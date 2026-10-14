@@ -1,11 +1,13 @@
 //! Real data: conversations with NPCs near the party start, from the user's archive.org zip.
-//! Skips where the zip is missing; prints the dialogue only (no game text in the repo).
+//! Skips where the zip is missing; prints actor numbers, line counts and lengths, never the
+//! dialogue or a name (no game text in the repo or the test output).
 #![allow(clippy::disallowed_methods)] // tests may read files
 
 use std::path::Path;
 
 use u6_formats::converse::ConverseLib;
 use u6_intake::{InputFile, intake};
+use u6_testkit::assert_same;
 
 use super::party::name_from_script;
 use super::script::{ScriptDst, load_script};
@@ -75,9 +77,10 @@ fn settle(e: &mut Engine) {
     }
 }
 
-/// Runs Talk (0x1127c4) on `npc`. At each "you say:" prompt it types the next of `lines`; at
-/// any other wait (a `*` page break, a key wait, a one-key question) it presses Space, then
-/// N, then Y until the game moves on. Returns the scroll and whether the conversation ended.
+/// Runs Talk (0x1127c4) on `npc`. At each prompt for the player's words (`Msg::YouSay`) it
+/// types the next of `lines`; at any other wait (a `*` page break, a key wait, a one-key
+/// question) it presses Space, then N, then Y until the game moves on. Returns the scroll and
+/// whether the conversation ended.
 fn converse(state: &State, files: &Files, npc: i16, lines: &[&str]) -> (Vec<String>, bool) {
     let leader = state.actors.party.leader_index;
     let prompt = latin(
@@ -140,10 +143,10 @@ fn every_script_loads_like_the_formats_parser() {
             Some(script) if npc != 0 => {
                 assert_eq!(got, npc);
                 assert!(script.bytecode.len() < super::SCRIPT_LEN, "npc {npc}: size");
-                assert_eq!(
-                    &buf[..script.bytecode.len()],
-                    &script.bytecode[..],
-                    "npc {npc}"
+                assert_same!(
+                    buf[..script.bytecode.len()],
+                    script.bytecode[..],
+                    "the script of npc {npc}"
                 );
                 assert_eq!(buf[0], 0xff, "npc {npc}: script starts with ff");
                 loaded += 1;
@@ -192,11 +195,12 @@ fn three_npcs_near_the_start_answer_name_job_bye() {
         let ok = done && asked >= 3 && replies.len() >= 3 && replies[1] != replies[2];
         assert!(!has_codes(&scroll), "actor {npc}: unsubstituted variable");
         println!(
-            "---- actor {npc} at distance {d} ({}): prompts {asked}, ended {done}",
-            latin(&name)
+            "---- actor {npc} at distance {d} (name length {}): prompts {asked}, ended {done}",
+            name.len()
         );
         if ok && answered < 3 {
-            println!("{}", scroll.join("\n"));
+            let lengths: Vec<usize> = scroll.iter().map(String::len).collect();
+            println!("  {} scroll lines, lengths {lengths:?}", scroll.len());
             answered += 1;
         }
     }
@@ -244,10 +248,12 @@ fn greeting_substitutes_title_time_and_names() {
     let (scroll, done) = converse(&base, &files, npc, &["name", "job", "bye"]);
     let all = scroll.join("\n");
     println!(
-        "---- actor {npc}: hour {}, title {title:?}, time {time:?}",
-        base.actors.calendar.hour
+        "---- actor {npc}: hour {}, title length {}, time length {}; {} scroll lines",
+        base.actors.calendar.hour,
+        title.len(),
+        time.len(),
+        scroll.len()
     );
-    println!("{all}");
     assert!(done && !has_codes(&scroll));
     assert!(
         all.contains(&title) && all.contains(&time),

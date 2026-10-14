@@ -346,11 +346,11 @@ fn ends<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -
     }
 }
 
-/// A bag on the map with a sword inside: its location bytes, read as a parent word, name the
-/// bag itself (x = the slot's low 10 bits, y = the rest).
-fn bag_on_the_map(s: &mut State) -> (Slot, Slot) {
+/// A bag on the map with an object of type `held` inside: its location bytes, read as a parent
+/// word, name the bag itself (x = the slot's low 10 bits, y = the rest).
+fn bag_on_the_map(s: &mut State, held: u16) -> (Slot, Slot) {
     let bag = give(s, BAG, IN_INVENTORY, 0, 1);
-    let sword = give(s, SWORD, IN_CONTAINER, 0, bag);
+    let sword = give(s, held, IN_CONTAINER, 0, bag);
     s.objects.obj_status[bag as usize] &= !WHERE_MASK;
     s.objects
         .set_xyz(bag, bag as u16 & 0x3ff, bag as u16 >> 10, 0);
@@ -362,11 +362,12 @@ fn bag_on_the_map(s: &mut State) -> (Slot, Slot) {
     (bag, sword)
 }
 
-/// Two bags inside each other (only a broken save has this) with a sword in the first.
-fn bags_in_a_cycle(s: &mut State) -> (Slot, Slot) {
+/// Two bags inside each other (only a broken save has this) with an object of type `held` in
+/// the first.
+fn bags_in_a_cycle(s: &mut State, held: u16) -> (Slot, Slot) {
     let a = give(s, BAG, IN_INVENTORY, 0, 1);
     let b = give(s, BAG, IN_CONTAINER, 0, a);
-    let sword = give(s, SWORD, IN_CONTAINER, 0, a);
+    let sword = give(s, held, IN_CONTAINER, 0, a);
     let st = &mut s.objects.obj_status[a as usize];
     *st = (*st & !WHERE_MASK) | IN_CONTAINER;
     s.objects.set_parent(a, b);
@@ -378,13 +379,13 @@ fn the_weight_line_of_a_container_no_actor_holds_is_drawn() {
     for (case, setup) in [
         (
             "a bag on the map",
-            bag_on_the_map as fn(&mut State) -> (Slot, Slot),
+            bag_on_the_map as fn(&mut State, u16) -> (Slot, Slot),
         ),
         ("bags in a cycle", bags_in_a_cycle),
     ] {
         let (finished, listed) = ends(case, move || {
             let mut s = world();
-            let (bag, sword) = setup(&mut s);
+            let (bag, sword) = setup(&mut s, SWORD);
             s.ui.panel.container = bag as u16;
             s.ui.panel.open_container = bag as u16;
             let e = run(s, &[], |st, io| async move { draw_list(&st, &io).await });
@@ -394,26 +395,41 @@ fn the_weight_line_of_a_container_no_actor_holds_is_drawn() {
     }
 }
 
+/// A one-hand sword and a two-handed halberd: the refusal comes before the both-hands arm, so
+/// the halberd leaves no marker in slot 5 and no two-handed flag on the member.
 #[test]
 fn ready_refuses_an_object_no_actor_holds() {
     for (case, setup) in [
         (
             "a bag on the map",
-            bag_on_the_map as fn(&mut State) -> (Slot, Slot),
+            bag_on_the_map as fn(&mut State, u16) -> (Slot, Slot),
         ),
         ("bags in a cycle", bags_in_a_cycle),
     ] {
-        let (finished, place, hand) = ends(case, move || {
-            let mut s = world();
-            let (_, sword) = setup(&mut s);
-            carried_weight(&mut s, 1);
-            s.ui.input.selection = sword;
-            let e = run(s, &[], |st, io| async move { ready(&st, &io).await });
-            let s = e.state();
-            (e.finished(), s.objects.place(sword), s.inventory.equip(2))
-        });
-        assert!(finished, "{case}: Ready ends");
-        assert_eq!((place, hand), (IN_CONTAINER, 0), "{case}: nothing readied");
+        for (weapon, held) in [("sword", SWORD), ("halberd", HALBERD)] {
+            let (finished, place, hands, flag) = ends(case, move || {
+                let mut s = world();
+                let (_, obj) = setup(&mut s, held);
+                carried_weight(&mut s, 1);
+                s.ui.input.selection = obj;
+                let e = run(s, &[], |st, io| async move { ready(&st, &io).await });
+                let s = e.state();
+                let inv = &s.inventory;
+                let flag = s.ui.panel.member_flag(s.ui.panel.member);
+                (
+                    e.finished(),
+                    s.objects.place(obj),
+                    (inv.equip(2), inv.equip(5)),
+                    flag,
+                )
+            });
+            assert!(finished, "{case}, {weapon}: Ready ends");
+            assert_eq!(
+                (place, hands, flag),
+                (IN_CONTAINER, (0, 0), false),
+                "{case}, {weapon}: nothing readied, no both-hands marker or flag"
+            );
+        }
     }
 }
 
@@ -439,12 +455,12 @@ fn the_holder_is_the_actor_at_the_end_of_the_chain() {
     assert_eq!(weight::holder(&s, 1), Some(1), "an actor holds itself");
     assert_eq!(weight::holder(&s, -1), None);
     let mut m = s.clone();
-    let (bag, inside) = bag_on_the_map(&mut m);
+    let (bag, inside) = bag_on_the_map(&mut m, SWORD);
     assert_eq!(
         (weight::holder(&m, bag), weight::holder(&m, inside)),
         (None, None)
     );
-    let (a, inside) = bags_in_a_cycle(&mut s);
+    let (a, inside) = bags_in_a_cycle(&mut s, SWORD);
     assert_eq!(
         (weight::holder(&s, a), weight::holder(&s, inside)),
         (None, None)

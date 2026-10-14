@@ -12,6 +12,7 @@ use crate::gfx::anim::shore_mask;
 use crate::gfx::seams::view_window;
 use crate::gfx::tables::GameTables;
 use crate::state::State;
+use u6_testkit::assert_same;
 
 /// The window render with `g` as the state's graphics for the call.
 fn render_window(s: &mut State, g: &mut GfxState, io: &crate::engine::Io, framed: bool) {
@@ -59,19 +60,25 @@ fn real_tables_match_the_image() {
     if let Ok(img) = std::fs::read(IMAGE) {
         let at = |a: usize, n: usize| img[a - 0x0010_0000..a - 0x0010_0000 + n].to_vec();
         let be = |v: &[u16]| v.iter().flat_map(|w| w.to_be_bytes()).collect::<Vec<_>>();
-        assert_eq!(
+        assert_same!(
             be(&t.shore_src),
             at(0x0015_2C52, 64),
-            "no relocation in the table"
+            "the shore sources: no relocation in the table"
         );
-        assert_eq!(be(&t.shore_dst), at(0x0015_2C92, 64));
-        assert_eq!(be(&t.dissolve_taps), at(0x0015_1F3C, 30));
-        assert_eq!(be(&[t.window_colour, t.window_shown, t.dissolve]), {
-            let mut v = at(0x0015_5180, 2);
-            v.extend(at(0x0015_3BF8, 2));
-            v.extend(at(0x0015_5178, 2));
-            v
-        });
+        assert_same!(be(&t.shore_dst), at(0x0015_2C92, 64), "the shore targets");
+        assert_same!(
+            be(&t.dissolve_taps),
+            at(0x0015_1F3C, 30),
+            "the dissolve taps"
+        );
+        let mut words = at(0x0015_5180, 2);
+        words.extend(at(0x0015_3BF8, 2));
+        words.extend(at(0x0015_5178, 2));
+        assert_same!(
+            be(&[t.window_colour, t.window_shown, t.dissolve]),
+            words,
+            "the window colour, shown flag and dissolve words"
+        );
     } else {
         eprintln!("image comparison skipped: {IMAGE} not present");
     }
@@ -80,7 +87,7 @@ fn real_tables_match_the_image() {
     src.sort_unstable();
     src.dedup();
     let dst: Vec<u16> = t.shore_dst.iter().map(|w| w / 4).collect();
-    println!("shore sources {src:?}, targets {}..={}", dst[0], dst[31]);
+    println!("{} shore source tiles, {} targets", src.len(), dst.len());
     assert!(t.shore_dst.iter().chain(&t.shore_src).all(|w| w % 4 == 0));
     assert_eq!(t.window_shown, 1);
 }

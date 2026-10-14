@@ -655,6 +655,7 @@ fn queue_pointer(pending: &mut Vec<InputEvent>, x: i32, y: i32, buttons: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use u6_testkit::assert_same;
 
     #[test]
     fn pointer_moves_collapse_and_button_changes_queue() {
@@ -959,19 +960,20 @@ mod tests {
             game
         };
         let mut game = start(&stored);
-        assert_eq!(blocks(&game)[63], [0, 0], "the save's far block");
+        assert_same!(blocks(&game)[63], [0, 0], "the save's far block");
         game.save_forgotten();
         save(&mut game);
         assert_eq!(game.save_generation(), 1);
         let whole = listed(&mut game);
         eprintln!("{} files listed after the removal", whole.len());
         assert_eq!(whole.len(), 1 + BLOCK_COUNT, "the objlist and every block");
-        assert_eq!(whole.get(&far), Some(&vec![0, 0]));
+        let far_bytes = whole.get(&far).expect("the far block is listed");
+        assert_same!(far_bytes, [0, 0], "the listed far block");
         let total: usize = whole.values().map(Vec::len).sum();
         assert!(total <= MAX_SAVE_BYTES, "{total} bytes");
         game.save_committed(1);
         let again = start(&whole);
-        assert_eq!(
+        assert_same!(
             blocks(&again),
             blocks(&game),
             "the same world, block for block"

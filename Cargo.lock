@@ -1195,6 +1195,7 @@ dependencies = [
  "u6-formats",
  "u6-intake",
  "u6-render",
+ "u6-testkit",
  "wasm-bindgen-test",
 ]
 
@@ -1204,6 +1205,7 @@ version = "0.1.0"
 dependencies = [
  "png",
  "serde",
+ "u6-testkit",
 ]
 
 [[package]]
@@ -1230,11 +1232,16 @@ name = "u6-render"
 version = "0.1.0"
 
 [[package]]
+name = "u6-testkit"
+version = "0.1.0"
+
+[[package]]
 name = "u6-web"
 version = "0.1.0"
 dependencies = [
  "u6-core",
  "u6-intake",
+ "u6-testkit",
  "wasm-bindgen",
 ]
 

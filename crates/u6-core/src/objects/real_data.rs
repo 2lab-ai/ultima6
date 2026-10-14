@@ -11,6 +11,7 @@ use super::*;
 use crate::files::Files;
 use crate::state::State;
 use u6_formats::objblk::ObjLocation;
+use u6_testkit::assert_same;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
@@ -46,7 +47,11 @@ fn every_block_loads_through_the_slot_tables() {
     // The strings came out of the data hunk (shape only; the text is the user's).
     let d = &s.objects.defs;
     assert!(d.nothing.starts_with(|c: char| c.is_ascii_uppercase()));
-    assert_eq!(d.nothing.to_ascii_lowercase(), d.nothing_lower);
+    assert_same!(
+        d.nothing.to_ascii_lowercase(),
+        d.nothing_lower,
+        "the lower-case nothing word"
+    );
     assert!(d.count_format.contains("%d"));
     let mut hist: BTreeMap<u8, usize> = BTreeMap::new();
     let mut total = 0;
@@ -200,6 +205,6 @@ fn names_of_twenty_objects_near_the_party() {
             got.len()
         );
         assert!(got.starts_with(&prefix));
-        assert_eq!(got, want);
+        assert_same!(got, want, "the name of slot {c:#05x}");
     }
 }

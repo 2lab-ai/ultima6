@@ -22,6 +22,7 @@ use u6_formats::objlist::ObjList;
 use u6_formats::portrait::{PORTRAIT_LEN, Portraits};
 use u6_formats::schedule::Schedules;
 use u6_formats::tileflag::TileFlags;
+use u6_testkit::assert_same;
 
 const DEFAULT_DIR: &str = "/Users/zhugehyuk/Games/ultima6/unpacked";
 const D1: &str = "d1/INSTALL";
@@ -55,7 +56,7 @@ fn objblk_every_block() {
         let data = read(D2, &id.file_name()).unwrap();
         let b = ObjBlock::parse(&data).unwrap_or_else(|e| panic!("{}: {e}", id.file_name()));
         assert_eq!(b.objects.len() * 8 + 2, data.len(), "{}", id.file_name());
-        assert_eq!(b.to_bytes(), data, "{} re-encodes", id.file_name());
+        assert_same!(b.to_bytes(), data, "{} re-encodes", id.file_name());
         for o in &b.objects {
             assert!(o.obj_n <= 1023);
             max_obj = max_obj.max(o.obj_n);
@@ -125,12 +126,12 @@ fn map_and_chunks() {
 fn objlist_proof_values() {
     let Some(d) = read(D2, "objlist") else { return };
     let o = ObjList::parse(&d).unwrap();
-    assert_eq!(o.to_bytes(), d, "objlist re-encodes byte-identically");
+    assert_same!(o.to_bytes(), d, "objlist re-encodes byte-identically");
     let bad_obj = o.actors.iter().filter(|a| a.obj_n > 431).count();
     let a1 = o.actors[1];
     assert_eq!((a1.pos.x, a1.pos.y, a1.pos.z, a1.obj_n), (307, 352, 0, 410));
     let exp: Vec<u16> = o.actors[2..5].iter().map(|a| a.exp).collect();
-    assert_eq!(exp, [374, 373, 372]);
+    assert_same!(exp, [374, 373, 372], "the experience of actors 2..5");
     assert_eq!(o.clock.year, 161);
     assert_eq!(
         (o.clock.minute, o.clock.hour, o.clock.day, o.clock.month),
@@ -138,8 +139,27 @@ fn objlist_proof_values() {
     );
     assert_eq!(o.moonstones[0], [935, 262, 0]);
     assert!(o.moonstones.iter().all(|m| m[0] <= 1023 && m[1] <= 1023));
-    assert_eq!(&o.party.names[..4], ["Avatar", "Dupre", "Shamino", "Iolo"]);
-    assert_eq!(o.unknown_1bfb, [0x0007, 0x00c5, 0x00e2, 0x0000]);
+    // The names (the user's text): the four at 0xF00 in 14-byte NUL-padded slots, read here
+    // straight from the file, one word of letters each.
+    let raw_names: Vec<String> = (0..4)
+        .map(|i| {
+            let slot = &d[0xF00 + 14 * i..][..14];
+            let len = slot.iter().position(|&b| b == 0).unwrap_or(14);
+            slot[..len].iter().map(|&b| char::from(b)).collect()
+        })
+        .collect();
+    assert_same!(o.party.names[..4], raw_names, "the party names at 0xF00");
+    assert!(
+        raw_names
+            .iter()
+            .all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphabetic())),
+        "four names of letters"
+    );
+    assert_same!(
+        o.unknown_1bfb,
+        [0x0007, 0x00c5, 0x00e2, 0x0000],
+        "the words at 0x1BFB"
+    );
     println!(
         "objlist: {} bytes, actors with obj_n > 431: {bad_obj}, party size {}, year {}, \
          karma {}, avatar portrait {}",
@@ -191,12 +211,13 @@ fn tile_tables() {
         return;
     };
     let flags = TileFlags::parse(&tf).unwrap();
-    assert_eq!(
-        &flags.weight[..8],
-        &[0x00, 0x04, 0x0c, 0x18, 0x1b, 0x0a, 0x0f, 0x1a]
+    assert_same!(
+        flags.weight[..8],
+        [0x00, 0x04, 0x0c, 0x18, 0x1b, 0x0a, 0x0f, 0x1a],
+        "the first weights"
     );
     let base = BaseTiles::parse(&bt).unwrap();
-    assert_eq!(&base.base[..4], &[0, 512, 513, 514]);
+    assert_same!(base.base[..4], [0, 512, 513, 514], "the first base tiles");
     let max = *base.base.iter().max().unwrap();
     assert_eq!(max, 2040);
     assert!(base.base[..=690].windows(2).all(|w| w[0] <= w[1]));
@@ -235,7 +256,11 @@ fn look_lzd() {
     }
     let terminator_at = decoded.len() - t.trailer.len();
     let reencoded = lzw::encode(&decoded).unwrap();
-    assert_eq!(lzw::decode(&reencoded).unwrap(), decoded);
+    assert_same!(
+        lzw::decode(&reencoded).unwrap(),
+        decoded,
+        "look.lzd round trip"
+    );
     println!(
         "look.lzd: stored {}, decoded {} (= header), {} entries, last tile {}, terminator at {}, \
          re-encode byte-identical: {}",
@@ -325,9 +350,14 @@ fn fonts() {
         return;
     };
     let f = BitFont::parse(&ch).unwrap();
-    assert_eq!(
-        f.glyphs[usize::from(b'A')],
-        [0x1e, 0x36, 0x66, 0x7e, 0x66, 0x66, 0xc6, 0x00]
+    // The glyphs (the user's art): 'A' is the 8 row bytes at 8 × 0x41, read here straight from
+    // the file, and has ink; the space has none.
+    let a = usize::from(b'A');
+    assert_same!(f.glyphs[a], ch[8 * a..8 * a + 8], "glyph 'A' at 8 x 0x41");
+    assert!(f.glyphs[a].iter().any(|&row| row != 0), "glyph 'A' has ink");
+    assert!(
+        f.glyphs[usize::from(b' ')].iter().all(|&row| row == 0),
+        "the space is blank"
     );
     let w = WouFont::from_lzw(&set).unwrap();
     assert_eq!((w.height, w.ink), (8, 15));
@@ -392,7 +422,7 @@ fn whole_file_lzw() {
         let out = lzw::decode(&f).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(out.len() as u32, lzw::declared_size(&f).unwrap(), "{name}");
         let re = lzw::encode(&out).unwrap();
-        assert_eq!(lzw::decode(&re).unwrap(), out, "{name} round trip");
+        assert_same!(lzw::decode(&re).unwrap(), out, "{name} round trip");
         identical += usize::from(re == f);
         println!(
             "lzw {name}: stored {} decoded {} re-encode identical {}",

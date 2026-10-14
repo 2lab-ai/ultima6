@@ -7,7 +7,7 @@
 //! missing; no game data in the repo.
 //!
 //! The start state: the Avatar (1) at the view centre (307, 352, 0) with members 2..4 just
-//! south, Lord British (5) four tiles north, actors 6 and 7 near him.
+//! south, actor 5 (creature 0x1f) four tiles north, actors 6 and 7 near it.
 #![allow(clippy::disallowed_methods)] // tests read the zip and write the frame receipts
 
 use super::tables::Msg;
@@ -355,7 +355,7 @@ fn locate_prints_the_degrees() {
     assert!(tail.has(&want), "{tail:?}");
 }
 
-/// Armageddon (0x70): every actor slot below 0xff but the Avatar and Lord British is gone,
+/// Armageddon (0x70): every actor slot below 0xff but the Avatar and actor 5 is gone,
 /// the party is the Avatar alone and the eggs stop.
 #[test]
 fn armageddon_leaves_two() {
@@ -378,7 +378,7 @@ fn armageddon_leaves_two() {
 }
 
 /// Energy Wind (0x62) north from the Avatar at (307, 348) (cross-hair four up): actors 6 and 7
-/// on the way and Lord British at the end are hurt; the members behind the caster are not.
+/// on the way and actor 5 at the end are hurt; the members behind the caster are not.
 #[test]
 fn energy_wind_hurts_along_its_path() {
     let Some(files) = files() else { return };
@@ -403,8 +403,8 @@ fn energy_wind_hurts_along_its_path() {
             "actor {a} on the path"
         );
     }
-    // Lord British is creature 0x1f, whom 0x1231be never hurts: his hit points become 0xff.
-    assert_eq!(s.actors.attrs.hp[5], 0xff, "Lord British at the end");
+    // Actor 5 is creature 0x1f, whom 0x1231be never hurts: its hit points become 0xff.
+    assert_eq!(s.actors.attrs.hp[5], 0xff, "actor 5 at the end");
     for a in [2usize, 3, 4] {
         assert_eq!(
             s.actors.attrs.hp[a], before[a],
@@ -520,7 +520,7 @@ fn wing_strike_without_foes() {
     assert!(tail.has(&none), "{tail:?}");
 }
 
-/// Hail Storm (0x54) on Lord British's tile: random 10..30 stones; the hits take hit points.
+/// Hail Storm (0x54) on actor 5's tile: random 10..30 stones; the hits take hit points.
 #[test]
 fn hail_storm_falls() {
     let Some(files) = files() else { return };
@@ -528,8 +528,8 @@ fn hail_storm_falls() {
     let e = cast(&files, 0x54, setup, "^^^^\n");
     let tail = show("Hail Storm at (307, 348)", &e);
     let s = e.state();
-    eprintln!("  Lord British hp 200 -> {}", s.actors.attrs.hp[5]);
-    // A stone hit him: 0x1231be leaves creature 0x1f (Lord British) at 0xff hit points.
+    eprintln!("  actor 5 hp 200 -> {}", s.actors.attrs.hp[5]);
+    // A stone hit it: 0x1231be leaves creature 0x1f (actor 5) at 0xff hit points.
     assert_eq!(s.actors.attrs.hp[5], 0xff);
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }

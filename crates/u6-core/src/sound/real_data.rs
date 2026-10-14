@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use u6_intake::{InputFile, intake};
+use u6_testkit::assert_same;
 
 use super::module::{Mem, Module, instr, song};
 use super::tables::{self, MedTables, SAMPLE_PERIODS};
@@ -67,7 +68,7 @@ fn every_song_name_is_an_mmd0_file_on_the_disks() {
     for n in 1..=tables::SONGS {
         let name = snd.file_name(n).unwrap();
         let bytes = files.get(name).unwrap_or_else(|| panic!("{name} missing"));
-        assert_eq!(&bytes[..4], b"MMD0", "{name}");
+        assert_same!(bytes[..4], b"MMD0", "the MED tag of {name}");
         assert!(
             bytes.len() <= super::MODULE_BUFFER,
             "{name} fits the buffer"
@@ -127,7 +128,11 @@ fn rendering_is_deterministic_across_buffer_sizes() {
         }
         out
     };
-    assert_eq!(run(128), run(1000));
+    assert_same!(
+        run(128),
+        run(1000),
+        "the samples rendered in 128- and 1000-frame chunks"
+    );
 }
 
 #[test]

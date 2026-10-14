@@ -110,8 +110,8 @@ fn use_on(s: State, files: &Files, target: Slot, cell: (i16, i16), keys: &[Input
     }
     assert!(
         e.finished(),
-        "Use did not finish: {:?}",
-        lines_of(&e.state())
+        "Use did not finish: {} scroll lines",
+        lines_of(&e.state()).len()
     );
     e
 }
@@ -378,7 +378,7 @@ fn use_on_eight_kinds_of_objects() {
     );
 
     // 8. The orb of the moons (0x57, carried by the Avatar). At the start nobody has told the
-    // Avatar how to use it (actor 5's talk flag bit 5, set in Lord British's conversation): the
+    // Avatar how to use it (actor 5's talk flag bit 5, set in actor 5's conversation): the
     // line 0x12ce42. With the flag set it makes a red moongate (0x54) two tiles north.
     for told in [false, true] {
         let mut s = start(&files);

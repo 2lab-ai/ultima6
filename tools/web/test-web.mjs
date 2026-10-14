@@ -29,6 +29,28 @@ async function started(page, files) {
   return s;
 }
 
+// No page: the harness's content-free comparison (synthetic values) names paths and lengths only.
+test('assertSame: a mismatch names the label, the paths, the lengths and the index, never the values', async () => {
+  const failure = (f) => {
+    try { f(); } catch (err) { return err.message; }
+    return null;
+  };
+  h.assertSame({ 'savegame/objlist': [1, 2] }, { 'savegame/objlist': [1, 2] }, 'equal');
+  const store = failure(() => h.assertSame(
+    { 'savegame/objblkaa': [7, 83, 9], 'savegame/objlist': [5] },
+    { 'savegame/objblkaa': [7, 88, 9] },
+    'the store',
+  ));
+  assert.equal(store, 'the store: savegame/objblkaa: lengths 3 and 3, first difference at index 1; savegame/objlist: not expected');
+  const name = failure(() => h.assertSame('Zhuge', 'Zhugx', 'the name'));
+  assert.equal(name, 'the name: lengths 5 and 5, first difference at index 4');
+  const list = failure(() => h.assertSame([{ path: 'a', bytes: [1] }], [{ path: 'a', bytes: [2, 3] }], 'files'));
+  assert.equal(list, 'files: [0].bytes: lengths 1 and 2, first difference at index 0');
+  for (const leak of ['83', '88', 'Zhug']) {
+    assert.ok(![store, name, list].some((m) => m.includes(leak)), `a message shows ${leak}`);
+  }
+});
+
 test('headers and CSP: the page runs under its policy, third-party requests are blocked', async (env) => {
   const { page } = await h.openPage(env, { gated: false });
   const doc = await h.load(page, env);
@@ -345,7 +367,7 @@ test('a Save of the game an import replaces, made while the import reads: the im
   let s = await started(page, 130);
   const stores = (await h.log(page)).slice(from).filter((e) => e.startsWith('saves:store:start'));
   assert.deepEqual(stores, [`saves:store:start:${folder.length}`], 'only the import stored');
-  assert.deepEqual(byName(await h.savedFiles(page)), byName(folder), 'the store holds the imported files');
+  h.assertSame(byName(await h.savedFiles(page)), byName(folder), 'the store holds the imported files');
   assert.match(s.status, /The saved game \(\d+ files\) was imported/);
   assert.equal(s.leader, moved, 'the imported save resumes');
   assert.equal(s.saved, 1, 'the replaced game\'s Save was not stored');
@@ -368,7 +390,7 @@ test('an import that does not start leaves the stored save; the game on screen s
   await h.waitSettled(page);
   let s = await h.state(page);
   assert.match(s.status, /Could not start the game/);
-  assert.deepEqual(byName(await h.savedFiles(page)), byName(stored), 'the stored save is as it was');
+  h.assertSame(byName(await h.savedFiles(page)), byName(stored), 'the stored save is as it was');
   await page.focus('#screen');
   await h.press(page, 'Control+s', 30);
   await h.press(page, 'y', 60);
@@ -411,7 +433,7 @@ test('a Save after the saved game was forgotten stores the whole game; a reload 
   await h.waitSettled(page);
   const stored = byName(await h.savedFiles(page));
   assert.equal(Object.keys(stored).length, 70, 'the objlist and every block');
-  assert.deepEqual(stored['savegame/objblkhh'], [0, 0], 'the far block as the game had it');
+  h.assertSame(stored['savegame/objblkhh'], [0, 0], 'the far block as the game had it');
   await page.reload();
   s = await started(page, 130);
   assert.equal(s.saves, 70, 'the whole save is laid over the game files');
@@ -631,7 +653,7 @@ test('zip as a player: the opening, Escape, the menu, a character created and pl
   await h.waitProgram(page, 'game');
   await h.waitPrompt(page);
   let s = await h.state(page);
-  assert.equal(s.name, 'Zhuge', 'the game plays the created character');
+  h.assertSame(s.name, 'Zhuge', 'the game plays the created character');
   await shot('03-game');
   await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
   await h.waitSettled(page);
@@ -648,7 +670,7 @@ test('zip as a player: the opening, Escape, the menu, a character created and pl
   await h.waitProgram(page, 'game');
   await h.waitPrompt(page);
   s = await h.state(page);
-  assert.equal(s.name, 'Zhuge', 'J in the menu plays the stored character');
+  h.assertSame(s.name, 'Zhuge', 'J in the menu plays the stored character');
   await shot('05-journey-onward');
   console.log(`  receipt: created ${s.name}; after the reload J in the menu plays ${s.name} (${s.saves} save file)`);
 }, { needs: h.haveZip });
@@ -730,9 +752,10 @@ async function lookAtAvatar(page, shot) {
 }
 
 // One step by clicks: the cell east of the Avatar, else (blocked by the start fight) west,
-// up to 6 tries; asserts the step is one cell along x.
+// up to the harness's `STEP_TRIES` tries (as `stepSideways`); asserts the step is one cell
+// along x.
 async function clickStep(page) {
-  for (let i = 0; i < 6; i += 1) {
+  for (let i = 0; i < h.STEP_TRIES; i += 1) {
     const dx = i % 2 === 0 ? 1 : -1;
     const { from, to } = await clickCell(page, dx);
     if (to === from) continue;
@@ -741,7 +764,7 @@ async function clickStep(page) {
     assert.deepEqual([tx - fx, ty - fy, tz - fz], [dx, 0, 0], `one cell ${dx > 0 ? 'east' : 'west'}: ${from} -> ${to}`);
     return { dx, from, to };
   }
-  throw new Error('six click steps blocked in a row');
+  throw new Error(`${h.STEP_TRIES} click steps blocked in a row`);
 }
 
 test('the mouse: the Look icon, then Look on the Avatar, then clicks walk; the keys still work', async (env) => {

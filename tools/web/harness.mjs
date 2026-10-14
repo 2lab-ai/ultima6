@@ -1,9 +1,11 @@
 // Shared pieces of the page tests: the local server, a page with test gates, file drops, the
 // IndexedDB view, frame comparisons. Game files are read from the user's local copy at run
 // time and never written anywhere.
+import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { chromium } from 'playwright';
 import { serve } from './serve.mjs';
 
@@ -14,6 +16,48 @@ export const ZIP = join(ORIGINAL, 'ultima-vi.zip');
 export const HFES = [1, 2, 3].map((n) => join(ORIGINAL, `Ultima VI Disk ${n}.hfe`));
 export const haveHfes = () => HFES.every((p) => existsSync(p));
 export const haveZip = () => existsSync(ZIP);
+
+/// Deep equality for values that hold content of the user's files (save bytes, names): when
+/// they differ the error names `label` and, per differing path (object keys are file paths),
+/// the lengths and the first differing index, never the values (spec 01 §Rights; assert's own
+/// message would print both). Strings, arrays and typed arrays count as sequences.
+export function assertSame(actual, expected, label) {
+  if (isDeepStrictEqual(actual, expected)) return;
+  const found = [];
+  difference(actual, expected, '', found);
+  assert.fail(`${label}: ${found.slice(0, 8).join('; ')}`);
+}
+
+const isSequence = (v) => typeof v === 'string' || Array.isArray(v) || ArrayBuffer.isView(v);
+const isRecord = (v) => typeof v === 'object' && v !== null && !isSequence(v);
+const kind = (v) => {
+  if (v === null || v === undefined) return String(v);
+  if (isSequence(v)) return `${typeof v === 'string' ? 'a string' : 'a sequence'} of length ${v.length}`;
+  return isRecord(v) ? 'an object' : `a ${typeof v}`;
+};
+
+/// Where `a` and `b` differ, as content-free entries pushed to `out`.
+function difference(a, b, path, out) {
+  const at = path ? `${path}: ` : '';
+  if (isSequence(a) && isSequence(b) && typeof a === typeof b) {
+    const n = Math.min(a.length, b.length);
+    let i = 0;
+    while (i < n && isDeepStrictEqual(a[i], b[i])) i += 1;
+    const nested = i < n && typeof a !== 'string' && (isRecord(a[i]) || isSequence(a[i]))
+      && (isRecord(b[i]) || isSequence(b[i]));
+    if (nested) difference(a[i], b[i], `${path}[${i}]`, out);
+    else out.push(`${at}lengths ${a.length} and ${b.length}, first difference at index ${i}`);
+  } else if (isRecord(a) && isRecord(b)) {
+    for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
+      const p = path ? `${path}.${k}` : k;
+      if (!(k in a)) out.push(`${p}: missing`);
+      else if (!(k in b)) out.push(`${p}: not expected`);
+      else if (!isDeepStrictEqual(a[k], b[k])) difference(a[k], b[k], p, out);
+    }
+  } else {
+    out.push(`${at}${kind(a)} and ${kind(b)}`);
+  }
+}
 
 // Runs in the page before its scripts: named gates the test holds and releases, an event log,
 // CSP violations, the default-prevented state of every key, file-read hooks.
@@ -292,7 +336,7 @@ export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 /// up to `STEP_TRIES` tries (each try's world turn moves the fight on; with a gargoyle on each
 /// side six tries in a row were seen blocked). Returns the key that walked, the leader before
 /// and after, and the frame before that step.
-const STEP_TRIES = 16;
+export const STEP_TRIES = 16;
 export async function stepSideways(page) {
   for (let i = 0; i < STEP_TRIES; i += 1) {
     await waitPrompt(page);

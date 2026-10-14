@@ -12,6 +12,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use u6_formats::objlist::ObjList;
+use u6_testkit::assert_same;
 
 use super::objlist::{OBJLIST_LEN, TABLES, decode, encode};
 use super::*;
@@ -217,13 +218,13 @@ fn decode_agrees_with_the_formats_parser() {
             r.talk_flags,
             r.movement_flags,
         ];
-        assert_eq!(got, want, "actor {i}");
+        assert_same!(got, want, "the attributes of actor {i}");
         assert_eq!(t.exp[i], r.exp);
         assert_eq!(t.base_type_frame[i] & 0x3ff, r.base_obj_n);
         assert_eq!(t.unknown_18f1[i], raw[0x18F1 + i]);
         assert_eq!(t.unknown_1af1[i], raw[0x1AF1 + i]);
     }
-    assert_eq!(a.party.names, list.party.names);
+    assert_same!(a.party.names, list.party.names, "the party names");
     assert_eq!(
         (a.party.members, a.party.size),
         (list.party.roster, list.party.size)
@@ -244,8 +245,8 @@ fn decode_agrees_with_the_formats_parser() {
         (a.quest_flag, a.rest_counter, a.karma, a.wind),
         (p.quest_flag, p.rest_counter, p.karma, p.wind_direction)
     );
-    assert_eq!(a.timers, list.timers);
-    assert_eq!(a.objlist_tail, raw[0x1BF1..0x1C73]);
+    assert_same!(a.timers, list.timers, "the timers");
+    assert_same!(a.objlist_tail, raw[0x1BF1..0x1C73], "the objlist tail");
     // The view centre is not decoded (0x105350 takes it from the leader), so a state that
     // holds the file's centre words writes the file's first 0x1C73 bytes back.
     let t = &raw[0x1BF1 + 0x0c..0x1BF1 + 0x12];
@@ -255,7 +256,7 @@ fn decode_agrees_with_the_formats_parser() {
         y: w(2),
         z: w(4) as u8,
     };
-    assert_eq!(encode(&s), raw[..OBJLIST_LEN]);
+    assert_same!(encode(&s), raw[..OBJLIST_LEN], "the objlist written back");
     eprintln!(
         "shipped objlist {} bytes; the game reads and writes {OBJLIST_LEN}",
         raw.len()
@@ -307,10 +308,7 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
             let (x, y) = (old_list[off + i], new_list[off + i]);
             if x != y {
                 let w = boot_change(name, i, x, y);
-                assert!(
-                    w.is_some(),
-                    "{name} byte {i:#x}: {x:#04x} -> {y:#04x} unexplained"
-                );
+                assert!(w.is_some(), "{name} byte {i:#x} changed, unexplained");
                 *why.entry(w.unwrap()).or_insert(0) += 1;
             }
         }
@@ -336,10 +334,10 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
             // The throne egg hatched (its status) and armed its gargoyles (their gear).
             eprintln!("{name}: {a} -> {b} records, gear {}", gear_records(&rb));
             assert!(gear_records(&rb) > 0, "the hatched gargoyles' gear");
-            assert_eq!(
+            assert_same!(
                 strip_fight(ra),
                 strip_fight(rb),
-                "{name}: apart from the fight"
+                "{name}: the records apart from the fight"
             );
             continue;
         }
@@ -350,7 +348,7 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
         );
         ra.sort();
         rb.sort();
-        assert_eq!(ra, rb, "{name}: the same records");
+        assert_same!(ra, rb, "{name}: the same records");
         assert_eq!(name, "savegame/objblkCD");
     }
 }
@@ -361,18 +359,11 @@ fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8
     for d in table_diffs(&want.0, &got.0) {
         eprintln!("{what}: objlist {d:?}");
     }
-    let tail: Vec<String> = (0..0x82)
+    let tail: Vec<usize> = (0..0x82)
         .filter(|&i| want.0.get(0x1BF1 + i) != got.0.get(0x1BF1 + i))
-        .map(|i| {
-            format!(
-                "{i:#04x}: {:#04x} -> {:#04x}",
-                want.0[0x1BF1 + i],
-                got.0[0x1BF1 + i]
-            )
-        })
         .collect();
     if !tail.is_empty() {
-        eprintln!("{what}: tail {tail:?}");
+        eprintln!("{what}: tail bytes differ at {tail:x?}");
     }
     let diffs = block_diffs(&want.1, &got.1);
     for (name, a, b) in &diffs {
@@ -389,7 +380,8 @@ fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8
             .filter(|(_, (x, y))| x != y)
             .take(6)
         {
-            eprintln!("    #{n}: {x:02x?} -> {y:02x?}");
+            let bytes: Vec<usize> = (0..8).filter(|&k| x[k] != y[k]).collect();
+            eprintln!("    record #{n}: bytes {bytes:?} differ");
         }
     }
     diffs.len()
@@ -508,7 +500,7 @@ fn the_ports_start_save_against_the_originals() {
     for i in 0..BLOCK_COUNT {
         let (w, g) = (defined_block(&want.1[i]), defined_block(&got.1[i]));
         if block_file(i) != "savegame/objblkCC" {
-            assert_eq!(w, g, "{}", block_file(i));
+            assert_same!(w, g, "the records of {}", block_file(i));
             continue;
         }
         // CC: the gargoyles' readied gear (temporary, owned by 0xe0..0xe2) and the egg's status
@@ -520,7 +512,11 @@ fn the_ports_start_save_against_the_originals() {
             wg > 0 && gg > 0,
             "both sides' gargoyles carry gear (0x13121a)"
         );
-        assert_eq!(strip_fight(w), strip_fight(g), "CC apart from the fight");
+        assert_same!(
+            strip_fight(w),
+            strip_fight(g),
+            "the records of CC apart from the fight"
+        );
     }
 }
 
@@ -561,14 +557,14 @@ fn the_originals_save_loads_and_saves_like_the_original() {
             let (x, y) = (want.0[off + i], got.0[off + i]);
             assert!(
                 x == y || frame_only(name, i, x, y),
-                "{name} byte {i:#x}: {x:#04x} -> {y:#04x}"
+                "{name} byte {i:#x} differs beyond the frame bits"
             );
         }
     }
     for i in 0..BLOCK_COUNT {
         let w = defined_block(&want.1[i]);
         let g = defined_block(&got.1[i]);
-        assert_eq!(w, g, "{}", block_file(i));
+        assert_same!(w, g, "the records of {}", block_file(i));
     }
     // The original moves records on every load + save cycle (0x10db82's merge, 0x10da94);
     // the port reproduces those moves.
@@ -806,7 +802,11 @@ fn walk_talk_save_restore() {
         "walked {start:?} -> {walked:?} with {} keys; talked to {npc:#x}",
         keys.len()
     );
-    assert!(lines.iter().any(|l| l.contains("bye")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("bye")),
+        "no line holds the typed bye ({} lines)",
+        lines.len()
+    );
     run.command(Cmd::Save);
     let saved = run.state();
     assert!(saved.objects.tmp_flag.iter().all(|&f| f == 0));
