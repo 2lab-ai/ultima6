@@ -16,6 +16,7 @@ pub mod converse;
 pub mod ega;
 pub mod error;
 pub mod font;
+pub mod gfx;
 pub mod look;
 pub mod lzw;
 pub mod map;

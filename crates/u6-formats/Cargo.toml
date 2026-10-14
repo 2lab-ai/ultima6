@@ -13,3 +13,7 @@ serde = ["dep:serde"]
 
 [dependencies]
 serde = { version = "1", optional = true, default-features = false, features = ["std", "derive"] }
+
+[dev-dependencies]
+# Contact-sheet PNG in the gfx real-data test only.
+png = "0.18"
