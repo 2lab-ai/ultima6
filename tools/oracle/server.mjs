@@ -7,6 +7,8 @@
 //   GET /eject?drive=0
 //   GET /export?drive=0&path=/abs.adf   write DFn back out as ADF
 //   GET /reset
+//   GET /configure?spec=CHIP_RAM=2048,FAST_RAM=0   machine options (powers off), then run again
+//   GET /palfix                         ExecBase 50 Hz + GfxBase PAL flags (lib.mjs palFix)
 //   GET /key?k=RETURN[&hold=4][&mods=LSHIFT,CTRL]   tap one key (KEY name or raw code)
 //   GET /down?k=..  /up?k=..            hold / release
 //   GET /type?text=...                  type text (\n = RETURN), US keymap
@@ -52,6 +54,11 @@ const handlers = {
   eject: (q) => o.eject(page, num(q.get('drive'), 0)),
   export: (q) => o.exportDisk(page, num(q.get('drive'), 0), q.get('path')),
   reset: () => o.reset(page),
+  palfix: () => o.palFix(page),
+  async configure(q) {
+    const r = await o.configure(page, q.get('spec') || '');
+    return { set: r, kicked: await o.ensureRunning(page), machine: await o.machine(page) };
+  },
   key: (q) => o.tap(page, keyOf(q.get('k')), { hold: num(q.get('hold'), 4), gap: num(q.get('gap'), 4), mods: q.get('mods') ? q.get('mods').split(',') : [] }),
   down: (q) => page.evaluate((c) => wasm_key(c, 1), typeof keyOf(q.get('k')) === 'number' ? keyOf(q.get('k')) : o.KEY[q.get('k')]),
   up: (q) => page.evaluate((c) => wasm_key(c, 0), typeof keyOf(q.get('k')) === 'number' ? keyOf(q.get('k')) : o.KEY[q.get('k')]),

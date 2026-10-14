@@ -485,3 +485,58 @@ export async function shellKeys(page, cmd) {
     return after.startsWith(before) ? after.slice(before.length) : after;
   }, cmd);
 }
+
+// Side-effect-free reads of emulated memory (vAmiga spypeek) and a direct memory patch
+// (main.cpp wasm_peek16 / wasm_mem_patch).
+export const peekL = (page, a) => page.evaluate((a) => ((Module._wasm_peek16(a) << 16) | Module._wasm_peek16(a + 2)) >>> 0, a);
+export const peekW = (page, a) => page.evaluate((a) => Module._wasm_peek16(a), a);
+export const peekStr = (page, a, max = 64) => page.evaluate(([a, max]) => {
+  let s = '';
+  for (let i = 0; i < max; i++) { const c = Module._wasm_peek(a + i); if (!c) break; s += String.fromCharCode(c); }
+  return s;
+}, [a, max]);
+export const poke = (page, a, bytes) => page.evaluate(([a, b]) => {
+  const p = Module._malloc(b.length);
+  Module.HEAPU8.set(b, p);
+  Module._wasm_mem_patch(a, p, b.length);
+  Module._free(p);
+}, [a, [...bytes]]);
+
+// The AROS ROM (20260820) boots this PAL machine as NTSC: ExecBase VBlankFrequency and
+// PowerSupplyFrequency are 60 and GfxBase->DisplayFlags is 0x0011 (NTSC|REALLY_PAL), although
+// the core runs 313-line PAL fields at 50 Hz and VPOSR reports a PAL Agnus (0xA000/0x20).
+// ultcli refuses to start the game when DisplayFlags bit 0 (NTSC) is set ("THIS VERSION ...
+// REQUIRES A PAL MACHINE"). Set what Kickstart sets on PAL hardware: 50/50 Hz, PAL|REALLY_PAL.
+export async function palFix(page) {
+  const eb = await peekL(page, 4);
+  const before = { vblank: (await peekW(page, eb + 0x212)) >> 8, power: (await peekW(page, eb + 0x212)) & 0xff };
+  await poke(page, eb + 0x212, [50, 50]); // VBlankFrequency, PowerSupplyFrequency
+  let n = await peekL(page, eb + 0x17a); // SysBase->LibList.lh_Head
+  for (let i = 0; i < 200 && n; i++) {
+    const succ = await peekL(page, n);
+    if (!succ) break;
+    if ((await peekStr(page, await peekL(page, n + 10))) === 'graphics.library') {
+      before.displayFlags = await peekW(page, n + 0xce);
+      await poke(page, n + 0xce, [0x00, 0x14]); // PAL | REALLY_PAL
+      return { execBase: eb, gfxBase: n, before, after: { vblank: 50, power: 50, displayFlags: await peekW(page, n + 0xce) } };
+    }
+    n = succ;
+  }
+  throw new Error('palFix: graphics.library not in SysBase->LibList');
+}
+
+// FNV-1a over a rectangle given in lores pixels of the 456x313 capture (x0..x1, y0..y1 exclusive).
+export const regionHash = (page, [x0, y0, x1, y1]) => page.evaluate(([w, x0, y0, x1, y1]) => {
+  const v = new Uint32Array(Module.HEAPU8.buffer, Module._wasm_pixel_buffer(), w * 313);
+  let x = 0x811c9dc5;
+  for (let y = y0; y < y1; y++) for (let lx = x0; lx < x1; lx++) { x ^= v[y * w + lx * 4]; x = Math.imul(x, 0x01000193); }
+  return x >>> 0;
+}, [TEX_W, x0, y0, x1, y1]);
+
+// Number of distinct colours in a lores rectangle (cheap "is anything drawn here" test).
+export const regionColours = (page, [x0, y0, x1, y1]) => page.evaluate(([w, x0, y0, x1, y1]) => {
+  const v = new Uint32Array(Module.HEAPU8.buffer, Module._wasm_pixel_buffer(), w * 313);
+  const s = new Set();
+  for (let y = y0; y < y1; y++) for (let lx = x0; lx < x1; lx++) s.add(v[y * w + lx * 4] & 0xffffff);
+  return s.size;
+}, [TEX_W, x0, y0, x1, y1]);

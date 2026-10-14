@@ -2,11 +2,15 @@
 # Ultima VI (Amiga) oracle: vAmigaWeb + AROS ROM in headless Chromium.
 #
 #   run.sh setup                 fetch vAmigaWeb build + node deps (idempotent)
-#   run.sh build                 original ADFs -> installer under AROS -> oracle HDFs
+#   run.sh floppies              the 4 game floppies from installu6's copy table: adf/ (as the
+#                                installer lays them out) and adf-gamefirst/ (launcher starts game)
+#   run.sh play [KEY ...]        adf-gamefirst/: boot to Britannia, shots: first frame, settled, steps
+#   run.sh intro                 adf/: boot through ORIGIN/intro until the picture stops; shots
+#   run.sh build                 original ADFs -> installer under AROS -> oracle HDFs (HD layout)
 #   run.sh boot [step ...]       boot oracle HDFs, run steps, save shots (see boot.mjs)
 #   run.sh serve                 control server on 127.0.0.1:${U6_ORACLE_PORT:-8765} (ctl.sh)
 #
-# Outputs: $U6_ORACLE_HOME (default ~/Games/ultima6/oracle): disks/, installed/, shots/, *.log
+# Outputs: $U6_ORACLE_HOME (default ~/Games/ultima6/oracle): adf*/, disks/, installed/, shots/, *.log
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,12 +48,42 @@ need_disks() {
   fi
 }
 
+# Build both floppy sets and read every file back with amitools (independent OFS reader).
+floppies() {
+  local set dir v
+  for set in adf adf-gamefirst; do
+    dir="$ORACLE_HOME/$set"
+    if [ "$set" = adf ]; then
+      python3 -I "$HERE/mkadf.py" floppies "$dir"
+    else
+      python3 -I "$HERE/mkadf.py" floppies "$dir" --game-first
+    fi
+    if ! command -v uvx >/dev/null 2>&1; then
+      echo "uvx not found: skipping amitools readback of $dir" >&2
+      continue
+    fi
+    rm -rf "$dir/xdf"
+    mkdir -p "$dir/xdf"
+    for v in PROGRAM POPULACE PLAYER PORTRAIT; do
+      uvx --from amitools xdftool "$dir/$v.adf" unpack "$dir/xdf/" >/dev/null
+    done
+    python3 -I "$HERE/mkadf.py" verify "$dir"
+  done
+}
+
 main() {
   local cmd="${1:-boot}"
   [ "$#" -gt 0 ] && shift
   case "$cmd" in
     setup) setup ;;
     build) setup >/dev/null; node "$HERE/build.mjs" ;;
+    floppies) floppies ;;
+    play|intro)
+      setup >/dev/null
+      local out="$U6_SHOTS_DIR/$cmd-$(date +%Y%m%d-%H%M%S)"
+      if [ "$cmd" = play ]; then node "$HERE/play.mjs" game "$out" "$@"; else node "$HERE/play.mjs" intro "$out"; fi
+      echo "shots: $out"
+      ;;
     boot)
       setup >/dev/null
       need_disks
@@ -65,7 +99,7 @@ main() {
       fi
       exec node "$HERE/server.mjs"
       ;;
-    *) sed -n '2,9p' "$0" >&2; return 2 ;;
+    *) sed -n '2,13p' "$0" >&2; return 2 ;;
   esac
 }
 
