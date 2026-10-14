@@ -30,23 +30,23 @@ use super::tables::at;
 pub const FRAME_MS: u16 = 20;
 /// [replaced] Time of the hit flash 0x1230ce (draw lists, the window with tile 0x101 rendered
 /// and copied, draw lists again): 16 PAL frames, the median of 45 flashes (14..18) in the oracle
-/// (tools/oracle/fight.mjs: the start fight, 3 boots × 7 party steps).
+/// (tools/oracle/fight.mjs + fight.py: the start fight, 3 boots × 7 party steps).
 pub const FLASH_MS: u16 = 16 * FRAME_MS;
 /// [replaced] Time of a flight's first render (0x102c90 at the top of 0x132706, before the
 /// first step): 6 PAL frames, the median of 87 flights in the oracle (5..6 in 84 of them).
 pub const FLIGHT_START_MS: u16 = 6 * FRAME_MS;
 /// [replaced] Time of one drawn step of a flight (the rounds up to it, the sprites saved and
-/// drawn, what lies over them, the rectangle copied, 0x151fe6): 47 ms, 2.33 PAL frames, from
-/// 525 frames over 227 drawn steps in the 41 flights of the oracle that drew any.
-pub const FLIGHT_STEP_MS: u16 = 47;
+/// drawn, what lies over them, the rectangle copied, 0x151fe6): 46 ms, 2.31 PAL frames, from
+/// 525 frames over 227 drawn steps in the 40 flights of the oracle that drew any.
+pub const FLIGHT_STEP_MS: u16 = 46;
 /// [replaced] Time of a view refresh with the window shown (0x102ef0: the animation tick, the
 /// window rendered by 0x102c90 and copied to the screen): 11 PAL frames, the median of the 40
 /// flights in the oracle that end with one (9..42, 29 of them 10 or 11); with the view flags
 /// before it, the refresh after a turn ([`crate::actors::turn::AFTER_TURN_MS`]).
 pub const REFRESH_MS: u16 = 11 * FRAME_MS;
-/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 24 ms,
-/// 1.2 PAL frames, from 157 frames over 131 changes of the message area in the oracle.
-pub const PRINT_MS: u16 = 24;
+/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 22 ms,
+/// 1.12 PAL frames, from 147 frames over 131 changes of the message area in the oracle.
+pub const PRINT_MS: u16 = 22;
 /// Time of a window presented dissolving (0x102c90 with A4-0x6578 set: 0x1520e2 copies the
 /// window pixel by pixel, 25,600 of them): not measured (no dissolve happens in the oracle's
 /// start fight), so one PAL frame.

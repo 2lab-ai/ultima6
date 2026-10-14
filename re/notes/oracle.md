@@ -110,6 +110,41 @@ the unshifted comparison by more than 0.1; observed 0.92-0.97 equal pixels).
 Where the party blocks the requested direction, play.mjs tries the other arrows; each press is a
 game turn. Step outcomes, gargoyle moves and combat messages differ between runs.
 
+## E. Fight pace (`fight.mjs`, `fight.py`, 2026-10-15)
+
+The original never waits for the display in a fight. Its VBlank server 0x14f27a is `jmp
+0x162294`: BEAMCON0 from 0x1624a4 when that is not negative, clear the flag 0x1624b0, the
+pointer shape (0x162518 = `jmp 0x1051a6`) and the pointer sprite's position (0x1622d6); no
+counter. The only routine that spins on 0x1624b0 is 0x1622be, reached from the shutdown 0x14ee70
+and from 0x1623be (D0 + 1 VBlanks), whose one caller is the Use machine 0x12cfe4. A fight is as
+slow as the 68000 and the blitter draw it. These are not delay loops but the work itself; in the
+oracle the game's code hunks sit in fast RAM (seglist bases 0x2ee…–0x354…), so a stock A500 (all
+of it on the chip bus, with display DMA) would be somewhat slower. The port's constants are the
+oracle's numbers.
+
+How it is measured: `fight.mjs` finds every hunk's runtime base (hunk 0 by a reloc-free window,
+then the seglist), takes party steps by key (held until A4-0x7a2c clears) and logs one row per
+emulated frame. Its CPU sample comes from vAmiga's debugger console, which runs a command between
+two frames, just after the VBlank interrupt was taken: `r cpu` gives the interrupted task's
+registers, `m.w $3fffe0` its exception frame (SR, PC), and the user stack copied at the end of
+the frame before gives the callers' return addresses. A sample whose user stack is not the
+game's is another task: the game waits on the floppy. `fight.py` maps PCs to image functions
+(the REA dump names) and counts frames by the first of flight 0x132706 / 0x1331b4, hit flash
+0x1230ce, message 0x108658…, refresh after a turn 0x102f2a, refresh 0x102ef0 / 0x102c90, party
+step 0x11d4ee, NPC turn 0x1200b0, scheduler 0x1213de in the routine and its callers.
+
+Start fight, keys UP RIGHT LEFT RIGHT LEFT RIGHT LEFT, 3 boots (`pace/fight-r0..r2`), frames
+from the key taken to the prompt: 535 396 300 283 364 270 215 / 439 334 169 137 261 138 255 /
+440 336 169 133 277 180 317; median 277, first 5 steps 300. Only the first step waits on the
+floppy (135..140 frames: a map region and the object names, look.lzd); later name lookups
+decode the cached file (0x161ec8, about 9 frames a step, counted under NPC turn). Per step:
+refresh after a turn 101.5 frames, flight 75.9, hit flash 33.9, NPC turn 21.0, floppy 19.6,
+scheduler 12.7, message 7.0, party step 6.0. Per operation (PAL frames): refresh after a turn
+21 (n 103, 19..22), hit flash 16 (n 45, 14..18), a flight's first render 6 (n 87), a drawn step
+2.31 (525 / 227), its closing refresh 11 (n 40), a message 1.12 per change of the scroll (147 /
+131), NPC turns and scheduler 33 a step (n 21, 19..77). Not seen in this fight: the actor flash
+0x132338, the window flash 0x115b7c, the quake 0x133a1a, a dissolve (0x1520e2).
+
 ## 1. Emulator, versions, sources
 
 | part | version / id | source |
@@ -177,6 +212,8 @@ state, so runs are not bit-identical end to end.
     tools/oracle/run.sh play [KEY ...]    # adf-gamefirst/ -> Britannia shots in shots/play-<ts>/ (§D)
     tools/oracle/run.sh intro      # adf/ -> ORIGIN/intro shots until the picture stops, shots/intro-<ts>/ (§C)
     node tools/oracle/pace.mjs OUT [HOLD ...]   # adf-gamefirst/: held-button walk, step frames per hold (ui/target.rs HELD_WALK_MS)
+    node tools/oracle/fight.mjs OUT [KEY ...]   # adf-gamefirst/: party steps in the start fight, a CPU sample per frame (§E)
+    python3 -I -B tools/oracle/fight.py OUT/turns.json ...   # where those frames go
     tools/oracle/run.sh build      # ADFs -> installer under AROS -> disks/{PROGRAM,POPULACE,PLAYER,PORTRAIT}.hdf
     tools/oracle/run.sh boot [step ...]   # boot those, run steps, PNGs into shots/boot-<ts>/
     tools/oracle/run.sh serve &    # control server 127.0.0.1:8765, then:

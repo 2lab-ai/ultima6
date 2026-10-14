@@ -13,15 +13,15 @@ use super::{clock, leaves, npc, path, tail, walk};
 const IDLE_REFILLS_PER_YIELD: u32 = 60;
 /// [replaced] Engine milliseconds of the refresh after a turn (0x102f2a with the view changed:
 /// the view flags 0x109e74, then 0x102ef0 draws the window and copies it to the screen): 21 PAL
-/// frames, the median of 103 refreshes in the oracle's start fight (19..22; tools/oracle
-/// fight.mjs, 3 boots × 7 party steps). The original has no wait there: that is the 68000's
+/// frames, the median of 103 refreshes in the oracle's start fight (19..22; tools/oracle/
+/// fight.mjs + fight.py, 3 boots × 7 party steps). The original has no wait there: that is the 68000's
 /// drawing time, which the port, drawing at once, waits on the engine clock instead.
 pub const AFTER_TURN_MS: u16 = 21 * crate::combat::present::FRAME_MS;
 /// [replaced] Engine milliseconds of an NPC's turn besides what it draws, prints and refreshes
-/// (the scheduler's pick and 0x1200b0's worktype code): 48 ms, 2.4 PAL frames. The oracle's
-/// world turns spend a median of 34 frames there (19..77, n = 21); the port's turns of the same
-/// fight run 14 NPC turns each.
-pub const NPC_TURN_MS: u16 = 48;
+/// (the scheduler's pick and 0x1200b0's worktype code): 45 ms, 2.3 PAL frames. The oracle's
+/// steps of the start fight spend a median of 33 frames there (19..77, n = 21); the port's steps
+/// of the same fight run 14.5 NPC turns each.
+pub const NPC_TURN_MS: u16 = 45;
 
 fn healthy(s: &State, actor: usize) -> bool {
     s.actors.attrs.status[actor] & 0x16 == 0
