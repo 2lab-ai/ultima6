@@ -20,6 +20,16 @@ Status: in-progress
   --disable-all-engines --enable-engine=ultima6` (emsdk 4.0.10), log
   `~/Games/ultima6/scummvm-wasm-build.log`.
 - Local data (never committed): `~/Games/ultima6/{original,img,files,unpacked}`.
+- REA on the real binary: `tools/hunk2raw.py game` → `~/Games/ultima6/re/game.bin` (35 hunks,
+  base 0x100000) → `rea inspect … --architecture m68k` = 1,383 procedures, 515 strings
+  (41 s). Bulk decompile: `node tools/rea/dump-all.mjs` (one MCP session; first batch 30 s
+  for import, then fast) → `~/Games/ultima6/re/dumps/game/` 1,383/1,383 status ok, 6.5 MB.
+- Rust gates: `scripts/cargo.sh fmt --all --check` · `clippy --workspace --all-targets -D warnings`
+  · `test --workspace` · `bash scripts/build-web.sh` (wasm32 via rustup stable 1.96.1).
+- Deploy channel: CF Pages project `ultima6` (account b6eba338…, created via API — `wrangler
+  pages project create` autoconfigures a Worker instead; that Worker was deleted) →
+  `npx wrangler@4 pages deploy site --project-name ultima6 --branch <b>`; preview alias
+  https://preview.ultima6.pages.dev. Custom domain + Vercel CNAME `ultima6` at milestone 1.
 
 ## Round 1 — open work units (rev 2: Rust main source)
 
