@@ -365,7 +365,11 @@ fn object_verdict(
         return Verdict::Neutral;
     }
     let status = &s.actors.attrs.status;
-    if status[usize::from(actor)] & 0x80 != 0 {
+    // The original reads A4+0x3d0c + mover for any mover, an object slot (≥ 0x100: a vessel
+    // being boarded, a dropped or pushed object) included, i.e. past the 256 status bytes into
+    // the tables after them. The port reads 0 there: an object is not a party member.
+    let mover_status = status.get(usize::from(actor)).copied().unwrap_or(0);
+    if mover_status & 0x80 != 0 {
         let fellow = id.0 != leader
             && s.actors.work.swap_ok != 0
             && id.0 < 0x100
@@ -746,6 +750,19 @@ pub(crate) mod tests {
             !can_move_to(&mut s, 10, 21, 20),
             "not while swapping is off"
         );
+    }
+
+    /// 0x11b1c0 asked for an object slot (Use boarding a vessel, Drop and Move): the party test
+    /// reads past the 256 actor status bytes (the original's A4+0x3d0c + slot); the port reads
+    /// "not in the party" there and goes on to the blocking checks.
+    #[test]
+    fn an_object_slot_mover_is_not_a_party_member() {
+        let mut s = two_actors();
+        s.objects.type_frame[0x200] = 0x17a;
+        s.objects.location[0x200] = Position { x: 22, y: 20, z: 0 };
+        link_objects(&mut s);
+        assert!(!can_move_to(&mut s, 0x200, 21, 20), "an actor stands there");
+        assert!(can_move_to(&mut s, 0x200, 22, 21));
     }
 
     #[test]

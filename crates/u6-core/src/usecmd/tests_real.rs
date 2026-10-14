@@ -394,6 +394,19 @@ fn use_on_eight_kinds_of_objects() {
                 .map(|(i, _)| i as Slot)
                 .collect::<Vec<_>>()
         };
+        // The start egg's gargoyles (hatched by the boot since the objects port of 0x1319b2)
+        // stand around the party; one on the gate's tile would make it fail ("Failed", as in
+        // the original). They go to level 15 (out of the world) for this case.
+        {
+            let c = s.map.centre;
+            let (gx, gy) = (c.x, c.y - 2);
+            for a in 0xe0..0x100i16 {
+                let p = s.objects.location[a as usize];
+                if s.objects.type_frame[a as usize] != 0 && (p.x, p.y, p.z) == (gx, gy, c.z) {
+                    crate::objects::move_to(&mut s, a, gx, gy, 0xf);
+                }
+            }
+        }
         let gates0 = gates(&s);
         s.ui.input.targeting = 1;
         s.ui.input.cursor = (5, 5);
