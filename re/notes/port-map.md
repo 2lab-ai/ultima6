@@ -425,8 +425,8 @@ Totals: functions 599: ported 71, partial 4, placeholder 2, stubbed 18, replaced
 | 0x128aa4 | objects |  |  | - |
 | 0x128b0e | objects | M | `objects/effects.rs::mark_takeable` | ported |
 | 0x128b6a | objects |  |  | - |
-| 0x128b98 | objects | M | `objects/effects.rs:199 in parse_answer` | stubbed |
-| 0x128ce8 | objects | M | `objects/effects.rs:143 in show_actor` | stubbed |
+| 0x128b98 | objects | M | `objects/effects.rs:205 in parse_answer` | stubbed |
+| 0x128ce8 | objects | M | `objects/effects.rs:149 in show_actor` | stubbed |
 | 0x12904c | objects |  | `objects/names.rs::article` | partial |
 | 0x12909a | objects |  |  | - |
 | 0x1290dc | objects |  |  | - |
@@ -444,7 +444,7 @@ Totals: functions 599: ported 71, partial 4, placeholder 2, stubbed 18, replaced
 | 0x12acc0 | objects |  |  | - |
 | 0x12adc4 | objects |  |  | - |
 | 0x12ae04 | objects | S |  | - |
-| 0x12ba36 | objects | M | `objects/effects.rs:152 in spring_trap` | stubbed |
+| 0x12ba36 | objects | M | `objects/effects.rs:158 in spring_trap` | stubbed |
 | 0x12bbc0 | objects |  |  | - |
 | 0x12bdfa | objects |  |  | - |
 | 0x12c062 | objects |  |  | - |
@@ -465,8 +465,8 @@ Totals: functions 599: ported 71, partial 4, placeholder 2, stubbed 18, replaced
 | 0x12d526 | objects |  |  | - |
 | 0x12d7d4 | objects |  |  | - |
 | 0x12d960 | objects |  |  | - |
-| 0x12d9ee | objects | M | `objects/effects.rs:172 in blast_doors` | stubbed |
-| 0x12db7e | objects | M | `objects/effects.rs:162 in explode_keg` | stubbed |
+| 0x12d9ee | objects | M | `objects/effects.rs:178 in blast_doors` | stubbed |
+| 0x12db7e | objects | M | `objects/effects.rs:168 in explode_keg` | stubbed |
 | 0x12dcbe | objects | M | `objects/effects.rs::object_of_kind_at` | ported |
 | 0x12dd1a | objects |  |  | - |
 | 0x12dd6e | objects |  |  | - |
@@ -487,9 +487,9 @@ Totals: functions 599: ported 71, partial 4, placeholder 2, stubbed 18, replaced
 | 0x12f1e6 | objects |  |  | - |
 | 0x12f3fa | objects |  |  | - |
 | 0x12f502 | party |  |  | - |
-| 0x12f6ee | objects | M | `objects/effects.rs:181 in mount_horse` | stubbed |
+| 0x12f6ee | objects | M | `objects/effects.rs:187 in mount_horse` | stubbed |
 | 0x12f7ea | objects |  |  | - |
-| 0x12f8fe | objects | M | `objects/effects.rs:190 in dismount` | stubbed |
+| 0x12f8fe | objects | M | `objects/effects.rs:196 in dismount` | stubbed |
 | 0x12fb0a | objects |  |  | - |
 | 0x12fca2 | objects |  |  | - |
 | 0x12fdf6 | objects |  |  | - |
@@ -503,9 +503,9 @@ Totals: functions 599: ported 71, partial 4, placeholder 2, stubbed 18, replaced
 | 0x1305e0 | objects | S |  | - |
 | 0x131196 | unknown | M | `objects/effects.rs::monster_index` | ported |
 | 0x1311d2 | unknown | M | `objects/effects.rs::vary` | ported |
-| 0x13121a | unknown | M | `objects/effects.rs:216 in equip_monster` | stubbed |
-| 0x131646 | unknown | M | `objects/effects.rs:208 in spawn_monster` | stubbed |
-| 0x1319b2 | objects | M | `objects/effects.rs:225 in random_encounter` | stubbed |
+| 0x13121a | unknown | M | `objects/effects.rs:222 in equip_monster` | stubbed |
+| 0x131646 | unknown | M | `objects/effects.rs:214 in spawn_monster` | stubbed |
+| 0x1319b2 | objects | M | `objects/effects.rs:233 in hatch_egg` | stubbed |
 | 0x1321dc | map | M | `map/` | planned |
 | 0x132338 | ui |  |  | - |
 | 0x13242e | ui | M | `ui/` | planned |

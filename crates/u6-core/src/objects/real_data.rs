@@ -45,7 +45,11 @@ fn every_block_loads_through_the_slot_tables() {
     let Some(files) = files() else { return };
     let mut s = loaded(&files);
     assert_eq!(s.objects.defs.stackable.len(), 21);
-    assert_eq!(s.objects.defs.nothing, "Nothing");
+    // The strings came out of the data hunk (shape only; the text is the user's).
+    let d = &s.objects.defs;
+    assert!(d.nothing.starts_with(|c: char| c.is_ascii_uppercase()));
+    assert_eq!(d.nothing.to_ascii_lowercase(), d.nothing_lower);
+    assert!(d.count_format.contains("%d"));
     let mut hist: BTreeMap<u8, usize> = BTreeMap::new();
     let mut total = 0;
     for i in 0..BLOCK_COUNT {
@@ -172,13 +176,15 @@ fn names_of_twenty_objects_near_the_party() {
         let o = &s.objects;
         let tile = tile_of(t, o.tf(c));
         let (prefix, count) = name_prefix(&s, c);
+        let d = &o.defs;
+        let count_text = |n: u16| d.count_format.replace("%d", &n.to_string());
         let want_prefix = match stack_kind(o, o.kind(c)) {
-            4 => format!("{} ", o.qq_of(c)),
-            2 if o.status(c) & 0x80 == 0 => format!("{} ", o.qq_of(c) & 0xff),
+            4 => count_text(o.qq_of(c)),
+            2 if o.status(c) & 0x80 == 0 => count_text(o.qq_of(c) & 0xff),
             _ => match t.tileflags.article(usize::from(tile)) {
-                Some(u6_formats::tileflag::Article::A) => "a ".into(),
-                Some(u6_formats::tileflag::Article::An) => "an ".into(),
-                Some(u6_formats::tileflag::Article::The) => "the ".into(),
+                Some(u6_formats::tileflag::Article::A) => d.articles[0].clone(),
+                Some(u6_formats::tileflag::Article::An) => d.articles[1].clone(),
+                Some(u6_formats::tileflag::Article::The) => d.articles[2].clone(),
                 _ => String::new(),
             },
         };

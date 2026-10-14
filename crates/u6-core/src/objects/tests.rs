@@ -29,10 +29,11 @@ pub(super) fn world() -> State {
     d.dir_dx = vec![0, 1, 1, 1, 0, -1, -1, -1];
     d.dir_dy = vec![-1, -1, 0, 1, 1, 1, 0, -1];
     d.stackable = vec![60, 61];
-    d.nothing = "Nothing".into();
-    d.nothing_lower = "nothing".into();
-    d.articles = ["a ".into(), "an ".into(), "the ".into()];
-    d.count_format = "%d ".into();
+    // Synthetic stand-ins for the game's strings.
+    d.nothing = "<none>".into();
+    d.nothing_lower = "<none-lc>".into();
+    d.articles = ["A:".into(), "AN:".into(), "THE:".into()];
+    d.count_format = "%d#".into();
     init_slots(&mut s.objects);
     s.map.centre.x = 500;
     s.map.centre.y = 500;
@@ -370,7 +371,7 @@ fn look_text_takes_the_next_entry_and_names_actors_by_party_name() {
         entries: vec![
             LookEntry {
                 tile: 0,
-                text: "Nothing".into(),
+                text: "zero".into(),
             },
             LookEntry {
                 tile: 40,
@@ -387,13 +388,13 @@ fn look_text_takes_the_next_entry_and_names_actors_by_party_name() {
     );
     s.tables.tileflags.flags3[usize::from(tile(10, 0))] = 0x40;
     let loaf = put(&mut s, 10, 1, 1);
-    assert_eq!(described_name(&s, loaf), "a loaf");
+    assert_eq!(described_name(&s, loaf), "A:loaf");
     s.objects.type_frame[loaf as usize] = 60 | (2 << 10);
     s.objects.qq[loaf as usize] = 3;
     // Type 60 is a quantity stack only for frame 0 (0x10cef2 compares the whole word): the
     // prefix counts by type, the quantity by type + frame.
-    assert_eq!(name_prefix(&s, loaf), ("3 ".to_string(), 3));
-    assert_eq!(display_name(&s, NONE), "Nothing");
+    assert_eq!(name_prefix(&s, loaf), ("3#".to_string(), 3));
+    assert_eq!(display_name(&s, NONE), "<none>");
     s.actors.attrs.status = vec![0; 256];
     s.actors.attrs.status[3] = 0x80;
     s.actors.party.members[0] = 3;

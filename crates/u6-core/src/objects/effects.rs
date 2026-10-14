@@ -2,6 +2,9 @@
 
 use super::iter::{begin_at, next_at};
 use super::{Objects, Slot};
+use std::cell::RefCell;
+
+use crate::engine::Io;
 use crate::state::State;
 use crate::todo_stub;
 
@@ -134,12 +137,15 @@ const STR_OPEN: u32 = 0x0012_cf20;
 const STR_NOT_NOW: u32 = 0x0012_cee2;
 const STR_CLOSE: u32 = 0x0012_cf38;
 
-/// Stub of 0x128ce8 (objects: show an actor's portrait, equipment and name)
+/// Stub of 0x128ce8 (objects: show an actor's portrait, equipment and name, wait for a key)
 ///
-/// Stub contract: async in the original (waits for a key unless A4-0x71b5 is set); draws the
-/// portrait / inventory panel and prints the name. Fallback: nothing shown, no key read; the
-/// caller continues. Reached from Talk's opening (0x115150) and the main loop (0x104e40).
-pub fn show_actor(_s: &mut State, _actor: Slot) {
+/// Stub contract: draws the actor's portrait (converse 0x133d3e) and equipment panel (ui
+/// 0x133fe0 / 0x1113fe), prints its name (0x10eef8 or its converse name) and, unless A4-0x71b5
+/// is set, awaits a key (0x10790a) — so the port's signature is async. Fallback: nothing shown,
+/// no key consumed; the caller continues. Reached by Talk's start (0x114afa) and its opcode
+/// executor (0x11404c), the side panel (0x103f64) and Look: the M1 Talk scenario reaches it,
+/// and the missing key wait is a command-boundary difference there.
+pub async fn show_actor(_state: &RefCell<State>, _io: &Io, _actor: Slot) {
     todo_stub!("0x128ce8 show an actor's portrait, equipment and name", ())
 }
 
@@ -216,11 +222,13 @@ pub fn equip_monster(_s: &mut State, _monster: Slot, _index: i16) {
     todo_stub!("0x13121a give a new monster its equipment", ())
 }
 
-/// Stub of 0x1319b2 (objects: random encounter: "Shamino says, I hear something...")
+/// Stub of 0x1319b2 (objects: hatch an egg: spawn its monsters, "Shamino says, I hear something")
 ///
-/// Stub contract: on the surface, with an RNG check, picks a monster group for the terrain and
-/// spawns it out of view (0x131646), possibly with Shamino's warning. Fallback: no encounter and
-/// no RNG draw. Reached from the turn path (0x130fc4) — RNG parity diverges once it is reached.
-pub fn random_encounter(_s: &mut State) {
-    todo_stub!("0x1319b2 random encounter", ())
+/// Stub contract: called by map 0x1321dc for every egg (type 0x14f) on the leader's level in the
+/// 40 × 40 window each time the window is rebuilt (0x108d10, i.e. whenever walking shifts the
+/// window), unless A4-0x7afb is set; with RNG checks it spawns the egg's monsters out of view
+/// (0x131646) and may print Shamino's warning. Fallback: no monster and no RNG draw. Reached on
+/// the M1 walk path: RNG parity diverges at the first window shift with an egg in range.
+pub fn hatch_egg(_s: &mut State, _egg: Slot) {
+    todo_stub!("0x1319b2 hatch an egg (spawn its monsters)", ())
 }

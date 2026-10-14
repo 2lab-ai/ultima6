@@ -102,7 +102,7 @@
 //! - 0x1311d2 [unknown] unnamed; calls 0x151f06 (random number in [lo, hi])
 //! - 0x13121a [unknown] unnamed; calls 0x151f06 (random number in [lo, hi])
 //! - 0x131646 [unknown] unnamed; calls 0x131196 (index of a value in a small-d~)
-//! - 0x1319b2 [objects] uses "Shamino says, "I hear somet~"
+//! - 0x1319b2 [objects] uses "Shamino says, "I hear somet~" (hatch an egg; stub)
 
 mod blocks;
 mod defs;
