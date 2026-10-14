@@ -40,7 +40,8 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // Public state for scripts and tests: data-ops = queued operations, data-state = what the page
 // does, data-saved = the last save generation stored, data-audio / data-audio-chunks = the
 // AudioContext state and the chunks the worklet received; on the canvas data-files = game
-// files of the running game, data-saves = save files it booted with, data-leader = x,y,z.
+// files of the running game, data-saves = save files it booted with, data-leader = x,y,z,
+// data-prompt = 1 while the game waits for a command key.
 function reflect(state) {
   if (state) document.body.dataset.state = state;
   const live = game && !crashed;
@@ -227,6 +228,7 @@ function frame(now) {
     feedAudio();
     checkSave();
     canvas.dataset.leader = game.leader_position().join(',');
+    canvas.dataset.prompt = game.at_prompt() ? '1' : '0';
   } catch (err) {
     stopOnTrap(err);
     return;

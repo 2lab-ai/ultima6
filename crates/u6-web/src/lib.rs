@@ -240,6 +240,14 @@ impl Game {
         self.save_out = Vec::new();
     }
 
+    /// True while the command loop waits for a command key with nothing queued (A4-0x7a2c set,
+    /// no key pending): the prompt is up.
+    pub fn at_prompt(&self) -> bool {
+        self.engine.as_ref().is_some_and(|e| {
+            e.state().main.reading == 1 && e.io().pending_events() == 0 && self.pending.is_empty()
+        })
+    }
+
     /// The leader's map position (x, y, z), or empty before a start.
     pub fn leader_position(&self) -> Vec<u16> {
         self.engine.as_ref().map_or_else(Vec::new, |e| {

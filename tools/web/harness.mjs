@@ -249,3 +249,33 @@ export function mapShift(before, after, width = 320) {
 }
 
 export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+/// One step east or west from the prompt: the seed is the clock's, so the start fight sometimes
+/// leaves a gargoyle or a member beside the Avatar and the step is blocked; then the other way,
+/// up to 6 tries (each try's world turn moves the fight on). Returns the key that walked, the
+/// leader before and after, and the frame before that step.
+export async function stepSideways(page) {
+  for (let i = 0; i < 6; i += 1) {
+    await waitPrompt(page);
+    const key = i % 2 === 0 ? 'ArrowRight' : 'ArrowLeft';
+    const from = (await state(page)).leader;
+    const before = await frame(page);
+    await page.keyboard.press(key);
+    await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0',
+      null, { timeout: 10_000 }).catch(() => {});
+    await waitPrompt(page);
+    const to = (await state(page)).leader;
+    if (to !== from) return { key, from, to, before };
+  }
+  throw new Error('six steps blocked in a row');
+}
+
+/// Waits until the game shows its prompt (waiting for a command key, nothing queued) for a few
+/// frames in a row: the world turns after a command (the start fight's) have run.
+export async function waitPrompt(page, timeout = 60_000) {
+  await page.waitForFunction(() => {
+    const at = document.getElementById('screen').dataset.prompt === '1';
+    window.__promptRun = at ? (window.__promptRun ?? 0) + 1 : 0;
+    return window.__promptRun >= 5;
+  }, null, { timeout, polling: 'raf' });
+}

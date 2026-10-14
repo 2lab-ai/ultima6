@@ -221,17 +221,16 @@ test('A on the canvas: Attack asks for a target, a stray key ends it, then the a
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
   await started(page, 130);
-  await h.sleep(2500);
+  await h.waitPrompt(page);
   await page.keyboard.press('a');
   await h.sleep(800);
   await page.keyboard.press('q'); // confirms no target: "what?", the turn (the start fight) runs
-  await h.sleep(4000);
+  await h.waitPrompt(page);
   await writeFile('/tmp/claude-501/m2-attack-what.png', await page.locator('#screen').screenshot());
-  const before = await h.frame(page);
-  await page.keyboard.press('ArrowRight');
-  await h.sleep(4000);
+  const { key, before } = await h.stepSideways(page);
   const walked = h.mapShift(before, await h.frame(page));
-  assert.ok(walked.shift === 16 && walked.score > 0.5, `one step east after A: ${JSON.stringify(walked)}`);
+  const want = key === 'ArrowRight' ? 16 : -16;
+  assert.ok(walked.shift === want && walked.score > 0.5, `one step (${key}) after A: ${JSON.stringify(walked)}`);
 }, { needs: h.haveHfes });
 
 test('Ctrl+S and Ctrl+R on the canvas are the game\'s Save and Restore, not the browser\'s', async (env) => {
@@ -252,17 +251,12 @@ test('Ctrl+S and Ctrl+R on the canvas are the game\'s Save and Restore, not the 
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['KeyL', false], 'other Ctrl shortcuts stay the browser\'s');
 }, { needs: h.haveHfes });
 
-// Walks one step east, then saves (Ctrl-S, Y) and waits until the save is stored; returns the
-// leader's position before and after the step.
+// Walks one step (east or west), then saves (Ctrl-S, Y) and waits until the save is stored;
+// returns the leader's position before and after the step.
 async function walkAndSave(page) {
-  await h.sleep(2500); // the boot reaches the prompt
+  await h.waitPrompt(page); // the boot reaches the prompt
   const start = (await h.state(page)).leader;
-  await page.keyboard.press('ArrowRight');
-  // The step happens when the loop reads the key, after the start fight's world turns.
-  await page.waitForFunction((at) => document.getElementById('screen').dataset.leader !== at,
-    start, { timeout: 30_000 });
-  const moved = (await h.state(page)).leader;
-  // Queued in order: the loop reads Ctrl-S at its prompt, then the question reads Y.
+  const { to: moved } = await h.stepSideways(page);
   await page.keyboard.press('Control+s');
   await h.sleep(400);
   await page.keyboard.press('y');
