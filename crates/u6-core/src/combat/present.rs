@@ -32,9 +32,14 @@ pub const FRAME_MS: u16 = 20;
 /// and copied, draw lists again): 16 PAL frames, the median of 45 flashes (14..18) in the oracle
 /// (tools/oracle/fight.mjs + fight.py: the start fight, 3 boots × 7 party steps).
 pub const FLASH_MS: u16 = 16 * FRAME_MS;
-/// [replaced] Time of a flight's first render (0x102c90 at the top of 0x132706, before the
-/// first step): 6 PAL frames, the median of 87 flights in the oracle (5..6 in 84 of them).
-pub const FLIGHT_START_MS: u16 = 6 * FRAME_MS;
+/// [replaced] Time of a render of the window into the back buffer (0x102c90 without the frame):
+/// 6 PAL frames, the median of the first renders of 87 flights in the oracle (5..6 in 84).
+pub const RENDER_MS: u16 = 6 * FRAME_MS;
+/// [replaced] Time of a render of the window with its frame, copied to the screen (0x102c90 with
+/// D0 = 1): 8.74 PAL frames, timed at the prompt (tools/oracle/timeit.mjs render).
+pub const WINDOW_MS: u16 = 175;
+/// A flight's first render (0x102c90 at the top of 0x132706, before the first step).
+pub const FLIGHT_START_MS: u16 = RENDER_MS;
 /// [replaced] Time of one drawn step of a flight (the rounds up to it, the sprites saved and
 /// drawn, what lies over them, the rectangle copied, 0x151fe6): 46 ms, 2.31 PAL frames, from
 /// 525 frames over 227 drawn steps in the 40 flights of the oracle that drew any.
@@ -47,13 +52,14 @@ pub const REFRESH_MS: u16 = 11 * FRAME_MS;
 /// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 22 ms,
 /// 1.12 PAL frames, from 147 frames over 131 changes of the message area in the oracle.
 pub const PRINT_MS: u16 = 22;
-/// Time of a window presented dissolving (0x102c90 with A4-0x6578 set: 0x1520e2 copies the
-/// window pixel by pixel, 25,600 of them): not measured (no dissolve happens in the oracle's
-/// start fight), so one PAL frame.
-pub const DISSOLVE_MS: u16 = FRAME_MS;
-/// Time of each window of the actor flash 0x132338 (the outlined actor presented dissolving,
-/// then the window without it): not measured, so one PAL frame.
-pub const ACTOR_FLASH_MS: u16 = FRAME_MS;
+/// [replaced] Time of a window presented dissolving (0x102c90 with A4-0x6578 set: 0x1520e2
+/// copies the 25,600 pixels of the window one by one): 171.07 PAL frames, timed at the prompt
+/// (tools/oracle/timeit.mjs dissolve; none happens in the start fight).
+pub const DISSOLVE_MS: u16 = 3421;
+/// [replaced] Time of each window of the actor flash 0x132338 (the outlined actor presented
+/// dissolving, then the window without it, dissolving too): half of its 345.83 PAL frames, timed
+/// at the prompt on the Avatar (tools/oracle/timeit.mjs actor).
+pub const ACTOR_FLASH_MS: u16 = 3458;
 /// The map window with its border, in screen pixels.
 const WINDOW: (usize, usize) = (176, 176);
 
@@ -65,21 +71,24 @@ const WINDOW: (usize, usize) = (176, 176);
 /// next one makes up, and the run takes the same engine time at any tick size. After anything
 /// else waited (a key, a prompt) the schedule starts again from now.
 pub async fn pace(state: &RefCell<State>, io: &Io, ms: u16) {
-    let due = {
-        let mut s = state.borrow_mut();
-        let now = io.now_ms();
-        let c = &mut s.combat;
-        let from = if now == c.paced_at_ms { c.due_ms } else { now };
-        c.due_ms = from + u64::from(ms);
-        *c.paced.entry(ms).or_default() += 1;
-        c.due_ms
-    };
+    let due = schedule(state, io, ms);
     io.vblank().await;
     let left = due.saturating_sub(io.now_ms());
     if left > 0 {
         io.sleep(u32::try_from(left).unwrap_or(u32::MAX)).await;
     }
     state.borrow_mut().combat.paced_at_ms = io.now_ms();
+}
+
+/// The deadline of a wait of `ms` on the schedule of [`pace`] (counted, not awaited).
+fn schedule(state: &RefCell<State>, io: &Io, ms: u16) -> u64 {
+    let mut s = state.borrow_mut();
+    let now = io.now_ms();
+    let c = &mut s.combat;
+    let from = if now == c.paced_at_ms { c.due_ms } else { now };
+    c.due_ms = from + u64::from(ms);
+    *c.paced.entry(ms).or_default() += 1;
+    c.due_ms
 }
 
 /// One presented rectangle of the screen.
@@ -97,6 +106,8 @@ pub struct Effect {
     pub cost: u16,
     /// Messages queued (`main.pending_print`) before it was presented.
     pub mark: usize,
+    /// The window was presented dissolving (0x1520e2): playback reveals it over its time.
+    pub dissolve: bool,
 }
 
 /// Records the screen rectangle (x0, y0)..=(x1, y1) as it is now (after a present), shown after
@@ -127,6 +138,7 @@ pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize,
             pixels,
             cost,
             mark,
+            dissolve: false,
         });
     }
 }
@@ -134,6 +146,16 @@ pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize,
 /// Records the whole map window, shown after `cost` ms.
 pub(crate) fn capture_window(s: &mut State, cost: u16) {
     capture(s, 0, 0, WINDOW.0 - 1, WINDOW.1 - 1, cost);
+}
+
+/// Records the whole map window presented dissolving (0x102c90 with A4-0x6578 set), revealed in
+/// the dissolve's pixel order over its `cost` ms.
+pub(crate) fn capture_dissolve(s: &mut State, cost: u16) {
+    let n = s.combat.effects.len();
+    capture_window(s, cost);
+    if let Some(e) = s.combat.effects.get_mut(n) {
+        e.dissolve = true;
+    }
 }
 
 /// Records `cost` ms of drawing that puts nothing new on the screen (a render into the back
@@ -151,6 +173,7 @@ pub(crate) fn capture_pause(s: &mut State, cost: u16) {
         pixels: Vec::new(),
         cost,
         mark,
+        dissolve: false,
     });
 }
 
@@ -198,7 +221,11 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
             print_paced(state, io, e.mark - printed).await;
             printed = e.mark;
         }
-        pace(state, io, e.cost).await;
+        if e.dissolve && (e.w, e.h) == WINDOW {
+            reveal(state, io, &e).await;
+        } else {
+            pace(state, io, e.cost).await;
+        }
         if e.w == 0 || e.h == 0 {
             continue;
         }
@@ -223,6 +250,41 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
         s.combat.swallow = false;
         s.ui.text.skip_newline = true;
     }
+}
+
+/// A window presented dissolving, as the original shows it: the old picture while the window
+/// renders ([`WINDOW_MS`]), then its pixels in the dissolve's order (0x1520e2: 160 × 160 from
+/// (8, 8), [`crate::gfx::blit::dissolve_order`]) at an even rate up to the end of its time.
+async fn reveal(state: &RefCell<State>, io: &Io, e: &Effect) {
+    let taps = state.borrow().gfx.tables.dissolve_taps;
+    let order = crate::gfx::blit::dissolve_order(160, 160, &taps);
+    let due = schedule(state, io, e.cost);
+    let begin = due - u64::from(e.cost) + u64::from(WINDOW_MS.min(e.cost));
+    let mut done = 0;
+    loop {
+        io.vblank().await;
+        let now = io.now_ms();
+        let upto = if now >= due {
+            order.len()
+        } else {
+            let part = now.saturating_sub(begin) * order.len() as u64 / (due - begin).max(1);
+            part as usize
+        };
+        if upto > done {
+            io.draw(|fb| {
+                for &(c, r) in &order[done..upto] {
+                    let (x, y) = (8 + usize::from(c), 8 + usize::from(r));
+                    fb.set(e.x + x, e.y + y, e.pixels[y * e.w + x]);
+                }
+            });
+            io.present();
+            done = upto;
+        }
+        if now >= due {
+            break;
+        }
+    }
+    state.borrow_mut().combat.paced_at_ms = io.now_ms();
 }
 
 /// Original: 0x13242e (ui: grow the flight's changed rectangle A4+0x1900.. to the 16 × 16

@@ -234,9 +234,9 @@ pub fn flash_actor(state: &mut State, io: &Io, actor: u16, bright: bool) {
     crate::objects::add_tile(state, word, col as i16, row as i16, 2);
     state.gfx.dissolve = 1;
     render_window(state, io, true);
-    crate::combat::present::capture_window(state, crate::combat::present::ACTOR_FLASH_MS);
+    crate::combat::present::capture_dissolve(state, crate::combat::present::ACTOR_FLASH_MS);
     crate::objects::build_draw_lists(state);
     state.gfx.dissolve = 1;
     render_window(state, io, true);
-    crate::combat::present::capture_window(state, crate::combat::present::ACTOR_FLASH_MS);
+    crate::combat::present::capture_dissolve(state, crate::combat::present::ACTOR_FLASH_MS);
 }

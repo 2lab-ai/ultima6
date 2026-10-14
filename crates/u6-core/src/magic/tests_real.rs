@@ -254,7 +254,7 @@ pub(super) fn cast_with(files: &Files, setup: fn(&mut State), input: &str) -> En
     for k in keys(input) {
         e.tick(&[k], 16);
     }
-    for _ in 0..640 {
+    for _ in 0..8000 {
         if e.finished() {
             break;
         }
@@ -429,7 +429,7 @@ fn light_at_night_lights_the_view() {
     for k in keys("IL\n") {
         e.tick(&[k], 16);
     }
-    for _ in 0..16 {
+    for _ in 0..2000 {
         e.tick(&[], 16);
     }
     assert!(e.finished());
@@ -500,7 +500,7 @@ fn detect_magic_on_a_potion() {
         super::dispatch(&st, &io, 1, true).await;
         flush_prints(&st, &io).await;
     });
-    for _ in 0..64 {
+    for _ in 0..2000 {
         e.tick(&[], 16);
     }
     assert!(e.finished());

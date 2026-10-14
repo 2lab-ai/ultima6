@@ -752,7 +752,7 @@ fn a_dropped_ring_of_invisibility_flashes_before_the_panel() {
         out.set(Some((s.combat.shown, s.combat.effects.len())));
     });
     e.tick(&[crate::InputEvent::Key(crate::Key::Enter)], 16);
-    for _ in 0..60 {
+    for _ in 0..1000 {
         if e.finished() {
             break;
         }

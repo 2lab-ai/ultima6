@@ -511,7 +511,7 @@ fn click_then_key(s: State, x: i16, y: i16) -> (u64, usize, u8) {
     let ev = |b| InputEvent::Pointer { x, y, buttons: b };
     e.tick(&[ev(1), ev(0)], 16);
     e.tick(&[InputEvent::Key(Key::Char('a'))], 16);
-    for _ in 0..60 {
+    for _ in 0..1000 {
         if e.finished() {
             break;
         }

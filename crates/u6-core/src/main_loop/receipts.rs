@@ -182,7 +182,7 @@ fn cast_light_at_night_through_the_command_loop() {
     let book = e.state().ui.panel.mode;
     dump(&e, "int-b-light-book");
     press(&mut e, &chars("il\n"), 4);
-    idle(&mut e, 40);
+    idle(&mut e, 1000);
     dump(&e, "int-b-light-lit");
     let s = e.state();
     let lit = lit_cells(&s);
@@ -239,7 +239,7 @@ fn magic_arrow_at_a_gargoyle_through_the_command_loop() {
     e.tick(&[InputEvent::Key(Key::Enter)], 16);
     let mut flight = None;
     let mut last = shown0;
-    for t in 0..200 {
+    for t in 0..2000 {
         let shown = e.state().combat.shown;
         if shown > last && pixels(&e) != before {
             flight.get_or_insert(t);
@@ -250,7 +250,7 @@ fn magic_arrow_at_a_gargoyle_through_the_command_loop() {
         last = shown;
         e.tick(&[], 16);
     }
-    idle(&mut e, 40);
+    idle(&mut e, 1000);
     dump(&e, "int-b-arrow-after");
     let s = e.state();
     let tail = scroll(&e, &command_line(&e, CAST));
@@ -379,7 +379,7 @@ fn the_spellbook_by_clicks_through_the_command_loop() {
     click(&mut e, 0xb8, 0x5c, 10);
     let back = page(&e);
     click(&mut e, 0xc8, 0x10 + 3 * 8 + 4, 4);
-    idle(&mut e, 40);
+    idle(&mut e, 1000);
     dump(&e, "int-mouse-book-light");
     let s = e.state();
     let lit = lit_cells(&s);

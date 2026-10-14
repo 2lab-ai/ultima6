@@ -145,6 +145,16 @@ scheduler 12.7, message 7.0, party step 6.0. Per operation (PAL frames): refresh
 131), NPC turns and scheduler 33 a step (n 21, 19..77). Not seen in this fight: the actor flash
 0x132338, the window flash 0x115b7c, the quake 0x133a1a, a dissolve (0x1520e2).
 
+Those are timed by `timeit.mjs` from a saved start (`U6_FIGHT_SAVE`): the debugger stops at the
+entry of the prompt's idle render 0x102c90 (D0 = 1, from the key wait 0x105c8e), the routine runs
+in its place (`g <address>` moves the PC and stops, a plain `g` runs on; its `rts` returns to
+the render's caller) and a breakpoint at that return address stops it again. PAL frames (beam
+lines as the fraction, deterministic from the snapshot): the render itself 8.74, the render with
+the dissolve flag A4-0x6578 set 171.07 (0x1520e2 copies the 25,600 window pixels one at a time),
+the actor flash 0x132338 on the Avatar 345.83 (two dissolving renders), the window flash
+0x115b7c (circle 1) 17.21. Not timed: the quake (its D1, the amplitude, is the caller's word
+there, and the console's `w` writes memory and custom registers, not CPU registers).
+
 ## 1. Emulator, versions, sources
 
 | part | version / id | source |
@@ -214,6 +224,7 @@ state, so runs are not bit-identical end to end.
     node tools/oracle/pace.mjs OUT [HOLD ...]   # adf-gamefirst/: held-button walk, step frames per hold (ui/target.rs HELD_WALK_MS)
     node tools/oracle/fight.mjs OUT [KEY ...]   # adf-gamefirst/: party steps in the start fight, a CPU sample per frame (§E)
     python3 -I -B tools/oracle/fight.py OUT/turns.json ...   # where those frames go
+    node tools/oracle/timeit.mjs OUT SNAPSHOT render|dissolve|actor|window   # one routine's PAL frames (§E)
     tools/oracle/run.sh build      # ADFs -> installer under AROS -> disks/{PROGRAM,POPULACE,PLAYER,PORTRAIT}.hdf
     tools/oracle/run.sh boot [step ...]   # boot those, run steps, PNGs into shots/boot-<ts>/
     tools/oracle/run.sh serve &    # control server 127.0.0.1:8765, then:

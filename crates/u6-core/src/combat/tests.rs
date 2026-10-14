@@ -554,3 +554,70 @@ fn effect_frames_take_the_same_engine_time_at_any_host_tick() {
         "16 ms {at16} vs zero polls {zero}"
     );
 }
+
+/// A window recorded dissolving (colour 5 over colour 0) with `cost` ms and played at ticks of
+/// `tick_ms`: per tick, how many of its 160 × 160 dissolving pixels the published frame shows,
+/// and the engine time at which the playback returned.
+fn dissolve_run(cost: u16, tick_ms: u32) -> (Vec<usize>, u64) {
+    let done = std::rc::Rc::new(std::cell::Cell::new(None));
+    let out = std::rc::Rc::clone(&done);
+    let mut e = crate::Engine::with_game(
+        State::empty(),
+        crate::Files::default(),
+        move |st, io| async move {
+            let fill = |c: u8| {
+                io.draw(|fb| {
+                    for y in 8..168 {
+                        for x in 8..168 {
+                            fb.set(x, y, c);
+                        }
+                    }
+                })
+            };
+            fill(5);
+            present::capture_dissolve(&mut st.borrow_mut(), cost);
+            fill(0);
+            io.present();
+            play_effects(&st, &io).await;
+            out.set(Some(io.now_ms()));
+        },
+    );
+    let mut shown = Vec::new();
+    for _ in 0..10_000 {
+        if done.get().is_some() {
+            break;
+        }
+        e.tick(&[], tick_ms);
+        let f = e.frame();
+        let n = (8..168)
+            .flat_map(|y| (8..168).map(move |x| (x, y)))
+            .filter(|&(x, y)| f.get(x, y) == Some(5))
+            .count();
+        shown.push(n);
+    }
+    (shown, done.get().expect("the playback ends"))
+}
+
+#[test]
+fn a_dissolving_window_is_revealed_over_its_time() {
+    // The original copies a dissolving window pixel by pixel for 171 frames (0x1520e2): the
+    // playback shows it growing over its time, not all at once at the end, at any tick size.
+    let cost = present::DISSOLVE_MS;
+    let (shown, at16) = dissolve_run(cost, 16);
+    let (_, at8) = dissolve_run(cost, 8);
+    let partial = shown.iter().filter(|&&n| n > 0 && n < 160 * 160).count();
+    println!(
+        "dissolve of {cost} ms: done at {at16} ms (16 ms ticks), {at8} ms (8 ms); {partial} ticks partly shown"
+    );
+    assert!(shown.windows(2).all(|w| w[0] <= w[1]), "it only grows");
+    assert_eq!(*shown.last().unwrap(), 160 * 160, "all of it at the end");
+    assert!(
+        partial > shown.len() / 2,
+        "most ticks show part of it: {partial} of {}",
+        shown.len()
+    );
+    assert!(
+        at16 >= u64::from(cost) && at16.abs_diff(at8) <= 16,
+        "{at16} vs {at8}"
+    );
+}

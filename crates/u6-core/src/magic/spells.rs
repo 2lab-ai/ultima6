@@ -16,9 +16,11 @@ pub(super) const MSG_FOOD: u32 = 0x0011_59ca;
 const MSG_TOO_OLD: u32 = 0x0011_58ea;
 /// Food object type.
 const FOOD: u16 = 0x81;
-/// Engine milliseconds the XORed window of [`flash_window`] stays on the screen: the original
-/// shows it for as long as its second XOR and copy take. Not measured, so one PAL frame.
-pub const WINDOW_FLASH_MS: u16 = crate::combat::present::FRAME_MS;
+/// [replaced] Engine milliseconds of one pass of [`flash_window`] (the XOR 0x1521f4, the border,
+/// the copy), which is how long the XORed window stays on the screen: 112 ms, 5.6 PAL frames,
+/// half of what is left of the flash's 17.21 frames (tools/oracle/timeit.mjs window) after its
+/// render ([`crate::combat::present::RENDER_MS`]).
+pub const WINDOW_FLASH_MS: u16 = 112;
 
 /// The caster flash 0x132338 (`mode` 0 on the caster, 1 on a target) through its seam, then
 /// its frames played: the original draws the flash inside the call, so it is on the screen
@@ -36,8 +38,8 @@ pub async fn flash_actor(state: &RefCell<State>, io: &Io, actor: u16, mode: u16)
 /// copied to the screen (0x151f5a); then the same XOR again, which restores it.
 ///
 /// The XORed window is on the screen while the second pass draws; the engine publishes only
-/// the last present of a poll, so the port waits [`WINDOW_FLASH_MS`] on the engine clock between
-/// the passes (no borrow held).
+/// the last present of a poll, so the port waits on the engine clock before each pass is shown,
+/// the render and a pass before the first, [`WINDOW_FLASH_MS`] before the second (no borrow held).
 pub async fn flash_window(state: &RefCell<State>, io: &Io, circle: u16) {
     if circle >= 9 {
         return;
@@ -49,6 +51,8 @@ pub async fn flash_window(state: &RefCell<State>, io: &Io, circle: u16) {
         s.gfx.plot_xor = true;
         crate::gfx::view::render_window(&mut s, io, false);
     }
+    let first = crate::combat::present::RENDER_MS + WINDOW_FLASH_MS;
+    crate::combat::present::pace(state, io, first).await;
     for pass in 0..2 {
         {
             let mut s = state.borrow_mut();

@@ -493,10 +493,11 @@ pub fn lie_down(s: &mut State, actor: i16) {
                         |u: u16, v: u16| (u as i16).wrapping_sub(v as i16).wrapping_abs() <= 5;
                     if flags & 0x1000 != 0 && near(p.x, c.x) && near(p.y, c.y) {
                         with_current_io(|io| crate::gfx::render_window(s, io, true));
+                        present::capture_window(s, present::WINDOW_MS);
                         objects::build_draw_lists(s);
                         s.gfx.dissolve = 1;
                         with_current_io(|io| crate::gfx::render_window(s, io, true));
-                        present::capture_window(s, present::DISSOLVE_MS);
+                        present::capture_dissolve(s, present::DISSOLVE_MS);
                     }
                 }
             }

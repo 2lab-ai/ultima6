@@ -59,7 +59,7 @@ fn start(files: &Files, spell: u8, setup: Setup, after: &str) -> Engine {
 }
 
 fn finish(e: &mut Engine) {
-    for _ in 0..400 {
+    for _ in 0..4000 {
         if e.finished() {
             break;
         }
@@ -280,7 +280,7 @@ fn gate_travel_to_a_moonstone() {
 fn wizard_eye_moves_the_view() {
     let Some(files) = files() else { return };
     let mut e = start(&files, 0x69, Box::new(|_| {}), ">>>");
-    for _ in 0..8 {
+    for _ in 0..1000 {
         e.tick(&[], 16);
     }
     {
