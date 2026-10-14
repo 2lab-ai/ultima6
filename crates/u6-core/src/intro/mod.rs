@@ -56,6 +56,7 @@ pub mod story;
 #[cfg(test)]
 mod tests;
 pub mod text;
+pub mod transfer;
 pub mod video;
 
 use std::cell::RefCell;
@@ -145,7 +146,7 @@ pub async fn main(st: &mut IntroState, io: &Io, seed: u16) -> IntroOutcome {
                 }
             }
             2 => {
-                if transfer(st) != 0 {
+                if transfer::transfer(st, io).await != 0 {
                     return journey(st, io).await;
                 }
             }
@@ -180,13 +181,6 @@ pub fn journey_onward(st: &mut IntroState) -> IntroOutcome {
     IntroOutcome::Play {
         created: st.objlist.is_some(),
     }
-}
-
-/// Stub: u 0x10a81e (transfer a character from an Ultima IV / V save disk) — returns 0 (no
-/// character found).
-fn transfer(st: &mut IntroState) -> u16 {
-    let _ = st;
-    crate::todo_stub!("u 0x10a81e transfer a character", 0)
 }
 
 /// Original: u 0x1031b8 (main menu: title and menu pictures, then a key) — the choice: 0

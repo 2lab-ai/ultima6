@@ -72,6 +72,12 @@ pub struct Hero {
     pub name: [u8; 14],
     /// Original: A4+0x2bee (the sex answer: 'M' / 'F', then "Male" / "Female")
     pub sex: Vec<u8>,
+    /// Original: A4+0x2bf6 (the class, "Avatar"; the transfer sheet shows it)
+    pub class: Vec<u8>,
+    /// Original: A4+0x2c06 (byte: status, 'G' = good)
+    pub status: u8,
+    /// Original: A4+0x2c07 (byte: 1 after a transfer; nothing in `u` reads it)
+    pub transferred: u8,
     /// Original: A4+0x2be8 / A4+0x2bea / A4+0x2bec (strength, dexterity, intelligence)
     pub str: i16,
     pub dex: i16,
@@ -82,6 +88,10 @@ pub struct Hero {
     pub level: i16,
     /// Original: A4+0x2c0c (hit points)
     pub hp: i16,
+    /// Original: A4+0x2c0e (maximum hit points; written by the transfer, read by nothing)
+    pub max_hp: i16,
+    /// Original: A4+0x2c10 (magic points the transfer sheet shows; the objlist takes 2 × int)
+    pub magic: i16,
     /// Original: A4+0x2c52 (portrait 0..5 within the sex's set)
     pub portrait: i16,
     /// Original: A4+0x2c12 (the montage item shown: portrait + 0 female / + 6 male)
@@ -118,6 +128,7 @@ pub struct IntroState {
     pub tv: super::opening::Tv,
     pub storm: super::storm::Storm,
     pub story: super::story::Story,
+    pub transfer: super::transfer::Transfer,
     pub gypsy: super::gypsy::Gypsy,
     /// Original: A4+0xb3c (long: state of the C `rand` 0x10fa6c)
     pub rand: u32,
@@ -175,6 +186,7 @@ impl IntroState {
             hero,
             tv: super::opening::Tv::default(),
             storm: super::storm::Storm::default(),
+            transfer: super::transfer::Transfer::default(),
             story: super::story::Story {
                 mover: super::story::Mover::new(mover_start),
                 ..super::story::Story::default()

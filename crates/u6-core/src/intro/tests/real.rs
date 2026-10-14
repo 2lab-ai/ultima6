@@ -331,3 +331,110 @@ fn receipt_story_frames() {
     println!("stubs {:?}", r.e.stub_hits());
     println!("dir {}", dir.display());
 }
+
+/// The transfer from the menu: B with no Ultima V save in the files ends in "No character
+/// found!"; a key returns to the menu.
+fn transfer_script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
+    r.tick(30);
+    r.keys(&[Key::Escape], 120);
+    r.keys(&[Key::Char('t')], 80);
+    shot("transfer-dialog", r);
+    r.keys(&[Key::Char('b')], 40);
+    shot("transfer-result", r);
+    r.keys(&[Key::Space], 80);
+    shot("transfer-back-at-menu", r);
+}
+
+#[test]
+fn transfer_without_a_save_says_no_character_found_and_returns_to_the_menu() {
+    let Some(files) = files() else { return };
+    let mut r = Run::new(files);
+    let mut seen = Vec::new();
+    transfer_script(&mut r, |name, run| seen.push((name.to_string(), run.frame().0)));
+    assert_eq!(*r.outcome.borrow(), None, "still in u (the menu)");
+    let result = &seen[1].1;
+    let dialog = &seen[0].1;
+    assert_ne!(result, dialog, "the text box changed");
+    let hits = r.e.stub_hits();
+    assert!(hits.keys().all(|k| k.starts_with("u ")), "{hits:?}");
+    assert!(
+        !hits.keys().any(|k| k.contains("0x10ac08")),
+        "every passage decodes: {hits:?}"
+    );
+}
+
+/// A synthetic Ultima V `saved.gam` (record at byte 2): name, male, Str 20 Dex 25 Int 18, MP 10,
+/// HP 200 / 200, Exp 3000, level 5.
+fn synthetic_u5_save() -> Vec<u8> {
+    let mut b = vec![0u8; 0x40];
+    b[2..9].copy_from_slice(b"Shamino");
+    b[2 + 9] = 0xb;
+    b[2 + 0xc] = 20;
+    b[2 + 0xd] = 25;
+    b[2 + 0xe] = 18;
+    b[2 + 0xf] = 10;
+    b[2 + 0x10..2 + 0x12].copy_from_slice(&200u16.to_be_bytes());
+    b[2 + 0x12..2 + 0x14].copy_from_slice(&200u16.to_be_bytes());
+    b[2 + 0x14..2 + 0x16].copy_from_slice(&3000u16.to_be_bytes());
+    b[2 + 0x16] = 5;
+    b
+}
+
+fn transfer_u5_script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
+    r.tick(30);
+    r.keys(&[Key::Escape], 120);
+    r.keys(&[Key::Char('t')], 80);
+    r.keys(&[Key::Char('b')], 60);
+    shot("transfer-sheet", r);
+    r.keys(&[Key::Char('c')], 60);
+    shot("transfer-portrait", r);
+    r.keys(&[Key::Char('t')], 120);
+    shot("transfer-story", r);
+    r.keys(&[Key::Escape], 200);
+}
+
+#[test]
+fn a_synthetic_ultima_v_save_is_transferred_into_the_objlist() {
+    let Some(mut files) = files() else { return };
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert("saved.gam".to_string(), synthetic_u5_save());
+    files.overlay("ultima5", extra);
+    let mut r = Run::new(files);
+    transfer_u5_script(&mut r, |_, _| {});
+    assert_eq!(
+        *r.outcome.borrow(),
+        Some(IntroOutcome::Play { created: true })
+    );
+    let st = r.state.borrow().clone().unwrap();
+    let s = st.borrow();
+    assert_eq!(s.actors.party.names[0], "Shamino");
+    let a = &s.actors.attrs;
+    assert_eq!((a.strength[1], a.dexterity[1], a.intelligence[1]), (20, 25, 18));
+    assert_eq!((a.exp[1], a.level[1], a.hp[1], a.magic[1]), (300, 3, 90, 36));
+}
+
+/// Receipt: the transfer screens (no save, then a synthetic Ultima V save) as PNG + raw indices
+/// under the system temp directory (`u6-intro-receipt/`). Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "writes receipt images outside the repository"]
+fn receipt_transfer_screens() {
+    let Some(files) = files() else { return };
+    let dir: PathBuf = std::env::temp_dir().join("u6-intro-receipt");
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = |name: &str, run: &Run| {
+        let (idx, pal) = run.frame();
+        png(&dir.join(format!("{name}.png")), &idx, &pal);
+        std::fs::write(dir.join(format!("{name}.idx")), &idx).unwrap();
+        println!("shot {name} at tick {}", run.e.ticks());
+    };
+    let mut r = Run::new(files.clone());
+    transfer_script(&mut r, save);
+    let mut with_save = files;
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert("saved.gam".to_string(), synthetic_u5_save());
+    with_save.overlay("ultima5", extra);
+    let mut r = Run::new(with_save);
+    transfer_u5_script(&mut r, save);
+    println!("outcome {:?}", r.outcome.borrow());
+    println!("stubs {:?}", r.e.stub_hits());
+}
