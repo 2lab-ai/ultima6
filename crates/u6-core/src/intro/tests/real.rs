@@ -13,6 +13,7 @@ use crate::files::Files;
 use crate::intro::{IntroOutcome, handoff, run};
 use crate::sound::AudioDriver;
 use crate::state::State;
+use u6_testkit::Quiet;
 use u6_testkit::assert_same;
 
 pub(super) const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
@@ -22,7 +23,7 @@ pub(super) fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -56,7 +57,7 @@ impl Run {
     /// then `game`); no outcome is recorded.
     pub(super) fn launcher(files: Files, seed: u16) -> Self {
         Self {
-            e: Engine::with_seed(files, seed).unwrap_or_else(|e| panic!("{e}")),
+            e: Engine::with_seed(files, seed).quiet(),
             outcome: Rc::new(RefCell::new(None)),
             state: Rc::new(RefCell::new(None)),
             speaker: None,
@@ -65,7 +66,7 @@ impl Run {
 
     /// The run with the host's audio driver on its files.
     pub(super) fn with_speaker(mut self) -> Self {
-        let driver = AudioDriver::new(self.e.io().files()).unwrap_or_else(|e| panic!("{e}"));
+        let driver = AudioDriver::new(self.e.io().files()).quiet();
         self.speaker = Some(Speaker {
             driver,
             peak: 0.0,
@@ -92,7 +93,7 @@ impl Run {
     }
 
     fn new(files: Files) -> Self {
-        let state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
+        let state = State::new_game(&files).quiet();
         let outcome = Rc::new(RefCell::new(None));
         let shared = Rc::new(RefCell::new(None));
         let (out, keep) = (Rc::clone(&outcome), Rc::clone(&shared));
@@ -233,18 +234,19 @@ fn a_scripted_creation_writes_the_character_into_the_objlist() {
     let mut r = Run::new(files);
     script(&mut r, |_, _| {});
     let outcome = r.outcome.borrow().clone();
-    assert_eq!(outcome, Some(IntroOutcome::Play { created: true }));
-    let st = r.state.borrow().clone().unwrap();
+    assert!(outcome == Some(IntroOutcome::Play { created: true }));
+    let st = r.state.borrow().clone().quiet();
     let s = st.borrow();
     assert_same!(s.actors.party.names[0], "Zhuge", "the created name");
-    assert_eq!(s.actors.attrs.level[1], 3);
-    assert_eq!(s.actors.attrs.hp[1], 90);
-    assert_eq!(s.actors.attrs.exp[1], 370);
-    assert_ne!(s.actors.objlist_tail[0x81], 0, "portrait byte");
+    assert!(s.actors.attrs.level[1] == 3);
+    assert!(s.actors.attrs.hp[1] == 90);
+    assert!(s.actors.attrs.exp[1] == 370);
+    assert!(s.actors.objlist_tail[0x81] != 0, "portrait byte");
     let hits = r.e.stub_hits();
     assert!(
         hits.keys().all(|k| k.starts_with("u ")),
-        "only u's declared stubs: {hits:?}"
+        "only u's declared stubs: {:?}",
+        hits.keys().collect::<Vec<_>>()
     );
 }
 
@@ -306,7 +308,7 @@ pub(super) fn png(path: &Path, idx: &[u8], pal: &[(u8, u8, u8)]) {
     chunk(b"IHDR", &ihdr);
     chunk(b"IDAT", &z);
     chunk(b"IEND", &[]);
-    std::fs::write(path, out).unwrap();
+    std::fs::write(path, out).quiet();
 }
 
 /// Receipt: the key screens as PNG + raw indices, and the objlist fields, under the system
@@ -316,33 +318,23 @@ pub(super) fn png(path: &Path, idx: &[u8], pal: &[(u8, u8, u8)]) {
 fn receipt_screens() {
     let Some(files) = files() else { return };
     let dir: PathBuf = std::env::temp_dir().join("u6-intro-receipt");
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).quiet();
     let mut r = Run::new(files);
     script(&mut r, |name, run| {
         let (idx, pal) = run.frame();
         png(&dir.join(format!("{name}.png")), &idx, &pal);
-        std::fs::write(dir.join(format!("{name}.idx")), &idx).unwrap();
+        std::fs::write(dir.join(format!("{name}.idx")), &idx).quiet();
         println!("shot {name} at tick {}", run.e.ticks());
     });
     println!("outcome {:?}", r.outcome.borrow());
-    let st = r.state.borrow().clone().unwrap();
+    let st = r.state.borrow().clone().quiet();
     let s = st.borrow();
     println!(
-        "state: the typed name kept {} str {} dex {} int {} magic {} hp {} level {} exp {} karma {} sex {} portrait {}",
-        s.actors.party.names[0] == "Zhuge",
-        s.actors.attrs.strength[1],
-        s.actors.attrs.dexterity[1],
-        s.actors.attrs.intelligence[1],
-        s.actors.attrs.magic[1],
-        s.actors.attrs.hp[1],
-        s.actors.attrs.level[1],
-        s.actors.attrs.exp[1],
-        s.actors.karma,
-        s.actors.objlist_tail[0x80],
-        s.actors.objlist_tail[0x81],
+        "state: the typed name kept {}",
+        s.actors.party.names[0] == "Zhuge"
     );
     let _ = handoff::summary;
-    println!("stubs {:?}", r.e.stub_hits());
+    println!("stubs {:?}", r.e.stub_hits().keys().collect::<Vec<_>>());
     println!("dir {}", dir.display());
 }
 
@@ -353,7 +345,7 @@ fn receipt_screens() {
 fn receipt_opening_frames() {
     let Some(files) = files() else { return };
     let dir: PathBuf = std::env::temp_dir().join("u6-intro-frames");
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).quiet();
     let mut r = Run::new(files);
     r.tick(265);
     r.keys(&[Key::Space], 60);
@@ -364,7 +356,7 @@ fn receipt_opening_frames() {
             let (idx, pal) = r.frame();
             let t = r.e.ticks();
             png(&dir.join(format!("f{t:05}-k{k:02}.png")), &idx, &pal);
-            std::fs::write(dir.join(format!("f{t:05}-k{k:02}.idx")), &idx).unwrap();
+            std::fs::write(dir.join(format!("f{t:05}-k{k:02}.idx")), &idx).quiet();
         }
     }
     println!("dir {}", dir.display());
@@ -377,7 +369,7 @@ fn receipt_opening_frames() {
 fn receipt_story_frames() {
     let Some(files) = files() else { return };
     let dir: PathBuf = std::env::temp_dir().join("u6-story-frames");
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).quiet();
     let mut r = Run::new(files);
     r.tick(30);
     r.keys(&[Key::Escape], 120);
@@ -388,11 +380,11 @@ fn receipt_story_frames() {
             let (idx, pal) = r.frame();
             let t = r.e.ticks();
             png(&dir.join(format!("f{t:05}-k{k:02}.png")), &idx, &pal);
-            std::fs::write(dir.join(format!("f{t:05}-k{k:02}.idx")), &idx).unwrap();
+            std::fs::write(dir.join(format!("f{t:05}-k{k:02}.idx")), &idx).quiet();
         }
         r.keys(&[Key::Space], 0);
     }
-    println!("stubs {:?}", r.e.stub_hits());
+    println!("stubs {:?}", r.e.stub_hits().keys().collect::<Vec<_>>());
     println!("dir {}", dir.display());
 }
 
@@ -417,15 +409,16 @@ fn transfer_without_a_save_says_no_character_found_and_returns_to_the_menu() {
     transfer_script(&mut r, |name, run| {
         seen.push((name.to_string(), run.frame().0))
     });
-    assert_eq!(*r.outcome.borrow(), None, "still in u (the menu)");
+    assert!((*r.outcome.borrow()).is_none(), "still in u (the menu)");
     let result = &seen[1].1;
     let dialog = &seen[0].1;
     assert!(result != dialog, "the text box changed");
     let hits = r.e.stub_hits();
-    assert!(hits.keys().all(|k| k.starts_with("u ")), "{hits:?}");
+    let ids: Vec<_> = hits.keys().collect();
+    assert!(hits.keys().all(|k| k.starts_with("u ")), "{ids:?}");
     assert!(
         !hits.keys().any(|k| k.contains("0x10ac08")),
-        "every passage decodes: {hits:?}"
+        "every passage decodes: {ids:?}"
     );
 }
 
@@ -467,22 +460,13 @@ fn a_synthetic_ultima_v_save_is_transferred_into_the_objlist() {
     files.overlay("ultima5", extra);
     let mut r = Run::new(files);
     transfer_u5_script(&mut r, |_, _| {});
-    assert_eq!(
-        *r.outcome.borrow(),
-        Some(IntroOutcome::Play { created: true })
-    );
-    let st = r.state.borrow().clone().unwrap();
+    assert!(*r.outcome.borrow() == Some(IntroOutcome::Play { created: true }));
+    let st = r.state.borrow().clone().quiet();
     let s = st.borrow();
     assert_same!(s.actors.party.names[0], "Quintus", "the transferred name");
     let a = &s.actors.attrs;
-    assert_eq!(
-        (a.strength[1], a.dexterity[1], a.intelligence[1]),
-        (20, 25, 18)
-    );
-    assert_eq!(
-        (a.exp[1], a.level[1], a.hp[1], a.magic[1]),
-        (300, 3, 90, 36)
-    );
+    assert!((a.strength[1], a.dexterity[1], a.intelligence[1]) == (20, 25, 18));
+    assert!((a.exp[1], a.level[1], a.hp[1], a.magic[1]) == (300, 3, 90, 36));
 }
 
 /// Receipt: the transfer screens (no save, then a synthetic Ultima V save) as PNG + raw indices
@@ -492,11 +476,11 @@ fn a_synthetic_ultima_v_save_is_transferred_into_the_objlist() {
 fn receipt_transfer_screens() {
     let Some(files) = files() else { return };
     let dir: PathBuf = std::env::temp_dir().join("u6-intro-receipt");
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).quiet();
     let save = |name: &str, run: &Run| {
         let (idx, pal) = run.frame();
         png(&dir.join(format!("{name}.png")), &idx, &pal);
-        std::fs::write(dir.join(format!("{name}.idx")), &idx).unwrap();
+        std::fs::write(dir.join(format!("{name}.idx")), &idx).quiet();
         println!("shot {name} at tick {}", run.e.ticks());
     };
     let mut r = Run::new(files.clone());
@@ -508,7 +492,7 @@ fn receipt_transfer_screens() {
     let mut r = Run::new(with_save);
     transfer_u5_script(&mut r, save);
     println!("outcome {:?}", r.outcome.borrow());
-    println!("stubs {:?}", r.e.stub_hits());
+    println!("stubs {:?}", r.e.stub_hits().keys().collect::<Vec<_>>());
 }
 
 /// Every passage the opening, the story and the transfer lay out decodes from the user's `u`
@@ -519,9 +503,9 @@ fn every_passage_of_this_unit_decodes() {
     let hits = Rc::new(RefCell::new(Vec::new()));
     let h2 = Rc::clone(&hits);
     let f2 = files.clone();
-    let state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
+    let state = State::new_game(&files).quiet();
     let mut e = Engine::with_game(state, files, move |_s, io| async move {
-        let mut st = crate::intro::state_for(&f2).unwrap();
+        let mut st = crate::intro::state_for(&f2).quiet();
         st.font = crate::intro::load::load_lzw(&st.files, b"u6.set")
             .and_then(|d| u6_formats::font::WouFont::parse(&d).ok());
         let screen = crate::intro::mem::View::screen(crate::intro::mem::Ptr::at(
@@ -557,10 +541,11 @@ fn every_passage_of_this_unit_decodes() {
     let stubs = e.stub_hits();
     assert!(
         !stubs.keys().any(|k| k.contains("0x10ac08")),
-        "evaluator stubs: {stubs:?}"
+        "evaluator stubs: {:?}",
+        stubs.keys().collect::<Vec<_>>()
     );
     let got = hits.borrow();
-    assert_eq!(got.len(), 13 + 20 + 1);
+    assert!(got.len() == 13 + 20 + 1);
     let blank: Vec<u16> = got
         .iter()
         .filter(|(_, ink)| !ink)

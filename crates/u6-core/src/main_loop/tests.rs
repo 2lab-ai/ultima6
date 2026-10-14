@@ -5,6 +5,7 @@ use std::path::Path;
 
 use super::*;
 use crate::files::Files;
+use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 /// Image address of the prompt format the command loop prints (the leader's name, a newline).
@@ -16,7 +17,7 @@ fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -32,14 +33,14 @@ fn files() -> Option<Files> {
 #[test]
 fn boot_reaches_the_prompt_without_stub_points() {
     let Some(files) = files() else { return };
-    let mut e = crate::Engine::game_first(files, 0).unwrap_or_else(|err| panic!("{err}"));
+    let mut e = crate::Engine::game_first(files, 0).quiet();
     for _ in 0..60 {
         e.tick(&[], 16);
     }
     let ids: Vec<&str> = e.stub_hits().keys().copied().collect();
     assert!(ids.is_empty(), "{ids:?}");
     let s = e.state();
-    assert_eq!(s.ui.text.current, crate::ui::WindowId::Messages);
+    assert!(s.ui.text.current == crate::ui::WindowId::Messages);
     // The prompt's first line: the leader's name through the format, both from the user's files.
     let fmt = game_string(e.io(), FMT_PROMPT);
     let first = fmt.split(|&b| b == b'\n').next().unwrap_or_default();
@@ -48,15 +49,14 @@ fn boot_reaches_the_prompt_without_stub_points() {
     assert!(prompt.len() > name.len(), "the format at {FMT_PROMPT:#x}");
     assert!(
         s.ui.messages.iter().any(|l| l.starts_with(&prompt)),
-        "none of the {} lines is the prompt",
-        s.ui.messages.len()
+        "no scroll line is the prompt"
     );
     assert!(
         s.objects.draw.cell.iter().any(|&n| n != 0),
         "objects in the window"
     );
-    assert_eq!(
-        s.actors.objlist_tail[TAIL_CREATED], 1,
+    assert!(
+        s.actors.objlist_tail[TAIL_CREATED] == 1,
         "portrait byte of the new game"
     );
 }
@@ -411,17 +411,13 @@ fn real_attack_without_a_target_and_the_next_arrow_walks() {
     press(&mut e, crate::Key::Char('a'));
     press(&mut e, crate::Key::Char('q'));
     let s = e.state();
-    assert!(
-        !says_port_line(&s),
-        "a port line among {} scroll lines",
-        s.ui.messages.len()
-    );
+    assert!(!says_port_line(&s), "a port line in the scroll");
     assert!(s.ui.messages.len() > lines, "Attack printed its lines");
-    assert_eq!((s.ui.input.targeting, s.ui.input.target_pending), (0, 0));
+    assert!((s.ui.input.targeting, s.ui.input.target_pending) == (0, 0));
     let centre = s.map.centre;
     drop(s);
     press(&mut e, crate::Key::Right);
-    assert_ne!(e.state().map.centre, centre, "the arrow walked");
+    assert!(e.state().map.centre != centre, "the arrow walked");
 }
 
 #[test]

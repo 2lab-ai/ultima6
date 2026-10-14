@@ -213,7 +213,9 @@ export async function openPage(env, { gated = true, gameFirst = true } = {}) {
     });
   }
   const page = await context.newPage();
-  page.on('pageerror', (err) => console.error(`  page error: ${err.message}`));
+  // A page error's text can quote the game's data (an engine panic names its values): its kind
+  // only.
+  page.on('pageerror', (err) => console.error(`  page error: ${err.name}`));
   return { context, page };
 }
 

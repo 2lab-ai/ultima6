@@ -9,6 +9,7 @@ use crate::image::GameImage;
 use crate::ui::tables::COMBAT_MODES;
 use crate::ui::text::WindowId;
 use u6_intake::{InputFile, intake};
+use u6_testkit::Quiet;
 use u6_testkit::assert_same;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
@@ -18,7 +19,7 @@ pub(super) fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -27,8 +28,8 @@ pub(super) fn files() -> Option<Files> {
 }
 
 fn start_state(files: &Files) -> State {
-    let mut s = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
-    s.ui = UiState::load(files).unwrap_or_else(|e| panic!("{e}"));
+    let mut s = State::new_game(files).quiet();
+    s.ui = UiState::load(files).quiet();
     let t = s.ui.tables.clone();
     s.ui.text.main_windows(&t);
     s
@@ -41,10 +42,10 @@ fn render(files: &Files, mode: u16, member: i16) -> Engine {
     s.ui.panel.mode = mode;
     s.ui.panel.member = member;
     s.ui.panel.dirty = true;
-    let prompt = GameImage::parse(files.get("game").unwrap())
-        .unwrap()
+    let prompt = GameImage::parse(files.get("game").quiet())
+        .quiet()
         .cstr(PROMPT)
-        .unwrap();
+        .quiet();
     run(s, &[], 4, move |st, io| async move {
         debug_render(&st, &io, &prompt).await;
     })
@@ -186,29 +187,18 @@ fn real_tables_font_and_start_state_render() {
     let mut q = crate::ui::input::Qualifiers::default();
     for c in ['\u{13}', '\u{12}'] {
         let code = crate::ui::input::key_code(&mut q, &t.keymap, crate::Key::Char(c));
-        assert_eq!(code, c as u16, "{c:?}");
+        assert!(code == c as u16, "{c:?}");
     }
-    assert_eq!(t.panel.combat_modes.len(), COMBAT_MODES.count());
+    assert!(t.panel.combat_modes.len() == COMBAT_MODES.count());
     assert!(s.ui.font.as_ref().is_some_and(|f| f.glyphs.len() == 256));
-    println!(
-        "colours text {} paper {} alert {}; panel mode {:#x}; window flags {:#x}",
-        t.colours.text,
-        t.colours.paper,
-        t.colours.alert,
-        t.initial.panel_mode,
-        t.initial.window_flags
-    );
     for (mode, file) in [(0x91, "p4-ui.png"), (0x90, "p4-ui-stats.png")] {
         let e = render(&files, mode, 0);
         let path = format!("/tmp/claude-501/{file}");
-        std::fs::write(&path, png(e.frame())).unwrap();
+        std::fs::write(&path, png(e.frame())).quiet();
         println!("{path}: panel mode {mode:#x}");
         for id in [WindowId::Status, WindowId::Messages] {
-            for (r, line) in window_text(&e, id).iter().enumerate() {
-                if !line.is_empty() {
-                    println!("  {id:?} row {r}: {} characters", line.chars().count());
-                }
-            }
+            let rows = window_text(&e, id);
+            assert!(rows.iter().any(|l| !l.is_empty()), "{id:?}: text drawn");
         }
         let st = e.state();
         assert!(!st.ui.panel.dirty);

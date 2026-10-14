@@ -20,6 +20,7 @@ use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
 use crate::objects::{ACTOR_SLOTS, BLOCK_COUNT, FIRST_TEMP_ACTOR};
 use crate::state::State;
+use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 const ORACLE: &str = "/Users/zhugehyuk/Games/ultima6/oracle/saveload";
@@ -29,7 +30,7 @@ fn zip_files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -47,7 +48,7 @@ fn oracle_save(dir: &str) -> Option<MemStore> {
     let mut files = BTreeMap::new();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        files.insert(format!("savegame/{name}"), std::fs::read(e.path()).unwrap());
+        files.insert(format!("savegame/{name}"), std::fs::read(e.path()).quiet());
     }
     Some(MemStore { files })
 }
@@ -77,7 +78,7 @@ impl Future for Inject {
             let mut s = self.state.borrow_mut();
             match cmd {
                 Cmd::Save => save(&mut s),
-                Cmd::Restore => restore(&mut s, &self.io).unwrap_or_else(|e| panic!("{e}")),
+                Cmd::Restore => restore(&mut s, &self.io).quiet(),
             }
         }
         self.game.as_mut().poll(cx)
@@ -92,7 +93,7 @@ struct Run {
 impl Run {
     /// Boots `files` as `Engine::game_first` does (seed 0) and runs to the first command prompt.
     fn boot(files: Files) -> Run {
-        let mut state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
+        let mut state = State::new_game(&files).quiet();
         state.rng.seed(0);
         let cmds = Rc::new(RefCell::new(VecDeque::new()));
         let c = Rc::clone(&cmds);
@@ -140,7 +141,7 @@ fn canon(s: &State) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut c = s.clone();
     save(&mut c);
     let blocks = c.objects.blocks.iter().map(|(_, b)| b.to_bytes()).collect();
-    (c.saveload.objlist.unwrap(), blocks)
+    (c.saveload.objlist.quiet(), blocks)
 }
 
 /// Differing objlist bytes per table: (table, number of bytes, first indices within it).
@@ -161,7 +162,7 @@ fn table_diffs(a: &[u8], b: &[u8]) -> Vec<(&'static str, usize, Vec<usize>)> {
 fn records(bytes: &[u8]) -> Vec<[u8; 8]> {
     bytes[2..]
         .chunks_exact(8)
-        .map(|r| r.try_into().unwrap())
+        .map(|r| r.try_into().quiet())
         .collect()
 }
 
@@ -176,8 +177,8 @@ fn block_diffs(a: &[Vec<u8>], b: &[Vec<u8>]) -> Vec<(String, usize, usize)> {
 #[test]
 fn decode_agrees_with_the_formats_parser() {
     let Some(files) = zip_files() else { return };
-    let raw = files.get(OBJLIST_FILE).unwrap();
-    let list = ObjList::parse(raw).unwrap();
+    let raw = files.get(OBJLIST_FILE).quiet();
+    let list = ObjList::parse(raw).quiet();
     let mut s = State::empty();
     decode(&mut s, raw);
     let (o, a) = (&s.objects, &s.actors);
@@ -258,10 +259,6 @@ fn decode_agrees_with_the_formats_parser() {
         z: w(4) as u8,
     };
     assert_same!(encode(&s), raw[..OBJLIST_LEN], "the objlist written back");
-    eprintln!(
-        "shipped objlist {} bytes; the game reads and writes {OBJLIST_LEN}",
-        raw.len()
-    );
 }
 
 /// The surface block holding the leader's superchunk (128 × 128 tiles a block, x then y): in a
@@ -274,7 +271,7 @@ fn leader_block(s: &State) -> usize {
 /// The shipped party roster: the actor numbers at objlist 0x0FE0, as many as the size at 0x0FF0
 /// (formats.md §6), read from the raw file.
 fn roster(files: &Files) -> Vec<usize> {
-    let raw = files.get(OBJLIST_FILE).unwrap();
+    let raw = files.get(OBJLIST_FILE).quiet();
     let n = usize::from(raw[0x0FF0]).min(16);
     raw[0x0FE0..0x0FE0 + n]
         .iter()
@@ -284,9 +281,9 @@ fn roster(files: &Files) -> Vec<usize> {
 
 /// The new-game files the port boots from: objlist and the 69 blocks.
 fn shipped(files: &Files) -> (Vec<u8>, Vec<Vec<u8>>) {
-    let objlist = files.get(OBJLIST_FILE).unwrap()[..OBJLIST_LEN].to_vec();
+    let objlist = files.get(OBJLIST_FILE).quiet()[..OBJLIST_LEN].to_vec();
     let blocks = (0..BLOCK_COUNT)
-        .map(|i| files.get(&block_file(i)).unwrap().to_vec())
+        .map(|i| files.get(&block_file(i)).quiet().to_vec())
         .collect();
     (objlist, blocks)
 }
@@ -321,7 +318,7 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
     let mut run = Run::boot(files);
     run.command(Cmd::Save);
     let s = run.state();
-    let new_list = s.saveload.objlist.clone().unwrap();
+    let new_list = s.saveload.objlist.clone().quiet();
     let new_blocks: Vec<Vec<u8>> = s.objects.blocks.iter().map(|(_, b)| b.to_bytes()).collect();
     let mut why = BTreeMap::new();
     for (off, len, name) in TABLES {
@@ -330,11 +327,12 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
             if x != y {
                 let w = boot_change(name, i, x, y, &party);
                 assert!(w.is_some(), "{name} byte {i:#x} changed, unexplained");
-                *why.entry(w.unwrap()).or_insert(0) += 1;
+                *why.entry(w.quiet()).or_insert(0) += 1;
             }
         }
     }
-    eprintln!("objlist bytes changed by the boot: {why:?}");
+    let reasons: Vec<&str> = why.keys().copied().collect();
+    eprintln!("objlist bytes changed by the boot, for: {reasons:?}");
     // The Save commits the blocks of the region: the 2 × 2 surface blocks the window spans,
     // the leader's among them.
     let committed: Vec<usize> = (0..BLOCK_COUNT)
@@ -342,7 +340,7 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
         .collect();
     let fight = leader_block(&s);
     let (xs, ys): (Vec<usize>, Vec<usize>) = committed.iter().map(|&i| (i % 8, i / 8)).unzip();
-    let (x0, y0) = (*xs.iter().min().unwrap(), *ys.iter().min().unwrap());
+    let (x0, y0) = (*xs.iter().min().quiet(), *ys.iter().min().quiet());
     let square: Vec<usize> = [(0, 0), (1, 0), (0, 1), (1, 1)]
         .iter()
         .map(|(dx, dy)| (y0 + dy) * 8 + x0 + dx)
@@ -351,19 +349,14 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
         .collect();
     assert!(
         committed.iter().all(|&i| i < 64) && committed == square,
-        "{} committed blocks, not a 2 x 2 square of the surface",
-        committed.len()
+        "the committed blocks are not a 2 x 2 square of the surface"
     );
     assert!(committed.contains(&fight), "the leader's block committed");
-    for (name, a, b) in block_diffs(&old_blocks, &new_blocks) {
-        let i = (0..BLOCK_COUNT).find(|&i| block_file(i) == name).unwrap();
+    for (name, _, _) in block_diffs(&old_blocks, &new_blocks) {
+        let i = (0..BLOCK_COUNT).find(|&i| block_file(i) == name).quiet();
         let (mut ra, mut rb) = (records(&old_blocks[i]), records(&new_blocks[i]));
         if i == fight {
             // The egg hatched (its status) and armed its creatures (their gear).
-            eprintln!(
-                "the leader's block: {a} -> {b} records, gear {}",
-                gear_records(&rb)
-            );
             assert!(gear_records(&rb) > 0, "the hatched creatures' gear");
             assert_same!(
                 strip_fight(ra),
@@ -372,11 +365,7 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
             );
             continue;
         }
-        let moved: Vec<usize> = (0..ra.len()).filter(|&n| ra[n] != rb[n]).collect();
-        eprintln!(
-            "{name}: {a} records, {} in another order: {moved:?}",
-            moved.len()
-        );
+        eprintln!("{name}: the same records in another order");
         ra.sort();
         rb.sort();
         assert_same!(ra, rb, "{name}: the same records");
@@ -386,9 +375,11 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
 
 /// Prints how `got` differs from `want` (objlist tables, tail bytes, block records); returns
 /// the number of differing block files.
+///
+/// Content-free: table names, byte and record indices only (no counts of the user's records).
 fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8>>)) -> usize {
-    for d in table_diffs(&want.0, &got.0) {
-        eprintln!("{what}: objlist {d:?}");
+    for (table, _, first) in table_diffs(&want.0, &got.0) {
+        eprintln!("{what}: objlist {table} differs, first at {first:x?}");
     }
     let tail: Vec<usize> = (0..0x82)
         .filter(|&i| want.0.get(0x1BF1 + i) != got.0.get(0x1BF1 + i))
@@ -398,12 +389,16 @@ fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8
     }
     let diffs = block_diffs(&want.1, &got.1);
     for (name, a, b) in &diffs {
-        let i = (0..BLOCK_COUNT).find(|&i| &block_file(i) == name).unwrap();
+        let i = (0..BLOCK_COUNT).find(|&i| &block_file(i) == name).quiet();
         let (ra, rb) = (records(&want.1[i]), records(&got.1[i]));
         let (mut sa, mut sb) = (ra.clone(), rb.clone());
         sa.sort();
         sb.sort();
-        eprintln!("{what}: {name} records {a} -> {b}, same set: {}", sa == sb);
+        let same_count = a == b;
+        eprintln!(
+            "{what}: {name} differs; the same record count {same_count}, the same set {}",
+            sa == sb
+        );
         for (n, (x, y)) in ra
             .iter()
             .zip(&rb)
@@ -422,9 +417,9 @@ fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8
 fn store_files(store: &MemStore) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut f = Files::default();
     f.overlay("s", store.files.clone());
-    let objlist = f.get(OBJLIST_FILE).unwrap().to_vec();
+    let objlist = f.get(OBJLIST_FILE).quiet().to_vec();
     let blocks = (0..BLOCK_COUNT)
-        .map(|i| f.get(&block_file(i)).unwrap().to_vec())
+        .map(|i| f.get(&block_file(i)).quiet().to_vec())
         .collect();
     (objlist, blocks)
 }
@@ -514,17 +509,17 @@ fn the_ports_start_save_against_the_originals() {
     let (Some(boot), Some(saved)) = (oracle_save("start-boot"), oracle_save("start-saved")) else {
         return;
     };
-    attach(&mut files, &boot).unwrap();
+    attach(&mut files, &boot).quiet();
     let party = roster(&files);
     let mut run = Run::boot(files);
     run.command(Cmd::Save);
     let s = run.state();
     let fight = leader_block(&s);
     let mut got_store = boot.clone();
-    got_store.store(&changed_since(&s, 0)).unwrap();
+    got_store.store(&changed_since(&s, 0)).quiet();
     let want = store_files(&saved);
     let got = store_files(&got_store);
-    assert_eq!(got.0.len(), want.0.len(), "objlist length");
+    assert!(got.0.len() == want.0.len(), "objlist length");
     report("port vs original", &want, &got);
     for (off, len, name) in TABLES {
         for i in 0..len {
@@ -545,9 +540,6 @@ fn the_ports_start_save_against_the_originals() {
         // and the egg's status come from the RNG (the port's seed is not the oracle's), and the
         // container indices after them shift; both sides arm their creatures.
         let (wg, gg) = (gear_records(&w), gear_records(&g));
-        eprintln!(
-            "the leader's block: the creatures' gear: {wg} records in the original, {gg} in the port"
-        );
         assert!(
             wg > 0 && gg > 0,
             "both sides' creatures carry gear (0x13121a)"
@@ -566,16 +558,15 @@ fn the_ports_start_save_against_the_originals() {
 #[test]
 fn a_saved_party_size_past_the_roster_boots_clamped() {
     let Some(mut files) = zip_files() else { return };
-    let mut f = files.get(OBJLIST_FILE).unwrap().to_vec();
+    let mut f = files.get(OBJLIST_FILE).quiet().to_vec();
     f[0x0FF0] = 17;
     let store = MemStore {
         files: BTreeMap::from([(OBJLIST_FILE.to_string(), f)]),
     };
-    attach(&mut files, &store).unwrap();
+    attach(&mut files, &store).quiet();
     let mut run = Run::boot(files);
-    assert_eq!(
-        run.e.state().actors.party.size,
-        15,
+    assert!(
+        run.e.state().actors.party.size == 15,
         "clamped at the vessel slot"
     );
     let hour = run.e.state().actors.calendar.hour;
@@ -583,8 +574,7 @@ fn a_saved_party_size_past_the_roster_boots_clamped() {
     assert!(run.at_prompt(), "a pass turn comes back to the prompt");
     let mut s = run.state();
     crate::actors::clock::tick(&mut s, 60);
-    assert_eq!(s.actors.calendar.hour, (hour + 1) % 24, "an hour on");
-    eprintln!("booted: party size {}, hour {hour}", s.actors.party.size);
+    assert!(s.actors.calendar.hour == (hour + 1) % 24, "an hour on");
 }
 
 /// The original's own save boots in the port, and the port's save of it is the original's
@@ -596,14 +586,14 @@ fn the_originals_save_loads_and_saves_like_the_original() {
         return;
     };
     let raw = &saved.files[OBJLIST_FILE];
-    assert_eq!(raw.len(), OBJLIST_LEN);
+    assert!(raw.len() == OBJLIST_LEN);
     // The temporary actors the save holds: a type in the low 10 bits of the BE type word at
     // objlist 0x400 + 2 * actor (formats.md §6), read from the saved file.
     let held: Vec<usize> = (FIRST_TEMP_ACTOR as usize..ACTOR_SLOTS)
         .filter(|&a| u16::from_be_bytes([raw[0x400 + 2 * a], raw[0x401 + 2 * a]]) & 0x3ff != 0)
         .collect();
     assert!(!held.is_empty(), "the original saved its hatched creatures");
-    attach(&mut files, &saved).unwrap();
+    attach(&mut files, &saved).quiet();
     let mut run = Run::boot(files);
     {
         let s = run.e.state();
@@ -611,13 +601,12 @@ fn the_originals_save_loads_and_saves_like_the_original() {
             .iter()
             .filter(|&&a| s.objects.type_frame[a] & 0x3ff != 0)
             .count();
-        eprintln!("loaded: {} temporary actors saved, {back} back", held.len());
-        assert_eq!(back, held.len(), "the saved creatures are back");
+        assert!(back == held.len(), "the saved creatures are back");
     }
     run.command(Cmd::Save);
     let s = run.state();
     let mut got_store = saved.clone();
-    got_store.store(&changed_since(&s, 0)).unwrap();
+    got_store.store(&changed_since(&s, 0)).quiet();
     let want = store_files(&resaved);
     let got = store_files(&got_store);
     report("port re-save vs original re-save", &want, &got);
@@ -659,7 +648,7 @@ fn transcript(s: &State) -> Vec<String> {
 
 impl Run {
     fn leader_at(&self) -> u6_formats::position::Position {
-        self.e.state().leader_position().unwrap()
+        self.e.state().leader_position().quiet()
     }
 
     /// Presses arrows until the party has stepped `n` times (a blocked direction is one turn;
@@ -692,8 +681,8 @@ impl Run {
     fn talk(&mut self) -> u16 {
         let (target, dx, dy) = {
             let s = self.e.state();
-            let c = s.leader_position().unwrap();
-            let leader = s.actors.party.leader().unwrap().0;
+            let c = s.leader_position().quiet();
+            let leader = s.actors.party.leader().quiet().0;
             let party: Vec<u16> = s.actors.party.active().map(|a| a.0).collect();
             let mut best: Option<(bool, i32, u16, i32, i32)> = None;
             for a in 1..0xe0u16 {
@@ -868,13 +857,13 @@ fn walk_talk_save_restore() {
     let npc = run.talk();
     let lines = transcript(&run.e.state());
     eprintln!(
-        "walked {start:?} -> {walked:?} with {} keys; talked to {npc:#x}",
-        keys.len()
+        "walked with {} keys (moved {}); talked to actor slot {npc:#x}",
+        keys.len(),
+        walked != start
     );
     assert!(
         lines.iter().any(|l| l.contains("bye")),
-        "no line holds the typed bye ({} lines)",
-        lines.len()
+        "no line holds the typed bye"
     );
     run.command(Cmd::Save);
     let saved = run.state();
@@ -889,16 +878,17 @@ fn walk_talk_save_restore() {
         "the region's four superchunks at least"
     );
     let want = canon(&saved);
-    let written = saved.saveload.objlist.clone().unwrap();
-    eprintln!("re-save after save: {:?}", table_diffs(&written, &want.0));
+    let written = saved.saveload.objlist.clone().quiet();
+    let tables: Vec<&str> = table_diffs(&written, &want.0).iter().map(|d| d.0).collect();
+    eprintln!("re-save after save: tables differing {tables:?}");
 
     // 1. A fresh engine booted from the stored save.
     let mut store = MemStore::default();
     let mut sync = SaveSync::default();
-    assert_eq!(sync.flush(&run.e, &mut store).unwrap(), 1 + committed.len());
-    assert_eq!(sync.flush(&run.e, &mut store).unwrap(), 0, "nothing new");
+    assert!(sync.flush(&run.e, &mut store).quiet() == 1 + committed.len());
+    assert!(sync.flush(&run.e, &mut store).quiet() == 0, "nothing new");
     let mut f = files.clone();
-    attach(&mut f, &store).unwrap();
+    attach(&mut f, &store).quiet();
     let fresh = Run::boot(f);
     let got = canon(&fresh.state());
     let diffs = objlist_diffs_but_frames(&want.0, &got.0);
@@ -908,20 +898,19 @@ fn walk_talk_save_restore() {
         state_diffs(&saved, &fresh.state())
     );
     assert!(diffs.is_empty());
-    assert_eq!(
-        block_diffs(&want.1, &got.1),
-        [],
+    assert!(
+        block_diffs(&want.1, &got.1).is_empty(),
         "fresh engine: block files"
     );
-    assert_eq!(fresh.leader_at(), walked);
+    assert!(fresh.leader_at() == walked);
 
     // 2. Restore in the same engine after walking on.
     run.walk(3);
-    assert_ne!(run.leader_at(), walked);
+    assert!(run.leader_at() != walked);
     run.command(Cmd::Restore);
     let restored = run.state();
-    assert_eq!(restored.objects.save_mode, 0x20, "save mode play");
-    assert_eq!(run.leader_at(), walked);
+    assert!(restored.objects.save_mode == 0x20, "save mode play");
+    assert!(run.leader_at() == walked);
     let got = canon(&restored);
     let diffs = objlist_diffs_but_frames(&want.0, &got.0);
     eprintln!("restore: objlist bytes differing beyond actor frames: {diffs:x?}");
@@ -930,6 +919,9 @@ fn walk_talk_save_restore() {
         state_diffs(&saved, &restored)
     );
     assert!(diffs.is_empty());
-    assert_eq!(block_diffs(&want.1, &got.1), [], "restore: block files");
+    assert!(
+        block_diffs(&want.1, &got.1).is_empty(),
+        "restore: block files"
+    );
     assert!(run.at_prompt());
 }

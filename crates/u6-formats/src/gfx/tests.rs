@@ -2,6 +2,7 @@
 //! when the unpacked game files are absent.
 
 use super::*;
+use u6_testkit::Quiet;
 
 /// One synthetic map record: offset, first row, per-row words for planes 0..4, anim ref.
 type MapRec<'a> = (usize, u8, &'a [[u16; PLANES]], Option<u16>);
@@ -360,22 +361,22 @@ fn gfx_real_data_all_tiles_and_contact_sheet() {
         eprintln!("skipped: {UNPACKED} not present");
         return;
     }
-    let read = |p: &str| std::fs::read(root.join(p)).unwrap();
+    let read = |p: &str| std::fs::read(root.join(p)).quiet();
     let set = decode_tiles(
         &read("d2/DATA1/maptiles.ega"),
         &read("d2/DATA1/objtiles.ega"),
         &read("d2/DATA1/tileindx.ega"),
         &read("d2/DATA1/masktype.ega"),
     )
-    .unwrap();
-    let am = AnimMask::parse(&read("d2/DATA1/animmask.ega")).unwrap();
-    let pal = palette(&read("d1/INSTALL/game")).unwrap();
+    .quiet();
+    let am = AnimMask::parse(&read("d2/DATA1/animmask.ega")).quiet();
+    let pal = palette(&read("d1/INSTALL/game")).quiet();
 
-    assert_eq!(set.tiles.len(), TILE_COUNT);
+    assert!(set.tiles.len() == TILE_COUNT);
     // The kinds and the overlays against the user's masktype bytes, decoded here by the LZW
     // decoder (round-trip tested on its own) and read without the tile decoder: `& 3` = 0 map,
     // 3 full, 2 left half, 1 right half; `& 4` an overlay.
-    let mt = crate::lzw::decode(&read("d2/DATA1/masktype.ega")).unwrap();
+    let mt = crate::lzw::decode(&read("d2/DATA1/masktype.ega")).quiet();
     let kinds: Vec<TileKind> = set.tiles.iter().map(|t| t.kind).collect();
     let raw_kinds: Vec<TileKind> = mt
         .iter()
@@ -388,9 +389,9 @@ fn gfx_real_data_all_tiles_and_contact_sheet() {
         .collect();
     u6_testkit::assert_same!(kinds, raw_kinds, "the tile kinds by masktype");
     let animated: Vec<&Tile> = set.tiles.iter().filter(|t| t.anim_ref.is_some()).collect();
-    assert_eq!(animated.len(), mt.iter().filter(|&&m| m & 4 != 0).count());
+    assert!(animated.len() == mt.iter().filter(|&&m| m & 4 != 0).count());
     for t in &animated {
-        let ov = am.overlay(t.anim_ref.unwrap()).unwrap();
+        let ov = am.overlay(t.anim_ref.quiet()).quiet();
         // Overlay bits land only on pixels the tile itself draws.
         for f in 0..ANIM_FRAMES {
             for (i, bits) in ov.frames[f].iter().enumerate() {

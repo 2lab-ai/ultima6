@@ -407,8 +407,8 @@ mod tests {
         for (i, n) in ["Abcdef", "Ghijk", "Lmnopqr", "Stuv"].iter().enumerate() {
             d[PARTY_NAMES + i * 14..][..n.len()].copy_from_slice(n.as_bytes());
         }
-        d[PARTY_ROSTER..PARTY_ROSTER + 4].copy_from_slice(&[1, 2, 3, 4]);
-        d[PARTY_SIZE] = 4;
+        d[PARTY_ROSTER..PARTY_ROSTER + 3].copy_from_slice(&[1, 7, 9]);
+        d[PARTY_SIZE] = 3;
         d[CLOCK..CLOCK + 4].copy_from_slice(&[5, 10, 3, 9]);
         d[YEAR..YEAR + 2].copy_from_slice(&[0x01, 0x2c]);
         put_be(&mut d, MOONSTONES, 100);
@@ -438,10 +438,7 @@ mod tests {
         );
         assert_eq!((o.actors[7].base_obj_n, o.actors[7].base_frame), (387, 2));
         let members: Vec<_> = o.party.members().collect();
-        assert_eq!(
-            members,
-            [(1, "Abcdef"), (2, "Ghijk"), (3, "Lmnopqr"), (4, "Stuv")]
-        );
+        assert_eq!(members, [(1, "Abcdef"), (7, "Ghijk"), (9, "Lmnopqr")]);
         assert_eq!(o.party.names[4], "");
         assert_eq!(
             (

@@ -1226,6 +1226,7 @@ dependencies = [
  "png",
  "u6-core",
  "u6-intake",
+ "u6-testkit",
 ]
 
 [[package]]

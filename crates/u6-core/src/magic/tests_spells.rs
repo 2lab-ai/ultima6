@@ -18,12 +18,13 @@ use crate::main_loop::flush_prints;
 use crate::objects::Slot;
 use crate::state::State;
 use std::cell::RefCell;
+use u6_testkit::Quiet;
 
 type Setup = Box<dyn FnOnce(&mut State)>;
 
 /// The incantation letters of `spell` from the user's `game`.
 fn word(files: &Files, spell: u8) -> String {
-    let s = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    let s = State::new_game(files).quiet();
     let w = s.magic.tables.word(usize::from(spell));
     w.iter().map(|&b| char::from(b)).collect()
 }
@@ -39,7 +40,7 @@ fn cast(files: &Files, spell: u8, setup: Setup, after: &str) -> Engine {
 /// [`cast`] without waiting for the end.
 fn start(files: &Files, spell: u8, setup: Setup, after: &str) -> Engine {
     let input = format!("{}\n{after}", word(files, spell));
-    let state = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    let state = State::new_game(files).quiet();
     let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {
         boot(&st, &io).await;
         {
@@ -70,7 +71,7 @@ fn finish(e: &mut Engine) {
 /// 0x11abd0 runs it for a target picked before the book), after `setup` sets the selection
 /// and the location the way 0x1225c0 would; `after` is typed one key per tick.
 fn dispatch_chosen(files: &Files, spell: u16, setup: Setup, after: &str) -> Engine {
-    let state = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    let state = State::new_game(files).quiet();
     let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {
         boot(&st, &io).await;
         setup(&mut st.borrow_mut());
@@ -101,7 +102,7 @@ fn place(s: &mut State, a: Slot, x: u16, y: u16) {
 
 /// The start state's view centre (the leader's place, read from the user's files).
 fn start_centre(files: &Files) -> (u16, u16, u16) {
-    let c = State::new_game(files).unwrap().map.centre;
+    let c = State::new_game(files).quiet().map.centre;
     (c.x, c.y, u16::from(c.z))
 }
 
@@ -139,7 +140,7 @@ fn at(s: &State, a: Slot) -> (u16, u16) {
 
 fn frame(e: &Engine, name: &str) {
     let path = format!("/tmp/claude-501/m2-magic2-{name}.png");
-    std::fs::write(&path, png(e.frame())).unwrap();
+    std::fs::write(&path, png(e.frame())).quiet();
     eprintln!("  frame {path}");
 }
 
@@ -170,20 +171,9 @@ fn mass_sleep_on_a_group() {
         .into_iter()
         .filter(|&a| s.actors.attrs.status[a as usize] & 4 != 0)
         .collect();
-    eprintln!("  asleep: {asleep:?}");
-    for a in [6usize, 7, 8] {
-        eprintln!(
-            "  actor {a}: tf {:#x} at {:?} status {:#x} int {}",
-            s.objects.type_frame[a],
-            s.objects.location[a],
-            s.actors.attrs.status[a],
-            s.actors.attrs.intelligence[a]
-        );
-    }
-    assert_eq!(asleep, [6, 7, 8], "{tail:?}");
-    assert_eq!(
-        s.actors.attrs.status[1] & 4,
-        0,
+    assert!(asleep == [6, 7, 8], "{tail:?}");
+    assert!(
+        s.actors.attrs.status[1] & 4 == 0,
         "the caster is outside the blast"
     );
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
@@ -208,7 +198,6 @@ fn fire_field_then_dispel_field() {
         }
         o
     };
-    eprintln!("  field object {field}");
     assert!(field >= 0x100, "a fire field one left, one up: {tail:?}");
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
     let before = e.state().clone();
@@ -220,7 +209,7 @@ fn fire_field_then_dispel_field() {
     let e = dispatch_chosen(&files, 0x21, setup, "");
     let tail = show("Dispel Field on it", &e);
     let s = e.state();
-    assert_eq!(s.objects.type_frame[field as usize], 0, "{tail:?}");
+    assert!(s.objects.type_frame[field as usize] == 0, "{tail:?}");
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
@@ -238,18 +227,13 @@ fn conjure_makes_a_creature() {
             [0x173, 0x156, 0x169, 0x158, 0x166].contains(&(s.objects.type_frame[a] & 0x3ff))
         })
         .collect();
-    eprintln!("  conjured: {made:x?}");
     let &[a] = made.as_slice() else {
-        panic!("one conjured creature: {made:?} {tail:?}");
+        panic!("not one conjured creature");
     };
     let (x, y) = at(&s, a as Slot);
-    eprintln!(
-        "  at ({x}, {y}), status {:#x}, worktype {}",
-        s.actors.attrs.status[a], s.actors.worktype[a]
-    );
     assert!(within((x, y), c, 5), "within 5 of the caster");
-    assert_eq!(s.actors.attrs.status[a] & 0x60, 0x40);
-    assert_eq!(s.actors.worktype[a], 8);
+    assert!(s.actors.attrs.status[a] & 0x60 == 0x40);
+    assert!(s.actors.worktype[a] == 8);
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
@@ -263,7 +247,7 @@ fn telekinesis_pushes_an_object() {
         // The first type with a weight byte that is not a crank or a lever.
         let kind = (1..0x100u16)
             .find(|&k| s.tables.tileflags.weight[usize::from(k)] != 0 && k != 0x120 && k != 0x10c)
-            .unwrap();
+            .quiet();
         let (x, y) = off(s, 2, 0);
         let z = u16::from(s.map.centre.z);
         let o = crate::objects::create_on_map(&mut s.objects, kind, 0, 1, x, y, z);
@@ -275,11 +259,6 @@ fn telekinesis_pushes_an_object() {
     let tail = show("Telekinesis on an object two east, north", &e);
     let s = e.state();
     let o = s.ui.input.selection;
-    eprintln!(
-        "  object {o} type {:#x} now at {:?}",
-        s.objects.kind(o),
-        at(&s, o)
-    );
     assert!(at(&s, o) == (c.0 + 2, c.1 - 1), "one tile north: {tail:?}");
     assert!(
         tail.has(&text_at(e.io(), super::items::MSG_DIRECTION)),
@@ -301,11 +280,7 @@ fn gate_travel_to_a_moonstone() {
         s.actors.tail_word(0x2e),
     );
     let c = s.map.centre;
-    eprintln!(
-        "  moonstone 0 {stone:?}, centre now {c:?}, avatar {:?}",
-        s.objects.location[1]
-    );
-    assert_eq!((c.x, c.y, u16::from(c.z)), stone, "{tail:?}");
+    assert!((c.x, c.y, u16::from(c.z)) == stone, "{tail:?}");
     assert!(
         tail.has(&text_at(e.io(), super::travel::MSG_TO_PHASE)),
         "{tail:?}"
@@ -329,14 +304,10 @@ fn wizard_eye_moves_the_view() {
         let eyes: Vec<usize> = (0x100..crate::objects::OBJECT_SLOTS)
             .filter(|&o| s.objects.type_frame[o] == 0x34)
             .collect();
-        eprintln!(
-            "  out: centre {c:?}, reveal_all {}, eye objects {eyes:?}",
-            s.map.reveal_all
-        );
         let east = (c0.0 + 3, c0.1);
         assert!((c.x, c.y) == east, "three steps east");
-        assert_eq!(s.map.reveal_all, 1);
-        assert_eq!(eyes.len(), 1);
+        assert!(s.map.reveal_all == 1);
+        assert!(eyes.len() == 1);
         assert!(at(&s, eyes[0] as Slot) == east, "the eye at the centre");
     }
     frame(&e, "wizard-eye-out");
@@ -351,7 +322,7 @@ fn wizard_eye_moves_the_view() {
         (s.map.centre.x, s.map.centre.y) == (c0.0, c0.1),
         "the centre back on the caster"
     );
-    assert_eq!(s.map.reveal_all, 0);
+    assert!(s.map.reveal_all == 0);
     assert!((0x100..crate::objects::OBJECT_SLOTS).all(|o| s.objects.type_frame[o] != 0x34));
     assert!(tail.has(&msg(&e, Msg::Done)), "{tail:?}");
 }
@@ -364,13 +335,12 @@ fn tremor_hurts_evil_actors() {
         s.actors.attrs.status[7] = (s.actors.attrs.status[7] & 0x9f) | 0x20;
         s.actors.attrs.hp[7] = 60;
     });
-    let before = State::new_game(&files).unwrap().actors.attrs.hp;
+    let before = State::new_game(&files).quiet().actors.attrs.hp;
     let e = cast(&files, 0x79, setup, "");
     let tail = show("Tremor", &e);
     let s = e.state();
-    eprintln!("  actor 7 hp 60 -> {}", s.actors.attrs.hp[7]);
     assert!((30..60).contains(&s.actors.attrs.hp[7]), "1..30 damage");
-    let start = State::new_game(&files).unwrap();
+    let start = State::new_game(&files).quiet();
     let others: Vec<usize> = (1..0xe0)
         .filter(|&a| a != 7 && start.objects.type_frame[a] != 0 && !evil(&start, a))
         .collect();
@@ -400,7 +370,6 @@ fn locate_prints_the_degrees() {
         + &ns
         + &printed(io, FMT_LONG, &[&long.abs().to_string()])
         + &ew;
-    eprintln!("  want {} characters, degrees ({lat}, {long})", want.len());
     assert!(tail.has(&want), "{tail:?}");
 }
 
@@ -409,10 +378,6 @@ fn locate_prints_the_degrees() {
 #[test]
 fn armageddon_leaves_two() {
     let Some(files) = files() else { return };
-    let before = State::new_game(&files).unwrap();
-    let alive_before = (0..0xffusize)
-        .filter(|&a| before.objects.type_frame[a] != 0)
-        .count();
     let e = cast(&files, 0x70, Box::new(|_| {}), "");
     show("Armageddon", &e);
     frame(&e, "armageddon");
@@ -420,10 +385,9 @@ fn armageddon_leaves_two() {
     let left: Vec<usize> = (0..0xff)
         .filter(|&a| s.objects.type_frame[a] != 0)
         .collect();
-    eprintln!("  actor slots in use: {alive_before} before, {left:?} after");
-    assert_eq!(left, [1, 5]);
-    assert_eq!(s.actors.party.size, 1);
-    assert_eq!(s.map.flag_7afb, 1);
+    assert!(left == [1, 5]);
+    assert!(s.actors.party.size == 1);
+    assert!(s.map.flag_7afb == 1);
 }
 
 /// Energy Wind (0x62) north from the Avatar to four tiles up (cross-hair four up): actors 6 and
@@ -451,13 +415,11 @@ fn energy_wind_hurts_along_its_path() {
         }
         crate::map::view::update_view(s);
     });
-    let before = State::new_game(&files).unwrap();
+    let before = State::new_game(&files).quiet();
     let e = cast(&files, 0x62, setup, "^^^^\n");
     let tail = show("Energy Wind four up", &e);
     frame(&e, "energy-wind");
     let s = e.state();
-    let hp: Vec<(usize, u8)> = (2..8).map(|a| (a, s.actors.attrs.hp[a])).collect();
-    eprintln!("  hit points after: {hp:?}");
     for a in [6usize, 7] {
         assert!(
             (70..100).contains(&s.actors.attrs.hp[a]),
@@ -491,12 +453,12 @@ fn slime_turns_evil_actors() {
         s.actors.attrs.status[7] = (s.actors.attrs.status[7] & 0x9f) | 0x20;
         dull(s, 7);
     });
-    let start = State::new_game(&files).unwrap();
+    let start = State::new_game(&files).quiet();
     let before = start.objects.type_frame.clone();
     let e = cast(&files, 0x76, setup, "");
     show("Slime", &e);
     let s = e.state();
-    assert_eq!(s.objects.type_frame[7], 0x177);
+    assert!(s.objects.type_frame[7] == 0x177);
     let others: Vec<usize> = (1..0xe0)
         .filter(|&a| a != 7 && before[a] != 0 && !evil(&start, a))
         .collect();
@@ -520,12 +482,11 @@ fn insect_swarm_makes_eight() {
     let swarms: Vec<usize> = (0xe0..0x100)
         .filter(|&a| s.objects.type_frame[a] & 0x3ff == 0x157)
         .collect();
-    eprintln!("  swarms in slots {swarms:x?}");
     assert!(!swarms.is_empty() && swarms.len() <= 8);
     for &a in &swarms {
         let (x, y) = at(&s, a as Slot);
         assert!(within((x, y), c, 5), "a swarm within 5 of the caster");
-        assert_eq!(s.actors.attrs.status[a] & 0x60, 0x40);
+        assert!(s.actors.attrs.status[a] & 0x60 == 0x40);
     }
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
@@ -554,7 +515,6 @@ fn web_covers_the_square() {
             }
         }
     }
-    eprintln!("  webs at {webs:?}");
     assert!(
         webs.contains(&(wx, wy)),
         "a web on the aimed tile: {tail:?}"
@@ -576,7 +536,6 @@ fn wing_strike_hits_a_foe() {
     let tail = show("Wing Strike", &e);
     frame(&e, "wing-strike");
     let s = e.state();
-    eprintln!("  actor 7 hp 60 -> {}", s.actors.attrs.hp[7]);
     assert!((40..60).contains(&s.actors.attrs.hp[7]), "1..20 damage");
     // Dragons of the world (0x19b) lie elsewhere in the loaded region; none is left in view.
     let left: Vec<(usize, (u16, u16))> = (0..crate::objects::OBJECT_SLOTS)
@@ -584,7 +543,6 @@ fn wing_strike_hits_a_foe() {
         .map(|o| (o, at(&s, o as Slot)))
         .filter(|&(_, t)| within(t, c, 6))
         .collect();
-    eprintln!("  0x19b objects in view after: {left:?}");
     assert!(left.is_empty(), "the dragon is gone");
     let none = text_at(e.io(), super::creatures::MSG_NO_FOES);
     assert!(!none.is_empty() && !tail.has(&none), "{tail:?}");
@@ -613,7 +571,6 @@ fn hail_storm_falls() {
     let e = cast(&files, 0x54, setup, "^^^^\n");
     let tail = show("Hail Storm four up", &e);
     let s = e.state();
-    eprintln!("  actor 5 hp 200 -> {}", s.actors.attrs.hp[5]);
     // A stone hit it: hit points lost, or 0xff when it is creature 0x1f (0x1231be).
     let hp = s.actors.attrs.hp[5];
     let hit = if unhurt_kind(&s, 5) {
@@ -636,7 +593,7 @@ fn reappear_brings_back_what_vanished() {
                 let base = s.tables.basetile.base[usize::from(k)];
                 s.tables.tileflags.flags3[usize::from(base)] & 8 != 0
             })
-            .unwrap();
+            .quiet();
         let (x, y) = off(s, 2, 0);
         let z = u16::from(s.map.centre.z);
         let o = crate::objects::create_on_map(&mut s.objects, kind, 0, 1, x, y, z);
@@ -647,8 +604,7 @@ fn reappear_brings_back_what_vanished() {
     let e = dispatch_chosen(&files, 0x19, setup, "");
     show("Vanish", &e);
     let tf = e.state().actors.tail_word(0x22);
-    eprintln!("  vanished type {tf:#x}");
-    assert_ne!(tf, 0);
+    assert!(tf != 0);
     let after = e.state().clone();
     let setup: Setup = Box::new(move |s| {
         *s = after;
@@ -665,6 +621,6 @@ fn reappear_brings_back_what_vanished() {
         o = crate::objects::next_at(&mut s.objects, &s.tables);
     }
     assert!(back, "{tail:?}");
-    assert_eq!(s.actors.tail_word(0x22), 0, "forgotten");
+    assert!(s.actors.tail_word(0x22) == 0, "forgotten");
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }

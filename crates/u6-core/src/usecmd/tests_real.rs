@@ -13,6 +13,7 @@ use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
 use crate::objects::Slot;
 use crate::state::State;
+use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
@@ -21,7 +22,7 @@ fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -30,7 +31,7 @@ fn files() -> Option<Files> {
 }
 
 fn start(files: &Files) -> State {
-    let mut s = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    let mut s = State::new_game(files).quiet();
     crate::main_loop::load_state_tail(&mut s);
     let t = s.ui.tables.clone();
     s.ui.text.main_windows(&t);
@@ -108,11 +109,7 @@ fn use_on(s: State, files: &Files, target: Slot, cell: (i16, i16), keys: &[Input
         };
         e.tick(&input, 16);
     }
-    assert!(
-        e.finished(),
-        "Use did not finish: {} scroll lines",
-        lines_of(&e.state()).len()
-    );
+    assert!(e.finished(), "Use did not finish");
     e
 }
 
@@ -123,7 +120,7 @@ fn save_frame(e: &Engine, name: &str) {
     let mut rgba = Vec::new();
     e.frame().write_rgba(&mut rgba);
     let path = Path::new(&dir).join(format!("{name}.png"));
-    std::fs::write(&path, png(320, 200, &rgba)).unwrap();
+    std::fs::write(&path, png(320, 200, &rgba)).quiet();
     eprintln!("frame: {}", path.display());
 }
 
@@ -188,8 +185,6 @@ fn report(e: &Engine, name: &str, before: usize) -> Vec<String> {
         .skip(before.saturating_sub(1))
         .filter(|l| !l.trim().is_empty())
         .collect();
-    let lens: Vec<usize> = new.iter().map(String::len).collect();
-    eprintln!("[{name}] {} lines, lengths {lens:?}", new.len());
     eprintln!(
         "[{name}] stubs: {:?}",
         e.stub_hits().keys().collect::<Vec<_>>()
@@ -198,31 +193,30 @@ fn report(e: &Engine, name: &str, before: usize) -> Vec<String> {
     new
 }
 
+/// The lookup the cases below use: the map records of each Use type on the start's level come
+/// nearest the start first, and the leader carries objects (what is where stays unprinted: it
+/// is the user's world).
 #[test]
 fn where_the_use_objects_are() {
     let Some(files) = files() else { return };
     let s = start(&files);
     let c = s.map.centre;
-    eprintln!("start {:?} leader {:?}", c, s.actors.party.leader());
+    let dist = |r: &(u16, u16, u8, u8)| r.0.abs_diff(c.x) + r.1.abs_diff(c.y);
     for kind in [
         0x62, 0x5a, 0x7a, 0x81, 0x10c, 0x12c, 0x12a, 0x19c, 0x19e, 0x57, 0x9a, 0xdf, 0x13c,
     ] {
         let r = records(&s, kind, c.x, c.y, c.z);
-        eprintln!(
-            "{kind:#x}: {} on this level, nearest {:?}",
-            r.len(),
-            r.first()
+        assert!(
+            r.windows(2).all(|w| dist(&w[0]) <= dist(&w[1])),
+            "type {kind:#x}: nearest first"
         );
     }
-    let lead = s.actors.party.leader().unwrap().slot();
+    let lead = s.actors.party.leader().quiet().slot();
     let mut o = s.objects.clone();
-    let mut k = crate::objects::first_child(&mut o, lead);
-    let mut inv = Vec::new();
-    while k >= 0 {
-        inv.push((k, o.kind(k), o.place(k)));
-        k = crate::objects::next_child(&mut o);
-    }
-    eprintln!("leader carries {inv:x?}");
+    assert!(
+        crate::objects::first_child(&mut o, lead) >= 0,
+        "the leader carries objects"
+    );
 }
 
 /// The leader's slot.
@@ -245,7 +239,7 @@ fn at(files: &Files, kind: u16, (x, y): (u16, u16)) -> (State, Slot) {
     let mut s = start(files);
     goto(&mut s, x, y + 1, 0);
     let slot = slot_at(&mut s, x, y, 0, kind);
-    assert!(slot >= 0, "no {kind:#x} at ({x}, {y})");
+    assert!(slot >= 0, "no {kind:#x} where the records put it");
     (s, slot)
 }
 
@@ -263,8 +257,8 @@ fn use_on_eight_kinds_of_objects() {
     let n = lines_of(&s).len();
     let e = use_on(s, &files, chest, (pos.0 as i16, pos.1 as i16), &[]);
     report(&e, "1-chest", n);
-    assert_eq!(e.state().objects.kind(chest), 0x62);
-    assert_eq!(frame_of(&e, chest), 0, "the chest is open");
+    assert!(e.state().objects.kind(chest) == 0x62);
+    assert!(frame_of(&e, chest) == 0, "the chest is open");
 
     // 2. A closed door (0x12c, frames 4-7) opens; used again it closes.
     let pos = nearest(&files, 0x12c, Some(5)).expect("a closed door");
@@ -272,30 +266,21 @@ fn use_on_eight_kinds_of_objects() {
     let n = lines_of(&s).len();
     let e = use_on(s, &files, door, (pos.0 as i16, pos.1 as i16), &[]);
     report(&e, "2-door-open", n);
-    assert_eq!(frame_of(&e, door), 1, "frame 5 ^ 4: open");
+    assert!(frame_of(&e, door) == 1, "frame 5 ^ 4: open");
     let s = e.state().clone();
     let n = lines_of(&s).len();
     let e = use_on(s, &files, door, (pos.0 as i16, pos.1 as i16), &[]);
     report(&e, "2-door-close", n);
-    assert_eq!(frame_of(&e, door), 5, "closed again");
+    assert!(frame_of(&e, door) == 5, "closed again");
 
     // 3. A lever (0x10c) flips its frame bit 0 and works the portcullises of its quality.
     let pos = nearest(&files, 0x10c, None).expect("a lever");
     let (s, lever) = at(&files, 0x10c, pos);
     let f0 = s.objects.tf(lever) >> 10;
-    let gates = |s: &State| {
-        s.objects
-            .type_frame
-            .iter()
-            .filter(|&&w| w & 0x3ff == 0x136)
-            .count()
-    };
-    let g0 = gates(&s);
     let n = lines_of(&s).len();
     let e = use_on(s, &files, lever, (pos.0 as i16, pos.1 as i16), &[]);
     let out = report(&e, "3-lever", n);
-    assert_eq!(frame_of(&e, lever), f0 ^ 1);
-    eprintln!("[3-lever] portcullises {g0} -> {}", gates(&e.state()));
+    assert!(frame_of(&e, lever) == f0 ^ 1);
     assert!(!out.is_empty());
 
     // 4. A lit candle (0x7a frame 1) is doused, then lit again.
@@ -304,12 +289,12 @@ fn use_on_eight_kinds_of_objects() {
     let n = lines_of(&s).len();
     let e = use_on(s, &files, candle, (pos.0 as i16, pos.1 as i16), &[]);
     report(&e, "4-candle-douse", n);
-    assert_eq!(frame_of(&e, candle), 0);
+    assert!(frame_of(&e, candle) == 0);
     let s = e.state().clone();
     let n = lines_of(&s).len();
     let e = use_on(s, &files, candle, (pos.0 as i16, pos.1 as i16), &[]);
     report(&e, "4-candle-light", n);
-    assert_eq!(frame_of(&e, candle), 1);
+    assert!(frame_of(&e, candle) == 1);
 
     // 5. A torch (0x5a) on the ground is lit (status 0x80, frame 1, 200 turns); used again it
     // burns out (goes).
@@ -320,15 +305,15 @@ fn use_on_eight_kinds_of_objects() {
     report(&e, "5-torch-light", n);
     {
         let s = e.state();
-        assert_eq!(s.objects.obj_status[torch as usize] & 0x80, 0x80);
-        assert_eq!(s.objects.tf(torch), 0x5a | 1 << 10);
-        assert_eq!(s.objects.qq_of(torch) & 0xff, 200);
+        assert!(s.objects.obj_status[torch as usize] & 0x80 == 0x80);
+        assert!(s.objects.tf(torch) == (0x5a | 1 << 10));
+        assert!(s.objects.qq_of(torch) & 0xff == 200);
     }
     let s = e.state().clone();
     let n = lines_of(&s).len();
     let e = use_on(s, &files, torch, (pos.0 as i16, pos.1 as i16), &[]);
     report(&e, "5-torch-out", n);
-    assert_eq!(e.state().objects.tf(torch), 0, "the torch slot is free");
+    assert!(e.state().objects.tf(torch) == 0, "the torch slot is free");
 
     // 6. Food (0x81) is eaten: one fewer, or gone.
     let pos = nearest(&files, 0x81, None).expect("food");
@@ -339,9 +324,9 @@ fn use_on_eight_kinds_of_objects() {
     report(&e, "6-food", n);
     let after = e.state().objects.tf(food);
     if q0 > 1 && after != 0 {
-        assert_eq!(e.state().objects.qq_of(food) & 0xff, q0 - 1);
+        assert!(e.state().objects.qq_of(food) & 0xff == q0 - 1);
     } else {
-        assert_eq!(after, 0, "eaten");
+        assert!(after == 0, "eaten");
     }
 
     // 7. Board a ship (0x19c), then leave it.
@@ -359,23 +344,15 @@ fn use_on_eight_kinds_of_objects() {
     let e = use_on(s, &files, ship, (pos.0 as i16, pos.1 as i16), &[]);
     report(&e, "7-ship-board", n);
     let s = e.state().clone();
-    assert_eq!(
-        s.actors.party.leader_index, s.actors.party.size,
+    assert!(
+        s.actors.party.leader_index == s.actors.party.size,
         "aboard: the leader index is the party size"
     );
-    assert_eq!(s.objects.kind(0), 0x19c, "actor 0 is the ship");
+    assert!(s.objects.kind(0) == 0x19c, "actor 0 is the ship");
     let c = s.map.centre;
     let n = lines_of(&s).len();
     let e = use_on(s, &files, 0, (c.x as i16, c.y as i16), &[]);
-    let out = report(&e, "7-ship-leave", n);
-    let s = e.state();
-    eprintln!(
-        "[7-ship-leave] leader index {} size {} actor0 type {:#x} lines {}",
-        s.actors.party.leader_index,
-        s.actors.party.size,
-        s.objects.kind(0),
-        out.len()
-    );
+    report(&e, "7-ship-leave", n);
 
     // 8. The orb of the moons (0x57, carried by the Avatar). At the start nobody has told the
     // Avatar how to use it (actor 5's talk flag bit 5, set in actor 5's conversation): the
@@ -388,9 +365,8 @@ fn use_on_eight_kinds_of_objects() {
             orb = crate::objects::next_child(&mut s.objects);
         }
         assert!(orb >= 0, "the Avatar carries the orb");
-        assert_eq!(
-            s.actors.attrs.talk_flags[5] & 0x20,
-            0,
+        assert!(
+            s.actors.attrs.talk_flags[5] & 0x20 == 0,
             "not told at the start"
         );
         if told {
@@ -430,19 +406,17 @@ fn use_on_eight_kinds_of_objects() {
         let name = if told { "8-orb-told" } else { "8-orb-start" };
         report(&e, name, n);
         let gates1 = gates(&e.state());
-        eprintln!("[{name}] red gates {gates0:?} -> {gates1:?}");
         if told {
-            assert_eq!(gates1.len(), gates0.len() + 1, "a moongate appeared");
-            let g = *gates1.iter().find(|g| !gates0.contains(g)).unwrap();
+            assert!(gates1.len() == gates0.len() + 1, "a moongate appeared");
+            let g = *gates1.iter().find(|g| !gates0.contains(g)).quiet();
             let s = e.state();
-            assert_eq!((s.objects.x(g), s.objects.y(g)), (c.x, c.y - 2));
-            assert_eq!(
-                s.objects.qq_of(g) >> 8,
-                3,
+            assert!((s.objects.x(g), s.objects.y(g)) == (c.x, c.y - 2));
+            assert!(
+                s.objects.qq_of(g) >> 8 == 3,
                 "quality = (dy + 2) * 5 + dx + 3"
             );
         } else {
-            assert_eq!(gates1, gates0);
+            assert!(gates1 == gates0);
         }
     }
 }
@@ -470,7 +444,7 @@ fn unported_drawbridge_and_serpent_figure_print_a_line() {
         let mut s = start(&files);
         goto(&mut s, x, y + 1, z);
         let obj = slot_at(&mut s, x, y, z, kind);
-        assert!(obj >= 0, "no {kind:#x} at ({x}, {y}, {z})");
+        assert!(obj >= 0, "no {kind:#x} where the records put it");
         let n = lines_of(&s).len();
         let e = use_on(s, &files, obj, (x as i16, y as i16), &[]);
         let out = report(&e, name, n);
@@ -480,8 +454,7 @@ fn unported_drawbridge_and_serpent_figure_print_a_line() {
         );
         assert!(
             out.len() >= 2,
-            "[{name}] the name, then the fallback's line: {} lines",
-            out.len()
+            "[{name}] the name, then the fallback's line"
         );
     }
 }

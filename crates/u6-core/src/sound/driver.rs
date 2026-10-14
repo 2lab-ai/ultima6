@@ -20,6 +20,13 @@ use crate::files::Files;
 use crate::image::GameImage;
 use crate::state::LoadError;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only trace: every call [`AudioDriver::apply`] carried out on this thread, in order.
+    pub(crate) static APPLIED: std::cell::RefCell<Vec<MedCall>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Chip memory address of the module buffer (A4-0x35cc). 0..16 holds the null sample.
 pub const CHIP_BUFFER: u32 = 0x10;
 /// Chip memory address of the sound-effect module (hunk 28 of `game`).
@@ -82,6 +89,8 @@ impl AudioDriver {
 
     /// Carries out one call.
     pub fn apply(&mut self, call: &MedCall, files: &Files) {
+        #[cfg(test)]
+        APPLIED.with(|t| t.borrow_mut().push(call.clone()));
         match call {
             MedCall::Stop => self.player.stop(&mut self.machine),
             MedCall::Load(name) => {

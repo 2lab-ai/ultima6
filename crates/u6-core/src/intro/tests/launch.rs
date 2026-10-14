@@ -14,6 +14,7 @@ use crate::main_loop::Program;
 use crate::saveload::{MemStore, OBJLIST_FILE, SaveSync, attach, changed_since};
 use crate::sound::med::PLAYING_SONG;
 use crate::sound::{CHIP_BUFFER, MODULE_BUFFER};
+use u6_testkit::Quiet;
 use u6_testkit::assert_same;
 
 /// Image address of the message `game` prints when the save holds no character (main pushes
@@ -27,17 +28,14 @@ fn no_character(r: &Run) -> String {
     let msg = String::from_utf8_lossy(&msg);
     let msg = msg.trim();
     let head = msg.rsplit_once(' ').map_or(msg, |(head, _)| head);
-    assert!(
-        head.len() > 8,
-        "the message is in game ({} bytes)",
-        head.len()
-    );
+    assert!(head.len() > 8, "the message is in game");
     head.to_string()
 }
 
-/// The size of the message scroll, for failure messages (the text itself is the game's).
-fn lines(r: &Run) -> String {
-    format!("{} message lines", r.e.state().ui.messages.len())
+/// The failure note for a check of the message scroll (its lines and their count are the
+/// game's, so the note names the scroll only).
+fn lines(_: &Run) -> String {
+    "the message scroll".to_string()
 }
 
 fn program(r: &Run) -> Program {
@@ -81,20 +79,20 @@ fn journey_onward_without_a_character_says_so_then_u_runs_again_and_creates_one(
     let Some(files) = files() else { return };
     let mut r = Run::launcher(files, 0);
     r.tick(1);
-    assert_eq!(program(&r), Program::U, "the launcher runs u first");
+    assert!(program(&r) == Program::U, "the launcher runs u first");
     to_menu(&mut r);
     r.keys(&[Key::Char('j')], 200);
-    assert_eq!(program(&r), Program::Game, "Journey Onward starts game");
+    assert!(program(&r) == Program::Game, "Journey Onward starts game");
     assert!(said(&r).contains(&no_character(&r)), "{}", lines(&r));
     assert!(!r.e.finished());
     // A key: game exits with code 0, the launcher's state 0 runs u again from its opening.
     r.keys(&[Key::Space], 30);
-    assert_eq!(program(&r), Program::U);
+    assert!(program(&r) == Program::U);
     assert!(!r.e.finished());
     // The second u makes a character; the second game (a new process) plays it.
     to_menu(&mut r);
     create_from_menu(&mut r, |_, _| {});
-    assert_eq!(program(&r), Program::Game);
+    assert!(program(&r) == Program::Game);
     assert!(to_prompt(&mut r, 600), "the game reaches its prompt");
     assert_same!(
         leader_name(&r),
@@ -102,12 +100,13 @@ fn journey_onward_without_a_character_says_so_then_u_runs_again_and_creates_one(
         "the leader is the created character"
     );
     let s = r.e.state();
-    assert_eq!(s.actors.attrs.level[1], 3);
-    assert_ne!(s.actors.objlist_tail[0x81], 0, "portrait byte");
+    assert!(s.actors.attrs.level[1] == 3);
+    assert!(s.actors.objlist_tail[0x81] != 0, "portrait byte");
     let hits = r.e.stub_hits();
     assert!(
         hits.keys().all(|k| k.starts_with("u ")),
-        "only u's declared seams: {hits:?}"
+        "only u's declared seams: {:?}",
+        hits.keys().collect::<Vec<_>>()
     );
 }
 
@@ -115,7 +114,7 @@ fn journey_onward_without_a_character_says_so_then_u_runs_again_and_creates_one(
 /// writes a few bytes of the module as it plays).
 fn plays(r: &Run, name: &str) -> bool {
     let Some(sp) = &r.speaker else { return false };
-    let file = r.e.io().files().get(name).unwrap();
+    let file = r.e.io().files().get(name).quiet();
     let n = file.len().min(MODULE_BUFFER);
     let at = CHIP_BUFFER as usize;
     let buf = &sp.driver.machine.chip[at..at + n];
@@ -132,7 +131,7 @@ fn the_songs_of_u_and_game_reach_the_hosts_audio_across_a_relaunch() {
     let Some(files) = files() else { return };
     let mut r = Run::launcher(files, 0).with_speaker();
     let song = |r: &Run, n: usize| {
-        let s = crate::intro::state_for(r.e.io().files()).unwrap();
+        let s = crate::intro::state_for(r.e.io().files()).quiet();
         String::from_utf8_lossy(&s.exe.song_names[n]).into_owned()
     };
     r.tick(30);
@@ -147,11 +146,11 @@ fn the_songs_of_u_and_game_reach_the_hosts_audio_across_a_relaunch() {
     r.tick(60);
     let menu = r.peak();
     r.keys(&[Key::Char('j')], 200);
-    assert_eq!(program(&r), Program::Game);
-    let sp = r.speaker.as_ref().unwrap();
+    assert!(program(&r) == Program::Game);
+    let sp = r.speaker.as_ref().quiet();
     assert!(sp.driver.player.module.is_none(), "u stopped the player");
     r.keys(&[Key::Space], 30);
-    assert_eq!(program(&r), Program::U);
+    assert!(program(&r) == Program::U);
     r.tick(30);
     assert!(plays(&r, &song(&r, 2)), "the second u's opening song");
     to_menu(&mut r);
@@ -161,11 +160,13 @@ fn the_songs_of_u_and_game_reach_the_hosts_audio_across_a_relaunch() {
     let name = r.e.state().sound.file_name(n).map(str::to_owned);
     assert!(n != 0 && name.is_some(), "the new game plays song {n}");
     assert!(
-        plays(&r, &name.unwrap()),
+        plays(&r, &name.quiet()),
         "the new game's song {n} reaches the driver"
     );
-    println!("peaks: opening {opening:.3}, menu {menu:.3}");
-    assert!(opening > 0.01 && menu > 0.01);
+    assert!(
+        opening > 0.01 && menu > 0.01,
+        "the opening and the menu are audible"
+    );
 }
 
 #[test]
@@ -179,7 +180,7 @@ fn quit_in_the_menu_ends_the_launcher() {
         r.e.finished(),
         "^Q: u exits with code 3, the launcher stops"
     );
-    assert_eq!(program(&r), Program::U, "game never ran");
+    assert!(program(&r) == Program::U, "game never ran");
 }
 
 /// The character `u` writes goes the way of a Save: the platform's store gets
@@ -198,23 +199,26 @@ fn a_created_character_is_stored_and_journey_onward_after_a_reload_plays_it() {
     );
     {
         let s = r.e.state();
-        assert_eq!(s.saveload.generation, 1, "u's write is a save generation");
+        assert!(s.saveload.generation == 1, "u's write is a save generation");
         let names: Vec<String> = changed_since(&s, 0).into_keys().collect();
-        assert_eq!(names, [OBJLIST_FILE], "only the objlist");
+        assert!(names == [OBJLIST_FILE], "only the objlist");
     }
     let mut store = MemStore::default();
     let mut sync = SaveSync::default();
-    assert_eq!(sync.flush(&r.e, &mut store).unwrap(), 1);
+    assert!(sync.flush(&r.e, &mut store).quiet() == 1);
     let objlist = &store.files[OBJLIST_FILE];
     assert_same!(objlist[0xf00..0xf06], b"Zhuge\0", "the stored name");
-    assert_ne!(objlist[0x1c72], 0, "the portrait byte: a character exists");
+    assert!(
+        objlist[0x1c72] != 0,
+        "the portrait byte: a character exists"
+    );
 
     let mut again: Files = files;
-    assert_eq!(attach(&mut again, &store).unwrap(), 1);
+    assert!(attach(&mut again, &store).quiet() == 1);
     let mut r = Run::launcher(again, 1);
     to_menu(&mut r);
     r.keys(&[Key::Char('j')], 30);
-    assert_eq!(program(&r), Program::Game);
+    assert!(program(&r) == Program::Game);
     assert!(to_prompt(&mut r, 600), "{}", lines(&r));
     assert!(!said(&r).contains(&no_character(&r)), "{}", lines(&r));
     assert_same!(leader_name(&r), "Zhuge", "the stored character");
@@ -225,7 +229,7 @@ fn without_u_the_game_starts_at_once() {
     if files().is_none() {
         return;
     }
-    let zip = std::fs::read(super::real::ZIP).unwrap();
+    let zip = std::fs::read(super::real::ZIP).quiet();
     let mut map: BTreeMap<String, Vec<u8>> = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data: zip,
@@ -239,16 +243,16 @@ fn without_u_the_game_starts_at_once() {
             .unwrap_or(path)
             .eq_ignore_ascii_case("u")
     });
-    assert_eq!(map.len() + 1, n, "one file named u");
+    assert!(map.len() + 1 == n, "one file named u");
     let files = Files::new(map);
-    let shipped = files.get(OBJLIST_FILE).unwrap()[0xf00..]
+    let shipped = files.get(OBJLIST_FILE).quiet()[0xf00..]
         .iter()
         .take_while(|&&b| b != 0)
         .map(|&b| char::from(b))
         .collect::<String>();
     let mut r = Run::launcher(files, 0);
     assert!(to_prompt(&mut r, 120), "game at once");
-    assert_eq!(program(&r), Program::Game);
+    assert!(program(&r) == Program::Game);
     assert!(!shipped.is_empty());
     assert!(
         leader_name(&r) == shipped,
@@ -276,11 +280,11 @@ fn receipt_launcher_screens() {
         || std::env::temp_dir().join("u6-launcher-receipt"),
         PathBuf::from,
     );
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).quiet();
     let shot = |name: &str, r: &Run| {
         let (idx, pal) = r.frame();
         png(&dir.join(format!("{name}.png")), &idx, &pal);
-        std::fs::write(dir.join(format!("{name}.idx")), &idx).unwrap();
+        std::fs::write(dir.join(format!("{name}.idx")), &idx).quiet();
         println!(
             "shot {name} at tick {} ({:?})",
             r.e.ticks(),
@@ -301,22 +305,17 @@ fn receipt_launcher_screens() {
     });
     assert!(to_prompt(&mut r, 600));
     shot("04-game-after-creation", &r);
-    println!(
-        "leader has the typed name: {}; party of {}",
-        leader_name(&r) == "Zhuge",
-        r.e.state().actors.party.size
-    );
+    println!("leader has the typed name: {}", leader_name(&r) == "Zhuge");
 
     let mut r = Run::launcher(files, 0);
     to_menu(&mut r);
     r.keys(&[Key::Char('j')], 200);
     shot("05-no-character", &r);
-    println!("{}", lines(&r));
     r.keys(&[Key::Space], 30);
     while !visible(&r) {
         r.tick(1);
     }
     shot("06-no-character-then-u", &r);
-    println!("stubs {:?}", r.e.stub_hits());
+    println!("stubs {:?}", r.e.stub_hits().keys().collect::<Vec<_>>());
     println!("dir {}", dir.display());
 }

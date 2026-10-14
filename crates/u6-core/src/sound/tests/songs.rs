@@ -264,11 +264,12 @@ fn driver_state(d: &AudioDriver) -> (Vec<u8>, bool, bool) {
     )
 }
 
-/// The trace of a relaunch synced at once: the driver goes through the states of the log
-/// applied call by call. Each prefix of the log synced on a fresh driver is that prefix applied
-/// one call at a time; the prefix up to the marker has the old run's unsynced calls applied
-/// (its file loaded, played, stopped) before the new process starts on an empty buffer; the one
-/// sync of the whole log ends in the state of the whole trace.
+/// The trace of a relaunch synced at once. The driver's test-only record of the calls it
+/// applies ([`crate::sound::driver::APPLIED`]) shows, within the one sync, the old run's
+/// unsynced calls applied before the marker and the new run's after it. The states agree: each
+/// prefix of the log synced on a fresh driver is that prefix applied one call at a time; the
+/// prefix up to the marker has the old run's file loaded, played and stopped, the marker starts
+/// the new process on an empty buffer, and the one sync ends in the state of the whole trace.
 #[test]
 fn a_relaunch_applies_the_old_runs_pending_calls_before_the_new_process_starts() {
     let short = Mmd::new(vec![vec![[cell(13, 1, 0, 0), EMPTY, EMPTY, EMPTY]; 2]]).build();
@@ -291,7 +292,19 @@ fn a_relaunch_applies_the_old_runs_pending_calls_before_the_new_process_starts()
         .expect("the relaunch marker");
     assert!(marker > 0, "old calls queued before the marker");
     let mut once = AudioDriver::with_tables(tables(), b"MMD0");
+    crate::sound::driver::APPLIED.with(|t| t.borrow_mut().clear());
     once.sync(&fresh.sound, &files);
+    let applied = crate::sound::driver::APPLIED.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let calls_in_order: Vec<MedCall> = log.iter().map(|(_, c)| c.clone()).collect();
+    assert_eq!(
+        applied, calls_in_order,
+        "one sync applies every call of the log, the old run's before the marker"
+    );
+    assert_eq!(
+        applied.iter().position(|c| *c == MedCall::NewProcess),
+        Some(marker),
+        "the old run's calls come first"
+    );
     let mut by_call = AudioDriver::with_tables(tables(), b"MMD0");
     let mut trace = Vec::new();
     for k in 0..=log.len() {

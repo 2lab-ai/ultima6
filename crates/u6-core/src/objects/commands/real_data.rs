@@ -1,6 +1,6 @@
 //! Real data: the user's archive.org zip → u6-intake → `Files` → `State::new_game`, then the
-//! object commands. Skips when the zip is absent; reads only, prints slots and counts only (no
-//! game text: the scroll lines are shown by count and length).
+//! object commands. Skips when the zip is absent; reads only, prints labels, slots and the seeds
+//! it searched only (no game text, no types, places, counts or stats of the user's world).
 #![allow(clippy::disallowed_methods)] // the test reads the zip
 
 use std::cell::RefCell;
@@ -13,6 +13,7 @@ use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
 use crate::objects::{ACTOR_SLOTS, FIRST_TEMP_ACTOR, Slot};
 use crate::state::State;
+use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
@@ -21,7 +22,7 @@ pub(super) fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -32,7 +33,7 @@ pub(super) fn files() -> Option<Files> {
 /// The state the command loop starts from: load state and its tail (the region, the window
 /// and its egg pass), RNG seeded with `seed` first as the engine does.
 pub(super) fn started(files: &Files, seed: u16) -> State {
-    let mut s = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    let mut s = State::new_game(files).quiet();
     s.rng.seed(seed);
     crate::main_loop::load_state_tail(&mut s);
     s
@@ -51,7 +52,6 @@ pub(super) fn monsters(s: &State) -> Vec<(Slot, u16, u16, u16, u8)> {
 
 /// An egg as the test sees it.
 struct Egg {
-    slot: Slot,
     /// Its map tile.
     at: (u16, u16),
     /// The templates inside: type, quantity (the most it hatches).
@@ -81,7 +81,6 @@ fn hatched_egg(s: &mut State) -> Egg {
         t = crate::objects::next_child(&mut s.objects);
     }
     Egg {
-        slot: egg,
         at: (s.objects.x(egg), s.objects.y(egg)),
         templates,
         full: s.objects.qq_of(egg) & 0xff == 100,
@@ -99,75 +98,58 @@ fn cells(s: &State) -> Vec<(i16, i16)> {
     v
 }
 
-/// View cells given as `col,row` pairs separated by spaces in the environment variable `var`
-/// (an oracle frame's cells, kept outside the repository), sorted.
-fn cells_from_env(var: &str) -> Option<Vec<(i16, i16)>> {
-    let text = std::env::var(var).ok()?;
+/// The oracle's view cells of the start egg's monsters, read off an oracle frame of the
+/// original's start and kept outside the repository (the user's world): this file under the
+/// oracle directory, the way the saveload tests find the original's saves.
+const ORACLE_CELLS: &str = "/Users/zhugehyuk/Games/ultima6/oracle/hatch/start-gargoyle-cells.txt";
+
+/// `col,row` pairs separated by white space (`#` lines are comments), sorted.
+fn parse_cells(text: &str) -> Vec<(i16, i16)> {
     let mut v: Vec<(i16, i16)> = text
-        .split_whitespace()
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .flat_map(str::split_whitespace)
         .map(|p| {
             let (x, y) = p.split_once(',').expect("col,row");
-            (x.parse().unwrap(), y.parse().unwrap())
+            (x.parse().quiet(), y.parse().quiet())
         })
         .collect();
     v.sort_unstable();
-    Some(v)
+    v
+}
+
+/// The oracle's cells: `U6_ORACLE_GARGOYLE_CELLS="c,r c,r ..."` when set (an override), else
+/// [`ORACLE_CELLS`] when present, else `None`.
+fn oracle_cells() -> Option<Vec<(i16, i16)>> {
+    if let Ok(text) = std::env::var("U6_ORACLE_GARGOYLE_CELLS") {
+        return Some(parse_cells(&text));
+    }
+    std::fs::read_to_string(ORACLE_CELLS)
+        .ok()
+        .map(|t| parse_cells(&t))
 }
 
 #[test]
 fn the_start_egg_hatches_its_gargoyles() {
     let Some(files) = files() else { return };
     let mut s = started(&files, 0);
-    let c = s.map.centre;
     let ms = monsters(&s);
     let Egg {
-        slot: egg,
         at,
         templates,
         full,
+        ..
     } = hatched_egg(&mut s);
-    eprintln!(
-        "egg {egg:#x}: {} templates, quantity 100 {full}; {} monsters",
-        templates.len(),
-        ms.len()
-    );
-    for &(m, t, x, y, z) in &ms {
-        let i = m as usize;
-        let a = &s.actors.attrs;
-        eprintln!(
-            "monster {m:#x} type {t:#x} view cell ({}, {}) z {z} str {} dex {} int {} hp {} lvl {} \
-             status {:#04x} worktype {:#x} mp {}",
-            x as i16 - c.x as i16 + 5,
-            y as i16 - c.y as i16 + 5,
-            a.strength[i],
-            a.dexterity[i],
-            a.intelligence[i],
-            a.hp[i],
-            a.level[i],
-            a.status[i],
-            s.actors.worktype[i],
-            s.actors.movement_points[i],
-        );
-        let mut ch = s.objects.next_of(m);
-        while ch >= 0 && s.objects.place(ch) != 0 && s.objects.contained_in(ch, m) {
-            eprintln!(
-                "   carries {ch:#x} type {:#x} status {:#04x} qq {:#06x}",
-                s.objects.kind(ch),
-                s.objects.status(ch),
-                s.objects.qq_of(ch)
-            );
-            ch = s.objects.next_of(ch);
-        }
-    }
+    // Output: the template's index only (types, counts and places are the user's data).
     // Each template makes 1..=its quantity of its type (all of it from an egg of quantity 100),
     // gargoyles among them (0x16a / 0x16b, the types 0x1319b2 compares with).
     assert!(!ms.is_empty(), "the egg hatched monsters");
-    for &(kind, n) in &templates {
+    for (k, &(kind, n)) in templates.iter().enumerate() {
         let made = ms.iter().filter(|m| m.1 == kind).count() as u16;
-        assert!(made <= n, "template {kind:#x}: {made} of at most {n}");
+        assert!(made <= n, "template {k}: more made than its quantity");
         assert!(
             !full || made == n,
-            "template {kind:#x}: the whole {n} of a full egg"
+            "template {k}: a full egg makes the whole quantity"
         );
     }
     assert!(ms.iter().all(|m| templates.iter().any(|t| t.0 == m.1)));
@@ -177,33 +159,36 @@ fn the_start_egg_hatches_its_gargoyles() {
     // Seed 0x1d3: the seed [`search_seeds_for_the_oracle_gargoyles`] found for the view cells an
     // oracle frame of the original's start shows (the oracle's own seed, the low word of
     // `time()`, is unknown). The test checks that they are in view on cells of their own, and
-    // the oracle's cells when `U6_ORACLE_GARGOYLE_CELLS` holds them (kept outside the repo).
+    // that they are the oracle's cells when those are at hand ([`oracle_cells`]: the file under
+    // the oracle directory, or the environment override). Without them the placement check is
+    // invariant-only: in view, one monster a cell.
     let s = started(&files, 0x1d3);
     let got = cells(&s);
     let mut distinct = got.clone();
     distinct.dedup();
-    assert_eq!(distinct.len(), got.len(), "one monster a cell");
+    assert!(distinct.len() == got.len(), "one monster a cell");
     assert!(
         got.iter()
             .all(|&(x, y)| (0..11).contains(&x) && (0..11).contains(&y))
     );
-    if let Some(want) = cells_from_env("U6_ORACLE_GARGOYLE_CELLS") {
-        assert!(got == want, "the oracle frame's cells");
+    match oracle_cells() {
+        Some(want) => assert!(got == want, "the oracle frame's cells"),
+        None => eprintln!("the oracle's cells not at hand: placement checked by invariants only"),
     }
 }
 
 /// Seed search (run by hand with `--ignored`): every seed word whose start hatch puts the
-/// monsters on the view cells an oracle frame shows, given as `U6_ORACLE_GARGOYLE_CELLS="c,r
-/// c,r ..."` (read off the frame; the cells are the user's world, so they stay out of the repo).
+/// monsters on the view cells an oracle frame shows ([`oracle_cells`]: read off the frame; the
+/// cells are the user's world, so they stay out of the repo).
 #[test]
 #[ignore]
 fn search_seeds_for_the_oracle_gargoyles() {
     let Some(files) = files() else { return };
-    let Some(want) = cells_from_env("U6_ORACLE_GARGOYLE_CELLS") else {
-        eprintln!("skipped: U6_ORACLE_GARGOYLE_CELLS not set");
+    let Some(want) = oracle_cells() else {
+        eprintln!("skipped: the oracle's cells are not at hand");
         return;
     };
-    let mut base = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
+    let mut base = State::new_game(&files).quiet();
     crate::objects::init_slots(&mut base.objects);
     let mut hits = Vec::new();
     for seed in (0..=0xffffu16).filter(|w| w & 1 == 1) {
@@ -260,8 +245,8 @@ fn run(s: State, files: &Files, keys: &[InputEvent], cmd: Command) -> (State, Ve
         }
     }
     assert!(e.finished(), "the command did not end");
-    for (id, n) in e.stub_hits() {
-        eprintln!("   stub {id} x{n}");
+    for id in e.stub_hits().keys() {
+        eprintln!("   stub {id}");
     }
     let s = e.state().clone();
     let lines = lines_of(&s);
@@ -293,9 +278,9 @@ fn stand_at(s: &mut State, x: u16, y: u16) {
     crate::map::view::update_view(s);
 }
 
+/// Names the step and whether it printed; the lines and their count are the game's.
 fn print_lines(what: &str, lines: &[String]) {
-    let lengths: Vec<usize> = lines.iter().map(String::len).collect();
-    eprintln!("{what}: {} scroll lines, lengths {lengths:?}", lines.len());
+    eprintln!("{what}: printed {}", lines.iter().any(|l| !l.is_empty()));
 }
 
 /// The map objects of `kind` that `keep` accepts, nearest the leader first (city-block
@@ -335,7 +320,12 @@ fn walkable(s: &State, x: i32, y: i32) -> bool {
 
 /// A tile next to `slot` the leader can stand on (west, east, south, north first).
 fn beside(s: &State, slot: Slot) -> Option<(u16, u16)> {
-    let (x, y) = (i32::from(s.objects.x(slot)), i32::from(s.objects.y(slot)));
+    beside_tile(s, s.objects.x(slot), s.objects.y(slot))
+}
+
+/// A tile next to (x, y) the leader can stand on (west, east, south, north first).
+fn beside_tile(s: &State, x: u16, y: u16) -> Option<(u16, u16)> {
+    let (x, y) = (i32::from(x), i32::from(y));
     [
         (-1, 0),
         (1, 0),
@@ -404,25 +394,32 @@ fn look_at_six_things_near_the_start() {
     assert!(all[5].contains(':'));
 }
 
-/// A tile next to the Avatar with no actor, on which the map lets an object lie (not a
-/// blocking tile), south-east first.
-fn drop_spot(s: &State) -> Option<(u16, u16)> {
-    let (x, y) = (i32::from(s.objects.x(1)), i32::from(s.objects.y(1)));
-    let z = u16::from(s.map.centre.z);
-    let tf = &s.tables.tileflags;
-    [
-        (1, 1),
-        (1, 0),
-        (0, 1),
-        (-1, 1),
-        (1, -1),
-        (-1, 0),
-        (0, -1),
-        (-1, -1),
-    ]
-    .iter()
-    .filter_map(|(dx, dy)| Some((u16::try_from(x + dx).ok()?, u16::try_from(y + dy).ok()?)))
-    .find(|&(x, y)| s.map.is_passable(tf, x, y, z) && crate::objects::actor_at(s, 0, x, y) < 0)
+/// A table near the start: the tile of a map object nearest the leader where Drop's surface
+/// test holds (`surface_at`: an object whose tile has the surface bit, flags3 0x02, the branch
+/// 0x12a226 takes for a table), with a tile beside it to stand on. Gives the table's tile and
+/// that tile; found at run time (where tables stand is the user's world).
+fn table(s: &State) -> Option<((u16, u16), (u16, u16))> {
+    let c = s.map.centre;
+    let mut tiles: Vec<(i32, u16, u16)> = (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .filter(|&o| {
+            let ob = &s.objects;
+            ob.tf(o) != 0 && ob.place(o) == 0 && ob.z(o) == c.z
+        })
+        .map(|o| {
+            let (x, y) = (s.objects.x(o), s.objects.y(o));
+            let d = (i32::from(x) - i32::from(c.x)).abs() + (i32::from(y) - i32::from(c.y)).abs();
+            (d, x, y)
+        })
+        .collect();
+    tiles.sort_unstable();
+    tiles.dedup();
+    let mut probe = s.clone();
+    tiles.into_iter().find_map(|(_, x, y)| {
+        if !super::drop::surface_at(&mut probe, x, y) {
+            return None;
+        }
+        Some(((x, y), beside_tile(s, x, y)?))
+    })
 }
 
 fn carried_by(s: &State, owner: Slot, slot: Slot) -> bool {
@@ -442,7 +439,7 @@ fn get_the_bread_then_drop_it_on_a_table() {
     aim(&mut s, bread);
     // Its weight: the type's byte of the weight table (tileflag 0x1000 + type, formats.md
     // §4.2), read from the raw file.
-    let loaf_weight = i16::from(files.get("tileflag").unwrap()[0x1000 + 0x80]);
+    let loaf_weight = i16::from(files.get("tileflag").quiet()[0x1000 + 0x80]);
     let weight = |s: &mut State| {
         super::seams::sum_inventory(s, 1);
         (s.inventory.equip_weight, s.inventory.carried_weight)
@@ -455,28 +452,28 @@ fn get_the_bread_then_drop_it_on_a_table() {
     let (mut s, lines) = run(s, &files, &[], get);
     print_lines("Get the bread", &lines);
     let after = weight(&mut s);
-    eprintln!(
-        "carried weight (readied, rest) {before:?} -> {after:?}; movement points {mp} -> {}",
-        s.actors.movement_points[1]
-    );
     // The loaf stacks into the Avatar's inventory (0x10cf7c merges it into a stack he has or
     // keeps this object); either way the Avatar now carries a loaf and the weight rose by its
     // own; Get takes 3 movement points (0x1285b6's).
     let loaf = (0x100..crate::objects::OBJECT_SLOTS as Slot)
         .find(|&o| s.objects.kind(o) == 0x80 && carried_by(&s, 1, o))
         .expect("a loaf in the Avatar's inventory");
-    assert_eq!(
-        after.1 - before.1,
-        loaf_weight,
+    assert!(
+        after.1 - before.1 == loaf_weight,
         "the weight rose by the loaf's"
     );
-    assert_eq!(s.actors.movement_points[1], mp.wrapping_sub(3));
+    assert!(s.actors.movement_points[1] == mp.wrapping_sub(3));
 
-    // Drop it on a tile next to the Avatar where an object may lie (the inventory panel of
-    // member 0 shows the loaf).
+    // Drop it on a table, the Avatar standing beside it (the inventory panel of member 0 shows
+    // the loaf): the spot test's surface branch (`surface_at`) takes it.
+    let ((ax, ay), (tx, ty)) = table(&s).expect("a table near the start");
+    stand_at(&mut s, tx, ty);
+    assert!(
+        super::drop::surface_at(&mut s, ax, ay),
+        "a surface to drop on"
+    );
     s.ui.panel.mode = 0x92;
     s.ui.panel.member = 0;
-    let (ax, ay) = drop_spot(&s).expect("a tile beside the Avatar to drop on");
     s.ui.input.selection = loaf;
     s.ui.input.target = (ax as i16, ay as i16);
     s.ui.input.targeting = 0;
@@ -487,14 +484,13 @@ fn get_the_bread_then_drop_it_on_a_table() {
     let (mut s, lines) = run(s, &files, &[InputEvent::Key(Key::Enter)], drop);
     print_lines("Drop it", &lines);
     let back = weight(&mut s);
-    eprintln!("carried weight after the drop {back:?}");
     let on_floor = (0x100..crate::objects::OBJECT_SLOTS as Slot).find(|&o| {
         s.objects.kind(o) == 0x80
             && s.objects.place(o) == 0
             && (s.objects.x(o), s.objects.y(o)) == (ax, ay)
     });
     assert!(on_floor.is_some(), "the loaf lies on the table");
-    assert_eq!(back, before);
+    assert!(back == before);
 }
 
 #[test]
@@ -521,12 +517,7 @@ fn push_a_chair_and_open_a_door() {
     // The direction prompt, then a direction: south.
     let (s, lines) = run(s, &files, &[InputEvent::Key(Key::Down)], push);
     print_lines("Move the chair south", &lines);
-    eprintln!(
-        "chair ({cx}, {cy}) -> ({}, {})",
-        s.objects.x(chair),
-        s.objects.y(chair)
-    );
-    assert_eq!((s.objects.x(chair), s.objects.y(chair)), (cx, cy + 1));
+    assert!((s.objects.x(chair), s.objects.y(chair)) == (cx, cy + 1));
 
     // The nearest closed steel door (0x12c, frames 4..7 closed): open, then closed again.
     let mut s = with_text(&files);
@@ -536,7 +527,6 @@ fn push_a_chair_and_open_a_door() {
     let closed = s.objects.tf(door) >> 10;
     let mut frames = Vec::new();
     for _ in 0..2 {
-        let f0 = s.objects.tf(door) >> 10;
         super::door(&mut s, door, false, false, false);
         let open = Box::new(|st: Rc<RefCell<State>>, io: Rc<Io>| {
             Box::pin(async move { crate::main_loop::flush_prints(&st, &io).await })
@@ -544,11 +534,8 @@ fn push_a_chair_and_open_a_door() {
         });
         let (s2, lines) = run(s, &files, &[], open);
         s = s2;
-        print_lines(
-            &format!("door frame {f0} -> {}", s.objects.tf(door) >> 10),
-            &lines,
-        );
+        print_lines("the door used", &lines);
         frames.push(s.objects.tf(door) >> 10);
     }
-    assert_eq!(frames, [closed ^ 4, closed], "open, then closed");
+    assert!(frames == [closed ^ 4, closed], "open, then closed");
 }
