@@ -203,6 +203,8 @@ pub struct Actors {
     /// Original: A4-0x7b84 (objlist 0x1BF1 quest flag)
     pub quest_flag: u8,
     /// Original: A4-0x2fd2 (word; 0x105350 copies the quest flag here, use not identified)
+    ///
+    /// Sync rule: written once at load from `quest_flag`; other writers not identified yet.
     pub quest_flag_copy: u16,
     /// Original: A4-0x7b83 (objlist 0x1BF2 rest counter)
     pub rest_counter: u8,

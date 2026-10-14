@@ -3,6 +3,10 @@
 //! must be in the published frame while the game is suspended, the game must resume without
 //! borrow panics, every presented stage must be published (no skipped frames), and the outcome
 //! must not depend on the tick size.
+//!
+//! Runs natively (`cargo test`) and in node under wasm-bindgen-test-runner:
+//! `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner scripts/cargo.sh test
+//! -p u6-core --test nested_prompt --target wasm32-unknown-unknown`.
 
 use std::cell::RefCell;
 
@@ -89,6 +93,9 @@ fn run(tick_ms: u32) -> Outcome {
         messages: engine.state().ui.messages.clone(),
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
 
 #[test]
 fn nested_prompt_is_published_resumes_and_skips_no_frame() {

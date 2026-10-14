@@ -109,7 +109,7 @@ Totals: functions 599: ported 3, partial 2, placeholder 2, stubbed 8, replaced 7
 | 0x10613a | ui | M | `ui/` | planned |
 | 0x10619c | ui | M | `ui/` | planned |
 | 0x106474 | ui | M | `ui/` | planned |
-| 0x106506 | ui | M | `main_loop.rs:61 in finish_load_state` | stubbed |
+| 0x106506 | ui | M | `main_loop.rs:77 in finish_load_state` | stubbed |
 | 0x10658e | ui | M | `ui/` | planned |
 | 0x10674e | magic | S |  | - |
 | 0x1067d8 | ui | M | `ui/` | planned |
@@ -130,10 +130,10 @@ Totals: functions 599: ported 3, partial 2, placeholder 2, stubbed 8, replaced 7
 | 0x108642 | ui | M | `ui/` | planned |
 | 0x108658 | ui | M | `ui/` | planned |
 | 0x1089d8 | map | M | `map/` | planned |
-| 0x108ac4 | map | M | `main_loop.rs:63 in finish_load_state` | stubbed |
+| 0x108ac4 | map | M | `main_loop.rs:79 in finish_load_state` | stubbed |
 | 0x108d10 | map | M | `map/` | planned |
 | 0x108f66 | map | M | `map/` | planned |
-| 0x108f90 | map | M | `main_loop.rs:65 in finish_load_state` | stubbed |
+| 0x108f90 | map | M | `main_loop.rs:81 in finish_load_state` | stubbed |
 | 0x108fba | map | M | `map/` | planned |
 | 0x10921a | map | M | `map/` | planned |
 | 0x1092fc | map | M | `map/` | planned |
@@ -146,7 +146,7 @@ Totals: functions 599: ported 3, partial 2, placeholder 2, stubbed 8, replaced 7
 | 0x109b6c | map |  |  | - |
 | 0x109bae | map | M | `map/` | planned |
 | 0x109c12 | map | M | `map/` | planned |
-| 0x109e74 | map | M | `main_loop.rs:72 in finish_load_state` | stubbed |
+| 0x109e74 | map | M | `main_loop.rs:88 in finish_load_state` | stubbed |
 | 0x10a4d6 | objects | M | `objects/` | planned |
 | 0x10a5b0 | objects | M | `objects/` | planned |
 | 0x10a79a | objects | M | `objects/` | planned |
@@ -178,7 +178,7 @@ Totals: functions 599: ported 3, partial 2, placeholder 2, stubbed 8, replaced 7
 | 0x10c928 | objects | M | `objects/` | planned |
 | 0x10c970 | objects | M | `objects/` | planned |
 | 0x10c9d2 | objects | M | `objects/` | planned |
-| 0x10cda8 | objects | M | `main_loop.rs:69 in finish_load_state` | stubbed |
+| 0x10cda8 | objects | M | `main_loop.rs:85 in finish_load_state` | stubbed |
 | 0x10cef2 | objects | M | `objects/` | planned |
 | 0x10cf2c | objects | M | `objects/` | planned |
 | 0x10cf7c | objects | M | `objects/` | planned |
@@ -196,16 +196,16 @@ Totals: functions 599: ported 3, partial 2, placeholder 2, stubbed 8, replaced 7
 | 0x10dea4 | objects | M | `objects/` | planned |
 | 0x10dfb4 | objects | M | `objects/` | planned |
 | 0x10e10c | objects | M | `objects/` | planned |
-| 0x10e1ce | objects | M | `main_loop.rs:62 in finish_load_state` | stubbed |
+| 0x10e1ce | objects | M | `main_loop.rs:78 in finish_load_state` | stubbed |
 | 0x10e4bc | objects |  |  | - |
 | 0x10e596 | objects | M | `objects/` | planned |
 | 0x10e73a | objects | M | `objects/` | planned |
 | 0x10e81e | objects | M | `objects/` | planned |
 | 0x10ed44 | objects | M | `objects/` | planned |
-| 0x10edb4 | objects | M | `main_loop.rs:60 in finish_load_state` | stubbed |
+| 0x10edb4 | objects | M | `main_loop.rs:76 in finish_load_state` | stubbed |
 | 0x10ee76 | objects | M | `objects/` | planned |
 | 0x10eef8 | objects | M | `objects/` | planned |
-| 0x110878 | sound | S | `main_loop.rs:53 in run` | stubbed |
+| 0x110878 | sound | S | `main_loop.rs:55 in run` | stubbed |
 | 0x110912 | sound | S |  | - |
 | 0x1109e0 | ui | M | `ui/` | planned |
 | 0x110c76 | ui | M | `ui/` | planned |

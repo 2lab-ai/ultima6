@@ -13,3 +13,8 @@ u6-render.workspace = true
 [dev-dependencies]
 # Real-data test only: zip -> files, exactly as the platforms do it.
 u6-intake.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+# Runs the executor gate (tests/nested_prompt.rs) under wasm-bindgen-test-runner (node).
+# Must match the installed wasm-bindgen CLI (0.2.129).
+wasm-bindgen-test = "=0.3.79"

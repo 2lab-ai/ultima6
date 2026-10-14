@@ -40,6 +40,11 @@ pub struct MapState {
     pub chunks: Chunks,
     /// Original: A4-0x7b78 / -0x7b76 / -0x7b74 (words: x, y, z the map window is centred on;
     /// 0x105350 sets them from the party leader's location)
+    ///
+    /// A duplicate the original keeps of the leader's object location. Sync rule: whoever moves
+    /// the leader (player step 0x11d4ee, level change 0x11d1d4) rewrites it in the same step, as
+    /// the original does; until `actors/` ports those, only the placeholder view moves it, and the
+    /// leader's object location stays authoritative ([`crate::State::leader_position`]).
     pub centre: Position,
     /// Original: A4-0x7958 / -0x7956 / -0x7954 (words; 0x105350 sets all three to -1 before the
     /// region load, so they are the key of the loaded region [likely])

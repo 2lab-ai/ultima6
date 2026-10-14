@@ -50,12 +50,28 @@ const DUNGEON_TILES: u16 = 256;
 /// rest of the load-state tail, the music start and then the command loop.
 pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
     finish_load_state(&mut state.borrow_mut());
+    // Stub contract: no result; the real call starts the area song (MED player, hunk 0). M1 has
+    // no sound, so silence is the accepted behaviour; every boot reaches it.
     todo_stub!("0x110878 start area music (MED player)", ());
     command_loop(&state, &io).await;
 }
 
 /// The calls 0x105350 makes after its reads, in its order, as stub points until the owning
-/// modules port them.
+/// modules port them. Contract of every stub here: no arguments the port passes yet, result
+/// `()`, the caller continues; every boot reaches all of them except 0x10cda8 (only when the
+/// leader index equals the party size, not the case in the shipped objlist). Expected side
+/// effects once ported, and what is visibly missing meanwhile:
+///
+/// - 0x10edb4 objects step [role not identified]; nothing visible known.
+/// - 0x106506 ui step (called with 0x56aa) [role not identified]; nothing visible known.
+/// - 0x10e1ce loads the object blocks of the leader's region into object slots 256..; until
+///   then no map objects exist in the slot tables (they stay in `objects.blocks`).
+/// - 0x108ac4 loads the map region around the party into the chunk cache; the port holds the
+///   whole map, so nothing is missing.
+/// - 0x108f90 rebuilds the map-window tile cache; the placeholder view reads tiles directly.
+/// - 0x10cda8 per-member object step [role not identified].
+/// - 0x109e74 computes the view flags (blocking / light / visible); until then `view_flags`
+///   stays empty, so nothing is hidden or darkened.
 fn finish_load_state(state: &mut State) {
     todo_stub!("0x10edb4 objects step of load state", ());
     todo_stub!("0x106506 ui step of load state", ());
