@@ -640,3 +640,30 @@ fn input_upper_cases_like_the_c_runtime() {
     assert_eq!(input::to_upper(u16::from(b'{')), u16::from(b'{'));
     assert_eq!(input::to_upper(0xe9), 0xe9);
 }
+
+#[test]
+fn the_gradient_lists_recolour_rows_below_their_waits() {
+    let mut e = exe();
+    poke_words(
+        &mut e,
+        0x0011_436a,
+        &[
+            0x0180, 0x0000, 0x2c01, 0xfffe, 0x01b0, 0x00df, 0x3201, 0xfffe, 0x01b0, 0x01df, 0xffff,
+            0xfffe,
+        ],
+    );
+    let mut st = IntroState::new(e, Files::default());
+    assert_eq!(st.video.gradient_steps, [(0, 24, 0x00df), (6, 24, 0x01df)]);
+    let shown = Ptr::at(st.video.shown);
+    st.video.chip.set_pixel(shown, 5, 3, 24);
+    st.video.chip.set_pixel(shown, 5, 9, 24);
+    st.video.chip.set_pixel(shown, 6, 9, 7);
+    st.video.gradient = true;
+    let got = drive(&[], move |io| async move {
+        st.video.publish(&io);
+        io.draw(|fb| (fb.get(5, 3), fb.get(5, 9), fb.get(6, 9), fb.palette[33]))
+    });
+    let (a, b, c, p) = got.unwrap();
+    assert_eq!((a, b, c), (Some(32), Some(33), Some(7)));
+    assert_eq!((p.r, p.g, p.b), (0x11, 0xdd, 0xff));
+}

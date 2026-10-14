@@ -51,6 +51,42 @@ pub struct Video {
     pub pointer: u16,
     /// Port-only: frames waited so far (for receipts and tests).
     pub frames: u64,
+    /// True while the gradient copper lists (0x11436a / 0x1144fa) show: 0x113df8 picked them,
+    /// 0x113db2 the plain ones.
+    pub gradient: bool,
+    /// The colour changes the gradient lists make down the screen, read from the list at
+    /// 0x11436a: (screen row, colour register, 12-bit value), in list order.
+    pub gradient_steps: Vec<(i32, usize, u16)>,
+}
+
+/// The gradient copper list of buffer 0 (the one of buffer 1, 0x1144fa, is the same but for
+/// its bitplane pointers).
+const GRADIENT_LIST: u32 = 0x0011_436a;
+/// Copper line of screen row 0 (DIWSTRT 0x2c81).
+const FIRST_LINE: i32 = 0x2c;
+
+/// The colour moves after the first WAIT of the copper list at `addr` of `u`.
+fn gradient_steps(exe: &UExe) -> Vec<(i32, usize, u16)> {
+    let mut steps = Vec::new();
+    let mut row = None;
+    for i in 0..200u32 {
+        let (a, b) = (
+            exe.word(GRADIENT_LIST + 4 * i),
+            exe.word(GRADIENT_LIST + 4 * i + 2),
+        );
+        if a == 0xffff && b == 0xfffe {
+            break;
+        }
+        if a & 1 != 0 {
+            row = Some(i32::from(a >> 8) - FIRST_LINE);
+        } else if let Some(r) = row {
+            let reg = a & 0x1fe;
+            if (0x180..=0x1be).contains(&reg) {
+                steps.push((r, usize::from((reg - 0x180) / 2), b));
+            }
+        }
+    }
+    steps
 }
 
 impl Video {
@@ -73,6 +109,8 @@ impl Video {
             cycle_palette: exe.palette(32),
             pointer: 0,
             frames: 0,
+            gradient: false,
+            gradient_steps: gradient_steps(exe),
         }
     }
 
@@ -92,6 +130,12 @@ impl Video {
     /// for raster line 200 (0x113e66) only lines the write up with the frame; the port's swap
     /// shows from the next frame either way.
     pub fn swap(&mut self, exe: &UExe) -> Ptr {
+        self.gradient = false;
+        self.swap_lists(exe)
+    }
+
+    /// The swap of 0x113db2 / 0x113df8 without the choice of copper lists.
+    fn swap_lists(&mut self, exe: &UExe) -> Ptr {
         self.shown = Self::buffer(self.cur);
         self.cur ^= 1;
         self.draw = Self::buffer(self.cur);
@@ -99,13 +143,14 @@ impl Video {
         Ptr::at(self.draw)
     }
 
-    /// Original: u 0x113df8 (display: as 0x113db2 with the other pair of copper lists, which add
-    /// a colour-16 gradient down the first 96 lines)
+    /// Original: u 0x113df8 (display: as 0x113db2 with the other pair of copper lists, which
+    /// rewrite colour 24 every 6 lines down the first 96 rows: the sky of the woods)
     ///
-    /// [partial] The gradient (16 copper waits writing colour 16 = 0x0df..0xfdf, 0x11436a) is
-    /// not drawn: the port shows the plain lists' colours.
+    /// The port shows the changes by giving the pixels of a changed colour a palette entry of
+    /// their own (32 + the change's number) on the rows the change covers.
     pub fn swap_gradient(&mut self, exe: &UExe) -> Ptr {
-        self.swap(exe)
+        self.gradient = true;
+        self.swap_lists(exe)
     }
 
     /// 0x119b94 / 0x119bde: the queued palette goes in with the swap.
@@ -218,9 +263,26 @@ impl Video {
                 let n = |v: u16| (v & 0xf) as u8 * 17;
                 fb.palette[i] = u6_render::Rgb::new(n(c >> 8), n(c >> 4), n(c));
             }
+            let steps: &[(i32, usize, u16)] = if self.gradient {
+                &self.gradient_steps
+            } else {
+                &[]
+            };
+            for (k, &(_, _, c)) in steps.iter().enumerate().take(256 - 32) {
+                let n = |v: u16| (v & 0xf) as u8 * 17;
+                fb.palette[32 + k] = u6_render::Rgb::new(n(c >> 8), n(c >> 4), n(c));
+            }
+            let mut over = [None::<u8>; 32];
+            let mut next = 0;
             for y in 0..H {
+                while next < steps.len().min(256 - 32) && steps[next].0 <= y {
+                    over[steps[next].1] = Some(32 + next as u8);
+                    next += 1;
+                }
                 for x in 0..W {
-                    fb.set(x as usize, y as usize, self.chip.pixel(planes, x, y));
+                    let c = self.chip.pixel(planes, x, y);
+                    let v = over[usize::from(c)].unwrap_or(c);
+                    fb.set(x as usize, y as usize, v);
                 }
             }
         });

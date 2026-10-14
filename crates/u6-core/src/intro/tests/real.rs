@@ -78,10 +78,10 @@ impl Run {
         self.tick(settle);
     }
 
-    /// The published frame: indices and the 32 colours as 12-bit words.
+    /// The published frame: indices and the palette (32 colours, then the copper gradient's).
     fn frame(&self) -> (Vec<u8>, Vec<(u8, u8, u8)>) {
         let f = self.e.frame();
-        let pal = f.palette[..32].iter().map(|c| (c.r, c.g, c.b)).collect();
+        let pal = f.palette.iter().map(|c| (c.r, c.g, c.b)).collect();
         (f.pixels().to_vec(), pal)
     }
 }
