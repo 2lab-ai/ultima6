@@ -6,8 +6,8 @@ tags: [ultima6, rust, refactor, ai, modding]
 
 # 04 — P3 refactor: AI-driven NPCs, editable systems, mods
 
-Status: planned (rev 3, 2026-10-15 — trinity round 1 on rev 2: gpt-6-astra REVISE, fable REVISE;
-their MUST-FIX items are folded in below). Starts after the M2 port is deployed (P2).
+Status: planned (rev 4, 2026-10-15 — trinity rounds 1–2: gpt-6-astra and fable MUST-FIX folded in;
+grok-4.7 slot pending). Starts after the M2 port is deployed (P2).
 
 User command (verbatim, `browser-port/ssot.md`): "3. rust 코드를 고치기 좋도록 리팩토링 /
 3.a npc의 가능한 행동을 ai model에게 주고 응답 받을수 있도록 / 3.b 캐릭터 월드맵 등 전체적인
@@ -60,8 +60,10 @@ engine through one path that mod overrides also feed. First family: missile weap
 with a behaviour test (changing the definition changes the game) and the parity gate.
 
 Bounds of F (validated, never truncated): 256 actor slots, fixed map size, fixed executable
-layout. Out of scope for v1: new actor slots, larger maps, new Use behaviours or new combat
-algorithms.
+layout. A rule lifted from code is overridden by patching its instruction operands, so its
+cardinality stays the original's (e.g. 10 missile weapons; more is refused). Out of scope for v1:
+new actor slots, larger maps, longer rule lists, new Use behaviours, new combat algorithms, and
+art (tiles, portraits).
 
 ## Definition set
 
@@ -113,7 +115,9 @@ real-data tests.
   apply through the original action path. `OriginalBrain` reproduces the original choice including
   its RNG draws (the worktype routines in `actors/npc.rs` mix choice and RNG), bit-identically.
 - **Model (W7b):** `ModelBrain` is opt-in per NPC or per area. A request carries a turn/state
-  generation; the turn waits at most its budget, then the original routine decides that turn
+  generation; requests for all ModelBrain NPCs of a world round go out together at the round's
+  start and share one round budget (one game future serves the whole round, so per-NPC budgets
+  would add up); when it runs out, the original routine decides each unanswered turn
   (rendering stays live throughout; turn order is unchanged); invalid, oversized, timed-out or stale
   replies fall back and are logged; one request in flight per NPC; bounded reply size.
 - **Payload boundary:** structured state and legal action ids only; dialogue text only if enabled
@@ -123,7 +127,8 @@ real-data tests.
   `connect-src 'self'`; candidates are `https:` + loopback for a user-entered endpoint, loopback
   only, or native only. Whatever ships, the browser receipt is behavioural: AI off → zero
   off-origin requests during play; AI on against a stub endpoint → only the allowed fields sent and
-  the chosen id applied; the `test-web.mjs` CSP assertion is replaced by that receipt.
+  the chosen id applied. The `test-web.mjs` header assertion stays, updated to the decided CSP
+value; the behavioural receipt is added next to it.
 
 ## Code that is easy to change
 
@@ -138,13 +143,14 @@ real-data tests.
 | WU | Scope | Needs | Gate |
 |---|---|---|---|
 | W0 | contracts: definition / override schema, stable ids, codec API, save sidecar, load-order and conflict rules | — | spec review |
-| W1 | map + chunks + basetile + tileflag + animdata writers and text forms | W0 | local byte-identity |
+| W1 | map + chunks + basetile + tileflag + animdata writers, look.lzd table writer through the existing LZW encoder, text forms | W0 | local byte-identity |
 | W2 | objlist codec unification (both profiles) + schedule writer + actor files | W0 | parity suite + byte-identity of both profiles |
-| W3a | converse disassembler (opcode table from the interpreter's arms; data-in-code tables kept as data) + relocating rebuild + name / price edits | W0 | identity rebuild of every script, **and** every name lengthened by N bytes → interpreter receipts identical except the names |
+| W3a | converse disassembler (opcode table from the interpreter's arms; data-in-code tables kept as data) + relocating rebuild (jump and table operands **and** the addresses of runtime script writes, `converse/exec.rs:268`, `converse/eval.rs:245` → `script.rs:41`) + name / price edits; a rebuilt script longer than `SCRIPT_LEN` 0x2800 is refused | W0 | identity rebuild of every script, **and** every name lengthened by N bytes → interpreter receipts identical except the names |
 | W4 | executable tables as `rules/*.toml` (in-place patch) | W0 | unchanged values → identical `game` bytes |
-| W5 | `u6-defs` library (export / build / merge, wasm-callable) + CLI adapter (export, build, validate, new-mod, pack) | W1–W4 | full export → build identical for every file the engine reads |
-| W6a | mod resolver + save sidecar + package limits | W5 | acceptance 3–5 |
-| W6b | page mod manager + end-to-end in the browser | W6a | acceptance 3 in the browser |
+| W5a | `u6-defs` library: export / build / merge / validate / sparse diff, wasm-callable (browser and CLI both call it; neither re-implements merge or validation) | W1–W4 | full export → build identical for every file the engine reads |
+| W5b | CLI adapter: file I/O and the commands export, build, validate, new-mod, pack | W5a | each command on the user's files |
+| W6a | mod resolver + save sidecar + package limits | W5a | acceptance 4–5 |
+| W6b | page mod manager + end-to-end in the browser | W6a, W5b, W8 (first family) | acceptance 3, in native and in the browser |
 | W7a | NPC seam + OriginalBrain | — | acceptance 1 + RNG-free enumeration test |
 | W7b | ModelBrain + budget + transport | W7a, transport decision | acceptance 2 |
 | W8 | rules extraction, one family per dispatch (missile weapons first) | W4 | behaviour test + parity |
