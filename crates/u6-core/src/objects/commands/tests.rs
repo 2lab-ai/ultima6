@@ -813,6 +813,25 @@ fn a_removed_serpent_head_still_sets_the_eggs_worktype() {
 }
 
 #[test]
+fn a_hatchling_removed_after_its_scatter_still_sets_the_eggs_worktype() {
+    // Template 1 (type 0x168, worktype 0) places its one; template 2's (0x168, worktype 6)
+    // fails its scatter and is removed, and 0x1319b2 goes on to 0x131ffe, which takes 6 as the
+    // egg's worktype; template 3's winged gargoyle gets it, not its own 8.
+    let mut s = monster_world();
+    let egg = put(&mut s, 0x14f, 520, 500);
+    s.objects.qq[egg as usize] = 100;
+    s.objects.obj_status[egg as usize] = 0x20;
+    create_in(&mut s, 0x16b, 0x08, 0x0801, egg); // third
+    create_in(&mut s, 0x168, 0x08, 0x0601, egg); // second
+    create_in(&mut s, 0x168, 0x08, 0x0001, egg); // first
+    hatch_egg(&mut s, egg);
+    assert_eq!(of_kind(&s, 0x168).len(), 1);
+    let g = of_kind(&s, 0x16b);
+    assert_eq!(g.len(), 1);
+    assert_eq!(s.actors.worktype[g[0] as usize], 6);
+}
+
+#[test]
 fn search_joins_the_last_spilled_name_with_and_past_a_fixed_content() {
     // The look-ahead that picks the separator must skip the 0x4c the spill never moves: with
     // [gem, ring, 0x4c] the ring is the last name (the and line), and a 0x4c first in the body

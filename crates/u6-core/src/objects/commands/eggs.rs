@@ -340,11 +340,11 @@ fn treasure(s: &mut State, m: Slot, index: i16, b: u8) {
 /// which ends that one (port: the original goes on with the freed slot, see the loop). A silver
 /// serpent gets its body segments (no slot for the first removes it, which ends it too; the
 /// original writes the actor bytes into its freed slot), a hydra its heads. Actors get the
-/// worktype the first of them took from its template (taken again while it is 0; 12 from a
-/// template of gargoyles that are friends on), with the movement flags of worktypes 15 / 16,
-/// and an attacking gargoyle doubled stats. A hostile hatched out of an egg without status
-/// 0x20 may make Shamino warn of its direction once per fight (A4-0x6a88). The egg ends with
-/// status 0x40 (hatched) and 0x02.
+/// egg's worktype, the quality of the first actor hatchling's template, a removed one's too
+/// (taken again while it is 0; 12 from a template of gargoyles that are friends on), with the
+/// movement flags of worktypes 15 / 16, and an attacking gargoyle doubled stats. A hostile
+/// hatched out of an egg without status 0x20 may make Shamino warn of its direction once per
+/// fight (A4-0x6a88). The egg ends with status 0x40 (hatched) and 0x02.
 pub fn hatch_egg(s: &mut State, egg: Slot) {
     let mut friends = false;
     let mut work: u8 = 0;
@@ -457,17 +457,16 @@ fn hatch_templates(
             } else if !seams::scatter(s, m, scatter_out) {
                 // After removing it (0x131cfe-0x131d02) the original jumps forward (0x131d06)
                 // to 0x131d0e, the path a placed hatchling takes, and gives the freed slot a
-                // serpent body, hydra heads and its actor bytes; the port stops here.
+                // serpent body, hydra heads and its actor bytes; the port only takes the
+                // worktype on the way (0x131ffe) and stops here.
                 remove(s, m);
+                take_worktype(s, c, m, work);
                 continue;
             }
             if t == SERPENT {
                 if !serpent_body(s, c, m, last) {
-                    // The original still takes the worktype from this template (0x131ffe-
-                    // 0x132016) before writing the freed slot; only the writes are skipped.
-                    if *work == 0 {
-                        *work = quality(s, c);
-                    }
+                    // The original goes on to 0x131ff2 with the freed slot; as above.
+                    take_worktype(s, c, m, work);
                     continue;
                 }
             } else if t == HYDRA {
@@ -475,9 +474,7 @@ fn hatch_templates(
             }
             if m < ACTOR_SLOTS as Slot {
                 let i = m as usize;
-                if *work == 0 {
-                    *work = quality(s, c);
-                }
+                take_worktype(s, c, m, work);
                 s.actors.worktype[i] = *work;
                 s.actors.attrs.combat_mode[i] = *work;
                 let mf = &mut s.actors.attrs.movement_flags[i];
@@ -520,6 +517,14 @@ fn hatch_templates(
             s.actors.work.prompt = 1;
         }
         s.actors.work.flag_6a88 = 1;
+    }
+}
+
+/// 0x131ff2-0x132016: for an actor slot `m` (a freed one too), the egg's worktype becomes the
+/// quality of template `c` while it is still 0.
+fn take_worktype(s: &State, c: Slot, m: Slot, work: &mut u8) {
+    if m < ACTOR_SLOTS as Slot && *work == 0 {
+        *work = quality(s, c);
     }
 }
 
