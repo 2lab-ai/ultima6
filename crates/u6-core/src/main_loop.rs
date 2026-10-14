@@ -223,9 +223,8 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
         crate::actors::turn::after_load(&mut s);
         crate::actors::clock::tick(&mut s, 0);
         if s.actors.objlist_tail.get(TAIL_COMBAT).copied().unwrap_or(0) != 0 {
-            // Contract: start combat mode (0x121c64, the B handler). The shipped state is out
-            // of combat, so a boot does not reach it.
-            todo_stub!("0x121c64 begin combat mode", ());
+            // 0x121c64, the B handler (the shipped objlist has the combat byte set).
+            crate::combat::mode::begin_combat(&mut s);
         } else {
             // Contract: pick and start the area song. M1 has no sound.
             todo_stub!("0x110912 pick and play the area song", ());

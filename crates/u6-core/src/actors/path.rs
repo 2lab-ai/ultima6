@@ -187,10 +187,9 @@ pub fn work_object(s: &State, actor: u16, kind: usize) -> Option<ObjectId> {
         .map(|f| f.id)
 }
 
-/// [combat] 0x1221da (a sleeper with no bed lies down [likely]). Stub contract: argument the
-/// actor; no result; the actor keeps its frame (sleeping, status bit 0x04 set).
-fn lie_down(_s: &mut State, _actor: u16) {
-    crate::todo_stub!("0x1221da lie down without a bed (fallback: none)", ())
+/// [combat] 0x1221da (the actor drops: its lying frame).
+fn lie_down(s: &mut State, actor: u16) {
+    crate::combat::damage::lie_down(s, actor as i16);
 }
 
 /// Original: 0x11de8c (actors: arrive at the schedule location: start the scheduled work)

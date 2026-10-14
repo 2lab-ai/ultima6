@@ -5,11 +5,9 @@
 //! behaviours that wait for the player (an arrest prompt, an NPC who starts a conversation)
 //! hand back a [`Wait`] that the async part awaits without holding a state borrow.
 //!
-//! Worktypes implemented in cut combat code (hunk 13: 3..6, 7, 8, 9, 10, 11, 13, 14, 0x13,
-//! 0x9a, 0x9b and the 0x99 target search) are stub points. Their contract: argument the actor,
-//! no result, no movement; the turn's epilogue then charges the actor 10 movement points
-//! (0x1200b0 does that whenever the points did not change), so such an NPC always makes
-//! progress toward the end of the round and never loops.
+//! Worktypes implemented in hunk 13 (3..6, 7, 8, 9, 10, 11, 13, 14, 0x13, 0x9a, 0x9b and the
+//! 0x99 target search) are `combat::npc`; the frames they present (hit flashes, missiles) are
+//! played right after the synchronous part ([`crate::combat::play_effects`]).
 
 use std::cell::RefCell;
 
@@ -34,36 +32,19 @@ pub enum Wait {
     Talk(u16),
 }
 
-/// The cut combat worktype behaviours (hunk 13), one stub point each; see the module doc for
-/// their common contract.
-fn combat_worktype(wt: u8) {
-    match wt {
-        3 => todo_stub!("0x125938 combat worktype 3 (fallback: idle)", ()),
-        4 => todo_stub!("0x1259b0 combat worktype 4 (fallback: idle)", ()),
-        5 => todo_stub!("0x125e26 combat worktype 5 (fallback: idle)", ()),
-        6 => todo_stub!("0x1263a2 combat worktype 6 (fallback: idle)", ()),
-        8 | 0x9b => todo_stub!("0x125254 combat worktype 8 / 0x9b (fallback: idle)", ()),
-        10 => todo_stub!("0x126990 combat worktype 10 (fallback: idle)", ()),
-        11 => todo_stub!("0x126b28 combat worktype 11 (fallback: idle)", ()),
-        13 => todo_stub!("0x126f58 combat worktype 13 (fallback: idle)", ()),
-        14 => todo_stub!("0x126cc0 combat worktype 14 (fallback: idle)", ()),
-        _ => todo_stub!(
-            "0x126738 combat worktype 7 / 9 / 0x13 / 0x9a (fallback: idle)",
-            ()
-        ),
-    }
+/// The combat worktype behaviours (hunk 13, `combat::npc`).
+fn combat_worktype(s: &mut State, actor: u16, wt: u8) {
+    crate::combat::npc::worktype(s, actor, wt);
 }
 
-/// [combat] 0x12500a (the 0x99 worktype's target search). Stub contract: argument the actor,
-/// result a target actor or -1. Fallback: -1, so the NPC loiters ([`loiter`]).
-fn find_target(_s: &State, _actor: u16) -> i16 {
-    todo_stub!("0x12500a find a combat target (fallback: none)", -1)
+/// [combat] 0x12500a (the 0x99 worktype's target search): a target actor or -1.
+fn find_target(s: &mut State, actor: u16) -> i16 {
+    crate::combat::npc::find_target(s, actor as i16)
 }
 
-/// [combat] 0x1230ce (strike the target, then redraw). Stub contract: argument the target; no
-/// result. Unreachable while [`find_target`] has no fallback target.
-fn strike(_s: &mut State, _target: u16) {
-    todo_stub!("0x1230ce strike a target (fallback: none)", ())
+/// [combat] 0x1230ce (the hit flash on the target).
+fn strike(s: &mut State, target: u16) {
+    crate::combat::damage::flash(s, target as i16);
 }
 
 /// Original: 0x12005a (actors: first free path slot, freeing slots of actors that stopped
@@ -410,7 +391,7 @@ pub fn npc_turn_sync(s: &mut State, actor: u16) -> Option<(i8, Wait)> {
     let wt = s.actors.worktype[a];
     let mut wait = Wait::None;
     match wt {
-        3..=11 | 13 | 14 | 0x13 | 0x9a | 0x9b => combat_worktype(wt),
+        3..=11 | 13 | 14 | 0x13 | 0x9a | 0x9b => combat_worktype(s, actor, wt),
         12 | 0x8f => wander(s, actor),
         15 | 16 | 0x8b..=0x8e => random_walk(s, actor, tx, ty),
         0x12 => {
@@ -518,6 +499,7 @@ fn guard_post(s: &mut State, actor: u16, tx: u16, ty: u16) {
 /// movement points did not change pays 10, so every turn makes progress.
 pub async fn npc_turn(state: &RefCell<State>, io: &Io, actor: u16) {
     let started = npc_turn_sync(&mut state.borrow_mut(), actor);
+    crate::combat::play_effects(state, io).await;
     let Some((before, wait)) = started else {
         return;
     };
@@ -561,7 +543,7 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
         seams::print(&mut s, -0x74cb, &[]);
         seams::full_redraw(&mut s);
         if s.actors.combat_mode() {
-            todo_stub!("0x121d78 break off combat (fallback: stays on)", ());
+            crate::combat::mode::break_off(&mut s);
         }
         seams::jail_party(&mut s, 0xba, 0xe7, 0);
         while s.actors.calendar.hour != 8 {
@@ -580,7 +562,7 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
         seams::refresh_view(&mut s);
     } else {
         seams::print(&mut s, -0x7489, &[]);
-        todo_stub!("0x123aec turn hostile (fallback: none)", ());
+        crate::combat::damage::rouse_neutrals(&mut s);
         s.actors.worktype[a] = 8;
         s.actors.attrs.status[a] = (s.actors.attrs.status[a] & 0x9f) | 0x20;
         for i in 0..0x100 {

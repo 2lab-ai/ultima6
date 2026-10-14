@@ -283,17 +283,9 @@ pub fn set_obj_quality(s: &mut State, id: ObjectId, q: u8) {
     }
 }
 
-/// [combat] 0x121b08: Chebyshev distance from `actor` to (x, y) (max of the axis distances; a
-/// combat stub point that only calls the runtime `abs` 0x101ea8). Contract kept as a stub: the
-/// combat leaf is outside milestone 1; the fallback is the distance itself.
+/// [combat] 0x121b08: distance from `actor` to (x, y) (the larger axis distance).
 pub fn distance(s: &State, actor: u16, x: u16, y: u16) -> i16 {
-    let p = s.objects.location[usize::from(actor)];
-    let dx = (p.x as i16).wrapping_sub(x as i16).wrapping_abs();
-    let dy = (p.y as i16).wrapping_sub(y as i16).wrapping_abs();
-    todo_stub!(
-        "0x121b08 distance to a tile (fallback: max axis distance)",
-        dx.max(dy)
-    )
+    crate::combat::leaves::distance(s, actor as i16, x as i16, y as i16)
 }
 
 /// [ui] 0x10790a: waits for a command key and returns its game code; the queued lines are

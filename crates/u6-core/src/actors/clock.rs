@@ -264,13 +264,9 @@ fn wear_off(s: &mut State, actor: u16, ring: bool) {
     }
 }
 
-/// [combat] 0x1231be (damage / death; "Slime divides!"). Stub contract: arguments the actor and
-/// the hit points lost; no result. Fallback: the hit points drop, never below 1 (death and its
-/// messages are combat's). Reached by poisoned actors; none in the start state.
+/// [combat] 0x1231be (damage / death; "Slime divides!"): the actor loses `damage` hit points.
 pub fn hurt(s: &mut State, actor: u16, damage: u8) {
-    let hp = &mut s.actors.attrs.hp[usize::from(actor)];
-    *hp = hp.saturating_sub(damage).max(1);
-    crate::todo_stub!("0x1231be hurt an actor (fallback: hp down, no death)", ())
+    crate::combat::damage::hurt(s, actor as i16, i16::from(damage));
 }
 
 /// [objects] 0x12db7e (the keg / timed object effect). Stub contract: argument the object of
