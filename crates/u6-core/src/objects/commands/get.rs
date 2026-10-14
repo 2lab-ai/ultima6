@@ -226,16 +226,15 @@ fn store(s: &mut State, actor: Slot, sel: Slot, kind: u16) -> bool {
     if !takeable(s, sel) && s.map.centre.z == 0 {
         mark_takeable(&mut s.objects, sel);
         seams::lose_karma(s, 1);
-        let witness = (1..0xe0).find(|&a| {
+        let witness = (1..0xe0).any(|a| {
             let st = s.actors.attrs.status[a as usize];
             st & 0x60 == 0 && crate::converse::on_screen(s, a) && st & 0x04 == 0
         });
-        match witness {
-            Some(a) => {
-                queue_at(s, S_STOP_THIEF, Vec::new());
-                seams::turn_hostile(s, a);
-            }
-            None => queue_at(s, S_STEALING, Vec::new()),
+        if witness {
+            queue_at(s, S_STOP_THIEF, Vec::new());
+            seams::turn_hostile(s);
+        } else {
+            queue_at(s, S_STEALING, Vec::new());
         }
     }
     crate::map::view::update_view(s);

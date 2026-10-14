@@ -1,6 +1,6 @@
-//! Calls from Restore into functions other modules own and have not ported. Each keeps the
-//! contract and an explicit fallback; the owner replaces the body with the call. Proposed
-//! owner in brackets.
+//! Calls from Restore into functions other modules own: combat's ports are called directly
+//! (integration M2); the area song keeps its contract and an explicit fallback. Owner in
+//! brackets.
 
 use crate::state::State;
 use crate::todo_stub;
@@ -11,14 +11,14 @@ pub(crate) fn play_area_song(_s: &mut State) {
     todo_stub!("0x110912 pick and play the area song", ());
 }
 
-/// 0x121c64: enter combat mode (the saved combat byte A4-0x7b0c is set) [combat].
-pub(crate) fn begin_combat(_s: &mut State) {
-    // Contract: party worktypes to combat, the combat panel. Fallback: not in combat.
-    todo_stub!("0x121c64 begin combat mode", ());
+/// 0x121c64: enter combat mode (the saved combat byte A4-0x7b0c is set) [combat]:
+/// [`crate::combat::mode::begin_combat`].
+pub(crate) fn begin_combat(s: &mut State) {
+    crate::combat::mode::begin_combat(s);
 }
 
-/// 0x121d78: leave combat mode (the saved combat byte is clear) [combat].
-pub(crate) fn break_off_combat(_s: &mut State) {
-    // Contract: party worktypes back to following. Fallback: worktypes as saved.
-    todo_stub!("0x121d78 break off combat", ());
+/// 0x121d78: leave combat mode (the saved combat byte is clear) [combat]:
+/// [`crate::combat::mode::break_off`].
+pub(crate) fn break_off_combat(s: &mut State) {
+    crate::combat::mode::break_off(s);
 }

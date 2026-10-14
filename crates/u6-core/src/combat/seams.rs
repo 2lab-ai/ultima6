@@ -1,6 +1,7 @@
-//! Calls from the combat code into functions other modules own that are not ported yet. Each is
-//! the narrowest signature the combat code needs, a `todo_stub!` with its contract and an
-//! explicit fallback. Proposed owner in brackets.
+//! Calls from the combat code into functions other modules own. Ported owners are called
+//! directly (integration M2: objects 0x10e596, 0x12f8fe); the others are the narrowest signature
+//! the combat code needs, a `todo_stub!` with its contract and an explicit fallback. Proposed
+//! owner in brackets.
 
 use crate::engine::with_current_io;
 use crate::objects::{self, Slot};
@@ -164,9 +165,10 @@ pub(crate) fn weapon_spell(_s: &mut State, _target: i16, _attacker: i16) {
     todo_stub!("0x1165d2 weapon 0x5b strikes an actor (fallback: none)", ())
 }
 
-/// [objects] 0x12f8fe(actor): a rider dismounts before it lies down. Fallback: stays mounted.
-pub(crate) fn dismount(_s: &mut State, _actor: i16) {
-    todo_stub!("0x12f8fe dismount before lying down (fallback: none)", ())
+/// [objects] 0x12f8fe(actor): a rider dismounts before it lies down:
+/// [`crate::objects::commands::dismount`].
+pub(crate) fn dismount(s: &mut State, actor: i16) {
+    crate::objects::commands::dismount(s, actor);
 }
 
 /// [sound] 0x110878(song): plays song `n` (7 = the combat song). Fallback: silence.
@@ -182,53 +184,10 @@ pub(crate) fn area_song(_s: &mut State) {
     )
 }
 
-/// [objects] 0x10e596(word, cx, cy, mode): add a tile to the draw list of window cell (cx, cy).
-/// Ported in `objects/draw.rs` but not exported by the objects module. Contract: nothing on a
-/// hidden (0xff) or dark (0x1bc) cell; a top tile (flags2 0x10) with mode 1 goes at the end of
-/// the list, any other tile in front. Fallback: that insertion on `objects.draw` (the egg,
-/// see-through and flags3 0x20 cases of the full port are not needed for the hit tile 0x101).
+/// [objects] 0x10e596(word, cx, cy, mode): add a tile to the draw list of window cell (cx, cy):
+/// [`crate::objects::add_tile`].
 pub(crate) fn add_tile(s: &mut State, word: u16, cx: i16, cy: i16, mode: u16) {
-    let Some(c) = usize::try_from(cy * 11 + cx).ok().filter(|&c| c < 121) else {
-        return;
-    };
-    let t = word & 0x7ff;
-    let top = s
-        .tables
-        .tileflags
-        .flags2
-        .get(usize::from(t))
-        .copied()
-        .unwrap_or(0)
-        & 0x10
-        != 0;
-    let d = &mut s.objects.draw;
-    let base = d.base[c];
-    let node = d.node_next[0];
-    if base != 0xff && base != 0x1bc && node != 0 {
-        d.node_next[0] = d.node_next[usize::from(node)];
-        d.node_tile[usize::from(node)] = word;
-        if (top || mode == 2) && mode & 1 != 0 {
-            let mut last = d.cell[c];
-            if last == 0 {
-                d.cell[c] = node;
-            } else {
-                let mut guard = 0;
-                while d.node_next[usize::from(last)] != 0 && guard < 256 {
-                    last = d.node_next[usize::from(last)];
-                    guard += 1;
-                }
-                d.node_next[usize::from(last)] = node;
-            }
-            d.node_next[usize::from(node)] = 0;
-        } else {
-            d.node_next[usize::from(node)] = d.cell[c];
-            d.cell[c] = node;
-        }
-    }
-    todo_stub!(
-        "0x10e596 add a tile to a window cell's draw list (fallback: port insertion)",
-        ()
-    )
+    objects::add_tile(s, word, cx, cy, mode);
 }
 
 /// [sound] A4-0x779a: the song playing. Fallback: 7 (the combat song 0x121c64 starts), so
@@ -238,7 +197,8 @@ pub(crate) fn current_song(_s: &State) -> u16 {
 }
 
 /// [map] 0x109c12(x0, y0, 0x28, 2): flood the sight from window cell (x0, y0) into the cell
-/// flags (bit 7 = seen). Ported as a private step of `map/view.rs`. Fallback: every cell seen.
+/// flags (bit 7 = seen). `map/view.rs` ports 0x109c12 for its modes 0 (light) and 1 (sight)
+/// only; the overview's mode 2 is not ported. Fallback: every cell seen.
 pub(crate) fn flood_sight(s: &mut State, _x0: i16, _y0: i16) {
     s.map.view_flags.iter_mut().for_each(|f| *f |= 0x80);
     todo_stub!(

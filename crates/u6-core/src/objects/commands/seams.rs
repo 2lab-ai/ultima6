@@ -1,49 +1,19 @@
-//! Calls from the object commands into routines other modules own and have not ported yet.
+//! Calls from the object commands into routines other modules own.
 //!
-//! Each seam names its owner and the original, keeps the `todo_stub!` hit count, and states
-//! its fallback. Where an accepted scenario depends on the exact result (the egg hatch on the
-//! walk path places monsters with 0x121e88 and its RNG draws), the fallback is the original's
-//! behaviour written out here from its code, so the dispatcher can swap in the owner's port
-//! without a behaviour change.
+//! Ported owners are called directly (integration M2: combat 0x121e88, 0x121b08, 0x1231be,
+//! 0x12395a, 0x1230ce, 0x1331b4, 0x1240fa, 0x122f3e, 0x12267a, 0x123aec, 0x101eb0, 0x1228ba;
+//! actors 0x11b1c0). The others name their owner and the original, keep the `todo_stub!` hit
+//! count, and state their fallback; where an accepted scenario depends on the exact result the
+//! fallback is the original's behaviour written out here from its code.
 
 use crate::objects::Slot;
-use crate::objects::moves::move_to;
 use crate::state::State;
 use crate::todo_stub;
 
-/// Owner: combat (hunk 13). Original 0x121e88 (put a new monster on a free tile near where it
-/// stands, out of the view when `out_of_view`).
-///
-/// Contract: up to 8 tries of x + (1..=4) + (1..=4) − 5, y the same (four RNG draws per try,
-/// in that order); with `out_of_view` a tile within 5 of the view centre on both axes is
-/// skipped; the first tile the actor may stand on (actors 0x11b1c0) gets it (0x10c9d2) and the
-/// result is true; false when no try fits or `m` < 0. Fallback = that behaviour (the egg hatch
-/// at game start depends on its draws and positions).
+/// Combat 0x121e88 (put a new monster on a free tile near where it stands, out of the view when
+/// `out_of_view`): [`crate::combat::mode::scatter`].
 pub(crate) fn scatter(s: &mut State, m: Slot, out_of_view: bool) -> bool {
-    todo_stub!("0x121e88 place a new monster near its tile", ());
-    if m < 0 {
-        return false;
-    }
-    let (x, y, z) = (s.objects.x(m), s.objects.y(m), u16::from(s.objects.z(m)));
-    for _ in 0..8 {
-        let a = s.rng.range(1, 4);
-        let b = s.rng.range(1, 4);
-        let nx = a.wrapping_add(b).wrapping_add(x).wrapping_sub(5);
-        let c = s.rng.range(1, 4);
-        let d = s.rng.range(1, 4);
-        let ny = c.wrapping_add(d).wrapping_add(y).wrapping_sub(5);
-        let centre = s.map.centre;
-        let (cx, cy) = (centre.x as i16, centre.y as i16);
-        let near = |v: u16, c: i16| (c.wrapping_sub(5)..=c.wrapping_add(5)).contains(&(v as i16));
-        if out_of_view && near(nx, cx) && near(ny, cy) {
-            continue;
-        }
-        if crate::actors::walk::can_move_to(s, m as u16, nx, ny) {
-            move_to(s, m, nx, ny, z);
-            return true;
-        }
-    }
-    false
+    crate::combat::mode::scatter(s, m, out_of_view)
 }
 
 /// Owner: ui (hunk 2). Original 0x105016 (direction 0..7 of the view pixel (x, y) from the
@@ -97,16 +67,10 @@ pub(crate) fn direction_of(s: &State, x: i16, y: i16) -> i16 {
     [[7, 6, 5], [0, -1, 4], [1, 2, 3]][col][row]
 }
 
-/// Owner: combat (hunk 13). Original 0x121b08 (distance from actor `a` to (x, y): the larger of
-/// |dx|, |dy|).
-///
-/// Contract: pure. Fallback = that computation.
+/// Combat 0x121b08 (distance from actor `a` to (x, y): the larger of |dx|, |dy|):
+/// [`crate::combat::leaves::distance`].
 pub(crate) fn distance(s: &State, a: u16, x: u16, y: u16) -> i16 {
-    todo_stub!("0x121b08 distance from an actor to a location", ());
-    let slot = a as Slot;
-    let dx = (s.objects.x(slot).wrapping_sub(x) as i16).wrapping_abs();
-    let dy = (s.objects.y(slot).wrapping_sub(y) as i16).wrapping_abs();
-    dx.max(dy)
+    crate::combat::leaves::distance(s, a as i16, x as i16, y as i16)
 }
 
 /// Owner: ui (hunk 8). Original 0x1118c6 (redraw the inventory panel after a carried object
@@ -116,28 +80,28 @@ pub(crate) fn redraw_inventory(s: &mut State) {
     s.ui.panel.dirty = true;
 }
 
-/// Owner: combat (hunk 13). Original 0x1231be (hurt actor `a` by `damage`: hit points, death,
-/// splitting slimes). Fallback: nothing (no damage).
-pub(crate) fn hurt(_s: &mut State, _a: Slot, _damage: i16) {
-    todo_stub!("0x1231be hurt an actor", ())
+/// Combat 0x1231be (hurt actor `a` by `damage`: hit points, death, splitting slimes):
+/// [`crate::combat::damage::hurt`].
+pub(crate) fn hurt(s: &mut State, a: Slot, damage: i16) {
+    crate::combat::damage::hurt(s, a, damage);
 }
 
-/// Owner: combat (hunk 13). Original 0x12395a (print actor `a`'s wound level: "critical!",
-/// "heavily wounded" ...). Fallback: nothing printed.
-pub(crate) fn wound_text(_s: &mut State, _a: Slot) {
-    todo_stub!("0x12395a print the wound level", ())
+/// Combat 0x12395a (print actor `a`'s wound level): [`crate::combat::damage::report_wounds`].
+pub(crate) fn wound_text(s: &mut State, a: Slot) {
+    crate::combat::damage::report_wounds(s, a);
 }
 
-/// Owner: combat (hunk 13). Original 0x1230ce (flash actor `a` hit: redraw with the hit
-/// colour). Fallback: nothing.
-pub(crate) fn flash(_s: &mut State, _a: Slot) {
-    todo_stub!("0x1230ce flash a hit actor", ())
+/// Combat 0x1230ce (flash actor `a` hit): [`crate::combat::damage::flash`].
+pub(crate) fn flash(s: &mut State, a: Slot) {
+    crate::combat::damage::flash(s, a);
 }
 
-/// Owner: ui (hunk 18). Original 0x1331b4 (explosion of `tile` around (x, y): animate it and
-/// return the slots it reached, -1-terminated in the original). Fallback: nobody reached.
-pub(crate) fn blast(_s: &mut State, _x: u16, _y: u16, _tile: u16) -> Vec<Slot> {
-    todo_stub!("0x1331b4 explosion animation and its victims", Vec::new())
+/// Ui (hunk 18) 0x1331b4 (explosion of `tile` around (x, y): animated, the slots it reached):
+/// [`crate::combat::present::blast`], without its -1 terminator.
+pub(crate) fn blast(s: &mut State, x: u16, y: u16, tile: u16) -> Vec<Slot> {
+    let mut hit = crate::combat::present::blast(s, x as i16, y as i16, tile);
+    hit.retain(|&a| a >= 0);
+    hit
 }
 
 /// Owner: magic (hunk 11). Original 0x116526 (the object of `kind` and `quality` that `owner`
@@ -147,52 +111,22 @@ pub(crate) fn carried(s: &mut State, owner: Slot, kind: u16, quality: i16) -> Sl
     crate::objects::find_child(&mut s.objects, owner, kind as i16, quality)
 }
 
-/// Owner: combat (hunk 13). Original 0x1240fa (the actor a horse or monster part `obj`
-/// belongs to; `obj` itself for an actor). Fallback: `obj` (the rider passed is the actor).
-pub(crate) fn rider(_s: &State, obj: Slot) -> Slot {
-    todo_stub!("0x1240fa actor of a part", obj)
+/// Combat 0x1240fa (the actor a horse or monster part `obj` belongs to; `obj` itself for an
+/// actor): [`crate::combat::leaves::owner`].
+pub(crate) fn rider(s: &mut State, obj: Slot) -> Slot {
+    crate::combat::leaves::owner(s, obj)
 }
 
-/// Original: A4-0x7e7e (bytes by monster index: a monster's own damage), A4-0x6800 / -0x67b6
-/// (37 weapon types and their damage), A4-0x6884 / -0x6850 (26 armour types and what they
-/// absorb).
-const MONSTER_DAMAGE: i32 = -0x7e7e;
-const WEAPON_TYPES: i32 = -0x6800;
-const WEAPON_DAMAGE: i32 = -0x67b6;
-const ARMOUR_TYPES: i32 = -0x6884;
-const ARMOUR_VALUE: i32 = -0x6850;
-
-/// Owner: combat (hunk 13). Original 0x122f3e (damage `obj` does: an actor of a monster type
-/// its monster byte, else the weapon table's byte for its type, -1 when not a weapon).
-///
-/// Contract: pure table lookup. Fallback = that lookup (Look prints it).
+/// Combat 0x122f3e (damage `obj` does: a monster's own byte, else its weapon's, -1 when not a
+/// weapon): [`crate::combat::leaves::damage_of`].
 pub(crate) fn damage(s: &State, obj: Slot) -> i16 {
-    todo_stub!("0x122f3e damage of a weapon or monster", ());
-    let d = &s.objcmds.data;
-    let kind = s.objects.kind(obj);
-    let index = if obj < 0x100 {
-        crate::objects::monster_index(&s.objects, kind)
-    } else {
-        -1
-    };
-    if index >= 0 {
-        return i16::from(d.a4_byte(MONSTER_DAMAGE + i32::from(index)));
-    }
-    (0..0x25)
-        .find(|&i| d.a4_word(WEAPON_TYPES + 2 * i) == kind)
-        .map_or(-1, |i| i16::from(d.a4_byte(WEAPON_DAMAGE + i)))
+    crate::combat::leaves::damage_of(s, obj)
 }
 
-/// Owner: combat (hunk 13). Original 0x12267a (the points of damage armour `obj` absorbs, 0).
-///
-/// Contract: pure table lookup. Fallback = that lookup (Look prints it).
+/// Combat 0x12267a (the points of damage armour `obj` absorbs, 0):
+/// [`crate::combat::leaves::armour_of`].
 pub(crate) fn armour(s: &State, obj: Slot) -> i16 {
-    todo_stub!("0x12267a armour value of an object", ());
-    let d = &s.objcmds.data;
-    let kind = s.objects.kind(obj);
-    (0..0x1a)
-        .find(|&i| d.a4_word(ARMOUR_TYPES + 2 * i) == kind)
-        .map_or(0, |i| i16::from(d.a4_byte(ARMOUR_VALUE + i)))
+    crate::combat::leaves::armour_of(s, obj)
 }
 
 /// Original: A4-0x71ca (9 words: types whose weight 0x1110f6 reads in tenths)
@@ -322,18 +256,16 @@ pub(crate) fn inventory_contents(s: &mut State, _actor: Slot) {
     s.ui.panel.dirty = true;
 }
 
-/// Owner: combat (hunk 13). Original 0x123aec (actor `a` turns on the party). Fallback:
-/// nothing.
-pub(crate) fn turn_hostile(_s: &mut State, _a: Slot) {
-    todo_stub!("0x123aec turn hostile", ())
+/// Combat 0x123aec (the party wronged a neutral: karma −5, the guards and townsfolk nearby turn
+/// on the party): [`crate::combat::damage::rouse_neutrals`].
+pub(crate) fn turn_hostile(s: &mut State) {
+    crate::combat::damage::rouse_neutrals(s);
 }
 
-/// Owner: main (hunk 1). Original 0x101eb0 (lower the karma A4-0x7b7c by `n`, to 0).
-/// Contract: pure arithmetic. Fallback = that.
+/// Main (hunk 1) 0x101eb0 (lower the karma A4-0x7b7c by `n`, to 0):
+/// [`crate::combat::leaves::lose_karma`].
 pub(crate) fn lose_karma(s: &mut State, n: u8) {
-    todo_stub!("0x101eb0 lower the karma", ());
-    let k = &mut s.actors.karma;
-    *k = (*k).saturating_sub(n);
+    crate::combat::leaves::lose_karma(s, i16::from(n));
 }
 
 /// Owner: ui / inventory (hunk 8). Original 0x1122dc (a readied object that cannot simply be
@@ -401,29 +333,22 @@ pub(crate) fn equipment_slot(s: &State, obj: Slot) -> i16 {
         .map_or(-1, |i| i as i16)
 }
 
-/// Owner: ui (hunk 18) via combat 0x1228ba. Original 0x1228ba → 0x132706 (the path from
-/// `actor` to (x, y) within `range`, with `tile` the thrown object flying along it; (x, y)
-/// end where it stops; false when nothing gets there). Fallback: true, (x, y) unchanged.
+/// Combat 0x1228ba (the path from `actor` to (x, y) within `range`, `tile` flying along it, ui
+/// 0x132706; (x, y) end where it stops; false when it did not get there):
+/// [`crate::combat::attack::shoot`].
 pub(crate) fn throw_path(
-    _s: &mut State,
-    _actor: Slot,
-    _range: i16,
-    _x: &mut i16,
-    _y: &mut i16,
-    _tile: u16,
+    s: &mut State,
+    actor: Slot,
+    range: i16,
+    x: &mut i16,
+    y: &mut i16,
+    tile: u16,
 ) -> bool {
-    todo_stub!("0x1228ba path and flight of a thrown object", true)
+    crate::combat::attack::shoot(s, actor, x, y, range, tile) != 0
 }
 
-/// Owner: actors. Original 0x11b1c0 (may `slot` stand at (x, y)). For an actor this is
-/// [`crate::actors::walk::can_move_to`]. Drop and Move ask it for objects too, where the
-/// original reads the actor tables past their 256 entries (A4+0x3d0c + slot lands in later
-/// tables) and the port's tables end: for a slot ≥ 0x100 the fallback is the tile test alone,
-/// a passable map tile with nothing impassable on it (0x11b9ae).
+/// Actors 0x11b1c0 (may `slot` stand at (x, y)): [`crate::actors::walk::can_move_to`], for an
+/// object slot too (Drop and Move ask it for the object), as the original calls it.
 pub(crate) fn may_stand(s: &mut State, slot: Slot, x: u16, y: u16) -> bool {
-    if (0..crate::objects::ACTOR_SLOTS as Slot).contains(&slot) {
-        return crate::actors::walk::can_move_to(s, slot as u16, x, y);
-    }
-    todo_stub!("0x11b1c0 for an object slot", ());
-    !crate::actors::walk::blocked_at(s, x, y)
+    crate::actors::walk::can_move_to(s, slot as u16, x, y)
 }

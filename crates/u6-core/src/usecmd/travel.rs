@@ -157,7 +157,8 @@ pub fn board_vessel(s: &mut State, obj: Slot) {
     s.map.centre.x = s.objects.x(v);
     s.map.centre.y = s.objects.y(v);
     crate::map::travel::leave_region(s, 2);
-    seams::reset_formation(s);
+    let first = Slot::from(member(s, 0));
+    seams::copy_actor(s, first, 0);
     let o = &mut s.objects;
     o.obj_status[0] &= !0x20;
     o.obj_status[0] &= !0x02;
@@ -548,7 +549,7 @@ pub async fn sextant_travel(ux: Ux<'_>) {
             seams::damage(&mut s, Slot::from(m), d);
         }
         ux.put(b'\n').await;
-        seams::check_deaths(&mut ux.s());
+        seams::report_wounds(&mut ux.s(), Slot::from(m));
         return;
     }
     {

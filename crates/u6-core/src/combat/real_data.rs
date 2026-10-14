@@ -1,6 +1,6 @@
 //! Real-data receipt of the combat code: the shipped start state (its combat byte is set, so
 //! the boot begins combat 0x121c64), two gargoyles made next to the party the way 0x131646
-//! makes a monster (the egg that hatches them is another unit's), the Avatar's Attack on one
+//! makes a monster (the start egg is kept from hatching), the Avatar's Attack on one
 //! (0x124caa with a confirmed cross-hair), then world turns: the party fights in its combat
 //! modes, the gargoyles assault (worktype 8). Skips where the zip is missing; prints numbers and
 //! the message transcript only. With `U6_COMBAT_FRAMES=<dir>` it writes the frames the effect
@@ -35,7 +35,11 @@ fn start() -> Option<(State, Files)> {
     let mut state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
     crate::objects::load_state_objects(&mut state);
     state.map.flag_784e = 1;
+    // The start window's egg stays unhatched here (A4-0x7afb, which 0x1321dc / 0x1319b2 check):
+    // since the objects port hatches it, its gargoyles would join the two this receipt makes.
+    state.map.flag_7afb = 1;
     crate::map::region::refresh_region(&mut state);
+    state.map.flag_7afb = 0;
     crate::map::view::update_view(&mut state);
     Some((state, files))
 }

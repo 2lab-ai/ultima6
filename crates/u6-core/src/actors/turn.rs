@@ -42,7 +42,9 @@ pub fn darkness(s: &mut State) {
     s.gfx.window_shown = 1;
     seams::full_redraw(s);
     seams::print(s, -0x740e, &[]);
-    crate::todo_stub!("0x1095bc resurrect the party (fallback: none)", ());
+    // Reachable since combat is ported (M2): without it a dead Avatar left the world turn
+    // looping with no one to hand the turn to.
+    crate::map::travel::resurrect_party(s);
 }
 
 /// Original: 0x121056 (party: leader and solo-mode bookkeeping per turn)

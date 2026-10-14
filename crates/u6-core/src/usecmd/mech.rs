@@ -79,9 +79,9 @@ pub async fn bury(ux: Ux<'_>, obj: Slot) {
 ///
 /// "Fire!"; the aim is the first actor 1..5 tiles out (direction from the frame, tables at
 /// A4-0x661c / -0x6618), else 6 tiles; the ball (tile 0x18f) flies there (combat 0x1228ba,
-/// range 5, leaving where it stopped in A4+0x185e / +0x1860). Unstopped, the explosion (0x1331b4,
-/// tile 0x189) is one tile further; an object at the end that is not a counted kind takes
-/// 1..60 damage (0x1231be).
+/// range 5, leaving where it stopped in A4+0x185e / +0x1860). When 0x1228ba gives 0 (the ball
+/// ended short of the aim) the explosion (0x1331b4, tile 0x189) is one tile further; an object
+/// at the end that is not a counted kind takes 1..60 damage (0x1231be).
 pub async fn cannon(ux: Ux<'_>, obj: Slot) {
     ux.print(STR_FIRE, &[]).await;
     let mut s = ux.s();
@@ -99,8 +99,8 @@ pub async fn cannon(ux: Ux<'_>, obj: Slot) {
         n += 1;
     }
     let (tx, ty) = (cx.wrapping_add(dx * n), cy.wrapping_add(dy * n));
-    let (stopped, mut hx, mut hy) = seams::missile(&mut s, obj, 5, tx, ty, 0x18f);
-    if stopped == 0 {
+    let (reached, mut hx, mut hy) = seams::missile(&mut s, obj, 5, tx, ty, 0x18f);
+    if reached == 0 {
         hx = hx.wrapping_add(dx);
         hy = hy.wrapping_add(dy);
         seams::blast(&mut s, 0x189, hx, hy);

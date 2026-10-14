@@ -1,11 +1,11 @@
 //! Calls from Use into code it does not own. Each is the narrowest signature Use needs; ported
 //! owners are called directly, the others keep a `todo_stub!` with an explicit fallback and a
-//! one-line contract. Owners: combat (hunk 13) = 0x1240fa, 0x1228ba, 0x1231be, 0x1230ce,
-//! 0x12395a, 0x1221da, 0x121d78, 0x122fbe; magic (hunks 2, 8, 11) = 0x1165a4, 0x11a470,
-//! 0x116d0e, 0x119200, 0x11a586, 0x119afc; objects commands (hunk 15) = 0x12948a, 0x129544; ui =
-//! 0x105016, 0x1118c6, 0x11121e, 0x111be0, 0x13410a, 0x132338, 0x1331b4, 0x107cba, the hand
-//! and weight words; sound = 0x110878, 0x110912, 0x100fa4; graphics = 0x1623be; the ending =
-//! 0x133d1e, 0x13513a.
+//! one-line contract. Ported (integration M2): combat (hunk 13) = 0x1240fa, 0x1228ba, 0x1231be,
+//! 0x1230ce, 0x12395a, 0x1221da, 0x121d78, 0x122fbe; ui (hunk 18, with combat) = 0x1331b4;
+//! objects commands (hunk 15) = 0x12948a (0x129544 is called there directly); ui = 0x107cba.
+//! Not ported: magic (hunks 2, 8, 11) = 0x1165a4, 0x11a470, 0x116d0e, 0x119200, 0x11a586,
+//! 0x119afc; ui = 0x105016, 0x1118c6, 0x11121e, 0x111be0, 0x132338, the weight words; sound =
+//! 0x110878, 0x110912, 0x100fa4; graphics = 0x1623be; the ending = 0x133d1e, 0x13513a.
 
 use crate::engine::Io;
 use crate::objects::{NONE, Slot};
@@ -15,56 +15,59 @@ use crate::todo_stub;
 // ---- combat -----------------------------------------------------------------------------------
 
 /// 0x1240fa(obj): the actor an object stands for (the rider of a horse 0x1a9, the head of a
-/// multi-tile part). Fallback: `obj` itself (right for every single-tile object).
-pub(crate) fn actor_of(_s: &mut State, obj: Slot) -> Slot {
-    if obj < 0 {
-        return NONE;
-    }
-    todo_stub!("0x1240fa actor an object stands for (usecmd seam)", obj)
+/// multi-tile part), -1 for none: [`crate::combat::leaves::owner`].
+pub(crate) fn actor_of(s: &mut State, obj: Slot) -> Slot {
+    crate::combat::leaves::owner(s, obj)
 }
 
-/// 0x1231be(actor, damage): deal damage. Fallback: none dealt.
-pub(crate) fn damage(_s: &mut State, _actor: Slot, _amount: i16) {
-    todo_stub!("0x1231be damage an actor (usecmd seam)", ())
+/// 0x1231be(actor, damage): deal damage: [`crate::combat::damage::hurt`].
+pub(crate) fn damage(s: &mut State, actor: Slot, amount: i16) {
+    crate::combat::damage::hurt(s, actor, amount);
 }
 
-/// 0x1230ce(actor): show an actor hit / poisoned (flash). Fallback: nothing shown.
-pub(crate) fn hit_flash(_s: &mut State, _actor: Slot) {
-    todo_stub!("0x1230ce actor hit flash (usecmd seam)", ())
+/// 0x1230ce(actor): show an actor hit / poisoned (flash): [`crate::combat::damage::flash`].
+pub(crate) fn hit_flash(s: &mut State, actor: Slot) {
+    crate::combat::damage::flash(s, actor);
 }
 
-/// 0x12395a: after damage, check deaths. Fallback: none.
-pub(crate) fn check_deaths(_s: &mut State) {
-    todo_stub!("0x12395a check deaths after damage (usecmd seam)", ())
+/// 0x12395a(actor): after damage, print how badly `actor` is hurt:
+/// [`crate::combat::damage::report_wounds`].
+pub(crate) fn report_wounds(s: &mut State, actor: Slot) {
+    crate::combat::damage::report_wounds(s, actor);
 }
 
-/// 0x1221da(actor): put an actor to sleep / refresh its status frame. Fallback: none.
-pub(crate) fn status_frame(_s: &mut State, _actor: Slot) {
-    todo_stub!("0x1221da actor status frame (usecmd seam)", ())
+/// 0x1221da(actor): an actor drops (asleep, paralysed, dead: its lying frame):
+/// [`crate::combat::damage::lie_down`].
+pub(crate) fn status_frame(s: &mut State, actor: Slot) {
+    crate::combat::damage::lie_down(s, actor);
 }
 
 /// 0x1228ba(from, range, &x, &y, tile): a missile flies from `from` towards (x, y); returns
-/// non-zero when something stopped it, and where it stopped (A4+0x185e / +0x1860). Fallback:
-/// (0, x, y), it arrives unstopped.
+/// its result (1 when it got there, 0 when something stopped it) and where it ended
+/// (A4+0x185e / +0x1860): [`crate::combat::attack::shoot`].
 pub(crate) fn missile(
-    _s: &mut State,
-    _from: Slot,
-    _range: i16,
+    s: &mut State,
+    from: Slot,
+    range: i16,
     x: i16,
     y: i16,
-    _tile: u16,
+    tile: u16,
 ) -> (i16, i16, i16) {
-    todo_stub!("0x1228ba missile flight (usecmd seam)", (0, x, y))
+    let (mut x, mut y) = (x, y);
+    let r = crate::combat::attack::shoot(s, from, &mut x, &mut y, range, tile);
+    (r, x, y)
 }
 
-/// 0x121d78: leave combat mode. Fallback: none.
-pub(crate) fn end_combat(_s: &mut State) {
-    todo_stub!("0x121d78 break off combat (usecmd seam)", ())
+/// 0x121d78: leave combat mode: [`crate::combat::mode::break_off`].
+pub(crate) fn end_combat(s: &mut State) {
+    crate::combat::mode::break_off(s);
 }
 
-/// 0x122fbe: party members' combat positions after boarding. Fallback: none.
-pub(crate) fn reset_formation(_s: &mut State) {
-    todo_stub!("0x122fbe reset formation (usecmd seam)", ())
+/// 0x122fbe(from, to): actor `to` becomes a copy of actor `from` (flags, type, attributes;
+/// boarding makes actor 0 a copy of the first member, 0x11cd78 passes D0 = A4+0x47ec,
+/// D1 = 0): [`crate::combat::leaves::copy_actor`].
+pub(crate) fn copy_actor(s: &mut State, from: Slot, to: Slot) {
+    crate::combat::leaves::copy_actor(s, from, to);
 }
 
 // ---- magic ------------------------------------------------------------------------------------
@@ -138,9 +141,9 @@ pub(crate) fn member_with(s: &mut State, kind: u16, quality: i16) -> Slot {
 // ---- objects commands (hunk 15) ---------------------------------------------------------------
 
 /// 0x12948a(obj): the first non-actor object at `obj`'s tile that is not `obj` and whose tile
-/// has no flags3 bit 4, -1. Fallback: -1 ("nothing").
-pub(crate) fn object_under(_s: &mut State, _obj: Slot) -> Slot {
-    todo_stub!("0x12948a object beneath (usecmd seam)", NONE)
+/// has no flags3 bit 4, -1: [`crate::objects::commands::object_under`].
+pub(crate) fn object_under(s: &mut State, obj: Slot) -> Slot {
+    crate::objects::commands::object_under(s, obj)
 }
 
 // ---- ui ---------------------------------------------------------------------------------------
@@ -181,10 +184,12 @@ pub(crate) fn flash_actor(_s: &mut State, _actor: Slot) {
     todo_stub!("0x132338 flash an actor (usecmd seam)", ())
 }
 
-/// 0x1331b4(tile, x, y): explosion animation; the actors and objects it hit, -1-terminated.
-/// Fallback: nothing hit.
-pub(crate) fn blast(_s: &mut State, _tile: u16, _x: i16, _y: i16) -> Vec<Slot> {
-    todo_stub!("0x1331b4 explosion animation (usecmd seam)", Vec::new())
+/// 0x1331b4(tile, x, y): explosion animation; the actors and objects it hit:
+/// [`crate::combat::present::blast`] (which takes (x, y, tile)), without its -1 terminator.
+pub(crate) fn blast(s: &mut State, tile: u16, x: i16, y: i16) -> Vec<Slot> {
+    let mut hit = crate::combat::present::blast(s, x, y, tile);
+    hit.retain(|&a| a >= 0);
+    hit
 }
 
 /// 0x107cba: read a line of text (returns its bytes). Fallback: an empty line.

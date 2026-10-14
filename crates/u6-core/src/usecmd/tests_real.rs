@@ -343,7 +343,15 @@ fn use_on_eight_kinds_of_objects() {
 
     // 7. Board a ship (0x19c), then leave it.
     let pos = nearest(&files, 0x19c, None).expect("a ship");
-    let (s, ship) = at(&files, 0x19c, pos);
+    let (mut s, ship) = at(&files, 0x19c, pos);
+    // Its deed: since 0x1240fa is ported the Use goes to the ship's head part, which carries
+    // the quality the deed must match (0x12f502: "A deed is required." otherwise).
+    let head = crate::combat::leaves::owner(&mut s, ship);
+    let q = s.objects.qq_of(head) >> 8;
+    if q != 0 {
+        let me = lead(&s);
+        crate::objects::create_in(&mut s, 0x95, crate::objects::IN_INVENTORY, q << 8 | 1, me);
+    }
     let n = lines_of(&s).len();
     let e = use_on(s, &files, ship, (pos.0 as i16, pos.1 as i16), &[]);
     report(&e, "7-ship-board", n);

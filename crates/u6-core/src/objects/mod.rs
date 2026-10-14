@@ -127,7 +127,7 @@ pub use blocks::{
 #[allow(unused_imports)]
 pub(crate) use blocks::{load_region_objects, unload_region_objects};
 pub use defs::{DefsError, ObjectDefs};
-pub use draw::{DRAW_CELLS, DRAW_NODES, DrawLists, build_draw_lists};
+pub use draw::{DRAW_CELLS, DRAW_NODES, DrawLists, add_tile, build_draw_lists};
 pub use effects::*;
 pub use iter::{
     AreaCursor, ChildCursor, LocationCursor, actor_at, begin_area, begin_at, find_child,

@@ -65,23 +65,10 @@ pub(crate) async fn select_item(cx: &Cx<'_>) -> (i16, i16) {
     cx.st(|s| (s.ui.input.selection, s.ui.input.target.0))
 }
 
-/// 0x128b98(buf, 0): decimal number in `text`; -1 empty, -2 escaped / not a number.
-/// Fallback: mode 0 as the original (digits accumulate ×10 in a word; any other byte → -2;
-/// empty → -1, the escape flag A4-0x7a44 taken as clear).
-pub(crate) fn parse_number(text: &[u8]) -> i16 {
-    todo_stub!("0x128b98 parse a number (converse seam)", {
-        if text.is_empty() {
-            return -1;
-        }
-        let mut v: i16 = 0;
-        for &b in text {
-            if !b.is_ascii_digit() {
-                return -2;
-            }
-            v = v.wrapping_mul(10).wrapping_add(i16::from(b - b'0'));
-        }
-        v
-    })
+/// 0x128b98(buf, 0): decimal number in `text`; -1 empty, -2 escaped / not a number:
+/// [`crate::objects::commands::parse_answer`] in mode 0.
+pub(crate) fn parse_number(s: &State, text: &[u8]) -> i16 {
+    crate::objects::commands::parse_answer(s, text, 0)
 }
 
 // ---- panels and scroll globals (ui) -----------------------------------------------------------

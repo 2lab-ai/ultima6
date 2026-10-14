@@ -181,7 +181,7 @@ pub async fn look(state: &RefCell<State>, io: &Io) {
     let kind = state.borrow().objects.kind(sel);
     if sel < 0x100 || kind == HORSE {
         let mut s = state.borrow_mut();
-        s.ui.input.selection = seams::rider(&s, sel);
+        s.ui.input.selection = seams::rider(&mut s, sel);
     }
     let sel = state.borrow().ui.input.selection;
     if matches!(kind, 0x18d..=0x18f) || sel < 0x100 {
