@@ -635,8 +635,9 @@ fn of_kind(s: &State, kind: u16) -> Vec<Slot> {
 fn a_hydra_that_finds_no_tile_grows_no_heads() {
     // The egg lies inside the view without status 0x20: every hatchling after the first must
     // scatter out of view, and from (502, 500) no candidate tile is outside it, so the second
-    // hydra is removed. 0x1319b2 goes on to grow heads on the freed slot (0x131cfe-0x131d06
-    // fall through to 0x131d0e); the port ends that hatchling there.
+    // hydra is removed. 0x1319b2 goes on to grow heads on the freed slot (after the removal at
+    // 0x131cfe-0x131d02, 0x131d06 jumps forward to 0x131d0e as for a placed hatchling); the
+    // port ends that hatchling there.
     let mut s = monster_world();
     let egg = put(&mut s, 0x14f, 502, 500);
     s.objects.qq[egg as usize] = 100;
@@ -677,7 +678,7 @@ fn removing_an_equipped_hatchling_keeps_the_eggs_next_template() {
 #[test]
 fn search_stops_at_a_content_that_refuses_to_move() {
     // A body may hold type 0x4c, which 0x10c9d2 always refuses; 0x129544 ignores the refusal
-    // (0x1297c4) and finds the same content again forever.
+    // (0x1297c4) and finds the same content again forever. The port passes over it.
     let (gem_place, fixed_place, out) = crate::objects::tests::returns("search", || {
         let mut s = world();
         let parts = tagged(&[
@@ -767,4 +768,97 @@ fn a_keg_on_a_cyclic_chain_does_not_go_off() {
         (s.objects.kind(keg), s.objects.status(keg))
     });
     assert_eq!((kind, keg_status), (0xdf, 0x08), "the keg stays as it was");
+}
+
+// Round-2 review regressions: each fails on the integration base 04982cc.
+
+#[test]
+fn a_serpent_head_without_a_body_slot_leaves_its_freed_slot_alone() {
+    // No object slot is free, so the first body segment fails and 0x1319b2 removes the head
+    // (0x131e54-0x131e58), then branches on to 0x131ff2 and writes the template's worktype,
+    // combat mode and movement flags into the freed temporary-actor slot.
+    let mut s = monster_world();
+    let egg = put(&mut s, 0x14f, 520, 500);
+    s.objects.qq[egg as usize] = 100;
+    s.objects.obj_status[egg as usize] = 0x20;
+    create_in(&mut s, 0x19d, 0x08, 0x0f02, egg); // one serpent, worktype 15, body of 2
+    s.objects.free.1 = 0;
+    hatch_egg(&mut s, egg);
+    assert!(of_kind(&s, 0x19d).is_empty(), "the head went");
+    let written: Vec<usize> = (0xe0..0x100)
+        .filter(|&i| s.actors.worktype[i] == 0xf || s.actors.attrs.combat_mode[i] == 0xf)
+        .collect();
+    assert!(
+        written.is_empty(),
+        "freed slots given worktype 15: {written:x?}"
+    );
+}
+
+#[test]
+fn a_removed_serpent_head_still_sets_the_eggs_worktype() {
+    // 0x1319b2 takes the worktype once per egg from the first template that reaches
+    // 0x131ffe, a removed serpent head's included: the gargoyle after it gets the serpent's.
+    let mut s = monster_world();
+    let egg = put(&mut s, 0x14f, 520, 500);
+    s.objects.qq[egg as usize] = 100;
+    s.objects.obj_status[egg as usize] = 0x20;
+    create_in(&mut s, 0x16b, 0x08, 0x0601, egg); // second: one gargoyle, worktype 6
+    create_in(&mut s, 0x19d, 0x08, 0x0f02, egg); // first: the serpent, worktype 15
+    s.objects.free.1 = 0;
+    hatch_egg(&mut s, egg);
+    assert!(of_kind(&s, 0x19d).is_empty());
+    let g = of_kind(&s, 0x16b);
+    assert_eq!(g.len(), 1);
+    assert_eq!(s.actors.worktype[g[0] as usize], 0xf);
+}
+
+#[test]
+fn search_joins_the_last_spilled_name_with_and_past_a_fixed_content() {
+    // The look-ahead that picks the separator must skip the 0x4c the spill never moves: with
+    // [gem, ring, 0x4c] the ring is the last name (the and line), and a 0x4c first in the body
+    // must not keep the rest from spilling.
+    // The comma, and, nothing and full-stop strings lie 4, 6 and 10 bytes apart: one short
+    // token each.
+    const ENDS: [(u32, &str); 4] = [
+        (0x0012_842c, "<c>"),
+        (0x0012_8430, "<a>"),
+        (0x0012_8436, "<n>"),
+        (0x0012_8440, "<d>"),
+    ];
+    fn run(order: &'static [u16]) -> (Vec<u8>, Vec<String>) {
+        crate::objects::tests::returns("search", move || {
+            let mut s = world();
+            let mut parts = tagged(&[0x0012_8402]);
+            parts.extend(
+                ENDS.iter()
+                    .map(|&(a, t)| (a, [t.as_bytes(), &[0]].concat())),
+            );
+            with_data(&mut s, parts);
+            s.actors.party.size = 1;
+            s.actors.party.members[0] = 1;
+            s.objects.type_frame[1] = 0x19a;
+            s.objects.set_xyz(1, 500, 500, 0);
+            crate::main_loop::test_support::link_placed_objects(&mut s);
+            let body = put(&mut s, 0x63, 501, 500);
+            // create_in links after the owner: the last created is the first content.
+            let made: Vec<Slot> = order
+                .iter()
+                .rev()
+                .map(|&t| create_in(&mut s, t, 0x08, 1, body))
+                .collect();
+            search(&mut s, body, 501, 500);
+            let places = made.iter().rev().map(|&o| s.objects.place(o)).collect();
+            let ends = queued(&s)
+                .into_iter()
+                .filter(|l| ENDS.iter().any(|&(_, t)| t == l))
+                .collect();
+            (places, ends)
+        })
+    }
+    let (places, ends) = run(&[0x4d, 0x4e, 0x4c]);
+    assert_eq!(places, [0, 0, 0x08], "gem and ring out, the 0x4c inside");
+    assert_eq!(ends, ["<a>", "<d>"]);
+    let (places, ends) = run(&[0x4c, 0x4d]);
+    assert_eq!(places, [0x08, 0], "the gem spills past the 0x4c");
+    assert_eq!(ends, ["<d>"]);
 }

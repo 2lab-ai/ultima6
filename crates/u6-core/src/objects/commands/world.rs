@@ -9,7 +9,7 @@ use super::seams;
 use super::text::{queue, queue_at};
 use crate::main_loop::PrintArg;
 use crate::objects::iter::{begin_at, find_child, first_child, next_at, next_child, tile_of};
-use crate::objects::moves::{move_to, remove};
+use crate::objects::moves::{FIXED_TYPE, move_to, remove};
 use crate::objects::{ACTOR_SLOTS, Slot, party_member, stack_kind};
 use crate::state::State;
 
@@ -244,8 +244,10 @@ fn flags1(s: &State, tile: u16) -> u8 {
 /// but spells and traps moves to the object's tile with the leader re-placed on top, the view
 /// refreshed after each, and is named, the names joined by the comma (0x12842c) and the last
 /// by the and (0x128430); the full stop (0x128440) ends it, the nothing line (0x128436) when
-/// none. Port: a content that refuses the move (type 0x4c) ends the spill, where the original
-/// finds it again forever.
+/// none. Port: a content of type 0x4c, which the move refuses, is passed over like the spells
+/// and traps, also by the look-ahead that picks the separator; the original ignores the
+/// refusal (0x1297c4), finds the same content again and names it forever. Any other refusal
+/// ends the spill.
 pub fn search(s: &mut State, obj: Slot, x: u16, y: u16) {
     let leader =
         Slot::from(s.actors.party.members[usize::from(s.actors.party.leader_index).min(15)]);
@@ -280,23 +282,22 @@ pub fn search(s: &mut State, obj: Slot, x: u16, y: u16) {
         if !is_closed_container(s, obj) {
             let mut c = first_child(&mut s.objects, obj);
             while c >= 0 {
-                let t = s.objects.kind(c);
-                if t == SPELL || t == TRAP {
+                if !spills(s, c) {
                     c = next_child(&mut s.objects);
                     continue;
                 }
                 let z = leader_z(s);
                 let (ox, oy) = (s.objects.x(obj), s.objects.y(obj));
-                // A content that refuses to move (type 0x4c, which a body may hold) would be
-                // found again: the original ignores the result (0x1297c4) and loops forever
-                // naming it; the port ends the spill there.
+                // A content that still refuses to move would be found again: the original
+                // ignores the result (0x1297c4) and loops forever naming it; the port ends the
+                // spill there.
                 if move_to(s, c, ox, oy, z) < 0 {
                     break;
                 }
                 move_to(s, leader, lx, ly, z);
                 refresh(s);
                 let mut d = first_child(&mut s.objects, obj);
-                while d >= 0 && matches!(s.objects.kind(d), SPELL | TRAP) {
+                while d >= 0 && !spills(s, d) {
                     d = next_child(&mut s.objects);
                 }
                 if found && d >= 0 {
@@ -313,6 +314,12 @@ pub fn search(s: &mut State, obj: Slot, x: u16, y: u16) {
         }
     }
     line(s, if found { S_DOT } else { S_NOTHING_DOT });
+}
+
+/// Whether the search moves content `c` out: not a spell or trap (0x129544 passes over those,
+/// 0x12976a-0x129776 and 0x129810-0x12981e) and, in the port, not of the type the move refuses.
+fn spills(s: &State, c: Slot) -> bool {
+    !matches!(s.objects.kind(c), SPELL | TRAP | FIXED_TYPE)
 }
 
 /// 0x109e74 then 0x102ef0, the redraw the search does after each change.
