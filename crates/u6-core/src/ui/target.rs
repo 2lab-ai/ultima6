@@ -18,6 +18,15 @@ const ESCAPE: u16 = 0x1b;
 const SPACE: u16 = 0x20;
 /// First function key code (F1 = 0x13b): F1 + n picks party member n in the panel.
 const F1: u16 = 0x13b;
+/// [replaced] Milliseconds from a held walk's step to its next sample: 33 PAL frames (20 ms each),
+/// from the oracle (tools/oracle/pace.mjs: game-first disks, the throne room with every actor
+/// outside the party passed over and the fight broken off, a press held three cells south, 6
+/// boots). In 4 boots the steps came 25..41 frames apart (median 29, mean 31.7, alternating about
+/// 27 and 38), the first 1..12 frames after the press and the second 28..37; in the other 2,
+/// whose followers were still forming up, 26..108 (median 72). 33 frames from the press puts the
+/// port's cells per held time within one of those 4 boots at every hold up to their 8 free cells
+/// (100 ms: 1, 1 s: 2, 4 s: 6), so no separate first-repeat delay is needed.
+pub(crate) const HELD_WALK_MS: u32 = 660;
 
 /// Alt + letter codes (0x100 + PC scan code) that select a command (0x106ca0 switch).
 const COMMAND_KEYS: [(u16, u8); 10] = [
@@ -92,21 +101,42 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
     }
 }
 
-/// 0x106be6..0x106c5e: the pointer sample (0x14f12c, the handler's events up to the next button
-/// change); with a button down the click map 0x10658e gives the code. A4-0x7a34 marks the press
-/// (the first sample with a button down, A4-0x7a36 then set); while held only the press's code
-/// repeats. With no button down both clear.
+/// 0x106be6..0x106c5e: the pointer sample (0x14f12c copies the handler's position 0x1623b8 /
+/// 0x1623ba and its button word 0x161bd4; the port takes the queued events up to the next button
+/// change, [`Io::take_pointer`]); with a button down the click map 0x10658e gives the code.
+/// A4-0x7a34 marks the press (the first sample with a button down, A4-0x7a36 then set); while
+/// held only the press's code repeats. With no button down both clear.
 ///
 /// A held button (A4-0x7a36 set and still down) repeats at once in the original: nothing in
 /// 0x106bbc or 0x14f12c waits, the input.device handler runs beside the game and the release
 /// shows in the next sample. The port's handler is the engine's queue, which fills only between
-/// polls, so a held repeat first waits one display frame and samples again (one repeat per
-/// frame; a prompt that drops the walk code then still sees the release). A key queued in front
-/// of the pointer events holds them back (input in order), the release perhaps among them, so a
-/// button still held behind a key gives way to the key poll.
+/// polls, so a held repeat first waits one display frame and samples again (a prompt that drops
+/// the walk code then still sees the release). A key queued in front of the pointer events holds
+/// them back (input in order), the release perhaps among them, so a button still held behind a
+/// key gives way to the key poll.
+///
+/// [replaced] What paces a held walk in the original is the step itself: it redraws the view
+/// (more than once while the followers form up) and every redraw costs the 68000 its CPU and
+/// blitter time, about 25 frames in the oracle, so the next sample comes [`HELD_WALK_MS`] after
+/// the step. The port draws a step at once, so where the walk code is a step (the command loop
+/// reads it, A4-0x7a2c, and the last step went through, A4-0x6a90 clear) the repeat waits that
+/// long on the engine clock (wall time, the same at any host frame rate) before it samples
+/// again. A prompt that drops the code keeps the frame pace. Not reproduced: 0x14f12c reads the
+/// handler's button word 0x161bd4 once per pass of this wait, so the original misses a click
+/// shorter than a pass (in the oracle 10 of 18 presses of 5 frames); the queue keeps every press.
 async fn pointer_click(state: &RefCell<State>, io: &Io) -> u16 {
     if sample(state, io) != 0 && state.borrow().actors.work.mouse_walk != 0 {
+        let pace = {
+            let s = state.borrow();
+            s.main.reading == 1
+                && s.ui.pointer.press_code == super::wait::WALK
+                && s.actors.work.step_blocked == 0
+        };
+        let due = io.now_ms() + if pace { u64::from(HELD_WALK_MS) } else { 0 };
         io.vblank().await;
+        if let Some(rest) = due.checked_sub(io.now_ms()).filter(|&ms| ms > 0) {
+            io.sleep(u32::try_from(rest).unwrap_or(u32::MAX)).await;
+        }
         if sample(state, io) != 0 && io.key_ready() {
             return 0;
         }
