@@ -28,25 +28,25 @@ pub struct Video {
     pub draw: Region,
     /// The 32 colour registers as the copper lists hold them (12-bit RGB words).
     pub colours: [u16; 32],
-    /// Original: 0x119ff8 (word: palette number installed at the next swap, 0 = none)
+    /// Original: u 0x119ff8 (word: palette number installed at the next swap, 0 = none)
     pub queued_palette: u16,
-    /// Original: 0x119e7c (32 words: the palette a fade steps through)
+    /// Original: u 0x119e7c (32 words: the palette a fade steps through)
     pub fade: [u16; 32],
-    /// Original: 0x119fec (the target palette of a fade-in)
+    /// Original: u 0x119fec (the target palette of a fade-in)
     pub fade_target: [u16; 32],
-    /// Original: 0x119eeb (byte: fade-in steps left − 1; negative = no fade-in)
+    /// Original: u 0x119eeb (byte: fade-in steps left − 1; negative = no fade-in)
     pub fade_in_count: i8,
-    /// Original: 0x119eec (word: the amount still taken off each colour of a fade-in)
+    /// Original: u 0x119eec (word: the amount still taken off each colour of a fade-in)
     pub fade_in_level: u16,
-    /// Original: 0x119f83 (byte: fade-out steps left − 1; negative = none)
+    /// Original: u 0x119f83 (byte: fade-out steps left − 1; negative = none)
     pub fade_out_count: i8,
-    /// Original: 0x119fea (word: colour cycling on)
+    /// Original: u 0x119fea (word: colour cycling on)
     pub cycling: u16,
-    /// Original: 0x10fb62 (word: frames until the next colour-cycle step)
+    /// Original: u 0x10fb62 (word: frames until the next colour-cycle step)
     pub cycle_wait: u16,
     /// Original: A4+0x1392 (the colour-cycle palette; 0x113d80 rotates its words 22..25)
     pub cycle_palette: [u16; 32],
-    /// Original: 0x119ffa (word: mouse pointer shown; the port has no pointer, kept for the
+    /// Original: u 0x119ffa (word: mouse pointer shown; the port has no pointer, kept for the
     /// callers that set it)
     pub pointer: u16,
     /// Port-only: frames waited so far (for receipts and tests).
@@ -138,7 +138,8 @@ impl Video {
         self.colours = exe.palette(n);
     }
 
-    /// Original: u 0x119ebc (display: start a 16-frame fade from black to `target`)
+    /// Original: u 0x119ebc (display: start a 16-frame fade from black to `target`: the counter
+    /// 0xf runs down to −1)
     pub fn start_fade_in(&mut self, target: [u16; 32]) {
         self.fade_target = target;
         self.fade = [0; 32];
@@ -146,7 +147,8 @@ impl Video {
         self.fade_in_count = 0x0f;
     }
 
-    /// Original: u 0x119f6c (display: start a 17-frame fade of `from` to black)
+    /// Original: u 0x119f6c (display: start an 18-frame fade of `from` to black: the counter
+    /// 0x11 runs down to −1)
     pub fn start_fade_out(&mut self, from: [u16; 32]) {
         self.fade = from;
         self.fade_out_count = 0x11;
@@ -180,7 +182,8 @@ impl Video {
         self.fade_out_count -= 1;
         self.colours = self.fade;
         for c in &mut self.fade {
-            let dec = |v: u16, mask: u16, one: u16| if v & mask != 0 { (v & mask) - one } else { 0 };
+            let dec =
+                |v: u16, mask: u16, one: u16| if v & mask != 0 { (v & mask) - one } else { 0 };
             *c = dec(*c, 0x00f, 0x001) | dec(*c, 0x0f0, 0x010) | dec(*c, 0xf00, 0x100);
         }
     }

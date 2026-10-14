@@ -57,7 +57,9 @@ pub struct Keyboard {
 impl Keyboard {
     pub fn new(exe: &UExe) -> Self {
         let table = (0..RAW_KEYS)
-            .map(|r| std::array::from_fn(|c| u16::from(exe.byte(A4 + 0x13e5 + 4 * r as u32 + c as u32))))
+            .map(|r| {
+                std::array::from_fn(|c| u16::from(exe.byte(A4 + 0x13e5 + 4 * r as u32 + c as u32)))
+            })
             .collect();
         Self {
             table,

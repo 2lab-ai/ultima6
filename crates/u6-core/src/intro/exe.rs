@@ -58,9 +58,29 @@ impl UExe {
             parts.push((base, loaded));
         }
         let mut flat = vec![0u8; (top - IMAGE_BASE) as usize];
-        for (base, loaded) in parts {
+        for &(base, loaded) in &parts {
             let o = (base - IMAGE_BASE) as usize;
             flat[o..o + loaded.len()].copy_from_slice(loaded);
+        }
+        // Relocate as the loader does: a longword with a RELOC32 entry gets its target hunk's
+        // base added (the `jmp abs.l` stubs of the code and the stored pointers then read as
+        // image addresses). Relocations sit on even offsets and never overlap.
+        for &(base, loaded) in &parts {
+            for off in (0..loaded.len().saturating_sub(3)).step_by(2) {
+                let at = base + off as u32;
+                let raw = u32::from_be_bytes([
+                    loaded[off],
+                    loaded[off + 1],
+                    loaded[off + 2],
+                    loaded[off + 3],
+                ]);
+                if let Ok(v) = img.pointer(at)
+                    && v != raw
+                {
+                    let o = (at - IMAGE_BASE) as usize;
+                    flat[o..o + 4].copy_from_slice(&v.to_be_bytes());
+                }
+            }
         }
         if img.segment_base(22) != Some(A4) {
             return Err(bad(format!(

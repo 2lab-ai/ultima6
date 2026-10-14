@@ -253,12 +253,10 @@ pub async fn opening(st: &mut IntroState, io: &Io) {
     };
     v.passage.y1 = 0x1f;
     check_key(st, io);
-    if st.skip == 0 {
-        if body(st, io).await {
-            let (s, d) = (st.views.screen, st.views.draw);
-            mem::fill_view(&mut st.video.chip, &s, 0);
-            mem::fill_view(&mut st.video.chip, &d, 0);
-        }
+    if st.skip == 0 && body(st, io).await {
+        let (s, d) = (st.views.screen, st.views.draw);
+        mem::fill_view(&mut st.video.chip, &s, 0);
+        mem::fill_view(&mut st.video.chip, &d, 0);
     }
     // 0x1055a2: two black swaps, colour cycling off, palette 0, music off.
     let s = st.views.screen;
@@ -316,7 +314,12 @@ async fn body(st: &mut IntroState, io: &Io) -> bool {
     swap(st, io).await;
     st.video.fade_in(io, st.exe.palette(0)).await;
     let p = st.views.screen.planes;
-    for v in [&mut st.views.draw, &mut st.views.front, &mut st.views.pan, &mut st.views.room] {
+    for v in [
+        &mut st.views.draw,
+        &mut st.views.front,
+        &mut st.views.pan,
+        &mut st.views.room,
+    ] {
         v.planes = p;
     }
     if hold(st, io, 0x32).await {

@@ -8,7 +8,6 @@
 
 use crate::engine::Io;
 
-use super::exe::A4;
 use super::mem::{self, Ptr, Region, View};
 use super::passages::show_passage;
 use super::screen::swap;
@@ -31,9 +30,6 @@ pub struct Gypsy {
     pub shimmer_on: i16,
     /// Original: A4+0x402 (word: the stream from the bottle to the flask is drawn)
     pub stream: i16,
-    /// Original: A4+0x2b12 / A4+0x2b14 / A4+0x2b16 / A4+0x2b18 (shimmer rectangle: right x,
-    /// left x, top y, bottom y)
-    pub rect: [i16; 4],
     /// Original: A4+0x2ae8 (the scene's `.new` file: `woods.new`, then `gypsy.new`)
     pub file: Ptr,
 }
@@ -57,8 +53,8 @@ fn draw(st: &mut IntroState, x: i16, y: i16, item: i16) {
 /// Original: u 0x1059a8 (gypsy: one more pour of `colour`: the shimmer starts 4 lines higher
 /// and its 16 colours are shared out among the pours so far)
 pub fn add_pour(st: &mut IntroState, colour: i16) {
+    st.views.shimmer.y0 -= 4;
     let g = &mut st.gypsy;
-    g.rect[2] -= 4;
     if let Some(slot) = g.poured.get_mut(g.pours as usize) {
         *slot = colour;
     }
@@ -91,7 +87,13 @@ pub fn shimmer_byte(st: &mut IntroState) -> [u8; 5] {
 /// the screen's rectangle A4+0x2b0a)
 pub fn shimmer(st: &mut IntroState) {
     let work = Ptr::at(Region::Work);
-    let [right, left, top, bottom] = st.gypsy.rect;
+    let View {
+        x1: right,
+        x0: left,
+        y0: top,
+        y1: bottom,
+        ..
+    } = st.views.shimmer;
     let mut y = top as u16;
     while y <= bottom as u16 {
         let mut xb = (left / 8) as u16;
@@ -136,7 +138,7 @@ pub fn draw_liquid(st: &mut IntroState, v: i16, item: i16, x: i16, y: i16) {
         return;
     }
     st.views.draw.planes = st.views.screen.planes;
-    let (v, kind, lvl) = (i32::from(v), i32::from(kind), i32::from(lvl));
+    let (v, lvl) = (i32::from(v), i32::from(lvl));
     let x = x + t(st, 0x60c, kind * 0x18 + lvl * 8 + v) + t(st, 0x404, v);
     let y = y + t(st, 0x6cc, kind * 3 + lvl) + y_off(st);
     let item = base + t(st, 0x54c, kind * 0x18 + lvl * 8 + v);
@@ -425,13 +427,6 @@ pub async fn pour(st: &mut IntroState, io: &Io, v: i16) {
 
 /// The question passage of the pair (a, b): the word at A4+0x426 + 16 a + 2 b.
 pub fn question(st: &IntroState, a: i16, b: i16) -> i16 {
-    st.exe.a4_i16(0x426 + (16 * i32::from(a) + 2 * i32::from(b)) as u32)
+    st.exe
+        .a4_i16(0x426 + (16 * i32::from(a) + 2 * i32::from(b)) as u32)
 }
-
-/// A4+0x2bf6 / A4+0x2c06: "Avatar" and 'G' copied before the gypsy speaks (no reader found).
-pub fn avatar_name(st: &IntroState) -> Vec<u8> {
-    st.exe.cstr(0x0010_586e)
-}
-
-/// Original: A4 + 0x2b0a the shimmer view address (for the docs of [`Gypsy::rect`]).
-pub const SHIMMER_VIEW: u32 = A4 + 0x2b0a;

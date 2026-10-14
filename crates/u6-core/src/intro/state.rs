@@ -39,7 +39,8 @@ pub struct Views {
     pub v2ac8: View,
     /// Original: A4+0x2ad8 (the gypsy scene saved behind the bottles)
     pub gypsy_bg: View,
-    /// Original: A4+0x2b0a (the shimmer rectangle of 0x105a04)
+    /// Original: A4+0x2b0a (the shimmer rectangle of 0x105a04; its fields A4+0x2b12 .. 0x2b18
+    /// are what creation and 0x1059a8 set)
     pub shimmer: View,
     /// Original: A4+0x2c54 (portrait panel)
     pub portrait: View,
@@ -66,8 +67,9 @@ pub struct Frame {
 /// The character the creation builds (what 0x105700 writes into the objlist).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Hero {
-    /// Original: A4+0x2bd8 (14 bytes: the name typed)
-    pub name: Vec<u8>,
+    /// Original: A4+0x2bd8 (14 bytes: the name typed, NUL-terminated; bytes after the NUL keep
+    /// what a longer earlier answer left there)
+    pub name: [u8; 14],
     /// Original: A4+0x2bee (the sex answer: 'M' / 'F', then "Male" / "Female")
     pub sex: Vec<u8>,
     /// Original: A4+0x2be8 / A4+0x2bea / A4+0x2bec (strength, dexterity, intelligence)
@@ -88,6 +90,18 @@ pub struct Hero {
     pub karma: u8,
 }
 
+impl Hero {
+    /// The name as a C string (up to the NUL).
+    pub fn name_str(&self) -> Vec<u8> {
+        self.name.iter().copied().take_while(|&b| b != 0).collect()
+    }
+
+    /// The sex answer's first byte ('M' / 'F', 0 before an answer).
+    pub fn sex_char(&self) -> u8 {
+        self.sex.first().copied().unwrap_or(0)
+    }
+}
+
 /// Every global of `u` the port uses.
 #[derive(Clone, Debug)]
 pub struct IntroState {
@@ -102,9 +116,10 @@ pub struct IntroState {
     pub frame: Frame,
     pub hero: Hero,
     pub tv: super::opening::Tv,
+    pub gypsy: super::gypsy::Gypsy,
     /// Original: A4+0xb3c (long: state of the C `rand` 0x10fa6c)
     pub rand: u32,
-    /// Original: 0x119996 (long: state of the shimmer generator 0x11999a)
+    /// Original: u 0x119996 (long: state of the shimmer generator 0x11999a)
     pub noise: u32,
     /// Original: A4+0x25ea (word: Escape pressed, the opening jumps to its end)
     pub skip: u16,
@@ -127,6 +142,8 @@ pub struct IntroState {
     pub blocks: Ptr,
     /// The user's files (the original opens them from the PROGRAM disk).
     pub files: Files,
+    /// Port-only: the objlist 0x105700 wrote (the port's files are read-only).
+    pub objlist: Option<Vec<u8>>,
 }
 
 impl IntroState {
@@ -154,12 +171,14 @@ impl IntroState {
             frame: Frame::default(),
             hero,
             tv: super::opening::Tv::default(),
+            gypsy: super::gypsy::Gypsy::default(),
             rand: 0,
             skip: 0,
             menu_drawn: 0,
             files_ptr: Ptr::at(Region::Files),
             blocks: Ptr::at(Region::Blocks),
             files,
+            objlist: None,
         }
     }
 

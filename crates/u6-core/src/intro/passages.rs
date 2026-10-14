@@ -53,7 +53,9 @@ pub fn case_address(exe: &UExe, n: u16) -> Option<u32> {
             }
             // beq.w
             0x6700 => {
-                let target = pc.wrapping_add(2).wrapping_add_signed(i32::from(exe.word(pc + 2) as i16));
+                let target = pc
+                    .wrapping_add(2)
+                    .wrapping_add_signed(i32::from(exe.word(pc + 2) as i16));
                 if acc == n {
                     return Some(target);
                 }
@@ -61,7 +63,10 @@ pub fn case_address(exe: &UExe, n: u16) -> Option<u32> {
             }
             // bra.w: the default case
             0x6000 => {
-                return Some(pc.wrapping_add(2).wrapping_add_signed(i32::from(exe.word(pc + 2) as i16)));
+                return Some(
+                    pc.wrapping_add(2)
+                        .wrapping_add_signed(i32::from(exe.word(pc + 2) as i16)),
+                );
             }
             _ => return None,
         }
@@ -107,7 +112,7 @@ impl Machine {
 /// The string at a pushed address: the player's name buffer, else a string of `u`.
 fn string_at(st: &IntroState, addr: u32) -> Vec<u8> {
     if addr == A4 + 0x2bd8 {
-        st.hero.name.clone()
+        st.hero.name_str()
     } else {
         st.exe.cstr(addr)
     }

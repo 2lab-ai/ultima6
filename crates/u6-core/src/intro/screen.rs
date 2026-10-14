@@ -31,7 +31,11 @@ pub fn poll_key(st: &mut IntroState, io: &Io) -> u16 {
         return 0;
     }
     let c = st.keys.take(io);
-    let digit = st.keys.ctype.get(usize::from(c & 0xff)).is_some_and(|t| t & 4 != 0);
+    let digit = st
+        .keys
+        .ctype
+        .get(usize::from(c & 0xff))
+        .is_some_and(|t| t & 4 != 0);
     if digit {
         let n = (c as u8).wrapping_sub(b'0') as i16 % 7;
         super::opening::set_script(st, n);

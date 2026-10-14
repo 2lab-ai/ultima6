@@ -169,7 +169,7 @@ pub fn printf(
     args: &[Arg],
 ) {
     let mut args = args.iter();
-    let mut word = |args: &mut std::slice::Iter<'_, Arg>| match args.next() {
+    let word = |args: &mut std::slice::Iter<'_, Arg>| match args.next() {
         Some(Arg::Word(w)) => *w,
         Some(Arg::Long(l)) => (*l >> 16) as u16,
         _ => 0,
@@ -309,7 +309,8 @@ pub fn wrap(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, text: &[u8]) {
             }
         }
         let avail = (right as u16).wrapping_sub(ctx.x as u16).wrapping_add(1);
-        let line_w = (start..end).fold(0u16, |s, i| s.wrapping_add(width(font, at(text, i)) as u16));
+        let line_w =
+            (start..end).fold(0u16, |s, i| s.wrapping_add(width(font, at(text, i)) as u16));
         match ctx.align {
             0 => put_span(chip, ctx, font, text, start, end),
             1 => align_right(chip, ctx, font, text, (start, end), (line_w, avail), left),
@@ -331,7 +332,14 @@ pub fn wrap(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, text: &[u8]) {
 }
 
 /// Original: u 0x115c42 (text: draw `text[start..end]`, stopping at a NUL)
-fn put_span(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, text: &[u8], start: usize, end: usize) {
+fn put_span(
+    chip: &mut Chip,
+    ctx: &mut TextCtx,
+    font: &WouFont,
+    text: &[u8],
+    start: usize,
+    end: usize,
+) {
     for i in start..end {
         let c = at(text, i);
         if c == 0 {

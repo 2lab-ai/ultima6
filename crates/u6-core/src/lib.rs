@@ -23,6 +23,7 @@ pub mod engine;
 pub mod files;
 pub mod gfx;
 pub mod image;
+pub mod intro;
 pub mod main_loop;
 pub mod map;
 pub mod objects;
