@@ -52,7 +52,8 @@ Status: in-progress
 | WU-P4 | ui | port/ui `7faa720`; 25 ported, 3 partial, 10 stubs; roster + stats panels render | merged → integrate/m1 |
 | WU-P5 | actors | port/actors `7004468`; 52/52; NPCs walk to schedules at 12:00 | merged → integrate/m1 |
 | WU-P6 | converse | port/converse `086b9bf`; 20/20; 200 scripts; real NPC dialogue coherent | merged → integrate/m1 |
-| WU-P7 | boot + command loop + seam reconciliation + web IndexedDB | `.worktrees/port-main` branch port/main (from integrate/m1 `393d5aa`, 310 tests) | in flight |
+| WU-P7 | boot + command loop + seam reconciliation + web IndexedDB | port/main `6dce550`; 315 tests (re-run by dispatcher); start/walk/talk/web/reload receipts read by dispatcher; M1 406: ported 219, replaced 76, stubbed 65, planned 34 | done |
+| WU-P7b | external review CHANGES (lifecycle race, unsupported-command honesty, canvas focus, memory, Attack targeting, error boundary) + `_headers` CSP | port/main | in flight |
 | WU-D | Deploy ultima6.2lab.ai | CF Pages project + preview alias live (skeleton) | custom domain at M1 |
 
 Open review items: gpt6 spec review CHANGES ×8 applied in `d749513`; WU-C0 notified.
@@ -75,3 +76,21 @@ port `port/main` headless start frame. Receipts kept outside the repo:
 | G2 | last command icon differs | icon reflects the combat flag set in the shipped DATA1 state | open |
 | G3 | one NPC sprite + brazier flames | animation phase / idle-pass RNG timing | not a defect (timing) |
 | G4 | pointer at (0,0) | emulator mouse sprite | not a defect |
+
+## Round 2 — milestone 2 (rest of the game), dispatched 2026-10-14
+
+Base origin/port/main `6dce550`. One worktree per unit (`.worktrees/m2-<unit>`, branch `m2/<unit>`).
+`u` (intro executable) REA: 479 procedures, 317 strings, 479/479 decompiled (`~/Games/ultima6/re/dumps/u/`).
+
+| WU | Scope | State |
+|---|---|---|
+| M2-combat | hunk 13 + Attack + combat mode + NPC combat worktypes + missile effects | in flight |
+| M2-magic | hunk 11 + Cast + spellbook + reagents | in flight |
+| M2-objcmds | hunk 15 Look/Get/Drop/Move/doors/traps + eggs/monster spawn | in flight |
+| M2-usecmd | hunk 16 Use + per-object handlers | in flight |
+| M2-inventory | hunk 8 inventory/Ready/Unready + 0x128ce8 panel + hunk 14 Rest | in flight |
+| M2-saveload | Save/Restore, byte-compatible savegame, SaveStore trait | in flight |
+| M2-sound | MED player + Paula emulation (u6-audio) + music state | in flight |
+| M2-intro | `u`: intro, menu, character creation, hand-off | in flight |
+| M2-mouse+ui | mouse input + remaining ui/gfx planned rows | after WU-P7b |
+| M2-int | wire handlers into commands.rs, web save slots + audio worklet | after units |
