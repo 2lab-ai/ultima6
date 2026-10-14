@@ -1,0 +1,16 @@
+# Cloudflare Pages response headers for every path (one rule: Pages merges the headers of all
+# matching rules, so each header is set exactly once). Checked locally by tools/web/serve.mjs.
+#
+# CSP: everything from this origin only; 'wasm-unsafe-eval' lets the page compile its own
+# wasm; inline style for the <style> block; connect-src 'self' = no third-party requests (the
+# game files never leave the browser).
+#
+# Cache-Control: no asset is content-hashed (app.js, store.js and the pkg/ glue + wasm must
+# change together), so nothing is immutable: every load revalidates (Pages' own default, made
+# explicit).
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+  Cache-Control: public, max-age=0, must-revalidate
