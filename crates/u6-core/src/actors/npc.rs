@@ -328,23 +328,20 @@ pub fn walk_path(s: &mut State, actor: u16, tx: u16, ty: u16) {
     }
 }
 
-/// [objects] 0x10d2d8 / 0x10d16e (does `holder` carry gold (0x58); take `n` of it). Stub
-/// contract: no gold is carried, so nothing is taken and no message prints.
-fn carries_gold(_s: &State, _holder: u16) -> bool {
-    todo_stub!(
-        "0x10d2d8 holder carries an object type (fallback: no)",
-        false
-    )
+/// [objects] 0x10d2d8(holder, 0x58): does `holder` carry gold, at any depth
+/// ([`crate::objects::count_of_kind`]; asm 0x11ffba..0x11ffc4).
+fn carries_gold(s: &mut State, holder: u16) -> bool {
+    crate::objects::count_of_kind(&mut s.objects, holder as i16, GOLD) != 0
 }
 
-/// [objects] 0x10d16e: removes `n` gold from `holder`. Unreachable while [`carries_gold`] says
-/// no.
-fn take_gold(_s: &mut State, _holder: u16, _n: u16) {
-    todo_stub!(
-        "0x10d16e take objects of a type from a holder (fallback: none)",
-        ()
-    )
+/// [objects] 0x10d16e(holder, 0x58, n): takes `n` gold from `holder`
+/// ([`crate::objects::take_from_owner`]; asm 0x11ffd2..0x11ffd8).
+fn take_gold(s: &mut State, holder: u16, n: u16) {
+    crate::objects::take_from_owner(s, holder as i16, GOLD, n);
 }
+
+/// Gold, the type the thief takes.
+const GOLD: u16 = 0x58;
 
 /// Original: 0x11ffae (actors: a thief takes gold from party member `target`)
 ///
@@ -553,11 +550,9 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
             "0x10c928 confiscate the party's weapons (fallback: kept)",
             ()
         );
+        // 0x11ff24..0x11ff2a: dissolve, then the draw lists rebuilt (0x10e81e).
         s.gfx.dissolve = 1;
-        todo_stub!(
-            "0x10e81e jail door and objects after the arrest (fallback: none)",
-            ()
-        );
+        crate::objects::build_draw_lists(&mut s);
         seams::area_music(&mut s);
         seams::refresh_view(&mut s);
     } else {
@@ -581,4 +576,33 @@ pub async fn talk(state: &RefCell<State>, io: &Io, actor: u16, target: u16) {
     let mut s = state.borrow_mut();
     seams::area_music(&mut s);
     s.actors.work.prompt = 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rng::Rng;
+
+    /// 0x11ffae on a member carrying 100 gold: 10..30 of it go (0x10d16e), one more draw
+    /// decides whether the theft is noticed; without gold nothing is drawn.
+    #[test]
+    fn a_thief_takes_gold_only_from_a_holder_of_gold() {
+        let mut s = State::empty();
+        crate::objects::init_slots(&mut s.objects);
+        s.objects.type_frame[2] = 0x17a;
+        s.objects.type_frame[10] = 0x17a;
+        s.rng = Rng::seeded(3);
+        let r0 = s.rng;
+        steal(&mut s, 10, 2);
+        assert_eq!(s.rng, r0, "no gold: no draw");
+        let gold = crate::objects::create_in(&mut s, GOLD, crate::objects::IN_INVENTORY, 100, 2);
+        assert!(gold >= 0);
+        let mut r = s.rng;
+        let n = r.range(10, 30);
+        steal(&mut s, 10, 2);
+        assert_eq!(
+            crate::objects::count_of_kind(&mut s.objects, 2, GOLD),
+            100 - n as i16
+        );
+    }
 }
