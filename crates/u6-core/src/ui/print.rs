@@ -1,0 +1,236 @@
+//! Text output: the line assembler 0x107e5a, the escape layer 0x108376, `printf` 0x108658 and
+//! their helpers. All of them can wait for a key (the more prompt, `*`), so they are async and
+//! take the shared state; no borrow is held across an await.
+
+use std::cell::RefCell;
+
+use super::text::{self, CENTRE, PAGED, RUNIC, SCROLL, WRAP, WindowId};
+use super::textstate::TRANSCRIPT;
+use crate::engine::Io;
+use crate::state::State;
+
+const NL: i16 = 0x0a;
+const SPACE: i16 = 0x20;
+/// Keys that end the more prompt (0x107f52..0x107f68): space, return, escape, 0x8f.
+const MORE_KEYS: [u16; 4] = [0x20, 0x0d, 0x1b, 0x8f];
+
+fn is_lower(c: i16) -> bool {
+    (0x61..=0x7a).contains(&c)
+}
+
+/// Draws `c` at window-relative cell (`col`, `row`) of the current window, in its colours.
+fn cell(s: &mut State, io: &Io, c: u8, col: u8, row: u16) {
+    let ui = &s.ui;
+    let w = *ui.text.win();
+    let x = u16::from(w.x) + u16::from(col);
+    io.draw(|fb| text::draw_char(fb, ui.font.as_ref(), &w, c, x, row));
+}
+
+/// Port-side transcript of the message scroll: a finished line goes to `UiState::messages`.
+fn transcript_end(s: &mut State) {
+    let ui = &mut s.ui;
+    if ui.text.current == WindowId::Messages {
+        let line: String = ui.text.transcript_line.drain(..).map(char::from).collect();
+        ui.messages.push(line);
+        let n = ui.messages.len();
+        if n > TRANSCRIPT {
+            ui.messages.drain(..n - TRANSCRIPT);
+        }
+    }
+}
+
+/// The more prompt of a paged window (0x107f2e..0x107fb4): idle-cursor glyphs from 1, wait for
+/// one of [`MORE_KEYS`], blank the window's last row, rearm the row count.
+async fn more(state: &RefCell<State>, io: &Io) {
+    let last = {
+        let mut s = state.borrow_mut();
+        let w = *s.ui.text.win();
+        s.ui.input.cursor_glyph = 1;
+        s.ui.input.accept = false;
+        u16::from(w.height) + u16::from(w.y) - 1
+    };
+    loop {
+        let k = Box::pin(super::wait::read_key(state, io)).await;
+        if MORE_KEYS.contains(&k) {
+            break;
+        }
+    }
+    let mut s = state.borrow_mut();
+    s.ui.input.cursor_glyph = 5;
+    s.ui.input.accept = true;
+    s.ui.text.drawn = false;
+    let w = *s.ui.text.win();
+    for col in 0..w.width {
+        cell(&mut s, io, b' ', col, last);
+    }
+    s.ui.text.more_rows = i16::from(w.height) - 1;
+}
+
+/// Original: 0x107e5a (ui: put a character into the current window's line: append, or on a full
+/// line / newline draw the line, word-wrap, move the cursor, scroll; `c` < 0 flushes the
+/// pending part of the line without a newline)
+pub async fn put_raw(state: &RefCell<State>, io: &Io, c: i16) {
+    let mut c = c;
+    let paging;
+    {
+        let mut s = state.borrow_mut();
+        let t = &mut s.ui.text;
+        if !t.on {
+            return;
+        }
+        if t.skip_newline && t.win().flags & SCROLL != 0 {
+            if c == NL {
+                return;
+            }
+            if c >= 0 {
+                t.skip_newline = false;
+            }
+        }
+        t.drawn = false;
+        if t.win().flags & text::CAPITALISE != 0 && t.capitalise && is_lower(c) {
+            c -= 0x20;
+        }
+        t.capitalise = false;
+        if c == 0 {
+            c = NL;
+        }
+        if t.win().flags & RUNIC != 0 && c > SPACE {
+            c |= 0x80;
+        }
+        let w = *t.win();
+        if !full(t) && c != NL && c >= 0 {
+            if !(w.flags & WRAP != 0 && c == SPACE && !t.nonspace) {
+                let n = usize::from(t.line_len);
+                t.line_ink[n] = w.fg;
+                t.line[n] = c as u8;
+                t.line_len += 1;
+            }
+            finish(t, c);
+            return;
+        }
+        if t.more_rows != 0 && c >= 0 && w.flags & PAGED != 0 {
+            t.more_rows -= 1;
+        }
+        paging = w.flags & PAGED != 0 && t.more_rows == 0 && c >= 0;
+    }
+    if paging {
+        more(state, io).await;
+    }
+    let mut s = state.borrow_mut();
+    end_line(&mut s, io, c);
+}
+
+/// 0x107fb8..0x108262: draw the assembled line, keep a wrapped tail, advance or scroll.
+fn end_line(s: &mut State, io: &Io, c: i16) {
+    let text_ink = s.ui.tables.colours.text;
+    let t = &mut s.ui.text;
+    let w = *t.win();
+    let len = usize::from(t.line_len);
+    let start = usize::from(t.line_start);
+    let wrapped = w.flags & WRAP != 0 && full(t) && c >= 0;
+    let mut end = len;
+    if wrapped {
+        t.line[len] = if c == NL { b' ' } else { c as u8 };
+        t.line_ink[len] = w.fg;
+        while t.line[end] != b' ' && !(end >= 1 && t.line[end - 1] == b'-') && end > start {
+            end -= 1;
+        }
+        if end == 0 {
+            end = len;
+        }
+    }
+    let row = u16::from(w.y) + u16::from(w.row);
+    if w.flags & CENTRE != 0 {
+        let pad = (i16::from(w.width) - end as i16) >> 1;
+        for col in start as i16..start as i16 + pad {
+            cell(s, io, b' ', col as u8, row);
+        }
+    }
+    let to_transcript = s.ui.text.current == WindowId::Messages;
+    for i in start..end {
+        let (ch, ink) = (s.ui.text.line[i], s.ui.text.line_ink[i]);
+        s.ui.text.win_mut().fg = ink;
+        cell(s, io, ch, i as u8, row);
+        if to_transcript {
+            s.ui.text.transcript_line.push(ch);
+        }
+    }
+    let t = &mut s.ui.text;
+    t.win_mut().fg = text_ink;
+    if start < end {
+        t.win_mut().col = end as u8;
+    }
+    if wrapped {
+        if t.line[end] == b' ' {
+            end += 1;
+        }
+        let mut i = end;
+        while i <= len {
+            t.line[i - end] = t.line[i];
+            t.line_ink[i - end] = t.line_ink[i];
+            i += 1;
+        }
+        t.line_start = 0;
+        t.line_len = (i - end) as u8;
+        if c == SPACE {
+            t.nonspace = false;
+        }
+    } else if c >= 0 {
+        t.line_len = 0;
+        t.line_start = 0;
+        if c != NL {
+            t.line_ink[0] = t.win().fg;
+            t.line_len = 1;
+            t.line[0] = c as u8;
+        }
+    }
+    if c >= 0 {
+        transcript_end(s);
+        let t = &mut s.ui.text;
+        let w = t.win_mut();
+        w.col = 0;
+        if i16::from(w.row) < i16::from(w.height) - 1 {
+            w.row += 1;
+        } else if w.flags & SCROLL != 0 {
+            let w = *w;
+            t.drawn = true;
+            io.draw(|fb| text::scroll_window(fb, &w));
+        }
+    } else {
+        let t = &mut s.ui.text;
+        let col = t.win().col;
+        t.hidden = false;
+        t.line_start = col;
+        t.line_len = col;
+    }
+    finish(&mut s.ui.text, c);
+}
+
+/// The line holds a whole window row. The original compares the length with the width for
+/// equality; the port also stops at the buffer size, which only a window wider than 40 cells
+/// (none exists) could reach.
+fn full(t: &super::textstate::TextState) -> bool {
+    t.line_len >= t.win().width.min(super::textstate::LINE as u8 - 1)
+}
+
+/// 0x108262: every character but a space marks the line as started; text was drawn.
+fn finish(t: &mut super::textstate::TextState, c: i16) {
+    if c != SPACE {
+        t.nonspace = true;
+    }
+    t.drawn = true;
+}
+
+/// Original: 0x10829a (ui: put each character of a string through 0x107e5a, unescaped)
+pub async fn put_raw_str(state: &RefCell<State>, io: &Io, s: &[u8]) {
+    for &b in s.iter().take_while(|&&b| b != 0) {
+        put_raw(state, io, i16::from(b)).await;
+    }
+}
+
+/// Original: 0x10827c (ui: put `n` copies of `c` through 0x107e5a)
+pub async fn put_raw_n(state: &RefCell<State>, io: &Io, n: i16, c: i16) {
+    for _ in 0..n.max(0) {
+        put_raw(state, io, c).await;
+    }
+}
