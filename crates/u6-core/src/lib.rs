@@ -27,6 +27,7 @@ pub mod main_loop;
 pub mod map;
 pub mod objects;
 pub mod rng;
+pub mod sound;
 pub mod state;
 pub mod stub;
 pub mod ui;

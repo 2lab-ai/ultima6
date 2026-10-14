@@ -332,9 +332,9 @@ pub fn refresh_view(s: &mut State) {
     with_current_io(|io| crate::gfx::refresh_view(s, io));
 }
 
-/// [sound] 0x110912: picks and starts the song for the current area. Fallback: silence.
-pub fn area_music(_s: &mut State) {
-    todo_stub!("0x110912 area music (fallback: silence)", ());
+/// [sound] 0x110912: picks and starts the song for the current area.
+pub fn area_music(s: &mut State) {
+    crate::sound::play_area_song(s);
 }
 
 /// [map] 0x1092fc: moves the party to (x, y, z) (jail).

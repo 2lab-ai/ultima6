@@ -725,6 +725,7 @@ version = "0.1.0"
 name = "u6-core"
 version = "0.1.0"
 dependencies = [
+ "u6-audio",
  "u6-formats",
  "u6-intake",
  "u6-render",

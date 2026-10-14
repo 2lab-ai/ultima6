@@ -6,13 +6,14 @@
 //! calls [`MedPlayer::timer_interrupt`] at each timer underflow. Addresses below are the chip
 //! memory of that machine (the module, the null sample).
 
-use u6_audio::{CiaTimer, Machine, Paula, TimerInterrupt};
+use u6_audio::{CiaTimer, Machine, Paula};
 
-use super::module::{Mem, Module, song};
+use super::module::{Mem, Module};
 use super::tables::MedTables;
 
-/// The 4 zero bytes a one-shot sample repeats after it ends (the original's 0x1535d0).
-pub const NULL_SAMPLE: u32 = 0;
+/// The 4 zero bytes a one-shot sample repeats after it ends (the original's 0x1535d0; any
+/// nonzero address of zeros: 0x10060c skips a repeat pointer of 0).
+pub const NULL_SAMPLE: u32 = 4;
 /// Tracks the routine keeps state for (0x10064a: 4 Amiga channels of 0x4a bytes, then 12 MIDI
 /// tracks of 0x12 bytes; only the first 4 reach Paula).
 pub const TRACKS: usize = 16;
@@ -144,6 +145,11 @@ impl<'a> Hw<'a> {
 
     pub fn mem(&self) -> Mem<'_> {
         Mem(self.chip)
+    }
+
+    /// Memory to read and Paula to write at the same time.
+    pub fn split(&mut self) -> (Mem<'_>, &mut Paula) {
+        (Mem(self.chip), self.paula)
     }
 
     pub fn set_byte(&mut self, addr: u32, v: u8) {

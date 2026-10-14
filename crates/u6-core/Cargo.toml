@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 u6-formats.workspace = true
 u6-render.workspace = true
+u6-audio.workspace = true
 
 [dev-dependencies]
 # Real-data test only: zip -> files, exactly as the platforms do it.

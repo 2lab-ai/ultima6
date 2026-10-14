@@ -53,13 +53,23 @@ impl MedTables {
     pub fn from_image(img: &GameImage) -> Result<Self, FormatError> {
         let words = |addr: u32, n: usize| -> Result<Vec<u16>, FormatError> {
             let b = img.bytes(addr, n * 2)?;
-            Ok(b.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect())
+            Ok(b.chunks(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect())
         };
         let periods: [u16; PERIOD_COUNT] = words(PERIODS, PERIOD_COUNT)?.try_into().unwrap();
         if periods[..60].windows(2).any(|w| w[1] >= w[0]) || periods[95] == 0 {
-            return Err(bad(format!("period table at {PERIODS:#x} is not a period table")));
+            return Err(bad(format!(
+                "period table at {PERIODS:#x} is not a period table"
+            )));
         }
-        let sine: [i8; 32] = img.bytes(SINE, 32)?.iter().map(|&b| b as i8).collect::<Vec<_>>().try_into().unwrap();
+        let sine: [i8; 32] = img
+            .bytes(SINE, 32)?
+            .iter()
+            .map(|&b| b as i8)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
         if sine[8] != 127 || sine[0] != 0 {
             return Err(bad(format!("sine table at {SINE:#x} does not peak at 127")));
         }

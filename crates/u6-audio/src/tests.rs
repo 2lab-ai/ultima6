@@ -41,7 +41,9 @@ fn render(m: &mut Machine, frames: usize) -> Vec<f32> {
 
 fn sign_changes(side: impl Iterator<Item = f32>) -> usize {
     let v: Vec<f32> = side.filter(|x| x.abs() > 1e-6).collect();
-    v.windows(2).filter(|w| (w[0] > 0.0) != (w[1] > 0.0)).count()
+    v.windows(2)
+        .filter(|w| (w[0] > 0.0) != (w[1] > 0.0))
+        .count()
 }
 
 #[test]
@@ -52,7 +54,10 @@ fn period_sets_the_pitch_at_the_pal_clock() {
     let crossings = sign_changes(out.iter().step_by(2).copied());
     // 4 samples × 200 clocks per cycle, two sign changes per cycle.
     let expect = 2.0 * f64::from(PAL_CLOCK) / 800.0;
-    assert!((crossings as f64 - expect).abs() < expect * 0.01, "{crossings} vs {expect}");
+    assert!(
+        (crossings as f64 - expect).abs() < expect * 0.01,
+        "{crossings} vs {expect}"
+    );
 }
 
 #[test]
@@ -89,7 +94,10 @@ fn dma_off_is_silent_and_on_again_restarts_from_the_location() {
     assert!(render(&mut m, 10).iter().all(|&x| x == 0.0));
     m.paula.channels[0].location = 8;
     m.paula.write_dmacon(0x8001);
-    assert!(render(&mut m, 4)[2] > 0.2, "restarted on the constant block");
+    assert!(
+        render(&mut m, 4)[2] > 0.2,
+        "restarted on the constant block"
+    );
 }
 
 #[test]
@@ -117,7 +125,11 @@ fn the_loop_uses_registers_written_after_the_start() {
     let first = out[0];
     let later: Vec<f32> = out.iter().step_by(2).skip(50).copied().collect();
     assert!(first > 0.4, "first block = 0x7f7f: {first}");
-    assert!(later.iter().all(|&x| (x - later[0]).abs() < 1e-6 && x > 0.2));
+    assert!(
+        later
+            .iter()
+            .all(|&x| (x - later[0]).abs() < 1e-6 && x > 0.2)
+    );
 }
 
 #[test]
@@ -130,7 +142,11 @@ fn timer_interrupts_every_latch_plus_one_e_cycles() {
     let mut out = vec![0.0; RATE as usize * 2];
     m.render(&mut irq, &mut out, RATE);
     let expect = f64::from(PAL_CLOCK) / 5.0 / f64::from(0x3742 + 1);
-    assert!((f64::from(irq.0) - expect).abs() <= 1.0, "{} vs {expect}", irq.0);
+    assert!(
+        (f64::from(irq.0) - expect).abs() <= 1.0,
+        "{} vs {expect}",
+        irq.0
+    );
 }
 
 #[test]
@@ -156,7 +172,12 @@ fn the_led_filter_cuts_high_frequencies() {
         m.led_filter = led;
         start(&mut m, 0, 0, 2, 80, 64); // ~11 kHz square
         let out = render(&mut m, 4800);
-        let s: f64 = out.iter().step_by(2).skip(480).map(|&x| f64::from(x).powi(2)).sum();
+        let s: f64 = out
+            .iter()
+            .step_by(2)
+            .skip(480)
+            .map(|&x| f64::from(x).powi(2))
+            .sum();
         (s / 4320.0).sqrt()
     };
     let (off, on) = (rms(false), rms(true));

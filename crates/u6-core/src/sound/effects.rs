@@ -2,7 +2,7 @@
 //! synth step, the effect commands as this player implements them (0x100c46 jump table), and
 //! the DMA start at the end (0x100628).
 
-use super::med::{CHANNELS, Hw, MedPlayer, NULL_SAMPLE};
+use super::med::{CHANNELS, Hw, MedPlayer};
 use super::module::{Module, song};
 
 /// Lowest period the slides leave (0x71 = 113).
@@ -16,7 +16,8 @@ impl MedPlayer {
                 continue;
             }
             let (cmd, arg) = (self.tracks[ch].cmd, self.tracks[ch].arg);
-            let mut synth_run = self.tracks[ch].synth;
+            // The synth step runs once per tick for a synth or hybrid note (0x100c12 / 0x100c18).
+            let synth = self.tracks[ch].synth;
             let t = &mut self.tracks[ch];
             if t.hold_count >= 0 {
                 t.hold_count -= 1;
@@ -30,12 +31,11 @@ impl MedPlayer {
                         if t.fade == 0 {
                             hw.dmacon(1 << ch);
                         }
-                        synth_run = t.synth;
                     }
                 }
             }
-            if synth_run != 0 {
-                self.synth_step(hw, ch, synth_run);
+            if synth != 0 {
+                self.synth_step(hw, ch, synth);
             }
             let t = &mut self.tracks[ch];
             if t.fade != 0 {
@@ -65,7 +65,11 @@ impl MedPlayer {
                 0x4 => Some(self.vibrato(ch, arg)),
                 0x5 => {
                     let p = self.tracks[ch].period;
-                    Some(if (tick as i8) >= 3 { p } else { p.wrapping_sub(u16::from(arg)) })
+                    Some(if (tick as i8) >= 3 {
+                        p
+                    } else {
+                        p.wrapping_sub(u16::from(arg))
+                    })
                 }
                 0xa | 0xd => {
                     let t = &mut self.tracks[ch];
@@ -192,6 +196,5 @@ impl MedPlayer {
                 hw.length(ch, t.repeat_len);
             }
         }
-        let _ = NULL_SAMPLE;
     }
 }

@@ -23,8 +23,7 @@ impl MedPlayer {
         self.set_tempo(&mut Hw::of(m), INIT_TEMPO);
     }
 
-    /// Original: 0x10102a (sound: MED init — signal, audio.device, ciab.resource, CIA-B timer)
-    /// [partial]
+    /// Original: 0x10102a (sound: MED init — audio.device, ciab.resource, timer B) [partial]
     fn init_player(&mut self, m: &mut Machine) {
         let crb = m.timer.control() & 0x80;
         m.timer.write_control(crb);
@@ -40,8 +39,7 @@ impl MedPlayer {
         self.shutdown(m);
     }
 
-    /// Original: 0x101126 (sound: MED shutdown — remove the CIA vector, close audio.device)
-    /// [partial]
+    /// Original: 0x101126 (sound: MED shutdown — CIA vector, audio.device) [partial]
     ///
     /// The OS calls are the platform's; what stays is the DMACON write that silences the four
     /// channels.
@@ -111,7 +109,11 @@ impl MedPlayer {
             t.track_vol = (v as u16).wrapping_mul(master as u16) >> 4;
         }
         let exp = md.expdata(mem);
-        let ext = if exp == 0 { 0 } else { md.exp_samples(mem, exp) };
+        let ext = if exp == 0 {
+            0
+        } else {
+            md.exp_samples(mem, exp)
+        };
         let entries = if ext == 0 { 0 } else { mem.w(exp + 8) };
         if entries == 0 {
             self.hold = [0; 63];
@@ -137,11 +139,19 @@ impl MedPlayer {
     pub(super) fn set_tempo(&mut self, hw: &mut Hw, tempo: u16) {
         let value = if tempo as u8 <= 10 {
             let i = (tempo & 0xff00) | u16::from((tempo as u8).wrapping_sub(1));
-            self.tables.st_tempos.get(usize::from(i)).copied().unwrap_or(0xffff)
+            self.tables
+                .st_tempos
+                .get(usize::from(i))
+                .copied()
+                .unwrap_or(0xffff)
         } else {
             let q = self.timer_div / u32::from(tempo);
             // divu.w leaves D1 alone when the quotient overflows 16 bits.
-            if q > 0xffff { self.timer_div as u16 } else { q as u16 }
+            if q > 0xffff {
+                self.timer_div as u16
+            } else {
+                q as u16
+            }
         };
         hw.timer.write_lo(value as u8);
         hw.timer.write_hi((value >> 8) as u8);

@@ -14,3 +14,4 @@ u6-intake = { path = "crates/u6-intake" }
 u6-formats = { path = "crates/u6-formats" }
 u6-core = { path = "crates/u6-core" }
 u6-render = { path = "crates/u6-render" }
+u6-audio = { path = "crates/u6-audio" }

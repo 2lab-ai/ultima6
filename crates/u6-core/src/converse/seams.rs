@@ -340,14 +340,14 @@ pub(crate) fn resurrect(_s: &mut State, _obj: i16) {
     todo_stub!("0x11785e resurrect (converse seam)", ())
 }
 
-/// 0x110878(song): play / 0 = stop. Fallback: nothing.
-pub(crate) fn play_song(_s: &mut State, _song: u16) {
-    todo_stub!("0x110878 play song (converse seam)", ())
+/// 0x110878(song): play / 0 = stop.
+pub(crate) fn play_song(s: &mut State, song: u16) {
+    crate::sound::play_song(s, song)
 }
 
-/// 0x110912: pick the area's song. Fallback: nothing.
-pub(crate) fn pick_song(_s: &mut State) {
-    todo_stub!("0x110912 pick the area song (converse seam)", ())
+/// 0x110912: pick the area's song.
+pub(crate) fn pick_song(s: &mut State) {
+    crate::sound::play_area_song(s)
 }
 
 // ---- objlist-block bytes (actors keep the block; the converse reads these directly) ---------

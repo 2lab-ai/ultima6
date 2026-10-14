@@ -201,14 +201,14 @@ pub(crate) fn break_off_combat(_state: &mut State) {
     todo_stub!("0x121d78 break off combat", ())
 }
 
-/// Start the song for the current area (0x110912, an M1 stub point). Fallback: silence.
-pub(crate) fn play_area_song(_state: &mut State) {
-    todo_stub!("0x110912 pick and play the area song", ())
+/// Start the song for the current area (0x110912).
+pub(crate) fn play_area_song(state: &mut State) {
+    crate::sound::play_area_song(state)
 }
 
-/// Play song `n` (0x110878, an M1 stub point). Fallback: silence.
-pub(crate) fn play_song(_state: &mut State, _n: u16) {
-    todo_stub!("0x110878 play a song", ())
+/// Play song `n` (0x110878).
+pub(crate) fn play_song(state: &mut State, n: u16) {
+    crate::sound::play_song(state, n)
 }
 
 /// Shamino names the place a dungeon entrance of quality `q` (1..=20) leads to (0x11d1d4):

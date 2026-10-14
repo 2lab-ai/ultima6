@@ -88,7 +88,8 @@ impl MedPlayer {
                         let t = &self.tracks[ch];
                         let n = note.wrapping_sub(1);
                         if (n as i8) >= 0 {
-                            let p = self.period_at(t.period_table, u16::from(n.wrapping_mul(2) / 2));
+                            let p =
+                                self.period_at(t.period_table, u16::from(n.wrapping_mul(2) / 2));
                             hw.period(ch, p);
                         }
                         note = 0;

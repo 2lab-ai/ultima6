@@ -93,6 +93,7 @@ pub struct State {
     pub gfx: GfxState,
     /// Globals of the main hunk (command loop, boot).
     pub main: MainState,
+    pub sound: crate::sound::SoundState,
     /// Original: 0x151ee0 (RNG state longword)
     pub rng: Rng,
 }
@@ -214,6 +215,7 @@ impl State {
             look,
             palette,
         };
+        state.sound = crate::sound::SoundState::load(files)?;
         state.objects.blocks = blocks;
         state.map.world = world;
         state.map.chunks = chunks;
