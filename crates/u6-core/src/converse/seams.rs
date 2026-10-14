@@ -16,7 +16,6 @@ use super::Cx;
 use super::party::ix;
 use crate::engine::Io;
 use crate::state::State;
-use crate::todo_stub;
 
 /// Objlist-block (A4-0x7b84) offsets the converse code reads: A4-0x7b26 (word, int var 0x15),
 /// A4-0x7b0b (solo member, -1 = party), A4-0x7b04 (gender, non-zero = female).
@@ -313,14 +312,14 @@ pub(crate) fn has_object(s: &State, actor: i16, ty: i16, quality: i16) -> i16 {
     crate::magic::carried_object(&s.objects, actor, ty, quality)
 }
 
-/// 0x110878(song): play / 0 = stop. Fallback: nothing.
-pub(crate) fn play_song(_s: &mut State, _song: u16) {
-    todo_stub!("0x110878 play song (converse seam)", ())
+/// 0x110878(song): play / 0 = stop.
+pub(crate) fn play_song(s: &mut State, song: u16) {
+    crate::sound::play_song(s, song)
 }
 
-/// 0x110912: pick the area's song. Fallback: nothing.
-pub(crate) fn pick_song(_s: &mut State) {
-    todo_stub!("0x110912 pick the area song (converse seam)", ())
+/// 0x110912: pick the area's song.
+pub(crate) fn pick_song(s: &mut State) {
+    crate::sound::play_area_song(s)
 }
 
 // ---- objlist-block bytes (actors keep the block; the converse reads these directly) ---------

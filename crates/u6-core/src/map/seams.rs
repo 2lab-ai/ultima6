@@ -8,7 +8,6 @@ use u6_formats::position::Position;
 
 use crate::objects::{OBJECT_SLOTS, ObjectId};
 use crate::state::State;
-use crate::todo_stub;
 
 /// Status byte of object `id` (A4+0x190c, byte per object slot: 0x18 = not on the map, 0x20 =
 /// temporary, 0x40 = egg active, ...).
@@ -198,14 +197,14 @@ pub(crate) fn break_off_combat(state: &mut State) {
     crate::combat::mode::break_off(state);
 }
 
-/// Start the song for the current area (0x110912, an M1 stub point). Fallback: silence.
-pub(crate) fn play_area_song(_state: &mut State) {
-    todo_stub!("0x110912 pick and play the area song", ())
+/// Start the song for the current area (0x110912).
+pub(crate) fn play_area_song(state: &mut State) {
+    crate::sound::play_area_song(state)
 }
 
-/// Play song `n` (0x110878, an M1 stub point). Fallback: silence.
-pub(crate) fn play_song(_state: &mut State, _n: u16) {
-    todo_stub!("0x110878 play a song", ())
+/// Play song `n` (0x110878).
+pub(crate) fn play_song(state: &mut State, n: u16) {
+    crate::sound::play_song(state, n)
 }
 
 /// Shamino names the place a dungeon entrance of quality `q` (1..=20) leads to (0x11d1d4):

@@ -1,0 +1,19 @@
+# u6-audio is platform-free: no I/O, no clocks, no environment (see the crate doc).
+disallowed-types = [
+    "std::time::Instant",
+    "std::time::SystemTime",
+    "std::fs::File",
+    "std::fs::OpenOptions",
+    "std::net::TcpStream",
+    "std::net::UdpSocket",
+]
+disallowed-methods = [
+    "std::fs::read",
+    "std::fs::read_to_string",
+    "std::fs::write",
+    "std::fs::read_dir",
+    "std::env::var",
+    "std::env::args",
+    "std::thread::sleep",
+    "std::thread::spawn",
+]

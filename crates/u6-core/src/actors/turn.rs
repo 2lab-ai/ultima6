@@ -44,7 +44,7 @@ pub fn darkness(s: &mut State) {
     if s.actors.party.leader_index == 0x10 || s.actors.work.resurrect_pending {
         return;
     }
-    crate::todo_stub!("0x110878 music off (fallback: silence)", ());
+    crate::sound::play_song(s, 0);
     seams::print(s, -0x7435, &[]);
     s.gfx.window_shown = 1;
     seams::full_redraw(s);

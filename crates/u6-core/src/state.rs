@@ -86,6 +86,7 @@ pub struct State {
     pub main: MainState,
     pub magic: crate::magic::MagicState,
     pub inventory: crate::inventory::InventoryState,
+    pub sound: crate::sound::SoundState,
     /// Original: 0x151ee0 (RNG state longword)
     pub rng: Rng,
     pub combat: crate::combat::CombatState,
@@ -219,6 +220,7 @@ impl State {
             look,
             palette,
         };
+        state.sound = crate::sound::SoundState::load(files)?;
         state.objects.blocks = blocks;
         state.map.world = world;
         state.map.chunks = chunks;

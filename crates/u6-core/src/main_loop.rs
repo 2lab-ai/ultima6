@@ -182,7 +182,7 @@ const TAIL_COMBAT: usize = 0x78;
 /// one tile substitution per animdata slot (0x152cd2), the character check, then 0x1217d4,
 /// the clock 0x10368a(0), combat or the area song, the command loop, music off and the `.tmp`
 /// cleanup 0x10d4e8. Not ported: the argument check ("JJS"), the copper and display setup
-/// (the engine's), music (no sound in M1).
+/// (the engine's).
 pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
     let (state, io) = (&*state, &*io);
     boot_screen(state, io);
@@ -222,13 +222,12 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
             // 0x121c64, the B handler (the shipped objlist has the combat byte set).
             crate::combat::mode::begin_combat(&mut s);
         } else {
-            // Contract: pick and start the area song. M1 has no sound.
-            todo_stub!("0x110912 pick and play the area song", ());
+            crate::sound::play_area_song(&mut s);
         }
     }
     flush_prints(state, io).await;
     commands::command_loop(state, io).await;
-    todo_stub!("0x110878 play song 0 (music off)", ());
+    crate::sound::play_song(&mut state.borrow_mut(), 0);
     crate::objects::delete_tmp_files(&mut state.borrow_mut().objects);
 }
 
