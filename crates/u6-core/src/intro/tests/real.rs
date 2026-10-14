@@ -99,6 +99,12 @@ fn script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
     shot("tv-room-2", r);
     r.keys(&[Key::Space], 400);
     shot("menu", r);
+    r.keys(&[Key::Char('a')], 120);
+    shot("credits", r);
+    for _ in 0..4 {
+        r.keys(&[Key::Space], 60);
+    }
+    shot("menu-again", r);
     r.keys(&[Key::Char('c')], 120);
     r.text("Zhuge", 10);
     r.keys(&[Key::Enter], 60);

@@ -31,10 +31,12 @@
 //!   u 0x113e8e · u 0x113ea6 · u 0x113ebe · u 0x113fb2 · u 0x113fce · u 0x113fea · u 0x115078 ·
 //!   u 0x1198f8 and the fades; input u 0x114f28 · u 0x113ed0 · u 0x113f0e · u 0x113f20;
 //!   C runtime `rand` u 0x10fa6c / `srand` u 0x10fa8e
-//! - stubbed: u 0x1078e6 introduction story · u 0x10a81e transfer (Ultima IV / V saves) ·
-//!   u 0x1070c0 acknowledgments · the MED music (seams)
+//! - u 0x1070c0 acknowledgments
+//! - stubbed: u 0x1078e6 introduction story · u 0x10a81e transfer (Ultima IV / V saves) · the
+//!   MED music and the VCR clock (seams)
 
 pub mod create;
+pub mod credits;
 pub mod exe;
 pub mod gypsy;
 pub mod handoff;
@@ -142,7 +144,7 @@ pub async fn main(st: &mut IntroState, io: &Io, seed: u16) -> IntroOutcome {
                     return journey(st);
                 }
             }
-            3 => credits(st),
+            3 => credits::credits(st, io).await,
             4 => return journey(st),
             _ => return IntroOutcome::Quit,
         }
@@ -186,12 +188,6 @@ fn introduction(st: &mut IntroState) {
 fn transfer(st: &mut IntroState) -> u16 {
     let _ = st;
     crate::todo_stub!("u 0x10a81e transfer a character", 0)
-}
-
-/// Stub: u 0x1070c0 (acknowledgments on the vellum).
-fn credits(st: &mut IntroState) {
-    let _ = st;
-    crate::todo_stub!("u 0x1070c0 acknowledgments", ());
 }
 
 /// Original: u 0x1031b8 (main menu: title and menu pictures, then a key) — the choice: 0
