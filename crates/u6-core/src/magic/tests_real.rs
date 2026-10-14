@@ -1,8 +1,9 @@
 //! Real data: spells cast from the start state of the user's archive.org zip, through the
 //! engine with typed keys (the Cast command's own steps, as 0x1041d8 runs them before
-//! 0x11af10). The Avatar gets a readied spellbook and reagents through the objects API. Prints
-//! the message scroll; the Light test writes headless frames to /tmp/claude-501/. Skips where
-//! the zip is missing; no game data in the repo.
+//! 0x11af10). The Avatar gets a readied spellbook and reagents through the objects API.
+//! Compares the message scroll with strings read from the user's `game` and prints only its
+//! line count; the Light test writes headless frames to /tmp/claude-501/. Skips where the zip
+//! is missing; no game data in the repo.
 #![allow(clippy::disallowed_methods)] // tests read the zip and write the frame receipts
 
 use std::cell::RefCell;
@@ -17,6 +18,8 @@ use crate::main_loop::{flush_prints, game_string, pointed_string};
 use crate::objects::{IN_CONTAINER, READIED};
 use crate::state::State;
 use crate::ui::printf::{Arg, printf};
+
+use super::tables::Msg;
 use u6_render::Framebuffer;
 
 pub(super) const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
@@ -82,7 +85,7 @@ pub(super) fn give_book(s: &mut State, spells: &[u8]) -> i16 {
 }
 
 /// The command loop's part of Cast (0x104216 and 0x10498e..0x104a96): the spell cursor (mode
-/// 3, range 7, cell (5, 5)), the target pending, "Cast-", the command, the cleanup.
+/// 3, range 7, cell (5, 5)), the target pending, the Cast line, the command, the cleanup.
 pub(super) async fn cast_command(state: &RefCell<State>, io: &Io) {
     {
         let mut s = state.borrow_mut();
@@ -109,15 +112,117 @@ pub(super) async fn cast_command(state: &RefCell<State>, io: &Io) {
     flush_prints(state, io).await;
 }
 
+/// Lines of the message scroll. They are the game's text, so the debug form (the assertion
+/// messages) shows only how many there are and their lengths; the tests compare them with
+/// strings read from the user's `game` at run time ([`text_at`], [`msg`], [`printed`]).
+pub(super) struct Scroll(Vec<String>);
+
+impl std::ops::Deref for Scroll {
+    type Target = [String];
+    fn deref(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Scroll {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let lengths: Vec<usize> = self.0.iter().map(String::len).collect();
+        write!(f, "{} lines of lengths {lengths:?}", lengths.len())
+    }
+}
+
+impl Scroll {
+    /// The first line holding `text`; never for an empty `text` (a string missing from `game`).
+    pub(super) fn find(&self, text: &str) -> Option<usize> {
+        if text.is_empty() {
+            return None;
+        }
+        self.0.iter().position(|l| l.contains(text))
+    }
+
+    /// True when a line holds `text` (see [`Self::find`]), or the lines do once joined (the
+    /// scroll wraps long lines at a space or mid-word).
+    pub(super) fn has(&self, text: &str) -> bool {
+        self.find(text).is_some()
+            || (!text.is_empty() && [" ", ""].iter().any(|sep| self.0.join(sep).contains(text)))
+    }
+}
+
+/// `bytes` as text without its newlines (the scroll keeps one line per entry).
+fn plain(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .filter(|&&b| b != b'\n')
+        .map(|&b| char::from(b))
+        .collect()
+}
+
+/// The string at image address `addr` of the user's `game`, without its newlines.
+pub(super) fn text_at(io: &Io, addr: u32) -> String {
+    plain(&game_string(io, addr))
+}
+
+/// Result message `m` of the spell tables (read from the user's `game` at load).
+pub(super) fn msg(e: &Engine, m: Msg) -> String {
+    plain(e.state().magic.tables.message(m))
+}
+
+/// The format at image address `addr` with each conversion (`%s`, `%d`, `%3d` ...) replaced by
+/// the next of `args`, without its newlines.
+pub(super) fn printed(io: &Io, addr: u32, args: &[&str]) -> String {
+    let fmt = text_at(io, addr);
+    let mut args = args.iter();
+    let mut out = String::new();
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let mut conv = chars.next();
+        while conv.is_some_and(|d| d.is_ascii_digit()) {
+            conv = chars.next();
+        }
+        if conv.is_some() {
+            out.push_str(args.next().copied().unwrap_or_default());
+        }
+    }
+    out
+}
+
+/// The longest piece of the format at `addr` between its conversions.
+pub(super) fn literal(io: &Io, addr: u32) -> String {
+    let fmt = text_at(io, addr);
+    let mut best = String::new();
+    for part in fmt.split('%') {
+        let lit = part.trim_start_matches(|c: char| c.is_ascii_digit());
+        let lit = lit.get(1..).unwrap_or_default();
+        if lit.len() > best.len() {
+            best = lit.to_string();
+        }
+    }
+    let first = fmt.split('%').next().unwrap_or_default();
+    if first.len() > best.len() {
+        best = first.to_string();
+    }
+    best
+}
+
 /// The scroll lines so far, the one being written last.
-pub(super) fn lines_of(s: &State) -> Vec<String> {
+pub(super) fn lines_of(s: &State) -> Scroll {
     let t = &s.ui.text;
     let mut lines = s.ui.messages.clone();
     let mut last: String = t.transcript_line.iter().map(|&b| char::from(b)).collect();
     let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
     last.extend(pending.iter().map(|&b| char::from(b)));
     lines.push(last);
-    lines
+    Scroll(lines)
+}
+
+/// The line the command loop prints for Cast (0x101f48 with the command's name).
+pub(super) fn cast_line_text(io: &Io) -> String {
+    let name = plain(&pointed_string(io, A4.wrapping_sub(0x7c8e) + 4 * 0x82));
+    printed(io, 0x0010_1f48, &[&name])
 }
 
 pub(super) fn keys(spec: &str) -> Vec<InputEvent> {
@@ -171,15 +276,18 @@ pub(super) fn reagents(s: &State) -> Vec<i16> {
         .collect()
 }
 
-/// Prints the scroll from the "Cast-" line on.
-pub(super) fn show(name: &str, e: &Engine) -> Vec<String> {
+/// The scroll from the last Cast line on ([`cast_line_text`]); prints its line count and
+/// the stub hits (the lines themselves are the game's text).
+pub(super) fn show(name: &str, e: &Engine) -> Scroll {
     let lines = lines_of(&e.state());
-    let from = lines.iter().rposition(|l| l.contains("Cast-")).unwrap_or(0);
-    let tail = lines[from..].to_vec();
-    eprintln!("--- {name}");
-    for l in &tail {
-        eprintln!("  {l}");
-    }
+    let cast = cast_line_text(e.io());
+    let from = if cast.is_empty() {
+        0
+    } else {
+        lines.iter().rposition(|l| l.contains(&cast)).unwrap_or(0)
+    };
+    let tail = Scroll(lines[from..].to_vec());
+    eprintln!("--- {name}: {} scroll lines", tail.len());
     eprintln!(
         "  stub hits: {:?}",
         e.stub_hits().keys().collect::<Vec<_>>()
@@ -333,7 +441,9 @@ fn light_at_night_lights_the_view() {
         "  lit view cells: {dark} before, {lit} after; light timer {}",
         s.actors.timers[0]
     );
-    assert!(tail.iter().any(|l| l.contains("(Light)")), "{tail:?}");
+    let light = plain(s.magic.tables.name(9));
+    let announced = printed(e.io(), super::cast::FMT_PAREN, &[&light]);
+    assert!(tail.has(&announced), "{tail:?}");
     assert_eq!(s.actors.timers[0], 100);
     assert!(lit > dark, "{lit} lit cells after, {dark} before");
     spent(
@@ -354,11 +464,8 @@ fn create_food_adds_food() {
     let s = e.state();
     let n = food(&s);
     assert!((1..=10).contains(&n), "{n} food");
-    assert!(
-        tail.iter()
-            .any(|l| l.contains(&format!("Create {n} food."))),
-        "{tail:?}"
-    );
+    let line = printed(e.io(), super::spells::MSG_FOOD, &[&n.to_string()]);
+    assert!(tail.has(&line), "{tail:?}");
     assert_eq!(s.magic.current, 0, "the books remember the spell");
     spent(
         &[10; 8],
@@ -398,12 +505,17 @@ fn detect_magic_on_a_potion() {
     }
     assert!(e.finished());
     let tail = show("Detect Magic", &e);
-    assert!(tail.iter().any(|l| l.contains("potion")), "{tail:?}");
-    assert!(
-        tail.iter()
-            .any(|l| l.contains("magical") || l.contains("potion.")),
-        "{tail:?}"
+    let s = e.state();
+    let sel = s.ui.input.selection;
+    assert_eq!(
+        s.objects.kind(sel),
+        super::detect::POTION,
+        "a potion two east"
     );
+    let kind = usize::from(s.objects.tf(sel) >> 10);
+    let what = plain(s.magic.tables.potions.get(kind).map_or(&[], Vec::as_slice));
+    let line = printed(e.io(), super::detect::MSG_POTION, &[&what]);
+    assert!(tail.has(&line), "{tail:?}");
 }
 
 #[test]
@@ -447,10 +559,7 @@ fn sleep_on_an_npc() {
     let asleep = s.actors.attrs.status[7] & 4 != 0;
     eprintln!("  actor 7 status {:#x}", s.actors.attrs.status[7]);
     assert!(
-        asleep
-            || tail
-                .iter()
-                .any(|l| l.contains("Failed") || l.contains("No effect")),
+        asleep || tail.has(&msg(&e, Msg::Failed)) || tail.has(&msg(&e, Msg::NoEffect)),
         "{tail:?}"
     );
     spent(
@@ -477,16 +586,17 @@ fn magic_arrow_goes_through_the_combat_seams() {
             .keys()
             .any(|k| k.starts_with("0x1228ba") || k.starts_with("0x1231be"))
     );
-    let failed = tail.iter().any(|l| l.contains("Failed"));
+    let failed = tail.has(&msg(&e, Msg::Failed));
     assert!(failed || s.actors.attrs.hp[7] < before, "{tail:?}");
     if !failed {
         // 0x11669e's order: the target's reaction (0x123c56) before the newline and the wound
         // line (0x12395a).
-        let at = |w: &str| tail.iter().position(|l| l.contains(w));
-        assert!(
-            at("yells").zip(at("wounded")).is_none_or(|(y, w)| y < w),
-            "{tail:?}"
-        );
+        // The words of the yell (A4-0x7318, its longest literal part) and of the wound word
+        // (A4-0x772e), from the user's `game`.
+        let yell = literal(e.io(), A4.wrapping_sub(0x7318));
+        let wounded = text_at(e.io(), A4.wrapping_sub(0x772e));
+        let (y, w) = (tail.find(&yell), tail.find(wounded.trim()));
+        assert!(y.zip(w).is_none_or(|(y, w)| y < w), "{tail:?}");
     }
     spent(
         &[10; 8],

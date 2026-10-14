@@ -10,23 +10,23 @@ use crate::engine::Io;
 use crate::state::State;
 use crate::ui::printf::Arg;
 
-/// "To phase ", the Locate formats "\n%d{", "S", "N", ", %d{", "E\n", "W\n" (`{` is the
-/// degree glyph of the font).
-const MSG_TO_PHASE: u32 = 0x0011_5a1e;
-const FMT_LAT: u32 = 0x0011_5a72;
-const MSG_SOUTH: u32 = 0x0011_5a78;
-const MSG_NORTH: u32 = 0x0011_5a7a;
-const FMT_LONG: u32 = 0x0011_5a7c;
-const MSG_EAST: u32 = 0x0011_5a82;
-const MSG_WEST: u32 = 0x0011_5a86;
+/// Hunk 11: the Gate Travel prompt, then the Locate formats and the four hemisphere letters
+/// (latitude, south, north, longitude, east, west; `{` is the degree glyph of the font).
+pub(super) const MSG_TO_PHASE: u32 = 0x0011_5a1e;
+pub(super) const FMT_LAT: u32 = 0x0011_5a72;
+pub(super) const MSG_SOUTH: u32 = 0x0011_5a78;
+pub(super) const MSG_NORTH: u32 = 0x0011_5a7a;
+pub(super) const FMT_LONG: u32 = 0x0011_5a7c;
+pub(super) const MSG_EAST: u32 = 0x0011_5a82;
+pub(super) const MSG_WEST: u32 = 0x0011_5a86;
 /// The wizard's eye object.
 const EYE: u16 = 0x34;
 /// Wizard Eye's moves.
 const EYE_STEPS: i16 = 0x28;
 
-/// Original: 0x11916e (magic: Gate Travel: "To phase " and up to four characters (0x107cba), a
-/// newline, the caster's flash; a number 1..8 (0x128b98) whose moonstone is placed (the words
-/// at A4-0x7b5a plus 6 (n − 1) not 0, 0, 0) sends the party through the moongate to it
+/// Original: 0x11916e (magic: Gate Travel: the phase prompt (0x115a1e) and up to four characters
+/// (0x107cba), a newline, the caster's flash; a number 1..8 (0x128b98) whose moonstone is placed
+/// (the words at A4-0x7b5a plus 6 (n − 1) not 0, 0, 0) sends the party through the moongate to it
 /// (0x10952e); anything else does nothing)
 pub async fn gate_travel(state: &RefCell<State>, io: &Io) {
     print_at(state, io, MSG_TO_PHASE, &[]).await;
@@ -67,7 +67,7 @@ fn centre_tile(s: &State) -> u8 {
 /// follow while the key is not escape (0x1b) and the centre's map tile is below 0xfc: a key is
 /// read without a target pending (A4-0x6a90 cleared); a direction moves the centre and the eye
 /// a tile and redraws. Then the eye goes, the centre comes back, the view is redrawn dissolving
-/// and "Done"; with the inventory panel up its contents are redrawn (0x111be0).
+/// and `Msg::Done`; with the inventory panel up its contents are redrawn (0x111be0).
 pub async fn wizard_eye(state: &RefCell<State>, io: &Io, x: i16, y: i16, mode: i16) {
     if mode != 0 {
         super::spells::flash_window(state, io, 6).await;
@@ -146,7 +146,7 @@ pub(super) fn degrees(c: u6_formats::position::Position) -> (i16, i16) {
 
 /// Original: 0x11a470 (magic: Locate: the centre as degrees: latitude (y − 0x168) / 8 and
 /// longitude (x − 0x130) / 8 (arithmetic shifts; the coordinates × 4 below the surface),
-/// "\n%d{" S or N, ", %d{" E or W)
+/// each with its hemisphere letter (0x115a72 .. 0x115a86))
 pub async fn locate(state: &RefCell<State>, io: &Io) {
     let (lat, long) = degrees(state.borrow().map.centre);
     print_at(state, io, FMT_LAT, &[Arg::Word(lat.wrapping_abs() as u16)]).await;

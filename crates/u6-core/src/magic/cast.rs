@@ -20,7 +20,7 @@ const MSG_NO_BOOK: u32 = 0x0011_5b36;
 const MSG_NO_MAGIC: u32 = 0x0011_5a9a;
 const MSG_NO_SPELLS: u32 = 0x0011_5ab2;
 const MSG_NOTHING: u32 = 0x0011_5ad0;
-const FMT_PAREN: u32 = 0x0011_5ada;
+pub(super) const FMT_PAREN: u32 = 0x0011_5ada;
 const FMT_NAME_QUOTE: u32 = 0x0011_5ae0;
 const FMT_S: u32 = 0x0011_58b0;
 const FMT_SPACE_S: u32 = 0x0011_5a62;
@@ -47,7 +47,7 @@ async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) 
 /// Original: 0x11af10 (magic: Cast command: the caster's readied spellbooks, then 0x11abd0)
 ///
 /// The caster's contents are walked (0x10ae52 / 0x10aed6); readied objects of type 0x39 are
-/// the books, the first and the second found. Without one: "No spellbook is readied.".
+/// the books, the first and the second found. Without one: the no-book line (0x115b36).
 pub async fn cast(state: &RefCell<State>, io: &Io) {
     let books = {
         let mut s = state.borrow_mut();
@@ -86,7 +86,7 @@ async fn close_book(state: &RefCell<State>, io: &Io) {
 }
 
 /// Prints the spell's name and incantation: `(Name)` when it was typed with the cursor in a
-/// mode (the typed syllables are cleared), else `Name` newline `"Syl Syl"`.
+/// mode (the typed syllables are cleared), else `Name`, a newline and the syllables in quotes.
 async fn announce(state: &RefCell<State>, io: &Io, spell: u16) {
     let (typed, name, word) = {
         let s = state.borrow();
@@ -135,15 +135,14 @@ async fn mark_line(state: &RefCell<State>, io: &Io, line: i16, spell: u16) {
 
 /// Original: 0x11abd0 (magic: cast from the readied books `book1` / `book2` (0 = none))
 ///
-/// Refused while the Negate Magic timer (A4-0x7b65) runs or when the books hold no spell. The
-/// book is drawn (0x115da4, 0x116028, 0x116218) in panel mode 0xa1 and one key is read: a
-/// confirmed target (0x8e) with a page line selected picks that line's spell; a map target
-/// (A4-0x2f02 / -0x2f00 set) casts the current spell on it at once; anything else says
-/// "nothing". The choice is announced, the marker moves to the line and the books keep the
-/// spell, the panel comes back. Then the checks in order: the caster's level against the
-/// circle, the magic points, the reagents of the line; on success the reagents (0x11615a), the
-/// points (one per circle) and 3 × circle + 10 movement points (0x11c650) are spent and the
-/// spell runs (0x11a586).
+/// Refused while the Negate Magic timer (A4-0x7b65) runs or when the books hold no spell. The book
+/// is drawn (0x115da4, 0x116028, 0x116218) in panel mode 0xa1 and one key is read: a confirmed
+/// target (0x8e) with a page line selected picks that line's spell; a map target (A4-0x2f02 /
+/// -0x2f00 set) casts the current spell on it at once; anything else says the nothing line
+/// (0x115ad0). The choice is announced, the marker moves to the line and the books keep the spell,
+/// the panel comes back. Then the checks in order: the caster's level against the circle, the magic
+/// points, the reagents of the line; on success the reagents (0x11615a), the points (one per
+/// circle) and 3 × circle + 10 movement points (0x11c650) are spent and the spell runs (0x11a586).
 pub async fn book_cast(state: &RefCell<State>, io: &Io, book1: Slot, book2: Slot) {
     let actor = {
         let mut s = state.borrow_mut();

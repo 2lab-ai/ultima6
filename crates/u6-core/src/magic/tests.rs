@@ -521,7 +521,8 @@ fn page_codes_turn_the_page() {
 
 #[test]
 fn wind_change_takes_the_last_direction_read() {
-    // Not a direction: "nowhere.", and the wind still takes the last direction read (A4-0x2efc).
+    // Not a direction: the no-direction word (0x115a8a), and the wind still takes the last
+    // direction read (A4-0x2efc).
     let mut s = world();
     s.ui.input.direction = 5;
     let s = run(s, &[Key::Char('x')], |st, io| async move {

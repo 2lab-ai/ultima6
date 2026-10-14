@@ -12,7 +12,7 @@ use crate::objects::Slot;
 use crate::state::State;
 use crate::ui::printf::Arg;
 
-const MSG_FOOD: u32 = 0x0011_59ca;
+pub(super) const MSG_FOOD: u32 = 0x0011_59ca;
 const MSG_TOO_OLD: u32 = 0x0011_58ea;
 /// Food object type.
 const FOOD: u16 = 0x81;
@@ -47,7 +47,7 @@ pub async fn flash_window(state: &RefCell<State>, io: &Io, circle: u16) {
 }
 
 /// Original: 0x118c80 (magic: Create Food: the flashes, random 1..10 food (type 0x81) into the
-/// caster's inventory (0x10cf7c), "Create %d food.")
+/// caster's inventory (0x10cf7c), the count in the food line (0x1159ca))
 pub async fn create_food(state: &RefCell<State>, io: &Io, spell: u16) {
     flash_window(state, io, spell / 16 + 1).await;
     let caster = super::cast::caster(&state.borrow());
@@ -123,10 +123,11 @@ pub async fn resurrect_and_rejoin(state: &RefCell<State>, io: &Io, body: i16) {
     }
 }
 
-/// Original: 0x117b94 (magic: Resurrect: "On whom: ", the target from the inventory panel
-/// (mode 0x92 for the read) unless chosen, its name; nothing, or the map locked (A4-0x7afb):
-/// "No effect"; a body (0x153, 0x162, 0x155, 0x154) of an actor below 0xe0 is raised
-/// ("Success"), one of quality 0 is "too old"; anything else "No effect")
+/// Original: 0x117b94 (magic: Resurrect: `Msg::OnWhom`, the target from the inventory panel (mode
+/// 0x92 for the read) unless chosen, its name; nothing, or the map locked (A4-0x7afb):
+/// `Msg::NoEffect`; a body (0x153, 0x162, 0x155, 0x154) of an actor below 0xe0 is raised
+/// (`Msg::Success`), one of quality 0 gets the too-old line (0x1158ea); anything else
+/// `Msg::NoEffect`)
 pub async fn resurrect_spell(state: &RefCell<State>, io: &Io, pre: i16) {
     say(state, io, FMT_S, Msg::OnWhom).await;
     if pre == 0 {
@@ -170,7 +171,7 @@ pub async fn resurrect_spell(state: &RefCell<State>, io: &Io, pre: i16) {
     }
 }
 
-/// Peer (0x27) in 0x11a586: the flashes, the overview of 0x12c54a with no gem, "Done".
+/// Peer (0x27) in 0x11a586: the flashes, the overview of 0x12c54a with no gem, `Msg::Done`.
 pub async fn peer(state: &RefCell<State>, io: &Io, spell: u16) {
     let caster = super::cast::caster(&state.borrow());
     flash_actor(state, io, caster, 0).await;
@@ -183,7 +184,7 @@ pub async fn peer(state: &RefCell<State>, io: &Io, spell: u16) {
 /// view centre: Repel Undead (0x29) makes creatures with flag 0x80 flee (worktype 0x13) unless
 /// they resist; Reveal (0x47) makes them visible and unreadies a readied 0x102 they carry;
 /// Confuse (0x52) turns evil actors (alignment 0x20) to neutral worktype 8 unless they resist;
-/// Fear (0x63) is 0x118a4e. Then "Success".)
+/// Fear (0x63) is 0x118a4e. Then `Msg::Success`.)
 ///
 /// Columns x outside, rows y inside, as the original. The port does not write worktypes of
 /// object slots ≥ 0x100 (the original's byte table would be overrun).
@@ -255,9 +256,9 @@ const FMT_S_DOT: u32 = 0x0011_5a94;
 /// A4-0x61be: the direction names, a pointer per direction 0..7.
 const DIRECTION_NAMES: u32 = 0x61be;
 
-/// Original: 0x11a508 (magic: Wind Change: "Direction-", one key without a target pending; a
-/// direction prints its name, anything else "nowhere."; the wind takes the last direction read
-/// (A4-0x2efc) either way)
+/// Original: 0x11a508 (magic: Wind Change: the direction prompt (0x115a08), one key without a
+/// target pending; a direction prints its name, anything else the no-direction word (0x115a8a); the
+/// wind takes the last direction read (A4-0x2efc) either way)
 pub async fn wind_change(state: &RefCell<State>, io: &Io) {
     print_at(state, io, MSG_DIRECTION, &[]).await;
     state.borrow_mut().ui.input.target_pending = 0;
@@ -274,7 +275,7 @@ pub async fn wind_change(state: &RefCell<State>, io: &Io) {
 }
 
 /// Original: 0x119200 (magic: X-ray: the flashes, every view tile shown (A4-0x794c = 1, view
-/// flags) for 100 view refreshes (0x102ef0), then the normal view and "Done")
+/// flags) for 100 view refreshes (0x102ef0), then the normal view and `Msg::Done`)
 ///
 /// The port waits one display frame per refresh (the original's redraws take display time;
 /// without a wait the port would publish none of them).

@@ -1,15 +1,19 @@
 //! Real data: the spells ported in the second magic unit, cast from the start state of the
 //! user's archive.org zip — through the book with the incantation typed (its letters read from
 //! the user's `game`) and the cross-hair moved by arrow keys where it can aim, and with the
-//! target set as 0x1225c0 would return it where it cannot (objects). Prints the message scroll
-//! and asserts the state changes; the visual ones write frames to /tmp/claude-501/. Skips where
-//! the zip is missing; no game data in the repo.
+//! target set as 0x1225c0 would return it where it cannot (objects). Compares the message
+//! scroll with strings read from the user's `game` (printing only its line count) and asserts
+//! the state changes; the visual ones write frames to /tmp/claude-501/. Skips where the zip is
+//! missing; no game data in the repo.
 //!
 //! The start state: the Avatar (1) at the view centre (307, 352, 0) with members 2..4 just
 //! south, Lord British (5) four tiles north, actors 6 and 7 near him.
 #![allow(clippy::disallowed_methods)] // tests read the zip and write the frame receipts
 
-use super::tests_real::{boot, cast_command, files, give_book, keys, lines_of, png, show};
+use super::tables::Msg;
+use super::tests_real::{
+    boot, cast_command, files, give_book, keys, lines_of, msg, png, printed, show, text_at,
+};
 use crate::engine::{Engine, Io};
 use crate::files::Files;
 use crate::main_loop::flush_prints;
@@ -84,7 +88,7 @@ fn dispatch_chosen(files: &Files, spell: u16, setup: Setup, after: &str) -> Engi
     e
 }
 
-/// "Cast-" as the command loop prints it (so [`show`] finds the start).
+/// The Cast line as the command loop prints it (so [`show`] finds the start).
 async fn cast_line(st: &RefCell<State>, io: &Io) {
     let at = crate::image::A4.wrapping_sub(0x7c8e) + 4 * 0x82;
     let name = crate::main_loop::pointed_string(io, at);
@@ -149,7 +153,7 @@ fn mass_sleep_on_a_group() {
         0,
         "the caster is outside the blast"
     );
-    assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
+    assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
 /// Fire Field (0x33) one tile north-west of the Avatar (cross-hair one left, one up): the field
@@ -171,7 +175,7 @@ fn fire_field_then_dispel_field() {
     };
     eprintln!("  field object {field}");
     assert!(field >= 0x100, "a fire field at (306, 351): {tail:?}");
-    assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
+    assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
     let before = e.state().clone();
     let setup: Setup = Box::new(move |s| {
         *s = before;
@@ -182,7 +186,7 @@ fn fire_field_then_dispel_field() {
     let tail = show("Dispel Field on it", &e);
     let s = e.state();
     assert_eq!(s.objects.type_frame[field as usize], 0, "{tail:?}");
-    assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
+    assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
 /// Conjure (0x31): a creature of the five Conjure types appears within 5 of the Avatar on its
@@ -210,7 +214,7 @@ fn conjure_makes_a_creature() {
     assert!(x.abs_diff(307) <= 5 && y.abs_diff(352) <= 5);
     assert_eq!(s.actors.attrs.status[a] & 0x60, 0x40);
     assert_eq!(s.actors.worktype[a], 8);
-    assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
+    assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
 /// Telekinesis (0x15) on an object two tiles east of the Avatar (picked the way 0x1225c0
@@ -238,7 +242,10 @@ fn telekinesis_pushes_an_object() {
         at(&s, o)
     );
     assert_eq!(at(&s, o), (309, 351), "{tail:?}");
-    assert!(tail.iter().any(|l| l.contains("Direction-")), "{tail:?}");
+    assert!(
+        tail.has(&text_at(e.io(), super::items::MSG_DIRECTION)),
+        "{tail:?}"
+    );
 }
 
 /// Gate Travel (0x64) with "1": the party goes to moonstone 0 (the start state's table).
@@ -260,12 +267,15 @@ fn gate_travel_to_a_moonstone() {
         s.objects.location[1]
     );
     assert_eq!((c.x, c.y, u16::from(c.z)), stone, "{tail:?}");
-    assert!(tail.iter().any(|l| l.contains("To phase")), "{tail:?}");
+    assert!(
+        tail.has(&text_at(e.io(), super::travel::MSG_TO_PHASE)),
+        "{tail:?}"
+    );
 }
 
 /// Wizard Eye (0x69): three steps east with the arrows, the frame taken while the eye is out
 /// (the view centre moved, every view tile shown), then escape: the centre comes back and the
-/// eye is gone, "Done".
+/// eye is gone, `Msg::Done`.
 #[test]
 fn wizard_eye_moves_the_view() {
     let Some(files) = files() else { return };
@@ -299,7 +309,7 @@ fn wizard_eye_moves_the_view() {
     assert_eq!((s.map.centre.x, s.map.centre.y), (307, 352));
     assert_eq!(s.map.reveal_all, 0);
     assert!((0x100..crate::objects::OBJECT_SLOTS).all(|o| s.objects.type_frame[o] != 0x34));
-    assert!(tail.iter().any(|l| l.contains("Done")), "{tail:?}");
+    assert!(tail.has(&msg(&e, Msg::Done)), "{tail:?}");
 }
 
 /// Tremor (0x79): the evil actor 7 (alignment 0x20) is hurt, the good ones are not.
@@ -319,7 +329,7 @@ fn tremor_hurts_evil_actors() {
     for a in [2usize, 3, 4, 5, 6] {
         assert_eq!(s.actors.attrs.hp[a], before[a], "actor {a} is not evil");
     }
-    assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
+    assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
 /// Locate (0x35) at (307, 352, 0): latitude (352 − 360) / 8 = −1 (north), longitude
@@ -332,11 +342,17 @@ fn locate_prints_the_degrees() {
     let c = e.state().map.centre;
     let lat = (c.y as i16 - 0x168) >> 3;
     let long = (c.x as i16 - 0x130) >> 3;
-    let ns = if lat > 0 { "S" } else { "N" };
-    let ew = if long > 0 { "E" } else { "W" };
-    let want = format!("{}{{{ns}, {}{{{ew}", lat.abs(), long.abs());
-    eprintln!("  want {want:?}");
-    assert!(tail.iter().any(|l| l.contains(&want)), "{tail:?}");
+    // The formats and hemisphere letters 0x11a470 prints, from the user's `game`.
+    use super::travel::{FMT_LAT, FMT_LONG, MSG_EAST, MSG_NORTH, MSG_SOUTH, MSG_WEST};
+    let io = e.io();
+    let ns = text_at(io, if lat > 0 { MSG_SOUTH } else { MSG_NORTH });
+    let ew = text_at(io, if long > 0 { MSG_EAST } else { MSG_WEST });
+    let want = printed(io, FMT_LAT, &[&lat.abs().to_string()])
+        + &ns
+        + &printed(io, FMT_LONG, &[&long.abs().to_string()])
+        + &ew;
+    eprintln!("  want {} characters, degrees ({lat}, {long})", want.len());
+    assert!(tail.has(&want), "{tail:?}");
 }
 
 /// Armageddon (0x70): every actor slot below 0xff but the Avatar and Lord British is gone,
@@ -395,7 +411,7 @@ fn energy_wind_hurts_along_its_path() {
             "member {a} behind the caster"
         );
     }
-    assert!(!tail.iter().any(|l| l.contains("No effect")), "{tail:?}");
+    assert!(!tail.has(&msg(&e, Msg::NoEffect)), "{tail:?}");
 }
 
 /// Slime (0x76): the evil actor 7 becomes a slime (0x177); the good ones keep their types.
@@ -437,7 +453,7 @@ fn insect_swarm_makes_eight() {
         assert!(x.abs_diff(307) <= 5 && y.abs_diff(352) <= 5);
         assert_eq!(s.actors.attrs.status[a] & 0x60, 0x40);
     }
-    assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
+    assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
 /// Web (0x59) three tiles west of the Avatar: webs (0x35) on the free cells of the 3 × 3 there
@@ -464,7 +480,7 @@ fn web_covers_the_square() {
     }
     eprintln!("  webs at {webs:?}");
     assert!(webs.contains(&(304, 352)), "{tail:?}");
-    assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
+    assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
 /// Wing Strike (0x68): the evil actor 7 is struck once by the dragon that crosses its row; the
@@ -490,16 +506,18 @@ fn wing_strike_hits_a_foe() {
         .collect();
     eprintln!("  0x19b objects in view after: {left:?}");
     assert!(left.is_empty(), "the dragon is gone");
-    assert!(!tail.iter().any(|l| l.contains("No foes")), "{tail:?}");
+    let none = text_at(e.io(), super::creatures::MSG_NO_FOES);
+    assert!(!none.is_empty() && !tail.has(&none), "{tail:?}");
 }
 
-/// Wing Strike with no foe in view: "No foes."
+/// Wing Strike with no foe in view: the no-foes line (0x115a66).
 #[test]
 fn wing_strike_without_foes() {
     let Some(files) = files() else { return };
     let e = cast(&files, 0x68, Box::new(|_| {}), "");
     let tail = show("Wing Strike, no foes", &e);
-    assert!(tail.iter().any(|l| l.contains("No foes")), "{tail:?}");
+    let none = text_at(e.io(), super::creatures::MSG_NO_FOES);
+    assert!(tail.has(&none), "{tail:?}");
 }
 
 /// Hail Storm (0x54) on Lord British's tile: random 10..30 stones; the hits take hit points.
@@ -513,7 +531,7 @@ fn hail_storm_falls() {
     eprintln!("  Lord British hp 200 -> {}", s.actors.attrs.hp[5]);
     // A stone hit him: 0x1231be leaves creature 0x1f (Lord British) at 0xff hit points.
     assert_eq!(s.actors.attrs.hp[5], 0xff);
-    assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
+    assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
 /// Vanish (0x19) on an object, then Reappear (0x13) at another place: it comes back there.
@@ -554,5 +572,5 @@ fn reappear_brings_back_what_vanished() {
     }
     assert!(back, "{tail:?}");
     assert_eq!(s.actors.tail_word(0x22), 0, "forgotten");
-    assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
+    assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }

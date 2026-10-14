@@ -15,14 +15,14 @@ use crate::ui::printf::Arg;
 
 const MSG_CHARGE: u32 = 0x0011_5978;
 const MSG_NOT_MAGICAL: u32 = 0x0011_5994;
-const MSG_POTION: u32 = 0x0011_59a8;
-const MSG_MAGICAL: u32 = 0x0011_59ba;
+pub(super) const MSG_POTION: u32 = 0x0011_59a8;
+pub(super) const MSG_MAGICAL: u32 = 0x0011_59ba;
 const MSG_TRAPPED: u32 = 0x0011_595e;
 const MSG_NO_TRAP: u32 = 0x0011_596e;
 /// Object types.
 const CHARGE: u16 = 0x150;
 const TRAP: u16 = 0x151;
-const POTION: u16 = 0x113;
+pub(super) const POTION: u16 = 0x113;
 const CHEST: u16 = 0x62;
 /// A trap's quality (the spell number of Trap).
 const TRAP_QUALITY: i16 = 0x16;
@@ -42,7 +42,7 @@ pub fn is_door(s: &State, kind: u16) -> bool {
 /// that `actor` carries at any depth, -1 if none)
 ///
 /// The objects after the actor in the list while they are carried (status bits 0x18) and
-/// inside it (0x10c928). Converse uses it for its "has" test.
+/// inside it (0x10c928). Converse uses it for its carried-object test.
 pub fn carried_object(o: &Objects, actor: i16, kind: i16, quality: i16) -> i16 {
     let mut slot = o.next_of(actor);
     while slot >= 0 && o.status(slot) & 0x18 != 0 && o.contained_in(slot, actor) {
@@ -167,8 +167,8 @@ pub async fn detect(
     report(state, io).await;
 }
 
-/// Detect Magic (1): a magic tile is "magical" (a potion names its kind); else a charge inside
-/// (type 0x150) shows its spell; else "not magical".
+/// Detect Magic (1): a magic tile gets the magical line (0x1159ba; a potion names its kind);
+/// else a charge inside (type 0x150) shows its spell; else the not-magical line (0x115994).
 async fn detect_magic(state: &RefCell<State>, io: &Io, sel: Slot) {
     seams::flash_actor(&mut state.borrow_mut(), io, sel as u16, 1);
     let (found, charge) = {
@@ -211,7 +211,7 @@ async fn detect_magic(state: &RefCell<State>, io: &Io, sel: Slot) {
 }
 
 /// Detect Trap (2): random 1..30 below the caster's intelligence finds each trap inside
-/// ("It's trapped." per trap); otherwise, or with none, "No trap".
+/// (the trapped line 0x11595e per trap); otherwise, or with none, the no-trap line 0x11596e.
 async fn detect_trap(state: &RefCell<State>, io: &Io, caster: u16, sel: Slot) {
     let traps = {
         let mut s = state.borrow_mut();

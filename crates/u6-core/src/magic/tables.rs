@@ -18,7 +18,7 @@ const SYLLABLES: u32 = 0x70b8;
 const MASKS: u32 = 0x6d1c;
 /// A4-0x6d2c: object type of each of the 8 reagents (words).
 const REAGENTS: u32 = 0x6d2c;
-/// A4-0x6c9c: circle name per circle ("1ST".."8TH").
+/// A4-0x6c9c: circle name per circle (the ordinals 1..8).
 const CIRCLES: u32 = 0x6c9c;
 /// A4-0x6c7c: the four alignment names.
 const ALIGNMENTS: u32 = 0x6c7c;

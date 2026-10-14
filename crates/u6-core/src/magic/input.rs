@@ -23,7 +23,7 @@ const DELETE: u16 = 0x7f;
 const BACKSPACE: u16 = 0x10e;
 const WALK: u16 = 0x80;
 const NO_COMMAND: u16 = 0x8f;
-/// A4-0x7387: "That spell is not in thy spellbook." (0x10674e).
+/// A4-0x7387: the line of a spell not in the book (0x10674e).
 const MSG_NOT_IN_BOOK: u32 = 0x7387;
 /// The newline 0x10674e prints after a search (hunk 2).
 const MSG_NEWLINE: u32 = 0x0010_4ffc;
@@ -39,7 +39,7 @@ pub(super) fn letter_bit(c: u8) -> u32 {
 ///
 /// Spells 0..0x7f in the books are tried in order; a spell matches when the set of its
 /// letters equals the typed set (A4-0x7a3a), so order and repeats do not matter. No match
-/// prints "That spell is not in thy spellbook."; a newline follows either way, the typed set
+/// prints that line (A4-0x7387); a newline follows either way, the typed set
 /// is cleared and the cursor mode becomes 1 (the cross-hair).
 pub async fn find_typed_spell(state: &RefCell<State>, io: &Io) -> i16 {
     let found = {

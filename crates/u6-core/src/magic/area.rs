@@ -22,7 +22,7 @@ pub const SLEEP_FIELD: u16 = 0x140;
 /// The web object Web lays.
 pub const WEB: u16 = 0x35;
 
-/// The start of the location spells: "Location: " when the caster is a party member (status
+/// The start of the location spells: `Msg::Location` when the caster is a party member (status
 /// bit 7), the target read unless chosen (A4-0x7a32 = 1, 0x10790a), a newline, the caster's
 /// flash. True when a map location is set (A4-0x2f02 / -0x2f00).
 pub(super) async fn location(state: &RefCell<State>, io: &Io, pre: i16) -> bool {
@@ -80,13 +80,13 @@ fn lay(s: &mut State, io: &Io, new: Slot, x: u16, y: u16) -> bool {
 
 /// Original: 0x118494 (magic: Reappear: the type Vanish took (A4-0x7b62) back at a location)
 ///
-/// The location prompt; no location or nothing vanished: "No effect". The missile 0x17f flies;
-/// short of the target: "Blocked". Then the object comes back there (quantity 1, ok to take,
-/// 0x128b0e) if it may lie there (0x11b1c0): shown dissolving, "Success", the type forgotten;
-/// else it goes again and "No effect".
+/// The location prompt; no location or nothing vanished: `Msg::NoEffect`. The missile 0x17f flies;
+/// short of the target: `Msg::Blocked`. Then the object comes back there (quantity 1, ok to take,
+/// 0x128b0e) if it may lie there (0x11b1c0): shown dissolving, `Msg::Success`, the type forgotten;
+/// else it goes again and `Msg::NoEffect`.
 ///
 /// With the object pool full (0x10bc4c: -1) the original passes the -1 on to 0x128b0e and
-/// 0x11b1c0 (0x118598, 0x1185a6); the port reports "No effect" and keeps the type.
+/// 0x11b1c0 (0x118598, 0x1185a6); the port reports `Msg::NoEffect` and keeps the type.
 pub async fn reappear(state: &RefCell<State>, io: &Io, pre: i16) {
     let at = location(state, io, pre).await;
     let tf = state.borrow().actors.tail_word(VANISHED);
@@ -118,14 +118,14 @@ pub async fn reappear(state: &RefCell<State>, io: &Io, pre: i16) {
 
 /// Original: 0x118602 (magic: a mass spell on the actors a blast at a location reaches)
 ///
-/// The location prompt; none: "No effect". The missile `missile` flies from the caster; short:
-/// "Blocked". The blast of `blast_tile` (0x1331b4) lists the actors it reaches; on each actor
-/// slot below 0x100: Mass Awaken (0x25) clears the sleep bit and gives the base type back,
-/// Mass Sleep (0x26) 0x1165d2, Mass Dispel (0x36) 0x116dcc, Explosion (0x41) 0x116e60 with the
-/// result 0xff, Mass Protect (0x55) status bit 0x01, Mass Curse (0x66) object status 0x40, Mass
-/// Invisibility (0x67) object status 0x02 with the flash where 0x115b50 allows, Mass Charm
-/// (0x73) 0x1167bc, Mass Kill (0x74) 0x11687e (their own results are dropped). Explosion and
-/// Mass Kill then blow up the doors and kegs there (0x12d9ee). "Success" unless the result byte
+/// The location prompt; none: `Msg::NoEffect`. The missile `missile` flies from the caster; short:
+/// `Msg::Blocked`. The blast of `blast_tile` (0x1331b4) lists the actors it reaches; on each actor
+/// slot below 0x100: Mass Awaken (0x25) clears the sleep bit and gives the base type back, Mass
+/// Sleep (0x26) 0x1165d2, Mass Dispel (0x36) 0x116dcc, Explosion (0x41) 0x116e60 with the result
+/// 0xff, Mass Protect (0x55) status bit 0x01, Mass Curse (0x66) object status 0x40, Mass
+/// Invisibility (0x67) object status 0x02 with the flash where 0x115b50 allows, Mass Charm (0x73)
+/// 0x1167bc, Mass Kill (0x74) 0x11687e (their own results are dropped). Explosion and Mass Kill
+/// then blow up the doors and kegs there (0x12d9ee). `Msg::Success` unless the result byte
 /// (A4+0x181e, not reset here) is 0xff.
 pub async fn area(
     state: &RefCell<State>,
@@ -202,13 +202,13 @@ async fn on_actor(state: &RefCell<State>, io: &Io, spell: u16, caster: u16, a: u
 /// Original: 0x11883c (magic: a field spell: Fire Field (0x33), Poison Field (0x37), Sleep Field
 /// (0x38), Energy Field (0x40) at a location)
 ///
-/// The location prompt; none: "No effect". The missile `missile`; short: "Blocked". The field
-/// object of the spell (0x13d, 0x13e, 0x140, 0x13f; status 0, quantity 1) is made there
-/// (0x10bc4c) and kept when it may lie there (0x11b1c0): shown dissolving, "Success"; else it
-/// goes again and "Not possible". Dispel Field (0x21, 0x116f2c) takes these types away.
+/// The location prompt; none: `Msg::NoEffect`. The missile `missile`; short: `Msg::Blocked`. The
+/// field object of the spell (0x13d, 0x13e, 0x140, 0x13f; status 0, quantity 1) is made there
+/// (0x10bc4c) and kept when it may lie there (0x11b1c0): shown dissolving, `Msg::Success`; else it
+/// goes again and `Msg::NotPossible`. Dispel Field (0x21, 0x116f2c) takes these types away.
 ///
 /// With the object pool full (0x10bc4c: -1) the original passes the -1 on to 0x11b1c0
-/// (0x1189f6); the port lays nothing and reports "Not possible".
+/// (0x1189f6); the port lays nothing and reports `Msg::NotPossible`.
 pub async fn field(state: &RefCell<State>, io: &Io, spell: u16, missile: u16, pre: i16) {
     if !location(state, io, pre).await {
         say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
@@ -267,11 +267,11 @@ pub fn web_flight(s: &mut State, io: &Io, actor: u16, x: i16, y: i16) -> i16 {
 
 /// Original: 0x11971a (magic: Web: webs (0x35) on the location and its eight neighbours)
 ///
-/// The location prompt; none: "No effect". The Web flight (0x1334a6); not all arrived:
-/// "Blocked". Then for x − 1..=x + 1 (columns outside), y − 1..=y + 1 a web is made at (0, 0) on
-/// the level (0x10bc4c) and moved to the cell (0x10c9d2) where it may lie (0x11b1c0), else it
-/// goes again; the view flags, "Success". A web the full object pool cannot make (0x10bc4c: -1)
-/// leaves its cell empty (the original passes the -1 on to 0x11b1c0, 0x119818).
+/// The location prompt; none: `Msg::NoEffect`. The Web flight (0x1334a6); not all arrived:
+/// `Msg::Blocked`. Then for x − 1..=x + 1 (columns outside), y − 1..=y + 1 a web is made at (0, 0)
+/// on the level (0x10bc4c) and moved to the cell (0x10c9d2) where it may lie (0x11b1c0), else it
+/// goes again; the view flags, `Msg::Success`. A web the full object pool cannot make (0x10bc4c:
+/// -1) leaves its cell empty (the original passes the -1 on to 0x11b1c0, 0x119818).
 pub async fn web(state: &RefCell<State>, io: &Io, pre: i16) {
     if !location(state, io, pre).await {
         say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
@@ -309,8 +309,8 @@ pub async fn web(state: &RefCell<State>, io: &Io, pre: i16) {
     say(state, io, FMT_NL_S_NL, Msg::Success).await;
 }
 
-/// Original: 0x119e8c (magic: Hail Storm: the location prompt; none: "No effect"; else the
-/// storm 0x133562 there and "Success")
+/// Original: 0x119e8c (magic: Hail Storm: the location prompt; none: `Msg::NoEffect`; else the
+/// storm 0x133562 there and `Msg::Success`)
 pub async fn hail_storm(state: &RefCell<State>, io: &Io, pre: i16) {
     if !location(state, io, pre).await {
         say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
@@ -428,7 +428,7 @@ pub fn wind_flight(s: &mut State, io: &Io, actor: u16, x: i16, y: i16, tile: u16
 /// Original: 0x119f26 (magic: the winds: a fan of five missiles of `tile` toward a location,
 /// the spell on every actor it passes)
 ///
-/// The location prompt; none, or the caster's own place: "No effect". The wind flight
+/// The location prompt; none, or the caster's own place: `Msg::NoEffect`. The wind flight
 /// (0x13331c); on each actor slot below 0x100: Flame Wind (0x53) 0x116e60, Poison Wind (0x57)
 /// 0x11663e, Energy Wind (0x62) random 1..30 damage (0x1231be), its experience to the caster
 /// (0x122104), the wound line (0x12395a) and the hit's reaction (0x123c56, 1), Death Wind

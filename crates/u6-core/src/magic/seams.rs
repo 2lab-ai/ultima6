@@ -102,7 +102,7 @@ pub(crate) fn provoke(s: &mut State, target: u16, attacker: u16, damage: i16) {
     crate::combat::damage::yell_for_help(s, target as i16, attacker as i16, damage);
 }
 
-/// [combat] 0x12395a (print the wound line of `actor`: "grazed", "barely wounded" ...):
+/// [combat] 0x12395a (print the wound line of `actor`, its words by the hit points left):
 /// [`crate::combat::damage::report_wounds`], then the lines and frames it queued.
 pub(crate) async fn wound_line(state: &RefCell<State>, io: &Io, actor: u16) {
     crate::combat::damage::report_wounds(&mut state.borrow_mut(), actor as i16);

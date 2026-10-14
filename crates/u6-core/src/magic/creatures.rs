@@ -17,10 +17,9 @@ const SLIME: u16 = 0x177;
 /// The insect type of Insect Swarm, the daemon of Summon.
 const INSECTS: u16 = 0x157;
 const DAEMON: u16 = 0x16f;
-/// "\nHostile daemon summoned.\n"
+/// Hunk 11: the line of a daemon summoned hostile, and the line of no foe in view.
 const MSG_HOSTILE: u32 = 0x0011_59dc;
-/// "\nNo foes.\n"
-const MSG_NO_FOES: u32 = 0x0011_5a66;
+pub(super) const MSG_NO_FOES: u32 = 0x0011_5a66;
 /// The Wing Strike dragon (two parts) and the A4 rows it reads: the step sign, the frames.
 const DRAGON_PART: u16 = 0x19b;
 
@@ -102,8 +101,8 @@ fn enlist(s: &mut State, new: Slot, align: u8) {
 /// 0x166; drawn for Summon too); the window and the caster flash. The creature (Summon: the
 /// daemon 0x16f) is made at the centre (0x131646) and put on the first of up to 8 random spots
 /// near it where it may stand; none: it goes again, silently. Placed: Summon's daemon turns
-/// chaotic (0x60) when it resists the caster (0x122076), "Hostile daemon summoned."; otherwise
-/// it takes the caster's alignment and "Success"; worktype 8, shown dissolving.
+/// chaotic (0x60) when it resists the caster (0x122076), the hostile line (0x1159dc); otherwise
+/// it takes the caster's alignment and `Msg::Success`; worktype 8, shown dissolving.
 pub async fn summon(state: &RefCell<State>, io: &Io, spell: u16, caster: u16) {
     let r = state.borrow_mut().rng.range(0, 0xf);
     let conjured = match r {
@@ -148,7 +147,7 @@ pub async fn summon(state: &RefCell<State>, io: &Io, spell: u16, caster: u16) {
 ///
 /// The flashes; eight times a swarm is made at the centre (0x131646) and put on the first of up
 /// to 8 random spots near it where it may stand, with the caster's alignment and worktype 8;
-/// one that finds none goes again. Then "Success".
+/// one that finds none goes again. Then `Msg::Success`.
 pub async fn insect_swarm(state: &RefCell<State>, io: &Io, spell: u16) {
     flash_window(state, io, spell / 16 + 1).await;
     let caster = super::cast::caster(&state.borrow());
@@ -174,7 +173,7 @@ pub async fn insect_swarm(state: &RefCell<State>, io: &Io, spell: u16) {
 /// The caster's flash, the quake (0x133a1a, 20 shakes of 3 pixels); then for the first object
 /// of every tile within 5 of the centre (columns outside): an actor slot below 0x100 of
 /// alignment 0x20 that is not a creature with flag 0x0100 takes random 1..30 damage (0x1231be),
-/// the caster the experience (0x122104), a newline and the wound line (0x12395a). "Success".
+/// the caster the experience (0x122104), a newline and the wound line (0x12395a). `Msg::Success`.
 pub async fn tremor(state: &RefCell<State>, io: &Io) {
     let caster = super::cast::caster(&state.borrow());
     {
@@ -210,8 +209,8 @@ pub async fn tremor(state: &RefCell<State>, io: &Io) {
     say(state, io, FMT_NL_S_NL, Msg::Success).await;
 }
 
-/// Original: 0x11a41e (magic: spell 0x80, outside the eight circles: the caster turns
-/// invisible (object status 0x02) with the flash, "Success"; already invisible: "No effect")
+/// Original: 0x11a41e (magic: spell 0x80, outside the eight circles: the caster turns invisible
+/// (object status 0x02) with the flash, `Msg::Success`; already invisible: `Msg::NoEffect`)
 pub async fn spell_0x80(state: &RefCell<State>, io: &Io) {
     let done = {
         let mut s = state.borrow_mut();
@@ -261,7 +260,7 @@ fn flap(s: &mut State, o: Slot) {
 /// two-part dragon (0x19b) appears at the window's edge on the foe's row (head one row up) and
 /// crosses the window in ten steps, beating its wings, the view redrawn each step; the step on
 /// the foe's column hurts it by random 1..20 (0x1231be), the caster takes the experience and
-/// the wound line follows. The dragon goes. None at all: "No foes."
+/// the wound line follows. The dragon goes. None at all: the no-foes line (0x115a66).
 ///
 /// The port waits one display frame per redraw (as X-ray does), so each step is shown.
 pub async fn wing_strike(state: &RefCell<State>, io: &Io) {
