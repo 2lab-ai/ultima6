@@ -172,6 +172,12 @@ fn real_tables_font_and_start_state_render() {
         [0x148, 0x150, 0x14d, 0x14b]
     );
     assert_eq!(t.keymap[0x44][0], 0x0d);
+    // Ctrl-S and Ctrl-R (Save, Restore) come out of the table's control column.
+    let mut q = crate::ui::input::Qualifiers::default();
+    for c in ['\u{13}', '\u{12}'] {
+        let code = crate::ui::input::key_code(&mut q, &t.keymap, crate::Key::Char(c));
+        assert_eq!(code, c as u16, "{c:?}");
+    }
     assert_eq!(t.panel.combat_modes.len(), 7);
     assert!(s.ui.font.as_ref().is_some_and(|f| f.glyphs.len() == 256));
     println!(

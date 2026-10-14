@@ -13,7 +13,9 @@
 //!
 //! Headless mode never opens a window or reads a clock: it runs N ticks of `HEADLESS_TICK_MS`,
 //! delivering the `--keys` one per tick while the game has no key queued, and writes the last
-//! published 320x200 frame. A `say:words` token types `words` and Return into the next line
+//! published 320x200 frame. A `ctrl+<letter>` token is that control character (`ctrl+s` Save,
+//! `ctrl+r` Restore; the window sends them for Ctrl + a letter). A `say:words` token types
+//! `words` and Return into the next line
 //! input, pressing space (one at a time, after the game has idled a few ticks) for every more
 //! prompt or key wait before it. The RNG seed defaults to 0 headless (reproducible) and to the
 //! wall clock in the window (as the original seeds from `time()`).
@@ -61,9 +63,24 @@ fn parse_token(token: &str) -> Result<Token, String> {
     }
 }
 
-/// One key token: an arrow / control key name or a single character.
+/// The control character of letter `c` (Ctrl-S = 0x13): what the game's key table gives in its
+/// control column.
+fn control_char(c: char) -> Option<char> {
+    c.is_ascii_alphabetic()
+        .then(|| char::from(c.to_ascii_lowercase() as u8 & 0x1f))
+}
+
+/// One key token: an arrow / control key name, `ctrl+<letter>`, or a single character.
 fn parse_key(token: &str) -> Result<Key, String> {
-    Ok(match token.to_ascii_lowercase().as_str() {
+    let lower = token.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("ctrl+") {
+        let mut chars = rest.chars();
+        return match (chars.next().and_then(control_char), chars.next()) {
+            (Some(c), None) => Ok(Key::Char(c)),
+            _ => Err(format!("unknown key {token:?}")),
+        };
+    }
+    Ok(match lower.as_str() {
         "up" => Key::Up,
         "down" => Key::Down,
         "left" => Key::Left,
@@ -239,11 +256,17 @@ fn upscale(rgba: &[u8], out: &mut [u32]) {
     }
 }
 
-fn map_key(key: minifb::Key) -> Option<Key> {
+/// A window key; with `ctrl` held a letter is its control character (Ctrl-S Save, Ctrl-R
+/// Restore).
+fn map_key(key: minifb::Key, ctrl: bool) -> Option<Key> {
     use minifb::Key as K;
     let letter = |k: K| {
-        let i = k as u8 - K::A as u8;
-        Key::Char(char::from(b'a' + i))
+        let c = char::from(b'a' + (k as u8 - K::A as u8));
+        Key::Char(if ctrl {
+            control_char(c).unwrap_or(c)
+        } else {
+            c
+        })
     };
     Some(match key {
         K::Up => Key::Up,
@@ -279,10 +302,12 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
     let start = Instant::now();
     let mut delivered_ms = 0u64;
     while window.is_open() {
+        let ctrl =
+            window.is_key_down(minifb::Key::LeftCtrl) || window.is_key_down(minifb::Key::RightCtrl);
         let input: Vec<InputEvent> = window
             .get_keys_pressed(KeyRepeat::Yes)
             .into_iter()
-            .filter_map(map_key)
+            .filter_map(|k| map_key(k, ctrl))
             .map(InputEvent::Key)
             .collect();
         let now_ms = start.elapsed().as_millis() as u64;
@@ -408,6 +433,11 @@ mod tests {
         assert!(args(&["--frames"]).is_err());
         assert!(args(&["--bogus"]).is_err());
         assert!(args(&["--keys", "upp"]).is_err());
+        assert_eq!(
+            args(&["--keys", "ctrl+s,CTRL+R"]).unwrap().keys,
+            [Key::Char('\u{13}'), Key::Char('\u{12}')].map(Token::Key)
+        );
+        assert!(args(&["--keys", "ctrl+1"]).is_err());
         assert!(args(&["--seed", "70000"]).is_err());
         assert_eq!(args(&[]).unwrap().frames, 60);
     }
@@ -415,12 +445,14 @@ mod tests {
     #[test]
     fn maps_letters_digits_and_arrows() {
         use minifb::Key as K;
-        assert_eq!(map_key(K::A), Some(Key::Char('a')));
-        assert_eq!(map_key(K::T), Some(Key::Char('t')));
-        assert_eq!(map_key(K::Z), Some(Key::Char('z')));
-        assert_eq!(map_key(K::Key7), Some(Key::Char('7')));
-        assert_eq!(map_key(K::Left), Some(Key::Left));
-        assert_eq!(map_key(K::F1), None);
+        assert_eq!(map_key(K::A, false), Some(Key::Char('a')));
+        assert_eq!(map_key(K::T, false), Some(Key::Char('t')));
+        assert_eq!(map_key(K::Z, false), Some(Key::Char('z')));
+        assert_eq!(map_key(K::Key7, false), Some(Key::Char('7')));
+        assert_eq!(map_key(K::Left, false), Some(Key::Left));
+        assert_eq!(map_key(K::F1, false), None);
+        assert_eq!(map_key(K::S, true), Some(Key::Char('\u{13}')));
+        assert_eq!(map_key(K::Left, true), Some(Key::Left));
     }
 
     #[test]

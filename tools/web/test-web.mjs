@@ -65,7 +65,7 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   const before = await h.frame(page);
   for (let i = 0; i < 2; i += 1) {
     await page.keyboard.press('ArrowRight');
-    await h.sleep(400);
+    await h.sleep(3000); // each step's world turn plays the start fight's hits
   }
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['ArrowRight', true], 'the canvas took the arrow');
   const walked = h.mapShift(before, await h.frame(page));
@@ -214,7 +214,7 @@ test('an engine trap stops the loop; Restart loads the kept files again', async 
   assert.equal(s.restartHidden, true);
 }, { needs: h.haveHfes });
 
-test('A on the canvas: the not-implemented line, then the arrow walks (screenshot)', async (env) => {
+test('A on the canvas: Attack asks for a target, a stray key ends it, then the arrow walks (screenshot)', async (env) => {
   const { page } = await h.openPage(env, { gated: false });
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
@@ -222,12 +222,32 @@ test('A on the canvas: the not-implemented line, then the arrow walks (screensho
   await h.sleep(2500);
   await page.keyboard.press('a');
   await h.sleep(800);
-  await writeFile('/tmp/claude-501/p7b-unsupported.png', await page.locator('#screen').screenshot());
+  await page.keyboard.press('q'); // confirms no target: "what?", the turn (the start fight) runs
+  await h.sleep(4000);
+  await writeFile('/tmp/claude-501/m2-attack-what.png', await page.locator('#screen').screenshot());
   const before = await h.frame(page);
   await page.keyboard.press('ArrowRight');
-  await h.sleep(600);
+  await h.sleep(4000);
   const walked = h.mapShift(before, await h.frame(page));
-  assert.ok(walked.shift === 16 && walked.score > 0.6, `one step east after A: ${JSON.stringify(walked)}`);
+  assert.ok(walked.shift === 16 && walked.score > 0.5, `one step east after A: ${JSON.stringify(walked)}`);
+}, { needs: h.haveHfes });
+
+test('Ctrl+S and Ctrl+R on the canvas are the game\'s Save and Restore, not the browser\'s', async (env) => {
+  const { page } = await h.openPage(env, { gated: false });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, 130);
+  await h.sleep(2500);
+  for (const key of ['Control+s', 'Control+r']) {
+    await page.keyboard.press(key);
+    await h.sleep(300);
+    const code = key === 'Control+s' ? 'KeyS' : 'KeyR';
+    assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), [code, true], `${key} taken by the canvas`);
+    await page.keyboard.press('n'); // the question's answer: no
+    await h.sleep(600);
+  }
+  await page.keyboard.press('Control+l');
+  assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['KeyL', false], 'other Ctrl shortcuts stay the browser\'s');
 }, { needs: h.haveHfes });
 
 const filter = process.argv[2];

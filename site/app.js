@@ -259,10 +259,12 @@ function queueImport(gather) {
 // --- wiring --------------------------------------------------------------------------------
 
 // Keys go to the engine only from the focused canvas with a game running; everything else
-// (Tab, keys of other elements, modifier shortcuts) keeps its browser meaning.
+// (Tab, keys of other elements, modifier shortcuts) keeps its browser meaning. Ctrl + the
+// letters of the game's control commands (Ctrl-S save, Ctrl-R restore, ...) are game keys
+// there, so the browser's own Save page / Reload do not fire.
 canvas.addEventListener('keydown', (e) => {
-  if (!game || crashed || e.ctrlKey || e.metaKey || e.altKey) return;
-  if (game.key_down(e.code, e.key)) e.preventDefault();
+  if (!game || crashed || e.metaKey || e.altKey) return;
+  if (game.key_down(e.code, e.key, e.ctrlKey)) e.preventDefault();
 });
 canvas.addEventListener('pointerdown', () => canvas.focus());
 

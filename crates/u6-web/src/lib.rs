@@ -42,9 +42,26 @@ pub fn too_large(total: u64) -> String {
     )
 }
 
-/// Maps a DOM `KeyboardEvent` (`code`, `key`) to an engine key: named keys by `code`,
-/// printable single characters by `key`.
-pub fn key_from_dom(code: &str, key: &str) -> Option<Key> {
+/// The letters whose control characters the command loop dispatches (Ctrl-E / Ctrl-Q exit,
+/// Ctrl-H help, Ctrl-R restore, Ctrl-S save, Ctrl-V version, Ctrl-Z sound;
+/// `u6_core::main_loop::commands`). With Ctrl held only these are game keys; every other
+/// Ctrl shortcut keeps its browser meaning.
+const CONTROL_LETTERS: &str = "ehqrsvz";
+
+/// Maps a DOM `KeyboardEvent` (`code`, `key`, `ctrlKey`) to an engine key: named keys by
+/// `code`, printable single characters by `key`, and with Ctrl a letter of
+/// [`CONTROL_LETTERS`] by `code` as its control character (Ctrl-S = 0x13).
+pub fn key_from_dom(code: &str, key: &str, ctrl: bool) -> Option<Key> {
+    if ctrl {
+        let letter = code.strip_prefix("Key")?.to_ascii_lowercase();
+        let mut chars = letter.chars();
+        return match (chars.next(), chars.next()) {
+            (Some(c), None) if CONTROL_LETTERS.contains(c) => {
+                Some(Key::Char(char::from(c as u8 & 0x1f)))
+            }
+            _ => None,
+        };
+    }
     Some(match code {
         "ArrowUp" => Key::Up,
         "ArrowDown" => Key::Down,
@@ -189,9 +206,10 @@ impl Game {
     }
 
     /// Queues a key press. Returns true when it is a game key (the caller should then
-    /// `preventDefault` so arrows do not scroll the page).
-    pub fn key_down(&mut self, code: &str, key: &str) -> bool {
-        match key_from_dom(code, key) {
+    /// `preventDefault` so arrows do not scroll the page and Ctrl-S / Ctrl-R do not save or
+    /// reload the page).
+    pub fn key_down(&mut self, code: &str, key: &str, ctrl: bool) -> bool {
+        match key_from_dom(code, key, ctrl) {
             Some(k) => {
                 if self.engine.is_some() {
                     self.pending.push(InputEvent::Key(k));
@@ -304,12 +322,23 @@ mod tests {
 
     #[test]
     fn maps_named_codes_and_single_characters() {
-        assert_eq!(key_from_dom("ArrowRight", "ArrowRight"), Some(Key::Right));
-        assert_eq!(key_from_dom("NumpadEnter", "Enter"), Some(Key::Enter));
-        assert_eq!(key_from_dom("KeyT", "t"), Some(Key::Char('t')));
-        assert_eq!(key_from_dom("KeyT", "T"), Some(Key::Char('T')));
-        assert_eq!(key_from_dom("ShiftLeft", "Shift"), None);
-        assert_eq!(key_from_dom("F1", "F1"), None);
+        assert_eq!(
+            key_from_dom("ArrowRight", "ArrowRight", false),
+            Some(Key::Right)
+        );
+        assert_eq!(
+            key_from_dom("NumpadEnter", "Enter", false),
+            Some(Key::Enter)
+        );
+        assert_eq!(key_from_dom("KeyT", "t", false), Some(Key::Char('t')));
+        assert_eq!(key_from_dom("KeyT", "T", false), Some(Key::Char('T')));
+        assert_eq!(key_from_dom("ShiftLeft", "Shift", false), None);
+        assert_eq!(key_from_dom("F1", "F1", false), None);
+        // Ctrl: the command loop's control keys only.
+        assert_eq!(key_from_dom("KeyS", "s", true), Some(Key::Char('\u{13}')));
+        assert_eq!(key_from_dom("KeyR", "r", true), Some(Key::Char('\u{12}')));
+        assert_eq!(key_from_dom("KeyL", "l", true), None);
+        assert_eq!(key_from_dom("ArrowUp", "ArrowUp", true), None);
     }
 
     #[test]
@@ -317,8 +346,8 @@ mod tests {
         let mut game = Game::new();
         assert_eq!(game.frame_len(), 320 * 200 * 4);
         assert!(game.frame_rgba().chunks(4).all(|p| p == [0, 0, 0, 255]));
-        assert!(game.key_down("ArrowUp", "ArrowUp"));
-        assert!(!game.key_down("ShiftLeft", "Shift"));
+        assert!(game.key_down("ArrowUp", "ArrowUp", false));
+        assert!(!game.key_down("ShiftLeft", "Shift", false));
         assert!(game.pending.is_empty());
         game.tick(16);
         assert!(!game.started());
