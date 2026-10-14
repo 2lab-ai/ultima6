@@ -131,11 +131,17 @@ pub(crate) async fn inventory_panel(cx: &Cx<'_>, _npc: i16, member: Option<u16>,
 }
 
 /// 0x128ce8: portrait panel (portrait, name, worn objects; waits for a key outside talk).
-/// Fallback: the portrait only, through 0x133d3e at (0xd8, 0x18) as 0x128ce8 places it.
+/// Fallback: its first steps for a person with nothing readied: the panel cleared to the paper
+/// colour (0x152176 + 0x1521f4 over (0xa8, 6)..(0x137, 0x67)), the sky bar (0x133b28), the
+/// portrait through 0x133d3e at (0xd8, 0x18); no name line and no equipment.
 pub(crate) async fn portrait_panel(cx: &Cx<'_>, npc: i16) {
     todo_stub!("0x128ce8 portrait panel (converse seam)", {
-        let state = cx.state.borrow();
+        let mut state = cx.state.borrow_mut();
+        let paper = state.ui.tables.colours.paper;
+        cx.io.draw(|fb| crate::ui::text::fill_rect(fb, 0xa8, 6, 0x137, 0x67, paper));
+        crate::ui::panels::sky_bar(&mut state, cx.io);
         super::script::draw_portrait(&state, cx.io, npc, 0xd8, 0x18);
+        state.ui.panel.dirty = true;
     })
 }
 

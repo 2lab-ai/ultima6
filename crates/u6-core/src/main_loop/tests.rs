@@ -32,3 +32,32 @@ fn dump_tail() {
     }
     println!();
 }
+
+#[test]
+#[ignore]
+fn dump_actors() {
+    let Some(files) = files() else { return };
+    let s = State::new_game(&files).unwrap();
+    for a in 1..12u16 {
+        let id = crate::objects::ObjectId(a);
+        println!(
+            "actor {a}: type {:#x} frame {} at {:?} status {:#x} base tile {:?} worktype {:#x}",
+            s.objects.obj_type(id),
+            s.objects.frame(id),
+            s.objects.location(id),
+            s.actors.attrs.status[usize::from(a)],
+            s.tables.basetile.base.get(usize::from(s.objects.obj_type(id))),
+            s.actors.worktype[usize::from(a)],
+        );
+    }
+    let mut e = crate::Engine::new(files).unwrap();
+    for _ in 0..60 {
+        e.tick(&[], 16);
+    }
+    let s = e.state();
+    for a in 1..6u16 {
+        let id = crate::objects::ObjectId(a);
+        println!("after: actor {a}: frame {} at {:?}", s.objects.frame(id), s.objects.location(id));
+    }
+}
+
