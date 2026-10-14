@@ -8,20 +8,19 @@
 //! 0xfffffff0) and −1; and, for the runs that type, a working key table.
 //!
 //! What the files hold: the synthetic font, a zeroed `savegame/objlist`, and for every `.new`
-//! the intro loads one 20-byte file whose table gives item 0 (empty) and item 1 the offset
-//! 0xffffffff; no other item is in the table.
+//! the intro loads one 20-byte file whose table gives item 0 the offset 8 (an empty item) and
+//! item 1 the offset 0xffffffff. Higher indices are past the table, but for those of 0x2000
+//! and more that the extreme words name, whose offsets are read before the table.
 //!
 //! What each run must reach: the opening alone runs 3000 ticks without an outcome; a creation
 //! goes through the woods, the wagon and the farewell to the objlist (`Play { created: true
 //! }`); the introduction, the transfer (Escape at the disk question) and the acknowledgments
 //! each return to the menu, which takes Journey Onward (`Play { created: false }`), as does
-//! Journey Onward at once; with u's own key table the menu has read every key sent and is
-//! still waiting. No run may hit a stub but the clock's: the passage case is stepped
-//! through to its end.
+//! Journey Onward at once; with u's own key table main has read every key sent and is still
+//! running. No run may hit a stub but the clock's, so every passage steps the case to its end.
 //!
-//! Not covered: the passage cases of a real `u`, the save readers of the transfer, items with
-//! pictures, and table words of `u` that only the drawing positions use (all covered by
-//! the word sums but drawn off the screen here).
+//! Not covered: the passage cases of a real `u`, the save readers of the transfer (there is no
+//! save), the mouse, and items with pictures (every item here draws nothing).
 
 use std::cell::RefCell;
 use std::rc::Rc;
