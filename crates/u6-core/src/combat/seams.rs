@@ -38,13 +38,19 @@ pub(crate) fn sprite_prepare(s: &mut State, slot: u16, tile: u16, angle: u16, cx
     let i = usize::from(slot & 0xf);
     s.combat.sprites.tiles[i] = tile;
     s.combat.sprites.saved[i] = false;
-    todo_stub!("0x15265a build a turned missile sprite (fallback: unturned tile)", ())
+    todo_stub!(
+        "0x15265a build a turned missile sprite (fallback: unturned tile)",
+        ()
+    )
 }
 
 /// The 24 × 16 back-buffer block 0x152800 / 0x152876 address for a sprite centred on (x, y):
 /// byte column (x − 8) / 8, rows y − 8 .. y + 8.
 fn block(x: u16, y: u16) -> (usize, usize) {
-    (usize::from(x.wrapping_sub(8) >> 3) * 8, usize::from(y.wrapping_sub(8)))
+    (
+        usize::from(x.wrapping_sub(8) >> 3) * 8,
+        usize::from(y.wrapping_sub(8)),
+    )
 }
 
 /// [graphics] 0x152800(slot, x, y): save the back-buffer block under a sprite centred on
@@ -63,7 +69,10 @@ pub(crate) fn sprite_save(s: &mut State, slot: u16, x: u16, y: u16) {
         })
     });
     s.combat.sprites.saved[usize::from(slot & 0xf)] = true;
-    todo_stub!("0x152800 save the background under a sprite (fallback: port copy)", ())
+    todo_stub!(
+        "0x152800 save the background under a sprite (fallback: port copy)",
+        ()
+    )
 }
 
 /// [graphics] 0x152876(slot, x, y): a slot holding a saved background puts it back; any other
@@ -90,7 +99,10 @@ pub(crate) fn sprite_draw(s: &mut State, slot: u16, x: u16, y: u16) {
             }
         })
     });
-    todo_stub!("0x152876 draw or restore a sprite (fallback: port blit)", ())
+    todo_stub!(
+        "0x152876 draw or restore a sprite (fallback: port blit)",
+        ()
+    )
 }
 
 /// [objects] 0x10c6a6(actor): the remains of a dead actor: a map object of its type + frame
@@ -129,7 +141,10 @@ pub(crate) fn remains(s: &mut State, actor: i16) -> Slot {
         objects::move_to(s, actor, x, y, 0xf);
     }
     s.objects.allow_type_4c = 0;
-    todo_stub!("0x10c6a6 make an actor's remains (fallback: ported behaviour)", body)
+    todo_stub!(
+        "0x10c6a6 make an actor's remains (fallback: ported behaviour)",
+        body
+    )
 }
 
 /// [magic] 0x11a586(spell, 1): cast spell `spell` from a staff or wand held by `caster` (the
@@ -137,7 +152,10 @@ pub(crate) fn remains(s: &mut State, actor: i16) -> Slot {
 /// selection). Returns the outcome byte the caller reads from A4+0x181e (0xfe charmed, 0
 /// paralysed). Fallback: nothing is cast, outcome 1 (no message).
 pub(crate) fn cast_from_item(_s: &mut State, _spell: u16, _caster: i16) -> u8 {
-    todo_stub!("0x11a586 cast a spell from a staff or wand (fallback: none)", 1)
+    todo_stub!(
+        "0x11a586 cast a spell from a staff or wand (fallback: none)",
+        1
+    )
 }
 
 /// [magic] 0x1165d2(target, attacker): the effect of a hit with weapon 0x5b on an actor.
@@ -158,7 +176,10 @@ pub(crate) fn play_song(_s: &mut State, _song: u16) {
 
 /// [sound] 0x110912: the song of the area. Fallback: silence.
 pub(crate) fn area_song(_s: &mut State) {
-    todo_stub!("0x110912 pick and play the area song (fallback: silence)", ())
+    todo_stub!(
+        "0x110912 pick and play the area song (fallback: silence)",
+        ()
+    )
 }
 
 /// [objects] 0x10e596(word, cx, cy, mode): add a tile to the draw list of window cell (cx, cy).
@@ -171,7 +192,15 @@ pub(crate) fn add_tile(s: &mut State, word: u16, cx: i16, cy: i16, mode: u16) {
         return;
     };
     let t = word & 0x7ff;
-    let top = s.tables.tileflags.flags2.get(usize::from(t)).copied().unwrap_or(0) & 0x10 != 0;
+    let top = s
+        .tables
+        .tileflags
+        .flags2
+        .get(usize::from(t))
+        .copied()
+        .unwrap_or(0)
+        & 0x10
+        != 0;
     let d = &mut s.objects.draw;
     let base = d.base[c];
     let node = d.node_next[0];
@@ -196,7 +225,10 @@ pub(crate) fn add_tile(s: &mut State, word: u16, cx: i16, cy: i16, mode: u16) {
             d.cell[c] = node;
         }
     }
-    todo_stub!("0x10e596 add a tile to a window cell's draw list (fallback: port insertion)", ())
+    todo_stub!(
+        "0x10e596 add a tile to a window cell's draw list (fallback: port insertion)",
+        ()
+    )
 }
 
 /// [sound] A4-0x779a: the song playing. Fallback: 7 (the combat song 0x121c64 starts), so
@@ -209,7 +241,10 @@ pub(crate) fn current_song(_s: &State) -> u16 {
 /// flags (bit 7 = seen). Ported as a private step of `map/view.rs`. Fallback: every cell seen.
 pub(crate) fn flood_sight(s: &mut State, _x0: i16, _y0: i16) {
     s.map.view_flags.iter_mut().for_each(|f| *f |= 0x80);
-    todo_stub!("0x109c12 flood the sight for the overview (fallback: all seen)", ())
+    todo_stub!(
+        "0x109c12 flood the sight for the overview (fallback: all seen)",
+        ()
+    )
 }
 
 /// [graphics] 0x1521f4(x0, y0, x1, y1): fill the rectangle with the plot colour (into the back

@@ -5,11 +5,9 @@
 //! behaviours that wait for the player (an arrest prompt, an NPC who starts a conversation)
 //! hand back a [`Wait`] that the async part awaits without holding a state borrow.
 //!
-//! Worktypes implemented in cut combat code (hunk 13: 3..6, 7, 8, 9, 10, 11, 13, 14, 0x13,
-//! 0x9a, 0x9b and the 0x99 target search) are stub points. Their contract: argument the actor,
-//! no result, no movement; the turn's epilogue then charges the actor 10 movement points
-//! (0x1200b0 does that whenever the points did not change), so such an NPC always makes
-//! progress toward the end of the round and never loops.
+//! Worktypes implemented in hunk 13 (3..6, 7, 8, 9, 10, 11, 13, 14, 0x13, 0x9a, 0x9b and the
+//! 0x99 target search) are `combat::npc`; the frames they present (hit flashes, missiles) are
+//! played right after the synchronous part ([`crate::combat::play_effects`]).
 
 use std::cell::RefCell;
 

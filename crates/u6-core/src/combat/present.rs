@@ -112,6 +112,7 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
             }
         });
         io.present();
+        state.borrow_mut().combat.shown += 1;
         for _ in 0..e.hold {
             io.vblank().await;
         }
@@ -287,24 +288,21 @@ pub fn fly(
     if flags & flight::RETURN != 0 {
         m[0].tx = xs[0];
         xs[0] = x0;
-        let t = m[0].ty;
-        m[0].ty = ys[0];
-        ys[0] = t;
+        std::mem::swap(&mut m[0].ty, &mut ys[0]);
     }
     m[0].px = m[0].tx * 16 + 8;
     m[0].py = m[0].ty * 16 + 8;
     let t = s.combat.tables.clone();
-    let kind = t
-        .missile_tiles
-        .iter()
-        .position(|&k| k == tile)
-        .unwrap_or(0);
+    let kind = t.missile_tiles.iter().position(|&k| k == tile).unwrap_or(0);
     let step = if flags & flight::TRAIL != 0 {
         6
     } else {
         i16::from(at(&t.missile_step, kind))
     };
-    let (cx, cy) = (u16::from(at(&t.missile_cx, kind)), u16::from(at(&t.missile_cy, kind)));
+    let (cx, cy) = (
+        u16::from(at(&t.missile_cx, kind)),
+        u16::from(at(&t.missile_cy, kind)),
+    );
     let (sx0, sy0) = (m[0].tx, m[0].ty);
     if tile != 0 {
         if flags & flight::SHARED != 0 {
@@ -354,7 +352,10 @@ pub fn fly(
             longest = major;
         }
         mi.err = minor.wrapping_add(minor).wrapping_sub(major);
-        mi.add = [minor.wrapping_add(minor), minor.wrapping_sub(major).wrapping_mul(2)];
+        mi.add = [
+            minor.wrapping_add(minor),
+            minor.wrapping_sub(major).wrapping_mul(2),
+        ];
     }
     let spin = i16::from(at(&t.missile_spin, kind));
     let mut round: i16 = 0;
@@ -404,10 +405,7 @@ pub fn fly(
             }
             let ddx = ntx.wrapping_sub(x0).wrapping_abs();
             let ddy = nty.wrapping_sub(y0).wrapping_abs();
-            if ddx > 7
-                || ddy > 7
-                || i16::from(t.distance_at(ddx as usize, ddy as usize)) > range
-            {
+            if ddx > 7 || ddy > 7 || i16::from(t.distance_at(ddx as usize, ddy as usize)) > range {
                 m[i].steps = round;
                 break 'missiles;
             }
@@ -416,7 +414,12 @@ pub fn fly(
             let z = u16::from(s.map.centre.z);
             let mt = crate::actors::seams::tile_at(s, ntx as u16, nty as u16, z);
             let f2 = |s: &State, tile: u16| {
-                s.tables.tileflags.flags2.get(usize::from(tile)).copied().unwrap_or(0)
+                s.tables
+                    .tileflags
+                    .flags2
+                    .get(usize::from(tile))
+                    .copied()
+                    .unwrap_or(0)
             };
             let near = ddx <= 1 && ddy <= 1 && f2(s, u16::from(mt)) & 0x08 != 0;
             if !near && f2(s, u16::from(mt)) & 0x20 != 0 {
@@ -558,7 +561,15 @@ pub fn blast(s: &mut State, x: i16, y: i16, tile: u16) -> Vec<i16> {
             .unwrap_or(0)
             .wrapping_add(w >> 10)
             .wrapping_sub(s.objects.at.part);
-        if s.tables.tileflags.flags2.get(usize::from(t)).copied().unwrap_or(0) & 0x20 != 0 {
+        if s.tables
+            .tileflags
+            .flags2
+            .get(usize::from(t))
+            .copied()
+            .unwrap_or(0)
+            & 0x20
+            != 0
+        {
             break;
         }
         o = crate::objects::next_at(&mut s.objects, &s.tables);

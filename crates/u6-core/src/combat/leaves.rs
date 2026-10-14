@@ -29,7 +29,10 @@ fn y_of(s: &State, o: i16) -> i16 {
 
 /// Object type (10 bits) of a slot.
 pub(crate) fn kind(s: &State, o: i16) -> u16 {
-    s.objects.type_frame.get(o as usize).map_or(0, |w| w & 0x3ff)
+    s.objects
+        .type_frame
+        .get(o as usize)
+        .map_or(0, |w| w & 0x3ff)
 }
 
 /// Original: 0x121b08 (combat: distance from `actor` to (x, y): the larger axis distance)
@@ -224,7 +227,13 @@ pub fn owner(s: &mut State, obj: i16) -> i16 {
 pub fn pick_weapon(s: &mut State, actor: i16, target: i16) -> i16 {
     let mut best = actor;
     let mut best_damage: i16 = 0;
-    let d = cell_distance(s, x_of(s, target), y_of(s, target), x_of(s, actor), y_of(s, actor));
+    let d = cell_distance(
+        s,
+        x_of(s, target),
+        y_of(s, target),
+        x_of(s, actor),
+        y_of(s, actor),
+    );
     let mut c = objects::first_child(&mut s.objects, actor);
     while c >= 0 {
         let readied = s.objects.obj_status[c as usize] & 0x18 == 0x18;

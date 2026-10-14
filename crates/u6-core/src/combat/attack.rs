@@ -43,7 +43,12 @@ const CONFIRMED: u16 = crate::ui::wait::REPEAT;
 
 fn leader(s: &State) -> i16 {
     let p = &s.actors.party;
-    i16::from(p.members.get(usize::from(p.leader_index)).copied().unwrap_or(0))
+    i16::from(
+        p.members
+            .get(usize::from(p.leader_index))
+            .copied()
+            .unwrap_or(0),
+    )
 }
 
 fn pos(s: &State, o: i16) -> (i16, i16) {
@@ -464,7 +469,17 @@ pub fn hit(s: &mut State, attacker: i16, x: i16, y: i16, weapon: i16) -> i16 {
         let (ax, ay) = pos(s, attacker);
         let tile = s.tables.basetile.base.get(0x31).copied().unwrap_or(0);
         let (mut xs, mut ys) = ([x], [y]);
-        present::fly(s, ax, ay, &mut xs, &mut ys, 1, 100, tile, present::flight::RETURN);
+        present::fly(
+            s,
+            ax,
+            ay,
+            &mut xs,
+            &mut ys,
+            1,
+            100,
+            tile,
+            present::flight::RETURN,
+        );
     }
     0
 }
@@ -579,7 +594,8 @@ pub fn missile(s: &mut State, attacker: i16, weapon: i16, x: &mut i16, y: &mut i
     let z = u16::from(s.map.centre.z);
     match wt {
         0x24..=0x26 => {
-            let far = x.wrapping_sub(ax).wrapping_abs() > 1 || y.wrapping_sub(ay).wrapping_abs() > 1;
+            let far =
+                x.wrapping_sub(ax).wrapping_abs() > 1 || y.wrapping_sub(ay).wrapping_abs() > 1;
             if far {
                 let mut thrown = weapon;
                 let mut c = objects::first_child(&mut s.objects, attacker);
@@ -645,19 +661,22 @@ pub fn missile(s: &mut State, attacker: i16, weapon: i16, x: &mut i16, y: &mut i
                 super::seams::weapon_spell(s, h, attacker);
             }
         }
-        0x4f | 0x50 => {
-            if s.rng.range(1, 100) == 0x25 {
-                objects::remove(s, weapon);
-                let wand = with_wand();
-                say(s, VANISHED, vec![wand]);
-                s.actors.work.prompt = 1;
-            }
+        0x4f | 0x50 if s.rng.range(1, 100) == 0x25 => {
+            objects::remove(s, weapon);
+            let wand = with_wand();
+            say(s, VANISHED, vec![wand]);
+            s.actors.work.prompt = 1;
         }
         _ => {}
     }
     let p = &s.ui.panel;
     if used && p.mode == 0x92 {
-        let m = s.actors.party.members.get(p.member.max(0) as usize).copied();
+        let m = s
+            .actors
+            .party
+            .members
+            .get(p.member.max(0) as usize)
+            .copied();
         if m.map(i16::from) == Some(attacker) {
             s.ui.panel.dirty = true;
         }

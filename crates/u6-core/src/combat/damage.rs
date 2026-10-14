@@ -200,8 +200,7 @@ pub fn apply_damage(s: &mut State, attacker: i16, target: i16, damage: i16) {
         s.actors.work.prompt = 1;
         s.actors.attrs.status[t] |= 0x08;
         let p = &s.ui.panel;
-        if p.mode == 0x91 || (p.mode == 0x90 && member(s, p.member.max(0) as usize) == target)
-        {
+        if p.mode == 0x91 || (p.mode == 0x90 && member(s, p.member.max(0) as usize) == target) {
             s.ui.panel.dirty = true;
         }
     }
@@ -391,7 +390,9 @@ fn party_numbers(s: &mut State, actor: i16) {
             q.push(Pending::Cursor(14, ((k - first) * 2 + 2) as i16));
             let hp = i16::from(s.actors.attrs.hp[actor as usize]);
             say(s, HP_NUMBER, vec![Text::Word(hp)]);
-            s.main.pending_print.push(Pending::Window(WindowId::Messages));
+            s.main
+                .pending_print
+                .push(Pending::Window(WindowId::Messages));
         }
         k += 1;
     }

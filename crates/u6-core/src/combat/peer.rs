@@ -12,11 +12,21 @@ use crate::state::State;
 const SIDE: i16 = 0x28;
 
 fn flags1(s: &State, tile: u16) -> u8 {
-    s.tables.tileflags.flags1.get(usize::from(tile)).copied().unwrap_or(0)
+    s.tables
+        .tileflags
+        .flags1
+        .get(usize::from(tile))
+        .copied()
+        .unwrap_or(0)
 }
 
 fn flags2(s: &State, tile: u16) -> u8 {
-    s.tables.tileflags.flags2.get(usize::from(tile)).copied().unwrap_or(0)
+    s.tables
+        .tileflags
+        .flags2
+        .get(usize::from(tile))
+        .copied()
+        .unwrap_or(0)
 }
 
 /// Original: 0x134044 (ui: one 4 × 4 overview cell at (x, y) in the back buffer, a checker of
@@ -155,7 +165,13 @@ fn draw_overview(s: &mut State) {
     }
     set_plot_colour(&mut s.gfx, 0xf);
     let [vx, vy] = s.map.view_offset;
-    super::seams::fill_rect(s, vx * 4 + 0x1c, vy * 4 + 0x1c, vx * 4 + 0x1f, vy * 4 + 0x1f);
+    super::seams::fill_rect(
+        s,
+        vx * 4 + 0x1c,
+        vy * 4 + 0x1c,
+        vx * 4 + 0x1f,
+        vy * 4 + 0x1f,
+    );
     set_plot_colour(&mut s.gfx, 0);
     s.gfx.plot_back = false;
     super::present::draw_borders(s, 8, 8, 0xa7, 0xa7);

@@ -106,7 +106,9 @@ pub struct CombatTables {
 
 fn words(img: &GameImage<'_>, off: i32, n: usize) -> Result<Vec<u16>, FormatError> {
     let b = img.read_zero_filled(A4.wrapping_add_signed(off), n * 2)?;
-    Ok(b.chunks(2).map(|w| u16::from_be_bytes([w[0], w[1]])).collect())
+    Ok(b.chunks(2)
+        .map(|w| u16::from_be_bytes([w[0], w[1]]))
+        .collect())
 }
 
 fn bytes(img: &GameImage<'_>, off: i32, n: usize) -> Result<Vec<u8>, FormatError> {
@@ -142,7 +144,10 @@ impl CombatTables {
             creature_stats: [stat(0)?, stat(1)?, stat(2)?, stat(3)?, stat(4)?, stat(5)?],
             creature_status: bytes(&img, CREATURE_STATUS, CREATURES)?,
             creature_flags: words(&img, CREATURE_FLAGS, CREATURES)?,
-            take: [zero_list(&img, TAKE_LISTS[0])?, zero_list(&img, TAKE_LISTS[1])?],
+            take: [
+                zero_list(&img, TAKE_LISTS[0])?,
+                zero_list(&img, TAKE_LISTS[1])?,
+            ],
             lying,
             angles: bytes(&img, ANGLES, 0x110)?,
             missile_tiles: words(&img, MISSILE_TILES, MISSILE_KINDS)?,

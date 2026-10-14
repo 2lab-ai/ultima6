@@ -95,6 +95,8 @@ pub struct CombatState {
     /// until other text): kept here while the lines are queued, applied by [`say`](present::say)
     /// and handed to the text layer when [`play_effects`] has printed them.
     pub swallow: bool,
+    /// Port-only: frames [`play_effects`] has put on the screen so far (receipts and tests).
+    pub shown: u64,
     /// Port-only: the last combat messages queued ([`present::say`]), for receipts and tests.
     pub said: Vec<present::Said>,
     /// Port-only: the sprite slots of the flight drawing seam (see [`seams::sprite_draw`]).
@@ -117,6 +119,7 @@ impl Default for CombatState {
             dirty: [0; 4],
             effects: Vec::new(),
             swallow: false,
+            shown: 0,
             said: Vec::new(),
             sprites: seams::Sprites::default(),
         }

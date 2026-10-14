@@ -220,7 +220,9 @@ pub fn hold_line(s: &mut State, actor: i16) -> i16 {
         let (fx, fy) = pos(s, w.front[1]);
         (bx, by, fx - bx, fy - by)
     };
-    let cross = (ax - bx).wrapping_mul(vy).wrapping_sub((ay - by).wrapping_mul(vx));
+    let cross = (ax - bx)
+        .wrapping_mul(vy)
+        .wrapping_sub((ay - by).wrapping_mul(vx));
     let mut side = cross > 0;
     if cross == 0 {
         side = s.rng.range(0, 1) != 0;
@@ -230,9 +232,15 @@ pub fn hold_line(s: &mut State, actor: i16) -> i16 {
         sx = -sx;
         sy = -sy;
     }
-    let reference = if party(s, actor) { member0(s) } else { w.front[1] };
+    let reference = if party(s, actor) {
+        member0(s)
+    } else {
+        w.front[1]
+    };
     let (rx, ry) = pos(s, reference);
-    let mut proj = (rx - bx).wrapping_mul(vx).wrapping_add((ry - by).wrapping_mul(vy));
+    let mut proj = (rx - bx)
+        .wrapping_mul(vx)
+        .wrapping_add((ry - by).wrapping_mul(vy));
     if reference == member0(s) {
         proj = proj.wrapping_add(vx.wrapping_abs().wrapping_add(vy.wrapping_abs()));
     }
@@ -255,8 +263,12 @@ pub fn hold_line(s: &mut State, actor: i16) -> i16 {
         if !taken {
             break;
         }
-        let a = (tx + sx - bx).wrapping_mul(vx).wrapping_add((ty - by).wrapping_mul(vy));
-        let b = (tx - bx).wrapping_mul(vx).wrapping_add((ty + sy - by).wrapping_mul(vy));
+        let a = (tx + sx - bx)
+            .wrapping_mul(vx)
+            .wrapping_add((ty - by).wrapping_mul(vy));
+        let b = (tx - bx)
+            .wrapping_mul(vx)
+            .wrapping_add((ty + sy - by).wrapping_mul(vy));
         if a.wrapping_sub(proj).wrapping_abs() < b.wrapping_sub(proj).wrapping_abs() {
             tx += sx;
         } else {
@@ -311,7 +323,9 @@ fn front_line(s: &State, me: u8, b: (i16, i16), v: (i16, i16)) -> i16 {
             continue;
         }
         let (tx, ty) = pos(s, t);
-        let p = (tx - b.0).wrapping_mul(v.0).wrapping_add((ty - b.1).wrapping_mul(v.1));
+        let p = (tx - b.0)
+            .wrapping_mul(v.0)
+            .wrapping_add((ty - b.1).wrapping_mul(v.1));
         if p < least {
             least = p;
         }
@@ -340,7 +354,12 @@ pub fn rear(s: &mut State, actor: i16) {
     }
     let (f1, f2, b, v) = if me_party {
         let b = w.party_centre;
-        (w.front[2], w.front[3], b, (w.enemy_centre.0 - b.0, w.enemy_centre.1 - b.1))
+        (
+            w.front[2],
+            w.front[3],
+            b,
+            (w.enemy_centre.0 - b.0, w.enemy_centre.1 - b.1),
+        )
     } else {
         let f1 = if w.front[5] < 0 { actor } else { w.front[5] };
         let f2 = if w.front[4] < 0 { actor } else { w.front[4] };
@@ -349,11 +368,15 @@ pub fn rear(s: &mut State, actor: i16) {
     };
     let least = front_line(s, align(s, actor), b, v);
     let (ax, ay) = pos(s, actor);
-    let mine = (ax - b.0).wrapping_mul(v.0).wrapping_add((ay - b.1).wrapping_mul(v.1));
+    let mine = (ax - b.0)
+        .wrapping_mul(v.0)
+        .wrapping_add((ay - b.1).wrapping_mul(v.1));
     let saved = mp(s, actor);
     let (cx, cy) = centre(s);
     let cross = |p: (i16, i16)| {
-        (p.0 - b.0).wrapping_mul(v.1).wrapping_sub((p.1 - b.1).wrapping_mul(v.0))
+        (p.0 - b.0)
+            .wrapping_mul(v.1)
+            .wrapping_sub((p.1 - b.1).wrapping_mul(v.0))
     };
     let failed = if me_party && distance(s, actor, cx, cy) > 3 {
         !go(s, actor, cx, cy)
@@ -399,7 +422,9 @@ pub fn flank(s: &mut State, actor: i16) {
     let (ax, ay) = pos(s, actor);
     let p = w.party_centre;
     let v = (w.enemy_centre.0 - p.0, w.enemy_centre.1 - p.1);
-    let cross = (ax - p.0).wrapping_mul(v.1).wrapping_sub((ay - p.1).wrapping_mul(v.0));
+    let cross = (ax - p.0)
+        .wrapping_mul(v.1)
+        .wrapping_sub((ay - p.1).wrapping_mul(v.0));
     let mut side = cross > 0;
     if cross == 0 {
         side = s.rng.range(0, 1) != 0;
@@ -428,7 +453,9 @@ pub fn flank(s: &mut State, actor: i16) {
         if far && ((tx - ax).wrapping_abs() > 5 || (ty - ay).wrapping_abs() > 5) {
             continue;
         }
-        let mut val = (tx - p.0).wrapping_mul(v.1).wrapping_sub((ty - p.1).wrapping_mul(v.0));
+        let mut val = (tx - p.0)
+            .wrapping_mul(v.1)
+            .wrapping_sub((ty - p.1).wrapping_mul(v.0));
         if !side {
             val = val.wrapping_neg();
         }
@@ -496,7 +523,8 @@ pub fn berserk(s: &mut State, actor: i16) {
         }
         let at = &s.actors.attrs;
         let i = t as usize;
-        let sum = i16::from(at.strength[i]) + i16::from(at.dexterity[i]) + i16::from(at.intelligence[i]);
+        let sum =
+            i16::from(at.strength[i]) + i16::from(at.dexterity[i]) + i16::from(at.intelligence[i]);
         if sum > best_sum {
             best = t;
             best_sum = sum;
@@ -666,7 +694,15 @@ pub fn grow(s: &mut State, actor: i16, dir: u16) -> i16 {
         return 0;
     }
     let z = u16::from(s.map.centre.z);
-    let seg = objects::create_on_map(&mut s.objects, 0x16e, 0x20, actor as u16, x as u16, y as u16, z);
+    let seg = objects::create_on_map(
+        &mut s.objects,
+        0x16e,
+        0x20,
+        actor as u16,
+        x as u16,
+        y as u16,
+        z,
+    );
     if seg >= 0 {
         let frames = s.combat.tables.vine_frames.clone();
         let f = |i: u16| u16::from(super::tables::at(&frames, usize::from(i)));
