@@ -189,8 +189,8 @@ pub(crate) fn walk(state: &mut State, id: ObjectId, dir: u16) {
 
 /// The routine 0x108fba runs for a party member whose type is 0x1af before leaving (owner
 /// `objects/`, 0x12f8fe, uses "No room!"). Fallback: nothing.
-pub(crate) fn before_leaving(_state: &mut State, _id: ObjectId) {
-    todo_stub!("0x12f8fe party member of type 0x1af leaves", ())
+pub(crate) fn before_leaving(state: &mut State, id: ObjectId) {
+    crate::usecmd::dismount(state, id.slot());
 }
 
 /// End combat mode (combat 0x121d78).
