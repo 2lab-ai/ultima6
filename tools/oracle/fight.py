@@ -88,19 +88,24 @@ class Incomplete(Exception):
 def frames_of(turn, image):
     """The frames of a step from the key taken (reading cleared) to the prompt: (frame, kind,
     chain, view changed, messages changed); kind 'other task' when another task's stack ran.
-    Raises Incomplete unless the capture holds every frame of it, one row each."""
+
+    Raises Incomplete unless the capture holds every emulated frame from before the key was
+    taken (a row with the command loop still reading) through the turn to 60 frames of the
+    prompt after it, one row each, none skipped."""
     rows = turn["rows"]
+    if not rows:
+        raise Incomplete(f"step {turn['key']}: no rows")
+    ids = [r[0] for r in rows]
+    if ids != list(range(ids[0], ids[0] + len(ids))) or any(r[2] for r in rows):
+        raise Incomplete(f"step {turn['key']}: frames {ids[0]}..{ids[-1]} not all captured")
     zero = [r[0] for r in rows if r[1] == 0]
     if not zero:
         raise Incomplete(f"step {turn['key']}: the game never took the key")
     lo, hi = zero[0], zero[-1]
-    ids = [r[0] for r in rows if lo <= r[0] <= hi]
-    skipped = sum(r[2] for r in rows if lo <= r[0] <= hi)
-    if ids != list(range(lo, hi + 1)) or skipped:
-        raise Incomplete(
-            f"step {turn['key']}: frames {lo}..{hi} but {len(ids)} rows, {skipped} skipped"
-        )
-    if rows[-1][0] - hi < 60 or rows[-1][1] != 1:
+    if rows[0][1] != 1 or rows[0][0] >= lo:
+        raise Incomplete(f"step {turn['key']}: the capture starts after the key was taken")
+    tail = [r for r in rows if r[0] > hi]
+    if len(tail) < 60 or any(r[1] != 1 for r in tail):
         raise Incomplete(f"step {turn['key']}: the capture ends before the prompt settled")
     pages = collections.Counter(
         r[8][2] >> 12 for r in rows if r[8] and image.function(r[8][1]) is not None

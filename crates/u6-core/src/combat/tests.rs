@@ -624,8 +624,8 @@ fn recorded_frames_take_their_time_at_any_host_tick() {
         let (ms, seen) = recorded_step(cost, None, tick, zeros);
         println!("three frames of {cost} ms: {ms} ms at {tick} ms ticks, {zeros} zero polls");
         assert!(
-            ms >= want && ms <= want + 16,
-            "{tick} ms ticks: {ms} ms, want {want}"
+            ms >= want && ms <= want + u64::from(tick),
+            "{tick} ms ticks: {ms} ms, want {want} + up to a tick"
         );
         for c in [2, 3, 4] {
             assert!(
@@ -661,9 +661,9 @@ fn recorded_frames_take_their_time_at_any_host_tick() {
     assert_eq!(centre(&e), 1, "the old picture while it waits");
 }
 
-/// The engine ms between the ends of ten waits of `cost` at 16 ms ticks, where the ticks
-/// numbered in `stalls` last `stall_ms` instead.
-fn waits_around_a_stall(cost: u16, stalls: std::ops::Range<usize>, stall_ms: u32) -> Vec<u64> {
+/// The engine ms each wait of `costs` took (one run of waits, from the game's first poll), with
+/// the host's ticks given by `tick(n)` for tick n (0 = the game's first poll).
+fn wait_lengths(costs: &'static [u16], tick: impl Fn(usize) -> u32) -> Vec<u64> {
     let ends = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let out = std::rc::Rc::clone(&ends);
     let mut e = crate::Engine::with_game(
@@ -671,35 +671,63 @@ fn waits_around_a_stall(cost: u16, stalls: std::ops::Range<usize>, stall_ms: u32
         crate::Files::default(),
         move |st, io| async move {
             out.borrow_mut().push(io.now_ms());
-            for _ in 0..10 {
+            for &cost in costs {
                 present::pace(&st, &io, cost).await;
                 out.borrow_mut().push(io.now_ms());
             }
         },
     );
-    for t in 0..10_000 {
+    for t in 0..100_000 {
         if e.finished() {
             break;
         }
-        e.tick(&[], if stalls.contains(&t) { stall_ms } else { 16 });
+        e.tick(&[], tick(t));
     }
+    assert!(e.finished(), "every wait ended");
     let ends = ends.borrow();
+    assert_eq!(ends.len(), costs.len() + 1, "every wait ended");
     ends.windows(2).map(|w| w[1] - w[0]).collect()
 }
 
+/// The host's longest step (site/app.js and u6-native cap a tick at 100 ms).
+const HOST_MAX_TICK: u32 = 100;
+
 #[test]
 fn a_stalled_tick_does_not_squeeze_the_waits_after_it() {
-    // A host that stalls (a tick of 100 ms, the hosts' cap, once or three times in a row) in
-    // the middle of a run: the waits after the stall keep their time, less a tick at most.
-    let cost = 46;
+    // A host that stalls (a tick of the hosts' cap, once or three times in a row) in the
+    // middle of a run of ten 46 ms waits at 16 ms ticks: the waits keep their time, less a tick
+    // at most, the one the stall falls in aside.
+    const COSTS: [u16; 10] = [46; 10];
     for stalls in [8..9, 8..11] {
-        let d = waits_around_a_stall(cost, stalls.clone(), 100);
-        println!("waits of {cost} ms around stalled ticks {stalls:?}: {d:?}");
-        let after = d.iter().skip_while(|&&ms| ms < 100).skip(1);
-        for &ms in after {
+        let st = stalls.clone();
+        let d = wait_lengths(
+            &COSTS,
+            move |t| if st.contains(&t) { HOST_MAX_TICK } else { 16 },
+        );
+        println!("waits of 46 ms around stalled ticks {stalls:?}: {d:?}");
+        let crossing = d.iter().position(|&ms| ms >= u64::from(HOST_MAX_TICK));
+        let crossing = crossing.expect("a wait spans the stall");
+        let after = &d[crossing + 1..];
+        assert!(!after.is_empty(), "waits follow the stall: {d:?}");
+        for (i, &ms) in d.iter().enumerate().filter(|&(i, _)| i != crossing) {
+            assert!(ms + 16 >= 46, "wait {i} lasted {ms} ms: {d:?}");
+        }
+    }
+}
+
+#[test]
+fn a_stall_on_the_first_tick_of_a_run_squeezes_no_wait() {
+    // The run's first observed tick is a stall (the host's longest step), then normal ticks of
+    // 16 or 7 ms: every wait after the one the stall falls in keeps its time, less one normal
+    // tick at most (the bound on carried lateness comes from the normal ticks, not the stall).
+    const COSTS: [u16; 6] = [46, 311, 46, 311, 23, 129];
+    for normal in [16u32, 7] {
+        let d = wait_lengths(&COSTS, move |t| if t == 1 { HOST_MAX_TICK } else { normal });
+        println!("first tick {HOST_MAX_TICK} ms then {normal} ms: waits {d:?} for {COSTS:?}");
+        for (i, (&ms, &cost)) in d.iter().zip(&COSTS).enumerate().skip(1) {
             assert!(
-                ms + 16 >= u64::from(cost),
-                "a wait of {ms} ms after the stall: {d:?}"
+                ms + u64::from(normal) >= u64::from(cost),
+                "wait {i} of {cost} ms lasted {ms} ms at {normal} ms ticks: {d:?}"
             );
         }
     }
@@ -707,7 +735,7 @@ fn a_stalled_tick_does_not_squeeze_the_waits_after_it() {
 
 /// A window recorded dissolving (colour 5 over colour 0) with `cost` ms and played at ticks of
 /// `tick_ms`: per tick, how many of its 160 × 160 dissolving pixels the published frame shows,
-/// and the engine time at which the playback returned.
+/// and the engine time the playback took.
 fn dissolve_run(cost: u16, tick_ms: u32) -> (Vec<usize>, u64) {
     let done = std::rc::Rc::new(std::cell::Cell::new(None));
     let out = std::rc::Rc::clone(&done);
@@ -727,11 +755,12 @@ fn dissolve_run(cost: u16, tick_ms: u32) -> (Vec<usize>, u64) {
             fill(0);
             io.present();
             io.vblank().await;
+            let t0 = io.now_ms();
             fill(5);
             io.present();
             present::capture_dissolve(&mut st.borrow_mut(), cost);
             play_effects(&st, &io).await;
-            out.set(Some(io.now_ms()));
+            out.set(Some(io.now_ms() - t0));
         },
     );
     let mut shown = Vec::new();
@@ -769,8 +798,10 @@ fn a_dissolving_window_is_revealed_over_its_time() {
         "most ticks show part of it: {partial} of {}",
         shown.len()
     );
+    let want = u64::from(cost);
     assert!(
-        at16 >= u64::from(cost) && at16.abs_diff(at8) <= 16,
-        "{at16} vs {at8}"
+        at16 >= want && at16 <= want + 16,
+        "{at16} ms at 16 ms ticks"
     );
+    assert!(at8 >= want && at8 <= want + 8, "{at8} ms at 8 ms ticks");
 }

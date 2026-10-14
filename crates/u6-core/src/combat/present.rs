@@ -77,36 +77,67 @@ const WINDOW: (usize, usize) = (176, 176);
 /// Port: waits until the original would have spent `ms` more on what it draws, on the engine
 /// clock, and at least one display frame, so what was presented before is published.
 ///
-/// The waits of one run (nothing else waited in between) follow one schedule: `combat.due_ms`
-/// moves on by `ms` from where the last one ended, so what a wait loses to the host's tick the
-/// next one makes up, and the run takes the same engine time at any tick size. Lateness is
-/// carried at most one tick (the shortest tick of the run): a host that stalls for one long
-/// tick does not squeeze the waits after it. After anything else waited (a key, a prompt) the
-/// schedule starts again from now.
+/// The waits of one run (nothing else waited in between) follow one schedule: each is due `ms`
+/// after the previous one was due, so what a wait loses to the host's tick the next one makes
+/// up, and the run takes the same engine time at any tick size. Lateness is carried at most one
+/// tick, the shortest the run has seen so far, applied anew at every frame of the wait: a host
+/// that stalls for one long tick (even the run's first) does not squeeze the waits after it.
+/// After anything else waited (a key, a prompt) the schedule starts again from now.
 pub async fn pace(state: &RefCell<State>, io: &Io, ms: u16) {
     let due = schedule(state, io, ms);
     loop {
-        if display_frame(state, io).await >= due {
+        let now = display_frame(state, io).await;
+        if now >= due.at(&state.borrow()) {
             break;
         }
     }
-    state.borrow_mut().combat.paced_at_ms = io.now_ms();
+    finish(state, io, &due);
 }
 
-/// The deadline of a wait of `ms` on the schedule of [`pace`] (counted, not awaited).
-fn schedule(state: &RefCell<State>, io: &Io, ms: u16) -> u64 {
+/// One wait on the schedule of [`pace`].
+struct Due {
+    /// When the wait before it in the run was due (`None`: the run starts with this wait).
+    prev: Option<u64>,
+    /// When this wait began.
+    start: u64,
+    ms: u16,
+}
+
+impl Due {
+    /// When it is due with the run's shortest tick as the lateness carried.
+    fn at(&self, s: &State) -> u64 {
+        let from = match self.prev {
+            Some(p) => p.max(self.start.saturating_sub(s.combat.tick_ms)),
+            None => self.start,
+        };
+        from + u64::from(self.ms)
+    }
+}
+
+/// A wait of `ms` on the schedule of [`pace`], counted, not awaited.
+fn schedule(state: &RefCell<State>, io: &Io, ms: u16) -> Due {
     let mut s = state.borrow_mut();
     let now = io.now_ms();
     let c = &mut s.combat;
-    let from = if now == c.paced_at_ms {
-        c.due_ms.max(now.saturating_sub(c.tick_ms))
+    let prev = if now == c.paced_at_ms {
+        Some(c.due_ms)
     } else {
         c.tick_ms = u64::MAX;
-        now
+        None
     };
-    c.due_ms = from + u64::from(ms);
     *c.paced.entry(ms).or_default() += 1;
-    c.due_ms
+    Due {
+        prev,
+        start: now,
+        ms,
+    }
+}
+
+/// The end of a wait: the run goes on from when it was due.
+fn finish(state: &RefCell<State>, io: &Io, due: &Due) {
+    let mut s = state.borrow_mut();
+    s.combat.due_ms = due.at(&s);
+    s.combat.paced_at_ms = io.now_ms();
 }
 
 /// One display frame of a paced wait: the engine time after it, the run's shortest tick kept.
@@ -320,11 +351,13 @@ fn put_window(fb: &mut crate::Framebuffer, pixels: &[u8]) {
 async fn reveal(state: &RefCell<State>, io: &Io, e: &Effect) {
     let taps = state.borrow().gfx.tables.dissolve_taps;
     let order = crate::gfx::blit::dissolve_order(160, 160, &taps);
-    let due = schedule(state, io, e.cost);
-    let begin = due - u64::from(e.cost) + u64::from(WINDOW_MS.min(e.cost));
+    let wait = schedule(state, io, e.cost);
+    let render = u64::from(WINDOW_MS.min(e.cost));
     let mut done = 0;
     loop {
         let now = display_frame(state, io).await;
+        let due = wait.at(&state.borrow());
+        let begin = due - u64::from(e.cost) + render;
         let upto = if now >= due {
             order.len()
         } else {
@@ -345,7 +378,7 @@ async fn reveal(state: &RefCell<State>, io: &Io, e: &Effect) {
             break;
         }
     }
-    state.borrow_mut().combat.paced_at_ms = io.now_ms();
+    finish(state, io, &wait);
 }
 
 /// Original: 0x13242e (ui: grow the flight's changed rectangle A4+0x1900.. to the 16 × 16

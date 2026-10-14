@@ -19,6 +19,10 @@ const ADF = process.env.U6_ADF_DIR || join(o.ORACLE_HOME, 'adf-gamefirst');
 mkdirSync(out, { recursive: true });
 const log = (s) => { appendFileSync(join(out, 'trace.log'), `${new Date().toISOString()} ${s}\n`); console.log(s); };
 const hex = (v) => `$${v.toString(16)}`;
+// A step that has not come back to the prompt by then is rejected (the start fight's longest
+// step is ~540 frames; a traced one runs ~30 wall seconds a frame-hundred).
+const STEP_FRAMES = 6000;
+const STEP_WALL_MS = 40 * 60000;
 // The traced routines (image addresses).
 const TRACED = {
   0x1213de: 'world turn', 0x1200b0: 'NPC turn', 0x102f2a: 'refresh after a turn',
@@ -27,11 +31,20 @@ const TRACED = {
 
 const h = await o.launch({ log: (s) => appendFileSync(join(out, 'trace.log'), `${s}\n`) });
 const { page } = h;
-// The last console prompt: beam line and PC, and the console text.
+// The console prompt printed since the last resume (`mark` = the console's length right after
+// it; the emulator does not run while a command is typed, so a prompt past it is a new stop,
+// and the one the resume was typed at, which shows the old PC, is never taken for it).
+let mark = 0;
 const prompt = async () => {
   const t = await page.evaluate(() => wasm_retro_shell_get_text());
-  const m = [...t.matchAll(/\((\d+),(\d+)\) \$([0-9a-f]+):/g)].at(-1);
+  const m = [...t.matchAll(/\((\d+),(\d+)\) \$([0-9a-f]+):/g)].filter((x) => x.index >= mark).at(-1);
   return m ? { v: Number(m[1]), pc: parseInt(m[3], 16) } : null;
+};
+// Runs on (`g`) or steps (`s`) from a stop, and marks the console there.
+const resume = async (cmd) => {
+  await o.shellKeys(page, 'clear');
+  await o.shellKeys(page, cmd);
+  mark = await page.evaluate(() => wasm_retro_shell_get_text().length);
 };
 try {
   await o.setFloppyCount(page, 4);
@@ -66,13 +79,18 @@ try {
   const entries = new Map(Object.keys(TRACED).map((a) => [runtime(bases, Number(a)), Number(a)]));
   for (const a of entries.keys()) await page.evaluate((c) => wasm_retro_shell(c), `break at ${hex(a)}`);
   await o.waitFrames(page, 3);
+  mark = await page.evaluate(() => wasm_retro_shell_get_text().length);
   const returns = new Set();
   const steps = [];
   for (const key of KEYS) {
     await page.evaluate((k) => { window.__trace.key = k; window.__trace.reading = []; }, o.KEY[key]);
     const calls = [], open = [];
     let seenZero = false, read = null, done = null, stuck = 0, last = null, strays = 0;
+    const startFrame = await o.frame(page), startWall = Date.now();
     for (;;) {
+      if ((await o.frame(page)) - startFrame > STEP_FRAMES || Date.now() - startWall > STEP_WALL_MS) {
+        throw new Error(`${key}: no prompt within ${STEP_FRAMES} frames / ${STEP_WALL_MS / 60000} min`);
+      }
       const f1 = await o.frame(page);
       await new Promise((r) => setTimeout(r, 40));
       const f2 = await o.frame(page);
@@ -86,8 +104,7 @@ try {
         // Stopped where nothing is traced (after a one-instruction step): run on.
         if (f1 === f2 && p && ++stuck > 3) {
           if (++strays > 50) throw new Error(`stopped at ${JSON.stringify(p)} again and again, not a traced address`);
-          await o.shellKeys(page, 'clear');
-          await o.shellKeys(page, 'g');
+          await resume('g');
           stuck = 0;
         }
         if (f1 !== f2) stuck = 0;
@@ -96,8 +113,8 @@ try {
       stuck = 0;
       if (last && last.pc === p.pc && last.f === f2 && last.v === p.v) {
         // The same stop again (a breakpoint under the PC): one instruction past it, then on.
-        await o.shellKeys(page, 's');
-        await o.shellKeys(page, 'g');
+        await resume('s');
+        await resume('g');
         continue;
       }
       last = { pc: p.pc, f: f2, v: p.v };
@@ -112,18 +129,24 @@ try {
         // An NPC turn's actor (D0) and its worktype then (0x139188 = hunk 23 + 0x3c00).
         const actor = fn === 0x1200b0 ? d0 & 0xff : null;
         const worktype = actor === null ? null : await page.evaluate((a) => Module._wasm_peek(a), bases[23] + 0x3c00 + actor);
-        open.push({ fn, a7, at, depth: open.length, actor, worktype });
+        open.push({ fn, ret, a7, at, depth: open.length, actor, worktype });
       }
       if (returns.has(p.pc)) {
-        const k = open.findLastIndex((c) => c.a7 + 4 === a7);
-        if (k >= 0) {
-          const c = open[k];
-          open.length = k;
-          calls.push({ fn: c.fn, at: c.at, frames: at - c.at, depth: c.depth, actor: c.actor, worktype: c.worktype });
+        // Only the youngest open call may return, to its own return address with A7 back above
+        // its return long; that address reached otherwise (a loop through the call site) is no
+        // return; an older call returning with younger ones open is a trace gone wrong.
+        const top = open.at(-1);
+        if (top && top.ret === p.pc && top.a7 + 4 === a7) {
+          open.pop();
+          calls.push({ fn: top.fn, at: top.at, frames: at - top.at, depth: top.depth, actor: top.actor, worktype: top.worktype });
+        } else {
+          const k = open.findIndex((c) => c.ret === p.pc && c.a7 + 4 === a7);
+          if (k >= 0) {
+            throw new Error(`${key}: ${TRACED[open[k].fn]} returned with ${open.length - 1 - k} younger calls open (${open.slice(k + 1).map((c) => TRACED[c.fn]).join(', ')})`);
+          }
         }
       }
-      await o.shellKeys(page, 'clear');
-      await o.shellKeys(page, 'g');
+      await resume('g');
     }
     if (open.length) throw new Error(`${key}: calls still open at the prompt: ${JSON.stringify(open)}`);
     steps.push({ key, read, prompt: done, calls });

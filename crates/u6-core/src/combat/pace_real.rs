@@ -114,7 +114,7 @@ fn play_keys(
     tick_ms: u32,
     zero_polls: bool,
 ) -> Vec<Turn> {
-    let mut state = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    let mut state = State::new_game(files).unwrap_or_else(|_| panic!("the game files do not load"));
     state.rng.seed(seed);
     let keep = Rc::new(RefCell::new(None));
     let k = Rc::clone(&keep);
@@ -293,8 +293,12 @@ fn the_start_fight_takes_the_same_time_at_any_host_tick() {
                 "seed {seed}: ms per step at 16 ms ticks {base:?}, at {tick} ms (zero polls \
                  {zero}) {other:?}"
             );
+            // Each step ends within its own run's tick of the same deadline.
             for (a, b) in base.iter().zip(&other) {
-                assert!(a.abs_diff(*b) <= 16, "seed {seed}: {base:?} vs {other:?}");
+                assert!(
+                    b + 16 >= *a && *b <= a + u64::from(tick),
+                    "seed {seed}: {base:?} vs {other:?}"
+                );
             }
         }
     }

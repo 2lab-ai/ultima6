@@ -709,8 +709,9 @@ mod tests {
         for (tick, zero) in [(8, false), (16, true), (5, true)] {
             let (other, n) = turn_ms(&[(6, 10), (6, 10)], tick, zero);
             assert_eq!(n, npcs, "the same turns");
+            // Each run ends within its own tick of the same deadline.
             assert!(
-                ms.abs_diff(other) <= 16,
+                other + 16 >= ms && other <= ms + u64::from(tick),
                 "16 ms ticks {ms}, {tick} ms {other}"
             );
         }

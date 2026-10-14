@@ -380,7 +380,10 @@ impl From<LoadError> for BootError {
 }
 
 /// Keys the input handler's ring holds (0x14f0ac: 50 slots at A4+0x64f6, one kept free so a
-/// full ring differs from an empty one); a key that finds it full is dropped.
+/// full ring differs from an empty one); a key that finds it full is dropped. The port counts
+/// presses ([`Key`] is one press): exact for auto-repeat, which sends presses only, but about
+/// twice the original's type-ahead for keys tapped one by one, whose releases take a slot of
+/// the ring there too.
 const KEY_RING: usize = 49;
 
 /// The game future type the engine retains.
@@ -688,8 +691,9 @@ mod tests {
     #[test]
     fn keys_beyond_the_handlers_ring_are_dropped() {
         // 0x14f0ac puts a key in the 50-slot ring at A4+0x64f6 only when the next slot is not
-        // the reader's (A4-0x35cd / -0x35ce): 49 keys wait at most, a key past them is lost.
-        // Pointer events are no keys.
+        // the reader's (A4-0x35cd / -0x35ce): 49 wait at most, one past them is lost. The port
+        // counts presses (a release takes a slot there too: auto-repeat is exact, taps get
+        // about twice the room). Pointer events are no keys.
         let mut e = idle_engine();
         let keys: Vec<InputEvent> = (0..60).map(|_| key('a')).collect();
         e.tick(&keys, 16);

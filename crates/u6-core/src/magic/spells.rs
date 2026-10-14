@@ -317,6 +317,8 @@ pub async fn xray(state: &RefCell<State>, io: &Io, spell: u16) {
         crate::combat::present::pace(state, io, crate::combat::present::REFRESH_MS).await;
         crate::gfx::view::refresh_view(&mut state.borrow_mut(), io);
     }
+    // The last X-ray view stays up while the normal one is drawn.
+    crate::combat::present::pace(state, io, crate::combat::present::REFRESH_MS).await;
     {
         let mut s = state.borrow_mut();
         s.map.reveal_all = 0;
