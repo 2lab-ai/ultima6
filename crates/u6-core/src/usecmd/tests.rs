@@ -405,18 +405,129 @@ fn a_ship_that_cannot_land_boards_the_first_skiff_or_raft_of_its_hold() {
     );
 }
 
-/// A raft alone in the hold does not count (the test at 0x12f612 is for 0x19e): the land
-/// refusal 0x12cd7a, the party still aboard its ship.
-#[test]
-fn a_ship_holding_only_a_raft_cannot_land() {
-    let s = ship_holding(false, &[0x19f], &[]);
-    let e = run(s, |st, io| async move {
+/// The land refusal's string (0x12cd7a): a synthetic marker the test puts at that address.
+const LAND_REFUSAL: (u32, &[u8]) = (0x0012_cd7a, b"MARKER-LAND-REFUSAL");
+
+/// Files with a synthetic `game` whose image (one CODE hunk from the image base) holds `text`,
+/// NUL-terminated, at image address `addr`: what `game_string` reads for the string a handler
+/// prints. The text is the test's own, no game text.
+fn game_with_string((addr, text): (u32, &[u8])) -> Files {
+    let at = (addr - crate::image::IMAGE_BASE) as usize;
+    let mut hunk = vec![0u8; (at + text.len() + 4) & !3];
+    hunk[at..at + text.len()].copy_from_slice(text);
+    let game = crate::image::SyntheticGame::new()
+        .loaded(false, hunk)
+        .build();
+    Files::new(std::collections::BTreeMap::from([(
+        "game".to_string(),
+        game,
+    )]))
+}
+
+/// [`run`] with `files`.
+fn run_on<G, F>(s: State, files: Files, game: G) -> Engine
+where
+    G: FnOnce(Rc<RefCell<State>>, Rc<Io>) -> F,
+    F: Future<Output = ()> + 'static,
+{
+    let mut e = Engine::with_game(s, files, game);
+    for _ in 0..64 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    e
+}
+
+/// Everything the message scroll took: its lines and the one being written.
+fn scroll_text(s: &State) -> String {
+    let t = &s.ui.text;
+    let mut all = s.ui.messages.join("\n");
+    all.extend(t.transcript_line.iter().map(|&b| char::from(b)));
+    all.extend(
+        t.line[usize::from(t.line_start)..usize::from(t.line_len)]
+            .iter()
+            .map(|&b| char::from(b)),
+    );
+    all
+}
+
+/// Board with no land to step on, on [`ship_holding`] (`hold` with `qualities`) and the test
+/// text layer, under a `game` that holds the land refusal's marker; returns the state.
+fn board_unlanding(hold: &[u16], qualities: &[u8]) -> State {
+    let mut s = ship_holding(false, hold, &[]);
+    s.ui = crate::main_loop::test_support::test_ui();
+    for (i, &q) in qualities.iter().enumerate() {
+        s.objects.qq[(A as usize) + i] = u16::from(q) << 8;
+    }
+    let e = run_on(s, game_with_string(LAND_REFUSAL), |st, io| async move {
         super::travel::board(Ux::new(&st, &io), 0).await;
     });
-    let s = e.state();
+    e.state().clone()
+}
+
+/// A raft alone in the hold does not count (the test at 0x12f612 is for 0x19e): the land
+/// refusal 0x12cd7a is printed, the party still aboard its ship.
+#[test]
+fn a_ship_holding_only_a_raft_cannot_land() {
+    let s = board_unlanding(&[0x19f], &[0]);
     assert_eq!(s.objects.kind(0), 0x19c, "still the ship");
     assert_eq!(s.actors.party.leader_index, s.actors.party.size, "aboard");
     assert!(in_hold(&s, A), "the raft stays in the hold");
+    let refusal = String::from_utf8_lossy(LAND_REFUSAL.1);
+    assert!(
+        scroll_text(&s).contains(&*refusal),
+        "the land refusal printed"
+    );
+}
+
+/// A skiff of a quality alone in the hold does not count either: the test looks for quality 0
+/// (0x10b18c(vessel, 0x19e, 0) at 0x12f60c..0x12f61e), so the refusal is printed and the skiff
+/// stays.
+#[test]
+fn a_ship_holding_only_a_skiff_of_a_quality_cannot_land() {
+    let s = board_unlanding(&[0x19e], &[5]);
+    assert_eq!(s.objects.kind(0), 0x19c, "still the ship");
+    assert_eq!(s.actors.party.leader_index, s.actors.party.size, "aboard");
+    assert!(in_hold(&s, A), "the skiff stays in the hold");
+    let refusal = String::from_utf8_lossy(LAND_REFUSAL.1);
+    assert!(
+        scroll_text(&s).contains(&*refusal),
+        "the land refusal printed"
+    );
+}
+
+/// With a skiff of quality 0 aboard the test passes, and the extraction takes the first skiff
+/// or raft of any quality (0x11d118 / 0x11d126): a skiff of quality 5 ahead of it is the one
+/// boarded; no refusal.
+#[test]
+fn a_ship_that_cannot_land_boards_the_first_skiff_of_any_quality() {
+    let (plain, marked) = (A, B);
+    let s = board_unlanding(&[0x19e, 0x19e], &[0, 5]);
+    assert_eq!(s.objects.kind(0), 0x19e, "a skiff boarded");
+    assert_eq!(s.actors.party.leader_index, s.actors.party.size, "aboard");
+    assert!(
+        !in_hold(&s, marked),
+        "the first one, of quality 5, is out of the hold"
+    );
+    assert!(
+        in_hold(&s, plain),
+        "the skiff of quality 0 moves on with actor 0"
+    );
+    let refusal = String::from_utf8_lossy(LAND_REFUSAL.1);
+    assert!(!scroll_text(&s).contains(&*refusal), "no refusal");
+}
+
+/// A raft of a quality ahead of the skiff of quality 0 is the one boarded.
+#[test]
+fn a_ship_that_cannot_land_boards_a_raft_of_a_quality_ahead_of_its_skiff() {
+    let (skiff, raft) = (A, B);
+    let s = board_unlanding(&[0x19e, 0x19f], &[0, 9]);
+    assert_eq!(s.objects.kind(0), 0x19f, "the raft boarded");
+    assert!(!in_hold(&s, raft), "the raft is out of the hold");
+    assert!(in_hold(&s, skiff), "the skiff moves on with actor 0");
 }
 
 /// As in the original: landing (0x11d0a4(1), the extraction skipped at 0x11d0f2) leaves the

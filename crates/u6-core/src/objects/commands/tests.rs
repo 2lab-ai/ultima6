@@ -676,7 +676,7 @@ fn removing_an_equipped_hatchling_keeps_the_eggs_next_template() {
 }
 
 #[test]
-fn search_stops_at_a_content_that_refuses_to_move() {
+fn search_passes_over_a_content_that_refuses_to_move() {
     // A body may hold type 0x4c, which 0x10c9d2 always refuses; 0x129544 ignores the refusal
     // (0x1297c4) and finds the same content again forever. The port passes over it.
     let (gem_place, fixed_place, out) = crate::objects::tests::returns("search", || {
@@ -733,12 +733,15 @@ fn a_dropped_stack_with_no_free_slot_marks_nothing() {
 #[test]
 fn a_dropped_ring_of_invisibility_flashes_before_the_panel() {
     // 0x12a226: the unready 0x11236c flashes the owner and the object flies (0x1228ba) before
-    // the panel is redrawn; their frames are on the screen when Drop returns, none are left
-    // for after the command.
+    // the panel is redrawn (0x12a7a8's container redraw, which marks the panel); their frames
+    // are on the screen when Drop returns, none are left for after the command. Sampled per
+    // tick: the flash is on the screen while the panel is not yet marked, and no frame comes
+    // after the mark.
     let mut s = monster_world();
     s.ui = crate::main_loop::test_support::test_ui();
     s.ui.panel.mode = 0x92;
     s.ui.panel.member = 0;
+    s.ui.panel.dirty = false;
     let ring = create_in(&mut s, 0x102, READIED, 0, 1);
     s.objects.obj_status[1] |= 2;
     s.ui.input.selection = ring;
@@ -751,14 +754,32 @@ fn a_dropped_ring_of_invisibility_flashes_before_the_panel() {
         let s = st.borrow();
         out.set(Some((s.combat.shown, s.combat.effects.len())));
     });
+    let sample = |e: &crate::Engine| (e.state().combat.shown, e.state().ui.panel.dirty);
+    let mut trace = vec![sample(&e)];
     e.tick(&[crate::InputEvent::Key(crate::Key::Enter)], 16);
+    trace.push(sample(&e));
     for _ in 0..60 {
         if e.finished() {
             break;
         }
         e.tick(&[], 16);
+        trace.push(sample(&e));
     }
     assert!(e.finished());
+    // The boundary: the panel marked again after the drop cleared the mark (0x12a226 leaves
+    // it clear, the container redraw sets it).
+    let last = trace.last().unwrap().0;
+    let mark = (1..trace.len())
+        .find(|&i| trace[i].1 && !trace[i - 1].1)
+        .expect("Drop marks the panel for its redraw");
+    assert!(
+        trace[..mark].iter().any(|&(shown, _)| shown > 0),
+        "a flash frame on the screen before the panel boundary: {trace:?}"
+    );
+    assert!(
+        trace[mark..].iter().all(|&(shown, _)| shown == last),
+        "no frame after the panel boundary: {trace:?}"
+    );
     assert_eq!(e.state().objects.place(ring), 0, "the ring lies on the map");
     assert_eq!(
         e.state().objects.obj_status[1] & 2,
@@ -810,7 +831,8 @@ fn a_keg_on_a_cyclic_chain_does_not_go_off() {
     assert_eq!((kind, keg_status), (0xdf, 0x08), "the keg stays as it was");
 }
 
-// Round-2 review regressions: each fails on the integration base 04982cc.
+// Round-2 review regressions: each fails on the integration base 04982cc, but the one marked
+// as a guard.
 
 #[test]
 fn a_serpent_head_without_a_body_slot_leaves_its_freed_slot_alone() {
@@ -823,6 +845,7 @@ fn a_serpent_head_without_a_body_slot_leaves_its_freed_slot_alone() {
     s.objects.obj_status[egg as usize] = 0x20;
     create_in(&mut s, 0x19d, 0x08, 0x0f02, egg); // one serpent, worktype 15, body of 2
     s.objects.free.1 = 0;
+    let flags_before = s.actors.attrs.movement_flags.clone();
     hatch_egg(&mut s, egg);
     assert!(of_kind(&s, 0x19d).is_empty(), "the head went");
     let written: Vec<usize> = (0xe0..0x100)
@@ -832,8 +855,18 @@ fn a_serpent_head_without_a_body_slot_leaves_its_freed_slot_alone() {
         written.is_empty(),
         "freed slots given worktype 15: {written:x?}"
     );
+    // Nor worktype 15's movement bits (0x131ff2: low 3 bits = 2).
+    let moved: Vec<usize> = (0xe0..0x100)
+        .filter(|&i| s.actors.attrs.movement_flags[i] != flags_before[i])
+        .collect();
+    assert!(
+        moved.is_empty(),
+        "freed slots given movement flags: {moved:x?}"
+    );
 }
 
+/// A guard, not a regression: 04982cc passes it too (its write into the freed slot took the
+/// worktype); it fails if the removal ends in a plain `continue` past 0x131ffe.
 #[test]
 fn a_removed_serpent_head_still_sets_the_eggs_worktype() {
     // 0x1319b2 takes the worktype once per egg from the first template that reaches
