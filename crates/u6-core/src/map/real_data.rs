@@ -30,7 +30,7 @@ fn files() -> Option<Files> {
 fn boot() -> Option<State> {
     let files = files()?;
     let mut s = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
-    s.map.load_view_tables(&files).unwrap_or_else(|e| panic!("{e}"));
+    s.map.load_tables(&files).unwrap_or_else(|e| panic!("{e}"));
     region::refresh_region(&mut s);
     Some(s)
 }
@@ -64,7 +64,10 @@ fn start_tile_is_walkable_and_walls_around_it_block() {
         for wx in 0..WINDOW {
             let (mx, my) = (ox + wx as u16, oy + wy as u16);
             let chunk = s.map.chunk_ref(mx, my, z).unwrap();
-            let want = s.map.chunks.tile(chunk.into(), usize::from(mx & 7), usize::from(my & 7));
+            let want = s
+                .map
+                .chunks
+                .tile(chunk.into(), usize::from(mx & 7), usize::from(my & 7));
             assert_eq!(Some(s.map.window_tiles[cell(wx, wy)]), want);
         }
     }
@@ -132,7 +135,13 @@ fn start_view_sees_the_room_and_not_past_its_walls() {
 /// `·` not seen.
 fn print_sight_area(s: &State) {
     let [vx, vy] = s.map.view_offset.map(|v| v as usize);
-    println!("sight area, window cells ({}..={}, {}..={}):", vx - 1, vx + 11, vy - 1, vy + 11);
+    println!(
+        "sight area, window cells ({}..={}, {}..={}):",
+        vx - 1,
+        vx + 11,
+        vy - 1,
+        vy + 11
+    );
     for y in vy - 1..=vy + 11 {
         let line: String = (vx - 1..=vx + 11)
             .map(|x| match () {
@@ -170,7 +179,7 @@ fn view_west_of_the_start_sees_round_through_the_corridor_and_darkens_at_night()
     assert_eq!(s.map.view_tile(9, 9), DARK);
     for row in 0..VIEW {
         for col in 0..VIEW {
-            let d = s.map.view_tables.as_ref().unwrap().dist[col.abs_diff(5)][row.abs_diff(5)];
+            let d = s.map.tables.as_ref().unwrap().dist[col.abs_diff(5)][row.abs_diff(5)];
             let lit = s.map.light_at(col, row) > 0;
             if s.map.is_visible(col, row) {
                 assert_eq!(lit, d < 4, "({col}, {row}) dist {d}");
@@ -205,11 +214,56 @@ fn assert_sight_is_closed(s: &State) {
             if !(seen(x, y) && passes(x, y)) {
                 continue;
             }
-            for (dx, dy) in [(0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)] {
+            for (dx, dy) in [
+                (0, -1),
+                (1, -1),
+                (1, 0),
+                (1, 1),
+                (0, 1),
+                (-1, 1),
+                (-1, 0),
+                (-1, -1),
+            ] {
                 let (nx, ny) = (x + dx, y + dy);
-                assert!(!area(nx, ny) || seen(nx, ny), "({nx}, {ny}) next to seen ({x}, {y})");
+                assert!(
+                    !area(nx, ny) || seen(nx, ny),
+                    "({nx}, {ny}) next to seen ({x}, {y})"
+                );
             }
         }
     }
     println!("sight area: {hidden} of 169 cells hidden");
+}
+
+#[test]
+fn map_tables_load_from_the_users_game() {
+    let Some(s) = boot() else { return };
+    let t = s.map.tables.as_ref().unwrap();
+    // A distance table: 0 at the origin, symmetric, growing away from it.
+    assert_eq!(t.dist[0][0], 0);
+    for a in 0..8 {
+        for b in 0..8 {
+            assert_eq!(t.dist[a][b], t.dist[b][a]);
+            if a > 0 {
+                assert!(t.dist[a][b] >= t.dist[a - 1][b]);
+            }
+        }
+    }
+    // The walk visits the 8 neighbours once each and ends back next to the start.
+    let (mut x, mut y) = (0i32, 0i32);
+    let mut seen = Vec::new();
+    for k in 0..8 {
+        x += i32::from(t.walk_dx[k]);
+        y += i32::from(t.walk_dy[k]);
+        assert!(x.abs() == 1 || y.abs() == 1, "step {k} left the ring");
+        seen.push((x, y));
+    }
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 8);
+    let gates = t.gate_x.iter().filter(|&&x| x != 0).count();
+    println!(
+        "dist row 0 {:?}; {gates} of 25 moongate destinations set",
+        t.dist[0]
+    );
 }

@@ -4,14 +4,11 @@
 //! Grids are the window's 40 × 40 cells ([`super::cell`]). The view is the 11 × 11 block at
 //! [`MapState::view_offset`]; the leader stands at view cell (5, 5).
 
-use u6_formats::FormatError;
-use u6_formats::gfx::{GAME_HUNK33_BLOCK, palette};
-
 use super::flags::*;
 use super::seams;
+use super::tables::MapTables;
 use super::{MapState, VIEW, WINDOW, WINDOW_CELLS, cell};
-use crate::files::Files;
-use crate::state::{LoadError, State};
+use crate::state::State;
 
 /// View tile of a cell nobody sees (0x109e74).
 pub const NOT_VISIBLE: u16 = 0xff;
@@ -20,78 +17,7 @@ pub const DARK: u16 = 0x1bc;
 /// Ambient light from which 0x109e74 skips the object-light pass.
 const FULL_DAYLIGHT: i8 = 7;
 
-/// Offset of hunk 33's data in the decrunched `game` (its HUNK_DATA header is 8 bytes).
-const HUNK33_DATA: usize = GAME_HUNK33_BLOCK + 8;
-/// Hunk-33 offsets (A4 = hunk 33 + 0x8000) of the tables 0x109c12 / 0x109e74 read.
-const DIST_AT: usize = 0x8000 - 0x794a;
-const WALK_DX_AT: usize = 0x8000 - 0x7908;
-const WALK_DY_AT: usize = 0x8000 - 0x7900;
-const WALK_STEP_AT: usize = 0x8000 - 0x78f8;
-const WALL_AT: usize = 0x8000 - 0x78f0;
-
-/// The view tables in the data hunk of the user's `game`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ViewTables {
-    /// Original: A4-0x794a (8 × 8 signed bytes, `dist[dx][dy]` = distance of a cell (dx, dy)
-    /// away; 0x109c12)
-    pub dist: [[i8; 8]; 8],
-    /// Original: A4-0x7908 / -0x7900 / -0x78f8 (8 signed bytes each: x, y and cell-index step
-    /// of the walk around a cell's 8 neighbours, starting north, clockwise; 0x109c12)
-    pub walk_dx: [i8; 8],
-    pub walk_dy: [i8; 8],
-    pub walk_step: [i8; 8],
-    /// Original: A4-0x78f0 (16 bytes: tile offset of a wall piece per neighbour mask; 0x109e74)
-    pub wall: [u8; 16],
-}
-
-impl ViewTables {
-    /// Reads the tables from the decrunched `game`. The file is first checked the way the
-    /// palette reader checks it (length, hunk header, hunk 33's HUNK_DATA); the walk tables
-    /// must agree with each other (`step = dy * 40 + dx`).
-    pub fn from_game(game: &[u8]) -> Result<ViewTables, FormatError> {
-        palette(game)?;
-        let at = |off: usize, n: usize| &game[HUNK33_DATA + off..HUNK33_DATA + off + n];
-        let signed = |off: usize| -> [i8; 8] { std::array::from_fn(|i| at(off, 8)[i] as i8) };
-        let dist_bytes = at(DIST_AT, 64);
-        let t = ViewTables {
-            dist: std::array::from_fn(|dx| std::array::from_fn(|dy| dist_bytes[dx * 8 + dy] as i8)),
-            walk_dx: signed(WALK_DX_AT),
-            walk_dy: signed(WALK_DY_AT),
-            walk_step: signed(WALK_STEP_AT),
-            wall: std::array::from_fn(|i| at(WALL_AT, 16)[i]),
-        };
-        for i in 0..8 {
-            let step = i32::from(t.walk_dy[i]) * WINDOW as i32 + i32::from(t.walk_dx[i]);
-            if step != i32::from(t.walk_step[i]) {
-                return Err(FormatError::Invalid {
-                    what: "game view walk tables",
-                    offset: HUNK33_DATA + WALK_STEP_AT + i,
-                    detail: format!(
-                        "step {} != dy * 40 + dx; unknown game version",
-                        t.walk_step[i]
-                    ),
-                });
-            }
-        }
-        Ok(t)
-    }
-}
-
 impl MapState {
-    /// Loads [`MapState::view_tables`] from `game` (the boot step `State::new_game` should run;
-    /// spec 03 §5 "data, not constants").
-    pub fn load_view_tables(&mut self, files: &Files) -> Result<(), LoadError> {
-        let game = files.get("game").ok_or_else(|| LoadError::Missing {
-            file: "game".into(),
-        })?;
-        let tables = ViewTables::from_game(game).map_err(|error| LoadError::Format {
-            file: "game".into(),
-            error,
-        })?;
-        self.view_tables = Some(tables);
-        Ok(())
-    }
-
     /// Window cell of view cell (col, row), 0..11 each.
     pub fn view_cell(&self, col: usize, row: usize) -> usize {
         let [vx, vy] = self.view_offset;
@@ -116,7 +42,8 @@ impl MapState {
 
 /// The tileflag arrays as the image lays them out, back to back: flags1 at 0x13b140, flags2 at
 /// 0x13b940, flags3 at 0x13c140 (2048 bytes each). An index past one array reads the next, as
-/// the original's `flags2[tile - 1]` and object tiles past 2047 do.
+/// the original's `flags2[tile - 1]` and object tiles past 2047 do; past flags3 the port reads 0
+/// (the original reads whatever follows it).
 struct TileBytes<'a>(&'a u6_formats::tileflag::TileFlags);
 
 impl TileBytes<'_> {
@@ -169,7 +96,7 @@ struct Flood<'a> {
     flags: &'a mut [u8],
     light: &'a mut [u8],
     view: [i16; 2],
-    t: &'a ViewTables,
+    t: &'a MapTables,
     tf: TileBytes<'a>,
     queue: Queue,
 }
@@ -325,9 +252,9 @@ impl Flood<'_> {
 /// Ends with the view object lists (0x10e81e). The object pass sees what the
 /// `objects_in_rect` seam returns (see `seams.rs`).
 ///
-/// Port fallback when [`MapState::view_tables`] is not loaded: the A4-0x794c path.
+/// Port fallback when [`MapState::tables`] is not loaded: the A4-0x794c path.
 pub fn update_view(state: &mut State) {
-    let tables = state.map.view_tables.clone();
+    let tables = state.map.tables.clone();
     let (Some(t), 0) = (tables, state.map.reveal_all) else {
         reveal_view(&mut state.map);
         seams::build_view_objects(state);
@@ -566,13 +493,16 @@ mod tests {
         }
     }
 
-    fn tables() -> ViewTables {
-        ViewTables {
+    fn tables() -> MapTables {
+        MapTables {
             dist: std::array::from_fn(|a| std::array::from_fn(|b| a.max(b) as i8)),
             walk_dx: [0; 8],
             walk_dy: [0; 8],
             walk_step: [0; 8],
             wall: std::array::from_fn(|k| k as u8),
+            gate_x: [0; 25],
+            gate_y: [0; 25],
+            gate_z: [0; 25],
         }
     }
 
@@ -590,7 +520,7 @@ mod tests {
         }
     }
 
-    fn flood<'a>(g: &'a mut Grids, t: &'a ViewTables, tf: &'a TileFlags) -> Flood<'a> {
+    fn flood<'a>(g: &'a mut Grids, t: &'a MapTables, tf: &'a TileFlags) -> Flood<'a> {
         Flood {
             tiles: &g.tiles,
             flags: &mut g.flags,

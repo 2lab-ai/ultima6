@@ -36,7 +36,7 @@ fn world() -> MapState {
 
 /// Synthetic view tables: Chebyshev distance, the 8-neighbour walk N, NE, E, SE, S, SW, W, NW
 /// as steps from the previous neighbour, identity wall pieces.
-fn tables() -> ViewTables {
+fn tables() -> MapTables {
     let ring = [
         (0, -1),
         (1, -1),
@@ -54,17 +54,20 @@ fn tables() -> ViewTables {
         step[k] = dy[k] * 40 + dx[k];
         prev = (x, y);
     }
-    ViewTables {
+    MapTables {
         dist: std::array::from_fn(|a| std::array::from_fn(|b| a.max(b) as i8)),
         walk_dx: dx,
         walk_dy: dy,
         walk_step: step,
         wall: std::array::from_fn(|k| k as u8),
+        gate_x: [0; 25],
+        gate_y: [0; 25],
+        gate_z: [0; 25],
     }
 }
 
 /// A state on an all-zero map (chunk 0 everywhere, tile 0 open) with empty tile flags.
-fn open_state(centre: Position) -> State {
+pub(super) fn open_state(centre: Position) -> State {
     let mut s = State::empty();
     s.map.world = WorldMap {
         surface: vec![0; SURFACE_CHUNKS * SURFACE_CHUNKS],
@@ -80,7 +83,7 @@ fn open_state(centre: Position) -> State {
         flags3: vec![0; TILE_COUNT],
     };
     s.tables.basetile.base = vec![0; 1024];
-    s.map.view_tables = Some(tables());
+    s.map.tables = Some(tables());
     s.map.centre = centre;
     s.actors.objlist_tail = vec![0; 0x82];
     region::rebuild_window(&mut s);
@@ -202,8 +205,8 @@ fn eggs_far_or_active_or_on_arrival_are_offered() {
 }
 
 #[test]
-fn view_tables_reject_a_file_that_is_not_the_game() {
-    assert!(ViewTables::from_game(&[0; 64]).is_err());
+fn tables_reject_a_file_that_is_not_the_game() {
+    assert!(MapTables::from_game(&[0; 64]).is_err());
 }
 
 #[test]
@@ -369,7 +372,7 @@ fn reveal_all_and_missing_tables_show_the_window_lit() {
         "flags untouched"
     );
     s.map.reveal_all = 0;
-    s.map.view_tables = None;
+    s.map.tables = None;
     s.map.light.fill(0);
     view::update_view(&mut s);
     assert_eq!(s.map.light_at(5, 5), 4);

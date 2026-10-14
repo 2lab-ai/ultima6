@@ -38,6 +38,7 @@
 pub mod flags;
 pub mod region;
 pub mod seams;
+pub mod tables;
 pub mod travel;
 pub mod view;
 
@@ -50,7 +51,7 @@ use u6_formats::chunks::Chunks;
 use u6_formats::map::WorldMap;
 use u6_formats::position::Position;
 
-pub use view::ViewTables;
+pub use tables::MapTables;
 
 /// Side of the window tile cache and of its flag / light grids (0x108d10 fills 5 × 5 chunks).
 pub const WINDOW: usize = 40;
@@ -117,9 +118,27 @@ pub struct MapState {
     /// command loop 0x1041d8, restore 0x1052c8, converse 0x114afa and others; meaning not
     /// identified; the image holds 0)
     pub flag_7afb: u8,
-    /// The tables 0x109c12 / 0x109e74 read from the data hunk of `game`; `None` until
-    /// [`MapState::load_view_tables`] runs.
-    pub view_tables: Option<ViewTables>,
+    /// Original: A4-0x6578 (word; "redraw everything" before a 0x10e81e + 0x102ef0 pair;
+    /// 0x10921a, 0x108fba and 0x1095bc set it to 1; read by 0x102c90; many other writers)
+    pub full_redraw: u16,
+    /// Original: A4-0x6a9e (word; 0x1095bc holds it at 1 while it runs the clock to morning;
+    /// read by the clock path [likely])
+    pub fast_clock: u16,
+    /// Original: A4-0x7afe (byte; 0x1095bc sets it to 1 when the party wakes up; meaning not
+    /// identified)
+    pub flag_7afe: u8,
+    /// Original: A4-0x7afd (byte; set to 1 after 0x11d1d4 prints a message; meaning not
+    /// identified, the message routines set it too)
+    pub flag_7afd: u8,
+    /// Original: A4-0x2f04 (word; 0x1095bc stores the body object it resurrects; read by the
+    /// resurrection callees [likely])
+    pub body: i16,
+    /// Original: A4+0x186e (64 words; 0x1095bc sets them all to -1; other users and meaning
+    /// not identified; empty until then)
+    pub table_186e: Vec<i16>,
+    /// The tables 0x109c12 / 0x109e74 / 0x11d1d4 read from the data hunk of `game`; `None`
+    /// until [`MapState::load_tables`] runs.
+    pub tables: Option<MapTables>,
     /// Original: A4-0x309b (byte per animdata slot; 0x105350 clears it for slots animating the
     /// base tile of object 0x125, 0x120 or 0xec and sets it for the others)
     pub anim_enabled: Vec<bool>,
@@ -148,7 +167,13 @@ impl Default for MapState {
             arriving: 0,
             flag_6592: 0,
             flag_7afb: 0,
-            view_tables: None,
+            full_redraw: 0,
+            fast_clock: 0,
+            flag_7afe: 0,
+            flag_7afd: 0,
+            body: 0,
+            table_186e: Vec::new(),
+            tables: None,
             anim_enabled: Vec::new(),
         }
     }
