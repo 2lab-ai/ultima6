@@ -10,7 +10,8 @@ Parser spec for the Rust engine, which reads the **Amiga** files directly. Measu
 `~/Games/ultima6/unpacked/{d1/INSTALL,d2/DATA1,d3/DATA2}` (PP20-decrunched). Cross-reference
 reader = ScummVM Nuvie; `N:` = `scummvm/engines/ultima/nuvie/`, `L:` =
 `scummvm/devtools/create_ultima/files/ultima6/scripts/u6/`. Nuvie reads the DOS layout, so
-"vs DOS" says what differs. Throwaway probe scripts (not committed) produced every number here.
+"layout vs DOS (Nuvie)" compares against the layout Nuvie's reader expects, not against DOS
+file bytes (no DOS copy was available). Throwaway probe scripts (not committed) produced every number here.
 BE/LE = big/little-endian. `[추정]` = inference. Hex dumps are first bytes of the file or record.
 
 ## 0. Container layers — apply in this order
@@ -30,15 +31,20 @@ BE/LE = big/little-endian. `[추정]` = inference. Hex dumps are first bytes of 
 - `[0..4]` u32 **LE** = decompressed size; byte 3 is always 0 (validity check :89-111).
 - Bitstream from byte 4, **LSB-first**: the code at bit `p` is `(u24le(buf[p/8..]) >> (p%8)) & mask(width)`.
 - Width starts at 9. Code `0x100` = clear (width 9, next_free = 0x102, dictionary emptied; the
-  **next code is a literal root**, output directly, no dictionary add). `0x101` = end.
+  **next code is a literal root**, output directly, no dictionary add, and it becomes `prev`;
+  N: u6_lzw.cpp:196-203,258). `0x101` = end.
 - Every stream starts with `0x100`. That is the validity test: `buf[4]==0 && (buf[5]&1)==1`.
 - Other codes: if `c < next_free`, output `string(c)`, add `(prev, first(string(c)))`. Otherwise
   `c` must equal `next_free` (KwKwK case): output `string(prev)+first(string(prev))` and add the
   same entry. Then `next_free++`; if `next_free >= 1<<width && width < 12`, `width++`.
 - Encoder behaviour (measured): it emits `0x100` exactly when next_free reaches `0x1000`
-  (`intro.new` 9 clears, `end.new` 15; max next_free 4096). Small files have only the leading
+  (`intro.new` 9 clears, `end.new` 15; max next_free 4096). That clear is read at the current
+  width (12), not 9. Small files have only the leading
   clear. The `0x101` code ends in the last byte (0 trailing bytes) in every stream measured: the
   table below, intro.new, end.new, and portrait.a item 0.
+- Bit reader must tolerate reading past the end: the u24 read at `p/8` can reach 1-2 bytes
+  beyond the last stream byte for the final code (Nuvie reads `[p/8+1]` always, `[p/8+2]` when
+  needed, :320-325). Zero-pad the buffer by 2 bytes or bounds-check (a Rust slice index panics).
 - Nuvie fallback, not needed by any Amiga file: a non-LZW file decodes as `bytes[8..]`
   (:299-309).
 
@@ -82,7 +88,7 @@ BE/LE = big/little-endian. `[추정]` = inference. Hex dumps are first bytes of 
 
 ## 3. File table (every file Nuvie opens for U6, plus every Amiga data file)
 
-| DOS name (Nuvie) | Nuvie reader | Amiga file, size | layout (detail §) | vs DOS |
+| DOS name (Nuvie) | Nuvie reader | Amiga file, size | layout (detail §) | layout vs DOS (Nuvie) |
 |---|---|---|---|---|
 | map | core/map.cpp:371,564-616 | d2 map 32256 | 12-bit chunk refs (§4.1) | identical |
 | chunks | core/map.cpp:375,588-599 | d2 chunks 65536 | 1024 × 64 u8 (§4.1) | identical |
@@ -110,6 +116,10 @@ BE/LE = big/little-endian. `[추정]` = inference. Hex dumps are first bytes of 
 | intro*.shp, blocks.shp, vellum1.shp, end.shp, palettes.int, endpal.lbm | L: intro.lua, ending.lua; N: script/script_cutscene.cpp:1264-1295 | d1 `*.new` ×14, d2 end.new | LZW → BE32 table (§8.4) | different format, pending |
 | — | — | d1 STARPOS.DAT 755 | LZW → 1200 B (§8.2) | no Nuvie reader |
 | — | — | d2 end 37724 | Amiga hunk exe (`00 00 03 f3`) | executable (ending) |
+
+Not data, out of scope: d1 `game u ultcli ultima6 installu6 start c/endcli s/startup-sequence
+disk.info ultima6.info` and d2 `Trashcan.info` (executables, scripts and icons; exe layout =
+`re/notes/game-layout.md`).
 
 Directory layout: Nuvie opens every name relative to `gamedir` (N: misc/u6_misc.cpp:73-88). The
 object files live in the `savegame/` subdirectory with lowercase names (save_game.cpp:57-58).
