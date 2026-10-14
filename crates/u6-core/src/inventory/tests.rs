@@ -62,9 +62,7 @@ pub(super) fn world() -> State {
     t.hand_tiles = vec![0x240, 0x244];
     t.counted = vec![GOLD, APPLE];
     t.glyphs = vec![0xf6de, 0x4924];
-    t.columns = vec![
-        3, 0, 0, 0, 7, 0, 0, 0, 9, 4, 0, 0, 11, 7, 3, 0, 13, 9, 5, 1,
-    ];
+    t.columns = vec![3, 0, 0, 0, 7, 0, 0, 0, 9, 4, 0, 0, 11, 7, 3, 0, 13, 9, 5, 1];
     init_slots(&mut s.objects);
     crate::objects::link_actors(&mut s.objects);
     let p = &mut s.actors.party;
@@ -208,7 +206,10 @@ fn pointer_hit_tests_select_list_and_equipment_slots() {
     assert_eq!((s.ui.input.selection, s.ui.input.target.0), (0x150, 2));
     s.ui.input.pointer = (0xe2, 0x2a);
     assert!(equipment_slot_at(&mut s));
-    assert_eq!(s.ui.input.selection, -1, "the both-hands marker selects nothing");
+    assert_eq!(
+        s.ui.input.selection, -1,
+        "the both-hands marker selects nothing"
+    );
     s.ui.input.pointer = (0, 0);
     assert!(!equipment_slot_at(&mut s) && !list_slot_at(&mut s));
 }
@@ -219,7 +220,10 @@ fn ready_and_unready_move_a_weapon_and_change_the_weights() {
     let sword = give(&mut s, SWORD, IN_INVENTORY, 0, 1);
     let _arrows = give(&mut s, ARROWS, IN_INVENTORY, 3, 1);
     carried_weight(&mut s, 1);
-    assert_eq!((s.inventory.equip_weight, s.inventory.carried_weight), (0, 33));
+    assert_eq!(
+        (s.inventory.equip_weight, s.inventory.carried_weight),
+        (0, 33)
+    );
     s.ui.input.selection = sword;
     let e = run(s, &[], |st, io| async move {
         ready(&st, &io).await;
@@ -229,7 +233,10 @@ fn ready_and_unready_move_a_weapon_and_change_the_weights() {
         assert!(e.finished());
         assert_eq!(s.objects.place(sword), READIED);
         assert_eq!(s.inventory.equip(2), sword);
-        assert_eq!((s.inventory.equip_weight, s.inventory.carried_weight), (30, 3));
+        assert_eq!(
+            (s.inventory.equip_weight, s.inventory.carried_weight),
+            (30, 3)
+        );
         assert_eq!(s.ui.panel.inventory_count, 1);
         let mut s = s.clone();
         s.ui.input.selection = sword;
@@ -241,7 +248,10 @@ fn ready_and_unready_move_a_weapon_and_change_the_weights() {
     let s = e.state();
     assert_eq!(s.objects.place(sword), IN_INVENTORY);
     assert_eq!(s.inventory.equip(2), 0);
-    assert_eq!((s.inventory.equip_weight, s.inventory.carried_weight), (0, 33));
+    assert_eq!(
+        (s.inventory.equip_weight, s.inventory.carried_weight),
+        (0, 33)
+    );
     assert_eq!(s.ui.panel.inventory_count, 2);
 }
 
@@ -256,7 +266,11 @@ fn ready_refuses_heavy_unreadyable_and_occupied() {
     let sword = give(&mut s, SWORD, READIED, 0, 1);
     let second = give(&mut s, SWORD, IN_INVENTORY, 0, 1);
     carried_weight(&mut s, 1);
-    for (obj, why) in [(armour, "heavy"), (bag, "no slot"), (second, "no hand free")] {
+    for (obj, why) in [
+        (armour, "heavy"),
+        (bag, "no slot"),
+        (second, "no hand free"),
+    ] {
         let mut t = s.clone();
         t.ui.input.selection = obj;
         let e = run(t, &[], |st, io| async move { ready(&st, &io).await });

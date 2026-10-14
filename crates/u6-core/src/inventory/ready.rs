@@ -211,9 +211,7 @@ pub fn release_effect(s: &mut State, io: &Io, obj: Slot, actor: Slot) -> i16 {
 
 /// Original: 0x111fe0 (inventory: the equipment slot holding `obj`, -1 if none)
 pub fn equipped_index(s: &State, obj: Slot) -> i16 {
-    (0..8)
-        .find(|&i| s.inventory.equip(i) == obj)
-        .unwrap_or(-1)
+    (0..8).find(|&i| s.inventory.equip(i) == obj).unwrap_or(-1)
 }
 
 /// Original: 0x1123d6 (inventory: Unready the selected object (A4-0x2f04) for the member shown)

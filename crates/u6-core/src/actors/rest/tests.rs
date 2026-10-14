@@ -1,9 +1,6 @@
 //! Unit tests of the Rest code on synthetic data: the party (actors 1, 2) at (20, 20) on open
 //! ground (tile flags of the walk tests), no map loaded (every map tile reads 0).
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use u6_formats::position::Position;
 
 use super::*;
@@ -103,7 +100,11 @@ fn camp_checks_refuse_in_their_order() {
     assert_eq!(refusal(&mut t), Some(STR_SOLO));
     let mut t = s.clone();
     t.actors.party.leader_index = 2;
-    assert_eq!(refusal(&mut t), Some(STR_NO_REPAIR), "aboard something not a ship");
+    assert_eq!(
+        refusal(&mut t),
+        Some(STR_NO_REPAIR),
+        "aboard something not a ship"
+    );
 }
 
 #[test]

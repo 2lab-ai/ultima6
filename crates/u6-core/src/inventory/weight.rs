@@ -52,7 +52,14 @@ pub fn ready_slot(s: &State, obj: Slot) -> i16 {
         8
     } else if within(0x208, 0x20f) || tile == 0x222 {
         5
-    } else if s.inventory.tables.hand_tiles.iter().take(33).any(|&t| t as i16 == tile) {
+    } else if s
+        .inventory
+        .tables
+        .hand_tiles
+        .iter()
+        .take(33)
+        .any(|&t| t as i16 == tile)
+    {
         2
     } else {
         -1

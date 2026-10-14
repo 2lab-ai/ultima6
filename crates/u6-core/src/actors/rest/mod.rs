@@ -268,7 +268,11 @@ pub async fn repair_hull(state: &RefCell<State>, io: &Io) {
         let mut s = state.borrow_mut();
         let ship = leader(&s) as usize;
         let hp = &mut s.actors.attrs.hp[ship];
-        *hp = if u16::from(*hp) + 5 < 100 { *hp + 5 } else { 100 };
+        *hp = if u16::from(*hp) + 5 < 100 {
+            *hp + 5
+        } else {
+            100
+        };
         super::clock::tick(&mut s, 5);
         s.actors.attrs.hp[ship]
     };

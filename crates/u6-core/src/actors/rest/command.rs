@@ -59,7 +59,8 @@ pub async fn rest(state: &RefCell<State>, io: &Io) {
     };
     let fire = make_camp(state, io);
     say(state, io, STR_MEAL, &[]).await;
-    if let Some(bard) = start_tune(&mut state.borrow_mut()) {
+    let bard = start_tune(&mut state.borrow_mut());
+    if let Some(bard) = bard {
         say_name(state, io, bard).await;
         say(state, io, STR_TUNE, &[]).await;
     }
@@ -135,7 +136,10 @@ fn make_camp(state: &RefCell<State>, io: &Io) -> Slot {
     let [t0, t1] = (1u16 << 10 | CAMPFIRE).to_be_bytes();
     let fire = create_from_record(&mut s, [0, b0, b1, b2, t0, t1, 0, 1]);
     // The original sets bit 5 at slot -1 when no slot was free; the port skips it.
-    if let Some(st) = usize::try_from(fire).ok().and_then(|f| s.objects.obj_status.get_mut(f)) {
+    if let Some(st) = usize::try_from(fire)
+        .ok()
+        .and_then(|f| s.objects.obj_status.get_mut(f))
+    {
         *st |= crate::objects::TEMPORARY;
     }
     build_draw_lists(&mut s);
