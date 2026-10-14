@@ -637,7 +637,7 @@ fn animate(s: &mut State, caster: u16, obj: Slot) {
     }
     let (kind, x, y) = (s.objects.kind(obj), s.objects.x(obj), s.objects.y(obj));
     let z = u16::from(s.map.centre.z);
-    let new = crate::objects::spawn_monster(s, kind, x, y, z);
+    let new = seams::spawn(s, kind, x, y, z);
     adopt(s, new, caster, 8);
     crate::objects::remove(s, obj);
 }
@@ -660,7 +660,7 @@ fn clone(s: &mut State, io: &Io, obj: Slot) {
         return;
     };
     let z = u16::from(s.map.centre.z);
-    let new = crate::objects::spawn_monster(s, s.objects.kind(obj), x, y, z);
+    let new = seams::spawn(s, s.objects.kind(obj), x, y, z);
     if let Ok(n) = usize::try_from(new) {
         let a = &mut s.actors.attrs;
         a.status[n] = (a.status[n] & 0x9f) | (a.status[usize::from(t)] & 0x60);

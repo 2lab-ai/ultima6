@@ -19,10 +19,10 @@ use crate::state::State;
 use crate::ui::printf::{Arg, printf};
 use u6_render::Framebuffer;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-const AVATAR: u16 = 1;
+pub(super) const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
+pub(super) const AVATAR: u16 = 1;
 
-fn files() -> Option<Files> {
+pub(super) fn files() -> Option<Files> {
     if !Path::new(ZIP).exists() {
         eprintln!("skipped: {ZIP} not present");
         return None;
@@ -37,7 +37,7 @@ fn files() -> Option<Files> {
 
 /// main()'s boot after load state (0x1351d8, see `main_loop::run`): palette, paper, windows,
 /// the load-state tail, the animation substitutions, the clock, then the panel and the view.
-async fn boot(state: &RefCell<State>, io: &Io) {
+pub(super) async fn boot(state: &RefCell<State>, io: &Io) {
     {
         let mut s = state.borrow_mut();
         let tables = s.ui.tables.clone();
@@ -66,7 +66,7 @@ async fn boot(state: &RefCell<State>, io: &Io) {
 }
 
 /// A readied spellbook with `spells` inside for the Avatar, and 10 of each reagent.
-fn give_book(s: &mut State, spells: &[u8]) -> i16 {
+pub(super) fn give_book(s: &mut State, spells: &[u8]) -> i16 {
     let book = crate::objects::create_in(s, super::SPELLBOOK, READIED, 0, AVATAR as i16);
     for &n in spells {
         crate::objects::create_in(s, super::SPELL, IN_CONTAINER, u16::from(n) << 8, book);
@@ -79,7 +79,7 @@ fn give_book(s: &mut State, spells: &[u8]) -> i16 {
 
 /// The command loop's part of Cast (0x104216 and 0x10498e..0x104a96): the spell cursor (mode
 /// 3, range 7, cell (5, 5)), the target pending, "Cast-", the command, the cleanup.
-async fn cast_command(state: &RefCell<State>, io: &Io) {
+pub(super) async fn cast_command(state: &RefCell<State>, io: &Io) {
     {
         let mut s = state.borrow_mut();
         crate::ui::cursor::panel_cursor_in(&mut s, io, 0);
@@ -106,7 +106,7 @@ async fn cast_command(state: &RefCell<State>, io: &Io) {
 }
 
 /// The scroll lines so far, the one being written last.
-fn lines_of(s: &State) -> Vec<String> {
+pub(super) fn lines_of(s: &State) -> Vec<String> {
     let t = &s.ui.text;
     let mut lines = s.ui.messages.clone();
     let mut last: String = t.transcript_line.iter().map(|&b| char::from(b)).collect();
@@ -116,13 +116,14 @@ fn lines_of(s: &State) -> Vec<String> {
     lines
 }
 
-fn keys(spec: &str) -> Vec<InputEvent> {
+pub(super) fn keys(spec: &str) -> Vec<InputEvent> {
     spec.chars()
         .map(|c| {
             InputEvent::Key(match c {
                 '\n' => Key::Enter,
                 '^' => Key::Up,
                 'v' => Key::Down,
+                '~' => Key::Escape,
                 '<' => Key::Left,
                 '>' => Key::Right,
                 c => Key::Char(c),
@@ -133,7 +134,7 @@ fn keys(spec: &str) -> Vec<InputEvent> {
 
 /// A booted engine that sets the state up with `setup`, then casts once; `input` is typed
 /// one key per tick. Returns the engine when the cast is over.
-fn cast_with(files: &Files, setup: fn(&mut State), input: &str) -> Engine {
+pub(super) fn cast_with(files: &Files, setup: fn(&mut State), input: &str) -> Engine {
     let state = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
     let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {
         boot(&st, &io).await;
@@ -159,7 +160,7 @@ fn cast_with(files: &Files, setup: fn(&mut State), input: &str) -> Engine {
 }
 
 /// Reagent counts the Avatar carries, in reagent order.
-fn reagents(s: &State) -> Vec<i16> {
+pub(super) fn reagents(s: &State) -> Vec<i16> {
     let t = s.magic.tables.reagents;
     t.iter()
         .map(|&k| super::book::carried_count(&s.objects, AVATAR as i16, k, 0))
@@ -167,7 +168,7 @@ fn reagents(s: &State) -> Vec<i16> {
 }
 
 /// Prints the scroll from the "Cast-" line on.
-fn show(name: &str, e: &Engine) -> Vec<String> {
+pub(super) fn show(name: &str, e: &Engine) -> Vec<String> {
     let lines = lines_of(&e.state());
     let from = lines.iter().rposition(|l| l.contains("Cast-")).unwrap_or(0);
     let tail = lines[from..].to_vec();
@@ -183,7 +184,7 @@ fn show(name: &str, e: &Engine) -> Vec<String> {
 }
 
 /// A PNG of the frame (RGB, zlib stored blocks).
-fn png(fb: &Framebuffer) -> Vec<u8> {
+pub(super) fn png(fb: &Framebuffer) -> Vec<u8> {
     fn crc32(data: &[u8]) -> u32 {
         let mut c = !0u32;
         for &b in data {
@@ -242,7 +243,7 @@ fn png(fb: &Framebuffer) -> Vec<u8> {
 }
 
 /// View cells drawn lit (neither unseen 0xff nor dark 0x1bc).
-fn lit_cells(s: &State) -> usize {
+pub(super) fn lit_cells(s: &State) -> usize {
     (0..11)
         .flat_map(|r| (0..11).map(move |c| (c, r)))
         .filter(|&(c, r)| {
@@ -253,7 +254,7 @@ fn lit_cells(s: &State) -> usize {
 }
 
 /// What a cast of `spell` must spend: one of each of its reagents, one point per circle.
-fn spent(before: &[i16], after: &[i16], mp: (u8, u8), s: &State, spell: usize) {
+pub(super) fn spent(before: &[i16], after: &[i16], mp: (u8, u8), s: &State, spell: usize) {
     let mask = s.magic.tables.mask(spell);
     for (i, (b, a)) in before.iter().zip(after).enumerate() {
         let want = b - i16::from(mask >> i & 1);

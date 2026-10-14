@@ -40,6 +40,8 @@ mod travel;
 mod tests;
 #[cfg(test)]
 mod tests_real;
+#[cfg(test)]
+mod tests_spells;
 
 pub use book::{draw_book, draw_book_page, load_book, set_current_spell};
 pub use cast::{book_cast, cast};
