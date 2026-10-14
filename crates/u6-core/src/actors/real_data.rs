@@ -38,7 +38,13 @@ fn start() -> Option<(State, Files)> {
     state.actors.game = GameTables::from_game(files.get("game").unwrap()).unwrap();
     crate::objects::load_state_objects(&mut state);
     state.map.flag_784e = 1;
+    // The start window's egg stays unhatched (A4-0x7afb, which 0x1321dc / 0x1319b2 check), as
+    // in combat's receipt: since the eggs hatch at boot its gargoyles fight the party, and the
+    // Avatar died around pass 70 (resurrected in the castle), so the schedules this receipt
+    // watches were no longer the ones around the start.
+    state.map.flag_7afb = 1;
     crate::map::region::refresh_region(&mut state);
+    state.map.flag_7afb = 0;
     crate::map::view::update_view(&mut state);
     Some((state, files))
 }
@@ -128,13 +134,15 @@ fn world_turns_move_npcs_toward_their_schedules() {
     let before = state.clone();
     let c0 = state.actors.calendar;
     let trace: Rc<RefCell<Trace>> = Rc::new(RefCell::new(Vec::new()));
-    let (tr, ids) = (Rc::clone(&trace), watched.clone());
+    let lowest = Rc::new(std::cell::Cell::new(state.actors.attrs.hp[1]));
+    let (tr, ids, low) = (Rc::clone(&trace), watched.clone(), Rc::clone(&lowest));
     let mut engine = Engine::with_game(state, files, move |st, io| async move {
         let mut after = 0;
         // Pass until the boundary hour, then 60 more passes (about an hour) of walking.
         while after < 60 && tr.borrow().len() < 2000 {
             pass(&st, &io).await;
             let s = st.borrow();
+            low.set(low.get().min(s.actors.attrs.hp[1]));
             let row = ids
                 .iter()
                 .map(|&a| {
@@ -158,6 +166,11 @@ fn world_turns_move_npcs_toward_their_schedules() {
     }
     assert!(engine.finished(), "the world turns returned to the player");
     let after = engine.state().clone();
+    assert_eq!(
+        lowest.get(),
+        before.actors.attrs.hp[1],
+        "no fight at the start: nothing hurts the Avatar"
+    );
     let c1 = after.actors.calendar;
     let trace = trace.borrow();
     println!(
