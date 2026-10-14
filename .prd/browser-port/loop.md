@@ -84,16 +84,17 @@ Base origin/port/main `6dce550`. One worktree per unit (`.worktrees/m2-<unit>`, 
 
 | WU | Scope | State |
 |---|---|---|
-| M2-combat | hunk 13 + Attack + combat mode + NPC combat worktypes + missile effects | in flight |
+| M2-combat | hunk 13 + Attack + combat mode + NPC combat worktypes + missile effects | m2/combat `114621d`; 53 + 7 hunk-18 fns; 334 tests; gargoyle fight messages match oracle wording | done → M2-int-a |
 | M2-magic | hunk 11 + Cast + spellbook + reagents | in flight |
-| M2-objcmds | hunk 15 Look/Get/Drop/Move/doors/traps + eggs/monster spawn | in flight |
-| M2-usecmd | hunk 16 Use + per-object handlers | in flight |
+| M2-objcmds | hunk 15 Look/Get/Drop/Move/doors/traps + eggs/monster spawn | m2/objcmds `5eea93a`; 339 tests; start frame 99.20% vs oracle (seed 0x1d3), 98.76% seed 0; Move-to-member partial | done → M2-int-a |
+| M2-usecmd | hunk 16 Use + per-object handlers | m2/usecmd `73300c7`; 53/59; 329 tests; 8 object kinds; duplicated 10 hunk-15 fns (dedupe in int) | done → M2-int-a |
 | M2-inventory | hunk 8 inventory/Ready/Unready + 0x128ce8 panel + hunk 14 Rest | in flight |
-| M2-saveload | Save/Restore, byte-compatible savegame, SaveStore trait | in flight |
+| M2-saveload | Save/Restore, byte-compatible savegame, SaveStore trait | m2/saveload `ad43c95`; 333 tests; original's save loads in port, port re-save = original re-save except frame bits + 1 stack-garbage byte | done → M2-int-a |
 | M2-sound | MED player + Paula emulation (u6-audio) + music state | in flight |
 | M2-intro | `u`: intro, menu, character creation, hand-off | in flight |
 | M2-mouse+ui | mouse input + remaining ui/gfx planned rows | after WU-P7b |
-| M2-int | wire handlers into commands.rs, web save slots + audio worklet | after units |
+| M2-int-a | merge combat+objcmds+saveload+usecmd, dedupe hunk 15, wire seams + commands.rs, ctrl keys | integrate/m2, in flight |
+| M2-int-b | merge magic+inventory+sound+intro, web save slots + audio worklet | after those units |
 
 ## Interim deploy receipt — 2026-10-14 (user: "중간 보고하고 중간 산출물 정리해서 한번 먼저 올려줘")
 
