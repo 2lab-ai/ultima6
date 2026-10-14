@@ -12,14 +12,21 @@
 //! (0x11615a, 0x11c650) and [`dispatch`] (0x11a586) runs the spell, which prompts for its
 //! target through the cross-hair where it needs one.
 //!
+//! The spells: one target (effects.rs, 0x116f2c), the detections (detect.rs), the routines of
+//! their own (spells.rs), the location spells (area.rs), the creature spells (creatures.rs),
+//! the object spells (items.rs), the travel and view spells (travel.rs) and Peer (peer.rs).
+//!
 //! Domain state = [`MagicState`] (the hunk-11 BSS and the spell-input bytes of the ui BSS that
-//! only this code reads); the tables are [`MagicTables`], read from the user's `game` at load.
-//! Calls into code that other units own (combat damage and missiles, a few ui and graphics
-//! helpers) go through [`seams`].
+//! only this code reads); the tables are [`MagicTables`], read from the user's `game` at load
+//! (the few small A4 tables the spells read at run time come through `seams::a4_bytes`).
+//! Calls into code that other units own (combat damage and missiles, the flights, a few ui,
+//! inventory and object routines) go through [`seams`].
 //!
 //! Original functions this module owns: every function of hunk 11 (see `re/notes/port-map.md`
 //! for each one's status) plus 0x10674e, 0x1067d8, 0x106812, 0x1078d2 and the spell-input
-//! block of 0x106bbc.
+//! block of 0x106bbc; ported here because the spells are their only callers on the spell
+//! side: 0x13331c, 0x1334a6, 0x133562 (hunk 18) and 0x12c54a (hunk 15, shared with Use on a
+//! gem).
 
 mod area;
 mod book;
@@ -42,6 +49,8 @@ mod tests;
 mod tests_real;
 #[cfg(test)]
 mod tests_spells;
+#[cfg(test)]
+mod tests_units;
 
 pub use book::{draw_book, draw_book_page, load_book, set_current_spell};
 pub use cast::{book_cast, cast};

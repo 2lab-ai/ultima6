@@ -144,7 +144,11 @@ fn mass_sleep_on_a_group() {
         );
     }
     assert_eq!(asleep, [6, 7, 8], "{tail:?}");
-    assert_eq!(s.actors.attrs.status[1] & 4, 0, "the caster is outside the blast");
+    assert_eq!(
+        s.actors.attrs.status[1] & 4,
+        0,
+        "the caster is outside the blast"
+    );
     assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
 }
 
@@ -190,14 +194,19 @@ fn conjure_makes_a_creature() {
     let tail = show("Conjure", &e);
     let s = e.state();
     let made: Vec<usize> = (0xe0..0x100)
-        .filter(|&a| [0x173, 0x156, 0x169, 0x158, 0x166].contains(&(s.objects.type_frame[a] & 0x3ff)))
+        .filter(|&a| {
+            [0x173, 0x156, 0x169, 0x158, 0x166].contains(&(s.objects.type_frame[a] & 0x3ff))
+        })
         .collect();
     eprintln!("  conjured: {made:x?}");
     let &[a] = made.as_slice() else {
         panic!("one conjured creature: {made:?} {tail:?}");
     };
     let (x, y) = at(&s, a as Slot);
-    eprintln!("  at ({x}, {y}), status {:#x}, worktype {}", s.actors.attrs.status[a], s.actors.worktype[a]);
+    eprintln!(
+        "  at ({x}, {y}), status {:#x}, worktype {}",
+        s.actors.attrs.status[a], s.actors.worktype[a]
+    );
     assert!(x.abs_diff(307) <= 5 && y.abs_diff(352) <= 5);
     assert_eq!(s.actors.attrs.status[a] & 0x60, 0x40);
     assert_eq!(s.actors.worktype[a], 8);
@@ -223,7 +232,11 @@ fn telekinesis_pushes_an_object() {
     let tail = show("Telekinesis on an object at (309, 352), north", &e);
     let s = e.state();
     let o = s.ui.input.selection;
-    eprintln!("  object {o} type {:#x} now at {:?}", s.objects.kind(o), at(&s, o));
+    eprintln!(
+        "  object {o} type {:#x} now at {:?}",
+        s.objects.kind(o),
+        at(&s, o)
+    );
     assert_eq!(at(&s, o), (309, 351), "{tail:?}");
     assert!(tail.iter().any(|l| l.contains("Direction-")), "{tail:?}");
 }
@@ -236,9 +249,16 @@ fn gate_travel_to_a_moonstone() {
     let tail = show("Gate Travel to phase 1", &e);
     frame(&e, "gate-travel");
     let s = e.state();
-    let stone = (s.actors.tail_word(0x2a), s.actors.tail_word(0x2c), s.actors.tail_word(0x2e));
+    let stone = (
+        s.actors.tail_word(0x2a),
+        s.actors.tail_word(0x2c),
+        s.actors.tail_word(0x2e),
+    );
     let c = s.map.centre;
-    eprintln!("  moonstone 0 {stone:?}, centre now {c:?}, avatar {:?}", s.objects.location[1]);
+    eprintln!(
+        "  moonstone 0 {stone:?}, centre now {c:?}, avatar {:?}",
+        s.objects.location[1]
+    );
     assert_eq!((c.x, c.y, u16::from(c.z)), stone, "{tail:?}");
     assert!(tail.iter().any(|l| l.contains("To phase")), "{tail:?}");
 }
@@ -259,7 +279,10 @@ fn wizard_eye_moves_the_view() {
         let eyes: Vec<usize> = (0x100..crate::objects::OBJECT_SLOTS)
             .filter(|&o| s.objects.type_frame[o] == 0x34)
             .collect();
-        eprintln!("  out: centre {c:?}, reveal_all {}, eye objects {eyes:?}", s.map.reveal_all);
+        eprintln!(
+            "  out: centre {c:?}, reveal_all {}, eye objects {eyes:?}",
+            s.map.reveal_all
+        );
         assert_eq!((c.x, c.y), (310, 352), "three steps east");
         assert_eq!(s.map.reveal_all, 1);
         assert_eq!(eyes.len(), 1);
@@ -322,12 +345,16 @@ fn locate_prints_the_degrees() {
 fn armageddon_leaves_two() {
     let Some(files) = files() else { return };
     let before = State::new_game(&files).unwrap();
-    let alive_before = (0..0xffusize).filter(|&a| before.objects.type_frame[a] != 0).count();
+    let alive_before = (0..0xffusize)
+        .filter(|&a| before.objects.type_frame[a] != 0)
+        .count();
     let e = cast(&files, 0x70, Box::new(|_| {}), "");
     show("Armageddon", &e);
     frame(&e, "armageddon");
     let s = e.state();
-    let left: Vec<usize> = (0..0xff).filter(|&a| s.objects.type_frame[a] != 0).collect();
+    let left: Vec<usize> = (0..0xff)
+        .filter(|&a| s.objects.type_frame[a] != 0)
+        .collect();
     eprintln!("  actor slots in use: {alive_before} before, {left:?} after");
     assert_eq!(left, [1, 5]);
     assert_eq!(s.actors.party.size, 1);
@@ -355,10 +382,16 @@ fn energy_wind_hurts_along_its_path() {
     let hp: Vec<(usize, u8)> = (2..8).map(|a| (a, s.actors.attrs.hp[a])).collect();
     eprintln!("  hit points after: {hp:?}");
     for a in [5usize, 6, 7] {
-        assert!((70..100).contains(&s.actors.attrs.hp[a]), "actor {a} on the path");
+        assert!(
+            (70..100).contains(&s.actors.attrs.hp[a]),
+            "actor {a} on the path"
+        );
     }
     for a in [2usize, 3, 4] {
-        assert_eq!(s.actors.attrs.hp[a], before[a], "member {a} behind the caster");
+        assert_eq!(
+            s.actors.attrs.hp[a], before[a],
+            "member {a} behind the caster"
+        );
     }
     assert!(!tail.iter().any(|l| l.contains("No effect")), "{tail:?}");
 }
@@ -377,7 +410,11 @@ fn slime_turns_evil_actors() {
     let s = e.state();
     assert_eq!(s.objects.type_frame[7], 0x177);
     for a in [1usize, 2, 3, 4, 5, 6] {
-        assert_eq!(s.objects.type_frame[a] & 0x3ff, before[a] & 0x3ff, "actor {a}");
+        assert_eq!(
+            s.objects.type_frame[a] & 0x3ff,
+            before[a] & 0x3ff,
+            "actor {a}"
+        );
     }
 }
 

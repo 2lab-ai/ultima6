@@ -320,8 +320,9 @@ struct Stone {
 /// left and a place is free): it lands at x × 16 + 1..30 + 1..30 − 23 (two draws), the same
 /// for y, and starts 50 pixels up and left of there. Every fourth round the stones are drawn
 /// (sprite 7, tile 0x18e). Each round every falling stone moves a pixel down and right; one
-/// that lands draws random 400..500 (unused) and hurts each actor on its tile by 1 (0x1231be),
-/// showing tile 0x101 over the ones in the window. The view is refreshed at the end.
+/// that lands draws random 400..500 (unused) and hurts each actor on its tile by 1 (0x1231be,
+/// after clearing the combat word A4-0x69a4, which combat owns), showing tile 0x101 over the
+/// ones in the window. The view is refreshed at the end.
 pub fn hail(s: &mut State, io: &Io, x: i16, y: i16) -> i16 {
     let mut stones: [Option<Stone>; 6] = [None; 6];
     let mut exp: i16 = 0;

@@ -248,7 +248,7 @@ pub async fn armageddon(state: &RefCell<State>, io: &Io) {
 /// Flips frame bit 0 of `o` (the wing beat).
 fn flap(s: &mut State, o: Slot) {
     if let Some(w) = s.objects.type_frame.get_mut(o as usize) {
-        *w = (*w & 0x3ff) + ((((*w >> 10) ^ 1) << 10) & 0xfc00);
+        *w ^= 0x400;
     }
 }
 

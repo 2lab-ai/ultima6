@@ -17,7 +17,7 @@ use crate::state::State;
 
 /// An empty world with actor 1 at (100, 100) leading a party of one, actors 2..=8 placed
 /// (type 0 = absent) by `actors`, slots linked, the test text layer.
-fn world_with(actors: &[(usize, u16, u16, u16)]) -> State {
+pub(super) fn world_with(actors: &[(usize, u16, u16, u16)]) -> State {
     let mut s = State::empty();
     s.ui = crate::main_loop::test_support::test_ui();
     s.objects.type_frame[1] = 0x17a;
@@ -34,7 +34,7 @@ fn world_with(actors: &[(usize, u16, u16, u16)]) -> State {
     s
 }
 
-fn world() -> State {
+pub(super) fn world() -> State {
     world_with(&[])
 }
 
@@ -48,7 +48,7 @@ fn book(s: &mut State, spells: &[u8]) -> Slot {
 }
 
 /// Runs `game` to its end in an engine with no files, typing `keys` one per tick.
-fn run<F, Fut>(s: State, keys: &[Key], game: F) -> State
+pub(super) fn run<F, Fut>(s: State, keys: &[Key], game: F) -> State
 where
     F: FnOnce(Rc<RefCell<State>>, Rc<Io>) -> Fut,
     Fut: std::future::Future<Output = ()> + 'static,

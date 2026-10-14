@@ -132,20 +132,21 @@ pub async fn wizard_eye(state: &RefCell<State>, io: &Io, x: i16, y: i16, mode: i
     }
 }
 
+/// Latitude and longitude of 0x11a470 for the place `c` (south and east positive).
+pub(super) fn degrees(c: u6_formats::position::Position) -> (i16, i16) {
+    let (mut x, mut y) = (c.x as i16, c.y as i16);
+    if c.z != 0 {
+        x = x.wrapping_shl(2);
+        y = y.wrapping_shl(2);
+    }
+    (y.wrapping_sub(0x168) >> 3, x.wrapping_sub(0x130) >> 3)
+}
+
 /// Original: 0x11a470 (magic: Locate: the centre as degrees: latitude (y − 0x168) / 8 and
 /// longitude (x − 0x130) / 8 (arithmetic shifts; the coordinates × 4 below the surface),
 /// "\n%d{" S or N, ", %d{" E or W)
 pub async fn locate(state: &RefCell<State>, io: &Io) {
-    let (lat, long) = {
-        let s = state.borrow();
-        let c = s.map.centre;
-        let (mut x, mut y) = (c.x as i16, c.y as i16);
-        if c.z != 0 {
-            x = x.wrapping_shl(2);
-            y = y.wrapping_shl(2);
-        }
-        (y.wrapping_sub(0x168) >> 3, x.wrapping_sub(0x130) >> 3)
-    };
+    let (lat, long) = degrees(state.borrow().map.centre);
     print_at(state, io, FMT_LAT, &[Arg::Word(lat.wrapping_abs() as u16)]).await;
     print_at(state, io, if lat > 0 { MSG_SOUTH } else { MSG_NORTH }, &[]).await;
     print_at(
