@@ -298,7 +298,9 @@ pub fn blit_masked(
     let stored: Vec<usize> = (0..5).filter(|p| h.flags >> p & 1 != 0).collect();
     let data = item.add(10);
     let mask_at = stored.len() * plane_size;
-    let src = chip.bytes(data).to_vec();
+    // The item's stored planes and its mask, no further (the copy frees `chip` for the writes).
+    let all = chip.bytes(data);
+    let src = all[..(mask_at + plane_size).min(all.len())].to_vec();
     let bit = |plane_off: usize, r: usize, c: i32| -> bool {
         let i = plane_off + r * row_bytes + (c / 8) as usize;
         src.get(i).is_some_and(|b| b >> (7 - c % 8) & 1 != 0)

@@ -78,13 +78,13 @@ fn poke_str(e: &mut UExe, addr: u32, s: &[u8]) {
 
 fn transfer_state() -> IntroState {
     let mut e = exe();
-    poke_str(&mut e, 0x0010_99a2, b"Male");
-    poke_str(&mut e, 0x0010_99a8, b"Female");
-    for (i, c) in [&b"Mage"[..], b"Bard", b"Fighter"].iter().enumerate() {
+    poke_str(&mut e, 0x0010_99a2, b"Mm");
+    poke_str(&mut e, 0x0010_99a8, b"Ff");
+    for (i, c) in [&b"Cl0"[..], b"Cl1", b"Cl2"].iter().enumerate() {
         poke_str(&mut e, A4 + 0x94b + 9 * i as u32, c);
     }
-    poke_str(&mut e, A4 + 0x94b + 9 * 8, b"Avatar");
-    poke_str(&mut e, A4 + 0x993, b"Avatar");
+    poke_str(&mut e, A4 + 0x94b + 9 * 8, b"ClA");
+    poke_str(&mut e, A4 + 0x993, b"ClA");
     IntroState::new(e, Files::default())
 }
 
@@ -92,7 +92,7 @@ fn transfer_state() -> IntroState {
 fn an_ultima_iv_roster_maps_into_the_creation_globals() {
     let mut st = transfer_state();
     let mut r = vec![0u8; 0x200];
-    r[..5].copy_from_slice(b"Iolo\0");
+    r[..5].copy_from_slice(b"Abel\0");
     r[0x10] = 0x5c;
     r[0x11] = 1;
     r[0x13] = 50;
@@ -102,22 +102,22 @@ fn an_ultima_iv_roster_maps_into_the_creation_globals() {
     r[0x18..0x1a].copy_from_slice(&350u16.to_be_bytes());
     r[0x1a..0x1c].copy_from_slice(&400u16.to_be_bytes());
     r[0x1c..0x1e].copy_from_slice(&2500u16.to_be_bytes());
-    r[0x100..0x108].copy_from_slice(b"Shamino\0");
+    r[0x100..0x108].copy_from_slice(b"Quintus\0");
     st.transfer.save = r;
     let bad = transfer::read_ultima_iv(&mut st);
     assert!(!bad);
     let f = st.transfer.found.clone();
-    assert_eq!(f.name_str(), b"Iolo");
+    assert_eq!(f.name_str(), b"Abel");
     assert_eq!((f.str, f.dex, f.int, f.magic), (50, 25, 9, 7));
     assert_eq!((f.hp, f.max_hp, f.exp, f.level), (350, 400, 2500, 4));
     assert_eq!(
         (f.sex.as_slice(), f.class.as_slice()),
-        (&b"Male"[..], &b"Bard"[..])
+        (&b"Mm"[..], &b"Cl1"[..])
     );
     assert_eq!(f.avatar, 0);
     transfer::convert_ultima_iv(&mut st);
     let h = &st.hero;
-    assert_eq!(h.name_str(), b"Iolo");
+    assert_eq!(h.name_str(), b"Abel");
     assert_eq!((h.str, h.dex, h.int), (25, 18, 9), "0x109ba8 on each");
     // 2500 / 1000 = 2: two halvings to 0, level 3; experience / 10; 30 hit points a level.
     assert_eq!(
@@ -126,7 +126,7 @@ fn an_ultima_iv_roster_maps_into_the_creation_globals() {
     );
     assert_eq!(
         (h.class.as_slice(), h.status, h.transferred),
-        (&b"Avatar"[..], b'G', 1)
+        (&b"ClA"[..], b'G', 1)
     );
 }
 
@@ -140,17 +140,17 @@ fn an_ultima_iv_avatar_record_becomes_class_8_and_reads_as_out_of_range() {
     st.transfer.save = r;
     let bad = transfer::read_ultima_iv(&mut st);
     let f = &st.transfer.found;
-    assert_eq!((f.avatar, f.class.as_slice()), (1, &b"Avatar"[..]));
+    assert_eq!((f.avatar, f.class.as_slice()), (1, &b"ClA"[..]));
     assert_eq!(st.transfer.save[0x11], 8, "written back into the roster");
     assert!(bad, "class 8 > 7");
-    assert_eq!(f.sex, b"Female");
+    assert_eq!(f.sex, b"Ff");
 }
 
 #[test]
 fn an_ultima_v_save_maps_its_first_character_unchanged() {
     let mut st = transfer_state();
     let mut b = vec![0u8; 0x40];
-    b[2..7].copy_from_slice(b"Dupre");
+    b[2..7].copy_from_slice(b"Corin");
     b[2 + 9] = 0xc;
     b[2 + 0xc] = 31;
     b[2 + 0xd] = 12;
@@ -161,7 +161,7 @@ fn an_ultima_v_save_maps_its_first_character_unchanged() {
     let f = &st.transfer.found;
     assert_eq!(
         (f.name_str().as_slice(), f.sex.as_slice()),
-        (&b"Dupre"[..], &b"Female"[..])
+        (&b"Corin"[..], &b"Ff"[..])
     );
     transfer::convert_ultima_v(&mut st);
     let h = &st.hero;

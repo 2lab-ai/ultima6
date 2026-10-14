@@ -366,7 +366,8 @@ pub async fn wait_answer(st: &mut IntroState, io: &Io, pointer: bool) -> u16 {
     }
 }
 
-/// Original: u 0x1064c0 (gypsy: ask question `p` until A or B; returns the virtue chosen)
+/// Original: u 0x1064c0 (gypsy: ask question `p` until A or B; returns the virtue chosen,
+/// 0..7)
 ///
 /// With A4+0x182e set the A and B buttons (items A4+0x546 + 6 / + 7) are drawn into the
 /// passage box first.
@@ -386,7 +387,10 @@ pub async fn ask(st: &mut IntroState, io: &Io, p: i16) -> i16 {
         }
     };
     let table = if c == u16::from(b'A') { 0x3d4 } else { 0x40c };
-    st.exe.a4_i16(table + 2 * p as u32)
+    // The original indexes its per-virtue tables with the word as it is; a `u` whose tables
+    // hold one past 7 would read beyond them. The port keeps the low three bits (0..7 are
+    // unchanged).
+    st.exe.a4_i16(table + 2 * p as u32) & 7
 }
 
 /// Original: u 0x106554 (gypsy: virtue `v` won a question: add its stats, Humility's karma,

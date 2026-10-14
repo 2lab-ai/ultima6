@@ -15,7 +15,7 @@
 //!
 //! The port reads both from the user's files by those names (the bare name decides, so
 //! `rost.bin` and `saved.gam` added to the files are found); without
-//! them the original's "No character found!" path runs. The record found (0x109870 /
+//! them the original's path for no character found runs. The record found (0x109870 /
 //! 0x109ad6) is shown next to what it becomes in Ultima VI (0x109bea / 0x109c80) on a sheet
 //! where the name and sex can be changed (0x109e72); then the portrait is chosen (0x10a15e)
 //! and the character is written into the objlist (0x105700) like a created one.
@@ -25,9 +25,9 @@ use crate::engine::Io;
 use super::create::{FEMALE, MALE, choose, choose_portrait, read_line, toggle_sex};
 use super::exe::A4;
 use super::mem::{self, Ptr, Region, View};
+use super::music;
 use super::passages::{passage, show_passage};
 use super::screen::{poll_key, swap};
-use super::seams;
 use super::state::IntroState;
 use super::text::{self, Arg};
 
@@ -47,9 +47,10 @@ const LABELS: u32 = 0x0010_99e6;
 const LABELS_2: u32 = 0x0010_99f6;
 const FMT_NAMES: u32 = 0x0010_99b0;
 const FMT_NUMBERS: u32 = 0x0010_99ba;
-/// Original: A4+0x94b (the Ultima IV class names, 9 bytes each: Mage .. Shepherd, Avatar)
+/// Original: A4+0x94b (the Ultima IV class names, 9 bytes each: the eight classes, then the
+/// Avatar's)
 const CLASSES: u32 = A4 + 0x94b;
-/// Original: A4+0x993 ("Avatar")
+/// Original: A4+0x993 (the Avatar's class name)
 const AVATAR: u32 = A4 + 0x993;
 /// Original: A4+0x99c (the sheet's keys: N, S, C, A, Escape)
 const SHEET_KEYS: u32 = A4 + 0x99c;
@@ -70,7 +71,7 @@ pub struct Found {
     pub str: i16,
     pub dex: i16,
     pub int: i16,
-    /// Original: A4+0x2c2a ("Male" / "Female")
+    /// Original: A4+0x2c2a (the male or female word, 0x1099a2 / 0x1099a8)
     pub sex: Vec<u8>,
     /// Original: A4+0x2c32 (the class name)
     pub class: Vec<u8>,
@@ -334,13 +335,13 @@ pub async fn ask_source(st: &mut IntroState, io: &Io) -> u16 {
         }
     }
     if key == b'B' {
-        seams::play_song(st, 0);
+        music::play_song(st, 0);
         let name = st.exe.cstr(U5_SAVE);
         if let Some(save) = super::load::load_raw(&st.files, &name) {
             st.transfer.save = save;
             st.transfer.source = source::ULTIMA_V;
         }
-        seams::play_song(st, 4);
+        music::play_song(st, 4);
     }
     if st.transfer.source == source::NONE {
         st.video.pointer = 0;
@@ -537,7 +538,7 @@ pub async fn sheet(st: &mut IntroState, io: &Io) -> bool {
 /// a key. At the end the panel comes back (only when the menu is still marked drawn) and the
 /// music stops.
 pub async fn transfer(st: &mut IntroState, io: &Io) -> u16 {
-    seams::play_song(st, 4);
+    music::play_song(st, 4);
     st.views.draw.planes = st.video.other();
     let (d, s) = (st.views.draw, st.views.screen);
     mem::copy_view(&mut st.video.chip, &d, &s);
@@ -660,11 +661,11 @@ pub async fn transfer(st: &mut IntroState, io: &Io) -> u16 {
     p.x1 = 0x13f;
     p.y1 = 0x37;
     p.planes = Ptr::at(Region::Work);
-    seams::play_song(st, 0);
+    music::play_song(st, 0);
     result
 }
 
-/// 0x10aa56..0x10aaf0: "a game is already in progress" (passage 0x3e6) until a key, on a
+/// 0x10aa56..0x10aaf0: the passage that a game is under way (0x3e6) until a key, on a
 /// cleared screen; the menu is marked not drawn.
 async fn in_progress(st: &mut IntroState, io: &Io) {
     let clear = |st: &mut IntroState| {

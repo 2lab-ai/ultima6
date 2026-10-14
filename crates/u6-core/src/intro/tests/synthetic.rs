@@ -13,7 +13,8 @@ use crate::intro::exe::{A4, UExe};
 use crate::intro::mem::{self, Chip, ItemHeader, Ptr, Region, View};
 use crate::intro::state::IntroState;
 use crate::intro::text::{self, Arg, TextCtx};
-use crate::intro::{create, gypsy, handoff, input, opening, passages, screen, seams};
+use crate::intro::{create, gypsy, handoff, input, music, opening, passages, screen};
+use crate::sound::MedCall;
 use crate::state::State;
 
 /// Bytes of the synthetic image: up to the end of u's last hunk (0x11a010).
@@ -479,13 +480,14 @@ fn read_line_takes_accepted_keys_backspaces_and_cancels() {
 #[test]
 fn the_sex_answer_is_spelled_out_by_two_toggles() {
     let mut e = exe();
-    e.poke(0x0010_99a2, b"Male\0\0Female\0");
+    e.poke(0x0010_99a2, b"Mm\0");
+    e.poke(0x0010_99a8, b"Ff\0");
     let mut st = IntroState::new(e, Files::default());
     st.hero.sex = b"M".to_vec();
     create::toggle_sex(&mut st);
-    assert_eq!(st.hero.sex, b"Female");
+    assert_eq!(st.hero.sex, b"Ff");
     create::toggle_sex(&mut st);
-    assert_eq!(st.hero.sex, b"Male");
+    assert_eq!(st.hero.sex, b"Mm");
 }
 
 #[test]
@@ -527,12 +529,43 @@ fn a_digit_key_switches_the_tv_script() {
 #[test]
 fn songs_switch_once() {
     let mut st = state();
-    seams::play_song(&mut st, 2);
+    st.exe.song_names = (0..13).map(|n| format!("song{n}").into_bytes()).collect();
+    let load = |n: u16| MedCall::Load(format!("song{n}"));
+    music::play_song(&mut st, 2);
     assert_eq!(st.song, 2);
-    seams::play_song(&mut st, 2);
+    assert_eq!(
+        st.music.take(),
+        [load(2)],
+        "the opening's song is only loaded"
+    );
+    music::start_music(&mut st);
+    assert_eq!(st.music.take(), [MedCall::PlayBuffer]);
+    music::play_song(&mut st, 2);
     assert_eq!(st.song, 2);
-    seams::play_song(&mut st, 0);
+    assert_eq!(st.music.take(), [], "the same song: nothing");
+    music::play_song(&mut st, 1);
+    assert_eq!(
+        st.music.take(),
+        [MedCall::Stop, load(1), MedCall::PlayBuffer]
+    );
+    music::play_song(&mut st, 0);
     assert_eq!(st.song, 0);
+    assert_eq!(st.music.take(), [MedCall::Stop]);
+    music::play_song(&mut st, 0x20);
+    assert_eq!(
+        st.music.take(),
+        [MedCall::PlayBuffer],
+        "past the table: no file, the buffer plays"
+    );
+    assert_eq!(
+        crate::intro::journey_onward(&mut st),
+        crate::intro::IntroOutcome::Play { created: false }
+    );
+    assert_eq!(
+        st.music.take(),
+        [MedCall::Stop],
+        "RemPlayer stops the player"
+    );
 }
 
 #[test]
@@ -585,7 +618,7 @@ fn the_objlist_gets_the_character_and_refuses_a_game_in_progress() {
     let files = Files::new([("PLAYER/objlist".to_string(), list.clone())].into());
     let mut st = IntroState::new(exe(), files);
     st.hero.name[..5].copy_from_slice(b"Zhuge");
-    st.hero.sex = b"Female".to_vec();
+    st.hero.sex = b"Ff".to_vec();
     (st.hero.str, st.hero.dex, st.hero.int) = (17, 19, 21);
     (st.hero.exp, st.hero.hp, st.hero.level) = (0x172, 300, 3);
     st.hero.portrait_item = 4;
@@ -672,4 +705,113 @@ fn the_gradient_lists_recolour_rows_below_their_waits() {
     let (a, b, c, p) = got.unwrap();
     assert_eq!((a, b, c), (Some(32), Some(33), Some(7)));
     assert_eq!((p.r, p.g, p.b), (0x11, 0xdd, 0xff));
+}
+
+/// Runs `f` on a thread of its own: a hang fails the test after a few seconds instead of
+/// stalling the suite.
+#[allow(clippy::disallowed_methods)] // the thread only bounds the time the test may take
+fn returns<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(v) => v,
+        Err(RecvTimeoutError::Timeout) => panic!("no progress: still running after 10 s"),
+        Err(RecvTimeoutError::Disconnected) => panic!("the code under test panicked"),
+    }
+}
+
+#[test]
+fn a_tv_pick_among_one_frame_ends_its_step_when_it_comes_round_again() {
+    // Script 0: a loop of 2 over (0x84 1 7: one of the next 1 frames, repeat). The second pass
+    // picks at the position of the first one, which the original's rejection (0x103b94) never
+    // gets past.
+    let (frame, pos, repeat, rand) = returns(|| {
+        let mut e = exe();
+        e.poke(A4 + 0x1c6, &[0x80, 0x02, 0x84, 0x01, 0x07, 0x81]);
+        let mut st = IntroState::new(e, Files::default());
+        st.tv = opening::Tv::new(&st);
+        opening::set_script(&mut st, 0);
+        opening::tv_step(&mut st);
+        opening::tv_step(&mut st);
+        (st.tv.frame, st.tv.pos, st.tv.repeat, st.rand)
+    });
+    assert_eq!((frame, pos, repeat), (7, 2, 0));
+    let mut by_hand = state();
+    by_hand.rand();
+    by_hand.rand();
+    assert_eq!(rand, by_hand.rand, "one rand per pick");
+}
+
+/// The x of every ink pixel on row `y` of a 41-pixel line.
+fn ink_row(chip: &Chip, v: View, y: i32) -> Vec<i32> {
+    let ink = text::glyph_colour(15);
+    (0..41)
+        .filter(|&x| chip.pixel(v.planes, x, y) == ink)
+        .collect()
+}
+
+fn wrapped(text: &'static [u8]) -> Chip {
+    returns(move || {
+        let f = font();
+        let mut chip = Chip::new();
+        let v = View {
+            planes: Ptr::at(Region::Screen0),
+            x1: 40,
+            x0: 0,
+            y0: 0,
+            y1: 100,
+        };
+        let mut c = ctx(v);
+        text::wrap(&mut chip, &mut c, &f, text);
+        chip
+    })
+}
+
+#[test]
+fn wrap_gets_past_a_line_of_a_space_and_a_word_wider_than_the_box() {
+    // After the line feed the line is one space, then 48 px of word in a 41 px box: the line
+    // ends at the space and draws nothing, which the original (0x115bd6) repeats for ever.
+    let chip = wrapped(b"\n aaaaaaaaaaaa");
+    let v = View::screen(Ptr::at(Region::Screen0));
+    assert_eq!(
+        ink_row(&chip, v, 8),
+        (0..10).map(|i| 4 * i).collect::<Vec<_>>()
+    );
+    assert_eq!(ink_row(&chip, v, 16), [0, 4]);
+}
+
+#[test]
+fn justify_stops_at_the_end_of_its_line() {
+    // Two spaces, then a word wider than the box with no space after it: the line ends at the
+    // second space; justifying it must not run on past the line (0x115cb0 looks for a space).
+    let chip = wrapped(b"\n  aaaaaaaaaaaa");
+    let v = View::screen(Ptr::at(Region::Screen0));
+    assert_eq!(ink_row(&chip, v, 8), Vec::<i32>::new());
+    assert_eq!(
+        ink_row(&chip, v, 16),
+        (0..10).map(|i| 4 * i).collect::<Vec<_>>()
+    );
+    assert_eq!(ink_row(&chip, v, 24), [0, 4]);
+}
+
+#[test]
+fn an_answer_table_entry_past_the_eight_virtues_pours_a_virtue() {
+    // A foreign `u` whose A answer to question 0 reads 9.
+    let mut e = exe();
+    e.poke(A4 + 0x3d4, &9u16.to_be_bytes());
+    let mut st = IntroState::new(e, Files::default());
+    keyboard(&mut st);
+    st.font = Some(font());
+    st.gypsy.level = [3; 8];
+    let got = drive(&[Key::Char('a')], move |io| async move {
+        let w = gypsy::ask(&mut st, &io, 0).await;
+        gypsy::pour(&mut st, &io, w).await;
+        (w, st.gypsy.level)
+    });
+    let (w, level) = got.unwrap();
+    assert_eq!(w, 1, "the low three bits");
+    assert_eq!(level[1], 2, "virtue 1 poured");
 }

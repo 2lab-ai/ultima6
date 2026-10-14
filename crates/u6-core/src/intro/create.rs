@@ -19,7 +19,7 @@ const ASK_SEX: u32 = 0x0010_5820;
 const NAME_FMT: u32 = 0x0010_9a14;
 pub(super) const MALE: u32 = 0x0010_99a2;
 pub(super) const FEMALE: u32 = 0x0010_99a8;
-/// The class the creation gives ("Avatar" at 0x10586e).
+/// The class name the creation gives (the string at 0x10586e).
 const AVATAR: u32 = 0x0010_586e;
 /// Original: A4+0x9a2 (the keys of the portrait buttons: sex, portrait, accept, abort, Escape)
 const PORTRAIT_KEYS: u32 = super::exe::A4 + 0x9a2;
@@ -152,9 +152,11 @@ pub async fn read_line(st: &mut IntroState, io: &Io, max: i16) -> Option<Vec<u8>
     }
 }
 
-/// Original: u 0x109e44 (creation: switch the sex answer: 'F' → "Male", 'M' → "Female")
+/// Original: u 0x109e44 (creation: switch the sex answer: 'F' → the male word at 0x1099a2,
+/// 'M' → the female word at 0x1099a8)
 ///
-/// Called twice after the answer it spells the answer out ("M" → "Female" → "Male").
+/// Called twice after the answer it spells the answer out ('M' → the female word → the male
+/// word).
 pub fn toggle_sex(st: &mut IntroState) {
     let name = match st.hero.sex_char() {
         b'F' => MALE,
@@ -414,7 +416,7 @@ pub async fn create(st: &mut IntroState, io: &Io) -> u16 {
     mem::draw_item(&mut st.video.chip, &v, v.x0, v.y0, vellum, 0);
     st.hero.portrait = 0;
     st.video.pointer = 1;
-    super::seams::play_song(st, 4);
+    super::music::play_song(st, 4);
     st.menu_drawn = 0;
     loop {
         st.video.pointer = 0;
@@ -433,7 +435,7 @@ pub async fn create(st: &mut IntroState, io: &Io) -> u16 {
         mem::fill_view(&mut st.video.chip, &panel, 0);
         mem::copy_view(&mut st.video.chip, &saved, &panel);
         swap(st, io).await;
-        super::seams::play_song(st, 0);
+        super::music::play_song(st, 0);
         return 1;
     }
     st.video.pointer = 0;
@@ -628,7 +630,7 @@ async fn farewell(st: &mut IntroState, io: &Io) {
 }
 
 /// 0x106f08..0x106fba: the fixed experience, level and hit points, the objlist write, the
-/// "game in progress" message when the save already holds a character.
+/// passage that a game is under way when the save already holds a character.
 async fn finish(st: &mut IntroState, io: &Io) -> u16 {
     st.hero.exp = 0x172;
     st.hero.hp = 0x5a;
@@ -658,6 +660,6 @@ async fn finish(st: &mut IntroState, io: &Io) -> u16 {
             mem::fill_view(&mut st.video.chip, &d, 0);
         }
     }
-    super::seams::play_song(st, 0);
+    super::music::play_song(st, 0);
     result
 }

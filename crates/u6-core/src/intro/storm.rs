@@ -89,12 +89,6 @@ pub struct Storm {
     pub rain: Rain,
 }
 
-/// `rand() % n` of the 68000 `divs` (0 for n = 0, where the original would trap).
-fn rand_mod(st: &mut IntroState, n: i16) -> i16 {
-    let r = st.rand();
-    if n == 0 { 0 } else { r % n }
-}
-
 /// Original: u 0x103c38 (opening: a random x within the view, x0 ..= x1)
 pub fn random_x(st: &mut IntroState, v: &mem::View) -> i16 {
     st.random(v.x1 - v.x0 + 1) + v.x0
@@ -109,8 +103,8 @@ pub fn random_y(st: &mut IntroState, v: &mem::View) -> i16 {
 /// or 3 (the rand calls in the original's order).
 fn place_cloud(st: &mut IntroState, i: usize, back: i16) {
     let v = st.views.draw;
-    let x = rand_mod(st, v.x1 - v.x0) + v.x0 - back;
-    let y = rand_mod(st, 0x1e);
+    let x = st.random(v.x1 - v.x0) + v.x0 - back;
+    let y = st.random(0x1e);
     let item = (st.rand() & 1) + 2;
     let c = &mut st.storm.clouds;
     c.x[i] = x - 0x8c;
@@ -172,12 +166,12 @@ pub fn rain_init(st: &mut IntroState, max: i16, delay: i16) {
 /// picks which comes first).
 fn drop_x(st: &mut IntroState) -> i16 {
     let v = st.views.draw;
-    rand_mod(st, v.x1 - v.x0 + 0x15) + (v.x0 - 0xa)
+    st.random(v.x1 - v.x0 + 0x15) + (v.x0 - 0xa)
 }
 
 fn drop_y(st: &mut IntroState) -> i16 {
     let v = st.views.draw;
-    rand_mod(st, 9) + v.y0 - 4
+    st.random(9) + v.y0 - 4
 }
 
 /// Original: u 0x103ea4 (opening: the rain: maybe one more drop, then every drop moves (2, 10)
@@ -190,7 +184,7 @@ pub fn rain_step(st: &mut IntroState) {
     let v = st.views.draw;
     let file = st.storm.rain.file;
     let (count, max, chance) = (st.storm.rain.count, st.storm.rain.max, st.storm.rain.chance);
-    if count != max && rand_mod(st, chance) == 0 {
+    if count != max && st.random(chance) == 0 {
         let n = st.storm.rain.count.clamp(0, DROPS as i16 - 1) as usize;
         let item = ((st.rand() & 3) + 4) as u8;
         let x = drop_x(st);
@@ -301,7 +295,7 @@ pub(super) async fn storm(st: &mut IntroState, io: &Io) -> bool {
     while !done {
         put(st, file, 0, 0, 1);
         clouds_step(st);
-        if rand_mod(st, 6) == 0 && frame >= 0x3c && flash == 0 && shown != 0 {
+        if st.random(6) == 0 && frame >= 0x3c && flash == 0 && shown != 0 {
             flash = (st.rand() & 3) + 1;
             bolt = st.rand() & 7;
             let pan = st.views.pan;
