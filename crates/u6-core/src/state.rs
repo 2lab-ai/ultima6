@@ -93,6 +93,7 @@ pub struct State {
     pub gfx: GfxState,
     /// Globals of the main hunk (command loop, boot).
     pub main: MainState,
+    pub inventory: crate::inventory::InventoryState,
     /// Original: 0x151ee0 (RNG state longword)
     pub rng: Rng,
 }
@@ -207,6 +208,7 @@ impl State {
             .map_err(|e| table(e.to_string()))?;
         state.actors.game = actor_tables;
         state.converse.text = Some(converse_text);
+        state.inventory = crate::inventory::InventoryState::load(files)?;
         state.tables = Tables {
             basetile,
             tileflags,

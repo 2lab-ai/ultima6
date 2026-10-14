@@ -83,6 +83,7 @@ pub mod leaves;
 pub mod npc;
 pub mod party;
 pub mod path;
+pub mod rest;
 pub mod seams;
 pub mod tables;
 pub mod turn;

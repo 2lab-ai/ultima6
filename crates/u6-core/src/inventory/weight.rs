@@ -1,7 +1,7 @@
 //! Equipment slots and weights (hunk 8): what an object readies into, what it weighs, and the
 //! per-actor totals with the equipment cells 0x1112cc fills.
 
-use crate::objects::{ObjectId, Slot, first_child, next_child, stack_kind};
+use crate::objects::{Slot, first_child, next_child, stack_kind};
 use crate::state::State;
 
 /// Torch: its frame 1 (lit) weighs as one torch whatever its count.
@@ -169,9 +169,4 @@ pub fn stones(tenths: i16) -> i16 {
     } else {
         q + i16::from(r != 0)
     }
-}
-
-/// The type of `obj` as an id-based read (helper for the panel code).
-pub(crate) fn kind_of(s: &State, obj: Slot) -> u16 {
-    ObjectId::from_slot(obj).map_or(0, |id| s.objects.obj_type(id))
 }

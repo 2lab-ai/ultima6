@@ -50,9 +50,7 @@ pub use panel::{
     list_up, panel_contents, tile_with_number,
 };
 pub use portrait::{direction_to, face_pointer, show_actor};
-pub use ready::{
-    clear_readied, equipped_index, ready, release_effect, unready, unready_check,
-};
+pub use ready::{equipped_index, ready, release_effect, unready, unready_check};
 pub use tables::InventoryTables;
 pub use weight::{
     carried_weight, contents_weight, counted_type, object_weight, ready_slot, stones,
