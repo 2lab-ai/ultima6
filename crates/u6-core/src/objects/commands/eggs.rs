@@ -482,7 +482,7 @@ fn hatch_templates(
         let c = s.map.centre;
         let dx = ex.wrapping_sub(c.x) as i16;
         let dy = ey.wrapping_sub(c.y) as i16;
-        let (rx, ry) = s.objcmds.pointer_ref;
+        let (rx, ry) = s.inventory.pointer_origin;
         let dir = seams::direction_of(
             s,
             (dx << 4).wrapping_add(i16::from(rx)),

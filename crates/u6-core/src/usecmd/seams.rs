@@ -4,9 +4,9 @@
 //! 0x1230ce, 0x12395a, 0x1221da, 0x121d78, 0x122fbe; ui (hunk 18, with combat) = 0x1331b4;
 //! objects commands (hunk 15) = 0x12948a (0x129544 is called there directly); ui = 0x107cba;
 //! magic (hunk 11) = 0x1165a4, 0x11a470, 0x116d0e, 0x119200, 0x11a586, 0x119afc, 0x115b7c,
-//! 0x116526. Not ported: ui = 0x105016, 0x1118c6, 0x11121e, 0x111be0, 0x132338, the weight
-//! words; sound = 0x110878, 0x110912, 0x100fa4; graphics = 0x1623be; the ending = 0x133d1e,
-//! 0x13513a.
+//! 0x116526; inventory (hunk 8) = 0x105016, 0x1118c6, 0x11121e, 0x111be0 and the weight words.
+//! Not ported: ui = 0x132338; sound = 0x110878, 0x110912, 0x100fa4; graphics = 0x1623be; the
+//! ending = 0x133d1e, 0x13513a.
 
 use crate::engine::Io;
 use crate::objects::{NONE, Slot};
@@ -144,35 +144,39 @@ pub(crate) fn object_under(s: &mut State, obj: Slot) -> Slot {
 
 // ---- ui ---------------------------------------------------------------------------------------
 
-/// 0x105016(px, py): the direction 0..7 from the view centre to the pointer pixel, -1 on the
-/// centre. Fallback -1 (the leader keeps facing as it is).
-pub(crate) fn pointer_direction(_s: &State, _px: i16, _py: i16) -> i16 {
-    todo_stub!("0x105016 direction to the pointer (usecmd seam)", -1)
+/// 0x105016(px, py): the direction 0..7 from the pointer origin to the pointer pixel, -1 on the
+/// origin's cell: [`crate::inventory::direction_to`].
+pub(crate) fn pointer_direction(s: &State, px: i16, py: i16) -> i16 {
+    crate::inventory::direction_to(s.inventory.pointer_origin, px, py)
 }
 
-/// 0x1118c6: redraw the inventory panel now. Fallback: the panel is redrawn at the next 0x103f64
-/// (A4-0x7afe set).
+/// 0x1118c6: redraw the inventory list. Port: Use's callers are synchronous here and 0x1118c6
+/// prints its weight lines, so the panel is marked (A4-0x7afe) and the command loop's 0x103f64
+/// redraws it before the next key.
 pub(crate) fn redraw_inventory(s: &mut State) {
-    todo_stub!("0x1118c6 redraw the inventory panel (usecmd seam)", ());
     s.ui.panel.dirty = true;
 }
 
-/// 0x111be0: refill the inventory panel's object list. Fallback: redrawn at the next 0x103f64.
+/// 0x111be0: refill the inventory panel of the actor or container it shows: the count and the
+/// cells now ([`crate::inventory::recount`]), the drawing at the next panel redraw.
 pub(crate) fn inventory_contents(s: &mut State) {
-    todo_stub!("0x111be0 inventory panel contents (usecmd seam)", ());
+    let shown = s.ui.panel.container as Slot;
+    crate::inventory::recount(s, shown);
     s.ui.panel.dirty = true;
 }
 
-/// 0x11121e(actor): recompute the readied equipment words and carried weight (A4+0x1342 /
-/// +0x1344). Fallback: none.
-pub(crate) fn ready_changed(_s: &mut State, _actor: Slot) {
-    todo_stub!("0x11121e equipment and weight words (usecmd seam)", ())
+/// 0x11121e(actor): the readied and carried weight words (A4+0x1342 / +0x1344) and the list
+/// count: [`crate::inventory::weights`].
+pub(crate) fn ready_changed(s: &mut State, actor: Slot) {
+    crate::inventory::weights(s, actor);
 }
 
-/// A4+0x1342 + A4+0x1344 after 0x11121e(actor): the weight the actor carries (tenths). Fallback:
-/// 0 (anything can be carried).
-pub(crate) fn carried_weight(_s: &mut State, _actor: Slot) -> i16 {
-    todo_stub!("0x11121e carried weight (usecmd seam)", 0)
+/// A4+0x1342 + A4+0x1344 after 0x11121e(actor): the weight the actor carries (tenths).
+pub(crate) fn carried_weight(s: &mut State, actor: Slot) -> i16 {
+    crate::inventory::weights(s, actor);
+    s.inventory
+        .equip_weight
+        .wrapping_add(s.inventory.carried_weight)
 }
 
 /// 0x132338(actor): flash the actor in the view. Fallback: none.

@@ -1,7 +1,8 @@
 //! Calls from the spell code into routines other units own: combat (hunk 13: damage, missiles,
-//! experience, hostility, the wound line), a few graphics / ui helpers and object routines
-//! that are not ported yet. Each is the narrowest signature the spells need, with a stub
-//! contract and an explicit fallback; the dispatcher points them at the owners' ports.
+//! experience, hostility, the wound line; hunk 18: the flights), objects (hunk 15), Use's
+//! levers, inventory (hunk 8) and a few graphics helpers. Each is the narrowest signature the
+//! spells need; since the M2 integration the ported ones call their owner, the rest (graphics
+//! 0x1521f4, 0x132338, the hail sprites) keep a stub contract and an explicit fallback.
 
 use std::cell::RefCell;
 
@@ -126,10 +127,10 @@ pub(crate) fn chest(s: &mut State, obj: i16, lock: bool) {
     crate::objects::commands::chest(s, Slot::from(obj), false, lock, !lock);
 }
 
-/// [ui] 0x110f96 (the equipment slot object `obj` is readied in, -1 when it cannot be
-/// readied). Stub contract: pure lookup by type. Fallback 0 (a slot): Animate goes ahead.
-pub(crate) fn ready_slot(_s: &State, _obj: i16) -> i16 {
-    todo_stub!("0x110f96 ready slot of an object (magic seam)", 0)
+/// [inventory] 0x110f96 (the equipment slot object `obj` readies into, -1 when it cannot be
+/// readied): [`crate::inventory::ready_slot`].
+pub(crate) fn ready_slot(s: &State, obj: i16) -> i16 {
+    crate::inventory::ready_slot(s, obj)
 }
 
 /// Bytes of the user's `game` at `A4 + off` (zeros where the file or the address is missing):
@@ -183,13 +184,10 @@ pub(crate) fn blast(s: &mut State, _io: &Io, x: i16, y: i16, tile: u16) -> Vec<i
     hit
 }
 
-/// [ui] 0x111be0 (draw the inventory of `actor` in the panel). Stub contract: draws. Fallback:
-/// the panel is marked for the next redraw.
-pub(crate) fn inventory_of(s: &mut State, _actor: u16) {
-    todo_stub!(
-        "0x111be0 inventory panel contents (magic seam)",
-        s.ui.panel.dirty = true
-    )
+/// [inventory] 0x111be0 (the inventory of `actor` in the panel: recount, then 0x1118c6):
+/// [`crate::inventory::panel_contents`].
+pub(crate) async fn inventory_of(state: &RefCell<State>, io: &Io, actor: u16) {
+    crate::inventory::panel_contents(state, io, actor as Slot).await;
 }
 
 /// [objects] 0x12e3f6 (work the drawbridge crank `obj`): [`crate::usecmd::drawbridge`].
@@ -208,38 +206,30 @@ pub(crate) fn push_blocked(s: &mut State, obj: Slot, x: u16, y: u16, dir: u16) -
     crate::objects::commands::push_blocked(s, obj, x, y, usize::from(dir & 7))
 }
 
-/// [inventory] 0x1122dc (what taking `obj` from `actor` meets first: 1 = the amulet of
-/// submission stays, with its message; 2 = a lit torch burns out; else 0). Stub contract:
-/// prints its own lines. Fallback: 0.
-pub(crate) async fn unready_check(
-    _state: &RefCell<State>,
-    _io: &Io,
-    _obj: Slot,
-    _actor: Slot,
-) -> i16 {
-    todo_stub!("0x1122dc unready check (magic seam)", 0)
+/// [inventory] 0x1122dc (what taking `obj` meets first: 1 = the amulet of submission stays,
+/// with its message; 2 = a lit torch burns out; else 0): [`crate::inventory::unready_check`]
+/// (which reads only the object; the victim is not an argument of the original's check).
+pub(crate) async fn unready_check(state: &RefCell<State>, io: &Io, obj: Slot, _actor: Slot) -> i16 {
+    crate::inventory::unready_check(state, io, obj).await
 }
 
 /// [inventory] 0x11236c (a readied ring of invisibility or 0x51 `obj` leaves its effect on
-/// `actor`). Stub contract: 3 when one did, else 0. Fallback: 0.
-pub(crate) fn release_effect(_s: &mut State, _obj: Slot, _actor: Slot) -> i16 {
-    todo_stub!("0x11236c release a ring's effect (magic seam)", 0)
+/// `actor`; 3 when one did, else 0): [`crate::inventory::release_effect`].
+pub(crate) fn release_effect(s: &mut State, io: &Io, obj: Slot, actor: Slot) -> i16 {
+    crate::inventory::release_effect(s, io, obj, actor)
 }
 
-/// [inventory] 0x1110f6 (weight of `obj` in tenths of a stone, its count included). Stub
-/// contract: pure. Fallback: the weight byte of its type (0x13a540), one item.
+/// [inventory] 0x1110f6 (weight of `obj` in tenths of a stone, its count included):
+/// [`crate::inventory::object_weight`].
 pub(crate) fn object_weight(s: &State, obj: Slot) -> i16 {
-    let kind = usize::from(s.objects.kind(obj));
-    todo_stub!(
-        "0x1110f6 object weight (magic seam)",
-        i16::from(s.tables.tileflags.weight.get(kind).copied().unwrap_or(0))
-    )
+    crate::inventory::object_weight(s, obj)
 }
 
 /// [inventory] 0x11121e (the weights `actor` carries, left at A4+0x1342 / +0x1344: readied,
-/// inventory). Stub contract: both words. Fallback: (0, 0).
-pub(crate) fn carried_weights(_s: &mut State, _actor: u16) -> (i16, i16) {
-    todo_stub!("0x11121e carried weights (magic seam)", (0, 0))
+/// inventory): [`crate::inventory::weights`], then both words.
+pub(crate) fn carried_weights(s: &mut State, actor: u16) -> (i16, i16) {
+    crate::inventory::weights(s, actor as Slot);
+    (s.inventory.equip_weight, s.inventory.carried_weight)
 }
 
 /// [objects] 0x128b98 (buf, 0): the decimal number typed; -1 empty, -2 not a number:

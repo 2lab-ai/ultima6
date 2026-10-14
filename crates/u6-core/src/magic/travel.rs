@@ -124,11 +124,13 @@ pub async fn wizard_eye(state: &RefCell<State>, io: &Io, x: i16, y: i16, mode: i
         crate::gfx::view::refresh_view(&mut s, io);
     }
     say(state, io, FMT_NL_S_NL, Msg::Done).await;
-    let mut s = state.borrow_mut();
-    if s.ui.panel.mode == 0x92 {
+    let shown = {
+        let s = state.borrow();
         let m = usize::try_from(s.ui.panel.member).unwrap_or(0).min(15);
-        let a = u16::from(s.actors.party.members[m]);
-        seams::inventory_of(&mut s, a);
+        (s.ui.panel.mode == 0x92).then(|| u16::from(s.actors.party.members[m]))
+    };
+    if let Some(a) = shown {
+        seams::inventory_of(state, io, a).await;
     }
 }
 

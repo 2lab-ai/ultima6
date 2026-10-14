@@ -7,11 +7,11 @@
 //! sound), and since milestone 2 Attack (0x81 → combat 0x124caa), Begin / break off combat
 //! (`B` → combat 0x121c64 / 0x121d78), Look / Get / Drop / Move (0x84..0x87 → objects 0x1298b8,
 //! 0x12a7a4, 0x12a226, 0x12ae04), Use (0x88 → 0x1305e0), Save (Ctrl-S → 0x105716), Restore
-//! (Ctrl-R → 0x1052c8) and the coordinate dump's overview (0xd5 → 0x13410a). The cut handlers
-//! (Cast, Rest, the debug teleport) are stub points: the loop prints what the original prints
-//! before calling them (the command's name), then the port's own line [`NOT_IMPLEMENTED`],
-//! clears the command state (`end_command`) and returns [`NO_TURN`]: no movement points spent,
-//! no world turn, the prompt again.
+//! (Ctrl-R → 0x1052c8), the coordinate dump's overview (0xd5 → 0x13410a), Cast (0x82 → magic
+//! 0x11af10) and Rest (0x89 → 0x127b1a). The one cut handler left (the debug teleport) is a stub
+//! point: the loop prints the port's own line [`NOT_IMPLEMENTED`], clears the command state
+//! (`end_command`) and returns [`NO_TURN`]: no movement points spent, no world turn, the prompt
+//! again.
 
 use std::cell::RefCell;
 
@@ -36,8 +36,6 @@ const MSG_OFF: u32 = 0x0010_1f66;
 const MSG_BANG: u32 = 0x0010_1f6a;
 const FMT_COORDS: u32 = 0x0010_1f6e;
 const FMT_REPROMPT: u32 = 0x0010_1fc0;
-/// "Rest", the first line 0x127b1a prints (hunk 14).
-const MSG_REST: u32 = 0x0012_72cc;
 /// Data-hunk strings, as A4 - offset.
 const MSG_WHAT: u32 = 0x7694;
 const MSG_PARTY_MODE: u32 = 0x768d;
@@ -318,22 +316,24 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
         }
         CAST..=0x88 => return targeted(state, io, code).await,
         REST => {
+            // 0x104a98..0x104ad0: song 8 unless aboard, 0x127b1a (it prints "Rest" itself), the
+            // area song unless aboard, then no target pending, the panel cursor, cursor mode
+            // off; the turn is taken.
             let aboard = {
                 let s = state.borrow();
                 s.actors.party.leader_index == s.actors.party.size
             };
             if !aboard {
-                todo_stub!("0x110878 play song 0 (music off)", ());
+                todo_stub!("0x110878 play song 8 (the rest song)", ());
             }
-            print_at(state, io, MSG_REST, &[]).await;
-            // Contract: the Rest command (0x127b1a: hours, guard, heal). Fallback: no rest, no
-            // turn.
-            todo_stub!("0x127b1a Rest command", ());
+            crate::actors::rest::rest(state, io).await;
             if !aboard {
                 todo_stub!("0x110912 pick and play the area song", ());
             }
-            not_implemented(state, io, true).await;
-            return NO_TURN;
+            let mut s = state.borrow_mut();
+            s.ui.input.target_pending = 0;
+            crate::ui::cursor::panel_cursor_in(&mut s, io, 0);
+            s.ui.input.targeting = 0;
         }
         COMBAT => return combat_toggle(state, io).await,
         SAVE => {

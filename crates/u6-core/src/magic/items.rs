@@ -251,7 +251,7 @@ pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
         seams::missile(state, io, victim as u16, 8, &mut to, tile).await;
         {
             let mut s = state.borrow_mut();
-            seams::release_effect(&mut s, obj, victim);
+            seams::release_effect(&mut s, io, obj, victim);
             if crate::objects::stack_kind(&s.objects, kind) != 0 {
                 let qq = s.objects.qq_of(obj);
                 crate::objects::add_to_owner(&mut s, caster as Slot, kind, qq);
@@ -259,8 +259,8 @@ pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
             } else {
                 crate::objects::move_into(&mut s, obj, caster as Slot, 0x10);
             }
-            seams::inventory_of(&mut s, caster);
         }
+        seams::inventory_of(state, io, caster).await;
         say(state, io, FMT_NL_S_NL, Msg::Success).await;
         let mut s = state.borrow_mut();
         s.actors.karma = s.actors.karma.wrapping_sub(5);

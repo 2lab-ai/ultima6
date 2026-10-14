@@ -62,16 +62,20 @@ fn both_hands(s: &State) -> bool {
 /// Original: 0x111be0 (ui: the panel contents of `obj`: clear the list cells (and for an actor
 /// the equipment), recount with 0x1112cc, redraw with 0x1118c6)
 pub async fn panel_contents(state: &RefCell<State>, io: &Io, obj: Slot) {
-    {
-        let mut s = state.borrow_mut();
-        let inv = &mut s.inventory;
-        inv.cells[..EQUIP].fill(0);
-        if obj < 0x100 {
-            inv.cells[EQUIP..CELLS].fill(0);
-        }
-        weight::carried_weight(&mut s, obj);
-    }
+    recount(&mut state.borrow_mut(), obj);
     draw_list(state, io).await;
+}
+
+/// The part of 0x111be0 before the drawing: the list cells (and for an actor the equipment)
+/// cleared and refilled by 0x1112cc. Synchronous callers run this and leave the drawing
+/// (0x1118c6) to the next panel redraw.
+pub fn recount(s: &mut State, obj: Slot) {
+    let inv = &mut s.inventory;
+    inv.cells[..EQUIP].fill(0);
+    if obj < 0x100 {
+        inv.cells[EQUIP..CELLS].fill(0);
+    }
+    weight::carried_weight(s, obj);
 }
 
 /// Original: 0x1113fe (ui: the eight equipment cells, offset by (x0, y0))

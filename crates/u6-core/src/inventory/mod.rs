@@ -18,6 +18,8 @@
 //! - 0x1110c8 [ui] type weighed per ten ([`counted_type`])
 //! - 0x1110f6 [ui] weight of one object ([`object_weight`])
 //! - 0x1111ca [ui] weight of an object's contents ([`contents_weight`])
+//! - 0x11121e [ui] list count and weights of an actor or container ([`weights`]; ported at the
+//!   M2 integration from objects::commands' fallback, which Get, Drop and Use call)
 //! - 0x1112cc [ui] weights and equipment of an actor or container ([`carried_weight`])
 //! - 0x111882 [ui] tenths to whole stones ([`stones`])
 //! - 0x111be0 [ui] panel contents ([`panel_contents`])
@@ -47,13 +49,13 @@ mod weight;
 
 pub use panel::{
     digit, draw_equipment, draw_icon, draw_list, equipment_slot_at, list_down, list_slot_at,
-    list_up, panel_contents, tile_with_number,
+    list_up, panel_contents, recount, tile_with_number,
 };
 pub use portrait::{direction_to, face_pointer, show_actor};
 pub use ready::{equipped_index, ready, release_effect, unready, unready_check};
 pub use tables::InventoryTables;
 pub use weight::{
-    carried_weight, contents_weight, counted_type, object_weight, ready_slot, stones,
+    carried_weight, contents_weight, counted_type, object_weight, ready_slot, stones, weights,
 };
 
 use crate::files::Files;

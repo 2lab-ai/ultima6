@@ -24,7 +24,7 @@ const S_LIT: u32 = 0x0012_88e4;
 const MSG_BURNED_OUT: i32 = -0x756f;
 const TORCH: u16 = 0x5a;
 /// The two hand slots of the equipment table (A4+0x1364, A4+0x136a).
-const HANDS: [usize; 2] = [2, 5];
+const HANDS: [i16; 2] = [2, 5];
 
 fn panel_actor(s: &State) -> Slot {
     let m = usize::try_from(s.ui.panel.member).unwrap_or(0).min(15);
@@ -49,8 +49,7 @@ pub fn light_torch(s: &mut State, t: Slot) {
         queue(s, fmt, Vec::new());
         return;
     }
-    let e = s.objcmds.equipment;
-    if e[HANDS[0]] != 0 && e[HANDS[1]] != 0 {
+    if s.inventory.equip(HANDS[0]) != 0 && s.inventory.equip(HANDS[1]) != 0 {
         queue_at(s, S_NO_FREE_HAND, Vec::new());
     } else {
         let mut torch = t;
@@ -71,12 +70,12 @@ pub fn light_torch(s: &mut State, t: Slot) {
         }
         let place = s.objects.place(torch);
         if place == IN_INVENTORY || place == IN_CONTAINER {
-            let hand = if s.objcmds.equipment[HANDS[0]] == 0 {
+            let hand = if s.inventory.equip(HANDS[0]) == 0 {
                 HANDS[0]
             } else {
                 HANDS[1]
             };
-            s.objcmds.equipment[hand] = torch;
+            s.inventory.set_equip(hand, torch);
             let b = &mut s.objects.obj_status[torch as usize];
             *b = (*b & !WHERE_MASK) | READIED;
             let owner = panel_actor(s);

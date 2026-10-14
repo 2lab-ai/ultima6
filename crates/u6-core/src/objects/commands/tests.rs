@@ -234,7 +234,7 @@ fn typed_answers_parse_like_the_original() {
 #[test]
 fn the_view_direction_of_a_pixel() {
     let mut s = world();
-    s.objcmds.pointer_ref = (0x58, 0x58);
+    s.inventory.pointer_origin = (0x58, 0x58);
     let d = |s: &State, x: i16, y: i16| seams::direction_of(s, x, y);
     assert_eq!(d(&s, 0x58, 0x58), -1);
     assert_eq!(d(&s, 0x58, 0x48), 0);
@@ -494,7 +494,8 @@ fn weights_count_stacks_and_tenths() {
     s.tables.tileflags.weight[60] = 3;
     s.tables.tileflags.weight[0x80] = 25;
     s.objects.defs.stackable = vec![60];
-    with_data(&mut s, vec![(a4(-0x71ca), 0x80u16.to_be_bytes().to_vec())]);
+    // The 9 types weighed in tenths (A4-0x71ca) are inventory's table since the M2 merge.
+    s.inventory.tables.counted = vec![0x80];
     let gold = put(&mut s, 0x58, 1, 1);
     s.objects.qq[gold as usize] = 40;
     let arrows = put(&mut s, 60, 2, 1);
@@ -538,14 +539,14 @@ fn a_carried_torch_stack_gives_one_lit_torch_in_a_free_hand() {
     assert_ne!(lit, stack);
     assert_eq!(s.objects.place(lit), READIED);
     assert_eq!((frame(&s, lit), s.objects.qq_of(lit) & 0xff), (1, 200));
-    assert_eq!(s.objcmds.equipment, [0; 8]);
+    assert_eq!(s.inventory.cells[crate::inventory::EQUIP..], [0; 8]);
     // A single carried torch goes into the first free hand.
     s.objects.qq[stack as usize] = 1;
     light_torch(&mut s, stack);
-    assert_eq!(s.objcmds.equipment[2], stack);
+    assert_eq!(s.inventory.equip(2), stack);
     assert_eq!(s.objects.place(stack), READIED);
     // Both hands full: refused.
-    s.objcmds.equipment[5] = lit;
+    s.inventory.set_equip(5, lit);
     let other = create_in(&mut s, 0x5a, 0x10, 1, 1);
     light_torch(&mut s, other);
     assert_eq!(s.objects.status(other) & 0x80, 0, "no free hand");

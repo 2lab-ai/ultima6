@@ -2,10 +2,12 @@
 //!
 //! Ported owners are called directly (integration M2: combat 0x121e88, 0x121b08, 0x1231be,
 //! 0x12395a, 0x1230ce, 0x1331b4, 0x1240fa, 0x122f3e, 0x12267a, 0x123aec, 0x101eb0, 0x1228ba;
-//! actors 0x11b1c0). The others name their owner and the original, keep the `todo_stub!` hit
-//! count, and state their fallback; where an accepted scenario depends on the exact result the
-//! fallback is the original's behaviour written out here from its code.
+//! actors 0x11b1c0; magic 0x116526, 0x115da4, 0x116028, 0x116218 and the book globals;
+//! inventory 0x105016, 0x1110c8, 0x1110f6, 0x1111ca, 0x11121e, 0x111be0, 0x1118c6, 0x1122dc,
+//! 0x11236c, 0x111fe0). The others (sound) name their owner and the original, keep the
+//! `todo_stub!` hit count, and state their fallback.
 
+use crate::engine::Io;
 use crate::objects::Slot;
 use crate::state::State;
 use crate::todo_stub;
@@ -16,55 +18,10 @@ pub(crate) fn scatter(s: &mut State, m: Slot, out_of_view: bool) -> bool {
     crate::combat::mode::scatter(s, m, out_of_view)
 }
 
-/// Owner: ui (hunk 2). Original 0x105016 (direction 0..7 of the view pixel (x, y) from the
-/// reference pixel A4-0x7a26 / -0x7a25, -1 at it).
-///
-/// Contract: pure. Within 24 pixels on both axes the 16-pixel cell around the reference
-/// decides (8 neighbours, -1 inside); farther, the dominant axis decides unless both differ by
-/// less than a factor of 2, then the diagonal. Fallback = that computation (the egg warning
-/// names the direction).
+/// Inventory 0x105016 (direction 0..7 of the view pixel (x, y) from the pointer origin
+/// A4-0x7a26 / -0x7a25, -1 at it): [`crate::inventory::direction_to`].
 pub(crate) fn direction_of(s: &State, x: i16, y: i16) -> i16 {
-    todo_stub!("0x105016 direction of a view pixel", ());
-    let (rx, ry) = (
-        i16::from(s.objcmds.pointer_ref.0),
-        i16::from(s.objcmds.pointer_ref.1),
-    );
-    let (ax, ay) = ((x - rx).abs(), (y - ry).abs());
-    let far = x < rx - 0x18 || x >= rx + 0x18 || y < ry - 0x18 || y >= ry + 0x18;
-    if far {
-        let mut d = -1;
-        if ay < ax {
-            if ay == 0 || ax / ay > 1 {
-                d = if x < rx { 6 } else { 2 };
-            }
-        } else if ax == 0 || ay / ax > 1 {
-            d = if y < ry { 0 } else { 4 };
-        }
-        if d == -1 {
-            d = match (x < rx, y < ry) {
-                (true, true) => 7,
-                (true, false) => 5,
-                (false, true) => 1,
-                (false, false) => 3,
-            };
-        }
-        return d;
-    }
-    let col = if x < rx - 8 {
-        0
-    } else if x < rx + 8 {
-        1
-    } else {
-        2
-    };
-    let row = if y < ry - 8 {
-        0
-    } else if y < ry + 8 {
-        1
-    } else {
-        2
-    };
-    [[7, 6, 5], [0, -1, 4], [1, 2, 3]][col][row]
+    crate::inventory::direction_to(s.inventory.pointer_origin, x, y)
 }
 
 /// Combat 0x121b08 (distance from actor `a` to (x, y): the larger of |dx|, |dy|):
@@ -73,10 +30,10 @@ pub(crate) fn distance(s: &State, a: u16, x: u16, y: u16) -> i16 {
     crate::combat::leaves::distance(s, a as i16, x as i16, y as i16)
 }
 
-/// Owner: ui (hunk 8). Original 0x1118c6 (redraw the inventory panel after a carried object
-/// changed). Fallback: the panel is marked for the next 0x103f64 redraw instead.
+/// Inventory 0x1118c6 (redraw the inventory list after a carried object changed). Port: the
+/// callers here are synchronous and 0x1118c6 prints its weight lines, so the panel is marked
+/// (A4-0x7afe) and the command loop's 0x103f64 redraws it before the next key.
 pub(crate) fn redraw_inventory(s: &mut State) {
-    todo_stub!("0x1118c6 redraw the inventory panel", ());
     s.ui.panel.dirty = true;
 }
 
@@ -128,60 +85,15 @@ pub(crate) fn armour(s: &State, obj: Slot) -> i16 {
     crate::combat::leaves::armour_of(s, obj)
 }
 
-/// Original: A4-0x71ca (9 words: types whose weight 0x1110f6 reads in tenths)
-const TENTHS_TYPES: i32 = -0x71ca;
-
-/// Owner: ui / inventory (hunk 8). Original 0x1110f6 (weight of `obj` in tenths of a stone:
-/// the type's weight byte × its count (gold-like stacks their word, quantity stacks their
-/// quantity byte, a lit (frame 1) torch 1), the 9 types of A4-0x71ca a tenth of that; 0xff
-/// reads 10000). The quotient's remainder sits in the high word, which no caller here uses.
-///
-/// Contract: pure. Fallback = that computation (Get and Look weigh with it).
+/// Inventory 0x1110f6 (weight of `obj` in tenths of a stone, its count included):
+/// [`crate::inventory::object_weight`].
 pub(crate) fn weight(s: &State, obj: Slot) -> i16 {
-    todo_stub!("0x1110f6 weight of an object", ());
-    let o = &s.objects;
-    let kind = o.kind(obj);
-    let count = match crate::objects::stack_kind(o, kind) {
-        4 => o.qq_of(obj),
-        2 if kind == 0x5a && o.tf(obj) >> 10 == 1 => 1,
-        2 => o.qq_of(obj) & 0xff,
-        _ => 1,
-    };
-    let unit = u16::from(
-        s.tables
-            .tileflags
-            .weight
-            .get(usize::from(kind))
-            .copied()
-            .unwrap_or(0),
-    );
-    let tenths = (0..9).any(|i| s.objcmds.data.a4_word(TENTHS_TYPES + 2 * i) == kind);
-    let w = if tenths {
-        ((unit.wrapping_mul(count)) as i16) / 10
-    } else {
-        unit.wrapping_mul(count) as i16
-    };
-    if w == 0xff { 10000 } else { w }
+    crate::inventory::object_weight(s, obj)
 }
 
-/// Owner: ui / inventory (hunk 8). Original 0x1111ca (weight of everything directly after
-/// `obj` in the list while it is inside something: the contents of a container; stops at the
-/// first entry 0x10c928 rejects).
-///
-/// Contract: pure. Fallback = that computation with [`weight`].
+/// Inventory 0x1111ca (weight of everything inside `obj`): [`crate::inventory::contents_weight`].
 pub(crate) fn contents_weight(s: &State, obj: Slot) -> i16 {
-    todo_stub!("0x1111ca weight of a container's contents", ());
-    let o = &s.objects;
-    let mut total: i16 = 0;
-    let mut c = o.next_of(obj);
-    while c >= 0 && o.place(c) != 0 {
-        if !o.contained_in(c, obj) {
-            return total;
-        }
-        total = total.wrapping_add(weight(s, c));
-        c = o.next_of(c);
-    }
-    total
+    crate::inventory::contents_weight(s, obj)
 }
 
 /// Magic's A4+0x17f4 / +0x17f6 (the readied books) set to (`book`, 0): Look opens that book.
@@ -216,47 +128,23 @@ pub(crate) fn music_on() {
     todo_stub!("0x110912 pick and play the area song", ())
 }
 
-/// Owner: ui / inventory (hunk 8). Original 0x1110c8 (`kind` is one of the 9 types at
-/// A4-0x71ca, weighed in tenths). Contract: pure. Fallback = that lookup.
+/// Inventory 0x1110c8 (`kind` is one of the 9 types at A4-0x71ca, weighed in tenths):
+/// [`crate::inventory::counted_type`].
 pub(crate) fn weighed_in_tenths(s: &State, kind: u16) -> bool {
-    todo_stub!("0x1110c8 type weighed in tenths", ());
-    (0..9).any(|i| s.objcmds.data.a4_word(TENTHS_TYPES + 2 * i) == kind)
+    crate::inventory::counted_type(s, kind as i16)
 }
 
-/// Owner: ui / inventory (hunk 8). Original 0x11121e (sum what `actor` holds: A4+0x1342 the
-/// weight bytes of its readied objects (cleared first for an actor), A4+0x1344 the weight of
-/// the rest with their contents, A4+0x1340 how many of those).
-///
-/// Contract: writes the three globals ([`super::ObjCommands::inventory_weights`], the panel's
-/// count). Fallback = that computation (Get's "too heavy" test reads it).
+/// Inventory 0x11121e (what `actor` holds: A4+0x1342 readied weight, A4+0x1344 the rest,
+/// A4+0x1340 their count): [`crate::inventory::weights`].
 pub(crate) fn sum_inventory(s: &mut State, actor: Slot) {
-    todo_stub!("0x11121e sum an actor's inventory weights", ());
-    s.ui.panel.inventory_count = 0;
-    let mut readied = s.objcmds.inventory_weights.0;
-    let mut carried = 0i16;
-    if actor < 0x100 {
-        readied = 0;
-    }
-    let mut c = crate::objects::first_child(&mut s.objects, actor);
-    while c >= 0 {
-        if s.objects.place(c) == crate::objects::READIED {
-            let k = usize::from(s.objects.kind(c));
-            let w = s.tables.tileflags.weight.get(k).copied().unwrap_or(0);
-            readied = readied.wrapping_add(i16::from(w));
-        } else {
-            let w = weight(s, c).wrapping_add(contents_weight(s, c));
-            carried = carried.wrapping_add(w);
-            s.ui.panel.inventory_count = s.ui.panel.inventory_count.wrapping_add(1);
-        }
-        c = crate::objects::next_child(&mut s.objects);
-    }
-    s.objcmds.inventory_weights = (readied, carried);
+    crate::inventory::weights(s, actor);
 }
 
-/// Owner: ui / inventory (hunk 8). Original 0x111be0 (lay out `actor`'s inventory panel).
-/// Fallback: the panel is marked for the next redraw.
-pub(crate) fn inventory_contents(s: &mut State, _actor: Slot) {
-    todo_stub!("0x111be0 inventory panel contents", ());
+/// Inventory 0x111be0 (lay out `actor`'s inventory panel): its count and cells now
+/// ([`crate::inventory::recount`]); the drawing (0x1118c6) waits for the loop's panel redraw
+/// (see [`redraw_inventory`]).
+pub(crate) fn inventory_contents(s: &mut State, actor: Slot) {
+    crate::inventory::recount(s, actor);
     s.ui.panel.dirty = true;
 }
 
@@ -272,69 +160,23 @@ pub(crate) fn lose_karma(s: &mut State, n: u8) {
     crate::combat::leaves::lose_karma(s, i16::from(n));
 }
 
-/// Owner: ui / inventory (hunk 8). Original 0x1122dc (a readied object that cannot simply be
-/// put down: the amulet 0x4c prints its message (A4-0x6c3c) and gives 1; a lit torch goes out
-/// of the world with its message (A4-0x756f) and gives 2; else 0).
-///
-/// Contract: as described (the text is queued). Fallback = that behaviour.
-pub(crate) fn cannot_drop(s: &mut State, obj: Slot) -> i16 {
-    todo_stub!("0x1122dc readied object that cannot be dropped", ());
-    if s.objects.place(obj) != crate::objects::READIED {
-        return 0;
-    }
-    match (s.objects.kind(obj), s.objects.tf(obj) >> 10) {
-        (0x4c, _) => {
-            let msg = s.objcmds.data.pointed(super::GameData::a4(-0x6c3c));
-            super::text::queue_at(s, 0x0011_0c62, vec![crate::main_loop::PrintArg::Str(msg)]);
-            1
-        }
-        (0x5a, 1) => {
-            crate::objects::moves::remove(s, obj);
-            super::text::queue_at(s, 0x0011_0c68, Vec::new());
-            let fmt = super::text::a4_string(s, -0x756f);
-            super::text::queue(s, fmt, Vec::new());
-            2
-        }
-        _ => 0,
-    }
+/// Inventory 0x1122dc (a readied object that cannot simply be put down: the amulet 0x4c with
+/// its message gives 1, a lit torch burns out and gives 2, else 0):
+/// [`crate::inventory::unready_check`].
+pub(crate) async fn cannot_drop(state: &std::cell::RefCell<State>, io: &Io, obj: Slot) -> i16 {
+    crate::inventory::unready_check(state, io, obj).await
 }
 
-/// Owner: ui / inventory (hunk 8). Original 0x11236c (putting down readied `obj` held by
-/// `owner` ends its magic: a ring 0x102 makes the owner visible (status bit 1 cleared), 0x51
-/// clears A4-0x7b65; both redraw (0x132338) and give 3; else 0).
-///
-/// Contract: as described. Fallback = that behaviour, the redraw left to the next frame.
-pub(crate) fn end_worn_magic(s: &mut State, obj: Slot, owner: Slot) -> i16 {
-    todo_stub!("0x11236c readied object's magic ends", ());
-    if s.objects.place(obj) != crate::objects::READIED {
-        return 0;
-    }
-    match s.objects.kind(obj) {
-        0x102 => {
-            if let Some(b) = s.objects.obj_status.get_mut(owner as usize) {
-                *b &= 0xfd;
-            }
-            3
-        }
-        0x51 => {
-            if let Some(b) = s.actors.objlist_tail.get_mut(0x1f) {
-                *b = 0;
-            }
-            3
-        }
-        _ => 0,
-    }
+/// Inventory 0x11236c (putting down readied `obj` held by `owner` ends its magic; 3 when it
+/// did, else 0): [`crate::inventory::release_effect`].
+pub(crate) fn end_worn_magic(s: &mut State, io: &Io, obj: Slot, owner: Slot) -> i16 {
+    crate::inventory::release_effect(s, io, obj, owner)
 }
 
-/// Owner: ui / inventory (hunk 8). Original 0x111fe0 (the equipment slot of A4+0x1360 that
-/// holds `obj`, -1). Contract: pure. Fallback = that search.
+/// Inventory 0x111fe0 (the equipment slot of A4+0x1360 that holds `obj`, -1):
+/// [`crate::inventory::equipped_index`].
 pub(crate) fn equipment_slot(s: &State, obj: Slot) -> i16 {
-    todo_stub!("0x111fe0 equipment slot of an object", ());
-    s.objcmds
-        .equipment
-        .iter()
-        .position(|&o| o == obj)
-        .map_or(-1, |i| i as i16)
+    crate::inventory::equipped_index(s, obj)
 }
 
 /// Combat 0x1228ba (the path from `actor` to (x, y) within `range`, `tile` flying along it, ui

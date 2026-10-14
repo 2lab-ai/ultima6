@@ -8,8 +8,9 @@
 //! 0x10b18c, 0x10cda8, 0x10a4d6, 0x12f6ee and the per-object tables A4+0x250c / A4-0x1184;
 //! actors (WU-P5) = 0x121fca, 0x121ff8, 0x122048,
 //! 0x1220f0, 0x122144, 0x1279d4, 0x10368a, 0x11ba5e, 0x1240fa, 0x1221da and A4-0x7afb / -0x7afe;
-//! map (WU-P2) = the 11×11 window caches, 0x109e74; gfx (WU-P1) = 0x1533e0, 0x102ef0; magic and
-//! music stay stubs in milestone 1 (0x116526, 0x11785e, 0x110878, 0x110912).
+//! map (WU-P2) = the 11×11 window caches, 0x109e74; gfx (WU-P1) = 0x1533e0, 0x102ef0; since the
+//! M2 integration magic (0x116526, 0x11785e) and inventory (0x128ce8, 0x1110c8, 0x1112cc,
+//! 0x105016); music (0x110878, 0x110912) is sound's.
 
 use super::Cx;
 use super::party::ix;

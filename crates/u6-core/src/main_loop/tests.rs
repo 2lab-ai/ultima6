@@ -245,12 +245,12 @@ fn says_port_line(s: &State) -> bool {
     m.concat().contains(line) || m.join(" ").contains(line)
 }
 
-/// Every cut handler the loop still reaches (Rest, the debug teleport): the port's line, the
-/// command state cleared, no movement points spent, no turn, and no key read (a queued key
-/// stays queued).
+/// The cut handler the loop still reaches (the debug teleport): the port's line, the command
+/// state cleared, no movement points spent, no turn, and no key read (a queued key stays
+/// queued).
 #[test]
 fn cut_commands_say_so_clear_the_command_and_take_no_turn() {
-    let codes = [0x89, 0xd6];
+    let codes = [0xd6];
     for combat in [0, 1] {
         for &code in &codes {
             let mut st = State::empty();
@@ -289,6 +289,22 @@ fn cast_without_a_book_takes_the_turn() {
     assert_eq!(code, 0x82);
     assert_eq!((s.ui.input.target_pending, s.ui.input.targeting), (0, 0));
     assert_eq!(s.ui.input.target_command, crate::ui::globals::NO_COMMAND);
+    assert!(!says_port_line(&s));
+}
+
+/// Rest is 0x127b1a: in combat it refuses at once; the turn is taken and the cursor state
+/// cleared (0x104abe..0x104ac8), no port line.
+#[test]
+fn rest_in_combat_refuses_and_takes_the_turn() {
+    let mut st = State::empty();
+    st.actors.objlist_tail[commands::TAIL_SOLO] = 0xff;
+    st.actors.objlist_tail[TAIL_COMBAT] = 1;
+    st.actors.party.leader_index = 0;
+    st.ui.input.targeting = 1;
+    st.ui.input.target_pending = 1;
+    let (code, s) = dispatched(0x89, &[], st);
+    assert_eq!(code, 0x89);
+    assert_eq!((s.ui.input.target_pending, s.ui.input.targeting), (0, 0));
     assert!(!says_port_line(&s));
 }
 

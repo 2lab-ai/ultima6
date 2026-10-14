@@ -168,7 +168,7 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
         )
     };
     let o = sel;
-    if seams::cannot_drop(&mut state.borrow_mut(), o) != 0 {
+    if seams::cannot_drop(state, io, o).await != 0 {
         redraw_container(state, io).await;
         return;
     }
@@ -196,27 +196,25 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
         print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
         return;
     };
-    land(&mut state.borrow_mut(), o, owner, here, kind, sk, n);
+    land(&mut state.borrow_mut(), io, o, owner, here, kind, sk, n);
     redraw_container(state, io).await;
 }
 
 /// Drop from the unready on (synchronous; "It broke!" is queued).
-fn land(s: &mut State, o: Slot, owner: Slot, here: Slot, kind: u16, sk: u16, n: i16) {
-    seams::end_worn_magic(s, o, owner);
+#[allow(clippy::too_many_arguments)]
+fn land(s: &mut State, io: &Io, o: Slot, owner: Slot, here: Slot, kind: u16, sk: u16, n: i16) {
+    seams::end_worn_magic(s, io, o, owner);
     if s.objects.place(o) == READIED {
         let slot = seams::equipment_slot(s, o);
-        if let Some(e) = usize::try_from(slot)
-            .ok()
-            .and_then(|i| s.objcmds.equipment.get_mut(i))
-        {
-            *e = 0;
+        if (0..8).contains(&slot) {
+            s.inventory.set_equip(slot, 0);
         }
         if super::super::seams::ready_slot(s, o) == 8 {
             let m = usize::try_from(s.ui.panel.member).unwrap_or(0);
             if let Some(f) = s.ui.panel.member_flags.get_mut(m) {
                 *f = 0;
             }
-            s.objcmds.equipment[5] = 0;
+            s.inventory.set_equip(5, 0);
         }
     }
     seams::sum_inventory(s, owner);

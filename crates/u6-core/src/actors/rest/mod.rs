@@ -315,9 +315,8 @@ fn camp_frame(s: &mut State, io: &Io) {
 }
 
 /// 0x1221da (combat, hunk 13: an actor lies down asleep: off its horse (0x12f8fe), the
-/// sleeping body tile of its creature, status bits). Owner: combat. Contract: called by Rest for
-/// every member but the guard. Fallback: nothing (the members do not visibly lie down; Rest
-/// still gives them their types back from 0x139688 when they wake).
-fn lie_down(_s: &mut State, _actor: Slot) {
-    crate::todo_stub!("0x1221da lie down asleep (Rest)", ())
+/// sleeping body tile of its creature, status bits): [`crate::combat::damage::lie_down`], for
+/// every member but the guard.
+fn lie_down(s: &mut State, actor: Slot) {
+    crate::combat::damage::lie_down(s, actor);
 }

@@ -270,7 +270,7 @@ fn get_the_bread_then_drop_it_on_a_table() {
     aim(&mut s, bread);
     let weight = |s: &mut State| {
         super::seams::sum_inventory(s, 1);
-        s.objcmds.inventory_weights
+        (s.inventory.equip_weight, s.inventory.carried_weight)
     };
     let before = weight(&mut s);
     let mp = s.actors.movement_points[1];

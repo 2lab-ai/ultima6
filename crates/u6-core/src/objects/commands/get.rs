@@ -169,7 +169,10 @@ async fn take(state: &RefCell<State>, io: &Io, actor: Slot, sel: Slot) -> bool {
         print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
         return true;
     }
-    let (readied, carried) = state.borrow().objcmds.inventory_weights;
+    let (readied, carried) = {
+        let inv = &state.borrow().inventory;
+        (inv.equip_weight, inv.carried_weight)
+    };
     if wt.wrapping_add(carried).wrapping_add(readied) > strength.wrapping_mul(20) {
         print_at(state, io, S_TOO_HEAVY, &[]).await;
         return true;
@@ -193,11 +196,10 @@ fn store(s: &mut State, actor: Slot, sel: Slot, kind: u16) -> bool {
         }
     } else if kind == TORCH && frame == 1 {
         if i16::from(s.actors.party.leader_index) == s.ui.panel.member {
-            let e = s.objcmds.equipment;
-            if e[2] == 0 {
-                s.objcmds.equipment[2] = sel;
-            } else if e[5] == 0 {
-                s.objcmds.equipment[5] = sel;
+            if s.inventory.equip(2) == 0 {
+                s.inventory.set_equip(2, sel);
+            } else if s.inventory.equip(5) == 0 {
+                s.inventory.set_equip(5, sel);
             } else {
                 return false;
             }

@@ -90,7 +90,7 @@ pub fn push_blocked(s: &mut State, obj: Slot, x: u16, y: u16, dir: usize) -> boo
 /// centre cell (0x1051a6, the pointer sprite, has no port).
 fn reset_pointer(s: &mut State) {
     s.ui.input.target_pending = 0;
-    s.objcmds.pointer_ref = (CENTRE_PIXEL, CENTRE_PIXEL);
+    s.inventory.pointer_origin = (CENTRE_PIXEL, CENTRE_PIXEL);
 }
 
 /// Original: 0x12ae04 (objects: the Move command on the confirmed target) [partial]
@@ -146,7 +146,7 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
         s.ui.input.target_pending = 0;
         let px = (ox.wrapping_sub(cx) << 4).wrapping_add(u16::from(CENTRE_PIXEL)) as u8;
         let py = (oy.wrapping_sub(cy) << 4).wrapping_add(u16::from(CENTRE_PIXEL)) as u8;
-        s.objcmds.pointer_ref = (px, py);
+        s.inventory.pointer_origin = (px, py);
         (ox, oy)
     };
     print_at(state, io, S_TO, &[]).await;

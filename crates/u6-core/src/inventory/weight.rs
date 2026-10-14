@@ -167,6 +167,37 @@ pub fn carried_weight(s: &mut State, obj: Slot) {
     }
 }
 
+/// Original: 0x11121e (ui: list count and the two weights of an actor or container, without
+/// the equipment cells)
+///
+/// Clears the list count (A4+0x1340) and the carried weight (A4+0x1344), and for an actor the
+/// readied weight (A4+0x1342). Each object directly inside: readied ones (status bits 0x18 both
+/// set) add their type's weight byte; the others add their weight with contents (0x1110f6 +
+/// 0x1111ca) and count one list entry. (Its search of the first 8 roster slots for `obj` is
+/// unused: the result is overwritten before it is read.)
+pub fn weights(s: &mut State, obj: Slot) {
+    s.ui.panel.inventory_count = 0;
+    s.inventory.carried_weight = 0;
+    if obj < 0x100 {
+        s.inventory.equip_weight = 0;
+    }
+    let mut c = first_child(&mut s.objects, obj);
+    while c >= 0 {
+        if s.objects.place(c) == crate::objects::READIED {
+            let w = type_weight(s, s.objects.kind(c));
+            let inv = &mut s.inventory;
+            inv.equip_weight = inv.equip_weight.wrapping_add(w);
+        } else {
+            let w = object_weight(s, c).wrapping_add(contents_weight(s, c));
+            let inv = &mut s.inventory;
+            inv.carried_weight = inv.carried_weight.wrapping_add(w);
+            let p = &mut s.ui.panel;
+            p.inventory_count = p.inventory_count.wrapping_add(1);
+        }
+        c = next_child(&mut s.objects);
+    }
+}
+
 /// Original: 0x111882 (ui: tenths to the stones shown: rounded half up, but any non-zero weight
 /// below one stone shows as 1)
 pub fn stones(tenths: i16) -> i16 {

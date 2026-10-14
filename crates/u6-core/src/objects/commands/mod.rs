@@ -47,32 +47,12 @@ pub use world::{
 };
 
 use crate::files::Files;
-use crate::objects::Slot;
-
-/// Original: A4-0x7a26 / -0x7a25 initial bytes: the pixel position in the map view the
-/// direction lookup 0x105016 measures from (Move 0x12ae04 writes it; the image holds the
-/// centre cell's).
-const POINTER_REF: i32 = -0x7a26;
 
 /// State of the object commands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ObjCommands {
     /// The user's `game` as loaded (strings, tables); empty until [`ObjCommands::load`].
     pub data: GameData,
-    /// Original: A4-0x7a26 / -0x7a25 (bytes: pixel x, y in the map view that 0x105016 measures
-    /// directions from; written by Move 0x12ae04, read by the egg warning of 0x1319b2)
-    pub pointer_ref: (u8, u8),
-    // TODO(M2-inventory): `inventory_weights` and `equipment` are the inventory unit's globals
-    // (0x11121e, the inventory panel); kept here until it lands, then they move to its state and
-    // the 0x11121e / 0x1118c6 / 0x111be0 seams here and in usecmd/seams.rs call it.
-    /// Original: A4+0x1342 / +0x1344 (words: weight of the readied objects and of the rest an
-    /// actor holds, written by the inventory sum 0x11121e and read by Get 0x12a7a4; the
-    /// inventory module owns 0x11121e and keeps them once ported)
-    pub inventory_weights: (i16, i16),
-    /// Original: A4+0x1360 (8 words: what the member the inventory panel shows has readied in
-    /// each equipment slot; 2 and 5 are the hands Get puts a lit torch in, Drop clears the slot
-    /// it empties; the inventory panel (ui) writes them and keeps them once ported)
-    pub equipment: [Slot; 8],
 }
 
 impl ObjCommands {
@@ -84,11 +64,6 @@ impl ObjCommands {
 
     /// The state over an already mapped image.
     pub fn from_data(data: GameData) -> Self {
-        let pointer_ref = (data.a4_byte(POINTER_REF), data.a4_byte(POINTER_REF + 1));
-        Self {
-            data,
-            pointer_ref,
-            ..Self::default()
-        }
+        Self { data }
     }
 }
