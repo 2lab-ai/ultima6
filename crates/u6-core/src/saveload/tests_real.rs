@@ -57,7 +57,7 @@ enum Cmd {
     Restore,
 }
 
-/// The real game future (`main_loop::run`) with commands run at the start of a poll, inside
+/// The real game future (`main_loop::game_first`) with commands run at the start of a poll, inside
 /// the engine's poll (so code that reaches the current `Io` finds it), while the loop is
 /// suspended at its command-key wait.
 struct Inject {
@@ -89,14 +89,14 @@ struct Run {
 }
 
 impl Run {
-    /// Boots `files` as `Engine::new` does (seed 0) and runs to the first command prompt.
+    /// Boots `files` as `Engine::game_first` does (seed 0) and runs to the first command prompt.
     fn boot(files: Files) -> Run {
         let mut state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
         state.rng.seed(0);
         let cmds = Rc::new(RefCell::new(VecDeque::new()));
         let c = Rc::clone(&cmds);
         let e = Engine::with_game(state, files, move |st, io| Inject {
-            game: Box::pin(crate::main_loop::run(Rc::clone(&st), Rc::clone(&io))),
+            game: Box::pin(crate::main_loop::game_first(Rc::clone(&st), Rc::clone(&io))),
             cmds: c,
             state: st,
             io,

@@ -598,7 +598,13 @@ fn the_objlist_gets_the_character_and_refuses_a_game_in_progress() {
     assert_eq!(b[0x1d70], 0xaa, "past 0x1c73 the file is kept");
     let mut s = State::empty();
     s.actors.party.names = vec![String::new(); 16];
-    handoff::apply(&mut s, &b).unwrap();
+    handoff::apply(&mut s, &b);
+    assert_eq!(
+        s.saveload.objlist.as_deref(),
+        Some(&b[..]),
+        "the save's objlist"
+    );
+    assert_eq!(s.saveload.generation, 1, "a write the platform stores");
     assert_eq!(s.actors.party.names[0], "Zhuge");
     assert_eq!(
         (s.actors.attrs.strength[1], s.actors.attrs.exp[1]),

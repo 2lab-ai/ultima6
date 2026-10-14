@@ -558,7 +558,7 @@ Totals: functions 599: ported 471, partial 7, stubbed 12, replaced 81, planned 1
 | 0x13511a | boot | M | `main_loop/main_hunk.rs::boot_hook` | ported |
 | 0x135120 | boot | M | `main_loop/main_hunk.rs::anim_step` | ported |
 | 0x13513a | boot |  | `usecmd/seams.rs:240 in ending` | stubbed |
-| 0x1351d8 | boot | M | `main_loop.rs::run` | partial |
+| 0x1351d8 | boot | M | `main_loop.rs::game_main` | partial |
 | 0x14ee70 | os | M | Engine / Io (rule: spec 03 §4) | replaced |
 | 0x14ef06 | os | M | `engine.rs::with_seed` | replaced |
 | 0x14f0ac | os | M | `ui/input.rs::key_code` | replaced |

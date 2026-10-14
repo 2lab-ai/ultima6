@@ -1,10 +1,10 @@
 //! The hand-off from `u` to `game`: the new character goes into the save's objlist (0x105700),
 //! then u exits with code 1 (0x10361a) and the launcher runs `game`, which loads that objlist.
 //!
-//! The port's files are read-only, so the written objlist is the result of the intro; the
-//! caller loads it into the game state as 0x105350 would read it ([`apply`]).
-
-use u6_formats::objlist::ObjList;
+//! The port's files are read-only; a written `savegame/` file goes where `game`'s Save puts
+//! its own (the save path of [`crate::saveload`]: the platform stores it after the tick, and
+//! the next boot lays it over the user's files). [`apply`] writes the objlist there and loads
+//! it into the game state as `game`'s load state 0x105350 reads `savegame/objlist`.
 
 use crate::state::State;
 
@@ -24,8 +24,6 @@ const GENDER: usize = 0x1c71;
 const PORTRAIT: usize = 0x1c72;
 /// Bytes of the objlist the Amiga reads and writes.
 const LEN: usize = 0x1c73;
-/// objlist offset of the 0x82-byte block `game` keeps at A4-0x7b84 (State's objlist tail).
-const TAIL: usize = 0x1bf1;
 
 /// Why 0x105700 wrote nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,30 +65,15 @@ pub fn write_objlist(st: &IntroState) -> Result<Vec<u8>, WriteError> {
     Ok(b)
 }
 
-/// The character fields of a written objlist into the game state, where `game`'s load state
-/// 0x105350 puts those bytes: the Avatar's attributes (actor 1), the first party name, the karma
-/// and the 0x82-byte block with the sex and portrait bytes. Fails when the bytes do not parse.
-pub fn apply(s: &mut State, objlist: &[u8]) -> Result<(), u6_formats::FormatError> {
-    let mut full = objlist.to_vec();
-    if full.len() < u6_formats::objlist::OBJLIST_LEN {
-        full.resize(u6_formats::objlist::OBJLIST_LEN, 0);
-    }
-    let list = ObjList::parse(&full)?;
-    let a = &list.actors[1];
-    let attrs = &mut s.actors.attrs;
-    attrs.strength[1] = a.strength;
-    attrs.dexterity[1] = a.dexterity;
-    attrs.intelligence[1] = a.intelligence;
-    attrs.magic[1] = a.magic;
-    attrs.exp[1] = a.exp;
-    attrs.hp[1] = a.hp;
-    attrs.level[1] = a.level;
-    if let (Some(dst), Some(src)) = (s.actors.party.names.get_mut(0), list.party.names.first()) {
-        dst.clone_from(src);
-    }
-    s.actors.karma = list.player.karma;
-    s.actors.objlist_tail = full[TAIL..TAIL + 0x82].to_vec();
-    Ok(())
+/// The objlist `u` wrote, into the save path and the game state: it becomes the session's
+/// `savegame/objlist` ([`crate::saveload::SaveLoad::objlist`], a new save generation, so the
+/// platform stores it as it stores a Save), and the tables are read from it as 0x105350 reads
+/// them (the 25 tables, then the party's position), so `game` starts with that character.
+pub fn apply(s: &mut State, objlist: &[u8]) {
+    s.saveload.objlist = Some(objlist.to_vec());
+    s.saveload.generation += 1;
+    crate::saveload::objlist::decode(s, objlist);
+    s.place_party();
 }
 
 /// The character fields of a written objlist, for receipts: (name, sex byte, portrait byte,

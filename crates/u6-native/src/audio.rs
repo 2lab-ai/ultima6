@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(out, [0.1, 0.2, 0.0, 0.0], "silence once the ring is dry");
     }
 
-    /// The boot's music on the user's files: the game's calls replayed after each tick render
+    /// The boot's music on the user's files (`game` started at once): the game's calls replayed after each tick render
     /// sound (the opening fight starts the combat song). Skips without the archive.
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
@@ -225,7 +225,7 @@ mod tests {
             name: "ultima-vi.zip".into(),
             data: std::fs::read(zip).unwrap(),
         }]);
-        let mut engine = Engine::with_seed(u6_core::Files::new(r.files), 0).unwrap();
+        let mut engine = Engine::game_first(u6_core::Files::new(r.files), 0).unwrap();
         let mut audio = Audio::new(&engine, WAV_RATE).unwrap();
         let mut samples = Vec::new();
         for _ in 0..120 {

@@ -2,9 +2,15 @@
 //! 3x-scaled window or renders headless to PNG for pixel checks.
 //!
 //! ```text
-//! u6-native --zip ultima-vi.zip [--seed N] [--save-dir DIR]      open the window
-//! u6-native --zip ultima-vi.zip --headless-png out.png [--frames N] [--keys up,up,left,t] [--seed N] [--save-dir DIR] [--wav out.wav]
+//! u6-native --zip ultima-vi.zip [--seed N] [--save-dir DIR] [--game-first]      open the window
+//! u6-native --zip ultima-vi.zip --headless-png out.png [--frames N] [--keys up,up,left,t] [--seed N] [--save-dir DIR] [--wav out.wav] [--game-first]
 //! ```
+//!
+//! The engine runs the launcher's sequence: `u` (the opening, the main menu, character
+//! creation; Escape skips the opening, `j` journeys onward), then `game`. `--game-first` starts
+//! `game` at once, as the oracle's game-first disks do (for comparisons with it); a save without
+//! a character then plays the shipped disk state. When the sequence ends (Quit in the menu,
+//! the end of the game) the window closes and the runner says so.
 //!
 //! Sound: the window plays the game's music through the default output device (cpal); headless
 //! `--wav PATH` writes the audio of the run (each tick's length at 44.1 kHz, 16-bit stereo) and
@@ -54,6 +60,7 @@ struct Args {
     seed: Option<u16>,
     save_dir: Option<PathBuf>,
     wav: Option<PathBuf>,
+    game_first: bool,
 }
 
 /// One `--keys` token.
@@ -136,6 +143,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--save-dir" => parsed.save_dir = Some(value("a directory")?.into()),
             "--wav" => parsed.wav = Some(value("a path")?.into()),
+            "--game-first" => parsed.game_first = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -163,8 +171,8 @@ impl Saves {
 }
 
 /// Reads the zip, runs the intake (report lines to stderr), lays the stored save over the
-/// files and boots the engine.
-fn boot(zip: &Path, seed: u16, saves: Option<&Saves>) -> Result<Engine, String> {
+/// files and boots the engine (the launcher's sequence, or `game` at once with `game_first`).
+fn boot(zip: &Path, seed: u16, saves: Option<&Saves>, game_first: bool) -> Result<Engine, String> {
     let data = std::fs::read(zip).map_err(|e| format!("{}: {e}", zip.display()))?;
     let name = zip
         .file_name()
@@ -178,8 +186,16 @@ fn boot(zip: &Path, seed: u16, saves: Option<&Saves>) -> Result<Engine, String> 
         let n = attach(&mut files, &saves.store).map_err(|e| e.to_string())?;
         eprintln!("save: {n} stored files over the new-game files");
     }
-    Engine::with_seed(files, seed).map_err(|e| e.to_string())
+    let engine = if game_first {
+        Engine::game_first(files, seed)
+    } else {
+        Engine::with_seed(files, seed)
+    };
+    engine.map_err(|e| e.to_string())
 }
+
+/// What the runner prints when the launcher's sequence ended.
+const ENDED: &str = "u6-native: the game ended";
 
 fn print_log(engine: &mut Engine) {
     for line in engine.take_log() {
@@ -203,7 +219,8 @@ fn simulate(
     let mut next = tokens.iter();
     let mut pending: Option<String> = None;
     let mut idle = 0u32;
-    for _ in 0..frames {
+    let mut ended = false;
+    for tick in 0..frames {
         let busy = engine.io().pending_events() > 0;
         idle = if busy { 0 } else { idle + 1 };
         let mut input = Vec::new();
@@ -239,6 +256,10 @@ fn simulate(
         if let Some((audio, samples)) = sound.as_mut() {
             audio.sync(engine);
             audio.render_ms(HEADLESS_TICK_MS, samples);
+        }
+        if engine.finished() && !ended {
+            ended = true;
+            eprintln!("{ENDED} (tick {})", tick + 1);
         }
     }
     let mut rgba = Vec::new();
@@ -349,6 +370,10 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
         window
             .update_with_buffer(&screen, w, h)
             .map_err(|e| e.to_string())?;
+        if engine.finished() {
+            eprintln!("{ENDED}");
+            break;
+        }
     }
     Ok(())
 }
@@ -371,7 +396,7 @@ fn run(args: Args) -> Result<(), String> {
     });
     match &args.headless_png {
         Some(path) => {
-            let mut engine = boot(zip, args.seed.unwrap_or(0), saves.as_ref())?;
+            let mut engine = boot(zip, args.seed.unwrap_or(0), saves.as_ref(), args.game_first)?;
             let mut audio = match &args.wav {
                 Some(_) => Some(Audio::new(&engine, WAV_RATE)?),
                 None => None,
@@ -418,7 +443,8 @@ fn run(args: Args) -> Result<(), String> {
             Ok(())
         }
         None => {
-            let engine = boot(zip, args.seed.unwrap_or_else(clock_seed), saves.as_ref())?;
+            let seed = args.seed.unwrap_or_else(clock_seed);
+            let engine = boot(zip, seed, saves.as_ref(), args.game_first)?;
             run_window(engine, saves)
         }
     }
@@ -498,6 +524,8 @@ mod tests {
         );
         assert!(args(&["--seed", "70000"]).is_err());
         assert_eq!(args(&[]).unwrap().frames, 60);
+        assert!(!args(&[]).unwrap().game_first, "the launcher by default");
+        assert!(args(&["--game-first"]).unwrap().game_first);
     }
 
     #[test]

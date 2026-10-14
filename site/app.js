@@ -1,7 +1,9 @@
 // Static shell: loads the wasm engine, feeds it dropped files, keys and time, and paints its
 // RGBA frames. No game bytes are fetched or uploaded. Dropping files runs the intake
 // (zip/HFE/ADF -> game files) and boots the engine; the game files are kept in this browser's
-// IndexedDB so a reload starts the game again without a new drop.
+// IndexedDB so a reload starts the game again without a new drop. The engine runs the
+// original launcher's sequence: `u` (the opening, the main menu, character creation), then
+// `game`; when it ends (Quit in the menu) the page says so and offers Restart.
 //
 // Everything that touches files, the engine or storage (engine load, the restore at page load,
 // each import, each forget) is one operation on a single queue: an operation starts only after
@@ -9,9 +11,9 @@
 // works on its own Game and puts it on screen only once it started; the one it replaces is
 // freed then. Keys reach the engine only while the canvas has focus and a game runs.
 //
-// Saves: a Save in the game (Ctrl-S, Y) is stored after the tick it committed in, as one
-// operation on the same queue (one IndexedDB transaction); every start lays the stored save
-// over the game files, so a reload resumes it. Sound: the first click or key on the canvas
+// Saves: a Save in the game (Ctrl-S, Y), like the character `u` creates, is stored after the
+// tick it committed in, as one operation on the same queue (one IndexedDB transaction); every
+// start lays the stored save over the game files, so a reload resumes it. Sound: the first click or key on the canvas
 // (or the Mute button) starts an AudioContext; after each tick the page renders the game's
 // audio in wasm a little ahead and posts it to the AudioWorklet (site/audio-worklet.js).
 import init, { Game, max_input_bytes } from './pkg/u6_web.js';
@@ -30,7 +32,8 @@ const statusLine = document.getElementById('status');
 
 const MAX_STEP_MS = 100; // a backgrounded tab must not jump the game ahead
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
-const HOW_TO_PLAY = 'Click the game screen or Tab to it, then: arrow keys walk, T talks, ' +
+const HOW_TO_PLAY = 'Click the game screen or Tab to it, then: Escape skips the opening; in ' +
+  'the menu C creates a character, J journeys onward; in the game arrow keys walk, T talks, ' +
   'space passes.';
 
 let wasm = null; // the wasm exports, once loaded
@@ -41,7 +44,8 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // does, data-saved = the last save generation stored, data-audio / data-audio-chunks = the
 // AudioContext state and the chunks the worklet received; on the canvas data-files = game
 // files of the running game, data-saves = save files it booted with, data-leader = x,y,z,
-// data-prompt = 1 while the game waits for a command key.
+// data-prompt = 1 while the game waits for a command key, data-program = u / game / ended,
+// data-name = the party leader's name, data-keys = keys not yet taken by the game.
 function reflect(state) {
   if (state) document.body.dataset.state = state;
   const live = game && !crashed;
@@ -229,11 +233,27 @@ function frame(now) {
     checkSave();
     canvas.dataset.leader = game.leader_position().join(',');
     canvas.dataset.prompt = game.at_prompt() ? '1' : '0';
+    canvas.dataset.program = game.program();
+    canvas.dataset.name = game.leader_name();
+    canvas.dataset.keys = String(game.keys_pending());
+    if (game.finished()) {
+      ended();
+      return;
+    }
   } catch (err) {
     stopOnTrap(err);
     return;
   }
   requestAnimationFrame(frame);
+}
+
+// The launcher's sequence ended (Quit in the menu): nothing runs any more; Restart starts it
+// again from the kept files.
+function ended() {
+  looping = false;
+  setStatus('The game has ended. Restart starts it again from the files kept in this browser.');
+  restart.hidden = false;
+  reflect('ended');
 }
 
 function startLoop() {
@@ -276,6 +296,7 @@ async function boot(next, origin) {
   attachAudio(next);
   canvas.width = next.width();
   canvas.height = next.height();
+  restart.hidden = true;
   reflect('running');
   startLoop();
   return report;

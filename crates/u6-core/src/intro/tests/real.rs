@@ -13,9 +13,9 @@ use crate::files::Files;
 use crate::intro::{IntroOutcome, handoff, run};
 use crate::state::State;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
+pub(super) const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
-fn files() -> Option<Files> {
+pub(super) fn files() -> Option<Files> {
     if !Path::new(ZIP).exists() {
         eprintln!("skipped: {ZIP} not present");
         return None;
@@ -29,13 +29,23 @@ fn files() -> Option<Files> {
 }
 
 /// The intro in an engine, with the outcome and the game state it changes.
-struct Run {
-    e: Engine,
+pub(super) struct Run {
+    pub(super) e: Engine,
     outcome: Rc<RefCell<Option<IntroOutcome>>>,
     state: Rc<RefCell<Option<Rc<RefCell<State>>>>>,
 }
 
 impl Run {
+    /// The engine as the platforms boot it (`Engine::with_seed`: the launcher's sequence, `u`
+    /// then `game`); no outcome is recorded.
+    pub(super) fn launcher(files: Files, seed: u16) -> Self {
+        Self {
+            e: Engine::with_seed(files, seed).unwrap_or_else(|e| panic!("{e}")),
+            outcome: Rc::new(RefCell::new(None)),
+            state: Rc::new(RefCell::new(None)),
+        }
+    }
+
     fn new(files: Files) -> Self {
         let state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
         let outcome = Rc::new(RefCell::new(None));
@@ -53,14 +63,14 @@ impl Run {
         }
     }
 
-    fn tick(&mut self, n: u32) {
+    pub(super) fn tick(&mut self, n: u32) {
         for _ in 0..n {
             self.e.tick(&[], 20);
         }
     }
 
     /// Sends `keys`, ticks until the engine took them, then `settle` ticks more.
-    fn keys(&mut self, keys: &[Key], settle: u32) {
+    pub(super) fn keys(&mut self, keys: &[Key], settle: u32) {
         let ev: Vec<InputEvent> = keys.iter().map(|&k| InputEvent::Key(k)).collect();
         self.e.tick(&ev, 20);
         let mut guard = 0;
@@ -79,7 +89,7 @@ impl Run {
     }
 
     /// The published frame: indices and the palette (32 colours, then the copper gradient's).
-    fn frame(&self) -> (Vec<u8>, Vec<(u8, u8, u8)>) {
+    pub(super) fn frame(&self) -> (Vec<u8>, Vec<(u8, u8, u8)>) {
         let f = self.e.frame();
         let pal = f.palette.iter().map(|c| (c.r, c.g, c.b)).collect();
         (f.pixels().to_vec(), pal)
@@ -133,6 +143,12 @@ fn script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
         r.keys(&[Key::Space], 60);
     }
     shot("menu-again", r);
+    create_from_menu(r, shot);
+}
+
+/// The creation from the menu: answers A, B alternately; name "Zhuge", male, second portrait;
+/// Escape ends the introduction story that follows.
+pub(super) fn create_from_menu(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
     r.keys(&[Key::Char('c')], 120);
     r.text("Zhuge", 10);
     r.keys(&[Key::Enter], 60);
@@ -187,7 +203,7 @@ fn a_scripted_creation_writes_the_character_into_the_objlist() {
 }
 
 /// PNG (RGB, stored deflate) of a frame.
-fn png(path: &Path, idx: &[u8], pal: &[(u8, u8, u8)]) {
+pub(super) fn png(path: &Path, idx: &[u8], pal: &[(u8, u8, u8)]) {
     fn crc(data: &[u8]) -> u32 {
         let mut c = 0xffff_ffffu32;
         for &b in data {

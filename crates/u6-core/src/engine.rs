@@ -285,7 +285,8 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Boots the game from `files` with RNG seed word 0 (the image's own initial state).
+    /// Boots the game from `files` with RNG seed word 0 (the image's own initial state); the
+    /// launcher's sequence, as [`Engine::with_seed`].
     pub fn new(files: Files) -> Result<Engine, BootError> {
         Self::with_seed(files, 0)
     }
@@ -294,11 +295,27 @@ impl Engine {
     ///
     /// Boots with an explicit RNG seed. The original seeds from the low word of `time()`
     /// (see [`crate::rng`]); platforms pass a clock value for variety or a constant for replays.
+    /// The task is the launcher's sequence ([`main_loop::run`]): `u` first, then `game`.
     pub fn with_seed(files: Files, seed: u16) -> Result<Engine, BootError> {
+        Self::boot(files, seed, main_loop::run)
+    }
+
+    /// As [`Engine::with_seed`], but the task starts `game` at once, without the launcher and
+    /// `u` ([`main_loop::game_first`]): the platforms' development entry (the oracle's
+    /// game-first disks start the same way) and tests of the game.
+    pub fn game_first(files: Files, seed: u16) -> Result<Engine, BootError> {
+        Self::boot(files, seed, main_loop::game_first)
+    }
+
+    fn boot<G, F>(files: Files, seed: u16, game: G) -> Result<Engine, BootError>
+    where
+        G: FnOnce(Rc<RefCell<State>>, Rc<Io>) -> F,
+        F: Future<Output = ()> + 'static,
+    {
         let stubs = Rc::new(StubLog::default());
         let mut state = stub::scoped(&stubs, || State::new_game(&files))?;
         state.rng.seed(seed);
-        Ok(Self::build(state, files, stubs, main_loop::run))
+        Ok(Self::build(state, files, stubs, game))
     }
 
     /// An engine around any game future (tests, tools). `game` receives the shared state and

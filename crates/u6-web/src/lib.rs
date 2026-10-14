@@ -10,7 +10,13 @@
 //! posts to its AudioWorklet. Saves: the page lays the stored `savegame/*` files over the
 //! new-game files before the boot ([`Game::load_save`], `saveload::attach`), and after a tick
 //! whose Save committed ([`Game::save_generation`] moved) it stores what [`Game::save_collect`]
-//! lists, then reports the generation committed ([`Game::save_committed`]).
+//! lists, then reports the generation committed ([`Game::save_committed`]). The character `u`
+//! makes is such a write too (its `savegame/objlist`).
+//!
+//! A start runs the launcher's sequence (`u`: the opening and the menu, then `game`);
+//! [`Game::start_game_first`] starts `game` at once (development and tests). When the sequence
+//! ends (Quit in the menu, the end of the game) [`Game::finished`] turns true and the page says
+//! so.
 //!
 //! Limits (a clear message instead of an exhausted tab): [`MAX_INPUT_BYTES`] for the dropped
 //! files together, [`MAX_UNZIPPED_BYTES`] for what the zip entries the intake inflates declare,
@@ -171,7 +177,52 @@ impl Game {
     /// original seeds from the clock; the page passes the low word of the time). Returns the
     /// intake report, one line per entry; fails with the report plus the boot error.
     pub fn start(&mut self, seed: u16) -> Result<String, JsError> {
-        self.boot(seed).map_err(|report| JsError::new(&report))
+        self.boot(seed, false)
+            .map_err(|report| JsError::new(&report))
+    }
+
+    /// As [`Game::start`], but `game` starts at once, without the launcher and `u` (the
+    /// development entry, as `u6-native --game-first`).
+    pub fn start_game_first(&mut self, seed: u16) -> Result<String, JsError> {
+        self.boot(seed, true)
+            .map_err(|report| JsError::new(&report))
+    }
+
+    /// True once the launcher's sequence ended (the engine is not ticked further).
+    pub fn finished(&self) -> bool {
+        self.engine.as_ref().is_some_and(Engine::finished)
+    }
+
+    /// The program that runs: `u`, `game`, `ended`, or empty before a start.
+    pub fn program(&self) -> String {
+        let Some(e) = &self.engine else {
+            return String::new();
+        };
+        if e.finished() {
+            return "ended".into();
+        }
+        match e.state().main.program {
+            u6_core::main_loop::Program::U => "u".into(),
+            u6_core::main_loop::Program::Game => "game".into(),
+        }
+    }
+
+    /// Keys queued and not yet taken by the game (the page's and the engine's queues).
+    pub fn keys_pending(&self) -> u32 {
+        let queued = self.engine.as_ref().map_or(0, |e| e.io().pending_events());
+        (queued + self.pending.len()) as u32
+    }
+
+    /// The party leader's name, or empty before a start.
+    pub fn leader_name(&self) -> String {
+        self.engine.as_ref().map_or_else(String::new, |e| {
+            let s = e.state();
+            let p = &s.actors.party;
+            p.names
+                .get(usize::from(p.leader_index))
+                .cloned()
+                .unwrap_or_default()
+        })
     }
 
     /// Number of game files the running game booted from (the save laid over them not
@@ -195,7 +246,7 @@ impl Game {
         })
     }
 
-    /// Saves the running game made since boot (0x105716 runs).
+    /// Writes of `savegame/` files since boot (Saves, 0x105716, and the character `u` wrote).
     pub fn save_generation(&self) -> u32 {
         self.engine
             .as_ref()
@@ -404,8 +455,9 @@ impl Game {
         Some(bytes)
     }
 
-    /// [`Game::start`] without the JS error type (testable off wasm).
-    fn boot(&mut self, seed: u16) -> Result<String, String> {
+    /// [`Game::start`] (or with `game_first` [`Game::start_game_first`]) without the JS error
+    /// type (testable off wasm).
+    fn boot(&mut self, seed: u16, game_first: bool) -> Result<String, String> {
         let inputs = std::mem::take(&mut self.inputs);
         self.input_bytes = 0;
         let unzipped: u64 = inputs
@@ -443,7 +495,12 @@ impl Game {
                 "\nThe saved game ({stored} files) is laid over them."
             ));
         }
-        match Engine::with_seed(files, seed) {
+        let engine = if game_first {
+            Engine::game_first(files, seed)
+        } else {
+            Engine::with_seed(files, seed)
+        };
+        match engine {
             Ok(engine) => {
                 // A path that differs from another only in case is shadowed (the game's lookups
                 // ignore case): the engine never reads it, so it is not kept either.
@@ -522,7 +579,7 @@ mod tests {
         let mut game = Game::new();
         game.collect("notes.txt", b"hello".to_vec()).unwrap();
         assert_eq!(game.files_loaded(), 1);
-        let report = game.boot(0).unwrap_err();
+        let report = game.boot(0, false).unwrap_err();
         assert!(
             report.starts_with("PP20: decrunched 0 file(s); 1 file(s) total"),
             "{report}"
@@ -552,7 +609,7 @@ mod tests {
         assert!(unzipped > 0 && unzipped < MAX_UNZIPPED_BYTES, "{unzipped}");
         let mut game = Game::new();
         game.collect("ultima-vi.zip", data).unwrap();
-        game.boot(1).unwrap();
+        game.boot(1, false).unwrap();
         let n = game.kept_count();
         assert_eq!(n, game.game_files());
         let kept: Vec<(String, Vec<u8>)> = (0..n)
@@ -565,17 +622,19 @@ mod tests {
         for (path, bytes) in kept {
             again.collect(&path, bytes).unwrap();
         }
-        again.boot(1).unwrap();
+        again.boot(1, false).unwrap();
         assert_eq!(again.game_files(), n);
         for _ in 0..60 {
             game.tick(16);
             again.tick(16);
         }
         assert!(game.frame_rgba() == again.frame_rgba(), "same first frames");
+        assert_eq!(game.program(), "u", "a start runs the launcher: `u` first");
+        assert!(!game.finished());
     }
 
-    /// A Save's files listed for the page, stored, and laid over the same game files: the next
-    /// start resumes where the party stood; the kept game files stay the new-game ones; the
+    /// A Save's files listed for the page, stored, and laid over the same game files (`game`
+    /// started at once): the next start resumes where the party stood; the kept game files stay the new-game ones; the
     /// sound machine starts and renders.
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
@@ -587,13 +646,14 @@ mod tests {
         let data = std::fs::read(ZIP).unwrap();
         let mut game = Game::new();
         game.collect("ultima-vi.zip", data.clone()).unwrap();
-        game.boot(1).unwrap();
+        game.boot(1, true).unwrap();
         let ticks = |game: &mut Game, n: u32| {
             for _ in 0..n {
                 game.tick(16);
             }
         };
         ticks(&mut game, 120);
+        assert_eq!(game.program(), "game");
         assert_eq!((game.save_generation(), game.save_collect()), (0, 0));
         let start = game.leader_position();
         game.key_down("ArrowRight", "ArrowRight", false);
@@ -628,7 +688,7 @@ mod tests {
         for (path, bytes) in files {
             again.load_save(&path, bytes);
         }
-        again.boot(1).unwrap();
+        again.boot(1, true).unwrap();
         assert_eq!(again.save_files(), n);
         assert_eq!(
             again.game_files(),
@@ -640,7 +700,7 @@ mod tests {
         for (path, bytes) in kept {
             fresh.collect(&path, bytes).unwrap();
         }
-        fresh.boot(1).unwrap();
+        fresh.boot(1, true).unwrap();
         assert_eq!(
             fresh.leader_position(),
             start,

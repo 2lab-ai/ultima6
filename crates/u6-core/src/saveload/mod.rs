@@ -54,13 +54,14 @@ pub fn block_file(i: usize) -> String {
 /// What the save code keeps besides the game globals.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SaveLoad {
-    /// Saves written since boot (0x105716 runs); [`SaveSync`] flushes when it moves.
+    /// Writes of `savegame/` files since boot (0x105716 runs, and the character `u` writes,
+    /// [`crate::intro::handoff::apply`]); [`SaveSync`] flushes when it moves.
     pub generation: u32,
     /// The [`SaveLoad::generation`] at which block `i`'s file was last committed (0 = not this
     /// session, the file is still the one the platform supplied).
     pub block_gen: Vec<u32>,
-    /// `savegame/objlist` as the last Save wrote it (`None` until a Save; 0x105350 then reads
-    /// the platform's file).
+    /// `savegame/objlist` as the last Save (or `u`'s character) wrote it (`None` until then;
+    /// 0x105350 then reads the platform's file).
     pub objlist: Option<Vec<u8>>,
     /// The party-name table (objlist 0x0F00, 16 × 14 bytes) as last read: an unchanged name is
     /// written back with the bytes that followed its NUL.

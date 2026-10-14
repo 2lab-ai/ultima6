@@ -108,6 +108,13 @@ globalThis.__ticks = 0;
 }
 `;
 
+// Appended to the glue with `gameFirst`: a start runs `game` at once (Game.start_game_first, as
+// `u6-native --game-first`), so the tests of the queue, the storage and the keys need no
+// character from `u`. The page itself is unchanged.
+const GAME_FIRST = `
+Game.prototype.start = Game.prototype.start_game_first;
+`;
+
 /// Starts the server and a headless Chromium; `close()` stops both.
 export async function setup(root = SITE) {
   const server = await serve({ root });
@@ -116,8 +123,9 @@ export async function setup(root = SITE) {
 }
 
 /// A fresh context (empty storage) and page with the hooks; `gated` adds the store and glue
-/// wrappers (the page itself is unchanged).
-export async function openPage(env, { gated = true } = {}) {
+/// wrappers; `gameFirst` (default) starts `game` without the launcher's `u` (the page itself is
+/// unchanged).
+export async function openPage(env, { gated = true, gameFirst = true } = {}) {
   const context = await env.browser.newContext({ viewport: { width: 1024, height: 900 } });
   await context.addInitScript(pageHooks);
   if (gated) {
@@ -126,9 +134,12 @@ export async function openPage(env, { gated = true } = {}) {
       const response = await route.fetch();
       await route.fulfill({ response, body: STORE_WRAPPER });
     });
+  }
+  if (gated || gameFirst) {
+    const extra = (gated ? GLUE_HOOKS : '') + (gameFirst ? GAME_FIRST : '');
     await context.route(/\/pkg\/u6_web\.js$/, async (route) => {
       const response = await route.fetch();
-      await route.fulfill({ response, body: (await response.text()) + GLUE_HOOKS });
+      await route.fulfill({ response, body: (await response.text()) + extra });
     });
   }
   const page = await context.newPage();
@@ -211,6 +222,8 @@ export const state = (page) => page.evaluate(() => ({
   saved: Number(document.body.dataset.saved ?? 0),
   audio: document.body.dataset.audio,
   audioChunks: Number(document.body.dataset.audioChunks ?? 0),
+  program: document.getElementById('screen').dataset.program,
+  name: document.getElementById('screen').dataset.name,
 }));
 
 export const log = (page) => page.evaluate(() => [...window.__log]);
@@ -278,4 +291,36 @@ export async function waitPrompt(page, timeout = 60_000) {
     window.__promptRun = at ? (window.__promptRun ?? 0) + 1 : 0;
     return window.__promptRun >= 5;
   }, null, { timeout, polling: 'raf' });
+}
+
+/// Waits until the running program is `program` (u, game or ended).
+export async function waitProgram(page, program, timeout = 60_000) {
+  await page.waitForFunction((p) => document.getElementById('screen').dataset.program === p,
+    program, { timeout, polling: 'raf' });
+}
+
+/// Waits until the canvas shows a colour other than black.
+export async function waitVisible(page, timeout = 30_000) {
+  await page.waitForFunction(() => {
+    const c = document.getElementById('screen');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    for (let i = 0; i < d.length; i += 4) if (d[i] || d[i + 1] || d[i + 2]) return true;
+    return false;
+  }, null, { timeout, polling: 'raf' });
+}
+
+/// Waits until the engine ran `n` more ticks (gated pages count them in the glue).
+export async function waitTicks(page, n, timeout = 60_000) {
+  const from = await page.evaluate(() => globalThis.__ticks);
+  await page.waitForFunction((t) => globalThis.__ticks >= t, from + n, { timeout, polling: 'raf' });
+}
+
+/// Presses `key` on the focused canvas, waits until the game took it, then `settle` ticks: the
+/// scripted keys of the Rust tests (`Run::keys`), at the page's tick rate.
+export async function press(page, key, settle) {
+  await page.keyboard.press(key);
+  await waitTicks(page, 1);
+  await page.waitForFunction(() => document.getElementById('screen').dataset.keys === '0',
+    null, { timeout: 60_000, polling: 'raf' });
+  await waitTicks(page, settle);
 }

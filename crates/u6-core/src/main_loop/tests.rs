@@ -22,20 +22,20 @@ fn files() -> Option<Files> {
     Some(Files::new(r.files))
 }
 
-/// The boot on the user's files: 60 ticks reach the command prompt with only the one stub
-/// point a boot passes (character creation 0x1351d8; since milestone 2 the egg in the start
-/// window hatches through the objects port 0x1319b2, its placement through combat 0x121e88 and
-/// the combat song of 0x121c64 through sound 0x110878, so none of them is a stub point); the
-/// screen shows the window, the panel and the prompt.
+/// The boot of `game` on the user's files (started without the launcher): 60 ticks reach the
+/// command prompt without a stub point (the character `u` makes is the launcher's; since
+/// milestone 2 the egg in the start window hatches through the objects port 0x1319b2, its
+/// placement through combat 0x121e88 and the combat song of 0x121c64 through sound 0x110878);
+/// the screen shows the window, the panel and the prompt.
 #[test]
-fn boot_reaches_the_prompt_with_one_stub_point() {
+fn boot_reaches_the_prompt_without_stub_points() {
     let Some(files) = files() else { return };
-    let mut e = crate::Engine::new(files).unwrap_or_else(|err| panic!("{err}"));
+    let mut e = crate::Engine::game_first(files, 0).unwrap_or_else(|err| panic!("{err}"));
     for _ in 0..60 {
         e.tick(&[], 16);
     }
-    let ids: Vec<&str> = e.stub_hits().keys().map(|k| &k[..8]).collect();
-    assert_eq!(ids, ["0x1351d8"]);
+    let ids: Vec<&str> = e.stub_hits().keys().copied().collect();
+    assert!(ids.is_empty(), "{ids:?}");
     let s = e.state();
     assert_eq!(s.ui.text.current, crate::ui::WindowId::Messages);
     assert!(
@@ -387,7 +387,7 @@ fn after_attack_an_arrow_walks() {
 #[test]
 fn real_attack_without_a_target_and_the_next_arrow_walks() {
     let Some(files) = files() else { return };
-    let mut e = crate::Engine::with_seed(files, 7).unwrap_or_else(|err| panic!("{err}"));
+    let mut e = crate::Engine::game_first(files, 7).unwrap_or_else(|err| panic!("{err}"));
     for _ in 0..60 {
         e.tick(&[], 16);
     }

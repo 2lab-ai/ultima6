@@ -4,8 +4,9 @@
 //! On the Amiga the launcher (`ultima6` / `ultcli`, a state machine on a byte) runs `PROGRAM:u
 //! JJS` first; `u` plays the opening, shows the menu, creates a character into
 //! `savegame/objlist` and exits with code 1, and the launcher then runs `PORTRAIT:game`, which
-//! loads that objlist. The port runs `u` as [`run`] inside the game future, before `game`'s
-//! boot reaches its character check, and applies the objlist it wrote to the game state.
+//! loads that objlist. The port's launcher ([`crate::main_loop::run`]) runs `u` as [`run`] in
+//! the engine task, then `game`; the objlist `u` wrote goes into the save path and the game
+//! state ([`handoff::apply`]).
 //!
 //! `u` is ported from its own image (`~/Games/ultima6/re/u.bin`, 24 hunks, A4 = 0x116798):
 //! addresses in the `Original:` lines here are `u` addresses, written `u 0x…` so that the port
@@ -95,21 +96,33 @@ pub enum IntroOutcome {
 }
 
 /// Runs `u` on the shared game state: the opening, the menu, character creation; a character
-/// it writes is applied to `state` (see [`handoff::apply`]). The RNG of `u` is seeded with the
-/// low word of the game RNG's state, the platform seed both programs take from `time()`.
+/// it writes goes into the save path and the game state (see [`handoff::apply`]). `u` reads the
+/// user's files with the `savegame/objlist` this run wrote laid over them. The RNG of `u` is
+/// seeded with the low word of the game RNG's state, the platform seed both programs take from
+/// `time()`.
 pub async fn run(state: &RefCell<State>, io: &Io) -> IntroOutcome {
     let Some(exe) = io.files().get("u").and_then(|f| UExe::parse(f).ok()) else {
         return IntroOutcome::Unavailable;
     };
-    let seed = state.borrow().rng.state() as u16;
-    let mut st = IntroState::new(exe, io.files().clone());
+    let (seed, written) = {
+        let s = state.borrow();
+        (s.rng.state() as u16, s.saveload.objlist.clone())
+    };
+    let mut files = io.files().clone();
+    if let Some(bytes) = written {
+        let name = crate::saveload::OBJLIST_FILE.to_string();
+        files.overlay(WRITTEN_LAYER, [(name, bytes)].into());
+    }
+    let mut st = IntroState::new(exe, files);
     let outcome = main(&mut st, io, seed, &LAUNCHER_ARGS).await;
     if let (IntroOutcome::Play { .. }, Some(bytes)) = (&outcome, st.objlist.as_ref()) {
-        let applied = handoff::apply(&mut state.borrow_mut(), bytes).is_ok();
-        return IntroOutcome::Play { created: applied };
+        handoff::apply(&mut state.borrow_mut(), bytes);
     }
     outcome
 }
+
+/// Name of the layer of the files `u` reads that holds what this run wrote.
+const WRITTEN_LAYER: &str = "written";
 
 /// The command line the launcher runs `u` with (`PROGRAM:u JJS`, state 0 of `ultcli`).
 pub const LAUNCHER_ARGS: [&[u8]; 2] = [b"u", b"JJS"];

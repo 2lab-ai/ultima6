@@ -1,14 +1,17 @@
 // Browser tests of site/ under its real headers (tools/web/serve.mjs applies site/_headers):
 // the operation queue (rapid imports, import during the restore, forget during a save), error
 // handling (read and forget failures, an engine trap and Restart), keyboard focus, the CSP,
-// saved games (stored after a Save, resumed on reload, forgotten, imported as a folder) and
-// the sound output (AudioContext after a gesture, chunks into the worklet).
+// saved games (stored after a Save, resumed on reload, forgotten, imported as a folder), the
+// sound output (AudioContext after a gesture, chunks into the worklet) and the launcher's
+// sequence as a player meets it (the opening, the menu, a character created and kept, Journey
+// Onward after a reload, Quit). Most tests start `game` at once (harness `gameFirst`); the
+// launcher tests run the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. Tests that need the user's disks skip when they are absent.
 //
 //   node tools/web/test-web.mjs [name-filter]      (build first: bash scripts/build-web.sh)
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import * as h from './harness.mjs';
 
 const MARKER = { name: 'port-test-marker.txt', text: 'not a game file' };
@@ -348,6 +351,95 @@ test('zip: a click starts the sound, the worklet gets chunks, Mute; save and rel
   await writeFile('/tmp/claude-501/int-b-web-restored.png', await page.locator('#screen').screenshot());
   console.log(`  receipt: saved at ${moved}, after the reload ${s.leader} (${s.saves} save files)`);
   assert.equal(s.leader, moved, 'restored position');
+}, { needs: h.haveZip });
+
+// The creation from the menu (u6-core intro tests `create_from_menu`): C, the name, male, the
+// second portrait, the gypsy's seven questions answered A, B alternately, Escape ending the
+// introduction story; settles in ticks, after the game took each key.
+async function createCharacter(page, name, shot) {
+  await h.press(page, 'c', 120);
+  for (const c of name) await h.press(page, c, 30);
+  await h.waitTicks(page, 10);
+  await h.press(page, 'Enter', 60);
+  await h.press(page, 'm', 60);
+  await h.press(page, 'p', 30);
+  await h.press(page, 'c', 60);
+  for (let i = 0; i < 3; i += 1) await h.press(page, 'Space', 200);
+  await h.press(page, 'Space', 120);
+  await h.press(page, 'Space', 120);
+  await shot('question');
+  for (let q = 0; q < 7; q += 1) await h.press(page, q % 2 === 0 ? 'a' : 'b', 220);
+  await h.press(page, 'Space', 200);
+  for (let i = 0; i < 4; i += 1) await h.press(page, 'Space', 120);
+  await h.waitTicks(page, 60);
+  await h.press(page, 'Escape', 200);
+}
+
+const RECEIPTS = '/tmp/claude-501/int-intro';
+
+test('zip as a player: the opening, Escape, the menu, a character created and played; a reload journeys onward with it (receipt)', async (env) => {
+  await mkdir(RECEIPTS, { recursive: true });
+  const { page } = await h.openPage(env, { gameFirst: false });
+  const shot = async (name) => writeFile(`${RECEIPTS}/web-${name}.png`, await page.locator('#screen').screenshot());
+  await h.load(page, env);
+  await h.dropFiles(page, [h.ZIP]);
+  await started(page);
+  await h.waitProgram(page, 'u');
+  await h.waitVisible(page);
+  await shot('01-opening');
+  await page.focus('#screen');
+  await h.press(page, 'Escape', 120);
+  assert.equal((await h.state(page)).program, 'u');
+  await shot('02-menu');
+  await createCharacter(page, 'Zhuge', shot);
+  await h.waitProgram(page, 'game');
+  await h.waitPrompt(page);
+  let s = await h.state(page);
+  assert.equal(s.name, 'Zhuge', 'the game plays the created character');
+  await shot('03-game');
+  await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
+  await h.waitSettled(page);
+  assert.deepEqual(await h.savedPaths(page), ['savegame/objlist'], 'u wrote the objlist, kept like a save');
+  await page.reload();
+  s = await started(page);
+  assert.equal(s.saves, 1, 'the stored objlist is laid over the game files');
+  await h.waitProgram(page, 'u');
+  await h.waitVisible(page);
+  await page.focus('#screen');
+  await h.press(page, 'Escape', 120);
+  await shot('04-menu-after-reload');
+  await h.press(page, 'j', 30);
+  await h.waitProgram(page, 'game');
+  await h.waitPrompt(page);
+  s = await h.state(page);
+  assert.equal(s.name, 'Zhuge', 'Journey Onward plays the stored character');
+  await shot('05-journey-onward');
+  console.log(`  receipt: created ${s.name}; after the reload Journey Onward plays ${s.name} (${s.saves} save file)`);
+}, { needs: h.haveZip });
+
+test('zip: Quit in the menu ends the game; the page says so and Restart starts it again', async (env) => {
+  const { page } = await h.openPage(env, { gameFirst: false });
+  await h.load(page, env);
+  await h.dropFiles(page, [h.ZIP]);
+  await started(page);
+  await h.waitProgram(page, 'u');
+  await h.waitVisible(page);
+  await page.focus('#screen');
+  await h.press(page, 'Escape', 120);
+  await page.keyboard.press('Control+q');
+  await page.waitForFunction(() => document.body.dataset.state === 'ended', null, { timeout: 30_000 });
+  let s = await h.state(page);
+  assert.equal(s.program, 'ended');
+  assert.match(s.status, /The game has ended\. Restart starts it again/);
+  assert.equal(s.restartHidden, false);
+  const ticks = await page.evaluate(() => globalThis.__ticks);
+  await h.sleep(500);
+  assert.equal(await page.evaluate(() => globalThis.__ticks), ticks, 'not ticked after the end');
+  await page.click('#restart');
+  await page.waitForLoadState('load');
+  s = await started(page);
+  assert.equal(s.restartHidden, true);
+  await h.waitProgram(page, 'u');
 }, { needs: h.haveZip });
 
 const filter = process.argv[2];

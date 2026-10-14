@@ -1,19 +1,23 @@
-//! Boot (`main()` 0x1351d8 after the platform setup) and the command loop 0x1041d8 (WU-P7).
+//! The launcher, boot (`main()` 0x1351d8 after the platform setup) and the command loop
+//! 0x1041d8 (WU-P7).
 //!
-//! `run` is the game future the engine polls: the rest of main (text windows, `paper.bmp`, the
-//! command bar, the tail of load state 0x105350, the character check, the first clock tick), then
-//! the command loop with its dispatcher ([`commands`]). The helpers of the main hunk the loop and
-//! the other modules call are in [`main_hunk`].
+//! [`run`] is the engine task: the launcher's program sequence (`u`, then `game` while `u`
+//! journeys on). `game` is the rest of main (text windows, `paper.bmp`, the command bar, the
+//! tail of load state 0x105350, the character check, the first clock tick), then the command
+//! loop with its dispatcher ([`commands`]). The helpers of the main hunk the loop and the other
+//! modules call are in [`main_hunk`].
 //!
 //! Character check: main tests A4-0x7b03 (byte 0x81 of the objlist block at A4-0x7b84, objlist
 //! 0x1C72, the Avatar's portrait, 1-based) and, when it is 0, prints "You must first create or
-//! transfer a character.", waits for a key and exits. The shipped `DATA1:objlist` holds 0 there:
-//! character creation is not in `game`. The port starts from the shipped disk state the way
-//! Nuvie's new-game path does (formats.md §7: it patches name, stats, gender and the portrait
-//! byte from the creation answers): without answers, the disk's name and stats stay and the
-//! portrait byte becomes 1 (`gender·6 + portrait + 1` with both 0). The check is a stub point
-//! ("0x1351d8 character creation"). The rest of the disk state is played as it is, combat-mode
-//! byte included (A4-0x7b0c = 1 in the shipped objlist, so main calls 0x121c64, a stub).
+//! transfer a character.", waits for a key and exits with code 0, which makes the launcher run
+//! `u` again. The shipped `DATA1:objlist` holds 0 there: the character is made by `u`
+//! ([`crate::intro`]), which writes it into `savegame/objlist`. Started without the launcher
+//! ([`game_first`]: no usable `u` in the user's files, the platforms' development entry), the
+//! port plays the shipped disk state: the disk's name and stats stay and the portrait byte
+//! becomes 1, as on the oracle's game-first disks (which also set the sex byte 0x1C71 to 1,
+//! female in `u`'s encoding; the port leaves it 0). The rest of the disk state is played as it
+//! is, combat-mode byte included (A4-0x7b0c = 1 in the shipped objlist, so main calls
+//! 0x121c64).
 //!
 //! Synchronous game code that prints (actors, map, objects call printf 0x108658, which waits on
 //! a more prompt in the port's async ui) queues its lines in [`MainState::pending_print`]; the
@@ -57,7 +61,6 @@ pub use main_hunk::*;
 use crate::engine::Io;
 use crate::image::A4;
 use crate::state::State;
-use crate::todo_stub;
 use crate::ui::printf::{Arg, printf};
 
 /// One queued `printf` argument (owned: the queue outlives the caller's borrows).
@@ -93,6 +96,18 @@ pub struct MainState {
     pub attack_target: i16,
     /// Original: A4+0x64ce (word: main sets it to 1 before load state; readers not identified)
     pub flag_64ce: u16,
+    /// Port-only: the program of the launcher's sequence that runs (for the platforms).
+    pub program: Program,
+}
+
+/// The programs the launcher runs one after the other ([`run`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Program {
+    /// `u`: the opening, the main menu, character creation ([`crate::intro`]).
+    #[default]
+    U,
+    /// `game`: main 0x1351d8 and the command loop.
+    Game,
 }
 
 /// Queues a `printf` of `fmt` for the loop to print (synchronous callers).
@@ -170,6 +185,77 @@ const MSG_CREATE_CHARACTER: u32 = 0x0013_50a6;
 /// Objlist block bytes of A4-0x7b03 (a character exists) and A4-0x7b0c (combat mode).
 const TAIL_CREATED: usize = 0x81;
 const TAIL_COMBAT: usize = 0x78;
+/// Exit codes of `game` (the argument of 0x14f15a), read by the launcher as its next state:
+/// 0 runs `u` (no character, 0x13546e), 3 ends the launcher (the end of main, 0x1354a4).
+const EXIT_RUN_U: u16 = 0;
+const EXIT_QUIT: u16 = 3;
+
+/// Original: ultcli 0x100360 (the launcher `PROGRAM:ultima6`: run `u`, then `game` while `u`
+/// journeys on) [partial]
+///
+/// A state machine on the exit code of the program it ran last (D7, the jump table at ultcli
+/// 0x100452): state 0 runs `u JJS` (0x10045c), 1 checks for a PAL display and runs `game JJS`
+/// with three buffer addresses (0x100492), 2 runs `end` and stops (0x1004e6), 3 stops
+/// (0x10052c), 4 stops with a requester (0x100532); each run waits for the program and takes
+/// its return code as the next state. So `u`'s Journey Onward (exit 1) starts `game`, its quit
+/// (exit 3) ends the launcher, and `game` without a character (exit 0) runs `u` again; the end
+/// of `game` (exit 3) ends it. Every `game` after the first is a new process ([`relaunch`]).
+/// Not ported: the PAL check (the port has no NTSC display), `end` (exit 2; no path of the port
+/// reaches the end of the game) and the requesters. With no usable `u` in the user's files the
+/// port starts `game` at once, as [`game_first`] does.
+pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
+    let (state, io) = (&*state, &*io);
+    let mut launched = false;
+    loop {
+        state.borrow_mut().main.program = Program::U;
+        match crate::intro::run(state, io).await {
+            crate::intro::IntroOutcome::Quit => return,
+            crate::intro::IntroOutcome::Unavailable => {
+                state.borrow_mut().main.program = Program::Game;
+                game_main(state, io, false).await;
+                return;
+            }
+            crate::intro::IntroOutcome::Play { .. } => {}
+        }
+        if launched {
+            relaunch(state, io);
+        }
+        launched = true;
+        state.borrow_mut().main.program = Program::Game;
+        if game_main(state, io, true).await != EXIT_RUN_U {
+            return;
+        }
+    }
+}
+
+/// The engine task without the launcher: `game` main at once (the platforms' development entry,
+/// which the oracle's game-first disks match; tests). A save without a character plays the
+/// shipped disk state (see the module doc).
+pub async fn game_first(state: Rc<RefCell<State>>, io: Rc<Io>) {
+    let (state, io) = (&*state, &*io);
+    state.borrow_mut().main.program = Program::Game;
+    game_main(state, io, false).await;
+}
+
+/// A new `game` process after the launcher ran `u` again: what the boot reads
+/// ([`State::new_game`] over the user's files), with the `savegame/objlist` this run wrote
+/// (`u`'s character, [`crate::saveload::SaveLoad::objlist`]) read in place of the files' one.
+/// The RNG goes on (the port has no clock to seed it from again). No Save can come before a
+/// relaunch (a Save is a command, and the end of the command loop ends the launcher), so the
+/// block files are the user's. Unchanged when the files no longer load.
+fn relaunch(state: &RefCell<State>, io: &Io) {
+    let Ok(mut fresh) = State::new_game(io.files()) else {
+        return;
+    };
+    let mut s = state.borrow_mut();
+    fresh.rng = s.rng;
+    fresh.saveload = std::mem::take(&mut s.saveload);
+    if let Some(objlist) = fresh.saveload.objlist.clone() {
+        crate::saveload::objlist::decode(&mut fresh, &objlist);
+        fresh.place_party();
+    }
+    *s = fresh;
+}
 
 /// Original: 0x1351d8 (main(): setup, load data, character check, music, command loop) [partial]
 ///
@@ -181,10 +267,13 @@ const TAIL_COMBAT: usize = 0x78;
 /// x = 8 + 16 i, y = 0xb0, then 0x19e at (0x98, 0xb0)), A4+0x64ce = 1, the tail of 0x105350,
 /// one tile substitution per animdata slot (0x152cd2), the character check, then 0x1217d4,
 /// the clock 0x10368a(0), combat or the area song, the command loop, music off and the `.tmp`
-/// cleanup 0x10d4e8. Not ported: the argument check ("JJS"), the copper and display setup
-/// (the engine's).
-pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
-    let (state, io) = (&*state, &*io);
+/// cleanup 0x10d4e8. Returns the exit code (0x14f15a). Without a character (0x13544a): the
+/// message (0x135452), A4-0x7a56 = 0, a key (0x10790a), the disk check for the PROGRAM disk
+/// `u` runs from (0x1349a0 with D0 = 0, the platform's), exit 0. `launched` = started by the
+/// launcher; otherwise a save without a character plays the shipped disk state (module doc).
+/// Not ported: the argument check (`JJS` and the launcher's three buffer addresses), the copper
+/// and display setup (the engine's).
+async fn game_main(state: &RefCell<State>, io: &Io, launched: bool) -> u16 {
     boot_screen(state, io);
     {
         let mut s = state.borrow_mut();
@@ -202,17 +291,16 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
         .get(TAIL_CREATED)
         .copied();
     if created.unwrap_or(0) == 0 {
-        // Contract: the original prints MSG_CREATE_CHARACTER, waits for a key and exits; the
-        // character is made by another program. Fallback: play the shipped disk state.
-        let exit = todo_stub!("0x1351d8 character creation (another executable)", false);
-        state.borrow_mut().actors.objlist_tail[TAIL_CREATED] = 1;
-        if exit {
+        if launched {
             let msg = game_string(io, MSG_CREATE_CHARACTER);
             printf(state, io, &msg, &[]).await;
             state.borrow_mut().ui.input.idle_refresh = false;
             crate::ui::wait::read_key(state, io).await;
-            return;
+            return EXIT_RUN_U;
         }
+        // [replaced] No program made a character: the portrait byte of the oracle's
+        // game-first disks (module doc).
+        state.borrow_mut().actors.objlist_tail[TAIL_CREATED] = 1;
     }
     {
         let mut s = state.borrow_mut();
@@ -229,6 +317,7 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
     commands::command_loop(state, io).await;
     crate::sound::play_song(&mut state.borrow_mut(), 0);
     crate::objects::delete_tmp_files(&mut state.borrow_mut().objects);
+    EXIT_QUIT
 }
 
 /// The part of 0x1351d8 between the font load and load state, on the screen.

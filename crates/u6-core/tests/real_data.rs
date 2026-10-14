@@ -67,7 +67,7 @@ fn new_game_from_the_real_zip() {
 #[test]
 fn engine_boots_draws_and_moves_the_view() {
     let Some(files) = files() else { return };
-    let mut engine = Engine::new(files).unwrap_or_else(|e| panic!("{e}"));
+    let mut engine = Engine::game_first(files, 0).unwrap_or_else(|e| panic!("{e}"));
     engine.tick(&[], 16);
     let start = engine.state().map.centre;
     let first = engine.frame().pixels().to_vec();
