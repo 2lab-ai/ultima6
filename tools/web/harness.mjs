@@ -344,8 +344,7 @@ export async function stepSideways(page) {
     const from = (await state(page)).leader;
     const before = await frame(page);
     await page.keyboard.press(key);
-    await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0',
-      null, { timeout: 10_000 }).catch(() => {});
+    await waitTaken(page);
     await waitPrompt(page);
     const to = (await state(page)).leader;
     if (to !== from) return { key, from, to, before };
@@ -353,14 +352,41 @@ export async function stepSideways(page) {
   throw new Error(`${STEP_TRIES} steps blocked in a row`);
 }
 
+// Each wait's own id: a wait counts its looks from zero (a count left by an earlier wait would
+// pass a new one at its first look, which can see the frame drawn before a key just pressed).
+let waits = 0;
+
 /// Waits until the game shows its prompt (waiting for a command key, nothing queued) for a few
-/// frames in a row: the world turns after a command (the start fight's) have run.
+/// frames in a row, counted from this call: the world turns after a command (the start fight's)
+/// have run. The first look is at once, the others one per frame, after the page's frame.
 export async function waitPrompt(page, timeout = 60_000) {
-  await page.waitForFunction(() => {
+  waits += 1;
+  await page.waitForFunction((id) => {
+    if (window.__promptWait !== id) {
+      window.__promptWait = id;
+      window.__promptRun = 0;
+    }
     const at = document.getElementById('screen').dataset.prompt === '1';
-    window.__promptRun = at ? (window.__promptRun ?? 0) + 1 : 0;
+    window.__promptRun = at ? window.__promptRun + 1 : 0;
     return window.__promptRun >= 5;
-  }, null, { timeout, polling: 'raf' });
+  }, waits, { timeout, polling: 'raf' });
+}
+
+/// Waits `n` frames of the page. The page's frame callback (one engine tick) runs before this
+/// wait's in every frame, so after them a running game ticked `n` more times; a stopped or
+/// ended one did not, which is what the checks of a stopped loop count on.
+export async function waitFrames(page, n, timeout = 60_000) {
+  if (n <= 0) return;
+  waits += 1;
+  await page.waitForFunction(({ id, count }) => {
+    if (window.__frameWait !== id) {
+      window.__frameWait = id;
+      window.__frameRun = 0;
+      return false; // the first look runs at once, between frames
+    }
+    window.__frameRun += 1;
+    return window.__frameRun >= count;
+  }, { id: waits, count: n }, { timeout, polling: 'raf' });
 }
 
 /// Waits until the running program is `program` (u, game or ended).
@@ -379,18 +405,44 @@ export async function waitVisible(page, timeout = 30_000) {
   }, null, { timeout, polling: 'raf' });
 }
 
-/// Waits until the engine ran `n` more ticks (gated pages count them in the glue).
+/// Waits until the engine ran `n` more ticks: gated pages count them in the glue; elsewhere
+/// `n` frames of the page's loop, which ticks once per frame.
 export async function waitTicks(page, n, timeout = 60_000) {
   const from = await page.evaluate(() => globalThis.__ticks);
+  if (from === undefined) {
+    await waitFrames(page, n, timeout);
+    return;
+  }
   await page.waitForFunction((t) => globalThis.__ticks >= t, from + n, { timeout, polling: 'raf' });
+}
+
+/// Waits until the game took every key and pointer event given to the page so far: a tick
+/// hands them to the engine and the game read them all (`data-keys` 0). The page writes
+/// `data-keys` after a tick, so a count read before one is the frame's from before the input.
+export async function waitTaken(page, timeout = 60_000) {
+  await waitTicks(page, 1, timeout);
+  await page.waitForFunction(() => document.getElementById('screen').dataset.keys === '0',
+    null, { timeout, polling: 'raf' });
 }
 
 /// Presses `key` on the focused canvas, waits until the game took it, then `settle` ticks: the
 /// scripted keys of the Rust tests (`Run::keys`), at the page's tick rate.
 export async function press(page, key, settle) {
   await page.keyboard.press(key);
-  await waitTicks(page, 1);
-  await page.waitForFunction(() => document.getElementById('screen').dataset.keys === '0',
-    null, { timeout: 60_000, polling: 'raf' });
+  await waitTaken(page);
+  await waitTicks(page, settle);
+}
+
+/// A pixel of the canvas (320 x 200 game pixels) as a page position through its CSS box.
+export async function screenPoint(page, x, y) {
+  const box = await page.locator('#screen').boundingBox();
+  return [box.x + ((x + 0.5) * box.width) / 320, box.y + ((y + 0.5) * box.height) / 200];
+}
+
+/// Clicks game pixel (x, y), waits until the game took the press and the release, then
+/// `settle` ticks: `press` for the mouse.
+export async function click(page, x, y, settle) {
+  await page.mouse.click(...(await screenPoint(page, x, y)));
+  await waitTaken(page);
   await waitTicks(page, settle);
 }

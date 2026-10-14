@@ -10,7 +10,10 @@
 // both the sound's gesture and exactly one game click). Most tests start `game` at once
 // (harness `gameFirst`); the launcher tests run the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
-// not timed. Tests that need the user's disks skip when they are absent.
+// not timed. The game is read once it reached what a check asserts, by its own signals (the
+// prompt, the key queue, the program, its ticks), never after a fixed sleep: a loaded host
+// draws fewer frames per second and each tick moves the game at most 100 ms, so a sleep there
+// covers less of the game. Tests that need the user's disks skip when they are absent.
 //
 //   node tools/web/test-web.mjs [name-filter]      (build first: bash scripts/build-web.sh)
 import assert from 'node:assert/strict';
@@ -21,13 +24,26 @@ const MARKER = { name: 'port-test-marker.txt', text: 'not a game file' };
 const tests = [];
 const test = (name, fn, { needs } = {}) => tests.push({ name, fn, needs });
 
+// The page once a start finished (nothing queued) and the started game ran a frame. The page
+// writes the canvas fields (leader, prompt, program, name, keys) only in its frame callback,
+// and a read can come before the first frame: they would be unset, or the replaced game's.
 async function started(page, files) {
   await h.waitSettled(page);
+  await h.waitFrames(page, 1);
   const s = await h.state(page);
   assert.equal(s.state, 'running', s.status);
   if (files !== undefined) assert.equal(s.files, files, s.status);
   return s;
 }
+
+// The page once the game waits at its prompt (its boot and the start fight's turns ran): where
+// a started or resumed game's party stands is read here.
+async function atPrompt(page) {
+  await h.waitPrompt(page);
+  return h.state(page);
+}
+
+const promptNow = (page) => page.evaluate(() => document.getElementById('screen').dataset.prompt);
 
 // No page: the harness's content-free comparison (synthetic values) names paths and lengths only.
 test('assertSame: a mismatch names the label, the paths, the lengths and the index, never the values', async () => {
@@ -73,6 +89,7 @@ test('headers and CSP: the page runs under its policy, third-party requests are 
   if (h.haveHfes()) {
     await page.setInputFiles('#picker', h.HFES);
     await started(page, 130);
+    await h.waitPrompt(page); // the boot ran to the prompt
     assert.deepEqual(await page.evaluate(() => window.__csp), csp, 'the game boots without violations');
   }
 });
@@ -234,7 +251,7 @@ test('an engine trap stops the loop; Restart loads the kept files again', async 
   assert.equal(s.restartHidden, false);
   assert.match(s.status, /internal error[\s\S]*Restart/);
   const ticks = await page.evaluate(() => globalThis.__ticks);
-  await h.sleep(500);
+  await h.waitFrames(page, 30); // a running loop would tick in each
   assert.equal(await page.evaluate(() => globalThis.__ticks), ticks, 'not ticked again');
   await page.click('#restart');
   await page.waitForLoadState('load');
@@ -250,9 +267,9 @@ test('A on the canvas: Attack asks for a target, a stray key ends it, then the a
   await page.setInputFiles('#picker', h.HFES);
   await started(page, 130);
   await h.waitPrompt(page);
-  await page.keyboard.press('a');
-  await h.sleep(800);
-  await page.keyboard.press('q'); // confirms no target: the no-target word, the turn (the start fight) runs
+  await h.press(page, 'a', 30);
+  assert.equal(await promptNow(page), '0', 'Attack waits for its target');
+  await h.press(page, 'q', 0); // confirms no target: the no-target word, the turn (the start fight) runs
   await h.waitPrompt(page);
   await writeFile('/tmp/claude-501/m2-attack-what.png', await page.locator('#screen').screenshot());
   const { key, before } = await h.stepSideways(page);
@@ -266,14 +283,14 @@ test('Ctrl+S and Ctrl+R on the canvas are the game\'s Save and Restore, not the 
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
   await started(page, 130);
-  await h.sleep(2500);
+  await h.waitPrompt(page);
   for (const key of ['Control+s', 'Control+r']) {
-    await page.keyboard.press(key);
-    await h.sleep(300);
+    await h.press(page, key, 30);
     const code = key === 'Control+s' ? 'KeyS' : 'KeyR';
     assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), [code, true], `${key} taken by the canvas`);
-    await page.keyboard.press('n'); // the question's answer: no
-    await h.sleep(600);
+    assert.equal(await promptNow(page), '0', `${key}: the game asks its question`);
+    await h.press(page, 'n', 0); // the question's answer: no
+    await h.waitPrompt(page);
   }
   await page.keyboard.press('Control+l');
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['KeyL', false], 'other Ctrl shortcuts stay the browser\'s');
@@ -285,9 +302,8 @@ async function walkAndSave(page) {
   await h.waitPrompt(page); // the boot reaches the prompt
   const start = (await h.state(page)).leader;
   const { to: moved } = await h.stepSideways(page);
-  await page.keyboard.press('Control+s');
-  await h.sleep(400);
-  await page.keyboard.press('y');
+  await h.press(page, 'Control+s', 30);
+  await h.press(page, 'y', 60);
   await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
   assert.equal((await h.state(page)).leader, moved, 'the save is where the party stands');
   await h.waitSettled(page);
@@ -307,7 +323,7 @@ test('a save (Ctrl-S, Y) is kept; a reload resumes it there; forgetting it start
   await page.reload();
   let s = await started(page, 130);
   assert.equal(s.saves, saved.length, 'the stored save is laid over the game files');
-  assert.equal(s.leader, moved, 'resumed where it was saved');
+  assert.equal((await atPrompt(page)).leader, moved, 'resumed where it was saved');
   assert.match(s.status, /the game saved in this browser, resumed/);
   await page.click('#forget-save');
   await h.waitSettled(page);
@@ -317,7 +333,7 @@ test('a save (Ctrl-S, Y) is kept; a reload resumes it there; forgetting it start
   await page.reload();
   s = await started(page, 130);
   assert.equal(s.saves, 0);
-  assert.equal(s.leader, start, 'a new game');
+  assert.equal((await atPrompt(page)).leader, start, 'a new game');
   assert.match(s.status, /a new game \(no game saved in this browser\)/);
 }, { needs: h.haveHfes });
 
@@ -341,7 +357,7 @@ test('an original savegame folder dropped becomes the saved game', async (env) =
   const s = await started(page, 130);
   assert.match(s.status, /The saved game \(\d+ files\) was imported/);
   assert.equal(s.saves, folder.length);
-  assert.equal(s.leader, moved, 'the imported save resumes');
+  assert.equal((await atPrompt(page)).leader, moved, 'the imported save resumes');
   assert.equal((await h.savedPaths(page)).length, folder.length, 'one record per file, any case');
 }, { needs: h.haveHfes });
 
@@ -369,11 +385,11 @@ test('a Save of the game an import replaces, made while the import reads: the im
   assert.deepEqual(stores, [`saves:store:start:${folder.length}`], 'only the import stored');
   h.assertSame(byName(await h.savedFiles(page)), byName(folder), 'the store holds the imported files');
   assert.match(s.status, /The saved game \(\d+ files\) was imported/);
-  assert.equal(s.leader, moved, 'the imported save resumes');
   assert.equal(s.saved, 1, 'the replaced game\'s Save was not stored');
+  assert.equal((await atPrompt(page)).leader, moved, 'the imported save resumes');
   await page.reload();
-  s = await started(page, 130);
-  assert.equal(s.leader, moved, 'a reload resumes the imported save');
+  await started(page, 130);
+  assert.equal((await atPrompt(page)).leader, moved, 'a reload resumes the imported save');
 }, { needs: h.haveHfes });
 
 test('an import that does not start leaves the stored save; the game on screen saves on', async (env) => {
@@ -392,6 +408,7 @@ test('an import that does not start leaves the stored save; the game on screen s
   assert.match(s.status, /Could not start the game/);
   h.assertSame(byName(await h.savedFiles(page)), byName(stored), 'the stored save is as it was');
   await page.focus('#screen');
+  await h.waitPrompt(page);
   await h.press(page, 'Control+s', 30);
   await h.press(page, 'y', 60);
   await page.waitForFunction(() => document.body.dataset.saved === '2', null, { timeout: 60_000 });
@@ -417,6 +434,7 @@ test('a Save after the saved game was forgotten stores the whole game; a reload 
   await page.click('#forget-save');
   await h.waitLog(page, 'saves:forget:start');
   await page.focus('#screen');
+  await h.waitPrompt(page); // the started game's boot and the start fight ran
   await h.press(page, 'Control+s', 30);
   await h.press(page, 'y', 60);
   await page.waitForFunction(() => globalThis.__saveGen === 1, null, { timeout: 30_000 });
@@ -437,7 +455,7 @@ test('a Save after the saved game was forgotten stores the whole game; a reload 
   await page.reload();
   s = await started(page, 130);
   assert.equal(s.saves, 70, 'the whole save is laid over the game files');
-  assert.equal(s.leader, later, 'resumed where it was saved');
+  assert.equal((await atPrompt(page)).leader, later, 'resumed where it was saved');
 }, { needs: h.haveHfes });
 
 test('a Save of a game that did not own the stored save, then the forget: it is not stored; the next Save is, whole', async (env) => {
@@ -521,8 +539,8 @@ test('zip: a click starts the sound, the worklet gets chunks, Mute; save and rel
   const { moved } = await walkAndSave(page);
   await writeFile('/tmp/claude-501/int-b-web-saved.png', await page.locator('#screen').screenshot());
   await page.reload();
-  s = await started(page);
-  await h.sleep(1500);
+  await started(page);
+  s = await atPrompt(page);
   await writeFile('/tmp/claude-501/int-b-web-restored.png', await page.locator('#screen').screenshot());
   console.log(`  receipt: saved at ${moved}, after the reload ${s.leader} (${s.saves} save files)`);
   assert.equal(s.leader, moved, 'restored position');
@@ -691,7 +709,7 @@ test('zip: Quit in the menu ends the game; the page says so and Restart starts i
   assert.match(s.status, /The game has ended\. Restart starts it again/);
   assert.equal(s.restartHidden, false);
   const ticks = await page.evaluate(() => globalThis.__ticks);
-  await h.sleep(500);
+  await h.waitFrames(page, 30); // a running loop would tick in each
   assert.equal(await page.evaluate(() => globalThis.__ticks), ticks, 'not ticked after the end');
   await page.click('#restart');
   await page.waitForLoadState('load');
@@ -699,12 +717,6 @@ test('zip: Quit in the menu ends the game; the page says so and Restart starts i
   assert.equal(s.restartHidden, true);
   await h.waitProgram(page, 'u');
 }, { needs: h.haveZip });
-
-// A pixel of the canvas (320 x 200 game pixels) as a page position through its CSS box.
-async function screenPoint(page, x, y) {
-  const box = await page.locator('#screen').boundingBox();
-  return [box.x + ((x + 0.5) * box.width) / 320, box.y + ((y + 0.5) * box.height) / 200];
-}
 
 // The message scroll's pixels (x 168..311, y 104..191) differ between two frames.
 function scrollChanged(before, after) {
@@ -718,34 +730,32 @@ function scrollChanged(before, after) {
 }
 
 const OUT = '/tmp/claude-501/int-mouse';
-const promptNow = (page) => page.evaluate(() => document.getElementById('screen').dataset.prompt);
 
 // Clicks the map cell `dx` cells east of the Avatar (its window cell (5, 5) is centred on
-// game pixel (88, 88)), then waits for the prompt again; the leader before and after.
+// game pixel (88, 88)), then waits until the game took the click and shows the prompt again;
+// the leader before and after.
 async function clickCell(page, dx) {
   await h.waitPrompt(page);
   const from = (await h.state(page)).leader;
-  await page.mouse.click(...(await screenPoint(page, 88 + 16 * dx, 88)));
-  await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0',
-    null, { timeout: 10_000 }).catch(() => {});
+  await h.click(page, 88 + 16 * dx, 88, 0);
   await h.waitPrompt(page);
   return { from, to: (await h.state(page)).leader };
 }
 
 // Look by clicks: the Look icon, then the Avatar's own cell. Look on a person shows the portrait
 // panel and waits for a key or a click; a click on the Avatar's cell answers it (0x8f, nothing
-// else happens). Returns the frame with the description in the scroll.
+// else happens). Returns the frame with the description in the scroll, read 90 ticks after the
+// game took the target click (1.5 s at 60 frames a second).
 async function lookAtAvatar(page, shot) {
-  await page.mouse.click(...(await screenPoint(page, 64, 184))); // the fourth icon: Look
-  await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0', null, { timeout: 10_000 });
+  await h.click(page, 64, 184, 30); // the fourth icon: Look
+  assert.equal(await promptNow(page), '0', 'Look waits for its target');
   if (shot) await writeFile(`${OUT}/web-look-target.png`, await page.locator('#screen').screenshot());
-  await page.mouse.click(...(await screenPoint(page, 88, 88))); // Look's target: the Avatar
-  await h.sleep(1500);
+  await h.click(page, 88, 88, 90); // Look's target: the Avatar
   assert.equal(await promptNow(page), '0', 'the portrait waits for a key or a click');
   const described = await h.frame(page);
   if (shot) await writeFile(`${OUT}/web-look.png`, await page.locator('#screen').screenshot());
   const at = (await h.state(page)).leader;
-  await page.mouse.click(...(await screenPoint(page, 88, 88)));
+  await h.click(page, 88, 88, 0);
   await h.waitPrompt(page);
   assert.equal((await h.state(page)).leader, at, 'the click that closes the portrait does not walk');
   return described;
@@ -782,18 +792,23 @@ test('the mouse: the Look icon, then Look on the Avatar, then clicks walk; the k
   assert.notEqual(to, from, 'the arrows still walk after the mouse');
 }, { needs: h.haveHfes });
 
-// Holds the left button 300 ms at game pixel (x, y); the engine ticks run during the hold (a
-// page whose tick never returns answers no evaluate: that is a frozen tab, not a slow one).
+// Holds the left button at game pixel (x, y) for 300 ms, longer (up to 30 s) until five engine
+// ticks ran (a loaded host draws fewer frames in 300 ms); returns the ticks run during the
+// hold, which the caller checks. A page whose tick never returns answers no evaluate: that is
+// a frozen tab, not a slow one; a loop that stopped answers with a count that does not grow.
 async function holdOnMap(page, x, y) {
   const ticks = () => Promise.race([
     page.evaluate(() => globalThis.__ticks),
     h.sleep(5000).then(() => { throw new Error('the tab froze during the hold'); }),
   ]);
-  await page.mouse.move(...(await screenPoint(page, x, y)));
+  await page.mouse.move(...(await h.screenPoint(page, x, y)));
   const t0 = await ticks();
   await page.mouse.down();
   await h.sleep(300);
-  const t1 = await ticks();
+  let t1 = await ticks();
+  for (const end = Date.now() + 30_000; t1 - t0 < 5 && Date.now() < end; t1 = await ticks()) {
+    await h.sleep(20);
+  }
   await page.mouse.up();
   return t1 - t0;
 }
@@ -809,13 +824,12 @@ test('the mouse: a press held 300 ms on the map walks and yields; held through t
   assert.ok(ran >= 5, `the engine ticked through the hold: ${ran} ticks`);
   await h.waitPrompt(page);
   // Ctrl-Q: the exit question waits for Y or N; a held map press is no answer.
-  await page.keyboard.press('Control+q');
-  await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0', null, { timeout: 10_000 });
-  await h.sleep(500);
+  await h.press(page, 'Control+q', 30);
+  assert.equal(await promptNow(page), '0', 'the exit question waits');
   const asked = (await h.state(page)).leader;
   const during = await holdOnMap(page, 88 + 48, 88);
   assert.ok(during >= 5, `the engine ticked through the hold in the question: ${during} ticks`);
-  await h.sleep(500);
+  await h.waitTicks(page, 30);
   assert.equal(await promptNow(page), '0', 'still asking after the release');
   assert.equal((await h.state(page)).leader, asked, 'the question took no walk');
   await page.keyboard.press('n');
@@ -829,7 +843,7 @@ test('the mouse: a press held 300 ms on the map walks and yields; held through t
 // read every frame) and the ms after the press at which each step showed.
 async function heldWalk(page, ms) {
   await h.waitPrompt(page);
-  await page.mouse.move(...(await screenPoint(page, 88, 88 + 48)));
+  await page.mouse.move(...(await h.screenPoint(page, 88, 88 + 48)));
   await page.evaluate(() => {
     const c = document.getElementById('screen');
     const seen = [[performance.now(), c.dataset.leader]];
@@ -844,7 +858,7 @@ async function heldWalk(page, ms) {
   await page.mouse.down();
   await h.sleep(ms);
   await page.mouse.up();
-  await page.waitForFunction(() => document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
+  await h.waitTaken(page);
   await h.waitPrompt(page);
   const seen = await page.evaluate(() => { const s = window.__walk; window.__walk = null; return s; });
   return { steps: seen.length - 1, at: seen.slice(1).map(([t]) => Math.round(t - seen[0][0])) };
@@ -877,17 +891,16 @@ test('zip: the first press on the canvas is one game click and starts the sound;
   // The page's first press: the Look icon. The game takes it once (Look waits for its target;
   // a second Look while it waits would be the no-target word and bring the prompt back), and
   // the same press starts the AudioContext.
-  await page.mouse.click(...(await screenPoint(page, 64, 184)));
-  await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0', null, { timeout: 10_000 });
+  await h.click(page, 64, 184, 0);
   await page.waitForFunction(() => document.body.dataset.audio === 'running', null, { timeout: 15_000 });
-  await h.sleep(1500);
+  await h.waitTicks(page, 90); // a second Look through the sound's start would show by now
   assert.equal(await promptNow(page), '0', 'Look still waits for its target: the press came once');
   await page.keyboard.press('Escape'); // no target: the no-target word, the prompt again
   await h.waitPrompt(page);
   const described = await lookAtAvatar(page, true);
   assert.ok(scrollChanged(before, described), 'Look printed in the scroll');
   const { from, to } = await clickStep(page);
-  await h.sleep(1000);
+  await h.waitTicks(page, 60);
   assert.equal((await h.state(page)).leader, to, 'one step per click, none after it');
   await writeFile(`${OUT}/web-walk.png`, await page.locator('#screen').screenshot());
   await page.waitForFunction(() => Number(document.body.dataset.audioChunks ?? 0) > 5, null, { timeout: 15_000 });
@@ -895,6 +908,7 @@ test('zip: the first press on the canvas is one game click and starts the sound;
   assert.equal(s.audio, 'running');
   await page.click('#mute');
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'true');
+  await h.waitTicks(page, 30); // a click the game took would have walked by now
   assert.equal((await h.state(page)).leader, to, 'Mute is not a game click');
   await page.click('#mute');
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'false');
