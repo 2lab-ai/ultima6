@@ -16,6 +16,9 @@ pub(super) const MSG_FOOD: u32 = 0x0011_59ca;
 const MSG_TOO_OLD: u32 = 0x0011_58ea;
 /// Food object type.
 const FOOD: u16 = 0x81;
+/// Display frames the XORed window of [`flash_window`] stays on the screen. The original shows
+/// it for as long as its second XOR and copy take; that time is not measured, so one PAL frame.
+pub const WINDOW_FLASH_HOLD: u8 = 1;
 
 /// The caster flash 0x132338 (`mode` 0 on the caster, 1 on a target) through its seam, then
 /// its frames played: the original draws the flash inside the call, so it is on the screen
@@ -28,23 +31,39 @@ pub async fn flash_actor(state: &RefCell<State>, io: &Io, actor: u16, mode: u16)
 /// Original: 0x115b7c (magic: flash the map window for a spell of circle `circle` < 9)
 ///
 /// Plot colour 15, XOR into the back buffer: the window is rendered (0x102c90 without the
-/// frame), the rectangle (8, 8)..(0xa8, 0xa8) XORed, the border redrawn over it (0x1324ae) and
-/// the window copied to the screen (0x151f5a); then the same XOR again, which restores it.
+/// frame, which sets its own plot colour A4-0x6570 first, so that colour is the one XORed), the
+/// rectangle (8, 8)..(0xa8, 0xa8) XORed, the border redrawn over it (0x1324ae) and the window
+/// copied to the screen (0x151f5a); then the same XOR again, which restores it.
+///
+/// The XORed window is on the screen while the second pass draws; the engine publishes only
+/// the last present of a poll, so the port waits [`WINDOW_FLASH_HOLD`] display frames between
+/// the passes (no borrow held).
 pub async fn flash_window(state: &RefCell<State>, io: &Io, circle: u16) {
     if circle >= 9 {
         return;
     }
-    let mut s = state.borrow_mut();
-    crate::gfx::blit::set_plot_colour(&mut s.gfx, 0xf);
-    s.gfx.plot_back = true;
-    s.gfx.plot_xor = true;
-    crate::gfx::view::render_window(&mut s, io, false);
-    for _ in 0..2 {
-        seams::fill_rect(&mut s, io, 8, 8, 0xa8, 0xa8);
-        seams::redraw_border(&mut s, 8, 8, 0xa7, 0xa7);
-        io.with_buffers(|back, front| crate::gfx::blit::copy_window(back, front));
-        io.present();
+    {
+        let mut s = state.borrow_mut();
+        crate::gfx::blit::set_plot_colour(&mut s.gfx, 0xf);
+        s.gfx.plot_back = true;
+        s.gfx.plot_xor = true;
+        crate::gfx::view::render_window(&mut s, io, false);
     }
+    for pass in 0..2 {
+        {
+            let mut s = state.borrow_mut();
+            seams::fill_rect(&mut s, io, 8, 8, 0xa8, 0xa8);
+            seams::redraw_border(&mut s, 8, 8, 0xa7, 0xa7);
+            io.with_buffers(|back, front| crate::gfx::blit::copy_window(back, front));
+            io.present();
+        }
+        if pass == 0 {
+            for _ in 0..WINDOW_FLASH_HOLD {
+                io.vblank().await;
+            }
+        }
+    }
+    let mut s = state.borrow_mut();
     s.gfx.plot_xor = false;
     s.gfx.plot_back = false;
 }

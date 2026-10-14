@@ -730,6 +730,46 @@ fn a_dropped_stack_with_no_free_slot_marks_nothing() {
 }
 
 #[test]
+fn a_dropped_ring_of_invisibility_flashes_before_the_panel() {
+    // 0x12a226: the unready 0x11236c flashes the owner and the object flies (0x1228ba) before
+    // the panel is redrawn; their frames are on the screen when Drop returns, none are left
+    // for after the command.
+    let mut s = monster_world();
+    s.ui = crate::main_loop::test_support::test_ui();
+    s.ui.panel.mode = 0x92;
+    s.ui.panel.member = 0;
+    let ring = create_in(&mut s, 0x102, READIED, 0, 1);
+    s.objects.obj_status[1] |= 2;
+    s.ui.input.selection = ring;
+    s.ui.input.target = (501, 500);
+    s.ui.input.targeting = 0;
+    let got = std::rc::Rc::new(std::cell::Cell::new(None));
+    let out = std::rc::Rc::clone(&got);
+    let mut e = crate::Engine::with_game(s, crate::Files::default(), move |st, io| async move {
+        drop_object(&st, &io).await;
+        let s = st.borrow();
+        out.set(Some((s.combat.shown, s.combat.effects.len())));
+    });
+    e.tick(&[crate::InputEvent::Key(crate::Key::Enter)], 16);
+    for _ in 0..60 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    assert_eq!(e.state().objects.place(ring), 0, "the ring lies on the map");
+    assert_eq!(
+        e.state().objects.obj_status[1] & 2,
+        0,
+        "the owner is visible again"
+    );
+    let (shown, left) = got.get().expect("Drop returned");
+    assert!(shown >= 2, "the flash at least: {shown}");
+    assert_eq!(left, 0, "frames left for after the command");
+}
+
+#[test]
 fn takeable_marks_and_passthroughs_ignore_slot_none() {
     let mut s = world();
     let before = s.objects.clone();

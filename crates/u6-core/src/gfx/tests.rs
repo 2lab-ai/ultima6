@@ -321,8 +321,9 @@ fn dissolve_visits_every_pixel_of_the_rect_once() {
 
 #[test]
 fn dissolve_ends_on_any_feedback_word_and_on_wrapped_corners() {
-    // Tampered feedback words (the top bit clear, odd and even ones): the register still comes
-    // back to 1 or dies at 0, so the order ends and holds each pixel of the rect at most once.
+    // Tampered feedback words (the top bit clear, odd and even ones): every non-zero word brings
+    // the register back to 1 (only 0 takes it to 0; see `dissolve_order`), so the order ends
+    // and holds each pixel of the rect at most once.
     for feedback in [
         0x0001u16, 0x0002, 0x0006, 0x00ff, 0x1234, 0x4001, 0x7ffe, 0x8000,
     ] {

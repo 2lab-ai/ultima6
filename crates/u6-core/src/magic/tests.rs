@@ -592,3 +592,224 @@ fn the_caster_flash_is_shown_before_the_spell_goes_on() {
     });
     assert_eq!(*got.borrow(), Some((2, 0)), "(frames shown, frames left)");
 }
+
+/// Runs `game` one display frame per tick with `events` queued before the first, and after every
+/// tick keeps the frames shown so far (`combat.shown`) with `snap` of the engine.
+fn ticks<T, F, Fut>(
+    s: State,
+    events: &[InputEvent],
+    snap: impl Fn(&Engine) -> T,
+    game: F,
+) -> Vec<(u64, T)>
+where
+    F: FnOnce(Rc<RefCell<State>>, Rc<Io>) -> Fut,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let mut e = Engine::with_game(s, Files::default(), game);
+    let mut out = Vec::new();
+    e.tick(events, 16);
+    out.push((e.state().combat.shown, snap(&e)));
+    for _ in 0..800 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+        out.push((e.state().combat.shown, snap(&e)));
+    }
+    assert!(e.finished(), "the spell ends");
+    out
+}
+
+/// `snap` on the first tick that had shown at least `n` frames.
+fn when_shown<T: Clone>(seen: &[(u64, T)], n: u64) -> Option<T> {
+    seen.iter()
+        .find(|(shown, _)| *shown >= n)
+        .map(|(_, t)| t.clone())
+}
+
+#[test]
+fn the_window_flash_is_on_the_screen_for_a_frame() {
+    // 0x115b7c presents the XORed window, then the window again: the first picture must reach
+    // the display (the engine publishes the last present of each poll).
+    let mut s = world();
+    s.gfx.tables.window_colour = 5;
+    let seen = ticks(
+        s,
+        &[],
+        |e| e.frame().get(50, 50),
+        |st, io| async move {
+            super::spells::flash_window(&st, &io, 1).await;
+        },
+    );
+    let last = seen.last().and_then(|(_, p)| *p);
+    assert!(
+        seen.iter().any(|(_, p)| *p != last),
+        "a published frame shows the XORed window: {:?}",
+        seen.iter().map(|(_, p)| *p).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tremor_shows_the_flash_and_the_shakes_before_it_hurts() {
+    // 0x119cbe: the flash 0x132338 and the quake 0x133a1a (20 shakes) draw before the loop
+    // that hurts: when an evil actor's hit points first change, the 2 + 20 + 1 frames are shown.
+    let mut s = world_with(&[(5, 0x178, 101, 100)]);
+    s.actors.attrs.status[5] = 0x20;
+    s.actors.attrs.intelligence[1] = 30;
+    s.actors.attrs.hp[5] = 50;
+    let seen = ticks(
+        s,
+        &[],
+        |e| e.state().actors.attrs.hp[5],
+        |st, io| async move {
+            super::creatures::tremor(&st, &io).await;
+        },
+    );
+    let hurt = seen.iter().find(|(_, hp)| *hp != 50).map(|(n, _)| *n);
+    // The hit's own flash may start in the same display frame.
+    assert!(
+        matches!(hurt, Some(n) if n >= 23),
+        "frames shown when the hurt lands: {hurt:?}"
+    );
+}
+
+#[test]
+fn wizard_eye_shows_the_flash_before_it_reads_a_key() {
+    // 0x119afc with the flashes: the window flash, the caster's flash, then the eye and its
+    // keys. The escape typed at once is still queued while the caster's flash is shown.
+    let seen = ticks(
+        world(),
+        &[InputEvent::Key(Key::Escape)],
+        |e| e.io().pending_events(),
+        |st, io| async move {
+            super::travel::wizard_eye(&st, &io, 103, 100, 1).await;
+        },
+    );
+    assert_eq!(
+        when_shown(&seen, 1),
+        Some(1),
+        "keys still queued at the flash"
+    );
+}
+
+#[test]
+fn gate_travel_shows_the_flash_before_the_party_goes() {
+    // 0x11916e: the caster's flash, then the moongate to stone 1 (0x10952e).
+    let mut s = world();
+    for (i, w) in [110u16, 100, 0].into_iter().enumerate() {
+        s.actors.set_tail_word(0x2a + 2 * i, w);
+    }
+    let keys = [InputEvent::Key(Key::Char('1')), InputEvent::Key(Key::Enter)];
+    let seen = ticks(
+        s,
+        &keys,
+        |e| e.state().map.centre.x,
+        |st, io| async move {
+            super::travel::gate_travel(&st, &io).await;
+        },
+    );
+    assert_eq!(seen.last().map(|(_, x)| *x), Some(110), "the party went");
+    assert_eq!(
+        when_shown(&seen, 1),
+        Some(100),
+        "the centre while the flash shows"
+    );
+}
+
+#[test]
+fn slime_shows_the_flash_before_the_slimes() {
+    // 0x118382: the caster's flash first, then the evil actors become slimes (no message, so
+    // no print would show it afterwards).
+    let mut s = world_with(&[(5, 0x178, 101, 100)]);
+    s.actors.attrs.status[5] = 0x20;
+    s.actors.attrs.intelligence[1] = 30;
+    let seen = ticks(
+        s,
+        &[],
+        |e| e.state().objects.type_frame[5],
+        |st, io| async move {
+            super::creatures::slime(&st, &io).await;
+        },
+    );
+    assert_eq!(seen.last().map(|(_, t)| *t), Some(0x177), "slimed");
+    assert_eq!(
+        when_shown(&seen, 1),
+        Some(0x178),
+        "the actor while the flash shows"
+    );
+}
+
+#[test]
+fn wing_strike_shows_the_flash_before_the_dragon() {
+    // 0x11a0cc: the caster's flash first, then the dragon (0x19b) crosses the window.
+    let mut s = world_with(&[(5, 0x178, 100, 97)]);
+    s.actors.attrs.status[5] = 0x20;
+    s.actors.attrs.hp[5] = 0xff;
+    let dragon = |e: &Engine| {
+        let s = e.state();
+        (0x100..crate::objects::OBJECT_SLOTS).any(|o| s.objects.type_frame[o] & 0x3ff == 0x19b)
+    };
+    let seen = ticks(s, &[], dragon, |st, io| async move {
+        super::creatures::wing_strike(&st, &io).await;
+    });
+    assert!(seen.iter().any(|(_, d)| *d), "the dragon flew");
+    assert_eq!(
+        when_shown(&seen, 1),
+        Some(false),
+        "no dragon while the flash shows"
+    );
+}
+
+#[test]
+fn pickpocket_shows_the_victims_flash_before_the_casters_panel() {
+    // 0x119266: the ring of invisibility (0x102) flies to the caster, 0x11236c flashes the
+    // victim, then the caster's inventory is shown (0x111be0). When the panel is recounted for
+    // the caster (its carried weight: a 20 and now the ring's 7), every frame has been shown.
+    use crate::ui::pointer::{PointerState, PointerTables};
+    let mut s = world_with(&[(5, 0x178, 102, 100)]);
+    let mut base = vec![0u16; 1024];
+    base[0x102] = 0x258;
+    s.tables.basetile.base = base;
+    let mut weight = vec![0u8; 1024];
+    weight[0x102] = 7;
+    weight[0x90] = 20;
+    s.tables.tileflags.weight = weight;
+    s.ui.pointer = PointerState::from_tables(PointerTables {
+        regions: vec![
+            [8, 8, 167, 167],
+            [8, 176, 167, 191],
+            [168, 8, 311, 103],
+            [0, 0, 319, 199],
+        ],
+        shapes: Vec::new(),
+        walk_cell: (-1, -1),
+        shown: false,
+    });
+    s.actors.attrs.strength[1] = 10;
+    crate::objects::create_in(&mut s, 0x90, IN_INVENTORY, 0, 1);
+    crate::objects::create_in(&mut s, 0x102, READIED, 0, 5);
+    s.ui.input.selection = 5;
+    s.ui.input.target = (102, 100);
+    s.ui.input.target_pending = 1;
+    // A click on the first ring slot (x 0xb0..0xc0, y 0x38..0x48) of the victim's panel.
+    let click = |b| InputEvent::Pointer {
+        x: 0xb8,
+        y: 0x40,
+        buttons: b,
+    };
+    let seen = ticks(
+        s,
+        &[click(1), click(0)],
+        |e| e.state().inventory.carried_weight,
+        |st, io| async move {
+            super::items::pickpocket(&st, &io, 1).await;
+        },
+    );
+    let total = seen.last().map(|(n, _)| *n);
+    let recounted = seen.iter().find(|(_, w)| *w == 27).map(|(n, _)| *n);
+    assert!(total >= Some(4), "the flights and the flashes: {total:?}");
+    assert_eq!(
+        recounted, total,
+        "frames shown when the caster's panel is recounted"
+    );
+}

@@ -33,7 +33,8 @@ pub async fn gate_travel(state: &RefCell<State>, io: &Io) {
     let (_, text) = crate::ui::keyread::read_line(state, io, 4).await;
     print_at(state, io, NEWLINE, &[]).await;
     let caster = super::cast::caster(&state.borrow());
-    seams::flash_actor(&mut state.borrow_mut(), io, caster, 0);
+    // The flash is on the screen before the party goes (0x1191a2, then 0x10952e).
+    super::spells::flash_actor(state, io, caster, 0).await;
     let n = seams::parse_number(&state.borrow(), &text);
     if !(1..=8).contains(&n) {
         return;
@@ -72,7 +73,8 @@ pub async fn wizard_eye(state: &RefCell<State>, io: &Io, x: i16, y: i16, mode: i
     if mode != 0 {
         super::spells::flash_window(state, io, 6).await;
         let caster = super::cast::caster(&state.borrow());
-        seams::flash_actor(&mut state.borrow_mut(), io, caster, 0);
+        // On the screen before the eye moves the view (0x119b36, then the eye's redraws).
+        super::spells::flash_actor(state, io, caster, 0).await;
     }
     let (saved, eye) = {
         let mut s = state.borrow_mut();
