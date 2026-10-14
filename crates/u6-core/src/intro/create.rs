@@ -359,8 +359,8 @@ async fn gypsy_page(st: &mut IntroState, io: &Io, item: u16, with_passage: bool)
     swap_gradient(st, io).await;
 }
 
-/// Original: u 0x106666 (creation: the whole sequence) — 0 = created, 1 = cancelled or a game
-/// already in progress
+/// Original: u 0x106666 (creation: the whole sequence) — 0 = created, 1 = cancelled or the
+/// save already holds a character (passage 0x3e6)
 pub async fn create(st: &mut IntroState, io: &Io) -> u16 {
     st.views.draw.planes = st.video.other();
     let (d, s) = (st.views.draw, st.views.screen);
@@ -518,7 +518,8 @@ async fn wagon(st: &mut IntroState, io: &Io) {
     }
     st.gypsy.shimmer_on = 0;
     st.gypsy.pours = 0;
-    let top = 0x7f + st.exe.a4_i16(0x414);
+    // A word sum (`add.w` at 0x106b3e).
+    let top = st.exe.a4_i16(0x414).wrapping_add(0x7f);
     st.views.shimmer = View {
         planes: st.views.draw.planes,
         x1: 0xac,

@@ -30,13 +30,13 @@ const LEN: usize = 0x1c73;
 pub enum WriteError {
     /// `savegame/objlist` is not in the user's files (the original asks for the disk).
     Missing,
-    /// The portrait byte is set: a game is already in progress.
+    /// The portrait byte is set: the save already holds a character.
     InProgress,
 }
 
 /// Original: u 0x105700 (creation: write the character into `savegame/objlist`) — the objlist
-/// bytes, or `Err` when the save already holds a character (portrait byte nonzero: "A game is
-/// already in progress")
+/// bytes, or `Err` when the save already holds a character (portrait byte nonzero; 0x105700
+/// returns 1 and writes nothing, and its callers show passage 0x3e6 about it)
 ///
 /// Strength, dexterity, intelligence, magic = 2 × intelligence, the sex (1 = female), the karma
 /// byte, the 14 name bytes, experience (big-endian word), hit points (at most 255), level and

@@ -271,8 +271,8 @@ fn dialog_boxes(planes: Ptr) -> [View; 3] {
 /// Original: u 0x10a450 (transfer: ask for the save disk and A / B; read the save) — the
 /// source (4 Ultima IV, 5 Ultima V), or 0 for Escape and when no character was found
 ///
-/// Without a save the bell rings (a BEL to the console, which the port has not), "No character
-/// found!" replaces the text and a key ends the dialog.
+/// Without a save the bell rings (a BEL to the console, which the port has not), the not-found
+/// line (the string at 0x109aa8) replaces the text and a key ends the dialog.
 ///
 /// Replaces: u 0x10f6ae (seek and read), u 0x10f716 (close), u 0x1148b0 (the raw Ultima V disk
 /// reader) with u 0x11493c, u 0x114982, u 0x1149d0, u 0x114a40, u 0x114a5a, u 0x114a66,
