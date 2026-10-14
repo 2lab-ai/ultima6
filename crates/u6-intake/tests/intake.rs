@@ -10,7 +10,7 @@ use common::zip_writer::zip;
 use u6_intake::{InputFile, Intake, intake};
 
 fn game_text() -> Vec<u8> {
-    text(&"The Avatar has returned. ".repeat(40))
+    text(&"Synthetic payload, made up. ".repeat(40))
 }
 
 fn volume(name: &str) -> Vec<u8> {

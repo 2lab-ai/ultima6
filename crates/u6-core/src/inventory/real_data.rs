@@ -244,7 +244,7 @@ fn inventory_ready_unready_and_panels() {
     let sword = s.inventory.equip(2);
     assert!(sword > 1, "member 0 starts with a weapon in hand");
     let s = unready_ready(&files, s, sword, 2, "member0-weapon");
-    // Dupre's panel (F2) and his armour (slot 4) off and on.
+    // Member 1's panel (F2) and the armour (slot 4) off and on.
     let e = panel(s, &files, 0x92, 1);
     receipt(e.frame(), "inventory-member1");
     let s = e.state().clone();
@@ -259,14 +259,14 @@ fn inventory_ready_unready_and_panels() {
     let s = unready_ready(&files, s, armour, 4, "member1-armour");
     println!("scroll: {} lines", s.ui.messages.len());
 
-    // The portrait / equipment panel 0x128ce8 of Dupre from the roster, as Look shows it (one
+    // The portrait / equipment panel 0x128ce8 of member 1 from the roster, as Look shows it (one
     // key ends it).
     let mut s = s;
     s.ui.panel.mode = 0x91;
-    let dupre = Slot::from(s.actors.party.members[1]);
+    let member1 = Slot::from(s.actors.party.members[1]);
     let e = run(s, &files, &[Key::Space], move |st, io| async move {
         palette(&st, &io);
-        show_actor(&st, &io, dupre).await;
+        show_actor(&st, &io, member1).await;
         io.present();
     });
     receipt(e.frame(), "portrait-member1");
@@ -284,24 +284,33 @@ fn inventory_ready_unready_and_panels() {
     receipt(e.frame(), "portrait-actor1");
 }
 
-/// Finds a wilderness spot east of Britain where Rest has nothing to refuse (a 16-tile grid,
-/// rows first).
+/// Finds a wilderness spot near the start where Rest has nothing to refuse: a 16-tile grid of
+/// surface places around the leader, nearest rings first.
 fn camp_site(files: &Files) -> Option<State> {
     let base = start(files);
-    for y in (0x160..0x260).step_by(0x10) {
-        for x in (0x180..0x280).step_by(0x10) {
-            let mut s = base.clone();
-            crate::map::travel::teleport(&mut s, x, y, 0, 0);
-            s.main.pending_print.clear();
-            let mut t = s.clone();
-            let refused = crate::actors::rest::not_wilderness(&t)
-                || crate::actors::rest::foes_near(&t)
-                || crate::actors::rest::others_near(&t)
-                || crate::actors::rest::no_room(&mut t);
-            if !refused {
-                println!("camp site ({x:#x}, {y:#x}): centre {:?}", s.map.centre);
-                return Some(s);
+    let c = base.map.centre;
+    let mut spots: Vec<(i32, u16, u16)> = Vec::new();
+    for dy in -8..=8i32 {
+        for dx in -8..=8i32 {
+            let (x, y) = (i32::from(c.x) + 16 * dx, i32::from(c.y) + 16 * dy);
+            if (0..1024).contains(&x) && (0..1024).contains(&y) && (dx, dy) != (0, 0) {
+                spots.push((dx.abs().max(dy.abs()), x as u16, y as u16));
             }
+        }
+    }
+    spots.sort_unstable();
+    for (ring, x, y) in spots {
+        let mut s = base.clone();
+        crate::map::travel::teleport(&mut s, x, y, 0, 0);
+        s.main.pending_print.clear();
+        let mut t = s.clone();
+        let refused = crate::actors::rest::not_wilderness(&t)
+            || crate::actors::rest::foes_near(&t)
+            || crate::actors::rest::others_near(&t)
+            || crate::actors::rest::no_room(&mut t);
+        if !refused {
+            println!("camp site {ring} rings of 16 tiles from the start");
+            return Some(s);
         }
     }
     None

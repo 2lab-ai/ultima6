@@ -382,21 +382,21 @@ impl ObjList {
 mod tests {
     use super::*;
 
-    /// A zeroed objlist carrying the formats.md §6 proof values.
+    /// A zeroed objlist with made-up values in the decoded fields (none from the game's files).
     fn sample() -> Vec<u8> {
         let mut d = vec![0u8; OBJLIST_LEN];
-        // Actor 1 = (307,352,0) obj 410 (OBJ_U6_AVATAR) frame 3.
+        // Actor 1 = (601, 297, 2), obj 300 frame 3.
         d[POS + 3..POS + 6].copy_from_slice(
             &Position {
-                x: 307,
-                y: 352,
-                z: 0,
+                x: 601,
+                y: 297,
+                z: 2,
             }
             .to_packed(),
         );
-        put_be(&mut d, OBJ_N + 2, obj_word(410, 3));
-        // Actors 2-4 exp 374/373/372.
-        for (a, e) in [(2, 374), (3, 373), (4, 372)] {
+        put_be(&mut d, OBJ_N + 2, obj_word(300, 3));
+        // Actors 2-4 exp 1000/2000/3000.
+        for (a, e) in [(2, 1000), (3, 2000), (4, 3000)] {
             put_be(&mut d, EXP + 2 * a, e);
         }
         d[STATUS + 1] = 0x40; // alignment 2
@@ -404,16 +404,16 @@ mod tests {
         d[LEVEL + 255] = 8;
         d[MOVEMENT_FLAGS + 255] = 0x5A;
         put_be(&mut d, BASE_OBJ_N + 2 * 7, obj_word(387, 2));
-        for (i, n) in ["Avatar", "Dupre", "Shamino", "Iolo"].iter().enumerate() {
+        for (i, n) in ["Abcdef", "Ghijk", "Lmnopqr", "Stuv"].iter().enumerate() {
             d[PARTY_NAMES + i * 14..][..n.len()].copy_from_slice(n.as_bytes());
         }
         d[PARTY_ROSTER..PARTY_ROSTER + 4].copy_from_slice(&[1, 2, 3, 4]);
         d[PARTY_SIZE] = 4;
-        d[CLOCK..CLOCK + 4].copy_from_slice(&[0, 8, 4, 7]);
-        d[YEAR..YEAR + 2].copy_from_slice(&[0x00, 0xa1]);
-        put_be(&mut d, MOONSTONES, 935);
-        put_be(&mut d, MOONSTONES + 2, 262);
-        d[UNKNOWN_1BFB..UNKNOWN_1BFB + 8].copy_from_slice(&[0, 7, 0, 0xc5, 0, 0xe2, 0, 0]);
+        d[CLOCK..CLOCK + 4].copy_from_slice(&[5, 10, 3, 9]);
+        d[YEAR..YEAR + 2].copy_from_slice(&[0x01, 0x2c]);
+        put_be(&mut d, MOONSTONES, 100);
+        put_be(&mut d, MOONSTONES + 2, 200);
+        d[UNKNOWN_1BFB..UNKNOWN_1BFB + 8].copy_from_slice(&[0, 0x11, 0, 0x22, 0, 0x33, 0, 0x44]);
         d[TIMERS + 15] = 9;
         d[SOLO_MEMBER] = 0xFF;
         d[AVATAR_PORTRAIT] = 3;
@@ -427,11 +427,11 @@ mod tests {
         let a1 = o.actors[1];
         assert_eq!(
             (a1.pos.x, a1.pos.y, a1.pos.z, a1.obj_n, a1.frame),
-            (307, 352, 0, 410, 3)
+            (601, 297, 2, 300, 3)
         );
         assert_eq!((a1.alignment(), a1.strength), (2, 25));
         let exp: Vec<_> = o.actors[2..5].iter().map(|a| a.exp).collect();
-        assert_eq!(exp, [374, 373, 372]);
+        assert_eq!(exp, [1000, 2000, 3000]);
         assert_eq!(
             (o.actors[255].level, o.actors[255].movement_flags),
             (8, 0x5A)
@@ -440,15 +440,21 @@ mod tests {
         let members: Vec<_> = o.party.members().collect();
         assert_eq!(
             members,
-            [(1, "Avatar"), (2, "Dupre"), (3, "Shamino"), (4, "Iolo")]
+            [(1, "Abcdef"), (2, "Ghijk"), (3, "Lmnopqr"), (4, "Stuv")]
         );
         assert_eq!(o.party.names[4], "");
         assert_eq!(
-            (o.clock.hour, o.clock.day, o.clock.month, o.clock.year),
-            (8, 4, 7, 161)
+            (
+                o.clock.minute,
+                o.clock.hour,
+                o.clock.day,
+                o.clock.month,
+                o.clock.year
+            ),
+            (5, 10, 3, 9, 300)
         );
-        assert_eq!(o.moonstones[0], [935, 262, 0]);
-        assert_eq!(o.unknown_1bfb, [7, 0xc5, 0xe2, 0]);
+        assert_eq!(o.moonstones[0], [100, 200, 0]);
+        assert_eq!(o.unknown_1bfb, [0x11, 0x22, 0x33, 0x44]);
         assert_eq!(
             (o.eclipse(), o.player.solo_member, o.player.avatar_portrait),
             (9, 0xFF, 3)
@@ -461,14 +467,14 @@ mod tests {
         let mut o = ObjList::parse(&d).unwrap();
         assert_eq!(o.to_bytes(), d);
         o.actors[2].exp = 0x1234;
-        o.clock.year = 162;
-        o.party.names[1] = "Sentri".into();
+        o.clock.year = 301;
+        o.party.names[1] = "Wxyzab".into();
         let e = o.to_bytes();
         assert_eq!(&e[EXP + 4..EXP + 6], &[0x12, 0x34]);
-        assert_eq!(&e[YEAR..YEAR + 2], &[0x00, 0xa2]);
-        assert_eq!(&e[PARTY_NAMES + 14..PARTY_NAMES + 21], b"Sentri\0");
+        assert_eq!(&e[YEAR..YEAR + 2], &[0x01, 0x2d]);
+        assert_eq!(&e[PARTY_NAMES + 14..PARTY_NAMES + 21], b"Wxyzab\0");
         assert_eq!(e[OBJLIST_LEN - 1], 0x77);
-        assert_eq!(ObjList::parse(&e).unwrap().party.names[1], "Sentri");
+        assert_eq!(ObjList::parse(&e).unwrap().party.names[1], "Wxyzab");
     }
 
     #[test]

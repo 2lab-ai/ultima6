@@ -1,7 +1,10 @@
 //! Integration against the user's own game data. Runs only where
 //! ~/Games/ultima6 exists (never in CI: the data is not ours to ship, and it is
 //! read here only, never copied). Oracles: greaseweazle ADFs (img/), amitools
-//! xdftool unpack (files/), and tools/pp20.py output (unpacked/).
+//! xdftool unpack (files/), tools/pp20.py output (unpacked/) and the HFE images the zip holds
+//! (original/). No expected value is copied from them: the report the intake must write is
+//! built here from those oracles (headers read at their offsets, files counted), and
+//! comparisons of their content name lengths and indices only.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)] // tests may read files and time
 
 use std::collections::BTreeMap;
@@ -9,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
-use u6_intake::{InputFile, intake, read_ofs};
+use u6_intake::{ADF_SIZE, InputFile, intake, read_ofs};
+use u6_testkit::assert_same;
 
 const GAME: &str = "/Users/zhugehyuk/Games/ultima6";
 const SIDE_CARS: [&str; 3] = [".blkdev", ".bootcode", ".xdfmeta"];
@@ -40,6 +44,35 @@ fn list_tree(root: &Path) -> BTreeMap<String, PathBuf> {
     out
 }
 
+/// The one directory under `dir` (xdftool unpacks a volume into a directory of its name).
+fn volume_dir(dir: &Path) -> String {
+    let dirs: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| {
+            let e = e.unwrap();
+            e.path()
+                .is_dir()
+                .then(|| e.file_name().into_string().unwrap())
+        })
+        .collect();
+    assert_eq!(dirs.len(), 1, "one volume directory in {}", dir.display());
+    dirs[0].clone()
+}
+
+/// The report line of an HFE image, from its header (HxC HFE v1: the magic, then cylinders at
+/// 9, sides at 10, track encoding at 11, the LE bit rate at 12) and a fully decoded disk of
+/// `ADF_SIZE / 512` sectors.
+fn hfe_line(label: &str, hfe: &[u8]) -> String {
+    assert!(hfe.starts_with(b"HXCPICFE"), "{label}: an HFE image");
+    let kbps = u16::from_le_bytes([hfe[12], hfe[13]]);
+    let n = ADF_SIZE / 512;
+    format!(
+        "{label}: HFE {} cyl x {} sides, {kbps} kbps, encoding {}; sectors {n}/{n} good, bad \
+         header checksums 0, bad data checksums 0, wrong-track headers 0",
+        hfe[9], hfe[10], hfe[11]
+    )
+}
+
 #[test]
 fn intake_on_the_real_ultima_vi_zip() {
     let game = Path::new(GAME);
@@ -64,45 +97,69 @@ fn intake_on_the_real_ultima_vi_zip() {
         println!("  {line}");
     }
 
-    // Same report as the TypeScript intake on this zip (captured from its real-data test run).
-    let hfe_line = |n: u8, kbps: u16| {
-        format!(
-            "Ultima VI Disk {n}.hfe: HFE 83 cyl x 2 sides, {kbps} kbps, encoding 1; \
-             sectors 1760/1760 good, bad header checksums 0, bad data checksums 0, \
-             wrong-track headers 0"
-        )
-    };
-    let ts_report = [
-        "ultima-vi.zip: zip, 3 disk image(s): Ultima VI Disk 1.hfe, Ultima VI Disk 3.hfe, \
-         Ultima VI Disk 2.hfe"
-            .to_string(),
-        hfe_line(1, 252),
-        "Ultima VI Disk 1.hfe: volume INSTALL (DOS0), 41 files".to_string(),
-        hfe_line(2, 248),
-        "Ultima VI Disk 2.hfe: volume DATA1 (DOS0), 81 files".to_string(),
-        hfe_line(3, 250),
-        "Ultima VI Disk 3.hfe: volume DATA2 (DOS0), 8 files".to_string(),
-        "PP20: decrunched 79 file(s); 130 file(s) total".to_string(),
-    ];
-    assert_eq!(r.report, ts_report);
-
-    // Three disks, every sector good.
-    let labels: Vec<&str> = r.disks.iter().map(|d| d.label.as_str()).collect();
-    assert_eq!(
-        labels,
-        [
-            "Ultima VI Disk 1.hfe",
-            "Ultima VI Disk 2.hfe",
-            "Ultima VI Disk 3.hfe"
-        ]
-    );
-    let volumes: Vec<Option<&str>> = r.disks.iter().map(|d| d.volume.as_deref()).collect();
-    assert_eq!(volumes, [Some("INSTALL"), Some("DATA1"), Some("DATA2")]);
-    let sector_lines: Vec<&String> = r.report.iter().filter(|l| l.contains("sectors ")).collect();
-    assert_eq!(sector_lines.len(), 3);
-    for l in sector_lines {
-        assert!(l.contains("sectors 1760/1760 good"), "{l}");
+    // The HFE images of the zip, as archive.org also lists them loose next to it.
+    let mut labels: Vec<String> = std::fs::read_dir(game.join("original"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.to_ascii_lowercase().ends_with(".hfe"))
+        .collect();
+    labels.sort();
+    assert!(!labels.is_empty(), "the HFE images next to the zip");
+    let got: Vec<String> = r.disks.iter().map(|d| d.label.clone()).collect();
+    assert_same!(got, labels, "the disk labels, in order");
+    // The zip line names the same images (in the archive's order).
+    let (head, list) = r.report[0].split_once(": ").unwrap();
+    assert_eq!(head, "ultima-vi.zip", "the zip line first");
+    let (count, names) = list.split_once(": ").unwrap();
+    assert_eq!(count, format!("zip, {} disk image(s)", labels.len()));
+    let mut listed: Vec<String> = names.split(", ").map(str::to_string).collect();
+    listed.sort_unstable();
+    assert_same!(listed, labels, "the images the zip line names");
+    // Then per disk its HFE line and its volume line: the volume xdftool unpacked (its name,
+    // the DOS type of the ADF's boot block, its file count), then the PP20 summary.
+    let mut want_report = vec![r.report[0].clone()];
+    for (i, label) in labels.iter().enumerate() {
+        let hfe = std::fs::read(game.join("original").join(label)).unwrap();
+        want_report.push(hfe_line(label, &hfe));
+        let d = game.join(format!("files/d{}", i + 1));
+        let vol = volume_dir(&d);
+        let n = list_tree(&d.join(&vol)).len();
+        let adf = std::fs::read(game.join(format!("img/disk{}.adf", i + 1))).unwrap();
+        assert_eq!(&adf[..3], b"DOS", "{label}: an AmigaDOS boot block");
+        let dos = format!("DOS{}", adf[3]);
+        want_report.push(format!("{label}: volume {vol} ({dos}), {n} files"));
     }
+    // The decrunched files: those xdftool unpacked that start with the PP20 magic.
+    let crunched: usize = (1..=labels.len())
+        .map(|i| {
+            let d = game.join(format!("files/d{i}"));
+            list_tree(&d.join(volume_dir(&d)))
+                .values()
+                .filter(|p| std::fs::read(p).unwrap().starts_with(b"PP20"))
+                .count()
+        })
+        .sum();
+    let mut want_files = BTreeMap::new();
+    for d in ["d1", "d2", "d3"] {
+        for (path, full) in list_tree(&game.join("unpacked").join(d)) {
+            if !SIDE_CARS.iter().any(|ext| path.ends_with(ext)) {
+                want_files.insert(path, full);
+            }
+        }
+    }
+    let summary = format!(
+        "PP20: decrunched {crunched} file(s); {} file(s) total",
+        want_files.len()
+    );
+    want_report.push(summary.clone());
+    assert_same!(r.report, want_report, "the report lines");
+
+    // Every disk with a volume, every sector good.
+    let volumes: Vec<Option<String>> = r.disks.iter().map(|d| d.volume.clone()).collect();
+    let want_volumes: Vec<Option<String>> = (1..=labels.len())
+        .map(|i| Some(volume_dir(&game.join(format!("files/d{i}")))))
+        .collect();
+    assert_same!(volumes, want_volumes, "the volume names");
 
     // Each ADF equals the greaseweazle image byte for byte.
     for (i, disk) in r.disks.iter().enumerate() {
@@ -122,12 +179,8 @@ fn intake_on_the_real_ultima_vi_zip() {
         let want = list_tree(&game.join(format!("files/d{}", i + 1)).join(&vol.name));
         let mut got: Vec<&str> = vol.files.iter().map(|(p, _)| p.as_str()).collect();
         got.sort_unstable();
-        assert_eq!(
-            got,
-            want.keys().map(String::as_str).collect::<Vec<_>>(),
-            "{}",
-            disk.label
-        );
+        let want_paths: Vec<&str> = want.keys().map(String::as_str).collect();
+        assert_same!(got, want_paths, "the files of {}", disk.label);
         for (path, full) in &want {
             let bytes = vol.file(path).unwrap();
             assert_eq!(
@@ -140,28 +193,17 @@ fn intake_on_the_real_ultima_vi_zip() {
     }
 
     // Intake files equal the decrunched tree (PP20 via tools/pp20.py).
-    let mut want = BTreeMap::new();
-    for d in ["d1", "d2", "d3"] {
-        for (path, full) in list_tree(&game.join("unpacked").join(d)) {
-            if !SIDE_CARS.iter().any(|ext| path.ends_with(ext)) {
-                want.insert(path, full);
-            }
-        }
-    }
-    assert_eq!(
-        r.files.keys().collect::<Vec<_>>(),
-        want.keys().collect::<Vec<_>>()
-    );
-    assert_eq!(r.files.len(), 130);
-    for (path, full) in &want {
+    let got: Vec<&String> = r.files.keys().collect();
+    let want: Vec<&String> = want_files.keys().collect();
+    assert_same!(got, want, "the intake's file paths");
+    for (path, full) in &want_files {
         assert_eq!(
             sha256(&r.files[path]),
             sha256(&std::fs::read(full).unwrap()),
             "{path}"
         );
     }
-    let summary = r.report.last().unwrap();
-    assert_eq!(summary, "PP20: decrunched 79 file(s); 130 file(s) total");
+    assert_eq!(r.report.last(), Some(&summary));
     assert!(!r.report.iter().any(|l| l.contains("decrunch failed")));
 
     assert!(elapsed.as_secs() < 60, "intake took {elapsed:?}");

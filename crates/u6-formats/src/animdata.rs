@@ -78,15 +78,15 @@ mod tests {
     fn parses_be_arrays() {
         let mut d = vec![0u8; ANIMDATA_LEN];
         d[..6].copy_from_slice(&[0x00, 0x02, 0x00, 0x08, 0x00, 0x09]); // n 2, tiles 8, 9
-        d[66..70].copy_from_slice(&[0x03, 0x5E, 0x03, 0xF1]); // 862, 1009
+        d[66..70].copy_from_slice(&[0x02, 0x00, 0x02, 0x10]); // 512, 528
         d[130] = 0x06;
         d[162] = 1;
         let a = AnimData::parse(&d).unwrap();
         assert_eq!(a.count, 2);
         assert_eq!(a.active().len(), 2);
         assert_eq!(a.slots[0].tile_to_animate, 8);
-        assert_eq!(a.slots[1].first_anim_frame, 1009);
-        assert_eq!(a.slots[0].frame_tile(0b111), 862 + 3);
+        assert_eq!(a.slots[1].first_anim_frame, 528);
+        assert_eq!(a.slots[0].frame_tile(0b111), 512 + 3);
         let mut bad = d.clone();
         bad[1] = 33;
         assert!(AnimData::parse(&bad).is_err());

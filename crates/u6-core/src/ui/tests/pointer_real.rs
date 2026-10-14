@@ -264,7 +264,7 @@ fn the_game_played_with_the_pointer() {
         p.send(InputEvent::Key(Key::Space));
     }
     assert!(p.e.state().ui.input.line_input, "member 1 waits for words");
-    p.receipt("talk-dupre");
+    p.receipt("talk-member1");
     let talk = p.scroll(12);
     println!("talk: {} scroll lines", talk.len());
     let talk_name = p.command_name(0x83);
@@ -315,7 +315,7 @@ fn the_game_played_with_the_pointer() {
         "Look names member 1"
     );
     assert_eq!(p.e.state().ui.input.target_pending, 0);
-    p.receipt("look-dupre");
+    p.receipt("look-member1");
 
     // A map cell south of the Avatar: one step south.
     let before = p.e.state().map.centre;
@@ -339,7 +339,7 @@ fn the_game_played_with_the_pointer() {
             "member 1's stats"
         );
     }
-    p.receipt("dupre-stats");
+    p.receipt("member1-stats");
 
     // The roster icon, then the Avatar's figure: the Avatar's inventory.
     p.click(0xc8, 0x60);

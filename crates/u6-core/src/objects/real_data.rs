@@ -43,7 +43,22 @@ fn loaded(files: &Files) -> State {
 fn every_block_loads_through_the_slot_tables() {
     let Some(files) = files() else { return };
     let mut s = loaded(&files);
+    // 0x10cef2 compares with 21 table words (the loop bound is the code's).
     assert_eq!(s.objects.defs.stackable.len(), 21);
+    // What the block files hold, read from the raw files (formats.md §5: a BE record count, then
+    // 8-byte records whose byte 0 has the location in bits 3-4).
+    let mut raw_total = 0usize;
+    let mut raw_hist: BTreeMap<u8, usize> = BTreeMap::new();
+    for i in 0..BLOCK_COUNT {
+        let raw = files
+            .get(&crate::saveload::block_file(i))
+            .expect("the block file");
+        let n = usize::from(u16::from_be_bytes([raw[0], raw[1]]));
+        for k in 0..n {
+            *raw_hist.entry(raw[2 + 8 * k] & 0x18).or_default() += 1;
+        }
+        raw_total += n;
+    }
     // The strings came out of the data hunk (shape only; the text is the user's).
     let d = &s.objects.defs;
     assert!(d.nothing.starts_with(|c: char| c.is_ascii_uppercase()));
@@ -76,11 +91,14 @@ fn every_block_loads_through_the_slot_tables() {
         );
     }
     println!("records {total}, by location bits {hist:?}");
-    assert_eq!(total, 16838);
-    assert_eq!(
-        hist,
-        BTreeMap::from([(0x00, 15071), (0x08, 1638), (0x10, 62), (0x18, 67)])
+    assert_eq!(total, raw_total, "every record of the files");
+    let by_place = |h: &BTreeMap<u8, usize>| h.iter().map(|(&k, &n)| (k, n)).collect::<Vec<_>>();
+    assert_same!(
+        by_place(&hist),
+        by_place(&raw_hist),
+        "the records by location bits"
     );
+    // 0x10ed44's free count (an immediate of the code).
     assert_eq!(s.objects.free.1, 0xaff, "every slot came back");
 }
 
@@ -136,11 +154,11 @@ fn the_party_start_region_and_its_objects() {
         .into_iter()
         .map(|(id, _)| (s.objects.obj_type(id), s.objects.frame(id)))
         .collect();
-    println!("objects_at(party start) = {got:?}");
+    println!("objects_at(party start): {} objects", got.len());
     let (mut g, mut w) = (got.clone(), want.clone());
     g.sort();
     w.sort();
-    assert_eq!(g, w);
+    assert_same!(g, w, "the objects at the party's start");
     assert!(got.contains(&(
         s.objects.obj_type(ObjectId(1)),
         s.objects.frame(ObjectId(1))

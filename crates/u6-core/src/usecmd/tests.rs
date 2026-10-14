@@ -33,7 +33,7 @@ fn world() -> State {
     s.objects.type_frame[1] = 0x17a;
     s.actors.party.members[0] = 1;
     s.actors.party.size = 1;
-    s.actors.party.names = vec!["Avatar".into()];
+    s.actors.party.names = vec!["Abcdef".into()];
     s.actors.attrs.status[1] = 0x80;
     s.actors.objlist_tail = vec![0; 0x82];
     s

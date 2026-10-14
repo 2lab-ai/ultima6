@@ -18,7 +18,7 @@ use super::objlist::{OBJLIST_LEN, TABLES, decode, encode};
 use super::*;
 use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
-use crate::objects::BLOCK_COUNT;
+use crate::objects::{ACTOR_SLOTS, BLOCK_COUNT, FIRST_TEMP_ACTOR};
 use crate::state::State;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
@@ -182,11 +182,16 @@ fn decode_agrees_with_the_formats_parser() {
     decode(&mut s, raw);
     let (o, a) = (&s.objects, &s.actors);
     for (i, r) in list.actors.iter().enumerate() {
-        assert_eq!(o.obj_status[i], r.obj_flags, "{i}");
-        assert_eq!(o.location[i], r.pos, "{i}");
-        assert_eq!(o.type_frame[i] & 0x3ff, r.obj_n, "{i}");
-        assert_eq!((o.type_frame[i] >> 10) as u8, r.frame, "{i}");
-        assert_eq!(o.qq[i], r.unknown_0600, "{i}");
+        assert_same!([o.obj_status[i]], [r.obj_flags], "the flags of actor {i}");
+        assert!(o.location[i] == r.pos, "the location of actor {i}");
+        let tf = [o.type_frame[i] & 0x3ff, o.type_frame[i] >> 10];
+        let want = [r.obj_n, u16::from(r.frame)];
+        assert_same!(tf, want, "the type and frame of actor {i}");
+        assert_same!(
+            [o.qq[i]],
+            [r.unknown_0600],
+            "the word at 0x600 of actor {i}"
+        );
         let t = &a.attrs;
         let got = [
             t.status[i],
@@ -219,31 +224,27 @@ fn decode_agrees_with_the_formats_parser() {
             r.movement_flags,
         ];
         assert_same!(got, want, "the attributes of actor {i}");
-        assert_eq!(t.exp[i], r.exp);
-        assert_eq!(t.base_type_frame[i] & 0x3ff, r.base_obj_n);
-        assert_eq!(t.unknown_18f1[i], raw[0x18F1 + i]);
-        assert_eq!(t.unknown_1af1[i], raw[0x1AF1 + i]);
+        assert_same!([t.exp[i]], [r.exp], "the experience of actor {i}");
+        let base = [t.base_type_frame[i] & 0x3ff];
+        assert_same!(base, [r.base_obj_n], "the base type of actor {i}");
+        let bytes = [t.unknown_18f1[i], t.unknown_1af1[i]];
+        let want = [raw[0x18F1 + i], raw[0x1AF1 + i]];
+        assert_same!(bytes, want, "the bytes at 0x18F1 and 0x1AF1 of actor {i}");
     }
     assert_same!(a.party.names, list.party.names, "the party names");
-    assert_eq!(
-        (a.party.members, a.party.size),
-        (list.party.roster, list.party.size)
-    );
+    assert_same!(a.party.members, list.party.roster, "the roster");
+    assert_same!([a.party.size], [list.party.size], "the party size");
     let c = list.clock;
-    assert_eq!(
-        (
-            a.calendar.minute,
-            a.calendar.hour,
-            a.calendar.day,
-            a.calendar.month,
-            a.calendar.year
-        ),
-        (c.minute, c.hour, c.day, c.month, c.year)
-    );
+    let k = &a.calendar;
+    let clock = [k.minute, k.hour, k.day, k.month].map(u16::from);
+    let want = [c.minute, c.hour, c.day, c.month].map(u16::from);
+    assert_same!(clock, want, "the clock");
+    assert_same!([k.year], [c.year], "the year");
     let p = list.player;
-    assert_eq!(
-        (a.quest_flag, a.rest_counter, a.karma, a.wind),
-        (p.quest_flag, p.rest_counter, p.karma, p.wind_direction)
+    assert_same!(
+        [a.quest_flag, a.rest_counter, a.karma, a.wind],
+        [p.quest_flag, p.rest_counter, p.karma, p.wind_direction],
+        "the player bytes"
     );
     assert_same!(a.timers, list.timers, "the timers");
     assert_same!(a.objlist_tail, raw[0x1BF1..0x1C73], "the objlist tail");
@@ -263,6 +264,24 @@ fn decode_agrees_with_the_formats_parser() {
     );
 }
 
+/// The surface block holding the leader's superchunk (128 × 128 tiles a block, x then y): in a
+/// start save the block of the opening fight (the egg the party stands by).
+fn leader_block(s: &State) -> usize {
+    let at = s.leader_position().expect("a leader");
+    usize::from(at.y / 128) * 8 + usize::from(at.x / 128)
+}
+
+/// The shipped party roster: the actor numbers at objlist 0x0FE0, as many as the size at 0x0FF0
+/// (formats.md §6), read from the raw file.
+fn roster(files: &Files) -> Vec<usize> {
+    let raw = files.get(OBJLIST_FILE).unwrap();
+    let n = usize::from(raw[0x0FF0]).min(16);
+    raw[0x0FE0..0x0FE0 + n]
+        .iter()
+        .map(|&a| usize::from(a))
+        .collect()
+}
+
 /// The new-game files the port boots from: objlist and the 69 blocks.
 fn shipped(files: &Files) -> (Vec<u8>, Vec<Vec<u8>>) {
     let objlist = files.get(OBJLIST_FILE).unwrap()[..OBJLIST_LEN].to_vec();
@@ -276,10 +295,11 @@ fn shipped(files: &Files) -> (Vec<u8>, Vec<Vec<u8>>) {
 /// original alike: 0x1217d4 raises a dexterity of 0 to 1 and takes actor 0 out of a schedule
 /// worktype; 0x105350 puts the view centre (block 0x0c..0x11) on the leader; the clock tick at
 /// +0 (0x10368a) sets the moons (block 0x7c..0x7f); idle animation turns actors; the opening
-/// fight (the throne egg 0x1319b2 hatches gargoyles into 0xe0..0xe2, combat starts 0x121c64;
-/// [`opening_fight`]). The portrait byte (block 0x81) is the port's character-creation stub.
-fn boot_change(table: &str, i: usize, x: u8, y: u8) -> Option<&'static str> {
-    if opening_fight(table, i) {
+/// fight (the egg 0x1319b2 hatches its creatures into temporary actor slots, combat starts
+/// 0x121c64; [`opening_fight`]). The portrait byte (block 0x81) is the port's character-creation
+/// stub.
+fn boot_change(table: &str, i: usize, x: u8, y: u8, party: &[usize]) -> Option<&'static str> {
+    if opening_fight(table, i, party) {
         return Some("0x1319b2 / 0x121c64 opening fight");
     }
     Some(match table {
@@ -297,6 +317,7 @@ fn boot_change(table: &str, i: usize, x: u8, y: u8) -> Option<&'static str> {
 fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
     let Some(files) = zip_files() else { return };
     let (old_list, old_blocks) = shipped(&files);
+    let party = roster(&files);
     let mut run = Run::boot(files);
     run.command(Cmd::Save);
     let s = run.state();
@@ -307,33 +328,43 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
         for i in 0..len {
             let (x, y) = (old_list[off + i], new_list[off + i]);
             if x != y {
-                let w = boot_change(name, i, x, y);
+                let w = boot_change(name, i, x, y, &party);
                 assert!(w.is_some(), "{name} byte {i:#x} changed, unexplained");
                 *why.entry(w.unwrap()).or_insert(0) += 1;
             }
         }
     }
     eprintln!("objlist bytes changed by the boot: {why:?}");
-    let committed: Vec<String> = (0..BLOCK_COUNT)
+    // The Save commits the blocks of the region: the 2 × 2 surface blocks the window spans,
+    // the leader's among them.
+    let committed: Vec<usize> = (0..BLOCK_COUNT)
         .filter(|&i| s.saveload.block_gen[i] == 1)
-        .map(block_file)
         .collect();
-    assert_eq!(
-        committed,
-        [
-            "savegame/objblkBC",
-            "savegame/objblkCC",
-            "savegame/objblkBD",
-            "savegame/objblkCD"
-        ]
+    let fight = leader_block(&s);
+    let (xs, ys): (Vec<usize>, Vec<usize>) = committed.iter().map(|&i| (i % 8, i / 8)).unzip();
+    let (x0, y0) = (*xs.iter().min().unwrap(), *ys.iter().min().unwrap());
+    let square: Vec<usize> = [(0, 0), (1, 0), (0, 1), (1, 1)]
+        .iter()
+        .map(|(dx, dy)| (y0 + dy) * 8 + x0 + dx)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert!(
+        committed.iter().all(|&i| i < 64) && committed == square,
+        "{} committed blocks, not a 2 x 2 square of the surface",
+        committed.len()
     );
+    assert!(committed.contains(&fight), "the leader's block committed");
     for (name, a, b) in block_diffs(&old_blocks, &new_blocks) {
         let i = (0..BLOCK_COUNT).find(|&i| block_file(i) == name).unwrap();
         let (mut ra, mut rb) = (records(&old_blocks[i]), records(&new_blocks[i]));
-        if name == "savegame/objblkCC" {
-            // The throne egg hatched (its status) and armed its gargoyles (their gear).
-            eprintln!("{name}: {a} -> {b} records, gear {}", gear_records(&rb));
-            assert!(gear_records(&rb) > 0, "the hatched gargoyles' gear");
+        if i == fight {
+            // The egg hatched (its status) and armed its creatures (their gear).
+            eprintln!(
+                "the leader's block: {a} -> {b} records, gear {}",
+                gear_records(&rb)
+            );
+            assert!(gear_records(&rb) > 0, "the hatched creatures' gear");
             assert_same!(
                 strip_fight(ra),
                 strip_fight(rb),
@@ -349,7 +380,7 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
         ra.sort();
         rb.sort();
         assert_same!(ra, rb, "{name}: the same records");
-        assert_eq!(name, "savegame/objblkCD");
+        assert!(committed.contains(&i), "{name}: a block of the region");
     }
 }
 
@@ -420,13 +451,13 @@ fn frame_only(table: &str, index: usize, x: u8, y: u8) -> bool {
     table == "0x137988 type + frame" && index.is_multiple_of(2) && x & 3 == y & 3
 }
 
-/// The opening fight in a start save: the egg at the throne (0x1319b2) hatches three gargoyles
-/// into the temporary actor slots 0xe0..0xe2, and combat mode starts for the objlist's combat
-/// byte (0x121c64: each member's worktype from its combat mode, worktype operand = its party
-/// index, the solo worktype kept at A4-0x7b0a). The port runs both since milestone 2 but from
-/// its own RNG state (seed 0; the oracle's differs), so the gargoyles' stats, places and gear
-/// differ from the original's.
-fn opening_fight(table: &str, index: usize) -> bool {
+/// The opening fight in a start save: the egg by the party (0x1319b2) hatches its creatures
+/// into the temporary actor slots (0x131646 from `FIRST_TEMP_ACTOR` on), and combat mode starts
+/// for the objlist's combat byte (0x121c64: each member's worktype from its combat mode,
+/// worktype operand = its party index, the solo worktype kept at A4-0x7b0a). The port runs both
+/// since milestone 2 but from its own RNG state (seed 0; the oracle's differs), so the
+/// creatures' stats, places and gear differ from the original's. `party` = the roster.
+fn opening_fight(table: &str, index: usize, party: &[usize]) -> bool {
     let actor = match table {
         "0x135588 location" => index / 3,
         "0x137988 type + frame"
@@ -435,16 +466,21 @@ fn opening_fight(table: &str, index: usize) -> bool {
         | "0x139688 base type + frame" => index / 2,
         _ => index,
     };
-    (0xe0..=0xe2).contains(&actor)
-        || (table == "0x139188 worktype" && (1..=4).contains(&actor))
-        || (table == "0x139488 worktype operand" && (1..=4).contains(&actor))
+    temporary(actor)
+        || (table == "0x139188 worktype" && party.contains(&actor))
+        || (table == "0x139488 worktype operand" && party.contains(&actor))
         || (table == "A4-0x7b84 block" && index == 0x7a)
 }
 
+/// A temporary actor slot (0xe0..0x100, the monsters' slots).
+fn temporary(actor: usize) -> bool {
+    (FIRST_TEMP_ACTOR as usize..ACTOR_SLOTS).contains(&actor)
+}
+
 /// A block record of the opening fight: a readied object (the gear 0x13121a gives) of a
-/// gargoyle in 0xe0..0xe2, or the throne egg (type 0x14f), whose status the hatch changes.
+/// temporary actor, or an egg (type 0x14f), whose status the hatch changes.
 fn fight_record(r: &[u8; 8]) -> bool {
-    (r[0] & 0x38 == 0x38 && (0xe0..=0xe2).contains(&r[1])) || r[4..6] == [1, 0x4f]
+    (r[0] & 0x38 == 0x38 && temporary(usize::from(r[1]))) || r[4..6] == [1, 0x4f]
 }
 
 /// The records of a block without the opening fight's, container indices (which shift after
@@ -465,10 +501,10 @@ fn strip_fight(v: Vec<[u8; 8]>) -> Vec<[u8; 8]> {
     v
 }
 
-/// The gargoyles' gear records (readied, owned by 0xe0..0xe2) of a block.
+/// The hatched creatures' gear records (readied, owned by a temporary actor) of a block.
 fn gear_records(v: &[[u8; 8]]) -> usize {
     v.iter()
-        .filter(|r| r[0] & 0x38 == 0x38 && (0xe0..=0xe2).contains(&r[1]))
+        .filter(|r| r[0] & 0x38 == 0x38 && temporary(usize::from(r[1])))
         .count()
 }
 
@@ -479,9 +515,11 @@ fn the_ports_start_save_against_the_originals() {
         return;
     };
     attach(&mut files, &boot).unwrap();
+    let party = roster(&files);
     let mut run = Run::boot(files);
     run.command(Cmd::Save);
     let s = run.state();
+    let fight = leader_block(&s);
     let mut got_store = boot.clone();
     got_store.store(&changed_since(&s, 0)).unwrap();
     let want = store_files(&saved);
@@ -492,41 +530,41 @@ fn the_ports_start_save_against_the_originals() {
         for i in 0..len {
             let (x, y) = (want.0[off + i], got.0[off + i]);
             if x != y {
-                let why = frame_only(name, i, x, y) || opening_fight(name, i);
+                let why = frame_only(name, i, x, y) || opening_fight(name, i, &party);
                 assert!(why, "{name} byte {i:#x} unexplained");
             }
         }
     }
     for i in 0..BLOCK_COUNT {
         let (w, g) = (defined_block(&want.1[i]), defined_block(&got.1[i]));
-        if block_file(i) != "savegame/objblkCC" {
+        if i != fight {
             assert_same!(w, g, "the records of {}", block_file(i));
             continue;
         }
-        // CC: the gargoyles' readied gear (temporary, owned by 0xe0..0xe2) and the egg's status
-        // come from the RNG (the port's seed is not the oracle's), and the container indices
-        // after them shift; both sides arm their gargoyles.
+        // The leader's block: the hatched creatures' readied gear (owned by temporary actors)
+        // and the egg's status come from the RNG (the port's seed is not the oracle's), and the
+        // container indices after them shift; both sides arm their creatures.
         let (wg, gg) = (gear_records(&w), gear_records(&g));
-        eprintln!("objblkCC: the gargoyles' gear: {wg} records in the original, {gg} in the port");
+        eprintln!(
+            "the leader's block: the creatures' gear: {wg} records in the original, {gg} in the port"
+        );
         assert!(
             wg > 0 && gg > 0,
-            "both sides' gargoyles carry gear (0x13121a)"
+            "both sides' creatures carry gear (0x13121a)"
         );
         assert_same!(
             strip_fight(w),
             strip_fight(g),
-            "the records of CC apart from the fight"
+            "the records of the leader's block apart from the fight"
         );
     }
 }
 
-/// The original's own save boots in the port, and the port's save of it is the original's
-/// save of the same state (the original booted from that save and saved again at once).
+/// The boot's own path (`State::new_game`, then game's main) of the user's files under a save
+/// whose party-size byte (objlist 0x0FF0) is 17: clamped to 15, the boot reaches the prompt, and
+/// a pass turn and an hour of the clock run over the 15 members.
 #[test]
 fn a_saved_party_size_past_the_roster_boots_clamped() {
-    // The boot's own path (`State::new_game`, then game's main) of the user's files under a save
-    // whose party-size byte (objlist 0x0FF0) is 17: clamped to 15, the boot reaches the prompt,
-    // and a pass turn and an hour of the clock run over the 15 members.
     let Some(mut files) = zip_files() else { return };
     let mut f = files.get(OBJLIST_FILE).unwrap().to_vec();
     f[0x0FF0] = 17;
@@ -549,28 +587,32 @@ fn a_saved_party_size_past_the_roster_boots_clamped() {
     eprintln!("booted: party size {}, hour {hour}", s.actors.party.size);
 }
 
+/// The original's own save boots in the port, and the port's save of it is the original's
+/// save of the same state (the original booted from that save and saved again at once).
 #[test]
 fn the_originals_save_loads_and_saves_like_the_original() {
     let Some(mut files) = zip_files() else { return };
     let (Some(saved), Some(resaved)) = (oracle_save("start-saved"), oracle_save("resaved")) else {
         return;
     };
-    assert_eq!(saved.files[OBJLIST_FILE].len(), OBJLIST_LEN);
+    let raw = &saved.files[OBJLIST_FILE];
+    assert_eq!(raw.len(), OBJLIST_LEN);
+    // The temporary actors the save holds: a type in the low 10 bits of the BE type word at
+    // objlist 0x400 + 2 * actor (formats.md §6), read from the saved file.
+    let held: Vec<usize> = (FIRST_TEMP_ACTOR as usize..ACTOR_SLOTS)
+        .filter(|&a| u16::from_be_bytes([raw[0x400 + 2 * a], raw[0x401 + 2 * a]]) & 0x3ff != 0)
+        .collect();
+    assert!(!held.is_empty(), "the original saved its hatched creatures");
     attach(&mut files, &saved).unwrap();
     let mut run = Run::boot(files);
     {
         let s = run.e.state();
-        let types: Vec<u16> = (0xe0..0xe3)
-            .map(|a| s.objects.type_frame[a] & 0x3ff)
-            .collect();
-        eprintln!(
-            "loaded: centre {:?}, temporary actors {types:x?}",
-            s.map.centre
-        );
-        assert!(
-            types.iter().all(|&t| t != 0),
-            "the saved gargoyles are back"
-        );
+        let back = held
+            .iter()
+            .filter(|&&a| s.objects.type_frame[a] & 0x3ff != 0)
+            .count();
+        eprintln!("loaded: {} temporary actors saved, {back} back", held.len());
+        assert_eq!(back, held.len(), "the saved creatures are back");
     }
     run.command(Cmd::Save);
     let s = run.state();

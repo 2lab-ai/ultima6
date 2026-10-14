@@ -42,15 +42,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unpacks_formats_md_examples() {
-        // OBJBLKAB `00 45 c4 02` -> (69,177,0); OBJBLKHH `00 84 03 0e` -> (900,896,0).
-        let p = Position::from_packed([0x45, 0xc4, 0x02]);
-        assert_eq!((p.x, p.y, p.z), (69, 177, 0));
-        let p = Position::from_packed([0x84, 0x03, 0x0e]);
-        assert_eq!((p.x, p.y, p.z), (900, 896, 0));
-        // schedule record 0 bytes 2..5 `33 71 05` -> (307,348,0).
-        let p = Position::from_packed([0x33, 0x71, 0x05]);
-        assert_eq!((p.x, p.y, p.z), (307, 348, 0));
+    fn unpacks_the_bit_fields() {
+        // Made-up bytes: `f4 61 09` -> (500,600,0); `2a ff 3f` -> (810,1023,3); `07 00 50` ->
+        // (7,0,5).
+        let p = Position::from_packed([0xf4, 0x61, 0x09]);
+        assert_eq!((p.x, p.y, p.z), (500, 600, 0));
+        let p = Position::from_packed([0x2a, 0xff, 0x3f]);
+        assert_eq!((p.x, p.y, p.z), (810, 1023, 3));
+        let p = Position::from_packed([0x07, 0x00, 0x50]);
+        assert_eq!((p.x, p.y, p.z), (7, 0, 5));
     }
 
     #[test]

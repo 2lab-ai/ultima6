@@ -148,7 +148,7 @@ fn script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
     r.tick(30);
     shot("origin", r);
     r.tick(85);
-    shot("lord-british", r);
+    shot("title-card-2", r);
     r.tick(150);
     shot("tv-room", r);
     r.keys(&[Key::Space], 60);
