@@ -417,6 +417,54 @@ test('a Save after the saved game was forgotten stores the whole game; a reload 
   assert.equal(s.leader, later, 'resumed where it was saved');
 }, { needs: h.haveHfes });
 
+test('a Save of a game that did not own the stored save, then the forget: it is not stored; the next Save is, whole', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, 130);
+  // No kept files: a drop of only a savegame folder starts nothing, it becomes the stored save
+  // and the game on screen no longer owns it (synthetic: the far block 63 empty).
+  await page.click('#forget');
+  await h.waitSettled(page);
+  assert.equal(await h.keptPaths(page), null);
+  await h.dropFiles(page, [], [{ name: 'PLAYER/SAVEGAME/OBJBLKHH', bytes: [0, 0] }]);
+  await h.waitSettled(page);
+  let s = await h.state(page);
+  assert.equal(s.state, 'running', s.status);
+  assert.match(s.status, /The game on screen is not saved in this browser any more/);
+  const lower = async () => (await h.savedPaths(page)).map((p) => p.toLowerCase());
+  assert.deepEqual(await lower(), ['savegame/objblkhh']);
+  // The game on screen saves: not stored, it does not own the store.
+  await page.focus('#screen');
+  await h.waitPrompt(page);
+  await h.press(page, 'Control+s', 30);
+  await h.press(page, 'y', 60);
+  await page.waitForFunction(() => globalThis.__saveGen === 1, null, { timeout: 30_000 });
+  await h.waitSettled(page);
+  assert.deepEqual(await lower(), ['savegame/objblkhh'], 'the Save was not stored');
+  assert.equal((await h.state(page)).saved, 0);
+  // The forget: that earlier Save stays out of the store on the ticks after it.
+  const from = (await h.log(page)).length;
+  await page.click('#forget-save');
+  await h.waitSettled(page);
+  await h.waitTicks(page, 10);
+  await h.waitSettled(page);
+  s = await h.state(page);
+  const stores = (await h.log(page)).slice(from).filter((e) => e.startsWith('saves:store:start'));
+  assert.deepEqual(stores, [], 'nothing stored after the forget');
+  assert.deepEqual(await h.savedPaths(page), [], 'the store stays empty');
+  assert.equal(s.saved, 0);
+  assert.match(s.status, /The saved game was removed from this browser; the next start is a new game/);
+  // A Save after the forget is stored, whole: the objlist and every block.
+  await page.focus('#screen');
+  await h.waitPrompt(page);
+  await h.press(page, 'Control+s', 30);
+  await h.press(page, 'y', 60);
+  await page.waitForFunction(() => document.body.dataset.saved === '2', null, { timeout: 60_000 });
+  await h.waitSettled(page);
+  assert.equal((await h.savedPaths(page)).length, 70, 'the objlist and every block');
+}, { needs: h.haveHfes });
+
 test('a savegame folder file over the save limit is left out before it is read', async (env) => {
   const { page } = await h.openPage(env);
   await h.load(page, env);
