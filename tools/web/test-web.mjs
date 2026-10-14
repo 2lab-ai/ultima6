@@ -1,12 +1,13 @@
 // Browser tests of site/ under its real headers (tools/web/serve.mjs applies site/_headers):
 // the operation queue (rapid imports, import during the restore, forget during a save), error
 // handling (read and forget failures, an engine trap and Restart), keyboard focus, the CSP,
-// saved games (stored after a Save, resumed on reload, forgotten, imported as a folder), the
-// sound output (AudioContext after a gesture, chunks into the worklet) and the launcher's
-// sequence as a player meets it (the opening, the menu, a character created and kept, Journey
-// Onward after a reload, Quit) and the mouse on the canvas (the first press is both the sound's
-// gesture and exactly one game click). Most tests start `game` at once (harness `gameFirst`); the
-// launcher tests run the page as it is.
+// saved games (stored after a Save, resumed on reload, forgotten, imported as a folder, a
+// replaced game's Save never stored over its replacement's, a folder file over the save limit
+// left out), the sound output (AudioContext after a gesture, chunks into the worklet) and the
+// launcher's sequence as a player meets it (the opening, the menu, a character created and
+// kept, the menu's J after a reload, Quit) and the mouse on the canvas (the first press is
+// both the sound's gesture and exactly one game click). Most tests start `game` at once
+// (harness `gameFirst`); the launcher tests run the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. Tests that need the user's disks skip when they are absent.
 //
@@ -228,7 +229,7 @@ test('A on the canvas: Attack asks for a target, a stray key ends it, then the a
   await h.waitPrompt(page);
   await page.keyboard.press('a');
   await h.sleep(800);
-  await page.keyboard.press('q'); // confirms no target: "what?", the turn (the start fight) runs
+  await page.keyboard.press('q'); // confirms no target: the no-target word, the turn (the start fight) runs
   await h.waitPrompt(page);
   await writeFile('/tmp/claude-501/m2-attack-what.png', await page.locator('#screen').screenshot());
   const { key, before } = await h.stepSideways(page);
@@ -297,25 +298,19 @@ test('a save (Ctrl-S, Y) is kept; a reload resumes it there; forgetting it start
   assert.match(s.status, /a new game \(no game saved in this browser\)/);
 }, { needs: h.haveHfes });
 
+// Stored save files as a PLAYER disk's savegame/ folder would hold them (upper case).
+const asFolder = (files) => files.map(({ path, bytes }) => ({ name: `PLAYER/${path.toUpperCase()}`, bytes }));
+// The files of a folder or a store, by lower-cased name.
+const byName = (files) => Object.fromEntries(files.map(({ name, path, bytes }) =>
+  [(path ?? name.slice('PLAYER/'.length)).toLowerCase(), bytes]));
+
 test('an original savegame folder dropped becomes the saved game', async (env) => {
   const { page } = await h.openPage(env);
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
   await started(page, 130);
   const { moved } = await walkAndSave(page);
-  // The stored files, as a PLAYER disk's savegame/ folder would hold them.
-  const folder = await page.evaluate(() => new Promise((done, fail) => {
-    const req = indexedDB.open('ultima6-port', 1);
-    req.onerror = () => fail(req.error);
-    req.onsuccess = () => {
-      const get = req.result.transaction('files').objectStore('files')
-        .getAll(IDBKeyRange.bound('save:', 'save:\uffff'));
-      get.onsuccess = () => {
-        req.result.close();
-        done(get.result.map((f) => ({ name: `PLAYER/${f.path.toUpperCase()}`, bytes: [...f.bytes] })));
-      };
-    };
-  }));
+  const folder = asFolder(await h.savedFiles(page));
   await page.click('#forget-save');
   await h.waitSettled(page);
   assert.deepEqual(await h.savedPaths(page), []);
@@ -326,6 +321,74 @@ test('an original savegame folder dropped becomes the saved game', async (env) =
   assert.equal(s.leader, moved, 'the imported save resumes');
   assert.equal((await h.savedPaths(page)).length, folder.length, 'one record per file, any case');
 }, { needs: h.haveHfes });
+
+test('a Save of the game an import replaces, made while the import reads: the imported save wins', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, 130);
+  const { moved } = await walkAndSave(page);
+  const folder = asFolder(await h.savedFiles(page));
+  const { to: later } = await h.stepSideways(page);
+  assert.notEqual(later, moved);
+  await page.evaluate(() => window.__hold('read'));
+  const from = (await h.log(page)).length;
+  await h.dropFiles(page, [], folder);
+  await h.waitLog(page, 'read:start');
+  // The game on screen saves (its second Save) while the import is held in its file reads.
+  await page.focus('#screen');
+  await h.press(page, 'Control+s', 30);
+  await h.press(page, 'y', 60);
+  await page.waitForFunction(() => globalThis.__saveGen === 2, null, { timeout: 30_000 });
+  await page.evaluate(() => window.__release('read'));
+  let s = await started(page, 130);
+  const stores = (await h.log(page)).slice(from).filter((e) => e.startsWith('saves:store:start'));
+  assert.deepEqual(stores, [`saves:store:start:${folder.length}`], 'only the import stored');
+  assert.deepEqual(byName(await h.savedFiles(page)), byName(folder), 'the store holds the imported files');
+  assert.match(s.status, /The saved game \(\d+ files\) was imported/);
+  assert.equal(s.leader, moved, 'the imported save resumes');
+  assert.equal(s.saved, 1, 'the replaced game\'s Save was not stored');
+  await page.reload();
+  s = await started(page, 130);
+  assert.equal(s.leader, moved, 'a reload resumes the imported save');
+}, { needs: h.haveHfes });
+
+test('an import that does not start leaves the stored save; the game on screen saves on', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, 130);
+  await walkAndSave(page);
+  const stored = await h.savedFiles(page);
+  // A folder with only the objlist, and no game files: the import cannot start.
+  const folder = asFolder(stored.filter(({ path }) => path === 'savegame/objlist'));
+  assert.ok(folder.length === 1 && stored.length > 1, String(stored.length));
+  await h.dropFiles(page, [], [...folder, MARKER]);
+  await h.waitSettled(page);
+  let s = await h.state(page);
+  assert.match(s.status, /Could not start the game/);
+  assert.deepEqual(byName(await h.savedFiles(page)), byName(stored), 'the stored save is as it was');
+  await page.focus('#screen');
+  await h.press(page, 'Control+s', 30);
+  await h.press(page, 'y', 60);
+  await page.waitForFunction(() => document.body.dataset.saved === '2', null, { timeout: 60_000 });
+  await h.waitSettled(page);
+  s = await h.state(page);
+  assert.match(s.status, /Saved in this browser/, 'the game on screen still stores its Saves');
+}, { needs: h.haveHfes });
+
+test('a savegame folder file over the save limit is left out before it is read', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  // Synthetic bytes: more than a block file can hold (the count word and 0xc00 records).
+  await h.dropFiles(page, [], [{ name: 'PLAYER/SAVEGAME/objblkAA', bytes: new Array(30_000).fill(0) }]);
+  await h.waitSettled(page);
+  const s = await h.state(page);
+  assert.match(s.status, /Left out of the saved game \(a save file holds at most \d+ bytes/);
+  assert.match(s.status, /Nothing was imported/);
+  assert.ok(!(await h.log(page)).some((e) => e.startsWith('read:')), 'nothing read');
+  assert.deepEqual(await h.savedPaths(page), [], 'nothing stored');
+});
 
 test('zip: a click starts the sound, the worklet gets chunks, Mute; save and reload (receipt)', async (env) => {
   const { page } = await h.openPage(env);
@@ -413,9 +476,9 @@ test('zip as a player: the opening, Escape, the menu, a character created and pl
   await h.waitProgram(page, 'game');
   await h.waitPrompt(page);
   s = await h.state(page);
-  assert.equal(s.name, 'Zhuge', 'Journey Onward plays the stored character');
+  assert.equal(s.name, 'Zhuge', 'J in the menu plays the stored character');
   await shot('05-journey-onward');
-  console.log(`  receipt: created ${s.name}; after the reload Journey Onward plays ${s.name} (${s.saves} save file)`);
+  console.log(`  receipt: created ${s.name}; after the reload J in the menu plays ${s.name} (${s.saves} save file)`);
 }, { needs: h.haveZip });
 
 test('zip: Quit in the menu ends the game; the page says so and Restart starts it again', async (env) => {
@@ -534,14 +597,14 @@ test('zip: the first press on the canvas is one game click and starts the sound;
   await mkdir(OUT, { recursive: true });
   const before = await h.frame(page);
   // The page's first press: the Look icon. The game takes it once (Look waits for its target;
-  // a second Look while it waits would be "what?" and bring the prompt back), and the same
-  // press starts the AudioContext.
+  // a second Look while it waits would be the no-target word and bring the prompt back), and
+  // the same press starts the AudioContext.
   await page.mouse.click(...(await screenPoint(page, 64, 184)));
   await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0', null, { timeout: 10_000 });
   await page.waitForFunction(() => document.body.dataset.audio === 'running', null, { timeout: 15_000 });
   await h.sleep(1500);
   assert.equal(await promptNow(page), '0', 'Look still waits for its target: the press came once');
-  await page.keyboard.press('Escape'); // no target: "what?", the prompt again
+  await page.keyboard.press('Escape'); // no target: the no-target word, the prompt again
   await h.waitPrompt(page);
   const described = await lookAtAvatar(page, true);
   assert.ok(scrollChanged(before, described), 'Look printed in the scroll');

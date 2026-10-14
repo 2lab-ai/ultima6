@@ -94,7 +94,8 @@ export async function forgetSaves() {
 }
 `;
 
-// Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch.
+// Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch, the
+// save generation of the game ticked last (whether or not the page stores its Saves).
 const GLUE_HOOKS = `
 globalThis.__u6mem = () => (wasm ? wasm.memory.buffer.byteLength : 0);
 globalThis.__ticks = 0;
@@ -103,7 +104,9 @@ globalThis.__ticks = 0;
   Game.prototype.tick = function (ms) {
     globalThis.__ticks += 1;
     if (globalThis.__trap) throw new WebAssembly.RuntimeError('unreachable (test trap)');
-    return tick.call(this, ms);
+    const done = tick.call(this, ms);
+    globalThis.__saveGen = this.save_generation();
+    return done;
   };
 }
 `;
@@ -176,6 +179,26 @@ export async function dropFiles(page, paths, extra = []) {
     }
     document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
   }, extra);
+}
+
+/// The stored save files ({ path, bytes: number[] }), sorted by path.
+export function savedFiles(page) {
+  return page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const get = db.transaction('files').objectStore('files')
+        .getAll(IDBKeyRange.bound('save:', 'save:\uffff'));
+      get.onsuccess = () => {
+        db.close();
+        done(get.result.map((f) => ({ path: f.path, bytes: [...f.bytes] }))
+          .sort((a, b) => (a.path < b.path ? -1 : Number(a.path > b.path))));
+      };
+      get.onerror = () => fail(get.error);
+    };
+  }));
 }
 
 /// The paths of the stored save files (sorted), [] when there are none.

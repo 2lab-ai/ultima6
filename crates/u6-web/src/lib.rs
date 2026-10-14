@@ -20,12 +20,15 @@
 //!
 //! Limits (a clear message instead of an exhausted tab): [`MAX_INPUT_BYTES`] for the dropped
 //! files together, [`MAX_UNZIPPED_BYTES`] for what the zip entries the intake inflates declare,
-//! [`MAX_GAME_FILES_BYTES`] for the game files the intake produces.
+//! [`MAX_GAME_FILES_BYTES`] for the game files the intake produces, [`MAX_SAVE_FILE_BYTES`] and
+//! [`MAX_SAVE_BYTES`] for the stored save (a file over them is left out, and the start's report
+//! says so).
 
 mod zipscan;
 
 use std::collections::BTreeMap;
 
+use u6_core::objects::{BLOCK_COUNT, MAX_RECORDS};
 use u6_core::saveload::{MemStore, attach, changed_since};
 use u6_core::sound::AudioDriver;
 use u6_core::{Engine, Files, Framebuffer, InputEvent, Key};
@@ -43,11 +46,32 @@ pub const MAX_UNZIPPED_BYTES: u64 = 64 << 20;
 /// the engine boots. PP20 output is bounded per file by its 24-bit length field (16 MiB), not in
 /// aggregate, inside u6-intake.
 pub const MAX_GAME_FILES_BYTES: usize = 64 << 20;
+/// One stored `savegame/` file: the largest the game writes there, a block at its record limit
+/// (the count word and 0xc00 records of 8 bytes; 0x10ddd2 clamps the count it reads to 0xc00).
+/// `savegame/objlist` is under it: Save writes the 0x1C73 bytes load state reads, and the
+/// character `u` makes keeps the user's file at its own length (u 0x105700 writes the first
+/// 0x1C73 bytes over it), so the objlist is not capped at 0x1C73.
+pub const MAX_SAVE_FILE_BYTES: usize = 2 + MAX_RECORDS * 8;
+/// The stored save together: the objlist and the 69 blocks, each at most [`MAX_SAVE_FILE_BYTES`].
+pub const MAX_SAVE_BYTES: usize = (1 + BLOCK_COUNT) * MAX_SAVE_FILE_BYTES;
 
 /// [`MAX_INPUT_BYTES`] for the page.
 #[wasm_bindgen]
 pub fn max_input_bytes() -> f64 {
     MAX_INPUT_BYTES as f64
+}
+
+/// [`MAX_SAVE_FILE_BYTES`] for the page (it leaves larger files of a dropped `savegame/` folder
+/// out before reading them; [`Game::load_save`] is the backstop).
+#[wasm_bindgen]
+pub fn max_save_file_bytes() -> f64 {
+    MAX_SAVE_FILE_BYTES as f64
+}
+
+/// [`MAX_SAVE_BYTES`] for the page.
+#[wasm_bindgen]
+pub fn max_save_bytes() -> f64 {
+    MAX_SAVE_BYTES as f64
 }
 
 /// The message for inputs over [`MAX_INPUT_BYTES`].
@@ -114,6 +138,10 @@ pub struct Game {
     kept: Vec<String>,
     /// The stored `savegame/*` files the next start lays over the game files.
     saves: BTreeMap<String, Vec<u8>>,
+    /// Bytes in `saves`.
+    save_bytes: usize,
+    /// One line per stored file [`Game::load_save`] left out, for the next start's report.
+    save_notes: Vec<String>,
     /// The last save generation the page reported stored.
     saved_gen: u32,
     /// The files [`Game::save_collect`] listed, until [`Game::save_committed`].
@@ -144,6 +172,8 @@ impl Game {
             log: Vec::new(),
             kept: Vec::new(),
             saves: BTreeMap::new(),
+            save_bytes: 0,
+            save_notes: Vec::new(),
             saved_gen: 0,
             save_out: Vec::new(),
             audio: None,
@@ -234,9 +264,28 @@ impl Game {
     }
 
     /// Collects one stored save file (`savegame/objlist`, `savegame/objblkAA`, ...) for the next
-    /// [`Game::start`], which lays them over the game files.
-    pub fn load_save(&mut self, path: &str, bytes: Vec<u8>) {
+    /// [`Game::start`], which lays them over the game files. A file over
+    /// [`MAX_SAVE_FILE_BYTES`], or one that would take the files together past
+    /// [`MAX_SAVE_BYTES`], is left out (the start's report names it); a path given again
+    /// replaces its file. Returns whether the file was taken.
+    pub fn load_save(&mut self, path: &str, bytes: Vec<u8>) -> bool {
+        let old = self.saves.get(path).map_or(0, Vec::len);
+        let total = self.save_bytes - old + bytes.len();
+        if bytes.len() > MAX_SAVE_FILE_BYTES || total > MAX_SAVE_BYTES {
+            let limit = if bytes.len() > MAX_SAVE_FILE_BYTES {
+                format!("a save file holds at most {MAX_SAVE_FILE_BYTES}")
+            } else {
+                format!("the saved game holds at most {MAX_SAVE_BYTES} together")
+            };
+            self.save_notes.push(format!(
+                "The saved game's file {path} ({} bytes) is left out: {limit} bytes.",
+                bytes.len()
+            ));
+            return false;
+        }
+        self.save_bytes = total;
         self.saves.insert(path.to_string(), bytes);
+        true
     }
 
     /// Number of stored save files the running game booted with (0: a new game).
@@ -484,6 +533,9 @@ impl Game {
         let r = intake(inputs);
         drop(r.disks);
         let mut report = r.report.join("\n");
+        for note in std::mem::take(&mut self.save_notes) {
+            report.push_str(&format!("\n{note}"));
+        }
         let total: usize = r.files.values().map(Vec::len).sum();
         if total > MAX_GAME_FILES_BYTES {
             report.push_str(&format!(
@@ -498,6 +550,7 @@ impl Game {
         let saves = MemStore {
             files: std::mem::take(&mut self.saves),
         };
+        self.save_bytes = 0;
         let stored = attach(&mut files, &saves).map_err(|e| format!("{report}\n{e}"))?;
         if stored > 0 {
             report.push_str(&format!(
@@ -638,6 +691,37 @@ mod tests {
         );
         assert!(!game.started());
         assert_eq!(game.files_loaded(), 0);
+    }
+
+    /// Stored save files: one larger than any save file is left out, the files together stop
+    /// at a total, a path given again replaces its file; what was left out is in the start's
+    /// report (synthetic bytes).
+    #[test]
+    fn save_files_over_the_caps_are_left_out_and_reported() {
+        let mut game = Game::new();
+        game.load_save("savegame/objblkAA", vec![0; 1 << 20]);
+        game.load_save("savegame/objlist", vec![0; 0x1c73]);
+        for _ in 0..3 {
+            game.load_save("savegame/objblkAB", vec![0; 20_000]);
+        }
+        assert!(!game.saves.contains_key("savegame/objblkAA"), "1 MiB");
+        assert!(game.saves.contains_key("savegame/objlist"));
+        assert!(
+            game.saves.contains_key("savegame/objblkAB"),
+            "replaced, not added up"
+        );
+        for i in 0..100 {
+            game.load_save(&format!("savegame/x{i:03}"), vec![0; 20_000]);
+        }
+        let taken = game.saves.len();
+        assert!((60..102).contains(&taken), "{taken} files taken");
+        let kept: usize = game.saves.values().map(Vec::len).sum();
+        assert!(kept < 2 << 20, "{kept} bytes");
+        game.collect("notes.txt", b"hello".to_vec()).unwrap();
+        let report = game.boot(0, false).unwrap_err();
+        let notes = report.lines().filter(|l| l.contains("left out")).count();
+        assert_eq!(notes, 1 + 102 - taken, "{report}");
+        assert!(report.contains("savegame/objblkAA"), "{report}");
     }
 
     const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
