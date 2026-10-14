@@ -448,6 +448,19 @@ fn press_and_events(
     after_ms: u32,
     step: fn(usize) -> Option<u32>,
 ) -> (Vec<(u64, u16)>, bool) {
+    let (codes, finished) = press_and_walk(ticks, reads, events, after_ms, step);
+    let codes = codes.iter().map(|&(t, k, _)| (t, k)).collect();
+    (codes, finished)
+}
+
+/// As [`press_and_events`], each code with the walk direction it set (A4-0x2efc).
+fn press_and_walk(
+    ticks: &[u32],
+    reads: usize,
+    events: &[(u32, InputEvent)],
+    after_ms: u32,
+    step: fn(usize) -> Option<u32>,
+) -> (Vec<(u64, u16, i16)>, bool) {
     let mut s = st();
     s.main.reading = 1;
     let codes = Rc::new(RefCell::new(Vec::new()));
@@ -455,7 +468,8 @@ fn press_and_events(
     let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
         for n in 0..reads {
             let k = wait::read_key(&st, &io).await;
-            out.borrow_mut().push((io.now_ms(), k));
+            let dir = st.borrow().ui.input.direction;
+            out.borrow_mut().push((io.now_ms(), k, dir));
             if let Some(ms) = step(n) {
                 io.sleep(ms).await;
             }
@@ -621,6 +635,101 @@ fn a_move_before_the_release_does_not_hide_it_from_the_due_sample() {
     assert!(
         wrong.is_empty(),
         "(hold, move, ticks, steps, expected): {wrong:?}"
+    );
+}
+
+#[test]
+fn a_due_sample_walks_where_the_pointer_was_at_its_due_time() {
+    // Held south of the Avatar, the pointer moves within its cell 650 ms after the press, then
+    // into the cell east of the Avatar at 662 ms, past the first repeat's due time (660 ms). At
+    // 10 ms ticks a tick lands on 660, before the second move; at the others the tick that
+    // passes 660 queues it, behind the first move. Either way the repeat walks south, where the
+    // pointer was at 660, and the next one east.
+    let ev = |x, y, b| InputEvent::Pointer { x, y, buttons: b };
+    let events = [
+        (650, ev(88, 105, 1)),
+        (662, ev(120, 88, 1)),
+        (1500, ev(120, 88, 0)),
+    ];
+    let walks: Vec<Vec<(u16, i16)>> = TICKS
+        .iter()
+        .map(|ticks| {
+            let (codes, _) = press_and_walk(ticks, 16, &events, HELD_WALK_MS_TEST, |_| None);
+            codes.iter().map(|&(_, k, dir)| (k, dir)).collect()
+        })
+        .collect();
+    println!("(code, direction) at 16 / 8 / 20 / 10 / 17,17,16 ms ticks: {walks:?}");
+    for (ticks, walk) in TICKS.iter().zip(&walks) {
+        assert_eq!(walk, &[(0x80, 4), (0x80, 4), (0x80, 2)], "ticks {ticks:?}");
+    }
+    // The move east at each millisecond from 655 to 670 ms, behind a move at 600 or 656: east
+    // from the first repeat on when it came by 660, else from the second.
+    let mut wrong = Vec::new();
+    for first in [600, 656] {
+        for east in (655..=670).filter(|&m| m > first) {
+            let events = [
+                (first, ev(88, 105, 1)),
+                (east, ev(120, 88, 1)),
+                (1500, ev(120, 88, 0)),
+            ];
+            let expect = if east <= HELD_WALK_MS_TEST { 2 } else { 4 };
+            for ticks in TICKS {
+                let (codes, _) = press_and_walk(ticks, 16, &events, HELD_WALK_MS_TEST, |_| None);
+                let dirs: Vec<i16> = codes.iter().map(|&(_, _, dir)| dir).collect();
+                if dirs != [4, expect, 2] {
+                    wrong.push((first, east, ticks, dirs));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "(first move, east move, ticks, directions): {wrong:?}"
+    );
+}
+
+#[test]
+fn a_bounded_take_stops_at_its_count_or_a_button_change() {
+    let ev = |x, y, b| InputEvent::Pointer { x, y, buttons: b };
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let out = Rc::clone(&seen);
+    let mut e = Engine::with_game(
+        State::empty(),
+        Files::default(),
+        move |_st, io| async move {
+            for n in [0, 1, 5, 5, 5] {
+                out.borrow_mut()
+                    .push((io.take_pointer_upto(n), io.pending_events()));
+            }
+        },
+    );
+    // Three held moves, a release, a move, then a key.
+    e.tick(
+        &[
+            ev(1, 1, 1),
+            ev(2, 2, 1),
+            ev(3, 3, 1),
+            ev(4, 4, 0),
+            ev(5, 5, 0),
+            InputEvent::Key(Key::Char('k')),
+        ],
+        16,
+    );
+    let p = |x, y, buttons| Pointer { x, y, buttons };
+    assert_eq!(
+        *seen.borrow(),
+        [
+            // None taken.
+            (p(0, 0, 0), 6),
+            // Only the first move.
+            (p(1, 1, 1), 5),
+            // The other moves; stops at the release.
+            (p(3, 3, 1), 3),
+            // The release and the move after it; stops at the key.
+            (p(5, 5, 0), 1),
+            // A key in front: nothing.
+            (p(5, 5, 0), 1),
+        ]
     );
 }
 
