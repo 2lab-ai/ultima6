@@ -27,8 +27,9 @@ line by line. Measured 2026-10-14.
 | 6 | 0x110878 / 0x110912 | start area music (MED player, hunk 0) |
 | 7 | 0x1041d8 | command loop (below) |
 
-Display and input bypass intuition/graphics calls: no call in `game` goes through the
-IntuitionBase or GfxBase it opens. Display = own copper list (0x16236a writes COP1LC/COPJMP1,
+Display and input bypass intuition/graphics calls: no call in the decompiled procedures goes
+through the IntuitionBase or GfxBase it opens (code outside the REA procedures, such as the
+VBlank server body at 0x14f27a, is not covered; see Gaps). Display = own copper list (0x16236a writes COP1LC/COPJMP1,
 0x162294 BEAMCON0); input = an input.device handler 0x151b08 whose events 0x151d00 maps from raw
 key codes. Music = MED player in hunk 0 (CIA-B timer interrupt via ciab.resource, audio.device).
 

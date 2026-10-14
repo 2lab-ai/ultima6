@@ -16,19 +16,19 @@ _spec.loader.exec_module(classify)
 A4 = classify.A4
 
 THUNK_BODY = """
-undefined4 thunk_FUN_00101934(void)
+long thunk_FUN_00200010(void)
 
 {
   int unaff_A4;
-  puVar1 = *(undefined4 **)(unaff_A4 + 0x67c0);
-  thunk_FUN_00108658(s__s___>_00101f3c, unaff_A4 + -0x765f);
-  FUN_00103f64();
-  uVar2 = DAT_0013558a;
-  *(code **)(unaff_A4 + 0x10) = FUN_00105000;
+  p = *(long *)(unaff_A4 + 0x1230);
+  thunk_FUN_00200800(s_hi_>_00201000, unaff_A4 + -0x4321);
+  FUN_00200600();
+  v = DAT_00202468;
+  *(code **)(unaff_A4 + 0x10) = FUN_00200a00;
   (**(code **)(_DAT_00000004 + -0xd2))();
   (**(code **)(*(int *)(unaff_A4 + 0x67d4) + -0x1e))();
-  (**(code **)(unaff_A4 + -0x7a24))();
-  _DAT_00dff096 = 0x8000;
+  (**(code **)(unaff_A4 + -0x2222))();
+  _DAT_00dff096 = 1;
   return 0;
 }
 """
@@ -36,37 +36,37 @@ undefined4 thunk_FUN_00101934(void)
 
 class ScanTests(unittest.TestCase):
     def setUp(self):
-        self.sc = classify.scan("thunk_FUN_00101934", THUNK_BODY)
+        self.sc = classify.scan("thunk_FUN_00200010", THUNK_BODY)
 
     def test_calls_exclude_own_signature(self):
-        self.assertEqual(self.sc["calls"], [0x103F64, 0x108658])
+        self.assertEqual(self.sc["calls"], [0x200600, 0x200800])
 
     def test_function_pointer_is_not_a_call(self):
-        self.assertEqual(self.sc["fn_ptrs"], [0x105000])
+        self.assertEqual(self.sc["fn_ptrs"], [0x200A00])
 
     def test_string_label_with_punctuation(self):
-        self.assertEqual(self.sc["slabels"], [0x101F3C])
+        self.assertEqual(self.sc["slabels"], [0x201000])
 
     def test_small_data_offsets(self):
-        for off in (0x67C0, -0x765F, 0x67D4, 0x10):
+        for off in (0x1230, -0x4321, 0x67D4, 0x10):
             self.assertIn(A4 + off, self.sc["a4"])
 
     def test_absolute_data_and_hw(self):
-        self.assertIn(0x13558A, self.sc["dat"])
+        self.assertIn(0x202468, self.sc["dat"])
         self.assertEqual(self.sc["hw"], ["DMACON"])
 
     def test_os_calls_and_fnptr_call(self):
         got = [(o["lib"], o["name"], o["lvo"], o["checked"]) for o in self.sc["os"]]
         self.assertEqual(got, [("exec", "FreeMem", -0xD2, True), ("dos", "Open", -0x1E, True)])
-        self.assertEqual(self.sc["fnptr_calls"], [A4 - 0x7A24])
+        self.assertEqual(self.sc["fnptr_calls"], [A4 - 0x2222])
 
     def test_recursive_call_kept(self):
-        body = "void FUN_00102000(void)\n{\n  FUN_00102000();\n}\n"
-        self.assertEqual(classify.scan("FUN_00102000", body)["calls"], [0x102000])
+        body = "void FUN_00202000(void)\n{\n  FUN_00202000();\n}\n"
+        self.assertEqual(classify.scan("FUN_00202000", body)["calls"], [0x202000])
 
     def test_indexed_longword_load(self):
-        body = "x = *(undefined4 *)(unaff_A4 + -0x6a60 + (int)sVar1 * 4);\n"
-        self.assertEqual(classify.scan("FUN_00100000", body)["a4_indexed"], [A4 - 0x6A60])
+        body = "x = *(undefined4 *)(unaff_A4 + -0x1110 + (int)i * 4);\n"
+        self.assertEqual(classify.scan("FUN_00200000", body)["a4_indexed"], [A4 - 0x1110])
 
 
 class BaseLibraryTests(unittest.TestCase):
@@ -79,12 +79,12 @@ class BaseLibraryTests(unittest.TestCase):
         self.assertEqual(classify.base_library("DAT_00123456", ""), "global?")
 
     def test_local_resolves_through_chain(self):
-        text = "iVar2 = DAT_00161ec4;\niVar1 = iVar2;\n"
-        self.assertEqual(classify.base_library("iVar1", text), "dos")
+        text = "c = DAT_00161ec4;\nb = c;\n"
+        self.assertEqual(classify.base_library("b", text), "dos")
 
     def test_reassigned_local_is_unknown(self):
-        text = "iVar10 = _DAT_00000004;\niVar10 = iVar2;\niVar2 = foo();\n"
-        self.assertEqual(classify.base_library("iVar10", text), "?")
+        text = "b = _DAT_00000004;\nb = c;\nc = foo();\n"
+        self.assertEqual(classify.base_library("b", text), "?")
 
     def test_registers(self):
         self.assertEqual(classify.base_library("unaff_A4", ""), "a4-fnptr")
