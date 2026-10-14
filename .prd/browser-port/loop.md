@@ -44,9 +44,15 @@ Status: in-progress
 | WU-R2 | `u6-formats` parsers | `1c442b3`; 44+12 tests (re-run by dispatcher) | done |
 | WU-4a | tile graphics + palette | `da9a115`, `1afd5f0`; 2048 tiles; sheet read by dispatcher = real U6 tiles | done |
 | WU-4b | function inventory | `5630231`, `9d93cb4`; 1383/1383; M1 = 320 game fns + 41 crt, 45 stubs | done |
-| WU-C0 | u6-core engine/State/RNG/seams (03 rev 2) | — | in flight |
+| WU-C0 | u6-core engine/State/RNG/seams (03 rev 2) | `65b421c`, `063b0f1`; 127 tests (re-run by dispatcher); zip→intake→State→Engine frame | done |
 | WU-O | Amiga emulator oracle (AROS) | — | in flight |
-| WU-P1..P7 | gfx · map · objects · ui · actors · converse · main loop | — | blocked on WU-C0 |
+| WU-P1 | gfx world view (blitter, map window) | `.worktrees/port-gfx` branch port/gfx | in flight |
+| WU-P2 | map (tile lookup, regions, view flags) | `.worktrees/port-map` branch port/map | in flight |
+| WU-P3 | objects (store, iterate, move, names) | `.worktrees/port-objects` branch port/objects | in flight |
+| WU-P4 | ui (printf, scroll, font, key read, panels) | `.worktrees/port-ui` branch port/ui | in flight |
+| WU-P5 | actors (turns, NPC turn, schedules, clock, party step) | `.worktrees/port-actors` branch port/actors | in flight |
+| WU-P6 | converse (Talk, interpreter, portraits) | `.worktrees/port-converse` branch port/converse | in flight |
+| WU-P7 | main loop 0x1041d8 + boot 0x1351d8 wiring, seam reconciliation | main, after P1–P6 merge | blocked |
 | WU-D | Deploy ultima6.2lab.ai | CF Pages project + preview alias live (skeleton) | custom domain at M1 |
 
 Open review items: gpt6 spec review CHANGES ×8 applied in `d749513`; WU-C0 notified.
