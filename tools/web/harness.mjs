@@ -289,10 +289,12 @@ export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /// One step east or west from the prompt: the seed is the clock's, so the start fight sometimes
 /// leaves a gargoyle or a member beside the Avatar and the step is blocked; then the other way,
-/// up to 6 tries (each try's world turn moves the fight on). Returns the key that walked, the
-/// leader before and after, and the frame before that step.
+/// up to `STEP_TRIES` tries (each try's world turn moves the fight on; with a gargoyle on each
+/// side six tries in a row were seen blocked). Returns the key that walked, the leader before
+/// and after, and the frame before that step.
+const STEP_TRIES = 16;
 export async function stepSideways(page) {
-  for (let i = 0; i < 6; i += 1) {
+  for (let i = 0; i < STEP_TRIES; i += 1) {
     await waitPrompt(page);
     const key = i % 2 === 0 ? 'ArrowRight' : 'ArrowLeft';
     const from = (await state(page)).leader;
@@ -304,7 +306,7 @@ export async function stepSideways(page) {
     const to = (await state(page)).leader;
     if (to !== from) return { key, from, to, before };
   }
-  throw new Error('six steps blocked in a row');
+  throw new Error(`${STEP_TRIES} steps blocked in a row`);
 }
 
 /// Waits until the game shows its prompt (waiting for a command key, nothing queued) for a few
