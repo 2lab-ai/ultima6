@@ -181,13 +181,14 @@ function setMuted(muted) {
 
 // --- saves ---------------------------------------------------------------------------------
 
-// The game whose Saves are stored: the one that started from the stored save (`boot`), or null
-// once the stored save is not its any more. `pause` > 0 while an import runs, which may replace
-// it; a Save made meanwhile is taken at the first tick after, as a list covers every Save since
-// the last one stored.
+// The game whose Saves are stored: the one that started from the stored save (`boot`) or was
+// on screen when it was removed (`forgetSaved`), or null once the stored save is not its any
+// more. `pause` > 0 while an import runs, which may replace it; a Save made meanwhile is taken
+// at the first tick after when the import left this game on screen, as a list covers every
+// Save since the last one stored.
 let owner = null;
 let pause = 0;
-let saveSeen = 0; // the owner's highest save generation already queued for storing
+let saveSeen = 0; // the owner's highest save generation already queued (or, at a forget, made)
 let forgets = 0; // removals of the stored save so far: a save job taken before one writes nothing
 
 // After a tick: a Save that committed in it is stored as one operation; the game hears of the
@@ -514,13 +515,15 @@ async function forgetKept() {
 
 // The stored save removed: a save job taken before writes nothing, and the game on screen owns
 // the empty store, its next Save listing the whole game (objlist and every block), so a start
-// from it is the world that game had and not new-game blocks under its own.
+// from it is the world that game had and not new-game blocks under its own. A Save it made
+// before, while it did not own the store, is not stored: only its Saves after the forget are.
 async function forgetSaved() {
   await forgetSaves();
   forgets += 1;
   if (game && !crashed) {
     game.save_forgotten();
     owner = game;
+    saveSeen = game.save_generation();
   }
   setStatus('The saved game was removed from this browser; the next start is a new game. The ' +
     'game on screen runs on until the page is left or reloaded; a Save in it stores the whole ' +
