@@ -21,7 +21,7 @@ const statusLine = document.getElementById('status');
 const MAX_STEP_MS = 100; // a backgrounded tab must not jump the game ahead
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
 const HOW_TO_PLAY = 'Click the game screen or Tab to it, then: arrow keys walk, T talks, ' +
-  'space passes, 0 and 1-9 pick party or solo mode.';
+  'space passes.';
 
 let wasm = null; // the wasm exports, once loaded
 let game = null; // the running game, or null
