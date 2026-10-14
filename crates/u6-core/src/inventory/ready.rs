@@ -16,16 +16,16 @@ use crate::state::State;
 use crate::ui::printf::{Arg, printf};
 
 /// Image strings (code hunk 8).
-const STR_READY: u32 = 0x0011_0c14;
+pub(super) const STR_READY: u32 = 0x0011_0c14;
 const STR_TORCH: u32 = 0x0011_0c1c;
-const STR_NAME_LINE: u32 = 0x0011_0baa;
+pub(super) const STR_NAME_LINE: u32 = 0x0011_0baa;
 const STR_CANT: u32 = 0x0011_0c24;
 const STR_HEAVY: u32 = 0x0011_0c38;
 const STR_NO_PLACE: u32 = 0x0011_0c46;
-const STR_PROMPT: u32 = 0x0011_0c5a;
+pub(super) const STR_PROMPT: u32 = 0x0011_0c5a;
 const STR_LINE: u32 = 0x0011_0c62;
 const STR_NEWLINE: u32 = 0x0011_0c68;
-const STR_UNREADY: u32 = 0x0011_0c6a;
+pub(super) const STR_UNREADY: u32 = 0x0011_0c6a;
 /// Original: A4-0x6c3c (pointer to the line that the amulet of submission cannot be removed)
 const PTR_AMULET: u32 = 0x6c3c;
 /// Original: A4-0x756f (the line that a torch burned out)
@@ -74,9 +74,13 @@ fn set_sparkle(s: &mut State, v: u8) {
 /// does (a container on the map, a broken chain; `weight::holder`), before anything is written.
 /// A torch is taken off its stack and a new single torch is readied. The ring of
 /// invisibility (0x102) makes the actor invisible and 0x51 starts the sparkle, both with the
-/// actor's flash (0x132338) after the panel contents are redrawn; its frames are played before
-/// the prompt, which follows in every case (Ready from the panel runs inside the key read, so
-/// frames left for after the command would show after the next key).
+/// actor's flash (0x132338) after the panel contents are redrawn. The prompt follows in every
+/// case. Ready from the panel runs inside a key read (any of them, a print's more prompt too),
+/// so the flash's frames are shown before the prompt only when no lines are queued and
+/// Attack's newline is not held ([`crate::ui::effects::show_recorded`]): playing them then
+/// would print the rest of the outer queue, and hand on its held newline, before Ready's
+/// prompt, where the original prints those lines after the more key. Else the next playback
+/// shows them.
 pub async fn ready(state: &RefCell<State>, io: &Io) {
     let (actor, obj, ty, strength) = {
         let s = state.borrow();
@@ -110,7 +114,7 @@ pub async fn ready(state: &RefCell<State>, io: &Io) {
             _ => {}
         }
     }
-    crate::combat::play_effects(state, io).await;
+    crate::ui::effects::show_recorded(state, io).await;
     prompt(state, io).await;
 }
 
@@ -228,8 +232,9 @@ pub fn equipped_index(s: &State, obj: Slot) -> i16 {
 /// name; the amulet of submission stays readied; a lit torch burns out; otherwise the slot is
 /// cleared, the effects end, a both-hands weapon frees slot 5, and the object goes back to the
 /// inventory (a torch onto the actor's torch stack when it has one). The frames of the effect's
-/// flash (0x11236c) are played (nothing between it and the panel draws), then the panel
-/// contents are redrawn and the prompt printed.
+/// flash (0x11236c) are shown (nothing between it and the panel draws) unless lines are
+/// queued or Attack's newline is held, as in [`ready`]; then the panel contents are redrawn
+/// and the prompt printed.
 pub async fn unready(state: &RefCell<State>, io: &Io) {
     let obj = state.borrow().ui.input.selection;
     if obj == 1 {
@@ -268,7 +273,7 @@ pub async fn unready(state: &RefCell<State>, io: &Io) {
             }
         }
     }
-    crate::combat::play_effects(state, io).await;
+    crate::ui::effects::show_recorded(state, io).await;
     panel_contents(state, io, actor).await;
     prompt(state, io).await;
 }

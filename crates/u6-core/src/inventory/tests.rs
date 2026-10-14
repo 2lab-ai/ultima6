@@ -497,9 +497,10 @@ fn panel_world() -> (State, Slot) {
     (s, ring)
 }
 
-/// A click at (x, y) in the panel (press and release), then the key `a`, read by 0x10790a
-/// (which runs Ready 0xa7 and Unready 0xa8 itself). The frames shown and still recorded when
-/// the key comes back, and the actor's status.
+/// A click at (x, y) in the panel (press and release) and the key `a` behind it in the same
+/// tick, read by 0x10790a (which runs Ready 0xa7 and Unready 0xa8 itself): the key is there
+/// when the wait polls again, so no idle poll plays what the command left. The frames shown
+/// and still recorded when the key comes back, and the actor's status.
 fn click_then_key(s: State, x: i16, y: i16) -> (u64, usize, u8) {
     let got = Rc::new(RefCell::new(None));
     let out = Rc::clone(&got);
@@ -509,8 +510,7 @@ fn click_then_key(s: State, x: i16, y: i16) -> (u64, usize, u8) {
         *out.borrow_mut() = Some((k, s.combat.shown, s.combat.effects.len()));
     });
     let ev = |b| InputEvent::Pointer { x, y, buttons: b };
-    e.tick(&[ev(1), ev(0)], 16);
-    e.tick(&[InputEvent::Key(Key::Char('a'))], 16);
+    e.tick(&[ev(1), ev(0), InputEvent::Key(Key::Char('a'))], 16);
     for _ in 0..60 {
         if e.finished() {
             break;
@@ -550,4 +550,118 @@ fn a_ring_taken_off_from_the_panel_flashes_before_the_next_key() {
         (2, 0),
         "the flash and the window after it are shown, none left for after the command"
     );
+}
+
+/// A synthetic `game` holding only the strings Ready and Unready print, made up for the test
+/// (the Ready line 0x110c14, the name line 0x110baa, the Unready line 0x110c6a, the prompt
+/// 0x110c5a with a leading newline as the original's has): one code hunk from the image base,
+/// zero elsewhere.
+fn ready_strings() -> Files {
+    let mut code = vec![0u8; 0x10d00];
+    for (addr, text) in [
+        (ready::STR_READY, &b"R "[..]),
+        (ready::STR_NAME_LINE, b"%s\n"),
+        (ready::STR_UNREADY, b"U %s\n"),
+        (ready::STR_PROMPT, b"\n=%s\n"),
+    ] {
+        let at = (addr - crate::image::IMAGE_BASE) as usize;
+        code[at..at + text.len()].copy_from_slice(text);
+    }
+    let game = crate::image::SyntheticGame::new()
+        .loaded(false, code)
+        .build();
+    Files::new([("game".to_string(), game)].into())
+}
+
+/// The command loop's playback of what a command queued (main_loop/commands.rs, after the
+/// dispatch) with Attack's newline held (combat.swallow): six queued lines in a window that
+/// pages after two, and a click at (x, y) in the panel inside that more prompt (0x10790a runs
+/// Ready and Unready itself), then the more key. The original prints the clicked command's
+/// lines there and the rest of the queue after the more key; the held newline reaches the text
+/// layer only after them.
+///
+/// The transcript before the more key and at the end, whether the held newline was handed on
+/// (the text layer's skip flag set, the combat flag clear), and equipment slot 2 at the end.
+fn click_in_a_more_prompt(mut s: State, x: i16, y: i16) -> (Vec<String>, Vec<String>, bool, Slot) {
+    use crate::main_loop::{PrintArg, queue_print};
+    s.ui.text.win_mut().flags |= crate::ui::text::PAGED;
+    s.ui.text.more_rows = 3;
+    for i in 0..6 {
+        queue_print(&mut s, b"q%d\n".to_vec(), vec![PrintArg::Word(i)]);
+    }
+    s.combat.swallow = true;
+    let mut e = Engine::with_game(s, ready_strings(), |st, io| async move {
+        crate::combat::play_effects(&st, &io).await;
+    });
+    e.tick(&[], 16);
+    assert!(!e.finished(), "the more prompt after two lines");
+    let ev = |b| InputEvent::Pointer { x, y, buttons: b };
+    e.tick(&[ev(1), ev(0)], 16);
+    for _ in 0..4 {
+        e.tick(&[], 16);
+    }
+    assert!(!e.finished(), "still in the more prompt");
+    let before = e.state().ui.messages.clone();
+    e.tick(&[InputEvent::Key(Key::Space)], 16);
+    for _ in 0..20 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished(), "the playback ended after the more key");
+    let s = e.state();
+    let handed = s.ui.text.skip_newline && !s.combat.swallow;
+    (before, s.ui.messages.clone(), handed, s.inventory.equip(2))
+}
+
+/// The checks on [`click_in_a_more_prompt`]'s transcripts: none of the lines still queued at
+/// the click is printed before the more key, all of them follow the clicked command's prompt,
+/// the prompt's leading newline is printed, and the held newline is handed on after them.
+fn the_queue_waits_for_the_more_key(before: &[String], lines: &[String], handed: bool) {
+    let prompt = lines
+        .iter()
+        .position(|l| l == "=Ann")
+        .unwrap_or_else(|| panic!("the command's prompt is printed: {lines:?}"));
+    let queued = |l: &String| ["q3", "q4", "q5"].contains(&l.as_str());
+    assert!(
+        !before.iter().any(queued),
+        "the queued lines wait for the more key: {before:?}"
+    );
+    let rest: Vec<usize> = (0..lines.len()).filter(|&i| queued(&lines[i])).collect();
+    assert_eq!(rest.len(), 3, "every queued line is printed: {lines:?}");
+    assert!(
+        rest.iter().all(|&i| i > prompt),
+        "the queued lines follow the prompt: {lines:?}"
+    );
+    assert_eq!(
+        lines[prompt - 1],
+        "",
+        "the prompt's leading newline is printed: {lines:?}"
+    );
+    assert!(
+        handed,
+        "the held newline is handed on after the queued lines"
+    );
+}
+
+#[test]
+fn ready_in_a_more_prompt_leaves_the_queued_lines_for_after_the_key() {
+    let (mut s, _) = panel_world();
+    let sword = give(&mut s, SWORD, IN_INVENTORY, 0, 1);
+    s.inventory.cells[0] = sword;
+    let (before, lines, handed, hand) = click_in_a_more_prompt(s, 0xf8 + 8, 0x20 + 8);
+    assert_eq!(hand, sword, "the click readied the sword");
+    the_queue_waits_for_the_more_key(&before, &lines, handed);
+}
+
+#[test]
+fn unready_in_a_more_prompt_leaves_the_queued_lines_for_after_the_key() {
+    let (mut s, _) = panel_world();
+    let sword = give(&mut s, SWORD, READIED, 0, 1);
+    s.inventory.set_equip(2, sword);
+    // Equipment slot 2: the pointer at (0xb2, 0x2a) selects it.
+    let (before, lines, handed, hand) = click_in_a_more_prompt(s, 0xb2, 0x2a);
+    assert_eq!(hand, 0, "the click took the sword off");
+    the_queue_waits_for_the_more_key(&before, &lines, handed);
 }
