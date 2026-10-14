@@ -104,27 +104,27 @@ fn script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
     for _ in 0..3 {
         r.keys(&[Key::Space], 40);
     }
-    shot("storm-lit", r);
+    shot("door-pan", r);
     r.keys(&[Key::Space], 90);
-    shot("stones", r);
+    shot("forest", r);
     r.keys(&[Key::Space], 80);
-    shot("stones-parted", r);
+    shot("stones-night", r);
     r.keys(&[Key::Space], 60);
-    shot("night", r);
+    shot("stone-in-hand", r);
     r.keys(&[Key::Space], 60);
-    shot("moon", r);
+    shot("moongate-risen", r);
     r.keys(&[Key::Space], 90);
-    shot("moongate", r);
+    shot("stone-close-up", r);
     r.keys(&[Key::Space], 60);
-    shot("ground-drops", r);
+    shot("gate-apprehension", r);
     r.keys(&[Key::Space], 60);
     r.keys(&[Key::Space], 30);
     r.keys(&[Key::Space], 30);
-    shot("gate-trembles", r);
+    shot("walk-into-gate", r);
     r.keys(&[Key::Space], 40);
-    shot("portal", r);
+    shot("gate-sunk", r);
     r.tick(80);
-    shot("portal-open", r);
+    shot("empty-circle", r);
     r.keys(&[Key::Space], 60);
     shot("menu", r);
     r.keys(&[Key::Char('a')], 120);
@@ -302,6 +302,7 @@ fn receipt_opening_frames() {
             let (idx, pal) = r.frame();
             let t = r.e.ticks();
             png(&dir.join(format!("f{t:05}-k{k:02}.png")), &idx, &pal);
+            std::fs::write(dir.join(format!("f{t:05}-k{k:02}.idx")), &idx).unwrap();
         }
     }
     println!("dir {}", dir.display());
@@ -325,6 +326,7 @@ fn receipt_story_frames() {
             let (idx, pal) = r.frame();
             let t = r.e.ticks();
             png(&dir.join(format!("f{t:05}-k{k:02}.png")), &idx, &pal);
+            std::fs::write(dir.join(format!("f{t:05}-k{k:02}.idx")), &idx).unwrap();
         }
         r.keys(&[Key::Space], 0);
     }

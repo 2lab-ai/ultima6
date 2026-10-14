@@ -296,11 +296,12 @@ pub async fn ask_source(st: &mut IntroState, io: &Io) -> u16 {
     print(st, Print::New, PUT_DISK, &[]);
     print(st, Print::More, CLICK_A, &[]);
     print(st, Print::More, OR_B, &[]);
+    // The rule under the title: the text box's top less 2, one row.
     let line = View {
         x0: body.x0,
         x1: body.x1 - 1,
-        y0: body.y1 - 2,
-        y1: body.y1 - 2,
+        y0: body.y0 - 2,
+        y1: body.y0 - 2,
         ..st.views.screen
     };
     mem::fill_view(&mut st.video.chip, &line, 0);

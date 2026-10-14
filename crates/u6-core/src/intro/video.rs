@@ -80,10 +80,11 @@ const BEAMCON: u32 = 0x0011_9fe8;
 const SPRITE: u32 = 0x0011_432a;
 /// Rows of the pointer at most (VSTOP = VSTART + 14 in 0x119c26).
 const SPRITE_ROWS: u32 = 14;
-/// Display window start of the copper lists (DIWSTRT 0x2c81): beam line and pixel of screen
-/// (0, 0).
+/// Beam line of screen row 0 (DIWSTRT 0x2c81 of the copper lists) and the sprite position
+/// HSTART that lands on screen column 0: 0x80, one less than the window's 0x81 (measured on the
+/// oracle: the menu's pointer at mouse (0, 0) has its tip, sprite column 1, on screen column 1).
 const DIW_LINE: i32 = 0x2c;
-const DIW_PIXEL: i32 = 0x81;
+const SPRITE_X0: i32 = 0x80;
 
 /// The pointer's rows (data words A, B) from the image, up to the end words 0, 0.
 fn sprite_rows(exe: &UExe) -> Vec<(u16, u16)> {
@@ -318,9 +319,8 @@ impl Video {
     }
 
     /// The pointer sprite as the hardware shows it from its control words: rows from beam line
-    /// VSTART (up to VSTOP), pixel colours 17..19 (sprite 0's), in front of the bitplanes
-    /// (BPLCON2 0x0008 of the copper lists) [추정: the 1-pixel horizontal origin of sprites
-    /// against DIWSTRT 0x81 is taken from the hardware reference, not measured].
+    /// VSTART (up to VSTOP), columns from HSTART, pixel colours 17..19 (sprite 0's), in front of
+    /// the bitplanes (BPLCON2 0x0008 of the copper lists).
     pub fn pointer_pixels(&self) -> Vec<(i32, i32, u8)> {
         let (pos, ctl) = ((self.sprite_ctl >> 16) as u16, self.sprite_ctl as u16);
         let vstart = i32::from(pos >> 8) | (i32::from(ctl >> 2) & 1) << 8;
@@ -332,7 +332,7 @@ impl Video {
             for c in 0..16 {
                 let v = ((a >> (15 - c)) & 1) | (((b >> (15 - c)) & 1) << 1);
                 if v != 0 {
-                    let x = hstart - DIW_PIXEL + c;
+                    let x = hstart - SPRITE_X0 + c;
                     let y = vstart - DIW_LINE + r as i32;
                     if (0..W).contains(&x) && (0..H).contains(&y) {
                         out.push((x, y, 16 + v as u8));

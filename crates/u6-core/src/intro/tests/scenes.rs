@@ -280,7 +280,7 @@ fn the_pointer_sprite_follows_its_control_words_and_hides_below_the_screen() {
     v.pointer = 1;
     v.server();
     // HSTART 10 + 0x80, VSTART 20 + 0x2c: colour 1 at the sprite's column 0, colour 3 below.
-    assert_eq!(v.pointer_pixels(), vec![(9, 20, 17), (10, 21, 19)]);
+    assert_eq!(v.pointer_pixels(), vec![(10, 20, 17), (11, 21, 19)]);
     v.beamcon = 0x20;
     v.server();
     assert_eq!(v.beamcon0, Some(0x20));
