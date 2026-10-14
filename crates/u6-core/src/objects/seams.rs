@@ -1,8 +1,7 @@
 //! Calls from object code into other modules (WU-P3 seams), forwarding to their owners since
-//! the integration (WU-P7). The one target outside milestone 1 keeps its `todo_stub!`.
+//! the integration (WU-P7).
 
 use crate::state::State;
-use crate::todo_stub;
 
 /// The panel mode A4-0x7a30 (0x92 while a party member's inventory is open for a command,
 /// 0x90 / 0x91 the stats / roster panels; ui owns it, `ui.panel.mode`).
@@ -34,13 +33,10 @@ pub(crate) fn after_actor_moved(s: &mut State, actor: i16) {
     }
 }
 
-/// Owner: ui. Original: 0x110f96 (equipment slot an object is readied in: 1 = one hand, 2 =
-/// head, 5 = other hand, 8 = both hands, 9 = ring...).
-///
-/// Contract: pure lookup by type. Fallback 0 = "no slot", so a readied object is never
-/// treated as needing a free hand. Reached by 0x10cf7c (adding to an actor) and 0x128ce8.
-pub(crate) fn ready_slot(_s: &State, _obj: i16) -> i16 {
-    todo_stub!("0x110f96 ready slot of an object", 0)
+/// 0x110f96 (inventory: the equipment slot an object readies into, -1 none; 8 = both hands,
+/// 9 = a ring). Reached by 0x10cf7c (adding to an actor) and 0x128ce8.
+pub(crate) fn ready_slot(s: &State, obj: i16) -> i16 {
+    crate::inventory::ready_slot(s, obj)
 }
 
 /// A4-0x7b71 (byte 0x13 of the objlist block at A4-0x7b84): dark cells show tiles with flags3

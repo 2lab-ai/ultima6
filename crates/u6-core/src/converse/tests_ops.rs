@@ -459,9 +459,9 @@ fn waiting_ops() {
 #[test]
 fn seam_ops_reach_their_stubs() {
     // The ops whose callee is still outside milestone 1 (the object ops 0xb9 / 0xba / 0xbe /
-    // 0xc8 / 0xc9 call the ported objects / ui code since the integration).
+    // 0xc8 / 0xc9 call the ported objects / ui code since the integration; op 0xbf's portrait
+    // panel 0x128ce8 is ported by the inventory unit).
     for (script, id) in [
-        (vec![0xbf, 5, 0xa7, 0], "0x128ce8"),
         (vec![0xd6, 5, 0xa7, 0], "0x11785e"),
         (vec![0x9c, 5, 0xa7, 0], "0x12f6ee"),
     ] {

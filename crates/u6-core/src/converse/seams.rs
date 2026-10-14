@@ -131,19 +131,8 @@ pub(crate) async fn inventory_panel(cx: &Cx<'_>, _npc: i16, member: Option<u16>,
 }
 
 /// 0x128ce8: portrait panel (portrait, name, worn objects; waits for a key outside talk).
-/// Fallback: its first steps for a person with nothing readied: the panel cleared to the paper
-/// colour (0x152176 + 0x1521f4 over (0xa8, 6)..(0x137, 0x67)), the sky bar (0x133b28), the
-/// portrait through 0x133d3e at (0xd8, 0x18); no name line and no equipment.
 pub(crate) async fn portrait_panel(cx: &Cx<'_>, npc: i16) {
-    todo_stub!("0x128ce8 portrait panel (converse seam)", {
-        let mut state = cx.state.borrow_mut();
-        let paper = state.ui.tables.colours.paper;
-        cx.io
-            .draw(|fb| crate::ui::text::fill_rect(fb, 0xa8, 6, 0x137, 0x67, paper));
-        crate::ui::panels::sky_bar(&mut state, cx.io);
-        super::script::draw_portrait(&state, cx.io, npc, 0xd8, 0x18);
-        state.ui.panel.dirty = true;
-    })
+    Box::pin(crate::inventory::show_actor(cx.state, cx.io, npc)).await;
 }
 
 /// 0x1533e0: draw the 56×64 portrait bitmap at (x, y) on the screen through the bitmap colour map
@@ -154,15 +143,14 @@ pub(crate) fn blit_portrait(state: &State, io: &Io, pixels: &[u8], x: i16, y: i1
 }
 
 /// 0x1110c8: object type in the 9-entry list at A4-0x71ca (counted, not weighed ×10).
-/// Fallback: false.
-pub(crate) fn counted_type(_s: &State, _ty: i16) -> bool {
-    todo_stub!("0x1110c8 counted object type (converse seam)", false)
+pub(crate) fn counted_type(s: &State, ty: i16) -> bool {
+    crate::inventory::counted_type(s, ty)
 }
 
 /// 0x1112cc(actor): the two carried-weight words it leaves at A4+0x1342 / A4+0x1344.
-/// Fallback: (0, 0).
-pub(crate) fn carried_weights(_s: &mut State, _actor: i16) -> (i16, i16) {
-    todo_stub!("0x1112cc carried weight (converse seam)", (0, 0))
+pub(crate) fn carried_weights(s: &mut State, actor: i16) -> (i16, i16) {
+    crate::inventory::carried_weight(s, actor);
+    (s.inventory.equip_weight, s.inventory.carried_weight)
 }
 
 /// 0x133b0e: full redraw of the panels and the view (as the actors call it).
@@ -240,9 +228,9 @@ pub(crate) fn mount(_s: &mut State, _actor: i16, _flags: u8) {
 // ---- actors, clock, combat leaves ---------------------------------------------------------------
 
 /// Party leader / target cursor step of 0x114afa: 0x105016(A4-0x2f0a, A4-0x2f08), when ≥ 0
-/// 0x11ba5e(leader, it) and 0x109e74. Fallback: nothing.
-pub(crate) fn face_target(_s: &mut State) {
-    todo_stub!("0x105016 face the talk target (converse seam)", ())
+/// 0x11ba5e(leader, it) and 0x109e74.
+pub(crate) fn face_target(s: &mut State) {
+    crate::inventory::face_pointer(s);
 }
 
 /// 0x1240fa(obj): the actor riding horse object `obj`. Fallback: `obj`.
