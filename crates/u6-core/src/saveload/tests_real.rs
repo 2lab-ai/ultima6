@@ -274,9 +274,13 @@ fn shipped(files: &Files) -> (Vec<u8>, Vec<Vec<u8>>) {
 /// Why the boot changes a shipped objlist byte before any command, in the port and the
 /// original alike: 0x1217d4 raises a dexterity of 0 to 1 and takes actor 0 out of a schedule
 /// worktype; 0x105350 puts the view centre (block 0x0c..0x11) on the leader; the clock tick at
-/// +0 (0x10368a) sets the moons (block 0x7c..0x7f); idle animation turns actors. The portrait
-/// byte (block 0x81) is the port's character-creation stub.
+/// +0 (0x10368a) sets the moons (block 0x7c..0x7f); idle animation turns actors; the opening
+/// fight (the throne egg 0x1319b2 hatches gargoyles into 0xe0..0xe2, combat starts 0x121c64;
+/// [`opening_fight`]). The portrait byte (block 0x81) is the port's character-creation stub.
 fn boot_change(table: &str, i: usize, x: u8, y: u8) -> Option<&'static str> {
+    if opening_fight(table, i) {
+        return Some("0x1319b2 / 0x121c64 opening fight");
+    }
     Some(match table {
         "A4+0x400c dexterity" if x == 0 && y == 1 => "0x1217d4 dexterity at least 1",
         "0x139188 worktype" if i == 0 => "0x1217d4 actor 0 worktype",
@@ -325,9 +329,20 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
             "savegame/objblkCD"
         ]
     );
-    for (name, a, _) in block_diffs(&old_blocks, &new_blocks) {
+    for (name, a, b) in block_diffs(&old_blocks, &new_blocks) {
         let i = (0..BLOCK_COUNT).find(|&i| block_file(i) == name).unwrap();
         let (mut ra, mut rb) = (records(&old_blocks[i]), records(&new_blocks[i]));
+        if name == "savegame/objblkCC" {
+            // The throne egg hatched (its status) and armed its gargoyles (their gear).
+            eprintln!("{name}: {a} -> {b} records, gear {}", gear_records(&rb));
+            assert!(gear_records(&rb) > 0, "the hatched gargoyles' gear");
+            assert_eq!(
+                strip_fight(ra),
+                strip_fight(rb),
+                "{name}: apart from the fight"
+            );
+            continue;
+        }
         let moved: Vec<usize> = (0..ra.len()).filter(|&n| ra[n] != rb[n]).collect();
         eprintln!(
             "{name}: {a} records, {} in another order: {moved:?}",
@@ -413,10 +428,12 @@ fn frame_only(table: &str, index: usize, x: u8, y: u8) -> bool {
     table == "0x137988 type + frame" && index.is_multiple_of(2) && x & 3 == y & 3
 }
 
-/// What the original's boot runs and the port stubs, in the original's start save: the egg
-/// at the throne (0x1319b2) hatches three gargoyles into the temporary actor slots 0xe0..0xe2,
-/// and combat mode starts for the objlist's combat byte (0x121c64: each member's worktype from
-/// its combat mode, worktype operand = its party index, the solo worktype kept at A4-0x7b0a).
+/// The opening fight in a start save: the egg at the throne (0x1319b2) hatches three gargoyles
+/// into the temporary actor slots 0xe0..0xe2, and combat mode starts for the objlist's combat
+/// byte (0x121c64: each member's worktype from its combat mode, worktype operand = its party
+/// index, the solo worktype kept at A4-0x7b0a). The port runs both since milestone 2 but from
+/// its own RNG state (seed 0; the oracle's differs), so the gargoyles' stats, places and gear
+/// differ from the original's.
 fn opening_fight(table: &str, index: usize) -> bool {
     let actor = match table {
         "0x135588 location" => index / 3,
@@ -430,6 +447,37 @@ fn opening_fight(table: &str, index: usize) -> bool {
         || (table == "0x139188 worktype" && (1..=4).contains(&actor))
         || (table == "0x139488 worktype operand" && (1..=4).contains(&actor))
         || (table == "A4-0x7b84 block" && index == 0x7a)
+}
+
+/// A block record of the opening fight: a readied object (the gear 0x13121a gives) of a
+/// gargoyle in 0xe0..0xe2, or the throne egg (type 0x14f), whose status the hatch changes.
+fn fight_record(r: &[u8; 8]) -> bool {
+    (r[0] & 0x38 == 0x38 && (0xe0..=0xe2).contains(&r[1])) || r[4..6] == [1, 0x4f]
+}
+
+/// The records of a block without the opening fight's, container indices (which shift after
+/// them) cleared, sorted.
+fn strip_fight(v: Vec<[u8; 8]>) -> Vec<[u8; 8]> {
+    let mut v: Vec<[u8; 8]> = v
+        .into_iter()
+        .filter(|r| !fight_record(r))
+        .map(|mut r| {
+            if r[0] & 0x18 == 0x08 {
+                r[1] = 0;
+                r[2] = 0;
+            }
+            r
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// The gargoyles' gear records (readied, owned by 0xe0..0xe2) of a block.
+fn gear_records(v: &[[u8; 8]]) -> usize {
+    v.iter()
+        .filter(|r| r[0] & 0x38 == 0x38 && (0xe0..=0xe2).contains(&r[1]))
+        .count()
 }
 
 #[test]
@@ -463,30 +511,16 @@ fn the_ports_start_save_against_the_originals() {
             assert_eq!(w, g, "{}", block_file(i));
             continue;
         }
-        // CC: the gargoyles' readied gear (temporary, owned by 0xe0..0xe2) is extra in the
-        // original, the egg's status differs, and the container indices after them shift.
-        let fight = |r: &[u8; 8]| {
-            (r[0] & 0x38 == 0x38 && (0xe0..=0xe2).contains(&r[1])) || r[4..6] == [1, 0x4f]
-        };
-        let strip = |v: Vec<[u8; 8]>| -> Vec<[u8; 8]> {
-            let mut v: Vec<[u8; 8]> = v
-                .into_iter()
-                .filter(|r| !fight(r))
-                .map(|mut r| {
-                    if r[0] & 0x18 == 0x08 {
-                        r[1] = 0;
-                        r[2] = 0;
-                    }
-                    r
-                })
-                .collect();
-            v.sort();
-            v
-        };
-        let extra = w.iter().filter(|r| fight(r)).count() - g.iter().filter(|r| fight(r)).count();
-        eprintln!("objblkCC: {extra} records more in the original (the gargoyles' gear)");
-        assert_eq!(extra, 13);
-        assert_eq!(strip(w), strip(g), "CC apart from the fight");
+        // CC: the gargoyles' readied gear (temporary, owned by 0xe0..0xe2) and the egg's status
+        // come from the RNG (the port's seed is not the oracle's), and the container indices
+        // after them shift; both sides arm their gargoyles.
+        let (wg, gg) = (gear_records(&w), gear_records(&g));
+        eprintln!("objblkCC: the gargoyles' gear: {wg} records in the original, {gg} in the port");
+        assert!(
+            wg > 0 && gg > 0,
+            "both sides' gargoyles carry gear (0x13121a)"
+        );
+        assert_eq!(strip_fight(w), strip_fight(g), "CC apart from the fight");
     }
 }
 
@@ -739,12 +773,17 @@ fn state_diffs(a: &State, b: &State) -> Vec<String> {
 }
 
 /// Objlist bytes that differ outside the actors' frame bits (the high 6 bits of each
-/// type + frame word: idle animation turns actors as display time passes, 0x10202e).
+/// type + frame word: idle animation turns actors as display time passes, 0x10202e) and the
+/// hit mark (movement flag 0x08: a hit's flash 0x1230ce sets it, every clock tick 0x10368a
+/// clears it, and a boot or a restore runs the clock at +0).
 fn objlist_diffs_but_frames(a: &[u8], b: &[u8]) -> Vec<(&'static str, usize)> {
     let mut out = Vec::new();
     for (off, len, name) in TABLES {
         for i in 0..len {
-            let (x, y) = (a[off + i], b[off + i]);
+            let (mut x, mut y) = (a[off + i], b[off + i]);
+            if name == "0x139588 movement flags" {
+                (x, y) = (x & !0x08, y & !0x08);
+            }
             let frame_byte = name == "0x137988 type + frame" && i.is_multiple_of(2);
             if (frame_byte && x & 3 != y & 3) || (!frame_byte && x != y) {
                 out.push((name, i));
