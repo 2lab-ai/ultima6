@@ -96,11 +96,23 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
 /// change); with a button down the click map 0x10658e gives the code. A4-0x7a34 marks the press
 /// (the first sample with a button down, A4-0x7a36 then set); while held only the press's code
 /// repeats. With no button down both clear.
+///
+/// A held button (A4-0x7a36 set and still down) repeats at once in the original: nothing in
+/// 0x106bbc or 0x14f12c waits, the input.device handler runs beside the game and the release
+/// shows in the next sample. The port's handler is the engine's queue, which fills only between
+/// polls, so a held repeat first waits one display frame and samples again (one repeat per
+/// frame; a prompt that drops the walk code then still sees the release). A key queued in front
+/// of the pointer events holds them back (input in order), the release perhaps among them, so a
+/// button still held behind a key gives way to the key poll.
 async fn pointer_click(state: &RefCell<State>, io: &Io) -> u16 {
-    let p = io.take_pointer();
+    if sample(state, io) != 0 && state.borrow().actors.work.mouse_walk != 0 {
+        io.vblank().await;
+        if sample(state, io) != 0 && io.key_ready() {
+            return 0;
+        }
+    }
     {
         let mut s = state.borrow_mut();
-        pointer::sample(&mut s, p);
         let ptr = &s.ui.pointer;
         let buttons = u16::from(ptr.left) | u16::from(ptr.right);
         if buttons & 3 == 0 {
@@ -125,6 +137,15 @@ async fn pointer_click(state: &RefCell<State>, io: &Io) -> u16 {
     } else {
         0
     }
+}
+
+/// 0x106be6: the handler's pointer into the sample (0x14f12c); the buttons as 0x106bbc reads
+/// them (1 left, 2 right; both down reads as neither).
+fn sample(state: &RefCell<State>, io: &Io) -> u16 {
+    let p = io.take_pointer();
+    let mut s = state.borrow_mut();
+    pointer::sample(&mut s, p);
+    u16::from(s.ui.pointer.left) | u16::from(s.ui.pointer.right)
 }
 
 /// 0x106c6c..0x106de6: the key from the poll: case, commands, directions; and the flags the

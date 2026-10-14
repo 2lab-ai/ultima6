@@ -86,6 +86,11 @@ fn gfx_map_tile_errors() {
     bad[2] = 0;
     bad[3] = 4;
     assert!(decode_tiles(&bad, &[], &idx, &mt).is_err());
+    // an empty record still names its first row: 16 (the file's) is the last one
+    let mut bad = f.clone();
+    bad[2] = 17;
+    bad[3] = 0;
+    assert!(decode_tiles(&bad, &[], &idx, &mt).is_err());
     // truncated planes, wrong tileindx size
     assert!(decode_tiles(&f[..f.len() - 1], &[], &idx, &mt).is_err());
     assert!(decode_tiles(&f, &[], &idx[1..], &mt).is_err());
@@ -173,6 +178,9 @@ fn gfx_object_tile_errors() {
     };
     let ok = obj(0, 2, &[0x0000], &[(3, &[0xFFFF])], None);
     assert!(run(&ok, 3, 0).is_ok());
+    // an empty record: first row 16 is the file's own, 17 lies past the tile
+    assert!(run(&obj(16, 2, &[], &[], None), 3, 0).is_ok());
+    assert!(run(&obj(17, 2, &[], &[], None), 3, 0).is_err());
     // object masktype with a map-range index
     assert!(run(&ok, 3, 0x6000).is_err());
     // plane 5

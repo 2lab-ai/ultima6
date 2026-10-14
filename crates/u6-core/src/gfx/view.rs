@@ -188,3 +188,52 @@ pub fn refresh_view(state: &mut State, io: &Io) {
         seams::quake(state, io, shakes);
     }
 }
+
+/// Original: 0x132338 (ui: flash an actor in the map window: its tile in outline mode over its
+/// cell, the window presented dissolving, then the window again without it)
+///
+/// Nothing for an actor off the map (status A4+0x190c & 0x18) or more than five cells from the
+/// view centre on either axis (`(x - centre + 5) & 0x3ff < 11`). The tile word is the type's base
+/// tile (0x13a940) plus the frame, plus 0x1800 (`bright`, D1 non-zero) or 0x1000; it goes into
+/// the cell's current draw list on top (0x10e596 mode 2), then A4-0x6578 = 1 and 0x102c90 with
+/// D0 = 1; the draw lists rebuilt (0x10e81e), A4-0x6578 = 1 and 0x102c90 again. The original
+/// shows the flash for as long as its second render takes; the port keeps both windows as
+/// frames played back after the command (the hit flash's way, [`crate::combat::play_effects`]),
+/// the flash for [`crate::combat::present::FLASH_HOLD`] frames.
+pub fn flash_actor(state: &mut State, io: &Io, actor: u16, bright: bool) {
+    let a = usize::from(actor);
+    let (Some(&status), Some(&at), Some(&tf)) = (
+        state.objects.obj_status.get(a),
+        state.objects.location.get(a),
+        state.objects.type_frame.get(a),
+    ) else {
+        return;
+    };
+    if status & 0x18 != 0 {
+        return;
+    }
+    let c = state.map.centre;
+    let col = (at.x & 0x3ff).wrapping_sub(c.x).wrapping_add(5) & 0x3ff;
+    let row = (at.y & 0x3ff).wrapping_sub(c.y).wrapping_add(5) & 0x3ff;
+    let base = state
+        .tables
+        .basetile
+        .base
+        .get(usize::from(tf & 0x3ff))
+        .copied();
+    let word = base
+        .unwrap_or(0)
+        .wrapping_add(tf >> 10)
+        .wrapping_add(if bright { 0x1800 } else { 0x1000 });
+    if col >= 11 || row >= 11 {
+        return;
+    }
+    crate::objects::add_tile(state, word, col as i16, row as i16, 2);
+    state.gfx.dissolve = 1;
+    render_window(state, io, true);
+    crate::combat::present::capture_window(state, crate::combat::present::FLASH_HOLD);
+    crate::objects::build_draw_lists(state);
+    state.gfx.dissolve = 1;
+    render_window(state, io, true);
+    crate::combat::present::capture_window(state, 0);
+}

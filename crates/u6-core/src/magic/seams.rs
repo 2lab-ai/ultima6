@@ -2,15 +2,14 @@
 //! experience, hostility, the wound line; hunk 18: the flights), objects (hunk 15), Use's
 //! levers, inventory (hunk 8) and a few graphics helpers. Each is the narrowest signature the
 //! spells need; since the M2 integration the ported ones call their owner (graphics 0x1521f4
-//! and the hail sprites 0x15265a / 0x152800 / 0x152876 since the pointer merge), the rest
-//! (0x132338) keep a stub contract and an explicit fallback.
+//! and the hail sprites 0x15265a / 0x152800 / 0x152876 since the pointer merge, the actor flash
+//! 0x132338 since the M2 fixes), the rest keep a stub contract and an explicit fallback.
 
 use std::cell::RefCell;
 
 use crate::engine::Io;
 use crate::objects::Slot;
 use crate::state::State;
-use crate::todo_stub;
 
 /// [gfx] 0x1521f4 (fill the inclusive pixel rectangle in the plot colour, 0x152174; XOR when
 /// A4-0x617c is set, into the back buffer when A4-0x6179 is set):
@@ -33,11 +32,10 @@ pub(crate) fn redraw_border(s: &mut State, x0: u16, y0: u16, x1: u16, y1: u16) {
     crate::combat::present::draw_borders(s, x0 as i16, y0 as i16, x1 as i16, y1 as i16);
 }
 
-/// [ui] 0x132338 (flash an actor on the map: when `actor` is on the map and in view, its tile
-/// is drawn with effect `mode` (0x10e596(2)) and the window presented dissolving, then redrawn
-/// plain). Stub contract: no result. Fallback: no flash.
-pub(crate) fn flash_actor(_s: &mut State, _io: &Io, _actor: u16, _mode: u16) {
-    todo_stub!("0x132338 flash an actor on the map", ())
+/// [ui] 0x132338 (flash an actor on the map, `mode` non-zero the bright outline):
+/// [`crate::gfx::flash_actor`].
+pub(crate) fn flash_actor(s: &mut State, io: &Io, actor: u16, mode: u16) {
+    crate::gfx::flash_actor(s, io, actor, mode != 0);
 }
 
 /// [combat] 0x1228ba (a missile of tile `tile` from `from` toward (x, y) within `range`; the

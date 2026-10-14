@@ -4,7 +4,7 @@ use u6_formats::gfx::Span;
 use u6_render::Framebuffer;
 
 use super::{GfxState, install, map_tile, object_tile};
-use crate::gfx::blit::{fill_rect, set_plot_colour};
+use crate::gfx::blit::{fill_colour, fill_rect, set_plot_colour};
 use crate::gfx::sprite::{draw, prepare, save};
 
 /// A state whose sine table is 64 · sin(n / 128 turns) rounded (the shape of the game's).
@@ -146,4 +146,40 @@ fn fill_orders_the_corners_and_follows_the_plot_mode() {
     set_plot_colour(&mut g, 16);
     fill_rect(&g, &mut fb, 0, 0, 5, 5);
     assert_eq!(fb.get(0, 0), Some(0), "a colour past 15 plots nothing");
+}
+
+#[test]
+fn an_empty_record_below_the_tile_prepares_a_clear_sprite() {
+    // No rows, first row 17 (a malformed record the loader now refuses, 0x1526c2 clears
+    // first_row × 16 bytes of the 256-byte scratch): the scratch is clear, nothing past it.
+    let mut g = gfx();
+    let mut t = object_tile(Span::Full, |_, _| None);
+    t.first_row = 17;
+    t.rows = 0;
+    install(&mut g, 7, t);
+    prepare(&mut g, 2, 7, 0, 128, 128);
+    assert!(g.sprites.slots[2].iter().all(|&p| p == 0xff));
+    // The file's own empty record (16, 0) clears exactly the scratch.
+    let mut t = object_tile(Span::Full, |_, _| None);
+    t.first_row = 16;
+    t.rows = 0;
+    install(&mut g, 8, t);
+    prepare(&mut g, 3, 8, 0, 128, 128);
+    assert!(g.sprites.slots[3].iter().all(|&p| p == 0xff));
+}
+
+#[test]
+fn a_fill_over_wrapped_corners_stays_on_the_screen() {
+    // x1 = -1 as a word: the rectangle reaches past the right edge; only row 0 is filled, from
+    // x 300 to the edge (the byte address would run on into the rows below).
+    let mut fb = Framebuffer::new();
+    fill_colour(&mut fb, 300, 0, 0xffff, 0, 7);
+    assert_eq!(fb.pixels().iter().filter(|&&p| p == 7).count(), 20);
+    assert_eq!(
+        (fb.get(300, 0), fb.get(319, 0), fb.get(0, 1)),
+        (Some(7), Some(7), Some(0))
+    );
+    // Both corners wrapped on both axes: a bounded fill of the whole screen.
+    fill_colour(&mut fb, 0, 0, 0xffff, 0xffff, 5);
+    assert_eq!(fb.pixels().iter().filter(|&&p| p == 5).count(), 320 * 200);
 }

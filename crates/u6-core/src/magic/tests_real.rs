@@ -393,7 +393,7 @@ fn detect_magic_on_a_potion() {
         super::dispatch(&st, &io, 1, true).await;
         flush_prints(&st, &io).await;
     });
-    for _ in 0..16 {
+    for _ in 0..64 {
         e.tick(&[], 16);
     }
     assert!(e.finished());

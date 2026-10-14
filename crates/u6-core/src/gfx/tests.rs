@@ -320,6 +320,33 @@ fn dissolve_visits_every_pixel_of_the_rect_once() {
 }
 
 #[test]
+fn dissolve_ends_on_any_feedback_word_and_on_wrapped_corners() {
+    // Tampered feedback words (the top bit clear, odd and even ones): the register still comes
+    // back to 1 or dies at 0, so the order ends and holds each pixel of the rect at most once.
+    for feedback in [
+        0x0001u16, 0x0002, 0x0006, 0x00ff, 0x1234, 0x4001, 0x7ffe, 0x8000,
+    ] {
+        let taps = vec![feedback; 15];
+        let order = dissolve_order(160, 160, &taps);
+        let mut seen = std::collections::BTreeSet::new();
+        assert!(
+            order
+                .iter()
+                .all(|&p| seen.insert(p) && p.0 < 160 && p.1 < 160)
+        );
+        assert!(order.len() <= 160 * 160, "{feedback:#06x}: {}", order.len());
+    }
+    // Corners that wrap (x1 = x0 - 1 makes the width 0x10000, 0 as a word): nothing is copied.
+    // The table has the 15 words of the game's (0x151f3c), so the 16-bit width finds its word.
+    let taps = vec![0xb400u16; 15];
+    let back = Framebuffer::new();
+    let mut front = Framebuffer::new();
+    front.clear(3);
+    dissolve(&taps, &back, &mut front, (20, 30), (19, 41));
+    assert_eq!(count(&front, 3), 320 * 200);
+}
+
+#[test]
 fn window_copy_moves_exactly_pixels_8_to_168() {
     let mut back = Framebuffer::new();
     back.clear(4);
