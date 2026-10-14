@@ -34,7 +34,7 @@ fn compass(s: &mut State) {
 #[test]
 fn degrees_follow_the_shifts() {
     let p = |x, y, z| Position { x, y, z };
-    assert_eq!(super::travel::degrees(p(307, 352, 0)), (-1, 0));
+    assert_eq!(super::travel::degrees(p(0x130 + 5, 0x168 - 3, 0)), (-1, 0));
     assert_eq!(super::travel::degrees(p(0x130 + 16, 0x168 + 8, 0)), (1, 2));
     assert_eq!(super::travel::degrees(p(100, 100, 1)), (5, 12), "× 4 below");
     assert_eq!(super::travel::degrees(p(0, 0, 0)), (-45, -38));

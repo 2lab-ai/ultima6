@@ -119,9 +119,9 @@ fn hfe_tracks(cylinders: usize, skip: Option<(usize, u32)>) -> Vec<Vec<Vec<u8>>>
 
 #[test]
 fn decodes_a_synthetic_80_cylinder_hfe_into_the_expected_adf() {
-    let tracks = hfe_tracks(83, None);
+    let tracks = hfe_tracks(82, None);
     let hfe = parse_hfe(&write_hfe(&tracks, 250)).unwrap();
-    assert_eq!((hfe.header.cylinders, hfe.header.sides), (83, 2));
+    assert_eq!((hfe.header.cylinders, hfe.header.sides), (82, 2));
     assert_eq!(
         (hfe.header.track_encoding, hfe.header.bit_rate_kbps),
         (1, 250)
