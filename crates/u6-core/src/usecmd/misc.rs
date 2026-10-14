@@ -31,8 +31,6 @@ const STR_NL: u32 = 0x0012_ccfe;
 const MANTRAS: i32 = -0x660e;
 /// Original: A4-0x65ce (20 pointers: the words the wishing well grants food for)
 const WISHES: i32 = -0x65ce;
-/// Original: A4-0x779a (word: the song playing)
-const SONG: i32 = -0x779a;
 
 /// Original: 0x1303f4 (objects: use the vortex cube at the Codex: the ending)
 ///
@@ -105,15 +103,19 @@ pub async fn wand(ux: Ux<'_>, obj: Slot) {
     crate::objects::take_from_owner(&mut s, obj, 0x150, u16::from(q) << 8 | 1);
 }
 
-/// Original: 0x12c8b8 (objects: play an instrument: digit keys play notes of `instrument`)
+/// Original: 0x12c8b8 (objects: play an instrument: digit keys play notes)
 ///
-/// Only with the music module loaded (A4-0x35cc): the song stops, the cursor goes off, each
-/// digit key plays its note ('0' = 10) until another key; then the song stops again.
-pub async fn instrument(ux: Ux<'_>, instrument: u8) {
+/// Only with the module buffer allocated (A4-0x35cc): the song playing (A4-0x779a) is kept and
+/// song 13, the instrument notes, loaded (0x110878(0xd): the music stops, the module is read even
+/// with sound off and not started); the cursor goes off; each digit key ('0' = 10) is stored at
+/// buffer +0x3d2 and the buffer played (0x100fa4) until another key; then the kept song again.
+/// The instrument in D0 is stored and never read (asm 0x12c8c0).
+pub async fn instrument(ux: Ux<'_>, _instrument: u8) {
     if !seams::music_loaded(&ux.s()) {
         return;
     }
-    seams::play_song(&mut ux.s(), 0);
+    let kept = ux.s().sound.current as i16;
+    seams::play_song(&mut ux.s(), crate::sound::SONG_INSTRUMENT as i16);
     ux.s().ui.input.targeting = 0;
     loop {
         let k = ux.key().await;
@@ -126,9 +128,9 @@ pub async fn instrument(ux: Ux<'_>, instrument: u8) {
         } else {
             (k as u8).wrapping_sub(0x30)
         };
-        seams::play_instrument(&mut ux.s(), instrument, note);
+        seams::play_instrument(&mut ux.s(), note);
     }
-    seams::play_song(&mut ux.s(), 0);
+    seams::play_song(&mut ux.s(), kept);
 }
 
 /// Original: 0x12cfe4 (objects: start the machine: its animation runs 16 frames, a sound)
@@ -156,7 +158,8 @@ pub async fn machine(ux: Ux<'_>) {
             crate::gfx::anim::substitute(&mut s.gfx, a.tile_to_animate, a.first_anim_frame);
         }
         crate::gfx::refresh_view(&mut s, ux.io);
-        let song = defs::a4_words(ux.io, SONG, 1).first().copied().unwrap_or(0) as i16;
+        // The song playing now (A4-0x779a), restored after the sound (asm 0x12d06e..0x12d08a).
+        let song = s.sound.current as i16;
         seams::play_song(&mut s, 0);
         seams::play_sound(&mut s);
         seams::screen_effect(ux.io);

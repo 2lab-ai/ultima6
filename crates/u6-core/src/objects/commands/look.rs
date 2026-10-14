@@ -104,7 +104,7 @@ fn leader(s: &State) -> Slot {
 /// its NUL) is printed as a printf format in a paged window; the next key read unpages. Then
 /// the area music again (0x110912).
 pub async fn read_book(state: &RefCell<State>, io: &Io, obj: Slot) {
-    seams::music_off();
+    seams::music_off(&mut state.borrow_mut());
     let q = (state.borrow().objects.qq_of(obj) >> 8) as u8;
     print_at(state, io, S_BLANK_LINES, &[]).await;
     let name = super::text::string(&state.borrow(), S_BOOK_DAT).to_ascii_lowercase();
@@ -131,7 +131,7 @@ pub async fn read_book(state: &RefCell<State>, io: &Io, obj: Slot) {
     }
     super::text::print(state, io, &text, &[]).await;
     state.borrow_mut().ui.input.unpage = true;
-    seams::music_on();
+    seams::music_on(&mut state.borrow_mut());
 }
 
 /// Original: 0x1298b8 (objects: the Look command on the confirmed target)

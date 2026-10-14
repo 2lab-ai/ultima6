@@ -175,17 +175,14 @@ pub(crate) fn dismount(s: &mut State, actor: i16) {
     crate::objects::commands::dismount(s, actor);
 }
 
-/// [sound] 0x110878(song): plays song `n` (7 = the combat song). Fallback: silence.
-pub(crate) fn play_song(_s: &mut State, _song: u16) {
-    todo_stub!("0x110878 play a song (fallback: silence)", ())
+/// [sound] 0x110878(song): plays song `n` (7 = the combat song): [`crate::sound::play_song`].
+pub(crate) fn play_song(s: &mut State, song: u16) {
+    crate::sound::play_song(s, song);
 }
 
-/// [sound] 0x110912: the song of the area. Fallback: silence.
-pub(crate) fn area_song(_s: &mut State) {
-    todo_stub!(
-        "0x110912 pick and play the area song (fallback: silence)",
-        ()
-    )
+/// [sound] 0x110912: the song of the area: [`crate::sound::play_area_song`].
+pub(crate) fn area_song(s: &mut State) {
+    crate::sound::play_area_song(s);
 }
 
 /// [objects] 0x10e596(word, cx, cy, mode): add a tile to the draw list of window cell (cx, cy):
@@ -194,10 +191,9 @@ pub(crate) fn add_tile(s: &mut State, word: u16, cx: i16, cy: i16, mode: u16) {
     objects::add_tile(s, word, cx, cy, mode);
 }
 
-/// [sound] A4-0x779a: the song playing. Fallback: 7 (the combat song 0x121c64 starts), so
-/// breaking off combat asks for the area song as the original does after a fight.
-pub(crate) fn current_song(_s: &State) -> u16 {
-    todo_stub!("0x110878 song playing (A4-0x779a; fallback: 7)", 7)
+/// [sound] A4-0x779a: the song playing (`sound.current`).
+pub(crate) fn current_song(s: &State) -> u16 {
+    s.sound.current
 }
 
 /// [map] 0x109c12(x0, y0, 0x28, 2): flood the sight from window cell (x0, y0) into the cell

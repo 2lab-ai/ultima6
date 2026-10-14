@@ -292,17 +292,16 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
         }
         0x16 => say(state, io, MSG_VERSION, &[]).await,
         0x1a => {
-            let on = state.borrow().main.sound == 0;
-            if on {
-                state.borrow_mut().main.sound = 1;
-                // Contract: start the area song. M1 has no sound: the flag only.
-                todo_stub!("0x110912 pick and play the area song", ());
-                say(state, io, MSG_SOUND_ON, &[]).await;
-            } else {
-                todo_stub!("0x110878 play song 0 (music off)", ());
-                say(state, io, MSG_SOUND_OFF, &[]).await;
-                state.borrow_mut().main.sound = 0;
-            }
+            // 0x104c12..0x104c36: on = the flag (A4-0x7b5c) and the area song; off = song 0
+            // and the flag cleared ([`crate::sound::toggle_sound`]), then the line.
+            let on = crate::sound::toggle_sound(&mut state.borrow_mut());
+            say(
+                state,
+                io,
+                if on { MSG_SOUND_ON } else { MSG_SOUND_OFF },
+                &[],
+            )
+            .await;
         }
         0x1b | 0x20 | NO_COMMAND => pass(state, io).await,
         WALK => {
@@ -324,11 +323,11 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
                 s.actors.party.leader_index == s.actors.party.size
             };
             if !aboard {
-                todo_stub!("0x110878 play song 8 (the rest song)", ());
+                crate::sound::play_song(&mut state.borrow_mut(), 8);
             }
             crate::actors::rest::rest(state, io).await;
             if !aboard {
-                todo_stub!("0x110912 pick and play the area song", ());
+                crate::sound::play_area_song(&mut state.borrow_mut());
             }
             let mut s = state.borrow_mut();
             s.ui.input.target_pending = 0;
@@ -541,7 +540,7 @@ async fn targeted(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
                     (s.actors.party.leader_index, s.ui.input.selection)
                 };
                 crate::converse::talk(&Cx::new(state, io), talker, target, true).await;
-                todo_stub!("0x110912 pick and play the area song", ());
+                crate::sound::play_area_song(&mut state.borrow_mut());
             }
             0x84 => crate::objects::commands::look(state, io).await,
             0x85 => crate::objects::commands::get(state, io).await,

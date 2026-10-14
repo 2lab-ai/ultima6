@@ -585,8 +585,8 @@ pub async fn sextant_travel(ux: Ux<'_>) {
         }
         (x, y)
     };
-    let sound = ux.s().main.sound;
-    ux.s().main.sound = 0;
+    let sound = crate::sound::sound_on(&ux.s());
+    crate::sound::set_sound_flag(&mut ux.s(), false);
     seams::gate_travel(ux.state, ux.io, x, y).await;
-    ux.s().main.sound = sound;
+    crate::sound::set_sound_flag(&mut ux.s(), sound);
 }

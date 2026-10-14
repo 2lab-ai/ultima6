@@ -22,20 +22,20 @@ fn files() -> Option<Files> {
     Some(Files::new(r.files))
 }
 
-/// The boot on the user's files: 60 ticks reach the command prompt with only the two stub
-/// points a boot passes (character creation 0x1351d8, and the combat song 0x110878 of the
-/// combat start 0x121c64 for the disk's combat byte; the egg in the start window hatches
-/// through the objects port 0x1319b2 and its placement through combat 0x121e88, so neither is
-/// a stub point since milestone 2); the screen shows the window, the panel and the prompt.
+/// The boot on the user's files: 60 ticks reach the command prompt with only the one stub
+/// point a boot passes (character creation 0x1351d8; since milestone 2 the egg in the start
+/// window hatches through the objects port 0x1319b2, its placement through combat 0x121e88 and
+/// the combat song of 0x121c64 through sound 0x110878, so none of them is a stub point); the
+/// screen shows the window, the panel and the prompt.
 #[test]
-fn boot_reaches_the_prompt_with_two_stub_points() {
+fn boot_reaches_the_prompt_with_one_stub_point() {
     let Some(files) = files() else { return };
     let mut e = crate::Engine::new(files).unwrap_or_else(|err| panic!("{err}"));
     for _ in 0..60 {
         e.tick(&[], 16);
     }
     let ids: Vec<&str> = e.stub_hits().keys().map(|k| &k[..8]).collect();
-    assert_eq!(ids, ["0x110878", "0x1351d8"]);
+    assert_eq!(ids, ["0x1351d8"]);
     let s = e.state();
     assert_eq!(s.ui.text.current, crate::ui::WindowId::Messages);
     assert!(
@@ -306,6 +306,33 @@ fn rest_in_combat_refuses_and_takes_the_turn() {
     assert_eq!(code, 0x89);
     assert_eq!((s.ui.input.target_pending, s.ui.input.targeting), (0, 0));
     assert!(!says_port_line(&s));
+}
+
+/// Ctrl-Z (0x1a) is sound's toggle: on sets the flag (A4-0x7b5c) and starts the area song; off
+/// stops the song and clears the flag.
+#[test]
+fn control_z_toggles_the_sound_flag_and_the_song() {
+    let mut st = State::empty();
+    st.sound.names = (1..=13).map(|n| format!("song{n}")).collect();
+    st.map.centre.z = 1; // a dungeon: song 9, no RNG draw
+    let (_, s) = dispatched(0x1a, &[], st);
+    assert!(crate::sound::sound_on(&s));
+    assert_eq!(s.sound.current, 9);
+    let calls: Vec<_> = s.sound.calls.iter().map(|(_, c)| c.clone()).collect();
+    assert_eq!(
+        calls,
+        [
+            crate::sound::MedCall::Load("song9".into()),
+            crate::sound::MedCall::PlayBuffer
+        ]
+    );
+    let (_, s) = dispatched(0x1a, &[], s);
+    assert!(!crate::sound::sound_on(&s));
+    assert_eq!(s.sound.current, 0);
+    assert_eq!(
+        s.sound.calls.back().map(|(_, c)| c.clone()),
+        Some(crate::sound::MedCall::Stop)
+    );
 }
 
 /// Talk is not cut: it still waits for its target (a key that confirms nothing: "what?", which

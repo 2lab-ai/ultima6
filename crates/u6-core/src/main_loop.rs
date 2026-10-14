@@ -82,8 +82,6 @@ pub enum Pending {
 pub struct MainState {
     /// Port-only: text-layer calls queued by synchronous code, flushed in order by the loop.
     pub pending_print: Vec<Pending>,
-    /// Original: A4-0x7b5c (word: sound on; control-Z toggles it, the port plays no sound)
-    pub sound: u16,
     /// Original: A4-0x7a2c (word: 1 while the loop waits for a command key outside a target)
     pub reading: u16,
     /// Original: A4-0x618e (byte: overlay frame counter 0x135120 steps)

@@ -4,13 +4,11 @@
 //! 0x12395a, 0x1230ce, 0x1331b4, 0x1240fa, 0x122f3e, 0x12267a, 0x123aec, 0x101eb0, 0x1228ba;
 //! actors 0x11b1c0; magic 0x116526, 0x115da4, 0x116028, 0x116218 and the book globals;
 //! inventory 0x105016, 0x1110c8, 0x1110f6, 0x1111ca, 0x11121e, 0x111be0, 0x1118c6, 0x1122dc,
-//! 0x11236c, 0x111fe0). The others (sound) name their owner and the original, keep the
-//! `todo_stub!` hit count, and state their fallback.
+//! 0x11236c, 0x111fe0; sound 0x110878, 0x110912).
 
 use crate::engine::Io;
 use crate::objects::Slot;
 use crate::state::State;
-use crate::todo_stub;
 
 /// Combat 0x121e88 (put a new monster on a free tile near where it stands, out of the view when
 /// `out_of_view`): [`crate::combat::mode::scatter`].
@@ -118,14 +116,14 @@ pub(crate) fn spell_in_slot(s: &State, row: Slot) -> u8 {
         .unwrap_or(0)
 }
 
-/// Owner: sound. Original 0x110878(0) (music off). Fallback: nothing (no music).
-pub(crate) fn music_off() {
-    todo_stub!("0x110878 play song 0 (music off)", ())
+/// Sound 0x110878(0) (music off): [`crate::sound::play_song`].
+pub(crate) fn music_off(s: &mut State) {
+    crate::sound::play_song(s, 0);
 }
 
-/// Owner: sound. Original 0x110912 (pick and play the area song). Fallback: nothing.
-pub(crate) fn music_on() {
-    todo_stub!("0x110912 pick and play the area song", ())
+/// Sound 0x110912 (pick and play the area song): [`crate::sound::play_area_song`].
+pub(crate) fn music_on(s: &mut State) {
+    crate::sound::play_area_song(s);
 }
 
 /// Inventory 0x1110c8 (`kind` is one of the 9 types at A4-0x71ca, weighed in tenths):

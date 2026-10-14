@@ -5,7 +5,7 @@
 //! objects commands (hunk 15) = 0x12948a (0x129544 is called there directly); ui = 0x107cba;
 //! magic (hunk 11) = 0x1165a4, 0x11a470, 0x116d0e, 0x119200, 0x11a586, 0x119afc, 0x115b7c,
 //! 0x116526; inventory (hunk 8) = 0x105016, 0x1118c6, 0x11121e, 0x111be0 and the weight words.
-//! Not ported: ui = 0x132338; sound = 0x110878, 0x110912, 0x100fa4; graphics = 0x1623be; the
+//! sound = 0x110878, 0x110912, 0x100fa4. Not ported: ui = 0x132338; graphics = 0x1623be; the
 //! ending = 0x133d1e, 0x13513a.
 
 use crate::engine::Io;
@@ -199,34 +199,34 @@ pub(crate) async fn read_line(state: &std::cell::RefCell<State>, io: &Io, max: i
 
 // ---- sound, graphics, the ending --------------------------------------------------------------
 
-/// 0x110878(song): play song N, 0 = stop. Fallback: no sound.
-pub(crate) fn play_song(_s: &mut State, _song: i16) {
-    todo_stub!("0x110878 play song (usecmd seam)", ())
+/// 0x110878(song): play song N, 0 = stop: [`crate::sound::play_song`].
+pub(crate) fn play_song(s: &mut State, song: i16) {
+    crate::sound::play_song(s, song as u16);
 }
 
-/// 0x110912: pick and play the area song. Fallback: no sound.
-pub(crate) fn area_song(_s: &mut State) {
-    todo_stub!("0x110912 pick and play the area song (usecmd seam)", ())
+/// 0x110912: pick and play the area song: [`crate::sound::play_area_song`].
+pub(crate) fn area_song(s: &mut State) {
+    crate::sound::play_area_song(s);
 }
 
-/// A4-0x35cc: the music module is loaded (instruments play only then). Fallback: false (the
-/// port plays no music yet).
+/// A4-0x35cc: the module buffer is allocated (instruments play only then). The setup
+/// allocates it once (0x110878 reads into it); the port always has it.
 pub(crate) fn music_loaded(_s: &State) -> bool {
-    todo_stub!(
-        "0x110878 music module loaded A4-0x35cc (usecmd seam)",
-        false
-    )
+    true
 }
 
-/// Module byte A4-0x35cc + 0x3d2 = `note`, instrument `instrument`, then 0x100fa4 plays it.
-/// Fallback: no sound.
-pub(crate) fn play_instrument(_s: &mut State, _instrument: u8, _note: u8) {
-    todo_stub!("0x100fa4 play an instrument note (usecmd seam)", ())
+/// Module byte A4-0x35cc + 0x3d2 = `note`, then 0x100fa4 plays the buffer (asm
+/// 0x12c900..0x12c908): [`crate::sound::poke_module_buffer`],
+/// [`crate::sound::play_module_buffer`].
+pub(crate) fn play_instrument(s: &mut State, note: u8) {
+    crate::sound::poke_module_buffer(s, 0x3d2, note);
+    crate::sound::play_module_buffer(s);
 }
 
-/// 0x100fa4 with the sample at 0x1512c8 (the machine's sound). Fallback: no sound.
-pub(crate) fn play_sound(_s: &mut State) {
-    todo_stub!("0x100fa4 play a sound effect (usecmd seam)", ())
+/// 0x100fa4 with the module at 0x1512c8 (the machine's sound effect):
+/// [`crate::sound::play_effect_module`].
+pub(crate) fn play_sound(s: &mut State) {
+    crate::sound::play_effect_module(s);
 }
 
 /// 0x1623be(100): the copper effect of the machine. Fallback: none.
