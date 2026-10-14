@@ -55,7 +55,10 @@ pub(crate) fn scatter(s: &mut State, m: Slot, out_of_view: bool) -> bool {
 /// names the direction).
 pub(crate) fn direction_of(s: &State, x: i16, y: i16) -> i16 {
     todo_stub!("0x105016 direction of a view pixel", ());
-    let (rx, ry) = (i16::from(s.objcmds.pointer_ref.0), i16::from(s.objcmds.pointer_ref.1));
+    let (rx, ry) = (
+        i16::from(s.objcmds.pointer_ref.0),
+        i16::from(s.objcmds.pointer_ref.1),
+    );
     let (ax, ay) = ((x - rx).abs(), (y - ry).abs());
     let far = x < rx - 0x18 || x >= rx + 0x18 || y < ry - 0x18 || y >= ry + 0x18;
     if far {
@@ -148,4 +151,180 @@ pub(crate) fn carried(s: &mut State, owner: Slot, kind: u16, quality: i16) -> Sl
 /// belongs to; `obj` itself for an actor). Fallback: `obj` (the rider passed is the actor).
 pub(crate) fn rider(_s: &State, obj: Slot) -> Slot {
     todo_stub!("0x1240fa actor of a part", obj)
+}
+
+/// Original: A4-0x7e7e (bytes by monster index: a monster's own damage), A4-0x6800 / -0x67b6
+/// (37 weapon types and their damage), A4-0x6884 / -0x6850 (26 armour types and what they
+/// absorb).
+const MONSTER_DAMAGE: i32 = -0x7e7e;
+const WEAPON_TYPES: i32 = -0x6800;
+const WEAPON_DAMAGE: i32 = -0x67b6;
+const ARMOUR_TYPES: i32 = -0x6884;
+const ARMOUR_VALUE: i32 = -0x6850;
+
+/// Owner: combat (hunk 13). Original 0x122f3e (damage `obj` does: an actor of a monster type
+/// its monster byte, else the weapon table's byte for its type, -1 when not a weapon).
+///
+/// Contract: pure table lookup. Fallback = that lookup (Look prints it).
+pub(crate) fn damage(s: &State, obj: Slot) -> i16 {
+    todo_stub!("0x122f3e damage of a weapon or monster", ());
+    let d = &s.objcmds.data;
+    let kind = s.objects.kind(obj);
+    let index = if obj < 0x100 {
+        crate::objects::monster_index(&s.objects, kind)
+    } else {
+        -1
+    };
+    if index >= 0 {
+        return i16::from(d.a4_byte(MONSTER_DAMAGE + i32::from(index)));
+    }
+    (0..0x25)
+        .find(|&i| d.a4_word(WEAPON_TYPES + 2 * i) == kind)
+        .map_or(-1, |i| i16::from(d.a4_byte(WEAPON_DAMAGE + i)))
+}
+
+/// Owner: combat (hunk 13). Original 0x12267a (the points of damage armour `obj` absorbs, 0).
+///
+/// Contract: pure table lookup. Fallback = that lookup (Look prints it).
+pub(crate) fn armour(s: &State, obj: Slot) -> i16 {
+    todo_stub!("0x12267a armour value of an object", ());
+    let d = &s.objcmds.data;
+    let kind = s.objects.kind(obj);
+    (0..0x1a)
+        .find(|&i| d.a4_word(ARMOUR_TYPES + 2 * i) == kind)
+        .map_or(0, |i| i16::from(d.a4_byte(ARMOUR_VALUE + i)))
+}
+
+/// Original: A4-0x71ca (9 words: types whose weight 0x1110f6 reads in tenths)
+const TENTHS_TYPES: i32 = -0x71ca;
+
+/// Owner: ui / inventory (hunk 8). Original 0x1110f6 (weight of `obj` in tenths of a stone:
+/// the type's weight byte × its count (gold-like stacks their word, quantity stacks their
+/// quantity byte, a lit (frame 1) torch 1), the 9 types of A4-0x71ca a tenth of that; 0xff
+/// reads 10000). The quotient's remainder sits in the high word, which no caller here uses.
+///
+/// Contract: pure. Fallback = that computation (Get and Look weigh with it).
+pub(crate) fn weight(s: &State, obj: Slot) -> i16 {
+    todo_stub!("0x1110f6 weight of an object", ());
+    let o = &s.objects;
+    let kind = o.kind(obj);
+    let count = match crate::objects::stack_kind(o, kind) {
+        4 => o.qq_of(obj),
+        2 if kind == 0x5a && o.tf(obj) >> 10 == 1 => 1,
+        2 => o.qq_of(obj) & 0xff,
+        _ => 1,
+    };
+    let unit = u16::from(s.tables.tileflags.weight.get(usize::from(kind)).copied().unwrap_or(0));
+    let tenths = (0..9).any(|i| s.objcmds.data.a4_word(TENTHS_TYPES + 2 * i) == kind);
+    let w = if tenths {
+        ((unit.wrapping_mul(count)) as i16) / 10
+    } else {
+        unit.wrapping_mul(count) as i16
+    };
+    if w == 0xff { 10000 } else { w }
+}
+
+/// Owner: ui / inventory (hunk 8). Original 0x1111ca (weight of everything directly after
+/// `obj` in the list while it is inside something: the contents of a container; stops at the
+/// first entry 0x10c928 rejects).
+///
+/// Contract: pure. Fallback = that computation with [`weight`].
+pub(crate) fn contents_weight(s: &State, obj: Slot) -> i16 {
+    todo_stub!("0x1111ca weight of a container's contents", ());
+    let o = &s.objects;
+    let mut total: i16 = 0;
+    let mut c = o.next_of(obj);
+    while c >= 0 && o.place(c) != 0 {
+        if !o.contained_in(c, obj) {
+            return total;
+        }
+        total = total.wrapping_add(weight(s, c));
+        c = o.next_of(c);
+    }
+    total
+}
+
+/// Owner: magic. A4+0x17f4 / +0x17f6 (the spellbook object Look opens and its page) set to
+/// (`book`, 0). Fallback: not recorded (magic keeps them).
+pub(crate) fn open_spellbook(_s: &mut State, _book: Slot) {
+    todo_stub!("0x115da4 spellbook globals A4+0x17f4", ())
+}
+
+/// Owner: magic (hunk 11). Originals 0x115da4, 0x116028, 0x116218 (lay out and draw the open
+/// spellbook's page). Fallback: nothing drawn; the key read that follows still runs.
+pub(crate) fn show_spellbook(_s: &mut State) {
+    todo_stub!("0x116218 draw the spellbook page", ())
+}
+
+/// Owner: magic. A4+0x17f8 (byte per spellbook row: the spell shown there). Fallback 0.
+pub(crate) fn spell_in_slot(_s: &State, _row: Slot) -> u8 {
+    todo_stub!("0x116028 spell on a spellbook row", 0)
+}
+
+/// Owner: sound. Original 0x110878(0) (music off). Fallback: nothing (no music).
+pub(crate) fn music_off() {
+    todo_stub!("0x110878 play song 0 (music off)", ())
+}
+
+/// Owner: sound. Original 0x110912 (pick and play the area song). Fallback: nothing.
+pub(crate) fn music_on() {
+    todo_stub!("0x110912 pick and play the area song", ())
+}
+
+/// Owner: ui / inventory (hunk 8). Original 0x1110c8 (`kind` is one of the 9 types at
+/// A4-0x71ca, weighed in tenths). Contract: pure. Fallback = that lookup.
+pub(crate) fn weighed_in_tenths(s: &State, kind: u16) -> bool {
+    todo_stub!("0x1110c8 type weighed in tenths", ());
+    (0..9).any(|i| s.objcmds.data.a4_word(TENTHS_TYPES + 2 * i) == kind)
+}
+
+/// Owner: ui / inventory (hunk 8). Original 0x11121e (sum what `actor` holds: A4+0x1342 the
+/// weight bytes of its readied objects (cleared first for an actor), A4+0x1344 the weight of
+/// the rest with their contents, A4+0x1340 how many of those).
+///
+/// Contract: writes the three globals ([`super::ObjCommands::inventory_weights`], the panel's
+/// count). Fallback = that computation (Get's "too heavy" test reads it).
+pub(crate) fn sum_inventory(s: &mut State, actor: Slot) {
+    todo_stub!("0x11121e sum an actor's inventory weights", ());
+    s.ui.panel.inventory_count = 0;
+    let mut readied = s.objcmds.inventory_weights.0;
+    let mut carried = 0i16;
+    if actor < 0x100 {
+        readied = 0;
+    }
+    let mut c = crate::objects::first_child(&mut s.objects, actor);
+    while c >= 0 {
+        if s.objects.place(c) == crate::objects::READIED {
+            let k = usize::from(s.objects.kind(c));
+            let w = s.tables.tileflags.weight.get(k).copied().unwrap_or(0);
+            readied = readied.wrapping_add(i16::from(w));
+        } else {
+            let w = weight(s, c).wrapping_add(contents_weight(s, c));
+            carried = carried.wrapping_add(w);
+            s.ui.panel.inventory_count = s.ui.panel.inventory_count.wrapping_add(1);
+        }
+        c = crate::objects::next_child(&mut s.objects);
+    }
+    s.objcmds.inventory_weights = (readied, carried);
+}
+
+/// Owner: ui / inventory (hunk 8). Original 0x111be0 (lay out `actor`'s inventory panel).
+/// Fallback: the panel is marked for the next redraw.
+pub(crate) fn inventory_contents(s: &mut State, _actor: Slot) {
+    todo_stub!("0x111be0 inventory panel contents", ());
+    s.ui.panel.dirty = true;
+}
+
+/// Owner: combat (hunk 13). Original 0x123aec (actor `a` turns on the party). Fallback:
+/// nothing.
+pub(crate) fn turn_hostile(_s: &mut State, _a: Slot) {
+    todo_stub!("0x123aec turn hostile", ())
+}
+
+/// Owner: main (hunk 1). Original 0x101eb0 (lower the karma A4-0x7b7c by `n`, to 0).
+/// Contract: pure arithmetic. Fallback = that.
+pub(crate) fn lose_karma(s: &mut State, n: u8) {
+    todo_stub!("0x101eb0 lower the karma", ());
+    let k = &mut s.actors.karma;
+    *k = if n < *k { *k - n } else { 0 };
 }

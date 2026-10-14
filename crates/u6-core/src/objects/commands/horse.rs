@@ -88,7 +88,10 @@ pub fn dismount(s: &mut State, rider: Slot) {
             if i == 1 && j == 1 {
                 continue;
             }
-            let (nx, ny) = (x.wrapping_add(i).wrapping_sub(1), y.wrapping_add(j).wrapping_sub(1));
+            let (nx, ny) = (
+                x.wrapping_add(i).wrapping_sub(1),
+                y.wrapping_add(j).wrapping_sub(1),
+            );
             if crate::actors::walk::can_move_to(s, horse as u16, nx, ny) {
                 let lz = z(s);
                 move_to(s, horse, nx, ny, lz);

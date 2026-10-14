@@ -156,7 +156,15 @@ pub fn spawn_monster(s: &mut State, kind: u16, x: u16, y: u16, z: u16) -> Slot {
     } else if kind >= 0x1aa {
         set_frame(s, m, 6);
         let tail = if other_way { 2 } else { 14 };
-        let p = create_on_map(&mut s.objects, kind | tail << 10, 1, 0, x.wrapping_add(1), y, z);
+        let p = create_on_map(
+            &mut s.objects,
+            kind | tail << 10,
+            1,
+            0,
+            x.wrapping_add(1),
+            y,
+            z,
+        );
         status_clear(s, p, 0x20);
     } else if kind == DRAGON {
         set_frame(s, m, 0);
@@ -188,8 +196,9 @@ pub fn spawn_monster(s: &mut State, kind: u16, x: u16, y: u16, z: u16) -> Slot {
 /// throwing weapon makes 6..12, a chest (0x62) gets gold, gems and a trap, a bag (0x3a) gold
 /// and other loot, gold (0x58) 2..60 pieces.
 pub fn equip_monster(s: &mut State, m: Slot, index: i16) {
-    let at = super::GameData::a4(EQUIP_LISTS)
-        .wrapping_add_signed(i32::from(s.objcmds.data.a4_word(EQUIP_OFFSETS + 2 * i32::from(index)) as i16));
+    let at = super::GameData::a4(EQUIP_LISTS).wrapping_add_signed(i32::from(
+        s.objcmds.data.a4_word(EQUIP_OFFSETS + 2 * i32::from(index)) as i16,
+    ));
     let mut p = at;
     let mut next = |s: &State| {
         let b = s.objcmds.data.byte(p);
@@ -365,7 +374,16 @@ pub fn hatch_egg(s: &mut State, egg: Slot) {
         let align = ((q % 10) - 1) << 5;
         let roll = s.rng.range(1, 100);
         if roll <= u16::from(amount(s, egg)) {
-            hatch_templates(s, egg, q, align as u8, friends, scatter_out, &mut work, &mut last);
+            hatch_templates(
+                s,
+                egg,
+                q,
+                align as u8,
+                friends,
+                scatter_out,
+                &mut work,
+                &mut last,
+            );
         }
     }
     status_or(s, egg, 0x40 | 0x02);
@@ -391,7 +409,11 @@ fn hatch_templates(
     let mut c = first_child(&mut s.objects, egg);
     while c >= 0 {
         let t = s.objects.kind(c);
-        let flagged = if s.objects.status(c) & 0x40 != 0 { t | 0x8000 } else { t };
+        let flagged = if s.objects.status(c) & 0x40 != 0 {
+            t | 0x8000
+        } else {
+            t
+        };
         let mut n = u16::from(amount(s, c));
         if !egg_full {
             n = s.rng.range(1, n);

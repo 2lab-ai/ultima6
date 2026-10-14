@@ -242,7 +242,8 @@ fn flags1(s: &State, tile: u16) -> u8 {
 /// spells and traps moves to the object's tile with the leader re-placed on top, the view
 /// refreshed after each, and is named ("a, b and c"); "nothing." when none.
 pub fn search(s: &mut State, obj: Slot, x: u16, y: u16) {
-    let leader = Slot::from(s.actors.party.members[usize::from(s.actors.party.leader_index).min(15)]);
+    let leader =
+        Slot::from(s.actors.party.members[usize::from(s.actors.party.leader_index).min(15)]);
     let (lx, ly) = (s.objects.x(leader), s.objects.y(leader));
     let mut kind = s.objects.kind(obj);
     let mut f = frame(s, obj);

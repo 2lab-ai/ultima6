@@ -15,7 +15,9 @@
 
 mod data;
 mod eggs;
+mod get;
 mod horse;
+mod look;
 mod seams;
 mod text;
 mod world;
@@ -27,13 +29,16 @@ mod tests;
 
 pub use data::GameData;
 pub use eggs::{equip_monster, hatch_egg, spawn_monster};
+pub use get::{get, takeable};
 pub use horse::{dismount, mount_horse, parse_answer};
+pub use look::{is_book, is_readable, is_sign, look, read_book};
 pub use world::{
     article, blast_doors, chest, door, explode_keg, is_closed_container, name_prefix, object_under,
     search, spring_trap,
 };
 
 use crate::files::Files;
+use crate::objects::Slot;
 
 /// Original: A4-0x7a26 / -0x7a25 initial bytes: the pixel position in the map view the
 /// direction lookup 0x105016 measures from (Move 0x12ae04 writes it; the image holds the
@@ -48,6 +53,13 @@ pub struct ObjCommands {
     /// Original: A4-0x7a26 / -0x7a25 (bytes: pixel x, y in the map view that 0x105016 measures
     /// directions from; written by Move 0x12ae04, read by the egg warning of 0x1319b2)
     pub pointer_ref: (u8, u8),
+    /// Original: A4+0x1342 / +0x1344 (words: weight of the readied objects and of the rest an
+    /// actor holds, written by the inventory sum 0x11121e and read by Get 0x12a7a4; the
+    /// inventory module owns 0x11121e and keeps them once ported)
+    pub inventory_weights: (i16, i16),
+    /// Original: A4+0x1364 / +0x136a (words: the objects in the two hands of the member the
+    /// inventory panel shows; Get puts a lit torch in the first free one; ui owns them)
+    pub hands: (Slot, Slot),
 }
 
 impl ObjCommands {
@@ -60,6 +72,10 @@ impl ObjCommands {
     /// The state over an already mapped image.
     pub fn from_data(data: GameData) -> Self {
         let pointer_ref = (data.a4_byte(POINTER_REF), data.a4_byte(POINTER_REF + 1));
-        Self { data, pointer_ref }
+        Self {
+            data,
+            pointer_ref,
+            ..Self::default()
+        }
     }
 }
