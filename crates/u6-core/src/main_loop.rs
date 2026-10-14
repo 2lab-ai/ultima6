@@ -53,7 +53,7 @@ use u6_formats::bitmap::Bitmap;
 pub use main_hunk::*;
 
 use crate::engine::Io;
-use crate::image::{A4, GameImage};
+use crate::image::A4;
 use crate::state::State;
 use crate::todo_stub;
 use crate::ui::printf::{Arg, printf};
@@ -131,9 +131,8 @@ pub async fn flush_prints(state: &RefCell<State>, io: &Io) {
 /// The NUL-terminated string at image address `addr` of the user's `game` (empty when the file
 /// or the address is missing: a message the port cannot read is not printed).
 pub fn game_string(io: &Io, addr: u32) -> Vec<u8> {
-    io.files()
-        .get("game")
-        .and_then(|g| GameImage::parse(g).ok()?.cstr(addr).ok())
+    io.game_image()
+        .and_then(|img| img.cstr(addr).ok())
         .unwrap_or_default()
 }
 
@@ -144,10 +143,7 @@ pub fn a4_string(io: &Io, off: u32) -> Vec<u8> {
 
 /// The string the pointer at image address `at` points to.
 pub fn pointed_string(io: &Io, at: u32) -> Vec<u8> {
-    let Some(game) = io.files().get("game") else {
-        return Vec::new();
-    };
-    let Ok(img) = GameImage::parse(game) else {
+    let Some(img) = io.game_image() else {
         return Vec::new();
     };
     img.pointer(at)

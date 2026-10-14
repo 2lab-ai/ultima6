@@ -16,7 +16,7 @@
 //!   generation, never game turns or the calendar.
 //! - Recursive async cycles put `Box::pin` on the cycle edge.
 
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
@@ -62,6 +62,9 @@ pub struct Io {
     front: RefCell<Framebuffer>,
     front_version: Cell<u64>,
     files: Files,
+    /// The layout of `game` in `files`, parsed at the first [`Io::game_image`] (`files` never
+    /// changes, so it stays valid for the run).
+    image: OnceCell<Option<crate::image::ImageLayout>>,
 }
 
 impl Io {
@@ -74,6 +77,7 @@ impl Io {
             front: RefCell::new(Framebuffer::new()),
             front_version: Cell::new(0),
             files,
+            image: OnceCell::new(),
         }
     }
 
@@ -95,6 +99,22 @@ impl Io {
     /// The game files (replaces the dos.library file layer).
     pub fn files(&self) -> &Files {
         &self.files
+    }
+
+    /// The user's `game` mapped by image address ([`crate::image::GameImage`]), parsed once:
+    /// the strings and tables the handlers read on every print come through here. `None` when
+    /// the file is missing or not a hunk file.
+    pub fn game_image(&self) -> Option<crate::image::GameImage<'_>> {
+        let game = self.files.get("game")?;
+        let layout = self
+            .image
+            .get_or_init(|| {
+                crate::image::GameImage::parse(game)
+                    .ok()
+                    .map(crate::image::GameImage::into_layout)
+            })
+            .as_ref()?;
+        Some(crate::image::GameImage::with_layout(game, layout))
     }
 
     /// Replaces: 0x151b08 (input.device handler; the platform queues events instead)

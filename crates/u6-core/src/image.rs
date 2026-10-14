@@ -9,6 +9,8 @@
 //! relocated); a stored pointer is resolved with [`GameImage::pointer`], which applies the
 //! segment's RELOC32 entry for that longword as the loader would.
 
+use std::borrow::Cow;
+
 use u6_formats::FormatError;
 
 /// Load address of hunk 0 in the RE image.
@@ -38,8 +40,17 @@ struct Segment {
 #[derive(Debug)]
 pub struct GameImage<'a> {
     file: &'a [u8],
-    segments: Vec<Segment>,
+    segments: Cow<'a, [Segment]>,
     /// RELOC32 entries: (image address of the longword, target segment), sorted.
+    relocs: Cow<'a, [(u32, usize)]>,
+}
+
+/// What [`GameImage::parse`] works out of a file (the segment table and the sorted RELOC32
+/// entries), kept so the same file can be viewed again without parsing it
+/// ([`GameImage::with_layout`]; the engine keeps one per run, `Io::game_image`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageLayout {
+    segments: Vec<Segment>,
     relocs: Vec<(u32, usize)>,
 }
 
@@ -170,9 +181,26 @@ impl<'a> GameImage<'a> {
         }
         Ok(GameImage {
             file,
-            segments,
-            relocs,
+            segments: Cow::Owned(segments),
+            relocs: Cow::Owned(relocs),
         })
+    }
+
+    /// The parsed layout, to view the same file again later ([`GameImage::with_layout`]).
+    pub fn into_layout(self) -> ImageLayout {
+        ImageLayout {
+            segments: self.segments.into_owned(),
+            relocs: self.relocs.into_owned(),
+        }
+    }
+
+    /// `file` viewed through a layout [`GameImage::parse`] made of it earlier.
+    pub fn with_layout(file: &'a [u8], layout: &'a ImageLayout) -> Self {
+        GameImage {
+            file,
+            segments: Cow::Borrowed(&layout.segments),
+            relocs: Cow::Borrowed(&layout.relocs),
+        }
     }
 
     /// Number of segments (hunks) in the file.

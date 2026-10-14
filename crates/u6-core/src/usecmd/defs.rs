@@ -3,7 +3,7 @@
 //! whose image lacks them yields empty tables (every type then counts as not usable).
 
 use crate::engine::Io;
-use crate::image::{A4, GameImage};
+use crate::image::A4;
 use crate::main_loop::pointed_string;
 
 /// Original: A4-0x66dc (85 words: the object types Use accepts, 0x128b6a)
@@ -44,9 +44,8 @@ fn a4(off: i32) -> u32 {
 
 /// `len` bytes at image address `addr` of the user's `game` (BSS reads 0), empty on failure.
 pub fn bytes(io: &Io, addr: u32, len: usize) -> Vec<u8> {
-    io.files()
-        .get("game")
-        .and_then(|g| GameImage::parse(g).ok()?.read_zero_filled(addr, len).ok())
+    io.game_image()
+        .and_then(|img| img.read_zero_filled(addr, len).ok())
         .unwrap_or_default()
 }
 
@@ -78,10 +77,7 @@ pub fn a4_pointed(io: &Io, off: i32, i: usize) -> Vec<u8> {
 
 /// The bytes the pointer at A4 + `off` + 4 `i` names, up to the first 0 (at most 64).
 pub fn a4_pointed_list(io: &Io, off: i32, i: usize) -> Vec<u8> {
-    let Some(game) = io.files().get("game") else {
-        return Vec::new();
-    };
-    let Ok(img) = GameImage::parse(game) else {
+    let Some(img) = io.game_image() else {
         return Vec::new();
     };
     let Ok(p) = img.pointer(a4(off).wrapping_add(4 * i as u32)) else {
