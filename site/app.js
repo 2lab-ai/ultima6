@@ -183,9 +183,9 @@ function setMuted(muted) {
 
 // The game whose Saves are stored: the one that started from the stored save (`boot`) or was
 // on screen when it was removed (`forgetSaved`), or null once the stored save is not its any
-// more. `pause` > 0 while an import runs, which may replace it; a Save made meanwhile is taken
-// at the first tick after when the import left this game on screen, as a list covers every
-// Save since the last one stored.
+// more. `pause` > 0 while an import runs, which may replace it; a Save made meanwhile is kept
+// only when the import left this game on screen: it is taken at the first tick after, as a list
+// covers every Save since the last one stored.
 let owner = null;
 let pause = 0;
 let saveSeen = 0; // the owner's highest save generation already queued (or, at a forget, made)
