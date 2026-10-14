@@ -196,8 +196,11 @@ pub fn copy_pixel(back: &Framebuffer, front: &mut Framebuffer, x: u16, y: u16) {
 /// original; the port then returns the pixels in raster order. A width or height of 0 (corners
 /// that wrapped; `divu` by 0 traps in the original) has no pixels.
 ///
-/// The loop ends for every feedback word: the register returns to 1 or falls to 0 within 65535
-/// steps (each of the 65535 non-zero words checked), so the bound below is never reached.
+/// The loop ends for every feedback word F. Reading bit i as x^(15 - i), a step multiplies by x
+/// modulo x^16 + F = x^m·Q with Q(0) = 1 (m ≤ 15 when F ≠ 0); the register starts at x^15, a
+/// multiple of x^m, and on those multiples the step is invertible, so for F ≠ 0 the register
+/// returns to 1 within 65535 steps and never meets 0. F = 0 takes it to 0 at the first step
+/// (raster order, below). The bound below is never reached.
 pub fn dissolve_order(w: u16, h: u16, taps: &[u16]) -> Vec<(u16, u16)> {
     if w == 0 || h == 0 {
         return Vec::new();
@@ -219,8 +222,8 @@ pub fn dissolve_order(w: u16, h: u16, taps: &[u16]) -> Vec<(u16, u16)> {
         if carry {
             s ^= feedback;
         }
-        // A register that falls to 0 never comes back to 1 (a zero or tampered feedback word;
-        // not the game's): raster order then, rather than spin.
+        // Only a zero feedback word (not the game's) takes the register to 0, where it would
+        // stay: raster order then, rather than spin.
         if s == 0 {
             return (0..h).flat_map(|r| (0..w).map(move |c| (c, r))).collect();
         }

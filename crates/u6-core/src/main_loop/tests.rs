@@ -423,3 +423,42 @@ fn real_attack_without_a_target_and_the_next_arrow_walks() {
     press(&mut e, crate::Key::Right);
     assert_ne!(e.state().map.centre, centre, "the arrow walked");
 }
+
+#[test]
+fn the_end_of_turn_quake_is_shown_before_the_next_key() {
+    // 0x10348c shakes the view (0x133a1a(10, 2)) for a volcano (0x133) found in view, inside
+    // the end of turn: the ten shakes and the window after them are on the screen by the time
+    // the command loop waits for the next key.
+    let mut s = State::empty();
+    s.ui = test_support::test_ui();
+    s.actors.party.members[0] = 1;
+    s.actors.party.size = 1;
+    s.objects.type_frame[1] = 0x17a;
+    s.actors.worktype[1] = 2;
+    s.actors.movement_points[1] = 20;
+    s.actors.attrs.dexterity[1] = 10;
+    s.objects.type_frame[300] = 0x133;
+    s.objects.draw.volcano_probe = 300;
+    let mut e = crate::Engine::with_game(s, Files::default(), |st, io| async move {
+        commands::command_loop(&st, &io).await;
+    });
+    e.tick(&[], 16);
+    e.tick(&[crate::InputEvent::Key(crate::Key::Char(' '))], 16);
+    let mut erupted = false;
+    let mut at_prompt = None;
+    for _ in 0..200 {
+        e.tick(&[], 16);
+        let s = e.state();
+        erupted |= s.objects.draw.volcano_probe == 0;
+        if erupted && s.main.reading == 1 {
+            at_prompt = Some((s.combat.shown, s.combat.effects.len()));
+            break;
+        }
+    }
+    assert!(erupted, "the end of turn ran the volcano");
+    assert_eq!(
+        at_prompt,
+        Some((11, 0)),
+        "(frames shown, frames left) at the next key"
+    );
+}

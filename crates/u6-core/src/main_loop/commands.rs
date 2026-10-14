@@ -595,7 +595,7 @@ async fn end_of_turn(state: &RefCell<State>, io: &Io, code: u16) {
     crate::actors::turn::world_turn(state, io).await;
     flush_prints(state, io).await;
     super::end_of_turn_volcano(&mut state.borrow_mut());
-    flush_prints(state, io).await;
+    crate::combat::play_effects(state, io).await;
     if code != WALK {
         state.borrow_mut().actors.work.prompt = 1;
     }

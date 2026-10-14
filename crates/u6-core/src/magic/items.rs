@@ -261,6 +261,8 @@ pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
                 crate::objects::move_into(&mut s, obj, caster as Slot, 0x10);
             }
         }
+        // The victim's flash (0x119526) is drawn before the caster's panel (0x119598).
+        super::effects::settle(state, io).await;
         seams::inventory_of(state, io, caster).await;
         say(state, io, FMT_NL_S_NL, Msg::Success).await;
         let mut s = state.borrow_mut();

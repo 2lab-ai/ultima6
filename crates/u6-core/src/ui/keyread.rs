@@ -79,6 +79,7 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
             // 0x105d4c: the pointer sample (0x14f12c); the event wait takes the events.
             super::pointer::sample(&mut s, io.pointer());
         }
+        super::effects::show_recorded(state, io).await;
         io.present();
         io.vblank().await;
     }
