@@ -272,7 +272,8 @@ fn driver_state(d: &AudioDriver) -> (Vec<u8>, bool, bool) {
     )
 }
 
-/// The trace of a relaunch synced at once. The driver's test-only record of the calls it
+/// The trace of a relaunch synced at once, marked as the launcher marks it (the new State takes
+/// the log over, then [`MedCall::NewProcess`]). The driver's test-only record of the calls it
 /// applies ([`crate::sound::driver::APPLIED`]) shows, within the one sync, the old run's
 /// unsynced calls applied before the marker and the new run's after it. The states agree: each
 /// prefix of the log synced on a fresh driver is that prefix applied one call at a time; the
@@ -292,6 +293,7 @@ fn a_relaunch_applies_the_old_runs_pending_calls_before_the_new_process_starts()
     play_song(&mut s, 0);
     let mut fresh = state(true);
     fresh.sound.continue_calls(&mut s.sound);
+    fresh.sound.call(MedCall::NewProcess);
     play_song(&mut fresh, 7);
     let log: Vec<(u64, MedCall)> = fresh.sound.calls.iter().cloned().collect();
     let marker = log
