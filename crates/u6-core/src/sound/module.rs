@@ -10,7 +10,10 @@
 //! pointer can hold any value.
 
 /// `base + off` as the 68000 forms an address from a register and an offset (32 bits, wrapping;
-/// 0x100fa4 reads `$301(a0)` of whatever the song pointer holds).
+/// 0x100fa4 reads `$301(a0)` of whatever the song pointer holds). A plain `+` here would give
+/// the same bits in a release build and panic in a debug one; the lint makes the gate's clippy
+/// run reject it in every profile.
+#[deny(clippy::arithmetic_side_effects)]
 pub fn addr(base: u32, off: u32) -> u32 {
     base.wrapping_add(off)
 }
@@ -78,7 +81,7 @@ pub struct Module {
 
 impl Module {
     /// A stored pointer of the module, made absolute (a stored 0 stays 0, as in 0x153550).
-    fn ptr(&self, m: Mem, at: u32) -> u32 {
+    pub(super) fn ptr(&self, m: Mem, at: u32) -> u32 {
         match m.l(at) {
             0 => 0,
             off => addr(self.base, off),

@@ -66,7 +66,7 @@ use crate::state::LoadError;
 /// Calls kept for the host (more than any game step makes between two engine ticks).
 pub const CALL_LOG: usize = 64;
 
-/// One call of the game into the MED routine.
+/// One call of the game into the MED routine, or the change of `game` process between two.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MedCall {
     /// 0x101010 StopPlayer (through 0x1109d2).
@@ -82,6 +82,11 @@ pub enum MedCall {
     PlayBuffer,
     /// 0x100fa4 PlayModule on the sound-effect module of hunk 28 (0x12d07e).
     PlayEffect,
+    /// Port-only: one `game` process ended and the next began (the launcher's relaunch,
+    /// [`SoundState::continue_calls`]). The old one's shutdown 0x14ee70 calls RemPlayer
+    /// (0x100f96); the new one's setup 0x14ef06 sets the player up again (InitPlayer 0x100f7c)
+    /// on its own memory: the effect module as the image holds it, an empty module buffer.
+    NewProcess,
 }
 
 /// The music code's globals and its calls into the player.
@@ -130,11 +135,14 @@ impl SoundState {
     }
 
     /// Takes the call log over from `old`, the state of the process before (a new `game` after
-    /// the launcher ran `u` again): the numbering goes on, so the host's driver, which counts the
-    /// calls it applied, takes the new ones, and calls it has not synced yet still reach it.
+    /// the launcher ran `u` again), and marks the change of process ([`MedCall::NewProcess`]).
+    /// The numbering goes on, so the host's driver, which counts the calls it applied, still gets
+    /// the old process's calls it has not synced yet, then starts the player over at the mark,
+    /// then plays the new process's calls.
     pub fn continue_calls(&mut self, old: &mut SoundState) {
         self.calls = std::mem::take(&mut old.calls);
         self.next_call = old.next_call;
+        self.call(MedCall::NewProcess);
     }
 
     /// File name of song `n` (1..=13).

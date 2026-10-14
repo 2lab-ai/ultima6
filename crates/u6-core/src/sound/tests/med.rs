@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::sound::med::{NULL_SAMPLE, PLAYING_SONG};
+use crate::sound::module;
 
 fn period(note: u8) -> u16 {
     tables().periods[24 + usize::from(note) - 1]
@@ -320,9 +321,30 @@ fn iff_octave_samples_take_the_octaves_part_by_the_row_of_their_kind() {
     assert_eq!(m.paula.channels[1].period, periods[24]);
 }
 
+/// A song pointer past the top of the address space: 0x100fa4 (`movea.l 8(a0),a0`, then
+/// `move.b $301(a0)`) reads the line speed from where the sum wraps to, inside chip memory, not
+/// from past its end (0) as a sum in a wider integer would.
+#[test]
+fn a_song_pointer_past_the_top_wraps_into_chip_memory() {
+    let mut bytes = one_line([cell(13, 1, 0, 0), EMPTY, EMPTY, EMPTY]).build();
+    let bad = 0xffff_fe00u32;
+    bytes[8..12].copy_from_slice(&bad.to_be_bytes());
+    let song = CHIP_BUFFER.wrapping_add(bad);
+    let at = song.wrapping_add(module::song::TEMPO2) as usize;
+    assert!(at < bytes.len(), "the wrapped address is in the module");
+    bytes[at - CHIP_BUFFER as usize] = 0x2a;
+    let (p, m) = playing_bytes(&bytes);
+    let md = module::Module { base: CHIP_BUFFER };
+    assert_eq!(md.song(module::Mem(&m.chip)), song);
+    assert_eq!(p.counter, 0x2a, "the line speed from the wrapped address");
+}
+
 /// Stored pointers of a malformed module can hold anything: the addresses the routine forms from
 /// them wrap as the 68000's do (0x100fa4: `movea.l 8(a0),a0`, then `move.b $301(a0)`), reads
-/// outside chip memory get 0, and nothing panics (debug builds check overflow).
+/// outside chip memory get 0, and nothing panics (debug builds check overflow). Each pointer
+/// made absolute is checked against the 32-bit wrapping sum, so a sum that saturates, stops or
+/// widens fails in a release build too; a plain `+` gives the same bits there, which the lint on
+/// [`module::addr`] rejects.
 #[test]
 fn pointers_anywhere_in_a_malformed_module_play_without_a_panic() {
     let hybrid = synth::synth(&[0x40, 0xff], &[0x00, 0xff], (1, 1), &[vec![1; 8]]);
@@ -349,11 +371,26 @@ fn pointers_anywhere_in_a_malformed_module_play_without_a_panic() {
         exp + 4,
         ptr(samples + 4) + 0x116,
     ];
+    // The hybrid's waveform pointers are relative to the instrument, the others to the module.
+    let (hybrid, wave) = (ptr(samples + 4), fields[8]);
+    let md = module::Module { base: CHIP_BUFFER };
     for at in fields {
         for bad in [0xffff_fe00u32, 0xffff_ffe0, 0x7fff_ffff] {
             let mut bytes = good.clone();
             bytes[at..at + 4].copy_from_slice(&bad.to_be_bytes());
             let (mut p, mut m) = playing_bytes(&bytes);
+            let mem = module::Mem(&m.chip);
+            let (formed, from) = if at == wave {
+                let instr = CHIP_BUFFER + hybrid as u32;
+                (module::Module::waveform(mem, instr, 0), instr)
+            } else {
+                (md.ptr(mem, CHIP_BUFFER + at as u32), CHIP_BUFFER)
+            };
+            assert_eq!(
+                formed,
+                from.wrapping_add(bad),
+                "pointer at {at:#x} = {bad:#x}"
+            );
             let mut out = vec![0.0; 4096];
             m.render(&mut p, &mut out, 8000);
             assert!(
