@@ -14,28 +14,19 @@ use u6_formats::gfx::{self, PALETTE_LEN, Rgb};
 use u6_formats::look::LookTable;
 use u6_formats::map::WorldMap;
 use u6_formats::objblk::{ObjBlock, ObjBlockId};
-use u6_formats::objlist::ObjList;
 use u6_formats::schedule::Schedules as ScheduleFile;
 use u6_formats::tileflag::TileFlags;
 
-use crate::actors::{Actors, Calendar, GameTables, Party, Schedules};
+use crate::actors::{Actors, GameTables, Schedules};
 use crate::converse::{ConverseState, ConverseText};
 use crate::files::Files;
 use crate::gfx::GfxState;
 use crate::main_loop::MainState;
 use crate::map::MapState;
-use crate::objects::{ACTOR_SLOTS, Objects};
+use crate::objects::Objects;
 use crate::rng::Rng;
 use crate::ui::UiState;
 
-/// objlist offset of the 0x82-byte block 0x105350 reads to A4-0x7b84 (quest flag .. 0x1C73).
-const OBJLIST_TAIL: usize = 0x1BF1;
-const OBJLIST_TAIL_LEN: usize = 0x82;
-/// objlist offset of the leader index (A4-0x7b7a).
-const OBJLIST_LEADER_INDEX: usize = 0x1BFB;
-/// objlist offsets of arrays u6-formats leaves undecoded.
-const OBJLIST_UNKNOWN_18F1: usize = 0x18F1;
-const OBJLIST_UNKNOWN_1AF1: usize = 0x1AF1;
 /// Object types whose base tile starts with its animation off (the words at 0x13ab8a, 0x13ab80
 /// and 0x13ab18 = basetile table 0x13a940 + 2 × type).
 const ANIM_OFF_TYPES: [usize; 3] = [0x125, 0x120, 0xec];
@@ -97,6 +88,8 @@ pub struct State {
     pub rng: Rng,
     pub combat: crate::combat::CombatState,
     pub objcmds: crate::objects::commands::ObjCommands,
+    /// Save / restore bookkeeping (the save generation, the last objlist written).
+    pub saveload: crate::saveload::SaveLoad,
 }
 
 /// A game file is missing or malformed.
@@ -174,7 +167,7 @@ impl State {
         let (anim, tileflags) = load_boot_tables(files)?;
         let schedule = load(files, "schedule", ScheduleFile::parse)?;
         let basetile = load(files, "basetile", BaseTiles::parse)?;
-        let objlist = load(files, "savegame/objlist", ObjList::parse)?;
+        let objlist = crate::saveload::boot_objlist(files)?;
         let world = load(files, "map", WorldMap::parse)?;
         let chunks = load(files, "chunks", Chunks::parse)?;
         let blocks = ObjBlockId::all()
@@ -229,66 +222,15 @@ impl State {
             total: schedule.records.len() as u16,
             entries: schedule.records,
         };
-        state.apply_objlist(&objlist);
+        crate::saveload::objlist::decode(&mut state, objlist);
         state.place_party();
         state.init_anim_flags();
         Ok(state)
     }
 
-    /// Spreads `objlist` over the tables 0x105350 reads it into.
-    fn apply_objlist(&mut self, list: &ObjList) {
-        let raw = &list.raw;
-        let (objects, actors) = (&mut self.objects, &mut self.actors);
-        let attrs = &mut actors.attrs;
-        for (a, r) in list.actors.iter().enumerate().take(ACTOR_SLOTS) {
-            objects.obj_status[a] = r.obj_flags;
-            objects.location[a] = r.pos;
-            objects.type_frame[a] = (r.obj_n & 0x3ff) | u16::from(r.frame & 0x3f) << 10;
-            objects.qq[a] = r.unknown_0600;
-            attrs.status[a] = r.status;
-            attrs.strength[a] = r.strength;
-            attrs.dexterity[a] = r.dexterity;
-            attrs.intelligence[a] = r.intelligence;
-            attrs.exp[a] = r.exp;
-            attrs.hp[a] = r.hp;
-            attrs.level[a] = r.level;
-            attrs.unknown_10f1[a] = r.unknown_10f1;
-            attrs.combat_mode[a] = r.combat_mode;
-            attrs.magic[a] = r.magic;
-            attrs.base_type_frame[a] =
-                (r.base_obj_n & 0x3ff) | u16::from(r.base_frame & 0x3f) << 10;
-            attrs.talk_flags[a] = r.talk_flags;
-            attrs.unknown_18f1[a] = raw[OBJLIST_UNKNOWN_18F1 + a];
-            attrs.movement_flags[a] = r.movement_flags;
-            attrs.unknown_1af1[a] = raw[OBJLIST_UNKNOWN_1AF1 + a];
-            actors.movement_points[a] = r.movement_points;
-            actors.worktype[a] = r.worktype;
-        }
-        actors.party = Party {
-            names: list.party.names.clone(),
-            members: list.party.roster,
-            size: list.party.size,
-            leader_index: raw[OBJLIST_LEADER_INDEX],
-        };
-        let c = list.clock;
-        actors.calendar = Calendar {
-            minute: c.minute,
-            hour: c.hour,
-            day: c.day,
-            month: c.month,
-            year: c.year,
-        };
-        actors.quest_flag = list.player.quest_flag;
-        actors.rest_counter = list.player.rest_counter;
-        actors.karma = list.player.karma;
-        actors.wind = list.player.wind_direction;
-        actors.timers = list.timers;
-        actors.objlist_tail = raw[OBJLIST_TAIL..OBJLIST_TAIL + OBJLIST_TAIL_LEN].to_vec();
-    }
-
     /// 0x105350 after the reads: copy the quest flag to A4-0x2fd2 and centre the view on the
     /// leader's location (x = 10 bits, y = 10 bits, z = 4 bits of the 3-byte entry).
-    fn place_party(&mut self) {
+    pub(crate) fn place_party(&mut self) {
         self.actors.quest_flag_copy = u16::from(self.actors.quest_flag);
         let leader = self.actors.party.leader();
         if let Some(pos) = leader.and_then(|id| self.objects.location(id)) {
@@ -298,7 +240,7 @@ impl State {
 
     /// 0x105350's loop over the animdata slots (A4+0x5dca of them): a slot whose tile is the
     /// base tile of object type 0x125, 0x120 or 0xec starts disabled, every other slot enabled.
-    fn init_anim_flags(&mut self) {
+    pub(crate) fn init_anim_flags(&mut self) {
         let base = &self.tables.basetile.base;
         let off: Vec<u16> = ANIM_OFF_TYPES
             .iter()
