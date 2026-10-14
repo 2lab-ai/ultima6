@@ -22,9 +22,10 @@ const SIDE_CARS = ['.blkdev', '.bootcode', '.xdfmeta'];
 
 /// How many game files an intake of the user's disks keeps: the files of the decrunched volumes
 /// (unpacked/d1..d3, xdftool's side-car files left out), counted at run time like the Rust
-/// intake test does; `undefined` without that copy (the count is the user's data, not ours).
+/// intake test does; `undefined` without that copy (the count is the user's data, not ours), or
+/// with `U6_TEST_NO_UNPACKED` set (to run the tests' run-time baseline path).
 export function gameFileCount() {
-  if (!existsSync(UNPACKED)) return undefined;
+  if (process.env.U6_TEST_NO_UNPACKED || !existsSync(UNPACKED)) return undefined;
   const count = (dir) => readdirSync(dir, { withFileTypes: true }).reduce((n, e) => {
     if (e.isDirectory()) return n + count(join(dir, e.name));
     return n + (SIDE_CARS.some((x) => e.name.endsWith(x)) ? 0 : 1);

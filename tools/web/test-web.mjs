@@ -50,8 +50,14 @@ async function started(page, files) {
   return s;
 }
 
-// The kept paths are as many as `want` stands for (`FILES` or `WITH_MARKER`).
+// The kept paths are as many as `want` stands for (`FILES` or `WITH_MARKER`); before any
+// started import the baseline is the count of the game on screen.
 async function kept(page, want, label) {
+  if (baseline === undefined) {
+    const files = (await h.state(page)).files;
+    baseline = want === WITH_MARKER ? files - 1 : files;
+    assert.ok(Number.isInteger(baseline) && baseline > 0, 'a count of game files');
+  }
   const paths = await h.keptPaths(page);
   assert.ok(paths !== null && paths.length === count(want), label);
   return paths;
@@ -952,12 +958,18 @@ try {
       console.log(`ok - ${t.name}`);
     } catch (err) {
       failed += 1;
-      // An assertion's generated message shows the compared values (the user's data): show its
-      // place only. Custom messages are the tests' own labels.
+      // An assertion's message carries the compared values (the user's data) after its first
+      // line, a generated one in its body: show the test's own label (the first line of a
+      // custom message) and the place only.
       const lines = String(err.stack ?? err).split('\n');
-      const quiet = err?.code === 'ERR_ASSERTION' && err.generatedMessage;
-      const shown = quiet ? ['AssertionError (the compared values are not shown)', ...lines.slice(1, 6)] : lines.slice(0, 6);
-      console.log(`not ok - ${t.name}\n  ${shown.join('\n  ')}`);
+      const frames = lines.filter((l) => /^\s+at /.test(l)).slice(0, 5);
+      let head = lines[0];
+      if (err?.code === 'ERR_ASSERTION') {
+        head = err.generatedMessage
+          ? 'AssertionError (the compared values are not shown)'
+          : `AssertionError: ${String(err.message).split('\n')[0]}`;
+      }
+      console.log(`not ok - ${t.name}\n  ${[head, ...frames].join('\n  ')}`);
     } finally {
       for (const context of env.browser.contexts()) await context.close();
     }
