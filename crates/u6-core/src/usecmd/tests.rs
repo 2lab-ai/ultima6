@@ -311,9 +311,10 @@ fn the_vortex_cube_refuses_before_the_codex_goes_while_the_ending_is_unported() 
     );
 }
 
-/// The party aboard a ship (actor 0, 0x19c) at the centre, a skiff (0x19e) in its hold.
-/// Returns the state and the skiff's slot.
-fn ship_with_skiff(land: bool) -> (State, Slot) {
+/// The party aboard a ship (actor 0, 0x19c) at the centre with the types `hold` in its hold
+/// (slots A, B, …, each moved in after the one before, so the last is the first child), and
+/// the types `beside` on the map east of the centre (slots from 0x210, quality 0).
+fn ship_holding(land: bool, hold: &[u16], beside: &[u16]) -> State {
     let mut s = world();
     s.objects.location[0] = s.map.centre;
     s.objects.type_frame[0] = 0x19c;
@@ -325,11 +326,28 @@ fn ship_with_skiff(land: bool) -> (State, Slot) {
     // Land: passable ground; else deep water (walkers blocked). Tile 0: what the walk test
     // reads without a world map.
     tiles(&mut s, 0, if land { 0 } else { 0x03 });
-    put(&mut s, A, 0x19e, 100, 100);
+    for (i, &kind) in hold.iter().enumerate() {
+        put(&mut s, A + i as Slot, kind, 100, 100);
+    }
+    for (i, &kind) in beside.iter().enumerate() {
+        put(&mut s, 0x210 + i as Slot, kind, 101, 100);
+    }
     link(&mut s);
     crate::objects::move_into(&mut s, 1, 0, crate::objects::IN_INVENTORY);
-    crate::objects::move_into(&mut s, A, 0, crate::objects::IN_INVENTORY);
-    (s, A)
+    for i in 0..hold.len() {
+        crate::objects::move_into(&mut s, A + i as Slot, 0, crate::objects::IN_INVENTORY);
+    }
+    s
+}
+
+/// [`ship_holding`] with one skiff (0x19e) in the hold; returns the state and the skiff's slot.
+fn ship_with_skiff(land: bool) -> (State, Slot) {
+    (ship_holding(land, &[0x19e], &[]), A)
+}
+
+/// True while `slot` is in actor 0's inventory (the hold of whatever vessel actor 0 is).
+fn in_hold(s: &State, slot: Slot) -> bool {
+    s.objects.parent(slot) == 0 && s.objects.place(slot) == crate::objects::IN_INVENTORY
 }
 
 #[test]
@@ -361,6 +379,68 @@ fn a_ship_that_can_land_leaves_its_skiff_in_the_hold() {
         "0x12f5d4: 0x11d0a4(1) keeps the skiff"
     );
     assert_ne!(s.objects.place(skiff), 0, "the skiff is not put on the map");
+}
+
+/// As in the original: the cannot-land test looks for a skiff only (0x10b18c(vessel, 0x19e,
+/// quality 0) at 0x12f60c..0x12f61e), the extraction takes the first skiff or raft
+/// (0x11d118 / 0x11d126). A raft ahead of the skiff is the one boarded; the skiff stays.
+#[test]
+fn a_ship_that_cannot_land_boards_the_first_skiff_or_raft_of_its_hold() {
+    let (raft, skiff) = (B, A);
+    let s = ship_holding(false, &[0x19e, 0x19f], &[]);
+    assert_eq!(
+        crate::objects::first_child(&mut s.clone().objects, 0),
+        raft,
+        "fixture: the raft is the hold's first child"
+    );
+    let e = run(s, |st, io| async move {
+        super::travel::board(Ux::new(&st, &io), 0).await;
+    });
+    let s = e.state();
+    assert_eq!(s.objects.kind(0), 0x19f, "0x11d0a4(0) takes the raft out");
+    assert_eq!(s.actors.party.leader_index, s.actors.party.size, "aboard");
+    assert!(
+        in_hold(&s, skiff),
+        "the skiff moves on with actor 0 (0x11cfa0)"
+    );
+}
+
+/// A raft alone in the hold does not count (the test at 0x12f612 is for 0x19e): the land
+/// refusal 0x12cd7a, the party still aboard its ship.
+#[test]
+fn a_ship_holding_only_a_raft_cannot_land() {
+    let s = ship_holding(false, &[0x19f], &[]);
+    let e = run(s, |st, io| async move {
+        super::travel::board(Ux::new(&st, &io), 0).await;
+    });
+    let s = e.state();
+    assert_eq!(s.objects.kind(0), 0x19c, "still the ship");
+    assert_eq!(s.actors.party.leader_index, s.actors.party.size, "aboard");
+    assert!(in_hold(&s, A), "the raft stays in the hold");
+}
+
+/// As in the original: landing (0x11d0a4(1), the extraction skipped at 0x11d0f2) leaves the
+/// skiff in the emptied actor 0, parked at level 14 (0x11d190..0x11d19e, 0x10c9d2 carrying
+/// its contents); boarding makes actor 0 a copy of the first member (0x122fbe, attributes
+/// only) and moves it with its contents (0x11cfa0), so the next vessel boarded has the skiff.
+#[test]
+fn the_skiff_left_in_the_hold_goes_with_the_next_vessel_boarded() {
+    let raft = 0x210;
+    let s = ship_holding(true, &[0x19e], &[0x19f]);
+    let e = run(s, move |st, io| async move {
+        super::travel::board(Ux::new(&st, &io), 0).await;
+        {
+            let s = st.borrow();
+            assert_eq!(s.actors.party.leader_index, 0, "landed");
+            assert_eq!(s.objects.z(0), 0xe, "actor 0 parked at level 14");
+            assert!(in_hold(&s, A), "the skiff stays in actor 0");
+        }
+        super::travel::board(Ux::new(&st, &io), raft).await;
+    });
+    let s = e.state();
+    assert_eq!(s.objects.kind(0), 0x19f, "aboard the raft");
+    assert_eq!(s.actors.party.leader_index, s.actors.party.size, "aboard");
+    assert!(in_hold(&s, A), "the raft carries the skiff");
 }
 
 /// The machine's animation slot: tile 0x180 (the base tile of type 0xec) cycles from 0x1c0;
