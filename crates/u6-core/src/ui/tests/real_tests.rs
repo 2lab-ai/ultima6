@@ -6,8 +6,10 @@
 
 use super::*;
 use crate::image::GameImage;
+use crate::ui::tables::COMBAT_MODES;
 use crate::ui::text::WindowId;
 use u6_intake::{InputFile, intake};
+use u6_testkit::assert_same;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
@@ -165,21 +167,28 @@ fn real_tables_font_and_start_state_render() {
     let Some(files) = files() else { return };
     let s = start_state(&files);
     let t = &s.ui.tables;
-    // Spot checks of the extracted table against what the code implies: raw 0x20 is `a`,
-    // the cursor keys give the PC codes 0x148 / 0x150 / 0x14d / 0x14b, return 0x0d.
-    assert_eq!(t.keymap[0x20][..2], [0x61, 0x41]);
-    assert_eq!(
-        [0x4c, 0x4d, 0x4e, 0x4f].map(|r| t.keymap[r][0]),
-        [0x148, 0x150, 0x14d, 0x14b]
+    // The extracted table against what the keyboard and the code imply (not values copied from
+    // the file): the Amiga raw key 0x20 (A) gives ASCII `a` / `A`, the raw cursor keys
+    // 0x4c..0x4f the PC codes 0x106bbc compares with (ui/target.rs, up / down / right / left),
+    // the raw Return 0x44 ASCII CR.
+    assert_same!(
+        t.keymap[0x20][..2],
+        [u16::from(b'a'), u16::from(b'A')],
+        "raw key A"
     );
-    assert_eq!(t.keymap[0x44][0], 0x0d);
+    assert_same!(
+        [0x4c, 0x4d, 0x4e, 0x4f].map(|r| t.keymap[r][0]),
+        [0x148, 0x150, 0x14d, 0x14b],
+        "the raw cursor keys"
+    );
+    assert_same!([t.keymap[0x44][0]], [u16::from(b'\r')], "raw Return");
     // Ctrl-S and Ctrl-R (Save, Restore) come out of the table's control column.
     let mut q = crate::ui::input::Qualifiers::default();
     for c in ['\u{13}', '\u{12}'] {
         let code = crate::ui::input::key_code(&mut q, &t.keymap, crate::Key::Char(c));
         assert_eq!(code, c as u16, "{c:?}");
     }
-    assert_eq!(t.panel.combat_modes.len(), 7);
+    assert_eq!(t.panel.combat_modes.len(), COMBAT_MODES.count());
     assert!(s.ui.font.as_ref().is_some_and(|f| f.glyphs.len() == 256));
     println!(
         "colours text {} paper {} alert {}; panel mode {:#x}; window flags {:#x}",

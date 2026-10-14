@@ -249,32 +249,39 @@ class InstallTable(unittest.TestCase):
     def test_table(self):
         with open(INSTALLU6, "rb") as f:
             entries, boot = mkadf.install_table(f.read())
-        self.assertEqual(len(entries), 129)
+        # Counts and bytes of the table are the user's data: the checks are its structure.
+        self.assertTrue(entries and all(e["volume"] in mkadf.VOLUMES for e in entries))
         by = {(e["volume"], e["dst"]): e for e in entries if e["floppy"]}
         self.assertEqual(by[("PROGRAM", "ultima6")]["src"], "ultcli")  # flags 3: floppy-only, decrunched
         self.assertTrue(by[("PROGRAM", "ultima6")]["floppy"])
         self.assertEqual(by[("PROGRAM", "s/startup-sequence")]["src"], "start")
-        self.assertFalse(any(e["floppy"] for e in entries if e["src"] in ("ultima6", "ultima6.info", "disk.info")))
-        self.assertEqual(sum(1 for e in entries if e["dst"].startswith("savegame/")), 70)
+        hd_only = ("ultima6", "ultima6.info", "disk.info")
+        self.assertFalse(any(e["floppy"] for e in entries if e["src"] in hd_only))
+        # Every other entry goes to the floppies.
+        self.assertEqual(sum(e["floppy"] for e in entries), sum(e["src"] not in hd_only for e in entries))
+        # The objlist and the 69 object blocks (u6-core objects::BLOCK_COUNT).
+        self.assertEqual(sum(1 for e in entries if e["dst"].startswith("savegame/")), 1 + 69)
         self.assertTrue(all(e["volume"] == "PLAYER" for e in entries if e["dst"].startswith("savegame/")))
         self.assertEqual({e["volume"] for e in entries if e["src_volume"] == "DATA2"}, {"POPULACE"})
         self.assertEqual(boot[:4], b"DOS\0")
-        self.assertEqual(sum(e["floppy"] for e in entries), 126)
 
     def test_game_first_patches(self):
         pp20 = load_path("pp20", os.path.join(HERE, "..", "pp20.py"))
         with open(os.path.join(GAMES, "files", "d1", "INSTALL", "ultcli"), "rb") as f:
             ultcli = pp20.decrunch(f.read())
         out, what = mkadf.game_first_patches("ultima6", ultcli)
-        self.assertEqual(out[0x3E4:0x3EA].hex(), "7e017c007a00")  # moveq #1,d7 ; moveq #0,d6 ; moveq #0,d5
-        self.assertEqual(sum(a != b for a, b in zip(out, ultcli)), 1)
+        # One byte differs: the low byte of the tool's patch word (moveq #1,d7), which ends there.
+        diff = [i for i, (a, b) in enumerate(zip(out, ultcli)) if a != b]
+        self.assertEqual(len(diff), 1)
+        patch = bytes.fromhex(mkadf.ULTCLI_STATE[2])
+        self.assertEqual(out[diff[0] + 1 - len(patch):diff[0] + 1], patch)
         with self.assertRaises(ValueError):
             mkadf.game_first_patches("ultima6", out)  # already patched: expected bytes absent
         with open(os.path.join(GAMES, "files", "d2", "DATA1", "objlist"), "rb") as f:
             objlist = pp20.decrunch(f.read())
         out, _ = mkadf.game_first_patches("savegame/objlist", objlist)
-        self.assertEqual((out[0x1C71], out[0x1C72]), (1, 1))
-        self.assertEqual(sum(a != b for a, b in zip(out, objlist)), 2)
+        self.assertEqual({o: out[o] for o in mkadf.OBJLIST_CREATED}, mkadf.OBJLIST_CREATED)
+        self.assertEqual(sum(a != b for a, b in zip(out, objlist)), len(mkadf.OBJLIST_CREATED))
         self.assertIsNone(mkadf.game_first_patches("game", b"x"))
 
 

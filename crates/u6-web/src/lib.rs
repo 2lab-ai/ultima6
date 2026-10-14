@@ -897,7 +897,8 @@ mod tests {
     /// The stored save removed under a game that started from one: its next Save lists the
     /// whole save (objlist and the 69 blocks), so the next start from it is the world that
     /// game had. A block of the save it started from that no Save rewrote (synthetic: an empty
-    /// far block) is in the list, with that save's bytes, and the restarted world holds it.
+    /// block, the last one the first Save did not list) is in the list, with that save's bytes,
+    /// and the restarted world holds it.
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn a_save_after_the_stored_one_was_removed_lists_the_whole_world() {
@@ -938,11 +939,11 @@ mod tests {
         save(&mut first);
         assert_eq!(first.save_generation(), 1);
         let mut stored = listed(&mut first);
-        let far = u6_core::saveload::block_file(63);
-        assert!(
-            !stored.contains_key(&far),
-            "a Save near the start leaves the far block"
-        );
+        let far_index = (0..BLOCK_COUNT)
+            .rev()
+            .find(|&i| !stored.contains_key(&u6_core::saveload::block_file(i)))
+            .expect("a Save near the start leaves blocks out");
+        let far = u6_core::saveload::block_file(far_index);
         stored.insert(far.clone(), vec![0, 0]);
         let kept: Vec<(String, Vec<u8>)> = (0..first.kept_count())
             .map(|i| (first.kept_path(i), first.kept_bytes(i).unwrap().to_vec()))
@@ -960,7 +961,7 @@ mod tests {
             game
         };
         let mut game = start(&stored);
-        assert_same!(blocks(&game)[63], [0, 0], "the save's far block");
+        assert_same!(blocks(&game)[far_index], [0, 0], "the save's far block");
         game.save_forgotten();
         save(&mut game);
         assert_eq!(game.save_generation(), 1);

@@ -56,7 +56,14 @@ fn the_players_tables_and_the_effect_module_come_out_of_game() {
         "effect module: {} bytes, instrument 1 type {kind}",
         fx.len()
     );
-    assert_eq!(kind, -1, "a synth sound");
+    // The same field read here from the raw module (MMD0: the BE instrument array pointer at
+    // 0x18, its first BE pointer, the BE type word at +4): one of MED's instrument types
+    // (-2 hybrid, -1 synth, 0 sample, 1..3 IFF octaves).
+    let be32 = |at: usize| u32::from_be_bytes(fx[at..at + 4].try_into().unwrap()) as usize;
+    let first = be32(be32(0x18));
+    let raw = i16::from_be_bytes([fx[first + 4], fx[first + 5]]);
+    assert_same!([kind], [raw], "the type of instrument 1");
+    assert!((-2..=3).contains(&kind), "a MED instrument type");
 }
 
 #[test]
@@ -67,11 +74,13 @@ fn every_song_name_is_an_mmd0_file_on_the_disks() {
     assert_eq!((snd.current, snd.loaded), (0, 0xffff));
     for n in 1..=tables::SONGS {
         let name = snd.file_name(n).unwrap();
-        let bytes = files.get(name).unwrap_or_else(|| panic!("{name} missing"));
-        assert_same!(bytes[..4], b"MMD0", "the MED tag of {name}");
+        let bytes = files
+            .get(name)
+            .unwrap_or_else(|| panic!("the file of song {n} missing"));
+        assert_same!(bytes[..4], b"MMD0", "the MED tag of song {n}");
         assert!(
             bytes.len() <= super::MODULE_BUFFER,
-            "{name} fits the buffer"
+            "song {n} fits the buffer"
         );
     }
 }
@@ -80,10 +89,15 @@ fn every_song_name_is_an_mmd0_file_on_the_disks() {
 fn every_song_starts_with_its_first_rows_notes_and_keeps_playing() {
     let Some(files) = files() else { return };
     let snd = SoundState::load(&files).unwrap();
-    let mut names: Vec<&str> = snd.names.iter().map(String::as_str).collect();
-    names.sort_unstable();
-    names.dedup();
-    for name in names {
+    // Each song file once, by the number of its first song (the names are the user's).
+    let mut songs: Vec<(u16, &str)> = Vec::new();
+    for n in 1..=tables::SONGS {
+        let name = snd.file_name(n).unwrap();
+        if !songs.iter().any(|&(_, m)| m == name) {
+            songs.push((n, name));
+        }
+    }
+    for (n, name) in songs {
         let mut d = AudioDriver::new(&files).unwrap();
         d.apply(&MedCall::Load(name.into()), &files);
         d.apply(&MedCall::PlayBuffer, &files);
@@ -101,26 +115,28 @@ fn every_song_starts_with_its_first_rows_notes_and_keeps_playing() {
             if has_note && cmd != 3 {
                 assert!(
                     d.machine.paula.channels[ch as usize].playing(),
-                    "{name} ch{ch}"
+                    "song {n} ch{ch}"
                 );
             }
         }
         let a = render(&mut d, 5);
         let rms = (a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() / a.len() as f64).sqrt();
         println!(
-            "{name}: {tracks} tracks, 5 s RMS {rms:.4}, state {}, line {}",
+            "song {n}: {tracks} tracks, 5 s RMS {rms:.4}, state {}, line {}",
             d.player.state, d.player.line
         );
-        assert!(rms > 0.01, "{name} is audible");
+        assert!(rms > 0.01, "song {n} is audible");
     }
 }
 
 #[test]
 fn rendering_is_deterministic_across_buffer_sizes() {
     let Some(files) = files() else { return };
+    // Song 1 of the table the user's `game` names.
+    let name = SoundState::load(&files).unwrap().names[0].clone();
     let run = |chunk: usize| {
         let mut d = AudioDriver::new(&files).unwrap();
-        d.apply(&MedCall::Load("ULTIMA_Aa.MOD".into()), &files);
+        d.apply(&MedCall::Load(name.clone()), &files);
         d.apply(&MedCall::PlayBuffer, &files);
         let mut out = vec![0f32; RATE as usize * 4];
         for c in out.chunks_mut(chunk * 2) {
@@ -139,7 +155,12 @@ fn rendering_is_deterministic_across_buffer_sizes() {
 fn the_instrument_song_jumps_to_the_poked_position() {
     let Some(files) = files() else { return };
     let mut d = AudioDriver::new(&files).unwrap();
-    d.apply(&MedCall::Load("ULTIMA_Ha.MOD".into()), &files);
+    // The instrument song (song 13 of the table the user's `game` names).
+    let snd = SoundState::load(&files).unwrap();
+    let name = snd
+        .file_name(super::SONG_INSTRUMENT)
+        .expect("the instrument song");
+    d.apply(&MedCall::Load(name.to_string()), &files);
     // 0x12c8b8 stores the key's number at +0x3d2 (line 0's B command argument) and restarts.
     d.apply(
         &MedCall::Poke {
@@ -174,5 +195,5 @@ fn the_shipped_save_has_sound_on() {
     let Some(files) = files() else { return };
     let s = State::new_game(&files).unwrap();
     assert!(sound_on(&s));
-    assert_eq!(s.sound.names.len(), 13);
+    assert_eq!(s.sound.names.len(), usize::from(tables::SONGS));
 }

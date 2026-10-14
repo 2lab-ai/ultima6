@@ -46,14 +46,7 @@ async fn boot_then(state: &RefCell<State>, io: &Io, setup: Setup) {
     super::boot_screen(state, io);
     {
         let mut s = state.borrow_mut();
-        s.main.flag_64ce = 1;
-        s.map.flag_7afb = 1;
-        super::finish_load_state(&mut s, io);
-        s.map.flag_7afb = 0;
-        let anim = s.tables.anim.clone();
-        for slot in anim.slots.iter().take(usize::from(anim.count)) {
-            crate::gfx::anim::substitute(&mut s.gfx, slot.tile_to_animate, slot.first_anim_frame);
-        }
+        super::test_support::load_state_like_main(&mut s, io);
         s.actors.objlist_tail[super::TAIL_CREATED] = 1;
         crate::actors::turn::after_load(&mut s);
         crate::actors::clock::tick(&mut s, 0);

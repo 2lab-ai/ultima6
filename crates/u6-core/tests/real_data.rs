@@ -28,18 +28,31 @@ fn files() -> Option<Files> {
 fn new_game_from_the_real_zip() {
     let Some(files) = files() else { return };
     let state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
-    let objlist = ObjList::parse(files.get("savegame/objlist").unwrap()).unwrap();
+    let raw = files.get("savegame/objlist").unwrap();
+    let objlist = ObjList::parse(raw).unwrap();
 
+    // The party and the clock against the raw objlist (formats.md §6): the size at 0x0FF0, the
+    // roster at 0x0FE0, the BE year at 0x1BF7.
     let party = &state.actors.party;
-    assert_eq!(party.size, 4);
-    assert_eq!(state.actors.party.active().count(), 4);
-    assert_eq!(party.leader().map(|id| id.0), Some(1));
+    let size = raw[0x0FF0];
+    assert!(party.size == size, "the party size at 0x0FF0");
+    assert_eq!(state.actors.party.active().count(), usize::from(size));
+    let first = u16::from(raw[0x0FE0]);
+    assert!(
+        party.leader().map(|id| id.0) == Some(first),
+        "the leader is the roster's first"
+    );
     let leader = state.leader_position().unwrap();
-    assert_eq!(leader, objlist.actors[1].pos);
-    assert_eq!(state.map.centre, leader);
-    assert_eq!(state.actors.calendar.year, 161);
+    assert!(
+        leader == objlist.actors[usize::from(first)].pos,
+        "the leader stands where the objlist puts it"
+    );
+    assert!(state.map.centre == leader, "the view on the leader");
+    let year = u16::from_be_bytes([raw[0x1BF7], raw[0x1BF8]]);
+    assert!(state.actors.calendar.year == year, "the year at 0x1BF7");
 
-    assert_eq!(state.objects.blocks.len(), 69);
+    // The 69 block files and the 256 actors' schedule starts (the code's counts).
+    assert_eq!(state.objects.blocks.len(), u6_core::objects::BLOCK_COUNT);
     assert_eq!(state.actors.schedules.first.len(), 256);
     assert_eq!(
         usize::from(state.actors.schedules.total),

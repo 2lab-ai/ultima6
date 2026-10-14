@@ -108,7 +108,11 @@ fn view_grid(s: &State) -> Vec<String> {
 #[test]
 fn start_view_sees_the_room_and_not_past_its_walls() {
     let Some(mut s) = boot() else { return };
+    let files = files().unwrap();
     let ambient = super::seams::ambient_light(&s);
+    // The ambient light is objlist tail byte 0x0b (objlist 0x1BFC), read here from the raw file.
+    let raw = files.get("savegame/objlist").unwrap()[0x1BFC] as i8;
+    assert!(ambient == raw, "the ambient light at objlist 0x1BFC");
     view::update_view(&mut s);
     let grid = view_grid(&s);
     println!(
@@ -118,9 +122,19 @@ fn start_view_sees_the_room_and_not_past_its_walls() {
     for line in &grid {
         println!("  |{line}|");
     }
-    // 08:00 (ambient 7) inside the throne room: the room and its walls fill the view, so every
-    // view cell is seen, and daylight lights it fully (4 - dist + 7 clamps to 4).
-    assert_eq!(ambient, 7);
+    // The start room and its walls fill the view, so every view cell is seen; the start is by
+    // day: the ambient light reaches the farthest view cell, so each cell gains
+    // 4 - dist + ambient, clamped to 4.
+    let t = s.map.tables.as_ref().unwrap();
+    let farthest = (0..VIEW)
+        .flat_map(|r| (0..VIEW).map(move |c| (c, r)))
+        .map(|(c, r)| t.dist[c.abs_diff(5)][r.abs_diff(5)])
+        .max()
+        .unwrap();
+    assert!(
+        i16::from(ambient) >= i16::from(farthest),
+        "the start is lit by day"
+    );
     for row in 0..VIEW {
         for col in 0..VIEW {
             assert!(s.map.is_visible(col, row), "({col}, {row}) hidden");
@@ -157,8 +171,12 @@ fn print_sight_area(s: &State) {
 #[test]
 fn view_west_of_the_start_sees_round_through_the_corridor_and_darkens_at_night() {
     let Some(mut s) = boot() else { return };
-    // Three steps west of the start (same window: (304 - 16) & 0x3f8 = 288).
+    // Three steps west of the start, inside the window the start loaded (its origin
+    // `(x - 16) & 0x3f8` stays), so the window is rebuilt, not reloaded.
+    let origin = |x: u16| x.wrapping_sub(16) & 0x3f8;
+    let x0 = s.map.centre.x;
     s.map.centre.x -= 3;
+    assert_eq!(origin(s.map.centre.x), origin(x0), "the same window");
     region::rebuild_window(&mut s);
     view::update_view(&mut s);
     println!("day, centre ({}, {}):", s.map.centre.x, s.map.centre.y);
@@ -175,17 +193,22 @@ fn view_west_of_the_start_sees_round_through_the_corridor_and_darkens_at_night()
         println!("  |{line}|");
     }
     assert_ne!(s.map.view_tile(5, 5), DARK);
-    // dist[4][4] = 6 in the user's table, so 4 - 6 + 0 < 0: no light two diagonals out.
-    assert_eq!(s.map.view_tile(9, 9), DARK);
+    // A seen cell at distance 4 or more gets no light (4 - dist + 0 <= 0) and is drawn dark.
+    let mut dark = 0;
     for row in 0..VIEW {
         for col in 0..VIEW {
             let d = s.map.tables.as_ref().unwrap().dist[col.abs_diff(5)][row.abs_diff(5)];
             let lit = s.map.light_at(col, row) > 0;
             if s.map.is_visible(col, row) {
                 assert_eq!(lit, d < 4, "({col}, {row}) dist {d}");
+                if d >= 4 {
+                    assert_eq!(s.map.view_tile(col, row), DARK, "({col}, {row}) dark");
+                    dark += 1;
+                }
             }
         }
     }
+    assert!(dark > 0, "a seen cell out of the light");
 }
 
 /// The flood's closure, checked from the tile flags alone: inside the sight area, a seen cell

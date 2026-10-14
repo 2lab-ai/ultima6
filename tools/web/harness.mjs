@@ -2,7 +2,7 @@
 // IndexedDB view, frame comparisons. Game files are read from the user's local copy at run
 // time and never written anywhere.
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -16,6 +16,28 @@ export const ZIP = join(ORIGINAL, 'ultima-vi.zip');
 export const HFES = [1, 2, 3].map((n) => join(ORIGINAL, `Ultima VI Disk ${n}.hfe`));
 export const haveHfes = () => HFES.every((p) => existsSync(p));
 export const haveZip = () => existsSync(ZIP);
+// The user's disks as tools/pp20.py left them: one directory per volume under d1..d3.
+export const UNPACKED = join(ORIGINAL, '..', 'unpacked');
+const SIDE_CARS = ['.blkdev', '.bootcode', '.xdfmeta'];
+
+/// How many game files an intake of the user's disks keeps: the files of the decrunched volumes
+/// (unpacked/d1..d3, xdftool's side-car files left out), counted at run time like the Rust
+/// intake test does; `undefined` without that copy (the count is the user's data, not ours).
+export function gameFileCount() {
+  if (!existsSync(UNPACKED)) return undefined;
+  const count = (dir) => readdirSync(dir, { withFileTypes: true }).reduce((n, e) => {
+    if (e.isDirectory()) return n + count(join(dir, e.name));
+    return n + (SIDE_CARS.some((x) => e.name.endsWith(x)) ? 0 : 1);
+  }, 0);
+  return ['d1', 'd2', 'd3'].reduce((n, d) => n + count(join(UNPACKED, d)), 0);
+}
+
+/// The objlist and the 69 block files a whole save holds (u6-core `objects::BLOCK_COUNT`).
+export const WHOLE_SAVE = 1 + 69;
+
+/// The save path of surface block `i` (`savegame/objblk` + column + row letter, as u6-core
+/// `saveload::block_file`).
+export const blockFile = (i) => `savegame/objblk${'abcdefgh'[i & 7]}${'abcdefgh'[i >> 3]}`;
 
 /// Deep equality for values that hold content of the user's files (save bytes, names): when
 /// they differ the error names `label` and, per differing path (object keys are file paths),

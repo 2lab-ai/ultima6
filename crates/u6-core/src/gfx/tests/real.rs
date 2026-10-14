@@ -82,14 +82,15 @@ fn real_tables_match_the_image() {
     } else {
         eprintln!("image comparison skipped: {IMAGE} not present");
     }
-    // Shore merges: 4 sources, the 32 shore tiles 16..48 as targets.
+    // Shore merges: the source tiles, the 32 shore targets (graphics.md: tiles 16..48).
     let mut src: Vec<u16> = t.shore_src.iter().map(|w| w / 4).collect();
     src.sort_unstable();
     src.dedup();
     let dst: Vec<u16> = t.shore_dst.iter().map(|w| w / 4).collect();
     println!("{} shore source tiles, {} targets", src.len(), dst.len());
     assert!(t.shore_dst.iter().chain(&t.shore_src).all(|w| w % 4 == 0));
-    assert_eq!(t.window_shown, 1);
+    // A flag word (its image value is compared above when the flattened image is present).
+    assert!(t.window_shown <= 1, "the window-shown flag");
 }
 
 #[test]
@@ -103,7 +104,10 @@ fn real_shore_masks_fit_and_the_window_draws_the_party() {
         .iter()
         .filter(|r| r.kind == TileKind::Map)
         .count();
-    assert_eq!(maps, 488);
+    // The map tiles are those whose masktype byte has `& 3 == 0` (graphics.md §4), counted in
+    // the user's masktype file.
+    let masktype = u6_formats::lzw::decode(files.get("masktype.ega").unwrap()).unwrap();
+    assert_eq!(maps, masktype.iter().filter(|&&m| m & 3 == 0).count());
     // Two ticks: the animdata frames reach the water tiles, the second (even) one merges.
     anim_tick(&mut state, &mut gfx);
     anim_tick(&mut state, &mut gfx);
@@ -119,8 +123,9 @@ fn real_shore_masks_fit_and_the_window_draws_the_party() {
     }
     let window = view_window(&state);
     let centre = &window.objects[5 * 11 + 5];
-    let avatar = state.tables.basetile.base[0x19a]
-        + u16::from(state.objects.frame(crate::objects::ObjectId(1)));
+    let leader = crate::objects::ObjectId(1);
+    let avatar = state.tables.basetile.base[usize::from(state.objects.obj_type(leader))]
+        + u16::from(state.objects.frame(leader));
     assert_eq!(
         centre.last(),
         Some(&avatar),

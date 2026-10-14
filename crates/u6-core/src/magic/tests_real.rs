@@ -53,16 +53,9 @@ pub(super) async fn boot(state: &RefCell<State>, io: &Io) {
         crate::main_loop::draw_paper(&s, io);
         s.ui.text.main_windows(&tables);
         crate::objects::init_slots(&mut s.objects);
-        s.main.flag_64ce = 1;
-        // The start window's egg stays unhatched (A4-0x7afb, which 0x1321dc / 0x1319b2 check),
-        // as in combat's receipt: its gargoyles would be foes in every spell's view.
-        s.map.flag_7afb = 1;
-        crate::main_loop::finish_load_state(&mut s, io);
-        s.map.flag_7afb = 0;
-        let anim = s.tables.anim.clone();
-        for slot in anim.slots.iter().take(usize::from(anim.count)) {
-            crate::gfx::anim::substitute(&mut s.gfx, slot.tile_to_animate, slot.first_anim_frame);
-        }
+        // As game's main, the start window's egg unhatched: its monsters would be foes in every
+        // spell's view.
+        crate::main_loop::test_support::load_state_like_main(&mut s, io);
         s.actors.objlist_tail[0x81] = 1;
         crate::actors::turn::after_load(&mut s);
         crate::actors::clock::tick(&mut s, 0);
@@ -386,9 +379,22 @@ fn night_book(s: &mut State) {
     crate::map::view::update_view(s);
 }
 
+/// The Avatar's magic points in the shipped objlist (its byte of the table at 0x13F1,
+/// formats.md §6), read from the raw file: what a cast from the start spends from.
+fn start_magic(files: &Files) -> u8 {
+    files.get("savegame/objlist").unwrap()[0x13F1 + usize::from(AVATAR)]
+}
+
+/// The NPC the casts below aim at: actor 7, put on the tile the cross-hair reaches with two
+/// rights and three ups.
+const TARGET: usize = 7;
+
 fn day_book(s: &mut State) {
     give_book(s, &[0, 1, 6, 9, 0x11, 0x14, 0x34]);
     s.actors.attrs.hp[2] = 10;
+    let c = s.map.centre;
+    let z = u16::from(c.z);
+    crate::objects::move_to(s, TARGET as i16, c.x + 2, c.y - 3, z);
     // A potion on the floor two cells east of the Avatar, for Detect Magic.
     let c = s.map.centre;
     crate::objects::create_on_map(
@@ -470,7 +476,7 @@ fn create_food_adds_food() {
     spent(
         &[10; 8],
         &reagents(&s),
-        (30, s.actors.attrs.magic[1]),
+        (start_magic(&files), s.actors.attrs.magic[1]),
         &s,
         0,
     );
@@ -529,7 +535,7 @@ fn heal_and_great_heal_on_a_member() {
     spent(
         &[10; 8],
         &reagents(&s),
-        (30, s.actors.attrs.magic[1]),
+        (start_magic(&files), s.actors.attrs.magic[1]),
         &s,
         6,
     );
@@ -544,7 +550,7 @@ fn heal_and_great_heal_on_a_member() {
     spent(
         &[10; 8],
         &reagents(&s),
-        (30, s.actors.attrs.magic[1]),
+        (start_magic(&files), s.actors.attrs.magic[1]),
         &s,
         0x34,
     );
@@ -554,10 +560,10 @@ fn heal_and_great_heal_on_a_member() {
 fn sleep_on_an_npc() {
     let Some(files) = files() else { return };
     let e = cast_with(&files, day_book, "IZ\n>>^^^\n");
-    let tail = show("Sleep on actor 7", &e);
+    let tail = show("Sleep on the target", &e);
     let s = e.state();
-    let asleep = s.actors.attrs.status[7] & 4 != 0;
-    eprintln!("  actor 7 status {:#x}", s.actors.attrs.status[7]);
+    let asleep = s.actors.attrs.status[TARGET] & 4 != 0;
+    eprintln!("  target status {:#x}", s.actors.attrs.status[TARGET]);
     assert!(
         asleep || tail.has(&msg(&e, Msg::Failed)) || tail.has(&msg(&e, Msg::NoEffect)),
         "{tail:?}"
@@ -565,7 +571,7 @@ fn sleep_on_an_npc() {
     spent(
         &[10; 8],
         &reagents(&s),
-        (30, s.actors.attrs.magic[1]),
+        (start_magic(&files), s.actors.attrs.magic[1]),
         &s,
         0x14,
     );
@@ -574,12 +580,12 @@ fn sleep_on_an_npc() {
 #[test]
 fn magic_arrow_goes_through_the_combat_seams() {
     let Some(files) = files() else { return };
-    let before = State::new_game(&files).unwrap().actors.attrs.hp[7];
+    let before = State::new_game(&files).unwrap().actors.attrs.hp[TARGET];
     let e = cast_with(&files, day_book, "OJ\n>>^^^\n");
-    let tail = show("Magic Arrow on actor 7", &e);
+    let tail = show("Magic Arrow on the target", &e);
     let hits = e.stub_hits();
     let s = e.state();
-    eprintln!("  actor 7 hp {before} -> {}", s.actors.attrs.hp[7]);
+    eprintln!("  target hp {before} -> {}", s.actors.attrs.hp[TARGET]);
     // The flight (0x1228ba) and the hit (0x1231be, 0x123c56, 0x12395a) are combat's ports.
     assert!(
         !hits
@@ -587,7 +593,7 @@ fn magic_arrow_goes_through_the_combat_seams() {
             .any(|k| k.starts_with("0x1228ba") || k.starts_with("0x1231be"))
     );
     let failed = tail.has(&msg(&e, Msg::Failed));
-    assert!(failed || s.actors.attrs.hp[7] < before, "{tail:?}");
+    assert!(failed || s.actors.attrs.hp[TARGET] < before, "{tail:?}");
     if !failed {
         // 0x11669e's order: the target's reaction (0x123c56) before the newline and the wound
         // line (0x12395a).
@@ -601,7 +607,7 @@ fn magic_arrow_goes_through_the_combat_seams() {
     spent(
         &[10; 8],
         &reagents(&s),
-        (30, s.actors.attrs.magic[1]),
+        (start_magic(&files), s.actors.attrs.magic[1]),
         &s,
         0x11,
     );
