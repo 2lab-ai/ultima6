@@ -16,14 +16,17 @@
 //! Without it nothing is stored and every boot starts from the zip's new-game files.
 //!
 //! Headless mode never opens a window or reads a clock: it runs N ticks of `HEADLESS_TICK_MS`,
-//! delivering the `--keys` one per tick while the game has no key queued, and writes the last
+//! delivering the `--keys` one per tick while the game has no input queued, and writes the last
 //! published 320x200 frame. A `ctrl+<letter>` token is that control character (`ctrl+s` Save,
 //! `ctrl+r` Restore; the window sends them for Ctrl + a letter); `tab` is the Tab key (with a
 //! cursor up it moves to the inventory panel). A `say:words` token types
 //! `words` and Return into the next line
 //! input, pressing space (one at a time, after the game has idled a few ticks) for every more
-//! prompt or key wait before it. The RNG seed defaults to 0 headless (reproducible) and to the
-//! wall clock in the window (as the original seeds from `time()`).
+//! prompt or key wait before it. `pointer:X:Y:B` moves the pointer to screen pixel (X, Y) with
+//! buttons B held (bit 0 left, bit 1 right); `click:X:Y` (or `click:X:Y:B`) is a press there
+//! and its release in the same tick; `wait:N` idles N ticks. `--png-every N:prefix` also writes the frame every
+//! N ticks. The RNG seed defaults to 0 headless (reproducible) and to the wall clock in the
+//! window (as the original seeds from `time()`). In the window the mouse is the pointer.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -31,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use minifb::{KeyRepeat, Window, WindowOptions};
+use minifb::{KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use u6_core::saveload::{SaveSync, attach};
 use u6_core::{Engine, Files, HEIGHT, InputEvent, Key, WIDTH};
 use u6_intake::{InputFile, intake};
@@ -54,6 +57,8 @@ struct Args {
     seed: Option<u16>,
     save_dir: Option<PathBuf>,
     wav: Option<PathBuf>,
+    /// `--png-every N:prefix`: also write the frame every N ticks to `prefix-<tick>.png`.
+    png_every: Option<(u32, PathBuf)>,
 }
 
 /// One `--keys` token.
@@ -62,13 +67,56 @@ enum Token {
     Key(Key),
     /// Text typed into the next line input, then Return.
     Say(String),
+    /// The pointer at (x, y) with these buttons.
+    Pointer(i16, i16, u8),
+    /// A press of these buttons at (x, y), then the release.
+    Click(i16, i16, u8),
+    /// Idle ticks.
+    Wait(u32),
+}
+
+/// `X:Y` or `X:Y:B` of a pointer token (B defaults to `default`).
+fn parse_point(spec: &str, default: u8) -> Result<(i16, i16, u8), String> {
+    let bad = || format!("bad pointer {spec:?} (want X:Y or X:Y:B)");
+    let mut it = spec.split(':');
+    let mut num = |what: &str| -> Result<Option<i64>, String> {
+        it.next()
+            .map(|v| {
+                v.parse::<i64>()
+                    .map_err(|_| format!("bad {what} in {spec:?}"))
+            })
+            .transpose()
+    };
+    let (Some(x), Some(y)) = (num("x")?, num("y")?) else {
+        return Err(bad());
+    };
+    let b = num("buttons")?.unwrap_or(i64::from(default));
+    if it.next().is_some() || !(0..=3).contains(&b) {
+        return Err(bad());
+    }
+    let clamp = |v: i64| v.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
+    Ok((clamp(x), clamp(y), b as u8))
 }
 
 fn parse_token(token: &str) -> Result<Token, String> {
-    match token.strip_prefix("say:") {
-        Some(text) => Ok(Token::Say(text.to_string())),
-        None => parse_key(token).map(Token::Key),
+    if let Some(text) = token.strip_prefix("say:") {
+        return Ok(Token::Say(text.to_string()));
     }
+    if let Some(spec) = token.strip_prefix("pointer:") {
+        let (x, y, b) = parse_point(spec, 0)?;
+        return Ok(Token::Pointer(x, y, b));
+    }
+    if let Some(spec) = token.strip_prefix("click:") {
+        let (x, y, b) = parse_point(spec, 1)?;
+        return Ok(Token::Click(x, y, b));
+    }
+    if let Some(n) = token.strip_prefix("wait:") {
+        return n
+            .parse()
+            .map(Token::Wait)
+            .map_err(|_| format!("bad wait {token:?}"));
+    }
+    parse_key(token).map(Token::Key)
 }
 
 /// The control character of letter `c` (Ctrl-S = 0x13): what the game's key table gives in its
@@ -136,6 +184,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--save-dir" => parsed.save_dir = Some(value("a directory")?.into()),
             "--wav" => parsed.wav = Some(value("a path")?.into()),
+            "--png-every" => {
+                let v = value("N:prefix")?;
+                let (n, prefix) = v.split_once(':').ok_or(format!("bad --png-every {v:?}"))?;
+                let n: u32 = n.parse().map_err(|_| format!("bad --png-every {v:?}"))?;
+                parsed.png_every = Some((n.max(1), prefix.into()));
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -190,32 +244,42 @@ fn print_log(engine: &mut Engine) {
 /// Ticks the game must idle with nothing queued before a space answers a wait for `say:`.
 const IDLE_TICKS: u32 = 3;
 
+/// A pointer event.
+fn pointer(x: i16, y: i16, buttons: u8) -> InputEvent {
+    InputEvent::Pointer { x, y, buttons }
+}
+
 /// Runs `frames` fixed ticks feeding the tokens (see the module doc); returns the last frame as
-/// RGBA8.
+/// RGBA8. `every` writes the frame every N ticks as well.
 fn simulate(
     engine: &mut Engine,
     frames: u32,
     tokens: &[Token],
     mut saves: Option<&mut Saves>,
     mut sound: Option<(&mut Audio, &mut Vec<f32>)>,
+    every: Option<&(u32, PathBuf)>,
 ) -> Result<Vec<u8>, String> {
-    let mut queue: std::collections::VecDeque<Key> = std::collections::VecDeque::new();
+    let mut queue: std::collections::VecDeque<InputEvent> = std::collections::VecDeque::new();
     let mut next = tokens.iter();
     let mut pending: Option<String> = None;
     let mut idle = 0u32;
-    for _ in 0..frames {
+    let mut wait = 0u32;
+    let mut rgba = Vec::new();
+    for tick in 0..frames {
         let busy = engine.io().pending_events() > 0;
         idle = if busy { 0 } else { idle + 1 };
         let mut input = Vec::new();
-        if !busy {
-            if let Some(k) = queue.pop_front() {
-                input.push(InputEvent::Key(k));
+        if wait > 0 {
+            wait -= 1;
+        } else if !busy {
+            if let Some(ev) = queue.pop_front() {
+                input.push(ev);
             } else if let Some(text) = pending.take() {
                 if engine.state().ui.input.line_input {
-                    queue.extend(text.chars().map(Key::Char));
-                    queue.push_back(Key::Enter);
-                    if let Some(k) = queue.pop_front() {
-                        input.push(InputEvent::Key(k));
+                    queue.extend(text.chars().map(|c| InputEvent::Key(Key::Char(c))));
+                    queue.push_back(InputEvent::Key(Key::Enter));
+                    if let Some(ev) = queue.pop_front() {
+                        input.push(ev);
                     }
                 } else {
                     if idle >= IDLE_TICKS {
@@ -228,6 +292,14 @@ fn simulate(
                 match next.next() {
                     Some(Token::Key(k)) => input.push(InputEvent::Key(*k)),
                     Some(Token::Say(text)) => pending = Some(text.clone()),
+                    Some(&Token::Pointer(x, y, b)) => input.push(pointer(x, y, b)),
+                    Some(&Token::Click(x, y, b)) => {
+                        // Both in one tick: the event wait samples the press, then the
+                        // release, so the click acts once (a hold would repeat the map walk).
+                        input.push(pointer(x, y, b));
+                        input.push(pointer(x, y, 0));
+                    }
+                    Some(&Token::Wait(n)) => wait = n,
                     None => {}
                 }
             }
@@ -240,8 +312,14 @@ fn simulate(
             audio.sync(engine);
             audio.render_ms(HEADLESS_TICK_MS, samples);
         }
+        if let Some((n, prefix)) = every
+            && (tick + 1) % n == 0
+        {
+            engine.frame().write_rgba(&mut rgba);
+            let path = format!("{}-{:05}.png", prefix.display(), tick + 1);
+            write_png(Path::new(&path), &rgba)?;
+        }
     }
-    let mut rgba = Vec::new();
     engine.frame().write_rgba(&mut rgba);
     Ok(rgba)
 }
@@ -323,15 +401,30 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
     let mut screen = vec![0u32; w * h];
     let start = Instant::now();
     let mut delivered_ms = 0u64;
+    let mut mouse = None;
     while window.is_open() {
         let ctrl =
             window.is_key_down(minifb::Key::LeftCtrl) || window.is_key_down(minifb::Key::RightCtrl);
-        let input: Vec<InputEvent> = window
+        let mut input: Vec<InputEvent> = window
             .get_keys_pressed(KeyRepeat::Yes)
             .into_iter()
             .filter_map(|k| map_key(k, ctrl))
             .map(InputEvent::Key)
             .collect();
+        // The mouse, once per frame when it changed: window pixels to screen pixels.
+        if let Some((x, y)) = window.get_mouse_pos(MouseMode::Clamp) {
+            let buttons = u8::from(window.get_mouse_down(MouseButton::Left))
+                | u8::from(window.get_mouse_down(MouseButton::Right)) << 1;
+            let now = (
+                (x as usize / SCALE) as i16,
+                (y as usize / SCALE) as i16,
+                buttons,
+            );
+            if mouse != Some(now) {
+                input.push(pointer(now.0, now.1, now.2));
+                mouse = Some(now);
+            }
+        }
         let now_ms = start.elapsed().as_millis() as u64;
         let step = (now_ms - delivered_ms).min(MAX_STEP_MS);
         delivered_ms = now_ms;
@@ -378,7 +471,14 @@ fn run(args: Args) -> Result<(), String> {
             };
             let mut samples = Vec::new();
             let sound = audio.as_mut().map(|a| (a, &mut samples));
-            let rgba = simulate(&mut engine, args.frames, &args.keys, saves.as_mut(), sound)?;
+            let rgba = simulate(
+                &mut engine,
+                args.frames,
+                &args.keys,
+                saves.as_mut(),
+                sound,
+                args.png_every.as_ref(),
+            )?;
             print_log(&mut engine);
             write_png(path, &rgba)?;
             if let Some(wav) = &args.wav {
@@ -498,6 +598,30 @@ mod tests {
         );
         assert!(args(&["--seed", "70000"]).is_err());
         assert_eq!(args(&[]).unwrap().frames, 60);
+    }
+
+    #[test]
+    fn parses_pointer_click_and_wait_tokens() {
+        let a = args(&[
+            "--keys",
+            "pointer:24:184:0,click:100:90,click:200:40:2,wait:5",
+        ])
+        .unwrap();
+        assert_eq!(
+            a.keys,
+            [
+                Token::Pointer(24, 184, 0),
+                Token::Click(100, 90, 1),
+                Token::Click(200, 40, 2),
+                Token::Wait(5)
+            ]
+        );
+        assert!(args(&["--keys", "click:1"]).is_err());
+        assert!(args(&["--keys", "pointer:1:2:4"]).is_err());
+        assert!(args(&["--keys", "click:1:2:1:9"]).is_err());
+        assert!(args(&["--keys", "wait:x"]).is_err());
+        let a = args(&["--png-every", "10:/tmp/f"]).unwrap();
+        assert_eq!(a.png_every, Some((10, PathBuf::from("/tmp/f"))));
     }
 
     #[test]

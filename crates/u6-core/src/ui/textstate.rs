@@ -75,6 +75,12 @@ impl Default for TextState {
 
 impl TextState {
     /// The initial state from the data hunk: the default window current, output on.
+    ///
+    /// Replaces: 0x162228 (main's call of the two below), 0x162238, 0x16227c
+    ///
+    /// (Hunk 34 sets four 8-byte windows at 0x15804a to (0, 0, 0x27, 0x18, colour 0xf) with
+    /// the pointer 0x158086 to them, and clears the words 0x158072 and 0x158092..0x158096; no
+    /// code in `game` reads any of them, so the port keeps none.)
     pub fn from_tables(t: &UiTables) -> Self {
         let mut s = TextState {
             on: t.initial.text_on,

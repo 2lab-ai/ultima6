@@ -11,6 +11,7 @@ use super::blit::{
 
 mod idle;
 mod real;
+mod sprite;
 mod view;
 
 /// A map record: rows `first..first+rows` opaque with colour `colour(r, c)`.

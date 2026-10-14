@@ -15,6 +15,8 @@ use crate::{Engine, Files, InputEvent, Io, Key, State};
 
 mod input_tests;
 mod panel_tests;
+mod pointer_real;
+mod pointer_tests;
 mod real_tests;
 mod text_tests;
 

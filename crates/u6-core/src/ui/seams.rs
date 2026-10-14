@@ -99,3 +99,35 @@ pub(crate) fn anim_step(s: &mut State) {
 pub(crate) fn sky_bar_tail(s: &mut State) {
     crate::main_loop::wind_change(s, 1);
 }
+
+/// The NUL-terminated string at image address `addr` of the user's `game` (main_loop's reader).
+pub(crate) fn game_string(io: &Io, addr: u32) -> Vec<u8> {
+    crate::main_loop::game_string(io, addr)
+}
+
+/// 0x12ba36(chest) (objects: spring the trap in a chest: acid, poison, bomb or gas, then remove
+/// the trap). The objects port's stub takes the trap object itself, so this passes the trap
+/// 0x10b18c finds in the chest (type 0x151, quality 0x16), as 0x12ba36 does at its end
+/// (0x116526).
+pub(crate) fn spring_trap(s: &mut State, chest: i16) {
+    let trap = crate::objects::find_child(&mut s.objects, chest, 0x151, 0x16);
+    if trap >= 0 {
+        crate::objects::spring_trap(s, trap);
+    }
+}
+
+/// [magic] A4+0x181a + `tab` (bytes: the spellbook's page tabs: previous circle, previous page,
+/// next page, next circle; 0xff = none, 0x106474 reads them by `(x - 0xb0) >> 4`): the magic
+/// state's page fields.
+pub(crate) fn spellbook_tab(s: &State, tab: usize) -> u8 {
+    let m = &s.magic;
+    [m.prev_circle, m.prev_page, m.next_page, m.next_circle]
+        .get(tab)
+        .copied()
+        .unwrap_or(0xff)
+}
+
+/// [magic] A4+0x1809 (byte: lines on the shown spellbook page): `magic.page_lines`.
+pub(crate) fn spellbook_lines(s: &State) -> u8 {
+    s.magic.page_lines
+}

@@ -218,6 +218,7 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
         let mut s = state.borrow_mut();
         crate::actors::turn::after_load(&mut s);
         crate::actors::clock::tick(&mut s, 0);
+        crate::ui::pointer::show(&mut s);
         if s.actors.objlist_tail.get(TAIL_COMBAT).copied().unwrap_or(0) != 0 {
             // 0x121c64, the B handler (the shipped objlist has the combat byte set).
             crate::combat::mode::begin_combat(&mut s);

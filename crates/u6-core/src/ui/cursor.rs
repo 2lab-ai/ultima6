@@ -37,7 +37,7 @@ pub fn select_command(s: &mut State, io: &Io, cmd: u8) {
     }
 }
 
-/// Original: 0x105f7c (ui: what the pointer is on) [partial]
+/// Original: 0x105f7c (ui: what the pointer is on)
 ///
 /// In the map window, the location and an actor there; in the inventory panel, the slot.
 ///

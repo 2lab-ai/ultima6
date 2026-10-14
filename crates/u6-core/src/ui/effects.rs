@@ -1,4 +1,4 @@
-//! Map-window effects of hunk 18 that the milestone reaches.
+//! Map-window effects of hunk 18: the quake, the view reset and the full view redraw.
 
 use super::seams;
 use crate::engine::Io;
@@ -23,10 +23,50 @@ pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
     seams::refresh_view(s, io);
 }
 
+/// Original: 0x133a96 (ui: forget the map window's caches: every cell's tile 0xff (unknown),
+/// every cell's object list empty, the node list free again (node n links to n + 1))
+pub fn reset_window(s: &mut State) {
+    let d = &mut s.objects.draw;
+    d.base.iter_mut().for_each(|t| *t = 0xff);
+    for (n, next) in d.node_next.iter_mut().enumerate() {
+        *next = (n as u8).wrapping_add(1);
+    }
+    d.cell.iter_mut().for_each(|c| *c = 0);
+}
+
+/// Original: 0x133b0e (ui: redraw the view from scratch: the caches forgotten (0x133a96), no
+/// view rebuild pending (A4-0x6a8e), the next present dissolving (A4-0x6578 = 1), the map
+/// window rendered and presented (0x102c90 with 1), the tile cache (0x108d10) and the view
+/// (0x109e74) rebuilt)
+pub fn redraw_view(s: &mut State, io: &Io) {
+    reset_window(s);
+    s.map.view_dirty = 0;
+    s.gfx.dissolve = 1;
+    seams::present_map(s, io, 1);
+    crate::map::region::rebuild_window(s);
+    crate::map::view::update_view(s);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Rng;
+
+    #[test]
+    fn reset_window_forgets_tiles_and_lists() {
+        let mut s = State::empty();
+        s.objects.draw.base[7] = 0x123;
+        s.objects.draw.cell[7] = 9;
+        s.objects.draw.node_next[3] = 0;
+        reset_window(&mut s);
+        let d = &s.objects.draw;
+        assert!(d.base.iter().all(|&t| t == 0xff));
+        assert!(d.cell.iter().all(|&c| c == 0));
+        assert_eq!(
+            (d.node_next[0], d.node_next[3], d.node_next[255]),
+            (1, 4, 0)
+        );
+    }
 
     #[test]
     fn quake_draws_two_numbers_per_shake() {

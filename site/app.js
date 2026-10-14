@@ -7,13 +7,16 @@
 // each import, each forget) is one operation on a single queue: an operation starts only after
 // the previous one finished, from its file reads through the boot to the storage commit. Each
 // works on its own Game and puts it on screen only once it started; the one it replaces is
-// freed then. Keys reach the engine only while the canvas has focus and a game runs.
+// freed then. Keys reach the engine only while the canvas has focus and a game runs; the mouse
+// on the canvas is the game's pointer (a press there also focuses it).
 //
 // Saves: a Save in the game (Ctrl-S, Y) is stored after the tick it committed in, as one
 // operation on the same queue (one IndexedDB transaction); every start lays the stored save
 // over the game files, so a reload resumes it. Sound: the first click or key on the canvas
 // (or the Mute button) starts an AudioContext; after each tick the page renders the game's
 // audio in wasm a little ahead and posts it to the AudioWorklet (site/audio-worklet.js).
+// A press on the canvas is first the game's pointer event, then the gesture that starts the
+// sound: the game queues it whatever the AudioContext does, and only once.
 import init, { Game, max_input_bytes } from './pkg/u6_web.js';
 import {
   collect, forgetFiles, forgetSaves, loadFiles, loadSaves, saveFiles, storeSaves,
@@ -31,7 +34,8 @@ const statusLine = document.getElementById('status');
 const MAX_STEP_MS = 100; // a backgrounded tab must not jump the game ahead
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
 const HOW_TO_PLAY = 'Click the game screen or Tab to it, then: arrow keys walk, T talks, ' +
-  'space passes.';
+  'space passes. The mouse works as in the original: click the map to walk, the command icons, ' +
+  'the party and the inventory.';
 
 let wasm = null; // the wasm exports, once loaded
 let game = null; // the running game, or null
@@ -431,13 +435,36 @@ canvas.addEventListener('keydown', (e) => {
   if (!game || crashed || e.metaKey || e.altKey) return;
   if (game.key_down(e.code, e.key, e.ctrlKey)) e.preventDefault();
 });
-canvas.addEventListener('pointerdown', () => {
-  gesture();
-  canvas.focus();
-});
 mute.addEventListener('click', () => {
   setMuted(!audio.muted);
   gesture();
+});
+// The pointer: the position through the canvas's CSS box onto its 320 x 200 pixels, the buttons
+// as DOM `buttons` (bit 0 left, bit 1 right). The canvas captures a press so the release reaches
+// the game even off the canvas; the context menu stays off it while a game runs. A press is, in
+// this order, the focus, the game's pointer event (queued for the next tick, exactly once) and
+// the gesture that starts the sound (the AudioContext is created before its first await, inside
+// the press's user activation); the sound starting never delays or drops the event.
+function sendPointer(e) {
+  if (!game || crashed) return;
+  const box = canvas.getBoundingClientRect();
+  if (box.width === 0 || box.height === 0) return;
+  const x = Math.floor(((e.clientX - box.left) * canvas.width) / box.width);
+  const y = Math.floor(((e.clientY - box.top) * canvas.height) / box.height);
+  game.pointer(x, y, e.buttons & 3);
+}
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.focus();
+  if (game && !crashed) canvas.setPointerCapture(e.pointerId);
+  sendPointer(e);
+  gesture();
+});
+canvas.addEventListener('pointermove', sendPointer);
+canvas.addEventListener('pointerup', sendPointer);
+canvas.addEventListener('pointercancel', (e) =>
+  sendPointer({ clientX: e.clientX, clientY: e.clientY, buttons: 0 }));
+canvas.addEventListener('contextmenu', (e) => {
+  if (game && !crashed) e.preventDefault();
 });
 
 // The whole page accepts drops so a near miss does not open the file in the tab.
