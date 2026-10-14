@@ -350,7 +350,9 @@ fn transfer_without_a_save_says_no_character_found_and_returns_to_the_menu() {
     let Some(files) = files() else { return };
     let mut r = Run::new(files);
     let mut seen = Vec::new();
-    transfer_script(&mut r, |name, run| seen.push((name.to_string(), run.frame().0)));
+    transfer_script(&mut r, |name, run| {
+        seen.push((name.to_string(), run.frame().0))
+    });
     assert_eq!(*r.outcome.borrow(), None, "still in u (the menu)");
     let result = &seen[1].1;
     let dialog = &seen[0].1;
@@ -409,8 +411,14 @@ fn a_synthetic_ultima_v_save_is_transferred_into_the_objlist() {
     let s = st.borrow();
     assert_eq!(s.actors.party.names[0], "Shamino");
     let a = &s.actors.attrs;
-    assert_eq!((a.strength[1], a.dexterity[1], a.intelligence[1]), (20, 25, 18));
-    assert_eq!((a.exp[1], a.level[1], a.hp[1], a.magic[1]), (300, 3, 90, 36));
+    assert_eq!(
+        (a.strength[1], a.dexterity[1], a.intelligence[1]),
+        (20, 25, 18)
+    );
+    assert_eq!(
+        (a.exp[1], a.level[1], a.hp[1], a.magic[1]),
+        (300, 3, 90, 36)
+    );
 }
 
 /// Receipt: the transfer screens (no save, then a synthetic Ultima V save) as PNG + raw indices
@@ -437,4 +445,62 @@ fn receipt_transfer_screens() {
     transfer_u5_script(&mut r, save);
     println!("outcome {:?}", r.outcome.borrow());
     println!("stubs {:?}", r.e.stub_hits());
+}
+
+/// Every passage the opening, the story and the transfer lay out decodes from the user's `u`
+/// (no evaluator stub fires) and puts text into the passage bitmap.
+#[test]
+fn every_passage_of_this_unit_decodes() {
+    let Some(files) = files() else { return };
+    let hits = Rc::new(RefCell::new(Vec::new()));
+    let h2 = Rc::clone(&hits);
+    let f2 = files.clone();
+    let state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
+    let mut e = Engine::with_game(state, files, move |_s, io| async move {
+        let mut st = crate::intro::state_for(&f2).unwrap();
+        st.font = crate::intro::load::load_lzw(&st.files, b"u6.set")
+            .and_then(|d| u6_formats::font::WouFont::parse(&d).ok());
+        let screen = crate::intro::mem::View::screen(crate::intro::mem::Ptr::at(
+            crate::intro::mem::Region::Screen1,
+        ));
+        st.views.draw = screen;
+        st.views.screen = screen;
+        st.text.view = screen;
+        let ids = (3..=0xf).chain(0xc8..=0xdb).chain([0x3e6]);
+        for n in ids {
+            st.views.passage = crate::intro::mem::View {
+                planes: crate::intro::mem::Ptr::at(crate::intro::mem::Region::Work),
+                ..screen
+            };
+            st.views.passage.y1 = 0x37;
+            let work = st
+                .video
+                .chip
+                .bytes_mut(crate::intro::mem::Ptr::at(crate::intro::mem::Region::Work));
+            work.iter_mut().for_each(|b| *b = 0);
+            crate::intro::passages::passage(&mut st, &io, n);
+            let p = st.views.passage;
+            let inked = (p.y0..=p.y1).any(|y| {
+                (p.x0..=p.x1)
+                    .any(|x| st.video.chip.pixel(p.planes, i32::from(x), i32::from(y)) == 0)
+            });
+            h2.borrow_mut().push((n, inked));
+        }
+    });
+    for _ in 0..10 {
+        e.tick(&[], 20);
+    }
+    let stubs = e.stub_hits();
+    assert!(
+        !stubs.keys().any(|k| k.contains("0x10ac08")),
+        "evaluator stubs: {stubs:?}"
+    );
+    let got = hits.borrow();
+    assert_eq!(got.len(), 13 + 20 + 1);
+    let blank: Vec<u16> = got
+        .iter()
+        .filter(|(_, ink)| !ink)
+        .map(|&(n, _)| n)
+        .collect();
+    assert!(blank.is_empty(), "passages without ink: {blank:x?}");
 }

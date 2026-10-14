@@ -123,8 +123,9 @@ pub fn read_ultima_iv(st: &mut IntroState) -> bool {
         save.resize(0x108, 0);
     }
     let f = &mut st.transfer.found;
-    for i in 0..8 {
-        f.name[i] = save[i];
+    // Each byte, then a NUL after it (so the ninth byte ends up 0).
+    for (i, &b) in save[..8].iter().enumerate() {
+        f.name[i] = b;
         f.name[i + 1] = 0;
     }
     f.str = i16::from(save[0x13]);
@@ -271,6 +272,10 @@ fn dialog_boxes(planes: Ptr) -> [View; 3] {
 ///
 /// Without a save the bell rings (a BEL to the console, which the port has not), "No character
 /// found!" replaces the text and a key ends the dialog.
+///
+/// Replaces: u 0x10f6ae (seek and read), u 0x10f716 (close), u 0x1148b0 (the raw Ultima V disk
+/// reader) with u 0x11493c, u 0x114982, u 0x1149d0, u 0x114a40, u 0x114a5a, u 0x114a66,
+/// u 0x114a84, u 0x114ae4, u 0x114b58, u 0x114c88, u 0x114cc6, u 0x114cf4 (by the files)
 pub async fn ask_source(st: &mut IntroState, io: &Io) -> u16 {
     st.views.draw.planes = st.views.screen.planes;
     let [mut title, mut body, mut row] = dialog_boxes(st.views.draw.planes);
@@ -370,10 +375,19 @@ pub fn values(st: &mut IntroState) {
     st.text.align = 0;
     let f = st.transfer.found.clone();
     let strs = |a: &[u8], b: &[u8], c: &[u8]| {
-        vec![Arg::Str(a.to_vec()), Arg::Str(b.to_vec()), Arg::Str(c.to_vec())]
+        vec![
+            Arg::Str(a.to_vec()),
+            Arg::Str(b.to_vec()),
+            Arg::Str(c.to_vec()),
+        ]
     };
     let nums = |n: [i16; 6]| n.map(|v| Arg::Word(v as u16)).to_vec();
-    print(st, Print::New, FMT_NAMES, &strs(&f.name_str(), &f.sex, &f.class));
+    print(
+        st,
+        Print::New,
+        FMT_NAMES,
+        &strs(&f.name_str(), &f.sex, &f.class),
+    );
     let row = [f.str, f.dex, f.int, f.magic, f.exp, f.level];
     print(st, Print::More, FMT_NUMBERS, &nums(row));
     st.views.buttons[1].x0 += 0x20;
@@ -384,7 +398,12 @@ pub fn values(st: &mut IntroState) {
     st.text.x = v.x0;
     st.text.y = v.y0 + 2;
     let h = st.hero.clone();
-    print(st, Print::New, FMT_NAMES, &strs(&h.name_str(), &h.sex, &h.class));
+    print(
+        st,
+        Print::New,
+        FMT_NAMES,
+        &strs(&h.name_str(), &h.sex, &h.class),
+    );
     let row = [h.str, h.dex, h.int, h.magic, h.exp, h.level];
     print(st, Print::More, FMT_NUMBERS, &nums(row));
     st.views.buttons[1].x0 -= 0x86;

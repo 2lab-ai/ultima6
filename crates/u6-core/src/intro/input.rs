@@ -123,6 +123,9 @@ impl Keyboard {
     }
 
     /// The engine's queued keys, as the handler would have queued them.
+    ///
+    /// Replaces: u 0x114d30 (the input.device handler; its mouse moves and the Alt + Help
+    /// BEAMCON0 keys have no source in the engine)
     fn pump(&mut self, io: &Io) {
         while let Some(key) = try_key(io) {
             for raw in crate::ui::input::raw_events(&self.table, key) {

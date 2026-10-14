@@ -620,6 +620,8 @@ Totals: functions 599: ported 223, partial 8, stubbed 65, replaced 81, planned 3
 Marker addresses that are not function entries (tables cited on fields):
 
 - 0x104ffe: `ui/tables.rs::keyword_end`
+- 0x10f6ae: `intro/transfer.rs::ask_source`
+- 0x10f716: `intro/transfer.rs::ask_source`
 - 0x110ba4: `ui/tables.rs::roster_hp`
 - 0x110baa: `ui/tables.rs::name_line`
 - 0x110bae: `ui/tables.rs::plain`
@@ -633,6 +635,8 @@ Marker addresses that are not function entries (tables cited on fields):
 - 0x110bf4: `ui/tables.rs::level_exp_value`
 - 0x110c0c: `ui/tables.rs::weights`
 - 0x112768: `converse/mod.rs::npc_name`
+- 0x1148b0: `intro/transfer.rs::ask_source`
+- 0x114d30: `intro/input.rs::pump`
 - 0x135588: `objects/mod.rs::location`
 - 0x137988: `objects/mod.rs::type_frame`
 - 0x139188: `actors/mod.rs::worktype`
@@ -679,3 +683,280 @@ Marker addresses that are not function entries (tables cited on fields):
 - 0x157e9e: `gfx/blit.rs::row_base`
 - 0x15803e: `gfx/load.rs::frame`
 - 0x15812c: `state.rs::palette`
+
+## u (the intro program)
+
+Markers written `u 0x...` against the functions of `u` (REA's procedure list plus the code
+hunk bases, less the `jmp abs.l` thunks). Same status precedence as above.
+
+Totals: u functions 249: ported 110, stubbed 3, replaced 16, - 120.
+
+| address | hunk | Rust path | status |
+|---|---|---|---|
+| u 0x100000 | 0 |  | - |
+| u 0x100180 | 0 |  | - |
+| u 0x1001f8 | 0 |  | - |
+| u 0x10021e | 0 |  | - |
+| u 0x100234 | 0 |  | - |
+| u 0x10038a | 0 |  | - |
+| u 0x100e30 | 0 |  | - |
+| u 0x100e70 | 0 |  | - |
+| u 0x100e96 | 0 |  | - |
+| u 0x100f10 | 0 |  | - |
+| u 0x100f7c | 0 |  | - |
+| u 0x100f96 | 0 |  | - |
+| u 0x100fa4 | 0 |  | - |
+| u 0x101010 | 0 | `intro/seams.rs:28 in music_stop` | stubbed |
+| u 0x10102a | 0 |  | - |
+| u 0x101126 | 0 |  | - |
+| u 0x101388 | 0 |  | - |
+| u 0x101390 | 0 |  | - |
+| u 0x1013a4 | 0 |  | - |
+| u 0x1013a6 | 0 |  | - |
+| u 0x1013a8 | 0 |  | - |
+| u 0x101404 | 0 |  | - |
+| u 0x1017d6 | 0 |  | - |
+| u 0x101824 | 0 |  | - |
+| u 0x101880 | 0 |  | - |
+| u 0x101af0 | 0 |  | - |
+| u 0x101b48 | 0 |  | - |
+| u 0x101bf8 | 0 | `intro/input.rs::fn` | ported |
+| u 0x101c0c | 0 |  | - |
+| u 0x101cec | 0 |  | - |
+| u 0x101d2c | 0 |  | - |
+| u 0x101dc8 | 0 |  | - |
+| u 0x101de4 | 0 |  | - |
+| u 0x101e0a | 0 |  | - |
+| u 0x101e36 | 0 |  | - |
+| u 0x101e72 | 0 |  | - |
+| u 0x101e98 | 0 |  | - |
+| u 0x101ef8 | 0 |  | - |
+| u 0x101f34 | 0 |  | - |
+| u 0x10202c | 0 |  | - |
+| u 0x102068 | 0 |  | - |
+| u 0x102088 | 0 |  | - |
+| u 0x1020b8 | 0 |  | - |
+| u 0x102108 | 0 |  | - |
+| u 0x102150 | 0 |  | - |
+| u 0x1021bc | 0 | `intro/seams.rs:34 in local_time` | stubbed |
+| u 0x1021f0 | 0 |  | - |
+| u 0x1022ac | 0 |  | - |
+| u 0x1022fc | 0 |  | - |
+| u 0x102360 | 0 |  | - |
+| u 0x102438 | 0 |  | - |
+| u 0x102554 | 0 |  | - |
+| u 0x102578 | 0 |  | - |
+| u 0x1025cc | 0 |  | - |
+| u 0x10261c | 0 |  | - |
+| u 0x102690 | 0 |  | - |
+| u 0x1026d8 | 0 |  | - |
+| u 0x102718 | 0 |  | - |
+| u 0x10273c | 0 |  | - |
+| u 0x10275c | 0 |  | - |
+| u 0x10278e | 0 |  | - |
+| u 0x102820 | 0 |  | - |
+| u 0x10285c | 0 |  | - |
+| u 0x1028e8 | 0 |  | - |
+| u 0x102928 | 0 |  | - |
+| u 0x102970 | 0 |  | - |
+| u 0x1029a0 | 0 |  | - |
+| u 0x1029d0 | 1 | `intro/mod.rs::main` | ported |
+| u 0x102caa | 1 |  | - |
+| u 0x102d0e | 1 |  | - |
+| u 0x102e4a | 1 | `intro/create.rs::get_key` | ported |
+| u 0x102f66 | 1 | `intro/create.rs::read_line` | ported |
+| u 0x1030f8 | 1 | `intro/create.rs::choose` | ported |
+| u 0x1031b2 | 1 |  | - |
+| u 0x1031b4 | 1 |  | - |
+| u 0x1031b6 | 1 |  | - |
+| u 0x1031b8 | 1 | `intro/mod.rs::menu` | ported |
+| u 0x10361a | 1 | `intro/mod.rs::journey_onward` | ported |
+| u 0x103658 | 1 |  | - |
+| u 0x1036bc | 1 | `intro/seams.rs::play_song` | ported |
+| u 0x103830 | 2 | `intro/opening.rs::draw_static` | ported |
+| u 0x103954 | 2 |  | - |
+| u 0x103956 | 2 | `intro/opening.rs::set_script` | ported |
+| u 0x103966 | 2 | `intro/opening.rs::draw_frame` | ported |
+| u 0x1039b8 | 2 | `intro/screen.rs::check_key` | ported |
+| u 0x1039d2 | 2 | `intro/screen.rs::poll_key` | ported |
+| u 0x103a42 | 2 | `intro/opening.rs::tv_step` | ported |
+| u 0x103c38 | 2 | `intro/storm.rs::random_x` | ported |
+| u 0x103c52 | 2 | `intro/storm.rs::random_y` | ported |
+| u 0x103c6c | 2 | `intro/storm.rs::clouds_init` | ported |
+| u 0x103d32 | 2 | `intro/storm.rs::clouds_step` | ported |
+| u 0x103e80 | 2 | `intro/storm.rs::rain_init` | ported |
+| u 0x103ea4 | 2 | `intro/storm.rs::rain_step` | ported |
+| u 0x1040aa | 2 | `intro/opening.rs::draw_clock` | ported |
+| u 0x1041b0 | 2 | `intro/opening.rs::opening` | ported |
+| u 0x1055ea | 2 | `intro/screen.rs::show` | ported |
+| u 0x105608 | 2 | `intro/state.rs::random` | ported |
+| u 0x105700 | 4 | `intro/handoff.rs::write_objlist` | ported |
+| u 0x105876 | 4 | `intro/create.rs::name_and_sex` | ported |
+| u 0x1059a8 | 4 | `intro/gypsy.rs::add_pour` | ported |
+| u 0x105a04 | 4 | `intro/gypsy.rs::shimmer` | ported |
+| u 0x105aea | 4 | `intro/gypsy.rs::draw_liquid` | ported |
+| u 0x105c24 | 4 | `intro/gypsy.rs::draw_bottles` | ported |
+| u 0x106312 | 4 | `intro/gypsy.rs::pointer_view` | ported |
+| u 0x10632a | 4 | `intro/gypsy.rs::shuffle` | ported |
+| u 0x106386 | 4 | `intro/gypsy.rs::wait_answer` | ported |
+| u 0x1064c0 | 4 | `intro/gypsy.rs::ask` | ported |
+| u 0x106554 | 4 | `intro/gypsy.rs::pour` | ported |
+| u 0x106666 | 4 | `intro/create.rs::create` | ported |
+| u 0x1070c0 | 5 | `intro/credits.rs::credits` | ported |
+| u 0x1077e0 | 6 |  | - |
+| u 0x107822 | 6 |  | - |
+| u 0x10782e | 6 |  | - |
+| u 0x107840 | 7 | `intro/story.rs::figures` | ported |
+| u 0x1078b6 | 7 | `intro/story.rs::polls` | ported |
+| u 0x1078da | 7 | `intro/story.rs::drain` | ported |
+| u 0x1078e6 | 7 | `intro/story.rs::introduction` | ported |
+| u 0x1097ac | 7 | `intro/story.rs::poll` | ported |
+| u 0x109870 | 8 | `intro/transfer.rs::read_ultima_iv` | ported |
+| u 0x109ad6 | 8 | `intro/transfer.rs::read_ultima_v` | ported |
+| u 0x109ba8 | 8 | `intro/transfer.rs::fn` | ported |
+| u 0x109bea | 8 | `intro/transfer.rs::convert_ultima_iv` | ported |
+| u 0x109c80 | 8 | `intro/transfer.rs::convert_ultima_v` | ported |
+| u 0x109d0a | 8 | `intro/transfer.rs::values` | ported |
+| u 0x109e44 | 8 | `intro/create.rs::toggle_sex` | ported |
+| u 0x109e72 | 8 | `intro/transfer.rs::sheet` | ported |
+| u 0x10a15e | 8 | `intro/create.rs::choose_portrait` | ported |
+| u 0x10a450 | 8 | `intro/transfer.rs::ask_source` | ported |
+| u 0x10a81e | 8 | `intro/transfer.rs::transfer` | ported |
+| u 0x10ac08 | 9 | `intro/passages.rs::passage` | ported |
+| u 0x10f4da | 9 | `intro/passages.rs::show_passage` | ported |
+| u 0x10f548 | 10 | `intro/load.rs::load_raw` | ported |
+| u 0x10f596 | 10 | `intro/seams.rs:18 in music_load` | stubbed |
+| u 0x10f6ae | 10 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x10f6e2 | 10 |  | - |
+| u 0x10f716 | 10 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x10f72c | 10 |  | - |
+| u 0x10f754 | 10 |  | - |
+| u 0x10f7b8 | 10 |  | - |
+| u 0x10f80e | 10 |  | - |
+| u 0x10f864 | 10 |  | - |
+| u 0x10f870 | 10 |  | - |
+| u 0x10f898 | 10 | `intro/mem.rs::fill_view` | ported |
+| u 0x10f8d4 | 10 |  | - |
+| u 0x10f8f2 | 10 | `intro/story.rs::step` | ported |
+| u 0x10fa3a | 10 |  | - |
+| u 0x10fa6c | 10 | `intro/state.rs::rand` | ported |
+| u 0x10fa8e | 10 | `intro/state.rs::srand` | ported |
+| u 0x10fae8 | 11 |  | - |
+| u 0x10faf2 | 11 |  | - |
+| u 0x10faf4 | 11 |  | - |
+| u 0x10faf6 | 11 |  | - |
+| u 0x10fafc | 11 | `intro/seams.rs::start_music` | ported |
+| u 0x10fb14 | 11 |  | - |
+| u 0x10fb20 | 11 |  | - |
+| u 0x10fb36 | 11 |  | - |
+| u 0x10fb42 | 11 |  | - |
+| u 0x10fb46 | 11 |  | - |
+| u 0x113b68 | 14 |  | - |
+| u 0x113bfe | 14 |  | - |
+| u 0x113d80 | 14 | `intro/video.rs::cycle_step` | ported |
+| u 0x113db2 | 14 | `intro/screen.rs::swap`; `intro/video.rs::swap` | ported |
+| u 0x113df8 | 14 | `intro/screen.rs::swap_gradient`; `intro/video.rs::swap_gradient` | ported |
+| u 0x113e3e | 14 |  | - |
+| u 0x113e66 | 14 |  | - |
+| u 0x113e8e | 14 | `intro/video.rs::flip` | ported |
+| u 0x113ea6 | 14 | `intro/video.rs::other` | ported |
+| u 0x113ebe | 14 | `intro/video.rs::current` | ported |
+| u 0x113ed0 | 14 | `intro/input.rs::queue` | ported |
+| u 0x113f0e | 14 | `intro/input.rs::ready` | ported |
+| u 0x113f20 | 14 | `intro/input.rs::take` | ported |
+| u 0x113f54 | 14 |  | - |
+| u 0x113f82 | 14 |  | - |
+| u 0x113f9a | 14 |  | - |
+| u 0x113fb2 | 14 | `intro/video.rs::fade_in` | ported |
+| u 0x113fce | 14 | `intro/video.rs::fade_out` | ported |
+| u 0x113fea | 14 | `intro/video.rs::set_palette` | ported |
+| u 0x114070 | 15 |  | - |
+| u 0x1140a2 | 15 | `intro/text.rs::printf` | ported |
+| u 0x1142a6 | 15 | `intro/text.rs::print` | ported |
+| u 0x1142c6 | 15 | `intro/text.rs::print_new` | ported |
+| u 0x1142f0 | 15 | `intro/text.rs::print_more` | ported |
+| u 0x1148b0 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x11493c | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114982 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x1149d0 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114a40 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114a5a | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114a66 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114a84 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114ae4 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114b58 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114c88 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114cc6 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114cf4 | 17 | `intro/transfer.rs::ask_source` | replaced |
+| u 0x114d30 | 18 | `intro/input.rs::pump` | replaced |
+| u 0x114e88 | 18 |  | - |
+| u 0x114f04 | 18 |  | - |
+| u 0x114f28 | 18 | `intro/input.rs::map_raw` | ported |
+| u 0x115068 | 19 |  | - |
+| u 0x115078 | 19 | `intro/video.rs::wait_frame` | ported |
+| u 0x11508a | 19 | `intro/load.rs::load_lzw` | ported |
+| u 0x115132 | 19 | `intro/load.rs::load_into` | ported |
+| u 0x1151a8 | 19 |  | - |
+| u 0x11547e | 19 |  | - |
+| u 0x115498 | 19 | `intro/text.rs::put_char` | ported |
+| u 0x115544 | 19 | `intro/text.rs::carriage_return` | ported |
+| u 0x115556 | 19 | `intro/text.rs::line_feed` | ported |
+| u 0x115588 | 19 | `intro/mem.rs::copy_view` | ported |
+| u 0x11560e | 19 | `intro/text.rs::clear_view` | ported |
+| u 0x115630 | 19 |  | - |
+| u 0x11563c | 19 | `intro/text.rs::clear_eos` | ported |
+| u 0x115672 | 19 | `intro/text.rs::clear_eol` | ported |
+| u 0x11568e | 19 | `intro/text.rs::clear_line_from` | ported |
+| u 0x1156e2 | 19 |  | - |
+| u 0x1158ec | 19 | `intro/text.rs::draw_glyph` | ported |
+| u 0x115a70 | 19 |  | - |
+| u 0x115a84 | 19 |  | - |
+| u 0x115a92 | 19 | `intro/text.rs::wrap` | ported |
+| u 0x115bdc | 19 | `intro/text.rs::align_centre` | ported |
+| u 0x115c0e | 19 | `intro/text.rs::align_right` | ported |
+| u 0x115c42 | 19 | `intro/text.rs::put_span` | ported |
+| u 0x115c60 | 19 | `intro/text.rs::justify` | ported |
+| u 0x116180 | 19 | `intro/mem.rs::copy_rect` | ported |
+| u 0x1162f4 | 19 |  | - |
+| u 0x116326 | 19 | `intro/mem.rs::fill_rect` | ported |
+| u 0x116360 | 19 |  | - |
+| u 0x1163fc | 19 | `intro/mem.rs::draw_item` | ported |
+| u 0x116490 | 19 | `intro/mem.rs::overlay_composite_left` | ported |
+| u 0x11653c | 19 | `intro/mem.rs::overlay_composite` | ported |
+| u 0x1165c2 | 19 | `intro/mem.rs::composite_mask` | ported |
+| u 0x1165f8 | 19 |  | - |
+| u 0x116602 | 19 |  | - |
+| u 0x116680 | 21 |  | - |
+| u 0x1198f8 | 23 | `intro/video.rs::server` | ported |
+| u 0x119944 | 23 | `intro/gypsy.rs::shimmer_byte` | ported |
+| u 0x11999a | 23 | `intro/state.rs::noise_word` | ported |
+| u 0x1199ba | 23 | `intro/mem.rs::blit_masked` | ported |
+| u 0x119b94 | 23 |  | - |
+| u 0x119bde | 23 |  | - |
+| u 0x119c26 | 23 | `intro/video.rs::place_pointer` | ported |
+| u 0x119c6c | 23 |  | - |
+| u 0x119ca4 | 23 |  | - |
+| u 0x119ebc | 23 | `intro/video.rs::start_fade_in` | ported |
+| u 0x119eee | 23 |  | - |
+| u 0x119efa | 23 | `intro/video.rs::fade_in_step` | ported |
+| u 0x119f6c | 23 | `intro/video.rs::start_fade_out` | ported |
+| u 0x119f84 | 23 |  | - |
+| u 0x119f90 | 23 | `intro/video.rs::fade_out_step` | ported |
+
+### u data addresses cited by markers
+
+Marker addresses of `u` that are not function entries (globals cited on fields):
+
+- u 0x10fb62: `intro/video.rs::CYCLE_WAIT`; `intro/video.rs::cycle_wait`
+- u 0x11432a: `intro/video.rs::sprite_ctl`
+- u 0x119996: `intro/state.rs::noise`
+- u 0x119e16: `intro/video.rs::MOUSE`; `intro/video.rs::mouse`
+- u 0x119e7c: `intro/video.rs::fade`
+- u 0x119eeb: `intro/video.rs::fade_in_count`
+- u 0x119eec: `intro/video.rs::fade_in_level`
+- u 0x119f83: `intro/video.rs::fade_out_count`
+- u 0x119fe8: `intro/video.rs::beamcon`
+- u 0x119fea: `intro/video.rs::cycling`
+- u 0x119fec: `intro/video.rs::fade_target`
+- u 0x119ff8: `intro/video.rs::queued_palette`
+- u 0x119ffa: `intro/video.rs::pointer`
