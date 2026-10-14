@@ -620,9 +620,10 @@ async function lookAtAvatar(page, shot) {
 }
 
 // One step by clicks: the cell east of the Avatar, else (blocked by the start fight) west,
-// up to 6 tries; asserts the step is one cell along x.
+// up to the harness's `STEP_TRIES` tries (as `stepSideways`); asserts the step is one cell
+// along x.
 async function clickStep(page) {
-  for (let i = 0; i < 6; i += 1) {
+  for (let i = 0; i < h.STEP_TRIES; i += 1) {
     const dx = i % 2 === 0 ? 1 : -1;
     const { from, to } = await clickCell(page, dx);
     if (to === from) continue;
@@ -631,7 +632,7 @@ async function clickStep(page) {
     assert.deepEqual([tx - fx, ty - fy, tz - fz], [dx, 0, 0], `one cell ${dx > 0 ? 'east' : 'west'}: ${from} -> ${to}`);
     return { dx, from, to };
   }
-  throw new Error('six click steps blocked in a row');
+  throw new Error(`${h.STEP_TRIES} click steps blocked in a row`);
 }
 
 test('the mouse: the Look icon, then Look on the Avatar, then clicks walk; the keys still work', async (env) => {

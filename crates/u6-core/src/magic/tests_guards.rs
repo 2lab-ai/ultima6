@@ -125,7 +125,7 @@ fn web_on_a_full_pool_skips_the_cells() {
 }
 
 /// M3: Replicate (0x58) with the object pool full: no copy, eight spots tried (two draws
-/// each, as when no copy may lie anywhere), `Msg::Failed` (1).
+/// each, as when no copy may lie anywhere: 16 draws, no more), `Msg::Failed` (1).
 #[test]
 fn replicate_on_a_full_pool_fails() {
     let mut s = world();
@@ -134,6 +134,8 @@ fn replicate_on_a_full_pool_fails() {
     s.tables.tileflags.flags3[0x10] = 8;
     select(&mut s, o);
     fill_pool(&mut s);
+    s.rng = Rng::seeded(9);
+    let before = s.rng;
     let s = run(s, &[], |st, io| async move {
         super::dispatch(&st, &io, 0x58, true).await;
     });
@@ -142,6 +144,11 @@ fn replicate_on_a_full_pool_fails() {
         .count();
     assert_eq!(copies, 0);
     assert_eq!(s.magic.result, 1, "failed");
+    let mut r = before;
+    for _ in 0..16 {
+        r.next_word();
+    }
+    assert_eq!(s.rng, r, "eight spots, two draws each");
 }
 
 /// M4: the resist check (0x122076) against an object slot: one draw, the object's

@@ -336,7 +336,7 @@ export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 /// up to `STEP_TRIES` tries (each try's world turn moves the fight on; with a gargoyle on each
 /// side six tries in a row were seen blocked). Returns the key that walked, the leader before
 /// and after, and the frame before that step.
-const STEP_TRIES = 16;
+export const STEP_TRIES = 16;
 export async function stepSideways(page) {
   for (let i = 0; i < STEP_TRIES; i += 1) {
     await waitPrompt(page);
