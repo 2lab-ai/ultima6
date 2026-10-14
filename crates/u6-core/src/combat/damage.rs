@@ -27,7 +27,7 @@ const SLIME: u32 = A4 - 0x7760;
 const VINE: u32 = A4 - 0x755a;
 const BROKEN: u32 = A4 - 0x7361;
 const YELLS: u32 = A4 - 0x7318;
-/// "`%s " (0x12395a) and "%3d\n" (0x1231be's roster line).
+/// The name-and-space format of 0x12395a and the three-digit number line of 0x1231be's roster.
 const NAME_SPACE: u32 = 0x0012_1b9a;
 const HP_NUMBER: u32 = 0x0012_1b94;
 
@@ -68,8 +68,9 @@ pub fn flash(s: &mut State, target: i16) {
     s.combat.flash = 1;
 }
 
-/// Original: 0x12395a (combat: print how badly an actor is hurt: "critical!", or "heavily",
-/// "lightly", "barely" + " wounded." by quarters of its maximum hit points)
+/// Original: 0x12395a (combat: print how badly an actor is hurt by quarters of its maximum hit
+/// points: the critical line (A4-0x7750), or one of three degrees (A4-0x7745 / -0x773d /
+/// -0x7735) followed by the wounded word (A4-0x772e))
 ///
 /// A critically hurt actor with intelligence 5 or more that is not in worktype 0, 1, 2, 3, 6
 /// or 0x0e starts to flee (worktype 7).
@@ -108,11 +109,11 @@ pub fn report_wounds(s: &mut State, actor: i16) {
 /// reported)
 ///
 /// The roll is `random(1, damage)` (-1 counts as 1, 1 and 0xff are exact) less `random(1,
-/// armour)` for an armoured actor; nothing left is "grazed". Otherwise an adjacent fighting
-/// actor turns on its attacker, the hurt goes through [`hurt`] and the attacker gains the
-/// experience it returns. For an actor target then: a bystander the player picked may yell
-/// for help ([`yell_for_help`]), "killed!", or the attacker's specials (dragging under,
-/// dissolving or robbing an item, poison), then the wound report.
+/// armour)` for an armoured actor; nothing left is a graze (A4-0x7723). Otherwise an adjacent
+/// fighting actor turns on its attacker, the hurt goes through [`hurt`] and the attacker gains
+/// the experience it returns. For an actor target then: a bystander the player picked may yell
+/// for help ([`yell_for_help`]), the death line (A4-0x7716), or the attacker's specials
+/// (dragging under, dissolving or robbing an item, poison), then the wound report.
 pub fn apply_damage(s: &mut State, attacker: i16, target: i16, damage: i16) {
     if target < 0 {
         return;
@@ -219,7 +220,7 @@ pub fn apply_damage(s: &mut State, attacker: i16, target: i16, damage: i16) {
 /// its remains made; a ship (0x19c) becomes a skiff with 10 hit points instead. Survivors lose
 /// the hit points; a slime (creature 0x30) divides onto a free neighbouring tile. A party
 /// member's numbers are redrawn in the panel. Objects: the tangle vine's root (0x16e) kills its
-/// vine actor; a breakable object loses `damage` from its quantity byte and breaks ("broken!",
+/// vine actor; a breakable object loses `damage` from its quantity byte and breaks (A4-0x7361,
 /// a trap inside goes off, a mirror 0x7b takes frame 2 for 10 karma, others vanish).
 pub fn hurt(s: &mut State, actor: i16, damage: i16) -> i16 {
     if damage < 0 {
@@ -240,10 +241,10 @@ pub fn hurt(s: &mut State, actor: i16, damage: i16) -> i16 {
         if index == 0x1f {
             s.actors.attrs.hp[a] = 0xff;
         } else if t == 0x19e || t == 0x19f {
-            let size = s.actors.party.size;
+            let size = leaves::party_size(s) as u16;
             let mut victim = member(s, 0);
             if size > 1 {
-                let i = s.rng.range(0, u16::from(size) - 1);
+                let i = s.rng.range(0, size - 1);
                 victim = member(s, usize::from(i));
             }
             hurt(s, victim, damage);
@@ -319,7 +320,7 @@ fn kill(s: &mut State, actor: i16, t: u16) -> (i16, bool) {
 
 /// 0x1231be: a dead member leaves the roster (solo index, leader index, names shift up).
 fn leave_party(s: &mut State, actor: i16) {
-    let size = usize::from(s.actors.party.size);
+    let size = leaves::party_size(s);
     let Some(k) = (1..=size.min(15)).find(|&k| member(s, k) == actor) else {
         return;
     };
@@ -345,8 +346,8 @@ fn leave_party(s: &mut State, actor: i16) {
     s.ui.panel.dirty = true;
 }
 
-/// 0x1231be: "Slime divides!": up to 8 tries of a random neighbouring tile the slime may stand
-/// on, a copy of it created there.
+/// 0x1231be: the slime divides (A4-0x7760): up to 8 tries of a random neighbouring tile the
+/// slime may stand on, a copy of it created there.
 fn slime_divides(s: &mut State, actor: i16) {
     let a = actor as usize;
     for _ in 0..8 {
@@ -381,7 +382,7 @@ fn party_numbers(s: &mut State, actor: i16) {
         return;
     }
     let first = usize::from(p.roster_first);
-    let size = usize::from(s.actors.party.size);
+    let size = leaves::party_size(s);
     let mut k = first;
     while k < size && k < first + 5 {
         if member(s, k) == actor {

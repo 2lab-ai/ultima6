@@ -71,17 +71,23 @@ pub(crate) fn remains(s: &mut State, actor: i16) -> Slot {
     )
 }
 
-/// [magic] 0x11a586(spell, 1): cast spell `spell` from a staff or wand held by `caster` (the
-/// original makes the caster party slot 16, A4+0x47fc, with leader index 16; the target is the
-/// selection). Returns the outcome byte the caller reads from A4+0x181e (0xfe charmed, 0
-/// paralysed). Fallback: nothing is cast, outcome 1 (no message).
+/// The magic hunk's refusal line (PC-relative 0x1159f8), shown for a cast the port cannot run.
+const CAST_REFUSED: u32 = 0x0011_59f8;
+
+/// [magic] 0x11a586(spell, 1) from a staff or wand: the spell its quality names, cast by the
+/// attacker as party slot 16 (A4+0x47fc, leader index 16) at the selection with the text off;
+/// the hit then reads the result byte A4+0x181e (asm 0x12467a..0x12476e).
 ///
-/// Still a stub after the magic merge: magic's dispatch awaits (it prints and flies), and this
-/// runs inside combat's synchronous hit (0x124232); it needs combat's async part to cast it.
-pub(crate) fn cast_from_item(_s: &mut State, _spell: u16, _caster: i16) -> u8 {
+/// Still a stub after the magic merge: magic's dispatch ([`crate::magic::dispatch`]) awaits (it
+/// prints and flies) while the hit 0x124232 that casts here is synchronous (the Attack command
+/// and the NPC worktypes), and magic's caster has no slot 16. Fallback: the cast is refused
+/// before the staff's charge is taken: the refusal line, the prompt reprinted, nothing cast.
+pub(crate) fn cast_from_item(s: &mut State) {
+    super::present::say(s, CAST_REFUSED, vec![]);
+    s.actors.work.prompt = 1;
     todo_stub!(
-        "0x11a586 cast a spell from a staff or wand (fallback: none)",
-        1
+        "0x11a586 cast a spell from a staff or wand (fallback: refused before the charge)",
+        ()
     )
 }
 

@@ -29,14 +29,12 @@ const NEXT_WEAPON: u32 = A4 - 0x76ac;
 const SHATTERED: u32 = A4 - 0x760d;
 const WISP: u32 = A4 - 0x7545;
 const VANISHED: u32 = A4 - 0x7354;
-/// PC-relative strings of hunk 13: "-", " ", "%s.\n", "\n", the charm / paralysis lines and
-/// "wand".
+/// PC-relative strings of hunk 13: the dash and the space after the command word, the
+/// name-with-full-stop format, the newline, and the word for a wand.
 const DASH: u32 = 0x0012_1bca;
 const SPACE: u32 = 0x0012_1bcc;
 const NAMED: u32 = 0x0012_1bc2;
 const NEWLINE: u32 = 0x0012_1bc8;
-const CHARMED: u32 = 0x0012_1ba0;
-const PARALYZED: u32 = 0x0012_1bb0;
 const WAND: u32 = 0x0012_1b8e;
 /// Cross-hair confirmed (the key read's code 0x8e).
 const CONFIRMED: u16 = crate::ui::wait::REPEAT;
@@ -96,7 +94,8 @@ fn aim(s: &mut State, weapon: i16) {
 }
 
 /// Original: 0x1249de (combat: list the weapons the leader has readied (up to 8 that do damage)
-/// and print the first: "with %s-", "with bare hands-", or "with ship cannons-" for a ship)
+/// and print the first (A4-0x76e5 with its name), bare hands (A4-0x76f6), or a ship's cannons
+/// (A4-0x7709))
 pub fn list_weapons(s: &mut State) {
     let attacker = leader(s);
     s.combat.weapon_index = 0;
@@ -125,12 +124,13 @@ pub fn list_weapons(s: &mut State) {
 
 /// Original: 0x124caa (combat: the Attack command)
 ///
-/// "Attack"; refused aboard ship unless the vessel has cannons (0x19c). Otherwise the command
-/// waits for a target (A4-0x7a32 = 1, A4-0x7a2e = 0x81), the weapons are listed and the
-/// cross-hair limited to the first one's range. A confirmed target that is not an object in a
-/// container or inventory is attacked with each weapon in turn ([`attack_with_weapon`]), the
-/// cross-hair asked again between weapons; anything else is "what?". The leader pays 10
-/// movement points; the cursor goes off.
+/// The command word (A4-0x769b); refused aboard ship unless the vessel has cannons (0x19c),
+/// with the line at A4-0x744d. Otherwise the command waits for a target (A4-0x7a32 = 1,
+/// A4-0x7a2e = 0x81), the weapons are listed and the cross-hair limited to the first one's
+/// range. A confirmed target that is not an object in a container or inventory is attacked
+/// with each weapon in turn ([`attack_with_weapon`]), the cross-hair asked again between
+/// weapons; anything else gets the question line A4-0x7694. The leader pays 10 movement
+/// points; the cursor goes off.
 ///
 /// The command loop calls this for code 0x81 and then clears A4-0x7a2e (0x8f).
 pub async fn attack(state: &RefCell<State>, io: &Io) {
@@ -195,11 +195,12 @@ pub const AFTER_ATTACK: u16 = NO_COMMAND;
 
 /// Original: 0x124a98 (combat: attack the selected target with the current weapon)
 ///
-/// A bow or crossbow without arrows / bolts says so. The target is echoed ("pass." for the
-/// attacker itself, the object's name, "nothing!", or the map tile's name); unless it is the
-/// attacker: the object there ([`leaves::actor_at`]) and the hit ([`hit`]): "interferes!" when
-/// a foe next to the attacker blocks a missile, "Out of range!" (the attack target is
-/// forgotten). Then the next weapon: its range on the cross-hair and "Attack with %s-", or,
+/// A bow or crossbow without arrows / bolts says so (A4-0x76dc / A4-0x76cc). The target is
+/// echoed: the pass line (A4-0x76bd) for the attacker itself, the object's name, the empty-cell
+/// line (A4-0x76b6), or the map tile's name; unless it is the attacker: the object there
+/// ([`leaves::actor_at`]) and the hit ([`hit`]): the interference line (A4-0x75f2) when a foe
+/// next to the attacker blocks a missile, the range line (A4-0x7512; the attack target is
+/// forgotten). Then the next weapon: its range on the cross-hair and its name (A4-0x76ac), or,
 /// after the last, the cursor off.
 pub fn attack_with_weapon(s: &mut State) {
     let attacker = leader(s);
@@ -353,8 +354,9 @@ const MISSILE_WEAPONS: [u16; 10] = [0x21, 0x25, 0x29, 0x2a, 0x31, 0x53, 0x32, 0x
 /// broadside), attack frames for the dragons 0x170..0x174, the view is refreshed. A missile
 /// (any weapon but 0x28 / 0x2f used at a distance, or one of the missile weapons) is stopped by
 /// an adjacent foe (1). A staff or wand casts the spell its quality names instead (a wisp
-/// 0x175 teleports with quality 0x81). Otherwise the to-hit roll ([`to_hit`]); a missed missile
-/// lands on a random neighbouring tile; the missile flies ([`missile`]); the damage is the
+/// 0x175 teleports with quality 0x81); the port refuses that cast before the staff's charge is
+/// taken ([`super::seams::cast_from_item`]). Otherwise the to-hit roll ([`to_hit`]); a missed
+/// missile lands on a random neighbouring tile; the missile flies ([`missile`]); the damage is the
 /// weapon's ([`leaves::damage_of`]), halved against a creature with flag 0x0080 unless the
 /// weapon is 0x30, 0x32 or 0x36; the triple crossbow strikes up to three targets. The glass
 /// sword shatters after a hit; a boomerang flies back.
@@ -414,7 +416,7 @@ pub fn hit(s: &mut State, attacker: i16, x: i16, y: i16, weapon: i16) -> i16 {
     let mut res: i16 = -1;
     let mut target = leaves::owner(s, s.combat.hit);
     if wt == 0x150 || wt == 0x39 {
-        staff_or_wand(s, attacker, weapon, wt, target);
+        staff_or_wand(s, attacker, weapon, wt);
         return 0;
     }
     if s.combat.hit >= 0 && target < 0x100 {
@@ -485,7 +487,17 @@ pub fn hit(s: &mut State, attacker: i16, x: i16, y: i16, weapon: i16) -> i16 {
 }
 
 /// 0x124232's staff (0x39) and wand (0x150) branch.
-fn staff_or_wand(s: &mut State, attacker: i16, weapon: i16, wt: u16, target: i16) {
+///
+/// A wisp (0x175) whose item has quality 0x81 jumps from the view centre
+/// ([`super::mode::scatter`]) or goes back. Otherwise a staff needs its charge (quality / 16 + 1)
+/// in both the attacker's magic and level, else nothing happens. The original then takes the
+/// charge from the magic, makes the attacker party slot 16 (A4+0x47fc, leader index 16) with
+/// the selection as the target, casts the quality's spell with the text off (0x11a586) and
+/// reports a charm (spell 0x50, result 0xfe: the line at 0x121ba0) or a paralysis (0x45,
+/// result 0: 0x121bb0) (asm 0x12461c..0x12476e). That cast awaits and this hit is synchronous
+/// (the Attack command and the NPC worktypes call it), so the port refuses it before the charge
+/// is taken: [`super::seams::cast_from_item`].
+fn staff_or_wand(s: &mut State, attacker: i16, weapon: i16, wt: u16) {
     let a = attacker as usize;
     let quality = s.objects.qq[weapon as usize] >> 8;
     if quality == 0x81 && kind(s, attacker) == 0x175 {
@@ -506,26 +518,8 @@ fn staff_or_wand(s: &mut State, attacker: i16, weapon: i16, wt: u16, target: i16
         if magic < charge || i16::from(s.actors.attrs.level[a]) < charge {
             return;
         }
-        s.actors.attrs.magic[a] = (magic - charge) as u8;
     }
-    let saved = s.actors.party.leader_index;
-    s.actors.party.leader_index = 0x10;
-    s.ui.input.selection = target;
-    if target >= 0 {
-        let (tx, ty) = pos(s, target);
-        s.ui.input.target = (tx, ty);
-    }
-    s.ui.text.on = false;
-    let outcome = super::seams::cast_from_item(s, quality, attacker);
-    s.ui.text.on = true;
-    if quality == 0x50 && outcome == 0xfe {
-        let n = name(s, s.ui.input.selection);
-        say(s, CHARMED, vec![n]);
-    } else if quality == 0x45 && outcome == 0 {
-        let n = name(s, s.ui.input.selection);
-        say(s, PARALYZED, vec![n]);
-    }
-    s.actors.party.leader_index = saved;
+    super::seams::cast_from_item(s);
 }
 
 /// Original: 0x122938 (combat: the flight of a missile weapon from `attacker` toward (x, y),
@@ -684,7 +678,7 @@ pub fn missile(s: &mut State, attacker: i16, weapon: i16, x: &mut i16, y: &mut i
     1
 }
 
-/// "wand" (a PC-relative string of hunk 13), as a message argument.
+/// The word for a wand (a PC-relative string of hunk 13), as a message argument.
 fn with_wand() -> Text {
     let b = crate::engine::with_current_io(|io| crate::main_loop::game_string(io, WAND));
     Text::Str(b.unwrap_or_default())

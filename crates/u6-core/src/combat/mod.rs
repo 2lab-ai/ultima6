@@ -91,7 +91,7 @@ pub struct CombatState {
     pub dirty: [i16; 4],
     /// Port-only: frames the synchronous code presented, for [`play_effects`].
     pub effects: Vec<Effect>,
-    /// Original: A4-0x7a48 as the Attack command sets it after its "\n" (newlines are swallowed
+    /// Original: A4-0x7a48 as the Attack command sets it after its newline (newlines are swallowed
     /// until other text): kept here while the lines are queued, applied by [`say`](present::say)
     /// and handed to the text layer when [`play_effects`] has printed them.
     pub swallow: bool,

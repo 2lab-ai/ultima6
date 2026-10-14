@@ -14,7 +14,7 @@ use crate::state::State;
 
 /// Creature types of the synthetic list: index 0..3.
 const ORC: u16 = 0x16b;
-const AVATAR: u16 = 0x17a;
+const PLAYER: u16 = 0x17a;
 const SLIME: u16 = 0x177;
 
 fn distance_table() -> Vec<u8> {
@@ -27,12 +27,12 @@ fn distance_table() -> Vec<u8> {
     d
 }
 
-/// Party: the Avatar (actor 1) at (20, 20) and Dupre (actor 2) at (21, 20); creature tables
-/// for the orc (index 0), the Avatar (1) and the slime (2).
+/// Party: member 0 (actor 1) at (20, 20) and member 1 (actor 2) at (21, 20); creature tables
+/// for the orc (index 0), the player's type (1) and the slime (2).
 fn world() -> State {
     let mut s = State::empty();
     s.map.centre = Position { x: 20, y: 20, z: 0 };
-    s.objects.defs.monster_types = vec![ORC, AVATAR, SLIME, 0];
+    s.objects.defs.monster_types = vec![ORC, PLAYER, SLIME, 0];
     let mut t = CombatTables {
         distance: distance_table(),
         ranges: vec![(0x29, 5), (0x21, 4)],
@@ -48,7 +48,7 @@ fn world() -> State {
     t.creature_flags = vec![0, 0, 0, 0];
     t.creature_status = vec![0x20, 0x40, 0x20, 0];
     s.combat.tables = t;
-    for (a, x, ty) in [(1usize, 20u16, AVATAR), (2, 21, AVATAR)] {
+    for (a, x, ty) in [(1usize, 20u16, PLAYER), (2, 21, PLAYER)] {
         s.objects.type_frame[a] = ty;
         s.objects.location[a] = Position { x, y: 20, z: 0 };
         s.actors.attrs.status[a] = 0xc0;
@@ -62,7 +62,7 @@ fn world() -> State {
     s.actors.worktype[1] = 2;
     s.actors.party.members[..2].copy_from_slice(&[1, 2]);
     s.actors.party.size = 2;
-    s.actors.party.names = vec!["Avatar".into(), "Dupre".into()];
+    s.actors.party.names = vec!["m0".into(), "m1".into()];
     s.actors.set_tail(tail::SOLO_MEMBER, 0xff);
     s
 }
@@ -176,7 +176,7 @@ fn damage_graze_hurt_and_kill() {
     assert_eq!(s.actors.attrs.status[0x10] & 0x10, 0x10);
     assert_eq!(s.actors.worktype[0x10], 0);
     assert_eq!(s.actors.attrs.exp[1] - before, 14);
-    assert!(said(&s).contains(&(A4 - 0x7716)), "killed!");
+    assert!(said(&s).contains(&(A4 - 0x7716)), "the death line");
     // The remains: a map object of the lying frame; the orc left for level 15.
     assert_eq!(s.objects.location[0x10].z, 0xf);
     let remains = (0x101..crate::objects::OBJECT_SLOTS)
@@ -194,7 +194,7 @@ fn damage_graze_hurt_and_kill() {
 #[test]
 fn wound_report_by_quarters() {
     let mut s = world();
-    // Max hp 90 (level 3): 22 hp = 88 / 90 → quarter 0 "critical!"; flees with int ≥ 5.
+    // Max hp 90 (level 3): 22 hp = 88 / 90 → quarter 0, the critical line; flees with int ≥ 5.
     orc(&mut s, 0x10, 21, 21);
     s.actors.attrs.level[0x10] = 3;
     s.actors.attrs.intelligence[0x10] = 9;
@@ -281,7 +281,7 @@ fn flight_stops_at_range_and_lists_actors_passed() {
     assert_eq!(r, 0);
     assert_eq!((xs[0], ys[0]), (23, 20));
     assert_eq!(s.combat.landing, (23, 20));
-    // Dupre (actor 2) stands on the way at (21, 20).
+    // Member 1 (actor 2) stands on the way at (21, 20).
     assert_eq!(&s.combat.passed[..], [2, 0x10, -1]);
     // Within range it gets there.
     let (mut xs, mut ys) = ([22i16], [20i16]);
@@ -320,7 +320,7 @@ fn assault_hits_an_adjacent_foe_and_pays_ten() {
     npc::assault(&mut s, 0x10);
     assert_eq!(s.actors.movement_points[0x10], 10);
     assert_eq!(s.ui.input.selection, 2, "nearest member");
-    // The hit either missed (no change) or Dupre lost hit points; the Avatar is untouched.
+    // The hit either missed (no change) or actor 2 lost hit points; actor 1 is untouched.
     assert_eq!(s.actors.attrs.hp[1], hp.0);
     assert!(s.actors.attrs.hp[2] <= hp.1);
 }
@@ -373,7 +373,7 @@ fn retreat_runs_away_from_a_near_foe() {
     s.actors.movement_points[0x10] = 20;
     link_placed_objects(&mut s);
     npc::retreat(&mut s, 0x10);
-    // It runs east, away from Dupre at (21, 20), or pays if it could not move.
+    // It runs east, away from actor 2 at (21, 20), or pays if it could not move.
     let p = s.objects.location[0x10];
     assert!(p.x >= 22, "{p:?}");
 }
@@ -388,4 +388,123 @@ fn wounds_stop_at_the_ship() {
     assert!(said(&s).is_empty());
     assert_eq!(damage::hurt(&mut s, 0x10, 5), 0);
     assert_eq!(s.actors.attrs.hp[0x10], 1, "the balloon takes no damage");
+}
+
+/// The magic hunk's refusal line (PC-relative 0x1159f8) a staff or wand attack prints while
+/// its cast (0x11a586) is not wired into the synchronous hit.
+const CAST_REFUSED: u32 = 0x0011_59f8;
+
+/// A readied object of `kind` in slot 0x200 whose quality names spell 0x10 (staff charge 2).
+fn charged_item(s: &mut State, kind: u16) -> i16 {
+    s.objects.type_frame[0x200] = kind;
+    s.objects.qq[0x200] = 0x10 << 8;
+    0x200
+}
+
+#[test]
+fn a_staff_attack_refuses_before_charging_magic() {
+    let mut s = world();
+    orc(&mut s, 0x10, 21, 21);
+    link_placed_objects(&mut s);
+    s.actors.attrs.magic[1] = 10;
+    s.actors.attrs.level[1] = 5;
+    let staff = charged_item(&mut s, 0x39);
+    s.ui.input.selection = 0x10;
+    let leader = s.actors.party.leader_index;
+    assert_eq!(attack::hit(&mut s, 1, 21, 21, staff), 0);
+    assert_eq!(
+        s.actors.attrs.magic[1], 10,
+        "no magic paid for a cast not run"
+    );
+    assert!(said(&s).contains(&CAST_REFUSED), "the refusal is shown");
+    assert_eq!(s.actors.party.leader_index, leader);
+    assert_eq!(s.actors.attrs.hp[0x10], 20, "the target is untouched");
+}
+
+#[test]
+fn a_wand_attack_refuses_visibly() {
+    let mut s = world();
+    orc(&mut s, 0x10, 21, 21);
+    link_placed_objects(&mut s);
+    let wand = charged_item(&mut s, 0x150);
+    s.ui.input.selection = 0x10;
+    let leader = s.actors.party.leader_index;
+    assert_eq!(attack::hit(&mut s, 1, 21, 21, wand), 0);
+    assert!(said(&s).contains(&CAST_REFUSED), "the refusal is shown");
+    assert_eq!(s.actors.party.leader_index, leader);
+    assert_eq!(s.actors.attrs.hp[0x10], 20, "the target is untouched");
+}
+
+/// Hit points, status and worktype of actor `a`.
+fn vitals(s: &State, a: usize) -> (u8, u8, u8) {
+    let at = &s.actors.attrs;
+    (at.hp[a], at.status[a], s.actors.worktype[a])
+}
+
+#[test]
+fn a_grown_vine_segment_names_its_vine() {
+    let mut s = world();
+    // The vine: actor 0x10 of type 0x16e at (25, 25), facing north; actor 0 a bystander.
+    orc(&mut s, 0x10, 25, 25);
+    s.objects.type_frame[0x10] = 0x16e;
+    s.actors.attrs.hp[0] = 30;
+    s.actors.attrs.status[0] = 0x20;
+    link_placed_objects(&mut s);
+    let zero = vitals(&s, 0);
+    assert_eq!(npc::grow(&mut s, 0x10, 2), 1, "the vine grew east");
+    let seg = (0x101..crate::objects::OBJECT_SLOTS)
+        .find(|&o| s.objects.type_frame[o] & 0x3ff == 0x16e)
+        .expect("a vine segment");
+    damage::apply_damage(&mut s, 1, seg as i16, 1);
+    assert_eq!(vitals(&s, 0), zero, "actor 0 is untouched");
+    assert_eq!(s.actors.attrs.hp[0x10], 0, "the vine dies");
+    assert_eq!(s.actors.attrs.status[0x10] & 0x10, 0x10);
+    assert_eq!(
+        s.objects.qq[seg] >> 8,
+        0x10,
+        "the segment's quality is the vine"
+    );
+}
+
+#[test]
+fn a_vine_that_cannot_leave_a_segment_reports_no_growth() {
+    let mut s = world();
+    orc(&mut s, 0x10, 25, 25);
+    s.objects.type_frame[0x10] = 0x16e;
+    s.actors.attrs.movement_flags[0x10] = 0xf0;
+    link_placed_objects(&mut s);
+    // No free object slot: the vine steps back and 0x126de8 returns 0 (asm 0x126f4c).
+    s.objects.free.1 = 0;
+    assert_eq!(npc::grow(&mut s, 0x10, 2), 0);
+    assert_eq!(s.objects.location[0x10].x, 25, "back on its tile");
+    assert_eq!(s.actors.attrs.movement_flags[0x10], 0xf0, "its facing kept");
+}
+
+#[test]
+fn party_loops_stop_at_the_sixteen_member_roster() {
+    let mut s = world();
+    for (i, m) in s.actors.party.members.iter_mut().enumerate() {
+        *m = (i + 1) as u8;
+    }
+    // A malformed size byte past the roster.
+    s.actors.party.size = 200;
+    s.actors.worktype[0] = 0x55;
+    s.actors.attrs.combat_mode[0] = 3;
+    s.actors.attrs.unknown_18f1[0] = 0x77;
+    mode::begin_combat(&mut s);
+    assert_eq!(s.actors.worktype[0], 0x55, "actor 0 is no member");
+    assert_eq!(s.actors.attrs.unknown_18f1[0], 0x77);
+    mode::break_off(&mut s);
+    assert_eq!(s.actors.worktype[0], 0x55);
+}
+
+#[test]
+fn tame_looks_for_the_party_within_the_roster_only() {
+    let mut s = world();
+    // Nobody near, so every member is looked at; a size byte past the 16 slots.
+    orc(&mut s, 0x10, 60, 60);
+    link_placed_objects(&mut s);
+    s.actors.party.size = 17;
+    npc::tame(&mut s, 0x10);
+    assert!(s.objects.location[0x10].x >= 59, "it ambled or waited");
 }
