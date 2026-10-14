@@ -11,8 +11,8 @@ use crate::todo_stub;
 use crate::ui::printf::Arg;
 
 const STR_WITH: u32 = 0x0012_c944;
-const FMT_STR: u32 = 0x0012_c94a; // "%s"
-const FMT_SP_STR: u32 = 0x0012_c94e; // " %s"
+const FMT_STR: u32 = 0x0012_c94a; // format: the string
+const FMT_SP_STR: u32 = 0x0012_c94e; // format: a space, the string
 const STR_CODEX: u32 = 0x0012_cf66;
 const STR_MANTRA: u32 = 0x0012_cc02;
 const STR_WRONG_MANTRA: u32 = 0x0012_cc0c;
@@ -27,6 +27,8 @@ const STR_CANT_CARRY: u32 = 0x0012_ccd8;
 const STR_BANG: u32 = 0x0012_ccf4;
 const FMT_S: u32 = 0x0012_ccf8;
 const STR_NL: u32 = 0x0012_ccfe;
+/// The serpent figure's line when no serpent hatched (0x12ff50 at 0x1301c2).
+const STR_NONE_HATCHED: u32 = 0x0012_ceee;
 /// Original: A4-0x660e (8 pointers: the shrine mantras, by virtue)
 const MANTRAS: i32 = -0x660e;
 /// Original: A4-0x65ce (20 pointers: the words the wishing well grants food for)
@@ -36,8 +38,13 @@ const WISHES: i32 = -0x65ce;
 ///
 /// The cube must hold the eight moonstones (one of each frame); on the surface the lens 0x18a
 /// at (0x399, 0x353), the lens 0x18c at (0x39d, 0x353) and the Codex 0x3b at (0x39b, 0x353)
-/// must be in place and the party within 4 tiles of the Codex: the Codex goes, "The Codex has
-/// vanished!", a key, the ending (0x133d1e, 0x13513a). False otherwise ("No effect").
+/// must be in place and the party within 5 tiles of the Codex: the Codex goes (0x10c1d6),
+/// 0x133d1e, the vanishing line (0x12cf66), a key, the end sequence 0x13513a. False otherwise
+/// (the caller prints the cube's refusal).
+///
+/// Port: the ending is not ported, so the cube refuses before the Codex goes (03 §3: an
+/// unported step on a path that destroys something stops it first) and play goes on with the
+/// Codex in place.
 pub async fn vortex_cube(ux: Ux<'_>, cube: Slot) -> bool {
     let codex = {
         let mut s = ux.s();
@@ -66,18 +73,21 @@ pub async fn vortex_cube(ux: Ux<'_>, cube: Slot) -> bool {
         }
         codex
     };
+    if !seams::ending_ported() {
+        return false;
+    }
+    // Once the ending is ported: 0x133d1e after the removal, 0x13513a after the key.
     crate::objects::remove(&mut ux.s(), codex);
     ux.print(STR_CODEX, &[]).await;
     ux.key().await;
-    seams::ending(&mut ux.s());
     true
 }
 
-/// Original: 0x12d204 (objects: use a wand: "With" its spells, cast one, a charge goes)
+/// Original: 0x12d204 (objects: use a wand: list its spells, cast one, a charge goes)
 ///
 /// The wand's first content (a charge 0x150) names the spell list by its quality (A4-0x71b4,
-/// names at A4-0x70b8); none → "No effect". The spell is cast through magic 0x11a586 and one
-/// charge of that quality is taken (0x10d16e).
+/// names at A4-0x70b8, after the line 0x12c944); none → the no-effect message. The spell is
+/// cast through magic 0x11a586 and one charge of that quality is taken (0x10d16e).
 pub async fn wand(ux: Ux<'_>, obj: Slot) {
     let charge = crate::objects::first_child(&mut ux.s().objects, obj);
     if charge == -1 {
@@ -133,45 +143,57 @@ pub async fn instrument(ux: Ux<'_>, _instrument: u8) {
     seams::play_song(&mut ux.s(), kept);
 }
 
-/// Original: 0x12cfe4 (objects: start the machine: its animation runs 16 frames, a sound)
+/// Original: 0x12cfe4 (objects: start the machine: its animation runs 16 steps, a sound)
 ///
-/// The animation slot whose tile is the base tile of type 0xec steps its 16 frames (tile
-/// substitution 0x152cd2, window 0x102c90, overlay 0x135120) and goes back to its first frame;
-/// then the view refresh, the song stops, a sound plays, the screen effect 0x1623be(100), the
-/// song comes back.
+/// The animation slot whose tile is the base tile of type 0xec runs 16 steps, step k showing
+/// its frame first + k / 4 (asm 0x12d018..0x12d024: tile substitution 0x152cd2, window
+/// 0x102c90, overlay 0x135120), and goes back to its first frame; then the view refresh, the
+/// song stops, the sound-effect module plays for the wait 0x1623be(100), the song comes back.
+///
+/// Port: each step's window is presented and held one vertical blank (the Amiga shows it while
+/// the next one is drawn; the port publishes only at a wait), the state borrow released.
 pub async fn machine(ux: Ux<'_>) {
-    {
-        let mut s = ux.s();
+    let slot = {
+        let s = ux.s();
         let base = s.tables.basetile.base.get(0xec).copied();
-        let anim = s.tables.anim.clone();
-        let slot = anim
-            .slots
+        let anim = &s.tables.anim;
+        anim.slots
             .iter()
             .take(usize::from(anim.count))
-            .find(|a| Some(a.tile_to_animate) == base);
-        if let Some(a) = slot {
-            for i in 0..0x10 {
-                crate::gfx::anim::substitute(&mut s.gfx, a.tile_to_animate, a.first_anim_frame + i);
+            .find(|a| Some(a.tile_to_animate) == base)
+            .map(|a| (a.tile_to_animate, a.first_anim_frame))
+    };
+    if let Some((tile, first)) = slot {
+        for step in 0..0x10u16 {
+            {
+                let mut s = ux.s();
+                crate::gfx::anim::substitute(&mut s.gfx, tile, first.wrapping_add(step >> 2));
                 crate::gfx::render_window(&mut s, ux.io, true);
                 crate::main_loop::anim_step(&mut s);
             }
-            crate::gfx::anim::substitute(&mut s.gfx, a.tile_to_animate, a.first_anim_frame);
+            ux.io.vblank().await;
         }
+        crate::gfx::anim::substitute(&mut ux.s().gfx, tile, first);
+    }
+    // The song playing now (A4-0x779a), restored after the sound (asm 0x12d06e..0x12d08a).
+    let song = {
+        let mut s = ux.s();
         crate::gfx::refresh_view(&mut s, ux.io);
-        // The song playing now (A4-0x779a), restored after the sound (asm 0x12d06e..0x12d08a).
         let song = s.sound.current as i16;
         seams::play_song(&mut s, 0);
         seams::play_sound(&mut s);
-        seams::screen_effect(ux.io);
-        seams::play_song(&mut s, song);
-    }
+        song
+    };
+    seams::wait_vblanks(ux.io, 100).await;
+    seams::play_song(&mut ux.s(), song);
 }
 
 /// Original: 0x12f0d2 (objects: the wishing well)
 ///
-/// "Make a wish?" and `Y`: "Wish for:" and a line; one of the 20 words at A4-0x65ce gives, 1 in
-/// 5, "You got food" and food (0x81) if the leader can carry it, else "Failed"; another word
-/// "No effect". Any other key prints a newline.
+/// The wish prompt (0x12ccae) and `Y`: the second prompt (0x12ccbc) and a line; one of the 20
+/// words at A4-0x65ce gives, 1 in 5, the food line (0x12ccc8) and food (0x81) if the leader can
+/// carry it (else the line 0x12ccd8), else the failed message; another word the no-effect
+/// message. Any other key prints a newline.
 pub async fn wish(ux: Ux<'_>) {
     let m = {
         let s = ux.s();
@@ -218,10 +240,11 @@ fn matches(word: &[u8], line: &[u8]) -> bool {
 
 /// Original: 0x12ed4a (objects: chant the mantra at a shrine)
 ///
-/// "Mantra:" and a line; it must be the mantra of this shrine (0xf2 + virtue). Then on each
-/// tile around the shrine a moonstone (0x49) of the shrine's virtue frees it: the force field
-/// 0x33 there goes and the eggs of wisps and daemons around are removed (0x12eca6); "Done"
-/// with magic's flash 0x115b7c, else "No effect".
+/// The mantra prompt (0x12cc02) and a line; it must be the mantra of this shrine (0xf2 +
+/// virtue; else the line 0x12cc0c). Then on each tile around the shrine a moonstone (0x49) of
+/// the shrine's virtue frees it: the force field 0x33 there goes and the eggs of wisps and
+/// daemons around are removed (0x12eca6); the done message with magic's flash 0x115b7c, else
+/// the no-effect message.
 pub async fn mantra(ux: Ux<'_>, shrine: Slot) {
     let virtue = ux.s().objects.kind(shrine).wrapping_sub(0xf2);
     ux.print(STR_MANTRA, &[]).await;
@@ -292,9 +315,8 @@ pub fn clear_eggs(s: &mut State, x: i16, y: i16) {
 /// Original: 0x12ef7a (objects: fish with a fishing pole)
 ///
 /// Water (flags1 bit 0) on a tile around the leader: unless one was caught this hour
-/// (A4-0x7b5f) 1 in 5 catches a fish (0x109 into the inventory, "Got it!") if the leader can
-/// carry it ("Got it, but can't carry it."), else "Didn't get a fish."; no water "You need to
-/// stand next to water.".
+/// (A4-0x7b5f) 1 in 5 catches a fish (0x109 into the inventory, the line 0x12cc3a) if the
+/// leader can carry it (else 0x12cc1c), else the line 0x12cc44; no water the line 0x12cc5a.
 pub async fn fish(ux: Ux<'_>) {
     use crate::actors::tail::HOURLY_B;
     let (m, mx, my) = {
@@ -326,15 +348,13 @@ pub async fn fish(ux: Ux<'_>) {
             if !wet {
                 continue;
             }
-            let caught = ux
-                .s()
-                .actors
-                .objlist_tail
-                .get(HOURLY_B)
-                .copied()
-                .unwrap_or(0)
-                == 0
-                && ux.s().rng.range(0, 4) == 0;
+            // The hourly byte first; the draw 0x151f06(0, 4) only when it is 0 (asm 0x12eff4,
+            // 0x12f000).
+            let caught = {
+                let mut s = ux.s();
+                s.actors.objlist_tail.get(HOURLY_B).copied().unwrap_or(0) == 0
+                    && s.rng.range(0, 4) == 0
+            };
             if caught {
                 let heavy = {
                     let mut s = ux.s();
@@ -368,10 +388,12 @@ pub async fn fish(ux: Ux<'_>) {
 
 /// Stub of 0x12ff50 (objects: the serpent figure summons silver serpents)
 ///
-/// Stub contract: "Not now!" while a silver serpent (0x19d) is among the temporary actors;
-/// else up to three eggs of serpents hatch around the party (RNG offsets, 0x11b1c0 checks,
-/// 0x10bc4c / 0x10be02, 0x1319b2) and "Silver snakes are generated!" or "None generated!".
-/// Fallback: nothing happens, no RNG draw. Not on the Use receipt paths.
-pub async fn serpents(_ux: Ux<'_>) {
-    todo_stub!("0x12ff50 summon silver serpents", ())
+/// Stub contract: the refusal line 0x12cee2 while a silver serpent (0x19d) is among the
+/// temporary actors; else up to three eggs of serpents hatch around the party (RNG offsets,
+/// 0x11b1c0 checks, 0x10bc4c / 0x10be02, 0x1319b2) and the line 0x12cf00 (some hatched) or
+/// 0x12ceee (none). Fallback: nothing hatches, no RNG draw, and the game's own line for that
+/// outcome (0x12ceee) is printed. Not on the Use receipt paths.
+pub async fn serpents(ux: Ux<'_>) {
+    todo_stub!("0x12ff50 summon silver serpents", ());
+    ux.print(STR_NONE_HATCHED, &[]).await;
 }

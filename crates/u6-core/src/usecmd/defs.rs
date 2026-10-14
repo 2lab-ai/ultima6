@@ -8,7 +8,7 @@ use crate::main_loop::pointed_string;
 
 /// Original: A4-0x65aa (10 words: types 0x130546 refuses while aboard ship)
 pub const ABOARD_REFUSED: (i32, usize) = (-0x65aa, 10);
-/// Original: A4-0x61be (8 pointers: "North" .. "Northwest" by direction)
+/// Original: A4-0x61be (8 pointers: the direction names, north first, clockwise)
 pub const DIRECTION_NAMES: i32 = -0x61be;
 /// Original: A4-0x61ce / A4-0x61c6 (8 signed bytes each: dx / dy of the 8 directions)
 pub const DIR_DX: i32 = -0x61ce;
@@ -26,7 +26,7 @@ pub const MONSTER_FLAGS: i32 = -0x7dbd;
 /// Original: A4-0x31f7 (byte per character: class bits, 0x04 = digit)
 pub const CHAR_CLASS: i32 = -0x31f7;
 
-/// Message pointers in the data hunk (A4 - n): `"%s"` arguments of the Use messages.
+/// Message pointers in the data hunk (A4 - n): the string arguments of the Use messages.
 pub const MSG_SUCCESS: u32 = 0x6c6c;
 pub const MSG_FAILED: u32 = 0x6c68;
 pub const MSG_NO_EFFECT: u32 = 0x6c64;

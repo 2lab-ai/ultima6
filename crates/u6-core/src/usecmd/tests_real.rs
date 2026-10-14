@@ -1,5 +1,6 @@
 //! Real data: Use on objects of the shipped world, from the user's archive.org zip. Skips where
-//! the zip is missing; prints the message lines only (no game text in the repo). With
+//! the zip is missing; prints line counts and lengths, never the text (no game text in the repo
+//! or the test output). With
 //! `U6_USE_FRAMES=<dir>` each case also writes the frame after the command as a PNG there.
 #![allow(clippy::disallowed_methods)] // tests may read files and the environment
 
@@ -178,7 +179,8 @@ fn png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Prints the lines the command added and the stub points it reached; writes its frame.
+/// Prints how many lines the command added (and their lengths) and the stub points it reached;
+/// writes its frame. Returns the lines for the caller's checks.
 fn report(e: &Engine, name: &str, before: usize) -> Vec<String> {
     let lines = lines_of(&e.state());
     let new: Vec<String> = lines
@@ -186,7 +188,8 @@ fn report(e: &Engine, name: &str, before: usize) -> Vec<String> {
         .skip(before.saturating_sub(1))
         .filter(|l| !l.trim().is_empty())
         .collect();
-    eprintln!("[{name}] {new:?}");
+    let lens: Vec<usize> = new.iter().map(String::len).collect();
+    eprintln!("[{name}] {} lines, lengths {lens:?}", new.len());
     eprintln!(
         "[{name}] stubs: {:?}",
         e.stub_hits().keys().collect::<Vec<_>>()
@@ -345,7 +348,7 @@ fn use_on_eight_kinds_of_objects() {
     let pos = nearest(&files, 0x19c, None).expect("a ship");
     let (mut s, ship) = at(&files, 0x19c, pos);
     // Its deed: since 0x1240fa is ported the Use goes to the ship's head part, which carries
-    // the quality the deed must match (0x12f502: "A deed is required." otherwise).
+    // the quality the deed must match (0x12f502: otherwise the deed line 0x12cd90).
     let head = crate::combat::leaves::owner(&mut s, ship);
     let q = s.objects.qq_of(head) >> 8;
     if q != 0 {
@@ -367,16 +370,16 @@ fn use_on_eight_kinds_of_objects() {
     let out = report(&e, "7-ship-leave", n);
     let s = e.state();
     eprintln!(
-        "[7-ship-leave] leader index {} size {} actor0 type {:#x} lines {out:?}",
+        "[7-ship-leave] leader index {} size {} actor0 type {:#x} lines {}",
         s.actors.party.leader_index,
         s.actors.party.size,
-        s.objects.kind(0)
+        s.objects.kind(0),
+        out.len()
     );
 
     // 8. The orb of the moons (0x57, carried by the Avatar). At the start nobody has told the
-    // Avatar how to use it (actor 5's talk flag bit 5, set in Lord British's conversation):
-    // "You can't figure out how to use it.". With the flag set it makes a red moongate (0x54)
-    // two tiles north.
+    // Avatar how to use it (actor 5's talk flag bit 5, set in Lord British's conversation): the
+    // line 0x12ce42. With the flag set it makes a red moongate (0x54) two tiles north.
     for told in [false, true] {
         let mut s = start(&files);
         let me = lead(&s);
@@ -403,8 +406,8 @@ fn use_on_eight_kinds_of_objects() {
                 .collect::<Vec<_>>()
         };
         // The start egg's gargoyles (hatched by the boot since the objects port of 0x1319b2)
-        // stand around the party; one on the gate's tile would make it fail ("Failed", as in
-        // the original). They go to level 15 (out of the world) for this case.
+        // stand around the party; one on the gate's tile would make it fail (the failed message,
+        // as in the original). They go to level 15 (out of the world) for this case.
         {
             let c = s.map.centre;
             let (gx, gy) = (c.x, c.y - 2);
@@ -441,5 +444,44 @@ fn use_on_eight_kinds_of_objects() {
         } else {
             assert_eq!(gates1, gates0);
         }
+    }
+}
+
+/// The first map record of `kind` on any level (surface first), with its level.
+fn anywhere(files: &Files, kind: u16) -> Option<(u16, u16, u8)> {
+    let s = start(files);
+    (0..=5u8).find_map(|z| records(&s, kind, 0, 0, z).first().map(|r| (r.0, r.1, z)))
+}
+
+/// The drawbridge crank (0x120) and the serpent figure (0x139) reach unported routines
+/// (0x12de3a, 0x12ff50); their fallbacks print the game's own line for "nothing happened"
+/// (0x12ca48, 0x12ceee) instead of ending silently.
+#[test]
+fn unported_drawbridge_and_serpent_figure_print_a_line() {
+    let Some(files) = files() else { return };
+    for (kind, stub, name) in [
+        (0x120, "0x12de3a", "9-drawbridge"),
+        (0x139, "0x12ff50", "10-serpent-figure"),
+    ] {
+        let Some((x, y, z)) = anywhere(&files, kind) else {
+            eprintln!("[{name}] no {kind:#x} in the world");
+            continue;
+        };
+        let mut s = start(&files);
+        goto(&mut s, x, y + 1, z);
+        let obj = slot_at(&mut s, x, y, z, kind);
+        assert!(obj >= 0, "no {kind:#x} at ({x}, {y}, {z})");
+        let n = lines_of(&s).len();
+        let e = use_on(s, &files, obj, (x as i16, y as i16), &[]);
+        let out = report(&e, name, n);
+        assert!(
+            e.stub_hits().keys().any(|k| k.starts_with(stub)),
+            "[{name}] reaches the stub {stub}"
+        );
+        assert!(
+            out.len() >= 2,
+            "[{name}] the name, then the fallback's line: {} lines",
+            out.len()
+        );
     }
 }

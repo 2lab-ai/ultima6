@@ -90,8 +90,8 @@ impl<'a> Ux<'a> {
         self.print(A4.wrapping_sub(off), &[]).await;
     }
 
-    /// printf of the format at `fmt` with the message the pointer at A4 - `ptr` names ("Not
-    /// usable", "No effect", ...).
+    /// printf of the format at `fmt` with the message the pointer at A4 - `ptr` names (the
+    /// shared Use messages: not usable, no effect, ...).
     pub async fn say(&self, fmt: u32, ptr: u32) {
         let msg = pointed_string(self.io, A4.wrapping_sub(ptr));
         self.print(fmt, &[Arg::Str(&msg)]).await;

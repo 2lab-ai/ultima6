@@ -12,7 +12,7 @@ const STR_WATER_HEAVY: u32 = 0x0012_c968;
 const STR_MILK_HEAVY: u32 = 0x0012_c994;
 const STR_NEED_MILK: u32 = 0x0012_c9c0;
 const STR_NEED_JAR: u32 = 0x0012_c9d6;
-const FMT_STR: u32 = 0x0012_c94a; // "%s"
+const FMT_STR: u32 = 0x0012_c94a; // format: the string
 const STR_STUDY: u32 = 0x0012_cb4a;
 const STR_DRINK: u32 = 0x0012_cc7e;
 const STR_EAT: u32 = 0x0012_cf52;
@@ -21,8 +21,8 @@ const STR_BREEZE: u32 = 0x0012_cf8a;
 
 /// Original: 0x130380 (objects: eat food: one off a stack, or the object goes)
 ///
-/// "You eat the food."; a counted stack (0x10cef2 ≠ 0) with more than one loses one, anything
-/// else is removed; a carried one redraws the inventory.
+/// The eating line (0x12cf52); a counted stack (0x10cef2 ≠ 0) with more than one loses one,
+/// anything else is removed; a carried one redraws the inventory.
 pub async fn eat(ux: Ux<'_>, obj: Slot) {
     ux.print(STR_EAT, &[]).await;
     let mut s = ux.s();
@@ -72,8 +72,9 @@ pub async fn milk(ux: Ux<'_>) {
 
 /// Original: 0x12d336 (objects: fill a bucket at a well: an empty bucket 0xb2 becomes 0xb3)
 ///
-/// [`milk`] (0x12d3c4) is the same routine for a cow. The leader needs an empty bucket and the strength to carry it full (20 × strength at least
-/// the carried weight + 0x20); the empty one goes and a full one is given (0x10cf7c), "Done".
+/// [`milk`] (0x12d3c4) is the same routine for a cow. The leader needs an empty bucket and the
+/// strength to carry it full (20 × strength at least the carried weight + 0x20); the empty one
+/// goes and a full one is given (0x10cf7c), the done message.
 pub async fn fill_bucket(ux: Ux<'_>, which: Bucket) {
     let (member, bucket) = {
         let mut s = ux.s();
@@ -154,7 +155,7 @@ pub async fn honey(ux: Ux<'_>) {
     seams::redraw_inventory(&mut ux.s());
 }
 
-/// Original: 0x12d526 (objects: drink a potion: "On whom:", the effect by its frame)
+/// Original: 0x12d526 (objects: drink a potion: ask on whom, the effect by its frame)
 ///
 /// Frame 0 wakes (status 0x04 off, the base type back), 1 cures poison (0x08 off), 2 heals
 /// (magic 0x116d0e(6)), 3 poisons and 4 puts to sleep unless the monster kind resists (bytes
@@ -266,12 +267,12 @@ pub async fn study_scroll(ux: Ux<'_>) {
     }
 }
 
-/// Original: 0x13051a (objects: the mouse: "Squeak!")
+/// Original: 0x13051a (objects: the mouse squeaks, the line 0x12cf80)
 pub async fn squeak(ux: Ux<'_>) {
     ux.print(STR_SQUEAK, &[]).await;
 }
 
-/// Original: 0x130526 (objects: a fan turns the wind one step clockwise, "You feel a breeze.",
+/// Original: 0x130526 (objects: a fan turns the wind one step clockwise, the line 0x12cf8a,
 /// then the clock runs 0 minutes for the wind line)
 pub async fn fan(ux: Ux<'_>) {
     {
