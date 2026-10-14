@@ -328,3 +328,95 @@ pub(crate) fn lose_karma(s: &mut State, n: u8) {
     let k = &mut s.actors.karma;
     *k = if n < *k { *k - n } else { 0 };
 }
+
+/// Owner: ui / inventory (hunk 8). Original 0x1122dc (a readied object that cannot simply be
+/// put down: the amulet 0x4c prints its message (A4-0x6c3c) and gives 1; a lit torch goes out
+/// of the world with its message (A4-0x756f) and gives 2; else 0).
+///
+/// Contract: as described (the text is queued). Fallback = that behaviour.
+pub(crate) fn cannot_drop(s: &mut State, obj: Slot) -> i16 {
+    todo_stub!("0x1122dc readied object that cannot be dropped", ());
+    if s.objects.place(obj) != crate::objects::READIED {
+        return 0;
+    }
+    match (s.objects.kind(obj), s.objects.tf(obj) >> 10) {
+        (0x4c, _) => {
+            let msg = s.objcmds.data.pointed(super::GameData::a4(-0x6c3c));
+            super::text::queue_at(s, 0x0011_0c62, vec![crate::main_loop::PrintArg::Str(msg)]);
+            1
+        }
+        (0x5a, 1) => {
+            crate::objects::moves::remove(s, obj);
+            super::text::queue_at(s, 0x0011_0c68, Vec::new());
+            let fmt = super::text::a4_string(s, -0x756f);
+            super::text::queue(s, fmt, Vec::new());
+            2
+        }
+        _ => 0,
+    }
+}
+
+/// Owner: ui / inventory (hunk 8). Original 0x11236c (putting down readied `obj` held by
+/// `owner` ends its magic: a ring 0x102 makes the owner visible (status bit 1 cleared), 0x51
+/// clears A4-0x7b65; both redraw (0x132338) and give 3; else 0).
+///
+/// Contract: as described. Fallback = that behaviour, the redraw left to the next frame.
+pub(crate) fn end_worn_magic(s: &mut State, obj: Slot, owner: Slot) -> i16 {
+    todo_stub!("0x11236c readied object's magic ends", ());
+    if s.objects.place(obj) != crate::objects::READIED {
+        return 0;
+    }
+    match s.objects.kind(obj) {
+        0x102 => {
+            if let Some(b) = s.objects.obj_status.get_mut(owner as usize) {
+                *b &= 0xfd;
+            }
+            3
+        }
+        0x51 => {
+            if let Some(b) = s.actors.objlist_tail.get_mut(0x1f) {
+                *b = 0;
+            }
+            3
+        }
+        _ => 0,
+    }
+}
+
+/// Owner: ui / inventory (hunk 8). Original 0x111fe0 (the equipment slot of A4+0x1360 that
+/// holds `obj`, -1). Contract: pure. Fallback = that search.
+pub(crate) fn equipment_slot(s: &State, obj: Slot) -> i16 {
+    todo_stub!("0x111fe0 equipment slot of an object", ());
+    s.objcmds
+        .equipment
+        .iter()
+        .position(|&o| o == obj)
+        .map_or(-1, |i| i as i16)
+}
+
+/// Owner: ui (hunk 18) via combat 0x1228ba. Original 0x1228ba → 0x132706 (the path from
+/// `actor` to (x, y) within `range`, with `tile` the thrown object flying along it; (x, y)
+/// end where it stops; false when nothing gets there). Fallback: true, (x, y) unchanged.
+pub(crate) fn throw_path(
+    _s: &mut State,
+    _actor: Slot,
+    _range: i16,
+    _x: &mut i16,
+    _y: &mut i16,
+    _tile: u16,
+) -> bool {
+    todo_stub!("0x1228ba path and flight of a thrown object", true)
+}
+
+/// Owner: actors. Original 0x11b1c0 (may `slot` stand at (x, y)). For an actor this is
+/// [`crate::actors::walk::can_move_to`]. Drop and Move ask it for objects too, where the
+/// original reads the actor tables past their 256 entries (A4+0x3d0c + slot lands in later
+/// tables) and the port's tables end: for a slot ≥ 0x100 the fallback is the tile test alone,
+/// a passable map tile with nothing impassable on it (0x11b9ae).
+pub(crate) fn may_stand(s: &mut State, slot: Slot, x: u16, y: u16) -> bool {
+    if (0..crate::objects::ACTOR_SLOTS as Slot).contains(&slot) {
+        return crate::actors::walk::can_move_to(s, slot as u16, x, y);
+    }
+    todo_stub!("0x11b1c0 for an object slot", ());
+    !crate::actors::walk::blocked_at(s, x, y)
+}

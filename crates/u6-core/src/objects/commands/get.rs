@@ -180,11 +180,11 @@ async fn take(state: &RefCell<State>, io: &Io, actor: Slot, sel: Slot) -> bool {
         }
     } else if kind == TORCH && frame == 1 {
         if i16::from(s.actors.party.leader_index) == s.ui.panel.member {
-            let (a, b) = s.objcmds.hands;
-            if a == 0 {
-                s.objcmds.hands.0 = sel;
-            } else if b == 0 {
-                s.objcmds.hands.1 = sel;
+            let e = s.objcmds.equipment;
+            if e[2] == 0 {
+                s.objcmds.equipment[2] = sel;
+            } else if e[5] == 0 {
+                s.objcmds.equipment[5] = sel;
             } else {
                 drop(s);
                 print_at(state, io, S_NO_FREE_HAND, &[]).await;

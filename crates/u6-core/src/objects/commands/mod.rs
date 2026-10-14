@@ -14,6 +14,7 @@
 //! yet).
 
 mod data;
+mod drop;
 mod eggs;
 mod get;
 mod horse;
@@ -28,6 +29,7 @@ mod real_data;
 mod tests;
 
 pub use data::GameData;
+pub use drop::{drop_object, fits_in, fragile, how_many, surface_at};
 pub use eggs::{equip_monster, hatch_egg, spawn_monster};
 pub use get::{get, takeable};
 pub use horse::{dismount, mount_horse, parse_answer};
@@ -57,9 +59,10 @@ pub struct ObjCommands {
     /// actor holds, written by the inventory sum 0x11121e and read by Get 0x12a7a4; the
     /// inventory module owns 0x11121e and keeps them once ported)
     pub inventory_weights: (i16, i16),
-    /// Original: A4+0x1364 / +0x136a (words: the objects in the two hands of the member the
-    /// inventory panel shows; Get puts a lit torch in the first free one; ui owns them)
-    pub hands: (Slot, Slot),
+    /// Original: A4+0x1360 (8 words: what the member the inventory panel shows has readied in
+    /// each equipment slot; 2 and 5 are the hands Get puts a lit torch in, Drop clears the slot
+    /// it empties; the inventory panel (ui) writes them and keeps them once ported)
+    pub equipment: [Slot; 8],
 }
 
 impl ObjCommands {
