@@ -412,7 +412,7 @@ fn telekinesis_needs_an_object_with_weight_and_a_direction() {
             z: 0
         }
     );
-    // Weight 0: "Not Possible", no key read.
+    // Weight 0: the not-possible line (0x1159f8), no key read.
     let mut s = world();
     let o = pick(&mut s, 0x77, 0, 102, 100);
     let s = run(s, &[], |st, io| async move {
@@ -426,7 +426,7 @@ fn telekinesis_needs_an_object_with_weight_and_a_direction() {
             z: 0
         }
     );
-    // A key that is not a direction: "nowhere", the object stays.
+    // A key that is not a direction: the no-direction word (0x115a14), the object stays.
     let mut s = world();
     let o = pick(&mut s, 0x77, 5, 102, 100);
     let s = run(s, &[Key::Char('x')], |st, io| async move {

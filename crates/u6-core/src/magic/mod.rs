@@ -45,6 +45,8 @@ mod travel;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_guards;
+#[cfg(test)]
 mod tests_real;
 #[cfg(test)]
 mod tests_spells;

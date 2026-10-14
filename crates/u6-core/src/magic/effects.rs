@@ -49,8 +49,8 @@ pub(super) async fn say(state: &RefCell<State>, io: &Io, fmt: u32, m: Msg) {
     print_at(state, io, fmt, &[Arg::Str(&text)]).await;
 }
 
-/// The result line after an effect: 0 "Success", 1 "Failed", 2 "No effect", 0xff / 0xfe the
-/// effect printed its own.
+/// The result line after an effect: 0 `Msg::Success`, 1 `Msg::Failed`, 2 `Msg::NoEffect`, 0xff /
+/// 0xfe the effect printed its own.
 pub(super) async fn report(state: &RefCell<State>, io: &Io) {
     let r = state.borrow().magic.result;
     let m = match r {
@@ -69,8 +69,8 @@ pub(super) async fn print_name(state: &RefCell<State>, io: &Io, obj: i16) {
     printf(state, io, name.as_bytes(), &[]).await;
 }
 
-/// "On whom: " / "On what: " when the caster is a party member (status bit 7), then the
-/// target read unless it is chosen, and the target's name or "nothing".
+/// `Msg::OnWhom` / `Msg::OnWhat` when the caster is a party member (status bit 7), then the
+/// target read unless it is chosen, and the target's name or `Msg::Nothing`.
 pub(super) async fn prompt_target(
     state: &RefCell<State>,
     io: &Io,
@@ -137,10 +137,10 @@ pub(super) fn flags3(s: &State, obj: Slot) -> u8 {
 /// the effect, the result line)
 ///
 /// The prompt and target (see [`prompt_target`]); the caster flashes (0x132338); with a map
-/// location the missile flies (0x1228ba). No target: "No effect". A missile that did not
-/// arrive: "Blocked!" within the range on both axes, else "Out of range!". An actor spell on
-/// an object (slot ≥ 0x100), or an object spell on an actor (except Dispel Field 0x21): "No
-/// effect". The target is resolved (0x1240fa), the effect runs and its result is printed.
+/// location the missile flies (0x1228ba). No target: `Msg::NoEffect`. A missile that did not
+/// arrive: `Msg::Blocked` within the range on both axes, else `Msg::OutOfRange`. An actor spell on
+/// an object (slot ≥ 0x100), or an object spell on an actor (except Dispel Field 0x21):
+/// `Msg::NoEffect`. The target is resolved (0x1240fa), the effect runs and its result is printed.
 pub async fn on_target(state: &RefCell<State>, io: &Io, spell: u16, t: Target) {
     prompt_target(state, io, t.kind, t.range, t.chosen).await;
     let (missing, caster) = {
@@ -343,10 +343,17 @@ pub fn dispel(s: &mut State, io: &Io, actor: u16) -> bool {
 }
 
 /// Original: 0x116d0e (magic: Heal (6): +random 1..30 hit points up to the maximum (0x122144);
-/// Great Heal (0x34): the maximum; nothing on an actor with status bit 0x10 (dead): "No
-/// effect")
+/// Great Heal (0x34): the maximum; nothing on an actor with status bit 0x10 (dead):
+/// `Msg::NoEffect`)
+///
+/// The original indexes the actor tables with the selection word as it is (0x116d18,
+/// 0x116d22, 0x116d86), so a potion aimed at an object (slot ≥ 0x100) reads and writes past
+/// them; the port does nothing for a selection outside the actor slots.
 pub fn heal(s: &mut State, spell: u16) {
     let t = s.ui.input.selection;
+    if !(0..0x100).contains(&t) {
+        return;
+    }
     let a = usize::from(t as u16);
     if s.actors.attrs.status[a] & 0x10 != 0 {
         s.magic.result = 2;
@@ -404,7 +411,7 @@ async fn hit_then_line(state: &RefCell<State>, io: &Io, caster: u16, target: u16
     seams::wound_line(state, io, target).await;
 }
 
-/// Original: 0x11669e (magic: Magic Arrow: dodged by dexterity ("Failed"), else 1..10 damage)
+/// Original: 0x11669e (magic: Magic Arrow: dodged by dexterity (`Msg::Failed`), else 1..10 damage)
 pub async fn magic_arrow(state: &RefCell<State>, io: &Io, caster: u16) {
     let (target, d) = {
         let mut s = state.borrow_mut();
@@ -419,7 +426,7 @@ pub async fn magic_arrow(state: &RefCell<State>, io: &Io, caster: u16) {
     set_result(state, 0xff);
 }
 
-/// Original: 0x116706 (magic: a damage spell on the selection: resisted (0x122076) "Failed";
+/// Original: 0x116706 (magic: a damage spell on the selection: resisted (0x122076) `Msg::Failed`;
 /// else Harm (5) 1..10, Energy Wind (0x62) 1..30, Disable (0x32) all hit points but one)
 pub async fn harm(state: &RefCell<State>, io: &Io, spell: u16) {
     let (caster, target, d) = {
@@ -449,8 +456,8 @@ pub async fn harm(state: &RefCell<State>, io: &Io, spell: u16) {
     set_result(state, 0xff);
 }
 
-/// Original: 0x11663e (magic: Poison: creatures with flag 0x04 are immune ("No effect"); a
-/// strength dodge (0x115c62) "Failed"; else status bit 0x08 and the hit flash (0xfe))
+/// Original: 0x11663e (magic: Poison: creatures with flag 0x04 are immune (`Msg::NoEffect`); a
+/// strength dodge (0x115c62) `Msg::Failed`; else status bit 0x08 and the hit flash (0xfe))
 pub fn poison(s: &mut State, caster: u16, target: u16) -> u8 {
     let (_, flags) = creature_bits(s, target);
     if flags & 4 != 0 {
@@ -464,8 +471,8 @@ pub fn poison(s: &mut State, caster: u16, target: u16) -> u8 {
     0xfe
 }
 
-/// Original: 0x1165d2 (magic: Sleep: creatures with flag 0x01 never sleep ("No effect"); a
-/// resist (0x122076) "Failed"; else the hit flash, status bit 0x04 and the sleeper lies down
+/// Original: 0x1165d2 (magic: Sleep: creatures with flag 0x01 never sleep (`Msg::NoEffect`); a
+/// resist (0x122076) `Msg::Failed`; else the hit flash, status bit 0x04 and the sleeper lies down
 /// (0x1221da), no message (0xfe))
 pub fn sleep(s: &mut State, caster: u16, target: u16) -> u8 {
     let (idx, flags) = creature_bits(s, target);
@@ -506,7 +513,7 @@ pub async fn fireball(state: &RefCell<State>, io: &Io, target: u16) -> bool {
 }
 
 /// Original: 0x11687e (magic: Kill: the dead (status 0x10) and creatures with flag 0x02 are
-/// immune (2); a resist "Failed" (1); else damage equal to its hit points (0xfe))
+/// immune (2); a resist `Msg::Failed` (1); else damage equal to its hit points (0xfe))
 pub async fn kill(state: &RefCell<State>, io: &Io, caster: u16, target: u16) -> u8 {
     {
         let mut s = state.borrow_mut();
@@ -527,9 +534,9 @@ pub async fn kill(state: &RefCell<State>, io: &Io, caster: u16, target: u16) -> 
     0xfe
 }
 
-/// Original: 0x1167bc (magic: Charm: a resist "Failed"; an uncharmed target keeps its
-/// alignment in its movement flags, gets object status 0x04, the caster's alignment and
-/// worktype 8, flashes and "is charmed." is printed; a charmed one is uncharmed (0x121bce))
+/// Original: 0x1167bc (magic: Charm: a resist `Msg::Failed`; an uncharmed target keeps its
+/// alignment in its movement flags, gets object status 0x04, the caster's alignment and worktype 8,
+/// flashes and the charmed line (0x1158bc) is printed; a charmed one is uncharmed (0x121bce))
 pub async fn charm(state: &RefCell<State>, io: &Io, caster: u16, target: u16) {
     let charmed = {
         let mut s = state.borrow_mut();
@@ -560,7 +567,7 @@ pub async fn charm(state: &RefCell<State>, io: &Io, caster: u16, target: u16) {
     }
 }
 
-/// A4-0x756f: "A torch burned out." (Douse on a lit torch).
+/// A4-0x756f: the line of a torch burned out (Douse on a lit torch).
 const MSG_TORCH_OUT: u32 = 0x756f;
 /// Objlist block bytes of the keg timer (A4-0x7b2a) and its object (A4-0x7b28).
 const KEG_TIMER: usize = 0x5a;
@@ -569,10 +576,10 @@ const KEG_OBJECT: usize = 0x5c;
 /// Original: 0x116912 (magic: Douse (4) / Ignite (8) a light source `obj`: torches 0x5a,
 /// braziers and the like (0xa4, 0x7a, 0xfd, 0xce frames 0..1, 0x91, 0xdf); frame bit 0 = lit)
 ///
-/// Dousing an unlit one or lighting a lit one: "No effect". Lighting the powder keg 0xdf
+/// Dousing an unlit one or lighting a lit one: `Msg::NoEffect`. Lighting the powder keg 0xdf
 /// (frame 0) starts the keg timer (3, this object); lighting another sets frame bit 0 and the
-/// lit status 0x80; dousing a torch removes it ("A torch burned out."); dousing another keeps
-/// frame bit 1 only and clears 0x80. Anything else: "No effect". The view flags follow.
+/// lit status 0x80; dousing a torch removes it (that line, A4-0x756f); dousing another keeps
+/// frame bit 1 only and clears 0x80. Anything else: `Msg::NoEffect`. The view flags follow.
 pub async fn douse_ignite(state: &RefCell<State>, io: &Io, obj: Slot, spell: u16) {
     let burned_out = {
         let mut s = state.borrow_mut();
@@ -609,7 +616,7 @@ pub async fn douse_ignite(state: &RefCell<State>, io: &Io, obj: Slot, spell: u16
 }
 
 /// Dispel Field (0x21): the first field (0x13d..0x140) at the target goes, with the hit flash
-/// on it and the view flags; none there: "No effect".
+/// on it and the view flags; none there: `Msg::NoEffect`.
 fn dispel_field(s: &mut State) {
     let (x, y) = s.ui.input.target;
     let z = u16::from(s.map.centre.z);
@@ -637,9 +644,12 @@ fn adopt(s: &mut State, new: Slot, from: u16, work: u8) {
 }
 
 /// Animate (0x30): an object with a ready slot (0x110f96) becomes a creature of its type at its
-/// place (0x131646) on the caster's side with worktype 8, and the object goes; else "No
-/// effect". The port skips the writes when no creature could be made (the original writes
-/// through slot -1).
+/// place (0x131646) on the caster's side with worktype 8, and the object goes; else
+/// [`Msg::NoEffect`].
+///
+/// No temporary-actor slot free: the original goes on with slot -1 (0x1173f6 .. 0x117426
+/// write the status and worktype bytes before their tables) and removes the object anyway
+/// (0x117432); the port keeps the object and reports [`Msg::NoEffect`].
 fn animate(s: &mut State, caster: u16, obj: Slot) {
     if seams::ready_slot(s, obj) == -1 {
         s.magic.result = 2;
@@ -648,12 +658,16 @@ fn animate(s: &mut State, caster: u16, obj: Slot) {
     let (kind, x, y) = (s.objects.kind(obj), s.objects.x(obj), s.objects.y(obj));
     let z = u16::from(s.map.centre.z);
     let new = seams::spawn(s, kind, x, y, z);
+    if new < 0 {
+        s.magic.result = 2;
+        return;
+    }
     adopt(s, new, caster, 8);
     crate::objects::remove(s, obj);
 }
 
 /// Clone (0x51): up to 8 random spots near the leader until the target could stand there
-/// (0x11b1c0); none: "No effect"; else a creature of its type there with its alignment and
+/// (0x11b1c0); none: `Msg::NoEffect`; else a creature of its type there with its alignment and
 /// worktype, shown dissolving.
 fn clone(s: &mut State, io: &Io, obj: Slot) {
     let t = obj as u16;
@@ -681,7 +695,10 @@ fn clone(s: &mut State, io: &Io, obj: Slot) {
 
 /// Replicate (0x58): an object whose tile has flags3 bit 3, copied (quantity 1, ok to take) to
 /// the first of up to 8 random spots near the leader where it may lie (0x11b1c0); copies that
-/// may not lie there are removed again. No tile flag or no spot: "Failed".
+/// may not lie there are removed again. No tile flag or no spot: [`Msg::Failed`].
+///
+/// A copy the full object pool cannot make (0x10bc4c: -1) counts as a spot where it may not
+/// lie; the original passes the -1 on to 0x128b0e and 0x11b1c0 (0x11751e, 0x11752e).
 fn replicate(s: &mut State, io: &Io, obj: Slot) {
     if flags3(s, obj) & 8 == 0 {
         s.magic.result = 1;
@@ -694,6 +711,9 @@ fn replicate(s: &mut State, io: &Io, obj: Slot) {
         let tf = s.objects.tf(obj).to_be_bytes();
         let new =
             crate::objects::create_from_record(s, [0, loc[0], loc[1], loc[2], tf[0], tf[1], 0, 1]);
+        if new < 0 {
+            continue;
+        }
         crate::objects::mark_takeable(&mut s.objects, new);
         if crate::actors::walk::can_move_to(s, new as u16, x, y) {
             redraw_dissolving(s, io);

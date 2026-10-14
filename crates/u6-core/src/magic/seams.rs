@@ -71,8 +71,17 @@ pub(crate) fn target_owner(s: &mut State, obj: i16) -> i16 {
 
 /// [combat] 0x122076 (does `target` resist `caster`'s spell: random 1..30 < int(target) / 2 −
 /// int(caster) + 15; true = resisted): [`crate::combat::leaves::contest`].
+///
+/// Repel Undead (0x118ac8) asks it for the first object of a tile, which may be an object
+/// slot (≥ 0x100); 0x122094 reads that slot's intelligence past the actor table. The port
+/// draws the same number and reads 0 there.
 pub(crate) fn resists(s: &mut State, caster: u16, target: u16) -> bool {
-    crate::combat::leaves::contest(s, caster as i16, target as i16)
+    if target < 0x100 {
+        return crate::combat::leaves::contest(s, caster as i16, target as i16);
+    }
+    let r = s.rng.range(1, 30) as i16;
+    let ia = crate::actors::leaves::intelligence(s, caster) as i16;
+    r < 0i16.wrapping_sub(ia).wrapping_add(15)
 }
 
 /// [combat] 0x1231be (hurt `target` by `damage`: hit points, death, splitting slimes; queues
@@ -93,7 +102,7 @@ pub(crate) fn provoke(s: &mut State, target: u16, attacker: u16, damage: i16) {
     crate::combat::damage::yell_for_help(s, target as i16, attacker as i16, damage);
 }
 
-/// [combat] 0x12395a (print the wound line of `actor`: "grazed", "barely wounded" ...):
+/// [combat] 0x12395a (print the wound line of `actor`, its words by the hit points left):
 /// [`crate::combat::damage::report_wounds`], then the lines and frames it queued.
 pub(crate) async fn wound_line(state: &RefCell<State>, io: &Io, actor: u16) {
     crate::combat::damage::report_wounds(&mut state.borrow_mut(), actor as i16);

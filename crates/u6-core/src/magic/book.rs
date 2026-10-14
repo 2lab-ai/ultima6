@@ -280,11 +280,11 @@ pub(super) fn layout(m: &mut MagicState) -> (Vec<u16>, i16) {
 /// Original: 0x116218 (magic: draw the shown page of the spellbook: up to 8 spells of one
 /// circle with their reagent counts, the current spell marked, the page arrows, the circle)
 ///
-/// The text area (0xb0, 0xe)..(0x12f, 0x4f) is cleared to the paper colour; in the status
-/// window each line has the name at column 1 and the count at column 14 (0x116084), the marker
-/// glyph 0x1a at column 0 of the current spell (whose count gets bit 7). The page arrows are
-/// tiles 0x19c / 0x19d where a previous / next page exists (else the blank 0x19b) at x = 0xc0 /
-/// 0xd0, y = 0x58; then the circle name at (11, 10) and "level" at (10, 11), and the message
+/// The text area (0xb0, 0xe)..(0x12f, 0x4f) is cleared to the paper colour; in the status window
+/// each line has the name at column 1 and the count at column 14 (0x116084), the marker glyph 0x1a
+/// at column 0 of the current spell (whose count gets bit 7). The page arrows are tiles 0x19c /
+/// 0x19d where a previous / next page exists (else the blank 0x19b) at x = 0xc0 / 0xd0, y = 0x58;
+/// then the circle name at (11, 10) and the level word (0x1158b4) at (10, 11), and the message
 /// scroll is current again.
 pub async fn draw_book_page(state: &RefCell<State>, io: &Io) {
     let (lines, circle, caster) = {

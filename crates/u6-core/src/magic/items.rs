@@ -11,10 +11,10 @@ use crate::objects::Slot;
 use crate::state::State;
 use crate::ui::printf::Arg;
 
-/// "\nNot Possible\n", "Direction-", "nowhere\n", "Which object: ", "\nCan't carry!\n",
-/// "\nIt's full\n", "With: ", "none\n", " %s" (hunk 11).
+/// Hunk 11: the not-possible line, the direction and object prompts, the no-direction word, the
+/// too-heavy and the full lines, the wand prompt, the no-choice word and a " %s" format.
 const MSG_NOT_POSSIBLE: u32 = 0x0011_59f8;
-const MSG_DIRECTION: u32 = 0x0011_5a08;
+pub(super) const MSG_DIRECTION: u32 = 0x0011_5a08;
 const MSG_NOWHERE: u32 = 0x0011_5a14;
 const MSG_WHICH: u32 = 0x0011_5a28;
 const MSG_CANT_CARRY: u32 = 0x0011_5a38;
@@ -43,7 +43,7 @@ fn caster_member(s: &State) -> (u16, bool) {
     (c, s.actors.attrs.status[usize::from(c)] & 0x80 != 0)
 }
 
-/// The selection's name and a newline, or "nothing".
+/// The selection's name and a newline, or `Msg::Nothing`.
 async fn name_or_nothing(state: &RefCell<State>, io: &Io, none: bool) {
     if none {
         say(state, io, FMT_S_NL, Msg::Nothing).await;
@@ -68,15 +68,16 @@ async fn shoot(state: &RefCell<State>, io: &Io, caster: u16, tile: u16) -> bool 
 /// Original: 0x118e98 (magic: Telekinesis: push an object at a distance, or work a crank or a
 /// lever)
 ///
-/// "On what: " for a member caster, the target read unless chosen; its name or "nothing"; the
-/// caster flashes and the missile 0x17f flies to it. No object (an actor slot, or no
-/// location): "No effect"; short: "Blocked". A crank (0x120) works (0x12e3f6), a lever (0x10c)
-/// switches (0x12e538); an object of weight 0 (0x13a540): "Not Possible". Otherwise it
-/// flashes, "Direction-" and one key without a target pending: no direction "nowhere"; a
-/// direction prints its name and the object moves a tile that way (0x10c9d2) unless the push
-/// is blocked (0x12acc0, "Blocked"); a cannon (0xdd) turns to face it; the view flags. The
-/// original moves the origin of the pointer direction (A4-0x7a26 / -0x7a25, 0x105016) onto the
-/// object and back to (0x58, 0x58); the port reads directions from keys only and keeps none.
+/// `Msg::OnWhat` for a member caster, the target read unless chosen; its name or `Msg::Nothing`;
+/// the caster flashes and the missile 0x17f flies to it. No object (an actor slot, or no location):
+/// `Msg::NoEffect`; short: `Msg::Blocked`. A crank (0x120) works (0x12e3f6), a lever (0x10c)
+/// switches (0x12e538); an object of weight 0 (0x13a540): the not-possible line (0x1159f8).
+/// Otherwise it flashes, the direction prompt (0x115a08) and one key without a target pending: no
+/// direction the no-direction word (0x115a14); a direction prints its name and the object moves a
+/// tile that way (0x10c9d2) unless the push is blocked (0x12acc0, `Msg::Blocked`); a cannon (0xdd)
+/// turns to face it; the view flags. The original moves the origin of the pointer direction
+/// (A4-0x7a26 / -0x7a25, 0x105016) onto the object and back to (0x58, 0x58); the port reads
+/// directions from keys only and keeps none.
 pub async fn telekinesis(state: &RefCell<State>, io: &Io, pre: i16) {
     let (caster, member) = caster_member(&state.borrow());
     if member {
@@ -163,18 +164,18 @@ fn close_victim(s: &mut State) {
 
 /// Original: 0x119266 (magic: Pickpocket: take an object from an actor at a distance)
 ///
-/// "On whom: " for a member caster, the target read unless chosen (the cursor mode A4-0x7a60
-/// kept); its name or "nothing"; the caster flashes and the missile 0x18b flies. Not an actor
-/// slot, or no location: "No effect"; short: "Blocked". The victim's inventory opens in the
-/// panel (A4+0x1380, 0x111c30, mode 0x92, A4+0x1820 set while it is read), "Which object: " and
-/// one key (the panel cursor on when a cursor mode was on). Not a confirmed pick: "nothing";
-/// its name otherwise. Not a carried object (status 0x18 clear): "No effect". What taking it
-/// meets first (0x1122dc) may stop it. Heavier than the caster may carry (0x1110f6 + the
-/// weights 0x11121e leaves, against strength × 20): "Can't carry!". Else it flies to the
-/// caster (0x1228ba with its tile), leaves its effect on the victim (0x11236c), a stack moves
-/// by its count (0x10cf7c / 0x10d16e), anything else into the caster's inventory (0x10cda8);
-/// the caster's inventory is shown (0x111be0), "Success" and karma − 5. Then the panel goes
-/// back to the leader.
+/// `Msg::OnWhom` for a member caster, the target read unless chosen (the cursor mode A4-0x7a60
+/// kept); its name or `Msg::Nothing`; the caster flashes and the missile 0x18b flies. Not an actor
+/// slot, or no location: `Msg::NoEffect`; short: `Msg::Blocked`. The victim's inventory opens in
+/// the panel (A4+0x1380, 0x111c30, mode 0x92, A4+0x1820 set while it is read), the object prompt
+/// (0x115a28) and one key (the panel cursor on when a cursor mode was on). Not a confirmed pick:
+/// `Msg::Nothing`; its name otherwise. Not a carried object (status 0x18 clear): `Msg::NoEffect`.
+/// What taking it meets first (0x1122dc) may stop it. Heavier than the caster may carry (0x1110f6 +
+/// the weights 0x11121e leaves, against strength × 20): the too-heavy line (0x115a38). Else it
+/// flies to the caster (0x1228ba with its tile), leaves its effect on the victim (0x11236c), a
+/// stack moves by its count (0x10cf7c / 0x10d16e), anything else into the caster's inventory
+/// (0x10cda8); the caster's inventory is shown (0x111be0), `Msg::Success` and karma − 5. Then the
+/// panel goes back to the leader.
 pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
     let (caster, member) = caster_member(&state.borrow());
     if member {
@@ -276,13 +277,14 @@ pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
 
 /// Original: 0x119876 (magic: Enchant: a wand takes a spell from the caster's book)
 ///
-/// The leader's inventory in the panel (mode 0x92, 0x111c30), "On what: " and the target read
-/// unless chosen; its name or "nothing". Not a wand (0x4e): "No effect" (the original's test of
-/// a readied target never holds). A wand holding 10 objects: "It's full". Otherwise the caster's
-/// readied books (the second found or any later one as the second book) open (0x115da4,
-/// 0x116028, 0x116218, panel mode 0xa1), "With: " and one key; the caster flashes. Not a
-/// confirmed line: "none"; else the line's spell is spoken (its syllables) and the wand gets a
-/// spell object (0x150) of that quality (0x10cf7c). A newline ends it.
+/// The leader's inventory in the panel (mode 0x92, 0x111c30), `Msg::OnWhat` and the target read
+/// unless chosen; its name or `Msg::Nothing`. Not a wand (0x4e): `Msg::NoEffect` (the original's
+/// test of a readied target never holds). A wand holding 10 objects: the full line (0x115a48).
+/// Otherwise the caster's readied books (the second found or any later one as the second book) open
+/// (0x115da4, 0x116028, 0x116218, panel mode 0xa1), the wand prompt (0x115a54) and one key; the
+/// caster flashes. Not a confirmed line: the no-choice word (0x115a5c); else the line's spell is
+/// spoken (its syllables) and the wand gets a spell object (0x150) of that quality (0x10cf7c). A
+/// newline ends it.
 pub async fn enchant(state: &RefCell<State>, io: &Io, pre: i16) {
     state.borrow_mut().ui.panel.mode = 0x92;
     crate::ui::panels::inventory(state, io).await;
@@ -370,8 +372,8 @@ pub async fn enchant(state: &RefCell<State>, io: &Io, pre: i16) {
 
 /// Original: 0x119dbc (magic: Seance: talk with the dead)
 ///
-/// "On whom: " and the target read unless chosen; a newline; the caster flashes. Not a body
-/// (0x153, 0x162, 0x155, 0x154): "No effect". Else its name, and the leader talks with the
+/// `Msg::OnWhom` and the target read unless chosen; a newline; the caster flashes. Not a body
+/// (0x153, 0x162, 0x155, 0x154): `Msg::NoEffect`. Else its name, and the leader talks with the
 /// person the body's quality names (0x1125b8) with A4+0x1821 set around the conversation.
 pub async fn seance(state: &RefCell<State>, io: &Io, pre: i16) {
     say(state, io, FMT_S, Msg::OnWhom).await;
