@@ -19,7 +19,7 @@ pub const MAX_RECORDS: usize = 0xc00;
 const MODE_SAVE: u16 = 0x53;
 const MODE_FROZEN: u16 = 0x52;
 const MODE_GAME: u16 = 0x47;
-/// Image address of "Error-too many objects in region" (0x10a490 + 4) printed by 0x10d376.
+/// Image address of the region-full error line (0x10a490 + 4) printed by 0x10d376.
 const STR_TOO_MANY: u32 = 0x0010_a494;
 /// Distance (tiles) from the party beyond which 0x10c49c drops temporary objects.
 const KEEP: i16 = 0x14;

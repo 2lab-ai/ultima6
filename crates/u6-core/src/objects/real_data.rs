@@ -1,5 +1,6 @@
 //! Real data: the user's archive.org zip → u6-intake → `Files` → `State::new_game`, then the
-//! object code. Skips when the zip is absent; reads only, prints numbers and names only.
+//! object code. Skips when the zip is absent; reads only, prints slots and counts only (names
+//! and strings of the game by length).
 #![allow(clippy::disallowed_methods)] // the test reads the zip
 
 use std::collections::BTreeMap;
@@ -147,9 +148,11 @@ fn names_of_twenty_objects_near_the_party() {
     let mut s = loaded(&files);
     let at = s.leader_position().unwrap();
     load_region(&mut s, at.x, at.y, u16::from(at.z));
+    let d = &s.objects.defs;
+    let lengths: Vec<usize> = d.articles.iter().map(String::len).collect();
     println!(
-        "articles {:?}, count format {:?}",
-        s.objects.defs.articles, s.objects.defs.count_format
+        "article lengths {lengths:?}, count format length {}",
+        d.count_format.len()
     );
     // The first 10 visible stacks of more than one item (plurals) in list order, then visible
     // map objects from the party's row on.
@@ -191,9 +194,10 @@ fn names_of_twenty_objects_near_the_party() {
         );
         let got = described_name(&s, c);
         println!(
-            "slot {c:#05x} type {:#05x} frame {} count {count}: {got:?}",
+            "slot {c:#05x} type {:#05x} frame {} count {count}: name length {}",
             o.kind(c),
-            o.tf(c) >> 10
+            o.tf(c) >> 10,
+            got.len()
         );
         assert!(got.starts_with(&prefix));
         assert_eq!(got, want);

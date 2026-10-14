@@ -20,7 +20,7 @@ const S_CAMPFIRE: u32 = 0x0012_88c4;
 const S_CANDLE: u32 = 0x0012_88ce;
 const S_DOUSED: u32 = 0x0012_88d6;
 const S_LIT: u32 = 0x0012_88e4;
-/// Original: A4-0x756f ("A torch burned out.", data hunk)
+/// Original: A4-0x756f (the burned-out torch line, data hunk)
 const MSG_BURNED_OUT: i32 = -0x756f;
 const TORCH: u16 = 0x5a;
 /// The two hand slots of the equipment table (A4+0x1364, A4+0x136a).
@@ -33,13 +33,13 @@ fn panel_actor(s: &State) -> Slot {
 
 /// Original: 0x12c326 (objects: use torch `t`: light it in a free hand, or put it out)
 ///
-/// A lit torch (status 0x80) goes out of the world: "A torch burned out.". Both hands full:
-/// "No free hand to hold the torch.". From a stack one torch is split off (on the map a new
-/// map object with the stack's frame, carried a new readied torch of the member the panel
-/// shows) and the stack loses one. A carried torch is readied in the first free hand (the
-/// panel's sums redone, 0x11121e); then it is lit: status 0x80, frame 1, 200 turns of fuel,
-/// the light recomputed by a clock step (0x10368a(0)), "Torch is lit.". The inventory panel is
-/// redrawn when open (0x1118c6).
+/// A lit torch (status 0x80) goes out of the world with the burned-out line (A4-0x756f). Both
+/// hands full: the no-free-hand line (0x128874). From a stack one torch is split off (on the
+/// map a new map object with the stack's frame, carried a new readied torch of the member the
+/// panel shows) and the stack loses one. A carried torch is readied in the first free hand
+/// (the panel's sums redone, 0x11121e); then it is lit: status 0x80, frame 1, 200 turns of
+/// fuel, the light recomputed by a clock step (0x10368a(0)), the lit line (0x128896). The
+/// inventory panel is redrawn when open (0x1118c6).
 pub fn light_torch(s: &mut State, t: Slot) {
     let q = s.objects.qq_of(t) & 0xff;
     if s.objects.status(t) & 0x80 != 0 {
@@ -127,8 +127,9 @@ pub fn use_up_one(s: &mut State, obj: Slot) {
 /// Original: 0x12c594 (objects: light or douse fixture `obj`: candle 0x7a, candelabra 0x91,
 /// fireplace 0xa4, brazier 0xce, campfire 0xfd)
 ///
-/// A newline and the fixture's name, then: lit (frame bit 0) it keeps frame bit 1 only, " is
-/// doused."; else frame bit 0 is set, " is lit.". Another type prints no name.
+/// A newline and the fixture's name, then: lit (frame bit 0) it keeps frame bit 1 only, the
+/// doused ending (0x1288d6); else frame bit 0 is set, the lit ending (0x1288e4). Another type
+/// prints no name.
 pub fn douse_or_light(s: &mut State, obj: Slot) {
     let kind = s.objects.kind(obj);
     let frame = s.objects.tf(obj) >> 10;

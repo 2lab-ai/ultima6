@@ -156,7 +156,7 @@ fn a_chest_opens_and_spills_next_to_the_leader() {
 }
 
 /// Kept from usecmd's chest test at the integration: a trap inside (0x151, quality 0x16)
-/// springs instead of "opened!" and goes.
+/// springs instead of the opened line and goes.
 #[test]
 fn a_chests_trap_springs_instead_of_opened_and_goes() {
     let mut s = door_world();
@@ -175,7 +175,7 @@ fn a_chests_trap_springs_instead_of_opened_and_goes() {
     assert_eq!(s.objects.type_frame[trap as usize], 0, "the trap is gone");
     assert!(
         !queued(&s).contains(&tag(S_OPENED)),
-        "the trap springs instead of \"opened!\""
+        "the trap springs instead of the opened line"
     );
 }
 
@@ -463,7 +463,11 @@ fn name_prefixes_count_stacks_and_name_articles() {
         })
         .collect();
     assert_eq!(args, [PrintArg::Word(300), PrintArg::Word(7)]);
-    assert_eq!(queued(&s), ["#", "#", "n"], "flags3 0x80: \"an \"");
+    assert_eq!(
+        queued(&s),
+        ["#", "#", "n"],
+        "flags3 0x80: the second article"
+    );
 }
 
 #[test]
@@ -616,4 +620,151 @@ fn lock_picks_break_more_in_clumsy_hands_and_lights_toggle() {
     );
     assert!(in_type_list(&s, 0x77), "the 85th entry counts");
     assert!(!in_type_list(&s, 0x78));
+}
+
+// Merge-gate regressions (M2 review): each fails on the integration base 4ab938d.
+
+fn of_kind(s: &State, kind: u16) -> Vec<Slot> {
+    monsters(s)
+        .into_iter()
+        .filter(|&m| s.objects.kind(m) == kind)
+        .collect()
+}
+
+#[test]
+fn a_hydra_that_finds_no_tile_grows_no_heads() {
+    // The egg lies inside the view without status 0x20: every hatchling after the first must
+    // scatter out of view, and from (502, 500) no candidate tile is outside it, so the second
+    // hydra is removed. 0x1319b2 goes on to grow heads on the freed slot (0x131cfe-0x131d06
+    // fall through to 0x131d0e); the port ends that hatchling there.
+    let mut s = monster_world();
+    let egg = put(&mut s, 0x14f, 502, 500);
+    s.objects.qq[egg as usize] = 100;
+    s.objects.obj_status[egg as usize] = 0;
+    create_in(&mut s, 0x16d, 0x08, 0x0802, egg); // two hydras, worktype 8
+    hatch_egg(&mut s, egg);
+    let hydras = of_kind(&s, 0x16d);
+    let heads = of_kind(&s, 0x16e);
+    assert_eq!(
+        (hydras.len(), heads.len()),
+        (1, 4),
+        "one hydra with its four heads"
+    );
+    assert!(heads.iter().all(|&h| s.actors.worktype[h as usize] == 0xd));
+}
+
+#[test]
+fn removing_an_equipped_hatchling_keeps_the_eggs_next_template() {
+    // Template 1: two of type 0x168, which stands only on damaging tiles, so the second fails
+    // its scatter and is removed with its spell (0x10c1d6 walks the contents with 0x10ae52,
+    // the cursor the egg's template walk shares). Template 2, one winged gargoyle, must still
+    // hatch.
+    let mut s = monster_world();
+    let egg = put(&mut s, 0x14f, 520, 500);
+    s.objects.qq[egg as usize] = 100;
+    s.objects.obj_status[egg as usize] = 0x20;
+    create_in(&mut s, 0x16b, 0x08, 0x0801, egg); // linked second
+    create_in(&mut s, 0x168, 0x08, 0x0802, egg); // linked first
+    hatch_egg(&mut s, egg);
+    assert_eq!(
+        of_kind(&s, 0x168).len(),
+        1,
+        "the first stays, the second went"
+    );
+    assert_eq!(of_kind(&s, 0x16b).len(), 1, "the next template hatched");
+}
+
+#[test]
+fn search_stops_at_a_content_that_refuses_to_move() {
+    // A body may hold type 0x4c, which 0x10c9d2 always refuses; 0x129544 ignores the refusal
+    // (0x1297c4) and finds the same content again forever.
+    let (gem_place, fixed_place, out) = crate::objects::tests::returns("search", || {
+        let mut s = world();
+        let parts = tagged(&[
+            0x0012_8402,
+            0x0012_842c,
+            0x0012_8430,
+            0x0012_8436,
+            0x0012_8440,
+        ]);
+        with_data(&mut s, parts);
+        s.actors.party.size = 1;
+        s.actors.party.members[0] = 1;
+        s.objects.type_frame[1] = 0x19a;
+        s.objects.set_xyz(1, 500, 500, 0);
+        crate::main_loop::test_support::link_placed_objects(&mut s);
+        let body = put(&mut s, 0x63, 501, 500);
+        let fixed = create_in(&mut s, 0x4c, 0x08, 0, body);
+        let gem = create_in(&mut s, 0x4d, 0x08, 1, body); // first content, then the 0x4c
+        search(&mut s, body, 501, 500);
+        (s.objects.place(gem), s.objects.place(fixed), queued(&s))
+    });
+    assert_eq!(gem_place, 0, "the gem spilled onto the tile");
+    assert_ne!(fixed_place, 0, "the 0x4c stays inside");
+    assert_eq!(out.last().map(String::as_str), Some("<128440>"), "{out:?}");
+}
+
+#[test]
+fn a_dropped_stack_with_no_free_slot_marks_nothing() {
+    // 0x12a226 marks the new stack takeable without testing the -1 0x10bc4c gives when no
+    // slot is free (0x12a750-0x12a758); the port must not index with it.
+    let mut s = monster_world();
+    s.ui.panel.member = 0;
+    let stack = create_in(&mut s, 60, 0x10, 5, 1);
+    s.ui.input.target = (501, 500);
+    s.objects.free.1 = 0;
+    let mut e = crate::Engine::with_game(s, crate::Files::default(), move |st, io| async move {
+        let mut s = st.borrow_mut();
+        drop::land(&mut s, &io, stack, 1, -1, 60, 2, 2);
+    });
+    for _ in 0..8 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let s = e.state();
+    let made = (0x101..0xc00).filter(|&o| s.objects.kind(o) == 60 && s.objects.place(o) == 0);
+    assert_eq!(made.count(), 0, "nothing was created on the map");
+}
+
+#[test]
+fn takeable_marks_and_passthroughs_ignore_slot_none() {
+    let mut s = world();
+    let before = s.objects.clone();
+    crate::objects::mark_takeable(&mut s.objects, -1);
+    crate::objects::toggle_passthrough(&mut s, -1);
+    assert_eq!(s.objects, before);
+}
+
+#[test]
+fn dismounting_a_rear_half_without_its_rider_does_nothing() {
+    // A mounted-horse part in an object slot whose owner 0x1240fa cannot find comes back as
+    // itself (0x10a5b0 returns the part); 0x12f8fe would index its 256-entry actor tables
+    // with it.
+    let mut s = monster_world();
+    let rear = put(&mut s, 0x1af, 510, 500);
+    assert!(rear >= 0x100);
+    let before = s.objects.clone();
+    dismount(&mut s, rear);
+    assert_eq!(s.objects, before);
+}
+
+#[test]
+fn a_keg_on_a_cyclic_chain_does_not_go_off() {
+    // The keg and a bag each "inside" the other: 0x12db7e walks the holders to the map without
+    // a bound (0x12dbdc-0x12dc0a); the port leaves the keg alone.
+    let (kind, keg_status) = crate::objects::tests::returns("explode_keg", || {
+        let mut s = world();
+        let keg = put(&mut s, 0xdf, 7, 7);
+        let bag = put(&mut s, 0x63, 8, 8);
+        s.objects.obj_status[keg as usize] = 0x08;
+        s.objects.obj_status[bag as usize] = 0x08;
+        s.objects.set_parent(keg, bag);
+        s.objects.set_parent(bag, keg);
+        explode_keg(&mut s, keg);
+        (s.objects.kind(keg), s.objects.status(keg))
+    });
+    assert_eq!((kind, keg_status), (0xdf, 0x08), "the keg stays as it was");
 }

@@ -1,5 +1,6 @@
 //! Real data: the user's archive.org zip → u6-intake → `Files` → `State::new_game`, then the
-//! object commands. Skips when the zip is absent; reads only, prints numbers and names only.
+//! object commands. Skips when the zip is absent; reads only, prints slots and counts only (no
+//! game text: the scroll lines are shown by count and length).
 #![allow(clippy::disallowed_methods)] // the test reads the zip
 
 use std::cell::RefCell;
@@ -199,10 +200,8 @@ fn stand_at(s: &mut State, x: u16, y: u16) {
 }
 
 fn print_lines(what: &str, lines: &[String]) {
-    eprintln!("{what}:");
-    for l in lines {
-        eprintln!("   | {l}");
-    }
+    let lengths: Vec<usize> = lines.iter().map(String::len).collect();
+    eprintln!("{what}: {} scroll lines, lengths {lengths:?}", lines.len());
 }
 
 fn find(s: &State, kind: u16, dx: i16, dy: i16) -> Slot {
@@ -231,12 +230,12 @@ fn look_at_six_things_in_the_throne_room_and_the_kitchen() {
     let clock = find(&s0, 0x9f, -7, -2);
     let mut all = Vec::new();
     for (what, slot, at) in [
-        ("Lord British", 5, None),
-        ("a gargoyle", 0xe0, None),
-        ("the picture (a sign: book.dat)", picture, None),
-        ("a brazier", brazier, None),
-        ("the cleaver (weight, damage)", cleaver, Some((314, 355))),
-        ("the clock (time)", clock, Some((301, 350))),
+        ("actor 5", 5, None),
+        ("temporary actor 0xe0", 0xe0, None),
+        ("type 0x8f (a sign: book.dat)", picture, None),
+        ("type 0xce", brazier, None),
+        ("type 0x71 (weight, damage)", cleaver, Some((314, 355))),
+        ("type 0x9f (the time)", clock, Some((301, 350))),
     ] {
         let mut s = s0.clone();
         if let Some((x, y)) = at {
@@ -328,7 +327,7 @@ fn push_a_chair_and_open_a_door() {
     let push = Box::new(|st: Rc<RefCell<State>>, io: Rc<Io>| {
         Box::pin(async move { super::push(&st, &io).await }) as Pin<Box<dyn Future<Output = ()>>>
     });
-    // "To " then a direction: south.
+    // The direction prompt, then a direction: south.
     let (s, lines) = run(s, &files, &[InputEvent::Key(Key::Down)], push);
     print_lines("Move the chair south", &lines);
     eprintln!(

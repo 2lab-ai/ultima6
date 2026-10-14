@@ -1,6 +1,6 @@
-//! Move (0x12ae04): push an object or actor one tile on the map (0x12acc0, 0x115c06, 0x12adc4).
+//! Move (0x12ae04): push an object or actor one tile on the map (0x12acc0, 0x115c06).
 //! Moving a carried object to another member or container is the other half of 0x12ae04 and
-//! stays a stub point here.
+//! stays a stub point here; the outermost-holder helper it calls (0x12adc4) comes with it.
 
 use std::cell::RefCell;
 
@@ -40,17 +40,6 @@ fn leader(s: &State) -> Slot {
     Slot::from(p.members[usize::from(p.leader_index).min(15)])
 }
 
-/// Original: 0x12adc4 (objects: the outermost object holding `obj` (the one on the map))
-pub fn outermost(s: &State, obj: Slot) -> Slot {
-    let mut o = obj;
-    loop {
-        o = s.objects.parent(o);
-        if s.objects.place(o) == 0 {
-            return o;
-        }
-    }
-}
-
 /// Original: 0x12acc0 (objects: is the push of `obj` from (x, y) toward `dir` blocked)
 ///
 /// Not blocked when the object may stand on the tile ahead (0x11b1c0) or a surface is there
@@ -87,12 +76,14 @@ fn reset_pointer(s: &mut State) {
 
 /// Original: 0x12ae04 (objects: the Move command on the confirmed target) [partial]
 ///
-/// Nothing selected or the shown container: "nothing". The name. On the map: within one tile
-/// of the leader ("Out of range!"), the leader turns to it, "To " and a direction key (any
-/// other key: "nowhere."), the direction's name. A weightless thing or a dragon part: "Not
-/// possible". An actor resists (magic 0x115c06), and the leader or an actor lying down (frame & 3 =
-/// 3, not type 0x153) cannot be pushed: "Failed". Else 5 movement points, and it goes into a
-/// container ahead it fits in (weight below 0xff), or, unless blocked ("Blocked"; 0x12acc0),
+/// Nothing selected or the shown container: the nothing message (A4-0x6c58). The name. On the
+/// map: within one tile of the leader (else the out-of-range message, A4-0x6c60), the leader
+/// turns to it, the direction prompt (0x1285fe) and a direction key (any other key: the
+/// nowhere line, 0x128602), the direction's name. A weightless thing or a dragon part: the
+/// not-possible message. An actor resists (magic 0x115c06), and the leader or an actor lying
+/// down (frame & 3 = 3, not type 0x153) cannot be pushed: the failed message (A4-0x6c68). Else
+/// 5 movement points, and it goes into a container ahead it fits in (weight below 0xff), or,
+/// unless blocked (the blocked message, A4-0x6c5c; 0x12acc0),
 /// one tile on; a chair turns to face the push instead when it does not already. Carried
 /// objects (moving them to someone else) are a stub point.
 pub async fn push(state: &RefCell<State>, io: &Io) {
@@ -107,7 +98,8 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
     putc(state, io, b'\n').await;
     if state.borrow().objects.place(sel) != 0 {
         // Contract: move a carried object to another party member or into a container
-        // ("To whom", weight, "Can't carry!", container rules, spellbook / vortex cube).
+        // (the to-whom prompt, weight, the can't-carry line, container rules, spellbook /
+        // vortex cube).
         // Fallback: nothing moves, no movement points.
         todo_stub!("0x12ae04 Move a carried object to someone", ());
         let mut s = state.borrow_mut();

@@ -4,13 +4,13 @@ use super::seams;
 use super::text::queue_at;
 use crate::objects::iter::{begin_at, next_at};
 use crate::objects::moves::{create_from_record, move_to, remove};
-use crate::objects::{Slot, actor_frame, pack_xyz, spawn_monster};
+use crate::objects::{ACTOR_SLOTS, Slot, actor_frame, pack_xyz, spawn_monster};
 use crate::state::State;
 
 /// The mounted horse (front and rear halves) and the free horse a dismount leaves.
 const MOUNTED: u16 = 0x1af;
 const HORSE: u16 = 0x1ae;
-/// "\nRear horse???\n", "\nNo room!\n" (hunk 16).
+/// The two lines a dismount may print: no rear half, no room for the horse (hunk 16).
 const S_REAR_HORSE: u32 = 0x0012_ce32;
 const S_NO_ROOM: u32 = 0x0012_cbd4;
 
@@ -56,16 +56,19 @@ pub fn mount_horse(s: &mut State, rider: Slot, x: u16, y: u16, frame: u16, here:
 /// Original: 0x12f8fe (objects: `rider` gets off its horse)
 ///
 /// The rider (the actor of a horse part, combat 0x1240fa) takes back its base type with the
-/// frame of its facing (0x10a4d6); the rear half behind it goes ("Rear horse???" when there is
-/// none). A new horse (0x1ae, 0x131646, made at 0, 0) is placed on the first tile around the
-/// rider it may stand on (0x11b1c0; columns, then rows), else "No room!" and it is removed.
+/// frame of its facing (0x10a4d6); the rear half behind it goes (the 0x12ce32 line when there
+/// is none). A new horse (0x1ae, 0x131646, made at 0, 0) is placed on the first tile around the
+/// rider it may stand on (0x11b1c0; columns, then rows), else the 0x12cbd4 line and it is
+/// removed.
 ///
-/// Port guards (kept from usecmd's copy at the integration): no rider (-1) does nothing, and a
-/// horse the spawn could not make (-1, no free temporary slot) is not tried on any tile, so
-/// "No room!" follows; the original would index its tables with -1.
+/// Port guards (the first two kept from usecmd's copy at the integration): no rider (-1) does
+/// nothing; a horse the spawn could not make (-1, no free temporary slot) is not tried on any
+/// tile, so the no-room line follows, where the original would index its tables with -1; and a
+/// part 0x1240fa finds no actor for (it gives back the part's own object slot, 0x100 and up)
+/// does nothing, where 0x12f8fe would read its 256-entry actor tables past their end.
 pub fn dismount(s: &mut State, rider: Slot) {
     let rider = seams::rider(s, rider);
-    if rider < 0 {
+    if !(0..ACTOR_SLOTS as Slot).contains(&rider) {
         return;
     }
     let (x, y) = (s.objects.x(rider), s.objects.y(rider));

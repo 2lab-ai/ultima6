@@ -36,7 +36,7 @@ const S_MAGIC_LOCKED: u32 = 0x0012_882a;
 const S_OPENED: u32 = 0x0012_883e;
 const S_UNLOCKED: u32 = 0x0012_8848;
 const S_LOCKED_PLAIN: u32 = 0x0012_8854;
-/// Original: A4-0x6c64 (pointer to "No effect" in the message table at A4-0x6c6c)
+/// Original: A4-0x6c64 (pointer to the no-effect message in the message table at A4-0x6c6c)
 pub(super) const P_NO_EFFECT: i32 = -0x6c64;
 
 /// The trap object (type 0x151, quality 0x16) a container may hold.
@@ -60,7 +60,7 @@ fn line(s: &mut State, addr: u32) {
     queue_at(s, addr, Vec::new());
 }
 
-/// `printf("%s\n", A4-0x6c64)`: "No effect".
+/// `printf("%s\n", A4-0x6c64)`: the no-effect message.
 fn no_effect(s: &mut State) {
     let msg = s.objcmds.data.pointed(super::GameData::a4(P_NO_EFFECT));
     queue_at(s, S_LINE, vec![PrintArg::Str(msg)]);
@@ -72,12 +72,13 @@ fn leader_z(s: &State) -> u16 {
 
 /// Original: 0x12bbc0 (objects: open, close, lock or unlock door `door`)
 ///
-/// A newline, then by the door's frame: 0..3 open (closes it, "closed!", unless a key or spell
-/// is given: "Can't (Un)lock an opened door"), 4..7 closed (`key`: "locked!", `lock` (the lock
-/// spell): "magically locked!", else it opens: "opened!", or its trap (0x151 quality 0x16)
-/// springs), 8..11 locked (`key` unlocks, `lock` locks magically, else "locked"), 12.. magically
-/// locked (only `unlock`, the spell, opens it). The frame changes by xor so the door keeps its
-/// half (bits 0-1).
+/// A newline, then by the door's frame: 0..3 open (closes it, the closed line, unless a key or
+/// spell is given: the open-door line 0x128800), 4..7 closed (`key`: the locked line, `lock`
+/// (the lock spell): the magically-locked line, else it opens: the opened line, or its trap
+/// (0x151 quality 0x16) springs), 8..11 locked (`key` unlocks, `lock` locks magically, else
+/// the plain locked line 0x128854), 12.. magically locked (only `unlock`, the spell, opens it).
+/// The frame changes by xor so the door keeps its half (bits 0-1). The lines are the S_*
+/// strings of hunk 15 above.
 pub fn door(s: &mut State, door: Slot, key: bool, lock: bool, unlock: bool) {
     queue(s, b"\n".to_vec(), Vec::new());
     let f = frame(s, door);
@@ -130,11 +131,12 @@ pub fn door(s: &mut State, door: Slot, key: bool, lock: bool, unlock: bool) {
 
 /// Original: 0x12bdfa (objects: open, close, lock or unlock chest `chest`)
 ///
-/// A newline, then by frame: 0 open (closes, "closed!"; a key or spell: "No effect"), 1 closed
-/// (opens: "opened!" or its trap springs, then its contents spill (0x129544); `key` locks,
-/// `lock` locks magically, `unlock`: "No effect"), 2 locked (`key` unlocks to 1, `lock` to 3,
-/// else "No effect"), 3 magically locked (`unlock` opens it to 1, else "No effect"). A chest in
-/// a container or inventory redraws its panel (0x1118c6).
+/// A newline, then by frame: 0 open (closes, the closed line; a key or spell: no effect), 1
+/// closed (opens: the opened line or its trap springs, then its contents spill (0x129544);
+/// `key` locks, `lock` locks magically, `unlock`: no effect), 2 locked (`key` unlocks to 1,
+/// `lock` to 3, else no effect), 3 magically locked (`unlock` opens it to 1, else no effect).
+/// No effect = the A4-0x6c64 message. A chest in a container or inventory redraws its panel
+/// (0x1118c6).
 pub fn chest(s: &mut State, chest: Slot, key: bool, lock: bool, unlock: bool) {
     queue(s, b"\n".to_vec(), Vec::new());
     match frame(s, chest) {
@@ -236,11 +238,14 @@ fn flags1(s: &State, tile: u16) -> u8 {
 /// spill what the object holds onto its tile)
 ///
 /// Only within one tile of the leader, for a non-actor whose tile has no flags1 bit 3 and that
-/// is not type 0x39. Prints "Searching here, you find ", then: a closed secret door (0x14e,
-/// frame bit 0 clear) opens ("a secret door"); else (past a cover, flags3 bit 4, to the object
-/// below it, 0x12948a) unless it is a closed container (0x129438), every object inside but
-/// spells and traps moves to the object's tile with the leader re-placed on top, the view
-/// refreshed after each, and is named ("a, b and c"); "nothing." when none.
+/// is not type 0x39. Prints the search lead-in (0x128402), then: a closed secret door (0x14e,
+/// frame bit 0 clear) opens (named by 0x12841e); else (past a cover, flags3 bit 4, to the
+/// object below it, 0x12948a) unless it is a closed container (0x129438), every object inside
+/// but spells and traps moves to the object's tile with the leader re-placed on top, the view
+/// refreshed after each, and is named, the names joined by the comma (0x12842c) and the last
+/// by the and (0x128430); the full stop (0x128440) ends it, the nothing line (0x128436) when
+/// none. Port: a content that refuses the move (type 0x4c) ends the spill, where the original
+/// finds it again forever.
 pub fn search(s: &mut State, obj: Slot, x: u16, y: u16) {
     let leader =
         Slot::from(s.actors.party.members[usize::from(s.actors.party.leader_index).min(15)]);
@@ -282,7 +287,12 @@ pub fn search(s: &mut State, obj: Slot, x: u16, y: u16) {
                 }
                 let z = leader_z(s);
                 let (ox, oy) = (s.objects.x(obj), s.objects.y(obj));
-                move_to(s, c, ox, oy, z);
+                // A content that refuses to move (type 0x4c, which a body may hold) would be
+                // found again: the original ignores the result (0x1297c4) and loops forever
+                // naming it; the port ends the spill there.
+                if move_to(s, c, ox, oy, z) < 0 {
+                    break;
+                }
                 move_to(s, leader, lx, ly, z);
                 refresh(s);
                 let mut d = first_child(&mut s.objects, obj);
@@ -311,8 +321,8 @@ fn refresh(s: &mut State) {
     crate::engine::with_current_io(|io| crate::gfx::refresh_view(s, io));
 }
 
-/// Original: 0x12904c (objects: print the article of `tile` from flags3 bits 6-7: "a ", "an ",
-/// "the " or nothing)
+/// Original: 0x12904c (objects: print the article of `tile` from flags3 bits 6-7: one of the
+/// three article strings 0x1283e2 / 0x1283e6 / 0x1283ea, or nothing)
 pub fn article(s: &mut State, tile: u16) {
     let at = match flags3(s, tile) & 0xc0 {
         0x40 => S_A,
@@ -407,7 +417,7 @@ pub fn spring_trap(s: &mut State, obj: Slot) {
     }
 }
 
-/// "\nThe door is blown up!\n" (hunk 16).
+/// The blown-up-door line (hunk 16).
 const S_DOOR_BLOWN: u32 = 0x0012_ca12;
 /// Powder keg and the four door types 0x12d9ee tries, in its order.
 const KEG: u16 = 0xdf;
@@ -421,7 +431,7 @@ const KEG_BLAST: u16 = 0x189;
 /// Columns x − 2..=x + 2, rows y − 2..y + 2 (the last row is not reached), on the leader's
 /// level: a keg there takes frame 1, the view is refreshed and it explodes (0x12db7e). Then the
 /// door of the first type of 0x12c, 0x129, 0x12a, 0x12b found that is not magically locked
-/// (frame & 0xc ≠ 0xc) is removed, the view refreshed, "The door is blown up!".
+/// (frame & 0xc ≠ 0xc) is removed, the view refreshed, the blown-up-door line (0x12ca12).
 pub fn blast_doors(s: &mut State, x: u16, y: u16) {
     let mut cx = (x as i16).wrapping_sub(2);
     while cx <= (x as i16).wrapping_add(2) {
@@ -455,14 +465,17 @@ pub fn blast_doors(s: &mut State, x: u16, y: u16) {
 
 /// Original: 0x12db7e (objects: explode powder keg `keg`)
 ///
-/// The blast is where the keg lies, or where the outermost object holding it lies. The keg is
+/// The blast is where the keg lies, or where the outermost object holding it lies (a keg whose
+/// holders never reach the map does nothing: port bound, see the body). The keg is
 /// removed, the explosion (tile 0x189, ui 0x1331b4) hurts everything it reaches that is not a
 /// counted stack (0x10cef2 kind 0) by 1..=60 (combat 0x1231be), then the doors and kegs around
 /// go (0x12d9ee) and the view is refreshed.
 pub fn explode_keg(s: &mut State, keg: Slot) {
-    let mut at = keg;
-    while s.objects.place(at) != 0 {
-        at = s.objects.parent(at);
+    // The original climbs to the map with no bound (0x12dbdc-0x12dc0a); a keg whose holders
+    // never reach it stays as it is.
+    let at = s.objects.map_holder(keg);
+    if at < 0 {
+        return;
     }
     let (x, y) = (s.objects.x(at), s.objects.y(at));
     remove(s, keg);

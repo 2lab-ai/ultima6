@@ -204,16 +204,20 @@ pub fn move_into(s: &mut State, slot: Slot, owner: Slot, place: u8) -> Slot {
 ///
 /// The body's quality byte is an actor number. The actor moves to the map tile of the body
 /// (or of whatever holds it), takes the body's contents (type 0x4c readied, the rest into its
-/// inventory; type 0x4c allowed meanwhile) and the body is removed. Returns the actor.
+/// inventory; type 0x4c allowed meanwhile) and the body is removed. Returns the actor; -1 for
+/// slot -1 or a body whose holders never reach the map (port bound, nothing changes).
 pub fn actor_from_body(s: &mut State, body: Slot) -> Slot {
     if body < 0 {
         return NONE;
     }
     s.objects.allow_type_4c = 1;
     let actor = (s.objects.qq_of(body) >> 8) as Slot;
-    let mut root = body;
-    while s.objects.place(root) != 0 {
-        root = s.objects.parent(root);
+    // The original climbs to the map with no bound (0x10c838-0x10c868); a body whose holders
+    // never reach it raises nobody here.
+    let root = s.objects.map_holder(body);
+    if root < 0 {
+        s.objects.allow_type_4c = 0;
+        return NONE;
     }
     let (x, y, z) = (s.objects.x(root), s.objects.y(root), s.objects.z(root));
     move_to(s, actor, x, y, u16::from(z));
