@@ -105,3 +105,47 @@ pub(crate) fn distance(s: &State, a: u16, x: u16, y: u16) -> i16 {
     let dy = (s.objects.y(slot).wrapping_sub(y) as i16).wrapping_abs();
     dx.max(dy)
 }
+
+/// Owner: ui (hunk 8). Original 0x1118c6 (redraw the inventory panel after a carried object
+/// changed). Fallback: the panel is marked for the next 0x103f64 redraw instead.
+pub(crate) fn redraw_inventory(s: &mut State) {
+    todo_stub!("0x1118c6 redraw the inventory panel", ());
+    s.ui.panel.dirty = true;
+}
+
+/// Owner: combat (hunk 13). Original 0x1231be (hurt actor `a` by `damage`: hit points, death,
+/// splitting slimes). Fallback: nothing (no damage).
+pub(crate) fn hurt(_s: &mut State, _a: Slot, _damage: i16) {
+    todo_stub!("0x1231be hurt an actor", ())
+}
+
+/// Owner: combat (hunk 13). Original 0x12395a (print actor `a`'s wound level: "critical!",
+/// "heavily wounded" ...). Fallback: nothing printed.
+pub(crate) fn wound_text(_s: &mut State, _a: Slot) {
+    todo_stub!("0x12395a print the wound level", ())
+}
+
+/// Owner: combat (hunk 13). Original 0x1230ce (flash actor `a` hit: redraw with the hit
+/// colour). Fallback: nothing.
+pub(crate) fn flash(_s: &mut State, _a: Slot) {
+    todo_stub!("0x1230ce flash a hit actor", ())
+}
+
+/// Owner: ui (hunk 18). Original 0x1331b4 (explosion of `tile` around (x, y): animate it and
+/// return the slots it reached, -1-terminated in the original). Fallback: nobody reached.
+pub(crate) fn blast(_s: &mut State, _x: u16, _y: u16, _tile: u16) -> Vec<Slot> {
+    todo_stub!("0x1331b4 explosion animation and its victims", Vec::new())
+}
+
+/// Owner: magic (hunk 11). Original 0x116526 (the object of `kind` and `quality` that `owner`
+/// carries, -1). Fallback: the first direct child of that kind and quality (0x10b18c).
+pub(crate) fn carried(s: &mut State, owner: Slot, kind: u16, quality: i16) -> Slot {
+    todo_stub!("0x116526 object of a kind an actor carries", ());
+    crate::objects::find_child(&mut s.objects, owner, kind as i16, quality)
+}
+
+/// Owner: combat (hunk 13). Original 0x1240fa (the actor a horse or monster part `obj`
+/// belongs to; `obj` itself for an actor). Fallback: `obj` (the rider passed is the actor).
+pub(crate) fn rider(_s: &State, obj: Slot) -> Slot {
+    todo_stub!("0x1240fa actor of a part", obj)
+}

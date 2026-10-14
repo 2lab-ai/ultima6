@@ -149,60 +149,7 @@ pub async fn show_actor(_state: &RefCell<State>, _io: &Io, _actor: Slot) {
     todo_stub!("0x128ce8 show an actor's portrait, equipment and name", ())
 }
 
-/// Stub of 0x12ba36 (objects: spring a trap: acid, poison, bomb or gas)
-///
-/// Stub contract: one RNG draw 0..=3 picks the effect, damages or poisons the actor and those in
-/// the blast (combat 0x1231be / 0x1230ce, ui animation 0x1331b4), then removes the trap. Fallback:
-/// the trap is removed without effect and no RNG draw is made. Not reached by the M1 scenarios.
-pub fn spring_trap(s: &mut State, trap: Slot) {
-    todo_stub!("0x12ba36 trap effects (acid, poison, bomb, gas)", ());
-    super::moves::remove(s, trap);
-}
+pub use super::commands::{blast_doors, explode_keg, spring_trap};
 
-/// Stub of 0x12db7e (objects: explode a powder keg)
-///
-/// Stub contract: removes the keg, damages the actors in the blast (ui 0x1331b4, combat
-/// 0x1231be), chains to 0x12d9ee and refreshes the view. Fallback: the keg is removed only. Not
-/// reached by the M1 scenarios.
-pub fn explode_keg(s: &mut State, keg: Slot) {
-    todo_stub!("0x12db7e explode a powder keg", ());
-    super::moves::remove(s, keg);
-}
-
-/// Stub of 0x12d9ee (objects: blow up kegs and doors around (x, y))
-///
-/// Stub contract: lights kegs (0xdf) and removes closed doors (0x12c / 0x129 / 0x12a / 0x12b)
-/// in x − 2..=x + 2, y − 2..y + 2, printing "The door is blown up!". Fallback: nothing. Not
-/// reached by the M1 scenarios.
-pub fn blast_doors(_s: &mut State, _x: u16, _y: u16) {
-    todo_stub!("0x12d9ee blow up kegs and doors around a tile", ())
-}
-
-/// Stub of 0x12f6ee (objects: mount / place a horse)
-///
-/// Stub contract: moves the rider, sets its type to the mounted horse (0x1af) and places or
-/// re-types the horse object, then rebuilds the tile cache and refreshes. Fallback: nothing.
-/// Not reached by the M1 scenarios (no Use command).
-pub fn mount_horse(_s: &mut State, _rider: Slot, _x: u16, _y: u16, _frame: u16, _here: u16) {
-    todo_stub!("0x12f6ee mount a horse", ())
-}
-
-/// Stub of 0x12f8fe (objects: dismount: put the horse next to the rider, "No room!")
-///
-/// Stub contract: restores the rider's base type, removes the mounted-horse object and places a
-/// horse on a free neighbouring tile (0x11b1c0), else prints "No room!". Fallback: nothing. Not
-/// reached by the M1 scenarios.
-pub fn dismount(_s: &mut State) {
-    todo_stub!("0x12f8fe dismount a horse", ())
-}
-
-/// Stub of 0x128b98 (objects: parse a typed number or direction answer)
-///
-/// Stub contract: digits give a number; with `mode` 1 a trailing N / S (2: E / W) gives the
-/// sign, any other letter 100; mode 0 with no digits gives -1 or, with A4-0x7a44 set, the value
-/// read so far. Fallback -2 ("no answer"). Reached only from Use handlers (not M1).
-pub fn parse_answer(_text: &str, _mode: i16) -> i16 {
-    todo_stub!("0x128b98 parse a typed number or direction", -2)
-}
-
+pub use super::commands::{dismount, mount_horse, parse_answer};
 pub use super::commands::{equip_monster, hatch_egg, spawn_monster};

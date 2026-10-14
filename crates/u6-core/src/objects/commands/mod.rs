@@ -9,12 +9,16 @@
 //! more prompt, and Drop / Move read keys); the world helpers on the walk path (egg hatching
 //! 0x1319b2 and the monster spawn 0x131646 / 0x13121a) are synchronous and queue their text.
 //!
-//! Submodules: `data` (the image), `eggs`, `seams` (calls into modules not ported yet).
+//! Submodules: `data` (the image), `text` (output), `eggs`, `world` (doors, chests, search,
+//! traps, kegs), `horse` (horses, the answer parser), `seams` (calls into modules not ported
+//! yet).
 
 mod data;
 mod eggs;
+mod horse;
 mod seams;
 mod text;
+mod world;
 
 #[cfg(test)]
 mod real_data;
@@ -23,6 +27,11 @@ mod tests;
 
 pub use data::GameData;
 pub use eggs::{equip_monster, hatch_egg, spawn_monster};
+pub use horse::{dismount, mount_horse, parse_answer};
+pub use world::{
+    article, blast_doors, chest, door, explode_keg, is_closed_container, name_prefix, object_under,
+    search, spring_trap,
+};
 
 use crate::files::Files;
 
