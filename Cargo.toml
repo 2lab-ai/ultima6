@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/u6-core", "crates/u6-render", "crates/u6-native", "crates/u6-web"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.96"
+publish = false
+
+[workspace.dependencies]
+u6-core = { path = "crates/u6-core" }
+u6-render = { path = "crates/u6-render" }

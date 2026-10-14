@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ultima VI (Rust port)</title>
+  <style>
+    :root { color-scheme: dark; }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #0b0b0f;
+      color: #e6e6eb;
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main {
+      max-width: 992px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 12px; }
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      aspect-ratio: 320 / 200;
+      background: #000;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+    #drop {
+      margin-top: 16px;
+      padding: 16px;
+      border: 2px dashed #555a66;
+      border-radius: 8px;
+      overflow-wrap: anywhere;
+    }
+    #drop.over { border-color: #9ab8ff; background: #141a2a; }
+    #drop p { margin: 0 0 12px; }
+    input[type="file"] { max-width: 100%; color: inherit; }
+    #status { margin: 12px 0 0; min-height: 1.5em; color: #b9c3d6; }
+    .hint { color: #9a9aa6; font-size: 0.875rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Ultima VI (Rust port)</h1>
+    <canvas id="screen" width="320" height="200"
+            aria-label="Game screen. Arrow keys move."></canvas>
+    <section id="drop" aria-labelledby="drop-title">
+      <p id="drop-title">
+        Drop your Ultima VI files: the archive.org zip, the three ADFs, or the
+        extracted files &mdash; nothing is uploaded.
+      </p>
+      <label for="picker">Or choose files:</label>
+      <input id="picker" type="file" multiple>
+      <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
+    </section>
+    <p class="hint">Arrow keys move the marker. The game data stays in your browser.</p>
+    <noscript><p>This page needs JavaScript and WebAssembly.</p></noscript>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
