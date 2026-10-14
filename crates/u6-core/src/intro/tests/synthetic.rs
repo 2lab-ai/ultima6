@@ -26,7 +26,7 @@ fn exe() -> UExe {
 
 /// A keyboard with the printable characters on raw keys (plain column), the named keys on
 /// their hardware codes, and C type bits.
-fn keyboard(st: &mut IntroState) {
+pub(super) fn keyboard(st: &mut IntroState) {
     let mut table = vec![[0u16; 4]; 0x60];
     for (row, c) in (0x21..0x61u16).enumerate() {
         table[row][0] = c;
@@ -63,7 +63,12 @@ fn keyboard(st: &mut IntroState) {
 
 /// A font of 4×8 glyphs, column 0 ink and the rest paper; space is all paper and NUL has no
 /// width (as in `u6.set`).
-fn font() -> WouFont {
+pub(super) fn font() -> WouFont {
+    WouFont::parse(&font_bytes()).unwrap()
+}
+
+/// The bytes of [`font`] (a `u6.set` before its U6-LZW).
+pub(super) fn font_bytes() -> Vec<u8> {
     let mut raw = vec![0u8; 0x304 + 64];
     raw[0] = 8;
     raw[2] = 0xf;
@@ -77,7 +82,7 @@ fn font() -> WouFont {
     for r in 0..8 {
         raw[0x304 + r * 4] = 0xf;
     }
-    WouFont::parse(&raw).unwrap()
+    raw
 }
 
 fn state() -> IntroState {
@@ -891,4 +896,77 @@ fn a_negative_question_word_reads_before_the_answer_table() {
         (near, far)
     });
     assert_eq!(got, Some((5, 0)), "the low three bits of 0xd, then 0");
+}
+
+#[test]
+fn a_shimmer_down_to_row_0xffff_ends_after_that_row() {
+    // Rows are unsigned words (`bhi` at 0x105a30): with the bottom row 0xffff (a `u` whose
+    // A4+0x414 is 0x7f80) the original's `addq.w` wraps back to row 0 and never ends. Two rows,
+    // 0xfffe and 0xffff, of one byte column: 16 noise words.
+    let noise = returns(|| {
+        let mut st = state();
+        st.views.shimmer = View {
+            planes: Ptr::at(Region::Screen0),
+            x1: 7,
+            x0: 0,
+            y0: -2,
+            y1: -1,
+        };
+        gypsy::shimmer(&mut st);
+        st.noise
+    });
+    let mut by_hand = state();
+    for _ in 0..16 {
+        by_hand.noise_word();
+    }
+    assert_eq!(noise, by_hand.noise, "two rows of eight pixels");
+}
+
+#[test]
+fn a_view_as_wide_as_a_word_allows_fills_and_copies_only_the_bitmap() {
+    // A case of a foreign `u` lays out views from its own words: the width is a word sum
+    // (`sub.w` / `addq.w` at 0x10f8a8, 0x1155b6) that can wrap, and a view 0x7fff wide and
+    // high changes no more than the 320 × 200 bitmap.
+    let s0 = Ptr::at(Region::Screen0);
+    let whole = View {
+        planes: s0,
+        x1: i16::MAX,
+        x0: i16::MIN,
+        y0: 0,
+        y1: 0,
+    };
+    assert_eq!(whole.width(), 0);
+    let wide = View {
+        x1: 0x7ffe,
+        x0: 0,
+        y0: 0,
+        y1: 0x7ffe,
+        ..whole
+    };
+    let chip = returns(move || {
+        let mut chip = Chip::new();
+        mem::fill_view(&mut chip, &wide, 7);
+        let other = View {
+            planes: Ptr::at(Region::Screen1),
+            ..wide
+        };
+        mem::copy_view(&mut chip, &wide, &other);
+        chip
+    });
+    for (x, y) in [(0, 0), (319, 199)] {
+        assert_eq!(chip.pixel(s0, x, y), 7);
+        assert_eq!(chip.pixel(Ptr::at(Region::Screen1), x, y), 7);
+    }
+}
+
+#[test]
+fn caps_lock_on_a_code_below_0x20_marked_lower_case_wraps_like_the_word_sum() {
+    // A foreign `u` whose key table gives raw key 0x10 the code 5 and whose C type table marks
+    // 5 lower case: with caps lock 0x115030 subtracts 0x20 as a word.
+    let mut e = exe();
+    e.poke(A4 + 0x13e5 + 4 * 0x10, &[5]);
+    e.poke(A4 + 0x1611 + 5, &[2]);
+    let mut keys = input::Keyboard::new(&e);
+    assert_eq!(keys.map_raw(0x62), 0, "caps lock down");
+    assert_eq!(keys.map_raw(0x10), 0xffe5);
 }

@@ -518,7 +518,8 @@ async fn wagon(st: &mut IntroState, io: &Io) {
     }
     st.gypsy.shimmer_on = 0;
     st.gypsy.pours = 0;
-    let top = 0x7f + st.exe.a4_i16(0x414);
+    // A word sum (`add.w` at 0x106b3e).
+    let top = st.exe.a4_i16(0x414).wrapping_add(0x7f);
     st.views.shimmer = View {
         planes: st.views.draw.planes,
         x1: 0xac,

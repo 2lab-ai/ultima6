@@ -107,7 +107,9 @@ impl Keyboard {
         };
         let t = self.ctype.get(usize::from(code)).copied().unwrap_or(0);
         if q.caps && t & 3 != 0 && t & 2 != 0 {
-            return code - 0x20;
+            // A word sum (`subi.w` at 0x115030): a code below 0x20 the C type table marks
+            // lower case wraps.
+            return code.wrapping_sub(0x20);
         }
         code
     }

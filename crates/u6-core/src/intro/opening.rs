@@ -94,10 +94,21 @@ fn next_byte(st: &mut IntroState) -> u8 {
 pub fn draw_frame(st: &mut IntroState, n: i16) {
     st.views.tv.planes = st.views.screen.planes;
     let i = n as usize;
-    let x = st.views.tv.x0 + st.tv.dx.get(i).copied().unwrap_or(0) - st.tv.shift;
-    let y = st.views.tv.y0 + st.tv.dy.get(i).copied().unwrap_or(0);
+    // Word sums (`add.w` / `sub.w` / `addi.w` at 0x103980..0x103996).
+    let x = st
+        .views
+        .tv
+        .x0
+        .wrapping_add(st.tv.dx.get(i).copied().unwrap_or(0))
+        .wrapping_sub(st.tv.shift);
+    let y = st
+        .views
+        .tv
+        .y0
+        .wrapping_add(st.tv.dy.get(i).copied().unwrap_or(0));
     let v = st.views.tv;
-    mem::draw_item(&mut st.video.chip, &v, x, y, st.tv.file, (n + 0x10) as u16);
+    let item = n.wrapping_add(0x10) as u16;
+    mem::draw_item(&mut st.video.chip, &v, x, y, st.tv.file, item);
 }
 
 /// Original: u 0x103830 (opening: TV static: random bytes in planes 0..3 of the TV rectangle of
@@ -157,14 +168,15 @@ pub fn tv_step(st: &mut IntroState) {
                     done = true;
                 }
                 0x83 => {
+                    // Word sums (`subq.w` / `sub.w` at 0x103ab2..0x103ad2).
                     let f = st.tv.flicker;
-                    st.tv.flicker -= 1;
+                    st.tv.flicker = f.wrapping_sub(1);
                     if f == 0 {
                         st.tv.flicker = 0xe;
                     }
-                    st.tv.dy[0x22] = 0x15 - st.tv.flicker;
+                    st.tv.dy[0x22] = 0x15_i16.wrapping_sub(st.tv.flicker);
                     draw_frame(st, 0x22);
-                    st.tv.dy[0x22] = 0x24 - st.tv.flicker;
+                    st.tv.dy[0x22] = 0x24_i16.wrapping_sub(st.tv.flicker);
                     draw_frame(st, 0x22);
                     st.tv.frame = 0x21;
                 }
@@ -195,7 +207,7 @@ pub fn tv_step(st: &mut IntroState) {
                     st.tv.picked = st.exe.a4_i16(0xd4 + 2 * i as u32);
                 }
                 0x88 => {
-                    st.tv.blink = (st.tv.blink + 1) & 0xff;
+                    st.tv.blink = st.tv.blink.wrapping_add(1) & 0xff;
                     if st.tv.blink & 4 != 0 {
                         st.tv.frame = ((st.tv.blink & 0x10) >> 4) + 0x25;
                     }

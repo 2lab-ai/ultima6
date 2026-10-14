@@ -128,17 +128,19 @@ pub async fn credits(st: &mut IntroState, io: &Io) {
     st.text.y = title_box.y0;
     st.text.align = 2;
     print(st, true, TITLE, &[]);
+    // The cursor is wherever the title string left it; word sums (`add.w` / `addq.w` at
+    // 0x10722a..0x10728a).
     let y = st.text.y;
     let rule = View {
-        y0: y + 9,
-        y1: y + 9,
+        y0: y.wrapping_add(9),
+        y1: y.wrapping_add(9),
         ..title_box
     };
     mem::fill_view(&mut st.video.chip, &rule, 0);
-    title_box.y0 = y + 0xe;
+    title_box.y0 = y.wrapping_add(0xe);
     st.views.draw.planes = st.views.screen.planes;
     clear_box(st, title_box);
-    st.text.y += 1;
+    st.text.y = st.text.y.wrapping_add(1);
     for step in PAGES {
         match *step {
             Step::New(a, args) => print(st, true, a, args),
