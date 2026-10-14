@@ -142,13 +142,11 @@ pub fn draw_char(
     }
 }
 
-/// Fills the inclusive pixel rectangle with `colour` (0x1521f4 after 0x152176 selects the
-/// colour; both belong to `gfx/` — local stand-in, see `seams.rs`).
+/// Fills the inclusive pixel rectangle with `colour`: 0x152176 selects the colour, 0x1521f4
+/// fills (on the screen, set mode; [`crate::gfx::blit::fill_rect`]).
 pub fn fill_rect(fb: &mut Framebuffer, x0: i32, y0: i32, x1: i32, y1: i32, colour: u8) {
-    let (xa, xb) = (x0.min(x1), x0.max(x1));
-    let (ya, yb) = (y0.min(y1), y0.max(y1));
-    let (w, h) = ((xb - xa + 1) as usize, (yb - ya + 1) as usize);
-    fb.blit(xa, ya, w, h, &vec![colour; w * h], None);
+    let w = |v: i32| v as u16;
+    crate::gfx::blit::fill_colour(fb, w(x0), w(y0), w(x1), w(y1), colour);
 }
 
 /// Original: 0x1522d6 (graphics: move a byte-aligned screen rectangle up by `-dy` pixel rows)

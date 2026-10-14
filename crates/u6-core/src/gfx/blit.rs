@@ -127,18 +127,48 @@ pub fn set_plot_colour(gfx: &mut GfxState, colour: u16) {
 /// when [`GfxState::plot_back`] (0x155577) is set; the caller passes that buffer as `fb`. A colour
 /// above 15 would index past both tables; the port then plots nothing.
 pub fn plot(gfx: &GfxState, fb: &mut Framebuffer, x: u16, y: u16) {
+    plot_in(fb, x, y, gfx.plot_colour, gfx.plot_xor);
+}
+
+/// [`plot`] with the colour and the mode given.
+fn plot_in(fb: &mut Framebuffer, x: u16, y: u16, colour: u16, xor: bool) {
     let Some(row) = row_base(y) else { return };
-    let Ok(colour) = u8::try_from(gfx.plot_colour) else {
+    let Ok(colour) = u8::try_from(colour) else {
         return;
     };
     if colour > 15 {
         return;
     }
     let i = (row + usize::from(x >> 3)) * 8 + usize::from(x & 7);
-    if gfx.plot_xor {
+    if xor {
         update(fb, i, |p| p ^ colour);
     } else {
         update(fb, i, |_| colour);
+    }
+}
+
+/// Original: 0x1521f4 (graphics: fill the rectangle (x0, y0)..=(x1, y1) in the plot colour,
+/// set or XOR as [`plot`] does, into the buffer [`GfxState::plot_back`] names)
+///
+/// The corners are put in order (unsigned); whole plane bytes are written with the edge masks
+/// 0x15802e / 0x158036 on the first and last byte of each row, so exactly the pixels x0..=x1
+/// change. The caller passes the buffer as `fb`.
+pub fn fill_rect(gfx: &GfxState, fb: &mut Framebuffer, x0: u16, y0: u16, x1: u16, y1: u16) {
+    fill(fb, (x0, y0, x1, y1), gfx.plot_colour, gfx.plot_xor);
+}
+
+/// [`fill_rect`] in `colour` (set mode), for callers that pass the colour of 0x152176 directly.
+pub fn fill_colour(fb: &mut Framebuffer, x0: u16, y0: u16, x1: u16, y1: u16, colour: u8) {
+    fill(fb, (x0, y0, x1, y1), u16::from(colour), false);
+}
+
+fn fill(fb: &mut Framebuffer, (x0, y0, x1, y1): (u16, u16, u16, u16), colour: u16, xor: bool) {
+    let (xa, xb) = if x0 < x1 { (x0, x1) } else { (x1, x0) };
+    let (ya, yb) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+    for y in ya..=yb {
+        for x in xa..=xb {
+            plot_in(fb, x, y, colour, xor);
+        }
     }
 }
 
@@ -240,11 +270,11 @@ pub fn copy_rect(
         return;
     }
     for r in 0..=rows {
-        let (Some(src), Some(dst)) = (row_base(y0 + r), row_base(dy + r)) else {
+        let (Some(src), Some(dst)) = (back_byte(x0, y0 + r), row_base(dy + r)) else {
             continue;
         };
         for b in 0..=bytes {
-            let s = (src + usize::from((x0 >> 3) + b)) * 8;
+            let s = (src + usize::from(b)) * 8;
             let d = (dst + usize::from((dx >> 3) + b)) * 8;
             for bit in 0..8 {
                 let i = s + bit;
@@ -255,6 +285,12 @@ pub fn copy_rect(
             }
         }
     }
+}
+
+/// Original: 0x152dd8 (graphics: the back-buffer byte address of pixel (x, y): the row table's
+/// row `y` plus x / 8)
+fn back_byte(x: u16, y: u16) -> Option<usize> {
+    row_base(y).map(|row| row + usize::from(x >> 3))
 }
 
 /// Original: 0x153384 (draw a `.bmp` bitmap at (x, y): its header is two little-endian words,

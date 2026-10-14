@@ -113,6 +113,8 @@ pub struct GameTables {
     /// Original: 0x157d9e (A4-0x3952; 256 bytes: screen colour 0..31 of each 8-bit bitmap
     /// colour, the map 0x153384 / 0x1533e0 draw `paper.bmp` and the portraits through)
     pub bitmap_colours: [u8; 256],
+    /// Original: 0x1525d9 (hunk 30; 128 signed bytes: 64 × the sine of n / 128 turns, 0x15265a)
+    pub sine: [i8; 128],
 }
 
 impl Default for GameTables {
@@ -129,6 +131,7 @@ impl Default for GameTables {
             window_shown: 0,
             dissolve: 0,
             bitmap_colours: [0; 256],
+            sine: [0; 128],
         }
     }
 }
@@ -156,6 +159,7 @@ impl GameTables {
             window_shown: word(0x0015_3BF8)?,
             dissolve: word(0x0015_5178)?,
             bitmap_colours: bytes::<256>(image_bytes(game, &HUNK_33, 0x0015_7D9E, 256)?),
+            sine: bytes::<128>(image_bytes(game, &HUNK_30, 0x0015_25D9, 128)?).map(|b| b as i8),
         })
     }
 }
@@ -179,6 +183,10 @@ mod tests {
         for i in 0..DISSOLVE_TAPS {
             let o = at30(0x0015_1F3C) + 2 * i;
             h30[o..o + 2].copy_from_slice(&(0x3u16 << i).to_be_bytes());
+        }
+        let sine = at30(0x0015_25D9);
+        for (i, b) in h30[sine..sine + 128].iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(3);
         }
         let dirs = at33(0x0015_5522);
         h33[dirs..dirs + 16]
@@ -219,6 +227,7 @@ mod tests {
         assert_eq!((t.dir_dx[5], t.dir_dy[0], t.dir_dy[2]), (-1, -1, 0));
         assert_eq!(t.hour_dir[11], 7);
         assert_eq!((t.bitmap_colours[33], t.bitmap_colours[255]), (1, 31));
+        assert_eq!((t.sine[1], t.sine[50], t.sine[127]), (3, -106, 125));
     }
 
     #[test]

@@ -51,6 +51,8 @@ pub struct GfxState {
     /// Original: 0x155178 (A4-0x6578; word: the next window present dissolves; image value from
     /// `game`)
     pub dissolve: u16,
+    /// The turned sprites of the flights (0x15265a / 0x152800 / 0x152876).
+    pub sprites: super::sprite::Sprites,
 }
 
 impl Default for GfxState {
@@ -87,6 +89,7 @@ impl Default for GfxState {
             panel_redraw: 0,
             sparkle: 0,
             dissolve: 0,
+            sprites: super::sprite::Sprites::default(),
         }
     }
 }
@@ -118,12 +121,18 @@ impl GfxState {
                 block2: Vec::new(),
             },
             tables: self.tables.clone(),
+            sprites: super::sprite::Sprites::none(),
             ..*self
         }
     }
 
     /// Original: 0x152e50 (load tile graphics: maptiles, masktype, tileindx, animmask)
     /// Replaces: 0x14f16c (object-tile cache prefill), 0x1623d6 (cache miss: reload a record)
+    /// Replaces: 0x1621c0 (read an LZW file's size), 0x161ec8 (the LZW decoder)
+    ///
+    /// An LZW file is read by 0x1621c0 (its 4-byte little-endian size) and 0x161ec8 (9..12-bit
+    /// codes, 0x100 resets, 0x101 ends, read from the file 0x400 bytes at a time);
+    /// `u6_formats::lzw` decodes the whole file (here `masktype.ega`, opened with D0 = 1).
     ///
     /// Reads the files in the original order (`maptiles.ega`, `masktype.ega`, `tileindx.ega`,
     /// `animmask.ega`, then the cache prefill from `objtiles.ega`) and decodes all 2048 records

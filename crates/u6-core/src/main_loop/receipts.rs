@@ -2,7 +2,7 @@
 //! [`super::run`] up to the prompt (the start egg left unhatched, out of combat), a state set up
 //! where keys from the boot cannot reach (no spellbook at the start; the castle is not
 //! wilderness), then [`super::commands::command_loop`] fed one key per tick. Cast reaches magic
-//! 0x11af10 and Rest 0x127b1a through the loop's dispatch. With `U6_RECEIPTS=<dir>` the frames
+//! 0x11af10 and Rest 0x127b1a through the loop's dispatch; the spellbook also by clicks (0x106474). With `U6_RECEIPTS=<dir>` the frames
 //! go there as raw RGBA (320 × 200). Skips where the zip is missing; reads it, copies nothing.
 #![allow(clippy::disallowed_methods)] // tests may read files
 
@@ -285,4 +285,63 @@ fn rest_one_hour_through_the_command_loop() {
     );
     assert!(tail.iter().any(|l| l.contains("guard")), "{tail:?}");
     assert_ne!(s.actors.calendar.hour, hour0, "an hour passed");
+}
+
+/// A press and its release in one tick (the event wait samples both: one click), then `settle`
+/// idle ticks.
+fn click(e: &mut Engine, x: i16, y: i16, settle: u32) {
+    e.tick(
+        &[
+            InputEvent::Pointer { x, y, buttons: 1 },
+            InputEvent::Pointer { x, y, buttons: 0 },
+        ],
+        16,
+    );
+    idle(e, settle);
+}
+
+/// The spellbook by the pointer (0x106474) at 22:00: C opens the book on the first circle's
+/// page, a click on its fourth tab pages to the next circle (0xa5), the first tab back (0xa2),
+/// and a click on Light's line (the fourth, 8 pixels a line from y 0x10) casts it (0x8e with the
+/// line selected): the view lights.
+#[test]
+fn the_spellbook_by_clicks_through_the_command_loop() {
+    let Some(files) = files() else { return };
+    let mut e = engine(
+        &files,
+        Box::new(|s| {
+            give_book(s, &[0, 1, 6, 9, 0x11, 0x14]);
+            s.actors.calendar.hour = 22;
+            crate::actors::clock::tick(s, 0);
+        }),
+    );
+    let dark = lit_cells(&e.state());
+    press(&mut e, &chars("c"), 10);
+    let page = |e: &Engine| {
+        let m = &e.state().magic;
+        (m.page[..usize::from(m.page_lines)].to_vec(), m.next_circle)
+    };
+    let first = page(&e);
+    assert_eq!(e.state().ui.panel.mode, crate::magic::BOOK_PANEL);
+    dump(&e, "int-mouse-book");
+    click(&mut e, 0xe8, 0x5c, 10);
+    let next = page(&e);
+    dump(&e, "int-mouse-book-next-circle");
+    click(&mut e, 0xb8, 0x5c, 10);
+    let back = page(&e);
+    click(&mut e, 0xc8, 0x10 + 3 * 8 + 4, 4);
+    idle(&mut e, 40);
+    dump(&e, "int-mouse-book-light");
+    let s = e.state();
+    let lit = lit_cells(&s);
+    let tail = scroll(&e, "Cast-");
+    eprintln!(
+        "book by clicks: pages {first:?} -> {next:?} -> {back:?}; lit cells {dark} -> {lit}; {tail:?}"
+    );
+    assert_eq!(first.0, [0, 1, 6, 9], "the first circle's page");
+    assert_eq!(next.0, [0x11, 0x14], "the next-circle tab");
+    assert_eq!(back.0, first.0, "the previous-circle tab");
+    assert!(tail.iter().any(|l| l.contains("Light")), "{tail:?}");
+    assert_eq!(s.actors.timers[0], 100, "the light timer runs");
+    assert!(lit > dark, "{lit} lit cells after, {dark} before");
 }

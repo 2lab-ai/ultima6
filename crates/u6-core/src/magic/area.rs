@@ -303,6 +303,7 @@ pub async fn hail_storm(state: &RefCell<State>, io: &Io, pre: i16) {
     }
     let (x, y) = state.borrow().ui.input.target;
     hail(&mut state.borrow_mut(), io, x, y);
+    crate::combat::play_effects(state, io).await;
     say(state, io, FMT_NL_S_NL, Msg::Success).await;
 }
 
@@ -322,12 +323,15 @@ struct Stone {
 /// (sprite 7, tile 0x18e). Each round every falling stone moves a pixel down and right; one
 /// that lands draws random 400..500 (unused) and hurts each actor on its tile by 1 (0x1231be,
 /// after clearing the combat word A4-0x69a4, which combat owns), showing tile 0x101 over the
-/// ones in the window. The view is refreshed at the end.
+/// ones in the window. The view is refreshed at the end. The code never waits (the Amiga draws as
+/// fast as it runs), so the port records each copy to the screen as a frame and the caller
+/// shows them ([`crate::combat::play_effects`]), the refreshed window last.
 pub fn hail(s: &mut State, io: &Io, x: i16, y: i16) -> i16 {
     let mut stones: [Option<Stone>; 6] = [None; 6];
     let mut exp: i16 = 0;
     let mut frame = 0;
     let mut left = s.rng.range(10, 0x1e) as i16;
+    seams::hail_start(s);
     let mut falling = false;
     let z = u16::from(s.map.centre.z);
     while left != 0 || falling {
@@ -385,6 +389,7 @@ pub fn hail(s: &mut State, io: &Io, x: i16, y: i16) -> i16 {
         }
     }
     crate::gfx::view::refresh_view(s, io);
+    crate::combat::present::capture_window(s, 0);
     exp
 }
 

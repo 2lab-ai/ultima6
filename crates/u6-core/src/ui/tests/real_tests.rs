@@ -10,7 +10,7 @@ use u6_intake::{InputFile, intake};
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
-fn files() -> Option<Files> {
+pub(super) fn files() -> Option<Files> {
     if !std::path::Path::new(ZIP).exists() {
         eprintln!("skipped: {ZIP} not present");
         return None;
@@ -101,7 +101,7 @@ fn cell_glyph(fb: &Framebuffer, s: &State, col: usize, row: usize, ink: u8) -> u
 }
 
 /// A PNG of the frame (RGB, zlib stored blocks).
-fn png(fb: &Framebuffer) -> Vec<u8> {
+pub(super) fn png(fb: &Framebuffer) -> Vec<u8> {
     fn crc32(data: &[u8]) -> u32 {
         let mut c = !0u32;
         for &b in data {

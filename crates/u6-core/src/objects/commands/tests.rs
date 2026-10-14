@@ -179,6 +179,31 @@ fn a_chests_trap_springs_instead_of_opened_and_goes() {
     );
 }
 
+/// The inventory click 0x10619c springs a carried chest's trap by calling 0x12ba36 with the
+/// chest itself (0x10643c: D0 = A4-0x2f04, the selection); 0x12ba36 finds the trap in it
+/// (0x12bb8e..0x12bb94). The ui seam passes the chest, so the trap goes.
+#[test]
+fn the_inventory_clicks_trap_seam_passes_the_chest() {
+    let mut s = door_world();
+    s.actors.party.members[0] = 1;
+    s.actors.party.size = 1;
+    s.objects.type_frame[1] = 0x19a;
+    s.actors.attrs.hp[1] = 60;
+    s.objects.set_xyz(1, 10, 11, 0);
+    crate::main_loop::test_support::link_placed_objects(&mut s);
+    let c = create_in(&mut s, 0x62, 0, 0, 1);
+    s.objects.type_frame[c as usize] = 0x62 | 1 << 10;
+    let trap = create_in(&mut s, 0x151, 0x08, 0, c);
+    s.objects.qq[trap as usize] = 0x1600;
+    crate::ui::seams::spring_trap(&mut s, c);
+    assert_eq!(s.objects.type_frame[trap as usize], 0, "the trap is gone");
+    assert_eq!(
+        s.objects.type_frame[c as usize],
+        0x62 | 1 << 10,
+        "the chest stays"
+    );
+}
+
 #[test]
 fn closed_containers_and_what_fits_in_them() {
     let mut s = world();

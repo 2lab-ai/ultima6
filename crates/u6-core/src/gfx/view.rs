@@ -45,8 +45,11 @@ impl ViewWindow {
 }
 
 /// Replaces: 0x162358 (copies the 32 OCS colours into the copper list)
+/// Replaces: 0x16236a (installs the copper list: the five bitplane pointers, the pointer sprite)
 ///
-/// The chunky buffer carries its palette; every window draw writes the 32 game colours.
+/// The chunky buffer carries its palette; every window draw writes the 32 game colours. The
+/// engine's buffers are the bitplanes, and the pointer sprite is its overlay
+/// ([`crate::ui::pointer::vblank`]).
 fn load_palette(state: &State, fb: &mut Framebuffer) {
     for (dst, c) in fb.palette.iter_mut().zip(&state.tables.palette) {
         *dst = Rgb::new(c.r, c.g, c.b);

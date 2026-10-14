@@ -4,7 +4,8 @@
 // saved games (stored after a Save, resumed on reload, forgotten, imported as a folder), the
 // sound output (AudioContext after a gesture, chunks into the worklet) and the launcher's
 // sequence as a player meets it (the opening, the menu, a character created and kept, Journey
-// Onward after a reload, Quit). Most tests start `game` at once (harness `gameFirst`); the
+// Onward after a reload, Quit) and the mouse on the canvas (the first press is both the sound's
+// gesture and exactly one game click). Most tests start `game` at once (harness `gameFirst`); the
 // launcher tests run the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. Tests that need the user's disks skip when they are absent.
@@ -440,6 +441,123 @@ test('zip: Quit in the menu ends the game; the page says so and Restart starts i
   s = await started(page);
   assert.equal(s.restartHidden, true);
   await h.waitProgram(page, 'u');
+}, { needs: h.haveZip });
+
+// A pixel of the canvas (320 x 200 game pixels) as a page position through its CSS box.
+async function screenPoint(page, x, y) {
+  const box = await page.locator('#screen').boundingBox();
+  return [box.x + ((x + 0.5) * box.width) / 320, box.y + ((y + 0.5) * box.height) / 200];
+}
+
+// The message scroll's pixels (x 168..311, y 104..191) differ between two frames.
+function scrollChanged(before, after) {
+  for (let y = 104; y < 192; y += 1) {
+    for (let x = 168; x < 312; x += 1) {
+      const i = (y * 320 + x) * 4;
+      if (before[i] !== after[i] || before[i + 1] !== after[i + 1] || before[i + 2] !== after[i + 2]) return true;
+    }
+  }
+  return false;
+}
+
+const OUT = '/tmp/claude-501/int-mouse';
+const promptNow = (page) => page.evaluate(() => document.getElementById('screen').dataset.prompt);
+
+// Clicks the map cell `dx` cells east of the Avatar (its window cell (5, 5) is centred on
+// game pixel (88, 88)), then waits for the prompt again; the leader before and after.
+async function clickCell(page, dx) {
+  await h.waitPrompt(page);
+  const from = (await h.state(page)).leader;
+  await page.mouse.click(...(await screenPoint(page, 88 + 16 * dx, 88)));
+  await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0',
+    null, { timeout: 10_000 }).catch(() => {});
+  await h.waitPrompt(page);
+  return { from, to: (await h.state(page)).leader };
+}
+
+// Look by clicks: the Look icon, then the Avatar's own cell. Look on a person shows the portrait
+// panel and waits for a key or a click; a click on the Avatar's cell answers it (0x8f, nothing
+// else happens). Returns the frame with the description in the scroll.
+async function lookAtAvatar(page, shot) {
+  await page.mouse.click(...(await screenPoint(page, 64, 184))); // the fourth icon: Look
+  await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0', null, { timeout: 10_000 });
+  if (shot) await writeFile(`${OUT}/web-look-target.png`, await page.locator('#screen').screenshot());
+  await page.mouse.click(...(await screenPoint(page, 88, 88))); // Look's target: the Avatar
+  await h.sleep(1500);
+  assert.equal(await promptNow(page), '0', 'the portrait waits for a key or a click');
+  const described = await h.frame(page);
+  if (shot) await writeFile(`${OUT}/web-look.png`, await page.locator('#screen').screenshot());
+  const at = (await h.state(page)).leader;
+  await page.mouse.click(...(await screenPoint(page, 88, 88)));
+  await h.waitPrompt(page);
+  assert.equal((await h.state(page)).leader, at, 'the click that closes the portrait does not walk');
+  return described;
+}
+
+// One step by clicks: the cell east of the Avatar, else (blocked by the start fight) west,
+// up to 6 tries; asserts the step is one cell along x.
+async function clickStep(page) {
+  for (let i = 0; i < 6; i += 1) {
+    const dx = i % 2 === 0 ? 1 : -1;
+    const { from, to } = await clickCell(page, dx);
+    if (to === from) continue;
+    const [fx, fy, fz] = from.split(',').map(Number);
+    const [tx, ty, tz] = to.split(',').map(Number);
+    assert.deepEqual([tx - fx, ty - fy, tz - fz], [dx, 0, 0], `one cell ${dx > 0 ? 'east' : 'west'}: ${from} -> ${to}`);
+    return { dx, from, to };
+  }
+  throw new Error('six click steps blocked in a row');
+}
+
+test('the mouse: the Look icon, then Look on the Avatar, then clicks walk; the keys still work', async (env) => {
+  const { page } = await h.openPage(env, { gated: false });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, 130);
+  await h.waitPrompt(page);
+  const before = await h.frame(page);
+  const described = await lookAtAvatar(page, false);
+  assert.ok(scrollChanged(before, described), 'Look printed in the scroll');
+  assert.equal((await h.state(page)).focused, 'screen', 'the click focused the canvas');
+  await clickStep(page);
+  const { from, to } = await h.stepSideways(page);
+  assert.notEqual(to, from, 'the arrows still walk after the mouse');
+}, { needs: h.haveHfes });
+
+test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await h.dropFiles(page, [h.ZIP]);
+  await started(page);
+  await h.waitPrompt(page);
+  assert.equal((await h.state(page)).audio, 'off', 'no sound before the first press');
+  await mkdir(OUT, { recursive: true });
+  const before = await h.frame(page);
+  // The page's first press: the Look icon. The game takes it once (Look waits for its target;
+  // a second Look while it waits would be "what?" and bring the prompt back), and the same
+  // press starts the AudioContext.
+  await page.mouse.click(...(await screenPoint(page, 64, 184)));
+  await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0', null, { timeout: 10_000 });
+  await page.waitForFunction(() => document.body.dataset.audio === 'running', null, { timeout: 15_000 });
+  await h.sleep(1500);
+  assert.equal(await promptNow(page), '0', 'Look still waits for its target: the press came once');
+  await page.keyboard.press('Escape'); // no target: "what?", the prompt again
+  await h.waitPrompt(page);
+  const described = await lookAtAvatar(page, true);
+  assert.ok(scrollChanged(before, described), 'Look printed in the scroll');
+  const { from, to } = await clickStep(page);
+  await h.sleep(1000);
+  assert.equal((await h.state(page)).leader, to, 'one step per click, none after it');
+  await writeFile(`${OUT}/web-walk.png`, await page.locator('#screen').screenshot());
+  await page.waitForFunction(() => Number(document.body.dataset.audioChunks ?? 0) > 5, null, { timeout: 15_000 });
+  const s = await h.state(page);
+  assert.equal(s.audio, 'running');
+  await page.click('#mute');
+  assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'true');
+  assert.equal((await h.state(page)).leader, to, 'Mute is not a game click');
+  await page.click('#mute');
+  assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'false');
+  console.log(`  receipt: first press -> Look waits, audioContext.state=${s.audio}, chunks=${s.audioChunks}; click walk ${from} -> ${to}`);
 }, { needs: h.haveZip });
 
 const filter = process.argv[2];

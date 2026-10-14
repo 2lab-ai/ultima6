@@ -82,9 +82,6 @@ fn tail(s: &State, i: usize) -> u8 {
     s.actors.objlist_tail.get(i).copied().unwrap_or(0)
 }
 
-/// Replaces: 0x1051a6 (set the pointer sprite by the pointer position: the port has no pointer)
-fn pointer_shape() {}
-
 /// `printf` of the image string at `addr`.
 async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
     let fmt = game_string(io, addr);
@@ -229,7 +226,7 @@ fn end_command(s: &mut State, io: &Io) {
     crate::ui::cursor::panel_cursor_in(s, io, 0);
     s.ui.input.targeting = 0;
     s.ui.input.target_command = NO_COMMAND;
-    pointer_shape();
+    crate::ui::pointer::update_shape(s);
 }
 
 /// Port-only: a cut handler's ending. [`NOT_IMPLEMENTED`] (on a new line after `after_name`, the
@@ -395,7 +392,7 @@ async fn pass(state: &RefCell<State>, io: &Io) {
     crate::ui::cursor::panel_cursor_in(&mut s, io, 0);
     s.ui.input.target_pending = 0;
     s.ui.input.targeting = 0;
-    pointer_shape();
+    crate::ui::pointer::update_shape(&mut s);
     let ty = s.objects.obj_type(ObjectId(leader as u16));
     let wind = s.actors.wind as i8;
     if (ty == 0x19f || ty == 0x1a7) && wind >= 0 {
@@ -437,7 +434,7 @@ async fn party_mode(state: &RefCell<State>, io: &Io) {
         s.ui.input.target_pending = 0;
         s.ui.input.targeting = 0;
         s.ui.input.target_command = NO_COMMAND;
-        pointer_shape();
+        crate::ui::pointer::update_shape(&mut s);
     }
 }
 
@@ -525,7 +522,7 @@ async fn targeted(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
         let mut s = state.borrow_mut();
         s.ui.input.target_pending = 1;
         s.ui.input.target_command = code;
-        pointer_shape();
+        crate::ui::pointer::update_shape(&mut s);
     }
     print_command(state, io, code).await;
     if code == CAST {

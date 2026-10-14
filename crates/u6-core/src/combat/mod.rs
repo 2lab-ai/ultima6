@@ -99,8 +99,6 @@ pub struct CombatState {
     pub shown: u64,
     /// Port-only: the last combat messages queued ([`present::say`]), for receipts and tests.
     pub said: Vec<present::Said>,
-    /// Port-only: the sprite slots of the flight drawing seam (see [`seams::sprite_draw`]).
-    pub sprites: seams::Sprites,
 }
 
 impl Default for CombatState {
@@ -121,7 +119,6 @@ impl Default for CombatState {
             swallow: false,
             shown: 0,
             said: Vec::new(),
-            sprites: seams::Sprites::default(),
         }
     }
 }

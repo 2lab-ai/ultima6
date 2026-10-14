@@ -77,11 +77,12 @@ pub fn push_blocked(s: &mut State, obj: Slot, x: u16, y: u16, dir: usize) -> boo
     !(free(s, a) || free(s, b))
 }
 
-/// The end of a Move that went nowhere or failed: no target pending, the pointer back on the
-/// centre cell (0x1051a6, the pointer sprite, has no port).
+/// The end of a Move that went nowhere or failed: no target pending, the pointer origin back on
+/// the centre cell, the pointer shape for it (0x1051a6, [`crate::ui::pointer::update_shape`]).
 fn reset_pointer(s: &mut State) {
     s.ui.input.target_pending = 0;
     s.inventory.pointer_origin = (CENTRE_PIXEL, CENTRE_PIXEL);
+    crate::ui::pointer::update_shape(s);
 }
 
 /// Original: 0x12ae04 (objects: the Move command on the confirmed target) [partial]

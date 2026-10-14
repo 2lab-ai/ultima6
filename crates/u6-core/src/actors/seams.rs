@@ -12,7 +12,6 @@ use crate::engine::{Io, with_current_io};
 use crate::main_loop::PrintArg;
 use crate::objects::{OBJECT_SLOTS, ObjectId};
 use crate::state::State;
-use crate::todo_stub;
 
 /// One object found at a location: its id and the part of a multi-tile object that covers the
 /// location (the original leaves it in A4-0x78dc; 0 = the object's own tile).
@@ -303,20 +302,16 @@ pub async fn talk(state: &RefCell<State>, io: &Io, speaker: u16, npc: u16, annou
     crate::converse::talk(&cx, speaker as u8, npc as i16, announce).await;
 }
 
-/// [ui] 0x133b0e: full redraw of the view (panels, map window, window cache, view flags).
-/// Contract: 0x133a96 (redraw the side panels), A4-0x6a8e = 0, A4-0x6578 = 1, 0x102c90, 0x108d10,
-/// 0x109e74. Ported part: the flags, the window cache and the view flags; the panel and window
-/// redraws (async in the ui port) follow at the loop's next panel redraw and refresh.
+/// [ui] 0x133b0e: full redraw of the view (the window caches reset 0x133a96, the flags, the
+/// map window, the tile cache, the view flags).
 pub fn full_redraw(s: &mut State) {
-    todo_stub!(
-        "0x133a96 redraw the side panels (fallback: next loop redraw)",
-        ()
-    );
-    s.map.view_dirty = 0;
-    s.gfx.dissolve = 1;
-    present_map(s);
-    crate::map::region::rebuild_window(s);
-    crate::map::view::update_view(s);
+    if with_current_io(|io| crate::ui::effects::redraw_view(s, io)).is_none() {
+        crate::ui::effects::reset_window(s);
+        s.map.view_dirty = 0;
+        s.gfx.dissolve = 1;
+        crate::map::region::rebuild_window(s);
+        crate::map::view::update_view(s);
+    }
 }
 
 /// [main] 0x102ef0: post-step refresh (rebuild the view and present).
