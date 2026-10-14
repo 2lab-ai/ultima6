@@ -8,7 +8,6 @@ use super::target::{panel_cursor, wait_event};
 use crate::engine::Io;
 use crate::objects::ObjectId;
 use crate::state::State;
-use crate::todo_stub;
 
 /// Codes the command loop dispatches (0x113.. / 0x147.. are mapped to these by 0x106bbc).
 pub const WALK: u16 = 0x80;
@@ -78,8 +77,8 @@ fn panel_code(s: &mut State, code: u16) -> Panel {
 
 /// 0x9f (the container shown: back to its parent, or to the roster for a member) and 0xa0 (the
 /// selection becomes the container shown).
-fn open_container(state: &RefCell<State>, io: &Io, code: u16) -> Panel {
-    {
+async fn open_container(state: &RefCell<State>, io: &Io, code: u16) -> Panel {
+    let shown = {
         let mut s = state.borrow_mut();
         let shown = s.ui.panel.container;
         if code == 0x9f && shown < 0x100 {
@@ -99,10 +98,9 @@ fn open_container(state: &RefCell<State>, io: &Io, code: u16) -> Panel {
         };
         s.ui.panel.container = parent;
         s.ui.panel.inventory_first = 0;
-    }
-    // Contract: draw the contents of `container` in the panel. Fallback: the panel keeps
-    // its view.
-    todo_stub!("0x111be0 inventory panel contents", ());
+        parent
+    };
+    crate::inventory::panel_contents(state, io, shown as i16).await;
     panel_cursor(state, io, 1);
     Panel::Again
 }
@@ -121,30 +119,27 @@ pub async fn read_key(state: &RefCell<State>, io: &Io) -> u16 {
         let outcome = if (0x90..0xaa).contains(&code) {
             match code {
                 0x95 => {
-                    // Contract: scroll the inventory list of the shown member up; no result.
-                    // Fallback: the list does not move.
-                    todo_stub!("0x111e0a inventory list up", ());
+                    crate::inventory::list_up(state, io).await;
                     panel_cursor(state, io, 1);
                     Panel::Again
                 }
                 0x96 => {
-                    todo_stub!("0x111dca inventory list down", ());
+                    crate::inventory::list_down(state, io).await;
                     panel_cursor(state, io, 1);
                     Panel::Again
                 }
-                0x9f | 0xa0 => open_container(state, io, code),
+                0x9f | 0xa0 => open_container(state, io, code).await,
                 0xa2..=0xa5 => {
                     Box::pin(crate::magic::page_key(state, io, code)).await;
                     Panel::Again
                 }
                 0xa7 => {
-                    // Contract: Ready the selected item (an M1 stub point). Fallback: nothing.
-                    todo_stub!("0x112052 Ready an item", ());
+                    Box::pin(crate::inventory::ready(state, io)).await;
                     panel_cursor(state, io, 1);
                     Panel::Again
                 }
                 0xa8 => {
-                    todo_stub!("0x1123d6 Unready an item", ());
+                    Box::pin(crate::inventory::unready(state, io)).await;
                     panel_cursor(state, io, 1);
                     Panel::Again
                 }

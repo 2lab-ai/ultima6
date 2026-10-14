@@ -6,7 +6,6 @@ use std::cell::RefCell;
 
 use crate::engine::Io;
 use crate::state::State;
-use crate::todo_stub;
 
 /// Original: 0x10a4d6 (objects: frame of an actor type for animation step / direction `n`)
 ///
@@ -137,16 +136,10 @@ const STR_OPEN: u32 = 0x0012_cf20;
 const STR_NOT_NOW: u32 = 0x0012_cee2;
 const STR_CLOSE: u32 = 0x0012_cf38;
 
-/// Stub of 0x128ce8 (objects: show an actor's portrait, equipment and name, wait for a key)
-///
-/// Stub contract: draws the actor's portrait (converse 0x133d3e) and equipment panel (ui
-/// 0x133fe0 / 0x1113fe), prints its name (0x10eef8 or its converse name) and, unless A4-0x71b5
-/// is set, awaits a key (0x10790a) — so the port's signature is async. Fallback: nothing shown,
-/// no key consumed; the caller continues. Reached by Talk's start (0x114afa) and its opcode
-/// executor (0x11404c), the side panel (0x103f64) and Look: the M1 Talk scenario reaches it,
-/// and the missing key wait is a command-boundary difference there.
-pub async fn show_actor(_state: &RefCell<State>, _io: &Io, _actor: Slot) {
-    todo_stub!("0x128ce8 show an actor's portrait, equipment and name", ())
+/// 0x128ce8 (an actor's portrait, equipment and name, then a key unless a conversation runs):
+/// ported in [`crate::inventory::show_actor`]; this entry keeps the objects-side signature.
+pub async fn show_actor(state: &RefCell<State>, io: &Io, actor: Slot) {
+    Box::pin(crate::inventory::show_actor(state, io, actor)).await
 }
 
 pub use super::commands::{blast_doors, explode_keg, spring_trap};

@@ -9,7 +9,6 @@ use super::text::fill_rect;
 use crate::engine::Io;
 use crate::objects::ObjectId;
 use crate::state::State;
-use crate::todo_stub;
 
 /// No command underlined (A4-0x7b09).
 pub const NO_ICON: u8 = 0xff;
@@ -43,7 +42,7 @@ pub fn select_command(s: &mut State, io: &Io, cmd: u8) {
 /// In the map window, the location and an actor there; in the inventory panel, the slot.
 ///
 /// Returns 0x9d for an actor (A4-0x2f04 = its slot), 0x9b / 0x9c for an inventory or equipment
-/// slot (0x111e3c / 0x111eec, not ported: declared stub), else 0. Map cells are 16 pixels, the
+/// slot (0x111e3c / 0x111eec, [`crate::inventory`]), else 0. Map cells are 16 pixels, the
 /// window 11 × 11 cells centred on the view centre.
 pub fn target_from_pointer(s: &mut State) -> u16 {
     let ui = &mut s.ui;
@@ -68,12 +67,10 @@ pub fn target_from_pointer(s: &mut State) -> u16 {
     }
     if s.ui.panel.mode == 0x92 {
         s.ui.input.target = (-1, -1);
-        // Contract of both: the slot under the pointer → selection (A4-0x2f04), true when the
-        // pointer is on one. Fallback: none hit.
-        if todo_stub!("0x111e3c inventory slot at the pointer", false) {
+        if crate::inventory::list_slot_at(s) {
             return 0x9b;
         }
-        if todo_stub!("0x111eec equipment slot at the pointer", false) {
+        if crate::inventory::equipment_slot_at(s) {
             return 0x9c;
         }
         return 0;
@@ -171,8 +168,7 @@ fn restore_under_cursor(s: &mut State, io: &Io, (col, row): (i8, i8), (x, y): (i
             let tile = base.wrapping_add(seams::facing_frame(ty, 4) as u16);
             super::panels::tile_on_blank(s, io, tile, 0x19b, x, y);
         } else {
-            // Contract: draw object `sel`'s icon (with its quantity) at (x, y). Fallback: none.
-            todo_stub!("0x105b14 draw an inventory object icon", ());
+            crate::inventory::draw_icon(s, io, sel, x, y);
         }
     } else {
         let p = &s.ui.panel;

@@ -85,6 +85,7 @@ pub struct State {
     /// Globals of the main hunk (command loop, boot).
     pub main: MainState,
     pub magic: crate::magic::MagicState,
+    pub inventory: crate::inventory::InventoryState,
     /// Original: 0x151ee0 (RNG state longword)
     pub rng: Rng,
     pub combat: crate::combat::CombatState,
@@ -210,6 +211,7 @@ impl State {
         })?;
         state.objcmds = crate::objects::commands::ObjCommands::load(files).map_err(table)?;
         state.magic.tables = crate::magic::MagicTables::from_game(game).map_err(table)?;
+        state.inventory = crate::inventory::InventoryState::load(files)?;
         state.tables = Tables {
             basetile,
             tileflags,

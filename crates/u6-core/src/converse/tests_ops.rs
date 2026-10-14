@@ -457,24 +457,34 @@ fn waiting_ops() {
 }
 
 #[test]
-fn seam_ops_reach_their_stubs() {
-    // The op whose callee is still outside milestone 1 (the object ops 0xb9 / 0xba / 0xbe /
-    // 0xc8 / 0xc9 call the ported objects / ui code since the integration; 0x9c's 0x12f6ee is
-    // objects::commands' port and 0xd6 calls magic's resurrection 0x11785e since milestone 2).
-    let mut e = Engine::with_game(
-        state(&[0xbf, 5, 0xa7, 0]),
-        Files::default(),
-        |st, io| async move {
+fn seam_ops_reach_their_ports() {
+    // Every op whose callee was outside milestone 1 now reaches a port (the object ops 0xb9 /
+    // 0xba / 0xbe / 0xc8 / 0xc9 since the integration; in milestone 2 op 0xbf's portrait panel
+    // 0x128ce8 is inventory's, 0x9c's 0x12f6ee objects::commands', 0xd6's 0x11785e magic's).
+    for (script, id) in [
+        (vec![0xbf, 5, 0xa7, 0], "0x128ce8"),
+        (vec![0xd6, 5, 0xa7, 0], "0x11785e"),
+        (vec![0x9c, 5, 0xa7, 0], "0x12f6ee"),
+    ] {
+        let mut e = Engine::with_game(state(&script), Files::default(), |st, io| async move {
             run_text(&super::Cx::new(&st, &io), 9).await;
-        },
-    );
-    e.tick(&[], 16);
-    assert!(e.finished());
-    assert!(
-        e.stub_hits().keys().any(|k| k.starts_with("0x128ce8")),
-        "{:?}",
-        e.stub_hits()
-    );
+        });
+        // The portrait panel waits for a key before the script goes on.
+        for _ in 0..4 {
+            e.tick(
+                &[crate::engine::InputEvent::Key(crate::engine::Key::Char(
+                    ' ',
+                ))],
+                16,
+            );
+        }
+        assert!(e.finished(), "{id}");
+        assert!(
+            !e.stub_hits().keys().any(|k| k.starts_with(id)),
+            "{id}: {:?}",
+            e.stub_hits()
+        );
+    }
 }
 
 // ---- keyword blocks 0x1149d6 -------------------------------------------------------------------
