@@ -56,8 +56,8 @@ const SEG_DX: i32 = -0x6582;
 const SEG_DY: i32 = -0x657e;
 const SEG_FRAME: i32 = -0x658a;
 const TAIL_FRAME: i32 = -0x6586;
-/// Original: A4-0x763a ("Shamino says, ... the %s!") and A4-0x61be (pointers to the 8
-/// direction names)
+/// Original: A4-0x763a (the warning format, a direction name for its `%s`) and A4-0x61be
+/// (pointers to the 8 direction names)
 const MSG_SHAMINO: i32 = -0x763a;
 const DIR_NAMES: i32 = -0x61be;
 /// The party member who warns (actor 3) and the status bits he needs.
@@ -326,8 +326,8 @@ fn treasure(s: &mut State, m: Slot, index: i16, b: u8) {
     }
 }
 
-/// Original: 0x1319b2 (objects: hatch egg `egg`: its monsters and objects, "Shamino says, I hear
-/// something to the …!")
+/// Original: 0x1319b2 (objects: hatch egg `egg`: its monsters and objects, and Shamino's
+/// warning of the direction they came from)
 ///
 /// Nothing while A4-0x7afb is set, or outside the egg's hours (quality tens 1: 6..=18 only,
 /// 2: never then). First it notes whether the gargoyles are friends: a gargoyle in the party, or
@@ -336,8 +336,9 @@ fn treasure(s: &mut State, m: Slot, index: i16, b: u8) {
 /// quantity (one draw; the whole quantity when the egg's is 100, one silver serpent): objects
 /// below type 0x156 (except a chest) are created on the egg's tile, monsters by 0x131646 with
 /// the egg's alignment. Everything after the very first is scattered (0x121e88, out of view
-/// unless the egg has status 0x20 or the party is arriving) or removed when no tile is free. A
-/// silver serpent gets its body segments, a hydra its eight heads. Actors get the template's
+/// unless the egg has status 0x20 or the party is arriving) or removed when no tile is free,
+/// which ends that one (port: the original goes on with the freed slot, see the loop). A silver
+/// serpent gets its body segments, a hydra its heads. Actors get the template's
 /// worktype (12 for gargoyles that are friends), with the movement flags of worktypes 15 / 16,
 /// and an attacking gargoyle doubled stats. A hostile hatched out of an egg without status 0x20
 /// may make Shamino warn of its direction once per fight (A4-0x6a88). The egg ends with status
@@ -408,6 +409,10 @@ fn hatch_templates(
     let mut first = true;
     let mut c = first_child(&mut s.objects, egg);
     while c >= 0 {
+        // The template walk keeps its own cursor: removing a hatchling walks its contents with
+        // 0x10ae52, which in the original (0x10c1d6) overwrites the cursor this loop reads with
+        // 0x10aed6 next and ends or derails the walk.
+        let cursor = s.objects.children;
         let t = s.objects.kind(c);
         let flagged = if s.objects.status(c) & 0x40 != 0 {
             t | 0x8000
@@ -448,7 +453,10 @@ fn hatch_templates(
             if first {
                 first = false;
             } else if !seams::scatter(s, m, scatter_out) {
+                // The original goes on to the serpent body, the hydra heads and the actor bytes
+                // of the freed slot (0x131d06 branches back to 0x131d0e); the port stops here.
                 remove(s, m);
+                continue;
             }
             if t == SERPENT {
                 serpent_body(s, c, m, last);
@@ -476,6 +484,7 @@ fn hatch_templates(
                 }
             }
         }
+        s.objects.children = cursor;
         c = next_child(&mut s.objects);
     }
     if s.actors.work.flag_6a88 == 0 && hostile {

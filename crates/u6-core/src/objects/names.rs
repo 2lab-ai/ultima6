@@ -36,7 +36,7 @@ pub fn quantity(o: &Objects, slot: Slot) -> u16 {
     }
 }
 
-/// Original: 0x10ee76 (objects: look.lzd string of a tile, "nothing" when empty)
+/// Original: 0x10ee76 (objects: look.lzd string of a tile, the nothing word when empty)
 ///
 /// The string of the first entry whose tile is ≥ `tile`. Past the last entry the walk reads on
 /// through the terminator (tile 0x800) and the bytes after it, as the original does in its
@@ -74,7 +74,8 @@ fn raw_look(t: &Tables, tile: u16) -> String {
 
 /// Original: 0x10eef8 (objects: display name of an object or actor)
 ///
-/// -1 → "Nothing". A party member (actor status bit 7) gets its party name; an actor with
+/// -1 → the capitalised nothing word. A party member (actor status bit 7) gets its party
+/// name; an actor with
 /// status bits 0x14 is named after its base type (the type it shows when not polymorphed or
 /// asleep); everything else after the look string of its tile. For slots ≥ 0x100 the original
 /// reads the actor-status test past its 256-byte table; both branches it can take there name
@@ -117,7 +118,7 @@ pub fn display_name(s: &State, slot: Slot) -> String {
     look_text(s, tile_of(t, o.tf(slot)))
 }
 
-/// The text 0x12904c prints for `tile` (flags3 bits 6-7: "a ", "an ", "the " or none), as a
+/// The text 0x12904c prints for `tile` (flags3 bits 6-7: one of the three articles or none), as a
 /// string for [`described_name`]. The port of 0x12904c itself, which prints it, is
 /// [`crate::objects::commands::article`].
 pub fn article_text(s: &State, tile: u16) -> &str {

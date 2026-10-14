@@ -136,10 +136,11 @@ pub async fn read_book(state: &RefCell<State>, io: &Io, obj: Slot) {
 
 /// Original: 0x1298b8 (objects: the Look command on the confirmed target)
 ///
-/// "Thou dost see " in a paged window, the leader turned toward the pointer (0x105016,
-/// 0x11ba5e) and the view updated. A dark target: "darkness.". No object (or an invisible
-/// one): the map tile's article and look name, or "nothing" outside the view, then "." and,
-/// within one tile of the leader, "Searching here, you find nothing.". An actor or horse
+/// The lead-in (0x128444) in a paged window, the leader turned toward the pointer (0x105016,
+/// 0x11ba5e) and the view updated. A dark target: the darkness line (0x128454). No object (or
+/// an invisible one): the map tile's article and look name, or the nothing word (0x128460)
+/// outside the view, then the full stop and, within one tile of the leader, the found-nothing
+/// line (0x128468). An actor or horse
 /// (through combat 0x1240fa) or a body: its count / article (unless it is a party member's
 /// shown portrait), name, and outside a ship its portrait panel (0x128ce8). Any other object:
 /// count / article and name (a bed's foot names its head), the weight with its contents in
@@ -466,7 +467,9 @@ async fn describe_spell(state: &RefCell<State>, io: &Io, spell: u8) {
     }
 }
 
-/// "The time is h:mm A.M." / "P.M.".
+/// The time line: its lead-in (0x128530), then by hour one of four formats: hour 0 with the
+/// minutes (0x128540), 1..=11 as h:mm (0x12854e), 12 with the minutes (0x12855c), later hours
+/// as (h - 12):mm (0x12856a).
 async fn tell_time(state: &RefCell<State>, io: &Io) {
     print_at(state, io, S_TIME_IS, &[]).await;
     let (h, m) = {

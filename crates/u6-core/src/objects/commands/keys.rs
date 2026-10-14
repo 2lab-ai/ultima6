@@ -53,14 +53,15 @@ pub fn toggle_lit(s: &mut State, obj: Slot) {
     *t = (*t & 0x3ff) + (f << 10);
 }
 
-/// Original: 0x12c0c2 (objects: use key or lock pick `key` "On" a door or chest)
+/// Original: 0x12c0c2 (objects: use key or lock pick `key` on a door or chest)
 ///
-/// "On " and the target key (anything but a confirmed target: "nothing"). The target's name.
-/// On the map it must be within one tile of the leader ("Out of range!"); only doors
-/// (0x129..=0x12c) and chests take keys ("No effect"). A lock pick may break (0x12c062 against
-/// the leader's dexterity, 0x121ff8: "Key broke.", one of the stack gone). A key whose quality
-/// matches the lock's (not 0), or a pick on a lock of quality 0, locks or unlocks it (0x12bdfa
-/// / 0x12bbc0 with the key flag); otherwise "No effect".
+/// The on-what prompt (0x12885c) and the target key (anything but a confirmed target: the
+/// nothing message). The target's name. On the map it must be within one tile of the leader
+/// (else the out-of-range message); only doors (0x129..=0x12c) and chests take keys (else the
+/// no-effect message). A lock pick may break (0x12c062 against the leader's dexterity,
+/// 0x121ff8: the broken-key line 0x128866, one of the stack gone). A key whose quality matches
+/// the lock's (not 0), or a pick on a lock of quality 0, locks or unlocks it (0x12bdfa /
+/// 0x12bbc0 with the key flag); otherwise the no-effect message.
 pub async fn use_key(state: &RefCell<State>, io: &Io, key: Slot) {
     let (actor, ktype) = {
         let s = state.borrow();

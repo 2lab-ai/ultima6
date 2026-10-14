@@ -1,4 +1,4 @@
-//! Get (0x12a7a4) with its "taken by right" test (0x128aa4).
+//! Get (0x12a7a4) with its test whether the party may take an object (0x128aa4).
 
 use std::cell::RefCell;
 
@@ -72,16 +72,17 @@ fn panel_actor(s: &State) -> Slot {
 /// Original: 0x12a7a4 (objects: the Get command on the confirmed target)
 ///
 /// The leader takes the selected object; past a cover (flags3 bit 4), or for an actor's tile,
-/// the object below (0x12948a). Nothing there or not on the map: "nothing". The leader turns
-/// to it and its name is printed. More than one tile away: "Out of range!". A damaging tile:
-/// "Not possible" and the hazard (0x102f3c). Weightless (unless a type weighed in tenths),
-/// 10000 or more, an actor or a dragon part: "Not possible". The weight with what the leader
-/// holds (0x11121e) above 20 × strength: "The total is too heavy.". Else 3 movement points,
-/// and the object goes into the inventory: a counted stack merges (0x10cf7c), a lit torch is
-/// readied in a free hand ("No free hand" when both hold something), anything else is carried
-/// (a few types get their resting frame back). Taking what is not yours on the surface costs
-/// karma, and the first awake neutral townsperson in view cries "Stop Thief!!!" and turns
-/// (combat 0x123aec); unseen: "Stealing!!!".
+/// the object below (0x12948a). Nothing there or not on the map: the nothing message. The
+/// leader turns to it and its name is printed. More than one tile away: the out-of-range
+/// message. A damaging tile: the not-possible message and the hazard (0x102f3c). Weightless
+/// (unless a type weighed in tenths), 10000 or more, an actor or a dragon part: not possible.
+/// The weight with what the leader holds (0x11121e) above 20 × strength: the too-heavy line
+/// (0x1285b6). Else 3 movement points, and the object goes into the inventory: a counted stack
+/// merges (0x10cf7c), a lit torch is readied in a free hand (the no-free-hand line 0x1285d0
+/// when both hold something), anything else is carried (a few types get their resting frame
+/// back). Taking what is not yours on the surface costs karma, and the first awake neutral
+/// townsperson in view cries thief (0x1285de) and turns (combat 0x123aec); unseen: the
+/// stealing line (0x1285f0).
 pub async fn get(state: &RefCell<State>, io: &Io) {
     let actor = leader(&state.borrow());
     {
@@ -151,7 +152,7 @@ pub async fn get(state: &RefCell<State>, io: &Io) {
     }
 }
 
-/// From the weight test on; false when Get ended at "No free hand" (no end-of-command
+/// From the weight test on; false when Get ended at the no-free-hand line (no end-of-command
 /// bookkeeping then).
 async fn take(state: &RefCell<State>, io: &Io, actor: Slot, sel: Slot) -> bool {
     let (wt, strength, kind) = {

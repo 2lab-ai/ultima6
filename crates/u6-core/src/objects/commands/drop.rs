@@ -73,9 +73,10 @@ pub fn surface_at(s: &mut State, x: u16, y: u16) -> bool {
 
 /// Original: 0x12a106 (objects: how many of stack `obj` to drop)
 ///
-/// Not a counted stack, readied, or a stack of one: 1. Else "How many? " and a line of up to
-/// 4 characters (0x107cba, the panel cursor put away meanwhile); empty: the whole stack, its
-/// count printed over the line; more than the stack, 0 or Escape: "0" and 0; else the number.
+/// Not a counted stack, readied, or a stack of one: 1. Else the how-many prompt (0x128578) and
+/// a line of up to 4 characters (0x107cba, the panel cursor put away meanwhile); empty: the
+/// whole stack, its count printed over the line; more than the stack, 0 or Escape: a zero
+/// printed (0x128588) and 0; else the number.
 pub async fn how_many(state: &RefCell<State>, io: &Io, obj: Slot) -> i16 {
     let (kind, n) = {
         let s = state.borrow();
@@ -134,13 +135,14 @@ fn amount(s: &State, kind: u16, obj: Slot, n: i16) -> u16 {
 
 /// Original: 0x12a226 (objects: the Drop command on the confirmed inventory object)
 ///
-/// Nothing selected, an object on the map, or the container the panel shows: "nothing". The
-/// name; a readied object that resists (0x1122dc) only redraws the panel. How many (0x12a106,
-/// 0 ends it), "Location: " and the target key. The spot must take it: the owner may stand
-/// there (0x11b1c0), or a surface, or a container it fits in (0x1289ca), and the path must
-/// reach it (0x1228ba); else "Not possible". Then it is unreadied (0x11236c, the equipment
-/// slots), the owner's sums redone (0x11121e), 3 movement points spent, and it flies along
-/// the path. Thrown farther than the next tile a fragile type breaks ("It broke!"). Otherwise
+/// Nothing selected, an object on the map, or the container the panel shows: the nothing
+/// message. The name; a readied object that resists (0x1122dc) only redraws the panel. How
+/// many (0x12a106, 0 ends it), the location prompt (0x12858e) and the target key. The spot
+/// must take it: the owner may stand there (0x11b1c0), or a surface, or a container it fits in
+/// (0x1289ca), and the path must reach it (0x1228ba); else the not-possible message. Then it
+/// is unreadied (0x11236c, the equipment slots), the owner's sums redone (0x11121e), 3
+/// movement points spent, and it flies along the path. Thrown farther than the next tile a
+/// fragile type breaks (the broke line, 0x1285a0). Otherwise
 /// it lands in the container there, or on the spot (a counted stack splits: the dropped part
 /// is a new object).
 pub async fn drop_object(state: &RefCell<State>, io: &Io) {
@@ -200,9 +202,18 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
     redraw_container(state, io).await;
 }
 
-/// Drop from the unready on (synchronous; "It broke!" is queued).
+/// Drop from the unready on (synchronous; the broke line is queued).
 #[allow(clippy::too_many_arguments)]
-fn land(s: &mut State, io: &Io, o: Slot, owner: Slot, here: Slot, kind: u16, sk: u16, n: i16) {
+pub(super) fn land(
+    s: &mut State,
+    io: &Io,
+    o: Slot,
+    owner: Slot,
+    here: Slot,
+    kind: u16,
+    sk: u16,
+    n: i16,
+) {
     seams::end_worn_magic(s, io, o, owner);
     if s.objects.place(o) == READIED {
         let slot = seams::equipment_slot(s, o);
@@ -259,7 +270,11 @@ fn land(s: &mut State, io: &Io, o: Slot, owner: Slot, here: Slot, kind: u16, sk:
             let [t0, t1] = kind.to_be_bytes();
             let [q0, q1] = q.to_be_bytes();
             let r = create_from_record(s, [0, b0, b1, b2, t0, t1, q0, q1]);
-            mark_takeable(&mut s.objects, r);
+            // The original marks without testing (0x12a758) the -1 a full object table gives;
+            // it still takes the count from the owner (0x12a766), as the port does.
+            if r != -1 {
+                mark_takeable(&mut s.objects, r);
+            }
             take_from_owner(s, owner, kind, q);
         } else {
             move_to(s, o, dx as u16, dy as u16, z);

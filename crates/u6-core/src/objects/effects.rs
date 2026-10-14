@@ -50,8 +50,13 @@ pub fn in_type_set_670c(o: &Objects, kind: u16) -> bool {
     o.defs.type_set_670c.iter().take(9).any(|&k| k == kind)
 }
 
-/// Original: 0x128b0e (objects: mark an object and everything inside it "ok to take")
+/// Original: 0x128b0e (objects: mark an object and everything inside it as fine to take)
+///
+/// Slot -1 does nothing (the original sets bit 0 of the byte before the status table).
 pub fn mark_takeable(o: &mut Objects, slot: Slot) {
+    if slot < 0 {
+        return;
+    }
     o.obj_status[slot as usize] |= 0x01;
     let mut c = o.next_of(slot);
     while c >= 0 && o.place(c) != 0 {
@@ -97,10 +102,13 @@ pub fn monster_index(o: &Objects, kind: u16) -> i16 {
 /// Original: 0x1301e2 (objects: open or close a passthrough (sliding wall section))
 ///
 /// Closed (frame 0): the section slides one tile — up for type 0x116, else left — takes
-/// frame | 2 and "Open the passthrough" is printed. Open: unless the first object where it
-/// closes is an actor ("Not now!"), it slides back, keeps frame bit 0 and prints "Close the
-/// passthrough".
+/// frame | 2 and the opening line (0x12cf20) is printed. Open: unless the first object where
+/// it closes is an actor (the refusal at 0x12cee2), it slides back, keeps frame bit 0 and
+/// prints the closing line (0x12cf38). Slot -1 does nothing.
 pub fn toggle_passthrough(s: &mut State, slot: Slot) {
+    if slot < 0 {
+        return;
+    }
     let o = &s.objects;
     let tf = o.tf(slot);
     let (x, y) = (o.x(slot), o.y(slot));
