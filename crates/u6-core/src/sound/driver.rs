@@ -5,9 +5,10 @@
 //! engine.io().files())`; from the audio callback (or a ring buffer it drains),
 //! `driver.render(&mut buf, sample_rate)`. Rendering never touches the engine, so audio cannot
 //! change the game; given the same calls at the same sample positions it is bit-reproducible.
-//! One driver serves every `game` process of a launcher run: the relaunch's new State numbers its
-//! calls from 0 again, and [`AudioDriver::sync`] then starts the player over as a new process
-//! does.
+//! One driver serves every `game` process of a launcher run: the relaunch's new State goes on
+//! with the old one's call log and marks the change of process ([`MedCall::NewProcess`],
+//! [`super::SoundState::continue_calls`]), and the driver starts the player over where it
+//! applies that mark.
 
 use u6_audio::{FilterModel, Machine};
 
@@ -33,8 +34,6 @@ pub struct AudioDriver {
     effect: Vec<u8>,
     /// Number of the next game call to apply.
     applied: u64,
-    /// The call applied under number `applied - 1` (a process's log never changes an entry).
-    last: Option<MedCall>,
 }
 
 impl AudioDriver {
@@ -65,31 +64,17 @@ impl AudioDriver {
             player,
             effect: effect.to_vec(),
             applied: 0,
-            last: None,
         }
     }
 
     /// Applies the game calls this driver has not seen yet, in order. Calls that dropped out of
-    /// the log (more than [`super::CALL_LOG`] since the last sync) are lost.
-    ///
-    /// A new `game` process (the launcher's relaunch replaced the State) numbers its calls from 0
-    /// again: its log ends below the calls already applied, or holds another call under the
-    /// number of the last one. The player then starts over as that process's setup sets it up
-    /// and plays the new log from its first call.
+    /// the log (more than [`super::CALL_LOG`] since the last sync) are lost. The numbering never
+    /// starts over: a new `game` process goes on with the log ([`SoundState::continue_calls`]).
     pub fn sync(&mut self, sound: &SoundState, files: &Files) {
-        let changed = |k: u64| {
-            sound
-                .calls
-                .iter()
-                .any(|(n, call)| *n == k && Some(call) != self.last.as_ref())
-        };
-        if sound.next_call < self.applied || self.applied.checked_sub(1).is_some_and(changed) {
-            self.new_process();
-        }
+        let from = self.applied;
         for (n, call) in &sound.calls {
-            if *n >= self.applied {
+            if *n >= from {
                 self.apply(call, files);
-                self.last = Some(call.clone());
             }
         }
         self.applied = sound.next_call;
@@ -115,6 +100,7 @@ impl AudioDriver {
             }
             MedCall::PlayBuffer => self.player.play(&mut self.machine, CHIP_BUFFER),
             MedCall::PlayEffect => self.player.play(&mut self.machine, CHIP_EFFECT),
+            MedCall::NewProcess => self.new_process(),
         }
     }
 
@@ -139,14 +125,15 @@ impl AudioDriver {
         self.player.remove(&mut self.machine);
     }
 
-    /// The end of one `game` process and the start of the next: the old one's shutdown
-    /// (0x14ee70: RemPlayer) leaves nothing playing, the new one's setup (0x14ef06) sets the
-    /// player up on its own memory (the effect module as the image holds it, an empty module
-    /// buffer). The output stage stays the host's.
+    /// [`MedCall::NewProcess`]: the end of one `game` process and the start of the next. The old
+    /// one's shutdown (0x14ee70: RemPlayer) leaves nothing playing, the new one's setup (0x14ef06)
+    /// sets the player up on its own memory (the effect module as the image holds it, an empty
+    /// module buffer). The output stage stays the host's, the count of applied calls the log's.
     fn new_process(&mut self) {
-        let filter = self.machine.filter;
+        let (filter, applied) = (self.machine.filter, self.applied);
         let effect = std::mem::take(&mut self.effect);
         *self = Self::with_tables(self.player.tables.clone(), &effect);
         self.machine.filter = filter;
+        self.applied = applied;
     }
 }

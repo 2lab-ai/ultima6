@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use super::*;
 use crate::files::Files;
 use crate::sound::{
-    AudioDriver, CALL_LOG, CHIP_EFFECT, MedCall, SONG_INSTRUMENT, SoundState, play_area_song,
-    play_song, set_sound_flag, sound_on, toggle_sound,
+    AudioDriver, CALL_LOG, CHIP_EFFECT, MODULE_BUFFER, MedCall, SONG_INSTRUMENT, SoundState,
+    play_area_song, play_song, set_sound_flag, sound_on, toggle_sound,
 };
 use crate::state::State;
 
@@ -160,12 +160,12 @@ fn the_driver_replays_new_calls_once_into_the_buffer() {
     assert!(out.iter().any(|&x| x.abs() > 0.01), "the note sounds");
 }
 
-/// The launcher's relaunch gives `game` a new State, whose call numbers start at 0 again. The
-/// driver takes that for a new `game` process (its shutdown 0x14ee70 removed the player, the new
-/// one's setup 0x14ef06 sets it up again, the effect module as the image holds it) and plays the
-/// new calls.
+/// The launcher's relaunch gives `game` a new State that takes the old one's call log over
+/// ([`SoundState::continue_calls`]) and marks the change of process: the driver then does what
+/// the old process's shutdown 0x14ee70 (RemPlayer) and the new one's setup 0x14ef06 (InitPlayer)
+/// do, so the new run starts from the effect module as the image holds it, and its calls go on.
 #[test]
-fn a_relaunched_game_numbers_its_calls_from_0_and_the_driver_plays_them() {
+fn a_relaunch_starts_the_player_over_from_the_images_effect_module() {
     let md = Mmd::new(vec![vec![[cell(13, 1, 0, 0), EMPTY, EMPTY, EMPTY]; 2]]);
     let files = Files::new(BTreeMap::from([
         ("S2".to_string(), md.build()),
@@ -185,12 +185,12 @@ fn a_relaunched_game_numbers_its_calls_from_0_and_the_driver_plays_them() {
     play_song(&mut s, 0);
     d.sync(&s.sound, &files);
     assert!(d.player.module.is_none());
-    assert_eq!(s.sound.next_call, 4);
 
-    // The relaunch: a fresh State, its two calls numbered 0 and 1.
-    let mut s = state(true);
-    play_song(&mut s, 7);
-    d.sync(&s.sound, &files);
+    // The relaunch: a fresh State going on with the old one's log.
+    let mut fresh = state(true);
+    fresh.sound.continue_calls(&mut s.sound);
+    play_song(&mut fresh, 7);
+    d.sync(&fresh.sound, &files);
     assert!(
         d.player.module.is_some() && d.machine.timer.running(),
         "the new run's song plays"
@@ -199,38 +199,94 @@ fn a_relaunched_game_numbers_its_calls_from_0_and_the_driver_plays_them() {
         d.machine.chip[speed], 3,
         "a new process starts from the image's effect module"
     );
-    d.sync(&s.sound, &files);
-    play_song(&mut s, 0);
-    d.sync(&s.sound, &files);
+    play_song(&mut fresh, 0);
+    d.sync(&fresh.sound, &files);
     assert!(
         d.player.module.is_none(),
         "later calls of the new run go on"
     );
 }
 
-/// A relaunch whose first tick makes as many calls as the whole old run (sound off there, an
-/// instrument used; sound on in the new run's objlist): the log entry under the old run's last
-/// number is another call, so it is a new process all the same.
+/// What the old run (`u` at its exit) called and the host did not sync yet reaches the driver
+/// before the change of process, and the new run's calls after it, all in one sync: the new
+/// run's song plays (the old run's last Stop came before it) from a module buffer that holds
+/// only its own file (the old run's longer file came before the new process's empty buffer).
 #[test]
-fn a_relaunch_as_long_as_the_old_run_is_a_new_process_too() {
-    let md = Mmd::new(vec![vec![[cell(13, 1, 0, 0), EMPTY, EMPTY, EMPTY]; 2]]);
+fn the_old_runs_unsynced_calls_come_before_the_new_process_and_its_calls() {
+    let short = Mmd::new(vec![vec![[cell(13, 1, 0, 0), EMPTY, EMPTY, EMPTY]; 2]]).build();
+    let long = Mmd::new(vec![vec![[cell(13, 1, 0, 0), EMPTY, EMPTY, EMPTY]; 8]; 4]).build();
+    assert!(long.len() > short.len() + 16);
     let files = Files::new(BTreeMap::from([
-        ("S9".to_string(), md.build()),
-        ("S13".to_string(), md.build()),
+        ("S7".to_string(), short.clone()),
+        ("S9".to_string(), long),
     ]));
     let mut d = AudioDriver::with_tables(tables(), b"MMD0");
-    let mut s = state(false);
-    play_song(&mut s, SONG_INSTRUMENT);
-    play_song(&mut s, 0);
-    assert_eq!(calls(&s), [load(13), MedCall::Stop]);
-    d.sync(&s.sound, &files);
     let mut s = state(true);
-    s.map.centre.z = 1;
-    play_area_song(&mut s);
-    assert_eq!(calls(&s), [load(9), MedCall::PlayBuffer]);
-    d.sync(&s.sound, &files);
+    play_song(&mut s, 9);
+    play_song(&mut s, 0);
+    let mut fresh = state(true);
+    fresh.sound.continue_calls(&mut s.sound);
+    play_song(&mut fresh, 7);
+    assert_eq!(
+        calls(&fresh),
+        [
+            load(9),
+            MedCall::PlayBuffer,
+            MedCall::Stop,
+            MedCall::NewProcess,
+            load(7),
+            MedCall::PlayBuffer
+        ]
+    );
+    d.sync(&fresh.sound, &files);
     assert!(
         d.player.module.is_some() && d.machine.timer.running(),
         "the new run's song plays"
     );
+    let at = CHIP_BUFFER as usize;
+    assert_eq!(&d.machine.chip[at..at + 4], b"MMD0");
+    assert!(
+        d.machine.chip[at + short.len()..at + MODULE_BUFFER]
+            .iter()
+            .all(|&b| b == 0),
+        "nothing of the old run's file is left after the new run's"
+    );
+}
+
+/// Only the marker starts the player over, whatever the calls around it: a new run whose first
+/// call is the old run's last (the case a guess from call numbers and contents could take
+/// either way) is a new process, the same call again within one process is not, and a marker
+/// already applied is not applied again.
+#[test]
+fn only_the_relaunch_marker_starts_the_player_over() {
+    let effect = Mmd::new(vec![vec![[cell(0, 0, 9, 0x05), EMPTY, EMPTY, EMPTY]; 2]]).build();
+    let speed = CHIP_EFFECT as usize + 0x34 + 0x301;
+    let files = Files::default();
+    let mut d = AudioDriver::with_tables(tables(), &effect);
+    let mut out = vec![0.0; 9600];
+    let mut s = state(true);
+    s.sound.call(MedCall::PlayEffect);
+    d.sync(&s.sound, &files);
+    d.render(&mut out, 48_000);
+    assert_eq!(d.machine.chip[speed], 5, "the effect ran its command 9");
+    s.sound.call(MedCall::PlayEffect);
+    d.sync(&s.sound, &files);
+    assert_eq!(
+        d.machine.chip[speed], 5,
+        "the same call again: the same process"
+    );
+
+    let mut fresh = state(true);
+    fresh.sound.continue_calls(&mut s.sound);
+    fresh.sound.call(MedCall::PlayEffect);
+    d.sync(&fresh.sound, &files);
+    assert_eq!(
+        d.machine.chip[speed], 3,
+        "the marked relaunch: a new process"
+    );
+    assert!(d.player.module.is_some(), "the new run's call played");
+    d.render(&mut out, 48_000);
+    assert_eq!(d.machine.chip[speed], 5);
+    d.sync(&fresh.sound, &files);
+    assert_eq!(d.machine.chip[speed], 5, "the marker was applied once");
 }

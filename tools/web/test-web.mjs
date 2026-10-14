@@ -3,7 +3,8 @@
 // handling (read and forget failures, an engine trap and Restart), keyboard focus, the CSP,
 // saved games (stored after a Save, resumed on reload, forgotten, imported as a folder, a
 // replaced game's Save never stored over its replacement's, a Save after a forget stored
-// whole, a folder file over the save limit left out), the sound output (AudioContext after a gesture, chunks into the worklet) and the
+// whole, a folder file over the save limit left out), the sound output (AudioContext after a
+// gesture, chunks into the worklet; a game whose MED tables fail the checks plays silent) and the
 // launcher's sequence as a player meets it (the opening, the menu, a character created and
 // kept, the menu's J after a reload, Quit) and the mouse on the canvas (the first press is
 // both the sound's gesture and exactly one game click). Most tests start `game` at once
@@ -504,6 +505,89 @@ test('zip: a click starts the sound, the worklet gets chunks, Mute; save and rel
   console.log(`  receipt: saved at ${moved}, after the reload ${s.leader} (${s.saves} save files)`);
   assert.equal(s.leader, moved, 'restored position');
 }, { needs: h.haveZip });
+
+// In the page: the files the last start kept (IndexedDB), with a copy of `game` whose MED period
+// table (image 0x101248, hunk 0 + 0x1248; u6-core sound/tables.rs) is zeroed, dropped as the
+// extracted files. The patch is a synthetic edit of the user's own bytes, in page memory only;
+// it checks that the place holds a period table first and prints nothing of it. Returns the
+// number of files dropped.
+function dropWithoutMedTables(page) {
+  return page.evaluate(async () => {
+    const kept = await new Promise((done, fail) => {
+      const req = indexedDB.open('ultima6-port', 1);
+      req.onerror = () => fail(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        const get = db.transaction('files').objectStore('files').get('extracted');
+        get.onsuccess = () => { db.close(); done(get.result); };
+        get.onerror = () => fail(get.error);
+      };
+    });
+    const game = kept.find((f) => f.path.split('/').pop().toLowerCase() === 'game');
+    if (!game) throw new Error('no game among the kept files');
+    const bytes = game.bytes.slice();
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    // The hunk header as u6-core image.rs reads it, up to the first block of hunk 0.
+    let pos = 0;
+    const long = () => { const x = v.getUint32(pos); pos += 4; return x; };
+    if (long() !== 0x3f3) throw new Error('game: no HUNK_HEADER');
+    for (let n = long(); n !== 0; n = long()) pos += 4 * n;
+    long();
+    const first = long();
+    const last = long();
+    for (let i = first; i <= last; i += 1) if (((long() & 0xc0000000) >>> 0) === 0xc0000000) long();
+    const type = long() & 0x3fffffff;
+    if (type !== 0x3e9 && type !== 0x3ea) throw new Error('game: hunk 0 holds no bytes');
+    long();
+    const at = pos + (0x101248 - 0x100000);
+    const word = (i) => v.getUint16(at + 2 * i);
+    for (let i = 1; i < 60; i += 1) {
+      if (word(i) >= word(i - 1)) throw new Error('game: no period table at the expected place');
+    }
+    bytes.fill(0, at, at + 2 * 96);
+    const dt = new DataTransfer();
+    for (const f of kept) dt.items.add(new File([f === game ? bytes : f.bytes], f.path));
+    document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    return kept.length;
+  });
+}
+
+test('a game whose MED tables fail the checks starts and plays silent: sound on at its boot, and after a reload from the first press', async (env) => {
+  const { page } = await h.openPage(env);
+  const silent = [];
+  page.on('console', (m) => { if (m.type() === 'warning' && m.text().startsWith('sound is off')) silent.push(m.text()); });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, 130);
+  await page.click('#screen');
+  await page.waitForFunction(() => document.body.dataset.audio === 'running', null, { timeout: 15_000 });
+  assert.equal(silent.length, 0, 'the user\'s game has its audio machine');
+  // The sound is on: the boot of the new game finds no audio machine for it.
+  const dropped = await dropWithoutMedTables(page);
+  let s = await started(page);
+  assert.match(s.status, /Started\./, 'the dropped files started');
+  assert.equal(silent.length, 1, `the boot said the sound is off: ${silent}`);
+  let ticks = await page.evaluate(() => globalThis.__ticks);
+  let step = await h.stepSideways(page);
+  assert.notEqual(step.to, step.from, 'the game plays');
+  assert.ok(await page.evaluate(() => globalThis.__ticks) > ticks, 'the engine ticks');
+  // The patched files are the kept ones now: a reload restores them before any gesture, and
+  // the first press starts the AudioContext, which finds no audio machine for the game.
+  await page.reload();
+  s = await started(page);
+  assert.equal(s.audio, 'off', 'no sound before a gesture');
+  assert.equal(silent.length, 1);
+  await page.click('#screen');
+  for (let i = 0; i < 150 && silent.length < 2; i += 1) await h.sleep(100);
+  assert.equal(silent.length, 2, `the gesture said the sound is off: ${silent}`);
+  s = await h.state(page);
+  assert.equal(s.state, 'running', s.status);
+  ticks = await page.evaluate(() => globalThis.__ticks);
+  step = await h.stepSideways(page);
+  assert.notEqual(step.to, step.from, 'the game plays on');
+  assert.ok(await page.evaluate(() => globalThis.__ticks) > ticks, 'the engine ticks');
+  console.log(`  receipt: ${dropped} files dropped with the period table zeroed; sound off at the boot and at the gesture, the game walks after each`);
+}, { needs: h.haveHfes });
 
 // The creation from the menu (u6-core intro tests `create_from_menu`): C, the name, male, the
 // second portrait, the gypsy's seven questions answered A, B alternately, Escape ending the

@@ -240,9 +240,11 @@ pub async fn game_first(state: Rc<RefCell<State>>, io: Rc<Io>) {
 /// A new `game` process after the launcher ran `u` again: what the boot reads
 /// ([`State::new_game`] over the user's files), with the `savegame/objlist` this run wrote
 /// (`u`'s character, [`crate::saveload::SaveLoad::objlist`]) read in place of the files' one.
-/// The RNG goes on (the port has no clock to seed it from again). No Save can come before a
-/// relaunch (a Save is a command, and the end of the command loop ends the launcher), so the
-/// block files are the user's. Unchanged when the files no longer load.
+/// The RNG goes on (the port has no clock to seed it from again); so does the sound log, with
+/// the change of process marked for the host's player
+/// ([`crate::sound::SoundState::continue_calls`]). No Save can come before a relaunch (a Save
+/// is a command, and the end of the command loop ends the launcher), so the block files are the
+/// user's. Unchanged when the files no longer load.
 fn relaunch(state: &RefCell<State>, io: &Io) {
     let Ok(mut fresh) = State::new_game(io.files()) else {
         return;
