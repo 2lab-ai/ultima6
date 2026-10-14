@@ -4,7 +4,7 @@
 //! the per-tick effects (`effects.rs`) and starts the DMA of the channels that got a new note.
 
 use super::med::{CHANNELS, Hw, MedPlayer, PLAYING_SONG, TRACKS};
-use super::module::{Module, song};
+use super::module::{Module, addr, song};
 
 /// Song flag bit 5: no effects on a line's first tick.
 const FLAG_NO_TICK0_FX: u8 = 0x20;
@@ -19,7 +19,7 @@ impl MedPlayer {
         };
         self.dma_pending = 0;
         let s = md.song(hw.mem());
-        let tempo2 = hw.mem().b(s + song::TEMPO2);
+        let tempo2 = hw.mem().b(addr(s, song::TEMPO2));
         let tick = self.counter.wrapping_add(1);
         let tick = if (tick as i8) < (tempo2 as i8) {
             self.counter = tick;
@@ -30,7 +30,7 @@ impl MedPlayer {
                 return;
             }
             self.next_line(hw, md, s);
-            if hw.mem().b(s + song::FLAGS) & FLAG_NO_TICK0_FX != 0 {
+            if hw.mem().b(addr(s, song::FLAGS)) & FLAG_NO_TICK0_FX != 0 {
                 self.start_dma(hw);
                 return;
             }
@@ -45,26 +45,29 @@ impl MedPlayer {
     fn read_line(&mut self, hw: &mut Hw, md: Module, s: u32) -> bool {
         let block = md.block(hw.mem(), self.block);
         self.numtracks = u16::from(hw.mem().b(block));
-        self.lines = u16::from(hw.mem().b(block + 1));
-        let mut at = block + 2 + u32::from(self.line * 3) * u32::from(self.numtracks);
+        self.lines = u16::from(hw.mem().b(addr(block, 1)));
+        let mut at = addr(
+            block,
+            2 + u32::from(self.line) * 3 * u32::from(self.numtracks),
+        );
         for ch in 0..usize::from(self.numtracks).min(TRACKS) {
             let mem = hw.mem();
-            let (mut note, b1, arg) = (mem.b(at), mem.b(at + 1), mem.b(at + 2));
-            at += 3;
+            let (mut note, b1, arg) = (mem.b(at), mem.b(addr(at, 1)), mem.b(addr(at, 2)));
+            at = addr(at, 3);
             self.tracks[ch].arg = arg;
             let (bit4, bit5) = (note & 0x80 != 0, note & 0x40 != 0);
             note &= 0x3f;
             if b1 & 0xf0 != 0 || bit4 || bit5 {
                 let instr = ((b1 >> 4) + if bit4 { 0x10 } else { 0 } + if bit5 { 0x20 } else { 0 })
                     .wrapping_sub(1);
-                let entry = s + u32::from(instr) * 8;
+                let entry = addr(s, u32::from(instr) * 8);
                 let t = &mut self.tracks[ch];
                 t.instr = instr;
                 t.hold = self.hold.get(usize::from(instr)).copied().unwrap_or(0);
                 t.decay = self.decay.get(usize::from(instr)).copied().unwrap_or(0);
                 t.instr_entry = entry;
-                t.volume = scale(mem.b(entry + 6), t.track_vol);
-                t.transpose = mem.b(entry + 7);
+                t.volume = scale(mem.b(addr(entry, 6)), t.track_vol);
+                t.transpose = mem.b(addr(entry, 7));
             }
             let cmd = b1 & 0x0f;
             self.tracks[ch].cmd = cmd;
@@ -103,7 +106,7 @@ impl MedPlayer {
                 }
                 0xc => {
                     let mut v = arg;
-                    if hw.mem().b(s + song::FLAGS) & FLAG_HEX_VOLUME == 0 {
+                    if hw.mem().b(addr(s, song::FLAGS)) & FLAG_HEX_VOLUME == 0 {
                         v = (arg >> 4).wrapping_mul(10).wrapping_add(arg & 0x0f);
                     }
                     let t = &mut self.tracks[ch];
@@ -114,7 +117,7 @@ impl MedPlayer {
                         0 => 0x20,
                         v => v,
                     };
-                    hw.set_byte(s + song::TEMPO2, v);
+                    hw.set_byte(addr(s, song::TEMPO2), v);
                 }
                 0x8 => {
                     let t = &mut self.tracks[ch];
@@ -122,7 +125,7 @@ impl MedPlayer {
                     t.hold = arg & 0x0f;
                 }
                 0xb => {
-                    if u16::from(arg) <= hw.mem().w(s + song::SONGLEN) {
+                    if u16::from(arg) <= hw.mem().w(addr(s, song::SONGLEN)) {
                         self.pseq = u16::from(arg);
                         self.next_block = 0xff;
                     }
@@ -155,7 +158,7 @@ impl MedPlayer {
             return 0;
         }
         let idx = n
-            .wrapping_add(hw.mem().b(s + song::PLAYTRANSP))
+            .wrapping_add(hw.mem().b(addr(s, song::PLAYTRANSP)))
             .wrapping_add(self.tracks[ch].transpose);
         if (idx as i8) < 0 {
             return 0;
@@ -180,12 +183,12 @@ impl MedPlayer {
                 if (self.next_block as i8) >= 0 {
                     pos = pos.wrapping_add(1);
                 }
-                if (pos as i16) >= (mem.w(s + song::SONGLEN) as i16) {
+                if (pos as i16) >= (mem.w(addr(s, song::SONGLEN)) as i16) {
                     pos = 0;
                 }
                 self.pseq = (self.pseq & 0xff00) | (pos & 0xff);
-                let mut blk = mem.b(s + song::PLAYSEQ + u32::from(pos));
-                if (blk as i8) >= (mem.b(s + song::NUMBLOCKS + 1) as i8) {
+                let mut blk = mem.b(addr(s, song::PLAYSEQ + u32::from(pos)));
+                if (blk as i8) >= (mem.b(addr(s, song::NUMBLOCKS + 1)) as i8) {
                     blk = 0;
                 }
                 self.block = (self.block & 0xff00) | u16::from(blk);
@@ -197,11 +200,11 @@ impl MedPlayer {
         // portamento note.
         let block = md.block(mem, self.block);
         let tracks = mem.b(block);
-        let tempo2 = mem.b(s + song::TEMPO2);
-        let mut at = block + 2 + u32::from(self.line * 3) * u32::from(tracks);
+        let tempo2 = mem.b(addr(s, song::TEMPO2));
+        let mut at = addr(block, 2 + u32::from(self.line) * 3 * u32::from(tracks));
         for t in self.tracks.iter_mut().take(usize::from(tracks)) {
             if t.hold_count >= 0 {
-                let (note, b1) = (mem.b(at), mem.b(at + 1));
+                let (note, b1) = (mem.b(at), mem.b(addr(at, 1)));
                 let keep = if note == 0 {
                     b1 & 0xf0 != 0
                 } else {
@@ -211,7 +214,7 @@ impl MedPlayer {
                     t.hold_count = t.hold_count.wrapping_add(tempo2 as i8);
                 }
             }
-            at += 3;
+            at = addr(at, 3);
         }
     }
 

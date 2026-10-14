@@ -6,23 +6,30 @@
 //! each access, which is the same address. Field offsets are the MMD0 format's (OctaMED
 //! `MMD0`, `MMD0song`, `MMD0block`, `InstrHdr`, `SynthInstr`, `MMD0exp`) as the routine uses
 //! them; every read is bounds-checked and reads 0 outside memory, where the original would read
-//! whatever is there.
+//! whatever is there. Addresses are formed with [`addr`], which wraps: a malformed module's
+//! pointer can hold any value.
+
+/// `base + off` as the 68000 forms an address from a register and an offset (32 bits, wrapping;
+/// 0x100fa4 reads `$301(a0)` of whatever the song pointer holds).
+pub fn addr(base: u32, off: u32) -> u32 {
+    base.wrapping_add(off)
+}
 
 /// Byte reader over the player's memory (chip memory of the audio machine).
 #[derive(Clone, Copy, Debug)]
 pub struct Mem<'a>(pub &'a [u8]);
 
 impl Mem<'_> {
-    pub fn b(&self, addr: u32) -> u8 {
-        self.0.get(addr as usize).copied().unwrap_or(0)
+    pub fn b(&self, at: u32) -> u8 {
+        self.0.get(at as usize).copied().unwrap_or(0)
     }
 
-    pub fn w(&self, addr: u32) -> u16 {
-        u16::from_be_bytes([self.b(addr), self.b(addr.wrapping_add(1))])
+    pub fn w(&self, at: u32) -> u16 {
+        u16::from_be_bytes([self.b(at), self.b(addr(at, 1))])
     }
 
-    pub fn l(&self, addr: u32) -> u32 {
-        u32::from(self.w(addr)) << 16 | u32::from(self.w(addr.wrapping_add(2)))
+    pub fn l(&self, at: u32) -> u32 {
+        u32::from(self.w(at)) << 16 | u32::from(self.w(addr(at, 2)))
     }
 }
 
@@ -74,42 +81,42 @@ impl Module {
     fn ptr(&self, m: Mem, at: u32) -> u32 {
         match m.l(at) {
             0 => 0,
-            off => self.base.wrapping_add(off),
+            off => addr(self.base, off),
         }
     }
 
     /// The song structure (`MMD0song`).
     pub fn song(&self, m: Mem) -> u32 {
-        self.ptr(m, self.base + MMD_SONG)
+        self.ptr(m, addr(self.base, MMD_SONG))
     }
 
     /// Block `n` (`MMD0block`: tracks, last line index, then 3 bytes per note).
     pub fn block(&self, m: Mem, n: u16) -> u32 {
-        let arr = self.ptr(m, self.base + MMD_BLOCKARR);
-        self.ptr(m, arr.wrapping_add(u32::from(n) * 4))
+        let arr = self.ptr(m, addr(self.base, MMD_BLOCKARR));
+        self.ptr(m, addr(arr, u32::from(n) * 4))
     }
 
     /// Instrument `n`'s data (0 = none).
     pub fn sample(&self, m: Mem, n: u8) -> u32 {
-        let arr = self.ptr(m, self.base + MMD_SMPLARR);
-        self.ptr(m, arr.wrapping_add(u32::from(n) * 4))
+        let arr = self.ptr(m, addr(self.base, MMD_SMPLARR));
+        self.ptr(m, addr(arr, u32::from(n) * 4))
     }
 
     /// The expansion structure (0 = none).
     pub fn expdata(&self, m: Mem) -> u32 {
-        self.ptr(m, self.base + MMD_EXPDATA)
+        self.ptr(m, addr(self.base, MMD_EXPDATA))
     }
 
     /// `MMD0exp.exp_smp` (instrument extensions: hold, decay), 0 = none.
     pub fn exp_samples(&self, m: Mem, exp: u32) -> u32 {
-        self.ptr(m, exp + 4)
+        self.ptr(m, addr(exp, 4))
     }
 
     /// Waveform `n` of the synth or hybrid instrument at `instr` (relative to the instrument).
     pub fn waveform(m: Mem, instr: u32, n: u8) -> u32 {
-        match m.l(instr + instr::WF + u32::from(n) * 4) {
+        match m.l(addr(instr, instr::WF + u32::from(n) * 4)) {
             0 => 0,
-            off => instr.wrapping_add(off),
+            off => addr(instr, off),
         }
     }
 }

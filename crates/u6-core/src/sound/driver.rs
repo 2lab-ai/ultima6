@@ -5,6 +5,9 @@
 //! engine.io().files())`; from the audio callback (or a ring buffer it drains),
 //! `driver.render(&mut buf, sample_rate)`. Rendering never touches the engine, so audio cannot
 //! change the game; given the same calls at the same sample positions it is bit-reproducible.
+//! One driver serves every `game` process of a launcher run: the relaunch's new State numbers its
+//! calls from 0 again, and [`AudioDriver::sync`] then starts the player over as a new process
+//! does.
 
 use u6_audio::{FilterModel, Machine};
 
@@ -26,8 +29,12 @@ pub const CHIP_EFFECT: u32 = CHIP_BUFFER + MODULE_BUFFER as u32;
 pub struct AudioDriver {
     pub machine: Machine,
     pub player: MedPlayer,
+    /// The sound-effect module as the image holds it (each new `game` process starts from it).
+    effect: Vec<u8>,
     /// Number of the next game call to apply.
     applied: u64,
+    /// The call applied under number `applied - 1` (a process's log never changes an entry).
+    last: Option<MedCall>,
 }
 
 impl AudioDriver {
@@ -56,16 +63,33 @@ impl AudioDriver {
         Self {
             machine,
             player,
+            effect: effect.to_vec(),
             applied: 0,
+            last: None,
         }
     }
 
     /// Applies the game calls this driver has not seen yet, in order. Calls that dropped out of
     /// the log (more than [`super::CALL_LOG`] since the last sync) are lost.
+    ///
+    /// A new `game` process (the launcher's relaunch replaced the State) numbers its calls from 0
+    /// again: its log ends below the calls already applied, or holds another call under the
+    /// number of the last one. The player then starts over as that process's setup sets it up
+    /// and plays the new log from its first call.
     pub fn sync(&mut self, sound: &SoundState, files: &Files) {
+        let changed = |k: u64| {
+            sound
+                .calls
+                .iter()
+                .any(|(n, call)| *n == k && Some(call) != self.last.as_ref())
+        };
+        if sound.next_call < self.applied || self.applied.checked_sub(1).is_some_and(changed) {
+            self.new_process();
+        }
         for (n, call) in &sound.calls {
             if *n >= self.applied {
                 self.apply(call, files);
+                self.last = Some(call.clone());
             }
         }
         self.applied = sound.next_call;
@@ -113,5 +137,16 @@ impl AudioDriver {
     /// RemPlayer (0x100f96), as the shutdown 0x14ee70 calls it.
     pub fn remove(&mut self) {
         self.player.remove(&mut self.machine);
+    }
+
+    /// The end of one `game` process and the start of the next: the old one's shutdown
+    /// (0x14ee70: RemPlayer) leaves nothing playing, the new one's setup (0x14ef06) sets the
+    /// player up on its own memory (the effect module as the image holds it, an empty module
+    /// buffer). The output stage stays the host's.
+    fn new_process(&mut self) {
+        let filter = self.machine.filter;
+        let effect = std::mem::take(&mut self.effect);
+        *self = Self::with_tables(self.player.tables.clone(), &effect);
+        self.machine.filter = filter;
     }
 }

@@ -3,7 +3,7 @@
 use super::*;
 
 /// A synth instrument: sequences (each ≤ 128 bytes), speeds, waveforms.
-fn synth(voltbl: &[u8], wftbl: &[u8], speeds: (u8, u8), waves: &[Vec<u8>]) -> Inst {
+pub(super) fn synth(voltbl: &[u8], wftbl: &[u8], speeds: (u8, u8), waves: &[Vec<u8>]) -> Inst {
     // Bytes after the 6-byte length/type header.
     let mut d = vec![0u8; 0x116 - 6 + 4 * waves.len()];
     d[0x12 - 6] = speeds.0;

@@ -2,7 +2,7 @@
 //! instrument, its arpeggio and vibrato. The sound-effect module in hunk 28 is a synth sound.
 
 use super::med::{Hw, MedPlayer};
-use super::module::{Module, instr};
+use super::module::{Module, addr, instr};
 
 /// Port bound on sequence commands per step: a JMP onto itself would hang the original's
 /// interrupt; the port stops the step instead.
@@ -26,7 +26,7 @@ impl MedPlayer {
     /// the start, the instrument's speeds, no pitch offsets; then one step.
     pub(super) fn synth_init(&mut self, hw: &mut Hw, ch: usize) {
         let ins = self.tracks[ch].synth;
-        let speeds = hw.mem().w(ins + instr::SPEEDS);
+        let speeds = hw.mem().w(addr(ins, instr::SPEEDS));
         let t = &mut self.tracks[ch];
         t.arp_pos = 0;
         t.arp_start = 0;
@@ -57,8 +57,8 @@ impl MedPlayer {
             return;
         };
         // Sequence bytes: entry `pos` (1-based) and the argument after it.
-        let vol_at = |pos: u16| mem.b(ins + instr::VOLTBL - 1 + u32::from(pos));
-        let wf_at = |pos: u16| mem.b(ins + instr::WFTBL - 1 + u32::from(pos));
+        let vol_at = |pos: u16| mem.b(addr(ins, instr::VOLTBL - 1 + u32::from(pos)));
+        let wf_at = |pos: u16| mem.b(addr(ins, instr::WFTBL - 1 + u32::from(pos)));
 
         t.vol_count = t.vol_count.wrapping_sub(1);
         if (t.vol_count as i8) <= 0 {

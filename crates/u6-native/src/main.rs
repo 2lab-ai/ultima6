@@ -409,7 +409,7 @@ fn map_key(key: minifb::Key, ctrl: bool) -> Option<Key> {
 fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String> {
     let (w, h) = (WIDTH * SCALE, HEIGHT * SCALE);
     let mut sound = match Output::open() {
-        Ok(out) => Some((Audio::new(&engine, out.rate)?, out)),
+        Ok(out) => Audio::or_silent(&engine, out.rate).map(|audio| (audio, out)),
         Err(e) => {
             eprintln!("audio: {e}; running silent");
             None

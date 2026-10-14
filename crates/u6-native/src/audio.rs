@@ -38,6 +38,15 @@ impl Audio {
         })
     }
 
+    /// The window's sound, or none (said on stderr) when the driver cannot be built from the
+    /// user's `game` (its MED tables fail the checks): the game then runs silent instead of not
+    /// at all.
+    pub fn or_silent(engine: &Engine, rate: u32) -> Option<Self> {
+        Self::new(engine, rate)
+            .map_err(|e| eprintln!("audio: {e}; sound is off"))
+            .ok()
+    }
+
     /// Replays the calls the last tick made.
     pub fn sync(&mut self, engine: &Engine) {
         self.driver.sync(&engine.state().sound, engine.io().files());
@@ -193,6 +202,51 @@ mod tests {
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect();
         assert_eq!(pcm, [32767, -32767, 0, 8192]);
+    }
+
+    #[test]
+    fn files_without_a_usable_game_leave_the_window_silent() {
+        let engine = Engine::with_game(
+            u6_core::State::default(),
+            u6_core::Files::default(),
+            |_, _| async {},
+        );
+        assert!(Audio::new(&engine, WAV_RATE).is_err());
+        assert!(Audio::or_silent(&engine, WAV_RATE).is_none());
+    }
+
+    /// The user's `game` with its period table broken in memory: the MED checks fail, the game
+    /// boots and runs, the window has no sound. Skips without the archive.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn a_game_whose_med_tables_fail_the_checks_runs_silent() {
+        let zip = Path::new("/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip");
+        if !zip.exists() {
+            eprintln!("skipped: {} not present", zip.display());
+            return;
+        }
+        let r = u6_intake::intake(vec![u6_intake::InputFile {
+            name: "ultima-vi.zip".into(),
+            data: std::fs::read(zip).unwrap(),
+        }]);
+        let mut files = u6_core::Files::new(r.files);
+        let mut game = files.get("game").unwrap().to_vec();
+        let at = u6_core::image::GameImage::parse(&game)
+            .unwrap()
+            .file_offset(u6_core::sound::tables::PERIODS)
+            .unwrap();
+        game[at..at + 2 * 96].fill(0);
+        files.overlay("broken", [("game".to_string(), game)].into());
+        let mut engine = Engine::game_first(files, 0).unwrap();
+        assert!(Audio::or_silent(&engine, WAV_RATE).is_none());
+        for _ in 0..120 {
+            engine.tick(&[], 16);
+        }
+        assert!(!engine.finished());
+        assert!(
+            engine.state().sound.next_call > 0,
+            "the game's music calls go on"
+        );
     }
 
     #[test]

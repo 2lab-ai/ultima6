@@ -3,7 +3,7 @@
 //! the DMA start at the end (0x100628).
 
 use super::med::{CHANNELS, Hw, MedPlayer};
-use super::module::{Module, song};
+use super::module::{Module, addr, song};
 
 /// Lowest period the slides leave (0x71 = 113).
 const MIN_PERIOD: u16 = 0x71;
@@ -113,7 +113,7 @@ impl MedPlayer {
         };
         let n = n
             .wrapping_sub(1)
-            .wrapping_add(hw.mem().b(s + song::PLAYTRANSP))
+            .wrapping_add(hw.mem().b(addr(s, song::PLAYTRANSP)))
             .wrapping_add(t.transpose);
         Some(self.period_at(t.period_table, u16::from(n.wrapping_mul(2) / 2)))
     }
