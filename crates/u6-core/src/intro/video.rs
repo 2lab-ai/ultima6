@@ -62,6 +62,8 @@ pub struct Video {
 /// The gradient copper list of buffer 0 (the one of buffer 1, 0x1144fa, is the same but for
 /// its bitplane pointers).
 const GRADIENT_LIST: u32 = 0x0011_436a;
+/// Original: u 0x10fb62 (word: frames until the next colour-cycle step; 3 in the image)
+const CYCLE_WAIT: u32 = 0x0010_fb62;
 /// Copper line of screen row 0 (DIWSTRT 0x2c81).
 const FIRST_LINE: i32 = 0x2c;
 
@@ -105,7 +107,7 @@ impl Video {
             fade_in_level: 0,
             fade_out_count: -1,
             cycling: 0,
-            cycle_wait: 0,
+            cycle_wait: exe.word(CYCLE_WAIT),
             cycle_palette: exe.palette(32),
             pointer: 0,
             frames: 0,

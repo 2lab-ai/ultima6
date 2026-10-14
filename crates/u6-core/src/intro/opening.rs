@@ -1,4 +1,6 @@
-//! The opening of `u`: ORIGIN, Lord British, the TV room (0x1041b0 and its helpers in hunk 2).
+//! The opening of `u`: ORIGIN, Lord British, the TV room (0x1041b0 and its helpers in hunk 2);
+//! the storm and the stones follow in [`super::storm`], the moongate and the portal in
+//! [`super::gate`].
 //!
 //! `intro_1a.new` and `intro_1b.new` are whole 5-plane screens loaded straight into the drawing
 //! buffer and faded in and out with palette 0. `intro_1.new` holds the TV room: item 0 the room,
@@ -238,10 +240,11 @@ fn room_frame(st: &mut IntroState, with_passage: bool) {
     draw_clock(st, 0xdd, draw, file);
 }
 
-/// Original: u 0x1041b0 (opening: ORIGIN, Lord British, the TV room; Escape skips) [partial]
+/// Original: u 0x1041b0 (opening: ORIGIN, Lord British, the TV room, the storm and the stones,
+/// the moongate and the gargoyles' portal; Escape skips to the end)
 ///
-/// The storm, the stones and the gate (from `intro_2.new` on, 0x1046c2..0x10558e) are not
-/// ported: after the TV room pans away, the opening ends as if skipped (stub point).
+/// From `intro_2.new` on (0x1046c2..0x10558e) the body continues in [`super::storm::storm`]
+/// and [`super::gate::gate`].
 pub async fn opening(st: &mut IntroState, io: &Io) {
     let v = &mut st.views;
     v.front = v.draw;
@@ -293,7 +296,8 @@ async fn room_until_key(st: &mut IntroState, io: &Io) -> bool {
     }
 }
 
-/// 0x1041b0 from the first music call to the stub point; true = ended through 0x10558e.
+/// 0x1041b0 from the first music call to 0x10558e; true = ended through 0x10558e (every path
+/// but the Escape check before the first picture).
 async fn body(st: &mut IntroState, io: &Io) -> bool {
     super::seams::play_song(st, 2);
     st.tv.file = st.files_ptr;
@@ -379,10 +383,9 @@ async fn body(st: &mut IntroState, io: &Io) -> bool {
     if pan_away(st, io).await {
         return true;
     }
-    crate::todo_stub!(
-        "u 0x1046c2 opening: storm, stones and gate (intro_2 .. intro_3)",
-        ()
-    );
+    if super::storm::storm(st, io).await {
+        super::gate::gate(st, io).await;
+    }
     true
 }
 

@@ -116,6 +116,8 @@ pub struct IntroState {
     pub frame: Frame,
     pub hero: Hero,
     pub tv: super::opening::Tv,
+    pub storm: super::storm::Storm,
+    pub story: super::story::Story,
     pub gypsy: super::gypsy::Gypsy,
     /// Original: A4+0xb3c (long: state of the C `rand` 0x10fa6c)
     pub rand: u32,
@@ -151,6 +153,7 @@ impl IntroState {
     pub fn new(exe: UExe, files: Files) -> Self {
         let video = Video::new(&exe);
         let keys = Keyboard::new(&exe);
+        let mover_start = exe.word(A4 + 0xb3a);
         let hero = Hero {
             karma: exe.byte(A4 + 0x400),
             ..Hero::default()
@@ -171,6 +174,11 @@ impl IntroState {
             frame: Frame::default(),
             hero,
             tv: super::opening::Tv::default(),
+            storm: super::storm::Storm::default(),
+            story: super::story::Story {
+                mover: super::story::Mover::new(mover_start),
+                ..super::story::Story::default()
+            },
             gypsy: super::gypsy::Gypsy::default(),
             rand: 0,
             skip: 0,

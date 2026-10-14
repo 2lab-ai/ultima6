@@ -97,7 +97,35 @@ fn script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
     shot("tv-room", r);
     r.keys(&[Key::Space], 60);
     shot("tv-room-2", r);
-    r.keys(&[Key::Space], 400);
+    // Passage 2 while the room pans away, then the storm waits for a key.
+    r.keys(&[Key::Space], 120);
+    r.keys(&[Key::Space], 160);
+    shot("storm", r);
+    for _ in 0..3 {
+        r.keys(&[Key::Space], 40);
+    }
+    shot("storm-lit", r);
+    r.keys(&[Key::Space], 90);
+    shot("stones", r);
+    r.keys(&[Key::Space], 80);
+    shot("stones-parted", r);
+    r.keys(&[Key::Space], 60);
+    shot("night", r);
+    r.keys(&[Key::Space], 60);
+    shot("moon", r);
+    r.keys(&[Key::Space], 90);
+    shot("moongate", r);
+    r.keys(&[Key::Space], 60);
+    shot("ground-drops", r);
+    r.keys(&[Key::Space], 60);
+    r.keys(&[Key::Space], 30);
+    r.keys(&[Key::Space], 30);
+    shot("gate-trembles", r);
+    r.keys(&[Key::Space], 40);
+    shot("portal", r);
+    r.tick(80);
+    shot("portal-open", r);
+    r.keys(&[Key::Space], 60);
     shot("menu", r);
     r.keys(&[Key::Char('a')], 120);
     shot("credits", r);
@@ -132,6 +160,9 @@ fn script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
         r.keys(&[Key::Space], 120);
     }
     r.tick(60);
+    // The introduction story follows a creation it was not seen before; Escape ends it.
+    shot("story-after-creation", r);
+    r.keys(&[Key::Escape], 200);
 }
 
 #[test]
@@ -249,6 +280,54 @@ fn receipt_screens() {
         s.actors.objlist_tail[0x81],
     );
     let _ = handoff::summary;
+    println!("stubs {:?}", r.e.stub_hits());
+    println!("dir {}", dir.display());
+}
+
+/// Receipt aid: the opening from the TV room on, one PNG every 8 ticks with Space every 120,
+/// under the system temp directory (`u6-intro-frames/`). Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "writes receipt images outside the repository"]
+fn receipt_opening_frames() {
+    let Some(files) = files() else { return };
+    let dir: PathBuf = std::env::temp_dir().join("u6-intro-frames");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut r = Run::new(files);
+    r.tick(265);
+    r.keys(&[Key::Space], 60);
+    for k in 0..18 {
+        r.keys(&[Key::Space], 0);
+        for _ in 0..15 {
+            r.tick(8);
+            let (idx, pal) = r.frame();
+            let t = r.e.ticks();
+            png(&dir.join(format!("f{t:05}-k{k:02}.png")), &idx, &pal);
+        }
+    }
+    println!("dir {}", dir.display());
+}
+
+/// Receipt aid: the introduction story from the menu, one PNG every 8 ticks with Space every
+/// 120 (`u6-story-frames/`). Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "writes receipt images outside the repository"]
+fn receipt_story_frames() {
+    let Some(files) = files() else { return };
+    let dir: PathBuf = std::env::temp_dir().join("u6-story-frames");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut r = Run::new(files);
+    r.tick(30);
+    r.keys(&[Key::Escape], 120);
+    r.keys(&[Key::Char('i')], 0);
+    for k in 0..26 {
+        for _ in 0..15 {
+            r.tick(8);
+            let (idx, pal) = r.frame();
+            let t = r.e.ticks();
+            png(&dir.join(format!("f{t:05}-k{k:02}.png")), &idx, &pal);
+        }
+        r.keys(&[Key::Space], 0);
+    }
     println!("stubs {:?}", r.e.stub_hits());
     println!("dir {}", dir.display());
 }

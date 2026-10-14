@@ -400,3 +400,51 @@ pub fn fill_view(chip: &mut Chip, view: &View, colour: u8) {
         colour,
     );
 }
+
+/// Bytes of the composite bitmap before its mask plane (A4+0x2e22: 5 planes, then the mask).
+const MASK_AT: usize = SCREEN;
+
+/// Original: u 0x1165c2 (intro graphics: the composite's mask plane = the OR of its five planes,
+/// so every pixel that is not colour 0 is opaque)
+pub fn composite_mask(chip: &mut Chip) {
+    let b = chip.bytes_mut(Ptr::at(Region::Composite));
+    for i in 0..PLANE {
+        let m = (0..5).fold(0u8, |m, p| m | b[p * PLANE + i]);
+        b[MASK_AT + i] = m;
+    }
+}
+
+/// The composite overlay of 0x11653c / 0x116490: per byte, where the mask is set the
+/// destination planes are cleared and the composite's planes ORed in; source column `col + skip`
+/// lands on destination column `col`.
+fn overlay(chip: &mut Chip, dst: Region, skip: usize) {
+    let src = chip.bytes(Ptr::at(Region::Composite)).to_vec();
+    let d = chip.bytes_mut(Ptr::at(dst));
+    for row in 0..200 {
+        for col in 0..(ROW - skip) {
+            let s = row * ROW + col + skip;
+            let t = row * ROW + col;
+            let keep = !src[MASK_AT + s];
+            for p in 0..5 {
+                let at = p * PLANE + t;
+                d[at] = (d[at] & keep) | src[p * PLANE + s];
+            }
+        }
+    }
+}
+
+/// Original: u 0x11653c (intro graphics: overlay the composite bitmap on the buffer drawn into,
+/// A4+0x2d52)
+pub fn overlay_composite(chip: &mut Chip, dst: Region) {
+    overlay(chip, dst, 0);
+}
+
+/// Original: u 0x116490 (intro graphics: as 0x11653c with the composite moved `x` pixels left,
+/// in whole bytes; nothing from x = 320 on)
+pub fn overlay_composite_left(chip: &mut Chip, dst: Region, x: i16) {
+    let skip = usize::from((x as u16) >> 3);
+    if skip >= ROW {
+        return;
+    }
+    overlay(chip, dst, skip);
+}

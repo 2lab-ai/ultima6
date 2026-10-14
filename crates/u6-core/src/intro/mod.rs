@@ -19,8 +19,10 @@
 //! Functions of `u` this module ports or stubs (see each item's `Original:` line):
 //!
 //! - u 0x1029d0 main · u 0x1031b8 main menu · u 0x10361a journey onward
-//! - u 0x1041b0 opening [partial: storm, stones and gate stubbed] · u 0x103a42 TV script ·
-//!   u 0x103966 · u 0x103830 · u 0x1040aa · u 0x1039b8 / u 0x1039d2 key checks · u 0x1055ea
+//! - u 0x1041b0 opening · u 0x103a42 TV script · u 0x103966 · u 0x103830 · u 0x1040aa ·
+//!   u 0x1039b8 / u 0x1039d2 key checks · u 0x1055ea; storm u 0x103c38 · u 0x103c52 ·
+//!   u 0x103c6c · u 0x103d32 · u 0x103e80 · u 0x103ea4; composite u 0x1165c2 · u 0x11653c ·
+//!   u 0x116490
 //! - u 0x106666 creation · u 0x105876 name / sex · u 0x102e4a / u 0x102f66 input ·
 //!   u 0x10a15e portrait · u 0x1030f8 buttons · u 0x109e44 · u 0x105700 objlist
 //! - gypsy: u 0x105a04 · u 0x1059a8 · u 0x119944 · u 0x105aea · u 0x105c24 · u 0x106312 ·
@@ -38,6 +40,7 @@
 pub mod create;
 pub mod credits;
 pub mod exe;
+pub mod gate;
 pub mod gypsy;
 pub mod handoff;
 pub mod input;
@@ -48,6 +51,8 @@ pub mod passages;
 pub mod screen;
 pub mod seams;
 pub mod state;
+pub mod storm;
+pub mod story;
 #[cfg(test)]
 mod tests;
 pub mod text;
@@ -131,31 +136,31 @@ pub async fn main(st: &mut IntroState, io: &Io, seed: u16) -> IntroOutcome {
     loop {
         match menu(st, io).await {
             0 => {
-                introduction(st);
+                story::introduction(st, io).await;
                 st.intro_seen = 1;
             }
             1 => {
                 if create::create(st, io).await == 0 {
-                    return journey(st);
+                    return journey(st, io).await;
                 }
             }
             2 => {
                 if transfer(st) != 0 {
-                    return journey(st);
+                    return journey(st, io).await;
                 }
             }
             3 => credits::credits(st, io).await,
-            4 => return journey(st),
+            4 => return journey_onward(st),
             _ => return IntroOutcome::Quit,
         }
     }
 }
 
 /// After a creation or transfer main shows the introduction once, then journeys on.
-fn journey(st: &mut IntroState) -> IntroOutcome {
+async fn journey(st: &mut IntroState, io: &Io) -> IntroOutcome {
     st.views.draw = st.views.screen;
     if st.intro_seen == 0 {
-        introduction(st);
+        story::introduction(st, io).await;
     }
     journey_onward(st)
 }
@@ -175,12 +180,6 @@ pub fn journey_onward(st: &mut IntroState) -> IntroOutcome {
     IntroOutcome::Play {
         created: st.objlist.is_some(),
     }
-}
-
-/// Stub: u 0x1078e6 (the introduction story: the stones, the gate, the gargoyles' altar).
-fn introduction(st: &mut IntroState) {
-    let _ = st;
-    crate::todo_stub!("u 0x1078e6 introduction story", ());
 }
 
 /// Stub: u 0x10a81e (transfer a character from an Ultima IV / V save disk) — returns 0 (no
