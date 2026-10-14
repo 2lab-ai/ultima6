@@ -101,10 +101,11 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
     }
 }
 
-/// 0x106be6..0x106c5e: the pointer sample (0x14f12c, the handler's events up to the next button
-/// change); with a button down the click map 0x10658e gives the code. A4-0x7a34 marks the press
-/// (the first sample with a button down, A4-0x7a36 then set); while held only the press's code
-/// repeats. With no button down both clear.
+/// 0x106be6..0x106c5e: the pointer sample (0x14f12c copies the handler's position 0x1623b8 /
+/// 0x1623ba and its button word 0x161bd4; the port takes the queued events up to the next button
+/// change, [`Io::take_pointer`]); with a button down the click map 0x10658e gives the code.
+/// A4-0x7a34 marks the press (the first sample with a button down, A4-0x7a36 then set); while
+/// held only the press's code repeats. With no button down both clear.
 ///
 /// A held button (A4-0x7a36 set and still down) repeats at once in the original: nothing in
 /// 0x106bbc or 0x14f12c waits, the input.device handler runs beside the game and the release
