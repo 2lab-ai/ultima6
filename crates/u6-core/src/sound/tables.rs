@@ -6,7 +6,7 @@ use u6_formats::FormatError;
 
 /// 0x101248: the synth note → period table (96 words); the sample table 0x101278 is the same
 /// memory 24 words on (`$42(a5)` points at one or the other).
-const PERIODS: u32 = 0x10_1248;
+pub const PERIODS: u32 = 0x10_1248;
 /// Entries of the synth table before the sample table starts.
 pub const SAMPLE_PERIODS: u16 = 24;
 const PERIOD_COUNT: usize = 96;

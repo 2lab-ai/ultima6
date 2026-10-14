@@ -4,7 +4,7 @@
 use u6_audio::{Machine, TimerInterrupt};
 
 use super::med::{CHANNELS, Hw, MedPlayer, PLAYING_SONG, TRACKS};
-use super::module::{Module, song};
+use super::module::{Module, addr, song};
 
 /// 0x10102a's result in 0x101174 when CIA-B timer B was free (1 = it fell back to timer A).
 const TIMER_B: u8 = 2;
@@ -76,10 +76,10 @@ impl MedPlayer {
         let mut hw = Hw::of(m);
         let mem = hw.mem();
         let s = md.song(mem);
-        self.counter = mem.b(s + song::TEMPO2);
-        let filter_on = mem.b(s + song::FLAGS) & 1 != 0;
-        let tempo = mem.w(s + song::DEFTEMPO);
-        let first = mem.b(s + song::PLAYSEQ);
+        self.counter = mem.b(addr(s, song::TEMPO2));
+        let filter_on = mem.b(addr(s, song::FLAGS)) & 1 != 0;
+        let tempo = mem.w(addr(s, song::DEFTEMPO));
+        let first = mem.b(addr(s, song::PLAYSEQ));
         hw.led_bit(!filter_on);
         self.line = 0;
         self.block = u16::from(first);
@@ -103,9 +103,9 @@ impl MedPlayer {
         let md = Module { base: module };
         let mem = hw.mem();
         let s = md.song(mem);
-        let master = i16::from(mem.b(s + song::MASTERVOL) as i8);
+        let master = i16::from(mem.b(addr(s, song::MASTERVOL)) as i8);
         for (n, t) in self.tracks.iter_mut().enumerate() {
-            let v = i16::from(mem.b(s + song::TRKVOL + n as u32) as i8);
+            let v = i16::from(mem.b(addr(s, song::TRKVOL + n as u32)) as i8);
             t.track_vol = (v as u16).wrapping_mul(master as u16) >> 4;
         }
         let exp = md.expdata(mem);
@@ -114,18 +114,18 @@ impl MedPlayer {
         } else {
             md.exp_samples(mem, exp)
         };
-        let entries = if ext == 0 { 0 } else { mem.w(exp + 8) };
+        let entries = if ext == 0 { 0 } else { mem.w(addr(exp, 8)) };
         if entries == 0 {
             self.hold = [0; 63];
             self.decay = [0; 63];
             return;
         }
-        let size = u32::from(mem.w(exp + 10));
+        let size = u32::from(mem.w(addr(exp, 10)));
         for i in 0..usize::from(entries) {
-            let at = ext + size * i as u32;
+            let at = addr(ext, size * i as u32);
             // The original writes past its 63-byte tables for more entries; the port stops.
             if i < 63 {
-                self.decay[i] = mem.b(at + 1);
+                self.decay[i] = mem.b(addr(at, 1));
                 self.hold[i] = mem.b(at);
             }
         }

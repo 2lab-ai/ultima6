@@ -10,7 +10,8 @@ use super::driver::CHIP_BUFFER;
 use super::med::MedPlayer;
 use super::tables::MedTables;
 
-/// Synthetic player tables: falling periods, a computed sine, made-up timer values.
+/// Synthetic player tables: falling periods, a computed sine, made-up timer values and octave
+/// rows (each row's values follow from its index, so a test can tell which row a note used).
 pub(super) fn tables() -> MedTables {
     let mut periods = [0u16; 96];
     for (i, p) in periods.iter_mut().enumerate() {
@@ -25,9 +26,9 @@ pub(super) fn tables() -> MedTables {
         sine,
         st_tempos: [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000],
         timer_div: 600_000,
-        octave_shift: [4, 3, 2, 1, 1, 0, 2, 2, 1, 1, 0, 0],
-        octave_mult: [15, 7, 3, 1, 1, 0, 3, 3, 1, 1, 0, 0],
-        octave_note: [12, 12, 12, 12, 24, 24, 0, 12, 12, 24, 24, 36],
+        octave_shift: std::array::from_fn(|row| (row % 3) as u8),
+        octave_mult: std::array::from_fn(|row| (row % 5) as u8),
+        octave_note: std::array::from_fn(|row| (12 * (row % 4)) as u8),
     }
 }
 
@@ -159,9 +160,13 @@ pub(super) const EMPTY: [u8; 3] = [0, 0, 0];
 
 /// A player set up (InitPlayer) with `module` in chip memory, PlayModule called.
 pub(super) fn playing(module: &Mmd) -> (MedPlayer, Machine) {
-    let bytes = module.build();
+    playing_bytes(&module.build())
+}
+
+/// [`playing`] with the module's bytes as given (a malformed module).
+pub(super) fn playing_bytes(bytes: &[u8]) -> (MedPlayer, Machine) {
     let mut m = Machine::new(CHIP_BUFFER as usize + bytes.len() + 64);
-    m.chip[CHIP_BUFFER as usize..CHIP_BUFFER as usize + bytes.len()].copy_from_slice(&bytes);
+    m.chip[CHIP_BUFFER as usize..CHIP_BUFFER as usize + bytes.len()].copy_from_slice(bytes);
     let mut p = MedPlayer::new(tables());
     p.init(&mut m);
     p.play(&mut m, CHIP_BUFFER);

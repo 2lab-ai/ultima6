@@ -286,3 +286,80 @@ fn play_reads_track_volumes_and_the_hold_decay_table() {
         (&[3, 7][..], &[5, 9][..], 99)
     );
 }
+
+#[test]
+fn iff_octave_samples_take_the_octaves_part_by_the_row_of_their_kind() {
+    // Rows of the synthetic tables: shift = row % 3, multiplier = row % 5, note = 12 (row % 4).
+    let mut md = one_line([cell(13, 1, 0, 0), cell(25, 2, 0, 0), EMPTY, EMPTY]);
+    md.insts = vec![
+        Inst {
+            kind: 1,
+            ..Inst::sample(62, 2, 4)
+        },
+        Inst {
+            kind: 2,
+            ..Inst::sample(70, 2, 4)
+        },
+    ];
+    let (mut p, mut m) = playing(&md);
+    ticks(&mut p, &mut m, 1);
+    let periods = tables().periods;
+    // Five octaves: 62 / 31 = 2 units; note 12 = octave 1, row 1: start 2 × 1, loop 2 << 1 words.
+    let s0 = sample_data(&m, 0);
+    assert_eq!(
+        (p.tracks[0].repeat, p.tracks[0].repeat_len),
+        (s0 + 2 + 8, 8)
+    );
+    assert_eq!(m.paula.channels[0].period, periods[24 + 12]);
+    // Three octaves: 70 / 7 = 10 units; note 24 = octave 2, row 6 + 2: start 10 × 3, shift 2.
+    let s1 = sample_data(&m, 1);
+    assert_eq!(
+        (p.tracks[1].repeat, p.tracks[1].repeat_len),
+        (s1 + 30 + 16, 16)
+    );
+    assert_eq!(m.paula.channels[1].period, periods[24]);
+}
+
+/// Stored pointers of a malformed module can hold anything: the addresses the routine forms from
+/// them wrap as the 68000's do (0x100fa4: `movea.l 8(a0),a0`, then `move.b $301(a0)`), reads
+/// outside chip memory get 0, and nothing panics (debug builds check overflow).
+#[test]
+fn pointers_anywhere_in_a_malformed_module_play_without_a_panic() {
+    let hybrid = synth::synth(&[0x40, 0xff], &[0x00, 0xff], (1, 1), &[vec![1; 8]]);
+    let mut md = one_line([
+        cell(13, 1, 0, 0),
+        cell(1, 2, 3, 4),
+        cell(25, 1, 0xc, 0x20),
+        cell(2, 2, 0xf, 0xf1),
+    ]);
+    md.insts = vec![Inst::sample(64, 4, 8), Inst { kind: -2, ..hybrid }];
+    md.ext = vec![(1, 2), (3, 4)];
+    let good = md.build();
+    let ptr = |at: usize| u32::from_be_bytes(good[at..at + 4].try_into().unwrap()) as usize;
+    let (blocks, samples, exp) = (ptr(0x10), ptr(0x18), ptr(0x20));
+    // The header's four, block 0, both instruments, the extensions, the hybrid's waveform 0.
+    let fields = [
+        0x08,
+        0x10,
+        0x18,
+        0x20,
+        blocks,
+        samples,
+        samples + 4,
+        exp + 4,
+        ptr(samples + 4) + 0x116,
+    ];
+    for at in fields {
+        for bad in [0xffff_fe00u32, 0xffff_ffe0, 0x7fff_ffff] {
+            let mut bytes = good.clone();
+            bytes[at..at + 4].copy_from_slice(&bad.to_be_bytes());
+            let (mut p, mut m) = playing_bytes(&bytes);
+            let mut out = vec![0.0; 4096];
+            m.render(&mut p, &mut out, 8000);
+            assert!(
+                out.iter().all(|v| v.is_finite()),
+                "pointer at {at:#x} = {bad:#x}"
+            );
+        }
+    }
+}

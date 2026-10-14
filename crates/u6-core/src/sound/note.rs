@@ -2,7 +2,7 @@
 //! start registers (the DMA itself starts at the end of the interrupt).
 
 use super::med::{CHANNELS, Hw, MedPlayer, NULL_SAMPLE};
-use super::module::{Module, instr, song};
+use super::module::{Module, addr, instr, song};
 use super::tables::SAMPLE_PERIODS;
 
 /// What 0x100e70 hands back for a sample note.
@@ -40,9 +40,9 @@ impl MedPlayer {
         }
         let s = md.song(mem);
         let note = note
-            .wrapping_add(mem.b(s + song::PLAYTRANSP))
-            .wrapping_add(mem.b(entry + 7));
-        let kind = mem.w(sample + instr::TYPE) as i16;
+            .wrapping_add(mem.b(addr(s, song::PLAYTRANSP)))
+            .wrapping_add(mem.b(addr(entry, 7)));
+        let kind = mem.w(addr(sample, instr::TYPE)) as i16;
         if ch >= CHANNELS {
             return;
         }
@@ -125,13 +125,13 @@ impl MedPlayer {
         note: u8,
     ) -> SampleNote {
         let mem = hw.mem();
-        let kind = mem.w(sample + instr::TYPE);
-        let (rep, replen) = (mem.w(entry), mem.w(entry + 2));
+        let kind = mem.w(addr(sample, instr::TYPE));
+        let (rep, replen) = (mem.w(entry), mem.w(addr(entry, 2)));
         if kind == 0 {
             self.tracks[ch].period_table = SAMPLE_PERIODS;
             return SampleNote {
-                start: sample + instr::DATA,
-                length: mem.l(sample + instr::LENGTH),
+                start: addr(sample, instr::DATA),
+                length: mem.l(addr(sample, instr::LENGTH)),
                 rep,
                 replen,
                 period: self.period_at(SAMPLE_PERIODS, u16::from(note.wrapping_mul(2) / 2)),

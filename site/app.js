@@ -297,7 +297,12 @@ async function boot(next, origin) {
   game = next;
   old?.free();
   saveSeen = 0;
-  attachAudio(next);
+  try {
+    attachAudio(next);
+  } catch (err) {
+    // No audio machine for this game (its MED tables fail the engine's checks): it runs silent.
+    console.warn(`sound is off: ${message(err)}`);
+  }
   canvas.width = next.width();
   canvas.height = next.height();
   restart.hidden = true;
