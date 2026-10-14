@@ -7,7 +7,8 @@
 // each import, each forget) is one operation on a single queue: an operation starts only after
 // the previous one finished, from its file reads through the boot to the storage commit. Each
 // works on its own Game and puts it on screen only once it started; the one it replaces is
-// freed then. Keys reach the engine only while the canvas has focus and a game runs.
+// freed then. Keys reach the engine only while the canvas has focus and a game runs; the mouse
+// on the canvas is the game's pointer (a press there also focuses it).
 import init, { Game, max_input_bytes } from './pkg/u6_web.js';
 import { collect, forgetFiles, loadFiles, saveFiles } from './store.js';
 
@@ -21,7 +22,8 @@ const statusLine = document.getElementById('status');
 const MAX_STEP_MS = 100; // a backgrounded tab must not jump the game ahead
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
 const HOW_TO_PLAY = 'Click the game screen or Tab to it, then: arrow keys walk, T talks, ' +
-  'space passes.';
+  'space passes. The mouse works as in the original: click the map to walk, the command icons, ' +
+  'the party and the inventory.';
 
 let wasm = null; // the wasm exports, once loaded
 let game = null; // the running game, or null
@@ -264,7 +266,29 @@ canvas.addEventListener('keydown', (e) => {
   if (!game || crashed || e.ctrlKey || e.metaKey || e.altKey) return;
   if (game.key_down(e.code, e.key)) e.preventDefault();
 });
-canvas.addEventListener('pointerdown', () => canvas.focus());
+// The pointer: the position through the canvas's CSS box onto its 320 x 200 pixels, the buttons
+// as DOM `buttons` (bit 0 left, bit 1 right). The canvas captures a press so the release reaches
+// the game even off the canvas; the context menu stays off it while a game runs.
+function sendPointer(e) {
+  if (!game || crashed) return;
+  const box = canvas.getBoundingClientRect();
+  if (box.width === 0 || box.height === 0) return;
+  const x = Math.floor(((e.clientX - box.left) * canvas.width) / box.width);
+  const y = Math.floor(((e.clientY - box.top) * canvas.height) / box.height);
+  game.pointer(x, y, e.buttons & 3);
+}
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.focus();
+  if (game && !crashed) canvas.setPointerCapture(e.pointerId);
+  sendPointer(e);
+});
+canvas.addEventListener('pointermove', sendPointer);
+canvas.addEventListener('pointerup', sendPointer);
+canvas.addEventListener('pointercancel', (e) =>
+  sendPointer({ clientX: e.clientX, clientY: e.clientY, buttons: 0 }));
+canvas.addEventListener('contextmenu', (e) => {
+  if (game && !crashed) e.preventDefault();
+});
 
 // The whole page accepts drops so a near miss does not open the file in the tab.
 window.addEventListener('dragover', (e) => {

@@ -101,7 +101,7 @@ fn name(s: &State, i: i16) -> Vec<u8> {
 }
 
 /// The actor slot of party member `i` (A4+0x47ec).
-fn member_actor(s: &State, i: i16) -> u8 {
+pub(crate) fn member_actor(s: &State, i: i16) -> u8 {
     usize::try_from(i)
         .ok()
         .and_then(|i| s.actors.party.members.get(i))

@@ -202,6 +202,15 @@ impl Game {
         }
     }
 
+    /// Queues the pointer at screen pixel (x, y) (the page maps the canvas's CSS box onto its
+    /// 320 × 200 pixels) with `buttons` held: bit 0 left, bit 1 right, as DOM `buttons`. Ignored
+    /// before the game starts.
+    pub fn pointer(&mut self, x: i32, y: i32, buttons: u8) {
+        if self.engine.is_some() {
+            queue_pointer(&mut self.pending, x, y, buttons);
+        }
+    }
+
     /// Engine log lines (first hit of each stub point) since the previous call.
     pub fn take_log(&mut self) -> String {
         std::mem::take(&mut self.log).join("\n")
@@ -298,9 +307,48 @@ impl Game {
     }
 }
 
+/// Queues a pointer event; a move right after one with the same buttons replaces it (the game
+/// samples the pointer once per frame and takes a run of moves at once anyway).
+fn queue_pointer(pending: &mut Vec<InputEvent>, x: i32, y: i32, buttons: u8) {
+    let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    let ev = InputEvent::Pointer {
+        x: word(x),
+        y: word(y),
+        buttons: buttons & 3,
+    };
+    let same =
+        |e: &InputEvent| matches!(*e, InputEvent::Pointer { buttons: b, .. } if b == buttons & 3);
+    if pending.last().is_some_and(same) {
+        pending.pop();
+    }
+    pending.push(ev);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_moves_collapse_and_button_changes_queue() {
+        let mut q = Vec::new();
+        let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
+        queue_pointer(&mut q, 10, 10, 0);
+        queue_pointer(&mut q, 20, 30, 0);
+        queue_pointer(&mut q, 20, 30, 1);
+        queue_pointer(&mut q, 21, 31, 5);
+        queue_pointer(&mut q, 21, 31, 0);
+        assert_eq!(q, [p(20, 30, 0), p(21, 31, 1), p(21, 31, 0)]);
+        q.push(InputEvent::Key(Key::Space));
+        queue_pointer(&mut q, 99_999, -99_999, 2);
+        assert_eq!(
+            q.last(),
+            Some(&p(i16::MAX, i16::MIN, 2)),
+            "a key in between keeps both"
+        );
+        let mut game = Game::new();
+        game.pointer(5, 5, 1);
+        assert!(game.pending.is_empty(), "no game, nothing queued");
+    }
 
     #[test]
     fn maps_named_codes_and_single_characters() {

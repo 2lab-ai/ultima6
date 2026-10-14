@@ -66,6 +66,7 @@ pub mod blit;
 pub(crate) mod idle;
 mod load;
 pub mod seams;
+pub mod sprite;
 pub mod tables;
 pub mod view;
 

@@ -1,12 +1,13 @@
 // Browser tests of site/ under its real headers (tools/web/serve.mjs applies site/_headers):
 // the operation queue (rapid imports, import during the restore, forget during a save), error
-// handling (read and forget failures, an engine trap and Restart), keyboard focus, the CSP.
+// handling (read and forget failures, an engine trap and Restart), keyboard focus, the CSP,
+// the mouse on the canvas.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. Tests that need the user's disks skip when they are absent.
 //
 //   node tools/web/test-web.mjs [name-filter]      (build first: bash scripts/build-web.sh)
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import * as h from './harness.mjs';
 
 const MARKER = { name: 'port-test-marker.txt', text: 'not a game file' };
@@ -228,6 +229,52 @@ test('A on the canvas: the not-implemented line, then the arrow walks (screensho
   await h.sleep(600);
   const walked = h.mapShift(before, await h.frame(page));
   assert.ok(walked.shift === 16 && walked.score > 0.6, `one step east after A: ${JSON.stringify(walked)}`);
+}, { needs: h.haveHfes });
+
+// A pixel of the canvas (320 x 200 game pixels) as a page position through its CSS box.
+async function screenPoint(page, x, y) {
+  const box = await page.locator('#screen').boundingBox();
+  return [box.x + ((x + 0.5) * box.width) / 320, box.y + ((y + 0.5) * box.height) / 200];
+}
+
+// The message scroll's pixels (x 168..311, y 104..191) differ between two frames.
+function scrollChanged(before, after) {
+  for (let y = 104; y < 192; y += 1) {
+    for (let x = 168; x < 312; x += 1) {
+      const i = (y * 320 + x) * 4;
+      if (before[i] !== after[i] || before[i + 1] !== after[i + 1] || before[i + 2] !== after[i + 2]) return true;
+    }
+  }
+  return false;
+}
+
+test('the mouse: the Look icon on the canvas, then a map cell east walks (screenshot)', async (env) => {
+  const { page } = await h.openPage(env, { gated: false });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, 130);
+  await h.sleep(2500);
+  // The fourth command icon (Look) at game pixel (64, 184).
+  const before = await h.frame(page);
+  await page.mouse.click(...(await screenPoint(page, 64, 184)));
+  await h.sleep(800);
+  const looked = await h.frame(page);
+  assert.ok(scrollChanged(before, looked), 'the Look command printed in the scroll');
+  assert.equal((await h.state(page)).focused, 'screen', 'the click focused the canvas');
+  await mkdir('/tmp/claude-501/m2-mouse', { recursive: true });
+  await writeFile('/tmp/claude-501/m2-mouse/web-look.png', await page.locator('#screen').screenshot());
+  // Two cells east of the Avatar (window cell (7, 5)): the party walks east.
+  await page.mouse.click(...(await screenPoint(page, 7 * 16 + 8, 5 * 16 + 8)));
+  await h.sleep(800);
+  const walked = h.mapShift(looked, await h.frame(page));
+  assert.ok(walked.shift >= 16 && walked.score > 0.6, `the map scrolled east: ${JSON.stringify(walked)}`);
+  await writeFile('/tmp/claude-501/m2-mouse/web-walk.png', await page.locator('#screen').screenshot());
+  // The keys still work after the mouse: one more step east.
+  const still = await h.frame(page);
+  await page.keyboard.press('ArrowRight');
+  await h.sleep(600);
+  const key = h.mapShift(still, await h.frame(page));
+  assert.ok(key.shift === 16 && key.score > 0.6, `the arrow after the mouse: ${JSON.stringify(key)}`);
 }, { needs: h.haveHfes });
 
 const filter = process.argv[2];

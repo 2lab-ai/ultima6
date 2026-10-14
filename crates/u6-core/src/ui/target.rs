@@ -1,12 +1,12 @@
-//! The event wait 0x106bbc: keys to commands and directions, the cross-hair and the panel
-//! cursor, the panel keys. Everything but the pointer (mouse) part is ported; the port has no
-//! pointer device, so the click mapping 0x10658e is behind a seam that reports no buttons.
+//! The event wait 0x106bbc: the pointer (clicks, [`super::click`]), keys to commands and
+//! directions, the cross-hair and the panel cursor, the panel keys.
 
 use std::cell::RefCell;
 
 pub use super::cursor::panel_cursor;
 use super::cursor::{select_command, target_from_pointer};
 use super::keyread::idle_poll;
+use super::pointer;
 use super::print::put_raw;
 use super::seams;
 use crate::engine::Io;
@@ -45,18 +45,12 @@ const DIRECTION_KEYS: [(u16, i16); 8] = [
     (0x147, 7),
 ];
 
-/// 0x14f12c (copy the pointer position and buttons) — the port has no pointer device:
-/// buttons are never down. Seam for the platform (an `InputEvent` for the mouse).
-fn pointer_buttons() -> u16 {
-    0
-}
-
-/// Original: 0x106bbc (ui: wait for the next input event, map it to a game code) [partial]
+/// Original: 0x106bbc (ui: wait for the next input event, map it to a game code)
 ///
-/// Commands, directions, the cross-hair, the panel cursor and the panel keys are handled here;
-/// the result is non-zero. Not ported: the pointer (mouse) branch (no pointer device: the
-/// click map 0x10658e is a declared stub that the keyboard never reaches) and the inline spell
-/// syllable entry and spellbook keys (Cast, outside M1; declared stubs).
+/// Each round samples the pointer first: while a button is down the click map gives the code
+/// ([`pointer_click`]); else a key: commands, directions, the cross-hair, the panel cursor and
+/// the panel keys. The result is non-zero. The inline spell syllable entry and the spellbook
+/// keys are magic's (declared stubs).
 pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
     if state.borrow().ui.input.accept {
         put_raw(state, io, -1).await;
@@ -71,9 +65,8 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
         if key != 0 {
             return key;
         }
-        if pointer_buttons() & 3 != 0 {
-            // Contract: map a click to a code (0 = none). Unreachable: no pointer device.
-            key = todo_stub!("0x10658e map a click to a command", 0);
+        key = pointer_click(state, io).await;
+        if key != 0 {
             continue;
         }
         key = idle_poll(state, io).await;
@@ -92,7 +85,42 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
         } else {
             tab_key(state, io, key)
         };
-        key = panel_key(state, io, key);
+        key = panel_key(state, io, key).await;
+    }
+}
+
+/// 0x106be6..0x106c5e: the pointer sample (0x14f12c, the handler's events up to the next button
+/// change); with a button down the click map 0x10658e gives the code. A4-0x7a34 marks the press
+/// (the first sample with a button down, A4-0x7a36 then set); while held only the press's code
+/// repeats. With no button down both clear.
+async fn pointer_click(state: &RefCell<State>, io: &Io) -> u16 {
+    let p = io.take_pointer();
+    {
+        let mut s = state.borrow_mut();
+        pointer::sample(&mut s, p);
+        let ptr = &s.ui.pointer;
+        let buttons = u16::from(ptr.left) | u16::from(ptr.right);
+        if buttons & 3 == 0 {
+            s.ui.pointer.pressed = false;
+            s.actors.work.mouse_walk = 0;
+            return 0;
+        }
+        let pressed = s.actors.work.mouse_walk == 0;
+        s.actors.work.mouse_walk = 1;
+        s.ui.pointer.pressed = pressed;
+        s.ui.pointer.buttons = buttons;
+        s.ui.input.pointer = s.ui.pointer.at;
+    }
+    let code = super::click::click(state, io).await;
+    let mut s = state.borrow_mut();
+    let ptr = &mut s.ui.pointer;
+    if ptr.pressed {
+        ptr.press_code = code;
+        code
+    } else if ptr.press_code == code {
+        code
+    } else {
+        0
     }
 }
 
@@ -100,10 +128,10 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
 /// rest of the iteration tests.
 fn map_key(s: &mut State, io: &Io, key: u16) -> (u16, bool, bool, bool, u8) {
     let mut key = key;
-    let input = &mut s.ui.input;
     if key != 0 {
-        input.key_marks = (-1, -1);
+        s.actors.work.mouse_target = (-1, -1);
     }
+    let input = &mut s.ui.input;
     if input.upcase && key < 0x100 && (key as u8).is_ascii_lowercase() {
         key -= 0x20;
     }
@@ -160,9 +188,26 @@ fn start_cross_hair(s: &mut State, io: &Io) {
 }
 
 /// 0x10765e..0x1078c4: keys of the panel modes: `*` / `/` switch between stats, inventory and
-/// roster, `+` / `-` step the member (or scroll the roster), F1.. pick a member.
-fn panel_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
-    let mut s = state.borrow_mut();
+/// roster, `+` / `-` step the member (or scroll the roster), F1.. pick a member; `` ` `` / `~`
+/// click the inventory's combat-mode icon (0x10619c with the pointer at (0xf8, 0x60)).
+async fn panel_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
+    let combat_icon = {
+        let mut s = state.borrow_mut();
+        let hit = !s.converse.active && s.ui.panel.mode == 0x92 && matches!(key, 0x60 | 0x7e);
+        if hit {
+            s.ui.input.pointer = (0xf8, 0x60);
+        }
+        hit
+    };
+    if combat_icon {
+        Box::pin(super::click::inventory_click(state, io)).await;
+        return 0;
+    }
+    panel_key_in(&mut state.borrow_mut(), key)
+}
+
+/// [`panel_key`] for every key but the combat-mode icon's.
+fn panel_key_in(s: &mut State, key: u16) -> u16 {
     let (mode, size) = (s.ui.panel.mode, u16::from(s.actors.party.size));
     if s.converse.active {
         return key;
@@ -180,15 +225,6 @@ fn panel_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
                 0x2f | 0x144 => 0x91,
                 0x2b => 0x99,
                 0x2d => 0x9a,
-                0x60 | 0x7e if mode == 0x92 => {
-                    input.pointer = (0xf8, 0x60);
-                    drop(s);
-                    // Contract: act on the inventory slot under the pointer (the panel's click
-                    // handler). Fallback: nothing happens.
-                    todo_stub!("0x10619c inventory click at the pointer", ());
-                    let _ = io;
-                    0
-                }
                 _ if member_key => {
                     input.selection = (key - F1) as i16;
                     mode
@@ -298,14 +334,14 @@ async fn targeting_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
             state.borrow_mut().ui.input.targeting = 0;
             0
         }
-        RETURN => confirm(state, io, targeting),
+        RETURN => confirm(state, io, targeting).await,
         super::wait::WALK => step(state, io, targeting),
         _ => member_key(state, key, targeting),
     }
 }
 
 /// Return with a cursor up (0x107218..0x1072c8).
-fn confirm(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
+async fn confirm(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
     if targeting == 1 {
         let mut s = state.borrow_mut();
         let mut key = super::wait::REPEAT;
@@ -329,12 +365,10 @@ fn confirm(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
         return RETURN;
     }
     panel_cursor(state, io, 2);
-    // Contract: act on the inventory / stats slot under the pointer (0x10619c / 0x10613a) and
-    // give the resulting code, 0 for none. Fallback: none.
     let key: u16 = if mode == 0x92 {
-        todo_stub!("0x10619c inventory click at the pointer", 0)
+        Box::pin(super::click::inventory_click(state, io)).await
     } else {
-        todo_stub!("0x10613a stats panel click at the pointer", 0)
+        super::click::stats_click(&mut state.borrow_mut())
     };
     let mut s = state.borrow_mut();
     if key == 0 && s.ui.input.target_pending == 1 && target_from_pointer(&mut s) != 0 {

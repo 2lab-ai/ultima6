@@ -57,8 +57,6 @@ pub struct InputState {
     pub target: (i16, i16),
     /// Original: A4-0x2efe (the selected cell shows nothing: tile 0xff or 0x1bc)
     pub target_void: bool,
-    /// Original: A4-0x7a28 / -0x7a2a (set to -1 whenever a key arrives)
-    pub key_marks: (i16, i16),
     /// Original: A4-0x7a56 (refresh the map view while the cursor idles)
     pub idle_refresh: bool,
 }
@@ -73,7 +71,6 @@ impl InputState {
             upcase: i.upcase,
             target_command: i.target_command,
             panel_cursor: (i.panel_cursor_col, 0),
-            key_marks: (-1, -1),
             idle_refresh: i.idle_refresh,
             ..InputState::default()
         }
