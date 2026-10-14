@@ -425,7 +425,7 @@ pub fn door_at_actor(s: &mut State, actor: u16, closed: u16) {
     }
 }
 
-/// [objects] 0x1301e2 (Use on a portcullis; "Not now!"). Stub contract: argument the
+/// [objects] 0x1301e2 (Use on a portcullis; its refusal). Stub contract: argument the
 /// portcullis object, no result; the portcullis stays as it is; reached only by door-opening
 /// NPCs standing in a portcullis (not in the start area).
 fn operate_portcullis(_s: &mut State, _id: ObjectId) {

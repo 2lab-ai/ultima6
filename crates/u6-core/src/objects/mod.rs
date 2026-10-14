@@ -125,7 +125,7 @@ pub use blocks::{
     load_surface, prune_far, write_back_block, write_back_level, write_back_surface,
 };
 #[allow(unused_imports)]
-pub(crate) use blocks::{load_region_objects, unload_region_objects};
+pub(crate) use blocks::{load_region_objects, parse_lenient, unload_region_objects};
 pub use defs::{DefsError, ObjectDefs};
 pub use draw::{DRAW_CELLS, DRAW_NODES, DrawLists, add_tile, build_draw_lists};
 pub use effects::*;

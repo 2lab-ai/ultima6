@@ -29,7 +29,7 @@ fn centre_on(s: &mut State, i: usize) {
     s.map.centre.y = p.y;
 }
 
-/// Original: 0x121020 (actors: the Avatar has died: "An unending darkness engulfs thee")
+/// Original: 0x121020 (actors: the Avatar has died: the darkness lines)
 ///
 /// Unless the leader index is 16: music off, the two lines with a full redraw between, then
 /// the resurrection 0x1095bc.
@@ -89,7 +89,7 @@ pub fn leader_bookkeeping(s: &mut State) {
     }
     let leader = member(s, li);
     if !healthy(s, leader) {
-        for i in 0..usize::from(size) {
+        for i in 0..s.actors.party.count() {
             let m = member(s, i);
             if healthy(s, m) && s.actors.worktype[m] != 0 {
                 s.actors.worktype[leader] = 1;
@@ -130,7 +130,7 @@ pub fn leader_bookkeeping(s: &mut State) {
 /// advanced party member and the flanks of both sides among the actors in worktype 2 or 3. A
 /// hostile centre on the party centre is pushed one step ahead of member 0.
 pub fn formation(s: &mut State) {
-    let size = usize::from(s.actors.party.size);
+    let size = s.actors.party.count();
     let (mut n, mut sx, mut sy) = (0i32, 0i32, 0i32);
     for i in 0..size {
         let m = member(s, i);
@@ -260,8 +260,8 @@ pub fn after_load(s: &mut State) {
 
 /// Original: 0x11c6c2 (actors: a swallowed actor fights its way out: true = still inside)
 ///
-/// Only actors with movement flag 0x10. The player's own character prints "ARGH!". On
-/// `random(1, 30)` below its strength it is freed (" regurgitated!", redraw requested);
+/// Only actors with movement flag 0x10. The player's own character cries out (A4-0x75e1). On
+/// `random(1, 30)` below its strength it is freed (its name and A4-0x75d3, redraw requested);
 /// otherwise it loses 1..15 hit points and its turn.
 pub fn swallowed(s: &mut State, actor: u16) -> bool {
     let a = usize::from(actor);
@@ -372,7 +372,7 @@ fn pick_actor(s: &mut State, mask: u16, pick: &mut Pick) {
     let c = s.map.centre;
     let wx = c.x.wrapping_sub(16) & 0x3f8;
     let wy = c.y.wrapping_sub(16) & 0x3f8;
-    for i in 1..usize::from(s.actors.party.size) {
+    for i in 1..s.actors.party.count() {
         let m = member(s, i);
         if s.actors.worktype[m] == 1 && s.actors.mp(m) <= 0 {
             let first = member(s, 0);
@@ -506,7 +506,7 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
             }
             let leader = member(&s, usize::from(s.actors.party.leader_index));
             if usize::from(chosen) != leader {
-                for i in 0..usize::from(s.actors.party.size) {
+                for i in 0..s.actors.party.count() {
                     if member(&s, i) == usize::from(chosen) {
                         seams::switch_leader(&mut s, i as u8);
                         s.actors.work.prompt = 1;

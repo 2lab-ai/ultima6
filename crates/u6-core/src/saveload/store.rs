@@ -6,6 +6,7 @@ use std::fmt;
 use super::{OBJLIST_FILE, block_file};
 use crate::engine::Engine;
 use crate::files::Files;
+use crate::objects::BLOCK_COUNT;
 use crate::state::State;
 
 /// Name of the layer [`attach`] adds to the game files.
@@ -61,11 +62,20 @@ impl SaveStore for MemStore {
     }
 }
 
+/// A name the game reads from its save: `savegame/objlist` or one of the 69 block files
+/// (0x105350, 0x10e4bc), compared without regard to ASCII case.
+fn is_save_file(name: &str) -> bool {
+    name.eq_ignore_ascii_case(OBJLIST_FILE)
+        || (0..BLOCK_COUNT).any(|i| name.eq_ignore_ascii_case(&block_file(i)))
+}
+
 /// Lays the stored save over the user's files before the engine boots, so load state reads
 /// the saved `savegame/objlist` and blocks; names the store does not hold fall through to the
-/// user's new-game files. Returns how many files the store supplied.
+/// user's new-game files. Only the files a save consists of are laid over (anything else the
+/// store holds could shadow a game file by its bare name). Returns how many it supplied.
 pub fn attach(files: &mut Files, store: &dyn SaveStore) -> Result<usize, StoreError> {
-    let saved = store.load()?;
+    let mut saved = store.load()?;
+    saved.retain(|name, _| is_save_file(name));
     let n = saved.len();
     if n > 0 {
         files.overlay(SAVE_LAYER, saved);

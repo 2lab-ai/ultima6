@@ -329,3 +329,18 @@ fn party_steps_five_tiles_each_way() {
         );
     }
 }
+
+#[test]
+fn the_ambush_kinds_are_creatures_of_the_game() {
+    let Some((s, _files)) = start() else {
+        return;
+    };
+    let g = &s.actors.game;
+    for k in 0..4 {
+        let kind = g.ambush_kind(k).expect("read from game");
+        let index = g.creature_index(kind);
+        println!("ambush roll {k}: creature index {index}");
+        assert!(index >= 0, "roll {k}: a creature type");
+    }
+    assert_eq!(g.ambush_kind(4), None);
+}

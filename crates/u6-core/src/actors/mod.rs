@@ -23,12 +23,12 @@
 //!
 //! - 0x102f3c [party] per-turn party status effects (poison, web)
 //! - 0x10368a [time] advance clock: light/status timers, date+wind line
-//! - 0x11b1c0 [actors] uses ""Thou art not upon a Sacred~"
+//! - 0x11b1c0 [actors] prints the not-on-sacred-ground refusal
 //! - 0x11b92a [actors] leaf; callers 2, from 1 subsystems
 //! - 0x11b9ae [actors] unnamed; calls 0x10996c (tile at (x,y): window cache, ~)
 //! - 0x11ba5e [actors] unnamed; calls 0x10aaca (next object of the iteration)
 //! - 0x11c650 [actors] leaf; callers 25, from 6 subsystems
-//! - 0x11c6c2 [actors] uses "regurgitated!"
+//! - 0x11c6c2 [actors] prints the swallowed actor's escape
 //! - 0x11c76e [actors] step of 0x11c910 (party member follows the leader [~)
 //! - 0x11c910 [party] party member follows the leader [likely]
 //! - 0x11d4ee [party] player move step (direction, drunk wobble, blocking)
@@ -50,8 +50,8 @@
 //! - 0x11f72e [actors] unnamed; calls 0x151f06 (random number in [lo, hi])
 //! - 0x11f804 [actors] step of 0x1200b0 (NPC turn: walk to current schedul~)
 //! - 0x11f9c6 [actors] step of 0x1200b0 (NPC turn: walk to current schedul~)
-//! - 0x11fd20 [actors] uses ""Thou art under arrest!"  "~"
-//! - 0x11ffae [actors] uses "The %s stole some gold!"
+//! - 0x11fd20 [actors] prints the guard's arrest question
+//! - 0x11ffae [actors] prints the theft of gold
 //! - 0x120034 [actors] step of 0x1200b0 (NPC turn: walk to current schedul~)
 //! - 0x12005a [actors] leaf; callers 2, from 2 subsystems
 //! - 0x1200b0 [schedules] NPC turn: walk to current schedule entry / do worktype
@@ -59,7 +59,7 @@
 //! - 0x1206e2 [actors] unnamed; 3 callees
 //! - 0x120a1c [actors] scan nearby hostiles, combat-state toggle [likely]
 //! - 0x120b64 [party] party centre / formation anchor [likely]
-//! - 0x121020 [actors] uses "An unending darkness engulf~"
+//! - 0x121020 [actors] prints the Avatar's death
 //! - 0x121056 [party] leader / solo-mode bookkeeping per turn [likely]
 //! - 0x1213de [actors] turn scheduler: next actor by movement points; NPC turns; tick clock
 //! - 0x1217d4 [actors] unnamed; calls 0x120b64 (party centre / formation anch~)
@@ -72,7 +72,7 @@
 //! - 0x122144 [combat] leaf; callers 9, from 7 subsystems
 //! - 0x122176 [combat] leaf; callers 5, from 5 subsystems
 //! - 0x1224ea [combat] leaf; callers 7, from 3 subsystems
-//! - 0x1279d4 [party] uses "has healed."
+//! - 0x1279d4 [party] prints a member's healing
 
 use u6_formats::schedule::ScheduleEntry;
 
@@ -98,6 +98,10 @@ pub use work::{ActorWork, PathScratch, tail, timer};
 
 /// Party roster slots.
 pub const PARTY_SLOTS: usize = 16;
+/// The largest party size a loaded `objlist` keeps. Aboard a vehicle `members[size]` is the
+/// vessel, so 15 is the last size at which every roster read the original makes stays in the
+/// 16 slots; 0x105350 reads the byte as it is and well-formed saves hold at most 8 (0x112daa).
+pub const PARTY_SIZE_MAX: u8 = (PARTY_SLOTS - 1) as u8;
 
 /// Per-actor attribute arrays (index = actor = object slot 0..256).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,10 +187,17 @@ impl Party {
         Some(ObjectId(u16::from(actor)))
     }
 
+    /// The members a loop over the roster visits: the size, at most the 16 slots (a join can
+    /// grow a loaded size past them, as 0x112daa only refuses at exactly 8).
+    pub fn count(&self) -> usize {
+        usize::from(self.size).min(PARTY_SLOTS)
+    }
+
     /// The first `size` members.
     pub fn active(&self) -> impl Iterator<Item = ObjectId> + '_ {
-        let n = usize::from(self.size).min(PARTY_SLOTS);
-        self.members[..n].iter().map(|&a| ObjectId(u16::from(a)))
+        self.members[..self.count()]
+            .iter()
+            .map(|&a| ObjectId(u16::from(a)))
     }
 }
 
@@ -298,5 +309,23 @@ mod tests {
         assert_eq!(party.leader(), None);
         party.size = 200;
         assert_eq!(party.active().count(), PARTY_SLOTS);
+    }
+
+    #[test]
+    fn a_party_size_past_the_roster_stays_in_bounds() {
+        use crate::state::State;
+        // A join (0x112daa only refuses at exactly 8) can grow a clamped size past the slots.
+        let mut s = State::empty();
+        s.map.centre = u6_formats::position::Position { x: 20, y: 20, z: 0 };
+        s.actors.party.size = 17;
+        s.actors.party.members = [1; PARTY_SLOTS];
+        s.objects.type_frame[1] = 0x17a;
+        s.objects.location[1] = s.map.centre;
+        s.actors.worktype[1] = 1;
+        clock::tick(&mut s, 60);
+        assert_eq!(npc::close_in(&mut s, 2), -1);
+        party::follow(&mut s, 3, true);
+        turn::formation(&mut s);
+        assert_eq!(s.actors.party.active().count(), PARTY_SLOTS);
     }
 }

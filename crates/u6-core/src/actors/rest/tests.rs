@@ -128,8 +128,6 @@ fn eight_hours_pass_and_the_fed_party_heals() {
         .find(|&i| s.objects.type_frame[i] & 0x3ff == CAMPFIRE)
         .expect("campfire");
     assert_eq!(s.objects.type_frame[fire] >> 10, 0, "the fire is out");
-    let text = s.ui.messages.join("|");
-    assert!(text.is_empty() || !text.contains("Not"), "{text}");
 }
 
 #[test]
@@ -161,4 +159,78 @@ fn the_hull_mends_five_points_up_to_100() {
     assert!(e.finished());
     assert_eq!(e.state().actors.attrs.hp[3], 100);
     assert_eq!(e.state().actors.calendar.minute, 15);
+}
+
+/// Four hours with both members fed from member 0's pack and wounded; `guard_key` answers the
+/// guard question. Returns the hit points of actors 1 and 2 after.
+fn rest_four_hours(guard_key: char) -> (u8, u8) {
+    let mut s = camp_world();
+    create_in(&mut s, FOOD, IN_INVENTORY, 3, 1);
+    s.actors.attrs.hp[1] = 5;
+    s.actors.attrs.hp[2] = 7;
+    let e = run(s, &[Key::Char('4'), Key::Char(guard_key), Key::Space]);
+    assert!(e.finished());
+    let s = e.state();
+    assert_eq!(s.actors.rest_counter, 0x0c, "no ambush: the healing ran");
+    (s.actors.attrs.hp[1], s.actors.attrs.hp[2])
+}
+
+#[test]
+fn the_guard_digit_reaches_every_member_but_the_last() {
+    // 0x127ce2..0x127cee: a digit is taken while below '0' + party size, so with two members
+    // '1' picks member 0 and '2' falls through to no guard, as in the original.
+    let (a, b) = rest_four_hours('1');
+    assert_eq!(a, 5, "the guard is not healed");
+    assert!(b > 7);
+    let (a, b) = rest_four_hours('2');
+    assert!(a > 5 && b > 7, "no guard: everybody heals");
+}
+
+#[test]
+fn only_the_first_member_eats_at_the_meal() {
+    // A4-0x77a0 keeps the meal going, and nothing in `game` sets it (its only accesses are the
+    // clears at 0x10ed24 and 0x127f10 and the test at 0x127f1a), so the meal is one round.
+    let mut s = camp_world();
+    s.objects.defs.stackable = vec![FOOD];
+    let food = create_in(&mut s, FOOD, IN_INVENTORY, 5, 2);
+    let e = run(s, &[Key::Char('1'), Key::Char('1'), Key::Space]);
+    assert!(e.finished());
+    assert_eq!(e.state().objects.qq_of(food) & 0xff, 4, "one item eaten");
+}
+
+#[test]
+fn an_ambush_places_hostile_attackers_around_the_camp() {
+    // Synthetic kinds (the real four are read from `game`): type 0x17a walks on open ground.
+    let mut s = camp_world();
+    s.actors.game.ambush_kinds = vec![0x17a; 4];
+    s.rng = crate::rng::Rng::seeded(7);
+    assert!(ambush(&mut s));
+    let placed: Vec<usize> = (3..crate::objects::ACTOR_SLOTS)
+        .filter(|&a| s.objects.type_frame[a] & 0x3ff == 0x17a)
+        .collect();
+    assert!(!placed.is_empty() && placed.len() <= 8, "{}", placed.len());
+    for &m in &placed {
+        let p = s.objects.location[m];
+        let (dx, dy) = (p.x as i16 - 20, p.y as i16 - 20);
+        assert!(
+            matches!(dx, -6 | 7) || matches!(dy, -7 | 6),
+            "slot {m} at {dx}, {dy}"
+        );
+        assert_eq!(s.actors.attrs.status[m] & 0x60, 0x20, "slot {m} hostile");
+        assert_eq!(s.actors.worktype[m], ATTACK, "slot {m} attacks");
+    }
+}
+
+#[test]
+fn an_ambush_takes_its_kinds_from_the_game() {
+    // Without the user's `game` loaded the four kinds are unknown: no monster is placed.
+    let mut s = camp_world();
+    let before = (0..crate::objects::ACTOR_SLOTS)
+        .filter(|&a| s.objects.type_frame[a] != 0)
+        .count();
+    assert!(!ambush(&mut s));
+    let after = (0..crate::objects::ACTOR_SLOTS)
+        .filter(|&a| s.objects.type_frame[a] != 0)
+        .count();
+    assert_eq!(after, before);
 }

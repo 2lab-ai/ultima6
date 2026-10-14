@@ -58,7 +58,7 @@ pub fn objects_in_rect(s: &mut State, x0: u16, y0: u16, x1: u16, y1: u16, z: u16
 }
 
 /// [objects] 0x10c9d2: moves an object or actor to (x, y, z), keeping the region lists;
-/// negative = failed (the player step then prints "Object mismatch").
+/// negative = failed (the player step then prints the mismatch message at 0x11b918).
 pub fn move_object(s: &mut State, id: ObjectId, x: u16, y: u16, z: u16) -> i16 {
     crate::objects::move_to(s, id.slot(), x, y, z)
 }

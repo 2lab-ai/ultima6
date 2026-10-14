@@ -63,8 +63,6 @@ const BARD: u16 = 0x182;
 const BARD_PLAYING: u16 = 0x188;
 /// A type 0x127688 does not count as "others" (0x1ae).
 const NOT_OTHERS: u16 = 0x1ae;
-/// The monsters of an ambush, by a roll of 0..=3 (0x12783c).
-const AMBUSHERS: [u16; 4] = [0x15f, 0x166, 0x156, 0x161];
 /// Worktypes: the guard's while the party sleeps, an ambusher's.
 const GUARDING: u8 = 0x0c;
 const ATTACK: u8 = 0x08;
@@ -96,7 +94,7 @@ fn member(s: &State, i: usize) -> Slot {
 }
 
 fn size(s: &State) -> usize {
-    usize::from(s.actors.party.size)
+    s.actors.party.count()
 }
 
 /// The party is aboard (the leader index points past the members, at the vehicle).
@@ -219,10 +217,15 @@ pub fn no_room(s: &mut State) -> bool {
 /// a free tile at one of the four sides 6 / 7 tiles from the centre (8 tries), hostile and
 /// attacking; true when one was placed)
 ///
-/// The monsters come from objects 0x131646 (a declared stub returning -1, no slot): a failed
-/// creation is skipped here, where the original would go on with slot -1.
+/// The four kinds are read from the user's `game` ([`super::GameTables::ambush_kind`]); without
+/// them nothing comes. Each monster is made by objects' 0x131646
+/// ([`crate::objects::spawn_monster`]); with no temporary-actor slot free it returns -1 and
+/// the port skips that monster, where the original goes on with slot -1 (the tries, then a
+/// status and worktype write at index -1).
 pub fn ambush(s: &mut State) -> bool {
-    let kind = AMBUSHERS[usize::from(s.rng.range(0, 3)).min(3)];
+    let Some(kind) = s.actors.game.ambush_kind(s.rng.range(0, 3)) else {
+        return false;
+    };
     let n = s.rng.range(1, 8);
     let c = s.map.centre;
     let (cx, cy, z) = (c.x as i16, c.y as i16, u16::from(c.z));
@@ -262,7 +265,7 @@ pub fn ambush(s: &mut State) -> bool {
 }
 
 /// Original: 0x127ac0 (party: repair the ship: its hit points + 5 up to 100, five minutes,
-/// "Hull Strength: n%")
+/// then the hull's strength in percent (the string at 0x1272b6))
 pub async fn repair_hull(state: &RefCell<State>, io: &Io) {
     let hp = {
         let mut s = state.borrow_mut();

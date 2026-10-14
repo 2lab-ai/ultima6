@@ -66,9 +66,6 @@ pub struct SaveLoad {
     /// The party-name table (objlist 0x0F00, 16 × 14 bytes) as last read: an unchanged name is
     /// written back with the bytes that followed its NUL.
     pub names_raw: Vec<u8>,
-    /// Restores done since boot. Restore invalidates whatever was pending (spec 03 §2/§5): a
-    /// request that carries an older epoch must not touch the restored world.
-    pub epoch: u32,
 }
 
 impl Default for SaveLoad {
@@ -78,7 +75,6 @@ impl Default for SaveLoad {
             block_gen: vec![0; BLOCK_COUNT],
             objlist: None,
             names_raw: Vec::new(),
-            epoch: 0,
         }
     }
 }

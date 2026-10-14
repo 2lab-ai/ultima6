@@ -639,6 +639,7 @@ Marker addresses that are not function entries (tables cited on fields):
 - 0x112768: `converse/mod.rs::npc_name`
 - 0x1148b0: `intro/transfer.rs::ask_source`
 - 0x114d30: `intro/input.rs::pump`
+- 0x12786a: `actors/tables.rs::ambush_kinds`
 - 0x135588: `objects/mod.rs::location`
 - 0x137988: `objects/mod.rs::type_frame`
 - 0x139188: `actors/mod.rs::worktype`
