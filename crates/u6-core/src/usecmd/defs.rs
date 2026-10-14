@@ -6,8 +6,6 @@ use crate::engine::Io;
 use crate::image::A4;
 use crate::main_loop::pointed_string;
 
-/// Original: A4-0x66dc (85 words: the object types Use accepts, 0x128b6a)
-pub const USABLE: (i32, usize) = (-0x66dc, 85);
 /// Original: A4-0x65aa (10 words: types 0x130546 refuses while aboard ship)
 pub const ABOARD_REFUSED: (i32, usize) = (-0x65aa, 10);
 /// Original: A4-0x61be (8 pointers: "North" .. "Northwest" by direction)

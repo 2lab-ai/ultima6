@@ -393,7 +393,7 @@ fn look_text_takes_the_next_entry_and_names_actors_by_party_name() {
     s.objects.qq[loaf as usize] = 3;
     // Type 60 is a quantity stack only for frame 0 (0x10cef2 compares the whole word): the
     // prefix counts by type, the quantity by type + frame.
-    assert_eq!(name_prefix(&s, loaf), ("3#".to_string(), 3));
+    assert_eq!(name_prefix_text(&s, loaf), ("3#".to_string(), 3));
     assert_eq!(display_name(&s, NONE), "<none>");
     s.actors.attrs.status = vec![0; 256];
     s.actors.attrs.status[3] = 0x80;

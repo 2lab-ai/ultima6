@@ -15,7 +15,6 @@ const STR_NOT_BOARDABLE: u32 = 0x0012_cdac;
 const STR_SHERRY: u32 = 0x0012_cdbe;
 const STR_BEHLEM: u32 = 0x0012_cdee;
 const STR_ON_HORSE: u32 = 0x0012_ce14;
-const STR_REAR_HORSE: u32 = 0x0012_ce32;
 const STR_NO_ROOM: u32 = 0x0012_cbd4;
 const STR_NO_BAG: u32 = 0x0012_cb62;
 const STR_NO_BASKET: u32 = 0x0012_cb80;
@@ -274,31 +273,6 @@ pub async fn board(ux: Ux<'_>, obj: Slot) {
     ux.flush().await;
 }
 
-/// Original: 0x12f6ee (objects: put `rider` on a horse at (x, y) facing `frame`)
-///
-/// The rider moves there and becomes the mounted horse (0x1af, `frame`), the view centres on
-/// it; the rear half one tile behind is either the object already there re-typed (`here`) or
-/// a new 0x1af with frame + 8. Tile cache and view are refreshed.
-pub fn mount_horse(s: &mut State, rider: Slot, x: u16, y: u16, frame: u16, here: u16) {
-    let zz = z(s);
-    crate::objects::move_to(s, rider, x, y, zz);
-    set_tf(s, rider, frame << 10 | 0x1af);
-    s.map.centre.x = x;
-    s.map.centre.y = y;
-    let (dx, dy) = crate::engine::with_current_io(|io| defs::direction(io, (frame & 6) as i16))
-        .unwrap_or((0, 0));
-    let (bx, by) = ((x as i16 - dx) as u16, (y as i16 - dy) as u16);
-    if here != 0 {
-        let rear = super::first_at(s, bx, by, zz);
-        let tf = s.objects.tf(rear);
-        set_tf(s, rear, (tf & 0xfc00) | 0x1af);
-    } else {
-        crate::objects::create_on_map(&mut s.objects, 0x1af | (frame + 8) << 10, 0, 0, bx, by, zz);
-    }
-    crate::map::region::refresh_region(s);
-    crate::engine::with_current_io(|io| crate::gfx::refresh_view(s, io));
-}
-
 /// Original: 0x12f7ea (objects: mount a horse 0x1ae)
 ///
 /// Only a temporary actor (≥ 0xe0) is boardable; Sherry and Beh Lem refuse, a rider is
@@ -328,60 +302,7 @@ pub async fn mount(ux: Ux<'_>, obj: Slot) {
     let (x, y, tf) = (s.objects.x(h), s.objects.y(h), s.objects.tf(h));
     set_tf(&mut s, h, (tf & 0xfc00).wrapping_add(0x58));
     crate::objects::remove(&mut s, h);
-    mount_horse(&mut s, Slot::from(lead), x, y, tf >> 10, 1);
-}
-
-/// Original: 0x12f8fe (objects: dismount: the rider gets its own shape back, a horse appears
-/// beside it, "No room!" when none fits)
-pub fn dismount(s: &mut State, obj: Slot) {
-    let r = super::seams::actor_of(s, obj);
-    if r < 0 {
-        return;
-    }
-    let ri = r as usize & 0xff;
-    let (x, y, zz) = (s.objects.x(r), s.objects.y(r), z(s));
-    let dir = (s.objects.tf(r) >> 10) & 6;
-    let base = s.actors.attrs.base_type_frame[ri] & 0x3ff;
-    let face = s.actors.attrs.movement_flags[ri] & 7;
-    let frame = crate::objects::actor_frame(base, i16::from(face)) as u16;
-    set_tf(s, r, frame << 10 | base);
-    let (dx, dy) =
-        crate::engine::with_current_io(|io| defs::direction(io, dir as i16)).unwrap_or((0, 0));
-    let (bx, by) = ((x as i16 - dx) as u16, (y as i16 - dy) as u16);
-    let mut rear = super::first_at(s, bx, by, zz);
-    while rear >= 0 && s.objects.kind(rear) != 0x1af {
-        rear = super::next_here(s);
-    }
-    if rear >= 0 {
-        crate::objects::remove(s, rear);
-    } else {
-        queue(s, STR_REAR_HORSE);
-    }
-    let horse = crate::objects::spawn_monster(s, 0x1ae, 0, 0, zz);
-    let mut placed = false;
-    'out: for i in 0..3u16 {
-        for j in 0..3u16 {
-            if (i, j) == (1, 1) || horse < 0 {
-                continue;
-            }
-            let (hx, hy) = ((x + i).wrapping_sub(1), (y + j).wrapping_sub(1));
-            if crate::actors::walk::can_move_to(s, horse as u16, hx, hy) {
-                crate::objects::move_to(s, horse, hx, hy, zz);
-                placed = true;
-                break 'out;
-            }
-        }
-    }
-    if !placed {
-        queue(s, STR_NO_ROOM);
-        crate::objects::remove(s, horse);
-    }
-    crate::engine::with_current_io(|io| crate::gfx::refresh_view(s, io));
-}
-
-fn queue(s: &mut State, fmt: u32) {
-    let text = crate::engine::with_current_io(|io| crate::main_loop::game_string(io, fmt));
-    crate::main_loop::queue_print(s, text.unwrap_or_default(), Vec::new());
+    crate::objects::commands::mount_horse(&mut s, Slot::from(lead), x, y, tf >> 10, true);
 }
 
 /// Original: 0x12e924 (objects: assemble a balloon from its parts)
@@ -618,7 +539,7 @@ pub async fn sextant_travel(ux: Ux<'_>) {
         let li = usize::from(s.actors.party.leader_index);
         let m = crate::objects::party_member(&s, li);
         let int = crate::actors::leaves::intelligence(&s, u16::from(m)) as i16;
-        (m, super::hunk15::fumbles(&mut s, int))
+        (m, crate::objects::commands::fails_roll(&mut s, int))
     };
     if fails {
         {

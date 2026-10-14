@@ -143,18 +143,6 @@ pub(crate) fn object_under(_s: &mut State, _obj: Slot) -> Slot {
     todo_stub!("0x12948a object beneath (usecmd seam)", NONE)
 }
 
-/// 0x129544(obj, x, y): search: secret doors, and the contents of `obj` spill to its tile.
-/// Fallback: nothing found, nothing moved.
-pub(crate) async fn search(
-    _state: &std::cell::RefCell<State>,
-    _io: &Io,
-    _obj: Slot,
-    _x: i16,
-    _y: i16,
-) {
-    todo_stub!("0x129544 search here (usecmd seam)", ())
-}
-
 // ---- ui ---------------------------------------------------------------------------------------
 
 /// 0x105016(px, py): the direction 0..7 from the view centre to the pointer pixel, -1 on the
@@ -176,17 +164,6 @@ pub(crate) fn inventory_contents(s: &mut State) {
     s.ui.panel.dirty = true;
 }
 
-/// A4+0x1364 / A4+0x136a: the objects in the panel member's two hands (0x11121e keeps them).
-/// Fallback: both hands free.
-pub(crate) fn hands(_s: &State) -> [Slot; 2] {
-    todo_stub!("0x11121e hand slots A4+0x1364/0x136a (usecmd seam)", [0, 0])
-}
-
-/// Writes hand `i` (A4+0x1364 + 6 i). Fallback: not kept.
-pub(crate) fn set_hand(_s: &mut State, _i: usize, _obj: Slot) {
-    todo_stub!("0x11121e set a hand slot (usecmd seam)", ())
-}
-
 /// 0x11121e(actor): recompute the readied equipment words and carried weight (A4+0x1342 /
 /// +0x1344). Fallback: none.
 pub(crate) fn ready_changed(_s: &mut State, _actor: Slot) {
@@ -197,11 +174,6 @@ pub(crate) fn ready_changed(_s: &mut State, _actor: Slot) {
 /// 0 (anything can be carried).
 pub(crate) fn carried_weight(_s: &mut State, _actor: Slot) -> i16 {
     todo_stub!("0x11121e carried weight (usecmd seam)", 0)
-}
-
-/// 0x13410a: the gem view (the whole map, waits for a key). Fallback: nothing shown.
-pub(crate) async fn peer_map(_state: &std::cell::RefCell<State>, _io: &Io) {
-    todo_stub!("0x13410a peer at the map (usecmd seam)", ())
 }
 
 /// 0x132338(actor): flash the actor in the view. Fallback: none.

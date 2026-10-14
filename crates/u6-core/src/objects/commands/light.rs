@@ -1,8 +1,12 @@
-//! Light sources of hunk 15: torches (0x12c326), using up one of a stack (0x12c54a), lighting
-//! or dousing a fixture (0x12c594). Synchronous; their text is queued.
+//! Light sources of hunk 15: torches (0x12c326), the gem (0x12c54a: the map overview, then one
+//! of the stack used up), lighting or dousing a fixture (0x12c594). Synchronous but for the
+//! gem, which waits on the overview's key; their text is queued.
+
+use std::cell::RefCell;
 
 use super::seams;
 use super::text::{queue, queue_at};
+use crate::engine::Io;
 use crate::objects::moves::{create_from_record, create_in, remove};
 use crate::objects::{IN_CONTAINER, IN_INVENTORY, READIED, Slot, WHERE_MASK, pack_xyz};
 use crate::state::State;
@@ -94,12 +98,20 @@ pub fn light_torch(s: &mut State, t: Slot) {
     }
 }
 
-/// Original: 0x12c54a (objects: one of stack `obj` is used up)
+/// Original: 0x12c54a (objects: peer through gem `obj`: the map overview, then one of the
+/// stack used up)
 ///
-/// After the view-flag rebuild 0x13410a: a quantity above 1 drops by one, else the object
+/// The overview (ui 0x13410a, [`crate::combat::peer::overview`]: the map window drawn small
+/// until a key), then [`use_up_one`]. (The integration kept usecmd's reading of 0x13410a: the
+/// dump of 0x12c54a calls it first, and the port of 0x13410a draws and waits for a key.)
+pub async fn use_up(state: &RefCell<State>, io: &Io, obj: Slot) {
+    crate::combat::peer::overview(state, io).await;
+    use_up_one(&mut state.borrow_mut(), obj);
+}
+
+/// The part of 0x12c54a after the overview: a quantity above 1 drops by one, else the object
 /// goes (`obj` 0 is skipped). The inventory panel is redrawn when open (0x1118c6).
-pub fn use_up(s: &mut State, obj: Slot) {
-    seams::rebuild_view_light(s);
+pub fn use_up_one(s: &mut State, obj: Slot) {
     if obj != 0 {
         let q = s.objects.qq_of(obj) & 0xff;
         if q > 1 {

@@ -140,8 +140,8 @@ pub use moves::{
     move_into, move_to, remove, take_from_owner,
 };
 pub use names::{
-    article, count_of_kind, described_name, display_name, look_text, name_prefix, quantity,
-    stack_kind,
+    article_text, count_of_kind, described_name, display_name, look_text, name_prefix_text,
+    quantity, stack_kind,
 };
 pub use parts::{
     find_segment_at, move_monster_parts, move_serpent, owner_of_part, update_vine_frames,

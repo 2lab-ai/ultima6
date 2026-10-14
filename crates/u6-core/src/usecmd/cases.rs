@@ -1,7 +1,8 @@
 //! The type switch of 0x1305e0 (0x13095e..0x130efa).
 
 use super::dispatch::{no_effect, not_readied, not_solo, not_usable};
-use super::{Ux, food, hunk15, mech, misc, travel};
+use super::{Ux, food, mech, misc, travel};
+use crate::objects::commands as hunk15;
 use crate::objects::{READIED, Slot};
 
 /// One case of the switch for target `obj` of type `ty` and frame `frame`; the caller runs the
@@ -16,9 +17,9 @@ pub(super) async fn dispatch_type(ux: Ux<'_>, obj: Slot, ty: u16, frame: u16) {
                 no_effect(ux).await;
             }
         }
-        0x3f | 0x40 => Box::pin(hunk15::key(ux, obj)).await,
+        0x3f | 0x40 => Box::pin(hunk15::use_key(ux.state, ux.io, obj)).await,
         0x49 => mech::bury(ux, obj).await,
-        0x4d => hunk15::gem(ux, obj).await,
+        0x4d => hunk15::use_up(ux.state, ux.io, obj).await,
         0x4e => match place {
             0 => not_usable(ux).await,
             READIED => Box::pin(misc::wand(ux, obj)).await,
@@ -26,12 +27,18 @@ pub(super) async fn dispatch_type(ux: Ux<'_>, obj: Slot, ty: u16, frame: u16) {
         },
         0x57 if place == 0 => not_usable(ux).await,
         0x57 => Box::pin(travel::orb(ux)).await,
-        0x5a => hunk15::torch(ux, obj).await,
+        0x5a => {
+            hunk15::light_torch(&mut ux.s(), obj);
+            ux.flush().await;
+        }
         0x5d if z == 0 || z == 5 => seams_sextant(ux).await,
         0x5d => not_usable(ux).await,
         0x61 => food::study_scroll(ux).await,
         0x62 if place != 0 => not_usable(ux).await,
-        0x62 => hunk15::chest(ux, obj, 0, 0, 0).await,
+        0x62 => {
+            hunk15::chest(&mut ux.s(), obj, false, false, false);
+            ux.flush().await;
+        }
         0x67 | 0x68 if place == READIED => Box::pin(mech::dig(ux)).await,
         0x67 | 0x68 => not_readied(ux).await,
         0x73..=0x75 => food::drink(ux, obj).await,
@@ -39,7 +46,8 @@ pub(super) async fn dispatch_type(ux: Ux<'_>, obj: Slot, ty: u16, frame: u16) {
             if ty == 0xce && frame & 2 != 0 {
                 not_usable(ux).await;
             } else {
-                hunk15::fixed_light(ux, obj).await;
+                hunk15::douse_or_light(&mut ux.s(), obj);
+                ux.flush().await;
             }
         }
         0x5f | 0x60 | 0x80..=0x85 | 0x87 | 0xb4 | 0xb8 | 0xd1 | 0xd2 | 0x109 => {
@@ -65,7 +73,8 @@ pub(super) async fn dispatch_type(ux: Ux<'_>, obj: Slot, ty: u16, frame: u16) {
                 not_usable(ux).await;
             }
             let (x, y) = ux.s().ui.input.target;
-            super::seams::search(ux.state, ux.io, obj, x, y).await;
+            hunk15::search(&mut ux.s(), obj, x as u16, y as u16);
+            ux.flush().await;
         }
         0xd4 => food::fan(ux).await,
         0xdd => mech::cannon(ux, obj).await,
@@ -84,7 +93,10 @@ pub(super) async fn dispatch_type(ux: Ux<'_>, obj: Slot, ty: u16, frame: u16) {
             ux.flush().await;
         }
         0x120 => mech::drawbridge(ux, obj).await,
-        0x129..=0x12c => hunk15::door(ux, obj, 0, 0, 0).await,
+        0x129..=0x12c => {
+            hunk15::door(&mut ux.s(), obj, false, false, false);
+            ux.flush().await;
+        }
         0x131 => {
             let solo = crate::ui::globals::solo_member(&ux.s().actors);
             if solo == -1 {
@@ -97,14 +109,14 @@ pub(super) async fn dispatch_type(ux: Ux<'_>, obj: Slot, ty: u16, frame: u16) {
             }
         }
         0x139 => misc::serpents(ux).await,
-        0x14e => hunk15::secret_door(&mut ux.s(), obj),
+        0x14e => hunk15::toggle_lit(&mut ux.s(), obj),
         0x19c | 0x19e | 0x19f | 0x1a7 if place == 0 => Box::pin(travel::board(ux, obj)).await,
         0x19c | 0x19e | 0x19f | 0x1a7 => not_usable(ux).await,
         0x1a4 if z == 0 || z == 5 => Box::pin(travel::inflate(ux, obj)).await,
         0x1a4 => not_usable(ux).await,
         0x1ae => travel::mount(ux, obj).await,
         0x1af => {
-            travel::dismount(&mut ux.s(), obj);
+            hunk15::dismount(&mut ux.s(), obj);
             ux.flush().await;
         }
         _ => {}

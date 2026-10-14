@@ -172,7 +172,7 @@ fn names_of_twenty_objects_near_the_party() {
     for &c in &picks {
         let o = &s.objects;
         let tile = tile_of(t, o.tf(c));
-        let (prefix, count) = name_prefix(&s, c);
+        let (prefix, count) = name_prefix_text(&s, c);
         let d = &o.defs;
         let count_text = |n: u16| d.count_format.replace("%d", &n.to_string());
         let want_prefix = match stack_kind(o, o.kind(c)) {

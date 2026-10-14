@@ -155,6 +155,30 @@ fn a_chest_opens_and_spills_next_to_the_leader() {
     assert_eq!(frame(&s, c), 1);
 }
 
+/// Kept from usecmd's chest test at the integration: a trap inside (0x151, quality 0x16)
+/// springs instead of "opened!" and goes.
+#[test]
+fn a_chests_trap_springs_instead_of_opened_and_goes() {
+    let mut s = door_world();
+    s.actors.party.members[0] = 1;
+    s.actors.party.size = 1;
+    s.objects.type_frame[1] = 0x19a;
+    s.actors.attrs.hp[1] = 60;
+    s.objects.set_xyz(1, 10, 11, 0);
+    crate::main_loop::test_support::link_placed_objects(&mut s);
+    let c = put(&mut s, 0x62, 10, 10);
+    s.objects.type_frame[c as usize] = 0x62 | 1 << 10;
+    let trap = create_in(&mut s, 0x151, 0x08, 0, c);
+    s.objects.qq[trap as usize] = 0x1600;
+    chest(&mut s, c, false, false, false);
+    assert_eq!(frame(&s, c), 0, "the chest is open");
+    assert_eq!(s.objects.type_frame[trap as usize], 0, "the trap is gone");
+    assert!(
+        !queued(&s).contains(&tag(S_OPENED)),
+        "the trap springs instead of \"opened!\""
+    );
+}
+
 #[test]
 fn closed_containers_and_what_fits_in_them() {
     let mut s = world();
@@ -535,9 +559,9 @@ fn using_up_the_last_of_a_stack_removes_it() {
     let mut s = world();
     let potions = put(&mut s, 60, 1, 1);
     s.objects.qq[potions as usize] = 0x0302;
-    use_up(&mut s, potions);
+    use_up_one(&mut s, potions);
     assert_eq!(s.objects.qq_of(potions), 0x0301);
-    use_up(&mut s, potions);
+    use_up_one(&mut s, potions);
     assert_eq!(s.objects.type_frame[potions as usize], 0);
 }
 

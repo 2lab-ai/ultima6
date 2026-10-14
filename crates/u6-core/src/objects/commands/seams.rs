@@ -427,10 +427,3 @@ pub(crate) fn may_stand(s: &mut State, slot: Slot, x: u16, y: u16) -> bool {
     todo_stub!("0x11b1c0 for an object slot", ());
     !crate::actors::walk::blocked_at(s, x, y)
 }
-
-/// Owner: ui (hunk 18). Original 0x13410a (clear and rebuild the 40 × 40 view-flag and light
-/// grids around the leader). Fallback: the view flags are rebuilt by 0x109e74 instead.
-pub(crate) fn rebuild_view_light(s: &mut State) {
-    todo_stub!("0x13410a rebuild the view and light grids", ());
-    crate::map::view::update_view(s);
-}

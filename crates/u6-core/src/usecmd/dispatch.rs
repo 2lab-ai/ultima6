@@ -21,12 +21,6 @@ const STR_NOT_READIED: u32 = 0x0012_cfd4;
 /// "Not while aboard ship!" (A4 - 0x744d).
 const STR_ABOARD: u32 = 0x744d;
 
-/// Original: 0x128b6a (objects: `ty` is one of the 85 usable types at A4-0x66dc)
-pub fn usable(io: &Io, ty: u16) -> bool {
-    let (off, n) = defs::USABLE;
-    defs::a4_words(io, off, n).contains(&ty)
-}
-
 /// Original: 0x130546 (objects: Use of `obj` is refused while aboard ship)
 ///
 /// Types in the 10-word list at A4-0x65aa are refused, except the vessel the party is in and a
@@ -119,7 +113,7 @@ async fn check(ux: Ux<'_>) -> Checked {
         ux.put(b'\n').await;
     }
     let ty = ux.s().objects.kind(sel);
-    if !usable(ux.io, ty) {
+    if !crate::objects::commands::in_type_list(&ux.s(), ty) {
         ux.say(FMT_NL_LINE, MSG_NOT_USABLE).await;
         return Checked::Refused;
     }

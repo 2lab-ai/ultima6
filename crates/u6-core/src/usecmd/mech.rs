@@ -4,7 +4,7 @@
 use super::defs::{self, MSG_FAILED, MSG_NO_EFFECT};
 use super::dispatch::FMT_NL_LINE;
 use super::{Ux, leader, seams, set_frame};
-use crate::objects::{NONE, Slot, object_of_kind_at};
+use crate::objects::{Slot, object_of_kind_at};
 use crate::state::State;
 use crate::todo_stub;
 
@@ -13,7 +13,6 @@ const STR_CANT_BURY: u32 = 0x0012_c926;
 const STR_FIRE: u32 = 0x0012_c9f2;
 const STR_NOT_NOW: u32 = 0x0012_c9fa;
 const STR_POWDER_LIT: u32 = 0x0012_ca04;
-const STR_DOOR_BLOWN: u32 = 0x0012_ca12;
 const STR_NO_BRIDGE: u32 = 0x0012_ca2a;
 const STR_LEVER: u32 = 0x0012_cad2;
 const STR_STRANGE: u32 = 0x0012_cae6;
@@ -29,12 +28,6 @@ const STR_NUGGET: u32 = 0x0012_cd4c;
 
 /// Objlist block index of A4-0x7b5a (8 moonstone locations, 3 words each).
 const MOONSTONES: usize = 0x2a;
-
-/// printf of a game string from synchronous code (queued for the next await point).
-fn queue(s: &mut State, fmt: u32) {
-    let text = crate::engine::with_current_io(|io| crate::main_loop::game_string(io, fmt));
-    crate::main_loop::queue_print(s, text.unwrap_or_default(), Vec::new());
-}
 
 /// 0x109e74 then 0x102ef0 from synchronous code.
 fn redraw(s: &mut State) {
@@ -149,63 +142,6 @@ pub async fn light_keg(ux: Ux<'_>, obj: Slot) {
         redraw(&mut s);
     } else {
         seams::redraw_inventory(&mut s);
-    }
-}
-
-/// Original: 0x12db7e (objects: a powder keg explodes)
-///
-/// The keg goes; the explosion (0x1331b4, tile 0x189) centres on the keg's tile, or on the
-/// tile of whoever carries it; everything it hit that is not a counted object takes 1..60
-/// damage; kegs and doors around catch it (0x12d9ee); the view is redrawn.
-pub fn explode_keg(s: &mut State, keg: Slot) {
-    let mut at = keg;
-    for _ in 0..crate::objects::OBJECT_SLOTS {
-        if s.objects.place(at) == 0 {
-            break;
-        }
-        at = s.objects.parent(at);
-    }
-    let (x, y) = (s.objects.x(at) as i16, s.objects.y(at) as i16);
-    crate::objects::remove(s, keg);
-    for hit in seams::blast(s, 0x189, x, y) {
-        if crate::objects::stack_kind(&s.objects, s.objects.kind(hit)) == 0 {
-            let d = s.rng.range(1, 0x3c) as i16;
-            seams::damage(s, hit, d);
-        }
-    }
-    blast_doors(s, x, y);
-    redraw(s);
-}
-
-/// Original: 0x12d9ee (objects: blow up kegs and doors around (x, y))
-///
-/// For x − 2..=x + 2, y − 2..y + 2 (the original's loop stops before y + 2): a keg (0xdf) is lit
-/// and explodes at once; the first door of 0x12c, 0x129, 0x12a, 0x12b there that is not
-/// magically locked (frame bits 2-3 both set) is removed, "The door is blown up!".
-pub fn blast_doors(s: &mut State, x: i16, y: i16) {
-    for cx in x.wrapping_sub(2)..=x.wrapping_add(2) {
-        for cy in y.wrapping_sub(2)..y.wrapping_add(2) {
-            let (ux, uy, z) = (cx as u16, cy as u16, z(s));
-            let keg = object_of_kind_at(s, ux, uy, z, 0xdf);
-            if keg >= 0 {
-                set_frame(s, keg, 1);
-                redraw(s);
-                explode_keg(s, keg);
-            }
-            let sealed = |s: &State, d: Slot| (s.objects.tf(d) >> 10) & 0xc == 0xc;
-            let mut door = NONE;
-            for kind in [0x12c, 0x129, 0x12a, 0x12b] {
-                if door != -1 && !sealed(s, door) {
-                    break;
-                }
-                door = object_of_kind_at(s, ux, uy, z, kind);
-            }
-            if door >= 0 && !sealed(s, door) {
-                crate::objects::remove(s, door);
-                redraw(s);
-                queue(s, STR_DOOR_BLOWN);
-            }
-        }
     }
 }
 

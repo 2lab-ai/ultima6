@@ -7,10 +7,10 @@ use std::rc::Rc;
 
 use u6_formats::position::Position;
 
-use super::{Ux, food, hunk15, mech, misc};
+use super::{Ux, food, mech, misc};
 use crate::engine::{Engine, Io};
 use crate::files::Files;
-use crate::objects::{IN_CONTAINER, IN_INVENTORY, Slot};
+use crate::objects::{IN_CONTAINER, Slot};
 use crate::state::State;
 
 /// Object slots the fixtures use.
@@ -65,134 +65,8 @@ where
     e
 }
 
-fn frame(e: &Engine, slot: Slot) -> u16 {
-    e.state().objects.tf(slot) >> 10
-}
-
-/// One door / chest handler call on `A` with (key, lock, unlock); returns the new frame.
-fn door_step(s: State, chest: bool, args: (i16, i16, i16)) -> (State, u16) {
-    let e = run(s, move |st, io| async move {
-        let ux = Ux::new(&st, &io);
-        if chest {
-            hunk15::chest(ux, A, args.0, args.1, args.2).await;
-        } else {
-            hunk15::door(ux, A, args.0, args.1, args.2).await;
-        }
-    });
-    let f = frame(&e, A);
-    (e.state().clone(), f)
-}
-
-#[test]
-fn door_frames_follow_plain_use_keys_and_spells() {
-    let mut s = world();
-    put(&mut s, A, 0x12c | 5 << 10, 100, 99);
-    link(&mut s);
-    let (s, f) = door_step(s, false, (0, 0, 0));
-    assert_eq!(f, 1, "closed 5 opens to 1");
-    let (s, f) = door_step(s, false, (1, 0, 0));
-    assert_eq!(f, 1, "a key does not lock an open door");
-    let (s, f) = door_step(s, false, (0, 0, 0));
-    assert_eq!(f, 5, "open closes");
-    let (s, f) = door_step(s, false, (1, 0, 0));
-    assert_eq!(f, 9, "a key locks a closed door");
-    let (s, f) = door_step(s, false, (0, 0, 0));
-    assert_eq!(f, 9, "plain use leaves it locked");
-    let (s, f) = door_step(s, false, (1, 0, 0));
-    assert_eq!(f, 5, "the key unlocks it");
-    let (s, f) = door_step(s, false, (0, 1, 0));
-    assert_eq!(f, 13, "the lock spell seals a closed door");
-    let (s, f) = door_step(s, false, (1, 0, 0));
-    assert_eq!(f, 13, "a key does not open a magic lock");
-    let (_, f) = door_step(s, false, (0, 0, 1));
-    assert_eq!(f, 5, "the unlock spell undoes it");
-}
-
-#[test]
-fn chest_frames_and_trap() {
-    let mut s = world();
-    put(&mut s, A, 0x62 | 1 << 10, 100, 99);
-    link(&mut s);
-    let (s, f) = door_step(s, true, (0, 0, 0));
-    assert_eq!(f, 0, "a closed chest opens");
-    let (s, f) = door_step(s, true, (1, 0, 0));
-    assert_eq!(f, 0, "No effect on an open chest with a key");
-    let (s, f) = door_step(s, true, (0, 0, 0));
-    assert_eq!(f, 1, "it closes");
-    let (s, f) = door_step(s, true, (1, 0, 0));
-    assert_eq!(f, 2, "the key locks it");
-    let (s, f) = door_step(s, true, (0, 1, 0));
-    assert_eq!(f, 3, "magically locked");
-    let (s, f) = door_step(s, true, (1, 0, 0));
-    assert_eq!(f, 3);
-    let (mut s, f) = door_step(s, true, (0, 0, 1));
-    assert_eq!(f, 1, "unlocked");
-    // A trap inside (0x151, quality 0x16) springs instead of "opened!" and goes.
-    put(&mut s, B, 0x151, 100, 99);
-    s.objects.qq[B as usize] = 0x1600;
-    link(&mut s);
-    crate::objects::move_into(&mut s, B, A, IN_CONTAINER);
-    let (s, f) = door_step(s, true, (0, 0, 0));
-    assert_eq!(f, 0);
-    assert_eq!(s.objects.tf(B), 0, "the trap is gone");
-}
-
-#[test]
-fn fixed_lights_toggle_bit_0_and_keep_bit_1() {
-    let mut s = world();
-    put(&mut s, A, 0xce | 2 << 10, 100, 99);
-    put(&mut s, B, 0x7a | 1 << 10, 101, 99);
-    link(&mut s);
-    let e = run(s, |st, io| async move {
-        let ux = Ux::new(&st, &io);
-        hunk15::fixed_light(ux, A).await;
-        hunk15::fixed_light(ux, B).await;
-    });
-    assert_eq!(frame(&e, A), 3, "brazier frame 2 lights to 3");
-    assert_eq!(frame(&e, B), 0, "a lit candle is doused");
-    let mut s = e.state().clone();
-    hunk15::secret_door(&mut s, A);
-    assert_eq!(s.objects.tf(A) >> 10, 2, "the secret-door toggle: 3 → 2");
-    hunk15::secret_door(&mut s, A);
-    assert_eq!(s.objects.tf(A) >> 10, 3);
-}
-
-#[test]
-fn pick_break_odds_follow_dexterity() {
-    // r in 1..=30 against (45 - dex) / 2 (truncating): dex 45 never breaks, dex 0 below 22.
-    let mut s = world();
-    let broke = (0..200).filter(|_| hunk15::pick_breaks(&mut s, 45)).count();
-    assert_eq!(broke, 0);
-    let mut rng = s.rng;
-    for _ in 0..50 {
-        let r = rng.range(1, 0x1e) as i16;
-        assert_eq!(hunk15::pick_breaks(&mut s, 0), r < 22);
-    }
-}
-
-#[test]
-fn torch_lights_from_the_inventory_and_burns_out() {
-    let mut s = world();
-    put(&mut s, A, 0x5a, 100, 99);
-    s.objects.qq[A as usize] = 1;
-    link(&mut s);
-    crate::objects::move_into(&mut s, A, 1, IN_INVENTORY);
-    let e = run(s, |st, io| async move {
-        hunk15::torch(Ux::new(&st, &io), A).await;
-    });
-    let s = e.state().clone();
-    assert_eq!(s.objects.tf(A), 0x5a | 1 << 10);
-    assert_eq!(
-        s.objects.obj_status[A as usize] & 0x98,
-        0x98,
-        "lit and readied"
-    );
-    assert_eq!(s.objects.qq_of(A) & 0xff, 200);
-    let e = run(s, |st, io| async move {
-        hunk15::torch(Ux::new(&st, &io), A).await;
-    });
-    assert_eq!(e.state().objects.tf(A), 0, "a lit torch burns out");
-}
+// The door, chest, fixed-light, secret-door, lock-pick and torch handlers Use reaches are
+// objects::commands' ports since the integration; their tests are in objects/commands/tests.rs.
 
 #[test]
 fn eating_takes_one_off_a_counted_stack() {
@@ -297,7 +171,7 @@ fn keg_explosion_blows_up_doors_but_not_sealed_ones() {
     put(&mut s, B, 0x12c | 5 << 10, 101, 99);
     put(&mut s, C, 0x12a | 13 << 10, 99, 99);
     link(&mut s);
-    mech::explode_keg(&mut s, A);
+    crate::objects::commands::explode_keg(&mut s, A);
     assert_eq!(s.objects.tf(A), 0, "the keg goes");
     assert_eq!(s.objects.tf(B), 0, "the door is blown up");
     assert_eq!(
@@ -326,10 +200,10 @@ fn mount_and_dismount_a_horse() {
     let mut s = world();
     s.actors.attrs.base_type_frame[1] = 0x17a;
     link(&mut s);
-    super::mount_horse(&mut s, 1, 100, 100, 2, 0);
+    crate::objects::commands::mount_horse(&mut s, 1, 100, 100, 2, false);
     assert_eq!(s.objects.tf(1), 0x1af | 2 << 10);
     let rear = crate::objects::object_of_kind_at(&mut s, 100, 100, 0, 0x1af);
     assert!(rear >= 0);
-    super::dismount(&mut s, 1);
+    crate::objects::commands::dismount(&mut s, 1);
     assert_eq!(s.objects.kind(1), 0x17a, "the rider's own type is back");
 }

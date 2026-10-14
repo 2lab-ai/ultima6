@@ -18,10 +18,6 @@
 //!
 //! - 0x1305e0 Use command: target checks, dispatch by type, end of the command
 //! - 0x130546 type refused aboard ship
-//! - 0x128b6a (hunk 15) usable type list
-//! - 0x12bbc0 / 0x12bdfa (hunk 15) doors / chests; 0x12c062 / 0x12c092 (hunk 15) dexterity /
-//!   intelligence checks; 0x12c0c2 (hunk 15) keys and lock picks; 0x12c326 (hunk 15) torches;
-//!   0x12c54a (hunk 15) gems; 0x12c594 (hunk 15) fixed lights; 0x12c68a (hunk 15) secret doors
 //! - 0x11d0a4 / 0x11cd78 (hunk 12) leave / board a vessel
 //! - 0x12dd1a [objects] drawbridge piece at a tile (with 0x12de3a, not ported)
 //! - 0x12ddae [objects] tile in the 5-byte list at A4-0x6614 (with 0x12de3a, not ported)
@@ -30,16 +26,20 @@
 //! - 0x12ff50 [objects] serpent figure (stub point)
 //!
 //! Ported with an `Original:` marker each: 0x12c8b8 0x12cfe4 0x12d096 0x12d204 0x12d336
-//! 0x12d3c4 0x12d452 0x12d4bc 0x12d526 0x12d7d4 0x12d960 0x12d9ee 0x12db7e 0x12dd6e 0x12e3f6
-//! (partial) 0x12e538 0x12e77c 0x12e912 0x12e924 0x12eb12 0x12eca6 0x12ed4a 0x12ef7a 0x12f0a4
-//! 0x12f0d2 0x12f1e6 0x12f3fa 0x12f502 0x12f6ee 0x12f7ea 0x12f8fe 0x12fb0a 0x12fca2 0x12fdf6
-//! 0x130380 0x1303f4 0x13051a 0x130526.
+//! 0x12d3c4 0x12d452 0x12d4bc 0x12d526 0x12d7d4 0x12d960 0x12dd6e 0x12e3f6 (partial) 0x12e538
+//! 0x12e77c 0x12e912 0x12e924 0x12eb12 0x12eca6 0x12ed4a 0x12ef7a 0x12f0a4 0x12f0d2 0x12f1e6
+//! 0x12f3fa 0x12f502 0x12f7ea 0x12fb0a 0x12fca2 0x12fdf6 0x130380 0x1303f4 0x13051a 0x130526.
+//!
+//! The hunk-15 helpers Use calls (the type list 0x128b6a, doors and chests 0x12bbc0 / 0x12bdfa,
+//! the rolls 0x12c062 / 0x12c092, keys 0x12c0c2, torches 0x12c326, the gem 0x12c54a, fixed
+//! lights 0x12c594, the frame toggle 0x12c68a, search 0x129544) and the shared world helpers
+//! (kegs 0x12db7e / 0x12d9ee, horses 0x12f6ee / 0x12f8fe) are `objects::commands`' ports; the
+//! type switch calls them there (integration M2: one implementation per address).
 
 mod cases;
 pub mod defs;
 mod dispatch;
 mod food;
-mod hunk15;
 mod mech;
 mod misc;
 pub(crate) mod seams;
@@ -53,8 +53,6 @@ mod tests_real;
 use std::cell::{RefCell, RefMut};
 
 pub use dispatch::{refused_aboard, use_command};
-pub use mech::{blast_doors, explode_keg};
-pub use travel::{dismount, mount_horse};
 
 use crate::engine::Io;
 use crate::image::A4;

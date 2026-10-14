@@ -272,7 +272,7 @@ pub fn hurt(s: &mut State, actor: u16, damage: u8) {
 /// [objects] 0x12db7e (the keg / timed object effect). Stub contract: argument the object of
 /// the keg timer; no result; nothing happens. The start state has no keg timer.
 fn keg_expires(s: &mut State, obj: u16) {
-    crate::usecmd::explode_keg(s, obj as i16);
+    crate::objects::commands::explode_keg(s, obj as i16);
 }
 
 /// The calendar part of 0x10368a, after the actor loop.

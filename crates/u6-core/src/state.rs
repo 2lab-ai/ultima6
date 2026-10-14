@@ -150,7 +150,8 @@ impl State {
         Self::default()
     }
 
-    /// Original: 0x105350 (load state: objlist, schedules, base tiles; place party) [partial]
+    /// The boot's load: what 0x105350 (load state; ported as [`crate::saveload::load_state`],
+    /// which Restore runs) reads, plus everything the boot reads before it.
     ///
     /// The boot loads first: tile graphics (0x152e50, [`GfxState::load`]), boot step 3
     /// (0x134f08), the font `u6.ch` and the tables the modules read out of `game` (ui, map,

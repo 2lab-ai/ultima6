@@ -59,8 +59,15 @@ pub fn mount_horse(s: &mut State, rider: Slot, x: u16, y: u16, frame: u16, here:
 /// frame of its facing (0x10a4d6); the rear half behind it goes ("Rear horse???" when there is
 /// none). A new horse (0x1ae, 0x131646, made at 0, 0) is placed on the first tile around the
 /// rider it may stand on (0x11b1c0; columns, then rows), else "No room!" and it is removed.
+///
+/// Port guards (kept from usecmd's copy at the integration): no rider (-1) does nothing, and a
+/// horse the spawn could not make (-1, no free temporary slot) is not tried on any tile, so
+/// "No room!" follows; the original would index its tables with -1.
 pub fn dismount(s: &mut State, rider: Slot) {
     let rider = seams::rider(s, rider);
+    if rider < 0 {
+        return;
+    }
     let (x, y) = (s.objects.x(rider), s.objects.y(rider));
     let d = usize::from((s.objects.tf(rider) >> 10) & 6);
     let i = rider as usize;
@@ -85,7 +92,7 @@ pub fn dismount(s: &mut State, rider: Slot) {
     let mut placed = false;
     'cols: for i in 0..3u16 {
         for j in 0..3u16 {
-            if i == 1 && j == 1 {
+            if (i == 1 && j == 1) || horse < 0 {
                 continue;
             }
             let (nx, ny) = (
