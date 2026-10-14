@@ -53,7 +53,7 @@ fn draw(st: &mut IntroState, x: i16, y: i16, item: i16) {
 /// Original: u 0x1059a8 (gypsy: one more pour of `colour`: the shimmer starts 4 lines higher
 /// and its 16 colours are shared out among the pours so far)
 pub fn add_pour(st: &mut IntroState, colour: i16) {
-    st.views.shimmer.y0 -= 4;
+    st.views.shimmer.y0 = st.views.shimmer.y0.wrapping_sub(4);
     let g = &mut st.gypsy;
     if let Some(slot) = g.poured.get_mut(g.pours as usize) {
         *slot = colour;
@@ -94,10 +94,11 @@ pub fn shimmer(st: &mut IntroState) {
         y1: bottom,
         ..
     } = st.views.shimmer;
-    let mut y = top as u16;
-    while y <= bottom as u16 {
-        let mut xb = (left / 8) as u16;
-        while xb <= (right / 8) as u16 {
+    // Rows and byte columns are unsigned words (`bhi` at 0x105a30 / 0x105a7a). With the bottom
+    // row 0xffff the original's `addq.w` wraps the row to 0 and never ends; the port stops
+    // after row 0xffff.
+    for y in top as u16..=bottom as u16 {
+        for xb in (left / 8) as u16..=(right / 8) as u16 {
             let planes = shimmer_byte(st);
             let at = usize::from(y) * mem::ROW + usize::from(xb);
             let bytes = st.video.chip.bytes_mut(work);
@@ -106,9 +107,7 @@ pub fn shimmer(st: &mut IntroState) {
                     *slot = b;
                 }
             }
-            xb += 1;
         }
-        y += 1;
     }
     let src = View {
         planes: work,
@@ -139,9 +138,13 @@ pub fn draw_liquid(st: &mut IntroState, v: i16, item: i16, x: i16, y: i16) {
     }
     st.views.draw.planes = st.views.screen.planes;
     let (v, lvl) = (i32::from(v), i32::from(lvl));
-    let x = x + t(st, 0x60c, kind * 0x18 + lvl * 8 + v) + t(st, 0x404, v);
-    let y = y + t(st, 0x6cc, kind * 3 + lvl) + y_off(st);
-    let item = base + t(st, 0x54c, kind * 0x18 + lvl * 8 + v);
+    let x = x
+        .wrapping_add(t(st, 0x60c, kind * 0x18 + lvl * 8 + v))
+        .wrapping_add(t(st, 0x404, v));
+    let y = y
+        .wrapping_add(t(st, 0x6cc, kind * 3 + lvl))
+        .wrapping_add(y_off(st));
+    let item = base.wrapping_add(t(st, 0x54c, kind * 0x18 + lvl * 8 + v));
     draw(st, x, y, item);
 }
 
@@ -160,9 +163,12 @@ pub fn draw_bottles(st: &mut IntroState, v: i16, frame: i16, again: i16) -> bool
     let vi = i32::from(v);
     let mut done = false;
     let lift = st.exe.a4_i16(0x546);
-    let lifted_x = t(st, 0x404, vi) + t(st, 0x704, vi) - 6;
-    let lifted_y = base_y + y_off(st) - 0x2d;
-    let tilted = |st: &IntroState| (t(st, 0x6f4, vi), 0x29 + y_off(st));
+    let lifted_x = t(st, 0x404, vi)
+        .wrapping_add(t(st, 0x704, vi))
+        .wrapping_sub(6);
+    let lifted_y = base_y.wrapping_add(y_off(st)).wrapping_sub(0x2d);
+    let tilted = |st: &IntroState| (t(st, 0x6f4, vi), y_off(st).wrapping_add(0x29));
+    let lift_item = |st: &IntroState, off| lift.wrapping_add(t(st, off, vi));
     let level = |st: &IntroState| st.gypsy.level[v as usize];
     let (mut x, mut y, item);
     match f {
@@ -172,33 +178,33 @@ pub fn draw_bottles(st: &mut IntroState, v: i16, frame: i16, again: i16) -> bool
             item = t(st, 0x7a4, vi);
         }
         1 | 15 => {
-            draw(st, lifted_x, lifted_y, lift + t(st, 0x814, vi));
+            draw(st, lifted_x, lifted_y, lift_item(st, 0x814));
             x = t(st, 0x704, vi);
             y = base_y;
             item = t(st, 0x7b4, vi);
         }
         2 | 14 => {
-            draw(st, lifted_x, lifted_y, lift + t(st, 0x824, vi));
+            draw(st, lifted_x, lifted_y, lift_item(st, 0x824));
             x = t(st, 0x704, vi);
             y = base_y - 0x25;
             item = t(st, 0x7b4, vi);
         }
         3 | 13 => {
-            draw(st, lifted_x, lifted_y, lift + t(st, 0x824, vi));
+            draw(st, lifted_x, lifted_y, lift_item(st, 0x824));
             x = t(st, 0x714, vi);
             y = base_y - 0x29;
             item = t(st, 0x7c4, vi);
         }
         4 | 12 => {
             let (tx, ty) = tilted(st);
-            draw(st, tx, ty, lift + t(st, 0x834, vi));
+            draw(st, tx, ty, lift_item(st, 0x834));
             x = t(st, 0x724, vi);
             y = t(st, 0x764, vi);
             item = t(st, 0x7d4, vi);
         }
         5 | 11 => {
             let (tx, ty) = tilted(st);
-            draw(st, tx, ty, lift + t(st, 0x834, vi));
+            draw(st, tx, ty, lift_item(st, 0x834));
             x = t(st, 0x734, vi);
             y = t(st, 0x774, vi);
             item = t(st, 0x7e4, vi);
@@ -214,7 +220,7 @@ pub fn draw_bottles(st: &mut IntroState, v: i16, frame: i16, again: i16) -> bool
         }
         6 | 10 => {
             let (tx, ty) = tilted(st);
-            draw(st, tx, ty, lift + t(st, 0x834, vi));
+            draw(st, tx, ty, lift_item(st, 0x834));
             x = t(st, 0x744, vi);
             y = t(st, 0x784, vi);
             item = t(st, 0x7f4, vi);
@@ -230,7 +236,7 @@ pub fn draw_bottles(st: &mut IntroState, v: i16, frame: i16, again: i16) -> bool
         }
         7 | 9 => {
             let (tx, ty) = tilted(st);
-            draw(st, tx, ty, lift + t(st, 0x834, vi));
+            draw(st, tx, ty, lift_item(st, 0x834));
             x = t(st, 0x754, vi);
             y = t(st, 0x794, vi);
             item = t(st, 0x804, vi);
@@ -243,7 +249,7 @@ pub fn draw_bottles(st: &mut IntroState, v: i16, frame: i16, again: i16) -> bool
         }
         _ => {
             let (tx, ty) = tilted(st);
-            draw(st, tx, ty, lift + t(st, 0x834, vi));
+            draw(st, tx, ty, lift_item(st, 0x834));
             x = t(st, 0x754, vi);
             y = t(st, 0x794, vi);
             item = t(st, 0x804, vi);
@@ -256,47 +262,54 @@ pub fn draw_bottles(st: &mut IntroState, v: i16, frame: i16, again: i16) -> bool
         }
     }
     if (4..=12).contains(&f) {
-        x -= t(st, 0x404, vi);
+        x = x.wrapping_sub(t(st, 0x404, vi));
     }
     if done {
         return false;
     }
     draw_liquid(st, v, item, x, y);
     let dy = y_off(st);
-    y += dy;
-    draw(st, t(st, 0x404, vi) + x, y, st.exe.a4_i16(0x548) + item);
+    y = y.wrapping_add(dy);
+    let (bx, bottle) = (t(st, 0x404, vi).wrapping_add(x), st.exe.a4_i16(0x548));
+    draw(st, bx, y, bottle.wrapping_add(item));
     for d in 0..8i32 {
         if d == vi {
             continue;
         }
         let lvl = st.gypsy.level[d as usize];
-        let bx = t(st, 0x404, d) + t(st, 0x704, d);
+        let bx = t(st, 0x404, d).wrapping_add(t(st, 0x704, d));
         if lvl > 0 {
-            let item = st.exe.a4_i16(0x54a) + t(st, 0x6e4, d) + lvl - 3;
-            draw(st, bx + 3, 0x61 + dy, item);
+            let item = st
+                .exe
+                .a4_i16(0x54a)
+                .wrapping_add(t(st, 0x6e4, d))
+                .wrapping_add(lvl - 3);
+            draw(st, bx.wrapping_add(3), dy.wrapping_add(0x61), item);
         }
-        let item = st.exe.a4_i16(0x548) + t(st, 0x7a4, d);
-        draw(st, bx, base_y + dy, item);
+        let item = st.exe.a4_i16(0x548).wrapping_add(t(st, 0x7a4, d));
+        draw(st, bx, base_y.wrapping_add(dy), item);
     }
     if f < 9 && st.gypsy.stream != 0 && again == 0 {
         let colour = t(st, 0x416, vi);
         add_pour(st, colour);
-        st.gypsy.shimmer_on += 1;
+        st.gypsy.shimmer_on = st.gypsy.shimmer_on.wrapping_add(1);
     }
     if st.gypsy.shimmer_on != 0 {
         shimmer(st);
     }
-    draw(st, 0x8e, 0x4c + dy, st.exe.a4_i16(0x548) + 7);
+    let flask = st.exe.a4_i16(0x548).wrapping_add(7);
+    draw(st, 0x8e, dy.wrapping_add(0x4c), flask);
     if st.gypsy.stream != 0 {
         let lvl = i32::from(3 - level(st));
         let sx = t(st, 0x874, lvl * 8 + vi);
-        let sy = t(st, 0x8a4, lvl) + dy;
+        let sy = t(st, 0x8a4, lvl).wrapping_add(dy);
         let base = if v > 5 {
             st.exe.a4_i16(0x548)
         } else {
             st.exe.a4_i16(0x54a)
         };
-        draw(st, sx, sy, base + t(st, 0x844, lvl * 8 + vi));
+        let item = base.wrapping_add(t(st, 0x844, lvl * 8 + vi));
+        draw(st, sx, sy, item);
     }
     true
 }
@@ -375,10 +388,12 @@ pub async fn ask(st: &mut IntroState, io: &Io, p: i16) -> i16 {
     if st.buttons_on != 0 {
         st.views.draw.planes = st.views.screen.planes;
         let v = st.views.passage;
+        // Word sums (`addq.w` at 0x1064d6).
         let base = st.exe.a4_i16(0x546);
         let file = st.gypsy.file;
-        mem::draw_item(&mut st.video.chip, &v, 0x10f, 0x29, file, (base + 6) as u16);
-        mem::draw_item(&mut st.video.chip, &v, 0x120, 0x29, file, (base + 7) as u16);
+        let (a, b) = (base.wrapping_add(6) as u16, base.wrapping_add(7) as u16);
+        mem::draw_item(&mut st.video.chip, &v, 0x10f, 0x29, file, a);
+        mem::draw_item(&mut st.video.chip, &v, 0x120, 0x29, file, b);
     }
     let c = loop {
         let c = wait_answer(st, io, true).await;
@@ -386,11 +401,12 @@ pub async fn ask(st: &mut IntroState, io: &Io, p: i16) -> i16 {
             break c;
         }
     };
-    let table = if c == u16::from(b'A') { 0x3d4 } else { 0x40c };
-    // The original indexes its per-virtue tables with the word as it is; a `u` whose tables
-    // hold one past 7 would read beyond them. The port keeps the low three bits (0..7 are
-    // unchanged).
-    st.exe.a4_i16(table + 2 * p as u32) & 7
+    let table: u32 = if c == u16::from(b'A') { 0x3d4 } else { 0x40c };
+    // The original indexes its per-virtue tables with the word as it is, sign-extended
+    // (0x106530), so a negative question word reads before the table; the port does the same
+    // 32-bit address sum. A `u` whose tables hold one past 7 would read beyond them: the port
+    // keeps the low three bits (0..7 are unchanged).
+    st.exe.a4_i16(table.wrapping_add_signed(2 * i32::from(p))) & 7
 }
 
 /// Original: u 0x106554 (gypsy: virtue `v` won a question: add its stats, Humility's karma,
@@ -401,9 +417,11 @@ pub async fn ask(st: &mut IntroState, io: &Io, p: i16) -> i16 {
 /// twice (the same frame, `again` = 1) at one swap each.
 pub async fn pour(st: &mut IntroState, io: &Io, v: i16) {
     let vi = u32::from(v as u16);
-    st.hero.str += st.exe.a4_i16(0x516 + 2 * vi);
-    st.hero.dex += st.exe.a4_i16(0x526 + 2 * vi);
-    st.hero.int += st.exe.a4_i16(0x536 + 2 * vi);
+    // Word sums (`add.w` at 0x106568..0x106580).
+    let h = &mut st.hero;
+    h.str = h.str.wrapping_add(st.exe.a4_i16(0x516 + 2 * vi));
+    h.dex = h.dex.wrapping_add(st.exe.a4_i16(0x526 + 2 * vi));
+    h.int = h.int.wrapping_add(st.exe.a4_i16(0x536 + 2 * vi));
     if v == 7 {
         st.hero.karma = st.hero.karma.wrapping_add(3);
     }
