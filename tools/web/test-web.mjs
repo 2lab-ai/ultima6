@@ -850,19 +850,26 @@ async function heldWalk(page, ms) {
   return { steps: seen.length - 1, at: seen.slice(1).map(([t]) => Math.round(t - seen[0][0])) };
 }
 
-// The original's steps for the same holds in the same start (the throne-room fight), measured
-// in the oracle with tools/oracle/pace.mjs: a 5-frame (100 ms) hold walks one cell when the game
-// samples it, a 50-frame (1 s) hold walks one cell (its first world turn takes 420..470 frames).
+// The original's steps for the same holds in the same start (the throne-room fight as booted),
+// measured in the oracle with tools/oracle/pace.mjs, each from a fresh boot: a 5-frame (100 ms)
+// hold walks one cell when the game samples it, a 50-frame (1 s) hold walks one cell (its first
+// world turn takes 420..470 frames). So each hold here starts from a fresh boot too.
 test('the mouse: a press held on the map walks at the original\'s pace: 100 ms one cell, 1 s the original\'s count', async (env) => {
-  const { page } = await h.openPage(env, { gated: false });
-  await h.load(page, env);
-  await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
-  const click = await heldWalk(page, 100);
+  const boot = async () => {
+    const opened = await h.openPage(env, { gated: false });
+    await h.load(opened.page, env);
+    await opened.page.setInputFiles('#picker', h.HFES);
+    await started(opened.page, 130);
+    return opened;
+  };
+  const first = await boot();
+  const click = await heldWalk(first.page, 100);
+  await first.context.close();
   assert.equal(click.steps, 1, `a 100 ms press walks one cell: ${JSON.stringify(click)}`);
-  const held = await heldWalk(page, 1000);
-  assert.ok(held.steps >= 1 && held.steps <= 2, `a 1 s press walks the original's one cell, within one: ${JSON.stringify(held)}`);
-  console.log(`  receipt: held 100 ms = ${click.steps} cell; held 1 s = ${held.steps} cells, at ms ${JSON.stringify(held.at)} after the press`);
+  const second = await boot();
+  const held = await heldWalk(second.page, 1000);
+  assert.ok(held.steps >= 1 && held.steps <= 2, `a 1 s press from a fresh boot walks the original's one cell, within one: ${JSON.stringify(held)}`);
+  console.log(`  receipt: from fresh boots, held 100 ms = ${click.steps} cell; held 1 s = ${held.steps} cells, at ms ${JSON.stringify(held.at)} after the press`);
 }, { needs: h.haveHfes });
 
 test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {
