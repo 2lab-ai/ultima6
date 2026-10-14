@@ -338,11 +338,13 @@ fn treasure(s: &mut State, m: Slot, index: i16, b: u8) {
 /// the egg's alignment. Everything after the very first is scattered (0x121e88, out of view
 /// unless the egg has status 0x20 or the party is arriving) or removed when no tile is free,
 /// which ends that one (port: the original goes on with the freed slot, see the loop). A silver
-/// serpent gets its body segments, a hydra its heads. Actors get the template's
-/// worktype (12 for gargoyles that are friends), with the movement flags of worktypes 15 / 16,
-/// and an attacking gargoyle doubled stats. A hostile hatched out of an egg without status 0x20
-/// may make Shamino warn of its direction once per fight (A4-0x6a88). The egg ends with status
-/// 0x40 (hatched) and 0x02.
+/// serpent gets its body segments (no slot for the first removes it, which ends it too; the
+/// original writes the actor bytes into its freed slot), a hydra its heads. Actors get the
+/// egg's worktype, the quality of the first actor hatchling's template, a removed one's too
+/// (taken again while it is 0; 12 from a template of gargoyles that are friends on), with the
+/// movement flags of worktypes 15 / 16, and an attacking gargoyle doubled stats. A hostile
+/// hatched out of an egg without status 0x20 may make Shamino warn of its direction once per
+/// fight (A4-0x6a88). The egg ends with status 0x40 (hatched) and 0x02.
 pub fn hatch_egg(s: &mut State, egg: Slot) {
     let mut friends = false;
     let mut work: u8 = 0;
@@ -453,21 +455,26 @@ fn hatch_templates(
             if first {
                 first = false;
             } else if !seams::scatter(s, m, scatter_out) {
-                // The original goes on to the serpent body, the hydra heads and the actor bytes
-                // of the freed slot (0x131d06 branches back to 0x131d0e); the port stops here.
+                // After removing it (0x131cfe-0x131d02) the original jumps forward (0x131d06)
+                // to 0x131d0e, the path a placed hatchling takes, and gives the freed slot a
+                // serpent body, hydra heads and its actor bytes; the port only takes the
+                // worktype on the way (0x131ffe) and stops here.
                 remove(s, m);
+                take_worktype(s, c, m, work);
                 continue;
             }
             if t == SERPENT {
-                serpent_body(s, c, m, last);
+                if !serpent_body(s, c, m, last) {
+                    // The original goes on to 0x131ff2 with the freed slot; as above.
+                    take_worktype(s, c, m, work);
+                    continue;
+                }
             } else if t == HYDRA {
                 hydra_heads(s, m);
             }
             if m < ACTOR_SLOTS as Slot {
                 let i = m as usize;
-                if *work == 0 {
-                    *work = quality(s, c);
-                }
+                take_worktype(s, c, m, work);
                 s.actors.worktype[i] = *work;
                 s.actors.attrs.combat_mode[i] = *work;
                 let mf = &mut s.actors.attrs.movement_flags[i];
@@ -513,11 +520,21 @@ fn hatch_templates(
     }
 }
 
+/// 0x131ff2-0x132016: for an actor slot `m` (a freed one too), the egg's worktype becomes the
+/// quality of template `c` while it is still 0.
+fn take_worktype(s: &State, c: Slot, m: Slot, work: &mut u8) {
+    if m < ACTOR_SLOTS as Slot && *work == 0 {
+        *work = quality(s, c);
+    }
+}
+
 /// 0x1319b2 for a silver serpent `m` hatched from template `c`: frame 0, quality 0, then
 /// quantity(c) + 1 body segments (A4-0x6592 numbers them) laid out from the head, the last
 /// with the tail frame. A segment that finds no slot ends the body: the head goes when it was
-/// the first, else the segment before becomes the tail.
-fn serpent_body(s: &mut State, c: Slot, m: Slot, last: &mut Slot) {
+/// the first, else the segment before becomes the tail. Returns whether the head is still
+/// there: after removing it (0x131e54-0x131e58) the original jumps (0x131e5c) to 0x131ff2 and
+/// writes the actor bytes into the freed slot, which the port's caller skips.
+fn serpent_body(s: &mut State, c: Slot, m: Slot, last: &mut Slot) -> bool {
     let i = m as usize;
     s.objects.type_frame[i] &= 0x3ff;
     s.map.flag_6592 = 0;
@@ -539,10 +556,10 @@ fn serpent_body(s: &mut State, c: Slot, m: Slot, last: &mut Slot) {
         if p < 0 {
             if k == 0 {
                 remove(s, m);
-            } else {
-                let f = sbyte(s, TAIL_FRAME, (k - 1) & 3) as u16;
-                set_frame(s, *last, f);
+                return false;
             }
+            let f = sbyte(s, TAIL_FRAME, (k - 1) & 3) as u16;
+            set_frame(s, *last, f);
             break;
         }
         status_clear(s, p, 0x20);
@@ -553,6 +570,7 @@ fn serpent_body(s: &mut State, c: Slot, m: Slot, last: &mut Slot) {
         }
         k += 1;
     }
+    true
 }
 
 /// 0x1319b2 for a hydra `m`: frame 0 and a head (0x16e, 0x131646) on every second

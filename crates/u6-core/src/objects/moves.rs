@@ -8,7 +8,7 @@ use super::{
 use crate::state::State;
 
 /// Type the move routines refuse (0x10c9d2 always, 0x10cda8 unless allowed).
-const FIXED_TYPE: u16 = 0x4c;
+pub(crate) const FIXED_TYPE: u16 = 0x4c;
 /// Silver-serpent head (moves one orthogonal step, never onto its own body).
 pub(crate) const SERPENT: u16 = 0x19d;
 /// Serpent body segment (cannot be removed on its own).
