@@ -503,3 +503,56 @@ fn inflating_a_balloon_tries_the_tiles_as_the_original_and_keeps_it_inflated_wit
     assert_eq!(deflated(&s), 0);
     assert_eq!(inflated(&s), [(100, 100)]);
 }
+
+#[test]
+fn fishing_counts_water_only_on_the_diagonal_the_original_reads() {
+    use crate::actors::tail::HOURLY_B;
+    // Water on one tile only (tile 0, flags1 bit 0); every other tile is dry tile 2.
+    let draws = |wet: (u16, u16)| {
+        let mut s = world();
+        link(&mut s);
+        tiles(&mut s, 2, 0);
+        s.tables.tileflags.flags1[0] = 0x01;
+        let [ox, oy] = s.map.window_origin;
+        let c = crate::map::cell(usize::from(wet.0 - ox), usize::from(wet.1 - oy));
+        s.map.window_tiles[c] = 0;
+        s.actors.objlist_tail[HOURLY_B] = 0;
+        let before = s.rng;
+        let e = run(s, |st, io| async move {
+            misc::fish(Ux::new(&st, &io)).await;
+        });
+        e.state().rng != before
+    };
+    // 0x12efc4..0x12efd0 add the outer counter to both x and y: (x-1, y-1), (x, y), (x+1, y+1).
+    for wet in [(99, 99), (100, 100), (101, 101)] {
+        assert!(draws(wet), "water at {wet:?} is read: the catch is drawn");
+    }
+    for wet in [(100, 99), (101, 100), (99, 101), (101, 99)] {
+        assert!(!draws(wet), "water at {wet:?} is not read: no draw");
+    }
+}
+
+#[test]
+fn the_telescope_pointed_nowhere_leaves_the_view_on_it() {
+    use crate::engine::{InputEvent, Key};
+    let mut s = world();
+    s.ui = crate::main_loop::test_support::test_ui();
+    put(&mut s, A, 0x9a, 100, 99);
+    link(&mut s);
+    tiles(&mut s, 0, 0);
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        super::travel::telescope(Ux::new(&st, &io), A).await;
+    });
+    e.tick(&[InputEvent::Key(Key::Char('a'))], 16);
+    for _ in 0..64 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let c = e.state().map.centre;
+    // 0x12fe80 branches to the exit 0x12ff46 without restoring A4-0x7b78 / -0x7b76; the next
+    // player step re-centres on the leader (0x11d536, 0x11d55c).
+    assert_eq!((c.x, c.y), (100, 99), "the centre stays on the telescope");
+}

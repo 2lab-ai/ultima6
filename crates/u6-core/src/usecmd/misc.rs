@@ -314,9 +314,13 @@ pub fn clear_eggs(s: &mut State, x: i16, y: i16) {
 
 /// Original: 0x12ef7a (objects: fish with a fishing pole)
 ///
-/// Water (flags1 bit 0) on a tile around the leader: unless one was caught this hour
-/// (A4-0x7b5f) 1 in 5 catches a fish (0x109 into the inventory, the line 0x12cc3a) if the
-/// leader can carry it (else 0x12cc1c), else the line 0x12cc44; no water the line 0x12cc5a.
+/// Water (flags1 bit 0) on a tile the scan reads: unless one was caught this hour (A4-0x7b5f)
+/// 1 in 5 catches a fish (0x109 into the inventory, the line 0x12cc3a) if the leader can carry
+/// it (else 0x12cc1c), else the line 0x12cc44; no water the line 0x12cc5a.
+///
+/// The scan runs a 3 × 3 loop skipping (1, 1), but both coordinates take the outer counter
+/// (asm 0x12efc4..0x12efd0 add D7 to x and to y): only (x−1, y−1), the leader's own tile and
+/// (x+1, y+1) are read. Kept as the original reads them.
 pub async fn fish(ux: Ux<'_>) {
     use crate::actors::tail::HOURLY_B;
     let (m, mx, my) = {
@@ -338,7 +342,8 @@ pub async fn fish(ux: Ux<'_>) {
             let wet = {
                 let s = ux.s();
                 let z = usize::from(s.map.centre.z);
-                let (x, y) = ((mx + i).wrapping_sub(1), (my + j).wrapping_sub(1));
+                // The outer counter for y too (0x12efca..0x12efd0).
+                let (x, y) = ((mx + i).wrapping_sub(1), (my + i).wrapping_sub(1));
                 let t = s
                     .map
                     .tile_at(usize::from(x), usize::from(y), z)

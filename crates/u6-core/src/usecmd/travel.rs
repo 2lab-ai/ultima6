@@ -479,7 +479,9 @@ pub async fn orb(ux: Ux<'_>) {
 /// The view centres on the telescope and redraws; the direction prompt (0x12ced6) and a
 /// direction key: with the whole window revealed (A4-0x794c) the view slides that way up to 40
 /// tiles, stopping on a tile ≥ 0xfc, each step redrawn; then back on the party with a dissolve
-/// and the done message. Any other key: the line 0x12cd0c.
+/// and the done message. Any other key: the line 0x12cd0c, and the routine returns (0x12fe80 →
+/// 0x12ff46) with the view centre still on the telescope, a tile from the leader; the next
+/// player step re-centres on the leader (0x11d4ee at 0x11d536 / 0x11d55c).
 ///
 /// Port: each view of the slide is presented and held one vertical blank, the state borrow
 /// released (the Amiga shows each while the next is drawn; the port publishes only at a wait).
@@ -496,9 +498,6 @@ pub async fn telescope(ux: Ux<'_>, obj: Slot) {
     ux.s().ui.input.target_pending = 0;
     if ux.key().await != 0x80 {
         ux.print(STR_NOWHERE, &[]).await;
-        let mut s = ux.s();
-        s.map.centre.x = ox;
-        s.map.centre.y = oy;
         return;
     }
     let dir = ux.s().ui.input.direction;
