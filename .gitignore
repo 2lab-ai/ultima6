@@ -8,3 +8,6 @@
 node_modules/
 dist/
 .worktrees/
+/target/
+/site/pkg/
+__pycache__/
