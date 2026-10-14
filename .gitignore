@@ -1,0 +1,10 @@
+# Game data and anything derived from it never enters this repo.
+/data/
+/re/dumps/
+*.adf
+*.hfe
+*.hxcstream
+*.zip
+node_modules/
+dist/
+.worktrees/
