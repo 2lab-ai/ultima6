@@ -22,19 +22,20 @@ fn files() -> Option<Files> {
     Some(Files::new(r.files))
 }
 
-/// The boot on the user's files: 60 ticks reach the command prompt with only the three stub
-/// points a boot passes (character creation, the combat song of the combat start for the
-/// disk's combat byte, the egg in the start window); the screen shows the window, the panel and
-/// the prompt.
+/// The boot on the user's files: 60 ticks reach the command prompt with only the two stub
+/// points a boot passes (character creation 0x1351d8, and the combat song 0x110878 of the
+/// combat start 0x121c64 for the disk's combat byte; the egg in the start window hatches
+/// through the objects port 0x1319b2 and its placement through combat 0x121e88, so neither is
+/// a stub point since milestone 2); the screen shows the window, the panel and the prompt.
 #[test]
-fn boot_reaches_the_prompt_with_three_stub_points() {
+fn boot_reaches_the_prompt_with_two_stub_points() {
     let Some(files) = files() else { return };
     let mut e = crate::Engine::new(files).unwrap_or_else(|err| panic!("{err}"));
     for _ in 0..60 {
         e.tick(&[], 16);
     }
     let ids: Vec<&str> = e.stub_hits().keys().map(|k| &k[..8]).collect();
-    assert_eq!(ids, ["0x110878", "0x1319b2", "0x1351d8"]);
+    assert_eq!(ids, ["0x110878", "0x1351d8"]);
     let s = e.state();
     assert_eq!(s.ui.text.current, crate::ui::WindowId::Messages);
     assert!(
@@ -244,14 +245,12 @@ fn says_port_line(s: &State) -> bool {
     m.concat().contains(line) || m.join(" ").contains(line)
 }
 
-/// Every cut handler the loop reaches (Attack, Cast, Look, Get, Drop, Move, Use, Rest, combat
-/// begin and break, Save, Restore, the debug teleport): the port's line, the command state
-/// cleared, no movement points spent, no turn, and no key read (a queued key stays queued).
+/// Every cut handler the loop still reaches (Cast, Rest, the debug teleport): the port's line,
+/// the command state cleared, no movement points spent, no turn, and no key read (a queued key
+/// stays queued).
 #[test]
 fn cut_commands_say_so_clear_the_command_and_take_no_turn() {
-    let codes = [
-        0x81, 0x82, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0xaa, 0x12, 0xd6,
-    ];
+    let codes = [0x82, 0x89, 0xd6];
     for combat in [0, 1] {
         for &code in &codes {
             let mut st = State::empty();
@@ -289,9 +288,9 @@ fn talk_still_reads_its_target() {
     assert!(!says_port_line(&s));
 }
 
-/// The loop on a cut command: the prompt again, no world turn (the clock and the movement
-/// points stay), and an arrow pressed after `A` walks the party (NICE-2: Attack used to leave
-/// its cross-hair up).
+/// Attack (0x124caa) given a key that confirms no target ("what?") takes its turn and leaves no
+/// cursor up, so an arrow pressed after it walks the party (NICE-2: Attack used to
+/// leave its cross-hair up).
 #[test]
 fn after_attack_an_arrow_walks() {
     use crate::Key;
@@ -312,7 +311,7 @@ fn after_attack_an_arrow_walks() {
             w.borrow_mut().push((code, targeting));
         }
     });
-    for k in [Key::Char('A'), Key::Right, Key::Right] {
+    for k in [Key::Char('A'), Key::Char('q'), Key::Right, Key::Right] {
         e.tick(&[crate::InputEvent::Key(k)], 16);
         for _ in 0..5 {
             e.tick(&[], 16);
@@ -321,51 +320,37 @@ fn after_attack_an_arrow_walks() {
     let got = walked.borrow().clone();
     assert_eq!(
         got,
-        [(commands::NO_TURN, 0), (0x80, 0), (0x80, 0)],
-        "A: cut, cursor off; each arrow is a walk"
+        [(0x81, 0), (0x80, 0), (0x80, 0)],
+        "A: the turn, cursor off; each arrow is a walk"
     );
 }
 
-/// On the user's files: `A` prints the port's line, runs no world turn (clock and every actor
-/// where they were) and leaves no cursor up, so `A` then an arrow ends where the arrow alone
-/// ends.
+/// On the user's files: `A` then a key that confirms no target runs the Attack command
+/// (0x124caa: its lines, no cursor left up), and the arrow after it walks the party.
 #[test]
-fn real_attack_is_cut_and_the_next_arrow_walks() {
+fn real_attack_without_a_target_and_the_next_arrow_walks() {
     let Some(files) = files() else { return };
-    let boot = |files: Files| {
-        let mut e = crate::Engine::with_seed(files, 7).unwrap_or_else(|err| panic!("{err}"));
-        for _ in 0..60 {
-            e.tick(&[], 16);
-        }
-        e
-    };
+    let mut e = crate::Engine::with_seed(files, 7).unwrap_or_else(|err| panic!("{err}"));
+    for _ in 0..60 {
+        e.tick(&[], 16);
+    }
+    // The world turn after the Attack plays the start fight's hit flashes: enough ticks for it
+    // to hand the turn back.
     let press = |e: &mut crate::Engine, k: crate::Key| {
         e.tick(&[crate::InputEvent::Key(k)], 16);
-        for _ in 0..30 {
+        for _ in 0..600 {
             e.tick(&[], 16);
         }
     };
-    let snapshot = |e: &crate::Engine| {
-        let s = e.state();
-        (s.map.centre, s.actors.calendar, s.objects.location.clone())
-    };
-    let mut cut = boot(files.clone());
-    let before = snapshot(&cut);
-    press(&mut cut, crate::Key::Char('a'));
-    assert_eq!(snapshot(&cut), before, "no turn");
-    assert!(
-        says_port_line(&cut.state()),
-        "{:?}",
-        cut.state().ui.messages
-    );
-    assert_eq!(cut.state().ui.input.targeting, 0);
-    press(&mut cut, crate::Key::Right);
-    let mut plain = boot(files);
-    press(&mut plain, crate::Key::Right);
-    assert_eq!(
-        snapshot(&cut),
-        snapshot(&plain),
-        "A then an arrow = the arrow"
-    );
-    assert_ne!(snapshot(&plain).0, before.0, "the arrow walked");
+    let lines = e.state().ui.messages.len();
+    press(&mut e, crate::Key::Char('a'));
+    press(&mut e, crate::Key::Char('q'));
+    let s = e.state();
+    assert!(!says_port_line(&s), "{:?}", s.ui.messages);
+    assert!(s.ui.messages.len() > lines, "Attack printed its lines");
+    assert_eq!((s.ui.input.targeting, s.ui.input.target_pending), (0, 0));
+    let centre = s.map.centre;
+    drop(s);
+    press(&mut e, crate::Key::Right);
+    assert_ne!(e.state().map.centre, centre, "the arrow walked");
 }
