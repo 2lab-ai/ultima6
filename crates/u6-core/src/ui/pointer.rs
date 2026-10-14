@@ -128,6 +128,10 @@ pub struct PointerState {
     pub press_code: u16,
     /// Original: A4-0x79c6 / -0x79c4 (words: window cell of the last walk click)
     pub walk_cell: (i16, i16),
+    /// Port-only: the engine clock (ms) at which a held walk's next sample is due, kept while
+    /// the command loop's last pointer code was a walk ([`crate::ui::target::HELD_WALK_MS`]);
+    /// `None` when no walk is paced.
+    pub walk_due: Option<u64>,
 }
 
 impl PointerState {
