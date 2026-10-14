@@ -117,7 +117,10 @@ real-data tests.
 - **Model (W7b):** `ModelBrain` is opt-in per NPC or per area. A request carries a turn/state
   generation; requests for all ModelBrain NPCs of a world round go out together at the round's
   start and share one round budget (one game future serves the whole round, so per-NPC budgets
-  would add up); when it runs out, the original routine decides each unanswered turn
+  would add up); when it runs out, the original routine decides each unanswered turn. The
+  generation is the restore / cancel epoch (03 §5), not a per-change counter: a reply computed
+  from the round-start view is applied on that NPC's turn only if its action id is in the legal
+  set recomputed at that moment; otherwise the original routine decides
   (rendering stays live throughout; turn order is unchanged); invalid, oversized, timed-out or stale
   replies fall back and are logged; one request in flight per NPC; bounded reply size.
 - **Payload boundary:** structured state and legal action ids only; dialogue text only if enabled
@@ -150,7 +153,7 @@ value; the behavioural receipt is added next to it.
 | W5a | `u6-defs` library: export / build / merge / validate / sparse diff, wasm-callable (browser and CLI both call it; neither re-implements merge or validation) | W1–W4 | full export → build identical for every file the engine reads |
 | W5b | CLI adapter: file I/O and the commands export, build, validate, new-mod, pack | W5a | each command on the user's files |
 | W6a | mod resolver + save sidecar + package limits | W5a | acceptance 4–5 |
-| W6b | page mod manager + end-to-end in the browser | W6a, W5b, W8 (first family) | acceptance 3, in native and in the browser |
+| W6b | page mod manager + end-to-end in native and in the browser | W6a, W5b, W8 (first family) | acceptance 3, in native and in the browser |
 | W7a | NPC seam + OriginalBrain | — | acceptance 1 + RNG-free enumeration test |
 | W7b | ModelBrain + budget + transport | W7a, transport decision | acceptance 2 |
 | W8 | rules extraction, one family per dispatch (missile weapons first) | W4 | behaviour test + parity |
