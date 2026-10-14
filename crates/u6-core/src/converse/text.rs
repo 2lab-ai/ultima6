@@ -1,20 +1,15 @@
 //! The converse messages, read at run time from the user's `game` executable (spec 03 §5 "data,
 //! not constants"): the original prints string literals that live in its code hunks 9 and 10
 //! and passes file names from its data hunk 33 (plus the word-end table of hunk 2 that the
-//! message-scroll stand-in uses). This module holds only their image addresses
-//! and a minimal AmigaDOS hunk walker that finds those hunks' bytes in the file.
+//! message-scroll stand-in uses). This module holds only their image addresses; the hunks'
+//! bytes come from the shared hunk loader [`crate::image::GameImage`].
 //!
 //! Version check: 35 hunks, hunk 2 = CODE 0x3a28 bytes, hunk 9 = CODE 0x318 bytes, hunk 10 = CODE 0x2958 bytes, hunk 33 =
 //! DATA with 0x4f0c bytes loaded (`re/notes/game-layout.md`, "`game` segments"); every message
 //! must end in a NUL inside its hunk.
 
-/// `HUNK_HEADER`, `HUNK_CODE`, `HUNK_DATA`, `HUNK_BSS`, `HUNK_RELOC32`, `HUNK_END`.
-const HUNK_HEADER: u32 = 0x3f3;
-const HUNK_CODE: u32 = 0x3e9;
-const HUNK_DATA: u32 = 0x3ea;
-const HUNK_BSS: u32 = 0x3eb;
-const HUNK_RELOC32: u32 = 0x3ec;
-const HUNK_END: u32 = 0x3f2;
+use crate::image::GameImage;
+
 /// Hunk count of the `game` executable this table was measured on.
 const GAME_HUNKS: usize = 35;
 /// (hunk, image base, loaded bytes) of the three hunks the messages live in.
@@ -134,15 +129,15 @@ impl ConverseText {
 
     /// Reads every message out of the decrunched `game` executable.
     pub fn from_game(game: &[u8]) -> Result<Self, String> {
-        let hunks = hunk_ranges(game)?;
-        if hunks.len() != GAME_HUNKS {
+        let img = GameImage::parse(game).map_err(|e| format!("game: {e}"))?;
+        if img.segment_count() != GAME_HUNKS {
             return Err(format!(
                 "game: {} hunks, expected {GAME_HUNKS}",
-                hunks.len()
+                img.segment_count()
             ));
         }
         for &(n, _, len) in &HUNKS {
-            let got = hunks[n].as_ref().map(|r| r.len());
+            let got = img.loaded(n).map(<[u8]>::len).filter(|&l| l > 0);
             if got != Some(len) {
                 return Err(format!(
                     "game: hunk {n} holds {got:?} bytes, expected {len:#x}"
@@ -156,8 +151,8 @@ impl ConverseText {
                 .copied()
                 .find(|&(_, base, len)| addr >= base && ((addr - base) as usize) < len)
                 .ok_or_else(|| format!("{msg:?}: {addr:#x} outside the known hunks"))?;
-            let range = hunks[n].clone().unwrap_or_default();
-            let bytes = &game[range][(addr - base) as usize..len];
+            let hunk = img.loaded(n).unwrap_or_default();
+            let bytes = &hunk[(addr - base) as usize..len];
             let end = bytes
                 .iter()
                 .position(|&b| b == 0)
@@ -166,77 +161,4 @@ impl ConverseText {
         }
         Ok(Self::from_pairs(pairs))
     }
-}
-
-fn long(data: &[u8], at: usize) -> Result<u32, String> {
-    at.checked_add(4)
-        .and_then(|end| data.get(at..end))
-        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-        .ok_or_else(|| format!("game: truncated at {at:#x}"))
-}
-
-/// File ranges of the loaded bytes of each CODE/DATA hunk (`None` for BSS), in hunk order.
-fn hunk_ranges(f: &[u8]) -> Result<Vec<Option<std::ops::Range<usize>>>, String> {
-    if long(f, 0)? != HUNK_HEADER {
-        return Err("game: not an AmigaDOS executable".into());
-    }
-    let mut at = 4;
-    // Resident library names: (length in longs, name) until a 0 length.
-    loop {
-        let n = long(f, at)? as usize;
-        at += 4;
-        if n == 0 {
-            break;
-        }
-        at += n * 4;
-    }
-    let (first, last) = (long(f, at + 4)? as usize, long(f, at + 8)? as usize);
-    let count = last
-        .checked_sub(first)
-        .map(|d| d + 1)
-        .ok_or("game: bad hunk table")?;
-    at += 12 + count * 4;
-    let mut hunks = Vec::with_capacity(count);
-    while hunks.len() < count {
-        let id = long(f, at)? & 0x3fff_ffff;
-        at += 4;
-        match id {
-            HUNK_CODE | HUNK_DATA => {
-                let len = long(f, at)? as usize * 4;
-                at += 4;
-                if at + len > f.len() {
-                    return Err(format!("game: hunk {} truncated", hunks.len()));
-                }
-                hunks.push(Some(at..at + len));
-                at += len;
-            }
-            HUNK_BSS => {
-                at += 4;
-                hunks.push(None);
-            }
-            other => return Err(format!("game: unexpected block {other:#x} at {at:#x}")),
-        }
-        // Relocation blocks, then HUNK_END.
-        loop {
-            match long(f, at)? & 0x3fff_ffff {
-                HUNK_RELOC32 => {
-                    at += 4;
-                    loop {
-                        let n = long(f, at)? as usize;
-                        at += 4;
-                        if n == 0 {
-                            break;
-                        }
-                        at += 4 + n * 4;
-                    }
-                }
-                HUNK_END => {
-                    at += 4;
-                    break;
-                }
-                other => return Err(format!("game: unexpected block {other:#x} at {at:#x}")),
-            }
-        }
-    }
-    Ok(hunks)
 }

@@ -1,16 +1,16 @@
 //! Game tables the actor code reads from the data hunk of `game` (spec 03 §5: extracted from the
 //! user's executable at run time, never compiled in).
 //!
-//! The data hunk (hunk 33) is the SAS/C small-data section: A4 = hunk start + 0x8000, so the
-//! table at A4 + `off` (negative `off`) sits `off + 0x8000` bytes into the hunk's data, which the
-//! decrunched `game` holds at file offset [`GAME_HUNK33_BLOCK`] + 8. [`GameTables::from_game`]
-//! validates the file with the palette check (length, hunk magic, hunk 33 header) first.
-//!
-//! Until the loader is wired into `State::new_game` (WU-C0), [`GameTables::default`] is empty:
-//! every lookup then behaves as "not listed" (see each accessor).
+//! The data hunk (hunk 33) is the SAS/C small-data section: A4 = hunk start + 0x8000; the tables
+//! are read at A4 + `off` through the shared hunk loader [`crate::image::GameImage`].
+//! [`GameTables::from_game`] validates the file with the palette check (length, hunk magic,
+//! hunk 33 header) first; `State::new_game` loads it. [`GameTables::default`] is empty: every
+//! lookup then behaves as "not listed" (see each accessor).
 
 use u6_formats::FormatError;
-use u6_formats::gfx::{self, GAME_HUNK33_BLOCK};
+use u6_formats::gfx;
+
+use crate::image::GameImage;
 
 /// A4 offset of the creature-type word list (0-terminated).
 const CREATURE_TYPES: i32 = -0x8000;
@@ -77,50 +77,47 @@ pub struct GameTables {
     pub raft_cost: [u8; 8],
 }
 
-fn hunk_offset(a4: i32) -> usize {
-    GAME_HUNK33_BLOCK + 8 + (a4 + 0x8000) as usize
-}
-
-fn word(game: &[u8], at: usize) -> u16 {
-    u16::from_be_bytes([game[at], game[at + 1]])
-}
-
 impl GameTables {
-    /// Extracts the tables from the PowerPacker-decrunched `game` executable.
+    /// Extracts the tables from the PowerPacker-decrunched `game` executable through the shared
+    /// hunk loader [`GameImage`].
     pub fn from_game(game: &[u8]) -> Result<Self, FormatError> {
         // Same version check as the palette: length, hunk magic, hunk 33 header.
         gfx::palette(game)?;
-        let types_at = hunk_offset(CREATURE_TYPES);
-        let flags_at = hunk_offset(CREATURE_FLAGS);
-        let creature_types: Vec<u16> = (0..CREATURE_MAX)
-            .map(|i| word(game, types_at + 2 * i))
-            .take_while(|&t| t != 0)
-            .collect();
+        let img = GameImage::parse(game)?;
+        let bytes = |a4: i32, n: usize| img.a4_bytes(a4, n);
+        let word = |a4: i32, i: usize| -> Result<u16, FormatError> {
+            let b = img.a4_bytes(a4 + 2 * i as i32, 2)?;
+            Ok(u16::from_be_bytes([b[0], b[1]]))
+        };
+        let mut creature_types = Vec::new();
+        for i in 0..CREATURE_MAX {
+            let t = word(CREATURE_TYPES, i)?;
+            if t == 0 {
+                break;
+            }
+            creature_types.push(t);
+        }
         let creature_flags = (0..creature_types.len())
-            .map(|i| word(game, flags_at + 2 * i))
-            .collect();
-        let objects_at = hunk_offset(WORK_OBJECTS);
-        let work_objects = [0, 1, 2, 3].map(|i| word(game, objects_at + 2 * i));
-        let moons_at = hunk_offset(MOONS);
-        let moons = game[moons_at..moons_at + 2 * (DAYS + 1)].to_vec();
+            .map(|i| word(CREATURE_FLAGS, i))
+            .collect::<Result<_, _>>()?;
+        let work_objects = [
+            word(WORK_OBJECTS, 0)?,
+            word(WORK_OBJECTS, 1)?,
+            word(WORK_OBJECTS, 2)?,
+            word(WORK_OBJECTS, 3)?,
+        ];
+        let moons = bytes(MOONS, 2 * (DAYS + 1))?.to_vec();
         let mut part_frames = [0u8; 16];
-        let at = hunk_offset(PART_FRAMES);
-        part_frames.copy_from_slice(&game[at..at + 16]);
+        part_frames.copy_from_slice(bytes(PART_FRAMES, 16)?);
         let mut ship_sides = [0u8; 4];
-        let at = hunk_offset(SHIP_SIDES);
-        ship_sides.copy_from_slice(&game[at..at + 4]);
-        let at = hunk_offset(DELTAS);
-        let deltas = game[at..at + 264].to_vec();
-        let at = hunk_offset(FORMATION);
-        let formation = game[at..at + 28].to_vec();
-        let at = hunk_offset(SAIL);
-        let sail = game[at..at + 64].to_vec();
+        ship_sides.copy_from_slice(bytes(SHIP_SIDES, 4)?);
+        let deltas = bytes(DELTAS, 264)?.to_vec();
+        let formation = bytes(FORMATION, 28)?.to_vec();
+        let sail = bytes(SAIL, 64)?.to_vec();
         let mut ship_cost = [0u8; 8];
-        let at = hunk_offset(SHIP_COST);
-        ship_cost.copy_from_slice(&game[at..at + 8]);
+        ship_cost.copy_from_slice(bytes(SHIP_COST, 8)?);
         let mut raft_cost = [0u8; 8];
-        let at = hunk_offset(RAFT_COST);
-        raft_cost.copy_from_slice(&game[at..at + 8]);
+        raft_cost.copy_from_slice(bytes(RAFT_COST, 8)?);
         Ok(Self {
             deltas,
             formation,

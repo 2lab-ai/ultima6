@@ -1,97 +1,82 @@
 //! Tables the draw path reads out of the user's `game` executable at run time (spec 03 §5: data
-//! is extracted, never compiled in). Addresses are image addresses (base 0x00100000); the file
-//! offset of an address is its hunk's header offset + 8 + (address - hunk base) in the
-//! PowerPacker-decrunched `game` (267,332 bytes). Each read checks the `HUNK_HEADER` magic, the
-//! hunk's type and longword count, like `u6_formats::gfx::palette` does for the palette. The
-//! bytes read here carry no relocations (word tables and data words); a real-data test compares
-//! them with the flattened image.
+//! is extracted, never compiled in). Addresses are image addresses (base 0x00100000), read
+//! through the shared hunk loader [`crate::image::GameImage`]. The version check is the hunk
+//! layout the addresses were measured on: hunk 30 (CODE) at 0x151ee0 with 0x16f0 bytes, hunk
+//! 33 (DATA) at 0x1536f0 with 0x4f0c bytes. The bytes read here carry no relocations (word
+//! tables and data words); a real-data test compares them with the flattened image.
 
 use u6_formats::FormatError;
-use u6_formats::gfx::GAME_EXE_LEN;
+
+use crate::image::GameImage;
 
 /// Shore merges per pass of 0x152d52 (`moveq #0x1f` + `dbf`).
 pub const SHORE_MERGES: usize = 32;
 /// LFSR feedback words of 0x1520e2, one per register width 2..=16 bits.
 pub const DISSOLVE_TAPS: usize = 15;
 
-const HUNK_HEADER: u32 = 0x3F3;
-const HUNK_CODE: u32 = 0x3E9;
-const HUNK_DATA: u32 = 0x3EA;
-
 /// One loaded hunk of `game` (re/notes/game-layout.md, `game` segments).
 struct Hunk {
-    /// File offset of the hunk's type longword.
-    header: usize,
-    kind: u32,
-    /// Longwords of loaded data that follow the 8-byte header.
-    longs: u32,
+    /// Hunk number.
+    n: usize,
+    /// Loaded bytes.
+    len: usize,
     /// Image address of the first data byte.
     base: u32,
 }
 
 /// Hunk 30 (CODE, 0x16f0 bytes at 0x151ee0): the graphics code with its embedded tables.
 const HUNK_30: Hunk = Hunk {
-    header: 235_908,
-    kind: HUNK_CODE,
-    longs: 0x5BC,
+    n: 30,
+    len: 0x16f0,
     base: 0x0015_1EE0,
 };
 
 /// Hunk 33 (DATA, 0x4f0c loaded bytes at 0x1536f0): the small-data globals (A4 = 0x15b6f0).
 const HUNK_33: Hunk = Hunk {
-    header: 243_036,
-    kind: HUNK_DATA,
-    longs: 0x13C3,
+    n: 33,
+    len: 0x4f0c,
     base: 0x0015_36F0,
 };
 
-fn be32(b: &[u8], off: usize) -> Option<u32> {
-    Some(u32::from_be_bytes(b.get(off..off + 4)?.try_into().ok()?))
-}
-
 fn invalid(offset: usize, detail: String) -> FormatError {
     FormatError::Invalid {
-        what: "game",
+        what: "game executable",
         offset,
         detail,
     }
 }
 
-/// `len` bytes at image address `addr` inside `hunk`, after checking the file and hunk header.
+/// Checks the two hunks this module reads are where they were measured.
+fn check_layout(img: &GameImage<'_>) -> Result<(), FormatError> {
+    for h in [&HUNK_30, &HUNK_33] {
+        let got = (img.segment_base(h.n), img.loaded(h.n).map(<[u8]>::len));
+        if got != (Some(h.base), Some(h.len)) {
+            return Err(invalid(
+                0,
+                format!(
+                    "hunk {} layout {got:x?}, expected {:#x} / {:#x}",
+                    h.n, h.base, h.len
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `len` bytes at `addr`, which must lie inside hunk `hunk`.
 fn image_bytes<'a>(
-    game: &'a [u8],
+    img: &GameImage<'a>,
     hunk: &Hunk,
     addr: u32,
     len: usize,
 ) -> Result<&'a [u8], FormatError> {
-    if game.len() != GAME_EXE_LEN {
-        return Err(FormatError::BadLength {
-            what: "game",
-            expected: format!("{GAME_EXE_LEN} (decrunched)"),
-            actual: game.len(),
-        });
-    }
-    if be32(game, 0) != Some(HUNK_HEADER) {
-        return Err(invalid(0, "no HUNK_HEADER magic".into()));
-    }
-    let head = (be32(game, hunk.header), be32(game, hunk.header + 4));
-    if head != (Some(hunk.kind), Some(hunk.longs)) {
-        return Err(invalid(
-            hunk.header,
-            format!(
-                "hunk header {head:x?}, expected {:#x} / {:#x}",
-                hunk.kind, hunk.longs
-            ),
-        ));
-    }
-    let start = addr
+    let inside = addr
         .checked_sub(hunk.base)
-        .map(|d| d as usize)
-        .filter(|&d| d + len <= hunk.longs as usize * 4)
-        .ok_or_else(|| invalid(hunk.header, format!("{addr:#x} outside the hunk")))?;
-    let off = hunk.header + 8 + start;
-    game.get(off..off + len)
-        .ok_or_else(|| invalid(off, "past the end of the file".into()))
+        .is_some_and(|d| d as usize + len <= hunk.len);
+    if !inside {
+        return Err(invalid(0, format!("{addr:#x} outside hunk {}", hunk.n)));
+    }
+    img.bytes(addr, len)
 }
 
 fn words<const N: usize>(b: &[u8]) -> [u16; N] {
@@ -151,6 +136,9 @@ impl Default for GameTables {
 impl GameTables {
     /// Reads the tables from the decrunched `game`.
     pub fn from_game(game: &[u8]) -> Result<Self, FormatError> {
+        let img = GameImage::parse(game)?;
+        check_layout(&img)?;
+        let game = &img;
         let n = SHORE_MERGES * 2;
         let shore_src = words(image_bytes(game, &HUNK_30, 0x0015_2C52, n)?);
         let shore_dst = words(image_bytes(game, &HUNK_30, 0x0015_2C92, n)?);
@@ -176,44 +164,47 @@ impl GameTables {
 mod tests {
     use super::*;
 
-    /// A synthetic `game`: right length, header magic, hunk 30 and 33 headers, chosen bytes.
+    /// A synthetic `game`: hunk 30 and 33 at their measured bases and sizes, chosen bytes.
     pub(crate) fn synthetic_game() -> Vec<u8> {
-        let mut g = vec![0u8; GAME_EXE_LEN];
-        g[..4].copy_from_slice(&HUNK_HEADER.to_be_bytes());
-        for h in [&HUNK_30, &HUNK_33] {
-            g[h.header..h.header + 4].copy_from_slice(&h.kind.to_be_bytes());
-            g[h.header + 4..h.header + 8].copy_from_slice(&h.longs.to_be_bytes());
-        }
-        let at = |h: &Hunk, a: u32| h.header + 8 + (a - h.base) as usize;
+        let mut h30 = vec![0u8; HUNK_30.len];
+        let mut h33 = vec![0u8; HUNK_33.len];
+        let at30 = |a: u32| (a - HUNK_30.base) as usize;
+        let at33 = |a: u32| (a - HUNK_33.base) as usize;
         for i in 0..SHORE_MERGES {
-            let s = at(&HUNK_30, 0x0015_2C52) + 2 * i;
-            g[s..s + 2].copy_from_slice(&(4 * (i as u16 + 1)).to_be_bytes());
-            let d = at(&HUNK_30, 0x0015_2C92) + 2 * i;
-            g[d..d + 2].copy_from_slice(&(4 * (i as u16 + 100)).to_be_bytes());
+            let s = at30(0x0015_2C52) + 2 * i;
+            h30[s..s + 2].copy_from_slice(&(4 * (i as u16 + 1)).to_be_bytes());
+            let d = at30(0x0015_2C92) + 2 * i;
+            h30[d..d + 2].copy_from_slice(&(4 * (i as u16 + 100)).to_be_bytes());
         }
         for i in 0..DISSOLVE_TAPS {
-            let o = at(&HUNK_30, 0x0015_1F3C) + 2 * i;
-            g[o..o + 2].copy_from_slice(&(0x3u16 << i).to_be_bytes());
+            let o = at30(0x0015_1F3C) + 2 * i;
+            h30[o..o + 2].copy_from_slice(&(0x3u16 << i).to_be_bytes());
         }
-        let dirs = at(&HUNK_33, 0x0015_5522);
-        g[dirs..dirs + 16]
+        let dirs = at33(0x0015_5522);
+        h33[dirs..dirs + 16]
             .copy_from_slice(&[0, 1, 1, 1, 0, 255, 255, 255, 255, 255, 0, 1, 1, 1, 0, 255]);
-        let colours = at(&HUNK_33, 0x0015_7D9E);
-        for (i, b) in g[colours..colours + 256].iter_mut().enumerate() {
+        let colours = at33(0x0015_7D9E);
+        for (i, b) in h33[colours..colours + 256].iter_mut().enumerate() {
             *b = (i % 32) as u8;
         }
-        let hours = at(&HUNK_33, 0x0015_3BFC);
-        g[hours..hours + 12].copy_from_slice(&[0, 0, 1, 1, 2, 3, 3, 4, 5, 5, 6, 7]);
+        let hours = at33(0x0015_3BFC);
+        h33[hours..hours + 12].copy_from_slice(&[0, 0, 1, 1, 2, 3, 3, 4, 5, 5, 6, 7]);
         for (a, v) in [
             (0x0015_5180, 13u16),
             (0x0015_5188, 2),
             (0x0015_3BF8, 1),
             (0x0015_5178, 1),
         ] {
-            let o = at(&HUNK_33, a);
-            g[o..o + 2].copy_from_slice(&v.to_be_bytes());
+            let o = at33(a);
+            h33[o..o + 2].copy_from_slice(&v.to_be_bytes());
         }
-        g
+        crate::image::SyntheticGame::new()
+            .place_at(HUNK_30.n, HUNK_30.base)
+            .loaded(false, h30)
+            .place_at(HUNK_33.n, HUNK_33.base)
+            .loaded(true, h33)
+            .bss(0)
+            .build()
     }
 
     #[test]
@@ -231,14 +222,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_length_magic_and_hunk_header() {
+    fn rejects_a_non_hunk_file_and_another_layout() {
         assert!(GameTables::from_game(&[0; 16]).is_err());
         let mut g = synthetic_game();
         g[0] = 0xff;
         assert!(GameTables::from_game(&g).is_err());
-        let mut g = synthetic_game();
-        g[HUNK_30.header + 7] ^= 1;
-        let e = GameTables::from_game(&g).unwrap_err().to_string();
-        assert!(e.contains("hunk header"), "{e}");
+        let other = crate::image::SyntheticGame::new()
+            .place_at(HUNK_30.n, HUNK_30.base + 8)
+            .loaded(false, vec![0; HUNK_30.len])
+            .build();
+        let e = GameTables::from_game(&other).unwrap_err().to_string();
+        assert!(e.contains("hunk 30 layout"), "{e}");
     }
 }

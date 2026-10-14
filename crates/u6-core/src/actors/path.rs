@@ -671,6 +671,7 @@ mod tests {
                 z: 0,
             },
         }];
+        crate::actors::walk::tests::link_objects(&mut s);
         s
     }
 
@@ -712,10 +713,8 @@ mod tests {
         s.tables.tileflags.flags3 = vec![0; 2048];
         s.tables.basetile.base = vec![0; 1024];
         s.tables.basetile.base[0x300] = 7;
-        for (i, y) in (0..10).enumerate() {
-            let id = 0x100 + i;
-            s.objects.type_frame[id] = 0x300;
-            s.objects.location[id] = Position { x: 8, y, z: 0 };
+        for y in 0..10 {
+            crate::objects::create_on_map(&mut s.objects, 0x300, 0, 0, 8, y, 0);
         }
         s.actors.work.slot = 0;
         seek(&mut s, 10, Goal::At(12, 5));

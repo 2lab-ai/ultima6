@@ -720,7 +720,19 @@ pub(crate) mod tests {
             s.objects.type_frame[a] = 0x17a;
             s.objects.location[a] = Position { x, y: 20, z: 0 };
         }
+        link_objects(&mut s);
         s
+    }
+
+    /// The object list over the slots placed so far (load state's 0x10ed44 + 0x10edb4), so the
+    /// object code's moves and walks find them.
+    pub(crate) fn link_objects(s: &mut State) {
+        crate::objects::init_slots(&mut s.objects);
+        crate::objects::link_actors(&mut s.objects);
+        let c = s.map.centre;
+        let (ox, oy) = (c.x.wrapping_sub(16) & 0x3f8, c.y.wrapping_sub(16) & 0x3f8);
+        s.map.window_origin = [ox, oy];
+        s.objects.set_window(ox, oy, c.z);
     }
 
     #[test]

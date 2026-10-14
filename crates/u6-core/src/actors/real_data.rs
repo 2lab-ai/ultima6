@@ -21,7 +21,8 @@ use super::{GameTables, clock, path, turn, walk};
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
-/// The start state with the `game` tables loaded (the wiring WU-C0 adds to `State::new_game`).
+/// The start state after load state: `State::new_game` and the object, region and view steps
+/// of 0x105350's tail (what `main_loop::finish_load_state` runs, less the command-bar draw).
 fn start() -> Option<(State, Files)> {
     if !Path::new(ZIP).exists() {
         eprintln!("skipped: {ZIP} not present");
@@ -35,6 +36,10 @@ fn start() -> Option<(State, Files)> {
     let files = Files::new(r.files);
     let mut state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
     state.actors.game = GameTables::from_game(files.get("game").unwrap()).unwrap();
+    crate::objects::load_state_objects(&mut state);
+    state.map.flag_784e = 1;
+    crate::map::region::refresh_region(&mut state);
+    crate::map::view::update_view(&mut state);
     Some((state, files))
 }
 

@@ -38,10 +38,57 @@ pub(super) fn text() -> ConverseText {
     }))
 }
 
+/// A text layer for the tests: every printable character on a raw key (plain or shifted),
+/// Return, Escape, space and backspace on theirs; the message scroll the whole screen (40 × 25
+/// cells), scrolling, no wrap and no capitals, so each scroll line is one line of output.
+pub(super) fn test_ui() -> crate::ui::UiState {
+    use crate::ui::tables::{Colours, Initial, RAW_KEYS, UiTables};
+    let mut keymap = vec![[0u16; 4]; RAW_KEYS];
+    let printable: Vec<u16> = (0x21..0x7f).collect();
+    for (row, pair) in printable.chunks(2).enumerate() {
+        keymap[row] = [pair[0], pair.get(1).copied().unwrap_or(0), 0, 0];
+    }
+    keymap[0x40] = [0x20; 4];
+    keymap[0x41] = [0x08; 4];
+    keymap[0x44] = [0x0d; 4];
+    keymap[0x45] = [0x1b; 4];
+    let t = UiTables {
+        keymap,
+        keyword_end: b" .,".to_vec(),
+        colours: Colours {
+            text: 1,
+            paper: 2,
+            alert: 3,
+            poisoned: 4,
+            command: 5,
+        },
+        initial: Initial {
+            text_on: true,
+            cursor_glyph: 5,
+            accept: true,
+            upcase: true,
+            target_command: crate::ui::globals::NO_COMMAND,
+            panel_mode: 0x91,
+            ..Initial::default()
+        },
+        ..UiTables::default()
+    };
+    let mut ui = crate::ui::UiState::from_parts(None, t.clone());
+    ui.text.main_windows(&t);
+    ui.text
+        .open(&t, crate::ui::WindowId::Messages, 0, 0, 0x27, 0x18);
+    ui.text.win_mut().flags = crate::ui::text::SCROLL;
+    // As the command loop's key read leaves it before a command: a whole window before a more
+    // prompt.
+    ui.text.more_rows = 25;
+    ui
+}
+
 /// A state with the synthetic messages, `script` in the script buffer, a party of actors 1 and
 /// 2 (leader 1 at (100, 100, 0)) and the view centred there.
 pub(super) fn state(script: &[u8]) -> State {
     let mut s = State::empty();
+    s.ui = test_ui();
     s.converse.text = Some(text());
     s.converse.script = script.to_vec();
     s.converse.script.resize(SCRIPT_LEN, 0);
@@ -103,9 +150,16 @@ macro_rules! run {
 }
 pub(super) use run;
 
-/// The scroll as one string.
+/// The scroll as one string: the finished lines, then the line being written (its drawn part
+/// and what waits in the line buffer).
 pub(super) fn scroll(s: &State) -> String {
-    s.ui.messages.join("\n")
+    let t = &s.ui.text;
+    let mut lines = s.ui.messages.clone();
+    let mut last: String = t.transcript_line.iter().map(|&b| char::from(b)).collect();
+    let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
+    last.extend(pending.iter().map(|&b| char::from(b)));
+    lines.push(last);
+    lines.join("\n")
 }
 
 /// A U6Lib (u32 offsets) whose items are `items` (None = empty).

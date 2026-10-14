@@ -175,6 +175,43 @@ impl<'a> GameImage<'a> {
         })
     }
 
+    /// Number of segments (hunks) in the file.
+    pub fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// Image base of segment `n`.
+    pub fn segment_base(&self, n: usize) -> Option<u32> {
+        self.segments.get(n).map(|s| s.base)
+    }
+
+    /// The loaded bytes of segment `n` (a CODE or DATA hunk; empty for BSS).
+    pub fn loaded(&self, n: usize) -> Option<&'a [u8]> {
+        let s = self.segments.get(n)?;
+        self.file.get(s.file_start..s.file_start + s.loaded)
+    }
+
+    /// `len` bytes at image address `addr` as the loaded program holds them: the allocated part
+    /// of a segment past its loaded bytes (BSS) reads 0. Fails outside every segment.
+    pub fn read_zero_filled(&self, addr: u32, len: usize) -> Result<Vec<u8>, FormatError> {
+        (0..len)
+            .map(|i| {
+                let a = addr.wrapping_add(i as u32);
+                let seg = self
+                    .segments
+                    .iter()
+                    .find(|s| a >= s.base && a < s.base + s.size)
+                    .ok_or_else(|| bad(0, format!("address {a:#x} is in no hunk")))?;
+                let off = (a - seg.base) as usize;
+                Ok(if off < seg.loaded {
+                    self.file[seg.file_start + off]
+                } else {
+                    0
+                })
+            })
+            .collect()
+    }
+
     /// File offset of image address `addr`, if it lies in a segment's loaded bytes.
     pub fn file_offset(&self, addr: u32) -> Option<usize> {
         let seg = self
@@ -235,5 +272,74 @@ impl<'a> GameImage<'a> {
     /// `len` bytes at `A4 + off`.
     pub fn a4_bytes(&self, off: i32, len: usize) -> Result<&'a [u8], FormatError> {
         self.bytes(A4.wrapping_add_signed(off), len)
+    }
+}
+
+/// Builds hunk files for tests: segments in order, each CODE / DATA with its bytes or BSS with a
+/// size; RELOC32 is not written.
+#[cfg(test)]
+pub(crate) struct SyntheticGame {
+    segments: Vec<(u32, Vec<u8>, u32)>,
+}
+
+#[cfg(test)]
+impl SyntheticGame {
+    pub(crate) fn new() -> Self {
+        Self {
+            segments: Vec::new(),
+        }
+    }
+
+    /// A CODE (`data` false) or DATA hunk holding `bytes` (a multiple of 4).
+    pub(crate) fn loaded(mut self, data: bool, bytes: Vec<u8>) -> Self {
+        let kind = if data { HUNK_DATA } else { HUNK_CODE };
+        let size = bytes.len() as u32;
+        self.segments.push((kind, bytes, size));
+        self
+    }
+
+    /// A BSS hunk of `size` bytes (a multiple of 4).
+    pub(crate) fn bss(mut self, size: u32) -> Self {
+        self.segments.push((HUNK_BSS, Vec::new(), size));
+        self
+    }
+
+    /// The segment sizes that put segment `n` at image address `base` after the ones so far
+    /// (one BSS gap), then `count` empty BSS hunks up to `n`.
+    pub(crate) fn place_at(mut self, n: usize, base: u32) -> Self {
+        let mut at = IMAGE_BASE;
+        for (_, _, size) in &self.segments {
+            at = (at + size + 7) & !7;
+        }
+        while self.segments.len() + 1 < n {
+            self.segments.push((HUNK_BSS, Vec::new(), 0));
+        }
+        if self.segments.len() < n {
+            self.segments.push((HUNK_BSS, Vec::new(), base - at));
+        }
+        self
+    }
+
+    pub(crate) fn build(&self) -> Vec<u8> {
+        let mut f = Vec::new();
+        let l = |f: &mut Vec<u8>, v: u32| f.extend_from_slice(&v.to_be_bytes());
+        let n = self.segments.len() as u32;
+        for v in [HUNK_HEADER, 0, n, 0, n - 1] {
+            l(&mut f, v);
+        }
+        for (_, _, size) in &self.segments {
+            l(&mut f, size / 4);
+        }
+        for (kind, bytes, size) in &self.segments {
+            l(&mut f, *kind);
+            if *kind == HUNK_BSS {
+                l(&mut f, size / 4);
+            } else {
+                l(&mut f, bytes.len() as u32 / 4);
+                f.extend_from_slice(bytes);
+            }
+            l(&mut f, HUNK_END);
+        }
+        f
     }
 }

@@ -92,6 +92,15 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
 /// steps back and blanks, anything else is drawn and advances, wrapping and scrolling)
 pub fn echo(s: &mut State, io: &Io, c: u8) {
     let ui = &mut s.ui;
+    // Port-side: the scroll transcript shows the typed line as the screen does.
+    if ui.text.current == super::WindowId::Messages {
+        let t = &mut ui.text.transcript_line;
+        if c == 8 {
+            t.pop();
+        } else {
+            t.push(c);
+        }
+    }
     let w = *ui.text.win();
     let mut col = u16::from(w.col) + u16::from(w.x);
     let mut row = u16::from(w.row) + u16::from(w.y);

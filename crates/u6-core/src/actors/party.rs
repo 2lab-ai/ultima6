@@ -553,6 +553,7 @@ mod tests {
             formation,
             ..GameTables::default()
         };
+        crate::actors::walk::tests::link_objects(&mut s);
         s
     }
 
@@ -591,8 +592,10 @@ mod tests {
         s.objects.location[9] = Position { x: 21, y: 20, z: 0 };
         s.objects.type_frame[8] = 0x17a;
         s.objects.location[8] = Position { x: 20, y: 19, z: 0 };
+        crate::actors::walk::tests::link_objects(&mut s);
         assert_eq!(player_step(&mut s, 1), StepResult::Blocked);
         s.objects.location[8].x = 25;
+        crate::actors::walk::tests::link_objects(&mut s);
         assert_eq!(player_step(&mut s, 1), StepResult::Moved);
         assert_eq!(s.objects.location[1], Position { x: 21, y: 19, z: 0 });
     }

@@ -27,30 +27,30 @@ const TAIL_GENDER: usize = 0x80;
 
 /// 0x108658 printf: prints `text` to the message scroll (the converse passes it as the format).
 pub(crate) async fn print(cx: &Cx<'_>, text: &[u8]) {
-    crate::ui::printf::printf(cx.state, cx.io, text, &[]).await;
+    Box::pin(crate::ui::printf::printf(cx.state, cx.io, text, &[])).await;
 }
 
 /// 0x108376: one character to the message scroll through the escape layer (`$x` / `#x` read the
 /// converse variables, `&` text shows only while A4-0x7b26 is set).
 pub(crate) async fn put_char(cx: &Cx<'_>, c: u8) {
-    crate::ui::printf::text_out(cx.state, cx.io, i16::from(c)).await;
+    Box::pin(crate::ui::printf::text_out(cx.state, cx.io, i16::from(c))).await;
 }
 
 /// 0x107cba(buf, max): line input with echo; returns the typed bytes (no NUL), empty after Esc.
 pub(crate) async fn read_line(cx: &Cx<'_>, max: usize) -> Vec<u8> {
-    let (n, line) = crate::ui::keyread::read_line(cx.state, cx.io, max as i16).await;
+    let (n, line) = Box::pin(crate::ui::keyread::read_line(cx.state, cx.io, max as i16)).await;
     if n < 0 { Vec::new() } else { line }
 }
 
 /// 0x10790a: one key, as the game's key code (letters upper case, CR 0x0d, Esc 0x1b).
 pub(crate) async fn read_key(cx: &Cx<'_>) -> u16 {
-    crate::ui::wait::read_key(cx.state, cx.io).await
+    Box::pin(crate::ui::wait::read_key(cx.state, cx.io)).await
 }
 
 /// Op 0xcb: A4-0x7a1c = 1 (the waiting cursor), 0x10790a, A4-0x7a1c = 5.
 pub(crate) async fn wait_key(cx: &Cx<'_>) {
     cx.st(|s| s.ui.input.cursor_glyph = 1);
-    crate::ui::wait::read_key(cx.state, cx.io).await;
+    Box::pin(crate::ui::wait::read_key(cx.state, cx.io)).await;
     cx.st(|s| s.ui.input.cursor_glyph = 5);
 }
 
@@ -61,7 +61,7 @@ pub(crate) async fn select_item(cx: &Cx<'_>) -> (i16, i16) {
         s.ui.input.target_pending = 1;
         s.ui.panel.mode = 0x92;
     });
-    crate::ui::wait::read_key(cx.state, cx.io).await;
+    Box::pin(crate::ui::wait::read_key(cx.state, cx.io)).await;
     cx.st(|s| (s.ui.input.selection, s.ui.input.target.0))
 }
 
@@ -127,7 +127,7 @@ pub(crate) async fn inventory_panel(cx: &Cx<'_>, _npc: i16, member: Option<u16>,
             p.member = m as i16;
         }
     });
-    crate::ui::panels::inventory(cx.state, cx.io).await;
+    Box::pin(crate::ui::panels::inventory(cx.state, cx.io)).await;
 }
 
 /// 0x128ce8: portrait panel (portrait, name, worn objects; waits for a key outside talk).
@@ -284,13 +284,13 @@ pub(crate) fn worktype_91(_s: &mut State, _actor: i16) {
 /// 0x1279d4(member index, 0): heal a party member (no announcement); its lines print at once.
 pub(crate) async fn heal_member(cx: &Cx<'_>, index: i16) {
     cx.st(|s| crate::actors::party::heal(s, index as usize, false));
-    crate::main_loop::flush_prints(cx.state, cx.io).await;
+    Box::pin(crate::main_loop::flush_prints(cx.state, cx.io)).await;
 }
 
 /// 0x10368a(minutes): advance the clock; its lines print at once.
 pub(crate) async fn clock_tick(cx: &Cx<'_>, minutes: u8) {
     cx.st(|s| crate::actors::clock::tick(s, i16::from(minutes)));
-    crate::main_loop::flush_prints(cx.state, cx.io).await;
+    Box::pin(crate::main_loop::flush_prints(cx.state, cx.io)).await;
 }
 
 /// Op 0x9e around the clock loop: A4-0x6a9e = 1 / 0, then A4-0x6578 = 1 and 0x109e74.

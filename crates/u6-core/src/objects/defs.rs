@@ -1,28 +1,21 @@
 //! Tables the object code reads from the original's data, taken from the user's own `game`
 //! executable at run time (spec 03 §5 "data, not constants"). Only the image addresses live here.
 //!
-//! Locating them: the decrunched `game` is an AmigaDOS hunk file. [`Image`] walks its blocks and
-//! places the hunks back to back from image address 0x100000, each base rounded up to 8 bytes
-//! (game-layout.md; the layout `tools/hunk2raw.py` gives the REA dumps). Small-data offsets `A4 + d` are image
-//! address 0x15b6f0 + d (hunk 33 + 0x8000). Bytes past a hunk's loaded length are BSS and read as
-//! 0. A file whose hunk layout differs from the measured one is refused: the addresses would not
-//! hold.
+//! Locating them: the decrunched `game` is an AmigaDOS hunk file, mapped by the shared hunk
+//! loader [`crate::image::GameImage`] (hunks back to back from image address 0x100000, each base
+//! rounded up to 8 bytes; game-layout.md). Small-data offsets `A4 + d` are image address
+//! 0x15b6f0 + d (hunk 33 + 0x8000). Bytes past a hunk's loaded length are BSS and read as 0. A
+//! file whose hunk layout differs from the measured one is refused: the addresses would not hold.
 
 use std::fmt;
 
+use crate::image::GameImage;
+
 /// Small-data base register A4 (hunk 33 + 0x8000).
-pub const A4: u32 = 0x0015_b6f0;
-const IMAGE_BASE: u32 = 0x0010_0000;
+pub const A4: u32 = crate::image::A4;
 /// Hunks in the measured `game` and the image address of hunk 33 (the merged data hunk).
 const GAME_HUNKS: usize = 35;
 const HUNK33_BASE: u32 = 0x0015_36f0;
-
-const HUNK_HEADER: u32 = 0x3f3;
-const HUNK_CODE: u32 = 0x3e9;
-const HUNK_DATA: u32 = 0x3ea;
-const HUNK_BSS: u32 = 0x3eb;
-const HUNK_RELOC32: u32 = 0x3ec;
-const HUNK_END: u32 = 0x3f2;
 
 /// The `game` file does not have the layout the table addresses were measured on.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,110 +33,23 @@ fn err<T>(what: impl Into<String>) -> Result<T, DefsError> {
     Err(DefsError(what.into()))
 }
 
-/// One hunk: image base, memory size, file offset and length of its loaded bytes.
-#[derive(Clone, Copy, Debug)]
-struct Hunk {
-    base: u32,
-    size: u32,
-    file: usize,
-    loaded: usize,
-}
-
-/// The hunk layout of a `game` file.
+/// The loaded image of a `game` file, read as the program sees it (BSS reads 0).
 pub(crate) struct Image<'a> {
-    bytes: &'a [u8],
-    hunks: Vec<Hunk>,
-}
-
-fn be32(b: &[u8], at: usize) -> Result<u32, DefsError> {
-    b.get(at..at + 4)
-        .map(|w| u32::from_be_bytes([w[0], w[1], w[2], w[3]]))
-        .ok_or_else(|| DefsError(format!("truncated at file offset {at}")))
+    img: GameImage<'a>,
 }
 
 impl<'a> Image<'a> {
-    /// Walks the hunk file. Fails on anything but HEADER, CODE, DATA, BSS, RELOC32 and END
-    /// blocks (the only ones `game` has, game-layout.md).
+    /// Maps the hunk file (the shared loader); any malformed block is refused.
     pub(crate) fn parse(bytes: &'a [u8]) -> Result<Self, DefsError> {
-        if be32(bytes, 0)? != HUNK_HEADER {
-            return err("not an AmigaDOS executable (no HUNK_HEADER)");
-        }
-        if be32(bytes, 4)? != 0 {
-            return err("resident library names are not supported");
-        }
-        let (first, last) = (be32(bytes, 12)?, be32(bytes, 16)?);
-        let count = last.checked_sub(first).map(|n| n as usize + 1);
-        let Some(count) = count.filter(|&n| n <= 256) else {
-            return err("bad hunk table");
-        };
-        let mut sizes = Vec::with_capacity(count);
-        for i in 0..count {
-            sizes.push((be32(bytes, 20 + 4 * i)? & 0x3fff_ffff) * 4);
-        }
-        let mut at = 20 + 4 * count;
-        let mut base = IMAGE_BASE;
-        let mut hunks = Vec::with_capacity(count);
-        for &size in &sizes {
-            let id = be32(bytes, at)? & 0x3fff_ffff;
-            let longs = be32(bytes, at + 4)? as usize;
-            let (file, loaded) = match id {
-                HUNK_CODE | HUNK_DATA => (at + 8, longs * 4),
-                HUNK_BSS => (at + 8, 0),
-                _ => return err(format!("unexpected hunk block {id:#x} at {at}")),
-            };
-            at = file + loaded;
-            loop {
-                match be32(bytes, at)? {
-                    HUNK_END => {
-                        at += 4;
-                        break;
-                    }
-                    HUNK_RELOC32 => {
-                        at += 4;
-                        loop {
-                            let n = be32(bytes, at)? as usize;
-                            at += 4;
-                            if n == 0 {
-                                break;
-                            }
-                            at += 4 + 4 * n;
-                        }
-                    }
-                    other => return err(format!("unexpected block {other:#x} at {at}")),
-                }
-            }
-            if file + loaded > bytes.len() {
-                return err("hunk data past the end of the file");
-            }
-            hunks.push(Hunk {
-                base,
-                size,
-                file,
-                loaded,
-            });
-            base = (base + size + 7) & !7;
-        }
-        Ok(Self { bytes, hunks })
+        let img = GameImage::parse(bytes).map_err(|e| DefsError(e.to_string()))?;
+        Ok(Self { img })
     }
 
     /// `len` bytes at image address `addr` (BSS bytes read as 0). Fails outside every hunk.
     pub(crate) fn read(&self, addr: u32, len: usize) -> Result<Vec<u8>, DefsError> {
-        (0..len)
-            .map(|i| {
-                let a = addr + i as u32;
-                let h = self
-                    .hunks
-                    .iter()
-                    .find(|h| a >= h.base && a < h.base + h.size)
-                    .ok_or_else(|| DefsError(format!("address {a:#x} is in no hunk")))?;
-                let off = (a - h.base) as usize;
-                Ok(if off < h.loaded {
-                    self.bytes[h.file + off]
-                } else {
-                    0
-                })
-            })
-            .collect()
+        self.img
+            .read_zero_filled(addr, len)
+            .map_err(|e| DefsError(e.to_string()))
     }
 
     /// The NUL-terminated string at `addr` (at most 256 bytes, Latin-1).
@@ -160,10 +66,17 @@ impl<'a> Image<'a> {
 
     /// Checks the layout the addresses below were measured on.
     pub(crate) fn check_game(&self) -> Result<(), DefsError> {
-        if self.hunks.len() != GAME_HUNKS || self.hunks[33].base != HUNK33_BASE {
+        let i = &self.img;
+        if i.segment_count() != GAME_HUNKS || i.segment_base(33) != Some(HUNK33_BASE) {
             return err("unknown game version (hunk layout differs from the measured one)");
         }
         Ok(())
+    }
+
+    /// Image base of hunk `n`.
+    #[cfg(test)]
+    fn base(&self, n: usize) -> Option<u32> {
+        self.img.segment_base(n)
     }
 }
 
@@ -281,20 +194,16 @@ pub(crate) fn at(table: &[u8], i: usize) -> u8 {
 mod tests {
     use super::*;
 
-    /// A two-hunk executable: CODE (8 bytes, one RELOC32 group) and BSS (4 longwords).
+    const IMAGE_BASE: u32 = crate::image::IMAGE_BASE;
+
+    /// A two-hunk executable: CODE (8 bytes) and BSS (4 longwords).
     fn tiny() -> Vec<u8> {
-        let mut f = Vec::new();
-        let mut l = |v: u32| f.extend_from_slice(&v.to_be_bytes());
-        for v in [HUNK_HEADER, 0, 2, 0, 1, 2, 4, HUNK_CODE, 2] {
-            l(v);
-        }
-        for v in [0x4142_4300, 0x1122_3344, HUNK_RELOC32, 1, 0, 4, 0, HUNK_END] {
-            l(v);
-        }
-        for v in [HUNK_BSS, 4, HUNK_END] {
-            l(v);
-        }
-        f
+        let mut code = vec![0x41, 0x42, 0x43, 0];
+        code.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        crate::image::SyntheticGame::new()
+            .loaded(false, code)
+            .bss(16)
+            .build()
     }
 
     #[test]
@@ -308,8 +217,7 @@ mod tests {
         );
         assert_eq!(img.read(IMAGE_BASE + 8, 2).unwrap(), [0, 0]);
         assert!(img.read(IMAGE_BASE + 8 + 16, 1).is_err());
-        // A 6-byte hunk would push the next base to an 8-byte boundary.
-        assert_eq!(img.hunks[1].base, IMAGE_BASE + 8);
+        assert_eq!(img.base(1), Some(IMAGE_BASE + 8));
         assert!(img.check_game().is_err());
         let mut bad = f.clone();
         bad[3] = 0xf4;
