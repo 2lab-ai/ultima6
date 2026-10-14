@@ -92,7 +92,11 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
         } else {
             tab_key(state, io, key)
         };
-        key = panel_key(state, io, key);
+        key = if crate::magic::takes_book_key(&state.borrow(), key) {
+            crate::magic::book_panel_key(state, io, key).await
+        } else {
+            panel_key(state, io, key)
+        };
     }
 }
 
@@ -213,15 +217,7 @@ fn panel_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
                 input.target = (-1, -1);
                 0x8f
             }
-            RETURN => {
-                // Contract: cast the spell under the spellbook cursor (magic, not in M1).
-                // Fallback: no spell; the key is consumed.
-                todo_stub!("0x115da4 spellbook select", 0)
-            }
-            0x80 => {
-                // Contract: move the spellbook cursor (0x106812). Fallback: consumed.
-                todo_stub!("0x106812 spellbook cursor step", 0)
-            }
+            // Return and a direction go to crate::magic::book_panel_key (wait_event).
             _ => key,
         },
         _ => key,
@@ -257,8 +253,7 @@ async fn targeting_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
         key
     };
     if cmd == 0x82 && targeting == 3 {
-        // Contract: enter a spell syllable (Cast, not in M1). Fallback: consumed.
-        return todo_stub!("0x10674e spell syllable entry", 0);
+        return Box::pin(crate::magic::spell_key(state, io, key)).await;
     }
     match key {
         TAB => {

@@ -4,10 +4,9 @@
 
 use std::cell::RefCell;
 
-use super::book::{draw_book_page, load_book, page_line, quality, redraw_after_page_step};
 use super::book::{MARKER, set_current_spell};
+use super::book::{draw_book_page, load_book, page_line, quality, redraw_after_page_step};
 use crate::engine::Io;
-use crate::image::A4;
 use crate::main_loop::{a4_string, game_string};
 use crate::objects::Slot;
 use crate::state::State;
@@ -202,6 +201,13 @@ pub async fn spell_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
     }
 }
 
+/// True when key `key` goes to [`book_panel_key`] rather than the ui's panel keys: the book is
+/// up (panel mode 0xa1), no conversation runs, and it is Return or a direction (Space /
+/// Escape the ui handles the same way).
+pub fn takes_book_key(s: &State, key: u16) -> bool {
+    s.ui.panel.mode == super::BOOK_PANEL && !s.converse.active && (key == RETURN || key == WALK)
+}
+
 /// The keys of panel mode 0xa1 (0x1077ec..0x1078c4, outside a conversation): Space / Escape
 /// give 0x8f with no target, Return casts the book's current spell (cursor mode 1), a
 /// direction steps the book; other keys pass unchanged.
@@ -343,10 +349,4 @@ pub async fn page_key(state: &RefCell<State>, io: &Io, code: u16) {
         }
         _ => {}
     }
-}
-
-/// The address of the not-in-book message (for tests).
-#[cfg(test)]
-pub(super) fn not_in_book_addr() -> u32 {
-    A4.wrapping_sub(MSG_NOT_IN_BOOK)
 }

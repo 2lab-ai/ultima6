@@ -122,14 +122,20 @@ pub(crate) fn lie_down(_s: &mut State, _actor: u16) {
     todo_stub!("0x1221da lie down (magic seam)", ())
 }
 
-/// [objects] 0x12bbc0 (open, close, lock or unlock the door or chest `obj`; `mode` 1 = unlock
-/// magically, 0x10000 = lock). Stub contract: no result. Fallback: nothing changes.
-pub(crate) fn door(_s: &mut State, _obj: i16, _mode: u32) {
+/// [objects] 0x12bbc0 (lock (`lock`, stack words 1, 0) or magically unlock (0, 1) the door
+/// `obj`; D1 = 0). Stub contract: no result. Fallback: nothing changes.
+pub(crate) fn door(_s: &mut State, _obj: i16, _lock: bool) {
     todo_stub!("0x12bbc0 lock or unlock a door (magic seam)", ())
 }
 
 /// [objects] 0x12bdfa (the same for a chest, type 0x62). Stub contract and fallback as
 /// [`door`].
-pub(crate) fn chest(_s: &mut State, _obj: i16, _mode: u32) {
+pub(crate) fn chest(_s: &mut State, _obj: i16, _lock: bool) {
     todo_stub!("0x12bdfa lock or unlock a chest (magic seam)", ())
+}
+
+/// [ui] 0x110f96 (the equipment slot object `obj` is readied in, -1 when it cannot be
+/// readied). Stub contract: pure lookup by type. Fallback 0 (a slot): Animate goes ahead.
+pub(crate) fn ready_slot(_s: &State, _obj: i16) -> i16 {
+    todo_stub!("0x110f96 ready slot of an object (magic seam)", 0)
 }

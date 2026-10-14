@@ -40,8 +40,10 @@ pub use book::{draw_book, draw_book_page, load_book, set_current_spell};
 pub use cast::{book_cast, cast};
 pub use detect::carried_object;
 pub use dispatch::dispatch;
-pub use input::{book_cursor_step, book_panel_key, find_typed_spell, page_key, spell_key};
-pub use spells::resurrect;
+pub use input::{
+    book_cursor_step, book_panel_key, find_typed_spell, page_key, spell_key, takes_book_key,
+};
+pub use spells::{resurrect, resurrect_join};
 pub use tables::{MagicTables, Msg};
 
 /// Spellbook object type.
@@ -99,4 +101,11 @@ pub struct MagicState {
     /// Original: A4-0x7a5c (byte: a page step moved the book; the next redraw selects the
     /// first line)
     pub page_moved: u8,
+}
+
+impl MagicState {
+    /// The current spell number (the byte A4+0x181f, widened as the code compares it).
+    pub fn current_spell(&self) -> u16 {
+        u16::from(self.current)
+    }
 }

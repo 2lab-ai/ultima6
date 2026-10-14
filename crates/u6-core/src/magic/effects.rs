@@ -61,7 +61,13 @@ pub(super) async fn print_name(state: &RefCell<State>, io: &Io, obj: i16) {
 
 /// "On whom: " / "On what: " when the caster is a party member (status bit 7), then the
 /// target read unless it is chosen, and the target's name or "nothing".
-pub(super) async fn prompt_target(state: &RefCell<State>, io: &Io, kind: i16, range: i16, chosen: bool) {
+pub(super) async fn prompt_target(
+    state: &RefCell<State>,
+    io: &Io,
+    kind: i16,
+    range: i16,
+    chosen: bool,
+) {
     let member = {
         let s = state.borrow();
         let c = usize::from(super::cast::caster(&s));
@@ -97,13 +103,24 @@ fn dist(a: i16, b: u16) -> i16 {
 /// The tile index of object `obj` (base tile of its type plus its frame).
 pub(super) fn tile_of(s: &State, obj: Slot) -> usize {
     let tf = s.objects.tf(obj);
-    let base = s.tables.basetile.base.get(usize::from(tf & 0x3ff)).copied().unwrap_or(0);
+    let base = s
+        .tables
+        .basetile
+        .base
+        .get(usize::from(tf & 0x3ff))
+        .copied()
+        .unwrap_or(0);
     usize::from(base.wrapping_add(tf >> 10))
 }
 
 /// flags3 (0x13c140) of the tile of `obj`.
 pub(super) fn flags3(s: &State, obj: Slot) -> u8 {
-    s.tables.tileflags.flags3.get(tile_of(s, obj)).copied().unwrap_or(0)
+    s.tables
+        .tileflags
+        .flags3
+        .get(tile_of(s, obj))
+        .copied()
+        .unwrap_or(0)
 }
 
 /// Original: 0x116f2c (magic: a spell on one target: prompt, missile, range and kind checks,
@@ -141,7 +158,10 @@ pub async fn on_target(state: &RefCell<State>, io: &Io, spell: u16, t: Target) {
     if reached == 0 {
         let near = {
             let s = state.borrow();
-            let at = s.objects.location(crate::objects::ObjectId(caster)).unwrap_or_default();
+            let at = s
+                .objects
+                .location(crate::objects::ObjectId(caster))
+                .unwrap_or_default();
             let (tx, ty) = s.ui.input.target;
             dist(tx, at.x) <= t.range && dist(ty, at.y) <= t.range
         };
@@ -611,7 +631,7 @@ fn adopt(s: &mut State, new: Slot, from: u16, work: u8) {
 /// effect". The port skips the writes when no creature could be made (the original writes
 /// through slot -1).
 fn animate(s: &mut State, caster: u16, obj: Slot) {
-    if crate::objects::seams::ready_slot(s, obj) == -1 {
+    if seams::ready_slot(s, obj) == -1 {
         s.magic.result = 2;
         return;
     }
@@ -662,7 +682,8 @@ fn replicate(s: &mut State, io: &Io, obj: Slot) {
         let z = u16::from(s.map.centre.z);
         let loc = crate::objects::pack_xyz(x, y, z).to_packed();
         let tf = s.objects.tf(obj).to_be_bytes();
-        let new = crate::objects::create_from_record(s, [0, loc[0], loc[1], loc[2], tf[0], tf[1], 0, 1]);
+        let new =
+            crate::objects::create_from_record(s, [0, loc[0], loc[1], loc[2], tf[0], tf[1], 0, 1]);
         crate::objects::mark_takeable(&mut s.objects, new);
         if crate::actors::walk::can_move_to(s, new as u16, x, y) {
             redraw_dissolving(s, io);
@@ -677,7 +698,10 @@ fn replicate(s: &mut State, io: &Io, obj: Slot) {
 /// view of the leader (strictly within 5 on both axes), not `from`; ties broken by random
 /// 0..1; -1 if none)
 pub fn nearest_seen(s: &mut State, from: u16) -> i16 {
-    let (fx, fy) = (s.objects.x(from as Slot) as i16, s.objects.y(from as Slot) as i16);
+    let (fx, fy) = (
+        s.objects.x(from as Slot) as i16,
+        s.objects.y(from as Slot) as i16,
+    );
     let c = s.map.centre;
     let (cx, cy) = (c.x as i16, c.y as i16);
     let (mut best, mut found) = (0x7fffi16, -1i16);
@@ -694,7 +718,9 @@ pub fn nearest_seen(s: &mut State, from: u16) -> i16 {
         if x <= cx - 5 || x >= cx + 5 || y <= cy - 5 || y >= cy + 5 {
             continue;
         }
-        let d = (x - fx).wrapping_mul(x - fx).wrapping_add((y - fy).wrapping_mul(y - fy));
+        let d = (x - fx)
+            .wrapping_mul(x - fx)
+            .wrapping_add((y - fy).wrapping_mul(y - fy));
         if d <= 0 || d > best {
             continue;
         }

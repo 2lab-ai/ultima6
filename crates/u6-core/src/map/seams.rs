@@ -259,10 +259,12 @@ pub(crate) fn raise_avatar_body(state: &mut State, body: ObjectId) {
     crate::objects::actor_from_body(state, body.slot());
 }
 
-/// Resurrect the companion lying as body object `body` (0x11785e, an M1 stub point in the
-/// magic code). Fallback: nothing.
-pub(crate) fn resurrect_body(_state: &mut State, _body: ObjectId) {
-    todo_stub!("0x11785e resurrect a companion's body", ())
+/// Resurrect the companion lying as body object `body` (0x11785e, magic).
+pub(crate) fn resurrect_body(state: &mut State, body: ObjectId) {
+    let a = crate::magic::resurrect(state, body.0 as i16);
+    if usize::try_from(a).is_ok_and(|i| state.actors.attrs.status[i] & 0x80 != 0) {
+        todo_stub!("0x112daa rejoin after a resurrection (sync map caller)", ())
+    }
 }
 
 /// Objects of the region list (A4-0xf84 head = slot 0x100, A4-0x1184 next links) in list order.

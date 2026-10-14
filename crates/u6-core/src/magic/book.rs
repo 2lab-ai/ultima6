@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use u6_formats::bitmap::Bitmap;
 
 use super::seams;
-use super::{BOOK_PANEL, MagicState, SPELL};
+use super::{MagicState, SPELL};
 use crate::engine::Io;
 use crate::image::A4;
 use crate::main_loop::pointed_string;
@@ -293,14 +293,19 @@ pub async fn draw_book_page(state: &RefCell<State>, io: &Io) {
         crate::gfx::blit::set_plot_colour(&mut s.gfx, paper);
         seams::fill_rect(&mut s, io, 0xb0, 0xe, 0x12f, 0x4f);
         let (lines, circle) = layout(&mut s.magic);
-        (lines, circle, Slot::from(super::cast::caster(&s)))
+        (lines, circle, super::cast::caster(&s) as Slot)
     };
     select_window(state, io, WindowId::Status).await;
     for (i, &spell) in lines.iter().enumerate() {
         let row = i as i16 + 1;
         state.borrow_mut().magic.page[i] = spell as u8;
         set_cursor(state, io, 1, row).await;
-        let name = state.borrow().magic.tables.name(usize::from(spell)).to_vec();
+        let name = state
+            .borrow()
+            .magic
+            .tables
+            .name(usize::from(spell))
+            .to_vec();
         print_at(state, io, FMT_S, &[Arg::Str(&name)]).await;
         set_cursor(state, io, 14, row).await;
         reagent_count(state, io, caster, spell, i as i16).await;
@@ -353,9 +358,4 @@ pub async fn redraw_after_page_step(state: &RefCell<State>, io: &Io) {
         put_raw(state, io, MARKER).await;
         select_window(state, io, WindowId::Messages).await;
     }
-}
-
-/// Whether the book panel is up (panel mode 0xa1).
-pub fn book_open(s: &State) -> bool {
-    s.ui.panel.mode == BOOK_PANEL
 }

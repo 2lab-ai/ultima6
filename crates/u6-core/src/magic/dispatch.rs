@@ -57,7 +57,9 @@ pub async fn dispatch(state: &RefCell<State>, io: &Io, spell: u16, chosen: bool)
     };
     match spell {
         0x00 => spells::create_food(state, io, spell).await,
-        0x01 | 0x02 | 0x16 | 0x17 | 0x18 | 0x24 => detect::detect(state, io, spell, 8, -1, chosen).await,
+        0x01 | 0x02 | 0x16 | 0x17 | 0x18 | 0x24 => {
+            detect::detect(state, io, spell, 8, -1, chosen).await
+        }
         0x32 => detect::detect(state, io, spell, 8, 1, chosen).await,
         0x03 | 0x05 | 0x06 | 0x20 | 0x28 | 0x34 | 0x45 | 0x50 | 0x51 => {
             on_target(state, io, spell, actor(0x17f)).await
