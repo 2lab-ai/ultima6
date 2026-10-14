@@ -18,15 +18,16 @@ const ESCAPE: u16 = 0x1b;
 const SPACE: u16 = 0x20;
 /// First function key code (F1 = 0x13b): F1 + n picks party member n in the panel.
 const F1: u16 = 0x13b;
-/// [replaced] Milliseconds from a held walk's step to its next sample: 33 PAL frames (20 ms each),
-/// from the oracle (tools/oracle/pace.mjs: game-first disks, the throne room with every actor
-/// outside the party passed over and the fight broken off, a press held three cells south, 6
-/// boots). In 4 boots the steps came 25..41 frames apart (median 29, mean 31.7, alternating about
-/// 27 and 38), the first 1..12 frames after the press and the second 28..37; in the other 2,
-/// whose followers were still forming up, 26..108 (median 72). 33 frames from the press puts the
-/// port's cells per held time within one of those 4 boots at every hold up to their 8 free cells
-/// (100 ms: 1, 1 s: 2, 4 s: 6), so no separate first-repeat delay is needed. The world turn after
-/// the step waits for its refresh ([`crate::actors::turn::AFTER_TURN_MS`]); the rest is waited here.
+/// [replaced] Milliseconds a held walk waits after a step, the step to its next sample being 33
+/// PAL frames (660 ms) in the oracle (tools/oracle/pace.mjs: game-first disks, the throne room
+/// with every actor outside the party passed over and the fight broken off, a press held three
+/// cells south, 6 boots). In 4 boots the steps came 25..41 frames apart (median 29, mean 31.7,
+/// alternating about 27 and 38), the first 1..12 frames after the press and the second 28..37;
+/// in the other 2, whose followers were still forming up, 26..108 (median 72). 33 frames from
+/// the press puts the port's cells per held time within one of those 4 boots at every hold up to
+/// their 8 free cells (100 ms: 1, 1 s: 2, 4 s: 6), so no separate first-repeat delay is needed.
+/// The world turn after the step waits for its refresh
+/// ([`crate::actors::turn::AFTER_TURN_MS`]); the rest is waited here.
 pub(crate) const HELD_WALK_MS: u32 = 660 - crate::actors::turn::AFTER_TURN_MS as u32;
 
 /// Alt + letter codes (0x100 + PC scan code) that select a command (0x106ca0 switch).

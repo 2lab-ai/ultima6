@@ -607,7 +607,8 @@ fn a_dissolving_window_is_revealed_over_its_time() {
     let (_, at8) = dissolve_run(cost, 8);
     let partial = shown.iter().filter(|&&n| n > 0 && n < 160 * 160).count();
     println!(
-        "dissolve of {cost} ms: done at {at16} ms (16 ms ticks), {at8} ms (8 ms); {partial} ticks partly shown"
+        "dissolve of {cost} ms: done at {at16} ms (16 ms ticks), {at8} ms (8 ms); \
+         {partial} ticks partly shown"
     );
     assert!(shown.windows(2).all(|w| w[0] <= w[1]), "it only grows");
     assert_eq!(*shown.last().unwrap(), 160 * 160, "all of it at the end");

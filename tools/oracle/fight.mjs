@@ -65,6 +65,7 @@ async function installRecorder(page, a4, bases) {
         let pc = parseInt(m[1], 16), kind = 'U';
         const usp = parseInt(m[2], 16), a5 = parseInt(m[4], 16);
         if (m[5].includes('S')) {
+          // 0xfe8f1a: the level-3 autovector entry of the pinned AROS ROM (20260820, §1).
           kind = parseInt(m[1], 16) !== 0xfe8f1a ? 'S?' : (parseInt(m[7], 16) & 0x2000 ? 'SS' : 'SU');
           pc = ((parseInt(m[8], 16) << 16) | parseInt(m[9], 16)) >>> 0;
         }

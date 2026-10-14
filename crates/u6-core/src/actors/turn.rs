@@ -14,8 +14,8 @@ const IDLE_REFILLS_PER_YIELD: u32 = 60;
 /// [replaced] Engine milliseconds of the refresh after a turn (0x102f2a with the view changed:
 /// the view flags 0x109e74, then 0x102ef0 draws the window and copies it to the screen): 21 PAL
 /// frames, the median of 103 refreshes in the oracle's start fight (19..22; tools/oracle/
-/// fight.mjs + fight.py, 3 boots × 7 party steps). The original has no wait there: that is the 68000's
-/// drawing time, which the port, drawing at once, waits on the engine clock instead.
+/// fight.mjs + fight.py, 3 boots × 7 party steps). The original has no wait there: that is the
+/// 68000's drawing time, which the port, drawing at once, waits on the engine clock instead.
 pub const AFTER_TURN_MS: u16 = 21 * crate::combat::present::FRAME_MS;
 /// [replaced] Engine milliseconds of an NPC's turn besides what it draws, prints and refreshes
 /// (the scheduler's pick and 0x1200b0's worktype code): 45 ms, 2.3 PAL frames. The oracle's
