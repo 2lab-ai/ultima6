@@ -345,8 +345,15 @@ pub fn dispel(s: &mut State, io: &Io, actor: u16) -> bool {
 /// Original: 0x116d0e (magic: Heal (6): +random 1..30 hit points up to the maximum (0x122144);
 /// Great Heal (0x34): the maximum; nothing on an actor with status bit 0x10 (dead): "No
 /// effect")
+///
+/// The original indexes the actor tables with the selection word as it is (0x116d18,
+/// 0x116d22, 0x116d86), so a potion aimed at an object (slot ≥ 0x100) reads and writes past
+/// them; the port does nothing for a selection outside the actor slots.
 pub fn heal(s: &mut State, spell: u16) {
     let t = s.ui.input.selection;
+    if !(0..0x100).contains(&t) {
+        return;
+    }
     let a = usize::from(t as u16);
     if s.actors.attrs.status[a] & 0x10 != 0 {
         s.magic.result = 2;
@@ -637,9 +644,12 @@ fn adopt(s: &mut State, new: Slot, from: u16, work: u8) {
 }
 
 /// Animate (0x30): an object with a ready slot (0x110f96) becomes a creature of its type at its
-/// place (0x131646) on the caster's side with worktype 8, and the object goes; else "No
-/// effect". The port skips the writes when no creature could be made (the original writes
-/// through slot -1).
+/// place (0x131646) on the caster's side with worktype 8, and the object goes; else
+/// [`Msg::NoEffect`].
+///
+/// No temporary-actor slot free: the original goes on with slot -1 (0x1173f6 .. 0x117426
+/// write the status and worktype bytes before their tables) and removes the object anyway
+/// (0x117432); the port keeps the object and reports [`Msg::NoEffect`].
 fn animate(s: &mut State, caster: u16, obj: Slot) {
     if seams::ready_slot(s, obj) == -1 {
         s.magic.result = 2;
@@ -648,6 +658,10 @@ fn animate(s: &mut State, caster: u16, obj: Slot) {
     let (kind, x, y) = (s.objects.kind(obj), s.objects.x(obj), s.objects.y(obj));
     let z = u16::from(s.map.centre.z);
     let new = seams::spawn(s, kind, x, y, z);
+    if new < 0 {
+        s.magic.result = 2;
+        return;
+    }
     adopt(s, new, caster, 8);
     crate::objects::remove(s, obj);
 }
@@ -682,6 +696,9 @@ fn clone(s: &mut State, io: &Io, obj: Slot) {
 /// Replicate (0x58): an object whose tile has flags3 bit 3, copied (quantity 1, ok to take) to
 /// the first of up to 8 random spots near the leader where it may lie (0x11b1c0); copies that
 /// may not lie there are removed again. No tile flag or no spot: "Failed".
+///
+/// A copy the full object pool cannot make (0x10bc4c: -1) counts as a spot where it may not
+/// lie; the original passes the -1 on to 0x128b0e and 0x11b1c0 (0x11751e, 0x11752e).
 fn replicate(s: &mut State, io: &Io, obj: Slot) {
     if flags3(s, obj) & 8 == 0 {
         s.magic.result = 1;
@@ -694,6 +711,9 @@ fn replicate(s: &mut State, io: &Io, obj: Slot) {
         let tf = s.objects.tf(obj).to_be_bytes();
         let new =
             crate::objects::create_from_record(s, [0, loc[0], loc[1], loc[2], tf[0], tf[1], 0, 1]);
+        if new < 0 {
+            continue;
+        }
         crate::objects::mark_takeable(&mut s.objects, new);
         if crate::actors::walk::can_move_to(s, new as u16, x, y) {
             redraw_dissolving(s, io);

@@ -63,12 +63,30 @@ pub(super) fn new_object(s: &mut State, tf: u16, x: u16, y: u16, z: u16) -> Slot
     crate::objects::create_from_record(s, [0, loc[0], loc[1], loc[2], hi, lo, 0, 1])
 }
 
+/// The new object `new` stays at (x, y) when it may lie there (0x11b1c0), shown dissolving;
+/// else it goes again. False when it went or was never made (-1: the object pool is full).
+fn lay(s: &mut State, io: &Io, new: Slot, x: u16, y: u16) -> bool {
+    if new < 0 {
+        return false;
+    }
+    if crate::actors::walk::can_move_to(s, new as u16, x, y) {
+        super::effects::redraw_dissolving(s, io);
+        true
+    } else {
+        crate::objects::remove(s, new);
+        false
+    }
+}
+
 /// Original: 0x118494 (magic: Reappear: the type Vanish took (A4-0x7b62) back at a location)
 ///
 /// The location prompt; no location or nothing vanished: "No effect". The missile 0x17f flies;
 /// short of the target: "Blocked". Then the object comes back there (quantity 1, ok to take,
 /// 0x128b0e) if it may lie there (0x11b1c0): shown dissolving, "Success", the type forgotten;
 /// else it goes again and "No effect".
+///
+/// With the object pool full (0x10bc4c: -1) the original passes the -1 on to 0x128b0e and
+/// 0x11b1c0 (0x118598, 0x1185a6); the port reports "No effect" and keeps the type.
 pub async fn reappear(state: &RefCell<State>, io: &Io, pre: i16) {
     let at = location(state, io, pre).await;
     let tf = state.borrow().actors.tail_word(VANISHED);
@@ -85,14 +103,10 @@ pub async fn reappear(state: &RefCell<State>, io: &Io, pre: i16) {
         let (x, y) = s.ui.input.target;
         let z = u16::from(s.map.centre.z);
         let new = new_object(&mut s, tf, x as u16, y as u16, z);
-        crate::objects::mark_takeable(&mut s.objects, new);
-        if crate::actors::walk::can_move_to(&mut s, new as u16, x as u16, y as u16) {
-            super::effects::redraw_dissolving(&mut s, io);
-            true
-        } else {
-            crate::objects::remove(&mut s, new);
-            false
+        if new >= 0 {
+            crate::objects::mark_takeable(&mut s.objects, new);
         }
+        lay(&mut s, io, new, x as u16, y as u16)
     };
     if placed {
         say(state, io, FMT_NL_S_NL, Msg::Success).await;
@@ -192,6 +206,9 @@ async fn on_actor(state: &RefCell<State>, io: &Io, spell: u16, caster: u16, a: u
 /// object of the spell (0x13d, 0x13e, 0x140, 0x13f; status 0, quantity 1) is made there
 /// (0x10bc4c) and kept when it may lie there (0x11b1c0): shown dissolving, "Success"; else it
 /// goes again and "Not possible". Dispel Field (0x21, 0x116f2c) takes these types away.
+///
+/// With the object pool full (0x10bc4c: -1) the original passes the -1 on to 0x11b1c0
+/// (0x1189f6); the port lays nothing and reports "Not possible".
 pub async fn field(state: &RefCell<State>, io: &Io, spell: u16, missile: u16, pre: i16) {
     if !location(state, io, pre).await {
         say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
@@ -213,13 +230,7 @@ pub async fn field(state: &RefCell<State>, io: &Io, spell: u16, missile: u16, pr
         let (x, y) = s.ui.input.target;
         let z = u16::from(s.map.centre.z);
         let new = new_object(&mut s, kind, x as u16, y as u16, z);
-        if crate::actors::walk::can_move_to(&mut s, new as u16, x as u16, y as u16) {
-            super::effects::redraw_dissolving(&mut s, io);
-            true
-        } else {
-            crate::objects::remove(&mut s, new);
-            false
-        }
+        lay(&mut s, io, new, x as u16, y as u16)
     };
     let m = if placed {
         Msg::Success
@@ -259,7 +270,8 @@ pub fn web_flight(s: &mut State, io: &Io, actor: u16, x: i16, y: i16) -> i16 {
 /// The location prompt; none: "No effect". The Web flight (0x1334a6); not all arrived:
 /// "Blocked". Then for x − 1..=x + 1 (columns outside), y − 1..=y + 1 a web is made at (0, 0) on
 /// the level (0x10bc4c) and moved to the cell (0x10c9d2) where it may lie (0x11b1c0), else it
-/// goes again; the view flags, "Success".
+/// goes again; the view flags, "Success". A web the full object pool cannot make (0x10bc4c: -1)
+/// leaves its cell empty (the original passes the -1 on to 0x11b1c0, 0x119818).
 pub async fn web(state: &RefCell<State>, io: &Io, pre: i16) {
     if !location(state, io, pre).await {
         say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
@@ -282,6 +294,9 @@ pub async fn web(state: &RefCell<State>, io: &Io, pre: i16) {
         for x in tx - 1..=tx + 1 {
             for y in ty - 1..=ty + 1 {
                 let w = new_object(&mut s, WEB, 0, 0, z);
+                if w < 0 {
+                    continue;
+                }
                 if crate::actors::walk::can_move_to(&mut s, w as u16, x as u16, y as u16) {
                     crate::objects::move_to(&mut s, w, x as u16, y as u16, z);
                 } else {
