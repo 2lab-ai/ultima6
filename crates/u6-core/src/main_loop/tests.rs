@@ -7,6 +7,8 @@ use super::*;
 use crate::files::Files;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
+/// Image address of the prompt format the command loop prints (the leader's name, a newline).
+const FMT_PROMPT: u32 = 0x0010_1f3c;
 
 #[allow(clippy::disallowed_methods)] // tests may read files
 fn files() -> Option<Files> {
@@ -38,10 +40,16 @@ fn boot_reaches_the_prompt_without_stub_points() {
     assert!(ids.is_empty(), "{ids:?}");
     let s = e.state();
     assert_eq!(s.ui.text.current, crate::ui::WindowId::Messages);
+    // The prompt's first line: the leader's name through the format, both from the user's files.
+    let fmt = game_string(e.io(), FMT_PROMPT);
+    let first = fmt.split(|&b| b == b'\n').next().unwrap_or_default();
+    let name = String::from_utf8_lossy(&leader_name(&s)).into_owned();
+    let prompt = String::from_utf8_lossy(first).replace("%s", &name);
+    assert!(prompt.len() > name.len(), "the format at {FMT_PROMPT:#x}");
     assert!(
-        s.ui.messages.iter().any(|l| l.starts_with("Avatar:")),
-        "{:?}",
-        s.ui.messages
+        s.ui.messages.iter().any(|l| l.starts_with(&prompt)),
+        "none of the {} lines is the prompt",
+        s.ui.messages.len()
     );
     assert!(
         s.objects.draw.cell.iter().any(|&n| n != 0),
@@ -335,8 +343,8 @@ fn control_z_toggles_the_sound_flag_and_the_song() {
     );
 }
 
-/// Talk is not cut: it still waits for its target (a key that confirms nothing: "what?", which
-/// the test text layer cannot print without the game's strings) and takes the turn.
+/// Talk is not cut: it still waits for its target (a key that confirms nothing: the no-target
+/// word, which the test text layer cannot print without the game's strings) and takes the turn.
 #[test]
 fn talk_still_reads_its_target() {
     let (code, s) = dispatched(0x83, &[crate::Key::Char('q')], State::empty());
@@ -345,9 +353,9 @@ fn talk_still_reads_its_target() {
     assert!(!says_port_line(&s));
 }
 
-/// Attack (0x124caa) given a key that confirms no target ("what?") takes its turn and leaves no
-/// cursor up, so an arrow pressed after it walks the party (NICE-2: Attack used to
-/// leave its cross-hair up).
+/// Attack (0x124caa) given a key that confirms no target (the no-target word) takes its turn
+/// and leaves no cursor up, so an arrow pressed after it walks the party (NICE-2: Attack used
+/// to leave its cross-hair up).
 #[test]
 fn after_attack_an_arrow_walks() {
     use crate::Key;

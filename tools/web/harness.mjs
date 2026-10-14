@@ -90,11 +90,13 @@ export async function loadSaves() {
   const files = await real.loadSaves(); log('saves:load:' + files.length); return files;
 }
 export async function forgetSaves() {
-  log('saves:forget:start'); await real.forgetSaves(); log('saves:forget:end');
+  log('saves:forget:start'); await window.__gate('saves-forget');
+  await real.forgetSaves(); log('saves:forget:end');
 }
 `;
 
-// Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch.
+// Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch, the
+// save generation of the game ticked last (whether or not the page stores its Saves).
 const GLUE_HOOKS = `
 globalThis.__u6mem = () => (wasm ? wasm.memory.buffer.byteLength : 0);
 globalThis.__ticks = 0;
@@ -103,7 +105,9 @@ globalThis.__ticks = 0;
   Game.prototype.tick = function (ms) {
     globalThis.__ticks += 1;
     if (globalThis.__trap) throw new WebAssembly.RuntimeError('unreachable (test trap)');
-    return tick.call(this, ms);
+    const done = tick.call(this, ms);
+    globalThis.__saveGen = this.save_generation();
+    return done;
   };
 }
 `;
@@ -176,6 +180,26 @@ export async function dropFiles(page, paths, extra = []) {
     }
     document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
   }, extra);
+}
+
+/// The stored save files ({ path, bytes: number[] }), sorted by path.
+export function savedFiles(page) {
+  return page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const get = db.transaction('files').objectStore('files')
+        .getAll(IDBKeyRange.bound('save:', 'save:\uffff'));
+      get.onsuccess = () => {
+        db.close();
+        done(get.result.map((f) => ({ path: f.path, bytes: [...f.bytes] }))
+          .sort((a, b) => (a.path < b.path ? -1 : Number(a.path > b.path))));
+      };
+      get.onerror = () => fail(get.error);
+    };
+  }));
 }
 
 /// The paths of the stored save files (sorted), [] when there are none.
@@ -265,10 +289,12 @@ export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /// One step east or west from the prompt: the seed is the clock's, so the start fight sometimes
 /// leaves a gargoyle or a member beside the Avatar and the step is blocked; then the other way,
-/// up to 6 tries (each try's world turn moves the fight on). Returns the key that walked, the
-/// leader before and after, and the frame before that step.
+/// up to `STEP_TRIES` tries (each try's world turn moves the fight on; with a gargoyle on each
+/// side six tries in a row were seen blocked). Returns the key that walked, the leader before
+/// and after, and the frame before that step.
+const STEP_TRIES = 16;
 export async function stepSideways(page) {
-  for (let i = 0; i < 6; i += 1) {
+  for (let i = 0; i < STEP_TRIES; i += 1) {
     await waitPrompt(page);
     const key = i % 2 === 0 ? 'ArrowRight' : 'ArrowLeft';
     const from = (await state(page)).leader;
@@ -280,7 +306,7 @@ export async function stepSideways(page) {
     const to = (await state(page)).leader;
     if (to !== from) return { key, from, to, before };
   }
-  throw new Error('six steps blocked in a row');
+  throw new Error(`${STEP_TRIES} steps blocked in a row`);
 }
 
 /// Waits until the game shows its prompt (waiting for a command key, nothing queued) for a few

@@ -8,16 +8,16 @@
 //! modules call are in [`main_hunk`].
 //!
 //! Character check: main tests A4-0x7b03 (byte 0x81 of the objlist block at A4-0x7b84, objlist
-//! 0x1C72, the Avatar's portrait, 1-based) and, when it is 0, prints "You must first create or
-//! transfer a character.", waits for a key and exits with code 0, which makes the launcher run
-//! `u` again. The shipped `DATA1:objlist` holds 0 there: the character is made by `u`
-//! ([`crate::intro`]), which writes it into `savegame/objlist`. Started without the launcher
-//! ([`game_first`]: no usable `u` in the user's files, the platforms' development entry), the
-//! port plays the shipped disk state: the disk's name and stats stay and the portrait byte
-//! becomes 1, as on the oracle's game-first disks (which also set the sex byte 0x1C71 to 1,
-//! female in `u`'s encoding; the port leaves it 0). The rest of the disk state is played as it
-//! is, combat-mode byte included (A4-0x7b0c = 1 in the shipped objlist, so main calls
-//! 0x121c64).
+//! 0x1C72, the Avatar's portrait, 1-based) and, when it is 0, prints the message that a
+//! character must be created first (0x1350a6), waits for a key and exits with code 0, which
+//! makes the launcher run `u` again. The shipped `DATA1:objlist` holds 0 there: the character
+//! is made by `u` ([`crate::intro`]), which writes it into `savegame/objlist`. Started without
+//! the launcher ([`game_first`]: no usable `u` in the user's files, the platforms'
+//! development entry), the port plays the shipped disk state: the disk's name and stats stay
+//! and the portrait byte becomes 1, as on the oracle's game-first disks (which also set the sex
+//! byte 0x1C71 to 1, female in `u`'s encoding; the port leaves it 0). The rest of the disk
+//! state is played as it is, combat-mode byte included (A4-0x7b0c = 1 in the shipped objlist,
+//! so main calls 0x121c64).
 //!
 //! Synchronous game code that prints (actors, map, objects call printf 0x108658, which waits on
 //! a more prompt in the port's async ui) queues its lines in [`MainState::pending_print`]; the
@@ -180,7 +180,7 @@ pub(crate) fn leader_name(s: &State) -> Vec<u8> {
         .map_or_else(Vec::new, |n| n.as_bytes().to_vec())
 }
 
-/// Image address of "You must first create or transfer a character." (main pushes it).
+/// Image address of the message that no character exists yet (main pushes it).
 const MSG_CREATE_CHARACTER: u32 = 0x0013_50a6;
 /// Objlist block bytes of A4-0x7b03 (a character exists) and A4-0x7b0c (combat mode).
 const TAIL_CREATED: usize = 0x81;

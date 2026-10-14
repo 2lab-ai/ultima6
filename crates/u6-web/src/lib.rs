@@ -11,7 +11,9 @@
 //! new-game files before the boot ([`Game::load_save`], `saveload::attach`), and after a tick
 //! whose Save committed ([`Game::save_generation`] moved) it stores what [`Game::save_collect`]
 //! lists, then reports the generation committed ([`Game::save_committed`]). The character `u`
-//! makes is such a write too (its `savegame/objlist`).
+//! makes is such a write too (its `savegame/objlist`). A list holds what the Saves since the
+//! last commit replaced; after the page removed the stored save ([`Game::save_forgotten`]) the
+//! next one holds the whole save.
 //!
 //! A start runs the launcher's sequence (`u`: the opening and the menu, then `game`);
 //! [`Game::start_game_first`] starts `game` at once (development and tests). When the sequence
@@ -20,13 +22,16 @@
 //!
 //! Limits (a clear message instead of an exhausted tab): [`MAX_INPUT_BYTES`] for the dropped
 //! files together, [`MAX_UNZIPPED_BYTES`] for what the zip entries the intake inflates declare,
-//! [`MAX_GAME_FILES_BYTES`] for the game files the intake produces.
+//! [`MAX_GAME_FILES_BYTES`] for the game files the intake produces, [`MAX_SAVE_FILE_BYTES`] and
+//! [`MAX_SAVE_BYTES`] for the stored save (a file over them is left out, and the start's report
+//! says so).
 
 mod zipscan;
 
 use std::collections::BTreeMap;
 
-use u6_core::saveload::{MemStore, attach, changed_since};
+use u6_core::objects::{BLOCK_COUNT, MAX_RECORDS};
+use u6_core::saveload::{MemStore, OBJLIST_FILE, attach, block_file, changed_since};
 use u6_core::sound::AudioDriver;
 use u6_core::{Engine, Files, Framebuffer, InputEvent, Key};
 use u6_intake::{InputFile, intake};
@@ -43,11 +48,32 @@ pub const MAX_UNZIPPED_BYTES: u64 = 64 << 20;
 /// the engine boots. PP20 output is bounded per file by its 24-bit length field (16 MiB), not in
 /// aggregate, inside u6-intake.
 pub const MAX_GAME_FILES_BYTES: usize = 64 << 20;
+/// One stored `savegame/` file: the largest the game writes there, a block at its record limit
+/// (the count word and 0xc00 records of 8 bytes; 0x10ddd2 clamps the count it reads to 0xc00).
+/// `savegame/objlist` is under it: Save writes the 0x1C73 bytes load state reads, and the
+/// character `u` makes keeps the user's file at its own length (u 0x105700 writes the first
+/// 0x1C73 bytes over it), so the objlist is not capped at 0x1C73.
+pub const MAX_SAVE_FILE_BYTES: usize = 2 + MAX_RECORDS * 8;
+/// The stored save together: the objlist and the 69 blocks, each at most [`MAX_SAVE_FILE_BYTES`].
+pub const MAX_SAVE_BYTES: usize = (1 + BLOCK_COUNT) * MAX_SAVE_FILE_BYTES;
 
 /// [`MAX_INPUT_BYTES`] for the page.
 #[wasm_bindgen]
 pub fn max_input_bytes() -> f64 {
     MAX_INPUT_BYTES as f64
+}
+
+/// [`MAX_SAVE_FILE_BYTES`] for the page (it leaves larger files of a dropped `savegame/` folder
+/// out before reading them; [`Game::load_save`] is the backstop).
+#[wasm_bindgen]
+pub fn max_save_file_bytes() -> f64 {
+    MAX_SAVE_FILE_BYTES as f64
+}
+
+/// [`MAX_SAVE_BYTES`] for the page.
+#[wasm_bindgen]
+pub fn max_save_bytes() -> f64 {
+    MAX_SAVE_BYTES as f64
 }
 
 /// The message for inputs over [`MAX_INPUT_BYTES`].
@@ -114,10 +140,18 @@ pub struct Game {
     kept: Vec<String>,
     /// The stored `savegame/*` files the next start lays over the game files.
     saves: BTreeMap<String, Vec<u8>>,
+    /// Bytes in `saves`.
+    save_bytes: usize,
+    /// One line per stored file [`Game::load_save`] left out, for the next start's report.
+    save_notes: Vec<String>,
     /// The last save generation the page reported stored.
     saved_gen: u32,
     /// The files [`Game::save_collect`] listed, until [`Game::save_committed`].
     save_out: Vec<(String, Vec<u8>)>,
+    /// The next list is the whole save ([`Game::save_forgotten`]); `save_out_whole`: the last
+    /// list was.
+    save_whole: bool,
+    save_out_whole: bool,
     /// The audio machine, once the page started its AudioContext.
     audio: Option<AudioDriver>,
     audio_rate: u32,
@@ -144,8 +178,12 @@ impl Game {
             log: Vec::new(),
             kept: Vec::new(),
             saves: BTreeMap::new(),
+            save_bytes: 0,
+            save_notes: Vec::new(),
             saved_gen: 0,
             save_out: Vec::new(),
+            save_whole: false,
+            save_out_whole: false,
             audio: None,
             audio_rate: 0,
             audio_buf: Vec::new(),
@@ -234,9 +272,28 @@ impl Game {
     }
 
     /// Collects one stored save file (`savegame/objlist`, `savegame/objblkAA`, ...) for the next
-    /// [`Game::start`], which lays them over the game files.
-    pub fn load_save(&mut self, path: &str, bytes: Vec<u8>) {
+    /// [`Game::start`], which lays them over the game files. A file over
+    /// [`MAX_SAVE_FILE_BYTES`], or one that would take the files together past
+    /// [`MAX_SAVE_BYTES`], is left out (the start's report names it); a path given again
+    /// replaces its file. Returns whether the file was taken.
+    pub fn load_save(&mut self, path: &str, bytes: Vec<u8>) -> bool {
+        let old = self.saves.get(path).map_or(0, Vec::len);
+        let total = self.save_bytes - old + bytes.len();
+        if bytes.len() > MAX_SAVE_FILE_BYTES || total > MAX_SAVE_BYTES {
+            let limit = if bytes.len() > MAX_SAVE_FILE_BYTES {
+                format!("a save file holds at most {MAX_SAVE_FILE_BYTES}")
+            } else {
+                format!("the saved game holds at most {MAX_SAVE_BYTES} together")
+            };
+            self.save_notes.push(format!(
+                "The saved game's file {path} ({} bytes) is left out: {limit} bytes.",
+                bytes.len()
+            ));
+            return false;
+        }
+        self.save_bytes = total;
         self.saves.insert(path.to_string(), bytes);
+        true
     }
 
     /// Number of stored save files the running game booted with (0: a new game).
@@ -257,11 +314,17 @@ impl Game {
     /// the replaced blocks, the original's names); returns how many. Read them with
     /// [`Game::save_path`] / [`Game::save_ptr`] / [`Game::save_len`].
     pub fn save_collect(&mut self) -> u32 {
+        let whole = self.save_whole;
         self.save_out = self.engine.as_ref().map_or_else(Vec::new, |e| {
-            changed_since(&e.state(), self.saved_gen)
-                .into_iter()
-                .collect()
+            let s = e.state();
+            let files = if whole {
+                whole_save(&s, self.saved_gen)
+            } else {
+                changed_since(&s, self.saved_gen)
+            };
+            files.into_iter().collect()
         });
+        self.save_out_whole = whole;
         self.save_out.len() as u32
     }
 
@@ -284,10 +347,21 @@ impl Game {
         self.save_out.get(i as usize).map_or(0, |(_, b)| b.len())
     }
 
+    /// The page removed the stored save: the next list ([`Game::save_collect`]) holds the whole
+    /// save, `savegame/objlist` and all 69 blocks as the game has them, until one is committed.
+    /// A Save lists only the blocks it replaced; over an emptied store those alone would let the
+    /// next start take every other block from the new-game files, a world this game never had.
+    pub fn save_forgotten(&mut self) {
+        self.save_whole = true;
+    }
+
     /// The page stored the files of generation `generation` (all-or-nothing); later lists start
     /// after it. A failed store is not reported, so the next list still has its files.
     pub fn save_committed(&mut self, generation: u32) {
         self.saved_gen = self.saved_gen.max(generation);
+        if self.save_out_whole {
+            self.save_whole = false;
+        }
         self.save_out = Vec::new();
     }
 
@@ -484,6 +558,9 @@ impl Game {
         let r = intake(inputs);
         drop(r.disks);
         let mut report = r.report.join("\n");
+        for note in std::mem::take(&mut self.save_notes) {
+            report.push_str(&format!("\n{note}"));
+        }
         let total: usize = r.files.values().map(Vec::len).sum();
         if total > MAX_GAME_FILES_BYTES {
             report.push_str(&format!(
@@ -498,6 +575,7 @@ impl Game {
         let saves = MemStore {
             files: std::mem::take(&mut self.saves),
         };
+        self.save_bytes = 0;
         let stored = attach(&mut files, &saves).map_err(|e| format!("{report}\n{e}"))?;
         if stored > 0 {
             report.push_str(&format!(
@@ -518,6 +596,8 @@ impl Game {
                 self.kept = paths;
                 self.saved_gen = 0;
                 self.save_out = Vec::new();
+                self.save_whole = false;
+                self.save_out_whole = false;
                 self.audio = None;
                 self.engine = Some(engine);
                 self.pending.clear();
@@ -535,6 +615,24 @@ impl Game {
         let fb = self.engine.as_ref().map_or(&self.blank, |e| e.frame());
         fb.write_rgba(&mut self.rgba);
     }
+}
+
+/// The whole save after a Save since generation `since`: `savegame/objlist` as the last Save (or
+/// `u`'s character) wrote it and every block file as the game holds it (the files a Save
+/// commits; between Saves they do not change), under the original's names. Empty when nothing
+/// was saved since `since`.
+fn whole_save(s: &u6_core::State, since: u32) -> BTreeMap<String, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    if s.saveload.generation <= since {
+        return out;
+    }
+    if let Some(objlist) = &s.saveload.objlist {
+        out.insert(OBJLIST_FILE.to_string(), objlist.clone());
+    }
+    for (i, (_, block)) in s.objects.blocks.iter().enumerate() {
+        out.insert(block_file(i), block.to_bytes());
+    }
+    out
 }
 
 /// Queues a pointer event; a move right after one with the same buttons replaces it (the game
@@ -638,6 +736,37 @@ mod tests {
         );
         assert!(!game.started());
         assert_eq!(game.files_loaded(), 0);
+    }
+
+    /// Stored save files: one larger than any save file is left out, the files together stop
+    /// at a total, a path given again replaces its file; what was left out is in the start's
+    /// report (synthetic bytes).
+    #[test]
+    fn save_files_over_the_caps_are_left_out_and_reported() {
+        let mut game = Game::new();
+        game.load_save("savegame/objblkAA", vec![0; 1 << 20]);
+        game.load_save("savegame/objlist", vec![0; 0x1c73]);
+        for _ in 0..3 {
+            game.load_save("savegame/objblkAB", vec![0; 20_000]);
+        }
+        assert!(!game.saves.contains_key("savegame/objblkAA"), "1 MiB");
+        assert!(game.saves.contains_key("savegame/objlist"));
+        assert!(
+            game.saves.contains_key("savegame/objblkAB"),
+            "replaced, not added up"
+        );
+        for i in 0..100 {
+            game.load_save(&format!("savegame/x{i:03}"), vec![0; 20_000]);
+        }
+        let taken = game.saves.len();
+        assert!((60..102).contains(&taken), "{taken} files taken");
+        let kept: usize = game.saves.values().map(Vec::len).sum();
+        assert!(kept < 2 << 20, "{kept} bytes");
+        game.collect("notes.txt", b"hello".to_vec()).unwrap();
+        let report = game.boot(0, false).unwrap_err();
+        let notes = report.lines().filter(|l| l.contains("left out")).count();
+        assert_eq!(notes, 1 + 102 - taken, "{report}");
+        assert!(report.contains("savegame/objblkAA"), "{report}");
     }
 
     const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
@@ -763,5 +892,95 @@ mod tests {
             heard = heard.max(fresh.audio_buf.iter().fold(0f32, |m, &v| m.max(v.abs())));
         }
         assert!(heard > 0.0, "the boot's song renders");
+    }
+    /// The stored save removed under a game that started from one: its next Save lists the
+    /// whole save (objlist and the 69 blocks), so the next start from it is the world that
+    /// game had. A block of the save it started from that no Save rewrote (synthetic: an empty
+    /// far block) is in the list, with that save's bytes, and the restarted world holds it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn a_save_after_the_stored_one_was_removed_lists_the_whole_world() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let ticks = |game: &mut Game, n: u32| {
+            for _ in 0..n {
+                game.tick(16);
+            }
+        };
+        let save = |game: &mut Game| {
+            game.key_down("KeyS", "s", true);
+            ticks(game, 30);
+            game.key_down("KeyY", "y", false);
+            ticks(game, 60);
+        };
+        let listed = |game: &mut Game| -> BTreeMap<String, Vec<u8>> {
+            (0..game.save_collect())
+                .map(|i| {
+                    let len = game.save_len(i);
+                    let bytes = unsafe { std::slice::from_raw_parts(game.save_ptr(i), len) };
+                    (game.save_path(i), bytes.to_vec())
+                })
+                .collect()
+        };
+        let blocks = |game: &Game| -> Vec<Vec<u8>> {
+            let s = game.engine.as_ref().unwrap().state();
+            s.objects.blocks.iter().map(|(_, b)| b.to_bytes()).collect()
+        };
+        let mut first = Game::new();
+        first
+            .collect("ultima-vi.zip", std::fs::read(ZIP).unwrap())
+            .unwrap();
+        first.boot(1, true).unwrap();
+        ticks(&mut first, 120);
+        save(&mut first);
+        assert_eq!(first.save_generation(), 1);
+        let mut stored = listed(&mut first);
+        let far = u6_core::saveload::block_file(63);
+        assert!(
+            !stored.contains_key(&far),
+            "a Save near the start leaves the far block"
+        );
+        stored.insert(far.clone(), vec![0, 0]);
+        let kept: Vec<(String, Vec<u8>)> = (0..first.kept_count())
+            .map(|i| (first.kept_path(i), first.kept_bytes(i).unwrap().to_vec()))
+            .collect();
+        let start = |save: &BTreeMap<String, Vec<u8>>| {
+            let mut game = Game::new();
+            for (path, bytes) in &kept {
+                game.collect(path, bytes.clone()).unwrap();
+            }
+            for (path, bytes) in save {
+                assert!(game.load_save(path, bytes.clone()));
+            }
+            game.boot(1, true).unwrap();
+            ticks(&mut game, 120);
+            game
+        };
+        let mut game = start(&stored);
+        assert_eq!(blocks(&game)[63], [0, 0], "the save's far block");
+        game.save_forgotten();
+        save(&mut game);
+        assert_eq!(game.save_generation(), 1);
+        let whole = listed(&mut game);
+        eprintln!("{} files listed after the removal", whole.len());
+        assert_eq!(whole.len(), 1 + BLOCK_COUNT, "the objlist and every block");
+        assert_eq!(whole.get(&far), Some(&vec![0, 0]));
+        let total: usize = whole.values().map(Vec::len).sum();
+        assert!(total <= MAX_SAVE_BYTES, "{total} bytes");
+        game.save_committed(1);
+        let again = start(&whole);
+        assert_eq!(
+            blocks(&again),
+            blocks(&game),
+            "the same world, block for block"
+        );
+        assert_eq!(again.leader_position(), game.leader_position());
+        save(&mut game);
+        assert!(
+            listed(&mut game).len() < 1 + BLOCK_COUNT,
+            "once committed, Saves list changes again"
+        );
     }
 }

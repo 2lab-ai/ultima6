@@ -11,11 +11,20 @@ use std::path::Path;
 
 use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
+use crate::image::A4;
 use crate::objects::{IN_CONTAINER, READIED};
 use crate::state::State;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 const AVATAR: i16 = 1;
+/// Where the receipts read the lines they look for (the user's `game`): the command-name table
+/// at A4-0x7c8e and the format its names are printed with (0x101f48), Cast's code, Rest's own
+/// name line (0x1272cc) and the line after the guard's name (0x1273fc).
+const COMMAND_NAMES: u32 = 0x7c8e;
+const FMT_NAME_DASH: u32 = 0x0010_1f48;
+const CAST: u32 = 0x82;
+const STR_REST: u32 = 0x0012_72cc;
+const STR_STANDS_GUARD: u32 = 0x0012_73fc;
 
 fn files() -> Option<Files> {
     if !Path::new(ZIP).exists() {
@@ -103,6 +112,31 @@ fn scroll(e: &Engine, from: &str) -> Vec<String> {
     lines[at..].to_vec()
 }
 
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// The line the command loop prints for command `code`: its name through the name format.
+fn command_line(e: &Engine, code: u32) -> String {
+    let name = super::pointed_string(e.io(), A4.wrapping_sub(COMMAND_NAMES) + 4 * code);
+    let line = text(&super::game_string(e.io(), FMT_NAME_DASH)).replace("%s", &text(&name));
+    assert!(!name.is_empty(), "the name of command {code:#x}");
+    line
+}
+
+/// The spell `n`'s name (the magic tables read from the user's `game`).
+fn spell_name(e: &Engine, n: usize) -> String {
+    text(&e.state().magic.tables.names[n])
+}
+
+/// Whether the scroll `lines` hold `want` with the word wrap undone (the lines joined, every run
+/// of white space as one space).
+fn holds(lines: &[String], want: &str) -> bool {
+    let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let want = flat(want);
+    !want.is_empty() && flat(&lines.join(" ")).contains(&want)
+}
+
 /// A readied spellbook holding `spells` for the Avatar and 10 of each reagent.
 fn give_book(s: &mut State, spells: &[u8]) {
     let book = crate::objects::create_in(s, crate::magic::SPELLBOOK, READIED, 0, AVATAR);
@@ -130,7 +164,8 @@ fn lit_cells(s: &State) -> usize {
         .count()
 }
 
-/// C at 22:00 with a book holding Light (9): the book panel, then "In Lor" lights the view.
+/// C at 22:00 with a book holding Light (9): the book panel, then its two words (keys I, L)
+/// light the view.
 #[test]
 fn cast_light_at_night_through_the_command_loop() {
     let Some(files) = files() else { return };
@@ -151,16 +186,20 @@ fn cast_light_at_night_through_the_command_loop() {
     dump(&e, "int-b-light-lit");
     let s = e.state();
     let lit = lit_cells(&s);
-    let tail = scroll(&e, "Cast-");
-    eprintln!("light: panel {book:#x} after C; lit cells {dark} -> {lit}; {tail:?}");
+    let tail = scroll(&e, &command_line(&e, CAST));
+    eprintln!(
+        "light: panel {book:#x} after C; lit cells {dark} -> {lit}; {} lines",
+        tail.len()
+    );
     assert_eq!(book, crate::magic::BOOK_PANEL, "the spellbook panel is up");
-    assert!(tail.iter().any(|l| l.contains("(Light)")), "{tail:?}");
+    let spell = spell_name(&e, 9);
+    assert!(holds(&tail, &spell), "{} lines, no spell name", tail.len());
     assert_eq!(s.actors.timers[0], 100, "the light timer runs");
     assert!(lit > dark, "{lit} lit cells after, {dark} before");
 }
 
-/// C, "Ort Jux" (Magic Arrow) at a gargoyle three tiles east: the flight is shown (a frame
-/// between the cast and the hit), the gargoyle hurt or the dodge reported.
+/// C, Magic Arrow's two words (keys O, J) at a gargoyle three tiles east: the flight is shown
+/// (a frame between the cast and the hit), the gargoyle hurt or the dodge reported.
 #[test]
 fn magic_arrow_at_a_gargoyle_through_the_command_loop() {
     let Some(files) = files() else { return };
@@ -214,22 +253,27 @@ fn magic_arrow_at_a_gargoyle_through_the_command_loop() {
     idle(&mut e, 40);
     dump(&e, "int-b-arrow-after");
     let s = e.state();
-    let tail = scroll(&e, "Cast-");
+    let tail = scroll(&e, &command_line(&e, CAST));
     let hp1 = s.actors.attrs.hp[foe as usize];
     eprintln!(
-        "arrow: frames shown {} (first new one at tick {flight:?}); gargoyle hp {hp0} -> {hp1}; {tail:?}",
-        s.combat.shown - shown0
+        "arrow: frames shown {} (first new one at tick {flight:?}); gargoyle hp {hp0} -> {hp1}; {} lines",
+        s.combat.shown - shown0,
+        tail.len()
     );
-    assert!(tail.iter().any(|l| l.contains("(Magic Arrow)")), "{tail:?}");
+    let spell = spell_name(&e, 0x11);
+    let failed = text(s.magic.tables.message(crate::magic::Msg::Failed));
+    assert!(holds(&tail, &spell), "{} lines, no spell name", tail.len());
     assert!(flight.is_some(), "a flight frame was shown");
     assert!(
-        hp1 < hp0 || tail.iter().any(|l| l.contains("Failed")),
-        "{tail:?}"
+        hp1 < hp0 || holds(&tail, &failed),
+        "hp {hp0} -> {hp1}, {} lines without the failure",
+        tail.len()
     );
 }
 
 /// B is not needed (out of combat); the party is put on the first spot east of the castle where
-/// every camp check of 0x127b1a passes, then R, 1 hour, Dupre (2) on guard: the camp lines.
+/// every camp check of 0x127b1a passes, then R, 1 hour, the second member (2) on guard: the
+/// camp lines.
 #[test]
 fn rest_one_hour_through_the_command_loop() {
     let Some(files) = files() else { return };
@@ -259,10 +303,11 @@ fn rest_one_hour_through_the_command_loop() {
     press(&mut e, &chars("r"), 10);
     press(&mut e, &chars("1"), 10);
     press(&mut e, &chars("2"), 10);
+    let guard = text(&super::game_string(e.io(), STR_STANDS_GUARD));
     let mut camp = None;
     for t in 0..6000 {
         e.tick(&[], 16);
-        if camp.is_none() && e.state().ui.messages.iter().any(|l| l.contains("guard")) {
+        if camp.is_none() && holds(&e.state().ui.messages, &guard) {
             camp = Some(t);
         }
         if t == 400 {
@@ -278,12 +323,16 @@ fn rest_one_hour_through_the_command_loop() {
     idle(&mut e, 60);
     dump(&e, "int-b-rest-after");
     let s = e.state();
-    let tail = scroll(&e, "Rest");
+    let tail = scroll(&e, &text(&super::game_string(e.io(), STR_REST)));
     eprintln!(
-        "rest at {at:?}: {:02}:{:02} -> {:02}:{:02}; {tail:?}",
-        hour0, 0, s.actors.calendar.hour, s.actors.calendar.minute
+        "rest at {at:?}: {:02}:{:02} -> {:02}:{:02}; camp line at tick {camp:?}; {} lines",
+        hour0,
+        0,
+        s.actors.calendar.hour,
+        s.actors.calendar.minute,
+        tail.len()
     );
-    assert!(tail.iter().any(|l| l.contains("guard")), "{tail:?}");
+    assert!(holds(&tail, &guard), "{} lines, no guard line", tail.len());
     assert_ne!(s.actors.calendar.hour, hour0, "an hour passed");
 }
 
@@ -334,14 +383,16 @@ fn the_spellbook_by_clicks_through_the_command_loop() {
     dump(&e, "int-mouse-book-light");
     let s = e.state();
     let lit = lit_cells(&s);
-    let tail = scroll(&e, "Cast-");
+    let tail = scroll(&e, &command_line(&e, CAST));
     eprintln!(
-        "book by clicks: pages {first:?} -> {next:?} -> {back:?}; lit cells {dark} -> {lit}; {tail:?}"
+        "book by clicks: pages {first:?} -> {next:?} -> {back:?}; lit cells {dark} -> {lit}; {} lines",
+        tail.len()
     );
     assert_eq!(first.0, [0, 1, 6, 9], "the first circle's page");
     assert_eq!(next.0, [0x11, 0x14], "the next-circle tab");
     assert_eq!(back.0, first.0, "the previous-circle tab");
-    assert!(tail.iter().any(|l| l.contains("Light")), "{tail:?}");
+    let spell = spell_name(&e, 9);
+    assert!(holds(&tail, &spell), "{} lines, no spell name", tail.len());
     assert_eq!(s.actors.timers[0], 100, "the light timer runs");
     assert!(lit > dark, "{lit} lit cells after, {dark} before");
 }

@@ -88,7 +88,8 @@ async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) 
     printf(state, io, &fmt, args).await;
 }
 
-/// "Name-": the command's name from the table A4-0x7c8e, then a dash.
+/// The command's name from the table A4-0x7c8e through the format at 0x101f48 (the name, then
+/// a dash).
 async fn print_command(state: &RefCell<State>, io: &Io, code: u16) {
     let name = pointed_string(io, A4.wrapping_sub(COMMAND_NAMES) + 4 * u32::from(code));
     print_at(state, io, FMT_NAME_DASH, &[Arg::Str(&name)]).await;
@@ -230,8 +231,8 @@ fn end_command(s: &mut State, io: &Io) {
 }
 
 /// Port-only: a cut handler's ending. [`NOT_IMPLEMENTED`] (on a new line after `after_name`, the
-/// "Name-" or "Rest" the original printed first), the command state cleared; the caller returns
-/// [`NO_TURN`].
+/// command's name the original printed first: the loop's [`print_command`], or Rest's own
+/// line), the command state cleared; the caller returns [`NO_TURN`].
 async fn not_implemented(state: &RefCell<State>, io: &Io, after_name: bool) {
     if after_name {
         printf(state, io, b"\n", &[]).await;
@@ -306,13 +307,13 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
             crate::actors::party::player_step(&mut state.borrow_mut(), dir as u16);
         }
         ATTACK => {
-            // 0x124caa prints "Attack" itself, reads the target and spends the movement points.
+            // 0x124caa prints its own name line, reads the target and spends the movement points.
             crate::combat::attack::attack(state, io).await;
             state.borrow_mut().ui.input.target_command = crate::combat::attack::AFTER_ATTACK;
         }
         CAST..=0x88 => return targeted(state, io, code).await,
         REST => {
-            // 0x104a98..0x104ad0: song 8 unless aboard, 0x127b1a (it prints "Rest" itself), the
+            // 0x104a98..0x104ad0: song 8 unless aboard, 0x127b1a (it prints its own name), the
             // area song unless aboard, then no target pending, the panel cursor, cursor mode
             // off; the turn is taken.
             let aboard = {
@@ -380,8 +381,8 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
     code
 }
 
-/// Pass (0x104b62): "Pass!", the leader's movement points 0, the cursor off; a ship (0x19f) or
-/// balloon (0x1a7) leader drifts one step with the wind (A4-0x7b7b ≥ 0); the party follows
+/// Pass (0x104b62): its message, the leader's movement points 0, the cursor off; a ship (0x19f)
+/// or balloon (0x1a7) leader drifts one step with the wind (A4-0x7b7b ≥ 0); the party follows
 /// (0x11c910 with D1 = 1).
 async fn pass(state: &RefCell<State>, io: &Io) {
     say(state, io, MSG_PASS, &[]).await;
@@ -402,7 +403,7 @@ async fn pass(state: &RefCell<State>, io: &Io) {
 }
 
 /// `0` (0x1045ae..0x1046bc): party mode, when not aboard and out of combat, if every member is
-/// within 8 tiles of the leader on both axes ("Not everyone is here." otherwise).
+/// within 8 tiles of the leader on both axes (otherwise the message that someone is missing).
 async fn party_mode(state: &RefCell<State>, io: &Io) {
     let (aboard, combat, all_here) = {
         let s = state.borrow();
@@ -503,9 +504,9 @@ async fn solo_mode(state: &RefCell<State>, io: &Io, code: u16) {
 
 /// Cast, Talk, Look, Get, Drop, Move, Use (0x10498e..0x104a96): Cast, Get, Drop and Move are
 /// refused aboard ship; then the command waits for its target (A4-0x7a32 = 1, A4-0x7a2e = code),
-/// "Name-" is printed and, except for Cast (0x11af10, which reads its own input), the next key
-/// read must confirm a target (0x8e) or the loop says "what?"; a confirmed target goes to the
-/// command's handler.
+/// the command's name is printed ([`print_command`]) and, except for Cast (0x11af10, which reads
+/// its own input), the next key read must confirm a target (0x8e) or the loop prints its
+/// no-target word; a confirmed target goes to the command's handler.
 async fn targeted(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
     if matches!(code, CAST | 0x85..=0x87) {
         let aboard = {
