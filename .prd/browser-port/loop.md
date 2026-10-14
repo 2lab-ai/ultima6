@@ -31,21 +31,23 @@ Status: in-progress
   `npx wrangler@4 pages deploy site --project-name ultima6 --branch <b>`; preview alias
   https://preview.ultima6.pages.dev. Custom domain + Vercel CNAME `ultima6` at milestone 1.
 
-## Round 1 — open work units (rev 2: Rust main source)
+## Round 1 — work units (rev 2: Rust main source)
 
-Gate before any Rust logic dispatch: `re/notes/game-layout.md` records (a) symbol
-count, (b) OS-call vs custom-chip access, (c) C runtime identity.
-
-| WU | Scope | Owner files | State |
+| WU | Scope | Result | State |
 |---|---|---|---|
-| WU-1 | rea `m68k` raw-binary architecture + tests + reinstall | rea `feat/m68k-raw-binary` | in flight |
-| WU-2 | hunk → flat image + map; layout notes | `tools/hunk2raw.py`, `re/notes/game-layout.md` | in flight |
-| WU-3 | Amiga data format spec (byte-level, for Rust parsers) | `re/notes/formats.md` (+ optional `tools/amiga2dos.py`) | in flight |
-| WU-6 | TS intake (oracle for the Rust port; deleted once `u6-intake` lands) | `web/` | in flight |
-| WU-R0 | Rust workspace skeleton: crates, native window, wasm shell, framebuffer | `Cargo.toml`, `crates/*` | open |
-| WU-O | Oracle: original game running in an Amiga emulator (AROS ROM) + screenshot capture | `re/notes/oracle.md`, `tools/oracle/` | open |
-| WU-R1 | `u6-intake` Rust port of WU-6 with the same fixture tests | `crates/u6-intake` | blocked on WU-6, WU-R0 |
-| WU-R2 | `u6-formats` parsers from formats.md | `crates/u6-formats` | blocked on WU-3, WU-R0 |
-| WU-4 | REA decompile: function inventory + classification; graphics loaders | `re/notes/functions.md`, `re/notes/graphics.md` | blocked on WU-1, WU-2 |
-| WU-P* | Per-subsystem logic port (from WU-4 inventory) | `crates/u6-core/src/<subsystem>` | blocked on WU-4 |
-| WU-D | Deploy: CF Pages `ultima6` + DNS CNAME | `site/`, deploy script | blocked on milestone 1 |
+| WU-1 | rea `m68k` raw-binary | rea `9466e0712` (feat/m68k-raw-binary, local); 199 tests; fixture decompiles | done |
+| WU-2 | hunk flattener + layout | `2725b02`; 30 tests; game = 35 hunks, no overlay, entry 0x100000 | done |
+| WU-3 | Amiga format spec | `c142d64`, `0eae222` formats.md | done |
+| WU-6 | TS intake (oracle for R1) | `8b02eda`; 33 tests; ADF sha = greaseweazle | done (delete after R1 parity — R1 done) |
+| WU-R0 | Rust workspace skeleton | `cc620ab`; 14 tests; wasm 35 KB | done |
+| WU-R1 | `u6-intake` Rust | `6b20c4e`; 30 tests incl. real zip 0.68 s (re-run by dispatcher) | done |
+| WU-R2 | `u6-formats` parsers | `1c442b3`; 44+12 tests (re-run by dispatcher) | done |
+| WU-4a | tile graphics + palette | `da9a115`, `1afd5f0`; 2048 tiles; sheet read by dispatcher = real U6 tiles | done |
+| WU-4b | function inventory | `5630231`, `9d93cb4`; 1383/1383; M1 = 320 game fns + 41 crt, 45 stubs | done |
+| WU-C0 | u6-core engine/State/RNG/seams (03 rev 2) | — | in flight |
+| WU-O | Amiga emulator oracle (AROS) | — | in flight |
+| WU-P1..P7 | gfx · map · objects · ui · actors · converse · main loop | — | blocked on WU-C0 |
+| WU-D | Deploy ultima6.2lab.ai | CF Pages project + preview alias live (skeleton) | custom domain at M1 |
+
+Open review items: gpt6 spec review CHANGES ×8 applied in `d749513`; WU-C0 notified.
+Cleanup owed: delete `web/` (TS intake) now that u6-intake has parity.
