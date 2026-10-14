@@ -343,8 +343,8 @@ fn a_song_pointer_past_the_top_wraps_into_chip_memory() {
 /// them wrap as the 68000's do (0x100fa4: `movea.l 8(a0),a0`, then `move.b $301(a0)`), reads
 /// outside chip memory get 0, and nothing panics (debug builds check overflow). Each pointer
 /// made absolute is checked against the 32-bit wrapping sum, so a sum that saturates, stops or
-/// widens fails in a release build too; a plain `+` gives the same bits there, which the lint on
-/// [`module::addr`] rejects.
+/// widens fails in a release build too; a plain `+` gives the same bits there, which the lint of
+/// [`module`] rejects.
 #[test]
 fn pointers_anywhere_in_a_malformed_module_play_without_a_panic() {
     let hybrid = synth::synth(&[0x40, 0xff], &[0x00, 0xff], (1, 1), &[vec![1; 8]]);
@@ -399,4 +399,87 @@ fn pointers_anywhere_in_a_malformed_module_play_without_a_panic() {
             );
         }
     }
+}
+
+/// The routine indexes its tables of pointers with a word: `4 × n` in a word register, taken as
+/// a sign-extended word (`lsl.w #2` at 0x1008c8, `movea.l 0(a0,d0.w)` at 0x1008ca). Block
+/// 0x2001 is the long 0x7ffc bytes before the block array, not 0x8004 bytes after it; block
+/// 0x4001 wraps to the array's second long. A synth's waveform byte is widened with `ext.w`
+/// (0x1004a4) before the same scaling.
+#[test]
+fn table_indexes_are_sign_extended_words() {
+    assert_eq!(module::long_index(0x1_0000, 0x2001), 0x8004);
+    assert_eq!(module::long_index(0x1_0000, 0x4001), 0x1_0004);
+    assert_eq!(module::long_index(0, 0xffff), 0xffff_fffc);
+    assert_eq!(module::long_index(0x20, 0x1fff), 0x20 + 0x7ffc);
+
+    let md = module::Module { base: CHIP_BUFFER };
+    let mut chip = vec![0u8; 0x2_0000];
+    let put = |chip: &mut Vec<u8>, at: u32, v: u32| {
+        chip[at as usize..at as usize + 4].copy_from_slice(&v.to_be_bytes());
+    };
+    // The block array at module offset 0x1_0000 (stored relative to the module).
+    put(&mut chip, CHIP_BUFFER + 0x10, 0x1_0000);
+    put(&mut chip, CHIP_BUFFER + 0x1_0000 - 0x7ffc, 0x1234);
+    put(&mut chip, CHIP_BUFFER + 0x1_0000 + 0x8004, 0x5678);
+    put(&mut chip, CHIP_BUFFER + 0x1_0000 + 4, 0x9abc);
+    let mem = module::Mem(&chip);
+    assert_eq!(md.block(mem, 0x2001), CHIP_BUFFER + 0x1234);
+    assert_eq!(md.block(mem, 0x4001), CHIP_BUFFER + 0x9abc);
+
+    // Waveform byte 0xff: `ext.w` makes it −1, the long before waveform 0.
+    let instr = 0x100;
+    put(&mut chip, instr + module::instr::WF - 4, 0x40);
+    put(&mut chip, instr + module::instr::WF + 0x3fc, 0x80);
+    let mem = module::Mem(&chip);
+    assert_eq!(module::Module::waveform(mem, instr, 0xff), instr + 0x40);
+}
+
+/// A line's notes start `3 × line × tracks` bytes into the block, a product the interrupt forms
+/// in a word and adds as a sign-extended word (`adda.w` at 0x1008e8, `lea 2(a2,d0.w)` at
+/// 0x100b72): `3 × line` wraps in 16 bits, and a product of 0x8000 or more reaches back before
+/// the block.
+#[test]
+fn a_line_offset_is_a_sign_extended_word() {
+    assert_eq!(module::line_at(0x100, 1, 2), 0x108);
+    assert_eq!(module::line_at(0x1_0000, 171, 64), 0x1_0002 - 0x7fc0);
+    assert_eq!(
+        module::line_at(0, 0x5556, 1),
+        2 + 2,
+        "3 × 0x5556 wraps to 2"
+    );
+    assert_eq!(
+        module::line_at(0, 0x2aab, 1),
+        2u32.wrapping_sub(0x7fff),
+        "3 × 0x2aab = 0x8001, the word −0x7fff"
+    );
+}
+
+/// A malformed block of 64 tracks at line 171: the notes the interrupt reads (0x1008e8) and the
+/// next line it looks ahead into for held notes (0x100b72) lie 0x7fc0 and 0x7f00 bytes before
+/// the block's notes, not 0x8040 and 0x8100 bytes after them.
+#[test]
+fn line_171_of_a_64_track_block_reads_before_the_block() {
+    let mut md = one_line([EMPTY; 4]);
+    md.ext = vec![(2, 0)];
+    let mut bytes = md.build();
+    let block = 0x9000usize;
+    let notes = block + 2;
+    bytes.resize(notes + 0x8100 + 0x100, 0);
+    let blockarr = u32::from_be_bytes(bytes[0x10..0x14].try_into().unwrap()) as usize;
+    bytes[blockarr..blockarr + 4].copy_from_slice(&(block as u32).to_be_bytes());
+    bytes[block..block + 2].copy_from_slice(&[64, 255]);
+    // Line 171 and the next one where the 68000 reads them, and where 32-bit sums would.
+    bytes[notes - 0x7fc0..][..3].copy_from_slice(&cell(13, 1, 0, 0));
+    bytes[notes - 0x7f00..][..3].copy_from_slice(&cell(0, 1, 0, 0));
+    bytes[notes + 0x8040..][..3].copy_from_slice(&cell(25, 1, 0, 0));
+    let (mut p, mut m) = playing_bytes(&bytes);
+    p.line = 171;
+    ticks(&mut p, &mut m, 1);
+    assert_eq!(p.line, 172);
+    assert_eq!(m.paula.channels[0].period, period(13), "line 171's note");
+    assert_eq!(
+        p.tracks[0].hold_count, 4,
+        "hold 2, extended by line 172's instrument (+3), one tick spent"
+    );
 }

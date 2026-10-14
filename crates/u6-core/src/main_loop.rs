@@ -199,10 +199,15 @@ const EXIT_QUIT: u16 = 3;
 /// (0x10052c), 4 stops with a requester (0x100532); each run waits for the program and takes
 /// its return code as the next state. So `u`'s Journey Onward (exit 1) starts `game`, its quit
 /// (exit 3) ends the launcher, and `game` without a character (exit 0) runs `u` again; the end
-/// of `game` (exit 3) ends it. Every `game` after the first is a new process ([`relaunch`]).
-/// Not ported: the PAL check (the port has no NTSC display), `end` (exit 2; no path of the port
-/// reaches the end of the game) and the requesters. With no usable `u` in the user's files the
-/// port starts `game` at once, as [`game_first`] does.
+/// of `game` (exit 3) ends it. Every `game` is a new process, the first one included: the
+/// host's player starts over at each hand-over from `u` ([`crate::sound::MedCall::NewProcess`]),
+/// and every `game` after the first also gets a new State ([`relaunch`]; the first one's is the
+/// State the engine booted, which `u` gave its character). Not ported: the PAL check (the port
+/// has no NTSC display), `end` (exit 2; no path of the port reaches the end of the game) and the
+/// requesters. With no usable `u` in the user's files the port starts `game` at once, as
+/// [`game_first`] does: no program ran before it, so the player the host built (the audio part
+/// of setup 0x14ef06, [`crate::sound::AudioDriver::new`]) is already `game`'s and nothing is
+/// marked.
 pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
     let (state, io) = (&*state, &*io);
     let mut launched = false;
@@ -221,6 +226,10 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
             relaunch(state, io);
         }
         launched = true;
+        state
+            .borrow_mut()
+            .sound
+            .call(crate::sound::MedCall::NewProcess);
         state.borrow_mut().main.program = Program::Game;
         if game_main(state, io, true).await != EXIT_RUN_U {
             return;
@@ -240,11 +249,11 @@ pub async fn game_first(state: Rc<RefCell<State>>, io: Rc<Io>) {
 /// A new `game` process after the launcher ran `u` again: what the boot reads
 /// ([`State::new_game`] over the user's files), with the `savegame/objlist` this run wrote
 /// (`u`'s character, [`crate::saveload::SaveLoad::objlist`]) read in place of the files' one.
-/// The RNG goes on (the port has no clock to seed it from again); so does the sound log, with
-/// the change of process marked for the host's player
-/// ([`crate::sound::SoundState::continue_calls`]). No Save can come before a relaunch (a Save
-/// is a command, and the end of the command loop ends the launcher), so the block files are the
-/// user's. Unchanged when the files no longer load.
+/// The RNG goes on (the port has no clock to seed it from again); so does the sound log
+/// ([`crate::sound::SoundState::continue_calls`]), which [`run`] then marks with the change of
+/// process for the host's player, as at every hand-over. No Save can come before a relaunch (a
+/// Save is a command, and the end of the command loop ends the launcher), so the block files
+/// are the user's. Unchanged when the files no longer load.
 fn relaunch(state: &RefCell<State>, io: &Io) {
     let Ok(mut fresh) = State::new_game(io.files()) else {
         return;

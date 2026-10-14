@@ -6,16 +6,34 @@
 //! each access, which is the same address. Field offsets are the MMD0 format's (OctaMED
 //! `MMD0`, `MMD0song`, `MMD0block`, `InstrHdr`, `SynthInstr`, `MMD0exp`) as the routine uses
 //! them; every read is bounds-checked and reads 0 outside memory, where the original would read
-//! whatever is there. Addresses are formed with [`addr`], which wraps: a malformed module's
-//! pointer can hold any value.
+//! whatever is there. Addresses are formed with [`addr`] and [`long_index`], which wrap as the
+//! 68000 does: a malformed module's pointer or index can hold any value. A plain `+` or `*`
+//! would give the same bits in a release build and panic in a debug one; the module's lint makes
+//! the gate's clippy run reject one anywhere in this file.
+#![deny(clippy::arithmetic_side_effects)]
 
 /// `base + off` as the 68000 forms an address from a register and an offset (32 bits, wrapping;
-/// 0x100fa4 reads `$301(a0)` of whatever the song pointer holds). A plain `+` here would give
-/// the same bits in a release build and panic in a debug one; the lint makes the gate's clippy
-/// run reject it in every profile.
-#[deny(clippy::arithmetic_side_effects)]
+/// 0x100fa4 reads `$301(a0)` of whatever the song pointer holds).
 pub fn addr(base: u32, off: u32) -> u32 {
     base.wrapping_add(off)
+}
+
+/// The address of long `n` of the table at `base`, as the routine indexes its tables of
+/// pointers: `4 × n` formed in a word register and taken as a sign-extended word index
+/// (`(d8,an,dn.w)`). The block array: `lsl.w #2` at 0x1008c8 and 0x100b60, the index at
+/// 0x1008ca and 0x100b62; the sample array: `add.w` twice at 0x100244, the index at 0x100248; a
+/// synth instrument's waveforms: `lsl.w #2` at 0x1004a6, the index at 0x1004a8.
+pub fn long_index(base: u32, n: u16) -> u32 {
+    addr(base, i32::from(n.wrapping_mul(4) as i16) as u32)
+}
+
+/// The first note of line `line` of the block at `block` with `tracks` tracks, as the timer
+/// interrupt forms it: `3 × line` in a word (`add.w` twice), `mulu.w` by the track count, and
+/// the product's low word taken as a sign-extended word past the block's two header bytes
+/// (`adda.w` at 0x1008e8 after the header's two `move.b (a2)+`; `lea 2(a2,d0.w)` at 0x100b72).
+pub fn line_at(block: u32, line: u16, tracks: u16) -> u32 {
+    let off = line.wrapping_mul(3).wrapping_mul(tracks);
+    addr(addr(block, 2), i32::from(off as i16) as u32)
 }
 
 /// Byte reader over the player's memory (chip memory of the audio machine).
@@ -96,13 +114,13 @@ impl Module {
     /// Block `n` (`MMD0block`: tracks, last line index, then 3 bytes per note).
     pub fn block(&self, m: Mem, n: u16) -> u32 {
         let arr = self.ptr(m, addr(self.base, MMD_BLOCKARR));
-        self.ptr(m, addr(arr, u32::from(n) * 4))
+        self.ptr(m, long_index(arr, n))
     }
 
     /// Instrument `n`'s data (0 = none).
     pub fn sample(&self, m: Mem, n: u8) -> u32 {
         let arr = self.ptr(m, addr(self.base, MMD_SMPLARR));
-        self.ptr(m, addr(arr, u32::from(n) * 4))
+        self.ptr(m, long_index(arr, u16::from(n)))
     }
 
     /// The expansion structure (0 = none).
@@ -115,9 +133,11 @@ impl Module {
         self.ptr(m, addr(exp, 4))
     }
 
-    /// Waveform `n` of the synth or hybrid instrument at `instr` (relative to the instrument).
+    /// Waveform `n` of the synth or hybrid instrument at `instr` (relative to the instrument;
+    /// the synth step widens the byte with `ext.w` at 0x1004a4 before it scales it).
     pub fn waveform(m: Mem, instr: u32, n: u8) -> u32 {
-        match m.l(addr(instr, instr::WF + u32::from(n) * 4)) {
+        let n = i16::from(n as i8) as u16;
+        match m.l(long_index(addr(instr, instr::WF), n)) {
             0 => 0,
             off => addr(instr, off),
         }
