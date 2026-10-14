@@ -30,6 +30,7 @@ pub mod rng;
 pub mod state;
 pub mod stub;
 pub mod ui;
+pub mod usecmd;
 
 pub use engine::{BootError, Engine, InputEvent, Io, Key};
 pub use files::Files;

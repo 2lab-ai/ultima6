@@ -99,7 +99,7 @@ pub async fn cannon(ux: Ux<'_>, obj: Slot) {
     let mut n = 1i16;
     while n < 6 {
         let (x, y) = (cx.wrapping_add(dx * n), cy.wrapping_add(dy * n));
-        let a = crate::objects::begin_at(&mut s.objects, &s.tables, x as u16, y as u16, z);
+        let a = super::first_at(&mut s, x as u16, y as u16, z);
         if (0..0x100).contains(&a) {
             break;
         }
@@ -112,7 +112,7 @@ pub async fn cannon(ux: Ux<'_>, obj: Slot) {
         hy = hy.wrapping_add(dy);
         seams::blast(&mut s, 0x189, hx, hy);
     }
-    let a = crate::objects::begin_at(&mut s.objects, &s.tables, hx as u16, hy as u16, z);
+    let a = super::first_at(&mut s, hx as u16, hy as u16, z);
     if a >= 0 && crate::objects::stack_kind(&s.objects, s.objects.kind(a)) == 0 {
         let d = s.rng.range(1, 0x3c) as i16;
         seams::damage(&mut s, a, d);
@@ -211,9 +211,9 @@ pub fn blast_doors(s: &mut State, x: i16, y: i16) {
 
 /// Original: 0x12dd6e (objects: the first actor at (x, y, z), 0 when none)
 pub fn actor_at(s: &mut State, x: u16, y: u16, z: u16) -> Slot {
-    let mut c = crate::objects::begin_at(&mut s.objects, &s.tables, x, y, z);
+    let mut c = super::first_at(s, x, y, z);
     while c > 0xff {
-        c = crate::objects::next_at(&mut s.objects, &s.tables);
+        c = super::next_here(s);
     }
     if c == -1 { 0 } else { c }
 }
@@ -264,19 +264,16 @@ fn operate(s: &mut State, obj: Slot, gate: u16) -> u8 {
                 if actor_at(s, x, y, z) != 0 {
                     return 2;
                 }
-                if (s.objects.tf(m) >> 10) & 2 != 0 { 3 } else { 1 }
+                if (s.objects.tf(m) >> 10) & 2 != 0 {
+                    3
+                } else {
+                    1
+                }
             } else {
                 0
             };
-            let new = crate::objects::create_on_map(
-                &mut s.objects,
-                gate | frame << 10,
-                0,
-                0,
-                x,
-                y,
-                z,
-            );
+            let new =
+                crate::objects::create_on_map(&mut s.objects, gate | frame << 10, 0, 0, x, y, z);
             if let Some(st) = usize::try_from(new)
                 .ok()
                 .and_then(|i| s.objects.obj_status.get_mut(i))
@@ -301,7 +298,8 @@ pub async fn switch(ux: Ux<'_>, obj: Slot) {
         set_frame(&mut s, obj, f ^ 1);
         operate(&mut s, obj, 0xaf)
     };
-    ux.print(if moved != 0 { STR_NOISE } else { STR_STRANGE }, &[]).await;
+    ux.print(if moved != 0 { STR_NOISE } else { STR_STRANGE }, &[])
+        .await;
 }
 
 /// Original: 0x12e3f6 (objects: the drawbridge crank: find the bridge of the crank's quality)
@@ -352,14 +350,17 @@ pub async fn dig(ux: Ux<'_>) {
     }
     let dir = ux.s().ui.input.direction;
     let name = defs::direction_name(ux.io, dir);
-    ux.print(FMT_DIR, &[crate::ui::printf::Arg::Str(&name)]).await;
+    ux.print(FMT_DIR, &[crate::ui::printf::Arg::Str(&name)])
+        .await;
     let (dx, dy) = defs::direction(ux.io, dir);
     let (x, y, z, tile) = {
         let s = ux.s();
         let c = s.map.centre;
         let (x, y) = ((c.x as i16 + dx) as u16, (c.y as i16 + dy) as u16);
         let z = u16::from(c.z);
-        let t = s.map.tile_at(usize::from(x), usize::from(y), usize::from(z));
+        let t = s
+            .map
+            .tile_at(usize::from(x), usize::from(y), usize::from(z));
         (x, y, z, t.unwrap_or(0))
     };
     let hole = z == 0 && x == 0x2c3 && y == 0x343 && {

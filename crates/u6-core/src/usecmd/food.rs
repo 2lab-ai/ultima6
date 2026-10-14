@@ -63,10 +63,16 @@ pub enum Bucket {
     Milk,
 }
 
-/// Original: 0x12d336 (objects: fill a bucket at a well: empty bucket 0xb2 → 0xb3) and
-/// 0x12d3c4 (milk a cow: 0xb2 → bucket of milk 0xb4)
+/// Original: 0x12d3c4 (objects: milk a cow: an empty bucket 0xb2 becomes a bucket of milk 0xb4)
 ///
-/// The leader needs an empty bucket and the strength to carry it full (20 × strength at least
+/// The body of 0x12d336 with the milk type and message.
+pub async fn milk(ux: Ux<'_>) {
+    fill_bucket(ux, Bucket::Milk).await;
+}
+
+/// Original: 0x12d336 (objects: fill a bucket at a well: an empty bucket 0xb2 becomes 0xb3)
+///
+/// [`milk`] (0x12d3c4) is the same routine for a cow. The leader needs an empty bucket and the strength to carry it full (20 × strength at least
 /// the carried weight + 0x20); the empty one goes and a full one is given (0x10cf7c), "Done".
 pub async fn fill_bucket(ux: Ux<'_>, which: Bucket) {
     let (member, bucket) = {

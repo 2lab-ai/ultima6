@@ -13,20 +13,27 @@
 //! state of its own is kept (the globals it touches belong to ui, objects, actors and map).
 //! Calls into modules that are not ported or are owned elsewhere go through [`seams`].
 //!
-//! Original functions this module owns (hunk 16 unless noted):
+//! Original functions this module owns (hunk 16 unless noted; 0x12dcbe and 0x1301e2 of this
+//! hunk were ported with objects):
 //!
 //! - 0x1305e0 Use command: target checks, dispatch by type, end of the command
 //! - 0x130546 type refused aboard ship
-//! - 0x128b6a (hunk 15) type is usable; 0x12bbc0 / 0x12bdfa (hunk 15) doors / chests;
-//!   0x12c062 / 0x12c092 (hunk 15) dexterity / intelligence checks; 0x12c0c2 (hunk 15) keys and
-//!   lock picks; 0x12c326 (hunk 15) light a torch; 0x12c54a (hunk 15) peer through a gem;
-//!   0x12c594 (hunk 15) light / douse a fixed light; 0x12c68a (hunk 15) secret door
+//! - 0x128b6a (hunk 15) usable type list
+//! - 0x12bbc0 / 0x12bdfa (hunk 15) doors / chests; 0x12c062 / 0x12c092 (hunk 15) dexterity /
+//!   intelligence checks; 0x12c0c2 (hunk 15) keys and lock picks; 0x12c326 (hunk 15) torches;
+//!   0x12c54a (hunk 15) gems; 0x12c594 (hunk 15) fixed lights; 0x12c68a (hunk 15) secret doors
 //! - 0x11d0a4 / 0x11cd78 (hunk 12) leave / board a vessel
-//! - 0x12c8b8 0x12cfe4 0x12d096 0x12d204 0x12d336 0x12d3c4 0x12d452 0x12d4bc 0x12d526 0x12d7d4
-//!   0x12d960 0x12d9ee 0x12db7e 0x12dd1a 0x12dd6e 0x12ddae 0x12ddda 0x12de3a 0x12e3f6 0x12e538
-//!   0x12e77c 0x12e912 0x12e924 0x12eb12 0x12eca6 0x12ed4a 0x12ef7a 0x12f0a4 0x12f0d2 0x12f1e6
-//!   0x12f3fa 0x12f502 0x12f6ee 0x12f7ea 0x12f8fe 0x12fb0a 0x12fca2 0x12fdf6 0x12ff50 0x130380
-//!   0x1303f4 0x13051a 0x130526 (0x12dcbe and 0x1301e2 of this hunk were ported with objects)
+//! - 0x12dd1a [objects] drawbridge piece at a tile (with 0x12de3a, not ported)
+//! - 0x12ddae [objects] tile in the 5-byte list at A4-0x6614 (with 0x12de3a, not ported)
+//! - 0x12ddda [objects] place a drawbridge piece (with 0x12de3a, not ported)
+//! - 0x12de3a [objects] raise / lower the drawbridge (stub point)
+//! - 0x12ff50 [objects] serpent figure (stub point)
+//!
+//! Ported with an `Original:` marker each: 0x12c8b8 0x12cfe4 0x12d096 0x12d204 0x12d336
+//! 0x12d3c4 0x12d452 0x12d4bc 0x12d526 0x12d7d4 0x12d960 0x12d9ee 0x12db7e 0x12dd6e 0x12e3f6
+//! (partial) 0x12e538 0x12e77c 0x12e912 0x12e924 0x12eb12 0x12eca6 0x12ed4a 0x12ef7a 0x12f0a4
+//! 0x12f0d2 0x12f1e6 0x12f3fa 0x12f502 0x12f6ee 0x12f7ea 0x12f8fe 0x12fb0a 0x12fca2 0x12fdf6
+//! 0x130380 0x1303f4 0x13051a 0x130526.
 
 mod cases;
 pub mod defs;
@@ -122,6 +129,16 @@ impl<'a> Ux<'a> {
     pub fn refresh(&self) {
         crate::gfx::refresh_view(&mut self.s(), self.io);
     }
+}
+
+/// 0x10ad1a: the first object at (x, y, z), -1 (starts the location cursor).
+pub(crate) fn first_at(s: &mut State, x: u16, y: u16, z: u16) -> Slot {
+    crate::objects::begin_at(&mut s.objects, &s.tables, x, y, z)
+}
+
+/// 0x10aaca: the next object of the location cursor, -1.
+pub(crate) fn next_here(s: &mut State) -> Slot {
+    crate::objects::next_at(&mut s.objects, &s.tables)
 }
 
 /// `|a - b|` on words, as the original's `sub.w` / `neg.w`.

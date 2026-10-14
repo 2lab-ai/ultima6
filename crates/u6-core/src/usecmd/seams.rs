@@ -103,6 +103,38 @@ pub(crate) fn gate_travel(_s: &mut State) {
     todo_stub!("0x119afc gate travel (usecmd seam)", ())
 }
 
+/// 0x115b7c(1): the shrine's flash after a mantra. Fallback: none.
+pub(crate) fn shrine_flash(_s: &mut State) {
+    todo_stub!("0x115b7c shrine flash (usecmd seam)", ())
+}
+
+/// 0x116526(actor, type): the object of `kind` the actor carries. Fallback: its first direct
+/// content of that kind (0x10b18c), which is where the balloon parts lie.
+pub(crate) fn find_carried(s: &mut State, actor: Slot, kind: u16) -> Slot {
+    todo_stub!(
+        "0x116526 object an actor carries (usecmd seam)",
+        crate::objects::find_child(&mut s.objects, actor, kind as i16, -1)
+    )
+}
+
+// ---- converse ---------------------------------------------------------------------------------
+
+/// 0x11304a(type, quality): the first party member on screen who carries an object of `kind`
+/// (and `quality`, 0 = any), -1. Converse ports it in a private module; composed here from its
+/// public parts: on screen (converse 0x1125b8's helper) and the carried-object test (0x116526).
+pub(crate) fn member_with(s: &mut State, kind: u16, quality: i16) -> Slot {
+    for i in 0..usize::from(s.actors.party.size) {
+        let m = Slot::from(super::member(s, i));
+        if crate::converse::on_screen(s, m) {
+            let q = if quality == 0 { -1 } else { quality };
+            if crate::objects::find_child(&mut s.objects, m, kind as i16, q) != -1 {
+                return m;
+            }
+        }
+    }
+    NONE
+}
+
 // ---- objects commands (hunk 15) ---------------------------------------------------------------
 
 /// 0x12948a(obj): the first non-actor object at `obj`'s tile that is not `obj` and whose tile
@@ -113,7 +145,13 @@ pub(crate) fn object_under(_s: &mut State, _obj: Slot) -> Slot {
 
 /// 0x129544(obj, x, y): search: secret doors, and the contents of `obj` spill to its tile.
 /// Fallback: nothing found, nothing moved.
-pub(crate) async fn search(_state: &std::cell::RefCell<State>, _io: &Io, _obj: Slot, _x: i16, _y: i16) {
+pub(crate) async fn search(
+    _state: &std::cell::RefCell<State>,
+    _io: &Io,
+    _obj: Slot,
+    _x: i16,
+    _y: i16,
+) {
     todo_stub!("0x129544 search here (usecmd seam)", ())
 }
 
@@ -194,12 +232,27 @@ pub(crate) fn area_song(_s: &mut State) {
     todo_stub!("0x110912 pick and play the area song (usecmd seam)", ())
 }
 
-/// 0x100fa4: MED: play the instrument note set at A4-0x35cc + 0x3d2. Fallback: no sound.
-pub(crate) fn play_note(_s: &mut State) {
+/// A4-0x35cc: the music module is loaded (instruments play only then). Fallback: false (the
+/// port plays no music yet).
+pub(crate) fn music_loaded(_s: &State) -> bool {
+    todo_stub!(
+        "0x110878 music module loaded A4-0x35cc (usecmd seam)",
+        false
+    )
+}
+
+/// Module byte A4-0x35cc + 0x3d2 = `note`, instrument `instrument`, then 0x100fa4 plays it.
+/// Fallback: no sound.
+pub(crate) fn play_instrument(_s: &mut State, _instrument: u8, _note: u8) {
     todo_stub!("0x100fa4 play an instrument note (usecmd seam)", ())
 }
 
-/// 0x1623be: the copper effect of the machine. Fallback: none.
+/// 0x100fa4 with the sample at 0x1512c8 (the machine's sound). Fallback: no sound.
+pub(crate) fn play_sound(_s: &mut State) {
+    todo_stub!("0x100fa4 play a sound effect (usecmd seam)", ())
+}
+
+/// 0x1623be(100): the copper effect of the machine. Fallback: none.
 pub(crate) fn screen_effect(_io: &Io) {
     todo_stub!("0x1623be screen effect (usecmd seam)", ())
 }

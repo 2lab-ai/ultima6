@@ -165,8 +165,7 @@ pub fn spring_trap(s: &mut State, trap: Slot) {
 /// 0x1231be), chains to 0x12d9ee and refreshes the view. Fallback: the keg is removed only. Not
 /// reached by the M1 scenarios.
 pub fn explode_keg(s: &mut State, keg: Slot) {
-    todo_stub!("0x12db7e explode a powder keg", ());
-    super::moves::remove(s, keg);
+    crate::usecmd::explode_keg(s, keg);
 }
 
 /// Stub of 0x12d9ee (objects: blow up kegs and doors around (x, y))
@@ -174,8 +173,8 @@ pub fn explode_keg(s: &mut State, keg: Slot) {
 /// Stub contract: lights kegs (0xdf) and removes closed doors (0x12c / 0x129 / 0x12a / 0x12b)
 /// in x − 2..=x + 2, y − 2..y + 2, printing "The door is blown up!". Fallback: nothing. Not
 /// reached by the M1 scenarios.
-pub fn blast_doors(_s: &mut State, _x: u16, _y: u16) {
-    todo_stub!("0x12d9ee blow up kegs and doors around a tile", ())
+pub fn blast_doors(s: &mut State, x: u16, y: u16) {
+    crate::usecmd::blast_doors(s, x as i16, y as i16);
 }
 
 /// Stub of 0x12f6ee (objects: mount / place a horse)
@@ -183,8 +182,8 @@ pub fn blast_doors(_s: &mut State, _x: u16, _y: u16) {
 /// Stub contract: moves the rider, sets its type to the mounted horse (0x1af) and places or
 /// re-types the horse object, then rebuilds the tile cache and refreshes. Fallback: nothing.
 /// Not reached by the M1 scenarios (no Use command).
-pub fn mount_horse(_s: &mut State, _rider: Slot, _x: u16, _y: u16, _frame: u16, _here: u16) {
-    todo_stub!("0x12f6ee mount a horse", ())
+pub fn mount_horse(s: &mut State, rider: Slot, x: u16, y: u16, frame: u16, here: u16) {
+    crate::usecmd::mount_horse(s, rider, x, y, frame, here);
 }
 
 /// Stub of 0x12f8fe (objects: dismount: put the horse next to the rider, "No room!")
@@ -192,8 +191,9 @@ pub fn mount_horse(_s: &mut State, _rider: Slot, _x: u16, _y: u16, _frame: u16, 
 /// Stub contract: restores the rider's base type, removes the mounted-horse object and places a
 /// horse on a free neighbouring tile (0x11b1c0), else prints "No room!". Fallback: nothing. Not
 /// reached by the M1 scenarios.
-pub fn dismount(_s: &mut State) {
-    todo_stub!("0x12f8fe dismount a horse", ())
+pub fn dismount(s: &mut State) {
+    let rider = s.actors.party.leader().map_or(-1, |l| l.slot());
+    crate::usecmd::dismount(s, rider);
 }
 
 /// Stub of 0x128b98 (objects: parse a typed number or direction answer)

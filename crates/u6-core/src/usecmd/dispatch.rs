@@ -139,7 +139,7 @@ async fn check(ux: Ux<'_>) -> Checked {
         let mut s = ux.s();
         let z = u16::from(s.map.centre.z);
         let (x, y) = (s.objects.x(sel), s.objects.y(sel));
-        let top = crate::objects::begin_at(&mut s.objects, &s.tables, x, y, z);
+        let top = super::first_at(&mut s, x, y, z);
         let top_ty = s.objects.kind(top);
         let door = seams::is_door(ux.io, ty)
             && !seams::is_door(ux.io, top_ty)

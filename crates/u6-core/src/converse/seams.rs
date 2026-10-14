@@ -233,8 +233,10 @@ pub(crate) fn move_into(s: &mut State, obj: i16, dest: i16, flags: i16) {
 
 /// Op 0x9c: 0x10a4d6(0x1af, movement flags & 7) then 0x12f6ee(actor, centre x, centre y, that
 /// object, 0). Fallback: nothing.
-pub(crate) fn mount(_s: &mut State, _actor: i16, _flags: u8) {
-    todo_stub!("0x12f6ee put an actor on a horse (converse seam)", ())
+pub(crate) fn mount(s: &mut State, actor: i16, flags: u8) {
+    let frame = crate::objects::actor_frame(0x1af, i16::from(flags)) as u16;
+    let c = s.map.centre;
+    crate::usecmd::mount_horse(s, actor, c.x, c.y, frame, 0);
 }
 
 // ---- actors, clock, combat leaves ---------------------------------------------------------------
