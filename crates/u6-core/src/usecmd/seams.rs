@@ -2,10 +2,11 @@
 //! owners are called directly, the others keep a `todo_stub!` with an explicit fallback and a
 //! one-line contract. Ported (integration M2): combat (hunk 13) = 0x1240fa, 0x1228ba, 0x1231be,
 //! 0x1230ce, 0x12395a, 0x1221da, 0x121d78, 0x122fbe; ui (hunk 18, with combat) = 0x1331b4;
-//! objects commands (hunk 15) = 0x12948a (0x129544 is called there directly); ui = 0x107cba.
-//! Not ported: magic (hunks 2, 8, 11) = 0x1165a4, 0x11a470, 0x116d0e, 0x119200, 0x11a586,
-//! 0x119afc; ui = 0x105016, 0x1118c6, 0x11121e, 0x111be0, 0x132338, the weight words; sound =
-//! 0x110878, 0x110912, 0x100fa4; graphics = 0x1623be; the ending = 0x133d1e, 0x13513a.
+//! objects commands (hunk 15) = 0x12948a (0x129544 is called there directly); ui = 0x107cba;
+//! magic (hunk 11) = 0x1165a4, 0x11a470, 0x116d0e, 0x119200, 0x11a586, 0x119afc, 0x115b7c,
+//! 0x116526. Not ported: ui = 0x105016, 0x1118c6, 0x11121e, 0x111be0, 0x132338, the weight
+//! words; sound = 0x110878, 0x110912, 0x100fa4; graphics = 0x1623be; the ending = 0x133d1e,
+//! 0x13513a.
 
 use crate::engine::Io;
 use crate::objects::{NONE, Slot};
@@ -72,52 +73,48 @@ pub(crate) fn copy_actor(s: &mut State, from: Slot, to: Slot) {
 
 // ---- magic ------------------------------------------------------------------------------------
 
-/// 0x1165a4(type): one of the 4 door types at A4-0x6b54 (magic's copy of the list). Fallback:
-/// the same lookup in the user's `game`.
-pub(crate) fn is_door(io: &Io, ty: u16) -> bool {
-    todo_stub!(
-        "0x1165a4 door type list (usecmd seam)",
-        super::defs::a4_words(io, -0x6b54, 4).contains(&ty)
-    )
+/// 0x1165a4(type): one of the 4 door types at A4-0x6b54: [`crate::magic::is_door`].
+pub(crate) fn is_door(s: &State, ty: u16) -> bool {
+    crate::magic::is_door(s, ty)
 }
 
-/// 0x11a470: the sextant line (latitude, longitude). Fallback: nothing printed.
-pub(crate) async fn sextant(_state: &std::cell::RefCell<State>, _io: &Io) {
-    todo_stub!("0x11a470 sextant coordinates (usecmd seam)", ())
+/// 0x11a470: the sextant line (latitude, longitude): [`crate::magic::locate`].
+pub(crate) async fn sextant(state: &std::cell::RefCell<State>, io: &Io) {
+    crate::magic::locate(state, io).await;
 }
 
-/// 0x116d0e(n): the heal effect a potion casts (n = 6). Fallback: none healed.
-pub(crate) fn heal(_s: &mut State, _n: i16) {
-    todo_stub!("0x116d0e heal an actor (usecmd seam)", ())
+/// 0x116d0e(6): the heal effect a potion casts on the selection: [`crate::magic::heal`].
+pub(crate) fn heal(s: &mut State, n: i16) {
+    crate::magic::heal(s, n as u16);
 }
 
-/// 0x119200: x-ray vision. Fallback: none.
-pub(crate) fn xray(_s: &mut State) {
-    todo_stub!("0x119200 x-ray vision (usecmd seam)", ())
+/// 0x119200(0x49): x-ray vision (the potion passes the X-ray spell number):
+/// [`crate::magic::xray`].
+pub(crate) async fn xray(state: &std::cell::RefCell<State>, io: &Io) {
+    crate::magic::xray(state, io, 0x49).await;
 }
 
-/// 0x11a586(spell): cast a spell from an object (wand). Fallback: no spell.
-pub(crate) async fn cast_from_object(_state: &std::cell::RefCell<State>, _io: &Io, _spell: u8) {
-    todo_stub!("0x11a586 spell target and effect (usecmd seam)", ())
+/// 0x11a586(spell, 0): cast a spell from an object (wand), its target not chosen yet:
+/// [`crate::magic::dispatch`].
+pub(crate) async fn cast_from_object(state: &std::cell::RefCell<State>, io: &Io, spell: u8) {
+    crate::magic::dispatch(state, io, u16::from(spell), false).await;
 }
 
-/// 0x119afc: the gate-travel spell to a latitude / longitude. Fallback: no travel.
-pub(crate) fn gate_travel(_s: &mut State) {
-    todo_stub!("0x119afc gate travel (usecmd seam)", ())
+/// 0x119afc(x, y, 0): the free view (Wizard Eye) from (x, y) without the flashes:
+/// [`crate::magic::wizard_eye`].
+pub(crate) async fn gate_travel(state: &std::cell::RefCell<State>, io: &Io, x: i16, y: i16) {
+    crate::magic::wizard_eye(state, io, x, y, 0).await;
 }
 
-/// 0x115b7c(1): the shrine's flash after a mantra. Fallback: none.
-pub(crate) fn shrine_flash(_s: &mut State) {
-    todo_stub!("0x115b7c shrine flash (usecmd seam)", ())
+/// 0x115b7c(1): the shrine's flash after a mantra: [`crate::magic::flash_window`].
+pub(crate) async fn shrine_flash(state: &std::cell::RefCell<State>, io: &Io) {
+    crate::magic::flash_window(state, io, 1).await;
 }
 
-/// 0x116526(actor, type): the object of `kind` the actor carries. Fallback: its first direct
-/// content of that kind (0x10b18c), which is where the balloon parts lie.
+/// 0x116526(actor, type, 0): the object of `kind` the actor carries at any depth, -1:
+/// [`crate::magic::carried_object`].
 pub(crate) fn find_carried(s: &mut State, actor: Slot, kind: u16) -> Slot {
-    todo_stub!(
-        "0x116526 object an actor carries (usecmd seam)",
-        crate::objects::find_child(&mut s.objects, actor, kind as i16, -1)
-    )
+    crate::magic::carried_object(&s.objects, actor, kind as i16, 0)
 }
 
 // ---- converse ---------------------------------------------------------------------------------
@@ -128,11 +125,10 @@ pub(crate) fn find_carried(s: &mut State, actor: Slot, kind: u16) -> Slot {
 pub(crate) fn member_with(s: &mut State, kind: u16, quality: i16) -> Slot {
     for i in 0..usize::from(s.actors.party.size) {
         let m = Slot::from(super::member(s, i));
-        if crate::converse::on_screen(s, m) {
-            let q = if quality == 0 { -1 } else { quality };
-            if crate::objects::find_child(&mut s.objects, m, kind as i16, q) != -1 {
-                return m;
-            }
+        if crate::converse::on_screen(s, m)
+            && crate::magic::carried_object(&s.objects, m, kind as i16, quality) != -1
+        {
+            return m;
         }
     }
     NONE

@@ -58,7 +58,8 @@ where
     for &k in keys {
         e.tick(&[InputEvent::Key(k)], 16);
     }
-    for _ in 0..32 {
+    // Enough display frames for the hit flashes combat holds on screen.
+    for _ in 0..600 {
         if e.finished() {
             break;
         }

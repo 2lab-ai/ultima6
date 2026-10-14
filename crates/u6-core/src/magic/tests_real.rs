@@ -465,17 +465,29 @@ fn sleep_on_an_npc() {
 #[test]
 fn magic_arrow_goes_through_the_combat_seams() {
     let Some(files) = files() else { return };
+    let before = State::new_game(&files).unwrap().actors.attrs.hp[7];
     let e = cast_with(&files, day_book, "OJ\n>>^^^\n");
     let tail = show("Magic Arrow on actor 7", &e);
     let hits = e.stub_hits();
     let s = e.state();
-    eprintln!("  actor 7 hp {}", s.actors.attrs.hp[7]);
-    assert!(hits.contains_key("0x1228ba fly a missile to the target"));
-    let hurt = hits.contains_key("0x1231be hurt an actor (magic seam)");
+    eprintln!("  actor 7 hp {before} -> {}", s.actors.attrs.hp[7]);
+    // The flight (0x1228ba) and the hit (0x1231be, 0x123c56, 0x12395a) are combat's ports.
     assert!(
-        hurt || tail.iter().any(|l| l.contains("Failed")),
-        "{tail:?}"
+        !hits
+            .keys()
+            .any(|k| k.starts_with("0x1228ba") || k.starts_with("0x1231be"))
     );
+    let failed = tail.iter().any(|l| l.contains("Failed"));
+    assert!(failed || s.actors.attrs.hp[7] < before, "{tail:?}");
+    if !failed {
+        // 0x11669e's order: the target's reaction (0x123c56) before the newline and the wound
+        // line (0x12395a).
+        let at = |w: &str| tail.iter().position(|l| l.contains(w));
+        assert!(
+            at("yells").zip(at("wounded")).is_none_or(|(y, w)| y < w),
+            "{tail:?}"
+        );
+    }
     spent(
         &[10; 8],
         &reagents(&s),

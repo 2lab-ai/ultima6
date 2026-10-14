@@ -532,8 +532,8 @@ fn view_at_centre(s: &mut State, io: &crate::engine::Io) {
 ///
 /// The leader's intelligence check (0x12c092) fails: 1..10 damage (combat 0x1231be, 0x12395a).
 /// Else "Enter degrees followed by N, S, E or W", "At latitude=" and a line (0x107cba, parsed by
-/// 0x128b98 mode 1) within −44..80, "longitude=" within −37..88: gate travel (magic 0x119afc)
-/// with the sound off; out of range shows "0".
+/// 0x128b98 mode 1) within −44..80, "longitude=" within −37..88: the free view of magic 0x119afc
+/// there with the sound off; out of range shows "0".
 pub async fn sextant_travel(ux: Ux<'_>) {
     let (m, fails) = {
         let mut s = ux.s();
@@ -575,9 +575,18 @@ pub async fn sextant_travel(ux: Ux<'_>) {
         return;
     }
     ux.put(b'\n').await;
-    let mut s = ux.s();
-    let sound = s.main.sound;
-    s.main.sound = 0;
-    seams::gate_travel(&mut s);
-    s.main.sound = sound;
+    // The view goes to (longitude × 8 + 0x130, latitude × 8 + 0x168), a quarter of that below
+    // the surface (A4-0x7b74), with the sound off while it is shown (asm 0x12fdb0..0x12fde6).
+    let (x, y) = {
+        let s = ux.s();
+        let (mut x, mut y) = ((lon << 3) + 0x130, (lat << 3) + 0x168);
+        if s.map.centre.z != 0 {
+            (x, y) = (x >> 2, y >> 2);
+        }
+        (x, y)
+    };
+    let sound = ux.s().main.sound;
+    ux.s().main.sound = 0;
+    seams::gate_travel(ux.state, ux.io, x, y).await;
+    ux.s().main.sound = sound;
 }

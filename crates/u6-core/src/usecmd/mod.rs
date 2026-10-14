@@ -53,6 +53,7 @@ mod tests_real;
 use std::cell::{RefCell, RefMut};
 
 pub use dispatch::{refused_aboard, use_command};
+pub(crate) use mech::{drawbridge, lever};
 
 use crate::engine::Io;
 use crate::image::A4;

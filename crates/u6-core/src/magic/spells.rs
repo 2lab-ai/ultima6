@@ -175,7 +175,7 @@ pub async fn peer(state: &RefCell<State>, io: &Io, spell: u16) {
     let caster = super::cast::caster(&state.borrow());
     flash_actor(state, io, caster, 0).await;
     flash_window(state, io, spell / 16 + 1).await;
-    super::peer::peer(state, io, 0).await;
+    crate::objects::commands::use_up(state, io, 0).await;
     say(state, io, FMT_NL_S_NL, Msg::Done).await;
 }
 

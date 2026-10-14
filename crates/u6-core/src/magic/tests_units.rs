@@ -39,9 +39,10 @@ fn degrees_follow_the_shifts() {
 
 #[test]
 fn parse_number_reads_digits_only() {
-    assert_eq!(super::seams::parse_number(b"12"), 12);
-    assert_eq!(super::seams::parse_number(b""), -1);
-    assert_eq!(super::seams::parse_number(b"1a"), -2);
+    let s = State::empty();
+    assert_eq!(super::seams::parse_number(&s, b"12"), 12);
+    assert_eq!(super::seams::parse_number(&s, b""), -1);
+    assert_eq!(super::seams::parse_number(&s, b"1a"), -2);
 }
 
 #[test]
@@ -419,10 +420,12 @@ fn pickpocket_needs_an_actor() {
 fn peer_spends_a_gem() {
     let mut s = world();
     let gem = crate::objects::create_in(&mut s, 0x4d, crate::objects::IN_INVENTORY, 2, 1);
-    let s = run(s, &[], move |st, io| async move {
-        super::peer::peer(&st, &io, gem).await;
+    // 0x12c54a is objects::commands' port; each overview (0x13410a) waits for a key.
+    let keys = [Key::Char(' '), Key::Char(' ')];
+    let s = run(s, &keys, move |st, io| async move {
+        crate::objects::commands::use_up(&st, &io, gem).await;
         assert_eq!(st.borrow().objects.qq[gem as usize] & 0xff, 1);
-        super::peer::peer(&st, &io, gem).await;
+        crate::objects::commands::use_up(&st, &io, gem).await;
     });
     assert_eq!(s.objects.type_frame[gem as usize], 0, "the last one goes");
 }

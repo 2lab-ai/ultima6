@@ -34,7 +34,7 @@ pub async fn gate_travel(state: &RefCell<State>, io: &Io) {
     print_at(state, io, NEWLINE, &[]).await;
     let caster = super::cast::caster(&state.borrow());
     seams::flash_actor(&mut state.borrow_mut(), io, caster, 0);
-    let n = seams::parse_number(&text);
+    let n = seams::parse_number(&state.borrow(), &text);
     if !(1..=8).contains(&n) {
         return;
     }

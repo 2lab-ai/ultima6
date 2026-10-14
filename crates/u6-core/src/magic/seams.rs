@@ -32,10 +32,9 @@ pub(crate) fn fill_rect(s: &mut State, io: &Io, x0: u16, y0: u16, x1: u16, y1: u
 }
 
 /// [ui] 0x1324ae (redraw the map-window border tiles 0x1b0..0x1b7 that the rectangle (x0, y0)
-/// ..(x1, y1) touches, into the back buffer). Stub contract: no result. Fallback: the border
-/// is not redrawn (the window flash of 0x115b7c XORs twice, so the border ends as it was).
-pub(crate) fn redraw_border(_s: &mut State, _x0: u16, _y0: u16, _x1: u16, _y1: u16) {
-    todo_stub!("0x1324ae redraw the window border over a rectangle", ())
+/// ..(x1, y1) touches, into the back buffer): [`crate::combat::present::draw_borders`].
+pub(crate) fn redraw_border(s: &mut State, x0: u16, y0: u16, x1: u16, y1: u16) {
+    crate::combat::present::draw_borders(s, x0 as i16, y0 as i16, x1 as i16, y1 as i16);
 }
 
 /// [ui] 0x132338 (flash an actor on the map: when `actor` is on the map and in view, its tile
@@ -46,93 +45,85 @@ pub(crate) fn flash_actor(_s: &mut State, _io: &Io, _actor: u16, _mode: u16) {
 }
 
 /// [combat] 0x1228ba (a missile of tile `tile` from `from` toward (x, y) within `range`; the
-/// flight may stop short and move (x, y)). Stub contract: non-zero when it reached the target.
-/// Fallback: 1, the target unchanged (the spell goes on as if nothing were in the way).
+/// flight may stop short and move (x, y); non-zero when it reached the target):
+/// [`crate::combat::attack::shoot`], then its recorded frames and lines played
+/// ([`crate::combat::play_effects`]).
 pub(crate) async fn missile(
-    _state: &RefCell<State>,
-    _io: &Io,
-    _from: u16,
-    _range: i16,
-    _target: &mut (i16, i16),
-    _tile: u16,
+    state: &RefCell<State>,
+    io: &Io,
+    from: u16,
+    range: i16,
+    target: &mut (i16, i16),
+    tile: u16,
 ) -> i16 {
-    todo_stub!("0x1228ba fly a missile to the target", 1)
+    let reached = {
+        let mut s = state.borrow_mut();
+        let (mut x, mut y) = *target;
+        let r = crate::combat::attack::shoot(&mut s, from as i16, &mut x, &mut y, range, tile);
+        *target = (x, y);
+        r
+    };
+    crate::combat::play_effects(state, io).await;
+    reached
 }
 
 /// [combat] 0x1240fa (the object a target stands for: a part of a multi-tile creature gives
-/// its head, a horse its rider). Stub contract: object in, object out. Fallback: unchanged.
-pub(crate) fn target_owner(_s: &mut State, obj: i16) -> i16 {
-    todo_stub!("0x1240fa the actor a target object stands for", obj)
+/// its head, a horse its rider): [`crate::combat::leaves::owner`].
+pub(crate) fn target_owner(s: &mut State, obj: i16) -> i16 {
+    crate::combat::leaves::owner(s, obj)
 }
 
 /// [combat] 0x122076 (does `target` resist `caster`'s spell: random 1..30 < int(target) / 2 −
-/// int(caster) + 15). Stub contract: true = resisted; one RNG draw. Fallback: the leaf as read
-/// at 0x122076 (the draw and the compare, intelligence from 0x122048), so the draw order holds
-/// until combat owns it.
+/// int(caster) + 15; true = resisted): [`crate::combat::leaves::contest`].
 pub(crate) fn resists(s: &mut State, caster: u16, target: u16) -> bool {
-    let r = s.rng.range(1, 0x1e) as i16;
-    let t = crate::actors::leaves::intelligence(s, target) as i16 / 2;
-    let c = crate::actors::leaves::intelligence(s, caster) as i16;
-    todo_stub!("0x122076 resist a spell", r < t - c + 0xf)
+    crate::combat::leaves::contest(s, caster as i16, target as i16)
 }
 
-/// [combat] 0x1231be (hurt `target` by `damage`: hit points, death, splitting slimes; prints).
-/// Stub contract: the experience the hit is worth. Fallback: the hit points drop, never below
-/// 1 (death and its messages are combat's); 0 experience.
+/// [combat] 0x1231be (hurt `target` by `damage`: hit points, death, splitting slimes; queues
+/// its lines; the experience the hit is worth): [`crate::combat::damage::hurt`].
 pub(crate) fn hurt(s: &mut State, target: u16, damage: i16) -> i16 {
-    if let Some(hp) = s.actors.attrs.hp.get_mut(usize::from(target)) {
-        *hp = (i16::from(*hp) - damage.max(0)).clamp(1, 0xff) as u8;
-    }
-    todo_stub!("0x1231be hurt an actor (magic seam)", 0)
+    crate::combat::damage::hurt(s, target as i16, damage)
 }
 
-/// [combat] 0x122104 (add `exp` experience to `actor`, at most 9999). Stub contract: no
-/// result. Fallback: the leaf as read at 0x122104.
+/// [combat] 0x122104 (add `exp` experience to `actor`, at most 9999):
+/// [`crate::combat::leaves::add_experience`].
 pub(crate) fn add_experience(s: &mut State, actor: u16, exp: i16) {
-    if let Some(e) = s.actors.attrs.exp.get_mut(usize::from(actor)) {
-        *e = if *e < 9999u16.wrapping_sub(exp as u16) {
-            e.wrapping_add(exp as u16)
-        } else {
-            9999
-        };
-    }
-    todo_stub!("0x122104 add experience", ())
+    crate::combat::leaves::add_experience(s, actor as i16, exp);
 }
 
-/// [combat] 0x123c56 (`target` turns on `attacker` after a hit of `damage`; may print "yells
-/// for help"). Stub contract: no result. Fallback: no change of attitude.
-pub(crate) fn provoke(_s: &mut State, _target: u16, _attacker: u16, _damage: i16) {
-    todo_stub!("0x123c56 a hit target turns hostile", ())
+/// [combat] 0x123c56 (`target` turns on `attacker` after a hit of `damage`; may yell for
+/// help): [`crate::combat::damage::yell_for_help`].
+pub(crate) fn provoke(s: &mut State, target: u16, attacker: u16, damage: i16) {
+    crate::combat::damage::yell_for_help(s, target as i16, attacker as i16, damage);
 }
 
-/// [combat] 0x12395a (print the wound line of `actor`: "grazed", "barely wounded" ...). Stub
-/// contract: prints; no result. Fallback: nothing printed.
-pub(crate) async fn wound_line(_state: &RefCell<State>, _io: &Io, _actor: u16) {
-    todo_stub!("0x12395a print the wound level", ())
+/// [combat] 0x12395a (print the wound line of `actor`: "grazed", "barely wounded" ...):
+/// [`crate::combat::damage::report_wounds`], then the lines and frames it queued.
+pub(crate) async fn wound_line(state: &RefCell<State>, io: &Io, actor: u16) {
+    crate::combat::damage::report_wounds(&mut state.borrow_mut(), actor as i16);
+    crate::combat::play_effects(state, io).await;
 }
 
-/// [combat] 0x1230ce (the hit flash on `actor` and its redraw; wakes and uncharms a
-/// paralysed sleeper's status bit 2). Stub contract: no result. Fallback: none.
-pub(crate) fn hit_flash(_s: &mut State, _actor: u16) {
-    todo_stub!("0x1230ce flash a hit actor (magic seam)", ())
+/// [combat] 0x1230ce (the hit flash on `actor` and its redraw):
+/// [`crate::combat::damage::flash`].
+pub(crate) fn hit_flash(s: &mut State, actor: u16) {
+    crate::combat::damage::flash(s, actor as i16);
 }
 
-/// [combat] 0x1221da (an actor put to sleep lies down). Stub contract: no result. Fallback:
-/// none (the sleep status bit is set by the spell).
-pub(crate) fn lie_down(_s: &mut State, _actor: u16) {
-    todo_stub!("0x1221da lie down (magic seam)", ())
+/// [combat] 0x1221da (an actor put to sleep lies down): [`crate::combat::damage::lie_down`].
+pub(crate) fn lie_down(s: &mut State, actor: u16) {
+    crate::combat::damage::lie_down(s, actor as i16);
 }
 
 /// [objects] 0x12bbc0 (lock (`lock`, stack words 1, 0) or magically unlock (0, 1) the door
-/// `obj`; D1 = 0). Stub contract: no result. Fallback: nothing changes.
-pub(crate) fn door(_s: &mut State, _obj: i16, _lock: bool) {
-    todo_stub!("0x12bbc0 lock or unlock a door (magic seam)", ())
+/// `obj`; D1 = 0, no key): [`crate::objects::commands::door`].
+pub(crate) fn door(s: &mut State, obj: i16, lock: bool) {
+    crate::objects::commands::door(s, Slot::from(obj), false, lock, !lock);
 }
 
-/// [objects] 0x12bdfa (the same for a chest, type 0x62). Stub contract and fallback as
-/// [`door`].
-pub(crate) fn chest(_s: &mut State, _obj: i16, _lock: bool) {
-    todo_stub!("0x12bdfa lock or unlock a chest (magic seam)", ())
+/// [objects] 0x12bdfa (the same for a chest, type 0x62): [`crate::objects::commands::chest`].
+pub(crate) fn chest(s: &mut State, obj: i16, lock: bool) {
+    crate::objects::commands::chest(s, Slot::from(obj), false, lock, !lock);
 }
 
 /// [ui] 0x110f96 (the equipment slot object `obj` is readied in, -1 when it cannot be
@@ -144,136 +135,21 @@ pub(crate) fn ready_slot(_s: &State, _obj: i16) -> i16 {
 /// Bytes of the user's `game` at `A4 + off` (zeros where the file or the address is missing):
 /// the small A4 tables the spells read at run time (spec 03 §5).
 pub(crate) fn a4_bytes(io: &Io, off: i32, len: usize) -> Vec<u8> {
-    io.files()
-        .get("game")
-        .and_then(|g| {
-            let img = crate::image::GameImage::parse(g).ok()?;
-            img.a4_bytes(off, len).ok().map(<[u8]>::to_vec)
-        })
+    io.game_image()
+        .and_then(|img| img.a4_bytes(off, len).ok().map(<[u8]>::to_vec))
         .unwrap_or_else(|| vec![0; len])
 }
 
 /// [objects] 0x131646 (a monster of `kind` at (x, y, z) with its stats, parts and equipment;
-/// -1 when no temporary-actor slot is free). Calls the objects port; while that is its stub
-/// (-1 always) the fallback is a bare temporary actor through the ported 0x10bec8 at the place
-/// (no stats, parts or equipment), so the summoning spells have a creature to place. Once the
-/// objects port is in, a -1 means no free slot and 0x10bec8 finds none either.
+/// -1 when no temporary-actor slot is free): [`crate::objects::spawn_monster`].
 pub(crate) fn spawn(s: &mut State, kind: u16, x: u16, y: u16, z: u16) -> Slot {
-    let m = crate::objects::spawn_monster(s, kind, x, y, z);
-    if m >= 0 {
-        return m;
-    }
-    todo_stub!(
-        "0x131646 spawn a monster (magic seam: bare actor)",
-        crate::objects::create_actor(s, kind, x, y, z)
-    )
-}
-
-/// The tile under (x, y) on the leader's level and its flags2 byte.
-fn flags2_at(s: &State, x: i16, y: i16) -> u8 {
-    let z = u16::from(s.map.centre.z);
-    let t = crate::actors::seams::tile_at(s, x as u16, y as u16, z);
-    s.tables
-        .tileflags
-        .flags2
-        .get(usize::from(t))
-        .copied()
-        .unwrap_or(0)
-}
-
-/// flags2 of the tile object `o` shows at the cell being walked (its part, A4-0x78dc).
-fn object_flags2(s: &State, o: Slot) -> u8 {
-    let w = s.objects.type_frame.get(o as usize).copied().unwrap_or(0);
-    let base = s.tables.basetile.base.get(usize::from(w & 0x3ff)).copied();
-    let t = base
-        .unwrap_or(0)
-        .wrapping_add(w >> 10)
-        .wrapping_sub(s.objects.at.part);
-    s.tables
-        .tileflags
-        .flags2
-        .get(usize::from(t))
-        .copied()
-        .unwrap_or(0)
-}
-
-/// An actor a flight lists (not the lying frame 0 of 0x165, movement flag 0x10 clear).
-fn listed(s: &State, o: Slot) -> bool {
-    let Ok(i) = usize::try_from(o) else {
-        return false;
-    };
-    let w = s.objects.type_frame[i];
-    i < 0x100
-        && !(w & 0x3ff == 0x165 && w >> 10 == 0)
-        && s.actors.attrs.movement_flags[i] & 0x10 == 0
-}
-
-/// `a / n` rounded half up (n > 0).
-fn div_round(a: i16, n: i16) -> i16 {
-    (i32::from(a) * 2 + i32::from(n)).div_euclid(i32::from(n) * 2) as i16
-}
-
-/// The fallback flight: a straight tile line per missile from (x0, y0), stopped past `range`
-/// on either axis, before a map tile with flags2 bit 5 (bit 3 lets it through next to the
-/// start) or on an object whose tile has it; the actors met, in slot order (A4+0x186e is a bit
-/// set walked by slot). xs / ys become where each stopped; 1 when all arrived.
-fn paths(
-    s: &mut State,
-    x0: i16,
-    y0: i16,
-    xs: &mut [i16],
-    ys: &mut [i16],
-    range: i16,
-) -> (i16, Vec<i16>) {
-    let z = u16::from(s.map.centre.z);
-    let mut passed = [false; 0x100];
-    let mut reached = 1;
-    for (tx, ty) in xs.iter_mut().zip(ys.iter_mut()) {
-        let (dx, dy) = (*tx - x0, *ty - y0);
-        let n = dx.abs().max(dy.abs());
-        let (mut ex, mut ey) = (x0, y0);
-        let mut stopped = false;
-        for k in 1..=n {
-            let (x, y) = (x0 + div_round(dx * k, n), y0 + div_round(dy * k, n));
-            let (ax, ay) = ((x - x0).abs(), (y - y0).abs());
-            let f2 = flags2_at(s, x, y);
-            if ax > range || ay > range || (f2 & 0x20 != 0 && !(ax <= 1 && ay <= 1 && f2 & 8 != 0))
-            {
-                stopped = true;
-                break;
-            }
-            (ex, ey) = (x, y);
-            let mut o = crate::objects::begin_at(&mut s.objects, &s.tables, x as u16, y as u16, z);
-            while o >= 0 {
-                if listed(s, o) {
-                    passed[o as usize] = true;
-                }
-                if object_flags2(s, o) & 0x20 != 0 {
-                    break;
-                }
-                o = crate::objects::next_at(&mut s.objects, &s.tables);
-            }
-            if o >= 0 && k < n {
-                stopped = true;
-                break;
-            }
-        }
-        if stopped {
-            reached = 0;
-        }
-        (*tx, *ty) = (ex, ey);
-    }
-    let list = (0..0x100)
-        .filter(|&a| passed[a])
-        .map(|a| a as i16)
-        .collect();
-    (reached, list)
+    crate::objects::spawn_monster(s, kind, x, y, z)
 }
 
 /// [ui] 0x132706 (fly a missile of `tile` from (x0, y0) toward each (xs[i], ys[i]) within
-/// `range`; `flags` as the original's word; xs / ys become where each stopped). Stub contract:
-/// 1 when every missile arrived, and the actors the flights passed (A4+0x186e). Fallback: the
-/// tile paths of [`paths`], nothing drawn.
+/// `range`; `flags` as the original's word; xs / ys become where each stopped):
+/// [`crate::combat::present::fly`]; 1 when every missile arrived, and the actors the flights
+/// passed (A4+0x186e without its -1 terminator).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fly(
     s: &mut State,
@@ -283,55 +159,28 @@ pub(crate) fn fly(
     xs: &mut [i16],
     ys: &mut [i16],
     range: i16,
-    _tile: u16,
-    _flags: u16,
+    tile: u16,
+    flags: u16,
 ) -> (i16, Vec<i16>) {
-    todo_stub!(
-        "0x132706 fly missiles (magic seam)",
-        paths(s, x0, y0, xs, ys, range)
-    )
+    let n = xs.len().min(ys.len()) as i16;
+    let reached = crate::combat::present::fly(s, x0, y0, xs, ys, n, range, tile, flags);
+    let passed = s
+        .combat
+        .passed
+        .iter()
+        .copied()
+        .take_while(|&a| a >= 0)
+        .collect();
+    (reached, passed)
 }
 
-/// [ui] 0x1331b4 (a blast of 16 sprites of `tile` from (x, y) out to the A4-0x63e6 / -0x63d6
-/// offsets, range 3; the actors reached: those the flights passed, then those on (x, y) up to
-/// the first object that stops missiles, at most 0x3f). Stub contract: the list. Fallback: the
-/// [`paths`] of the 16 flights, then the (x, y) part as read at 0x133238.
-pub(crate) fn blast(s: &mut State, io: &Io, x: i16, y: i16, _tile: u16) -> Vec<i16> {
-    todo_stub!("0x1331b4 blast (magic seam)", {
-        let (bx, by) = (a4_bytes(io, -0x63e6, 16), a4_bytes(io, -0x63d6, 16));
-        let mut xs: Vec<i16> = bx.iter().map(|&d| x + i16::from(d as i8)).collect();
-        let mut ys: Vec<i16> = by.iter().map(|&d| y + i16::from(d as i8)).collect();
-        let (_, mut list) = paths(s, x, y, &mut xs, &mut ys, 3);
-        list.truncate(0x3e);
-        let z = u16::from(s.map.centre.z);
-        let mut o = crate::objects::begin_at(&mut s.objects, &s.tables, x as u16, y as u16, z);
-        while list.len() < 0x3f && o >= 0 {
-            if listed(s, o) {
-                list.push(o);
-            }
-            if object_flags2(s, o) & 0x20 != 0 {
-                break;
-            }
-            o = crate::objects::next_at(&mut s.objects, &s.tables);
-        }
-        list
-    })
-}
-
-/// [ui] 0x13410a (the map overview: the 40 × 40 window cache at 4 pixels per tile, shown until
-/// a key). Stub contract: draws, waits for a key, restores the view flags. Fallback: nothing
-/// shown and no key read.
-pub(crate) async fn overview(_state: &RefCell<State>, _io: &Io) {
-    todo_stub!("0x13410a map overview (magic seam)", ())
-}
-
-/// [ui] 0x1118c6 (redraw the inventory panel: equipment, figure, list). Stub contract: draws.
-/// Fallback: the panel is marked for the next redraw (A4-0x7afe).
-pub(crate) fn redraw_inventory(s: &mut State) {
-    todo_stub!(
-        "0x1118c6 redraw the inventory panel (magic seam)",
-        s.ui.panel.dirty = true
-    )
+/// [ui] 0x1331b4 (a blast of 16 sprites of `tile` from (x, y); the actors reached):
+/// [`crate::combat::present::blast`] (which reads the offsets A4-0x63e6 / -0x63d6 itself),
+/// without its -1 terminator.
+pub(crate) fn blast(s: &mut State, _io: &Io, x: i16, y: i16, tile: u16) -> Vec<i16> {
+    let mut hit = crate::combat::present::blast(s, x, y, tile);
+    hit.retain(|&a| a >= 0);
+    hit
 }
 
 /// [ui] 0x111be0 (draw the inventory of `actor` in the panel). Stub contract: draws. Fallback:
@@ -343,29 +192,20 @@ pub(crate) fn inventory_of(s: &mut State, _actor: u16) {
     )
 }
 
-/// [objects] 0x12e3f6 (work the drawbridge crank `obj`). Stub contract: raises or lowers the
-/// bridge of its quality, prints. Fallback: nothing.
-pub(crate) async fn crank(_state: &RefCell<State>, _io: &Io, _obj: Slot) {
-    todo_stub!("0x12e3f6 drawbridge crank (magic seam)", ())
+/// [objects] 0x12e3f6 (work the drawbridge crank `obj`): [`crate::usecmd::drawbridge`].
+pub(crate) async fn crank(state: &RefCell<State>, io: &Io, obj: Slot) {
+    crate::usecmd::drawbridge(crate::usecmd::Ux::new(state, io), obj).await;
 }
 
-/// [objects] 0x12e538 (switch the lever `obj`). Stub contract: opens or closes its
-/// portcullises, prints. Fallback: nothing.
-pub(crate) async fn lever(_state: &RefCell<State>, _io: &Io, _obj: Slot) {
-    todo_stub!("0x12e538 switch a lever (magic seam)", ())
+/// [objects] 0x12e538 (switch the lever `obj`): [`crate::usecmd::lever`].
+pub(crate) async fn lever(state: &RefCell<State>, io: &Io, obj: Slot) {
+    crate::usecmd::lever(crate::usecmd::Ux::new(state, io), obj).await;
 }
 
-/// [objects] 0x12acc0 (is the push of `obj` from (x, y) toward `dir` blocked). Stub contract:
-/// true = blocked. Fallback: the first test of its contract, blocked unless `obj` may stand on
-/// the tile ahead (0x11b1c0).
+/// [objects] 0x12acc0 (is the push of `obj` from (x, y) toward `dir` blocked; true =
+/// blocked): [`crate::objects::commands::push_blocked`].
 pub(crate) fn push_blocked(s: &mut State, obj: Slot, x: u16, y: u16, dir: u16) -> bool {
-    let d = usize::from(dir & 7);
-    let nx = x.wrapping_add_signed(s.objects.defs.dx(d));
-    let ny = y.wrapping_add_signed(s.objects.defs.dy(d));
-    todo_stub!(
-        "0x12acc0 push blocked (magic seam)",
-        !crate::actors::walk::can_move_to(s, obj as u16, nx, ny)
-    )
+    crate::objects::commands::push_blocked(s, obj, x, y, usize::from(dir & 7))
 }
 
 /// [inventory] 0x1122dc (what taking `obj` from `actor` meets first: 1 = the amulet of
@@ -402,23 +242,10 @@ pub(crate) fn carried_weights(_s: &mut State, _actor: u16) -> (i16, i16) {
     todo_stub!("0x11121e carried weights (magic seam)", (0, 0))
 }
 
-/// [objects] 0x128b98 (buf, 0): the decimal number typed; -1 empty, -2 not a number. Fallback:
-/// mode 0 as the original (digits accumulate × 10 in a word, any other byte -2, empty -1; the
-/// escape flag A4-0x7a44 taken as clear), as the converse seam reads it.
-pub(crate) fn parse_number(text: &[u8]) -> i16 {
-    todo_stub!("0x128b98 parse a number (magic seam)", {
-        if text.is_empty() {
-            return -1;
-        }
-        let mut v: i16 = 0;
-        for &b in text {
-            if !b.is_ascii_digit() {
-                return -2;
-            }
-            v = v.wrapping_mul(10).wrapping_add(i16::from(b - b'0'));
-        }
-        v
-    })
+/// [objects] 0x128b98 (buf, 0): the decimal number typed; -1 empty, -2 not a number:
+/// [`crate::objects::commands::parse_answer`] in mode 0.
+pub(crate) fn parse_number(s: &State, text: &[u8]) -> i16 {
+    crate::objects::commands::parse_answer(s, text, 0)
 }
 
 /// [gfx] 0x152800 / 0x152876 / 0x15265a / 0x151fe6 (the hail-stone sprites of 0x133562: save

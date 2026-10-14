@@ -14,7 +14,8 @@
 //!
 //! The spells: one target (effects.rs, 0x116f2c), the detections (detect.rs), the routines of
 //! their own (spells.rs), the location spells (area.rs), the creature spells (creatures.rs),
-//! the object spells (items.rs), the travel and view spells (travel.rs) and Peer (peer.rs).
+//! the object spells (items.rs) and the travel and view spells (travel.rs); Peer's overview
+//! 0x12c54a is objects::commands' port (shared with Use on a gem).
 //!
 //! Domain state = [`MagicState`] (the hunk-11 BSS and the spell-input bytes of the ui BSS that
 //! only this code reads); the tables are [`MagicTables`], read from the user's `game` at load
@@ -25,8 +26,7 @@
 //! Original functions this module owns: every function of hunk 11 (see `re/notes/port-map.md`
 //! for each one's status) plus 0x10674e, 0x1067d8, 0x106812, 0x1078d2 and the spell-input
 //! block of 0x106bbc; ported here because the spells are their only callers on the spell
-//! side: 0x13331c, 0x1334a6, 0x133562 (hunk 18) and 0x12c54a (hunk 15, shared with Use on a
-//! gem).
+//! side: 0x13331c, 0x1334a6 and 0x133562 (hunk 18).
 
 mod area;
 mod book;
@@ -37,7 +37,6 @@ mod dispatch;
 mod effects;
 mod input;
 mod items;
-mod peer;
 pub(crate) mod seams;
 mod spells;
 pub mod tables;
@@ -54,14 +53,15 @@ mod tests_units;
 
 pub use book::{draw_book, draw_book_page, load_book, set_current_spell};
 pub use cast::{book_cast, cast};
-pub use detect::carried_object;
+pub use detect::{carried_object, is_door};
 pub use dispatch::dispatch;
-pub use effects::strength_contest;
+pub use effects::{heal, sleep, strength_contest};
 pub use input::{
     book_cursor_step, book_panel_key, find_typed_spell, page_key, spell_key, takes_book_key,
 };
-pub use spells::{resurrect, resurrect_and_rejoin};
+pub use spells::{flash_window, resurrect, resurrect_and_rejoin, xray};
 pub use tables::{MagicTables, Msg};
+pub use travel::{locate, wizard_eye};
 
 /// Spellbook object type.
 pub const SPELLBOOK: u16 = 0x39;

@@ -135,9 +135,8 @@ async fn check(ux: Ux<'_>) -> Checked {
         let (x, y) = (s.objects.x(sel), s.objects.y(sel));
         let top = super::first_at(&mut s, x, y, z);
         let top_ty = s.objects.kind(top);
-        let door = seams::is_door(ux.io, ty)
-            && !seams::is_door(ux.io, top_ty)
-            && flags3_of(&s, top) & 0x10 == 0;
+        let door =
+            seams::is_door(&s, ty) && !seams::is_door(&s, top_ty) && flags3_of(&s, top) & 0x10 == 0;
         let secret = ty == 0x14e && top_ty != 0x14e;
         let other = i16::from(s.actors.party.leader_index) != s.ui.panel.member;
         let readied = s.objects.place(sel) == READIED;

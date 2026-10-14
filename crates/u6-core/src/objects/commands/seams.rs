@@ -104,11 +104,10 @@ pub(crate) fn blast(s: &mut State, x: u16, y: u16, tile: u16) -> Vec<Slot> {
     hit
 }
 
-/// Owner: magic (hunk 11). Original 0x116526 (the object of `kind` and `quality` that `owner`
-/// carries, -1). Fallback: the first direct child of that kind and quality (0x10b18c).
+/// Magic 0x116526 (the object of `kind` and `quality` (0 = any) that `owner` carries at any
+/// depth, -1): [`crate::magic::carried_object`].
 pub(crate) fn carried(s: &mut State, owner: Slot, kind: u16, quality: i16) -> Slot {
-    todo_stub!("0x116526 object of a kind an actor carries", ());
-    crate::objects::find_child(&mut s.objects, owner, kind as i16, quality)
+    crate::magic::carried_object(&s.objects, owner, kind as i16, quality)
 }
 
 /// Combat 0x1240fa (the actor a horse or monster part `obj` belongs to; `obj` itself for an
@@ -185,21 +184,26 @@ pub(crate) fn contents_weight(s: &State, obj: Slot) -> i16 {
     total
 }
 
-/// Owner: magic. A4+0x17f4 / +0x17f6 (the spellbook object Look opens and its page) set to
-/// (`book`, 0). Fallback: not recorded (magic keeps them).
-pub(crate) fn open_spellbook(_s: &mut State, _book: Slot) {
-    todo_stub!("0x115da4 spellbook globals A4+0x17f4", ())
+/// Magic's A4+0x17f4 / +0x17f6 (the readied books) set to (`book`, 0): Look opens that book.
+pub(crate) fn open_spellbook(s: &mut State, book: Slot) {
+    s.magic.books = [book, 0];
 }
 
-/// Owner: magic (hunk 11). Originals 0x115da4, 0x116028, 0x116218 (lay out and draw the open
-/// spellbook's page). Fallback: nothing drawn; the key read that follows still runs.
-pub(crate) fn show_spellbook(_s: &mut State) {
-    todo_stub!("0x116218 draw the spellbook page", ())
+/// Magic 0x115da4 then 0x116028 (the books' spells and page, the book drawn in the side
+/// panel): [`crate::magic::load_book`], [`crate::magic::draw_book`]; the page itself is
+/// 0x116218 ([`crate::magic::draw_book_page`], awaited by the caller).
+pub(crate) fn show_spellbook(s: &mut State, io: &crate::engine::Io) {
+    crate::magic::load_book(s);
+    crate::magic::draw_book(s, io);
 }
 
-/// Owner: magic. A4+0x17f8 (byte per spellbook row: the spell shown there). Fallback 0.
-pub(crate) fn spell_in_slot(_s: &State, _row: Slot) -> u8 {
-    todo_stub!("0x116028 spell on a spellbook row", 0)
+/// Magic's A4+0x17f8 (byte per spellbook row: the spell shown there; read past the 8 rows as
+/// the bytes that follow, here 0).
+pub(crate) fn spell_in_slot(s: &State, row: Slot) -> u8 {
+    usize::try_from(row)
+        .ok()
+        .and_then(|r| s.magic.page.get(r).copied())
+        .unwrap_or(0)
 }
 
 /// Owner: sound. Original 0x110878(0) (music off). Fallback: nothing (no music).

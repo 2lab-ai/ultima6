@@ -152,6 +152,9 @@ pub(crate) fn remains(s: &mut State, actor: i16) -> Slot {
 /// original makes the caster party slot 16, A4+0x47fc, with leader index 16; the target is the
 /// selection). Returns the outcome byte the caller reads from A4+0x181e (0xfe charmed, 0
 /// paralysed). Fallback: nothing is cast, outcome 1 (no message).
+///
+/// Still a stub after the magic merge: magic's dispatch awaits (it prints and flies), and this
+/// runs inside combat's synchronous hit (0x124232); it needs combat's async part to cast it.
 pub(crate) fn cast_from_item(_s: &mut State, _spell: u16, _caster: i16) -> u8 {
     todo_stub!(
         "0x11a586 cast a spell from a staff or wand (fallback: none)",
@@ -159,10 +162,11 @@ pub(crate) fn cast_from_item(_s: &mut State, _spell: u16, _caster: i16) -> u8 {
     )
 }
 
-/// [magic] 0x1165d2(target, attacker): the effect of a hit with weapon 0x5b on an actor.
-/// Fallback: none.
-pub(crate) fn weapon_spell(_s: &mut State, _target: i16, _attacker: i16) {
-    todo_stub!("0x1165d2 weapon 0x5b strikes an actor (fallback: none)", ())
+/// [magic] 0x1165d2(attacker, target): weapon 0x5b puts the actor it hit to sleep (D0 = the
+/// attacker, D1 = A4+0x185c, asm 0x122ec6..0x122ed8): [`crate::magic::sleep`]; its result
+/// byte is dropped.
+pub(crate) fn weapon_spell(s: &mut State, target: i16, attacker: i16) {
+    crate::magic::sleep(s, attacker as u16, target as u16);
 }
 
 /// [objects] 0x12f8fe(actor): a rider dismounts before it lies down:

@@ -30,8 +30,17 @@ pub struct Target {
 }
 
 pub(super) async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
+    settle(state, io).await;
     let fmt = game_string(io, addr);
     printf(state, io, &fmt, args).await;
+}
+
+/// Port: the combat and object routines the spells call are synchronous and queue their lines
+/// and presented frames (spec 03 §1); they are shown before the spell prints again, so the
+/// screen and the text keep the original's order ([`crate::combat::play_effects`]; nothing
+/// when nothing is queued).
+pub(super) async fn settle(state: &RefCell<State>, io: &Io) {
+    crate::combat::play_effects(state, io).await;
 }
 
 /// Prints result message `m` with format `fmt` (`%s`, `\n%s\n` or `\n%s!\n`).
@@ -55,6 +64,7 @@ pub(super) async fn report(state: &RefCell<State>, io: &Io) {
 
 /// The display name of `obj` (0x10eef8), printed as a format.
 pub(super) async fn print_name(state: &RefCell<State>, io: &Io, obj: i16) {
+    settle(state, io).await;
     let name = crate::objects::display_name(&state.borrow(), Slot::from(obj));
     printf(state, io, name.as_bytes(), &[]).await;
 }

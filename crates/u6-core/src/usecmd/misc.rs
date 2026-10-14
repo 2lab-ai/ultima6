@@ -258,7 +258,7 @@ pub async fn mantra(ux: Ux<'_>, shrine: Slot) {
         freed
     };
     if freed {
-        seams::shrine_flash(&mut ux.s());
+        seams::shrine_flash(ux.state, ux.io).await;
         ux.say(FMT_NL_LINE, MSG_DONE).await;
     } else {
         ux.say(FMT_NL_LINE, MSG_NO_EFFECT).await;

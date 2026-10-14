@@ -381,12 +381,14 @@ fn energy_wind_hurts_along_its_path() {
     let s = e.state();
     let hp: Vec<(usize, u8)> = (2..8).map(|a| (a, s.actors.attrs.hp[a])).collect();
     eprintln!("  hit points after: {hp:?}");
-    for a in [5usize, 6, 7] {
+    for a in [6usize, 7] {
         assert!(
             (70..100).contains(&s.actors.attrs.hp[a]),
             "actor {a} on the path"
         );
     }
+    // Lord British is creature 0x1f, whom 0x1231be never hurts: his hit points become 0xff.
+    assert_eq!(s.actors.attrs.hp[5], 0xff, "Lord British at the end");
     for a in [2usize, 3, 4] {
         assert_eq!(
             s.actors.attrs.hp[a], before[a],
@@ -508,12 +510,9 @@ fn hail_storm_falls() {
     let e = cast(&files, 0x54, setup, "^^^^\n");
     let tail = show("Hail Storm at (307, 348)", &e);
     let s = e.state();
-    eprintln!(
-        "  Lord British hp 200 -> {}; hurt seam hits {:?}",
-        s.actors.attrs.hp[5],
-        e.stub_hits().get("0x1231be hurt an actor (magic seam)")
-    );
-    assert!(s.actors.attrs.hp[5] <= 200);
+    eprintln!("  Lord British hp 200 -> {}", s.actors.attrs.hp[5]);
+    // A stone hit him: 0x1231be leaves creature 0x1f (Lord British) at 0xff hit points.
+    assert_eq!(s.actors.attrs.hp[5], 0xff);
     assert!(tail.iter().any(|l| l.contains("Success")), "{tail:?}");
 }
 

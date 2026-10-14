@@ -245,12 +245,12 @@ fn says_port_line(s: &State) -> bool {
     m.concat().contains(line) || m.join(" ").contains(line)
 }
 
-/// Every cut handler the loop still reaches (Cast, Rest, the debug teleport): the port's line,
-/// the command state cleared, no movement points spent, no turn, and no key read (a queued key
+/// Every cut handler the loop still reaches (Rest, the debug teleport): the port's line, the
+/// command state cleared, no movement points spent, no turn, and no key read (a queued key
 /// stays queued).
 #[test]
 fn cut_commands_say_so_clear_the_command_and_take_no_turn() {
-    let codes = [0x82, 0x89, 0xd6];
+    let codes = [0x89, 0xd6];
     for combat in [0, 1] {
         for &code in &codes {
             let mut st = State::empty();
@@ -276,6 +276,20 @@ fn cut_commands_say_so_clear_the_command_and_take_no_turn() {
             assert!(says_port_line(&s), "{what}: {:?}", s.ui.messages);
         }
     }
+}
+
+/// Cast is magic's 0x11af10 (it reads its own input): with no spellbook readied it ends at once,
+/// the turn taken, the command state cleared, no port line.
+#[test]
+fn cast_without_a_book_takes_the_turn() {
+    let mut st = State::empty();
+    st.actors.objlist_tail[commands::TAIL_SOLO] = 0xff;
+    st.actors.party.leader_index = 0;
+    let (code, s) = dispatched(0x82, &[], st);
+    assert_eq!(code, 0x82);
+    assert_eq!((s.ui.input.target_pending, s.ui.input.targeting), (0, 0));
+    assert_eq!(s.ui.input.target_command, crate::ui::globals::NO_COMMAND);
+    assert!(!says_port_line(&s));
 }
 
 /// Talk is not cut: it still waits for its target (a key that confirms nothing: "what?", which

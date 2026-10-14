@@ -387,7 +387,7 @@ async fn read_one(state: &RefCell<State>, io: &Io, obj: Slot, read: &mut bool) {
 /// Look's spellbook: the book's owner leads while the book is open (magic 0x115da4, 0x116028,
 /// 0x116218, panel mode 0xa1); a spell confirmed with the cursor is described.
 async fn spellbook(state: &RefCell<State>, io: &Io, book: Slot) {
-    let (saved_leader, saved_mode) = {
+    let saved_leader = {
         let mut s = state.borrow_mut();
         seams::open_spellbook(&mut s, book);
         let saved = s.actors.party.leader_index;
@@ -402,10 +402,15 @@ async fn spellbook(state: &RefCell<State>, io: &Io, book: Slot) {
         {
             s.actors.party.leader_index = i as u8;
         }
-        seams::show_spellbook(&mut s);
+        seams::show_spellbook(&mut s, io);
+        saved
+    };
+    crate::magic::draw_book_page(state, io).await;
+    let saved_mode = {
+        let mut s = state.borrow_mut();
         let mode = s.ui.panel.mode;
         s.ui.panel.mode = PANEL_SPELLBOOK;
-        (saved, mode)
+        mode
     };
     let key = crate::ui::wait::read_key(state, io).await;
     let sel = state.borrow().ui.input.selection;

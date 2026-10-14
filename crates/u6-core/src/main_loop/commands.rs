@@ -120,7 +120,9 @@ pub async fn command_loop(state: &RefCell<State>, io: &Io) {
         state.borrow_mut().main.reading = 0;
         let code = map_letter(state, io, key).await;
         let code = dispatch(state, io, code).await;
-        flush_prints(state, io).await;
+        // The frames and lines the synchronous combat and object code queued for this command
+        // (none for most), then any lines still queued.
+        crate::combat::play_effects(state, io).await;
         match code {
             EXIT => return,
             NO_TURN => reprompt(state, io).await,
@@ -505,9 +507,9 @@ async fn solo_mode(state: &RefCell<State>, io: &Io, code: u16) {
 
 /// Cast, Talk, Look, Get, Drop, Move, Use (0x10498e..0x104a96): Cast, Get, Drop and Move are
 /// refused aboard ship; then the command waits for its target (A4-0x7a32 = 1, A4-0x7a2e = code),
-/// "Name-" is printed and, except for Cast (which reads its own input), the next key read must
-/// confirm a target (0x8e) or the loop says "what?"; a confirmed target goes to the command's
-/// handler. Cast is cut: it ends after "Name-" without reading a target and gives [`NO_TURN`].
+/// "Name-" is printed and, except for Cast (0x11af10, which reads its own input), the next key
+/// read must confirm a target (0x8e) or the loop says "what?"; a confirmed target goes to the
+/// command's handler.
 async fn targeted(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
     if matches!(code, CAST | 0x85..=0x87) {
         let aboard = {
@@ -528,12 +530,9 @@ async fn targeted(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
     }
     print_command(state, io, code).await;
     if code == CAST {
-        // Contract: the Cast command (0x11af10: spell input, magic). Fallback: no spell.
-        todo_stub!("0x11af10 Cast command", ());
-        not_implemented(state, io, true).await;
-        return NO_TURN;
-    }
-    if crate::ui::wait::read_key(state, io).await == TARGET_DONE {
+        // 0x11af10 reads its own input (the book, the syllables, the target).
+        crate::magic::cast(state, io).await;
+    } else if crate::ui::wait::read_key(state, io).await == TARGET_DONE {
         let command = state.borrow().ui.input.target_command;
         match command {
             TALK => {

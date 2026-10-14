@@ -244,7 +244,7 @@ pub async fn potion(ux: Ux<'_>, obj: Slot) {
                 no_effect = true;
             }
         }
-        7 => seams::xray(&mut ux.s()),
+        7 => seams::xray(ux.state, ux.io).await,
         3 | 4 => no_effect = true,
         _ => {}
     }
