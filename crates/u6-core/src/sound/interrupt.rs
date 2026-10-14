@@ -4,7 +4,7 @@
 //! the per-tick effects (`effects.rs`) and starts the DMA of the channels that got a new note.
 
 use super::med::{CHANNELS, Hw, MedPlayer, PLAYING_SONG, TRACKS};
-use super::module::{Module, addr, song};
+use super::module::{Module, addr, line_at, song};
 
 /// Song flag bit 5: no effects on a line's first tick.
 const FLAG_NO_TICK0_FX: u8 = 0x20;
@@ -46,10 +46,7 @@ impl MedPlayer {
         let block = md.block(hw.mem(), self.block);
         self.numtracks = u16::from(hw.mem().b(block));
         self.lines = u16::from(hw.mem().b(addr(block, 1)));
-        let mut at = addr(
-            block,
-            2 + u32::from(self.line) * 3 * u32::from(self.numtracks),
-        );
+        let mut at = line_at(block, self.line, self.numtracks);
         for ch in 0..usize::from(self.numtracks).min(TRACKS) {
             let mem = hw.mem();
             let (mut note, b1, arg) = (mem.b(at), mem.b(addr(at, 1)), mem.b(addr(at, 2)));
@@ -201,7 +198,7 @@ impl MedPlayer {
         let block = md.block(mem, self.block);
         let tracks = mem.b(block);
         let tempo2 = mem.b(addr(s, song::TEMPO2));
-        let mut at = addr(block, 2 + u32::from(self.line) * 3 * u32::from(tracks));
+        let mut at = line_at(block, self.line, u16::from(tracks));
         for t in self.tracks.iter_mut().take(usize::from(tracks)) {
             if t.hold_count >= 0 {
                 let (note, b1) = (mem.b(at), mem.b(addr(at, 1)));

@@ -27,6 +27,15 @@ pub fn long_index(base: u32, n: u16) -> u32 {
     addr(base, i32::from(n.wrapping_mul(4) as i16) as u32)
 }
 
+/// The first note of line `line` of the block at `block` with `tracks` tracks, as the timer
+/// interrupt forms it: `3 × line` in a word (`add.w` twice), `mulu.w` by the track count, and
+/// the product's low word taken as a sign-extended word past the block's two header bytes
+/// (`adda.w` at 0x1008e8 after the header's two `move.b (a2)+`; `lea 2(a2,d0.w)` at 0x100b72).
+pub fn line_at(block: u32, line: u16, tracks: u16) -> u32 {
+    let off = line.wrapping_mul(3).wrapping_mul(tracks);
+    addr(addr(block, 2), i32::from(off as i16) as u32)
+}
+
 /// Byte reader over the player's memory (chip memory of the audio machine).
 #[derive(Clone, Copy, Debug)]
 pub struct Mem<'a>(pub &'a [u8]);
