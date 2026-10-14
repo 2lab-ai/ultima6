@@ -1,0 +1,10 @@
+[package]
+name = "u6-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Test-only helpers of the workspace (a dev-dependency; never part of a build)"
+
+[dependencies]

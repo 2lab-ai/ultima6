@@ -14,3 +14,7 @@ u6-core.workspace = true
 u6-intake.workspace = true
 # Must equal the installed wasm-bindgen CLI version (scripts/build-web.sh).
 wasm-bindgen = "=0.2.129"
+
+[dev-dependencies]
+# Content-free equality for the real-data tests (spec 01 §Rights).
+u6-testkit.workspace = true

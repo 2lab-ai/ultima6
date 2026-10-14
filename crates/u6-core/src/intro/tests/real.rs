@@ -13,6 +13,7 @@ use crate::files::Files;
 use crate::intro::{IntroOutcome, handoff, run};
 use crate::sound::AudioDriver;
 use crate::state::State;
+use u6_testkit::assert_same;
 
 pub(super) const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
@@ -143,7 +144,7 @@ impl Run {
 
 /// The scripted creation: answers A, B alternately; name "Zhuge", male, second portrait.
 fn script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
-    // Opening: ORIGIN (palette 0 faded in by tick ~18), Lord British, the TV room.
+    // Opening: ORIGIN (palette 0 faded in by tick ~18), the second title card, the TV room.
     r.tick(30);
     shot("origin", r);
     r.tick(85);
@@ -235,7 +236,7 @@ fn a_scripted_creation_writes_the_character_into_the_objlist() {
     assert_eq!(outcome, Some(IntroOutcome::Play { created: true }));
     let st = r.state.borrow().clone().unwrap();
     let s = st.borrow();
-    assert_eq!(s.actors.party.names[0], "Zhuge");
+    assert_same!(s.actors.party.names[0], "Zhuge", "the created name");
     assert_eq!(s.actors.attrs.level[1], 3);
     assert_eq!(s.actors.attrs.hp[1], 90);
     assert_eq!(s.actors.attrs.exp[1], 370);
@@ -327,8 +328,8 @@ fn receipt_screens() {
     let st = r.state.borrow().clone().unwrap();
     let s = st.borrow();
     println!(
-        "state: name {:?} str {} dex {} int {} magic {} hp {} level {} exp {} karma {} sex {} portrait {}",
-        s.actors.party.names[0],
+        "state: the typed name kept {} str {} dex {} int {} magic {} hp {} level {} exp {} karma {} sex {} portrait {}",
+        s.actors.party.names[0] == "Zhuge",
         s.actors.attrs.strength[1],
         s.actors.attrs.dexterity[1],
         s.actors.attrs.intelligence[1],
@@ -419,7 +420,7 @@ fn transfer_without_a_save_says_no_character_found_and_returns_to_the_menu() {
     assert_eq!(*r.outcome.borrow(), None, "still in u (the menu)");
     let result = &seen[1].1;
     let dialog = &seen[0].1;
-    assert_ne!(result, dialog, "the text box changed");
+    assert!(result != dialog, "the text box changed");
     let hits = r.e.stub_hits();
     assert!(hits.keys().all(|k| k.starts_with("u ")), "{hits:?}");
     assert!(
@@ -472,7 +473,7 @@ fn a_synthetic_ultima_v_save_is_transferred_into_the_objlist() {
     );
     let st = r.state.borrow().clone().unwrap();
     let s = st.borrow();
-    assert_eq!(s.actors.party.names[0], "Quintus");
+    assert_same!(s.actors.party.names[0], "Quintus", "the transferred name");
     let a = &s.actors.attrs;
     assert_eq!(
         (a.strength[1], a.dexterity[1], a.intelligence[1]),

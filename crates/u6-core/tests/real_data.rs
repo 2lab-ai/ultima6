@@ -75,7 +75,7 @@ fn engine_boots_draws_and_moves_the_view() {
     engine.tick(&[InputEvent::Key(Key::Right)], 16);
     engine.tick(&[], 16);
     assert_eq!(engine.state().map.centre.x, start.x + 1);
-    assert_ne!(engine.frame().pixels(), &first[..], "view moved");
+    assert!(engine.frame().pixels() != &first[..], "view moved");
     // Stub contract, independent of which stubs still exist: one log line per stub id hit.
     let hits = engine.stub_hits();
     let log = engine.take_log();

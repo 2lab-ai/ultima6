@@ -14,6 +14,7 @@ use crate::main_loop::Program;
 use crate::saveload::{MemStore, OBJLIST_FILE, SaveSync, attach, changed_since};
 use crate::sound::med::PLAYING_SONG;
 use crate::sound::{CHIP_BUFFER, MODULE_BUFFER};
+use u6_testkit::assert_same;
 
 /// Image address of the message `game` prints when the save holds no character (main pushes
 /// it, 0x135452).
@@ -95,7 +96,11 @@ fn journey_onward_without_a_character_says_so_then_u_runs_again_and_creates_one(
     create_from_menu(&mut r, |_, _| {});
     assert_eq!(program(&r), Program::Game);
     assert!(to_prompt(&mut r, 600), "the game reaches its prompt");
-    assert_eq!(leader_name(&r), "Zhuge");
+    assert_same!(
+        leader_name(&r),
+        "Zhuge",
+        "the leader is the created character"
+    );
     let s = r.e.state();
     assert_eq!(s.actors.attrs.level[1], 3);
     assert_ne!(s.actors.objlist_tail[0x81], 0, "portrait byte");
@@ -186,7 +191,11 @@ fn a_created_character_is_stored_and_journey_onward_after_a_reload_plays_it() {
     to_menu(&mut r);
     create_from_menu(&mut r, |_, _| {});
     assert!(to_prompt(&mut r, 600));
-    assert_eq!(leader_name(&r), "Zhuge");
+    assert_same!(
+        leader_name(&r),
+        "Zhuge",
+        "the leader is the created character"
+    );
     {
         let s = r.e.state();
         assert_eq!(s.saveload.generation, 1, "u's write is a save generation");
@@ -197,7 +206,7 @@ fn a_created_character_is_stored_and_journey_onward_after_a_reload_plays_it() {
     let mut sync = SaveSync::default();
     assert_eq!(sync.flush(&r.e, &mut store).unwrap(), 1);
     let objlist = &store.files[OBJLIST_FILE];
-    assert_eq!(&objlist[0xf00..0xf06], b"Zhuge\0");
+    assert_same!(objlist[0xf00..0xf06], b"Zhuge\0", "the stored name");
     assert_ne!(objlist[0x1c72], 0, "the portrait byte: a character exists");
 
     let mut again: Files = files;
@@ -208,7 +217,7 @@ fn a_created_character_is_stored_and_journey_onward_after_a_reload_plays_it() {
     assert_eq!(program(&r), Program::Game);
     assert!(to_prompt(&mut r, 600), "{}", lines(&r));
     assert!(!said(&r).contains(&no_character(&r)), "{}", lines(&r));
-    assert_eq!(leader_name(&r), "Zhuge", "the stored character");
+    assert_same!(leader_name(&r), "Zhuge", "the stored character");
 }
 
 #[test]
@@ -293,8 +302,8 @@ fn receipt_launcher_screens() {
     assert!(to_prompt(&mut r, 600));
     shot("04-game-after-creation", &r);
     println!(
-        "leader {:?}; party of {}",
-        leader_name(&r),
+        "leader has the typed name: {}; party of {}",
+        leader_name(&r) == "Zhuge",
         r.e.state().actors.party.size
     );
 

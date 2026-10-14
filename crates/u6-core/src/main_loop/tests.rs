@@ -411,7 +411,11 @@ fn real_attack_without_a_target_and_the_next_arrow_walks() {
     press(&mut e, crate::Key::Char('a'));
     press(&mut e, crate::Key::Char('q'));
     let s = e.state();
-    assert!(!says_port_line(&s), "{:?}", s.ui.messages);
+    assert!(
+        !says_port_line(&s),
+        "a port line among {} scroll lines",
+        s.ui.messages.len()
+    );
     assert!(s.ui.messages.len() > lines, "Attack printed its lines");
     assert_eq!((s.ui.input.targeting, s.ui.input.target_pending), (0, 0));
     let centre = s.map.centre;

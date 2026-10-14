@@ -263,7 +263,7 @@ fn map_tables_load_from_the_users_game() {
     assert_eq!(seen.len(), 8);
     let gates = t.gate_x.iter().filter(|&&x| x != 0).count();
     println!(
-        "dist row 0 {:?}; {gates} of 25 moongate destinations set",
-        t.dist[0]
+        "dist rows of {} entries; {gates} of 25 moongate destinations set",
+        t.dist[0].len()
     );
 }
