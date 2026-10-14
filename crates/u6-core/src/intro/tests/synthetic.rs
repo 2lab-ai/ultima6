@@ -983,8 +983,10 @@ fn two_items(item1: u32) -> Vec<u8> {
 #[test]
 fn a_new_offset_of_0xffffffff_goes_one_byte_back_as_adda_l_does() {
     // 0x116420 adds the offset as a long: 0xffffffff is −1. At the montage's place (files +
-    // 0x9c40) item 1 starts one byte before the file; at the start of a region it lies past
-    // the region's end, reads 0 and draws nothing (the item's planes at + 10, 0x116468).
+    // 0x9c40) item 1 starts one byte before the file. At the start of a region its header
+    // lies past the region's end and reads 0 (one row of 16 pixels, no planes stored), and its
+    // mask at + 10 (`lea (0xa,a0)` at 0x116468) wraps back to region offset 9: where that
+    // mask is set, the planes the item does not store are cleared.
     let mut chip = Chip::new();
     let montage = Ptr::at(Region::Files).add(0x9c40);
     chip.write(montage, &two_items(0xffff_ffff));
@@ -992,9 +994,19 @@ fn a_new_offset_of_0xffffffff_goes_one_byte_back_as_adda_l_does() {
     assert_eq!(item.map(|p| p.offset), Some(0x9c3f));
     let blocks = Ptr::at(Region::Blocks);
     chip.write(blocks, &two_items(0xffff_ffff));
+    chip.write(blocks.add(9), &[0xf0]);
     let screen = View::screen(Ptr::at(Region::Screen0));
+    mem::fill_view(&mut chip, &screen, 7);
     mem::draw_item(&mut chip, &screen, 0x10, 0x10, blocks, 1);
-    assert_eq!(chip.pixel(screen.planes, 0x10, 0x10), 0);
+    let row: Vec<u8> = (0x0e..0x16)
+        .map(|x| chip.pixel(screen.planes, x, 0x10))
+        .collect();
+    assert_eq!(
+        row,
+        [7, 7, 0, 0, 0, 0, 7, 7],
+        "the mask's first four columns"
+    );
+    assert_eq!(chip.pixel(screen.planes, 0x10, 0x11), 7, "one row");
 }
 
 #[test]
