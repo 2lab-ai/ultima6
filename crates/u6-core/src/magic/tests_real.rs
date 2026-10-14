@@ -355,6 +355,13 @@ fn create_food_adds_food() {
         "{tail:?}"
     );
     assert_eq!(s.magic.current, 0, "the books remember the spell");
+    spent(
+        &[10; 8],
+        &reagents(&s),
+        (30, s.actors.attrs.magic[1]),
+        &s,
+        0,
+    );
 }
 
 /// Detect Magic on an object. The cross-hair cannot pick an object yet (its pick 0x1225c0 is a
@@ -402,7 +409,13 @@ fn heal_and_great_heal_on_a_member() {
     let s = e.state();
     let hp = s.actors.attrs.hp[2];
     assert!((11..=40).contains(&hp), "Heal gives 1..30: {hp}");
-    assert_eq!(s.actors.attrs.magic[1], 29);
+    spent(
+        &[10; 8],
+        &reagents(&s),
+        (30, s.actors.attrs.magic[1]),
+        &s,
+        6,
+    );
     drop(s);
     let e = cast_with(&files, day_book, "VM\n2");
     show("Great Heal on member 2", &e);
@@ -411,7 +424,13 @@ fn heal_and_great_heal_on_a_member() {
         u16::from(s.actors.attrs.hp[2]),
         crate::actors::leaves::max_hp(&s, 2)
     );
-    assert_eq!(s.actors.attrs.magic[1], 30 - 4);
+    spent(
+        &[10; 8],
+        &reagents(&s),
+        (30, s.actors.attrs.magic[1]),
+        &s,
+        0x34,
+    );
 }
 
 #[test]
@@ -429,7 +448,13 @@ fn sleep_on_an_npc() {
                 .any(|l| l.contains("Failed") || l.contains("No effect")),
         "{tail:?}"
     );
-    assert_eq!(s.actors.attrs.magic[1], 28);
+    spent(
+        &[10; 8],
+        &reagents(&s),
+        (30, s.actors.attrs.magic[1]),
+        &s,
+        0x14,
+    );
 }
 
 #[test]
@@ -446,5 +471,11 @@ fn magic_arrow_goes_through_the_combat_seams() {
         hurt || tail.iter().any(|l| l.contains("Failed")),
         "{tail:?}"
     );
-    assert_eq!(s.actors.attrs.magic[1], 28);
+    spent(
+        &[10; 8],
+        &reagents(&s),
+        (30, s.actors.attrs.magic[1]),
+        &s,
+        0x11,
+    );
 }
