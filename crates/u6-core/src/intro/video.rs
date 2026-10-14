@@ -46,9 +46,23 @@ pub struct Video {
     pub cycle_wait: u16,
     /// Original: A4+0x1392 (the colour-cycle palette; 0x113d80 rotates its words 22..25)
     pub cycle_palette: [u16; 32],
-    /// Original: u 0x119ffa (word: mouse pointer shown; the port has no pointer, kept for the
-    /// callers that set it)
+    /// Original: u 0x119ffa (word: mouse pointer shown)
     pub pointer: u16,
+    /// Original: u 0x119e16 / u 0x119e18 (words: the pointer's x, y; the input handler 0x114d30
+    /// adds the mouse's moves, clamped to the screen; without a mouse they keep the image's
+    /// values)
+    pub mouse: (i16, i16),
+    /// Original: u 0x11432a (the pointer sprite's control words SPR0POS / SPR0CTL, written by
+    /// 0x119c26 each frame)
+    pub sprite_ctl: u32,
+    /// The pointer sprite's rows from u 0x11432e on (data words A, B), up to the end words 0, 0.
+    pub sprite_rows: Vec<(u16, u16)>,
+    /// Original: u 0x119fe8 (word: the BEAMCON0 value the server writes each frame when it is
+    /// not negative; the input handler sets 0x20 (PAL) on left Alt + Help, 0 (NTSC) on right
+    /// Alt + Help; the image starts at −1)
+    pub beamcon: u16,
+    /// Port-only: the last value the server wrote to BEAMCON0 (the port's display stays PAL).
+    pub beamcon0: Option<u16>,
     /// Port-only: frames waited so far (for receipts and tests).
     pub frames: u64,
     /// True while the gradient copper lists (0x11436a / 0x1144fa) show: 0x113df8 picked them,
@@ -57,6 +71,26 @@ pub struct Video {
     /// The colour changes the gradient lists make down the screen, read from the list at
     /// 0x11436a: (screen row, colour register, 12-bit value), in list order.
     pub gradient_steps: Vec<(i32, usize, u16)>,
+}
+
+/// Original: u 0x119e16 (the pointer position words), u 0x119fe8 (the BEAMCON0 word), u 0x11432a
+/// (the pointer sprite: control words, then the rows).
+const MOUSE: u32 = 0x0011_9e16;
+const BEAMCON: u32 = 0x0011_9fe8;
+const SPRITE: u32 = 0x0011_432a;
+/// Rows of the pointer at most (VSTOP = VSTART + 14 in 0x119c26).
+const SPRITE_ROWS: u32 = 14;
+/// Display window start of the copper lists (DIWSTRT 0x2c81): beam line and pixel of screen
+/// (0, 0).
+const DIW_LINE: i32 = 0x2c;
+const DIW_PIXEL: i32 = 0x81;
+
+/// The pointer's rows (data words A, B) from the image, up to the end words 0, 0.
+fn sprite_rows(exe: &UExe) -> Vec<(u16, u16)> {
+    (0..SPRITE_ROWS)
+        .map(|r| (exe.word(SPRITE + 4 + 4 * r), exe.word(SPRITE + 6 + 4 * r)))
+        .take_while(|&(a, b)| a != 0 || b != 0)
+        .collect()
 }
 
 /// The gradient copper list of buffer 0 (the one of buffer 1, 0x1144fa, is the same but for
@@ -110,6 +144,11 @@ impl Video {
             cycle_wait: exe.word(CYCLE_WAIT),
             cycle_palette: exe.palette(32),
             pointer: 0,
+            mouse: (exe.word(MOUSE) as i16, exe.word(MOUSE + 2) as i16),
+            sprite_ctl: u32::from(exe.word(SPRITE)) << 16 | u32::from(exe.word(SPRITE + 2)),
+            sprite_rows: sprite_rows(exe),
+            beamcon: exe.word(BEAMCON),
+            beamcon0: None,
             frames: 0,
             gradient: false,
             gradient_steps: gradient_steps(exe),
@@ -241,11 +280,32 @@ impl Video {
         self.colours = self.cycle_palette;
     }
 
-    /// Original: u 0x1198f8 (VBlank server "Ultima 6 Int": fades, colour cycling) [partial]
+    /// Original: u 0x119c26 (VBlank: the pointer sprite's control words: VSTART = y + 0x2c,
+    /// HSTART = x + 0x80, VSTOP = VSTART + 14; with the pointer off y is 0xc9, below the
+    /// display window)
+    pub fn place_pointer(&mut self) {
+        let x = self.mouse.0 as u16;
+        let mut y = if self.pointer == 0 {
+            0xc9
+        } else {
+            self.mouse.1 as u16
+        };
+        y = y.wrapping_add(0x2c) << 8;
+        let h = x.wrapping_add(0x80);
+        let pos = (h >> 1) | y;
+        let ctl = (h & 1) | y.wrapping_add(0xe00);
+        self.sprite_ctl = u32::from(pos) << 16 | u32::from(ctl);
+    }
+
+    /// Original: u 0x1198f8 (VBlank server "Ultima 6 Int": BEAMCON0, the pointer sprite,
+    /// fades, colour cycling)
     ///
-    /// Not ported: the BEAMCON0 write of 0x119fe8 (PAL/NTSC switch) and the pointer sprite
-    /// position 0x119c26 (the port has no mouse).
+    /// The frame-wait flag it clears is the port's [`Video::wait_frame`].
     pub fn server(&mut self) {
+        if (self.beamcon as i16) >= 0 {
+            self.beamcon0 = Some(self.beamcon);
+        }
+        self.place_pointer();
         self.fade_in_step();
         self.fade_out_step();
         if self.cycling != 0 {
@@ -255,6 +315,32 @@ impl Video {
                 self.cycle_step();
             }
         }
+    }
+
+    /// The pointer sprite as the hardware shows it from its control words: rows from beam line
+    /// VSTART (up to VSTOP), pixel colours 17..19 (sprite 0's), in front of the bitplanes
+    /// (BPLCON2 0x0008 of the copper lists) [추정: the 1-pixel horizontal origin of sprites
+    /// against DIWSTRT 0x81 is taken from the hardware reference, not measured].
+    pub fn pointer_pixels(&self) -> Vec<(i32, i32, u8)> {
+        let (pos, ctl) = ((self.sprite_ctl >> 16) as u16, self.sprite_ctl as u16);
+        let vstart = i32::from(pos >> 8) | (i32::from(ctl >> 2) & 1) << 8;
+        let vstop = i32::from(ctl >> 8) | (i32::from(ctl >> 1) & 1) << 8;
+        let hstart = (i32::from(pos & 0xff) << 1) | i32::from(ctl & 1);
+        let rows = if vstop > vstart { vstop - vstart } else { 0 };
+        let mut out = Vec::new();
+        for (r, &(a, b)) in self.sprite_rows.iter().enumerate().take(rows as usize) {
+            for c in 0..16 {
+                let v = ((a >> (15 - c)) & 1) | (((b >> (15 - c)) & 1) << 1);
+                if v != 0 {
+                    let x = hstart - DIW_PIXEL + c;
+                    let y = vstart - DIW_LINE + r as i32;
+                    if (0..W).contains(&x) && (0..H).contains(&y) {
+                        out.push((x, y, 16 + v as u8));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The shown buffer as indices plus the 32 colours, onto the engine's screen.
@@ -286,6 +372,9 @@ impl Video {
                     let v = over[usize::from(c)].unwrap_or(c);
                     fb.set(x as usize, y as usize, v);
                 }
+            }
+            for (x, y, c) in self.pointer_pixels() {
+                fb.set(x as usize, y as usize, c);
             }
         });
         io.present();

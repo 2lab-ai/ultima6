@@ -77,7 +77,8 @@ pub enum IntroOutcome {
     /// Journey onward (0x10361a: exit code 1, the launcher runs `game`). `created` = a
     /// character was written and applied to the game state.
     Play { created: bool },
-    /// The menu's quit key (^Q): `u` exits and the launcher stops.
+    /// Exit code 3: the menu's quit key (^Q), or main's argument check failed; the launcher
+    /// stops.
     Quit,
     /// The user's files have no usable `u`; nothing was shown.
     Unavailable,
@@ -92,7 +93,7 @@ pub async fn run(state: &RefCell<State>, io: &Io) -> IntroOutcome {
     };
     let seed = state.borrow().rng.state() as u16;
     let mut st = IntroState::new(exe, io.files().clone());
-    let outcome = main(&mut st, io, seed).await;
+    let outcome = main(&mut st, io, seed, &LAUNCHER_ARGS).await;
     if let (IntroOutcome::Play { .. }, Some(bytes)) = (&outcome, st.objlist.as_ref()) {
         let applied = handoff::apply(&mut state.borrow_mut(), bytes).is_ok();
         return IntroOutcome::Play { created: applied };
@@ -100,12 +101,24 @@ pub async fn run(state: &RefCell<State>, io: &Io) -> IntroOutcome {
     outcome
 }
 
-/// Original: u 0x1029d0 (main: setup, opening, menu loop) [partial]
+/// The command line the launcher runs `u` with (`PROGRAM:u JJS`, state 0 of `ultcli`).
+pub const LAUNCHER_ARGS: [&[u8]; 2] = [b"u", b"JJS"];
+
+/// The argument main requires (the string at 0x102c12, `JJS`).
+const JJS: u32 = 0x0010_2c12;
+
+/// Original: u 0x1029d0 (main: argument check, setup, opening, menu loop)
 ///
-/// Not ported: the `JJS` argument check (the launcher always passes it) and the argument copy.
-/// Setup as 0x113bfe and main leave it: the screen view on buffer 1, the menu panel view, the
-/// spare view, the text context (`u6.set`, ink 15, paper 0, justified), `blocks.new`.
-pub async fn main(st: &mut IntroState, io: &Io, seed: u16) -> IntroOutcome {
+/// Anything but exactly one argument `JJS` exits with code 3 before any setup, the code the
+/// menu's quit exits with (so `u` started by hand, not by the launcher, shows nothing). The
+/// arguments are then copied to A4−0x26 (40 bytes each), which nothing reads. Setup as
+/// 0x113bfe and main leave it: the screen view on buffer 1, the menu panel view, the spare
+/// view, the text context (`u6.set`, ink 15, paper 0, justified), `blocks.new`.
+pub async fn main(st: &mut IntroState, io: &Io, seed: u16, args: &[&[u8]]) -> IntroOutcome {
+    let jjs = st.exe.cstr(JJS);
+    if args.len() != 2 || args[1] != jjs.as_slice() {
+        return IntroOutcome::Quit;
+    }
     st.srand(seed);
     let screen = View::screen(Ptr::at(Region::Screen1));
     let v = &mut st.views;
