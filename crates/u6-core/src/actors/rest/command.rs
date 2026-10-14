@@ -192,10 +192,28 @@ fn retype(s: &mut State, from: u16, to: u16) -> Option<usize> {
 /// Mealtime: one frame per round while A4-0x77a0 is set (and the first round), member `i / 4`
 /// eating at every fourth; the index of the first member without food, else the party size.
 ///
-/// Only the first round runs: the byte's only accesses in `game` are the clears at 0x10ed24
-/// (0x10e81e, an object 0x188 coming into view) and 0x127f10 and the test at 0x127f1a; no
-/// absolute, `lea` or `pea` reference to it exists, and the data hunk starts it at 0. So the
-/// port, like the original, feeds member 0 alone.
+/// Only the first round runs: nothing in `game` sets the byte (absolute 0x153f50; the data hunk
+/// starts it at 0), so the port, like the original, feeds member 0 alone. Where it was sought:
+/// - every 16-bit displacement A4-0x77b0 ..= -0x7790, at every even offset of every code hunk
+///   and with any base register: A4-0x77a0 is only cleared (0x10ed24 in 0x10e81e, an object
+///   0x188 coming into view; 0x127f10) and tested (0x127f1a); A4-0x779f is only written
+///   (0x10ed32, the random 0..=1), A4-0x77a4 is a byte of its own (0x10ee7c, 0x10ee9c) and
+///   A4-0x77a3 ..= -0x77a1 are never accessed, so no word or long write covers the byte;
+/// - the 2,855 RELOC32 operands (none points into 0x153e00..0x154100) and the PC-relative ones
+///   (none reaches it);
+/// - the `lea` / `pea` bases below it, whose indexed accesses could reach it: the nearest ones
+///   are only read (A4-0x77ce, a 21-word table 0x10cf12 compares; -0x77d5, -0x77e5, -0x77ec;
+///   the file names at -0x7818 / -0x782a), the nearest written ones are the four region keys
+///   at A4-0x784c and the 69 `.tmp` flags at A4-0x78d8; the one file read below it is the
+///   objlist tail, A4-0x7b84 for 0x82 bytes;
+/// - (d8,A4,Xn) accesses, in the decoded code and in the bytes between: only in hunk 30 and in
+///   hunk 0's sound player, both with A4 loaded with their own tables (0x1525c4, 0x157e9e, …
+///   from 0x15274e on; the song structure at 0x1008a8);
+/// - the interrupt and callback code: the five loads of the small-data A4 (0x100008, 0x1051aa,
+///   0x14f174, 0x151b10, 0x162404); hunk 0 with the player, whose relocated operands point into
+///   hunks 0, 31 and 32 besides the start-up's A4 and BSS start; the sprite code 0x162294 that
+///   0x14f27a jumps to (no operand near the byte). 0x1198f8 is no entry: it is the displacement
+///   word of `lea 0x190c(A4)` at 0x1198f6.
 async fn meal(state: &RefCell<State>, io: &Io) -> usize {
     state.borrow_mut().objects.draw.anim_188[0] = 0;
     let mut hungry = None;

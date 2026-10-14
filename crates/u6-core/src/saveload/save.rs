@@ -16,8 +16,9 @@ const IN_INVENTORY: u8 = 0x10;
 
 /// The rename loop of 0x10e4bc: every block whose `.tmp` file is current (A4-0x78d8) replaces
 /// its block file (0x134b48 deletes `savegame/objblk??`, 0x134b9e renames the `.tmp` over it;
-/// read back as 0x10ddd2 / 0x10e10c do, [`crate::objects::parse_lenient`]), and the flag clears. The block is stamped with the running save generation so the platform
-/// stores it ([`super::changed_since`]).
+/// read back as 0x10ddd2 / 0x10e10c do, [`crate::objects::parse_lenient`]), and the flag
+/// clears. The block is stamped with the running save generation so the platform stores it
+/// ([`super::changed_since`]).
 ///
 /// A flag without a `.tmp` file leaves no block file behind (the delete happens, the rename
 /// finds nothing); the port reads that as an empty block. 0x10d538 writes the file whenever it
@@ -117,9 +118,9 @@ pub fn save(s: &mut State) {
     s.ui.panel.dirty = true;
 }
 
-/// The Save command's handler as the command loop calls it (code 0xaa after the save question's
-/// answer Y). The save itself does not wait; the warnings a block write may queue (0x10d376)
-/// are printed by the loop's next flush.
+/// The Save command's handler as the command loop calls it (code 0xaa, once the question at
+/// A4-0x764d is answered Y). The save itself does not wait; the warnings a block write may
+/// queue (0x10d376) are printed by the loop's next flush.
 pub async fn save_game(state: &RefCell<State>, _io: &Io) {
     save(&mut state.borrow_mut());
 }

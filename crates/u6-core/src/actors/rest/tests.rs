@@ -189,7 +189,8 @@ fn the_guard_digit_reaches_every_member_but_the_last() {
 #[test]
 fn only_the_first_member_eats_at_the_meal() {
     // A4-0x77a0 keeps the meal going, and nothing in `game` sets it (its only accesses are the
-    // clears at 0x10ed24 and 0x127f10 and the test at 0x127f1a), so the meal is one round.
+    // clears at 0x10ed24 and 0x127f10 and the test at 0x127f1a; the channels searched are listed
+    // on `meal`), so the meal is one round.
     let mut s = camp_world();
     s.objects.defs.stackable = vec![FOOD];
     let food = create_in(&mut s, FOOD, IN_INVENTORY, 5, 2);

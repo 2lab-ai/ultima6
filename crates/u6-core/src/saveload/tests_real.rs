@@ -523,6 +523,33 @@ fn the_ports_start_save_against_the_originals() {
 /// The original's own save boots in the port, and the port's save of it is the original's
 /// save of the same state (the original booted from that save and saved again at once).
 #[test]
+fn a_saved_party_size_past_the_roster_boots_clamped() {
+    // The boot's own path (`State::new_game`, then game's main) of the user's files under a save
+    // whose party-size byte (objlist 0x0FF0) is 17: clamped to 15, the boot reaches the prompt,
+    // and a pass turn and an hour of the clock run over the 15 members.
+    let Some(mut files) = zip_files() else { return };
+    let mut f = files.get(OBJLIST_FILE).unwrap().to_vec();
+    f[0x0FF0] = 17;
+    let store = MemStore {
+        files: BTreeMap::from([(OBJLIST_FILE.to_string(), f)]),
+    };
+    attach(&mut files, &store).unwrap();
+    let mut run = Run::boot(files);
+    assert_eq!(
+        run.e.state().actors.party.size,
+        15,
+        "clamped at the vessel slot"
+    );
+    let hour = run.e.state().actors.calendar.hour;
+    run.press(Key::Space);
+    assert!(run.at_prompt(), "a pass turn comes back to the prompt");
+    let mut s = run.state();
+    crate::actors::clock::tick(&mut s, 60);
+    assert_eq!(s.actors.calendar.hour, (hour + 1) % 24, "an hour on");
+    eprintln!("booted: party size {}, hour {hour}", s.actors.party.size);
+}
+
+#[test]
 fn the_originals_save_loads_and_saves_like_the_original() {
     let Some(mut files) = zip_files() else { return };
     let (Some(saved), Some(resaved)) = (oracle_save("start-saved"), oracle_save("resaved")) else {
