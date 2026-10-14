@@ -5,5 +5,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+description = "Platform-free parsers for the Amiga Ultima VI data files (spec: re/notes/formats.md)"
+
+[features]
+# Serialize/Deserialize derives on every data struct (for P3 data-driven modding).
+serde = ["dep:serde"]
 
 [dependencies]
+serde = { version = "1", optional = true, default-features = false, features = ["std", "derive"] }
