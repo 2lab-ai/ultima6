@@ -24,6 +24,7 @@ pub mod engine;
 pub mod files;
 pub mod gfx;
 pub mod image;
+pub mod intro;
 pub mod inventory;
 pub mod magic;
 pub mod main_loop;
