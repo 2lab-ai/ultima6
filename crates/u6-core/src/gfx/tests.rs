@@ -328,3 +328,26 @@ fn window_copy_moves_exactly_pixels_8_to_168() {
     assert_eq!((front.get(8, 8), front.get(167, 167)), (Some(4), Some(4)));
     assert_eq!((front.get(7, 8), front.get(168, 167)), (Some(0), Some(0)));
 }
+
+#[test]
+fn bitmaps_map_their_bytes_through_the_colour_table_and_copy_rects_by_bytes() {
+    let mut colours = [0u8; 256];
+    for (i, c) in colours.iter_mut().enumerate() {
+        *c = (i as u8).wrapping_mul(3) | 0x20;
+    }
+    let mut fb = Framebuffer::new();
+    let pixels: Vec<u8> = (0..16 * 2).map(|i| i as u8).collect();
+    super::blit::blit_bitmap(&colours, &mut fb, (16, 2), &pixels, 13, 5);
+    // x is taken down to the byte column 8; bit 5 of the table byte is not a plane.
+    assert_eq!(fb.get(8, 5), Some(0));
+    assert_eq!(fb.get(9, 5), Some(3));
+    assert_eq!(fb.get(8 + 15, 6), Some((31u8 * 3) & 0x1f));
+    assert_eq!(fb.get(8 + 16, 5), Some(0), "16 pixels per row");
+    // copy_rect: bytes x0/8..=x1/8 of rows y0..=y1 to dx/8, dy.
+    let mut front = Framebuffer::new();
+    super::blit::copy_rect(&fb, &mut front, 9, 5, 17, 6, 100, 50);
+    assert_eq!(front.get(96 + 1, 50), Some(3), "column 9 lands at 96 + 1");
+    assert_eq!(front.get(96 + 15, 51), fb.get(8 + 15, 6));
+    assert_eq!(front.get(96 + 16, 50), Some(0), "two bytes copied");
+    assert_eq!(front.get(97, 52), Some(0), "two rows copied");
+}

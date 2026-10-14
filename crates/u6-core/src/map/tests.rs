@@ -193,10 +193,10 @@ fn eggs_far_or_active_or_on_arrival_are_offered() {
     let before = hits(id);
     region::check_eggs(&mut s);
     assert_eq!(hits(id) - before, 2);
-    s.objects.actor_flags[5] = 0x20;
+    s.objects.obj_status[5] = 0x20;
     region::check_eggs(&mut s);
     assert_eq!(hits(id) - before, 2 + 3);
-    s.objects.actor_flags[5] = 0;
+    s.objects.obj_status[5] = 0;
     s.map.arriving = 1;
     region::check_eggs(&mut s);
     assert_eq!(hits(id) - before, 5 + 3);

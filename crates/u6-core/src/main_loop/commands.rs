@@ -239,7 +239,7 @@ async fn yes_no(state: &RefCell<State>, io: &Io) -> bool {
 
 /// 0x104496..0x104d96: the handler of `code`; returns the code the end of turn sees (an exit
 /// prompt answered `N` gives 0, `Y` 0x12d).
-async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
+pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
     let size = u16::from(state.borrow().actors.party.size);
     if (0x30..=0x39).contains(&code) && code < size + 0x31 {
         if code == 0x30 {
@@ -434,7 +434,7 @@ async fn solo_mode(state: &RefCell<State>, io: &Io, code: u16) {
         let m = usize::from(s.actors.party.members[i]);
         let able = s.actors.attrs.status[m] & 0x16 == 0
             && s.actors.attrs.movement_flags[m] & 0x10 == 0
-            && s.objects.actor_flags[m] & 0x04 == 0;
+            && s.objects.obj_status[m] & 0x04 == 0;
         let p = &s.actors.party;
         let name = p
             .names

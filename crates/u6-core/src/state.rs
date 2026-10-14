@@ -234,7 +234,7 @@ impl State {
         let (objects, actors) = (&mut self.objects, &mut self.actors);
         let attrs = &mut actors.attrs;
         for (a, r) in list.actors.iter().enumerate().take(ACTOR_SLOTS) {
-            objects.actor_flags[a] = r.obj_flags;
+            objects.obj_status[a] = r.obj_flags;
             objects.location[a] = r.pos;
             objects.type_frame[a] = (r.obj_n & 0x3ff) | u16::from(r.frame & 0x3f) << 10;
             objects.qq[a] = r.unknown_0600;

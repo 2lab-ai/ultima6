@@ -100,7 +100,7 @@ pub fn actor_status_tick(s: &mut State, actor: u16) {
                 .get(usize::from(s.objects.obj_type(o)));
             let t = base.copied().unwrap_or(0) + u16::from(s.objects.frame(o));
             if flags1(s, t) & 0x08 != 0 {
-                if let Some(f) = s.objects.actor_flags.get_mut(o.index()) {
+                if let Some(f) = s.objects.obj_status.get_mut(o.index()) {
                     *f &= !0x02;
                 }
                 crate::actors::party::tile_effect(s, actor, t);
@@ -241,7 +241,7 @@ pub fn end_solo(s: &mut State, io: &Io) {
         .take(usize::from(s.actors.party.size))
         .skip(1)
     {
-        if s.objects.actor_flags[usize::from(m)] & 0x04 == 0 {
+        if s.objects.obj_status[usize::from(m)] & 0x04 == 0 {
             s.actors.worktype[usize::from(m)] = 1;
         }
     }

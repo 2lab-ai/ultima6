@@ -274,8 +274,7 @@ pub fn draw_paper(s: &State, io: &Io) {
         return;
     };
     let colours = &s.gfx.tables.bitmap_colours;
-    let size = (bmp.width, bmp.height);
-    io.draw(|fb| crate::gfx::blit::blit_bitmap(colours, fb, size, &bmp.pixels, 0, 0));
+    io.draw(|fb| crate::gfx::blit::blit_bmp(colours, fb, &bmp, 0, 0));
 }
 
 /// The calls 0x105350 makes after its reads, in its order: link the actors (0x10edb4, after the

@@ -53,13 +53,13 @@ pub fn in_type_set_670c(o: &Objects, kind: u16) -> bool {
 
 /// Original: 0x128b0e (objects: mark an object and everything inside it "ok to take")
 pub fn mark_takeable(o: &mut Objects, slot: Slot) {
-    o.actor_flags[slot as usize] |= 0x01;
+    o.obj_status[slot as usize] |= 0x01;
     let mut c = o.next_of(slot);
     while c >= 0 && o.place(c) != 0 {
         if !o.contained_in(c, slot) {
             return;
         }
-        o.actor_flags[c as usize] |= 0x01;
+        o.obj_status[c as usize] |= 0x01;
         c = o.next_of(c);
     }
 }

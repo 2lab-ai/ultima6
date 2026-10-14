@@ -38,51 +38,7 @@ pub(super) fn text() -> ConverseText {
     }))
 }
 
-/// A text layer for the tests: every printable character on a raw key (plain or shifted),
-/// Return, Escape, space and backspace on theirs; the message scroll the whole screen (40 × 25
-/// cells), scrolling, no wrap and no capitals, so each scroll line is one line of output.
-pub(super) fn test_ui() -> crate::ui::UiState {
-    use crate::ui::tables::{Colours, Initial, RAW_KEYS, UiTables};
-    let mut keymap = vec![[0u16; 4]; RAW_KEYS];
-    let printable: Vec<u16> = (0x21..0x7f).collect();
-    for (row, pair) in printable.chunks(2).enumerate() {
-        keymap[row] = [pair[0], pair.get(1).copied().unwrap_or(0), 0, 0];
-    }
-    keymap[0x40] = [0x20; 4];
-    keymap[0x41] = [0x08; 4];
-    keymap[0x44] = [0x0d; 4];
-    keymap[0x45] = [0x1b; 4];
-    let t = UiTables {
-        keymap,
-        keyword_end: b" .,".to_vec(),
-        colours: Colours {
-            text: 1,
-            paper: 2,
-            alert: 3,
-            poisoned: 4,
-            command: 5,
-        },
-        initial: Initial {
-            text_on: true,
-            cursor_glyph: 5,
-            accept: true,
-            upcase: true,
-            target_command: crate::ui::globals::NO_COMMAND,
-            panel_mode: 0x91,
-            ..Initial::default()
-        },
-        ..UiTables::default()
-    };
-    let mut ui = crate::ui::UiState::from_parts(None, t.clone());
-    ui.text.main_windows(&t);
-    ui.text
-        .open(&t, crate::ui::WindowId::Messages, 0, 0, 0x27, 0x18);
-    ui.text.win_mut().flags = crate::ui::text::SCROLL;
-    // As the command loop's key read leaves it before a command: a whole window before a more
-    // prompt.
-    ui.text.more_rows = 25;
-    ui
-}
+pub(super) use crate::main_loop::test_support::test_ui;
 
 /// A state with the synthetic messages, `script` in the script buffer, a party of actors 1 and
 /// 2 (leader 1 at (100, 100, 0)) and the view centred there.

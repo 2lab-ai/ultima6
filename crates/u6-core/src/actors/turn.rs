@@ -15,7 +15,7 @@ const IDLE_REFILLS_PER_YIELD: u32 = 60;
 fn healthy(s: &State, actor: usize) -> bool {
     s.actors.attrs.status[actor] & 0x16 == 0
         && s.actors.attrs.movement_flags[actor] & 0x10 == 0
-        && s.objects.actor_flags[actor] & 0x04 == 0
+        && s.objects.obj_status[actor] & 0x04 == 0
 }
 
 fn member(s: &State, i: usize) -> usize {
@@ -58,7 +58,7 @@ pub fn leader_bookkeeping(s: &mut State) {
         return;
     }
     if s.actors.party.leader_index == size {
-        s.objects.actor_flags[0] &= 0xbb;
+        s.objects.obj_status[0] &= 0xbb;
         s.actors.attrs.status[0] = (s.actors.attrs.status[0] & 0x81) | 0x40;
         s.actors.attrs.movement_flags[0] &= 0xef;
     }
@@ -337,7 +337,7 @@ fn may_act(s: &State, a: usize, z: u8) -> bool {
         && (st & 0x04 == 0 || wt == 0x80)
         && st & 0x10 == 0
         && s.actors.mp(a) > 0
-        && s.objects.actor_flags[a] & 0x18 == 0
+        && s.objects.obj_status[a] & 0x18 == 0
         && s.objects.location[a].z == z
 }
 

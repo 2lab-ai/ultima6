@@ -86,7 +86,7 @@ pub fn move_to(s: &mut State, slot: Slot, x: u16, y: u16, z: u16) -> Slot {
     let p = o.list_pos(x, y, true);
     o.set_next(last, o.next_of(p));
     o.set_next(p, slot);
-    o.actor_flags[slot as usize] &= !WHERE_MASK;
+    o.obj_status[slot as usize] &= !WHERE_MASK;
     o.set_xyz(slot, x, y, z);
     if let Some(cell) = o.cell(x, y, 0x3ff) {
         o.grid[cell] = slot;
@@ -194,7 +194,7 @@ pub fn move_into(s: &mut State, slot: Slot, owner: Slot, place: u8) -> Slot {
     o.set_next(owner, slot);
     let (x, y, z) = (o.x(slot), o.y(slot), u16::from(o.z(slot)));
     o.unlink_cell(x, y, z, slot, o.next_of(pred));
-    let st = &mut o.actor_flags[slot as usize];
+    let st = &mut o.obj_status[slot as usize];
     *st = (*st & !WHERE_MASK) | place;
     o.set_parent(slot, owner);
     slot
@@ -258,7 +258,7 @@ pub fn create_on_map(
     }
     let prev = o.list_pos(x, y, true);
     o.pop_free();
-    o.actor_flags[slot as usize] = status | TEMPORARY;
+    o.obj_status[slot as usize] = status | TEMPORARY;
     o.set_xyz(slot, x, y, z);
     o.type_frame[slot as usize] = tf;
     o.qq[slot as usize] = qq;
@@ -282,9 +282,9 @@ pub fn create_in(s: &mut State, tf: u16, status: u8, qq: u16, owner: Slot) -> Sl
     }
     o.pop_free();
     let i = slot as usize;
-    o.actor_flags[i] = status;
+    o.obj_status[i] = status;
     if tf != 0x18c {
-        o.actor_flags[i] |= TEMPORARY;
+        o.obj_status[i] |= TEMPORARY;
     }
     o.set_parent(slot, owner);
     o.type_frame[i] = tf;
@@ -313,7 +313,7 @@ pub fn create_actor(s: &mut State, tf: u16, x: u16, y: u16, z: u16) -> Slot {
     o.free_actors.0 = o.next_of(slot);
     o.free_actors.1 -= 1;
     let i = slot as usize;
-    o.actor_flags[i] = 0x21;
+    o.obj_status[i] = 0x21;
     o.set_xyz(slot, x, y, z);
     o.type_frame[i] = tf;
     o.qq[i] = 1;
@@ -385,7 +385,7 @@ pub fn add_to_owner(s: &mut State, owner: Slot, kind: u16, count: u16) -> Slot {
             let mut c = first_child(&mut s.objects, owner);
             while c >= 0 {
                 if s.objects.place(c) == READIED && seams::ready_slot(s, c) == 1 {
-                    let st = &mut s.objects.actor_flags[c as usize];
+                    let st = &mut s.objects.obj_status[c as usize];
                     *st = (*st & !WHERE_MASK) | IN_INVENTORY;
                     break;
                 }

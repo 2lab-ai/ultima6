@@ -15,7 +15,7 @@ const CURSED: u8 = 0x40;
 
 fn stat_less_curse(s: &State, actor: usize, value: u8) -> u16 {
     let v = u16::from(value);
-    if s.objects.actor_flags[actor] & CURSED != 0 {
+    if s.objects.obj_status[actor] & CURSED != 0 {
         let w = (v as i16) - 3;
         if w < 1 { 1 } else { w as u16 }
     } else {
@@ -30,7 +30,7 @@ fn stat_less_curse(s: &State, actor: usize, value: u8) -> u16 {
 /// combat mode, else 1 (follow) in party mode or 0 in solo mode.
 pub fn uncharm(s: &mut State, actor: u16) {
     let a = usize::from(actor);
-    s.objects.actor_flags[a] &= !0x04;
+    s.objects.obj_status[a] &= !0x04;
     let attrs = &mut s.actors.attrs;
     attrs.status[a] = (attrs.status[a] & 0x9f) | (attrs.movement_flags[a] & 0x60);
     if attrs.status[a] & 0x80 != 0 {
@@ -114,7 +114,7 @@ pub fn max_magic(s: &State, actor: u16) -> u16 {
 /// whose tile has flags3 bit 0x10, or one on another level.
 pub fn can_see(s: &State, viewer: u16, target: u16) -> bool {
     let (v, t) = (usize::from(viewer), usize::from(target));
-    let flags = |i: usize| s.objects.actor_flags.get(i).copied().unwrap_or(0);
+    let flags = |i: usize| s.objects.obj_status.get(i).copied().unwrap_or(0);
     let mut seen = flags(t) & 0x02 == 0;
     let status = &s.actors.attrs.status;
     if status[v] & 0x80 != 0 && !seen && t < 0x100 && status[t] & 0x80 != 0 {
@@ -162,7 +162,7 @@ mod tests {
         s.actors.attrs.strength[5] = 20;
         s.actors.attrs.intelligence[5] = 2;
         assert_eq!(strength(&s, 5), 20);
-        s.objects.actor_flags[5] = CURSED;
+        s.objects.obj_status[5] = CURSED;
         assert_eq!(strength(&s, 5), 17);
         assert_eq!(intelligence(&s, 5), 1);
     }
@@ -204,12 +204,12 @@ mod tests {
     #[test]
     fn uncharm_restores_alignment_and_worktype() {
         let mut s = State::empty();
-        s.objects.actor_flags[9] = 0x04 | 0x01;
+        s.objects.obj_status[9] = 0x04 | 0x01;
         s.actors.attrs.status[9] = 0x20;
         s.actors.attrs.movement_flags[9] = 0x40;
         s.actors.set_tail(tail::SOLO_MEMBER, 0xff);
         uncharm(&mut s, 9);
-        assert_eq!(s.objects.actor_flags[9], 0x01);
+        assert_eq!(s.objects.obj_status[9], 0x01);
         assert_eq!(s.actors.attrs.status[9], 0x40);
         assert_eq!(s.actors.worktype[9], 1);
         s.actors.set_tail(tail::SOLO_MEMBER, 2);
@@ -227,7 +227,7 @@ mod tests {
     fn visibility_rules() {
         let mut s = State::empty();
         assert!(can_see(&s, 1, 2));
-        s.objects.actor_flags[2] = 0x02;
+        s.objects.obj_status[2] = 0x02;
         assert!(!can_see(&s, 1, 2));
         s.actors.attrs.status[1] = 0x80;
         s.actors.attrs.status[2] = 0x80;

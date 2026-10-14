@@ -147,7 +147,7 @@ fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
     const CLOAK_NAME: u32 = 0x101efc;
     let a = usize::from(actor);
     for obj in seams::contents(s, ObjectId(actor)) {
-        let flags = s.objects.actor_flags.get(obj.index()).copied().unwrap_or(0);
+        let flags = s.objects.obj_status.get(obj.index()).copied().unwrap_or(0);
         if flags & 0x18 == 0x10 {
             continue;
         }
@@ -171,7 +171,7 @@ fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
             }
             0x102 => {
                 if s.rng.range(0, 999) == 0x1ad {
-                    s.objects.actor_flags[a] &= !0x02;
+                    s.objects.obj_status[a] &= !0x02;
                     s.gfx.dissolve = 1;
                     f.vanish = true;
                     seams::present_map(s);
@@ -220,10 +220,10 @@ fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
 /// only when the condition holds; the attribute roll is `random(1, 30)`.
 fn wear_off(s: &mut State, actor: u16, ring: bool) {
     let a = usize::from(actor);
-    if s.objects.actor_flags[a] & 0x02 != 0 && !ring && s.rng.range(0, 63) == 0 {
+    if s.objects.obj_status[a] & 0x02 != 0 && !ring && s.rng.range(0, 63) == 0 {
         let v = leaves::intelligence(s, actor) as i16;
         if v <= s.rng.range(1, 30) as i16 {
-            s.objects.actor_flags[a] &= !0x02;
+            s.objects.obj_status[a] &= !0x02;
         }
     }
     if s.actors.attrs.status[a] & 0x01 != 0 && s.rng.range(0, 63) == 0 {
@@ -232,13 +232,13 @@ fn wear_off(s: &mut State, actor: u16, ring: bool) {
             s.actors.attrs.status[a] &= !0x01;
         }
     }
-    if s.objects.actor_flags[a] & 0x40 != 0 && s.rng.range(0, 15) == 0 {
+    if s.objects.obj_status[a] & 0x40 != 0 && s.rng.range(0, 15) == 0 {
         let v = leaves::intelligence(s, actor) as i16;
         if v >= s.rng.range(1, 30) as i16 {
-            s.objects.actor_flags[a] &= !0x40;
+            s.objects.obj_status[a] &= !0x40;
         }
     }
-    if s.objects.actor_flags[a] & 0x04 != 0 && s.rng.range(0, 7) == 0 {
+    if s.objects.obj_status[a] & 0x04 != 0 && s.rng.range(0, 7) == 0 {
         let v = leaves::intelligence(s, actor) as i16;
         if v >= s.rng.range(1, 30) as i16 {
             leaves::uncharm(s, actor);

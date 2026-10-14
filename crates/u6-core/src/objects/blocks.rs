@@ -48,7 +48,7 @@ impl Objects {
     pub(crate) fn pack_record(&mut self, s_print: &mut Vec<u32>, slot: Slot, n: usize) {
         let i = slot as usize;
         if self.place(slot) != 0 {
-            let st = &mut self.actor_flags[i];
+            let st = &mut self.obj_status[i];
             let parent = (u16::from(self.location[i].to_packed()[1]) << 8
                 | u16::from(self.location[i].to_packed()[0])) as Slot;
             if parent >= 0x100 {
@@ -61,7 +61,7 @@ impl Objects {
         let [b0, b1, b2] = self.location[i].to_packed();
         let [t0, t1] = self.type_frame[i].to_be_bytes();
         let [q0, q1] = self.qq[i].to_be_bytes();
-        self.rec[r..r + 8].copy_from_slice(&[self.actor_flags[i], b0, b1, b2, t0, t1, q0, q1]);
+        self.rec[r..r + 8].copy_from_slice(&[self.obj_status[i], b0, b1, b2, t0, t1, q0, q1]);
         if self.place(slot) == IN_CONTAINER {
             let parent = self.parent(slot);
             let mut m = n;
@@ -286,7 +286,7 @@ impl Objects {
             self.rec_slots[i] = slot;
             let r = &self.rec[i * 8..i * 8 + 8];
             let k = slot as usize;
-            self.actor_flags[k] = r[0];
+            self.obj_status[k] = r[0];
             self.location[k] = u6_formats::position::Position::from_packed([r[1], r[2], r[3]]);
             self.type_frame[k] = u16::from_be_bytes([r[4], r[5]]);
             self.qq[k] = u16::from_be_bytes([r[6], r[7]]);
@@ -391,7 +391,7 @@ pub fn prune_far(s: &mut State, x: u16, y: u16, z: u16) {
         if o.place(c) == 0 && far(o, c) {
             if o.status(c) & TEMPORARY == 0 && o.tf(c) != 0 {
                 if o.kind(c) == 0x14f && o.status(c) & 0x40 != 0 {
-                    s.objects.actor_flags[c as usize] &= !0x40;
+                    s.objects.obj_status[c as usize] &= !0x40;
                 }
             } else {
                 remove(s, c);

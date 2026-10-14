@@ -434,7 +434,7 @@ pub fn resurrect_party(state: &mut State) {
             state.objects.type_frame[i] = attrs.base_type_frame[i];
         }
         attrs.status[i] = (attrs.status[i] & 0x9f) | 0x40;
-        if let Some(f) = state.objects.actor_flags.get_mut(i) {
+        if let Some(f) = state.objects.obj_status.get_mut(i) {
             *f &= 0xb9;
         }
         state.actors.attrs.status[i] &= 0xe1;

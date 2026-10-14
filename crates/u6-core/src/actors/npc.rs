@@ -397,7 +397,7 @@ pub fn steal(s: &mut State, actor: u16, target: u16) {
 /// when the turn ended early.
 pub fn npc_turn_sync(s: &mut State, actor: u16) -> Option<(i8, Wait)> {
     let a = usize::from(actor);
-    if s.actors.attrs.status[a] & 0x80 != 0 && s.objects.actor_flags[a] & 0x04 == 0 {
+    if s.actors.attrs.status[a] & 0x80 != 0 && s.objects.obj_status[a] & 0x04 == 0 {
         leaves::uncharm(s, actor);
     }
     let before = s.actors.mp(a);

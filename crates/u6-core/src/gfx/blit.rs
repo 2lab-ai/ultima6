@@ -257,8 +257,22 @@ pub fn copy_rect(
     }
 }
 
+/// Original: 0x153384 (draw a `.bmp` bitmap at (x, y): its header is two little-endian words,
+/// width and height, read byte by byte; then the body of 0x1533e0)
+///
+/// The header is decoded by `u6_formats::bitmap` (the LZW file 0x1346a0 reads).
+pub fn blit_bmp(
+    colours: &[u8; 256],
+    front: &mut Framebuffer,
+    bmp: &u6_formats::bitmap::Bitmap,
+    x: u16,
+    y: u16,
+) {
+    blit_bitmap(colours, front, (bmp.width, bmp.height), &bmp.pixels, x, y);
+}
+
 /// Original: 0x1533e0 (draw an 8-bit bitmap with a word header on the screen); also the body of
-/// 0x153384 (the same with a byte-pair header, `paper.bmp`)
+/// 0x153384
 ///
 /// `pixels` is `width × height` bytes, row-major; each byte becomes screen colour
 /// `colours[byte] & 0x1f` (the five bits the shifts take into the planes). The bitmap starts

@@ -202,10 +202,7 @@ pub struct Objects {
     /// Original: A4+0x190c (status byte per slot: bits 3-4 where, 0x01 ok to take, 0x02
     /// invisible, 0x20 temporary, 0x40 broken / egg active, 0x80 lit; objlist 0x0000 fills the
     /// actor slots)
-    ///
-    /// One byte per object slot, not only per actor; the name stays until the aggregate's loader
-    /// (`state.rs`, which writes `actor_flags[0..256]`) is renamed with it.
-    pub actor_flags: Vec<u8>,
+    pub obj_status: Vec<u8>,
     /// Original: 0x135588 (3 bytes per slot: x 10 bits, y 10 bits, z 4 bits; for a contained
     /// object bytes 0-1 hold the parent slot; objlist 0x0100 fills the actor slots)
     pub location: Vec<Position>,
@@ -278,7 +275,7 @@ pub struct Objects {
 impl Default for Objects {
     fn default() -> Self {
         Self {
-            actor_flags: vec![0; OBJECT_SLOTS],
+            obj_status: vec![0; OBJECT_SLOTS],
             location: vec![Position::default(); OBJECT_SLOTS],
             type_frame: vec![0; OBJECT_SLOTS],
             qq: vec![0; OBJECT_SLOTS],
@@ -335,7 +332,7 @@ impl Objects {
 
     /// Status byte of `slot` (0 for -1).
     pub fn status(&self, slot: Slot) -> u8 {
-        ix(slot).map_or(0, |i| self.actor_flags[i])
+        ix(slot).map_or(0, |i| self.obj_status[i])
     }
 
     /// Status bits 3-4 of `slot`: 0 = on the map.
