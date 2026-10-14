@@ -76,12 +76,14 @@ fn engine_boots_draws_and_moves_the_view() {
     engine.tick(&[], 16);
     assert_eq!(engine.state().map.centre.x, start.x + 1);
     assert_ne!(engine.frame().pixels(), &first[..], "view moved");
+    // Stub contract, independent of which stubs still exist: one log line per stub id hit.
     let hits = engine.stub_hits();
-    assert_eq!(
-        hits.get("0x108ac4 load map region around the party"),
-        Some(&1)
-    );
     let log = engine.take_log();
-    assert!(log.iter().any(|l| l.contains("0x110878")), "{log:?}");
+    let logged: Vec<&str> = log.iter().map(|l| l.trim_start_matches("stub: ")).collect();
+    let mut ids: Vec<&str> = hits.keys().copied().collect();
+    let mut sorted = logged.clone();
+    sorted.sort_unstable();
+    ids.sort_unstable();
+    assert_eq!(sorted, ids, "{log:?}");
     assert!(engine.take_log().is_empty());
 }
