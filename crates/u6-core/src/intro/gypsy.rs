@@ -386,11 +386,12 @@ pub async fn ask(st: &mut IntroState, io: &Io, p: i16) -> i16 {
             break c;
         }
     };
-    let table = if c == u16::from(b'A') { 0x3d4 } else { 0x40c };
-    // The original indexes its per-virtue tables with the word as it is; a `u` whose tables
-    // hold one past 7 would read beyond them. The port keeps the low three bits (0..7 are
-    // unchanged).
-    st.exe.a4_i16(table + 2 * p as u32) & 7
+    let table: u32 = if c == u16::from(b'A') { 0x3d4 } else { 0x40c };
+    // The original indexes its per-virtue tables with the word as it is, sign-extended
+    // (0x106530), so a negative question word reads before the table; the port does the same
+    // 32-bit address sum. A `u` whose tables hold one past 7 would read beyond them: the port
+    // keeps the low three bits (0..7 are unchanged).
+    st.exe.a4_i16(table.wrapping_add_signed(2 * i32::from(p))) & 7
 }
 
 /// Original: u 0x106554 (gypsy: virtue `v` won a question: add its stats, Humility's karma,

@@ -114,12 +114,13 @@ impl UExe {
 
     /// Big-endian word at image address `addr`.
     pub fn word(&self, addr: u32) -> u16 {
-        u16::from_be_bytes([self.byte(addr), self.byte(addr + 1)])
+        u16::from_be_bytes([self.byte(addr), self.byte(addr.wrapping_add(1))])
     }
 
-    /// Big-endian signed word at `A4 + off`.
+    /// Big-endian signed word at `A4 + off`. The sum wraps as the 68000's 32-bit address sum
+    /// does, so an `off` that is a negative index as `u32` reads below A4 (0 outside the image).
     pub fn a4_i16(&self, off: u32) -> i16 {
-        self.word(A4 + off) as i16
+        self.word(A4.wrapping_add(off)) as i16
     }
 
     /// The `n` signed words from `A4 + off` on.

@@ -745,6 +745,30 @@ fn a_tv_pick_among_one_frame_ends_its_step_when_it_comes_round_again() {
     assert_eq!(rand, by_hand.rand, "one rand per pick");
 }
 
+#[test]
+fn a_tv_pick_among_no_frames_ends_its_step_when_it_comes_round_again() {
+    // Script 0: a loop of 2 over (0x84 0: one of the next 0 frames, then frame 7, repeat). With
+    // a count of 0 the pick is the byte after it every pass, so the second pass repeats the
+    // first one's position (0x103b94 again; the original's divide at 0x105612 traps first).
+    let (frame, pos, repeat, rand) = returns(|| {
+        let mut e = exe();
+        e.poke(A4 + 0x1c6, &[0x80, 0x02, 0x84, 0x00, 0x07, 0x81]);
+        let mut st = IntroState::new(e, Files::default());
+        st.tv = opening::Tv::new(&st);
+        opening::set_script(&mut st, 0);
+        opening::tv_step(&mut st);
+        let first = st.tv.last_pick;
+        opening::tv_step(&mut st);
+        assert_eq!(st.tv.last_pick, first, "the same position both passes");
+        (st.tv.frame, st.tv.pos, st.tv.repeat, st.rand)
+    });
+    assert_eq!((frame, pos, repeat), (7, 2, 0));
+    let mut by_hand = state();
+    by_hand.rand();
+    by_hand.rand();
+    assert_eq!(rand, by_hand.rand, "one rand per pick");
+}
+
 /// The x of every ink pixel on row `y` of a 41-pixel line.
 fn ink_row(chip: &Chip, v: View, y: i32) -> Vec<i32> {
     let ink = text::glyph_colour(15);
@@ -814,4 +838,22 @@ fn an_answer_table_entry_past_the_eight_virtues_pours_a_virtue() {
     let (w, level) = got.unwrap();
     assert_eq!(w, 1, "the low three bits");
     assert_eq!(level[1], 2, "virtue 1 poured");
+}
+
+#[test]
+fn a_negative_question_word_reads_before_the_answer_table() {
+    // A foreign `u` whose pair table names question −1, then −32768: 0x106530 sign-extends the
+    // word and indexes A4+0x3d4 with it, so −1 reads the word before the table and −32768
+    // lands below the image (0 here).
+    let mut e = exe();
+    e.poke(A4 + 0x3d2, &0x000du16.to_be_bytes());
+    let mut st = IntroState::new(e, Files::default());
+    keyboard(&mut st);
+    st.font = Some(font());
+    let got = drive(&[Key::Char('a'), Key::Char('a')], move |io| async move {
+        let near = gypsy::ask(&mut st, &io, -1).await;
+        let far = gypsy::ask(&mut st, &io, i16::MIN).await;
+        (near, far)
+    });
+    assert_eq!(got, Some((5, 0)), "the low three bits of 0xd, then 0");
 }
