@@ -104,7 +104,11 @@ pub struct SaveSync {
 impl SaveSync {
     /// Hands the store what a Save committed since the last flush. Returns the number of files
     /// written (0 when there was no Save).
-    pub fn flush(&mut self, engine: &Engine, store: &mut dyn SaveStore) -> Result<usize, StoreError> {
+    pub fn flush(
+        &mut self,
+        engine: &Engine,
+        store: &mut dyn SaveStore,
+    ) -> Result<usize, StoreError> {
         let (files, generation) = {
             let s = engine.state();
             (changed_since(&s, self.flushed), s.saveload.generation)

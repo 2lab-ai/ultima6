@@ -116,10 +116,7 @@ fn encode_puts_every_table_at_its_offset() {
     assert_eq!(f[0x14F1 + 2], 2 ^ 15, "movement points");
     assert_eq!(f[0x1AF1 + 255], 255 ^ 13);
     let t = &f[TAIL..];
-    assert_eq!(
-        &t[..10],
-        &[0x11, 0x22, 1, 2, 3, 4, 0x01, 0x61, 0x33, 0x44]
-    );
+    assert_eq!(&t[..10], &[0x11, 0x22, 1, 2, 3, 4, 0x01, 0x61, 0x33, 0x44]);
     assert_eq!(t[0x0a], 2, "leader index");
     assert_eq!(t[0x0b], 0x8b, "undecoded bytes come from the block");
     assert_eq!(
@@ -141,7 +138,10 @@ fn decode_reads_back_what_encode_wrote() {
     assert_eq!(t.objects.location[..256], s.objects.location[..256]);
     assert_eq!(t.objects.type_frame[..256], s.objects.type_frame[..256]);
     assert_eq!(t.objects.qq[..256], s.objects.qq[..256]);
-    assert_eq!(t.objects.obj_status[300], 0, "only actor slots are in objlist");
+    assert_eq!(
+        t.objects.obj_status[300], 0,
+        "only actor slots are in objlist"
+    );
     assert_eq!(t.actors.attrs, s.actors.attrs);
     assert_eq!(t.actors.worktype, s.actors.worktype);
     assert_eq!(t.actors.movement_points, s.actors.movement_points);
@@ -170,7 +170,10 @@ fn a_short_file_leaves_the_rest_as_it_was() {
     t.actors.attrs.dexterity[5] = 0xdd;
     decode(&mut t, &f);
     assert_eq!(t.actors.attrs.status[5], 5 ^ 1, "read");
-    assert_eq!(t.actors.attrs.strength[0], 2, "first byte of the table read");
+    assert_eq!(
+        t.actors.attrs.strength[0], 2,
+        "first byte of the table read"
+    );
     assert_eq!(t.actors.attrs.strength[5], 0xee, "past the end: kept");
     assert_eq!(t.actors.attrs.dexterity[5], 0xdd);
     // Bytes past 0x1C73 are not read.

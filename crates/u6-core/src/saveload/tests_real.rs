@@ -224,10 +224,19 @@ fn decode_agrees_with_the_formats_parser() {
         assert_eq!(t.unknown_1af1[i], raw[0x1AF1 + i]);
     }
     assert_eq!(a.party.names, list.party.names);
-    assert_eq!((a.party.members, a.party.size), (list.party.roster, list.party.size));
+    assert_eq!(
+        (a.party.members, a.party.size),
+        (list.party.roster, list.party.size)
+    );
     let c = list.clock;
     assert_eq!(
-        (a.calendar.minute, a.calendar.hour, a.calendar.day, a.calendar.month, a.calendar.year),
+        (
+            a.calendar.minute,
+            a.calendar.hour,
+            a.calendar.day,
+            a.calendar.month,
+            a.calendar.year
+        ),
         (c.minute, c.hour, c.day, c.month, c.year)
     );
     let p = list.player;
@@ -262,6 +271,23 @@ fn shipped(files: &Files) -> (Vec<u8>, Vec<Vec<u8>>) {
     (objlist, blocks)
 }
 
+/// Why the boot changes a shipped objlist byte before any command, in the port and the
+/// original alike: 0x1217d4 raises a dexterity of 0 to 1 and takes actor 0 out of a schedule
+/// worktype; 0x105350 puts the view centre (block 0x0c..0x11) on the leader; the clock tick at
+/// +0 (0x10368a) sets the moons (block 0x7c..0x7f); idle animation turns actors. The portrait
+/// byte (block 0x81) is the port's character-creation stub.
+fn boot_change(table: &str, i: usize, x: u8, y: u8) -> Option<&'static str> {
+    Some(match table {
+        "A4+0x400c dexterity" if x == 0 && y == 1 => "0x1217d4 dexterity at least 1",
+        "0x139188 worktype" if i == 0 => "0x1217d4 actor 0 worktype",
+        "A4-0x7b84 block" if (0x0c..0x12).contains(&i) => "0x105350 view centre",
+        "A4-0x7b84 block" if (0x7c..0x80).contains(&i) => "0x10368a moons",
+        "A4-0x7b84 block" if i == 0x81 => "character-creation stub",
+        _ if frame_only(table, i, x, y) => "idle frame",
+        _ => return None,
+    })
+}
+
 #[test]
 fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
     let Some(files) = zip_files() else { return };
@@ -271,39 +297,47 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
     let s = run.state();
     let new_list = s.saveload.objlist.clone().unwrap();
     let new_blocks: Vec<Vec<u8>> = s.objects.blocks.iter().map(|(_, b)| b.to_bytes()).collect();
-    for d in table_diffs(&old_list, &new_list) {
-        eprintln!("objlist differs: {d:?}");
+    let mut why = BTreeMap::new();
+    for (off, len, name) in TABLES {
+        for i in 0..len {
+            let (x, y) = (old_list[off + i], new_list[off + i]);
+            if x != y {
+                let w = boot_change(name, i, x, y);
+                assert!(
+                    w.is_some(),
+                    "{name} byte {i:#x}: {x:#04x} -> {y:#04x} unexplained"
+                );
+                *why.entry(w.unwrap()).or_insert(0) += 1;
+            }
+        }
     }
+    eprintln!("objlist bytes changed by the boot: {why:?}");
     let committed: Vec<String> = (0..BLOCK_COUNT)
         .filter(|&i| s.saveload.block_gen[i] == 1)
         .map(block_file)
         .collect();
-    eprintln!("committed: {committed:?}");
-    for d in block_diffs(&old_blocks, &new_blocks) {
-        eprintln!("block differs: {d:?}");
+    assert_eq!(
+        committed,
+        [
+            "savegame/objblkBC",
+            "savegame/objblkCC",
+            "savegame/objblkBD",
+            "savegame/objblkCD"
+        ]
+    );
+    for (name, a, _) in block_diffs(&old_blocks, &new_blocks) {
+        let i = (0..BLOCK_COUNT).find(|&i| block_file(i) == name).unwrap();
+        let (mut ra, mut rb) = (records(&old_blocks[i]), records(&new_blocks[i]));
+        let moved: Vec<usize> = (0..ra.len()).filter(|&n| ra[n] != rb[n]).collect();
+        eprintln!(
+            "{name}: {a} records, {} in another order: {moved:?}",
+            moved.len()
+        );
+        ra.sort();
+        rb.sort();
+        assert_eq!(ra, rb, "{name}: the same records");
+        assert_eq!(name, "savegame/objblkCD");
     }
-    for i in 0..BLOCK_COUNT {
-        let (a, b) = (records(&old_blocks[i]), records(&new_blocks[i]));
-        let mut shown = 0;
-        for (n, (x, y)) in a.iter().zip(&b).enumerate() {
-            if x != y && shown < 12 {
-                eprintln!("  {} #{n}: {:02x?} -> {:02x?}", block_file(i), x, y);
-                shown += 1;
-            }
-        }
-        if a != b {
-            let mut sa = a.clone();
-            let mut sb = b.clone();
-            sa.sort();
-            sb.sort();
-            eprintln!("  {}: same records as a set: {}", block_file(i), sa == sb);
-        }
-    }
-    let tail: Vec<String> = (0..0x82)
-        .filter(|&i| old_list[0x1BF1 + i] != new_list[0x1BF1 + i])
-        .map(|i| format!("{i:#04x}: {:#04x} -> {:#04x}", old_list[0x1BF1 + i], new_list[0x1BF1 + i]))
-        .collect();
-    eprintln!("tail: {tail:?}");
 }
 
 /// Prints how `got` differs from `want` (objlist tables, tail bytes, block records); returns
@@ -314,7 +348,13 @@ fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8
     }
     let tail: Vec<String> = (0..0x82)
         .filter(|&i| want.0.get(0x1BF1 + i) != got.0.get(0x1BF1 + i))
-        .map(|i| format!("{i:#04x}: {:#04x} -> {:#04x}", want.0[0x1BF1 + i], got.0[0x1BF1 + i]))
+        .map(|i| {
+            format!(
+                "{i:#04x}: {:#04x} -> {:#04x}",
+                want.0[0x1BF1 + i],
+                got.0[0x1BF1 + i]
+            )
+        })
         .collect();
     if !tail.is_empty() {
         eprintln!("{what}: tail {tail:?}");
@@ -327,7 +367,13 @@ fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8
         sa.sort();
         sb.sort();
         eprintln!("{what}: {name} records {a} -> {b}, same set: {}", sa == sb);
-        for (n, (x, y)) in ra.iter().zip(&rb).enumerate().filter(|(_, (x, y))| x != y).take(6) {
+        for (n, (x, y)) in ra
+            .iter()
+            .zip(&rb)
+            .enumerate()
+            .filter(|(_, (x, y))| x != y)
+            .take(6)
+        {
             eprintln!("    #{n}: {x:02x?} -> {y:02x?}");
         }
     }
@@ -360,23 +406,29 @@ fn defined_block(bytes: &[u8]) -> Vec<[u8; 8]> {
     records(bytes).iter().map(defined).collect()
 }
 
-/// The opening fight the port does not run: the egg at the throne (0x1319b2, a stub) hatches
-/// three gargoyles into the temporary actor slots 0xe0..0xe2, and combat mode starts
-/// (0x121c64, a stub). Objlist bytes these change in the original's start save.
+/// An actor's frame bits: the high 6 bits of its type + frame word (objlist 0x0400, even
+/// bytes). Idle animation turns actors as display time passes (0x10202e, A4-0x7afa); the
+/// oracle saved after ~1000 frames, the port after 40 ticks.
+fn frame_only(table: &str, index: usize, x: u8, y: u8) -> bool {
+    table == "0x137988 type + frame" && index.is_multiple_of(2) && x & 3 == y & 3
+}
+
+/// What the original's boot runs and the port stubs, in the original's start save: the egg
+/// at the throne (0x1319b2) hatches three gargoyles into the temporary actor slots 0xe0..0xe2,
+/// and combat mode starts for the objlist's combat byte (0x121c64: each member's worktype from
+/// its combat mode, worktype operand = its party index, the solo worktype kept at A4-0x7b0a).
 fn opening_fight(table: &str, index: usize) -> bool {
-    let actor = |i: usize| match table {
-        "0x135588 location" => i / 3,
+    let actor = match table {
+        "0x135588 location" => index / 3,
         "0x137988 type + frame"
         | "A4+0x250c quality / quantity"
         | "A4+0x440c experience"
-        | "0x139688 base type + frame" => i / 2,
-        _ => i,
+        | "0x139688 base type + frame" => index / 2,
+        _ => index,
     };
-    let a = actor(index);
-    (0xe0..=0xe2).contains(&a)
-        || (table == "0x139188 worktype" && (2..=4).contains(&a))
-        || (table == "0x139488 worktype operand" && (1..=4).contains(&a))
-        || (table == "0x137988 type + frame" && [3, 6].contains(&a))
+    (0xe0..=0xe2).contains(&actor)
+        || (table == "0x139188 worktype" && (1..=4).contains(&actor))
+        || (table == "0x139488 worktype operand" && (1..=4).contains(&actor))
         || (table == "A4-0x7b84 block" && index == 0x7a)
 }
 
@@ -398,8 +450,10 @@ fn the_ports_start_save_against_the_originals() {
     report("port vs original", &want, &got);
     for (off, len, name) in TABLES {
         for i in 0..len {
-            if want.0[off + i] != got.0[off + i] {
-                assert!(opening_fight(name, i), "{name} byte {i:#x} unexplained");
+            let (x, y) = (want.0[off + i], got.0[off + i]);
+            if x != y {
+                let why = frame_only(name, i, x, y) || opening_fight(name, i);
+                assert!(why, "{name} byte {i:#x} unexplained");
             }
         }
     }
@@ -436,42 +490,338 @@ fn the_ports_start_save_against_the_originals() {
     }
 }
 
+/// The original's own save boots in the port, and the port's save of it is the original's
+/// save of the same state (the original booted from that save and saved again at once).
 #[test]
-fn the_originals_save_loads_and_saves_back_unchanged() {
+fn the_originals_save_loads_and_saves_like_the_original() {
     let Some(mut files) = zip_files() else { return };
-    let Some(saved) = oracle_save("start-saved") else { return };
+    let (Some(saved), Some(resaved)) = (oracle_save("start-saved"), oracle_save("resaved")) else {
+        return;
+    };
     assert_eq!(saved.files[OBJLIST_FILE].len(), OBJLIST_LEN);
     attach(&mut files, &saved).unwrap();
     let mut run = Run::boot(files);
     {
         let s = run.e.state();
-        let types: Vec<u16> = (0xe0..0xe3).map(|a| s.objects.type_frame[a] & 0x3ff).collect();
-        eprintln!("loaded: centre {:?}, temporary actors {types:x?}", s.map.centre);
-        assert!(types.iter().all(|&t| t != 0), "the saved gargoyles are back");
-        assert_eq!(s.saveload.generation, 0);
+        let types: Vec<u16> = (0xe0..0xe3)
+            .map(|a| s.objects.type_frame[a] & 0x3ff)
+            .collect();
+        eprintln!(
+            "loaded: centre {:?}, temporary actors {types:x?}",
+            s.map.centre
+        );
+        assert!(
+            types.iter().all(|&t| t != 0),
+            "the saved gargoyles are back"
+        );
     }
     run.command(Cmd::Save);
     let s = run.state();
     let mut got_store = saved.clone();
     got_store.store(&changed_since(&s, 0)).unwrap();
-    let want = store_files(&saved);
+    let want = store_files(&resaved);
     let got = store_files(&got_store);
-    report("port re-save vs original", &want, &got);
-    let diff: Vec<(&str, usize)> = TABLES
-        .iter()
-        .flat_map(|&(off, len, name)| {
-            (0..len)
-                .filter(move |&i| want.0[off + i] != got.0[off + i])
-                .map(move |i| (name, i))
+    report("port re-save vs original re-save", &want, &got);
+    for (off, len, name) in TABLES {
+        for i in 0..len {
+            let (x, y) = (want.0[off + i], got.0[off + i]);
+            assert!(
+                x == y || frame_only(name, i, x, y),
+                "{name} byte {i:#x}: {x:#04x} -> {y:#04x}"
+            );
+        }
+    }
+    for i in 0..BLOCK_COUNT {
+        let w = defined_block(&want.1[i]);
+        let g = defined_block(&got.1[i]);
+        assert_eq!(w, g, "{}", block_file(i));
+    }
+    // The original moves records on every load + save cycle (0x10db82's merge, 0x10da94);
+    // the port reproduces those moves.
+    let before = store_files(&saved);
+    let moved: Vec<String> = (0..BLOCK_COUNT)
+        .filter(|&i| before.1[i] != want.1[i])
+        .map(block_file)
+        .collect();
+    eprintln!("blocks the original's second save rewrote: {moved:?}");
+    assert!(!moved.is_empty());
+}
+
+/// The scroll lines so far plus the line being written.
+fn transcript(s: &State) -> Vec<String> {
+    let t = &s.ui.text;
+    let mut lines = s.ui.messages.clone();
+    let mut last: String = t.transcript_line.iter().map(|&b| char::from(b)).collect();
+    let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
+    last.extend(pending.iter().map(|&b| char::from(b)));
+    lines.push(last);
+    lines
+}
+
+impl Run {
+    fn leader_at(&self) -> u6_formats::position::Position {
+        self.e.state().leader_position().unwrap()
+    }
+
+    /// Presses arrows until the party has stepped `n` times (a blocked direction is one turn;
+    /// then the next of S, E, W, N is tried). Returns the keys pressed.
+    fn walk(&mut self, n: usize) -> Vec<Key> {
+        let mut pressed = Vec::new();
+        let dirs = [Key::Down, Key::Right, Key::Left, Key::Up];
+        let (mut d, mut moved) = (0, 0);
+        while moved < n {
+            assert!(
+                pressed.len() < 4 * n + 8,
+                "the party cannot walk: {pressed:?}"
+            );
+            let before = self.leader_at();
+            self.press(dirs[d]);
+            pressed.push(dirs[d]);
+            if self.leader_at() != before {
+                moved += 1;
+            } else {
+                d = (d + 1) % dirs.len();
+            }
+            assert!(self.at_prompt(), "a step ends at the prompt");
+        }
+        pressed
+    }
+
+    /// `T`, the cross-hair onto the nearest actor not in the party within 5 tiles (else the
+    /// nearest member), Return; then answers the conversation: "bye" at a line input, else
+    /// space / N / Y until the prompt is back. Returns the actor talked to.
+    fn talk(&mut self) -> u16 {
+        let (target, dx, dy) = {
+            let s = self.e.state();
+            let c = s.leader_position().unwrap();
+            let leader = s.actors.party.leader().unwrap().0;
+            let party: Vec<u16> = s.actors.party.active().map(|a| a.0).collect();
+            let mut best: Option<(bool, i32, u16, i32, i32)> = None;
+            for a in 1..0xe0u16 {
+                let p = s.objects.location[usize::from(a)];
+                if a == leader || s.objects.type_frame[usize::from(a)] == 0 || p.z != c.z {
+                    continue;
+                }
+                let (dx, dy) = (
+                    i32::from(p.x) - i32::from(c.x),
+                    i32::from(p.y) - i32::from(c.y),
+                );
+                if dx.abs() > 5 || dy.abs() > 5 {
+                    continue;
+                }
+                let key = (party.contains(&a), dx.abs().max(dy.abs()), a, dx, dy);
+                if best.is_none_or(|b| (key.0, key.1) < (b.0, b.1)) {
+                    best = Some(key);
+                }
+            }
+            let b = best.expect("an actor near the party");
+            (b.2, b.3, b.4)
+        };
+        self.press(Key::Char('t'));
+        let (h, v) = (
+            if dx < 0 { Key::Left } else { Key::Right },
+            if dy < 0 { Key::Up } else { Key::Down },
+        );
+        for _ in 0..dx.abs() {
+            self.press(h);
+        }
+        for _ in 0..dy.abs() {
+            self.press(v);
+        }
+        self.press(Key::Enter);
+        let mut said = false;
+        for i in 0..200 {
+            if self.at_prompt() {
+                break;
+            }
+            if self.e.state().ui.input.line_input {
+                for c in "bye".chars() {
+                    self.e.tick(&[InputEvent::Key(Key::Char(c))], 16);
+                }
+                self.press(Key::Enter);
+                said = true;
+            } else {
+                self.press([Key::Space, Key::Char('n'), Key::Char('y')][i % 3]);
+            }
+        }
+        assert!(self.at_prompt(), "the conversation ended");
+        assert!(said, "the conversation asked for a line");
+        target
+    }
+}
+
+/// The parts of two states that differ, named by field (actor tables compared per table).
+fn state_diffs(a: &State, b: &State) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut check = |name: &str, same: bool| {
+        if !same {
+            out.push(name.to_string());
+        }
+    };
+    let n = 0x100;
+    let (oa, ob) = (&a.objects, &b.objects);
+    check(
+        "objects.obj_status[actors]",
+        oa.obj_status[..n] == ob.obj_status[..n],
+    );
+    check(
+        "objects.location[actors]",
+        oa.location[..n] == ob.location[..n],
+    );
+    check(
+        "objects.type_frame[actors]",
+        oa.type_frame[..n] == ob.type_frame[..n],
+    );
+    check("objects.qq[actors]", oa.qq[..n] == ob.qq[..n]);
+    check("objects.next (slot numbering)", oa.next == ob.next);
+    check(
+        "objects.type_frame[objects]",
+        oa.type_frame[n..] == ob.type_frame[n..],
+    );
+    check("objects.free", oa.free == ob.free);
+    check(
+        "objects.loaded_surface",
+        oa.loaded_surface == ob.loaded_surface,
+    );
+    check("objects.blocks", oa.blocks == ob.blocks);
+    check("objects.tmp_flag", oa.tmp_flag == ob.tmp_flag);
+    check("objects.save_mode", oa.save_mode == ob.save_mode);
+    let (aa, ab) = (&a.actors, &b.actors);
+    check("actors.attrs", aa.attrs == ab.attrs);
+    check(
+        "actors.movement_points",
+        aa.movement_points == ab.movement_points,
+    );
+    check("actors.worktype", aa.worktype == ab.worktype);
+    check("actors.schedules", aa.schedules == ab.schedules);
+    check("actors.party", aa.party == ab.party);
+    check("actors.calendar", aa.calendar == ab.calendar);
+    check("actors.quest_flag", aa.quest_flag == ab.quest_flag);
+    check(
+        "actors.quest_flag_copy",
+        aa.quest_flag_copy == ab.quest_flag_copy,
+    );
+    check("actors.timers", aa.timers == ab.timers);
+    check(
+        "actors.karma/wind/rest",
+        (aa.karma, aa.wind, aa.rest_counter) == (ab.karma, ab.wind, ab.rest_counter),
+    );
+    let tail: Vec<usize> = (0..0x82)
+        .filter(|&i| aa.objlist_tail[i] != ab.objlist_tail[i])
+        .collect();
+    check(&format!("actors.objlist_tail {tail:x?}"), tail.is_empty());
+    let (wa, wb) = (format!("{:?}", aa.work), format!("{:?}", ab.work));
+    let fields: Vec<String> = wa
+        .split(", ")
+        .zip(wb.split(", "))
+        .filter(|(x, y)| x != y)
+        .map(|(x, _)| {
+            x.split(':')
+                .next()
+                .unwrap_or("")
+                .trim_start_matches("ActorWork { ")
+                .to_string()
         })
         .collect();
-    eprintln!("objlist bytes that differ: {diff:x?}");
-    for i in 0..BLOCK_COUNT {
-        assert_eq!(
-            defined_block(&want.1[i]),
-            defined_block(&got.1[i]),
-            "{}",
-            block_file(i)
-        );
+    check(&format!("actors.work {fields:?}"), fields.is_empty());
+    check("map.centre", a.map.centre == b.map.centre);
+    check("map.view_flags", a.map.view_flags == b.map.view_flags);
+    check("map.view_tiles", a.map.view_tiles == b.map.view_tiles);
+    check("map.anim_enabled", a.map.anim_enabled == b.map.anim_enabled);
+    check("tables", a.tables == b.tables);
+    check("ui.panel", a.ui.panel == b.ui.panel);
+    check("ui.messages", a.ui.messages == b.ui.messages);
+    check("converse", a.converse == b.converse);
+    check("gfx", a.gfx == b.gfx);
+    check("main", a.main == b.main);
+    check("rng", a.rng == b.rng);
+    out
+}
+
+/// Objlist bytes that differ outside the actors' frame bits (the high 6 bits of each
+/// type + frame word: idle animation turns actors as display time passes, 0x10202e).
+fn objlist_diffs_but_frames(a: &[u8], b: &[u8]) -> Vec<(&'static str, usize)> {
+    let mut out = Vec::new();
+    for (off, len, name) in TABLES {
+        for i in 0..len {
+            let (x, y) = (a[off + i], b[off + i]);
+            let frame_byte = name == "0x137988 type + frame" && i.is_multiple_of(2);
+            if (frame_byte && x & 3 != y & 3) || (!frame_byte && x != y) {
+                out.push((name, i));
+            }
+        }
     }
+    out
+}
+
+#[test]
+fn walk_talk_save_restore() {
+    let Some(files) = zip_files() else { return };
+    let mut run = Run::boot(files.clone());
+    let start = run.leader_at();
+    let keys = run.walk(10);
+    let walked = run.leader_at();
+    let npc = run.talk();
+    let lines = transcript(&run.e.state());
+    eprintln!(
+        "walked {start:?} -> {walked:?} with {} keys; talked to {npc:#x}",
+        keys.len()
+    );
+    assert!(lines.iter().any(|l| l.contains("bye")), "{lines:?}");
+    run.command(Cmd::Save);
+    let saved = run.state();
+    assert!(saved.objects.tmp_flag.iter().all(|&f| f == 0));
+    let committed: Vec<String> = (0..BLOCK_COUNT)
+        .filter(|&i| saved.saveload.block_gen[i] == 1)
+        .map(block_file)
+        .collect();
+    eprintln!("save 1 committed {committed:?}");
+    assert!(
+        committed.len() >= 4,
+        "the region's four superchunks at least"
+    );
+    let want = canon(&saved);
+    let written = saved.saveload.objlist.clone().unwrap();
+    eprintln!("re-save after save: {:?}", table_diffs(&written, &want.0));
+
+    // 1. A fresh engine booted from the stored save.
+    let mut store = MemStore::default();
+    let mut sync = SaveSync::default();
+    assert_eq!(sync.flush(&run.e, &mut store).unwrap(), 1 + committed.len());
+    assert_eq!(sync.flush(&run.e, &mut store).unwrap(), 0, "nothing new");
+    let mut f = files.clone();
+    attach(&mut f, &store).unwrap();
+    let fresh = Run::boot(f);
+    let got = canon(&fresh.state());
+    let diffs = objlist_diffs_but_frames(&want.0, &got.0);
+    eprintln!("fresh engine: objlist bytes differing beyond actor frames: {diffs:x?}");
+    eprintln!(
+        "fresh engine: state parts differing: {:?}",
+        state_diffs(&saved, &fresh.state())
+    );
+    assert!(diffs.is_empty());
+    assert_eq!(
+        block_diffs(&want.1, &got.1),
+        [],
+        "fresh engine: block files"
+    );
+    assert_eq!(fresh.leader_at(), walked);
+
+    // 2. Restore in the same engine after walking on.
+    run.walk(3);
+    assert_ne!(run.leader_at(), walked);
+    run.command(Cmd::Restore);
+    let restored = run.state();
+    assert_eq!(restored.saveload.epoch, 1);
+    assert_eq!(run.leader_at(), walked);
+    let got = canon(&restored);
+    let diffs = objlist_diffs_but_frames(&want.0, &got.0);
+    eprintln!("restore: objlist bytes differing beyond actor frames: {diffs:x?}");
+    eprintln!(
+        "restore: state parts differing: {:?}",
+        state_diffs(&saved, &restored)
+    );
+    assert!(diffs.is_empty());
+    assert_eq!(block_diffs(&want.1, &got.1), [], "restore: block files");
+    assert!(run.at_prompt());
 }

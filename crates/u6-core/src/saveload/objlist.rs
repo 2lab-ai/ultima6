@@ -129,11 +129,17 @@ pub fn encode(s: &State) -> Vec<u8> {
     let (o, a) = (&s.objects, &s.actors);
     let at = &a.attrs;
     let n = ACTOR_SLOTS;
-    put_bytes(&mut f[0x0000..0x0100], &o.obj_status[..n.min(o.obj_status.len())]);
+    put_bytes(
+        &mut f[0x0000..0x0100],
+        &o.obj_status[..n.min(o.obj_status.len())],
+    );
     for (i, p) in o.location.iter().take(n).enumerate() {
         f[0x0100 + 3 * i..0x0103 + 3 * i].copy_from_slice(&p.to_packed());
     }
-    put_words(&mut f[0x0400..0x0600], &o.type_frame[..n.min(o.type_frame.len())]);
+    put_words(
+        &mut f[0x0400..0x0600],
+        &o.type_frame[..n.min(o.type_frame.len())],
+    );
     put_words(&mut f[0x0600..0x0800], &o.qq[..n.min(o.qq.len())]);
     put_bytes(&mut f[0x0800..0x0900], &at.status);
     put_bytes(&mut f[0x0900..0x0A00], &at.strength);
@@ -223,5 +229,6 @@ pub fn decode(s: &mut State, file: &[u8]) {
     a.karma = t[tail::KARMA];
     a.wind = t[tail::WIND];
     a.party.leader_index = t[tail::LEADER_INDEX];
-    a.timers.copy_from_slice(&t[tail::TIMERS..tail::TIMERS + 16]);
+    a.timers
+        .copy_from_slice(&t[tail::TIMERS..tail::TIMERS + 16]);
 }

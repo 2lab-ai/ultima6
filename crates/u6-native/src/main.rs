@@ -2,9 +2,14 @@
 //! 3x-scaled window or renders headless to PNG for pixel checks.
 //!
 //! ```text
-//! u6-native --zip ultima-vi.zip [--seed N]                       open the window
-//! u6-native --zip ultima-vi.zip --headless-png out.png [--frames N] [--keys up,up,left,t] [--seed N]
+//! u6-native --zip ultima-vi.zip [--seed N] [--save-dir DIR]      open the window
+//! u6-native --zip ultima-vi.zip --headless-png out.png [--frames N] [--keys up,up,left,t] [--seed N] [--save-dir DIR]
 //! ```
+//!
+//! `--save-dir DIR` keeps the game's saves in `DIR/savegame/` (the original's PLAYER-disk
+//! layout; an original `savegame/` directory copied there loads as it is): the boot reads the
+//! saved state from there, and every Save the game makes is written there after its tick.
+//! Without it nothing is stored and every boot starts from the zip's new-game files.
 //!
 //! Headless mode never opens a window or reads a clock: it runs N ticks of `HEADLESS_TICK_MS`,
 //! delivering the `--keys` one per tick while the game has no key queued, and writes the last
@@ -20,8 +25,12 @@ use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use minifb::{KeyRepeat, Window, WindowOptions};
+use u6_core::saveload::{SaveSync, attach};
 use u6_core::{Engine, Files, HEIGHT, InputEvent, Key, WIDTH};
 use u6_intake::{InputFile, intake};
+
+mod saves;
+use saves::DirStore;
 
 const SCALE: usize = 3;
 const HEADLESS_TICK_MS: u32 = 16;
@@ -34,6 +43,7 @@ struct Args {
     frames: u32,
     keys: Vec<Token>,
     seed: Option<u16>,
+    save_dir: Option<PathBuf>,
 }
 
 /// One `--keys` token.
@@ -98,14 +108,36 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 let n = value("a number")?;
                 parsed.seed = Some(n.parse().map_err(|_| format!("bad --seed {n:?}"))?);
             }
+            "--save-dir" => parsed.save_dir = Some(value("a directory")?.into()),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
     Ok(parsed)
 }
 
-/// Reads the zip, runs the intake (report lines to stderr) and boots the engine.
-fn boot(zip: &Path, seed: u16) -> Result<Engine, String> {
+/// Where saves go, if anywhere: the store and what it has handed over so far.
+struct Saves {
+    store: DirStore,
+    sync: SaveSync,
+}
+
+impl Saves {
+    /// After a tick: writes what a Save in it committed.
+    fn flush(&mut self, engine: &Engine) -> Result<(), String> {
+        let n = self
+            .sync
+            .flush(engine, &mut self.store)
+            .map_err(|e| e.to_string())?;
+        if n > 0 {
+            eprintln!("save: wrote {n} files");
+        }
+        Ok(())
+    }
+}
+
+/// Reads the zip, runs the intake (report lines to stderr), lays the stored save over the
+/// files and boots the engine.
+fn boot(zip: &Path, seed: u16, saves: Option<&Saves>) -> Result<Engine, String> {
     let data = std::fs::read(zip).map_err(|e| format!("{}: {e}", zip.display()))?;
     let name = zip
         .file_name()
@@ -114,7 +146,12 @@ fn boot(zip: &Path, seed: u16) -> Result<Engine, String> {
     for line in &r.report {
         eprintln!("intake: {line}");
     }
-    Engine::with_seed(Files::new(r.files), seed).map_err(|e| e.to_string())
+    let mut files = Files::new(r.files);
+    if let Some(saves) = saves {
+        let n = attach(&mut files, &saves.store).map_err(|e| e.to_string())?;
+        eprintln!("save: {n} stored files over the new-game files");
+    }
+    Engine::with_seed(files, seed).map_err(|e| e.to_string())
 }
 
 fn print_log(engine: &mut Engine) {
@@ -128,7 +165,12 @@ const IDLE_TICKS: u32 = 3;
 
 /// Runs `frames` fixed ticks feeding the tokens (see the module doc); returns the last frame as
 /// RGBA8.
-fn simulate(engine: &mut Engine, frames: u32, tokens: &[Token]) -> Vec<u8> {
+fn simulate(
+    engine: &mut Engine,
+    frames: u32,
+    tokens: &[Token],
+    mut saves: Option<&mut Saves>,
+) -> Result<Vec<u8>, String> {
     let mut queue: std::collections::VecDeque<Key> = std::collections::VecDeque::new();
     let mut next = tokens.iter();
     let mut pending: Option<String> = None;
@@ -163,10 +205,13 @@ fn simulate(engine: &mut Engine, frames: u32, tokens: &[Token]) -> Vec<u8> {
             }
         }
         engine.tick(&input, HEADLESS_TICK_MS);
+        if let Some(saves) = saves.as_deref_mut() {
+            saves.flush(engine)?;
+        }
     }
     let mut rgba = Vec::new();
     engine.frame().write_rgba(&mut rgba);
-    rgba
+    Ok(rgba)
 }
 
 fn write_png(path: &Path, rgba: &[u8]) -> Result<(), String> {
@@ -224,7 +269,7 @@ fn map_key(key: minifb::Key) -> Option<Key> {
     })
 }
 
-fn run_window(mut engine: Engine) -> Result<(), String> {
+fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String> {
     let (w, h) = (WIDTH * SCALE, HEIGHT * SCALE);
     let mut window =
         Window::new("Ultima VI", w, h, WindowOptions::default()).map_err(|e| e.to_string())?;
@@ -244,6 +289,9 @@ fn run_window(mut engine: Engine) -> Result<(), String> {
         let step = (now_ms - delivered_ms).min(MAX_STEP_MS);
         delivered_ms = now_ms;
         engine.tick(&input, step as u32);
+        if let Some(saves) = saves.as_mut() {
+            saves.flush(&engine)?;
+        }
         print_log(&mut engine);
         engine.frame().write_rgba(&mut rgba);
         upscale(&rgba, &mut screen);
@@ -266,10 +314,14 @@ fn run(args: Args) -> Result<(), String> {
         .zip
         .as_deref()
         .ok_or("--zip <ultima-vi.zip> is required")?;
+    let mut saves = args.save_dir.as_ref().map(|dir| Saves {
+        store: DirStore::new(dir),
+        sync: SaveSync::default(),
+    });
     match &args.headless_png {
         Some(path) => {
-            let mut engine = boot(zip, args.seed.unwrap_or(0))?;
-            let rgba = simulate(&mut engine, args.frames, &args.keys);
+            let mut engine = boot(zip, args.seed.unwrap_or(0), saves.as_ref())?;
+            let rgba = simulate(&mut engine, args.frames, &args.keys, saves.as_mut())?;
             print_log(&mut engine);
             write_png(path, &rgba)?;
             let hits = engine.stub_hits();
@@ -291,7 +343,10 @@ fn run(args: Args) -> Result<(), String> {
             }
             Ok(())
         }
-        None => run_window(boot(zip, args.seed.unwrap_or_else(clock_seed))?),
+        None => {
+            let engine = boot(zip, args.seed.unwrap_or_else(clock_seed), saves.as_ref())?;
+            run_window(engine, saves)
+        }
     }
 }
 
@@ -331,6 +386,12 @@ mod tests {
         assert_eq!(a.zip, Some(PathBuf::from("u6.zip")));
         assert_eq!(a.headless_png, Some(PathBuf::from("o.png")));
         assert_eq!((a.frames, a.seed), (5, Some(77)));
+        assert_eq!(a.save_dir, None);
+        assert_eq!(
+            args(&["--save-dir", "saves"]).unwrap().save_dir,
+            Some(PathBuf::from("saves"))
+        );
+        assert!(args(&["--save-dir"]).is_err());
         assert_eq!(
             a.keys,
             [Key::Up, Key::Right, Key::Char('t'), Key::Escape].map(Token::Key)
