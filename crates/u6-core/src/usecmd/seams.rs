@@ -5,11 +5,12 @@
 //! objects commands (hunk 15) = 0x12948a (0x129544 is called there directly); ui = 0x107cba;
 //! magic (hunk 11) = 0x1165a4, 0x11a470, 0x116d0e, 0x119200, 0x11a586, 0x119afc, 0x115b7c,
 //! 0x116526; inventory (hunk 8) = 0x105016, 0x1118c6, 0x11121e, 0x111be0 and the weight words.
-//! sound = 0x110878, 0x110912, 0x100fa4. Not ported: ui = 0x132338; graphics = 0x1623be; the
-//! ending = 0x133d1e, 0x13513a.
+//! sound = 0x110878, 0x110912, 0x100fa4; converse = 0x11304a (called there directly). Ported
+//! here: graphics = 0x1623be (a wait only Use calls). Not ported: ui = 0x132338; the ending =
+//! 0x133d1e, 0x13513a.
 
 use crate::engine::Io;
-use crate::objects::{NONE, Slot};
+use crate::objects::Slot;
 use crate::state::State;
 use crate::todo_stub;
 
@@ -117,23 +118,6 @@ pub(crate) fn find_carried(s: &mut State, actor: Slot, kind: u16) -> Slot {
     crate::magic::carried_object(&s.objects, actor, kind as i16, 0)
 }
 
-// ---- converse ---------------------------------------------------------------------------------
-
-/// 0x11304a(type, quality): the first party member on screen who carries an object of `kind`
-/// (and `quality`, 0 = any), -1. Converse ports it in a private module; composed here from its
-/// public parts: on screen (converse 0x1125b8's helper) and the carried-object test (0x116526).
-pub(crate) fn member_with(s: &mut State, kind: u16, quality: i16) -> Slot {
-    for i in 0..usize::from(s.actors.party.size) {
-        let m = Slot::from(super::member(s, i));
-        if crate::converse::on_screen(s, m)
-            && crate::magic::carried_object(&s.objects, m, kind as i16, quality) != -1
-        {
-            return m;
-        }
-    }
-    NONE
-}
-
 // ---- objects commands (hunk 15) ---------------------------------------------------------------
 
 /// 0x12948a(obj): the first non-actor object at `obj`'s tile that is not `obj` and whose tile
@@ -229,13 +213,20 @@ pub(crate) fn play_sound(s: &mut State) {
     crate::sound::play_effect_module(s);
 }
 
-/// 0x1623be(100): the copper effect of the machine. Fallback: none.
-pub(crate) fn screen_effect(_io: &Io) {
-    todo_stub!("0x1623be screen effect (usecmd seam)", ())
+/// Original: 0x1623be (graphics: wait `n` + 1 vertical blanks)
+///
+/// A `dbf` loop on D0 around the VBlank wait 0x1622be (which keeps D0); the machine 0x12cfe4
+/// passes 100 while its sound effect plays.
+pub(crate) async fn wait_vblanks(io: &Io, n: u16) {
+    for _ in 0..=n {
+        io.vblank().await;
+    }
 }
 
-/// 0x133d1e then 0x13513a: the ending sequence after the Codex vanished. Fallback: the game
-/// goes on.
-pub(crate) fn ending(_s: &mut State) {
-    todo_stub!("0x13513a the ending (usecmd seam)", ())
+/// 0x133d1e then 0x13513a: the ending after the Codex vanished (the vortex cube 0x1303f4 calls
+/// 0x133d1e after removing the Codex, 0x13513a after the vanishing line and a key; the end
+/// sequence does not return to play). Not ported: false. The cube asks before it removes the
+/// Codex and refuses while this is false, so nothing is destroyed for an ending that cannot run.
+pub(crate) fn ending_ported() -> bool {
+    todo_stub!("0x13513a the ending (usecmd seam)", false)
 }

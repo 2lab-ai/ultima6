@@ -9,16 +9,16 @@ use crate::objects::{ACTOR_SLOTS, READIED, Slot};
 use crate::state::State;
 
 /// Image strings 0x1305e0 prints (hunk 16).
-pub(super) const FMT_LINE: u32 = 0x0012_c9ee; // "%s\n"
-pub(super) const FMT_NL_LINE: u32 = 0x0012_c93e; // "\n%s\n"
-pub(super) const FMT_BANG: u32 = 0x0012_cda6; // "\n%s!\n"
+pub(super) const FMT_LINE: u32 = 0x0012_c9ee; // format: the string, a newline
+pub(super) const FMT_NL_LINE: u32 = 0x0012_c93e; // format: newline, the string, newline
+pub(super) const FMT_BANG: u32 = 0x0012_cda6; // format: as above with an exclamation mark
 const STR_HORSE: u32 = 0x0012_cfa0;
 const STR_NL: u32 = 0x0012_ccfe;
 pub(super) const STR_NOT_NOW: u32 = 0x0012_cee2;
 const STR_IN_HAND: u32 = 0x0012_cfa8;
 const STR_NOT_SOLO: u32 = 0x0012_cfc0;
 const STR_NOT_READIED: u32 = 0x0012_cfd4;
-/// "Not while aboard ship!" (A4 - 0x744d).
+/// The aboard-ship refusal (the data-hunk string at A4 - 0x744d).
 const STR_ABOARD: u32 = 0x744d;
 
 /// Original: 0x130546 (objects: Use of `obj` is refused while aboard ship)
@@ -50,12 +50,13 @@ enum Checked {
 ///
 /// Order: the target (A4-0x2f04) becomes the actor it stands for (combat 0x1240fa); an actor
 /// other than a horse or cow used while not aboard with a map cell selected, or an object whose
-/// tile has flags3 bit 4, is replaced by the object under it (0x12948a); none → "nothing". The
-/// name is printed ("horse" for a ridden horse); the type must be usable (0x128b6a) and not
-/// refused aboard ship (0x130546). A map object turns the leader towards the pointer (0x105016,
-/// 0x11ba5e, 0x109e74) and must be next to the leader ("Out of range"). A door blocked by an
-/// object, or a secret door not on top, gives "Not now!"; a readied object of another member
-/// than the panel's (except a torch) "Must be in your hand.". Then the handler; after any
+/// tile has flags3 bit 4, is replaced by the object under it (0x12948a); none → the nothing
+/// message. The name is printed (the line 0x12cfa0 for a ridden horse); the type must be usable
+/// (0x128b6a) and not refused aboard ship (0x130546). A map object turns the leader towards the
+/// pointer (0x105016, 0x11ba5e, 0x109e74) and must be next to the leader (the out-of-range
+/// message). A door blocked by an object, or a secret door not on top, gives the line 0x12cee2;
+/// a readied object of another member than the panel's (except a torch) the line 0x12cfa8.
+/// Then the handler; after any
 /// handler the leader pays 5 movement points (0x11c650), the view flags and the view are
 /// refreshed (0x109e74, 0x102ef0).
 pub async fn use_command(state: &RefCell<State>, io: &Io) {
@@ -179,22 +180,22 @@ async fn in_reach(ux: Ux<'_>, sel: Slot) -> bool {
     !far
 }
 
-/// The "Not usable" line the type cases print when a condition fails.
+/// The not-usable message the type cases print when a condition fails.
 pub(super) async fn not_usable(ux: Ux<'_>) {
     ux.say(FMT_NL_LINE, MSG_NOT_USABLE).await;
 }
 
-/// "No effect".
+/// The no-effect message.
 pub(super) async fn no_effect(ux: Ux<'_>) {
     ux.say(FMT_NL_LINE, MSG_NO_EFFECT).await;
 }
 
-/// "Not in solo mode." (the ladder case).
+/// The solo-mode refusal 0x12cfc0 (the ladder case).
 pub(super) async fn not_solo(ux: Ux<'_>) {
     ux.print(STR_NOT_SOLO, &[]).await;
 }
 
-/// "Not readied." (shovels, wands).
+/// The not-readied line 0x12cfd4 (shovels, wands).
 pub(super) async fn not_readied(ux: Ux<'_>) {
     ux.print(STR_NOT_READIED, &[]).await;
 }

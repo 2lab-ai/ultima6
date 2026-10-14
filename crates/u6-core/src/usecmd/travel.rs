@@ -73,12 +73,13 @@ pub fn can_land(s: &mut State, io: &crate::engine::Io, x: i16, y: i16, vessel: S
 /// Original: 0x11d0a4 (actors: the party leaves its vessel)
 ///
 /// The vessel becomes a map object again at the centre (0x10bcee: the actor's type + frame, its
-/// hit points as quantity); unless `boarding`, a skiff or raft carried inside goes to the
-/// centre too. The vessel actor turns into "nothing" (type 0x58, worktype 0) and moves to
-/// level 14 (out of the world), member 0 leads, the party is placed at the centre (0x10921a
-/// mode 2); a carried skiff is boarded at once (0x11cd78); the area song plays. Returns the new
-/// vessel object.
-pub fn leave_vessel(s: &mut State, boarding: bool) -> Slot {
+/// hit points as quantity); unless `keep_skiff` (D0 ≠ 0: boarding another vessel 0x11cd78 and
+/// stepping onto land 0x12f5d4 pass 1), the first skiff or raft carried inside goes to the
+/// centre too (asm 0x11d0f2..0x11d148). The vessel actor turns into the empty type 0x58
+/// (worktype 0) and moves to level 14 (out of the world), member 0 leads, the party is placed
+/// at the centre (0x10921a mode 2); a skiff taken out is boarded at once (0x11cd78); the area
+/// song plays. Returns the new vessel object.
+pub fn leave_vessel(s: &mut State, keep_skiff: bool) -> Slot {
     let v = member(s, usize::from(s.actors.party.size));
     let vi = usize::from(v);
     let c = s.map.centre;
@@ -87,7 +88,7 @@ pub fn leave_vessel(s: &mut State, boarding: bool) -> Slot {
     let obj =
         crate::objects::create_on_map(&mut s.objects, tf & 0x3ff, 1, hp, c.x, c.y, u16::from(c.z));
     let mut skiff = NONE;
-    if !boarding {
+    if !keep_skiff {
         let mut k = crate::objects::first_child(&mut s.objects, Slot::from(v));
         while k >= 0 {
             if matches!(s.objects.kind(k), 0x19e | 0x19f) {
@@ -197,12 +198,13 @@ pub fn board_vessel(s: &mut State, obj: Slot) {
 
 /// Original: 0x12f502 (objects: board or leave a vessel: ship, skiff, raft, balloon)
 ///
-/// Party mode only ("Not in solo mode!"). Used on the vessel the party is in: it leaves when the
-/// Avatar can step off (0x12f3fa; a balloon deflates into its object 0x1a4), a ship beside
-/// land with a skiff aboard puts the party into the skiff, else "Only next to land.". Another
-/// vessel: a ship or skiff with a quality needs its deed (a member carrying 0x95 of that
-/// quality, converse 0x11304a); next to the leader it is boarded (from a skiff onto a ship the
-/// skiff comes along), else "Out of range".
+/// Party mode only (the solo refusal 0x12cd66). Used on the vessel the party is in: it leaves
+/// when the Avatar can step off (0x12f3fa; 0x11d0a4(1), the skiff stays in the hold; a balloon
+/// deflates into its object 0x1a4); a ship that cannot land with a skiff aboard puts the party
+/// into the skiff (0x11d0a4(0), asm 0x12f620); else the land refusal 0x12cd7a. Another vessel:
+/// a ship or skiff with a quality needs its deed (a member carrying 0x95 of that quality,
+/// converse 0x11304a; else the line 0x12cd90); next to the leader it is boarded (from a skiff
+/// onto a ship the skiff comes along), else the out-of-range message.
 pub async fn board(ux: Ux<'_>, obj: Slot) {
     let (v, vt, lead, lt, vx, vy) = {
         let mut s = ux.s();
@@ -229,7 +231,7 @@ pub async fn board(ux: Ux<'_>, obj: Slot) {
         };
         if can {
             let mut s = ux.s();
-            let out = leave_vessel(&mut s, false);
+            let out = leave_vessel(&mut s, true);
             if vt == 0x1a7 {
                 set_tf(&mut s, out, 0x1a4);
                 seams::inventory_contents(&mut s);
@@ -240,7 +242,7 @@ pub async fn board(ux: Ux<'_>, obj: Slot) {
                 vt == 0x19c && crate::objects::find_child(&mut s.objects, v, 0x19e, 0) != -1
             };
             if skiff {
-                leave_vessel(&mut ux.s(), true);
+                leave_vessel(&mut ux.s(), false);
             } else {
                 ux.print(STR_ONLY_LAND, &[]).await;
             }
@@ -250,7 +252,7 @@ pub async fn board(ux: Ux<'_>, obj: Slot) {
     }
     if matches!(vt, 0x19c | 0x19e) && super::quality(&ux.s(), v) != 0 {
         let q = super::quality(&ux.s(), v);
-        if seams::member_with(&mut ux.s(), 0x95, i16::from(q)) == -1 {
+        if crate::converse::member_with_object(&mut ux.s(), 0x95, i16::from(q)) == -1 {
             ux.print(STR_DEED, &[]).await;
             return;
         }
@@ -277,7 +279,7 @@ pub async fn board(ux: Ux<'_>, obj: Slot) {
 /// Original: 0x12f7ea (objects: mount a horse 0x1ae)
 ///
 /// Only a temporary actor (≥ 0xe0) is boardable; Sherry and Beh Lem refuse, a rider is
-/// already on one. The horse turns into "nothing" and goes, the leader takes its place
+/// already on one. The horse turns into the empty type 0x58 and goes, the leader takes its place
 /// mounted (0x12f6ee with the horse's frame, its rear re-typed).
 pub async fn mount(ux: Ux<'_>, obj: Slot) {
     let (h, lead) = {
@@ -311,7 +313,7 @@ pub async fn mount(ux: Ux<'_>, obj: Slot) {
 /// The party needs a mammoth silk bag (0x1a5), a balloon basket (0x1a6), a cauldron (0x93) and
 /// a rope (0x11c), each missing one named; with all four they are taken (magic 0x116526 finds
 /// each, 0x10c1d6 removes it) and a deflated balloon (0x1a4, takeable) lies at the leader's
-/// feet, "Done!".
+/// feet, the line 0x12cbc4.
 pub async fn balloon(ux: Ux<'_>) {
     ux.put(b'\n').await;
     let parts = [
@@ -322,7 +324,7 @@ pub async fn balloon(ux: Ux<'_>) {
     ];
     let mut owners = [NONE; 4];
     for (i, (kind, msg)) in parts.into_iter().enumerate() {
-        owners[i] = seams::member_with(&mut ux.s(), kind, 0);
+        owners[i] = crate::converse::member_with_object(&mut ux.s(), kind as i16, 0);
         if owners[i] == -1 {
             ux.print(msg, &[]).await;
         }
@@ -349,7 +351,15 @@ pub async fn balloon(ux: Ux<'_>) {
 }
 
 /// Original: 0x12eb12 (objects: inflate a balloon: 0x1a4 becomes the balloon 0x1a7 next to the
-/// leader, "No room!" when none of the tiles around fits)
+/// leader)
+///
+/// As the original orders it: the deflated balloon goes first (0x12eb22), the inflated one is
+/// made at the leader's tile (0x10bc4c at 0x12ebf2), then the 3 × 3 tiles around are tried
+/// (x outer, y inner) for the first the balloon may stand on (0x11b1c0), where it moves with
+/// the line 0x12cbcc. The test at 0x12ec16..0x12ec1c skips (0, 0), the northwest tile, not the
+/// centre; the leader's own tile is tried (and an actor there blocks it). With no tile the
+/// line 0x12cbd4, and the inflated balloon stays on the leader's tile (no rollback in the
+/// original either). Creation cannot fail here: the removal just freed the slot it takes.
 pub async fn inflate(ux: Ux<'_>, obj: Slot) {
     let done = {
         let mut s = ux.s();
@@ -386,11 +396,11 @@ pub async fn inflate(ux: Ux<'_>, obj: Slot) {
 
 /// Original: 0x12fb0a (objects: the orb of the moons: a red moongate where the player points)
 ///
-/// Only the Avatar knows how (actor 5's talk flags bit 5, A4+0x3e11). "Where:" and a target
-/// within 2 tiles of the centre: a red moongate (0x54) is made whose quality is the cell
-/// (0 next to the centre on its row, else (dy + 2) · 5 + dx + 3); where the Avatar could stand
-/// and no gate (0x12d / 0x12e marker) is, "a red moon gate appears." and it moves there with a
-/// dissolve; else "Failed" and it goes.
+/// Only the Avatar knows how (actor 5's talk flags bit 5, A4+0x3e11; else the line 0x12ce42).
+/// The target prompt (0x12ce68) and a target within 2 tiles of the centre: a red moongate
+/// (0x54) is made whose quality is the cell (0 next to the centre on its row, else
+/// (dy + 2) · 5 + dx + 3); where the Avatar could stand and no gate (0x12d / 0x12e marker) is,
+/// the line 0x12ce70 and it moves there with a dissolve; else the failed message and it goes.
 pub async fn orb(ux: Ux<'_>) {
     let knows = ux
         .s()
@@ -466,10 +476,15 @@ pub async fn orb(ux: Ux<'_>) {
 
 /// Original: 0x12fdf6 (objects: look through a telescope)
 ///
-/// The view centres on the telescope and redraws; "Direction:" and a direction key: with the
-/// whole window revealed (A4-0x794c) the view slides that way up to 40 tiles, stopping on a
-/// tile ≥ 0xfc, each step redrawn; then back on the party with a dissolve and "Done". Any other
-/// key "nowhere.".
+/// The view centres on the telescope and redraws; the direction prompt (0x12ced6) and a
+/// direction key: with the whole window revealed (A4-0x794c) the view slides that way up to 40
+/// tiles, stopping on a tile ≥ 0xfc, each step redrawn; then back on the party with a dissolve
+/// and the done message. Any other key: the line 0x12cd0c, and the routine returns (0x12fe80 →
+/// 0x12ff46) with the view centre still on the telescope, a tile from the leader; the next
+/// player step re-centres on the leader (0x11d4ee at 0x11d536 / 0x11d55c).
+///
+/// Port: each view of the slide is presented and held one vertical blank, the state borrow
+/// released (the Amiga shows each while the next is drawn; the port publishes only at a wait).
 pub async fn telescope(ux: Ux<'_>, obj: Slot) {
     let (ox, oy) = {
         let mut s = ux.s();
@@ -483,9 +498,6 @@ pub async fn telescope(ux: Ux<'_>, obj: Slot) {
     ux.s().ui.input.target_pending = 0;
     if ux.key().await != 0x80 {
         ux.print(STR_NOWHERE, &[]).await;
-        let mut s = ux.s();
-        s.map.centre.x = ox;
-        s.map.centre.y = oy;
         return;
     }
     let dir = ux.s().ui.input.direction;
@@ -498,8 +510,12 @@ pub async fn telescope(ux: Ux<'_>, obj: Slot) {
         s.map.reveal_all = 1;
         s.gfx.dissolve = 1;
         view_at_centre(&mut s, ux.io);
-        let (mut n, mut tile) = (0x28i16, 0u8);
-        while n >= 0 && tile < 0xfc {
+    }
+    ux.io.vblank().await;
+    let (mut n, mut tile) = (0x28i16, 0u8);
+    while n >= 0 && tile < 0xfc {
+        {
+            let mut s = ux.s();
             s.map.centre.x = (s.map.centre.x as i16).wrapping_add(dx) as u16;
             s.map.centre.y = (s.map.centre.y as i16).wrapping_add(dy) as u16;
             view_at_centre(&mut s, ux.io);
@@ -510,6 +526,10 @@ pub async fn telescope(ux: Ux<'_>, obj: Slot) {
                 .tile_at(usize::from(c.x), usize::from(c.y), usize::from(c.z))
                 .unwrap_or(0);
         }
+        ux.io.vblank().await;
+    }
+    {
+        let mut s = ux.s();
         s.map.reveal_all = 0;
         s.map.centre.x = ox;
         s.map.centre.y = oy;
@@ -531,9 +551,9 @@ fn view_at_centre(s: &mut State, io: &crate::engine::Io) {
 /// Original: 0x12fca2 (objects: the astrolabe: gate travel to a typed latitude and longitude)
 ///
 /// The leader's intelligence check (0x12c092) fails: 1..10 damage (combat 0x1231be, 0x12395a).
-/// Else "Enter degrees followed by N, S, E or W", "At latitude=" and a line (0x107cba, parsed by
-/// 0x128b98 mode 1) within −44..80, "longitude=" within −37..88: the free view of magic 0x119afc
-/// there with the sound off; out of range shows "0".
+/// Else the instruction line (0x12ce8a), the latitude prompt (0x12ceb4) and a line (0x107cba,
+/// parsed by 0x128b98 mode 1) within −44..80, the longitude prompt (0x12cec8) within −37..88:
+/// the free view of magic 0x119afc there with the sound off; out of range the line 0x12cec2.
 pub async fn sextant_travel(ux: Ux<'_>) {
     let (m, fails) = {
         let mut s = ux.s();

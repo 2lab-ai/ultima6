@@ -14,6 +14,8 @@ const STR_FIRE: u32 = 0x0012_c9f2;
 const STR_NOT_NOW: u32 = 0x0012_c9fa;
 const STR_POWDER_LIT: u32 = 0x0012_ca04;
 const STR_NO_BRIDGE: u32 = 0x0012_ca2a;
+/// 0x12e3f6's line for result 0 of 0x12de3a (the bridge did not move).
+const STR_BRIDGE_NOTHING: u32 = 0x0012_ca48;
 const STR_LEVER: u32 = 0x0012_cad2;
 const STR_STRANGE: u32 = 0x0012_cae6;
 const STR_NOISE: u32 = 0x0012_cb02;
@@ -21,7 +23,7 @@ const STR_CANT_CLOSE: u32 = 0x0012_cb16;
 const STR_SWITCH: u32 = 0x0012_cb34;
 const STR_DIRECTION: u32 = 0x0012_cd00;
 const STR_NOWHERE: u32 = 0x0012_cd0c;
-const FMT_DIR: u32 = 0x0012_cd16; // "%s.\n"
+const FMT_DIR: u32 = 0x0012_cd16; // format: the string, a full stop, a newline
 const STR_HOLE: u32 = 0x0012_cd1c;
 const STR_FOUNTAIN: u32 = 0x0012_cd2e;
 const STR_NUGGET: u32 = 0x0012_cd4c;
@@ -41,8 +43,9 @@ fn z(s: &State) -> u16 {
 
 /// Original: 0x12d096 (objects: bury a moonstone where the leader stands)
 ///
-/// On a grass or swamp tile (1..7, 0x10..0x6f) "buried.": its location goes into the moonstone
-/// table (A4-0x7b5a + 6 × frame: x, y, z), the stone onto the tile and the leader on top of it.
+/// On a grass or swamp tile (1..7, 0x10..0x6f) the line 0x12c91c (else 0x12c926): its location
+/// goes into the moonstone table (A4-0x7b5a + 6 × frame: x, y, z), the stone onto the tile and
+/// the leader on top of it.
 pub async fn bury(ux: Ux<'_>, obj: Slot) {
     let (lx, ly, z, tile) = {
         let s = ux.s();
@@ -77,11 +80,11 @@ pub async fn bury(ux: Ux<'_>, obj: Slot) {
 
 /// Original: 0x12d7d4 (objects: fire a cannon the way its frame points)
 ///
-/// "Fire!"; the aim is the first actor 1..5 tiles out (direction from the frame, tables at
-/// A4-0x661c / -0x6618), else 6 tiles; the ball (tile 0x18f) flies there (combat 0x1228ba,
-/// range 5, leaving where it stopped in A4+0x185e / +0x1860). When 0x1228ba gives 0 (the ball
-/// ended short of the aim) the explosion (0x1331b4, tile 0x189) is one tile further; an object
-/// at the end that is not a counted kind takes 1..60 damage (0x1231be).
+/// The line 0x12c9f2; the aim is the first actor 1..5 tiles out (direction from the frame,
+/// tables at A4-0x661c / -0x6618), else 6 tiles; the ball (tile 0x18f) flies there (combat
+/// 0x1228ba, range 5, leaving where it stopped in A4+0x185e / +0x1860). When 0x1228ba gives 0
+/// (the ball ended short of the aim) the explosion (0x1331b4, tile 0x189) is one tile further;
+/// an object at the end that is not a counted kind takes 1..60 damage (0x1231be).
 pub async fn cannon(ux: Ux<'_>, obj: Slot) {
     ux.print(STR_FIRE, &[]).await;
     let mut s = ux.s();
@@ -115,7 +118,8 @@ pub async fn cannon(ux: Ux<'_>, obj: Slot) {
 /// Original: 0x12d960 (objects: light a powder keg: it explodes when the keg timer runs out)
 ///
 /// Only an unlit keg (frame 0) while no other burns (A4-0x7b2a = 0): frame 1, timer 3, the keg
-/// in A4-0x7b28, "Powder lit!"; a keg on the map redraws the view, a carried one the inventory.
+/// in A4-0x7b28, the line 0x12ca04; a keg on the map redraws the view, a carried one the
+/// inventory.
 pub async fn light_keg(ux: Ux<'_>, obj: Slot) {
     use crate::actors::tail::{KEG_OBJECT, KEG_TIMER};
     let (frame, timer) = {
@@ -158,9 +162,8 @@ pub fn actor_at(s: &mut State, x: u16, y: u16, z: u16) -> Slot {
 ///
 /// The lever's frame bit 0 flips. With a quality q, every portcullis marker (0x12d of quality
 /// q) on the level opens (its portcullis 0x136 removed) or closes (one created, frame 1, or 3
-/// when the marker's frame has bit 1) unless an actor stands there ("can't close the
-/// portcullis." ends the walk). "you hear a noise." when something moved, else "strange,
-/// nothing happened.".
+/// when the marker's frame has bit 1) unless an actor stands there (the line 0x12cb16 ends the
+/// walk). The line 0x12cb02 when something moved, else 0x12cae6.
 pub async fn lever(ux: Ux<'_>, obj: Slot) {
     ux.print(STR_LEVER, &[]).await;
     let outcome = {
@@ -241,9 +244,9 @@ pub async fn switch(ux: Ux<'_>, obj: Slot) {
 /// Original: 0x12e3f6 (objects: the drawbridge crank: find the bridge of the crank's quality)
 /// [partial]
 ///
-/// Ported: the search for a drawbridge piece (0x10d) of the crank's quality on the level ("No
-/// correspondent drawbridge" when there is none). The raising / lowering 0x12de3a (with its
-/// helpers 0x12dd1a, 0x12ddae, 0x12ddda) is a stub point.
+/// Ported: the search for a drawbridge piece (0x10d) of the crank's quality on the level (the
+/// line 0x12ca2a when there is none). The raising / lowering 0x12de3a (with its helpers
+/// 0x12dd1a, 0x12ddae, 0x12ddda) is a stub point.
 pub async fn drawbridge(ux: Ux<'_>, obj: Slot) {
     let found = {
         let mut s = ux.s();
@@ -259,17 +262,20 @@ pub async fn drawbridge(ux: Ux<'_>, obj: Slot) {
         return;
     }
     // Contract: 0x101ff6 ×2, 0x102ef0 ×20, then 0x12de3a raises or lowers the bridge pieces and
-    // one of five messages ("Strange, nothing happened." .. "Can't open the drawbridge.").
-    // Fallback: the bridge stays as it is, no message.
+    // returns 0..4, the line printed by it (jump table at 0x12e4d6: 0x12ca48, 0x12ca66,
+    // 0x12ca7e, 0x12ca96, 0x12cab4). Fallback: the bridge stays as it is and the line of
+    // result 0 (nothing happened, 0x12ca48) is printed.
     todo_stub!("0x12de3a raise or lower the drawbridge", ());
+    ux.print(STR_BRIDGE_NOTHING, &[]).await;
 }
 
 /// Original: 0x12f1e6 (objects: dig with a shovel or pick in a direction)
 ///
-/// "Direction:"; a direction key names it, anything else "nowhere.". On the surface at
-/// (0x2c3, 0x343) with no hole there a hole (0x134, quality 0x13) is dug ("You dig a hole.").
-/// In a dungeon (levels 1-4) on a cave floor tile (0x6c..0x6f) 1 in 32 finds a fountain (0xea),
-/// else 1 in 10 a gold nugget (0x59), else "Failed"; anywhere else "No effect".
+/// The direction prompt (0x12cd00); a direction key names it, anything else the line 0x12cd0c.
+/// On the surface at (0x2c3, 0x343) with no hole there a hole (0x134, quality 0x13) is dug (the
+/// line 0x12cd1c). In a dungeon (levels 1-4) on a cave floor tile (0x6c..0x6f) 1 in 32 finds a
+/// fountain (0xea), else 1 in 10 a gold nugget (0x59), else the failed message; anywhere else
+/// the no-effect message.
 pub async fn dig(ux: Ux<'_>) {
     ux.print(STR_DIRECTION, &[]).await;
     {
