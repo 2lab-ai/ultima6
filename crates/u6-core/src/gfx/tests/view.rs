@@ -12,10 +12,31 @@ use u6_formats::tileflag::TileFlags;
 use super::{install, map_tile, object_tile};
 use crate::Files;
 use crate::engine::Engine;
-use crate::gfx::anim::anim_tick;
 use crate::gfx::seams::view_window;
-use crate::gfx::{GfxState, refresh_view, render_window};
+use crate::gfx::GfxState;
 use crate::state::State;
+
+/// The window render with `g` as the state's graphics for the call.
+fn render_window(s: &mut State, g: &mut GfxState, io: &crate::engine::Io, framed: bool) {
+    std::mem::swap(&mut s.gfx, g);
+    crate::gfx::render_window(s, io, framed);
+    std::mem::swap(&mut s.gfx, g);
+}
+
+/// The refresh with `g` as the state's graphics for the call.
+#[allow(dead_code)]
+fn refresh_view(s: &mut State, g: &mut GfxState, io: &crate::engine::Io) {
+    std::mem::swap(&mut s.gfx, g);
+    crate::gfx::refresh_view(s, io);
+    std::mem::swap(&mut s.gfx, g);
+}
+
+/// The animation tick with `g` as the state's graphics for the call.
+fn anim_tick(s: &mut State, g: &mut GfxState) {
+    std::mem::swap(&mut s.gfx, g);
+    crate::gfx::anim::anim_tick(s);
+    std::mem::swap(&mut s.gfx, g);
+}
 
 const AVATAR_TYPE: usize = 0x19a;
 const AVATAR_BASE: u16 = 1000;
@@ -77,8 +98,10 @@ fn window_cells_follow_the_centre_and_the_leader_sits_at_80_96() {
     // Cell (5, 5) = world (19, 10): chunk tile 2·8 + 3 = 19 → colour 20.
     assert_eq!(fb.get(80, 81), Some(20));
     assert_eq!(fb.get(95, 95), Some(20));
-    // Cell (0, 0) = world (14, 5): tile 5·8 + 6 = 46 → colour 46 % 32 + 1 = 15.
-    assert_eq!(fb.get(0, 0), Some(15));
+    // Cell (0, 0) = world (14, 5): tile 5·8 + 6 = 46 → colour 46 % 32 + 1 = 15; only pixels
+    // 8..168 reach the screen (0x151f5a).
+    assert_eq!(fb.get(8, 8), Some(15));
+    assert_eq!(fb.get(0, 0), Some(0));
     // The avatar's one opaque pixel, over the map tile.
     assert_eq!(fb.get(88, 88), Some(30));
     // Nothing past the 11 cells.
@@ -96,13 +119,15 @@ fn border_tiles_and_dissolve_flag() {
         assert_eq!(g.dissolve, 0, "cleared after the dissolve");
     });
     let fb = e.frame();
-    assert_eq!((fb.get(8, 0), fb.get(7, 0)), (Some(25), Some(15)));
+    // The border's outer half (x or y below 8) stays in the back buffer: 0x1520e2 dissolves only
+    // (8, 8)..(0xa7, 0xa7) to the screen.
+    assert_eq!((fb.get(8, 8), fb.get(7, 8)), (Some(25), Some(0)));
     // 0x1b7 at (0xa0, 16 i), left half: x 160..168 for y 16..160.
     assert_eq!((fb.get(160, 16), fb.get(167, 159)), (Some(26), Some(26)));
     assert_ne!(fb.get(160, 15), Some(26));
     let hits = e.stub_hits();
-    assert!(hits.contains_key("0x1520e2 dissolve the window to the front buffer"));
-    assert!(e.take_log().iter().any(|l| l.contains("0x106932")));
+    assert!(!hits.keys().any(|k| k.starts_with("0x1520e2") || k.starts_with("0x106932")));
+    assert!(!e.take_log().iter().any(|l| l.contains("0x106932")));
 }
 
 #[test]
@@ -126,17 +151,17 @@ fn sparkle_draws_two_randoms_per_pixel() {
 fn refresh_runs_the_tick_and_the_window_only_when_shown() {
     let (mut s, mut g) = world();
     g.window_shown = 0;
-    g.view_stale = 1;
+    s.map.view_dirty = 1;
     g.panel_redraw = 3;
     let e = with_io(move |io| {
         refresh_view(&mut s, &mut g, io);
-        assert_eq!((g.view_stale, g.panel_redraw, g.anim_counter), (0, 0, 0));
+        assert_eq!((s.map.view_dirty, g.panel_redraw, g.anim_counter), (0, 0, 0));
         g.window_shown = 1;
         refresh_view(&mut s, &mut g, io);
         assert_eq!(g.anim_counter, 1);
     });
     assert_eq!(e.frame().get(80, 81), Some(20));
-    assert!(e.stub_hits().contains_key("0x133a1a redraw a side panel"));
+    assert!(!e.stub_hits().keys().any(|k| k.starts_with("0x133a1a")));
 }
 
 #[test]
@@ -152,7 +177,7 @@ fn tick_substitutes_frames_by_mode_and_merges_on_even_counts() {
         count: 3,
         slots: vec![slot(100), slot(101), slot(102), slot(103)],
     };
-    s.map.anim_enabled = vec![true, false, true];
+    s.map.anim_enabled = vec![1, 0, 1];
     g.anim_counter = 6;
     g.actor_anim_due = 1;
     // The leader (type 0x19a, frame 0) is the only actor: one roll(0, 0x1f) for its idle cycle.

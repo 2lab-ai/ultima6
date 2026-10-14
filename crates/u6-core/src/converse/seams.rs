@@ -337,22 +337,16 @@ pub(crate) fn after_drop(_s: &mut State, _obj: i16) {
     todo_stub!("0x128b0e after dropping an object (converse seam)", ())
 }
 
-/// The word at A4-0x1184 + 2 × `obj` (op 0xd6 walks it from an actor to a body object 0x153).
-/// Fallback: -1 (end of the chain).
-pub(crate) fn object_link(_s: &State, _obj: i16) -> i16 {
-    todo_stub!("0x11404c object link table A4-0x1184 (converse seam)", -1)
+/// The word at A4-0x1184 + 2 × `obj` (op 0xd6 walks it from an actor to a body object 0x153):
+/// the object list link `objects.next`, -1 at the end.
+pub(crate) fn object_link(s: &State, obj: i16) -> i16 {
+    s.objects.next_of(obj)
 }
 
 /// The word at A4+0x250c + 2 × `obj` (its high byte names the NPC a shrine or statue talks
-/// as). Actor slots: objlist 0x0600; other objects: the object tables. Fallback: the actor
-/// word, 0 for other objects.
+/// as): `objects.qq`, 0 for a slot past the table.
 pub(crate) fn object_word_250c(s: &State, obj: i16) -> u16 {
-    todo_stub!("0x114afa object word table A4+0x250c (converse seam)", {
-        ix(obj)
-            .and_then(|i| s.actors.attrs.unknown_0600.get(i))
-            .copied()
-            .unwrap_or(0)
-    })
+    ix(obj).map_or(0, |i| s.objects.qq_of(i as i16))
 }
 
 /// 0x10d2d8(actor, type): how many objects of `type` the actor has. Fallback: 0.

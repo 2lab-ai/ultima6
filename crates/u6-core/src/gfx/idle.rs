@@ -35,7 +35,11 @@ fn set_frame(state: &mut State, id: ObjectId, frame: u16) {
 }
 
 /// Runs the pass; true when any frame changed (the caller then rebuilds the window lists).
-pub(crate) fn actor_idle_frames(state: &mut State, gfx: &GfxState) -> bool {
+///
+/// The pass reads only the direction tables and the "due" word of [`GfxState`]; it works on a
+/// copy of those ([`GfxState::view`]) so the state stays borrowable.
+pub(crate) fn actor_idle_frames(state: &mut State) -> bool {
+    let gfx = &state.gfx.view();
     let mut changed = false;
     let c = state.map.centre;
     for slot in 0..SLOTS {

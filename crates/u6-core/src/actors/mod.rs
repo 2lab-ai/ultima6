@@ -101,8 +101,6 @@ pub const PARTY_SLOTS: usize = 16;
 /// Per-actor attribute arrays (index = actor = object slot 0..256).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActorAttrs {
-    /// Original: A4+0x250c (word per actor; objlist 0x0600, meaning not identified)
-    pub unknown_0600: Vec<u16>,
     /// Original: A4+0x3d0c (objlist 0x0800 status)
     pub status: Vec<u8>,
     /// Original: A4+0x3f0c (objlist 0x0900 strength)
@@ -143,7 +141,6 @@ impl Default for ActorAttrs {
     fn default() -> Self {
         let bytes = || vec![0u8; ACTOR_SLOTS];
         Self {
-            unknown_0600: vec![0; ACTOR_SLOTS],
             status: bytes(),
             strength: bytes(),
             dexterity: bytes(),

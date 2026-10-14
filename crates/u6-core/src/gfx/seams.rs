@@ -208,50 +208,52 @@ fn insert(
 }
 
 /// Animation flag of animdata slot `slot` (A4-0x309b, byte per slot: 0 off, 1 forward,
-/// 2 backward). Owner: map ([`crate::map::MapState::anim_enabled`]); it stores a `bool`, so the
-/// value 2 cannot be represented yet and reads as 1.
-pub(crate) fn anim_mode(state: &State, slot: usize) -> u8 {
-    state
-        .map
-        .anim_enabled
-        .get(slot)
-        .map_or(0, |&on| u8::from(on))
+/// 2 backward). Owner: map ([`crate::map::MapState::anim_enabled`]).
+pub(crate) fn anim_mode(map: &crate::map::MapState, slot: usize) -> u8 {
+    map.anim_enabled.get(slot).copied().unwrap_or(0)
 }
 
 /// 0x102c90's target cursor: when the ui is idle (A4-0x7a32 == 0, A4-0x7a5b == 0) it calls
 /// 0x106932(0) and clears A4-0x7a60; when A4-0x7a60 == 1 it draws tile 0x16c (A4-0x7a5d < 0) or
-/// 0x16d at (16·A4-0x7a5f, 16·A4-0x7a5e). Returns that (tile, x, y). Owner: ui (WU-P4).
-/// Fallback: no cursor.
-pub(crate) fn map_cursor(_state: &mut State) -> Option<(u16, u16, u16)> {
-    todo_stub!("0x106932 map-window target cursor", None)
+/// 0x16d at (16·A4-0x7a5f, 16·A4-0x7a5e). Returns that (tile, x, y) for the caller to blit
+/// into the back buffer. The ui globals live in `ui.input` ([`crate::ui::InputState`]).
+pub(crate) fn map_cursor(state: &mut State, io: &Io) -> Option<(u16, u16, u16)> {
+    let input = &state.ui.input;
+    if input.target_pending == 0 && !input.cursor_by_tab {
+        crate::ui::cursor::panel_cursor_in(state, io, 0);
+        state.ui.input.targeting = 0;
+    }
+    let input = &state.ui.input;
+    (input.targeting == 1).then(|| {
+        let tile = if input.range < 0 { 0x16c } else { 0x16d };
+        let (col, row) = input.cursor;
+        (tile, (i16::from(col) * 16) as u16, (i16::from(row) * 16) as u16)
+    })
 }
 
-/// 0x109e74 when 0x102ef0 finds the view flags stale. Owner: map (WU-P2). Fallback: nothing;
-/// [`view_window`] recomputes the window on every draw.
-pub(crate) fn view_flags(_state: &mut State) {
-    todo_stub!("0x109e74 view-window flags", ());
+/// 0x109e74 when 0x102ef0 finds the view flags stale (map, [`crate::map::view::update_view`]).
+pub(crate) fn view_flags(state: &mut State) {
+    crate::map::view::update_view(state);
 }
 
-/// 0x133a1a(`panel`, 1): redraw a side panel after the window. Owner: ui (WU-P4). Fallback:
-/// nothing.
-pub(crate) fn redraw_panel(_state: &mut State, _panel: u8) {
-    todo_stub!("0x133a1a redraw a side panel", ());
+/// 0x133a1a(`shakes`, 1): 0x102ef0's last step shakes the view `shakes` times by one pixel
+/// (ui, [`crate::ui::effects::quake`]), with A4-0x7afc already cleared so its own 0x102ef0 call
+/// does not shake again.
+pub(crate) fn quake(state: &mut State, io: &Io, shakes: u8) {
+    crate::ui::effects::quake(state, io, i16::from(shakes), 1);
 }
 
 /// Present the map window: [`blit::dissolve`] over (8, 8)..(0xa7, 0xa7) when `dissolve`, else
-/// [`blit::copy_window`], from the back buffer into the front. Owner: engine (WU-C0): `Io` lets
-/// the game draw only into the back buffer and copy all of it; these copies need both buffers
-/// (e.g. `Io::with_buffers(|back, front| ..)`). Fallback: the whole back buffer is presented,
-/// the same picture as long as nothing draws into the front directly.
-pub(crate) fn present_window(io: &Io, _gfx: &GfxState, dissolve: bool) {
-    if dissolve {
-        todo_stub!(
-            "0x1520e2 dissolve the window to the front buffer",
-            io.present()
-        );
-    } else {
-        todo_stub!("0x151f5a copy the window to the front buffer", io.present());
-    }
+/// [`blit::copy_window`] (0x151f5a), from the back buffer into the front (the screen).
+pub(crate) fn present_window(io: &Io, gfx: &GfxState, dissolve: bool) {
+    io.with_buffers(|back, front| {
+        if dissolve {
+            super::blit::dissolve(&gfx.tables.dissolve_taps, back, front, (8, 8), (0xa7, 0xa7));
+        } else {
+            super::blit::copy_window(back, front);
+        }
+    });
+    io.present();
 }
 
 /// Original 0x10ad1a + 0x10aaca: the objects at (x, y, z) in the original's chain order

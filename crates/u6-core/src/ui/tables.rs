@@ -3,7 +3,7 @@
 
 use u6_formats::FormatError;
 
-use super::image::GameImage;
+use crate::image::GameImage;
 use super::text::TextWindow;
 
 /// Raw key codes the table covers (0x00..0x5f; 0x60..0x67 are qualifiers, handled in code).
@@ -134,7 +134,7 @@ impl UiTables {
             .collect();
         let mut combat_modes = Vec::new();
         for mode in COMBAT_MODES {
-            let ptr = img.pointer(super::image::A4.wrapping_sub(0x7230) + 4 * u32::from(mode))?;
+            let ptr = img.pointer(crate::image::A4.wrapping_sub(0x7230) + 4 * u32::from(mode))?;
             combat_modes.push(img.cstr(ptr)?);
         }
         let w = img.a4_bytes(-0x7a1a, 9)?;

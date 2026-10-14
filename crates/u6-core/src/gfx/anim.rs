@@ -127,17 +127,20 @@ fn merge_rows(gfx: &mut GfxState, src: usize, dst: usize, plane: u8, skip: u8, m
 /// only while [`GfxState::actor_anim_due`] (A4-0x7afa) is set; the ui's input wait sets it on
 /// each idle step (0x105c8e). The flag is cleared, and if a frame changed the window object
 /// lists are rebuilt (0x10e81e).
-pub fn anim_tick(state: &mut State, gfx: &mut GfxState) {
+pub fn anim_tick(state: &mut State) {
+    let State {
+        gfx, tables, map, ..
+    } = state;
     if gfx.anim_paused != 0 {
         return;
     }
     gfx.anim_counter = gfx.anim_counter.wrapping_add(1);
     let counter = gfx.anim_counter;
-    let anim = &state.tables.anim;
+    let anim = &tables.anim;
     for (i, slot) in anim.slots.iter().enumerate().take(usize::from(anim.count)) {
         let mask = u16::from(slot.and_mask);
         let step = |v: u16| v.checked_shr(u32::from(slot.shift % 64)).unwrap_or(0);
-        let frame = match seams::anim_mode(state, i) {
+        let frame = match seams::anim_mode(map, i) {
             1 => slot.first_anim_frame.wrapping_add(step(counter & mask)),
             2 => slot.first_anim_frame.wrapping_add(step(!counter & mask)),
             _ => slot.first_anim_frame,
@@ -147,8 +150,8 @@ pub fn anim_tick(state: &mut State, gfx: &mut GfxState) {
     if counter & 1 == 0 {
         merge_shores(gfx);
     }
-    let changed = actor_idle_frames(state, gfx);
-    gfx.actor_anim_due = 0;
+    let changed = actor_idle_frames(state);
+    state.gfx.actor_anim_due = 0;
     if changed {
         seams::rebuild_window_objects(state);
     }

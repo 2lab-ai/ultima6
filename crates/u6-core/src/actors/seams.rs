@@ -258,7 +258,7 @@ pub fn print_name(_s: &mut State, _id: ObjectId) {
 /// [main] 0x102f2a: after an actor's turn, redraws the view when 0x6a8e asks for it.
 /// Fallback: clears the request (A4-0x6a8e) as the original does after the redraw.
 pub fn after_turn_refresh(s: &mut State) {
-    s.actors.work.freed = 0;
+    s.map.view_dirty = 0;
     todo_stub!(
         "0x102f2a refresh after an actor turn (fallback: no redraw)",
         ()
@@ -273,7 +273,7 @@ pub fn switch_leader(s: &mut State, member: u8) {
         if let Some(pos) = s.leader_position() {
             s.map.centre = pos;
         }
-        s.actors.work.darkness = 1;
+        s.gfx.window_shown = 1;
         s.actors.work.prompt = 1;
     }
     todo_stub!(
@@ -322,19 +322,9 @@ pub fn present_map(_s: &mut State) {
     todo_stub!("0x102c90 present the map window (fallback: none)", ())
 }
 
-/// [main] 0x101ff6: sets the animation flag of the animdata slot animating `tile`.
-/// Fallback: the same write on `map.anim_enabled` (a plain table update).
+/// [main] 0x101ff6: sets the animation flag of the animdata slot animating `tile` (1 = on).
 pub fn set_tile_animation(s: &mut State, tile: u16, on: bool) {
-    let anim = &s.tables.anim;
-    let n = usize::from(anim.count).min(anim.slots.len());
-    if let Some(i) = anim.slots[..n]
-        .iter()
-        .position(|a| a.tile_to_animate == tile)
-        && let Some(f) = s.map.anim_enabled.get_mut(i)
-    {
-        *f = on;
-    }
-    todo_stub!("0x101ff6 set a tile animation (fallback: anim_enabled)", ())
+    crate::main_loop::set_tile_animation(s, tile, u8::from(on));
 }
 
 /// [objects] 0x10a5b0: the other half of a two-tile creature, -1 if none. Fallback: none (the

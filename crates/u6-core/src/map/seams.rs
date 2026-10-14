@@ -145,14 +145,9 @@ pub(crate) fn moonstone(state: &State, n: u8) -> [u16; 3] {
 }
 
 /// Quality byte of object `id` (the high byte of the word at A4+0x250c + 2 id: a ladder's
-/// destination bits, a moongate's destination, a dungeon entrance's name). The 256 actor slots
-/// are `actors.attrs.unknown_0600`; other slots belong to `objects/` (fallback 0 there until it
-/// holds them).
+/// destination bits, a moongate's destination, a dungeon entrance's name; `objects.qq`).
 pub(crate) fn object_quality(state: &State, id: ObjectId) -> u8 {
-    match state.actors.attrs.unknown_0600.get(id.index()) {
-        Some(&w) => (w >> 8) as u8,
-        None => todo_stub!("0x10e1ce object quality of a map object (A4+0x250c)", 0),
-    }
+    (state.objects.qq_of(id.slot()) >> 8) as u8
 }
 
 /// Objects at (x, y, z) in iteration order, each with the stacking word A4-0x78dc the walk

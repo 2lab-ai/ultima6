@@ -22,6 +22,7 @@ pub mod converse;
 pub mod engine;
 pub mod files;
 pub mod gfx;
+pub mod image;
 pub mod main_loop;
 pub mod map;
 pub mod objects;

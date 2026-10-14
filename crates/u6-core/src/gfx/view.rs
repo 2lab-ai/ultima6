@@ -12,6 +12,7 @@ use u6_render::{Framebuffer, Rgb};
 use super::anim::anim_tick;
 use super::blit::{blit_back, plot, set_plot_colour};
 use super::{GfxState, seams};
+use crate::actors::Calendar;
 use crate::engine::Io;
 use crate::state::State;
 
@@ -57,10 +58,9 @@ fn load_palette(state: &State, fb: &mut Framebuffer) {
 /// Plot colour A4-0x6568, into the back buffer: the pivot (x + 4, y + 14), the hour hand one
 /// step from it in direction `hour_dir[hour % 12]`, the minute hand in direction
 /// `minute · 2 / 15` (hour A4-0x7b81, minute A4-0x7b82; `divs.w`). The plot colour stays set.
-fn clock_hands(state: &State, gfx: &mut GfxState, fb: &mut Framebuffer, x: u16, y: u16) {
+fn clock_hands(cal: &Calendar, gfx: &mut GfxState, fb: &mut Framebuffer, x: u16, y: u16) {
     let t = &gfx.tables;
     let (px, py) = (x.wrapping_add(4), y.wrapping_add(0xe));
-    let cal = &state.actors.calendar;
     let hour = usize::from(t.hour_dir[usize::from(cal.hour % 12)]);
     let minute = usize::from(cal.minute) * 2 / 15;
     let tip = |d: usize| {
@@ -108,17 +108,22 @@ fn draw_border(gfx: &GfxState, fb: &mut Framebuffer) {
 /// (random 8..=0xa7, random 8..=0xa7). With `framed` (D0): the ui's target cursor, the border,
 /// then the window goes to the front, dissolved when A4-0x6578 is set (cleared after), copied
 /// otherwise.
-pub fn render_window(state: &mut State, gfx: &mut GfxState, io: &Io, framed: bool) {
-    set_plot_colour(gfx, gfx.tables.window_colour);
+pub fn render_window(state: &mut State, io: &Io, framed: bool) {
+    let colour = state.gfx.tables.window_colour;
+    set_plot_colour(&mut state.gfx, colour);
     let window = seams::view_window(state);
     let clock = state.tables.basetile.base.get(CLOCK_TYPE).copied();
     let cursor = if framed {
-        seams::map_cursor(state)
+        seams::map_cursor(state, io)
     } else {
         None
     };
-    io.draw(|fb| {
-        load_palette(state, fb);
+    io.draw(|fb| load_palette(state, fb));
+    io.draw_back(|fb| load_palette(state, fb));
+    let State {
+        gfx, actors, rng, ..
+    } = state;
+    io.draw_back(|fb| {
         for (row, tiles) in window.tiles.iter().enumerate() {
             for (col, &tile) in tiles.iter().enumerate() {
                 let (x, y) = (col as u16 * CELL, row as u16 * CELL);
@@ -126,7 +131,7 @@ pub fn render_window(state: &mut State, gfx: &mut GfxState, io: &Io, framed: boo
                 for &word in &window.objects[row * WINDOW_TILES + col] {
                     blit_back(gfx, fb, word, x, y);
                     if Some(word & 0x7ff) == clock {
-                        clock_hands(state, gfx, fb, x, y);
+                        clock_hands(&actors.calendar, gfx, fb, x, y);
                     }
                 }
             }
@@ -136,8 +141,8 @@ pub fn render_window(state: &mut State, gfx: &mut GfxState, io: &Io, framed: boo
             gfx.plot_back = true;
             set_plot_colour(gfx, 8);
             for _ in 0..100 {
-                let x = state.rng.range(8, 0xa7);
-                let y = state.rng.range(8, 0xa7);
+                let x = rng.range(8, 0xa7);
+                let y = rng.range(8, 0xa7);
                 plot(gfx, fb, x, y);
             }
             gfx.plot_xor = false;
@@ -165,18 +170,18 @@ pub fn render_window(state: &mut State, gfx: &mut GfxState, io: &Io, framed: boo
 /// A4-0x6a8e set: 0x109e74, then clear. A4-0x7af8 set: the animation tick 0x10202e and
 /// 0x102c90 with D0 = 1. A4-0x7afc non-zero: clear it and redraw that panel (0x133a1a with
 /// D1 = 1).
-pub fn refresh_view(state: &mut State, gfx: &mut GfxState, io: &Io) {
-    if gfx.view_stale != 0 {
+pub fn refresh_view(state: &mut State, io: &Io) {
+    if state.map.view_dirty != 0 {
         seams::view_flags(state);
-        gfx.view_stale = 0;
+        state.map.view_dirty = 0;
     }
-    if gfx.window_shown != 0 {
-        anim_tick(state, gfx);
-        render_window(state, gfx, io, true);
+    if state.gfx.window_shown != 0 {
+        anim_tick(state);
+        render_window(state, io, true);
     }
-    if gfx.panel_redraw != 0 {
-        let panel = gfx.panel_redraw;
-        gfx.panel_redraw = 0;
-        seams::redraw_panel(state, panel);
+    if state.gfx.panel_redraw != 0 {
+        let shakes = state.gfx.panel_redraw;
+        state.gfx.panel_redraw = 0;
+        seams::quake(state, io, shakes);
     }
 }

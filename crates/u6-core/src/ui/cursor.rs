@@ -88,7 +88,12 @@ pub fn target_from_pointer(s: &mut State) -> u16 {
 /// moves the pointer onto it; only while the cursor mode is the panel's and the panel shows a
 /// member's stats or inventory)
 pub fn panel_cursor(state: &RefCell<State>, io: &Io, mode: i16) {
-    let mut s = state.borrow_mut();
+    panel_cursor_in(&mut state.borrow_mut(), io, mode);
+}
+
+/// [`panel_cursor`] on a borrowed state (the map-window render 0x102c90 calls it from inside a
+/// synchronous step).
+pub fn panel_cursor_in(s: &mut State, io: &Io, mode: i16) {
     let size = i16::from(s.actors.party.size);
     let (cursor_x, cursor_y) = (s.ui.tables.cursor_x, s.ui.tables.cursor_y);
     let ui = &mut s.ui;
@@ -139,8 +144,8 @@ pub fn panel_cursor(state: &RefCell<State>, io: &Io, mode: i16) {
         y = i16::from(cursor_y[row as usize][c]);
     }
     match mode {
-        1 => io.draw(|fb| seams::blit_tile(fb, 0x16d, x, y)),
-        0 => restore_under_cursor(&mut s, io, (col, row), (x, y)),
+        1 => io.draw(|fb| seams::blit_tile(s, fb, 0x16d, x, y)),
+        0 => restore_under_cursor(s, io, (col, row), (x, y)),
         2 => s.ui.input.pointer = (x, y),
         _ => {}
     }
@@ -152,7 +157,7 @@ fn restore_under_cursor(s: &mut State, io: &Io, (col, row): (i8, i8), (x, y): (i
     let sel = s.ui.input.selection;
     if row > 2 {
         let tile = s.ui.panel.icons[col.clamp(0, 4) as usize];
-        io.draw(|fb| seams::blit_tile(fb, tile, x, y));
+        io.draw(|fb| seams::blit_tile(s, fb, tile, x, y));
     } else if (code == 0x9b || code == 0x9c) && sel >= 0 {
         if row < 0 {
             let ty = s.objects.obj_type(ObjectId(sel as u16));
@@ -164,7 +169,7 @@ fn restore_under_cursor(s: &mut State, io: &Io, (col, row): (i8, i8), (x, y): (i
                 .copied()
                 .unwrap_or(0);
             let tile = base.wrapping_add(seams::facing_frame(ty, 4) as u16);
-            io.draw(|fb| super::panels::tile_on_blank(fb, tile, 0x19b, x, y));
+            super::panels::tile_on_blank(s, io, tile, 0x19b, x, y);
         } else {
             // Contract: draw object `sel`'s icon (with its quantity) at (x, y). Fallback: none.
             todo_stub!("0x105b14 draw an inventory object icon", ());
@@ -178,6 +183,6 @@ fn restore_under_cursor(s: &mut State, io: &Io, (col, row): (i8, i8), (x, y): (i
         } else {
             0x19a
         };
-        io.draw(|fb| seams::blit_tile(fb, tile, x, y));
+        io.draw(|fb| seams::blit_tile(s, fb, tile, x, y));
     }
 }

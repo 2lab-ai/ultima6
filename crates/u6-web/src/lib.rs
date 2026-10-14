@@ -199,7 +199,7 @@ mod tests {
             "{report}"
         );
         assert!(
-            report.ends_with("animdata: not found in the dropped files"),
+            report.ends_with("maptiles.ega: not found in the dropped files"),
             "{report}"
         );
         assert!(!game.started());

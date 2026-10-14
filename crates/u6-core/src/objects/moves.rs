@@ -29,7 +29,7 @@ fn note_carried(s: &mut State, test: impl Fn(&Objects, Slot) -> bool) {
     let i = usize::from(seams::command_member(s));
     let member = s.actors.party.members.get(i).copied().unwrap_or(0);
     if test(&s.objects, Slot::from(member)) {
-        s.objects.carried_changed = 1;
+        s.ui.panel.dirty = true;
     }
 }
 
@@ -77,7 +77,7 @@ pub fn move_to(s: &mut State, slot: Slot, x: u16, y: u16, z: u16) -> Slot {
         (lx - 5..=lx + 5).contains(&px) && (ly - 5..=ly + 5).contains(&py)
     };
     if near(ox, oy) || near(x, y) {
-        s.objects.near_view_changed = 1;
+        s.map.view_dirty = 1;
     }
     let o = &mut s.objects;
     let last = o.last_inside(slot);

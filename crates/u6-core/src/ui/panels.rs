@@ -58,25 +58,26 @@ fn clear_panel(s: &State, io: &Io) {
 
 /// Original: 0x105c6a (ui: draw `tile` over `bg` at pixel (x, y); a forwarding wrapper of 0x10598a)
 pub fn tile_on_blank_at(s: &State, io: &Io, tile: u16, bg: u16, x: i16, y: i16) {
-    let _ = s;
-    io.draw(|fb| tile_on_blank(fb, tile, bg, x, y));
+    tile_on_blank(s, io, tile, bg, x, y);
 }
 
 /// Original: 0x10598a (ui: compose `tile` over `bg` at the top left of the other screen buffer and
 /// copy the 16 × 16 result to (x, y))
-pub fn tile_on_blank(fb: &mut u6_render::Framebuffer, tile: u16, bg: u16, x: i16, y: i16) {
-    seams::blit_tile_back(fb, bg, 0, 0);
-    seams::blit_tile_back(fb, tile, 0, 0);
-    seams::copy_rect(fb, 0, 0, 0xf, 0xf, x, y);
+pub fn tile_on_blank(s: &State, io: &Io, tile: u16, bg: u16, x: i16, y: i16) {
+    io.with_buffers(|back, front| {
+        seams::blit_tile_back(s, back, bg, 0, 0);
+        seams::blit_tile_back(s, back, tile, 0, 0);
+        seams::copy_rect(back, front, 0, 0, 0xf, 0xf, x, y);
+    });
 }
 
 /// Original: 0x133fe0 (ui: the 2 × 2 tiles 0x170..0x173 of the inventory figure frame at (x, y))
-pub fn figure_frame(io: &Io, x: i16, y: i16) {
+pub fn figure_frame(s: &State, io: &Io, x: i16, y: i16) {
     io.draw(|fb| {
-        seams::blit_tile(fb, 0x170, x, y);
-        seams::blit_tile(fb, 0x171, x + 0x10, y);
-        seams::blit_tile(fb, 0x172, x, y + 0x10);
-        seams::blit_tile(fb, 0x173, x + 0x10, y + 0x10);
+        seams::blit_tile(s, fb, 0x170, x, y);
+        seams::blit_tile(s, fb, 0x171, x + 0x10, y);
+        seams::blit_tile(s, fb, 0x172, x, y + 0x10);
+        seams::blit_tile(s, fb, 0x173, x + 0x10, y + 0x10);
     });
 }
 
@@ -246,12 +247,12 @@ fn icon_row(s: &State, io: &Io, member: i16, mid: [u16; 2]) {
     let size = i16::from(s.actors.party.size);
     io.draw(|fb| {
         if member > 0 {
-            seams::blit_tile(fb, 0x183, 0xb0, ICON_ROW_Y);
+            seams::blit_tile(s, fb, 0x183, 0xb0, ICON_ROW_Y);
         }
-        seams::blit_tile(fb, mid[0], 0xc0, ICON_ROW_Y);
-        seams::blit_tile(fb, mid[1], 0xd0, ICON_ROW_Y);
+        seams::blit_tile(s, fb, mid[0], 0xc0, ICON_ROW_Y);
+        seams::blit_tile(s, fb, mid[1], 0xd0, ICON_ROW_Y);
         if member < size - 1 {
-            seams::blit_tile(fb, 0x184, 0xe0, ICON_ROW_Y);
+            seams::blit_tile(s, fb, 0x184, 0xe0, ICON_ROW_Y);
         }
     });
 }
@@ -278,7 +279,7 @@ pub async fn stats(state: &RefCell<State>, io: &Io, member: i16) {
         &[Arg::Str(&n)],
     )
     .await;
-    io.draw(|fb| seams::draw_portrait(fb, actor, 0xb0, 0x10));
+    seams::draw_portrait(&state.borrow(), io, actor, 0xb0, 0x10);
     let (st, dx, it, mp, mmp, hp, mhp, lv, xp) = {
         let s = state.borrow();
         let a = &s.actors.attrs;
@@ -358,7 +359,7 @@ pub async fn inventory(state: &RefCell<State>, io: &Io) {
         )
         .await;
     }
-    figure_frame(io, 0xc0, 0x20);
+    figure_frame(&state.borrow(), io, 0xc0, 0x20);
     at(state, io, 0, 9, &p.weights[0], &[]).await;
     at(state, io, 9, 9, &p.weights[1], &[]).await;
     {
@@ -366,7 +367,7 @@ pub async fn inventory(state: &RefCell<State>, io: &Io) {
         if open == 0 {
             icon_row(&s, io, member, [0x180, 0x181]);
             if member != 0 {
-                io.draw(|fb| seams::blit_tile(fb, 0x187, 0xf0, ICON_ROW_Y));
+                io.draw(|fb| seams::blit_tile(&s, fb, 0x187, 0xf0, ICON_ROW_Y));
             }
         }
         let shown = if open == 0 {
@@ -413,9 +414,10 @@ pub fn sky_bar(s: &mut State, io: &Io) {
     let heights = s.ui.tables.sky_heights;
     let moon_base = s.tables.basetile.base.get(MOON_TYPE).copied().unwrap_or(0);
     let z = s.map.centre.z;
-    io.draw(|fb| {
+    let st = &*s;
+    io.with_buffers(|back, front| {
         for i in 0..9 {
-            seams::blit_tile_back(fb, 0x19b, i * 16, 4);
+            seams::blit_tile_back(st, back, 0x19b, i * 16, 4);
         }
         if z == 0 || z == 5 {
             let hour = cal.hour;
@@ -428,28 +430,28 @@ pub fn sky_bar(s: &mut State, io: &Io) {
                     0x16a
                 };
                 let p = usize::from(19 - hour);
-                seams::blit_tile_back(fb, tile, (19 - i16::from(hour)) * 8, i16::from(heights[p]));
+                seams::blit_tile_back(st, back, tile, (19 - i16::from(hour)) * 8, i16::from(heights[p]));
             }
             if !eclipse {
                 for (pos, phase) in moons {
                     if pos <= 14 {
                         let tile = moon_base.wrapping_add(u16::from(phase));
                         let y = i16::from(heights[usize::from(pos)]);
-                        seams::blit_tile_back(fb, tile, i16::from(pos) * 8, y);
+                        seams::blit_tile_back(st, back, tile, i16::from(pos) * 8, y);
                     }
                 }
             }
             for i in 0..9 {
-                seams::blit_tile_back(fb, 0x160 + i as u16, i * 16, 4);
+                seams::blit_tile_back(st, back, 0x160 + i as u16, i * 16, 4);
             }
         } else {
-            seams::blit_tile_back(fb, 0x174, 0, 4);
+            seams::blit_tile_back(st, back, 0x174, 0, 4);
             for i in 1..8 {
-                seams::blit_tile_back(fb, 0x175, i * 16, 4);
+                seams::blit_tile_back(st, back, 0x175, i * 16, 4);
             }
-            seams::blit_tile_back(fb, 0x176, 0x80, 4);
+            seams::blit_tile_back(st, back, 0x176, 0x80, 4);
         }
-        seams::copy_rect(fb, 0, 4, 0x87, 0x13, 0xb0, 6);
+        seams::copy_rect(back, front, 0, 4, 0x87, 0x13, 0xb0, 6);
     });
     seams::sky_bar_tail(s);
 }

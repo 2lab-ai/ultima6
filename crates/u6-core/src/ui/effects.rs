@@ -10,14 +10,17 @@ use crate::state::State;
 ///
 /// Two RNG draws per shake, x first, as the original.
 pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
-    seams::present_map(s, 0);
+    seams::present_map(s, io, 0);
     for _ in 0..times.max(0) {
         let (lo, hi) = ((0x10 - amp) as u16, (amp + 0x10) as u16);
         let dx = s.rng.range(lo, hi) as i16;
         let dy = s.rng.range(lo, hi) as i16;
-        io.draw(|fb| seams::copy_rect(fb, dx, dy, dx + 0x90, dy + 0x90, 0x10, 0x10));
+        io.with_buffers(|back, front| {
+            seams::copy_rect(back, front, dx, dy, dx + 0x90, dy + 0x90, 0x10, 0x10);
+        });
+        io.present();
     }
-    seams::refresh_view(s);
+    seams::refresh_view(s, io);
 }
 
 #[cfg(test)]

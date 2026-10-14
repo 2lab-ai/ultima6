@@ -125,6 +125,9 @@ pub struct GameTables {
     pub window_shown: u16,
     /// Original: 0x155178 (A4-0x6578; image value of the "dissolve the next present" word)
     pub dissolve: u16,
+    /// Original: 0x157d9e (A4-0x3952; 256 bytes: screen colour 0..31 of each 8-bit bitmap
+    /// colour, the map 0x153384 / 0x1533e0 draw `paper.bmp` and the portraits through)
+    pub bitmap_colours: [u8; 256],
 }
 
 impl Default for GameTables {
@@ -140,6 +143,7 @@ impl Default for GameTables {
             dir_dy: [0; 8],
             window_shown: 0,
             dissolve: 0,
+            bitmap_colours: [0; 256],
         }
     }
 }
@@ -163,6 +167,7 @@ impl GameTables {
             dir_dy: bytes::<8>(image_bytes(game, &HUNK_33, 0x0015_552A, 8)?).map(|b| b as i8),
             window_shown: word(0x0015_3BF8)?,
             dissolve: word(0x0015_5178)?,
+            bitmap_colours: bytes::<256>(image_bytes(game, &HUNK_33, 0x0015_7D9E, 256)?),
         })
     }
 }
@@ -193,6 +198,10 @@ mod tests {
         let dirs = at(&HUNK_33, 0x0015_5522);
         g[dirs..dirs + 16]
             .copy_from_slice(&[0, 1, 1, 1, 0, 255, 255, 255, 255, 255, 0, 1, 1, 1, 0, 255]);
+        let colours = at(&HUNK_33, 0x0015_7D9E);
+        for (i, b) in g[colours..colours + 256].iter_mut().enumerate() {
+            *b = (i % 32) as u8;
+        }
         let hours = at(&HUNK_33, 0x0015_3BFC);
         g[hours..hours + 12].copy_from_slice(&[0, 0, 1, 1, 2, 3, 3, 4, 5, 5, 6, 7]);
         for (a, v) in [
@@ -218,6 +227,7 @@ mod tests {
         assert_eq!((t.window_shown, t.dissolve, t.clock_colour), (1, 1, 2));
         assert_eq!((t.dir_dx[5], t.dir_dy[0], t.dir_dy[2]), (-1, -1, 0));
         assert_eq!(t.hour_dir[11], 7);
+        assert_eq!((t.bitmap_colours[33], t.bitmap_colours[255]), (1, 31));
     }
 
     #[test]

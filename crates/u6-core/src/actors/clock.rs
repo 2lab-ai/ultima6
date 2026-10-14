@@ -112,7 +112,7 @@ pub fn tick(s: &mut State, minutes: i16) {
         keg_expires(s, obj);
     }
     if s.rng.range(0, 7) == 0 {
-        s.actors.work.random_event = 1;
+        s.objects.draw.volcano_probe = 1;
     }
     let mut f = TickFlags::default();
     for actor in 0..0x100u16 {
@@ -172,7 +172,7 @@ fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
             0x102 => {
                 if s.rng.range(0, 999) == 0x1ad {
                     s.objects.actor_flags[a] &= !0x02;
-                    s.actors.work.ring_redraw = 1;
+                    s.gfx.dissolve = 1;
                     f.vanish = true;
                     seams::present_map(s);
                 } else {
@@ -180,17 +180,17 @@ fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
                 }
             }
             0x101 => {
-                let regen_all = s.actors.work.command == 0x91;
-                let regen_one = s.actors.work.command == 0x90
+                let regen_all = s.ui.panel.mode == 0x91;
+                let regen_one = s.ui.panel.mode == 0x90
                     && s.actors
                         .party
                         .members
-                        .get(usize::from(s.actors.work.command_member))
+                        .get(s.ui.panel.member as usize)
                         == Some(&(actor as u8));
                 if (regen_all || regen_one)
                     && u16::from(s.actors.attrs.hp[a]) < leaves::max_hp(s, actor)
                 {
-                    s.actors.work.status_counter = s.actors.work.status_counter.wrapping_add(1);
+                    s.ui.panel.dirty = true;
                 }
                 let hp = i16::from(s.actors.attrs.hp[a]) + minutes;
                 let max = leaves::max_hp(s, actor);
@@ -336,7 +336,7 @@ fn regain_magic(s: &mut State) {
             if u16::from(s.actors.attrs.magic[a]) > max {
                 s.actors.attrs.magic[a] = max as u8;
             }
-            s.actors.work.status_counter = s.actors.work.status_counter.wrapping_add(1);
+            s.ui.panel.dirty = true;
         }
     }
 }

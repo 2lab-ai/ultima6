@@ -4,7 +4,7 @@
 #![allow(clippy::disallowed_methods)] // the test reads the zip and writes the PNG receipts
 
 use super::*;
-use crate::ui::image::GameImage;
+use crate::image::GameImage;
 use crate::ui::text::WindowId;
 use u6_intake::{InputFile, intake};
 

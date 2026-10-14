@@ -1,79 +1,54 @@
-//! Calls into other modules' original functions that are not ported yet (spec: the narrowest
-//! signature the ui needs, a `todo_stub!` body, an explicit fallback). The dispatcher replaces
-//! each body with a call to the owner's port at merge.
+//! Calls from the ui into other modules' original functions, reconciled at integration
+//! (WU-P7): each forwards to the owner's port; the ones whose target is outside milestone 1
+//! keep a `todo_stub!` with the explicit fallback.
 
 use u6_render::Framebuffer;
 
-use crate::objects::ObjectId;
+use crate::engine::Io;
 use crate::state::State;
 use crate::todo_stub;
 
-/// 0x122144 (actors: maximum hit points). Contract: actor slot → 1..=255. Fallback: the leaf's
-/// formula as read from its code (level byte at 0x139888 × 30, at least 1, at most 255), so the
-/// panels show real numbers until actors/ ports it. Every stats-panel draw reaches it.
+/// 0x122144 (actors: maximum hit points of actor slot `actor`).
 pub(crate) fn max_hp(s: &State, actor: u8) -> u8 {
-    let level = s.actors.attrs.level[usize::from(actor)];
-    todo_stub!(
-        "0x122144 maximum hit points",
-        (u16::from(level) * 30).clamp(1, 255) as u8
-    )
+    crate::actors::leaves::max_hp(s, u16::from(actor)) as u8
 }
 
-/// 0x122176 (actors: maximum magic points). Contract: actor slot → points. Fallback: the
-/// leaf's formula (by object type: 0x19a → 2 × INT, 0x17a → INT, 0x179 / 0x182 → INT / 2,
-/// others 0).
+/// 0x122176 (actors: maximum magic points).
 pub(crate) fn max_magic(s: &State, actor: u8) -> u16 {
-    let int = u16::from(s.actors.attrs.intelligence[usize::from(actor)]);
-    let fallback = match s.objects.obj_type(ObjectId(u16::from(actor))) {
-        0x19a => int * 2,
-        0x17a => int,
-        0x179 | 0x182 => int / 2,
-        _ => 0,
-    };
-    todo_stub!("0x122176 maximum magic points", fallback)
+    crate::actors::leaves::max_magic(s, u16::from(actor))
 }
 
-/// 0x1220f0 (actors: level). Contract: actor slot → level. Fallback: the level byte at
-/// 0x139888 the leaf returns.
+/// 0x1220f0 (actors: level).
 pub(crate) fn level(s: &State, actor: u8) -> u8 {
-    let level = s.actors.attrs.level[usize::from(actor)];
-    todo_stub!("0x1220f0 actor level", level)
+    crate::actors::leaves::level(s, u16::from(actor))
 }
 
-/// 0x10a4d6 (objects: frame offset of an object type facing `dir`). Contract: (type, dir) →
-/// frame added to the type's base tile. Fallback 0 (the first frame); the roster shows each
-/// member's base tile.
+/// 0x10a4d6 (objects: frame offset of an object type facing `dir`).
 pub(crate) fn facing_frame(obj_type: u16, dir: i16) -> i16 {
-    let _ = (obj_type, dir);
-    todo_stub!("0x10a4d6 frame of a type facing a direction", 0)
+    crate::objects::actor_frame(obj_type, dir)
 }
 
-/// 0x133d3e (converse: load and draw an actor's portrait at pixel (x, y)). Contract: draws a
-/// 56 × 64 portrait; no result. Fallback: nothing drawn (the stats panel shows no portrait).
-pub(crate) fn draw_portrait(fb: &mut Framebuffer, actor: u8, x: i16, y: i16) {
-    let _ = (fb, actor, x, y);
-    todo_stub!("0x133d3e draw an actor portrait", ())
+/// 0x133d3e (converse: load and draw an actor's portrait at pixel (x, y) on the screen).
+pub(crate) fn draw_portrait(s: &State, io: &Io, actor: u8, x: i16, y: i16) {
+    crate::converse::draw_portrait(s, io, i16::from(actor), x, y);
 }
 
-/// 0x153002 (gfx: draw tile `tile` at pixel (x, y) on the screen the text layer draws on).
-/// Contract: masked 16 × 16 tile blit, no result. Fallback: nothing drawn.
-pub(crate) fn blit_tile(fb: &mut Framebuffer, tile: u16, x: i16, y: i16) {
-    let _ = (fb, tile, x, y);
-    todo_stub!("0x153002 tile blit", ())
+/// 0x153002 (gfx: draw tile `tile` at pixel (x, y) on the screen).
+pub(crate) fn blit_tile(s: &State, fb: &mut Framebuffer, tile: u16, x: i16, y: i16) {
+    crate::gfx::blit::blit_front(&s.gfx, fb, tile, x as u16, y as u16);
 }
 
-/// 0x152ffa (gfx: the same tile blit into the other screen buffer, 0x161be2). Fallback: nothing
-/// drawn.
-pub(crate) fn blit_tile_back(fb: &mut Framebuffer, tile: u16, x: i16, y: i16) {
-    let _ = (fb, tile, x, y);
-    todo_stub!("0x152ffa tile blit to the back screen", ())
+/// 0x152ffa (gfx: the same tile blit into the other screen buffer, 0x161be2).
+pub(crate) fn blit_tile_back(s: &State, back: &mut Framebuffer, tile: u16, x: i16, y: i16) {
+    crate::gfx::blit::blit_back(&s.gfx, back, tile, x as u16, y as u16);
 }
 
 /// 0x151fe6 (gfx: copy the inclusive pixel rectangle (x0, y0)..(x1, y1) of the other screen
-/// buffer to (dx, dy) on the screen, whole bytes of 8 pixels, all five planes; stack words in
-/// that order, read from its code). No result. Fallback: nothing copied.
+/// buffer to (dx, dy) on the screen, whole bytes of 8 pixels, all five planes).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn copy_rect(
-    fb: &mut Framebuffer,
+    back: &Framebuffer,
+    front: &mut Framebuffer,
     x0: i16,
     y0: i16,
     x1: i16,
@@ -81,21 +56,18 @@ pub(crate) fn copy_rect(
     dx: i16,
     dy: i16,
 ) {
-    let _ = (fb, x0, y0, x1, y1, dx, dy);
-    todo_stub!("0x151fe6 copy a screen rectangle", ())
+    let w = |v: i16| v as u16;
+    crate::gfx::blit::copy_rect(back, front, w(x0), w(y0), w(x1), w(y1), w(dx), w(dy));
 }
 
-/// 0x102ef0 (gfx/main: rebuild the view if dirty and redraw it). Contract: no result.
-/// Fallback: nothing redrawn (the idle cursor still blinks).
-pub(crate) fn refresh_view(s: &mut State) {
-    let _ = s;
-    todo_stub!("0x102ef0 post-step view refresh", ())
+/// 0x102ef0 (gfx: rebuild the view if dirty and redraw it).
+pub(crate) fn refresh_view(s: &mut State, io: &Io) {
+    crate::gfx::refresh_view(s, io);
 }
 
-/// 0x102c90 (gfx: present the map window; `flag` as passed). Fallback: nothing presented.
-pub(crate) fn present_map(s: &mut State, flag: i16) {
-    let _ = (s, flag);
-    todo_stub!("0x102c90 present the map window", ())
+/// 0x102c90 (gfx: render the map window; with `flag` add the cursor and border and present).
+pub(crate) fn present_map(s: &mut State, io: &Io, flag: i16) {
+    crate::gfx::render_window(s, io, flag != 0);
 }
 
 /// 0x124e0e (combat: distance between two window cells; the cross-hair passes (5, 5) and the
@@ -105,34 +77,33 @@ pub(crate) fn distance(x0: i16, y0: i16, x1: i16, y1: i16) -> i16 {
     todo_stub!("0x124e0e distance between cells", d)
 }
 
-/// 0x1225c0 (actors: the actor at a map location, starting from `actor`'s level). Contract:
-/// (actor, x, y) → object slot, or -1. Fallback -1 (nobody there).
+/// 0x1225c0 (combat: the actor at a map location, starting from `actor`'s level): walks the
+/// objects at (x, y) (0x10ad1a / 0x10aaca), skipping any that 0x1224ea says `actor` cannot see;
+/// the first visible actor slot below 0x100 without status bit 0x10 wins, else the first visible
+/// object, else -1. Not ported (a combat leaf outside milestone 1). Fallback: the first actor
+/// standing there (objects 0x10b20e), visibility not checked.
 pub(crate) fn actor_at(s: &State, actor: u8, x: i16, y: i16) -> i16 {
-    let _ = (s, actor, x, y);
-    todo_stub!("0x1225c0 actor at a location", -1)
+    let _ = actor;
+    let found = crate::objects::actor_at(s, 1, x as u16, y as u16);
+    todo_stub!("0x1225c0 actor at a location", found)
 }
 
-/// Map-window caches A4-0x15f0 (byte per window cell, 11 × 11: something stands there) and
-/// A4-0x1476 (word per cell: tile shown), filled with the map-window tile cache 0x108f90
-/// [likely] (map / gfx). Contract: cell → (occupied, tile). Fallback: empty cell showing tile
-/// 0xff (nothing visible).
+/// Map-window caches A4-0x15f0 (byte per window cell, 11 × 11: first draw-list node, non-zero =
+/// something stands there) and A4-0x1476 (word per cell: tile shown), both built by 0x109e74 →
+/// 0x10e81e (`objects.draw`).
 pub(crate) fn window_cell(s: &State, col: i16, row: i16) -> (bool, u16) {
-    let _ = (s, col, row);
-    todo_stub!(
-        "0x15a27a map-window cell caches A4-0x15f0 / A4-0x1476",
-        (false, 0xff)
-    )
+    let d = &s.objects.draw;
+    let i = usize::try_from(row * 11 + col).ok().filter(|&i| i < 121);
+    i.map_or((false, 0xff), |i| (d.cell[i] != 0, d.base[i]))
 }
 
-/// 0x135120 (boot: step the tile animation frame unless A4-0x7b64 is set). Fallback: no step.
+/// 0x135120 (boot: step the overlay frame unless A4-0x7b64 is set).
 pub(crate) fn anim_step(s: &mut State) {
-    let _ = s;
-    todo_stub!("0x135120 step the tile animation", ())
+    crate::main_loop::anim_step(s);
 }
 
-/// 0x103632 (main: called with 1 at the end of the sky bar; it draws a random number with
-/// 0x151f06). Contract: no result. Fallback: nothing, so no RNG draw happens there.
+/// 0x103632 called with 1 at the end of the sky bar: with a non-zero argument it skips its
+/// random wind change, so this call draws no random number.
 pub(crate) fn sky_bar_tail(s: &mut State) {
-    let _ = s;
-    todo_stub!("0x103632 sky bar tail (random)", ())
+    crate::main_loop::wind_change(s, 1);
 }

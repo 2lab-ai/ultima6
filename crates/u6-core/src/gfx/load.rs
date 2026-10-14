@@ -42,8 +42,6 @@ pub struct GfxState {
     pub anim_paused: u8,
     /// Original: 0x153bf6 (A4-0x7afa; word: actor idle frames due; 0x10202e clears it)
     pub actor_anim_due: u16,
-    /// Original: 0x154c62 (A4-0x6a8e; word: view flags stale, 0x102ef0 then runs 0x109e74)
-    pub view_stale: u16,
     /// Original: 0x153bf8 (A4-0x7af8; word: the map window is shown; image value from `game`)
     pub window_shown: u16,
     /// Original: 0x153bf4 (A4-0x7afc; byte: panel 0x102ef0 redraws after the window, 0x133a1a)
@@ -85,7 +83,6 @@ impl Default for GfxState {
             anim_counter: 0,
             anim_paused: 0,
             actor_anim_due: 0,
-            view_stale: 0,
             window_shown: 0,
             panel_redraw: 0,
             sparkle: 0,
@@ -108,6 +105,23 @@ fn format_error(file: &str) -> impl FnOnce(FormatError) -> LoadError + '_ {
 }
 
 impl GfxState {
+    /// A state without tile records (no allocation): what the idle pass reads (tables and the
+    /// display globals) without the 2048 records.
+    pub(crate) fn view(&self) -> GfxState {
+        GfxState {
+            records: Vec::new(),
+            overlays: Vec::new(),
+            record_of: Vec::new(),
+            masktype: Vec::new(),
+            animmask: AnimMask {
+                block1: Vec::new(),
+                block2: Vec::new(),
+            },
+            tables: self.tables.clone(),
+            ..*self
+        }
+    }
+
     /// Original: 0x152e50 (load tile graphics: maptiles, masktype, tileindx, animmask)
     /// Replaces: 0x14f16c (object-tile cache prefill), 0x1623d6 (cache miss: reload a record)
     ///

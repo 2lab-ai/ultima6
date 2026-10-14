@@ -1,9 +1,9 @@
 //! Read-only view of the user's `game` executable as the loaded memory image (spec 03 §5, "data,
-//! not constants").
+//! not constants"): the one hunk loader every module reads its tables through.
 //!
-//! The text layer needs strings and small tables that live inside `game` (panel format strings,
-//! the raw-key table, the initial colours). They are read here at run time from the user's own
-//! PowerPacker-decrunched `game`, never compiled in. Addresses are image addresses as in the RE
+//! The modules need strings and small tables that live inside `game` (panel format strings, the
+//! raw-key table, colours, walk tables, object definitions, converse messages). They are read
+//! here at run time from the user's own PowerPacker-decrunched `game`, never compiled in. Addresses are image addresses as in the RE
 //! notes: AmigaDOS hunk segments laid out one after another from 0x00100000, each base aligned
 //! to 8 bytes (re/notes/game-layout.md, `tools/hunk2raw.py`). Bytes are the file's (not
 //! relocated); a stored pointer is resolved with [`GameImage::pointer`], which applies the

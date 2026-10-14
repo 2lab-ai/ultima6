@@ -61,8 +61,6 @@ pub struct InputState {
     pub key_marks: (i16, i16),
     /// Original: A4-0x7a56 (refresh the map view while the cursor idles)
     pub idle_refresh: bool,
-    /// Original: A4-0x7afa (set when the idle cursor was shown; read by the map draw)
-    pub idle_mark: bool,
 }
 
 impl InputState {
@@ -100,8 +98,6 @@ pub struct PanelState {
     pub container: u16,
     /// Original: A4+0x1380 (container opened in the panel instead of a member, 0 = none)
     pub open_container: u16,
-    /// Original: A4-0x71b5 (panel keys disabled)
-    pub locked: bool,
     /// Original: A4-0x797e (the bottom row of panel icons, tiles; see `UiTables::panel_icons`)
     pub icons: [u16; 5],
     /// Original: A4+0x1340 (objects in the inventory list)

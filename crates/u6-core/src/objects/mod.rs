@@ -215,9 +215,7 @@ pub struct Objects {
     /// Original: A4+0x250c (word per slot: high byte quality, low byte quantity; a gold or
     /// other word-count stack uses the whole word; objlist 0x0600 fills the actor slots)
     ///
-    /// The aggregate loads objlist 0x0600 into `actors.attrs.unknown_0600`; [`init_slots`]
-    /// copies it here, after which this table is authoritative (that actor field is a load-time
-    /// duplicate to delete at merge).
+    /// The aggregate's loader writes objlist 0x0600 into the actor slots.
     pub qq: Vec<u16>,
     /// Original: A4-0x1184 (word per slot: next slot in the object list or a free chain, -1 =
     /// end; slot 0x100 is the list head)
@@ -271,12 +269,6 @@ pub struct Objects {
     pub save_mode: u16,
     /// Original: A4-0x7af8 (word: 0x10d538 sets it after a save wrote the blocks)
     pub saved_blocks: u16,
-    /// Original: A4-0x7afe (byte: an object the current command's actor carries changed; set
-    /// by move/remove/create while the command code is 0x92, by 0x12ba36 and 0x128ce8)
-    pub carried_changed: u8,
-    /// Original: A4-0x6a8e (word: a move touched the 11 × 11 tiles around the leader; also set
-    /// by map 0x108d10)
-    pub near_view_changed: u16,
     /// Map-window draw lists built by 0x10e81e.
     pub draw: DrawLists,
     /// Tables read from the user's `game` file ([`ObjectDefs::from_game`]).
@@ -312,8 +304,6 @@ impl Default for Objects {
             tmp_flag: vec![0; BLOCK_COUNT],
             save_mode: 0,
             saved_blocks: 0,
-            carried_changed: 0,
-            near_view_changed: 0,
             draw: DrawLists::default(),
             defs: ObjectDefs::default(),
         }

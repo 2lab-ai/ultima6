@@ -177,6 +177,11 @@ pub fn dissolve_order(w: u16, h: u16, taps: &[u16]) -> Vec<(u16, u16)> {
         if carry {
             s ^= feedback;
         }
+        // A zero register never comes back to 1 (only with a zero feedback word, which the
+        // game's table does not hold): raster order then, rather than spin.
+        if s == 0 {
+            return (0..h).flat_map(|r| (0..w).map(move |c| (c, r))).collect();
+        }
         if s == 1 {
             break;
         }
@@ -209,6 +214,74 @@ pub fn copy_window(back: &Framebuffer, front: &mut Framebuffer) {
     for y in 8..168 {
         for x in 8..168 {
             copy_pixel(back, front, x, y);
+        }
+    }
+}
+
+/// Original: 0x151fe6 (copy the pixel rectangle (x0, y0)..=(x1, y1) of the back buffer to
+/// (dx, dy) on the screen: whole bytes of 8 pixels, all five planes)
+///
+/// Columns are bytes: x0 / 8 ..= x1 / 8 go to dx / 8 onwards (`lsr.w #3`), rows y0..=y1 to
+/// dy onwards. A row past the screen is dropped (the original would land in the next plane).
+#[allow(clippy::too_many_arguments)]
+pub fn copy_rect(
+    back: &Framebuffer,
+    front: &mut Framebuffer,
+    x0: u16,
+    y0: u16,
+    x1: u16,
+    y1: u16,
+    dx: u16,
+    dy: u16,
+) {
+    let bytes = (x1 >> 3).wrapping_sub(x0 >> 3);
+    let rows = y1.wrapping_sub(y0);
+    if bytes >= ROW_BYTES as u16 || rows >= HEIGHT as u16 {
+        return;
+    }
+    for r in 0..=rows {
+        let (Some(src), Some(dst)) = (row_base(y0 + r), row_base(dy + r)) else {
+            continue;
+        };
+        for b in 0..=bytes {
+            let s = (src + usize::from((x0 >> 3) + b)) * 8;
+            let d = (dst + usize::from((dx >> 3) + b)) * 8;
+            for bit in 0..8 {
+                let i = s + bit;
+                if i < WIDTH * HEIGHT {
+                    let p = back.get(i % WIDTH, i / WIDTH).unwrap_or(0);
+                    update(front, d + bit, |_| p);
+                }
+            }
+        }
+    }
+}
+
+/// Original: 0x1533e0 (draw an 8-bit bitmap with a word header on the screen); also the body of
+/// 0x153384 (the same with a byte-pair header, `paper.bmp`)
+///
+/// `pixels` is `width × height` bytes, row-major; each byte becomes screen colour
+/// `colours[byte] & 0x1f` (the five bits the shifts take into the planes). The bitmap starts
+/// at byte column x / 8 of row y; each row is `width` pixels, the next row starts a screen row
+/// below. Pixels past the screen are dropped.
+pub fn blit_bitmap(
+    colours: &[u8; 256],
+    front: &mut Framebuffer,
+    (width, height): (u16, u16),
+    pixels: &[u8],
+    x: u16,
+    y: u16,
+) {
+    for r in 0..usize::from(height) {
+        let Some(row) = row_base(y.wrapping_add(r as u16)) else {
+            continue;
+        };
+        let start = (row + usize::from(x >> 3)) * 8;
+        for c in 0..usize::from(width) {
+            let Some(&b) = pixels.get(r * usize::from(width) + c) else {
+                return;
+            };
+            update(front, start + c, |_| colours[usize::from(b)] & 0x1f);
         }
     }
 }

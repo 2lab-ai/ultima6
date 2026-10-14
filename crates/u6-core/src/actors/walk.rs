@@ -289,7 +289,7 @@ pub fn can_move_to(s: &mut State, actor: u16, x: u16, y: u16) -> bool {
         let mut keep = true;
         if m.kind == 0x19d && other == 0x19d {
             // Serpent segments: blocked only by the segment right behind (word 0x600 high byte).
-            let seg = |i: usize| s.actors.attrs.unknown_0600.get(i).copied().unwrap_or(0) >> 8;
+            let seg = |i: usize| s.objects.qq.get(i).copied().unwrap_or(0) >> 8;
             if seg(a) + 1 == seg(id.index()) {
                 keep = false;
                 ok = false;
@@ -570,7 +570,7 @@ pub fn face(s: &mut State, actor: u16, dir: u16) {
         let phase = if f & 4 == 0 { 7 } else { 3 };
         set_frame(s, me, facing * 8 + phase);
         if !outside_window(s, actor) {
-            s.actors.work.random_byte = s.rng.range(2, 4) as u8;
+            s.gfx.panel_redraw = s.rng.range(2, 4) as u8;
         }
     } else if t == 0x19b && f < 8 {
         let p = s.objects.location[a];

@@ -120,7 +120,7 @@ pub fn place_party(state: &mut State, x: u16, y: u16, z: u16, mode: u16) {
     state.map.flag_784e = 1;
     seams::main_after_placing(state);
     if mode == 1 {
-        state.map.full_redraw = 1;
+        state.gfx.dissolve = 1;
         draw(state);
     }
     for _ in 0..5 {
@@ -197,7 +197,7 @@ fn gather_step(state: &mut State, m: ObjectId, mode: u16) -> bool {
         seams::move_object(state, m, cx, cy, PARKED);
         state.map.flag_784e = 1;
         if mode == 1 {
-            state.map.full_redraw = 1;
+            state.gfx.dissolve = 1;
             draw(state);
         }
         return true;
@@ -331,7 +331,7 @@ pub fn after_step(state: &mut State) {
                     && (1..0x15).contains(&q)
                 {
                     seams::say_place_name(state, q);
-                    state.map.flag_7afd = 1;
+                    state.actors.work.prompt = 1;
                 }
                 if party_mode {
                     climb(state, id);
@@ -345,7 +345,7 @@ pub fn after_step(state: &mut State) {
     }
     if refused {
         seams::say_party_mode_needed(state);
-        state.map.flag_7afd = 1;
+        state.actors.work.prompt = 1;
     }
 }
 
@@ -417,7 +417,7 @@ pub fn resurrect_party(state: &mut State) {
                     && u16::from(seams::object_quality(state, o)) == a
             });
             if let Some(body) = body {
-                state.map.body = body.0 as i16;
+                state.ui.input.selection = body.0 as i16;
                 raise(state, ObjectId(a), body);
             }
         }
@@ -451,7 +451,7 @@ pub fn resurrect_party(state: &mut State) {
     seams::main_after_placing(state);
     seams::break_off_combat(state);
     teleport(state, 0x133, 0x160, 0, 0);
-    state.map.fast_clock = 1;
+    state.actors.work.force_teleport = 1;
     loop {
         let before = state.actors.calendar;
         let h = before.hour;
@@ -464,11 +464,11 @@ pub fn resurrect_party(state: &mut State) {
             break;
         }
     }
-    state.map.fast_clock = 0;
-    state.map.full_redraw = 1;
+    state.actors.work.force_teleport = 0;
+    state.gfx.dissolve = 1;
     draw(state);
     seams::play_area_song(state);
-    state.map.flag_7afe = 1;
+    state.ui.panel.dirty = true;
     state.map.flag_784e = 1;
 }
 
@@ -524,7 +524,7 @@ mod tests {
     }
 
     fn quality(s: &mut State, id: ObjectId, q: u8) {
-        s.actors.attrs.unknown_0600[id.index()] = u16::from(q) << 8;
+        s.objects.qq[id.index()] = u16::from(q) << 8;
     }
 
     #[test]
@@ -650,7 +650,7 @@ mod tests {
             crate::stub::detached_hits().get(id).copied().unwrap_or(0),
             before + 1
         );
-        assert_eq!(s.map.flag_7afd, 1);
+        assert_eq!(s.actors.work.prompt, 1);
         // In combat nothing happens; with leader index == size neither.
         s.actors.objlist_tail[0x79] = PARTY_MODE;
         s.actors.objlist_tail[0x78] = 1;
@@ -684,7 +684,7 @@ mod tests {
         assert_eq!(s.actors.party.leader_index, 0xff);
         assert_eq!(s.actors.attrs.exp[1], 1000, "no body matched");
         assert_eq!(s.actors.attrs.status[1], ((0x90 & 0x9f) | 0x40) & 0xe1);
-        assert_eq!((s.map.fast_clock, s.map.flag_7afe), (0, 1));
+        assert_eq!((s.actors.work.force_teleport, s.ui.panel.dirty), (0, true));
         // The Avatar's raise step itself.
         raise(&mut s, ObjectId(1), body);
         assert_eq!(s.actors.attrs.exp[1], 500);

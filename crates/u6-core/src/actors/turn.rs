@@ -39,7 +39,7 @@ pub fn darkness(s: &mut State) {
     }
     crate::todo_stub!("0x110878 music off (fallback: silence)", ());
     seams::print(s, -0x7435, &[]);
-    s.actors.work.darkness = 1;
+    s.gfx.window_shown = 1;
     seams::full_redraw(s);
     seams::print(s, -0x740e, &[]);
     crate::todo_stub!("0x1095bc resurrect the party (fallback: none)", ());
@@ -262,7 +262,7 @@ pub fn swallowed(s: &mut State, actor: u16) -> bool {
         seams::print_name(s, me);
         seams::print(s, -0x75d3, &[]);
         s.actors.attrs.movement_flags[a] &= !0x10;
-        s.actors.work.freed = 1;
+        s.map.view_dirty = 1;
         return false;
     }
     let damage = s.rng.range(1, 15) as u8;
@@ -621,9 +621,9 @@ mod tests {
     fn a_dead_avatar_brings_the_darkness_once_per_bookkeeping() {
         let mut s = world(&[]);
         s.actors.attrs.status[1] = 0x90;
-        s.actors.work.darkness = 0;
+        s.gfx.window_shown = 0;
         leader_bookkeeping(&mut s);
-        assert_eq!(s.actors.work.darkness, 1);
+        assert_eq!(s.gfx.window_shown, 1);
     }
 
     #[test]
@@ -650,7 +650,7 @@ mod tests {
         s.actors.attrs.hp[10] = 20;
         assert!(!swallowed(&mut s, 10), "strength 31 always beats 1..30");
         assert_eq!(s.actors.attrs.movement_flags[10] & 0x10, 0);
-        assert_eq!(s.actors.work.freed, 1);
+        assert_eq!(s.map.view_dirty, 1);
         s.actors.attrs.movement_flags[10] = 0x10;
         s.actors.attrs.strength[10] = 1;
         assert!(swallowed(&mut s, 10));

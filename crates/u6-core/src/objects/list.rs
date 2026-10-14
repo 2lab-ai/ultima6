@@ -289,16 +289,14 @@ pub fn link_actors(o: &mut Objects) {
     }
 }
 
-/// The object steps of load state 0x105350 in its order, for `main_loop` to call in place of
-/// its three stubs: slots reset (0x10ed44, a boot step in the original), the actors' quality /
-/// quantity words from objlist 0x0600, the actors linked (0x10edb4), the save mode from the data
-/// hunk, and the region at the leader loaded (0x10e1ce).
+/// The object steps of load state 0x105350 in its order: slots reset (0x10ed44, a boot step in
+/// the original), the save mode from the data hunk, the actors linked (0x10edb4) and the region
+/// at the leader loaded (0x10e1ce). The aggregate's loader already put objlist 0x0600 (the
+/// actors' quality / quantity words) into [`super::Objects::qq`]. `main_loop` calls the steps
+/// itself to keep 0x106506 between 0x10edb4 and 0x10e1ce; tools and tests call this.
 pub fn load_state_objects(s: &mut crate::state::State) {
     let o = &mut s.objects;
     init_slots(o);
-    for (q, &w) in o.qq.iter_mut().zip(&s.actors.attrs.unknown_0600) {
-        *q = w;
-    }
     o.save_mode = o.defs.save_mode;
     link_actors(o);
     let at = s.map.centre;

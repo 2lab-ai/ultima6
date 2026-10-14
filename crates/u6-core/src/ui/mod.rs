@@ -78,7 +78,6 @@
 pub mod cursor;
 pub mod effects;
 pub mod globals;
-pub mod image;
 pub mod input;
 pub mod keyread;
 pub mod panels;

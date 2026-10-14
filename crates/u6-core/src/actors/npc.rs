@@ -571,7 +571,7 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
             "0x10c928 confiscate the party's weapons (fallback: kept)",
             ()
         );
-        s.actors.work.ring_redraw = 1;
+        s.gfx.dissolve = 1;
         todo_stub!(
             "0x10e81e jail door and objects after the arrest (fallback: none)",
             ()

@@ -55,13 +55,6 @@ pub mod timer {
 pub struct ActorWork {
     /// Original: A4-0x7afd (byte: the command loop reprints the prompt when set)
     pub prompt: u8,
-    /// Original: A4-0x7afe (byte: party-status counter the clock and command loop bump; data
-    /// hunk 1)
-    pub status_counter: u8,
-    /// Original: A4-0x7af6 (word: set by the clock on a 1-in-8 draw)
-    pub random_event: u16,
-    /// Original: A4-0x7af8 (word: set by 0x121020; data hunk 1)
-    pub darkness: u16,
     /// Original: A4-0x617a (byte: time stop has run out; the data hunk holds 1)
     pub time_stop_over: u8,
     /// Original: A4-0x7ac4 (byte: hour of the last hour-change bookkeeping; data hunk 0xff)
@@ -82,8 +75,6 @@ pub struct ActorWork {
     pub searches: u16,
     /// Original: A4-0x6a9e (word: while set, 0x11e60c teleports even in view)
     pub force_teleport: u16,
-    /// Original: A4-0x6a8e (word: set when a swallowed actor is freed)
-    pub freed: u16,
     /// Original: A4-0x6a8c (word: party members may swap places in 0x11b1c0; data hunk 1)
     pub swap_ok: u16,
     /// Original: A4-0x6a92 (byte: a drunk "Hic!" is pending; set by 0x11d4ee)
@@ -92,12 +83,6 @@ pub struct ActorWork {
     pub slot: u8,
     /// Original: A4+0x1846 (word: leader index kept by 0x1217d4)
     pub leader_kept: u16,
-    /// Original: A4-0x6578 (word: set when an invisibility ring wears out; redraw request)
-    pub ring_redraw: u16,
-    /// Original: A4-0x7a30 (word: the command code being executed; 0x90 / 0x91 = rest)
-    pub command: u16,
-    /// Original: A4-0x7a3e (word: party index the command applies to)
-    pub command_member: u16,
     /// Original: A4-0x6a94 (word: while 0, approach steps refuse damaging tiles)
     pub walk_through_damage: u16,
     /// Original: A4+0x1830 / +0x1832 (words: party centre, set by 0x120b64)
@@ -121,8 +106,6 @@ pub struct ActorWork {
     pub mouse_walk: u16,
     /// Original: A4-0x7a2a / -0x7a28 (words: the clicked target; data hunk -1, -1)
     pub mouse_target: (i16, i16),
-    /// Original: A4-0x7afc (byte: random 2..4 drawn when a 0x1a8 creature in view turns)
-    pub random_byte: u8,
     /// Original: A4-0x7a4c (word: cleared around the portcullis call in 0x11db7c; data hunk 1)
     pub portcullis_guard: u16,
 }
@@ -131,9 +114,6 @@ impl Default for ActorWork {
     fn default() -> Self {
         Self {
             prompt: 0,
-            status_counter: 1,
-            random_event: 0,
-            darkness: 1,
             time_stop_over: 1,
             last_hour: 0xff,
             bell_strikes: 0,
@@ -144,14 +124,10 @@ impl Default for ActorWork {
             teleports: 0,
             searches: 0,
             force_teleport: 0,
-            freed: 0,
             swap_ok: 1,
             hic: 0,
             slot: 0,
             leader_kept: 0,
-            ring_redraw: 0,
-            command: 0,
-            command_member: 0,
             walk_through_damage: 0,
             party_centre: (0, 0),
             enemy_centre: (0, 0),
@@ -162,7 +138,6 @@ impl Default for ActorWork {
             step_blocked: 0,
             mouse_walk: 0,
             mouse_target: (-1, -1),
-            random_byte: 0,
             portcullis_guard: 1,
         }
     }

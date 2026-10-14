@@ -4,9 +4,16 @@
 use u6_formats::position::Position;
 
 use crate::gfx::GfxState;
-use crate::gfx::idle::actor_idle_frames;
 use crate::rng::Rng;
 use crate::state::State;
+
+/// The pass with `g` as the state's graphics (its tables and the due word).
+fn actor_idle_frames(s: &mut State, g: &GfxState) -> bool {
+    let saved = std::mem::replace(&mut s.gfx, g.clone());
+    let changed = crate::gfx::idle::actor_idle_frames(s);
+    s.gfx = saved;
+    changed
+}
 
 const CENTRE: Position = Position {
     x: 100,

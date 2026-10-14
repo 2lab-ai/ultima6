@@ -416,7 +416,7 @@ fn shrines_talk_as_the_npc_in_their_object_word() {
     let f = script_files();
     let mut st = state(&[]);
     st.objects.type_frame[7] = 0x189;
-    st.actors.attrs.unknown_0600[7] = 0x0300;
+    st.objects.qq[7] = 0x0300;
     let s = talk_to(st, f, 7, "");
     let text = scroll(&s);
     assert!(text.starts_with("[Shrine]"), "{text}");

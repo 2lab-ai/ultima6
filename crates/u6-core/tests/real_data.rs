@@ -59,7 +59,7 @@ fn new_game_from_the_real_zip() {
         leader.z,
         state.actors.calendar,
         state.actors.schedules.entries.len(),
-        state.map.anim_enabled.iter().filter(|&&on| on).count(),
+        state.map.anim_enabled.iter().filter(|&&on| on != 0).count(),
         state.map.anim_enabled.len(),
     );
 }

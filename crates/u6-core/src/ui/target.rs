@@ -131,7 +131,7 @@ fn tab_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
     let mode = {
         let s = state.borrow();
         let mode = s.ui.panel.mode;
-        if key != TAB || mode == 0x9e || s.ui.panel.locked {
+        if key != TAB || mode == 0x9e || s.converse.active {
             return key;
         }
         mode
@@ -146,17 +146,17 @@ fn tab_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
     if s.ui.input.targeting == 0 {
         return key;
     }
-    start_cross_hair(&mut s);
+    start_cross_hair(&mut s, io);
     0
 }
 
 /// 0x107640..0x10765c: cross-hair at the window centre (5, 5), range 7, started by Tab.
-fn start_cross_hair(s: &mut State) {
+fn start_cross_hair(s: &mut State, io: &Io) {
     let input = &mut s.ui.input;
     input.cursor = (5, 5);
     input.range = 7;
     input.cursor_by_tab = true;
-    seams::present_map(s, 1);
+    seams::present_map(s, io, 1);
 }
 
 /// 0x10765e..0x1078c4: keys of the panel modes: `*` / `/` switch between stats, inventory and
@@ -164,7 +164,7 @@ fn start_cross_hair(s: &mut State) {
 fn panel_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
     let mut s = state.borrow_mut();
     let (mode, size) = (s.ui.panel.mode, u16::from(s.actors.party.size));
-    if s.ui.panel.locked {
+    if s.converse.active {
         return key;
     }
     let member_key = (F1..F1 + size).contains(&key);
@@ -283,14 +283,14 @@ async fn targeting_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
             } else {
                 let (mode, locked) = {
                     let s = state.borrow();
-                    (s.ui.panel.mode, s.ui.panel.locked)
+                    (s.ui.panel.mode, s.converse.active)
                 };
                 if mode != 0x9e && !locked {
                     panel_cursor(state, io, 0);
                     state.borrow_mut().ui.input.targeting = 1;
                 }
             }
-            seams::present_map(&mut state.borrow_mut(), 1);
+            seams::present_map(&mut state.borrow_mut(), io, 1);
             0
         }
         SPACE | ESCAPE => {
@@ -359,7 +359,7 @@ fn step(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
             && seams::distance(nx, ny, 5, 5) <= i16::from(range)
         {
             s.ui.input.cursor = (nx as i8, ny as i8);
-            seams::present_map(&mut s, 1);
+            seams::present_map(&mut s, io, 1);
             return 0;
         }
         if range != -1 {

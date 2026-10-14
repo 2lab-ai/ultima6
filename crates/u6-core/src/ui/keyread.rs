@@ -69,9 +69,10 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
             let glyph = (u16::from(frame) & 3) + ui.input.cursor_glyph;
             let w = *ui.text.win();
             io.draw(|fb| text::draw_char(fb, ui.font.as_ref(), &w, glyph as u8, col, row));
-            ui.input.idle_mark = true;
-            if ui.input.idle_refresh {
-                seams::refresh_view(&mut s);
+            let refresh = ui.input.idle_refresh;
+            s.gfx.actor_anim_due = 1;
+            if refresh {
+                seams::refresh_view(&mut s, io);
                 seams::anim_step(&mut s);
             }
         }

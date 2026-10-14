@@ -33,9 +33,6 @@ fn loaded(files: &Files) -> State {
     s.objects.load_defs(files).unwrap_or_else(|e| panic!("{e}"));
     let o = &mut s.objects;
     init_slots(o);
-    for (q, &w) in o.qq.iter_mut().zip(&s.actors.attrs.unknown_0600) {
-        *q = w;
-    }
     link_actors(o);
     s
 }

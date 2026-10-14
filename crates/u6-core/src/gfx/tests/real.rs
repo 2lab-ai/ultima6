@@ -7,11 +7,33 @@ use u6_formats::gfx::TileKind;
 
 use crate::engine::Engine;
 use crate::files::Files;
-use crate::gfx::anim::{anim_tick, shore_mask};
+use crate::gfx::anim::shore_mask;
 use crate::gfx::seams::view_window;
 use crate::gfx::tables::GameTables;
-use crate::gfx::{GfxState, render_window};
+use crate::gfx::GfxState;
 use crate::state::State;
+
+/// The window render with `g` as the state's graphics for the call.
+fn render_window(s: &mut State, g: &mut GfxState, io: &crate::engine::Io, framed: bool) {
+    std::mem::swap(&mut s.gfx, g);
+    crate::gfx::render_window(s, io, framed);
+    std::mem::swap(&mut s.gfx, g);
+}
+
+/// The refresh with `g` as the state's graphics for the call.
+#[allow(dead_code)]
+fn refresh_view(s: &mut State, g: &mut GfxState, io: &crate::engine::Io) {
+    std::mem::swap(&mut s.gfx, g);
+    crate::gfx::refresh_view(s, io);
+    std::mem::swap(&mut s.gfx, g);
+}
+
+/// The animation tick with `g` as the state's graphics for the call.
+fn anim_tick(s: &mut State, g: &mut GfxState) {
+    std::mem::swap(&mut s.gfx, g);
+    crate::gfx::anim::anim_tick(s);
+    std::mem::swap(&mut s.gfx, g);
+}
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 /// The flattened image REA reads (local, derived; only compared against, never copied).

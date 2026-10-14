@@ -277,7 +277,7 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
         *mf = (*mf & 0xf8) | d as u8;
         s.actors.work.stepped = 1;
         walk::face(s, l, d as u16);
-        s.actors.work.freed = 1;
+        s.map.view_dirty = 1;
         StepResult::Moved
     } else {
         let p = s.objects.location[li];
@@ -423,7 +423,7 @@ pub fn tile_effect(s: &mut State, actor: u16, tile: u16) {
         seams::after_turn_refresh(s);
         flash(s, actor);
         s.actors.attrs.status[a] |= 0x08;
-        s.actors.work.status_counter = 1;
+        s.ui.panel.dirty = true;
     };
     match tile {
         2..=5 => {
