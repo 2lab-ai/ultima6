@@ -62,6 +62,9 @@ pub struct ObjCommands {
     /// Original: A4-0x7a26 / -0x7a25 (bytes: pixel x, y in the map view that 0x105016 measures
     /// directions from; written by Move 0x12ae04, read by the egg warning of 0x1319b2)
     pub pointer_ref: (u8, u8),
+    // TODO(M2-inventory): `inventory_weights` and `equipment` are the inventory unit's globals
+    // (0x11121e, the inventory panel); kept here until it lands, then they move to its state and
+    // the 0x11121e / 0x1118c6 / 0x111be0 seams here and in usecmd/seams.rs call it.
     /// Original: A4+0x1342 / +0x1344 (words: weight of the readied objects and of the rest an
     /// actor holds, written by the inventory sum 0x11121e and read by Get 0x12a7a4; the
     /// inventory module owns 0x11121e and keeps them once ported)

@@ -397,7 +397,8 @@ fn object_verdict(
 ///
 /// Only creatures with flag 0x4000 outside the party. A door (0x129..0x12c) at the actor's
 /// location gets frame `4 × closed + (frame & 3)` and the view flags are recomputed; a
-/// portcullis (0x116 / 0x118) is operated through 0x1301e2 with A4-0x7a4c cleared around it.
+/// portcullis (0x116 / 0x118) is operated through 0x1301e2 with the text output (A4-0x7a4c,
+/// `ui.text.on`) off around it.
 pub fn door_at_actor(s: &mut State, actor: u16, closed: u16) {
     let a = usize::from(actor);
     let ci = seams::creature_index(s, s.objects.type_frame[a] & 0x3ff);
@@ -417,9 +418,9 @@ pub fn door_at_actor(s: &mut State, actor: u16, closed: u16) {
             return;
         }
         if t == 0x116 || t == 0x118 {
-            s.actors.work.portcullis_guard = 0;
+            s.ui.text.on = false;
             operate_portcullis(s, id);
-            s.actors.work.portcullis_guard = 1;
+            s.ui.text.on = true;
         }
     }
 }

@@ -460,7 +460,7 @@ fn waiting_ops() {
 fn seam_ops_reach_their_stubs() {
     // The ops whose callee is still outside milestone 1 (the object ops 0xb9 / 0xba / 0xbe /
     // 0xc8 / 0xc9 call the ported objects / ui code since the integration; 0x9c's 0x12f6ee is
-    // ported with Use).
+    // objects::commands' port since milestone 2).
     for (script, id) in [
         (vec![0xbf, 5, 0xa7, 0], "0x128ce8"),
         (vec![0xd6, 5, 0xa7, 0], "0x11785e"),
