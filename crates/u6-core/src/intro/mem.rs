@@ -79,10 +79,12 @@ impl Ptr {
         Self { region, offset: 0 }
     }
 
+    /// `n` bytes on, as the 68000's 32-bit address sums (`adda.l`, `lea`) make it: an `n` that
+    /// is a negative offset as `u32` goes back. An offset past the region reads 0.
     pub const fn add(self, n: u32) -> Self {
         Self {
             region: self.region,
-            offset: self.offset + n,
+            offset: self.offset.wrapping_add(n),
         }
     }
 }
@@ -239,13 +241,18 @@ impl ItemHeader {
 /// Where item `index` of the `.new` file loaded at `file` starts, or `None` when the index is
 /// past the offset table (0x1163fc: `index × 4 >= ` the low word of the first offset, which is
 /// the table's own size).
+///
+/// `index × 4` is a word (`lsl.w` at 0x116410), compared signed (`bge` at 0x116418) and used
+/// sign-extended as the index of the offset read (`move.l (0,a0,d1.w)` at 0x11641c), so an
+/// index of 0x2000 or more that passes reads before the table or aliases a lower entry. The
+/// offset is added as a long (`adda.l` at 0x116420).
 pub fn item_at(chip: &Chip, file: Ptr, index: u16) -> Option<Ptr> {
     let limit = chip.word(file, 2) as i16;
     let i4 = index.wrapping_shl(2) as i16;
     if i4 >= limit {
         return None;
     }
-    let off = chip.long(file, usize::from(index) * 4);
+    let off = chip.long(file.add(i32::from(i4) as u32), 0);
     Some(file.add(off))
 }
 

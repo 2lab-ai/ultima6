@@ -131,7 +131,8 @@ fn put(st: &mut IntroState, x: i16, y: i16, item: u16) {
 /// dy + 0x4f), on the drawing view reset to the screen view; then a frame wait)
 pub async fn figures(st: &mut IntroState, io: &Io, a: i16, b: i16, dy: i16) {
     st.views.draw = st.views.screen;
-    // Word sums (`subq.w` / `addi.w` at 0x10785e..0x107884): the positions walk to A4+0x8f8.
+    // Word sums (`subq.w` / `addi.w` at 0x10785e..0x107884). `a` and `b` are the figures'
+    // sway offsets ([`sway`]), `dy` their bob ([`bob`]) or a scene's constant.
     put(st, a.wrapping_sub(8), dy.wrapping_add(0x4d), 3);
     put(st, b.wrapping_add(0xb6), dy.wrapping_add(0x4f), 4);
     st.video.wait_frame(io).await;

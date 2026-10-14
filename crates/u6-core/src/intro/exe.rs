@@ -128,15 +128,23 @@ impl UExe {
         (0..n).map(|i| self.a4_i16(off + 2 * i as u32)).collect()
     }
 
-    /// `n` bytes from image address `addr` on.
+    /// `n` bytes from image address `addr` on (the address wraps past 0xffffffff, as
+    /// [`UExe::word`]'s does).
     pub fn bytes(&self, addr: u32, n: usize) -> Vec<u8> {
-        (0..n).map(|i| self.byte(addr + i as u32)).collect()
+        (0..n)
+            .map(|i| self.byte(addr.wrapping_add(i as u32)))
+            .collect()
     }
 
     /// The NUL-terminated string at image address `addr` (at most 512 bytes, no NUL).
+    ///
+    /// A passage case of `u` passes its own pointers here (the volume-name table A4+0x8ac, a
+    /// pushed format). The address sum wraps like [`UExe::bytes`]; it cannot wrap in practice,
+    /// since a byte outside the image reads 0 and ends the string before the sum gets past
+    /// 0xffffffff.
     pub fn cstr(&self, addr: u32) -> Vec<u8> {
         (0..512)
-            .map(|i| self.byte(addr + i))
+            .map(|i| self.byte(addr.wrapping_add(i)))
             .take_while(|&b| b != 0)
             .collect()
     }

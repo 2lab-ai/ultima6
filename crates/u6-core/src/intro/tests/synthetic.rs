@@ -901,8 +901,9 @@ fn a_negative_question_word_reads_before_the_answer_table() {
 #[test]
 fn a_shimmer_down_to_row_0xffff_ends_after_that_row() {
     // Rows are unsigned words (`bhi` at 0x105a30): with the bottom row 0xffff (a `u` whose
-    // A4+0x414 is 0x7f80) the original's `addq.w` wraps back to row 0 and never ends. Two rows,
-    // 0xfffe and 0xffff, of one byte column: 16 noise words.
+    // A4+0x414 is 0xff80: the wagon's top 0x7f + 0xff80, create.rs) the original's `addq.w`
+    // wraps back to row 0 and never ends. Here the rows are −2 and −1, 0xfffe and 0xffff as
+    // the unsigned words the loop compares, of one byte column: 16 noise words.
     let noise = returns(|| {
         let mut st = state();
         st.views.shimmer = View {
@@ -969,4 +970,58 @@ fn caps_lock_on_a_code_below_0x20_marked_lower_case_wraps_like_the_word_sum() {
     let mut keys = input::Keyboard::new(&e);
     assert_eq!(keys.map_raw(0x62), 0, "caps lock down");
     assert_eq!(keys.map_raw(0x10), 0xffe5);
+}
+
+/// A `.new` table of two items, item 1 at `item1`, with item 0's empty header after it.
+fn two_items(item1: u32) -> Vec<u8> {
+    let mut b = vec![0, 0, 0, 8];
+    b.extend(item1.to_be_bytes());
+    b.extend([0; 12]);
+    b
+}
+
+#[test]
+fn a_new_offset_of_0xffffffff_goes_one_byte_back_as_adda_l_does() {
+    // 0x116420 adds the offset as a long: 0xffffffff is −1. At the montage's place (files +
+    // 0x9c40) item 1 starts one byte before the file; at the start of a region it lies past
+    // the region's end, reads 0 and draws nothing (the item's planes at + 10, 0x116468).
+    let mut chip = Chip::new();
+    let montage = Ptr::at(Region::Files).add(0x9c40);
+    chip.write(montage, &two_items(0xffff_ffff));
+    let item = mem::item_at(&chip, montage, 1);
+    assert_eq!(item.map(|p| p.offset), Some(0x9c3f));
+    let blocks = Ptr::at(Region::Blocks);
+    chip.write(blocks, &two_items(0xffff_ffff));
+    let screen = View::screen(Ptr::at(Region::Screen0));
+    mem::draw_item(&mut chip, &screen, 0x10, 0x10, blocks, 1);
+    assert_eq!(chip.pixel(screen.planes, 0x10, 0x10), 0);
+}
+
+#[test]
+fn an_item_index_of_0x2000_or_more_reads_its_offset_at_the_word_index() {
+    // index × 4 is a word, sign-extended as the index of the offset read (0x116410,
+    // 0x11641c): 0x7fff reads the long 4 bytes before the table, 0x4000 the table's first.
+    let mut chip = Chip::new();
+    let file = Ptr::at(Region::Files).add(0x10);
+    chip.write(Ptr::at(Region::Files).add(0xc), &0x100u32.to_be_bytes());
+    chip.write(file, &two_items(0x20));
+    assert_eq!(mem::item_at(&chip, file, 0x7fff), Some(file.add(0x100)));
+    assert_eq!(
+        mem::item_at(&chip, file, 0x4000),
+        Some(file.add(8)),
+        "item 0's entry"
+    );
+    assert_eq!(mem::item_at(&chip, file, 1), Some(file.add(0x20)));
+    assert_eq!(mem::item_at(&chip, file, 2), None, "past the table");
+}
+
+#[test]
+fn bytes_of_u_wrap_past_the_top_of_the_address_space() {
+    let e = exe();
+    assert_eq!(e.bytes(0xffff_fffe, 4), [0; 4]);
+    assert_eq!(
+        e.cstr(0xffff_fff0),
+        Vec::<u8>::new(),
+        "nothing there: an empty string"
+    );
 }
