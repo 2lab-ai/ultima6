@@ -398,9 +398,9 @@ fn the_event_wait_takes_a_click_then_its_release() {
         }
     });
     let ev = |x, y, b| InputEvent::Pointer { x, y, buttons: b };
-    // The Talk icon, then a press held south of the Avatar (the walk repeats), then a key.
+    // The Talk icon, then a press held south of the Avatar (the walk repeats a pace later).
     e.tick(&[ev(44, 184, 1), ev(44, 184, 0), ev(88, 104, 1)], 16);
-    for _ in 0..4 {
+    for _ in 0..HELD_WALK_MS_TEST.div_ceil(16) + 1 {
         e.tick(&[], 16);
     }
     assert_eq!(*codes.borrow(), [0x83, 0x80, 0x80]);
@@ -408,10 +408,11 @@ fn the_event_wait_takes_a_click_then_its_release() {
     assert!(e.state().actors.work.mouse_walk == 1, "held");
 }
 
-/// The codes `reads` command-key reads give, each with the display generation it came in,
-/// while the press south of the Avatar (88, 104) is held for `held` ticks and then released;
-/// `after` ticks follow. Whether the game finished (all reads done).
-fn held_walk(reads: usize, held: usize, after: usize) -> (Vec<(u64, u16)>, bool) {
+/// The codes `reads` command-key reads give, each with the engine clock (ms) it came at, while
+/// the press south of the Avatar (88, 104) is held `held_ms` and then released, at host ticks of
+/// `tick_ms`; `after_ms` follow. The press goes in at the first tick. Whether the game finished
+/// (all reads done).
+fn held_walk(tick_ms: u32, reads: usize, held_ms: u32, after_ms: u32) -> (Vec<(u64, u16)>, bool) {
     let mut s = st();
     s.main.reading = 1;
     let codes = Rc::new(RefCell::new(Vec::new()));
@@ -419,7 +420,7 @@ fn held_walk(reads: usize, held: usize, after: usize) -> (Vec<(u64, u16)>, bool)
     let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
         for _ in 0..reads {
             let k = wait::read_key(&st, &io).await;
-            out.borrow_mut().push((io.generation(), k));
+            out.borrow_mut().push((io.now_ms(), k));
         }
     });
     let ev = |b| InputEvent::Pointer {
@@ -427,39 +428,75 @@ fn held_walk(reads: usize, held: usize, after: usize) -> (Vec<(u64, u16)>, bool)
         y: 104,
         buttons: b,
     };
-    e.tick(&[ev(1)], 16);
-    for _ in 1..held {
-        e.tick(&[], 16);
+    e.tick(&[ev(1)], tick_ms);
+    for _ in 1..held_ms.div_ceil(tick_ms) {
+        e.tick(&[], tick_ms);
     }
-    e.tick(&[ev(0)], 16);
-    for _ in 0..after {
-        e.tick(&[], 16);
+    e.tick(&[ev(0)], tick_ms);
+    for _ in 0..after_ms.div_ceil(tick_ms) {
+        e.tick(&[], tick_ms);
     }
     let c = codes.borrow().clone();
     (c, e.finished())
 }
 
 #[test]
-fn a_held_press_repeats_once_per_display_frame() {
-    // Held for five ticks: the press and one repeat per frame, then nothing after the release.
-    let (codes, finished) = held_walk(12, 5, 4);
-    assert_eq!(
-        codes,
-        (0..5).map(|g| (g, 0x80)).collect::<Vec<_>>(),
-        "one walk code per display frame while held"
+fn a_held_walk_repeats_at_the_originals_pace() {
+    let pace = u64::from(HELD_WALK_MS_TEST);
+    // Held for 2.5 paces: the press, then a repeat one pace after each step, nothing after the
+    // release.
+    let hold = HELD_WALK_MS_TEST * 5 / 2;
+    let (codes, finished) = held_walk(16, 12, hold, 2 * HELD_WALK_MS_TEST);
+    let times: Vec<u64> = codes.iter().map(|&(t, _)| t).collect();
+    assert!(
+        codes.iter().all(|&(_, k)| k == 0x80),
+        "walk codes: {codes:?}"
     );
+    assert_eq!(times.len(), 3, "the press and two repeats: {times:?}");
+    for w in times.windows(2) {
+        let gap = w[1] - w[0];
+        assert!(
+            gap >= pace && gap < pace + 16,
+            "one pace between steps, to the tick: {times:?}"
+        );
+    }
     assert!(!finished, "the reads wait for input after the release");
-    // A press and its release one tick apart: one walk.
-    let (codes, _) = held_walk(12, 1, 4);
-    assert_eq!(codes, [(0, 0x80)], "a one-tick click walks once");
+    // A press and its release one tick apart, or held for less than a pace: one walk.
+    for held in [16, HELD_WALK_MS_TEST - 32] {
+        let (codes, _) = held_walk(16, 12, held, 2 * HELD_WALK_MS_TEST);
+        assert_eq!(codes.len(), 1, "held {held} ms walks once: {codes:?}");
+    }
+}
+
+/// The pace in ms as the test helpers take it.
+const HELD_WALK_MS_TEST: u32 = crate::ui::target::HELD_WALK_MS;
+
+#[test]
+fn a_held_walk_counts_the_same_steps_at_any_host_tick() {
+    // Spec 03 §1: the same input over the same time gives the same game at any tick size.
+    for hold in [300, HELD_WALK_MS_TEST * 5 / 2] {
+        let steps: Vec<usize> = [16, 8]
+            .iter()
+            .map(|&tick| held_walk(tick, 64, hold, 2 * HELD_WALK_MS_TEST).0.len())
+            .collect();
+        println!("held {hold} ms: steps at 16 ms / 8 ms ticks {steps:?}");
+        assert_eq!(steps[0], steps[1], "held {hold} ms: {steps:?}");
+        let expect = 1 + (hold - 1) as usize / HELD_WALK_MS_TEST as usize;
+        assert_eq!(steps[0], expect, "held {hold} ms");
+    }
 }
 
 /// A loop shaped like the y/n and more prompts (0x10790a until one of its keys, here `A`) with
-/// a press held on the map: `events[t]` go in on tick t. The key it read and how many reads, or
-/// `None` while it still waits; the loop gives up after 64 reads.
-fn prompt_under_held_press(events: &[&[InputEvent]], ticks: usize) -> Option<(u16, usize)> {
+/// a press held on the map: `events[t]` go in on tick t; `reading` = A4-0x7a2c (clear in a
+/// prompt, set while the command loop reads, where the walk repeat is paced). The key it read
+/// and how many reads, or `None` while it still waits; the loop gives up after 64 reads.
+fn prompt_under_held_press(
+    events: &[&[InputEvent]],
+    ticks: usize,
+    reading: u16,
+) -> Option<(u16, usize)> {
     let mut s = st();
-    s.main.reading = 1;
+    s.main.reading = reading;
     let got = Rc::new(RefCell::new(None));
     let out = Rc::clone(&got);
     let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
@@ -487,22 +524,26 @@ fn a_prompt_survives_a_held_map_press() {
         buttons: b,
     };
     let key = InputEvent::Key(Key::Char('a'));
-    // Held for five ticks, released, then the key: the prompt reads it.
-    let (press, release, k) = ([ev(1)], [ev(0)], [key]);
-    let events: [&[InputEvent]; 8] = [&press, &[], &[], &[], &[], &release, &[], &k];
-    let got = prompt_under_held_press(&events, 12);
-    assert!(
-        matches!(got, Some((0x41, n)) if n <= 8),
-        "the prompt got its key after the release: {got:?}"
-    );
-    // The key typed while the button is still down, then the release behind it in the queue:
-    // the key is read (the release cannot be taken before it).
-    let events: [&[InputEvent]; 6] = [&press, &[], &k, &[], &release, &[]];
-    let got = prompt_under_held_press(&events, 10);
-    assert!(
-        matches!(got, Some((0x41, n)) if n <= 8),
-        "the prompt got the key typed during the hold: {got:?}"
-    );
+    // Room for one paced repeat of the command loop's walk.
+    let ticks = (HELD_WALK_MS_TEST / 16) as usize + 12;
+    for reading in [0, 1] {
+        // Held for five ticks, released, then the key: the prompt reads it.
+        let (press, release, k) = ([ev(1)], [ev(0)], [key]);
+        let events: [&[InputEvent]; 8] = [&press, &[], &[], &[], &[], &release, &[], &k];
+        let got = prompt_under_held_press(&events, ticks, reading);
+        assert!(
+            matches!(got, Some((0x41, n)) if n <= 8),
+            "reading {reading}: the prompt got its key after the release: {got:?}"
+        );
+        // The key typed while the button is still down, then the release behind it in the
+        // queue: the key is read (the release cannot be taken before it).
+        let events: [&[InputEvent]; 6] = [&press, &[], &k, &[], &release, &[]];
+        let got = prompt_under_held_press(&events, ticks, reading);
+        assert!(
+            matches!(got, Some((0x41, n)) if n <= 8),
+            "reading {reading}: the prompt got the key typed during the hold: {got:?}"
+        );
+    }
 }
 
 /// The inventory panel showing `container`; the back icon (0x114, 0x14) clicked and released,

@@ -176,6 +176,7 @@ state, so runs are not bit-identical end to end.
     tools/oracle/run.sh floppies   # adf/ + adf-gamefirst/ from installu6's table, amitools readback (§A)
     tools/oracle/run.sh play [KEY ...]    # adf-gamefirst/ -> Britannia shots in shots/play-<ts>/ (§D)
     tools/oracle/run.sh intro      # adf/ -> ORIGIN/intro shots until the picture stops, shots/intro-<ts>/ (§C)
+    node tools/oracle/pace.mjs OUT [HOLD ...]   # adf-gamefirst/: held-button walk, step frames per hold (ui/target.rs HELD_WALK_MS)
     tools/oracle/run.sh build      # ADFs -> installer under AROS -> disks/{PROGRAM,POPULACE,PLAYER,PORTRAIT}.hdf
     tools/oracle/run.sh boot [step ...]   # boot those, run steps, PNGs into shots/boot-<ts>/
     tools/oracle/run.sh serve &    # control server 127.0.0.1:8765, then:

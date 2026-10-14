@@ -533,6 +533,32 @@ export const regionHash = (page, [x0, y0, x1, y1]) => page.evaluate(([w, x0, y0,
   return x >>> 0;
 }, [TEX_W, x0, y0, x1, y1]);
 
+// Lores rectangles of the game screen (456x313 capture; picture origin at about x 93, y 44).
+export const PARTY_PANEL = [270, 70, 410, 135]; // party names + hit points
+export const MAP_VIEW = [100, 50, 262, 205];
+
+// The game-first boot up to the settled throne room (play.mjs steps 1-2): the party panel has
+// text (>= 12 colours; the AROS console and the empty parchment give <= 5), then the map view
+// has been redrawn and the party panel and the disk have kept still for 250 frames.
+export async function waitGame(page, log = () => {}) {
+  const t0 = await frame(page);
+  while ((await regionColours(page, PARTY_PANEL)) < 12) {
+    if ((await frame(page)) - t0 > 20000) throw new Error('game UI did not appear within 20000 frames');
+    await waitFrames(page, 10);
+  }
+  log(`game UI at frame ${await frame(page)}`);
+  const map0 = await regionHash(page, MAP_VIEW);
+  let ph = await regionHash(page, PARTY_PANEL), since = await frame(page), redrawn = false;
+  while (!redrawn || (await frame(page)) - since < 250) {
+    await waitFrames(page, 25);
+    if (!redrawn && (await regionHash(page, MAP_VIEW)) !== map0) { redrawn = true; since = await frame(page); }
+    const nh = await regionHash(page, PARTY_PANEL);
+    if (nh !== ph || (await diskActivity(page)) > 0) { ph = nh; since = await frame(page); }
+    if ((await frame(page)) - t0 > 30000) throw new Error('game view did not settle within 30000 frames');
+  }
+  log(`settled at frame ${await frame(page)}`);
+}
+
 // Number of distinct colours in a lores rectangle (cheap "is anything drawn here" test).
 export const regionColours = (page, [x0, y0, x1, y1]) => page.evaluate(([w, x0, y0, x1, y1]) => {
   const v = new Uint32Array(Module.HEAPU8.buffer, Module._wasm_pixel_buffer(), w * 313);

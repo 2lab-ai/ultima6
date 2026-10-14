@@ -1,10 +1,10 @@
 //! Real data: the whole game booted from the user's zip and played with the pointer only:
 //! the Talk icon then party member 1 on the map, the Look icon then member 1, a map click that
 //! walks, member 1 in the roster, the leader's inventory with the weapon off and on by clicks;
-//! a press held on the map (a walk, a becalmed balloon, the exit question). The command names
-//! and the member's name the scroll is checked for are read from the user's files; the test
-//! prints counts and positions, not the game's text. Frames with the pointer
-//! sprite go to /tmp/claude-501/m2-mouse/. Skips without the zip; the data is read only.
+//! a press held on the map (a walk, its pace against the oracle's, a becalmed balloon, the exit
+//! question). The command names and the member's name the scroll is checked for are read from
+//! the user's files; the test prints counts and positions, not the game's text. Frames with the
+//! pointer sprite go to /tmp/claude-501/m2-mouse/. Skips without the zip; the data is read only.
 #![allow(clippy::disallowed_methods)] // the test reads the zip and writes the PNG receipts
 
 use super::real_tests::{files, png};
@@ -46,6 +46,33 @@ impl Play {
             .take()
             .expect("the game future holds the state");
         (p, st)
+    }
+
+    /// As [`Play::boot_with_state`], then the oracle's quiet start (tools/oracle/pace.mjs): every
+    /// actor outside the party gets status bit 0x10, so the world turn passes it over (0x1213de),
+    /// and `b` breaks off the start fight: a step is the party's move alone.
+    fn boot_quiet(files: &Files) -> Play {
+        let (mut p, st) = Play::boot_with_state(files);
+        {
+            let mut s = st.borrow_mut();
+            let party: Vec<usize> = s.actors.party.active().map(|a| a.index()).collect();
+            for a in (0..0x100).filter(|a| !party.contains(a)) {
+                s.actors.attrs.status[a] |= 0x10;
+            }
+        }
+        p.send(InputEvent::Key(Key::Char('b')));
+        p.settle(2000);
+        p
+    }
+
+    /// Holds the left button three cells south of the Avatar for `ms` (16 ms ticks, rounded),
+    /// then idles until the prompt is back; the cells walked.
+    fn held_steps(&mut self, ms: u32) -> u16 {
+        let from = self.leader_at();
+        let path = self.hold((88, 88 + 48), ((ms + 8) / 16) as usize);
+        self.settle(4000);
+        let at = self.leader_at();
+        steps(from, &path).iter().sum::<u16>() + steps(*path.last().unwrap(), &[at])[0]
     }
 
     /// The command loop waits for a command key and nothing is queued.
@@ -374,11 +401,12 @@ fn steps(from: (u16, u16), path: &[(u16, u16)]) -> Vec<u16> {
 }
 
 #[test]
-fn a_held_press_walks_a_step_a_frame_and_stops_at_the_release() {
+fn a_held_press_walks_a_cell_a_step_and_stops_at_the_release() {
     let Some(files) = files() else { return };
     let mut p = Play::boot(&files);
     assert!(p.at_prompt(), "boot reaches the prompt");
-    const HELD: usize = 90;
+    // Four paces: past the start fight's first world turn and two held repeats.
+    let held = (4 * crate::ui::target::HELD_WALK_MS / 16) as usize;
     // Three cells away in each direction: the first hold that walks more than one cell.
     for (dx, dy) in [
         (0, 3),
@@ -391,19 +419,16 @@ fn a_held_press_walks_a_step_a_frame_and_stops_at_the_release() {
         (3, -3),
     ] {
         let from = p.leader_at();
-        let path = p.hold((88 + 16 * dx, 88 + 16 * dy), HELD);
+        let path = p.hold((88 + 16 * dx, 88 + 16 * dy), held);
         p.idle(400);
         let st = steps(from, &path);
         let moved: u16 = st.iter().sum();
         let walked: Vec<usize> = (0..st.len()).filter(|&t| st[t] != 0).collect();
-        println!("held {HELD} ticks toward ({dx}, {dy}): {moved} cells, at ticks {walked:?}");
+        println!("held {held} ticks toward ({dx}, {dy}): {moved} cells, at ticks {walked:?}");
         if moved < 2 {
             continue;
         }
-        assert!(
-            st.iter().all(|&d| d <= 1),
-            "one step a frame at most: {st:?}"
-        );
+        assert!(st.iter().all(|&d| d <= 1), "one cell a step: {st:?}");
         assert_eq!(
             Some(&p.leader_at()),
             path.last(),
@@ -413,6 +438,51 @@ fn a_held_press_walks_a_step_a_frame_and_stops_at_the_release() {
         return;
     }
     panic!("no held walk got past one cell");
+}
+
+/// The original's held walks three cells south of the Avatar, measured in the oracle
+/// (tools/oracle/pace.mjs, game-first disks, 3 to 6 boots): (PAL frames held, the cells walked
+/// in most trials). A press of 5 or 10 frames counts when the game sampled it; 200 frames = the
+/// steps by frame 200 of the 300-frame holds. Quiet = every actor outside the party passed over
+/// and the fight broken off; the start = the throne-room fight as booted, whose first world
+/// turn takes 420..470 frames.
+const ORACLE_QUIET: [(u32, u16); 5] = [(5, 1), (10, 1), (25, 1), (50, 2), (200, 6)];
+const ORACLE_START: [(u32, u16); 4] = [(5, 1), (10, 1), (25, 1), (50, 1)];
+
+/// The port's cells for the oracle's holds (a PAL frame = 20 ms), each from a fresh boot.
+fn port_counts(boot: impl Fn() -> Play, oracle: &[(u32, u16)]) -> Vec<(u32, u16, u16)> {
+    oracle
+        .iter()
+        .map(|&(frames, orig)| (frames, orig, boot().held_steps(frames * 20)))
+        .collect()
+}
+
+#[test]
+fn a_held_press_walks_at_the_originals_pace() {
+    let Some(files) = files() else { return };
+    for (name, counts) in [
+        (
+            "quiet",
+            port_counts(|| Play::boot_quiet(&files), &ORACLE_QUIET),
+        ),
+        (
+            "start fight",
+            port_counts(|| Play::boot(&files), &ORACLE_START),
+        ),
+    ] {
+        println!("{name}: (PAL frames held, original cells, port cells) {counts:?}");
+        for &(frames, orig, port) in &counts {
+            if frames * 20 < crate::ui::target::HELD_WALK_MS {
+                // Shorter than a step (100 ms included): one cell, as the original.
+                assert_eq!(port, orig, "{name}: a press of {frames} frames");
+            } else {
+                assert!(
+                    port.abs_diff(orig) <= 1,
+                    "{name}: held {frames} frames, the original's {orig} cells within one: {port}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
