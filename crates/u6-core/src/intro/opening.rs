@@ -74,9 +74,12 @@ pub fn set_script(st: &mut IntroState, n: i16) {
     st.tv.script = n;
 }
 
-/// The next byte of the TV script.
+/// The byte at position `at` of the TV script. The original adds the script's 0x50-byte row
+/// (`muls.w`) and the sign-extended position word (`adda.w`, 0x103a60) as a 32-bit address, so
+/// a position that wrapped negative reads below the script; the port makes the same sum.
 fn script_byte(st: &mut IntroState, at: i16) -> u8 {
-    let addr = A4 + 0x1c6 + (st.tv.script as i32 * 0x50 + at as i32) as u32;
+    let row = i32::from(st.tv.script) * 0x50;
+    let addr = (A4 + 0x1c6).wrapping_add_signed(row + i32::from(at));
     st.exe.byte(addr)
 }
 
@@ -169,16 +172,17 @@ pub fn tv_step(st: &mut IntroState) {
                     let n = i16::from(next_byte(st));
                     // The original draws again while the pick repeats the last one (0x103b94);
                     // with one frame or none to pick from it can only repeat and loops for ever.
-                    // The port keeps that one draw.
+                    // The port keeps that one draw. The pick and the step are word sums (`add.w`
+                    // at 0x103b8a / 0x103bae): a position past 0x7fff wraps negative.
                     let pick = loop {
-                        let p = st.tv.pos + st.random(n);
+                        let p = st.tv.pos.wrapping_add(st.random(n));
                         if st.tv.last_pick != p || n <= 1 {
                             break p;
                         }
                     };
                     st.tv.last_pick = pick;
                     let f = i16::from(script_byte(st, pick));
-                    st.tv.pos += n;
+                    st.tv.pos = st.tv.pos.wrapping_add(n);
                     st.tv.frame = f;
                 }
                 0x85 => {

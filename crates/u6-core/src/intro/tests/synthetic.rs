@@ -769,6 +769,41 @@ fn a_tv_pick_among_no_frames_ends_its_step_when_it_comes_round_again() {
     assert_eq!(rand, by_hand.rand, "one rand per pick");
 }
 
+#[test]
+fn a_tv_script_that_never_loops_back_wraps_its_position_like_the_68000() {
+    // Script 0 of a foreign `u`: (0x84 124) to position 126, then 128 picks of (0x84 255) that
+    // walk the word A4+0x263c up to 0x7fff after the last count, so the pick and the step past
+    // the 255 frames wrap it negative (`add.w` at 0x103b8a / 0x103bae) and the next byte is
+    // read below the script (`adda.w` at 0x103a60): 0x8a there ends the step.
+    let script = A4 + 0x1c6;
+    let at = move |p: i16| script.wrapping_add_signed(i32::from(p));
+    let mut by_hand = state();
+    let mut picks = Vec::new();
+    for n in std::iter::once(124).chain([255; 128]) {
+        picks.push(by_hand.random(n));
+    }
+    let last = *picks.last().unwrap();
+    assert_ne!(last, 0, "the last pick itself goes past 0x7fff");
+    let (frame, pos, last_pick, rand) = returns(move || {
+        let mut e = UExe::from_flat(vec![0; 0x2_0000]);
+        e.poke(at(0), &[0x84, 124]);
+        for j in 0..128 {
+            e.poke(at(126 + 257 * j), &[0x84, 0xff]);
+        }
+        let end = 0x7fff_i16.wrapping_add(255);
+        e.poke(at(end), &[0x8a]);
+        let mut st = IntroState::new(e, Files::default());
+        st.tv = opening::Tv::new(&st);
+        opening::set_script(&mut st, 0);
+        opening::tv_step(&mut st);
+        (st.tv.frame, st.tv.pos, st.tv.last_pick, st.rand)
+    });
+    assert_eq!(last_pick, 0x7fff_i16.wrapping_add(last));
+    assert_eq!(pos, 0x7fff_i16.wrapping_add(256), "one past the 0x8a");
+    assert_eq!(frame, 0, "the zeroed byte at the last pick");
+    assert_eq!(rand, by_hand.rand, "one rand per pick");
+}
+
 /// The x of every ink pixel on row `y` of a 41-pixel line.
 fn ink_row(chip: &Chip, v: View, y: i32) -> Vec<i32> {
     let ink = text::glyph_colour(15);
