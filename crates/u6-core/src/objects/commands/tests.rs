@@ -483,3 +483,83 @@ fn weights_count_stacks_and_tenths() {
     move_into(&mut s, arrows, bag, 0x08);
     assert_eq!(seams::contents_weight(&s, bag), 15);
 }
+
+#[test]
+fn fixtures_light_and_douse_keeping_their_half() {
+    let mut s = world();
+    let brazier = put(&mut s, 0xce, 1, 1);
+    s.objects.type_frame[brazier as usize] = 0xce | 2 << 10;
+    douse_or_light(&mut s, brazier);
+    assert_eq!(frame(&s, brazier), 3);
+    douse_or_light(&mut s, brazier);
+    assert_eq!(frame(&s, brazier), 2);
+}
+
+#[test]
+fn a_carried_torch_stack_gives_one_lit_torch_in_a_free_hand() {
+    let mut s = world();
+    s.actors.party.size = 1;
+    s.actors.party.members[0] = 1;
+    s.objects.type_frame[1] = 0x19a;
+    s.objects.set_xyz(1, 500, 500, 0);
+    crate::main_loop::test_support::link_placed_objects(&mut s);
+    s.ui.panel.member = 0;
+    let stack = create_in(&mut s, 0x5a, 0x10, 3, 1);
+    light_torch(&mut s, stack);
+    assert_eq!(s.objects.qq_of(stack) & 0xff, 2, "the stack lost one");
+    // The split-off torch is made readied (0x10be02 with 0x18), so it takes no hand slot.
+    let lit = (0x101..0xc00)
+        .find(|&o| s.objects.kind(o) == 0x5a && s.objects.status(o) & 0x80 != 0)
+        .unwrap();
+    assert_ne!(lit, stack);
+    assert_eq!(s.objects.place(lit), READIED);
+    assert_eq!((frame(&s, lit), s.objects.qq_of(lit) & 0xff), (1, 200));
+    assert_eq!(s.objcmds.equipment, [0; 8]);
+    // A single carried torch goes into the first free hand.
+    s.objects.qq[stack as usize] = 1;
+    light_torch(&mut s, stack);
+    assert_eq!(s.objcmds.equipment[2], stack);
+    assert_eq!(s.objects.place(stack), READIED);
+    // Both hands full: refused.
+    s.objcmds.equipment[5] = lit;
+    let other = create_in(&mut s, 0x5a, 0x10, 1, 1);
+    light_torch(&mut s, other);
+    assert_eq!(s.objects.status(other) & 0x80, 0, "no free hand");
+    // A lit torch used again goes out.
+    light_torch(&mut s, lit);
+    assert_eq!(s.objects.type_frame[lit as usize], 0);
+}
+
+#[test]
+fn using_up_the_last_of_a_stack_removes_it() {
+    let mut s = world();
+    let potions = put(&mut s, 60, 1, 1);
+    s.objects.qq[potions as usize] = 0x0302;
+    use_up(&mut s, potions);
+    assert_eq!(s.objects.qq_of(potions), 0x0301);
+    use_up(&mut s, potions);
+    assert_eq!(s.objects.type_frame[potions as usize], 0);
+}
+
+#[test]
+fn lock_picks_break_more_in_clumsy_hands_and_lights_toggle() {
+    let mut s = world();
+    s.rng = crate::rng::Rng::seeded(99);
+    let mut r = s.rng;
+    let roll = r.range(1, 30) as i16;
+    assert_eq!(pick_breaks(&mut s, 10), roll < (45 - 10) / 2);
+    let roll = r.range(1, 30) as i16;
+    assert_eq!(fails_roll(&mut s, 44), roll < 0);
+    let candle = put(&mut s, 0x7a, 1, 1);
+    s.objects.type_frame[candle as usize] = 0x7a | 2 << 10;
+    toggle_lit(&mut s, candle);
+    assert_eq!(frame(&s, candle), 3);
+    toggle_lit(&mut s, candle);
+    assert_eq!(frame(&s, candle), 2);
+    with_data(
+        &mut s,
+        vec![(a4(-0x66dc + 2 * 0x54), 0x77u16.to_be_bytes().to_vec())],
+    );
+    assert!(in_type_list(&s, 0x77), "the 85th entry counts");
+    assert!(!in_type_list(&s, 0x78));
+}

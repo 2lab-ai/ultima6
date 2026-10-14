@@ -10,7 +10,8 @@
 //! 0x1319b2 and the monster spawn 0x131646 / 0x13121a) are synchronous and queue their text.
 //!
 //! Submodules: `data` (the image), `text` (output), `eggs`, `world` (doors, chests, search,
-//! traps, kegs), `horse` (horses, the answer parser), `seams` (calls into modules not ported
+//! traps, kegs), `light` (torches, fixtures), `horse` (horses, the answer parser), `look`,
+//! `get`, `drop`, `push` (the four commands), `seams` (calls into modules not ported
 //! yet).
 
 mod data;
@@ -18,6 +19,8 @@ mod drop;
 mod eggs;
 mod get;
 mod horse;
+mod keys;
+mod light;
 mod look;
 mod push;
 mod seams;
@@ -34,6 +37,8 @@ pub use drop::{drop_object, fits_in, fragile, how_many, surface_at};
 pub use eggs::{equip_monster, hatch_egg, spawn_monster};
 pub use get::{get, takeable};
 pub use horse::{dismount, mount_horse, parse_answer};
+pub use keys::{fails_roll, in_type_list, pick_breaks, toggle_lit, use_key};
+pub use light::{douse_or_light, light_torch, use_up};
 pub use look::{is_book, is_readable, is_sign, look, read_book};
 pub use push::{outermost, push, push_blocked, resists_push};
 pub use world::{
