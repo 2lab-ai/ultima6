@@ -343,8 +343,8 @@ fn a_song_pointer_past_the_top_wraps_into_chip_memory() {
 /// them wrap as the 68000's do (0x100fa4: `movea.l 8(a0),a0`, then `move.b $301(a0)`), reads
 /// outside chip memory get 0, and nothing panics (debug builds check overflow). Each pointer
 /// made absolute is checked against the 32-bit wrapping sum, so a sum that saturates, stops or
-/// widens fails in a release build too; a plain `+` gives the same bits there, which the lint on
-/// [`module::addr`] rejects.
+/// widens fails in a release build too; a plain `+` gives the same bits there, which the lint of
+/// [`module`] rejects.
 #[test]
 fn pointers_anywhere_in_a_malformed_module_play_without_a_panic() {
     let hybrid = synth::synth(&[0x40, 0xff], &[0x00, 0xff], (1, 1), &[vec![1; 8]]);
@@ -399,4 +399,38 @@ fn pointers_anywhere_in_a_malformed_module_play_without_a_panic() {
             );
         }
     }
+}
+
+/// The routine indexes its tables of pointers with a word: `4 × n` in a word register, taken as
+/// a sign-extended word (`lsl.w #2` at 0x1008c8, `movea.l 0(a0,d0.w)` at 0x1008ca). Block
+/// 0x2001 is the long 0x7ffc bytes before the block array, not 0x8004 bytes after it; block
+/// 0x4001 wraps to the array's second long. A synth's waveform byte is widened with `ext.w`
+/// (0x1004a4) before the same scaling.
+#[test]
+fn table_indexes_are_sign_extended_words() {
+    assert_eq!(module::long_index(0x1_0000, 0x2001), 0x8004);
+    assert_eq!(module::long_index(0x1_0000, 0x4001), 0x1_0004);
+    assert_eq!(module::long_index(0, 0xffff), 0xffff_fffc);
+    assert_eq!(module::long_index(0x20, 0x1fff), 0x20 + 0x7ffc);
+
+    let md = module::Module { base: CHIP_BUFFER };
+    let mut chip = vec![0u8; 0x2_0000];
+    let put = |chip: &mut Vec<u8>, at: u32, v: u32| {
+        chip[at as usize..at as usize + 4].copy_from_slice(&v.to_be_bytes());
+    };
+    // The block array at module offset 0x1_0000 (stored relative to the module).
+    put(&mut chip, CHIP_BUFFER + 0x10, 0x1_0000);
+    put(&mut chip, CHIP_BUFFER + 0x1_0000 - 0x7ffc, 0x1234);
+    put(&mut chip, CHIP_BUFFER + 0x1_0000 + 0x8004, 0x5678);
+    put(&mut chip, CHIP_BUFFER + 0x1_0000 + 4, 0x9abc);
+    let mem = module::Mem(&chip);
+    assert_eq!(md.block(mem, 0x2001), CHIP_BUFFER + 0x1234);
+    assert_eq!(md.block(mem, 0x4001), CHIP_BUFFER + 0x9abc);
+
+    // Waveform byte 0xff: `ext.w` makes it −1, the long before waveform 0.
+    let instr = 0x100;
+    put(&mut chip, instr + module::instr::WF - 4, 0x40);
+    put(&mut chip, instr + module::instr::WF + 0x3fc, 0x80);
+    let mem = module::Mem(&chip);
+    assert_eq!(module::Module::waveform(mem, instr, 0xff), instr + 0x40);
 }
