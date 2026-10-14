@@ -843,8 +843,8 @@ fn an_answer_table_entry_past_the_eight_virtues_pours_a_virtue() {
 #[test]
 fn a_negative_question_word_reads_before_the_answer_table() {
     // A foreign `u` whose pair table names question −1, then −32768: 0x106530 sign-extends the
-    // word and indexes A4+0x3d4 with it, so −1 reads the word before the table and −32768
-    // lands below the image (0 here).
+    // word and indexes A4+0x3d4 with it, so −1 reads the word before the table and −32768 the
+    // word 64 KB below it, image 0x106b6c in the code hunk (0 in this zeroed image).
     let mut e = exe();
     e.poke(A4 + 0x3d2, &0x000du16.to_be_bytes());
     let mut st = IntroState::new(e, Files::default());
