@@ -223,7 +223,7 @@ pub async fn reagent_count(state: &RefCell<State>, io: &Io, actor: Slot, spell: 
 }
 
 /// The page lines 0x116218 lays out: per line the spell and whether it is the current one.
-fn layout(m: &mut MagicState) -> (Vec<u16>, i16) {
+pub(super) fn layout(m: &mut MagicState) -> (Vec<u16>, i16) {
     m.prev_circle = 0xff;
     m.prev_page = 0xff;
     m.next_page = 0xff;

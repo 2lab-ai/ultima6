@@ -40,6 +40,7 @@ pub use book::{draw_book, draw_book_page, load_book, set_current_spell};
 pub use cast::{book_cast, cast};
 pub use detect::carried_object;
 pub use dispatch::dispatch;
+pub use effects::strength_contest;
 pub use input::{
     book_cursor_step, book_panel_key, find_typed_spell, page_key, spell_key, takes_book_key,
 };

@@ -777,3 +777,27 @@ pub async fn chain_bolt(state: &RefCell<State>, io: &Io, target: u16) {
         seams::wound_line(state, io, from).await;
     }
 }
+
+/// Original: 0x115c06 (magic: a strength contest of `a` against `b` (the Move command's push):
+/// random 1..30 < (str(b) / 2 − str(a) + 30) / 2)
+pub fn strength_contest(s: &mut State, a: u16, b: u16) -> bool {
+    let r = s.rng.range(1, 0x1e) as i16;
+    let t = crate::actors::leaves::strength(s, b) as i16 / 2;
+    let c = crate::actors::leaves::strength(s, a) as i16;
+    r < (t - c + 0x1e) / 2
+}
+
+/// Original: 0x118a4e (magic: Fear on one actor: an actor that is not good (alignment bits
+/// 0x60 ≠ 0x40), does not resist the caster (0x122076) and is not a creature with flag 0x02
+/// flees (worktype 0x13))
+pub fn frighten(s: &mut State, actor: u16) {
+    let (idx, flags) = creature_bits(s, actor);
+    let a = usize::from(actor);
+    if actor >= 0x100 || s.actors.attrs.status[a] & 0x60 == 0x40 {
+        return;
+    }
+    let caster = super::cast::caster(s);
+    if !seams::resists(s, caster, actor) && (idx < 0 || flags & 2 == 0) {
+        s.actors.worktype[a] = 0x13;
+    }
+}

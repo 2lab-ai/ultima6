@@ -29,7 +29,7 @@ const MSG_NOT_IN_BOOK: u32 = 0x7387;
 const MSG_NEWLINE: u32 = 0x0010_4ffc;
 
 /// Bit of letter `c` in a syllable set (`1 << (c - 'A')`, a 68000 long shift: 0 from 32 on).
-fn letter_bit(c: u8) -> u32 {
+pub(super) fn letter_bit(c: u8) -> u32 {
     1u32.checked_shl(u32::from(c.wrapping_sub(0x41) & 0x3f))
         .unwrap_or(0)
 }
@@ -286,7 +286,7 @@ pub async fn book_cursor_step(state: &RefCell<State>, io: &Io) -> u16 {
 }
 
 /// Spells of the books in the circles before `circle`.
-fn spells_before(s: &State, circle: u8) -> u8 {
+pub(super) fn spells_before(s: &State, circle: u8) -> u8 {
     let mut n = 0u8;
     for c in 0..=usize::from(circle) {
         for b in 0..16 {

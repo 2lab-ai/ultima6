@@ -306,6 +306,13 @@ fn light_at_night_lights_the_view() {
         (lit_cells(&s), reagents(&s), s.actors.attrs.magic[1])
     };
     std::fs::write("/tmp/claude-501/m2-magic-light-before.png", png(e.frame())).unwrap();
+    // The book picture 0x116028 draws is the user's file named at A4-0x61de.
+    let name = pointed_string(e.io(), A4.wrapping_sub(0x61de));
+    let bmp = files
+        .get(&String::from_utf8_lossy(&name))
+        .and_then(|f| u6_formats::bitmap::Bitmap::from_lzw(f).ok());
+    let bmp = bmp.expect("the book picture decodes");
+    eprintln!("  book picture {}×{}", bmp.width, bmp.height);
     for k in keys("IL\n") {
         e.tick(&[k], 16);
     }

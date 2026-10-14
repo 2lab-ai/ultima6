@@ -207,10 +207,66 @@ pub async fn peer(state: &RefCell<State>, io: &Io, spell: u16) {
     say(state, io, FMT_NL_S_NL, Msg::Done).await;
 }
 
-/// Stub of 0x118ac8 (a spell on every foe in view: Repel Undead, Reveal, Confuse, Fear).
-/// Fallback: nothing.
-pub async fn all_foes(_state: &RefCell<State>, _io: &Io, _spell: u16) {
-    todo_stub!("0x118ac8 spell on every foe in view", ())
+/// Original: 0x118ac8 (magic: a spell on the first object of every tile within 7 of the
+/// view centre: Repel Undead (0x29) makes creatures with flag 0x80 flee (worktype 0x13) unless
+/// they resist; Reveal (0x47) makes them visible and unreadies a readied 0x102 they carry;
+/// Confuse (0x52) turns evil actors (alignment 0x20) to neutral worktype 8 unless they resist;
+/// Fear (0x63) is 0x118a4e. Then "Success".)
+///
+/// Columns x outside, rows y inside, as the original. The port does not write worktypes of
+/// object slots ≥ 0x100 (the original's byte table would be overrun).
+pub async fn all_foes(state: &RefCell<State>, io: &Io, spell: u16) {
+    let caster = super::cast::caster(&state.borrow());
+    flash_actor(state, io, caster, 0).await;
+    {
+        let s = &mut *state.borrow_mut();
+        let c = s.map.centre;
+        let (cx, cy, z) = (c.x as i16, c.y as i16, u16::from(c.z));
+        for x in cx - 7..=cx + 7 {
+            for y in cy - 7..=cy + 7 {
+                let o = crate::objects::begin_at(&mut s.objects, &s.tables, x as u16, y as u16, z);
+                if o >= 0 {
+                    foe(s, spell, caster, o);
+                }
+            }
+        }
+    }
+    say(state, io, FMT_NL_S_NL, Msg::Success).await;
+}
+
+/// One tile's object under 0x118ac8.
+fn foe(s: &mut State, spell: u16, caster: u16, o: Slot) {
+    let i = o as usize;
+    match spell {
+        0x29 => {
+            let idx = crate::objects::monster_index(&s.objects, s.objects.kind(o));
+            if s.actors.game.creature_flags(idx) & 0x80 != 0
+                && !seams::resists(s, caster, o as u16)
+                && i < 0x100
+            {
+                s.actors.worktype[i] = 0x13;
+            }
+        }
+        0x47 => {
+            s.objects.obj_status[i] &= !2;
+            let ring = crate::objects::find_child(&mut s.objects, o, 0x102, 0);
+            if ring != -1 && s.objects.status(ring) & 0x18 == 0x18 {
+                let st = &mut s.objects.obj_status[ring as usize];
+                *st = (*st & 0xe7) | 0x10;
+            }
+        }
+        0x52 => {
+            if i < 0x100
+                && s.actors.attrs.status[i] & 0x60 == 0x20
+                && !seams::resists(s, caster, o as u16)
+            {
+                s.actors.worktype[i] = 8;
+                s.actors.attrs.status[i] &= 0x9f;
+            }
+        }
+        0x63 => super::effects::frighten(s, o as u16),
+        _ => {}
+    }
 }
 
 /// Stub of 0x118cec (Conjure / Summon a creature next to `caster`). Fallback: nothing.
@@ -231,18 +287,37 @@ pub async fn locate(state: &RefCell<State>, io: &Io, spell: u16) {
     todo_stub!("0x11a470 Locate: print the position", ())
 }
 
-/// Stub of 0x11a508 (Wind Change: a direction prompt). Fallback: nothing.
-pub async fn wind_change(_state: &RefCell<State>, _io: &Io) {
-    todo_stub!("0x11a508 Wind Change", ())
+const MSG_DIRECTION: u32 = 0x0011_5a08;
+const MSG_NOWHERE: u32 = 0x0011_5a8a;
+const FMT_S_DOT: u32 = 0x0011_5a94;
+/// A4-0x61be: the direction names, a pointer per direction 0..7.
+const DIRECTION_NAMES: u32 = 0x61be;
+
+/// Original: 0x11a508 (magic: Wind Change: "Direction-", one key without a target pending; a
+/// direction prints its name, anything else "nowhere."; the wind takes the last direction read
+/// (A4-0x2efc) either way)
+pub async fn wind_change(state: &RefCell<State>, io: &Io) {
+    print_at(state, io, MSG_DIRECTION, &[]).await;
+    state.borrow_mut().ui.input.target_pending = 0;
+    let key = crate::ui::wait::read_key(state, io).await;
+    let dir = state.borrow().ui.input.direction;
+    if key == 0x80 {
+        let at = crate::image::A4.wrapping_sub(DIRECTION_NAMES) + 4 * (dir as u32);
+        let name = crate::main_loop::pointed_string(io, at);
+        print_at(state, io, FMT_S_DOT, &[Arg::Str(&name)]).await;
+    } else {
+        print_at(state, io, MSG_NOWHERE, &[]).await;
+    }
+    state.borrow_mut().actors.wind = dir as u8;
 }
 
-/// Stub of 0x1195f2 (Insect Swarm). Fallback: nothing.
-pub async fn insect_swarm(_state: &RefCell<State>, _io: &Io) {
+/// Stub of 0x1195f2 (Insect Swarm, D0 = the spell). Fallback: nothing.
+pub async fn insect_swarm(_state: &RefCell<State>, _io: &Io, _spell: u16) {
     todo_stub!("0x1195f2 Insect Swarm", ())
 }
 
 /// Stub of 0x119266 (Pickpocket: take an object from an actor). Fallback: nothing.
-pub async fn pickpocket(_state: &RefCell<State>, _io: &Io) {
+pub async fn pickpocket(_state: &RefCell<State>, _io: &Io, _pre: i16) {
     todo_stub!("0x119266 Pickpocket", ())
 }
 
@@ -251,9 +326,31 @@ pub async fn seance(_state: &RefCell<State>, _io: &Io, _pre: i16) {
     todo_stub!("0x119dbc Seance", ())
 }
 
-/// Stub of 0x119200 (X-ray: the view through walls). Fallback: nothing.
-pub async fn xray(_state: &RefCell<State>, _io: &Io) {
-    todo_stub!("0x119200 X-ray", ())
+/// Original: 0x119200 (magic: X-ray: the flashes, every view tile shown (A4-0x794c = 1, view
+/// flags) for 100 view refreshes (0x102ef0), then the normal view and "Done")
+///
+/// The port waits one display frame per refresh (the original's redraws take display time;
+/// without a wait the port would publish none of them).
+pub async fn xray(state: &RefCell<State>, io: &Io, spell: u16) {
+    flash_window(state, io, spell / 16 + 1).await;
+    let caster = super::cast::caster(&state.borrow());
+    flash_actor(state, io, caster, 0).await;
+    {
+        let mut s = state.borrow_mut();
+        s.map.reveal_all = 1;
+        crate::map::view::update_view(&mut s);
+    }
+    for _ in 0..100 {
+        crate::gfx::view::refresh_view(&mut state.borrow_mut(), io);
+        io.vblank().await;
+    }
+    {
+        let mut s = state.borrow_mut();
+        s.map.reveal_all = 0;
+        crate::map::view::update_view(&mut s);
+        crate::gfx::view::refresh_view(&mut s, io);
+    }
+    say(state, io, FMT_NL_S_NL, Msg::Done).await;
 }
 
 /// Stub of 0x119f26 (the wind spells: a line of missiles `tile` in a direction). Fallback:
@@ -268,12 +365,12 @@ pub async fn hail_storm(_state: &RefCell<State>, _io: &Io, _pre: i16) {
 }
 
 /// Stub of 0x11971a (Web). Fallback: nothing.
-pub async fn web(_state: &RefCell<State>, _io: &Io) {
+pub async fn web(_state: &RefCell<State>, _io: &Io, _pre: i16) {
     todo_stub!("0x11971a Web", ())
 }
 
 /// Stub of 0x119876 (Enchant: a wand gets a charge of a spell). Fallback: nothing.
-pub async fn enchant(_state: &RefCell<State>, _io: &Io) {
+pub async fn enchant(_state: &RefCell<State>, _io: &Io, _pre: i16) {
     todo_stub!("0x119876 Enchant", ())
 }
 
