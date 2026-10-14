@@ -53,7 +53,7 @@ Status: in-progress
 | WU-P5 | actors | port/actors `7004468`; 52/52; NPCs walk to schedules at 12:00 | merged → integrate/m1 |
 | WU-P6 | converse | port/converse `086b9bf`; 20/20; 200 scripts; real NPC dialogue coherent | merged → integrate/m1 |
 | WU-P7 | boot + command loop + seam reconciliation + web IndexedDB | port/main `6dce550`; 315 tests (re-run by dispatcher); start/walk/talk/web/reload receipts read by dispatcher; M1 406: ported 219, replaced 76, stubbed 65, planned 34 | done |
-| WU-P7b | external review CHANGES (lifecycle race, unsupported-command honesty, canvas focus, memory, Attack targeting, error boundary) + `_headers` CSP | `a0f7443`, `ec598e0` (MUST-1/2/3, NICE-3, input limits, CSP); 10/10 browser tests (re-run by dispatcher); agent stopped by API 429 mid NICE-2 — WIP `0864d8b` on port/main | partial (deployed at ec598e0) |
+| WU-P7b | external review CHANGES (lifecycle race, unsupported-command honesty, canvas focus, memory, Attack targeting, error boundary) + `_headers` CSP | `a0f7443`, `ec598e0` (MUST-1/2/3, NICE-3, input limits, CSP); 10/10 browser tests (re-run by dispatcher); agent stopped by API 429 mid NICE-2 — WIP `0864d8b` on port/main | done — `0864d8b` (page notice: party/solo need leaving combat) merged `aa145b8`, production `a549b08a` |
 | WU-D | Deploy ultima6.2lab.ai | main `a28f4c2` (merge of ec598e0) → Pages production `108af585`; custom domain ultima6.2lab.ai active (Vercel CNAME rec_b5896faf… → ultima6.pages.dev); live playthrough in headless Chromium: drop → walk → reload from IndexedDB, 10 requests all same-origin, 0 console errors | done (M1 interim) |
 
 Open review items: gpt6 spec review CHANGES ×8 applied in `d749513`; WU-C0 notified.
@@ -112,3 +112,17 @@ committed as WIP and pushed (not built): m2/combat `283a748`, m2/magic `c224a2a`
 `d967d6a`, m2/inventory `ac4924a`, m2/saveload `269cec6`, m2/sound `260c2a6`, m2/intro
 `3d4f493`, port/main `0864d8b`; m2/objcmds had no uncommitted files. Resume each unit from its
 worktree when the limit clears.
+
+## Redeploy — 2026-10-14
+
+main `aa145b8` (merge of port/main `0864d8b`): 323 tests, web tests 10/10. Production deployment
+`a549b08a`; https://ultima6.2lab.ai serves the corrected notice (party/solo listed under "not yet":
+the shipped state starts in combat mode and leaving combat is not ported). Live playthrough:
+requests 10, foreign 0, console errors 0.
+
+Open items carried from WU-P7b (assign in M2-int):
+- PP20 output is bounded per file (16 MiB) but not in aggregate (u6-intake).
+- wasm memory stays ~192 MiB per tab because the whole zip is copied in; read only the disk
+  entries with `Blob.slice` (~30× less).
+- Panel keys inside `ui::wait::read_key` (inventory scroll, Ready/Unready, spellbook page,
+  container) do nothing silently — say "not implemented" until M2-inventory/magic land.
