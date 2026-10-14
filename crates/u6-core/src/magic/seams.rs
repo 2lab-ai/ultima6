@@ -428,8 +428,9 @@ pub(crate) fn draw_hail(_s: &mut State, _io: &Io, _stones: &[(i16, i16)]) {
     todo_stub!("0x152876 hail-stone sprites (magic seam)", ())
 }
 
-/// [gfx] the hit mark of 0x133562: tile 0x101 over window pixel (x, y) (0x152ffa), shown and
-/// put back. Stub contract: draws. Fallback: nothing drawn.
+/// [gfx] the hit mark of 0x133562: the background under window pixel (x, y) saved in sprite 6
+/// (0x152800), tile 0x101 over it (0x152ffa, ported), the cell copied to the screen, the
+/// background put back (0x152876). Stub contract: draws. Fallback: nothing drawn.
 pub(crate) fn hail_hit(_s: &mut State, _io: &Io, _x: i16, _y: i16) {
-    todo_stub!("0x152ffa hail hit mark (magic seam)", ())
+    todo_stub!("0x152800 hail hit mark (magic seam)", ())
 }
