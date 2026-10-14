@@ -121,16 +121,59 @@ impl Io {
         }
     }
 
-    /// Draws into the back buffer. The borrow ends with the closure, so it cannot cross an await.
+    /// Draws on the displayed screen (the front buffer, 0x161bde: the text layer, panels and
+    /// 0x153002 draw here). The borrow ends with the closure, so it cannot cross an await.
     pub fn draw<R>(&self, f: impl FnOnce(&mut Framebuffer) -> R) -> R {
+        f(&mut self.front.borrow_mut())
+    }
+
+    /// Draws into the other buffer (the back buffer, 0x161be2: the map window is composed
+    /// here by 0x152ffa and copied to the screen by 0x151f5a / 0x1520e2 / 0x151fe6).
+    pub fn draw_back<R>(&self, f: impl FnOnce(&mut Framebuffer) -> R) -> R {
         f(&mut self.back.borrow_mut())
     }
 
-    /// Copies the back buffer to the front buffer; the engine publishes it after this poll.
+    /// Both buffers at once (back read-write, front read-write), for the copies between them.
+    pub fn with_buffers<R>(&self, f: impl FnOnce(&mut Framebuffer, &mut Framebuffer) -> R) -> R {
+        f(&mut self.back.borrow_mut(), &mut self.front.borrow_mut())
+    }
+
+    /// Marks the screen (front buffer) as shown: the engine publishes it after this poll. The
+    /// Amiga displays its screen buffer continuously; the port publishes at the points where
+    /// the original waits (key poll, VBlank), so a frame is never shown half drawn.
     pub fn present(&self) {
-        self.front.borrow_mut().clone_from(&self.back.borrow());
         self.front_version.set(self.front_version.get() + 1);
     }
+}
+
+thread_local! {
+    /// The `Io` of the engine that is polling (set by [`Engine::tick`] around its poll).
+    static CURRENT: RefCell<Option<Rc<Io>>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` with the `Io` of the engine that is polling, or returns `None` outside a poll.
+///
+/// For synchronous game code that the original lets draw or open a file in the middle of a
+/// routine (a party move redraws the view between steps, 0x102ef0): it runs inside the one
+/// game poll, so it reaches the same buffers the async code draws on, in call order. It never
+/// waits; anything that waits (a more prompt, a key) stays on the async path.
+pub fn with_current_io<R>(f: impl FnOnce(&Io) -> R) -> Option<R> {
+    let io = CURRENT.with(|c| c.borrow().clone())?;
+    Some(f(&io))
+}
+
+/// Runs `f` with `io` as the current `Io`, restoring the previous one afterwards.
+fn scoped_io<R>(io: &Rc<Io>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Rc<Io>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            CURRENT.with(|c| *c.borrow_mut() = prev);
+        }
+    }
+    let prev = CURRENT.with(|c| c.borrow_mut().replace(Rc::clone(io)));
+    let _restore = Restore(prev);
+    f()
 }
 
 /// Future of [`Io::next_key`].
@@ -277,7 +320,9 @@ impl Engine {
         if !self.finished {
             let mut cx = Context::from_waker(Waker::noop());
             let task = &mut self.task;
-            if stub::scoped(&self.stubs, || task.as_mut().poll(&mut cx)).is_ready() {
+            let io = &self.io;
+            let poll = || scoped_io(io, || task.as_mut().poll(&mut cx));
+            if stub::scoped(&self.stubs, poll).is_ready() {
                 self.finished = true;
             }
         }

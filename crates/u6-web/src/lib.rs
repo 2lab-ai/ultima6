@@ -3,10 +3,44 @@
 //!
 //! JS owns the clock and the DOM. Key callbacks only queue events; [`Game::tick`] delivers them
 //! to the engine with the elapsed time, so game code never runs inside an input handler.
+//!
+//! Limits (a clear message instead of an exhausted tab): [`MAX_INPUT_BYTES`] for the dropped
+//! files together, [`MAX_UNZIPPED_BYTES`] for what the zip entries the intake inflates declare,
+//! [`MAX_GAME_FILES_BYTES`] for the game files the intake produces.
+
+mod zipscan;
 
 use u6_core::{Engine, Files, Framebuffer, InputEvent, Key};
 use u6_intake::{InputFile, intake};
 use wasm_bindgen::prelude::*;
+
+/// The dropped files together (the archive.org zip is 185 MiB, the game three 880 KiB disks).
+/// The page checks the file sizes before reading anything; [`Game::load_file`] is the backstop.
+pub const MAX_INPUT_BYTES: usize = 512 << 20;
+/// What the disk-image entries of the dropped zips (the only entries the intake inflates)
+/// declare uncompressed, together; read from the central directories before anything is
+/// inflated (u6-intake caps each inflate at its declared size).
+pub const MAX_UNZIPPED_BYTES: u64 = 64 << 20;
+/// The game files the intake produced, together (the Amiga disks hold 2.4 MiB), checked before
+/// the engine boots. PP20 output is bounded per file by its 24-bit length field (16 MiB), not in
+/// aggregate, inside u6-intake.
+pub const MAX_GAME_FILES_BYTES: usize = 64 << 20;
+
+/// [`MAX_INPUT_BYTES`] for the page.
+#[wasm_bindgen]
+pub fn max_input_bytes() -> f64 {
+    MAX_INPUT_BYTES as f64
+}
+
+/// The message for inputs over [`MAX_INPUT_BYTES`].
+pub fn too_large(total: u64) -> String {
+    format!(
+        "The dropped files are {} MiB together; this page takes at most {} MiB \
+         (the archive.org zip, the three disks or the extracted files).",
+        total >> 20,
+        MAX_INPUT_BYTES >> 20
+    )
+}
 
 /// Maps a DOM `KeyboardEvent` (`code`, `key`) to an engine key: named keys by `code`,
 /// printable single characters by `key`.
@@ -33,11 +67,16 @@ pub fn key_from_dom(code: &str, key: &str) -> Option<Key> {
 #[wasm_bindgen]
 pub struct Game {
     inputs: Vec<InputFile>,
+    /// Bytes in `inputs`.
+    input_bytes: usize,
     engine: Option<Engine>,
     pending: Vec<InputEvent>,
     blank: Framebuffer,
     rgba: Vec<u8>,
     log: Vec<String>,
+    /// Paths of the game files the last start booted from, until the page has kept them (their
+    /// bytes are read in place from the engine's file map, never copied in wasm).
+    kept: Vec<String>,
 }
 
 impl Default for Game {
@@ -52,11 +91,13 @@ impl Game {
     pub fn new() -> Game {
         let mut game = Game {
             inputs: Vec::new(),
+            input_bytes: 0,
             engine: None,
             pending: Vec::new(),
             blank: Framebuffer::new(),
             rgba: Vec::new(),
             log: Vec::new(),
+            kept: Vec::new(),
         };
         game.redraw();
         game
@@ -71,21 +112,66 @@ impl Game {
     }
 
     /// Collects one dropped file (zip, ADF, HFE or an extracted game file) for [`Game::start`].
-    pub fn load_file(&mut self, path: &str, bytes: &[u8]) {
-        self.inputs.push(InputFile {
-            name: path.to_string(),
-            data: bytes.to_vec(),
-        });
+    /// Takes the bytes over (one copy from JS into wasm, none here). Fails, keeping nothing of
+    /// the call, when the files collected so far would pass [`MAX_INPUT_BYTES`].
+    pub fn load_file(&mut self, path: &str, bytes: Vec<u8>) -> Result<(), JsError> {
+        self.collect(path, bytes).map_err(|msg| JsError::new(&msg))
     }
 
     pub fn files_loaded(&self) -> u32 {
         self.inputs.len() as u32
     }
 
-    /// Runs the intake over the collected files and boots the engine. Returns the intake
-    /// report, one line per entry; fails with the report plus the boot error.
-    pub fn start(&mut self) -> Result<String, JsError> {
-        self.boot().map_err(|report| JsError::new(&report))
+    /// Runs the intake over the collected files and boots the engine with RNG seed `seed` (the
+    /// original seeds from the clock; the page passes the low word of the time). Returns the
+    /// intake report, one line per entry; fails with the report plus the boot error.
+    pub fn start(&mut self, seed: u16) -> Result<String, JsError> {
+        self.boot(seed).map_err(|report| JsError::new(&report))
+    }
+
+    /// Number of game files the running game booted from.
+    pub fn game_files(&self) -> u32 {
+        self.engine
+            .as_ref()
+            .map_or(0, |e| e.io().files().len() as u32)
+    }
+
+    /// Number of game files the last start left for the page to keep (so a reload needs no new
+    /// drop; each goes back in as a loose file the intake passes through). 0 after
+    /// [`Game::release_kept`].
+    pub fn kept_count(&self) -> u32 {
+        self.kept.len() as u32
+    }
+
+    /// Path of kept file `i` (`VOLUME/dir/file`).
+    pub fn kept_path(&self, i: u32) -> String {
+        self.kept.get(i as usize).cloned().unwrap_or_default()
+    }
+
+    /// Address of kept file `i` in wasm memory (0 when absent); the page copies `kept_len(i)`
+    /// bytes from there before calling into wasm again.
+    pub fn kept_ptr(&self, i: u32) -> *const u8 {
+        self.kept_bytes(i).map_or(std::ptr::null(), <[u8]>::as_ptr)
+    }
+
+    pub fn kept_len(&self, i: u32) -> usize {
+        self.kept_bytes(i).map_or(0, <[u8]>::len)
+    }
+
+    /// Forgets the kept paths once the page stored (or gave up on) the files.
+    pub fn release_kept(&mut self) {
+        self.kept = Vec::new();
+    }
+
+    /// Stub points the game reached so far, one `count id` line each (for the console).
+    pub fn stub_report(&self) -> String {
+        self.engine.as_ref().map_or_else(String::new, |e| {
+            e.stub_hits()
+                .iter()
+                .map(|(id, n)| format!("{n} {id}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
     }
 
     pub fn started(&self) -> bool {
@@ -138,12 +224,62 @@ impl Game {
 }
 
 impl Game {
+    /// [`Game::load_file`] without the JS error type.
+    fn collect(&mut self, path: &str, data: Vec<u8>) -> Result<(), String> {
+        let total = self.input_bytes.saturating_add(data.len());
+        if total > MAX_INPUT_BYTES {
+            return Err(too_large(total as u64));
+        }
+        self.input_bytes = total;
+        self.inputs.push(InputFile {
+            name: path.to_string(),
+            data,
+        });
+        Ok(())
+    }
+
+    /// Kept file `i`, read in place from the running engine's files.
+    fn kept_bytes(&self, i: u32) -> Option<&[u8]> {
+        let path = self.kept.get(i as usize)?;
+        self.engine.as_ref()?.io().files().get(path)
+    }
+
     /// [`Game::start`] without the JS error type (testable off wasm).
-    fn boot(&mut self) -> Result<String, String> {
-        let r = intake(std::mem::take(&mut self.inputs));
+    fn boot(&mut self, seed: u16) -> Result<String, String> {
+        let inputs = std::mem::take(&mut self.inputs);
+        self.input_bytes = 0;
+        let unzipped: u64 = inputs
+            .iter()
+            .filter_map(|f| zipscan::declared_disk_bytes(&f.data))
+            .sum();
+        if unzipped > MAX_UNZIPPED_BYTES {
+            return Err(format!(
+                "The disk images in the dropped zip declare {} MiB unpacked; this page unpacks \
+                 at most {} MiB.",
+                unzipped >> 20,
+                MAX_UNZIPPED_BYTES >> 20
+            ));
+        }
+        let r = intake(inputs);
+        drop(r.disks);
         let mut report = r.report.join("\n");
-        match Engine::new(Files::new(r.files)) {
+        let total: usize = r.files.values().map(Vec::len).sum();
+        if total > MAX_GAME_FILES_BYTES {
+            report.push_str(&format!(
+                "\nThe game files come to {} MiB; this page takes at most {} MiB.",
+                total >> 20,
+                MAX_GAME_FILES_BYTES >> 20
+            ));
+            return Err(report);
+        }
+        let mut paths: Vec<String> = r.files.keys().cloned().collect();
+        match Engine::with_seed(Files::new(r.files), seed) {
             Ok(engine) => {
+                // A path that differs from another only in case is shadowed (the game's lookups
+                // ignore case): the engine never reads it, so it is not kept either.
+                let files = engine.io().files();
+                paths.retain(|p| files.resolve(p).is_some_and(|(_, key)| key == p));
+                self.kept = paths;
                 self.engine = Some(engine);
                 self.pending.clear();
                 self.redraw();
@@ -189,20 +325,68 @@ mod tests {
     }
 
     #[test]
+    fn inputs_over_the_limit_are_refused_and_not_kept() {
+        let mut game = Game::new();
+        game.collect("a.adf", vec![0; 1 << 20]).unwrap();
+        let err = game.collect("b.zip", vec![0; MAX_INPUT_BYTES]).unwrap_err();
+        assert!(err.contains("at most 512 MiB"), "{err}");
+        assert_eq!((game.files_loaded(), game.input_bytes), (1, 1 << 20));
+    }
+
+    #[test]
     fn start_without_game_files_reports_the_missing_file() {
         let mut game = Game::new();
-        game.load_file("notes.txt", b"hello");
+        game.collect("notes.txt", b"hello".to_vec()).unwrap();
         assert_eq!(game.files_loaded(), 1);
-        let report = game.boot().unwrap_err();
+        let report = game.boot(0).unwrap_err();
         assert!(
             report.starts_with("PP20: decrunched 0 file(s); 1 file(s) total"),
             "{report}"
         );
         assert!(
-            report.ends_with("animdata: not found in the dropped files"),
+            report.ends_with("maptiles.ega: not found in the dropped files"),
             "{report}"
         );
         assert!(!game.started());
         assert_eq!(game.files_loaded(), 0);
+    }
+
+    const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
+
+    /// On the user's zip (skipped when absent; read only): the disk entries declare well under
+    /// the unzip limit, the start keeps every game file in place, and those files given back as
+    /// loose files start the same game.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn real_zip_keeps_its_game_files_and_restarts_from_them() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let data = std::fs::read(ZIP).unwrap();
+        let unzipped = zipscan::declared_disk_bytes(&data).unwrap();
+        assert!(unzipped > 0 && unzipped < MAX_UNZIPPED_BYTES, "{unzipped}");
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", data).unwrap();
+        game.boot(1).unwrap();
+        let n = game.kept_count();
+        assert_eq!(n, game.game_files());
+        let kept: Vec<(String, Vec<u8>)> = (0..n)
+            .map(|i| (game.kept_path(i), game.kept_bytes(i).unwrap().to_vec()))
+            .collect();
+        assert!(kept.iter().all(|(_, b)| !b.is_empty()));
+        game.release_kept();
+        assert_eq!((game.kept_count(), game.kept_len(0)), (0, 0));
+        let mut again = Game::new();
+        for (path, bytes) in kept {
+            again.collect(&path, bytes).unwrap();
+        }
+        again.boot(1).unwrap();
+        assert_eq!(again.game_files(), n);
+        for _ in 0..60 {
+            game.tick(16);
+            again.tick(16);
+        }
+        assert!(game.frame_rgba() == again.frame_rgba(), "same first frames");
     }
 }

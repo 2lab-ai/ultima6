@@ -93,7 +93,10 @@ impl WorldMap {
             _ => (self.dungeons.get(z - 1)?, DUNGEON_CHUNKS),
         };
         let (cx, cy) = (x / CHUNK_SIZE, y / CHUNK_SIZE);
-        (cx < side && cy < side).then(|| grid[cy * side + cx])
+        // A grid shorter than its side (an empty map in tests and tools) has no chunk there.
+        (cx < side && cy < side)
+            .then(|| grid.get(cy * side + cx).copied())
+            .flatten()
     }
 
     /// All refs, surface first.
@@ -102,5 +105,20 @@ impl WorldMap {
             .iter()
             .chain(self.dungeons.iter().flatten())
             .copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_at_on_an_empty_grid_is_none() {
+        let w = WorldMap {
+            surface: Vec::new(),
+            dungeons: vec![Vec::new()],
+        };
+        assert_eq!(w.chunk_at(10, 10, 0), None);
+        assert_eq!(w.chunk_at(10, 10, 1), None);
     }
 }

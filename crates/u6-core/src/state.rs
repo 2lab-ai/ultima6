@@ -18,9 +18,11 @@ use u6_formats::objlist::ObjList;
 use u6_formats::schedule::Schedules as ScheduleFile;
 use u6_formats::tileflag::TileFlags;
 
-use crate::actors::{Actors, Calendar, Party, Schedules};
-use crate::converse::ConverseState;
+use crate::actors::{Actors, Calendar, GameTables, Party, Schedules};
+use crate::converse::{ConverseState, ConverseText};
 use crate::files::Files;
+use crate::gfx::GfxState;
+use crate::main_loop::MainState;
 use crate::map::MapState;
 use crate::objects::{ACTOR_SLOTS, Objects};
 use crate::rng::Rng;
@@ -87,6 +89,10 @@ pub struct State {
     pub map: MapState,
     pub ui: UiState,
     pub converse: ConverseState,
+    /// World-view graphics: tile records, the animation tables and the display globals.
+    pub gfx: GfxState,
+    /// Globals of the main hunk (command loop, boot).
+    pub main: MainState,
     /// Original: 0x151ee0 (RNG state longword)
     pub rng: Rng,
 }
@@ -94,8 +100,18 @@ pub struct State {
 /// A game file is missing or malformed.
 #[derive(Debug)]
 pub enum LoadError {
-    Missing { file: String },
-    Format { file: String, error: FormatError },
+    Missing {
+        file: String,
+    },
+    Format {
+        file: String,
+        error: FormatError,
+    },
+    /// A table read out of a file failed its checks (the reader's own message).
+    Table {
+        file: String,
+        detail: String,
+    },
 }
 
 impl fmt::Display for LoadError {
@@ -103,6 +119,7 @@ impl fmt::Display for LoadError {
         match self {
             LoadError::Missing { file } => write!(f, "{file}: not found in the dropped files"),
             LoadError::Format { file, error } => write!(f, "{file}: {error}"),
+            LoadError::Table { file, detail } => write!(f, "{file}: {detail}"),
         }
     }
 }
@@ -140,14 +157,18 @@ impl State {
 
     /// Original: 0x105350 (load state: objlist, schedules, base tiles; place party) [partial]
     ///
-    /// Boot step 3 (0x134f08) and then 0x105350's reads in the original order: `schedule`,
-    /// `basetile`, `savegame/objlist` (25 reads of the 0x1C73 bytes the Amiga uses), the leader
-    /// position and the animation flags. The port also loads whole files the original reads
-    /// later per region or on demand (`map`, `chunks`, the 69 `savegame/objblk??`, `look.lzd`, the
-    /// palette inside `game`). 0x105350's remaining calls (0x10edb4, 0x106506, the region loads
-    /// 0x10e1ce / 0x108ac4, 0x108f90, 0x10cda8, 0x109e74) run from `main_loop` once their
-    /// modules exist. The RNG keeps its unseeded state; the engine seeds it.
+    /// The boot loads first: tile graphics (0x152e50, [`GfxState::load`]), boot step 3
+    /// (0x134f08), the font `u6.ch` and the tables the modules read out of `game` (ui, map,
+    /// objects, actors, converse; spec 03 §5). Then 0x105350's reads in the original order:
+    /// `schedule`, `basetile`, `savegame/objlist` (25 reads of the 0x1C73 bytes the Amiga uses),
+    /// the leader position and the animation flags. The port also loads whole files the original
+    /// reads later per region or on demand (`map`, `chunks`, the 69 `savegame/objblk??`,
+    /// `look.lzd`, the palette inside `game`). 0x105350's remaining calls (0x10edb4, 0x106506,
+    /// the region loads 0x10e1ce / 0x108ac4, 0x108f90, 0x10cda8, 0x109e74) run from `main_loop`
+    /// ([`crate::main_loop::finish_load_state`]). The RNG keeps its unseeded state; the engine
+    /// seeds it.
     pub fn new_game(files: &Files) -> Result<State, LoadError> {
+        let gfx = GfxState::load(files)?;
         let (anim, tileflags) = load_boot_tables(files)?;
         let schedule = load(files, "schedule", ScheduleFile::parse)?;
         let basetile = load(files, "basetile", BaseTiles::parse)?;
@@ -162,8 +183,30 @@ impl State {
             .collect::<Result<Vec<_>, _>>()?;
         let look = load(files, "look.lzd", LookTable::from_lzd)?;
         let palette = load(files, "game", gfx::palette)?;
+        let ui = UiState::load(files)?;
+        let table = |detail: String| LoadError::Table {
+            file: "game".into(),
+            detail,
+        };
+        let game = files.get("game").ok_or_else(|| LoadError::Missing {
+            file: "game".into(),
+        })?;
+        let actor_tables = GameTables::from_game(game).map_err(|error| LoadError::Format {
+            file: "game".into(),
+            error,
+        })?;
+        let converse_text = ConverseText::from_game(game).map_err(table)?;
 
         let mut state = State::empty();
+        state.gfx = gfx;
+        state.ui = ui;
+        state.map.load_tables(files)?;
+        state
+            .objects
+            .load_defs(files)
+            .map_err(|e| table(e.to_string()))?;
+        state.actors.game = actor_tables;
+        state.converse.text = Some(converse_text);
         state.tables = Tables {
             basetile,
             tileflags,
@@ -191,10 +234,10 @@ impl State {
         let (objects, actors) = (&mut self.objects, &mut self.actors);
         let attrs = &mut actors.attrs;
         for (a, r) in list.actors.iter().enumerate().take(ACTOR_SLOTS) {
-            objects.actor_flags[a] = r.obj_flags;
+            objects.obj_status[a] = r.obj_flags;
             objects.location[a] = r.pos;
             objects.type_frame[a] = (r.obj_n & 0x3ff) | u16::from(r.frame & 0x3f) << 10;
-            attrs.unknown_0600[a] = r.unknown_0600;
+            objects.qq[a] = r.unknown_0600;
             attrs.status[a] = r.status;
             attrs.strength[a] = r.strength;
             attrs.dexterity[a] = r.dexterity;
@@ -259,7 +302,7 @@ impl State {
             .slots
             .iter()
             .take(usize::from(anim.count))
-            .map(|slot| !off.contains(&slot.tile_to_animate))
+            .map(|slot| u8::from(!off.contains(&slot.tile_to_animate)))
             .collect();
     }
 
@@ -321,12 +364,15 @@ mod tests {
         };
         s.init_anim_flags();
         // Only the first `count` slots get a flag.
-        assert_eq!(s.map.anim_enabled, [false, true, false, false]);
+        assert_eq!(s.map.anim_enabled, [0, 1, 0, 0]);
     }
 
     #[test]
     fn missing_file_is_reported_by_name() {
         let err = State::new_game(&Files::default()).unwrap_err();
-        assert_eq!(err.to_string(), "animdata: not found in the dropped files");
+        assert_eq!(
+            err.to_string(),
+            "maptiles.ega: not found in the dropped files"
+        );
     }
 }

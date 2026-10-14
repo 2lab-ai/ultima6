@@ -19,6 +19,7 @@
       padding: 16px;
     }
     h1 { font-size: 1.25rem; margin: 0 0 12px; }
+    h2 { font-size: 1rem; margin: 0 0 4px; }
     canvas {
       display: block;
       width: 100%;
@@ -27,7 +28,11 @@
       background: #000;
       image-rendering: pixelated;
       image-rendering: crisp-edges;
+      outline: 3px solid transparent;
+      outline-offset: 3px;
     }
+    /* The ring says the game has the keyboard (also after a scripted focus, so not :focus-visible). */
+    canvas:focus { outline-color: #ffd166; }
     #drop {
       margin-top: 16px;
       padding: 16px;
@@ -38,25 +43,48 @@
     #drop.over { border-color: #9ab8ff; background: #141a2a; }
     #drop p { margin: 0 0 12px; }
     input[type="file"] { max-width: 100%; color: inherit; }
-    #status { margin: 12px 0 0; min-height: 1.5em; color: #b9c3d6; }
+    button { margin-left: 8px; color: inherit; background: #1d2230; border: 1px solid #555a66;
+             border-radius: 4px; padding: 2px 8px; }
+    button:disabled, input:disabled { opacity: 0.5; }
+    :is(button, input):focus-visible { outline: 3px solid #ffd166; outline-offset: 2px; }
+    #status { margin: 12px 0 0; min-height: 1.5em; color: #b9c3d6; white-space: pre-wrap; }
+    #limits { margin-top: 16px; padding: 12px 16px; border-left: 4px solid #ffd166;
+              background: #16161d; }
+    #limits p { margin: 0 0 8px; }
+    #limits p:last-child { margin-bottom: 0; }
     .hint { color: #9a9aa6; font-size: 0.875rem; }
   </style>
 </head>
 <body>
   <main>
     <h1>Ultima VI (Rust port)</h1>
-    <canvas id="screen" width="320" height="200"
-            aria-label="Game screen. Arrow keys walk; letter keys are game commands."></canvas>
+    <canvas id="screen" width="320" height="200" tabindex="0"
+            aria-label="Game screen. Click it or Tab to it; then arrow keys walk and letter keys are game commands. Tab leaves it."></canvas>
     <section id="drop" aria-labelledby="drop-title">
       <p id="drop-title">
         Drop your Ultima VI files: the archive.org zip, the three ADFs, or the
         extracted files &mdash; nothing is uploaded.
       </p>
       <label for="picker">Or choose files:</label>
-      <input id="picker" type="file" multiple>
+      <input id="picker" type="file" multiple disabled>
+      <button id="forget" type="button" disabled>Forget the kept files</button>
+      <button id="restart" type="button" hidden>Restart</button>
       <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
     </section>
-    <p class="hint">Arrow keys walk the party. Your game files stay in your browser and are never uploaded.</p>
+    <section id="limits" aria-labelledby="limits-title">
+      <h2 id="limits-title">What this version does</h2>
+      <p>Works: walking (arrow keys), passing a turn (space), party mode (0) and solo mode
+        (1&ndash;9), talking (T, a direction, then type and press Return). The clock runs and
+        people follow their schedules.</p>
+      <p>Not yet: combat, magic, rest, the inventory commands (look, get, drop, move, use) and
+        the inventory panel keys, saving and restoring a game, music and sound, the mouse. Those
+        commands say &ldquo;Not implemented in this version&rdquo; and do nothing.</p>
+      <p>Keeping your files in this browser is not a saved game: every visit starts a new game
+        from the disks.</p>
+    </section>
+    <p class="hint">Click the game screen or Tab to it before playing; Tab leaves it again. Your
+      game files stay in your browser (kept in its storage for the next visit) and are never
+      uploaded.</p>
     <noscript><p>This page needs JavaScript and WebAssembly.</p></noscript>
   </main>
   <script type="module" src="./app.js"></script>

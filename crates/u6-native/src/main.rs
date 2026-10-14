@@ -7,9 +7,11 @@
 //! ```
 //!
 //! Headless mode never opens a window or reads a clock: it runs N ticks of `HEADLESS_TICK_MS`,
-//! delivering key i of `--keys` with tick i, and writes the last published 320x200 frame. The
-//! RNG seed defaults to 0 headless (reproducible) and to the wall clock in the window (as the
-//! original seeds from `time()`).
+//! delivering the `--keys` one per tick while the game has no key queued, and writes the last
+//! published 320x200 frame. A `say:words` token types `words` and Return into the next line
+//! input, pressing space (one at a time, after the game has idled a few ticks) for every more
+//! prompt or key wait before it. The RNG seed defaults to 0 headless (reproducible) and to the
+//! wall clock in the window (as the original seeds from `time()`).
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -30,11 +32,26 @@ struct Args {
     zip: Option<PathBuf>,
     headless_png: Option<PathBuf>,
     frames: u32,
-    keys: Vec<Key>,
+    keys: Vec<Token>,
     seed: Option<u16>,
 }
 
-/// One `--keys` token: an arrow / control key name or a single character.
+/// One `--keys` token.
+#[derive(Clone, Debug, PartialEq)]
+enum Token {
+    Key(Key),
+    /// Text typed into the next line input, then Return.
+    Say(String),
+}
+
+fn parse_token(token: &str) -> Result<Token, String> {
+    match token.strip_prefix("say:") {
+        Some(text) => Ok(Token::Say(text.to_string())),
+        None => parse_key(token).map(Token::Key),
+    }
+}
+
+/// One key token: an arrow / control key name or a single character.
 fn parse_key(token: &str) -> Result<Key, String> {
     Ok(match token.to_ascii_lowercase().as_str() {
         "up" => Key::Up,
@@ -74,7 +91,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 parsed.keys = seq
                     .split(',')
                     .filter(|t| !t.is_empty())
-                    .map(parse_key)
+                    .map(parse_token)
                     .collect::<Result<_, _>>()?;
             }
             "--seed" => {
@@ -106,14 +123,45 @@ fn print_log(engine: &mut Engine) {
     }
 }
 
-/// Runs `frames` fixed ticks, key i delivered with tick i; returns the last frame as RGBA8.
-fn simulate(engine: &mut Engine, frames: u32, keys: &[Key]) -> Vec<u8> {
-    for i in 0..frames as usize {
-        let input: Vec<InputEvent> = keys
-            .get(i)
-            .map(|&k| InputEvent::Key(k))
-            .into_iter()
-            .collect();
+/// Ticks the game must idle with nothing queued before a space answers a wait for `say:`.
+const IDLE_TICKS: u32 = 3;
+
+/// Runs `frames` fixed ticks feeding the tokens (see the module doc); returns the last frame as
+/// RGBA8.
+fn simulate(engine: &mut Engine, frames: u32, tokens: &[Token]) -> Vec<u8> {
+    let mut queue: std::collections::VecDeque<Key> = std::collections::VecDeque::new();
+    let mut next = tokens.iter();
+    let mut pending: Option<String> = None;
+    let mut idle = 0u32;
+    for _ in 0..frames {
+        let busy = engine.io().pending_events() > 0;
+        idle = if busy { 0 } else { idle + 1 };
+        let mut input = Vec::new();
+        if !busy {
+            if let Some(k) = queue.pop_front() {
+                input.push(InputEvent::Key(k));
+            } else if let Some(text) = pending.take() {
+                if engine.state().ui.input.line_input {
+                    queue.extend(text.chars().map(Key::Char));
+                    queue.push_back(Key::Enter);
+                    if let Some(k) = queue.pop_front() {
+                        input.push(InputEvent::Key(k));
+                    }
+                } else {
+                    if idle >= IDLE_TICKS {
+                        input.push(InputEvent::Key(Key::Space));
+                        idle = 0;
+                    }
+                    pending = Some(text);
+                }
+            } else {
+                match next.next() {
+                    Some(Token::Key(k)) => input.push(InputEvent::Key(*k)),
+                    Some(Token::Say(text)) => pending = Some(text.clone()),
+                    None => {}
+                }
+            }
+        }
         engine.tick(&input, HEADLESS_TICK_MS);
     }
     let mut rgba = Vec::new();
@@ -224,13 +272,23 @@ fn run(args: Args) -> Result<(), String> {
             let rgba = simulate(&mut engine, args.frames, &args.keys);
             print_log(&mut engine);
             write_png(path, &rgba)?;
-            let stubs: u64 = engine.stub_hits().values().sum();
+            let hits = engine.stub_hits();
+            let stubs: u64 = hits.values().sum();
             println!(
-                "wrote {} ({} frames, {} stub hits)",
+                "wrote {} ({} frames, {} keys still queued, {} stub hits)",
                 path.display(),
                 args.frames,
+                engine.io().pending_events(),
                 stubs
             );
+            for (id, n) in hits {
+                println!("  {n:6} {id}");
+            }
+            if std::env::var_os("U6_TRANSCRIPT").is_some() {
+                for line in &engine.state().ui.messages {
+                    println!("| {line}");
+                }
+            }
             Ok(())
         }
         None => run_window(boot(zip, args.seed.unwrap_or_else(clock_seed))?),
@@ -273,7 +331,19 @@ mod tests {
         assert_eq!(a.zip, Some(PathBuf::from("u6.zip")));
         assert_eq!(a.headless_png, Some(PathBuf::from("o.png")));
         assert_eq!((a.frames, a.seed), (5, Some(77)));
-        assert_eq!(a.keys, [Key::Up, Key::Right, Key::Char('t'), Key::Escape]);
+        assert_eq!(
+            a.keys,
+            [Key::Up, Key::Right, Key::Char('t'), Key::Escape].map(Token::Key)
+        );
+        let a = args(&["--keys", "t,say:name,enter"]).unwrap();
+        assert_eq!(
+            a.keys,
+            [
+                Token::Key(Key::Char('t')),
+                Token::Say("name".into()),
+                Token::Key(Key::Enter)
+            ]
+        );
         assert!(args(&["--frames"]).is_err());
         assert!(args(&["--bogus"]).is_err());
         assert!(args(&["--keys", "upp"]).is_err());

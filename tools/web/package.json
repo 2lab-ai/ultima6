@@ -1,0 +1,14 @@
+{
+  "name": "ultima6-web-tests",
+  "private": true,
+  "type": "module",
+  "description": "Local server for site/ that applies site/_headers, and the Playwright tests of the page",
+  "dependencies": {
+    "playwright": "1.63.0"
+  },
+  "scripts": {
+    "serve": "node serve.mjs --root ../../site",
+    "test": "node test-web.mjs",
+    "measure": "node measure-memory.mjs --root ../../site"
+  }
+}
