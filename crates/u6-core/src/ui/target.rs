@@ -132,10 +132,10 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
 /// host tick size. Time the step waits for itself (an effect, a prompt) counts toward its pace,
 /// not on top of it: added, the tick rounding of those waits would build up over a walk again (a
 /// 100 ms wait lasts 112 ms at 16 ms ticks, 104 at 8). The cost: in the original such a wait
-/// comes before its
-/// redraw, so each step that waits comes up to a pace early, and over a walk of such steps that
-/// adds up (unmeasured: the oracle captures have no held walk whose steps wait, only single
-/// clicks in the start fight, whose 143..541-frame turns mix the 68000's work with its waits).
+/// comes before its redraw, so each step that waits comes up to a pace early, and over a walk of
+/// such steps that adds up (unmeasured: the oracle captures have no held walk whose steps wait,
+/// only single clicks in the start fight, whose 143..541-frame turns mix the 68000's work with
+/// its waits).
 /// A step whose own waits outlast the pace samples on the next frame and the cadence starts
 /// again from that sample (no burst of the paces it outlasted). A hold that gives no walk (the
 /// pointer on the Avatar's cell or off the map, a blocked step) keeps the frame pace, and so does
@@ -169,9 +169,10 @@ async fn pointer_click(state: &RefCell<State>, io: &Io) -> u16 {
         // the sample, so the sample takes only the `queued` events that came before it (none:
         // the pointer as it was). A take is the first event and the moves after it that keep its
         // buttons; when the first take keeps the held buttons (a move), a second one takes the
-        // button change behind it, so a held move does not hide a release. On a repeat with no
-        // due time both takes are unbounded: a release behind a move is seen a frame sooner. A
-        // key is in front only if it came before.
+        // button change behind it, so a held move does not hide a release. Else (no due time, a
+        // tick on the due time, or a due already passed at entry) both takes are unbounded: on a
+        // repeat with no due time a release behind a move is then seen a frame sooner. A key is
+        // in front only if it came before.
         let early = due.is_some_and(|at| io.now_ms() > at);
         let before = io.pending_events();
         let left = |io: &Io| {
@@ -229,13 +230,11 @@ async fn pointer_click(state: &RefCell<State>, io: &Io) -> u16 {
 /// 0x106be6: the handler's pointer into the sample (0x14f12c); the buttons as 0x106bbc reads
 /// them (1 left, 2 right; both down reads as neither).
 fn sample(state: &RefCell<State>, io: &Io) -> u16 {
-    let p = io.take_pointer();
-    let mut s = state.borrow_mut();
-    pointer::sample(&mut s, p);
-    pointer_buttons(&s)
+    sample_upto(state, io, usize::MAX)
 }
 
-/// As [`sample`], from at most the first `n` queued events ([`Io::take_pointer_upto`]).
+/// As [`sample`], from at most the first `n` queued events ([`Io::take_pointer_upto`]; with
+/// `usize::MAX` the take is [`Io::take_pointer`]'s).
 fn sample_upto(state: &RefCell<State>, io: &Io, n: usize) -> u16 {
     let p = io.take_pointer_upto(n);
     let mut s = state.borrow_mut();
