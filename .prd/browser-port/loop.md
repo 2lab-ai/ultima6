@@ -21,15 +21,21 @@ Status: in-progress
   `~/Games/ultima6/scummvm-wasm-build.log`.
 - Local data (never committed): `~/Games/ultima6/{original,img,files,unpacked}`.
 
-## Round 1 — open work units
+## Round 1 — open work units (rev 2: Rust main source)
+
+Gate before any Rust logic dispatch: `re/notes/game-layout.md` records (a) symbol
+count, (b) OS-call vs custom-chip access, (c) C runtime identity.
 
 | WU | Scope | Owner files | State |
 |---|---|---|---|
-| WU-1 | rea `m68k` raw-binary architecture (Ghidra `68000:BE:32:default`) + tests | rea `src/domain/rawBinary*`, `src/ghidra/GhidraRawBinary*`, schemas | open |
-| WU-2 | hunk → flat raw image with relocations applied + symbol/section map | this repo `tools/hunk2raw.py` | open |
-| WU-3 | Format adapter for byte-order files vs Nuvie readers | this repo `tools/amiga2dos.py`, `re/notes/formats.md` | open |
-| WU-4 | Graphics formats (`*.ega`) from REA decompile of the loaders | `re/notes/graphics.md`, adapter extension | blocked on WU-1, WU-2 |
-| WU-5 | ScummVM fork: Amiga detection + any engine hook | `2lab-ai/scummvm` `engines/ultima/` | blocked on WU-3/4 |
-| WU-6 | Browser intake: zip → HFE → ADF → OFS → PP20 (TS) with tests | this repo `web/src/intake/` | open |
-| WU-7 | Shell UI + engine launch + IndexedDB cache | this repo `web/` | blocked on wasm build |
-| WU-8 | Deploy: CF Pages `ultima6` + DNS CNAME | — | blocked on WU-7 |
+| WU-1 | rea `m68k` raw-binary architecture + tests + reinstall | rea `feat/m68k-raw-binary` | in flight |
+| WU-2 | hunk → flat image + map; layout notes | `tools/hunk2raw.py`, `re/notes/game-layout.md` | in flight |
+| WU-3 | Amiga data format spec (byte-level, for Rust parsers) | `re/notes/formats.md` (+ optional `tools/amiga2dos.py`) | in flight |
+| WU-6 | TS intake (oracle for the Rust port; deleted once `u6-intake` lands) | `web/` | in flight |
+| WU-R0 | Rust workspace skeleton: crates, native window, wasm shell, framebuffer | `Cargo.toml`, `crates/*` | open |
+| WU-O | Oracle: original game running in an Amiga emulator (AROS ROM) + screenshot capture | `re/notes/oracle.md`, `tools/oracle/` | open |
+| WU-R1 | `u6-intake` Rust port of WU-6 with the same fixture tests | `crates/u6-intake` | blocked on WU-6, WU-R0 |
+| WU-R2 | `u6-formats` parsers from formats.md | `crates/u6-formats` | blocked on WU-3, WU-R0 |
+| WU-4 | REA decompile: function inventory + classification; graphics loaders | `re/notes/functions.md`, `re/notes/graphics.md` | blocked on WU-1, WU-2 |
+| WU-P* | Per-subsystem logic port (from WU-4 inventory) | `crates/u6-core/src/<subsystem>` | blocked on WU-4 |
+| WU-D | Deploy: CF Pages `ultima6` + DNS CNAME | `site/`, deploy script | blocked on milestone 1 |
