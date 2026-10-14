@@ -1,7 +1,7 @@
 //! Equipment slots and weights (hunk 8): what an object readies into, what it weighs, and the
 //! per-actor totals with the equipment cells 0x1112cc fills.
 
-use crate::objects::{Slot, first_child, next_child, stack_kind};
+use crate::objects::{ACTOR_SLOTS, OBJECT_SLOTS, Slot, first_child, next_child, stack_kind};
 use crate::state::State;
 
 /// Torch: its frame 1 (lit) weighs as one torch whatever its count.
@@ -196,6 +196,29 @@ pub fn weights(s: &mut State, obj: Slot) {
         }
         c = next_child(&mut s.objects);
     }
+}
+
+/// The actor at the end of `obj`'s container chain, `None` when the chain ends elsewhere: the
+/// walk Ready (0x11219a..0x1121c0) and the weight line (0x111b26..0x111b52) make for the strength
+/// and the owner of a readied object.
+///
+/// The original follows location bytes 0-1 while the slot is 0x100 or more without looking at
+/// the status: from a container on the map it reads the coordinates as a parent, and a chain
+/// that comes back on itself never ends. The port stops at the first object that is not
+/// contained (as 0x10c810 does) and after as many steps as there are object slots.
+pub(crate) fn holder(s: &State, obj: Slot) -> Option<Slot> {
+    let o = &s.objects;
+    let mut owner = obj;
+    for _ in 0..OBJECT_SLOTS {
+        if owner < ACTOR_SLOTS as Slot {
+            return (owner >= 0).then_some(owner);
+        }
+        if o.place(owner) == 0 {
+            return None;
+        }
+        owner = o.parent(owner);
+    }
+    None
 }
 
 /// Original: 0x111882 (ui: tenths to the stones shown: rounded half up, but any non-zero weight

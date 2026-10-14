@@ -26,9 +26,9 @@ const STR_PROMPT: u32 = 0x0011_0c5a;
 const STR_LINE: u32 = 0x0011_0c62;
 const STR_NEWLINE: u32 = 0x0011_0c68;
 const STR_UNREADY: u32 = 0x0011_0c6a;
-/// Original: A4-0x6c3c (pointer to "Magical energy prevents you from removing the amulet.")
+/// Original: A4-0x6c3c (pointer to the line that the amulet of submission cannot be removed)
 const PTR_AMULET: u32 = 0x6c3c;
-/// Original: A4-0x756f ("A torch burned out.")
+/// Original: A4-0x756f (the line that a torch burned out)
 const STR_BURNED_OUT: u32 = 0x756f;
 
 /// Object types with special handling.
@@ -66,11 +66,13 @@ fn set_sparkle(s: &mut State, v: u8) {
 
 /// Original: 0x112052 (inventory: Ready the selected object (A4-0x2f04) for the member shown)
 ///
-/// "Ready-" and the name (a torch prints "torch"); refused when it has no slot, when its weight
-/// byte would take the readied weight past 10 × strength, or when the slot is taken (a second
-/// one-hand weapon or shield goes to the free hand, a two-handed one needs both and leaves the
-/// marker 1 in slot 5, a second ring goes to slot 6). The object moves readied into the actor
-/// that holds it; a torch is taken off its stack and a new single torch is readied. The ring of
+/// The Ready line (0x110c14) and the name (a torch prints 0x110c1c instead); refused when it has
+/// no slot, when its weight byte would take the readied weight past 10 × strength, or when the
+/// slot is taken (a second one-hand weapon or shield goes to the free hand, a two-handed one
+/// needs both and leaves the marker 1 in slot 5, a second ring goes to slot 6). The object moves
+/// readied into the actor that holds it; the port refuses it as having no slot when no actor
+/// does (a container on the map, a broken chain; `weight::holder`), before anything is written.
+/// A torch is taken off its stack and a new single torch is readied. The ring of
 /// invisibility (0x102) makes the actor invisible and 0x51 starts the sparkle, both with the
 /// actor's flash (0x132338). The panel contents are redrawn; the prompt follows in every case.
 pub async fn ready(state: &RefCell<State>, io: &Io) {
@@ -119,6 +121,13 @@ fn place(s: &mut State, obj: Slot, ty: u16, strength: u8) -> Option<u32> {
     if load > i16::from(strength).wrapping_mul(10) {
         return Some(STR_HEAVY);
     }
+    // The original walks to the owner after the taken-slot test (0x11219a, a do-while from the
+    // object's parent; the same as this for any object slot), and a container on the map or a
+    // broken chain sends it through coordinates or round forever. The port asks here, before
+    // the both-hands arm below writes the marker.
+    let Some(owner) = weight::holder(s, obj) else {
+        return Some(STR_CANT);
+    };
     let inv = &s.inventory;
     let (hand, other) = (inv.equip(2) != 0, inv.equip(5) != 0);
     match slot {
@@ -137,10 +146,6 @@ fn place(s: &mut State, obj: Slot, ty: u16, strength: u8) -> Option<u32> {
     }
     if s.inventory.equip(slot) != 0 {
         return Some(STR_NO_PLACE);
-    }
-    let mut owner = obj;
-    while owner >= 0x100 {
-        owner = s.objects.parent(owner);
     }
     let readied = if ty == TORCH {
         let q = &mut s.objects.qq[obj as usize];
@@ -216,11 +221,11 @@ pub fn equipped_index(s: &State, obj: Slot) -> i16 {
 
 /// Original: 0x1123d6 (inventory: Unready the selected object (A4-0x2f04) for the member shown)
 ///
-/// Nothing for the selection 1 (the both-hands marker). "Unready-" and the name; the amulet of
-/// submission stays readied; a lit torch burns out; otherwise the slot is cleared, the effects
-/// end, a both-hands weapon frees slot 5, and the object goes back to the inventory (a torch
-/// onto the actor's torch stack when it has one). The panel contents are redrawn and the prompt
-/// printed.
+/// Nothing for the selection 1 (the both-hands marker). The Unready line (0x110c6a) with the
+/// name; the amulet of submission stays readied; a lit torch burns out; otherwise the slot is
+/// cleared, the effects end, a both-hands weapon frees slot 5, and the object goes back to the
+/// inventory (a torch onto the actor's torch stack when it has one). The panel contents are
+/// redrawn and the prompt printed.
 pub async fn unready(state: &RefCell<State>, io: &Io) {
     let obj = state.borrow().ui.input.selection;
     if obj == 1 {

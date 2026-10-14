@@ -10,7 +10,9 @@ use u6_formats::tileflag::TileFlags;
 use super::*;
 use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
-use crate::objects::{IN_CONTAINER, IN_INVENTORY, READIED, Slot, create_in, init_slots};
+use crate::objects::{
+    IN_CONTAINER, IN_INVENTORY, READIED, Slot, WHERE_MASK, create_in, init_slots,
+};
 use crate::state::State;
 
 /// Object types of the synthetic world (tile = 4 × type).
@@ -61,8 +63,12 @@ pub(super) fn world() -> State {
     let t = &mut s.inventory.tables;
     t.hand_tiles = vec![0x240, 0x244];
     t.counted = vec![GOLD, APPLE];
-    t.glyphs = vec![0xf6de, 0x4924];
-    t.columns = vec![3, 0, 0, 0, 7, 0, 0, 0, 9, 4, 0, 0, 11, 7, 3, 0, 13, 9, 5, 1];
+    // Synthetic digits: 0 a checker (rows 101 010 101 010 101), 1 the left column (100 × 5).
+    t.glyphs = vec![0xaaaa, 0x9248];
+    // Synthetic columns, 4 per digit count: the units at 12, further digits 6, 4 or 3 apart.
+    t.columns = vec![
+        0, 0, 0, 0, 12, 0, 0, 0, 12, 6, 0, 0, 12, 8, 4, 0, 12, 9, 6, 3,
+    ];
     init_slots(&mut s.objects);
     crate::objects::link_actors(&mut s.objects);
     let p = &mut s.actors.party;
@@ -307,10 +313,145 @@ fn a_number_is_plotted_digit_by_digit_into_the_icon() {
         io.present();
     });
     let fb = e.frame();
-    // "10" (two digits: columns 9, 4): units (glyph 0 = 0xf6de) at 9, tens (0x4924) at 4.
+    // 10 is two digits (columns 12, 6): the units (glyph 0, the checker) at 12, the tens
+    // (glyph 1, the left column) at 6, rows 11..=15.
     let lit = |x: usize, y: usize| fb.get(32 + x, 40 + y) == Some(6);
-    assert!(lit(9, 11) && lit(10, 11) && lit(11, 11), "top row of 0");
-    assert!(lit(9, 12) && !lit(10, 12) && lit(11, 12));
-    assert!(lit(5, 11) && !lit(4, 11) && !lit(6, 11), "the 1's stem");
-    assert!(lit(5, 15) && !lit(5, 16) && !lit(5, 10));
+    assert!(lit(12, 11) && !lit(13, 11) && lit(14, 11), "top row of 0");
+    assert!(!lit(12, 12) && lit(13, 12) && !lit(14, 12));
+    assert!(
+        lit(12, 15) && !lit(13, 15) && lit(14, 15),
+        "bottom row of 0"
+    );
+    assert!(
+        (11..=15).all(|y| lit(6, y) && !lit(7, y) && !lit(8, y)),
+        "the 1's column"
+    );
+    assert!(!lit(6, 10) && !lit(6, 16) && !lit(12, 10) && !lit(12, 16));
+}
+
+/// Runs `f` on a thread of its own and returns its answer; fails when it has not answered within
+/// five seconds (the owner walks these tests guard spun forever) or when it panicked.
+#[allow(clippy::disallowed_methods)] // a test thread, so a walk that never ends fails the test
+fn ends<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(v) => v,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{what}: the owner walk did not end")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("{what}: panicked"),
+    }
+}
+
+/// A bag on the map with a sword inside: its location bytes, read as a parent word, name the
+/// bag itself (x = the slot's low 10 bits, y = the rest).
+fn bag_on_the_map(s: &mut State) -> (Slot, Slot) {
+    let bag = give(s, BAG, IN_INVENTORY, 0, 1);
+    let sword = give(s, SWORD, IN_CONTAINER, 0, bag);
+    s.objects.obj_status[bag as usize] &= !WHERE_MASK;
+    s.objects
+        .set_xyz(bag, bag as u16 & 0x3ff, bag as u16 >> 10, 0);
+    assert_eq!(
+        s.objects.parent(bag),
+        bag,
+        "the bag's coordinates read as itself"
+    );
+    (bag, sword)
+}
+
+/// Two bags inside each other (only a broken save has this) with a sword in the first.
+fn bags_in_a_cycle(s: &mut State) -> (Slot, Slot) {
+    let a = give(s, BAG, IN_INVENTORY, 0, 1);
+    let b = give(s, BAG, IN_CONTAINER, 0, a);
+    let sword = give(s, SWORD, IN_CONTAINER, 0, a);
+    let st = &mut s.objects.obj_status[a as usize];
+    *st = (*st & !WHERE_MASK) | IN_CONTAINER;
+    s.objects.set_parent(a, b);
+    (a, sword)
+}
+
+#[test]
+fn the_weight_line_of_a_container_no_actor_holds_is_drawn() {
+    for (case, setup) in [
+        (
+            "a bag on the map",
+            bag_on_the_map as fn(&mut State) -> (Slot, Slot),
+        ),
+        ("bags in a cycle", bags_in_a_cycle),
+    ] {
+        let (finished, listed) = ends(case, move || {
+            let mut s = world();
+            let (bag, sword) = setup(&mut s);
+            s.ui.panel.container = bag as u16;
+            s.ui.panel.open_container = bag as u16;
+            let e = run(s, &[], |st, io| async move { draw_list(&st, &io).await });
+            (e.finished(), e.state().inventory.cells[0] == sword)
+        });
+        assert!(finished && listed, "{case}: the list is drawn");
+    }
+}
+
+#[test]
+fn ready_refuses_an_object_no_actor_holds() {
+    for (case, setup) in [
+        (
+            "a bag on the map",
+            bag_on_the_map as fn(&mut State) -> (Slot, Slot),
+        ),
+        ("bags in a cycle", bags_in_a_cycle),
+    ] {
+        let (finished, place, hand) = ends(case, move || {
+            let mut s = world();
+            let (_, sword) = setup(&mut s);
+            carried_weight(&mut s, 1);
+            s.ui.input.selection = sword;
+            let e = run(s, &[], |st, io| async move { ready(&st, &io).await });
+            let s = e.state();
+            (e.finished(), s.objects.place(sword), s.inventory.equip(2))
+        });
+        assert!(finished, "{case}: Ready ends");
+        assert_eq!((place, hand), (IN_CONTAINER, 0), "{case}: nothing readied");
+    }
+}
+
+/// The parent word of a container on the map with y bit 5 set (what 0x9f, back to the parent,
+/// shows) is 0x8000 or more: the panel draws an object figure, no actor's.
+#[test]
+fn the_figure_of_a_container_word_past_0x8000_is_drawn() {
+    let mut s = world();
+    s.ui.panel.container = 0x8001;
+    let e = run(s, &[], |st, io| async move { draw_list(&st, &io).await });
+    assert!(e.finished());
+    assert_eq!(e.state().inventory.cells, [0; CELLS]);
+}
+
+#[test]
+fn the_holder_is_the_actor_at_the_end_of_the_chain() {
+    let mut s = world();
+    let outer = give(&mut s, BAG, IN_INVENTORY, 0, 1);
+    let inner = give(&mut s, BAG, IN_CONTAINER, 0, outer);
+    let sword = give(&mut s, SWORD, READIED, 0, 1);
+    assert_eq!(weight::holder(&s, inner), Some(1), "two bags deep");
+    assert_eq!(weight::holder(&s, sword), Some(1));
+    assert_eq!(weight::holder(&s, 1), Some(1), "an actor holds itself");
+    assert_eq!(weight::holder(&s, -1), None);
+    let mut m = s.clone();
+    let (bag, inside) = bag_on_the_map(&mut m);
+    assert_eq!(
+        (weight::holder(&m, bag), weight::holder(&m, inside)),
+        (None, None)
+    );
+    let (a, inside) = bags_in_a_cycle(&mut s);
+    assert_eq!(
+        (weight::holder(&s, a), weight::holder(&s, inside)),
+        (None, None)
+    );
+    // A parent word of 0x8000 or more (y bit 5 in a map location) ends the walk too.
+    let st = &mut s.objects.obj_status[inside as usize];
+    *st = (*st & !WHERE_MASK) | IN_CONTAINER;
+    s.objects.set_parent(inside, -0x7fff);
+    assert_eq!(weight::holder(&s, inside), None);
 }

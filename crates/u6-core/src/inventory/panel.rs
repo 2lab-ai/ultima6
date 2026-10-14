@@ -210,7 +210,8 @@ fn listed(s: &State, c: Slot) -> bool {
 /// Not in roster mode unless A4+0x1820 is set. The first row is pulled back by 4 while it is 4
 /// or more and the list no longer reaches past it. The weights are those 0x1112cc left, as whole
 /// stones over the strength of the actor that ultimately holds the container (×2 for the
-/// total).
+/// total); over 0 when no actor holds it (a container on the map, a broken chain: the original
+/// reads coordinates as parents there; `weight::holder`).
 pub async fn draw_list(state: &RefCell<State>, io: &Io) {
     let saved = {
         let s = state.borrow();
@@ -242,8 +243,18 @@ pub async fn draw_list(state: &RefCell<State>, io: &Io) {
             }
             c = next_child(&mut s.objects);
         }
-        let figure = if container < 0x100 {
-            let ty = s.actors.attrs.base_type_frame[container as usize] & 0x3ff;
+        // The original's signed test (0x111988) sends a word of 0x8000 or more (the parent word
+        // of a container on the map, 0x9f) to the actor table at a negative index; the port draws
+        // it as an object.
+        let figure = if (0..0x100).contains(&container) {
+            let ty = s
+                .actors
+                .attrs
+                .base_type_frame
+                .get(container as usize)
+                .copied()
+                .unwrap_or(0)
+                & 0x3ff;
             let base = s
                 .tables
                 .basetile
@@ -281,15 +292,8 @@ pub async fn draw_list(state: &RefCell<State>, io: &Io) {
     text_out(state, io, if first == 0 { 0x20 } else { 0x18 }).await;
     let (strength, equip, total) = {
         let s = state.borrow();
-        let mut owner = s.ui.panel.container as Slot;
-        while owner >= 0x100 {
-            owner = s.objects.parent(owner);
-        }
-        let strength = s
-            .actors
-            .attrs
-            .strength
-            .get(owner as usize)
+        let strength = weight::holder(&s, s.ui.panel.container as Slot)
+            .and_then(|a| s.actors.attrs.strength.get(a as usize))
             .copied()
             .unwrap_or(0);
         let inv = &s.inventory;
