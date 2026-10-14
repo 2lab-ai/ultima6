@@ -6,139 +6,161 @@ tags: [ultima6, rust, refactor, ai, modding]
 
 # 04 — P3 refactor: AI-driven NPCs, editable systems, mods
 
-Status: planned (rev 2, 2026-10-15 — rebuilt on the measured data-source inventory; rev 1 assumed
-the engine would be rewritten to read definitions). Starts after the M2 port is deployed (P2).
+Status: planned (rev 3, 2026-10-15 — trinity round 1 on rev 2: gpt-6-astra REVISE, fable REVISE;
+their MUST-FIX items are folded in below). Starts after the M2 port is deployed (P2).
 
 User command (verbatim, `browser-port/ssot.md`): "3. rust 코드를 고치기 좋도록 리팩토링 /
 3.a npc의 가능한 행동을 ai model에게 주고 응답 받을수 있도록 / 3.b 캐릭터 월드맵 등 전체적인
 시스템 쉽게 수정할 수 있도록 / 3.c 스팀 게임처럼 mod를 쉽게 만들수 있도록".
 
-## Invariant: the original stays the default and stays reproducible
+## Invariant
 
 With no mod and no AI brain, every P1/M2 parity receipt (headless frame sequences + state traces of
-03 §7 and the M2 receipts) stays bit-identical. Each P3 unit lands behind that gate.
+03 §7 and the M2 receipts) stays bit-identical. Units that change engine code paths (rules
+extraction, the NPC seam, codec unification) land only behind that gate.
 
-## Measured facts (inventory of integrate/m2 `b312930`, 2026-10-15)
+## Measured facts (integrate/m2 `b312930`, 2026-10-15)
 
-- Every game datum reaches the engine through `Files` (`crates/u6-core/src/files.rs`): either a
-  user data file (map, chunks, objblk??, objlist, schedule, basetile, tileflag, animdata, look.lzd,
-  converse.a/b, portrait.*, book.dat, tiles, bitmaps, MED modules) or the user's `game` executable
-  read at fixed image addresses (palette, spells/reagents, creature and combat tables, map/moongate
-  tables, object defs, inventory and UI tables, engine strings). Nothing reads `u` yet (the intro
-  merge adds it). No game text, art or bulk table is compiled in.
-- Compiled-in game knowledge exists only as object-type / tile / worktype IDs taken from compare
-  instructions of the original code (e.g. `combat/attack.rs:346` `MISSILE_WEAPONS`, the Use
-  command's 58-arm type switch in `usecmd/cases.rs`, ~150 scalar IDs).
-- `Files` is already a layer stack: `overlay` pushes a layer (`files.rs:84`), `get` searches
-  top-down; a test stacks two overlays (`files.rs:205`). Layers must be in place before boot
-  (`Engine::with_seed` loads every table, `engine.rs:297`). The save layer is pushed by
-  `saveload::attach`; the platforms build `base` then `save`.
-- Write-back exists for objblk (byte-identical on all 69 real blocks), objlist (core encoder) and
-  single schedule records. No writer exists for map, chunks, basetile, tileflag, animdata, look,
-  converse, portrait, book or tiles.
-- Non-party NPC names and shop prices live inside each NPC's converse bytecode (name in the script
-  header; prices as operands / script tables read by op 0xb4, `converse/eval.rs:209`).
-- B-class readers refuse any `game` that is not the measured build (length and hunk layout), so
-  executable data can only be patched in place.
+- Every game datum reaches the engine through `Files` (`u6-core/src/files.rs`): user data files
+  (map, chunks, objblk??, objlist, schedule, basetile, tileflag, animdata, look.lzd, converse.a/b,
+  portrait.*, book.dat, tiles, bitmaps, MED modules) or the user's `game` executable at fixed image
+  addresses (palette, spell / creature / combat / map / object / inventory / UI tables). No game
+  text, art or bulk table is compiled in.
+- Typed tables already exist after parsing (`state.rs:169-236`), but conversations, portraits,
+  books, bitmaps and songs are read lazily from `Files` after boot (`converse/script.rs:145,216`,
+  `main_loop.rs:267`, `magic/book.rs:176`, `sound/driver.rs:81`), so an edit must exist as bytes.
+- Compiled-in game knowledge = object-type / tile / worktype IDs from compare instructions
+  (e.g. `combat/attack.rs:346` `MISSILE_WEAPONS`, the 58-arm Use switch in `usecmd/cases.rs`,
+  ~150 scalar IDs).
+- `Files` is a layer stack (`overlay` `files.rs:84`, top-down `get`); layers precede boot
+  (`engine.rs:297`). `saveload::attach` puts `savegame/objlist` and `objblk??` on top
+  (`saveload/store.rs:67-72`), so a save shadows any mod edit of actors or object placement.
+- Writers: objblk (byte-identical on all 69 real blocks); objlist in two profiles — the shipped
+  file is 0x1D73 bytes (`u6-formats/src/objlist.rs:14`), the game's save writes 0x1C73
+  (`u6-core/src/saveload/objlist.rs`); single schedule records. The existing `lzw::encode`
+  reproduces every real LZW stream byte-for-byte (look.lzd 1/1, converse.a 97/97, converse.b
+  102/102, portrait.a/b/z 98/96/12; trinity measurement, counts only).
+- Conversations: every script's name is terminated by an opcode (no slack byte, 200/200); jump and
+  table operands are absolute script addresses (`converse/exec.rs:81`, `converse/eval.rs:211`);
+  op 0xb4 reads word tables that sit inside the code. Shop prices are script operands / such
+  tables. Renaming an NPC therefore means relocating the script.
 
-## Decision 1 — how definitions reach the engine (3b, 3c)
+## Decision 1 — definitions compile to files, plus a rules boundary (F+)
 
-| Option | What | Parity risk | Cost |
+The editable form of each original file or executable table is a definition; `build` serializes
+definitions back to the original byte formats into a `Files` layer, and the engine keeps reading
+files. Rewriting loaders to read definitions (R) is rejected: the lazy readers above would still need
+bytes, and it puts every loader behind the parity gate at once.
+
+F alone does not deliver "고치기 좋도록": compiled-in rules stay address hunts. So P3 also extracts
+rules into typed, immutable inputs (`CombatRules`, `UseRules`, …) whose defaults are read from the
+user's `game` at the instruction operand addresses (no content enters the source), consumed by the
+engine through one path that mod overrides also feed. First family: missile weapons
+(`MISSILE_WEAPONS`), then the Use switch, then the scalar IDs by module. Each family is one unit
+with a behaviour test (changing the definition changes the game) and the parity gate.
+
+Bounds of F (validated, never truncated): 256 actor slots, fixed map size, fixed executable
+layout. Out of scope for v1: new actor slots, larger maps, new Use behaviours or new combat
+algorithms.
+
+## Definition set
+
+| Definition | Source | Text form | Writer |
 |---|---|---|---|
-| **F. Definitions compile to files** (recommended) | A definition = the typed, editable form of one original file or one executable table. `export` parses the user's files into text; `build` serializes definitions back to the original byte formats into a `Files` layer. The engine keeps reading files exactly as today. | none without mods (engine untouched); with mods, only data differs | one writer per format (map, chunks, tileflag, basetile, animdata, look, converse, schedule, executable tables) |
-| R. Engine reads definitions | Rewrite every loader to read typed definitions; the original files become one importer. | every loader changes → whole parity suite at risk | rewrite of ~20 loaders plus the writers anyway for round trips |
-
-Recommendation: **F**. It keeps the invariant structurally true, turns acceptance 4 (byte-identical
-round trip) into the central mechanical gate, and makes a mod nothing more than a `Files` layer
-between `base` and `save`. The cost of F is bounded by the original formats (fixed actor count 256,
-fixed map size, fixed executable layout); edits that break those bounds are rejected by validation
-with the bound named, not silently truncated.
-
-Compiled-in IDs (class C) become editable in a second stage: each list moves to a `rules`
-definition whose default is read from the instruction operand in the user's `game` at its address
-(so no game content enters the source), one list per change, each behind the parity gate.
-
-## Definition set (F)
-
-| Definition | Original source | Text form | Writer needed |
-|---|---|---|---|
-| actors (party names, stats, alignment, flags, location, worktype) | objlist | `actors/<slot>.toml` | exists (core encoder) |
-| schedules | schedule | inside each actor file | whole-file writer |
+| actors (names, stats, alignment, flags, location, worktype) + schedules | objlist (both profiles) + schedule | `actors/<slot>.toml` | unify the two objlist codecs; whole-file schedule writer |
 | object placement | objblk?? | `world/objects/<block>.toml` | exists |
-| world map | map + chunks | `world/map.txt` (chunk ids as a grid) + `world/chunks.txt` | new |
-| object types | basetile + tileflag + animdata + look.lzd | `objects/types.toml` | new (look needs the LZW encoder to match byte-for-byte) |
-| conversations (NPC names, dialogue, prices) | converse.a/b | `converse/<slot>.u6c` (disassembled text) | assembler; round trip on all scripts |
-| spells, reagents, creatures, combat, moongates | `game` at fixed addresses | `rules/*.toml` | in-place patcher of the executable bytes |
-| art (tiles, portraits) | *.ega, portrait.* | PNG + palette map | later stage |
+| world map | map + chunks | `world/map.txt`, `world/chunks.txt` | inverse of the fixed-size parsers |
+| object types | basetile + tileflag + animdata + look.lzd | `objects/types.toml` | fixed-size writers; look via the existing LZW encoder |
+| conversations | converse.a/b | per script: name, price words and other addressable fields (v1); full text form (later) | disassembler + relocating rebuild |
+| spells, reagents, creatures, combat, moongates | `game` at fixed addresses | `rules/*.toml` | in-place patcher |
+| rules lifted from code | `game` instruction operands | `rules/*.toml` | in-place patcher of the operand |
 
-Exports are extracted content: they stay on the user's machine or in the user's browser; they are
-never fixtures, test inputs, build artifacts or published files. Tests use synthetic definitions.
+Unchanged files, compressed blocks and unknown regions are preserved byte-for-byte; a changed
+part is checked by value (decode(encode(v)) = v) and by game behaviour. Byte-identity gates need
+the user's files, so they are local-only tests that skip without the zip, like the existing
+real-data tests.
+
+## Rights: local export vs. shareable mods
+
+- `export` output is extracted content: it stays on the user's machine or browser; never a fixture,
+  test input, artifact or published file.
+- A shareable mod is a **sparse override** computed by `u6 pack <mod-dir>` against the author's
+  local base: stable id + changed field + new value only. It carries no original bytes, no old
+  values and no generated archives; the consumer's tool rebuilds bytes from the consumer's own
+  base. `pack` refuses a package field equal to the base value; a test proves packages contain no
+  base snapshot. Whole-script replacement is allowed only for author-written dialogue.
+- Conversation edits produce bytecode the existing interpreter runs; "data only" means no new
+  general plugin runtime (a later plugin ABI gets no host network import).
+- Package input limits: normalized paths, duplicate canonical names refused, bounded decompressed
+  size and file count, malformed packages fail with no change to the running game or saves.
+
+## Mods and saves
+
+- Load order: `base` ← `mods` (dependencies, then load-after, then id; the manager's user order
+  only reorders within those constraints) ← `save`. Field-level merge by stable id; conflicts and
+  dependency cycles are reported and refuse the set.
+- v1 lifecycle: changing the enabled set = reboot + start a new game, or resume a save made with the
+  same set. No hot reload, no migration of existing saves.
+- Each save carries a sidecar (in the save layer, ignored by the original) with the base
+  fingerprint, schema / engine version, and the ordered mod list (id, version, content hash). It is
+  committed in the same save generation as the state. Missing, changed or reordered mods refuse
+  the save before boot and list the difference; a save with no sidecar loads only with no mods.
 
 ## 3.a — NPC actions offered to an AI model
 
-Engine seam unchanged from rev 1 (03 §5): the NPC turn 0x1200b0 keeps one entry point and splits into
-Perceive (owned `NpcView`) → Enumerate (`legal_actions`, no RNG, no mutation) → Decide
-(`trait NpcBrain`, async, with a turn/state generation) → Validate + apply through the original
-action path. `OriginalBrain` reproduces the original choice and is the default; `ModelBrain` is
-opt-in per NPC or per area; invalid, oversized, timed-out or stale replies fall back to the
-original routine for that turn and are logged; a slow reply never stalls the game loop (bounded
-budget per turn, one request in flight per NPC).
+- **Seam (W7a):** the NPC turn 0x1200b0 splits into Perceive (owned `NpcView`) → Enumerate
+  (`legal_actions`, zero RNG draws, no mutation — tested) → Decide (`NpcBrain`) → Validate +
+  apply through the original action path. `OriginalBrain` reproduces the original choice including
+  its RNG draws (the worktype routines in `actors/npc.rs` mix choice and RNG), bit-identically.
+- **Model (W7b):** `ModelBrain` is opt-in per NPC or per area. A request carries a turn/state
+  generation; the turn waits at most its budget, then the original routine decides that turn
+  (rendering stays live throughout; turn order is unchanged); invalid, oversized, timed-out or stale
+  replies fall back and are logged; one request in flight per NPC; bounded reply size.
+- **Payload boundary:** structured state and legal action ids only; dialogue text only if enabled
+  per NPC; exact JSON shown before the first request and on demand; no endpoint preconfigured; keys
+  in memory unless the user keeps them; changing the destination or the field set asks again.
+- **Transport:** open security decision (trinity 2026-10-15, then the user): the page's CSP is
+  `connect-src 'self'`; candidates are `https:` + loopback for a user-entered endpoint, loopback
+  only, or native only. Whatever ships, the browser receipt is behavioural: AI off → zero
+  off-origin requests during play; AI on against a stub endpoint → only the allowed fields sent and
+  the chosen id applied; the `test-web.mjs` CSP assertion is replaced by that receipt.
 
-Payload boundary: structured state and legal action ids only; no file bytes, no dialogue text
-unless the user enables it per NPC; the exact JSON is shown before the first request and on
-demand; no endpoint is preconfigured; keys stay in memory unless the user chooses to keep them.
+## Code that is easy to change
 
-Transport (open — security decision, trinity in progress 2026-10-15): the public page's CSP is
-`connect-src 'self'`. Candidates: widen to `https:` + loopback for a user-entered endpoint; widen
-to loopback only; native runner only. The browser receipt is behavioural, not header-based: with
-AI off, zero off-origin requests during play; with AI on against a stub endpoint, exactly the
-allowed fields are sent and the chosen id is applied.
+- One codec per format, shared by engine, definitions and saves (objlist profiles unified; the
+  test-only `ConverseLib` / `Portraits` / `Books` either become the engine's readers or go).
+- Rules extraction as above.
+- Rights cleanup: the ~110 quoted game strings in `re/notes/functions-*.md` and module doc
+  listings become role descriptions.
 
-## 3.c — mod packages
+## Work units (one agent each)
 
-- Package: folder or zip with `mod.toml` (id, name, version, author, engine semver range,
-  depends / conflicts / load-after) plus any subset of definition files; data only (no script
-  runtime; a later plugin ABI gets no host network import).
-- Apply: base definitions ← mods in deterministic order (dependencies, load-after, id), field-level
-  merge by stable id (actor slot, object type, chunk, script slot, spell); conflicts reported; the
-  result is built to bytes and pushed as layer `mods` between `base` and `save`. Bare-name lookup
-  in `Files` means a mod may only contain the canonical paths the builder emits.
-- Saves record the enabled set (a sidecar file in the save layer the original ignores); a save
-  whose mods are missing refuses to load and lists them.
-- Tools: `u6 export <disks> <dir>`, `u6 build <dir>`, `u6 validate`, `u6 new-mod <id>`; the page
-  gets a mod manager (drop a mod zip, enable / disable / reorder, validation report).
-
-## 3 — "고치기 좋도록" (code that is easy to change)
-
-- One parser per format: delete the duplicates (u6-formats `ObjList` vs the core encoder;
-  `ConverseLib` / `Portraits` / `Books` used only by tests) — the engine and the definition layer use
-  the same parser and writer.
-- Rights cleanup of the notes and module docs: replace the ~110 quoted game strings in
-  `re/notes/functions-*.md` and module doc listings with role descriptions.
-- Module docs list the definitions each module reads, so a change to a rule starts from its
-  definition, not from an address hunt.
-
-## Work units (one agent each, disjoint files)
-
-| WU | Scope | Gate |
-|---|---|---|
-| P3-W1 | map + chunks writer and text form | export → build = identical bytes on the user's files |
-| P3-W2 | basetile, tileflag, animdata, look.lzd writers | same |
-| P3-W3 | converse disassembler / assembler (`.u6c`) | every script round-trips byte-identically; the interpreter runs the rebuilt bytes with identical receipts |
-| P3-W4 | executable tables as `rules/*.toml` (in-place patch) | patch of unchanged values = identical `game` bytes |
-| P3-W5 | `u6-defs` crate + CLI (export / build / validate / new-mod), schedule writer, actor files | full export → build of every file the engine reads = identical bytes |
-| P3-W6 | mod packages, `mods` layer, save record, page mod manager | acceptance 3 |
-| P3-W7 | NPC brain seam + OriginalBrain + ModelBrain + transport | acceptance 1, 2 |
-| P3-W8 | duplicate-parser deletion, rights cleanup of notes, module docs | parity suite identical |
-
-W1–W4 and W7–W8 run in parallel; W5 needs W1–W4; W6 needs W5.
+| WU | Scope | Needs | Gate |
+|---|---|---|---|
+| W0 | contracts: definition / override schema, stable ids, codec API, save sidecar, load-order and conflict rules | — | spec review |
+| W1 | map + chunks + basetile + tileflag + animdata writers and text forms | W0 | local byte-identity |
+| W2 | objlist codec unification (both profiles) + schedule writer + actor files | W0 | parity suite + byte-identity of both profiles |
+| W3a | converse disassembler (opcode table from the interpreter's arms; data-in-code tables kept as data) + relocating rebuild + name / price edits | W0 | identity rebuild of every script, **and** every name lengthened by N bytes → interpreter receipts identical except the names |
+| W4 | executable tables as `rules/*.toml` (in-place patch) | W0 | unchanged values → identical `game` bytes |
+| W5 | `u6-defs` library (export / build / merge, wasm-callable) + CLI adapter (export, build, validate, new-mod, pack) | W1–W4 | full export → build identical for every file the engine reads |
+| W6a | mod resolver + save sidecar + package limits | W5 | acceptance 3–5 |
+| W6b | page mod manager + end-to-end in the browser | W6a | acceptance 3 in the browser |
+| W7a | NPC seam + OriginalBrain | — | acceptance 1 + RNG-free enumeration test |
+| W7b | ModelBrain + budget + transport | W7a, transport decision | acceptance 2 |
+| W8 | rules extraction, one family per dispatch (missile weapons first) | W4 | behaviour test + parity |
+| W9 | rights cleanup of notes and docs | — | grep: no quoted game strings |
+| W3b | full conversation text form | W3a | later |
 
 ## Acceptance (P3)
 
 1. No mods, OriginalBrain: all P1/M2 receipts identical.
-2. An NPC set to `ModelBrain` with a stub endpoint receives its legal list; its chosen action is
+2. An NPC on `ModelBrain` with a stub endpoint receives its legal list; its chosen action is
    applied; invalid / timeout / stale replies fall back and are logged.
-3. A sample mod (synthetic values only) renames an NPC, changes a shop price and moves a chest;
-   enabling it changes those in game without rebuilding the engine; disabling restores the
-   original; a save made with it refuses to load without it.
-4. Export → build of the base game is byte-identical for every file the engine reads.
+3. A sample mod made with `pack` from synthetic values renames an NPC, changes a shop price, moves
+   a chest, changes one map tile and one lifted rule; in a new game with it enabled all five show;
+   disabled (new game) the original returns.
+4. Two non-conflicting mods compose; two conflicting mods are refused with the field named; a
+   malformed package is refused with no change.
+5. A save made with a mod set resumes with that set; with a mod missing, changed or reordered it is
+   refused before boot with the difference listed; a save without a sidecar loads only with no mods.
+6. Export → build of the base game is byte-identical for every file the engine reads.
