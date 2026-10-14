@@ -39,9 +39,13 @@ one at `0x00161BDE`. Both run the same code from `0x00153008`.
   `0x0014F262`, a stub that jumps to `0x00162358`. That routine copies the 32 words into the
   copper colour moves (stride 4, `dbf` count 0x1F).
 - **No other writer**: a byte search of the image finds the `-0x35C4(A4)` displacement once,
-  at `0x0014F03A`. `xrefs` to the copper colour area returns only `0x00162358`. No code writes
-  `0xDFF180..` directly (the only custom-register write besides COP1LC is `BEAMCON0` in
-  `0x00162294`). So the palette is static: **no day/night palette, no colour cycling**. The
+  at `0x0014F03A`. A scan of the image for every absolute longword into the copper colour moves
+  (`0x001519F2..0x00151B05`) or the custom chips (`0x00DFF000..0x00DFFFFF`) finds only these:
+  `0x00162358` (colours), `0x001622D6` and `0x0016236A` (sprite pointer, bitplane pointers,
+  COP1LC), `BEAMCON0` in `0x00162294`, and DMACON/VHPOSR/audio registers in hunk 0. There is
+  also a stored copper-list pointer at `0x001624A6` (no absolute or decompiled reference), and a custom-chip base
+  at `A4 − 0x35C8` that is used only to restore COP1LC/COPJMP1 on exit (`0x0014EE8A`,
+  `0x0014EE94`). So the palette is static: **no day/night palette, no colour cycling**. The
   animation effects come from §6 instead.
 - **Shape**: entry 0 is black and entry 15 is white. Entries 0..15 are an EGA-like set; 16..31
   are extra shades (skin, browns, greys, reds). Entries 17..19 double as the sprite (pointer)
