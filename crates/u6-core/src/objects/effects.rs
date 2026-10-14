@@ -205,30 +205,4 @@ pub fn parse_answer(_text: &str, _mode: i16) -> i16 {
     todo_stub!("0x128b98 parse a typed number or direction", -2)
 }
 
-/// Stub of 0x131646 (objects: create a monster of `kind` at (x, y, z) with stats)
-///
-/// Stub contract: takes a temporary-actor slot (0x10bec8), sets stats from the monster tables
-/// (0x131196 / 0x1311d2, combat 0x122176), its frame and extra parts, and gives it equipment
-/// (0x13121a). Fallback -1 (no monster). Reached by random encounters (0x1319b2) only.
-pub fn spawn_monster(_s: &mut State, _kind: u16, _x: u16, _y: u16, _z: u16) -> Slot {
-    todo_stub!("0x131646 create a monster with stats and equipment", -1)
-}
-
-/// Stub of 0x13121a (objects: give a new monster its equipment from the A4-0x7cbe table)
-///
-/// Stub contract: RNG-weighted items into the monster's inventory. Fallback: none given. Reached
-/// only through 0x131646.
-pub fn equip_monster(_s: &mut State, _monster: Slot, _index: i16) {
-    todo_stub!("0x13121a give a new monster its equipment", ())
-}
-
-/// Stub of 0x1319b2 (objects: hatch an egg: spawn its monsters, "Shamino says, I hear something")
-///
-/// Stub contract: called by map 0x1321dc for every egg (type 0x14f) on the leader's level in the
-/// 40 × 40 window each time the window is rebuilt (0x108d10, i.e. whenever walking shifts the
-/// window), unless A4-0x7afb is set; with RNG checks it spawns the egg's monsters out of view
-/// (0x131646) and may print Shamino's warning. Fallback: no monster and no RNG draw. Reached on
-/// the M1 walk path: RNG parity diverges at the first window shift with an egg in range.
-pub fn hatch_egg(_s: &mut State, _egg: Slot) {
-    todo_stub!("0x1319b2 hatch an egg (spawn its monsters)", ())
-}
+pub use super::commands::{equip_monster, hatch_egg, spawn_monster};

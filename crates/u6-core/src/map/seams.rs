@@ -101,10 +101,9 @@ pub(crate) fn build_view_objects(state: &mut State) {
     crate::objects::build_draw_lists(state);
 }
 
-/// Offer egg `id` to hatch (owner `objects/`, 0x1319b2: may create monsters). Reached when an
-/// egg is in the window. Fallback: nothing hatches.
-pub(crate) fn hatch_egg(_state: &mut State, _id: ObjectId) {
-    todo_stub!("0x1319b2 hatch an egg", ())
+/// Offer egg `id` to hatch (owner `objects/`, 0x1319b2: may create monsters).
+pub(crate) fn hatch_egg(state: &mut State, id: ObjectId) {
+    crate::objects::hatch_egg(state, id.slot());
 }
 
 /// A byte of the objlist block A4-0x7b84 (`actors.objlist_tail`, objlist 0x1BF1..0x1C73) that
