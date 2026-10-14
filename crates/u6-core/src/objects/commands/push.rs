@@ -40,15 +40,6 @@ fn leader(s: &State) -> Slot {
     Slot::from(p.members[usize::from(p.leader_index).min(15)])
 }
 
-/// Original: 0x115c06 (magic: does `target` resist being pushed by `pusher`: one draw 1..=30
-/// below (half the target's strength − the pusher's + 30) / 2, effective strengths 0x121fca)
-pub fn resists_push(s: &mut State, pusher: Slot, target: Slot) -> bool {
-    let r = s.rng.range(1, 30) as i16;
-    let half = (crate::actors::leaves::strength(s, target as u16) as i16) / 2;
-    let p = crate::actors::leaves::strength(s, pusher as u16) as i16;
-    r < (half - p + 30) / 2
-}
-
 /// Original: 0x12adc4 (objects: the outermost object holding `obj` (the one on the map))
 pub fn outermost(s: &State, obj: Slot) -> Slot {
     let mut o = obj;
@@ -98,7 +89,7 @@ fn reset_pointer(s: &mut State) {
 /// Nothing selected or the shown container: "nothing". The name. On the map: within one tile
 /// of the leader ("Out of range!"), the leader turns to it, "To " and a direction key (any
 /// other key: "nowhere."), the direction's name. A weightless thing or a dragon part: "Not
-/// possible". An actor resists (0x115c06), and the leader or an actor lying down (frame & 3 =
+/// possible". An actor resists (magic 0x115c06), and the leader or an actor lying down (frame & 3 =
 /// 3, not type 0x153) cannot be pushed: "Failed". Else 5 movement points, and it goes into a
 /// container ahead it fits in (weight below 0xff), or, unless blocked ("Blocked"; 0x12acc0),
 /// one tile on; a chair turns to face the push instead when it does not already. Carried
@@ -187,7 +178,7 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
     if sel < 0x100 {
         let failed = {
             let mut s = state.borrow_mut();
-            resists_push(&mut s, pusher, sel)
+            crate::magic::strength_contest(&mut s, pusher as u16, sel as u16)
                 || sel == pusher
                 || (s.objects.tf(sel) >> 10 & 3 == 3 && kind != 0x153)
         };

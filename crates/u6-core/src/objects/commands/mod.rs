@@ -40,7 +40,7 @@ pub use horse::{dismount, mount_horse, parse_answer};
 pub use keys::{fails_roll, in_type_list, pick_breaks, toggle_lit, use_key};
 pub use light::{douse_or_light, light_torch, use_up, use_up_one};
 pub use look::{is_book, is_readable, is_sign, look, read_book};
-pub use push::{outermost, push, push_blocked, resists_push};
+pub use push::{outermost, push, push_blocked};
 pub use world::{
     article, blast_doors, chest, door, explode_keg, is_closed_container, name_prefix, object_under,
     search, spring_trap,

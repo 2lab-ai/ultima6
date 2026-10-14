@@ -492,7 +492,10 @@ mod tests {
             [Key::Char('\u{13}'), Key::Char('\u{12}')].map(Token::Key)
         );
         assert!(args(&["--keys", "ctrl+1"]).is_err());
-        assert_eq!(args(&["--keys", "tab"]).unwrap().keys, [Token::Key(Key::Char('\t'))]);
+        assert_eq!(
+            args(&["--keys", "tab"]).unwrap().keys,
+            [Token::Key(Key::Char('\t'))]
+        );
         assert!(args(&["--seed", "70000"]).is_err());
         assert_eq!(args(&[]).unwrap().frames, 60);
     }

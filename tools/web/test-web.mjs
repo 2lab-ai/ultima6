@@ -258,13 +258,16 @@ async function walkAndSave(page) {
   await h.sleep(2500); // the boot reaches the prompt
   const start = (await h.state(page)).leader;
   await page.keyboard.press('ArrowRight');
-  await h.sleep(3000); // the world turn plays the start fight's hits
+  // The step happens when the loop reads the key, after the start fight's world turns.
+  await page.waitForFunction((at) => document.getElementById('screen').dataset.leader !== at,
+    start, { timeout: 30_000 });
   const moved = (await h.state(page)).leader;
-  assert.notEqual(moved, start, 'the party moved');
+  // Queued in order: the loop reads Ctrl-S at its prompt, then the question reads Y.
   await page.keyboard.press('Control+s');
   await h.sleep(400);
   await page.keyboard.press('y');
-  await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 30_000 });
+  await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
+  assert.equal((await h.state(page)).leader, moved, 'the save is where the party stands');
   await h.waitSettled(page);
   assert.match((await h.state(page)).status, /Saved in this browser \(\d+ files\)/);
   return { start, moved };

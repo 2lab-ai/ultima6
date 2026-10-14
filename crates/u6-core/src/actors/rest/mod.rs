@@ -281,7 +281,7 @@ pub async fn repair_hull(state: &RefCell<State>, io: &Io) {
 }
 
 /// The first camp check that fails, in 0x127b1a's order.
-fn refusal(s: &mut State) -> Option<u32> {
+pub(crate) fn refusal(s: &mut State) -> Option<u32> {
     if s.actors.tail(tail::COMBAT_MODE) != 0 {
         return Some(STR_COMBAT);
     }

@@ -483,7 +483,11 @@ fn a_strong_target_resists_a_weak_pusher() {
     s.rng = crate::rng::Rng::seeded(7);
     let mut r = s.rng;
     let roll = r.range(1, 30) as i16;
-    assert_eq!(resists_push(&mut s, 1, 2), roll < (60 / 2 - 5 + 30) / 2);
+    // 0x115c06 is magic's port (hunk 11); the push calls it.
+    assert_eq!(
+        crate::magic::strength_contest(&mut s, 1, 2),
+        roll < (60 / 2 - 5 + 30) / 2
+    );
     assert_eq!(s.rng, r, "one draw");
 }
 
