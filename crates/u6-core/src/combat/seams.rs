@@ -1,109 +1,32 @@
 //! Calls from the combat code into functions other modules own. Ported owners are called
-//! directly (integration M2: objects 0x10e596, 0x12f8fe); the others are the narrowest signature
-//! the combat code needs, a `todo_stub!` with its contract and an explicit fallback. Proposed
-//! owner in brackets.
+//! directly (integration M2: objects 0x10e596, 0x12f8fe; the pointer merge: graphics 0x15265a,
+//! 0x152800, 0x152876, 0x1521f4); the others are the narrowest signature the combat code needs,
+//! a `todo_stub!` with its contract and an explicit fallback. Proposed owner in brackets.
 
 use crate::engine::with_current_io;
 use crate::objects::{self, Slot};
 use crate::state::State;
 use crate::todo_stub;
 
-/// Sprite slots of the flight drawing (graphics hunk 26: the 16 prepared sprites at
-/// A4-relative 0x155584 + 0x6900, their "background saved" bytes 0x1525c4 and the 8 saved
-/// backgrounds 0x14df70). Port-only state of the fallbacks below.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Sprites {
-    /// Tile prepared in each slot (0x15265a), 0 = none.
-    pub tiles: [u16; 16],
-    /// 0x1525c4: the slot holds a saved background (0x152800 sets it, 0x15265a clears it).
-    pub saved: [bool; 16],
-    /// 0x14df70: 24 × 16 pixels under each of the first 8 slots.
-    pub under: Vec<Vec<u8>>,
-}
-
-impl Default for Sprites {
-    fn default() -> Self {
-        Self {
-            tiles: [0; 16],
-            saved: [false; 16],
-            under: vec![vec![0; 24 * 16]; 8],
-        }
-    }
-}
-
 /// [graphics] 0x15265a(slot, tile, angle, cx, cy): build sprite `slot` from object tile `tile`
-/// turned by `angle` (0..127 = a full turn) about (cx, cy) in eighths of a pixel. Contract: the
-/// slot's background flag is cleared. Fallback: the tile unturned.
+/// turned by `angle` (0..127 = a full turn) about (cx, cy); the slot's background flag is
+/// cleared: [`crate::gfx::sprite::prepare`].
 pub(crate) fn sprite_prepare(s: &mut State, slot: u16, tile: u16, angle: u16, cx: u16, cy: u16) {
-    let _ = (angle, cx, cy);
-    let i = usize::from(slot & 0xf);
-    s.combat.sprites.tiles[i] = tile;
-    s.combat.sprites.saved[i] = false;
-    todo_stub!(
-        "0x15265a build a turned missile sprite (fallback: unturned tile)",
-        ()
-    )
-}
-
-/// The 24 × 16 back-buffer block 0x152800 / 0x152876 address for a sprite centred on (x, y):
-/// byte column (x − 8) / 8, rows y − 8 .. y + 8.
-fn block(x: u16, y: u16) -> (usize, usize) {
-    (
-        usize::from(x.wrapping_sub(8) >> 3) * 8,
-        usize::from(y.wrapping_sub(8)),
-    )
+    crate::gfx::sprite::prepare(&mut s.gfx, slot, tile, angle, cx as i16, cy as i16);
 }
 
 /// [graphics] 0x152800(slot, x, y): save the back-buffer block under a sprite centred on
-/// (x, y) and mark the slot as holding it. Fallback: the same copy on the port's buffers.
+/// (x, y) and mark the slot as holding it: [`crate::gfx::sprite::save`].
 pub(crate) fn sprite_save(s: &mut State, slot: u16, x: u16, y: u16) {
-    let i = usize::from(slot & 7);
-    let (bx, by) = block(x, y);
-    let under = &mut s.combat.sprites.under[i];
-    with_current_io(|io| {
-        io.draw_back(|fb| {
-            for r in 0..16 {
-                for c in 0..24 {
-                    under[r * 24 + c] = fb.get(bx + c, by + r).unwrap_or(0);
-                }
-            }
-        })
-    });
-    s.combat.sprites.saved[usize::from(slot & 0xf)] = true;
-    todo_stub!(
-        "0x152800 save the background under a sprite (fallback: port copy)",
-        ()
-    )
+    let gfx = &mut s.gfx;
+    with_current_io(|io| io.draw_back(|back| crate::gfx::sprite::save(gfx, back, slot, x, y)));
 }
 
 /// [graphics] 0x152876(slot, x, y): a slot holding a saved background puts it back; any other
-/// slot draws its sprite centred on (x, y) into the back buffer. Fallback: the background copy,
-/// or the slot's tile blitted at (x − 8, y − 8).
+/// slot draws its sprite centred on (x, y) into the back buffer: [`crate::gfx::sprite::draw`].
 pub(crate) fn sprite_draw(s: &mut State, slot: u16, x: u16, y: u16) {
-    let i = usize::from(slot & 0xf);
-    let saved = s.combat.sprites.saved[i];
-    let tile = s.combat.sprites.tiles[i];
-    let (bx, by) = block(x, y);
-    let st = &*s;
-    with_current_io(|io| {
-        io.draw_back(|fb| {
-            if saved {
-                let under = &st.combat.sprites.under[i & 7];
-                for r in 0..16 {
-                    for c in 0..24 {
-                        fb.set(bx + c, by + r, under[r * 24 + c]);
-                    }
-                }
-            } else if tile != 0 {
-                let (dx, dy) = (x.wrapping_sub(8), y.wrapping_sub(8));
-                crate::gfx::blit::blit_back(&st.gfx, fb, tile, dx, dy);
-            }
-        })
-    });
-    todo_stub!(
-        "0x152876 draw or restore a sprite (fallback: port blit)",
-        ()
-    )
+    let gfx = &s.gfx;
+    with_current_io(|io| io.draw_back(|back| crate::gfx::sprite::draw(gfx, back, slot, x, y)));
 }
 
 /// [objects] 0x10c6a6(actor): the remains of a dead actor: a map object of its type + frame
@@ -207,17 +130,14 @@ pub(crate) fn flood_sight(s: &mut State, _x0: i16, _y0: i16) {
     )
 }
 
-/// [graphics] 0x1521f4(x0, y0, x1, y1): fill the rectangle with the plot colour (into the back
-/// buffer while A4-0x6179 is set). Fallback: the same fill pixel by pixel through 0x152188.
+/// [graphics] 0x1521f4(x0, y0, x1, y1): fill the rectangle with the plot colour, into the back
+/// buffer while A4-0x6179 is set: [`crate::gfx::blit::fill_rect`].
 pub(crate) fn fill_rect(s: &mut State, x0: i16, y0: i16, x1: i16, y1: i16) {
     let gfx = &s.gfx;
+    let (x0, y0, x1, y1) = (x0 as u16, y0 as u16, x1 as u16, y1 as u16);
     with_current_io(|io| {
         let fill = |fb: &mut u6_render::Framebuffer| {
-            for y in y0..=y1 {
-                for x in x0..=x1 {
-                    crate::gfx::blit::plot(gfx, fb, x as u16, y as u16);
-                }
-            }
+            crate::gfx::blit::fill_rect(gfx, fb, x0, y0, x1, y1);
         };
         if gfx.plot_back {
             io.draw_back(fill);
@@ -225,5 +145,4 @@ pub(crate) fn fill_rect(s: &mut State, x0: i16, y0: i16, x1: i16, y1: i16) {
             io.draw(fill);
         }
     });
-    todo_stub!("0x1521f4 fill a rectangle (fallback: pixel fill)", ())
 }

@@ -1,8 +1,9 @@
 //! Calls from the spell code into routines other units own: combat (hunk 13: damage, missiles,
 //! experience, hostility, the wound line; hunk 18: the flights), objects (hunk 15), Use's
 //! levers, inventory (hunk 8) and a few graphics helpers. Each is the narrowest signature the
-//! spells need; since the M2 integration the ported ones call their owner, the rest (graphics
-//! 0x1521f4, 0x132338, the hail sprites) keep a stub contract and an explicit fallback.
+//! spells need; since the M2 integration the ported ones call their owner (graphics 0x1521f4
+//! since the pointer merge), the rest (0x132338, the hail sprites) keep a stub contract and an
+//! explicit fallback.
 
 use std::cell::RefCell;
 
@@ -11,19 +12,13 @@ use crate::objects::Slot;
 use crate::state::State;
 use crate::todo_stub;
 
-/// Stand-in for graphics 0x1521f4 (fill the inclusive pixel rectangle in the plot colour,
-/// 0x152174; XOR when A4-0x617c is set, into the back buffer when A4-0x6179 is set), drawn
-/// pixel by pixel through the ported plot 0x152188, which applies both flags. Owner: gfx.
+/// [gfx] 0x1521f4 (fill the inclusive pixel rectangle in the plot colour, 0x152174; XOR when
+/// A4-0x617c is set, into the back buffer when A4-0x6179 is set):
+/// [`crate::gfx::blit::fill_rect`].
 pub(crate) fn fill_rect(s: &mut State, io: &Io, x0: u16, y0: u16, x1: u16, y1: u16) {
-    let (xa, xb) = (x0.min(x1), x0.max(x1));
-    let (ya, yb) = (y0.min(y1), y0.max(y1));
     let gfx = &s.gfx;
     let draw = |fb: &mut u6_render::Framebuffer| {
-        for y in ya..=yb {
-            for x in xa..=xb {
-                crate::gfx::blit::plot(gfx, fb, x, y);
-            }
-        }
+        crate::gfx::blit::fill_rect(gfx, fb, x0, y0, x1, y1);
     };
     if gfx.plot_back {
         io.draw_back(draw);

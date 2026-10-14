@@ -86,7 +86,7 @@ Totals: functions 599: ported 491, partial 6, stubbed 6, replaced 84, planned 5,
 | 0x103f64 | ui | M | `ui/panels.rs::redraw_panel` | ported |
 | 0x103fd4 | main | M | `main_loop/main_hunk.rs::switch_leader` | ported |
 | 0x104094 | main | M | `main_loop/main_hunk.rs::end_solo` | ported |
-| 0x104140 | main | M | `main_loop/commands.rs:366 in dispatch` | stubbed |
+| 0x104140 | main | M | `main_loop/commands.rs:363 in dispatch` | stubbed |
 | 0x1041d8 | main | M | `main_loop/commands.rs::command_loop` | ported |
 | 0x105016 | ui | M | `inventory/portrait.rs::direction_to` | ported |
 | 0x1051a6 | ui | M | `ui/pointer.rs::update_shape` | ported |
@@ -507,7 +507,7 @@ Totals: functions 599: ported 491, partial 6, stubbed 6, replaced 84, planned 5,
 | 0x131646 | unknown | M | `objects/commands/eggs.rs::spawn_monster` | ported |
 | 0x1319b2 | objects | M | `objects/commands/eggs.rs::hatch_egg` | ported |
 | 0x1321dc | map | M | `map/region.rs::check_eggs` | ported |
-| 0x132338 | ui |  | `inventory/seams.rs:15 in flash_actor`; `magic/seams.rs:45 in flash_actor`; `usecmd/seams.rs:184 in flash_actor` | stubbed |
+| 0x132338 | ui |  | `inventory/seams.rs:15 in flash_actor`; `magic/seams.rs:40 in flash_actor`; `usecmd/seams.rs:184 in flash_actor` | stubbed |
 | 0x13242e | ui | M | `combat/present.rs::extend_dirty` | ported |
 | 0x1324ae | ui | M | `combat/present.rs::draw_borders` | ported |
 | 0x1325e4 | ui | M | `combat/present.rs::redraw_over` | ported |

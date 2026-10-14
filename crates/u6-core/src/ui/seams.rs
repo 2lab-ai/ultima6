@@ -106,14 +106,11 @@ pub(crate) fn game_string(io: &Io, addr: u32) -> Vec<u8> {
 }
 
 /// 0x12ba36(chest) (objects: spring the trap in a chest: acid, poison, bomb or gas, then remove
-/// the trap). The objects port's stub takes the trap object itself, so this passes the trap
-/// 0x10b18c finds in the chest (type 0x151, quality 0x16), as 0x12ba36 does at its end
-/// (0x116526).
+/// the trap): [`crate::objects::spring_trap`]. 0x10619c passes the chest itself (0x10643c: D0 =
+/// A4-0x2f04, the selection); 0x12ba36 finds the trap in it (0x116526 with type 0x151, quality
+/// 0x16, at 0x12bb8e..0x12bb94).
 pub(crate) fn spring_trap(s: &mut State, chest: i16) {
-    let trap = crate::objects::find_child(&mut s.objects, chest, 0x151, 0x16);
-    if trap >= 0 {
-        crate::objects::spring_trap(s, trap);
-    }
+    crate::objects::spring_trap(s, chest);
 }
 
 /// [magic] A4+0x181a + `tab` (bytes: the spellbook's page tabs: previous circle, previous page,
