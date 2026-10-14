@@ -9,10 +9,13 @@ tags: [ultima6, oracle, amiga, aros, vamiga, emulator]
 Measured 2026-10-14 on macOS 26.6.2 arm64. Harness = `tools/oracle/`. Everything that touches game
 data stays in `~/Games/ultima6/oracle/` (disks, extracted tree, shots, logs).
 
-**Result in one line:** under the AROS ROM, the original disk 1 boots and the original installer
-runs to completion (HD path), but the game itself crashes about 32 s into `ultcli`, before it
-draws its first picture. No title screen or Britannia view can be captured with AROS. That is the
-blocking point (details in §5).
+**Result:** under the AROS ROM, the original installer runs to completion on both of its paths.
+On the **installer-made floppy set** (PROGRAM/POPULACE/PLAYER/PORTRAIT in DF0-DF3) the game boots
+by its own startup-sequence and shows the **"ORIGIN Presents" title** (about frame 3606) and the
+**first intro scene** (the armchair/TV room, about frame 3859). From about frame 4114 the picture is
+a garbled composite. It stays unchanged, music keeps playing, and SPACE, ESC and RETURN change
+nothing up to frame 7158. No main menu or Britannia view was reached. The HD-install layout
+(volume HDFs) crashes earlier, about 32 s in, before any picture. Details in §5.
 
 ## 1. Emulator, versions, sources
 
@@ -42,6 +45,12 @@ That leaves netplay as the only injection path. To remove it: `brew uninstall fs
   "REQUIRES A PAL MACHINE RUNNING AT 50HZ" text.
 - `installu6` asks "(H)ard drive or (F)loppies". The floppy path builds four disks with the labels
   PROGRAM, POPULACE, PLAYER, PORTRAIT. The HD path asks for a directory (example `DH0:ULTIMA6`).
+- The floppy path (measured, §3) writes `PROGRAM:s/startup-sequence` = `ultima6` / `endcli`
+  (= disk 1's `start`), and `PROGRAM:ultima6` is the **CLI launcher**: byte-identical to the
+  decrunched `ultcli`. The HD path installs the Workbench `ultima6` instead (9,212 bytes).
+  Per-disk split: PROGRAM = launcher, `u`, intro/title/menu `.new`, `.MOD` music, `c/endcli`;
+  POPULACE = `book.dat`, `converse.*`, `portrait.*`, `*.bmp`; PLAYER = map/tiles/`look.lzd`;
+  PORTRAIT = `game`, `end*`, `tileflag`, `schedule`, `u6.ch`, `u6.set`, `basetile`, `anim*`, `paper.bmp`.
 
 ## 3. What boots (all under AROS)
 
@@ -50,15 +59,19 @@ That leaves netplay as the only injection path. To remove it: `brew uninstall fs
 | disk1 in DF0 | the installer console window appears at about frame 2250 (45 s) | `shots/probe/t45.png` `9309e99d…`; `shots/install/01-prompt.hires.png` `6b6867d8…` |
 | floppy install, blank OFS ADFs from `mkadf.py` | asks for and fills all four disks (PROGRAM, POPULACE, PLAYER, PORTRAIT), then keeps copying ("Copying PLAYER:maptiles.ega"). Not run to the end; disks not exported | `shots/install/07-disk4.hires.png` `86dd7c64…`, `09-later.hires.png` `8c467c5f…` |
 | HD install (`h`, `DH0:ULTIMA6`, `y`) on a blank 16 MB FFS HDF | completes: "Uncompressing game", copies `savegame/*`, then the window closes (empty Workbench screen, texhash 34535989) | `shots/hd/02-path-prompt.hires.png` `204fe891…`, `04-after-copy` `99f12c12…`, `05-warp` `52cfb642…`, `06-done` `130e32ea…` |
-| installed tree | 125 files, 2,461,018 bytes. 53 top-level files and all 70 `savegame/` files (OBJBLK* + objlist) are byte-identical to the PP20-unpacked set in `~/Games/ultima6/unpacked`. Extras: `gypsya.new`, `ULTIMA6.info`. Not installed: `installu6`, `ultcli`, `start`, `s/`, `c/` | `disks/u6-installed.hdf` (manual run) `ca6c61b4…` |
+| installed tree | 125 files, 2,461,018 bytes. 53 top-level files and all 70 `savegame/` files (OBJBLK* + objlist) are byte-identical to the PP20-unpacked set in `~/Games/ultima6/unpacked`. Extras: `gypsya.new`, `ULTIMA6.info`. Not installed: `installu6`, `ultcli`, `start`, `s/`, `c/` | manual run: `prev/u6-installed.hdf` `ca6c61b4…`; scripted run: `disks/u6-installed.hdf` `49fca0cd…` |
 | **`gypsya.new` defect** | the installer writes it as 72,880 bytes that are all zero except one long at offset 4 (`$000925D0` in one run, `$00092668` in the other; looks like a memory address). `gypsy.new` (same size) has 70,751 nonzero bytes. [추정] it should be a copy of `gypsy.new`, and AROS is what breaks it. Replacing it with `gypsy.new` does not change the crash below (`diag/gypsy`) | — |
 | scripted `run.sh build` (exit 0) | the same prompts (installer prompt texhash 1482153914), install finished in 13,641 frames. The extracted tree is identical to the manual run's except bytes 4-7 of `gypsya.new` | `shots/build/01..03*.hires.png` |
 | `ultima6` from a CLI startup-sequence | prints "Must be run from Workbench, with no other windows open" and returns (rc 0). The AROS ROM alone boots to a CLI, not a Workbench | `shots/game/diag-10.hires.png` `60121032…` |
 | `ultcli` from `DH1:ULTIMA6` | "ultcli: object not found" (the HD install does not copy it) | `boot-tree/o2.txt` |
-| `ultcli` with volumes PROGRAM/POPULACE/PLAYER/PORTRAIT on DH0-DH3 (`run.sh build` layout) | grey AROS screen, then black from about frame 500 (texhash 2847054613), then a crash at about frame 1631 (§5). No picture is ever drawn; SPACE/RETURN/ESC change nothing | `shots/game/v4-10.png` = `v4-60.png` `cda9039b…`; `run.sh boot` default run: `shots/boot-20261014-160059/t10.png` = `t30.png` `cda9039b…`, `t60.png` `fb75b891…` (still black, shorter display window; [추정] from post-crash register writes) |
+| `ultcli` with volumes PROGRAM/POPULACE/PLAYER/PORTRAIT on DH0-DH3 (`run.sh build` layout; `v4-*` shots from the manual-run volumes now in `prev/`, `boot-20261014-160059` from the scripted `disks/`) | grey AROS screen, then black from about frame 500 (texhash 2847054613), then a crash at about frame 1631 (§5). No picture is ever drawn; SPACE/RETURN/ESC change nothing | `shots/game/v4-10.png` = `v4-60.png` `cda9039b…`; `run.sh boot` default run: `shots/boot-20261014-160059/t10.png` = `t30.png` `cda9039b…`, `t60.png` `fb75b891…` (still black, shorter display window; [추정] from post-crash register writes) |
+| floppy install, sources on HDFs (INSTALL/DATA1/DATA2 volume HDFs from `files/d*`, the four blanks in DF0, then moved to DF1-DF3 after each label) | completes. Copying takes 32,600 frames (about 11 min, real floppy speed), then the empty Workbench screen. Result has **defects**: `PLAYER:map`, `PORTRAIT:end`, `PORTRAIT:end.new` are 0 bytes; `POPULACE:converse.a` is 160,175 bytes and differs from the 162,615-byte original; PLAYER has no `savegame/`; `gypsya.new` is again near-zero (19 nonzero bytes). 48 other files are byte-identical to the HD install | `shots/floppy/01-prompt.hires.png` `6b6867d8…`, `02-program` `8e64fa44…` (same as the earlier floppy run), `04-copy-done` `130e32ea…`; ADFs `floppy/PROGRAM.adf` `1d496d94…`, `POPULACE.adf` `41e7d5f0…`, `PLAYER.adf` `a4e3b7c7…`, `PORTRAIT.adf` `6d3cf554…` |
+| **boot of that floppy set** (DF0 PROGRAM, DF1 POPULACE, DF2 PLAYER, DF3 PORTRAIT) | AROS boot console (frame 1750); bitplane DMA on (0.52) from about frame 1828; heavy disk loading until about 3350; **"ORIGIN Presents"** at about frame 3606 (audio on); **first intro scene** at about 3859; from about 4114 a garbled composite that stays unchanged (texhash 3218773203 to frame 6159; music keeps going, blitter and disk idle). In a second run the picture was already garbled at about frame 3850, and SPACE/ESC/RETURN changed nothing up to frame 7158 | `diag/floppyboot2/f03500.png` `09bdf668…` (ORIGIN), `f03750.png` `3c21d33a…` (intro scene), `f04000.png` = `final.png` `97eb2956…` (garbled), `final.hires.png` `3bd4c185…`; keys: `shots/floppy-keys/boot-20261014-162550/*` |
 | A500-like machine (OCS, 512 KB chip + 512 KB slow, no fast) with the same volumes | AROS stays on its grey boot screen for 2319 frames (texhash 3314420245, no disk DMA). The startup-sequence never runs | `diag/a500/final.png` `36075656…` |
 
-All shots are under `~/Games/ultima6/oracle/`. The boot is reproducible screen by screen: the
+All shots are under `~/Games/ultima6/oracle/`. Scripted volumes (`disks/`, from `run.sh build`):
+PROGRAM `bc4f63c6…`, POPULACE `1d2e4e2c…`, PLAYER `85a4060a…`, PORTRAIT `f463326d…` (FFS
+timestamps make these differ between builds; the extracted trees do not, except `gypsya.new`). The boot is reproducible screen by screen: the
 installer prompt gave the same picture hash in independent runs (`9309e99d…` for probe/t45 and
 install/01-prompt; texhash 1482153914 in three runs). The low-memory contents after the crash
 differed between two runs, though. Host-side timing (when a command lands) leaks into emulated
@@ -71,8 +84,9 @@ state, so runs are not bit-identical end to end.
     tools/oracle/run.sh boot [step ...]   # boot those, run steps, PNGs into shots/boot-<ts>/
     tools/oracle/run.sh serve &    # control server 127.0.0.1:8765, then:
     tools/oracle/ctl.sh insert drive=0 path=/abs/x.hdf    # .adf -> DFn, .hdf -> DHn (power-cycles)
-    tools/oracle/ctl.sh key k=RETURN | type 'text=DH0:ULTIMA6
-    ' | stable frames=150 | until hash=N | shot name=x modes=lores,hires,tex,page | status | quit
+    tools/oracle/ctl.sh type $'text=DH0:ULTIMA6\n'          # \n = RETURN
+    tools/oracle/ctl.sh key k=RETURN      # also: stable frames=150, until hash=N, status, quit
+    tools/oracle/ctl.sh shot name=x modes=lores,hires,tex,page
 
 - **Input** = raw Amiga keycodes through `wasm_key(code, pressed)` (`main.cpp:1002`), so host
   keymaps play no part. Names are in `lib.mjs` `KEY` (US layout, shifted characters held with
@@ -93,10 +107,19 @@ state, so runs are not bit-identical end to end.
   the full installed tree plus `ultcli` (PP20-decrunched by `tools/pp20.py`). PROGRAM's
   `s/startup-sequence` is `ultcli`. With DF0 and DH0 both bootable, DF0 boots first.
 
-## 5. The blocking point (ultcli under AROS)
+## 5. Blocking points
 
-The timeline below comes from `diag.mjs`, a `$0-$7F` sampler, and RetroShell catch/watch points
-on the default machine:
+**Floppy set (the game's own layout):** the intro stops after its first scene with a garbled
+picture and does not react to SPACE/ESC/RETURN (§3). Not investigated further. Two candidate
+causes [가설], both unverified: (a) the floppy set itself is defective (0-byte `map`/`end`/
+`end.new`, short `converse.a`, no `savegame/`, near-zero `gypsya.new`), and these are files AROS
+wrote when it ran the installer; (b) an AROS graphics or blitter difference in the intro's next
+scene. The floppy ADFs were produced by an interactive `ctl.sh` session (§3 row), not by
+`build.mjs`.
+
+**HD-install layout (`run.sh build` volume HDFs, `ultcli`):** crash before any picture. The
+timeline below comes from `diag.mjs`, a `$0-$7F` sampler, and RetroShell catch/watch points on
+the default machine:
 
 1. Frames 0-112: AROS boots. ExecBase (`$4`) settles at `$2007D8`.
 2. From about frame 500: black screen. Bitplane DMA is 0 at every sample from frame 250 on
@@ -105,11 +128,12 @@ on the default machine:
 4. Frame 1631: `$0`, `$4`, `$C`, `$10`, `$2C` all change in one sample (ExecBase pointer and
    exception vectors overwritten). The instruction trace at that moment:
    user mode `2f1b3a btst #$6,($2,A2)` / `2f1b40 bne $2f1b3a` (a blitter-busy wait on DMACONR,
-   [추정] A2 = `$DFF000`), then **supervisor, IPL 6, PC `$000000`**. A level-6 interrupt vectored
-   through a clobbered `$78`.
+   [추정] A2 = `$DFF000`), then **supervisor, IPL 6, PC `$000000`**. [추정] A level-6
+   interrupt vectored through a clobbered autovector `$78`. `$78` itself was not sampled at the
+   crash; a read watchpoint on it showed `$FE8F74` (AROS's level-6 handler) at about frame 1335.
 5. After that the CPU runs garbage: illegal opcodes at `$0` loop through vector 4 = 0, it walks
    through unmapped `$A00xxx`, and memory gets filled with `0000 0000 2600` from about frame
-   1799. "Last exception: 11" in `? cpu` comes from this phase. With no console filter, the
+   1799. [추정] The "Last exception: 11" seen in `? cpu` at frame 2069 comes from this phase. With no console filter, the
    wild CPU's per-access "Invalid addr e9xxxx" warnings (131,060 of them) once brought the page
    down.
 
@@ -131,3 +155,10 @@ AROS's own boot raises vectors 4 (MOVEC probe `$F802B0`), 8 (`ori.w #$2000,SR` a
 - Realtime only (50 fps). Warp has no effect headless. Audio is not captured.
 - `texhash` is FNV-1a over every 3rd texel. It is for equality checks, not a cryptographic hash.
 - The 1 MB A500 configuration does not get past AROS boot in this setup.
+- `run.sh build` automates only the HD-install path. The better-behaved floppy set needs the
+  manual `ctl.sh` session described in §3; booting it is scripted:
+
+
+      F=~/Games/ultima6/oracle/floppy
+      U6_DISKS=$F/PROGRAM.adf,$F/POPULACE.adf,$F/PLAYER.adf,$F/PORTRAIT.adf \
+        tools/oracle/run.sh boot wait:3600 shot:origin wait:250 shot:intro

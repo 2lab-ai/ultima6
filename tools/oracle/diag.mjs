@@ -1,7 +1,7 @@
 // Boot diagnostics: boot the oracle disk set, run for N frames, then report what the machine is
 // doing: frame/hash/DMA, colour histogram of the texture, RetroShell inspector output.
 // usage: node diag.mjs OUTDIR FRAMES [retroshell-cmd ...]
-//   env U6_MACHINE as for boot.mjs; U6_PRE='cmd;cmd' + U6_PRE_AT=frames (RetroShell before the run); U6_DISKS='PROGRAM,POPULACE,PLAYER,PORTRAIT' (DH0..DH3; names under disks/ or absolute paths)
+//   env U6_SHOT_EVERY=1 saves a lores shot every 250 frames; U6_MACHINE as for boot.mjs; U6_PRE='cmd;cmd' + U6_PRE_AT=frames (RetroShell before the run); U6_DISKS='PROGRAM,POPULACE,PLAYER,PORTRAIT' (DH0..DH3; names under disks/ or absolute paths; .adf paths go to DF0..DF3)
 import { appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
@@ -18,7 +18,10 @@ const { page } = h;
 try {
   if (process.env.U6_MACHINE) log(`configure ${JSON.stringify(await o.configure(page, process.env.U6_MACHINE))}`);
   const vols = (process.env.U6_DISKS || 'PROGRAM,POPULACE,PLAYER,PORTRAIT').split(',');
+  const adf = vols.some((v) => v.endsWith('.adf'));
+  if (adf) await o.setFloppyCount(page, 4);
   for (const [i, v] of vols.entries()) await o.insert(page, v.startsWith('/') ? v : join(o.ORACLE_HOME, 'disks', `${v}.hdf`), i);
+  if (adf) await o.reset(page); // ADF inserts do not power-cycle; HDF inserts do
   // U6_PRE='cmd;cmd' = RetroShell commands after U6_PRE_AT frames (e.g. catchpoints; arm them
   // after AROS's own boot-time CPU/FPU probes, which raise vectors 4/8/11 in the ROM).
   if (process.env.U6_PRE_AT) await o.waitFrames(page, Number(process.env.U6_PRE_AT));
@@ -37,6 +40,7 @@ try {
     try { await o.waitFrames(page, step, { deadlineMs: 20000 }); }
     catch (e) { log(`stopped: ${e.message}`); break; }
     log(`f+${f + step} frame=${await o.frame(page)} texhash=${await o.texHash(page)} unmapped=${await o.unmapped(page)} dma=${JSON.stringify(await o.activity(page))}`);
+    if (process.env.U6_SHOT_EVERY === '1') for (const w of await o.shot(page, `f${String(f + step).padStart(5, '0')}`, { dir: out, modes: ['lores'] })) log(`shot ${w.file} ${w.sha256}`);
   }
   for (const w of await o.shot(page, 'final', { dir: out, modes: ['lores', 'hires', 'tex'] })) log(`shot ${w.file} ${w.sha256}`);
   const rgba = await o.grab(page);
