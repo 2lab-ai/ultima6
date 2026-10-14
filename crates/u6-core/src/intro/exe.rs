@@ -114,12 +114,13 @@ impl UExe {
 
     /// Big-endian word at image address `addr`.
     pub fn word(&self, addr: u32) -> u16 {
-        u16::from_be_bytes([self.byte(addr), self.byte(addr + 1)])
+        u16::from_be_bytes([self.byte(addr), self.byte(addr.wrapping_add(1))])
     }
 
-    /// Big-endian signed word at `A4 + off`.
+    /// Big-endian signed word at `A4 + off`. The sum wraps as the 68000's 32-bit address sum
+    /// does, so an `off` that is a negative index as `u32` reads below A4 (0 outside the image).
     pub fn a4_i16(&self, off: u32) -> i16 {
-        self.word(A4 + off) as i16
+        self.word(A4.wrapping_add(off)) as i16
     }
 
     /// The `n` signed words from `A4 + off` on.
@@ -127,15 +128,23 @@ impl UExe {
         (0..n).map(|i| self.a4_i16(off + 2 * i as u32)).collect()
     }
 
-    /// `n` bytes from image address `addr` on.
+    /// `n` bytes from image address `addr` on (the address wraps past 0xffffffff, as
+    /// [`UExe::word`]'s does).
     pub fn bytes(&self, addr: u32, n: usize) -> Vec<u8> {
-        (0..n).map(|i| self.byte(addr + i as u32)).collect()
+        (0..n)
+            .map(|i| self.byte(addr.wrapping_add(i as u32)))
+            .collect()
     }
 
     /// The NUL-terminated string at image address `addr` (at most 512 bytes, no NUL).
+    ///
+    /// A passage case of `u` passes its own pointers here (the volume-name table A4+0x8ac, a
+    /// pushed format). The address sum wraps like [`UExe::bytes`]; it cannot wrap in practice,
+    /// since a byte outside the image reads 0 and ends the string before the sum gets past
+    /// 0xffffffff.
     pub fn cstr(&self, addr: u32) -> Vec<u8> {
         (0..512)
-            .map(|i| self.byte(addr + i))
+            .map(|i| self.byte(addr.wrapping_add(i)))
             .take_while(|&b| b != 0)
             .collect()
     }

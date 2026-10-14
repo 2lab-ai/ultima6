@@ -388,8 +388,8 @@ fn receipt_story_frames() {
     println!("dir {}", dir.display());
 }
 
-/// The transfer from the menu: B with no Ultima V save in the files ends in "No character
-/// found!"; a key returns to the menu.
+/// The transfer from the menu: B with no Ultima V save in the files ends in the not-found line
+/// (the string at 0x109aa8); a key returns to the menu.
 fn transfer_script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
     r.tick(30);
     r.keys(&[Key::Escape], 120);

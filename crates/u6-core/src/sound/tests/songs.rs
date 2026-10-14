@@ -34,6 +34,15 @@ fn load(n: u16) -> MedCall {
     MedCall::Load(format!("S{n}"))
 }
 
+/// The sound side of the launcher's relaunch (`main_loop::run`): a fresh State going on with
+/// the old one's log, then the change of process the launcher marks at every hand-over.
+fn relaunch(old: &mut State) -> State {
+    let mut fresh = state(true);
+    fresh.sound.continue_calls(&mut old.sound);
+    fresh.sound.call(MedCall::NewProcess);
+    fresh
+}
+
 #[test]
 fn the_sound_flag_is_the_objlist_word_at_0x28() {
     let mut s = state(false);
@@ -161,9 +170,10 @@ fn the_driver_replays_new_calls_once_into_the_buffer() {
 }
 
 /// The launcher's relaunch gives `game` a new State that takes the old one's call log over
-/// ([`SoundState::continue_calls`]) and marks the change of process: the driver then does what
-/// the old process's shutdown 0x14ee70 (RemPlayer) and the new one's setup 0x14ef06 (InitPlayer)
-/// do, so the new run starts from the effect module as the image holds it, and its calls go on.
+/// ([`SoundState::continue_calls`]), and the launcher marks the change of process: the driver
+/// then does what the old process's shutdown 0x14ee70 (RemPlayer) and the new one's setup
+/// 0x14ef06 (InitPlayer) do, so the new run starts from the effect module as the image holds
+/// it, and its calls go on.
 #[test]
 fn a_relaunch_starts_the_player_over_from_the_images_effect_module() {
     let md = Mmd::new(vec![vec![[cell(13, 1, 0, 0), EMPTY, EMPTY, EMPTY]; 2]]);
@@ -187,8 +197,7 @@ fn a_relaunch_starts_the_player_over_from_the_images_effect_module() {
     assert!(d.player.module.is_none());
 
     // The relaunch: a fresh State going on with the old one's log.
-    let mut fresh = state(true);
-    fresh.sound.continue_calls(&mut s.sound);
+    let mut fresh = relaunch(&mut s);
     play_song(&mut fresh, 7);
     d.sync(&fresh.sound, &files);
     assert!(
@@ -224,8 +233,7 @@ fn the_old_runs_unsynced_calls_come_before_the_new_process_and_its_calls() {
     let mut s = state(true);
     play_song(&mut s, 9);
     play_song(&mut s, 0);
-    let mut fresh = state(true);
-    fresh.sound.continue_calls(&mut s.sound);
+    let mut fresh = relaunch(&mut s);
     play_song(&mut fresh, 7);
     assert_eq!(
         calls(&fresh),
@@ -362,8 +370,7 @@ fn only_the_relaunch_marker_starts_the_player_over() {
         "the same call again: the same process"
     );
 
-    let mut fresh = state(true);
-    fresh.sound.continue_calls(&mut s.sound);
+    let mut fresh = relaunch(&mut s);
     fresh.sound.call(MedCall::PlayEffect);
     d.sync(&fresh.sound, &files);
     assert_eq!(
@@ -375,4 +382,18 @@ fn only_the_relaunch_marker_starts_the_player_over() {
     assert_eq!(d.machine.chip[speed], 5);
     d.sync(&fresh.sound, &files);
     assert_eq!(d.machine.chip[speed], 5, "the marker was applied once");
+}
+
+/// A driver kept across a log numbered from 0 again (a new engine's State) would skip every
+/// call of it: debug builds stop there.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "one driver serves one engine")]
+fn a_log_numbered_over_again_stops_a_debug_build() {
+    let files = Files::default();
+    let mut d = AudioDriver::with_tables(tables(), b"MMD0");
+    let mut s = state(true);
+    play_song(&mut s, 2);
+    d.sync(&s.sound, &files);
+    d.sync(&state(true).sound, &files);
 }

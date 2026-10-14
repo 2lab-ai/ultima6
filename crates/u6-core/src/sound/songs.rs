@@ -28,8 +28,10 @@ pub fn set_sound_flag(s: &mut State, on: bool) {
 ///
 /// Same song: nothing. Otherwise the playing song stops; song `n` then starts if sound is on
 /// (song 13 is loaded regardless and never started here). The file is read only when the
-/// buffer does not hold it already. The module buffer A4-0x35cc is allocated at setup; the port
-/// always has it.
+/// buffer does not hold it already. The module buffer A4-0x35cc is allocated at setup (46390
+/// bytes at 0x14ef76, only with enough memory free; without one it reads and plays nothing,
+/// 0x1108aa); the port always has one, of the read's length ([`MODULE_BUFFER`], 0x1108d6), so
+/// a file longer than 46390 bytes does not overflow it as it would the original's.
 pub fn play_song(s: &mut State, n: u16) {
     if n == s.sound.current {
         return;

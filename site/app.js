@@ -516,7 +516,8 @@ async function forgetKept() {
 // The stored save removed: a save job taken before writes nothing, and the game on screen owns
 // the empty store, its next Save listing the whole game (objlist and every block), so a start
 // from it is the world that game had and not new-game blocks under its own. A Save it made
-// before, while it did not own the store, is not stored: only its Saves after the forget are.
+// before the forget and not yet stored (made while it did not own the store, or during an
+// import just before) is not stored: only its Saves after the forget are.
 async function forgetSaved() {
   await forgetSaves();
   forgets += 1;

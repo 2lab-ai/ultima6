@@ -26,7 +26,7 @@ fn exe() -> UExe {
 
 /// A keyboard with the printable characters on raw keys (plain column), the named keys on
 /// their hardware codes, and C type bits.
-fn keyboard(st: &mut IntroState) {
+pub(super) fn keyboard(st: &mut IntroState) {
     let mut table = vec![[0u16; 4]; 0x60];
     for (row, c) in (0x21..0x61u16).enumerate() {
         table[row][0] = c;
@@ -63,7 +63,12 @@ fn keyboard(st: &mut IntroState) {
 
 /// A font of 4×8 glyphs, column 0 ink and the rest paper; space is all paper and NUL has no
 /// width (as in `u6.set`).
-fn font() -> WouFont {
+pub(super) fn font() -> WouFont {
+    WouFont::parse(&font_bytes()).unwrap()
+}
+
+/// The bytes of [`font`] (a `u6.set` before its U6-LZW).
+pub(super) fn font_bytes() -> Vec<u8> {
     let mut raw = vec![0u8; 0x304 + 64];
     raw[0] = 8;
     raw[2] = 0xf;
@@ -77,7 +82,7 @@ fn font() -> WouFont {
     for r in 0..8 {
         raw[0x304 + r * 4] = 0xf;
     }
-    WouFont::parse(&raw).unwrap()
+    raw
 }
 
 fn state() -> IntroState {
@@ -745,6 +750,65 @@ fn a_tv_pick_among_one_frame_ends_its_step_when_it_comes_round_again() {
     assert_eq!(rand, by_hand.rand, "one rand per pick");
 }
 
+#[test]
+fn a_tv_pick_among_no_frames_ends_its_step_when_it_comes_round_again() {
+    // Script 0: a loop of 2 over (0x84 0: one of the next 0 frames, then frame 7, repeat). With
+    // a count of 0 the pick is the byte after it every pass, so the second pass repeats the
+    // first one's position (0x103b94 again; the original's divide at 0x105612 traps first).
+    let (frame, pos, repeat, rand) = returns(|| {
+        let mut e = exe();
+        e.poke(A4 + 0x1c6, &[0x80, 0x02, 0x84, 0x00, 0x07, 0x81]);
+        let mut st = IntroState::new(e, Files::default());
+        st.tv = opening::Tv::new(&st);
+        opening::set_script(&mut st, 0);
+        opening::tv_step(&mut st);
+        let first = st.tv.last_pick;
+        opening::tv_step(&mut st);
+        assert_eq!(st.tv.last_pick, first, "the same position both passes");
+        (st.tv.frame, st.tv.pos, st.tv.repeat, st.rand)
+    });
+    assert_eq!((frame, pos, repeat), (7, 2, 0));
+    let mut by_hand = state();
+    by_hand.rand();
+    by_hand.rand();
+    assert_eq!(rand, by_hand.rand, "one rand per pick");
+}
+
+#[test]
+fn a_tv_script_that_never_loops_back_wraps_its_position_like_the_68000() {
+    // Script 0 of a foreign `u`: (0x84 124) to position 126, then 128 picks of (0x84 255) that
+    // walk the word A4+0x263c up to 0x7fff after the last count, so the pick and the step past
+    // the 255 frames wrap it negative (`add.w` at 0x103b8a / 0x103bae) and the next byte is
+    // read below the script (`adda.w` at 0x103a60): 0x8a there ends the step.
+    let script = A4 + 0x1c6;
+    let at = move |p: i16| script.wrapping_add_signed(i32::from(p));
+    let mut by_hand = state();
+    let mut picks = Vec::new();
+    for n in std::iter::once(124).chain([255; 128]) {
+        picks.push(by_hand.random(n));
+    }
+    let last = *picks.last().unwrap();
+    assert_ne!(last, 0, "the last pick itself goes past 0x7fff");
+    let (frame, pos, last_pick, rand) = returns(move || {
+        let mut e = UExe::from_flat(vec![0; 0x2_0000]);
+        e.poke(at(0), &[0x84, 124]);
+        for j in 0..128 {
+            e.poke(at(126 + 257 * j), &[0x84, 0xff]);
+        }
+        let end = 0x7fff_i16.wrapping_add(255);
+        e.poke(at(end), &[0x8a]);
+        let mut st = IntroState::new(e, Files::default());
+        st.tv = opening::Tv::new(&st);
+        opening::set_script(&mut st, 0);
+        opening::tv_step(&mut st);
+        (st.tv.frame, st.tv.pos, st.tv.last_pick, st.rand)
+    });
+    assert_eq!(last_pick, 0x7fff_i16.wrapping_add(last));
+    assert_eq!(pos, 0x7fff_i16.wrapping_add(256), "one past the 0x8a");
+    assert_eq!(frame, 0, "the zeroed byte at the last pick");
+    assert_eq!(rand, by_hand.rand, "one rand per pick");
+}
+
 /// The x of every ink pixel on row `y` of a 41-pixel line.
 fn ink_row(chip: &Chip, v: View, y: i32) -> Vec<i32> {
     let ink = text::glyph_colour(15);
@@ -814,4 +878,162 @@ fn an_answer_table_entry_past_the_eight_virtues_pours_a_virtue() {
     let (w, level) = got.unwrap();
     assert_eq!(w, 1, "the low three bits");
     assert_eq!(level[1], 2, "virtue 1 poured");
+}
+
+#[test]
+fn a_negative_question_word_reads_before_the_answer_table() {
+    // A foreign `u` whose pair table names question −1, then −32768: 0x106530 sign-extends the
+    // word and indexes A4+0x3d4 with it, so −1 reads the word before the table and −32768 the
+    // word 64 KB below it, image 0x106b6c in the code hunk (0 in this zeroed image).
+    let mut e = exe();
+    e.poke(A4 + 0x3d2, &0x000du16.to_be_bytes());
+    let mut st = IntroState::new(e, Files::default());
+    keyboard(&mut st);
+    st.font = Some(font());
+    let got = drive(&[Key::Char('a'), Key::Char('a')], move |io| async move {
+        let near = gypsy::ask(&mut st, &io, -1).await;
+        let far = gypsy::ask(&mut st, &io, i16::MIN).await;
+        (near, far)
+    });
+    assert_eq!(got, Some((5, 0)), "the low three bits of 0xd, then 0");
+}
+
+#[test]
+fn a_shimmer_down_to_row_0xffff_ends_after_that_row() {
+    // Rows are unsigned words (`bhi` at 0x105a30): with the bottom row 0xffff (a `u` whose
+    // A4+0x414 is 0xff80: the wagon's top 0x7f + 0xff80, create.rs) the original's `addq.w`
+    // wraps back to row 0 and never ends. Here the rows are −2 and −1, 0xfffe and 0xffff as
+    // the unsigned words the loop compares, of one byte column: 16 noise words.
+    let noise = returns(|| {
+        let mut st = state();
+        st.views.shimmer = View {
+            planes: Ptr::at(Region::Screen0),
+            x1: 7,
+            x0: 0,
+            y0: -2,
+            y1: -1,
+        };
+        gypsy::shimmer(&mut st);
+        st.noise
+    });
+    let mut by_hand = state();
+    for _ in 0..16 {
+        by_hand.noise_word();
+    }
+    assert_eq!(noise, by_hand.noise, "two rows of eight pixels");
+}
+
+#[test]
+fn a_view_as_wide_as_a_word_allows_fills_and_copies_only_the_bitmap() {
+    // A case of a foreign `u` lays out views from its own words: the width is a word sum
+    // (`sub.w` / `addq.w` at 0x10f8a8, 0x1155b6) that can wrap, and a view 0x7fff wide and
+    // high changes no more than the 320 × 200 bitmap.
+    let s0 = Ptr::at(Region::Screen0);
+    let whole = View {
+        planes: s0,
+        x1: i16::MAX,
+        x0: i16::MIN,
+        y0: 0,
+        y1: 0,
+    };
+    assert_eq!(whole.width(), 0);
+    let wide = View {
+        x1: 0x7ffe,
+        x0: 0,
+        y0: 0,
+        y1: 0x7ffe,
+        ..whole
+    };
+    let chip = returns(move || {
+        let mut chip = Chip::new();
+        mem::fill_view(&mut chip, &wide, 7);
+        let other = View {
+            planes: Ptr::at(Region::Screen1),
+            ..wide
+        };
+        mem::copy_view(&mut chip, &wide, &other);
+        chip
+    });
+    for (x, y) in [(0, 0), (319, 199)] {
+        assert_eq!(chip.pixel(s0, x, y), 7);
+        assert_eq!(chip.pixel(Ptr::at(Region::Screen1), x, y), 7);
+    }
+}
+
+#[test]
+fn caps_lock_on_a_code_below_0x20_marked_lower_case_wraps_like_the_word_sum() {
+    // A foreign `u` whose key table gives raw key 0x10 the code 5 and whose C type table marks
+    // 5 lower case: with caps lock 0x115030 subtracts 0x20 as a word.
+    let mut e = exe();
+    e.poke(A4 + 0x13e5 + 4 * 0x10, &[5]);
+    e.poke(A4 + 0x1611 + 5, &[2]);
+    let mut keys = input::Keyboard::new(&e);
+    assert_eq!(keys.map_raw(0x62), 0, "caps lock down");
+    assert_eq!(keys.map_raw(0x10), 0xffe5);
+}
+
+/// A `.new` table of two items, item 1 at `item1`, with item 0's empty header after it.
+fn two_items(item1: u32) -> Vec<u8> {
+    let mut b = vec![0, 0, 0, 8];
+    b.extend(item1.to_be_bytes());
+    b.extend([0; 12]);
+    b
+}
+
+#[test]
+fn a_new_offset_of_0xffffffff_goes_one_byte_back_as_adda_l_does() {
+    // 0x116420 adds the offset as a long: 0xffffffff is −1. At the montage's place (files +
+    // 0x9c40) item 1 starts one byte before the file. At the start of a region its header
+    // lies past the region's end and reads 0 (one row of 16 pixels, no planes stored), and its
+    // mask at + 10 (`lea (0xa,a0)` at 0x116468) wraps back to region offset 9: where that
+    // mask is set, the planes the item does not store are cleared.
+    let mut chip = Chip::new();
+    let montage = Ptr::at(Region::Files).add(0x9c40);
+    chip.write(montage, &two_items(0xffff_ffff));
+    let item = mem::item_at(&chip, montage, 1);
+    assert_eq!(item.map(|p| p.offset), Some(0x9c3f));
+    let blocks = Ptr::at(Region::Blocks);
+    chip.write(blocks, &two_items(0xffff_ffff));
+    chip.write(blocks.add(9), &[0xf0]);
+    let screen = View::screen(Ptr::at(Region::Screen0));
+    mem::fill_view(&mut chip, &screen, 7);
+    mem::draw_item(&mut chip, &screen, 0x10, 0x10, blocks, 1);
+    let row: Vec<u8> = (0x0e..0x16)
+        .map(|x| chip.pixel(screen.planes, x, 0x10))
+        .collect();
+    assert_eq!(
+        row,
+        [7, 7, 0, 0, 0, 0, 7, 7],
+        "the mask's first four columns"
+    );
+    assert_eq!(chip.pixel(screen.planes, 0x10, 0x11), 7, "one row");
+}
+
+#[test]
+fn an_item_index_of_0x2000_or_more_reads_its_offset_at_the_word_index() {
+    // index × 4 is a word, sign-extended as the index of the offset read (0x116410,
+    // 0x11641c): 0x7fff reads the long 4 bytes before the table, 0x4000 the table's first.
+    let mut chip = Chip::new();
+    let file = Ptr::at(Region::Files).add(0x10);
+    chip.write(Ptr::at(Region::Files).add(0xc), &0x100u32.to_be_bytes());
+    chip.write(file, &two_items(0x20));
+    assert_eq!(mem::item_at(&chip, file, 0x7fff), Some(file.add(0x100)));
+    assert_eq!(
+        mem::item_at(&chip, file, 0x4000),
+        Some(file.add(8)),
+        "item 0's entry"
+    );
+    assert_eq!(mem::item_at(&chip, file, 1), Some(file.add(0x20)));
+    assert_eq!(mem::item_at(&chip, file, 2), None, "past the table");
+}
+
+#[test]
+fn bytes_of_u_wrap_past_the_top_of_the_address_space() {
+    let e = exe();
+    assert_eq!(e.bytes(0xffff_fffe, 4), [0; 4]);
+    assert_eq!(
+        e.cstr(0xffff_fff0),
+        Vec::<u8>::new(),
+        "nothing there: an empty string"
+    );
 }

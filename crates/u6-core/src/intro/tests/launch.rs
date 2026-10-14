@@ -13,7 +13,7 @@ use crate::files::Files;
 use crate::main_loop::Program;
 use crate::saveload::{MemStore, OBJLIST_FILE, SaveSync, attach, changed_since};
 use crate::sound::med::PLAYING_SONG;
-use crate::sound::{CHIP_BUFFER, MODULE_BUFFER};
+use crate::sound::{AudioDriver, CHIP_BUFFER, CHIP_EFFECT, MODULE_BUFFER};
 use u6_testkit::Quiet;
 use u6_testkit::assert_same;
 
@@ -123,6 +123,75 @@ fn plays(r: &Run, name: &str) -> bool {
     p.state == PLAYING_SONG && p.module.is_some() && differ * 100 < n
 }
 
+/// How far the host's driver is from what a new `game` process's player starts from once the
+/// process's song `name` is in (setup 0x14ef06: a module buffer of its own, the effect module
+/// as the image holds it): the number of nonzero buffer bytes past that file (bytes of an
+/// earlier program's files) and whether the effect module is the image's.
+fn new_process_left(r: &Run, name: &str) -> (usize, bool) {
+    let Some(sp) = &r.speaker else {
+        return (usize::MAX, false);
+    };
+    let files = r.e.io().files();
+    let n = files.get(name).quiet().len().min(MODULE_BUFFER);
+    let (at, fx) = (CHIP_BUFFER as usize, CHIP_EFFECT as usize);
+    let chip = &sp.driver.machine.chip;
+    let image = AudioDriver::new(files).quiet();
+    let left = chip[at + n..at + MODULE_BUFFER]
+        .iter()
+        .filter(|&&b| b != 0)
+        .count();
+    (left, chip[fx..] == image.machine.chip[fx..])
+}
+
+/// The song the game state plays and its file name.
+fn game_song(r: &Run) -> (u16, String) {
+    let n = r.e.state().sound.current;
+    let name = r.e.state().sound.file_name(n).map(str::to_owned);
+    assert!(n != 0 && name.is_some(), "the game plays song {n}");
+    (n, name.quiet())
+}
+
+/// File name of `u`'s song `n` (from its song table).
+fn u_song(r: &Run, n: usize) -> String {
+    let s = crate::intro::state_for(r.e.io().files()).quiet();
+    String::from_utf8_lossy(&s.exe.song_names[n]).into_owned()
+}
+
+/// Stands for what `u`'s process leaves in the memory it frees at its exit (cleanup 0x113b68):
+/// a nonzero byte in the host's driver everywhere past `u`'s song `name` in the module buffer
+/// and over the effect module, none of which a `game` process may start from.
+fn fill_u_memory(r: &mut Run, name: &str) {
+    let n = r.e.io().files().get(name).quiet().len().min(MODULE_BUFFER);
+    let (at, fx) = (CHIP_BUFFER as usize, CHIP_EFFECT as usize);
+    let chip = &mut r.speaker.as_mut().quiet().driver.machine.chip;
+    chip[at + n..at + MODULE_BUFFER].fill(0xa5);
+    chip[fx..].fill(0xa5);
+}
+
+/// The first `game` after `u` is a new process, as every later one is: `u`'s exit (cleanup
+/// 0x113b68) frees its module buffer and `game`'s setup (0x14ef06) allocates its own. After
+/// `u`'s opening and menu songs, whatever `u`'s memory holds, and its creation, the game's song
+/// plays from a buffer that holds its own file only, beside the image's effect module: what the
+/// relaunch gives ([`the_songs_of_u_and_game_reach_the_hosts_audio_across_a_relaunch`]).
+#[test]
+fn the_first_game_after_u_starts_the_player_over_as_a_relaunch_does() {
+    let Some(files) = files() else { return };
+    let mut r = Run::launcher(files, 0).with_speaker();
+    to_menu(&mut r);
+    let menu = u_song(&r, 1);
+    assert!(plays(&r, &menu), "the menu's song");
+    fill_u_memory(&mut r, &menu);
+    create_from_menu(&mut r, |_, _| {});
+    assert!(program(&r) == Program::Game);
+    assert!(to_prompt(&mut r, 600));
+    let (n, name) = game_song(&r);
+    assert!(plays(&r, &name), "the game's song {n} reaches the driver");
+    assert!(
+        new_process_left(&r, &name) == (0, true),
+        "(bytes of u's memory past the game's song {n}, the image's effect module)"
+    );
+}
+
 /// The songs reach the hosts' audio driver as `game`'s do (the engine's sound log, replayed
 /// after each tick): `u`'s opening and menu songs, the player stopped when `u` exits, the songs
 /// of the `u` that `game` sends the launcher back to, and the new `game`'s after the relaunch.
@@ -130,18 +199,14 @@ fn plays(r: &Run, name: &str) -> bool {
 fn the_songs_of_u_and_game_reach_the_hosts_audio_across_a_relaunch() {
     let Some(files) = files() else { return };
     let mut r = Run::launcher(files, 0).with_speaker();
-    let song = |r: &Run, n: usize| {
-        let s = crate::intro::state_for(r.e.io().files()).quiet();
-        String::from_utf8_lossy(&s.exe.song_names[n]).into_owned()
-    };
     r.tick(30);
     assert!(
-        plays(&r, &song(&r, 2)),
+        plays(&r, &u_song(&r, 2)),
         "the opening's song from its first picture"
     );
     let opening = r.peak();
     to_menu(&mut r);
-    assert!(plays(&r, &song(&r, 1)), "the menu's song");
+    assert!(plays(&r, &u_song(&r, 1)), "the menu's song");
     r.peak();
     r.tick(60);
     let menu = r.peak();
@@ -152,16 +217,20 @@ fn the_songs_of_u_and_game_reach_the_hosts_audio_across_a_relaunch() {
     r.keys(&[Key::Space], 30);
     assert!(program(&r) == Program::U);
     r.tick(30);
-    assert!(plays(&r, &song(&r, 2)), "the second u's opening song");
+    assert!(plays(&r, &u_song(&r, 2)), "the second u's opening song");
     to_menu(&mut r);
+    let menu_song = u_song(&r, 1);
+    fill_u_memory(&mut r, &menu_song);
     create_from_menu(&mut r, |_, _| {});
     assert!(to_prompt(&mut r, 600));
-    let n = r.e.state().sound.current;
-    let name = r.e.state().sound.file_name(n).map(str::to_owned);
-    assert!(n != 0 && name.is_some(), "the new game plays song {n}");
+    let (n, name) = game_song(&r);
     assert!(
-        plays(&r, &name.quiet()),
+        plays(&r, &name),
         "the new game's song {n} reaches the driver"
+    );
+    assert!(
+        new_process_left(&r, &name) == (0, true),
+        "no byte of u's memory past the new game's song {n}, and the image's effect module"
     );
     assert!(
         opening > 0.01 && menu > 0.01,

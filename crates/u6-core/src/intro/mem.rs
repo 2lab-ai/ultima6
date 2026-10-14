@@ -79,10 +79,12 @@ impl Ptr {
         Self { region, offset: 0 }
     }
 
+    /// `n` bytes on, as the 68000's 32-bit address sums (`adda.l`, `lea`) make it: an `n` that
+    /// is a negative offset as `u32` goes back. An offset past the region reads 0.
     pub const fn add(self, n: u32) -> Self {
         Self {
             region: self.region,
-            offset: self.offset + n,
+            offset: self.offset.wrapping_add(n),
         }
     }
 }
@@ -114,12 +116,15 @@ impl View {
         }
     }
 
+    /// `x1 − x0 + 1` as the word sums of 0x10f8a8 / 0x1155b6 make it (a view a case of `u`
+    /// laid out may wrap).
     pub const fn width(&self) -> i16 {
-        self.x1 - self.x0 + 1
+        self.x1.wrapping_sub(self.x0).wrapping_add(1)
     }
 
+    /// `y1 − y0 + 1`, as [`View::width`].
     pub const fn height(&self) -> i16 {
-        self.y1 - self.y0 + 1
+        self.y1.wrapping_sub(self.y0).wrapping_add(1)
     }
 }
 
@@ -236,13 +241,18 @@ impl ItemHeader {
 /// Where item `index` of the `.new` file loaded at `file` starts, or `None` when the index is
 /// past the offset table (0x1163fc: `index × 4 >= ` the low word of the first offset, which is
 /// the table's own size).
+///
+/// `index × 4` is a word (`lsl.w` at 0x116410), compared signed (`bge` at 0x116418) and used
+/// sign-extended as the index of the offset read (`move.l (0,a0,d1.w)` at 0x11641c), so an
+/// index of 0x2000 or more that passes reads before the table or aliases a lower entry. The
+/// offset is added as a long (`adda.l` at 0x116420).
 pub fn item_at(chip: &Chip, file: Ptr, index: u16) -> Option<Ptr> {
     let limit = chip.word(file, 2) as i16;
     let i4 = index.wrapping_shl(2) as i16;
     if i4 >= limit {
         return None;
     }
-    let off = chip.long(file, usize::from(index) * 4);
+    let off = chip.long(file.add(i32::from(i4) as u32), 0);
     Some(file.add(off))
 }
 
@@ -346,17 +356,23 @@ pub fn copy_rect(
 ) {
     let fast = sx & 15 == 0 && dx & 15 == 0 && w & 15 == 0;
     let and = and && !fast;
-    let mut px = Vec::with_capacity(usize::try_from(i32::from(w) * i32::from(h)).unwrap_or(0));
-    for r in 0..i32::from(h) {
-        for c in 0..i32::from(w) {
-            px.push(chip.pixel(src, i32::from(sx) + c, i32::from(sy) + r));
+    let (sx, sy, dx, dy) = (i32::from(sx), i32::from(sy), i32::from(dx), i32::from(dy));
+    // Only the part that lands on the destination bitmap changes anything ([`Chip::set_pixel`]
+    // drops the rest), so the loops stop there: a rectangle as wide as a word allows costs no
+    // more than the screen.
+    let rows = (-dy).max(0)..i32::from(h).min(H - dy);
+    let cols = (-dx).max(0)..i32::from(w).min(W - dx);
+    let mut px = Vec::new();
+    for r in rows.clone() {
+        for c in cols.clone() {
+            px.push(chip.pixel(src, sx + c, sy + r));
         }
     }
     let mut it = px.into_iter();
-    for r in 0..i32::from(h) {
-        for c in 0..i32::from(w) {
+    for r in rows {
+        for c in cols.clone() {
             let v = it.next().unwrap_or(0);
-            let (x, y) = (i32::from(dx) + c, i32::from(dy) + r);
+            let (x, y) = (dx + c, dy + r);
             let v = if and { v & chip.pixel(dst, x, y) } else { v };
             chip.set_pixel(dst, x, y, v);
         }
@@ -385,9 +401,11 @@ pub fn fill_rect(chip: &mut Chip, planes: Ptr, (x, y): (i16, i16), (w, h): (i16,
     if w <= 0 || h <= 0 {
         return;
     }
-    for r in 0..i32::from(h) {
-        for c in 0..i32::from(w) {
-            chip.set_pixel(planes, i32::from(x) + c, i32::from(y) + r, colour);
+    // Clipped to the bitmap as in [`copy_rect`].
+    let (x, y) = (i32::from(x), i32::from(y));
+    for py in y.max(0)..(y + i32::from(h)).min(H) {
+        for px in x.max(0)..(x + i32::from(w)).min(W) {
+            chip.set_pixel(planes, px, py, colour);
         }
     }
 }

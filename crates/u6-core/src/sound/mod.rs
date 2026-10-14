@@ -82,10 +82,20 @@ pub enum MedCall {
     PlayBuffer,
     /// 0x100fa4 PlayModule on the sound-effect module of hunk 28 (0x12d07e).
     PlayEffect,
-    /// Port-only: one `game` process ended and the next began (the launcher's relaunch,
-    /// [`SoundState::continue_calls`]). The old one's shutdown 0x14ee70 calls RemPlayer
-    /// (0x100f96); the new one's setup 0x14ef06 sets the player up again (InitPlayer 0x100f7c)
-    /// on its own memory: the effect module as the image holds it, an empty module buffer.
+    /// Port-only: the program before (`u`, or a `game` the launcher went back to `u` from) ended
+    /// and a new `game` process began: every hand-over from `u` to `game`, the first one
+    /// included ([`crate::main_loop::run`]). The program that ends frees its memory, its module
+    /// buffer with it, and removes the player: `u`'s cleanup 0x113b68 frees each allocation of
+    /// its table (0x10f80e, FreeMem at 0x10f83e; the buffer is the 46390 bytes setup 0x113bfe
+    /// took at 0x113c34) and calls RemPlayer (0x100f96); `game`'s shutdown 0x14ee70 does the
+    /// same (0x134cd6, then 0x100f96). The new process's setup 0x14ef06 allocates its own buffer
+    /// (0x14ef76: 46390 bytes of chip memory through 0x134c1c, AllocMem at 0x134c4c), sets the
+    /// player up again (InitPlayer 0x100f7c at 0x14f098) and relocates the effect module of its
+    /// own image (0x15355a at 0x14f0a2). That allocation asks for chip memory without
+    /// MEMF_CLEAR (the screen buffers after it, 0x14ef86, ask for both), so the original's new
+    /// buffer holds whatever the chip memory held, the bytes of the buffer `u` freed among the
+    /// possible ones. The port's new buffer is zero, the same at every hand-over, beside the
+    /// effect module as the image holds it ([`AudioDriver`]).
     NewProcess,
 }
 
@@ -135,14 +145,13 @@ impl SoundState {
     }
 
     /// Takes the call log over from `old`, the state of the process before (a new `game` after
-    /// the launcher ran `u` again), and marks the change of process ([`MedCall::NewProcess`]).
-    /// The numbering goes on, so the host's driver, which counts the calls it applied, still gets
-    /// the old process's calls it has not synced yet, then starts the player over at the mark,
-    /// then plays the new process's calls.
+    /// the launcher ran `u` again). The numbering goes on, so the host's driver, which counts the
+    /// calls it applied, still gets the old process's calls it has not synced yet, then the
+    /// change of process the launcher marks next ([`MedCall::NewProcess`]), then the new
+    /// process's calls.
     pub fn continue_calls(&mut self, old: &mut SoundState) {
         self.calls = std::mem::take(&mut old.calls);
         self.next_call = old.next_call;
-        self.call(MedCall::NewProcess);
     }
 
     /// File name of song `n` (1..=13).
