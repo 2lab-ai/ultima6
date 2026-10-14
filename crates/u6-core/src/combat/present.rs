@@ -6,8 +6,17 @@
 //! does exactly that on the polling engine's buffers ([`with_current_io`]) and records each
 //! presented rectangle with the number of messages queued before it ([`capture`]). Playback
 //! puts the rectangles back on the screen in order, prints the messages in between, and waits
-//! VBlanks so the pictures are seen: the original shows them for as long as its drawing takes,
-//! the port for a fixed number of display frames (display time is not game time, spec 03 §1).
+//! so the pictures are seen.
+//!
+//! Timing. Nothing in a fight waits for the display in the original: its VBlank server 0x14f27a
+//! (`jmp 0x162294`) only rewrites BEAMCON0, clears the flag 0x1624b0 and moves the pointer
+//! sprite (0x1051a6, 0x1622d6), and the one routine that spins on that flag, 0x1622be, is reached
+//! only from the shutdown 0x14ee70 and from 0x1623be, whose sole caller is the Use machine
+//! 0x12cfe4. A fight is as slow as the 68000 and the blitter draw it. The port draws at once, so
+//! each picture carries the time the original spends making it ([`Effect::cost`], measured in the
+//! oracle), and playback waits that long on the engine clock before showing it ([`pace`]): the
+//! old picture stays up while the original would still be drawing, the same at any host frame
+//! rate (spec 03 §1).
 
 use std::cell::RefCell;
 
@@ -17,31 +26,82 @@ use crate::state::State;
 
 use super::tables::at;
 
-/// VBlanks a hit flash stays on the screen.
-pub const FLASH_HOLD: u8 = 8;
-/// Flight steps per VBlank (the original steps the overlay animation every 4 steps).
-const STEPS_PER_FRAME: i16 = 4;
+/// Milliseconds of one PAL frame (the original's display runs at 50 Hz).
+pub const FRAME_MS: u16 = 20;
+/// [replaced] Time of the hit flash 0x1230ce (draw lists, the window with tile 0x101 rendered
+/// and copied, draw lists again): 16 PAL frames, the median of 45 flashes (14..18) in the oracle
+/// (tools/oracle/fight.mjs: the start fight, 3 boots × 7 party steps).
+pub const FLASH_MS: u16 = 16 * FRAME_MS;
+/// [replaced] Time of a flight's first render (0x102c90 at the top of 0x132706, before the
+/// first step): 6 PAL frames, the median of 87 flights in the oracle (5..6 in 84 of them).
+pub const FLIGHT_START_MS: u16 = 6 * FRAME_MS;
+/// [replaced] Time of one drawn step of a flight (the rounds up to it, the sprites saved and
+/// drawn, what lies over them, the rectangle copied, 0x151fe6): 47 ms, 2.33 PAL frames, from
+/// 525 frames over 227 drawn steps in the 41 flights of the oracle that drew any.
+pub const FLIGHT_STEP_MS: u16 = 47;
+/// [replaced] Time of a view refresh with the window shown (0x102ef0: the animation tick, the
+/// window rendered by 0x102c90 and copied to the screen): 11 PAL frames, the median of the 40
+/// flights in the oracle that end with one (9..42, 29 of them 10 or 11); with the view flags
+/// before it, the refresh after a turn ([`crate::actors::turn::AFTER_TURN_MS`]).
+pub const REFRESH_MS: u16 = 11 * FRAME_MS;
+/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 24 ms,
+/// 1.2 PAL frames, from 157 frames over 131 changes of the message area in the oracle.
+pub const PRINT_MS: u16 = 24;
+/// Time of a window presented dissolving (0x102c90 with A4-0x6578 set: 0x1520e2 copies the
+/// window pixel by pixel, 25,600 of them): not measured (no dissolve happens in the oracle's
+/// start fight), so one PAL frame.
+pub const DISSOLVE_MS: u16 = FRAME_MS;
+/// Time of each window of the actor flash 0x132338 (the outlined actor presented dissolving,
+/// then the window without it): not measured, so one PAL frame.
+pub const ACTOR_FLASH_MS: u16 = FRAME_MS;
 /// The map window with its border, in screen pixels.
 const WINDOW: (usize, usize) = (176, 176);
+
+/// Port: waits until the original would have spent `ms` more on what it draws, on the engine
+/// clock, and at least one display frame, so what was presented before is published.
+///
+/// The waits of one run (nothing else waited in between) follow one schedule: `combat.due_ms`
+/// moves on by `ms` from where the last one ended, so what a wait loses to the host's tick the
+/// next one makes up, and the run takes the same engine time at any tick size. After anything
+/// else waited (a key, a prompt) the schedule starts again from now.
+pub async fn pace(state: &RefCell<State>, io: &Io, ms: u16) {
+    let due = {
+        let mut s = state.borrow_mut();
+        let now = io.now_ms();
+        let c = &mut s.combat;
+        let from = if now == c.paced_at_ms { c.due_ms } else { now };
+        c.due_ms = from + u64::from(ms);
+        *c.paced.entry(ms).or_default() += 1;
+        c.due_ms
+    };
+    io.vblank().await;
+    let left = due.saturating_sub(io.now_ms());
+    if left > 0 {
+        io.sleep(u32::try_from(left).unwrap_or(u32::MAX)).await;
+    }
+    state.borrow_mut().combat.paced_at_ms = io.now_ms();
+}
 
 /// One presented rectangle of the screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Effect {
-    /// Top-left pixel and size.
+    /// Top-left pixel and size (0 × 0: no picture, only the time).
     pub x: usize,
     pub y: usize,
     pub w: usize,
     pub h: usize,
     /// The screen's pixels there, row-major.
     pub pixels: Vec<u8>,
-    /// VBlanks to wait after showing it.
-    pub hold: u8,
+    /// Engine milliseconds the original spends making it: [`play_effects`] waits that long
+    /// before showing it.
+    pub cost: u16,
     /// Messages queued (`main.pending_print`) before it was presented.
     pub mark: usize,
 }
 
-/// Records the screen rectangle (x0, y0)..=(x1, y1) as it is now (after a present).
-pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize, hold: u8) {
+/// Records the screen rectangle (x0, y0)..=(x1, y1) as it is now (after a present), shown after
+/// `cost` ms.
+pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize, cost: u16) {
     if x1 < x0 || y1 < y0 {
         return;
     }
@@ -65,15 +125,33 @@ pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize,
             w,
             h,
             pixels,
-            hold,
+            cost,
             mark,
         });
     }
 }
 
-/// Records the whole map window.
-pub(crate) fn capture_window(s: &mut State, hold: u8) {
-    capture(s, 0, 0, WINDOW.0 - 1, WINDOW.1 - 1, hold);
+/// Records the whole map window, shown after `cost` ms.
+pub(crate) fn capture_window(s: &mut State, cost: u16) {
+    capture(s, 0, 0, WINDOW.0 - 1, WINDOW.1 - 1, cost);
+}
+
+/// Records `cost` ms of drawing that puts nothing new on the screen (a render into the back
+/// buffer).
+pub(crate) fn capture_pause(s: &mut State, cost: u16) {
+    if with_current_io(|_| ()).is_none() {
+        return;
+    }
+    let mark = s.main.pending_print.len();
+    s.combat.effects.push(Effect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+        pixels: Vec::new(),
+        cost,
+        mark,
+    });
 }
 
 /// Prints the first `n` queued messages and keeps the rest queued.
@@ -94,15 +172,35 @@ async fn flush_first(state: &RefCell<State>, io: &Io, n: usize) {
     s.main.pending_print = q;
 }
 
+/// Prints the first `n` queued entries one by one, each message after its time ([`PRINT_MS`]).
+async fn print_paced(state: &RefCell<State>, io: &Io, n: usize) {
+    for _ in 0..n {
+        let text = matches!(
+            state.borrow().main.pending_print.first(),
+            Some(crate::main_loop::Pending::Print(..))
+        );
+        if text {
+            pace(state, io, PRINT_MS).await;
+        }
+        flush_first(state, io, 1).await;
+    }
+}
+
 /// Plays the recorded frames in order with the messages queued between them, then the rest of
-/// the messages. A no-op when nothing was recorded.
+/// the messages: each after its time on the engine clock ([`pace`]). A no-op when nothing was
+/// recorded or queued.
 pub async fn play_effects(state: &RefCell<State>, io: &Io) {
     let effects = std::mem::take(&mut state.borrow_mut().combat.effects);
     let mut printed = 0;
+    let mut shown = false;
     for e in effects {
         if e.mark > printed {
-            flush_first(state, io, e.mark - printed).await;
+            print_paced(state, io, e.mark - printed).await;
             printed = e.mark;
+        }
+        pace(state, io, e.cost).await;
+        if e.w == 0 || e.h == 0 {
+            continue;
         }
         io.draw(|fb| {
             for r in 0..e.h {
@@ -113,11 +211,13 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
         });
         io.present();
         state.borrow_mut().combat.shown += 1;
-        for _ in 0..e.hold {
-            io.vblank().await;
-        }
+        shown = true;
     }
-    crate::main_loop::flush_prints(state, io).await;
+    if shown {
+        pace(state, io, 0).await;
+    }
+    let rest = state.borrow().main.pending_print.len();
+    print_paced(state, io, rest).await;
     let mut s = state.borrow_mut();
     if s.combat.swallow {
         s.combat.swallow = false;
@@ -278,6 +378,7 @@ pub fn fly(
     flags: u16,
 ) -> i16 {
     with_current_io(|io| crate::gfx::render_window(s, io, false));
+    capture_pause(s, FLIGHT_START_MS);
     let n = n.clamp(0, 16) as usize;
     let mut passed = [0u16; 32];
     let mut m = [Missile::default(); 16];
@@ -484,9 +585,8 @@ pub fn fly(
                         copy_rect(back, front, w(dx0), w(dy0), w(dx1), w(dy1), w(dx0), w(dy0));
                     })
                 });
-                let hold = u8::from(round % STEPS_PER_FRAME == 0);
                 let (cx0, cx1) = ((dx0 as usize) & !7, (dx1 as usize) | 7);
-                capture(s, cx0, dy0 as usize, cx1, dy1 as usize, hold);
+                capture(s, cx0, dy0 as usize, cx1, dy1 as usize, FLIGHT_STEP_MS);
             }
             if draws {
                 for (i, mi) in m.iter().enumerate().take(n) {
@@ -501,7 +601,7 @@ pub fn fly(
     }
     if tile != 0 && flags & (flight::TRAIL | flight::SHARED) == 0 {
         with_current_io(|io| crate::gfx::refresh_view(s, io));
-        capture_window(s, 0);
+        capture_window(s, REFRESH_MS);
     }
     for i in 0..n {
         let moved_x = m[i].tx != xs[i];

@@ -52,7 +52,7 @@ pub fn flash(s: &mut State, target: i16) {
             objects::build_draw_lists(s);
             super::seams::add_tile(s, 0x101, col, row, 1);
             with_current_io(|io| crate::gfx::render_window(s, io, true));
-            present::capture_window(s, present::FLASH_HOLD);
+            present::capture_window(s, present::FLASH_MS);
             objects::build_draw_lists(s);
             s.map.view_dirty = 1;
         }
@@ -496,7 +496,7 @@ pub fn lie_down(s: &mut State, actor: i16) {
                         objects::build_draw_lists(s);
                         s.gfx.dissolve = 1;
                         with_current_io(|io| crate::gfx::render_window(s, io, true));
-                        present::capture_window(s, 1);
+                        present::capture_window(s, present::DISSOLVE_MS);
                     }
                 }
             }

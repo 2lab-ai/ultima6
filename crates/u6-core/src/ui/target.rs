@@ -25,8 +25,9 @@ const F1: u16 = 0x13b;
 /// 27 and 38), the first 1..12 frames after the press and the second 28..37; in the other 2,
 /// whose followers were still forming up, 26..108 (median 72). 33 frames from the press puts the
 /// port's cells per held time within one of those 4 boots at every hold up to their 8 free cells
-/// (100 ms: 1, 1 s: 2, 4 s: 6), so no separate first-repeat delay is needed.
-pub(crate) const HELD_WALK_MS: u32 = 660;
+/// (100 ms: 1, 1 s: 2, 4 s: 6), so no separate first-repeat delay is needed. The world turn after
+/// the step waits for its refresh ([`crate::actors::turn::AFTER_TURN_MS`]); the rest is waited here.
+pub(crate) const HELD_WALK_MS: u32 = 660 - crate::actors::turn::AFTER_TURN_MS as u32;
 
 /// Alt + letter codes (0x100 + PC scan code) that select a command (0x106ca0 switch).
 const COMMAND_KEYS: [(u16, u8); 10] = [

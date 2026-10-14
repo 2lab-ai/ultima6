@@ -16,9 +16,9 @@ pub(super) const MSG_FOOD: u32 = 0x0011_59ca;
 const MSG_TOO_OLD: u32 = 0x0011_58ea;
 /// Food object type.
 const FOOD: u16 = 0x81;
-/// Display frames the XORed window of [`flash_window`] stays on the screen. The original shows
-/// it for as long as its second XOR and copy take; that time is not measured, so one PAL frame.
-pub const WINDOW_FLASH_HOLD: u8 = 1;
+/// Engine milliseconds the XORed window of [`flash_window`] stays on the screen: the original
+/// shows it for as long as its second XOR and copy take. Not measured, so one PAL frame.
+pub const WINDOW_FLASH_MS: u16 = crate::combat::present::FRAME_MS;
 
 /// The caster flash 0x132338 (`mode` 0 on the caster, 1 on a target) through its seam, then
 /// its frames played: the original draws the flash inside the call, so it is on the screen
@@ -36,7 +36,7 @@ pub async fn flash_actor(state: &RefCell<State>, io: &Io, actor: u16, mode: u16)
 /// copied to the screen (0x151f5a); then the same XOR again, which restores it.
 ///
 /// The XORed window is on the screen while the second pass draws; the engine publishes only
-/// the last present of a poll, so the port waits [`WINDOW_FLASH_HOLD`] display frames between
+/// the last present of a poll, so the port waits [`WINDOW_FLASH_MS`] on the engine clock between
 /// the passes (no borrow held).
 pub async fn flash_window(state: &RefCell<State>, io: &Io, circle: u16) {
     if circle >= 9 {
@@ -58,9 +58,7 @@ pub async fn flash_window(state: &RefCell<State>, io: &Io, circle: u16) {
             io.present();
         }
         if pass == 0 {
-            for _ in 0..WINDOW_FLASH_HOLD {
-                io.vblank().await;
-            }
+            crate::combat::present::pace(state, io, WINDOW_FLASH_MS).await;
         }
     }
     let mut s = state.borrow_mut();

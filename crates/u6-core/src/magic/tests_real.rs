@@ -254,7 +254,7 @@ pub(super) fn cast_with(files: &Files, setup: fn(&mut State), input: &str) -> En
     for k in keys(input) {
         e.tick(&[k], 16);
     }
-    for _ in 0..64 {
+    for _ in 0..640 {
         if e.finished() {
             break;
         }

@@ -198,7 +198,7 @@ pub fn refresh_view(state: &mut State, io: &Io) {
 /// the cell's current draw list on top (0x10e596 mode 2), then A4-0x6578 = 1 and 0x102c90 with
 /// D0 = 1; the draw lists rebuilt (0x10e81e), A4-0x6578 = 1 and 0x102c90 again. The original
 /// shows the flash for as long as its second render takes; the port records both windows as
-/// frames (the hit flash's way), the flash for [`crate::combat::present::FLASH_HOLD`] frames.
+/// frames (the hit flash's way), each after its time ([`crate::combat::present::ACTOR_FLASH_MS`]).
 /// The caller plays them ([`crate::combat::play_effects`]) where the original draws, before
 /// anything else is drawn or awaited: the async callers right after the call (the spells
 /// wrapper `magic::spells::flash_actor`, Ready / Unready, Pickpocket, Drop), the synchronous
@@ -234,9 +234,9 @@ pub fn flash_actor(state: &mut State, io: &Io, actor: u16, bright: bool) {
     crate::objects::add_tile(state, word, col as i16, row as i16, 2);
     state.gfx.dissolve = 1;
     render_window(state, io, true);
-    crate::combat::present::capture_window(state, crate::combat::present::FLASH_HOLD);
+    crate::combat::present::capture_window(state, crate::combat::present::ACTOR_FLASH_MS);
     crate::objects::build_draw_lists(state);
     state.gfx.dissolve = 1;
     render_window(state, io, true);
-    crate::combat::present::capture_window(state, 0);
+    crate::combat::present::capture_window(state, crate::combat::present::ACTOR_FLASH_MS);
 }

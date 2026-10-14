@@ -508,3 +508,49 @@ fn tame_looks_for_the_party_within_the_roster_only() {
     npc::tame(&mut s, 0x10);
     assert!(s.objects.location[0x10].x >= 59, "it ambled or waited");
 }
+
+/// Records `n` window frames with the hit flash's hold and plays them back at host ticks of
+/// `tick_ms`, with a zero-elapsed poll after every `zero_every` ticks (0 = none); the engine time
+/// at which the playback returned.
+fn playback_ms(n: usize, tick_ms: u32, zero_every: usize) -> u64 {
+    let done = std::rc::Rc::new(std::cell::Cell::new(None));
+    let out = std::rc::Rc::clone(&done);
+    let mut e = crate::Engine::with_game(
+        State::empty(),
+        crate::Files::default(),
+        move |st, io| async move {
+            for _ in 0..n {
+                present::capture_window(&mut st.borrow_mut(), present::FLASH_MS);
+            }
+            play_effects(&st, &io).await;
+            out.set(Some(io.now_ms()));
+        },
+    );
+    for t in 1..100_000 {
+        if done.get().is_some() {
+            break;
+        }
+        e.tick(&[], tick_ms);
+        if zero_every != 0 && t % zero_every == 0 {
+            e.tick(&[], 0);
+        }
+    }
+    done.get().expect("the playback ends")
+}
+
+#[test]
+fn effect_frames_take_the_same_engine_time_at_any_host_tick() {
+    // Spec 03 §1: display waits run on the engine clock, not on host ticks. The same frames take
+    // the same time at 16 ms and 8 ms ticks, and polls with no time elapsed add nothing.
+    let at16 = playback_ms(3, 16, 0);
+    let at8 = playback_ms(3, 8, 0);
+    let zero = playback_ms(3, 16, 1);
+    println!(
+        "three flash frames: {at16} ms at 16 ms ticks, {at8} ms at 8 ms, {zero} ms with zero polls"
+    );
+    assert!(at16.abs_diff(at8) <= 16, "16 ms {at16} vs 8 ms {at8}");
+    assert!(
+        at16.abs_diff(zero) <= 16,
+        "16 ms {at16} vs zero polls {zero}"
+    );
+}
