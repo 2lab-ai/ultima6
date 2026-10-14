@@ -5,9 +5,12 @@
 //! Handlers ported for milestone 1: walk (0x80), pass (space, Esc, 0x8f), party mode `0`, solo
 //! mode `1`..`9`, Talk (0x83 → 0x1127c4), the control codes (0x05 / 0x11 / 0x12d exit, 0x08
 //! help, 0x16 version, 0x1a sound). The cut handlers (Attack, Begin/break off combat, Cast, Look,
-//! Get, Drop, Move, Use, Rest, Save, Restore) are stub points: the loop prints what the original
-//! prints before calling them, the handler does nothing (no movement points spent), and the
-//! iteration ends as usual.
+//! Get, Drop, Move, Use, Rest, Save, Restore, the debug teleport) are stub points: the loop prints
+//! what the original prints before calling them (the command's name; not the begin/break combat
+//! lines nor the save/restore questions, which would announce something that does not happen),
+//! then the port's own line [`NOT_IMPLEMENTED`], clears the command state
+//! (`end_command`) and returns [`NO_TURN`]: no movement points spent, no world turn, the prompt
+//! again.
 
 use std::cell::RefCell;
 
@@ -25,7 +28,6 @@ use crate::ui::printf::{Arg, printf};
 const FMT_PROMPT: u32 = 0x0010_1f3c;
 const FMT_KEY_ECHO: u32 = 0x0010_1f44;
 const FMT_NAME_DASH: u32 = 0x0010_1f48;
-const MSG_RESTORE: u32 = 0x0010_1f4c;
 const MSG_HELP: u32 = 0x0010_1f5c;
 const MSG_ON: u32 = 0x0010_1f62;
 const MSG_OFF: u32 = 0x0010_1f66;
@@ -40,14 +42,11 @@ const MSG_PARTY_MODE: u32 = 0x768d;
 const MSG_PASS: u32 = 0x7641;
 const MSG_ABOARD: u32 = 0x744d;
 const MSG_EXIT: u32 = 0x765f;
-const MSG_SAVE: u32 = 0x764d;
 const MSG_SOLO: u32 = 0x766a;
 const MSG_FAILS: u32 = 0x7681;
 const MSG_NOT_ALL_HERE: u32 = 0x72aa;
 const MSG_NOT_IN_COMBAT: u32 = 0x732d;
 const MSG_NOT_SOLO: u32 = 0x7340;
-const MSG_BEGIN_COMBAT: u32 = 0x7534;
-const MSG_BREAK_COMBAT: u32 = 0x7525;
 const MSG_VERSION: u32 = 0x723c;
 const MSG_SOUND_ON: u32 = 0x727b;
 const MSG_SOUND_OFF: u32 = 0x7271;
@@ -68,10 +67,15 @@ const SAVE: u16 = 0xaa;
 const EXIT: u16 = 0x12d;
 /// The key read gives this when a cursor confirmed its target.
 const TARGET_DONE: u16 = crate::ui::wait::REPEAT;
+/// Port-only: what a cut handler returns instead of its code. No key or command code is 0xffff;
+/// the loop reprints the prompt and runs no end of turn (no world turn, no volcano check).
+pub(crate) const NO_TURN: u16 = 0xffff;
+/// Port-only text (not the game's) a cut handler prints instead of acting.
+pub(crate) const NOT_IMPLEMENTED: &[u8] = b"Not implemented in this version - nothing happened.\n";
 
 /// Objlist block bytes (A4-0x7b84 + n) the loop reads.
 const TAIL_COMBAT: usize = 0x78;
-const TAIL_SOLO: usize = 0x79;
+pub(crate) const TAIL_SOLO: usize = 0x79;
 const TAIL_SOLO_WORK: usize = 0x7a;
 
 fn tail(s: &State, i: usize) -> u8 {
@@ -115,10 +119,11 @@ pub async fn command_loop(state: &RefCell<State>, io: &Io) {
         let code = map_letter(state, io, key).await;
         let code = dispatch(state, io, code).await;
         flush_prints(state, io).await;
-        if code == EXIT {
-            return;
+        match code {
+            EXIT => return,
+            NO_TURN => reprompt(state, io).await,
+            _ => end_of_turn(state, io, code).await,
         }
-        end_of_turn(state, io, code).await;
     }
 }
 
@@ -136,7 +141,7 @@ fn start_cursor(s: &mut State, io: &Io, mode: u8, range: i8) {
 
 /// 0x104216..0x104496: command letters to codes, with the cursor each starts. Drop's inventory
 /// panel is redrawn (0x103f64) before its panel cursor shows.
-async fn map_letter(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
+pub(crate) async fn map_letter(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
     let (code, redraw) = letter_code(&mut state.borrow_mut(), io, key);
     if redraw {
         crate::ui::panels::redraw_panel(state, io).await;
@@ -225,6 +230,17 @@ fn end_command(s: &mut State, io: &Io) {
     pointer_shape();
 }
 
+/// Port-only: a cut handler's ending. [`NOT_IMPLEMENTED`] (on a new line after `after_name`, the
+/// "Name-" or "Rest" the original printed first), the command state cleared; the caller returns
+/// [`NO_TURN`].
+async fn not_implemented(state: &RefCell<State>, io: &Io, after_name: bool) {
+    if after_name {
+        printf(state, io, b"\n", &[]).await;
+    }
+    printf(state, io, NOT_IMPLEMENTED, &[]).await;
+    end_command(&mut state.borrow_mut(), io);
+}
+
 /// Reads keys until `Y` or `N` and echoes it (`%c` newline); true for `Y`.
 async fn yes_no(state: &RefCell<State>, io: &Io) -> bool {
     let key = loop {
@@ -238,7 +254,7 @@ async fn yes_no(state: &RefCell<State>, io: &Io) -> bool {
 }
 
 /// 0x104496..0x104d96: the handler of `code`; returns the code the end of turn sees (an exit
-/// prompt answered `N` gives 0, `Y` 0x12d).
+/// prompt answered `N` gives 0, `Y` 0x12d), or [`NO_TURN`] after a cut handler.
 pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
     let size = u16::from(state.borrow().actors.party.size);
     if (0x30..=0x39).contains(&code) && code < size + 0x31 {
@@ -267,11 +283,11 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
             print_at(state, io, MSG_BANG, &[]).await;
         }
         0x12 => {
-            print_at(state, io, MSG_RESTORE, &[]).await;
-            if yes_no(state, io).await {
-                // Contract: reload the saved game (0x1052c8). Fallback: nothing restored.
-                todo_stub!("0x1052c8 restore the saved game", ());
-            }
+            // Contract: the restore question (image 0x101f4c), then on `Y` reload the saved game
+            // (0x1052c8). Fallback: the question is not asked, nothing restored, no turn.
+            todo_stub!("0x1052c8 restore the saved game", ());
+            not_implemented(state, io, false).await;
+            return NO_TURN;
         }
         0x16 => say(state, io, MSG_VERSION, &[]).await,
         0x1a => {
@@ -296,11 +312,13 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
             let fmt = a4_string(io, FMT_ATTACK);
             let name = a4_string(io, MSG_ATTACK);
             printf(state, io, &fmt, &[Arg::Str(&name)]).await;
-            // Contract: the Attack command (0x124caa: target, combat). Fallback: no attack.
+            // Contract: the Attack command (0x124caa: target, combat). Fallback: no attack, the
+            // cross-hair put away, no turn.
             todo_stub!("0x124caa Attack command", ());
-            state.borrow_mut().ui.input.target_command = NO_COMMAND;
+            not_implemented(state, io, true).await;
+            return NO_TURN;
         }
-        CAST..=0x88 => targeted(state, io, code).await,
+        CAST..=0x88 => return targeted(state, io, code).await,
         REST => {
             let aboard = {
                 let s = state.borrow();
@@ -310,22 +328,23 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
                 todo_stub!("0x110878 play song 0 (music off)", ());
             }
             print_at(state, io, MSG_REST, &[]).await;
-            // Contract: the Rest command (0x127b1a: hours, guard, heal). Fallback: no rest.
+            // Contract: the Rest command (0x127b1a: hours, guard, heal). Fallback: no rest, no
+            // turn.
             todo_stub!("0x127b1a Rest command", ());
             if !aboard {
                 todo_stub!("0x110912 pick and play the area song", ());
             }
-            end_command(&mut state.borrow_mut(), io);
+            not_implemented(state, io, true).await;
+            return NO_TURN;
         }
-        COMBAT => combat_toggle(state, io).await,
+        COMBAT => return combat_toggle(state, io).await,
         SAVE => {
             if state.borrow().map.flag_7afb == 0 {
-                say(state, io, MSG_SAVE, &[]).await;
-                if yes_no(state, io).await {
-                    // Contract: write the save (0x105716). Fallback: nothing written.
-                    todo_stub!("0x105716 save the game", ());
-                    end_command(&mut state.borrow_mut(), io);
-                }
+                // Contract: the save question (A4-0x764d), then on `Y` write the save (0x105716).
+                // Fallback: the question is not asked, nothing written, no turn.
+                todo_stub!("0x105716 save the game", ());
+                not_implemented(state, io, false).await;
+                return NO_TURN;
             }
         }
         0xd5 => {
@@ -346,8 +365,10 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
         }
         0xd6 => {
             // Contract: the debug teleport (number prompts 0x104140, then 0x1092fc). Fallback:
-            // no teleport.
+            // no teleport, no turn.
             todo_stub!("0x104140 debug teleport prompts", ());
+            not_implemented(state, io, false).await;
+            return NO_TURN;
         }
         0xd7 => {
             let mut s = state.borrow_mut();
@@ -488,9 +509,10 @@ async fn solo_mode(state: &RefCell<State>, io: &Io, code: u16) {
 
 /// Cast, Talk, Look, Get, Drop, Move, Use (0x10498e..0x104a96): Cast, Get, Drop and Move are
 /// refused aboard ship; then the command waits for its target (A4-0x7a32 = 1, A4-0x7a2e = code),
-/// "Name-" is printed and, except for Cast (which reads its own input), the next key read must
-/// confirm a target (0x8e) or the loop says "what?".
-async fn targeted(state: &RefCell<State>, io: &Io, code: u16) {
+/// "Name-" is printed and, for Talk, the next key read must confirm a target (0x8e) or the loop
+/// says "what?". The cut commands (Cast reads its own input; Look, Get, Drop, Move and Use act
+/// on the confirmed target) end after "Name-" without reading a target and give [`NO_TURN`].
+async fn targeted(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
     if matches!(code, CAST | 0x85..=0x87) {
         let aboard = {
             let s = state.borrow();
@@ -499,7 +521,7 @@ async fn targeted(state: &RefCell<State>, io: &Io, code: u16) {
         if aboard {
             print_command(state, io, code).await;
             say(state, io, MSG_ABOARD, &[]).await;
-            return;
+            return code;
         }
     }
     {
@@ -509,37 +531,40 @@ async fn targeted(state: &RefCell<State>, io: &Io, code: u16) {
         pointer_shape();
     }
     print_command(state, io, code).await;
-    if code == CAST {
-        // Contract: the Cast command (0x11af10: spell input, magic). Fallback: no spell.
-        todo_stub!("0x11af10 Cast command", ());
-    } else if crate::ui::wait::read_key(state, io).await == TARGET_DONE {
-        let command = state.borrow().ui.input.target_command;
-        match command {
-            TALK => {
-                let (talker, target) = {
-                    let s = state.borrow();
-                    (s.actors.party.leader_index, s.ui.input.selection)
-                };
-                crate::converse::talk(&Cx::new(state, io), talker, target, true).await;
-                todo_stub!("0x110912 pick and play the area song", ());
-            }
-            // Contracts: the object commands act on the target (A4-0x2f04 / -0x2f02); the
-            // fallback does nothing and spends no movement points.
+    if code != TALK {
+        match code {
+            // Contract: the Cast command (0x11af10: spell input, magic). Fallback: no spell.
+            CAST => todo_stub!("0x11af10 Cast command", ()),
+            // Contracts: the object commands act on the confirmed target (A4-0x2f04 / -0x2f02);
+            // the fallback reads no target, does nothing and spends no movement points.
             0x84 => todo_stub!("0x1298b8 Look command", ()),
             0x85 => todo_stub!("0x12a7a4 Get command", ()),
             0x86 => todo_stub!("0x12a226 Drop command", ()),
             0x87 => todo_stub!("0x12ae04 Move command", ()),
-            0x88 => todo_stub!("0x1305e0 Use command", ()),
-            _ => {}
+            _ => todo_stub!("0x1305e0 Use command", ()),
+        }
+        not_implemented(state, io, true).await;
+        return NO_TURN;
+    }
+    if crate::ui::wait::read_key(state, io).await == TARGET_DONE {
+        if state.borrow().ui.input.target_command == TALK {
+            let (talker, target) = {
+                let s = state.borrow();
+                (s.actors.party.leader_index, s.ui.input.selection)
+            };
+            crate::converse::talk(&Cx::new(state, io), talker, target, true).await;
+            todo_stub!("0x110912 pick and play the area song", ());
         }
     } else {
         say(state, io, MSG_WHAT, &[]).await;
     }
     end_command(&mut state.borrow_mut(), io);
+    code
 }
 
-/// `B` (0x104b98..0x104c10): begin or break off combat, in party mode only.
-async fn combat_toggle(state: &RefCell<State>, io: &Io) {
+/// `B` (0x104b98..0x104c10): begin or break off combat, in party mode only. The refusals (solo,
+/// aboard) are the original's and take the turn; begin and break are cut and give [`NO_TURN`].
+async fn combat_toggle(state: &RefCell<State>, io: &Io) -> u16 {
     let (solo, combat, aboard) = {
         let s = state.borrow();
         let p = &s.actors.party;
@@ -551,17 +576,22 @@ async fn combat_toggle(state: &RefCell<State>, io: &Io) {
     };
     if solo >= 0 {
         say(state, io, MSG_NOT_SOLO, &[]).await;
-    } else if combat {
-        say(state, io, MSG_BREAK_COMBAT, &[]).await;
-        // Contract: leave combat mode (0x121d78). Fallback: still in combat.
+        return COMBAT;
+    }
+    if combat {
+        // Contract: the break-off line (A4-0x7525), then leave combat mode (0x121d78).
+        // Fallback: no line, still in combat, no turn.
         todo_stub!("0x121d78 break off combat", ());
     } else if aboard {
         say(state, io, MSG_ABOARD, &[]).await;
+        return COMBAT;
     } else {
-        say(state, io, MSG_BEGIN_COMBAT, &[]).await;
-        // Contract: enter combat mode (0x121c64). Fallback: not in combat.
+        // Contract: the begin line (A4-0x7534), then enter combat mode (0x121c64). Fallback: no
+        // line, not in combat, no turn.
         todo_stub!("0x121c64 begin combat mode", ());
     }
+    not_implemented(state, io, false).await;
+    NO_TURN
 }
 
 /// 0x104d98..0x104df2: a pending save or restore (A4-0x637a 'R' / 'G'), the world turn
@@ -578,16 +608,18 @@ async fn end_of_turn(state: &RefCell<State>, io: &Io, code: u16) {
     flush_prints(state, io).await;
     super::end_of_turn_volcano(&mut state.borrow_mut());
     flush_prints(state, io).await;
-    let prompt = {
-        let mut s = state.borrow_mut();
-        if code != WALK {
-            s.actors.work.prompt = 1;
-        }
-        s.actors.work.prompt != 0
-    };
-    if prompt {
-        let name = leader_name(&state.borrow());
-        print_at(state, io, FMT_REPROMPT, &[Arg::Str(&name)]).await;
-        state.borrow_mut().actors.work.prompt = 0;
+    if code != WALK {
+        state.borrow_mut().actors.work.prompt = 1;
     }
+    if state.borrow().actors.work.prompt != 0 {
+        reprompt(state, io).await;
+    }
+}
+
+/// The prompt again (`\n%s:` newline `%>`, A4-0x7afd back to 0): after any command but a step,
+/// and after a cut handler.
+async fn reprompt(state: &RefCell<State>, io: &Io) {
+    let name = leader_name(&state.borrow());
+    print_at(state, io, FMT_REPROMPT, &[Arg::Str(&name)]).await;
+    state.borrow_mut().actors.work.prompt = 0;
 }

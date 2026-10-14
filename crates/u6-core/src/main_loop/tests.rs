@@ -229,12 +229,142 @@ fn exit_asks_until_y_or_n() {
 }
 
 #[test]
-fn pass_spends_the_leaders_points_and_cut_commands_spend_none() {
+fn pass_spends_the_leaders_points() {
     let (code, s) = dispatched(0x20, &[], State::empty());
     assert_eq!((code, s.actors.movement_points[1]), (0x20, 0));
-    // Look with a key that confirms nothing: "what?", no points spent, the cursor cleared.
-    let (code, s) = dispatched(0x84, &[crate::Key::Char('q')], State::empty());
-    assert_eq!((code, s.actors.movement_points[1]), (0x84, 20));
+}
+
+/// Whether the message scroll shows the port's line, wrapped or not (the test window breaks
+/// inside words, the game's at spaces, which it drops).
+fn says_port_line(s: &State) -> bool {
+    let line = String::from_utf8_lossy(commands::NOT_IMPLEMENTED);
+    let line = line.trim_end();
+    let m = &s.ui.messages;
+    m.concat().contains(line) || m.join(" ").contains(line)
+}
+
+/// Every cut handler the loop reaches (Attack, Cast, Look, Get, Drop, Move, Use, Rest, combat
+/// begin and break, Save, Restore, the debug teleport): the port's line, the command state
+/// cleared, no movement points spent, no turn, and no key read (a queued key stays queued).
+#[test]
+fn cut_commands_say_so_clear_the_command_and_take_no_turn() {
+    let codes = [
+        0x81, 0x82, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0xaa, 0x12, 0xd6,
+    ];
+    for combat in [0, 1] {
+        for &code in &codes {
+            let mut st = State::empty();
+            st.actors.objlist_tail[commands::TAIL_SOLO] = 0xff; // party mode
+            st.actors.objlist_tail[TAIL_COMBAT] = combat;
+            st.actors.party.leader_index = 0;
+            st.ui.input.targeting = 1;
+            st.ui.input.target_pending = 1;
+            let (got, s) = dispatched(code, &[], st);
+            let what = format!("code {code:#x}, combat {combat}");
+            assert_eq!(got, commands::NO_TURN, "{what}");
+            assert_eq!(s.actors.movement_points[1], 20, "{what}");
+            assert_eq!(
+                (s.ui.input.target_pending, s.ui.input.targeting),
+                (0, 0),
+                "{what}"
+            );
+            assert_eq!(
+                s.ui.input.target_command,
+                crate::ui::globals::NO_COMMAND,
+                "{what}"
+            );
+            assert!(says_port_line(&s), "{what}: {:?}", s.ui.messages);
+        }
+    }
+}
+
+/// Talk is not cut: it still waits for its target (a key that confirms nothing: "what?", which
+/// the test text layer cannot print without the game's strings) and takes the turn.
+#[test]
+fn talk_still_reads_its_target() {
+    let (code, s) = dispatched(0x83, &[crate::Key::Char('q')], State::empty());
+    assert_eq!((code, s.actors.movement_points[1]), (0x83, 20));
     assert_eq!((s.ui.input.target_pending, s.ui.input.targeting), (0, 0));
-    assert_eq!(s.ui.input.target_command, crate::ui::globals::NO_COMMAND);
+    assert!(!says_port_line(&s));
+}
+
+/// The loop on a cut command: the prompt again, no world turn (the clock and the movement
+/// points stay), and an arrow pressed after `A` walks the party (NICE-2: Attack used to leave
+/// its cross-hair up).
+#[test]
+fn after_attack_an_arrow_walks() {
+    use crate::Key;
+    let mut s = State::empty();
+    s.ui = test_support::test_ui();
+    s.ui.tables.keymap[0x4e] = [0x14d; 4]; // the right arrow's direction code
+    s.actors.party.members[0] = 1;
+    s.actors.party.size = 1;
+    s.objects.type_frame[1] = 0x17a;
+    let walked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let w = std::rc::Rc::clone(&walked);
+    let mut e = crate::Engine::with_game(s, Files::default(), move |st, io| async move {
+        for _ in 0..3 {
+            let key = crate::ui::wait::read_key(&st, &io).await;
+            let code = commands::map_letter(&st, &io, key).await;
+            let code = commands::dispatch(&st, &io, code).await;
+            let targeting = st.borrow().ui.input.targeting;
+            w.borrow_mut().push((code, targeting));
+        }
+    });
+    for k in [Key::Char('A'), Key::Right, Key::Right] {
+        e.tick(&[crate::InputEvent::Key(k)], 16);
+        for _ in 0..5 {
+            e.tick(&[], 16);
+        }
+    }
+    let got = walked.borrow().clone();
+    assert_eq!(
+        got,
+        [(commands::NO_TURN, 0), (0x80, 0), (0x80, 0)],
+        "A: cut, cursor off; each arrow is a walk"
+    );
+}
+
+/// On the user's files: `A` prints the port's line, runs no world turn (clock and every actor
+/// where they were) and leaves no cursor up, so `A` then an arrow ends where the arrow alone
+/// ends.
+#[test]
+fn real_attack_is_cut_and_the_next_arrow_walks() {
+    let Some(files) = files() else { return };
+    let boot = |files: Files| {
+        let mut e = crate::Engine::with_seed(files, 7).unwrap_or_else(|err| panic!("{err}"));
+        for _ in 0..60 {
+            e.tick(&[], 16);
+        }
+        e
+    };
+    let press = |e: &mut crate::Engine, k: crate::Key| {
+        e.tick(&[crate::InputEvent::Key(k)], 16);
+        for _ in 0..30 {
+            e.tick(&[], 16);
+        }
+    };
+    let snapshot = |e: &crate::Engine| {
+        let s = e.state();
+        (s.map.centre, s.actors.calendar, s.objects.location.clone())
+    };
+    let mut cut = boot(files.clone());
+    let before = snapshot(&cut);
+    press(&mut cut, crate::Key::Char('a'));
+    assert_eq!(snapshot(&cut), before, "no turn");
+    assert!(
+        says_port_line(&cut.state()),
+        "{:?}",
+        cut.state().ui.messages
+    );
+    assert_eq!(cut.state().ui.input.targeting, 0);
+    press(&mut cut, crate::Key::Right);
+    let mut plain = boot(files);
+    press(&mut plain, crate::Key::Right);
+    assert_eq!(
+        snapshot(&cut),
+        snapshot(&plain),
+        "A then an arrow = the arrow"
+    );
+    assert_ne!(snapshot(&plain).0, before.0, "the arrow walked");
 }

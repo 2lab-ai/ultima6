@@ -86,15 +86,15 @@ Totals: functions 599: ported 223, partial 8, stubbed 65, replaced 81, planned 3
 | 0x103f64 | ui | M | `ui/panels.rs::redraw_panel` | ported |
 | 0x103fd4 | main | M | `main_loop/main_hunk.rs::switch_leader` | ported |
 | 0x104094 | main | M | `main_loop/main_hunk.rs::end_solo` | ported |
-| 0x104140 | main | M | `main_loop/commands.rs:350 in dispatch` | stubbed |
+| 0x104140 | main | M | `main_loop/commands.rs:369 in dispatch` | stubbed |
 | 0x1041d8 | main | M | `main_loop/commands.rs::command_loop` | ported |
 | 0x105016 | ui | M | `converse/seams.rs:245 in face_target` | stubbed |
 | 0x1051a6 | ui | M | `main_loop/commands.rs::pointer_shape` | replaced |
 | 0x105228 | ui |  | `ui/text.rs::draw_char` | ported |
 | 0x10525c | ui |  | `ui/text.rs::scroll_window` | ported |
-| 0x1052c8 | saveload | S | `main_loop/commands.rs:273 in dispatch`; `main_loop/commands.rs:573 in end_of_turn` | stubbed |
+| 0x1052c8 | saveload | S | `main_loop/commands.rs:288 in dispatch`; `main_loop/commands.rs:603 in end_of_turn` | stubbed |
 | 0x105350 | saveload | M | `state.rs::new_game` | partial |
-| 0x105716 | saveload | S | `main_loop/commands.rs:326 in dispatch`; `main_loop/commands.rs:575 in end_of_turn` | stubbed |
+| 0x105716 | saveload | S | `main_loop/commands.rs:345 in dispatch`; `main_loop/commands.rs:605 in end_of_turn` | stubbed |
 | 0x10598a | ui | M | `ui/panels.rs::tile_on_blank` | ported |
 | 0x1059d4 | ui | M | `ui/` | planned |
 | 0x105a3e | ui | M | `ui/` | planned |
@@ -205,8 +205,8 @@ Totals: functions 599: ported 223, partial 8, stubbed 65, replaced 81, planned 3
 | 0x10edb4 | objects | M | `objects/list.rs::link_actors` | ported |
 | 0x10ee76 | objects | M | `objects/names.rs::look_text` | ported |
 | 0x10eef8 | objects | M | `objects/names.rs::display_name` | ported |
-| 0x110878 | sound | S | `actors/turn.rs:40 in darkness`; `converse/seams.rs:345 in play_song`; `main_loop.rs:236 in run`; `main_loop/commands.rs:285 in dispatch`; `main_loop/commands.rs:310 in dispatch`; `map/seams.rs:211 in play_song` | stubbed |
-| 0x110912 | sound | S | `actors/seams.rs:337 in area_music`; `converse/seams.rs:350 in pick_song`; `main_loop.rs:231 in run`; `main_loop/commands.rs:282 in dispatch`; `main_loop/commands.rs:316 in dispatch`; `main_loop/commands.rs:524 in targeted`; `map/seams.rs:206 in play_area_song` | stubbed |
+| 0x110878 | sound | S | `actors/turn.rs:40 in darkness`; `converse/seams.rs:345 in play_song`; `main_loop.rs:236 in run`; `main_loop/commands.rs:301 in dispatch`; `main_loop/commands.rs:328 in dispatch`; `map/seams.rs:211 in play_song` | stubbed |
+| 0x110912 | sound | S | `actors/seams.rs:337 in area_music`; `converse/seams.rs:350 in pick_song`; `main_loop.rs:231 in run`; `main_loop/commands.rs:298 in dispatch`; `main_loop/commands.rs:335 in dispatch`; `main_loop/commands.rs:556 in targeted`; `map/seams.rs:206 in play_area_song` | stubbed |
 | 0x1109e0 | ui | M | `ui/panels.rs::roster` | ported |
 | 0x110c76 | ui | M | `ui/panels.rs::combat_mode_line` | ported |
 | 0x110d2c | ui | M | `ui/panels.rs::stats` | ported |
@@ -307,7 +307,7 @@ Totals: functions 599: ported 223, partial 8, stubbed 65, replaced 81, planned 3
 | 0x11a550 | magic |  |  | - |
 | 0x11a586 | magic |  |  | - |
 | 0x11abd0 | magic |  |  | - |
-| 0x11af10 | magic | S | `main_loop/commands.rs:514 in targeted` | stubbed |
+| 0x11af10 | magic | S | `main_loop/commands.rs:537 in targeted` | stubbed |
 | 0x11b1c0 | actors | M | `actors/walk.rs::can_move_to` | ported |
 | 0x11b92a | actors | M | `actors/walk.rs::outside_window` | ported |
 | 0x11b9ae | actors | M | `actors/walk.rs::blocked_at` | ported |
@@ -354,8 +354,8 @@ Totals: functions 599: ported 223, partial 8, stubbed 65, replaced 81, planned 3
 | 0x121826 | schedules | M | `actors/clock.rs::pick_schedules` | ported |
 | 0x121b08 | combat | S | `map/seams.rs:184 in distance` | stubbed |
 | 0x121bce | combat | M | `actors/leaves.rs::uncharm` | ported |
-| 0x121c64 | combat | S | `main_loop.rs:228 in run`; `main_loop/commands.rs:563 in combat_toggle` | stubbed |
-| 0x121d78 | combat | S | `actors/npc.rs:564 in arrest`; `main_loop/commands.rs:557 in combat_toggle`; `map/seams.rs:201 in break_off_combat` | stubbed |
+| 0x121c64 | combat | S | `main_loop.rs:228 in run`; `main_loop/commands.rs:591 in combat_toggle` | stubbed |
+| 0x121d78 | combat | S | `actors/npc.rs:564 in arrest`; `main_loop/commands.rs:584 in combat_toggle`; `map/seams.rs:201 in break_off_combat` | stubbed |
 | 0x121e88 | combat | S |  | - |
 | 0x121fca | combat | M | `actors/leaves.rs::strength` | ported |
 | 0x121ff8 | combat | M | `actors/leaves.rs::dexterity` | ported |
@@ -389,7 +389,7 @@ Totals: functions 599: ported 223, partial 8, stubbed 65, replaced 81, planned 3
 | 0x124232 | combat |  |  | - |
 | 0x1249de | combat |  |  | - |
 | 0x124a98 | combat |  |  | - |
-| 0x124caa | combat | S | `main_loop/commands.rs:300 in dispatch` | stubbed |
+| 0x124caa | combat | S | `main_loop/commands.rs:317 in dispatch` | stubbed |
 | 0x124e0e | combat | S | `ui/seams.rs:77 in distance` | stubbed |
 | 0x124e74 | combat |  |  | - |
 | 0x12500a | combat | S | `actors/npc.rs:60 in find_target` | stubbed |
@@ -415,7 +415,7 @@ Totals: functions 599: ported 223, partial 8, stubbed 65, replaced 81, planned 3
 | 0x12783c | party |  |  | - |
 | 0x1279d4 | party | M | `actors/party.rs::heal` | ported |
 | 0x127ac0 | party |  |  | - |
-| 0x127b1a | party | S | `main_loop/commands.rs:314 in dispatch` | stubbed |
+| 0x127b1a | party | S | `main_loop/commands.rs:333 in dispatch` | stubbed |
 | 0x1283b8 | objects | M | `objects/effects.rs::party_member` | ported |
 | 0x1288ee | objects | M | `objects/effects.rs::member_x` | ported |
 | 0x128942 | objects | M | `objects/effects.rs::member_y` | ported |
@@ -436,14 +436,14 @@ Totals: functions 599: ported 223, partial 8, stubbed 65, replaced 81, planned 3
 | 0x129438 | objects |  |  | - |
 | 0x12948a | objects |  |  | - |
 | 0x129544 | objects |  |  | - |
-| 0x1298b8 | objects | S | `main_loop/commands.rs:528 in targeted` | stubbed |
+| 0x1298b8 | objects | S | `main_loop/commands.rs:540 in targeted` | stubbed |
 | 0x12a050 | objects |  |  | - |
 | 0x12a106 | objects |  |  | - |
-| 0x12a226 | objects | S | `main_loop/commands.rs:530 in targeted` | stubbed |
-| 0x12a7a4 | objects | S | `main_loop/commands.rs:529 in targeted` | stubbed |
+| 0x12a226 | objects | S | `main_loop/commands.rs:542 in targeted` | stubbed |
+| 0x12a7a4 | objects | S | `main_loop/commands.rs:541 in targeted` | stubbed |
 | 0x12acc0 | objects |  |  | - |
 | 0x12adc4 | objects |  |  | - |
-| 0x12ae04 | objects | S | `main_loop/commands.rs:531 in targeted` | stubbed |
+| 0x12ae04 | objects | S | `main_loop/commands.rs:543 in targeted` | stubbed |
 | 0x12ba36 | objects | M | `objects/effects.rs:158 in spring_trap` | stubbed |
 | 0x12bbc0 | objects |  |  | - |
 | 0x12bdfa | objects |  |  | - |
@@ -500,7 +500,7 @@ Totals: functions 599: ported 223, partial 8, stubbed 65, replaced 81, planned 3
 | 0x13051a | objects |  |  | - |
 | 0x130526 | objects |  |  | - |
 | 0x130546 | objects |  |  | - |
-| 0x1305e0 | objects | S | `main_loop/commands.rs:532 in targeted` | stubbed |
+| 0x1305e0 | objects | S | `main_loop/commands.rs:544 in targeted` | stubbed |
 | 0x131196 | unknown | M | `objects/effects.rs::monster_index` | ported |
 | 0x1311d2 | unknown | M | `objects/effects.rs::vary` | ported |
 | 0x13121a | unknown | M | `objects/effects.rs:222 in equip_monster` | stubbed |
@@ -525,7 +525,7 @@ Totals: functions 599: ported 223, partial 8, stubbed 65, replaced 81, planned 3
 | 0x133e5e | converse | M | `converse/script.rs::load_script` | ported |
 | 0x133fe0 | ui | M | `ui/panels.rs::figure_frame` | ported |
 | 0x134044 | ui | M | `ui/` | planned |
-| 0x13410a | ui | M | `main_loop/commands.rs:345 in dispatch` | stubbed |
+| 0x13410a | ui | M | `main_loop/commands.rs:364 in dispatch` | stubbed |
 | 0x1346a0 | fileio | M | Files (rule: spec 03 §4) | replaced |
 | 0x1346f4 | fileio | M | Files (rule: spec 03 §4) | replaced |
 | 0x1346fc | fileio | M | Files (rule: spec 03 §4) | replaced |
