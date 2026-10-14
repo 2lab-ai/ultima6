@@ -45,7 +45,7 @@ Status: in-progress
 | WU-4a | tile graphics + palette | `da9a115`, `1afd5f0`; 2048 tiles; sheet read by dispatcher = real U6 tiles | done |
 | WU-4b | function inventory | `5630231`, `9d93cb4`; 1383/1383; M1 = 320 game fns + 41 crt, 45 stubs | done |
 | WU-C0 | u6-core engine/State/RNG/seams (03 rev 2) | `65b421c`, `063b0f1`; 127 tests (re-run by dispatcher); zip→intake→State→Engine frame | done |
-| WU-O | Amiga emulator oracle (AROS) | `693c4db`, `159bea2`; vAmigaWeb+AROS headless; boots to ORIGIN Presents + intro scene, then frozen (installer under AROS wrote broken disks) | partial → WU-O2 in flight (build floppies from verified files) |
+| WU-O | Amiga emulator oracle (AROS) | `6486e6b`, `7bf6d1a`, `9fc76d2`; floppies built from installu6's copy table; original reaches Britannia via `--game-first` (launcher 1-byte patch + objlist 0x1C71/0x1C72 = 1); intro program `u` still stalls under AROS (not root-caused) | done (game path) |
 | WU-P1 | gfx world view | port/gfx `57d6c8a`; 18 fns; throne-room frame read by dispatcher | merged → integrate/m1 |
 | WU-P2 | map | port/map `43bb7a4`; 16 ported + 3 replaced; view/light grids from real data | merged → integrate/m1 |
 | WU-P3 | objects | port/objects `8ec66c3`; 60/70 + 4 helpers; 16838 records load + write back | merged → integrate/m1 |
@@ -57,3 +57,21 @@ Status: in-progress
 
 Open review items: gpt6 spec review CHANGES ×8 applied in `d749513`; WU-C0 notified.
 TS intake deleted in `1a414a6`. Port worktrees gfx/map/objects/ui/actors/converse removed after the clean+on-remote+merged gate.
+
+## M1 parity receipt — start frame (2026-10-14, dispatcher-read)
+
+Oracle `~/Games/ultima6/oracle/shots/play-20261014-190647/ingame.png` (crop at (93,44), 320×200) vs
+port `port/main` headless start frame. Receipts kept outside the repo:
+`~/Games/ultima6/receipts/parity-start.png` (sha256 dd74b474…), `parity-diff2.png` (f769019e…).
+
+- Raw RGB agreement is 4.2% because the emulator expands 4-bit channels non-linearly (15→240,
+  mid values one nibble low) while the port uses n×17. Under a palette-index mapping
+  (each port colour → majority oracle colour) agreement is **98.80% whole screen, 99.23% outside
+  the map window**.
+
+| Gap | Where | Cause | State |
+|---|---|---|---|
+| G1 | gargoyles in the throne room (oracle) absent in port | egg hatching 0x1319b2 + monster spawn 0x13121a are stubs | open (M2 with combat) |
+| G2 | last command icon differs | icon reflects the combat flag set in the shipped DATA1 state | open |
+| G3 | one NPC sprite + brazier flames | animation phase / idle-pass RNG timing | not a defect (timing) |
+| G4 | pointer at (0,0) | emulator mouse sprite | not a defect |
