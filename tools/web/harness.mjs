@@ -90,7 +90,8 @@ export async function loadSaves() {
   const files = await real.loadSaves(); log('saves:load:' + files.length); return files;
 }
 export async function forgetSaves() {
-  log('saves:forget:start'); await real.forgetSaves(); log('saves:forget:end');
+  log('saves:forget:start'); await window.__gate('saves-forget');
+  await real.forgetSaves(); log('saves:forget:end');
 }
 `;
 

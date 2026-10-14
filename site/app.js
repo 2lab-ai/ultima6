@@ -17,9 +17,10 @@
 // start lays the stored save over the game files, so a reload resumes it. Only the game that
 // owns the stored save (the one on screen, once it started) stores its Saves, and none is taken
 // while an import runs: a replaced game's Save never lands over the save its replacement
-// started from. An imported savegame folder becomes the stored save once the game
-// started from it. Sound: the first click or key on the canvas
-// (or the Mute button) starts an AudioContext; after each tick the page renders the game's
+// started from. An imported savegame folder becomes the stored save once the game started
+// from it. After the stored save is removed, the next Save of the game on screen is stored
+// whole (objlist and every block). Sound: the first click or key on the canvas (or the Mute
+// button) starts an AudioContext; after each tick the page renders the game's
 // audio in wasm a little ahead and posts it to the AudioWorklet (site/audio-worklet.js).
 // A press on the canvas is first the game's pointer event, then the gesture that starts the
 // sound: the game queues it whatever the AudioContext does, and only once.
@@ -187,16 +188,19 @@ function setMuted(muted) {
 let owner = null;
 let pause = 0;
 let saveSeen = 0; // the owner's highest save generation already queued for storing
+let forgets = 0; // removals of the stored save so far: a save job taken before one writes nothing
 
 // After a tick: a Save that committed in it is stored as one operation; the game hears of the
 // commit (its next list starts after it) only once the transaction completed. The operation
-// writes nothing when its game no longer owns the stored save by then (it was replaced).
+// writes nothing when its game no longer owns the stored save by then (it was replaced) or
+// the stored save was removed after it was taken (it lists only the blocks its Saves replaced).
 function checkSave() {
   if (pause > 0 || game !== owner) return;
   const gen = game.save_generation();
   if (gen <= saveSeen) return;
   saveSeen = gen;
   const g = game;
+  const era = forgets;
   const files = [];
   const n = g.save_collect();
   for (let i = 0; i < n; i += 1) {
@@ -206,7 +210,7 @@ function checkSave() {
     files.push({ path, bytes: new Uint8Array(wasm.memory.buffer, ptr, len).slice() });
   }
   enqueue('Saving the game', async () => {
-    if (g !== owner) return;
+    if (g !== owner || era !== forgets) return;
     await storeSaves(files);
     if (g === game && !crashed) g.save_committed(gen);
     document.body.dataset.saved = String(gen);
@@ -503,10 +507,19 @@ async function forgetKept() {
     : 'The kept game files were removed from this browser.');
 }
 
+// The stored save removed: a save job taken before writes nothing, and the game on screen owns
+// the empty store, its next Save listing the whole game (objlist and every block), so a start
+// from it is the world that game had and not new-game blocks under its own.
 async function forgetSaved() {
   await forgetSaves();
+  forgets += 1;
+  if (game && !crashed) {
+    game.save_forgotten();
+    owner = game;
+  }
   setStatus('The saved game was removed from this browser; the next start is a new game. The ' +
-    'game on screen runs on until the page is left or reloaded.');
+    'game on screen runs on until the page is left or reloaded; a Save in it stores the whole ' +
+    'game again.');
 }
 
 // Runs `op` (an import, which may replace the running game) with no Save taken meanwhile.
