@@ -92,8 +92,17 @@ fn finish_load_state(state: &mut State) {
 ///
 /// Placeholder: draw, present, wait one display generation, wait for a key, move the view.
 async fn command_loop(state: &RefCell<State>, io: &Io) {
+    // WU-P1 wiring: tile graphics (0x152e50, boot step 2) until `State` carries `GfxState`; the
+    // placeholder view stays only for files that do not load.
+    let mut gfx = crate::gfx::GfxState::load(io.files()).ok();
     loop {
-        io.draw(|fb| draw_placeholder_view(&state.borrow(), fb));
+        match gfx.as_mut() {
+            Some(gfx) => crate::gfx::refresh_view(&mut state.borrow_mut(), gfx, io),
+            None => {
+                todo_stub!("0x152e50 tile graphics not loaded (placeholder view)", ());
+                io.draw(|fb| draw_placeholder_view(&state.borrow(), fb));
+            }
+        }
         io.present();
         io.vblank().await;
         let key = io.next_key().await;
