@@ -124,9 +124,11 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
 /// waits on the engine clock for the next sample's due time ([`super::pointer::PointerState`]
 /// `walk_due`). Each due time is a pace after the previous one, not after the tick the repeat
 /// woke at, and the sample is taken as of the due time: an event comes at the clock of the tick
-/// that queued it, so what the waking tick queued (a release, a key) came after the sample. So
-/// step n comes exactly when the press plus n paces is before the release, at any host tick
-/// size. Time the step waits for itself (an effect, a prompt) counts toward its pace, not on top
+/// that queued it, so when the waking tick strictly passes the due time, what it queued (a
+/// release, a key) came after the sample, and when a tick lands exactly on the due time, its
+/// events count as before it. A held move in front of a release does not hide the release from
+/// the sample. So step n comes exactly when the press plus n paces is before the release, at any
+/// host tick size. Time the step waits for itself (an effect, a prompt) counts toward its pace, not on top
 /// of it: added, the tick rounding of those waits would build up over a walk again (a 100 ms wait
 /// lasts 112 ms at 16 ms ticks, 104 at 8). The cost: in the original such a wait comes before its
 /// redraw, so each step that waits comes up to a pace early, and over a walk of such steps that
@@ -161,18 +163,24 @@ async fn pointer_click(state: &RefCell<State>, io: &Io) -> u16 {
             queued = io.pending_events();
             io.vblank().await;
         }
-        // Woken by a tick that passed the due time: what that tick queued came after the
-        // sample. With nothing queued before it the sample is the pointer as it was; else the
-        // take stops at the first button change after the earlier events (a later move may
-        // still move the position), and a key is in front only if it came before.
+        // Woken by a tick that strictly passed the due time: what that tick queued came after
+        // the sample, so with nothing queued before it the sample is the pointer as it was.
+        // Else the take: the first event and the moves after it that keep its buttons. When the
+        // first one keeps the held buttons (a move), a button change behind it is taken too if
+        // it came before; a key is in front only if it came before. A move the waking tick
+        // queued after an earlier event can still be taken: the position only, never a button.
         let early = due.is_some_and(|at| io.now_ms() > at);
         let (held, key_first) = if early && queued == 0 {
             (pointer_buttons(&state.borrow()), false)
         } else {
-            let before = io.pending_events();
-            let held = sample(state, io);
-            let taken = before - io.pending_events();
-            (held, io.key_ready() && !(early && taken >= queued))
+            let (before, buttons) = (io.pending_events(), io.pointer().buttons);
+            let came_before = |io: &Io| !early || before - io.pending_events() < queued;
+            let mut held = sample(state, io);
+            let more = io.pending_events() > 0 && !io.key_ready() && came_before(io);
+            if io.pointer().buttons == buttons && more {
+                held = sample(state, io);
+            }
+            (held, io.key_ready() && came_before(io))
         };
         if held != 0 && key_first {
             return 0;

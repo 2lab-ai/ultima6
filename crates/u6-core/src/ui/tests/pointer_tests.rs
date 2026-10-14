@@ -428,6 +428,26 @@ fn held_walk_at(
     after_ms: u32,
     step: fn(usize) -> Option<u32>,
 ) -> (Vec<(u64, u16)>, bool) {
+    let up = InputEvent::Pointer {
+        x: 88,
+        y: 104,
+        buttons: 0,
+    };
+    press_and_events(ticks, reads, &[(held_ms, up)], after_ms, step)
+}
+
+/// The press south of the Avatar (88, 104) at the first tick of `ticks` (cycled, ms each), then
+/// each of `events` at the tick that ends exactly its ms after the press (that tick shortened
+/// when the cycle would pass it; in order), then `after_ms`. The codes the command-key reads
+/// gave, each with the engine clock (ms) it came at, and whether all `reads` were done; after
+/// the n-th read the game waits `step(n)` ms when that is `Some`.
+fn press_and_events(
+    ticks: &[u32],
+    reads: usize,
+    events: &[(u32, InputEvent)],
+    after_ms: u32,
+    step: fn(usize) -> Option<u32>,
+) -> (Vec<(u64, u16)>, bool) {
     let mut s = st();
     s.main.reading = 1;
     let codes = Rc::new(RefCell::new(Vec::new()));
@@ -441,23 +461,25 @@ fn held_walk_at(
             }
         }
     });
-    let ev = |b| InputEvent::Pointer {
-        x: 88,
-        y: 104,
-        buttons: b,
-    };
     let mut cycle = ticks.iter().copied().cycle();
     let mut tick = || cycle.next().unwrap_or(16);
-    e.tick(&[ev(1)], tick());
-    let release = e.io().now_ms() + u64::from(held_ms);
-    let up = [ev(0)];
-    loop {
-        let (now, t) = (e.io().now_ms(), u64::from(tick()));
-        if now + t >= release {
-            e.tick(&up, u32::try_from(release - now).unwrap_or(u32::MAX));
-            break;
+    let press = InputEvent::Pointer {
+        x: 88,
+        y: 104,
+        buttons: 1,
+    };
+    e.tick(&[press], tick());
+    let pressed = e.io().now_ms();
+    for &(at, ev) in events {
+        let at = pressed + u64::from(at);
+        loop {
+            let (now, t) = (e.io().now_ms(), u64::from(tick()));
+            if now + t >= at {
+                e.tick(&[ev], u32::try_from(at - now).unwrap_or(u32::MAX));
+                break;
+            }
+            e.tick(&[], t as u32);
         }
-        e.tick(&[], t as u32);
     }
     let end = e.io().now_ms() + u64::from(after_ms);
     while e.io().now_ms() < end {
@@ -507,11 +529,11 @@ fn a_held_walk_counts_the_same_steps_at_any_host_tick() {
     // Spec 03 §1: the same input over the same time gives the same game at any tick size. Each
     // hold is delivered exactly (the release `hold` ms after the press at every pattern), and
     // step n comes exactly when n paces after the press is before the release. The holds sit on
-    // and one tick either side of whole paces (1320, 1980; at 1328 and 1988 the release comes in
-    // the tick that passes the due time, at 16 ms ticks) and run past ten paces (a repeat
-    // restarted from the tick it woke at loses a step there: 672 ms a step at 16 ms, 664 at 8).
+    // and one tick either side of whole paces (1320, 1980; at 16 ms ticks, 1328 and 1984 put the
+    // release in the tick that passes the due time) and run past ten paces (a repeat restarted
+    // from the tick it woke at loses a step there: 672 ms a step at 16 ms, 664 at 8).
     let holds = [
-        300, 1304, 1312, 1320, 1328, 1336, 1344, 1650, 1964, 1980, 1988, 1996, 6650, 10_000,
+        300, 1304, 1312, 1320, 1328, 1336, 1344, 1650, 1964, 1980, 1984, 1996, 6650, 10_000,
     ];
     for hold in holds {
         let steps: Vec<usize> = TICKS
@@ -547,6 +569,58 @@ fn every_hold_around_a_whole_pace_walks_by_the_hold_alone() {
     assert!(
         wrong.is_empty(),
         "(hold, ticks, steps, expected): {wrong:?}"
+    );
+}
+
+#[test]
+fn a_move_before_the_release_does_not_hide_it_from_the_due_sample() {
+    // The button stays down while the pointer moves within the same cell 668 ms after the press
+    // (a held move: the web host queues it apart from the release), then the release comes 20
+    // ms before the second repeat's due time (1320 ms), or 20 ms after it. Whether the move
+    // came in the tick that woke the first repeat or is still queued behind it at the due
+    // sample, that sample sees the release behind it: two steps before the due time, three after.
+    let ev = |y, b| InputEvent::Pointer {
+        x: 88,
+        y,
+        buttons: b,
+    };
+    for (release, expect) in [(1300u32, 2usize), (1340, 3)] {
+        let steps: Vec<usize> = TICKS
+            .iter()
+            .map(|ticks| {
+                let events = [(668, ev(105, 1)), (release, ev(105, 0))];
+                press_and_events(ticks, 64, &events, 2 * HELD_WALK_MS_TEST, |_| None)
+                    .0
+                    .len()
+            })
+            .collect();
+        println!(
+            "move at 668, release at {release}: steps at 16 / 8 / 20 / 10 / 17,17,16 ms ticks {steps:?}"
+        );
+        assert_eq!(steps, [expect; 5], "release at {release} ms");
+    }
+    // Holds within 24 ms of one and two paces, a held move 1 or 9 ms before the release, or
+    // half a pace or a pace after the press: the steps follow the hold alone.
+    let pace = HELD_WALK_MS_TEST;
+    let mut wrong = Vec::new();
+    for hold in (1..=2).flat_map(|k| (k * pace - 24..=k * pace + 24).step_by(4)) {
+        let expect = 1 + (hold - 1) as usize / pace as usize;
+        for at in [hold - 1, hold - 9, pace / 2, pace + 8] {
+            if at >= hold {
+                continue;
+            }
+            for ticks in TICKS {
+                let events = [(at, ev(105, 1)), (hold, ev(105, 0))];
+                let got = press_and_events(ticks, 16, &events, pace, |_| None).0.len();
+                if got != expect {
+                    wrong.push((hold, at, ticks, got, expect));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "(hold, move, ticks, steps, expected): {wrong:?}"
     );
 }
 
