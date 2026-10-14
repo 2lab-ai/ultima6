@@ -26,7 +26,7 @@ crates/
   u6-intake   zip → HFE → Amiga MFM → ADF → OFS files → PP20 (shared by native + wasm)
   u6-formats  parsers for the Amiga data files (spec: re/notes/formats.md)
   u6-core     platform-free game state + logic, ported per original function
-  u6-render   indexed framebuffer renderer (tiles, objects, UI) → RGBA
+  u6-render   platform-free framebuffer + blit primitives → RGBA (world-view orchestration lives in u6-core/gfx)
   u6-native   desktop runner (window + keyboard) for development and oracle comparison
   u6-web      wasm-bindgen entry: canvas, input, file drop, IndexedDB cache
 ```

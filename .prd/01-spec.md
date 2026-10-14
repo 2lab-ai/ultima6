@@ -31,6 +31,17 @@ carries no license field. Therefore:
   describes behavior in prose;
 - no game data or derived files are committed.
 
+These restrictions are distribution controls, not a legal determination or a claim of clean-room
+development. The archive item's availability and the user's possession of files do not
+establish a license. The translated engine is derived from analysis of EA's executable; whether
+publishing it is permitted depends on facts and jurisdiction this project has not assessed
+(reported to the user 2026-10-14; deploy proceeds on the user's instruction). Extracted strings,
+tables, artwork and executable fragments never go into source, fixtures, build artifacts, logs or
+review captures. Original files and extracted content stay browser-local and are excluded from
+telemetry and error reports. A later AI-model integration needs its own explicit payload/consent
+boundary and must not upload dialogue, files or extracted content silently. Public branding must
+not imply EA endorsement.
+
 ## Phases
 
 | Phase | Outcome |
