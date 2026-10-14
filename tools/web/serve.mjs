@@ -1,0 +1,105 @@
+// Static server for site/ that applies site/_headers the way Cloudflare Pages does (every rule
+// whose path pattern matches adds its headers; `*` matches anything, `:name` one segment), so
+// the page can be checked under its real CSP before a deploy. Local only; no game data.
+//
+//   node tools/web/serve.mjs [--root site] [--port 8787] [--headers <root>/_headers]
+//
+// As a module: `const s = await serve({ root }); s.url; await s.close();`
+import { createServer } from 'node:http';
+import { readFile, stat } from 'node:fs/promises';
+import { extname, join, normalize, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json',
+  '.wasm': 'application/wasm',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+/// Parses a Pages `_headers` file into [{ pattern: RegExp, headers: [[name, value]] }].
+export function parseHeaders(text) {
+  const rules = [];
+  let rule = null;
+  for (const raw of text.split(/\r?\n/)) {
+    if (raw.trim() === '' || raw.trimStart().startsWith('#')) continue;
+    if (!/^\s/.test(raw)) {
+      const path = raw.trim();
+      const re = path
+        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*')
+        .replace(/:[A-Za-z]\w*/g, '[^/]+');
+      rule = { path, pattern: new RegExp(`^${re}$`), headers: [] };
+      rules.push(rule);
+      continue;
+    }
+    if (!rule) throw new Error(`_headers: header line before any path: ${raw.trim()}`);
+    const at = raw.indexOf(':');
+    if (at < 0) throw new Error(`_headers: not a header line: ${raw.trim()}`);
+    rule.headers.push([raw.slice(0, at).trim(), raw.slice(at + 1).trim()]);
+  }
+  return rules;
+}
+
+/// The headers `rules` give `path` (repeated names joined with ", ", as Pages does).
+export function headersFor(rules, path) {
+  const out = new Map();
+  for (const rule of rules) {
+    if (!rule.pattern.test(path)) continue;
+    for (const [name, value] of rule.headers) {
+      const key = name.toLowerCase();
+      const prev = out.get(key);
+      out.set(key, prev ? [prev[0], `${prev[1]}, ${value}`] : [name, value]);
+    }
+  }
+  return [...out.values()];
+}
+
+async function loadRules(file) {
+  try {
+    return parseHeaders(await readFile(file, 'utf8'));
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+}
+
+/// Serves `root` on 127.0.0.1:`port` (0 = any free port).
+export async function serve({ root = 'site', port = 0, headersFile } = {}) {
+  const base = resolve(root);
+  const rules = await loadRules(headersFile ?? join(base, '_headers'));
+  const server = createServer(async (req, res) => {
+    try {
+      const path = decodeURIComponent(new URL(req.url, 'http://local').pathname);
+      let file = normalize(join(base, path));
+      if (file !== base && !file.startsWith(base + sep)) throw Object.assign(new Error(), { code: 'ENOENT' });
+      if (path === '/_headers') throw Object.assign(new Error(), { code: 'ENOENT' });
+      if ((await stat(file)).isDirectory()) file = join(file, 'index.html');
+      const body = await readFile(file);
+      for (const [name, value] of headersFor(rules, path)) res.setHeader(name, value);
+      res.setHeader('Content-Type', TYPES[extname(file)] ?? 'application/octet-stream');
+      res.end(body);
+    } catch (err) {
+      res.statusCode = err.code === 'ENOENT' || err.code === 'ENOTDIR' ? 404 : 500;
+      res.end(res.statusCode === 404 ? 'not found' : String(err));
+    }
+  });
+  await new Promise((done) => server.listen(port, '127.0.0.1', done));
+  const url = `http://127.0.0.1:${server.address().port}/`;
+  return { url, rules, close: () => new Promise((done) => server.close(done)) };
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const arg = (name, fallback) => {
+    const i = process.argv.indexOf(`--${name}`);
+    return i > 0 ? process.argv[i + 1] : fallback;
+  };
+  const s = await serve({ root: arg('root', 'site'), port: Number(arg('port', 8787)), headersFile: arg('headers') });
+  console.log(`serving ${resolve(arg('root', 'site'))} at ${s.url} (${s.rules.length} header rule(s))`);
+}
