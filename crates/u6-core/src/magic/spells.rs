@@ -10,7 +10,6 @@ use super::tables::Msg;
 use crate::engine::Io;
 use crate::objects::Slot;
 use crate::state::State;
-use crate::todo_stub;
 use crate::ui::printf::Arg;
 
 const MSG_FOOD: u32 = 0x0011_59ca;
@@ -62,16 +61,8 @@ pub async fn create_food(state: &RefCell<State>, io: &Io, spell: u16) {
     print_at(state, io, MSG_FOOD, &[Arg::Word(n)]).await;
 }
 
-/// Original: 0x11785e (magic: raise the actor that body object `body` stands for) [partial]
-///
-/// The actor comes back where the body lay (0x10c810), alive (status bit 0x10 cleared, then
-/// bits 0..4), 1 hit point, its base type, magic points from 0x122176; below karma 0x62 its
-/// experience is scaled by karma / 100. It is then put on the first tile it may stand on
-/// (0x11b1c0) on square rings of radius 1..4 around that place (per ring: the top edge from
-/// the left, the left edge from the top, the bottom edge from the right, the right edge from
-/// the bottom), else where it is. Returns the actor. A party member (status bit 0x80) rejoins
-/// through 0x112daa, which reads its name from its script (async): [`resurrect_join`] does
-/// it; this synchronous part leaves it to the caller.
+/// The synchronous part of 0x11785e ([`resurrect_and_rejoin`]): everything before the rejoin.
+/// Returns the actor.
 pub fn resurrect(s: &mut State, body: i16) -> i16 {
     let a = crate::objects::actor_from_body(s, Slot::from(body));
     let Ok(i) = usize::try_from(a) else {
@@ -112,8 +103,17 @@ pub fn resurrect(s: &mut State, body: i16) -> i16 {
     a
 }
 
-/// 0x11785e with its rejoin: [`resurrect`], then 0x112daa for a party member.
-pub async fn resurrect_join(state: &RefCell<State>, io: &Io, body: i16) {
+/// Original: 0x11785e (magic: raise the actor that body object `body` stands for)
+///
+/// The actor comes back where the body lay (0x10c810), alive (status bit 0x10 cleared, then
+/// bits 0..4), 1 hit point, its base type, magic points from 0x122176; below karma 0x62 its
+/// experience is scaled by karma / 100. It is then put on the first tile it may stand on
+/// (0x11b1c0) on square rings of radius 1..4 around that place (per ring: the top edge from
+/// the left, the left edge from the top, the bottom edge from the right, the right edge from
+/// the bottom), else where it is ([`resurrect`]). A party member (status bit 0x80) rejoins
+/// through 0x112daa, which reads its name from its script and may print (hence async); its
+/// result is dropped.
+pub async fn resurrect_and_rejoin(state: &RefCell<State>, io: &Io, body: i16) {
     let a = resurrect(&mut state.borrow_mut(), body);
     let member = usize::try_from(a)
         .ok()
@@ -164,46 +164,18 @@ pub async fn resurrect_spell(state: &RefCell<State>, io: &Io, pre: i16) {
     } else if q == 0 {
         print_at(state, io, MSG_TOO_OLD, &[]).await;
     } else {
-        resurrect_join(state, io, sel).await;
+        resurrect_and_rejoin(state, io, sel).await;
         say(state, io, FMT_NL_S_NL, Msg::Success).await;
         state.borrow_mut().magic.result = 0;
     }
 }
 
-// ---- spells not ported yet: each is a stub point with the contract of its routine ----------
-
-/// Stub of 0x118494 (Reappear: the vanished object type A4-0x7b62 back at a chosen spot).
-/// Fallback: nothing (the reagents and points are spent already).
-pub async fn reappear(_state: &RefCell<State>, _io: &Io, _pre: i16) {
-    todo_stub!("0x118494 Reappear spell", ())
-}
-
-/// Stub of 0x118e98 (Telekinesis: move or use an object at a distance). Fallback: nothing.
-pub async fn telekinesis(_state: &RefCell<State>, _io: &Io, _pre: i16) {
-    todo_stub!("0x118e98 Telekinesis spell", ())
-}
-
-/// Stub of 0x118602 (the mass spells on the actors around a chosen location: a missile of
-/// `tile`, then the effect of `spell`; `field` = the object type of the visual). Fallback:
-/// nothing.
-pub async fn area(
-    _state: &RefCell<State>,
-    _io: &Io,
-    _spell: u16,
-    _tile: u16,
-    _field: u16,
-    _pre: i16,
-) {
-    todo_stub!("0x118602 mass spell at a location", ())
-}
-
-/// Stub of 0x12c54a (Peer: the map view of the area) for spell 0x27; the original then
-/// prints "Done". Fallback: no map, "Done" printed.
+/// Peer (0x27) in 0x11a586: the flashes, the overview of 0x12c54a with no gem, "Done".
 pub async fn peer(state: &RefCell<State>, io: &Io, spell: u16) {
     let caster = super::cast::caster(&state.borrow());
     flash_actor(state, io, caster, 0).await;
     flash_window(state, io, spell / 16 + 1).await;
-    todo_stub!("0x12c54a Peer: show the area map", ());
+    super::peer::peer(state, io, 0).await;
     say(state, io, FMT_NL_S_NL, Msg::Done).await;
 }
 
@@ -269,22 +241,12 @@ fn foe(s: &mut State, spell: u16, caster: u16, o: Slot) {
     }
 }
 
-/// Stub of 0x118cec (Conjure / Summon a creature next to `caster`). Fallback: nothing.
-pub async fn summon(_state: &RefCell<State>, _io: &Io, _spell: u16, _caster: u16) {
-    todo_stub!("0x118cec Conjure / Summon", ())
-}
-
-/// Stub of 0x11883c (a field of object type `tile` at a chosen location). Fallback: nothing.
-pub async fn field(_state: &RefCell<State>, _io: &Io, _spell: u16, _tile: u16, _pre: i16) {
-    todo_stub!("0x11883c field spell", ())
-}
-
-/// Stub of 0x11a470 (Locate: the party's position as degrees). Fallback: nothing.
+/// Locate (0x35) in 0x11a586: the flashes, then 0x11a470.
 pub async fn locate(state: &RefCell<State>, io: &Io, spell: u16) {
     let caster = super::cast::caster(&state.borrow());
     flash_actor(state, io, caster, 0).await;
     flash_window(state, io, spell / 16 + 1).await;
-    todo_stub!("0x11a470 Locate: print the position", ())
+    super::travel::locate(state, io).await;
 }
 
 const MSG_DIRECTION: u32 = 0x0011_5a08;
@@ -309,21 +271,6 @@ pub async fn wind_change(state: &RefCell<State>, io: &Io) {
         print_at(state, io, MSG_NOWHERE, &[]).await;
     }
     state.borrow_mut().actors.wind = dir as u8;
-}
-
-/// Stub of 0x1195f2 (Insect Swarm, D0 = the spell). Fallback: nothing.
-pub async fn insect_swarm(_state: &RefCell<State>, _io: &Io, _spell: u16) {
-    todo_stub!("0x1195f2 Insect Swarm", ())
-}
-
-/// Stub of 0x119266 (Pickpocket: take an object from an actor). Fallback: nothing.
-pub async fn pickpocket(_state: &RefCell<State>, _io: &Io, _pre: i16) {
-    todo_stub!("0x119266 Pickpocket", ())
-}
-
-/// Stub of 0x119dbc (Seance: talk to the dead, 0x1125b8 with A4+0x1821). Fallback: nothing.
-pub async fn seance(_state: &RefCell<State>, _io: &Io, _pre: i16) {
-    todo_stub!("0x119dbc Seance", ())
 }
 
 /// Original: 0x119200 (magic: X-ray: the flashes, every view tile shown (A4-0x794c = 1, view
@@ -351,63 +298,4 @@ pub async fn xray(state: &RefCell<State>, io: &Io, spell: u16) {
         crate::gfx::view::refresh_view(&mut s, io);
     }
     say(state, io, FMT_NL_S_NL, Msg::Done).await;
-}
-
-/// Stub of 0x119f26 (the wind spells: a line of missiles `tile` in a direction). Fallback:
-/// nothing.
-pub async fn wind(_state: &RefCell<State>, _io: &Io, _spell: u16, _tile: u16, _pre: i16) {
-    todo_stub!("0x119f26 wind spell", ())
-}
-
-/// Stub of 0x119e8c (Hail Storm). Fallback: nothing.
-pub async fn hail_storm(_state: &RefCell<State>, _io: &Io, _pre: i16) {
-    todo_stub!("0x119e8c Hail Storm", ())
-}
-
-/// Stub of 0x11971a (Web). Fallback: nothing.
-pub async fn web(_state: &RefCell<State>, _io: &Io, _pre: i16) {
-    todo_stub!("0x11971a Web", ())
-}
-
-/// Stub of 0x119876 (Enchant: a wand gets a charge of a spell). Fallback: nothing.
-pub async fn enchant(_state: &RefCell<State>, _io: &Io, _pre: i16) {
-    todo_stub!("0x119876 Enchant", ())
-}
-
-/// Stub of 0x11916e (Gate Travel: "To phase" prompt, then the moongate travel). Fallback:
-/// nothing.
-pub async fn gate_travel(_state: &RefCell<State>, _io: &Io) {
-    todo_stub!("0x11916e Gate Travel", ())
-}
-
-/// Stub of 0x11a0cc (Wing Strike: every foe in view, "No foes."). Fallback: nothing.
-pub async fn wing_strike(_state: &RefCell<State>, _io: &Io) {
-    todo_stub!("0x11a0cc Wing Strike", ())
-}
-
-/// Stub of 0x119afc (Wizard Eye: a free-moving view from (x, y)). Fallback: nothing.
-pub async fn wizard_eye(_state: &RefCell<State>, _io: &Io, _x: i16, _y: i16, _mode: i16) {
-    todo_stub!("0x119afc Wizard Eye", ())
-}
-
-/// Stub of 0x11a550 (Armageddon: every creature but the caster and Lord British dies).
-/// Fallback: nothing.
-pub async fn armageddon(_state: &RefCell<State>, _io: &Io) {
-    todo_stub!("0x11a550 Armageddon", ())
-}
-
-/// Stub of 0x118382 (Slime). Fallback: nothing.
-pub async fn slime(_state: &RefCell<State>, _io: &Io) {
-    todo_stub!("0x118382 Slime", ())
-}
-
-/// Stub of 0x119cbe (Tremor: quake, damage to the foes in view). Fallback: nothing.
-pub async fn tremor(_state: &RefCell<State>, _io: &Io) {
-    todo_stub!("0x119cbe Tremor", ())
-}
-
-/// Stub of 0x11a41e (spell number 0x80, outside the eight circles; not reachable from a book).
-/// Fallback: nothing.
-pub async fn spell_0x80(_state: &RefCell<State>, _io: &Io) {
-    todo_stub!("0x11a41e spell 0x80", ())
 }

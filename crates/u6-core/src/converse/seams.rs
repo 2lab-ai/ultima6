@@ -335,18 +335,6 @@ pub(crate) fn has_object(s: &State, actor: i16, ty: i16, quality: i16) -> i16 {
     crate::magic::carried_object(&s.objects, actor, ty, quality)
 }
 
-/// 0x11785e(obj): resurrect the body object (magic). The rejoin of a party member (0x112daa,
-/// async) is not done from this synchronous caller.
-pub(crate) fn resurrect(s: &mut State, obj: i16) {
-    let a = crate::magic::resurrect(s, obj);
-    if usize::try_from(a).is_ok_and(|i| s.actors.attrs.status[i] & 0x80 != 0) {
-        todo_stub!(
-            "0x112daa rejoin after a resurrection (sync converse caller)",
-            ()
-        )
-    }
-}
-
 /// 0x110878(song): play / 0 = stop. Fallback: nothing.
 pub(crate) fn play_song(_s: &mut State, _song: u16) {
     todo_stub!("0x110878 play song (converse seam)", ())

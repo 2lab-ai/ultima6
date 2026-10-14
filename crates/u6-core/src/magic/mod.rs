@@ -21,15 +21,20 @@
 //! for each one's status) plus 0x10674e, 0x1067d8, 0x106812, 0x1078d2 and the spell-input
 //! block of 0x106bbc.
 
+mod area;
 mod book;
 mod cast;
+mod creatures;
 mod detect;
 mod dispatch;
 mod effects;
 mod input;
+mod items;
+mod peer;
 pub(crate) mod seams;
 mod spells;
 pub mod tables;
+mod travel;
 
 #[cfg(test)]
 mod tests;
@@ -44,7 +49,7 @@ pub use effects::strength_contest;
 pub use input::{
     book_cursor_step, book_panel_key, find_typed_spell, page_key, spell_key, takes_book_key,
 };
-pub use spells::{resurrect, resurrect_join};
+pub use spells::{resurrect, resurrect_and_rejoin};
 pub use tables::{MagicTables, Msg};
 
 /// Spellbook object type.
