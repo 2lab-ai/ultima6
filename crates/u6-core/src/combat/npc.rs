@@ -609,8 +609,8 @@ pub fn retreat(s: &mut State, actor: i16) {
 /// A party member within 3 tiles of `actor` on both axes.
 fn party_near(s: &State, actor: i16) -> bool {
     let (ax, ay) = pos(s, actor);
-    (0..usize::from(s.actors.party.size)).any(|i| {
-        let (mx, my) = pos(s, i16::from(s.actors.party.members[i]));
+    s.actors.party.active().any(|m| {
+        let (mx, my) = pos(s, m.0 as i16);
         (mx - ax).wrapping_abs() < 3 && (my - ay).wrapping_abs() < 3
     })
 }
@@ -682,6 +682,10 @@ pub fn lurk(s: &mut State, actor: i16) {
 /// Original: 0x126de8 (combat: the tangle vine grows one step toward `dir`, leaving a vine
 /// segment (0x16e, quality = the vine) with the frame joining its old and new facing
 /// (A4-0x6752); never straight back. 0 when it could not move)
+///
+/// The segment's quality byte (the high byte of its word, which 0x1231be reads back as the
+/// vine) is the actor (asm 0x126e74 `asl.w #8`). Without a free object slot the vine steps back
+/// with its old facing and the result is 0 (asm 0x126f20..0x126f4c).
 pub fn grow(s: &mut State, actor: i16, dir: u16) -> i16 {
     let a = actor as usize;
     let dir = dir & 6;
@@ -698,7 +702,7 @@ pub fn grow(s: &mut State, actor: i16, dir: u16) -> i16 {
         &mut s.objects,
         0x16e,
         0x20,
-        actor as u16,
+        (actor as u16) << 8,
         x as u16,
         y as u16,
         z,
@@ -717,7 +721,7 @@ pub fn grow(s: &mut State, actor: i16, dir: u16) -> i16 {
     objects::move_to(s, actor, x as u16, y as u16, z);
     let mf = &mut s.actors.attrs.movement_flags[a];
     *mf = (*mf & 0xf8) | facing as u8;
-    i16::from(*mf)
+    0
 }
 
 /// Original: 0x126f58 (combat: worktype 13, the tangle vine: strike a foe next to it on a coin;

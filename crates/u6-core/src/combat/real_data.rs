@@ -2,8 +2,9 @@
 //! the boot begins combat 0x121c64), two gargoyles made next to the party the way 0x131646
 //! makes a monster (the start egg is kept from hatching), the Avatar's Attack on one
 //! (0x124caa with a confirmed cross-hair), then world turns: the party fights in its combat
-//! modes, the gargoyles assault (worktype 8). Skips where the zip is missing; prints numbers and
-//! the message transcript only. With `U6_COMBAT_FRAMES=<dir>` it writes the frames the effect
+//! modes, the gargoyles assault (worktype 8). Skips where the zip is missing; prints slots,
+//! counts and numbers only (no names, no message text). The messages it looks for are read from
+//! the user's `game` at run time. With `U6_COMBAT_FRAMES=<dir>` it writes the frames the effect
 //! playback showed as binary PPM files there (outside the repository).
 #![allow(clippy::disallowed_methods)] // tests may read files and the environment
 
@@ -15,11 +16,27 @@ use u6_intake::{InputFile, intake};
 
 use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
+use crate::image::A4;
 use crate::state::State;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 /// The two creature types named after gargoyles in the monster list.
 const GARGOYLE_TYPES: [u16; 2] = [0x16a, 0x16b];
+/// Messages the receipt looks for: the Attack command word and its weapon lines (with a
+/// weapon, bare hands), the death line and the graze line (A4 − offset).
+const ATTACK_WORD: u32 = A4 - 0x769b;
+const WEAPON_LINES: [u32; 2] = [A4 - 0x76e5, A4 - 0x76f6];
+const KILLED: u32 = A4 - 0x7716;
+const GRAZED: u32 = A4 - 0x7723;
+
+/// The words of a one-argument message format after its `%s`, as the message scroll shows
+/// them (read from the user's `game`).
+fn after_argument(io: &Io, at: u32) -> String {
+    let fmt = crate::main_loop::game_string(io, at);
+    let fmt = String::from_utf8_lossy(&fmt);
+    let tail = fmt.split_once("%s").map_or(&*fmt, |(_, t)| t);
+    tail.trim().to_string()
+}
 
 fn start() -> Option<(State, Files)> {
     if !Path::new(ZIP).exists() {
@@ -151,7 +168,12 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
         .expect("a gargoyle creature type");
     let report: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let rep = Rc::clone(&report);
+    let needles: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let words = Rc::clone(&needles);
     let mut e = Engine::with_game(state, files, move |st, io| async move {
+        words
+            .borrow_mut()
+            .extend([after_argument(&io, KILLED), after_argument(&io, GRAZED)]);
         let foes = {
             let mut s = st.borrow_mut();
             boot_screen(&mut s, &io);
@@ -180,17 +202,21 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
                 (target.y as i16 - c.y as i16 + 5) as i8,
             );
             s.main.attack_target = foes[0];
-            let n = crate::objects::display_name(&s, foes[0]);
-            rep.borrow_mut().push(format!("foes {foes:?} ({n})"));
+            rep.borrow_mut()
+                .push(format!("foes {foes:?} (type {kind:#x})"));
         }
         super::attack::attack(&st, &io).await;
         {
             let s = st.borrow();
             let g = foes[0] as usize;
+            let said: Vec<u32> = s.combat.said.iter().map(|m| m.at).collect();
+            let word = said.contains(&ATTACK_WORD);
+            let weapon = WEAPON_LINES.iter().any(|w| said.contains(w));
             let mut r = rep.borrow_mut();
-            for line in &s.ui.messages {
-                r.push(format!("attack: {line}"));
-            }
+            r.push(format!(
+                "attack: command word {word}, weapon line {weapon}, {} message lines",
+                s.ui.messages.len()
+            ));
             r.push(format!("attack: gargoyle hp {}", s.actors.attrs.hp[g]));
         }
         for turn in 0..120 {
@@ -237,10 +263,7 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
         }
     }
     let s = e.state();
-    println!("--- combat log (message scroll transcript) ---");
-    for line in &s.ui.messages {
-        println!("{line}");
-    }
+    println!("message lines: {}", s.ui.messages.len());
     println!("--- report ---");
     for line in report.borrow().iter() {
         println!("{line}");
@@ -263,17 +286,22 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
     let attack_line = report
         .borrow()
         .iter()
-        .any(|l| l.starts_with("attack: Attack with"));
+        .any(|l| l.starts_with("attack: command word true, weapon line true"));
     assert!(attack_line, "the Attack line");
+    let (killed, grazed) = {
+        let n = needles.borrow();
+        (n[0].clone(), n[1].clone())
+    };
+    assert!(!killed.is_empty() && !grazed.is_empty(), "both lines read");
     let foes_dead = report
         .borrow()
         .iter()
         .any(|l| l.starts_with("both gargoyles dead"));
     assert!(foes_dead, "the fight ends");
-    assert!(text.contains("killed!"), "a death is reported");
+    assert!(text.contains(&killed), "a death is reported");
     let gained = party.iter().any(|&m| s.actors.attrs.exp[m] > exp0[m]);
     assert!(gained, "experience for the kills");
-    let hurt = party.iter().any(|&m| s.actors.attrs.hp[m] < hp0[m]) || text.contains("grazed");
+    let hurt = party.iter().any(|&m| s.actors.attrs.hp[m] < hp0[m]) || text.contains(&grazed);
     assert!(hurt, "the gargoyles struck back");
     assert!(s.combat.shown > 0, "hit flashes / missiles were shown");
     let name = crate::objects::display_name(&s, i16::from(s.actors.party.members[0]));

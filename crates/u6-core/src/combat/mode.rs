@@ -1,6 +1,7 @@
 //! Combat mode on and off (the B command, the boot with the combat byte set) and the random
 //! jump of an actor (a wisp teleporting, a creature fleeing out of view).
 
+use super::leaves::party_size;
 use crate::actors::tail;
 use crate::engine::with_current_io;
 use crate::state::State;
@@ -34,7 +35,7 @@ fn icon(s: &State, tile: u16) {
 /// starts.
 pub fn begin_combat(s: &mut State) {
     s.actors.set_tail(tail::COMBAT_MODE, 1);
-    for i in 0..usize::from(s.actors.party.size) {
+    for i in 0..party_size(s) {
         let m = member(s, i);
         if s.objects.obj_status[m] & 0x04 == 0 {
             s.actors.worktype[m] = s.actors.attrs.combat_mode[m];
@@ -43,7 +44,7 @@ pub fn begin_combat(s: &mut State) {
     }
     let solo = s.actors.tail(tail::SOLO_MEMBER) as i8;
     let k = if solo < 0 {
-        let size = usize::from(s.actors.party.size);
+        let size = party_size(s);
         let mut k = 0;
         loop {
             let m = member(s, k);
@@ -76,7 +77,7 @@ pub fn break_off(s: &mut State) {
     s.actors.set_tail(tail::COMBAT_MODE, 0);
     let solo = s.actors.tail(tail::SOLO_MEMBER) as i8;
     let follow: u8 = if solo < 0 { 1 } else { 0 };
-    for i in 0..usize::from(s.actors.party.size) {
+    for i in 0..party_size(s) {
         let m = member(s, i);
         if s.actors.attrs.status[m] & 0x10 != 0 {
             s.actors.worktype[m] = 0;

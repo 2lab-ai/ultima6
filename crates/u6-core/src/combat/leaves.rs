@@ -35,6 +35,13 @@ pub(crate) fn kind(s: &State, o: i16) -> u16 {
         .map_or(0, |w| w & 0x3ff)
 }
 
+/// The party size the roster loops use: the size byte, at most the 16 roster slots. The
+/// original loops to the byte A4+0x4b00 over A4+0x47ec unbounded (asm 0x121c76, 0x121d9c,
+/// 0x1269ea); a save's byte past 16 would index beyond the roster.
+pub(crate) fn party_size(s: &State) -> usize {
+    s.actors.party.active().count()
+}
+
 /// Original: 0x121b08 (combat: distance from `actor` to (x, y): the larger axis distance)
 pub fn distance(s: &State, actor: i16, x: i16, y: i16) -> i16 {
     let dx = abs16(x_of(s, actor).wrapping_sub(x));
