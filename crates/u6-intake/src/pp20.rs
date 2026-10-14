@@ -1,4 +1,4 @@
-//! PowerPacker "PP20" decruncher — port of `web/src/intake/pp20.ts` (itself a port of
+//! PowerPacker "PP20" decruncher — port of the former TypeScript intake (itself a port of
 //! `tools/pp20.py`, algorithm per Stuart Caie's ppdepack).
 //!
 //! File: "PP20", 4 offset-length bytes, crunched stream, then 4 trailer bytes:

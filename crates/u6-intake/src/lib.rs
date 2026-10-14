@@ -8,7 +8,7 @@
 //! ```
 //!
 //! Loose files (already extracted) pass through with PP20 decrunch. Rust port of
-//! `web/src/intake/` (same pipeline, same report lines). No I/O, no clocks: pure
+//! the former TypeScript intake in `web/` (removed after parity) (same pipeline, same report lines). No I/O, no clocks: pure
 //! functions over byte slices, so it runs unchanged on native and
 //! wasm32-unknown-unknown. `clippy.toml` in this crate turns the common violations
 //! into lint errors.

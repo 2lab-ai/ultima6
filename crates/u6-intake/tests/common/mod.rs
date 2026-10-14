@@ -1,4 +1,4 @@
-//! Test-only encoders (ports of `web/src/intake/__tests__/*`), so every decoder
+//! Test-only encoders (ports of the former TypeScript tests), so every decoder
 //! stage round-trips without game data. Each test binary uses a subset.
 #![allow(dead_code)]
 

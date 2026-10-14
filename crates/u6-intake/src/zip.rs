@@ -1,5 +1,5 @@
 //! Minimal zip reader (stored and deflate entries), mirroring fflate's `unzipSync`
-//! as used by `web/src/intake/index.ts`: find the end-of-central-directory record,
+//! as used by the former TypeScript intake (removed after the Rust port reached parity): find the end-of-central-directory record,
 //! walk the central directory, ask the filter per entry name *before* touching its
 //! data, then locate the data through the local header. CRCs are not checked
 //! (fflate does not either). Zip64 sizes and offsets are honoured.

@@ -1,4 +1,4 @@
-//! Port of `web/src/intake/__tests__/ofs.test.ts`.
+//! Port of the former TypeScript test ofs.test.ts.
 
 mod common;
 

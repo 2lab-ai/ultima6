@@ -1,4 +1,4 @@
-//! Port of `web/src/intake/__tests__/intake.test.ts` (plus deflate-entry cases).
+//! Port of the former TypeScript test intake.test.ts (plus deflate-entry cases).
 
 mod common;
 
