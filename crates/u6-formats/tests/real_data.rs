@@ -47,7 +47,7 @@ fn data_dir() -> Option<PathBuf> {
 /// Reads `<data>/<disk>/<name>`; `None` (skip) when the data directory is absent.
 fn read(disk: &str, name: &str) -> Option<Vec<u8>> {
     let path = data_dir()?.join(disk).join(name);
-    Some(std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display())))
+    Some(std::fs::read(&path).quiet())
 }
 
 // The test's own readers of raw bytes; they share no code with the parsers under test.

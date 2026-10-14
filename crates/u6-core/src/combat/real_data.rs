@@ -163,10 +163,11 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
         return;
     };
     state.rng.seed(0x1234);
-    let kind = GARGOYLE_TYPES
+    let which = GARGOYLE_TYPES
         .into_iter()
-        .find(|&k| crate::objects::monster_index(&state.objects, k) >= 0)
+        .position(|k| crate::objects::monster_index(&state.objects, k) >= 0)
         .expect("a gargoyle creature type");
+    let kind = GARGOYLE_TYPES[which];
     let report: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let rep = Rc::clone(&report);
     let needles: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -203,8 +204,11 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
                 (target.y as i16 - c.y as i16 + 5) as i8,
             );
             s.main.attack_target = foes[0];
-            rep.borrow_mut()
-                .push(format!("foes {foes:?} (type {kind:#x})"));
+            rep.borrow_mut().push(format!(
+                "{} foes spawned, gargoyle type {which} of {}",
+                foes.len(),
+                GARGOYLE_TYPES.len()
+            ));
         }
         super::attack::attack(&st, &io).await;
         {
@@ -258,7 +262,8 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
         }
     }
     let s = e.state();
-    // Output names labels, slots and the test's own counts only (spec 01 §Rights).
+    // Output: labels, booleans, an index into the test's own type list and counts of what the
+    // test made (spec 01 §Rights).
     println!("--- report ---");
     for line in report.borrow().iter() {
         println!("{line}");

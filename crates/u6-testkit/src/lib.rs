@@ -4,15 +4,17 @@
 //! Spec 01 §Rights: what the tests print never shows content of the user's files. `assert_eq!`
 //! prints both values when it fails, so values read from those files (text, bytes, table rows,
 //! records, frames) are compared with [`assert_same!`] instead: its failure names the label,
-//! both lengths and the first index where the two differ, never the values.
+//! whether the lengths differ and the first index where the two differ, never the values (nor
+//! the lengths: the length of a list of the user's records or paths is a count of them).
 
 /// `assert_eq!` for sequences that hold content of the user's files:
 /// `assert_same!(left, right, "label {}", arg)`.
 ///
 /// Both sides are anything `AsRef<[T]>` with the same element type (`str`, `String`, `Vec<T>`,
 /// arrays, slices; a scalar goes in as `[x]`). The label is required and takes `format!`
-/// arguments. On failure it panics with `<label>: lengths <a> and <b>, first difference at
-/// index <i>` (for a prefix, `i` is the shorter length).
+/// arguments. On failure it panics with `<label>: lengths differ, first difference at index
+/// <i>` or `<label>: lengths equal, first difference at index <i>` (for a prefix, `i` is where
+/// the shorter one ends).
 #[macro_export]
 macro_rules! assert_same {
     ($left:expr, $right:expr, $($label:tt)+) => {
@@ -37,11 +39,14 @@ where
         .zip(r)
         .position(|(a, b)| a != b)
         .unwrap_or(l.len().min(r.len()));
+    let lengths = if l.len() == r.len() {
+        "equal"
+    } else {
+        "differ"
+    };
     panic!(
-        "{}: lengths {} and {}, first difference at index {at}",
-        label(),
-        l.len(),
-        r.len()
+        "{}: lengths {lengths}, first difference at index {at}",
+        label()
     );
 }
 
@@ -95,20 +100,20 @@ mod tests {
         assert_same!([7u16], [7], "a scalar as a one-element array");
     }
 
-    /// The message holds the label, both lengths and the index; none of the values (the
-    /// distinctive letters, their numbers, any `Debug` brackets).
+    /// The message holds the label, whether the lengths differ and the index; none of the
+    /// values (the distinctive letters, their numbers, any `Debug` brackets) nor the lengths.
     #[test]
     fn a_mismatch_names_the_label_lengths_and_index_only() {
         let left = b"SECRET".to_vec();
         let right = b"SECRXT";
         let m = failure(|| assert_same!(left, right, "record {}", 3)).expect("a failure");
-        assert_eq!(m, "record 3: lengths 6 and 6, first difference at index 4");
-        for leak in ["SECR", "83", "88", "[", "\""] {
+        assert_eq!(m, "record 3: lengths equal, first difference at index 4");
+        for leak in ["SECR", "83", "88", "6", "[", "\""] {
             assert!(!m.contains(leak), "the message shows {leak:?}");
         }
         let m = failure(|| assert_same!("Zhuge", String::from("Zhugx"), "name")).unwrap();
-        assert_eq!(m, "name: lengths 5 and 5, first difference at index 4");
-        assert!(!m.contains("Zhug"));
+        assert_eq!(m, "name: lengths equal, first difference at index 4");
+        assert!(!m.contains("Zhug") && !m.contains('5'));
     }
 
     #[test]
@@ -132,7 +137,8 @@ mod tests {
     #[test]
     fn a_prefix_differs_at_the_shorter_length() {
         let m = failure(|| assert_same!(vec![1u8, 2], [1, 2, 3], "tail")).unwrap();
-        assert_eq!(m, "tail: lengths 2 and 3, first difference at index 2");
+        assert_eq!(m, "tail: lengths differ, first difference at index 2");
+        assert!(!m.contains('3'), "the longer length is not shown");
     }
 
     #[test]
@@ -140,6 +146,6 @@ mod tests {
         let a = vec![vec![1u8, 2], vec![3]];
         let b = vec![vec![1u8, 2], vec![4]];
         let m = failure(|| assert_same!(a, b, "blocks")).unwrap();
-        assert_eq!(m, "blocks: lengths 2 and 2, first difference at index 1");
+        assert_eq!(m, "blocks: lengths equal, first difference at index 1");
     }
 }

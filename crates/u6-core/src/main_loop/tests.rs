@@ -395,7 +395,7 @@ fn after_attack_an_arrow_walks() {
 #[test]
 fn real_attack_without_a_target_and_the_next_arrow_walks() {
     let Some(files) = files() else { return };
-    let mut e = crate::Engine::game_first(files, 7).unwrap_or_else(|err| panic!("{err}"));
+    let mut e = crate::Engine::game_first(files, 7).quiet();
     for _ in 0..60 {
         e.tick(&[], 16);
     }

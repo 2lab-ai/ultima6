@@ -321,7 +321,7 @@ fn sheet(
     let mut img = vec![0x40u8; w * h * 3];
     for (n, t) in range.clone().enumerate() {
         let tile = &set.tiles[t];
-        let pixels = tile.frame(am, 0).unwrap();
+        let pixels = tile.frame(am, 0).quiet();
         let (ox, oy) = (2 + (n % cols) * cell, 2 + (n / cols) * cell);
         for y in 0..TILE_H * scale {
             for x in 0..TILE_W * scale {
@@ -346,11 +346,11 @@ fn sheet(
 
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 fn write_png(path: &std::path::Path, (w, h, data): (u32, u32, Vec<u8>)) {
-    let file = std::fs::File::create(path).unwrap();
+    let file = std::fs::File::create(path).quiet();
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().unwrap().write_image_data(&data).unwrap();
+    enc.write_header().quiet().write_image_data(&data).quiet();
 }
 
 #[test]

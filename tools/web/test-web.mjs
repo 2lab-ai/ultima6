@@ -36,9 +36,10 @@ const tests = [];
 const test = (name, fn, { needs } = {}) => tests.push({ name, fn, needs });
 
 // Output rule (spec 01 §Rights): what a test prints, its receipts and its failure messages,
-// holds labels, lengths, indices, counts of what the test itself made and pass/fail only; the
-// page's status text, positions, counts of the user's files are compared, never printed. An
-// assertion that builds its own message from the values is shown without it (the runner).
+// holds labels, indices, counts of what the test itself made and pass/fail only; the page's
+// status text, positions, counts of the user's files and the lengths of their records or paths
+// (a count of them) are compared, never printed. A failure shows its label or kind and its
+// places in these files, never its message (the runner, h.failureLines).
 
 // The page once a start finished (nothing queued) and the started game ran a frame. The page
 // writes the canvas fields (leader, prompt, program, name, keys) only in its frame callback,
@@ -79,8 +80,9 @@ async function atPrompt(page) {
 
 const promptNow = (page) => page.evaluate(() => document.getElementById('screen').dataset.prompt);
 
-// No page: the harness's content-free comparison (synthetic values) names paths and lengths only.
-test('assertSame: a mismatch names the label, the paths, the lengths and the index, never the values', async () => {
+// No page: the harness's content-free comparison (synthetic values) names paths, whether the
+// lengths differ and the index only.
+test('assertSame: a mismatch names the label, the paths, equal or differing lengths and the index, never the values', async () => {
   const failure = (f) => {
     try { f(); } catch (err) { return err.message; }
     return null;
@@ -91,13 +93,50 @@ test('assertSame: a mismatch names the label, the paths, the lengths and the ind
     { 'savegame/objblkaa': [7, 88, 9] },
     'the store',
   ));
-  assert.equal(store, 'the store: savegame/objblkaa: lengths 3 and 3, first difference at index 1; savegame/objlist: not expected');
+  assert.equal(store, 'the store: savegame/objblkaa: lengths equal, first difference at index 1; savegame/objlist: not expected');
   const name = failure(() => h.assertSame('Zhuge', 'Zhugx', 'the name'));
-  assert.equal(name, 'the name: lengths 5 and 5, first difference at index 4');
+  assert.equal(name, 'the name: lengths equal, first difference at index 4');
   const list = failure(() => h.assertSame([{ path: 'a', bytes: [1] }], [{ path: 'a', bytes: [2, 3] }], 'files'));
-  assert.equal(list, 'files: [0].bytes: lengths 1 and 2, first difference at index 0');
-  for (const leak of ['83', '88', 'Zhug']) {
-    assert.ok(![store, name, list].some((m) => m.includes(leak)), `a message shows ${leak}`);
+  assert.equal(list, 'files: [0].bytes: lengths differ, first difference at index 0');
+  const kinds = failure(() => h.assertSame({ a: 'xyz', b: [1, 2, 3, 4] }, { a: 7, b: null }, 'kinds'));
+  assert.equal(kinds, 'kinds: a: a string and a number; b: a sequence and null');
+  for (const leak of ['83', '88', 'Zhug', '3', '5']) {
+    assert.ok(![store, name, list, kinds].some((m) => m.includes(leak)), `a message shows ${leak}`);
+  }
+});
+
+// The runner's failure lines (h.failureLines) on errors whose text holds a sentinel: plain,
+// multi-line with lines shaped as frames of this directory, a thrown string, a page-chosen name,
+// assertions with a label and generated, and Playwright's own (a page's thrown error, a timeout
+// on a selector). None shows the sentinel; each shows its fixed head, the thrown ones a place
+// in this file.
+test('the runner shows a failure by its label or kind and its places here, never its message', async (env) => {
+  const S = 'QX7SENTINELZ9';
+  const caught = async (f) => {
+    try { await f(); } catch (err) { return err; }
+    throw new Error('no failure');
+  };
+  const here = (lines) => lines.slice(1).some((l) => /^at test-web\.mjs:\d+:\d+$/.test(l));
+  const fake = new URL(`${S}.mjs`, import.meta.url).href;
+  const named = new Error(S);
+  named.name = S;
+  const page = await (await env.browser.newContext()).newPage();
+  const cases = [
+    ['plain', await caught(() => { throw new Error(S); }), 'Error (its message is not shown)'],
+    ['multi-line', await caught(() => { throw new TypeError(`a\n    at ${S} (${fake}:1:1)\n    at ${new URL(fake).pathname}:2:2\n${S}`); }), 'TypeError (its message is not shown)'],
+    ['a string', await caught(() => { throw S; }), 'Error (its message is not shown)'],
+    ['a page-chosen name', named, 'Error (its message is not shown)'],
+    ['a labelled assertion', await caught(() => assert.equal(S, `${S}-other`, 'the label')), 'AssertionError: the label'],
+    ['a generated assertion', await caught(() => assert.deepEqual([S], [`${S}-other`])), 'AssertionError (the compared values are not shown)'],
+    ['a page error', await caught(() => page.evaluate((s) => { throw new Error(s); }, S)), 'Error (its message is not shown)'],
+    ['a timeout', await caught(() => page.waitForSelector(`#${S}`, { timeout: 50 })), 'TimeoutError (its message is not shown)'],
+  ];
+  for (const [what, err, head] of cases) {
+    const lines = h.failureLines(err);
+    assert.ok(lines[0] === head, `${what}: the head`);
+    assert.ok(!lines.join('\n').includes(S), `${what}: no message text`);
+    assert.ok(lines.slice(1).every((l) => /^at [\w./-]+\.mjs:\d+:\d+$/.test(l)), `${what}: places only`);
+    if (what !== 'a string') assert.ok(here(lines), `${what}: a place in this file`);
   }
 });
 
@@ -979,18 +1018,9 @@ try {
       console.log(`ok - ${t.name}`);
     } catch (err) {
       failed += 1;
-      // An assertion's message carries the compared values (the user's data) after its first
-      // line, a generated one in its body: show the test's own label (the first line of a
-      // custom message) and the place only.
-      const lines = String(err.stack ?? err).split('\n');
-      const frames = lines.filter((l) => /^\s+at /.test(l)).slice(0, 5);
-      let head = lines[0];
-      if (err?.code === 'ERR_ASSERTION') {
-        head = err.generatedMessage
-          ? 'AssertionError (the compared values are not shown)'
-          : `AssertionError: ${String(err.message).split('\n')[0]}`;
-      }
-      console.log(`not ok - ${t.name}\n  ${[head, ...frames].join('\n  ')}`);
+      // A fixed head (an assertion's own label, else the error's kind) and the places in these
+      // files: no message text (h.failureLines).
+      console.log(`not ok - ${t.name}\n  ${h.failureLines(err).join('\n  ')}`);
     } finally {
       for (const context of env.browser.contexts()) await context.close();
     }

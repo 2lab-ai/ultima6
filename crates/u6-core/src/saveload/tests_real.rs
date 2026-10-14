@@ -798,19 +798,7 @@ fn state_diffs(a: &State, b: &State) -> Vec<String> {
         .filter(|&i| aa.objlist_tail[i] != ab.objlist_tail[i])
         .collect();
     check(&format!("actors.objlist_tail {tail:x?}"), tail.is_empty());
-    let (wa, wb) = (format!("{:?}", aa.work), format!("{:?}", ab.work));
-    let fields: Vec<String> = wa
-        .split(", ")
-        .zip(wb.split(", "))
-        .filter(|(x, y)| x != y)
-        .map(|(x, _)| {
-            x.split(':')
-                .next()
-                .unwrap_or("")
-                .trim_start_matches("ActorWork { ")
-                .to_string()
-        })
-        .collect();
+    let fields = work_diffs(&aa.work, &ab.work);
     check(&format!("actors.work {fields:?}"), fields.is_empty());
     check("map.centre", a.map.centre == b.map.centre);
     check("map.view_flags", a.map.view_flags == b.map.view_flags);
@@ -824,6 +812,50 @@ fn state_diffs(a: &State, b: &State) -> Vec<String> {
     check("main", a.main == b.main);
     check("rng", a.rng == b.rng);
     out
+}
+
+/// The names of the [`crate::actors::ActorWork`] fields that differ, never their values. The
+/// pattern names every field, so a field added to the struct breaks the build here until it is
+/// compared too.
+fn work_diffs(a: &crate::actors::ActorWork, b: &crate::actors::ActorWork) -> Vec<&'static str> {
+    macro_rules! differing {
+        ($($field:ident),+ $(,)?) => {{
+            let crate::actors::ActorWork { $($field: _),+ } = a;
+            let mut out = Vec::new();
+            $(if a.$field != b.$field {
+                out.push(stringify!($field));
+            })+
+            out
+        }};
+    }
+    differing!(
+        prompt,
+        time_stop_over,
+        last_hour,
+        bell_strikes,
+        hour_strikes,
+        saw_damage,
+        avoid_damage,
+        stepped,
+        teleports,
+        searches,
+        force_teleport,
+        swap_ok,
+        hic,
+        slot,
+        leader_kept,
+        walk_through_damage,
+        party_centre,
+        enemy_centre,
+        front,
+        enemies,
+        flag_6a88,
+        follow,
+        step_blocked,
+        mouse_walk,
+        mouse_target,
+        resurrect_pending,
+    )
 }
 
 /// Objlist bytes that differ outside the actors' frame bits (the high 6 bits of each

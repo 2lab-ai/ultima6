@@ -42,8 +42,9 @@ export const blockFile = (i) => `savegame/objblk${'abcdefgh'[i & 7]}${'abcdefgh'
 
 /// Deep equality for values that hold content of the user's files (save bytes, names): when
 /// they differ the error names `label` and, per differing path (object keys are file paths),
-/// the lengths and the first differing index, never the values (spec 01 §Rights; assert's own
-/// message would print both). Strings, arrays and typed arrays count as sequences.
+/// whether the lengths differ and the first differing index, never the values nor the lengths
+/// (spec 01 §Rights: the length of a list of the user's records or paths is a count of them;
+/// assert's own message would print both). Strings, arrays and typed arrays count as sequences.
 export function assertSame(actual, expected, label) {
   if (isDeepStrictEqual(actual, expected)) return;
   const found = [];
@@ -55,7 +56,7 @@ const isSequence = (v) => typeof v === 'string' || Array.isArray(v) || ArrayBuff
 const isRecord = (v) => typeof v === 'object' && v !== null && !isSequence(v);
 const kind = (v) => {
   if (v === null || v === undefined) return String(v);
-  if (isSequence(v)) return `${typeof v === 'string' ? 'a string' : 'a sequence'} of length ${v.length}`;
+  if (isSequence(v)) return typeof v === 'string' ? 'a string' : 'a sequence';
   return isRecord(v) ? 'an object' : `a ${typeof v}`;
 };
 
@@ -69,7 +70,7 @@ function difference(a, b, path, out) {
     const nested = i < n && typeof a !== 'string' && (isRecord(a[i]) || isSequence(a[i]))
       && (isRecord(b[i]) || isSequence(b[i]));
     if (nested) difference(a[i], b[i], `${path}[${i}]`, out);
-    else out.push(`${at}lengths ${a.length} and ${b.length}, first difference at index ${i}`);
+    else out.push(`${at}lengths ${a.length === b.length ? 'equal' : 'differ'}, first difference at index ${i}`);
   } else if (isRecord(a) && isRecord(b)) {
     for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
       const p = path ? `${path}.${k}` : k;
@@ -80,6 +81,51 @@ function difference(a, b, path, out) {
   } else {
     out.push(`${at}${kind(a)} and ${kind(b)}`);
   }
+}
+
+// The error classes a failure is shown by; any other name (a page can set its own) shows as
+// `Error`.
+const ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError',
+  'TimeoutError', 'AbortError', 'RuntimeError', 'AssertionError']);
+const HERE = join(dirname(fileURLToPath(import.meta.url)), '/');
+// A stack frame's place: node writes a module's as a file URL, Playwright's rewritten stacks a
+// plain path.
+const FRAME = /^\s+at (?:async )?(?:[^()]*\()?((?:file:\/\/)?\/[^\s()]+):(\d+):(\d+)\)?$/;
+const framePath = (place) => {
+  try { return place.startsWith('file:') ? fileURLToPath(place) : place; } catch { return ''; }
+};
+
+/// The kind of `err` as one of the fixed names above.
+export const errorName = (err) => (ERROR_NAMES.has(err?.name) ? err.name : 'Error');
+
+/// What the runner shows of a failure (spec 01 §Rights): an error's message can carry the
+/// user's data (an assertion's compared values; a page, Playwright or helper error quoting the
+/// page's text, a selector or a status line), so the lines are a fixed head and the places in
+/// these test files only. The head is an assertion's own label (the first line of the test's
+/// message: node appends the compared values after it) or, for any other error, its kind. The
+/// places are read from the stack after the message (whose lines could look like frames) and
+/// shown as file:line:column of a file in this directory.
+export function failureLines(err) {
+  let head = `${errorName(err)} (its message is not shown)`;
+  if (err instanceof assert.AssertionError) {
+    head = err.generatedMessage
+      ? 'AssertionError (the compared values are not shown)'
+      : `AssertionError: ${String(err.message).split('\n')[0]}`;
+  }
+  let stack = typeof err?.stack === 'string' ? err.stack : '';
+  const message = typeof err?.message === 'string' ? err.message : '';
+  const end = message ? stack.indexOf(message) : -1;
+  if (end >= 0) stack = stack.slice(end + message.length);
+  else if (message) stack = stack.split('\n').slice(message.split('\n').length).join('\n');
+  const places = [];
+  for (const line of stack.split('\n')) {
+    const m = FRAME.exec(line);
+    const path = m ? framePath(m[1]) : '';
+    if (path.startsWith(HERE) && places.length < 5) {
+      places.push(`at ${path.slice(HERE.length)}:${m[2]}:${m[3]}`);
+    }
+  }
+  return [head, ...places];
 }
 
 // Runs in the page before its scripts: named gates the test holds and releases, an event log,
@@ -216,7 +262,7 @@ export async function openPage(env, { gated = true, gameFirst = true } = {}) {
   const page = await context.newPage();
   // A page error's text can quote the game's data (an engine panic names its values): its kind
   // only.
-  page.on('pageerror', (err) => console.error(`  page error: ${err.name}`));
+  page.on('pageerror', (err) => console.error(`  page error: ${errorName(err)}`));
   return { context, page };
 }
 

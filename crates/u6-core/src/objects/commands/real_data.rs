@@ -1,6 +1,7 @@
 //! Real data: the user's archive.org zip → u6-intake → `Files` → `State::new_game`, then the
-//! object commands. Skips when the zip is absent; reads only, prints labels, slots and the seeds
-//! it searched only (no game text, no types, places, counts or stats of the user's world).
+//! object commands. Skips when the zip is absent; reads only, prints labels, slots and pass/fail
+//! only (no game text, no types, places, counts or stats of the user's world; the seed search
+//! writes the seeds it found to a file outside the repository).
 #![allow(clippy::disallowed_methods)] // the test reads the zip
 
 use std::cell::RefCell;
@@ -102,6 +103,8 @@ fn cells(s: &State) -> Vec<(i16, i16)> {
 /// original's start and kept outside the repository (the user's world): this file under the
 /// oracle directory, the way the saveload tests find the original's saves.
 const ORACLE_CELLS: &str = "/Users/zhugehyuk/Games/ultima6/oracle/hatch/start-gargoyle-cells.txt";
+/// Where the seed search writes the seeds it found, next to [`ORACLE_CELLS`].
+const ORACLE_SEEDS: &str = "/Users/zhugehyuk/Games/ultima6/oracle/hatch/start-gargoyle-seeds.txt";
 
 /// `col,row` pairs separated by white space (`#` lines are comments), sorted.
 fn parse_cells(text: &str) -> Vec<(i16, i16)> {
@@ -179,7 +182,9 @@ fn the_start_egg_hatches_its_gargoyles() {
 
 /// Seed search (run by hand with `--ignored`): every seed word whose start hatch puts the
 /// monsters on the view cells an oracle frame shows ([`oracle_cells`]: read off the frame; the
-/// cells are the user's world, so they stay out of the repo).
+/// cells are the user's world, so they stay out of the repo). The seeds follow from the user's
+/// files too: they go to [`ORACLE_SEEDS`] (or `U6_ORACLE_SEEDS_OUT`), and the output says only
+/// whether there are any and where they went.
 #[test]
 #[ignore]
 fn search_seeds_for_the_oracle_gargoyles() {
@@ -199,7 +204,10 @@ fn search_seeds_for_the_oracle_gargoyles() {
             hits.push(seed);
         }
     }
-    eprintln!("{} seeds: {:x?}", hits.len(), hits);
+    let out = std::env::var("U6_ORACLE_SEEDS_OUT").unwrap_or_else(|_| ORACLE_SEEDS.to_string());
+    let text: String = hits.iter().map(|s| format!("{s:#06x}\n")).collect();
+    std::fs::write(&out, text).quiet();
+    eprintln!("seeds found: {}; written to {out}", !hits.is_empty());
 }
 
 /// The start state with the message scroll set up as main leaves it.

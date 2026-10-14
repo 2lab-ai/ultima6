@@ -1,7 +1,7 @@
 //! Real data: the user's zip → u6-intake → `State` + `UiState::load`, the start state's panels
 //! and message scroll rendered headless to /tmp/claude-501/p4-ui*.png. Skips without the zip;
-//! the data is read only, never copied, and the test prints numbers and the drawn rows' lengths
-//! only (the text is the user's).
+//! the data is read only, never copied, and the test prints the receipt paths, its own panel
+//! modes and the stub points only (the text is the user's).
 #![allow(clippy::disallowed_methods)] // the test reads the zip and writes the PNG receipts
 
 use super::*;

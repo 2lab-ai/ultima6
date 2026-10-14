@@ -4,7 +4,7 @@
 //! xdftool unpack (files/), tools/pp20.py output (unpacked/) and the HFE images the zip holds
 //! (original/). No expected value is copied from them: the report the intake must write is
 //! built here from those oracles (headers read at their offsets, files counted), and
-//! comparisons of their content name lengths and indices only.
+//! comparisons of their content name whether the lengths differ and indices only.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)] // tests may read files and time
 
 use std::collections::BTreeMap;

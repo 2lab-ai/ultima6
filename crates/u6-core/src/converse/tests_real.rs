@@ -1,6 +1,6 @@
 //! Real data: conversations with NPCs near the party start, from the user's archive.org zip.
-//! Skips where the zip is missing; prints actor numbers, line counts and lengths, never the
-//! dialogue or a name (no game text in the repo or the test output).
+//! Skips where the zip is missing; prints actor numbers and pass/fail, never the dialogue, a
+//! name, or how many lines or how long (no game text in the repo or the test output).
 #![allow(clippy::disallowed_methods)] // tests may read files
 
 use std::path::Path;

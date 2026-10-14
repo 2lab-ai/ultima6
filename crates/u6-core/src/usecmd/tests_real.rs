@@ -1,6 +1,6 @@
 //! Real data: Use on objects of the shipped world, from the user's archive.org zip. Skips where
-//! the zip is missing; prints line counts and lengths, never the text (no game text in the repo
-//! or the test output). With
+//! the zip is missing; prints the case labels and the stub points, never the text nor how many
+//! lines or how long (no game text in the repo or the test output). With
 //! `U6_USE_FRAMES=<dir>` each case also writes the frame after the command as a PNG there.
 #![allow(clippy::disallowed_methods)] // tests may read files and the environment
 
@@ -176,8 +176,8 @@ fn png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Prints how many lines the command added (and their lengths) and the stub points it reached;
-/// writes its frame. Returns the lines for the caller's checks.
+/// Prints the stub points the command reached; writes its frame. Returns the lines it added
+/// for the caller's checks.
 fn report(e: &Engine, name: &str, before: usize) -> Vec<String> {
     let lines = lines_of(&e.state());
     let new: Vec<String> = lines

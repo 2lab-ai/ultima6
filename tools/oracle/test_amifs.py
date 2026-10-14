@@ -252,9 +252,10 @@ class InstallTable(unittest.TestCase):
         # Counts and bytes of the table are the user's data: the checks are its structure.
         self.assertTrue(entries and all(e["volume"] in mkadf.VOLUMES for e in entries))
         by = {(e["volume"], e["dst"]): e for e in entries if e["floppy"]}
-        self.assertEqual(by[("PROGRAM", "ultima6")]["src"], "ultcli")  # flags 3: floppy-only, decrunched
+        # flags 3: floppy-only, decrunched
+        self.assertTrue(by[("PROGRAM", "ultima6")]["src"] == "ultcli", "the launcher's source")
         self.assertTrue(by[("PROGRAM", "ultima6")]["floppy"])
-        self.assertEqual(by[("PROGRAM", "s/startup-sequence")]["src"], "start")
+        self.assertTrue(by[("PROGRAM", "s/startup-sequence")]["src"] == "start", "the startup-sequence's source")
         hd_only = ("ultima6", "ultima6.info", "disk.info")
         self.assertFalse(any(e["floppy"] for e in entries if e["src"] in hd_only))
         # Every other entry goes to the floppies.
@@ -264,8 +265,8 @@ class InstallTable(unittest.TestCase):
         saves = sum(1 for e in entries if e["dst"].startswith("savegame/"))
         self.assertTrue(saves == 1 + 69, "the objlist and the 69 blocks")
         self.assertTrue(all(e["volume"] == "PLAYER" for e in entries if e["dst"].startswith("savegame/")))
-        self.assertEqual({e["volume"] for e in entries if e["src_volume"] == "DATA2"}, {"POPULACE"})
-        self.assertEqual(boot[:4], b"DOS\0")
+        self.assertTrue({e["volume"] for e in entries if e["src_volume"] == "DATA2"} == {"POPULACE"}, "DATA2 goes to POPULACE")
+        self.assertTrue(boot[:4] == b"DOS\0", "an AmigaDOS boot block")
 
     def test_game_first_patches(self):
         # The patch values below come from mkadf's own constants, so those checks confirm the
@@ -300,8 +301,8 @@ class InstallTable(unittest.TestCase):
         changed = sum(a != b for a, b in zip(out, objlist))
         self.assertTrue(changed == len(mkadf.OBJLIST_CREATED), "only the patch bytes change")
         # formats.md section 6: 0x1C71 = gender, 0x1C72 = the avatar portrait (non-zero = a character).
-        self.assertEqual(set(mkadf.OBJLIST_CREATED), {0x1C71, 0x1C72})
-        self.assertNotEqual(out[0x1C72], 0, "the patched save holds a character")
+        self.assertTrue(set(mkadf.OBJLIST_CREATED) == {0x1C71, 0x1C72}, "the patched offsets")
+        self.assertTrue(out[0x1C72] != 0, "the patched save holds a character")
         self.assertIsNone(mkadf.game_first_patches("game", b"x"))
 
 

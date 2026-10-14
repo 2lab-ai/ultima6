@@ -107,8 +107,9 @@ pub(super) async fn cast_command(state: &RefCell<State>, io: &Io) {
 }
 
 /// Lines of the message scroll. They are the game's text, so the debug form (the assertion
-/// messages) shows only how many there are and their lengths; the tests compare them with
-/// strings read from the user's `game` at run time ([`text_at`], [`msg`], [`printed`]).
+/// messages) is a label only: not their text, how many there are nor their lengths (the count
+/// and lengths of the user's records are not shown either); the tests compare them with strings
+/// read from the user's `game` at run time ([`text_at`], [`msg`], [`printed`]).
 pub(super) struct Scroll(Vec<String>);
 
 impl std::ops::Deref for Scroll {
@@ -120,8 +121,7 @@ impl std::ops::Deref for Scroll {
 
 impl std::fmt::Debug for Scroll {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let lengths: Vec<usize> = self.0.iter().map(String::len).collect();
-        write!(f, "{} lines of lengths {lengths:?}", lengths.len())
+        f.write_str("the message scroll (its lines are not shown)")
     }
 }
 
