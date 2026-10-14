@@ -2,6 +2,9 @@
 //! strings print nothing, the A4 tables read as zeros, the empty map lets anything stand
 //! anywhere, the seams take their fallbacks).
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use super::tests::{run, world, world_with};
 use crate::engine::Key;
 use crate::objects::Slot;
@@ -291,6 +294,78 @@ fn wing_strike_hits_on_the_foe_s_column() {
     assert!(
         (0x100..crate::objects::OBJECT_SLOTS).all(|o| s.objects.type_frame[o] & 0x3ff != 0x19b)
     );
+}
+
+/// 0x133562's sprite calls: a stone (sprite 7) over its saved background reaches the screen
+/// through the changed rectangle (whole bytes) as one frame, and the back buffer gets the
+/// background back; the hit mark (tile 0x101) copies its 16 x 16 cell to the screen and leaves
+/// the back buffer as it was; the restores grow the rectangle for the next copy.
+#[test]
+fn hail_stones_and_the_hit_mark_reach_the_screen_only() {
+    type Seen = ((u8, u8, u8, u8), bool, bool, Vec<u8>, [i16; 4], usize);
+    let mut s = world_with(&[]);
+    s.gfx.records[0x101].pixels = vec![5; 256];
+    s.gfx.records[0x101].transparent = vec![false; 256];
+    let seen: Rc<RefCell<Option<Seen>>> = Rc::new(RefCell::new(None));
+    let out = Rc::clone(&seen);
+    run(s, &[], move |st, io| async move {
+        io.draw_back(|b| {
+            for y in 0..200 {
+                for x in 0..320 {
+                    b.set(x, y, ((x + y) % 7) as u8);
+                }
+            }
+        });
+        let dump = |b: &mut u6_render::Framebuffer| b.pixels().to_vec();
+        let back0 = io.draw_back(dump);
+        let mut s = st.borrow_mut();
+        super::seams::hail_start(&mut s);
+        let stone = &mut s.gfx.sprites.slots[7];
+        stone.fill(0xff);
+        stone[0] = 9;
+        stone[17] = 0x2a;
+        super::seams::draw_hail(&mut s, &io, &[(40, 50)]);
+        let stone_px = io.draw(|f| {
+            let g = |x, y| f.get(x, y).unwrap_or(0xee);
+            (g(32, 42), g(33, 43), g(34, 42), g(56, 42))
+        });
+        let restored = io.draw_back(dump) == back0;
+        let rect = s.combat.dirty;
+        super::seams::hail_hit(&mut s, &io, 88, 88);
+        let cell = io.draw(|f| {
+            (80..96)
+                .flat_map(|y| (80..96).map(move |x| (x, y)))
+                .map(|(x, y)| f.get(x, y).unwrap_or(0xee))
+                .collect()
+        });
+        let still = io.draw_back(dump) == back0;
+        *out.borrow_mut() = Some((
+            stone_px,
+            restored,
+            still,
+            cell,
+            rect,
+            s.combat.effects.len(),
+        ));
+    });
+    let (stone_px, restored, still, cell, rect, frames) = seen.borrow_mut().take().unwrap();
+    assert_eq!(
+        stone_px,
+        (9, 0x0a, (34 + 42) % 7, 0),
+        "the stone's pixels (5 bits), its background, nothing past the copied bytes"
+    );
+    assert!(
+        restored,
+        "the stone's background is back in the back buffer"
+    );
+    assert_eq!(
+        rect,
+        [32, 42, 48, 58],
+        "the restore grew the rectangle again"
+    );
+    assert!(cell.iter().all(|&p| p == 5), "the hit mark on the screen");
+    assert!(still, "the hit mark's background is back");
+    assert_eq!(frames, 2, "one frame per copy");
 }
 
 #[test]

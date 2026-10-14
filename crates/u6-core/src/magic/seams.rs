@@ -2,8 +2,8 @@
 //! experience, hostility, the wound line; hunk 18: the flights), objects (hunk 15), Use's
 //! levers, inventory (hunk 8) and a few graphics helpers. Each is the narrowest signature the
 //! spells need; since the M2 integration the ported ones call their owner (graphics 0x1521f4
-//! since the pointer merge), the rest (0x132338, the hail sprites) keep a stub contract and an
-//! explicit fallback.
+//! and the hail sprites 0x15265a / 0x152800 / 0x152876 since the pointer merge), the rest
+//! (0x132338) keep a stub contract and an explicit fallback.
 
 use std::cell::RefCell;
 
@@ -233,16 +233,81 @@ pub(crate) fn parse_number(s: &State, text: &[u8]) -> i16 {
     crate::objects::commands::parse_answer(s, text, 0)
 }
 
-/// [gfx] 0x152800 / 0x152876 / 0x15265a / 0x151fe6 (the hail-stone sprites of 0x133562: save
-/// the background under each stone, draw sprite 7 there, copy the changed rectangle, put the
-/// backgrounds back). Stub contract: draws `stones` (window pixels). Fallback: nothing drawn.
-pub(crate) fn draw_hail(_s: &mut State, _io: &Io, _stones: &[(i16, i16)]) {
-    todo_stub!("0x152876 hail-stone sprites (magic seam)", ())
+/// Sprite slot of the hail stone (0x1335ba) and of the hit mark's saved background (0x13398a);
+/// slots 0..=5 save the backgrounds under the stones.
+const STONE_SLOT: u16 = 7;
+const HIT_SLOT: u16 = 6;
+/// The stone's object tile and its turning centre (0x1335a0..0x1335c2: angle 0).
+const STONE_TILE: u16 = 0x18e;
+const STONE_CENTRE: i16 = 0x7f;
+/// The hit mark's tile (0x1339a2).
+const HIT_TILE: u16 = 0x101;
+/// The changed rectangle A4+0x1900.. when nothing changed (0x1335ca..0x1335dc).
+const NO_RECT: [i16; 4] = [0xa8, 0xa8, 7, 7];
+
+/// [gfx] the start of 0x133562 (0x1335ac..0x1335dc): sprite 7 built from tile 0x18e, unturned
+/// (0x15265a, [`crate::gfx::sprite::prepare`]), and no changed rectangle (combat's
+/// A4+0x1900.. words, [`crate::combat::CombatState::dirty`]).
+pub(crate) fn hail_start(s: &mut State) {
+    let c = STONE_CENTRE;
+    crate::gfx::sprite::prepare(&mut s.gfx, STONE_SLOT, STONE_TILE, 0, c, c);
+    s.combat.dirty = NO_RECT;
 }
 
-/// [gfx] the hit mark of 0x133562: the background under window pixel (x, y) saved in sprite 6
-/// (0x152800), tile 0x101 over it (0x152ffa, ported), the cell copied to the screen, the
-/// background put back (0x152876). Stub contract: draws. Fallback: nothing drawn.
-pub(crate) fn hail_hit(_s: &mut State, _io: &Io, _x: i16, _y: i16) {
-    todo_stub!("0x152800 hail hit mark (magic seam)", ())
+/// The copy of the changed back-buffer rectangle to the screen (0x151fe6, whole bytes of 8
+/// pixels), recorded as a frame that [`crate::combat::play_effects`] shows for `hold` vblanks.
+fn show_rect(s: &mut State, io: &Io, [x0, y0, x1, y1]: [i16; 4], hold: u8) {
+    let w = |v: i16| v as u16;
+    io.with_buffers(|back, front| {
+        crate::gfx::blit::copy_rect(back, front, w(x0), w(y0), w(x1), w(y1), w(x0), w(y0));
+    });
+    let (cx0, cx1) = ((x0 as usize) & !7, (x1 as usize) | 7);
+    crate::combat::present::capture(s, cx0, y0 as usize, cx1, y1 as usize, hold);
+}
+
+/// [gfx] the stones of 0x133562 (0x1336f8..0x133892), window pixels `stones`: the background
+/// under stone k saved in sprite slot k (0x152800), the stone (sprite 7) drawn over each
+/// (0x152876), every one growing the changed rectangle (0x13242e,
+/// [`crate::combat::present::extend_dirty`]); the rectangle copied to the screen (0x151fe6) and
+/// reset; the backgrounds put back (0x152876 on a saved slot), growing it again for the next
+/// copy. Slot k is the stone's place among those shown (the original numbers them by their
+/// array index; both loops use the same one, so the pixels are the same).
+pub(crate) fn draw_hail(s: &mut State, io: &Io, stones: &[(i16, i16)]) {
+    let w = |v: i16| v as u16;
+    for (k, &(x, y)) in stones.iter().enumerate() {
+        let gfx = &mut s.gfx;
+        io.draw_back(|back| crate::gfx::sprite::save(gfx, back, k as u16, w(x), w(y)));
+        crate::combat::present::extend_dirty(s, x, y);
+    }
+    for &(x, y) in stones {
+        let gfx = &s.gfx;
+        io.draw_back(|back| crate::gfx::sprite::draw(gfx, back, STONE_SLOT, w(x), w(y)));
+        crate::combat::present::extend_dirty(s, x, y);
+    }
+    let rect = s.combat.dirty;
+    if rect[0] <= rect[2] && rect[1] <= rect[3] {
+        show_rect(s, io, rect, 1);
+    }
+    s.combat.dirty = NO_RECT;
+    for (k, &(x, y)) in stones.iter().enumerate() {
+        let gfx = &s.gfx;
+        io.draw_back(|back| crate::gfx::sprite::draw(gfx, back, k as u16, w(x), w(y)));
+        crate::combat::present::extend_dirty(s, x, y);
+    }
+}
+
+/// [gfx] the hit mark of 0x133562 (0x133984..0x1339ea) at window pixel (x, y): the background
+/// saved in sprite slot 6 (0x152800), tile 0x101 over it (0x152ffa), the 16 × 16 cell copied to
+/// the screen (0x151fe6), the background put back (0x152876) and the rectangle grown
+/// (0x13242e), so the next stones' copy erases the mark from the screen.
+pub(crate) fn hail_hit(s: &mut State, io: &Io, x: i16, y: i16) {
+    let w = |v: i16| v as u16;
+    let gfx = &mut s.gfx;
+    io.draw_back(|back| crate::gfx::sprite::save(gfx, back, HIT_SLOT, w(x), w(y)));
+    let gfx = &s.gfx;
+    io.draw_back(|back| crate::gfx::blit::blit_back(gfx, back, HIT_TILE, w(x - 8), w(y - 8)));
+    show_rect(s, io, [x - 8, y - 8, x + 7, y + 7], 0);
+    let gfx = &s.gfx;
+    io.draw_back(|back| crate::gfx::sprite::draw(gfx, back, HIT_SLOT, w(x), w(y)));
+    crate::combat::present::extend_dirty(s, x, y);
 }
