@@ -1,5 +1,6 @@
 // Static shell: loads the wasm engine, feeds it dropped files, keys and time,
-// and paints its RGBA frames. No game bytes are fetched or uploaded.
+// and paints its RGBA frames. No game bytes are fetched or uploaded. Dropping
+// files runs the intake (zip/HFE/ADF -> game files) and boots the engine.
 import init, { Game } from './pkg/u6_web.js';
 
 const canvas = document.getElementById('screen');
@@ -10,6 +11,7 @@ const statusLine = document.getElementById('status');
 const MAX_STEP_MS = 100; // a backgrounded tab must not jump the game ahead
 
 function setStatus(text) {
+  statusLine.style.whiteSpace = 'pre-wrap';
   statusLine.textContent = text;
 }
 
@@ -66,23 +68,26 @@ async function main() {
       for (const { path, file } of items) {
         game.load_file(path, new Uint8Array(await file.arrayBuffer()));
       }
-      const n = game.files_loaded();
-      setStatus(`${n} file${n === 1 ? '' : 's'} loaded (in memory, this tab only).`);
     } catch (err) {
       setStatus(`Could not read a file: ${err}`);
+      return;
+    }
+    const n = game.files_loaded();
+    setStatus(`${n} file${n === 1 ? '' : 's'} read; decoding the disks\u2026`);
+    // Let the status paint before the (synchronous) intake runs.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    try {
+      const report = game.start();
+      setStatus(`${report}\nStarted (in memory, this tab only). Arrow keys move the view.`);
+    } catch (err) {
+      setStatus(`Could not start the game:\n${err.message ?? err}`);
     }
   }
 
+  // Key handlers only queue events; the engine sees them on the next tick.
   window.addEventListener('keydown', (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey || isFormControl(e.target)) return;
-    if (game.key_down(e.code)) e.preventDefault();
-  });
-  window.addEventListener('keyup', (e) => {
-    if (game.key_up(e.code) && !isFormControl(e.target)) e.preventDefault();
-  });
-  window.addEventListener('blur', () => game.release_all());
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) game.release_all();
+    if (game.key_down(e.code, e.key)) e.preventDefault();
   });
 
   // The whole page accepts drops so a near miss does not open the file in the tab.
@@ -124,6 +129,8 @@ async function main() {
     const ms = Math.floor(carry);
     carry -= ms;
     game.tick(ms);
+    const log = game.take_log();
+    if (log) console.info(log);
     draw();
     requestAnimationFrame(frame);
   }

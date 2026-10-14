@@ -8,5 +8,6 @@ publish.workspace = true
 
 [dependencies]
 u6-core.workspace = true
+u6-intake.workspace = true
 minifb = "0.29"
 png = "0.18"

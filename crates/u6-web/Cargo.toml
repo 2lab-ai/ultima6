@@ -11,5 +11,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 u6-core.workspace = true
+u6-intake.workspace = true
 # Must equal the installed wasm-bindgen CLI version (scripts/build-web.sh).
 wasm-bindgen = "=0.2.129"

@@ -7,4 +7,9 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+u6-formats.workspace = true
 u6-render.workspace = true
+
+[dev-dependencies]
+# Real-data test only: zip -> files, exactly as the platforms do it.
+u6-intake.workspace = true

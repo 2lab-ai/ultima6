@@ -1,22 +1,25 @@
-//! Desktop runner: a 3x-scaled window for development, or a deterministic headless
-//! render to PNG for pixel checks.
+//! Desktop runner: boots the engine from the user's archive.org zip, then either opens a
+//! 3x-scaled window or renders headless to PNG for pixel checks.
 //!
 //! ```text
-//! u6-native                                   open the window
-//! u6-native --headless-png out.png [--frames N] [--hold-right|--hold-left|--hold-up|--hold-down]
+//! u6-native --zip ultima-vi.zip [--seed N]                       open the window
+//! u6-native --zip ultima-vi.zip --headless-png out.png [--frames N] [--keys up,up,left,t] [--seed N]
 //! ```
 //!
-//! Headless mode never opens a window or reads a clock: it runs N ticks of
-//! `HEADLESS_TICK_MS` with the given keys held and writes the 320x200 RGBA frame.
+//! Headless mode never opens a window or reads a clock: it runs N ticks of `HEADLESS_TICK_MS`,
+//! delivering key i of `--keys` with tick i, and writes the last published 320x200 frame. The
+//! RNG seed defaults to 0 headless (reproducible) and to the wall clock in the window (as the
+//! original seeds from `time()`).
 
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use minifb::{Window, WindowOptions};
-use u6_core::{Framebuffer, Game, HEIGHT, Input, Key, WIDTH};
+use minifb::{KeyRepeat, Window, WindowOptions};
+use u6_core::{Engine, Files, HEIGHT, InputEvent, Key, WIDTH};
+use u6_intake::{InputFile, intake};
 
 const SCALE: usize = 3;
 const HEADLESS_TICK_MS: u32 = 16;
@@ -24,9 +27,32 @@ const MAX_STEP_MS: u64 = 100;
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
+    zip: Option<PathBuf>,
     headless_png: Option<PathBuf>,
     frames: u32,
-    hold: Vec<Key>,
+    keys: Vec<Key>,
+    seed: Option<u16>,
+}
+
+/// One `--keys` token: an arrow / control key name or a single character.
+fn parse_key(token: &str) -> Result<Key, String> {
+    Ok(match token.to_ascii_lowercase().as_str() {
+        "up" => Key::Up,
+        "down" => Key::Down,
+        "left" => Key::Left,
+        "right" => Key::Right,
+        "enter" | "return" => Key::Enter,
+        "esc" | "escape" => Key::Escape,
+        "space" => Key::Space,
+        "backspace" => Key::Backspace,
+        _ => {
+            let mut chars = token.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => Key::Char(c),
+                _ => return Err(format!("unknown key {token:?}")),
+            }
+        }
+    })
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -35,57 +61,67 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         ..Args::default()
     };
     while let Some(arg) = args.next() {
+        let mut value = |what: &str| args.next().ok_or(format!("{arg} needs {what}"));
         match arg.as_str() {
-            "--headless-png" => {
-                let path = args.next().ok_or("--headless-png needs a path")?;
-                parsed.headless_png = Some(path.into());
-            }
+            "--zip" => parsed.zip = Some(value("a path")?.into()),
+            "--headless-png" => parsed.headless_png = Some(value("a path")?.into()),
             "--frames" => {
-                let n = args.next().ok_or("--frames needs a number")?;
+                let n = value("a number")?;
                 parsed.frames = n.parse().map_err(|_| format!("bad --frames {n:?}"))?;
             }
-            "--hold-right" => parsed.hold.push(Key::Right),
-            "--hold-left" => parsed.hold.push(Key::Left),
-            "--hold-up" => parsed.hold.push(Key::Up),
-            "--hold-down" => parsed.hold.push(Key::Down),
+            "--keys" => {
+                let seq = value("a key list")?;
+                parsed.keys = seq
+                    .split(',')
+                    .filter(|t| !t.is_empty())
+                    .map(parse_key)
+                    .collect::<Result<_, _>>()?;
+            }
+            "--seed" => {
+                let n = value("a number")?;
+                parsed.seed = Some(n.parse().map_err(|_| format!("bad --seed {n:?}"))?);
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
     Ok(parsed)
 }
 
-fn map_key(key: minifb::Key) -> Option<Key> {
-    use minifb::Key as K;
-    Some(match key {
-        K::Up => Key::Up,
-        K::Down => Key::Down,
-        K::Left => Key::Left,
-        K::Right => Key::Right,
-        K::Enter | K::NumPadEnter => Key::Enter,
-        K::Escape => Key::Escape,
-        K::Space => Key::Space,
-        _ => return None,
-    })
+/// Reads the zip, runs the intake (report lines to stderr) and boots the engine.
+fn boot(zip: &Path, seed: u16) -> Result<Engine, String> {
+    let data = std::fs::read(zip).map_err(|e| format!("{}: {e}", zip.display()))?;
+    let name = zip
+        .file_name()
+        .map_or("input.zip".into(), |n| n.to_string_lossy().into_owned());
+    let r = intake(vec![InputFile { name, data }]);
+    for line in &r.report {
+        eprintln!("intake: {line}");
+    }
+    Engine::with_seed(Files::new(r.files), seed).map_err(|e| e.to_string())
 }
 
-/// Runs `frames` fixed ticks with `hold` pressed and returns the final frame as RGBA8.
-fn simulate(frames: u32, hold: &[Key]) -> Vec<u8> {
-    let mut game = Game::new();
-    let mut input = Input::default();
-    for &key in hold {
-        input.set(key, true);
+fn print_log(engine: &mut Engine) {
+    for line in engine.take_log() {
+        eprintln!("{line}");
     }
-    for _ in 0..frames {
-        game.tick(&input, HEADLESS_TICK_MS);
+}
+
+/// Runs `frames` fixed ticks, key i delivered with tick i; returns the last frame as RGBA8.
+fn simulate(engine: &mut Engine, frames: u32, keys: &[Key]) -> Vec<u8> {
+    for i in 0..frames as usize {
+        let input: Vec<InputEvent> = keys
+            .get(i)
+            .map(|&k| InputEvent::Key(k))
+            .into_iter()
+            .collect();
+        engine.tick(&input, HEADLESS_TICK_MS);
     }
-    let mut fb = Framebuffer::new();
-    game.render(&mut fb);
     let mut rgba = Vec::new();
-    fb.write_rgba(&mut rgba);
+    engine.frame().write_rgba(&mut rgba);
     rgba
 }
 
-fn write_png(path: &PathBuf, rgba: &[u8]) -> Result<(), String> {
+fn write_png(path: &Path, rgba: &[u8]) -> Result<(), String> {
     let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut encoder = png::Encoder::new(BufWriter::new(file), WIDTH as u32, HEIGHT as u32);
     encoder.set_color(png::ColorType::Rgba);
@@ -110,29 +146,58 @@ fn upscale(rgba: &[u8], out: &mut [u32]) {
     }
 }
 
-fn run_window() -> Result<(), String> {
+fn map_key(key: minifb::Key) -> Option<Key> {
+    use minifb::Key as K;
+    let letter = |k: K| {
+        let i = k as u8 - K::A as u8;
+        Key::Char(char::from(b'a' + i))
+    };
+    Some(match key {
+        K::Up => Key::Up,
+        K::Down => Key::Down,
+        K::Left => Key::Left,
+        K::Right => Key::Right,
+        K::Enter | K::NumPadEnter => Key::Enter,
+        K::Escape => Key::Escape,
+        K::Space => Key::Space,
+        K::Backspace => Key::Backspace,
+        K::Key0 => Key::Char('0'),
+        K::Key1 => Key::Char('1'),
+        K::Key2 => Key::Char('2'),
+        K::Key3 => Key::Char('3'),
+        K::Key4 => Key::Char('4'),
+        K::Key5 => Key::Char('5'),
+        K::Key6 => Key::Char('6'),
+        K::Key7 => Key::Char('7'),
+        K::Key8 => Key::Char('8'),
+        K::Key9 => Key::Char('9'),
+        k if (K::A as u8..=K::Z as u8).contains(&(k as u8)) => letter(k),
+        _ => return None,
+    })
+}
+
+fn run_window(mut engine: Engine) -> Result<(), String> {
     let (w, h) = (WIDTH * SCALE, HEIGHT * SCALE);
     let mut window =
         Window::new("Ultima VI", w, h, WindowOptions::default()).map_err(|e| e.to_string())?;
     window.set_target_fps(60);
-    let mut game = Game::new();
-    let mut input = Input::default();
-    let mut fb = Framebuffer::new();
     let mut rgba = Vec::new();
     let mut screen = vec![0u32; w * h];
     let start = Instant::now();
     let mut delivered_ms = 0u64;
     while window.is_open() {
-        input.clear();
-        for key in window.get_keys().into_iter().filter_map(map_key) {
-            input.set(key, true);
-        }
+        let input: Vec<InputEvent> = window
+            .get_keys_pressed(KeyRepeat::Yes)
+            .into_iter()
+            .filter_map(map_key)
+            .map(InputEvent::Key)
+            .collect();
         let now_ms = start.elapsed().as_millis() as u64;
         let step = (now_ms - delivered_ms).min(MAX_STEP_MS);
         delivered_ms = now_ms;
-        game.tick(&input, step as u32);
-        game.render(&mut fb);
-        fb.write_rgba(&mut rgba);
+        engine.tick(&input, step as u32);
+        print_log(&mut engine);
+        engine.frame().write_rgba(&mut rgba);
         upscale(&rgba, &mut screen);
         window
             .update_with_buffer(&screen, w, h)
@@ -141,16 +206,39 @@ fn run_window() -> Result<(), String> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    let result = parse_args(std::env::args().skip(1)).and_then(|args| match &args.headless_png {
+/// Low word of the wall-clock seconds, like the original's `time()` seed.
+fn clock_seed() -> u16 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as u16)
+}
+
+fn run(args: Args) -> Result<(), String> {
+    let zip = args
+        .zip
+        .as_deref()
+        .ok_or("--zip <ultima-vi.zip> is required")?;
+    match &args.headless_png {
         Some(path) => {
-            write_png(path, &simulate(args.frames, &args.hold))?;
-            println!("wrote {} ({} frames)", path.display(), args.frames);
+            let mut engine = boot(zip, args.seed.unwrap_or(0))?;
+            let rgba = simulate(&mut engine, args.frames, &args.keys);
+            print_log(&mut engine);
+            write_png(path, &rgba)?;
+            let stubs: u64 = engine.stub_hits().values().sum();
+            println!(
+                "wrote {} ({} frames, {} stub hits)",
+                path.display(),
+                args.frames,
+                stubs
+            );
             Ok(())
         }
-        None => run_window(),
-    });
-    match result {
+        None => run_window(boot(zip, args.seed.unwrap_or_else(clock_seed))?),
+    }
+}
+
+fn main() -> ExitCode {
+    match parse_args(std::env::args().skip(1)).and_then(run) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("u6-native: {e}");
@@ -168,22 +256,40 @@ mod tests {
     }
 
     #[test]
-    fn parses_headless_flags() {
-        let a = args(&["--headless-png", "o.png", "--frames", "5", "--hold-right"]).unwrap();
+    fn parses_flags_and_key_lists() {
+        let a = args(&[
+            "--zip",
+            "u6.zip",
+            "--headless-png",
+            "o.png",
+            "--frames",
+            "5",
+            "--keys",
+            "up,Right,t,ESC",
+            "--seed",
+            "77",
+        ])
+        .unwrap();
+        assert_eq!(a.zip, Some(PathBuf::from("u6.zip")));
         assert_eq!(a.headless_png, Some(PathBuf::from("o.png")));
-        assert_eq!((a.frames, a.hold), (5, vec![Key::Right]));
+        assert_eq!((a.frames, a.seed), (5, Some(77)));
+        assert_eq!(a.keys, [Key::Up, Key::Right, Key::Char('t'), Key::Escape]);
         assert!(args(&["--frames"]).is_err());
         assert!(args(&["--bogus"]).is_err());
+        assert!(args(&["--keys", "upp"]).is_err());
+        assert!(args(&["--seed", "70000"]).is_err());
+        assert_eq!(args(&[]).unwrap().frames, 60);
     }
 
     #[test]
-    fn headless_hold_right_puts_marker_at_209() {
-        let rgba = simulate(60, &[Key::Right]);
-        let at = |x: usize, y: usize| &rgba[(y * WIDTH + x) * 4..][..4];
-        assert_eq!(at(209, 92), [255, 255, 255, 255]);
-        assert_eq!(at(224, 107), [255, 255, 255, 255]);
-        assert_eq!(at(208, 92), [0, 0, 0, 255]);
-        assert_eq!(at(225, 92), [0, 0, 0, 255]);
+    fn maps_letters_digits_and_arrows() {
+        use minifb::Key as K;
+        assert_eq!(map_key(K::A), Some(Key::Char('a')));
+        assert_eq!(map_key(K::T), Some(Key::Char('t')));
+        assert_eq!(map_key(K::Z), Some(Key::Char('z')));
+        assert_eq!(map_key(K::Key7), Some(Key::Char('7')));
+        assert_eq!(map_key(K::Left), Some(Key::Left));
+        assert_eq!(map_key(K::F1), None);
     }
 
     #[test]

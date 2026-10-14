@@ -648,6 +648,8 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 name = "u6-core"
 version = "0.1.0"
 dependencies = [
+ "u6-formats",
+ "u6-intake",
  "u6-render",
 ]
 
@@ -674,6 +676,7 @@ dependencies = [
  "minifb",
  "png",
  "u6-core",
+ "u6-intake",
 ]
 
 [[package]]
@@ -685,6 +688,7 @@ name = "u6-web"
 version = "0.1.0"
 dependencies = [
  "u6-core",
+ "u6-intake",
  "wasm-bindgen",
 ]
 
