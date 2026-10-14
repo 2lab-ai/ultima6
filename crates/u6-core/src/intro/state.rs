@@ -27,7 +27,8 @@ pub struct Views {
     pub v17f4: View,
     /// Original: A4+0x1804 (the spare bitmap A4+0x2e2e, full screen)
     pub spare: View,
-    /// Original: A4+0x25f6 (TV room background)
+    /// Original: A4+0x25f6 (TV room background; the gate scene clips the moongate with it, the
+    /// story's key poll 0x1097ac points it at the shown buffer)
     pub room: View,
     /// Original: A4+0x2606 (TV room pan layer)
     pub pan: View,

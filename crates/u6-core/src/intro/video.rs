@@ -5,7 +5,10 @@
 //! copper lists (0x119c6c), so a palette change, like a buffer swap, shows from the next frame
 //! on. The VBlank server 0x1198f8 runs once per frame: it clears the frame-wait flag 0x10fb60
 //! (0x115078 waits for that), steps a running fade-in (0x119efa) or fade-out (0x119f90), and
-//! every third frame rotates the colour-cycle palette (0x113d80) while 0x119fea is set.
+//! every third frame rotates the colour-cycle palette (0x113d80) while 0x119fea is set. It also
+//! writes BEAMCON0 when its word is not negative (only the Alt + Help keys set it) and places
+//! the mouse pointer, sprite 0, from the pointer position (0x119c26); the port draws that sprite
+//! over the frame it publishes, at the image's position (0, 0) since the engine has no mouse.
 //!
 //! The port publishes a frame at every frame wait: the shown buffer read as 5-bit indices,
 //! through the colours of that moment, then runs the server's step and awaits the engine's

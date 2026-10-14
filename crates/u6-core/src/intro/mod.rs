@@ -31,11 +31,21 @@
 //!   u 0x115498 · u 0x1158ec · u 0x115a92 and its aligners; graphics u 0x1163fc · u 0x1199ba ·
 //!   u 0x116180 · u 0x115588 · u 0x116326 · u 0x10f898; display u 0x113db2 · u 0x113df8 ·
 //!   u 0x113e8e · u 0x113ea6 · u 0x113ebe · u 0x113fb2 · u 0x113fce · u 0x113fea · u 0x115078 ·
-//!   u 0x1198f8 and the fades; input u 0x114f28 · u 0x113ed0 · u 0x113f0e · u 0x113f20;
-//!   C runtime `rand` u 0x10fa6c / `srand` u 0x10fa8e
+//!   u 0x1198f8 and the fades · u 0x119c26 pointer sprite; input u 0x114f28 · u 0x113ed0 ·
+//!   u 0x113f0e · u 0x113f20; C runtime `rand` u 0x10fa6c / `srand` u 0x10fa8e
 //! - u 0x1070c0 acknowledgments
-//! - stubbed: u 0x1078e6 introduction story · u 0x10a81e transfer (Ultima IV / V saves) · the
-//!   MED music and the VCR clock (seams)
+//! - story: u 0x1078e6 introduction · u 0x107840 · u 0x1078b6 · u 0x1078da · u 0x1097ac ·
+//!   u 0x10f8f2 movement
+//! - transfer: u 0x10a81e · u 0x10a450 dialog · u 0x109870 / u 0x109ad6 readers ·
+//!   u 0x109ba8 · u 0x109bea / u 0x109c80 converters · u 0x109e72 sheet · u 0x109d0a; the
+//!   save reads (dos 0x10f6ae / 0x10f716, the raw Ultima V disk reader 0x1148b0 and hunk 17)
+//!   are replaced by the files
+//! - stubbed (seams): the MED music (u 0x10f596 load, u 0x101010 stop; 0x10fafc starts it
+//!   through a seam) and the VCR clock (u 0x1021bc local time)
+//!
+//! Empty routines of `u` the ported code calls do nothing in the port and carry no marker:
+//! 0x1031b2 / 0x1031b4 / 0x1031b6, 0x10faf2 / 0x10faf4 / 0x10faf6, 0x10fb14, 0x10fb20, 0x107822,
+//! 0x10782e.
 
 pub mod create;
 pub mod credits;
