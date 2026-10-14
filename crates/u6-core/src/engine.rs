@@ -210,6 +210,23 @@ impl Io {
         self.pointer.get()
     }
 
+    /// As [`Io::take_pointer`], taking at most the first `n` queued events (none when `n` is 0):
+    /// for a sample as of a time before the latest events came.
+    pub fn take_pointer_upto(&self, n: usize) -> Pointer {
+        let mut events = self.events.borrow_mut();
+        let mut taken = 0;
+        while let Some(&InputEvent::Pointer { x, y, buttons }) = events.front() {
+            let p = Pointer::apply(x, y, buttons);
+            if taken == n || (taken > 0 && p.buttons != self.pointer.get().buttons) {
+                break;
+            }
+            self.pointer.set(p);
+            events.pop_front();
+            taken += 1;
+        }
+        self.pointer.get()
+    }
+
     /// Resolves once the tick clock reaches now + `ms` (deadline fixed at the call).
     pub fn sleep(&self, ms: u32) -> Sleep<'_> {
         Sleep {
