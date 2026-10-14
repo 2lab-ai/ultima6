@@ -301,8 +301,9 @@ pub async fn wind_change(state: &RefCell<State>, io: &Io) {
 /// Original: 0x119200 (magic: X-ray: the flashes, every view tile shown (A4-0x794c = 1, view
 /// flags) for 100 view refreshes (0x102ef0), then the normal view and `Msg::Done`)
 ///
-/// The port waits one display frame per refresh (the original's redraws take display time;
-/// without a wait the port would publish none of them).
+/// The port waits each refresh's time on the engine clock before drawing it (the original's
+/// redraws take that long: [`crate::combat::present::REFRESH_MS`], 0x102ef0 as measured in the
+/// oracle; without a wait the port would publish none of them).
 pub async fn xray(state: &RefCell<State>, io: &Io, spell: u16) {
     flash_window(state, io, spell / 16 + 1).await;
     let caster = super::cast::caster(&state.borrow());
@@ -313,8 +314,8 @@ pub async fn xray(state: &RefCell<State>, io: &Io, spell: u16) {
         crate::map::view::update_view(&mut s);
     }
     for _ in 0..100 {
+        crate::combat::present::pace(state, io, crate::combat::present::REFRESH_MS).await;
         crate::gfx::view::refresh_view(&mut state.borrow_mut(), io);
-        io.vblank().await;
     }
     {
         let mut s = state.borrow_mut();

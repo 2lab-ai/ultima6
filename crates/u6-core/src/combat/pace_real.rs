@@ -66,7 +66,7 @@ const SEEDS: [u16; 9] = [0, 2, 5, 7, 11, 100, 1000, 4242, 31337];
 
 fn files() -> Option<Files> {
     if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+        println!("skipped: no game files ({ZIP} not present)");
         return None;
     }
     let data = std::fs::read(ZIP).unwrap();
@@ -113,6 +113,7 @@ fn play(files: &Files, seed: u16, tick_ms: u32, zero_polls: bool) -> Vec<Turn> {
         }
         tick(&mut e, &[]);
     }
+    assert!(at_prompt(&e), "seed {seed}: the boot reaches the prompt");
     let mut turns = Vec::new();
     for &k in &KEYS {
         let from = leader(&e);

@@ -68,14 +68,16 @@ const WINDOW: (usize, usize) = (176, 176);
 ///
 /// The waits of one run (nothing else waited in between) follow one schedule: `combat.due_ms`
 /// moves on by `ms` from where the last one ended, so what a wait loses to the host's tick the
-/// next one makes up, and the run takes the same engine time at any tick size. After anything
-/// else waited (a key, a prompt) the schedule starts again from now.
+/// next one makes up, and the run takes the same engine time at any tick size. Lateness is
+/// carried at most one tick (the shortest tick of the run): a host that stalls for one long
+/// tick does not squeeze the waits after it. After anything else waited (a key, a prompt) the
+/// schedule starts again from now.
 pub async fn pace(state: &RefCell<State>, io: &Io, ms: u16) {
     let due = schedule(state, io, ms);
-    io.vblank().await;
-    let left = due.saturating_sub(io.now_ms());
-    if left > 0 {
-        io.sleep(u32::try_from(left).unwrap_or(u32::MAX)).await;
+    loop {
+        if display_frame(state, io).await >= due {
+            break;
+        }
     }
     state.borrow_mut().combat.paced_at_ms = io.now_ms();
 }
@@ -85,10 +87,27 @@ fn schedule(state: &RefCell<State>, io: &Io, ms: u16) -> u64 {
     let mut s = state.borrow_mut();
     let now = io.now_ms();
     let c = &mut s.combat;
-    let from = if now == c.paced_at_ms { c.due_ms } else { now };
+    let from = if now == c.paced_at_ms {
+        c.due_ms.max(now.saturating_sub(c.tick_ms))
+    } else {
+        c.tick_ms = u64::MAX;
+        now
+    };
     c.due_ms = from + u64::from(ms);
     *c.paced.entry(ms).or_default() += 1;
     c.due_ms
+}
+
+/// One display frame of a paced wait: the engine time after it, the run's shortest tick kept.
+async fn display_frame(state: &RefCell<State>, io: &Io) -> u64 {
+    let before = io.now_ms();
+    io.vblank().await;
+    let now = io.now_ms();
+    if now > before {
+        let t = &mut state.borrow_mut().combat.tick_ms;
+        *t = (*t).min(now - before);
+    }
+    now
 }
 
 /// One presented rectangle of the screen.
@@ -212,10 +231,22 @@ async fn print_paced(state: &RefCell<State>, io: &Io, n: usize) {
 /// Plays the recorded frames in order with the messages queued between them, then the rest of
 /// the messages: each after its time on the engine clock ([`pace`]). A no-op when nothing was
 /// recorded or queued.
+///
+/// The synchronous code that recorded the frames left its last picture on the screen (the
+/// window renders present as they go); the original showed the window as it last was until its
+/// first new picture was drawn, so the playback starts from the window as last published and
+/// puts the step's last picture back after the recorded ones.
 pub async fn play_effects(state: &RefCell<State>, io: &Io) {
     let effects = std::mem::take(&mut state.borrow_mut().combat.effects);
+    let last = effects
+        .iter()
+        .any(|e| e.w > 0 && e.h > 0)
+        .then(|| io.draw(|fb| window_of(fb)));
+    if last.is_some() {
+        let shown = io.published(window_of);
+        io.draw(|fb| put_window(fb, &shown));
+    }
     let mut printed = 0;
-    let mut shown = false;
     for e in effects {
         if e.mark > printed {
             print_paced(state, io, e.mark - printed).await;
@@ -238,10 +269,14 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
         });
         io.present();
         state.borrow_mut().combat.shown += 1;
-        shown = true;
     }
-    if shown {
+    if let Some(last) = last
+        && io.draw(|fb| window_of(fb)) != last
+    {
+        // The last recorded frame is seen before the step's own last picture replaces it.
         pace(state, io, 0).await;
+        io.draw(|fb| put_window(fb, &last));
+        io.present();
     }
     let rest = state.borrow().main.pending_print.len();
     print_paced(state, io, rest).await;
@@ -249,6 +284,22 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
     if s.combat.swallow {
         s.combat.swallow = false;
         s.ui.text.skip_newline = true;
+    }
+}
+
+/// The map window's pixels (with its border), row-major.
+fn window_of(fb: &crate::Framebuffer) -> Vec<u8> {
+    (0..WINDOW.1)
+        .flat_map(|y| (0..WINDOW.0).map(move |x| (x, y)))
+        .map(|(x, y)| fb.get(x, y).unwrap_or(0))
+        .collect()
+}
+
+fn put_window(fb: &mut crate::Framebuffer, pixels: &[u8]) {
+    for y in 0..WINDOW.1 {
+        for x in 0..WINDOW.0 {
+            fb.set(x, y, pixels[y * WINDOW.0 + x]);
+        }
     }
 }
 
@@ -262,8 +313,7 @@ async fn reveal(state: &RefCell<State>, io: &Io, e: &Effect) {
     let begin = due - u64::from(e.cost) + u64::from(WINDOW_MS.min(e.cost));
     let mut done = 0;
     loop {
-        io.vblank().await;
-        let now = io.now_ms();
+        let now = display_frame(state, io).await;
         let upto = if now >= due {
             order.len()
         } else {

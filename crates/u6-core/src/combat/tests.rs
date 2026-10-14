@@ -509,50 +509,200 @@ fn tame_looks_for_the_party_within_the_roster_only() {
     assert!(s.objects.location[0x10].x >= 59, "it ambled or waited");
 }
 
-/// Records `n` window frames with the hit flash's hold and plays them back at host ticks of
-/// `tick_ms`, with a zero-elapsed poll after every `zero_every` ticks (0 = none); the engine time
-/// at which the playback returned.
-fn playback_ms(n: usize, tick_ms: u32, zero_every: usize) -> u64 {
+/// The colour of window pixel (88, 88) in the frame the engine shows.
+fn centre(e: &crate::Engine) -> u8 {
+    e.frame().get(88, 88).unwrap_or(0)
+}
+
+/// Fills the map window's inside (8..168) on the screen with colour `c`.
+fn fill_window(io: &crate::engine::Io, c: u8) {
+    io.draw(|fb| {
+        for y in 8..168 {
+            for x in 8..168 {
+                fb.set(x, y, c);
+            }
+        }
+    });
+}
+
+/// Ticks `e` (each tick of `tick_ms` followed by `zeros` polls with no time) until `done`, at
+/// most 20 000 ticks; per tick (engine ms since the first tick, the centre colour shown).
+fn run_until(
+    e: &mut crate::Engine,
+    done: &std::rc::Rc<std::cell::Cell<Option<u64>>>,
+    tick_ms: u32,
+    zeros: usize,
+) -> Vec<(u64, u8)> {
+    let mut seen = Vec::new();
+    let mut t0 = None;
+    for _ in 0..20_000 {
+        if done.get().is_some() {
+            break;
+        }
+        e.tick(&[], tick_ms);
+        for _ in 0..zeros {
+            e.tick(&[], 0);
+        }
+        let now = e.io().now_ms();
+        let t0 = *t0.get_or_insert(now);
+        seen.push((now - t0, centre(e)));
+    }
+    seen
+}
+
+/// A step as production code leaves the screen: the window published in colour 1, then in one
+/// poll its frames drawn and presented on the screen and recorded (colours 2, 3, 4, each with
+/// `cost` ms), a last draw in colour `last` that is not recorded (if any), and the playback.
+/// The engine time (from the first tick) the playback took, and per tick the time and the
+/// colour shown.
+fn recorded_step(cost: u16, last: Option<u8>, tick_ms: u32, zeros: usize) -> (u64, Vec<(u64, u8)>) {
     let done = std::rc::Rc::new(std::cell::Cell::new(None));
     let out = std::rc::Rc::clone(&done);
     let mut e = crate::Engine::with_game(
         State::empty(),
         crate::Files::default(),
         move |st, io| async move {
-            for _ in 0..n {
-                present::capture_window(&mut st.borrow_mut(), present::FLASH_MS);
+            fill_window(&io, 1);
+            io.present();
+            io.vblank().await;
+            let t0 = io.now_ms();
+            for c in [2, 3, 4] {
+                fill_window(&io, c);
+                io.present();
+                present::capture_window(&mut st.borrow_mut(), cost);
             }
+            if let Some(c) = last {
+                fill_window(&io, c);
+                io.present();
+            }
+            play_effects(&st, &io).await;
+            out.set(Some(io.now_ms() - t0));
+        },
+    );
+    let seen = run_until(&mut e, &done, tick_ms, zeros);
+    (done.get().expect("the playback ends"), seen)
+}
+
+#[test]
+fn the_old_picture_stays_until_the_first_recorded_frame() {
+    // The original draws a step's pictures one after the other while the last one it showed
+    // stays up: the published window is the old one (1) until the first recorded frame's time,
+    // then each recorded frame in turn, and the step's last draw (9) only at the end.
+    let cost = present::FLASH_MS;
+    let (_, seen) = recorded_step(cost, Some(9), 16, 0);
+    let before: Vec<u8> = seen
+        .iter()
+        .filter(|&&(t, _)| t > 0 && t < u64::from(cost))
+        .map(|&(_, c)| c)
+        .collect();
+    println!("shown while the first frame is drawn: {before:?}");
+    assert!(
+        !before.is_empty() && before.iter().all(|&c| c == 1),
+        "{before:?}"
+    );
+    let order: Vec<u8> = seen.iter().map(|&(_, c)| c).fold(Vec::new(), |mut v, c| {
+        if v.last() != Some(&c) {
+            v.push(c);
+        }
+        v
+    });
+    assert_eq!(
+        order,
+        [1, 2, 3, 4, 9],
+        "each frame in turn, the last draw at the end"
+    );
+}
+
+#[test]
+fn recorded_frames_take_their_time_at_any_host_tick() {
+    // Spec 03 §1: display waits run on the engine clock. Three frames of a cost that is no
+    // multiple of the tick take their total (to within a tick) at 16 ms and 8 ms ticks and with
+    // polls of no time between, and every frame is published.
+    let cost = 333;
+    let want = 3 * u64::from(cost);
+    for (tick, zeros) in [(16, 0), (8, 0), (16, 3), (5, 2)] {
+        let (ms, seen) = recorded_step(cost, None, tick, zeros);
+        println!("three frames of {cost} ms: {ms} ms at {tick} ms ticks, {zeros} zero polls");
+        assert!(
+            ms >= want && ms <= want + 16,
+            "{tick} ms ticks: {ms} ms, want {want}"
+        );
+        for c in [2, 3, 4] {
+            assert!(
+                seen.iter().any(|&(_, s)| s == c),
+                "frame {c} shown at {tick} ms"
+            );
+        }
+    }
+    // Polls with no time do not pass a deadline: after the first tick, a thousand of them
+    // leave the old picture up and the playback waiting.
+    let done = std::rc::Rc::new(std::cell::Cell::new(None));
+    let out = std::rc::Rc::clone(&done);
+    let mut e = crate::Engine::with_game(
+        State::empty(),
+        crate::Files::default(),
+        move |st, io| async move {
+            fill_window(&io, 1);
+            io.present();
+            io.vblank().await;
+            fill_window(&io, 2);
+            io.present();
+            present::capture_window(&mut st.borrow_mut(), cost);
             play_effects(&st, &io).await;
             out.set(Some(io.now_ms()));
         },
     );
-    for t in 1..100_000 {
-        if done.get().is_some() {
+    e.tick(&[], 16);
+    e.tick(&[], 16);
+    for _ in 0..1000 {
+        e.tick(&[], 0);
+    }
+    assert!(done.get().is_none(), "zero-time polls passed the deadline");
+    assert_eq!(centre(&e), 1, "the old picture while it waits");
+}
+
+/// The engine ms between the ends of ten waits of `cost` at 16 ms ticks, where the ticks
+/// numbered in `stalls` last `stall_ms` instead.
+fn waits_around_a_stall(cost: u16, stalls: std::ops::Range<usize>, stall_ms: u32) -> Vec<u64> {
+    let ends = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let out = std::rc::Rc::clone(&ends);
+    let mut e = crate::Engine::with_game(
+        State::empty(),
+        crate::Files::default(),
+        move |st, io| async move {
+            out.borrow_mut().push(io.now_ms());
+            for _ in 0..10 {
+                present::pace(&st, &io, cost).await;
+                out.borrow_mut().push(io.now_ms());
+            }
+        },
+    );
+    for t in 0..10_000 {
+        if e.finished() {
             break;
         }
-        e.tick(&[], tick_ms);
-        if zero_every != 0 && t % zero_every == 0 {
-            e.tick(&[], 0);
-        }
+        e.tick(&[], if stalls.contains(&t) { stall_ms } else { 16 });
     }
-    done.get().expect("the playback ends")
+    let ends = ends.borrow();
+    ends.windows(2).map(|w| w[1] - w[0]).collect()
 }
 
 #[test]
-fn effect_frames_take_the_same_engine_time_at_any_host_tick() {
-    // Spec 03 §1: display waits run on the engine clock, not on host ticks. The same frames take
-    // the same time at 16 ms and 8 ms ticks, and polls with no time elapsed add nothing.
-    let at16 = playback_ms(3, 16, 0);
-    let at8 = playback_ms(3, 8, 0);
-    let zero = playback_ms(3, 16, 1);
-    println!(
-        "three flash frames: {at16} ms at 16 ms ticks, {at8} ms at 8 ms, {zero} ms with zero polls"
-    );
-    assert!(at16.abs_diff(at8) <= 16, "16 ms {at16} vs 8 ms {at8}");
-    assert!(
-        at16.abs_diff(zero) <= 16,
-        "16 ms {at16} vs zero polls {zero}"
-    );
+fn a_stalled_tick_does_not_squeeze_the_waits_after_it() {
+    // A host that stalls (a tick of 100 ms, the hosts' cap, once or three times in a row) in
+    // the middle of a run: the waits after the stall keep their time, less a tick at most.
+    let cost = 46;
+    for stalls in [8..9, 8..11] {
+        let d = waits_around_a_stall(cost, stalls.clone(), 100);
+        println!("waits of {cost} ms around stalled ticks {stalls:?}: {d:?}");
+        let after = d.iter().skip_while(|&&ms| ms < 100).skip(1);
+        for &ms in after {
+            assert!(
+                ms + 16 >= u64::from(cost),
+                "a wait of {ms} ms after the stall: {d:?}"
+            );
+        }
+    }
 }
 
 /// A window recorded dissolving (colour 5 over colour 0) with `cost` ms and played at ticks of
@@ -574,10 +724,12 @@ fn dissolve_run(cost: u16, tick_ms: u32) -> (Vec<usize>, u64) {
                     }
                 })
             };
-            fill(5);
-            present::capture_dissolve(&mut st.borrow_mut(), cost);
             fill(0);
             io.present();
+            io.vblank().await;
+            fill(5);
+            io.present();
+            present::capture_dissolve(&mut st.borrow_mut(), cost);
             play_effects(&st, &io).await;
             out.set(Some(io.now_ms()));
         },
