@@ -17,10 +17,10 @@ const MSG_TOO_OLD: u32 = 0x0011_58ea;
 /// Food object type.
 const FOOD: u16 = 0x81;
 /// [replaced] Engine milliseconds of one pass of [`flash_window`] (the XOR 0x1521f4, the border,
-/// the copy), which is how long the XORed window stays on the screen: 112 ms, 5.6 PAL frames,
-/// half of what is left of the flash's 17.21 frames (tools/oracle/timeit.mjs window) after its
-/// render ([`crate::combat::present::RENDER_MS`]).
-pub const WINDOW_FLASH_MS: u16 = 112;
+/// the copy), which is how long the XORed window stays on the screen: 106 ms, 5.3 PAL frames,
+/// half of what is left of the flash's 17.09 frames (two timed runs, 17.21 and 16.96,
+/// tools/oracle/timeit.mjs window) after its render ([`crate::combat::present::RENDER_MS`]).
+pub const WINDOW_FLASH_MS: u16 = 106;
 
 /// The caster flash 0x132338 (`mode` 0 on the caster, 1 on a target) through its seam, then
 /// its frames played: the original draws the flash inside the call, so it is on the screen

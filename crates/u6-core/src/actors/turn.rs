@@ -12,16 +12,26 @@ use super::{clock, leaves, npc, path, tail, walk};
 /// host once (port checkpoint, spec 03 §1: a yield changes no game state).
 const IDLE_REFILLS_PER_YIELD: u32 = 60;
 /// [replaced] Engine milliseconds of the refresh after a turn (0x102f2a with the view changed:
-/// the view flags 0x109e74, then 0x102ef0 draws the window and copies it to the screen): 21 PAL
-/// frames, the median of 103 refreshes in the oracle's start fight (19..22; tools/oracle/
-/// fight.mjs + fight.py, 3 boots × 7 party steps). The original has no wait there: that is the
-/// 68000's drawing time, which the port, drawing at once, waits on the engine clock instead.
-pub const AFTER_TURN_MS: u16 = 21 * crate::combat::present::FRAME_MS;
-/// [replaced] Engine milliseconds of an NPC's turn besides what it draws, prints and refreshes
-/// (the scheduler's pick and 0x1200b0's worktype code): 45 ms, 2.3 PAL frames. The oracle's
-/// steps of the start fight spend a median of 33 frames there (19..77, n = 21); the port's steps
-/// of the same fight run 14.5 NPC turns each.
-pub const NPC_TURN_MS: u16 = 45;
+/// the view flags 0x109e74, then 0x102ef0 draws the window and copies it to the screen): 432 ms,
+/// 21.58 PAL frames, the median of 62 such calls traced in the oracle (19.94..23.99: 31 in the
+/// start fight, 31 in the castle without it; tools/oracle/trace.mjs). fight.py's CPU samples
+/// give 21 (n = 103). With the view unchanged the call returns at once (0.00 frames). The
+/// original has no wait there: that is the 68000's drawing time, which the port, drawing at
+/// once, waits on the engine clock instead.
+pub const AFTER_TURN_MS: u16 = 432;
+/// [replaced] Engine milliseconds of one pick of the scheduler 0x1213de (its pass over the 256
+/// actors, the refills and clock minutes, the formation and schedule passes, spread over the
+/// picks): 20 ms, 0.975 PAL frames, the world turn's time outside its NPC turns and refreshes
+/// over its picks (each NPC turn and the player's), traced in the oracle: 256.6 frames over 263
+/// picks in 21 steps (the start fight 0.975, the castle without it 1.04, the castle with the
+/// party still in its combat modes 0.92).
+pub const PICK_MS: u16 = 20;
+/// [replaced] Engine milliseconds of an NPC turn in a combat worktype (below 0x80: the party's
+/// combat modes, assault) besides what it draws, prints and names: 40 ms, 2.01 PAL frames, the
+/// mean of 69 traced in the oracle (2.28 over the 45 of the start fight, 1.49 over 24 with no
+/// foe in the castle). A turn in a schedule worktype (0x80 and up) takes 0.02 frames (n = 173)
+/// and waits nothing.
+pub const COMBAT_NPC_MS: u16 = 40;
 
 fn healthy(s: &State, actor: usize) -> bool {
     s.actors.attrs.status[actor] & 0x16 == 0
@@ -458,8 +468,9 @@ fn refill(s: &mut State) {
 /// swallowed), after making it the leader if it is another party member.
 ///
 /// Port: the original draws as it goes and is as slow as that drawing; the port waits the
-/// measured time on the engine clock instead, before each NPC turn ([`NPC_TURN_MS`]) and before
-/// each refresh of a changed view ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile.
+/// measured time on the engine clock instead, at each pick ([`PICK_MS`], and [`COMBAT_NPC_MS`]
+/// before an NPC turn in a combat worktype) and before each refresh of a changed view
+/// ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile.
 pub async fn world_turn(state: &RefCell<State>, io: &Io) {
     leader_bookkeeping(&mut state.borrow_mut());
     raise_if_dead(state, io).await;
@@ -500,10 +511,13 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
         let actor = pick.actor as u16;
         let a = usize::from(actor);
         let held = swallowed(&mut state.borrow_mut(), actor);
+        let wt = state.borrow().actors.worktype[a];
+        let npc = !held && wt != 2 && wt != 1;
+        let fights = npc && wt < 0x80;
+        let ms = PICK_MS + if fights { COMBAT_NPC_MS } else { 0 };
+        crate::combat::present::pace(state, io, ms).await;
         if !held {
-            let wt = state.borrow().actors.worktype[a];
-            if wt != 2 && wt != 1 {
-                crate::combat::present::pace(state, io, NPC_TURN_MS).await;
+            if npc {
                 npc::npc_turn(state, io, actor).await;
                 leader_bookkeeping(&mut state.borrow_mut());
                 raise_if_dead(state, io).await;
@@ -668,7 +682,7 @@ mod tests {
         let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
             let t0 = io.now_ms();
             world_turn(&st, &io).await;
-            let n = st.borrow().combat.paced.get(&NPC_TURN_MS).copied();
+            let n = st.borrow().combat.paced.get(&PICK_MS).copied();
             out.set(Some((io.now_ms() - t0, n.unwrap_or(0))));
         });
         for _ in 0..10_000 {
@@ -690,7 +704,7 @@ mod tests {
         let (ms, npcs) = turn_ms(&[(6, 10), (6, 10)], 16, false);
         println!("two NPCs: {npcs} NPC turns, {ms} ms");
         assert!(npcs >= 2, "both acted: {npcs}");
-        let least = u64::from(npcs) * u64::from(NPC_TURN_MS) + u64::from(AFTER_TURN_MS);
+        let least = u64::from(npcs) * u64::from(PICK_MS) + u64::from(AFTER_TURN_MS);
         assert!(ms >= least, "{ms} ms, at least {least}");
         for (tick, zero) in [(8, false), (16, true), (5, true)] {
             let (other, n) = turn_ms(&[(6, 10), (6, 10)], tick, zero);

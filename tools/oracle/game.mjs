@@ -94,3 +94,32 @@ export function runtime(bases, img) {
   while (HUNKS[i][0] > img) i--;
   return bases[i] + img - HUNKS[i][0];
 }
+
+// The castle without the fight: every actor in the assault worktype (8: the start's gargoyles;
+// worktypes at 0x139188 = hunk 23 + 0x3c00) gets status bit 0x10 (A4+0x3d0c), which the world
+// turn 0x1213de passes over (as pace.mjs's poke), then `b` breaks off combat; the castle's
+// people go on with their own worktypes and schedules.
+export async function townSetup(page, bases, a4) {
+  const peekN = (a, n) => page.evaluate(([a, n]) => Array.from({ length: n }, (_, i) => Module._wasm_peek(a + i)), [a, n]);
+  const worktype = await peekN(bases[23] + 0x3c00, 256);
+  const status = await peekN(a4 + 0x3d0c, 256);
+  const assault = worktype.flatMap((w, i) => (w === 8 ? [i] : []));
+  await o.poke(page, a4 + 0x3d0c, status.map((v, i) => (assault.includes(i) ? v | 0x10 : v)));
+  // `b` held until the command loop takes it (A4-0x7a2c cleared): a short tap can fall in one of
+  // the idle loop's redraws and be missed.
+  await page.evaluate(() => wasm_key(0x35, 1));
+  let taken = false;
+  for (let i = 0; i < 40 && !taken; i++) {
+    await o.waitFrames(page, 2);
+    taken = (await o.peekW(page, a4 - 0x7a2c)) === 0;
+  }
+  await page.evaluate(() => wasm_key(0x35, 0));
+  await o.waitFrames(page, 400);
+  const party = await peekN(a4 + 0x47ec, (await o.peekW(page, a4 + 0x4b00)) >> 8);
+  const after = await peekN(bases[23] + 0x3c00, 256);
+  const wts = party.map((a) => after[a].toString(16)).join(',');
+  if (!taken || party.slice(1).some((a) => after[a] >= 2 && after[a] < 0x10)) {
+    throw new Error(`town: combat not broken off (b taken ${taken}; party worktypes ${wts})`);
+  }
+  return `assault actors passed over: ${assault.map((a) => a.toString(16)).join(',')}; b taken; party worktypes ${wts}`;
+}

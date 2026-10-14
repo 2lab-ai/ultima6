@@ -29,29 +29,40 @@ use super::tables::at;
 /// Milliseconds of one PAL frame (the original's display runs at 50 Hz).
 pub const FRAME_MS: u16 = 20;
 /// [replaced] Time of the hit flash 0x1230ce (draw lists, the window with tile 0x101 rendered
-/// and copied, draw lists again): 16 PAL frames, the median of 45 flashes (14..18) in the oracle
-/// (tools/oracle/fight.mjs + fight.py: the start fight, 3 boots × 7 party steps).
-pub const FLASH_MS: u16 = 16 * FRAME_MS;
-/// [replaced] Time of a render of the window into the back buffer (0x102c90 without the frame):
-/// 6 PAL frames, the median of the first renders of 87 flights in the oracle (5..6 in 84).
-pub const RENDER_MS: u16 = 6 * FRAME_MS;
+/// and copied, draw lists again): 311 ms, 15.56 PAL frames, the median of 20 calls traced in the
+/// oracle's start fight (15.31..15.95; tools/oracle/trace.mjs). fight.py's CPU samples give 16
+/// (n = 45).
+pub const FLASH_MS: u16 = 311;
+/// [replaced] Time of a render of the window into the back buffer (0x102c90 without the frame)
+/// and what a flight does before its first step: 129 ms, 6.45 PAL frames, the median of the 29
+/// traced flights that drew no step (6.19..6.88; the CPU samples of 87 flights give 6).
+pub const RENDER_MS: u16 = 129;
 /// [replaced] Time of a render of the window with its frame, copied to the screen (0x102c90 with
 /// D0 = 1): 8.74 PAL frames, timed at the prompt (tools/oracle/timeit.mjs render).
 pub const WINDOW_MS: u16 = 175;
 /// A flight's first render (0x102c90 at the top of 0x132706, before the first step).
 pub const FLIGHT_START_MS: u16 = RENDER_MS;
 /// [replaced] Time of one drawn step of a flight (the rounds up to it, the sprites saved and
-/// drawn, what lies over them, the rectangle copied, 0x151fe6): 46 ms, 2.31 PAL frames, from
-/// 525 frames over 227 drawn steps in the 40 flights of the oracle that drew any.
+/// drawn, what lies over them, the rectangle copied, 0x151fe6): 46 ms, 2.31 PAL frames. A
+/// sampled estimate: fight.py's 525 frames over 227 changes of the view in the steps of the 40
+/// flights that drew any (no routine boundary to trace; the traced whole flights, median 11.8
+/// frames over 58, agree with start + steps + end).
 pub const FLIGHT_STEP_MS: u16 = 46;
 /// [replaced] Time of a view refresh with the window shown (0x102ef0: the animation tick, the
-/// window rendered by 0x102c90 and copied to the screen): 11 PAL frames, the median of the 40
-/// flights in the oracle that end with one (9..42, 29 of them 10 or 11); with the view flags
-/// before it, the refresh after a turn ([`crate::actors::turn::AFTER_TURN_MS`]).
+/// window rendered by 0x102c90 and copied to the screen): 11 PAL frames. A sampled estimate:
+/// the median of the 40 flights whose CPU samples end in one (9..42, 29 of them 10 or 11); with
+/// the view flags before it, the traced refresh after a turn
+/// ([`crate::actors::turn::AFTER_TURN_MS`], 21.58).
 pub const REFRESH_MS: u16 = 11 * FRAME_MS;
-/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 22 ms,
-/// 1.12 PAL frames, from 147 frames over 131 changes of the message area in the oracle.
-pub const PRINT_MS: u16 = 22;
+/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 23 ms, 1.17
+/// PAL frames, the mean of 63 calls traced in the oracle (tools/oracle/trace.mjs; median 0.39,
+/// the ones that scroll take up to 3.5). Per call, as the port prints one queued message a call.
+pub const PRINT_MS: u16 = 23;
+/// [replaced] Time of an object's name read for a message (0x10eef8: 0x10ee76 decodes it out of
+/// the look.lzd copy in memory, 0x161ec8): 27 ms, 1.33 PAL frames, the mean of 33 calls traced
+/// in the oracle's fight (median 1.28). The first read of a boot also loads the file from the
+/// floppy (133 frames): not modelled.
+pub const NAME_MS: u16 = 27;
 /// [replaced] Time of a window presented dissolving (0x102c90 with A4-0x6578 set: 0x1520e2
 /// copies the 25,600 pixels of the window one by one): 171.07 PAL frames, timed at the prompt
 /// (tools/oracle/timeit.mjs dissolve; none happens in the start fight).
@@ -839,7 +850,9 @@ pub(crate) fn say(s: &mut State, at: u32, args: Vec<Text>) {
     }
 }
 
-/// The display name of an object (0x10eef8), as a message argument.
-pub(crate) fn name(s: &State, o: i16) -> Text {
+/// The display name of an object (0x10eef8), as a message argument, after the time the original
+/// takes to read it out of look.lzd ([`NAME_MS`]).
+pub(crate) fn name(s: &mut State, o: i16) -> Text {
+    capture_pause(s, NAME_MS);
     Text::Str(crate::objects::display_name(s, o).into_bytes())
 }

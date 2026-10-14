@@ -34,6 +34,8 @@ CODE = [i for i in range(len(HUNKS)) if i not in (6, 20, 23, 24, 25, 27, 28, 31,
 KINDS = [
     ("flight", {0x132706, 0x1331B4}),
     ("hit flash", {0x1230CE}),
+    # 0x10eef8 reads a name out of look.lzd (0x10ee76, 0x161ec8) for a message to print.
+    ("object name", {0x10EEF8}),
     ("message", {0x108658, 0x107E5A, 0x108376, 0x107DD8, 0x107E00}),
     ("refresh after a turn", {0x102F2A}),
     ("refresh", {0x102EF0, 0x102C90}),
@@ -79,12 +81,27 @@ def kind(chain):
     return "other"
 
 
+class Incomplete(Exception):
+    """A capture that does not hold every emulated frame of a step."""
+
+
 def frames_of(turn, image):
     """The frames of a step from the key taken (reading cleared) to the prompt: (frame, kind,
-    chain, view changed, messages changed); kind 'other task' when another task's stack ran."""
+    chain, view changed, messages changed); kind 'other task' when another task's stack ran.
+    Raises Incomplete unless the capture holds every frame of it, one row each."""
     rows = turn["rows"]
     zero = [r[0] for r in rows if r[1] == 0]
+    if not zero:
+        raise Incomplete(f"step {turn['key']}: the game never took the key")
     lo, hi = zero[0], zero[-1]
+    ids = [r[0] for r in rows if lo <= r[0] <= hi]
+    skipped = sum(r[2] for r in rows if lo <= r[0] <= hi)
+    if ids != list(range(lo, hi + 1)) or skipped:
+        raise Incomplete(
+            f"step {turn['key']}: frames {lo}..{hi} but {len(ids)} rows, {skipped} skipped"
+        )
+    if rows[-1][0] - hi < 60 or rows[-1][1] != 1:
+        raise Incomplete(f"step {turn['key']}: the capture ends before the prompt settled")
     pages = collections.Counter(
         r[8][2] >> 12 for r in rows if r[8] and image.function(r[8][1]) is not None
     )
@@ -108,17 +125,23 @@ def frames_of(turn, image):
 
 
 def runs(frames, name):
-    """Consecutive frames of one kind."""
+    """Runs of consecutive frames (by frame id) of one kind."""
     out, cur = [], []
     for f in frames:
-        if f[1] == name:
+        if f[1] == name and (not cur or f[0] == cur[-1][0] + 1):
             cur.append(f)
-        elif cur:
+            continue
+        if cur:
             out.append(cur)
-            cur = []
+        cur = [f] if f[1] == name else []
     if cur:
         out.append(cur)
     return out
+
+
+def length(run):
+    """Frames a run spans, from its frame ids."""
+    return run[-1][0] - run[0][0] + 1
 
 
 def flight_phases(run):
@@ -152,16 +175,19 @@ def main():
         d = json.load(open(path))
         image = Image(d["bases"], procs)
         for n, turn in enumerate(d["turns"]):
-            frames = frames_of(turn, image)
+            try:
+                frames = frames_of(turn, image)
+            except Incomplete as e:
+                raise SystemExit(f"{path}: {e}") from None
             kinds = collections.Counter(f[1] for f in frames)
             totals.update(kinds)
-            per_step.append(len(frames))
+            per_step.append(frames[-1][0] - frames[0][0] + 1)
             print(
-                f"{path} step {n} {turn['key']}: {len(frames)} frames, other tasks "
+                f"{path} step {n} {turn['key']}: {per_step[-1]} frames, other tasks "
                 f"{kinds['other task']}: " + ", ".join(f"{k} {v}" for k, v in kinds.most_common())
             )
-            cost["refresh after a turn"] += [len(r) for r in runs(frames, "refresh after a turn")]
-            cost["hit flash"] += [len(r) for r in runs(frames, "hit flash")]
+            cost["refresh after a turn"] += [length(r) for r in runs(frames, "refresh after a turn")]
+            cost["hit flash"] += [length(r) for r in runs(frames, "hit flash")]
             for r in runs(frames, "flight"):
                 first, steps, end, drawn = flight_phases(r)
                 cost["flight start"].append(first)
@@ -171,8 +197,9 @@ def main():
                     cost["flight step x100"].append(round(100 * steps / drawn))
                     cost["flight step frames"].append(steps)
                     cost["flight steps drawn"].append(drawn)
+            cost["object name"] += [length(r) for r in runs(frames, "object name")]
             for r in runs(frames, "message"):
-                cost["message frames"].append(len(r))
+                cost["message frames"].append(length(r))
                 cost["message changes"].append(sum(1 for f in r if f[4]))
             cost["NPC turns and scheduler per step"].append(
                 kinds["NPC turn"] + kinds["scheduler"] + kinds["other"]

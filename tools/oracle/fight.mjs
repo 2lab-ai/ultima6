@@ -7,6 +7,8 @@
 //                                          (default UP RIGHT LEFT RIGHT LEFT RIGHT LEFT)
 //   env U6_FIGHT_SNAPSHOT=file  start from a snapshot fight.mjs saved instead of booting
 //       U6_FIGHT_SAVE=file      save the settled start there (a full boot takes ~3 min)
+//       U6_FIGHT_SETUP=town     no fight: the start's assault actors passed over, combat broken
+//                               off (game.mjs townSetup), so the steps are the castle's world turns
 //       U6_GAME_BIN = flattened game image (hunk table and signatures)
 // The CPU sample: vAmiga's debugger console runs a command between two frames, where the
 // VBlank interrupt has just been taken (PC = the AROS level-3 handler, registers still the
@@ -17,7 +19,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
-import { CODE, hunkBases, loadSnapshot, saveSnapshot } from './game.mjs';
+import { CODE, hunkBases, loadSnapshot, saveSnapshot, townSetup } from './game.mjs';
 
 const [out = join(o.SHOTS_DIR, `fight-${Date.now()}`), ...keyArgs] = process.argv.slice(2);
 const KEYS = keyArgs.length ? keyArgs : ['UP', 'RIGHT', 'LEFT', 'RIGHT', 'LEFT', 'RIGHT', 'LEFT'];
@@ -137,6 +139,7 @@ try {
   const bases = await hunkBases(page, log);
   const a4 = bases[33] + 0x8000;
   log(`hunk bases ${bases.map((b) => b.toString(16)).join(',')}; A4 ${a4.toString(16)}; centre ${await o.peekW(page, a4 - 0x7b78)},${await o.peekW(page, a4 - 0x7b76)}`);
+  if (process.env.U6_FIGHT_SETUP === 'town') log(`town: ${await townSetup(page, bases, a4)}`);
   await page.evaluate(() => wasm_retro_shell('debugger'));
   await o.waitFrames(page, 3);
   await installRecorder(page, a4, bases);
