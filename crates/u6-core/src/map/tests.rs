@@ -9,7 +9,6 @@ use super::flags::*;
 use super::view::{DARK, NOT_VISIBLE};
 use super::*;
 use crate::state::State;
-use crate::stub;
 
 /// Surface chunk ref = (cx + cy) % 1024 per chunk, dungeon level L ref = 900 + L; chunk c tile
 /// (col, row) = (c + row * 8 + col) % 256.
@@ -94,10 +93,6 @@ fn at(x: u16, y: u16) -> Position {
     Position { x, y, z: 0 }
 }
 
-fn hits(id: &str) -> u64 {
-    stub::detached_hits().get(id).copied().unwrap_or(0)
-}
-
 #[test]
 fn chunk_ref_masks_and_wraps_dungeon_coordinates() {
     let m = world();
@@ -180,7 +175,8 @@ fn rebuild_window_wraps_near_the_map_edge_and_masks_dungeons() {
 
 #[test]
 fn eggs_far_or_active_or_on_arrival_are_offered() {
-    let id = "0x1319b2 hatch an egg";
+    // An offered egg is hatched (objects 0x1319b2): with no template it hatches nothing but
+    // is marked (status 0x40 | 0x02); the marks show which eggs were offered.
     let mut s = open_state(at(300, 300));
     let egg = |s: &mut State, slot: u16, x: u16, y: u16| {
         s.objects.type_frame[usize::from(slot)] = 0x14f;
@@ -190,19 +186,22 @@ fn eggs_far_or_active_or_on_arrival_are_offered() {
     egg(&mut s, 5, 305, 300); // near
     egg(&mut s, 6, 309, 300); // 9 tiles east: far
     egg(&mut s, 7, 300, 291); // 9 tiles north: far
-    let before = hits(id);
-    region::check_eggs(&mut s);
-    assert_eq!(hits(id) - before, 2);
-    s.objects.obj_status[5] = 0x20;
-    region::check_eggs(&mut s);
-    assert_eq!(hits(id) - before, 2 + 3);
-    s.objects.obj_status[5] = 0;
+    let offered = |s: &mut State, status5: u8| {
+        for e in 5..8 {
+            s.objects.obj_status[e] = 0;
+        }
+        s.objects.obj_status[5] = status5;
+        region::check_eggs(s);
+        (5..8)
+            .map(|e| s.objects.obj_status[e] & 0x40 != 0)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(offered(&mut s, 0), [false, true, true]);
+    assert_eq!(offered(&mut s, 0x20), [true, true, true]);
     s.map.arriving = 1;
-    region::check_eggs(&mut s);
-    assert_eq!(hits(id) - before, 5 + 3);
+    assert_eq!(offered(&mut s, 0), [true, true, true]);
     s.map.flag_7afb = 1;
-    region::check_eggs(&mut s);
-    assert_eq!(hits(id) - before, 8);
+    assert_eq!(offered(&mut s, 0), [false, false, false]);
 }
 
 #[test]

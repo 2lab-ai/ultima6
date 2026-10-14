@@ -105,6 +105,7 @@
 //! - 0x1319b2 [objects] uses "Shamino says, "I hear somet~" (hatch an egg; stub)
 
 mod blocks;
+pub mod commands;
 mod defs;
 mod draw;
 mod effects;

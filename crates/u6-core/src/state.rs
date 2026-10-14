@@ -96,6 +96,7 @@ pub struct State {
     /// Original: 0x151ee0 (RNG state longword)
     pub rng: Rng,
     pub combat: crate::combat::CombatState,
+    pub objcmds: crate::objects::commands::ObjCommands,
 }
 
 /// A game file is missing or malformed.
@@ -212,6 +213,7 @@ impl State {
             file: "game".into(),
             error,
         })?;
+        state.objcmds = crate::objects::commands::ObjCommands::load(files).map_err(table)?;
         state.tables = Tables {
             basetile,
             tileflags,
