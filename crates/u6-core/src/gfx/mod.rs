@@ -43,7 +43,7 @@
 //! - 0x152dac [graphics] shore merge: animated water into tiles 16..47
 //! - 0x152dc8 [graphics] empty
 //! - 0x152dca [graphics] set the overlay frame (& 7)
-//! - 0x152dd8 [graphics] empty
+//! - 0x152dd8 [graphics] back-buffer byte address of (D0 = x, D1 = y) in A1 (leaf)
 //! - 0x152e50 [graphics] load tile graphics (maptiles/tileindx/masktype/animmask)
 //! - 0x152ffa [graphics] tile blitter, entry A (back buffer)
 //! - 0x153002 [graphics] tile blitter, entry B (front buffer)
