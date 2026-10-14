@@ -524,6 +524,48 @@ test('the mouse: the Look icon, then Look on the Avatar, then clicks walk; the k
   assert.notEqual(to, from, 'the arrows still walk after the mouse');
 }, { needs: h.haveHfes });
 
+// Holds the left button 300 ms at game pixel (x, y); the engine ticks run during the hold (a
+// page whose tick never returns answers no evaluate: that is a frozen tab, not a slow one).
+async function holdOnMap(page, x, y) {
+  const ticks = () => Promise.race([
+    page.evaluate(() => globalThis.__ticks),
+    h.sleep(5000).then(() => { throw new Error('the tab froze during the hold'); }),
+  ]);
+  await page.mouse.move(...(await screenPoint(page, x, y)));
+  const t0 = await ticks();
+  await page.mouse.down();
+  await h.sleep(300);
+  const t1 = await ticks();
+  await page.mouse.up();
+  return t1 - t0;
+}
+
+test('the mouse: a press held 300 ms on the map walks and yields; held through the exit question it walks nowhere and N gets the prompt back', async (env) => {
+  const { page } = await h.openPage(env); // gated: the glue counts the ticks
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, 130);
+  await h.waitPrompt(page);
+  // Three cells south of the Avatar, at the prompt.
+  const ran = await holdOnMap(page, 88, 88 + 48);
+  assert.ok(ran >= 5, `the engine ticked through the hold: ${ran} ticks`);
+  await h.waitPrompt(page);
+  // Ctrl-Q: the exit question waits for Y or N; a held map press is no answer.
+  await page.keyboard.press('Control+q');
+  await page.waitForFunction(() => document.getElementById('screen').dataset.prompt === '0', null, { timeout: 10_000 });
+  await h.sleep(500);
+  const asked = (await h.state(page)).leader;
+  const during = await holdOnMap(page, 88 + 48, 88);
+  assert.ok(during >= 5, `the engine ticked through the hold in the question: ${during} ticks`);
+  await h.sleep(500);
+  assert.equal(await promptNow(page), '0', 'still asking after the release');
+  assert.equal((await h.state(page)).leader, asked, 'the question took no walk');
+  await page.keyboard.press('n');
+  await h.waitPrompt(page);
+  assert.equal((await h.state(page)).leader, asked, 'N: the prompt again, in place');
+  console.log(`  receipt: held 300 ms at the prompt = ${ran} ticks; in the exit question = ${during} ticks, no step, N back to the prompt`);
+}, { needs: h.haveHfes });
+
 test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {
   const { page } = await h.openPage(env);
   await h.load(page, env);

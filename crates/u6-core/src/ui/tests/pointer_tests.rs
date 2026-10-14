@@ -408,6 +408,155 @@ fn the_event_wait_takes_a_click_then_its_release() {
     assert!(e.state().actors.work.mouse_walk == 1, "held");
 }
 
+/// The codes `reads` command-key reads give, each with the display generation it came in,
+/// while the press south of the Avatar (88, 104) is held for `held` ticks and then released;
+/// `after` ticks follow. Whether the game finished (all reads done).
+fn held_walk(reads: usize, held: usize, after: usize) -> (Vec<(u64, u16)>, bool) {
+    let mut s = st();
+    s.main.reading = 1;
+    let codes = Rc::new(RefCell::new(Vec::new()));
+    let out = Rc::clone(&codes);
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        for _ in 0..reads {
+            let k = wait::read_key(&st, &io).await;
+            out.borrow_mut().push((io.generation(), k));
+        }
+    });
+    let ev = |b| InputEvent::Pointer {
+        x: 88,
+        y: 104,
+        buttons: b,
+    };
+    e.tick(&[ev(1)], 16);
+    for _ in 1..held {
+        e.tick(&[], 16);
+    }
+    e.tick(&[ev(0)], 16);
+    for _ in 0..after {
+        e.tick(&[], 16);
+    }
+    let c = codes.borrow().clone();
+    (c, e.finished())
+}
+
+#[test]
+fn a_held_press_repeats_once_per_display_frame() {
+    // Held for five ticks: the press and one repeat per frame, then nothing after the release.
+    let (codes, finished) = held_walk(12, 5, 4);
+    assert_eq!(
+        codes,
+        (0..5).map(|g| (g, 0x80)).collect::<Vec<_>>(),
+        "one walk code per display frame while held"
+    );
+    assert!(!finished, "the reads wait for input after the release");
+    // A press and its release one tick apart: one walk.
+    let (codes, _) = held_walk(12, 1, 4);
+    assert_eq!(codes, [(0, 0x80)], "a one-tick click walks once");
+}
+
+/// A loop shaped like the y/n and more prompts (0x10790a until one of its keys, here `A`) with
+/// a press held on the map: `events[t]` go in on tick t. The key it read and how many reads, or
+/// `None` while it still waits; the loop gives up after 64 reads.
+fn prompt_under_held_press(events: &[&[InputEvent]], ticks: usize) -> Option<(u16, usize)> {
+    let mut s = st();
+    s.main.reading = 1;
+    let got = Rc::new(RefCell::new(None));
+    let out = Rc::clone(&got);
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        let mut n = 0;
+        let k = loop {
+            let k = wait::read_key(&st, &io).await;
+            n += 1;
+            if k == 0x41 || n == 64 {
+                break k;
+            }
+        };
+        *out.borrow_mut() = Some((k, n));
+    });
+    for t in 0..ticks {
+        e.tick(events.get(t).copied().unwrap_or(&[]), 16);
+    }
+    *got.borrow()
+}
+
+#[test]
+fn a_prompt_survives_a_held_map_press() {
+    let ev = |b| InputEvent::Pointer {
+        x: 88,
+        y: 104,
+        buttons: b,
+    };
+    let key = InputEvent::Key(Key::Char('a'));
+    // Held for five ticks, released, then the key: the prompt reads it.
+    let (press, release, k) = ([ev(1)], [ev(0)], [key]);
+    let events: [&[InputEvent]; 8] = [&press, &[], &[], &[], &[], &release, &[], &k];
+    let got = prompt_under_held_press(&events, 12);
+    assert!(
+        matches!(got, Some((0x41, n)) if n <= 8),
+        "the prompt got its key after the release: {got:?}"
+    );
+    // The key typed while the button is still down, then the release behind it in the queue:
+    // the key is read (the release cannot be taken before it).
+    let events: [&[InputEvent]; 6] = [&press, &[], &k, &[], &release, &[]];
+    let got = prompt_under_held_press(&events, 10);
+    assert!(
+        matches!(got, Some((0x41, n)) if n <= 8),
+        "the prompt got the key typed during the hold: {got:?}"
+    );
+}
+
+/// The inventory panel showing `container`; the back icon (0x114, 0x14) clicked and released,
+/// read by 0x10790a (which handles 0x9f itself). The container shown afterwards.
+fn back_from(s: State, container: u16) -> u16 {
+    let mut s = s;
+    s.ui.panel.mode = 0x92;
+    s.ui.panel.container = container;
+    // Not dirty: no full panel redraw (0x111c30 starts again from the actor) after the code.
+    s.ui.panel.dirty = false;
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        let _ = wait::read_key(&st, &io).await;
+    });
+    let ev = |b| InputEvent::Pointer {
+        x: 0x114,
+        y: 0x14,
+        buttons: b,
+    };
+    e.tick(&[ev(1), ev(0)], 16);
+    for _ in 0..4 {
+        e.tick(&[], 16);
+    }
+    e.state().ui.panel.container
+}
+
+#[test]
+fn back_from_a_container_goes_to_its_parent_or_from_the_map_to_the_actor() {
+    let mut s = st();
+    s.actors.party.members[0] = 1;
+    // A bag (slot 0x150) inside a chest (slot 0x9d2): the location word holds the chest.
+    let (bag, chest) = (0x150usize, 0x9d2u16);
+    s.objects.obj_status[bag] = crate::objects::IN_CONTAINER;
+    s.objects.location[bag].x = chest & 0x3ff;
+    s.objects.location[bag].y = chest >> 10;
+    assert_eq!(
+        back_from(s.clone(), bag as u16),
+        chest,
+        "inside: its container"
+    );
+    // The same bag lying on the map: the location word is its coordinates, not a slot; back
+    // goes to the panel's actor.
+    s.objects.obj_status[bag] = 0;
+    s.objects.location[bag].x = 0x123;
+    s.objects.location[bag].y = 0x2c5;
+    assert_eq!(
+        back_from(s.clone(), bag as u16),
+        1,
+        "on the map: the member's actor"
+    );
+    // An open container (an actor not in the party) is the panel's actor then.
+    s.ui.panel.open_container = 0x40;
+    assert_eq!(back_from(s, bag as u16), 0x40, "on the map: the open actor");
+}
+
 #[test]
 fn pointer_tables_from_a_synthetic_game() {
     // Hunk 28 (sprite data), hunk 33 (the A4 data), hunk 34 (the shape tables) at their bases.

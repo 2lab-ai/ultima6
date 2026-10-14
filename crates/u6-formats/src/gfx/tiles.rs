@@ -62,10 +62,11 @@ fn blank(masktype: u8, kind: TileKind, first_row: u8, rows: u8) -> Tile {
     }
 }
 
-/// Rejects a row range that does not fit the 16-row tile. `rows == 0` draws nothing, so its first
-/// row is not checked (the file uses `16, 0`).
+/// Rejects a row range that does not fit the 16-row tile. An empty record (`rows == 0`) draws
+/// nothing but still names its first row: up to 16 (the file uses `16, 0`); a later one would
+/// make the sprite decoder `0x0015265A` clear rows past its 16-row buffer.
 fn check_rows(first: u8, rows: u8, what: &'static str, offset: usize) -> Result<()> {
-    if rows > 0 && usize::from(first) + usize::from(rows) > TILE_H {
+    if usize::from(first) + usize::from(rows) > TILE_H {
         return Err(FormatError::invalid(
             what,
             offset,

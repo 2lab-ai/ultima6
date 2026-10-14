@@ -139,7 +139,9 @@ fn decode(gfx: &mut GfxState, tile: u16) {
     };
     let (pixels, transparent) = (rec.pixels.clone(), rec.transparent.clone());
     let scratch = &mut gfx.sprites.scratch;
-    scratch[..first * TILE_W].fill(CLEAR);
+    // 0x1526c2 clears `first` rows with no bound: a first row past 16 (the loader refuses it)
+    // would write past the 256-byte scratch; the port stops at its end.
+    scratch[..(first * TILE_W).min(PIXELS)].fill(CLEAR);
     for r in 0..rows.min(TILE_W - first.min(TILE_W)) {
         let y = first + r;
         for c in 0..width {

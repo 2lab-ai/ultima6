@@ -2,11 +2,12 @@
 //! owners are called directly, the others keep a `todo_stub!` with an explicit fallback and a
 //! one-line contract. Ported (integration M2): combat (hunk 13) = 0x1240fa, 0x1228ba, 0x1231be,
 //! 0x1230ce, 0x12395a, 0x1221da, 0x121d78, 0x122fbe; ui (hunk 18, with combat) = 0x1331b4;
-//! objects commands (hunk 15) = 0x12948a (0x129544 is called there directly); ui = 0x107cba;
+//! objects commands (hunk 15) = 0x12948a (0x129544 is called there directly); ui = 0x107cba,
+//! 0x132338 (in gfx);
 //! magic (hunk 11) = 0x1165a4, 0x11a470, 0x116d0e, 0x119200, 0x11a586, 0x119afc, 0x115b7c,
 //! 0x116526; inventory (hunk 8) = 0x105016, 0x1118c6, 0x11121e, 0x111be0 and the weight words.
 //! sound = 0x110878, 0x110912, 0x100fa4; converse = 0x11304a (called there directly). Ported
-//! here: graphics = 0x1623be (a wait only Use calls). Not ported: ui = 0x132338; the ending =
+//! here: graphics = 0x1623be (a wait only Use calls). Not ported: the ending =
 //! 0x133d1e, 0x13513a.
 
 use crate::engine::Io;
@@ -163,9 +164,10 @@ pub(crate) fn carried_weight(s: &mut State, actor: Slot) -> i16 {
         .wrapping_add(s.inventory.carried_weight)
 }
 
-/// 0x132338(actor): flash the actor in the view. Fallback: none.
-pub(crate) fn flash_actor(_s: &mut State, _actor: Slot) {
-    todo_stub!("0x132338 flash an actor (usecmd seam)", ())
+/// 0x132338(actor, 1): flash the actor in the view, bright (D1 = 1 at both calls in 0x12d526):
+/// [`crate::gfx::flash_actor`] on the polling engine's buffers.
+pub(crate) fn flash_actor(s: &mut State, actor: Slot) {
+    crate::engine::with_current_io(|io| crate::gfx::flash_actor(s, io, actor as u16, true));
 }
 
 /// 0x1331b4(tile, x, y): explosion animation; the actors and objects it hit:

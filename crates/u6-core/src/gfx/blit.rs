@@ -162,9 +162,14 @@ pub fn fill_colour(fb: &mut Framebuffer, x0: u16, y0: u16, x1: u16, y1: u16, col
     fill(fb, (x0, y0, x1, y1), u16::from(colour), false);
 }
 
+/// The corners are put in order as 0x152244..0x15224e does (unsigned), then held to the screen:
+/// the original has no bound and runs its byte pointer on past the row (and the buffer) for
+/// corners that wrapped below zero.
 fn fill(fb: &mut Framebuffer, (x0, y0, x1, y1): (u16, u16, u16, u16), colour: u16, xor: bool) {
     let (xa, xb) = if x0 < x1 { (x0, x1) } else { (x1, x0) };
     let (ya, yb) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+    let xb = xb.min(WIDTH as u16 - 1);
+    let yb = yb.min(HEIGHT as u16 - 1);
     for y in ya..=yb {
         for x in xa..=xb {
             plot_in(fb, x, y, colour, xor);
@@ -188,8 +193,15 @@ pub fn copy_pixel(back: &Framebuffer, front: &mut Framebuffer, x: u16, y: u16) {
 /// again; each state `s` names pixel (s mod w, s div w) and is skipped when that row is past the
 /// rect. Pixel (0, 0), which the register never holds, comes last. `taps[width - 2]` is the
 /// feedback word. A rect of one or two pixels (width < 2) would read before the table in the
-/// original; the port then returns the pixels in raster order.
+/// original; the port then returns the pixels in raster order. A width or height of 0 (corners
+/// that wrapped; `divu` by 0 traps in the original) has no pixels.
+///
+/// The loop ends for every feedback word: the register returns to 1 or falls to 0 within 65535
+/// steps (each of the 65535 non-zero words checked), so the bound below is never reached.
 pub fn dissolve_order(w: u16, h: u16, taps: &[u16]) -> Vec<(u16, u16)> {
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
     let last = (u32::from(w) * u32::from(h)) as u16;
     let width = 16 - last.wrapping_sub(1).leading_zeros() as usize;
     let Some(&feedback) = width.checked_sub(2).and_then(|i| taps.get(i)) else {
@@ -197,7 +209,7 @@ pub fn dissolve_order(w: u16, h: u16, taps: &[u16]) -> Vec<(u16, u16)> {
     };
     let mut out = Vec::new();
     let mut s: u16 = 1;
-    loop {
+    for _ in 0..=u16::MAX {
         let (row, col) = (s / w, s % w);
         if row < h {
             out.push((col, row));
@@ -207,8 +219,8 @@ pub fn dissolve_order(w: u16, h: u16, taps: &[u16]) -> Vec<(u16, u16)> {
         if carry {
             s ^= feedback;
         }
-        // A zero register never comes back to 1 (only with a zero feedback word, which the
-        // game's table does not hold): raster order then, rather than spin.
+        // A register that falls to 0 never comes back to 1 (a zero or tampered feedback word;
+        // not the game's): raster order then, rather than spin.
         if s == 0 {
             return (0..h).flat_map(|r| (0..w).map(move |c| (c, r))).collect();
         }
@@ -232,7 +244,10 @@ pub fn dissolve(
     (x0, y0): (u16, u16),
     (x1, y1): (u16, u16),
 ) {
-    let (w, h) = (x1.wrapping_sub(x0) + 1, y1.wrapping_sub(y0) + 1);
+    let (w, h) = (
+        x1.wrapping_sub(x0).wrapping_add(1),
+        y1.wrapping_sub(y0).wrapping_add(1),
+    );
     for (dx, dy) in dissolve_order(w, h, taps) {
         copy_pixel(back, front, x0 + dx, y0 + dy);
     }
