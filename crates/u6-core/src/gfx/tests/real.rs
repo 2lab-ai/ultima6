@@ -7,10 +7,10 @@ use u6_formats::gfx::TileKind;
 
 use crate::engine::Engine;
 use crate::files::Files;
+use crate::gfx::GfxState;
 use crate::gfx::anim::shore_mask;
 use crate::gfx::seams::view_window;
 use crate::gfx::tables::GameTables;
-use crate::gfx::GfxState;
 use crate::state::State;
 
 /// The window render with `g` as the state's graphics for the call.
@@ -89,6 +89,7 @@ fn real_tables_match_the_image() {
 fn real_shore_masks_fit_and_the_window_draws_the_party() {
     let Some(files) = files() else { return };
     let mut state = State::new_game(&files).unwrap();
+    crate::main_loop::load_state_tail(&mut state);
     let mut gfx = GfxState::load(&files).unwrap();
     let maps = gfx
         .records

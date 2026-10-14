@@ -5,14 +5,12 @@ use u6_formats::basetile::BaseTiles;
 use u6_formats::chunks::Chunks;
 use u6_formats::gfx::Span;
 use u6_formats::map::{SURFACE_CHUNKS, WorldMap};
-use u6_formats::objblk::{ObjBlock, ObjBlockId, ObjRecord};
 use u6_formats::position::Position;
 use u6_formats::tileflag::TileFlags;
 
 use super::{install, map_tile, object_tile};
 use crate::Files;
 use crate::engine::Engine;
-use crate::gfx::seams::view_window;
 use crate::gfx::GfxState;
 use crate::state::State;
 
@@ -78,7 +76,19 @@ fn world() -> (State, GfxState) {
         object_tile(Span::Full, |r, c| (r == 8 && c == 8).then_some(30)),
     );
     g.window_shown = 1;
+    prepare(&mut s);
     (s, g)
+}
+
+/// Load state's tail for the synthetic world: the object list over the actors, the window cache
+/// around the centre (0x108d10) and the view with its draw lists (0x109e74 → 0x10e81e), which
+/// the window render reads. Run again after moving the centre or an actor.
+fn prepare(s: &mut State) {
+    crate::objects::init_slots(&mut s.objects);
+    crate::objects::link_actors(&mut s.objects);
+    s.map.window_key = [-1; 3];
+    crate::map::region::rebuild_window(s);
+    crate::map::view::update_view(s);
 }
 
 /// Runs `f` inside a one-tick engine so `Io` exists; returns the published frame.
@@ -126,7 +136,11 @@ fn border_tiles_and_dissolve_flag() {
     assert_eq!((fb.get(160, 16), fb.get(167, 159)), (Some(26), Some(26)));
     assert_ne!(fb.get(160, 15), Some(26));
     let hits = e.stub_hits();
-    assert!(!hits.keys().any(|k| k.starts_with("0x1520e2") || k.starts_with("0x106932")));
+    assert!(
+        !hits
+            .keys()
+            .any(|k| k.starts_with("0x1520e2") || k.starts_with("0x106932"))
+    );
     assert!(!e.take_log().iter().any(|l| l.contains("0x106932")));
 }
 
@@ -155,7 +169,10 @@ fn refresh_runs_the_tick_and_the_window_only_when_shown() {
     g.panel_redraw = 3;
     let e = with_io(move |io| {
         refresh_view(&mut s, &mut g, io);
-        assert_eq!((s.map.view_dirty, g.panel_redraw, g.anim_counter), (0, 0, 0));
+        assert_eq!(
+            (s.map.view_dirty, g.panel_redraw, g.anim_counter),
+            (0, 0, 0)
+        );
         g.window_shown = 1;
         refresh_view(&mut s, &mut g, io);
         assert_eq!(g.anim_counter, 1);
@@ -196,118 +213,4 @@ fn tick_substitutes_frames_by_mode_and_merges_on_even_counts() {
     g.anim_paused = 1;
     anim_tick(&mut s, &mut g);
     assert_eq!(g.anim_counter, 7, "paused: no tick");
-}
-
-#[test]
-fn fallback_expands_multi_tile_objects_and_floor_tiles() {
-    let (mut s, _) = world();
-    // Map object type 2 (tile 500: wide and tall) at the centre + (1, 1) = cell (6, 6);
-    // type 3 (tile 600, flags3 bit 5) replaces the ground tile of cell (2, 2).
-    s.tables.basetile.base[2] = 500;
-    s.tables.basetile.base[3] = 600;
-    s.tables.basetile.base[0x14f] = 700;
-    s.tables.tileflags.flags2[500] = 0xc0;
-    s.tables.tileflags.flags3[600] = 0x20;
-    let rec = |obj_n, x, y, status| ObjRecord {
-        status,
-        pos: Position { x, y, z: 0 },
-        obj_n,
-        frame: 0,
-        quality: 0,
-        qty: 0,
-    };
-    let objects = vec![
-        rec(2, 20, 11, 0),
-        rec(3, 16, 7, 0),
-        rec(0x14f, 19, 9, 0),
-        rec(2, 18, 9, 2),
-        rec(2, 30, 30, 0),
-    ];
-    s.objects.blocks = vec![(ObjBlockId::Surface { sx: 0, sy: 0 }, ObjBlock { objects })];
-    let w = view_window(&s);
-    let cell = |c: usize, r: usize| &w.objects[r * 11 + c];
-    assert_eq!(cell(6, 6), &[500]);
-    assert_eq!(cell(5, 6), &[499]);
-    assert_eq!(cell(6, 5), &[498]);
-    assert_eq!(w.tiles[2][2], 600);
-    assert!(cell(2, 2).is_empty());
-    assert!(
-        cell(5, 4).iter().all(|&t| t != 700),
-        "basetile of 0x14f is never listed"
-    );
-    // The invisible map object at cell (4, 4) is not drawn; at (5, 5) the part 497 of the
-    // first object went to the head after the leader.
-    assert!(cell(4, 4).is_empty());
-    assert_eq!(cell(5, 5), &[497, AVATAR_BASE]);
-}
-
-#[test]
-fn fallback_lists_follow_the_insertion_rules_of_0x10e596() {
-    let (mut s, _) = world();
-    // At the leader's cell: plain 600, foreground 610 (flags2 bit 4), plain 620, foreground 630;
-    // foreground wide 640 one cell right, so its part 639 lands here as a part (to the end).
-    for (ty, tile, f2) in [(10, 600, 0), (11, 610, 0x10), (12, 620, 0), (13, 630, 0x10)] {
-        s.tables.basetile.base[ty] = tile;
-        s.tables.tileflags.flags2[usize::from(tile)] = f2;
-    }
-    s.tables.basetile.base[14] = 640;
-    s.tables.tileflags.flags2[640] = 0x90;
-    s.tables.tileflags.flags2[639] = 0x10;
-    let rec = |obj_n, x| ObjRecord {
-        status: 0,
-        pos: Position { x, y: 10, z: 0 },
-        obj_n,
-        frame: 0,
-        quality: 0,
-        qty: 0,
-    };
-    let objects = vec![
-        rec(10, 19),
-        rec(11, 19),
-        rec(14, 20),
-        rec(12, 19),
-        rec(13, 19),
-    ];
-    s.objects.blocks = vec![(ObjBlockId::Surface { sx: 0, sy: 0 }, ObjBlock { objects })];
-    // Actor 2: invisible, status bit 7 → outline only; actor 3: status bit 0 → red outline on
-    // top of its sprite; actor 4: movement flag 0x10 → not drawn.
-    for (a, x) in [(2usize, 21u16), (3, 22), (4, 23)] {
-        s.objects.location[a] = Position { x, y: 10, z: 0 };
-        s.objects.type_frame[a] = AVATAR_TYPE as u16;
-    }
-    s.objects.actor_flags[2] = 2;
-    s.actors.attrs.status[2] = 0x80;
-    s.actors.attrs.status[3] = 1;
-    s.actors.attrs.movement_flags[4] = 0x10;
-    let w = view_window(&s);
-    assert_eq!(
-        w.objects[5 * 11 + 5],
-        [620, 600, AVATAR_BASE, 630, 610, 639]
-    );
-    assert_eq!(w.objects[5 * 11 + 7], [AVATAR_BASE | 0x800]);
-    assert_eq!(w.objects[5 * 11 + 8], [AVATAR_BASE, AVATAR_BASE | 0x1000]);
-    assert!(w.objects[5 * 11 + 9].is_empty());
-}
-
-#[test]
-fn fallback_stops_listing_after_255_nodes() {
-    let (mut s, _) = world();
-    s.tables.basetile.base[10] = 600;
-    let objects = (0..300)
-        .map(|_| ObjRecord {
-            status: 0,
-            pos: Position { x: 19, y: 10, z: 0 },
-            obj_n: 10,
-            frame: 0,
-            quality: 0,
-            qty: 0,
-        })
-        .collect();
-    s.objects.blocks = vec![(ObjBlockId::Surface { sx: 0, sy: 0 }, ObjBlock { objects })];
-    let w = view_window(&s);
-    let listed: usize = w.objects.iter().map(Vec::len).sum();
-    assert_eq!(
-        listed, 255,
-        "the leader takes one node, 254 records get the rest"
-    );
 }

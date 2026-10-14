@@ -44,7 +44,11 @@ pub(crate) fn map_cursor(state: &mut State, io: &Io) -> Option<(u16, u16, u16)> 
     (input.targeting == 1).then(|| {
         let tile = if input.range < 0 { 0x16c } else { 0x16d };
         let (col, row) = input.cursor;
-        (tile, (i16::from(col) * 16) as u16, (i16::from(row) * 16) as u16)
+        (
+            tile,
+            (i16::from(col) * 16) as u16,
+            (i16::from(row) * 16) as u16,
+        )
     })
 }
 

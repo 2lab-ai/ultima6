@@ -90,7 +90,12 @@ pub(crate) fn load_region_objects(state: &mut State, x: u16, y: u16, z: u16) {
 /// object tiles: one array in the original, kept in `objects.draw.base` (sync rule: copied from
 /// `map.view_tiles` right here, the only place 0x109e74 hands it over).
 pub(crate) fn build_view_objects(state: &mut State) {
-    let n = state.objects.draw.base.len().min(state.map.view_tiles.len());
+    let n = state
+        .objects
+        .draw
+        .base
+        .len()
+        .min(state.map.view_tiles.len());
     let tiles = state.map.view_tiles[..n].to_vec();
     state.objects.draw.base[..n].copy_from_slice(&tiles);
     crate::objects::build_draw_lists(state);
@@ -220,7 +225,10 @@ pub(crate) fn say_place_name(state: &mut State, q: u8) {
         } else if (9..=11).contains(&q) {
             lines.push(game_string(io, 0x0011_b902));
         }
-        lines.push(pointed_string(io, A4.wrapping_sub(0x6a60) + 4 * u32::from(q)));
+        lines.push(pointed_string(
+            io,
+            A4.wrapping_sub(0x6a60) + 4 * u32::from(q),
+        ));
         lines.push(game_string(io, 0x0011_b90e));
         lines
     });

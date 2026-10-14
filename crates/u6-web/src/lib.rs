@@ -183,10 +183,8 @@ impl Game {
         let r = intake(std::mem::take(&mut self.inputs));
         let mut report = r.report.join("\n");
         let files = r.files;
-        let copy: Vec<(String, Vec<u8>)> = files
-            .iter()
-            .map(|(p, b)| (p.clone(), b.clone()))
-            .collect();
+        let copy: Vec<(String, Vec<u8>)> =
+            files.iter().map(|(p, b)| (p.clone(), b.clone())).collect();
         match Engine::with_seed(Files::new(files), seed) {
             Ok(engine) => {
                 self.extracted = copy;

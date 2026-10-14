@@ -196,9 +196,13 @@ fn hydra_steps_the_neighbour_head_and_itself() {
     let (mut s, g) = world();
     s.rng = start;
     put(&mut s, 1, 0x176, 0, CENTRE);
-    put(&mut s, 300, 0x1a9, 9, Position { x: 101, ..CENTRE });
+    // The neighbour head is a map object in the list (the walk 0x10ad1a finds it there).
+    crate::objects::init_slots(&mut s.objects);
+    crate::objects::link_actors(&mut s.objects);
+    let head = crate::objects::create_on_map(&mut s.objects, 0x1a9 | 9 << 10, 0, 0, 101, 100, 0);
+    let head = head as u16;
     assert!(actor_idle_frames(&mut s, &g));
-    assert_eq!(word(&s, 300), (0x1a9, 8 + 2));
+    assert_eq!(word(&s, head), (0x1a9, 8 + 2));
     assert_eq!((word(&s, 1).1, s.actors.attrs.movement_flags[1]), (1, 0x80));
     assert_eq!(s.rng, end);
 }

@@ -177,10 +177,12 @@ fn constant_and_stub_ops() {
         "carries-object seam: not carried"
     );
     assert_eq!(ev(&[2, 3, 0xc7, 0xa7]), NOT_FOUND, "no member carries it");
-    // 0xc0 asks for an item: the seam picks nothing.
-    let (v, s) = run!(state(&[0xc0, 0xa7]), Files::default(), chars("x"), |cx| {
-        eval(cx).await
-    });
+    // 0xc0 asks for an item; a key that picks nothing leaves the selection as the cursor code
+    // leaves it with nothing under the pointer (-1, -1).
+    let mut st = state(&[0xc0, 0xa7]);
+    st.ui.input.selection = -1;
+    st.ui.input.target = (-1, -1);
+    let (v, s) = run!(st, Files::default(), chars("x"), |cx| { eval(cx).await });
     assert_eq!(v, NOT_FOUND);
     assert_eq!(scroll(&s), "[SelectItem]");
 }
@@ -456,22 +458,10 @@ fn waiting_ops() {
 
 #[test]
 fn seam_ops_reach_their_stubs() {
+    // The ops whose callee is still outside milestone 1 (the object ops 0xb9 / 0xba / 0xbe /
+    // 0xc8 / 0xc9 call the ported objects / ui code since the integration).
     for (script, id) in [
-        (
-            vec![0xb9, 1, 0xa7, 2, 0xa7, 3, 0xa7, 4, 0xa7, 0],
-            "0x10cf7c",
-        ),
-        (
-            vec![0xba, 1, 0xa7, 2, 0xa7, 3, 0xa7, 4, 0xa7, 0],
-            "0x10d16e",
-        ),
-        (vec![0xbe, 1, 0xa7, 0], "0x111c30"),
         (vec![0xbf, 5, 0xa7, 0], "0x128ce8"),
-        (vec![0xc8, 5, 0xa7, 6, 0xa7, 0], "0x10cda8"),
-        (
-            vec![0xc9, 1, 0xa7, 2, 0xa7, 5, 0xa7, 6, 0xa7, 0],
-            "0x10b18c",
-        ),
         (vec![0xd6, 5, 0xa7, 0], "0x11785e"),
         (vec![0x9c, 5, 0xa7, 0], "0x12f6ee"),
     ] {

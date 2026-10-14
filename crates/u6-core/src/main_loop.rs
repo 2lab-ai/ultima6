@@ -41,6 +41,8 @@
 pub mod commands;
 pub mod main_hunk;
 #[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
 mod tests;
 
 use std::cell::RefCell;
@@ -197,7 +199,12 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
             crate::gfx::anim::substitute(&mut s.gfx, slot.tile_to_animate, slot.first_anim_frame);
         }
     }
-    let created = state.borrow().actors.objlist_tail.get(TAIL_CREATED).copied();
+    let created = state
+        .borrow()
+        .actors
+        .objlist_tail
+        .get(TAIL_CREATED)
+        .copied();
     if created.unwrap_or(0) == 0 {
         // Contract: the original prints MSG_CREATE_CHARACTER, waits for a key and exits; the
         // character is made by another program. Fallback: play the shipped disk state.
@@ -232,9 +239,11 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
 
 /// The part of 0x1351d8 between the font load and load state, on the screen.
 fn boot_screen(state: &RefCell<State>, io: &Io) {
+    boot_hook();
     let mut s = state.borrow_mut();
     let tables = s.ui.tables.clone();
-    s.ui.text.open(&tables, crate::ui::WindowId::Screen, 0, 0, 0x27, 0x18);
+    s.ui.text
+        .open(&tables, crate::ui::WindowId::Screen, 0, 0, 0x27, 0x18);
     io.draw(|fb| {
         for (dst, c) in fb.palette.iter_mut().zip(&s.tables.palette) {
             *dst = u6_render::Rgb::new(c.r, c.g, c.b);
@@ -280,6 +289,20 @@ pub fn finish_load_state(s: &mut State, io: &Io) {
     crate::objects::link_actors(&mut s.objects);
     let last = crate::ui::globals::last_command(&s.actors);
     crate::ui::cursor::select_command(s, io, last);
+    region_steps(s);
+}
+
+/// The state part of the load-state tail without a screen (tools, tests): the slot reset main
+/// does first (0x10ed44), then [`finish_load_state`] less the command-bar underline.
+pub fn load_state_tail(s: &mut State) {
+    crate::objects::init_slots(&mut s.objects);
+    s.objects.save_mode = s.objects.defs.save_mode;
+    crate::objects::link_actors(&mut s.objects);
+    region_steps(s);
+}
+
+/// 0x105350 from the region load on (0x10e1ce .. 0x109e74).
+fn region_steps(s: &mut State) {
     let c = s.map.centre;
     crate::objects::load_region(s, c.x, c.y, u16::from(c.z));
     s.map.load_region(c.x, c.y, u16::from(c.z));

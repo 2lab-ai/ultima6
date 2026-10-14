@@ -100,10 +100,18 @@ pub struct State {
 /// A game file is missing or malformed.
 #[derive(Debug)]
 pub enum LoadError {
-    Missing { file: String },
-    Format { file: String, error: FormatError },
+    Missing {
+        file: String,
+    },
+    Format {
+        file: String,
+        error: FormatError,
+    },
     /// A table read out of a file failed its checks (the reader's own message).
-    Table { file: String, detail: String },
+    Table {
+        file: String,
+        detail: String,
+    },
 }
 
 impl fmt::Display for LoadError {
@@ -362,6 +370,9 @@ mod tests {
     #[test]
     fn missing_file_is_reported_by_name() {
         let err = State::new_game(&Files::default()).unwrap_err();
-        assert_eq!(err.to_string(), "maptiles.ega: not found in the dropped files");
+        assert_eq!(
+            err.to_string(),
+            "maptiles.ega: not found in the dropped files"
+        );
     }
 }

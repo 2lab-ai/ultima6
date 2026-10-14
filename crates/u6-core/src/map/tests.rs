@@ -185,6 +185,7 @@ fn eggs_far_or_active_or_on_arrival_are_offered() {
     let egg = |s: &mut State, slot: u16, x: u16, y: u16| {
         s.objects.type_frame[usize::from(slot)] = 0x14f;
         s.objects.location[usize::from(slot)] = at(x, y);
+        crate::main_loop::test_support::link_placed_objects(s);
     };
     egg(&mut s, 5, 305, 300); // near
     egg(&mut s, 6, 309, 300); // 9 tiles east: far
@@ -239,6 +240,7 @@ fn object(s: &mut State, slot: u16, (x, y): (u16, u16), tile: u16, [f1, f2, f3]:
     s.tables.tileflags.flags3[usize::from(tile)] = f3;
     s.objects.type_frame[usize::from(slot)] = ty;
     s.objects.location[usize::from(slot)] = at(x, y);
+    crate::main_loop::test_support::link_placed_objects(s);
 }
 
 fn set_ambient(s: &mut State, light: i8) {

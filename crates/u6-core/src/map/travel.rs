@@ -514,12 +514,14 @@ mod tests {
             s.objects.location[a] = at(300, 300, 0);
             s.actors.attrs.dexterity[a] = 20 + a as u8;
         }
+        crate::main_loop::test_support::link_placed_objects(&mut s);
         s
     }
 
     fn put(s: &mut State, slot: u16, type_frame: u16, p: Position) -> ObjectId {
         s.objects.type_frame[usize::from(slot)] = type_frame;
         s.objects.location[usize::from(slot)] = p;
+        crate::main_loop::test_support::link_placed_objects(s);
         ObjectId(slot)
     }
 
@@ -547,14 +549,17 @@ mod tests {
         // A member on another level and one held by status 0x02 / movement flag 0x10 stay.
         s.actors.party.members[2] = 3;
         s.actors.party.size = 3;
+        s.objects.type_frame[3] = 0x150;
         s.objects.location[3] = at(10, 10, 2);
         s.actors.attrs.status[2] = 0x04;
         s.actors.attrs.base_type_frame[2] = 0x177;
+        crate::main_loop::test_support::link_placed_objects(&mut s);
         leave_region(&mut s, 2);
-        // Seam fallbacks: no step, distance 0, so member 2 joins at once; all end parked.
-        assert_eq!(s.objects.location[1], at(300, 300, 15));
-        assert_eq!(s.objects.location[2], at(300, 300, 15));
-        assert_eq!(s.objects.location[3], at(300, 300, 15));
+        // Distance is a stub (0), so member 2 joins at once; all end parked on level 15, where
+        // 0x10c9d2 keeps 8-bit coordinates (300 & 0xff = 44).
+        assert_eq!(s.objects.location[1], at(44, 44, 15));
+        assert_eq!(s.objects.location[2], at(44, 44, 15));
+        assert_eq!(s.objects.location[3], at(44, 44, 15));
         assert_eq!(
             s.objects.type_frame[2], 0x177,
             "shape restored from the base type"
@@ -628,6 +633,8 @@ mod tests {
         put(&mut s, 210, OBJ_RED_GATE, at(300, 300, 0));
         after_step(&mut s);
         assert_eq!(s.map.centre, at(10, 20, 0));
+        // The teleport's clock tick (0x10368a) set the moons for the day; set the tie again.
+        s.actors.objlist_tail[0x7c..0x80].copy_from_slice(&[1, 5, 2, 9]);
         s.actors.calendar.minute = 40;
         put(&mut s, 211, OBJ_RED_GATE, at(10, 20, 0));
         after_step(&mut s);
@@ -639,17 +646,13 @@ mod tests {
 
     #[test]
     fn solo_mode_refuses_and_the_leaders_own_tile_object_is_skipped() {
-        let id = "0x108658 print the party-mode message (string in game)";
         let mut s = party();
         s.actors.objlist_tail[0x79] = 0;
         put(&mut s, 210, OBJ_HOLE, at(300, 300, 0));
-        let before = crate::stub::detached_hits().get(id).copied().unwrap_or(0);
         after_step(&mut s);
         assert_eq!(s.map.centre, at(300, 300, 0));
-        assert_eq!(
-            crate::stub::detached_hits().get(id).copied().unwrap_or(0),
-            before + 1
-        );
+        // "You must be in party mode to enter." is queued for the command loop to print.
+        assert_eq!(s.main.pending_print.len(), 1);
         assert_eq!(s.actors.work.prompt, 1);
         // In combat nothing happens; with leader index == size neither.
         s.actors.objlist_tail[0x79] = PARTY_MODE;

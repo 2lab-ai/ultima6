@@ -33,6 +33,12 @@ fn files() -> Option<Files> {
 
 fn with_text(files: &Files) -> State {
     let mut s = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    // Load state's tail: the region's objects and the view the on-screen test reads; main's
+    // text windows (the message scroll current).
+    crate::main_loop::load_state_tail(&mut s);
+    let t = s.ui.tables.clone();
+    s.ui.text.main_windows(&t);
+    s.ui.text.more_rows = i16::from(s.ui.text.win().height);
     let text = ConverseText::from_game(files.get("game").unwrap()).unwrap();
     s.converse.text = Some(text);
     s
@@ -47,12 +53,23 @@ fn line_keys(line: &str) -> Vec<InputEvent> {
     v
 }
 
+/// The scroll lines so far, the one being written last.
+fn lines_of(s: &State) -> Vec<String> {
+    let t = &s.ui.text;
+    let mut lines = s.ui.messages.clone();
+    let mut last: String = t.transcript_line.iter().map(|&b| char::from(b)).collect();
+    let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
+    last.extend(pending.iter().map(|&b| char::from(b)));
+    lines.push(last);
+    lines
+}
+
 /// Ticks without input until the game waits for a key with nothing queued (or ends).
 fn settle(e: &mut Engine) {
     for _ in 0..32 {
-        let before = e.state().ui.messages.clone();
+        let before = lines_of(&e.state());
         e.tick(&[], 16);
-        if e.finished() || (e.io().pending_events() == 0 && e.state().ui.messages == before) {
+        if e.finished() || (e.io().pending_events() == 0 && lines_of(&e.state()) == before) {
             return;
         }
     }
@@ -83,13 +100,13 @@ fn converse(state: &State, files: &Files, npc: i16, lines: &[&str]) -> (Vec<Stri
         if e.finished() {
             break;
         }
-        let now = e.state().ui.messages.clone();
+        let now = lines_of(&e.state());
         if now != seen {
             tries = 0;
             seen = now;
         }
         let last = seen.last().cloned().unwrap_or_default();
-        if last.trim_end().ends_with(&prompt) {
+        if e.state().ui.input.line_input || last.trim_end().ends_with(&prompt) {
             let Some(line) = lines.next() else { break };
             e.tick(&line_keys(line), 16);
             tries = 0;
@@ -100,7 +117,7 @@ fn converse(state: &State, files: &Files, npc: i16, lines: &[&str]) -> (Vec<Stri
         }
     }
     let done = e.finished();
-    (e.state().ui.messages.clone(), done)
+    (lines_of(&e.state()), done)
 }
 
 #[test]

@@ -134,16 +134,32 @@ fn start_cursor(s: &mut State, io: &Io, mode: u8, range: i8) {
     input.range = range;
 }
 
-/// 0x104216..0x104496: command letters to codes, with the cursor each starts.
+/// 0x104216..0x104496: command letters to codes, with the cursor each starts. Drop's inventory
+/// panel is redrawn (0x103f64) before its panel cursor shows.
 async fn map_letter(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
-    let mut s = state.borrow_mut();
-    match key {
+    let (code, redraw) = letter_code(&mut state.borrow_mut(), io, key);
+    if redraw {
+        crate::ui::panels::redraw_panel(state, io).await;
+    }
+    if code == 0x86 {
+        crate::ui::cursor::panel_cursor_in(&mut state.borrow_mut(), io, 1);
+    }
+    code
+}
+
+/// The synchronous part of [`map_letter`]: the code, and whether Drop asks for the inventory
+/// panel of the leader first.
+fn letter_code(s: &mut State, io: &Io, key: u16) -> (u16, bool) {
+    let code = match key {
         0x13 => SAVE,
         0x41 => {
-            start_cursor(&mut s, io, 1, 7);
+            start_cursor(s, io, 1, 7);
             let target = s.main.attack_target;
             if target >= 0 {
-                let p = s.objects.location(ObjectId(target as u16)).unwrap_or_default();
+                let p = s
+                    .objects
+                    .location(ObjectId(target as u16))
+                    .unwrap_or_default();
                 let c = s.map.centre;
                 let col = (p.x as i8).wrapping_sub(c.x as i8).wrapping_add(5);
                 let row = (p.y as i8).wrapping_sub(c.y as i8).wrapping_add(5);
@@ -154,52 +170,49 @@ async fn map_letter(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
         }
         0x42 => COMBAT,
         0x43 => {
-            start_cursor(&mut s, io, 3, 7);
+            start_cursor(s, io, 3, 7);
             CAST
         }
         0x44 => {
-            start_cursor(&mut s, io, 2, 7);
+            start_cursor(s, io, 2, 7);
             s.ui.input.panel_cursor = (3, 0);
             let (leader, size) = (s.actors.party.leader_index, s.actors.party.size);
-            let p = &s.ui.panel;
-            if leader != size && (p.mode != 0x92 || p.member != i16::from(leader)) {
-                let p = &mut s.ui.panel;
+            let p = &mut s.ui.panel;
+            let redraw = leader != size && (p.mode != 0x92 || p.member != i16::from(leader));
+            if redraw {
                 p.mode = 0x92;
                 p.member = i16::from(leader);
                 p.dirty = true;
-                drop(s);
-                crate::ui::panels::redraw_panel(state, io).await;
-                s = state.borrow_mut();
             }
-            crate::ui::cursor::panel_cursor_in(&mut s, io, 1);
-            0x86
+            return (0x86, redraw);
         }
         0x47 => {
-            start_cursor(&mut s, io, 1, -1);
+            start_cursor(s, io, 1, -1);
             0x85
         }
         0x4c => {
-            start_cursor(&mut s, io, 1, 7);
+            start_cursor(s, io, 1, 7);
             0x84
         }
         0x4d => {
-            start_cursor(&mut s, io, 1, -1);
+            start_cursor(s, io, 1, -1);
             0x87
         }
         0x52 => {
-            start_cursor(&mut s, io, 1, 7);
+            start_cursor(s, io, 1, 7);
             REST
         }
         0x54 => {
-            start_cursor(&mut s, io, 1, 7);
+            start_cursor(s, io, 1, 7);
             TALK
         }
         0x55 => {
-            start_cursor(&mut s, io, 1, -1);
+            start_cursor(s, io, 1, -1);
             0x88
         }
         other => other,
-    }
+    };
+    (code, false)
 }
 
 /// The cleanup after a command (0x104d7c and its copies): no target pending, the panel cursor
@@ -319,7 +332,10 @@ async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
             let args = {
                 let s = state.borrow();
                 let (cal, c) = (s.actors.calendar, s.map.centre);
-                [cal.hour, cal.day, cal.minute].map(u16::from).to_vec().into_iter()
+                [cal.hour, cal.day, cal.minute]
+                    .map(u16::from)
+                    .to_vec()
+                    .into_iter()
                     .chain([c.x, c.y, u16::from(c.z)])
                     .collect::<Vec<_>>()
             };
@@ -355,7 +371,8 @@ async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
 async fn pass(state: &RefCell<State>, io: &Io) {
     say(state, io, MSG_PASS, &[]).await;
     let mut s = state.borrow_mut();
-    let leader = usize::from(s.actors.party.members[usize::from(s.actors.party.leader_index).min(15)]);
+    let leader =
+        usize::from(s.actors.party.members[usize::from(s.actors.party.leader_index).min(15)]);
     s.actors.movement_points[leader] = 0;
     crate::ui::cursor::panel_cursor_in(&mut s, io, 0);
     s.ui.input.target_pending = 0;
@@ -377,7 +394,10 @@ async fn party_mode(state: &RefCell<State>, io: &Io) {
         let p = &s.actors.party;
         let c = s.map.centre;
         let near = |m: &u8| {
-            let at = s.objects.location(ObjectId(u16::from(*m))).unwrap_or_default();
+            let at = s
+                .objects
+                .location(ObjectId(u16::from(*m)))
+                .unwrap_or_default();
             (c.x as i16 - at.x as i16).abs() <= 8 && (c.y as i16 - at.y as i16).abs() <= 8
         };
         (
@@ -416,8 +436,16 @@ async fn solo_mode(state: &RefCell<State>, io: &Io, code: u16) {
             && s.actors.attrs.movement_flags[m] & 0x10 == 0
             && s.objects.actor_flags[m] & 0x04 == 0;
         let p = &s.actors.party;
-        let name = p.names.get(i).map_or_else(Vec::new, |n| n.as_bytes().to_vec());
-        (able, p.leader_index == p.size, tail(&s, TAIL_COMBAT) != 0, name)
+        let name = p
+            .names
+            .get(i)
+            .map_or_else(Vec::new, |n| n.as_bytes().to_vec());
+        (
+            able,
+            p.leader_index == p.size,
+            tail(&s, TAIL_COMBAT) != 0,
+            name,
+        )
     };
     if !able {
         say(state, io, MSG_FAILS, &[Arg::Str(&name)]).await;

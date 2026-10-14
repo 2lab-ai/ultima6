@@ -430,7 +430,13 @@ pub fn sky_bar(s: &mut State, io: &Io) {
                     0x16a
                 };
                 let p = usize::from(19 - hour);
-                seams::blit_tile_back(st, back, tile, (19 - i16::from(hour)) * 8, i16::from(heights[p]));
+                seams::blit_tile_back(
+                    st,
+                    back,
+                    tile,
+                    (19 - i16::from(hour)) * 8,
+                    i16::from(heights[p]),
+                );
             }
             if !eclipse {
                 for (pos, phase) in moons {

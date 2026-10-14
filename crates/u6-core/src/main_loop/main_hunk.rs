@@ -27,7 +27,9 @@ fn set_tail(s: &mut State, i: usize, v: u8) {
 pub fn set_tile_animation(s: &mut State, tile: u16, value: u8) {
     let anim = &s.tables.anim;
     let n = usize::from(anim.count).min(anim.slots.len());
-    if let Some(i) = anim.slots[..n].iter().position(|a| a.tile_to_animate == tile)
+    if let Some(i) = anim.slots[..n]
+        .iter()
+        .position(|a| a.tile_to_animate == tile)
         && let Some(f) = s.map.anim_enabled.get_mut(i)
     {
         *f = value;
@@ -91,7 +93,11 @@ pub fn actor_status_tick(s: &mut State, actor: u16) {
     while obj >= 0 {
         if obj != actor as i16 {
             let o = ObjectId(obj as u16);
-            let base = s.tables.basetile.base.get(usize::from(s.objects.obj_type(o)));
+            let base = s
+                .tables
+                .basetile
+                .base
+                .get(usize::from(s.objects.obj_type(o)));
             let t = base.copied().unwrap_or(0) + u16::from(s.objects.frame(o));
             if flags1(s, t) & 0x08 != 0 {
                 if let Some(f) = s.objects.actor_flags.get_mut(o.index()) {
@@ -220,13 +226,21 @@ pub fn end_solo(s: &mut State, io: &Io) {
     let members = s.actors.party.members;
     let solo = tail(s, TAIL_SOLO) as i8;
     let saved = tail(s, TAIL_SOLO_WORK);
-    let who = if solo < 0 { members[0] } else { members[(solo as usize).min(15)] };
+    let who = if solo < 0 {
+        members[0]
+    } else {
+        members[(solo as usize).min(15)]
+    };
     s.actors.worktype[usize::from(who)] = saved;
     let first = usize::from(members[0]);
     let w = s.actors.worktype[first];
     set_tail(s, TAIL_SOLO_WORK, w);
     s.actors.worktype[first] = 2;
-    for &m in members.iter().take(usize::from(s.actors.party.size)).skip(1) {
+    for &m in members
+        .iter()
+        .take(usize::from(s.actors.party.size))
+        .skip(1)
+    {
         if s.objects.actor_flags[usize::from(m)] & 0x04 == 0 {
             s.actors.worktype[usize::from(m)] = 1;
         }

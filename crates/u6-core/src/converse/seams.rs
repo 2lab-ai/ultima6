@@ -11,8 +11,8 @@
 //! map (WU-P2) = the 11×11 window caches, 0x109e74; gfx (WU-P1) = 0x1533e0, 0x102ef0; magic and
 //! music stay stubs in milestone 1 (0x116526, 0x11785e, 0x110878, 0x110912).
 
-use super::party::ix;
 use super::Cx;
+use super::party::ix;
 use crate::engine::Io;
 use crate::state::State;
 use crate::todo_stub;
@@ -138,7 +138,8 @@ pub(crate) async fn portrait_panel(cx: &Cx<'_>, npc: i16) {
     todo_stub!("0x128ce8 portrait panel (converse seam)", {
         let mut state = cx.state.borrow_mut();
         let paper = state.ui.tables.colours.paper;
-        cx.io.draw(|fb| crate::ui::text::fill_rect(fb, 0xa8, 6, 0x137, 0x67, paper));
+        cx.io
+            .draw(|fb| crate::ui::text::fill_rect(fb, 0xa8, 6, 0x137, 0x67, paper));
         crate::ui::panels::sky_bar(&mut state, cx.io);
         super::script::draw_portrait(&state, cx.io, npc, 0xd8, 0x18);
         state.ui.panel.dirty = true;
@@ -149,9 +150,7 @@ pub(crate) async fn portrait_panel(cx: &Cx<'_>, npc: i16) {
 /// A4-0x3952 (gfx [`crate::gfx::blit::blit_bitmap`]).
 pub(crate) fn blit_portrait(state: &State, io: &Io, pixels: &[u8], x: i16, y: i16) {
     let colours = &state.gfx.tables.bitmap_colours;
-    io.draw(|fb| {
-        crate::gfx::blit::blit_bitmap(colours, fb, (56, 64), pixels, x as u16, y as u16)
-    });
+    io.draw(|fb| crate::gfx::blit::blit_bitmap(colours, fb, (56, 64), pixels, x as u16, y as u16));
 }
 
 /// 0x1110c8: object type in the 9-entry list at A4-0x71ca (counted, not weighed ×10).

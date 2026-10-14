@@ -36,7 +36,11 @@ pub fn set_obj_word(s: &mut State, id: ObjectId, word: u16) {
 
 /// Location of an object (0x135588).
 pub fn obj_pos(s: &State, id: ObjectId) -> Position {
-    s.objects.location.get(id.index()).copied().unwrap_or_default()
+    s.objects
+        .location
+        .get(id.index())
+        .copied()
+        .unwrap_or_default()
 }
 
 /// [objects] 0x10ad1a + 0x10aaca: every object at (x, y, z), with the covering part. A read-only
@@ -50,14 +54,7 @@ pub fn objects_at(s: &State, x: u16, y: u16, z: u16) -> Vec<Found> {
 }
 
 /// [objects] 0x10b05a + 0x10af74: every object in the window rectangle on the current level.
-pub fn objects_in_rect(
-    s: &mut State,
-    x0: u16,
-    y0: u16,
-    x1: u16,
-    y1: u16,
-    z: u16,
-) -> Vec<ObjectId> {
+pub fn objects_in_rect(s: &mut State, x0: u16, y0: u16, x1: u16, y1: u16, z: u16) -> Vec<ObjectId> {
     crate::map::seams::objects_in_rect(s, x0 as i16, y0 as i16, x1 as i16, y1 as i16, z)
 }
 
@@ -179,7 +176,9 @@ pub fn print(s: &mut State, text: i32, args: &[Arg]) {
     let line = with_current_io(|io| {
         let mut args = args.iter();
         let fmt = if text == 0 {
-            args.next().and_then(|&a| arg_text(s, io, a)).unwrap_or_default()
+            args.next()
+                .and_then(|&a| arg_text(s, io, a))
+                .unwrap_or_default()
         } else {
             crate::main_loop::game_string(io, crate::image::A4.wrapping_add_signed(text))
         };
@@ -317,7 +316,10 @@ pub async fn talk(state: &RefCell<State>, io: &Io, speaker: u16, npc: u16, annou
 /// 0x109e74. Ported part: the flags, the window cache and the view flags; the panel and window
 /// redraws (async in the ui port) follow at the loop's next panel redraw and refresh.
 pub fn full_redraw(s: &mut State) {
-    todo_stub!("0x133a96 redraw the side panels (fallback: next loop redraw)", ());
+    todo_stub!(
+        "0x133a96 redraw the side panels (fallback: next loop redraw)",
+        ()
+    );
     s.map.view_dirty = 0;
     s.gfx.dissolve = 1;
     present_map(s);

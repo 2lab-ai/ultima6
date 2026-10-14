@@ -3,8 +3,8 @@
 
 use u6_formats::FormatError;
 
-use crate::image::GameImage;
 use super::text::TextWindow;
+use crate::image::GameImage;
 
 /// Raw key codes the table covers (0x00..0x5f; 0x60..0x67 are qualifiers, handled in code).
 pub const RAW_KEYS: usize = 0x60;

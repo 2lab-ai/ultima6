@@ -496,7 +496,8 @@ fn stub_counters_record_the_seams_a_talk_reaches() {
     }
     assert_eq!(*calls.borrow(), 1);
     let hits = e.stub_hits();
-    assert!(hits.keys().any(|k| k.starts_with("0x108658")), "{hits:?}");
+    // The text goes through the ui's printf (wired); the portrait panel is still a stub.
+    assert!(!hits.keys().any(|k| k.starts_with("0x108658")), "{hits:?}");
     assert!(
         hits.keys().any(|k| k.starts_with("0x128ce8")),
         "portrait panel seam"

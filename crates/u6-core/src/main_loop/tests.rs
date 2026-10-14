@@ -46,7 +46,10 @@ fn dump_actors() {
             s.objects.frame(id),
             s.objects.location(id),
             s.actors.attrs.status[usize::from(a)],
-            s.tables.basetile.base.get(usize::from(s.objects.obj_type(id))),
+            s.tables
+                .basetile
+                .base
+                .get(usize::from(s.objects.obj_type(id))),
             s.actors.worktype[usize::from(a)],
         );
     }
@@ -57,7 +60,10 @@ fn dump_actors() {
     let s = e.state();
     for a in 1..6u16 {
         let id = crate::objects::ObjectId(a);
-        println!("after: actor {a}: frame {} at {:?}", s.objects.frame(id), s.objects.location(id));
+        println!(
+            "after: actor {a}: frame {} at {:?}",
+            s.objects.frame(id),
+            s.objects.location(id)
+        );
     }
 }
-
