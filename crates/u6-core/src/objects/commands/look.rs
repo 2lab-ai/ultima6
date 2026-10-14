@@ -108,7 +108,10 @@ pub async fn read_book(state: &RefCell<State>, io: &Io, obj: Slot) {
     let q = (state.borrow().objects.qq_of(obj) >> 8) as u8;
     print_at(state, io, S_BLANK_LINES, &[]).await;
     let name = super::text::string(&state.borrow(), S_BOOK_DAT).to_ascii_lowercase();
-    let file = io.files().get(&String::from_utf8_lossy(&name)).unwrap_or(&[]);
+    let file = io
+        .files()
+        .get(&String::from_utf8_lossy(&name))
+        .unwrap_or(&[]);
     let at = usize::from(q).wrapping_sub(1).wrapping_mul(2);
     let text: Vec<u8> = file
         .get(at..at.wrapping_add(2))
@@ -232,7 +235,12 @@ async fn look_at_actor(state: &RefCell<State>, io: &Io, sel: Slot) {
     };
     let name = {
         let mut s = state.borrow_mut();
-        let shown = s.actors.attrs.status.get(sel as usize).is_some_and(|&b| b & 0x80 != 0);
+        let shown = s
+            .actors
+            .attrs
+            .status
+            .get(sel as usize)
+            .is_some_and(|&b| b & 0x80 != 0);
         if !shown || aboard {
             world::name_prefix(&mut s, sel);
         }
@@ -263,9 +271,21 @@ async fn look_at_object(
         let (tx, ty) = s.ui.input.target;
         let z = u16::from(s.map.centre.z);
         if tile == BED_FOOT_V {
-            s.ui.input.selection = begin_at(&mut s.objects, &s.tables, tx as u16, ty.wrapping_sub(1) as u16, z);
+            s.ui.input.selection = begin_at(
+                &mut s.objects,
+                &s.tables,
+                tx as u16,
+                ty.wrapping_sub(1) as u16,
+                z,
+            );
         } else if tile == BED_FOOT_H {
-            s.ui.input.selection = begin_at(&mut s.objects, &s.tables, tx.wrapping_sub(1) as u16, ty as u16, z);
+            s.ui.input.selection = begin_at(
+                &mut s.objects,
+                &s.tables,
+                tx.wrapping_sub(1) as u16,
+                ty as u16,
+                z,
+            );
         }
         count
     };
@@ -277,7 +297,17 @@ async fn look_at_object(
         seams::weight(&s, sel).wrapping_add(seams::contents_weight(&s, sel))
     };
     if wt != 0 && wt < 0xff {
-        print_at(state, io, if count == 1 { S_IT_WEIGHS } else { S_THEY_WEIGH }, &[]).await;
+        print_at(
+            state,
+            io,
+            if count == 1 {
+                S_IT_WEIGHS
+            } else {
+                S_THEY_WEIGH
+            },
+            &[],
+        )
+        .await;
         let args = [Arg::Word((wt / 10) as u16), Arg::Word((wt % 10) as u16)];
         print_at(state, io, S_STONES, &args).await;
     }
@@ -362,7 +392,14 @@ async fn spellbook(state: &RefCell<State>, io: &Io, book: Slot) {
         seams::open_spellbook(&mut s, book);
         let saved = s.actors.party.leader_index;
         let owner = s.objects.parent(book);
-        if let Some(i) = s.actors.party.members.iter().take(8).position(|&m| Slot::from(m) == owner) {
+        if let Some(i) = s
+            .actors
+            .party
+            .members
+            .iter()
+            .take(8)
+            .position(|&m| Slot::from(m) == owner)
+        {
             s.actors.party.leader_index = i as u8;
         }
         seams::show_spellbook(&mut s);

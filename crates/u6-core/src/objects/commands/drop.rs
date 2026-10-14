@@ -5,7 +5,7 @@ use std::cell::RefCell;
 
 use super::get::{P_NOT_POSSIBLE, message};
 use super::seams;
-use super::text::{print, print_at, putc};
+use super::text::{print, print_at, putc, queue_at};
 use super::world::S_LINE;
 use crate::engine::Io;
 use crate::objects::iter::{begin_at, next_at, tile_of};
@@ -161,7 +161,11 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
         let s = state.borrow();
         let kind = s.objects.kind(sel);
         let m = usize::try_from(s.ui.panel.member).unwrap_or(0).min(15);
-        (kind, stack_kind(&s.objects, kind), Slot::from(s.actors.party.members[m]))
+        (
+            kind,
+            stack_kind(&s.objects, kind),
+            Slot::from(s.actors.party.members[m]),
+        )
     };
     let o = sel;
     if seams::cannot_drop(&mut state.borrow_mut(), o) != 0 {
@@ -192,14 +196,22 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
         print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
         return;
     };
-    let mut s = state.borrow_mut();
-    seams::end_worn_magic(&mut s, o, owner);
+    land(&mut state.borrow_mut(), o, owner, here, kind, sk, n);
+    redraw_container(state, io).await;
+}
+
+/// Drop from the unready on (synchronous; "It broke!" is queued).
+fn land(s: &mut State, o: Slot, owner: Slot, here: Slot, kind: u16, sk: u16, n: i16) {
+    seams::end_worn_magic(s, o, owner);
     if s.objects.place(o) == READIED {
-        let slot = seams::equipment_slot(&s, o);
-        if let Some(e) = usize::try_from(slot).ok().and_then(|i| s.objcmds.equipment.get_mut(i)) {
+        let slot = seams::equipment_slot(s, o);
+        if let Some(e) = usize::try_from(slot)
+            .ok()
+            .and_then(|i| s.objcmds.equipment.get_mut(i))
+        {
             *e = 0;
         }
-        if super::super::seams::ready_slot(&s, o) == 8 {
+        if super::super::seams::ready_slot(s, o) == 8 {
             let m = usize::try_from(s.ui.panel.member).unwrap_or(0);
             if let Some(f) = s.ui.panel.member_flags.get_mut(m) {
                 *f = 0;
@@ -207,61 +219,57 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
             s.objcmds.equipment[5] = 0;
         }
     }
-    seams::sum_inventory(&mut s, owner);
-    crate::actors::walk::spend_mp(&mut s, owner as u16, 3);
+    seams::sum_inventory(s, owner);
+    crate::actors::walk::spend_mp(s, owner as u16, 3);
     let (tx, ty) = s.ui.input.target;
     let (mut dx, mut dy) = (tx, ty);
     let tile = tile_of(&s.tables, s.objects.tf(o));
-    seams::throw_path(&mut s, owner, 8, &mut dx, &mut dy, tile);
+    seams::throw_path(s, owner, 8, &mut dx, &mut dy, tile);
     let z = u16::from(s.map.centre.z);
     let (ox, oy) = (s.objects.x(owner), s.objects.y(owner));
     let far = |t: i16, a: u16| t.wrapping_sub(a as i16).wrapping_abs() > 1;
-    if (far(tx, ox) || far(ty, oy)) && fragile(&s, kind) {
+    if (far(tx, ox) || far(ty, oy)) && fragile(s, kind) {
         if sk != 0 {
-            let q = amount(&s, sk, o, n);
-            take_from_owner(&mut s, owner, kind, q);
+            let q = amount(s, sk, o, n);
+            take_from_owner(s, owner, kind, q);
         } else if kind == 0x1a1 || kind == 0x7b {
             let f = if kind == 0x1a1 { 1 } else { 2 };
             let t = &mut s.objects.type_frame[o as usize];
             *t = (*t & 0x3ff) + (f << 10);
-            move_to(&mut s, o, dx as u16, dy as u16, z);
+            move_to(s, o, dx as u16, dy as u16, z);
             mark_takeable(&mut s.objects, o);
         } else {
-            remove(&mut s, o);
+            remove(s, o);
         }
-        drop(s);
-        print_at(state, io, S_IT_BROKE, &[]).await;
-        s = state.borrow_mut();
+        queue_at(s, S_IT_BROKE, Vec::new());
     } else {
-        if fits_in(&s, here, o) && !surface_at(&mut s, tx as u16, ty as u16) {
+        if fits_in(s, here, o) && !surface_at(s, tx as u16, ty as u16) {
             if sk != 0 {
-                let q = amount(&s, sk, o, n);
-                let r = add_to_owner(&mut s, here, kind, q);
+                let q = amount(s, sk, o, n);
+                let r = add_to_owner(s, here, kind, q);
                 if r != -1 {
                     mark_takeable(&mut s.objects, r);
                 }
-                take_from_owner(&mut s, owner, kind, q);
+                take_from_owner(s, owner, kind, q);
             } else {
-                move_into(&mut s, o, here, IN_CONTAINER);
+                move_into(s, o, here, IN_CONTAINER);
                 mark_takeable(&mut s.objects, o);
             }
         } else if sk != 0 {
-            let q = amount(&s, sk, o, n);
+            let q = amount(s, sk, o, n);
             let [b0, b1, b2] = pack_xyz(dx as u16, dy as u16, z).to_packed();
             let [t0, t1] = kind.to_be_bytes();
             let [q0, q1] = q.to_be_bytes();
-            let r = create_from_record(&mut s, [0, b0, b1, b2, t0, t1, q0, q1]);
+            let r = create_from_record(s, [0, b0, b1, b2, t0, t1, q0, q1]);
             mark_takeable(&mut s.objects, r);
-            take_from_owner(&mut s, owner, kind, q);
+            take_from_owner(s, owner, kind, q);
         } else {
-            move_to(&mut s, o, dx as u16, dy as u16, z);
+            move_to(s, o, dx as u16, dy as u16, z);
             mark_takeable(&mut s.objects, o);
         }
     }
-    crate::map::view::update_view(&mut s);
+    crate::map::view::update_view(s);
     s.ui.panel.dirty = false;
-    drop(s);
-    redraw_container(state, io).await;
 }
 
 /// The spot test of Drop: the object may stand there, or a surface, or a container it fits
@@ -288,9 +296,10 @@ fn place_ok(s: &mut State, o: Slot, owner: Slot) -> Option<Slot> {
 
 /// 0x111be0 on the container the panel shows (A4+0x1346).
 async fn redraw_container(state: &RefCell<State>, io: &Io) {
-    let mut s = state.borrow_mut();
-    let c = s.ui.panel.container as Slot;
-    seams::inventory_contents(&mut s, c);
-    drop(s);
+    {
+        let mut s = state.borrow_mut();
+        let c = s.ui.panel.container as Slot;
+        seams::inventory_contents(&mut s, c);
+    }
     crate::main_loop::flush_prints(state, io).await;
 }

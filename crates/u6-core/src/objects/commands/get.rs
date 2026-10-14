@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 
 use super::seams;
-use super::text::{print, print_at, putc};
+use super::text::{print, print_at, putc, queue_at};
 use super::world::{self, P_NO_EFFECT};
 use crate::engine::Io;
 use crate::objects::iter::tile_of;
@@ -89,7 +89,11 @@ pub async fn get(state: &RefCell<State>, io: &Io) {
         let sel = s.ui.input.selection;
         let cover = |s: &State, o: Slot| {
             let tile = tile_of(&s.tables, s.objects.tf(o));
-            s.tables.tileflags.flags3.get(usize::from(tile)).is_some_and(|f| f & 0x10 != 0)
+            s.tables
+                .tileflags
+                .flags3
+                .get(usize::from(tile))
+                .is_some_and(|f| f & 0x10 != 0)
         };
         if (sel <= 0xff && s.ui.input.target.0 != -1) || cover(&s, sel) {
             let under = world::object_under(&mut s, sel);
@@ -170,13 +174,22 @@ async fn take(state: &RefCell<State>, io: &Io, actor: Slot, sel: Slot) -> bool {
         print_at(state, io, S_TOO_HEAVY, &[]).await;
         return true;
     }
-    let mut s = state.borrow_mut();
-    crate::actors::walk::spend_mp(&mut s, actor as u16, 3);
+    let stored = store(&mut state.borrow_mut(), actor, sel, kind);
+    if !stored {
+        print_at(state, io, S_NO_FREE_HAND, &[]).await;
+    }
+    stored
+}
+
+/// Get from the movement points on (synchronous; the theft lines are queued): false when
+/// both hands of the shown member are full for a lit torch.
+fn store(s: &mut State, actor: Slot, sel: Slot, kind: u16) -> bool {
+    crate::actors::walk::spend_mp(s, actor as u16, 3);
     let frame = s.objects.tf(sel) >> 10;
     if stack_kind(&s.objects, kind) != 0 && !(kind == TORCH && frame != 0) {
         let qq = s.objects.qq_of(sel);
-        if add_to_owner(&mut s, actor, kind, qq) >= 0 {
-            remove(&mut s, sel);
+        if add_to_owner(s, actor, kind, qq) >= 0 {
+            remove(s, sel);
         }
     } else if kind == TORCH && frame == 1 {
         if i16::from(s.actors.party.leader_index) == s.ui.panel.member {
@@ -186,14 +199,12 @@ async fn take(state: &RefCell<State>, io: &Io, actor: Slot, sel: Slot) -> bool {
             } else if e[5] == 0 {
                 s.objcmds.equipment[5] = sel;
             } else {
-                drop(s);
-                print_at(state, io, S_NO_FREE_HAND, &[]).await;
                 return false;
             }
         }
-        move_into(&mut s, sel, actor, READIED);
+        move_into(s, sel, actor, READIED);
     } else {
-        move_into(&mut s, sel, actor, IN_INVENTORY);
+        move_into(s, sel, actor, IN_INVENTORY);
         let t = &mut s.objects.type_frame[sel as usize];
         match kind {
             0x7a | 0x91 => *t &= 0x3ff,
@@ -208,43 +219,38 @@ async fn take(state: &RefCell<State>, io: &Io, actor: Slot, sel: Slot) -> bool {
             _ => {}
         }
     }
-    if shows_leader_inventory(&s) {
-        let a = panel_actor(&s);
-        seams::inventory_contents(&mut s, a);
+    if shows_leader_inventory(s) {
+        let a = panel_actor(s);
+        seams::inventory_contents(s, a);
     }
-    if !takeable(&s, sel) && s.map.centre.z == 0 {
+    if !takeable(s, sel) && s.map.centre.z == 0 {
         mark_takeable(&mut s.objects, sel);
-        seams::lose_karma(&mut s, 1);
-        let mut seen = false;
-        for a in 1..0xe0 {
+        seams::lose_karma(s, 1);
+        let witness = (1..0xe0).find(|&a| {
             let st = s.actors.attrs.status[a as usize];
-            if st & 0x60 == 0 && crate::converse::on_screen(&s, a) && st & 0x04 == 0 {
-                drop(s);
-                print_at(state, io, S_STOP_THIEF, &[]).await;
-                s = state.borrow_mut();
-                seams::turn_hostile(&mut s, a);
-                seen = true;
-                break;
+            st & 0x60 == 0 && crate::converse::on_screen(s, a) && st & 0x04 == 0
+        });
+        match witness {
+            Some(a) => {
+                queue_at(s, S_STOP_THIEF, Vec::new());
+                seams::turn_hostile(s, a);
             }
-        }
-        if !seen {
-            drop(s);
-            print_at(state, io, S_STEALING, &[]).await;
-            s = state.borrow_mut();
+            None => queue_at(s, S_STEALING, Vec::new()),
         }
     }
-    crate::map::view::update_view(&mut s);
+    crate::map::view::update_view(s);
     true
 }
 
 /// The end of Get past the weight test: the shown member's sums again, no target pending.
 async fn finish(state: &RefCell<State>, io: &Io) {
-    let mut s = state.borrow_mut();
-    if i16::from(s.actors.party.leader_index) != s.ui.panel.member {
-        let a = panel_actor(&s);
-        seams::sum_inventory(&mut s, a);
+    {
+        let mut s = state.borrow_mut();
+        if i16::from(s.actors.party.leader_index) != s.ui.panel.member {
+            let a = panel_actor(&s);
+            seams::sum_inventory(&mut s, a);
+        }
+        s.ui.input.target_pending = 0;
     }
-    s.ui.input.target_pending = 0;
-    drop(s);
     crate::main_loop::flush_prints(state, io).await;
 }

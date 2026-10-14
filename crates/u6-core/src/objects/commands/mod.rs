@@ -34,8 +34,8 @@ pub use drop::{drop_object, fits_in, fragile, how_many, surface_at};
 pub use eggs::{equip_monster, hatch_egg, spawn_monster};
 pub use get::{get, takeable};
 pub use horse::{dismount, mount_horse, parse_answer};
-pub use push::{outermost, push, push_blocked, resists_push};
 pub use look::{is_book, is_readable, is_sign, look, read_book};
+pub use push::{outermost, push, push_blocked, resists_push};
 pub use world::{
     article, blast_doors, chest, door, explode_keg, is_closed_container, name_prefix, object_under,
     search, spring_trap,

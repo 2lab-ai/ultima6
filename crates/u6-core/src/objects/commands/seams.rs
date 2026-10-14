@@ -214,7 +214,14 @@ pub(crate) fn weight(s: &State, obj: Slot) -> i16 {
         2 => o.qq_of(obj) & 0xff,
         _ => 1,
     };
-    let unit = u16::from(s.tables.tileflags.weight.get(usize::from(kind)).copied().unwrap_or(0));
+    let unit = u16::from(
+        s.tables
+            .tileflags
+            .weight
+            .get(usize::from(kind))
+            .copied()
+            .unwrap_or(0),
+    );
     let tenths = (0..9).any(|i| s.objcmds.data.a4_word(TENTHS_TYPES + 2 * i) == kind);
     let w = if tenths {
         ((unit.wrapping_mul(count)) as i16) / 10
@@ -326,7 +333,7 @@ pub(crate) fn turn_hostile(_s: &mut State, _a: Slot) {
 pub(crate) fn lose_karma(s: &mut State, n: u8) {
     todo_stub!("0x101eb0 lower the karma", ());
     let k = &mut s.actors.karma;
-    *k = if n < *k { *k - n } else { 0 };
+    *k = (*k).saturating_sub(n);
 }
 
 /// Owner: ui / inventory (hunk 8). Original 0x1122dc (a readied object that cannot simply be

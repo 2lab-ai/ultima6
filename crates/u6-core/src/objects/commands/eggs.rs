@@ -135,7 +135,7 @@ pub fn spawn_monster(s: &mut State, kind: u16, x: u16, y: u16, z: u16) -> Slot {
         s.actors.attrs.dexterity[i] = v(s, DEX);
         s.actors.attrs.intelligence[i] = v(s, INT);
         s.actors.attrs.hp[i] = v(s, HP);
-        s.actors.attrs.level[i] = ((u16::from(s.actors.attrs.hp[i]) + 0x1d) / 0x1e) as u8;
+        s.actors.attrs.level[i] = u16::from(s.actors.attrs.hp[i]).div_ceil(0x1e) as u8;
         s.actors.attrs.status[i] = byte(s, STATUS, index);
     } else {
         let a = &mut s.actors.attrs;

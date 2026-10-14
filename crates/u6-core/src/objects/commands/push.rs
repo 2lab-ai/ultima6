@@ -67,7 +67,10 @@ pub fn outermost(s: &State, obj: Slot) -> Slot {
 pub fn push_blocked(s: &mut State, obj: Slot, x: u16, y: u16, dir: usize) -> bool {
     let d = &s.objects.defs;
     let at = |i: usize, d: &crate::objects::ObjectDefs| {
-        (x.wrapping_add_signed(d.dx(i)), y.wrapping_add_signed(d.dy(i)))
+        (
+            x.wrapping_add_signed(d.dx(i)),
+            y.wrapping_add_signed(d.dy(i)),
+        )
     };
     let (nx, ny) = at(dir, d);
     if !seams::may_stand(s, obj, nx, ny) && !surface_at(s, nx, ny) {
@@ -78,7 +81,8 @@ pub fn push_blocked(s: &mut State, obj: Slot, x: u16, y: u16, dir: usize) -> boo
     }
     let d = &s.objects.defs;
     let (a, b) = (at(dir.wrapping_sub(1), d), at(dir + 1, d));
-    let free = |s: &mut State, (x, y): (u16, u16)| seams::may_stand(s, obj, x, y) || surface_at(s, x, y);
+    let free =
+        |s: &mut State, (x, y): (u16, u16)| seams::may_stand(s, obj, x, y) || surface_at(s, x, y);
     !(free(s, a) || free(s, b))
 }
 
@@ -164,7 +168,15 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
         let wt = seams::weight(&s, sel).wrapping_add(seams::contents_weight(&s, sel));
         (wt, s.objects.kind(sel))
     };
-    let weightless = state.borrow().tables.tileflags.weight.get(usize::from(kind)).copied().unwrap_or(0) == 0;
+    let weightless = state
+        .borrow()
+        .tables
+        .tileflags
+        .weight
+        .get(usize::from(kind))
+        .copied()
+        .unwrap_or(0)
+        == 0;
     if weightless || kind == 0x19b {
         let msg = message(&state.borrow(), P_NOT_POSSIBLE);
         print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;

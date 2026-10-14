@@ -44,12 +44,6 @@ pub(crate) async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &
     print(state, io, &fmt, args).await;
 }
 
-/// printf of the game string at `A4 + off`.
-pub(crate) async fn print_a4(state: &RefCell<State>, io: &Io, off: i32, args: &[Arg<'_>]) {
-    let fmt = a4_string(&state.borrow(), off);
-    print(state, io, &fmt, args).await;
-}
-
 /// 0x108376: one character through the escape layer (the commands print their newlines so).
 pub(crate) async fn putc(state: &RefCell<State>, io: &Io, c: u8) {
     crate::main_loop::flush_prints(state, io).await;
