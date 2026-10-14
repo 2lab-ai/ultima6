@@ -256,12 +256,6 @@ pub(crate) fn raise_avatar_body(state: &mut State, body: ObjectId) {
     crate::objects::actor_from_body(state, body.slot());
 }
 
-/// Resurrect the companion lying as body object `body` (0x11785e, an M1 stub point in the
-/// magic code). Fallback: nothing.
-pub(crate) fn resurrect_body(_state: &mut State, _body: ObjectId) {
-    todo_stub!("0x11785e resurrect a companion's body", ())
-}
-
 /// Objects of the region list (A4-0xf84 head = slot 0x100, A4-0x1184 next links) in list order.
 pub(crate) fn region_list(state: &State) -> Vec<ObjectId> {
     let o = &state.objects;

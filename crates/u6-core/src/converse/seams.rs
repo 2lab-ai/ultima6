@@ -319,14 +319,9 @@ pub(crate) fn view_cell(s: &State, col: i16, row: i16) -> (u8, i16) {
 
 // ---- magic and music (milestone-1 stubs) ---------------------------------------------------
 
-/// 0x116526(actor, type, quality): object id or -1. Fallback: -1 (not carried).
-pub(crate) fn has_object(_s: &State, _actor: i16, _ty: i16, _quality: i16) -> i16 {
-    todo_stub!("0x116526 actor carries an object (converse seam)", -1)
-}
-
-/// 0x11785e(obj): resurrect the body object. Fallback: nothing.
-pub(crate) fn resurrect(_s: &mut State, _obj: i16) {
-    todo_stub!("0x11785e resurrect (converse seam)", ())
+/// 0x116526(actor, type, quality): object id or -1 (magic).
+pub(crate) fn has_object(s: &State, actor: i16, ty: i16, quality: i16) -> i16 {
+    crate::magic::carried_object(&s.objects, actor, ty, quality)
 }
 
 /// 0x110878(song): play / 0 = stop. Fallback: nothing.

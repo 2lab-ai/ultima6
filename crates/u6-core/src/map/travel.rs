@@ -8,7 +8,10 @@
 
 use u6_formats::position::Position;
 
+use std::cell::RefCell;
+
 use super::{region, seams, view};
+use crate::engine::Io;
 use crate::objects::ObjectId;
 use crate::state::State;
 
@@ -406,26 +409,40 @@ fn blue_moongate(state: &mut State, gate: ObjectId) {
 ///
 /// Port guard: when a clock tick leaves the time unchanged (the clock not ported yet) the wait
 /// stops instead of spinning forever.
-pub fn resurrect_party(state: &mut State) {
-    state.actors.party.leader_index = 0xff;
+pub async fn resurrect_party(cell: &RefCell<State>, io: &Io) {
+    cell.borrow_mut().actors.party.leader_index = 0xff;
     for a in 0..0xe0u16 {
-        let st = state.actors.attrs.status[usize::from(a)];
-        if st & 0x80 != 0 && st & 0x10 != 0 {
-            let body = seams::region_list(state).into_iter().find(|&o| {
-                let t = state.objects.obj_type(o);
-                (t == OBJ_BODY_A || t == OBJ_BODY_B)
-                    && u16::from(seams::object_quality(state, o)) == a
-            });
+        let body = {
+            let state = &mut *cell.borrow_mut();
+            let st = state.actors.attrs.status[usize::from(a)];
+            let body = (st & 0x80 != 0 && st & 0x10 != 0)
+                .then(|| {
+                    seams::region_list(state).into_iter().find(|&o| {
+                        let t = state.objects.obj_type(o);
+                        (t == OBJ_BODY_A || t == OBJ_BODY_B)
+                            && u16::from(seams::object_quality(state, o)) == a
+                    })
+                })
+                .flatten();
             if let Some(body) = body {
                 state.ui.input.selection = body.0 as i16;
-                raise(state, ObjectId(a), body);
+                if a == 1 {
+                    raise_avatar(state, body);
+                } else {
+                    state.map.flag_784e = 0;
+                }
             }
+            body
+        };
+        if let Some(body) = body.filter(|_| a != 1) {
+            crate::magic::resurrect_and_rejoin(cell, io, body.0 as i16).await;
         }
-        let w = &mut state.actors.worktype[usize::from(a)];
+        let w = &mut cell.borrow_mut().actors.worktype[usize::from(a)];
         if *w == 0x9b {
             *w = 0x81;
         }
     }
+    let state = &mut *cell.borrow_mut();
     for m in members(state) {
         let i = m.index();
         let attrs = &mut state.actors.attrs;
@@ -472,13 +489,9 @@ pub fn resurrect_party(state: &mut State) {
     state.map.flag_784e = 1;
 }
 
-/// 0x1095bc's raise step for actor `a` lying as `body`.
-fn raise(state: &mut State, a: ObjectId, body: ObjectId) {
-    if a != ObjectId(1) {
-        state.map.flag_784e = 0;
-        seams::resurrect_body(state, body);
-        return;
-    }
+/// 0x1095bc's raise step for the Avatar lying as `body` (a companion goes through 0x11785e,
+/// [`crate::magic::resurrect_and_rejoin`]).
+fn raise_avatar(state: &mut State, body: ObjectId) {
     seams::raise_avatar_body(state, body);
     let attrs = &mut state.actors.attrs;
     attrs.status[1] &= 0xef;
@@ -680,16 +693,23 @@ mod tests {
         let body = put(&mut s, 400, OBJ_BODY_A, at(300, 300, 0));
         // The body's quality (actor 1) comes through the seam; slot 400 reads 0, so no match.
         s.actors.calendar.hour = 3;
-        resurrect_party(&mut s);
+        let mut e = crate::Engine::with_game(s, crate::Files::default(), |st, io| async move {
+            resurrect_party(&st, &io).await;
+        });
+        e.tick(&[], 0);
+        assert!(e.finished());
+        let mut s = e.state().clone();
         assert_eq!(s.map.centre, at(0x133, 0x160, 0));
         assert_eq!(s.objects.location[1], at(0x133, 0x160, 0));
         assert_eq!(s.actors.worktype[7], 0x81);
-        assert_eq!(s.actors.party.leader_index, 0xff);
+        // In an engine the back-to-party-mode step (0x104094) runs and member 0 leads again;
+        // outside one it had no screen and left the 0xff.
+        assert_eq!(s.actors.party.leader_index, 0);
         assert_eq!(s.actors.attrs.exp[1], 1000, "no body matched");
         assert_eq!(s.actors.attrs.status[1], ((0x90 & 0x9f) | 0x40) & 0xe1);
         assert_eq!((s.actors.work.force_teleport, s.ui.panel.dirty), (0, true));
         // The Avatar's raise step itself.
-        raise(&mut s, ObjectId(1), body);
+        raise_avatar(&mut s, body);
         assert_eq!(s.actors.attrs.exp[1], 500);
         assert_eq!(s.actors.attrs.magic[1], 25);
         assert_eq!(s.objects.type_frame[1], 0x19a);

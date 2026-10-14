@@ -33,8 +33,15 @@ fn centre_on(s: &mut State, i: usize) {
 ///
 /// Unless the leader index is 16: music off, the two lines with a full redraw between, then
 /// the resurrection 0x1095bc.
+///
+/// Port: 0x1095bc ([`crate::map::travel::resurrect_party`]) waits (the rejoin prints), and
+/// this runs inside synchronous code (the bookkeeping, a killing blow in 0x1231be), so it only
+/// marks the resurrection pending; [`world_turn`] awaits it at its next bookkeeping point,
+/// before it picks an actor again. The rest of a killing blow therefore runs before the raise.
+/// While it is pending the lines are not printed again (the original's raise has cleared the
+/// death by then).
 pub fn darkness(s: &mut State) {
-    if s.actors.party.leader_index == 0x10 {
+    if s.actors.party.leader_index == 0x10 || s.actors.work.resurrect_pending {
         return;
     }
     crate::todo_stub!("0x110878 music off (fallback: silence)", ());
@@ -42,9 +49,15 @@ pub fn darkness(s: &mut State) {
     s.gfx.window_shown = 1;
     seams::full_redraw(s);
     seams::print(s, -0x740e, &[]);
-    // Reachable since combat is ported (M2): without it a dead Avatar left the world turn
-    // looping with no one to hand the turn to.
-    crate::map::travel::resurrect_party(s);
+    s.actors.work.resurrect_pending = true;
+}
+
+/// The resurrection [`darkness`] left pending, awaited (0x1095bc).
+async fn raise_if_dead(state: &RefCell<State>, io: &Io) {
+    let pending = std::mem::take(&mut state.borrow_mut().actors.work.resurrect_pending);
+    if pending {
+        crate::map::travel::resurrect_party(state, io).await;
+    }
 }
 
 /// Original: 0x121056 (party: leader and solo-mode bookkeeping per turn)
@@ -433,9 +446,10 @@ fn refill(s: &mut State) {
 /// the bookkeeping again. Returns when the pick is the player's character (worktype 2, not
 /// swallowed), after making it the leader if it is another party member.
 pub async fn world_turn(state: &RefCell<State>, io: &Io) {
+    leader_bookkeeping(&mut state.borrow_mut());
+    raise_if_dead(state, io).await;
     let mask = {
         let mut s = state.borrow_mut();
-        leader_bookkeeping(&mut s);
         formation(&mut s);
         go_to_schedules(&mut s);
         let leader = member(&s, usize::from(s.actors.party.leader_index));
@@ -473,8 +487,9 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
             let wt = state.borrow().actors.worktype[a];
             if wt != 2 && wt != 1 {
                 npc::npc_turn(state, io, actor).await;
+                leader_bookkeeping(&mut state.borrow_mut());
+                raise_if_dead(state, io).await;
                 let mut s = state.borrow_mut();
-                leader_bookkeeping(&mut s);
                 if (2..0x10).contains(&s.actors.worktype[a]) {
                     s.actors.attrs.unknown_18f1[a] = actor as u8;
                 }
@@ -626,6 +641,34 @@ mod tests {
         s.gfx.window_shown = 0;
         leader_bookkeeping(&mut s);
         assert_eq!(s.gfx.window_shown, 1);
+    }
+
+    #[test]
+    fn a_dead_avatar_is_raised_before_the_world_turn_picks_again() {
+        let mut s = world(&[]);
+        s.actors.attrs.status[1] = 0x90;
+        s.actors.calendar.hour = 9;
+        let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+            world_turn(&st, &io).await;
+        });
+        e.tick(&[], 16);
+        let s = e.state();
+        // The raise ran (bits reset, the view moved to the castle) before any pick; the
+        // Avatar of this bare world is not carried along, so the turn then idles.
+        assert!(!s.actors.work.resurrect_pending);
+        assert_eq!(s.actors.attrs.status[1] & 0x10, 0, "the Avatar lives again");
+        assert_eq!((s.map.centre.x, s.map.centre.y), (0x133, 0x160));
+    }
+
+    #[test]
+    fn a_pending_resurrection_is_not_announced_twice() {
+        let mut s = world(&[]);
+        s.actors.attrs.status[1] = 0x90;
+        leader_bookkeeping(&mut s);
+        assert!(s.actors.work.resurrect_pending);
+        s.gfx.window_shown = 0;
+        leader_bookkeeping(&mut s);
+        assert_eq!(s.gfx.window_shown, 0, "the darkness lines once per death");
     }
 
     #[test]

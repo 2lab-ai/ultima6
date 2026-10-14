@@ -134,8 +134,7 @@ pub async fn read_key(state: &RefCell<State>, io: &Io) -> u16 {
                 }
                 0x9f | 0xa0 => open_container(state, io, code),
                 0xa2..=0xa5 => {
-                    // Contract: page the spellbook (magic); M1 has no spellbook open.
-                    todo_stub!("0x116218 spellbook page", ());
+                    Box::pin(crate::magic::page_key(state, io, code)).await;
                     Panel::Again
                 }
                 0xa7 => {

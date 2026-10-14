@@ -458,24 +458,23 @@ fn waiting_ops() {
 
 #[test]
 fn seam_ops_reach_their_stubs() {
-    // The ops whose callee is still outside milestone 1 (the object ops 0xb9 / 0xba / 0xbe /
+    // The op whose callee is still outside milestone 1 (the object ops 0xb9 / 0xba / 0xbe /
     // 0xc8 / 0xc9 call the ported objects / ui code since the integration; 0x9c's 0x12f6ee is
-    // objects::commands' port since milestone 2).
-    for (script, id) in [
-        (vec![0xbf, 5, 0xa7, 0], "0x128ce8"),
-        (vec![0xd6, 5, 0xa7, 0], "0x11785e"),
-    ] {
-        let mut e = Engine::with_game(state(&script), Files::default(), |st, io| async move {
+    // objects::commands' port and 0xd6 calls magic's resurrection 0x11785e since milestone 2).
+    let mut e = Engine::with_game(
+        state(&[0xbf, 5, 0xa7, 0]),
+        Files::default(),
+        |st, io| async move {
             run_text(&super::Cx::new(&st, &io), 9).await;
-        });
-        e.tick(&[], 16);
-        assert!(e.finished());
-        assert!(
-            e.stub_hits().keys().any(|k| k.starts_with(id)),
-            "{id}: {:?}",
-            e.stub_hits()
-        );
-    }
+        },
+    );
+    e.tick(&[], 16);
+    assert!(e.finished());
+    assert!(
+        e.stub_hits().keys().any(|k| k.starts_with("0x128ce8")),
+        "{:?}",
+        e.stub_hits()
+    );
 }
 
 // ---- keyword blocks 0x1149d6 -------------------------------------------------------------------
