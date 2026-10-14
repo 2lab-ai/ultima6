@@ -85,13 +85,13 @@ Base origin/port/main `6dce550`. One worktree per unit (`.worktrees/m2-<unit>`, 
 | WU | Scope | State |
 |---|---|---|
 | M2-combat | hunk 13 + Attack + combat mode + NPC combat worktypes + missile effects | m2/combat `114621d`; 53 + 7 hunk-18 fns; 334 tests; gargoyle fight messages match oracle wording | done → M2-int-a |
-| M2-magic | hunk 11 + Cast + spellbook + reagents | in flight |
+| M2-magic | hunk 11 + Cast + spellbook + reagents | m2/magic `4c4ba6f`; 343 tests; Cast flow + 37 hunk-11 fns; 7 spells receipted; 22 spell routines stubbed → M2-magic2 | partial → M2-magic2 in flight |
 | M2-objcmds | hunk 15 Look/Get/Drop/Move/doors/traps + eggs/monster spawn | m2/objcmds `5eea93a`; 339 tests; start frame 99.20% vs oracle (seed 0x1d3), 98.76% seed 0; Move-to-member partial | done → M2-int-a |
 | M2-usecmd | hunk 16 Use + per-object handlers | m2/usecmd `73300c7`; 53/59; 329 tests; 8 object kinds; duplicated 10 hunk-15 fns (dedupe in int) | done → M2-int-a |
 | M2-inventory | hunk 8 inventory/Ready/Unready + 0x128ce8 panel + hunk 14 Rest | in flight |
 | M2-saveload | Save/Restore, byte-compatible savegame, SaveStore trait | m2/saveload `ad43c95`; 333 tests; original's save loads in port, port re-save = original re-save except frame bits + 1 stack-garbage byte | done → M2-int-a |
 | M2-sound | MED player + Paula emulation (u6-audio) + music state | m2/sound `0f7958c`; 362 tests; start song = song 7 ULTIMA_Da; envelope vs oracle audio r 0.952, tempo drift +0.01 s / 7.5 s; host wiring (AudioDriver + AudioWorklet) + 4 commands.rs edits pending | done → M2-int-b |
-| M2-intro | `u`: intro, menu, character creation, hand-off | in flight |
+| M2-intro | `u`: intro, menu, character creation, hand-off | m2/intro `355253d`; 338 tests; ORIGIN + Lord British frames 100% vs oracle; full creation ("Zhuge": STR 20 DEX 17 INT 24); storm/stones/gate, Introduction story, Transfer stubbed → M2-intro2 | partial → M2-intro2 in flight |
 | M2-mouse+ui | mouse input + remaining ui/gfx planned rows | after WU-P7b |
 | M2-int-a | merge combat+objcmds+saveload+usecmd, dedupe hunk 15, wire seams + commands.rs, ctrl keys | integrate/m2, in flight |
 | M2-int-b | merge magic+inventory+sound+intro, web save slots + audio worklet | after those units |
