@@ -197,9 +197,12 @@ pub fn refresh_view(state: &mut State, io: &Io) {
 /// tile (0x13a940) plus the frame, plus 0x1800 (`bright`, D1 non-zero) or 0x1000; it goes into
 /// the cell's current draw list on top (0x10e596 mode 2), then A4-0x6578 = 1 and 0x102c90 with
 /// D0 = 1; the draw lists rebuilt (0x10e81e), A4-0x6578 = 1 and 0x102c90 again. The original
-/// shows the flash for as long as its second render takes; the port keeps both windows as
-/// frames played back after the command (the hit flash's way, [`crate::combat::play_effects`]),
-/// the flash for [`crate::combat::present::FLASH_HOLD`] frames.
+/// shows the flash for as long as its second render takes; the port records both windows as
+/// frames (the hit flash's way), the flash for [`crate::combat::present::FLASH_HOLD`] frames.
+/// The caller plays them ([`crate::combat::play_effects`]) where the original draws, before
+/// anything else is drawn or awaited: the async callers right after the call (the spells
+/// wrapper `magic::spells::flash_actor`, Ready / Unready, Pickpocket, Drop), the synchronous
+/// ones at the next print or the end of the command.
 pub fn flash_actor(state: &mut State, io: &Io, actor: u16, bright: bool) {
     let a = usize::from(actor);
     let (Some(&status), Some(&at), Some(&tf)) = (

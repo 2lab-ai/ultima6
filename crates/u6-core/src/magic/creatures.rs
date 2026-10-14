@@ -37,7 +37,7 @@ fn flags_of(s: &State, o: u16) -> (i16, u16) {
 /// 0xe0.. loses everything it carries (0x10c1d6). Then the view dissolves in (no message).
 pub async fn slime(state: &RefCell<State>, io: &Io) {
     let caster = super::cast::caster(&state.borrow());
-    seams::flash_actor(&mut state.borrow_mut(), io, caster, 0);
+    super::spells::flash_actor(state, io, caster, 0).await;
     let s = &mut *state.borrow_mut();
     let c = s.map.centre;
     let (cx, cy, z) = (c.x as i16, c.y as i16, u16::from(c.z));
@@ -181,6 +181,8 @@ pub async fn tremor(state: &RefCell<State>, io: &Io) {
         seams::flash_actor(&mut s, io, caster, 0);
         crate::ui::effects::quake(&mut s, io, 0x14, 3);
     }
+    // Both draw before the loop in the original (0x119cd6, 0x119cde): their frames now.
+    super::effects::settle(state, io).await;
     let c = state.borrow().map.centre;
     let (cx, cy, z) = (c.x as i16, c.y as i16, u16::from(c.z));
     for x in cx - 5..=cx + 5 {
@@ -265,7 +267,7 @@ fn flap(s: &mut State, o: Slot) {
 /// The port waits one display frame per redraw (as X-ray does), so each step is shown.
 pub async fn wing_strike(state: &RefCell<State>, io: &Io) {
     let caster = super::cast::caster(&state.borrow());
-    seams::flash_actor(&mut state.borrow_mut(), io, caster, 0);
+    super::spells::flash_actor(state, io, caster, 0).await;
     let rows = seams::a4_bytes(io, -0x6b2c, 6);
     let mut any = false;
     for a in 0..0x100u16 {

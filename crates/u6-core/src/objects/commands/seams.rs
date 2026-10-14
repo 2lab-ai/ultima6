@@ -166,7 +166,8 @@ pub(crate) async fn cannot_drop(state: &std::cell::RefCell<State>, io: &Io, obj:
 }
 
 /// Inventory 0x11236c (putting down readied `obj` held by `owner` ends its magic; 3 when it
-/// did, else 0): [`crate::inventory::release_effect`].
+/// did, else 0): [`crate::inventory::release_effect`]. Its flash is recorded; Drop plays it
+/// with the flight before the panel is redrawn ([`super::drop_object`]).
 pub(crate) fn end_worn_magic(s: &mut State, io: &Io, obj: Slot, owner: Slot) -> i16 {
     crate::inventory::release_effect(s, io, obj, owner)
 }

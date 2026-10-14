@@ -74,7 +74,9 @@ fn set_sparkle(s: &mut State, v: u8) {
 /// does (a container on the map, a broken chain; `weight::holder`), before anything is written.
 /// A torch is taken off its stack and a new single torch is readied. The ring of
 /// invisibility (0x102) makes the actor invisible and 0x51 starts the sparkle, both with the
-/// actor's flash (0x132338). The panel contents are redrawn; the prompt follows in every case.
+/// actor's flash (0x132338) after the panel contents are redrawn; its frames are played before
+/// the prompt, which follows in every case (Ready from the panel runs inside the key read, so
+/// frames left for after the command would show after the next key).
 pub async fn ready(state: &RefCell<State>, io: &Io) {
     let (actor, obj, ty, strength) = {
         let s = state.borrow();
@@ -108,6 +110,7 @@ pub async fn ready(state: &RefCell<State>, io: &Io) {
             _ => {}
         }
     }
+    crate::combat::play_effects(state, io).await;
     prompt(state, io).await;
 }
 
@@ -224,8 +227,9 @@ pub fn equipped_index(s: &State, obj: Slot) -> i16 {
 /// Nothing for the selection 1 (the both-hands marker). The Unready line (0x110c6a) with the
 /// name; the amulet of submission stays readied; a lit torch burns out; otherwise the slot is
 /// cleared, the effects end, a both-hands weapon frees slot 5, and the object goes back to the
-/// inventory (a torch onto the actor's torch stack when it has one). The panel contents are
-/// redrawn and the prompt printed.
+/// inventory (a torch onto the actor's torch stack when it has one). The frames of the effect's
+/// flash (0x11236c) are played (nothing between it and the panel draws), then the panel
+/// contents are redrawn and the prompt printed.
 pub async fn unready(state: &RefCell<State>, io: &Io) {
     let obj = state.borrow().ui.input.selection;
     if obj == 1 {
@@ -264,6 +268,7 @@ pub async fn unready(state: &RefCell<State>, io: &Io) {
             }
         }
     }
+    crate::combat::play_effects(state, io).await;
     panel_contents(state, io, actor).await;
     prompt(state, io).await;
 }

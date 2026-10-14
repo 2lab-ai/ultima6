@@ -199,6 +199,7 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
         return;
     };
     land(&mut state.borrow_mut(), io, o, owner, here, kind, sk, n);
+    crate::combat::play_effects(state, io).await;
     redraw_container(state, io).await;
 }
 
