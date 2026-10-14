@@ -79,6 +79,10 @@ pub fn can_land(s: &mut State, io: &crate::engine::Io, x: i16, y: i16, vessel: S
 /// (worktype 0) and moves to level 14 (out of the world), member 0 leads, the party is placed
 /// at the centre (0x10921a mode 2); a skiff taken out is boarded at once (0x11cd78); the area
 /// song plays. Returns the new vessel object.
+///
+/// As in the original, what is not taken out stays inside actor 0 (0x10c9d2 moves it with its
+/// contents, asm 0x10cbd2..0x10cc88), and the next boarding moves actor 0 with them again
+/// (0x11cfa0): the next vessel boarded carries the skiff kept on landing.
 pub fn leave_vessel(s: &mut State, keep_skiff: bool) -> Slot {
     let v = member(s, usize::from(s.actors.party.size));
     let vi = usize::from(v);
@@ -201,7 +205,11 @@ pub fn board_vessel(s: &mut State, obj: Slot) {
 /// Party mode only (the solo refusal 0x12cd66). Used on the vessel the party is in: it leaves
 /// when the Avatar can step off (0x12f3fa; 0x11d0a4(1), the skiff stays in the hold; a balloon
 /// deflates into its object 0x1a4); a ship that cannot land with a skiff aboard puts the party
-/// into the skiff (0x11d0a4(0), asm 0x12f620); else the land refusal 0x12cd7a. Another vessel:
+/// into the skiff (0x11d0a4(0), asm 0x12f620); else the land refusal 0x12cd7a. The original's
+/// two halves differ and the port keeps both: the test looks for a skiff of quality 0 only
+/// (0x10b18c at 0x12f60c..0x12f61e), the extraction takes the first skiff or raft of any
+/// quality (0x11d118 / 0x11d126), so a raft ahead of the skiff is the one boarded and a raft
+/// alone gets the refusal. Another vessel:
 /// a ship or skiff with a quality needs its deed (a member carrying 0x95 of that quality,
 /// converse 0x11304a; else the line 0x12cd90); next to the leader it is boarded (from a skiff
 /// onto a ship the skiff comes along), else the out-of-range message.
