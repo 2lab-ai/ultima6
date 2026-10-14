@@ -18,7 +18,8 @@
 //! Headless mode never opens a window or reads a clock: it runs N ticks of `HEADLESS_TICK_MS`,
 //! delivering the `--keys` one per tick while the game has no key queued, and writes the last
 //! published 320x200 frame. A `ctrl+<letter>` token is that control character (`ctrl+s` Save,
-//! `ctrl+r` Restore; the window sends them for Ctrl + a letter). A `say:words` token types
+//! `ctrl+r` Restore; the window sends them for Ctrl + a letter); `tab` is the Tab key (with a
+//! cursor up it moves to the inventory panel). A `say:words` token types
 //! `words` and Return into the next line
 //! input, pressing space (one at a time, after the game has idled a few ticks) for every more
 //! prompt or key wait before it. The RNG seed defaults to 0 headless (reproducible) and to the
@@ -96,6 +97,7 @@ fn parse_key(token: &str) -> Result<Key, String> {
         "esc" | "escape" => Key::Escape,
         "space" => Key::Space,
         "backspace" => Key::Backspace,
+        "tab" => Key::Char('\t'),
         _ => {
             let mut chars = token.chars();
             match (chars.next(), chars.next()) {
@@ -490,6 +492,7 @@ mod tests {
             [Key::Char('\u{13}'), Key::Char('\u{12}')].map(Token::Key)
         );
         assert!(args(&["--keys", "ctrl+1"]).is_err());
+        assert_eq!(args(&["--keys", "tab"]).unwrap().keys, [Token::Key(Key::Char('\t'))]);
         assert!(args(&["--seed", "70000"]).is_err());
         assert_eq!(args(&[]).unwrap().frames, 60);
     }
