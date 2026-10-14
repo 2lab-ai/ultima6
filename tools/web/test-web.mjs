@@ -792,10 +792,10 @@ test('the mouse: the Look icon, then Look on the Avatar, then clicks walk; the k
   assert.notEqual(to, from, 'the arrows still walk after the mouse');
 }, { needs: h.haveHfes });
 
-// Holds the left button at game pixel (x, y) for 300 ms and at least five engine ticks (a
-// loaded host draws fewer frames in 300 ms); returns the ticks run during the hold. The ticks
-// run during it: a page whose tick never returns answers no evaluate, a frozen tab, not a slow
-// one; a loop that stopped answers with a count that does not grow.
+// Holds the left button at game pixel (x, y) for 300 ms, longer (up to 30 s) until five engine
+// ticks ran (a loaded host draws fewer frames in 300 ms); returns the ticks run during the
+// hold, which the caller checks. A page whose tick never returns answers no evaluate: that is
+// a frozen tab, not a slow one; a loop that stopped answers with a count that does not grow.
 async function holdOnMap(page, x, y) {
   const ticks = () => Promise.race([
     page.evaluate(() => globalThis.__ticks),
@@ -806,8 +806,7 @@ async function holdOnMap(page, x, y) {
   await page.mouse.down();
   await h.sleep(300);
   let t1 = await ticks();
-  for (const end = Date.now() + 30_000; t1 - t0 < 5; t1 = await ticks()) {
-    if (Date.now() > end) throw new Error(`${t1 - t0} ticks in 30 s of the hold`);
+  for (const end = Date.now() + 30_000; t1 - t0 < 5 && Date.now() < end; t1 = await ticks()) {
     await h.sleep(20);
   }
   await page.mouse.up();
@@ -892,8 +891,9 @@ test('zip: the first press on the canvas is one game click and starts the sound;
   // The page's first press: the Look icon. The game takes it once (Look waits for its target;
   // a second Look while it waits would be the no-target word and bring the prompt back), and
   // the same press starts the AudioContext.
-  await h.click(page, 64, 184, 90);
+  await h.click(page, 64, 184, 0);
   await page.waitForFunction(() => document.body.dataset.audio === 'running', null, { timeout: 15_000 });
+  await h.waitTicks(page, 90); // a second Look through the sound's start would show by now
   assert.equal(await promptNow(page), '0', 'Look still waits for its target: the press came once');
   await page.keyboard.press('Escape'); // no target: the no-target word, the prompt again
   await h.waitPrompt(page);
@@ -908,6 +908,7 @@ test('zip: the first press on the canvas is one game click and starts the sound;
   assert.equal(s.audio, 'running');
   await page.click('#mute');
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'true');
+  await h.waitTicks(page, 30); // a click the game took would have walked by now
   assert.equal((await h.state(page)).leader, to, 'Mute is not a game click');
   await page.click('#mute');
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'false');
