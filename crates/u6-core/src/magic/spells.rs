@@ -17,9 +17,12 @@ const MSG_TOO_OLD: u32 = 0x0011_58ea;
 /// Food object type.
 const FOOD: u16 = 0x81;
 
-/// The caster flash 0x132338 (`mode` 0 on the caster, 1 on a target) through its seam.
+/// The caster flash 0x132338 (`mode` 0 on the caster, 1 on a target) through its seam, then
+/// its frames played: the original draws the flash inside the call, so it is on the screen
+/// before the window flash 0x115b7c or the waits that follow it in the spells.
 pub async fn flash_actor(state: &RefCell<State>, io: &Io, actor: u16, mode: u16) {
     seams::flash_actor(&mut state.borrow_mut(), io, actor, mode);
+    crate::combat::play_effects(state, io).await;
 }
 
 /// Original: 0x115b7c (magic: flash the map window for a spell of circle `circle` < 9)

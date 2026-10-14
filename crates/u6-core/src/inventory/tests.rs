@@ -455,3 +455,83 @@ fn the_holder_is_the_actor_at_the_end_of_the_chain() {
     s.objects.set_parent(inside, -0x7fff);
     assert_eq!(weight::holder(&s, inside), None);
 }
+
+/// The ring of invisibility (0x102) on the ring tile, actor 1 at the view centre, the click
+/// regions of the shipped `game` (map window, command bar, side panel, the screen) and the
+/// inventory panel of member 0 (mode 0x92).
+fn panel_world() -> (State, Slot) {
+    use crate::ui::pointer::{PointerState, PointerTables};
+    let mut s = world();
+    s.tables.basetile.base[0x102] = 0x258;
+    s.ui.pointer = PointerState::from_tables(PointerTables {
+        regions: vec![
+            [8, 8, 167, 167],
+            [8, 176, 167, 191],
+            [168, 8, 311, 103],
+            [0, 0, 319, 199],
+        ],
+        shapes: Vec::new(),
+        walk_cell: (-1, -1),
+        shown: false,
+    });
+    s.ui.panel.member = 0;
+    s.ui.panel.container = 1;
+    s.main.reading = 1;
+    let ring = give(&mut s, 0x102, IN_INVENTORY, 0, 1);
+    (s, ring)
+}
+
+/// A click at (x, y) in the panel (press and release), then the key `a`, read by 0x10790a
+/// (which runs Ready 0xa7 and Unready 0xa8 itself). The frames shown and still recorded when
+/// the key comes back, and the actor's status.
+fn click_then_key(s: State, x: i16, y: i16) -> (u64, usize, u8) {
+    let got = Rc::new(RefCell::new(None));
+    let out = Rc::clone(&got);
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        let k = crate::ui::wait::read_key(&st, &io).await;
+        let s = st.borrow();
+        *out.borrow_mut() = Some((k, s.combat.shown, s.combat.effects.len()));
+    });
+    let ev = |b| InputEvent::Pointer { x, y, buttons: b };
+    e.tick(&[ev(1), ev(0)], 16);
+    e.tick(&[InputEvent::Key(Key::Char('a'))], 16);
+    for _ in 0..60 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    let (k, shown, left) = got.borrow().expect("the key was read");
+    assert_eq!(k, 0x41, "the key after the click");
+    (shown, left, e.state().objects.obj_status[1])
+}
+
+#[test]
+fn a_ring_readied_from_the_panel_flashes_before_the_next_key() {
+    let (mut s, ring) = panel_world();
+    s.inventory.cells[0] = ring;
+    let (shown, left, status) = click_then_key(s, 0xf8 + 8, 0x20 + 8);
+    assert_ne!(status & 2, 0, "Ready made the actor invisible");
+    assert_eq!(
+        (shown, left),
+        (2, 0),
+        "the flash and the window after it are shown, none left for after the command"
+    );
+}
+
+#[test]
+fn a_ring_taken_off_from_the_panel_flashes_before_the_next_key() {
+    let (mut s, ring) = panel_world();
+    s.objects.obj_status[ring as usize] =
+        (s.objects.obj_status[ring as usize] & !WHERE_MASK) | READIED;
+    s.objects.obj_status[1] |= 2;
+    s.inventory.set_equip(3, ring);
+    // Equipment slot 3 (the first ring): x 0xb0..0xc0, y 0x38..0x48.
+    let (shown, left, status) = click_then_key(s, 0xb8, 0x40);
+    assert_eq!(status & 2, 0, "Unready made the actor visible");
+    assert_eq!(
+        (shown, left),
+        (2, 0),
+        "the flash and the window after it are shown, none left for after the command"
+    );
+}

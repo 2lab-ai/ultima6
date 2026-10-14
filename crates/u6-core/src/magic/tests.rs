@@ -551,3 +551,44 @@ fn confuse_and_fear_act_on_the_first_object_of_each_tile() {
     });
     assert_eq!(s.actors.worktype[5], 0x13, "Fear: flee");
 }
+
+#[test]
+fn xray_shows_the_caster_flash_before_its_refreshes() {
+    // 0x119200 calls the flash 0x132338 before it sets A4-0x794c and starts the 100 refreshes:
+    // by the first display frame with every view tile shown, the flash and the window after
+    // it are on the screen, none left for after the command.
+    let s = world();
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        super::spells::xray(&st, &io, 0x49).await;
+    });
+    let mut at_reveal = None;
+    for _ in 0..400 {
+        e.tick(&[], 16);
+        {
+            let s = e.state();
+            if at_reveal.is_none() && s.map.reveal_all == 1 {
+                at_reveal = Some((s.combat.shown, s.combat.effects.len()));
+            }
+        }
+        if e.finished() {
+            break;
+        }
+    }
+    assert!(e.finished());
+    assert_eq!(at_reveal, Some((2, 0)), "(frames shown, frames left)");
+}
+
+#[test]
+fn the_caster_flash_is_shown_before_the_spell_goes_on() {
+    // Locate, Peer and the timed spells of 0x11a586 call the window flash 0x115b7c right after
+    // the caster's 0x132338, and 0x115b7c draws straight to the screen: the caster's flash and
+    // the window after it are on the screen when the flash returns.
+    let got = Rc::new(RefCell::new(None));
+    let out = Rc::clone(&got);
+    run(world(), &[], move |st, io| async move {
+        super::spells::flash_actor(&st, &io, 1, 0).await;
+        let s = st.borrow();
+        *out.borrow_mut() = Some((s.combat.shown, s.combat.effects.len()));
+    });
+    assert_eq!(*got.borrow(), Some((2, 0)), "(frames shown, frames left)");
+}
