@@ -1,0 +1,9 @@
+{
+  "name": "ultima6-oracle",
+  "private": true,
+  "type": "module",
+  "description": "Amiga Ultima VI oracle: vAmigaWeb (AROS) in headless Chromium, scripted input + framebuffer capture",
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}
