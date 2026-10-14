@@ -1,11 +1,15 @@
 // Static shell: loads the wasm engine, feeds it dropped files, keys and time,
 // and paints its RGBA frames. No game bytes are fetched or uploaded. Dropping
-// files runs the intake (zip/HFE/ADF -> game files) and boots the engine.
+// files runs the intake (zip/HFE/ADF -> game files) and boots the engine; the
+// extracted game files are kept in this browser's IndexedDB so a reload starts
+// the game again without a new drop.
 import init, { Game } from './pkg/u6_web.js';
+import { collect, forgetFiles, loadFiles, saveFiles } from './store.js';
 
 const canvas = document.getElementById('screen');
 const drop = document.getElementById('drop');
 const picker = document.getElementById('picker');
+const forget = document.getElementById('forget');
 const statusLine = document.getElementById('status');
 
 const MAX_STEP_MS = 100; // a backgrounded tab must not jump the game ahead
@@ -20,26 +24,9 @@ function isFormControl(target) {
     (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(target.tagName));
 }
 
-function fileOf(entry) {
-  return new Promise((resolve, reject) => entry.file(resolve, reject));
-}
-
-function readBatch(reader) {
-  return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
-}
-
-// Walks a dropped file or folder; paths are relative to the drop.
-async function collect(entry, out) {
-  if (entry.isFile) {
-    out.push({ path: entry.fullPath.replace(/^\//, ''), file: await fileOf(entry) });
-  } else if (entry.isDirectory) {
-    const reader = entry.createReader();
-    for (;;) {
-      const batch = await readBatch(reader);
-      if (batch.length === 0) break;
-      for (const child of batch) await collect(child, out);
-    }
-  }
+// The low word of the clock in seconds, as the original seeds its RNG from time().
+function clockSeed() {
+  return Math.floor(Date.now() / 1000) & 0xffff;
 }
 
 async function main() {
@@ -50,7 +37,7 @@ async function main() {
     setStatus(`The engine failed to load: ${err}`);
     return;
   }
-  const game = new Game();
+  let game = new Game();
   const width = game.width();
   const height = game.height();
   canvas.width = width;
@@ -63,25 +50,49 @@ async function main() {
     ctx.putImageData(new ImageData(pixels, width, height), 0, 0);
   }
 
+  // Boots from `items` ({ path, bytes }); stores the extracted files when `store` is set.
+  async function start(items, store, origin) {
+    if (game.started()) {
+      game.free();
+      game = new Game();
+    }
+    for (const { path, bytes } of items) game.load_file(path, bytes);
+    const n = game.files_loaded();
+    setStatus(`${n} file${n === 1 ? '' : 's'} ${origin}; decoding the disks…`);
+    // Let the status paint before the (synchronous) intake runs.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    let report;
+    try {
+      report = game.start(clockSeed());
+    } catch (err) {
+      setStatus(`Could not start the game:\n${err.message ?? err}`);
+      return;
+    }
+    let kept = '';
+    if (store) {
+      const files = [];
+      for (let i = 0; i < game.extracted_count(); i += 1) {
+        files.push({ path: game.extracted_path(i), bytes: game.extracted_bytes(i) });
+      }
+      kept = (await saveFiles(files))
+        ? ` The ${files.length} game files are kept in this browser for the next visit.`
+        : ' (The files could not be kept in this browser; drop them again next time.)';
+    }
+    game.drop_extracted();
+    setStatus(`${report}\nStarted.${kept} Arrow keys walk; T talks; space passes.`);
+  }
+
   async function load(items) {
+    const read = [];
     try {
       for (const { path, file } of items) {
-        game.load_file(path, new Uint8Array(await file.arrayBuffer()));
+        read.push({ path, bytes: new Uint8Array(await file.arrayBuffer()) });
       }
     } catch (err) {
       setStatus(`Could not read a file: ${err}`);
       return;
     }
-    const n = game.files_loaded();
-    setStatus(`${n} file${n === 1 ? '' : 's'} read; decoding the disks\u2026`);
-    // Let the status paint before the (synchronous) intake runs.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    try {
-      const report = game.start();
-      setStatus(`${report}\nStarted (in memory, this tab only). Arrow keys move the view.`);
-    } catch (err) {
-      setStatus(`Could not start the game:\n${err.message ?? err}`);
-    }
+    await start(read, true, 'read');
   }
 
   // Key handlers only queue events; the engine sees them on the next tick.
@@ -119,6 +130,10 @@ async function main() {
   picker.addEventListener('change', () => {
     load([...picker.files].map((file) => ({ path: file.webkitRelativePath || file.name, file })));
   });
+  forget.addEventListener('click', async () => {
+    await forgetFiles();
+    setStatus('The kept game files were removed from this browser.');
+  });
 
   let last = performance.now();
   let carry = 0;
@@ -136,8 +151,13 @@ async function main() {
   }
 
   draw();
-  setStatus('No files loaded yet.');
   requestAnimationFrame(frame);
+  const kept = await loadFiles();
+  if (kept && kept.length > 0) {
+    await start(kept, false, 'kept from the last visit');
+  } else {
+    setStatus('No files loaded yet.');
+  }
 }
 
 main();

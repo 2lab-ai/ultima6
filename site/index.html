@@ -38,6 +38,8 @@
     #drop.over { border-color: #9ab8ff; background: #141a2a; }
     #drop p { margin: 0 0 12px; }
     input[type="file"] { max-width: 100%; color: inherit; }
+    button { margin-left: 8px; color: inherit; background: #1d2230; border: 1px solid #555a66;
+             border-radius: 4px; padding: 2px 8px; }
     #status { margin: 12px 0 0; min-height: 1.5em; color: #b9c3d6; }
     .hint { color: #9a9aa6; font-size: 0.875rem; }
   </style>
@@ -54,9 +56,12 @@
       </p>
       <label for="picker">Or choose files:</label>
       <input id="picker" type="file" multiple>
+      <button id="forget" type="button">Forget the kept files</button>
       <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
     </section>
-    <p class="hint">Arrow keys walk the party. Your game files stay in your browser and are never uploaded.</p>
+    <p class="hint">Arrow keys walk the party, T then a direction and Return talks, space passes.
+      Your game files stay in your browser (kept in its storage for the next visit) and are
+      never uploaded.</p>
     <noscript><p>This page needs JavaScript and WebAssembly.</p></noscript>
   </main>
   <script type="module" src="./app.js"></script>

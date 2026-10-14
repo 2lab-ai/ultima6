@@ -38,6 +38,8 @@ pub struct Game {
     blank: Framebuffer,
     rgba: Vec<u8>,
     log: Vec<String>,
+    /// The game files the intake extracted at the last start, until the page has stored them.
+    extracted: Vec<(String, Vec<u8>)>,
 }
 
 impl Default for Game {
@@ -57,6 +59,7 @@ impl Game {
             blank: Framebuffer::new(),
             rgba: Vec::new(),
             log: Vec::new(),
+            extracted: Vec::new(),
         };
         game.redraw();
         game
@@ -82,10 +85,47 @@ impl Game {
         self.inputs.len() as u32
     }
 
-    /// Runs the intake over the collected files and boots the engine. Returns the intake
-    /// report, one line per entry; fails with the report plus the boot error.
-    pub fn start(&mut self) -> Result<String, JsError> {
-        self.boot().map_err(|report| JsError::new(&report))
+    /// Runs the intake over the collected files and boots the engine with RNG seed `seed` (the
+    /// original seeds from the clock; the page passes the low word of the time). Returns the
+    /// intake report, one line per entry; fails with the report plus the boot error.
+    pub fn start(&mut self, seed: u16) -> Result<String, JsError> {
+        self.boot(seed).map_err(|report| JsError::new(&report))
+    }
+
+    /// Number of game files the last start extracted (the page stores them so a reload needs
+    /// no new drop; each is a loose file the intake passes through).
+    pub fn extracted_count(&self) -> u32 {
+        self.extracted.len() as u32
+    }
+
+    /// Path of extracted file `i` (`VOLUME/dir/file`).
+    pub fn extracted_path(&self, i: u32) -> String {
+        self.extracted
+            .get(i as usize)
+            .map_or_else(String::new, |(p, _)| p.clone())
+    }
+
+    /// Bytes of extracted file `i` (a copy).
+    pub fn extracted_bytes(&self, i: u32) -> Vec<u8> {
+        self.extracted
+            .get(i as usize)
+            .map_or_else(Vec::new, |(_, b)| b.clone())
+    }
+
+    /// Releases the extracted copies once stored.
+    pub fn drop_extracted(&mut self) {
+        self.extracted = Vec::new();
+    }
+
+    /// Stub points the game reached so far, one `count id` line each (for the console).
+    pub fn stub_report(&self) -> String {
+        self.engine.as_ref().map_or_else(String::new, |e| {
+            e.stub_hits()
+                .iter()
+                .map(|(id, n)| format!("{n} {id}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
     }
 
     pub fn started(&self) -> bool {
@@ -139,11 +179,17 @@ impl Game {
 
 impl Game {
     /// [`Game::start`] without the JS error type (testable off wasm).
-    fn boot(&mut self) -> Result<String, String> {
+    fn boot(&mut self, seed: u16) -> Result<String, String> {
         let r = intake(std::mem::take(&mut self.inputs));
         let mut report = r.report.join("\n");
-        match Engine::new(Files::new(r.files)) {
+        let files = r.files;
+        let copy: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(p, b)| (p.clone(), b.clone()))
+            .collect();
+        match Engine::with_seed(Files::new(files), seed) {
             Ok(engine) => {
+                self.extracted = copy;
                 self.engine = Some(engine);
                 self.pending.clear();
                 self.redraw();
@@ -193,7 +239,7 @@ mod tests {
         let mut game = Game::new();
         game.load_file("notes.txt", b"hello");
         assert_eq!(game.files_loaded(), 1);
-        let report = game.boot().unwrap_err();
+        let report = game.boot(0).unwrap_err();
         assert!(
             report.starts_with("PP20: decrunched 0 file(s); 1 file(s) total"),
             "{report}"
