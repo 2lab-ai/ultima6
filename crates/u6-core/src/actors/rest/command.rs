@@ -8,19 +8,20 @@ use crate::objects::{build_draw_lists, create_from_record, display_name};
 /// Original: 0x127b1a (party: the Rest command: camp checks, hull repair aboard ship, the
 /// hours, the guard, the camp, the meal, the sleep with ambush rolls, the healing)
 ///
-/// Prints "Rest", then refuses in combat, aboard anything but a ship, outside the wilderness,
-/// with foes or others near, in solo mode or without room. Aboard ship the hull is repaired.
-/// Otherwise (nobody on a horse) it asks the hours (`1`..`9`) and, for a party of more than one,
-/// the guard (the cross-hair when the command came with one, else `1`.. picks a member). A
-/// campfire (type 0xfd, frame 1) is lit at the centre and the members walk to their camp places
-/// (20 rounds at most). Mealtime: a bard (0x182) plays (0x188 while the meal lasts); each member
-/// eats while A4-0x77a0 keeps the meal going (four frames per member; nothing in `game` sets it,
-/// so [추정] the music player does, and without music only the first member eats); the first
-/// without food bounds the healing. Everybody but the guard lies down (combat 0x1221da). Each
-/// ten minutes of the hours: the guard's turn (worktype 0x0c), the clock, the view; every step
-/// whose number has bits 0 and 2 clear rolls 1..=64, and a 1 is an ambush (0x12783c): with a
-/// guard "You hear something!" and the party wakes, without one the party stays asleep. The fire
-/// goes out; members take their types back (0x139688) and their movement points (dexterity).
+/// Prints the command's name (0x1272cc), then refuses in combat, aboard anything but a ship,
+/// outside the wilderness, with foes or others near, in solo mode or without room. Aboard ship
+/// the hull is repaired. Otherwise (nobody on a horse) it asks the hours (`1`..`9`) and, for a
+/// party of more than one, the guard (the cross-hair when the command came with one, else a
+/// digit `1`.. below `0` + the party size picks a member, so never the last one). A campfire
+/// (type 0xfd, frame 1) is lit at the centre and the members walk to their camp places (20
+/// rounds at most). Mealtime: a bard (0x182) plays (0x188 while the meal lasts); the meal goes
+/// on while A4-0x77a0 is set (four frames per member), and nothing in `game` sets it, so only
+/// the first member eats; the first without food bounds the healing. Everybody but the guard
+/// lies down (combat 0x1221da). Each ten minutes of the hours: the guard's turn (worktype
+/// 0x0c), the clock, the view; every step whose number has bits 0 and 2 clear rolls 1..=64,
+/// and a 1 is an ambush (0x12783c): with a guard the party hears it (0x127422) and wakes,
+/// without one it stays asleep. The fire goes out; members take their types back (0x139688)
+/// and their movement points (dexterity).
 /// Four hours or more with the rest counter at 0 and no ambush heal every member before the
 /// first hungry one (0x1279d4, announced), the counter becomes 12. The view centre moves to the
 /// leader.
@@ -86,7 +87,8 @@ pub async fn rest(state: &RefCell<State>, io: &Io) {
     wake(state, io, guard, hours, hungry, ambushed, fire).await;
 }
 
-/// "Who will guard?": the guard chosen with the cross-hair or a digit, `NO_GUARD` for none.
+/// The guard question (0x1273aa): the guard chosen with the cross-hair or a digit, `NO_GUARD`
+/// for none.
 async fn choose_guard(state: &RefCell<State>, io: &Io, targeting: u8) -> Slot {
     say(state, io, STR_GUARD, &[]).await;
     state.borrow_mut().ui.input.target_pending = 1;
@@ -99,6 +101,8 @@ async fn choose_guard(state: &RefCell<State>, io: &Io, targeting: u8) -> Slot {
     {
         let mut s = state.borrow_mut();
         let n = s.actors.party.size;
+        // 0x127ce2..0x127cee compares with '0' + size (not '1' + size, as the cross-hair's
+        // digits and the command loop's do): the last member cannot be picked by digit.
         if targeting == 0 && key >= 0x31 && key < u16::from(n) + 0x30 {
             // A4+0x47bb + key: the roster byte of member key - '1'.
             let sel = member(&s, usize::from(key - 0x31));
@@ -187,6 +191,11 @@ fn retype(s: &mut State, from: u16, to: u16) -> Option<usize> {
 
 /// Mealtime: one frame per round while A4-0x77a0 is set (and the first round), member `i / 4`
 /// eating at every fourth; the index of the first member without food, else the party size.
+///
+/// Only the first round runs: the byte's only accesses in `game` are the clears at 0x10ed24
+/// (0x10e81e, an object 0x188 coming into view) and 0x127f10 and the test at 0x127f1a; no
+/// absolute, `lea` or `pea` reference to it exists, and the data hunk starts it at 0. So the
+/// port, like the original, feeds member 0 alone.
 async fn meal(state: &RefCell<State>, io: &Io) -> usize {
     state.borrow_mut().objects.draw.anim_188[0] = 0;
     let mut hungry = None;

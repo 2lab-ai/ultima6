@@ -161,7 +161,7 @@ impl Objects {
 
 /// A block file as the game would read it back: the count, then as many whole records as the
 /// file holds.
-fn parse_lenient(bytes: &[u8]) -> u6_formats::objblk::ObjBlock {
+pub(crate) fn parse_lenient(bytes: &[u8]) -> u6_formats::objblk::ObjBlock {
     let count = bytes
         .get(..2)
         .map_or(0, |w| usize::from(u16::from_be_bytes([w[0], w[1]])));

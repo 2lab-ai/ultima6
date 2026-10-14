@@ -41,6 +41,11 @@ const SHIP_COST: i32 = -0x6a0c;
 const RAFT_COST: i32 = -0x6a04;
 /// Days in a month (the clock wraps after 28).
 const DAYS: usize = 28;
+/// Image address of the first of the four `move.w #kind, D7` of the ambush 0x12783c (code hunk
+/// 14), one per roll 0..=3, each 6 bytes after the last (a `bra.b` follows each).
+const AMBUSH_KINDS: u32 = 0x0012_7868;
+/// The opcode word of `move.w #imm, D7`, checked before each kind is read.
+const MOVE_W_IMM_D7: u16 = 0x3e3c;
 
 /// Tables the actor code reads, as extracted from `game`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -75,6 +80,40 @@ pub struct GameTables {
     pub ship_cost: [u8; 8],
     /// Original: A4-0x6a04 (8 bytes: raft move cost by (heading − current) & 7)
     pub raft_cost: [u8; 8],
+    /// Original: 0x12786a + 6 × k (the object type of the monsters an ambush brings on a roll of
+    /// k: the immediate words of four `move.w #kind, D7` in 0x12783c; empty when not loaded)
+    pub ambush_kinds: Vec<u16>,
+}
+
+fn bad(addr: u32, detail: String) -> FormatError {
+    FormatError::Invalid {
+        what: "game (actor tables)",
+        offset: addr as usize,
+        detail,
+    }
+}
+
+/// The four ambush kinds of 0x12783c: each word must follow a `move.w #imm, D7` and be an
+/// object type (1..=0x3ff), else this is not the `game` the port reads.
+fn ambush_kinds(img: &GameImage) -> Result<Vec<u16>, FormatError> {
+    (0..4u32)
+        .map(|k| {
+            let at = AMBUSH_KINDS + 6 * k;
+            let b = img.bytes(at, 4)?;
+            let op = u16::from_be_bytes([b[0], b[1]]);
+            let kind = u16::from_be_bytes([b[2], b[3]]);
+            if op != MOVE_W_IMM_D7 {
+                return Err(bad(at, format!("opcode {op:#06x}, not move.w #imm, D7")));
+            }
+            if !(1..=0x3ff).contains(&kind) {
+                return Err(bad(
+                    at + 2,
+                    format!("ambush kind {kind:#x} is no object type"),
+                ));
+            }
+            Ok(kind)
+        })
+        .collect()
 }
 
 impl GameTables {
@@ -118,6 +157,7 @@ impl GameTables {
         ship_cost.copy_from_slice(bytes(SHIP_COST, 8)?);
         let mut raft_cost = [0u8; 8];
         raft_cost.copy_from_slice(bytes(RAFT_COST, 8)?);
+        let ambush_kinds = ambush_kinds(&img)?;
         Ok(Self {
             deltas,
             formation,
@@ -130,6 +170,7 @@ impl GameTables {
             moons,
             part_frames,
             ship_sides,
+            ambush_kinds,
         })
     }
 
@@ -174,6 +215,11 @@ impl GameTables {
             .map_or(0, |&b| i16::from(b as i8))
     }
 
+    /// The monster type an ambush brings on a roll of `k` (0..=3); `None` when not loaded.
+    pub fn ambush_kind(&self, k: u16) -> Option<u16> {
+        self.ambush_kinds.get(usize::from(k)).copied()
+    }
+
     /// Moon byte `k` (0 or 1) of `day`; 0 when not loaded.
     pub fn moon(&self, day: u8, k: usize) -> u8 {
         self.moons
@@ -210,5 +256,42 @@ mod tests {
     #[test]
     fn a_non_game_file_is_rejected() {
         assert!(GameTables::from_game(&[0u8; 64]).is_err());
+    }
+
+    /// Code hunk 14 (0x127278, 0x113c bytes) with the four `move.w #kind, D7` of 0x12783c.
+    fn hunk_14(kinds: [u16; 4], op: u16) -> Vec<u8> {
+        let mut code = vec![0u8; 0x113c];
+        for (k, kind) in kinds.into_iter().enumerate() {
+            let at = (AMBUSH_KINDS - 0x0012_7278) as usize + 6 * k;
+            code[at..at + 2].copy_from_slice(&op.to_be_bytes());
+            code[at + 2..at + 4].copy_from_slice(&kind.to_be_bytes());
+        }
+        crate::image::SyntheticGame::new()
+            .place_at(14, 0x0012_7278)
+            .loaded(false, code)
+            .build()
+    }
+
+    #[test]
+    fn ambush_kinds_are_the_immediates_of_0x12783c() {
+        let game = hunk_14([0x101, 0x102, 0x103, 0x104], MOVE_W_IMM_D7);
+        let img = GameImage::parse(&game).unwrap_or_else(|e| panic!("{e}"));
+        let t = GameTables {
+            ambush_kinds: ambush_kinds(&img).unwrap_or_else(|e| panic!("{e}")),
+            ..GameTables::default()
+        };
+        assert_eq!(t.ambush_kind(2), Some(0x103));
+        assert_eq!(t.ambush_kind(4), None);
+        assert_eq!(GameTables::default().ambush_kind(0), None);
+        let game = hunk_14([0x101, 0x102, 0x103, 0x104], 0x3e3d);
+        assert!(
+            ambush_kinds(&GameImage::parse(&game).unwrap()).is_err(),
+            "other code"
+        );
+        let game = hunk_14([0x101, 0x102, 0, 0x104], MOVE_W_IMM_D7);
+        assert!(
+            ambush_kinds(&GameImage::parse(&game).unwrap()).is_err(),
+            "no type"
+        );
     }
 }

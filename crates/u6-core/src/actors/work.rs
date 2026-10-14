@@ -77,7 +77,7 @@ pub struct ActorWork {
     pub force_teleport: u16,
     /// Original: A4-0x6a8c (word: party members may swap places in 0x11b1c0; data hunk 1)
     pub swap_ok: u16,
-    /// Original: A4-0x6a92 (byte: a drunk "Hic!" is pending; set by 0x11d4ee)
+    /// Original: A4-0x6a92 (byte: a drunk's hiccup is pending; set by 0x11d4ee)
     pub hic: u8,
     /// Original: A4+0x184a (byte: path slot being filled)
     pub slot: u8,

@@ -321,3 +321,80 @@ fn boot_objlist_wants_the_bytes_the_game_reads() {
     assert_eq!(boot_objlist(&Files::new(base)).unwrap().len(), OBJLIST_LEN);
     assert!(boot_objlist(&Files::default()).is_err());
 }
+
+/// The three files 0x105350 reads, synthetic: no schedules, base tiles all 0, and `objlist`.
+fn state_files(objlist: Vec<u8>) -> Files {
+    let mut base = BTreeMap::new();
+    base.insert("schedule".to_string(), vec![0; 514]);
+    base.insert("basetile".to_string(), vec![0; 0x800]);
+    base.insert("DATA1/objlist".to_string(), objlist);
+    Files::new(base)
+}
+
+/// Restore (0x1052c8) of `objlist` on an empty state, then `after` on the restored state.
+fn restored(
+    mut s: State,
+    objlist: Vec<u8>,
+    after: impl FnOnce(&mut State) + 'static,
+) -> crate::engine::Engine {
+    s.objects.blocks = ObjBlockId::all().map(|id| (id, block(&[]))).collect();
+    let mut e = crate::engine::Engine::with_game(s, state_files(objlist), |st, io| async move {
+        let mut s = st.borrow_mut();
+        restore(&mut s, &io).expect("the synthetic files parse");
+        after(&mut s);
+    });
+    for _ in 0..20 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    e
+}
+
+#[test]
+fn a_party_size_past_the_roster_is_clamped_and_the_hour_passes() {
+    // 0x112daa refuses a ninth member; a file with 17 must not index past the 16 slots.
+    let mut f = encode(&State::empty());
+    f[0x0FF0] = 17;
+    f[0x0FE0..0x0FF0].copy_from_slice(&[1; 16]);
+    let e = restored(State::empty(), f, |s| crate::actors::clock::tick(s, 60));
+    let s = e.state();
+    assert_eq!(s.actors.party.size, 15, "clamped at the vessel slot");
+    assert_eq!(s.actors.calendar.hour, 1, "an hour on");
+}
+
+#[test]
+fn restore_leaves_the_save_mode_at_play() {
+    // 0x1052c8 sets A4-0x637a = 0x20 before 0x105350, which does not write it.
+    let mut s = State::empty();
+    s.objects.defs.save_mode = 0x52;
+    s.objects.save_mode = 0x47;
+    let e = restored(s, encode(&State::empty()), |_| {});
+    assert_eq!(e.state().objects.save_mode, 0x20);
+}
+
+#[test]
+fn attach_takes_only_the_files_the_game_reads() {
+    let mut base = BTreeMap::new();
+    base.insert("DATA1/schedule".to_string(), b"s".to_vec());
+    let mut store = MemStore::default();
+    for (name, bytes) in [
+        ("SAVEGAME/OBJLIST", &b"saved"[..]),
+        ("savegame/objblkHI", b"HI"),
+        ("savegame/objblkEI", b"EI"),
+        ("savegame/objblkAA.tmp", b"tmp"),
+        ("schedule", b"stray"),
+        ("savegame/notes", b"n"),
+    ] {
+        store.files.insert(name.into(), bytes.to_vec());
+    }
+    let mut files = Files::new(base);
+    assert_eq!(attach(&mut files, &store), Ok(2), "objlist and objblkEI");
+    assert_eq!(files.get("savegame/objlist"), Some(&b"saved"[..]));
+    assert_eq!(files.get("savegame/objblkei"), Some(&b"EI"[..]));
+    assert_eq!(files.get("schedule"), Some(&b"s"[..]), "not overlaid");
+    assert_eq!(files.get("savegame/objblkHI"), None, "no block 71");
+    assert_eq!(files.get("savegame/notes"), None);
+}

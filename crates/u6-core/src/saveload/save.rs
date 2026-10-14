@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 
-use u6_formats::objblk::{OBJ_RECORD_LEN, ObjBlock, ObjRecord};
+use u6_formats::objblk::ObjBlock;
 
 use super::objlist;
 use crate::engine::Io;
@@ -14,25 +14,9 @@ pub(crate) const MODE_PLAY: u16 = 0x20;
 /// Location bits of a member carried by the vehicle the party is aboard (0x10cda8's place).
 const IN_INVENTORY: u8 = 0x10;
 
-/// A block file as the game reads it back (0x10ddd2 / 0x10e10c): the count, then as many whole
-/// records as the file holds.
-fn parse_block(bytes: &[u8]) -> ObjBlock {
-    let count = bytes
-        .get(..2)
-        .map_or(0, |w| usize::from(u16::from_be_bytes([w[0], w[1]])));
-    let objects = bytes
-        .get(2..)
-        .unwrap_or(&[])
-        .chunks_exact(OBJ_RECORD_LEN)
-        .take(count)
-        .map(ObjRecord::from_bytes)
-        .collect();
-    ObjBlock { objects }
-}
-
 /// The rename loop of 0x10e4bc: every block whose `.tmp` file is current (A4-0x78d8) replaces
-/// its block file (0x134b48 deletes `savegame/objblk??`, 0x134b9e renames the `.tmp` over it),
-/// and the flag clears. The block is stamped with the running save generation so the platform
+/// its block file (0x134b48 deletes `savegame/objblk??`, 0x134b9e renames the `.tmp` over it;
+/// read back as 0x10ddd2 / 0x10e10c do, [`crate::objects::parse_lenient`]), and the flag clears. The block is stamped with the running save generation so the platform
 /// stores it ([`super::changed_since`]).
 ///
 /// A flag without a `.tmp` file leaves no block file behind (the delete happens, the rename
@@ -50,7 +34,7 @@ pub fn commit_blocks(s: &mut State) {
                 || ObjBlock {
                     objects: Vec::new(),
                 },
-                parse_block,
+                crate::objects::parse_lenient,
             );
         }
         s.objects.tmp_flag[i] = 0;
@@ -133,7 +117,7 @@ pub fn save(s: &mut State) {
     s.ui.panel.dirty = true;
 }
 
-/// The Save command's handler as the command loop calls it (code 0xaa after the "Save game?"
+/// The Save command's handler as the command loop calls it (code 0xaa after the save question's
 /// answer Y). The save itself does not wait; the warnings a block write may queue (0x10d376)
 /// are printed by the loop's next flush.
 pub async fn save_game(state: &RefCell<State>, _io: &Io) {

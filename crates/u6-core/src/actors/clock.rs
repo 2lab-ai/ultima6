@@ -142,7 +142,7 @@ fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
     // A4 string offsets the original prints (the text is game data in `game`).
     const TORCH_OUT: i32 = -0x756f;
     const VANISHED: i32 = -0x7354;
-    // The two item names the "vanished" line uses (PC-relative strings in hunk 1).
+    // The two item names the vanishing line uses (PC-relative strings in hunk 1).
     const RING_NAME: u32 = 0x101ef6;
     const CLOAK_NAME: u32 = 0x101efc;
     let a = usize::from(actor);
@@ -264,7 +264,7 @@ fn wear_off(s: &mut State, actor: u16, ring: bool) {
     }
 }
 
-/// [combat] 0x1231be (damage / death; "Slime divides!"): the actor loses `damage` hit points.
+/// [combat] 0x1231be (damage / death; a slime splits): the actor loses `damage` hit points.
 pub fn hurt(s: &mut State, actor: u16, damage: u8) {
     crate::combat::damage::hurt(s, actor as i16, i16::from(damage));
 }
@@ -317,7 +317,7 @@ fn hours_pass(s: &mut State, minutes: i16, f: &TickFlags) {
 /// Party casters (types 0x19a, 0x17a, 0x179, 0x182) regain their level in magic points, up to
 /// [`leaves::max_magic`]; each bumps the party-status counter.
 fn regain_magic(s: &mut State) {
-    for i in 0..usize::from(s.actors.party.size) {
+    for i in 0..s.actors.party.count() {
         let actor = u16::from(s.actors.party.members[i]);
         let a = usize::from(actor);
         let t = s.objects.type_frame[a] & 0x3ff;
@@ -392,8 +392,8 @@ fn set_light(s: &mut State, f: &TickFlags) {
     }
 }
 
-/// The date line in the status area: "%2d-%02d-%04d Wind:%2s" with month, day, year and the
-/// wind name (the name table at A4-0x7ae4 is indexed by the signed wind byte).
+/// The date line in the status area (the format at A4-0x7293): month, day, year and the wind
+/// name (the name table at A4-0x7ae4 is indexed by the signed wind byte).
 fn date_line(s: &mut State) {
     const DATE: i32 = -0x7293;
     let c = s.actors.calendar;

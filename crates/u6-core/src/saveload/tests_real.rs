@@ -851,7 +851,7 @@ fn walk_talk_save_restore() {
     assert_ne!(run.leader_at(), walked);
     run.command(Cmd::Restore);
     let restored = run.state();
-    assert_eq!(restored.saveload.epoch, 1);
+    assert_eq!(restored.objects.save_mode, 0x20, "save mode play");
     assert_eq!(run.leader_at(), walked);
     let got = canon(&restored);
     let diffs = objlist_diffs_but_frames(&want.0, &got.0);

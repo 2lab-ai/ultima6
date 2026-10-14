@@ -3,7 +3,7 @@
 //! in the same order. The file the game writes is 0x1C73 bytes (0x134a54 opens it with
 //! MODE_NEWFILE); the shipped `DATA1:objlist` is 0x1D73 and the game reads only its first 0x1C73.
 
-use crate::actors::{Calendar, PARTY_SLOTS};
+use crate::actors::{Calendar, PARTY_SIZE_MAX, PARTY_SLOTS};
 use crate::objects::ACTOR_SLOTS;
 use crate::state::State;
 
@@ -175,7 +175,8 @@ fn get_bytes(dst: &mut [u8], src: &[u8]) {
 
 /// The 25 reads of 0x105350: each table gets the file's bytes. A file shorter than 0x1C73
 /// leaves the tables (or the part of one) past its end as they were, as AmigaDOS `Read`
-/// returns what the file holds; bytes past 0x1C73 are not read.
+/// returns what the file holds; bytes past 0x1C73 are not read. The party size is clamped to
+/// [`PARTY_SIZE_MAX`] (the original reads past its 16-slot roster on a larger one).
 pub fn decode(s: &mut State, file: &[u8]) {
     let mut f = encode(s);
     let n = file.len().min(OBJLIST_LEN);
@@ -202,7 +203,8 @@ pub fn decode(s: &mut State, file: &[u8]) {
         .collect();
     s.saveload.names_raw = f[NAMES..NAMES + PARTY_SLOTS * NAME_LEN].to_vec();
     a.party.members.copy_from_slice(&f[0x0FE0..0x0FF0]);
-    a.party.size = f[0x0FF0];
+    // 0x105350 takes the byte as it is; past 15 the roster loops would leave the 16 slots.
+    a.party.size = f[0x0FF0].min(PARTY_SIZE_MAX);
     get_bytes(&mut at.level, &f[0x0FF1..0x10F1]);
     get_bytes(&mut at.unknown_10f1, &f[0x10F1..0x11F1]);
     get_bytes(&mut a.worktype, &f[0x11F1..0x12F1]);

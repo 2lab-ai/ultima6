@@ -228,7 +228,7 @@ pub fn close_in(s: &mut State, actor: u16) -> i16 {
     let p = s.objects.location[usize::from(actor)];
     let mut best: i16 = -1;
     let mut best_d: i16 = 50;
-    for i in 0..usize::from(s.actors.party.size) {
+    for i in 0..s.actors.party.count() {
         let m = u16::from(s.actors.party.members[i]);
         let mi = usize::from(m);
         if s.objects.type_frame[mi] == 0 || s.actors.attrs.status[mi] & 0x10 != 0 {
@@ -511,7 +511,7 @@ pub async fn npc_turn(state: &RefCell<State>, io: &Io, actor: u16) {
     }
 }
 
-/// Original: 0x11fd20 (actors: a guard arrests the party: "Wilt thou come quietly?")
+/// Original: 0x11fd20 (actors: a guard arrests the party: will it come quietly (A4-0x7503))
 ///
 /// Only once the flag bit 7 of actor 5's talk flags is set; otherwise the guard just goes back
 /// to its schedule (0x81). Waits for Y or N. Yes: the party is knocked out, taken to the jail
