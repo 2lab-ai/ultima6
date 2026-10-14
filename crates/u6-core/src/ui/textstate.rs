@@ -45,10 +45,6 @@ pub struct TextState {
     pub drawn: bool,
     /// Original: A4-0x7a50 (`@` keywords get the alert colour)
     pub keyword_colour: bool,
-    /// Original: A4-0x3006 (word variables printed by `#n`; written by converse 0x11404c)
-    pub vars: [u16; VARS],
-    /// Original: A4-0x2fbe (string pointers printed by `$n`; written by converse)
-    pub strings: Vec<Vec<u8>>,
     /// Port-side: the characters of the current scroll line drawn so far (for the transcript).
     pub transcript_line: Vec<u8>,
 }
@@ -72,8 +68,6 @@ impl Default for TextState {
             more_rows: 0,
             drawn: false,
             keyword_colour: false,
-            vars: [0; VARS],
-            strings: vec![Vec::new(); VARS],
             transcript_line: Vec::new(),
         }
     }

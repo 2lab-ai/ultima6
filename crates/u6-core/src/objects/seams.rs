@@ -1,43 +1,37 @@
-//! Calls from object code into modules that are not ported yet (WU-P3 seams).
-//!
-//! Each seam is the narrowest signature the object code needs, with a stub contract: what the
-//! original routine does at that call, the fallback the port uses meanwhile, and whether a
-//! milestone-1 path reaches it. The dispatcher points each at the owning module at merge.
+//! Calls from object code into other modules (WU-P3 seams), forwarding to their owners since
+//! the integration (WU-P7). The one target outside milestone 1 keeps its `todo_stub!`.
 
 use crate::state::State;
 use crate::todo_stub;
 
-/// Owner: main / ui (the command loop 0x1041d8 keeps the code at A4-0x7a30).
-///
-/// Contract: the code of the command being executed (0x92 while a party member's inventory is
-/// open for a command, 0x90 / 0x91 for attack modes). Fallback 0 = no command, so "an object
-/// the selected member carries changed" is never flagged. Reached by every object move.
-pub(crate) fn command_code(_s: &State) -> u16 {
-    todo_stub!("0x1041d8 current command code (A4-0x7a30)", 0)
+/// The panel mode A4-0x7a30 (0x92 while a party member's inventory is open for a command,
+/// 0x90 / 0x91 the stats / roster panels; ui owns it, `ui.panel.mode`).
+pub(crate) fn command_code(s: &State) -> u16 {
+    s.ui.panel.mode
 }
 
-/// Owner: main / ui (A4-0x7a3e, index into the party of the member a command acts for).
-///
-/// Contract: read only while the command code is 0x92. Fallback 0 (the leader slot).
-pub(crate) fn command_member(_s: &State) -> u16 {
-    todo_stub!("0x1041d8 command party member (A4-0x7a3e)", 0)
+/// The party index the panel shows (A4-0x7a3e, `ui.panel.member`).
+pub(crate) fn command_member(s: &State) -> u16 {
+    s.ui.panel.member as u16
 }
 
-/// Owner: ui. Original: 0x108658 (printf to the message scroll).
-///
-/// Contract: prints the game string at image address `fmt` (format directives filled from
-/// `args`) to the message scroll. Fallback: nothing printed; the caller continues. Reached
-/// only on error and effect paths (too many objects in a region, traps, blown doors).
-pub(crate) fn print(_s: &mut State, _fmt: u32, _args: &[i32]) {
-    todo_stub!("0x108658 printf to the message scroll", ())
+/// Printf 0x108658 of the game string at image address `fmt` with word arguments, queued for
+/// the command loop to print (object code is synchronous; ui printf may wait on a more prompt).
+pub(crate) fn print(s: &mut State, fmt: u32, args: &[i32]) {
+    let text = crate::engine::with_current_io(|io| crate::main_loop::game_string(io, fmt));
+    let args = args
+        .iter()
+        .map(|&a| crate::main_loop::PrintArg::Word(a as u16))
+        .collect();
+    crate::main_loop::queue_print(s, text.unwrap_or_default(), args);
 }
 
-/// Owner: main. Original: 0x1032b6 via 0x10f03c (after an actor moved while the view is live).
-///
-/// Contract: per-actor follow-up of a move (party status effects of the new tile). Fallback:
-/// nothing. Reached by every actor move after load (flag A4-0x784e set).
-pub(crate) fn after_actor_moved(_s: &mut State, _actor: i16) {
-    todo_stub!("0x1032b6 per-actor step after a move", ())
+/// Main 0x1032b6 via 0x10f03c (after an actor moved while the view is live): the hazard of the
+/// actor's new tile.
+pub(crate) fn after_actor_moved(s: &mut State, actor: i16) {
+    if actor >= 0 {
+        crate::main_loop::actor_status_tick(s, actor as u16);
+    }
 }
 
 /// Owner: ui. Original: 0x110f96 (equipment slot an object is readied in: 1 = one hand, 2 =
@@ -49,26 +43,34 @@ pub(crate) fn ready_slot(_s: &State, _obj: i16) -> i16 {
     todo_stub!("0x110f96 ready slot of an object", 0)
 }
 
-/// Owner: map / ui (A4-0x7b71, byte: dark cells show tiles with flags3 bit 0 — a "see
-/// through" mode). Fallback false. Read by every draw-list build.
-pub(crate) fn see_through(_s: &State) -> bool {
-    todo_stub!("0x10e596 see-through flag (A4-0x7b71)", false)
+/// A4-0x7b71 (byte 0x13 of the objlist block at A4-0x7b84): dark cells show tiles with flags3
+/// bit 0 (a "see through" mode).
+pub(crate) fn see_through(s: &State) -> bool {
+    s.actors.objlist_tail.get(0x13).is_some_and(|&b| b != 0)
 }
 
-/// Owner: map (A4-0x794c, word: skip the view-flag / light pass of 0x10e81e). Fallback 0, so the
-/// pass runs on the fallbacks below (everything visible, no light overlay).
-pub(crate) fn view_pass_off(_s: &State) -> u16 {
-    todo_stub!("0x10e81e view pass switch (A4-0x794c)", 0)
+/// A4-0x794c (word: skip the view-flag / light pass of 0x10e81e; `map.reveal_all`).
+pub(crate) fn view_pass_off(s: &State) -> u16 {
+    s.map.reveal_all
 }
 
-/// Owner: map. Original: A4+0x514a (40 × 40 bytes of view flags from 0x109e74, bit 7 = lit /
-/// visible) at window (col, row). Fallback 0x80 (visible), so no cell loses its objects.
-pub(crate) fn view_flag(_s: &State, _col: i16, _row: i16) -> u8 {
-    todo_stub!("0x109e74 view flag at a window tile (A4+0x514a)", 0x80)
+/// A4+0x514a (40 × 40 bytes of view flags from 0x109e74, bit 7 = lit / visible) at window
+/// (col, row); 0 outside the grid.
+pub(crate) fn view_flag(s: &State, col: i16, row: i16) -> u8 {
+    grid_byte(&s.map.view_flags, col, row)
 }
 
-/// Owner: map. Original: A4+0x578a (40 × 40 bytes: light level 1..3 draws overlay tile
-/// 0x1bc + level). Fallback 0 (no overlay).
-pub(crate) fn view_light(_s: &State, _col: i16, _row: i16) -> u8 {
-    todo_stub!("0x109e74 light level at a window tile (A4+0x578a)", 0)
+/// A4+0x578a (40 × 40 bytes: light level 1..3 draws overlay tile 0x1bc + level).
+pub(crate) fn view_light(s: &State, col: i16, row: i16) -> u8 {
+    grid_byte(&s.map.light, col, row)
+}
+
+fn grid_byte(grid: &[u8], col: i16, row: i16) -> u8 {
+    let side = crate::map::WINDOW as i16;
+    if !(0..side).contains(&col) || !(0..side).contains(&row) {
+        return 0;
+    }
+    grid.get(crate::map::cell(col as usize, row as usize))
+        .copied()
+        .unwrap_or(0)
 }

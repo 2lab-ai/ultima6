@@ -6,12 +6,14 @@
 //! the other modules call are in [`main_hunk`].
 //!
 //! Character check: main tests A4-0x7b03 (byte 0x81 of the objlist block at A4-0x7b84, objlist
-//! 0x1C72) and, when it is 0, prints "You must first create or transfer a character.", waits for
-//! a key and exits. The shipped `DATA1:objlist` holds 0 there: character creation is not in
-//! `game` (it writes the save the other executables leave; game-layout.md). The port starts the
-//! game from the shipped disk state instead, like Nuvie's new-game path (the roster, stats and
-//! position as the disk has them), and records the check as a stub point
-//! ("0x1351d8 character creation").
+//! 0x1C72, the Avatar's portrait, 1-based) and, when it is 0, prints "You must first create or
+//! transfer a character.", waits for a key and exits. The shipped `DATA1:objlist` holds 0 there:
+//! character creation is not in `game`. The port starts from the shipped disk state the way
+//! Nuvie's new-game path does (formats.md §7: it patches name, stats, gender and the portrait
+//! byte from the creation answers): without answers, the disk's name and stats stay and the
+//! portrait byte becomes 1 (`gender·6 + portrait + 1` with both 0). The check is a stub point
+//! ("0x1351d8 character creation"). The rest of the disk state is played as it is, combat-mode
+//! byte included (A4-0x7b0c = 1 in the shipped objlist, so main calls 0x121c64, a stub).
 //!
 //! Synchronous game code that prints (actors, map, objects call printf 0x108658, which waits on
 //! a more prompt in the port's async ui) queues its lines in [`MainState::pending_print`]; the
@@ -61,14 +63,23 @@ pub enum PrintArg {
     Str(Vec<u8>),
 }
 
+/// One queued text-layer call of synchronous code, in call order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// printf 0x108658 of a format with its arguments.
+    Print(Vec<u8>, Vec<PrintArg>),
+    /// 0x107dd8: make a window current.
+    Window(crate::ui::WindowId),
+    /// 0x107e00: move the current window's cursor to (col, row).
+    Cursor(i16, i16),
+}
+
 /// Globals of the main hunk the command loop and boot own (the rest of the loop's globals live
 /// with the module that reads them most: `ui.input`, `ui.panel`, `actors.work`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MainState {
-    /// Port-only: `printf` calls queued by synchronous code, flushed in order by the loop.
-    pub pending_print: Vec<(Vec<u8>, Vec<PrintArg>)>,
-    /// Original: A4-0x7a50 (word: help mode, toggled by control-H)
-    pub help: u16,
+    /// Port-only: text-layer calls queued by synchronous code, flushed in order by the loop.
+    pub pending_print: Vec<Pending>,
     /// Original: A4-0x7b5c (word: sound on; control-Z toggles it, the port plays no sound)
     pub sound: u16,
     /// Original: A4-0x7a2c (word: 1 while the loop waits for a command key outside a target)
@@ -84,10 +95,10 @@ pub struct MainState {
 
 /// Queues a `printf` of `fmt` for the loop to print (synchronous callers).
 pub fn queue_print(s: &mut State, fmt: Vec<u8>, args: Vec<PrintArg>) {
-    s.main.pending_print.push((fmt, args));
+    s.main.pending_print.push(Pending::Print(fmt, args));
 }
 
-/// Prints the queued lines through 0x108658, oldest first.
+/// Runs the queued text-layer calls (0x108658, 0x107dd8, 0x107e00), oldest first.
 pub async fn flush_prints(state: &RefCell<State>, io: &Io) {
     loop {
         let next = {
@@ -95,15 +106,23 @@ pub async fn flush_prints(state: &RefCell<State>, io: &Io) {
             let q = &mut s.main.pending_print;
             (!q.is_empty()).then(|| q.remove(0))
         };
-        let Some((fmt, args)) = next else { return };
-        let args: Vec<Arg<'_>> = args
-            .iter()
-            .map(|a| match a {
-                PrintArg::Word(w) => Arg::Word(*w),
-                PrintArg::Str(s) => Arg::Str(s),
-            })
-            .collect();
-        printf(state, io, &fmt, &args).await;
+        match next {
+            None => return,
+            Some(Pending::Window(id)) => crate::ui::panels::select_window(state, io, id).await,
+            Some(Pending::Cursor(col, row)) => {
+                crate::ui::panels::set_cursor(state, io, col, row).await
+            }
+            Some(Pending::Print(fmt, args)) => {
+                let args: Vec<Arg<'_>> = args
+                    .iter()
+                    .map(|a| match a {
+                        PrintArg::Word(w) => Arg::Word(*w),
+                        PrintArg::Str(s) => Arg::Str(s),
+                    })
+                    .collect();
+                printf(state, io, &fmt, &args).await;
+            }
+        }
     }
 }
 
@@ -183,6 +202,7 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
         // Contract: the original prints MSG_CREATE_CHARACTER, waits for a key and exits; the
         // character is made by another program. Fallback: play the shipped disk state.
         let exit = todo_stub!("0x1351d8 character creation (another executable)", false);
+        state.borrow_mut().actors.objlist_tail[TAIL_CREATED] = 1;
         if exit {
             let msg = game_string(io, MSG_CREATE_CHARACTER);
             printf(state, io, &msg, &[]).await;

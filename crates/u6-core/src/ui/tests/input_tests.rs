@@ -59,16 +59,16 @@ fn bridge_finds_characters_in_the_game_table() {
 fn read_one(s: State, keys: &[Key]) -> Engine {
     run(s, keys, 8, |st, io| async move {
         let k = wait::read_key(&st, &io).await;
-        st.borrow_mut().ui.text.vars[0] = k;
+        st.borrow_mut().converse.ints[0] = k;
     })
 }
 
 #[test]
 fn key_read_upcases_letters_and_maps_arrows_to_walk() {
     let e = read_one(state(), &[Key::Char('a')]);
-    assert_eq!(e.state().ui.text.vars[0], u16::from(b'A'));
+    assert_eq!(e.state().converse.ints[0], u16::from(b'A'));
     let e = read_one(state(), &[Key::Right]);
-    assert_eq!(e.state().ui.text.vars[0], wait::WALK);
+    assert_eq!(e.state().converse.ints[0], wait::WALK);
     assert_eq!(e.state().ui.input.direction, 2);
     // Without a key the read keeps waiting (and yields every tick).
     let e = read_one(state(), &[]);
@@ -101,7 +101,7 @@ fn panel_keys_are_handled_inside_the_key_read() {
     let e = read_one(s, &[Key::Char('/'), Key::Char('-')]);
     assert!(e.finished());
     assert_eq!(e.state().ui.panel.mode, 0x91);
-    assert_eq!(e.state().ui.text.vars[0], u16::from(b'-'));
+    assert_eq!(e.state().converse.ints[0], u16::from(b'-'));
 }
 
 #[test]
@@ -122,7 +122,7 @@ fn cross_hair_moves_within_range_and_the_command_letter_confirms() {
     s.ui.tables.keymap[0x14] = [0x74, 0x54, 0x14, 0x84];
     let e = read_one(s.clone(), &[Key::Right, Key::Up, Key::Char('t')]);
     let st = e.state();
-    assert_eq!(st.ui.text.vars[0], wait::REPEAT, "T confirms like Return");
+    assert_eq!(st.converse.ints[0], wait::REPEAT, "T confirms like Return");
     assert_eq!(st.ui.input.targeting, 0);
     assert_eq!(st.ui.input.pointer, (6 * 16, 4 * 16));
     // Window cell (6, 4) around the centre (100, 200) is map (101, 199).
@@ -133,7 +133,7 @@ fn cross_hair_moves_within_range_and_the_command_letter_confirms() {
     s.ui.input.range = -1;
     let e = read_one(s, &[Key::Up]);
     let st = e.state();
-    assert_eq!(st.ui.text.vars[0], wait::REPEAT);
+    assert_eq!(st.converse.ints[0], wait::REPEAT);
     assert_eq!(st.ui.input.target, (100, 199));
 }
 
@@ -150,15 +150,15 @@ fn escape_drops_the_cross_hair_and_keeps_waiting() {
     assert_eq!(e.state().ui.input.targeting, 0);
 }
 
-/// Runs the line editor for at most `max` characters; the result goes to `strings[0]` and the
-/// count to `vars[0]` (as a word).
+/// Runs the line editor for at most `max` characters; the result goes to the converse buffer 0
+/// and the count to word variable 0 (test scratch).
 fn edit(keys: &[Key], max: i16) -> Engine {
     run(state(), keys, 12, move |st, io| async move {
         let (n, line) = keyread::read_line(&st, &io, max).await;
         io.present();
         let mut s = st.borrow_mut();
-        s.ui.text.vars[0] = n as u16;
-        s.ui.text.strings[0] = line;
+        s.converse.ints[0] = n as u16;
+        s.converse.buffers[0] = line;
     })
 }
 
@@ -167,15 +167,15 @@ fn line_editor_echoes_backspaces_and_ends_on_return_or_escape() {
     let (a, s, bs, ret) = (Key::Char('a'), Key::Char('s'), Key::Backspace, Key::Enter);
     let e = edit(&[a, s, bs, a, ret], 8);
     assert!(e.finished());
-    assert_eq!(e.state().ui.text.strings[0], b"aa");
-    assert_eq!(e.state().ui.text.vars[0], 2);
+    assert_eq!(e.state().converse.buffers[0], b"aa");
+    assert_eq!(e.state().converse.ints[0], 2);
     assert_eq!(scroll_row(&e, 14).trim_end(), "aa", "echoed, the s erased");
     // At most `max` characters are taken.
     let e = edit(&[a, a, a, ret], 2);
-    assert_eq!(e.state().ui.text.strings[0], b"aa");
+    assert_eq!(e.state().converse.buffers[0], b"aa");
     // Escape erases the echo and gives -1.
     let e = edit(&[a, s, Key::Escape], 8);
-    assert_eq!(e.state().ui.text.vars[0], 0xffff);
+    assert_eq!(e.state().converse.ints[0], 0xffff);
     assert!(e.state().ui.input.line_cancelled);
     assert_eq!(scroll_row(&e, 14).trim_end(), "");
     let st = e.state();

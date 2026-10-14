@@ -1,25 +1,19 @@
 //! Calls from `map/` into routines other units own, with the narrowest signature `map/` needs.
 //!
-//! Each stub states its contract (arguments, result, side effects of the real routine), the
-//! fallback and whether a milestone-1 boot reaches it. The dispatcher replaces the bodies with
-//! the owners' functions at merge; the signatures are the request.
+//! Since the integration (WU-P7) each forwards to its owner; the targets outside milestone 1
+//! (eggs, combat, music, magic, the hunk-12 place names) keep a `todo_stub!` with the contract
+//! and the fallback.
 
 use u6_formats::position::Position;
 
-use crate::objects::{ACTOR_SLOTS, OBJECT_SLOTS, ObjectId};
+use crate::objects::{OBJECT_SLOTS, ObjectId};
 use crate::state::State;
 use crate::todo_stub;
 
-/// Status byte of object `id` (A4+0x190c, byte per object: 0x18 = not on the map, 0x20 = temporary,
-/// 0x40 = egg active, ...). `objects/` holds it for the 256 actor slots so far; other slots read 0
-/// until it covers all slots.
+/// Status byte of object `id` (A4+0x190c, byte per object slot: 0x18 = not on the map, 0x20 =
+/// temporary, 0x40 = egg active, ...).
 pub(crate) fn object_status(state: &State, id: ObjectId) -> u8 {
-    state
-        .objects
-        .actor_flags
-        .get(id.index())
-        .copied()
-        .unwrap_or(0)
+    state.objects.status(id.slot())
 }
 
 /// Ambient light (A4-0x7b79, signed byte; 0x105350 loads it with the objlist block at A4-0x7b84,
@@ -29,97 +23,77 @@ pub(crate) fn ambient_light(state: &State) -> i8 {
     state.actors.objlist_tail.get(0x0b).map_or(0, |&b| b as i8)
 }
 
-/// Objects in the rectangle x0..=x1, y0..=y1 on level `z`, in iteration order (owner `objects/`:
-/// 0x10b05a begins the walk, x0 / y0 clamped at 0, at the leader's level; 0x10af74 yields the
-/// next object of the region list on the map (status & 0x18 = 0) whose masked x, y and z match).
-/// Reached by every view update (0x109e74) and window rebuild (0x1321dc).
-///
-/// Fallback: the same filter over the object slots in index order, skipping empty slots. Until
-/// 0x10e1ce places the region's object blocks into slots, that finds actors only; the view then
-/// marks no doors, windows or lights carried by objects. The caller takes a snapshot; the
-/// original walks lazily, so an object the walk's own callee adds may or may not be visited.
+/// Objects in the rectangle x0..=x1, y0..=y1 on level `z`, in iteration order (objects 0x10b05a
+/// begins the walk at the leader's level, 0x10af74 yields the next object on the map whose
+/// masked x, y and z match). The caller takes a snapshot; the original walks lazily.
 pub(crate) fn objects_in_rect(
-    state: &State,
+    state: &mut State,
     x0: i16,
     y0: i16,
     x1: i16,
     y1: i16,
     z: u16,
 ) -> Vec<ObjectId> {
-    let (x0, y0) = (x0.max(0), y0.max(0));
-    let mask = state.map.world_mask;
-    let scan = || {
-        (0..OBJECT_SLOTS as u16)
-            .map(ObjectId)
-            .filter(|&id| {
-                let Some(p) = state.objects.location(id) else {
-                    return false;
-                };
-                let (x, y) = ((p.x & mask) as i16, (p.y & mask) as i16);
-                state.objects.type_frame[id.index()] != 0
-                    && object_status(state, id) & 0x18 == 0
-                    && (x0..=x1).contains(&x)
-                    && (y0..=y1).contains(&y)
-                    && u16::from(p.z) == z
-            })
-            .collect()
-    };
-    todo_stub!("0x10b05a objects in a rectangle (0x10af74 walk)", scan())
-}
-
-/// Rebuild the window object grid A4+0x67c (40 × 40 words: first object on each window cell, -1
-/// = none) from the region list (owner `objects/`, 0x10dea4). Reached by every window rebuild.
-/// Fallback: the grid is not kept.
-pub(crate) fn rebuild_object_grid(_state: &mut State) {
-    todo_stub!("0x10dea4 rebuild the window object grid", ())
-}
-
-/// Object in window cell (wx, wy) of the grid A4+0x67c, -1 = none (owner `objects/`, built by
-/// 0x10dea4). Read by 0x108d10 for each actor in the window. Fallback: -1, so every such actor
-/// is offered to [`move_object`].
-pub(crate) fn object_grid_cell(_state: &State, _wx: usize, _wy: usize) -> i16 {
-    todo_stub!("0x10dea4 window object grid cell (A4+0x67c)", -1)
-}
-
-/// Move object `id` to (x, y, z), updating the region list, the object grid and the "view
-/// changed" flag (owner `objects/`, 0x10c9d2). 0x108d10 re-places actors at their own location;
-/// the party moves put members on the centre or park them at z = 15. Fallback: only the
-/// location table is written, so the party follows the centre.
-pub(crate) fn move_object(state: &mut State, id: ObjectId, x: u16, y: u16, z: u16) {
-    todo_stub!("0x10c9d2 move an object to a map location", ());
-    if let Some(p) = state.objects.location.get_mut(id.index()) {
-        *p = Position {
-            x: x & 0x3ff,
-            y: y & 0x3ff,
-            z: (z & 0xf) as u8,
-        };
+    let _ = z;
+    let mut out = Vec::new();
+    let mut c = crate::objects::begin_area(state, x0, y0, x1, y1);
+    while let Some(id) = ObjectId::from_slot(c) {
+        out.push(id);
+        c = crate::objects::next_in_area(&mut state.objects);
     }
+    out
+}
+
+/// Window origin and coordinate mask for the objects (A4-0x2ef8 / -0x2ef6 / -0x796c: one copy,
+/// written here as 0x108d10 writes it), then the window object grid A4+0x67c (0x10dea4).
+pub(crate) fn rebuild_object_grid(state: &mut State) {
+    let [ox, oy] = state.map.window_origin;
+    let z = state.map.centre.z;
+    state.objects.set_window(ox, oy, z);
+}
+
+/// Object in window cell (wx, wy) of the grid A4+0x67c, -1 = none (built by 0x10dea4).
+pub(crate) fn object_grid_cell(state: &State, wx: usize, wy: usize) -> i16 {
+    state
+        .objects
+        .grid
+        .get(wy * crate::objects::GRID_SIDE + wx)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Move object `id` to (x, y, z), updating the object list, the grid and the "view changed"
+/// flag (objects 0x10c9d2).
+pub(crate) fn move_object(state: &mut State, id: ObjectId, x: u16, y: u16, z: u16) {
+    crate::objects::move_to(state, id.slot(), x, y, z);
 }
 
 /// Remove temporary objects (status 0x20) farther than 20 tiles from (x, y) or on another level
-/// than `z`, and clear the active bit of such eggs (owner `objects/`, 0x10c49c). Reached by
-/// every window rebuild. Fallback: nothing removed.
-pub(crate) fn drop_far_temporaries(_state: &mut State, _x: u16, _y: u16, _z: u16) {
-    todo_stub!("0x10c49c remove far temporary objects", ())
+/// than `z`, and clear the active bit of such eggs (objects 0x10c49c).
+pub(crate) fn drop_far_temporaries(state: &mut State, x: u16, y: u16, z: u16) {
+    crate::objects::prune_far(state, x, y, z);
 }
 
-/// Show or hide the moongates at the 8 moonstone locations inside the window by the moon phases,
-/// then update the view if one changed (owner `main_loop`, 0x10355c). Reached by every window
-/// rebuild. Fallback: no moongates.
-pub(crate) fn update_moongates(_state: &mut State) {
-    todo_stub!("0x10355c moongates in the window", ())
+/// Show or hide the moongates at the 8 moonstone locations inside the window (main 0x10355c).
+pub(crate) fn update_moongates(state: &mut State) {
+    crate::main_loop::moongates(state);
 }
 
-/// Load the object blocks of the region around (x, y, z) into the object slots (owner `objects/`,
-/// 0x10e1ce). Reached by every region refresh (0x108f90). Fallback: no map objects in slots.
-pub(crate) fn load_region_objects(_state: &mut State, _x: u16, _y: u16, _z: u16) {
-    todo_stub!("0x10e1ce load object blocks for the region", ())
+/// Load the object blocks of the region around (x, y, z) into the object slots (objects
+/// 0x10e1ce).
+pub(crate) fn load_region_objects(state: &mut State, x: u16, y: u16, z: u16) {
+    crate::objects::load_region(state, x, y, z);
 }
 
-/// Build the per-view-cell object draw lists (A4-0x15f0, 11 × 11) for 0x102c90; draws RNG
-/// (owner `objects/`, 0x10e81e). Reached by every view update. Fallback: no objects drawn.
-pub(crate) fn build_view_objects(_state: &mut State) {
-    todo_stub!("0x10e81e build the view object lists", ())
+/// Build the per-view-cell object draw lists for 0x102c90 (objects 0x10e81e; draws RNG). The
+/// view tiles 0x109e74 just wrote are A4-0x1476, which the lists' builder overwrites with flat
+/// object tiles: one array in the original, kept in `objects.draw.base` (sync rule: copied from
+/// `map.view_tiles` right here, the only place 0x109e74 hands it over).
+pub(crate) fn build_view_objects(state: &mut State) {
+    let n = state.objects.draw.base.len().min(state.map.view_tiles.len());
+    let tiles = state.map.view_tiles[..n].to_vec();
+    state.objects.draw.base[..n].copy_from_slice(&tiles);
+    crate::objects::build_draw_lists(state);
 }
 
 /// Offer egg `id` to hatch (owner `objects/`, 0x1319b2: may create monsters). Reached when an
@@ -151,76 +125,52 @@ pub(crate) fn object_quality(state: &State, id: ObjectId) -> u8 {
 }
 
 /// Objects at (x, y, z) in iteration order, each with the stacking word A4-0x78dc the walk
-/// leaves while yielding it (owner `objects/`: 0x10ad1a begins, 0x10aaca steps). Reached on every
-/// player step (0x11d1d4). Fallback: the object slots at that location in index order, word 0.
-pub(crate) fn objects_at(state: &State, x: u16, y: u16, z: u16) -> Vec<(ObjectId, u16)> {
-    let scan = || {
-        (0..OBJECT_SLOTS as u16)
-            .map(ObjectId)
-            .filter(|&id| {
-                let p = state.objects.location(id);
-                state.objects.type_frame[id.index()] != 0
-                    && object_status(state, id) & 0x18 == 0
-                    && p.is_some_and(|p| (p.x, p.y, u16::from(p.z)) == (x, y, z))
-            })
-            .map(|id| (id, 0))
-            .collect()
-    };
-    todo_stub!("0x10ad1a objects at a location (0x10aaca walk)", scan())
+/// leaves while yielding it (objects 0x10ad1a begins, 0x10aaca steps).
+pub(crate) fn objects_at(state: &mut State, x: u16, y: u16, z: u16) -> Vec<(ObjectId, u16)> {
+    let at = Position { x, y, z: z as u8 };
+    crate::objects::objects_at(state, at)
 }
 
-/// First object of type `ty` at (x, y) on the leader's level (owner `objects/`, 0x10ad66).
-/// Fallback: the slot scan of [`objects_at`].
+/// First object of type `ty` at (x, y) on the leader's level (objects 0x10ad66).
 pub(crate) fn find_object_at(state: &State, ty: u16, x: u16, y: u16) -> Option<ObjectId> {
-    let z = u16::from(state.map.centre.z);
-    let found = objects_at(state, x, y, z)
-        .into_iter()
-        .map(|(id, _)| id)
-        .find(|&id| state.objects.obj_type(id) == ty);
-    todo_stub!("0x10ad66 find an object of a type at a location", found)
+    ObjectId::from_slot(crate::objects::object_of_type_at(state, ty, x, y))
 }
 
-/// Remove object `id` from the map (owner `objects/`, 0x10c1d6). Fallback: nothing removed.
-pub(crate) fn remove_object(_state: &mut State, _id: ObjectId) {
-    todo_stub!("0x10c1d6 remove an object from the map", ())
+/// Remove object `id` from the map (objects 0x10c1d6).
+pub(crate) fn remove_object(state: &mut State, id: ObjectId) {
+    crate::objects::remove(state, id.slot());
 }
 
-/// Advance the clock (owner `actors/`, 0x10368a; the argument word is passed in D0: 0 from the
-/// teleports, 0x0a after the midnight moongate, 0x0f per step of the resurrection wait; its
-/// meaning is the owner's). Fallback: the clock stands still, so 0x1095bc's wait for morning
-/// gives up (see [`super::travel::resurrect_party`]).
-pub(crate) fn clock_tick(_state: &mut State, _arg: u16) {
-    todo_stub!("0x10368a advance the clock", ())
+/// Advance the clock (actors 0x10368a; the argument word is passed in D0: 0 from the
+/// teleports, 0x0a after the midnight moongate, 0x0f per step of the resurrection wait).
+pub(crate) fn clock_tick(state: &mut State, arg: u16) {
+    crate::actors::clock::tick(state, arg as i16);
 }
 
-/// UI step after a teleport (owner `ui/`, 0x133b28; draws with the tile blitter). Fallback:
-/// nothing drawn.
-pub(crate) fn ui_after_teleport(_state: &mut State) {
-    todo_stub!("0x133b28 ui step after a teleport", ())
+/// UI step after a teleport (ui 0x133b28, the sky bar), on the polling engine's screen.
+pub(crate) fn ui_after_teleport(state: &mut State) {
+    crate::engine::with_current_io(|io| crate::ui::panels::sky_bar(state, io));
 }
 
-/// Main-loop step after the party is placed (owner `main_loop`, 0x104094). Fallback: nothing.
-pub(crate) fn main_after_placing(_state: &mut State) {
-    todo_stub!("0x104094 main step after placing the party", ())
+/// Main-loop step after the party is placed (main 0x104094: back to party mode).
+pub(crate) fn main_after_placing(state: &mut State) {
+    crate::engine::with_current_io(|io| crate::main_loop::end_solo(state, io));
 }
 
-/// Post-step refresh: rebuild the view if dirty and redraw (owner `gfx/`, 0x102ef0). The party
-/// moves call it between the object lists (0x10e81e) and the next step, so each step is drawn.
-/// Fallback: nothing drawn.
-pub(crate) fn refresh_view(_state: &mut State) {
-    todo_stub!("0x102ef0 post-step view refresh", ())
+/// Post-step refresh: rebuild the view if dirty and redraw (gfx 0x102ef0), on the polling
+/// engine's screen; the party moves call it between steps, so each step is drawn.
+pub(crate) fn refresh_view(state: &mut State) {
+    crate::engine::with_current_io(|io| crate::gfx::refresh_view(state, io));
 }
 
-/// Party member `id` follows the leader once (owner `actors/` party code, 0x11c910; D1 = 1 from
-/// 0x10921a). Fallback: the member stays where 0x10921a put it (on the leader's tile).
-pub(crate) fn party_follow(_state: &mut State, _id: ObjectId) {
-    todo_stub!("0x11c910 party member follows the leader", ())
+/// Party member `id` follows the leader once (actors 0x11c910; D1 = 1 from 0x10921a).
+pub(crate) fn party_follow(state: &mut State, id: ObjectId) {
+    crate::actors::party::follow(state, id.0, true);
 }
 
-/// Step actor `id` toward (x, y); nonzero when it moved (owner `actors/`, 0x11f452; draws RNG).
-/// Fallback: 0 (did not move).
-pub(crate) fn step_toward(_state: &mut State, _id: ObjectId, _x: u16, _y: u16) -> i16 {
-    todo_stub!("0x11f452 step an actor toward a location", 0)
+/// Step actor `id` toward (x, y); nonzero when it moved (actors 0x11f452; draws RNG).
+pub(crate) fn step_toward(state: &mut State, id: ObjectId, x: u16, y: u16) -> i16 {
+    i16::from(crate::actors::npc::approach(state, id.0, x, y))
 }
 
 /// Distance from actor `id` to (x, y) (owner: combat leaf 0x121b08, an M1 stub point; uses
@@ -229,10 +179,9 @@ pub(crate) fn distance(_state: &State, _id: ObjectId, _x: u16, _y: u16) -> i16 {
     todo_stub!("0x121b08 distance from an actor to a location", 0)
 }
 
-/// Walk actor `id` one step in direction `dir` (0, 2, 4, 6) with flag 1 (owner `actors/`,
-/// 0x11f0a0). Fallback: no step.
-pub(crate) fn walk(_state: &mut State, _id: ObjectId, _dir: u16) {
-    todo_stub!("0x11f0a0 walk an actor one step", ())
+/// Walk actor `id` one step in direction `dir` (0, 2, 4, 6) with flag 1 (actors 0x11f0a0).
+pub(crate) fn walk(state: &mut State, id: ObjectId, dir: u16) {
+    crate::actors::walk::step(state, id.0, dir, 1);
 }
 
 /// The routine 0x108fba runs for a party member whose type is 0x1af before leaving (owner
@@ -257,37 +206,49 @@ pub(crate) fn play_song(_state: &mut State, _n: u16) {
     todo_stub!("0x110878 play a song", ())
 }
 
-/// Print the place a dungeon entrance of quality `q` (1..=20) leads to, as Shamino's line
-/// (owner `ui/`: printf 0x108658 of the string at A4-0x7303, then 0x11b8f8 "dungeon " for
-/// q < 8 or 0x11b902 "shrine of " for q 9..=11, then the name the pointer table A4-0x6a60 + 4q
-/// points at (strings in hunk 12), then 0x11b90e; all to be read from the user's `game`).
-/// Fallback: no message.
-pub(crate) fn say_place_name(_state: &mut State, _q: u8) {
-    todo_stub!("0x108658 print Shamino's place name (strings in game)", ())
+/// Shamino names the place a dungeon entrance of quality `q` (1..=20) leads to (0x11d1d4):
+/// printf of the string at A4-0x7303, then "dungeon " (0x11b8f8) for q < 8 or "shrine of "
+/// (0x11b902) for q 9..=11, then the name the pointer table A4-0x6a60 + 4q points at, then the
+/// string at 0x11b90e; all read from the user's `game`, queued for the loop to print.
+pub(crate) fn say_place_name(state: &mut State, q: u8) {
+    use crate::image::A4;
+    use crate::main_loop::{game_string, pointed_string, queue_print};
+    let lines = crate::engine::with_current_io(|io| {
+        let mut lines = vec![crate::main_loop::a4_string(io, 0x7303)];
+        if q < 8 {
+            lines.push(game_string(io, 0x0011_b8f8));
+        } else if (9..=11).contains(&q) {
+            lines.push(game_string(io, 0x0011_b902));
+        }
+        lines.push(pointed_string(io, A4.wrapping_sub(0x6a60) + 4 * u32::from(q)));
+        lines.push(game_string(io, 0x0011_b90e));
+        lines
+    });
+    for line in lines.unwrap_or_default() {
+        queue_print(state, line, Vec::new());
+    }
 }
 
-/// Print A4-0x72cf, "You must be in party mode to enter." (owner `ui/`, printf 0x108658; the
-/// string has to be read from the user's `game`). Fallback: no message.
-pub(crate) fn say_party_mode_needed(_state: &mut State) {
-    todo_stub!("0x108658 print the party-mode message (string in game)", ())
+/// Print A4-0x72cf, "You must be in party mode to enter." (printf 0x108658 of the string in
+/// the user's `game`, queued for the loop to print).
+pub(crate) fn say_party_mode_needed(state: &mut State) {
+    let line = crate::engine::with_current_io(|io| crate::main_loop::a4_string(io, 0x72cf));
+    crate::main_loop::queue_print(state, line.unwrap_or_default(), Vec::new());
 }
 
-/// Maximum hit points of actor `id` (combat leaf 0x122144, ported with the actor model).
-/// Fallback: the current hit points.
+/// Maximum hit points of actor `id` (hunk-13 leaf 0x122144, ported with the actor model).
 pub(crate) fn max_hp(state: &State, id: ObjectId) -> u8 {
-    let hp = state.actors.attrs.hp.get(id.index()).copied().unwrap_or(0);
-    todo_stub!("0x122144 maximum hit points", hp)
+    crate::actors::leaves::max_hp(state, id.0) as u8
 }
 
-/// Scan for nearby hostiles and toggle the combat state (owner `actors/`, 0x120a1c). Fallback:
-/// nothing.
-pub(crate) fn scan_hostiles(_state: &mut State) {
-    todo_stub!("0x120a1c scan nearby hostiles", ())
+/// Scan for nearby hostiles and toggle the combat state (actors 0x120a1c).
+pub(crate) fn scan_hostiles(state: &mut State) {
+    crate::actors::turn::go_to_schedules(state);
 }
 
-/// Put the Avatar back from its body object (owner `objects/`, 0x10c810). Fallback: nothing.
-pub(crate) fn raise_avatar_body(_state: &mut State, _body: ObjectId) {
-    todo_stub!("0x10c810 raise the Avatar from its body", ())
+/// Put the Avatar back from its body object (objects 0x10c810).
+pub(crate) fn raise_avatar_body(state: &mut State, body: ObjectId) {
+    crate::objects::actor_from_body(state, body.slot());
 }
 
 /// Resurrect the companion lying as body object `body` (0x11785e, an M1 stub point in the
@@ -296,17 +257,17 @@ pub(crate) fn resurrect_body(_state: &mut State, _body: ObjectId) {
     todo_stub!("0x11785e resurrect a companion's body", ())
 }
 
-/// Objects of the region list (A4-0xf84 head, A4-0x1184 next links) in list order (owner
-/// `objects/`). Fallback: every non-empty object slot from 256 up.
+/// Objects of the region list (A4-0xf84 head = slot 0x100, A4-0x1184 next links) in list order.
 pub(crate) fn region_list(state: &State) -> Vec<ObjectId> {
-    let scan = || {
-        (ACTOR_SLOTS as u16..OBJECT_SLOTS as u16)
-            .map(ObjectId)
-            .filter(|&id| state.objects.type_frame[id.index()] != 0)
-            .collect()
-    };
-    todo_stub!(
-        "0x10d376 the region object list (A4-0xf84 / A4-0x1184)",
-        scan()
-    )
+    let o = &state.objects;
+    let mut out = Vec::new();
+    let mut c = o.next_of(crate::objects::HEAD);
+    while let Some(id) = ObjectId::from_slot(c) {
+        out.push(id);
+        if out.len() > OBJECT_SLOTS {
+            break;
+        }
+        c = o.next_of(c);
+    }
+    out
 }

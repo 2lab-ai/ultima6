@@ -90,7 +90,16 @@ pub fn begin_at(o: &mut Objects, t: &Tables, mut x: u16, mut y: u16, z: u16) -> 
 /// that are double height and south-east that are both. Contained objects and other levels are
 /// skipped; [`LocationCursor::part`] says which case matched.
 pub fn next_at(o: &mut Objects, t: &Tables) -> Slot {
-    let here = o.at.pos;
+    let mut at = o.at;
+    let found = step_at(o, t, &mut at);
+    o.at = at;
+    found
+}
+
+/// The body of 0x10aaca on a cursor held apart from the tables (so a read-only walk can run on a
+/// copy of the cursor).
+fn step_at(o: &Objects, t: &Tables, cursor: &mut LocationCursor) -> Slot {
+    let here = cursor.pos;
     let x = (u16::from(here[1]) << 8 | u16::from(here[0])) & 0x3ff;
     let y = ((u16::from(here[2]) << 8 | u16::from(here[1])) >> 2) & 0x3ff;
     let z = here[2] >> 4;
@@ -99,7 +108,7 @@ pub fn next_at(o: &mut Objects, t: &Tables) -> Slot {
     let south_east = set_y(set_x(here, x + 1), y + 1);
     let mut found = NONE;
     loop {
-        let cur = o.at.cur;
+        let cur = cursor.cur;
         if cur < 0 || found >= 0 {
             return found;
         }
@@ -111,29 +120,53 @@ pub fn next_at(o: &mut Objects, t: &Tables) -> Slot {
             } else if at == east {
                 if f2 & 0x80 != 0 {
                     found = cur;
-                    o.at.part = 1;
+                    cursor.part = 1;
                 }
             } else if at == south {
                 if f2 & 0x40 != 0 {
                     found = cur;
-                    o.at.part = if f2 & 0x80 != 0 { 2 } else { 1 };
+                    cursor.part = if f2 & 0x80 != 0 { 2 } else { 1 };
                 }
             } else if at == south_east {
                 if f2 & 0xc0 == 0xc0 {
                     found = cur;
-                    o.at.part = 3;
+                    cursor.part = 3;
                 }
-            } else if o.at.second_row != 0 {
-                o.at.cur = NONE;
+            } else if cursor.second_row != 0 {
+                cursor.cur = NONE;
                 return found;
             } else {
-                o.at.cur = o.list_pos(x, y + 1, false);
-                o.at.second_row = 1;
+                cursor.cur = o.list_pos(x, y + 1, false);
+                cursor.second_row = 1;
                 continue;
             }
         }
-        o.at.cur = o.next_of(o.at.cur);
+        cursor.cur = o.next_of(cursor.cur);
     }
+}
+
+/// [`objects_at`] without moving the state's cursor (for read-only callers; the walk is the same,
+/// on a fresh cursor).
+pub fn objects_at_view(s: &State, pos: Position) -> Vec<(ObjectId, u16)> {
+    let (o, t) = (&s.objects, &s.tables);
+    let (mut x, mut y, z) = (pos.x, pos.y, u16::from(pos.z));
+    if z != 0 {
+        x &= 0xff;
+        y &= 0xff;
+    }
+    let mut cursor = LocationCursor {
+        pos: super::pack_xyz(x, y, z).to_packed(),
+        cur: o.list_pos(x, y, false),
+        second_row: 0,
+        part: 0,
+    };
+    let mut out = Vec::new();
+    let mut slot = step_at(o, t, &mut cursor);
+    while let Some(id) = ObjectId::from_slot(slot) {
+        out.push((id, cursor.part));
+        slot = step_at(o, t, &mut cursor);
+    }
+    out
 }
 
 /// Every object 0x10ad1a / 0x10aaca yield at `pos`, with the part each covers.

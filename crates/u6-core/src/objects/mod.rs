@@ -131,7 +131,7 @@ pub use effects::*;
 pub use iter::{
     AreaCursor, ChildCursor, LocationCursor, actor_at, begin_area, begin_at, find_child,
     first_child, next_at, next_child, next_child_of_kind, next_in_area, object_of_type_at,
-    objects_at,
+    objects_at, objects_at_view,
 };
 pub use list::{init_slots, link_actors, load_state_objects};
 pub use moves::{

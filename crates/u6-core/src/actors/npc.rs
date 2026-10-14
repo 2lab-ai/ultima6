@@ -550,7 +550,7 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
         seams::print(&mut s, -0x7503, &[]);
     }
     let key = loop {
-        let k = seams::read_key(io).await;
+        let k = seams::read_key(state, io).await;
         if k == u16::from(b'N') || k == u16::from(b'Y') {
             break k;
         }

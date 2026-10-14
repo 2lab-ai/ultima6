@@ -404,15 +404,16 @@ fn set_light(s: &mut State, f: &TickFlags) {
 fn date_line(s: &mut State) {
     const DATE: i32 = -0x7293;
     let c = s.actors.calendar;
-    seams::status_cursor(s);
+    const WIND_NAMES: i32 = -0x7ae4;
+    seams::date_line_window(s, true);
     let args = [
         Arg::Word(i16::from(c.month)),
         Arg::Word(i16::from(c.day)),
         Arg::Word(c.year as i16),
-        Arg::Word(i16::from(s.actors.wind as i8)),
+        Arg::Pointer(WIND_NAMES + 4 * i32::from(s.actors.wind as i8)),
     ];
     seams::print(s, DATE, &args);
-    seams::status_cursor(s);
+    seams::date_line_window(s, false);
 }
 
 #[cfg(test)]

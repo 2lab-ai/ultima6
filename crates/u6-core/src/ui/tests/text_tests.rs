@@ -45,9 +45,10 @@ fn printf_unknown_directive_prints_the_character_unescaped() {
 #[test]
 fn escapes_variables_hidden_text_and_glyphs() {
     let mut s = state();
-    s.ui.text.vars[3] = 2;
-    s.ui.text.vars[10] = 1;
-    s.ui.text.strings[1] = b"xyz".to_vec();
+    s.converse.ints[3] = 2;
+    s.converse.ints[10] = 1;
+    s.converse.strs[1] = crate::converse::StrRef::Buffer(0);
+    s.converse.buffers[0] = b"xyz".to_vec();
     let e = print(s, b"#3 thing\\s #a thing\\s $1!", &[]);
     assert_eq!(scroll_row(&e, 14).trim_end(), "2 things 1 thing");
     assert_eq!(scroll_row(&e, 15).trim_end(), "xyz!");

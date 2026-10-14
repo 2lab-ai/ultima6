@@ -224,13 +224,18 @@ fn run(args: Args) -> Result<(), String> {
             let rgba = simulate(&mut engine, args.frames, &args.keys);
             print_log(&mut engine);
             write_png(path, &rgba)?;
-            let stubs: u64 = engine.stub_hits().values().sum();
+            let hits = engine.stub_hits();
+            let stubs: u64 = hits.values().sum();
             println!(
-                "wrote {} ({} frames, {} stub hits)",
+                "wrote {} ({} frames, {} keys still queued, {} stub hits)",
                 path.display(),
                 args.frames,
+                engine.io().pending_events(),
                 stubs
             );
+            for (id, n) in hits {
+                println!("  {n:6} {id}");
+            }
             Ok(())
         }
         None => run_window(boot(zip, args.seed.unwrap_or_else(clock_seed))?),

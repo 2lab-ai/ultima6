@@ -120,7 +120,7 @@ pub async fn text_out(state: &RefCell<State>, io: &Io, c: i16) {
         b'#' => {
             let v = {
                 let mut s = state.borrow_mut();
-                let v = s.ui.text.vars[var_index(c)];
+                let v = crate::converse::int_var(&s, var_index(c) as u8);
                 s.ui.text.plural = v != 1;
                 v
             };
@@ -128,7 +128,7 @@ pub async fn text_out(state: &RefCell<State>, io: &Io, c: i16) {
             state.borrow_mut().ui.text.prefix = 0;
         }
         b'$' => {
-            let text = state.borrow().ui.text.strings[var_index(c)].clone();
+            let text = crate::converse::string_var(&state.borrow(), var_index(c) as u8);
             put_raw_str(state, io, &text).await;
             state.borrow_mut().ui.text.prefix = 0;
         }

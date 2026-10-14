@@ -1,210 +1,27 @@
 //! What gfx needs from other modules and from the engine, behind the narrowest signatures
-//! (03 §6). Each seam names its producer; the dispatcher replaces the fallback at merge.
-
-use u6_formats::objblk::ObjLocation;
+//! (03 §6), each forwarding to its owner since the integration (WU-P7).
 
 use super::GfxState;
 #[cfg(doc)]
 use super::blit;
 use super::view::{ViewWindow, WINDOW_TILES};
 use crate::engine::Io;
-use crate::objects::{ACTOR_SLOTS, ObjectId};
+use crate::objects::ObjectId;
 use crate::state::State;
-use crate::todo_stub;
 
-/// The window contents as last built by map 0x109e74 (tile cache A4-0x1476: map tile per cell,
-/// 0xff for an unseen cell, 0x1bc for an unlit one, wall shapes fixed up from their neighbours)
-/// and objects 0x10e81e → 0x10e73a / 0x10e596 (per-cell object lists, multi-tile parts, light
-/// fringe tiles 0x1bd..0x1bf). Owners: map (WU-P2) and objects (WU-P3).
-///
-/// Fallback (until they land): every cell visible and lit, the raw map tile at
-/// `centre - 5 + (col, row)` (coordinates wrap at the map size like 0x10996c's mask), and the
-/// objects of [`fallback_objects`].
+/// The window contents as last built by map 0x109e74 and objects 0x10e81e: the tile cache
+/// A4-0x1476 (`objects.draw.base`: map tile per cell, 0xff unseen, 0x1bc unlit, flat object
+/// tiles over it) and the per-cell object lists (`objects.draw`, first drawn first).
 pub(crate) fn view_window(state: &State) -> ViewWindow {
-    let tiles = todo_stub!("0x109e74 view-window flags", fallback_tiles(state));
-    let mut window = ViewWindow {
-        tiles,
-        ..ViewWindow::empty()
-    };
-    todo_stub!(
-        "0x10e81e window object lists",
-        fallback_objects(state, &mut window)
-    );
-    window
-}
-
-/// Map size in tiles on level `z` (surface 1024, dungeons 256).
-fn map_side(z: u8) -> i32 {
-    if z == 0 { 1024 } else { 256 }
-}
-
-fn fallback_tiles(state: &State) -> [[u16; WINDOW_TILES]; WINDOW_TILES] {
-    let c = state.map.centre;
-    let side = map_side(c.z);
-    let mut tiles = [[0u16; WINDOW_TILES]; WINDOW_TILES];
-    for (row, line) in tiles.iter_mut().enumerate() {
+    let d = &state.objects.draw;
+    let mut window = ViewWindow::empty();
+    for (row, line) in window.tiles.iter_mut().enumerate() {
         for (col, t) in line.iter_mut().enumerate() {
-            let x = (i32::from(c.x) - 5 + col as i32).rem_euclid(side) as usize;
-            let y = (i32::from(c.y) - 5 + row as i32).rem_euclid(side) as usize;
-            *t = state
-                .map
-                .tile_at(x, y, usize::from(c.z))
-                .map_or(0, u16::from);
+            *t = d.base.get(row * WINDOW_TILES + col).copied().unwrap_or(0);
+            window.objects[row * WINDOW_TILES + col] = d.tiles(col, row);
         }
     }
-    tiles
-}
-
-/// Fallback for 0x10e81e: actors 0..256 with a type, then the map objects of `objects.blocks`
-/// (0x10e1ce has not put them into slots yet) whose location is the map, each on the centre's
-/// level in cells 0..=11 (`x - centre_x + 5`), in that order [추정: the original walks its region
-/// list 0x10b05a / 0x10af74; actors first is what puts people over carpets under the head
-/// insertion of [`insert`]; the order of two map objects in one cell is not verified]. Tile =
-/// `basetile[type] + frame`. As in 0x10e81e: an object with flag bit 1 (invisible) is skipped
-/// unless it is an actor with status (A4+0x3d0c) bit 7; an actor with movement flag 0x10 is
-/// skipped; an actor gets an outline first (its word plus 0x800 when invisible and below type
-/// 0x1aa, plus 0x1000 with status bit 0, plus 0x1800 with flag 0x40), then its sprite unless
-/// invisible. Each
-/// goes through [`place`] (0x10e73a). Not reproduced: the 0x7b frame fix-up, the 0x18a / 0x18c
-/// cases, the light fringe tiles 0x1bd..0x1bf, the -0x7af6 / -0x78e0 bookkeeping.
-fn fallback_objects(state: &State, window: &mut ViewWindow) {
-    let c = state.map.centre;
-    let base = &state.tables.basetile.base;
-    let cell = |x: u16, y: u16| {
-        let (cx, cy) = (
-            i32::from(x) - i32::from(c.x) + 5,
-            i32::from(y) - i32::from(c.y) + 5,
-        );
-        ((0..=11).contains(&cx) && (0..=11).contains(&cy)).then_some((cx, cy))
-    };
-    let tile = |t: u16, frame: u8| base.get(usize::from(t)).map(|b| b + u16::from(frame));
-    let mut nodes = 0usize;
-    for a in 0..ACTOR_SLOTS as u16 {
-        let id = ObjectId(a);
-        let (ty, Some(p)) = (state.objects.obj_type(id), state.objects.location(id)) else {
-            continue;
-        };
-        if ty == 0 || p.z != c.z {
-            continue;
-        }
-        let (Some((cx, cy)), Some(t)) = (cell(p.x, p.y), tile(ty, state.objects.frame(id))) else {
-            continue;
-        };
-        let flags = state.objects.actor_flags[usize::from(a)];
-        let status = actor_status(state, id);
-        if (flags & 2 != 0 && status & 0x80 == 0) || movement_flags(state, id) & 0x10 != 0 {
-            continue;
-        }
-        let mut bits = 0;
-        if flags & 2 != 0 && ty < 0x1aa {
-            bits = 0x800;
-        }
-        if status & 1 != 0 {
-            bits = 0x1000;
-        }
-        if flags & 0x40 != 0 {
-            bits = 0x1800;
-        }
-        if bits != 0 {
-            place(state, window, &mut nodes, t.wrapping_add(bits), cx, cy);
-        }
-        if flags & 2 == 0 {
-            place(state, window, &mut nodes, t, cx, cy);
-        }
-    }
-    for (_, block) in &state.objects.blocks {
-        for r in &block.objects {
-            if r.location() != ObjLocation::Map || r.pos.z != c.z {
-                continue;
-            }
-            let (Some((cx, cy)), Some(t)) = (cell(r.pos.x, r.pos.y), tile(r.obj_n, r.frame)) else {
-                continue;
-            };
-            if r.status & 2 == 0 {
-                place(state, window, &mut nodes, t, cx, cy);
-            }
-        }
-    }
-}
-
-/// 0x10e73a: the object's word at its cell, and for a wide tile (flags2 bit 7) `word - 1` to the
-/// left, for a tall one (bit 6) `word - 1` above, for both `word - 2` above and `word - 3`
-/// above-left; parts outside cells 0..11 are dropped. Parts are inserted as kind 1.
-fn place(state: &State, window: &mut ViewWindow, nodes: &mut usize, word: u16, cx: i32, cy: i32) {
-    let f = flags2(state, word);
-    let mut put = |w: u16, x: i32, y: i32, part: bool| insert(state, window, nodes, w, x, y, part);
-    if cx < 11 && cy < 11 {
-        put(word, cx, cy, false);
-    }
-    if f & 0x80 != 0 {
-        if cx != 0 && cy < 11 {
-            put(word.wrapping_sub(1), cx - 1, cy, true);
-        }
-        if f & 0x40 != 0 {
-            if cx < 11 && cy != 0 {
-                put(word.wrapping_sub(2), cx, cy - 1, true);
-            }
-            if cx != 0 && cy != 0 {
-                put(word.wrapping_sub(3), cx - 1, cy - 1, true);
-            }
-        }
-    } else if f & 0x40 != 0 && cx < 11 && cy != 0 {
-        put(word.wrapping_sub(1), cx, cy - 1, true);
-    }
-}
-
-fn flags2(state: &State, word: u16) -> u8 {
-    let flags = &state.tables.tileflags.flags2;
-    flags.get(usize::from(word & 0x7ff)).copied().unwrap_or(0)
-}
-
-/// Object list nodes of 0x10e81e (bytes 1..=255 at A4-0x1577; node 0 ends a list).
-const LIST_NODES: usize = 255;
-
-/// 0x10e596 for a cell whose cache tile is a normal map tile (the fallback never makes unseen
-/// 0xff or unlit 0x1bc cells): the basetile of type 0x14f (0x13abde) is never listed; a tile
-/// with flags3 bit 5 replaces the cache tile; otherwise, while list nodes are left, a tile without
-/// flags2 bit 4 goes to the head of the cell's list (drawn first), a main tile with it goes in
-/// front of the first listed tile with it, a part with it to the end (A4-0x7b71 taken as 0).
-#[allow(clippy::too_many_arguments)]
-fn insert(
-    state: &State,
-    window: &mut ViewWindow,
-    nodes: &mut usize,
-    word: u16,
-    cx: i32,
-    cy: i32,
-    part: bool,
-) {
-    let (Ok(x), Ok(y)) = (usize::try_from(cx), usize::try_from(cy)) else {
-        return;
-    };
-    if x >= WINDOW_TILES || y >= WINDOW_TILES {
-        return;
-    }
-    let t = usize::from(word & 0x7ff);
-    if state.tables.basetile.base.get(0x14f).copied() == Some(word & 0x7ff) {
-        return;
-    }
-    if state.tables.tileflags.flags3.get(t).copied().unwrap_or(0) & 0x20 != 0 {
-        window.tiles[y][x] = word;
-        return;
-    }
-    if *nodes >= LIST_NODES {
-        return;
-    }
-    *nodes += 1;
-    let list = &mut window.objects[y * WINDOW_TILES + x];
-    let at = if flags2(state, word) & 0x10 == 0 {
-        0
-    } else if part {
-        list.len()
-    } else {
-        list.iter()
-            .position(|&w| flags2(state, w) & 0x10 != 0)
-            .unwrap_or(list.len())
-    };
-    list.insert(at, word);
+    window
 }
 
 /// Animation flag of animdata slot `slot` (A4-0x309b, byte per slot: 0 off, 1 forward,
@@ -256,57 +73,49 @@ pub(crate) fn present_window(io: &Io, gfx: &GfxState, dissolve: bool) {
     io.present();
 }
 
-/// Original 0x10ad1a + 0x10aaca: the objects at (x, y, z) in the original's chain order
-/// (0x10aaca also returns multi-tile objects whose other parts cover the location). Owner:
-/// objects (WU-P3). Fallback: every slot whose location is exactly (x, y, z) and whose type/frame
-/// word is not 0, in slot order; actor slots only with actor flags bits 3-4 clear (on the map).
-pub(crate) fn objects_at(state: &State, x: i32, y: i32, z: u8) -> Vec<ObjectId> {
-    todo_stub!(
-        "0x10ad1a objects at a location",
-        (0..state.objects.location.len() as u16)
-            .map(ObjectId)
-            .filter(|&id| {
-                let p = state.objects.location[id.index()];
-                let flags = state
-                    .objects
-                    .actor_flags
-                    .get(id.index())
-                    .copied()
-                    .unwrap_or(0);
-                (i32::from(p.x), i32::from(p.y), p.z) == (x, y, z)
-                    && state.objects.type_frame[id.index()] != 0
-                    && flags & 0x18 == 0
-            })
-            .collect()
-    )
+/// Objects 0x10ad1a + 0x10aaca: the objects at (x, y, z) in the chain order (multi-tile parts
+/// covering the location included).
+pub(crate) fn objects_at(state: &mut State, x: i32, y: i32, z: u8) -> Vec<ObjectId> {
+    let at = u6_formats::position::Position {
+        x: x as u16,
+        y: y as u16,
+        z,
+    };
+    crate::objects::objects_at(state, at)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
 }
 
-/// Original 0x10b922(x, y, z, dir, frame): the body part of type 0x19b at (x, y, z) whose frame
-/// & 0x3e matches the byte A4-0x6a70[(frame & 6) * 2 + dir / 2] [from the decompile; arguments
-/// not checked in the assembly]. Owner: objects (WU-P3). Fallback: none found (the 0x19b case
-/// then draws one RNG value less per part).
+/// Objects 0x10b922(x, y, z, dir, frame): the serpent body part next to (x, y) in direction
+/// `dir` whose frame matches the head's `frame`.
 pub(crate) fn serpent_part(
-    _state: &State,
-    _x: i32,
-    _y: i32,
-    _z: u8,
-    _dir: u16,
-    _frame: u16,
+    state: &mut State,
+    x: i32,
+    y: i32,
+    z: u8,
+    dir: u16,
+    frame: u16,
 ) -> Option<ObjectId> {
-    todo_stub!("0x10b922 serpent body part", None)
+    let slot = crate::objects::find_segment_at(
+        state,
+        x as u16,
+        y as u16,
+        u16::from(z),
+        usize::from(dir),
+        frame,
+    );
+    ObjectId::from_slot(slot)
 }
 
-/// Original 0x10a5b0(id): the other half of a two-tile creature (types above 0x1a9, 0x19b,
-/// 0x19c), found in the direction its tile flags1 high nibble names. Owner: objects (WU-P3).
-/// Fallback: none (the other half keeps its frame).
-pub(crate) fn other_half(_state: &State, _id: ObjectId) -> Option<ObjectId> {
-    todo_stub!("0x10a5b0 other half of a two-tile creature", None)
+/// Objects 0x10a5b0(id): the other half of a two-tile creature.
+pub(crate) fn other_half(state: &mut State, id: ObjectId) -> Option<ObjectId> {
+    ObjectId::from_slot(crate::objects::owner_of_part(state, id.slot()))
 }
 
-/// Original 0x10e81e: rebuild the window object lists after frames changed. Owner: objects
-/// (WU-P3). Fallback: nothing; [`view_window`] rebuilds the lists on every draw.
-pub(crate) fn rebuild_window_objects(_state: &mut State) {
-    todo_stub!("0x10e81e window object lists", ());
+/// Objects 0x10e81e: rebuild the window object lists after frames changed.
+pub(crate) fn rebuild_window_objects(state: &mut State) {
+    crate::objects::build_draw_lists(state);
 }
 
 /// Type/frame word of `id` (0x137988; objects owns the table).

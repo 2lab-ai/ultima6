@@ -243,10 +243,12 @@ async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
         }
         0x08 => {
             print_at(state, io, MSG_HELP, &[]).await;
+            // A4-0x7a50: the help mode is the keyword colour of the text layer.
             let on = {
                 let mut s = state.borrow_mut();
-                s.main.help = u16::from(s.main.help == 0);
-                s.main.help != 0
+                let t = &mut s.ui.text;
+                t.keyword_colour = !t.keyword_colour;
+                t.keyword_colour
             };
             print_at(state, io, if on { MSG_ON } else { MSG_OFF }, &[]).await;
             print_at(state, io, MSG_BANG, &[]).await;

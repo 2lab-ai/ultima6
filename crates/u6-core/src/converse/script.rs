@@ -225,6 +225,6 @@ pub fn load_portrait(state: &State, files: &Files, npc: i16) -> Option<Vec<u8>> 
 /// 0x38 / 0x40 size words in front of the pixels) to the bitmap blit 0x1533e0 at (`x`, `y`).
 pub fn draw_portrait(state: &State, io: &Io, npc: i16, x: i16, y: i16) {
     if let Some(pixels) = load_portrait(state, io.files(), npc) {
-        seams::blit_portrait(io, &pixels, x, y);
+        seams::blit_portrait(state, io, &pixels, x, y);
     }
 }
