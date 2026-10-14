@@ -178,10 +178,9 @@ pub(crate) fn step_toward(state: &mut State, id: ObjectId, x: u16, y: u16) -> i1
     i16::from(crate::actors::npc::approach(state, id.0, x, y))
 }
 
-/// Distance from actor `id` to (x, y) (owner: combat leaf 0x121b08, an M1 stub point; uses
-/// `abs`). Fallback: 0, so a gathering member joins the leader at once (0x108fba).
-pub(crate) fn distance(_state: &State, _id: ObjectId, _x: u16, _y: u16) -> i16 {
-    todo_stub!("0x121b08 distance from an actor to a location", 0)
+/// Distance from actor `id` to (x, y) (combat 0x121b08).
+pub(crate) fn distance(state: &State, id: ObjectId, x: u16, y: u16) -> i16 {
+    crate::combat::leaves::distance(state, id.slot(), x as i16, y as i16)
 }
 
 /// Walk actor `id` one step in direction `dir` (0, 2, 4, 6) with flag 1 (actors 0x11f0a0).
@@ -195,10 +194,9 @@ pub(crate) fn before_leaving(_state: &mut State, _id: ObjectId) {
     todo_stub!("0x12f8fe party member of type 0x1af leaves", ())
 }
 
-/// End combat mode (0x121d78, an M1 stub point: the B command handler). Fallback: nothing; M1
-/// starts out of combat.
-pub(crate) fn break_off_combat(_state: &mut State) {
-    todo_stub!("0x121d78 break off combat", ())
+/// End combat mode (combat 0x121d78).
+pub(crate) fn break_off_combat(state: &mut State) {
+    crate::combat::mode::break_off(state);
 }
 
 /// Start the song for the current area (0x110912, an M1 stub point). Fallback: silence.

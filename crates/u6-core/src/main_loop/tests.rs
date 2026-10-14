@@ -23,8 +23,9 @@ fn files() -> Option<Files> {
 }
 
 /// The boot on the user's files: 60 ticks reach the command prompt with only the three stub
-/// points a boot passes (character creation, combat start for the disk's combat byte, the egg
-/// in the start window); the screen shows the window, the panel and the prompt.
+/// points a boot passes (character creation, the combat song of the combat start for the
+/// disk's combat byte, the egg in the start window); the screen shows the window, the panel and
+/// the prompt.
 #[test]
 fn boot_reaches_the_prompt_with_three_stub_points() {
     let Some(files) = files() else { return };
@@ -33,7 +34,7 @@ fn boot_reaches_the_prompt_with_three_stub_points() {
         e.tick(&[], 16);
     }
     let ids: Vec<&str> = e.stub_hits().keys().map(|k| &k[..8]).collect();
-    assert_eq!(ids, ["0x121c64", "0x1319b2", "0x1351d8"]);
+    assert_eq!(ids, ["0x110878", "0x1319b2", "0x1351d8"]);
     let s = e.state();
     assert_eq!(s.ui.text.current, crate::ui::WindowId::Messages);
     assert!(

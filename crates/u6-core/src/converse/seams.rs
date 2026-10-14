@@ -245,9 +245,9 @@ pub(crate) fn face_target(_s: &mut State) {
     todo_stub!("0x105016 face the talk target (converse seam)", ())
 }
 
-/// 0x1240fa(obj): the actor riding horse object `obj`. Fallback: `obj`.
-pub(crate) fn rider(_s: &State, obj: i16) -> i16 {
-    todo_stub!("0x1240fa rider of a horse (converse seam)", obj)
+/// 0x1240fa(obj): the actor a part belongs to (the horse of a horse's back half).
+pub(crate) fn rider(s: &mut State, obj: i16) -> i16 {
+    crate::combat::leaves::owner(s, obj)
 }
 
 /// 0x121ff8(actor): effective dexterity (int var 10).
@@ -275,9 +275,9 @@ pub(crate) fn level(s: &State, a: i16) -> i16 {
     i16::from(crate::actors::leaves::level(s, a as u16))
 }
 
-/// 0x1221da(actor) after worktype 0x91. Fallback: nothing.
-pub(crate) fn worktype_91(_s: &mut State, _actor: i16) {
-    todo_stub!("0x1221da worktype 0x91 follow-up (converse seam)", ())
+/// 0x1221da(actor) after worktype 0x91 (the actor drops: its lying frame).
+pub(crate) fn worktype_91(s: &mut State, actor: i16) {
+    crate::combat::damage::lie_down(s, actor);
 }
 
 /// 0x1279d4(member index, 0): heal a party member (no announcement); its lines print at once.

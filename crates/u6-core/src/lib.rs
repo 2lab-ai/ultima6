@@ -18,6 +18,7 @@
 //! `actors/`, `converse/` and `main_loop`.
 
 pub mod actors;
+pub mod combat;
 pub mod converse;
 pub mod engine;
 pub mod files;

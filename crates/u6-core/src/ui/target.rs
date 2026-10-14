@@ -356,7 +356,7 @@ fn step(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
         let range = s.ui.input.range;
         if (0..11).contains(&nx)
             && (0..11).contains(&ny)
-            && seams::distance(nx, ny, 5, 5) <= i16::from(range)
+            && seams::distance(&s, nx, ny, 5, 5) <= i16::from(range)
         {
             s.ui.input.cursor = (nx as i8, ny as i8);
             seams::present_map(&mut s, io, 1);

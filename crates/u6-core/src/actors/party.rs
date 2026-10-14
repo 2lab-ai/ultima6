@@ -371,16 +371,14 @@ fn pay_step(s: &mut State, l: u16, d: usize, diagonal: bool, (cx, cy): (u16, u16
     }
 }
 
-/// [combat] 0x1230ce (a hit's flash and redraw on `actor`). Stub contract: argument the actor;
-/// no result; nothing drawn. Reached only from hazards ([`tile_effect`]).
-fn flash(_s: &mut State, _actor: u16) {
-    crate::todo_stub!("0x1230ce flash a hit actor (fallback: none)", ())
+/// [combat] 0x1230ce (a hit's flash on `actor`). Reached from hazards ([`tile_effect`]).
+fn flash(s: &mut State, actor: u16) {
+    crate::combat::damage::flash(s, actor as i16);
 }
 
-/// [combat] 0x1221da (put an actor to sleep / knock it down). Stub contract: argument the
-/// actor; no result; the sleep status bit is already set by the caller.
-fn fall_asleep(_s: &mut State, _actor: u16) {
-    crate::todo_stub!("0x1221da lie down without a bed (fallback: none)", ())
+/// [combat] 0x1221da (put an actor to sleep / knock it down: its lying frame).
+fn fall_asleep(s: &mut State, actor: u16) {
+    crate::combat::damage::lie_down(s, actor as i16);
 }
 
 /// [objects] 0x10b18c / 0x10b0ba (the first object of type `t` carried by `actor`, then the

@@ -6,7 +6,6 @@ use u6_render::Framebuffer;
 
 use crate::engine::Io;
 use crate::state::State;
-use crate::todo_stub;
 
 /// 0x122144 (actors: maximum hit points of actor slot `actor`).
 pub(crate) fn max_hp(s: &State, actor: u8) -> u8 {
@@ -70,22 +69,15 @@ pub(crate) fn present_map(s: &mut State, io: &Io, flag: i16) {
     crate::gfx::render_window(s, io, flag != 0);
 }
 
-/// 0x124e0e (combat: distance between two window cells; the cross-hair passes (5, 5) and the
-/// cell). Contract: → distance in cells. Fallback [추정]: the larger of |dx| and |dy|.
-pub(crate) fn distance(x0: i16, y0: i16, x1: i16, y1: i16) -> i16 {
-    let d = (x1 - x0).abs().max((y1 - y0).abs());
-    todo_stub!("0x124e0e distance between cells", d)
+/// 0x124e0e (combat: distance between two window cells from the A4-0x69a0 table; the
+/// cross-hair passes (5, 5) and the cell).
+pub(crate) fn distance(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) -> i16 {
+    crate::combat::leaves::cell_distance(s, x0, y0, x1, y1)
 }
 
-/// 0x1225c0 (combat: the actor at a map location, starting from `actor`'s level): walks the
-/// objects at (x, y) (0x10ad1a / 0x10aaca), skipping any that 0x1224ea says `actor` cannot see;
-/// the first visible actor slot below 0x100 without status bit 0x10 wins, else the first visible
-/// object, else -1. Not ported (a combat leaf outside milestone 1). Fallback: the first actor
-/// standing there (objects 0x10b20e), visibility not checked.
-pub(crate) fn actor_at(s: &State, actor: u8, x: i16, y: i16) -> i16 {
-    let _ = actor;
-    let found = crate::objects::actor_at(s, 1, x as u16, y as u16);
-    todo_stub!("0x1225c0 actor at a location", found)
+/// 0x1225c0 (combat: the object at a map location a hit lands on, as `actor` sees it).
+pub(crate) fn actor_at(s: &mut State, actor: u8, x: i16, y: i16) -> i16 {
+    crate::combat::leaves::actor_at(s, i16::from(actor), x, y)
 }
 
 /// Map-window caches A4-0x15f0 (byte per window cell, 11 × 11: first draw-list node, non-zero =
