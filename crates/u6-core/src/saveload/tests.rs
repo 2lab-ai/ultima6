@@ -331,13 +331,16 @@ fn state_files(objlist: Vec<u8>) -> Files {
     Files::new(base)
 }
 
-/// Restore (0x1052c8) of `objlist` on an empty state, then `after` on the restored state.
+/// Restore (0x1052c8) of `objlist` on an empty state (empty block files unless `s` has some),
+/// then `after` on the restored state.
 fn restored(
     mut s: State,
     objlist: Vec<u8>,
     after: impl FnOnce(&mut State) + 'static,
 ) -> crate::engine::Engine {
-    s.objects.blocks = ObjBlockId::all().map(|id| (id, block(&[]))).collect();
+    if s.objects.blocks.is_empty() {
+        s.objects.blocks = ObjBlockId::all().map(|id| (id, block(&[]))).collect();
+    }
     let mut e = crate::engine::Engine::with_game(s, state_files(objlist), |st, io| async move {
         let mut s = st.borrow_mut();
         restore(&mut s, &io).expect("the synthetic files parse");
@@ -366,6 +369,26 @@ fn a_party_size_past_the_roster_is_clamped_and_the_hour_passes() {
 }
 
 #[test]
+fn a_booted_party_size_past_the_roster_is_clamped_and_the_hour_passes() {
+    // The boot's way in (no Restore): the objlist steps of `State::new_game` (the boot's file,
+    // decode, the view on the leader), main's load-state tail, 0x1217d4 and the clock.
+    let mut f = encode(&State::empty());
+    f[0x0FF0] = 17;
+    f[0x0FE0..0x0FF0].copy_from_slice(&[1; 16]);
+    let files = state_files(f);
+    let mut s = State::empty();
+    s.objects.blocks = ObjBlockId::all().map(|id| (id, block(&[]))).collect();
+    decode(&mut s, boot_objlist(&files).expect("synthetic objlist"));
+    s.place_party();
+    crate::main_loop::load_state_tail(&mut s);
+    crate::actors::turn::after_load(&mut s);
+    crate::actors::clock::tick(&mut s, 0);
+    assert_eq!(s.actors.party.size, 15, "clamped at the vessel slot");
+    crate::actors::clock::tick(&mut s, 60);
+    assert_eq!(s.actors.calendar.hour, 1, "an hour on");
+}
+
+#[test]
 fn restore_leaves_the_save_mode_at_play() {
     // 0x1052c8 sets A4-0x637a = 0x20 before 0x105350, which does not write it.
     let mut s = State::empty();
@@ -373,6 +396,25 @@ fn restore_leaves_the_save_mode_at_play() {
     s.objects.save_mode = 0x47;
     let e = restored(s, encode(&State::empty()), |_| {});
     assert_eq!(e.state().objects.save_mode, 0x20);
+}
+
+#[test]
+fn restore_reads_the_region_in_play_mode() {
+    // 0x1052c8 sets A4-0x637a = 0x20 before 0x105350, so the region's block reads run in play
+    // mode whatever the data hunk started it at (0x10ddd2 reads nothing in mode 'R').
+    let mut s = State::empty();
+    s.objects.defs.save_mode = 0x52;
+    let rec = [[0u8, 1, 0, 0, 0, 0x77, 0, 1]];
+    s.objects.blocks = ObjBlockId::all()
+        .enumerate()
+        .map(|(i, id)| (id, block(if i < 64 { &rec } else { &[] })))
+        .collect();
+    let e = restored(s, encode(&State::empty()), |_| {});
+    let o = &e.state().objects;
+    let loaded = (crate::objects::ACTOR_SLOTS..crate::objects::OBJECT_SLOTS)
+        .filter(|&i| o.type_frame[i] & 0x3ff == 0x77)
+        .count();
+    assert!(loaded > 0, "the region's objects in slots: {loaded}");
 }
 
 #[test]

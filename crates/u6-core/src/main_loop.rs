@@ -279,6 +279,8 @@ async fn game_main(state: &RefCell<State>, io: &Io, launched: bool) -> u16 {
     {
         let mut s = state.borrow_mut();
         s.main.flag_64ce = 1;
+        // A4-0x637a starts at its data-hunk value (Restore sets play before load state).
+        s.objects.save_mode = s.objects.defs.save_mode;
         finish_load_state(&mut s, io);
         let anim = s.tables.anim.clone();
         for slot in anim.slots.iter().take(usize::from(anim.count)) {
@@ -362,22 +364,23 @@ pub fn draw_paper(s: &State, io: &Io) {
     io.draw(|fb| crate::gfx::blit::blit_bmp(colours, fb, &bmp, 0, 0));
 }
 
-/// The calls 0x105350 makes after its reads, in its order: link the actors (0x10edb4, after the
-/// save mode from the data hunk), underline the last command (0x106506 with A4-0x7b09), the
-/// object blocks of the region (0x10e1ce), the map region (0x108ac4, the port holds the whole
-/// map), A4-0x784e = 1, the window cache (0x108f90), each member into the leader's inventory
-/// when the party is aboard (0x10cda8 with place 0x10, only when the leader index is the party
-/// size), the view flags (0x109e74).
+/// The calls 0x105350 makes after its reads, in its order: link the actors (0x10edb4),
+/// underline the last command (0x106506 with A4-0x7b09), the object blocks of the region
+/// (0x10e1ce), the map region (0x108ac4, the port holds the whole map), A4-0x784e = 1, the
+/// window cache (0x108f90), each member into the leader's inventory when the party is aboard
+/// (0x10cda8 with place 0x10, only when the leader index is the party size), the view flags
+/// (0x109e74). The save mode (A4-0x637a), which the block reads check, is left as it is: 0x105350
+/// does not write it; the boot starts it at its data-hunk value and Restore at play.
 pub fn finish_load_state(s: &mut State, io: &Io) {
-    s.objects.save_mode = s.objects.defs.save_mode;
     crate::objects::link_actors(&mut s.objects);
     let last = crate::ui::globals::last_command(&s.actors);
     crate::ui::cursor::select_command(s, io, last);
     region_steps(s);
 }
 
-/// The state part of the load-state tail without a screen (tools, tests): the slot reset main
-/// does first (0x10ed44), then [`finish_load_state`] less the command-bar underline.
+/// The state part of the boot's load-state tail without a screen (tools, tests): the slot
+/// reset main does first (0x10ed44), the save mode at its data-hunk value, then
+/// [`finish_load_state`] less the command-bar underline.
 pub fn load_state_tail(s: &mut State) {
     crate::objects::init_slots(&mut s.objects);
     s.objects.save_mode = s.objects.defs.save_mode;

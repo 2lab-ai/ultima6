@@ -110,8 +110,7 @@ pub fn load_state(s: &mut State, io: &Io, files: StateFiles) {
 ///
 /// The files are read and parsed first: when one is unreadable nothing changes and the error
 /// is returned (the original has no such case; its disks are always there). 0x105350 does not
-/// write the save mode, but the port's load-state tail sets it from the data hunk (as the boot
-/// needs), so it is set to play again after [`load_state`].
+/// write the save mode, so the region's block reads in [`load_state`] run in play mode.
 pub fn restore(s: &mut State, io: &Io) -> Result<(), LoadError> {
     let files = read_state_files(s, io.files())?;
     s.map.flag_7afb = 0;
@@ -130,7 +129,6 @@ pub fn restore(s: &mut State, io: &Io) -> Result<(), LoadError> {
     crate::ui::cursor::select_command(s, io, NO_COMMAND);
     s.ui.panel.dirty = true;
     load_state(s, io, files);
-    s.objects.save_mode = MODE_PLAY;
     crate::actors::turn::after_load(s);
     seams::play_area_song(s);
     if s.actors.tail(TAIL_COMBAT) != 0 {

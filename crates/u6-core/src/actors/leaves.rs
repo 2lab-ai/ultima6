@@ -109,11 +109,12 @@ pub fn max_magic(s: &State, actor: u16) -> u16 {
 /// Original: 0x1224ea (combat: can `viewer` see `target` (visible, same level, not hidden))
 ///
 /// `viewer` and `target` are any objects (a cannon's ball is seen from the cannon's slot).
-/// Visible = not invisible; an invisible party member is seen by a party member. Object flags
-/// and actor status exist for actor slots only: past them the original reads the next table
-/// (status of a viewer ≥ 0x100 is a talk-flags byte), the port reads 0 (visible, not in the
-/// party). Never: a swallowed actor, the object word 0x165 (type 0x165 frame 0), an object
-/// whose tile has flags3 bit 0x10, or one on another level.
+/// Visible = not invisible; an invisible party member is seen by a party member. The object
+/// flags (A4+0x190c, read at 0x1224f6) cover every slot; the actor status (A4+0x3d0c, read for
+/// the viewer at 0x122506 without a bound) exists for actor slots only: past them the original
+/// reads the next table (status of a viewer ≥ 0x100 is a talk-flags byte), the port reads 0
+/// (not in the party). Never: a swallowed actor, the object word 0x165 (type 0x165 frame 0), an
+/// object whose tile has flags3 bit 0x10, or one on another level.
 pub fn can_see(s: &State, viewer: u16, target: u16) -> bool {
     let (v, t) = (usize::from(viewer), usize::from(target));
     let flags = |i: usize| s.objects.obj_status.get(i).copied().unwrap_or(0);
