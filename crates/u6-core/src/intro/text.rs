@@ -328,6 +328,16 @@ pub fn wrap(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, text: &[u8]) {
         if last == 0 {
             return;
         }
+        if pos == start {
+            // Nothing taken: a line after a line feed that is spaces, then a word wider than
+            // the rest of the box, ends at its first space. The original (0x115bd6) lays out
+            // the same line again for ever; the port drops the spaces, so the word starts the
+            // line and goes on it as its first word.
+            while at(text, pos) == b' ' {
+                pos += 1;
+            }
+            pos = pos.max(start + 1);
+        }
     }
 }
 
@@ -398,12 +408,16 @@ fn justify(
     if line_w >= avail || last == 0 || last == 0x0a {
         return put_span(chip, ctx, font, text, start, end);
     }
-    while at(text, start) == b' ' {
+    // The original runs both loops to the first non-space / space whatever the line's end
+    // (0x115c82, 0x115cb0); the line's first word always ends inside it, except on a line of
+    // spaces before a word wider than the box, where it drew the word twice or ran past the
+    // text. The port stops at the line's end.
+    while start < end && at(text, start) == b' ' {
         put_char(chip, ctx, font, b' ');
         line_w = line_w.wrapping_sub(width(font, b' ') as u16);
         start += 1;
     }
-    while at(text, start) != b' ' {
+    while start < end && at(text, start) != b' ' {
         let c = at(text, start);
         put_char(chip, ctx, font, c);
         line_w = line_w.wrapping_sub(width(font, c) as u16);

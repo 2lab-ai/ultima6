@@ -622,6 +622,7 @@ Marker addresses that are not function entries (tables cited on fields):
 - 0x100628: `sound/`; `sound/effects.rs::start_dma`
 - 0x100890: `sound/`; `sound/interrupt.rs::interrupt`
 - 0x104ffe: `ui/tables.rs::keyword_end`
+- 0x10f596: `intro/music.rs::play_song`
 - 0x10f6ae: `intro/transfer.rs::ask_source`
 - 0x10f716: `intro/transfer.rs::ask_source`
 - 0x110ba4: `ui/tables.rs::roster_hp`
@@ -701,7 +702,7 @@ Marker addresses that are not function entries (tables cited on fields):
 Markers written `u 0x...` against the functions of `u` (REA's procedure list plus the code
 hunk bases, less the `jmp abs.l` thunks). Same status precedence as above.
 
-Totals: u functions 249: ported 110, stubbed 3, replaced 16, - 120.
+Totals: u functions 249: ported 112, stubbed 1, replaced 18, - 118.
 
 | address | hunk | Rust path | status |
 |---|---|---|---|
@@ -716,9 +717,9 @@ Totals: u functions 249: ported 110, stubbed 3, replaced 16, - 120.
 | u 0x100e96 | 0 |  | - |
 | u 0x100f10 | 0 |  | - |
 | u 0x100f7c | 0 |  | - |
-| u 0x100f96 | 0 |  | - |
+| u 0x100f96 | 0 | `intro/music.rs::remove_player` | ported |
 | u 0x100fa4 | 0 |  | - |
-| u 0x101010 | 0 | `intro/seams.rs:28 in music_stop` | stubbed |
+| u 0x101010 | 0 | `intro/music.rs::stop_player` | ported |
 | u 0x10102a | 0 |  | - |
 | u 0x101126 | 0 |  | - |
 | u 0x101388 | 0 |  | - |
@@ -750,7 +751,7 @@ Totals: u functions 249: ported 110, stubbed 3, replaced 16, - 120.
 | u 0x1020b8 | 0 |  | - |
 | u 0x102108 | 0 |  | - |
 | u 0x102150 | 0 |  | - |
-| u 0x1021bc | 0 | `intro/seams.rs:34 in local_time` | stubbed |
+| u 0x1021bc | 0 | `intro/seams.rs:10 in local_time` | stubbed |
 | u 0x1021f0 | 0 |  | - |
 | u 0x1022ac | 0 |  | - |
 | u 0x1022fc | 0 |  | - |
@@ -784,7 +785,7 @@ Totals: u functions 249: ported 110, stubbed 3, replaced 16, - 120.
 | u 0x1031b8 | 1 | `intro/mod.rs::menu` | ported |
 | u 0x10361a | 1 | `intro/mod.rs::journey_onward` | ported |
 | u 0x103658 | 1 |  | - |
-| u 0x1036bc | 1 | `intro/seams.rs::play_song` | ported |
+| u 0x1036bc | 1 | `intro/music.rs::play_song` | ported |
 | u 0x103830 | 2 | `intro/opening.rs::draw_static` | ported |
 | u 0x103954 | 2 |  | - |
 | u 0x103956 | 2 | `intro/opening.rs::set_script` | ported |
@@ -837,7 +838,7 @@ Totals: u functions 249: ported 110, stubbed 3, replaced 16, - 120.
 | u 0x10ac08 | 9 | `intro/passages.rs::passage` | ported |
 | u 0x10f4da | 9 | `intro/passages.rs::show_passage` | ported |
 | u 0x10f548 | 10 | `intro/load.rs::load_raw` | ported |
-| u 0x10f596 | 10 | `intro/seams.rs:18 in music_load` | stubbed |
+| u 0x10f596 | 10 | `intro/music.rs::play_song` | replaced |
 | u 0x10f6ae | 10 | `intro/transfer.rs::ask_source` | replaced |
 | u 0x10f6e2 | 10 |  | - |
 | u 0x10f716 | 10 | `intro/transfer.rs::ask_source` | replaced |
@@ -857,7 +858,7 @@ Totals: u functions 249: ported 110, stubbed 3, replaced 16, - 120.
 | u 0x10faf2 | 11 |  | - |
 | u 0x10faf4 | 11 |  | - |
 | u 0x10faf6 | 11 |  | - |
-| u 0x10fafc | 11 | `intro/seams.rs::start_music` | ported |
+| u 0x10fafc | 11 | `intro/music.rs::start_music` | ported |
 | u 0x10fb14 | 11 |  | - |
 | u 0x10fb20 | 11 |  | - |
 | u 0x10fb36 | 11 |  | - |
@@ -937,7 +938,7 @@ Totals: u functions 249: ported 110, stubbed 3, replaced 16, - 120.
 | u 0x11653c | 19 | `intro/mem.rs::overlay_composite` | ported |
 | u 0x1165c2 | 19 | `intro/mem.rs::composite_mask` | ported |
 | u 0x1165f8 | 19 |  | - |
-| u 0x116602 | 19 |  | - |
+| u 0x116602 | 19 | `intro/music.rs::play_song` | replaced |
 | u 0x116680 | 21 |  | - |
 | u 0x1198f8 | 23 | `intro/video.rs::server` | ported |
 | u 0x119944 | 23 | `intro/gypsy.rs::shimmer_byte` | ported |

@@ -71,9 +71,9 @@ pub struct Hero {
     /// Original: A4+0x2bd8 (14 bytes: the name typed, NUL-terminated; bytes after the NUL keep
     /// what a longer earlier answer left there)
     pub name: [u8; 14],
-    /// Original: A4+0x2bee (the sex answer: 'M' / 'F', then "Male" / "Female")
+    /// Original: A4+0x2bee (the sex answer: 'M' / 'F', then the male or female word)
     pub sex: Vec<u8>,
-    /// Original: A4+0x2bf6 (the class, "Avatar"; the transfer sheet shows it)
+    /// Original: A4+0x2bf6 (the class name; the transfer sheet shows it)
     pub class: Vec<u8>,
     /// Original: A4+0x2c06 (byte: status, 'G' = good)
     pub status: u8,
@@ -158,6 +158,8 @@ pub struct IntroState {
     pub files: Files,
     /// Port-only: the objlist 0x105700 wrote (the port's files are read-only).
     pub objlist: Option<Vec<u8>>,
+    /// Port-only: the calls into the MED routine not handed to the game state yet.
+    pub music: super::music::Calls,
 }
 
 impl IntroState {
@@ -200,6 +202,7 @@ impl IntroState {
             blocks: Ptr::at(Region::Blocks),
             files,
             objlist: None,
+            music: super::music::Calls::default(),
         }
     }
 

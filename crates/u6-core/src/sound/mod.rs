@@ -129,6 +129,14 @@ impl SoundState {
         }
     }
 
+    /// Takes the call log over from `old`, the state of the process before (a new `game` after
+    /// the launcher ran `u` again): the numbering goes on, so the host's driver, which counts the
+    /// calls it applied, takes the new ones, and calls it has not synced yet still reach it.
+    pub fn continue_calls(&mut self, old: &mut SoundState) {
+        self.calls = std::mem::take(&mut old.calls);
+        self.next_call = old.next_call;
+    }
+
     /// File name of song `n` (1..=13).
     pub fn file_name(&self, n: u16) -> Option<&str> {
         self.names

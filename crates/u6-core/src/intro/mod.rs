@@ -41,8 +41,9 @@
 //!   u 0x109ba8 · u 0x109bea / u 0x109c80 converters · u 0x109e72 sheet · u 0x109d0a; the
 //!   save reads (dos 0x10f6ae / 0x10f716, the raw Ultima V disk reader 0x1148b0 and hunk 17)
 //!   are replaced by the files
-//! - stubbed (seams): the MED music (u 0x10f596 load, u 0x101010 stop; 0x10fafc starts it
-//!   through a seam) and the VCR clock (u 0x1021bc local time)
+//! - music: u 0x1036bc songs · u 0x10fafc start · u 0x101010 StopPlayer · u 0x100f96
+//!   RemPlayer, `u`'s copy of `game`'s MED routine, on the host's audio driver
+//! - stubbed (seam): the VCR clock (u 0x1021bc local time)
 //!
 //! Empty routines of `u` the ported code calls do nothing in the port and carry no marker:
 //! 0x1031b2 / 0x1031b4 / 0x1031b6, 0x10faf2 / 0x10faf4 / 0x10faf6, 0x10fb14, 0x10fb20, 0x107822,
@@ -57,6 +58,7 @@ pub mod handoff;
 pub mod input;
 pub mod load;
 pub mod mem;
+pub mod music;
 pub mod opening;
 pub mod passages;
 pub mod screen;
@@ -71,6 +73,8 @@ pub mod transfer;
 pub mod video;
 
 use std::cell::RefCell;
+use std::future::{Future, poll_fn};
+use std::pin::pin;
 
 use u6_formats::font::WouFont;
 
@@ -99,7 +103,9 @@ pub enum IntroOutcome {
 /// it writes goes into the save path and the game state (see [`handoff::apply`]). `u` reads the
 /// user's files with the `savegame/objlist` this run wrote laid over them. The RNG of `u` is
 /// seeded with the low word of the game RNG's state, the platform seed both programs take from
-/// `time()`.
+/// `time()`. The calls `u` makes into its MED routine go into the game state's sound log at
+/// the end of each poll, in order with the calls of `game` (the hosts replay that log after
+/// each tick; see [`music`]).
 pub async fn run(state: &RefCell<State>, io: &Io) -> IntroOutcome {
     let Some(exe) = io.files().get("u").and_then(|f| UExe::parse(f).ok()) else {
         return IntroOutcome::Unavailable;
@@ -114,7 +120,20 @@ pub async fn run(state: &RefCell<State>, io: &Io) -> IntroOutcome {
         files.overlay(WRITTEN_LAYER, [(name, bytes)].into());
     }
     let mut st = IntroState::new(exe, files);
-    let outcome = main(&mut st, io, seed, &LAUNCHER_ARGS).await;
+    let calls = st.music.handle();
+    let outcome = {
+        let mut main = pin!(main(&mut st, io, seed, &LAUNCHER_ARGS));
+        poll_fn(|cx| {
+            let poll = main.as_mut().poll(cx);
+            let made = calls.take();
+            if !made.is_empty() {
+                let sound = &mut state.borrow_mut().sound;
+                made.into_iter().for_each(|c| sound.call(c));
+            }
+            poll
+        })
+        .await
+    };
     if let (IntroOutcome::Play { .. }, Some(bytes)) = (&outcome, st.objlist.as_ref()) {
         handoff::apply(&mut state.borrow_mut(), bytes);
     }
@@ -188,7 +207,11 @@ pub async fn main(st: &mut IntroState, io: &Io, seed: u16, args: &[&[u8]]) -> In
             }
             3 => credits::credits(st, io).await,
             4 => return journey_onward(st),
-            _ => return IntroOutcome::Quit,
+            _ => {
+                // 0x102bf2: the cleanup 0x113b68 (the platform's but for its RemPlayer), exit 3.
+                music::remove_player(st);
+                return IntroOutcome::Quit;
+            }
         }
     }
 }
@@ -205,8 +228,9 @@ async fn journey(st: &mut IntroState, io: &Io) -> IntroOutcome {
 /// Original: u 0x10361a (journey onward: check the `game` disk, clean up, exit with code 1)
 ///
 /// The disk check (open `game` on volume 1, with the disk prompt) and the cleanup 0x113b68 are
-/// the platform's.
+/// the platform's, but for the cleanup's RemPlayer ([`music::remove_player`]).
 pub fn journey_onward(st: &mut IntroState) -> IntroOutcome {
+    music::remove_player(st);
     st.views.passage = View {
         planes: Ptr::at(Region::Work),
         x1: 0x13f,
@@ -231,7 +255,7 @@ pub async fn menu(st: &mut IntroState, io: &Io) -> i16 {
     load::load_into(&mut st.video.chip, &st.files, b"mainmenu.new", menu_file);
     load::load_into(&mut st.video.chip, &st.files, b"title.new", title);
     if st.song != 1 {
-        seams::play_song(st, 1);
+        music::play_song(st, 1);
     }
     st.video.set_palette(&st.exe, 5);
     if st.menu_drawn == 0 {
@@ -311,9 +335,9 @@ pub async fn menu(st: &mut IntroState, io: &Io) -> i16 {
             _ => None,
         };
         if let Some(n) = play {
-            seams::play_song(st, n);
+            music::play_song(st, n);
             if n == 2 {
-                seams::start_music(st);
+                music::start_music(st);
             }
         }
         if let Some(p) = pick {
@@ -323,7 +347,7 @@ pub async fn menu(st: &mut IntroState, io: &Io) -> i16 {
     }
     st.video.pointer = 0;
     if choice != 3 {
-        seams::play_song(st, 0);
+        music::play_song(st, 0);
     }
     choice
 }

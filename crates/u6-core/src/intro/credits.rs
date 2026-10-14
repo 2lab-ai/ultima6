@@ -59,7 +59,7 @@ const PAGES: &[Step] = &[
     Step::More(0x0010_7780),
 ];
 
-/// The heading of the first page ("Ultima VI / A Lord British Production").
+/// The heading of the first page (the title, then the line naming its maker).
 const TITLE: u32 = 0x0010_745e;
 
 fn print(st: &mut IntroState, fresh: bool, addr: u32, args: &[u16]) {

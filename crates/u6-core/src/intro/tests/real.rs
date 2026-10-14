@@ -11,6 +11,7 @@ use std::rc::Rc;
 use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
 use crate::intro::{IntroOutcome, handoff, run};
+use crate::sound::AudioDriver;
 use crate::state::State;
 
 pub(super) const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
@@ -33,6 +34,20 @@ pub(super) struct Run {
     pub(super) e: Engine,
     outcome: Rc<RefCell<Option<IntroOutcome>>>,
     state: Rc<RefCell<Option<Rc<RefCell<State>>>>>,
+    /// The host's audio, when the run has one ([`Run::with_speaker`]).
+    pub(super) speaker: Option<Speaker>,
+}
+
+/// Sample rate of the test's audio.
+const RATE: u32 = 22_050;
+
+/// The audio driver the hosts run, fed as they feed it: synced to the engine's sound log after
+/// every tick and rendered for the tick's 20 ms.
+pub(super) struct Speaker {
+    pub(super) driver: AudioDriver,
+    /// The loudest sample since the last [`Run::peak`].
+    peak: f32,
+    buf: Vec<f32>,
 }
 
 impl Run {
@@ -43,6 +58,35 @@ impl Run {
             e: Engine::with_seed(files, seed).unwrap_or_else(|e| panic!("{e}")),
             outcome: Rc::new(RefCell::new(None)),
             state: Rc::new(RefCell::new(None)),
+            speaker: None,
+        }
+    }
+
+    /// The run with the host's audio driver on its files.
+    pub(super) fn with_speaker(mut self) -> Self {
+        let driver = AudioDriver::new(self.e.io().files()).unwrap_or_else(|e| panic!("{e}"));
+        self.speaker = Some(Speaker {
+            driver,
+            peak: 0.0,
+            buf: vec![0.0; 2 * (RATE / 50) as usize],
+        });
+        self
+    }
+
+    /// The loudest sample the speaker rendered since the last call (0 without a speaker).
+    pub(super) fn peak(&mut self) -> f32 {
+        self.speaker
+            .as_mut()
+            .map_or(0.0, |s| std::mem::take(&mut s.peak))
+    }
+
+    /// One engine tick of 20 ms with `ev`, then the host's audio step.
+    fn step(&mut self, ev: &[InputEvent]) {
+        self.e.tick(ev, 20);
+        if let Some(sp) = &mut self.speaker {
+            sp.driver.sync(&self.e.state().sound, self.e.io().files());
+            sp.driver.render(&mut sp.buf, RATE);
+            sp.peak = sp.buf.iter().fold(sp.peak, |m, &v| m.max(v.abs()));
         }
     }
 
@@ -60,22 +104,23 @@ impl Run {
             e,
             outcome,
             state: shared,
+            speaker: None,
         }
     }
 
     pub(super) fn tick(&mut self, n: u32) {
         for _ in 0..n {
-            self.e.tick(&[], 20);
+            self.step(&[]);
         }
     }
 
     /// Sends `keys`, ticks until the engine took them, then `settle` ticks more.
     pub(super) fn keys(&mut self, keys: &[Key], settle: u32) {
         let ev: Vec<InputEvent> = keys.iter().map(|&k| InputEvent::Key(k)).collect();
-        self.e.tick(&ev, 20);
+        self.step(&ev);
         let mut guard = 0;
         while self.e.io().pending_events() > 0 && guard < 20_000 {
-            self.e.tick(&[], 20);
+            self.step(&[]);
             guard += 1;
         }
         self.tick(settle);
@@ -387,7 +432,7 @@ fn transfer_without_a_save_says_no_character_found_and_returns_to_the_menu() {
 /// HP 200 / 200, Exp 3000, level 5.
 fn synthetic_u5_save() -> Vec<u8> {
     let mut b = vec![0u8; 0x40];
-    b[2..9].copy_from_slice(b"Shamino");
+    b[2..9].copy_from_slice(b"Quintus");
     b[2 + 9] = 0xb;
     b[2 + 0xc] = 20;
     b[2 + 0xd] = 25;
@@ -427,7 +472,7 @@ fn a_synthetic_ultima_v_save_is_transferred_into_the_objlist() {
     );
     let st = r.state.borrow().clone().unwrap();
     let s = st.borrow();
-    assert_eq!(s.actors.party.names[0], "Shamino");
+    assert_eq!(s.actors.party.names[0], "Quintus");
     let a = &s.actors.attrs;
     assert_eq!(
         (a.strength[1], a.dexterity[1], a.intelligence[1]),

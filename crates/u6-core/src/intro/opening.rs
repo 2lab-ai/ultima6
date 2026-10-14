@@ -122,10 +122,11 @@ pub fn draw_static(st: &mut IntroState) {
 ///
 /// Bytes below 0x80 are frames to draw; 0x80 n starts a loop of n (n ≥ 10 halves it), 0x81
 /// repeats it and ends the step, 0x82 draws static and ends, 0x83 flickers frame 0x22 twice,
-/// 0x84 n draws one of the next n frames at random (never the same twice), 0x85 goes to the next
-/// script, 0x86 / 0x87 draw / pick a frame from A4+0xd4, 0x88 blinks frames 0x25 / 0x26, 0x89
-/// draws a random one of 0x32..0x34, 0x8a ends the step, 0x8b nothing. The last frame number
-/// stays in A4+0x3fa and is drawn again by commands that do not set it.
+/// 0x84 n draws one of the next n frames at random (never the same twice; for n ≤ 1 its one
+/// draw), 0x85 goes to the next script, 0x86 / 0x87 draw / pick a frame from A4+0xd4, 0x88
+/// blinks frames 0x25 / 0x26, 0x89 draws a random one of 0x32..0x34, 0x8a ends the step, 0x8b
+/// nothing. The last frame number stays in A4+0x3fa and is drawn again by commands that do not
+/// set it.
 pub fn tv_step(st: &mut IntroState) {
     st.tv.static_drawn = 0;
     for _ in 0..4096 {
@@ -166,9 +167,12 @@ pub fn tv_step(st: &mut IntroState) {
                 }
                 0x84 => {
                     let n = i16::from(next_byte(st));
+                    // The original draws again while the pick repeats the last one (0x103b94);
+                    // with one frame or none to pick from it can only repeat and loops for ever.
+                    // The port keeps that one draw.
                     let pick = loop {
                         let p = st.tv.pos + st.random(n);
-                        if st.tv.last_pick != p {
+                        if st.tv.last_pick != p || n <= 1 {
                             break p;
                         }
                     };
@@ -270,7 +274,7 @@ pub async fn opening(st: &mut IntroState, io: &Io) {
     swap(st, io).await;
     st.video.cycling = 0;
     st.video.set_palette(&st.exe, 0);
-    super::seams::play_song(st, 0);
+    super::music::play_song(st, 0);
 }
 
 /// Waits `n` frames polling the keys; true when Escape was pressed.
@@ -299,13 +303,13 @@ async fn room_until_key(st: &mut IntroState, io: &Io) -> bool {
 /// 0x1041b0 from the first music call to 0x10558e; true = ended through 0x10558e (every path
 /// but the Escape check before the first picture).
 async fn body(st: &mut IntroState, io: &Io) -> bool {
-    super::seams::play_song(st, 2);
+    super::music::play_song(st, 2);
     st.tv.file = st.files_ptr;
     let file = st.tv.file;
     super::load::load_into(&mut st.video.chip, &st.files, b"intro_1.new", file);
     let draw = Ptr::at(st.video.draw);
     super::load::load_into(&mut st.video.chip, &st.files, b"intro_1a.new", draw);
-    super::seams::start_music(st);
+    super::music::start_music(st);
     swap(st, io).await;
     st.video.fade_in(io, st.exe.palette(0)).await;
     st.views.draw.planes = st.views.screen.planes;

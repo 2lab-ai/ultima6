@@ -301,8 +301,8 @@ impl Video {
         self.sprite_ctl = u32::from(pos) << 16 | u32::from(ctl);
     }
 
-    /// Original: u 0x1198f8 (VBlank server "Ultima 6 Int": BEAMCON0, the pointer sprite,
-    /// fades, colour cycling)
+    /// Original: u 0x1198f8 (VBlank server, the interrupt `u` names after itself: BEAMCON0, the
+    /// pointer sprite, fades, colour cycling)
     ///
     /// The frame-wait flag it clears is the port's [`Video::wait_frame`].
     pub fn server(&mut self) {

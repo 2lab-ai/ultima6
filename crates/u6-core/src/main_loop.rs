@@ -250,6 +250,7 @@ fn relaunch(state: &RefCell<State>, io: &Io) {
     let mut s = state.borrow_mut();
     fresh.rng = s.rng;
     fresh.saveload = std::mem::take(&mut s.saveload);
+    fresh.sound.continue_calls(&mut s.sound);
     if let Some(objlist) = fresh.saveload.objlist.clone() {
         crate::saveload::objlist::decode(&mut fresh, &objlist);
         fresh.place_party();

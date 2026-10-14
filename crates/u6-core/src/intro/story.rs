@@ -300,7 +300,7 @@ pub async fn introduction(st: &mut IntroState, io: &Io) {
     st.video.set_palette(&st.exe, 0);
     st.skip = 0;
     st.menu_drawn = 0;
-    super::seams::play_song(st, 0);
+    super::music::play_song(st, 0);
 }
 
 /// 0x107934..0x109764: the scenes; returns at the end or on Escape.
@@ -310,7 +310,7 @@ async fn body(st: &mut IntroState, io: &Io) {
     let file = st.files_ptr;
     super::load::load_into(&mut st.video.chip, &st.files, b"intro.new", file);
     st.video.set_palette(&st.exe, 2);
-    super::seams::play_song(st, 3);
+    super::music::play_song(st, 3);
     put(st, 0, 0, 6);
     put(st, 0, 0x70, 5);
     swap(st, io).await;
