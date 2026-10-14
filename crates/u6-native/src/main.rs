@@ -3,8 +3,12 @@
 //!
 //! ```text
 //! u6-native --zip ultima-vi.zip [--seed N] [--save-dir DIR]      open the window
-//! u6-native --zip ultima-vi.zip --headless-png out.png [--frames N] [--keys up,up,left,t] [--seed N] [--save-dir DIR]
+//! u6-native --zip ultima-vi.zip --headless-png out.png [--frames N] [--keys up,up,left,t] [--seed N] [--save-dir DIR] [--wav out.wav]
 //! ```
+//!
+//! Sound: the window plays the game's music through the default output device (cpal); headless
+//! `--wav PATH` writes the audio of the run (each tick's length at 44.1 kHz, 16-bit stereo) and
+//! prints its RMS and peak.
 //!
 //! `--save-dir DIR` keeps the game's saves in `DIR/savegame/` (the original's PLAYER-disk
 //! layout; an original `savegame/` directory copied there loads as it is): the boot reads the
@@ -31,7 +35,9 @@ use u6_core::saveload::{SaveSync, attach};
 use u6_core::{Engine, Files, HEIGHT, InputEvent, Key, WIDTH};
 use u6_intake::{InputFile, intake};
 
+mod audio;
 mod saves;
+use audio::{Audio, Output, WAV_RATE};
 use saves::DirStore;
 
 const SCALE: usize = 3;
@@ -46,6 +52,7 @@ struct Args {
     keys: Vec<Token>,
     seed: Option<u16>,
     save_dir: Option<PathBuf>,
+    wav: Option<PathBuf>,
 }
 
 /// One `--keys` token.
@@ -126,6 +133,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 parsed.seed = Some(n.parse().map_err(|_| format!("bad --seed {n:?}"))?);
             }
             "--save-dir" => parsed.save_dir = Some(value("a directory")?.into()),
+            "--wav" => parsed.wav = Some(value("a path")?.into()),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -187,6 +195,7 @@ fn simulate(
     frames: u32,
     tokens: &[Token],
     mut saves: Option<&mut Saves>,
+    mut sound: Option<(&mut Audio, &mut Vec<f32>)>,
 ) -> Result<Vec<u8>, String> {
     let mut queue: std::collections::VecDeque<Key> = std::collections::VecDeque::new();
     let mut next = tokens.iter();
@@ -224,6 +233,10 @@ fn simulate(
         engine.tick(&input, HEADLESS_TICK_MS);
         if let Some(saves) = saves.as_deref_mut() {
             saves.flush(engine)?;
+        }
+        if let Some((audio, samples)) = sound.as_mut() {
+            audio.sync(engine);
+            audio.render_ms(HEADLESS_TICK_MS, samples);
         }
     }
     let mut rgba = Vec::new();
@@ -294,6 +307,13 @@ fn map_key(key: minifb::Key, ctrl: bool) -> Option<Key> {
 
 fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String> {
     let (w, h) = (WIDTH * SCALE, HEIGHT * SCALE);
+    let mut sound = match Output::open() {
+        Ok(out) => Some((Audio::new(&engine, out.rate)?, out)),
+        Err(e) => {
+            eprintln!("audio: {e}; running silent");
+            None
+        }
+    };
     let mut window =
         Window::new("Ultima VI", w, h, WindowOptions::default()).map_err(|e| e.to_string())?;
     window.set_target_fps(60);
@@ -316,6 +336,10 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
         engine.tick(&input, step as u32);
         if let Some(saves) = saves.as_mut() {
             saves.flush(&engine)?;
+        }
+        if let Some((audio, out)) = sound.as_mut() {
+            audio.sync(&engine);
+            out.top_up(audio);
         }
         print_log(&mut engine);
         engine.frame().write_rgba(&mut rgba);
@@ -346,9 +370,32 @@ fn run(args: Args) -> Result<(), String> {
     match &args.headless_png {
         Some(path) => {
             let mut engine = boot(zip, args.seed.unwrap_or(0), saves.as_ref())?;
-            let rgba = simulate(&mut engine, args.frames, &args.keys, saves.as_mut())?;
+            let mut audio = match &args.wav {
+                Some(_) => Some(Audio::new(&engine, WAV_RATE)?),
+                None => None,
+            };
+            let mut samples = Vec::new();
+            let sound = audio.as_mut().map(|a| (a, &mut samples));
+            let rgba = simulate(&mut engine, args.frames, &args.keys, saves.as_mut(), sound)?;
             print_log(&mut engine);
             write_png(path, &rgba)?;
+            if let Some(wav) = &args.wav {
+                audio::write_wav(wav, &samples, WAV_RATE)?;
+                let (rms, peak) = audio::levels(&samples);
+                let s = engine.state();
+                println!(
+                    "wrote {} ({:.2} s, rms {rms:.4}, peak {peak:.4}; sound {}, song {} {})",
+                    wav.display(),
+                    samples.len() as f64 / 2.0 / f64::from(WAV_RATE),
+                    if u6_core::sound::sound_on(&s) {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                    s.sound.current,
+                    s.sound.file_name(s.sound.current).unwrap_or("-"),
+                );
+            }
             let hits = engine.stub_hits();
             let stubs: u64 = hits.values().sum();
             println!(
@@ -417,6 +464,11 @@ mod tests {
             Some(PathBuf::from("saves"))
         );
         assert!(args(&["--save-dir"]).is_err());
+        assert_eq!(
+            args(&["--wav", "boot.wav"]).unwrap().wav,
+            Some(PathBuf::from("boot.wav"))
+        );
+        assert_eq!(a.wav, None);
         assert_eq!(
             a.keys,
             [Key::Up, Key::Right, Key::Char('t'), Key::Escape].map(Token::Key)

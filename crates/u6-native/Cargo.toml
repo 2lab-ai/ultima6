@@ -11,3 +11,4 @@ u6-core.workspace = true
 u6-intake.workspace = true
 minifb = "0.29"
 png = "0.18"
+cpal = "0.18"
