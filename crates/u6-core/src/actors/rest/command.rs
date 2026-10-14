@@ -69,7 +69,8 @@ pub async fn rest(state: &RefCell<State>, io: &Io) {
         crate::inventory::draw_list(state, io).await;
     }
     end_tune(&mut state.borrow_mut());
-    for i in 0..size(&state.borrow()) {
+    let n = size(&state.borrow());
+    for i in 0..n {
         let m = member(&state.borrow(), i);
         if m == guard {
             say(state, io, STR_NEWLINE, &[]).await;
