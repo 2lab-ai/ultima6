@@ -82,6 +82,16 @@ export async function forgetFiles() {
   if (window.__fail.has('forget')) { log('forget:fail'); throw new Error('test: storage refused the delete'); }
   await real.forgetFiles(); log('forget:end');
 }
+export async function storeSaves(files, replace) {
+  log('saves:store:start:' + files.length); await window.__gate('saves');
+  await real.storeSaves(files, replace); log('saves:store:end');
+}
+export async function loadSaves() {
+  const files = await real.loadSaves(); log('saves:load:' + files.length); return files;
+}
+export async function forgetSaves() {
+  log('saves:forget:start'); await real.forgetSaves(); log('saves:forget:end');
+}
 `;
 
 // Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch.
@@ -137,7 +147,8 @@ export async function waitSettled(page, timeout = 60_000) {
   await page.waitForFunction(() => document.body.dataset.ops === '0', null, { timeout });
 }
 
-/// Drops `paths` (local files) plus `extra` ({ name, text }) on the drop zone, as a user drop.
+/// Drops `paths` (local files) plus `extra` ({ name, text } or { name, bytes: number[] }) on the
+/// drop zone, as a user drop.
 export async function dropFiles(page, paths, extra = []) {
   await page.evaluate(() => {
     if (document.getElementById('__t')) return;
@@ -149,9 +160,27 @@ export async function dropFiles(page, paths, extra = []) {
   await page.evaluate((extra) => {
     const dt = new DataTransfer();
     for (const file of document.getElementById('__t').files) dt.items.add(file);
-    for (const { name, text } of extra) dt.items.add(new File([text], name));
+    for (const { name, text, bytes } of extra) {
+      dt.items.add(new File([bytes ? new Uint8Array(bytes) : text], name));
+    }
     document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
   }, extra);
+}
+
+/// The paths of the stored save files (sorted), [] when there are none.
+export function savedPaths(page) {
+  return page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const get = db.transaction('files').objectStore('files')
+        .getAll(IDBKeyRange.bound('save:', 'save:\uffff'));
+      get.onsuccess = () => { db.close(); done(get.result.map((f) => f.path).sort()); };
+      get.onerror = () => fail(get.error);
+    };
+  }));
 }
 
 /// The paths kept in IndexedDB, or null.
@@ -177,6 +206,11 @@ export const state = (page) => page.evaluate(() => ({
   focused: document.activeElement?.id ?? document.activeElement?.tagName,
   pickerDisabled: document.getElementById('picker').disabled,
   restartHidden: document.getElementById('restart').hidden,
+  saves: Number(document.getElementById('screen').dataset.saves),
+  leader: document.getElementById('screen').dataset.leader,
+  saved: Number(document.body.dataset.saved ?? 0),
+  audio: document.body.dataset.audio,
+  audioChunks: Number(document.body.dataset.audioChunks ?? 0),
 }));
 
 export const log = (page) => page.evaluate(() => [...window.__log]);

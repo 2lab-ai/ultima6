@@ -480,6 +480,8 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
                 io.vblank().await;
             }
         }
+        // A death in the clock's ticks above (a hazard tile, 0x1032b6) left the raise pending.
+        raise_if_dead(state, io).await;
         let actor = pick.actor as u16;
         let a = usize::from(actor);
         let held = swallowed(&mut state.borrow_mut(), actor);

@@ -4,12 +4,24 @@
 //! JS owns the clock and the DOM. Key callbacks only queue events; [`Game::tick`] delivers them
 //! to the engine with the elapsed time, so game code never runs inside an input handler.
 //!
+//! Sound: once the page has an AudioContext it calls [`Game::audio_start`] with its sample
+//! rate; every tick then replays the game's MED calls on the emulated A500 audio machine
+//! (`u6_core::sound::AudioDriver`) and [`Game::audio_render`] renders the samples the page
+//! posts to its AudioWorklet. Saves: the page lays the stored `savegame/*` files over the
+//! new-game files before the boot ([`Game::load_save`], `saveload::attach`), and after a tick
+//! whose Save committed ([`Game::save_generation`] moved) it stores what [`Game::save_collect`]
+//! lists, then reports the generation committed ([`Game::save_committed`]).
+//!
 //! Limits (a clear message instead of an exhausted tab): [`MAX_INPUT_BYTES`] for the dropped
 //! files together, [`MAX_UNZIPPED_BYTES`] for what the zip entries the intake inflates declare,
 //! [`MAX_GAME_FILES_BYTES`] for the game files the intake produces.
 
 mod zipscan;
 
+use std::collections::BTreeMap;
+
+use u6_core::saveload::{MemStore, attach, changed_since};
+use u6_core::sound::AudioDriver;
 use u6_core::{Engine, Files, Framebuffer, InputEvent, Key};
 use u6_intake::{InputFile, intake};
 use wasm_bindgen::prelude::*;
@@ -94,6 +106,16 @@ pub struct Game {
     /// Paths of the game files the last start booted from, until the page has kept them (their
     /// bytes are read in place from the engine's file map, never copied in wasm).
     kept: Vec<String>,
+    /// The stored `savegame/*` files the next start lays over the game files.
+    saves: BTreeMap<String, Vec<u8>>,
+    /// The last save generation the page reported stored.
+    saved_gen: u32,
+    /// The files [`Game::save_collect`] listed, until [`Game::save_committed`].
+    save_out: Vec<(String, Vec<u8>)>,
+    /// The audio machine, once the page started its AudioContext.
+    audio: Option<AudioDriver>,
+    audio_rate: u32,
+    audio_buf: Vec<f32>,
 }
 
 impl Default for Game {
@@ -115,6 +137,12 @@ impl Game {
             rgba: Vec::new(),
             log: Vec::new(),
             kept: Vec::new(),
+            saves: BTreeMap::new(),
+            saved_gen: 0,
+            save_out: Vec::new(),
+            audio: None,
+            audio_rate: 0,
+            audio_buf: Vec::new(),
         };
         game.redraw();
         game
@@ -146,11 +174,112 @@ impl Game {
         self.boot(seed).map_err(|report| JsError::new(&report))
     }
 
-    /// Number of game files the running game booted from.
+    /// Number of game files the running game booted from (the save laid over them not
+    /// counted; see [`Game::save_files`]).
     pub fn game_files(&self) -> u32 {
         self.engine
             .as_ref()
-            .map_or(0, |e| e.io().files().len() as u32)
+            .map_or(0, |e| e.io().files().layer_len("base") as u32)
+    }
+
+    /// Collects one stored save file (`savegame/objlist`, `savegame/objblkAA`, ...) for the next
+    /// [`Game::start`], which lays them over the game files.
+    pub fn load_save(&mut self, path: &str, bytes: Vec<u8>) {
+        self.saves.insert(path.to_string(), bytes);
+    }
+
+    /// Number of stored save files the running game booted with (0: a new game).
+    pub fn save_files(&self) -> u32 {
+        self.engine.as_ref().map_or(0, |e| {
+            e.io().files().layer_len(u6_core::saveload::SAVE_LAYER) as u32
+        })
+    }
+
+    /// Saves the running game made since boot (0x105716 runs).
+    pub fn save_generation(&self) -> u32 {
+        self.engine
+            .as_ref()
+            .map_or(0, |e| e.state().saveload.generation)
+    }
+
+    /// Lists the files the Saves since the last reported commit wrote (`savegame/objlist` and
+    /// the replaced blocks, the original's names); returns how many. Read them with
+    /// [`Game::save_path`] / [`Game::save_ptr`] / [`Game::save_len`].
+    pub fn save_collect(&mut self) -> u32 {
+        self.save_out = self.engine.as_ref().map_or_else(Vec::new, |e| {
+            changed_since(&e.state(), self.saved_gen)
+                .into_iter()
+                .collect()
+        });
+        self.save_out.len() as u32
+    }
+
+    pub fn save_path(&self, i: u32) -> String {
+        self.save_out
+            .get(i as usize)
+            .map(|(p, _)| p.clone())
+            .unwrap_or_default()
+    }
+
+    /// Address of listed save file `i` in wasm memory; copy `save_len(i)` bytes before the next
+    /// call into wasm.
+    pub fn save_ptr(&self, i: u32) -> *const u8 {
+        self.save_out
+            .get(i as usize)
+            .map_or(std::ptr::null(), |(_, b)| b.as_ptr())
+    }
+
+    pub fn save_len(&self, i: u32) -> usize {
+        self.save_out.get(i as usize).map_or(0, |(_, b)| b.len())
+    }
+
+    /// The page stored the files of generation `generation` (all-or-nothing); later lists start
+    /// after it. A failed store is not reported, so the next list still has its files.
+    pub fn save_committed(&mut self, generation: u32) {
+        self.saved_gen = self.saved_gen.max(generation);
+        self.save_out = Vec::new();
+    }
+
+    /// The leader's map position (x, y, z), or empty before a start.
+    pub fn leader_position(&self) -> Vec<u16> {
+        self.engine.as_ref().map_or_else(Vec::new, |e| {
+            let s = e.state();
+            s.actors.party.leader().map_or_else(Vec::new, |l| {
+                let p = s.objects.location[usize::from(l.0)];
+                vec![p.x, p.y, u16::from(p.z)]
+            })
+        })
+    }
+
+    /// Starts the audio machine for the running game at the page's `sample_rate`; false before
+    /// a start (the page calls it again for each new game).
+    pub fn audio_start(&mut self, sample_rate: u32) -> Result<bool, JsError> {
+        let Some(engine) = &self.engine else {
+            return Ok(false);
+        };
+        let mut driver =
+            AudioDriver::new(engine.io().files()).map_err(|e| JsError::new(&e.to_string()))?;
+        driver.sync(&engine.state().sound, engine.io().files());
+        self.audio = Some(driver);
+        self.audio_rate = sample_rate;
+        Ok(true)
+    }
+
+    /// Renders `frames` stereo frames (interleaved f32) into the audio buffer; returns the
+    /// number of samples (0 without [`Game::audio_start`]). Copy them from [`Game::audio_ptr`]
+    /// before the next call into wasm.
+    pub fn audio_render(&mut self, frames: u32) -> usize {
+        let Some(driver) = &mut self.audio else {
+            return 0;
+        };
+        self.audio_buf.clear();
+        self.audio_buf.resize(2 * frames as usize, 0.0);
+        driver.render(&mut self.audio_buf, self.audio_rate);
+        self.audio_buf.len()
+    }
+
+    pub fn audio_ptr(&self) -> *const f32 {
+        self.audio_buf.as_ptr()
     }
 
     /// Number of game files the last start left for the page to keep (so a reload needs no new
@@ -200,6 +329,9 @@ impl Game {
         if let Some(engine) = &mut self.engine {
             engine.tick(&self.pending, ms);
             self.log.extend(engine.take_log());
+            if let Some(driver) = &mut self.audio {
+                driver.sync(&engine.state().sound, engine.io().files());
+            }
         }
         self.pending.clear();
         self.redraw();
@@ -256,10 +388,12 @@ impl Game {
         Ok(())
     }
 
-    /// Kept file `i`, read in place from the running engine's files.
+    /// Kept file `i`, read in place from the running engine's game files (the base layer: a
+    /// save laid over them is never kept as a game file).
     fn kept_bytes(&self, i: u32) -> Option<&[u8]> {
         let path = self.kept.get(i as usize)?;
-        self.engine.as_ref()?.io().files().get(path)
+        let (_, bytes) = self.engine.as_ref()?.io().files().get_in("base", path)?;
+        Some(bytes)
     }
 
     /// [`Game::start`] without the JS error type (testable off wasm).
@@ -291,13 +425,26 @@ impl Game {
             return Err(report);
         }
         let mut paths: Vec<String> = r.files.keys().cloned().collect();
-        match Engine::with_seed(Files::new(r.files), seed) {
+        let mut files = Files::new(r.files);
+        let saves = MemStore {
+            files: std::mem::take(&mut self.saves),
+        };
+        let stored = attach(&mut files, &saves).map_err(|e| format!("{report}\n{e}"))?;
+        if stored > 0 {
+            report.push_str(&format!(
+                "\nThe saved game ({stored} files) is laid over them."
+            ));
+        }
+        match Engine::with_seed(files, seed) {
             Ok(engine) => {
                 // A path that differs from another only in case is shadowed (the game's lookups
                 // ignore case): the engine never reads it, so it is not kept either.
                 let files = engine.io().files();
-                paths.retain(|p| files.resolve(p).is_some_and(|(_, key)| key == p));
+                paths.retain(|p| files.get_in("base", p).is_some_and(|(key, _)| key == p));
                 self.kept = paths;
+                self.saved_gen = 0;
+                self.save_out = Vec::new();
+                self.audio = None;
                 self.engine = Some(engine);
                 self.pending.clear();
                 self.redraw();
@@ -417,5 +564,88 @@ mod tests {
             again.tick(16);
         }
         assert!(game.frame_rgba() == again.frame_rgba(), "same first frames");
+    }
+
+    /// A Save's files listed for the page, stored, and laid over the same game files: the next
+    /// start resumes where the party stood; the kept game files stay the new-game ones; the
+    /// sound machine starts and renders.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn a_save_listed_and_laid_over_restarts_there() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let data = std::fs::read(ZIP).unwrap();
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", data.clone()).unwrap();
+        game.boot(1).unwrap();
+        let ticks = |game: &mut Game, n: u32| {
+            for _ in 0..n {
+                game.tick(16);
+            }
+        };
+        ticks(&mut game, 120);
+        assert_eq!((game.save_generation(), game.save_collect()), (0, 0));
+        let start = game.leader_position();
+        game.key_down("ArrowRight", "ArrowRight", false);
+        ticks(&mut game, 400);
+        let moved = game.leader_position();
+        assert_ne!(moved, start, "one step east");
+        game.key_down("KeyS", "s", true);
+        ticks(&mut game, 30);
+        game.key_down("KeyY", "y", false);
+        ticks(&mut game, 60);
+        assert_eq!(game.save_generation(), 1, "Ctrl-S, Y saved");
+        assert_eq!(game.leader_position(), moved);
+        let n = game.save_collect();
+        assert!(n > 1, "objlist and blocks: {n}");
+        let files: Vec<(String, Vec<u8>)> = (0..n)
+            .map(|i| {
+                let len = game.save_len(i);
+                let bytes = unsafe { std::slice::from_raw_parts(game.save_ptr(i), len) };
+                (game.save_path(i), bytes.to_vec())
+            })
+            .collect();
+        assert!(files.iter().any(|(p, _)| p == "savegame/objlist"));
+        game.save_committed(1);
+        assert_eq!(game.save_collect(), 0, "nothing new after the commit");
+        let kept: Vec<(String, Vec<u8>)> = (0..game.kept_count())
+            .map(|i| (game.kept_path(i), game.kept_bytes(i).unwrap().to_vec()))
+            .collect();
+        let mut again = Game::new();
+        for (path, bytes) in &kept {
+            again.collect(path, bytes.clone()).unwrap();
+        }
+        for (path, bytes) in files {
+            again.load_save(&path, bytes);
+        }
+        again.boot(1).unwrap();
+        assert_eq!(again.save_files(), n);
+        assert_eq!(
+            again.game_files(),
+            game.game_files(),
+            "the save is not a game file"
+        );
+        assert_eq!(again.leader_position(), moved);
+        let mut fresh = Game::new();
+        for (path, bytes) in kept {
+            fresh.collect(&path, bytes).unwrap();
+        }
+        fresh.boot(1).unwrap();
+        assert_eq!(
+            fresh.leader_position(),
+            start,
+            "the kept files are the new game's"
+        );
+        assert!(fresh.audio_start(48_000).unwrap());
+        let mut heard = 0f32;
+        for _ in 0..60 {
+            fresh.tick(16);
+            let n = fresh.audio_render(768);
+            assert_eq!(n, 1536);
+            heard = heard.max(fresh.audio_buf.iter().fold(0f32, |m, &v| m.max(v.abs())));
+        }
+        assert!(heard > 0.0, "the boot's song renders");
     }
 }

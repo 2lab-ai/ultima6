@@ -1,6 +1,8 @@
 // Browser tests of site/ under its real headers (tools/web/serve.mjs applies site/_headers):
 // the operation queue (rapid imports, import during the restore, forget during a save), error
-// handling (read and forget failures, an engine trap and Restart), keyboard focus, the CSP.
+// handling (read and forget failures, an engine trap and Restart), keyboard focus, the CSP,
+// saved games (stored after a Save, resumed on reload, forgotten, imported as a folder) and
+// the sound output (AudioContext after a gesture, chunks into the worklet).
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. Tests that need the user's disks skip when they are absent.
 //
@@ -249,6 +251,107 @@ test('Ctrl+S and Ctrl+R on the canvas are the game\'s Save and Restore, not the 
   await page.keyboard.press('Control+l');
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['KeyL', false], 'other Ctrl shortcuts stay the browser\'s');
 }, { needs: h.haveHfes });
+
+// Walks one step east, then saves (Ctrl-S, Y) and waits until the save is stored; returns the
+// leader's position before and after the step.
+async function walkAndSave(page) {
+  await h.sleep(2500); // the boot reaches the prompt
+  const start = (await h.state(page)).leader;
+  await page.keyboard.press('ArrowRight');
+  await h.sleep(3000); // the world turn plays the start fight's hits
+  const moved = (await h.state(page)).leader;
+  assert.notEqual(moved, start, 'the party moved');
+  await page.keyboard.press('Control+s');
+  await h.sleep(400);
+  await page.keyboard.press('y');
+  await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 30_000 });
+  await h.waitSettled(page);
+  assert.match((await h.state(page)).status, /Saved in this browser \(\d+ files\)/);
+  return { start, moved };
+}
+
+test('a save (Ctrl-S, Y) is kept; a reload resumes it there; forgetting it starts over', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, 130);
+  const { start, moved } = await walkAndSave(page);
+  const saved = await h.savedPaths(page);
+  assert.ok(saved.includes('savegame/objlist') && saved.length > 1, String(saved));
+  assert.ok((await h.log(page)).includes('saves:store:end'), 'stored through the queue');
+  await page.reload();
+  let s = await started(page, 130);
+  assert.equal(s.saves, saved.length, 'the stored save is laid over the game files');
+  assert.equal(s.leader, moved, 'resumed where it was saved');
+  assert.match(s.status, /the game saved in this browser, resumed/);
+  await page.click('#forget-save');
+  await h.waitSettled(page);
+  assert.deepEqual(await h.savedPaths(page), [], 'the save is gone');
+  assert.equal((await h.keptPaths(page)).length, 130, 'the game files stay');
+  assert.match((await h.state(page)).status, /The saved game was removed/);
+  await page.reload();
+  s = await started(page, 130);
+  assert.equal(s.saves, 0);
+  assert.equal(s.leader, start, 'a new game');
+  assert.match(s.status, /a new game \(no game saved in this browser\)/);
+}, { needs: h.haveHfes });
+
+test('an original savegame folder dropped becomes the saved game', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, 130);
+  const { moved } = await walkAndSave(page);
+  // The stored files, as a PLAYER disk's savegame/ folder would hold them.
+  const folder = await page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const get = req.result.transaction('files').objectStore('files')
+        .getAll(IDBKeyRange.bound('save:', 'save:\uffff'));
+      get.onsuccess = () => {
+        req.result.close();
+        done(get.result.map((f) => ({ name: `PLAYER/${f.path.toUpperCase()}`, bytes: [...f.bytes] })));
+      };
+    };
+  }));
+  await page.click('#forget-save');
+  await h.waitSettled(page);
+  assert.deepEqual(await h.savedPaths(page), []);
+  await h.dropFiles(page, [], folder);
+  const s = await started(page, 130);
+  assert.match(s.status, /The saved game \(\d+ files\) was imported/);
+  assert.equal(s.saves, folder.length);
+  assert.equal(s.leader, moved, 'the imported save resumes');
+  assert.equal((await h.savedPaths(page)).length, folder.length, 'one record per file, any case');
+}, { needs: h.haveHfes });
+
+test('zip: a click starts the sound, the worklet gets chunks, Mute; save and reload (receipt)', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await h.dropFiles(page, [h.ZIP]);
+  await started(page);
+  assert.equal((await h.state(page)).audio, 'off', 'no sound before a gesture');
+  await page.click('#screen');
+  await page.waitForFunction(() => Number(document.body.dataset.audioChunks ?? 0) > 5, null, { timeout: 15_000 });
+  let s = await h.state(page);
+  assert.equal(s.audio, 'running');
+  assert.deepEqual(await page.evaluate(() => window.__csp), [], 'the worklet loads under the CSP');
+  console.log(`  receipt: audioContext.state=${s.audio}, worklet chunks=${s.audioChunks}`);
+  await page.click('#mute');
+  assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'true');
+  await page.click('#mute');
+  assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'false');
+  await page.click('#screen');
+  const { moved } = await walkAndSave(page);
+  await writeFile('/tmp/claude-501/int-b-web-saved.png', await page.locator('#screen').screenshot());
+  await page.reload();
+  s = await started(page);
+  await h.sleep(1500);
+  await writeFile('/tmp/claude-501/int-b-web-restored.png', await page.locator('#screen').screenshot());
+  console.log(`  receipt: saved at ${moved}, after the reload ${s.leader} (${s.saves} save files)`);
+  assert.equal(s.leader, moved, 'restored position');
+}, { needs: h.haveZip });
 
 const filter = process.argv[2];
 const env = await h.setup();

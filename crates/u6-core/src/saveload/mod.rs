@@ -35,7 +35,7 @@ mod tests_real;
 
 pub use restore::{StateFiles, boot_objlist, load_state, read_state_files, restore, restore_game};
 pub use save::{commit_blocks, save, save_game, write_back_region};
-pub use store::{MemStore, SaveStore, SaveSync, StoreError, attach, changed_since};
+pub use store::{MemStore, SAVE_LAYER, SaveStore, SaveSync, StoreError, attach, changed_since};
 
 use crate::objects::BLOCK_COUNT;
 

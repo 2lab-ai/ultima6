@@ -8,13 +8,23 @@
 // the previous one finished, from its file reads through the boot to the storage commit. Each
 // works on its own Game and puts it on screen only once it started; the one it replaces is
 // freed then. Keys reach the engine only while the canvas has focus and a game runs.
+//
+// Saves: a Save in the game (Ctrl-S, Y) is stored after the tick it committed in, as one
+// operation on the same queue (one IndexedDB transaction); every start lays the stored save
+// over the game files, so a reload resumes it. Sound: the first click or key on the canvas
+// (or the Mute button) starts an AudioContext; after each tick the page renders the game's
+// audio in wasm a little ahead and posts it to the AudioWorklet (site/audio-worklet.js).
 import init, { Game, max_input_bytes } from './pkg/u6_web.js';
-import { collect, forgetFiles, loadFiles, saveFiles } from './store.js';
+import {
+  collect, forgetFiles, forgetSaves, loadFiles, loadSaves, saveFiles, storeSaves,
+} from './store.js';
 
 const canvas = document.getElementById('screen');
 const drop = document.getElementById('drop');
 const picker = document.getElementById('picker');
 const forget = document.getElementById('forget');
+const forgetSave = document.getElementById('forget-save');
+const mute = document.getElementById('mute');
 const restart = document.getElementById('restart');
 const statusLine = document.getElementById('status');
 
@@ -28,10 +38,14 @@ let game = null; // the running game, or null
 let crashed = false; // the engine trapped: nothing calls into it again until a reload
 
 // Public state for scripts and tests: data-ops = queued operations, data-state = what the page
-// does; data-files on the canvas = game files of the running game.
+// does, data-saved = the last save generation stored, data-audio / data-audio-chunks = the
+// AudioContext state and the chunks the worklet received; on the canvas data-files = game
+// files of the running game, data-saves = save files it booted with, data-leader = x,y,z.
 function reflect(state) {
   if (state) document.body.dataset.state = state;
-  canvas.dataset.files = String(game && !crashed ? game.game_files() : 0);
+  const live = game && !crashed;
+  canvas.dataset.files = String(live ? game.game_files() : 0);
+  canvas.dataset.saves = String(live ? game.save_files() : 0);
 }
 
 function setStatus(text) {
@@ -72,6 +86,117 @@ function enqueue(what, op) {
   return tail;
 }
 
+// --- sound ---------------------------------------------------------------------------------
+
+const AHEAD_S = 0.15; // audio rendered ahead of the worklet
+const MAX_RENDER_S = 0.25; // at most per tick (a tab back from the background)
+const audio = {
+  ctx: null, node: null, gain: null, ready: false, muted: false,
+  queued: 0, at: 0, posted: 0, received: 0, // the worklet's last report, frames posted since
+};
+
+function reflectAudio() {
+  document.body.dataset.audio = audio.ctx ? audio.ctx.state : 'off';
+  document.body.dataset.audioChunks = String(audio.received);
+}
+
+// The audio machine of game `g` at the context's rate (each new game gets its own).
+function attachAudio(g) {
+  if (audio.ready && g && !crashed) g.audio_start(audio.ctx.sampleRate);
+}
+
+// From a user gesture: the AudioContext (created once, resumed after that) and its worklet.
+async function startAudio() {
+  if (audio.ctx) {
+    if (audio.ctx.state === 'suspended') await audio.ctx.resume();
+    reflectAudio();
+    return;
+  }
+  const ctx = new AudioContext();
+  audio.ctx = ctx;
+  ctx.onstatechange = reflectAudio;
+  reflectAudio();
+  await ctx.audioWorklet.addModule('./audio-worklet.js');
+  const node = new AudioWorkletNode(ctx, 'u6-audio', {
+    numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
+  });
+  const gain = ctx.createGain();
+  gain.gain.value = audio.muted ? 0 : 1;
+  node.connect(gain).connect(ctx.destination);
+  node.port.onmessage = (e) => {
+    audio.queued = e.data.queued;
+    audio.received = e.data.received;
+    audio.at = ctx.currentTime;
+    audio.posted = 0;
+    reflectAudio();
+  };
+  Object.assign(audio, { node, gain, ready: true });
+  attachAudio(game);
+  if (ctx.state === 'suspended') await ctx.resume();
+  reflectAudio();
+}
+
+function gesture() {
+  startAudio().catch((err) => console.warn(`sound is off: ${message(err)}`));
+}
+
+// After a tick: keep the worklet AHEAD_S ahead (its last report less what it played since,
+// plus what was posted after the report).
+function feedAudio() {
+  if (!audio.ready || audio.ctx.state !== 'running') return;
+  const rate = audio.ctx.sampleRate;
+  const held = Math.max(0, audio.queued - (audio.ctx.currentTime - audio.at) * rate) + audio.posted;
+  const want = Math.min(Math.ceil(AHEAD_S * rate - held), Math.ceil(MAX_RENDER_S * rate));
+  if (want <= 0) return;
+  const n = game.audio_render(want);
+  if (n === 0) return;
+  // Copy before the next call into wasm, which may grow (detach) its memory.
+  const chunk = new Float32Array(wasm.memory.buffer, game.audio_ptr(), n).slice();
+  audio.node.port.postMessage(chunk, [chunk.buffer]);
+  audio.posted += want;
+}
+
+function setMuted(muted) {
+  audio.muted = muted;
+  if (audio.gain) audio.gain.gain.value = muted ? 0 : 1;
+  mute.textContent = muted ? 'Unmute' : 'Mute';
+  mute.setAttribute('aria-pressed', String(muted));
+}
+
+// --- saves ---------------------------------------------------------------------------------
+
+let saveSeen = 0; // the running game's highest save generation already queued for storing
+
+// After a tick: a Save that committed in it is stored as one operation; the game hears of the
+// commit (its next list starts after it) only once the transaction completed.
+function checkSave() {
+  const gen = game.save_generation();
+  if (gen <= saveSeen) return;
+  saveSeen = gen;
+  const g = game;
+  const files = [];
+  const n = g.save_collect();
+  for (let i = 0; i < n; i += 1) {
+    const path = g.save_path(i);
+    const ptr = g.save_ptr(i);
+    const len = g.save_len(i);
+    files.push({ path, bytes: new Uint8Array(wasm.memory.buffer, ptr, len).slice() });
+  }
+  enqueue('Saving the game', async () => {
+    await storeSaves(files);
+    if (g === game && !crashed) g.save_committed(gen);
+    document.body.dataset.saved = String(gen);
+    setStatus(`Saved in this browser (${files.length} files): the next visit resumes this game.`);
+  });
+}
+
+// The stored save into `next` before its start.
+async function attachSaves(next) {
+  const saves = await loadSaves();
+  for (const { path, bytes } of saves) next.load_save(path, bytes);
+  return saves.length;
+}
+
 // --- engine and frames ---------------------------------------------------------------------
 
 let looping = false;
@@ -99,6 +224,9 @@ function frame(now) {
     const log = game.take_log();
     if (log) console.info(log);
     draw();
+    feedAudio();
+    checkSave();
+    canvas.dataset.leader = game.leader_position().join(',');
   } catch (err) {
     stopOnTrap(err);
     return;
@@ -142,6 +270,8 @@ async function boot(next, origin) {
   const old = game;
   game = next;
   old?.free();
+  saveSeen = 0;
+  attachAudio(next);
   canvas.width = next.width();
   canvas.height = next.height();
   reflect('running');
@@ -174,11 +304,16 @@ function needEngine() {
   if (crashed) throw new Error('the engine stopped; press Restart');
 }
 
-// An import: `items` ({ path, file }) read one at a time into a new Game, booted, kept.
-async function importFiles(items) {
+// Files of an original `savegame/` folder (the PLAYER disk's saved game).
+const SAVE_PATH = /(^|\/)savegame\/[^/]+$/i;
+
+// An import: `items` ({ path, file }) read one at a time into a new Game, booted, kept. The
+// files of a `savegame/` folder among them become the stored save (replacing the old one);
+// a drop of only such a folder resumes it with the kept game files.
+async function importFiles(dropped) {
   needEngine();
-  const total = items.reduce((sum, { file }) => sum + file.size, 0);
-  if (items.length === 0) {
+  const total = dropped.reduce((sum, { file }) => sum + file.size, 0);
+  if (dropped.length === 0) {
     setStatus('No files in the drop.');
     return;
   }
@@ -188,6 +323,20 @@ async function importFiles(items) {
       'or the extracted files).');
     return;
   }
+  const saveItems = dropped.filter(({ path }) => SAVE_PATH.test(path));
+  const items = dropped.filter(({ path }) => !SAVE_PATH.test(path));
+  if (saveItems.length > 0) {
+    const files = [];
+    for (const { path, file } of saveItems) {
+      setStatus(`Reading ${path}…`);
+      files.push({ path: `savegame/${path.split('/').pop()}`, bytes: new Uint8Array(await file.arrayBuffer()) });
+    }
+    await storeSaves(files, true);
+    if (items.length === 0) {
+      await restoreKept(true, `The saved game (${files.length} files) was imported.`);
+      return;
+    }
+  }
   const next = new Game();
   let started = false;
   try {
@@ -196,15 +345,16 @@ async function importFiles(items) {
       // The JS copy lives only until wasm has its own (load_file copies it in).
       next.load_file(path, new Uint8Array(await file.arrayBuffer()));
     }
+    await attachSaves(next);
     const report = await boot(next, 'read');
     if (report === null) return;
     started = true;
     canvas.focus();
     const kept = (await keep(next))
-      ? ` The ${next.game_files()} game files are kept in this browser for the next visit ` +
-        '(not a saved game: each visit starts a new game).'
+      ? ` The ${next.game_files()} game files are kept in this browser for the next visit.`
       : ' (The files could not be kept in this browser; drop them again next time.)';
-    setStatus(`${report}\nStarted.${kept}\n${HOW_TO_PLAY}`);
+    const resumed = next.save_files() > 0 ? ' Resumed the game saved in this browser.' : '';
+    setStatus(`${report}\nStarted.${resumed}${kept}\n${HOW_TO_PLAY}`);
   } finally {
     if (started) {
       if (!crashed) next.release_kept();
@@ -214,13 +364,15 @@ async function importFiles(items) {
   }
 }
 
-// The restore: the kept files (if any) into a new Game, booted. `focus` when the user asked
-// for it (Restart); the restore at page load leaves the focus where it is.
-async function restoreKept(focus) {
+// The restore: the kept files (if any) and the saved game into a new Game, booted. `focus`
+// when the user asked for it (Restart, an imported save); the restore at page load leaves the
+// focus where it is. `note` goes first in the status.
+async function restoreKept(focus, note = '') {
   needEngine();
+  const lead = note ? `${note}\n` : '';
   let kept = await loadFiles();
   if (!kept || kept.length === 0) {
-    setStatus('No files loaded yet: drop or choose your Ultima VI files.');
+    setStatus(`${lead}No files loaded yet: drop or choose your Ultima VI files.`);
     return;
   }
   const next = new Game();
@@ -231,13 +383,17 @@ async function restoreKept(focus) {
       kept[i] = null;
     }
     kept = null;
+    await attachSaves(next);
     const report = await boot(next, 'kept from the last visit');
     if (report === null) return;
     started = true;
     next.release_kept();
     if (focus) canvas.focus();
-    setStatus(`${report}\nStarted from the files kept in this browser (a new game, not a ` +
-      `saved one).\n${HOW_TO_PLAY}`);
+    const what = next.save_files() > 0
+      ? 'the game saved in this browser, resumed'
+      : 'a new game (no game saved in this browser)';
+    setStatus(`${lead}${report}\nStarted from the files kept in this browser: ${what}.\n` +
+      HOW_TO_PLAY);
   } finally {
     if (!started) next.free();
   }
@@ -249,6 +405,12 @@ async function forgetKept() {
     ? 'The kept game files were removed from this browser. The game on screen runs until ' +
       'the page is left or reloaded.'
     : 'The kept game files were removed from this browser.');
+}
+
+async function forgetSaved() {
+  await forgetSaves();
+  setStatus('The saved game was removed from this browser; the next start is a new game. The ' +
+    'game on screen runs on until the page is left or reloaded.');
 }
 
 function queueImport(gather) {
@@ -263,10 +425,18 @@ function queueImport(gather) {
 // letters of the game's control commands (Ctrl-S save, Ctrl-R restore, ...) are game keys
 // there, so the browser's own Save page / Reload do not fire.
 canvas.addEventListener('keydown', (e) => {
+  gesture();
   if (!game || crashed || e.metaKey || e.altKey) return;
   if (game.key_down(e.code, e.key, e.ctrlKey)) e.preventDefault();
 });
-canvas.addEventListener('pointerdown', () => canvas.focus());
+canvas.addEventListener('pointerdown', () => {
+  gesture();
+  canvas.focus();
+});
+mute.addEventListener('click', () => {
+  setMuted(!audio.muted);
+  gesture();
+});
 
 // The whole page accepts drops so a near miss does not open the file in the tab.
 window.addEventListener('dragover', (e) => {
@@ -300,6 +470,10 @@ forget.addEventListener('click', () => {
   if (queued > 0) setStatus('The kept files will be removed after the current step…');
   enqueue('Removing the kept files', forgetKept);
 });
+forgetSave.addEventListener('click', () => {
+  if (queued > 0) setStatus('The saved game will be removed after the current step…');
+  enqueue('Removing the saved game', forgetSaved);
+});
 restart.addEventListener('click', () => {
   try {
     sessionStorage.setItem(FOCUS_AFTER_RELOAD, '1');
@@ -324,6 +498,7 @@ function takeFocusFlag() {
 }
 
 reflect('loading');
+reflectAudio();
 enqueue('Loading the engine', async () => {
   try {
     wasm = await init();
@@ -332,6 +507,7 @@ enqueue('Loading the engine', async () => {
     throw new Error(`the engine could not load (${message(err)})`);
   }
   forget.disabled = false;
+  forgetSave.disabled = false;
   reflect('idle');
 });
 // The picker opens once the kept files are back, so a choice never races the restore (a drop
