@@ -1,0 +1,20 @@
+[package]
+name = "u6-hdpack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The HD pack format u6-hdpack/1 (spec 07 HD1): writer, strict reader, content hash"
+
+[dependencies]
+# The tile and portrait sizes the format is defined on.
+u6-formats.workspace = true
+# The zip reader the page's intake already uses (its limits and refusals), platform-free.
+u6-intake.workspace = true
+# Lossless WebP (VP8L) encode and decode in pure Rust; builds for wasm32-unknown-unknown.
+image-webp = "0.2"
+# CRC-32 of the stored zip entries the writer makes.
+crc32fast = "1"
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = "1"
