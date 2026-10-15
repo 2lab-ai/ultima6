@@ -113,6 +113,21 @@ test('assertSame: a mismatch names the label, the paths, equal or differing leng
   assert.ok(![prefix, shorter, typed].some((m) => /\d/.test(m)), 'a prefix or a kind shows no number');
 });
 
+// No page: the held walk's pace floor on synthetic step times (ms after the press, floor 500),
+// so the check is exercised even when a boot walks one cell.
+test('the held-walk pace floor: a late first step does not let the next come sooner; a step at the pace passes', async () => {
+  const f = 500;
+  for (const [shown, label] of [[[], 'no step'], [[0], 'the press only'], [[12, 660, 1320], 'a repeat each pace'],
+    [[400, 900], 'a late first step, the next a floor after it'], [[0, 500, 1000], 'repeats at the floor itself']]) {
+    assert.ok(notSooner(shown, f), `passes: ${label}`);
+  }
+  for (const [shown, label] of [[[500, 500], 'two steps at once after a late first'],
+    [[400, 700], 'a late first step, the next a short gap after it'], [[0, 499], 'a repeat before the floor'],
+    [[0, 660, 1000], 'a fast third step'], [[-100, 450], 'a step before the press, the next within its floor of the press']]) {
+    assert.ok(!notSooner(shown, f), `fails: ${label}`);
+  }
+});
+
 // The runner's failure lines (h.failureLines) on errors whose text holds a sentinel: plain,
 // multi-line with lines shaped as frames of this directory, a thrown string, a page-chosen name,
 // assertions with a label and generated, Playwright's own (a page's thrown error, a timeout on
@@ -947,6 +962,14 @@ test('the mouse: a press held 300 ms on the map walks and yields; held through t
 // pace rule is pinned by the Rust tests (ui/tests/pointer_tests.rs).
 const ORIGINAL_FASTEST_REPEAT_MS = 25 * 20;
 
+// Whether the steps of one held walk, shown at `shown` ms after the press (the first is the
+// press's own step), keep the original's pace floor `floor` ms: step n at least n floors after
+// the press, and each repeat at least a floor after the step before it (a late first step does
+// not let the next one come sooner).
+function notSooner(shown, floor) {
+  return shown.every((t, n) => t >= n * floor && (n === 0 || t - shown[n - 1] >= floor));
+}
+
 // Holds the left button at game pixel (x, y) from the prompt until the game ran `ms` on its
 // clock since it took the press, then releases (the oracle's holds are frames of the game's
 // time; a wall-time hold reaches a loaded page's engine shorter, a tick moving it at most
@@ -1016,7 +1039,7 @@ async function freshHeldWalk(page, ms) {
 // The original's steps for the same holds in the same start (the throne-room fight as booted),
 // measured in the oracle with tools/oracle/pace.mjs, each from a fresh boot: a 5-frame (100 ms)
 // hold walks one cell when the game samples it, a 50-frame (1 s) hold walks one cell (its first
-// world turn takes 420..470 frames). So each hold here starts from a fresh boot too and is
+// world turn takes 422..473 frames). So each hold here starts from a fresh boot too and is
 // timed on the engine clock; no repeat comes sooner than the original's fastest (with one cell
 // per hold, the usual boot, there is no repeat to time and the receipt says so).
 test('the mouse: a press held on the map walks at the original\'s pace: 100 ms one cell, 1 s the original\'s count', async (env) => {
@@ -1027,8 +1050,6 @@ test('the mouse: a press held on the map walks at the original\'s pace: 100 ms o
     await started(opened.page, FILES);
     return opened;
   };
-  // Step n (from 0) shows at least n of the original's fastest repeats after the press.
-  const notSooner = (walk) => walk.shown.every((t, n) => t >= n * ORIGINAL_FASTEST_REPEAT_MS);
   const first = await boot();
   const click = await freshHeldWalk(first.page, 100);
   await first.context.close();
@@ -1042,13 +1063,16 @@ test('the mouse: a press held on the map walks at the original\'s pace: 100 ms o
     : `${repeats} repeat${repeats === 1 ? '' : 's'} timed against the original's fastest`;
   console.log(`  receipt: from fresh boots, ${line(100, click)}; ${line(1000, held)}; ${timed}`);
   // Harness guards: the release reached the game after the asked hold (heldWalk waits for the
-  // clock) and, for the click, within the original's fastest repeat (a release held back by
-  // host load would otherwise read as a pace fault).
+  // clock) and within the original's fastest repeat after it (a release held back by host load
+  // would otherwise read as a pace fault).
+  const late = 'the harness released within the original\'s fastest repeat';
   assert.ok(click.hold >= 100 && held.hold >= 1000, 'the harness: no early release reached the game');
-  assert.ok(click.hold < ORIGINAL_FASTEST_REPEAT_MS, 'the harness released within a pace');
+  assert.ok(click.hold < ORIGINAL_FASTEST_REPEAT_MS, late);
+  assert.ok(held.hold < 1000 + ORIGINAL_FASTEST_REPEAT_MS, `${late} after the 1 s hold`);
   assert.ok(click.steps === 1, 'a 100 ms press walks one cell');
   assert.ok(held.steps >= 1 && held.steps <= 2, 'a 1 s press from a fresh boot walks the original\'s one cell, within one');
-  assert.ok(notSooner(click) && notSooner(held), 'no repeat sooner than the original\'s fastest');
+  const floor = ORIGINAL_FASTEST_REPEAT_MS;
+  assert.ok(notSooner(click.shown, floor) && notSooner(held.shown, floor), 'no repeat sooner than the original\'s fastest');
 }, { needs: h.haveHfes });
 
 test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {

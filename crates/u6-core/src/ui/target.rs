@@ -25,10 +25,13 @@ const F1: u16 = 0x13b;
 /// per run. Gaps between two steps of one held press, in frames:
 /// - b1, b2, b5, b6, within the first 8 cells (the free ones): n = 122, 25..41, median 29, mean
 ///   31.7 (alternating about 27 and 38); the first step 1..12 frames after the press, the second
-///   28..37. Past the 8th cell b1 and b2 (500-frame holds) add one gap of 121..123 per trial.
-/// - b3, b4, whose followers were still forming up: n = 37, 26..108, median 72.
+///   28..37. Past the 8th cell b1 and b2 (500-frame holds) add two gaps per trial: 121..123, then
+///   26..28.
+/// - b3, b4, whose followers were still forming up: n = 37, 26..108, median 72. b4's come from a
+///   press held east (its presses south and north walked no cell).
 ///
-/// A sample every P frames from the press gives 1 + floor(t / P) cells by held time t. Against the
+/// A sample every P frames from the press gives 1 + floor((t - 1) / P) cells for a hold of t
+/// (the rule below: step n when the press plus n paces is before the release). Against the
 /// four boots' 300- and 500-frame holds, every t up to their 8th cell, the port stays within one
 /// cell of the original for P = 30..37 frames (100 ms: 1 against 0..1, 1 s: 2 against 2, 4 s: 7
 /// against 6..7); 33 sits in that range, and a sample from the press needs no separate
