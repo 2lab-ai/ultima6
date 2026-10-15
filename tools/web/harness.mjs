@@ -585,14 +585,14 @@ export async function click(page, x, y, settle) {
 /// second that moves only while the test runs frames (`runFrames`). Each frame moves it on by
 /// 1000 / hz ms and calls the callbacks queued, with that time; a step takes no virtual time, so
 /// a frame's budget never runs out. Playwright's own polls keep the real frames (its utility
-/// script took them at the page's first evaluate, before this); the page's loop moves over at
-/// its next real frame, which this waits for. The virtual clock starts at the real one when the
-/// loop's first callback reaches it, so the first virtual frame is about one interval after the
-/// last real one. `displayCost` makes the page's own clock reads cost time (a slow host).
-export async function virtualDisplay(page, hz) {
+/// script took them at the page's first evaluate, before this). The virtual clock starts at the
+/// real one: a loop already running moves over at its next real frame, which this waits for
+/// (that frame is less than one interval before the first virtual one); with `loop: false`
+/// (before a start) the loop starts on the virtual display. `displayCost` makes the page's own
+/// clock reads cost time (a slow host).
+export async function virtualDisplay(page, hz, { loop = true } = {}) {
   await page.evaluate((rate) => {
-    const realNow = performance.now.bind(performance);
-    const v = { hz: rate, base: realNow(), frames: 0, queue: [], synced: false, cost: 0, spent: 0 };
+    const v = { hz: rate, base: performance.now(), frames: 0, queue: [], cost: 0, spent: 0 };
     v.now = () => v.base + (v.frames * 1000) / v.hz;
     // The frames' callbacks: the frame's time, the clock's cost so far reset.
     v.run = () => {
@@ -605,10 +605,6 @@ export async function virtualDisplay(page, hz) {
     };
     window.__display = v;
     window.requestAnimationFrame = (callback) => {
-      if (!v.synced) {
-        v.synced = true;
-        v.base = realNow();
-      }
       v.queue.push(callback);
       return v.queue.length;
     };
@@ -618,7 +614,7 @@ export async function virtualDisplay(page, hz) {
       return t;
     };
   }, hz);
-  await page.waitForFunction(() => window.__display.queue.length > 0, null, { timeout: 10_000 });
+  if (loop) await page.waitForFunction(() => window.__display.queue.length > 0, null, { timeout: 10_000 });
 }
 
 /// On the virtual display: every read of performance.now in a frame moves it on by `ms` (the
@@ -658,6 +654,17 @@ export function runFrames(page, n) {
     }
     return { called, seen };
   }, n);
+}
+
+/// On the virtual display: runs frames until the engine ran `step` steps in all (`__ticks`), at
+/// most `max`; returns the steps it stopped at (more than `step` when the frame that reached it
+/// ran several).
+export function runFramesToStep(page, step, max) {
+  return page.evaluate(([want, limit]) => {
+    const v = window.__display;
+    for (let i = 0; i < limit && globalThis.__ticks < want; i += 1) v.run();
+    return globalThis.__ticks;
+  }, [step, max]);
 }
 
 /// On the virtual display: runs frames until the game took every input and shows its prompt for

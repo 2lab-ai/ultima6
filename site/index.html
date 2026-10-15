@@ -39,10 +39,15 @@
     #speed-badge { position: absolute; top: 6px; left: 6px; padding: 0 6px; border-radius: 4px;
                    background: rgba(11, 11, 15, 0.8); color: #ffd166; font-size: 0.875rem;
                    pointer-events: none; }
-    #speed-group { display: inline-block; margin-left: 8px; white-space: nowrap; }
-    #speed-group button { margin-left: 4px; }
+    /* Mute and the Speed group: a row of their own under the file controls, so a wider label or
+       "behind" never moves them; on a narrow screen the group may go under Mute. "behind"
+       keeps its place while hidden. */
+    #playback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+    #playback button { margin-left: 0; }
+    #speed-group { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
     #speed-label { display: inline-block; min-width: 5.5em; text-align: center; }
     #behind { color: #ff9a9a; }
+    #behind[hidden] { display: inline; visibility: hidden; }
     #drop {
       margin-top: 16px;
       padding: 16px;
@@ -72,7 +77,7 @@
       <canvas id="screen" width="320" height="200" tabindex="0"
               aria-label="Game screen. Click it or Tab to it; then arrow keys walk and letter keys are game commands. Tab leaves it."></canvas>
       <span id="speed-badge" hidden
-            title="Game speed: - slower, = or + faster, the keypad - and + always. While the stats or inventory panel is open, - and + belong to the panel (its members), and while a line is typed to the line.">1&times;</span>
+            title="Game speed: - slower, = or + faster, unless the game is using that key: while a line or a name is typed, in the stats and inventory panels (- and + pick the member), in a party list that scrolls, and in the opening's menu. The keypad - and + and the Speed buttons always change it.">1&times;</span>
     </div>
     <section id="drop" aria-labelledby="drop-title">
       <p id="drop-title">
@@ -84,14 +89,16 @@
       <input id="picker" type="file" multiple disabled>
       <button id="forget" type="button" disabled>Forget the kept files</button>
       <button id="forget-save" type="button" disabled>Forget the saved game</button>
-      <button id="mute" type="button" aria-pressed="false">Mute</button>
-      <span id="speed-group" role="group" aria-label="Game speed"
-            title="On the game screen: - slower, = or + faster, the keypad - and + always. While the stats or inventory panel is open, - and + belong to the panel (its members), and while a line is typed to the line.">
-        Speed<button id="slower" type="button" aria-label="Slower">&minus;</button>
-        <span id="speed-label">1&times;</span><button id="faster" type="button" aria-label="Faster">+</button>
-        <span id="behind" hidden>behind</span>
-      </span>
       <button id="restart" type="button" hidden>Restart</button>
+      <div id="playback">
+        <button id="mute" type="button" aria-pressed="false">Mute</button>
+        <span id="speed-group" role="group" aria-label="Game speed"
+              title="On the game screen: - slower, = or + faster, unless the game is using that key (a line or a name being typed, the stats and inventory panels, a party list that scrolls, the opening's menu). The keypad - and + and these buttons always change the speed.">
+          Speed <button id="slower" type="button" aria-label="Slower">&minus;</button><span
+            id="speed-label">1&times;</span><button id="faster" type="button" aria-label="Faster">+</button>
+          <span id="behind" hidden>behind</span>
+        </span>
+      </div>
       <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
     </section>
     <section id="limits" aria-labelledby="limits-title">
@@ -106,11 +113,12 @@
         sound on and off; the Mute button silences the page). Sound starts once you click or
         press a key on the game screen.</p>
       <p>Speed: on the game screen - slows the game and = (or +) speeds it up, through 1&times;,
-        1.5&times;, 2&times;, 3&times;, 4&times;, 6&times;, 8&times; and Max; the keypad - and +
-        always do, and so do the Speed buttons. While the stats or inventory panel is open, or a
-        line is being typed, - and + are the game's. 1&times; is the original's pace; above
-        4&times; the music fades out. &ldquo;behind&rdquo; means this computer cannot keep up
-        with the chosen speed.</p>
+        1.5&times;, 2&times;, 3&times;, 4&times;, 6&times;, 8&times; and Max, but only while the
+        game is not using that key: while you type a line or a name, in the stats and inventory
+        panels (where - and + pick the member), in a party list long enough to scroll, and in the
+        opening's menu, the key is the game's. The keypad - and + and the Speed buttons always
+        change the speed. 1&times; is the original's pace; above 4&times; the music fades out.
+        &ldquo;behind&rdquo; means this computer cannot keep up with the chosen speed.</p>
       <p>Not yet: a few rare object actions (moving a carried thing to someone else, a staff's or
         wand's spell in combat). Those say
         &ldquo;Not implemented in this version&rdquo; or do nothing.</p>
