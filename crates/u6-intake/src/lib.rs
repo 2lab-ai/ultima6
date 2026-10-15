@@ -7,6 +7,9 @@
 //! any file starting with "PP20" -> PowerPacker decrunch (checked per file)
 //! ```
 //!
+//! The intake holds at most [`INTAKE_BUDGET`] bytes of output: past it, it stops, says so and
+//! keeps nothing.
+//!
 //! Loose files (already extracted) pass through with PP20 decrunch. Rust port of
 //! the former TypeScript intake in `web/` (removed after parity) (same pipeline, same report lines). No I/O, no clocks: pure
 //! functions over byte slices, so it runs unchanged on native and
@@ -25,8 +28,60 @@ pub mod zip;
 
 pub use hfe::{HfeHeader, HfeImage, is_hfe, parse_hfe};
 pub use mfm::{ADF_SIZE, DiskDecode, TrackDecode, decode_amiga_disk, decode_amiga_track};
-pub use ofs::{OfsVolume, adf_dos_type, read_ofs};
-pub use pp20::{decrunch_pp20, is_pp20};
+pub use ofs::{OfsVolume, adf_dos_type, read_ofs, read_ofs_within};
+pub use pp20::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
+
+/// The bytes the intake may hold in all (64 MiB): the ADFs, the volumes' files and the loose
+/// files it keeps, and the PP20 output that replaces crunched files. Each step that produces or
+/// keeps bytes is charged before it allocates them; bytes it drops (a crunched file once
+/// decrunched, the earlier copy of a repeated path) are given back.
+///
+/// From the formats, not from any game file: the game is three Amiga DD disks of
+/// [`ADF_SIZE`] (901,120) bytes, 2,703,360 bytes of ADF. A volume's files fit in its blocks, at
+/// most 2,703,360 bytes on the three, and PP20 output is at most 56/3 of its crunched stream
+/// ([`pp20::MAX_EXPANSION`]), 50,462,720 bytes. While a file decrunches, its crunched bytes
+/// (at most one disk, 901,120) are held as well: 54,067,200 bytes (51.6 MiB) in the worst case.
+/// 64 MiB leaves 24% over that (the same 64 MiB the web page allows the game files).
+pub const INTAKE_BUDGET: usize = 64 << 20;
+
+const BUDGET_MIB: usize = INTAKE_BUDGET >> 20;
+
+/// What is left of [`INTAKE_BUDGET`]. The first charge that does not fit spends it: every later
+/// one fails too, so the intake stops expanding there.
+struct Budget {
+    left: usize,
+    spent: bool,
+}
+
+impl Budget {
+    /// Charges `n` bytes for the input `name`, or returns its report line when they do not fit.
+    fn charge(&mut self, name: &str, n: usize) -> Result<(), String> {
+        if self.spent {
+            return Err(format!(
+                "{name}: not read: the intake's {BUDGET_MIB} MiB budget is spent"
+            ));
+        }
+        if n > self.left {
+            self.spent = true;
+            return Err(format!(
+                "{name}: not read: {n} more bytes would pass the intake's {BUDGET_MIB} MiB budget"
+            ));
+        }
+        self.left -= n;
+        Ok(())
+    }
+
+    /// Charges bytes the caller already bounded by `left` (a volume read within it, a decrunch
+    /// refused past it).
+    fn take_within(&mut self, n: usize) {
+        debug_assert!(n <= self.left, "charged past the budget");
+        self.left = self.left.saturating_sub(n);
+    }
+
+    fn give_back(&mut self, n: usize) {
+        self.left = self.left.saturating_add(n).min(INTAKE_BUDGET);
+    }
+}
 
 /// A decoding failure; `Display` is the text that lands in [`Intake::report`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,15 +214,17 @@ struct Collected {
 }
 
 impl Collected {
-    fn put(&mut self, path: String, bytes: Vec<u8>, report: &mut Vec<String>) {
+    /// Returns the length of the earlier copy it drops (0 for a new path).
+    fn put(&mut self, path: String, bytes: Vec<u8>, report: &mut Vec<String>) -> usize {
         match self.index.get(&path) {
             Some(&i) => {
                 report.push(format!("{path}: duplicate path, later copy kept"));
-                self.entries[i].1 = bytes;
+                std::mem::replace(&mut self.entries[i].1, bytes).len()
             }
             None => {
                 self.index.insert(path.clone(), self.entries.len());
                 self.entries.push((path, bytes));
+                0
             }
         }
     }
@@ -234,8 +291,16 @@ fn hfe_to_adf(label: &str, data: &[u8], report: &mut Vec<String>) -> Option<Vec<
 
 /// Run the whole pipeline over the dropped files. Never fails: every problem becomes
 /// a line in [`Intake::report`] and the affected input is skipped or kept raw.
+///
+/// Past [`INTAKE_BUDGET`] it stops expanding: the input that would pass it and each one after
+/// it get a line, PP20 files not yet decrunched stay crunched (one count in the PP20 line), and
+/// the result keeps no disks and no files, so nothing starts from part of a set.
 pub fn intake(files: Vec<InputFile>) -> Intake {
     let mut report = Vec::new();
+    let mut budget = Budget {
+        left: INTAKE_BUDGET,
+        spent: false,
+    };
     let mut disk_inputs: Vec<InputFile> = Vec::new();
     let mut loose: Vec<InputFile> = Vec::new();
 
@@ -256,21 +321,36 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
     let mut disks = Vec::new();
     let mut raw = Collected::default();
     for f in disk_inputs {
+        // An HFE decodes to a whole ADF whatever its size; a dropped ADF is kept as it is.
+        let size = if is_hfe(&f.data) {
+            ADF_SIZE
+        } else {
+            f.data.len()
+        };
+        if let Err(line) = budget.charge(&f.name, size) {
+            report.push(line);
+            continue;
+        }
         let adf = if is_hfe(&f.data) {
             match hfe_to_adf(&f.name, &f.data, &mut report) {
                 Some(adf) => adf,
-                None => continue,
+                None => {
+                    budget.give_back(ADF_SIZE);
+                    continue;
+                }
             }
         } else {
             report.push(format!("{}: ADF {} bytes", f.name, f.data.len()));
             f.data
         };
 
-        let volume = match read_ofs(&adf) {
+        let volume = match read_ofs_within(&adf, budget.left) {
             Ok(vol) => {
                 let count = vol.files.len();
+                budget.take_within(vol.files.iter().map(|(_, b)| b.len()).sum());
                 for (path, bytes) in vol.files {
-                    raw.put(format!("{}/{path}", vol.name), bytes, &mut report);
+                    let dropped = raw.put(format!("{}/{path}", vol.name), bytes, &mut report);
+                    budget.give_back(dropped);
                 }
                 report.push(format!(
                     "{}: volume {} ({}), {count} files",
@@ -278,6 +358,14 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
                 ));
                 for w in &vol.warnings {
                     report.push(format!("{}: {w}", f.name));
+                }
+                if vol.limit_reached {
+                    budget.spent = true;
+                    report.push(format!(
+                        "{}: volume {}: the next file would pass the intake's {BUDGET_MIB} MiB \
+                         budget; it and the files after it are not read",
+                        f.name, vol.name
+                    ));
                 }
                 Some(vol.name)
             }
@@ -294,20 +382,43 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
     }
 
     for f in loose {
-        raw.put(normalize_path(&f.name), f.data, &mut report);
+        if let Err(line) = budget.charge(&f.name, f.data.len()) {
+            report.push(line);
+            continue;
+        }
+        let dropped = raw.put(normalize_path(&f.name), f.data, &mut report);
+        budget.give_back(dropped);
     }
 
     let mut out = BTreeMap::new();
-    let (mut packed, mut failed) = (0usize, 0usize);
+    let (mut packed, mut failed, mut left_crunched) = (0usize, 0usize, 0usize);
     for (path, bytes) in raw.entries {
         if !is_pp20(&bytes) {
             out.insert(path, bytes);
             continue;
         }
-        match decrunch_pp20(&bytes) {
-            Ok(plain) => {
+        if budget.spent {
+            left_crunched += 1;
+            out.insert(path, bytes);
+            continue;
+        }
+        // Capped by what is left before the output is allocated.
+        match decrunch_pp20_within(&bytes, budget.left) {
+            Ok(Some(plain)) => {
+                budget.take_within(plain.len());
+                budget.give_back(bytes.len());
                 out.insert(path, plain);
                 packed += 1;
+            }
+            Ok(None) => {
+                budget.spent = true;
+                let n = pp20_declared_len(&bytes).unwrap_or(0);
+                report.push(format!(
+                    "{path}: not decrunched: its {n} bytes would pass the intake's {BUDGET_MIB} \
+                     MiB budget"
+                ));
+                out.insert(path, bytes);
+                left_crunched += 1;
             }
             Err(err) => {
                 report.push(format!(
@@ -323,11 +434,27 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
     } else {
         String::new()
     };
+    let budget_note = if left_crunched > 0 {
+        format!(", {left_crunched} left crunched at the budget")
+    } else {
+        String::new()
+    };
     report.push(format!(
-        "PP20: decrunched {packed} file(s){failed_note}; {} file(s) total",
+        "PP20: decrunched {packed} file(s){failed_note}{budget_note}; {} file(s) total",
         out.len()
     ));
 
+    if budget.spent {
+        // The engine reports the files it misses; a part of a set would start and fail later.
+        report.push(format!(
+            "The intake stopped at its {BUDGET_MIB} MiB budget: no disks or files are kept"
+        ));
+        return Intake {
+            disks: Vec::new(),
+            files: BTreeMap::new(),
+            report,
+        };
+    }
     Intake {
         disks,
         files: out,

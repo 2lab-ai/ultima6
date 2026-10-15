@@ -33,6 +33,9 @@ pub struct OfsVolume {
     pub dirs: Vec<String>,
     /// Problems found while walking (bad checksums, broken chains).
     pub warnings: Vec<String>,
+    /// The walk stopped at a file whose bytes would take `files` past the limit given to
+    /// [`read_ofs_within`]: that file and the ones after it are not read.
+    pub limit_reached: bool,
 }
 
 impl OfsVolume {
@@ -88,6 +91,10 @@ struct Reader<'a> {
     index: BTreeMap<String, usize>,
     dirs: Vec<String>,
     warnings: Vec<String>,
+    /// Bytes `files` may hold together, and hold now.
+    limit: usize,
+    total: usize,
+    limit_reached: bool,
 }
 
 impl Reader<'_> {
@@ -104,8 +111,12 @@ impl Reader<'_> {
 
     /// Map semantics: a repeated path replaces the bytes but keeps its first position.
     fn set_file(&mut self, path: String, bytes: Vec<u8>) {
+        self.total += bytes.len();
         match self.index.get(&path) {
-            Some(&i) => self.files[i].1 = bytes,
+            Some(&i) => {
+                let old = std::mem::replace(&mut self.files[i].1, bytes);
+                self.total -= old.len();
+            }
             None => {
                 self.index.insert(path.clone(), self.files.len());
                 self.files.push((path, bytes));
@@ -115,10 +126,25 @@ impl Reader<'_> {
 }
 
 impl Reader<'_> {
-    fn read_file(&mut self, hdr: usize, path: &str) -> Result<Vec<u8>, Error> {
+    /// The file's bytes, or `None` when they would take the files read past the limit (nothing
+    /// is read then).
+    fn read_file(&mut self, hdr: usize, path: &str) -> Result<Option<Vec<u8>>, Error> {
         let img = self.img;
         let size = u32_at(img, hdr * BS + 324) as usize;
-        // Grow as blocks are read: a corrupt byte_size must not allocate gigabytes.
+        // A file's bytes sit in the image's blocks, at most a block's worth in each, so no file
+        // is larger than its image. A larger byte_size is corrupt: refused before any read (a
+        // self-linked extension chain would otherwise read up to `blocks` tables of it).
+        if size > img.len() {
+            return Err(Error::new(format!(
+                "{path}: byte size {size} passes the image size {}",
+                img.len()
+            )));
+        }
+        // At most byte_size bytes are read, so this keeps the files within the limit.
+        if size > self.limit - self.total {
+            return Ok(None);
+        }
+        // Reserves at most the image (byte_size was checked against it above).
         let mut out = Vec::with_capacity(size.min(self.blocks * BS));
         let per_block = if self.ffs { BS } else { BS - 24 };
         let mut table = hdr as u32;
@@ -172,7 +198,7 @@ impl Reader<'_> {
                 out.len()
             )));
         }
-        Ok(out)
+        Ok(Some(out))
     }
 
     fn walk_dir(&mut self, dir_block: usize, prefix: &str) {
@@ -181,6 +207,9 @@ impl Reader<'_> {
         for i in 0..TABLE_LONGS {
             let mut b = u32_at(img, dir_block * BS + TABLE_AT + i * 4);
             while b != 0 {
+                if self.limit_reached {
+                    return;
+                }
                 if !self.valid(b) {
                     self.warnings.push(format!("{here}: bad hash entry {b}"));
                     break;
@@ -205,7 +234,11 @@ impl Reader<'_> {
                     self.check_header(blk, &path);
                     if sec == ST_FILE {
                         match self.read_file(blk, &path) {
-                            Ok(bytes) => self.set_file(path, bytes),
+                            Ok(Some(bytes)) => self.set_file(path, bytes),
+                            Ok(None) => {
+                                self.limit_reached = true;
+                                return;
+                            }
                             Err(err) => self.warnings.push(err.to_string()),
                         }
                     } else if sec == ST_USERDIR {
@@ -223,6 +256,13 @@ impl Reader<'_> {
 }
 
 pub fn read_ofs(img: &[u8]) -> Result<OfsVolume, Error> {
+    read_ofs_within(img, usize::MAX)
+}
+
+/// As [`read_ofs`], but the files read come to at most `limit` bytes together: the walk stops
+/// before the first file that would pass it ([`OfsVolume::limit_reached`]). The intake passes
+/// what is left of its budget.
+pub fn read_ofs_within(img: &[u8], limit: usize) -> Result<OfsVolume, Error> {
     let dos_type = adf_dos_type(img)
         .ok_or_else(|| Error::new("not an AmigaDOS image (boot block lacks DOS signature)"))?;
     let flags = img[3];
@@ -249,6 +289,9 @@ pub fn read_ofs(img: &[u8]) -> Result<OfsVolume, Error> {
         index: BTreeMap::new(),
         dirs: Vec::new(),
         warnings: Vec::new(),
+        limit,
+        total: 0,
+        limit_reached: false,
     };
     r.check_header(root, "root");
     r.walk_dir(root, "");
@@ -258,5 +301,6 @@ pub fn read_ofs(img: &[u8]) -> Result<OfsVolume, Error> {
         files: r.files,
         dirs: r.dirs,
         warnings: r.warnings,
+        limit_reached: r.limit_reached,
     })
 }

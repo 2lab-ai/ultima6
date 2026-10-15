@@ -77,6 +77,11 @@ pub fn parse_hfe(data: &[u8]) -> Result<HfeImage, Error> {
     }
 
     let mut tracks = Vec::with_capacity(cylinders);
+    // The tracks copied so far. A writer lays the cylinders out in disjoint runs of blocks, and
+    // a cylinder's copy (`length` bytes for two sides, half for one) fits in its run, so on any
+    // such image the copies come to less than the image. More means cylinders share data: a
+    // few KiB could otherwise expand to 255 x 64 KiB.
+    let mut copied = 0usize;
     for cyl in 0..cylinders {
         let offset = usize::from(u16le(data, lut + cyl * 4)) * BLOCK;
         let length = usize::from(u16le(data, lut + cyl * 4 + 2));
@@ -87,6 +92,12 @@ pub fn parse_hfe(data: &[u8]) -> Result<HfeImage, Error> {
             )));
         }
         let per_side = length >> 1;
+        copied += per_side * usize::from(header.sides);
+        if copied > data.len() {
+            return Err(Error::new(
+                "HFE track table overlaps: its cylinders share track data",
+            ));
+        }
         let mut sides = Vec::with_capacity(usize::from(header.sides));
         for side in 0..usize::from(header.sides) {
             let mut out = vec![0u8; per_side];

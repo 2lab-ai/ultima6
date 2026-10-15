@@ -4,7 +4,7 @@ mod common;
 
 use common::ofs_builder::{ImageBuilder, Node, amiga_hash};
 use common::text;
-use u6_intake::{ADF_SIZE, read_ofs};
+use u6_intake::{ADF_SIZE, read_ofs, read_ofs_within};
 
 const BS: usize = 512;
 
@@ -103,4 +103,27 @@ fn reports_hash_loops_instead_of_recursing_forever() {
         vol.warnings
     );
     assert_eq!(vol.file("an"), Some(&b"first"[..]));
+}
+
+#[test]
+fn a_limit_stops_the_walk_before_the_file_that_would_pass_it() {
+    // "a", "b", "c" hash to consecutive slots, so the walk reads them in that order.
+    let img = ImageBuilder::new(false).build(
+        "LIMIT",
+        &[
+            Node::File("a", bytes(1000, 1)),
+            Node::File("b", bytes(2000, 2)),
+            Node::File("c", bytes(10, 3)),
+        ],
+    );
+    let all = read_ofs_within(&img, 3010).unwrap();
+    assert!(!all.limit_reached);
+    assert_eq!(all.files.len(), 3);
+    let vol = read_ofs_within(&img, 2999).unwrap();
+    assert!(vol.limit_reached);
+    let paths: Vec<&str> = vol.files.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(paths, ["a"]);
+    assert_eq!(vol.file("a"), Some(bytes(1000, 1).as_slice()));
+    assert!(vol.warnings.is_empty(), "{:?}", vol.warnings);
+    assert!(!read_ofs(&img).unwrap().limit_reached);
 }
