@@ -247,8 +247,9 @@ fn pointer() -> crate::ui::pointer::PointerState {
 /// An engine over the adversarial scene: every step its edits and the idle refresh; every 17th
 /// a flight (the block under it saved, the sprite drawn and shown, the block put back); every
 /// 23rd a glyph and a text scroll over the window on the screen; every 41st a quake and its
-/// playback. The plane on or off; on, after each refresh that presented the window the window
-/// rect of the screen's plane must be the back buffer's (counted in the returned cell).
+/// playback, every third of them with a pause after its last picture. The plane on or off; on,
+/// after each refresh that presented the window the window rect of the screen's plane must be
+/// the back buffer's (counted in the returned cell).
 fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>) {
     let (mut s, words) = adv::scene();
     s.ui = crate::main_loop::test_support::test_ui();
@@ -309,8 +310,21 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>) {
                 }
             }
             if step % 41 == 20 {
-                crate::ui::effects::quake(&mut st.borrow_mut(), &io, 2, 3);
+                // Every third quake pauses after its last picture: the playback then ends on the
+                // colours it shows and puts back their sources in a poll with no present (one
+                // would publish them in full), published with the plane alone.
+                let pause = step / 41 % 3 == 1;
+                {
+                    let mut s = st.borrow_mut();
+                    crate::ui::effects::quake(&mut s, &io, 2, 3);
+                    if pause {
+                        crate::combat::present::capture_pause(&mut s, 40);
+                    }
+                }
                 crate::combat::play_effects(&st, &io).await;
+                if pause {
+                    io.vblank().await;
+                }
             }
             io.present();
             io.vblank().await;
@@ -355,7 +369,9 @@ fn buffers(e: &Engine) -> [(Vec<u8>, [u6_render::Rgb; 256]); 4] {
 /// hold only right attributions and its back buffer covers what the records draw. And with plain
 /// asserts, live without debug assertions: after every tick the published plane is the screen's
 /// in full and the shown plane the published one's but for the pointer sprite's pixels, which
-/// are classic; after every window present the screen's window rect is the back buffer's.
+/// are classic; after every window present the screen's window rect is the back buffer's. The
+/// plane engine published the plane alone at least once (the paused quakes), the moving pointer
+/// over it.
 #[test]
 fn paired_engines_show_the_same_with_the_plane_off_and_on() {
     let seed = 0x2545_F491_4F6C_DD1D;
@@ -412,13 +428,18 @@ fn paired_engines_show_the_same_with_the_plane_off_and_on() {
     println!(
         "paired engines: 1500 ticks, {images} pixels checked against their records, {covered} \
          covered; {} frames played back, decisions {:?}; {} window presents checked, the sprite \
-         shown in {sprites} ticks",
+         shown in {sprites} ticks, {} publishes of the plane alone",
         s.combat.shown,
         decisions(&s),
-        windows.get()
+        windows.get(),
+        on.src_publishes()
     );
     assert!(windows.get() > 0 && sprites > 0);
     assert!(off.frame().src().is_none() && on.frame().src().is_some());
     assert!(s.combat.shown > 0, "quakes were played back");
     assert!(images > 0 && covered > 0);
+    assert!(
+        on.src_publishes() > 0 && off.src_publishes() == 0,
+        "the paused quakes published their last sources with the plane alone"
+    );
 }

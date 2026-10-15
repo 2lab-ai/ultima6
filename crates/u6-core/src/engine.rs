@@ -538,6 +538,9 @@ pub struct Engine {
     shown_version: u64,
     /// Bumped each time only `shown`'s source plane changed ([`Engine::src_version`]).
     src_version: u64,
+    /// The ticks whose publish took the source plane alone ([`Engine::src_publishes`]).
+    #[cfg(test)]
+    src_publishes: u64,
     sprite: Option<crate::ui::pointer::SpriteFrame>,
     stubs: Rc<StubLog>,
 }
@@ -604,6 +607,8 @@ impl Engine {
             shown: Framebuffer::new(),
             shown_version: 0,
             src_version: 0,
+            #[cfg(test)]
+            src_publishes: 0,
             sprite: None,
             stubs,
         }
@@ -661,6 +666,10 @@ impl Engine {
         } else if sources {
             let mut front = self.io.front.borrow_mut();
             src_only = self.io.published.borrow_mut().sync_src_from(&mut front) > 0;
+            #[cfg(test)]
+            {
+                self.src_publishes += u64::from(src_only);
+            }
         }
         let at = self.io.handler_pointer();
         let sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
@@ -698,6 +707,13 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn sprite(&self) -> Option<&crate::ui::pointer::SpriteFrame> {
         self.sprite.as_ref()
+    }
+
+    /// The ticks so far whose publish took the source plane alone, the screen's sources into
+    /// the published frame where the colours already were its own ([`Io::present_sources`]; tests).
+    #[cfg(test)]
+    pub(crate) fn src_publishes(&self) -> u64 {
+        self.src_publishes
     }
 
     /// The last published frame (320×200 indices plus the palette) with the pointer sprite.
