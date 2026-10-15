@@ -29,12 +29,12 @@ use super::tables::at;
 /// Milliseconds of one PAL frame (the original's display runs at 50 Hz).
 pub const FRAME_MS: u16 = 20;
 /// [replaced] Time of the hit flash 0x1230ce (draw lists, the window with tile 0x101 rendered
-/// and copied, draw lists again): 312 ms, 15.602 PAL frames, the median of 18 calls traced in
-/// the oracle's start fight (15.34..16.03; tools/oracle/trace.mjs on the CPU clock, reduced by
-/// trace.py). fight.py's CPU samples give 16 (n = 45).
+/// and copied, draw lists again): 312 ms, 15.602 PAL frames, the median of 38 calls traced in
+/// the oracle (15.32..16.03; the r4 and r5 runs pooled, re/notes/oracle.md; tools/oracle/trace.mjs
+/// on the CPU clock, reduced by trace.py). fight.py's CPU samples give 16 (n = 45).
 pub const FLASH_MS: u16 = 312;
 /// [replaced] Time of a render of the window into the back buffer (0x102c90 without the frame)
-/// and what a flight does before its first step: 128 ms, 6.397 PAL frames, the median of the 27
+/// and what a flight does before its first step: 128 ms, 6.379 PAL frames, the median of the 57
 /// traced flights that drew no step (6.15..7.33; the CPU samples of 87 flights give 6).
 pub const RENDER_MS: u16 = 128;
 /// [replaced] Time of a render of the window with its frame, copied to the screen (0x102c90 with
@@ -53,15 +53,15 @@ pub const FLIGHT_STEP_MS: u16 = 46;
 /// window rendered by 0x102c90 and copied to the screen): 11 PAL frames. A sampled estimate:
 /// the median of the 40 flights whose CPU samples end in one (9..42, 29 of them 10 or 11); with
 /// the view flags before it, the traced refresh after a turn
-/// ([`crate::actors::turn::AFTER_TURN_MS`], 21.375).
+/// ([`crate::actors::turn::AFTER_TURN_MS`], 21.336).
 pub const REFRESH_MS: u16 = 11 * FRAME_MS;
-/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 24 ms, 1.185
-/// PAL frames, the mean of 57 calls traced in the oracle (0.06..3.60, the ones that scroll the
+/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 22 ms, 1.125
+/// PAL frames, the mean of 128 calls traced in the oracle (0.06..3.60, the ones that scroll the
 /// longest). Per call, as the port prints one queued message a call.
-pub const PRINT_MS: u16 = 24;
+pub const PRINT_MS: u16 = 22;
 /// [replaced] Time of an object's name read for a message (0x10eef8: 0x10ee76 decodes it out of
-/// the look.lzd copy in memory, 0x161ec8): 26 ms, 1.294 PAL frames, the mean of 32 calls traced
-/// in the oracle's fight (1.01..1.66). The first read of a boot also loads the file from the
+/// the look.lzd copy in memory, 0x161ec8): 26 ms, 1.289 PAL frames, the mean of 70 calls traced
+/// in the oracle (1.01..1.72). The first read of a boot also loads the file from the
 /// floppy (132.23 frames traced): not modelled.
 pub const NAME_MS: u16 = 26;
 /// [replaced] Time of a window presented dissolving (0x102c90 with A4-0x6578 set: 0x1520e2
