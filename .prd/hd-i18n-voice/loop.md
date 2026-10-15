@@ -17,7 +17,7 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 
 Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 4, 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
-Shipped: 06's speed control is live in production (Cloudflare Pages 269ed8c1 at main 810df38). 06 is complete in production (9f831837 at main bf93585). Next: 07 HD, unit H0.
+Shipped: 06's speed control is live in production (Cloudflare Pages 269ed8c1 at main 810df38). 06 is complete in production (9f831837 at main bf93585). In flight: H0 (source plane) and H3 (pack format + imagegen tool), in parallel, because they touch separate crates.
 
 ## Order, and why it differs from the user's numbering
 
@@ -34,8 +34,8 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 |---|---|---|---|
 | H0 | 07 | `Framebuffer` source plane (`Src` with image version, `set_src`, `copy_px`), set by `gfx::blit`/`blit_bitmap`, copied by `copy_pixel`/`copy_rect`/dissolve; record versions bumped by the shore merge; enabled by u6-web; source receipt | T4 |
 | H1 | 07 | `u6-render` compositor + MMPX×S (cached by content hash) in wasm; `u6-web` HD exports; page S× canvas, HD toggle, logical pointer mapping | H0 |
-| H2 | 07 | HD pack format, drop classification before `importFiles`, IndexedDB/forget, limits | H1 |
-| H3 | 07 | `tools/hd` inventory/atlas/run/ingest/pack with the gate; synthetic tests | H2 |
+| H2 | 07 | the page loads a pack through `u6-hdpack` (from H3): drop classification before `importFiles`, IndexedDB/forget, limits | H1, H3 |
+| H3 | 07 | `crates/u6-hdpack` (the pack format: writer, strict reader, limits, content hash) + the `tools/hd` binary: inventory/atlas/run(`--send`)/ingest/pack with the gates; synthetic tests; gate tuning on synthetic sheets | — (in parallel with H0) |
 | H4 | 07 | ops: run `tools/hd` on the owner's files with imagegen (portraits → bitmaps → terrain → actors), load the pack in the owner's browser, read the frames | H3 |
 | L1 | 08 | text path: `i32` chars, `u16` line and narrowing sites, UTF-8 assembler (invalid bytes pass), Hangul table, runic guard, cell padding, josa, `%1$s`, empty articles; the `u` program's text path by code point (1b) | — |
 | L2 | 08 | locale layer + run, table-string and outermost-print hooks + pack parser; identity-pack receipt with `wide` on | L1, L3 |
