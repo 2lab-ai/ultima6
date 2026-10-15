@@ -61,6 +61,17 @@ pub const POINTER_LEFT: u8 = 1;
 /// Right button bit (0x161bd4 bit 1).
 pub const POINTER_RIGHT: u8 = 2;
 
+/// [`Io::keys_owned`] bit: the game takes `-` now.
+pub const OWN_MINUS: u8 = 1;
+/// [`Io::keys_owned`] bit: the game takes `+` now.
+pub const OWN_PLUS: u8 = 2;
+/// [`Io::keys_owned`] bit: the game takes `=` now.
+pub const OWN_EQUALS: u8 = 4;
+/// All three [`Io::keys_owned`] bits (a line being typed).
+pub const OWN_ALL: u8 = OWN_MINUS | OWN_PLUS | OWN_EQUALS;
+/// Number of [`Io::keys_owned`] bits.
+const OWN_KEYS: usize = 3;
+
 /// The pointer as the input handler keeps it: position 0x1623b8 / 0x1623ba (pixels, clamped to
 /// the screen) and the button word 0x161bd4.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -99,6 +110,10 @@ pub struct Io {
     /// The layout of `game` in `files`, parsed at the first [`Io::game_image`] (`files` never
     /// changes, so it stays valid for the run).
     image: OnceCell<Option<crate::image::ImageLayout>>,
+    /// Port-only, no original address: per key of [`OWN_MINUS`] / [`OWN_PLUS`] / [`OWN_EQUALS`]
+    /// (bit order), the claims on it that live now ([`Io::own_keys`]): the keys the game takes
+    /// where its state is not in [`State`] (`u`'s).
+    owned_keys: Cell<[u32; OWN_KEYS]>,
 }
 
 impl Io {
@@ -114,6 +129,7 @@ impl Io {
             published: RefCell::new(Framebuffer::new()),
             files,
             image: OnceCell::new(),
+            owned_keys: Cell::new([0; OWN_KEYS]),
         }
     }
 
@@ -139,8 +155,9 @@ impl Io {
 
     /// The pointer where the input handler has it: the last queued pointer event (the handler
     /// moves the position as events come, 0x151b08), else the last one taken. For the display
-    /// (the VBlank server's sprite); the game's own sample is [`Io::take_pointer`]'s.
-    fn handler_pointer(&self) -> Pointer {
+    /// (the VBlank server's sprite) and the platforms (a button held paces the steps at 1×,
+    /// spec 06); the game's own sample is [`Io::take_pointer`]'s.
+    pub fn handler_pointer(&self) -> Pointer {
         let events = self.events.borrow();
         let last = events.iter().rev().find_map(|e| match *e {
             InputEvent::Pointer { x, y, buttons } => Some(Pointer::apply(x, y, buttons)),
@@ -263,11 +280,53 @@ impl Io {
         f(&mut self.back.borrow_mut(), &mut self.front.borrow_mut())
     }
 
+    /// Port-only (spec 06 §Design 6): the keys among [`OWN_MINUS`], [`OWN_PLUS`] and
+    /// [`OWN_EQUALS`] that game code waiting now has claimed with [`Io::own_keys`], so the page
+    /// leaves them to it instead of changing the speed.
+    pub fn keys_owned(&self) -> u8 {
+        let counts = self.owned_keys.get();
+        (0..OWN_KEYS)
+            .filter(|&i| counts[i] != 0)
+            .fold(0, |bits, i| bits | 1 << i)
+    }
+
+    /// Port-only: claims `bits` of [`Io::keys_owned`] until the guard drops (the end of the wait
+    /// that reads them, an early return, the future dropped, an unwind). Claims count per key,
+    /// so guards may drop in any order: a key stays owned while any claim on it lives.
+    pub fn own_keys(&self, bits: u8) -> OwnedKeys<'_> {
+        self.count_claims(bits, true);
+        OwnedKeys { io: self, bits }
+    }
+
+    /// Adds (`add`) or takes off one claim on each key of `bits`.
+    fn count_claims(&self, bits: u8, add: bool) {
+        let mut counts = self.owned_keys.get();
+        for (i, n) in counts.iter_mut().enumerate() {
+            if bits & 1 << i != 0 {
+                *n = if add { *n + 1 } else { *n - 1 };
+            }
+        }
+        self.owned_keys.set(counts);
+    }
+
     /// Marks the screen (front buffer) as shown: the engine publishes it after this poll. The
     /// Amiga displays its screen buffer continuously; the port publishes at the points where
     /// the original waits (key poll, VBlank), so a frame is never shown half drawn.
     pub fn present(&self) {
         self.front_version.set(self.front_version.get() + 1);
+    }
+}
+
+/// Keys claimed by [`Io::own_keys`], given back on drop.
+#[must_use = "the keys are given back as soon as the guard drops"]
+pub struct OwnedKeys<'a> {
+    io: &'a Io,
+    bits: u8,
+}
+
+impl Drop for OwnedKeys<'_> {
+    fn drop(&mut self) {
+        self.io.count_claims(self.bits, false);
     }
 }
 
@@ -557,6 +616,17 @@ impl Engine {
     pub fn take_log(&mut self) -> Vec<String> {
         self.stubs.take_lines()
     }
+
+    /// Port-only (spec 06 §Design 6): which of `-`, `+` and `=` ([`OWN_MINUS`], [`OWN_PLUS`],
+    /// [`OWN_EQUALS`]) the game takes now, as of the last tick: those `u` claimed on the `Io`
+    /// ([`Io::keys_owned`]) and those `game`'s state reads ([`crate::ui::target::keys_owned`]).
+    /// None once the game finished.
+    pub fn keys_owned(&self) -> u8 {
+        if self.finished {
+            return 0;
+        }
+        self.io.keys_owned() | crate::ui::target::keys_owned(&self.state.borrow())
+    }
 }
 
 #[cfg(test)]
@@ -752,6 +822,89 @@ mod tests {
             "the game took nothing"
         );
         assert_eq!(e.frame().get(99, 48), Some(17), "drawn there");
+    }
+
+    #[test]
+    fn claimed_keys_last_while_their_guard_does_and_nest() {
+        let mut e = engine_with(|_state, io| async move {
+            let plus = io.own_keys(OWN_PLUS);
+            io.vblank().await;
+            {
+                let _inner = io.own_keys(OWN_MINUS | OWN_EQUALS);
+                io.vblank().await;
+            }
+            io.vblank().await;
+            drop(plus);
+            io.vblank().await;
+            let _last = io.own_keys(OWN_ALL);
+        });
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            e.tick(&[], 20);
+            seen.push(e.keys_owned());
+        }
+        assert_eq!(
+            seen,
+            [OWN_PLUS, OWN_ALL, OWN_PLUS, 0, 0],
+            "each given back at its drop"
+        );
+        assert!(e.finished());
+        assert_eq!(
+            e.io().keys_owned(),
+            0,
+            "a claim at the end ended with the game"
+        );
+    }
+
+    #[test]
+    fn claims_count_per_key_and_drop_in_any_order() {
+        let io = Io::new(Files::default());
+        let minus = io.own_keys(OWN_MINUS);
+        let plus = io.own_keys(OWN_PLUS);
+        drop(minus);
+        assert_eq!(
+            io.keys_owned(),
+            OWN_PLUS,
+            "a claim dropped first leaves the later one"
+        );
+        let all = io.own_keys(OWN_ALL);
+        drop(plus);
+        assert_eq!(io.keys_owned(), OWN_ALL, "the other claim on + lives");
+        let again = io.own_keys(OWN_MINUS);
+        drop(all);
+        assert_eq!(io.keys_owned(), OWN_MINUS, "a dead claim is not revived");
+        drop(again);
+        assert_eq!(io.keys_owned(), 0);
+    }
+
+    #[test]
+    fn a_claim_ends_with_its_future_dropped_mid_wait_and_with_an_unwind() {
+        let io = Io::new(Files::default());
+        let mut wait = Box::pin(async {
+            let _keys = io.own_keys(OWN_MINUS | OWN_EQUALS);
+            io.vblank().await;
+        });
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            io.keys_owned(),
+            OWN_MINUS | OWN_EQUALS,
+            "claimed while it waits"
+        );
+        drop(wait);
+        assert_eq!(io.keys_owned(), 0, "the dropped future gave them back");
+        let _outer = io.own_keys(OWN_PLUS);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _keys = io.own_keys(OWN_ALL);
+            assert_eq!(io.keys_owned(), OWN_ALL);
+            panic!("an unwind through a claim");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(
+            io.keys_owned(),
+            OWN_PLUS,
+            "the unwind gave back its own claim only"
+        );
     }
 
     #[test]
