@@ -1,6 +1,7 @@
 //! Tests of the intro on synthetic data, and the real-data runs (skipped without the archive).
 
 mod asm;
+mod blits;
 mod extreme;
 mod launch;
 mod real;

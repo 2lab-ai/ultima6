@@ -54,3 +54,16 @@ Append-only. Closed units, with their receipts.
     - a pass in the opening fight took 5.3–12.3 s at 1× and 0.6–1.9 s at 4×;
     - 0 foreign requests, 0 console errors.
   - The dispatcher read frames 07 (4× badge and controls) and 08 (Max 76.8× on preview).
+
+| T5 | 06 | O3: planar row/word blits in the opening | T1 |
+
+- **T5** merged at 4c2c07f (branch 34a1f13 + 3b1ef7d, plus merges of main).
+  - The opening's masked blit and rectangle copy now work on whole bytes; the per-pixel forms are kept as test references.
+  - Speed: 4.37–4.51× per opening step (native release).
+  - Frames are unchanged:
+    - 7,168 seeded whole-Chip equivalence cases, plus a matrix covering every shift pair, both copy modes and aliasing;
+    - opus review fuzz: 12.0M random cases and 470k exhaustive edge cases, 0 differences;
+    - owner-local comparison by the dispatcher at 20 ms steps: 400 PNG pairs, 0 differing.
+  - Gates on the merge: 862 passed, web 41/41.
+  - Reviews: gpt-6-astra APPROVE twice; opus APPROVE.
+  - Deploys: preview, then production aeb272a5. live-check2 shows 0 foreign requests and 0 errors. The dispatcher read the opening title card frame.
