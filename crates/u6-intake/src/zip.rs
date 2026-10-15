@@ -472,6 +472,12 @@ pub fn read_zip(data: &[u8], keep: impl Fn(&str) -> bool) -> Result<Vec<(String,
 /// to exactly that size and to its CRC-32.
 pub fn entry(data: &[u8], s: &Slice) -> Result<Vec<u8>, Error> {
     let name = s.name();
+    // General-purpose flag bit 0: the data is encrypted (`zip -P`), not the bytes it declares.
+    if s.flags & 1 != 0 {
+        return Err(Error::new(format!(
+            "{name}: encrypted entries are not supported"
+        )));
+    }
     let range = data.get(to_usize(s.start)?..to_usize(s.end)?);
     let (_, body) = s.local(range.ok_or_else(invalid)?)?;
     let bytes = match s.method {
@@ -1099,6 +1105,57 @@ mod tests {
         let mut got = read_zip(&rebuilt, disks).unwrap();
         got.sort();
         assert_eq!(got, entries(&[("Disk 1.adf", &disk), ("Disk 2.adf", &two)]));
+    }
+
+    #[test]
+    fn an_encrypted_entry_is_refused_as_one() {
+        let disk: Vec<u8> = (0..4000u32).map(|i| (i * 7 % 251) as u8).collect();
+        // As `zip -P` stores one: a 12-byte encryption header, then the data enciphered (here
+        // a stand-in cipher), the CRC and size the plain data's; flag bit 0 in both records.
+        let mut cipher: Vec<u8> = (0..12u8).map(|i| i.wrapping_mul(37)).collect();
+        cipher.extend(disk.iter().map(|b| b ^ 0x5a));
+        let (mut stored_zip, at) = make(&[stored("Disk 1.adf", &cipher)], 0, false);
+        let (local, cd) = (at[0].0 as usize, central_at(&stored_zip));
+        for (field, v) in [(14, crc32fast::hash(&disk)), (22, disk.len() as u32)] {
+            stored_zip[local + field..local + field + 4].copy_from_slice(&v.to_le_bytes());
+            stored_zip[cd + field + 2..cd + field + 6].copy_from_slice(&v.to_le_bytes());
+        }
+        // A deflated entry whose data is plain but flagged: refused too, never read as plain.
+        let (mut flagged, at) = make(&[deflated("Disk 1.adf", &disk)], 0, false);
+        let (flagged_local, flagged_cd) = (at[0].0 as usize, central_at(&flagged));
+        for (z, local, cd) in [
+            (&mut stored_zip, local, cd),
+            (&mut flagged, flagged_local, flagged_cd),
+        ] {
+            z[local + 6] |= 1;
+            z[cd + 8] |= 1;
+        }
+        for (z, what) in [(&stored_zip, "stored"), (&flagged, "deflated")] {
+            let (whole, sliced) = paths(z);
+            for (path, r) in [("whole", whole), ("sliced", sliced)] {
+                let e = match r {
+                    Ok(read) => panic!("{what} ({path}) read {} entries", read.len()),
+                    Err(e) => e.to_string(),
+                };
+                assert_eq!(
+                    e, "Disk 1.adf: encrypted entries are not supported",
+                    "{what} ({path})"
+                );
+            }
+        }
+        // Its name is still listed, and another entry of the zip still reads.
+        let (mut two, at) = make(
+            &[deflated("Disk 1.adf", &disk), stored("Disk 2.adf", &disk)],
+            0,
+            false,
+        );
+        two[at[0].0 as usize + 6] |= 1;
+        let cd = central_at(&two);
+        two[cd + 8] |= 1;
+        let (slices, _) = read_directory(&two).unwrap();
+        assert_eq!(slices.len(), 2);
+        assert!(entry(&two, &slices[0]).is_err());
+        assert_eq!(entry(&two, &slices[1]).unwrap(), disk);
     }
 
     /// [`paths`]: the two must agree; returns what they read.
