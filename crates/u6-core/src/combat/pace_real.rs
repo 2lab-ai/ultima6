@@ -17,8 +17,10 @@ use super::present::{
     FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, FRAME_MS, NAME_MS, PRINT_MS, REFRESH_MS,
 };
 use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, PICK_MS};
+use crate::actors::walk::{FOLLOW_MS, STEP_MS};
 use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
+use crate::pacer::STEP_MS as HOST_STEP_MS;
 use crate::state::State;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
@@ -151,7 +153,8 @@ fn play_keys(
             }
         }
         tick(&mut e, &[InputEvent::Key(Key::Char('b'))]);
-        for _ in 0..30 {
+        // 480 ms for the break-off.
+        for _ in 0..480 / tick_ms {
             tick(&mut e, &[]);
         }
         settle(&mut e);
@@ -198,9 +201,13 @@ fn median(v: &mut [u32]) -> u32 {
     }
 }
 
-/// What a wait of `ms` is for (the constants have distinct values in this fight).
+/// What a wait of `ms` is for (the constants have distinct values, but a party step without
+/// followers may take as long as a message).
 fn what(ms: u16) -> &'static str {
     match ms {
+        v if v == STEP_MS + FOLLOW_MS => "party step and its followers",
+        v if v == STEP_MS && v == PRINT_MS => "message or party step",
+        v if v == STEP_MS => "party step",
         AFTER_TURN_MS => "refresh after a turn",
         PICK_MS => "scheduler pick",
         v if v == PICK_MS + COMBAT_NPC_MS => "pick + combat NPC turn",
@@ -225,7 +232,7 @@ fn the_start_fight_turns_take_the_originals_time() {
     let (mut all, mut first5) = (Vec::new(), Vec::new());
     let mut spent: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
     for seed in SEEDS {
-        let turns = play(&files, seed, 16, false);
+        let turns = play(&files, seed, HOST_STEP_MS, false);
         let row: Vec<String> = turns
             .iter()
             .map(|t| format!("{}{}", frames(t.ms), if t.moved { "" } else { "*" }))
@@ -279,28 +286,35 @@ fn the_start_fight_turns_take_the_originals_time() {
 
 #[test]
 fn the_start_fight_takes_the_same_time_at_any_host_tick() {
-    // Spec 03 §1: the same steps take the same engine time at 16 ms and 8 ms ticks, and polls
-    // with no time elapsed add nothing (to within a host tick per step).
+    // Spec 03 §1: the same steps take the same engine time at the hosts' step (spec 06) and at
+    // ticks of half of it, and at 16 ms and 8 ms ticks; polls with no time elapsed add nothing
+    // (to within a host tick per step). The finer tick divides the coarser one: where it does
+    // not (20 against 8), the key's tick and the end's rounding differ by more than a tick.
     let Some(files) = files() else {
         return;
     };
-    for seed in [0, 5] {
-        let base: Vec<u64> = play(&files, seed, 16, false).iter().map(|t| t.ms).collect();
-        for (tick, zero) in [(8, false), (16, true)] {
-            let other: Vec<u64> = play(&files, seed, tick, zero)
+    for (coarse, finer) in [(HOST_STEP_MS, HOST_STEP_MS / 2), (16, 8)] {
+        for seed in [0, 5] {
+            let base: Vec<u64> = play(&files, seed, coarse, false)
                 .iter()
                 .map(|t| t.ms)
                 .collect();
-            println!(
-                "seed {seed}: ms per step at 16 ms ticks {base:?}, at {tick} ms (zero polls \
-                 {zero}) {other:?}"
-            );
-            // Each step ends within its own run's tick of the same deadline.
-            for (a, b) in base.iter().zip(&other) {
-                assert!(
-                    b + 16 >= *a && *b <= a + u64::from(tick),
-                    "seed {seed}: {base:?} vs {other:?}"
+            for (tick, zero) in [(finer, false), (coarse, true)] {
+                let other: Vec<u64> = play(&files, seed, tick, zero)
+                    .iter()
+                    .map(|t| t.ms)
+                    .collect();
+                println!(
+                    "seed {seed}: ms per step at {coarse} ms ticks {base:?}, at {tick} ms \
+                     (zero polls {zero}) {other:?}"
                 );
+                // Each step ends within its own run's tick of the same deadline.
+                for (a, b) in base.iter().zip(&other) {
+                    assert!(
+                        b + u64::from(coarse) >= *a && *b <= a + u64::from(tick),
+                        "seed {seed}: {base:?} vs {other:?}"
+                    );
+                }
             }
         }
     }
@@ -331,7 +345,7 @@ fn the_castle_without_the_fight_takes_the_originals_time() {
     let mut spent: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
     let mut all = Vec::new();
     for seed in SEEDS {
-        let turns = play_keys(&files, seed, &TOWN_KEYS, true, 16, false);
+        let turns = play_keys(&files, seed, &TOWN_KEYS, true, HOST_STEP_MS, false);
         let row: Vec<String> = turns
             .iter()
             .map(|t| format!("{}{}", frames(t.ms), if t.moved { "" } else { "*" }))

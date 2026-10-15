@@ -120,3 +120,35 @@ Base origin/port/main `6dce550`. One worktree per unit (`.worktrees/m2-<unit>`, 
 | rights | fix/m2r4-rights | merged 3c2741e: no character or place names, messages, song titles, tables, bytes or values read from the game files anywhere in the repo (sweep 0 in owned files); mechanics vocabulary allowed (01-spec §Rights); mkadf by regions + sha256 (ADFs byte-identical); classify.py by string address (0 classification differences / 1383); palette and conversation checks structural |
 
 Redeploy: main 2b4551b → production 8999b6ca; 765 tests (--profile gate), web 28/28; live check 10 requests, 0 foreign, 0 errors; frames read by the dispatcher.
+
+## WU-P7b carried item closed 2026-10-15
+
+- "Panel keys inside `ui::wait::read_key` do nothing silently" was closed by inspection on main `3349a83`. read_key now dispatches inventory scroll, Ready/Unready, the spellbook page and containers (`crates/u6-core/src/ui/wait.rs:135-155`).
+
+## M2 round 5 — closed 2026-10-15
+
+Playback and walkstep merged into main `a99c2bf` and deployed to production `36aa4826` (https://ultima6.2lab.ai).
+
+| Unit | Branch | Result |
+|---|---|---|
+| playback | fix/m2r5-playback | merged `3ed544c` (head `800767e`). An action inside a more prompt (Ready, Unready, a trapped chest) plays its own lines and frames in place, while the outer print, its frames and the held newline are set aside and put back. Frames come due by printed marks (`present::printed_one`). The idle poll shows due frames in every wait (`show_recorded` removed). The idle-refresh quake plays in its prompt. PRINT_MS 22 (pooled 22.495 ms). Reviews: gpt6 ×4 and opus ×3 rounds, all APPROVE at the end. |
+| walkstep | fix/m2r5-walkstep | merged `a99c2bf` (head `b094f0b`). The step's own time is STEP_MS 24 plus FOLLOW_MS 41 when a follower is eligible. Constants are pooled from r4+r5. COMBAT_NPC_MS 46 is charged by the routine a worktype runs (`npc::runs_combat_routine`). Followers are checked with follow()'s own guards. Receipts: castle 34 vs 33, start fight 302 vs 277, quiet held walk 1/1/1/2/7 vs 1/1/1/2/6. Reviews: gpt6 + opus ×2 rounds, APPROVE. |
+
+Gates on `a99c2bf`:
+- fmt and clippy clean
+- `--profile gate`: 793 passed, 0 failed, 6 ignored
+- build-web: wasm 1,759,472 B
+- web 28/28
+- test_amifs, test_fight and test_trace pass
+- port_map clean
+
+Live check2 on preview `cf99e9f2` and on production: 10 requests, 0 foreign, 0 errors. Frames read by the dispatcher: menu, game start, walk into the start fight with wound lines, Journey Onward after reload.
+
+## webpace — closed 2026-10-15
+
+| Unit | Branch | Result |
+|---|---|---|
+| webpace | fix/m2r4-webpace | Merged as `517b2ba` (head `de4e98f`).<br>**Root cause:** the clock seed, not the hold length. About 7% of boots leave a foe in the walked cell; the step is blocked and 0 cells result.<br>**Fix:** holds are timed on the engine clock; a direction retry is added; the pass-turn after a blocked sideways try is added.<br>**Pace check:** the original's fastest repeat, 500 ms from `pace/run-b1..b6`, is an independent floor, both cumulative and consecutive. The harness guards are labelled as such. The results table is in `re/notes/oracle.md` §4, and the `HELD_WALK_MS` doc matches it.<br>**Receipts on de4e98f:** 3 runs under 8× `yes` and 3 under `U6_FRAME_DELAY=150`, all 29/29.<br>**Reviews:** gpt6 ×3 and opus ×2, APPROVE. |
+
+Gates on `517b2ba`: fmt, clippy, 793 tests (`--profile gate`), web 29/29. The wasm is unchanged at 1,759,472 B, so no redeploy was needed.
+

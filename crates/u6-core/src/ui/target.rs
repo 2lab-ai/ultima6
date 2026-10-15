@@ -19,16 +19,26 @@ const SPACE: u16 = 0x20;
 /// First function key code (F1 = 0x13b): F1 + n picks party member n in the panel.
 const F1: u16 = 0x13b;
 /// [replaced] Milliseconds from one sample of a held walk to the next: 33 PAL frames (20 ms each),
-/// from the oracle (tools/oracle/pace.mjs: game-first disks, the throne room with every actor
-/// outside the party passed over and the fight broken off, a press held three cells south, 6
-/// boots). In 4 boots the steps came 25..41 frames apart (median 29, mean 31.7, alternating about
-/// 27 and 38), the first 1..12 frames after the press and the second 28..37; in the other 2,
-/// whose followers were still forming up, 26..108 (median 72). A sample every 33 frames from the
-/// press puts the port's cells per held time within one of those 4 boots at every hold up to
-/// their 8 free cells (100 ms: 1, 1 s: 2, 4 s: 7 against their 6), so no separate first-repeat
-/// delay is needed. The waits of the step's world turn (its refresh,
-/// [`crate::actors::turn::AFTER_TURN_MS`], and in a fight its NPC turns and effects) count inside
-/// the pace, not on top of it.
+/// from the oracle (tools/oracle/pace.mjs, runs pace/run-b1..b6; the table in re/notes/oracle.md
+/// §4 "Held-walk pace"): game-first disks, the start position with every actor outside the party
+/// passed over and the fight broken off (setup `quiet`), a press held three cells south, one boot
+/// per run. Gaps between two steps of one held press, in frames:
+/// - b1, b2, b5, b6, within the first 8 cells (the free ones): n = 122, 25..41, median 29, mean
+///   31.7 (alternating about 27 and 38); the first step 1..12 frames after the press, the second
+///   28..37. Past the 8th cell b1 and b2 (500-frame holds) add two gaps per trial: 121..123, then
+///   26..28.
+/// - b3, b4, whose followers were still forming up: n = 37, 26..108, median 72. b4's come from a
+///   press held east (its presses south and north walked no cell).
+///
+/// A sample every P frames from the press gives 1 + floor((t - 1) / P) cells for a hold of t
+/// (the rule below: step n when the press plus n paces is before the release). Against the
+/// four boots' 300- and 500-frame holds, every t up to their 8th cell, the port stays within one
+/// cell of the original for P = 30..37 frames (100 ms: 1 against 0..1, 1 s: 2 against 2, 4 s: 7
+/// against 6..7); 33 sits in that range, and a sample from the press needs no separate
+/// first-repeat delay. The step's own wait ([`crate::actors::walk::STEP_MS`], and
+/// [`crate::actors::walk::FOLLOW_MS`] when members follow) and the waits of its world turn (its
+/// refresh, [`crate::actors::turn::AFTER_TURN_MS`], and in a fight its NPC turns and effects)
+/// count inside the pace, not on top of it.
 pub(crate) const HELD_WALK_MS: u32 = 660;
 
 /// Alt + letter codes (0x100 + PC scan code) that select a command (0x106ca0 switch).
@@ -133,11 +143,11 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
 /// plus n paces is before the release, in the direction the pointer had at that time, at any
 /// host tick size. Time the step waits for itself (an effect, a prompt) counts toward its pace,
 /// not on top of it: added, the tick rounding of those waits would build up over a walk again (a
-/// 100 ms wait lasts 112 ms at 16 ms ticks, 104 at 8). The cost: in the original such a wait
-/// comes before its redraw, so each step that waits comes up to a pace early, and over a walk of
-/// such steps that adds up (unmeasured: the oracle captures have no held walk whose steps wait,
-/// only single clicks in the start fight, whose 143..541-frame turns mix the 68000's work with
-/// its waits).
+/// 110 ms wait lasts 120 ms at the hosts' 20 ms step, 112 at 8 ms ticks). The cost: in the
+/// original such a wait comes before its redraw, so each step that waits comes up to a pace
+/// early, and over a walk of such steps that adds up (unmeasured: the oracle captures have no
+/// held walk whose steps wait, only single clicks in the start fight, whose 143..541-frame turns
+/// mix the 68000's work with its waits).
 /// A step whose own waits outlast the pace samples on the next frame and the cadence starts
 /// again from that sample (no burst of the paces it outlasted). A hold that gives no walk (the
 /// pointer on the hero's cell or off the map, a blocked step) keeps the frame pace, and so does
@@ -381,6 +391,44 @@ fn panel_key_in(s: &mut State, key: u16) -> u16 {
     }
 }
 
+/// Port-only (spec 06 §Design 6): which of `-`, `+` and `=` `game` takes now, as bits
+/// ([`crate::engine::OWN_MINUS`], [`crate::engine::OWN_PLUS`], [`crate::engine::OWN_EQUALS`]),
+/// for the page that otherwise takes them for the speed. A read of the flags the line editor and
+/// [`panel_key`] go by, as of the last poll (a key still queued may change them):
+/// - a line being typed (0x107cba, A4-0x7a57 set): all three, characters of the line;
+/// - outside a conversation, the stats or inventory panel (mode 0x90 / 0x92): `-` and `+`, the
+///   member before and after (`=` is no panel key);
+/// - outside a conversation, the roster (mode 0x91): `+` while members follow below it, `-`
+///   while it does not start at the first (the scroll's own tests).
+///
+/// None while `u` runs: its state is the program's own, so it claims its keys on the `Io`
+/// ([`crate::engine::Io::own_keys`]).
+pub fn keys_owned(s: &State) -> u8 {
+    use crate::engine::{OWN_ALL, OWN_MINUS, OWN_PLUS};
+    if s.main.program != crate::main_loop::Program::Game {
+        return 0;
+    }
+    if s.ui.input.line_input {
+        return OWN_ALL;
+    }
+    if s.converse.active {
+        return 0;
+    }
+    let (first, size) = (
+        i16::from(s.ui.panel.roster_first),
+        i16::from(s.actors.party.size),
+    );
+    match s.ui.panel.mode {
+        0x90 | 0x92 => OWN_MINUS | OWN_PLUS,
+        0x91 => {
+            let plus = if first < size - 5 { OWN_PLUS } else { 0 };
+            let minus = if first != 0 { OWN_MINUS } else { 0 };
+            plus | minus
+        }
+        _ => 0,
+    }
+}
+
 /// The command letter that confirms a cursor started by that command (0x106e1e..0x106e86):
 /// A, C (cross-hair only), T, L, G, D, M, U.
 fn confirms(cmd: u16, targeting: u8, key: u16) -> bool {
@@ -600,4 +648,85 @@ fn member_key(state: &RefCell<State>, key: u16, targeting: u8) -> u16 {
         (p.x as i16, p.y as i16)
     };
     super::wait::REPEAT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{OWN_ALL, OWN_EQUALS, OWN_MINUS, OWN_PLUS};
+    use crate::main_loop::Program;
+
+    /// A `game` state on synthetic values: no line typed, no conversation, panel mode `mode`,
+    /// `size` members, the roster from member `first`.
+    fn at(mode: u16, size: u8, first: u8) -> State {
+        let mut s = State::empty();
+        s.main.program = Program::Game;
+        s.ui.panel.mode = mode;
+        s.actors.party.size = size;
+        s.ui.panel.roster_first = first;
+        s
+    }
+
+    #[test]
+    fn the_keys_game_takes_by_state() {
+        let line = |mut s: State| {
+            s.ui.input.line_input = true;
+            s
+        };
+        let talk = |mut s: State| {
+            s.converse.active = true;
+            s
+        };
+        let rows: [(&str, State, u8); 13] = [
+            ("the prompt, map panel", at(0x9e, 8, 0), 0),
+            ("the spellbook", at(0xa1, 8, 0), 0),
+            ("stats", at(0x90, 1, 0), OWN_MINUS | OWN_PLUS),
+            ("inventory", at(0x92, 1, 0), OWN_MINUS | OWN_PLUS),
+            ("roster of 5", at(0x91, 5, 0), 0),
+            ("roster of 6 from 0", at(0x91, 6, 0), OWN_PLUS),
+            ("roster of 6 from 1", at(0x91, 6, 1), OWN_MINUS),
+            ("roster of 7 from 1", at(0x91, 7, 1), OWN_MINUS | OWN_PLUS),
+            ("roster of 8 from 3", at(0x91, 8, 3), OWN_MINUS),
+            ("a line typed", line(at(0x9e, 1, 0)), OWN_ALL),
+            ("inventory in a conversation", talk(at(0x92, 1, 0)), 0),
+            ("words typed", line(talk(at(0x92, 1, 0))), OWN_ALL),
+            ("a new state is u's", line(State::empty()), 0),
+        ];
+        for (label, s, want) in rows {
+            assert_eq!(keys_owned(&s), want, "{label}");
+        }
+        assert_eq!(OWN_ALL, OWN_MINUS | OWN_PLUS | OWN_EQUALS);
+    }
+
+    /// The bits follow the panel keys themselves: over the panel modes, with and without a
+    /// conversation, every party size and roster start, the panel takes `-`, `+` or `=` exactly
+    /// when its bit is set.
+    #[test]
+    fn the_panel_bits_agree_with_the_panel_keys() {
+        let mut cases = [0; 2];
+        for mode in [0, 0x90, 0x91, 0x92, 0x9e, 0xa1] {
+            for converse in [false, true] {
+                for size in 0..=16u8 {
+                    for first in 0..=16u8 {
+                        let mut s = at(mode, size, first);
+                        s.converse.active = converse;
+                        let owned = keys_owned(&s);
+                        for (key, bit) in [(0x2d, OWN_MINUS), (0x2b, OWN_PLUS), (0x3d, OWN_EQUALS)]
+                        {
+                            let takes = panel_key_in(&mut s.clone(), key) != key;
+                            assert_eq!(
+                                takes,
+                                owned & bit != 0,
+                                "key {key:#x}, mode {mode:#x}, conversation {converse}, \
+                                 {size} members from {first}"
+                            );
+                            cases[usize::from(takes)] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        println!("{} (state, key) pairs taken, {} not", cases[1], cases[0]);
+        assert!(cases[0] > 0 && cases[1] > 0);
+    }
 }

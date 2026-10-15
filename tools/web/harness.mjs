@@ -218,16 +218,37 @@ export async function forgetSaves() {
 `;
 
 // Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch, the
-// save generation of the game ticked last (whether or not the page stores its Saves).
+// save generation of the game ticked last (whether or not the page stores its Saves), the
+// engine clock and the button changes the game took on it. The clock (`__clock`) is the ms of
+// every tick of a started game summed: the engine adds a tick's ms before the game runs in it,
+// so an event queued before a tick reaches the game at the clock after that tick (as the Rust
+// tests' press: `now_ms()` after the tick that took it). `__buttons` holds [buttons, clock] for
+// each change of the buttons the page queued, at the clock of the tick that took it: a press's
+// delivered hold is its release's clock less its own, whatever the wall time between them.
 const GLUE_HOOKS = `
 globalThis.__u6mem = () => (wasm ? wasm.memory.buffer.byteLength : 0);
 globalThis.__ticks = 0;
+globalThis.__clock = 0;
+globalThis.__buttons = [];
 {
   const tick = Game.prototype.tick;
+  const pointer = Game.prototype.pointer;
+  let queued = [];
+  let held = 0;
+  Game.prototype.pointer = function (x, y, buttons) {
+    if (this.started()) queued.push(buttons & 3);
+    return pointer.call(this, x, y, buttons);
+  };
   Game.prototype.tick = function (ms) {
     globalThis.__ticks += 1;
     if (globalThis.__trap) throw new WebAssembly.RuntimeError('unreachable (test trap)');
+    if (this.started()) globalThis.__clock += ms;
     const done = tick.call(this, ms);
+    for (const b of queued) {
+      if (b !== held) globalThis.__buttons.push([b, globalThis.__clock]);
+      held = b;
+    }
+    queued = [];
     globalThis.__saveGen = this.save_generation();
     return done;
   };
@@ -413,9 +434,11 @@ export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /// One step east or west from the prompt: the seed is the clock's, so the start fight sometimes
 /// leaves a gargoyle or a member beside the hero and the step is blocked; then the other way,
-/// up to `STEP_TRIES` tries (each try's world turn moves the fight on; with a gargoyle on each
-/// side six tries in a row were seen blocked). Returns the key that walked, the leader before
-/// and after, and the frame before that step.
+/// up to `STEP_TRIES` tries. A blocked step costs no movement points, so the world turn after
+/// it picks the hero again at once: no NPC turn runs, the prompt is back and the fight does not
+/// move on, and a boot with both sides blocked would stay blocked on every try. After each
+/// blocked try a pass (`passTurn`) spends the hero's turn, so the NPCs move. Returns the key
+/// that walked, the leader before and after, and the frame before that step.
 export const STEP_TRIES = 16;
 export async function stepSideways(page) {
   for (let i = 0; i < STEP_TRIES; i += 1) {
@@ -428,8 +451,18 @@ export async function stepSideways(page) {
     await waitPrompt(page);
     const to = (await state(page)).leader;
     if (to !== from) return { key, from, to, before };
+    await passTurn(page);
   }
   throw new Error(`${STEP_TRIES} steps blocked in a row`);
+}
+
+/// At the prompt, a pass (Space on the focused canvas): the hero's turn is spent, so the world
+/// turn runs the NPCs' turns (the start fight's foes move on), then the prompt again.
+export async function passTurn(page) {
+  await waitPrompt(page);
+  await page.keyboard.press('Space');
+  await waitTaken(page);
+  await waitPrompt(page);
 }
 
 // Each wait's own id: a wait counts its looks from zero (a count left by an earlier wait would

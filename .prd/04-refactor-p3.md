@@ -6,8 +6,8 @@ tags: [ultima6, rust, refactor, ai, modding]
 
 # 04 — P3 refactor: AI-driven NPCs, editable systems, mods
 
-Status: planned (rev 4, 2026-10-15 — trinity rounds 1–2: gpt-6-astra and fable MUST-FIX folded in;
-grok-4.7 slot pending). Starts after the M2 port is deployed (P2).
+Status: planned (rev 5, 2026-10-15 — trinity rounds 1–2: gpt-6-astra and fable MUST-FIX folded in;
+grok-4.7 slot pending; rev 5 adds the HD/4K seam (05-hd-output.md), W10 and acceptance 7, not yet reviewed). Starts after the M2 port is deployed (P2).
 
 User command (verbatim, `browser-port/ssot.md`): "3. rust 코드를 고치기 좋도록 리팩토링 /
 3.a npc의 가능한 행동을 ai model에게 주고 응답 받을수 있도록 / 3.b 캐릭터 월드맵 등 전체적인
@@ -141,11 +141,15 @@ value; the behavioural receipt is added next to it.
 - Rights cleanup: the ~110 quoted game strings in `re/notes/functions-*.md` and module doc
   listings become role descriptions.
 
+## Output for HD / 4K
+
+The user's 2026-10-15 requirement (x2/x4 resources, an HD/4K map view, more of the map shown; "not now") is designed in [`05-hd-output.md`](05-hd-output.md). P3 builds only its seam: the scene and asset-provider contracts and HD-pack type in W0, the scene output in W10, and acceptance 7. The parity frame stays unchanged.
+
 ## Work units (one agent each)
 
 | WU | Scope | Needs | Gate |
 |---|---|---|---|
-| W0 | contracts: definition / override schema, stable ids, codec API, save sidecar, load-order and conflict rules | — | spec review |
+| W0 | contracts: definition / override schema, stable ids, codec API, save sidecar, load-order and conflict rules, scene and asset-provider contracts, HD-pack content type | — | spec review |
 | W1 | map + chunks + basetile + tileflag + animdata writers, look.lzd table writer through the existing LZW encoder, text forms | W0 | local byte-identity |
 | W2 | objlist codec unification (both profiles) + schedule writer + actor files | W0 | parity suite + byte-identity of both profiles |
 | W3a | converse disassembler (opcode table from the interpreter's arms; data-in-code tables kept as data) + relocating rebuild (jump and table operands **and** the addresses of runtime script writes, `converse/exec.rs:268`, `converse/eval.rs:245` → `script.rs:41`) + name / price edits; a rebuilt script longer than `SCRIPT_LEN` 0x2800 is refused | W0 | identity rebuild of every script, **and** every name lengthened by N bytes → interpreter receipts identical except the names |
@@ -158,6 +162,7 @@ value; the behavioural receipt is added next to it.
 | W7b | ModelBrain + budget + transport | W7a, transport decision | acceptance 2 |
 | W8 | rules extraction, one family per dispatch (missile weapons first) | W4 | behaviour test + parity |
 | W9 | rights cleanup of notes and docs | — | grep: no quoted game strings |
+| W10 | scene output next to the frame (map cells + UI widgets, logical units); view size read from state in new code | W0 | parity identical + scene/frame agreement on synthetic state |
 | W3b | full conversation text form | W3a | later |
 
 ## Acceptance (P3)
@@ -173,3 +178,4 @@ value; the behavioural receipt is added next to it.
 5. A save made with a mod set resumes with that set; with a mod missing, changed or reordered it is
    refused before boot with the difference listed; a save without a sidecar loads only with no mods.
 6. Export → build of the base game is byte-identical for every file the engine reads.
+7. Every presented frame has a scene, and drawing that scene at 1× with the base assets reproduces the frame's map window and panels (synthetic state, then the real-data receipts as pass/fail).

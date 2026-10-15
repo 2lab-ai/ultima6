@@ -29,12 +29,12 @@ use super::tables::at;
 /// Milliseconds of one PAL frame (the original's display runs at 50 Hz).
 pub const FRAME_MS: u16 = 20;
 /// [replaced] Time of the hit flash 0x1230ce (draw lists, the window with tile 0x101 rendered
-/// and copied, draw lists again): 312 ms, 15.602 PAL frames, the median of 18 calls traced in
-/// the oracle's start fight (15.34..16.03; tools/oracle/trace.mjs on the CPU clock, reduced by
-/// trace.py). fight.py's CPU samples give 16 (n = 45).
+/// and copied, draw lists again): 312 ms, 15.602 PAL frames, the median of 38 calls traced in
+/// the oracle (15.32..16.03; the r4 and r5 runs pooled, re/notes/oracle.md; tools/oracle/trace.mjs
+/// on the CPU clock, reduced by trace.py). fight.py's CPU samples give 16 (n = 45).
 pub const FLASH_MS: u16 = 312;
 /// [replaced] Time of a render of the window into the back buffer (0x102c90 without the frame)
-/// and what a flight does before its first step: 128 ms, 6.397 PAL frames, the median of the 27
+/// and what a flight does before its first step: 128 ms, 6.379 PAL frames, the median of the 57
 /// traced flights that drew no step (6.15..7.33; the CPU samples of 87 flights give 6).
 pub const RENDER_MS: u16 = 128;
 /// [replaced] Time of a render of the window with its frame, copied to the screen (0x102c90 with
@@ -53,15 +53,16 @@ pub const FLIGHT_STEP_MS: u16 = 46;
 /// window rendered by 0x102c90 and copied to the screen): 11 PAL frames. A sampled estimate:
 /// the median of the 40 flights whose CPU samples end in one (9..42, 29 of them 10 or 11); with
 /// the view flags before it, the traced refresh after a turn
-/// ([`crate::actors::turn::AFTER_TURN_MS`], 21.375).
+/// ([`crate::actors::turn::AFTER_TURN_MS`], 21.336).
 pub const REFRESH_MS: u16 = 11 * FRAME_MS;
-/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 24 ms, 1.185
-/// PAL frames, the mean of 57 calls traced in the oracle (0.06..3.60, the ones that scroll the
-/// longest). Per call, as the port prints one queued message a call.
-pub const PRINT_MS: u16 = 24;
+/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 22 ms, the
+/// mean of 128 calls traced in the oracle, 1.12476 PAL frames = 22.495 ms (0.06..3.60, the ones
+/// that scroll the longest), to the nearest ms as the other constants. Per call, as the port
+/// prints one queued message a call.
+pub const PRINT_MS: u16 = 22;
 /// [replaced] Time of an object's name read for a message (0x10eef8: 0x10ee76 decodes it out of
-/// the look.lzd copy in memory, 0x161ec8): 26 ms, 1.294 PAL frames, the mean of 32 calls traced
-/// in the oracle's fight (1.01..1.66). The first read of a boot also loads the file from the
+/// the look.lzd copy in memory, 0x161ec8): 26 ms, 1.289 PAL frames, the mean of 70 calls traced
+/// in the oracle (1.01..1.72). The first read of a boot also loads the file from the
 /// floppy (132.23 frames traced): not modelled.
 pub const NAME_MS: u16 = 26;
 /// [replaced] Time of a window presented dissolving (0x102c90 with A4-0x6578 set: 0x1520e2
@@ -162,7 +163,13 @@ pub struct Effect {
     /// Engine milliseconds the original spends making it: [`play_effects`] waits that long
     /// before showing it.
     pub cost: u16,
-    /// Messages queued (`main.pending_print`) before it was presented.
+    /// Messages queued (`main.pending_print`) before it was presented, the one being printed
+    /// included: one less after each is printed ([`printed_one`]), 0 once they all are. That
+    /// holds for frames recorded before the entry in flight left the queue. A frame recorded
+    /// inside that entry's key wait (its more prompt) would be marked after the entries still
+    /// queued and come due one entry early; none is: everything that runs in a key wait records
+    /// inside an [`interrupt`] (the idle poll 0x105c8e, Ready, Unready, a trapped chest),
+    /// marked against an empty queue.
     pub mark: usize,
     /// The window was presented dissolving (0x1520e2): playback reveals it over its time.
     pub dissolve: bool,
@@ -235,6 +242,65 @@ pub(crate) fn capture_pause(s: &mut State, cost: u16) {
     });
 }
 
+/// Port: one queued entry was printed ([`crate::main_loop::flush_prints`], after it ran): the
+/// frames recorded after it are one entry nearer, and those whose entries are all printed are
+/// due (mark 0). A flush that leaves the frames for later (the end of turn, Get) leaves them
+/// due, so at the next playback they come before anything queued since.
+pub(crate) fn printed_one(s: &mut State) {
+    for e in &mut s.combat.effects {
+        e.mark = e.mark.saturating_sub(1);
+    }
+}
+
+/// Port: what an action run inside a key wait sets aside of the print it interrupts
+/// ([`interrupt`]): the queued lines, the frames recorded among them that are not due yet and
+/// Attack's held newline ([`crate::combat::CombatState::swallow`]).
+///
+/// The original prints and draws synchronously. An action that the key read 0x10790a runs
+/// while a print waits for its more key (0x107f4c in 0x107e5a), such as Ready, Unready, a
+/// trapped chest clicked in the inventory, or the idle refresh of 0x105c8e, prints and draws
+/// right there: after whatever the interrupted code drew before the prompt, and before the
+/// print's other lines, which come after the key. The port queues lines and frames, so the
+/// action shows the interrupted frames that are due, sets the rest aside, plays its own in
+/// place ([`play_effects`]) and puts the interrupted ones back ([`resume`]).
+#[must_use]
+pub(crate) struct Interrupted {
+    pending: Vec<crate::main_loop::Pending>,
+    effects: Vec<Effect>,
+    swallow: bool,
+}
+
+/// Shows the interrupted print's frames whose lines are printed (mark 0: the original drew them
+/// before the prompt), then sets its queue, its other frames and its held newline aside
+/// ([`Interrupted`]).
+pub(crate) async fn interrupt(state: &RefCell<State>, io: &Io) -> Interrupted {
+    let outer = {
+        let mut s = state.borrow_mut();
+        let (due, later) = std::mem::take(&mut s.combat.effects)
+            .into_iter()
+            .partition(|e| e.mark == 0);
+        s.combat.effects = due;
+        Interrupted {
+            pending: std::mem::take(&mut s.main.pending_print),
+            effects: later,
+            swallow: std::mem::replace(&mut s.combat.swallow, false),
+        }
+    };
+    // Nothing is queued and no newline held: this plays the due frames and prints nothing.
+    play_effects(state, io).await;
+    outer
+}
+
+/// Plays whatever the action still left (its lines and frames came before the interrupted
+/// print's rest), then puts the interrupted print back exactly as it was.
+pub(crate) async fn resume(state: &RefCell<State>, io: &Io, outer: Interrupted) {
+    play_effects(state, io).await;
+    let mut s = state.borrow_mut();
+    s.main.pending_print.extend(outer.pending);
+    s.combat.effects.extend(outer.effects);
+    s.combat.swallow = outer.swallow;
+}
+
 /// Prints the first `n` queued messages and keeps the rest queued.
 async fn flush_first(state: &RefCell<State>, io: &Io, n: usize) {
     if n == 0 {
@@ -274,10 +340,13 @@ async fn print_paced(state: &RefCell<State>, io: &Io, n: usize) {
 /// The synchronous code that recorded the frames left its last picture on the screen (the
 /// window renders present as they go); the original showed the window as it last was until its
 /// first new picture was drawn, so the playback starts from the window as last published and
-/// puts the step's last picture back after the recorded ones.
+/// puts the step's last picture back after the recorded ones. An action run inside a more
+/// prompt of the lines before a frame ([`interrupt`]) that shows frames of its own ends on the
+/// window as it leaves it, which the game then has: that becomes the picture to end on, not
+/// the one taken before it (the frames still to come are pictures made before it, as recorded).
 pub async fn play_effects(state: &RefCell<State>, io: &Io) {
     let effects = std::mem::take(&mut state.borrow_mut().combat.effects);
-    let last = effects
+    let mut last = effects
         .iter()
         .any(|e| e.w > 0 && e.h > 0)
         .then(|| io.draw(|fb| window_of(fb)));
@@ -288,8 +357,12 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
     let mut printed = 0;
     for e in effects {
         if e.mark > printed {
+            let before = state.borrow().combat.shown;
             print_paced(state, io, e.mark - printed).await;
             printed = e.mark;
+            if last.is_some() && state.borrow().combat.shown != before {
+                last = Some(io.draw(|fb| window_of(fb)));
+            }
         }
         if e.dissolve && (e.w, e.h) == WINDOW {
             reveal(state, io, &e).await;

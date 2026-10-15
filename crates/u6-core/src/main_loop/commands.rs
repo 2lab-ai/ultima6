@@ -304,7 +304,7 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
         0x1b | 0x20 | NO_COMMAND => pass(state, io).await,
         WALK => {
             let dir = state.borrow().ui.input.direction;
-            crate::actors::party::player_step(&mut state.borrow_mut(), dir as u16);
+            crate::actors::walk::paced_player_step(state, io, dir as u16).await;
         }
         ATTACK => {
             // 0x124caa prints its own name line, reads the target and spends the movement points.

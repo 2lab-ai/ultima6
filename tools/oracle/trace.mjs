@@ -7,8 +7,9 @@
 // usage: node trace.mjs OUTDIR SNAPSHOT [KEY ...]   (default UP RIGHT LEFT RIGHT LEFT RIGHT LEFT)
 //   env U6_FIGHT_SETUP=town: the town setup of fight.mjs (no fight) before the steps
 // Output: OUTDIR/trace.json ({bases, keys, steps: [{key, read, prompt, calls: [{fn, at, frames,
-// depth}]}], complete}), written after every step; `complete` turns true only once every key's
-// step is in (trace.py refuses a file without it).
+// depth, actor, worktype, followers}]}], complete}), written after every step; `complete` turns
+// true only once every key's step is in (trace.py refuses a file without it). An NPC turn has
+// its actor and worktype, a followers' pass the count of members it may move.
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
@@ -26,10 +27,12 @@ const hex = (v) => `$${v.toString(16)}`;
 // step is ~540 frames; a traced one runs ~30 wall seconds a frame-hundred).
 const STEP_FRAMES = 6000;
 const STEP_WALL_MS = 40 * 60000;
-// The traced routines (image addresses).
+// The traced routines (image addresses): the party step 0x11d4ee, with the followers' pass it
+// ends in (0x11c910), is the walk command's own work before the world turn.
 const TRACED = {
   0x1213de: 'world turn', 0x1200b0: 'NPC turn', 0x102f2a: 'refresh after a turn',
   0x132706: 'flight', 0x1230ce: 'hit flash', 0x108658: 'printf', 0x10eef8: 'object name',
+  0x11d4ee: 'party step', 0x11c910: 'follow',
 };
 
 const h = await o.launch({ log: (s) => appendFileSync(join(out, 'trace.log'), `${s}\n`) });
@@ -139,7 +142,17 @@ try {
         // An NPC turn's actor (D0) and its worktype then (0x139188 = hunk 23 + 0x3c00).
         const actor = fn === 0x1200b0 ? d0 & 0xff : null;
         const worktype = actor === null ? null : await page.evaluate((a) => Module._wasm_peek(a), bases[23] + 0x3c00 + actor);
-        open.push({ fn, ret, a7, at, depth: open.length, actor, worktype });
+        // The followers' pass (leader in D0): how many members besides the leader are in
+        // worktype 1, the ones it may move (the party list A4+0x47ec, its size A4+0x4b00).
+        const followers = fn !== 0x11c910 ? null : await page.evaluate(([a4, wt, leader]) => {
+          let n = 0;
+          for (let i = 0; i < Module._wasm_peek(a4 + 0x4b00); i++) {
+            const m = Module._wasm_peek(a4 + 0x47ec + i);
+            if (m !== leader && Module._wasm_peek(wt + m) === 1) n++;
+          }
+          return n;
+        }, [a4, bases[23] + 0x3c00, d0 & 0xff]);
+        open.push({ fn, ret, a7, at, depth: open.length, actor, worktype, followers });
       }
       if (returns.has(p.pc)) {
         // The youngest open call returns, or none does (tracecore.mjs closeAt); an older one
@@ -150,7 +163,7 @@ try {
         } catch (e) {
           throw new Error(`${key}: ${e.message}`);
         }
-        if (top) calls.push({ fn: top.fn, at: top.at, frames: at - top.at, depth: top.depth, actor: top.actor, worktype: top.worktype });
+        if (top) calls.push({ fn: top.fn, at: top.at, frames: at - top.at, depth: top.depth, actor: top.actor, worktype: top.worktype, followers: top.followers });
       }
       await resume('g');
     }

@@ -114,8 +114,10 @@ pub async fn get_key(st: &mut IntroState, io: &Io) -> u16 {
 ///
 /// Letters, digits, space and `- ' . ,` are taken (and drawn, except for one-character input,
 /// which returns as soon as it has its character); Backspace erases the last one in the paper
-/// colour.
+/// colour. Port: while it reads, `-`, `+` and `=` are claimed for it on the `Io`
+/// ([`Io::own_keys`]), so the page does not take them for the speed.
 pub async fn read_line(st: &mut IntroState, io: &Io, max: i16) -> Option<Vec<u8>> {
+    let _keys = io.own_keys(crate::engine::OWN_ALL);
     let mut chars: Vec<(u8, i16, i16)> = Vec::new();
     loop {
         let c = if max == 1 && !chars.is_empty() {

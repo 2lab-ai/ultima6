@@ -140,6 +140,7 @@ pub async fn flush_prints(state: &RefCell<State>, io: &Io) {
                 printf(state, io, &fmt, &args).await;
             }
         }
+        crate::combat::present::printed_one(&mut state.borrow_mut());
     }
 }
 
