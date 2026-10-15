@@ -860,13 +860,16 @@ async function lookAtAvatar(page, shot) {
 }
 
 // One step by clicks: the cell east of the Avatar, else (blocked by the start fight) west,
-// up to the harness's `STEP_TRIES` tries (as `stepSideways`); asserts the step is one cell
-// along x.
+// up to the harness's `STEP_TRIES` tries, a pass after each blocked one (as `stepSideways`:
+// a blocked step runs no world turn); asserts the step is one cell along x.
 async function clickStep(page) {
   for (let i = 0; i < h.STEP_TRIES; i += 1) {
     const dx = i % 2 === 0 ? 1 : -1;
     const { from, to } = await clickCell(page, dx);
-    if (to === from) continue;
+    if (to === from) {
+      await h.passTurn(page); // the click focused the canvas
+      continue;
+    }
     const [fx, fy, fz] = from.split(',').map(Number);
     const [tx, ty, tz] = to.split(',').map(Number);
     assert.ok(tx - fx === dx && ty === fy && tz === fz, `one cell ${dx > 0 ? 'east' : 'west'}`);
