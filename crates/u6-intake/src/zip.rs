@@ -345,9 +345,9 @@ fn end_records(v: &View, size: u64) -> Result<Ends, Stop> {
     Ok(ends)
 }
 
-/// One central-directory record, its Zip64 values applied.
+/// One central-directory record, its Zip64 values applied (its name as stored: decoded only
+/// for the filter, and for the output of the entries taken).
 struct Central<'a> {
-    name: String,
     raw_name: &'a [u8],
     flags: usize,
     method: usize,
@@ -374,11 +374,9 @@ fn central_entry<'a>(v: &View<'a>, o: u64) -> Result<Central<'a>, Stop> {
     let mut local = u64::from(v.u32(o + 42)?);
     let name_at = o + 46;
     let raw_name = v.at(name_at, name_len)?;
-    let name = entry_name(raw_name, flags & 0x800 != 0);
     let extra = v.at(name_at + name_len as u64, extra_len)?;
     zip64_fields(extra, &mut full, &mut csize, &mut local)?;
     Ok(Central {
-        name,
         raw_name,
         flags,
         method,
@@ -431,23 +429,32 @@ pub fn read_zip(data: &[u8], keep: impl Fn(&str) -> bool) -> Result<Vec<(String,
     let Directory::Entries(slices) = directory(data.len() as u64, 0, data, keep)? else {
         return Err(invalid()); // the whole file holds every offset
     };
+    // Each name decoded once; a repeated one takes the first one's place (a name -> place
+    // index over those names, no copies of them).
+    let names: Vec<String> = slices.iter().map(Slice::name).collect();
+    let mut first: HashMap<&str, usize> = HashMap::with_capacity(names.len());
+    let place: Vec<usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| *first.entry(n.as_str()).or_insert(i))
+        .collect();
+    drop(first);
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut slot: HashMap<String, usize> = HashMap::new();
-    for s in slices {
+    let mut at: Vec<usize> = vec![usize::MAX; slices.len()];
+    for ((i, s), name) in slices.iter().enumerate().zip(names) {
         let range = data.get(to_usize(s.start)?..to_usize(s.end)?);
         let (_, body) = s.local(range.ok_or_else(invalid)?)?;
         let bytes = match s.method {
             0 => body.to_vec(),
             8 => miniz_oxide::inflate::decompress_to_vec_with_limit(body, to_usize(s.full)?)
-                .map_err(|err| Error::new(format!("{}: inflate failed: {err}", s.name)))?,
+                .map_err(|err| Error::new(format!("{name}: inflate failed: {err}")))?,
             m => return Err(unknown_method(m)),
         };
-        match slot.get(&s.name) {
-            Some(&i) => out[i].1 = bytes,
-            None => {
-                slot.insert(s.name.clone(), out.len());
-                out.push((s.name, bytes));
-            }
+        if place[i] == i {
+            at[i] = out.len();
+            out.push((name, bytes));
+        } else {
+            out[at[place[i]]].1 = bytes;
         }
     }
     Ok(out)
@@ -475,8 +482,6 @@ pub struct Slice {
     /// slice).
     pub start: u64,
     pub end: u64,
-    /// The entry's name as [`read_zip`] reports it.
-    pub name: String,
     /// What the entry declares unpacked: the inflate limit of a deflated entry.
     pub full: u64,
     raw_name: Vec<u8>,
@@ -493,6 +498,11 @@ impl Slice {
 
     pub fn is_empty(&self) -> bool {
         self.end == self.start
+    }
+
+    /// The entry's name as [`read_zip`] reports it.
+    pub fn name(&self) -> String {
+        entry_name(&self.raw_name, self.flags & 0x800 != 0)
     }
 
     /// The most reading the entry yields: a stored entry its data, a deflated one what it
@@ -578,7 +588,7 @@ fn walk(v: &View, size: u64, keep: impl Fn(&str) -> bool) -> Result<Vec<Slice>, 
         let c = central_entry(v, at)?;
         at = c.next;
         records.push(c.local);
-        if keep(&c.name) {
+        if keep(&entry_name(c.raw_name, c.flags & 0x800 != 0)) {
             if c.method != 0 && c.method != 8 {
                 return Err(unknown_method(c.method).into());
             }
@@ -610,7 +620,6 @@ fn walk(v: &View, size: u64, keep: impl Fn(&str) -> bool) -> Result<Vec<Slice>, 
         slices.push(Slice {
             start: c.local,
             end,
-            name: c.name,
             full: c.full,
             raw_name: c.raw_name.to_vec(),
             flags: c.flags,
@@ -1025,7 +1034,7 @@ mod tests {
                 [exact[1], exact[3]],
                 "exact ranges, pad {pad}"
             );
-            assert_eq!(slices[0].name, "d/Disk 1.hfe");
+            assert_eq!(slices[0].name(), "d/Disk 1.hfe");
             assert_eq!(
                 (slices[0].unpacked(), slices[1].unpacked()),
                 (3000, two.len() as u64)
