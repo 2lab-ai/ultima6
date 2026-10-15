@@ -16,7 +16,7 @@ use u6_testkit::Quiet;
 use super::present::{
     FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, FRAME_MS, NAME_MS, PRINT_MS, REFRESH_MS,
 };
-use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, PICK_MS};
+use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, MINUTE_MS, PICK_MS, SETUP_MS};
 use crate::actors::walk::{FOLLOW_MS, STEP_MS};
 use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
@@ -200,15 +200,21 @@ fn median(v: &mut [u32]) -> u32 {
 }
 
 /// What a wait of `ms` is for (the constants have distinct values, but a party step without
-/// followers may take as long as a message).
+/// followers may take as long as a message). The world turn pays its passes ([`PICK_MS`] each,
+/// shorter than a frame) with its next wait (actors/turn.rs `world_turn`): a combat NPC turn's,
+/// a clock minute's, a refresh's, or its setup's at the end; such a wait is named by that one,
+/// with passes (a run of passes alone is never a wait, so two of them, as long as a message, are
+/// not taken for one).
 fn what(ms: u16) -> &'static str {
+    let passes = |rest: u16| rest.is_multiple_of(PICK_MS);
     match ms {
         v if v == STEP_MS + FOLLOW_MS => "party step and its followers",
         v if v == STEP_MS && v == PRINT_MS => "message or party step",
         v if v == STEP_MS => "party step",
-        AFTER_TURN_MS => "refresh after a turn",
-        PICK_MS => "scheduler pick",
-        v if v == PICK_MS + COMBAT_NPC_MS => "pick + combat NPC turn",
+        v if v >= AFTER_TURN_MS && passes(v - AFTER_TURN_MS) => "refresh after a turn, with passes",
+        v if v >= PICK_MS + MINUTE_MS && passes(v - MINUTE_MS) => "clock minute, with passes",
+        v if v > COMBAT_NPC_MS && passes(v - COMBAT_NPC_MS) => "combat NPC turn, with passes",
+        v if v >= SETUP_MS + PICK_MS && passes(v - SETUP_MS) => "turn setup, with passes",
         NAME_MS => "object name",
         FLASH_MS => "hit flash",
         FLIGHT_START_MS => "flight start",
@@ -225,8 +231,9 @@ fn the_start_fight_turns_take_the_originals_time() {
         return;
     };
     let frames = |ms: u64| (ms / u64::from(FRAME_MS)) as u32;
-    // The port: every seed, the steps that moved the party (a blocked step runs no world turn,
-    // in the original either).
+    // The port: every seed, the steps that moved the party. A blocked step is left out: it runs
+    // a world turn of one pick (its setup and one pass), in the original as in the port
+    // (tools/oracle/trace.mjs, re/notes/oracle.md §E), not a step's.
     let (mut all, mut first5) = (Vec::new(), Vec::new());
     let mut spent: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
     for seed in SEEDS {

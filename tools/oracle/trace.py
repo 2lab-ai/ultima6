@@ -22,6 +22,14 @@ WORLD_TURN, NPC_TURN, AFTER_TURN = 0x1213DE, 0x1200B0, 0x102F2A
 FLIGHT, HIT_FLASH, PRINTF, NAME = 0x132706, 0x1230CE, 0x108658, 0x10EEF8
 # The party step and the followers' pass it ends in.
 STEP, FOLLOW = 0x11D4EE, 0x11C910
+# The world turn's setup before its first pick: 0x121056 (called again after each NPC turn),
+# 0x120b64, then 0x120a1c, whose return ends it; and the clock minute 0x10368a it advances after
+# refilling everyone's points when no one near has any left.
+SETUP_END, MINUTE = 0x120A1C, 0x10368A
+# A setup longer than this is the start fight's first world turn after the boot (8.71 frames in
+# both runs, 0x120a1c alone 8.08; every later one 0.56..1.23): a one-off, left out of the setup's
+# cost (still taken out of the turn's passes).
+ONE_OFF_SETUP = 5.0
 # The worktypes 0x1200b0 runs through a combat routine (its dispatch 0x120184..0x120248; the
 # port's actors/npc.rs runs_combat_routine): the NPC turns COMBAT_NPC_MS is the time of.
 COMBAT_ROUTINES = frozenset([*range(3, 12), 13, 14, 0x13, 0x9A, 0x9B])
@@ -85,13 +93,14 @@ def constants(steps):
     """Per constant, the statistics of its traced calls over `steps` (trace.json's steps), and
     under "blocked steps" what the steps whose party step was blocked spent and ran."""
     out = {k: [] for k in ("refresh after a turn", "combat NPC turn", "other NPC turn",
-                           "scheduler pick", "hit flash", "flight", "flight without a step",
+                           "world turn setup", "clock minute", "hit flash", "flight", "flight without a step",
                            "message", "object name", "party step", "party step, blocked",
                            "follow", "follow, no one to move", "follow, Pass",
                            "follow, Pass, no one to move", "blocked step, world turn",
                            "blocked step, key to prompt")}
     blocked = {"steps": 0, "points spent": [], "NPC turns": 0}
     pick_frames = picks = 0.0
+    pass_frames = passes = 0.0
     for s in steps:
         calls = s["calls"]
         party_steps = [c for c in calls if c["fn"] == STEP]
@@ -142,8 +151,28 @@ def constants(steps):
                 out[key].append(n["frames"] - own)
             pick_frames += world["frames"] - sum(c["frames"] for c in turns + refreshes)
             picks += len(turns) + 1
+            # With its setup traced: the setup (entry to 0x120a1c's return) and the clock
+            # minutes apart; the rest over the passes over the actors, one a pick (each NPC turn
+            # and the player's) and one after each minute's refill.
+            top = [c for c in calls if c["depth"] == world["depth"] + 1 and inside(world, c)]
+            ends = [c for c in top if c["fn"] == SETUP_END]
+            if ends:
+                setup = ends[0]["at"] + ends[0]["frames"] - world["at"]
+                if setup < ONE_OFF_SETUP:
+                    out["world turn setup"].append(setup)
+                minutes = [c for c in top if c["fn"] == MINUTE]
+                for m in minutes:
+                    # Its own time: the date line it prints is paid apart.
+                    own = sum(c["frames"] for c in calls if c["fn"] in OWN_COSTS
+                              and c["depth"] == m["depth"] + 1 and inside(m, c))
+                    out["clock minute"].append(m["frames"] - own)
+                parts = sum(c["frames"] for c in top if c["fn"] in (NPC_TURN, AFTER_TURN, MINUTE))
+                pass_frames += world["frames"] - setup - parts
+                passes += len(turns) + 1 + len(minutes)
     res = {k: stats(v) for k, v in out.items()}
-    res["scheduler pick"] = {"n": int(picks), "mean": pick_frames / picks if picks else 0.0}
+    res["scheduler pick, setup and minutes in"] = {
+        "n": int(picks), "mean": pick_frames / picks if picks else 0.0}
+    res["scheduler pass"] = {"n": int(passes), "mean": pass_frames / passes if passes else 0.0}
     res["blocked steps"] = blocked
     return res
 
@@ -151,7 +180,10 @@ def constants(steps):
 # The constant each line feeds, and whether the port pays the median or the mean.
 USES = {
     "refresh after a turn": ("actors/turn.rs AFTER_TURN_MS", "median"),
-    "scheduler pick": ("actors/turn.rs PICK_MS", "mean"),
+    "world turn setup": ("actors/turn.rs SETUP_MS", "mean"),
+    "clock minute": ("actors/turn.rs MINUTE_MS", "mean"),
+    "scheduler pass": ("actors/turn.rs PICK_MS", "mean"),
+    "scheduler pick, setup and minutes in": ("(check: the old PICK_MS)", "mean"),
     "combat NPC turn": ("actors/turn.rs COMBAT_NPC_MS", "mean"),
     "other NPC turn": ("(no wait)", "mean"),
     "hit flash": ("combat/present.rs FLASH_MS", "median"),
@@ -164,7 +196,7 @@ USES = {
     "follow, no one to move": ("(no wait)", "mean"),
     "follow, Pass": ("actors/walk.rs PASS_FOLLOW_MS", "mean"),
     "follow, Pass, no one to move": ("(no wait)", "mean"),
-    "blocked step, world turn": ("(check: one pick, actors/turn.rs PICK_MS)", "mean"),
+    "blocked step, world turn": ("(check: actors/turn.rs SETUP_MS + PICK_MS)", "mean"),
     "blocked step, key to prompt": ("(check: the frame counter's, actors/walk.rs tests)", "mean"),
     "flight": ("(start + steps + end; check only)", "median"),
 }

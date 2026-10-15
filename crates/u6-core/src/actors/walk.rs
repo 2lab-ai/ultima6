@@ -52,8 +52,8 @@ pub const PASS_FOLLOW_MS: u16 = 42;
 /// move was paid: both end in the followers' pass and the level test). A blocked step returns
 /// before them and waits nothing: traced, it took 0.082 PAL frames (n 12, 0.06..0.37; the
 /// castle, tools/oracle/trace.py "party step, blocked") with the leader's points unchanged, and
-/// the command's world turn then picked the leader again at once (one pick, no NPC turn, the
-/// view unchanged: the next key read 1 to 2 frames after the key). A windless step was not
+/// the command's world turn then picked the leader again at once (its setup and one pass, no
+/// NPC turn, the view unchanged: the next key read 1 to 2 frames after the key). A windless step was not
 /// traced and waits nothing. Nothing is drawn meanwhile: the world turn's refresh draws the view
 /// the step left. A line the step queues (the hiccup, the refused move's) plays after this
 /// wait, up to [`STEP_MS`] + [`FOLLOW_MS`] later than the original prints it.
@@ -977,13 +977,13 @@ pub(crate) mod tests {
     /// again at once). The oracle (tools/oracle/trace.mjs, the castle without the fight, 12
     /// steps north into a tile that is not enterable): the leader's points unchanged, a world
     /// turn of one pick and no NPC turn (1.13..1.72 frames), the next key read 1 to 2 PAL
-    /// frames after the key (mean 1.667, by the frame counter). The port: the pick's time (one
-    /// pick, no step wait, no refresh: the view did not change) and nothing else.
+    /// frames after the key (mean 1.667, by the frame counter). The port: the world turn's setup
+    /// and one pass (no step wait, no refresh: the view did not change) and nothing else.
     #[test]
     fn a_blocked_step_takes_one_pick_and_keeps_the_leaders_points() {
         // The traced key-to-prompt bound, in engine ms (20 a PAL frame).
         let (lo, hi) = (20, 40);
-        let want = u64::from(super::super::turn::PICK_MS);
+        let want = u64::from(super::super::turn::SETUP_MS + super::super::turn::PICK_MS);
         assert!((lo..=hi).contains(&want), "one pick within 1..2 frames");
         let mut s = column();
         npc_ahead(&mut s);

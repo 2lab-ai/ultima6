@@ -193,7 +193,7 @@ are not identical (§3), so r5 is a second sample, not a copy. PAL frames, CPU c
 | object name 0x10eef8 (the boot's first, 132.23 with the floppy, aside) | mean 1.294 (n 32) | mean 1.289 (n 70, 1.01..1.72) | NAME_MS 26 |
 | NPC turn 0x1200b0, own time, worktype in a combat routine (3..=11, 13, 14, 0x13, 0x9a, 0x9b) | mean 2.338 (n 43) | mean 2.278 (n 87, 0.89..4.04) | COMBAT_NPC_MS 46 (was 47) |
 | the same, any other worktype (all traced ones schedule worktypes, 0x80 and up) | mean 0.050 (n 122) | mean 0.033 (n 244) | no wait |
-| world turn outside NPC turns and refreshes, per pick | 0.994 (179 picks) | 0.994 (359 picks) | PICK_MS 20 |
+| world turn outside NPC turns and refreshes, per pick | 0.994 (179 picks) | 0.994 (359 picks) | PICK_MS 20 then; now split into SETUP_MS, PICK_MS and MINUTE_MS (**The world turn split**, below) |
 
 **The party step.** trace.mjs also traces the party step 0x11d4ee and the followers' pass it
 ends in (0x11c910), counting at the pass's entry the members besides the leader in worktype 1
@@ -230,16 +230,47 @@ SPACE SPACE (`p6`). PAL frames:
 | call | value | constant (ms) |
 |---|---|---|
 | party step 0x11d4ee, blocked (no followers' pass inside it) | mean 0.082 (n 12, 0.06..0.37); the leader's points the same at its entry and return in all 12 | no wait |
-| the world turn after it | mean 1.504 (n 12, 1.13..1.72): no NPC turn, one pick (the hero again: its points were not spent), the refresh after it with the view unchanged (0.00) | one pick, PICK_MS 20 |
-| key to the next key read, blocked step (frame counter) | 1..2 (n 12, mean 1.667) | the port: PICK_MS 20 |
+| the world turn after it | mean 1.504 (n 12, 1.13..1.72): no NPC turn, one pick (the hero again: its points were not spent), the refresh after it with the view unchanged (0.00) | its setup and one pass, SETUP_MS + PICK_MS 27 |
+| key to the next key read, blocked step (frame counter) | 1..2 (n 12, mean 1.667) | the port: SETUP_MS + PICK_MS 27 |
 | Pass's followers' pass 0x11c910 (D1 = 1), three followers | mean 2.110 (n 33, 0.16..5.39: 14 took 1.82..5.39, 19 took 0.16..0.47; in the runs of Pass alone the first two of seven were the long ones) | PASS_FOLLOW_MS 42 |
 
 A one-pick world turn costs more than the pooled pick (1.50 against 0.994): the turn's own
-bookkeeping before its picks (0x121056, 0x120b64, 0x120a1c, the formation and the schedules)
-falls on that one pick, while PICK_MS spreads it over every pick of the 359. Pass's prints are
+setup before its picks falls on that one pick, while the old PICK_MS spread it over every pick
+of the 359 (the split below). Pass's prints are
 three a pass (n 33 each): its line (0.19..1.94), one inside its world turn (0.73..1.01) and the
 prompt again (0.30..2.97). No vessel is reachable from the start snapshot (the party is on foot in the
 castle), so Pass's drift step aboard is not traced and the port does not pace it.
+
+**The world turn split.** 0x1213de's own time is three costs, not one a pick: its setup, once
+(0x121056, 0x120b64 and 0x120a1c before the first pick; 0x1213e6..0x121438), a pass over the 256
+actors per pick (0x12143a..0x1216ae, and once more after each refill), and a clock minute each
+time no one near has points left (the refill 0x1216b2..0x1216fa, then 0x10368a with 1 through
+0x1219b8). A least-squares fit of the old traces' time per world turn on its picks gives a
+negative setup, because the minute (about 9 frames, every other step) dominates the
+remainder. So trace.mjs now also traces 0x121056, 0x120b64, 0x120a1c and 0x10368a, and trace.py
+counts the setup (world turn entry to 0x120a1c's return), the minute's own time (its date line
+print apart, as messages are) and the passes (the turn's time outside its setup, NPC turns,
+refreshes and minutes, over its picks plus its minutes). Runs, 2026-10-15, the same setups and
+keys as r4/r5: `pace/trace-fight-s1`, `-s2`, `pace/trace-town-s1`, `-s2`, and UP ×7 in the castle
+(`pace/trace-town-blocked-s1`). They reproduce the earlier runs where the routines overlap
+(refresh after a turn median 21.211, n 70; combat NPC turn mean 2.327, n 87; the old per-pick
+mean 0.990, n 374, against 0.994), so the added stops change nothing. PAL frames:
+
+| part | fight | castle | pooled | constant (ms) |
+|---|---|---|---|---|
+| setup, once a world turn | mean 0.998 (n 12, 0.93..1.23) | mean 0.704 (n 21, 0.56..1.09) | mean 0.811 (n 33) | SETUP_MS 16 |
+| a pass (a pick's, or after a refill) | 0.544 (225 passes) | 0.514 (161) | 0.531 (386) | PICK_MS 11 |
+| clock minute 0x10368a, own time | mean 9.130 (n 6, 8.86..9.38) | mean 9.482 (n 6, 9.14..9.76) | mean 9.306 (n 12) | MINUTE_MS 186 |
+
+The start fight's first world turn after the boot took 8.71 frames of setup in both runs
+(0x120a1c alone 8.08) and is left out of SETUP_MS as a one-off (trace.py `ONE_OFF_SETUP`, 5
+frames); why that pass is long is not established. The port pays the minute with the pass after
+it, and in a time stop (where 0x10368a only counts the stop down; not traced) the pass alone. A
+pass (11 ms) is shorter than a host frame and `pace` waits at least one, so the port owes the
+passes and pays them with the turn's next wait, and the setup with its last (actors/turn.rs
+`world_turn`); paced one by one, the start fight's steps came out up to 48 ms longer at 16 ms
+host ticks than at 8 ms (seed 0, the receipt allows one tick). The castle's steps in the port then follow the original's alternation
+(31 43 31 43 30 43 31 frames against 28 43 33 48 32 41 32).
 
 The flight step (46 ms) and the closing refresh of a flight (`REFRESH_MS`, 11 frames) have no
 routine boundary to trace and stay sampled estimates (fight.py). The sampled estimates held

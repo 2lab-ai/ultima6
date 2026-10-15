@@ -34,11 +34,16 @@ const hex = (v) => `$${v.toString(16)}`;
 const STEP_FRAMES = 6000;
 const STEP_WALL_MS = 40 * 60000;
 // The traced routines (image addresses): the party step 0x11d4ee, with the followers' pass it
-// ends in (0x11c910), is the walk command's own work before the world turn.
+// ends in (0x11c910), is the walk command's own work before the world turn; the world turn
+// 0x1213de begins with its setup, 0x121056 (also called after each NPC turn), 0x120b64 and
+// 0x120a1c, before its first pick, and when no one near has points left refills them and
+// advances the clock a minute (0x10368a through 0x1219b8).
 const TRACED = {
   0x1213de: 'world turn', 0x1200b0: 'NPC turn', 0x102f2a: 'refresh after a turn',
   0x132706: 'flight', 0x1230ce: 'hit flash', 0x108658: 'printf', 0x10eef8: 'object name',
   0x11d4ee: 'party step', 0x11c910: 'follow',
+  0x121056: 'turn bookkeeping', 0x120b64: 'party centre', 0x120a1c: 'schedules',
+  0x10368a: 'clock minute',
 };
 
 const h = await o.launch({ log: (s) => appendFileSync(join(out, 'trace.log'), `${s}\n`) });

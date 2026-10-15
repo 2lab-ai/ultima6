@@ -8,9 +8,6 @@ use crate::state::State;
 use super::seams::{self, Arg};
 use super::{clock, leaves, npc, path, tail, timer, walk};
 
-/// Refills (clock minutes) without anyone able to act after which the scheduler yields to the
-/// host once (port checkpoint, spec 03 §1: a yield changes no game state).
-const IDLE_REFILLS_PER_YIELD: u32 = 60;
 /// [replaced] Engine milliseconds of the refresh after a turn (0x102f2a with the view changed:
 /// the view flags 0x109e74, then 0x102ef0 draws the window and copies it to the screen): 427 ms,
 /// 21.336 PAL frames, the median of 73 such calls traced in the oracle (19.86..23.98: the start
@@ -19,11 +16,28 @@ const IDLE_REFILLS_PER_YIELD: u32 = 60;
 /// returns at once. The original has no wait there: that is the 68000's drawing time, which the
 /// port, drawing at once, waits on the engine clock instead.
 pub const AFTER_TURN_MS: u16 = 427;
-/// [replaced] Engine milliseconds of one pick of the scheduler 0x1213de (its pass over the 256
-/// actors, the refills and clock minutes, the formation and schedule passes, spread over the
-/// picks): 20 ms, 0.994 PAL frames, the world turn's time outside its NPC turns and refreshes
-/// over its picks (each NPC turn and the player's): 359 picks traced in the same runs.
-pub const PICK_MS: u16 = 20;
+/// [replaced] Engine milliseconds of the world turn's setup before its first pick (0x1213de up to
+/// the return of 0x120a1c: the bookkeeping 0x121056, the party centre 0x120b64, the schedules
+/// 0x120a1c), once per world turn: 16 ms, 0.811 PAL frames, the mean of 33 traced (0.56..1.23;
+/// the start fight and the castle without it, two runs each, and the castle's blocked steps;
+/// tools/oracle/trace.mjs on the CPU clock, tools/oracle/trace.py "world turn setup"). The start
+/// fight's first world turn after the boot took 8.71 in both runs (0x120a1c alone 8.08): a
+/// one-off, not paid.
+pub const SETUP_MS: u16 = 16;
+/// [replaced] Engine milliseconds of one pass of the scheduler 0x1213de over the 256 actors (a
+/// pick's, each NPC turn's and the player's, and the one after a refill; with the refill and the
+/// bookkeeping after an NPC turn): 11 ms, 0.531 PAL frames, the world turn's time outside its
+/// setup, NPC turns, refreshes and clock minutes over its 386 passes traced in the same runs
+/// (tools/oracle/trace.py "scheduler pass"). Before the setup and the minutes were traced apart
+/// a pick carried them: 0.994 frames (359 picks, r4 and r5), 0.990 in these runs.
+pub const PICK_MS: u16 = 11;
+/// [replaced] Engine milliseconds of a clock minute in the world turn (0x10368a with 1, through
+/// 0x1219b8, after the refill when no one near has points left: [`clock::tick`]) besides the
+/// date line it prints: 186 ms, 9.306 PAL frames, the mean of the 12 traced in the same runs
+/// (8.86..9.76; every other step of the castle and of the start fight). The port waits it with
+/// the pass the refill begins ([`PICK_MS`]). In a time stop the minute only counts the stop down
+/// and returns at its first test: not traced, the pass alone is waited.
+pub const MINUTE_MS: u16 = 186;
 /// [replaced] Engine milliseconds of an NPC turn that runs a combat routine (the worktype the
 /// turn runs, [`turn_worktype`], in [`npc::runs_combat_routine`]: the party's combat modes,
 /// assault, retreat) besides what it draws, prints and names: 46 ms, 2.278 PAL frames, the mean
@@ -457,16 +471,15 @@ fn refill(s: &mut State) {
     }
 }
 
-/// What the port waits at the pick of `actor` ([`PICK_MS`]), with [`COMBAT_NPC_MS`] more when
-/// an NPC turn (`npc`) runs a combat routine: in a time stop, or on another level than the
-/// party, 0x1200b0 ends the turn at once (0x1200e8..0x120112, [`npc::npc_turn_sync`]) and no
-/// worktype takes its time. The worktype is the one the turn runs ([`turn_worktype`]), not the
-/// one the pick saw.
-fn pick_ms(s: &State, actor: usize, npc: bool) -> u16 {
+/// Whether the pick of `actor` takes [`COMBAT_NPC_MS`] besides its pass ([`PICK_MS`]): an NPC
+/// turn (`npc`) that runs a combat routine. In a time stop, or on another level than the party,
+/// 0x1200b0 ends the turn at once (0x1200e8..0x120112, [`npc::npc_turn_sync`]) and no worktype
+/// takes its time. The worktype is the one the turn runs ([`turn_worktype`]), not the one the
+/// pick saw.
+fn fights(s: &State, actor: usize, npc: bool) -> bool {
     let runs =
         s.actors.timers[timer::TIME_STOP] == 0 && s.objects.location[actor].z == s.map.centre.z;
-    let fights = npc && runs && npc::runs_combat_routine(turn_worktype(s, actor));
-    PICK_MS + if fights { COMBAT_NPC_MS } else { 0 }
+    npc && runs && npc::runs_combat_routine(turn_worktype(s, actor))
 }
 
 /// The worktype 0x1200b0 runs for `actor`. Its first test (0x1200ba..0x1200d4), before it saves
@@ -500,9 +513,18 @@ fn turn_worktype(s: &State, actor: usize) -> u8 {
 /// swallowed), after making it the leader if it is another party member.
 ///
 /// Port: the original draws as it goes and is as slow as that drawing; the port waits the
-/// measured time on the engine clock instead, at each pick ([`pick_ms`]: [`PICK_MS`], and
-/// [`COMBAT_NPC_MS`] before an NPC turn in a combat worktype that runs) and before each refresh
-/// of a changed view ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile.
+/// measured time on the engine clock instead: the setup once ([`SETUP_MS`]), each pick
+/// ([`PICK_MS`], and [`COMBAT_NPC_MS`] for an NPC turn in a combat worktype that runs,
+/// [`fights`]), each refill and clock minute ([`PICK_MS`] + [`MINUTE_MS`]) and each refresh of a
+/// changed view ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile. A pick is shorter
+/// than a host frame, and [`crate::combat::present::pace`] waits at least one (so a run of them
+/// would end later at a coarser tick), so picks are owed and paid with the next wait of the
+/// turn: before a combat NPC turn, at a refill, before a refresh, or at the end of the turn. The
+/// port's NPC turns and picks take no engine time, so the pictures keep their times. The setup
+/// is paid with the end of the turn: that last wait is then never shorter than a frame and
+/// makes up what the waits before it ended late, while the turn's pictures come at most the
+/// setup's 16 ms (under a frame) early. A raise of the dead party (rare, long) waits with what
+/// is owed still outstanding.
 pub async fn world_turn(state: &RefCell<State>, io: &Io) {
     leader_bookkeeping(&mut state.borrow_mut());
     raise_if_dead(state, io).await;
@@ -516,26 +538,30 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
         }
         if s.map.centre.z == 0 { 0x3ff } else { 0xff }
     };
+    let mut owed = 0;
     loop {
         let mut pick = Pick {
             actor: -1,
             mp: 0,
             dex: 1,
         };
-        let mut idle = 0u32;
         loop {
-            {
+            let minute = {
                 let mut s = state.borrow_mut();
                 pick_actor(&mut s, mask, &mut pick);
                 if pick.mp > 0 {
                     break;
                 }
                 refill(&mut s);
+                // While a time stop runs past it the minute only counts it down: no minute's
+                // time, and the pass stays owed (the stop ends within its count of refills).
+                let stopped = s.actors.timers[timer::TIME_STOP] > 1;
                 clock::tick(&mut s, 1);
-            }
-            idle += 1;
-            if idle.is_multiple_of(IDLE_REFILLS_PER_YIELD) {
-                io.vblank().await;
+                owed += PICK_MS;
+                !stopped
+            };
+            if minute {
+                pay(state, io, &mut owed, MINUTE_MS).await;
             }
         }
         // A death in the clock's ticks above (a hazard tile, 0x1032b6) left the raise pending.
@@ -545,8 +571,10 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
         let held = swallowed(&mut state.borrow_mut(), actor);
         let wt = state.borrow().actors.worktype[a];
         let npc = !held && wt != 2 && wt != 1;
-        let ms = pick_ms(&state.borrow(), a, npc);
-        crate::combat::present::pace(state, io, ms).await;
+        owed += PICK_MS;
+        if fights(&state.borrow(), a, npc) {
+            pay(state, io, &mut owed, COMBAT_NPC_MS).await;
+        }
         if !held {
             if npc {
                 npc::npc_turn(state, io, actor).await;
@@ -558,29 +586,47 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
                 }
             }
             if state.borrow().map.view_dirty != 0 {
-                crate::combat::present::pace(state, io, AFTER_TURN_MS).await;
+                pay(state, io, &mut owed, AFTER_TURN_MS).await;
             }
             seams::after_turn_refresh(&mut state.borrow_mut());
         }
-        let mut s = state.borrow_mut();
-        if s.actors.worktype[a] == 2 && s.actors.attrs.movement_flags[a] & 0x10 == 0 {
-            let mut chosen = actor;
-            if s.actors.party.leader_index == s.actors.party.size {
-                chosen = 0;
-            }
-            let leader = member(&s, usize::from(s.actors.party.leader_index));
-            if usize::from(chosen) != leader {
-                for i in 0..s.actors.party.count() {
-                    if member(&s, i) == usize::from(chosen) {
-                        seams::switch_leader(&mut s, i as u8);
-                        s.actors.work.prompt = 1;
-                        break;
-                    }
-                }
-            }
+        if leader_picked(&mut state.borrow_mut(), actor) {
+            pay(state, io, &mut owed, SETUP_MS).await;
             return;
         }
     }
+}
+
+/// [`world_turn`]'s waits: what is `owed` and `more`, in one wait (none when both are 0).
+async fn pay(state: &RefCell<State>, io: &Io, owed: &mut u16, more: u16) {
+    let ms = std::mem::take(owed) + more;
+    if ms > 0 {
+        crate::combat::present::pace(state, io, ms).await;
+    }
+}
+
+/// The end of [`world_turn`]'s loop (0x121760..0x1217cc): true when the pick `actor` is the
+/// player's character (worktype 2, not swallowed), made the leader if it is another member.
+fn leader_picked(s: &mut State, actor: u16) -> bool {
+    let a = usize::from(actor);
+    if s.actors.worktype[a] != 2 || s.actors.attrs.movement_flags[a] & 0x10 != 0 {
+        return false;
+    }
+    let mut chosen = actor;
+    if s.actors.party.leader_index == s.actors.party.size {
+        chosen = 0;
+    }
+    let leader = member(s, usize::from(s.actors.party.leader_index));
+    if usize::from(chosen) != leader {
+        for i in 0..s.actors.party.count() {
+            if member(s, i) == usize::from(chosen) {
+                seams::switch_leader(s, i as u8);
+                s.actors.work.prompt = 1;
+                break;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -621,6 +667,17 @@ mod tests {
             s.actors.movement_points[a] = mp as u8;
         }
         s
+    }
+
+    /// What the port waits for the pick of `actor`: its pass, and the combat turn's time when
+    /// it fights ([`fights`]).
+    fn pick_ms(s: &State, actor: usize, npc: bool) -> u16 {
+        PICK_MS
+            + if fights(s, actor, npc) {
+                COMBAT_NPC_MS
+            } else {
+                0
+            }
     }
 
     fn pick(s: &mut State) -> i16 {
@@ -701,20 +758,15 @@ mod tests {
         assert!(s.actors.mp(1) > 0, "the player has points again");
     }
 
-    /// The engine time one world turn of `world(npcs)` takes at host ticks of `tick_ms` (a poll
-    /// with no time elapsed after each when `zero_polls`), the view changed before it, and the
-    /// NPC turns it ran.
-    fn turn_ms(npcs: &[(i8, u8)], tick_ms: u32, zero_polls: bool) -> (u64, u32) {
-        let mut s = world(npcs);
-        s.actors.movement_points[1] = 0;
-        s.map.view_dirty = 1;
+    /// The engine time one world turn on `s` takes at host ticks of `tick_ms` (a poll with no
+    /// time elapsed after each when `zero_polls`), and the state after it.
+    fn turn_ms(s: State, tick_ms: u32, zero_polls: bool) -> (u64, State) {
         let done = Rc::new(std::cell::Cell::new(None));
         let out = Rc::clone(&done);
         let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
             let t0 = io.now_ms();
             world_turn(&st, &io).await;
-            let n = st.borrow().combat.paced.get(&PICK_MS).copied();
-            out.set(Some((io.now_ms() - t0, n.unwrap_or(0))));
+            out.set(Some(io.now_ms() - t0));
         });
         for _ in 0..10_000 {
             if done.get().is_some() {
@@ -725,7 +777,8 @@ mod tests {
                 e.tick(&[], 0);
             }
         }
-        done.get().expect("the turn ends")
+        let ms = done.get().expect("the turn ends");
+        (ms, e.state().clone())
     }
 
     #[test]
@@ -840,8 +893,9 @@ mod tests {
     fn a_members_turn_after_its_charm_takes_no_combat_turn_time() {
         // Member 10 (status 0x80, in the party list) still in the charm's worktype 8, its
         // charm over (no object status 0x04), out of combat: its turn runs worktype 1 (party
-        // mode), which spends 5 of its 5 points. Two picks (it and the player) and the refresh
-        // of the view the turn started with changed; no combat NPC turn.
+        // mode), which spends 5 of its 5 points. The setup, three passes (its pick, the one after
+        // the refill and the player's pick), one clock minute and the refresh of the view the
+        // turn started with changed; no combat NPC turn.
         let mut s = world(&[(5, 10)]);
         s.actors.party.members[1] = 10;
         s.actors.party.size = 2;
@@ -849,7 +903,11 @@ mod tests {
         s.actors.worktype[10] = 8;
         s.actors.movement_points[1] = 0;
         s.map.view_dirty = 1;
-        let want = 2 * u64::from(PICK_MS) + u64::from(AFTER_TURN_MS);
+        s.actors.calendar.minute = 30;
+        let want = u64::from(SETUP_MS)
+            + 3 * u64::from(PICK_MS)
+            + u64::from(MINUTE_MS)
+            + u64::from(AFTER_TURN_MS);
         for (tick, zero) in [(16, false), (7, false), (16, true)] {
             let done = Rc::new(std::cell::Cell::new(None));
             let out = Rc::clone(&done);
@@ -869,6 +927,7 @@ mod tests {
             }
             let ms = done.get().expect("the turn ends");
             assert_eq!(e.state().actors.worktype[10], 1, "the turn uncharmed it");
+            assert_eq!(e.state().actors.calendar.minute, 31, "one clock minute");
             assert!(
                 ms >= want && ms <= want + u64::from(tick),
                 "{ms} ms at {tick} ms ticks (zero polls {zero}), want {want}"
@@ -876,24 +935,53 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_world_turn_waits_the_originals_time_at_any_host_tick() {
-        // Spec 03 §1: the turn's waits (an NPC turn each, the refresh of the changed view) run
-        // on the engine clock: the same time at 16 ms and 8 ms ticks and with polls of no time.
-        let (ms, npcs) = turn_ms(&[(6, 10), (6, 10)], 16, false);
-        println!("two NPCs: {npcs} NPC turns, {ms} ms");
-        assert!(npcs >= 2, "both acted: {npcs}");
-        let least = u64::from(npcs) * u64::from(PICK_MS) + u64::from(AFTER_TURN_MS);
-        assert!(ms >= least, "{ms} ms, at least {least}");
-        for (tick, zero) in [(8, false), (16, true), (5, true)] {
-            let (other, n) = turn_ms(&[(6, 10), (6, 10)], tick, zero);
-            assert_eq!(n, npcs, "the same turns");
-            // Each run ends within its own tick of the same deadline.
+    /// The cases of a world turn's time: the setup, then per pass, per clock minute; each at host
+    /// ticks of 16 ms, 7 ms and 16 ms with a poll of no time after each, ending within a tick
+    /// of the stated cost; the view unchanged, so no refresh.
+    fn assert_turn_ms(name: &str, s: &State, want: u64, minutes: u8) {
+        for (tick, zero) in [(16, false), (7, false), (16, true)] {
+            let (ms, after) = turn_ms(s.clone(), tick, zero);
+            let m = after
+                .actors
+                .calendar
+                .minute
+                .wrapping_sub(s.actors.calendar.minute);
+            assert_eq!(m, minutes, "{name}: clock minutes");
+            assert_eq!(after.map.view_dirty, 0, "{name}: no refresh");
             assert!(
-                other + 16 >= ms && other <= ms + u64::from(tick),
-                "16 ms ticks {ms}, {tick} ms {other}"
+                ms >= want && ms <= want + u64::from(tick),
+                "{name}: {ms} ms at {tick} ms ticks (zero polls {zero}), want {want}"
             );
         }
+    }
+
+    #[test]
+    fn a_one_pick_world_turn_takes_its_setup_and_one_pass() {
+        // The player has its points (10 of dexterity 10): picked at once, as after a blocked
+        // step. The setup and one pass (the oracle: 1.13..1.72 frames for such a turn, n 18).
+        let s = world(&[(5, 10)]);
+        let want = u64::from(SETUP_MS) + u64::from(PICK_MS);
+        assert_turn_ms("one pick", &s, want, 0);
+    }
+
+    #[test]
+    fn an_n_pick_world_turn_takes_its_setup_its_passes_and_its_minute() {
+        // The player spent; NPCs 10 and 11 (5 of dexterity 10 each) in worktype 0x11, whose
+        // turn only spends 5 points: each takes one turn, then no one has points, the refill
+        // and a clock minute, then the player. The setup, three picks, and the minute with the
+        // pass the refill begins.
+        let mut s = world(&[(5, 10), (5, 10)]);
+        s.actors.movement_points[1] = 0;
+        s.actors.worktype[10] = 0x11;
+        s.actors.worktype[11] = 0x11;
+        s.actors.calendar.minute = 30;
+        let want = u64::from(SETUP_MS) + 4 * u64::from(PICK_MS) + u64::from(MINUTE_MS);
+        assert_turn_ms("two NPCs", &s, want, 1);
+        // The same in a time stop: the NPC turns end at once and the minute only counts the
+        // stop down (no minute's time).
+        s.actors.timers[timer::TIME_STOP] = 5;
+        let want = u64::from(SETUP_MS) + 4 * u64::from(PICK_MS);
+        assert_turn_ms("two NPCs, time stopped", &s, want, 0);
     }
 
     #[test]
