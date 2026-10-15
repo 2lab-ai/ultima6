@@ -165,12 +165,14 @@ impl<W: Write> EventLines<W> {
         }
     }
 
-    /// The end of the stream: its last line (without a newline), then the first thread id.
+    /// The end of the stream: its last line (without a newline), the lines flushed to
+    /// `events`, then the first thread id.
     pub fn finish(mut self) -> Option<String> {
         if !self.dropping && !self.line.is_empty() {
             let line = std::mem::take(&mut self.line);
             self.on_line(&line);
         }
+        let _ = self.events.flush();
         self.thread
     }
 }
@@ -204,9 +206,13 @@ fn nonblocking(fd: i32) -> Result<(), String> {
     Ok(())
 }
 
+/// Most bytes, and most system calls, one turn of [`Pipes::step`] moves in each direction:
+/// a pipe that is never found empty (or never full) still hands the caller back its turn.
+const TURN_BYTES: usize = 64 << 10;
+const TURN_CALLS: usize = 8;
+
 /// The call's two pipes, driven from the calling thread: the prompt written to its input and
-/// its events read, as each is ready, waiting at most until `until` (and at most `step`, so the
-/// caller can look at the call between waits). Closing a pipe is dropping it here.
+/// its events read, as each is ready. Closing a pipe is dropping it here.
 struct Pipes<'a, W: Write> {
     stdin: Option<std::process::ChildStdin>,
     stdout: Option<std::process::ChildStdout>,
@@ -218,9 +224,16 @@ struct Pipes<'a, W: Write> {
 }
 
 impl<W: Write> Pipes<'_, W> {
-    /// Waits for either pipe to be ready (or `wait` to pass), then writes and reads what it can.
-    fn step(&mut self, wait: Duration) {
+    /// One turn: waits until either pipe is ready or `until` passes, then writes and reads what
+    /// it can, at most [`TURN_BYTES`] and [`TURN_CALLS`] each way and never past `until`, so
+    /// the caller's checks (the call's exit, the deadline, the grace) run between turns
+    /// whatever the call does with its pipes.
+    fn step(&mut self, until: Instant) {
         use std::os::fd::AsRawFd;
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
         let mut fds: Vec<libc::pollfd> = Vec::with_capacity(2);
         if let Some(i) = &self.stdin {
             fds.push(libc::pollfd {
@@ -236,11 +249,12 @@ impl<W: Write> Pipes<'_, W> {
                 revents: 0,
             });
         }
-        let ms = i32::try_from(wait.as_millis()).unwrap_or(i32::MAX);
         if fds.is_empty() {
-            std::thread::sleep(wait);
+            std::thread::sleep(left);
             return;
         }
+        // Rounded up, so a wait of under a millisecond still waits.
+        let ms = i32::try_from(left.as_micros().div_ceil(1000)).unwrap_or(i32::MAX);
         // SAFETY: `fds` is a live array of `fds.len()` pollfd records for open descriptors.
         let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
         if n <= 0 {
@@ -250,10 +264,16 @@ impl<W: Write> Pipes<'_, W> {
         if let Some(i) = &mut self.stdin
             && ready(i.as_raw_fd())
         {
-            loop {
-                match i.write(&self.prompt[self.written..]) {
+            let mut moved = 0;
+            for _ in 0..TURN_CALLS {
+                if moved >= TURN_BYTES || Instant::now() >= until {
+                    break;
+                }
+                let end = self.prompt.len().min(self.written + (TURN_BYTES - moved));
+                match i.write(&self.prompt[self.written..end]) {
                     Ok(n) => {
                         self.written += n;
+                        moved += n;
                         if self.written == self.prompt.len() {
                             // Taken whole: the call's input ends.
                             self.stdin = None;
@@ -274,13 +294,20 @@ impl<W: Write> Pipes<'_, W> {
             && ready(o.as_raw_fd())
         {
             let mut chunk = [0u8; 8192];
-            loop {
+            let mut moved = 0;
+            for _ in 0..TURN_CALLS {
+                if moved >= TURN_BYTES || Instant::now() >= until {
+                    break;
+                }
                 match o.read(&mut chunk) {
                     Ok(0) => {
                         self.stdout = None;
                         break;
                     }
-                    Ok(n) => self.lines.feed(&chunk[..n]),
+                    Ok(n) => {
+                        moved += n;
+                        self.lines.feed(&chunk[..n]);
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => {
@@ -339,7 +366,8 @@ impl Runner for Codex {
             prompt: prompt.as_bytes(),
             written: 0,
             refused: None,
-            lines: EventLines::new(events),
+            // Buffered: a stream of short lines is not a write per line.
+            lines: EventLines::new(std::io::BufWriter::new(events)),
         };
         if pipes.prompt.is_empty() {
             pipes.stdin = None;
@@ -357,17 +385,13 @@ impl Runner for Codex {
             if now >= deadline {
                 break Err(format!("timed out after {} s", self.timeout.as_secs()));
             }
-            pipes.step((deadline - now).min(Duration::from_millis(50)));
+            pipes.step(deadline.min(now + Duration::from_millis(50)));
         };
         // Whatever the call left running goes with it.
         drop(group);
         let grace = Instant::now() + CLEANUP;
-        while pipes.stdout.is_some() {
-            let now = Instant::now();
-            if now >= grace {
-                break;
-            }
-            pipes.step(grace - now);
+        while pipes.stdout.is_some() && Instant::now() < grace {
+            pipes.step(grace);
         }
         let ended = pipes.stdout.is_none();
         let taken = pipes.stdin.is_none() && pipes.refused.is_none();

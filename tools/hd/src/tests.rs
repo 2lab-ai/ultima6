@@ -1884,7 +1884,12 @@ fn the_review_codex_shapes_end_in_time() {
     let deaf = review_stub(&t, "deaf.sh", "exec 0<&-\nsleep 30");
     let big = "x".repeat(1 << 20);
     let (r, took) = call(deaf, 30, &big);
-    assert!(r.unwrap_err().contains("did not take its prompt"));
+    // The write to its closed input fails with EPIPE (std ignores SIGPIPE at startup, so the
+    // signal does not end this process instead).
+    let e = r.unwrap_err();
+    assert!(e.contains("did not take its prompt"), "{e}");
+    let epipe = std::io::Error::from_raw_os_error(libc::EPIPE).to_string();
+    assert!(e.ends_with(&epipe), "{e}");
     assert!(took < Duration::from_secs(5), "{took:?}");
     let _ = std::fs::remove_dir_all(&t);
 }
