@@ -181,7 +181,11 @@ fn drain(ring: &Ring, out: &mut [f32], channels: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use u6_core::pacer::STEP_MS;
     use u6_testkit::Quiet;
+
+    /// The boot's first 1.92 s in ticks of the fixed step, as the headless runner ticks.
+    const BOOT_TICKS: u32 = 1920 / STEP_MS;
 
     #[test]
     fn levels_and_the_wav_header() {
@@ -240,8 +244,8 @@ mod tests {
         files.overlay("broken", [("game".to_string(), game)].into());
         let mut engine = Engine::game_first(files, 0).quiet();
         assert!(Audio::or_silent(&engine, WAV_RATE).is_none());
-        for _ in 0..120 {
-            engine.tick(&[], 16);
+        for _ in 0..BOOT_TICKS {
+            engine.tick(&[], STEP_MS);
         }
         assert!(!engine.finished());
         assert!(
@@ -283,12 +287,12 @@ mod tests {
         let mut engine = Engine::game_first(u6_core::Files::new(r.files), 0).quiet();
         let mut audio = Audio::new(&engine, WAV_RATE).quiet();
         let mut samples = Vec::new();
-        for _ in 0..120 {
-            engine.tick(&[], 16);
+        for _ in 0..BOOT_TICKS {
+            engine.tick(&[], STEP_MS);
             audio.sync(&engine);
-            audio.render_ms(16, &mut samples);
+            audio.render_ms(STEP_MS, &mut samples);
         }
-        assert!(samples.len() == 2 * (120 * 16 * WAV_RATE as usize / 1000));
+        assert!(samples.len() == 2 * (1920 * WAV_RATE as usize / 1000));
         let (rms, peak) = levels(&samples);
         assert!(rms > 0.001 && peak <= 1.0, "audible and in range");
     }
