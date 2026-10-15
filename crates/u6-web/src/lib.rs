@@ -1277,6 +1277,51 @@ mod tests {
         assert!(!game.finished());
     }
 
+    /// On the user's zip (skipped when absent): a start over a running game converts the new
+    /// game's frame at once (its versions start again at 0, the page's version still moves on),
+    /// and its presents convert its own frames, as the old always-convert path gives them.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn a_start_over_a_running_game_converts_the_new_games_frame() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let data = std::fs::read(ZIP).quiet();
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", data.clone()).quiet();
+        game.boot(1, false).quiet();
+        let old_path = |g: &Game| {
+            let mut rgba = Vec::new();
+            g.engine.as_ref().quiet().frame().write_rgba(&mut rgba);
+            rgba
+        };
+        for _ in 0..300 {
+            game.step(20);
+            game.present();
+        }
+        assert!(game.rgba == old_path(&game), "the first game's frame");
+        let (first, version) = (game.frame_rgba(), game.frame_version());
+        game.collect("ultima-vi.zip", data).quiet();
+        game.boot(2, true).quiet();
+        assert!(game.frame_version() > version, "the start converted");
+        assert!(game.rgba == old_path(&game), "the new game's first frame");
+        assert!(game.rgba != first, "not the replaced game's");
+        let mut converted = 0;
+        for _ in 0..120 {
+            game.step(20);
+            let v = game.frame_version();
+            game.present();
+            converted += u32::from(game.frame_version() != v);
+            assert!(game.rgba == old_path(&game), "the new game's frames");
+        }
+        assert!(converted > 0, "the new game's presents convert");
+        assert!(
+            game.program() == "game",
+            "the second start runs game at once"
+        );
+    }
+
     /// A Save's files listed for the page, stored, and laid over the same game files (`game`
     /// started at once): the next start resumes where the party stood; the kept game files stay the new-game ones; the
     /// sound machine starts and renders.

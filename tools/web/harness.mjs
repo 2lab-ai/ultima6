@@ -230,7 +230,7 @@ export async function forgetSaves() {
 // of the buttons the page queued, at the clock of the step that took it: a press's delivered
 // hold is its release's clock less its own, whatever the wall time between them. `__presents`
 // counts the page's presents, `__converted` those that converted a new frame (frame_version
-// moved: spec 06 O1).
+// moved: spec 06 O1); `__shownGame` is the game that presented last.
 const GLUE_HOOKS = `
 globalThis.__u6mem = () => (wasm ? wasm.memory.buffer.byteLength : 0);
 globalThis.__ticks = 0;
@@ -273,6 +273,7 @@ globalThis.__converted = 0;
     present.call(this);
     globalThis.__presents += 1;
     if (this.frame_version() !== before) globalThis.__converted += 1;
+    globalThis.__shownGame = this;
   };
   Game.prototype.ran = function (k) {
     ran.call(this, k);

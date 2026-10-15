@@ -529,6 +529,8 @@ async function boot(next, origin) {
   game = next;
   owner = next;
   old?.free();
+  drawnGame = null; // the freed game's frame is not this one's
+  drawnVersion = -1;
   saveSeen = 0;
   paceGame(next);
   try {
