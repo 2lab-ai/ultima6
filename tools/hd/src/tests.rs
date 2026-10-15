@@ -1631,6 +1631,52 @@ fn an_actor_span_is_its_frame_count() {
     assert_eq!(plan2.split_actors(&g2), 1);
 }
 
+#[test]
+fn actor_types_whose_frames_overlap_are_one_item() {
+    let base = |g: &Game| {
+        let plan = group::plan(g);
+        let actors: Vec<Item> = of_class(&plan, Class::Actor).into_iter().cloned().collect();
+        (plan, actors)
+    };
+    let (plan, actors) = base(&synthetic::game());
+    assert_eq!((actors.len(), plan.actor_overlaps), (2, 0));
+    // A type of four facings of one (0x167) based at the walker's seventh frame: its frames
+    // run past the walker's into the beast's. All three are one item of their 12 records.
+    let mut g = synthetic::game();
+    g.basetile[0x167] = synthetic::ACTOR_A + 6;
+    g.actor_types.push(0x167);
+    let (plan, actors) = base(&g);
+    assert_eq!(plan.actor_overlaps, 2);
+    assert_eq!(actors.len(), 1);
+    let mut images: Vec<ImageId> = actors[0].images().collect();
+    images.sort_by_key(|id| format!("{id:?}"));
+    let want: Vec<ImageId> = (synthetic::ACTOR_A..synthetic::ACTOR_B + 4)
+        .map(tile)
+        .collect();
+    assert_eq!(images.len(), want.len());
+    assert!(want.iter().all(|id| images.contains(id)));
+    assert_eq!(
+        actors[0].layout,
+        Some(group::Layout {
+            base: synthetic::ACTOR_A,
+            frames: 12,
+            per_facing: None
+        })
+    );
+    assert_eq!(plan.split_actors(&g), 0);
+    // The beast's double-width frames keep their composition.
+    assert!(actors[0].pieces.iter().any(|p| p.w == 2));
+    // A type inside the walker's frames only (0x164, two frames): joined to the walker.
+    let mut g = synthetic::game();
+    g.basetile[0x164] = synthetic::ACTOR_A + 2;
+    g.actor_types.push(0x164);
+    let (plan, actors) = base(&g);
+    assert_eq!((actors.len(), plan.actor_overlaps), (2, 1));
+    assert_eq!(actors[0].images().count(), 8);
+    assert_eq!(actors[0].layout.unwrap().per_facing, None);
+    assert_eq!(actors[1].layout, base(&synthetic::game()).1[1].layout);
+}
+
 /// The ingest-side record of one judged image, for the group gates.
 fn judged(piece: u32, id: ImageId, classic: Classic, hd: Rgba) -> ingest::Judged {
     ingest::Judged {

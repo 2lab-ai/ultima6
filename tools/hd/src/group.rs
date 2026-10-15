@@ -6,8 +6,10 @@
 //! - **terrain**: map records a map chunk cell names, closed over the animdata frames that
 //!   replace them (sources below 0x200, as 0x152cd2 takes); the 32 shore records are left out,
 //!   since the shore merge rewrites them on every even tick and no pristine image can match;
-//! - **actor**: the records of an actor type's frames, from its base tile up to the next type's
-//!   base tile (types: the monster list and the actors' types at the start);
+//! - **actor**: the records of an actor type's frames, as many as its type has from its base
+//!   tile ([`actor_layout`]; a type of unknown layout up to the next type's base tile); types
+//!   whose frames overlap are one item (types: the monster list and the actors' types at the
+//!   start);
 //! - **multi**: a tile with the double width / height flags and its parts, composed as the
 //!   object draw 0x10e73a composes them (tile − 1 west, − 1 or − 2 north, − 3 north-west);
 //! - **object**: every other non-empty record (8-wide `Left` / `Right` records included: their
@@ -127,6 +129,8 @@ pub struct Plan {
     pub empty: usize,
     /// Mosaics that shared a record with another and joined its item.
     pub overlaps: usize,
+    /// Actor types whose frames overlap another type's, joined to its item.
+    pub actor_overlaps: usize,
 }
 
 impl Plan {
@@ -368,7 +372,24 @@ pub fn plan(game: &Game) -> Plan {
         }
     }
     actors.sort_by_key(|l| l.base);
+    // Types whose frames overlap (a base tile among another type's frames, or frames running
+    // past the next type's base tile) are one item: their frames together, paired in order,
+    // since no one facing layout holds for all of them. Otherwise the later type would lose
+    // the shared records to the earlier and be split over two items.
+    let mut joined: Vec<Layout> = Vec::new();
+    let end = |l: &Layout| usize::from(l.base) + usize::from(l.frames);
     for l in actors {
+        match joined.last_mut() {
+            Some(j) if usize::from(l.base) < end(j) => {
+                let e = end(j).max(end(&l));
+                j.frames = (e - usize::from(j.base)) as u16;
+                j.per_facing = None;
+                plan.actor_overlaps += 1;
+            }
+            _ => joined.push(l),
+        }
+    }
+    for l in joined {
         let b = usize::from(l.base);
         let range = b..(b + usize::from(l.frames)).min(n);
         let pieces = pieces_in(range, &mut taken, &mut used);

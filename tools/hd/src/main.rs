@@ -138,6 +138,10 @@ fn inventory(a: &Args) -> Result<(), String> {
         .filter(|l| l.per_facing.is_none())
         .count();
     println!("actor frame groups of no known layout (to the next base tile): {unknown}");
+    println!(
+        "actor types whose frames overlap another's (joined to its item, paired in order): {}",
+        plan.actor_overlaps
+    );
     println!("actor spans split over items: {}", plan.split_actors(&g));
     let counts = atlas::sheet_counts(&g, &numbered(&plan));
     let total: usize = counts.iter().map(|(_, n)| n).sum();
