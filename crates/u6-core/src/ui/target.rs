@@ -19,14 +19,20 @@ const SPACE: u16 = 0x20;
 /// First function key code (F1 = 0x13b): F1 + n picks party member n in the panel.
 const F1: u16 = 0x13b;
 /// [replaced] Milliseconds from one sample of a held walk to the next: 33 PAL frames (20 ms each),
-/// from the oracle (tools/oracle/pace.mjs: game-first disks, the throne room with every actor
-/// outside the party passed over and the fight broken off, a press held three cells south, 6
-/// boots). In 4 boots the steps came 25..41 frames apart (median 29, mean 31.7, alternating about
-/// 27 and 38), the first 1..12 frames after the press and the second 28..37; in the other 2,
-/// whose followers were still forming up, 26..108 (median 72). A sample every 33 frames from the
-/// press puts the port's cells per held time within one of those 4 boots at every hold up to
-/// their 8 free cells (100 ms: 1, 1 s: 2, 4 s: 7 against their 6), so no separate first-repeat
-/// delay is needed. The step's own wait ([`crate::actors::walk::STEP_MS`], and
+/// from the oracle (tools/oracle/pace.mjs, runs pace/run-b1..b6; the table in re/notes/oracle.md
+/// §4 "Held-walk pace"): game-first disks, the start position with every actor outside the party
+/// passed over and the fight broken off (setup `quiet`), a press held three cells south, one boot
+/// per run. Gaps between two steps of one held press, in frames:
+/// - b1, b2, b5, b6, within the first 8 cells (the free ones): n = 122, 25..41, median 29, mean
+///   31.7 (alternating about 27 and 38); the first step 1..12 frames after the press, the second
+///   28..37. Past the 8th cell b1 and b2 (500-frame holds) add one gap of 121..123 per trial.
+/// - b3, b4, whose followers were still forming up: n = 37, 26..108, median 72.
+///
+/// A sample every P frames from the press gives 1 + floor(t / P) cells by held time t. Against the
+/// four boots' 300- and 500-frame holds, every t up to their 8th cell, the port stays within one
+/// cell of the original for P = 30..37 frames (100 ms: 1 against 0..1, 1 s: 2 against 2, 4 s: 7
+/// against 6..7); 33 sits in that range, and a sample from the press needs no separate
+/// first-repeat delay. The step's own wait ([`crate::actors::walk::STEP_MS`], and
 /// [`crate::actors::walk::FOLLOW_MS`] when members follow) and the waits of its world turn (its
 /// refresh, [`crate::actors::turn::AFTER_TURN_MS`], and in a fight its NPC turns and effects)
 /// count inside the pace, not on top of it.

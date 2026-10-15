@@ -348,12 +348,15 @@ the longest holds outlast one).
 | b5 | quiet | 4 | 16 | 25 | 28 | 41 |
 | b6 | quiet | 4 | 16 | 26 | 29 | 40 |
 | all | quiet | 74 | 171 | 25 | 34 | 123 |
+| b1 b2 b5 b6 | quiet, first 8 cells | 44 | 122 | 25 | 29 | 41 |
+| b3 b4 | quiet | 30 | 37 | 26 | 72 | 108 |
 
-Two figures come from these runs: the port's `HELD_WALK_MS` (`ui/target.rs`, 33 frames, its doc
-gives the derivation) and the web test's `ORIGINAL_FASTEST_REPEAT_MS` (`tools/web/test-web.mjs`,
-the fastest gap: 25 frames = 500 ms, a floor no repeat may beat). That doc groups the boots
-differently (4 boots at 25..41 frames, 2 at 26..108); per run file b1 and b2 also hold gaps up
-to 123 frames. The minimum, 25, is the same either way.
+The 8 cells south are the free ones: past the 8th, b1 and b2 (500-frame holds) add one gap of
+121..123 frames per trial. In b3 and b4 the followers were still forming up. Two figures come
+from these runs: the port's `HELD_WALK_MS` (`ui/target.rs`, 33 frames: a sample every 30..37
+frames keeps the port's cells per held time within one of b1, b2, b5, b6 up to their 8th cell;
+its doc has the derivation) and the web test's `ORIGINAL_FASTEST_REPEAT_MS`
+(`tools/web/test-web.mjs`, the fastest gap: 25 frames = 500 ms, a floor no repeat may beat).
 
 ## 5. Blocking points
 
