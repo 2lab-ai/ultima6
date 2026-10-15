@@ -57,8 +57,9 @@ pub struct GfxState {
     /// The turned sprites of the flights (0x15265a / 0x152800 / 0x152876).
     pub sprites: super::sprite::Sprites,
     /// Port-only (spec 06 O2): what the idle refresh last rendered and merged, so it can leave
-    /// out a render or a merge that would change nothing. Not game state: it compares equal
-    /// whatever it holds, and a clone starts empty ([`super::cache::RenderCache`]).
+    /// out a render or a merge that would change nothing, and the records' versions. Not game
+    /// state: it compares equal whatever it holds; a clone has no window memo and keeps the
+    /// versions ([`super::cache::RenderCache`]).
     pub cache: super::cache::RenderCache,
 }
 

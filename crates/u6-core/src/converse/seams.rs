@@ -123,10 +123,18 @@ pub(crate) async fn portrait_panel(cx: &Cx<'_>, npc: i16) {
 }
 
 /// 0x1533e0: draw the 56×64 portrait bitmap at (x, y) on the screen through the bitmap colour map
-/// A4-0x3952 (gfx [`crate::gfx::blit::blit_bitmap`]).
-pub(crate) fn blit_portrait(state: &State, io: &Io, pixels: &[u8], x: i16, y: i16) {
+/// A4-0x3952 (gfx [`crate::gfx::blit::blit_bitmap`]); `src` names it on the source plane.
+pub(crate) fn blit_portrait(
+    state: &State,
+    io: &Io,
+    pixels: &[u8],
+    src: crate::gfx::blit::BitmapSource,
+    x: i16,
+    y: i16,
+) {
     let colours = &state.gfx.tables.bitmap_colours;
-    io.draw(|fb| crate::gfx::blit::blit_bitmap(colours, fb, (56, 64), pixels, x as u16, y as u16));
+    let (x, y) = (x as u16, y as u16);
+    io.draw(|fb| crate::gfx::blit::blit_bitmap(colours, fb, (56, 64), pixels, x, y, src));
 }
 
 /// 0x1110c8: object type in the 9-entry list at A4-0x71ca (counted, not weighed ×10).

@@ -346,6 +346,43 @@ fn portraits_map_slots_to_archives() {
     assert_eq!(px(&s, 6), None, "empty item");
 }
 
+/// Spec 07 HD0 through the portrait draw 0x133d3e: a portrait names its (letter, item) on the
+/// source plane, packed letter << 8 | item (portrait.b item 0xff is 0x62ff); an item past 255
+/// (slot 0x163: portrait.b item 0x100) is drawn, in its colours, but classic.
+#[test]
+fn drawn_portraits_name_their_letter_and_item_up_to_item_255() {
+    let img = |v: u8| Some(packed(&vec![v; u6_formats::portrait::PORTRAIT_LEN]));
+    let mut b = vec![None; 0x101];
+    b[0xff] = img(7);
+    b[0x100] = img(9);
+    let f = files(&[("facefile.b", lib(&b))]);
+    let mut s = state(&[]);
+    s.gfx.tables.bitmap_colours = std::array::from_fn(|i| i as u8);
+    let mut e = Engine::with_game(s, f, |st, io| async move {
+        let s = st.borrow();
+        super::draw_portrait(&s, &io, 0x162, 0xd8, 0x18);
+        super::draw_portrait(&s, &io, 0x163, 0x40, 0x80);
+        io.present();
+    });
+    e.enable_src_plane();
+    e.tick(&[], 16);
+    let fb = e.frame();
+    let at = |x, y| (fb.get(x, y), fb.src_at(x, y));
+    let named = u6_render::Src {
+        ver: 0,
+        id: 0x62ff,
+        u: 5,
+        v: 3,
+        kind: u6_render::Kind::Portrait,
+        flags: 0,
+    };
+    assert_eq!(at(0xd8 + 5, 0x18 + 3), (Some(7), Some(named)));
+    assert_eq!(
+        at(0x40 + 5, 0x80 + 3),
+        (Some(9), Some(u6_render::Src::CLASSIC))
+    );
+}
+
 #[test]
 fn script_names_cut_at_the_first_high_byte() {
     let a: Vec<Option<Vec<u8>>> = (0..0x63)

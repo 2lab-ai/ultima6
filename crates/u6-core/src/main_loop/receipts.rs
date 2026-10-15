@@ -27,7 +27,7 @@ const CAST: u32 = 0x82;
 const STR_REST: u32 = 0x0012_72cc;
 const STR_STANDS_GUARD: u32 = 0x0012_73fc;
 
-fn files() -> Option<Files> {
+pub(super) fn files() -> Option<Files> {
     if !Path::new(ZIP).exists() {
         eprintln!("skipped: {ZIP} not present");
         return None;
@@ -39,11 +39,11 @@ fn files() -> Option<Files> {
     Some(Files::new(r.files))
 }
 
-type Setup = Box<dyn FnOnce(&mut State)>;
+pub(super) type Setup = Box<dyn FnOnce(&mut State)>;
 
 /// [`super::run`] with the start egg unhatched (A4-0x7afb around the region load), out of
 /// combat, and `setup` before the command loop.
-async fn boot_then(state: &RefCell<State>, io: &Io, setup: Setup) {
+pub(super) async fn boot_then(state: &RefCell<State>, io: &Io, setup: Setup) {
     super::boot_screen(state, io);
     {
         let mut s = state.borrow_mut();
@@ -82,7 +82,7 @@ fn press(e: &mut Engine, keys: &[Key], settle: u32) {
     }
 }
 
-fn chars(text: &str) -> Vec<Key> {
+pub(super) fn chars(text: &str) -> Vec<Key> {
     text.chars()
         .map(|c| match c {
             '\n' => Key::Enter,
@@ -132,7 +132,7 @@ fn holds(lines: &[String], want: &str) -> bool {
 }
 
 /// A readied spellbook holding `spells` for the hero and 10 of each reagent.
-fn give_book(s: &mut State, spells: &[u8]) {
+pub(super) fn give_book(s: &mut State, spells: &[u8]) {
     let book = crate::objects::create_in(s, crate::magic::SPELLBOOK, READIED, 0, HERO);
     for &n in spells {
         crate::objects::create_in(

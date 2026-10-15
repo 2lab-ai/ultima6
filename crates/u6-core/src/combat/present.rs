@@ -22,6 +22,7 @@ use std::cell::RefCell;
 
 use crate::engine::{Io, with_current_io};
 use crate::gfx::blit::{blit_back, copy_rect};
+use crate::gfx::cache::Sources;
 use crate::state::State;
 
 use super::tables::at;
@@ -160,6 +161,9 @@ pub struct Effect {
     pub h: usize,
     /// The screen's pixels there, row-major.
     pub pixels: Vec<u8>,
+    /// Port-only (spec 07 HD0): their sources when the screen has a source plane, put back with
+    /// them by the playback. Not game state ([`Sources`]).
+    pub src: Sources,
     /// Engine milliseconds the original spends making it: [`play_effects`] waits that long
     /// before showing it.
     pub cost: u16,
@@ -182,18 +186,8 @@ pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize,
         return;
     }
     let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
-    let pixels = with_current_io(|io| {
-        io.draw(|fb| {
-            let mut p = Vec::with_capacity(w * h);
-            for y in y0..=y1 {
-                for x in x0..=x1 {
-                    p.push(fb.get(x, y).unwrap_or(0));
-                }
-            }
-            p
-        })
-    });
-    if let Some(pixels) = pixels {
+    let shot = with_current_io(|io| io.draw(|fb| rect_of(fb, (x0, y0), (w, h))));
+    if let Some((pixels, src)) = shot {
         let mark = s.main.pending_print.len();
         s.combat.effects.push(Effect {
             x: x0,
@@ -201,6 +195,7 @@ pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize,
             w,
             h,
             pixels,
+            src,
             cost,
             mark,
             dissolve: false,
@@ -236,6 +231,7 @@ pub(crate) fn capture_pause(s: &mut State, cost: u16) {
         w: 0,
         h: 0,
         pixels: Vec::new(),
+        src: Sources::default(),
         cost,
         mark,
         dissolve: false,
@@ -354,6 +350,8 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
         let shown = io.published(window_of);
         io.draw(|fb| put_window(fb, &shown));
     }
+    // The pictures are compared by their colours only: the sources ride along.
+    let same = |a: &(Vec<u8>, Sources), b: &(Vec<u8>, Sources)| a.0 == b.0;
     let mut printed = 0;
     for e in effects {
         if e.mark > printed {
@@ -375,20 +373,27 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
         io.draw(|fb| {
             for r in 0..e.h {
                 for c in 0..e.w {
-                    fb.set(e.x + c, e.y + r, e.pixels[r * e.w + c]);
+                    let k = r * e.w + c;
+                    put(fb, (e.x + c, e.y + r), e.pixels[k], e.src.at(k));
                 }
             }
         });
         io.present();
         state.borrow_mut().combat.shown += 1;
     }
-    if let Some(last) = last
-        && io.draw(|fb| window_of(fb)) != last
-    {
-        // The last recorded frame is seen before the step's own last picture replaces it.
-        pace(state, io, 0).await;
-        io.draw(|fb| put_window(fb, &last));
-        io.present();
+    if let Some(last) = last {
+        if !same(&io.draw(|fb| window_of(fb)), &last) {
+            // The last recorded frame is seen before the step's own last picture replaces it.
+            pace(state, io, 0).await;
+            io.draw(|fb| put_window(fb, &last));
+            io.present();
+        } else if last.1.0.is_some() {
+            // The same colours, but the frame put up may name other images (or none): the last
+            // picture's sources go back, published with the plane alone, so the frames and their
+            // times are those without the plane (spec 07 HD0).
+            io.draw(|fb| put_window(fb, &last));
+            io.present_sources();
+        }
     }
     let rest = state.borrow().main.pending_print.len();
     print_paced(state, io, rest).await;
@@ -399,18 +404,44 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
     }
 }
 
-/// The map window's pixels (with its border), row-major.
-fn window_of(fb: &crate::Framebuffer) -> Vec<u8> {
-    (0..WINDOW.1)
-        .flat_map(|y| (0..WINDOW.0).map(move |x| (x, y)))
-        .map(|(x, y)| fb.get(x, y).unwrap_or(0))
-        .collect()
+/// The `w` × `h` pixels from (x, y), row-major, and their sources when `fb` has a source plane.
+fn rect_of(
+    fb: &crate::Framebuffer,
+    (x0, y0): (usize, usize),
+    (w, h): (usize, usize),
+) -> (Vec<u8>, Sources) {
+    let at = (y0..y0 + h).flat_map(|y| (x0..x0 + w).map(move |x| (x, y)));
+    let pixels = at.clone().map(|(x, y)| fb.get(x, y).unwrap_or(0)).collect();
+    let src = fb.src().map(|_| {
+        at.map(|(x, y)| fb.src_at(x, y).unwrap_or_default())
+            .collect()
+    });
+    (pixels, Sources(src))
 }
 
-fn put_window(fb: &mut crate::Framebuffer, pixels: &[u8]) {
+/// The map window's pixels (with its border), row-major, with their sources ([`rect_of`]).
+fn window_of(fb: &crate::Framebuffer) -> (Vec<u8>, Sources) {
+    rect_of(fb, (0, 0), WINDOW)
+}
+
+/// Puts back pixel `(x, y)` in `colour`, naming `src` when there is one (else classic).
+fn put(
+    fb: &mut crate::Framebuffer,
+    (x, y): (usize, usize),
+    colour: u8,
+    src: Option<u6_render::Src>,
+) {
+    match src {
+        Some(src) => fb.set_src(x, y, colour, src),
+        None => fb.set(x, y, colour),
+    }
+}
+
+fn put_window(fb: &mut crate::Framebuffer, (pixels, src): &(Vec<u8>, Sources)) {
     for y in 0..WINDOW.1 {
         for x in 0..WINDOW.0 {
-            fb.set(x, y, pixels[y * WINDOW.0 + x]);
+            let k = y * WINDOW.0 + x;
+            put(fb, (x, y), pixels[k], src.at(k));
         }
     }
 }
@@ -438,7 +469,8 @@ async fn reveal(state: &RefCell<State>, io: &Io, e: &Effect) {
             io.draw(|fb| {
                 for &(c, r) in &order[done..upto] {
                     let (x, y) = (8 + usize::from(c), 8 + usize::from(r));
-                    fb.set(e.x + x, e.y + y, e.pixels[y * e.w + x]);
+                    let k = y * e.w + x;
+                    put(fb, (e.x + x, e.y + y), e.pixels[k], e.src.at(k));
                 }
             });
             io.present();

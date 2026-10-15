@@ -167,17 +167,23 @@ fn a4_pointed(io: &Io, off: u32) -> String {
 ///
 /// The picture is the LZW file named at A4-0x61de (A4-0x61e8 = 1 around the read selects the
 /// compressed path of 0x134776), drawn at (0xa8, 6) by 0x153384. A missing or bad file draws
-/// nothing.
+/// nothing. The source plane names it the spellbook.
 pub fn draw_book(s: &mut State, io: &Io) {
     let paper = u16::from(s.ui.tables.colours.paper);
     crate::gfx::blit::set_plot_colour(&mut s.gfx, paper);
     seams::fill_rect(s, io, 0xa8, 6, 0x137, 0x67);
-    let name = a4_pointed(io, BOOK_BMP);
-    let Some(bmp) = io.files().get(&name).and_then(|f| Bitmap::from_lzw(f).ok()) else {
+    let Some(bmp) = book_bitmap(io) else {
         return;
     };
     let colours = &s.gfx.tables.bitmap_colours;
-    io.draw(|fb| crate::gfx::blit::blit_bmp(colours, fb, &bmp, 0xa8, 6));
+    let role = u6_render::BITMAP_SPELLBOOK;
+    io.draw(|fb| crate::gfx::blit::blit_bmp(colours, fb, &bmp, 0xa8, 6, role));
+}
+
+/// The bitmap [`draw_book`] draws, decoded; `None` for a missing or bad file.
+pub(crate) fn book_bitmap(io: &Io) -> Option<Bitmap> {
+    let name = a4_pointed(io, BOOK_BMP);
+    io.files().get(&name).and_then(|f| Bitmap::from_lzw(f).ok())
 }
 
 async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
