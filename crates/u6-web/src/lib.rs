@@ -27,7 +27,9 @@
 //! so.
 //!
 //! Limits (a clear message instead of an exhausted tab): [`MAX_INPUT_BYTES`] for the dropped
-//! files together, [`MAX_UNZIPPED_BYTES`] for what the zip entries the intake inflates declare,
+//! files together as they are copied into wasm (a zip over [`SLICED_ZIP_BYTES`] is read in
+//! slices, [`Game::zip_open`]: only its directory and its disk-image entries are copied in, and
+//! only they count), [`MAX_UNZIPPED_BYTES`] for what the zip entries the intake inflates declare,
 //! [`MAX_GAME_FILES_BYTES`] for the game files the intake produces, [`MAX_SAVE_FILE_BYTES`] and
 //! [`MAX_SAVE_BYTES`] for the stored save (a file over them is left out, and the start's report
 //! says so).
@@ -44,16 +46,24 @@ use u6_core::{Engine, Files, Framebuffer, InputEvent, Key};
 use u6_intake::{InputFile, intake};
 use wasm_bindgen::prelude::*;
 
-/// The dropped files together (the archive.org zip is 185 MiB, the game three 880 KiB disks).
-/// The page checks the file sizes before reading anything; [`Game::load_file`] is the backstop.
+/// The dropped files together, as copied into wasm: a file read whole counts its size; a zip
+/// read in slices ([`zip_sliced`]) counts the bytes read of it, its directory and its disk-image
+/// entries, not its size. Every read is checked before it is made: the page checks the sizes of
+/// the files it reads whole, before anything is read and again before each one against what
+/// wasm already holds ([`Game::input_held`]); [`Game::load_file`] is their backstop, and
+/// [`Game::zip_need`] checks each slice before the page reads it.
 pub const MAX_INPUT_BYTES: usize = 512 << 20;
+/// A dropped zip larger than this is read in slices ([`Game::zip_open`]) instead of whole: the
+/// archive.org zip is mostly flux streams and scans the intake never reads. A smaller one is
+/// copied in whole, which costs the tab at most this much.
+pub const SLICED_ZIP_BYTES: u64 = 16 << 20;
 /// What the disk-image entries of the dropped zips (the only entries the intake inflates)
 /// declare uncompressed, together; read from the central directories before anything is
 /// inflated (u6-intake caps each inflate at its declared size).
 pub const MAX_UNZIPPED_BYTES: u64 = 64 << 20;
 /// The game files the intake produced, together (the Amiga disks hold 2.4 MiB), checked before
-/// the engine boots. PP20 output is bounded per file by its 24-bit length field (16 MiB), not in
-/// aggregate, inside u6-intake.
+/// the engine boots. The intake itself bounds its total output (decrunched files, disk images
+/// and raw files; u6-intake's budget), so this is the page's own limit on what it boots from.
 pub const MAX_GAME_FILES_BYTES: usize = 64 << 20;
 /// One stored `savegame/` file: the largest the game writes there, a block at its record limit
 /// (the count word and 0xc00 records of 8 bytes; 0x10ddd2 clamps the count it reads to 0xc00).
@@ -96,13 +106,38 @@ pub fn budget_ms(raf_interval_ms: f64) -> f64 {
     pacer::budget_ms(raf_interval_ms)
 }
 
-/// The message for inputs over [`MAX_INPUT_BYTES`].
+/// Whether the page reads the dropped file `name` of `size` bytes through [`Game::zip_open`]
+/// instead of whole: a `.zip` over [`SLICED_ZIP_BYTES`]. Whether it is a zip is then told from
+/// its first bytes, as for a file read whole (one that is not is read whole after all).
+#[wasm_bindgen]
+pub fn zip_sliced(name: &str, size: f64) -> bool {
+    zipscan::ends_with_ci(name, ".zip") && size > SLICED_ZIP_BYTES as f64
+}
+
+/// [`too_large`] for the page (its check of the files it reads whole).
+#[wasm_bindgen]
+pub fn input_too_large(total: f64) -> String {
+    too_large(total as u64)
+}
+
+/// The message for inputs over [`MAX_INPUT_BYTES`]; it states the rule.
 pub fn too_large(total: u64) -> String {
     format!(
-        "The dropped files are {} MiB together; this page takes at most {} MiB \
-         (the archive.org zip, the three disks or the extracted files).",
+        "The dropped files are {} MiB together; this page takes at most {} MiB (a zip over {} \
+         MiB counts only what is read of it: its directory and its disk images).",
         total >> 20,
-        MAX_INPUT_BYTES >> 20
+        MAX_INPUT_BYTES >> 20,
+        SLICED_ZIP_BYTES >> 20
+    )
+}
+
+/// The message for disk images that declare more than [`MAX_UNZIPPED_BYTES`] unpacked.
+pub fn unpacks_too_much(declared: u64) -> String {
+    format!(
+        "The disk images in the dropped zip declare {} MiB unpacked; this page unpacks at most \
+         {} MiB.",
+        declared >> 20,
+        MAX_UNZIPPED_BYTES >> 20
     )
 }
 
@@ -148,8 +183,10 @@ pub fn key_from_dom(code: &str, key: &str, ctrl: bool) -> Option<Key> {
 #[wasm_bindgen]
 pub struct Game {
     inputs: Vec<InputFile>,
-    /// Bytes in `inputs`.
+    /// Bytes copied in for `inputs` and the zip being read ([`MAX_INPUT_BYTES`]).
     input_bytes: usize,
+    /// The zip being read in slices ([`Game::zip_open`]) and `input_bytes` before it.
+    zip: Option<(zipscan::Sliced, usize)>,
     engine: Option<Engine>,
     pending: Vec<InputEvent>,
     blank: Framebuffer,
@@ -193,6 +230,7 @@ impl Game {
         let mut game = Game {
             inputs: Vec::new(),
             input_bytes: 0,
+            zip: None,
             engine: None,
             pending: Vec::new(),
             blank: Framebuffer::new(),
@@ -232,6 +270,41 @@ impl Game {
 
     pub fn files_loaded(&self) -> u32 {
         self.inputs.len() as u32
+    }
+
+    /// The bytes the dropped files hold in wasm so far (the files read whole and what was read of
+    /// the zips read in slices): the page checks each file it reads whole against
+    /// [`MAX_INPUT_BYTES`] with these before reading it.
+    pub fn input_held(&self) -> f64 {
+        self.input_bytes as f64
+    }
+
+    /// Starts reading the dropped file `path` of `size` bytes in slices (the page does so when
+    /// [`zip_sliced`]): [`Game::zip_need`] names each range of it to read and [`Game::zip_give`]
+    /// takes its bytes. First its first four bytes: one that does not start as a zip is then read
+    /// whole and collected as it is. A zip is collected for [`Game::start`] as a zip of only its
+    /// disk-image entries, which the intake reads as it would read them in the dropped zip. Only
+    /// the bytes read count toward [`MAX_INPUT_BYTES`]. A file still being read is dropped.
+    pub fn zip_open(&mut self, path: &str, size: f64) -> Result<(), JsError> {
+        self.open_zip(path, size).map_err(|msg| JsError::new(&msg))
+    }
+
+    /// The next range of the open zip to read, as `[start, end]` (`end` exclusive), or empty once
+    /// it is read and collected. Fails, keeping nothing of the zip, when reading the range would
+    /// take the dropped files past [`MAX_INPUT_BYTES`].
+    pub fn zip_need(&mut self) -> Result<Vec<f64>, JsError> {
+        let range = self.zip_range().map_err(|msg| JsError::new(&msg))?;
+        Ok(range.map_or_else(Vec::new, |(start, end)| vec![start as f64, end as f64]))
+    }
+
+    /// The bytes of the range [`Game::zip_need`] named. Fails, keeping nothing of the zip, when
+    /// they do not read as that part of a zip (the directory; an entry's local header, which must
+    /// agree with its central record, and its data; see `u6_intake::zip`), when its disk images
+    /// are more than `u6_intake::zip::MAX_ENTRIES`, yield more than [`MAX_UNZIPPED_BYTES`], or
+    /// their ranges would take the dropped files past [`MAX_INPUT_BYTES`] (all checked before
+    /// any entry is read).
+    pub fn zip_give(&mut self, bytes: Vec<u8>) -> Result<(), JsError> {
+        self.zip_bytes(bytes).map_err(|msg| JsError::new(&msg))
     }
 
     /// Runs the intake over the collected files and boots the engine with RNG seed `seed` (the
@@ -613,6 +686,71 @@ impl Game {
         Ok(())
     }
 
+    /// [`Game::zip_open`] without the JS error type.
+    fn open_zip(&mut self, path: &str, size: f64) -> Result<(), String> {
+        if !(size.is_finite() && size >= 0.0 && size.fract() == 0.0 && size < 2f64.powi(53)) {
+            return Err(format!("{path}: not a file size"));
+        }
+        self.drop_zip();
+        let sliced = zipscan::Sliced::new(path, size as u64);
+        self.zip = Some((sliced, self.input_bytes));
+        Ok(())
+    }
+
+    /// [`Game::zip_need`] without the JS error type: `None` once the zip is collected.
+    fn zip_range(&mut self) -> Result<Option<(u64, u64)>, String> {
+        let Some((sliced, _)) = &self.zip else {
+            return Ok(None);
+        };
+        if let Some((start, end)) = sliced.need() {
+            let total = (self.input_bytes as u64).saturating_add(end - start);
+            if total > MAX_INPUT_BYTES as u64 {
+                self.drop_zip();
+                return Err(too_large(total));
+            }
+            return Ok(Some((start, end)));
+        }
+        let Some((sliced, held)) = self.zip.take() else {
+            return Ok(None);
+        };
+        let name = sliced.path.clone();
+        match sliced.finish() {
+            Ok(data) => {
+                self.inputs.push(InputFile { name, data });
+                Ok(None)
+            }
+            Err(msg) => {
+                self.input_bytes = held;
+                Err(msg)
+            }
+        }
+    }
+
+    /// [`Game::zip_give`] without the JS error type.
+    fn zip_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        let Some((sliced, _)) = &mut self.zip else {
+            return Err("no zip is being read".into());
+        };
+        let held = self.input_bytes.saturating_add(bytes.len());
+        match sliced.give(bytes, held) {
+            Ok(()) => {
+                self.input_bytes = held;
+                Ok(())
+            }
+            Err(msg) => {
+                self.drop_zip();
+                Err(msg)
+            }
+        }
+    }
+
+    /// Forgets the zip being read and what it counted.
+    fn drop_zip(&mut self) {
+        if let Some((_, held)) = self.zip.take() {
+            self.input_bytes = held;
+        }
+    }
+
     /// Kept file `i`, read in place from the running engine's game files (the base layer: a
     /// save laid over them is never kept as a game file).
     fn kept_bytes(&self, i: u32) -> Option<&[u8]> {
@@ -626,17 +764,16 @@ impl Game {
     fn boot(&mut self, seed: u16, game_first: bool) -> Result<String, String> {
         let inputs = std::mem::take(&mut self.inputs);
         self.input_bytes = 0;
-        let unzipped: u64 = inputs
-            .iter()
-            .filter_map(|f| zipscan::declared_disk_bytes(&f.data))
-            .sum();
+        self.zip = None;
+        // A zip whose directory does not read is refused here, not left to the intake: what its
+        // disk images yield could not be checked.
+        let mut unzipped = 0u64;
+        for f in &inputs {
+            let declared = zipscan::declared_disk_bytes(&f.name, &f.data)?;
+            unzipped = unzipped.saturating_add(declared.unwrap_or(0));
+        }
         if unzipped > MAX_UNZIPPED_BYTES {
-            return Err(format!(
-                "The disk images in the dropped zip declare {} MiB unpacked; this page unpacks \
-                 at most {} MiB.",
-                unzipped >> 20,
-                MAX_UNZIPPED_BYTES >> 20
-            ));
+            return Err(unpacks_too_much(unzipped));
         }
         let r = intake(inputs);
         drop(r.disks);
@@ -1121,7 +1258,9 @@ mod tests {
             return;
         }
         let data = std::fs::read(ZIP).quiet();
-        let unzipped = zipscan::declared_disk_bytes(&data).quiet();
+        let unzipped = zipscan::declared_disk_bytes("ultima-vi.zip", &data)
+            .quiet()
+            .quiet();
         assert!(
             unzipped > 0 && unzipped < MAX_UNZIPPED_BYTES,
             "under the unzip limit"
@@ -1333,6 +1472,483 @@ mod tests {
         assert!(
             listed(&mut game).len() < 1 + BLOCK_COUNT,
             "once committed, Saves list changes again"
+        );
+    }
+
+    use zipscan::tests::{Entry, stored, zip};
+
+    /// A file of `size` bytes made of `pieces` (offset, bytes), zeros in its last bytes the first
+    /// read of a sliced file takes (`tail_start(size)..size`), and nothing else: a read that
+    /// touches a byte elsewhere, or a range that is reversed or runs past the end of the file, is
+    /// a request the reader must never make, and panics. Records each range read.
+    struct Virtual {
+        size: u64,
+        pieces: Vec<(u64, Vec<u8>)>,
+        reads: std::cell::RefCell<Vec<(u64, u64)>>,
+    }
+
+    impl Virtual {
+        fn new(size: u64, pieces: Vec<(u64, Vec<u8>)>) -> Self {
+            Virtual {
+                size,
+                pieces,
+                reads: Default::default(),
+            }
+        }
+
+        fn whole(data: &[u8]) -> Self {
+            Virtual::new(data.len() as u64, vec![(0, data.to_vec())])
+        }
+
+        fn read(&self, start: u64, end: u64) -> Vec<u8> {
+            assert!(
+                start <= end && end <= self.size,
+                "a request outside the file: {start}..{end}"
+            );
+            self.reads.borrow_mut().push((start, end));
+            let tail = u6_intake::zip::tail_start(self.size)..self.size;
+            (start..end)
+                .map(|i| {
+                    let mut held = self.pieces.iter();
+                    let piece = held.find(|(at, b)| (*at..*at + b.len() as u64).contains(&i));
+                    match piece {
+                        Some((at, b)) => b[(i - at) as usize],
+                        None if tail.contains(&i) => 0,
+                        None => panic!("a forbidden request: {start}..{end}"),
+                    }
+                })
+                .collect()
+        }
+
+        fn reads(&self) -> Vec<(u64, u64)> {
+            self.reads.borrow().clone()
+        }
+    }
+
+    /// Reads `file` into `game` through the slicing calls, as the page does (`zip_sliced` files);
+    /// returns the number of reads.
+    fn sparse_in(game: &mut Game, path: &str, file: &Virtual) -> Result<usize, String> {
+        game.open_zip(path, file.size as f64)?;
+        let mut n = 0;
+        while let Some((start, end)) = game.zip_range()? {
+            game.zip_bytes(file.read(start, end))?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    fn slice_in(game: &mut Game, path: &str, data: &[u8]) -> Result<usize, String> {
+        sparse_in(game, path, &Virtual::whole(data))
+    }
+
+    /// The zip `zip` as a file of `size` bytes: its entries at the start (with the zeros an
+    /// entry's range may run on when no record follows it, the longest local extra field), its
+    /// central directory `gap` bytes before its end record, which is at the end (the record's
+    /// directory offset moved there); nothing between. Reading the bytes between is a forbidden
+    /// request.
+    fn far(zip: &[u8], size: u64, gap: u64) -> Virtual {
+        let e = zip.len() - 22;
+        let at = u32::from_le_bytes(zip[e + 16..e + 20].try_into().unwrap()) as usize;
+        let dir = &zip[at..e];
+        let mut end = zip[e..].to_vec();
+        let moved = size - 22 - gap - dir.len() as u64;
+        end[16..20].copy_from_slice(&(moved as u32).to_le_bytes());
+        let mut head = zip[..at].to_vec();
+        head.resize(at + 0xffff, 0);
+        let pieces = if gap == 0 {
+            vec![(0, head), (moved, [dir, &end].concat())]
+        } else {
+            vec![(0, head), (moved, dir.to_vec()), (size - 22, end)]
+        };
+        Virtual::new(size, pieces)
+    }
+
+    /// A deflated disk-image entry that declares `full` unpacked (its data: an empty deflate
+    /// stream, so nothing is ever inflated from it).
+    fn declaring(name: &str, full: u32) -> Entry<'_> {
+        Entry {
+            method: 8,
+            full,
+            ..stored(name, b"\x03\x00")
+        }
+    }
+
+    #[test]
+    fn large_zips_are_read_in_slices_and_the_message_states_the_rule() {
+        let mib = |n: u64| (n << 20) as f64;
+        assert!(zip_sliced("ultima-vi.zip", mib(17)) && zip_sliced("a/U.ZIP", mib(600)));
+        assert!(
+            !zip_sliced("small.zip", mib(16)),
+            "a small zip is read whole"
+        );
+        assert!(!zip_sliced("disk.hfe", mib(600)) && !zip_sliced("ü", mib(600)));
+        let msg = too_large(600 << 20);
+        assert!(msg.starts_with(
+            "The dropped files are 600 MiB together; this page takes at most 512 MiB"
+        ));
+        assert!(
+            msg.contains("a zip over 16 MiB counts only what is read of it"),
+            "{msg}"
+        );
+        assert_eq!(input_too_large(mib(600)), msg);
+    }
+
+    /// A zip read in slices gives the intake what the zip read whole gives (the same report:
+    /// the same disk-image entries, by the same filter, in the same order); only the first
+    /// bytes, the directory and those entries are read, and the rebuilt zip is no larger than
+    /// what was read (synthetic bytes).
+    #[test]
+    fn a_zip_read_in_slices_starts_the_intake_the_whole_zip_starts() {
+        let filler = vec![1u8; 2 << 20];
+        let (one, two) = (vec![2u8; 4096], vec![3u8; 3000]);
+        let data = zip(&[
+            stored("scans/filler.bin", &filler),
+            stored("d/Disk 1.adf", &one),
+            stored("__MACOSX/d/Disk 1.adf", b"mac"),
+            stored("d/._Disk 2.adf", b"dot"),
+            stored("notes.txt", b"n"),
+            stored("Disk 2.HFE", &two),
+        ]);
+        let mut whole = Game::new();
+        whole.collect("u6.zip", data.clone()).unwrap();
+        let expected = whole.boot(0, false).unwrap_err();
+        assert!(
+            expected.starts_with("u6.zip: zip, 2 disk image(s): Disk 1.adf, Disk 2.HFE\n"),
+            "{expected}"
+        );
+        let mut sliced = Game::new();
+        let n = slice_in(&mut sliced, "u6.zip", &data);
+        assert_eq!(n, Ok(4), "the first bytes, the tail and two entries");
+        assert_eq!(sliced.files_loaded(), 1);
+        assert!(
+            sliced.input_bytes < 80 << 10,
+            "{} bytes",
+            sliced.input_bytes
+        );
+        assert!(
+            sliced.inputs[0].data.len() <= sliced.input_bytes + u6_intake::zip::REBUILT_COMMENT,
+            "the rebuilt zip"
+        );
+        assert_eq!(sliced.input_held(), sliced.input_bytes as f64);
+        assert_eq!(sliced.boot(0, false).unwrap_err(), expected);
+    }
+
+    /// A large file named .zip that does not start as one is read whole after its first bytes,
+    /// and collected as the whole path collects it (synthetic bytes).
+    #[test]
+    fn a_large_file_named_zip_that_is_not_one_is_read_whole_like_the_whole_path() {
+        let mut data = b"not a zip at all".to_vec();
+        data.resize(17 << 20, 7);
+        let mut whole = Game::new();
+        whole.collect("odd.zip", data.clone()).unwrap();
+        let expected = whole.boot(0, false).unwrap_err();
+        let file = Virtual::whole(&data);
+        let mut sliced = Game::new();
+        assert_eq!(sparse_in(&mut sliced, "odd.zip", &file), Ok(2));
+        assert_eq!(file.reads(), [(0, 4), (0, data.len() as u64)]);
+        assert_eq!(sliced.input_bytes, 4 + data.len());
+        assert!(sliced.inputs[0].data == data);
+        assert_eq!(sliced.boot(0, false).unwrap_err(), expected);
+    }
+
+    /// A zip read whole whose directory does not read is refused before the intake runs, so
+    /// what its disk images would yield is never unchecked: an entry declaring more than the
+    /// unzip limit ahead of an entry past the end of the file, or ahead of a record the end
+    /// record counts and the directory lacks. The control, that entry alone, is refused for what
+    /// it declares (synthetic bytes).
+    #[test]
+    fn a_whole_zip_whose_directory_does_not_read_is_refused_before_the_intake() {
+        let big = declaring("Disk 1.adf", 100 << 20);
+        let past = Entry {
+            csize: 1 << 20, // its data runs past the end of the file
+            ..stored("Disk 2.adf", &[2; 64])
+        };
+        let past_end = zip(&[big, past]);
+        let mut counted = zip(&[big]);
+        let e = counted.len() - 22;
+        counted[e + 8] = 2; // two records counted, one there
+        counted[e + 10] = 2;
+        for (what, data) in [
+            ("an entry past the end", past_end),
+            ("a record missing", counted),
+        ] {
+            let mut game = Game::new();
+            game.collect("u6.zip", data).unwrap();
+            let err = game.boot(0, false).unwrap_err();
+            assert_eq!(err, "u6.zip: zip unreadable: invalid zip data", "{what}");
+        }
+        let mut game = Game::new();
+        game.collect("u6.zip", zip(&[big])).unwrap();
+        assert_eq!(
+            game.boot(0, false),
+            Err(unpacks_too_much(100 << 20)),
+            "the control"
+        );
+    }
+
+    /// A zip of 600 MiB of which only the parts made here exist: taken, as what is read of it
+    /// fits; nothing between the parts is ever asked for. Entries whose ranges would pass the
+    /// input limit, disk images yielding more than the unzip limit, a directory more than
+    /// `MAX_DIRECTORY_BYTES` before the end: refused after the tail read, before any entry or
+    /// the directory is read, keeping nothing.
+    #[test]
+    fn a_sliced_zip_counts_the_bytes_read_and_refuses_past_the_limits_before_reading() {
+        let size = 600u64 << 20;
+        let disk = [2u8; 4096];
+        let ok = far(&zip(&[stored("Disk 1.adf", &disk)]), size, 0);
+        let mut game = Game::new();
+        game.collect("loose.txt", b"loose".to_vec()).unwrap();
+        assert_eq!(sparse_in(&mut game, "big.zip", &ok), Ok(3));
+        assert_eq!(ok.reads().len(), 3, "the first bytes, the tail, the entry");
+        assert!(game.input_bytes < 1 << 20, "{} bytes", game.input_bytes);
+        assert!(
+            game.inputs[1].data.len() <= game.input_bytes + u6_intake::zip::REBUILT_COMMENT,
+            "the rebuilt zip"
+        );
+        let report = game.boot(0, false).unwrap_err();
+        assert!(
+            report.starts_with("big.zip: zip, 1 disk image(s): Disk 1.adf\n"),
+            "{report}"
+        );
+
+        let packed = Entry {
+            csize: 550 << 20, // deflated, declaring 1 MiB unpacked: its data is 550 MiB
+            ..declaring("Disk 1.adf", 1 << 20)
+        };
+        let dir_far = u6_intake::zip::MAX_DIRECTORY_BYTES + 1;
+        let unreadable = Some("big.zip: zip unreadable: invalid zip data".to_string());
+        let cases = [
+            (
+                "ranges past the input limit",
+                far(&zip(&[packed]), size, 0),
+                None,
+            ),
+            (
+                "disk images past the unzip limit",
+                far(&zip(&[declaring("Disk 1.adf", 100 << 20)]), size, 0),
+                Some(unpacks_too_much(100 << 20)),
+            ),
+            (
+                "a directory too far from the end",
+                far(&zip(&[stored("Disk 1.adf", &disk)]), size, dir_far),
+                unreadable,
+            ),
+        ];
+        for (what, file, message) in cases {
+            let mut game = Game::new();
+            game.collect("loose.txt", b"loose".to_vec()).unwrap();
+            let err = sparse_in(&mut game, "big.zip", &file).unwrap_err();
+            match message {
+                Some(m) => assert_eq!(err, m, "{what}"),
+                None => assert!(
+                    err.contains("this page takes at most 512 MiB"),
+                    "{what}: {err}"
+                ),
+            }
+            let tail = (u6_intake::zip::tail_start(size), size);
+            assert_eq!(
+                file.reads(),
+                [(0, 4), tail],
+                "{what}: the first bytes and the tail"
+            );
+            assert_eq!(
+                (game.files_loaded(), game.input_bytes),
+                (1, 5),
+                "{what}: nothing kept"
+            );
+            assert!(game.zip.is_none(), "{what}");
+        }
+    }
+
+    /// `zip` (no comment) with Zip64 end records: a Zip64 end record and locator before its end
+    /// record, which then holds the sentinels.
+    fn with_zip64(zip: &[u8]) -> Vec<u8> {
+        let e = zip.len() - 22;
+        let field = |at: usize| u32::from_le_bytes(zip[e + at..e + at + 4].try_into().unwrap());
+        let count = u64::from(u16::from_le_bytes([zip[e + 8], zip[e + 9]]));
+        let (len, at) = (u64::from(field(12)), u64::from(field(16)));
+        let mut out = zip[..e].to_vec();
+        let z = out.len() as u64;
+        out.extend_from_slice(&0x0606_4b50u32.to_le_bytes());
+        out.extend_from_slice(&44u64.to_le_bytes());
+        out.extend_from_slice(&[45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // versions, disks
+        for v in [count, count, len, at] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&0x0706_4b50u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&z.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]); // disks, counts
+        out.extend_from_slice(&[0xff; 8]); // directory size and offset
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    /// One record over `MAX_ENTRIES`, every record there and valid (the whole path reads such a
+    /// directory to its end), without and with Zip64 end records: refused after the first bytes
+    /// and the tail, before the directory (which starts before the tail) is read.
+    #[test]
+    fn a_valid_directory_over_the_record_limit_is_refused_before_it_is_read() {
+        let max = u6_intake::zip::MAX_ENTRIES as usize;
+        let names: Vec<String> = (0..max + 1).map(|i| format!("{i:05}")).collect();
+        let mut list: Vec<Entry> = names.iter().map(|n| stored(n, b"")).collect();
+        list[0] = stored("Disk 1.adf", &[2; 64]);
+        let at_limit = zip(&list[..max]);
+        let mut game = Game::new();
+        assert_eq!(
+            slice_in(&mut game, "u6.zip", &at_limit),
+            Ok(4),
+            "at the limit: read"
+        );
+        let plain = zip(&list);
+        for (what, data) in [("plain", plain.clone()), ("Zip64", with_zip64(&plain))] {
+            let file = Virtual::whole(&data);
+            let size = file.size;
+            let mut game = Game::new();
+            let err = sparse_in(&mut game, "u6.zip", &file).unwrap_err();
+            assert_eq!(err, "u6.zip: zip unreadable: invalid zip data", "{what}");
+            let tail = (u6_intake::zip::tail_start(size), size);
+            assert_eq!(file.reads(), [(0, 4), tail], "{what}: not the directory");
+            let mut whole = Game::new();
+            whole.collect("u6.zip", data).unwrap();
+            assert_eq!(whole.boot(0, false).unwrap_err(), err, "{what}: read whole");
+        }
+    }
+
+    /// The zip assembled from the entries is what the page holds of them: their ranges fit with
+    /// what is held, the zip of them (with its central directory) does not. Refused after the
+    /// tail, before the entry is read or the zip's room reserved (reading it would be a
+    /// forbidden request).
+    #[test]
+    fn a_sliced_zip_whose_rebuilt_zip_would_pass_the_limit_is_refused_before_reading() {
+        let size = 600u64 << 20;
+        let max = MAX_INPUT_BYTES as u64;
+        let tail = size - u6_intake::zip::tail_start(size);
+        let held = 5 + 4 + tail; // the loose file, the first bytes, the tail
+        let room = max - held - 10; // the entry's range: from its local header, 64 KiB past its data
+        let entry = Entry {
+            csize: (room - 0xffff - 40) as u32,
+            ..declaring("Disk 1.adf", 1 << 20)
+        };
+        let file = far(&zip(&[entry]), size, 0);
+        let mut game = Game::new();
+        game.collect("loose.txt", b"loose".to_vec()).unwrap();
+        let err = sparse_in(&mut game, "big.zip", &file).unwrap_err();
+        let rebuilt = room + 2 * (46 + 10) + 22 + u6_intake::zip::REBUILT_COMMENT as u64;
+        assert_eq!(err, too_large(held + rebuilt));
+        assert!(
+            held + room <= max && held + rebuilt > max,
+            "only the rebuilt zip passes"
+        );
+        assert_eq!(file.reads(), [(0, 4), (size - tail, size)], "not the entry");
+        assert_eq!(
+            (game.files_loaded(), game.input_bytes),
+            (1, 5),
+            "nothing kept"
+        );
+    }
+
+    /// A file that does not read as the part of a zip it was asked for, an entry past the end of
+    /// the file, a local header that disagrees with its central record: a clean error naming the
+    /// zip, and nothing of it kept (synthetic bytes).
+    #[test]
+    fn a_sliced_zip_that_does_not_read_is_refused_and_nothing_is_kept() {
+        let disk = vec![2u8; 4096];
+        let good = zip(&[stored("Disk 1.adf", &disk), stored("Disk 2.adf", &disk)]);
+        let past = zip(&[
+            stored("Disk 1.adf", &disk),
+            Entry {
+                csize: 1 << 20,
+                ..stored("Disk 2.adf", &disk)
+            },
+        ]);
+        let mut cut = good.clone();
+        cut.truncate(good.len() - 30);
+        let second = 30 + 10 + 4096;
+        let mut renamed = good.clone();
+        renamed[second + 30 + 5] = b'3'; // the second local header names "Disk 3.adf"
+        let mut unsigned = good.clone();
+        unsigned[second] ^= 1;
+        for (what, data) in [
+            ("a cut tail", &cut),
+            ("an entry past the end", &past),
+            ("a local header with another name", &renamed),
+            ("a local header without its signature", &unsigned),
+        ] {
+            let mut game = Game::new();
+            game.collect("loose.txt", b"loose".to_vec()).unwrap();
+            let err = slice_in(&mut game, "u6.zip", data).unwrap_err();
+            assert_eq!(err, "u6.zip: zip unreadable: invalid zip data", "{what}");
+            let held = (game.files_loaded(), game.input_bytes);
+            assert_eq!(held, (1, 5), "{what}: nothing kept");
+            assert!(game.zip.is_none() && game.zip_range() == Ok(None), "{what}");
+            let mut whole = Game::new();
+            whole.collect("u6.zip", data.clone()).unwrap();
+            // Read whole: refused by the check before the intake (the directory) or by the
+            // intake (a local header), the same line first either way.
+            let err = whole.boot(0, false).unwrap_err();
+            let line = err.lines().next();
+            assert_eq!(
+                line,
+                Some("u6.zip: zip unreadable: invalid zip data"),
+                "{what}: whole"
+            );
+        }
+        let mut game = Game::new();
+        assert!(game.open_zip("u6.zip", f64::NAN).is_err());
+        assert!(game.zip_bytes(b"PK".to_vec()).is_err(), "no zip open");
+        game.open_zip("u6.zip", good.len() as f64).unwrap();
+        assert_eq!(game.zip_range(), Ok(Some((0, 4))));
+        assert!(
+            game.zip_bytes(b"PK".to_vec()).is_err(),
+            "not the range asked for"
+        );
+        assert!(game.zip.is_none(), "dropped");
+    }
+
+    /// On the user's zip (skipped when absent; read only): read in slices, a tenth of it at most
+    /// is copied in, and the start keeps the same game files and shows the same frames as the
+    /// start from the zip read whole (content-free comparisons; nothing of the zip is printed).
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn the_users_zip_read_in_slices_starts_the_game_the_whole_zip_starts() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let data = std::fs::read(ZIP).quiet();
+        assert!(
+            zip_sliced("ultima-vi.zip", data.len() as f64),
+            "read in slices"
+        );
+        let mut sliced = Game::new();
+        slice_in(&mut sliced, "ultima-vi.zip", &data).quiet();
+        assert!(
+            sliced.input_bytes < data.len() / 10,
+            "a tenth of the zip at most"
+        );
+        sliced.boot(1, false).quiet();
+        let mut whole = Game::new();
+        whole.collect("ultima-vi.zip", data).quiet();
+        whole.boot(1, false).quiet();
+        let kept = |game: &Game| -> Vec<(String, Vec<u8>)> {
+            (0..game.kept_count())
+                .map(|i| (game.kept_path(i), game.kept_bytes(i).quiet().to_vec()))
+                .collect()
+        };
+        assert!(sliced.kept_count() > 0);
+        assert_same!(kept(&sliced), kept(&whole), "the kept game files");
+        for _ in 0..60 {
+            for g in [&mut sliced, &mut whole] {
+                g.step(16);
+                g.present();
+            }
+        }
+        assert!(
+            sliced.frame_rgba() == whole.frame_rgba(),
+            "the same first frames"
         );
     }
 }
