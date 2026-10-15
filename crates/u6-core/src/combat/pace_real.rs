@@ -17,6 +17,7 @@ use super::present::{
     FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, FRAME_MS, NAME_MS, PRINT_MS, REFRESH_MS,
 };
 use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, PICK_MS};
+use crate::actors::walk::{FOLLOW_MS, STEP_MS};
 use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
 use crate::state::State;
@@ -198,9 +199,13 @@ fn median(v: &mut [u32]) -> u32 {
     }
 }
 
-/// What a wait of `ms` is for (the constants have distinct values in this fight).
+/// What a wait of `ms` is for (the constants have distinct values, but a party step without
+/// followers may take as long as a message).
 fn what(ms: u16) -> &'static str {
     match ms {
+        v if v == STEP_MS + FOLLOW_MS => "party step and its followers",
+        v if v == STEP_MS && v == PRINT_MS => "message or party step",
+        v if v == STEP_MS => "party step",
         AFTER_TURN_MS => "refresh after a turn",
         PICK_MS => "scheduler pick",
         v if v == PICK_MS + COMBAT_NPC_MS => "pick + combat NPC turn",

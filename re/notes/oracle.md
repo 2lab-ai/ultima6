@@ -173,25 +173,42 @@ is rejected. A resume and the console mark are one page call and the console is 
 so a stop's prompt is never missed or read stale (an earlier version did, and its silent
 unwinding hid it). The emulator stands still while stopped; the stops cost the game nothing.
 `trace.py` reduces trace.json to the port's constants; it refuses a file the run did not mark
-`complete` (trace.mjs sets it in its write after the last step). The constants below come from
-the start fight, the same keys (`pace/trace-fight-r4`), and the castle without the fight
-(`U6_FIGHT_SETUP=town`: the assault actors e0..e2 passed over, `b` held until taken, party
-worktypes 2,1,1,1; keys DOWN ×5, UP ×2; `pace/trace-town-r4`). Those two runs predate the
-`complete` flag (each logged all seven of its steps, but trace.py now refuses their files); both
-setups rerun with the flagged tool (`pace/trace-fight-r5`, `pace/trace-town-r5`) finished all
-seven steps each and are marked complete. Runs are not identical (§3), so r5 is a second
-sample, not a copy; the constants stay r4's here. PAL frames, CPU clock:
+`complete` (trace.mjs sets it in its write after the last step), and a followers' pass without
+its count of followers. The constants below come from the start fight, the same keys, and the
+castle without the fight (`U6_FIGHT_SETUP=town`: the assault actors e0..e2 passed over, `b` held
+until taken, party worktypes 2,1,1,1; keys DOWN ×5, UP ×2), two runs of each pooled:
+`pace/trace-fight-r4`, `pace/trace-town-r4`, `pace/trace-fight-r5`, `pace/trace-town-r5`. The
+r4 runs predate the `complete` flag; a one-off check (outside the repo) found each one's seven
+steps, in its keys' order, in trace.json, trace.log and the run's output, with nothing thrown,
+and then marked the two files complete with their keys (2026-10-15; the steps unchanged). Runs
+are not identical (§3), so r5 is a second sample, not a copy. PAL frames, CPU clock:
 
-| call | value | constant |
+| call | r4 alone | r4 and r5 pooled | constant (ms) |
+|---|---|---|---|
+| refresh after a turn 0x102f2a, view changed | median 21.375 (n 38) | median 21.336 (n 73, 19.86..23.98) | AFTER_TURN_MS 427 |
+| hit flash 0x1230ce | median 15.602 (n 18) | median 15.602 (n 38, 15.32..16.03) | FLASH_MS 312 |
+| flight 0x132706 with no step drawn | median 6.397 (n 27) | median 6.379 (n 57, 6.15..7.33) | RENDER_MS 128 |
+| printf 0x108658 | mean 1.185 (n 57) | mean 1.125 (n 128, 0.06..3.60) | PRINT_MS pooled 22 — applied in present.rs by fix/m2r5-playback |
+| object name 0x10eef8 (the boot's first, 132.23 with the floppy, aside) | mean 1.294 (n 32) | mean 1.289 (n 70, 1.01..1.72) | NAME_MS 26 |
+| NPC turn 0x1200b0, own time, worktype in a combat routine (3..=11, 13, 14, 0x13, 0x9a, 0x9b) | mean 2.338 (n 43) | mean 2.278 (n 87, 0.89..4.04) | COMBAT_NPC_MS 46 (was 47) |
+| the same, any other worktype (all traced ones schedule worktypes, 0x80 and up) | mean 0.050 (n 122) | mean 0.033 (n 244) | no wait |
+| world turn outside NPC turns and refreshes, per pick | 0.994 (179 picks) | 0.994 (359 picks) | PICK_MS 20 |
+
+**The party step.** trace.mjs also traces the party step 0x11d4ee and the followers' pass it
+ends in (0x11c910), counting at the pass's entry the members besides the leader in worktype 1
+(the ones it may move): the castle three times (`pace/trace-town-w1`..`w3`, 3 followers at
+every pass) and the start fight once (`pace/trace-fight-w1`, none: every member is in its
+combat mode), the same setups and keys as above, 2026-10-15:
+
+| call | value | constant (ms) |
 |---|---|---|
-| refresh after a turn 0x102f2a, view changed | median 21.375 (n 38, 19.96..23.80) | AFTER_TURN_MS 427 |
-| hit flash 0x1230ce | median 15.602 (n 18, 15.34..16.03) | FLASH_MS 312 |
-| flight 0x132706 with no step drawn | median 6.397 (n 27, 6.15..7.33) | RENDER_MS 128 |
-| printf 0x108658 | mean 1.185 (n 57, 0.06..3.60) | PRINT_MS 24 |
-| object name 0x10eef8 (the boot's first, 132.23 with the floppy, aside) | mean 1.294 (n 32) | NAME_MS 26 |
-| NPC turn 0x1200b0, own time, combat worktype | mean 2.338 (n 43, 0.95..4.04) | COMBAT_NPC_MS 47 |
-| the same, schedule worktype (0x80 and up) | mean 0.05 (n 122) | no wait |
-| world turn outside NPC turns and refreshes, per pick | 0.994 (179 picks) | PICK_MS 20 |
+| party step 0x11d4ee, own time (its followers' pass and messages apart) | mean 1.186 (n 27: the castle's 21 and the fight's 6, 0.57..2.26; the fight's first step, 78.69 with the floppy, aside) | STEP_MS 24 |
+| followers' pass 0x11c910 with members to move (the castle) | mean 2.065 (n 21, 0.16..5.27) | FOLLOW_MS 41 |
+| the same with no member in worktype 1 (the fight) | mean 0.049 (n 7) | no wait |
+
+The whole step in the castle: 1.13..5.98 frames (median 1.99, mean 3.19, n 21); its world turn
+25.95..41.43 (median 29.49). So the original's 33-frame castle step is the world turn plus a
+step of about 3 frames.
 
 The flight step (46 ms) and the closing refresh of a flight (`REFRESH_MS`, 11 frames) have no
 routine boundary to trace and stay sampled estimates (fight.py). The sampled estimates held
