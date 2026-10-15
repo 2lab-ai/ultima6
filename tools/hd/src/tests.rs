@@ -1837,6 +1837,35 @@ fn the_work_dir_takes_one_command_at_a_time() {
 }
 
 #[test]
+fn contenders_released_together_get_one_lock() {
+    use std::sync::Barrier;
+    let w = work("lock-race");
+    // Eight contenders released at once, 200 times: exactly one holds the lock each time (the
+    // others are refused while it holds it, until the round ends). Before each round the file
+    // is left as a holder that died between its open and its pid write would leave it.
+    for round in 0..200 {
+        std::fs::write(w.path(".u6-hd.lock"), b"").unwrap();
+        let start = Barrier::new(8);
+        let held: Vec<crate::work::Lock> = std::thread::scope(|s| {
+            let contenders: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        start.wait();
+                        w.lock().ok()
+                    })
+                })
+                .collect();
+            contenders
+                .into_iter()
+                .filter_map(|c| c.join().unwrap())
+                .collect()
+        });
+        assert_eq!(held.len(), 1, "round {round}: {} holders", held.len());
+    }
+    let _ = std::fs::remove_dir_all(&w.root);
+}
+
+#[test]
 fn the_review_paths_are_refused() {
     let repo = crate::work::repo_root().canonicalize().unwrap();
     let parent = repo.parent().unwrap().to_path_buf();
