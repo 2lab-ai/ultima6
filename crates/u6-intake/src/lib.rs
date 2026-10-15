@@ -66,8 +66,6 @@ pub use pp20::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
 /// - one string while it is made, before it is cut to its length: a report line, a warning or
 ///   an error, at most twice 8,704 bytes;
 /// - a loose file's path while it is made and charged: twice its name, one at a time;
-/// - two names compared while the disk images are sorted: a copy of each one's digit runs, at
-///   most both names' lengths, one comparison at a time;
 /// - the walk's directory paths along its recursion: at most [`ofs::MAX_DEPTH`] of at most
 ///   3,903 bytes, 249,792 bytes;
 /// - the visited set's entries for blocks the walk keeps nothing for: one per block of an ADF
@@ -144,6 +142,8 @@ struct Ledger {
     unlisted: usize,
     /// The least `left` has been: the most the intake had charged at once.
     low: usize,
+    /// What `left` was when the ledger was made: no give-back takes it past this.
+    start: usize,
 }
 
 impl Ledger {
@@ -158,6 +158,7 @@ impl Ledger {
             after_spent: 0,
             unlisted: 0,
             low: left,
+            start: left,
         }
     }
 
@@ -254,8 +255,15 @@ impl Ledger {
         self.take(n);
     }
 
+    /// Returns `n` bytes charged earlier. More than was charged is a bookkeeping error: it
+    /// fails a test build, and a release build keeps the budget at its starting amount.
     fn give_back(&mut self, n: usize) {
-        self.left = self.left.saturating_add(n).min(INTAKE_BUDGET);
+        let back = self.left.saturating_add(n);
+        debug_assert!(
+            back <= self.start,
+            "gave back {n} bytes more than were charged"
+        );
+        self.left = back.min(self.start);
     }
 }
 
@@ -341,21 +349,25 @@ fn normalize_path(name: &str) -> String {
 /// Approximates the TS `localeCompare(b, "en", { numeric: true })`: digit runs compare
 /// by value, other characters case-insensitively with whitespace < punctuation <
 /// digits < letters; exact ties fall back to code point order.
+///
+/// Compares in place: it allocates nothing.
 fn by_label(a: &str, b: &str) -> Ordering {
-    let (mut x, mut y) = (a.chars().peekable(), b.chars().peekable());
+    let (mut i, mut j) = (0, 0);
     loop {
-        let ord = match (x.peek().copied(), y.peek().copied()) {
+        let ord = match (a[i..].chars().next(), b[j..].chars().next()) {
             (None, None) => return a.cmp(b),
             (None, Some(_)) => return Ordering::Less,
             (Some(_), None) => return Ordering::Greater,
             (Some(c), Some(d)) if c.is_ascii_digit() && d.is_ascii_digit() => {
-                let (m, n) = (digit_run(&mut x), digit_run(&mut y));
+                let (m, n) = (digit_run(a, i), digit_run(b, j));
+                (i, j) = (i + m.len(), j + n.len());
+                // Value order: without leading zeros, the longer run is the larger number,
+                // and runs of one length compare digit by digit.
                 let (m, n) = (m.trim_start_matches('0'), n.trim_start_matches('0'));
                 m.len().cmp(&n.len()).then_with(|| m.cmp(n))
             }
             (Some(c), Some(d)) => {
-                x.next();
-                y.next();
+                (i, j) = (i + c.len_utf8(), j + d.len_utf8());
                 char_key(c).cmp(&char_key(d))
             }
         };
@@ -365,8 +377,13 @@ fn by_label(a: &str, b: &str) -> Ordering {
     }
 }
 
-fn digit_run(it: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
-    std::iter::from_fn(|| it.next_if(char::is_ascii_digit)).collect()
+/// The run of ASCII digits that starts at byte `at` of `s`, borrowed.
+fn digit_run(s: &str, at: usize) -> &str {
+    let rest = &s[at..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    &rest[..end]
 }
 
 fn char_key(c: char) -> (u8, char) {
@@ -812,6 +829,29 @@ mod tests {
             w(&mut img, 880, 24 + k * 4, b as u32);
         }
         img
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "more than were charged"))]
+    fn a_give_back_past_the_charges_is_caught() {
+        // A test build panics; a release build keeps the budget at its starting amount.
+        let mut l = Ledger::new(1 << 20);
+        let start = l.left;
+        l.give_back(1);
+        assert_eq!(l.left, start);
+    }
+
+    #[test]
+    fn comparing_names_allocates_nothing() {
+        // Digit runs of 100,000 digits each, equal up to the last: compared in place.
+        let a = format!("disk {}1.adf", "0".repeat(1) + &"7".repeat(99_999));
+        let b = format!("disk {}2.adf", "0".repeat(1) + &"7".repeat(99_999));
+        let start = LIVE.with(Cell::get);
+        PEAK.with(|p| p.set(start));
+        let ord = by_label(&a, &b);
+        let peak = PEAK.with(Cell::get) - start;
+        assert_eq!(ord, Ordering::Less);
+        assert_eq!(peak, 0, "comparing two names allocated {peak} bytes");
     }
 
     #[test]

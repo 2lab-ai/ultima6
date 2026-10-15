@@ -656,3 +656,51 @@ fn spare_capacity_in_the_inputs_is_charged() {
     );
     assert_eq!(r.report.last().map(String::as_str), Some(STOP_LINE));
 }
+
+/// `data` in a buffer of 40 MiB.
+fn in_spare_buffer(data: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(40 << 20);
+    v.extend_from_slice(data);
+    v
+}
+
+#[test]
+fn a_replaced_copy_gives_back_its_whole_buffer() {
+    // "x" first comes in a 40 MiB buffer, then again in a small one, which replaces it; "y"
+    // (30 MiB) fits only if the replaced buffer's whole capacity was given back.
+    let r = intake(vec![
+        file("x".into(), in_spare_buffer(&[1; 1024])),
+        file("x".into(), vec![2; 1024]),
+        file("y".into(), vec![3; 30 << 20]),
+    ]);
+    assert!(
+        !r.report.iter().any(|l| l.contains("budget")),
+        "{:#?}",
+        r.report
+    );
+    assert_eq!(r.files["x"], vec![2; 1024]);
+    assert_eq!(r.files["y"].len(), 30 << 20);
+}
+
+#[test]
+fn a_decrunched_file_gives_back_its_whole_crunched_buffer() {
+    // A small crunched file in a 40 MiB buffer, then two that expand to 16 MiB each: they fit
+    // only if the first one's whole buffer was given back once it was decrunched.
+    let packed = max_ratio_pp20((1 << 24) - 1, 0x11);
+    let r = intake(vec![
+        file("a".into(), in_spare_buffer(&max_ratio_pp20(1000, 0x22))),
+        file("b".into(), packed.clone()),
+        file("c".into(), packed),
+    ]);
+    assert!(
+        !r.report.iter().any(|l| l.contains("budget")),
+        "{:#?}",
+        r.report
+    );
+    assert_eq!(
+        r.report.last().map(String::as_str),
+        Some("PP20: decrunched 3 file(s); 3 file(s) total")
+    );
+    assert_eq!(r.files["a"], vec![0x22; 1000]);
+    assert_eq!(r.files["c"].len(), (1 << 24) - 1);
+}
