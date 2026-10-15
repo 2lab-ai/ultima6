@@ -1,6 +1,6 @@
 //! Real-data receipt of the combat code: the shipped start state (its combat byte is set, so
 //! the boot begins combat 0x121c64), two gargoyles made next to the party the way 0x131646
-//! makes a monster (the start egg is kept from hatching), the Avatar's Attack on one
+//! makes a monster (the start egg is kept from hatching), the hero's Attack on one
 //! (0x124caa with a confirmed cross-hair), then world turns: the party fights in its combat
 //! modes, the gargoyles assault (worktype 8). Skips where the zip is missing; prints slots,
 //! counts and numbers only (no names, no message text). The messages it looks for are read from

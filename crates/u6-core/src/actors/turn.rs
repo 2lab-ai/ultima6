@@ -47,7 +47,7 @@ fn centre_on(s: &mut State, i: usize) {
     s.map.centre.y = p.y;
 }
 
-/// Original: 0x121020 (actors: the Avatar has died: the darkness lines)
+/// Original: 0x121020 (actors: the hero has died: the darkness lines)
 ///
 /// Unless the leader index is 16: music off, the two lines with a full redraw between, then
 /// the resurrection 0x1095bc.
@@ -81,7 +81,7 @@ async fn raise_if_dead(state: &RefCell<State>, io: &Io) {
 /// Original: 0x121056 (party: leader and solo-mode bookkeeping per turn)
 ///
 /// With the leader index at the party size (a vehicle carries the party) actor 0 is cleaned
-/// up. A dead Avatar (actor 1) ends in [`darkness`]. In solo mode a leader who cannot act ends
+/// up. A dead hero (actor 1) ends in [`darkness`]. In solo mode a leader who cannot act ends
 /// it (0x104094). In party mode a leader who cannot act hands over to the first member who
 /// can; and member 0 takes the lead back from any other member once it can act (in combat the
 /// old leader returns to its combat worktype instead of following).
@@ -744,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_avatar_brings_the_darkness_once_per_bookkeeping() {
+    fn a_dead_hero_brings_the_darkness_once_per_bookkeeping() {
         let mut s = world(&[]);
         s.actors.attrs.status[1] = 0x90;
         s.gfx.window_shown = 0;
@@ -753,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_avatar_is_raised_before_the_world_turn_picks_again() {
+    fn a_dead_hero_is_raised_before_the_world_turn_picks_again() {
         let mut s = world(&[]);
         s.actors.attrs.status[1] = 0x90;
         s.actors.calendar.hour = 9;
@@ -763,9 +763,9 @@ mod tests {
         e.tick(&[], 16);
         let s = e.state();
         // The raise ran (bits reset, the view moved to the castle) before any pick; the
-        // Avatar of this bare world is not carried along, so the turn then idles.
+        // hero of this bare world is not carried along, so the turn then idles.
         assert!(!s.actors.work.resurrect_pending);
-        assert_eq!(s.actors.attrs.status[1] & 0x10, 0, "the Avatar lives again");
+        assert_eq!(s.actors.attrs.status[1] & 0x10, 0, "the hero lives again");
         assert_eq!((s.map.centre.x, s.map.centre.y), (0x133, 0x160));
     }
 

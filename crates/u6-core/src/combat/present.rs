@@ -70,7 +70,7 @@ pub const NAME_MS: u16 = 26;
 pub const DISSOLVE_MS: u16 = 3422;
 /// [replaced] Time of each window of the actor flash 0x132338 (the outlined actor presented
 /// dissolving, then the window without it, dissolving too): half of its 345.83 PAL frames, timed
-/// at the prompt on the Avatar (tools/oracle/timeit.mjs actor, the same on the CPU clock).
+/// at the prompt on the hero (tools/oracle/timeit.mjs actor, the same on the CPU clock).
 pub const ACTOR_FLASH_MS: u16 = 3458;
 /// The map window with its border, in screen pixels.
 const WINDOW: (usize, usize) = (176, 176);
