@@ -21,8 +21,15 @@
 //! saved state from there, and every Save the game makes is written there after its tick.
 //! Without it nothing is stored and every boot starts from the zip's new-game files.
 //!
-//! Headless mode never opens a window or reads a clock: it runs N ticks of `HEADLESS_TICK_MS`,
-//! delivering the `--keys` one per tick while the game has no input queued, and writes the last
+//! The window runs the game on the fixed step (spec 06): each window frame runs the 20 ms steps
+//! (one PAL frame) the wall time since the previous frame is worth at the speed, while the
+//! frame's budget lasts (`pace`). `=` or numpad `+` is faster, `-` or numpad `-` slower,
+//! through 1×, 1.5×, 2×, 3×, 4×, 6×, 8× and Max (as many steps as the budget holds); the title
+//! shows a speed other than 1×. A mouse button held paces at 1×, so a click walks as at 1×.
+//!
+//! Headless mode never opens a window or reads a clock: it runs N ticks of `HEADLESS_TICK_MS`
+//! (the same fixed step), delivering the `--keys` one per tick while the game has no input
+//! queued, and writes the last
 //! published 320x200 frame. A `ctrl+<letter>` token is that control character (`ctrl+s` Save,
 //! `ctrl+r` Restore; the window sends them for Ctrl + a letter); `tab` is the Tab key (with a
 //! cursor up it moves to the inventory panel). A `say:words` token types
@@ -41,18 +48,20 @@ use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use minifb::{KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
+use u6_core::pacer::{Pacer, STEP_MS};
 use u6_core::saveload::{SaveSync, attach};
 use u6_core::{Engine, Files, HEIGHT, InputEvent, Key, WIDTH};
 use u6_intake::{InputFile, intake};
 
 mod audio;
+mod pace;
 mod saves;
 use audio::{Audio, Output, WAV_RATE};
 use saves::DirStore;
 
 const SCALE: usize = 3;
-const HEADLESS_TICK_MS: u32 = 16;
-const MAX_STEP_MS: u64 = 100;
+/// Engine milliseconds of a headless tick: the fixed step, as in the window and the page.
+const HEADLESS_TICK_MS: u32 = STEP_MS;
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
@@ -406,6 +415,74 @@ fn map_key(key: minifb::Key, ctrl: bool) -> Option<Key> {
     })
 }
 
+/// What a window key does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Route {
+    /// A key for the game.
+    Game(Key),
+    /// The next speed up ([`pace::faster`]).
+    Faster,
+    /// The next speed down ([`pace::slower`]).
+    Slower,
+}
+
+/// A window key's route (spec 06 §Design 6): `=` and numpad `+` faster, `-` and numpad `-`
+/// slower, whatever the game is doing; every other key as [`map_key`] maps it. [`map_key`]
+/// gives the game none of the four (nor a shifted character such as `+`), so no key the game
+/// takes changes hands, and unlike the page's there is no owner check
+/// ([`u6_core::Engine::keys_owned`]).
+fn route(key: minifb::Key, ctrl: bool) -> Option<Route> {
+    use minifb::Key as K;
+    match key {
+        K::Equal | K::NumPadPlus => Some(Route::Faster),
+        K::Minus | K::NumPadMinus => Some(Route::Slower),
+        _ => map_key(key, ctrl).map(Route::Game),
+    }
+}
+
+/// One step of the window: the engine ticks [`STEP_MS`] with the input not yet delivered (a
+/// frame's input goes to its first step, as the page queues keys for its next step; a frame
+/// that runs none keeps it for the next), the store writes what a Save in the step committed,
+/// and the sound machine replays the step's calls (after every step: the call log holds one
+/// step's). False once the game ended.
+fn window_step(
+    engine: &mut Engine,
+    pending: &mut Vec<InputEvent>,
+    saves: Option<&mut Saves>,
+    audio: Option<&mut Audio>,
+) -> Result<bool, String> {
+    engine.tick(pending, STEP_MS);
+    pending.clear();
+    if let Some(saves) = saves {
+        saves.flush(engine)?;
+    }
+    if let Some(audio) = audio {
+        audio.sync(engine);
+    }
+    Ok(!engine.finished())
+}
+
+/// The mouse this frame as the game's pointer: `pos` in window pixels scaled to screen pixels,
+/// and the `left` / `right` buttons ([`u6_core::engine::POINTER_LEFT`], `POINTER_RIGHT`). The
+/// buttons are read every frame on their own: without a position (minifb 0.29 always has one
+/// in [`MouseMode::Clamp`], the edge of the window when the mouse is outside it; this keeps a
+/// backend that had none from losing a release) they come at the `last` position, so a
+/// release always reaches the game and a held button cannot stick. None while there was never
+/// a position.
+fn sample_mouse(
+    pos: Option<(f32, f32)>,
+    left: bool,
+    right: bool,
+    last: Option<(i16, i16, u8)>,
+) -> Option<(i16, i16, u8)> {
+    let buttons = u8::from(left) | u8::from(right) << 1;
+    let (x, y) = match pos {
+        Some((x, y)) => ((x as usize / SCALE) as i16, (y as usize / SCALE) as i16),
+        None => last.map(|(x, y, _)| (x, y))?,
+    };
+    Some((x, y, buttons))
+}
+
 fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String> {
     let (w, h) = (WIDTH * SCALE, HEIGHT * SCALE);
     let mut sound = match Output::open() {
@@ -415,51 +492,76 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
             None
         }
     };
-    let mut window =
-        Window::new("Ultima VI", w, h, WindowOptions::default()).map_err(|e| e.to_string())?;
+    let mut pacer = Pacer::new();
+    let mut window = Window::new(&pace::title(pacer.speed()), w, h, WindowOptions::default())
+        .map_err(|e| e.to_string())?;
     window.set_target_fps(60);
     let mut rgba = Vec::new();
     let mut screen = vec![0u32; w * h];
-    let start = Instant::now();
-    let mut delivered_ms = 0u64;
+    let mut last = Instant::now();
     let mut mouse = None;
+    let mut pending: Vec<InputEvent> = Vec::new();
     while window.is_open() {
         let ctrl =
             window.is_key_down(minifb::Key::LeftCtrl) || window.is_key_down(minifb::Key::RightCtrl);
-        let mut input: Vec<InputEvent> = window
-            .get_keys_pressed(KeyRepeat::Yes)
-            .into_iter()
-            .filter_map(|k| map_key(k, ctrl))
-            .map(InputEvent::Key)
-            .collect();
-        // The mouse, once per frame when it changed: window pixels to screen pixels.
-        if let Some((x, y)) = window.get_mouse_pos(MouseMode::Clamp) {
-            let buttons = u8::from(window.get_mouse_down(MouseButton::Left))
-                | u8::from(window.get_mouse_down(MouseButton::Right)) << 1;
-            let now = (
-                (x as usize / SCALE) as i16,
-                (y as usize / SCALE) as i16,
-                buttons,
-            );
-            if mouse != Some(now) {
-                input.push(pointer(now.0, now.1, now.2));
-                mouse = Some(now);
+        let mut speed = pacer.speed();
+        for key in window.get_keys_pressed(KeyRepeat::Yes) {
+            match route(key, ctrl) {
+                Some(Route::Game(k)) => pending.push(InputEvent::Key(k)),
+                Some(Route::Faster) => speed = pace::faster(speed),
+                Some(Route::Slower) => speed = pace::slower(speed),
+                None => {}
             }
         }
-        let now_ms = start.elapsed().as_millis() as u64;
-        let step = (now_ms - delivered_ms).min(MAX_STEP_MS);
-        delivered_ms = now_ms;
-        engine.tick(&input, step as u32);
-        if let Some(saves) = saves.as_mut() {
-            saves.flush(&engine)?;
+        if speed != pacer.speed() {
+            pacer.set_speed(speed);
+            window.set_title(&pace::title(speed));
+            if let Some((_, out)) = sound.as_mut() {
+                out.set_speed(speed);
+            }
         }
+        // The mouse, once per frame when it changed.
+        let now = sample_mouse(
+            window.get_mouse_pos(MouseMode::Clamp),
+            window.get_mouse_down(MouseButton::Left),
+            window.get_mouse_down(MouseButton::Right),
+            mouse,
+        );
+        if now != mouse {
+            if let Some((x, y, buttons)) = now {
+                pending.push(pointer(x, y, buttons));
+            }
+            mouse = now;
+        }
+        // The handler's buttons after this frame's input: the last pointer state queued (still
+        // pending or taken).
+        let held = mouse.is_some_and(|(_, _, buttons)| buttons != 0);
+        let frame_at = Instant::now();
+        let wall_dt_ms = frame_at.duration_since(last).as_secs_f64() * 1000.0;
+        last = frame_at;
+        let steps = pace::run_frame(
+            &mut pacer,
+            wall_dt_ms,
+            held,
+            || frame_at.elapsed().as_secs_f64() * 1000.0,
+            || {
+                window_step(
+                    &mut engine,
+                    &mut pending,
+                    saves.as_mut(),
+                    sound.as_mut().map(|(audio, _)| audio),
+                )
+            },
+        )?;
         if let Some((audio, out)) = sound.as_mut() {
-            audio.sync(&engine);
             out.top_up(audio);
         }
         print_log(&mut engine);
-        engine.frame().write_rgba(&mut rgba);
-        upscale(&rgba, &mut screen);
+        // A frame that ran no step shows the picture it had.
+        if steps > 0 {
+            engine.frame().write_rgba(&mut rgba);
+            upscale(&rgba, &mut screen);
+        }
         window
             .update_with_buffer(&screen, w, h)
             .map_err(|e| e.to_string())?;
@@ -663,6 +765,136 @@ mod tests {
         assert_eq!(map_key(K::F1, false), None);
         assert_eq!(map_key(K::S, true), Some(Key::Char('\u{13}')));
         assert_eq!(map_key(K::Left, true), Some(Key::Left));
+    }
+
+    /// The speed keys against the game's: the four speed keys whatever the modifiers, every
+    /// other key as [`map_key`] has it; and [`map_key`] gives the game none of the four (so the
+    /// game's state, [`u6_core::Engine::keys_owned`], has nothing to claim).
+    #[test]
+    fn routes_the_speed_keys_and_leaves_the_rest_to_the_game() {
+        use minifb::Key as K;
+        let speed = [
+            (K::Equal, Route::Faster),
+            (K::NumPadPlus, Route::Faster),
+            (K::Minus, Route::Slower),
+            (K::NumPadMinus, Route::Slower),
+        ];
+        for ctrl in [false, true] {
+            for (key, want) in speed {
+                assert_eq!(route(key, ctrl), Some(want), "{key:?} ctrl {ctrl}");
+                assert_eq!(map_key(key, ctrl), None, "{key:?} never reached the game");
+            }
+            for key in [
+                K::A,
+                K::S,
+                K::Key0,
+                K::Key9,
+                K::Up,
+                K::Enter,
+                K::NumPadEnter,
+                K::Escape,
+                K::Space,
+                K::Backspace,
+                K::F1,
+                K::LeftShift,
+                K::NumPad5,
+                K::NumPadAsterisk,
+            ] {
+                assert_eq!(
+                    route(key, ctrl),
+                    map_key(key, ctrl).map(Route::Game),
+                    "{key:?} ctrl {ctrl}"
+                );
+            }
+        }
+        assert_eq!(route(K::S, true), Some(Route::Game(Key::Char('\u{13}'))));
+        assert_eq!(route(K::F1, false), None);
+    }
+
+    /// A frame's input goes to its first step only, and a frame that runs no step keeps it
+    /// for the next: a game that takes every event as it comes records the step (the tick
+    /// count, from 1) each one reached it in.
+    #[test]
+    fn the_frames_input_goes_to_its_first_step() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen: Rc<RefCell<Vec<(u64, InputEvent)>>> = Rc::default();
+        let log = Rc::clone(&seen);
+        let mut engine = Engine::with_game(
+            u6_core::State::default(),
+            Files::default(),
+            |_, io| async move {
+                loop {
+                    let step = io.generation() + 1;
+                    while io.pending_events() > 0 {
+                        let ev = if io.key_ready() {
+                            InputEvent::Key(io.next_key().await)
+                        } else {
+                            let p = io.take_pointer();
+                            pointer(p.x, p.y, p.buttons)
+                        };
+                        log.borrow_mut().push((step, ev));
+                    }
+                    io.vblank().await;
+                }
+            },
+        );
+        let mut pacer = Pacer::new();
+        let mut pending = Vec::new();
+        let mut frame = |engine: &mut Engine, input: &[InputEvent], dt: f64| {
+            pending.extend_from_slice(input);
+            let k = pace::run_frame(
+                &mut pacer,
+                dt,
+                false,
+                || 0.0,
+                || window_step(engine, &mut pending, None, None),
+            )
+            .unwrap();
+            (k, pending.len())
+        };
+        let (a, at) = (InputEvent::Key(Key::Char('a')), pointer(1, 2, 0));
+        let (b, c) = (
+            InputEvent::Key(Key::Char('b')),
+            InputEvent::Key(Key::Char('c')),
+        );
+        assert_eq!(
+            frame(&mut engine, &[a, at], 10.0),
+            (0, 2),
+            "10 ms: no step, kept"
+        );
+        assert_eq!(frame(&mut engine, &[], 100.0), (5, 0), "110 ms: steps 1-5");
+        assert_eq!(frame(&mut engine, &[b], 30.0), (2, 0), "140 ms: steps 6-7");
+        assert_eq!(
+            frame(&mut engine, &[c], 5.0),
+            (0, 1),
+            "145 ms: no step, kept"
+        );
+        assert_eq!(frame(&mut engine, &[], 15.0), (1, 0), "160 ms: step 8");
+        assert_eq!(*seen.borrow(), [(1, a), (1, at), (6, b), (8, c)]);
+        assert_eq!((engine.ticks(), engine.io().now_ms()), (8, 160));
+    }
+
+    #[test]
+    fn the_mouse_buttons_are_read_with_or_without_a_position() {
+        let s = SCALE as f32;
+        let press = sample_mouse(Some((10.0 * s, 20.0 * s + 2.0)), true, false, None);
+        assert_eq!(press, Some((10, 20, 1)), "window pixels to screen pixels");
+        let right = sample_mouse(Some((10.0 * s, 20.0 * s)), true, true, press);
+        assert_eq!(right, Some((10, 20, 3)));
+        // No position: the buttons as they are, where the pointer was last.
+        assert_eq!(sample_mouse(None, true, true, right), right, "still held");
+        let release = sample_mouse(None, false, false, right);
+        assert_eq!(release, Some((10, 20, 0)), "the release reaches the game");
+        assert_eq!(
+            sample_mouse(None, true, false, None),
+            None,
+            "never a position"
+        );
+        assert_eq!(
+            sample_mouse(Some((0.0, 0.0)), false, false, release),
+            Some((0, 0, 0))
+        );
     }
 
     #[test]
