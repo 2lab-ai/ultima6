@@ -38,7 +38,8 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review: `ran
    - Engine-ms waits (`pace`, `sleep`) are unchanged.
 2. **`Pacer` in `u6-core`.** A pure struct with no clock, shared by web and native. It commits on report:
    - `due(wall_dt_ms, held) -> n` at a finite speed s: `acc += clamp(dt, 0, CAP) × r`, where r = s, or 1 while `held`; returns `min(floor(acc / 20), MAX_STEPS)` without consuming. The wall time cut by the clamp, `max(dt − CAP, 0)`, is added to `clamped_ms`.
-   - `held` is true while a pointer button is down, read from the engine's pointer state (not the page's), so a held press is measured at 1× in every mode, Max included.
+   - `held` is true while a pointer button is down: the pointer handler's state after this frame's queued input (the last queued pointer event, else the last one the engine took). A held press is therefore measured at 1× in every mode, Max included, from the frame it is queued in.
+   - The press edge (`held` turning true) resets `acc` to 0 and counts nothing as lost, so steps owed at a faster speed are never run under a held button. While held, Max keeps a 1× accumulator, fractional steps included.
    - The host runs `k ≤ n` steps, stopping early when its frame budget is spent. k may be 0.
    - `ran(k)`: `acc -= 20 k`. Anything owed beyond `CAP × r` is converted to wall ms (÷ r) and added to `dropped_ms`. `dropped_ms` (budget loss only) is the one source for the "behind" indicator; `clamped_ms` (a hidden tab, a debugger pause) is not shown as "behind".
    - Max is a separate mode, not a large s. `due` returns `MAX_STEPS` (the 1× count while `held`), and the host runs steps until its budget is spent. `ran(k)` then sets `acc` to 0, so Max never owes and never reports "behind". Any change of speed or mode resets `acc` to 0.
@@ -46,7 +47,7 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review: `ran
      - `CAP` = 250 ms of wall time per frame;
      - `MAX_STEPS` = 64 per frame;
      - frame budget = 0.5 × the measured rAF interval, never below 3 ms.
-   - Unit tests: over T ms the host gets exactly `floor(T × speed / 20)` steps, ±1; a 150 ms hold at 8× and at Max gets the 1× count.
+   - Unit tests: over T ms the host gets exactly `floor(T × speed / 20)` steps, ±1; a 150 ms hold at 8× and at Max gets the 1× count, also when steps were owed before the press; the press adds nothing to `dropped_ms`.
 3. **Web API.**
    - `tick(ms)` (= `step` + `present`) stays until the page and the harness move to `step` (T2), then it is deleted with its 7 call sites in `crates/u6-web`. The ~170 `.tick(&` sites elsewhere call `Engine::tick`, which this spec does not change.
    - New:
