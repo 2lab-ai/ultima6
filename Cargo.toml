@@ -17,10 +17,18 @@ u6-render = { path = "crates/u6-render" }
 u6-audio = { path = "crates/u6-audio" }
 u6-testkit = { path = "crates/u6-testkit" }
 
+# The shipped builds (`scripts/build-web.sh`, `u6-native --release`): one codegen unit makes the
+# wasm about a fifth smaller at the same speed (spec 06 O4). No LTO: Cargo skips it for u6-web
+# (cdylib + rlib), and a cdylib-only fat-LTO wasm measured 9.8% bigger.
+[profile.release]
+codegen-units = 1
+
 # The test gate (`scripts/cargo.sh test --workspace --profile gate`): release speed with the
 # integer-overflow and debug-assertion checks on, so a test of a wrapping fix fails in the gate
-# when the wrap regresses (plain release would wrap silently and stay green).
+# when the wrap regresses (plain release would wrap silently and stay green). It keeps Cargo's
+# release default of 16 codegen units, so the shipped-build flag above does not slow it.
 [profile.gate]
 inherits = "release"
 overflow-checks = true
 debug-assertions = true
+codegen-units = 16

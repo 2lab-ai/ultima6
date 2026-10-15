@@ -106,7 +106,11 @@ pub fn crunch_pp20(plain: &[u8]) -> Vec<u8> {
         bs.put(0, 1);
         put_literals(&mut bs, &lits);
     }
+    pack(bs, OFFSET_LENS, plain.len())
+}
 
+/// The file around a token stream (bits in read order) that declares `n` output bytes.
+fn pack(bs: BitStream, offset_lens: [u8; 4], n: usize) -> Vec<u8> {
     // Pad at the front of the read order; the trailer's skip count discards it.
     let skip = (8 - bs.bits.len() % 8) % 8;
     let stream: Vec<u8> = std::iter::repeat_n(0, skip).chain(bs.bits).collect();
@@ -117,10 +121,33 @@ pub fn crunch_pp20(plain: &[u8]) -> Vec<u8> {
             src[src_len - 1 - (k >> 3)] |= 1 << (k & 7);
         }
     }
-    let n = plain.len();
     let mut out = b"PP20".to_vec();
-    out.extend_from_slice(&OFFSET_LENS);
+    out.extend_from_slice(&offset_lens);
     out.extend_from_slice(&src);
     out.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8, skip as u8]);
     out
+}
+
+/// A file that decrunches to `len` (6 or more) copies of `byte` from as few stream bits as the
+/// format allows: one literal, then one match at offset 0 (offset width 0) as long as the rest,
+/// its length all 3-bit groups of 7. Each group adds 7 bytes for 3 bits, the format's best
+/// ratio, so the file comes within a few bytes of 56/3 output bytes per stream byte.
+pub fn max_ratio_pp20(len: usize, byte: u8) -> Vec<u8> {
+    assert!(
+        (6..1 << 24).contains(&len),
+        "one literal and a match of at least 5"
+    );
+    let mut bs = BitStream::default();
+    bs.put(0, 1); // a literal run
+    bs.put(0, 2); // of one byte
+    bs.put(usize::from(byte), 8);
+    bs.put(3, 2); // a long match
+    bs.put(1, 1); // with the offset width of class 3 (0 bits): offset 0
+    let mut rem = len - 1 - 5;
+    while rem >= 7 {
+        bs.put(7, 3);
+        rem -= 7;
+    }
+    bs.put(rem, 3);
+    pack(bs, [0; 4], len)
 }

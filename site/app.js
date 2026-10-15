@@ -16,19 +16,27 @@
 // on the canvas is the game's pointer (a press there also focuses it).
 //
 // Saves: a Save in the game (Ctrl-S, Y), like the character `u` creates, is stored after the
-// tick it committed in, as one operation on the same queue (one IndexedDB transaction); every
+// frame it committed in, as one operation on the same queue (one IndexedDB transaction); every
 // start lays the stored save over the game files, so a reload resumes it. Only the game that
 // owns the stored save (the one on screen, once it started) stores its Saves, and none is taken
 // while an import runs: a replaced game's Save never lands over the save its replacement
 // started from. An imported savegame folder becomes the stored save once the game started
 // from it. After the stored save is removed, the next Save of the game on screen is stored
 // whole (objlist and every block). Sound: the first click or key on the canvas (or the Mute
-// button) starts an AudioContext; after each tick the page renders the game's
+// button) starts an AudioContext; after each frame the page renders the game's
 // audio in wasm a little ahead and posts it to the AudioWorklet (site/audio-worklet.js).
 // A press on the canvas is first the game's pointer event, then the gesture that starts the
 // sound: the game queues it whatever the AudioContext does, and only once.
+//
+// Time (spec 06): the engine runs only in fixed steps of one PAL frame (`step_ms`, 20 ms).
+// Each display frame the page asks the game how many steps the wall time since the last one
+// is worth at the viewer's speed (`pace`), runs them while the frame's budget lasts, reports
+// them (`ran`) and shows the result once (`present`). The speed (1x .. 8x, Max) is the
+// viewer's, kept in localStorage; - and = / + on the canvas, the keypad - and +, and the Speed
+// buttons change it.
 import init, {
-  Game, input_too_large, max_input_bytes, max_save_bytes, max_save_file_bytes, zip_sliced,
+  Game, budget_ms, input_too_large, max_input_bytes, max_save_bytes, max_save_file_bytes, step_ms,
+  zip_sliced,
 } from './pkg/u6_web.js';
 import {
   collect, forgetFiles, forgetSaves, loadFiles, loadSaves, saveFiles, storeSaves,
@@ -42,8 +50,13 @@ const forgetSave = document.getElementById('forget-save');
 const mute = document.getElementById('mute');
 const restart = document.getElementById('restart');
 const statusLine = document.getElementById('status');
+const badge = document.getElementById('speed-badge');
+const slower = document.getElementById('slower');
+const faster = document.getElementById('faster');
+const speedLabel = document.getElementById('speed-label');
+const speedReached = document.getElementById('speed-reached');
+const behindMark = document.getElementById('behind');
 
-const MAX_STEP_MS = 100; // a backgrounded tab must not jump the game ahead
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
 const HOW_TO_PLAY = 'Click the game screen or Tab to it, then: Escape skips the opening; in ' +
   'the menu C creates a character, J journeys onward; in the game arrow keys walk, T talks, ' +
@@ -59,7 +72,9 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // AudioContext state and the chunks the worklet received; on the canvas data-files = game
 // files of the running game, data-saves = save files it booted with, data-leader = x,y,z,
 // data-prompt = 1 while the game waits for a command key, data-program = u / game / ended,
-// data-name = the party leader's name, data-keys = keys not yet taken by the game.
+// data-name = the party leader's name, data-keys = keys not yet taken by the game,
+// data-speed = the chosen speed (1, 1.5, .. 8, max), data-behind = 1 while steps are dropped;
+// on the body data-gain = the music's gain now (0 muted or above 4x, 1).
 function reflect(state) {
   if (state) document.body.dataset.state = state;
   const live = game && !crashed;
@@ -108,7 +123,9 @@ function enqueue(what, op) {
 // --- sound ---------------------------------------------------------------------------------
 
 const AHEAD_S = 0.15; // audio rendered ahead of the worklet
-const MAX_RENDER_S = 0.25; // at most per tick (a tab back from the background)
+const MAX_RENDER_S = 0.25; // at most per frame (a tab back from the background)
+const LOUD_UP_TO = 4; // above this speed (and at Max) the music fades out
+const FADE_S = 0.05 / 3; // the fade's time constant: ~95% of the way in 50 ms
 const audio = {
   ctx: null, node: null, gain: null, ready: false, muted: false,
   queued: 0, at: 0, posted: 0, received: 0, // the worklet's last report, frames posted since
@@ -140,7 +157,7 @@ async function startAudio() {
     numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
   });
   const gain = ctx.createGain();
-  gain.gain.value = audio.muted ? 0 : 1;
+  gain.gain.value = loudness();
   node.connect(gain).connect(ctx.destination);
   node.port.onmessage = (e) => {
     audio.queued = e.data.queued;
@@ -159,7 +176,7 @@ function gesture() {
   startAudio().catch((err) => console.warn(`sound is off: ${message(err)}`));
 }
 
-// After a tick: keep the worklet AHEAD_S ahead (its last report less what it played since,
+// Once per frame: keep the worklet AHEAD_S ahead (its last report less what it played since,
 // plus what was posted after the report).
 function feedAudio() {
   if (!audio.ready || audio.ctx.state !== 'running') return;
@@ -175,9 +192,27 @@ function feedAudio() {
   audio.posted += want;
 }
 
+// The music's gain: 0 muted (at any speed) or above LOUD_UP_TO, else 1. The music is rendered
+// in wall time whatever the speed.
+function loudness() {
+  const speed = SPEEDS[speedAt];
+  return audio.muted || speed === 0 || speed > LOUD_UP_TO ? 0 : 1;
+}
+
+// Sets the gain to `loudness()`: muting at once, any other change over ~50 ms. Only through
+// the automation timeline: a value written directly does not take while a fade is scheduled.
+function applyGain() {
+  if (!audio.gain) return;
+  const param = audio.gain.gain;
+  const now = audio.ctx.currentTime;
+  param.cancelScheduledValues(now);
+  if (audio.muted) param.setValueAtTime(0, now);
+  else param.setTargetAtTime(loudness(), now, FADE_S);
+}
+
 function setMuted(muted) {
   audio.muted = muted;
-  if (audio.gain) audio.gain.gain.value = muted ? 0 : 1;
+  applyGain();
   mute.textContent = muted ? 'Unmute' : 'Mute';
   mute.setAttribute('aria-pressed', String(muted));
 }
@@ -187,17 +222,18 @@ function setMuted(muted) {
 // The game whose Saves are stored: the one that started from the stored save (`boot`) or was
 // on screen when it was removed (`forgetSaved`), or null once the stored save is not its any
 // more. `pause` > 0 while an import runs, which may replace it; a Save made meanwhile is kept
-// only when the import left this game on screen: it is taken at the first tick after, as a list
+// only when the import left this game on screen: it is taken at the first frame after, as a list
 // covers every Save since the last one stored.
 let owner = null;
 let pause = 0;
 let saveSeen = 0; // the owner's highest save generation already queued (or, at a forget, made)
 let forgets = 0; // removals of the stored save so far: a save job taken before one writes nothing
 
-// After a tick: a Save that committed in it is stored as one operation; the game hears of the
-// commit (its next list starts after it) only once the transaction completed. The operation
-// writes nothing when its game no longer owns the stored save by then (it was replaced) or
-// the stored save was removed after it was taken (it lists only the blocks its Saves replaced).
+// After a frame's steps: a Save that committed in them is stored as one operation; the game
+// hears of the commit (its next list starts after it) only once the transaction completed. The
+// operation writes nothing when its game no longer owns the stored save by then (it was
+// replaced) or the stored save was removed after it was taken (it lists only the blocks its
+// Saves replaced).
 function checkSave() {
   if (pause > 0 || game !== owner) return;
   const gen = game.save_generation();
@@ -243,11 +279,148 @@ async function adoptSaves(imported) {
   }
 }
 
+// --- speed ---------------------------------------------------------------------------------
+
+// The speeds offered, slowest first: u6-core's pacer::PRESETS, then Max (0: as many steps as
+// the frame's budget holds). 1x, the original's pace, is the default.
+const SPEEDS = [1, 1.5, 2, 3, 4, 6, 8, 0];
+const SPEED_KEY = 'u6.speed'; // localStorage: the chosen speed's name
+const BADGE_MS = 1500; // the badge stays this long after a change (and always while not at 1x)
+const BEHIND_MS = 1000; // "behind" shows while steps were dropped this recently
+const REACH_MS = 500; // the speed Max reaches is measured over windows of this much wall time
+// The characters that change the speed: their Game.keys_owned bit (the game takes the key
+// itself while it is set) and the direction.
+const SPEED_CHARS = new Map([['-', [1, -1]], ['+', [2, 1]], ['=', [4, 1]]]);
+
+// The name of speed `i` as stored and reflected: 1, 1.5, .. 8, max.
+const speedName = (i) => (SPEEDS[i] === 0 ? 'max' : String(SPEEDS[i]));
+
+// The stored speed; an unreadable or unknown value is 1x.
+function storedSpeed() {
+  try {
+    const name = localStorage.getItem(SPEED_KEY);
+    return Math.max(0, SPEEDS.findIndex((_, i) => speedName(i) === name));
+  } catch {
+    return 0;
+  }
+}
+
+let speedAt = storedSpeed(); // the chosen speed, an index into SPEEDS
+let badgeRecent = false; // the speed changed less than BADGE_MS ago
+let badgeTimer = 0;
+// Engine ms per wall ms over the frames of the current window, and smoothed over the windows:
+// the speed reached (shown at Max).
+const reach = { steps: 0, wall: 0, rate: 0 };
+// The game's dropped_ms() at the last frame, and the time of the frame it last grew in.
+let dropped = 0;
+let droppedAt = -Infinity;
+
+function resetReach() {
+  Object.assign(reach, { steps: 0, wall: 0, rate: 0 });
+}
+
+// A game put on screen runs at the chosen speed, has dropped nothing yet, and its clock starts
+// now: the time its start took (the synchronous intake, with no frame) is not owed to it.
+function paceGame(g) {
+  g.set_speed(SPEEDS[speedAt]);
+  last = performance.now();
+  dropped = 0;
+  droppedAt = -Infinity;
+  resetReach();
+}
+
+// One preset faster (`by` 1) or slower (-1), within the list: the game takes it at once, the
+// badge shows it, the choice is kept for the next visit, the music fades above 4x.
+function changeSpeed(by) {
+  speedAt = Math.min(Math.max(speedAt + by, 0), SPEEDS.length - 1);
+  if (game && !crashed) game.set_speed(SPEEDS[speedAt]);
+  resetReach();
+  try {
+    localStorage.setItem(SPEED_KEY, speedName(speedAt));
+  } catch {
+    // No storage: the choice lasts until the page is left.
+  }
+  badgeRecent = true;
+  clearTimeout(badgeTimer);
+  badgeTimer = setTimeout(() => {
+    badgeRecent = false;
+    showSpeed();
+  }, BADGE_MS);
+  applyGain();
+  showSpeed();
+}
+
+// The chosen speed's name as shown (2×, Max) and at Max the speed reached once measured
+// (` 5.3×`, shown after the name: Max 5.3×).
+function speedText() {
+  const speed = SPEEDS[speedAt];
+  if (speed !== 0) return [`${speed}×`, ''];
+  return ['Max', reach.rate > 0 ? ` ${reach.rate.toFixed(1)}×` : ''];
+}
+
+// Sets `el`'s `key` (a property such as hidden or textContent) only when it changes: the page
+// writes these every frame.
+function put(el, key, value) {
+  if (el[key] !== value) el[key] = value;
+}
+
+// The label announces a change of the chosen speed (a live region); the speed Max reaches,
+// which moves every REACH_MS, is beside it and not announced.
+function showSpeed() {
+  const [name, reached] = speedText();
+  put(speedLabel, 'textContent', name);
+  put(speedReached, 'textContent', reached);
+  put(badge, 'textContent', name + reached);
+  put(canvas.dataset, 'speed', speedName(speedAt));
+  put(badge, 'hidden', SPEEDS[speedAt] === 1 && !badgeRecent);
+}
+
+// A speed key (spec 06 §Design 6): 1 faster, -1 slower, 0 none. The keypad's + and - by `code`,
+// always; otherwise the character (`key`, so every layout works): = and + faster, - slower,
+// each unless the game takes that key now (a panel cycling members, a line being typed, u's
+// menu), when it is the game's. With Ctrl no key is a speed key.
+function speedKey(e) {
+  if (e.ctrlKey) return 0;
+  if (e.code === 'NumpadAdd') return 1;
+  if (e.code === 'NumpadSubtract') return -1;
+  const char = SPEED_CHARS.get(e.key);
+  if (!char || (game.keys_owned() & char[0]) !== 0) return 0;
+  return char[1];
+}
+
+// After a frame's `k` steps over `dt` wall ms, at frame time `now`: the speed reached, the
+// "behind" marker (the game's dropped_ms grew in the last BEHIND_MS; time cut from a stall,
+// clamped_ms, is not behind), the gain the music has now.
+function paced(now, dt, k) {
+  if (dt > 0 && dt <= LONG_FRAME_MS) {
+    reach.steps += k;
+    reach.wall += dt;
+  }
+  if (reach.wall >= REACH_MS) {
+    const rate = (reach.steps * stepMs) / reach.wall;
+    reach.rate = reach.rate > 0 ? (reach.rate + rate) / 2 : rate;
+    reach.steps = 0;
+    reach.wall = 0;
+  }
+  const d = game.dropped_ms();
+  if (d > dropped) droppedAt = now;
+  dropped = d;
+  const behind = now - droppedAt < BEHIND_MS;
+  put(canvas.dataset, 'behind', behind ? '1' : '0');
+  put(behindMark, 'hidden', !behind);
+  showSpeed();
+  if (audio.gain) put(document.body.dataset, 'gain', audio.gain.gain.value.toFixed(2));
+}
+
 // --- engine and frames ---------------------------------------------------------------------
 
+// The Pacer's CAP_MS: a longer gap between frames is a stall (a hidden tab), not the display's
+// interval.
+const LONG_FRAME_MS = 250;
 let looping = false;
-let last = 0;
-let carry = 0;
+let last = 0; // the time of the previous frame
+let interval = 1000 / 60; // the display's frame interval, smoothed over the frames
+let stepMs = 20; // step_ms(), once the engine loaded
 
 function draw() {
   // Re-create the view every frame: wasm memory growth detaches old buffers.
@@ -255,21 +428,37 @@ function draw() {
   canvas.getContext('2d').putImageData(new ImageData(pixels, canvas.width, canvas.height), 0, 0);
 }
 
+// One display frame: the steps its wall time is worth at the chosen speed (`pace`; the first
+// frame's time can precede `last`, which counts 0), run while the frame's budget lasts (half the
+// display's interval, at least 3 ms; the first always) and until the sequence ends, then
+// reported (`ran`). The frame is converted and drawn once if any ran; the sound, a Save to
+// store and the reflected state once per frame.
 function frame(now) {
   if (!game || crashed) {
     looping = false;
     return;
   }
-  // The first rAF timestamp can precede `last`; a negative step would wrap as u32.
-  carry = Math.min(Math.max(0, carry + (now - last)), MAX_STEP_MS);
+  const dt = now - last;
   last = now;
-  const ms = Math.floor(carry);
-  carry -= ms;
+  if (dt > 0 && dt <= LONG_FRAME_MS) interval += (dt - interval) / 8;
   try {
-    game.tick(ms);
+    const due = game.pace(dt);
+    const budget = budget_ms(interval);
+    const start = performance.now();
+    let k = 0;
+    let done = false;
+    while (k < due && !done && (k === 0 || performance.now() - start < budget)) {
+      game.step(stepMs);
+      k += 1;
+      done = game.finished();
+    }
+    game.ran(k);
     const log = game.take_log();
     if (log) console.info(log);
-    draw();
+    if (k > 0) {
+      game.present();
+      draw();
+    }
     feedAudio();
     checkSave();
     canvas.dataset.leader = game.leader_position().join(',');
@@ -277,7 +466,8 @@ function frame(now) {
     canvas.dataset.program = game.program();
     canvas.dataset.name = game.leader_name();
     canvas.dataset.keys = String(game.keys_pending());
-    if (game.finished()) {
+    paced(now, dt, k);
+    if (done || game.finished()) {
       ended();
       return;
     }
@@ -301,11 +491,10 @@ function startLoop() {
   if (looping) return;
   looping = true;
   last = performance.now();
-  carry = 0;
   requestAnimationFrame(frame);
 }
 
-// A trap or exception inside the engine: its state is unknown, so it is never ticked again.
+// A trap or exception inside the engine: its state is unknown, so it is never stepped again.
 function stopOnTrap(err) {
   console.error(err);
   setStatus(`The game stopped on an internal error (${message(err)}). Restart loads the ` +
@@ -335,6 +524,7 @@ async function boot(next, origin) {
   owner = next;
   old?.free();
   saveSeen = 0;
+  paceGame(next);
   try {
     attachAudio(next);
   } catch (err) {
@@ -581,20 +771,29 @@ function queueImport(gather) {
 // Keys go to the engine only from the focused canvas with a game running; everything else
 // (Tab, keys of other elements, modifier shortcuts) keeps its browser meaning. Ctrl + the
 // letters of the game's control commands (Ctrl-S save, Ctrl-R restore, ...) are game keys
-// there, so the browser's own Save page / Reload do not fire.
+// there, so the browser's own Save page / Reload do not fire. The speed keys (`speedKey`) are
+// the page's and never reach the game.
 canvas.addEventListener('keydown', (e) => {
   gesture();
   if (!game || crashed || e.metaKey || e.altKey) return;
-  if (game.key_down(e.code, e.key, e.ctrlKey)) e.preventDefault();
+  const by = speedKey(e);
+  if (by !== 0) {
+    e.preventDefault();
+    changeSpeed(by);
+  } else if (game.key_down(e.code, e.key, e.ctrlKey)) {
+    e.preventDefault();
+  }
 });
 mute.addEventListener('click', () => {
   setMuted(!audio.muted);
   gesture();
 });
+slower.addEventListener('click', () => changeSpeed(-1));
+faster.addEventListener('click', () => changeSpeed(1));
 // The pointer: the position through the canvas's CSS box onto its 320 x 200 pixels, the buttons
 // as DOM `buttons` (bit 0 left, bit 1 right). The canvas captures a press so the release reaches
 // the game even off the canvas; the context menu stays off it while a game runs. A press is, in
-// this order, the focus, the game's pointer event (queued for the next tick, exactly once) and
+// this order, the focus, the game's pointer event (queued for the next step, exactly once) and
 // the gesture that starts the sound (the AudioContext is created before its first await, inside
 // the press's user activation); the sound starting never delays or drops the event.
 function sendPointer(e) {
@@ -680,6 +879,8 @@ function takeFocusFlag() {
 
 reflect('loading');
 reflectAudio();
+showSpeed();
+canvas.dataset.behind = '0';
 enqueue('Loading the engine', async () => {
   try {
     wasm = await init();
@@ -687,6 +888,7 @@ enqueue('Loading the engine', async () => {
     reflect('failed');
     throw new Error(`the engine could not load (${message(err)})`);
   }
+  stepMs = step_ms();
   forget.disabled = false;
   forgetSave.disabled = false;
   reflect('idle');

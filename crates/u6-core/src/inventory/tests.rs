@@ -15,6 +15,8 @@ use crate::objects::{
 };
 use crate::state::State;
 
+mod nested;
+
 /// Object types of the synthetic world (tile = 4 × type).
 const SWORD: u16 = 0x90; // tile 0x240: in the weapon-tile list
 const SHIELD: u16 = 0x82; // tile 0x208

@@ -2,9 +2,11 @@
 
 mod common;
 
-use common::ofs_builder::{ImageBuilder, Node, amiga_hash};
+use common::ofs_builder::{
+    ImageBuilder, Node, amiga_hash, deep_latin1_files, nested_dirs, shared_block_volume,
+};
 use common::text;
-use u6_intake::{ADF_SIZE, read_ofs};
+use u6_intake::{ADF_SIZE, read_ofs, read_ofs_within};
 
 const BS: usize = 512;
 
@@ -103,4 +105,85 @@ fn reports_hash_loops_instead_of_recursing_forever() {
         vol.warnings
     );
     assert_eq!(vol.file("an"), Some(&b"first"[..]));
+}
+
+#[test]
+fn a_limit_stops_the_walk_before_the_file_that_would_pass_it() {
+    // "a", "b", "c" hash to consecutive slots, so the walk reads them in that order.
+    let img = ImageBuilder::new(false).build(
+        "LIMIT",
+        &[
+            Node::File("a", bytes(1000, 1)),
+            Node::File("b", bytes(2000, 2)),
+            Node::File("c", bytes(10, 3)),
+        ],
+    );
+    // Each file is charged its bytes, its path twice with 61 bytes of room (a volume name of
+    // 30 two-byte characters and a slash), and 384 bytes; the volume its name.
+    let charge = |n: usize| n + 2 * (61 + 1) + 384;
+    let name = "LIMIT".len();
+    let whole = read_ofs(&img).unwrap();
+    assert_eq!(whole.held, name + charge(1000) + charge(2000) + charge(10));
+    let all = read_ofs_within(&img, whole.held).unwrap();
+    assert!(!all.limit_reached);
+    assert_eq!(all.files.len(), 3);
+    let vol = read_ofs_within(&img, name + charge(1000) + charge(2000) - 1).unwrap();
+    assert!(vol.limit_reached);
+    assert_eq!(vol.held, name + charge(1000));
+    let paths: Vec<&str> = vol.files.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(paths, ["a"]);
+    assert_eq!(vol.file("a"), Some(bytes(1000, 1).as_slice()));
+    assert!(vol.warnings.is_empty(), "{:?}", vol.warnings);
+    assert!(!read_ofs(&img).unwrap().limit_reached);
+}
+
+#[test]
+fn a_directory_chain_as_deep_as_the_disk_reads_on_a_small_stack() {
+    // 1,757 levels, every block of the disk; 512 KiB is half the stack a wasm build runs on.
+    let img = nested_dirs("DEEP", 1757, false);
+    let vol = std::thread::Builder::new()
+        .stack_size(512 << 10)
+        .spawn(move || read_ofs(&img).unwrap())
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(vol.dirs.len(), 64);
+    assert_eq!(
+        vol.warnings,
+        ["directories nested more than 64 levels deep are not read"]
+    );
+}
+
+#[test]
+fn a_file_keeps_no_more_capacity_than_its_bytes() {
+    // An image 300 bytes longer than its 1,760 blocks, holding an FFS file of 901,400 bytes
+    // read out of one data block (its header is its own extension block): longer than the
+    // blocks, within the image.
+    let mut img = shared_block_volume(1, 901_400);
+    img.extend_from_slice(&[0; 300]);
+    let vol = read_ofs(&img).unwrap();
+    let kept = &vol.files.iter().find(|(p, _)| p == "s000").expect("read").1;
+    assert_eq!(kept.len(), 901_400);
+    assert_eq!(kept.capacity(), kept.len());
+}
+
+#[test]
+fn a_path_is_at_most_3964_bytes_and_held_at_its_length() {
+    // 64 directories (the most the walk enters) and a file in the last, every name 30
+    // characters of two bytes: 65 names of 60 bytes and 64 slashes.
+    let img = deep_latin1_files(ADF_SIZE / BS, 64, 1);
+    let vol = read_ofs(&img).unwrap();
+    assert_eq!(vol.dirs.len(), 64);
+    let (path, _) = &vol.files[0];
+    assert_eq!(path.len(), 65 * 60 + 64);
+    assert_eq!(path.capacity(), path.len());
+    assert!(vol.dirs.iter().all(|d| d.capacity() == d.len()));
+    // One level more and the file is not read.
+    let img = deep_latin1_files(ADF_SIZE / BS, 65, 1);
+    let vol = read_ofs(&img).unwrap();
+    assert!(vol.files.is_empty());
+    assert_eq!(
+        vol.warnings,
+        ["directories nested more than 64 levels deep are not read"]
+    );
 }

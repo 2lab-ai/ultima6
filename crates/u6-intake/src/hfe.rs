@@ -43,7 +43,14 @@ fn u16le(data: &[u8], at: usize) -> u16 {
     u16::from(byte(data, at)) | (u16::from(byte(data, at + 1)) << 8)
 }
 
-pub fn parse_hfe(data: &[u8]) -> Result<HfeImage, Error> {
+/// Where each cylinder's track data starts in the image and how many bytes each of its sides
+/// copies out, after the checks [`parse_hfe`] makes. Allocates nothing per track.
+struct Layout {
+    header: HfeHeader,
+    cylinders: Vec<(usize, usize)>,
+}
+
+fn layout(data: &[u8]) -> Result<Layout, Error> {
     if !is_hfe(data) {
         return Err(Error::new("not an HFE v1 image (missing HXCPICFE magic)"));
     }
@@ -70,14 +77,19 @@ pub fn parse_hfe(data: &[u8]) -> Result<HfeImage, Error> {
         return Err(Error::new(format!("bad HFE side count {}", header.sides)));
     }
 
-    let cylinders = usize::from(header.cylinders);
+    let count = usize::from(header.cylinders);
     let lut = usize::from(header.track_list_offset) * BLOCK;
-    if lut + cylinders * 4 > data.len() {
+    if lut + count * 4 > data.len() {
         return Err(Error::new("HFE image truncated (track table)"));
     }
 
-    let mut tracks = Vec::with_capacity(cylinders);
-    for cyl in 0..cylinders {
+    let mut cylinders = Vec::with_capacity(count);
+    // The tracks copied out so far. A writer lays the cylinders out in disjoint runs of blocks,
+    // and a cylinder's copy (`length` bytes for two sides, half for one) fits in its run, so on
+    // any such image the copies come to less than the image. More means cylinders share data:
+    // a few KiB could otherwise expand to 255 x 64 KiB.
+    let mut copied = 0usize;
+    for cyl in 0..count {
         let offset = usize::from(u16le(data, lut + cyl * 4)) * BLOCK;
         let length = usize::from(u16le(data, lut + cyl * 4 + 2));
         let blocks = length.div_ceil(BLOCK);
@@ -87,12 +99,38 @@ pub fn parse_hfe(data: &[u8]) -> Result<HfeImage, Error> {
             )));
         }
         let per_side = length >> 1;
+        copied += per_side * usize::from(header.sides);
+        if copied > data.len() {
+            return Err(Error::new(
+                "HFE track table overlaps: its cylinders share track data",
+            ));
+        }
+        cylinders.push((offset, per_side));
+    }
+    Ok(Layout { header, cylinders })
+}
+
+/// The bytes [`parse_hfe`] copies out of `data` for its tracks (at most `data.len()`), or the
+/// error it returns; copies nothing. The intake charges them before it parses.
+pub fn hfe_track_bytes(data: &[u8]) -> Result<usize, Error> {
+    let l = layout(data)?;
+    let sides = usize::from(l.header.sides);
+    Ok(l.cylinders
+        .iter()
+        .map(|&(_, per_side)| per_side * sides)
+        .sum())
+}
+
+pub fn parse_hfe(data: &[u8]) -> Result<HfeImage, Error> {
+    let Layout { header, cylinders } = layout(data)?;
+    let mut tracks = Vec::with_capacity(cylinders.len());
+    for (offset, per_side) in cylinders {
         let mut sides = Vec::with_capacity(usize::from(header.sides));
         for side in 0..usize::from(header.sides) {
             let mut out = vec![0u8; per_side];
             for (blk, chunk) in out.chunks_mut(HALF).enumerate() {
                 let from = offset + blk * BLOCK + side * HALF;
-                // In range by the truncation check above; clamp anyway (untrusted input).
+                // In range by the truncation check in `layout`; clamp anyway (untrusted input).
                 let src = data.get(from..).unwrap_or(&[]);
                 let n = chunk.len().min(src.len());
                 chunk[..n].copy_from_slice(&src[..n]);

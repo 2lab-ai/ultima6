@@ -681,6 +681,56 @@ fn the_menu_takes_letters_and_return() {
     assert_eq!(got, Some(0), "Return takes the first entry");
 }
 
+/// While `u`'s line reader and its menu wait for keys, they claim theirs on the `Io` (all three
+/// of `-`, `+`, `=` for a line, the menu's song keys `-` and `=`), and give them back when they
+/// return (Return, a menu letter).
+#[test]
+fn the_line_and_the_menu_claim_their_keys_while_they_read() {
+    use crate::engine::{OWN_ALL, OWN_EQUALS, OWN_MINUS};
+    for (menu, keys, claim) in [
+        (false, [Key::Char('-'), Key::Enter], OWN_ALL),
+        (
+            true,
+            [Key::Char('-'), Key::Char('j')],
+            OWN_MINUS | OWN_EQUALS,
+        ),
+    ] {
+        let mut st = state();
+        st.text = ctx(View::screen(Ptr::at(Region::Screen0)));
+        st.menu_drawn = 1;
+        let done = Rc::new(RefCell::new(false));
+        let d2 = Rc::clone(&done);
+        let mut e = Engine::with_game(State::empty(), Files::default(), move |_s, io| async move {
+            if menu {
+                crate::intro::menu(&mut st, &io).await;
+            } else {
+                create::read_line(&mut st, &io, 13).await;
+            }
+            *d2.borrow_mut() = true;
+            io.sleep(u32::MAX).await;
+        });
+        for _ in 0..3 {
+            e.tick(&[], 20);
+        }
+        assert_eq!(e.keys_owned(), claim, "menu {menu}: waiting");
+        e.tick(&[InputEvent::Key(keys[0])], 20);
+        for _ in 0..3 {
+            e.tick(&[], 20);
+        }
+        assert!(!*done.borrow(), "menu {menu}: `-` taken, still reading");
+        assert_eq!(e.keys_owned(), claim, "menu {menu}: still waiting");
+        e.tick(&[InputEvent::Key(keys[1])], 20);
+        for _ in 0..50 {
+            if *done.borrow() {
+                break;
+            }
+            e.tick(&[], 20);
+        }
+        assert!(*done.borrow(), "menu {menu}: returned");
+        assert_eq!(e.keys_owned(), 0, "menu {menu}: given back");
+    }
+}
+
 #[test]
 fn input_upper_cases_like_the_c_runtime() {
     assert_eq!(input::to_upper(u16::from(b'a')), u16::from(b'A'));

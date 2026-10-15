@@ -1,14 +1,20 @@
 //! Browser entry point: collects the dropped files, runs u6-intake, boots `u6_core::Engine`
 //! and hands frames back as RGBA8 (see `site/app.js`).
 //!
-//! JS owns the clock and the DOM. Key callbacks only queue events; [`Game::tick`] delivers them
-//! to the engine with the elapsed time, so game code never runs inside an input handler.
+//! JS owns the clock and the DOM. Key callbacks only queue events; [`Game::step`] delivers them
+//! to the engine with the step's time, so game code never runs inside an input handler.
+//!
+//! The fixed step (spec 06): each display frame the page asks [`Game::pace`] how many steps of
+//! [`step_ms`] its wall time is worth, runs them with [`Game::step`] while its budget
+//! ([`budget_ms`]) lasts, reports them ([`Game::ran`]) and converts the frame once
+//! ([`Game::present`]). [`Game::set_speed`] picks the speed; [`Game::keys_owned`] says which of
+//! `-`, `+` and `=` the game takes itself.
 //!
 //! Sound: once the page has an AudioContext it calls [`Game::audio_start`] with its sample
-//! rate; every tick then replays the game's MED calls on the emulated A500 audio machine
+//! rate; every step then replays the game's MED calls on the emulated A500 audio machine
 //! (`u6_core::sound::AudioDriver`) and [`Game::audio_render`] renders the samples the page
 //! posts to its AudioWorklet. Saves: the page lays the stored `savegame/*` files over the
-//! new-game files before the boot ([`Game::load_save`], `saveload::attach`), and after a tick
+//! new-game files before the boot ([`Game::load_save`], `saveload::attach`), and after a frame
 //! whose Save committed ([`Game::save_generation`] moved) it stores what [`Game::save_collect`]
 //! lists, then reports the generation committed ([`Game::save_committed`]). The character `u`
 //! makes is such a write too (its `savegame/objlist`). A list holds what the Saves since the
@@ -33,6 +39,7 @@ mod zipscan;
 use std::collections::BTreeMap;
 
 use u6_core::objects::{BLOCK_COUNT, MAX_RECORDS};
+use u6_core::pacer::{self, Pacer, Speed};
 use u6_core::saveload::{MemStore, OBJLIST_FILE, attach, block_file, changed_since};
 use u6_core::sound::AudioDriver;
 use u6_core::{Engine, Files, Framebuffer, InputEvent, Key};
@@ -84,6 +91,19 @@ pub fn max_save_file_bytes() -> f64 {
 #[wasm_bindgen]
 pub fn max_save_bytes() -> f64 {
     MAX_SAVE_BYTES as f64
+}
+
+/// [`u6_core::pacer::STEP_MS`] for the page: the `ms` of every [`Game::step`].
+#[wasm_bindgen]
+pub fn step_ms() -> u32 {
+    pacer::STEP_MS
+}
+
+/// [`u6_core::pacer::budget_ms`] for the page: the wall milliseconds its steps may take in one
+/// display frame, from the measured interval between frames.
+#[wasm_bindgen]
+pub fn budget_ms(raf_interval_ms: f64) -> f64 {
+    pacer::budget_ms(raf_interval_ms)
 }
 
 /// Whether the page reads the dropped file `name` of `size` bytes through [`Game::zip_open`]
@@ -193,6 +213,8 @@ pub struct Game {
     audio: Option<AudioDriver>,
     audio_rate: u32,
     audio_buf: Vec<f32>,
+    /// The steps the page's wall time is worth, at the viewer's speed.
+    pacer: Pacer,
 }
 
 impl Default for Game {
@@ -225,6 +247,7 @@ impl Game {
             audio: None,
             audio_rate: 0,
             audio_buf: Vec::new(),
+            pacer: Pacer::new(),
         };
         game.redraw();
         game
@@ -530,8 +553,10 @@ impl Game {
         self.engine.is_some()
     }
 
-    /// Advances the engine by `ms` with the keys queued since the previous tick.
-    pub fn tick(&mut self, ms: u32) {
+    /// One engine tick of `ms` (the page's fixed step: [`step_ms`]) with the keys queued since
+    /// the previous one: the engine's log taken, the sound machine given the game's calls, the
+    /// queue emptied. The RGBA frame is left as it was ([`Game::present`]).
+    pub fn step(&mut self, ms: u32) {
         if let Some(engine) = &mut self.engine {
             engine.tick(&self.pending, ms);
             self.log.extend(engine.take_log());
@@ -540,7 +565,65 @@ impl Game {
             }
         }
         self.pending.clear();
+    }
+
+    /// Converts the engine's frame (black before a start) into the RGBA frame
+    /// ([`Game::frame_ptr`]): once per display frame, after its steps.
+    pub fn present(&mut self) {
         self.redraw();
+    }
+
+    /// Adds `dt` wall milliseconds since the previous display frame and returns the steps they
+    /// are worth at the speed, or at 1× while a pointer button is held
+    /// ([`u6_core::pacer::Pacer::due`]); nothing is taken off until [`Game::ran`].
+    pub fn pace(&mut self, dt: f64) -> u32 {
+        let held = self.pointer_held();
+        self.pacer.due(dt, held)
+    }
+
+    /// The page ran `k` of the steps [`Game::pace`] gave (0 when its budget allowed none).
+    pub fn ran(&mut self, k: u32) {
+        self.pacer.ran(k);
+    }
+
+    /// Sets the speed: `x` engine milliseconds per wall millisecond, 0 for Max (as many steps
+    /// as the frame budget holds). A negative, infinite or NaN `x` is ignored.
+    pub fn set_speed(&mut self, x: f64) {
+        self.pacer.set_speed(if x == 0.0 {
+            Speed::Max
+        } else {
+            Speed::Finite(x)
+        });
+    }
+
+    /// The speed [`Game::set_speed`] set, 0 for Max (1 until then).
+    pub fn speed(&self) -> f64 {
+        match self.pacer.speed() {
+            Speed::Finite(x) => x,
+            Speed::Max => 0.0,
+        }
+    }
+
+    /// Wall milliseconds the pace cut so far from frames longer than its cap (a hidden tab, a
+    /// debugger pause): lost time, but not the game falling behind.
+    pub fn clamped_ms(&self) -> f64 {
+        self.pacer.clamped_ms()
+    }
+
+    /// Wall milliseconds of steps owed and not run so far (the budget did not hold them): the
+    /// page shows "behind" while it grows.
+    pub fn dropped_ms(&self) -> f64 {
+        self.pacer.dropped_ms()
+    }
+
+    /// Which of `-`, `+` and `=` the game takes itself now (as of the last step), as bits: 1 `-`,
+    /// 2 `+`, 4 `=`. The page leaves a key whose bit is set to the game instead of changing the
+    /// speed: all three while a line is typed (`game`'s line editor, `u`'s name), `-` and `+` in
+    /// the stats or inventory panel, `+` / `-` in the roster while it scrolls down / up, `-` and
+    /// `=` in `u`'s menu (its songs). 0 before a start and after the end
+    /// ([`u6_core::Engine::keys_owned`]).
+    pub fn keys_owned(&self) -> u8 {
+        self.engine.as_ref().map_or(0, Engine::keys_owned)
     }
 
     /// Queues a key press. Returns true when it is a game key (the caller should then
@@ -748,6 +831,22 @@ impl Game {
         }
     }
 
+    /// A pointer button is down as the input handler has it: the last pointer event queued
+    /// since the previous step (newer than the engine's), else the engine's handler pointer
+    /// ([`u6_core::Io::handler_pointer`]). False before a start.
+    fn pointer_held(&self) -> bool {
+        let queued = self.pending.iter().rev().find_map(|e| match *e {
+            InputEvent::Pointer { buttons, .. } => Some(buttons),
+            InputEvent::Key(_) => None,
+        });
+        let buttons = queued.or_else(|| {
+            self.engine
+                .as_ref()
+                .map(|e| e.io().handler_pointer().buttons)
+        });
+        buttons.is_some_and(|b| b & 3 != 0)
+    }
+
     fn redraw(&mut self) {
         let fb = self.engine.as_ref().map_or(&self.blank, |e| e.frame());
         fb.write_rgba(&mut self.rgba);
@@ -845,7 +944,8 @@ mod tests {
         assert!(game.key_down("ArrowUp", "ArrowUp", false));
         assert!(!game.key_down("ShiftLeft", "Shift", false));
         assert!(game.pending.is_empty());
-        game.tick(16);
+        game.step(16);
+        game.present();
         assert!(!game.started());
     }
 
@@ -907,6 +1007,244 @@ mod tests {
         assert!(report.contains("savegame/objblkAA"), "{report}");
     }
 
+    /// A game on synthetic state and no files: palette entry v = (v, 3v, 255 - v), then each step
+    /// a pixel per generation on row 0, each key taken drawn on row 1 (its character as the
+    /// index) and logged as a stub hit, the pointer's cell lit, presented before the frame's
+    /// wait.
+    fn synthetic_engine() -> Engine {
+        Engine::with_game(
+            u6_core::State::empty(),
+            Files::default(),
+            |_state, io| async move {
+                io.draw(|fb| {
+                    for (i, c) in fb.palette.iter_mut().enumerate() {
+                        let v = i as u8;
+                        *c = u6_core::Rgb::new(v, v.wrapping_mul(3), 255 - v);
+                    }
+                });
+                let mut typed = 0;
+                loop {
+                    let p = io.take_pointer();
+                    while io.key_ready() {
+                        let key = io.next_key().await;
+                        let code = match key {
+                            Key::Char(c) => c as u8,
+                            _ => 0xff,
+                        };
+                        io.draw(|fb| fb.set(typed % 320, 1, code));
+                        u6_core::stub::hit("synthetic.key");
+                        typed += 1;
+                    }
+                    let g = io.generation();
+                    io.draw(|fb| {
+                        fb.set(g as usize % 320, 0, (g % 251) as u8 + 1);
+                        fb.set(p.x as usize, p.y as usize, 0x80 | p.buttons);
+                    });
+                    io.present();
+                    io.vblank().await;
+                }
+            },
+        )
+    }
+
+    /// The keys queued reach the game in the step after them (the queues empty, their characters
+    /// drawn in the synthetic palette's colours) and its log line comes through; a step alone
+    /// leaves the RGBA frame as it was, the present shows it. Before a start the frame stays
+    /// black.
+    #[test]
+    fn a_step_takes_the_keys_and_a_present_shows_it() {
+        let mut game = Game::new();
+        game.engine = Some(synthetic_engine());
+        let first = game.frame_rgba();
+        let rgba = |v: u8| [v, v.wrapping_mul(3), 255 - v, 255];
+        let pixel = |g: &Game, x: usize, y: usize| {
+            let at = (y * 320 + x) * 4;
+            g.frame_rgba()[at..at + 4].to_vec()
+        };
+        for i in 0..60u32 {
+            if i % 7 == 3 {
+                game.key_down("KeyT", "t", false);
+                game.key_down("Minus", "-", false);
+            }
+            if i % 5 == 1 {
+                game.pointer(i as i32 * 3, 50 + i as i32, (i % 3) as u8);
+            }
+            game.step([20, 16, 7, 33][i as usize % 4]);
+            game.present();
+            let log = game.take_log();
+            if i == 3 {
+                assert_eq!(log, "stub: synthetic.key", "the first key's line");
+                assert!(
+                    game.pending.is_empty() && game.keys_pending() == 0,
+                    "both keys taken"
+                );
+                assert_eq!(pixel(&game, 0, 1), rgba(b't'), "t drawn");
+                assert_eq!(pixel(&game, 1, 1), rgba(b'-'), "- drawn after it");
+            } else {
+                assert_eq!(log, "", "step {i}: one line per stub id");
+            }
+        }
+        assert_eq!(pixel(&game, 17, 1), rgba(b'-'), "the ninth pair's -");
+        assert!(game.frame_rgba() != first, "the frames changed");
+        let shown = game.frame_rgba();
+        game.step(20);
+        assert!(game.frame_rgba() == shown, "a step alone converts nothing");
+        game.present();
+        assert!(game.frame_rgba() != shown, "the present shows the step");
+        let mut idle = Game::new();
+        idle.step(20);
+        idle.present();
+        assert!(idle.frame_rgba() == first, "before a start: black");
+    }
+
+    /// The speed: 1 at first; a preset, 0 for Max (the step cap per frame) and back; a negative,
+    /// infinite or NaN speed ignored. A frame past the cap is clamped, steps not run are
+    /// dropped: two counts.
+    #[test]
+    fn set_speed_round_trips_and_refuses_what_is_not_a_speed() {
+        let mut game = Game::new();
+        assert_eq!(game.speed(), 1.0);
+        game.set_speed(2.0);
+        assert_eq!((game.speed(), game.pace(100.0)), (2.0, 10));
+        game.ran(10);
+        game.set_speed(0.0);
+        assert_eq!(game.speed(), 0.0, "Max");
+        assert_eq!(game.pace(16.0), pacer::MAX_STEPS);
+        game.ran(5);
+        for bad in [-1.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            game.set_speed(bad);
+            assert_eq!(game.speed(), 0.0, "{bad} ignored");
+        }
+        game.set_speed(1.5);
+        assert_eq!((game.speed(), game.pace(40.0)), (1.5, 3));
+        game.ran(3);
+        assert_eq!((game.clamped_ms(), game.dropped_ms()), (0.0, 0.0));
+        assert_eq!(game.pace(1_000.0), 18, "250 ms of wall time at 1.5×");
+        assert_eq!(
+            (game.clamped_ms(), game.dropped_ms()),
+            (750.0, 0.0),
+            "the stall"
+        );
+        game.ran(18);
+        for _ in 0..30 {
+            let n = game.pace(100.0);
+            game.ran(n.min(1));
+        }
+        assert!(game.clamped_ms() == 750.0, "no frame past the cap");
+        assert!(
+            game.dropped_ms() > 0.0,
+            "a budget of one step a frame falls behind"
+        );
+        assert_eq!((step_ms(), budget_ms(1000.0 / 60.0)), (20, 1000.0 / 120.0));
+    }
+
+    /// The pace runs at 1× while a pointer button is down, as the page's queued pointer events
+    /// and then the engine's handler have it, at 8× and at Max; released, the speed again.
+    #[test]
+    fn a_held_button_paces_at_1x() {
+        for speed in [8.0, 0.0] {
+            let mut game = Game::new();
+            game.engine = Some(synthetic_engine());
+            game.set_speed(speed);
+            let fast = game.pace(100.0);
+            game.ran(fast);
+            assert!(fast >= 40, "{speed}: {fast} steps free");
+            game.pointer(10, 10, 1);
+            assert_eq!(game.pace(100.0), 5, "{speed}: the press queued");
+            game.ran(5);
+            for _ in 0..5 {
+                game.step(20);
+            }
+            assert_eq!(game.pace(100.0), 5, "{speed}: held in the engine");
+            game.ran(5);
+            game.pointer(12, 10, 1);
+            game.pointer(12, 10, 0);
+            assert_eq!(game.pace(100.0), fast, "{speed}: the release queued");
+            game.ran(fast);
+            game.step(20);
+            assert_eq!(game.pace(100.0), fast, "{speed}: released");
+        }
+    }
+
+    /// The keys the game takes: none before a start, at a `game` prompt and after the end;
+    /// `game`'s state (a line typed, the panels, the roster per direction) and what `u` claims on
+    /// the `Io`, together (synthetic state).
+    #[test]
+    fn keys_owned_follows_the_running_state() {
+        use u6_core::engine::{OWN_ALL, OWN_EQUALS, OWN_MINUS, OWN_PLUS};
+        use u6_core::main_loop::Program;
+        let owned = |edit: &dyn Fn(&mut u6_core::State), claim: u8| {
+            let mut s = u6_core::State::empty();
+            s.main.program = Program::Game;
+            s.ui.panel.mode = 0x9e;
+            edit(&mut s);
+            let mut game = Game::new();
+            game.engine = Some(Engine::with_game(
+                s,
+                Files::default(),
+                move |_s, io| async move {
+                    let _keys = io.own_keys(claim);
+                    io.sleep(u32::MAX).await;
+                },
+            ));
+            game.step(20);
+            game.keys_owned()
+        };
+        let roster = |size: u8, first: u8| {
+            move |s: &mut u6_core::State| {
+                s.ui.panel.mode = 0x91;
+                s.actors.party.size = size;
+                s.ui.panel.roster_first = first;
+            }
+        };
+        assert_eq!(Game::new().keys_owned(), 0, "before a start");
+        assert_eq!(owned(&|_| {}, 0), 0, "at the prompt");
+        assert_eq!(owned(&|s| s.ui.input.line_input = true, 0), OWN_ALL);
+        assert_eq!(owned(&|s| s.ui.panel.mode = 0x90, 0), OWN_MINUS | OWN_PLUS);
+        assert_eq!(owned(&|s| s.ui.panel.mode = 0x92, 0), OWN_MINUS | OWN_PLUS);
+        assert_eq!(
+            owned(&roster(6, 0), 0),
+            OWN_PLUS,
+            "six from the first: down only"
+        );
+        assert_eq!(
+            owned(&roster(6, 1), 0),
+            OWN_MINUS,
+            "six from the second: up only"
+        );
+        assert_eq!(
+            owned(&roster(7, 1), 0),
+            OWN_MINUS | OWN_PLUS,
+            "seven from the second"
+        );
+        assert_eq!(owned(&roster(5, 0), 0), 0, "five fit");
+        let menu = OWN_MINUS | OWN_EQUALS;
+        assert_eq!(
+            owned(&|s| s.main.program = Program::U, menu),
+            menu,
+            "u's menu"
+        );
+        assert_eq!(
+            owned(&|s| s.ui.panel.mode = 0x90, OWN_EQUALS),
+            OWN_ALL,
+            "the Io's claim and the state together"
+        );
+        assert_eq!(
+            owned(&|s| s.main.program = Program::U, 0),
+            0,
+            "u's own state, not game's"
+        );
+        let mut ended = Game::new();
+        ended.engine = Some(Engine::with_game(
+            u6_core::State::empty(),
+            Files::default(),
+            |_s, _io| async {},
+        ));
+        ended.step(20);
+        assert!(ended.finished());
+        assert_eq!(ended.keys_owned(), 0, "after the end");
+    }
+
     const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
     /// On the user's zip (skipped when absent; read only): the disk entries declare well under
@@ -945,8 +1283,10 @@ mod tests {
         again.boot(1, false).quiet();
         assert!(again.game_files() == n);
         for _ in 0..60 {
-            game.tick(16);
-            again.tick(16);
+            for g in [&mut game, &mut again] {
+                g.step(16);
+                g.present();
+            }
         }
         assert!(game.frame_rgba() == again.frame_rgba(), "same first frames");
         assert!(
@@ -972,7 +1312,8 @@ mod tests {
         game.boot(1, true).quiet();
         let ticks = |game: &mut Game, n: u32| {
             for _ in 0..n {
-                game.tick(16);
+                game.step(16);
+                game.present();
             }
         };
         ticks(&mut game, 120);
@@ -1030,7 +1371,8 @@ mod tests {
         assert!(fresh.audio_start(48_000).quiet());
         let mut heard = 0f32;
         for _ in 0..60 {
-            fresh.tick(16);
+            fresh.step(16);
+            fresh.present();
             let n = fresh.audio_render(768);
             assert!(n == 1536);
             heard = heard.max(fresh.audio_buf.iter().fold(0f32, |m, &v| m.max(v.abs())));
@@ -1051,7 +1393,8 @@ mod tests {
         }
         let ticks = |game: &mut Game, n: u32| {
             for _ in 0..n {
-                game.tick(16);
+                game.step(16);
+                game.present();
             }
         };
         let save = |game: &mut Game| {
@@ -1598,8 +1941,10 @@ mod tests {
         assert!(sliced.kept_count() > 0);
         assert_same!(kept(&sliced), kept(&whole), "the kept game files");
         for _ in 0..60 {
-            sliced.tick(16);
-            whole.tick(16);
+            for g in [&mut sliced, &mut whole] {
+                g.step(16);
+                g.present();
+            }
         }
         assert!(
             sliced.frame_rgba() == whole.frame_rgba(),

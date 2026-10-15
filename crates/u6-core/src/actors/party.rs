@@ -114,6 +114,45 @@ fn best_step(s: &mut State, m: u16, rank: usize, (mx, my): (u16, u16), (fx, fy):
     }
 }
 
+/// 0x11c910's first tests of member `m`: not the leader, on the party's level, in worktype 1.
+fn in_line(s: &State, m: u16, leader: u16) -> bool {
+    let mi = usize::from(m);
+    m != leader
+        && u16::from(s.objects.location[mi].z) == walk::party_z(s)
+        && s.actors.worktype[mi] == 1
+}
+
+/// 0x11c910's tests of member `m` after the swallowed one (0x11c6c2): not dead, asleep or
+/// paralysed (status 0x16), not inside a swallower (movement flag 0x10).
+fn free_to_step(s: &State, m: u16) -> bool {
+    let mi = usize::from(m);
+    s.actors.attrs.status[mi] & 0x16 == 0 && s.actors.attrs.movement_flags[mi] & 0x10 == 0
+}
+
+/// Does [`follow`] have a member to move: the party not aboard a vessel (its first test,
+/// 0x11c91c..0x11c926) and a member past its tests ([`in_line`], [`free_to_step`]). The
+/// swallowed test 0x11c6c2, which rolls, is not run: asked after a pass, a member still
+/// swallowed keeps movement flag 0x10 and does not count, one the pass freed does.
+///
+/// A proxy for whether the pass does its formation work, and so for its cost
+/// ([`super::walk::FOLLOW_MS`]), not for whether anyone moved: an eligible member may still
+/// stay put, when it stands beside someone ahead and its spot does not call it on (`go` false
+/// in [`follow`]) or no step around it scores ([`best_step`]). The charge stays then, as the
+/// traced passes are averaged whether or not their members moved. The step asks it after the
+/// level transition 0x11d1d4 ([`player_step`]), so a step onto a gate or a ladder reads the
+/// members' level after it (no such step was traced).
+pub(crate) fn has_followers(s: &State) -> bool {
+    let p = &s.actors.party;
+    if p.leader_index == p.size {
+        return false;
+    }
+    let l = leader(s);
+    p.members[..p.count()]
+        .iter()
+        .map(|&m| u16::from(m))
+        .any(|m| in_line(s, m, l) && free_to_step(s, m))
+}
+
 /// Original: 0x11c910 (party: the followers keep formation behind the leader)
 ///
 /// Not while a vehicle carries the party. Two passes over the members in worktype 1 on the
@@ -148,18 +187,7 @@ pub fn follow(s: &mut State, leader: u16, strict: bool) {
             let fy = ly + fdx * g.side(rank) - fdy * g.back(rank);
             let m = u16::from(m);
             let mi = usize::from(m);
-            if m == leader
-                || u16::from(s.objects.location[mi].z) != walk::party_z(s)
-                || s.actors.worktype[mi] != 1
-            {
-                continue;
-            }
-            if super::turn::swallowed(s, m) {
-                continue;
-            }
-            if s.actors.attrs.status[mi] & 0x16 != 0
-                || s.actors.attrs.movement_flags[mi] & 0x10 != 0
-            {
+            if !in_line(s, m, leader) || super::turn::swallowed(s, m) || !free_to_step(s, m) {
                 continue;
             }
             let saved = s.actors.movement_points[mi];

@@ -16,7 +16,7 @@ use super::present::{
     self, ACTOR_FLASH_MS, DISSOLVE_MS, FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, NAME_MS,
     PRINT_MS, REFRESH_MS, RENDER_MS,
 };
-use crate::actors::turn::{AFTER_TURN_MS, PICK_MS};
+use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, PICK_MS};
 use crate::engine::{Engine, Io};
 use crate::files::Files;
 use crate::magic::WINDOW_FLASH_MS;
@@ -245,6 +245,42 @@ fn combat_npcs() -> State {
     s.actors.timers[crate::actors::timer::TIME_STOP] = 100;
     s.map.view_dirty = 1;
     s
+}
+
+/// [`combat_npcs`] without the time stop, the NPCs in worktype 4 (rear) with 5 points each: on
+/// the party's level, with no hostiles near (formation 0x120b64 counts none), a rear fighter
+/// outside the party only spends 5 points (0x1259b0), so each takes one turn that runs its
+/// worktype and draws nothing.
+fn running_combat_npcs() -> State {
+    let mut s = combat_npcs();
+    s.actors.timers[crate::actors::timer::TIME_STOP] = 0;
+    for a in [10usize, 11] {
+        s.actors.worktype[a] = 4;
+        s.actors.movement_points[a] = 5;
+    }
+    s
+}
+
+#[test]
+fn combat_npc_turns_that_run_take_their_turn_time_at_any_tick() {
+    // Three picks (the two NPCs, then the player after the refill), a combat NPC turn for each
+    // NPC, and the one refresh of the view the turn started with changed.
+    let want = 3 * u64::from(PICK_MS) + 2 * u64::from(COMBAT_NPC_MS) + u64::from(AFTER_TURN_MS);
+    same_at_any_tick(
+        "running combat NPC turns",
+        want,
+        running_combat_npcs,
+        |st, io| async move {
+            crate::actors::turn::world_turn(&st, &io).await;
+            let s = st.borrow();
+            assert_eq!(s.actors.worktype[10..12], [4, 4], "still rear fighters");
+            assert_eq!(
+                [s.actors.mp(10), s.actors.mp(11)],
+                [10, 10],
+                "one turn each, refilled"
+            );
+        },
+    );
 }
 
 #[test]

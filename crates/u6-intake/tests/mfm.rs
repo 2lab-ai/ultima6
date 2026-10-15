@@ -160,3 +160,31 @@ fn rejects_non_hfe_input_and_truncated_images() {
     let err = parse_hfe(&one[..one.len() - 600]).unwrap_err().to_string();
     assert!(err.contains("truncated"), "{err}");
 }
+
+#[test]
+fn rejects_track_tables_whose_cylinders_overlap() {
+    // 100 cylinders that all name the same 32 KiB of track data: 3.2 MB of tracks out of a
+    // 33 KiB image. Disjoint track data (any image a writer lays out) never comes to more
+    // than the image.
+    let mut h = vec![0u8; 1024 + 32 * 1024];
+    h[..8].copy_from_slice(b"HXCPICFE");
+    h[9] = 100;
+    h[10] = 2;
+    h[11] = 1;
+    h[12] = 250;
+    h[18] = 1;
+    for cyl in 0..100 {
+        let at = 512 + cyl * 4;
+        h[at..at + 2].copy_from_slice(&2u16.to_le_bytes());
+        h[at + 2..at + 4].copy_from_slice(&(32u16 * 1024).to_le_bytes());
+    }
+    // (Not `unwrap_err`: on success it would print megabytes of tracks.)
+    let err = match parse_hfe(&h) {
+        Ok(_) => panic!("the table is refused"),
+        Err(err) => err.to_string(),
+    };
+    assert!(err.contains("overlap"), "{err}");
+    h[9] = 1;
+    let one = parse_hfe(&h).unwrap();
+    assert_eq!(one.tracks.len(), 1);
+}
