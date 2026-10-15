@@ -85,8 +85,8 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
    Gate per cell: structure correlation ≥ 0.9, shift ≤ 0.5 source px, silhouette IoU ≥ 0.85, key purity ≤ 12 levels. Portraits measure structure at the layout scale: both images box-averaged to 1/4 of the source size, then correlated, still ≥ 0.9. At the source pixel a faithful repaint scores 0.55–0.66, measured by H3 on synthetic portraits: 1-px features become drawn ones. Negative controls on synthetic portraits (mirrored, shifted by 1/8, two portraits swapped) must each fail a gate.
 
    Two group gates on top of the per-cell gate:
-   - **Terrain seams.** Each terrain record is tiled 3×3 against itself. The seam step must stay ≤ 1.5× the interior step.
-   - **Animation sequences.** For each actor frame group (all its directions and frames), the frame-pair motion kept must be ≥ 50% of the source's.
+   - **Terrain seams.** Each terrain record is tiled 3×3 against itself. The seam step must stay ≤ max(1.5, the classic tile's own seam ratio) × the interior step: a tile whose own wrap already steps cannot be asked to step less, and the generated one may not step more than both.
+   - **Animation sequences.** For each actor frame group (all its directions and frames), every frame pair that moves in the source must keep ≥ 50% of its motion (the minimum over pairs, not the mean, so one exaggerated pair cannot hide frozen ones).
 
    Thresholds are tuned on synthetic sheets first. A failing cell is re-rolled once. A failing group falls back to MMPX as a whole, so a group never mixes generated and scaled frames. The run order, best fit first:
    1. portraits;
