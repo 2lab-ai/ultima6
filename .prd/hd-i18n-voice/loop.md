@@ -15,7 +15,7 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 | `08-i18n-ko.md` | 2 |
 | `09-npc-voice.md` | 3 |
 
-Spec review: gpt-6-astra reviewed 06–09 (all CHANGES); every must-fix is folded into rev 2 of each spec. opus reviewed 06 rev 2 (CHANGES, 5 must-fix, checked against the code), folded into rev 3. opus reviewed 07 rev 2 (CHANGES, 3 must-fix), folded into rev 3 as a per-pixel source plane. The opus reviews of 08–09 are pending (claude capacity). In flight: T1 (with the rev-3 scope), T6 (998cfac, in review).
+Spec review: gpt-6-astra reviewed 06–09 (all CHANGES); every must-fix is folded into rev 2 of each spec. opus reviewed 06 rev 2 (CHANGES, 5 must-fix, checked against the code), folded into rev 3. opus reviewed 07 rev 2 (CHANGES, 3 must-fix), folded into rev 3 as a per-pixel source plane; gpt-6-astra re-reviewed rev 3 (CHANGES: image versions, HD re-entry), folded into rev 4. The opus reviews of 08–09 are pending (claude capacity). In flight: T1 (with the rev-3 scope), T6 (998cfac, in review).
 
 ## Order, and why it differs from the user's numbering
 
@@ -36,7 +36,7 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 | T4 | 06 | O1 + O2: one RGBA per changed frame; skip idle map re-render; `merge_shores` on its counter | T2 |
 | T5 | 06 | O3: planar row/word blits in the opening | T1 |
 | T6 | 06 | O4: release profile flags; wasm size receipt | — |
-| H0 | 07 | `Framebuffer` source plane (`Src`, `set_src`, `copy_px`), set by `gfx::blit`/`blit_bitmap` and copied by `copy_pixel`/`copy_rect`/dissolve; zero cost when off; source receipt | T4 |
+| H0 | 07 | `Framebuffer` source plane (`Src` with image version, `set_src`, `copy_px`), set by `gfx::blit`/`blit_bitmap`, copied by `copy_pixel`/`copy_rect`/dissolve; record versions bumped by the shore merge; enabled by u6-web; source receipt | T4 |
 | H1 | 07 | `u6-render` compositor + MMPX×S (cached by content hash) in wasm; `u6-web` HD exports; page S× canvas, HD toggle, logical pointer mapping | H0 |
 | H2 | 07 | HD pack format, drop classification before `importFiles`, IndexedDB/forget, limits | H1 |
 | H3 | 07 | `tools/hd` inventory/atlas/run/ingest/pack with the gate; synthetic tests | H2 |

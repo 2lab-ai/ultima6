@@ -6,7 +6,7 @@ tags: [ultima6, hd, rendering, imagegen]
 
 # 07 — HD art: imagegen upscale with a scaler baseline
 
-Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 3 folds in the opus review, checked against the code: the scene list is replaced by a per-pixel source plane in the framebuffer, which follows every copy, offset, effect and persistence by construction). This is user item 1 (`hd-i18n-voice/ssot.md`, verbatim): "hd 이미지 업스케일을 이미지젠 스킬로 해주고 hd 업스케일해줘". It builds the seam designed in `05-hd-output.md` (scene output, assets by id) for the map, portraits and panels. The research notes are kept outside the repo: `~/Games/ultima6/research/2026-10-15/r1-hd-findings.md`.
+Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 3 folds in the opus review, checked against the code: the scene list is replaced by a per-pixel source plane in the framebuffer, which follows every copy, offset, effect and persistence by construction. rev 4 folds in the gpt-6-astra re-review: each source carries the image version it was drawn from, and the plane is kept whenever the web build runs, so switching HD on loses nothing). This is user item 1 (`hd-i18n-voice/ssot.md`, verbatim): "hd 이미지 업스케일을 이미지젠 스킬로 해주고 hd 업스케일해줘". It builds the seam designed in `05-hd-output.md` (scene output, assets by id) for the map, portraits and panels. The research notes are kept outside the repo: `~/Games/ultima6/research/2026-10-15/r1-hd-findings.md`.
 
 ## Measured facts
 
@@ -41,10 +41,11 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
 ## Design
 
 1. **HD0: source plane and HD compositor (engine and page, no AI).**
-   - **Source plane.** `Framebuffer` gains an optional plane of one `Src` per pixel, allocated only while HD is on. With it absent, nothing changes and no work is done; the parity frame is untouched in both cases.
-     - `Src` is `{kind, id, u, v, flags}`:
+   - **Source plane.** `Framebuffer` gains an optional plane of one `Src` per pixel. `u6-web` enables it when a game starts, so it exists whether or not HD is shown; native and the tests leave it off unless a test asks. With it absent, nothing changes and no work is done; the parity frame is untouched in both cases.
+     - `Src` is `{kind, id, ver, u, v, flags}`:
        - `kind` is classic, tile, portrait or bitmap;
        - `id` is the record number, the portrait (letter, item), or the bitmap role (paper, spellbook);
+       - `ver` is the image's version when the pixel was drawn. A record's version starts at 0 and increases each time its bytes are rewritten in place: the shore merge, `anim.rs:116`, is the one writer. Portraits and bitmaps never change while loaded, so they stay at 0;
        - `(u, v)` is the pixel's position inside that image;
        - `flags` marks a pixel whose colour the blit changed: the overlay OR and the outline.
      - `set`, `clear` and `blit` mark the pixel classic.
@@ -54,23 +55,24 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
    - **What this buys.**
      - The source follows every copy, offset, quake shift, dissolve and persisted front-buffer pixel by construction. That covers the scratch compositing at back (0,0) and (0,4), and a frame left on screen by a skipped render (06 O2).
      - Everything drawn directly (text, clock hands, sparkles, missiles, the pointer sprite, combat pixel replays) is classic. It is shown as the classic pixel scaled, so it can never be painted over.
-     - No list, no mask and no lifetime rules are needed.
-   - **Compositor (`u6-render`, in wasm).** It runs when `shown` changes; that change bumps `frame_version`.
+     - No list and no mask are needed. The one lifetime rule left is the image version: a pixel whose `ver` is older than its record's current version was drawn from bytes that no longer exist, so the compositor shows it classic until the game redraws it.
+   - **Compositor (`u6-render`, in wasm).** It runs when its input key changes: `frame_version` (bumped on every change of `shown`) together with `hd_version` (bumped by the HD toggle, a scale change, and a pack load or forget).
      - It writes an S×-sized RGBA frame, S = 2, 3 or 4 by device pixels.
      - For each screen pixel, it writes an S×S block:
-       - a tile, portrait or bitmap pixel without flags takes the block `(u·S.., v·S..)` of that image's HD version;
+       - a tile, portrait or bitmap pixel without flags and with a current `ver` takes the block `(u·S.., v·S..)` of that image's HD version;
        - an HD sub-pixel that is transparent takes the classic colour;
-       - a classic pixel, or a flagged one, takes its classic colour.
+       - a classic, flagged or stale pixel takes its classic colour.
      - `u6-web` exports `hd_frame_ptr`, `hd_frame_len`, `hd_scale` and `set_hd(on, scale)`. The page draws that frame to a canvas sized S× and keeps pointer mapping on the 320×200 logical size.
    - **HD image per id:**
      - the pack image, if the pack has one whose content hash matches the record's current bytes;
      - otherwise MMPX×S of the record's own current content, with its transparency. Merged shores and substituted frames are covered this way. The result is cached by content hash, because the water and shore records cycle.
-   - **Toggle.** "HD" next to Mute, on by default, kept in `localStorage`. With it off, the plane is dropped and the page draws the classic frame as today.
+   - **Toggle.** "HD" next to Mute, on by default, kept in `localStorage`. With it off, the page draws the classic frame as today and the compositor does not run; the plane keeps being written, so switching on again is exact at once.
 2. **HD1: pack format and loading.** One zip containing:
    - `manifest.json`: `format: "u6-hdpack/1"`, `tile`, `scale`, `derived`, generator, and a base digest over the record hashes;
    - `index.bin`: per record id, content hash, atlas, column, row, flags;
    - `atlas-N.webp` (lossless RGBA);
-   - optional `portrait/NNN.webp`, `bitmap/<role>.webp`.
+   - optional `portrait/<letter>-<item>.webp` (the `load_portrait` pair) and `bitmap/<role>.webp` (`paper`, `spellbook`);
+   - every image's entry in `index.bin` names its kind, id, the content hash of the classic image it was made from, and its size. Tiles are 16·8 px square; portraits and bitmaps are 8× their classic size. An image whose hash does not match the owner's classic image is ignored, and the MMPX fallback is used.
 
    The page accepts it through the existing drop or file picker. The page classifies a drop before `importFiles`: a zip with a `manifest.json` whose `format` is `u6-hdpack/1` goes to the HD loader and never starts a game. The page stores it in IndexedDB under `hd:*` (`site/store.js`) and reloads it on later visits. "Forget the HD pack" sits next to the other forget buttons. The page never fetches a pack. The limits are written here, because 04 W6a is not built (07 HD0–HD1 supersede 04 W10 and W6a for HD): ≤ 150 MB decoded, ≤ 4096 entries, each image exactly 16·8 px square for tiles or 8× its classic size for portraits and bitmaps; a malformed pack is refused with no change.
 3. **HD2: the local imagegen tool (`tools/hd`, native Rust plus a driver).** Commands:
@@ -113,8 +115,16 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
    - that the plane follows `copy_window`, `copy_rect` at an offset, the dissolve, the quake shift and a front pixel that persists across presents;
    - that text over a portrait, the clock hands, a sparkle, a missile and the pointer sprite stay classic;
    - that an outline-flash and an overlay pixel are flagged;
-   - that a merged shore record falls back to MMPX of its current bytes.
-3. **Source receipt.** On every published frame of the real-data receipts, run locally, every unflagged tile, portrait or bitmap pixel equals the classic pixel of its image at `(u, v)`. The receipt prints pass/fail only. This proves the plane is exact.
+   - that a merged shore record falls back to MMPX of its current bytes;
+   - that a pixel drawn from a record, then left in place while the record is rewritten, then copied and presented, is shown classic (stale `ver`);
+   - that switching HD off and on over a persistent panel and a skipped render, and loading a pack or changing the scale with unchanged game pixels, recompose the frame exactly;
+   - the final S× RGBA, not only the plane, for overlapping HD art, an outline flash, an overlay pixel, the pointer and a combat replay;
+   - coverage: on a synthetic scene of tiles, a portrait and a panel, the expected pixels are attributed and none of them is classic.
+3. **Source receipt (consistency).** On every published frame of the real-data receipts, run locally:
+   - every unflagged tile, portrait or bitmap pixel with a current `ver` equals the classic pixel of its image at `(u, v)`;
+   - the share of map-window pixels attributed to a tile is printed, with the counts only.
+
+   The receipt prints pass/fail and those counts. It checks that the attributed pixels are right; coverage is checked by the synthetic tests above.
 4. **The owner's pack.** `tools/hd` builds it from the owner's files with imagegen, and the owner's browser loads it by drop.
    - Portraits and panels show the imagegen art.
    - Coastlines show MMPX (HD3).
