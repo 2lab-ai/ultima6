@@ -133,6 +133,14 @@ fn free_to_step(s: &State, m: u16) -> bool {
 /// 0x11c91c..0x11c926) and a member past its tests ([`in_line`], [`free_to_step`]). The
 /// swallowed test 0x11c6c2, which rolls, is not run: asked after a pass, a member still
 /// swallowed keeps movement flag 0x10 and does not count, one the pass freed does.
+///
+/// A proxy for whether the pass does its formation work, and so for its cost
+/// ([`super::walk::FOLLOW_MS`]), not for whether anyone moved: an eligible member may still
+/// stay put, when it stands beside someone ahead and its spot does not call it on (`go` false
+/// in [`follow`]) or no step around it scores ([`best_step`]). The charge stays then, as the
+/// traced passes are averaged whether or not their members moved. The step asks it after the
+/// level transition 0x11d1d4 ([`player_step`]), so a step onto a gate or a ladder reads the
+/// members' level after it (no such step was traced).
 pub(crate) fn has_followers(s: &State) -> bool {
     let p = &s.actors.party;
     if p.leader_index == p.size {

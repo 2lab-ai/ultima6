@@ -751,9 +751,9 @@ pub(crate) mod tests {
     }
 
     /// The walk command (0x80, north) through the command loop's dispatch on `s` at host ticks
-    /// of `tick` ms with `zeros` polls of no time after each: the engine time it took and where
-    /// the leader ends.
-    fn walk_ms(s: State, tick: u32, zeros: usize) -> (u64, (u16, u16)) {
+    /// of `tick` ms with `zeros` polls of no time after each: the engine time it took and the
+    /// state after it.
+    fn walk_ms(s: State, tick: u32, zeros: usize) -> (u64, State) {
         let done = Rc::new(Cell::new(None));
         let out = Rc::clone(&done);
         let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
@@ -771,8 +771,8 @@ pub(crate) mod tests {
             }
         }
         let ms = done.get().expect("the step ends");
-        let p = e.state().objects.location[1];
-        (ms, (p.x, p.y))
+        let after = e.state().clone();
+        (ms, after)
     }
 
     #[test]
@@ -849,8 +849,58 @@ pub(crate) mod tests {
             );
             let want = u64::from(want);
             for (tick, zeros) in [(16, 0), (7, 0), (16, 3)] {
-                let (ms, to) = walk_ms(s.clone(), tick, zeros);
-                assert_eq!(to, at, "{name}: where the leader ends");
+                let (ms, after) = walk_ms(s.clone(), tick, zeros);
+                let p = after.objects.location[1];
+                assert_eq!((p.x, p.y), at, "{name}: where the leader ends");
+                assert!(
+                    ms >= want && ms <= want + u64::from(tick),
+                    "{name}: {ms} ms at {tick} ms ticks ({zeros} zero polls), want {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_swallowed_follower_counts_by_what_the_pass_left_it() {
+        // Member 2 swallowed (movement flag 0x10, 100 hit points), member 3 in a combat
+        // worktype: 2 is the pass's only follower. The pass runs twice (0x11c910) and rolls the
+        // swallowed test 0x11c6c2 for 2 in each while it is still held: random(1, 30) against
+        // its strength, then, still held, random(1, 15) for the hurt. The draws are counted
+        // here on a copy of the starting generator.
+        let swallowed = |strength: u8| {
+            let mut s = column();
+            s.actors.worktype[3] = 3;
+            s.actors.attrs.movement_flags[2] |= 0x10;
+            s.actors.attrs.hp[2] = 100;
+            s.actors.attrs.strength[2] = strength;
+            s
+        };
+        // Strength 1: no roll of 1..30 is below it, so 2 stays swallowed through both passes
+        // (two draws in each) and does not count afterwards: the step alone.
+        let held = swallowed(1);
+        let mut held_rng = held.rng;
+        for _ in 0..2 {
+            held_rng.range(1, 30);
+            held_rng.range(1, 15);
+        }
+        // Strength 31: the first roll frees it (one draw), the second pass does not roll, and
+        // it counts afterwards: the step and its followers' pass.
+        let freed = swallowed(31);
+        let mut freed_rng = freed.rng;
+        freed_rng.range(1, 30);
+        let cases = [
+            ("stays swallowed", held, held_rng, 0x10, STEP_MS),
+            ("freed", freed, freed_rng, 0, STEP_MS + FOLLOW_MS),
+        ];
+        for (name, s, rng, flag, want) in cases {
+            let want = u64::from(want);
+            for (tick, zeros) in [(16, 0), (7, 0), (16, 3)] {
+                let (ms, after) = walk_ms(s.clone(), tick, zeros);
+                assert_eq!(after.rng, rng, "{name}: the draws");
+                let held = after.actors.attrs.movement_flags[2] & 0x10;
+                assert_eq!(held, flag, "{name}: swallowed after the step");
+                let p = after.objects.location[1];
+                assert_eq!((p.x, p.y), (20, 19), "{name}: the leader moved");
                 assert!(
                     ms >= want && ms <= want + u64::from(tick),
                     "{name}: {ms} ms at {tick} ms ticks ({zeros} zero polls), want {want}"
