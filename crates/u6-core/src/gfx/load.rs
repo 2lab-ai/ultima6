@@ -15,6 +15,8 @@ pub struct GfxState {
     /// The shore merge 0x152dac rewrites map records in place.
     pub records: Vec<Tile>,
     /// The animmask overlay each record's reference resolves to (0x153002 tail), resolved at load.
+    /// Never written after the load: the window cache depends on it ([`super::cache`], checked
+    /// in debug builds).
     pub overlays: Vec<Option<AnimOverlay>>,
     /// Original: 0x15559e (longword per tile: pointer to its record); here the record index.
     /// 0x152cd2 copies entries, so several tiles can share one record.
@@ -23,8 +25,9 @@ pub struct GfxState {
     /// copies entries along with `record_of`.
     pub masktype: Vec<u8>,
     /// Original: 0x152e3c / 0x152e40 (`animmask.ega` block 1 = overlays, block 2 = shore masks)
+    /// Never written after the load, as `overlays` and `tables`.
     pub animmask: AnimMask,
-    /// Tables read out of `game`.
+    /// Tables read out of `game`. Never written after the load, as `overlays`.
     pub tables: GameTables,
     /// Original: 0x15803e (byte: overlay frame 0..7; written only by 0x152dca)
     pub frame: u8,
@@ -53,6 +56,10 @@ pub struct GfxState {
     pub dissolve: u16,
     /// The turned sprites of the flights (0x15265a / 0x152800 / 0x152876).
     pub sprites: super::sprite::Sprites,
+    /// Port-only (spec 06 O2): what the idle refresh last rendered and merged, so it can leave
+    /// out a render or a merge that would change nothing. Not game state: it compares equal
+    /// whatever it holds, and a clone starts empty ([`super::cache::RenderCache`]).
+    pub cache: super::cache::RenderCache,
 }
 
 impl Default for GfxState {
@@ -90,6 +97,7 @@ impl Default for GfxState {
             sparkle: 0,
             dissolve: 0,
             sprites: super::sprite::Sprites::default(),
+            cache: super::cache::RenderCache::default(),
         }
     }
 }
@@ -122,6 +130,7 @@ impl GfxState {
             },
             tables: self.tables.clone(),
             sprites: super::sprite::Sprites::none(),
+            cache: super::cache::RenderCache::default(),
             ..*self
         }
     }
@@ -157,7 +166,7 @@ impl GfxState {
             .map(|t| t.anim_ref.map(|r| animmask.overlay(r)).transpose())
             .collect::<Result<Vec<_>, _>>()
             .map_err(format_error("animmask.ega"))?;
-        Ok(GfxState {
+        let mut gfx = GfxState {
             masktype: set.tiles.iter().map(|t| t.masktype).collect(),
             records: set.tiles,
             overlays,
@@ -166,7 +175,9 @@ impl GfxState {
             dissolve: tables.dissolve,
             tables,
             ..GfxState::default()
-        })
+        };
+        super::cache::check_static(&mut gfx);
+        Ok(gfx)
     }
 
     /// The record tile `t` (low 11 bits) currently draws, with its live masktype.

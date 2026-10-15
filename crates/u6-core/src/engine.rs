@@ -22,6 +22,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::files::Files;
@@ -94,6 +95,9 @@ impl Pointer {
     }
 }
 
+/// The number of the next [`Io`] made ([`Io::back_mark`]).
+static NEXT_IO: AtomicU64 = AtomicU64::new(1);
+
 /// The game's view of the platform: input queue, millisecond clock, display generation, two
 /// screen buffers and the file layer. Nothing else in the core touches time, input or files.
 pub struct Io {
@@ -114,10 +118,16 @@ pub struct Io {
     /// (bit order), the claims on it that live now ([`Io::own_keys`]): the keys the game takes
     /// where its state is not in [`State`] (`u`'s).
     owned_keys: Cell<[u32; OWN_KEYS]>,
+    /// Port-only: this `Io`'s number, distinct for every `Io` made ([`NEXT_IO`]).
+    serial: u64,
+    /// Port-only: the mutable borrows of `back` so far ([`Io::draw_back`], [`Io::with_buffers`]).
+    back_writes: Cell<u64>,
+    /// Port-only: [`Io::set_window_cache`].
+    window_cache: Cell<bool>,
 }
 
 impl Io {
-    fn new(files: Files) -> Self {
+    pub(crate) fn new(files: Files) -> Self {
         Self {
             events: RefCell::new(VecDeque::new()),
             pointer: Cell::new(Pointer::default()),
@@ -130,6 +140,9 @@ impl Io {
             files,
             image: OnceCell::new(),
             owned_keys: Cell::new([0; OWN_KEYS]),
+            serial: NEXT_IO.fetch_add(1, Ordering::Relaxed),
+            back_writes: Cell::new(0),
+            window_cache: Cell::new(true),
         }
     }
 
@@ -272,12 +285,42 @@ impl Io {
     /// Draws into the other buffer (the back buffer, 0x161be2: the map window is composed
     /// here by 0x152ffa and copied to the screen by 0x151f5a / 0x1520e2 / 0x151fe6).
     pub fn draw_back<R>(&self, f: impl FnOnce(&mut Framebuffer) -> R) -> R {
+        self.back_writes.set(self.back_writes.get() + 1);
         f(&mut self.back.borrow_mut())
     }
 
     /// Both buffers at once (back read-write, front read-write), for the copies between them.
     pub fn with_buffers<R>(&self, f: impl FnOnce(&mut Framebuffer, &mut Framebuffer) -> R) -> R {
+        self.back_writes.set(self.back_writes.get() + 1);
         f(&mut self.back.borrow_mut(), &mut self.front.borrow_mut())
+    }
+
+    /// Reads the back buffer without counting a write ([`Io::back_mark`]), for tests that
+    /// compare it.
+    #[cfg(test)]
+    pub(crate) fn peek_back<R>(&self, f: impl FnOnce(&Framebuffer) -> R) -> R {
+        f(&self.back.borrow())
+    }
+
+    /// Port-only: this `Io`'s back buffer and the mutable borrows of it so far. A mark equal to
+    /// an earlier one says the back buffer is the same one and nothing could draw on it since
+    /// (every draw goes through [`Io::draw_back`] or [`Io::with_buffers`], which count; a read
+    /// through them counts too).
+    pub(crate) fn back_mark(&self) -> (u64, u64) {
+        (self.serial, self.back_writes.get())
+    }
+
+    /// Port-only (spec 06 O2): with `on` (the default) the idle refresh draws only the cells of
+    /// the map window whose draws read a changed value ([`crate::gfx::cache`]); off, it renders
+    /// the whole window at every refresh, as the original does. The frames and the state are the
+    /// same either way: the equivalence checks run both.
+    pub fn set_window_cache(&self, on: bool) {
+        self.window_cache.set(on);
+    }
+
+    /// [`Io::set_window_cache`].
+    pub fn window_cache(&self) -> bool {
+        self.window_cache.get()
     }
 
     /// Port-only (spec 06 §Design 6): the keys among [`OWN_MINUS`], [`OWN_PLUS`] and
@@ -459,6 +502,8 @@ pub struct Engine {
     published_version: u64,
     /// The published frame with the pointer sprite over it (the frame the platform shows).
     shown: Framebuffer,
+    /// Bumped each time `shown` is composed again ([`Engine::frame_version`]).
+    shown_version: u64,
     sprite: Option<crate::ui::pointer::SpriteFrame>,
     stubs: Rc<StubLog>,
 }
@@ -523,6 +568,7 @@ impl Engine {
             ticks: 0,
             published_version: 0,
             shown: Framebuffer::new(),
+            shown_version: 0,
             sprite: None,
             stubs,
         }
@@ -579,12 +625,21 @@ impl Engine {
                 sp.draw(&mut self.shown);
             }
             self.sprite = sprite;
+            self.shown_version += 1;
         }
     }
 
     /// The last published frame (320×200 indices plus the palette) with the pointer sprite.
     pub fn frame(&self) -> &Framebuffer {
         &self.shown
+    }
+
+    /// Changes whenever [`Engine::frame`] was composed again (the game presented, the pointer
+    /// sprite changed, the first tick); 0 before the first tick. A platform converts the frame
+    /// only when this moved since its last conversion (spec 06 O1): a tick that composed nothing
+    /// left the frame as it was.
+    pub fn frame_version(&self) -> u64 {
+        self.shown_version
     }
 
     /// True once the game future returned (it is never polled again).
@@ -822,6 +877,44 @@ mod tests {
             "the game took nothing"
         );
         assert_eq!(e.frame().get(99, 48), Some(17), "drawn there");
+    }
+
+    #[test]
+    fn the_frame_version_moves_only_when_the_frame_is_composed() {
+        // The first tick composes the frame; a tick where the game presented nothing and the
+        // sprite stayed leaves it (and its version); a pointer move redraws the sprite; a
+        // present publishes the screen.
+        let mut e = idle_engine();
+        assert_eq!(e.frame_version(), 0, "before the first tick");
+        e.tick(&[], 20);
+        assert_eq!(e.frame_version(), 1, "the first tick");
+        for _ in 0..3 {
+            e.tick(&[], 20);
+        }
+        assert_eq!(e.frame_version(), 1, "nothing changed");
+        let at = |x| InputEvent::Pointer {
+            x,
+            y: 50,
+            buttons: 0,
+        };
+        e.tick(&[at(100)], 20);
+        assert_eq!(e.frame_version(), 2, "the sprite moved");
+        e.tick(&[at(100)], 20);
+        assert_eq!(e.frame_version(), 2, "the same place");
+        let mut p = engine_with(|_state, io| async move {
+            loop {
+                io.present();
+                io.vblank().await;
+                io.vblank().await;
+            }
+        });
+        let versions: Vec<u64> = (0..5)
+            .map(|_| {
+                p.tick(&[], 20);
+                p.frame_version()
+            })
+            .collect();
+        assert_eq!(versions, [1, 1, 2, 2, 3], "a present every other tick");
     }
 
     #[test]

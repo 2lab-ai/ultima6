@@ -21,7 +21,7 @@ pub const ANIM_FRAMES: usize = 8;
 pub const ANIM_PLANE: u8 = 3;
 
 /// The two blocks of `animmask.ega`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct AnimMask {
     pub block1: Vec<u8>,
@@ -30,7 +30,7 @@ pub struct AnimMask {
 
 /// One resolved overlay: rows `first_row..first_row + rows`, 8 frames of row bitmasks
 /// (bit 15 = leftmost pixel).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct AnimOverlay {
     pub first_row: u8,

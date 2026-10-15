@@ -9,6 +9,8 @@ use super::blit::{
     blit_back, copy_window, dissolve, dissolve_order, outline_colour, plot, set_plot_colour,
 };
 
+mod adv;
+mod cache;
 mod idle;
 mod real;
 mod sprite;

@@ -81,8 +81,9 @@ fn bytes<const N: usize>(b: &[u8]) -> [u8; N] {
     std::array::from_fn(|i| b[i])
 }
 
-/// The game tables the world view needs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The game tables the world view needs. Read once at load and never written after (the window
+/// cache depends on it, [`super::cache`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct GameTables {
     /// Original: 0x152c52 (hunk 30; 32 words: source tile × 4 of each shore merge)
     pub shore_src: [u16; SHORE_MERGES],

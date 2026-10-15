@@ -10,8 +10,9 @@
 // both the sound's gesture and exactly one game click) and the fixed step with its speed
 // control (spec 06: the steps follow the clock on a virtual 60 Hz and 144 Hz display and on
 // the real one, the speed keys and the keys the game keeps, the badge, the buttons, the stored
-// choice, a held press at 1x whatever the speed, the music above 4x). Most tests start `game` at once
-// (harness `gameFirst`); the launcher tests run the page as it is.
+// choice, a held press at 1x whatever the speed, the music above 4x, a frame converted and
+// drawn only when it changed). Most tests start `game` at once (harness `gameFirst`); the
+// launcher tests run the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. The game is read once it reached what a check asserts, by its own signals (the
 // prompt, the key queue, the program, its ticks: the page's fixed steps of 20 ms), never after a
@@ -1634,6 +1635,85 @@ test('a press held 150 ms at 8x walks as at 1x: the game takes it at 1x (virtual
   }
   assert.ok(one.cells === 1 && eight.cells === 1, 'one cell at either speed');
   assert.ok(Math.abs(eight.hold - one.hold) <= STEP_MS, 'the 8x hold is the 1x one, within a step');
+}, { needs: h.haveHfes });
+
+// On the virtual display: runs `n` frames and returns, per frame, the steps it ran, the
+// conversions of the game's frame and the canvas draws in it.
+const framesSeen = (page, n) => page.evaluate((count) => {
+  const v = window.__display;
+  const out = [];
+  for (let i = 0; i < count; i += 1) {
+    const a = [globalThis.__ticks, globalThis.__converted, window.__draws];
+    v.run();
+    out.push([globalThis.__ticks - a[0], globalThis.__converted - a[1], window.__draws - a[2]]);
+  }
+  return out;
+}, n);
+
+// Counts the canvas draws (putImageData) in `window.__draws`.
+function countDraws() {
+  const put = CanvasRenderingContext2D.prototype.putImageData;
+  window.__draws = 0;
+  CanvasRenderingContext2D.prototype.putImageData = function (...args) {
+    window.__draws += 1;
+    return put.apply(this, args);
+  };
+}
+
+test('a display frame converts the game\'s frame at most once however many steps ran, and draws the canvas only for a conversion (virtual 60 Hz display, spec 06 O1)', async (env) => {
+  const page = await bootGame(env, countDraws);
+  await h.waitPrompt(page);
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const receipts = [];
+  for (const speed of ['1', '8']) {
+    await speedTo(page, speed);
+    await h.runFrames(page, 1);
+    const seen = await framesSeen(page, 300);
+    const sum = (k) => seen.reduce((t, f) => t + f[k], 0);
+    seen.forEach(([steps, converted, draws], i) => {
+      assert.ok(converted <= 1 && draws <= 1, `${speed}x frame ${i}: at most one conversion and one draw`);
+      assert.ok(draws === converted, `${speed}x frame ${i}: the canvas drawn for a conversion, never without one`);
+      assert.ok(steps > 0 || converted === 0, `${speed}x frame ${i}: no step, no conversion`);
+    });
+    assert.ok(sum(1) > 0, `${speed}x: the game's frames reach the canvas`);
+    if (speed === '8') assert.ok(sum(0) > 4 * sum(1), '8x: several steps a frame, one conversion');
+    receipts.push(`${speed}x ${sum(0)} steps, ${sum(1)} conversions, ${sum(2)} draws, at most ${Math.max(...seen.map((f) => f[0]))} steps and ${Math.max(...seen.map((f) => f[1]))} conversion a frame`);
+  }
+  console.log(`  receipt: 300 virtual frames: ${receipts.join('; ')}`);
+}, { needs: h.haveHfes });
+
+// Whether the canvas shows the RGBA frame of the game that presented last, compared in the page
+// by an FNV-1a hash of each (the frame is the user's data: only the equality leaves the page).
+const canvasShowsGame = (page) => page.evaluate(() => {
+  const hash = (d) => {
+    let x = 0x811c9dc5;
+    for (let i = 0; i < d.length; i += 1) x = Math.imul(x ^ d[i], 0x01000193) >>> 0;
+    return x;
+  };
+  const c = document.getElementById('screen');
+  return hash(c.getContext('2d').getImageData(0, 0, c.width, c.height).data) === hash(globalThis.__shownGame.frame_rgba());
+});
+
+test('a new game put on screen repaints the canvas with its own frame: an import over the running game (spec 06 O1)', async (env) => {
+  const page = await bootGame(env, countDraws);
+  await h.waitPrompt(page);
+  assert.ok(await canvasShowsGame(page), 'the first game\'s frame on the canvas');
+  const before = await page.evaluate(() => {
+    globalThis.__firstGame = globalThis.__shownGame;
+    return window.__draws;
+  });
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitFrames(page, 3);
+  const after = await page.evaluate(() => ({
+    draws: window.__draws, other: globalThis.__shownGame !== globalThis.__firstGame,
+  }));
+  assert.ok(after.other, 'the new game presents');
+  assert.ok(after.draws > before, 'the canvas is drawn again');
+  assert.ok(await canvasShowsGame(page), 'the new game\'s frame on the canvas');
+  await h.waitPrompt(page);
+  assert.ok(await canvasShowsGame(page), 'and at its prompt');
 }, { needs: h.haveHfes });
 
 test('"behind" shows while the frame budget drops steps (a slow host at 8x), not after a stall past the cap; it clears at 1x (virtual 60 Hz display)', async (env) => {

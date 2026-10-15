@@ -151,3 +151,54 @@ fn real_shore_masks_fit_and_the_window_draws_the_party() {
         assert!(fb.get(x, y) == Some(p), "hero pixel at ({x}, {y})");
     }
 }
+
+/// Spec 06 O2 on the user's game (`game` started at once, seed 0): 3000 steps with the render
+/// cache and without it, idle at the prompt with four walks between; the shown frame and the back
+/// buffer (the border's outer halves too) after every step and the whole `State` every 10 steps
+/// are the same. The cache drew less than the whole window; only counts are printed.
+#[test]
+fn real_idle_with_the_cache_shows_what_it_shows_without() {
+    let Some(files) = files() else { return };
+    let mut on = Engine::game_first(files.clone(), 0).quiet();
+    let mut off = Engine::game_first(files, 0).quiet();
+    off.io().set_window_cache(false);
+    let walks = [
+        (500, crate::Key::Right),
+        (900, crate::Key::Down),
+        (1300, crate::Key::Left),
+        (1700, crate::Key::Up),
+    ];
+    for step in 0..3000u32 {
+        let input: Vec<crate::InputEvent> = walks
+            .iter()
+            .filter(|&&(at, _)| at == step)
+            .map(|&(_, k)| crate::InputEvent::Key(k))
+            .collect();
+        on.tick(&input, 20);
+        off.tick(&input, 20);
+        assert_same!(
+            on.frame().pixels(),
+            off.frame().pixels(),
+            "step {step}: frame"
+        );
+        assert!(
+            on.frame().palette == off.frame().palette,
+            "step {step}: palette"
+        );
+        let back = |e: &Engine| e.io().peek_back(|b| b.pixels().to_vec());
+        assert_same!(back(&on), back(&off), "step {step}: the back buffer");
+        if step % 10 == 9 {
+            assert!(*on.state() == *off.state(), "step {step}: the whole State");
+        }
+    }
+    let (c, o) = (&on.state().gfx.cache, &off.state().gfx.cache);
+    println!(
+        "3000 steps: renders drawing nothing {}, drawing {} boxes in {}; without the cache {} {}",
+        c.window_skips, c.boxes_redrawn, c.window_partial, o.window_skips, o.window_partial
+    );
+    assert!(
+        c.window_partial > 1000,
+        "most refreshes draw some boxes only"
+    );
+    assert!((o.window_skips, o.window_partial) == (0, 0));
+}

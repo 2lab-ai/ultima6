@@ -64,6 +64,7 @@
 
 pub mod anim;
 pub mod blit;
+pub mod cache;
 pub(crate) mod idle;
 mod load;
 pub mod seams;

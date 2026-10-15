@@ -36,12 +36,12 @@ fn anim_tick(s: &mut State, g: &mut GfxState) {
     std::mem::swap(&mut s.gfx, g);
 }
 
-const HERO_TYPE: usize = 0x19a;
-const HERO_BASE: u16 = 1000;
+pub(super) const HERO_TYPE: usize = 0x19a;
+pub(super) const HERO_BASE: u16 = 1000;
 
 /// Surface of chunk 1 everywhere, chunk 1 tile (col, row) = row·8 + col; map tile n has colour
 /// n % 32 + 1 in every pixel; the leader (actor 1) stands at (19, 10).
-fn world() -> (State, GfxState) {
+pub(super) fn world() -> (State, GfxState) {
     let mut s = State::empty();
     s.map.world = WorldMap {
         surface: vec![1; SURFACE_CHUNKS * SURFACE_CHUNKS],
@@ -83,7 +83,7 @@ fn world() -> (State, GfxState) {
 /// Load state's tail for the synthetic world: the object list over the actors, the window cache
 /// around the centre (0x108d10) and the view with its draw lists (0x109e74 → 0x10e81e), which
 /// the window render reads. Run again after moving the centre or an actor.
-fn prepare(s: &mut State) {
+pub(super) fn prepare(s: &mut State) {
     crate::objects::init_slots(&mut s.objects);
     crate::objects::link_actors(&mut s.objects);
     s.map.window_key = [-1; 3];

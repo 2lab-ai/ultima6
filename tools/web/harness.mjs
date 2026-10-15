@@ -228,16 +228,21 @@ export async function forgetSaves() {
 // before a step reaches the game at the clock after that step (as the Rust tests' press:
 // `now_ms()` after the tick that took it). `__buttons` holds [buttons, clock] for each change
 // of the buttons the page queued, at the clock of the step that took it: a press's delivered
-// hold is its release's clock less its own, whatever the wall time between them.
+// hold is its release's clock less its own, whatever the wall time between them. `__presents`
+// counts the page's presents, `__converted` those that converted a new frame (frame_version
+// moved: spec 06 O1); `__shownGame` is the game that presented last.
 const GLUE_HOOKS = `
 globalThis.__u6mem = () => (wasm ? wasm.memory.buffer.byteLength : 0);
 globalThis.__ticks = 0;
 globalThis.__clock = 0;
 globalThis.__buttons = [];
 globalThis.__sent = [];
+globalThis.__presents = 0;
+globalThis.__converted = 0;
 {
   const step = Game.prototype.step;
   const ran = Game.prototype.ran;
+  const present = Game.prototype.present;
   const pointer = Game.prototype.pointer;
   const keyDown = Game.prototype.key_down;
   let queued = [];
@@ -262,6 +267,13 @@ globalThis.__sent = [];
     queued = [];
     globalThis.__saveGen = this.save_generation();
     globalThis.__owned = this.keys_owned();
+  };
+  Game.prototype.present = function () {
+    const before = this.frame_version();
+    present.call(this);
+    globalThis.__presents += 1;
+    if (this.frame_version() !== before) globalThis.__converted += 1;
+    globalThis.__shownGame = this;
   };
   Game.prototype.ran = function (k) {
     ran.call(this, k);

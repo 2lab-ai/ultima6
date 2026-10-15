@@ -31,9 +31,9 @@
 // Time (spec 06): the engine runs only in fixed steps of one PAL frame (`step_ms`, 20 ms).
 // Each display frame the page asks the game how many steps the wall time since the last one
 // is worth at the viewer's speed (`pace`), runs them while the frame's budget lasts, reports
-// them (`ran`) and shows the result once (`present`). The speed (1x .. 8x, Max) is the
-// viewer's, kept in localStorage; - and = / + on the canvas, the keypad - and +, and the Speed
-// buttons change it.
+// them (`ran`) and shows the result once, if they changed it (`present`, `frame_version`).
+// The speed (1x .. 8x, Max) is the viewer's, kept in localStorage; - and = / + on the canvas,
+// the keypad - and +, and the Speed buttons change it.
 import init, {
   Game, budget_ms, input_too_large, max_input_bytes, max_save_bytes, max_save_file_bytes, step_ms,
   zip_sliced,
@@ -422,7 +422,17 @@ let last = 0; // the time of the previous frame
 let interval = 1000 / 60; // the display's frame interval, smoothed over the frames
 let stepMs = 20; // step_ms(), once the engine loaded
 
+let drawnGame = null; // the game whose frame the canvas shows
+let drawnVersion = -1; // its frame_version() then
+
+// Draws the game's RGBA frame on the canvas, unless the canvas already shows that frame of
+// that game (spec 06 O1: `present` converts only a changed frame, and so the page draws only
+// a changed one; a start resizes, and so clears, the canvas, and its first frame is drawn).
 function draw() {
+  const version = game.frame_version();
+  if (game === drawnGame && version === drawnVersion) return;
+  drawnGame = game;
+  drawnVersion = version;
   // Re-create the view every frame: wasm memory growth detaches old buffers.
   const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.frame_ptr(), game.frame_len());
   canvas.getContext('2d').putImageData(new ImageData(pixels, canvas.width, canvas.height), 0, 0);
@@ -431,8 +441,8 @@ function draw() {
 // One display frame: the steps its wall time is worth at the chosen speed (`pace`; the first
 // frame's time can precede `last`, which counts 0), run while the frame's budget lasts (half the
 // display's interval, at least 3 ms; the first always) and until the sequence ends, then
-// reported (`ran`). The frame is converted and drawn once if any ran; the sound, a Save to
-// store and the reflected state once per frame.
+// reported (`ran`). If any ran, the frame is converted and drawn once, when they changed it;
+// the sound, a Save to store and the reflected state once per frame.
 function frame(now) {
   if (!game || crashed) {
     looping = false;
@@ -523,6 +533,8 @@ async function boot(next, origin) {
   game = next;
   owner = next;
   old?.free();
+  drawnGame = null; // the freed game's frame is not this one's
+  drawnVersion = -1;
   saveSeen = 0;
   paceGame(next);
   try {
