@@ -33,6 +33,16 @@
     }
     /* The ring says the game has the keyboard (also after a scripted focus, so not :focus-visible). */
     canvas:focus { outline-color: #ffd166; }
+    /* The speed badge lies over the canvas: the canvas keeps its box, and the pointer passes
+       through the badge to it. */
+    #screen-box { position: relative; }
+    #speed-badge { position: absolute; top: 6px; left: 6px; padding: 0 6px; border-radius: 4px;
+                   background: rgba(11, 11, 15, 0.8); color: #ffd166; font-size: 0.875rem;
+                   pointer-events: none; }
+    #speed-group { display: inline-block; margin-left: 8px; white-space: nowrap; }
+    #speed-group button { margin-left: 4px; }
+    #speed-label { display: inline-block; min-width: 5.5em; text-align: center; }
+    #behind { color: #ff9a9a; }
     #drop {
       margin-top: 16px;
       padding: 16px;
@@ -58,8 +68,12 @@
 <body>
   <main>
     <h1>Ultima VI (Rust port)</h1>
-    <canvas id="screen" width="320" height="200" tabindex="0"
-            aria-label="Game screen. Click it or Tab to it; then arrow keys walk and letter keys are game commands. Tab leaves it."></canvas>
+    <div id="screen-box">
+      <canvas id="screen" width="320" height="200" tabindex="0"
+              aria-label="Game screen. Click it or Tab to it; then arrow keys walk and letter keys are game commands. Tab leaves it."></canvas>
+      <span id="speed-badge" hidden
+            title="Game speed: - slower, = or + faster, the keypad - and + always. While the stats or inventory panel is open, - and + belong to the panel (its members), and while a line is typed to the line.">1&times;</span>
+    </div>
     <section id="drop" aria-labelledby="drop-title">
       <p id="drop-title">
         Drop your Ultima VI files: the archive.org zip, the three ADFs, or the
@@ -71,6 +85,12 @@
       <button id="forget" type="button" disabled>Forget the kept files</button>
       <button id="forget-save" type="button" disabled>Forget the saved game</button>
       <button id="mute" type="button" aria-pressed="false">Mute</button>
+      <span id="speed-group" role="group" aria-label="Game speed"
+            title="- slower, = or + faster, the keypad - and + always (on the game screen)">
+        Speed<button id="slower" type="button" aria-label="Slower">&minus;</button>
+        <span id="speed-label">1&times;</span><button id="faster" type="button" aria-label="Faster">+</button>
+        <span id="behind" hidden>behind</span>
+      </span>
       <button id="restart" type="button" hidden>Restart</button>
       <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
     </section>
@@ -85,6 +105,12 @@
         saving and restoring the game (Ctrl-S, Ctrl-R), music and sound (Ctrl-Z turns the game's
         sound on and off; the Mute button silences the page). Sound starts once you click or
         press a key on the game screen.</p>
+      <p>Speed: on the game screen - slows the game and = (or +) speeds it up, through 1&times;,
+        1.5&times;, 2&times;, 3&times;, 4&times;, 6&times;, 8&times; and Max; the keypad - and +
+        always do, and so do the Speed buttons. While the stats or inventory panel is open, or a
+        line is being typed, - and + are the game's. 1&times; is the original's pace; above
+        4&times; the music fades out. &ldquo;behind&rdquo; means this computer cannot keep up
+        with the chosen speed.</p>
       <p>Not yet: a few rare object actions (moving a carried thing to someone else, a staff's or
         wand's spell in combat). Those say
         &ldquo;Not implemented in this version&rdquo; or do nothing.</p>

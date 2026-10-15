@@ -218,39 +218,56 @@ export async function forgetSaves() {
 `;
 
 // Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch, the
-// save generation of the game ticked last (whether or not the page stores its Saves), the
-// engine clock and the button changes the game took on it. The clock (`__clock`) is the ms of
-// every tick of a started game summed: the engine adds a tick's ms before the game runs in it,
-// so an event queued before a tick reaches the game at the clock after that tick (as the Rust
-// tests' press: `now_ms()` after the tick that took it). `__buttons` holds [buttons, clock] for
-// each change of the buttons the page queued, at the clock of the tick that took it: a press's
-// delivered hold is its release's clock less its own, whatever the wall time between them.
+// steps run (`__ticks`: the helpers' ticks are the page's fixed steps of 20 ms), the save
+// generation of the game stepped last (whether or not the page stores its Saves), the engine
+// clock and the button changes the game took on it, the keys the game takes itself
+// (`__owned`, keys_owned after the step), the keys the page sent it (`__sent`, their DOM `key`)
+// and, after each frame's report (`ran`), the game's speed (`__speed`, 0 = Max) and its lost
+// time (`__dropped`, `__clamped`). The clock (`__clock`) is the ms of every step of a started
+// game summed: the engine adds a step's ms before the game runs in it, so an event queued
+// before a step reaches the game at the clock after that step (as the Rust tests' press:
+// `now_ms()` after the tick that took it). `__buttons` holds [buttons, clock] for each change
+// of the buttons the page queued, at the clock of the step that took it: a press's delivered
+// hold is its release's clock less its own, whatever the wall time between them.
 const GLUE_HOOKS = `
 globalThis.__u6mem = () => (wasm ? wasm.memory.buffer.byteLength : 0);
 globalThis.__ticks = 0;
 globalThis.__clock = 0;
 globalThis.__buttons = [];
+globalThis.__sent = [];
 {
-  const tick = Game.prototype.tick;
+  const step = Game.prototype.step;
+  const ran = Game.prototype.ran;
   const pointer = Game.prototype.pointer;
+  const keyDown = Game.prototype.key_down;
   let queued = [];
   let held = 0;
   Game.prototype.pointer = function (x, y, buttons) {
     if (this.started()) queued.push(buttons & 3);
     return pointer.call(this, x, y, buttons);
   };
-  Game.prototype.tick = function (ms) {
+  Game.prototype.key_down = function (code, key, ctrl) {
+    globalThis.__sent.push(key);
+    return keyDown.call(this, code, key, ctrl);
+  };
+  Game.prototype.step = function (ms) {
     globalThis.__ticks += 1;
     if (globalThis.__trap) throw new WebAssembly.RuntimeError('unreachable (test trap)');
     if (this.started()) globalThis.__clock += ms;
-    const done = tick.call(this, ms);
+    step.call(this, ms);
     for (const b of queued) {
       if (b !== held) globalThis.__buttons.push([b, globalThis.__clock]);
       held = b;
     }
     queued = [];
     globalThis.__saveGen = this.save_generation();
-    return done;
+    globalThis.__owned = this.keys_owned();
+  };
+  Game.prototype.ran = function (k) {
+    ran.call(this, k);
+    globalThis.__speed = this.speed();
+    globalThis.__dropped = this.dropped_ms();
+    globalThis.__clamped = this.clamped_ms();
   };
 }
 `;
@@ -485,9 +502,10 @@ export async function waitPrompt(page, timeout = 60_000) {
   }, waits, { timeout, polling: 'raf' });
 }
 
-/// Waits `n` frames of the page. The page's frame callback (one engine tick) runs before this
-/// wait's in every frame, so after them a running game ticked `n` more times; a stopped or
-/// ended one did not, which is what the checks of a stopped loop count on.
+/// Waits `n` frames of the page. The page's frame callback runs before this wait's in every
+/// frame, so after them a running game had `n` more frames (at 1×, the steps their wall time is
+/// worth: about one in most frames at 50–60 Hz); a stopped or ended one stepped in none, which
+/// is what the checks of a stopped loop count on.
 export async function waitFrames(page, n, timeout = 60_000) {
   if (n <= 0) return;
   waits += 1;
@@ -518,8 +536,9 @@ export async function waitVisible(page, timeout = 30_000) {
   }, null, { timeout, polling: 'raf' });
 }
 
-/// Waits until the engine ran `n` more ticks: gated pages count them in the glue; elsewhere
-/// `n` frames of the page's loop, which ticks once per frame.
+/// Waits until the engine ran `n` more ticks, the page's fixed steps of 20 ms: gated pages count
+/// them in the glue; elsewhere `n` frames of the page's loop (at 1×, as much engine time as
+/// `n` frames of the display).
 export async function waitTicks(page, n, timeout = 60_000) {
   const from = await page.evaluate(() => globalThis.__ticks);
   if (from === undefined) {
@@ -529,9 +548,10 @@ export async function waitTicks(page, n, timeout = 60_000) {
   await page.waitForFunction((t) => globalThis.__ticks >= t, from + n, { timeout, polling: 'raf' });
 }
 
-/// Waits until the game took every key and pointer event given to the page so far: a tick
+/// Waits until the game took every key and pointer event given to the page so far: a step
 /// hands them to the engine and the game read them all (`data-keys` 0). The page writes
-/// `data-keys` after a tick, so a count read before one is the frame's from before the input.
+/// `data-keys` after each frame, so a count read before one is the frame's from before the
+/// input.
 export async function waitTaken(page, timeout = 60_000) {
   await waitTicks(page, 1, timeout);
   await page.waitForFunction(() => document.getElementById('screen').dataset.keys === '0',
@@ -539,7 +559,7 @@ export async function waitTaken(page, timeout = 60_000) {
 }
 
 /// Presses `key` on the focused canvas, waits until the game took it, then `settle` ticks: the
-/// scripted keys of the Rust tests (`Run::keys`), at the page's tick rate.
+/// scripted keys of the Rust tests (`Run::keys`), in the page's steps.
 export async function press(page, key, settle) {
   await page.keyboard.press(key);
   await waitTaken(page);
@@ -558,4 +578,106 @@ export async function click(page, x, y, settle) {
   await page.mouse.click(...(await screenPoint(page, x, y)));
   await waitTaken(page);
   await waitTicks(page, settle);
+}
+
+/// Opt-in virtual display for the rate tests (spec 06 Acceptance 1): from this call on, the
+/// page's requestAnimationFrame and performance.now run on a virtual clock at `hz` frames a
+/// second that moves only while the test runs frames (`runFrames`). Each frame moves it on by
+/// 1000 / hz ms and calls the callbacks queued, with that time; a step takes no virtual time, so
+/// a frame's budget never runs out. Playwright's own polls keep the real frames (its utility
+/// script took them at the page's first evaluate, before this); the page's loop moves over at
+/// its next real frame, which this waits for. The virtual clock starts at the real one when the
+/// loop's first callback reaches it, so the first virtual frame is about one interval after the
+/// last real one. `displayCost` makes the page's own clock reads cost time (a slow host).
+export async function virtualDisplay(page, hz) {
+  await page.evaluate((rate) => {
+    const realNow = performance.now.bind(performance);
+    const v = { hz: rate, base: realNow(), frames: 0, queue: [], synced: false, cost: 0, spent: 0 };
+    v.now = () => v.base + (v.frames * 1000) / v.hz;
+    // The frames' callbacks: the frame's time, the clock's cost so far reset.
+    v.run = () => {
+      v.frames += 1;
+      v.spent = 0;
+      const due = v.queue;
+      v.queue = [];
+      for (const callback of due) callback(v.now());
+      return due.length;
+    };
+    window.__display = v;
+    window.requestAnimationFrame = (callback) => {
+      if (!v.synced) {
+        v.synced = true;
+        v.base = realNow();
+      }
+      v.queue.push(callback);
+      return v.queue.length;
+    };
+    performance.now = () => {
+      const t = v.now() + v.spent;
+      v.spent += v.cost;
+      return t;
+    };
+  }, hz);
+  await page.waitForFunction(() => window.__display.queue.length > 0, null, { timeout: 10_000 });
+}
+
+/// On the virtual display: every read of performance.now in a frame moves it on by `ms` (the
+/// page's steps then take time: the frame's budget holds fewer of them); 0 makes them free again.
+export function displayCost(page, ms) {
+  return page.evaluate((cost) => { window.__display.cost = cost; }, ms);
+}
+
+/// On the virtual display: `ms` pass with no frame (a stall, a hidden tab); the next frame comes
+/// that much later.
+export function displayStall(page, ms) {
+  return page.evaluate((wait) => { window.__display.base += wait; }, ms);
+}
+
+/// Sets the virtual display's rate to `hz` from its current time on.
+export function displayRate(page, hz) {
+  return page.evaluate((rate) => {
+    const v = window.__display;
+    v.base = v.now();
+    v.frames = 0;
+    v.hz = rate;
+  }, hz);
+}
+
+/// Runs `n` frames of the virtual display (one evaluate, nothing else runs between them);
+/// returns how many frame callbacks it called and the leader positions the page showed, each
+/// change once (the first is the one before these frames).
+export function runFrames(page, n) {
+  return page.evaluate((count) => {
+    const v = window.__display;
+    const c = document.getElementById('screen');
+    const seen = [c.dataset.leader];
+    let called = 0;
+    for (let i = 0; i < count; i += 1) {
+      called += v.run();
+      if (c.dataset.leader !== seen.at(-1)) seen.push(c.dataset.leader);
+    }
+    return { called, seen };
+  }, n);
+}
+
+/// On the virtual display: runs frames until the game took every input and shows its prompt for
+/// five frames in a row (`waitPrompt`), at most `max`; returns the frames run and the leader
+/// positions the page showed, each change once (the first is the one before these frames).
+export async function runFramesToPrompt(page, max) {
+  const out = await page.evaluate((limit) => {
+    const v = window.__display;
+    const c = document.getElementById('screen');
+    const seen = [c.dataset.leader];
+    let run = 0;
+    let frames = 0;
+    while (frames < limit && run < 5) {
+      v.run();
+      frames += 1;
+      if (c.dataset.leader !== seen.at(-1)) seen.push(c.dataset.leader);
+      run = c.dataset.prompt === '1' && c.dataset.keys === '0' ? run + 1 : 0;
+    }
+    return { frames, seen, prompt: run >= 5 };
+  }, max);
+  if (!out.prompt) throw new Error(`no prompt within ${max} virtual frames`);
+  return out;
 }
