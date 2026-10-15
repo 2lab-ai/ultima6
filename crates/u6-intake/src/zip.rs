@@ -15,7 +15,8 @@
 //! the same check of each entry's range ([`Slice`]), so both refuse alike (each of these is
 //! stricter than the reader before slicing):
 //! - more than [`MAX_ENTRIES`] central records, or a central directory starting more than
-//!   [`MAX_DIRECTORY_BYTES`] before the end of its end record (both before any record is read);
+//!   [`MAX_DIRECTORY_BYTES`] before the end of its end record (both before any record is read),
+//!   or whose records run past the start of its end records;
 //! - an entry the filter takes with a method other than stored or deflate, or 4 GiB or more
 //!   packed or declared unpacked;
 //! - an entry whose local header and data do not fit before the end of the file;
@@ -598,6 +599,10 @@ fn walk(v: &View, size: u64, keep: impl Fn(&str) -> bool) -> Result<Vec<Slice>, 
     for _ in 0..count {
         let c = central_entry(v, at)?;
         at = c.next;
+        // The directory lies before its end records (the limit is measured to them).
+        if at > ends {
+            return Err(invalid().into());
+        }
         records.push(c.local);
         if keep(&entry_name(c.raw_name, c.flags & 0x800 != 0)) {
             if c.method != 0 && c.method != 8 {
@@ -1663,6 +1668,41 @@ mod tests {
             record: Some(zip.len() - 22),
             read: Ok(all),
             reads: Some(2),
+            zip,
+        });
+
+        // opus XN5: the end record inside the last central record's name (the rest of the name
+        // its comment), the directory up to it within the limit but its records running past it
+        // (as the zip of its entries would carry them past the limit): both paths refuse it.
+        let names: Vec<String> = (0..280).map(|i| format!("{i:0>59996}.adf")).collect();
+        let list: Vec<E> = names.iter().map(|n| stored(n, b"d")).collect();
+        let (mut zip, exact) = make(&list, 0, false);
+        let cd = central_at(&zip);
+        let last_central = zip.len() - 22 - (46 + 60_000);
+        let last_local = exact[279].0 as usize;
+        let k = 100; // where in the last name the end record starts
+        let e = last_central + 46 + k;
+        let mut record = Vec::new();
+        put_eocd(
+            &mut record,
+            280,
+            (e - cd) as u32,
+            cd as u32,
+            60_000 - k - 22,
+        );
+        zip.truncate(zip.len() - 22); // the file ends with the last name
+        zip[e..e + 22].copy_from_slice(&record);
+        zip[last_local + 30 + k..][..22].copy_from_slice(&record); // the local name agrees
+        if e + 22 - cd > MAX_DIRECTORY_BYTES as usize
+            || zip.len() - cd <= MAX_DIRECTORY_BYTES as usize
+        {
+            setup.push("opus XN5: not a directory within the limit up to its record".to_string());
+        }
+        rows.push(Row {
+            what: "opus XN5: the end record inside the last central record's name",
+            record: Some(e),
+            read: Err(invalid()),
+            reads: None,
             zip,
         });
 
