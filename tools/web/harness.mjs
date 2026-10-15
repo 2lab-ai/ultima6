@@ -218,16 +218,37 @@ export async function forgetSaves() {
 `;
 
 // Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch, the
-// save generation of the game ticked last (whether or not the page stores its Saves).
+// save generation of the game ticked last (whether or not the page stores its Saves), the
+// engine clock and the button changes the game took on it. The clock (`__clock`) is the ms of
+// every tick of a started game summed: the engine adds a tick's ms before the game runs in it,
+// so an event queued before a tick reaches the game at the clock after that tick (as the Rust
+// tests' press: `now_ms()` after the tick that took it). `__buttons` holds [buttons, clock] for
+// each change of the buttons the page queued, at the clock of the tick that took it: a press's
+// delivered hold is its release's clock less its own, whatever the wall time between them.
 const GLUE_HOOKS = `
 globalThis.__u6mem = () => (wasm ? wasm.memory.buffer.byteLength : 0);
 globalThis.__ticks = 0;
+globalThis.__clock = 0;
+globalThis.__buttons = [];
 {
   const tick = Game.prototype.tick;
+  const pointer = Game.prototype.pointer;
+  let queued = [];
+  let held = 0;
+  Game.prototype.pointer = function (x, y, buttons) {
+    if (this.started()) queued.push(buttons & 3);
+    return pointer.call(this, x, y, buttons);
+  };
   Game.prototype.tick = function (ms) {
     globalThis.__ticks += 1;
     if (globalThis.__trap) throw new WebAssembly.RuntimeError('unreachable (test trap)');
+    if (this.started()) globalThis.__clock += ms;
     const done = tick.call(this, ms);
+    for (const b of queued) {
+      if (b !== held) globalThis.__buttons.push([b, globalThis.__clock]);
+      held = b;
+    }
+    queued = [];
     globalThis.__saveGen = this.save_generation();
     return done;
   };
