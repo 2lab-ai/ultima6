@@ -84,3 +84,24 @@ Append-only. Closed units, with their receipts.
 - **Deploys:** preview, then production 9f831837, both at bf93585.
   - live-speed on production: 1×→4×→3×→4×→Max (76.8×)→1×; 1.5× kept across a reload; 0 foreign requests, 0 errors.
   - The dispatcher read the walked-into-the-fight frame on preview.
+
+| H0 | 07 | `Framebuffer` source plane (`Src` with image version, `set_src`, `copy_px`), set by `gfx::blit`/`blit_bitmap`, copied by `copy_pixel`/`copy_rect`/dissolve; record versions bumped by the shore merge; enabled by u6-web; source receipt | T4 |
+
+- **H0** merged at 8d66e1b (branch 12be07a + 6c86bcb + 0198349 + 62d1421 + 7531c93, five rounds).
+  - **The plane:**
+    - each pixel names the record, portrait (`letter << 8 | item`) or panel bitmap it was drawn from, with the image's version and its (u, v); overlay and outline pixels are flagged;
+    - copies, the dissolve, the quake, the text scroll, a flight's put-back and combat playback carry their sources; text, plots, sparkles, a missile's own pixels and the pointer are classic;
+    - "current" means `ver` equal to the record's version; a relaunch resets every plane to classic.
+  - **Cost:** published and shown copy only the changed 16-pixel chunks of the plane, each plane with one sync consumer. Idle tick +4.3 µs with the plane on, against +32 µs for whole-plane copies; plane off equals d767366 within noise.
+  - **Source-only publish:** a playback that ends on equal colours puts back the last picture's sources without a new colour frame. `Engine::src_version()` moves only when shown's sources change, and the H1 compositor keys on it.
+  - **Receipts:**
+    - owner-local source receipt: pass, 2753 frames, 0 stale, map window 100.0% tile;
+    - paired engines plane off vs on, 1500 ticks: State, RNG, cache decisions and the colours of all four buffers equal every tick, published plane = front plane, shown = published except the pointer;
+    - mutations in release builds (debug assertions off): opus 8/8 on the last round, 20/23 and 10/11 on earlier rounds, survivors unreachable or equivalent.
+  - **Gates on the merge:** 939 passed, web 47/47 three times.
+  - **Reviews:**
+    - gpt-6-astra in parts, every round: round 1 three parts (APPROVE, APPROVE, CHANGES on the tests); round 2 four parts (two CHANGES: the playback sources, downstream propagation); round 3 CHANGES (a stationary pointer); round 4 APPROVE;
+    - opus: round 1 APPROVE; rounds 2–5 combined APPROVE.
+  - **Deploys:** preview 9f7caf87, then production 3eba8ffb, both at 8d66e1b.
+    - live-speed on production: Max 76.8×; 0 foreign requests, 0 errors.
+    - The dispatcher read the menu, castle hall, walked-into-the-fight and after-reload frames on preview; they are unchanged.
