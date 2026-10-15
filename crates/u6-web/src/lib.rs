@@ -1283,7 +1283,7 @@ mod tests {
             sliced.input_bytes
         );
         assert!(
-            sliced.inputs[0].data.len() <= sliced.input_bytes,
+            sliced.inputs[0].data.len() <= sliced.input_bytes + u6_intake::zip::REBUILT_COMMENT,
             "the rebuilt zip"
         );
         assert_eq!(sliced.input_held(), sliced.input_bytes as f64);
@@ -1359,7 +1359,7 @@ mod tests {
         assert_eq!(ok.reads().len(), 3, "the first bytes, the tail, the entry");
         assert!(game.input_bytes < 1 << 20, "{} bytes", game.input_bytes);
         assert!(
-            game.inputs[1].data.len() <= game.input_bytes,
+            game.inputs[1].data.len() <= game.input_bytes + u6_intake::zip::REBUILT_COMMENT,
             "the rebuilt zip"
         );
         let report = game.boot(0, false).unwrap_err();
@@ -1493,7 +1493,7 @@ mod tests {
         let mut game = Game::new();
         game.collect("loose.txt", b"loose".to_vec()).unwrap();
         let err = sparse_in(&mut game, "big.zip", &file).unwrap_err();
-        let rebuilt = room + 2 * (46 + 10) + 22;
+        let rebuilt = room + 2 * (46 + 10) + 22 + u6_intake::zip::REBUILT_COMMENT as u64;
         assert_eq!(err, too_large(held + rebuilt));
         assert!(
             held + room <= max && held + rebuilt > max,
