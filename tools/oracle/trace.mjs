@@ -40,11 +40,13 @@ const prompt = async () => {
   const m = [...t.matchAll(/\((\d+),(\d+)\) \$([0-9a-f]+):/g)].filter((x) => x.index >= mark).at(-1);
   return m ? { v: Number(m[1]), pc: parseInt(m[3], 16) } : null;
 };
-// Runs on (`g`) or steps (`s`) from a stop, and marks the console there.
+// Runs on (`g`) or steps (`s`) from a stop, and marks the console there: typed and marked in
+// one page call, so no frame can run (and stop) between the command and the mark.
 const resume = async (cmd) => {
-  await o.shellKeys(page, 'clear');
-  await o.shellKeys(page, cmd);
-  mark = await page.evaluate(() => wasm_retro_shell_get_text().length);
+  mark = await page.evaluate((cmd) => {
+    for (const ch of `clear\n${cmd}\n`) Module._wasm_retro_shell_press_key(ch.charCodeAt(0));
+    return wasm_retro_shell_get_text().length;
+  }, cmd);
 };
 try {
   await o.setFloppyCount(page, 4);
@@ -79,7 +81,12 @@ try {
   const entries = new Map(Object.keys(TRACED).map((a) => [runtime(bases, Number(a)), Number(a)]));
   for (const a of entries.keys()) await page.evaluate((c) => wasm_retro_shell(c), `break at ${hex(a)}`);
   await o.waitFrames(page, 3);
+  // The console keeps a bounded scrollback: cleared here (and at every resume), so a stop's
+  // prompt always lies past the mark.
+  await page.evaluate(() => wasm_retro_shell('clear'));
+  await o.waitFrames(page, 3);
   mark = await page.evaluate(() => wasm_retro_shell_get_text().length);
+  log(`console cleared: ${mark} chars`);
   const returns = new Set();
   const steps = [];
   for (const key of KEYS) {
@@ -96,6 +103,11 @@ try {
       const f2 = await o.frame(page);
       const p = f1 === f2 ? await prompt() : null;
       const hit = p && (entries.has(p.pc) || returns.has(p.pc));
+      if (process.env.U6_TRACE_DEBUG && Date.now() - (globalThis.__dbg ?? 0) > 15000) {
+        globalThis.__dbg = Date.now();
+        const t = await page.evaluate(() => wasm_retro_shell_get_text());
+        log(`debug: frames ${f1} ${f2}, prompt ${JSON.stringify(p)}, mark ${mark}, text ${t.length} ${JSON.stringify(t.slice(-160))}, open ${open.length}, calls ${calls.length}`);
+      }
       if (!hit) {
         const rd = await page.evaluate(() => window.__trace.reading);
         const z = rd.filter(([, r]) => r === 0);
