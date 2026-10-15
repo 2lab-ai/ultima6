@@ -15,7 +15,7 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 | `08-i18n-ko.md` | 2 |
 | `09-npc-voice.md` | 3 |
 
-Spec review: gpt-6-astra reviewed 06–09 (all CHANGES); every must-fix is folded into rev 2 of each spec. Next: the opus spec review of rev 2, then the units below in order, starting with T1.
+Spec review: gpt-6-astra reviewed 06–09 (all CHANGES); every must-fix is folded into rev 2 of each spec. opus reviewed 06 rev 2 (CHANGES, 5 must-fix, checked against the code), folded into rev 3. The opus reviews of 07–09 are pending (claude capacity). In flight: T1 (with the rev-3 scope), T6 (998cfac, in review).
 
 ## Order, and why it differs from the user's numbering
 
@@ -30,8 +30,8 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 
 | Unit | Spec | Scope | Needs |
 |---|---|---|---|
-| T1 | 06 | `u6-core` `Pacer` + `STEP_MS` + tests; `u6-web` `step/present/pace/set_speed/speed/plus_minus_owner` (keep `tick`) | — |
-| T2 | 06 | `site/app.js` fixed-step loop, key intercept, badge and Speed buttons, `localStorage`, gain ramp above 4×; harness `GLUE_HOOKS` wraps `step`; web tests | T1 |
+| T1 | 06 | `u6-core` `Pacer` (`due(dt, held)`, `ran`, clamp/budget losses) + `STEP_MS` + tests; `Io` port-only key-owner flag set by the `u` read loop and menu; `u6-web` `step/present/pace/ran/set_speed/speed/dropped_ms/clamped_ms/keys_owned` (keep `tick`) | — |
+| T2 | 06 | `site/app.js` fixed-step loop, key intercept by DOM `key`, badge and Speed buttons, `localStorage`, gain ramp above 4×; harness `GLUE_HOOKS` wraps `step` + rAF/now shim; delete `Game::tick`; web tests | T1 |
 | T3 | 06 | native `run_window` on `Pacer`, `HEADLESS_TICK_MS` 20, keys, speed in the title; re-run the 16 ms receipts at 20 ms | T1 |
 | T4 | 06 | O1 + O2: one RGBA per changed frame; skip idle map re-render; `merge_shores` on its counter | T2 |
 | T5 | 06 | O3: planar row/word blits in the opening | T1 |
