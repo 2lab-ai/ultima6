@@ -102,8 +102,9 @@ impl Sliced {
 
     /// Takes the bytes of the range [`Sliced::need`] named. `held`: what the dropped files hold
     /// in wasm with these bytes; once the directory is read, its disk-image entries must be at
-    /// most [`MAX_ENTRIES`], yield at most [`crate::MAX_UNZIPPED_BYTES`] and their ranges fit
-    /// under [`crate::MAX_INPUT_BYTES`] with `held`, or none of them is read.
+    /// most [`MAX_ENTRIES`], yield at most [`crate::MAX_UNZIPPED_BYTES`], and the zip of them
+    /// (their ranges, read into it, and its central directory: [`Rebuilt::holds`]) fit under
+    /// [`crate::MAX_INPUT_BYTES`] with `held`, or none of them is read and nothing reserved.
     pub(crate) fn give(&mut self, bytes: Vec<u8>, held: usize) -> Result<(), String> {
         let Some((start, end)) = self.need() else {
             return Err(format!("{}: no more of it was asked for", self.path));
@@ -133,10 +134,7 @@ impl Sliced {
                         if yields > crate::MAX_UNZIPPED_BYTES {
                             return Err(crate::unpacks_too_much(yields));
                         }
-                        let room = wanted
-                            .iter()
-                            .fold(0u64, |sum, s| sum.saturating_add(s.len()));
-                        let total = (held as u64).saturating_add(room);
+                        let total = (held as u64).saturating_add(Rebuilt::holds(&wanted));
                         if total > crate::MAX_INPUT_BYTES as u64 {
                             return Err(crate::too_large(total));
                         }

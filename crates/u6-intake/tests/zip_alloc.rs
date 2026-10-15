@@ -1,6 +1,11 @@
 //! A deflated entry that inflates to far more than it declares: reading it whole or in slices
 //! stops at the declared size, and a counting allocator shows what the read held at once stays
 //! near that size (synthetic bytes).
+//!
+//! What the counter measures: the bytes the code asked the global allocator for on the test's
+//! own thread, live at once during the call (the sizes requested, not what the allocator rounds
+//! them up to; allocations of other threads not counted). It is not the process's memory: no
+//! resident size, no allocator overhead or fragmentation, no memory freed on another thread.
 
 mod common;
 

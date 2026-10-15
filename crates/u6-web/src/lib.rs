@@ -1135,8 +1135,9 @@ mod tests {
     use zipscan::tests::{Entry, stored, zip};
 
     /// A file of `size` bytes made of `pieces` (offset, bytes), zeros in its last bytes the first
-    /// read of a sliced file takes (`tail_start`), and nothing else: a read that touches a byte
-    /// elsewhere is a request the reader must never make, and panics. Records each range read.
+    /// read of a sliced file takes (`tail_start(size)..size`), and nothing else: a read that
+    /// touches a byte elsewhere, or a range that is reversed or runs past the end of the file, is
+    /// a request the reader must never make, and panics. Records each range read.
     struct Virtual {
         size: u64,
         pieces: Vec<(u64, Vec<u8>)>,
@@ -1157,14 +1158,19 @@ mod tests {
         }
 
         fn read(&self, start: u64, end: u64) -> Vec<u8> {
+            assert!(
+                start <= end && end <= self.size,
+                "a request outside the file: {start}..{end}"
+            );
             self.reads.borrow_mut().push((start, end));
+            let tail = u6_intake::zip::tail_start(self.size)..self.size;
             (start..end)
                 .map(|i| {
                     let mut held = self.pieces.iter();
                     let piece = held.find(|(at, b)| (*at..*at + b.len() as u64).contains(&i));
                     match piece {
                         Some((at, b)) => b[(i - at) as usize],
-                        None if i >= u6_intake::zip::tail_start(self.size) => 0,
+                        None if tail.contains(&i) => 0,
                         None => panic!("a forbidden request: {start}..{end}"),
                     }
                 })
@@ -1340,8 +1346,8 @@ mod tests {
     /// A zip of 600 MiB of which only the parts made here exist: taken, as what is read of it
     /// fits; nothing between the parts is ever asked for. Entries whose ranges would pass the
     /// input limit, disk images yielding more than the unzip limit, a directory more than
-    /// `MAX_DIRECTORY_BYTES` before the end, more records than `MAX_ENTRIES`: refused after the
-    /// tail read, before any entry or the directory is read, keeping nothing.
+    /// `MAX_DIRECTORY_BYTES` before the end: refused after the tail read, before any entry or
+    /// the directory is read, keeping nothing.
     #[test]
     fn a_sliced_zip_counts_the_bytes_read_and_refuses_past_the_limits_before_reading() {
         let size = 600u64 << 20;
@@ -1367,10 +1373,6 @@ mod tests {
             ..declaring("Disk 1.adf", 1 << 20)
         };
         let dir_far = u6_intake::zip::MAX_DIRECTORY_BYTES + 1;
-        let mut many = far(&zip(&[stored("Disk 1.adf", &disk)]), size, 0);
-        let end = &mut many.pieces[1].1;
-        let e = end.len() - 22;
-        end[e + 8..e + 12].copy_from_slice(&[0xff; 4]); // 0xffff records, no Zip64 record
         let unreadable = Some("big.zip: zip unreadable: invalid zip data".to_string());
         let cases = [
             (
@@ -1386,9 +1388,8 @@ mod tests {
             (
                 "a directory too far from the end",
                 far(&zip(&[stored("Disk 1.adf", &disk)]), size, dir_far),
-                unreadable.clone(),
+                unreadable,
             ),
-            ("more records than the limit", many, unreadable),
         ];
         for (what, file, message) in cases {
             let mut game = Game::new();
@@ -1414,6 +1415,96 @@ mod tests {
             );
             assert!(game.zip.is_none(), "{what}");
         }
+    }
+
+    /// `zip` (no comment) with Zip64 end records: a Zip64 end record and locator before its end
+    /// record, which then holds the sentinels.
+    fn with_zip64(zip: &[u8]) -> Vec<u8> {
+        let e = zip.len() - 22;
+        let field = |at: usize| u32::from_le_bytes(zip[e + at..e + at + 4].try_into().unwrap());
+        let count = u64::from(u16::from_le_bytes([zip[e + 8], zip[e + 9]]));
+        let (len, at) = (u64::from(field(12)), u64::from(field(16)));
+        let mut out = zip[..e].to_vec();
+        let z = out.len() as u64;
+        out.extend_from_slice(&0x0606_4b50u32.to_le_bytes());
+        out.extend_from_slice(&44u64.to_le_bytes());
+        out.extend_from_slice(&[45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // versions, disks
+        for v in [count, count, len, at] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&0x0706_4b50u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&z.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]); // disks, counts
+        out.extend_from_slice(&[0xff; 8]); // directory size and offset
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    /// One record over `MAX_ENTRIES`, every record there and valid (the whole path reads such a
+    /// directory to its end), without and with Zip64 end records: refused after the first bytes
+    /// and the tail, before the directory (which starts before the tail) is read.
+    #[test]
+    fn a_valid_directory_over_the_record_limit_is_refused_before_it_is_read() {
+        let max = u6_intake::zip::MAX_ENTRIES as usize;
+        let names: Vec<String> = (0..max + 1).map(|i| format!("{i:05}")).collect();
+        let mut list: Vec<Entry> = names.iter().map(|n| stored(n, b"")).collect();
+        list[0] = stored("Disk 1.adf", &[2; 64]);
+        let at_limit = zip(&list[..max]);
+        let mut game = Game::new();
+        assert_eq!(
+            slice_in(&mut game, "u6.zip", &at_limit),
+            Ok(4),
+            "at the limit: read"
+        );
+        let plain = zip(&list);
+        for (what, data) in [("plain", plain.clone()), ("Zip64", with_zip64(&plain))] {
+            let file = Virtual::whole(&data);
+            let size = file.size;
+            let mut game = Game::new();
+            let err = sparse_in(&mut game, "u6.zip", &file).unwrap_err();
+            assert_eq!(err, "u6.zip: zip unreadable: invalid zip data", "{what}");
+            let tail = (u6_intake::zip::tail_start(size), size);
+            assert_eq!(file.reads(), [(0, 4), tail], "{what}: not the directory");
+            let mut whole = Game::new();
+            whole.collect("u6.zip", data).unwrap();
+            assert_eq!(whole.boot(0, false).unwrap_err(), err, "{what}: read whole");
+        }
+    }
+
+    /// The zip assembled from the entries is what the page holds of them: their ranges fit with
+    /// what is held, the zip of them (with its central directory) does not. Refused after the
+    /// tail, before the entry is read or the zip's room reserved (reading it would be a
+    /// forbidden request).
+    #[test]
+    fn a_sliced_zip_whose_rebuilt_zip_would_pass_the_limit_is_refused_before_reading() {
+        let size = 600u64 << 20;
+        let max = MAX_INPUT_BYTES as u64;
+        let tail = size - u6_intake::zip::tail_start(size);
+        let held = 5 + 4 + tail; // the loose file, the first bytes, the tail
+        let room = max - held - 10; // the entry's range: from its local header, 64 KiB past its data
+        let entry = Entry {
+            csize: (room - 0xffff - 40) as u32,
+            ..declaring("Disk 1.adf", 1 << 20)
+        };
+        let file = far(&zip(&[entry]), size, 0);
+        let mut game = Game::new();
+        game.collect("loose.txt", b"loose".to_vec()).unwrap();
+        let err = sparse_in(&mut game, "big.zip", &file).unwrap_err();
+        let rebuilt = room + 2 * (46 + 10) + 22;
+        assert_eq!(err, too_large(held + rebuilt));
+        assert!(
+            held + room <= max && held + rebuilt > max,
+            "only the rebuilt zip passes"
+        );
+        assert_eq!(file.reads(), [(0, 4), (size - tail, size)], "not the entry");
+        assert_eq!(
+            (game.files_loaded(), game.input_bytes),
+            (1, 5),
+            "nothing kept"
+        );
     }
 
     /// A file that does not read as the part of a zip it was asked for, an entry past the end of
