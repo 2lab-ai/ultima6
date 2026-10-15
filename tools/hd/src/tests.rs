@@ -1732,17 +1732,42 @@ fn a_flat_tile_takes_no_other_picture() {
 #[test]
 fn the_work_dir_takes_one_command_at_a_time() {
     let w = work("lock");
+    // Held with the file still empty (as between a holder's open and its pid write): refused.
     let first = w.lock().unwrap();
-    assert!(w.lock().unwrap_err().contains("another u6-hd"));
+    std::fs::write(w.path(".u6-hd.lock"), b"").unwrap();
+    let e = w.lock().unwrap_err();
+    assert!(e.contains("another u6-hd is using"), "{e}");
+    std::fs::write(w.path(".u6-hd.lock"), std::process::id().to_string()).unwrap();
+    let e = w.lock().unwrap_err();
+    assert!(
+        e.contains(&format!("another u6-hd (pid {})", std::process::id())),
+        "{e}"
+    );
+    // Two handles of the one file, as two processes would hold them: dropping the holder is
+    // what frees it, and the file stays where it is (never removed, never re-created).
+    let ino = |p: &Path| std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(p).unwrap());
+    let before = ino(&w.path(".u6-hd.lock"));
     drop(first);
+    assert!(w.path(".u6-hd.lock").exists());
     let again = w.lock().unwrap();
+    assert_eq!(ino(&w.path(".u6-hd.lock")), before);
+    assert!(w.lock().is_err());
     drop(again);
-    // A lock left by a process that is gone is taken over.
-    let mut gone = std::process::Command::new("/usr/bin/true").spawn().unwrap();
-    let pid = gone.id();
-    gone.wait().unwrap();
-    std::fs::write(w.path(".u6-hd.lock"), pid.to_string()).unwrap();
-    assert!(w.lock().is_ok());
+    // A pid written by a process that is gone, or garbage, holds nothing: only the lock does.
+    std::fs::write(w.path(".u6-hd.lock"), "999999999 not a pid").unwrap();
+    let held = w.lock().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(w.path(".u6-hd.lock")).unwrap(),
+        std::process::id().to_string()
+    );
+    drop(held);
+    // A symlink in its place is refused, not followed.
+    std::fs::remove_file(w.path(".u6-hd.lock")).unwrap();
+    let target = w.path("elsewhere");
+    std::fs::write(&target, b"keep").unwrap();
+    std::os::unix::fs::symlink(&target, w.path(".u6-hd.lock")).unwrap();
+    assert!(w.lock().unwrap_err().contains("not a regular file"));
+    assert_eq!(std::fs::read(&target).unwrap(), b"keep");
     let _ = std::fs::remove_dir_all(&w.root);
 }
 

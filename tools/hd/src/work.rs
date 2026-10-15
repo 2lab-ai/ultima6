@@ -187,62 +187,61 @@ pub fn digest(parts: &[&[u8]]) -> String {
     format!("{h:016x}")
 }
 
-/// The work dir's lock, held while a command writes there; removed when dropped.
+/// The work dir's lock, held while a command writes there: an advisory lock (`flock`) on the
+/// open handle of `.u6-hd.lock`, released when the handle closes, by drop or by the process
+/// ending however it ends. The file stays: removing it would let a waiting command lock the old
+/// file while a new one locks a fresh one.
 #[derive(Debug)]
 pub struct Lock {
-    path: PathBuf,
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// Whether process `pid` is running.
-fn alive(pid: &str) -> bool {
-    !pid.is_empty()
-        && pid.bytes().all(|b| b.is_ascii_digit())
-        && std::process::Command::new("/bin/kill")
-            .args(["-0", pid])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+    _file: std::fs::File,
 }
 
 impl Work {
-    /// Takes the work dir's lock (`.u6-hd.lock`, created with `O_EXCL`, holding the pid): a
-    /// second command on the same work dir is refused while the first runs; a lock whose
-    /// process is gone is taken over.
+    /// Takes the work dir's lock: a second command on the same work dir is refused while the
+    /// first holds it, and a command that is gone (killed included) holds nothing. The file
+    /// holds the holder's pid, for the message only.
     pub fn lock(&self) -> Result<Lock, String> {
         let dir = ensure_dir(&self.root)?;
         let path = dir.join(".u6-hd.lock");
-        for _ in 0..2 {
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o644)
-                .open(&path)
-            {
-                Ok(mut f) => {
-                    let _ = write!(f, "{}", std::process::id());
-                    return Ok(Lock { path });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let pid = std::fs::read_to_string(&path).unwrap_or_default();
-                    if alive(pid.trim()) {
-                        return Err(format!(
-                            "{}: another u6-hd (pid {}) is using this work dir",
-                            path.display(),
-                            pid.trim()
-                        ));
-                    }
-                    let _ = std::fs::remove_file(&path);
-                }
-                Err(e) => return Err(format!("{}: {e}", path.display())),
+        // A regular file or none (then created); a symlink there is not followed.
+        if let Ok(m) = std::fs::symlink_metadata(&path)
+            && !m.file_type().is_file()
+        {
+            return Err(format!("{}: not a regular file", path.display()));
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o644)
+            .open(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let pid = std::fs::read_to_string(&path).unwrap_or_default();
+                let pid = pid.trim();
+                let who = if pid.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (pid {pid})")
+                };
+                return Err(format!(
+                    "{}: another u6-hd{who} is using this work dir",
+                    path.display()
+                ));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(format!("{}: {e}", path.display()));
             }
         }
-        Err(format!("{}: could not take the lock", path.display()))
+        // Held: the pid replaces whatever an earlier holder wrote.
+        let pid = std::process::id().to_string();
+        file.set_len(0)
+            .and_then(|()| file.write_all(pid.as_bytes()))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Lock { _file: file })
     }
 
     /// The work dir at `dir`, or the default under `HOME`; refused inside a protected tree.

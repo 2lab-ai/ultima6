@@ -180,6 +180,85 @@ fn a_failed_call_exits_non_zero() {
     let _ = std::fs::remove_dir_all(&e.dir);
 }
 
+/// A `codex` stand-in that takes its prompt, writes its pid to `$STUB_HOLD` and sleeps.
+fn slow_stub(dir: &Path) -> PathBuf {
+    let p = dir.join("codex-slow");
+    std::fs::write(
+        &p,
+        "#!/bin/sh\ncat > /dev/null\necho $$ > \"$STUB_HOLD.tmp\"\nmv \"$STUB_HOLD.tmp\" \"$STUB_HOLD\"\nexec sleep 60\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+#[test]
+fn a_running_command_holds_the_work_dir_until_it_is_gone() {
+    let e = Env::new("lock");
+    let work = e.dir.join("work");
+    let w = work.to_str().unwrap();
+    let hold = e.dir.join("held");
+    assert!(
+        e.run(&["atlas", "--synthetic", "--work", w])
+            .status
+            .success()
+    );
+    let slow = slow_stub(&e.dir);
+    let mut first = e
+        .cmd(&[
+            "run",
+            "--work",
+            w,
+            "--codex",
+            slow.to_str().unwrap(),
+            "--send",
+            "--limit",
+            "1",
+        ])
+        .env("STUB_HOLD", &hold)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    while !hold.exists() {
+        assert!(
+            start.elapsed().as_secs() < 30,
+            "the first command never called codex"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let stub_pid = std::fs::read_to_string(&hold).unwrap().trim().to_string();
+    // While it runs, every command on the work dir is refused, naming the holder.
+    let codex = stub(&e.dir);
+    let c = codex.to_str().unwrap();
+    for args in [
+        vec!["run", "--work", w, "--codex", c],
+        vec!["ingest", "--synthetic", "--work", w],
+        vec!["pack", "--work", w],
+        vec!["atlas", "--synthetic", "--work", w, "--rebuild"],
+    ] {
+        let o = e.run(&args);
+        assert!(!o.status.success(), "{args:?}: {}", text(&o));
+        let pid = format!("another u6-hd (pid {})", first.id());
+        assert!(text(&o).contains(&pid), "{args:?}: {}", text(&o));
+    }
+    // Killed outright (no handler runs): the lock goes with the process, though the file and
+    // its codex child (in its own group) are still there.
+    first.kill().unwrap();
+    first.wait().unwrap();
+    assert!(work.join(".u6-hd.lock").exists());
+    let o = e.run(&["run", "--work", w, "--codex", c]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("Nothing was sent"), "{}", text(&o));
+    assert_eq!(e.calls(), 0);
+    let _ = Command::new("/bin/kill")
+        .args(["-s", "KILL", "--", &format!("-{stub_pid}")])
+        .status();
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
+
 #[test]
 fn the_default_and_relative_work_dirs_are_checked() {
     let e = Env::new("contain");
