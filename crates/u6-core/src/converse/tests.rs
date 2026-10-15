@@ -154,12 +154,23 @@ pub(super) fn files(entries: &[(&str, Vec<u8>)]) -> Files {
 
 // ---- text extraction ---------------------------------------------------------------------------
 
+/// How [`exe`] shortens hunk 10.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cut10 {
+    /// Long enough for every message and its NUL.
+    No,
+    /// Ends before its last message starts.
+    BeforeLast,
+    /// Ends with its last message started and no NUL after it.
+    NoNul,
+}
+
 /// A hunk executable with 35 hunks: CODE hunks 2, 9 and 10 and DATA hunk 33 at their image bases
 /// (one marker byte `A` + n at the address of message n, zeros elsewhere), empty BSS hunks
 /// between. Hunks 2, 10 and 33 are just long enough for their messages (synthetic lengths, not
-/// the shipped hunks'); hunk 9 reaches hunk 10's base, which its length sets. `short10` ends hunk
-/// 10 at its last message.
-fn exe(short10: bool) -> Vec<u8> {
+/// the shipped hunks'); hunk 9 reaches hunk 10's base, which its length sets. `cut` shortens
+/// hunk 10 (see [`Cut10`]).
+fn exe(cut: Cut10) -> Vec<u8> {
     let base = |n: usize| match n {
         2 => 0x0010_4fb0u32,
         9 => 0x0011_25b8,
@@ -194,13 +205,22 @@ fn exe(short10: bool) -> Vec<u8> {
         data
     };
     let fit = |n: usize| (last(n) + 8) & !3;
-    let len10 = if short10 { last(10) & !3 } else { fit(10) };
+    let len10 = match cut {
+        Cut10::No => fit(10),
+        Cut10::BeforeLast => last(10) & !3,
+        Cut10::NoNul => (last(10) & !3) + 4,
+    };
+    let mut h10 = hunk(10, len10);
+    if cut == Cut10::NoNul {
+        // The last message starts inside the loaded bytes; no terminator follows it there.
+        h10[last(10) + 1..].fill(b'z');
+    }
     crate::image::SyntheticGame::new()
         .place_at(2, base(2))
         .loaded(false, hunk(2, fit(2)))
         .place_at(9, base(9))
         .loaded(false, hunk(9, (base(10) - base(9)) as usize))
-        .loaded(false, hunk(10, len10))
+        .loaded(false, h10)
         .place_at(33, base(33))
         .loaded(true, hunk(33, fit(33)))
         .bss(0)
@@ -209,13 +229,15 @@ fn exe(short10: bool) -> Vec<u8> {
 
 #[test]
 fn messages_come_out_of_the_hunks_at_their_addresses() {
-    let t = ConverseText::from_game(&exe(false)).unwrap();
+    let t = ConverseText::from_game(&exe(Cut10::No)).unwrap();
     for (i, &(m, _)) in MESSAGES.iter().enumerate() {
         assert_eq!(t.get(m), [b'A' + i as u8], "{m:?}");
     }
-    // Hunk 10 ending before its last message's NUL (or the message itself) is refused.
-    let err = ConverseText::from_game(&exe(true)).unwrap_err();
-    assert!(err.contains("hunk 10"), "{err}");
+    // Hunk 10 ending before its last message, or inside it with no NUL left, is refused.
+    let err = ConverseText::from_game(&exe(Cut10::BeforeLast)).unwrap_err();
+    assert!(err.contains("past the loaded bytes of hunk 10"), "{err}");
+    let err = ConverseText::from_game(&exe(Cut10::NoNul)).unwrap_err();
+    assert!(err.contains("no NUL inside hunk 10"), "{err}");
     assert!(ConverseText::from_game(b"not a hunk file").is_err());
 }
 
