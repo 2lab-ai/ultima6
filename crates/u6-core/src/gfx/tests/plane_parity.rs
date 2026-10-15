@@ -310,15 +310,23 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>) {
                 }
             }
             if step % 41 == 20 {
-                // Every third quake pauses after its last picture: the playback then ends on the
-                // colours it shows and puts back their sources in a poll with no present (one
-                // would publish them in full), published with the plane alone.
+                // Every third quake pauses after its last picture, and its last picture is the
+                // window put back classic in its own colours (a replay): the playback then ends
+                // on the colours it shows and puts back sources other than the frame's in a poll
+                // with no present (one would publish them in full), published with the plane
+                // alone.
                 let pause = step / 41 % 3 == 1;
                 {
                     let mut s = st.borrow_mut();
                     crate::ui::effects::quake(&mut s, &io, 2, 3);
                     if pause {
                         crate::combat::present::capture_pause(&mut s, 40);
+                        io.draw(|f| {
+                            for (x, y) in (0..176).flat_map(|y| (0..176).map(move |x| (x, y))) {
+                                let colour = f.get(x, y).expect("on the screen");
+                                f.set(x, y, colour);
+                            }
+                        });
                     }
                 }
                 crate::combat::play_effects(&st, &io).await;
