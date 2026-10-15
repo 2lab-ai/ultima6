@@ -6,18 +6,21 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use u6_hdpack::{
-    ATLAS_CELLS, Generator, ImageId, PackError, PackImage, Rgba, TILE_HD, read_pack, write_pack,
+    ATLAS_CELLS, Generator, ImageId, PORTRAIT_HD, PackError, PackImage, Rgba, TILE_HD, read_pack,
+    write_pack,
 };
 
 struct Counting;
 
 static NOW: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = unsafe { System.alloc(layout) };
         if !p.is_null() {
+            ALLOCS.fetch_add(1, Ordering::SeqCst);
             let now = NOW.fetch_add(layout.size(), Ordering::SeqCst) + layout.size();
             PEAK.fetch_max(now, Ordering::SeqCst);
         }
@@ -101,6 +104,31 @@ fn the_reader_holds_one_atlas_at_a_time() {
     }
     println!("peak {peak} bytes refusing a pack with a 100 MB entry it does not name");
     assert!(peak < 4 << 20, "peak {peak}");
+
+    // Allocations grow with the entries, not with their square: each entry is found by name
+    // in one map, not by decoding every entry's name again.
+    let allocs = |n: u16| {
+        let images: Vec<PackImage> = (0..n)
+            .map(|i| PackImage {
+                id: ImageId::Portrait {
+                    letter: b'a' + (i % 26) as u8,
+                    item: i / 26,
+                },
+                hash: u64::from(i),
+                image: Rgba::new(PORTRAIT_HD.0, PORTRAIT_HD.1),
+            })
+            .collect();
+        let pack = write_pack(&images, &g, true).unwrap();
+        drop(images);
+        let before = ALLOCS.load(Ordering::SeqCst);
+        let read = read_pack(&pack).unwrap();
+        let count = ALLOCS.load(Ordering::SeqCst) - before;
+        assert_eq!(read.images.len(), usize::from(n));
+        count
+    };
+    let (small, large) = (allocs(60), allocs(480));
+    println!("allocations reading 60 portraits {small}, 480 portraits {large}");
+    assert!(large < 10 * small, "{small} -> {large}");
 }
 
 /// A zip of `files` stored, the last one replaced by `deflated` declaring `full` bytes.

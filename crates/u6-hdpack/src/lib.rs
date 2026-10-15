@@ -40,6 +40,7 @@
 //! wrong digest, a file whose size differs from its index entry — is refused; a read returns
 //! the whole pack or an error, never part of one.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Cursor;
 
@@ -719,13 +720,16 @@ pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
     else {
         return Err(PackError::Zip("directory outside the file".into()));
     };
-    let mut names: Vec<String> = slices.iter().map(zip::Slice::name).collect();
-    if let Some(n) = names.iter().find(|n| !known_name(n)) {
-        return Err(PackError::Entry(format!("unknown entry {n:?}")));
-    }
-    names.sort_unstable();
-    if names.windows(2).any(|w| w[0] == w[1]) {
-        return Err(PackError::Entry("an entry name twice".into()));
+    // Each name decoded once, into the one map every lookup below uses (sorted by name).
+    let mut names: BTreeMap<String, &zip::Slice> = BTreeMap::new();
+    for s in &slices {
+        let n = s.name();
+        if !known_name(&n) {
+            return Err(PackError::Entry(format!("unknown entry {n:?}")));
+        }
+        if names.insert(n, s).is_some() {
+            return Err(PackError::Entry("an entry name twice".into()));
+        }
     }
     let declared: u64 = slices.iter().map(zip::Slice::unpacked).sum();
     if declared > MAX_FILE_BYTES {
@@ -736,9 +740,8 @@ pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
     // An entry is inflated only when it is wanted, one at a time; every one is checked for its
     // declared size and its CRC-32 (u6_intake::zip::entry).
     let read = |name: &str, max: u64| -> Result<Vec<u8>, PackError> {
-        let s = slices
-            .iter()
-            .find(|s| s.name() == name)
+        let s = *names
+            .get(name)
             .ok_or_else(|| PackError::Files(format!("no {name}")))?;
         if s.unpacked() > max {
             return Err(PackError::Limit(format!("{name} is larger than it can be")));
@@ -779,10 +782,10 @@ pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
     want.extend((0..atlas_rows.len()).map(atlas_name));
     want.extend(entries.iter().filter_map(|e| e.id.file_name()));
     want.sort_unstable();
-    if let Some(n) = names.iter().find(|n| want.binary_search(n).is_err()) {
+    if let Some(n) = names.keys().find(|n| want.binary_search(n).is_err()) {
         return Err(PackError::Files(format!("{n} is not in the index")));
     }
-    if let Some(n) = want.iter().find(|n| names.binary_search(n).is_err()) {
+    if let Some(n) = want.iter().find(|n| !names.contains_key(n.as_str())) {
         return Err(PackError::Files(format!("no {n}")));
     }
     // One atlas decoded at a time: its tiles are cut out and it is dropped before the next,
