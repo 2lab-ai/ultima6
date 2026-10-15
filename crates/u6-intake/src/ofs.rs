@@ -23,20 +23,25 @@ const ST_ROOT: i32 = 1;
 const ST_USERDIR: i32 = 2;
 const ST_FILE: i32 = -3;
 
+/// Bytes of a name in UTF-8: at most 30 characters (the BCPL length is clamped there), each
+/// ISO 8859-1, so U+0000..U+00FF and at most 2 bytes.
+pub const MAX_NAME_BYTES: usize = 60;
 /// Directory levels below the root the walk enters; a directory deeper than that is not read
-/// (one warning per volume). Real Amiga floppies nest a few levels. 64 keeps a path under
-/// 64 x 31 = 1,984 bytes (names are at most 30 characters) and the walk's recursion shallow
-/// on the 1 MiB stack a wasm build gets.
+/// (one warning per volume). Real Amiga floppies nest a few levels. 64 keeps the walk's
+/// recursion shallow on the 1 MiB stack a wasm build gets and a path at most
+/// [`MAX_PATH_BYTES`].
 pub const MAX_DEPTH: usize = 64;
+/// The longest path the walk builds: a file in the deepest directory it enters, 65 names and
+/// 64 slashes, 3,964 bytes.
+pub const MAX_PATH_BYTES: usize = (MAX_DEPTH + 1) * MAX_NAME_BYTES + MAX_DEPTH;
 /// Warnings a volume lists; the rest are counted in one more line.
 pub const MAX_WARNINGS: usize = 32;
-/// Room the intake needs in front of a path for its key: the volume name (at most 30
-/// characters) and a slash.
-const KEY_PREFIX: usize = 31;
+/// Room the intake needs in front of a path for its key: the volume name and a slash.
+const KEY_PREFIX: usize = MAX_NAME_BYTES + 1;
 /// What each file, directory and warning the walk keeps is charged besides its bytes and text:
 /// its list and map entries, the `String` and `Vec` headers, its block in the visited set, and
-/// the same again in the intake's maps. An empty file costs about 270 bytes through the whole
-/// intake, its 61 bytes of name twice included; it is charged 378 (tests/budget.rs).
+/// the same again in the intake's maps. An empty file at the root costs about 270 bytes through
+/// the whole intake, its name twice included (tests/budget.rs).
 pub const ENTRY_BYTES: usize = 256;
 
 #[derive(Clone, Debug, Default)]
@@ -52,7 +57,9 @@ pub struct OfsVolume {
     pub warnings: Vec<String>,
     /// What the walk charged against its limit: each file's bytes (as reserved) and its path
     /// twice (the key and an index copy, with room for the intake's volume prefix in front of
-    /// each), each directory path and each listed warning, and [`ENTRY_BYTES`] for each of them.
+    /// each), each directory path and each listed warning, and [`ENTRY_BYTES`] for each of them
+    /// (strings are built at their exact length, so the charge is what they hold); and, kept as
+    /// spent, a failed read's bytes and a block for each extension table any read walks.
     pub held: usize,
     /// The walk stopped where the next charge would have passed the limit given to
     /// [`read_ofs_within`]: the rest of the volume is not read.
@@ -86,13 +93,27 @@ fn block_checksum_ok(img: &[u8], block: usize) -> bool {
         == 0
 }
 
-/// BCPL string at offset 432, bytes mapped one-to-one to chars (ISO 8859-1).
+/// BCPL string at offset 432, bytes mapped one-to-one to chars (ISO 8859-1), at its exact
+/// length (at most [`MAX_NAME_BYTES`]).
 fn bcpl_name(img: &[u8], block: usize) -> String {
     let base = block * BS + 432;
     let len = usize::from(img.get(base).copied().unwrap_or(0)).min(30);
-    (0..len)
-        .map(|i| char::from(img.get(base + 1 + i).copied().unwrap_or(0)))
-        .collect()
+    let chars = || (0..len).map(|i| char::from(img.get(base + 1 + i).copied().unwrap_or(0)));
+    let mut name = String::with_capacity(chars().map(char::len_utf8).sum());
+    chars().for_each(|c| name.push(c));
+    name
+}
+
+/// `prefix/name` (or `name` at the root) at its exact length: `format!` reserves about twice.
+fn join_path(prefix: &str, name: String) -> String {
+    if prefix.is_empty() {
+        return name;
+    }
+    let mut path = String::with_capacity(prefix.len() + 1 + name.len());
+    path.push_str(prefix);
+    path.push('/');
+    path.push_str(&name);
+    path
 }
 
 /// `"DOS<n>"` when the boot block carries the DOS signature.
@@ -143,8 +164,9 @@ impl Reader<'_> {
             self.unlisted += 1;
             return;
         }
-        let w = msg();
-        if self.charge(w.len() + ENTRY_BYTES) {
+        let mut w = msg();
+        w.shrink_to_fit();
+        if self.charge(w.capacity() + ENTRY_BYTES) {
             self.warnings.push(w);
         }
     }
@@ -161,8 +183,9 @@ impl Reader<'_> {
     fn set_file(&mut self, path: String, bytes: Vec<u8>, key: usize) {
         match self.index.get(&path) {
             Some(&i) => {
+                // The earlier copy was charged its byte size, its length.
                 let old = std::mem::replace(&mut self.files[i].1, bytes);
-                self.held -= old.capacity() + key;
+                self.held -= old.len() + key;
             }
             None => {
                 self.index.insert(path.clone(), self.files.len());
@@ -174,8 +197,9 @@ impl Reader<'_> {
 
 impl Reader<'_> {
     /// The file's bytes, or `None` when they and `key` (what its path costs) would pass the
-    /// limit (nothing is read then). Both are charged before the bytes are reserved and given
-    /// back if the read fails.
+    /// limit (nothing is read then), or when the tables it walks do. Both are charged before
+    /// the bytes are reserved. A failed read keeps its charge: what it copied counts as spent,
+    /// so headers that share one bad chain cannot copy it again and again past the limit.
     fn read_file(&mut self, hdr: usize, path: &str, key: usize) -> Result<Option<Vec<u8>>, Error> {
         let size = u32_at(self.img, hdr * BS + 324) as usize;
         // A file's bytes sit in the image's blocks, at most a block's worth in each, so no file
@@ -190,14 +214,15 @@ impl Reader<'_> {
         if !self.charge(size + key) {
             return Ok(None);
         }
-        let read = self.read_blocks(hdr, path, size);
-        if read.is_err() {
-            self.held -= size + key;
-        }
-        read.map(Some)
+        self.read_blocks(hdr, path, size)
     }
 
-    fn read_blocks(&mut self, hdr: usize, path: &str, size: usize) -> Result<Vec<u8>, Error> {
+    fn read_blocks(
+        &mut self,
+        hdr: usize,
+        path: &str,
+        size: usize,
+    ) -> Result<Option<Vec<u8>>, Error> {
         let img = self.img;
         // Exactly the byte size, so the bytes never move to a larger block as they grow.
         let mut out = Vec::with_capacity(size);
@@ -207,6 +232,12 @@ impl Reader<'_> {
         while table != 0 && out.len() < size {
             if !self.valid(table) || hops > self.blocks {
                 return Err(Error::new(format!("{path}: broken extension chain")));
+            }
+            // Each table after the first is a block's worth of work (its checksum reads it
+            // whole), charged and kept: empty tables copy nothing, but many headers can walk
+            // one long chain of them.
+            if hops > 0 && !self.charge(BS) {
+                return Ok(None);
             }
             hops += 1;
             let t = table as usize;
@@ -252,7 +283,7 @@ impl Reader<'_> {
                 out.len()
             )));
         }
-        Ok(out)
+        Ok(Some(out))
     }
 
     /// Walks the directory at `dir_block`, `depth` levels below the root (the root is 0).
@@ -274,12 +305,7 @@ impl Reader<'_> {
                     self.warn(|| format!("{here}: loop at block {b}"));
                     break;
                 }
-                let name = bcpl_name(img, blk);
-                let path = if prefix.is_empty() {
-                    name
-                } else {
-                    format!("{prefix}/{name}")
-                };
+                let path = join_path(prefix, bcpl_name(img, blk));
                 let kind = s32_at(img, blk * BS);
                 let sec = s32_at(img, blk * BS + BS - 4);
                 if kind != T_HEADER {
@@ -287,7 +313,7 @@ impl Reader<'_> {
                 } else {
                     self.check_header(blk, &path);
                     if sec == ST_FILE {
-                        let key = 2 * (KEY_PREFIX + path.len()) + ENTRY_BYTES;
+                        let key = 2 * (KEY_PREFIX + path.capacity()) + ENTRY_BYTES;
                         match self.read_file(blk, &path, key) {
                             Ok(Some(bytes)) => self.set_file(path, bytes, key),
                             Ok(None) => return,
@@ -296,7 +322,7 @@ impl Reader<'_> {
                     } else if sec == ST_USERDIR {
                         if depth >= MAX_DEPTH {
                             self.too_deep = true;
-                        } else if self.charge(path.len() + ENTRY_BYTES) {
+                        } else if self.charge(path.capacity() + ENTRY_BYTES) {
                             self.dirs.push(path.clone());
                             self.walk_dir(blk, &path, depth + 1);
                         } else {

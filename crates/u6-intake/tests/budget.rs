@@ -7,9 +7,14 @@ mod common;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use common::ofs_builder::{ImageBuilder, Node, nested_dirs, shared_block_volume};
+use common::ofs_builder::{
+    ImageBuilder, Node, deep_latin1_files, empty_table_loops, nested_dirs, shared_block_volume,
+    shared_short_chain,
+};
 use common::pp20_encoder::max_ratio_pp20;
-use u6_intake::{InputFile, Intake, decrunch_pp20_within, intake, pp20_declared_len, read_ofs};
+use u6_intake::{
+    InputFile, Intake, decrunch_pp20_within, intake, pp20_declared_len, read_ofs, read_ofs_within,
+};
 
 /// The budget these tests hold the intake to: 64 MiB (the derivation is at `INTAKE_BUDGET` in
 /// the crate). Stated here, not imported, so the tests run against any version of the intake.
@@ -418,5 +423,67 @@ fn many_small_files_are_charged_for_their_bookkeeping() {
     assert!(
         whole <= held,
         "the intake held {whole} bytes, charged {held}"
+    );
+}
+
+#[test]
+fn deep_paths_in_two_byte_characters_are_charged_as_held() {
+    // 6,900 empty files 63 directories down, every name 30 characters of two bytes each: each
+    // path is 3,903 bytes, so the paths come to 27 MB, and each is held more than once.
+    let adf = deep_latin1_files(7000, 63, 6900);
+    let (r, peak) = peak_of(|| intake(vec![file("deep.adf".into(), adf)]));
+    assert!(
+        peak <= BOUND,
+        "the intake held {peak} bytes at once, over {BOUND}"
+    );
+    // They fit: the walk charges what the intake holds, it does not refuse them.
+    assert_eq!(
+        r.files.len(),
+        6900,
+        "{:#?}",
+        &r.report[..r.report.len().min(6)]
+    );
+    assert!(r.files.keys().all(|k| k.len() == "DEEP/".len() + 3903));
+}
+
+/// The number of reads that failed with `what`, listed or counted in the last warning.
+fn failed_reads(warnings: &[String], what: &str) -> usize {
+    let listed = warnings.iter().filter(|w| w.contains(what)).count();
+    let unlisted = warnings
+        .last()
+        .and_then(|w| w.strip_suffix(" more warnings not listed"))
+        .map_or(0, |n| n.parse::<usize>().unwrap());
+    listed + unlisted
+}
+
+#[test]
+fn reads_that_fail_on_a_shared_chain_copy_at_most_the_limit() {
+    // 200 headers share one extension chain of 884,736 bytes and each claims a byte more:
+    // every read copies the chain and fails. Under an 8 MiB limit the copying stops at it.
+    let limit = 8 << 20;
+    let img = shared_short_chain(200);
+    let vol = read_ofs_within(&img, limit).unwrap();
+    let reads = failed_reads(&vol.warnings, "short read 884736/884737");
+    assert!(vol.limit_reached, "{:?}", vol.warnings);
+    assert!(
+        reads * 884_736 <= limit,
+        "{reads} reads copied {} bytes under a limit of {limit}",
+        reads * 884_736
+    );
+}
+
+#[test]
+fn reads_that_walk_empty_tables_stop_at_the_limit() {
+    // Headers whose tables are empty and link to themselves copy nothing, but each walks 1,761
+    // tables before it gives up: the tables are charged as work too.
+    let limit = 8 << 20;
+    let img = empty_table_loops(200);
+    let vol = read_ofs_within(&img, limit).unwrap();
+    let reads = failed_reads(&vol.warnings, "broken extension chain");
+    assert!(vol.limit_reached, "{:?}", vol.warnings);
+    assert!(
+        reads * 1760 * 512 <= limit,
+        "{reads} reads walked {} tables under a limit of {limit}",
+        reads * 1761
     );
 }

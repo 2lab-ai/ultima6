@@ -254,3 +254,121 @@ pub fn nested_dirs(volume: &str, depth: usize, loops: bool) -> Vec<u8> {
     checksum_block(&mut img, parent);
     img
 }
+
+/// A 30-character name in ISO 8859-1 whose every character is two bytes in UTF-8: 27 x 0xE9,
+/// then `index` in three base-64 digits from 0xC0.
+pub fn latin1_name(index: usize) -> [u8; 30] {
+    let mut n = [0xe9u8; 30];
+    for (k, at) in (27..30).rev().enumerate() {
+        n[at] = 0xc0 + ((index >> (6 * k)) & 63) as u8;
+    }
+    n
+}
+
+fn put_raw_name(img: &mut [u8], block: usize, name: &[u8]) {
+    img[block * BS + 432] = name.len() as u8;
+    img[block * BS + 433..block * BS + 433 + name.len()].copy_from_slice(name);
+}
+
+/// An OFS image of `blocks` blocks: a chain of `depth` directories under the root, then
+/// `files` empty files in the deepest one, all on one hash chain. Every name is
+/// [`latin1_name`]: 30 characters, 60 bytes in UTF-8.
+pub fn deep_latin1_files(blocks: usize, depth: usize, files: usize) -> Vec<u8> {
+    let mut img = vec![0u8; blocks * BS];
+    img[..4].copy_from_slice(b"DOS\0");
+    let root = 880;
+    put32(&mut img, root, 0, 2);
+    put32(&mut img, root, 12, 72);
+    put32(&mut img, root, BS - 4, 1);
+    put_name(&mut img, root, "DEEP");
+    let free: Vec<usize> = (2..blocks)
+        .filter(|&b| b != root)
+        .take(depth + files)
+        .collect();
+    assert_eq!(free.len(), depth + files, "the image has room");
+    let mut parent = root;
+    for (k, &b) in free[..depth].iter().enumerate() {
+        put32(&mut img, b, 0, 2);
+        put32(&mut img, b, 4, b as u32);
+        put32(&mut img, b, BS - 12, parent as u32);
+        put32(&mut img, b, BS - 4, 2); // a directory
+        put_raw_name(&mut img, b, &latin1_name(k));
+        put32(&mut img, parent, 24, b as u32); // slot 0 of the one above
+        parent = b;
+    }
+    let mut prev: Option<usize> = None;
+    for (k, &b) in free[depth..].iter().enumerate() {
+        put32(&mut img, b, 0, 2);
+        put32(&mut img, b, 4, b as u32);
+        put32(&mut img, b, BS - 12, parent as u32);
+        put32(&mut img, b, BS - 4, (-3i32) as u32); // a file, byte size 0
+        put_raw_name(&mut img, b, &latin1_name(k));
+        match prev {
+            None => put32(&mut img, parent, 24, b as u32),
+            Some(p) => put32(&mut img, p, BS - 16, b as u32),
+        }
+        prev = Some(b);
+    }
+    for b in std::iter::once(root).chain(free.iter().copied()) {
+        checksum_block(&mut img, b);
+    }
+    img
+}
+
+/// An FFS volume with `count` file headers that share one extension chain: each header's table
+/// and the 23 extension blocks after it point 72 times at the one data block 883, 884,736
+/// bytes in all, and each header claims one byte more, so every read copies the whole chain
+/// and comes up one byte short.
+pub fn shared_short_chain(count: usize) -> Vec<u8> {
+    // The builder lays out root 880, the header of "a" at 882 and its data block at 883.
+    let mut img = ImageBuilder::new(true).build("CHAIN", &[Node::File("a", vec![0x33; BS])]);
+    let exts: Vec<usize> = (884..884 + 23).collect();
+    for (k, &e) in exts.iter().enumerate() {
+        put32(&mut img, e, 0, 16); // an extension block
+        put32(&mut img, e, 4, e as u32);
+        put32(&mut img, e, 8, 72);
+        for i in 0..72 {
+            put32(&mut img, e, 24 + i * 4, 883);
+        }
+        put32(
+            &mut img,
+            e,
+            BS - 8,
+            exts.get(k + 1).map_or(0, |&n| n as u32),
+        );
+        put32(&mut img, e, BS - 4, (-3i32) as u32);
+        checksum_block(&mut img, e);
+    }
+    let mut prev = 882;
+    for k in 0..count {
+        let hdr = 907 + k;
+        put32(&mut img, hdr, 0, 2);
+        put32(&mut img, hdr, 4, hdr as u32);
+        put32(&mut img, hdr, 8, 72);
+        for i in 0..72 {
+            put32(&mut img, hdr, 24 + i * 4, 883);
+        }
+        put32(&mut img, hdr, 324, 24 * 72 * BS as u32 + 1);
+        put_name(&mut img, hdr, &format!("s{k:03}"));
+        put32(&mut img, hdr, BS - 8, 884); // the shared chain
+        put32(&mut img, hdr, BS - 4, (-3i32) as u32);
+        checksum_block(&mut img, hdr);
+        put32(&mut img, prev, BS - 16, hdr as u32); // the hash chain
+        checksum_block(&mut img, prev);
+        prev = hdr;
+    }
+    img
+}
+
+/// An FFS volume with `count` file headers of one byte whose tables are empty and which are
+/// their own extension blocks: each read walks its chain until it gives up as broken, copying
+/// nothing.
+pub fn empty_table_loops(count: usize) -> Vec<u8> {
+    let mut img = shared_block_volume(count, 1);
+    for k in 0..count {
+        let hdr = 884 + k;
+        put32(&mut img, hdr, 8, 0);
+        checksum_block(&mut img, hdr);
+    }
+    img
+}

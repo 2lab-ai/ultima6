@@ -31,31 +31,46 @@ pub use mfm::{ADF_SIZE, DiskDecode, TrackDecode, decode_amiga_disk, decode_amiga
 pub use ofs::{OfsVolume, adf_dos_type, read_ofs, read_ofs_within};
 pub use pp20::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
 
-/// The bytes the intake may hold in all (64 MiB). Each is charged before it is allocated and
-/// given back when the intake drops it:
+/// The bytes the intake may hold in all (64 MiB).
+///
+/// Retained, charged before it is allocated and given back when the intake drops it. Strings
+/// are built at their exact length, so a charge is what the allocation holds:
 /// - each ADF it keeps: a dropped one as it is, an HFE's decoded one; while an HFE decodes, also
 ///   the tracks the parser copies out ([`hfe_track_bytes`]) and the decode's working bytes
-///   ([`mfm::DECODE_WORK_BYTES`]);
-/// - each volume's files as reserved, their paths (twice, as key and index), the directory
-///   paths and the listed warnings, each with [`ofs::ENTRY_BYTES`] for its list and map entries
-///   ([`OfsVolume::held`]);
+///   ([`mfm::DECODE_WORK_BYTES`]: one track's cells, its sectors, the missing list);
+/// - each volume's files as reserved, their paths (twice, as key and index, with room for the
+///   volume name), the directory paths and the listed warnings, each with
+///   [`ofs::ENTRY_BYTES`] for its list and map entries ([`OfsVolume::held`]);
 /// - each loose file it keeps, and each PP20 output (its crunched bytes given back once done).
 ///
-/// Not charged, and bounded apart from it: the inputs and their names (the caller's), the zip
-/// entries `zip.rs` inflates, the report lines that name an input, per volume two fixed lines
-/// past its [`ofs::MAX_WARNINGS`] warnings, and the walk's visited set for blocks it keeps
-/// nothing for (one entry per block of an ADF already charged). The walk enters at most [`ofs::MAX_DEPTH`]
-/// directory levels, so its recursion is shallow and a path at most 1,984 bytes.
+/// Spent, charged and never given back, so the work an image can cause is bounded too: the bytes
+/// a failed file read reserved, and a block for each extension table a read walks.
 ///
-/// From the formats, not from any game file: the game is three Amiga DD disks of
+/// Transient or outside it, not charged, each bounded apart from it:
+/// - one warning or error string while it is made, before `warn` lists or counts it: a path
+///   (at most [`ofs::MAX_PATH_BYTES`], 3,964 bytes) and a few words, reserved at most twice;
+/// - the walk's directory paths along its recursion: at most [`ofs::MAX_DEPTH`] of at most
+///   3,903 bytes, 249,792 bytes;
+/// - the visited set's entries for blocks the walk keeps nothing for (one per block, of an ADF
+///   already charged; a kept entry's is in [`ofs::ENTRY_BYTES`]);
+/// - an HFE's track table as read before its charge: at most 255 entries of 16 bytes;
+/// - the inputs and their names (the caller's), the zip entries `zip.rs` inflates, the report
+///   lines that name an input, and per volume two fixed lines past its
+///   [`ofs::MAX_WARNINGS`] warnings.
+///
+/// The size, from the formats, not from any game file: the game is three Amiga DD disks of
 /// [`ADF_SIZE`] (901,120) bytes, 2,703,360 bytes of ADF. A volume's files fit in its blocks, at
 /// most 2,703,360 bytes on the three, and PP20 output is at most 56/3 of its crunched stream
 /// ([`pp20::MAX_EXPANSION`]), 50,462,720 bytes. While a file decrunches, its crunched bytes
-/// (at most one disk, 901,120) are held as well. The entries take at most 1,760 a disk, each
-/// 256 bytes plus its name twice with its volume (2 x 61 at the root): 1,995,840 bytes. That
-/// is 56,063,040 bytes (53.5 MiB) in the worst case, with the HFE decode (at most an HFE's
-/// size and 290,552 bytes) given back before any PP20 output. 64 MiB leaves 19.7% over that
-/// (the same 64 MiB the web page allows the game files).
+/// (at most one disk, 901,120) are held as well, and the extension tables of 1,757 data blocks
+/// cost 25 blocks a disk (38,400 bytes). The entries are at most 1,757 headers and 32 warnings
+/// a disk, 5,367 on three; with every name at the root (at most 60 bytes) each is charged
+/// 256 + 2 x (61 + 60) = 498 bytes, 2,672,766 in all. That is 56,778,366 bytes (54.1 MiB),
+/// and 64 MiB is 18.2% above it (the same 64 MiB the web page allows the game files). Deeper
+/// names cost more: a set of three disks fits while its paths average at most 1,022 bytes
+/// (about 16 levels of 60-byte names); past that the intake stops at the budget, it does not
+/// pass it. The HFE decodes (at most an HFE's size and 290,552 bytes) are given back before
+/// any PP20 output.
 pub const INTAKE_BUDGET: usize = 64 << 20;
 
 const BUDGET_MIB: usize = INTAKE_BUDGET >> 20;
@@ -244,6 +259,15 @@ impl Collected {
     }
 }
 
+/// `a`, `sep`, `b` in one string at its exact length (`format!` reserves about twice).
+fn joined(a: &str, sep: &str, b: &str) -> String {
+    let mut s = String::with_capacity(a.len() + sep.len() + b.len());
+    s.push_str(a);
+    s.push_str(sep);
+    s.push_str(b);
+    s
+}
+
 /// Pull disk images out of a zip; everything else in it (scans, flux streams) is ignored.
 fn unzip_disks(name: &str, data: &[u8], report: &mut Vec<String>) -> Result<Vec<InputFile>, Error> {
     let entries = zip::read_zip(data, |entry| {
@@ -380,10 +404,12 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
         let volume = match read_ofs_within(&adf, budget.left) {
             Ok(vol) => {
                 let count = vol.files.len();
-                // The walk's charge covers the keys and warning lines made from it below.
+                // The walk's charge covers the keys and warning lines made from it below; both
+                // are built at their exact length, as the walk charged them.
                 budget.take_within(vol.held);
                 for (path, bytes) in vol.files {
-                    let dropped = raw.put(format!("{}/{path}", vol.name), bytes, &mut report);
+                    let key = joined(&vol.name, "/", &path);
+                    let dropped = raw.put(key, bytes, &mut report);
                     budget.give_back(dropped);
                 }
                 report.push(format!(
@@ -391,7 +417,7 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
                     f.name, vol.name, vol.dos_type
                 ));
                 for w in &vol.warnings {
-                    report.push(format!("{}: {w}", f.name));
+                    report.push(joined(&f.name, ": ", w));
                 }
                 if vol.limit_reached {
                     budget.spent = true;

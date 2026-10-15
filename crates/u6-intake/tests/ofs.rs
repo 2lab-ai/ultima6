@@ -2,7 +2,9 @@
 
 mod common;
 
-use common::ofs_builder::{ImageBuilder, Node, amiga_hash, nested_dirs, shared_block_volume};
+use common::ofs_builder::{
+    ImageBuilder, Node, amiga_hash, deep_latin1_files, nested_dirs, shared_block_volume,
+};
 use common::text;
 use u6_intake::{ADF_SIZE, read_ofs, read_ofs_within};
 
@@ -116,8 +118,9 @@ fn a_limit_stops_the_walk_before_the_file_that_would_pass_it() {
             Node::File("c", bytes(10, 3)),
         ],
     );
-    // Each file is charged its bytes, its path twice with 31 bytes of room, and 256 bytes.
-    let charge = |n: usize| n + 2 * (31 + 1) + 256;
+    // Each file is charged its bytes, its path twice with 61 bytes of room (a volume name of
+    // 30 two-byte characters and a slash), and 256 bytes.
+    let charge = |n: usize| n + 2 * (61 + 1) + 256;
     let whole = read_ofs(&img).unwrap();
     assert_eq!(whole.held, charge(1000) + charge(2000) + charge(10));
     let all = read_ofs_within(&img, whole.held).unwrap();
@@ -161,4 +164,25 @@ fn a_file_keeps_no_more_capacity_than_its_bytes() {
     let kept = &vol.files.iter().find(|(p, _)| p == "s000").expect("read").1;
     assert_eq!(kept.len(), 901_400);
     assert_eq!(kept.capacity(), kept.len());
+}
+
+#[test]
+fn a_path_is_at_most_3964_bytes_and_held_at_its_length() {
+    // 64 directories (the most the walk enters) and a file in the last, every name 30
+    // characters of two bytes: 65 names of 60 bytes and 64 slashes.
+    let img = deep_latin1_files(ADF_SIZE / BS, 64, 1);
+    let vol = read_ofs(&img).unwrap();
+    assert_eq!(vol.dirs.len(), 64);
+    let (path, _) = &vol.files[0];
+    assert_eq!(path.len(), 65 * 60 + 64);
+    assert_eq!(path.capacity(), path.len());
+    assert!(vol.dirs.iter().all(|d| d.capacity() == d.len()));
+    // One level more and the file is not read.
+    let img = deep_latin1_files(ADF_SIZE / BS, 65, 1);
+    let vol = read_ofs(&img).unwrap();
+    assert!(vol.files.is_empty());
+    assert_eq!(
+        vol.warnings,
+        ["directories nested more than 64 levels deep are not read"]
+    );
 }
