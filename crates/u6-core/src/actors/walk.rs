@@ -3,10 +3,14 @@
 //! Tile flags (tileflag, 0x13b140 = flags1): 0x01 water, 0x02 impassable, 0x04 wall, 0x08
 //! damaging, high nibble = extra move cost. Creature flags: [`super::GameTables`].
 
+use std::cell::RefCell;
+
+use crate::engine::Io;
 use crate::objects::ObjectId;
 use crate::rng::Rng;
 use crate::state::State;
 
+use super::party::StepResult;
 use super::seams::{self, Found};
 use super::timer;
 
@@ -14,6 +18,55 @@ use super::timer;
 /// x 0,1,1,1,0,-1,-1,-1 and y -1,-1,0,1,1,1,0,-1).
 pub const DX8: [i16; 8] = [0, 1, 1, 1, 0, -1, -1, -1];
 pub const DY8: [i16; 8] = [-1, -1, 0, 1, 1, 1, 0, -1];
+
+/// [replaced] Engine milliseconds of the player's step 0x11d4ee besides its followers' pass (the
+/// hiccup and vessel tests, the blocking tests, a swap, the cost, the window rebuilt, the move
+/// and the facing, the level test 0x11d1d4): 24 ms, 1.186 PAL frames, the mean of 27 steps
+/// traced in the oracle (0.57..2.26): 21 in the castle without the fight (3 runs of 7) and 6 in
+/// the start fight, whose first step also waited on the floppy and is left out
+/// (tools/oracle/trace.mjs on the CPU clock, the reduction tools/oracle/trace.py). The original
+/// has no wait there: that is the 68000's time, which the port, stepping at once, waits on the
+/// engine clock instead.
+pub const STEP_MS: u16 = 24;
+/// [replaced] Engine milliseconds of the followers' pass 0x11c910 the step ends in, when it has
+/// members to move (in worktype 1, besides the leader): 41 ms, 2.065 PAL frames, the mean of
+/// the castle's 21 passes, 3 followers each (0.16..5.27). In the fight every member is in its
+/// combat mode and the pass took 0.049 frames (n = 7): no wait.
+pub const FOLLOW_MS: u16 = 41;
+
+/// Port: the walk command's step ([`super::party::player_step`], 0x11d4ee), then the time the
+/// original spends in it, on the engine clock: [`STEP_MS`], and [`FOLLOW_MS`] more when the
+/// followers' pass has members to move ([`follows`]). Only a step past its blocking tests waits
+/// (moved, or refused by 0x10c9d2 after the move was paid: both end in the followers' pass and
+/// the level test); a blocked or windless step returns before them, is not traced and waits
+/// nothing. Nothing is drawn meanwhile: the world turn's refresh draws the view the step left.
+pub async fn paced_player_step(state: &RefCell<State>, io: &Io, dir: u16) -> StepResult {
+    let result = super::party::player_step(&mut state.borrow_mut(), dir);
+    if matches!(result, StepResult::Moved | StepResult::Mismatch) {
+        let follow = if follows(&state.borrow()) {
+            FOLLOW_MS
+        } else {
+            0
+        };
+        crate::combat::present::pace(state, io, STEP_MS + follow).await;
+    }
+    result
+}
+
+/// Does the followers' pass 0x11c910 have members to move: not while a vessel carries the party
+/// (the leader index at the party size, its first test 0x11c91c..0x11c926; no vessel step was
+/// traced), and a member besides the leader in worktype 1 (what tools/oracle/trace.mjs counts at
+/// the pass's entry).
+fn follows(s: &State) -> bool {
+    let p = &s.actors.party;
+    if p.leader_index == p.size {
+        return false;
+    }
+    let leader = p.members.get(usize::from(p.leader_index)).copied();
+    p.members[..p.count()]
+        .iter()
+        .any(|&m| Some(m) != leader && s.actors.worktype[usize::from(m)] == 1)
+}
 
 pub(crate) fn flags1(s: &State, tile: u16) -> u8 {
     s.tables
@@ -665,9 +718,107 @@ fn dragon_part(_s: &State, _x: u16, _y: u16, _z: u16, _part: u16, _frame: u16) -
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use u6_formats::position::Position;
 
     use super::*;
+    use crate::actors::{GameTables, tail};
+    use crate::engine::Engine;
+    use crate::files::Files;
+
+    /// Leader 1 (worktype 2) with members 2 and 3 following it (worktype 1) in a column going
+    /// north at (20, 20..22), ranks one and two tiles behind; NPC 9 at (20, 18).
+    fn column() -> State {
+        let mut s = State::empty();
+        creature_tiles(&mut s);
+        s.actors.set_tail(tail::SOLO_MEMBER, 0xff);
+        s.actors.party.members[..3].copy_from_slice(&[1, 2, 3]);
+        s.actors.party.size = 3;
+        s.map.centre = Position { x: 20, y: 20, z: 0 };
+        for (i, a) in [1usize, 2, 3].into_iter().enumerate() {
+            s.objects.type_frame[a] = 0x17a;
+            s.objects.location[a] = Position {
+                x: 20,
+                y: 20 + i as u16,
+                z: 0,
+            };
+            s.actors.attrs.status[a] = 0x80;
+            s.actors.worktype[a] = if i == 0 { 2 } else { 1 };
+            s.actors.movement_points[a] = 30;
+        }
+        s.objects.type_frame[9] = 0x17a;
+        s.objects.location[9] = Position { x: 20, y: 18, z: 0 };
+        let mut formation = vec![0; 28];
+        formation[12] = 1;
+        formation[13] = 2;
+        s.actors.game = GameTables {
+            formation,
+            ..GameTables::default()
+        };
+        link_objects(&mut s);
+        s
+    }
+
+    /// The walk command (0x80, north) through the command loop's dispatch on `s` at host ticks
+    /// of `tick` ms with `zeros` polls of no time after each: the engine time it took and where
+    /// the leader ends.
+    fn walk_ms(s: State, tick: u32, zeros: usize) -> (u64, (u16, u16)) {
+        let done = Rc::new(Cell::new(None));
+        let out = Rc::clone(&done);
+        let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+            let t0 = io.now_ms();
+            crate::main_loop::commands::dispatch(&st, &io, 0x80).await;
+            out.set(Some(io.now_ms() - t0));
+        });
+        for _ in 0..10_000 {
+            if done.get().is_some() {
+                break;
+            }
+            e.tick(&[], tick);
+            for _ in 0..zeros {
+                e.tick(&[], 0);
+            }
+        }
+        let ms = done.get().expect("the step ends");
+        let p = e.state().objects.location[1];
+        (ms, (p.x, p.y))
+    }
+
+    #[test]
+    fn a_step_waits_the_originals_time_at_any_host_tick() {
+        // Each case: the setup, what its step costs (counted here: the step, its followers'
+        // pass when someone follows) and where the leader ends.
+        let follow_on: fn(&mut State) = |_| {};
+        let in_combat: fn(&mut State) = |s| {
+            // The members in a combat worktype: the pass has no one to move.
+            s.actors.worktype[2] = 3;
+            s.actors.worktype[3] = 3;
+        };
+        let blocked: fn(&mut State) = |s| {
+            s.objects.location[9].y = 19;
+            link_objects(s);
+        };
+        let cases = [
+            ("two followers", follow_on, STEP_MS + FOLLOW_MS, (20, 19)),
+            ("no one follows", in_combat, STEP_MS, (20, 19)),
+            ("blocked", blocked, 0, (20, 20)),
+        ];
+        for (name, setup, want, at) in cases {
+            let want = u64::from(want);
+            for (tick, zeros) in [(16, 0), (7, 0), (16, 3)] {
+                let mut s = column();
+                setup(&mut s);
+                let (ms, to) = walk_ms(s, tick, zeros);
+                assert_eq!(to, at, "{name}: where the leader ends");
+                assert!(
+                    ms >= want && ms <= want + u64::from(tick),
+                    "{name}: {ms} ms at {tick} ms ticks ({zeros} zero polls), want {want}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn spend_mp_modifiers() {

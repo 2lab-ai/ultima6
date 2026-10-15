@@ -782,14 +782,42 @@ fn a_stall_after_lateness_built_up_shortens_no_wait_by_more_than_its_tick() {
     // and the run ends within the longest tick of the waits' sum.
     const COSTS: [u16; 12] = [46, 46, 46, 46, 46, 427, 46, 46, 46, 311, 46, 46];
     let stalls = [4usize, 5, 20];
-    let d = wait_ends(&COSTS, move |t| {
+    let tick = move |t: usize| {
         if stalls.contains(&t) {
             HOST_MAX_TICK
         } else {
             16
         }
-    });
+    };
+    let d = wait_ends(&COSTS, tick);
     println!("waits (ms, tick ended on) around stalls at ticks {stalls:?}: {d:?} for {COSTS:?}");
+    // The scenario: the third stall lands inside a long wait while the run is still behind its
+    // schedule (the waits ended before it ended after they were due). The engine clock moves a
+    // tick before each poll, so the run starts at the end of tick 0 and the stall spans the
+    // engine time from the end of the tick before it to its own end.
+    let clock = |t: usize| -> u64 { (0..=t).map(|u| u64::from(tick(u))).sum() };
+    let (from, to) = (clock(stalls[2] - 1), clock(stalls[2]));
+    let (mut ended, mut due) = (clock(0), clock(0));
+    let mut spanning = None;
+    for (i, (&(ms, _), &cost)) in d.iter().zip(&COSTS).enumerate() {
+        if ended + ms > from {
+            spanning = Some((i, ended + ms));
+            break;
+        }
+        ended += ms;
+        due += u64::from(cost);
+    }
+    let (i, end) = spanning.expect("a wait is in progress when the third stall lands");
+    assert!(
+        end >= to && COSTS[i] > HOST_MAX_TICK as u16,
+        "the third stall falls inside wait {i} ({} ms, ends at {end}): {d:?}",
+        COSTS[i]
+    );
+    assert!(
+        ended > due,
+        "lateness outstanding when the third stall lands: the waits before it ended at {ended}, \
+         due at {due}: {d:?}"
+    );
     let paid = d
         .iter()
         .zip(&COSTS)

@@ -1,11 +1,13 @@
 """The port's timing constants from trace.mjs runs (trace.json: every traced call with its PAL
-frames): what actors/turn.rs and combat/present.rs take, rebuilt from the oracle's data.
+frames): what actors/turn.rs, actors/walk.rs and combat/present.rs take, rebuilt from the
+oracle's data.
 
 usage: python3 -I -B trace.py RUN/trace.json ...
 Refuses a file of a run that did not finish (trace.mjs writes after every step and marks the
-file complete only once every key's step is in). Prints per constant n, median, mean and range in PAL frames, and the ms (20 a frame) the port
-uses: the median where one call is one cost, the mean where the port pays one cost per call of
-a varying routine (messages, names, NPC turns, picks).
+file complete only once every key's step is in), and a followers' pass without its count of
+followers. Prints per constant n, median, mean and range in PAL frames, and the ms (20 a frame)
+the port uses: the median where one call is one cost, the mean where the port pays one cost per
+call of a varying routine (messages, names, NPC turns, picks, steps, followers' passes).
 """
 
 import json
@@ -14,15 +16,18 @@ import sys
 
 WORLD_TURN, NPC_TURN, AFTER_TURN = 0x1213DE, 0x1200B0, 0x102F2A
 FLIGHT, HIT_FLASH, PRINTF, NAME = 0x132706, 0x1230CE, 0x108658, 0x10EEF8
+# The party step and the followers' pass it ends in.
+STEP, FOLLOW = 0x11D4EE, 0x11C910
 # Called inside an NPC turn and paid as costs of their own.
 OWN_COSTS = (FLIGHT, HIT_FLASH, PRINTF, NAME)
-# A name read longer than this loaded look.lzd from the floppy (the boot's first): not a cost
-# the port pays.
-FLOPPY_NAME = 20.0
+# A name read or a step longer than this waited on the floppy (the boot's first name read loads
+# look.lzd, its first step a map region): not a cost the port pays.
+FLOPPY = 20.0
 
 
 class Incomplete(Exception):
-    """A trace.json of a run that did not trace every one of its keys."""
+    """A trace.json of a run that did not trace every one of its keys, or that lacks a field a
+    constant needs."""
 
 
 def steps_of(doc):
@@ -56,7 +61,8 @@ def constants(steps):
     """Per constant, the statistics of its traced calls over `steps` (trace.json's steps)."""
     out = {k: [] for k in ("refresh after a turn", "combat NPC turn", "schedule NPC turn",
                            "scheduler pick", "hit flash", "flight", "flight without a step",
-                           "message", "object name")}
+                           "message", "object name", "party step", "follow",
+                           "follow, no one to move")}
     pick_frames = picks = 0.0
     for s in steps:
         calls = s["calls"]
@@ -71,8 +77,18 @@ def constants(steps):
                     out["flight without a step"].append(c["frames"])
             elif c["fn"] == PRINTF:
                 out["message"].append(c["frames"])
-            elif c["fn"] == NAME and c["frames"] < FLOPPY_NAME:
+            elif c["fn"] == NAME and c["frames"] < FLOPPY:
                 out["object name"].append(c["frames"])
+            elif c["fn"] == STEP and c["frames"] < FLOPPY:
+                # Its own time: the followers' pass and what it prints and names are paid apart.
+                own = sum(x["frames"] for x in calls if x is not c
+                          and x["fn"] in (FOLLOW, *OWN_COSTS)
+                          and x["depth"] == c["depth"] + 1 and inside(c, x))
+                out["party step"].append(c["frames"] - own)
+            elif c["fn"] == FOLLOW:
+                if c.get("followers") is None:
+                    raise Incomplete("a followers' pass without its count of followers")
+                out["follow" if c["followers"] else "follow, no one to move"].append(c["frames"])
         for world in (c for c in calls if c["fn"] == WORLD_TURN):
             turns = [c for c in calls if c["fn"] == NPC_TURN and inside(world, c)]
             refreshes = [c for c in calls if c["fn"] == AFTER_TURN and inside(world, c)]
@@ -98,6 +114,9 @@ USES = {
     "flight without a step": ("combat/present.rs RENDER_MS", "median"),
     "message": ("combat/present.rs PRINT_MS", "mean"),
     "object name": ("combat/present.rs NAME_MS", "mean"),
+    "party step": ("actors/walk.rs STEP_MS", "mean"),
+    "follow": ("actors/walk.rs FOLLOW_MS", "mean"),
+    "follow, no one to move": ("(no wait)", "mean"),
     "flight": ("(start + steps + end; check only)", "median"),
 }
 
@@ -108,9 +127,11 @@ def main():
     steps = []
     for path in sys.argv[1:]:
         try:
-            steps += steps_of(json.load(open(path)))
+            run = steps_of(json.load(open(path)))
+            constants(run)
         except Incomplete as e:
             raise SystemExit(f"{path}: {e}") from None
+        steps += run
     for k, v in constants(steps).items():
         use, how = USES[k]
         if not v.get("n"):

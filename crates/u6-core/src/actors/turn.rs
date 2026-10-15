@@ -13,22 +13,22 @@ use super::{clock, leaves, npc, path, tail, timer, walk};
 const IDLE_REFILLS_PER_YIELD: u32 = 60;
 /// [replaced] Engine milliseconds of the refresh after a turn (0x102f2a with the view changed:
 /// the view flags 0x109e74, then 0x102ef0 draws the window and copies it to the screen): 427 ms,
-/// 21.375 PAL frames, the median of 38 such calls traced in the oracle (19.96..23.80: the start
-/// fight and the castle without it, 7 steps each; tools/oracle/trace.mjs on the CPU clock, the
-/// reduction tools/oracle/trace.py). With the view unchanged the call returns at once. The
-/// original has no wait there: that is the 68000's drawing time, which the port, drawing at
-/// once, waits on the engine clock instead.
+/// 21.336 PAL frames, the median of 73 such calls traced in the oracle (19.86..23.98: the start
+/// fight and the castle without it, 7 steps each, two runs of each setup; tools/oracle/trace.mjs
+/// on the CPU clock, the reduction tools/oracle/trace.py). With the view unchanged the call
+/// returns at once. The original has no wait there: that is the 68000's drawing time, which the
+/// port, drawing at once, waits on the engine clock instead.
 pub const AFTER_TURN_MS: u16 = 427;
 /// [replaced] Engine milliseconds of one pick of the scheduler 0x1213de (its pass over the 256
 /// actors, the refills and clock minutes, the formation and schedule passes, spread over the
 /// picks): 20 ms, 0.994 PAL frames, the world turn's time outside its NPC turns and refreshes
-/// over its picks (each NPC turn and the player's): 179 picks traced in the same runs.
+/// over its picks (each NPC turn and the player's): 359 picks traced in the same runs.
 pub const PICK_MS: u16 = 20;
-/// [replaced] Engine milliseconds of an NPC turn in a combat worktype (below 0x80: the party's
-/// combat modes, assault) besides what it draws, prints and names: 47 ms, 2.338 PAL frames, the
-/// mean of 43 traced in the start fight (0.95..4.04). A turn in a schedule worktype (0x80 and
-/// up) takes 0.05 frames (n = 122) and waits nothing.
-pub const COMBAT_NPC_MS: u16 = 47;
+/// [replaced] Engine milliseconds of an NPC turn that runs a combat worktype (3 to 0x7f: the
+/// party's combat modes, assault; [`turn_worktype`]) besides what it draws, prints and names:
+/// 46 ms, 2.278 PAL frames, the mean of 87 traced in the start fight's two runs (0.89..4.04). A
+/// turn in a schedule worktype (0x80 and up) takes 0.033 frames (n = 244) and waits nothing.
+pub const COMBAT_NPC_MS: u16 = 46;
 
 fn healthy(s: &State, actor: usize) -> bool {
     s.actors.attrs.status[actor] & 0x16 == 0
@@ -456,14 +456,36 @@ fn refill(s: &mut State) {
 }
 
 /// What the port waits at the pick of `actor` ([`PICK_MS`]), with [`COMBAT_NPC_MS`] more when
-/// an NPC turn (`npc`) in a combat worktype runs: in a time stop, or on another level than the
+/// an NPC turn (`npc`) runs a combat worktype: in a time stop, or on another level than the
 /// party, 0x1200b0 ends the turn at once (0x1200e8..0x120112, [`npc::npc_turn_sync`]) and no
-/// worktype takes its time.
+/// worktype takes its time. The worktype is the one the turn runs ([`turn_worktype`]), not the
+/// one the pick saw.
 fn pick_ms(s: &State, actor: usize, npc: bool) -> u16 {
     let runs =
         s.actors.timers[timer::TIME_STOP] == 0 && s.objects.location[actor].z == s.map.centre.z;
-    let fights = npc && runs && s.actors.worktype[actor] < 0x80;
+    let fights = npc && runs && (3..0x80).contains(&turn_worktype(s, actor));
     PICK_MS + if fights { COMBAT_NPC_MS } else { 0 }
+}
+
+/// The worktype 0x1200b0 runs for `actor`. Its first test (0x1200ba..0x1200d4), before it saves
+/// the points and before the time-stop and level tests: a party member (status bit 0x80) who is
+/// not charmed (object status 0x04) is uncharmed (0x121bce through the thunk 0x121988,
+/// [`super::leaves::uncharm`]), which gives it the party's worktype back: its combat mode in
+/// combat, else 1 (follow) in party mode or 0 in solo mode. Anyone else runs its own. Below 3
+/// (0 wait, 1 follow, 2 the player's character's, also the first combat mode a member can be
+/// set to: 0x1061de cycles them 2..8) the turn only spends its points (the default arm) and
+/// waits nothing; no traced turn began below 3.
+fn turn_worktype(s: &State, actor: usize) -> u8 {
+    let member = s.actors.attrs.status[actor] & 0x80 != 0;
+    if !member || s.objects.obj_status[actor] & 0x04 != 0 {
+        s.actors.worktype[actor]
+    } else if s.actors.combat_mode() {
+        s.actors.attrs.combat_mode[actor]
+    } else if s.actors.solo_member() < 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// Original: 0x1213de (actors: world turn: let NPCs act until the player's character is next)
@@ -720,6 +742,108 @@ mod tests {
         s.actors.timers[timer::TIME_STOP] = 0;
         s.objects.location[10].z = 1;
         assert_eq!(pick_ms(&s, 10, true), PICK_MS, "another level");
+    }
+
+    #[test]
+    fn a_party_members_turn_is_charged_by_the_worktype_it_runs() {
+        // NPC 10 is a party member (status 0x80) picked in worktype 8, on the party's level, no
+        // time stop. 0x1200b0 first uncharms a member who is not charmed (0x1200ba..0x1200d4),
+        // which resets its worktype, and then runs that one.
+        let fights = PICK_MS + COMBAT_NPC_MS;
+        let mut s = world(&[(6, 10)]);
+        s.actors.attrs.status[10] = 0x80;
+        s.actors.worktype[10] = 8;
+        // Charmed (object status 0x04): not uncharmed, its turn runs the charm's assault.
+        s.objects.obj_status[10] = 0x04;
+        assert_eq!(pick_ms(&s, 10, true), fights, "charmed: worktype 8 runs");
+        // The charm is over but the worktype is still the charm's: out of combat in party mode
+        // it follows (1), which only spends its points.
+        s.objects.obj_status[10] = 0;
+        assert_eq!(
+            pick_ms(&s, 10, true),
+            PICK_MS,
+            "uncharmed to 1 out of combat"
+        );
+        // In combat it runs its combat mode: front (3) fights, mode 2 is the default arm.
+        s.actors.set_tail(tail::COMBAT_MODE, 1);
+        s.actors.attrs.combat_mode[10] = 3;
+        s.actors.worktype[10] = 0x90;
+        assert_eq!(
+            pick_ms(&s, 10, true),
+            fights,
+            "a schedule worktype uncharmed to 3"
+        );
+        s.actors.attrs.combat_mode[10] = 2;
+        s.actors.worktype[10] = 8;
+        assert_eq!(pick_ms(&s, 10, true), PICK_MS, "uncharmed to 2 in combat");
+        // Not a member: its own worktype, whatever its charm.
+        s.actors.attrs.status[10] = 0;
+        assert_eq!(pick_ms(&s, 10, true), fights, "an NPC in worktype 8");
+    }
+
+    #[test]
+    fn the_worktype_a_members_turn_runs_is_the_one_its_uncharm_leaves() {
+        // turn_worktype restates 0x121bce's worktype rule; the uncharm itself must agree.
+        for (combat, solo, mode) in [
+            (false, 0xff, 3),
+            (false, 0, 3),
+            (true, 0xff, 3),
+            (true, 0, 2),
+        ] {
+            let mut s = world(&[(6, 10)]);
+            s.actors.attrs.status[10] = 0x80;
+            s.actors.worktype[10] = 8;
+            s.actors.attrs.combat_mode[10] = mode;
+            s.actors.set_tail(tail::COMBAT_MODE, u8::from(combat));
+            s.actors.set_tail(tail::SOLO_MEMBER, solo);
+            let mut t = s.clone();
+            crate::actors::leaves::uncharm(&mut t, 10);
+            assert_eq!(
+                turn_worktype(&s, 10),
+                t.actors.worktype[10],
+                "combat {combat}, solo {solo:#x}, mode {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_members_turn_after_its_charm_takes_no_combat_turn_time() {
+        // Member 10 (status 0x80, in the party list) still in the charm's worktype 8, its
+        // charm over (no object status 0x04), out of combat: its turn runs worktype 1 (party
+        // mode), which spends 5 of its 5 points. Two picks (it and the player) and the refresh
+        // of the view the turn started with changed; no combat NPC turn.
+        let mut s = world(&[(5, 10)]);
+        s.actors.party.members[1] = 10;
+        s.actors.party.size = 2;
+        s.actors.attrs.status[10] = 0x80;
+        s.actors.worktype[10] = 8;
+        s.actors.movement_points[1] = 0;
+        s.map.view_dirty = 1;
+        let want = 2 * u64::from(PICK_MS) + u64::from(AFTER_TURN_MS);
+        for (tick, zero) in [(16, false), (7, false), (16, true)] {
+            let done = Rc::new(std::cell::Cell::new(None));
+            let out = Rc::clone(&done);
+            let mut e = Engine::with_game(s.clone(), Files::default(), move |st, io| async move {
+                let t0 = io.now_ms();
+                world_turn(&st, &io).await;
+                out.set(Some(io.now_ms() - t0));
+            });
+            for _ in 0..10_000 {
+                if done.get().is_some() {
+                    break;
+                }
+                e.tick(&[], tick);
+                if zero {
+                    e.tick(&[], 0);
+                }
+            }
+            let ms = done.get().expect("the turn ends");
+            assert_eq!(e.state().actors.worktype[10], 1, "the turn uncharmed it");
+            assert!(
+                ms >= want && ms <= want + u64::from(tick),
+                "{ms} ms at {tick} ms ticks (zero polls {zero}), want {want}"
+            );
+        }
     }
 
     #[test]
