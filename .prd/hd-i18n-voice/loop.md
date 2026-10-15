@@ -15,7 +15,7 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 | `08-i18n-ko.md` | 2 |
 | `09-npc-voice.md` | 3 |
 
-Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 4, 08 at rev 3, 09 at rev 2. The opus review of 09 is pending on claude capacity. Closed units are in `loop.done.md`.
+Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 4, 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
 In flight: T2 (page loop, keys, badge), T5 (opening blits by byte); T3 (native) dispatches when capacity allows.
 
@@ -47,12 +47,12 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 | L4 | 08 | page: language gate, en/ko UI catalog, pack drop/forget, hidden-input IME focused by the line bit; engine `InputEvent::Text` into `read_line`; aliases on a matching copy | L2 |
 | L5 | 08 | `tools/i18n` glossary, speakers, translate, review, pack, coverage receipt, upload boundary; style guide | L3 |
 | L6 | 08 | ops: run L5 on the owner's files, owner sample, full run, load, read frames | L4, L5 |
-| V1 | 09 | `u6-core::speech` tap + `take_speech` | L1 |
+| V1 | 09 | `u6-core::speech` tap: kind from the call sites, flag around the three speech emitters in the Messages window, speaker after `0xbf`, flushes, capped queue, enable flag, `take_speech` | L1 |
 | V2 | 09 | `tools/speech/fetch-models.sh`, parts + manifest + LICENSE/NOTICE; preview deploy | — |
-| V3 | 09 | `site/voice/` worker and player, opt-in, chip, terms notice | V1, V2 |
+| V3 | 09 | `site/voice/` worker and player, opt-in, chip, terms notice, forget buttons, mute both gains, no speech above 4× | V1, V2 |
 | V4 | 09 | profiles: mixer, type-class table (no LLM) | V3 |
 | V6 | 09 | personality profiles from bundles, local voice pack tool, coverage receipt, upload boundary | V4, V5 |
-| V5 | 09 | NPC bundle exporter (wasm), IndexedDB, download | L3 |
+| V5 | 09 | NPC bundle exporter (wasm) keyed by (archive, item) on 08's run catalog, `npc-bundle:` keys, download | L3 |
 
 Each unit is reviewed by gpt-6-astra and opus before it merges. Each item ends with a merge, a preview deploy with a live check and a frame read, then production.
 
