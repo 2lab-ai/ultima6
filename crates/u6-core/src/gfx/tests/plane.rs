@@ -790,99 +790,192 @@ fn combat_playback_puts_back_the_sources_it_recorded() {
     assert!(e.state().combat.effects.is_empty(), "all played");
 }
 
-/// The playback of [`equal_colours`]: the screen shows record 1, the synchronous code presents
-/// record 5 (the same pixels: recorded), then record 1 again (its last picture); with `pause` a
-/// pause is recorded after the frame. Returns the engine after the playback and its
-/// (frame version, source version) after each tick.
-fn equal_colours(plane: bool, pause: bool) -> (Engine, Vec<(u64, u64)>) {
+/// A playback of [`equal_colours`].
+#[derive(Clone, Copy)]
+struct Playback {
+    plane: bool,
+    /// A pause is recorded after the frame.
+    pause: bool,
+    /// The record of the recorded frame in window cell (col, row) (1 is the last picture's).
+    shot: fn(u16, u16) -> u16,
+    /// The pointer at (x, y): a shape of 16 rows whose opaque columns are the bits of each word
+    /// (bit 15 the first column).
+    pointer: Option<(i16, i16, [u16; 16])>,
+}
+
+/// The pixels the pointer of `p` covers.
+fn pointer_covers(p: &Playback, x: usize, y: usize) -> bool {
+    p.pointer.is_some_and(|(px, py, rows)| {
+        let (c, r) = (x as i32 - i32::from(px), y as i32 - i32::from(py));
+        (0..16).contains(&c) && (0..16).contains(&r) && rows[r as usize] & (0x8000 >> c) != 0
+    })
+}
+
+/// Records 1 and 5 have the same pixels. The screen shows record 1, the synchronous code presents
+/// the recorded frame ([`Playback::shot`], recorded), then record 1 again (its last picture); then
+/// the playback. Returns the engine after it and its (frame version, source version) after each
+/// tick.
+fn equal_colours(p: Playback) -> (Engine, Vec<(u64, u64)>) {
     let mut s = State::empty();
     s.ui = crate::main_loop::test_support::test_ui();
     let same = |r: usize, c: usize| ((r * 16 + c) % 31 + 1) as u8;
     install(&mut s.gfx, 1, map_tile(0, 16, same));
     install(&mut s.gfx, 5, map_tile(0, 16, same));
-    let fill = |gfx: &GfxState, f: &mut Framebuffer, n: u16| {
+    if let Some((_, _, rows)) = p.pointer {
+        let rows = rows
+            .iter()
+            .map(|&w| std::array::from_fn(|c| u8::from(w & (0x8000 >> c) != 0)))
+            .collect();
+        let shape = crate::ui::pointer::Shape { dx: 0, dy: 0, rows };
+        s.ui.pointer =
+            crate::ui::pointer::PointerState::from_tables(crate::ui::pointer::PointerTables {
+                shapes: vec![shape],
+                shown: true,
+                ..Default::default()
+            });
+    }
+    let fill = |gfx: &GfxState, f: &mut Framebuffer, n: &dyn Fn(u16, u16) -> u16| {
         for row in 0..11 {
             for col in 0..11 {
-                blit_front(gfx, f, n, col * 16, row * 16);
+                blit_front(gfx, f, n(col, row), col * 16, row * 16);
             }
         }
     };
     let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
-        io.draw(|f| fill(&st.borrow().gfx, f, 1));
+        io.draw(|f| fill(&st.borrow().gfx, f, &|_, _| 1));
         io.present();
         io.vblank().await;
         {
             let mut s = st.borrow_mut();
-            io.draw(|f| fill(&s.gfx, f, 5));
+            io.draw(|f| fill(&s.gfx, f, &p.shot));
             io.present();
             crate::combat::present::capture_window(&mut s, 40);
-            if pause {
+            if p.pause {
                 crate::combat::present::capture_pause(&mut s, 60);
             }
-            io.draw(|f| fill(&s.gfx, f, 1));
+            io.draw(|f| fill(&s.gfx, f, &|_, _| 1));
             io.present();
         }
         crate::combat::play_effects(&st, &io).await;
         io.sleep(u32::MAX).await;
     });
-    if plane {
+    if p.plane {
         e.enable_src_plane();
     }
     let versions = (0..40)
-        .map(|_| {
-            e.tick(&[], 16);
+        .map(|t| {
+            let at = p
+                .pointer
+                .filter(|_| t == 0)
+                .map(|(x, y, _)| InputEvent::Pointer { x, y, buttons: 0 });
+            e.tick(at.as_slice(), 16);
             (e.frame_version(), e.src_version())
         })
         .collect();
     (e, versions)
 }
 
+/// [`equal_colours`] with the plane off and on: the frame versions and the colours of both, the
+/// last tick's source version, and checks that the shown frame names record 1 off the pointer
+/// and nothing under it, and that the published frame and the screen name record 1.
+fn equal_colours_pair(p: Playback, what: &str) -> u64 {
+    let (off, plain) = equal_colours(Playback { plane: false, ..p });
+    let (on, versions) = equal_colours(Playback { plane: true, ..p });
+    let frames = |v: &[(u64, u64)]| v.iter().map(|p| p.0).collect::<Vec<_>>();
+    assert_eq!(
+        frames(&versions),
+        frames(&plain),
+        "{what}: the frame versions"
+    );
+    assert!(
+        plain.iter().all(|p| p.1 == 0),
+        "{what}: no plane, no source version"
+    );
+    assert!(on.state().combat.effects.is_empty(), "{what}: all played");
+    assert!(
+        off.frame().pixels() == on.frame().pixels(),
+        "{what}: the colours"
+    );
+    let at = |x: usize, y: usize| tile(1, 0, ((x % 16) as u16, (y % 16) as u16), 0);
+    let window = (0..176).flat_map(|y| (0..176).map(move |x| (x, y)));
+    for (x, y) in window.clone() {
+        let want = if pointer_covers(&p, x, y) {
+            Src::CLASSIC
+        } else {
+            at(x, y)
+        };
+        assert_eq!(
+            on.frame().src_at(x, y),
+            Some(want),
+            "{what}: shown at ({x}, {y})"
+        );
+    }
+    let named = |fb: &Framebuffer| {
+        window
+            .clone()
+            .all(|(x, y)| fb.src_at(x, y) == Some(at(x, y)))
+    };
+    assert!(on.io().published(named), "{what}: published");
+    assert!(on.io().draw(|f| named(f)), "{what}: the screen");
+    on.src_version()
+}
+
 /// A playback whose last picture has the colours of the frame put up last (records 1 and 5 have
 /// the same pixels): the last picture's sources go back all the same, in the published and the
-/// shown frame, with no new frame: right after the frame (its present publishes them), and after
-/// a pause (published with the plane alone, the source version moved). The frame versions are
-/// those of the run without the plane.
+/// shown frame, with no new frame: right after the frame (its present publishes them; no source
+/// version), and after a pause (published with the plane alone; the source version moves once).
+/// The frame versions are those of the run without the plane.
 #[test]
 fn a_playback_ending_on_equal_colours_puts_back_the_last_sources() {
     for pause in [false, true] {
-        let (off, plain) = equal_colours(false, pause);
-        let (on, versions) = equal_colours(true, pause);
-        let frames = |v: &[(u64, u64)]| v.iter().map(|p| p.0).collect::<Vec<_>>();
-        assert_eq!(
-            frames(&versions),
-            frames(&plain),
-            "pause {pause}: the frame versions"
-        );
-        assert!(
-            plain.iter().all(|p| p.1 == 0),
-            "no plane: no source version"
-        );
-        assert_eq!(
-            on.src_version(),
-            u64::from(pause),
-            "pause {pause}: published alone"
-        );
-        assert!(
-            on.state().combat.effects.is_empty() && off.frame().pixels() == on.frame().pixels()
-        );
-        let named = |fb: &Framebuffer, n: u16| {
-            (0..176).all(|y| {
-                (0..176).all(|x| {
-                    let uv = ((x % 16) as u16, (y % 16) as u16);
-                    fb.src_at(x, y) == Some(tile(n, 0, uv, 0))
-                })
-            })
+        let p = Playback {
+            plane: true,
+            pause,
+            shot: |_, _| 5,
+            pointer: None,
         };
-        assert!(
-            named(on.frame(), 1),
-            "pause {pause}: shown names the last picture's record"
-        );
-        assert!(
-            on.io().published(|p| named(p, 1)),
-            "pause {pause}: published"
-        );
-        assert!(on.io().draw(|f| named(f, 1)), "pause {pause}: the screen");
+        let what = format!("pause {pause}");
+        assert_eq!(equal_colours_pair(p, &what), u64::from(pause), "{what}");
     }
+}
+
+/// The same after a pause with the pointer standing over the window: two opaque columns of four
+/// rows at (36, 40), inside the chunks x 32..48 of rows 40..44, whose other pixels change their
+/// sources. The pixels beside the pointer get the last picture's sources (a source-only publish
+/// that took only chunks of equal colours would leave those chunks behind for good), the
+/// pointer's own stay classic, and the source version moves once.
+#[test]
+fn a_stationary_pointer_does_not_hold_back_the_sources_beside_it() {
+    let mut rows = [0u16; 16];
+    rows[..4].fill(0xC000);
+    let p = Playback {
+        plane: true,
+        pause: true,
+        shot: |_, _| 5,
+        pointer: Some((36, 40, rows)),
+    };
+    assert_eq!(equal_colours_pair(p, "beside the pointer"), 1);
+}
+
+/// The source version moves only when the shown frame's sources changed: not when the change
+/// lies wholly under the pointer (record 5 recorded in cell (2, 2) only, a solid pointer over
+/// that cell: the published frame changes, the shown one does not), and not when the last
+/// picture's sources are those the frame already has.
+#[test]
+fn the_source_version_moves_only_when_the_shown_sources_change() {
+    let hidden = Playback {
+        plane: true,
+        pause: true,
+        shot: |col, row| if (col, row) == (2, 2) { 5 } else { 1 },
+        pointer: Some((32, 32, [0xFFFF; 16])),
+    };
+    assert_eq!(equal_colours_pair(hidden, "under the pointer"), 0);
+    let same = Playback {
+        shot: |_, _| 1,
+        pointer: None,
+        ..hidden
+    };
+    assert_eq!(equal_colours_pair(same, "the same sources"), 0);
 }
 
 /// The water record and the shore record it merges into ([`shore_state`]).

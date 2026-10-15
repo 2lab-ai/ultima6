@@ -648,7 +648,8 @@ impl Engine {
         // The published frame is the one buffer synced from the screen, and the shown frame the
         // one synced from it: with a source plane only its changed chunks are copied. Sources
         // presented alone ([`Io::present_sources`]) are published with the plane alone, where
-        // the colours already are the screen's; the colours and the frames are as without them.
+        // the colours already are the screen's, and the shown frame composed again in the same
+        // colours; the colours and the frames are as without them.
         let sources = self.io.sources_due.replace(false);
         let mut src_only = false;
         if presented {
@@ -671,13 +672,25 @@ impl Engine {
             self.sprite = sprite;
             self.shown_version += 1;
         } else if src_only {
-            self.shown
-                .sync_src_from(&mut self.io.published.borrow_mut());
-            // The sprite again, in the colours it has there: its pixels classic.
+            // As the composition above, but for the frame version: the published frame's
+            // colours are those `shown` was composed from and the sprite has not moved, so the
+            // colours come out the same; the sprite's pixels are classic again. The source version
+            // moves only if the sources shown changed (not for a change under the sprite alone).
+            let before = self.shown.src().map(<[crate::Src]>::to_vec);
+            #[cfg(debug_assertions)]
+            let colours = self.shown.pixels().to_vec();
+            self.shown.sync_from(&mut self.io.published.borrow_mut());
             if let Some(sp) = &self.sprite {
                 sp.draw(&mut self.shown);
             }
-            self.src_version += 1;
+            #[cfg(debug_assertions)]
+            debug_assert!(
+                self.shown.pixels() == colours,
+                "a source-only publish keeps the colours"
+            );
+            if self.shown.src() != before.as_deref() {
+                self.src_version += 1;
+            }
         }
     }
 
@@ -709,8 +722,9 @@ impl Engine {
     }
 
     /// Port-only (spec 07 HD0): changes whenever only the source plane of [`Engine::frame`]
-    /// changed, its colours not ([`Io::present_sources`]); 0 until then. A consumer of the plane
-    /// recomposes when this or [`Engine::frame_version`] moved.
+    /// changed, its colours not ([`Io::present_sources`]; not for a change under the pointer
+    /// sprite alone, whose pixels are classic); 0 until then. A consumer of the plane recomposes
+    /// when this or [`Engine::frame_version`] moved.
     pub fn src_version(&self) -> u64 {
         self.src_version
     }
