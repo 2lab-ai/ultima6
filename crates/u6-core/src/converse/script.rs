@@ -181,6 +181,13 @@ pub fn load_script(state: &mut State, files: &Files, npc: i16, dst: ScriptDst<'_
 /// where `n` is the objlist portrait byte; any other slot `s` uses item `s - 1` (slot 0: item 0)
 /// of `portrait.a`, from 0x62 on item `s - 1 - 0x62` of `portrait.b`.
 pub fn load_portrait(state: &State, files: &Files, npc: i16) -> Option<Vec<u8>> {
+    let (letter, item) = portrait_ref(state, npc)?;
+    portrait_pixels(state, files, letter, item)
+}
+
+/// The portrait [`load_portrait`] loads for `npc`: the archive letter (`portrait.<letter>`) and
+/// the item in it; `None` for a hero without a portrait number.
+pub fn portrait_ref(state: &State, npc: i16) -> Option<(u8, u16)> {
     let mut slot = npc;
     if slot >= 0xe0 {
         let ty = obj_type(state, npc);
@@ -204,9 +211,12 @@ pub fn load_portrait(state: &State, files: &Files, npc: i16) -> Option<Vec<u8>> 
             (b'a', s)
         }
     };
-    if item < 0 {
-        return None;
-    }
+    u16::try_from(item).ok().map(|item| (letter, item))
+}
+
+/// The 56×64 palette indices of portrait `item` of `portrait.<letter>` ([`portrait_ref`]), or
+/// `None` (missing file, empty item).
+pub fn portrait_pixels(state: &State, files: &Files, letter: u8, item: u16) -> Option<Vec<u8>> {
     let name = state
         .converse
         .text
@@ -214,7 +224,7 @@ pub fn load_portrait(state: &State, files: &Files, npc: i16) -> Option<Vec<u8>> 
         .get(Msg::PortraitFile)
         .to_vec();
     let file = files.get(&archive(&name, letter))?;
-    let off = le32(file, item as usize * 4)?;
+    let off = le32(file, usize::from(item) * 4)?;
     let pixels = lzw::decode(file.get(off..)?).ok()?;
     (pixels.len() >= PORTRAIT_LEN).then(|| pixels[..PORTRAIT_LEN].to_vec())
 }
@@ -223,8 +233,16 @@ pub fn load_portrait(state: &State, files: &Files, npc: i16) -> Option<Vec<u8>> 
 ///
 /// Loads `npc`'s portrait ([`load_portrait`]) and hands it (56×64; the original writes the
 /// 0x38 / 0x40 size words in front of the pixels) to the bitmap blit 0x1533e0 at (`x`, `y`).
+/// The source plane names it by its (letter, item) ([`u6_render::portrait_id`]).
 pub fn draw_portrait(state: &State, io: &Io, npc: i16, x: i16, y: i16) {
-    if let Some(pixels) = load_portrait(state, io.files(), npc) {
-        seams::blit_portrait(state, io, &pixels, x, y);
+    let Some((letter, item)) = portrait_ref(state, npc) else {
+        return;
+    };
+    if let Some(pixels) = portrait_pixels(state, io.files(), letter, item) {
+        let src = u6_render::portrait_id(letter, item)
+            .map_or((u6_render::Kind::Classic, 0), |id| {
+                (u6_render::Kind::Portrait, id)
+            });
+        seams::blit_portrait(state, io, &pixels, src, x, y);
     }
 }

@@ -323,6 +323,17 @@ impl Io {
         self.window_cache.get()
     }
 
+    /// Port-only (spec 07 HD0): gives the back buffer, the screen and the published frame a
+    /// source plane ([`Framebuffer::enable_src`]), every pixel classic until drawn again. The
+    /// colours are those without it. It counts as a write of the back buffer
+    /// ([`Io::back_mark`]): the window cache's memo of what it holds no longer stands for the new
+    /// plane.
+    pub fn enable_src_plane(&self) {
+        self.draw_back(Framebuffer::enable_src);
+        self.front.borrow_mut().enable_src();
+        self.published.borrow_mut().enable_src();
+    }
+
     /// Port-only (spec 06 §Design 6): the keys among [`OWN_MINUS`], [`OWN_PLUS`] and
     /// [`OWN_EQUALS`] that game code waiting now has claimed with [`Io::own_keys`], so the page
     /// leaves them to it instead of changing the speed.
@@ -632,6 +643,14 @@ impl Engine {
     /// The last published frame (320×200 indices plus the palette) with the pointer sprite.
     pub fn frame(&self) -> &Framebuffer {
         &self.shown
+    }
+
+    /// Port-only (spec 07 HD0): every buffer gets a source plane ([`Io::enable_src_plane`], and
+    /// the frame with the pointer sprite, whose pixels are classic). Off unless called; the
+    /// frames' colours are the same either way.
+    pub fn enable_src_plane(&mut self) {
+        self.io.enable_src_plane();
+        self.shown.enable_src();
     }
 
     /// Changes whenever [`Engine::frame`] was composed again (the game presented, the pointer

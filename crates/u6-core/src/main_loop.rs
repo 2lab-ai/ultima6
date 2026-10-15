@@ -45,6 +45,8 @@
 pub mod commands;
 pub mod main_hunk;
 #[cfg(test)]
+mod plane_receipt;
+#[cfg(test)]
 mod receipts;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -365,15 +367,21 @@ fn boot_screen(state: &RefCell<State>, io: &Io) {
 ///
 /// The file name is the pointer at A4-0x61e2; 0x1346a0 reads and LZW-decodes it, 0x153384 draws
 /// it at (0, 0) through the bitmap colour map. A missing or bad file draws nothing, as the
-/// original skips the draw when the open fails.
+/// original skips the draw when the open fails. The source plane names it the paper.
 pub fn draw_paper(s: &State, io: &Io) {
-    let name = pointed_string(io, A4.wrapping_sub(0x61e2));
-    let name = String::from_utf8_lossy(&name).into_owned();
-    let Some(bmp) = io.files().get(&name).and_then(|f| Bitmap::from_lzw(f).ok()) else {
+    let Some(bmp) = paper_bitmap(io) else {
         return;
     };
     let colours = &s.gfx.tables.bitmap_colours;
-    io.draw(|fb| crate::gfx::blit::blit_bmp(colours, fb, &bmp, 0, 0));
+    let role = u6_render::BITMAP_PAPER;
+    io.draw(|fb| crate::gfx::blit::blit_bmp(colours, fb, &bmp, 0, 0, role));
+}
+
+/// The bitmap [`draw_paper`] draws, decoded; `None` for a missing or bad file.
+pub(crate) fn paper_bitmap(io: &Io) -> Option<Bitmap> {
+    let name = pointed_string(io, A4.wrapping_sub(0x61e2));
+    let name = String::from_utf8_lossy(&name).into_owned();
+    io.files().get(&name).and_then(|f| Bitmap::from_lzw(f).ok())
 }
 
 /// The calls 0x105350 makes after its reads, in its order: link the actors (0x10edb4),

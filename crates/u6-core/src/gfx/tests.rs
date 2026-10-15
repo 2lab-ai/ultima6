@@ -12,6 +12,7 @@ use super::blit::{
 mod adv;
 mod cache;
 mod idle;
+mod plane;
 mod real;
 mod sprite;
 mod view;
@@ -368,7 +369,8 @@ fn bitmaps_map_their_bytes_through_the_colour_table_and_copy_rects_by_bytes() {
     }
     let mut fb = Framebuffer::new();
     let pixels: Vec<u8> = (0..16 * 2).map(|i| i as u8).collect();
-    super::blit::blit_bitmap(&colours, &mut fb, (16, 2), &pixels, 13, 5);
+    let classic = (u6_render::Kind::Classic, 0);
+    super::blit::blit_bitmap(&colours, &mut fb, (16, 2), &pixels, 13, 5, classic);
     // x is taken down to the byte column 8; bit 5 of the table byte is not a plane.
     assert_eq!(fb.get(8, 5), Some(0));
     assert_eq!(fb.get(9, 5), Some(3));

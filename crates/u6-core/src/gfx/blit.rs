@@ -5,9 +5,14 @@
 //! buffer. Nothing clips: a tile at x = 312 continues on the next row at x = 0, as it does on
 //! the Amiga. Writes past the last pixel (the original would land in the next plane) are
 //! dropped, and so is any call with y ≥ 200 (the original indexes past its row table).
+//!
+//! Spec 07 HD0: the record blit and the bitmap blit name the image each pixel comes from on the
+//! source plane (when the buffer has one, [`Framebuffer::enable_src`]), and the copies between
+//! the buffers carry it ([`Framebuffer::copy_px`]); every other write here (plots, fills) is
+//! classic. The colours are the same with and without the plane.
 
 use u6_formats::gfx::{ANIM_FRAMES, ANIM_PLANE, Span, TILE_W, TileKind};
-use u6_render::{Framebuffer, HEIGHT, WIDTH};
+use u6_render::{FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, HEIGHT, Kind, Src, WIDTH};
 
 use super::GfxState;
 
@@ -19,12 +24,33 @@ fn row_base(y: u16) -> Option<usize> {
     (usize::from(y) < HEIGHT).then(|| usize::from(y) * ROW_BYTES)
 }
 
-/// Applies `f` to the pixel at linear index `i`, if it is on the screen.
+/// Applies `f` to the pixel at linear index `i`, if it is on the screen (classic).
 fn update(fb: &mut Framebuffer, i: usize, f: impl FnOnce(u8) -> u8) {
     if i < WIDTH * HEIGHT {
         let (x, y) = (i % WIDTH, i / WIDTH);
         let p = fb.get(x, y).unwrap_or(0);
         fb.set(x, y, f(p));
+    }
+}
+
+/// [`update`] with the pixel's source `src`.
+fn update_src(fb: &mut Framebuffer, i: usize, src: Src, f: impl FnOnce(u8) -> u8) {
+    if i < WIDTH * HEIGHT {
+        let (x, y) = (i % WIDTH, i / WIDTH);
+        let p = fb.get(x, y).unwrap_or(0);
+        fb.set_src(x, y, f(p), src);
+    }
+}
+
+/// The source of pixel (u, v) of tile record `record` at version `ver`, with `flags`.
+fn tile_src(record: u16, ver: u32, (u, v): (usize, usize), flags: u8) -> Src {
+    Src {
+        ver,
+        id: record,
+        u: u as u16,
+        v: v as u16,
+        kind: Kind::Tile,
+        flags,
     }
 }
 
@@ -65,19 +91,31 @@ pub fn blit_front(gfx: &GfxState, front: &mut Framebuffer, word: u16, x: u16, y:
 /// - object record with `word & 0x1800`: outline mode ([`outline`]).
 /// - `& 4`: the overlay frame [`GfxState::frame`] is OR-ed into colour bit 3 of the screen pixels
 ///   under its bits, over all 16 columns from the unshifted byte address (0x152e4c).
+///
+/// Source plane (spec 07): a pixel the record writes names the record (`record_of`, not the
+/// tile number: substitutions share records), its current version
+/// ([`super::cache::RenderCache::version`]) and its (column, row) in the record. A pixel under
+/// an overlay bit names the same record at its (column, row) with [`FLAG_OVERLAY`], whether the
+/// record or something under it drew it (its colour is the OR either way; an overlay whose rows
+/// pass the record's 16 names rows past them), and an outline pixel names the record pixel it
+/// outlines with [`FLAG_OUTLINE`].
 fn blit(gfx: &GfxState, fb: &mut Framebuffer, word: u16, x: u16, y: u16) {
     let Some(row) = row_base(y) else { return };
     let base = row + usize::from(x >> 3);
     let (rec, overlay, masktype) = gfx.record(word);
+    let id = gfx.record_of[usize::from(word & 0x7ff)];
+    let ver = gfx.cache.version(usize::from(id));
     if masktype & 3 != 0 && word & 0x1800 != 0 {
         // The original then reads its overlay reference out of the scratch buffer (stale bytes
         // after the coverage rows); the port draws no overlay in outline mode.
-        outline(fb, rec, base, outline_colour(word));
+        outline(fb, rec, (id, ver), base, outline_colour(word));
         return;
     }
     for (i, (&p, &clear)) in rec.pixels.iter().zip(&rec.transparent).enumerate() {
         if !clear {
-            update(fb, pixel_at(base, i / TILE_W, i % TILE_W), |_| p);
+            let (r, c) = (i / TILE_W, i % TILE_W);
+            let src = tile_src(id, ver, (c, r), 0);
+            update_src(fb, pixel_at(base, r, c), src, |_| p);
         }
     }
     if masktype & 4 != 0
@@ -89,7 +127,8 @@ fn blit(gfx: &GfxState, fb: &mut Framebuffer, word: u16, x: u16, y: u16) {
             let r = usize::from(ov.first_row) + k;
             for c in 0..TILE_W {
                 if bits & (0x8000 >> c) != 0 {
-                    update(fb, pixel_at(base, r, c), |p| p | 1 << ANIM_PLANE);
+                    let src = tile_src(id, ver, (c, r), FLAG_OVERLAY);
+                    update_src(fb, pixel_at(base, r, c), src, |p| p | 1 << ANIM_PLANE);
                 }
             }
         }
@@ -100,8 +139,15 @@ fn blit(gfx: &GfxState, fb: &mut Framebuffer, word: u16, x: u16, y: u16) {
 /// object record (NOT mask AND NOT every stored plane, built in the scratch buffer 0x155584),
 /// leaving every other pixel. The routine from the table at 0x152bc2 sets the colour's planes and
 /// clears the others, plane 4 included. Unlike the normal path this one does not add the byte
-/// for right-span records, so their outline lands 8 pixels left of the sprite.
-fn outline(fb: &mut Framebuffer, rec: &u6_formats::gfx::Tile, base: usize, colour: u8) {
+/// for right-span records, so their outline lands 8 pixels left of the sprite. `(id, ver)`: the
+/// record and its version, for the source plane.
+fn outline(
+    fb: &mut Framebuffer,
+    rec: &u6_formats::gfx::Tile,
+    (id, ver): (u16, u32),
+    base: usize,
+    colour: u8,
+) {
     let shift = match rec.kind {
         TileKind::Object(Span::Right) => 8,
         _ => 0,
@@ -109,7 +155,8 @@ fn outline(fb: &mut Framebuffer, rec: &u6_formats::gfx::Tile, base: usize, colou
     for (i, (&p, &clear)) in rec.pixels.iter().zip(&rec.transparent).enumerate() {
         let (r, c) = (i / TILE_W, i % TILE_W);
         if !clear && p == 0 && c >= shift {
-            update(fb, pixel_at(base, r, c - shift), |_| colour);
+            let src = tile_src(id, ver, (c, r), FLAG_OUTLINE);
+            update_src(fb, pixel_at(base, r, c - shift), src, |_| colour);
         }
     }
 }
@@ -178,13 +225,12 @@ fn fill(fb: &mut Framebuffer, (x0, y0, x1, y1): (u16, u16, u16, u16), colour: u1
 }
 
 /// Original: 0x15206c (copy one pixel, all 5 planes, from the back buffer to the front)
+///
+/// The pixel's source comes along ([`Framebuffer::copy_px`]).
 pub fn copy_pixel(back: &Framebuffer, front: &mut Framebuffer, x: u16, y: u16) {
     let Some(row) = row_base(y) else { return };
     let i = (row + usize::from(x >> 3)) * 8 + usize::from(x & 7);
-    if i < WIDTH * HEIGHT {
-        let p = back.get(i % WIDTH, i / WIDTH).unwrap_or(0);
-        update(front, i, |_| p);
-    }
+    front.copy_px(back, i, i);
 }
 
 /// The pixel order of 0x1520e2 over a `w`×`h` rect, as offsets (dx, dy).
@@ -266,13 +312,16 @@ pub fn copy_window(back: &Framebuffer, front: &mut Framebuffer) {
     }
 }
 
-/// [`copy_window`]'s result by rows: each row of its rect that differs between the buffers is
-/// copied, the others (which the copy would leave as they are) are not.
+/// [`copy_window`]'s result by rows: each row of its rect whose colours differ between the
+/// buffers is copied, the others (which the copy would leave as they are) are not. With a source
+/// plane on the screen every row is copied, colours and sources: a row of equal colours can hold
+/// other sources (a replay put it back classic), and copying the sources costs less than
+/// comparing them.
 pub fn copy_window_rows(back: &Framebuffer, front: &mut Framebuffer) {
     for y in 8..168 {
-        let row = y * WIDTH + 8..y * WIDTH + 168;
-        if back.pixels()[row.clone()] != front.pixels()[row.clone()] {
-            front.blit(8, y as i32, 160, 1, &back.pixels()[row], None);
+        let i = y * WIDTH + 8;
+        if front.src().is_some() || back.pixels()[i..i + 160] != front.pixels()[i..i + 160] {
+            front.copy_span(back, i, i, 160);
         }
     }
 }
@@ -282,6 +331,7 @@ pub fn copy_window_rows(back: &Framebuffer, front: &mut Framebuffer) {
 ///
 /// Columns are bytes: x0 / 8 ..= x1 / 8 go to dx / 8 onwards (`lsr.w #3`), rows y0..=y1 to
 /// dy onwards. A row past the screen is dropped (the original would land in the next plane).
+/// The pixels' sources come along ([`Framebuffer::copy_px`]).
 #[allow(clippy::too_many_arguments)]
 pub fn copy_rect(
     back: &Framebuffer,
@@ -306,11 +356,7 @@ pub fn copy_rect(
             let s = (src + usize::from(b)) * 8;
             let d = (dst + usize::from((dx >> 3) + b)) * 8;
             for bit in 0..8 {
-                let i = s + bit;
-                if i < WIDTH * HEIGHT {
-                    let p = back.get(i % WIDTH, i / WIDTH).unwrap_or(0);
-                    update(front, d + bit, |_| p);
-                }
+                front.copy_px(back, s + bit, d + bit);
             }
         }
     }
@@ -325,15 +371,18 @@ fn back_byte(x: u16, y: u16) -> Option<usize> {
 /// Original: 0x153384 (draw a `.bmp` bitmap at (x, y): its header is two little-endian words,
 /// width and height, read byte by byte; then the body of 0x1533e0)
 ///
-/// The header is decoded by `u6_formats::bitmap` (the LZW file 0x1346a0 reads).
+/// The header is decoded by `u6_formats::bitmap` (the LZW file 0x1346a0 reads). `role`: the
+/// bitmap's [`u6_render::Src::id`] ([`u6_render::BITMAP_PAPER`], [`u6_render::BITMAP_SPELLBOOK`]).
 pub fn blit_bmp(
     colours: &[u8; 256],
     front: &mut Framebuffer,
     bmp: &u6_formats::bitmap::Bitmap,
     x: u16,
     y: u16,
+    role: u16,
 ) {
-    blit_bitmap(colours, front, (bmp.width, bmp.height), &bmp.pixels, x, y);
+    let (size, src) = ((bmp.width, bmp.height), (Kind::Bitmap, role));
+    blit_bitmap(colours, front, size, &bmp.pixels, x, y, src);
 }
 
 /// Original: 0x1533e0 (draw an 8-bit bitmap with a word header on the screen); also the body of
@@ -343,6 +392,9 @@ pub fn blit_bmp(
 /// `colours[byte] & 0x1f` (the five bits the shifts take into the planes). The bitmap starts
 /// at byte column x / 8 of row y; each row is `width` pixels, the next row starts a screen row
 /// below. Pixels past the screen are dropped.
+///
+/// `(kind, id)` names the image for the source plane (spec 07): each pixel gets (column, row)
+/// in the bitmap, version 0. [`Kind::Classic`] draws classic pixels.
 pub fn blit_bitmap(
     colours: &[u8; 256],
     front: &mut Framebuffer,
@@ -350,6 +402,7 @@ pub fn blit_bitmap(
     pixels: &[u8],
     x: u16,
     y: u16,
+    (kind, id): (Kind, u16),
 ) {
     for r in 0..usize::from(height) {
         let Some(row) = row_base(y.wrapping_add(r as u16)) else {
@@ -360,7 +413,18 @@ pub fn blit_bitmap(
             let Some(&b) = pixels.get(r * usize::from(width) + c) else {
                 return;
             };
-            update(front, start + c, |_| colours[usize::from(b)] & 0x1f);
+            let src = match kind {
+                Kind::Classic => Src::CLASSIC,
+                _ => Src {
+                    ver: 0,
+                    id,
+                    u: c as u16,
+                    v: r as u16,
+                    kind,
+                    flags: 0,
+                },
+            };
+            update_src(front, start + c, src, |_| colours[usize::from(b)] & 0x1f);
         }
     }
 }

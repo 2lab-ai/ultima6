@@ -87,7 +87,10 @@ impl RenderCache {
         }
     }
 
-    fn version(&self, r: usize) -> u32 {
+    /// Record `r`'s version: the changes of its pixels so far, 0 before the first. The source
+    /// plane names it with each pixel drawn from the record (spec 07; a clone of the cache
+    /// starts again at 0).
+    pub fn version(&self, r: usize) -> u32 {
         self.versions.get(r).copied().unwrap_or(0)
     }
 }
