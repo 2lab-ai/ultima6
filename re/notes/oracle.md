@@ -268,6 +268,7 @@ state, so runs are not bit-identical end to end.
     node tools/oracle/trace.mjs OUT SNAPSHOT [KEY ...]   # exact calls of the traced routines per step (§E)
     python3 -I -B tools/oracle/trace.py OUT/trace.json ...   # the port's timing constants from them
     python3 -I -B tools/oracle/test_fight.py   # fight.py and trace.py on synthetic captures
+    node tools/oracle/test_trace.mjs   # trace.mjs's stop bookkeeping (tracecore.mjs), no emulator
     tools/oracle/run.sh build      # ADFs -> installer under AROS -> disks/{PROGRAM,POPULACE,PLAYER,PORTRAIT}.hdf
     tools/oracle/run.sh boot [step ...]   # boot those, run steps, PNGs into shots/boot-<ts>/
     tools/oracle/run.sh serve &    # control server 127.0.0.1:8765, then:
