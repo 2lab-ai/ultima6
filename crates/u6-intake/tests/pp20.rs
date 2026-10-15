@@ -34,7 +34,7 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
         ("two equal bytes", vec![7, 7]),
         (
             "text with repeats",
-            text(&"Ultima VI: The False Prophet. The Avatar returns to Britannia. ".repeat(12)),
+            text(&"Synthetic text: a long line that repeats, so it crunches well. ".repeat(12)),
         ),
         ("long run (length extension chunks)", vec![0xaa; 2000]),
         ("random (literal runs only)", lcg(700, 1)),

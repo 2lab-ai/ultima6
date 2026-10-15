@@ -225,26 +225,26 @@ mod tests {
 
     #[test]
     fn decodes_amiga_byte_order() {
-        // OBJBLKHH-style map record `00 84 03 0e | 01 33 | 00 00` -> (900,896,0) obj 307 frame 0;
-        // gold in a container `08 05 00 00 | 00 58 | 01 2c` -> container 5, obj 88, qty 300;
-        // sign `00 .. | 05 4c | 07 00`: obj 332 frame 1, quality 7.
+        // Made-up records: on the map `00 f4 61 09 | 00 c8 | 00 00` -> (500,600,0) obj 200 frame
+        // 0; gold in a container `08 06 00 00 | 00 58 | 01 90` -> container 6, obj 88, qty 400;
+        // a sign `01 .. | 05 4c | 09 00`: obj 332 frame 1, quality 9.
         let mut d = vec![0x00, 0x03];
-        d.extend_from_slice(&[0x00, 0x84, 0x03, 0x0e, 0x01, 0x33, 0x00, 0x00]);
-        d.extend_from_slice(&[0x08, 0x05, 0x00, 0x00, 0x00, 0x58, 0x01, 0x2c]);
-        d.extend_from_slice(&[0x01, 0x10, 0x00, 0x00, 0x05, 0x4c, 0x07, 0x00]);
+        d.extend_from_slice(&[0x00, 0xf4, 0x61, 0x09, 0x00, 0xc8, 0x00, 0x00]);
+        d.extend_from_slice(&[0x08, 0x06, 0x00, 0x00, 0x00, 0x58, 0x01, 0x90]);
+        d.extend_from_slice(&[0x01, 0x20, 0x00, 0x00, 0x05, 0x4c, 0x09, 0x00]);
         let b = ObjBlock::parse(&d).unwrap();
         let [a, g, s] = [b.objects[0], b.objects[1], b.objects[2]];
         assert_eq!(
             (a.pos.x, a.pos.y, a.pos.z, a.obj_n, a.frame),
-            (900, 896, 0, 307, 0)
+            (500, 600, 0, 200, 0)
         );
         assert_eq!(a.location(), ObjLocation::Map);
         assert_eq!(a.container_index(), None);
         assert_eq!(g.location(), ObjLocation::Container);
-        assert_eq!(g.container_index(), Some(5));
-        assert_eq!((g.obj_n, g.stack_qty()), (88, 300));
+        assert_eq!(g.container_index(), Some(6));
+        assert_eq!((g.obj_n, g.stack_qty()), (88, 400));
         assert!(is_stackable(g.obj_n, g.frame));
-        assert_eq!((s.obj_n, s.frame, s.quality, s.qty), (332, 1, 7, 0));
+        assert_eq!((s.obj_n, s.frame, s.quality, s.qty), (332, 1, 9, 0));
         assert_eq!(s.status & STATUS_OK_TO_TAKE, 1);
         assert_eq!(b.to_bytes(), d);
     }

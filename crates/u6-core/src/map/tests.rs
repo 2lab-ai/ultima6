@@ -127,19 +127,19 @@ fn tile_at_reads_the_window_cache_inside_it_and_the_chunks_outside() {
 fn rebuild_window_aligns_on_chunks_and_keeps_an_unchanged_window() {
     let mut s = State::empty();
     s.map = world();
-    s.map.centre = at(307, 352);
+    s.map.centre = at(339, 400);
     region::rebuild_window(&mut s);
     let m = &s.map;
-    assert_eq!(m.window_origin, [288, 336]);
-    assert_eq!(m.view_offset, [307 - 288 - 5, 352 - 336 - 5]);
-    assert_eq!(m.window_key, [288, 336, 0]);
+    assert_eq!(m.window_origin, [320, 384]);
+    assert_eq!(m.view_offset, [339 - 320 - 5, 400 - 384 - 5]);
+    assert_eq!(m.window_key, [320, 384, 0]);
     assert_eq!(
         (m.world_mask, m.view_dirty, m.flag_784e),
         (SURFACE_MASK, 1, 1)
     );
     for y in 0..WINDOW {
         for x in 0..WINDOW {
-            let (wx, wy) = (288 + x, 336 + y);
+            let (wx, wy) = (320 + x, 384 + y);
             let chunk = m.chunk_ref(wx as u16, wy as u16, 0).unwrap();
             let want = m.chunks.tile(chunk.into(), wx % 8, wy % 8).unwrap();
             assert_eq!(m.window_tiles[cell(x, y)], want, "cell ({x}, {y})");
@@ -148,14 +148,14 @@ fn rebuild_window_aligns_on_chunks_and_keeps_an_unchanged_window() {
     // Same origin and level: the cache is kept (a poked cell survives).
     s.map.window_tiles[0] ^= 0xff;
     let poked = s.map.window_tiles[0];
-    s.map.centre = at(310, 355);
+    s.map.centre = at(342, 403);
     region::rebuild_window(&mut s);
     assert_eq!(s.map.window_tiles[0], poked);
-    assert_eq!(s.map.view_offset, [310 - 288 - 5, 355 - 336 - 5]);
+    assert_eq!(s.map.view_offset, [342 - 320 - 5, 403 - 384 - 5]);
     // A new origin refills it.
-    s.map.centre = at(330, 355);
+    s.map.centre = at(362, 403);
     region::rebuild_window(&mut s);
-    assert_eq!(s.map.window_origin, [312, 336]);
+    assert_eq!(s.map.window_origin, [344, 384]);
     assert_ne!(s.map.window_tiles[0], poked);
 }
 

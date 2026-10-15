@@ -10,7 +10,7 @@ use common::zip_writer::zip;
 use u6_intake::{InputFile, Intake, intake};
 
 fn game_text() -> Vec<u8> {
-    text(&"The Avatar has returned. ".repeat(40))
+    text(&"Synthetic payload, made up. ".repeat(40))
 }
 
 fn volume(name: &str) -> Vec<u8> {
@@ -24,9 +24,10 @@ fn volume(name: &str) -> Vec<u8> {
     )
 }
 
-/// Encode an ADF image as an HFE: 83 cylinders like the archive.org dumps.
+/// Encode an ADF image as an HFE of 82 cylinders: more than the ADF's 80, as flux dumps carry
+/// (the extra ones blank).
 fn adf_to_hfe(adf: &[u8]) -> Vec<u8> {
-    let tracks: Vec<Vec<Vec<u8>>> = (0..83)
+    let tracks: Vec<Vec<Vec<u8>>> = (0..82)
         .map(|cyl| {
             (0..2)
                 .map(|head| {
@@ -111,7 +112,7 @@ fn zip_of_hfe_disks_to_adfs_volume_files_pp20_decrunched_scans_ignored() {
     ));
     assert!(has_line(
         &r,
-        "Ultima VI Disk 1.hfe: HFE 83 cyl x 2 sides, 250 kbps, encoding 1; sectors 1760/1760 good, \
+        "Ultima VI Disk 1.hfe: HFE 82 cyl x 2 sides, 250 kbps, encoding 1; sectors 1760/1760 good, \
          bad header checksums 0, bad data checksums 0, wrong-track headers 0"
     ));
     assert!(has_line(

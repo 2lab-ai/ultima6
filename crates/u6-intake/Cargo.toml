@@ -12,3 +12,5 @@ miniz_oxide = { version = "0.8", default-features = false, features = ["with-all
 
 [dev-dependencies]
 sha2 = "0.10"
+# Content-free equality for the real-data test (spec 01 §Rights).
+u6-testkit.workspace = true

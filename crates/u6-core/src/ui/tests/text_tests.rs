@@ -38,7 +38,7 @@ fn printf_numbers_padding_and_plural() {
 fn printf_unknown_directive_prints_the_character_unescaped() {
     // `/`, `>` and `%` alone would be escapes; as directives they print literally.
     assert_eq!(top(b"7%/9", &[]), "7/9");
-    assert_eq!(top(b"%s:%>", &[Arg::Str(b"Iolo")]), "Iolo:>");
+    assert_eq!(top(b"%s:%>", &[Arg::Str(b"Wxyz")]), "Wxyz:>");
     assert_eq!(top(b"100%%", &[]), "100%");
 }
 

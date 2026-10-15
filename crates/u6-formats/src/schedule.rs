@@ -122,9 +122,9 @@ mod tests {
 
     #[test]
     fn parses_records_and_splits_per_actor() {
-        // formats.md record 0 = `08 92 33 71 05` -> hour 8, worktype 0x92, (307,348,0).
+        // Made-up record `2e 91 f4 61 19` -> hour 14, day 1, worktype 0x91, (500,600,1).
         let recs = [
-            [0x08, 0x92, 0x33, 0x71, 0x05],
+            [0x2e, 0x91, 0xf4, 0x61, 0x19],
             [0x2C, 0x01, 0, 0, 0x10],
             [0xF7, 2, 1, 0, 0],
         ];
@@ -132,8 +132,8 @@ mod tests {
         let s = Schedules::parse(&d).unwrap();
         assert_eq!(s.records.len(), 3);
         let r = s.records[0];
-        assert_eq!((r.hour, r.day_of_week, r.worktype), (8, 0, 0x92));
-        assert_eq!((r.pos.x, r.pos.y, r.pos.z), (307, 348, 0));
+        assert_eq!((r.hour, r.day_of_week, r.worktype), (14, 1, 0x91));
+        assert_eq!((r.pos.x, r.pos.y, r.pos.z), (500, 600, 1));
         assert_eq!((s.records[1].hour, s.records[1].day_of_week), (12, 1));
         assert_eq!(s.records[1].pos.z, 1);
         // actor 5: first 0, next (actor 6) = 2 -> 2 records; actor 6 -> 1; actor 255 -> 1.

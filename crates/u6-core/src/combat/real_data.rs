@@ -18,6 +18,7 @@ use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
 use crate::image::A4;
 use crate::state::State;
+use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 /// The two creature types named after gargoyles in the monster list.
@@ -43,13 +44,13 @@ fn start() -> Option<(State, Files)> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
     }]);
     let files = Files::new(r.files);
-    let mut state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
+    let mut state = State::new_game(&files).quiet();
     crate::objects::load_state_objects(&mut state);
     state.map.flag_784e = 1;
     // The start window's egg stays unhatched here (A4-0x7afb, which 0x1321dc / 0x1319b2 check):
@@ -123,7 +124,7 @@ fn boot_screen(s: &mut State, io: &Io) {
 /// Free tiles around the leader for the spawned monsters.
 fn free_tiles(s: &mut State, n: usize) -> Vec<(u16, u16)> {
     let c = s.map.centre;
-    let leader = s.actors.party.leader().unwrap().0;
+    let leader = s.actors.party.leader().quiet().0;
     let mut out = Vec::new();
     for (dx, dy) in [
         (1i16, -1i16),
@@ -153,7 +154,7 @@ fn write_ppm(dir: &Path, name: &str, fb: &u6_render::Framebuffer) {
         let c = fb.palette[usize::from(i)];
         out.extend([c.r, c.g, c.b]);
     }
-    std::fs::write(dir.join(name), out).unwrap();
+    std::fs::write(dir.join(name), out).quiet();
 }
 
 #[test]
@@ -162,10 +163,11 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
         return;
     };
     state.rng.seed(0x1234);
-    let kind = GARGOYLE_TYPES
+    let which = GARGOYLE_TYPES
         .into_iter()
-        .find(|&k| crate::objects::monster_index(&state.objects, k) >= 0)
+        .position(|k| crate::objects::monster_index(&state.objects, k) >= 0)
         .expect("a gargoyle creature type");
+    let kind = GARGOYLE_TYPES[which];
     let report: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let rep = Rc::clone(&report);
     let needles: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -185,6 +187,7 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
             crate::map::view::update_view(&mut s);
             foes
         };
+        assert!(foes.len() == 2, "two foes spawned");
         crate::ui::panels::redraw_panel(&st, &io).await;
         crate::gfx::refresh_view(&mut st.borrow_mut(), &io);
         crate::gfx::render_window(&mut st.borrow_mut(), &io, true);
@@ -202,27 +205,24 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
                 (target.y as i16 - c.y as i16 + 5) as i8,
             );
             s.main.attack_target = foes[0];
-            rep.borrow_mut()
-                .push(format!("foes {foes:?} (type {kind:#x})"));
+            rep.borrow_mut().push(format!(
+                "two foes spawned, gargoyle type {which} of {}",
+                GARGOYLE_TYPES.len()
+            ));
         }
         super::attack::attack(&st, &io).await;
         {
             let s = st.borrow();
-            let g = foes[0] as usize;
             let said: Vec<u32> = s.combat.said.iter().map(|m| m.at).collect();
             let word = said.contains(&ATTACK_WORD);
             let weapon = WEAPON_LINES.iter().any(|w| said.contains(w));
             let mut r = rep.borrow_mut();
-            r.push(format!(
-                "attack: command word {word}, weapon line {weapon}, {} message lines",
-                s.ui.messages.len()
-            ));
-            r.push(format!("attack: gargoyle hp {}", s.actors.attrs.hp[g]));
+            r.push(format!("attack: command word {word}, weapon line {weapon}"));
         }
-        for turn in 0..120 {
+        for _ in 0..120 {
             {
                 let mut s = st.borrow_mut();
-                let l = s.actors.party.leader().unwrap().0;
+                let l = s.actors.party.leader().quiet().0;
                 s.actors.movement_points[usize::from(l)] = 0;
             }
             crate::actors::turn::world_turn(&st, &io).await;
@@ -232,8 +232,7 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
                 .iter()
                 .all(|&g| s.actors.attrs.status[g as usize] & 0x10 != 0);
             if dead {
-                rep.borrow_mut()
-                    .push(format!("both gargoyles dead after {turn} turns"));
+                rep.borrow_mut().push("both gargoyles dead".to_string());
                 break;
             }
         }
@@ -263,25 +262,14 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
         }
     }
     let s = e.state();
-    println!("message lines: {}", s.ui.messages.len());
+    // Output: labels, booleans and an index into the test's own type list (spec 01 §Rights).
     println!("--- report ---");
     for line in report.borrow().iter() {
         println!("{line}");
     }
     let party: Vec<usize> = s.actors.party.active().map(|a| a.index()).collect();
-    for &m in &party {
-        println!(
-            "member {m}: hp {} -> {}, exp {} -> {}",
-            hp0[m], s.actors.attrs.hp[m], exp0[m], s.actors.attrs.exp[m]
-        );
-    }
-    println!(
-        "effect frames shown: {}, captured {}",
-        s.combat.shown,
-        frames.len()
-    );
-    println!("stub hits: {:?}", e.stub_hits());
-    assert_eq!(report.borrow().last().map(String::as_str), Some("done"));
+    println!("stub hits: {:?}", e.stub_hits().keys().collect::<Vec<_>>());
+    assert!(report.borrow().last().map(String::as_str) == Some("done"));
     let text = s.ui.messages.join("\n");
     let attack_line = report
         .borrow()
@@ -308,7 +296,7 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
     assert!(!name.is_empty());
     if let Some(dir) = frames_dir {
         let dir = Path::new(&dir);
-        std::fs::create_dir_all(dir).unwrap();
+        std::fs::create_dir_all(dir).quiet();
         for (t, fb) in &frames {
             write_ppm(dir, &format!("effect-{t:05}.ppm"), fb);
         }

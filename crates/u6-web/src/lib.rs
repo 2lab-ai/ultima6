@@ -655,7 +655,7 @@ fn queue_pointer(pending: &mut Vec<InputEvent>, x: i32, y: i32, buttons: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use u6_testkit::assert_same;
+    use u6_testkit::{Quiet, assert_same};
 
     #[test]
     fn pointer_moves_collapse_and_button_changes_queue() {
@@ -782,32 +782,38 @@ mod tests {
             eprintln!("skipped: {ZIP} not present");
             return;
         }
-        let data = std::fs::read(ZIP).unwrap();
-        let unzipped = zipscan::declared_disk_bytes(&data).unwrap();
-        assert!(unzipped > 0 && unzipped < MAX_UNZIPPED_BYTES, "{unzipped}");
+        let data = std::fs::read(ZIP).quiet();
+        let unzipped = zipscan::declared_disk_bytes(&data).quiet();
+        assert!(
+            unzipped > 0 && unzipped < MAX_UNZIPPED_BYTES,
+            "under the unzip limit"
+        );
         let mut game = Game::new();
-        game.collect("ultima-vi.zip", data).unwrap();
-        game.boot(1, false).unwrap();
+        game.collect("ultima-vi.zip", data).quiet();
+        game.boot(1, false).quiet();
         let n = game.kept_count();
-        assert_eq!(n, game.game_files());
+        assert!(n == game.game_files());
         let kept: Vec<(String, Vec<u8>)> = (0..n)
-            .map(|i| (game.kept_path(i), game.kept_bytes(i).unwrap().to_vec()))
+            .map(|i| (game.kept_path(i), game.kept_bytes(i).quiet().to_vec()))
             .collect();
         assert!(kept.iter().all(|(_, b)| !b.is_empty()));
         game.release_kept();
-        assert_eq!((game.kept_count(), game.kept_len(0)), (0, 0));
+        assert!((game.kept_count(), game.kept_len(0)) == (0, 0));
         let mut again = Game::new();
         for (path, bytes) in kept {
-            again.collect(&path, bytes).unwrap();
+            again.collect(&path, bytes).quiet();
         }
-        again.boot(1, false).unwrap();
-        assert_eq!(again.game_files(), n);
+        again.boot(1, false).quiet();
+        assert!(again.game_files() == n);
         for _ in 0..60 {
             game.tick(16);
             again.tick(16);
         }
         assert!(game.frame_rgba() == again.frame_rgba(), "same first frames");
-        assert_eq!(game.program(), "u", "a start runs the launcher: `u` first");
+        assert!(
+            game.program() == "u",
+            "a start runs the launcher: `u` first"
+        );
         assert!(!game.finished());
     }
 
@@ -821,31 +827,31 @@ mod tests {
             eprintln!("skipped: {ZIP} not present");
             return;
         }
-        let data = std::fs::read(ZIP).unwrap();
+        let data = std::fs::read(ZIP).quiet();
         let mut game = Game::new();
-        game.collect("ultima-vi.zip", data.clone()).unwrap();
-        game.boot(1, true).unwrap();
+        game.collect("ultima-vi.zip", data.clone()).quiet();
+        game.boot(1, true).quiet();
         let ticks = |game: &mut Game, n: u32| {
             for _ in 0..n {
                 game.tick(16);
             }
         };
         ticks(&mut game, 120);
-        assert_eq!(game.program(), "game");
-        assert_eq!((game.save_generation(), game.save_collect()), (0, 0));
+        assert!(game.program() == "game");
+        assert!((game.save_generation(), game.save_collect()) == (0, 0));
         let start = game.leader_position();
         game.key_down("ArrowRight", "ArrowRight", false);
         ticks(&mut game, 400);
         let moved = game.leader_position();
-        assert_ne!(moved, start, "one step east");
+        assert!(moved != start, "one step east");
         game.key_down("KeyS", "s", true);
         ticks(&mut game, 30);
         game.key_down("KeyY", "y", false);
         ticks(&mut game, 60);
-        assert_eq!(game.save_generation(), 1, "Ctrl-S, Y saved");
-        assert_eq!(game.leader_position(), moved);
+        assert!(game.save_generation() == 1, "Ctrl-S, Y saved");
+        assert!(game.leader_position() == moved);
         let n = game.save_collect();
-        assert!(n > 1, "objlist and blocks: {n}");
+        assert!(n > 1, "objlist and blocks");
         let files: Vec<(String, Vec<u8>)> = (0..n)
             .map(|i| {
                 let len = game.save_len(i);
@@ -855,41 +861,39 @@ mod tests {
             .collect();
         assert!(files.iter().any(|(p, _)| p == "savegame/objlist"));
         game.save_committed(1);
-        assert_eq!(game.save_collect(), 0, "nothing new after the commit");
+        assert!(game.save_collect() == 0, "nothing new after the commit");
         let kept: Vec<(String, Vec<u8>)> = (0..game.kept_count())
-            .map(|i| (game.kept_path(i), game.kept_bytes(i).unwrap().to_vec()))
+            .map(|i| (game.kept_path(i), game.kept_bytes(i).quiet().to_vec()))
             .collect();
         let mut again = Game::new();
         for (path, bytes) in &kept {
-            again.collect(path, bytes.clone()).unwrap();
+            again.collect(path, bytes.clone()).quiet();
         }
         for (path, bytes) in files {
             again.load_save(&path, bytes);
         }
-        again.boot(1, true).unwrap();
-        assert_eq!(again.save_files(), n);
-        assert_eq!(
-            again.game_files(),
-            game.game_files(),
+        again.boot(1, true).quiet();
+        assert!(again.save_files() == n);
+        assert!(
+            again.game_files() == game.game_files(),
             "the save is not a game file"
         );
-        assert_eq!(again.leader_position(), moved);
+        assert!(again.leader_position() == moved);
         let mut fresh = Game::new();
         for (path, bytes) in kept {
-            fresh.collect(&path, bytes).unwrap();
+            fresh.collect(&path, bytes).quiet();
         }
-        fresh.boot(1, true).unwrap();
-        assert_eq!(
-            fresh.leader_position(),
-            start,
+        fresh.boot(1, true).quiet();
+        assert!(
+            fresh.leader_position() == start,
             "the kept files are the new game's"
         );
-        assert!(fresh.audio_start(48_000).unwrap());
+        assert!(fresh.audio_start(48_000).quiet());
         let mut heard = 0f32;
         for _ in 0..60 {
             fresh.tick(16);
             let n = fresh.audio_render(768);
-            assert_eq!(n, 1536);
+            assert!(n == 1536);
             heard = heard.max(fresh.audio_buf.iter().fold(0f32, |m, &v| m.max(v.abs())));
         }
         assert!(heard > 0.0, "the boot's song renders");
@@ -897,7 +901,8 @@ mod tests {
     /// The stored save removed under a game that started from one: its next Save lists the
     /// whole save (objlist and the 69 blocks), so the next start from it is the world that
     /// game had. A block of the save it started from that no Save rewrote (synthetic: an empty
-    /// far block) is in the list, with that save's bytes, and the restarted world holds it.
+    /// block, the last one the first Save did not list) is in the list, with that save's bytes,
+    /// and the restarted world holds it.
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn a_save_after_the_stored_one_was_removed_lists_the_whole_world() {
@@ -926,51 +931,53 @@ mod tests {
                 .collect()
         };
         let blocks = |game: &Game| -> Vec<Vec<u8>> {
-            let s = game.engine.as_ref().unwrap().state();
+            let s = game.engine.as_ref().quiet().state();
             s.objects.blocks.iter().map(|(_, b)| b.to_bytes()).collect()
         };
         let mut first = Game::new();
         first
-            .collect("ultima-vi.zip", std::fs::read(ZIP).unwrap())
-            .unwrap();
-        first.boot(1, true).unwrap();
+            .collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        first.boot(1, true).quiet();
         ticks(&mut first, 120);
         save(&mut first);
-        assert_eq!(first.save_generation(), 1);
+        assert!(first.save_generation() == 1);
         let mut stored = listed(&mut first);
-        let far = u6_core::saveload::block_file(63);
-        assert!(
-            !stored.contains_key(&far),
-            "a Save near the start leaves the far block"
-        );
+        let far_index = (0..BLOCK_COUNT)
+            .rev()
+            .find(|&i| !stored.contains_key(&u6_core::saveload::block_file(i)))
+            .expect("a Save near the start leaves blocks out");
+        let far = u6_core::saveload::block_file(far_index);
         stored.insert(far.clone(), vec![0, 0]);
         let kept: Vec<(String, Vec<u8>)> = (0..first.kept_count())
-            .map(|i| (first.kept_path(i), first.kept_bytes(i).unwrap().to_vec()))
+            .map(|i| (first.kept_path(i), first.kept_bytes(i).quiet().to_vec()))
             .collect();
         let start = |save: &BTreeMap<String, Vec<u8>>| {
             let mut game = Game::new();
             for (path, bytes) in &kept {
-                game.collect(path, bytes.clone()).unwrap();
+                game.collect(path, bytes.clone()).quiet();
             }
             for (path, bytes) in save {
                 assert!(game.load_save(path, bytes.clone()));
             }
-            game.boot(1, true).unwrap();
+            game.boot(1, true).quiet();
             ticks(&mut game, 120);
             game
         };
         let mut game = start(&stored);
-        assert_same!(blocks(&game)[63], [0, 0], "the save's far block");
+        assert_same!(blocks(&game)[far_index], [0, 0], "the save's far block");
         game.save_forgotten();
         save(&mut game);
-        assert_eq!(game.save_generation(), 1);
+        assert!(game.save_generation() == 1);
         let whole = listed(&mut game);
-        eprintln!("{} files listed after the removal", whole.len());
-        assert_eq!(whole.len(), 1 + BLOCK_COUNT, "the objlist and every block");
+        assert!(
+            whole.len() == 1 + BLOCK_COUNT,
+            "the objlist and every block"
+        );
         let far_bytes = whole.get(&far).expect("the far block is listed");
         assert_same!(far_bytes, [0, 0], "the listed far block");
         let total: usize = whole.values().map(Vec::len).sum();
-        assert!(total <= MAX_SAVE_BYTES, "{total} bytes");
+        assert!(total <= MAX_SAVE_BYTES, "within the save cap");
         game.save_committed(1);
         let again = start(&whole);
         assert_same!(
@@ -978,7 +985,7 @@ mod tests {
             blocks(&game),
             "the same world, block for block"
         );
-        assert_eq!(again.leader_position(), game.leader_position());
+        assert!(again.leader_position() == game.leader_position());
         save(&mut game);
         assert!(
             listed(&mut game).len() < 1 + BLOCK_COUNT,

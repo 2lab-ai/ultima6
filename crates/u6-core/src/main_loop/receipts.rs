@@ -14,6 +14,7 @@ use crate::files::Files;
 use crate::image::A4;
 use crate::objects::{IN_CONTAINER, READIED};
 use crate::state::State;
+use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 const AVATAR: i16 = 1;
@@ -33,7 +34,7 @@ fn files() -> Option<Files> {
     }
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
-        data: std::fs::read(ZIP).unwrap(),
+        data: std::fs::read(ZIP).quiet(),
     }]);
     Some(Files::new(r.files))
 }
@@ -46,14 +47,7 @@ async fn boot_then(state: &RefCell<State>, io: &Io, setup: Setup) {
     super::boot_screen(state, io);
     {
         let mut s = state.borrow_mut();
-        s.main.flag_64ce = 1;
-        s.map.flag_7afb = 1;
-        super::finish_load_state(&mut s, io);
-        s.map.flag_7afb = 0;
-        let anim = s.tables.anim.clone();
-        for slot in anim.slots.iter().take(usize::from(anim.count)) {
-            crate::gfx::anim::substitute(&mut s.gfx, slot.tile_to_animate, slot.first_anim_frame);
-        }
+        super::test_support::load_state_like_main(&mut s, io);
         s.actors.objlist_tail[super::TAIL_CREATED] = 1;
         crate::actors::turn::after_load(&mut s);
         crate::actors::clock::tick(&mut s, 0);
@@ -67,7 +61,7 @@ async fn boot_then(state: &RefCell<State>, io: &Io, setup: Setup) {
 }
 
 fn engine(files: &Files, setup: Setup) -> Engine {
-    let state = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    let state = State::new_game(files).quiet();
     let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {
         boot_then(&st, &io, setup).await;
     });
@@ -102,7 +96,7 @@ fn dump(e: &Engine, name: &str) {
     if let Ok(dir) = std::env::var("U6_RECEIPTS") {
         let mut rgba = Vec::new();
         e.frame().write_rgba(&mut rgba);
-        std::fs::write(Path::new(&dir).join(format!("{name}.rgba")), rgba).unwrap();
+        std::fs::write(Path::new(&dir).join(format!("{name}.rgba")), rgba).quiet();
     }
 }
 
@@ -187,15 +181,14 @@ fn cast_light_at_night_through_the_command_loop() {
     let s = e.state();
     let lit = lit_cells(&s);
     let tail = scroll(&e, &command_line(&e, CAST));
-    eprintln!(
-        "light: panel {book:#x} after C; lit cells {dark} -> {lit}; {} lines",
-        tail.len()
+    assert!(
+        book == crate::magic::BOOK_PANEL,
+        "the spellbook panel is up"
     );
-    assert_eq!(book, crate::magic::BOOK_PANEL, "the spellbook panel is up");
     let spell = spell_name(&e, 9);
-    assert!(holds(&tail, &spell), "{} lines, no spell name", tail.len());
-    assert_eq!(s.actors.timers[0], 100, "the light timer runs");
-    assert!(lit > dark, "{lit} lit cells after, {dark} before");
+    assert!(holds(&tail, &spell), "no spell name in the scroll");
+    assert!(s.actors.timers[0] == 100, "the light timer runs");
+    assert!(lit > dark, "more view cells lit after the cast");
 }
 
 /// C, Magic Arrow's two words (keys O, J) at a gargoyle three tiles east: the flight is shown
@@ -255,19 +248,13 @@ fn magic_arrow_at_a_gargoyle_through_the_command_loop() {
     let s = e.state();
     let tail = scroll(&e, &command_line(&e, CAST));
     let hp1 = s.actors.attrs.hp[foe as usize];
-    eprintln!(
-        "arrow: frames shown {} (first new one at tick {flight:?}); gargoyle hp {hp0} -> {hp1}; {} lines",
-        s.combat.shown - shown0,
-        tail.len()
-    );
     let spell = spell_name(&e, 0x11);
     let failed = text(s.magic.tables.message(crate::magic::Msg::Failed));
-    assert!(holds(&tail, &spell), "{} lines, no spell name", tail.len());
+    assert!(holds(&tail, &spell), "no spell name in the scroll");
     assert!(flight.is_some(), "a flight frame was shown");
     assert!(
         hp1 < hp0 || holds(&tail, &failed),
-        "hp {hp0} -> {hp1}, {} lines without the failure",
-        tail.len()
+        "the gargoyle neither hurt nor the failure line"
     );
 }
 
@@ -297,7 +284,7 @@ fn rest_one_hour_through_the_command_loop() {
             crate::objects::build_draw_lists(s);
         }),
     );
-    let at = spot.get().expect("a camp spot near the castle");
+    assert!(spot.get().is_some(), "a camp spot near the castle");
     let hour0 = e.state().actors.calendar.hour;
     dump(&e, "int-b-rest-before");
     press(&mut e, &chars("r"), 10);
@@ -324,16 +311,8 @@ fn rest_one_hour_through_the_command_loop() {
     dump(&e, "int-b-rest-after");
     let s = e.state();
     let tail = scroll(&e, &text(&super::game_string(e.io(), STR_REST)));
-    eprintln!(
-        "rest at {at:?}: {:02}:{:02} -> {:02}:{:02}; camp line at tick {camp:?}; {} lines",
-        hour0,
-        0,
-        s.actors.calendar.hour,
-        s.actors.calendar.minute,
-        tail.len()
-    );
-    assert!(holds(&tail, &guard), "{} lines, no guard line", tail.len());
-    assert_ne!(s.actors.calendar.hour, hour0, "an hour passed");
+    assert!(holds(&tail, &guard), "no guard line in the scroll");
+    assert!(s.actors.calendar.hour != hour0, "an hour passed");
 }
 
 /// A press and its release in one tick (the event wait samples both: one click), then `settle`
@@ -371,7 +350,7 @@ fn the_spellbook_by_clicks_through_the_command_loop() {
         (m.page[..usize::from(m.page_lines)].to_vec(), m.next_circle)
     };
     let first = page(&e);
-    assert_eq!(e.state().ui.panel.mode, crate::magic::BOOK_PANEL);
+    assert!(e.state().ui.panel.mode == crate::magic::BOOK_PANEL);
     dump(&e, "int-mouse-book");
     click(&mut e, 0xe8, 0x5c, 10);
     let next = page(&e);
@@ -384,15 +363,11 @@ fn the_spellbook_by_clicks_through_the_command_loop() {
     let s = e.state();
     let lit = lit_cells(&s);
     let tail = scroll(&e, &command_line(&e, CAST));
-    eprintln!(
-        "book by clicks: pages {first:?} -> {next:?} -> {back:?}; lit cells {dark} -> {lit}; {} lines",
-        tail.len()
-    );
-    assert_eq!(first.0, [0, 1, 6, 9], "the first circle's page");
-    assert_eq!(next.0, [0x11, 0x14], "the next-circle tab");
-    assert_eq!(back.0, first.0, "the previous-circle tab");
+    assert!(first.0 == [0, 1, 6, 9], "the first circle's page");
+    assert!(next.0 == [0x11, 0x14], "the next-circle tab");
+    assert!(back.0 == first.0, "the previous-circle tab");
     let spell = spell_name(&e, 9);
-    assert!(holds(&tail, &spell), "{} lines, no spell name", tail.len());
-    assert_eq!(s.actors.timers[0], 100, "the light timer runs");
-    assert!(lit > dark, "{lit} lit cells after, {dark} before");
+    assert!(holds(&tail, &spell), "no spell name in the scroll");
+    assert!(s.actors.timers[0] == 100, "the light timer runs");
+    assert!(lit > dark, "more view cells lit after the cast");
 }
