@@ -38,9 +38,8 @@ pub fn set_frame(gfx: &mut GfxState, value: u8) {
 ///
 /// Merges the animated water tiles into the 32 shore tiles. The five passes differ only in the
 /// plane they touch; on chunky records each pass rewrites one colour bit. A record whose pixels
-/// it changes gets a new version, and the merge's memo is forgotten ([`super::cache`]).
+/// it changes gets a new version ([`super::cache::RenderCache::record_changed`]).
 pub fn merge_shores(gfx: &mut GfxState) {
-    super::cache::forget_shores(gfx);
     for plane in 0..PLANES as u8 {
         merge_plane(gfx, plane);
     }
@@ -136,12 +135,6 @@ fn merge_rows(gfx: &mut GfxState, src: usize, dst: usize, plane: u8, skip: u8, m
 /// each idle step (0x105c8e). The flag is cleared, and if a frame changed the window object
 /// lists are rebuilt (0x10e81e).
 pub fn anim_tick(state: &mut State) {
-    anim_tick_with(state, false);
-}
-
-/// [`anim_tick`]; with `cached` (spec 06 O2) the shore merge is left out when it would change
-/// no record ([`super::cache::merge_shores_if_changed`]).
-pub(crate) fn anim_tick_with(state: &mut State, cached: bool) {
     let State {
         gfx, tables, map, ..
     } = state;
@@ -162,11 +155,7 @@ pub(crate) fn anim_tick_with(state: &mut State, cached: bool) {
         substitute(gfx, slot.tile_to_animate, frame);
     }
     if counter & 1 == 0 {
-        if cached {
-            super::cache::merge_shores_if_changed(gfx);
-        } else {
-            merge_shores(gfx);
-        }
+        merge_shores(gfx);
     }
     let changed = actor_idle_frames(state);
     state.gfx.actor_anim_due = 0;

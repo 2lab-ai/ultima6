@@ -178,9 +178,9 @@ fn run(on: &mut State, off: &mut State) -> Vec<Drawn> {
     }
     let c = &off.gfx.cache;
     assert_eq!(
-        (c.window_skips, c.window_partial, c.shore_skips),
-        (0, 0, 0),
-        "off: every refresh renders the whole window and merges"
+        (c.window_skips, c.window_partial),
+        (0, 0),
+        "off: every refresh renders the whole window"
     );
     drawn
 }
@@ -226,8 +226,8 @@ fn the_cached_refresh_draws_what_the_every_time_refresh_draws() {
     }
     let c = &on.gfx.cache;
     println!(
-        "shore merges left out: {}; renders: {} nothing, {} partial ({} boxes)",
-        c.shore_skips, c.window_skips, c.window_partial, c.boxes_redrawn
+        "renders: {} nothing, {} partial ({} boxes)",
+        c.window_skips, c.window_partial, c.boxes_redrawn
     );
     assert_eq!(drawn[0], All, "the first render");
     assert_eq!(drawn[1], Boxes(1), "the first merge: the shore's box");
@@ -276,7 +276,6 @@ fn the_cached_refresh_draws_what_the_every_time_refresh_draws() {
         count(250..320, &some) > 0 && count(250..320, &nothing) > 0,
         "idle frames: a frame changed, other steps changed nothing"
     );
-    assert!(on.gfx.cache.shore_skips > 0, "unchanged merges left out");
     assert!(
         on.gfx.records[SHORE].pixels != shore_before,
         "the merges that ran changed the shore"
@@ -285,8 +284,7 @@ fn the_cached_refresh_draws_what_the_every_time_refresh_draws() {
 
 /// The renders without a memo: a clone of the state does not take the cache with it (another
 /// `Io`'s back buffer); the cursor outside the cells and an overlay whose rows pass its tile
-/// (draws that leave their box) render the whole window every time. A crossed shore merge (a
-/// target record that is also a source) is never left out.
+/// (draws that leave their box) render the whole window every time.
 #[test]
 fn the_cache_stands_aside_where_it_cannot_stand_for_the_render() {
     let renders = |s: &State| {
@@ -323,14 +321,4 @@ fn the_cache_stands_aside_where_it_cannot_stand_for_the_render() {
         crate::gfx::refresh_view(&mut tall, &io);
     }
     assert_eq!(renders(&tall), 0, "overlay rows past the tile: everything");
-    // Merge 1 writes the record merge 0 reads.
-    s.gfx.tables.shore_src[1] = (SHORE * 4) as u16;
-    s.gfx.tables.shore_dst[1] = (ANIMATED * 4) as u16;
-    let rec = s.gfx.animmask.block2[0..2].to_vec();
-    s.gfx.animmask.block2[2..4].copy_from_slice(&rec);
-    let skips = s.gfx.cache.shore_skips;
-    for _ in 0..8 {
-        crate::gfx::refresh_view(&mut s, &io);
-    }
-    assert_eq!(s.gfx.cache.shore_skips, skips, "crossed: every merge runs");
 }

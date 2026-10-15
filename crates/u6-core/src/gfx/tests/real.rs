@@ -155,8 +155,7 @@ fn real_shore_masks_fit_and_the_window_draws_the_party() {
 /// Spec 06 O2 on the user's game (`game` started at once, seed 0): 3000 steps with the render
 /// cache and without it, idle at the prompt with four walks between; the shown frame and the back
 /// buffer (the border's outer halves too) after every step and the whole `State` every 10 steps
-/// are the same. The cache drew less than the whole
-/// window, and no shore merge is crossed; only counts are printed.
+/// are the same. The cache drew less than the whole window; only counts are printed.
 #[test]
 fn real_idle_with_the_cache_shows_what_it_shows_without() {
     let Some(files) = files() else { return };
@@ -169,7 +168,6 @@ fn real_idle_with_the_cache_shows_what_it_shows_without() {
         (1300, crate::Key::Left),
         (1700, crate::Key::Up),
     ];
-    let mut crossed = false;
     for step in 0..3000u32 {
         let input: Vec<crate::InputEvent> = walks
             .iter()
@@ -192,24 +190,15 @@ fn real_idle_with_the_cache_shows_what_it_shows_without() {
         if step % 10 == 9 {
             assert!(*on.state() == *off.state(), "step {step}: the whole State");
         }
-        crossed |= crate::gfx::cache::shores_crossed(&on.state().gfx);
     }
     let (c, o) = (&on.state().gfx.cache, &off.state().gfx.cache);
     println!(
-        "3000 steps: renders drawing nothing {}, drawing {} boxes in {}; shore merges left \
-         out {}; without the cache {} {} {}",
-        c.window_skips,
-        c.boxes_redrawn,
-        c.window_partial,
-        c.shore_skips,
-        o.window_skips,
-        o.window_partial,
-        o.shore_skips
+        "3000 steps: renders drawing nothing {}, drawing {} boxes in {}; without the cache {} {}",
+        c.window_skips, c.boxes_redrawn, c.window_partial, o.window_skips, o.window_partial
     );
     assert!(
         c.window_partial > 1000,
         "most refreshes draw some boxes only"
     );
-    assert!(!crossed, "no shore merge writes a record another reads");
-    assert!((o.window_skips, o.window_partial, o.shore_skips) == (0, 0, 0));
+    assert!((o.window_skips, o.window_partial) == (0, 0));
 }

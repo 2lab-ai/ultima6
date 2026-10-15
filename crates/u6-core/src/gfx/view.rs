@@ -251,18 +251,17 @@ fn draw_boxes(
 /// 0x102c90 with D0 = 1. A4-0x7afc non-zero: clear it and redraw that panel (0x133a1a with
 /// D1 = 1).
 ///
-/// Port (spec 06 O2, [`Io::set_window_cache`], on by default): the tick's shore merge and the
-/// render's draws are left out where they would change nothing ([`super::cache`]); the frames
-/// and the state are those of the original's every-time render.
+/// Port (spec 06 O2, [`Io::set_window_cache`], on by default): the render's draws are left out
+/// where they would change nothing ([`super::cache`]); the frames and the state are those of
+/// the original's every-time render.
 pub fn refresh_view(state: &mut State, io: &Io) {
     if state.map.view_dirty != 0 {
         seams::view_flags(state);
         state.map.view_dirty = 0;
     }
     if state.gfx.window_shown != 0 {
-        let cached = io.window_cache();
-        anim::anim_tick_with(state, cached);
-        if cached {
+        anim::anim_tick(state);
+        if io.window_cache() {
             render_window_cached(state, io);
         } else {
             render_window(state, io, true);

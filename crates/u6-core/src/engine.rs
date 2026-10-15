@@ -311,10 +311,9 @@ impl Io {
     }
 
     /// Port-only (spec 06 O2): with `on` (the default) the idle refresh draws only the cells of
-    /// the map window whose draws read a changed value, and runs the shore merge only when its
-    /// records changed ([`crate::gfx::cache`]); off, it renders the whole window and merges at
-    /// every refresh, as the original does. The frames and the state are the same either way:
-    /// the equivalence checks run both.
+    /// the map window whose draws read a changed value ([`crate::gfx::cache`]); off, it renders
+    /// the whole window at every refresh, as the original does. The frames and the state are the
+    /// same either way: the equivalence checks run both.
     pub fn set_window_cache(&self, on: bool) {
         self.window_cache.set(on);
     }

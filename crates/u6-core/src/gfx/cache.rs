@@ -28,16 +28,8 @@
 //! written only by the shore merge (`anim::merge_rows`); a writer of
 //! [`super::GfxState::records`] elsewhere must report the record
 //! ([`RenderCache::record_changed`]).
-//!
-//! The shore merge 0x152dac rewrites each target record from its source record under the
-//! merge's mask. Its output is decided by the record each source and target tile draws
-//! (`record_of`, which the animation's substitutions move) and those records' pixels. When no
-//! target record is also a source record, a second run with the same records copies the same
-//! source bits over bits that already hold them, so it is left out then.
 
 use super::GfxState;
-use super::anim::shore_mask;
-use super::tables::SHORE_MERGES;
 use super::view::{ViewWindow, WINDOW_TILES};
 use crate::state::State;
 use u6_formats::gfx::{ANIM_FRAMES, TILE_COUNT, TILE_H, TILE_W};
@@ -45,8 +37,8 @@ use u6_formats::gfx::{ANIM_FRAMES, TILE_COUNT, TILE_H, TILE_W};
 /// Boxes of the window: its cells.
 pub(super) const BOXES: usize = WINDOW_TILES * WINDOW_TILES;
 
-/// Port-only, no original address: what the last map window render of the refresh drew, the
-/// records' versions, and the records of the last shore merge. A cache, not game state: equal
+/// Port-only, no original address: what the last map window render of the refresh drew, and the
+/// records' versions. A cache, not game state: equal
 /// whatever it holds (the same game with and without it is the same `State`), and empty in a
 /// clone (a copy cannot know which back buffer it would describe).
 #[derive(Debug, Default)]
@@ -54,14 +46,11 @@ pub struct RenderCache {
     window: Option<WindowMemo>,
     /// Per record: changes of its pixels so far (empty until the first).
     versions: Vec<u32>,
-    shores: Option<[(u16, u16); SHORE_MERGES]>,
     /// Window renders left out whole so far (the tests read them).
     pub(crate) window_skips: u64,
     /// Window renders that redrew some boxes only, and the boxes they redrew.
     pub(crate) window_partial: u64,
     pub(crate) boxes_redrawn: u64,
-    /// Shore merges left out so far.
-    pub(crate) shore_skips: u64,
 }
 
 impl Clone for RenderCache {
@@ -245,51 +234,4 @@ pub(super) fn dirty_boxes(
 /// (a render the memo cannot stand for).
 pub(super) fn remember_window(gfx: &mut GfxState, memo: Option<(WindowKey, (u64, u64))>) {
     gfx.cache.window = memo.map(|(key, back)| WindowMemo { back, key });
-}
-
-/// The source and target record of each shore merge (`u16::MAX` for a merge the tables or the
-/// masks leave out, which never changes).
-fn shore_records(gfx: &GfxState) -> [(u16, u16); SHORE_MERGES] {
-    std::array::from_fn(|i| {
-        let tile =
-            |w: u16| (w.is_multiple_of(4) && usize::from(w / 4) < TILE_COUNT).then_some(w / 4);
-        let src = tile(gfx.tables.shore_src[i]);
-        let dst = tile(gfx.tables.shore_dst[i]);
-        match (src, dst, shore_mask(&gfx.animmask.block2, i)) {
-            (Some(s), Some(d), Some(_)) => {
-                (gfx.record_of[usize::from(s)], gfx.record_of[usize::from(d)])
-            }
-            _ => (u16::MAX, u16::MAX),
-        }
-    })
-}
-
-/// True when a shore merge's target record is also a merge's source record (then a second run
-/// can change what the first left).
-#[cfg(test)]
-pub(crate) fn shores_crossed(gfx: &GfxState) -> bool {
-    crossed(&shore_records(gfx))
-}
-
-fn crossed(records: &[(u16, u16); SHORE_MERGES]) -> bool {
-    records
-        .iter()
-        .any(|&(_, dst)| dst != u16::MAX && records.iter().any(|&(src, _)| src == dst))
-}
-
-/// The shore merge 0x152dac, left out when it would leave every record as it is: the merges'
-/// records are those of the last merge run here, and no target record is a source record.
-pub(super) fn merge_shores_if_changed(gfx: &mut GfxState) {
-    let records = shore_records(gfx);
-    if !crossed(&records) && gfx.cache.shores == Some(records) {
-        gfx.cache.shore_skips += 1;
-        return;
-    }
-    super::anim::merge_shores(gfx);
-    gfx.cache.shores = Some(records);
-}
-
-/// Forgets the last shore merge's records (a merge run without the memo).
-pub(super) fn forget_shores(gfx: &mut GfxState) {
-    gfx.cache.shores = None;
 }
