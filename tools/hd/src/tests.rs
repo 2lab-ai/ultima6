@@ -987,7 +987,7 @@ fn a_flat_source_must_stay_flat() {
 
 #[test]
 fn hashes_are_the_engines() {
-    use u6_core::converse::{ConverseText, Msg, load_portrait};
+    use u6_core::converse::{ConverseText, Msg, portrait_pixels, portrait_ref};
     use u6_formats::bitmap::Bitmap;
     use u6_formats::lzw;
     use u6_formats::portrait::PORTRAIT_LEN;
@@ -1008,7 +1008,8 @@ fn hashes_are_the_engines() {
             "record {r}"
         );
     }
-    // Portraits: the tool reads an archive as the engine's load_portrait does.
+    // Portraits: the tool lists an archive's items and hashes the pixels the engine's
+    // portrait_pixels reads for each, by the (letter, item) the engine's portrait_ref names.
     let images: Vec<Vec<u8>> = (0..3u8)
         .map(|k| {
             (0..PORTRAIT_LEN)
@@ -1029,17 +1030,16 @@ fn hashes_are_the_engines() {
     let name = b"facefile.?".to_vec();
     let files = u6_core::Files::new([("DISK/facefile.a".to_string(), lib)].into_iter().collect());
     let mut state = u6_core::State::empty();
-    state.converse.text = Some(ConverseText::from_pairs([(
-        Msg::PortraitFile,
-        name.clone(),
-    )]));
-    let ours = crate::game::portraits(&files, &name);
+    state.converse.text = Some(ConverseText::from_pairs([(Msg::PortraitFile, name)]));
+    let ours = crate::game::portraits(&state, &files);
     assert_eq!(ours.len(), 3);
     g.portraits = ours;
     for item in 0..3u16 {
         // Slot s reads item s - 1 of archive a (slot 0 reads item 0; slot 1 is the hero's).
         let npc = if item == 0 { 0 } else { item as i16 + 1 };
-        let theirs = load_portrait(&state, &files, npc).unwrap();
+        assert_eq!(portrait_ref(&state, npc), Some((b'a', item)));
+        let theirs = portrait_pixels(&state, &files, b'a', item).unwrap();
+        assert_eq!(theirs, images[usize::from(item)]);
         let id = ImageId::Portrait { letter: b'a', item };
         assert_eq!(
             g.hash(id),

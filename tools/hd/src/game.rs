@@ -8,14 +8,13 @@
 
 use std::path::Path;
 
-use u6_core::converse::Msg;
+use u6_core::converse::{Msg, portrait_pixels};
 use u6_core::image::{A4, GameImage};
 use u6_core::objects::{ACTOR_SLOTS, ObjectId};
 use u6_core::{Files, State};
 use u6_formats::animdata::AnimEntry;
 use u6_formats::bitmap::Bitmap;
 use u6_formats::gfx::{TILE_COUNT, TILE_PIXELS, TILE_W, TileKind};
-use u6_formats::lzw;
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_LEN, PORTRAIT_WIDTH};
 use u6_formats::u6lib::{EntryWidth, U6Lib};
 use u6_hdpack::{ImageId, Role, image_hash, tile_hash};
@@ -191,12 +190,6 @@ impl Game {
         let game = files.get("game").ok_or_else(|| {
             LoadFailure::new("the game files did not load as Ultima VI")("no executable".into())
         })?;
-        let portrait_name = state
-            .converse
-            .text
-            .as_ref()
-            .map(|t| t.get(Msg::PortraitFile).to_vec())
-            .unwrap_or_default();
         Ok(Game {
             palette,
             records,
@@ -207,7 +200,7 @@ impl Game {
             shore,
             actor_types,
             bitmap_colours: state.gfx.tables.bitmap_colours.to_vec(),
-            portraits: portraits(&files, &portrait_name),
+            portraits: portraits(&state, &files),
             bitmaps: bitmaps(&files, game),
         })
     }
@@ -277,12 +270,19 @@ impl Game {
     }
 }
 
-/// Every item of the three portrait archives, read as `load_portrait` reads one: the item's
-/// offset from the table, LZW from there, the first 56×64 bytes.
-pub fn portraits(files: &Files, name: &[u8]) -> Vec<(u8, u16, Vec<u8>)> {
+/// Every item of the three portrait archives, its pixels as the engine reads them
+/// (`u6_core::converse::portrait_pixels`, the loading half of 0x133d3e): each item the
+/// archive's table lists that is not empty.
+pub fn portraits(state: &State, files: &Files) -> Vec<(u8, u16, Vec<u8>)> {
+    let name = state
+        .converse
+        .text
+        .as_ref()
+        .map(|t| t.get(Msg::PortraitFile).to_vec())
+        .unwrap_or_default();
     let mut out = Vec::new();
     for letter in PORTRAIT_LETTERS {
-        let mut n = name.to_vec();
+        let mut n = name.clone();
         let Some(b) = n.get_mut(NAME_LETTER) else {
             continue;
         };
@@ -296,15 +296,15 @@ pub fn portraits(files: &Files, name: &[u8]) -> Vec<(u8, u16, Vec<u8>)> {
             let Some(at) = file.get(item * 4..item * 4 + 4) else {
                 continue;
             };
-            let off = u32::from_le_bytes([at[0], at[1], at[2], at[3]]) as usize;
+            let off = u32::from_le_bytes([at[0], at[1], at[2], at[3]]);
+            let Ok(item) = u16::try_from(item) else {
+                continue;
+            };
             if it.is_empty() || off == 0 {
                 continue;
             }
-            let Some(px) = file.get(off..).and_then(|d| lzw::decode(d).ok()) else {
-                continue;
-            };
-            if px.len() >= PORTRAIT_LEN {
-                out.push((letter, item as u16, px[..PORTRAIT_LEN].to_vec()));
+            if let Some(px) = portrait_pixels(state, files, letter, item) {
+                out.push((letter, item, px));
             }
         }
     }
