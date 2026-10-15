@@ -1994,9 +1994,8 @@ fn the_event_reader_holds_one_line_at_most() {
     stream.extend_from_slice(exact.as_bytes());
     stream.extend_from_slice(b"\n{\"last\":1}");
     let mut kept = Vec::new();
-    let mut ids = Vec::new();
-    run::read_events(stream.as_slice(), &mut kept, |id| ids.push(id));
-    assert_eq!(ids, ["t-1"]);
+    let id = run::read_events(stream.as_slice(), &mut kept);
+    assert_eq!(id.as_deref(), Some("t-1"));
     let lines: Vec<&[u8]> = kept.split(|&b| b == b'\n').collect();
     assert_eq!(lines.len(), 6, "five lines, each with its newline");
     assert_eq!(lines[0], b"{\"type\":\"turn.started\"}");
@@ -2008,7 +2007,7 @@ fn the_event_reader_holds_one_line_at_most() {
     let n = (run::EVENTS_MAX as usize / line.len()) * 2;
     let long: Vec<u8> = line.iter().copied().cycle().take(n * line.len()).collect();
     let mut kept = Vec::new();
-    run::read_events(long.as_slice(), &mut kept, |_| {});
+    run::read_events(long.as_slice(), &mut kept);
     assert!(kept.len() as u64 <= run::EVENTS_MAX && kept.len() as u64 > run::EVENTS_MAX - 64);
 }
 

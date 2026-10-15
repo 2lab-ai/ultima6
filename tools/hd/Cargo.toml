@@ -16,6 +16,7 @@ u6-core.workspace = true
 u6-formats.workspace = true
 u6-intake.workspace = true
 u6-hdpack.workspace = true
+libc = "0.2"
 png = "0.18"
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = "1"

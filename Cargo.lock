@@ -1247,6 +1247,7 @@ dependencies = [
 name = "u6-hdtool"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "png",
  "serde",
  "serde_json",

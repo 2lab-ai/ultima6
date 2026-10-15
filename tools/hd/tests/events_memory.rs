@@ -55,38 +55,37 @@ impl Read for Stream {
     }
 }
 
-/// The peak heap above the start while `read_events` reads `s`, and the ids it reported.
-fn measure(s: Stream) -> (usize, Vec<String>) {
-    let mut ids = Vec::with_capacity(4);
+/// The peak heap above the start while `read_events` reads `s`, and the thread id it found.
+fn measure(s: Stream) -> (usize, Option<String>) {
     let base = NOW.load(Ordering::SeqCst);
     PEAK.store(base, Ordering::SeqCst);
-    read_events(s, std::io::sink(), |id| ids.push(id));
-    (PEAK.load(Ordering::SeqCst) - base, ids)
+    let id = read_events(s, std::io::sink());
+    (PEAK.load(Ordering::SeqCst) - base, id)
 }
 
 #[test]
 fn the_reader_never_holds_more_than_a_line() {
     let thread = b"\n{\"type\":\"thread.started\",\"thread_id\":\"t-1\"}\n".to_vec();
-    let (peak, ids) = measure(Stream {
+    let (peak, id) = measure(Stream {
         fill: 256 << 20,
         byte: b'x',
         tail: thread.clone(),
         at: 0,
     });
     println!("peak {peak} bytes reading a 256 MiB line");
-    assert_eq!(ids, ["t-1"]);
+    assert_eq!(id.as_deref(), Some("t-1"));
     assert!(peak <= 4 * LINE_MAX, "peak {peak}");
     // Lines at the cap, each parsed as JSON and kept: still a few lines' worth.
     let one = format!("{{\"pad\":\"{}\"}}\n", "y".repeat(LINE_MAX - 10));
     let mut tail = one.repeat(64).into_bytes();
     tail.extend_from_slice(&thread);
-    let (peak, ids) = measure(Stream {
+    let (peak, id) = measure(Stream {
         fill: 0,
         byte: 0,
         tail,
         at: 0,
     });
     println!("peak {peak} bytes reading 64 lines at the cap");
-    assert_eq!(ids, ["t-1"]);
+    assert_eq!(id.as_deref(), Some("t-1"));
     assert!(peak <= 4 * LINE_MAX, "peak {peak}");
 }

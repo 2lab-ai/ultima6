@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -98,79 +97,211 @@ impl Drop for Group {
     }
 }
 
-/// Reads codex's event stream `r` to its end in 8 KiB chunks: each line of at most
-/// [`LINE_MAX`] bytes goes to `events` while they hold under [`EVENTS_MAX`] bytes, and the first
-/// `thread.started` event's id goes to `thread` (once). A longer line is dropped up to its
-/// newline without being held, so memory stays bounded whatever the stream holds.
-pub fn read_events(mut r: impl Read, mut events: impl Write, mut thread: impl FnMut(String)) {
-    let mut kept = 0u64;
-    let mut sent = false;
-    let mut on_line = |line: &[u8]| {
-        if !sent
+/// Codex's event stream, line by line as its bytes arrive: each line of at most [`LINE_MAX`]
+/// bytes goes to `events` while they hold under [`EVENTS_MAX`] bytes, and the first
+/// `thread.started` event's id is kept. A longer line is dropped up to its newline without
+/// being held, so memory stays bounded whatever the stream holds.
+pub struct EventLines<W: Write> {
+    events: W,
+    kept: u64,
+    thread: Option<String>,
+    line: Vec<u8>,
+    dropping: bool,
+}
+
+impl<W: Write> EventLines<W> {
+    pub fn new(events: W) -> EventLines<W> {
+        EventLines {
+            events,
+            kept: 0,
+            thread: None,
+            line: Vec::new(),
+            dropping: false,
+        }
+    }
+
+    fn on_line(&mut self, line: &[u8]) {
+        if self.thread.is_none()
             && let Ok(v) = serde_json::from_slice::<serde_json::Value>(line)
             && v["type"] == "thread.started"
             && let Some(id) = v["thread_id"].as_str()
         {
-            sent = true;
-            thread(id.to_string());
+            self.thread = Some(id.to_string());
         }
-        if kept + (line.len() as u64) < EVENTS_MAX {
-            kept += line.len() as u64 + 1;
-            let _ = events
+        if self.kept + (line.len() as u64) < EVENTS_MAX {
+            self.kept += line.len() as u64 + 1;
+            let _ = self
+                .events
                 .write_all(line)
-                .and_then(|()| events.write_all(b"\n"));
+                .and_then(|()| self.events.write_all(b"\n"));
         }
-    };
-    let mut chunk = [0u8; 8192];
-    let mut line: Vec<u8> = Vec::new();
-    let mut dropping = false;
-    loop {
-        let n = match r.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
-        };
-        let mut rest = &chunk[..n];
-        while !rest.is_empty() {
-            let (part, ends) = match rest.iter().position(|&b| b == b'\n') {
-                Some(i) => (&rest[..i], true),
-                None => (rest, false),
+    }
+
+    /// The next bytes of the stream.
+    pub fn feed(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let (part, ends) = match bytes.iter().position(|&b| b == b'\n') {
+                Some(i) => (&bytes[..i], true),
+                None => (bytes, false),
             };
-            if !dropping && line.len() + part.len() <= LINE_MAX {
-                line.extend_from_slice(part);
+            if !self.dropping && self.line.len() + part.len() <= LINE_MAX {
+                self.line.extend_from_slice(part);
             } else {
-                dropping = true;
-                line = Vec::new();
+                self.dropping = true;
+                self.line = Vec::new();
             }
             if ends {
-                if !dropping {
-                    on_line(&line);
+                if !self.dropping {
+                    let line = std::mem::take(&mut self.line);
+                    self.on_line(&line);
+                    self.line = line;
                 }
-                line.clear();
-                dropping = false;
-                rest = &rest[part.len() + 1..];
+                self.line.clear();
+                self.dropping = false;
+                bytes = &bytes[part.len() + 1..];
             } else {
-                rest = &[];
+                bytes = &[];
             }
         }
     }
-    if !dropping && !line.is_empty() {
-        on_line(&line);
+
+    /// The end of the stream: its last line (without a newline), then the first thread id.
+    pub fn finish(mut self) -> Option<String> {
+        if !self.dropping && !self.line.is_empty() {
+            let line = std::mem::take(&mut self.line);
+            self.on_line(&line);
+        }
+        self.thread
     }
 }
 
-enum Event {
-    Thread(String),
-    Done,
+/// Reads codex's event stream `r` to its end in 8 KiB chunks ([`EventLines`]); returns the
+/// first thread id.
+pub fn read_events(mut r: impl Read, events: impl Write) -> Option<String> {
+    let mut lines = EventLines::new(events);
+    let mut chunk = [0u8; 8192];
+    loop {
+        match r.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => lines.feed(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    lines.finish()
+}
+
+/// `fd` switched to non-blocking (our end of a pipe to the call; the call's end is its own).
+fn nonblocking(fd: i32) -> Result<(), String> {
+    // SAFETY: fcntl on a descriptor this function's caller owns, with no pointer arguments.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(format!(
+            "a pipe to the call: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// The call's two pipes, driven from the calling thread: the prompt written to its input and
+/// its events read, as each is ready, waiting at most until `until` (and at most `step`, so the
+/// caller can look at the call between waits). Closing a pipe is dropping it here.
+struct Pipes<'a, W: Write> {
+    stdin: Option<std::process::ChildStdin>,
+    stdout: Option<std::process::ChildStdout>,
+    prompt: &'a [u8],
+    written: usize,
+    /// The prompt's write failed: the call's input was closed before it took it all.
+    refused: Option<std::io::Error>,
+    lines: EventLines<W>,
+}
+
+impl<W: Write> Pipes<'_, W> {
+    /// Waits for either pipe to be ready (or `wait` to pass), then writes and reads what it can.
+    fn step(&mut self, wait: Duration) {
+        use std::os::fd::AsRawFd;
+        let mut fds: Vec<libc::pollfd> = Vec::with_capacity(2);
+        if let Some(i) = &self.stdin {
+            fds.push(libc::pollfd {
+                fd: i.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            });
+        }
+        if let Some(o) = &self.stdout {
+            fds.push(libc::pollfd {
+                fd: o.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        let ms = i32::try_from(wait.as_millis()).unwrap_or(i32::MAX);
+        if fds.is_empty() {
+            std::thread::sleep(wait);
+            return;
+        }
+        // SAFETY: `fds` is a live array of `fds.len()` pollfd records for open descriptors.
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+        if n <= 0 {
+            return;
+        }
+        let ready = |fd: i32| fds.iter().any(|p| p.fd == fd && p.revents != 0);
+        if let Some(i) = &mut self.stdin
+            && ready(i.as_raw_fd())
+        {
+            loop {
+                match i.write(&self.prompt[self.written..]) {
+                    Ok(n) => {
+                        self.written += n;
+                        if self.written == self.prompt.len() {
+                            // Taken whole: the call's input ends.
+                            self.stdin = None;
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        self.refused = Some(e);
+                        self.stdin = None;
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(o) = &mut self.stdout
+            && ready(o.as_raw_fd())
+        {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match o.read(&mut chunk) {
+                    Ok(0) => {
+                        self.stdout = None;
+                        break;
+                    }
+                    Ok(n) => self.lines.feed(&chunk[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => {
+                        self.stdout = None;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Runner for Codex {
-    /// One deadline covers the call: the prompt is written by its own thread and the events
-    /// read by another, while this one waits for the call to exit, the prompt to fail or the
-    /// deadline, whichever comes first; then the call's group is killed (on every path) and the
-    /// reader is given [`CLEANUP`] to report the stream's end.
+    /// One deadline covers the call, all of it in this thread: the prompt is written and the
+    /// events read as the pipes are ready (both non-blocking, one `poll` for the two), while
+    /// the call is watched for its exit, until it exits, the prompt fails or the deadline
+    /// passes; then the call's group is killed (on every path) and the stream given [`CLEANUP`]
+    /// to end. Then both pipes are closed, whatever still holds their other ends: nothing of
+    /// the call outlives it here, no thread, no descriptor.
     fn generate(&self, sheet: &Path, prompt: &str, dir: &Path) -> Result<PathBuf, String> {
+        use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
         let deadline = Instant::now() + self.timeout;
         let (stderr, stderr_tmp, stderr_path) = work::create_temp(&dir.join("stderr.txt"), 0o644)?;
@@ -196,33 +327,25 @@ impl Runner for Codex {
             .spawn()
             .map_err(|e| format!("{}: {e}", self.bin.display()))?;
         let mut group = Group { child };
-        let (Some(stdout), Some(mut stdin)) = (group.child.stdout.take(), group.child.stdin.take())
+        let (Some(stdout), Some(stdin)) = (group.child.stdout.take(), group.child.stdin.take())
         else {
             return Err("no pipes to the call".into());
         };
-        // Two messages at most: the first thread id and the end.
-        let (tx, rx) = mpsc::sync_channel(2);
-        std::thread::spawn(move || {
-            read_events(stdout, events, |id| {
-                let _ = tx.try_send(Event::Thread(id));
-            });
-            let _ = tx.try_send(Event::Done);
-        });
-        let (wtx, wrx) = mpsc::sync_channel(1);
-        let text = prompt.to_owned();
-        std::thread::spawn(move || {
-            let r = stdin.write_all(text.as_bytes());
-            drop(stdin);
-            let _ = wtx.try_send(r);
-        });
-        let mut wrote = None;
+        nonblocking(stdin.as_raw_fd())?;
+        nonblocking(stdout.as_raw_fd())?;
+        let mut pipes = Pipes {
+            stdin: Some(stdin),
+            stdout: Some(stdout),
+            prompt: prompt.as_bytes(),
+            written: 0,
+            refused: None,
+            lines: EventLines::new(events),
+        };
+        if pipes.prompt.is_empty() {
+            pipes.stdin = None;
+        }
         let waited = loop {
-            if wrote.is_none()
-                && let Ok(r) = wrx.try_recv()
-            {
-                wrote = Some(r);
-            }
-            if let Some(Err(e)) = &wrote {
+            if let Some(e) = &pipes.refused {
                 break Err(format!("the call did not take its prompt: {e}"));
             }
             match group.child.try_wait() {
@@ -234,31 +357,33 @@ impl Runner for Codex {
             if now >= deadline {
                 break Err(format!("timed out after {} s", self.timeout.as_secs()));
             }
-            std::thread::sleep((deadline - now).min(Duration::from_millis(50)));
+            pipes.step((deadline - now).min(Duration::from_millis(50)));
         };
         // Whatever the call left running goes with it.
         drop(group);
         let grace = Instant::now() + CLEANUP;
-        if wrote.is_none() {
-            wrote = wrx
-                .recv_timeout(grace.saturating_duration_since(Instant::now()))
-                .ok();
-        }
-        let mut thread_id = None;
-        let ended = loop {
-            match rx.recv_timeout(grace.saturating_duration_since(Instant::now())) {
-                Ok(Event::Thread(id)) => thread_id = Some(id),
-                Ok(Event::Done) | Err(mpsc::RecvTimeoutError::Disconnected) => break true,
-                Err(mpsc::RecvTimeoutError::Timeout) => break false,
+        while pipes.stdout.is_some() {
+            let now = Instant::now();
+            if now >= grace {
+                break;
             }
-        };
+            pipes.step(grace - now);
+        }
+        let ended = pipes.stdout.is_none();
+        let taken = pipes.stdin.is_none() && pipes.refused.is_none();
+        let refused = pipes.refused.take();
+        // Our ends of both pipes close here, whoever holds the others.
+        drop(pipes.stdin.take());
+        drop(pipes.stdout.take());
+        let thread_id = pipes.lines.finish();
         let _ = work::commit(&stderr_tmp, &stderr_path);
         let _ = work::commit(&events_tmp, &events_path);
         let status = waited?;
-        match wrote {
-            Some(Ok(())) => {}
-            Some(Err(e)) => return Err(format!("the call did not take its prompt: {e}")),
-            None => return Err("the call did not take its prompt".into()),
+        if !taken {
+            return Err(match refused {
+                Some(e) => format!("the call did not take its prompt: {e}"),
+                None => "the call did not take its prompt".into(),
+            });
         }
         if !ended {
             return Err("the call's output did not end".into());
