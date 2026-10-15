@@ -259,7 +259,8 @@ enum Inventory {
     CombatMode,
     /// The locked line (0x104fe6) and the prompt.
     Locked,
-    /// Open the chest (0xa0) after springing its trap (0x12ba36) and printing the prompt.
+    /// Open the chest (0xa0) after springing its trap (0x12ba36, its lines and pictures shown
+    /// there) and printing the prompt (0x106438..0x10645c).
     Trap,
 }
 
@@ -274,6 +275,12 @@ enum Inventory {
 /// a list object is readied (0xa7) or, if it is a container (A4-0x670c set, not type 0x39),
 /// opened (0xa0); a locked chest says so, a trapped one springs first. An equipped object is
 /// taken off (0xa8).
+///
+/// The click runs inside a key read (a print's more prompt too), so the trap sets the
+/// interrupted print's queued lines, frames and held newline aside, plays its own lines and
+/// frames in their order before the prompt and puts the interrupted ones back after it
+/// ([`crate::combat::present::interrupt`]): the original prints and draws the trap
+/// synchronously and the interrupted lines after the more key.
 pub async fn inventory_click(state: &RefCell<State>, io: &Io) -> u16 {
     let then = inventory_checks(&mut state.borrow_mut());
     match then {
@@ -291,9 +298,11 @@ pub async fn inventory_click(state: &RefCell<State>, io: &Io) -> u16 {
         }
         Inventory::Trap => {
             let chest = state.borrow().ui.input.selection;
+            let outer = crate::combat::present::interrupt(state, io).await;
             seams::spring_trap(&mut state.borrow_mut(), chest);
-            crate::main_loop::flush_prints(state, io).await;
+            crate::combat::play_effects(state, io).await;
             prompt(state, io).await;
+            crate::combat::present::resume(state, io, outer).await;
             0xa0
         }
     }
