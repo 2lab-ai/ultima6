@@ -293,12 +293,9 @@ fn the_default_and_relative_work_dirs_are_checked() {
     let _ = std::fs::remove_dir_all(&e.dir);
 }
 
-#[test]
-fn a_failed_game_load_names_no_file() {
-    let e = Env::new("errors");
-    let files = e.dir.join("files");
-    std::fs::create_dir_all(&files).unwrap();
-    std::fs::write(files.join("maptiles.ega"), b"not a game file").unwrap();
+/// `inventory --game files`: fails with `category` alone on the terminal, the details in the
+/// 0600 diagnostic file; returns the details.
+fn failed_load(e: &Env, files: &Path, category: &str) -> String {
     let work = e.dir.join("work");
     let o = e.run(&[
         "inventory",
@@ -308,15 +305,73 @@ fn a_failed_game_load_names_no_file() {
         work.to_str().unwrap(),
     ]);
     assert!(!o.status.success());
-    let stderr = String::from_utf8_lossy(&o.stderr);
-    assert!(stderr.contains("did not load"), "{stderr}");
-    assert!(!stderr.contains("maptiles"), "{stderr}");
-    assert!(!stderr.contains(".ega"), "{stderr}");
-    // The details are in a file only the owner reads.
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr),
+    );
+    assert!(stderr.contains(category), "{stderr}");
+    // The details are in a file only the owner reads, and only there.
     use std::os::unix::fs::PermissionsExt;
     let diag = work.join("diagnostic.txt");
     let mode = std::fs::metadata(&diag).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+    let text = std::fs::read_to_string(&diag).unwrap();
+    let (first, detail) = text.split_once('\n').unwrap();
+    assert_eq!(first, category);
+    let detail = detail.trim_end().to_string();
+    assert!(!detail.is_empty());
+    for line in detail.lines().filter(|l| !l.trim().is_empty()) {
+        assert!(!stdout.contains(line), "on stdout: {line}");
+        assert!(!stderr.contains(line), "on stderr: {line}");
+    }
+    assert!(stdout.is_empty(), "{stdout}");
+    detail
+}
+
+#[test]
+fn a_game_that_cannot_be_read_names_no_file() {
+    let e = Env::new("unreadable");
+    let files = e.dir.join("files");
+    std::fs::create_dir_all(&files).unwrap();
+    let locked = files.join("owner-disk-name.adf");
+    std::fs::write(&locked, b"x").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let detail = failed_load(&e, &files, "the game files could not be read");
+    // The details name the file and the error; the terminal shows neither.
+    assert!(detail.contains("owner-disk-name.adf"), "{detail}");
+    assert!(detail.contains("ermission denied"), "{detail}");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
+
+#[test]
+fn a_game_the_engine_does_not_load_names_no_file() {
+    let e = Env::new("errors");
+    let files = e.dir.join("files");
+    std::fs::create_dir_all(&files).unwrap();
+    std::fs::write(files.join("maptiles.ega"), b"not a game file").unwrap();
+    let detail = failed_load(&e, &files, "the game files did not load as Ultima VI");
+    // What the engine said is in the details only (its own words, whatever they are), and no
+    // name of the files given is on the terminal either (checked in failed_load by line).
+    assert_ne!(detail, "the game files did not load as Ultima VI");
+    // Positive control: the engine's error names a game file, which the terminal must not.
+    assert!(detail.contains(".ega"), "{detail}");
+    let o = e.run(&[
+        "inventory",
+        "--game",
+        files.to_str().unwrap(),
+        "--work",
+        e.dir.join("work").to_str().unwrap(),
+    ]);
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    for name in ["maptiles", ".ega", "not a game file"] {
+        assert!(!all.contains(name), "{name}: {all}");
+    }
     let _ = std::fs::remove_dir_all(&e.dir);
 }
 
