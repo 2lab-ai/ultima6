@@ -386,11 +386,15 @@ fn in_place_flips_of_a_written_pack() {
         let mut b = pack.clone();
         let i = rng.below(b.len());
         b[i] ^= 1 << rng.below(8);
-        if let Ok(Ok(p)) = read(&b) {
-            ok += 1;
-            if p.images != orig.images {
-                changed += 1;
+        match read(&b) {
+            Err(()) => panic!("a flip of byte {i} panics the reader"),
+            Ok(Ok(p)) => {
+                ok += 1;
+                if p.images != orig.images {
+                    changed += 1;
+                }
             }
+            Ok(Err(_)) => {}
         }
     }
     println!("in-place single-bit flips of a written pack: accepted {ok}, pixels differ {changed}");

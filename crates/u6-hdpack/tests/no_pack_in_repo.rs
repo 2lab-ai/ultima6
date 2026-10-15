@@ -9,7 +9,8 @@
 //! - an `index.bin` that starts with the index magic;
 //! - a file named as a pack entry: `atlas-N.webp`, `portrait/<letter>-<item>.webp`,
 //!   `bitmap/paper.webp` or `bitmap/spellbook.webp`;
-//! - a zip holding any of these (its entries are checked the same way);
+//! - a zip holding any of these (its entries are checked the same way). A file that looks like a
+//!   zip but does not read as one is an error, not a pass: what it holds cannot be checked;
 //! - the tool's work files: `jobs.jsonl` lines with `sheet` and `places`, an `ingest.json` list
 //!   of `slice`s, an `atlas.json` with `generation` and `plan`, the masters
 //!   `slices/{t-N,p-L-N,b-ROLE}.png`, the receipts `out/sNNNN-aN.json`.
@@ -33,8 +34,27 @@ fn number(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Why the file `name` with `bytes` is a pack, a part of one, or a tool output; or `None`.
-fn pack_file(name: &str, bytes: &[u8]) -> Option<&'static str> {
+/// Why the file `name` with `bytes` is a pack, a part of one, or a tool output; `Ok(None)` if it
+/// is none of these; `Err` if it looks like a zip that does not read (it cannot be checked).
+fn pack_file(name: &str, bytes: &[u8]) -> Result<Option<&'static str>, String> {
+    if let Some(why) = shape(name, bytes) {
+        return Ok(Some(why));
+    }
+    if !zip::is_zip(bytes) {
+        return Ok(None);
+    }
+    let entries =
+        zip::read_zip(bytes, |_| true).map_err(|e| format!("{name}: an unreadable zip: {e}"))?;
+    for (n, b) in &entries {
+        if pack_file(&format!("{name}/{n}"), b)?.is_some() {
+            return Ok(Some("a zip holding a pack or its parts"));
+        }
+    }
+    Ok(None)
+}
+
+/// Why the file `name` with `bytes` is, by its own name and bytes, a pack part or tool output.
+fn shape(name: &str, bytes: &[u8]) -> Option<&'static str> {
     let file = base(name);
     let dir = name.rsplit('/').nth(1).unwrap_or_default();
     if file == "manifest.json" && json(bytes).is_some_and(|v| v["format"].as_str() == Some(FORMAT))
@@ -98,13 +118,6 @@ fn pack_file(name: &str, bytes: &[u8]) -> Option<&'static str> {
             .is_some_and(|(a, b)| number(a) && number(b))
     {
         return Some("a tool receipt");
-    }
-    if zip::is_zip(bytes) {
-        let entries = zip::read_zip(bytes, |_| true).ok()?;
-        return entries
-            .iter()
-            .find_map(|(n, b)| pack_file(n, b))
-            .map(|_| "a zip holding a pack or its parts");
     }
     None
 }
@@ -233,20 +246,17 @@ fn the_detector_finds_packs_and_tool_outputs() {
         date: "2026-10-16".into(),
     };
     let pack = write_pack(&[], &g, true).unwrap();
-    assert!(pack_file("x/anything.bin", &pack).is_some());
+    assert!(hit("x/anything.bin", &pack));
     for (name, bytes) in zip::read_zip(&pack, |_| true).unwrap() {
-        assert!(
-            pack_file(&format!("site/{name}"), &bytes).is_some(),
-            "{name}"
-        );
+        assert!(hit(&format!("site/{name}"), &bytes), "{name}");
     }
     // The manifest as JSON, an escaped slash included, and deflated in a zip, where the
     // format string is not in the file's bytes at all.
     let escaped = br#"{"format": "u6-hdpack\/1", "derived": true}"#;
-    assert!(pack_file("site/manifest.json", escaped).is_some());
+    assert!(hit("site/manifest.json", escaped));
     let zipped = deflated_zip(b"manifest.json", escaped);
     assert!(!zipped.windows(FORMAT.len()).any(|w| w == FORMAT.as_bytes()));
-    assert!(pack_file("data/x.zip", &zipped).is_some());
+    assert!(hit("data/x.zip", &zipped));
     // Loose pack images and the tool's work files.
     for name in [
         "site/atlas-3.webp",
@@ -256,21 +266,48 @@ fn the_detector_finds_packs_and_tool_outputs() {
         "w/slices/p-z-0.png",
         "w/slices/b-paper.png",
     ] {
-        assert!(pack_file(name, b"").is_some(), "{name}");
+        assert!(hit(name, b""), "{name}");
     }
-    assert!(pack_file("w/out/s0012-a2.json", b"{}").is_some());
+    assert!(hit("w/out/s0012-a2.json", b"{}"));
     let job = br#"{"sheet":"s0000-a1","places":[]}"#;
-    assert!(pack_file("w/jobs.jsonl", job).is_some());
-    assert!(pack_file("w/ingest.json", br#"[{"slice":"slices/t-1.png"}]"#).is_some());
-    assert!(pack_file("w/atlas.json", br#"{"generation":"a","plan":"b"}"#).is_some());
+    assert!(hit("w/jobs.jsonl", job));
+    assert!(hit("w/ingest.json", br#"[{"slice":"slices/t-1.png"}]"#));
+    assert!(hit("w/atlas.json", br#"{"generation":"a","plan":"b"}"#));
     // Source naming the format, another manifest, other images and names: not caught.
-    assert!(pack_file("crates/u6-hdpack/src/lib.rs", FORMAT.as_bytes()).is_none());
-    assert!(pack_file("site/app.js", b"if (format === 'u6-hdpack/1') {}").is_none());
-    assert!(pack_file("site/manifest.json", br#"{"format": "webmanifest"}"#).is_none());
-    assert!(pack_file("site/manifest.json", b"u6-hdpack/1, not json").is_none());
-    assert!(pack_file("site/pkg/u6_web_bg.wasm", b"\0asm").is_none());
-    assert!(pack_file("site/icons/atlas.webp", b"").is_none());
-    assert!(pack_file("tools/oracle/out/run.json", b"{}").is_none());
+    assert!(!hit("crates/u6-hdpack/src/lib.rs", FORMAT.as_bytes()));
+    assert!(!hit("site/app.js", b"if (format === 'u6-hdpack/1') {}"));
+    assert!(!hit("site/manifest.json", br#"{"format": "webmanifest"}"#));
+    assert!(!hit("site/manifest.json", b"u6-hdpack/1, not json"));
+    assert!(!hit("site/pkg/u6_web_bg.wasm", b"\0asm"));
+    assert!(!hit("site/icons/atlas.webp", b""));
+    assert!(!hit("tools/oracle/out/run.json", b"{}"));
+    // A file that looks like a zip and does not read is an error naming it, not a pass: a
+    // malformed archive, a pack one bit off (its CRC-32), and a zip inside a zip that is one.
+    let unreadable = |name: &str, bytes: &[u8]| {
+        let e = pack_file(name, bytes).expect_err(name);
+        assert!(e.contains(name) && e.contains("an unreadable zip"), "{e}");
+    };
+    unreadable("data/broken.zip", b"PK\x03\x04garbage");
+    unreadable("data/end.zip", b"PK\x05\x06");
+    let mut off = pack.clone();
+    let mid = off.len() / 3;
+    off[mid] ^= 0x10;
+    unreadable("site/off.bin", &off);
+    let inner = deflated_zip(b"inner.zip", b"PK\x03\x04garbage");
+    let e = pack_file("data/outer.zip", &inner).expect_err("a bad zip inside");
+    assert!(
+        e.contains("data/outer.zip/inner.zip: an unreadable zip"),
+        "{e}"
+    );
+    // Other files starting with "PK" but not a zip's signatures are just files.
+    assert!(!hit("notes/pk.txt", b"PKG notes"));
+}
+
+/// Whether the detector catches `name` with `bytes` (which must read).
+fn hit(name: &str, bytes: &[u8]) -> bool {
+    pack_file(name, bytes)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .is_some()
 }
 
 #[test]
@@ -297,10 +334,19 @@ fn no_pack_is_in_the_index_or_under_site() {
     assert!(files.len() > 100, "the index lists the repository");
     assert!(files.iter().any(|(p, _)| p == "Cargo.toml"));
     walk(&root.join("site"), &root, &mut files);
-    let found: Vec<String> = files
-        .iter()
-        .filter_map(|(p, b)| pack_file(p, b).map(|why| format!("{p}: {why}")))
-        .collect();
+    let mut found = Vec::new();
+    let mut unreadable = Vec::new();
+    for (p, b) in &files {
+        match pack_file(p, b) {
+            Ok(Some(why)) => found.push(format!("{p}: {why}")),
+            Ok(None) => {}
+            Err(e) => unreadable.push(e),
+        }
+    }
+    assert!(
+        unreadable.is_empty(),
+        "zip-looking files that do not read, so cannot be checked: {unreadable:?}"
+    );
     assert!(
         found.is_empty(),
         "HD pack files in the repo or site/: {found:?}"

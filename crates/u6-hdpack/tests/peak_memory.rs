@@ -5,7 +5,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use u6_hdpack::{ATLAS_CELLS, Generator, ImageId, PackImage, Rgba, TILE_HD, read_pack, write_pack};
+use u6_hdpack::{
+    ATLAS_CELLS, Generator, ImageId, PackError, PackImage, Rgba, TILE_HD, read_pack, write_pack,
+};
 
 struct Counting;
 
@@ -91,7 +93,12 @@ fn the_reader_holds_one_atlas_at_a_time() {
     PEAK.store(base, Ordering::SeqCst);
     let r = read_pack(&zip);
     let peak = PEAK.load(Ordering::SeqCst) - base;
-    assert!(r.is_err());
+    match r {
+        Err(PackError::Files(d)) => {
+            assert!(d.contains("portrait/a-1.webp is not in the index"), "{d}")
+        }
+        other => panic!("{:?}", other.map(|p| p.images.len())),
+    }
     println!("peak {peak} bytes refusing a pack with a 100 MB entry it does not name");
     assert!(peak < 4 << 20, "peak {peak}");
 }

@@ -761,7 +761,8 @@ fn animated_webp(img: &Rgba) -> Vec<u8> {
     for v in [0, 0, img.width - 1, img.height - 1, 100] {
         anmf.extend(u24(v));
     }
-    anmf.push(0);
+    // Not blended onto the canvas (the decoder's blend is not exact): the frame replaces it.
+    anmf.push(0x02);
     anmf.extend_from_slice(vp8l);
     let mut body = b"WEBP".to_vec();
     body.extend(chunk(b"VP8X", &vp8x));
@@ -778,10 +779,15 @@ fn an_animated_webp_is_refused() {
     let pack = written();
     let img = image(PORTRAIT_HD.0, PORTRAIT_HD.1, 3, false);
     let anim = animated_webp(&img);
-    // It is a valid animation of that size.
-    let dec = image_webp::WebPDecoder::new(Cursor::new(anim.as_slice())).unwrap();
+    // It is a valid animation of that size, whose one frame decodes to the image's pixels.
+    let mut dec = image_webp::WebPDecoder::new(Cursor::new(anim.as_slice())).unwrap();
     assert!(dec.is_animated());
+    assert_eq!(dec.num_frames(), 1);
     assert_eq!(dec.dimensions(), (PORTRAIT_HD.0, PORTRAIT_HD.1));
+    assert!(dec.has_alpha());
+    let mut frame = vec![0; dec.output_buffer_size().unwrap()];
+    dec.read_frame(&mut frame).unwrap();
+    assert!(frame == img.pixels, "the frame is not the image");
     let bad = with_file(&pack, "portrait/b-7.webp", |b| *b = anim.clone());
     match read_pack(&bad) {
         Err(PackError::Image(d)) => assert!(d.contains("not a lossless still"), "{d}"),
