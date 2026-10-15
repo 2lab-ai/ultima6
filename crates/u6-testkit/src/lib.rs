@@ -4,8 +4,9 @@
 //! Spec 01 §Rights: what the tests print never shows content of the user's files. `assert_eq!`
 //! prints both values when it fails, so values read from those files (text, bytes, table rows,
 //! records, frames) are compared with [`assert_same!`] instead: its failure names the label,
-//! whether the lengths differ and the first index where the two differ, never the values (nor
-//! the lengths: the length of a list of the user's records or paths is a count of them).
+//! whether the lengths differ and the first index where the two differ, never the values nor
+//! the lengths (the length of a list of the user's records or paths is a count of them, so a
+//! prefix is reported without the index where the shorter one ends).
 
 /// `assert_eq!` for sequences that hold content of the user's files:
 /// `assert_same!(left, right, "label {}", arg)`.
@@ -13,8 +14,9 @@
 /// Both sides are anything `AsRef<[T]>` with the same element type (`str`, `String`, `Vec<T>`,
 /// arrays, slices; a scalar goes in as `[x]`). The label is required and takes `format!`
 /// arguments. On failure it panics with `<label>: lengths differ, first difference at index
-/// <i>` or `<label>: lengths equal, first difference at index <i>` (for a prefix, `i` is where
-/// the shorter one ends).
+/// <i>` or `<label>: lengths equal, first difference at index <i>` when an element differs, and
+/// with `<label>: lengths differ, one is a prefix of the other` when none does (no index: it
+/// would be the shorter length).
 #[macro_export]
 macro_rules! assert_same {
     ($left:expr, $right:expr, $($label:tt)+) => {
@@ -34,11 +36,9 @@ where
     if l == r {
         return;
     }
-    let at = l
-        .iter()
-        .zip(r)
-        .position(|(a, b)| a != b)
-        .unwrap_or(l.len().min(r.len()));
+    let Some(at) = l.iter().zip(r).position(|(a, b)| a != b) else {
+        panic!("{}: lengths differ, one is a prefix of the other", label());
+    };
     let lengths = if l.len() == r.len() {
         "equal"
     } else {
@@ -134,11 +134,17 @@ mod tests {
         );
     }
 
+    /// A prefix names neither length nor the index where the shorter one ends (both would be
+    /// the shorter length); an element that differs before the end still gets its index.
     #[test]
-    fn a_prefix_differs_at_the_shorter_length() {
+    fn a_prefix_is_named_without_an_index() {
         let m = failure(|| assert_same!(vec![1u8, 2], [1, 2, 3], "tail")).unwrap();
-        assert_eq!(m, "tail: lengths differ, first difference at index 2");
-        assert!(!m.contains('3'), "the longer length is not shown");
+        assert_eq!(m, "tail: lengths differ, one is a prefix of the other");
+        let m = failure(|| assert_same!([7u8, 8, 9, 4, 5], [7, 8, 9], "files")).unwrap();
+        assert_eq!(m, "files: lengths differ, one is a prefix of the other");
+        assert!(!m.contains('3') && !m.contains('5'), "no length is shown");
+        let m = failure(|| assert_same!(vec![1u8, 9], [1, 2, 3], "early")).unwrap();
+        assert_eq!(m, "early: lengths differ, first difference at index 1");
     }
 
     #[test]

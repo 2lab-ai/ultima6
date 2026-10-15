@@ -187,6 +187,7 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
             crate::map::view::update_view(&mut s);
             foes
         };
+        assert!(foes.len() == 2, "two foes spawned");
         crate::ui::panels::redraw_panel(&st, &io).await;
         crate::gfx::refresh_view(&mut st.borrow_mut(), &io);
         crate::gfx::render_window(&mut st.borrow_mut(), &io, true);
@@ -205,8 +206,7 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
             );
             s.main.attack_target = foes[0];
             rep.borrow_mut().push(format!(
-                "{} foes spawned, gargoyle type {which} of {}",
-                foes.len(),
+                "two foes spawned, gargoyle type {which} of {}",
                 GARGOYLE_TYPES.len()
             ));
         }
@@ -262,8 +262,7 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
         }
     }
     let s = e.state();
-    // Output: labels, booleans, an index into the test's own type list and counts of what the
-    // test made (spec 01 §Rights).
+    // Output: labels, booleans and an index into the test's own type list (spec 01 §Rights).
     println!("--- report ---");
     for line in report.borrow().iter() {
         println!("{line}");

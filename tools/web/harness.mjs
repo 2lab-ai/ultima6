@@ -44,7 +44,9 @@ export const blockFile = (i) => `savegame/objblk${'abcdefgh'[i & 7]}${'abcdefgh'
 /// they differ the error names `label` and, per differing path (object keys are file paths),
 /// whether the lengths differ and the first differing index, never the values nor the lengths
 /// (spec 01 §Rights: the length of a list of the user's records or paths is a count of them;
-/// assert's own message would print both). Strings, arrays and typed arrays count as sequences.
+/// assert's own message would print both). A prefix is named without an index (it would be the
+/// shorter length), equal elements in sequences of two kinds as such. Strings, arrays and typed
+/// arrays count as sequences.
 export function assertSame(actual, expected, label) {
   if (isDeepStrictEqual(actual, expected)) return;
   const found = [];
@@ -70,7 +72,9 @@ function difference(a, b, path, out) {
     const nested = i < n && typeof a !== 'string' && (isRecord(a[i]) || isSequence(a[i]))
       && (isRecord(b[i]) || isSequence(b[i]));
     if (nested) difference(a[i], b[i], `${path}[${i}]`, out);
-    else out.push(`${at}lengths ${a.length === b.length ? 'equal' : 'differ'}, first difference at index ${i}`);
+    else if (i < n) out.push(`${at}lengths ${a.length === b.length ? 'equal' : 'differ'}, first difference at index ${i}`);
+    else if (a.length !== b.length) out.push(`${at}lengths differ, one is a prefix of the other`);
+    else out.push(`${at}the same elements, different kinds`);
   } else if (isRecord(a) && isRecord(b)) {
     for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
       const p = path ? `${path}.${k}` : k;
@@ -88,6 +92,8 @@ function difference(a, b, path, out) {
 const ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError',
   'TimeoutError', 'AbortError', 'RuntimeError', 'AssertionError']);
 const HERE = join(dirname(fileURLToPath(import.meta.url)), '/');
+// The files whose places a failure shows: the runner's own (not every path under tools/web).
+const RUNNER_FILES = new Set(['test-web.mjs', 'harness.mjs']);
 // A stack frame's place: node writes a module's as a file URL, Playwright's rewritten stacks a
 // plain path.
 const FRAME = /^\s+at (?:async )?(?:[^()]*\()?((?:file:\/\/)?\/[^\s()]+):(\d+):(\d+)\)?$/;
@@ -95,16 +101,19 @@ const framePath = (place) => {
   try { return place.startsWith('file:') ? fileURLToPath(place) : place; } catch { return ''; }
 };
 
-/// The kind of `err` as one of the fixed names above.
-export const errorName = (err) => (ERROR_NAMES.has(err?.name) ? err.name : 'Error');
+/// The kind of `err` as one of the fixed names above (`Error` for a thrown value that is not
+/// an Error).
+export const errorName = (err) => (err instanceof Error && ERROR_NAMES.has(err.name) ? err.name : 'Error');
 
 /// What the runner shows of a failure (spec 01 §Rights): an error's message can carry the
 /// user's data (an assertion's compared values; a page, Playwright or helper error quoting the
 /// page's text, a selector or a status line), so the lines are a fixed head and the places in
 /// these test files only. The head is an assertion's own label (the first line of the test's
 /// message: node appends the compared values after it) or, for any other error, its kind. The
-/// places are read from the stack after the message (whose lines could look like frames) and
-/// shown as file:line:column of a file in this directory.
+/// places are read from an Error's stack after its message (whose lines could look like
+/// frames; a stack that does not hold the message shows none) and shown as file:line:column of
+/// the runner's own files only. A thrown value that is not an Error shows no places: its
+/// `stack`, if any, is anyone's text.
 export function failureLines(err) {
   let head = `${errorName(err)} (its message is not shown)`;
   if (err instanceof assert.AssertionError) {
@@ -112,18 +121,18 @@ export function failureLines(err) {
       ? 'AssertionError (the compared values are not shown)'
       : `AssertionError: ${String(err.message).split('\n')[0]}`;
   }
-  let stack = typeof err?.stack === 'string' ? err.stack : '';
-  const message = typeof err?.message === 'string' ? err.message : '';
-  const end = message ? stack.indexOf(message) : -1;
-  if (end >= 0) stack = stack.slice(end + message.length);
-  else if (message) stack = stack.split('\n').slice(message.split('\n').length).join('\n');
+  let stack = err instanceof Error && typeof err.stack === 'string' ? err.stack : '';
+  const message = err instanceof Error && typeof err.message === 'string' ? err.message : '';
+  if (message) {
+    const end = stack.indexOf(message);
+    stack = end >= 0 ? stack.slice(end + message.length) : '';
+  }
   const places = [];
   for (const line of stack.split('\n')) {
     const m = FRAME.exec(line);
     const path = m ? framePath(m[1]) : '';
-    if (path.startsWith(HERE) && places.length < 5) {
-      places.push(`at ${path.slice(HERE.length)}:${m[2]}:${m[3]}`);
-    }
+    const file = path.startsWith(HERE) ? path.slice(HERE.length) : '';
+    if (RUNNER_FILES.has(file) && places.length < 5) places.push(`at ${file}:${m[2]}:${m[3]}`);
   }
   return [head, ...places];
 }

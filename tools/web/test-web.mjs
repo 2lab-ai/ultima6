@@ -81,7 +81,8 @@ async function atPrompt(page) {
 const promptNow = (page) => page.evaluate(() => document.getElementById('screen').dataset.prompt);
 
 // No page: the harness's content-free comparison (synthetic values) names paths, whether the
-// lengths differ and the index only.
+// lengths differ and the index only; a prefix without an index (it would be the shorter
+// length), equal elements of two kinds as such.
 test('assertSame: a mismatch names the label, the paths, equal or differing lengths and the index, never the values', async () => {
   const failure = (f) => {
     try { f(); } catch (err) { return err.message; }
@@ -100,16 +101,24 @@ test('assertSame: a mismatch names the label, the paths, equal or differing leng
   assert.equal(list, 'files: [0].bytes: lengths differ, first difference at index 0');
   const kinds = failure(() => h.assertSame({ a: 'xyz', b: [1, 2, 3, 4] }, { a: 7, b: null }, 'kinds'));
   assert.equal(kinds, 'kinds: a: a string and a number; b: a sequence and null');
+  const prefix = failure(() => h.assertSame({ files: ['a', 'b', 'c'] }, { files: ['a', 'b', 'c', 'd', 'e'] }, 'paths'));
+  assert.equal(prefix, 'paths: files: lengths differ, one is a prefix of the other');
+  const shorter = failure(() => h.assertSame('Zhug', 'Zhuge', 'the name'));
+  assert.equal(shorter, 'the name: lengths differ, one is a prefix of the other');
+  const typed = failure(() => h.assertSame(new Uint8Array([1, 2]), [1, 2], 'bytes'));
+  assert.equal(typed, 'bytes: the same elements, different kinds');
   for (const leak of ['83', '88', 'Zhug', '3', '5']) {
-    assert.ok(![store, name, list, kinds].some((m) => m.includes(leak)), `a message shows ${leak}`);
+    assert.ok(![store, name, list, kinds, prefix, shorter, typed].some((m) => m.includes(leak)), `a message shows ${leak}`);
   }
+  assert.ok(![prefix, shorter, typed].some((m) => /\d/.test(m)), 'a prefix or a kind shows no number');
 });
 
 // The runner's failure lines (h.failureLines) on errors whose text holds a sentinel: plain,
 // multi-line with lines shaped as frames of this directory, a thrown string, a page-chosen name,
-// assertions with a label and generated, and Playwright's own (a page's thrown error, a timeout
-// on a selector). None shows the sentinel; each shows its fixed head, the thrown ones a place
-// in this file.
+// assertions with a label and generated, Playwright's own (a page's thrown error, a timeout on
+// a selector), a frame of another file in this directory, a thrown object with a stack and an
+// Error whose stack lost its message. None shows the sentinel; each shows its fixed head, and
+// places in this file only where they are an Error's frames after its message.
 test('the runner shows a failure by its label or kind and its places here, never its message', async (env) => {
   const S = 'QX7SENTINELZ9';
   const caught = async (f) => {
@@ -120,23 +129,33 @@ test('the runner shows a failure by its label or kind and its places here, never
   const fake = new URL(`${S}.mjs`, import.meta.url).href;
   const named = new Error(S);
   named.name = S;
+  const thisFile = new URL(import.meta.url).pathname;
+  const other = new Error('m');
+  other.stack = `Error: m\n    at f (${new URL(fake).pathname}:3:3)\n    at ${thisFile}:5:5`;
+  const object = { name: 'TypeError', message: S, stack: `    at ${new URL(fake).pathname}:1:1\n    at ${thisFile}:4:4` };
+  const lost = new Error(S);
+  lost.stack = `    at ${thisFile}:7:7`;
   const page = await (await env.browser.newContext()).newPage();
   const cases = [
     ['plain', await caught(() => { throw new Error(S); }), 'Error (its message is not shown)'],
     ['multi-line', await caught(() => { throw new TypeError(`a\n    at ${S} (${fake}:1:1)\n    at ${new URL(fake).pathname}:2:2\n${S}`); }), 'TypeError (its message is not shown)'],
-    ['a string', await caught(() => { throw S; }), 'Error (its message is not shown)'],
     ['a page-chosen name', named, 'Error (its message is not shown)'],
     ['a labelled assertion', await caught(() => assert.equal(S, `${S}-other`, 'the label')), 'AssertionError: the label'],
     ['a generated assertion', await caught(() => assert.deepEqual([S], [`${S}-other`])), 'AssertionError (the compared values are not shown)'],
     ['a page error', await caught(() => page.evaluate((s) => { throw new Error(s); }, S)), 'Error (its message is not shown)'],
     ['a timeout', await caught(() => page.waitForSelector(`#${S}`, { timeout: 50 })), 'TimeoutError (its message is not shown)'],
+    ['another file here', other, 'Error (its message is not shown)'],
+    ['an object with a stack', await caught(() => { throw object; }), 'Error (its message is not shown)', false],
+    ['a stack without its message', lost, 'Error (its message is not shown)', false],
+    ['a string', await caught(() => { throw S; }), 'Error (its message is not shown)', false],
   ];
-  for (const [what, err, head] of cases) {
+  for (const [what, err, head, placed = true] of cases) {
     const lines = h.failureLines(err);
     assert.ok(lines[0] === head, `${what}: the head`);
     assert.ok(!lines.join('\n').includes(S), `${what}: no message text`);
     assert.ok(lines.slice(1).every((l) => /^at [\w./-]+\.mjs:\d+:\d+$/.test(l)), `${what}: places only`);
-    if (what !== 'a string') assert.ok(here(lines), `${what}: a place in this file`);
+    if (placed) assert.ok(here(lines), `${what}: a place in this file`);
+    else assert.ok(lines.length === 1, `${what}: no place`);
   }
 });
 
