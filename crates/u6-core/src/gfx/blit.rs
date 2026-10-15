@@ -314,16 +314,12 @@ pub fn copy_window(back: &Framebuffer, front: &mut Framebuffer) {
 
 /// [`copy_window`]'s result by rows: each row of its rect whose colours differ between the
 /// buffers is copied, the others (which the copy would leave as they are) are not. With a source
-/// plane on the screen every row is copied, colours and sources: a row of equal colours can hold
-/// other sources (a replay put it back classic), and copying the sources costs less than
-/// comparing them.
-pub fn copy_window_rows(back: &Framebuffer, front: &mut Framebuffer) {
-    for y in 8..168 {
-        let i = y * WIDTH + 8;
-        if front.src().is_some() || back.pixels()[i..i + 160] != front.pixels()[i..i + 160] {
-            front.copy_span(back, i, i, 160);
-        }
-    }
+/// plane on the screen, the sources of the rect that may differ are copied too: those written in
+/// either buffer since the last such copy, including a row of equal colours that a replay put
+/// back classic ([`Framebuffer::sync_rect_from`]; the screen is the one buffer synced from the
+/// back buffer, always over this rect).
+pub fn copy_window_rows(back: &mut Framebuffer, front: &mut Framebuffer) {
+    front.sync_rect_from(back, 8..168, 8..168);
 }
 
 /// Original: 0x151fe6 (copy the pixel rectangle (x0, y0)..=(x1, y1) of the back buffer to
@@ -368,6 +364,17 @@ fn back_byte(x: u16, y: u16) -> Option<usize> {
     row_base(y).map(|row| row + usize::from(x >> 3))
 }
 
+/// What a bitmap is on the source plane (spec 07 HD0): a portrait, a panel bitmap, or nothing
+/// named (its pixels classic).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitmapSource {
+    Classic,
+    /// A portrait: its [`u6_render::portrait_id`].
+    Portrait(u16),
+    /// A panel bitmap: its role ([`u6_render::BITMAP_PAPER`], [`u6_render::BITMAP_SPELLBOOK`]).
+    Bitmap(u16),
+}
+
 /// Original: 0x153384 (draw a `.bmp` bitmap at (x, y): its header is two little-endian words,
 /// width and height, read byte by byte; then the body of 0x1533e0)
 ///
@@ -381,7 +388,7 @@ pub fn blit_bmp(
     y: u16,
     role: u16,
 ) {
-    let (size, src) = ((bmp.width, bmp.height), (Kind::Bitmap, role));
+    let (size, src) = ((bmp.width, bmp.height), BitmapSource::Bitmap(role));
     blit_bitmap(colours, front, size, &bmp.pixels, x, y, src);
 }
 
@@ -393,8 +400,8 @@ pub fn blit_bmp(
 /// at byte column x / 8 of row y; each row is `width` pixels, the next row starts a screen row
 /// below. Pixels past the screen are dropped.
 ///
-/// `(kind, id)` names the image for the source plane (spec 07): each pixel gets (column, row)
-/// in the bitmap, version 0. [`Kind::Classic`] draws classic pixels.
+/// `src` names the image for the source plane (spec 07): each pixel gets (column, row) in the
+/// bitmap, version 0; [`BitmapSource::Classic`] draws classic pixels.
 pub fn blit_bitmap(
     colours: &[u8; 256],
     front: &mut Framebuffer,
@@ -402,8 +409,13 @@ pub fn blit_bitmap(
     pixels: &[u8],
     x: u16,
     y: u16,
-    (kind, id): (Kind, u16),
+    src: BitmapSource,
 ) {
+    let (kind, id) = match src {
+        BitmapSource::Classic => (Kind::Classic, 0),
+        BitmapSource::Portrait(id) => (Kind::Portrait, id),
+        BitmapSource::Bitmap(role) => (Kind::Bitmap, role),
+    };
     for r in 0..usize::from(height) {
         let Some(row) = row_base(y.wrapping_add(r as u16)) else {
             continue;

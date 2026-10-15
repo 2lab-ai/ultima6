@@ -323,6 +323,16 @@ impl Io {
         self.window_cache.get()
     }
 
+    /// Port-only (spec 07 HD0): every pixel of the back buffer's, the screen's and the published
+    /// frame's source planes classic, the colours untouched ([`Framebuffer::reset_src`]; the
+    /// shown frame follows at its next sync from the published one). It counts as a write of the
+    /// back buffer ([`Io::back_mark`]).
+    pub fn reset_src_plane(&self) {
+        self.draw_back(Framebuffer::reset_src);
+        self.front.borrow_mut().reset_src();
+        self.published.borrow_mut().reset_src();
+    }
+
     /// Port-only (spec 07 HD0): gives the back buffer, the screen and the published frame a
     /// source plane ([`Framebuffer::enable_src`]), every pixel classic until drawn again. The
     /// colours are those without it. It counts as a write of the back buffer
@@ -622,16 +632,18 @@ impl Engine {
         let version = self.io.front_version.get();
         let presented = version != self.published_version;
         if presented {
+            // The published frame is the one buffer synced from the screen, and the shown frame
+            // the one synced from it: with a source plane only its changed chunks are copied.
             self.io
                 .published
                 .borrow_mut()
-                .clone_from(&self.io.front.borrow());
+                .sync_from(&mut self.io.front.borrow_mut());
             self.published_version = version;
         }
         let at = self.io.handler_pointer();
         let sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
         if presented || sprite != self.sprite || self.ticks == 1 {
-            self.shown.clone_from(&self.io.published.borrow());
+            self.shown.sync_from(&mut self.io.published.borrow_mut());
             if let Some(sp) = &sprite {
                 sp.draw(&mut self.shown);
             }

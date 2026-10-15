@@ -258,10 +258,18 @@ pub async fn game_first(state: Rc<RefCell<State>>, io: Rc<Io>) {
 /// Save is a command, and the end of the command loop ends the launcher), so the block files
 /// are the user's. Unchanged when the files no longer load.
 fn relaunch(state: &RefCell<State>, io: &Io) {
-    let Ok(mut fresh) = State::new_game(io.files()) else {
+    let Ok(fresh) = State::new_game(io.files()) else {
         return;
     };
-    let mut s = state.borrow_mut();
+    take_over(&mut state.borrow_mut(), fresh, io);
+}
+
+/// The new process `fresh` takes the place of `s` ([`relaunch`]): the RNG, the save state and
+/// the sound log go on, the character `u` made is read in. Its records' versions start again at
+/// 0 while the screen buffers keep what the old records drew, so every source plane is reset to
+/// classic, the colours untouched ([`Io::reset_src_plane`]): no old pixel can match a new
+/// version (spec 07 HD0).
+pub(crate) fn take_over(s: &mut State, mut fresh: State, io: &Io) {
     fresh.rng = s.rng;
     fresh.saveload = std::mem::take(&mut s.saveload);
     fresh.sound.continue_calls(&mut s.sound);
@@ -270,6 +278,7 @@ fn relaunch(state: &RefCell<State>, io: &Io) {
         fresh.place_party();
     }
     *s = fresh;
+    io.reset_src_plane();
 }
 
 /// Original: 0x1351d8 (main(): setup, load data, character check, music, command loop) [partial]

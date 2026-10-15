@@ -1,17 +1,18 @@
 //! Spec 07 HD0: the source plane on synthetic art. What names each pixel (records, overlays,
-//! outlines, portraits, panel bitmaps), how the copies, the dissolve, the quake and the presents
-//! carry it, what stays classic (text, clock hands, the sparkle, a missile, the pointer sprite),
-//! a pixel left from a record rewritten since (stale), the coverage of a scene, and the colours
-//! with and without the plane over the adversarial run of the window cache. No game data.
+//! outlines, portraits, panel bitmaps), how the copies, the dissolve, the quake, a text scroll, a
+//! flight's put-back block, a combat playback and the presents carry it, what stays classic
+//! (text, clock hands, the sparkle, a missile, the pointer sprite), a pixel left from a record
+//! rewritten since (stale, also in a clone), and a scene whose every pixel is checked against its
+//! image. The parity runs are in `plane_parity`. No game data.
 
 use u6_formats::bitmap::Bitmap;
 use u6_formats::font::BitFont;
 use u6_formats::gfx::{AnimOverlay, Span};
 use u6_render::{
-    BITMAP_PAPER, FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, HEIGHT, Kind, Src, WIDTH, portrait_id,
+    BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, HEIGHT, Kind, Src,
+    WIDTH,
 };
 
-use super::adv::{self, Lists, X};
 use super::view::{HERO_BASE, world};
 use super::{full_period_taps, install, map_tile, object_tile};
 use crate::Files;
@@ -19,20 +20,20 @@ use crate::engine::{Engine, InputEvent, Io};
 use crate::gfx::GfxState;
 use crate::gfx::anim::{merge_shores, set_frame, substitute};
 use crate::gfx::blit::{
-    blit_back, blit_bitmap, blit_bmp, blit_front, copy_rect, copy_window, copy_window_rows,
-    dissolve, dissolve_order,
+    BitmapSource, blit_back, blit_bitmap, blit_bmp, blit_front, copy_rect, copy_window,
+    copy_window_rows, dissolve, dissolve_order,
 };
 use crate::state::State;
 
 /// A buffer with the plane.
-fn plane() -> Framebuffer {
+pub(super) fn plane() -> Framebuffer {
     let mut fb = Framebuffer::new();
     fb.enable_src();
     fb
 }
 
 /// The source of pixel (u, v) of record `id` at version `ver`.
-fn tile(id: u16, ver: u32, (u, v): (u16, u16), flags: u8) -> Src {
+pub(super) fn tile(id: u16, ver: u32, (u, v): (u16, u16), flags: u8) -> Src {
     Src {
         ver,
         id,
@@ -43,7 +44,19 @@ fn tile(id: u16, ver: u32, (u, v): (u16, u16), flags: u8) -> Src {
     }
 }
 
-fn kind(fb: &Framebuffer, x: usize, y: usize) -> Kind {
+/// The source of pixel (u, v) of portrait or bitmap `id` (version 0, no flags).
+fn picture(kind: Kind, id: u16, (u, v): (usize, usize)) -> Src {
+    Src {
+        ver: 0,
+        id,
+        u: u as u16,
+        v: v as u16,
+        kind,
+        flags: 0,
+    }
+}
+
+pub(super) fn kind(fb: &Framebuffer, x: usize, y: usize) -> Kind {
     fb.src_at(x, y).expect("a plane, on the screen").kind
 }
 
@@ -52,11 +65,23 @@ fn colours() -> [u8; 256] {
     std::array::from_fn(|i| i as u8)
 }
 
-/// A 56 × 64 portrait whose pixel (u, v) has colour (u + v) % 31 + 1.
-fn portrait() -> Vec<u8> {
-    (0..56 * 64)
-        .map(|i| ((i % 56 + i / 56) % 31 + 1) as u8)
+/// A `w` × `h` synthetic image of colours 1..=31 hashed from (`seed`, index): no shift of it
+/// matches it (not periodic), and images of other seeds differ.
+fn image(seed: u32, w: usize, h: usize) -> Vec<u8> {
+    (0..w * h)
+        .map(|i| {
+            let mut x = (i as u32 ^ seed.wrapping_mul(0x85EB_CA6B)).wrapping_mul(0x9E37_79B1);
+            x ^= x >> 15;
+            x = x.wrapping_mul(0x2C1B_3C6D);
+            x ^= x >> 12;
+            (x % 31 + 1) as u8
+        })
         .collect()
+}
+
+/// A 56 × 64 portrait ([`image`] of `seed`).
+fn portrait(seed: u32) -> Vec<u8> {
+    image(seed, 56, 64)
 }
 
 #[test]
@@ -153,7 +178,7 @@ fn overlay_and_outline_pixels_are_flagged() {
 }
 
 /// The back buffer of a window of map records 1..=4 (pixel (r, c) of record n has colour
-/// (r·16 + c + n) % 31 + 1) over its 11 × 11 cells.
+/// (r·16 + c + n) % 31 + 1, and record n is at version n) over its 11 × 11 cells.
 fn window_back() -> (GfxState, Framebuffer) {
     let mut gfx = GfxState::default();
     for n in 1..=4 {
@@ -162,20 +187,23 @@ fn window_back() -> (GfxState, Framebuffer) {
             n,
             map_tile(0, 16, move |r, c| ((r * 16 + c + n) % 31 + 1) as u8),
         );
+        for _ in 0..n {
+            gfx.cache.record_changed(n);
+        }
     }
     let mut back = plane();
     for row in 0..11u16 {
         for col in 0..11u16 {
-            blit_back(
-                &gfx,
-                &mut back,
-                (row * 11 + col) % 4 + 1,
-                col * 16,
-                row * 16,
-            );
+            let n = (row * 11 + col) % 4 + 1;
+            blit_back(&gfx, &mut back, n, col * 16, row * 16);
         }
     }
     (gfx, back)
+}
+
+/// The record [`window_back`] draws in the cell of pixel (x, y).
+fn window_record(x: usize, y: usize) -> u16 {
+    ((y / 16 * 11 + x / 16) % 4 + 1) as u16
 }
 
 /// Pixel `(x, y)` of `fb` has the colour and the source of `(bx, by)` of `back`.
@@ -192,28 +220,32 @@ fn same(fb: &Framebuffer, (x, y): (usize, usize), back: &Framebuffer, (bx, by): 
 /// and the quake's shifted copy move each pixel's source with its colour.
 #[test]
 fn the_plane_follows_the_copies_the_dissolve_and_the_quake() {
-    let (_, back) = window_back();
+    let (_, mut back) = window_back();
     let mut front = plane();
     copy_window(&back, &mut front);
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             if (8..168).contains(&x) && (8..168).contains(&y) {
                 same(&front, (x, y), &back, (x, y));
-                assert_eq!(kind(&front, x, y), Kind::Tile);
+                let n = window_record(x, y);
+                let uv = ((x % 16) as u16, (y % 16) as u16);
+                assert_eq!(front.src_at(x, y), Some(tile(n, u32::from(n), uv, 0)));
             } else {
                 assert_eq!(kind(&front, x, y), Kind::Classic);
             }
         }
     }
-    // The cached present: a row whose colours are the back buffer's but whose pixels were put
-    // back classic (a replay) is copied for its sources.
-    let mut rows = front.clone();
+    // The cached present: the window rect synced, then a row of it put back classic in its own
+    // colours (a replay); the next present copies that row's sources again.
+    let mut rows = plane();
+    copy_window_rows(&mut back, &mut rows);
+    assert!(rows.src() == front.src() && rows.pixels() == front.pixels());
     for x in 8..168 {
         let p = rows.get(x, 40).unwrap();
         rows.set(x, 40, p);
     }
-    assert!(rows.pixels() == front.pixels());
-    copy_window_rows(&back, &mut rows);
+    assert!(rows.pixels() == front.pixels() && rows.src() != front.src());
+    copy_window_rows(&mut back, &mut rows);
     assert!(rows.src() == front.src(), "the row's sources are copied");
     // Bytes 2..=5 of rows 16..=31 to (200, 100).
     let mut rect = plane();
@@ -288,45 +320,170 @@ fn a_front_pixel_keeps_its_source_across_presents() {
     assert!(e.io().published(|p| p.src_at(203, 104)) == Some(tile(7, 0, (3, 4), 0)));
 }
 
+/// The published frame copies only what changed of the screen's plane (spec 07 HD0 cost): after
+/// a present of a changed screen, after an idle tick that changed nothing and presented again,
+/// and after a present of a single new pixel, the published plane is the screen's, and the shown
+/// frame's is the published one's but for the pointer sprite.
+#[test]
+fn a_present_after_an_idle_tick_leaves_the_published_plane_the_screens() {
+    let mut s = State::empty();
+    install(
+        &mut s.gfx,
+        7,
+        map_tile(0, 16, |r, c| ((r + c) % 31 + 1) as u8),
+    );
+    s.ui.pointer =
+        crate::ui::pointer::PointerState::from_tables(crate::ui::pointer::PointerTables {
+            shapes: vec![crate::ui::pointer::Shape {
+                dx: 0,
+                dy: 0,
+                rows: vec![[1; 16]; 2],
+            }],
+            shown: true,
+            ..Default::default()
+        });
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        io.draw(|f| {
+            for x in (0..320).step_by(16) {
+                blit_front(&st.borrow().gfx, f, 7, x, 100);
+            }
+        });
+        io.present();
+        io.vblank().await;
+        // An idle tick: nothing drawn, nothing presented.
+        io.vblank().await;
+        // A present with nothing changed since the last one.
+        io.present();
+        io.vblank().await;
+        io.draw(|f| f.set(3, 104, 9));
+        io.present();
+        io.sleep(u32::MAX).await;
+    });
+    e.enable_src_plane();
+    let at = |x: i16| InputEvent::Pointer {
+        x,
+        y: 105,
+        buttons: 0,
+    };
+    for (n, input) in [vec![at(40)], vec![], vec![at(90)], vec![], vec![]]
+        .into_iter()
+        .enumerate()
+    {
+        e.tick(&input, 16);
+        let front = e.io().draw(|f| f.src().unwrap().to_vec());
+        assert!(
+            e.io().published(|p| p.src() == Some(&front[..])),
+            "tick {n}: published"
+        );
+        let (published, shown) = (e.io().published(|p| p.src().unwrap().to_vec()), e.frame());
+        for (i, (p, s)) in published.iter().zip(shown.src().unwrap()).enumerate() {
+            let (x, y) = (i % WIDTH, i / WIDTH);
+            let sprite = (105..107).contains(&y) && shown.get(x, y) == Some(17);
+            assert!(
+                p == s || (sprite && s.kind == Kind::Classic),
+                "tick {n}: shown ({x}, {y})"
+            );
+        }
+    }
+    assert_eq!(
+        e.frame().src_at(3, 104).map(|s| s.kind),
+        Some(Kind::Classic)
+    );
+    assert_eq!(e.frame().src_at(4, 104), Some(tile(7, 0, (4, 4), 0)));
+    assert_eq!(
+        e.frame().src_at(41, 105),
+        Some(tile(7, 0, (9, 5), 0)),
+        "the sprite moved off"
+    );
+    assert_eq!(
+        e.frame().src_at(91, 105).map(|s| s.kind),
+        Some(Kind::Classic),
+        "and on"
+    );
+}
+
 /// Text drawn over a portrait is classic in the glyph's cell; the rest of the portrait keeps
 /// its (letter, item) and (u, v).
 #[test]
 fn text_over_a_portrait_is_classic() {
-    let id = portrait_id(b'a', 3).unwrap();
+    // b'a' << 8 | 3: portrait.a, item 3.
+    let id = 0x6103;
     let mut fb = plane();
-    let pixels = portrait();
-    blit_bitmap(
-        &colours(),
-        &mut fb,
-        (56, 64),
-        &pixels,
-        0xd8,
-        0x18,
-        (Kind::Portrait, id),
-    );
+    let pixels = portrait(3);
+    let src = BitmapSource::Portrait(id);
+    blit_bitmap(&colours(), &mut fb, (56, 64), &pixels, 0xd8, 0x18, src);
     let font = BitFont {
         glyphs: vec![[0xAA; 8]; 256],
     };
     crate::ui::text::draw_glyph(&mut fb, &font, 0xe0, 0x20, b'A', 1, 2);
-    for v in 0..64u16 {
-        for u in 0..56u16 {
-            let (x, y) = (0xd8 + usize::from(u), 0x18 + usize::from(v));
+    for v in 0..64 {
+        for u in 0..56 {
+            let (x, y) = (0xd8 + u, 0x18 + v);
             let glyph = (0xe0..0xe8).contains(&x) && (0x20..0x28).contains(&y);
             if glyph {
                 assert_eq!(kind(&fb, x, y), Kind::Classic);
             } else {
-                let want = Src {
-                    ver: 0,
-                    id,
-                    u,
-                    v,
-                    kind: Kind::Portrait,
-                    flags: 0,
-                };
-                assert_eq!(fb.src_at(x, y), Some(want));
+                assert_eq!(fb.src_at(x, y), Some(picture(Kind::Portrait, id, (u, v))));
             }
         }
     }
+}
+
+/// A text window scrolled over the paper: each pixel moved up keeps its source (the paper's
+/// pixel it was, with its (u, v)), a glyph moved up stays classic, and the row the scroll clears
+/// is classic; nothing outside the window changes.
+#[test]
+fn a_text_scroll_moves_the_sources_under_it() {
+    let mut fb = plane();
+    let paper = Bitmap {
+        width: 320,
+        height: 200,
+        pixels: image(5, 320, 200),
+    };
+    blit_bmp(&colours(), &mut fb, &paper, 0, 0, BITMAP_PAPER);
+    let font = BitFont {
+        glyphs: vec![[0x81; 8]; 256],
+    };
+    // A glyph in the window's second row.
+    crate::ui::text::draw_glyph(&mut fb, &font, 192, 112, b'A', 1, 2);
+    let w = crate::ui::text::TextWindow {
+        x: 22,
+        y: 13,
+        width: 16,
+        height: 10,
+        col: 0,
+        row: 0,
+        fg: 1,
+        bg: 2,
+        flags: 0,
+    };
+    let before = fb.clone();
+    crate::ui::text::scroll_window(&mut fb, &w);
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let inside = (176..304).contains(&x) && (104..184).contains(&y);
+            if !inside {
+                same(&fb, (x, y), &before, (x, y));
+            } else if y < 176 {
+                same(&fb, (x, y), &before, (x, y + 8));
+            } else {
+                assert_eq!((fb.get(x, y), kind(&fb, x, y)), (Some(2), Kind::Classic));
+            }
+        }
+    }
+    let paper_at = |u, v| Some(picture(Kind::Bitmap, 0, (u, v)));
+    assert_eq!(
+        fb.src_at(180, 104),
+        paper_at(180, 112),
+        "the paper moved up"
+    );
+    assert_eq!(fb.get(180, 104), Some(paper.pixels[112 * 320 + 180]));
+    assert_eq!(kind(&fb, 192, 104), Kind::Classic, "the glyph moved up");
+    assert_eq!(
+        fb.src_at(192, 112),
+        paper_at(192, 120),
+        "the paper under it"
+    );
 }
 
 /// The world of the view tests in `s.gfx`, with the clock's hands on the hero's tile and its
@@ -388,9 +545,11 @@ fn clock_hands_and_the_sparkle_are_classic() {
     });
 }
 
-/// A missile's sprite and the block it puts back are pixel writes: classic.
+/// A flight: the block under the sprite saved (slot 3), the sprite drawn (slot 2: its pixels
+/// classic), the block put back: every pixel of the block has its colour and its source again,
+/// those the sprite covered and those it did not (its clear last column, the block's third byte).
 #[test]
-fn a_missile_is_classic() {
+fn a_missile_is_classic_and_the_block_it_put_back_is_named_again() {
     let (mut gfx, mut back) = window_back();
     gfx.tables.sine = std::array::from_fn(|n| {
         (64.0 * (n as f64 * std::f64::consts::TAU / 128.0).sin()).round() as i8
@@ -403,18 +562,54 @@ fn a_missile_is_classic() {
         }),
     );
     crate::gfx::sprite::prepare(&mut gfx, 2, 7, 0, 128, 128);
+    let before = back.clone();
+    crate::gfx::sprite::save(&mut gfx, &back, 3, 40, 40);
     crate::gfx::sprite::draw(&gfx, &mut back, 2, 40, 40);
-    for r in 0..16 {
-        for c in 0..16 {
-            let want = if c < 15 { Kind::Classic } else { Kind::Tile };
-            assert_eq!(kind(&back, 32 + c, 32 + r), want, "({c}, {r})");
+    // The block is bytes 4..=6 of rows 32..48 (x 32..56); the sprite covers x 32..47.
+    for y in 32..48 {
+        for x in 32..56 {
+            if x < 47 {
+                assert_eq!(kind(&back, x, y), Kind::Classic, "the sprite at ({x}, {y})");
+            } else {
+                same(&back, (x, y), &before, (x, y));
+            }
         }
     }
-    // The flight's next step puts the saved block back (the save marks the slot).
-    let (_, mut under) = window_back();
-    crate::gfx::sprite::save(&mut gfx, &under, 2, 40, 40);
-    crate::gfx::sprite::draw(&gfx, &mut under, 2, 40, 40);
-    assert_eq!(kind(&under, 40, 40), Kind::Classic, "the block put back");
+    crate::gfx::sprite::draw(&gfx, &mut back, 3, 40, 40);
+    for y in 32..48 {
+        for x in 32..56 {
+            same(&back, (x, y), &before, (x, y));
+            let n = window_record(x, y);
+            let uv = ((x % 16) as u16, (y % 16) as u16);
+            assert_eq!(back.src_at(x, y), Some(tile(n, u32::from(n), uv, 0)));
+        }
+    }
+    // Outside the sprite's opaque footprint: its clear column and the block's third byte.
+    let n = window_record(47, 33);
+    assert_eq!(back.src_at(47, 33), Some(tile(n, u32::from(n), (15, 1), 0)));
+    assert_eq!(
+        back.get(47, 33),
+        Some(((16 + 15 + n as usize) % 31 + 1) as u8)
+    );
+    let n = window_record(53, 46);
+    assert_eq!(back.src_at(53, 46), Some(tile(n, u32::from(n), (5, 14), 0)));
+    // Saved from a buffer without a plane, the block is put back classic, in its colours.
+    let mut plain = Framebuffer::new();
+    for y in 32..48 {
+        for x in 32..56 {
+            plain.set(x, y, before.get(x, y).unwrap());
+        }
+    }
+    crate::gfx::sprite::save(&mut gfx, &plain, 3, 40, 40);
+    assert!(
+        gfx.sprites.under_src[3].0.is_none(),
+        "no plane: no sources saved"
+    );
+    crate::gfx::sprite::draw(&gfx, &mut back, 3, 40, 40);
+    assert_eq!(
+        (back.get(40, 40), kind(&back, 40, 40)),
+        (before.get(40, 40), Kind::Classic)
+    );
 }
 
 /// The pointer sprite is drawn over the published frame into the shown one: classic there, the
@@ -453,13 +648,113 @@ fn the_pointer_sprite_is_classic() {
     assert_eq!(kind(e.frame(), 204, 110), Kind::Tile, "below the sprite");
 }
 
-/// Tile 21's record drawn into the back buffer, then the shore merge rewrites it, then the
-/// window is copied and presented: the shown pixel names version 0 while the record is at 5
-/// (one rewrite per plane), and its colour is one the record no longer holds.
+/// Combat playback over the plane: the screen shows record 1, then the synchronous code presents
+/// records 2 (recorded), 3 (recorded dissolving) and 4 (its last picture). The playback puts the
+/// published window back, shows the recorded frames (the dissolve revealed over its time) and
+/// ends on the last picture: on every frame shown, each window pixel names the record its colour
+/// came from, with its (u, v) and version.
 #[test]
-fn a_pixel_left_while_its_record_is_rewritten_is_stale() {
-    const WATER: usize = 20;
-    const SHORE: usize = 21;
+fn combat_playback_puts_back_the_sources_it_recorded() {
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    for n in 1..=4 {
+        install(
+            &mut s.gfx,
+            n,
+            map_tile(0, 16, move |r, c| ((r * 16 + c + 7 * n) % 31 + 1) as u8),
+        );
+        for _ in 0..n {
+            s.gfx.cache.record_changed(n);
+        }
+    }
+    let fill = |gfx: &GfxState, f: &mut Framebuffer, n: u16| {
+        for row in 0..11 {
+            for col in 0..11 {
+                blit_front(gfx, f, n, col * 16, row * 16);
+            }
+        }
+    };
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        io.draw(|f| fill(&st.borrow().gfx, f, 1));
+        io.present();
+        io.vblank().await;
+        {
+            let mut s = st.borrow_mut();
+            io.draw(|f| fill(&s.gfx, f, 2));
+            io.present();
+            crate::combat::present::capture_window(&mut s, 40);
+            io.draw(|f| fill(&s.gfx, f, 3));
+            io.present();
+            crate::combat::present::capture_dissolve(&mut s, 200);
+            io.draw(|f| fill(&s.gfx, f, 4));
+            io.present();
+        }
+        crate::combat::play_effects(&st, &io).await;
+        io.sleep(u32::MAX).await;
+    });
+    e.enable_src_plane();
+    let mut shown = Vec::new();
+    let mut version = 0;
+    for _ in 0..200 {
+        e.tick(&[], 16);
+        if e.frame_version() == version {
+            continue;
+        }
+        version = e.frame_version();
+        let fb = e.frame();
+        let gfx = &e.state().gfx;
+        let (mut all, mut inner) = (Vec::new(), Vec::new());
+        for y in 0..176 {
+            for x in 0..176 {
+                let src = fb.src_at(x, y).unwrap();
+                let n = src.id;
+                let want = tile(n, u32::from(n), ((x % 16) as u16, (y % 16) as u16), 0);
+                assert!((1..=4).contains(&n) && src == want, "({x}, {y}): {src:?}");
+                let colour = gfx.records[usize::from(n)].pixels[y % 16 * 16 + x % 16];
+                assert_eq!(fb.get(x, y), Some(colour), "({x}, {y})");
+                all.push(n);
+                if (8..168).contains(&x) && (8..168).contains(&y) {
+                    inner.push(n);
+                }
+            }
+        }
+        let set = |mut v: Vec<u16>| {
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        shown.push((set(all), set(inner)));
+    }
+    // The dissolve reveals the window's inside over its time (its border keeps the frame before
+    // until the whole recorded rect is put up).
+    assert!(
+        shown.iter().any(|(all, _)| all == &[2, 3]),
+        "the reveal: {shown:?}"
+    );
+    assert!(
+        shown.iter().any(|(_, inner)| inner == &[3]),
+        "revealed: {shown:?}"
+    );
+    let mut whole: Vec<u16> = shown
+        .iter()
+        .filter(|(a, _)| a.len() == 1)
+        .map(|(a, _)| a[0])
+        .collect();
+    whole.dedup();
+    assert_eq!(
+        whole,
+        [1, 2, 3, 4],
+        "the published window, the two frames, the last picture"
+    );
+    assert!(e.state().combat.effects.is_empty(), "all played");
+}
+
+/// The water record and the shore record it merges into ([`shore_state`]).
+const WATER: usize = 20;
+const SHORE: usize = 21;
+
+/// A state whose shore merge 0 takes every pixel of [`WATER`] into [`SHORE`].
+fn shore_state() -> State {
     let mut s = State::empty();
     install(&mut s.gfx, WATER, map_tile(0, 16, |_, _| 0b10101));
     install(&mut s.gfx, SHORE, map_tile(0, 16, |_, _| 0b01010));
@@ -476,7 +771,15 @@ fn a_pixel_left_while_its_record_is_rewritten_is_stale() {
     }
     b2[0..2].copy_from_slice(&rec.wrapping_sub(0x400).to_le_bytes());
     s.gfx.animmask.block2 = b2;
-    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+    s
+}
+
+/// The shore record drawn into the back buffer, then the shore merge rewrites it, then the
+/// window is copied and presented: the shown pixel names version 0 while the record is at 5
+/// (one rewrite per plane), and its colour is one the record no longer holds.
+#[test]
+fn a_pixel_left_while_its_record_is_rewritten_is_stale() {
+    let mut e = Engine::with_game(shore_state(), Files::default(), |st, io| async move {
         {
             let mut s = st.borrow_mut();
             io.draw_back(|b| blit_back(&s.gfx, b, SHORE as u16, 16, 16));
@@ -506,88 +809,259 @@ fn a_pixel_left_while_its_record_is_rewritten_is_stale() {
     );
 }
 
-/// Each attributed, unflagged pixel of `fb` against its image: the record's pixel at (u, v),
-/// the portrait's or the paper's through the colour table. Returns the pixels checked by kind
-/// (tile, portrait, bitmap).
-fn check_against_images(
-    fb: &Framebuffer,
-    gfx: &GfxState,
-    portrait: &[u8],
-    paper: &Bitmap,
-) -> [usize; 3] {
-    let mut n = [0; 3];
-    for (i, src) in fb.src().unwrap().iter().enumerate() {
-        if src.flags != 0 {
-            continue;
-        }
-        let (u, v) = (usize::from(src.u), usize::from(src.v));
-        let want = match src.kind {
-            Kind::Classic => continue,
-            Kind::Tile => {
-                n[0] += 1;
-                gfx.records[usize::from(src.id)].pixels[v * 16 + u]
-            }
-            Kind::Portrait => {
-                n[1] += 1;
-                portrait[v * 56 + u]
-            }
-            Kind::Bitmap => {
-                n[2] += 1;
-                paper.pixels[v * usize::from(paper.width) + u]
-            }
-        };
-        assert_eq!(fb.pixels()[i], want, "pixel {i} against its image");
-    }
-    n
+/// Spec 07 HD0 with `RenderCache::clone`: a state cloned mid-run keeps its records' versions, so
+/// a pixel drawn before the clone is current for the clone as for the original, and a merge in
+/// the clone after it makes that pixel stale there only.
+#[test]
+fn a_clone_keeps_the_record_versions() {
+    let s = shore_state();
+    let mut g = s.gfx.clone();
+    merge_shores(&mut g);
+    let ver = g.cache.version(SHORE);
+    assert_eq!(ver, 5, "one rewrite per colour plane");
+    let mut back = plane();
+    blit_back(&g, &mut back, SHORE as u16, 16, 16);
+    let drawn = back.src_at(19, 20).unwrap();
+    assert_eq!(drawn, tile(SHORE as u16, ver, (3, 4), 0));
+    let mut copy = g.clone();
+    assert_eq!(copy.cache.version(SHORE), drawn.ver, "current in the clone");
+    // Other water: the clone's next merge rewrites the shore.
+    copy.records[WATER].pixels.fill(0b00011);
+    merge_shores(&mut copy);
+    assert!(
+        copy.cache.version(SHORE) != drawn.ver,
+        "stale in the clone after its merge"
+    );
+    assert_eq!(
+        g.cache.version(SHORE),
+        drawn.ver,
+        "still current in the original"
+    );
+    // Cloned with the whole State, as the parity runs and the tools clone it.
+    let mut st = State::empty();
+    st.gfx = g;
+    assert_eq!(st.clone().gfx.cache.version(SHORE), drawn.ver);
 }
 
-/// A synthetic screen of the paper panel, the map window and a portrait: every pixel of each
-/// is attributed to its image, none is classic, and each equals its image's pixel at (u, v).
+/// The relaunch of `game` after `u` (main_loop's `take_over`): the new process loads the records
+/// again (versions from 0) while the buffers keep the old pixels. Its shore merge from other
+/// water rewrites as many planes as the old one did, so an old pixel's version is the new
+/// record's again with other bytes. The relaunch resets every plane to classic, the colours
+/// untouched: no old pixel is current in the back buffer, the screen, the published frame or the
+/// shown one.
 #[test]
-fn a_scene_of_tiles_a_portrait_and_a_panel_is_attributed() {
-    let (mut s, g) = world();
+fn a_new_game_process_leaves_no_old_pixel_current() {
+    let row = |gfx: &GfxState, f: &mut Framebuffer| {
+        for x in (0..320).step_by(16) {
+            blit_front(gfx, f, SHORE as u16, x, 16);
+        }
+    };
+    let mut e = Engine::with_game(shore_state(), Files::default(), move |st, io| async move {
+        {
+            let mut s = st.borrow_mut();
+            merge_shores(&mut s.gfx);
+            io.draw_back(|b| row(&s.gfx, b));
+            io.draw(|f| row(&s.gfx, f));
+        }
+        io.present();
+        io.vblank().await;
+        {
+            let mut fresh = shore_state();
+            install(&mut fresh.gfx, SHORE, map_tile(0, 16, |_, _| 0));
+            install(&mut fresh.gfx, WATER, map_tile(0, 16, |_, _| 0b11111));
+            let mut s = st.borrow_mut();
+            crate::main_loop::take_over(&mut s, fresh, &io);
+            merge_shores(&mut s.gfx);
+            assert_eq!(
+                s.gfx.cache.version(SHORE),
+                5,
+                "the new versions met the old"
+            );
+        }
+        io.present();
+        io.sleep(u32::MAX).await;
+    });
+    e.enable_src_plane();
+    e.tick(&[], 16);
+    let old = e.frame().clone();
+    assert_eq!(old.src_at(19, 20).map(|p| p.ver), Some(5));
+    e.tick(&[], 16);
+    let s = e.state();
+    let current = |fb: &Framebuffer| {
+        fb.src()
+            .unwrap()
+            .iter()
+            .filter(|p| p.kind == Kind::Tile && p.ver == s.gfx.cache.version(usize::from(p.id)))
+            .count()
+    };
+    assert_eq!(current(e.frame()), 0, "shown");
+    assert_eq!(e.io().published(current), 0, "published");
+    assert_eq!(e.io().draw(|f| current(f)), 0, "screen");
+    assert_eq!(e.io().peek_back(current), 0, "back");
+    assert!(e.frame().pixels() == old.pixels(), "the colours untouched");
+    assert_eq!(kind(e.frame(), 19, 20), Kind::Classic);
+}
+
+/// The spellbook of the coverage scene: (x, y, width, height).
+const BOOK: (usize, usize, usize, usize) = (0xa8, 6, 144, 98);
+/// Its two portraits: (id, x, y, image seed). b'a' << 8 | 3 is portrait.a item 3, b'z' << 8 | 0
+/// portrait.z item 0.
+const FACES: [(u16, usize, usize, u32); 2] = [(0x6103, 176, 112, 3), (0x7a00, 240, 112, 4)];
+
+/// What the coverage scene must hold at (x, y), from its layout alone: the colour and the source.
+/// The window cell (cx, cy) shows world (14 + cx, 5 + cy), whose tile and record is
+/// (y % 8)·8 + x % 8 (colour n % 32 + 1, version n % 3 + 1); the hero's one opaque pixel is at
+/// (88, 88), record [`HERO_BASE`] at version 2. Elsewhere the portraits, the spellbook (id 1)
+/// and the paper (id 0), each pixel its image's at (u, v).
+fn scene_expect(x: usize, y: usize) -> (u8, Src) {
+    if (8..168).contains(&x) && (8..168).contains(&y) {
+        if (x, y) == (88, 88) {
+            return (30, tile(HERO_BASE, 2, (8, 8), 0));
+        }
+        let n = (5 + y / 16) % 8 * 8 + (14 + x / 16) % 8;
+        let uv = ((x % 16) as u16, (y % 16) as u16);
+        return (
+            (n % 32 + 1) as u8,
+            tile(n as u16, (n % 3 + 1) as u32, uv, 0),
+        );
+    }
+    for (id, fx, fy, seed) in FACES {
+        if (fx..fx + 56).contains(&x) && (fy..fy + 64).contains(&y) {
+            let (u, v) = (x - fx, y - fy);
+            return (
+                portrait(seed)[v * 56 + u],
+                picture(Kind::Portrait, id, (u, v)),
+            );
+        }
+    }
+    let (bx, by, bw, bh) = BOOK;
+    if (bx..bx + bw).contains(&x) && (by..by + bh).contains(&y) {
+        let (u, v) = (x - bx, y - by);
+        return (
+            image(2, bw, bh)[v * bw + u],
+            picture(Kind::Bitmap, 1, (u, v)),
+        );
+    }
+    (
+        image(1, WIDTH, HEIGHT)[y * WIDTH + x],
+        picture(Kind::Bitmap, 0, (x, y)),
+    )
+}
+
+/// The pixels of `fb` whose colour or source is not [`scene_expect`]'s.
+fn scene_mismatches(fb: &Framebuffer) -> usize {
+    (0..HEIGHT)
+        .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let (colour, src) = scene_expect(x, y);
+            (fb.get(x, y), fb.src_at(x, y)) != (Some(colour), Some(src))
+        })
+        .count()
+}
+
+/// A synthetic screen of the paper, the map window (64 records at versions 1..=3, the hero's at
+/// 2), the spellbook and two portraits, drawn by the game's routines: every pixel is attributed
+/// (none classic) and has exactly its image's colour and source at (u, v), including the id and
+/// the version. The check is the layout's ([`scene_expect`]), not the plane's helpers, and it
+/// catches a wrong panel id, a wrong version and a shifted (u, v).
+#[test]
+fn a_scene_of_tiles_portraits_and_panels_is_attributed_exactly() {
+    let (mut s, mut g) = world();
+    for n in 0..64 {
+        for _ in 0..n % 3 + 1 {
+            g.cache.record_changed(n);
+        }
+    }
+    g.cache.record_changed(usize::from(HERO_BASE));
+    g.cache.record_changed(usize::from(HERO_BASE));
     s.gfx = g;
     let io = Io::new(Files::default());
     io.enable_src_plane();
-    let paper = Bitmap {
-        width: 320,
-        height: 200,
-        pixels: (0..WIDTH * HEIGHT).map(|i| (i % 7 + 1) as u8).collect(),
+    let bitmap = |seed, (w, h): (usize, usize)| Bitmap {
+        width: w as u16,
+        height: h as u16,
+        pixels: image(seed, w, h),
     };
-    let face = portrait();
-    let id = portrait_id(b'z', 0).unwrap();
+    let paper = bitmap(1, (WIDTH, HEIGHT));
+    let (bx, by, bw, bh) = BOOK;
+    let book = bitmap(2, (bw, bh));
     io.draw(|f| blit_bmp(&colours(), f, &paper, 0, 0, BITMAP_PAPER));
     crate::gfx::render_window(&mut s, &io, true);
-    io.draw(|f| {
-        blit_bitmap(
-            &colours(),
-            f,
-            (56, 64),
-            &face,
-            0xd8,
-            0x18,
-            (Kind::Portrait, id),
-        )
-    });
-    io.draw(|f| {
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
-                let want = if (8..168).contains(&x) && (8..168).contains(&y) {
-                    Kind::Tile
-                } else if (0xd8..0xd8 + 56).contains(&x) && (0x18..0x18 + 64).contains(&y) {
-                    Kind::Portrait
-                } else {
-                    Kind::Bitmap
-                };
-                assert_eq!(kind(f, x, y), want, "({x}, {y})");
-            }
-        }
-        let n = check_against_images(f, &s.gfx, &face, &paper);
-        assert_eq!(
-            n,
-            [160 * 160, 56 * 64, WIDTH * HEIGHT - 160 * 160 - 56 * 64]
-        );
-    });
+    io.draw(|f| blit_bmp(&colours(), f, &book, bx as u16, by as u16, BITMAP_SPELLBOOK));
+    for (id, fx, fy, seed) in FACES {
+        let (x, y) = (fx as u16, fy as u16);
+        let face = portrait(seed);
+        io.draw(|f| {
+            blit_bitmap(
+                &colours(),
+                f,
+                (56, 64),
+                &face,
+                x,
+                y,
+                BitmapSource::Portrait(id),
+            )
+        });
+    }
+    let fb = io.draw(|f| f.clone());
+    assert!(
+        fb.src().unwrap().iter().all(|s| s.kind != Kind::Classic),
+        "none classic"
+    );
+    assert_eq!(scene_mismatches(&fb), 0);
+    // The check fails on a wrong panel id, a wrong version, a shifted (u, v) (the source alone,
+    // or with the neighbour's colour), and a portrait's id swapped for the other's.
+    let wrong = |x: usize, y: usize, f: &dyn Fn(Src) -> Src, colour: Option<u8>| {
+        let mut bad = fb.clone();
+        let src = f(bad.src_at(x, y).unwrap());
+        bad.set_src(x, y, colour.unwrap_or(bad.get(x, y).unwrap()), src);
+        scene_mismatches(&bad)
+    };
+    assert_eq!(
+        wrong(200, 50, &|s| Src { id: 0, ..s }, None),
+        1,
+        "the book named the paper"
+    );
+    assert_eq!(
+        wrong(
+            100,
+            60,
+            &|s| Src {
+                ver: s.ver + 1,
+                ..s
+            },
+            None
+        ),
+        1,
+        "a wrong version"
+    );
+    assert_eq!(
+        wrong(40, 100, &|s| Src { ver: 0, ..s }, None),
+        1,
+        "version 0"
+    );
+    assert_eq!(
+        wrong(5, 190, &|s| Src { u: s.u + 1, ..s }, None),
+        1,
+        "a shifted u"
+    );
+    let right = fb.get(6, 190);
+    assert_eq!(
+        wrong(5, 190, &|s| Src { u: s.u + 1, ..s }, right),
+        1,
+        "shifted, its colour"
+    );
+    assert_eq!(
+        wrong(300, 150, &|s| Src { v: s.v + 1, ..s }, None),
+        1,
+        "a shifted v"
+    );
+    assert_eq!(
+        wrong(250, 150, &|s| Src { id: 0x6103, ..s }, None),
+        1,
+        "the other portrait"
+    );
+    assert!(right != fb.get(5, 190), "the paper is not flat there");
 }
 
 /// A plane enabled while the window cache remembers a render (the page starts the plane before
@@ -618,94 +1092,4 @@ fn enabling_the_plane_redraws_what_the_window_cache_remembers() {
         assert_eq!(tiles, 176 * 176);
     });
     assert!(io.draw(|f| (8..168).all(|y| (8..168).all(|x| kind(f, x, y) == Kind::Tile))));
-}
-
-/// The three runs of [`plane_parity`]: the plane off with the window cache, on with it, on
-/// without it.
-fn three_ios() -> [Io; 3] {
-    let ios = [0, 1, 2].map(|_| Io::new(Files::default()));
-    ios[1].enable_src_plane();
-    ios[2].enable_src_plane();
-    ios[2].set_window_cache(false);
-    ios
-}
-
-/// `steps` refreshes of the adversarial edits of seed `seed` on the three runs, compared after
-/// each; returns the attributed pixels the screen of the cached plane run showed.
-fn plane_parity(seed: u64, steps: u32) -> usize {
-    let (s0, words) = adv::scene();
-    let mut states = [s0.clone(), s0.clone(), s0];
-    let mut ios = three_ios();
-    let mut rng = X(seed | 1);
-    let mut lists = [0, 1, 2].map(|_| Lists {
-        base: vec![0; 121],
-        lists: vec![Vec::new(); 121],
-    });
-    let mut attributed = 0;
-    for i in 0..steps {
-        let start = rng.clone();
-        for k in 0..3 {
-            let mut x = start.clone();
-            adv::edit(&mut states[k], &ios[k], &mut x, &mut lists[k], &words, i);
-            rng = x;
-        }
-        if rng.pm(5) {
-            // A clone of the State takes over (an empty cache, versions from 0).
-            states = states.map(|s| s.clone());
-        }
-        if rng.pm(3) {
-            ios = three_ios();
-        }
-        if rng.pm(5) {
-            for (s, io) in states.iter().zip(&ios) {
-                let mut other = s.clone();
-                other.objects.draw.base[60] ^= 1;
-                crate::gfx::refresh_view(&mut other, io);
-            }
-        }
-        for (s, io) in states.iter_mut().zip(&ios) {
-            crate::gfx::refresh_view(s, io);
-        }
-        let screen = |io: &Io| io.draw(|f| (f.pixels().to_vec(), f.palette));
-        let back = |io: &Io| io.peek_back(|b| (b.pixels().to_vec(), b.palette));
-        let planes = |io: &Io| {
-            let front = io.draw(|f| f.src().map(<[Src]>::to_vec));
-            (front, io.peek_back(|b| b.src().map(<[Src]>::to_vec)))
-        };
-        let (s0, b0) = (screen(&ios[0]), back(&ios[0]));
-        for (k, io) in ios.iter().enumerate().skip(1) {
-            assert!(
-                screen(io) == s0 && back(io) == b0,
-                "seed {seed} step {i}: run {k}'s colours differ from the run without the plane"
-            );
-        }
-        assert!(planes(&ios[0]) == (None, None));
-        assert!(
-            planes(&ios[1]) == planes(&ios[2]),
-            "seed {seed} step {i}: the cached plane differs from the every-time render's"
-        );
-        assert!(
-            states[0] == states[1] && states[1] == states[2],
-            "seed {seed} step {i}: the State"
-        );
-        attributed += ios[1].draw(|f| {
-            f.src()
-                .unwrap()
-                .iter()
-                .filter(|s| s.kind == Kind::Tile)
-                .count()
-        });
-    }
-    attributed
-}
-
-/// Spec 07 Acceptance 1: the plane changes no colour, no palette and no State over the
-/// adversarial edits of the window cache, and the cache leaves it as the full render writes it.
-#[test]
-fn the_plane_changes_no_frame_and_follows_the_window_cache() {
-    let mut attributed = 0;
-    for seed in 0..2 {
-        attributed += plane_parity(0x51_7CC1_B727_220A ^ (seed * 0x1000_0001), 400);
-    }
-    assert!(attributed > 0, "the plane was written");
 }

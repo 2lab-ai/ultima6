@@ -239,10 +239,10 @@ pub fn draw_portrait(state: &State, io: &Io, npc: i16, x: i16, y: i16) {
         return;
     };
     if let Some(pixels) = portrait_pixels(state, io.files(), letter, item) {
-        let src = u6_render::portrait_id(letter, item)
-            .map_or((u6_render::Kind::Classic, 0), |id| {
-                (u6_render::Kind::Portrait, id)
-            });
+        let src = u6_render::portrait_id(letter, item).map_or(
+            crate::gfx::blit::BitmapSource::Classic,
+            crate::gfx::blit::BitmapSource::Portrait,
+        );
         seams::blit_portrait(state, io, &pixels, src, x, y);
     }
 }

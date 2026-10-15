@@ -394,7 +394,7 @@ fn run(seed: u64, steps: u32) -> (u64, u64, u64) {
         edit(&mut off, &io_off, &mut rng, &mut l, &words, i);
         assert!(rng.0 == x_on.0, "the same edits");
         if rng.pm(5) {
-            // A clone of the State takes over (an empty cache).
+            // A clone of the State takes over (no window memo, the versions kept).
             on = on.clone();
             off = off.clone();
         }
@@ -413,7 +413,7 @@ fn run(seed: u64, steps: u32) -> (u64, u64, u64) {
             crate::gfx::refresh_view(&mut other_on, &io_on);
             crate::gfx::refresh_view(&mut other_off, &io_off);
         }
-        // Counted on the state that refreshes (a clone above started at 0).
+        // Counted on the state that refreshes (a clone above started its counts at 0).
         let before = counts(&on);
         crate::gfx::refresh_view(&mut on, &io_on);
         crate::gfx::refresh_view(&mut off, &io_off);

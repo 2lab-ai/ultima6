@@ -303,7 +303,7 @@ fn render_window_cached(state: &mut State, io: &Io) {
                 set_plot_colour(gfx, gfx.tables.clock_colour);
                 gfx.plot_back = false;
             }
-            io.with_buffers(|back, front| copy_window_rows(back, front));
+            io.with_buffers(copy_window_rows);
             io.present();
             if redrawn == 0 {
                 gfx.cache.window_skips += 1;

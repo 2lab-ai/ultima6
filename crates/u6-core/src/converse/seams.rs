@@ -128,7 +128,7 @@ pub(crate) fn blit_portrait(
     state: &State,
     io: &Io,
     pixels: &[u8],
-    src: (u6_render::Kind, u16),
+    src: crate::gfx::blit::BitmapSource,
     x: i16,
     y: i16,
 ) {

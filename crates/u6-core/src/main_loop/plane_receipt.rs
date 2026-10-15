@@ -166,7 +166,9 @@ fn the_source_plane_names_the_classic_pixels_of_the_users_game() {
     press(&mut e, &mut r, &[Key::Space], 60);
     idle(&mut e, &mut r, 2000);
     let (tiles, window) = r.window;
-    let pass = r.wrong == 0;
+    // Pass: no attributed pixel differs from its image, and every kind was checked.
+    let covered = r.checked.iter().all(|&n| n > 0);
+    let pass = r.wrong == 0 && covered;
     println!(
         "source receipt: {}; {} frames; checked {} tile, {} portrait, {} paper, {} spellbook \
          pixels; {} stale, {} flagged; map window {:.1}% tile ({tiles} of {window})",
@@ -181,9 +183,9 @@ fn the_source_plane_names_the_classic_pixels_of_the_users_game() {
         tiles as f64 * 100.0 / window.max(1) as f64,
     );
     assert!(
-        pass,
+        r.wrong == 0,
         "{} attributed pixels differ from their image",
         r.wrong
     );
-    assert!(r.checked.iter().all(|&n| n > 0), "every kind was checked");
+    assert!(covered, "every kind was checked");
 }
