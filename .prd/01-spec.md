@@ -17,8 +17,8 @@ so NPCs can be driven by an AI model, systems are editable, and mods are easy
 
 The input is the user's own download: `ultima-vi.zip` from archive.org item
 `ultima-vi`, a Pauline flux dump of the **Amiga 3.5"** release (disks INSTALL, DATA1,
-DATA2). The executable is `game` (PowerPacker-crunched AmigaOS hunk file, 267,332
-bytes decrunched, Motorola 68000).
+DATA2). The executable is `game` (PowerPacker-crunched AmigaOS hunk file, Motorola
+68000).
 
 Rights boundary (fixed 2026-10-14): Ultima VI is still a commercial Electronic Arts
 title (GOG "Ultima 4+5+6", "© 1992, 2011 Electronic Arts Inc."); the archive.org item
@@ -39,9 +39,10 @@ publishing it is permitted depends on facts and jurisdiction this project has no
 tables, artwork and executable fragments never go into source, fixtures, build artifacts, logs or
 review captures. Original files and extracted content stay browser-local and are excluded from
 telemetry and error reports. Fixed 2026-10-15 (milestone 2 reviews): this covers names,
-identifiers and comments, and every value read out of the game files, numbers included. A test
-that reads the user's files derives its expected values from those files at run time (an
-independent read at a documented offset, an invariant, or a constant the original's code
+identifiers and comments, and every value read out of the game files, numbers included.
+The vocabulary of the game's mechanics — the names of spells, items and objects, and of the virtues — may name code and docs (a port needs them to stay readable and to edit its systems); the names of characters and places, the game's messages and other text, its tables, art and bytes, and values read from its files may not.
+A test that reads the user's files derives its expected values from those files at run time
+(an independent read at a documented offset, an invariant, or a constant the original's code
 defines), never from a value written in the repo. Its normal and failure output shows only
 labels, indices or offsets, counts and timings the test made itself, and pass/fail. It never
 shows a value or a length of the user's data (`u6-testkit::assert_same!`, `Quiet`; the web

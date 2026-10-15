@@ -15,18 +15,19 @@ outside the repo: `~/Games/ultima6/re/<name>.{bin,json}`.
 
 Ghidra import: raw binary, `68000:BE:32:default`, base = entry = `0x00100000`. Cross-check: a
 throwaway scanner (not committed) agreed with the tool on every hunk's type, loaded bytes and
-reloc count in all five files; `image_size` = last base + size − base; no tool warnings (incl.
-the check that each reloc's stored offset ≤ the target segment size).
+reloc count in all five files (the file sizes and reloc counts, values of the user's files, are
+not reproduced); `image_size` = last base + size − base; no tool warnings (incl. the check that
+each reloc's stored offset ≤ the target segment size).
 
 ## Summary
 
-| file | input bytes | input sha256 (16) | hunks CODE/DATA/BSS | CHIP hunks | relocs | symbols | overlay | entry | image bytes |
-|---|---|---|---|---|---|---|---|---|---|
-| `game` | 267,332 | `34a6e9dd66d58ff2` | 35 = 26/5/4 | 28, 31 (DATA) | 2,855 | 0 | none | 0x00100000 | 402,736 |
-| `u` | 87,316 | `2e9267dbb9fb509d` | 24 = 18/5/1 | 16 (DATA), 17 (CODE), 20 (DATA) | 643 | 0 | none | 0x00100000 | 106,512 |
-| `ultima6` | 9,212 | `79ebabd9281f105c` | 7 = 5/2/0 | 2 (DATA) | 48 | 0 | none | 0x00100000 | 9,320 |
-| `ultcli` | 8,512 | `dfd96f65b66fdccd` | 7 = 5/2/0 | 2 (DATA) | 45 | 0 | none | 0x00100000 | 8,632 |
-| `installu6` | 20,192 | `580ff939de83bea6` | 11 = 9/1/1 | 3 (CODE) | 339 | 0 | none | 0x00100000 | 289,380 |
+| file | input sha256 (16) | hunks CODE/DATA/BSS | CHIP hunks | symbols | overlay | entry | image bytes |
+|---|---|---|---|---|---|---|---|
+| `game` | `34a6e9dd66d58ff2` | 35 = 26/5/4 | 28, 31 (DATA) | 0 | none | 0x00100000 | 402,736 |
+| `u` | `2e9267dbb9fb509d` | 24 = 18/5/1 | 16 (DATA), 17 (CODE), 20 (DATA) | 0 | none | 0x00100000 | 106,512 |
+| `ultima6` | `79ebabd9281f105c` | 7 = 5/2/0 | 2 (DATA) | 0 | none | 0x00100000 | 9,320 |
+| `ultcli` | `dfd96f65b66fdccd` | 7 = 5/2/0 | 2 (DATA) | 0 | none | 0x00100000 | 8,632 |
+| `installu6` | `580ff939de83bea6` | 11 = 9/1/1 | 3 (CODE) | 0 | none | 0x00100000 | 289,380 |
 
 All five: no resident libraries, `first` = 0, `table_size` = `last` + 1. The only block types
 present are HEADER, CODE, DATA, BSS, RELOC32, END — no SYMBOL, DEBUG, NAME, EXT,
@@ -35,100 +36,100 @@ tests in `tools/test_hunk2raw.py`, not by real data.
 
 ### `game` segments
 
-| # | type | mem | base | size | loaded | relocs |
-|---|---|---|---|---|---|---|
-| 0 | CODE | ANY | 0x00100000 | 0x1eb0 | 0x1eb0 | 45 |
-| 1 | CODE | ANY | 0x00101eb0 | 0x3100 | 0x3100 | 130 |
-| 2 | CODE | ANY | 0x00104fb0 | 0x3a28 | 0x3a28 | 93 |
-| 3 | CODE | ANY | 0x001089d8 | 0x10dc | 0x10dc | 48 |
-| 4 | CODE | ANY | 0x00109ab8 | 0x964 | 0x964 | 13 |
-| 5 | CODE | ANY | 0x0010a420 | 0x4c60 | 0x4c60 | 177 |
-| 6 | BSS | ANY | 0x0010f080 | 0x171c | 0x0 | 0 |
-| 7 | CODE | ANY | 0x001107a0 | 0x240 | 0x240 | 10 |
-| 8 | CODE | ANY | 0x001109e0 | 0x1bd4 | 0x1bd4 | 73 |
-| 9 | CODE | ANY | 0x001125b8 | 0x318 | 0x318 | 12 |
-| 10 | CODE | ANY | 0x001128d0 | 0x2958 | 0x2958 | 113 |
-| 11 | CODE | ANY | 0x00115228 | 0x5f94 | 0x5f94 | 168 |
-| 12 | CODE | ANY | 0x0011b1c0 | 0x6944 | 0x6944 | 345 |
-| 13 | CODE | ANY | 0x00121b08 | 0x5770 | 0x5770 | 238 |
-| 14 | CODE | ANY | 0x00127278 | 0x113c | 0x113c | 46 |
-| 15 | CODE | ANY | 0x001283b8 | 0x4500 | 0x4500 | 188 |
-| 16 | CODE | ANY | 0x0012c8b8 | 0x4880 | 0x4880 | 175 |
-| 17 | CODE | ANY | 0x00131138 | 0x1200 | 0x1200 | 46 |
-| 18 | CODE | ANY | 0x00132338 | 0x2238 | 0x2238 | 70 |
-| 19 | CODE | ANY | 0x00134570 | 0xf8 | 0xf8 | 2 |
-| 20 | DATA | ANY | 0x00134668 | 0x38 | 0x38 | 0 |
-| 21 | CODE | ANY | 0x001346a0 | 0x868 | 0x868 | 16 |
-| 22 | CODE | ANY | 0x00134f08 | 0x680 | 0x680 | 41 |
-| 23 | BSS | ANY | 0x00135588 | 0x114b8 | 0x0 | 0 |
-| 24 | BSS | ANY | 0x00146a40 | 0x7530 | 0x0 | 0 |
-| 25 | BSS | ANY | 0x0014df70 | 0xf00 | 0x0 | 0 |
-| 26 | CODE | ANY | 0x0014ee70 | 0x454 | 0x454 | 24 |
-| 27 | DATA | ANY | 0x0014f2c8 | 0x2000 | 0x2000 | 0 |
-| 28 | DATA | CHIP | 0x001512c8 | 0x83c | 0x83c | 0 |
-| 29 | CODE | ANY | 0x00151b08 | 0x3d4 | 0x3d4 | 17 |
-| 30 | CODE | ANY | 0x00151ee0 | 0x16f0 | 0x16f0 | 210 |
-| 31 | DATA | CHIP | 0x001535d0 | 0x4 | 0x4 | 0 |
-| 32 | CODE | ANY | 0x001535d8 | 0x118 | 0x118 | 2 |
-| 33 | DATA | ANY | 0x001536f0 | 0xe7d8 | 0x4f0c | 421 |
-| 34 | CODE | ANY | 0x00161ec8 | 0x668 | 0x668 | 132 |
+| # | type | mem | base | size | loaded |
+|---|---|---|---|---|---|
+| 0 | CODE | ANY | 0x00100000 | 0x1eb0 | 0x1eb0 |
+| 1 | CODE | ANY | 0x00101eb0 | 0x3100 | 0x3100 |
+| 2 | CODE | ANY | 0x00104fb0 | 0x3a28 | 0x3a28 |
+| 3 | CODE | ANY | 0x001089d8 | 0x10dc | 0x10dc |
+| 4 | CODE | ANY | 0x00109ab8 | 0x964 | 0x964 |
+| 5 | CODE | ANY | 0x0010a420 | 0x4c60 | 0x4c60 |
+| 6 | BSS | ANY | 0x0010f080 | 0x171c | 0x0 |
+| 7 | CODE | ANY | 0x001107a0 | 0x240 | 0x240 |
+| 8 | CODE | ANY | 0x001109e0 | 0x1bd4 | 0x1bd4 |
+| 9 | CODE | ANY | 0x001125b8 | 0x318 | 0x318 |
+| 10 | CODE | ANY | 0x001128d0 | 0x2958 | 0x2958 |
+| 11 | CODE | ANY | 0x00115228 | 0x5f94 | 0x5f94 |
+| 12 | CODE | ANY | 0x0011b1c0 | 0x6944 | 0x6944 |
+| 13 | CODE | ANY | 0x00121b08 | 0x5770 | 0x5770 |
+| 14 | CODE | ANY | 0x00127278 | 0x113c | 0x113c |
+| 15 | CODE | ANY | 0x001283b8 | 0x4500 | 0x4500 |
+| 16 | CODE | ANY | 0x0012c8b8 | 0x4880 | 0x4880 |
+| 17 | CODE | ANY | 0x00131138 | 0x1200 | 0x1200 |
+| 18 | CODE | ANY | 0x00132338 | 0x2238 | 0x2238 |
+| 19 | CODE | ANY | 0x00134570 | 0xf8 | 0xf8 |
+| 20 | DATA | ANY | 0x00134668 | 0x38 | 0x38 |
+| 21 | CODE | ANY | 0x001346a0 | 0x868 | 0x868 |
+| 22 | CODE | ANY | 0x00134f08 | 0x680 | 0x680 |
+| 23 | BSS | ANY | 0x00135588 | 0x114b8 | 0x0 |
+| 24 | BSS | ANY | 0x00146a40 | 0x7530 | 0x0 |
+| 25 | BSS | ANY | 0x0014df70 | 0xf00 | 0x0 |
+| 26 | CODE | ANY | 0x0014ee70 | 0x454 | 0x454 |
+| 27 | DATA | ANY | 0x0014f2c8 | 0x2000 | 0x2000 |
+| 28 | DATA | CHIP | 0x001512c8 | 0x83c | 0x83c |
+| 29 | CODE | ANY | 0x00151b08 | 0x3d4 | 0x3d4 |
+| 30 | CODE | ANY | 0x00151ee0 | 0x16f0 | 0x16f0 |
+| 31 | DATA | CHIP | 0x001535d0 | 0x4 | 0x4 |
+| 32 | CODE | ANY | 0x001535d8 | 0x118 | 0x118 |
+| 33 | DATA | ANY | 0x001536f0 | 0xe7d8 | 0x4f0c |
+| 34 | CODE | ANY | 0x00161ec8 | 0x668 | 0x668 |
 
 ### `u` segments
 
-| # | type | mem | base | size | loaded | relocs |
-|---|---|---|---|---|---|---|
-| 0 | CODE | ANY | 0x00100000 | 0x29cc | 0x29cc | 45 |
-| 1 | CODE | ANY | 0x001029d0 | 0xe60 | 0xe60 | 38 |
-| 2 | CODE | ANY | 0x00103830 | 0x1ea0 | 0x1ea0 | 34 |
-| 3 | DATA | ANY | 0x001056d0 | 0x30 | 0x30 | 0 |
-| 4 | CODE | ANY | 0x00105700 | 0x19bc | 0x19bc | 41 |
-| 5 | CODE | ANY | 0x001070c0 | 0x720 | 0x720 | 13 |
-| 6 | CODE | ANY | 0x001077e0 | 0x5c | 0x5c | 0 |
-| 7 | CODE | ANY | 0x00107840 | 0x202c | 0x202c | 25 |
-| 8 | CODE | ANY | 0x00109870 | 0x1398 | 0x1398 | 29 |
-| 9 | CODE | ANY | 0x0010ac08 | 0x493c | 0x493c | 8 |
-| 10 | CODE | ANY | 0x0010f548 | 0x5a0 | 0x5a0 | 13 |
-| 11 | CODE | ANY | 0x0010fae8 | 0x74 | 0x74 | 4 |
-| 12 | DATA | ANY | 0x0010fb60 | 0x4 | 0x4 | 0 |
-| 13 | BSS | ANY | 0x0010fb68 | 0x4000 | 0x0 | 0 |
-| 14 | CODE | ANY | 0x00113b68 | 0x504 | 0x504 | 23 |
-| 15 | CODE | ANY | 0x00114070 | 0x2b8 | 0x2b8 | 4 |
-| 16 | DATA | CHIP | 0x00114328 | 0x584 | 0x584 | 0 |
-| 17 | CODE | CHIP | 0x001148b0 | 0x47c | 0x47c | 5 |
-| 18 | CODE | ANY | 0x00114d30 | 0x338 | 0x338 | 17 |
-| 19 | CODE | ANY | 0x00115068 | 0x1610 | 0x1610 | 259 |
-| 20 | DATA | CHIP | 0x00116678 | 0x4 | 0x4 | 0 |
-| 21 | CODE | ANY | 0x00116680 | 0x118 | 0x118 | 2 |
-| 22 | DATA | ANY | 0x00116798 | 0x3160 | 0x1718 | 20 |
-| 23 | CODE | ANY | 0x001198f8 | 0x718 | 0x718 | 63 |
+| # | type | mem | base | size | loaded |
+|---|---|---|---|---|---|
+| 0 | CODE | ANY | 0x00100000 | 0x29cc | 0x29cc |
+| 1 | CODE | ANY | 0x001029d0 | 0xe60 | 0xe60 |
+| 2 | CODE | ANY | 0x00103830 | 0x1ea0 | 0x1ea0 |
+| 3 | DATA | ANY | 0x001056d0 | 0x30 | 0x30 |
+| 4 | CODE | ANY | 0x00105700 | 0x19bc | 0x19bc |
+| 5 | CODE | ANY | 0x001070c0 | 0x720 | 0x720 |
+| 6 | CODE | ANY | 0x001077e0 | 0x5c | 0x5c |
+| 7 | CODE | ANY | 0x00107840 | 0x202c | 0x202c |
+| 8 | CODE | ANY | 0x00109870 | 0x1398 | 0x1398 |
+| 9 | CODE | ANY | 0x0010ac08 | 0x493c | 0x493c |
+| 10 | CODE | ANY | 0x0010f548 | 0x5a0 | 0x5a0 |
+| 11 | CODE | ANY | 0x0010fae8 | 0x74 | 0x74 |
+| 12 | DATA | ANY | 0x0010fb60 | 0x4 | 0x4 |
+| 13 | BSS | ANY | 0x0010fb68 | 0x4000 | 0x0 |
+| 14 | CODE | ANY | 0x00113b68 | 0x504 | 0x504 |
+| 15 | CODE | ANY | 0x00114070 | 0x2b8 | 0x2b8 |
+| 16 | DATA | CHIP | 0x00114328 | 0x584 | 0x584 |
+| 17 | CODE | CHIP | 0x001148b0 | 0x47c | 0x47c |
+| 18 | CODE | ANY | 0x00114d30 | 0x338 | 0x338 |
+| 19 | CODE | ANY | 0x00115068 | 0x1610 | 0x1610 |
+| 20 | DATA | CHIP | 0x00116678 | 0x4 | 0x4 |
+| 21 | CODE | ANY | 0x00116680 | 0x118 | 0x118 |
+| 22 | DATA | ANY | 0x00116798 | 0x3160 | 0x1718 |
+| 23 | CODE | ANY | 0x001198f8 | 0x718 | 0x718 |
 
 ### `installu6` segments
 
-| # | type | mem | base | size | loaded | relocs |
-|---|---|---|---|---|---|---|
-| 0 | CODE | ANY | 0x00100000 | 0x1a48 | 0x1a48 | 3 |
-| 1 | CODE | ANY | 0x00101a48 | 0x1910 | 0x1910 | 27 |
-| 2 | BSS | ANY | 0x00103358 | 0x41eb0 | 0x0 | 0 |
-| 3 | CODE | CHIP | 0x00145208 | 0x560 | 0x560 | 12 |
-| 4 | DATA | ANY | 0x00145768 | 0xfe0 | 0xc34 | 275 |
-| 5 | CODE | ANY | 0x00146748 | 0xf8 | 0xf8 | 2 |
-| 6 | CODE | ANY | 0x00146840 | 0x94 | 0x94 | 7 |
-| 7 | CODE | ANY | 0x001468d8 | 0x14 | 0x14 | 0 |
-| 8 | CODE | ANY | 0x001468f0 | 0xdc | 0xdc | 9 |
-| 9 | CODE | ANY | 0x001469d0 | 0x24 | 0x24 | 2 |
-| 10 | CODE | ANY | 0x001469f8 | 0x6c | 0x6c | 2 |
+| # | type | mem | base | size | loaded |
+|---|---|---|---|---|---|
+| 0 | CODE | ANY | 0x00100000 | 0x1a48 | 0x1a48 |
+| 1 | CODE | ANY | 0x00101a48 | 0x1910 | 0x1910 |
+| 2 | BSS | ANY | 0x00103358 | 0x41eb0 | 0x0 |
+| 3 | CODE | CHIP | 0x00145208 | 0x560 | 0x560 |
+| 4 | DATA | ANY | 0x00145768 | 0xfe0 | 0xc34 |
+| 5 | CODE | ANY | 0x00146748 | 0xf8 | 0xf8 |
+| 6 | CODE | ANY | 0x00146840 | 0x94 | 0x94 |
+| 7 | CODE | ANY | 0x001468d8 | 0x14 | 0x14 |
+| 8 | CODE | ANY | 0x001468f0 | 0xdc | 0xdc |
+| 9 | CODE | ANY | 0x001469d0 | 0x24 | 0x24 |
+| 10 | CODE | ANY | 0x001469f8 | 0x6c | 0x6c |
 
 ### `ultima6` / `ultcli` segments (same hunk types and memory flags)
 
-| # | type | mem | ultima6 base | size | loaded | relocs | ultcli base | size | loaded | relocs |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 0 | CODE | ANY | 0x00100000 | 0x35c | 0x35c | 9 | 0x00100000 | 0x35c | 0x35c | 9 |
-| 1 | CODE | ANY | 0x00100360 | 0x580 | 0x580 | 6 | 0x00100360 | 0x510 | 0x510 | 5 |
-| 2 | DATA | CHIP | 0x001008e0 | 0xd0 | 0xd0 | 0 | 0x00100870 | 0xd0 | 0xd0 | 0 |
-| 3 | CODE | ANY | 0x001009b0 | 0x14 | 0x14 | 1 | 0x00100940 | 0x14 | 0x14 | 1 |
-| 4 | CODE | ANY | 0x001009c8 | 0x118 | 0x118 | 2 | 0x00100958 | 0x118 | 0x118 | 2 |
-| 5 | DATA | ANY | 0x00100ae0 | 0x638 | 0x400 | 28 | 0x00100a70 | 0x5ec | 0x3b8 | 26 |
-| 6 | CODE | ANY | 0x00101118 | 0x1350 | 0x1350 | 2 | 0x00101060 | 0x1158 | 0x1158 | 2 |
+| # | type | mem | ultima6 base | size | loaded | ultcli base | size | loaded |
+|---|---|---|---|---|---|---|---|---|
+| 0 | CODE | ANY | 0x00100000 | 0x35c | 0x35c | 0x00100000 | 0x35c | 0x35c |
+| 1 | CODE | ANY | 0x00100360 | 0x580 | 0x580 | 0x00100360 | 0x510 | 0x510 |
+| 2 | DATA | CHIP | 0x001008e0 | 0xd0 | 0xd0 | 0x00100870 | 0xd0 | 0xd0 |
+| 3 | CODE | ANY | 0x001009b0 | 0x14 | 0x14 | 0x00100940 | 0x14 | 0x14 |
+| 4 | CODE | ANY | 0x001009c8 | 0x118 | 0x118 | 0x00100958 | 0x118 | 0x118 |
+| 5 | DATA | ANY | 0x00100ae0 | 0x638 | 0x400 | 0x00100a70 | 0x5ec | 0x3b8 |
+| 6 | CODE | ANY | 0x00101118 | 0x1350 | 0x1350 | 0x00101060 | 0x1158 | 0x1158 |
 
 ## Entry and startup code
 

@@ -15,7 +15,7 @@
 //!
 //! Original functions this module will own (milestone 1):
 //!
-//! - 0x1125b8 [converse] converse text substitutions (milord/milady, time of day)
+//! - 0x1125b8 [converse] converse text substitutions (forms of address, time of day)
 //! - 0x1127c4 [converse] Talk command: target, shrine/statue cases, start talk
 //! - 0x1128d0 [converse] unnamed; 1 callees
 //! - 0x112b0a [converse] leaf; callers 2, from 1 subsystems

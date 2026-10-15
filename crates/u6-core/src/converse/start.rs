@@ -79,9 +79,9 @@ fn load_text(cx: &Cx<'_>) {
 
 /// Original: 0x1125b8 (conversation set-up: variables, then 0x114afa)
 ///
-/// String slots: `$G` (0x10) milady / milord by the hero's gender, `$N` (0x17) the NPC-name
-/// buffer, `$P` (0x19) the talker's party name, `$T` (0x1d) morning (hour < 12) / afternoon
-/// (< 18) / evening, `$0`..`$9` the ten buffers. Word variables: 10 dexterity, 13 day,
+/// String slots: `$G` (0x10) the string at 0x112758 or 0x112760 by the hero's gender, `$N`
+/// (0x17) the NPC-name buffer, `$P` (0x19) the talker's party name, `$T` (0x1d) the string at
+/// 0x112790 (hour < 12), 0x112798 (< 18) or 0x1127a2, `$0`..`$9` the ten buffers. Word variables: 10 dexterity, 13 day,
 /// 14 experience, 16 female, 17 hour, 18 intelligence, 20 karma, 21 A4-0x7b26, 22 month,
 /// 24 party size − 1, 25 hit points, 28 strength (of the talker), 32 the target's worktype,
 /// 34 year; 0..9 cleared. Music stops around the conversation; afterwards variable 21 is

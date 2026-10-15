@@ -31,7 +31,8 @@ pub(super) fn font() -> BitFont {
     }
 }
 
-/// Synthetic tables: a few raw keys, colours 1..5, synthetic panel strings.
+/// Test tables: a few raw keys mapped to the keyboard's characters and the port's own key codes,
+/// colours 1..5, synthetic panel strings.
 pub(super) fn tables() -> UiTables {
     let mut keymap = vec![[0u16; 4]; tables::RAW_KEYS];
     keymap[0x20] = [0x61, 0x41, 0x01, 0x8f];

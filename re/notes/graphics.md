@@ -51,12 +51,12 @@ one at `0x00161BDE`. Both run the same code from `0x00153008`.
   animation effects come from §6 instead.
 - **Shape**: entries 0..15 are an EGA-like set (8..15 the bright forms of 0..7, §6.1); 16..31
   are further shades. Entries 17..19 double as the sprite (pointer) colours (hardware).
-- **Where to read it at run time**: in the PowerPacker-decrunched `d1/INSTALL/game`
-  (267,332 bytes, `palette::GAME_EXE_LEN`), the `HUNK_DATA` header of hunk 33 sits at file
-  offset 243,036 (`HUNK_DATA`, then the hunk's length, 0x13C3 longwords). Its data starts 8
-  bytes later, and the palette is `+0x4A3C` into that data, so file offset **262,048
-  (`0x3FFA0`)**, 64 bytes. On the disk, `game` is PP20-crunched, so it must be decrunched first.
-  `gfx::palette(game)` checks the length, the `HUNK_HEADER` id and that 8-byte hunk header
+- **Where to read it at run time**: in the PowerPacker-decrunched `d1/INSTALL/game`, the
+  `HUNK_DATA` header of hunk 33 sits at file offset 243,036 (`HUNK_DATA`, then the block's
+  length in longwords). Its data starts 8 bytes later, and the palette is `+0x4A3C` into that
+  data, so file offset **262,048 (`0x3FFA0`)**, 64 bytes. On the disk, `game` is PP20-crunched,
+  so it must be decrunched first. `gfx::palette(game)` checks the `HUNK_HEADER` id, the
+  `HUNK_DATA` id and that the length field's data lies inside the file and holds the palette
   before it reads.
 - 8-bit expansion: a channel nibble `x` becomes `x·17` (`(x<<4)|x`).
 
@@ -86,13 +86,13 @@ requires the index to be in the matching range. Every real entry agrees (§11).
 
 The blitter (`0x00153008`) loads `masktype[tile & 0x7FF]` into `0x0015335E`:
 
-| bits | meaning | values that occur |
-|---|---|---|
-| `& 3 == 0` | map tile, opaque copy (§4.1) | 0, 4 |
-| `& 3 == 3` | object tile, 16 columns, 2 bytes per row (§5) | 3, 7 |
-| `& 3 == 2` | object tile, left 8 columns, 1 byte per row | 2 |
-| `& 3 == 1` | object tile, right 8 columns (screen byte + 1, `0x0015327C`) | 1, 5 |
-| `& 4` | an animmask reference follows the pixel data (§6) | 4, 5, 7 |
+| bits | meaning |
+|---|---|
+| `& 3 == 0` | map tile, opaque copy (§4.1) |
+| `& 3 == 3` | object tile, 16 columns, 2 bytes per row (§5) |
+| `& 3 == 2` | object tile, left 8 columns, 1 byte per row |
+| `& 3 == 1` | object tile, right 8 columns (screen byte + 1, `0x0015327C`) |
+| `& 4` | an animmask reference follows the pixel data (§6) |
 
 No value above 7 occurs (checked). The tile word passed to the blitter has the tile in bits 0..10.
 Bits 11..12 select an outline mode (§7).

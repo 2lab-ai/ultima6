@@ -33,20 +33,21 @@ their bytes, so a different build is refused before its table is read.
 One table entry has no source on disk 1. installu6 ignores stat()'s result (0x102e26), so its
 size is the previous entry's; it AllocMem's that much without MEMF_CLEAR (0x102e5c), read() on the
 failed open() reads nothing, and the buffer is written out under the entry's name. Its content is
-whatever was in that memory; here, zeros. No program reads it.
+whatever was in that memory; the tool writes zeros of that size. No program reads it.
 
 `--game-first` is NOT what the installer writes. It exists because `u` (intro, menu, character
 creation) stops in its intro under the AROS ROM (re/notes/oracle.md), so no character can be
-created there. Two patches, both checked first (the file's sha256, the objlist bytes 0):
+created there. Two patches, both checked first (the launcher's sha256; for the objlist, that
+the two bytes do not mark a character yet):
   PROGRAM:ultima6 (= ultcli)  hunk 1 +8: its first state becomes 1 (the tool writes the word of
       `moveq #1,d7` there). ultcli's state machine (0x100440 jump table: 0 = run u, 1 = run game,
       2 = run end) then starts at state 1, so it launches PORTRAIT:game with its normal
       arguments and skips u.
   PLAYER:savegame/objlist  0x1C71 = 1, 0x1C72 = 1 (gender, hero portrait). game's main()
       (0x1351d8) prints its no-character line (0x1350a6) when the byte at a4-0x7b03 is 0;
-      0x105578 reads objlist 0x1BF1..0x1C72 to a4-0x7b84, so that byte is objlist 0x1C72,
-      which the stock DATA1 file leaves 0. Values = Nuvie's new-game mapping for a male hero
-      with the first portrait (re/notes/formats.md section 7).
+      0x105578 reads objlist 0x1BF1..0x1C72 to a4-0x7b84, so that byte is objlist 0x1C72.
+      Values = Nuvie's new-game mapping for a male hero with the first portrait
+      (re/notes/formats.md section 7).
 """
 import hashlib
 import importlib.util

@@ -277,11 +277,17 @@ fn gfx_palette_words_and_exe_checks() {
     words[4] = 0x10;
     assert!(palette_from_ocs_words(&words).is_err());
 
-    let mut exe = vec![0u8; GAME_EXE_LEN];
-    // HUNK_HEADER, then hunk 33's block: HUNK_DATA and its length in longwords.
+    // A synthetic executable: HUNK_HEADER, then at hunk 33's offset a HUNK_DATA block of
+    // `longs` longwords that holds the palette with room to spare, then a few bytes more.
+    let longs = (GAME_PALETTE_IN_HUNK + PALETTE_LEN * 2) / 4 + 5;
+    let data = GAME_HUNK33_BLOCK + 8;
+    let mut exe = vec![0u8; data + longs * 4 + 12];
     exe[..4].copy_from_slice(&0x3F3u32.to_be_bytes());
     exe[GAME_HUNK33_BLOCK..GAME_HUNK33_BLOCK + 4].copy_from_slice(&0x3EAu32.to_be_bytes());
-    exe[GAME_HUNK33_BLOCK + 4..GAME_HUNK33_BLOCK + 8].copy_from_slice(&0x13C3u32.to_be_bytes());
+    let set_longs = |exe: &mut Vec<u8>, n: u32| {
+        exe[GAME_HUNK33_BLOCK + 4..data].copy_from_slice(&n.to_be_bytes());
+    };
+    set_longs(&mut exe, longs as u32);
     exe[GAME_PALETTE_OFFSET + 62..GAME_PALETTE_OFFSET + 64].copy_from_slice(&[0x0F, 0xFF]);
     assert_eq!(
         palette(&exe).unwrap()[31],
@@ -291,9 +297,25 @@ fn gfx_palette_words_and_exe_checks() {
             b: 255
         }
     );
+    // The file's own length bounds the block: the data may end exactly at the end of the file.
+    assert!(palette(&exe[..data + longs * 4]).is_ok());
+    assert!(palette(&exe[..data + longs * 4 - 1]).is_err());
+    // A length field past the file, one that wraps, and one too short for the palette.
+    for n in [
+        (exe.len() / 4) as u32,
+        u32::MAX,
+        (GAME_PALETTE_IN_HUNK / 4) as u32,
+    ] {
+        let mut bad = exe.clone();
+        set_longs(&mut bad, n);
+        assert!(palette(&bad).is_err(), "length field {n:#x}");
+    }
     let mut bad = exe.clone();
-    bad[GAME_HUNK33_BLOCK + 7] = 0;
-    assert!(palette(&bad).is_err());
+    bad[GAME_HUNK33_BLOCK + 3] = 0xE9;
+    assert!(palette(&bad).is_err(), "not HUNK_DATA");
+    let mut bad = exe.clone();
+    bad[3] = 0xF2;
+    assert!(palette(&bad).is_err(), "not HUNK_HEADER");
     let mut bad = exe.clone();
     bad[GAME_PALETTE_OFFSET] = 0x10;
     assert!(palette(&bad).is_err());

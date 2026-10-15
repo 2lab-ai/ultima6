@@ -201,7 +201,7 @@ Proof, per field (checked on every record; the values are not reproduced):
 - quality vs qty:
   - Signs (332): byte 6 is distinct per sign and byte 7 is always 0. Byte 6 is therefore the
     book index, i.e. quality (u6_usecode.cpp:2415). Books, scrolls and tombstones look the same.
-  - Eggs (335): byte 7 is a percentage (at most 101) = hatch percent = qty. Byte 6 is a small
+  - Eggs (335): byte 7 is the hatch percent (checked on every egg) = qty. Byte 6 is a small
     code = alignment+period = quality (egg_manager.cpp:121,162-175).
   - Stackables: byte 6 = 0 and byte 7 ≠ 0, and a stack's quantity reads as the whole word `w`
     (checked on gold in containers).

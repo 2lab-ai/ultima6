@@ -20,8 +20,8 @@ mod tests;
 
 pub use anim::{ANIM_FRAMES, ANIM_PLANE, AnimMask, AnimOverlay};
 pub use palette::{
-    GAME_EXE_LEN, GAME_HUNK33_BLOCK, GAME_PALETTE_IN_HUNK, GAME_PALETTE_OFFSET, PALETTE_LEN, Rgb,
-    palette, palette_from_ocs_words,
+    GAME_HUNK33_BLOCK, GAME_PALETTE_IN_HUNK, GAME_PALETTE_OFFSET, PALETTE_LEN, Rgb, palette,
+    palette_from_ocs_words,
 };
 pub use tiles::decode_tiles;
 
