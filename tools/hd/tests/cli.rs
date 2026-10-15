@@ -294,8 +294,8 @@ fn the_default_and_relative_work_dirs_are_checked() {
 }
 
 /// `inventory --game files`: fails with `category` alone on the terminal, the details in the
-/// 0600 diagnostic file; returns the details.
-fn failed_load(e: &Env, files: &Path, category: &str) -> String {
+/// 0600 diagnostic file; returns the details, stdout and stderr.
+fn failed_load(e: &Env, files: &Path, category: &str) -> (String, String, String) {
     let work = e.dir.join("work");
     let o = e.run(&[
         "inventory",
@@ -325,7 +325,15 @@ fn failed_load(e: &Env, files: &Path, category: &str) -> String {
         assert!(!stderr.contains(line), "on stderr: {line}");
     }
     assert!(stdout.is_empty(), "{stdout}");
-    detail
+    (detail, stdout.into_owned(), stderr.into_owned())
+}
+
+/// Each of `values` is absent from stdout and from stderr.
+fn absent(values: &[&str], stdout: &str, stderr: &str) {
+    for v in values {
+        assert!(!stdout.contains(v), "{v:?} on stdout: {stdout}");
+        assert!(!stderr.contains(v), "{v:?} on stderr: {stderr}");
+    }
 }
 
 #[test]
@@ -337,10 +345,23 @@ fn a_game_that_cannot_be_read_names_no_file() {
     std::fs::write(&locked, b"x").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let detail = failed_load(&e, &files, "the game files could not be read");
-    // The details name the file and the error; the terminal shows neither.
-    assert!(detail.contains("owner-disk-name.adf"), "{detail}");
-    assert!(detail.contains("ermission denied"), "{detail}");
+    let (detail, stdout, stderr) = failed_load(&e, &files, "the game files could not be read");
+    // The details name the file and the error (positive controls); the terminal shows neither,
+    // each value checked on its own, on each stream.
+    let error = std::io::Error::from_raw_os_error(13).to_string();
+    for v in ["owner-disk-name.adf", error.as_str()] {
+        assert!(detail.contains(v), "{v:?} not in {detail}");
+    }
+    absent(
+        &[
+            "owner-disk-name.adf",
+            "owner-disk-name",
+            error.as_str(),
+            "ermission denied",
+        ],
+        &stdout,
+        &stderr,
+    );
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
     let _ = std::fs::remove_dir_all(&e.dir);
 }
@@ -351,12 +372,14 @@ fn a_game_the_engine_does_not_load_names_no_file() {
     let files = e.dir.join("files");
     std::fs::create_dir_all(&files).unwrap();
     std::fs::write(files.join("maptiles.ega"), b"not a game file").unwrap();
-    let detail = failed_load(&e, &files, "the game files did not load as Ultima VI");
+    let (detail, stdout, stderr) =
+        failed_load(&e, &files, "the game files did not load as Ultima VI");
     // What the engine said is in the details only (its own words, whatever they are), and no
     // name of the files given is on the terminal either (checked in failed_load by line).
     assert_ne!(detail, "the game files did not load as Ultima VI");
     // Positive control: the engine's error names a game file, which the terminal must not.
     assert!(detail.contains(".ega"), "{detail}");
+    absent(&[detail.as_str(), ".ega"], &stdout, &stderr);
     let o = e.run(&[
         "inventory",
         "--game",
