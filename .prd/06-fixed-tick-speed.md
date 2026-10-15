@@ -6,7 +6,7 @@ tags: [ultima6, timing, web, native]
 
 # 06 — Fixed game tick, - / + speed control, performance
 
-Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review: `ran` in the API, Max as its own mode, admission loss counted, image-equivalence for optimizations. rev 3 folds in the opus review, checked against the code: a held press runs at 1×, separate clamp and budget losses, a per-key ownership bitmask that also sees the `u` program, `=` as the free "faster" key, O2 keyed on what a step really changes and kept off while sparkle or dissolve is on). User item 4 (`hd-i18n-voice/ssot.md`, verbatim): "게임 루프(틱)을 고정해서 속도 유지해줘. 이거 키보드 -+로 조절할 수 있도록해줘. (지금 너무 느린데 최적화도 해야할 것 같음)". Research notes are kept outside the repo, in `~/Games/ultima6/research/2026-10-15/r4-speed-findings.md`.
+Status: shipped (2026-10-16, production 9f831837 at main bf93585; T1–T6 in `hd-i18n-voice/loop.done.md`). Spec history: rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review: `ran` in the API, Max as its own mode, admission loss counted, image-equivalence for optimizations. rev 3 folds in the opus review, checked against the code: a held press runs at 1×, separate clamp and budget losses, a per-key ownership bitmask that also sees the `u` program, `=` as the free "faster" key, O2 keyed on what a step really changes and kept off while sparkle or dissolve is on). User item 4 (`hd-i18n-voice/ssot.md`, verbatim): "게임 루프(틱)을 고정해서 속도 유지해줘. 이거 키보드 -+로 조절할 수 있도록해줘. (지금 너무 느린데 최적화도 해야할 것 같음)". Research notes are kept outside the repo, in `~/Games/ultima6/research/2026-10-15/r4-speed-findings.md`.
 
 ## Measured facts (main 72865e5)
 

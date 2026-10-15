@@ -67,3 +67,20 @@ Append-only. Closed units, with their receipts.
   - Gates on the merge: 862 passed, web 41/41.
   - Reviews: gpt-6-astra APPROVE twice; opus APPROVE.
   - Deploys: preview, then production aeb272a5. live-check2 shows 0 foreign requests and 0 errors. The dispatcher read the opening title card frame.
+
+| T4 | 06 | O1 + O2: one RGBA per changed frame; skip idle map re-render; `merge_shores` on its counter | T2 |
+
+- **T4** merged at 4283973 (branch a01cc39 + f7080e3 + e054c76 + 824d0bf + 3eef552 + 9962db0).
+  - **O1:** a frame is converted to RGBA and drawn only when `frame_version` moved.
+  - **O2:** the window redraws only the cells whose inputs changed. A whole-render skip had fired once in about 2,200 idle refreshes on real data. The shore-merge skip never fired and was deleted.
+  - **Speed:** idle tick 82 → 25 µs mean (native).
+  - **Equivalence** (screen, back buffer, RNG and State equal to a full render):
+    - synthetic: 320 steps;
+    - adversarial: `adv.rs`, run by opus at 60 seeds × 400 steps;
+    - real data: 3000 steps;
+    - owner-local PNGs: 301/301 idle and 301/301 walking.
+  - **Gates on the merge with nostep:** 905 passed, web 47/47.
+  - **Reviews:** gpt-6-astra in three parts, APPROVE in both rounds; opus APPROVE in both rounds.
+- **Deploys:** preview, then production 9f831837, both at bf93585.
+  - live-speed on production: 1×→4×→3×→4×→Max (76.8×)→1×; 1.5× kept across a reload; 0 foreign requests, 0 errors.
+  - The dispatcher read the walked-into-the-fight frame on preview.

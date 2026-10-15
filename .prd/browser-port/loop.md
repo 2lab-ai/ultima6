@@ -46,7 +46,6 @@ re-verified: G1 · gargoyles stand in the throne room in the M2 production frame
 
 | Unit | Branch | Scope | State |
 |---|---|---|---|
-| nostep | fix/m2r6-nostep | the cost of commands that do not walk: a blocked step (the port runs no world turn; check the asm and trace) and Pass (followers' pass + vessel drift unpaced, commands.rs:400-402) | in flight |
 
 Open items carried from WU-P7b (assign in M2-int):
 

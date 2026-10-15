@@ -191,3 +191,26 @@ Gates on `517b2ba`: fmt, clippy, 793 tests (`--profile gate`), web 29/29. The wa
 - **Gates on 0fff6c3:** 887 tests (`--profile gate`), web 45/45, amifs OK.
 - **Memory, measured on the merged main:** wasm after start 192.2 → 13.9 MiB; ArrayBuffer peak 186.9 → 8.5 MiB; renderer RSS peak 517.6 → 157.9 MiB.
 - **Deploys:** preview, then production 6847a75d. live-check2 found 0 foreign requests and 0 errors. The dispatcher read the walked-into-the-fight frame.
+
+## nostep — closed 2026-10-16
+
+| Unit | Branch | Result |
+|---|---|---|
+| nostep | fix/m2r6-nostep | Merged as `bf93585` (head `ac4b241`). See the notes below. |
+
+- **What was built:**
+  - A blocked step costs what the original's does.
+  - The world turn is split into setup (16 ms), picks (11 ms) and minutes (186 ms), reduced from 13 oracle traces.
+  - Pass is charged by whether follow moved anyone: 95 / 4 ms, from the q1..q6 traces.
+  - `owed` is a u32. Owed passes are paid before a showing NPC turn, as leading pauses of its own playback.
+  - The oracle tools (trace, fight, pace) write booleans and counts only.
+- **Review rounds 1–4:**
+  - gpt6 tools CHANGES: raw game values in trace output.
+  - opus findings 1–5.
+  - opus round 3: a regression, a 0x99 guard's flash published early (76/76 seeds).
+  - Final: gpt-6-astra and opus APPROVE. The 200-seed guard probe shows 0 early.
+- **Receipts at 20 ms:** castle 32 (−3.0%), start fight 305 (+10.1%), first 5 319 (+6.3%).
+- **Gates on the merge:** 905 tests, web 47/47, test_fight OK, test_trace 8/8, amifs OK.
+- **Deploys:** production 9f831837. Live checks pass, with 0 foreign requests and 0 errors.
+
+Round 6 of M2's follow-ups is complete: intake-budget, zip-slice and nostep are all merged and live.
