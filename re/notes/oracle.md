@@ -420,7 +420,12 @@ state, so runs are not bit-identical end to end.
 One boot (one time seed) per run, game-first disks, holds of 5..500 frames (b4..b6: 50 and 300),
 three trials per hold at different press phases (b4..b6: two), a press held three cells south
 (b4 also north and east). Gaps = PAL frames between two steps of one held press, recounted from
-the runs' `pace.json` on 2026-10-15. `quiet` = the actors outside the party passed over and the
+the runs' `pace.json` on 2026-10-15. pace.mjs writes a step as the frame the view centre
+changed and the press code as a timeline flag; the centre and the party's actors are compared
+in the emulator and never written (spec 01 §Rights). These runs were rewritten that way on
+2026-10-16 by a one-off script outside the repo (each trial's centre and step deltas dropped,
+the press code made a flag, the logs' centre and party actors removed); the gaps below and every
+trial's steps, press, release and timeline read the same before and after. `quiet` = the actors outside the party passed over and the
 fight broken off; `start` = the start fight as booted, where a gap is a whole world turn (only
 the longest holds outlast one).
 
