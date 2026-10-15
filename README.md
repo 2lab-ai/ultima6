@@ -51,7 +51,7 @@ scripts/deploy-web.sh main                          # Cloudflare Pages project u
 
 | Path | What |
 |---|---|
-| `.prd/` | spec (01), architecture (02), core port contract (03), P3 refactor plan (04), loop |
+| `.prd/` | spec (01), architecture (02), core port contract (03), P3 refactor plan (04), HD/4K output design (05), loop |
 | `crates/u6-intake` · `u6-formats` · `u6-core` · `u6-render` · `u6-audio` · `u6-native` · `u6-web` · `u6-testkit` | Rust workspace (`u6-audio`: the emulated Amiga audio machine; `u6-testkit`: content-free comparisons for the real-data tests) |
 | `re/notes/` | reverse-engineering notes (formats, graphics, functions, subsystems, oracle, port map) |
 | `tools/` | PP20, hunk flattener, REA drivers, Amiga emulator oracle, web test harness |

@@ -120,3 +120,7 @@ Base origin/port/main `6dce550`. One worktree per unit (`.worktrees/m2-<unit>`, 
 | rights | fix/m2r4-rights | merged 3c2741e: no character or place names, messages, song titles, tables, bytes or values read from the game files anywhere in the repo (sweep 0 in owned files); mechanics vocabulary allowed (01-spec §Rights); mkadf by regions + sha256 (ADFs byte-identical); classify.py by string address (0 classification differences / 1383); palette and conversation checks structural |
 
 Redeploy: main 2b4551b → production 8999b6ca; 765 tests (--profile gate), web 28/28; live check 10 requests, 0 foreign, 0 errors; frames read by the dispatcher.
+
+## WU-P7b carried item closed 2026-10-15
+
+- "Panel keys inside `ui::wait::read_key` do nothing silently" was closed by inspection on main `3349a83`. read_key now dispatches inventory scroll, Ready/Unready, the spellbook page and containers (`crates/u6-core/src/ui/wait.rs:135-155`).

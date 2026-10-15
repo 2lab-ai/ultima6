@@ -48,16 +48,17 @@ re-verified: G1 · gargoyles stand in the throne room in the M2 production frame
 |---|---|---|---|
 | webpace | fix/m2r4-webpace | browser pace test flakes under load: expect cells from the delivered engine-time hold; 5+5 loaded runs | in flight |
 | playback | fix/m2r5-playback | nested playback scope: an inventory action inside a key wait (more prompt) prints its own lines and shows its own frames in place — trapped chest (ui/click.rs:295), ring flash from Ready/Unready; stale queue mark and stale capture of a deferred flash | in flight |
+| intake-budget | fix/m2r6-intake-budget | the intake's total output bounded (PP20 per-file only today; WU-P7b) | in flight |
+| zip-slice | fix/m2r6-zip-slice | a dropped zip is read by `Blob.slice` (central directory + wanted entries only), wasm ~192 MiB → measured | in flight |
 | walkstep | fix/m2r5-walkstep | a quiet keyboard step pays the 420 ms refresh only; measure the walk handler 0x11d4ee (~12 frames) and charge it there | in flight; also pooled r4+r5 trace constants, pick_ms worktype order, a combat-NPC world_turn fixture |
 
 Open items carried from WU-P7b (assign in M2-int):
 - PP20 output is bounded per file (16 MiB) but not in aggregate (u6-intake).
 - wasm memory stays ~192 MiB per tab because the whole zip is copied in; read only the disk
   entries with `Blob.slice` (~30× less).
-- Panel keys inside `ui::wait::read_key` (inventory scroll, Ready/Unready, spellbook page,
-  container) do nothing silently — say "not implemented" until M2-inventory/magic land.
 
 ## Next
 
 - After the follow-ups: merge → gates → preview → live check → production → live check.
-- Then P3 per `.prd/04-refactor-p3.md` (rev 4; trinity 2/3 APPROVE, grok-4.7 slot still to run for the P3 and AI-transport briefs), user step 4 = redeploy.
+- Then P3 per `.prd/04-refactor-p3.md` (rev 5). Trinity: 2 of 3 approved rev 4; the grok-4.7 slot is retried at 15:04 for the P3 and AI-transport briefs. Rev 5 (the HD/4K seam: W10, acceptance 7, `05-hd-output.md`) still needs all three engines. User step 4 = redeploy.
+- After P4: research the HD/4K phase (user 2026-10-15, `05-hd-output.md` §Research). The research list is there.
