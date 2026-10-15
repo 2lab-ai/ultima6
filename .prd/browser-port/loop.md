@@ -46,11 +46,9 @@ re-verified: G1 · gargoyles stand in the throne room in the M2 production frame
 
 | Unit | Branch | Scope | State |
 |---|---|---|---|
-| cpnits | fix/m2r4-cpnits | Time Stop NPC turns charged without running; partial trace.json reduced as complete; trace.mjs state-machine tests; REFRESH/FLIGHT_STEP/AFTER_TURN docs; engine log in a test; jitter tick pattern | in flight |
 | webpace | fix/m2r4-webpace | browser pace test flakes under load: expect cells from the delivered engine-time hold; 5+5 loaded runs | in flight |
-| rights | fix/m2r4-rights | names/song titles in identifiers and docs, original code bytes in tools/oracle/mkadf.py, measured values in re/notes formats.md + graphics.md, README crate list | in flight |
-| playback | (after cpnits) | nested playback scope: an inventory action inside a key wait (more prompt) prints its own lines and shows its own frames in place — trapped chest (ui/click.rs:295), ring flash from Ready/Unready; stale queue mark and stale capture of a deferred flash | next |
-| walkstep | (after cpnits) | a quiet keyboard step pays the 420 ms refresh only; measure the walk handler 0x11d4ee (~12 frames) and charge it there | next |
+| playback | fix/m2r5-playback | nested playback scope: an inventory action inside a key wait (more prompt) prints its own lines and shows its own frames in place — trapped chest (ui/click.rs:295), ring flash from Ready/Unready; stale queue mark and stale capture of a deferred flash | in flight |
+| walkstep | fix/m2r5-walkstep | a quiet keyboard step pays the 420 ms refresh only; measure the walk handler 0x11d4ee (~12 frames) and charge it there | in flight; also pooled r4+r5 trace constants, pick_ms worktype order, a combat-NPC world_turn fixture |
 
 Open items carried from WU-P7b (assign in M2-int):
 - PP20 output is bounded per file (16 MiB) but not in aggregate (u6-intake).

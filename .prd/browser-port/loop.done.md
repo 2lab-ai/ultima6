@@ -111,3 +111,12 @@ Base origin/port/main `6dce550`. One worktree per unit (`.worktrees/m2-<unit>`, 
 | M2-review | external merge-gate review, 10 modules × (gpt-6-astra + opus) | 20 reports; sound APPROVE ×2; 9 modules CHANGES: panics on malformed files/saves (sprite first_row, party size, actor tables by object slot, -1 slots), fishing BorrowMutError, held mouse button never yields (walk burst, y/n and more prompts freeze), intro TV loop, items lost on failed Animate/scatter/balloon/Codex, egg cursor, stale-session save race; ledger in the session scratchpad review/findings.md | done |
 | M2-fix | 10 fix units (`.worktrees/fix-<unit>`, branch `fix/m2-<unit>` from `4ab938d`): combat, state (actors+saveload), objects, magic, usecmd, inventory, sound, intro (+ intro music), mouse (+ 0x132338 shared seam), web; RED test per MUST-FIX | dispatched 2026-10-15 | in flight |
 | M2-ship | merge fix branches → gates → re-review of the fix diffs → main → preview → live check → production → live check | after M2-fix | next |
+
+## M2 follow-ups — rights + cpnits closed 2026-10-15
+
+| Unit | Branch | Result |
+|---|---|---|
+| cpnits | fix/m2r4-cpnits | merged 2b4551b: Time Stop turns charge no combat-NPC time (asm 0x1200e8); trace.json carries keys + complete and trace.py refuses partial runs; tracecore.mjs + test_trace.mjs; lateness repaid one tick per wait (no wait ends more than its ending tick early); docs without game values; hunk lengths from hunk2raw's JSON |
+| rights | fix/m2r4-rights | merged 3c2741e: no character or place names, messages, song titles, tables, bytes or values read from the game files anywhere in the repo (sweep 0 in owned files); mechanics vocabulary allowed (01-spec §Rights); mkadf by regions + sha256 (ADFs byte-identical); classify.py by string address (0 classification differences / 1383); palette and conversation checks structural |
+
+Redeploy: main 2b4551b → production 8999b6ca; 765 tests (--profile gate), web 28/28; live check 10 requests, 0 foreign, 0 errors; frames read by the dispatcher.
