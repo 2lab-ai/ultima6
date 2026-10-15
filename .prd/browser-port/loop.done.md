@@ -144,3 +144,11 @@ Gates on `a99c2bf`:
 
 Live check2 on preview `cf99e9f2` and on production: 10 requests, 0 foreign, 0 errors. Frames read by the dispatcher: menu, game start, walk into the start fight with wound lines, Journey Onward after reload.
 
+## webpace — closed 2026-10-15
+
+| Unit | Branch | Result |
+|---|---|---|
+| webpace | fix/m2r4-webpace | Merged as `517b2ba` (head `de4e98f`).<br>**Root cause:** the clock seed, not the hold length. About 7% of boots leave a foe in the walked cell; the step is blocked and 0 cells result.<br>**Fix:** holds are timed on the engine clock; a direction retry is added; the pass-turn after a blocked sideways try is added.<br>**Pace check:** the original's fastest repeat, 500 ms from `pace/run-b1..b6`, is an independent floor, both cumulative and consecutive. The harness guards are labelled as such. The results table is in `re/notes/oracle.md` §4, and the `HELD_WALK_MS` doc matches it.<br>**Receipts on de4e98f:** 3 runs under 8× `yes` and 3 under `U6_FRAME_DELAY=150`, all 29/29.<br>**Reviews:** gpt6 ×3 and opus ×2, APPROVE. |
+
+Gates on `517b2ba`: fmt, clippy, 793 tests (`--profile gate`), web 29/29. The wasm is unchanged at 1,759,472 B, so no redeploy was needed.
+

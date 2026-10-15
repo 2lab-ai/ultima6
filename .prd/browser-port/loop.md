@@ -46,7 +46,6 @@ re-verified: G1 · gargoyles stand in the throne room in the M2 production frame
 
 | Unit | Branch | Scope | State |
 |---|---|---|---|
-| webpace | fix/m2r4-webpace | browser pace test flake. Root cause: the clock seed. About 7% of boots leave a foe in the walked cell, the step is blocked, and 0 cells result. Fixed with an engine-clock hold plus a direction retry, and a turn passed after a blocked sideways try. 5+5 receipts green on c319cae | merging main → review |
 | intake-budget | fix/m2r6-intake-budget | the intake's total output bounded (PP20 per-file only today; WU-P7b) | in flight |
 | nostep | fix/m2r6-nostep | the cost of commands that do not walk: a blocked step (the port runs no world turn; check the asm and trace) and Pass (followers' pass + vessel drift unpaced, commands.rs:400-402) | in flight |
 | zip-slice | fix/m2r6-zip-slice | a dropped zip is read by `Blob.slice` (central directory + wanted entries only), wasm ~192 MiB → measured | in flight |
