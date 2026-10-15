@@ -390,24 +390,58 @@ HUNK_MODULE = {
 }
 MED_RANGE = (0x1001F8, 0x101388)   # [likely] MED player module inside hunk 0
 
-# Distinctive-string votes (case-sensitive regex on the string text -> subsystem).
-STRING_RULES = [
-    (r"savegame/objlist|Save game|Restore game|Saving\.\.\.|Restoring\.\.\.|Disk full", "saveload"),
-    (r"talkdr|No response|Talking to yourself|converse\.a|portrait\.a|you say:|milady|milord", "converse"),
-    (r"spellbook|Magical energy|Create %d food|To phase|No foes|^(Sanct|Create Food|Detect Magic|Mass Sleep|Fireball)$", "magic"),
-    (r"Attack|killed|wounded|Out of arrows|Out of bolts|grazed|critical|Begin combat|Break off combat|yells for help", "combat"),
-    (r"^(COMMAND|FRONT|FLANK|BERSERK|RETREAT|ASSAULT)$", "combat"),
-    (r"Not in solo mode|has healed|Hull Strength|Not while in Comb", "party"),
-    (r"Wind:|%2d-%02d-%04d", "time"),
-    (r"\.MOD$|^Sound o", "sound"),
-    (r"locked!|opened!|closed!|look\.lzd|too many objects|objblk|buried|drawbridge|lever|Torch is lit|is doused", "objects"),
-    (r"Ready-|Unready-|Can't be readied|Too heavy|No place to put", "inventory"),
-    (r"STR:%d|DEX:%d|INT:%d|Lev%/Exp|Version", "ui"),
-    (r"^chunks$|maptiles|basetile", "map"),
-    (r"^N\]Nuschedule$|^schedule$", "schedules"),
-    (r"You must first cre|U6\.CH", "boot"),
-]
-STRING_RULES = [(re.compile(p), s) for p, s in STRING_RULES]
+# Distinctive-string votes: the strings of `game` whose text marks a subsystem, by address
+# (image address in game.bin). Chosen once by reading the text; the text stays out of the
+# repo, so a string counts by its address alone.
+STRING_SUBSYSTEM = {
+    "saveload": (
+        0x101f4c, 0x104fd4, 0x1345e2, 0x13463c, 0x13464a, 0x1540a3,
+    ),
+    "converse": (
+        0x112758, 0x112760, 0x1129a2, 0x112a4a, 0x112a5a, 0x112a68, 0x112aa2, 0x155338,
+        0x155344,
+    ),
+    "magic": (
+        0x115422, 0x115446, 0x115452, 0x115514, 0x11553c, 0x115876, 0x1159ca, 0x115a1e,
+        0x115a66, 0x115ab2, 0x115b36, 0x128730, 0x154369,
+    ),
+    "combat": (
+        0x101f02, 0x110b72, 0x110b7a, 0x110b86, 0x110b8c, 0x110b94, 0x110b9c, 0x153fa0,
+        0x153fc2, 0x153fcd, 0x153fda, 0x154014, 0x154024, 0x154044, 0x154055, 0x154196,
+        0x1541bc, 0x1541cb, 0x1543d8,
+    ),
+    "party": (
+        0x112a1e, 0x1272a8, 0x1272b6, 0x1272d2, 0x127356, 0x12cd66, 0x12cfc0, 0x1543b0,
+    ),
+    "time": (
+        0x15445d,
+    ),
+    "sound": (
+        0x110806, 0x110816, 0x110824, 0x110832, 0x110840, 0x11084e, 0x11085c, 0x11086a,
+        0x154475, 0x15447f,
+    ),
+    "objects": (
+        0x10a490, 0x10a4bc, 0x1287f6, 0x128820, 0x12882a, 0x12883e, 0x128848, 0x128896,
+        0x1288d6, 0x12c91c, 0x12c926, 0x12ca2a, 0x12ca66, 0x12ca7e, 0x12ca96, 0x12cab4,
+        0x12cad2, 0x153ec6, 0x153ed8, 0x153eee,
+    ),
+    "inventory": (
+        0x110c14, 0x110c24, 0x110c38, 0x110c46, 0x110c6a,
+    ),
+    "ui": (
+        0x110bb2, 0x110bba, 0x110bc2, 0x110bea, 0x1544b4,
+    ),
+    "map": (
+        0x104fca, 0x108ab8, 0x152df6,
+    ),
+    "schedules": (
+        0x104fbc,
+    ),
+    "boot": (
+        0x1350a0, 0x1350a6,
+    ),
+}
+STRING_VOTES = {a: sub for sub, addrs in STRING_SUBSYSTEM.items() for a in addrs}
 SHARED_TABLE_MIN_USERS = 6   # a pointer table read by this many functions is a message pool
 
 # Hand-read functions: addr -> (class, subsystem, role). A role ending in "[likely]" is an
@@ -479,7 +513,7 @@ CURATED = {
     0x12c594: ("game", "objects", "douse a light source"),
     0x1305e0: ("game", "objects", "Use command: dispatch to per-object handlers"),
     # sound
-    0x110878: ("game", "sound", "play song N (load ULTIMA_x.MOD, start MED); 0 = stop"),
+    0x110878: ("game", "sound", "play song N (load its file named in the song table, start MED); 0 = stop"),
     0x110912: ("game", "sound", "pick a song for the current area and play it"),
     # ui / inventory
     0x110d2c: ("game", "ui", "party-member stats panel (STR/DEX/INT, HP/MP, level)"),
@@ -490,7 +524,7 @@ CURATED = {
     0x1123d6: ("game", "inventory", "Unready an item"),
     # converse
     0x1127c4: ("game", "converse", "Talk command: target, shrine/statue cases, start talk"),
-    0x1125b8: ("game", "converse", "converse text substitutions (milord/milady, time of day)"),
+    0x1125b8: ("game", "converse", "converse text substitutions (forms of address, time of day)"),
     0x114afa: ("game", "converse", "start conversation: checks, load script, greeting"),
     0x1130a2: ("game", "converse", "converse interpreter main loop (input, keyword match)"),
     0x11404c: ("game", "converse", "converse opcode executor"),
@@ -554,13 +588,8 @@ CURATED = {
 }
 
 
-def string_text(strings, a):
-    s = strings[a]
-    return s if isinstance(s, str) else str(s)
-
-
 def classify(data):
-    procs, strings = data["procs"], data["strings"]
+    procs = data["procs"]
     real = {a: r for a, r in procs.items() if r["kind"] != "thunk"}
     users = Counter(k for r in real.values() for k in r["tables"])
     for r in real.values():
@@ -574,10 +603,8 @@ def classify(data):
         cls, sub, _ = HUNK_MODULE.get(r["hunk"], ("game", "unknown", ""))
         votes = Counter()
         for s in r["evidence_strings"]:
-            for rx, vs in STRING_RULES:
-                if rx.search(string_text(strings, s)):
-                    votes[vs] += 1
-                    break
+            if s in STRING_VOTES:
+                votes[STRING_VOTES[s]] += 1
         role = None
         if a in CURATED:
             cls, sub, role = CURATED[a]
@@ -597,8 +624,8 @@ def classify(data):
         subs = {real[c]["subsystem"] for c in r["callers"] if c in real}
         r["caller_subsystems"] = len(subs)
         if r["role"] is None:
-            r["role"] = auto_role(r, strings)
-        r["evidence"] = evidence(r, strings)
+            r["role"] = auto_role(r)
+        r["evidence"] = evidence(r)
     neighbour_roles(real)
     for a, r in procs.items():
         if r["kind"] == "thunk":
@@ -645,7 +672,7 @@ def propagate(real):
             break
 
 
-# Milestone 1 = boot into Britannia, draw the map with objects and party, walk with the
+# Milestone 1 = boot into the world map, draw the map with objects and party, walk with the
 # keyboard, NPCs follow schedules, talk to an NPC. Closure over direct calls from the startup,
 # not entering the command handlers below (other commands), magic, or non-leaf combat code;
 # the cut targets are recorded as stub points.
@@ -688,14 +715,14 @@ def mark_milestone(real):
         r["milestone1_stub"] = a in cut and a not in seen
 
 
-def auto_role(r, strings):
+def auto_role(r):
     ev = r["evidence_strings"]
     if r["class"] == "crt":
         return "C library routine (not identified)"
     if r["class"] == "med":
         return "MED player internals [likely]"
     if ev:
-        return 'uses "%s"' % short(string_text(strings, ev[0]), 28)
+        return "uses string 0x%x" % ev[0]
     if r["os"]:
         return "calls " + ", ".join(sorted({o["lib"] + "." + o["name"] for o in r["os"]})[:3])
     return None                     # filled from neighbours in neighbour_roles()
@@ -723,10 +750,10 @@ def short(s, n=18):
     return s if len(s) <= n else s[: n - 1] + "~"
 
 
-def evidence(r, strings):
+def evidence(r):
     out = []
     for s in r["evidence_strings"][:2]:
-        out.append('"%s"' % short(string_text(strings, s)))
+        out.append("string 0x%x" % s)
     for o in r["os"]:
         tok = "%s.%s%s" % (o["lib"], o["name"], "" if o["checked"] else "?")
         if tok not in out:
@@ -855,8 +882,8 @@ def write_index(data, notes_dir, real, stubs, by_fam):
              "strings, m = module default, one string, or a `[likely]` curated role, l = "
              "inferred from callers or an unreached MED-range function. `M1` = M in the "
              "milestone-1 set, S = stub point at its boundary (see subsystems.md). `stubs` = "
-             "jump-stub addresses that jump to the function. `key evidence`: quoted string "
-             "(truncated), library call (`?` = vector not checked by hand), custom-chip/CIA "
+             "jump-stub addresses that jump to the function. `key evidence`: the address of a "
+             "string the function uses (its text is not reproduced), library call (`?` = vector not checked by hand), custom-chip/CIA "
              "register, sole caller, or fan-in.\n\n")
     w.append("## Class histogram\n\n| class | all procedures | functions only |\n|---|---|---|\n")
     for k in sorted(allh, key=lambda k: -allh[k]):

@@ -30,7 +30,7 @@ async fn actor(cx: &Cx<'_>) -> i16 {
 /// Original: 0x11404c (converse op executor)
 ///
 /// Runs op `op` (already read) with `npc` = the NPC talked to. Result 0, 1 for a malformed
-/// operand or an `a1` whose condition is -1, -1 (and "Unknown command.") for an unknown op;
+/// operand or an `a1` whose condition is -1, -1 (and the line 0x1129d2) for an unknown op;
 /// 0x1148f0 ignores it. Operand expressions are read with 0x1130a2, actor operands then go
 /// through 0x112b0a.
 pub(crate) async fn exec(cx: &Cx<'_>, op: u8, npc: i16) -> i16 {

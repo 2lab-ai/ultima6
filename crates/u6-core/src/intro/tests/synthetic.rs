@@ -14,6 +14,8 @@ use crate::intro::mem::{self, Chip, ItemHeader, Ptr, Region, View};
 use crate::intro::state::IntroState;
 use crate::intro::text::{self, Arg, TextCtx};
 use crate::intro::{create, gypsy, handoff, input, music, opening, passages, screen};
+
+use super::asm::*;
 use crate::sound::MedCall;
 use crate::state::State;
 
@@ -389,32 +391,33 @@ fn passage_exe() -> UExe {
         &mut e,
         chain,
         &[
-            0x2007,
-            0x4a40,
-            0x6700,
+            MOVE_L_D7_D0,
+            TST_W_D0,
+            BEQ_W,
             rel(chain + 6, case0),
-            0x6000,
+            BRA_W,
             rel(chain + 10, tail),
         ],
     );
-    let mut code: Vec<u16> = vec![
-        0x7005, 0x3940, 0x2cfc, 0x397c, 0x012f, 0x2d0a, 0x2006, 0x41ec, 0x2d02,
-    ];
+    // moveq #5,d0; move.w d0,$2cfc(a4); move.w #$12f,$2d0a(a4); move.l d6,d0; lea $2d02(a4),a0.
+    let mut code: Vec<u16> = vec![moveq_d0(5), MOVE_W_D0_TO_A4, 0x2cfc];
+    code.extend([MOVE_W_IMM_TO_A4, 0x012f, 0x2d0a]);
+    code.extend([MOVE_L_D6_D0, LEA_A4_A0, 0x2d02]);
     let at = |code: &Vec<u16>| case0 + 2 * code.len() as u32;
     let ext = at(&code) + 2;
-    code.extend([0x4eba, rel(ext, fill_thunk)]);
-    code.extend([0x554f, 0x707f, 0x3f00]);
+    code.extend([JSR_PC, rel(ext, fill_thunk)]);
+    code.extend([SUBQ_W_2_A7, moveq_d0(0x7f), PUSH_W_D0]);
     let ext = at(&code) + 2;
-    code.extend([0x487a, rel(ext, fmt)]);
+    code.extend([PEA_PC, rel(ext, fmt)]);
     let ext = at(&code) + 2;
-    code.extend([0x4eba, rel(ext, print_thunk)]);
-    code.extend([0x504f, 0x1b7c, 0x0002, 0xfffe]);
+    code.extend([JSR_PC, rel(ext, print_thunk)]);
+    code.extend([ADDQ_W_8_A7, MOVE_B_IMM_TO_A5, 0x0002, 0xfffe]);
     let ext = at(&code) + 2;
-    code.extend([0x6000, rel(ext, tail)]);
+    code.extend([BRA_W, rel(ext, tail)]);
     poke_words(&mut e, case0, &code);
-    poke_words(&mut e, tail, &[0x206d, 0xfff6]);
-    poke_words(&mut e, fill_thunk, &[0x4ef9, 0x0010, 0xf898]);
-    poke_words(&mut e, print_thunk, &[0x4ef9, 0x0011, 0x42f0]);
+    poke_words(&mut e, tail, &[MOVEA_L_A5_A0, 0xfff6]);
+    poke_words(&mut e, fill_thunk, &jmp_abs(0x0010_f898));
+    poke_words(&mut e, print_thunk, &jmp_abs(0x0011_42f0));
     e.poke(fmt, b"Hi%c\0");
     e
 }

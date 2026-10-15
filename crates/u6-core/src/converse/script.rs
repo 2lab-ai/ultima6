@@ -22,8 +22,8 @@ const SPECIAL_TALKERS: [(u16, u16, i16); 3] = [
     (0x17e, 0x67, 0xc1),
     (0x16b, 0x68, 0xc2),
 ];
-/// Objlist-block offset of the avatar's portrait number (A4-0x7b03, objlist 0x1C72, 1-based).
-const TAIL_AVATAR_PORTRAIT: usize = 0x81;
+/// Objlist-block offset of the hero's portrait number (A4-0x7b03, objlist 0x1C72, 1-based).
+const TAIL_HERO_PORTRAIT: usize = 0x81;
 
 impl ConverseState {
     /// The byte at signed position `pos`. Outside the buffer the port sets `fault` and yields 0.
@@ -131,7 +131,7 @@ fn le32(f: &[u8], at: usize) -> Option<usize> {
 /// longword is the unpacked size: 0 or ≥ 0x2800 means the next 0x2800 file bytes are read as
 /// they are, otherwise they are a U6-LZW stream. Loading into the script buffer stops the music
 /// first. Result: `npc` (non-zero) once loaded. Port divergences: a missing archive or a stream
-/// that does not decode gives 0 ("no response") where the original's disk-prompting open would
+/// that does not decode gives 0 (the NPC does not answer) where the original's disk-prompting open would
 /// not fail; nothing is written past the destination buffer.
 pub fn load_script(state: &mut State, files: &Files, npc: i16, dst: ScriptDst<'_>) -> i16 {
     let Some((letter, item)) = script_item(state, npc) else {
@@ -175,9 +175,9 @@ pub fn load_script(state: &mut State, files: &Files, npc: i16, dst: ScriptDst<'_
     npc
 }
 
-/// The loading half of 0x133d3e ([`draw_portrait`]): 56×64 palette indices of `npc`'s portrait, or `None` (avatar without a
+/// The loading half of 0x133d3e ([`draw_portrait`]): 56×64 palette indices of `npc`'s portrait, or `None` (hero without a
 /// portrait number, empty item, missing file). Object types 0x175 / 0x17e / 0x16b at slots from
-/// 0xe0 use portrait slots 0xc0..0xc2; the avatar (actor 1) uses item `n - 1` of `portrait.z`
+/// 0xe0 use portrait slots 0xc0..0xc2; the hero (actor 1) uses item `n - 1` of `portrait.z`
 /// where `n` is the objlist portrait byte; any other slot `s` uses item `s - 1` (slot 0: item 0)
 /// of `portrait.a`, from 0x62 on item `s - 1 - 0x62` of `portrait.b`.
 pub fn load_portrait(state: &State, files: &Files, npc: i16) -> Option<Vec<u8>> {
@@ -192,7 +192,7 @@ pub fn load_portrait(state: &State, files: &Files, npc: i16) -> Option<Vec<u8>> 
         let n = state
             .actors
             .objlist_tail
-            .get(TAIL_AVATAR_PORTRAIT)
+            .get(TAIL_HERO_PORTRAIT)
             .copied()
             .unwrap_or(0);
         (b'z', i16::from(n) - 1)

@@ -15,11 +15,11 @@
 //!
 //! Original functions this module will own (milestone 1):
 //!
-//! - 0x1125b8 [converse] converse text substitutions (milord/milady, time of day)
+//! - 0x1125b8 [converse] converse text substitutions (forms of address, time of day)
 //! - 0x1127c4 [converse] Talk command: target, shrine/statue cases, start talk
 //! - 0x1128d0 [converse] unnamed; 1 callees
 //! - 0x112b0a [converse] leaf; callers 2, from 1 subsystems
-//! - 0x112b20 [converse] uses "Undefined."
+//! - 0x112b20 [converse] uses string 0x112984
 //! - 0x112ba4 [converse] unnamed; 1 callees
 //! - 0x112bf2 [converse] leaf; callers 7, from 2 subsystems
 //! - 0x112d72 [converse] step of 0x114afa (start conversation: checks, load ~)
@@ -156,8 +156,8 @@ impl Default for ConverseState {
 pub struct OutFallback {
     /// Pending prefix: `#` `$` `%` `/` `@` `\` `^`, or 0.
     pub prefix: u8,
-    /// Inside `&`..`&` (Gargish text, shown only while A4-0x7b26 is set).
-    pub gargish: bool,
+    /// Inside `&`..`&` (text in the gargoyles' tongue, shown only while A4-0x7b26 is set).
+    pub gargoyle_tongue: bool,
     /// The last `#` variable was not 1 (`/` and `\\` pick singular / plural letters).
     pub plural: bool,
 }

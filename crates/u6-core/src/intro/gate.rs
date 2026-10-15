@@ -6,7 +6,7 @@
 //! hand that picks it up, 5 the circle lit red by the gate, 4 the stones in front, 2 the red
 //! moongate (drawn through the room view A4+0x25f6, clipped at y 0x65 so it rises out of the
 //! ground), 6 the hand holding the stone close up (the view tilts down to it), 7..0x1a the
-//! Avatar seen from behind, smaller step by step, walking into the gate.
+//! hero seen from behind, smaller step by step, walking into the gate.
 
 use crate::engine::Io;
 
@@ -78,7 +78,7 @@ fn tilt_frame(st: &mut IntroState, file: Ptr, d: i16) {
 ///
 /// Passages 9 .. 0xf, each until a key: the stones at night (9), the hand picks the stone up
 /// (0xa), the gate rises and the hand goes down (0xb), the view tilts down to the stone in the
-/// hand and back (0xc, 0xd), the gate quivers (0xe, 0xf), then the Avatar walks into it and the
+/// hand and back (0xc, 0xd), the gate quivers (0xe, 0xf), then the hero walks into it and the
 /// gate sinks into the ground; the empty circle stays until a key.
 pub(super) async fn gate(st: &mut IntroState, io: &Io) {
     check_key(st, io);
@@ -227,7 +227,7 @@ async fn gate_until_key(st: &mut IntroState, io: &Io, file: Ptr, tremble: i16) -
 }
 
 /// 0x104ef2..0x10548c: the view tilts down to the hand and back (passages 0xc, 0xd), the gate
-/// quivers (0xe, 0xf), the Avatar walks into it. False on Escape.
+/// quivers (0xe, 0xf), the hero walks into it. False on Escape.
 async fn hand_and_walk(st: &mut IntroState, io: &Io, file: Ptr) -> bool {
     let step = 4;
     let mut d: i16 = 0;

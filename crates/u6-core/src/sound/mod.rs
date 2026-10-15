@@ -13,7 +13,9 @@
 //!   each engine tick ([`AudioDriver::sync`]) and pulls samples ([`AudioDriver::render`]).
 //!
 //! The song file names, the player's tables and the sound-effect module come from the user's
-//! `game` (`tables.rs`); the songs are the user's `ULTIMA_?a.MOD` files (MMD0, OctaMED).
+//! `game` (`tables.rs`); the songs are the user's files those names point at (MMD0, OctaMED):
+//! 0x110878 reads song `n`'s name pointer from A4-0x779a + 4n (0x1108c4..0x1108cc), as the
+//! port does.
 //!
 //! Original functions this module owns:
 //!

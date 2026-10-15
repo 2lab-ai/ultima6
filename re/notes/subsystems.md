@@ -19,10 +19,10 @@ line by line. Measured 2026-10-14.
 
 | step | function | what |
 |---|---|---|
-| 1 | 0x14ef06 | memory check (exits below 260000 bytes free), buffers, opens intuition + graphics, saves the system copper list, adds VBlank server "Ultima 6 Int", opens input.device (0x151c60) |
+| 1 | 0x14ef06 | memory check (exits below 260000 bytes free), buffers, opens intuition + graphics, saves the system copper list, adds a VBlank server (its name string at 0x14eeea), opens input.device (0x151c60) |
 | 2 | 0x152e50, 0x14f16c | tile graphics: maptiles / tileindx / masktype / animmask, objtiles |
 | 3 | 0x134f08 | animdata + tileflag tables |
-| 4 | 0x1351d8 body | BOOK.DAT, U6.CH; "You must first create a character" if none |
+| 4 | 0x1351d8 body | BOOK.DAT, U6.CH; the no-character line (0x1350a6) if none |
 | 5 | 0x105350 | load state: objlist, schedules, base tiles; party position; object blocks; view |
 | 6 | 0x110878 / 0x110912 | start area music (MED player, hunk 0) |
 | 7 | 0x1041d8 | command loop (below) |
@@ -57,7 +57,7 @@ One iteration (one player command):
 | M | 0x87 | 0x12ae04 Move (push) | | 0x13 | 0xaa | 0x105716 Save (asks first) |
 | R | 0x89 | 0x127b1a Rest | | 0x12 | - | 0x1052c8 Restore (asks first) |
 
-Control codes (read as ASCII control keys [likely]): 0x05 "Exit Game?" sets code 0x12d, which
+Control codes (read as ASCII control keys [likely]): 0x05 (the exit question, 0x154091) sets code 0x12d, which
 ends the loop; 0x08 help; 0x11 skips to the end-of-turn path; 0x16 version line; 0x1a sound
 on/off (0x110912 / 0x110878).
 Codes 0xd5-0xd7 and 0x119 are debug/cheat paths (coordinate dump, a hidden prompt, a clock
@@ -72,7 +72,7 @@ letter.
 | 0x1200b0 | NPC turn: reads the actor's current schedule entry (location) and walks toward it / performs its worktype; worktype-specific helpers live in hunk 13 (0x12500a..0x126f58) |
 | 0x121826 | schedule selection (called from the clock): for actors 2..0xdf, finds the entry whose hour matches the current hour and whose weekday matches or is "any", stores the entry index, sets worktype 0x81 |
 | 0x10368a | clock tick: torch/light timers, status timers, random events, date + wind line in the status area |
-| 0x11d4ee | player step: direction, drunk wobble ("Hic!"), blocking, level transitions (0x11d1d4) |
+| 0x11d4ee | player step: direction, drunk wobble (line 0x11b912), blocking, level transitions (0x11d1d4) |
 | 0x11c910 | each party member follows the leader [likely] |
 
 Global tables these share (offsets read off the code, meaning [likely]):
@@ -120,7 +120,7 @@ Hunks are the SAS/C modules the functions live in.
 | unknown | 4 | 9 | 4 | 17 | hunk 17 helpers (0x131196 ...) |
 
 No intro/endgame module was identified in `game`; the only endgame-flavoured code found is a
-Use handler ("The Codex has vanished", 0x1303f4). The other executables (`u`, `ultima6`; see
+Use handler (0x1303f4, printing the vanishing line 0x12cf66). The other executables (`u`, `ultima6`; see
 [game-layout.md](game-layout.md)) are the candidates for intro and character creation
 [unverified].
 
@@ -145,7 +145,7 @@ actor model (layer 4), not with combat.
 
 ## Milestone 1 set
 
-Goal: boot into Britannia, draw the map view with objects and the party, walk with the keyboard,
+Goal: boot into the world map, draw the map view with objects and the party, walk with the keyboard,
 NPCs follow schedules, talk to an NPC.
 
 Method (in `classify.py`, `mark_milestone`): closure over direct calls from the startup 0x100000

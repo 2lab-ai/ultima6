@@ -10,7 +10,7 @@ All 1383 REA procedures of `game` (base 0x00100000, A4 = 0x15B6F0 [likely]) = 59
 
     python3 -I -B tools/rea/classify.py --notes re/notes   # also writes ~/Games/ultima6/re/inventory.json
 
-Legend. `class`: crt = SAS/C runtime, os-wrapper, med = MED music player, file-io, graphics, input, game. `subsystem/conf`: conf h = curated or two distinctive strings, m = module default, one string, or a `[likely]` curated role, l = inferred from callers or an unreached MED-range function. `M1` = M in the milestone-1 set, S = stub point at its boundary (see subsystems.md). `stubs` = jump-stub addresses that jump to the function. `key evidence`: quoted string (truncated), library call (`?` = vector not checked by hand), custom-chip/CIA register, sole caller, or fan-in.
+Legend. `class`: crt = SAS/C runtime, os-wrapper, med = MED music player, file-io, graphics, input, game. `subsystem/conf`: conf h = curated or two distinctive strings, m = module default, one string, or a `[likely]` curated role, l = inferred from callers or an unreached MED-range function. `M1` = M in the milestone-1 set, S = stub point at its boundary (see subsystems.md). `stubs` = jump-stub addresses that jump to the function. `key evidence`: the address of a string the function uses (its text is not reproduced), library call (`?` = vector not checked by hand), custom-chip/CIA register, sole caller, or fan-in.
 
 ## Class histogram
 

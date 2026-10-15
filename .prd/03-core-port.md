@@ -142,7 +142,7 @@ crates/u6-core/src/
 
 ## 7. Milestone-1 acceptance
 
-Native headless runner and the browser both: boot from the user's disks → Britannia map view
+Native headless runner and the browser both: boot from the user's disks → world map view
 with party and objects drawn, side panels, message scroll; arrow keys walk the party; NPCs move
 on schedule as the clock advances; `T` + direction talks to an NPC and shows portrait + text.
 Receipt = frames read by the dispatcher (headless PNG sequence + live-site screenshots), not

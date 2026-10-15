@@ -10,7 +10,7 @@ use crate::state::State;
 
 use super::state::IntroState;
 
-/// Objlist bytes 0x105700 writes (formats.md §6; actor 1 = the Avatar).
+/// Objlist bytes 0x105700 writes (formats.md §6; actor 1 = the hero).
 const STR: usize = 0x901;
 const DEX: usize = 0xa01;
 const INT: usize = 0xb01;

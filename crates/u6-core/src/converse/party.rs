@@ -58,12 +58,12 @@ pub(crate) fn resolve_npc(s: &State, v: i16) -> i16 {
     if v == SELF_NPC { s.converse.npc } else { v }
 }
 
-/// Original: 0x112b20 (NPC name from its script; "Undefined." when there is none)
+/// Original: 0x112b20 (NPC name from its script; the line 0x112984 when there is none)
 ///
 /// Loads `npc`'s script into a scratch buffer and copies its bytes 2..52 to the name buffer
 /// A4+0x13ba (no script: only its first byte is cleared), cut at the first byte with bit 7 set
-/// or after the first NUL. A cut at 0 (the script's name is empty) prints "Undefined."; NPC 0x6e
-/// gets a '.' as its third character.
+/// or after the first NUL. A cut at 0 (the script's name is empty) prints the line 0x112984;
+/// NPC 0x6e gets a '.' as its third character.
 pub(crate) async fn npc_name_from_script(cx: &Cx<'_>, npc: i16) -> Vec<u8> {
     let (name, undefined) = cx.st(|s| name_from_script(s, cx.io.files(), npc));
     if undefined {
@@ -73,7 +73,7 @@ pub(crate) async fn npc_name_from_script(cx: &Cx<'_>, npc: i16) -> Vec<u8> {
     name
 }
 
-/// The synchronous body of 0x112b20: the name, and whether "Undefined." is due.
+/// The synchronous body of 0x112b20: the name, and whether the line 0x112984 is due.
 pub(crate) fn name_from_script(s: &mut State, files: &Files, npc: i16) -> (Vec<u8>, bool) {
     let mut tmp = Vec::new();
     let mut buf = if load_script(s, files, npc, ScriptDst::Other(&mut tmp)) != 0 {
