@@ -49,7 +49,7 @@ pub struct Codex {
     pub bin: PathBuf,
     /// `$CODEX_HOME` (default `~/.codex`).
     pub home: PathBuf,
-    /// One deadline for the call: the process group, its output and the event reader.
+    /// One deadline for the call: the process group, its prompt and its output.
     pub timeout: Duration,
 }
 
@@ -72,7 +72,7 @@ impl Codex {
 
 /// Most bytes of one codex event line; a longer line is read and dropped whole.
 pub const LINE_MAX: usize = 64 << 10;
-/// How long the event reader is given, once the call's group is gone, to report its end.
+/// How long the event stream is given, once the call's group is gone, to end.
 const CLEANUP: Duration = Duration::from_secs(1);
 
 /// Kills every process of the group `pgid` (the call and anything it started).
