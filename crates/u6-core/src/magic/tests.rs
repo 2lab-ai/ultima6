@@ -59,7 +59,7 @@ where
         e.tick(&[InputEvent::Key(k)], 16);
     }
     // Enough display frames for the hit flashes combat holds on screen.
-    for _ in 0..600 {
+    for _ in 0..6000 {
         if e.finished() {
             break;
         }
@@ -562,7 +562,7 @@ fn xray_shows_the_caster_flash_before_its_refreshes() {
         super::spells::xray(&st, &io, 0x49).await;
     });
     let mut at_reveal = None;
-    for _ in 0..400 {
+    for _ in 0..4000 {
         e.tick(&[], 16);
         {
             let s = e.state();
@@ -609,7 +609,7 @@ where
     let mut out = Vec::new();
     e.tick(events, 16);
     out.push((e.state().combat.shown, snap(&e)));
-    for _ in 0..800 {
+    for _ in 0..8000 {
         if e.finished() {
             break;
         }

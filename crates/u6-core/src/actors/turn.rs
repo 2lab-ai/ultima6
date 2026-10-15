@@ -11,6 +11,24 @@ use super::{clock, leaves, npc, path, tail, walk};
 /// Refills (clock minutes) without anyone able to act after which the scheduler yields to the
 /// host once (port checkpoint, spec 03 §1: a yield changes no game state).
 const IDLE_REFILLS_PER_YIELD: u32 = 60;
+/// [replaced] Engine milliseconds of the refresh after a turn (0x102f2a with the view changed:
+/// the view flags 0x109e74, then 0x102ef0 draws the window and copies it to the screen): 427 ms,
+/// 21.375 PAL frames, the median of 38 such calls traced in the oracle (19.96..23.80: the start
+/// fight and the castle without it, 7 steps each; tools/oracle/trace.mjs on the CPU clock, the
+/// reduction tools/oracle/trace.py). With the view unchanged the call returns at once. The
+/// original has no wait there: that is the 68000's drawing time, which the port, drawing at
+/// once, waits on the engine clock instead.
+pub const AFTER_TURN_MS: u16 = 427;
+/// [replaced] Engine milliseconds of one pick of the scheduler 0x1213de (its pass over the 256
+/// actors, the refills and clock minutes, the formation and schedule passes, spread over the
+/// picks): 20 ms, 0.994 PAL frames, the world turn's time outside its NPC turns and refreshes
+/// over its picks (each NPC turn and the player's): 179 picks traced in the same runs.
+pub const PICK_MS: u16 = 20;
+/// [replaced] Engine milliseconds of an NPC turn in a combat worktype (below 0x80: the party's
+/// combat modes, assault) besides what it draws, prints and names: 47 ms, 2.338 PAL frames, the
+/// mean of 43 traced in the start fight (0.95..4.04). A turn in a schedule worktype (0x80 and
+/// up) takes 0.05 frames (n = 122) and waits nothing.
+pub const COMBAT_NPC_MS: u16 = 47;
 
 fn healthy(s: &State, actor: usize) -> bool {
     s.actors.attrs.status[actor] & 0x16 == 0
@@ -445,6 +463,11 @@ fn refill(s: &mut State) {
 /// may be swallowed ([`swallowed`]); an NPC (not worktype 1 or 2) runs [`npc::npc_turn`], then
 /// the bookkeeping again. Returns when the pick is the player's character (worktype 2, not
 /// swallowed), after making it the leader if it is another party member.
+///
+/// Port: the original draws as it goes and is as slow as that drawing; the port waits the
+/// measured time on the engine clock instead, at each pick ([`PICK_MS`], and [`COMBAT_NPC_MS`]
+/// before an NPC turn in a combat worktype) and before each refresh of a changed view
+/// ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile.
 pub async fn world_turn(state: &RefCell<State>, io: &Io) {
     leader_bookkeeping(&mut state.borrow_mut());
     raise_if_dead(state, io).await;
@@ -485,9 +508,13 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
         let actor = pick.actor as u16;
         let a = usize::from(actor);
         let held = swallowed(&mut state.borrow_mut(), actor);
+        let wt = state.borrow().actors.worktype[a];
+        let npc = !held && wt != 2 && wt != 1;
+        let fights = npc && wt < 0x80;
+        let ms = PICK_MS + if fights { COMBAT_NPC_MS } else { 0 };
+        crate::combat::present::pace(state, io, ms).await;
         if !held {
-            let wt = state.borrow().actors.worktype[a];
-            if wt != 2 && wt != 1 {
+            if npc {
                 npc::npc_turn(state, io, actor).await;
                 leader_bookkeeping(&mut state.borrow_mut());
                 raise_if_dead(state, io).await;
@@ -495,6 +522,9 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
                 if (2..0x10).contains(&s.actors.worktype[a]) {
                     s.actors.attrs.unknown_18f1[a] = actor as u8;
                 }
+            }
+            if state.borrow().map.view_dirty != 0 {
+                crate::combat::present::pace(state, io, AFTER_TURN_MS).await;
             }
             seams::after_turn_refresh(&mut state.borrow_mut());
         }
@@ -625,7 +655,8 @@ mod tests {
             world_turn(&st, &io).await;
             r.set(r.get() + 1);
         });
-        for _ in 0..10 {
+        // Two NPC turns and the refreshes paced on the engine clock (well under 2 s).
+        for _ in 0..125 {
             e.tick(&[], 16);
         }
         assert!(e.finished());
@@ -634,6 +665,53 @@ mod tests {
         // The NPCs spent their points, the round ended, all were refilled and a minute passed.
         assert_eq!(s.actors.calendar.minute, 31);
         assert!(s.actors.mp(1) > 0, "the player has points again");
+    }
+
+    /// The engine time one world turn of `world(npcs)` takes at host ticks of `tick_ms` (a poll
+    /// with no time elapsed after each when `zero_polls`), the view changed before it, and the
+    /// NPC turns it ran.
+    fn turn_ms(npcs: &[(i8, u8)], tick_ms: u32, zero_polls: bool) -> (u64, u32) {
+        let mut s = world(npcs);
+        s.actors.movement_points[1] = 0;
+        s.map.view_dirty = 1;
+        let done = Rc::new(std::cell::Cell::new(None));
+        let out = Rc::clone(&done);
+        let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+            let t0 = io.now_ms();
+            world_turn(&st, &io).await;
+            let n = st.borrow().combat.paced.get(&PICK_MS).copied();
+            out.set(Some((io.now_ms() - t0, n.unwrap_or(0))));
+        });
+        for _ in 0..10_000 {
+            if done.get().is_some() {
+                break;
+            }
+            e.tick(&[], tick_ms);
+            if zero_polls {
+                e.tick(&[], 0);
+            }
+        }
+        done.get().expect("the turn ends")
+    }
+
+    #[test]
+    fn a_world_turn_waits_the_originals_time_at_any_host_tick() {
+        // Spec 03 §1: the turn's waits (an NPC turn each, the refresh of the changed view) run
+        // on the engine clock: the same time at 16 ms and 8 ms ticks and with polls of no time.
+        let (ms, npcs) = turn_ms(&[(6, 10), (6, 10)], 16, false);
+        println!("two NPCs: {npcs} NPC turns, {ms} ms");
+        assert!(npcs >= 2, "both acted: {npcs}");
+        let least = u64::from(npcs) * u64::from(PICK_MS) + u64::from(AFTER_TURN_MS);
+        assert!(ms >= least, "{ms} ms, at least {least}");
+        for (tick, zero) in [(8, false), (16, true), (5, true)] {
+            let (other, n) = turn_ms(&[(6, 10), (6, 10)], tick, zero);
+            assert_eq!(n, npcs, "the same turns");
+            // Each run ends within its own tick of the same deadline.
+            assert!(
+                other + 16 >= ms && other <= ms + u64::from(tick),
+                "16 ms ticks {ms}, {tick} ms {other}"
+            );
+        }
     }
 
     #[test]

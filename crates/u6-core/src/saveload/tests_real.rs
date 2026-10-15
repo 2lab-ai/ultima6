@@ -115,7 +115,10 @@ impl Run {
     }
 
     fn settle(&mut self) {
-        for _ in 0..40 {
+        for t in 0..4000 {
+            if t >= 40 && self.at_prompt() {
+                break;
+            }
             self.e.tick(&[], 16);
         }
     }

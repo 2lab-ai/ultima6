@@ -61,7 +61,7 @@ pub use effects::{heal, sleep, strength_contest};
 pub use input::{
     book_cursor_step, book_panel_key, find_typed_spell, page_key, spell_key, takes_book_key,
 };
-pub use spells::{flash_window, resurrect, resurrect_and_rejoin, xray};
+pub use spells::{WINDOW_FLASH_MS, flash_window, resurrect, resurrect_and_rejoin, xray};
 pub use tables::{MagicTables, Msg};
 pub use travel::{locate, wizard_eye};
 

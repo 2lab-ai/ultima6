@@ -71,7 +71,13 @@ fn engine_boots_draws_and_moves_the_view() {
     let first = engine.frame().pixels().to_vec();
     assert!(first.iter().any(|&p| p != 0), "map drawn");
     engine.tick(&[InputEvent::Key(Key::Right)], 16);
-    engine.tick(&[], 16);
+    // The scrolled view shows at the first refresh of the world turn, after the measured waits.
+    for _ in 0..100 {
+        engine.tick(&[], 16);
+        if engine.frame().pixels() != &first[..] {
+            break;
+        }
+    }
     assert!(engine.state().map.centre.x == start.x + 1);
     assert!(engine.frame().pixels() != &first[..], "view moved");
     // Stub contract, independent of which stubs still exist: one log line per stub id hit.

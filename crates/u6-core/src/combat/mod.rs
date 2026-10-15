@@ -7,8 +7,8 @@
 //! a missile flight 0x132706) the core draws it the way the original does and records what
 //! reached the screen in [`CombatState::effects`], marked with the number of message lines
 //! queued before it ([`present`]). The async part ([`play_effects`]) shows the recorded frames
-//! in order, interleaved with the queued messages, waiting a VBlank where the frame has to stay
-//! visible. The Attack command ([`attack::attack`]) and the NPC turn play them right after the
+//! in order, interleaved with the queued messages, each after the time the original spends
+//! drawing it, on the engine clock ([`present::pace`]). The Attack command ([`attack::attack`]) and the NPC turn play them right after the
 //! synchronous step that made them, so state changes and pictures keep the original order.
 //!
 //! Domain state = [`CombatState`]: the hunk-13 working globals and the tables read from `game`
@@ -54,9 +54,13 @@ pub mod seams;
 pub mod tables;
 
 #[cfg(test)]
+mod pace_real;
+#[cfg(test)]
 mod real_data;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_pace;
 
 pub use present::{Effect, play_effects};
 pub use tables::CombatTables;
@@ -99,6 +103,16 @@ pub struct CombatState {
     pub shown: u64,
     /// Port-only: the last combat messages queued ([`present::say`]), for receipts and tests.
     pub said: Vec<present::Said>,
+    /// Port-only: the engine time (ms) at which the original would be done with what has been
+    /// paced so far ([`present::pace`]).
+    pub due_ms: u64,
+    /// Port-only: the engine time (ms) at which the last [`present::pace`] returned.
+    pub paced_at_ms: u64,
+    /// Port-only: the shortest host tick (ms) of the current run of waits: the lateness
+    /// [`present::pace`] carries at most.
+    pub tick_ms: u64,
+    /// Port-only: how many waits [`present::pace`] took of each length (ms), for receipts.
+    pub paced: std::collections::BTreeMap<u16, u32>,
 }
 
 impl Default for CombatState {
@@ -119,6 +133,10 @@ impl Default for CombatState {
             swallow: false,
             shown: 0,
             said: Vec::new(),
+            due_ms: 0,
+            paced_at_ms: u64::MAX,
+            tick_ms: u64::MAX,
+            paced: std::collections::BTreeMap::new(),
         }
     }
 }

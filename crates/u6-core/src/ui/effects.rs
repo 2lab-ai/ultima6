@@ -7,9 +7,9 @@ use crate::combat::present::capture_window;
 use crate::engine::Io;
 use crate::state::State;
 
-/// Display frames a shake stays on the screen. The original shows each for as long as its
-/// copy (0x1344a8) and the next shake's draws take; that time is not measured, so one PAL frame.
-pub const SHAKE_HOLD: u8 = 1;
+/// Engine milliseconds of one shake (its copy, 0x1344a8, and the next shake's draws). Not
+/// measured (no quake happens in the oracle's start fight), so one PAL frame.
+pub const SHAKE_MS: u16 = crate::combat::present::FRAME_MS;
 
 /// Original: 0x133a1a (ui: shake the map window `times` times by up to `amp` pixels: each time
 /// a random offset in 16 ± amp on both axes, and the 0x90-pixel window copied from there back
@@ -18,7 +18,7 @@ pub const SHAKE_HOLD: u8 = 1;
 /// Two RNG draws per shake, x first, as the original. The callers are synchronous (the end of
 /// turn 0x10348c, the view refresh 0x102ef0, Tremor), and the engine publishes only the last
 /// present of a poll, so each shake and then the refreshed window are recorded and shown by
-/// the next playback ([`crate::combat::play_effects`]), each shake for [`SHAKE_HOLD`] frames.
+/// the next playback ([`crate::combat::play_effects`]), each shake after [`SHAKE_MS`].
 pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
     seams::present_map(s, io, 0);
     for _ in 0..times.max(0) {
@@ -29,10 +29,10 @@ pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
             seams::copy_rect(back, front, dx, dy, dx + 0x90, dy + 0x90, 0x10, 0x10);
         });
         io.present();
-        capture_window(s, SHAKE_HOLD);
+        capture_window(s, SHAKE_MS);
     }
     seams::refresh_view(s, io);
-    capture_window(s, 0);
+    capture_window(s, crate::combat::present::REFRESH_MS);
 }
 
 /// Port: frames that synchronous code recorded inside a key wait (a shake request carried out
@@ -122,16 +122,25 @@ mod tests {
     #[test]
     fn quake_records_each_shake_then_the_window() {
         // The original presents every shake (0x1344a8 copies to the screen); the engine only
-        // publishes the last present of a poll, so each is recorded for playback, one display
-        // frame each, and the refreshed window after them.
+        // publishes the last present of a poll, so each is recorded for playback, each after its
+        // time, and the refreshed window after them.
         let mut e =
             crate::Engine::with_game(shaking(), crate::Files::default(), |st, io| async move {
                 quake(&mut st.borrow_mut(), &io, 3, 4);
             });
         e.tick(&[], 0);
         let s = e.state();
-        let holds: Vec<u8> = s.combat.effects.iter().map(|f| f.hold).collect();
-        assert_eq!(holds, [1, 1, 1, 0], "three shakes, then the window");
+        let costs: Vec<u16> = s.combat.effects.iter().map(|f| f.cost).collect();
+        assert_eq!(
+            costs,
+            [
+                SHAKE_MS,
+                SHAKE_MS,
+                SHAKE_MS,
+                crate::combat::present::REFRESH_MS
+            ],
+            "three shakes, then the window"
+        );
         assert!(
             s.combat.effects.iter().all(|f| (f.w, f.h) == (176, 176)),
             "the whole map window each time"
@@ -155,7 +164,7 @@ mod tests {
                 out.set(Some((k, s.combat.shown, s.combat.effects.len())));
             });
         e.tick(&[], 16);
-        for _ in 0..6 {
+        for _ in 0..30 {
             e.tick(&[], 16);
         }
         e.tick(&[crate::InputEvent::Key(crate::Key::Char('a'))], 16);

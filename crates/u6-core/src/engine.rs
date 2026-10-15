@@ -93,6 +93,8 @@ pub struct Io {
     back: RefCell<Framebuffer>,
     front: RefCell<Framebuffer>,
     front_version: Cell<u64>,
+    /// The screen as the engine last published it (what the player sees, without the pointer).
+    published: RefCell<Framebuffer>,
     files: Files,
     /// The layout of `game` in `files`, parsed at the first [`Io::game_image`] (`files` never
     /// changes, so it stays valid for the run).
@@ -109,6 +111,7 @@ impl Io {
             back: RefCell::new(Framebuffer::new()),
             front: RefCell::new(Framebuffer::new()),
             front_version: Cell::new(0),
+            published: RefCell::new(Framebuffer::new()),
             files,
             image: OnceCell::new(),
         }
@@ -127,6 +130,23 @@ impl Io {
     /// Events queued and not yet consumed.
     pub fn pending_events(&self) -> usize {
         self.events.borrow().len()
+    }
+
+    /// The screen as it was last published (the picture on display, before this poll's draws).
+    pub fn published<R>(&self, f: impl FnOnce(&Framebuffer) -> R) -> R {
+        f(&self.published.borrow())
+    }
+
+    /// The pointer where the input handler has it: the last queued pointer event (the handler
+    /// moves the position as events come, 0x151b08), else the last one taken. For the display
+    /// (the VBlank server's sprite); the game's own sample is [`Io::take_pointer`]'s.
+    fn handler_pointer(&self) -> Pointer {
+        let events = self.events.borrow();
+        let last = events.iter().rev().find_map(|e| match *e {
+            InputEvent::Pointer { x, y, buttons } => Some(Pointer::apply(x, y, buttons)),
+            InputEvent::Key(_) => None,
+        });
+        last.unwrap_or(self.pointer.get())
     }
 
     /// The game files (replaces the dos.library file layer).
@@ -359,6 +379,13 @@ impl From<LoadError> for BootError {
     }
 }
 
+/// Keys the input handler's ring holds (0x14f0ac: 50 slots at A4+0x64f6, one kept free so a
+/// full ring differs from an empty one); a key that finds it full is dropped. The port counts
+/// presses ([`Key`] is one press): exact for auto-repeat, which sends presses only, but about
+/// twice the original's type-ahead for keys tapped one by one, whose releases take a slot of
+/// the ring there too.
+const KEY_RING: usize = 49;
+
 /// The game future type the engine retains.
 type Task = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -370,7 +397,6 @@ pub struct Engine {
     task: Task,
     finished: bool,
     ticks: u64,
-    published: Framebuffer,
     published_version: u64,
     /// The published frame with the pointer sprite over it (the frame the platform shows).
     shown: Framebuffer,
@@ -436,7 +462,6 @@ impl Engine {
             task,
             finished: false,
             ticks: 0,
-            published: Framebuffer::new(),
             published_version: 0,
             shown: Framebuffer::new(),
             sprite: None,
@@ -444,12 +469,28 @@ impl Engine {
         }
     }
 
-    /// One host tick: queue `input`, advance the clock by `elapsed_ms`, poll the game once (also
-    /// while it waits; never after it finished), bump the display generation, publish the front
-    /// buffer if the game presented, then the vertical-blank work of the display (the pointer
-    /// sprite over the published frame, [`crate::ui::pointer::vblank`]).
+    /// One host tick: queue `input` (keys past the handler's ring, [`KEY_RING`], are dropped),
+    /// advance the clock by `elapsed_ms`, poll the game once (also while it waits; never after it
+    /// finished), bump the display generation, publish the front buffer if the game presented,
+    /// then the vertical-blank work of the display (the pointer sprite, at the handler's
+    /// position, over the published frame, [`crate::ui::pointer::vblank`]).
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
-        self.io.events.borrow_mut().extend(input.iter().copied());
+        {
+            let mut events = self.io.events.borrow_mut();
+            let mut keys = events
+                .iter()
+                .filter(|e| matches!(e, InputEvent::Key(_)))
+                .count();
+            for &e in input {
+                if matches!(e, InputEvent::Key(_)) {
+                    if keys >= KEY_RING {
+                        continue;
+                    }
+                    keys += 1;
+                }
+                events.push_back(e);
+            }
+        }
         self.io.now_ms.set(self.io.now_ms() + u64::from(elapsed_ms));
         if !self.finished {
             let mut cx = Context::from_waker(Waker::noop());
@@ -465,12 +506,16 @@ impl Engine {
         let version = self.io.front_version.get();
         let presented = version != self.published_version;
         if presented {
-            self.published.clone_from(&self.io.front.borrow());
+            self.io
+                .published
+                .borrow_mut()
+                .clone_from(&self.io.front.borrow());
             self.published_version = version;
         }
-        let sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), self.io.pointer());
+        let at = self.io.handler_pointer();
+        let sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
         if presented || sprite != self.sprite || self.ticks == 1 {
-            self.shown.clone_from(&self.published);
+            self.shown.clone_from(&self.io.published.borrow());
             if let Some(sp) = &sprite {
                 sp.draw(&mut self.shown);
             }
@@ -622,6 +667,91 @@ mod tests {
             self.done = true;
             Poll::Ready(())
         }
+    }
+
+    /// An engine whose game only sleeps (it takes no input), with the pointer tables of one
+    /// shape shown.
+    fn idle_engine() -> Engine {
+        let mut s = State::empty();
+        s.ui.pointer =
+            crate::ui::pointer::PointerState::from_tables(crate::ui::pointer::PointerTables {
+                shapes: vec![crate::ui::pointer::Shape {
+                    dx: -1,
+                    dy: -2,
+                    rows: vec![[1; 16]],
+                }],
+                shown: true,
+                ..Default::default()
+            });
+        Engine::with_game(s, Files::default(), |_state, io| async move {
+            io.sleep(u32::MAX).await;
+        })
+    }
+
+    #[test]
+    fn keys_beyond_the_handlers_ring_are_dropped() {
+        // 0x14f0ac puts a key in the 50-slot ring at A4+0x64f6 only when the next slot is not
+        // the reader's (A4-0x35cd / -0x35ce): 49 wait at most, one past them is lost. The port
+        // counts presses (a release takes a slot there too: auto-repeat is exact, taps get
+        // about twice the room). Pointer events are no keys.
+        let mut e = idle_engine();
+        let keys: Vec<InputEvent> = (0..60).map(|_| key('a')).collect();
+        e.tick(&keys, 16);
+        e.tick(
+            &[
+                InputEvent::Pointer {
+                    x: 5,
+                    y: 5,
+                    buttons: 0,
+                },
+                key('b'),
+            ],
+            16,
+        );
+        let queued: Vec<InputEvent> = e.io.events.borrow().iter().copied().collect();
+        let n = queued
+            .iter()
+            .filter(|ev| matches!(ev, InputEvent::Key(_)))
+            .count();
+        println!(
+            "60 keys then 1 queued: {n} keys wait, {} events",
+            queued.len()
+        );
+        assert_eq!(n, 49, "the ring's room");
+        assert!(
+            !queued.contains(&key('b')),
+            "the key past a full ring is lost"
+        );
+        assert_eq!(queued.len(), 50, "the pointer event is kept");
+    }
+
+    #[test]
+    fn the_sprite_follows_the_handler_while_the_game_waits() {
+        // The VBlank server moves the sprite to the handler's position (0x1622d6 reads
+        // 0x1623b8 / 0x1623ba) whether or not the game samples it: while the game waits, the
+        // shown sprite follows the queued moves; the pointer the game takes stays where it was.
+        let mut e = idle_engine();
+        e.tick(&[], 16);
+        e.tick(
+            &[InputEvent::Pointer {
+                x: 100,
+                y: 50,
+                buttons: 0,
+            }],
+            16,
+        );
+        let at = e.sprite.as_ref().map(|sp| (sp.x, sp.y));
+        println!(
+            "sprite at {at:?}, the game's pointer {:?}",
+            e.io().pointer()
+        );
+        assert_eq!(at, Some((99, 48)), "the sprite at the queued position");
+        assert_eq!(
+            e.io().pointer(),
+            Pointer::default(),
+            "the game took nothing"
+        );
+        assert_eq!(e.frame().get(99, 48), Some(17), "drawn there");
     }
 
     #[test]
