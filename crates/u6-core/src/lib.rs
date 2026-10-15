@@ -18,18 +18,25 @@
 //! `actors/`, `converse/` and `main_loop`.
 
 pub mod actors;
+pub mod combat;
 pub mod converse;
 pub mod engine;
 pub mod files;
 pub mod gfx;
 pub mod image;
+pub mod intro;
+pub mod inventory;
+pub mod magic;
 pub mod main_loop;
 pub mod map;
 pub mod objects;
 pub mod rng;
+pub mod saveload;
+pub mod sound;
 pub mod state;
 pub mod stub;
 pub mod ui;
+pub mod usecmd;
 
 pub use engine::{BootError, Engine, InputEvent, Io, Key};
 pub use files::Files;

@@ -1,11 +1,13 @@
 //! Real data: conversations with NPCs near the party start, from the user's archive.org zip.
-//! Skips where the zip is missing; prints the dialogue only (no game text in the repo).
+//! Skips where the zip is missing; prints actor numbers and pass/fail, never the dialogue, a
+//! name, or how many lines or how long (no game text in the repo or the test output).
 #![allow(clippy::disallowed_methods)] // tests may read files
 
 use std::path::Path;
 
 use u6_formats::converse::ConverseLib;
 use u6_intake::{InputFile, intake};
+use u6_testkit::assert_same;
 
 use super::party::name_from_script;
 use super::script::{ScriptDst, load_script};
@@ -15,6 +17,7 @@ use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
 use crate::objects::ObjectId;
 use crate::state::State;
+use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
@@ -23,7 +26,7 @@ fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -32,14 +35,14 @@ fn files() -> Option<Files> {
 }
 
 fn with_text(files: &Files) -> State {
-    let mut s = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    let mut s = State::new_game(files).quiet();
     // Load state's tail: the region's objects and the view the on-screen test reads; main's
     // text windows (the message scroll current).
     crate::main_loop::load_state_tail(&mut s);
     let t = s.ui.tables.clone();
     s.ui.text.main_windows(&t);
     s.ui.text.more_rows = i16::from(s.ui.text.win().height);
-    let text = ConverseText::from_game(files.get("game").unwrap()).unwrap();
+    let text = ConverseText::from_game(files.get("game").quiet()).quiet();
     s.converse.text = Some(text);
     s
 }
@@ -75,19 +78,13 @@ fn settle(e: &mut Engine) {
     }
 }
 
-/// Runs Talk (0x1127c4) on `npc`. At each "you say:" prompt it types the next of `lines`; at
-/// any other wait (a `*` page break, a key wait, a one-key question) it presses Space, then
-/// N, then Y until the game moves on. Returns the scroll and whether the conversation ended.
+/// Runs Talk (0x1127c4) on `npc`. At each prompt for the player's words (`Msg::YouSay`) it
+/// types the next of `lines`; at any other wait (a `*` page break, a key wait, a one-key
+/// question) it presses Space, then N, then Y until the game moves on. Returns the scroll and
+/// whether the conversation ended.
 fn converse(state: &State, files: &Files, npc: i16, lines: &[&str]) -> (Vec<String>, bool) {
     let leader = state.actors.party.leader_index;
-    let prompt = latin(
-        state
-            .converse
-            .text
-            .as_ref()
-            .unwrap()
-            .get(super::Msg::YouSay),
-    );
+    let prompt = latin(state.converse.text.as_ref().quiet().get(super::Msg::YouSay));
     let prompt = prompt.trim().to_string();
     let mut e = Engine::with_game(state.clone(), files.clone(), move |st, io| async move {
         talk(&Cx::new(&st, &io), leader, npc, true).await;
@@ -124,8 +121,8 @@ fn converse(state: &State, files: &Files, npc: i16, lines: &[&str]) -> (Vec<Stri
 fn every_script_loads_like_the_formats_parser() {
     let Some(files) = files() else { return };
     let mut s = with_text(&files);
-    let lib_a = ConverseLib::parse(files.get("converse.a").unwrap()).unwrap();
-    let lib_b = ConverseLib::parse(files.get("converse.b").unwrap()).unwrap();
+    let lib_a = ConverseLib::parse(files.get("converse.a").quiet()).quiet();
+    let lib_b = ConverseLib::parse(files.get("converse.b").quiet()).quiet();
     let mut loaded = 0;
     for npc in 0..0xe0i16 {
         let mut buf = Vec::new();
@@ -138,27 +135,27 @@ fn every_script_loads_like_the_formats_parser() {
         let want = lib.scripts.get(item as usize).cloned().flatten();
         match want {
             Some(script) if npc != 0 => {
-                assert_eq!(got, npc);
+                assert!(got == npc);
                 assert!(script.bytecode.len() < super::SCRIPT_LEN, "npc {npc}: size");
-                assert_eq!(
-                    &buf[..script.bytecode.len()],
-                    &script.bytecode[..],
-                    "npc {npc}"
+                assert_same!(
+                    buf[..script.bytecode.len()],
+                    script.bytecode[..],
+                    "the script of npc {npc}"
                 );
-                assert_eq!(buf[0], 0xff, "npc {npc}: script starts with ff");
+                assert!(buf[0] == 0xff, "npc {npc}: script starts with ff");
                 loaded += 1;
             }
-            _ => assert_eq!(got, 0, "npc {npc}"),
+            _ => assert!(got == 0, "npc {npc}"),
         }
     }
-    println!("{loaded} actor scripts load and equal u6_formats::converse");
+    assert!(loaded > 0, "scripts loaded");
 }
 
 #[test]
 fn three_npcs_near_the_start_answer_name_job_bye() {
     let Some(files) = files() else { return };
     let base = with_text(&files);
-    let leader = base.leader_position().unwrap();
+    let leader = base.leader_position().quiet();
     let members: Vec<u16> = base.actors.party.active().map(|id| id.0).collect();
     let mut near: Vec<(u32, i16)> = (2..0xe0i16)
         .filter(|a| !members.contains(&(*a as u16)))
@@ -173,10 +170,10 @@ fn three_npcs_near_the_start_answer_name_job_bye() {
         })
         .collect();
     near.sort();
-    let prompt = latin(base.converse.text.as_ref().unwrap().get(super::Msg::YouSay));
+    let prompt = latin(base.converse.text.as_ref().quiet().get(super::Msg::YouSay));
     let prompt = prompt.trim().to_string();
     let mut answered = 0;
-    for &(d, npc) in near.iter().take(40) {
+    for &(_, npc) in near.iter().take(40) {
         let mut s = base.clone();
         let (name, _) = name_from_script(&mut s, &files, npc);
         if name.is_empty() {
@@ -191,17 +188,13 @@ fn three_npcs_near_the_start_answer_name_job_bye() {
         let asked = scroll.iter().filter(|l| l.contains(&prompt)).count();
         let ok = done && asked >= 3 && replies.len() >= 3 && replies[1] != replies[2];
         assert!(!has_codes(&scroll), "actor {npc}: unsubstituted variable");
-        println!(
-            "---- actor {npc} at distance {d} ({}): prompts {asked}, ended {done}",
-            latin(&name)
-        );
         if ok && answered < 3 {
-            println!("{}", scroll.join("\n"));
+            println!("actor slot {npc:#x} answered name and job and said goodbye");
             answered += 1;
         }
     }
-    assert_eq!(
-        answered, 3,
+    assert!(
+        answered == 3,
         "three NPCs answered name and job differently and said goodbye"
     );
 }
@@ -219,7 +212,7 @@ fn has_codes(scroll: &[String]) -> bool {
 fn greeting_substitutes_title_time_and_names() {
     let Some(files) = files() else { return };
     let base = with_text(&files);
-    let text = base.converse.text.clone().unwrap();
+    let text = base.converse.text.clone().quiet();
     let title = text.get(if super::seams::female(&base) {
         Msg::Milady
     } else {
@@ -240,14 +233,9 @@ fn greeting_substitutes_title_time_and_names() {
                 && buf.windows(2).any(|w| w == b"$G")
                 && buf.windows(2).any(|w| w == b"$T")
         })
-        .unwrap();
+        .quiet();
     let (scroll, done) = converse(&base, &files, npc, &["name", "job", "bye"]);
     let all = scroll.join("\n");
-    println!(
-        "---- actor {npc}: hour {}, title {title:?}, time {time:?}",
-        base.actors.calendar.hour
-    );
-    println!("{all}");
     assert!(done && !has_codes(&scroll));
     assert!(
         all.contains(&title) && all.contains(&time),

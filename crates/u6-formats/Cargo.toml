@@ -17,3 +17,5 @@ serde = { version = "1", optional = true, default-features = false, features = [
 [dev-dependencies]
 # Contact-sheet PNG in the gfx real-data test only.
 png = "0.18"
+# Content-free equality for the real-data tests (spec 01 §Rights).
+u6-testkit.workspace = true

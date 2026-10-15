@@ -16,7 +16,7 @@
 //!   generation, never game turns or the calendar.
 //! - Recursive async cycles put `Box::pin` on the cycle edge.
 
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
@@ -50,30 +50,70 @@ pub enum Key {
 pub enum InputEvent {
     /// A key press (auto-repeat arrives as further presses).
     Key(Key),
+    /// The pointer (mouse) at screen pixel (x, y), 0..=319 × 0..=199 (the platform scales from
+    /// its window; values outside are clamped), with `buttons` held: bit 0 left, bit 1 right
+    /// ([`POINTER_LEFT`], [`POINTER_RIGHT`]).
+    Pointer { x: i16, y: i16, buttons: u8 },
+}
+
+/// Left button bit of [`InputEvent::Pointer`] (the original's button word 0x161bd4, bit 0).
+pub const POINTER_LEFT: u8 = 1;
+/// Right button bit (0x161bd4 bit 1).
+pub const POINTER_RIGHT: u8 = 2;
+
+/// The pointer as the input handler keeps it: position 0x1623b8 / 0x1623ba (pixels, clamped to
+/// the screen) and the button word 0x161bd4.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pointer {
+    pub x: i16,
+    pub y: i16,
+    pub buttons: u8,
+}
+
+impl Pointer {
+    /// Replaces: 0x151b08 (input.device handler, mouse class: the move is added to the position
+    /// and clamped to 0..=319 / 0..=199; codes 0x68 / 0xe8 and 0x69 / 0xe9 set and clear
+    /// button bits 0 and 1). Platforms report absolute positions, so the position is taken.
+    fn apply(x: i16, y: i16, buttons: u8) -> Pointer {
+        Pointer {
+            x: x.clamp(0, 0x13f),
+            y: y.clamp(0, 199),
+            buttons: buttons & (POINTER_LEFT | POINTER_RIGHT),
+        }
+    }
 }
 
 /// The game's view of the platform: input queue, millisecond clock, display generation, two
 /// screen buffers and the file layer. Nothing else in the core touches time, input or files.
 pub struct Io {
     events: RefCell<VecDeque<InputEvent>>,
+    pointer: Cell<Pointer>,
     now_ms: Cell<u64>,
     generation: Cell<u64>,
     back: RefCell<Framebuffer>,
     front: RefCell<Framebuffer>,
     front_version: Cell<u64>,
+    /// The screen as the engine last published it (what the player sees, without the pointer).
+    published: RefCell<Framebuffer>,
     files: Files,
+    /// The layout of `game` in `files`, parsed at the first [`Io::game_image`] (`files` never
+    /// changes, so it stays valid for the run).
+    image: OnceCell<Option<crate::image::ImageLayout>>,
 }
 
 impl Io {
     fn new(files: Files) -> Self {
         Self {
             events: RefCell::new(VecDeque::new()),
+            pointer: Cell::new(Pointer::default()),
             now_ms: Cell::new(0),
             generation: Cell::new(0),
             back: RefCell::new(Framebuffer::new()),
             front: RefCell::new(Framebuffer::new()),
             front_version: Cell::new(0),
+            published: RefCell::new(Framebuffer::new()),
             files,
+            image: OnceCell::new(),
         }
     }
 
@@ -92,16 +132,99 @@ impl Io {
         self.events.borrow().len()
     }
 
+    /// The screen as it was last published (the picture on display, before this poll's draws).
+    pub fn published<R>(&self, f: impl FnOnce(&Framebuffer) -> R) -> R {
+        f(&self.published.borrow())
+    }
+
+    /// The pointer where the input handler has it: the last queued pointer event (the handler
+    /// moves the position as events come, 0x151b08), else the last one taken. For the display
+    /// (the VBlank server's sprite); the game's own sample is [`Io::take_pointer`]'s.
+    fn handler_pointer(&self) -> Pointer {
+        let events = self.events.borrow();
+        let last = events.iter().rev().find_map(|e| match *e {
+            InputEvent::Pointer { x, y, buttons } => Some(Pointer::apply(x, y, buttons)),
+            InputEvent::Key(_) => None,
+        });
+        last.unwrap_or(self.pointer.get())
+    }
+
     /// The game files (replaces the dos.library file layer).
     pub fn files(&self) -> &Files {
         &self.files
     }
 
+    /// The user's `game` mapped by image address ([`crate::image::GameImage`]), parsed once:
+    /// the strings and tables the handlers read on every print come through here. `None` when
+    /// the file is missing or not a hunk file.
+    pub fn game_image(&self) -> Option<crate::image::GameImage<'_>> {
+        let game = self.files.get("game")?;
+        let layout = self
+            .image
+            .get_or_init(|| {
+                crate::image::GameImage::parse(game)
+                    .ok()
+                    .map(crate::image::GameImage::into_layout)
+            })
+            .as_ref()?;
+        Some(crate::image::GameImage::with_layout(game, layout))
+    }
+
     /// Replaces: 0x151b08 (input.device handler; the platform queues events instead)
     ///
     /// Resolves with the next queued key, in arrival order; pending while the queue is empty.
+    /// Pointer events before it are applied to the pointer on the way (as the handler would),
+    /// for the waits that read only keys.
     pub fn next_key(&self) -> NextKey<'_> {
         NextKey { io: self }
+    }
+
+    /// True when the next queued event is a key (a pointer event before it is taken first, by
+    /// [`Io::take_pointer`]).
+    pub fn key_ready(&self) -> bool {
+        matches!(self.events.borrow().front(), Some(InputEvent::Key(_)))
+    }
+
+    /// The pointer as the handler last left it (no event is taken).
+    pub fn pointer(&self) -> Pointer {
+        self.pointer.get()
+    }
+
+    /// Takes the pointer events at the front of the queue up to the next change of the buttons:
+    /// the first one, then those after it that keep its buttons (moves). So each call delivers
+    /// at most one press or release, at the position the moves after it reached; a key in front
+    /// stays queued and holds the pointer events behind it (input is consumed in order).
+    /// Returns the pointer as it then is.
+    pub fn take_pointer(&self) -> Pointer {
+        let mut events = self.events.borrow_mut();
+        let mut first = true;
+        while let Some(&InputEvent::Pointer { x, y, buttons }) = events.front() {
+            let p = Pointer::apply(x, y, buttons);
+            if !first && p.buttons != self.pointer.get().buttons {
+                break;
+            }
+            self.pointer.set(p);
+            events.pop_front();
+            first = false;
+        }
+        self.pointer.get()
+    }
+
+    /// As [`Io::take_pointer`], taking at most the first `n` queued events (none when `n` is 0):
+    /// for a sample as of a time before the latest events came.
+    pub fn take_pointer_upto(&self, n: usize) -> Pointer {
+        let mut events = self.events.borrow_mut();
+        let mut taken = 0;
+        while let Some(&InputEvent::Pointer { x, y, buttons }) = events.front() {
+            let p = Pointer::apply(x, y, buttons);
+            if taken == n || (taken > 0 && p.buttons != self.pointer.get().buttons) {
+                break;
+            }
+            self.pointer.set(p);
+            events.pop_front();
+            taken += 1;
+        }
+        self.pointer.get()
     }
 
     /// Resolves once the tick clock reaches now + `ms` (deadline fixed at the call).
@@ -112,6 +235,8 @@ impl Io {
         }
     }
 
+    /// Replaces: 0x1622be (wait for the vertical blank: set the flag 0x1624b0 the server clears)
+    ///
     /// Resolves at a later display generation than the current one, so never within the tick
     /// that created it: whatever was presented before the await is published first.
     pub fn vblank(&self) -> VBlank<'_> {
@@ -184,9 +309,15 @@ pub struct NextKey<'a> {
 impl Future for NextKey<'_> {
     type Output = Key;
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Key> {
-        match self.io.events.borrow_mut().pop_front() {
-            Some(InputEvent::Key(key)) => Poll::Ready(key),
-            None => Poll::Pending,
+        let mut events = self.io.events.borrow_mut();
+        loop {
+            match events.pop_front() {
+                Some(InputEvent::Key(key)) => return Poll::Ready(key),
+                Some(InputEvent::Pointer { x, y, buttons }) => {
+                    self.io.pointer.set(Pointer::apply(x, y, buttons));
+                }
+                None => return Poll::Pending,
+            }
         }
     }
 }
@@ -248,6 +379,13 @@ impl From<LoadError> for BootError {
     }
 }
 
+/// Keys the input handler's ring holds (0x14f0ac: 50 slots at A4+0x64f6, one kept free so a
+/// full ring differs from an empty one); a key that finds it full is dropped. The port counts
+/// presses ([`Key`] is one press): exact for auto-repeat, which sends presses only, but about
+/// twice the original's type-ahead for keys tapped one by one, whose releases take a slot of
+/// the ring there too.
+const KEY_RING: usize = 49;
+
 /// The game future type the engine retains.
 type Task = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -259,13 +397,16 @@ pub struct Engine {
     task: Task,
     finished: bool,
     ticks: u64,
-    published: Framebuffer,
     published_version: u64,
+    /// The published frame with the pointer sprite over it (the frame the platform shows).
+    shown: Framebuffer,
+    sprite: Option<crate::ui::pointer::SpriteFrame>,
     stubs: Rc<StubLog>,
 }
 
 impl Engine {
-    /// Boots the game from `files` with RNG seed word 0 (the image's own initial state).
+    /// Boots the game from `files` with RNG seed word 0 (the image's own initial state); the
+    /// launcher's sequence, as [`Engine::with_seed`].
     pub fn new(files: Files) -> Result<Engine, BootError> {
         Self::with_seed(files, 0)
     }
@@ -274,11 +415,27 @@ impl Engine {
     ///
     /// Boots with an explicit RNG seed. The original seeds from the low word of `time()`
     /// (see [`crate::rng`]); platforms pass a clock value for variety or a constant for replays.
+    /// The task is the launcher's sequence ([`main_loop::run`]): `u` first, then `game`.
     pub fn with_seed(files: Files, seed: u16) -> Result<Engine, BootError> {
+        Self::boot(files, seed, main_loop::run)
+    }
+
+    /// As [`Engine::with_seed`], but the task starts `game` at once, without the launcher and
+    /// `u` ([`main_loop::game_first`]): the platforms' development entry (the oracle's
+    /// game-first disks start the same way) and tests of the game.
+    pub fn game_first(files: Files, seed: u16) -> Result<Engine, BootError> {
+        Self::boot(files, seed, main_loop::game_first)
+    }
+
+    fn boot<G, F>(files: Files, seed: u16, game: G) -> Result<Engine, BootError>
+    where
+        G: FnOnce(Rc<RefCell<State>>, Rc<Io>) -> F,
+        F: Future<Output = ()> + 'static,
+    {
         let stubs = Rc::new(StubLog::default());
         let mut state = stub::scoped(&stubs, || State::new_game(&files))?;
         state.rng.seed(seed);
-        Ok(Self::build(state, files, stubs, main_loop::run))
+        Ok(Self::build(state, files, stubs, game))
     }
 
     /// An engine around any game future (tests, tools). `game` receives the shared state and
@@ -305,17 +462,35 @@ impl Engine {
             task,
             finished: false,
             ticks: 0,
-            published: Framebuffer::new(),
             published_version: 0,
+            shown: Framebuffer::new(),
+            sprite: None,
             stubs,
         }
     }
 
-    /// One host tick: queue `input`, advance the clock by `elapsed_ms`, poll the game once (also
-    /// while it waits; never after it finished), bump the display generation, publish the front
-    /// buffer if the game presented.
+    /// One host tick: queue `input` (keys past the handler's ring, [`KEY_RING`], are dropped),
+    /// advance the clock by `elapsed_ms`, poll the game once (also while it waits; never after it
+    /// finished), bump the display generation, publish the front buffer if the game presented,
+    /// then the vertical-blank work of the display (the pointer sprite, at the handler's
+    /// position, over the published frame, [`crate::ui::pointer::vblank`]).
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
-        self.io.events.borrow_mut().extend(input.iter().copied());
+        {
+            let mut events = self.io.events.borrow_mut();
+            let mut keys = events
+                .iter()
+                .filter(|e| matches!(e, InputEvent::Key(_)))
+                .count();
+            for &e in input {
+                if matches!(e, InputEvent::Key(_)) {
+                    if keys >= KEY_RING {
+                        continue;
+                    }
+                    keys += 1;
+                }
+                events.push_back(e);
+            }
+        }
         self.io.now_ms.set(self.io.now_ms() + u64::from(elapsed_ms));
         if !self.finished {
             let mut cx = Context::from_waker(Waker::noop());
@@ -329,15 +504,28 @@ impl Engine {
         self.ticks += 1;
         self.io.generation.set(self.io.generation() + 1);
         let version = self.io.front_version.get();
-        if version != self.published_version {
-            self.published.clone_from(&self.io.front.borrow());
+        let presented = version != self.published_version;
+        if presented {
+            self.io
+                .published
+                .borrow_mut()
+                .clone_from(&self.io.front.borrow());
             self.published_version = version;
+        }
+        let at = self.io.handler_pointer();
+        let sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
+        if presented || sprite != self.sprite || self.ticks == 1 {
+            self.shown.clone_from(&self.io.published.borrow());
+            if let Some(sp) = &sprite {
+                sp.draw(&mut self.shown);
+            }
+            self.sprite = sprite;
         }
     }
 
-    /// The last published frame: 320×200 indices plus the palette.
+    /// The last published frame (320×200 indices plus the palette) with the pointer sprite.
     pub fn frame(&self) -> &Framebuffer {
-        &self.published
+        &self.shown
     }
 
     /// True once the game future returned (it is never polled again).
@@ -479,6 +667,91 @@ mod tests {
             self.done = true;
             Poll::Ready(())
         }
+    }
+
+    /// An engine whose game only sleeps (it takes no input), with the pointer tables of one
+    /// shape shown.
+    fn idle_engine() -> Engine {
+        let mut s = State::empty();
+        s.ui.pointer =
+            crate::ui::pointer::PointerState::from_tables(crate::ui::pointer::PointerTables {
+                shapes: vec![crate::ui::pointer::Shape {
+                    dx: -1,
+                    dy: -2,
+                    rows: vec![[1; 16]],
+                }],
+                shown: true,
+                ..Default::default()
+            });
+        Engine::with_game(s, Files::default(), |_state, io| async move {
+            io.sleep(u32::MAX).await;
+        })
+    }
+
+    #[test]
+    fn keys_beyond_the_handlers_ring_are_dropped() {
+        // 0x14f0ac puts a key in the 50-slot ring at A4+0x64f6 only when the next slot is not
+        // the reader's (A4-0x35cd / -0x35ce): 49 wait at most, one past them is lost. The port
+        // counts presses (a release takes a slot there too: auto-repeat is exact, taps get
+        // about twice the room). Pointer events are no keys.
+        let mut e = idle_engine();
+        let keys: Vec<InputEvent> = (0..60).map(|_| key('a')).collect();
+        e.tick(&keys, 16);
+        e.tick(
+            &[
+                InputEvent::Pointer {
+                    x: 5,
+                    y: 5,
+                    buttons: 0,
+                },
+                key('b'),
+            ],
+            16,
+        );
+        let queued: Vec<InputEvent> = e.io.events.borrow().iter().copied().collect();
+        let n = queued
+            .iter()
+            .filter(|ev| matches!(ev, InputEvent::Key(_)))
+            .count();
+        println!(
+            "60 keys then 1 queued: {n} keys wait, {} events",
+            queued.len()
+        );
+        assert_eq!(n, 49, "the ring's room");
+        assert!(
+            !queued.contains(&key('b')),
+            "the key past a full ring is lost"
+        );
+        assert_eq!(queued.len(), 50, "the pointer event is kept");
+    }
+
+    #[test]
+    fn the_sprite_follows_the_handler_while_the_game_waits() {
+        // The VBlank server moves the sprite to the handler's position (0x1622d6 reads
+        // 0x1623b8 / 0x1623ba) whether or not the game samples it: while the game waits, the
+        // shown sprite follows the queued moves; the pointer the game takes stays where it was.
+        let mut e = idle_engine();
+        e.tick(&[], 16);
+        e.tick(
+            &[InputEvent::Pointer {
+                x: 100,
+                y: 50,
+                buttons: 0,
+            }],
+            16,
+        );
+        let at = e.sprite.as_ref().map(|sp| (sp.x, sp.y));
+        println!(
+            "sprite at {at:?}, the game's pointer {:?}",
+            e.io().pointer()
+        );
+        assert_eq!(at, Some((99, 48)), "the sprite at the queued position");
+        assert_eq!(
+            e.io().pointer(),
+            Pointer::default(),
+            "the game took nothing"
+        );
+        assert_eq!(e.frame().get(99, 48), Some(17), "drawn there");
     }
 
     #[test]

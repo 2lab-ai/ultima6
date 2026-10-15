@@ -127,18 +127,53 @@ pub fn set_plot_colour(gfx: &mut GfxState, colour: u16) {
 /// when [`GfxState::plot_back`] (0x155577) is set; the caller passes that buffer as `fb`. A colour
 /// above 15 would index past both tables; the port then plots nothing.
 pub fn plot(gfx: &GfxState, fb: &mut Framebuffer, x: u16, y: u16) {
+    plot_in(fb, x, y, gfx.plot_colour, gfx.plot_xor);
+}
+
+/// [`plot`] with the colour and the mode given.
+fn plot_in(fb: &mut Framebuffer, x: u16, y: u16, colour: u16, xor: bool) {
     let Some(row) = row_base(y) else { return };
-    let Ok(colour) = u8::try_from(gfx.plot_colour) else {
+    let Ok(colour) = u8::try_from(colour) else {
         return;
     };
     if colour > 15 {
         return;
     }
     let i = (row + usize::from(x >> 3)) * 8 + usize::from(x & 7);
-    if gfx.plot_xor {
+    if xor {
         update(fb, i, |p| p ^ colour);
     } else {
         update(fb, i, |_| colour);
+    }
+}
+
+/// Original: 0x1521f4 (graphics: fill the rectangle (x0, y0)..=(x1, y1) in the plot colour,
+/// set or XOR as [`plot`] does, into the buffer [`GfxState::plot_back`] names)
+///
+/// The corners are put in order (unsigned); whole plane bytes are written with the edge masks
+/// 0x15802e / 0x158036 on the first and last byte of each row, so exactly the pixels x0..=x1
+/// change. The caller passes the buffer as `fb`.
+pub fn fill_rect(gfx: &GfxState, fb: &mut Framebuffer, x0: u16, y0: u16, x1: u16, y1: u16) {
+    fill(fb, (x0, y0, x1, y1), gfx.plot_colour, gfx.plot_xor);
+}
+
+/// [`fill_rect`] in `colour` (set mode), for callers that pass the colour of 0x152176 directly.
+pub fn fill_colour(fb: &mut Framebuffer, x0: u16, y0: u16, x1: u16, y1: u16, colour: u8) {
+    fill(fb, (x0, y0, x1, y1), u16::from(colour), false);
+}
+
+/// The corners are put in order as 0x152244..0x15224e does (unsigned), then held to the screen:
+/// the original has no bound and runs its byte pointer on past the row (and the buffer) for
+/// corners that wrapped below zero.
+fn fill(fb: &mut Framebuffer, (x0, y0, x1, y1): (u16, u16, u16, u16), colour: u16, xor: bool) {
+    let (xa, xb) = if x0 < x1 { (x0, x1) } else { (x1, x0) };
+    let (ya, yb) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+    let xb = xb.min(WIDTH as u16 - 1);
+    let yb = yb.min(HEIGHT as u16 - 1);
+    for y in ya..=yb {
+        for x in xa..=xb {
+            plot_in(fb, x, y, colour, xor);
+        }
     }
 }
 
@@ -158,8 +193,18 @@ pub fn copy_pixel(back: &Framebuffer, front: &mut Framebuffer, x: u16, y: u16) {
 /// again; each state `s` names pixel (s mod w, s div w) and is skipped when that row is past the
 /// rect. Pixel (0, 0), which the register never holds, comes last. `taps[width - 2]` is the
 /// feedback word. A rect of one or two pixels (width < 2) would read before the table in the
-/// original; the port then returns the pixels in raster order.
+/// original; the port then returns the pixels in raster order. A width or height of 0 (corners
+/// that wrapped; `divu` by 0 traps in the original) has no pixels.
+///
+/// The loop ends for every feedback word F. Reading bit i as x^(15 - i), a step multiplies by x
+/// modulo x^16 + F = x^m·Q with Q(0) = 1 (m ≤ 15 when F ≠ 0); the register starts at x^15, a
+/// multiple of x^m, and on those multiples the step is invertible, so for F ≠ 0 the register
+/// returns to 1 within 65535 steps and never meets 0. F = 0 takes it to 0 at the first step
+/// (raster order, below). The bound below is never reached.
 pub fn dissolve_order(w: u16, h: u16, taps: &[u16]) -> Vec<(u16, u16)> {
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
     let last = (u32::from(w) * u32::from(h)) as u16;
     let width = 16 - last.wrapping_sub(1).leading_zeros() as usize;
     let Some(&feedback) = width.checked_sub(2).and_then(|i| taps.get(i)) else {
@@ -167,7 +212,7 @@ pub fn dissolve_order(w: u16, h: u16, taps: &[u16]) -> Vec<(u16, u16)> {
     };
     let mut out = Vec::new();
     let mut s: u16 = 1;
-    loop {
+    for _ in 0..=u16::MAX {
         let (row, col) = (s / w, s % w);
         if row < h {
             out.push((col, row));
@@ -177,8 +222,8 @@ pub fn dissolve_order(w: u16, h: u16, taps: &[u16]) -> Vec<(u16, u16)> {
         if carry {
             s ^= feedback;
         }
-        // A zero register never comes back to 1 (only with a zero feedback word, which the
-        // game's table does not hold): raster order then, rather than spin.
+        // Only a zero feedback word (not the game's) takes the register to 0, where it would
+        // stay: raster order then, rather than spin.
         if s == 0 {
             return (0..h).flat_map(|r| (0..w).map(move |c| (c, r))).collect();
         }
@@ -202,7 +247,10 @@ pub fn dissolve(
     (x0, y0): (u16, u16),
     (x1, y1): (u16, u16),
 ) {
-    let (w, h) = (x1.wrapping_sub(x0) + 1, y1.wrapping_sub(y0) + 1);
+    let (w, h) = (
+        x1.wrapping_sub(x0).wrapping_add(1),
+        y1.wrapping_sub(y0).wrapping_add(1),
+    );
     for (dx, dy) in dissolve_order(w, h, taps) {
         copy_pixel(back, front, x0 + dx, y0 + dy);
     }
@@ -240,11 +288,11 @@ pub fn copy_rect(
         return;
     }
     for r in 0..=rows {
-        let (Some(src), Some(dst)) = (row_base(y0 + r), row_base(dy + r)) else {
+        let (Some(src), Some(dst)) = (back_byte(x0, y0 + r), row_base(dy + r)) else {
             continue;
         };
         for b in 0..=bytes {
-            let s = (src + usize::from((x0 >> 3) + b)) * 8;
+            let s = (src + usize::from(b)) * 8;
             let d = (dst + usize::from((dx >> 3) + b)) * 8;
             for bit in 0..8 {
                 let i = s + bit;
@@ -255,6 +303,12 @@ pub fn copy_rect(
             }
         }
     }
+}
+
+/// Original: 0x152dd8 (graphics: the back-buffer byte address of pixel (x, y): the row table's
+/// row `y` plus x / 8)
+fn back_byte(x: u16, y: u16) -> Option<usize> {
+    row_base(y).map(|row| row + usize::from(x >> 3))
 }
 
 /// Original: 0x153384 (draw a `.bmp` bitmap at (x, y): its header is two little-endian words,

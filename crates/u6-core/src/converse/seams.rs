@@ -8,14 +8,14 @@
 //! 0x10b18c, 0x10cda8, 0x10a4d6, 0x12f6ee and the per-object tables A4+0x250c / A4-0x1184;
 //! actors (WU-P5) = 0x121fca, 0x121ff8, 0x122048,
 //! 0x1220f0, 0x122144, 0x1279d4, 0x10368a, 0x11ba5e, 0x1240fa, 0x1221da and A4-0x7afb / -0x7afe;
-//! map (WU-P2) = the 11×11 window caches, 0x109e74; gfx (WU-P1) = 0x1533e0, 0x102ef0; magic and
-//! music stay stubs in milestone 1 (0x116526, 0x11785e, 0x110878, 0x110912).
+//! map (WU-P2) = the 11×11 window caches, 0x109e74; gfx (WU-P1) = 0x1533e0, 0x102ef0; since the
+//! M2 integration magic (0x116526, 0x11785e) and inventory (0x128ce8, 0x1110c8, 0x1112cc,
+//! 0x105016); music (0x110878, 0x110912) is sound's.
 
 use super::Cx;
 use super::party::ix;
 use crate::engine::Io;
 use crate::state::State;
-use crate::todo_stub;
 
 /// Objlist-block (A4-0x7b84) offsets the converse code reads: A4-0x7b26 (word, int var 0x15),
 /// A4-0x7b0b (solo member, -1 = party), A4-0x7b04 (gender, non-zero = female).
@@ -65,23 +65,10 @@ pub(crate) async fn select_item(cx: &Cx<'_>) -> (i16, i16) {
     cx.st(|s| (s.ui.input.selection, s.ui.input.target.0))
 }
 
-/// 0x128b98(buf, 0): decimal number in `text`; -1 empty, -2 escaped / not a number.
-/// Fallback: mode 0 as the original (digits accumulate ×10 in a word; any other byte → -2;
-/// empty → -1, the escape flag A4-0x7a44 taken as clear).
-pub(crate) fn parse_number(text: &[u8]) -> i16 {
-    todo_stub!("0x128b98 parse a number (converse seam)", {
-        if text.is_empty() {
-            return -1;
-        }
-        let mut v: i16 = 0;
-        for &b in text {
-            if !b.is_ascii_digit() {
-                return -2;
-            }
-            v = v.wrapping_mul(10).wrapping_add(i16::from(b - b'0'));
-        }
-        v
-    })
+/// 0x128b98(buf, 0): decimal number in `text`; -1 empty, -2 escaped / not a number:
+/// [`crate::objects::commands::parse_answer`] in mode 0.
+pub(crate) fn parse_number(s: &State, text: &[u8]) -> i16 {
+    crate::objects::commands::parse_answer(s, text, 0)
 }
 
 // ---- panels and scroll globals (ui) -----------------------------------------------------------
@@ -131,19 +118,8 @@ pub(crate) async fn inventory_panel(cx: &Cx<'_>, _npc: i16, member: Option<u16>,
 }
 
 /// 0x128ce8: portrait panel (portrait, name, worn objects; waits for a key outside talk).
-/// Fallback: its first steps for a person with nothing readied: the panel cleared to the paper
-/// colour (0x152176 + 0x1521f4 over (0xa8, 6)..(0x137, 0x67)), the sky bar (0x133b28), the
-/// portrait through 0x133d3e at (0xd8, 0x18); no name line and no equipment.
 pub(crate) async fn portrait_panel(cx: &Cx<'_>, npc: i16) {
-    todo_stub!("0x128ce8 portrait panel (converse seam)", {
-        let mut state = cx.state.borrow_mut();
-        let paper = state.ui.tables.colours.paper;
-        cx.io
-            .draw(|fb| crate::ui::text::fill_rect(fb, 0xa8, 6, 0x137, 0x67, paper));
-        crate::ui::panels::sky_bar(&mut state, cx.io);
-        super::script::draw_portrait(&state, cx.io, npc, 0xd8, 0x18);
-        state.ui.panel.dirty = true;
-    })
+    Box::pin(crate::inventory::show_actor(cx.state, cx.io, npc)).await;
 }
 
 /// 0x1533e0: draw the 56×64 portrait bitmap at (x, y) on the screen through the bitmap colour map
@@ -154,15 +130,14 @@ pub(crate) fn blit_portrait(state: &State, io: &Io, pixels: &[u8], x: i16, y: i1
 }
 
 /// 0x1110c8: object type in the 9-entry list at A4-0x71ca (counted, not weighed ×10).
-/// Fallback: false.
-pub(crate) fn counted_type(_s: &State, _ty: i16) -> bool {
-    todo_stub!("0x1110c8 counted object type (converse seam)", false)
+pub(crate) fn counted_type(s: &State, ty: i16) -> bool {
+    crate::inventory::counted_type(s, ty)
 }
 
 /// 0x1112cc(actor): the two carried-weight words it leaves at A4+0x1342 / A4+0x1344.
-/// Fallback: (0, 0).
-pub(crate) fn carried_weights(_s: &mut State, _actor: i16) -> (i16, i16) {
-    todo_stub!("0x1112cc carried weight (converse seam)", (0, 0))
+pub(crate) fn carried_weights(s: &mut State, actor: i16) -> (i16, i16) {
+    crate::inventory::carried_weight(s, actor);
+    (s.inventory.equip_weight, s.inventory.carried_weight)
 }
 
 /// 0x133b0e: full redraw of the panels and the view (as the actors call it).
@@ -233,21 +208,23 @@ pub(crate) fn move_into(s: &mut State, obj: i16, dest: i16, flags: i16) {
 
 /// Op 0x9c: 0x10a4d6(0x1af, movement flags & 7) then 0x12f6ee(actor, centre x, centre y, that
 /// object, 0). Fallback: nothing.
-pub(crate) fn mount(_s: &mut State, _actor: i16, _flags: u8) {
-    todo_stub!("0x12f6ee put an actor on a horse (converse seam)", ())
+pub(crate) fn mount(s: &mut State, actor: i16, flags: u8) {
+    let frame = crate::objects::actor_frame(0x1af, i16::from(flags)) as u16;
+    let c = s.map.centre;
+    crate::objects::commands::mount_horse(s, actor, c.x, c.y, frame, false);
 }
 
 // ---- actors, clock, combat leaves ---------------------------------------------------------------
 
 /// Party leader / target cursor step of 0x114afa: 0x105016(A4-0x2f0a, A4-0x2f08), when ≥ 0
-/// 0x11ba5e(leader, it) and 0x109e74. Fallback: nothing.
-pub(crate) fn face_target(_s: &mut State) {
-    todo_stub!("0x105016 face the talk target (converse seam)", ())
+/// 0x11ba5e(leader, it) and 0x109e74.
+pub(crate) fn face_target(s: &mut State) {
+    crate::inventory::face_pointer(s);
 }
 
-/// 0x1240fa(obj): the actor riding horse object `obj`. Fallback: `obj`.
-pub(crate) fn rider(_s: &State, obj: i16) -> i16 {
-    todo_stub!("0x1240fa rider of a horse (converse seam)", obj)
+/// 0x1240fa(obj): the actor a part belongs to (the horse of a horse's back half).
+pub(crate) fn rider(s: &mut State, obj: i16) -> i16 {
+    crate::combat::leaves::owner(s, obj)
 }
 
 /// 0x121ff8(actor): effective dexterity (int var 10).
@@ -275,9 +252,9 @@ pub(crate) fn level(s: &State, a: i16) -> i16 {
     i16::from(crate::actors::leaves::level(s, a as u16))
 }
 
-/// 0x1221da(actor) after worktype 0x91. Fallback: nothing.
-pub(crate) fn worktype_91(_s: &mut State, _actor: i16) {
-    todo_stub!("0x1221da worktype 0x91 follow-up (converse seam)", ())
+/// 0x1221da(actor) after worktype 0x91 (the actor drops: its lying frame).
+pub(crate) fn worktype_91(s: &mut State, actor: i16) {
+    crate::combat::damage::lie_down(s, actor);
 }
 
 /// 0x1279d4(member index, 0): heal a party member (no announcement); its lines print at once.
@@ -330,24 +307,19 @@ pub(crate) fn view_cell(s: &State, col: i16, row: i16) -> (u8, i16) {
 
 // ---- magic and music (milestone-1 stubs) ---------------------------------------------------
 
-/// 0x116526(actor, type, quality): object id or -1. Fallback: -1 (not carried).
-pub(crate) fn has_object(_s: &State, _actor: i16, _ty: i16, _quality: i16) -> i16 {
-    todo_stub!("0x116526 actor carries an object (converse seam)", -1)
+/// 0x116526(actor, type, quality): object id or -1 (magic).
+pub(crate) fn has_object(s: &State, actor: i16, ty: i16, quality: i16) -> i16 {
+    crate::magic::carried_object(&s.objects, actor, ty, quality)
 }
 
-/// 0x11785e(obj): resurrect the body object. Fallback: nothing.
-pub(crate) fn resurrect(_s: &mut State, _obj: i16) {
-    todo_stub!("0x11785e resurrect (converse seam)", ())
+/// 0x110878(song): play / 0 = stop.
+pub(crate) fn play_song(s: &mut State, song: u16) {
+    crate::sound::play_song(s, song)
 }
 
-/// 0x110878(song): play / 0 = stop. Fallback: nothing.
-pub(crate) fn play_song(_s: &mut State, _song: u16) {
-    todo_stub!("0x110878 play song (converse seam)", ())
-}
-
-/// 0x110912: pick the area's song. Fallback: nothing.
-pub(crate) fn pick_song(_s: &mut State) {
-    todo_stub!("0x110912 pick the area song (converse seam)", ())
+/// 0x110912: pick the area's song.
+pub(crate) fn pick_song(s: &mut State) {
+    crate::sound::play_area_song(s)
 }
 
 // ---- objlist-block bytes (actors keep the block; the converse reads these directly) ---------

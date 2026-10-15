@@ -63,25 +63,34 @@
     <section id="drop" aria-labelledby="drop-title">
       <p id="drop-title">
         Drop your Ultima VI files: the archive.org zip, the three ADFs, or the
-        extracted files &mdash; nothing is uploaded.
+        extracted files &mdash; nothing is uploaded. A <code>savegame</code> folder from the
+        original's PLAYER disk dropped here becomes the saved game.
       </p>
       <label for="picker">Or choose files:</label>
       <input id="picker" type="file" multiple disabled>
       <button id="forget" type="button" disabled>Forget the kept files</button>
+      <button id="forget-save" type="button" disabled>Forget the saved game</button>
+      <button id="mute" type="button" aria-pressed="false">Mute</button>
       <button id="restart" type="button" hidden>Restart</button>
       <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
     </section>
     <section id="limits" aria-labelledby="limits-title">
       <h2 id="limits-title">What this version does</h2>
-      <p>Works: walking (arrow keys), passing a turn (space), talking (T, a direction, then type
-        and press Return). The clock runs and people follow their schedules.</p>
-      <p>Not yet: combat, magic, rest, the inventory commands (look, get, drop, move, use) and
-        the inventory panel keys, saving and restoring a game, music and sound, the mouse. Those
-        commands say &ldquo;Not implemented in this version&rdquo; and do nothing. The game on the
-        disks starts in combat mode and leaving it (B) is one of them, so party mode (0) and
-        solo mode (1&ndash;9) are refused for now.</p>
-      <p>Keeping your files in this browser is not a saved game: every visit starts a new game
-        from the disks.</p>
+      <p>The game starts as the original does: the opening (Escape skips it), then the menu, where
+        C creates a character (or T transfers one from Ultima IV or V) and J journeys onward.</p>
+      <p>Works: walking (arrow keys), passing a turn (space), talking (T), combat (A attacks, B
+        begins or breaks off combat), casting spells (C), resting (R), looking, getting,
+        dropping, moving and using things (L, G, D, M, U), the inventory panel, the mouse (click
+        the map to walk, the command icons, the party list, the inventory and the spellbook),
+        saving and restoring the game (Ctrl-S, Ctrl-R), music and sound (Ctrl-Z turns the game's
+        sound on and off; the Mute button silences the page). Sound starts once you click or
+        press a key on the game screen.</p>
+      <p>Not yet: a few rare object actions (moving a carried thing to someone else, a staff's or
+        wand's spell in combat). Those say
+        &ldquo;Not implemented in this version&rdquo; or do nothing.</p>
+      <p>A character you create and a save (Ctrl-S) are kept in this browser and the next visit resumes it; &ldquo;Forget the
+        saved game&rdquo; starts over. &ldquo;Forget the kept files&rdquo; removes the game files
+        themselves.</p>
     </section>
     <p class="hint">Click the game screen or Tab to it before playing; Tab leaves it again. Your
       game files stay in your browser (kept in its storage for the next visit) and are never

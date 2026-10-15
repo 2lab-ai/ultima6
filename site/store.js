@@ -1,7 +1,9 @@
 // The game files of the last start, kept in this browser's IndexedDB so a reload can start the
-// game without a new drop (the files the engine booted from, never uploaded). Keeping them is
-// not a saved game: every start is a new game from the disks. The page calls these one at a
-// time (its operation queue), so a read never races a write or a delete.
+// game without a new drop (the files the engine booted from, never uploaded), and the saved
+// game: the `savegame/` files the game's Save writes (the original's names), one record each
+// under `save:` + the lower-cased name in the same store, so a later Save replaces only the
+// blocks it wrote and an imported folder's case does not make a second copy. The page calls
+// these one at a time (its operation queue), so a read never races a write or a delete.
 
 const DB = 'ultima6-port';
 const STORE = 'files';
@@ -60,6 +62,37 @@ export async function loadFiles() {
 /// Removes the kept files; resolves once the delete is committed, throws when it is not.
 export async function forgetFiles() {
   await run('readwrite', (s) => s.delete(KEY));
+}
+
+const SAVE = 'save:';
+const SAVES = IDBKeyRange.bound(SAVE, `${SAVE}\uffff`);
+
+/// Writes the files ({ path, bytes }) of one Save over the stored ones, all in one transaction;
+/// `replace` drops every stored save file first (an imported savegame folder). Resolves once
+/// committed, throws when it is not.
+export async function storeSaves(files, replace = false) {
+  await run('readwrite', (s) => {
+    if (replace) s.delete(SAVES);
+    let last = null;
+    for (const { path, bytes } of files) last = s.put({ path, bytes }, SAVE + path.toLowerCase());
+    return last ?? s.count();
+  });
+}
+
+/// The stored save files ({ path, bytes }), or [] (none, or storage unavailable).
+export async function loadSaves() {
+  try {
+    const files = await run('readonly', (s) => s.getAll(SAVES));
+    return Array.isArray(files) ? files : [];
+  } catch (err) {
+    console.warn(`could not read the saved game: ${err}`);
+    return [];
+  }
+}
+
+/// Removes the saved game; resolves once the delete is committed, throws when it is not.
+export async function forgetSaves() {
+  await run('readwrite', (s) => s.delete(SAVES));
 }
 
 function fileOf(entry) {

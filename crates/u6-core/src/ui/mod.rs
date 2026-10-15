@@ -1,8 +1,10 @@
 //! UI: message scroll + printf 0x108658, side panels 0x103f64 / 0x110d2c, key read 0x10790a, the
 //! raw-key → game-code table 0x151d00 (WU-P4).
 //!
-//! Domain state = [`UiState`]: the message scroll and the panel state. The input.device handler
-//! itself (0x151b08) is replaced by the engine's event queue ([`crate::Io::next_key`]).
+//! Domain state = [`UiState`]: the message scroll, the panel state and the pointer. The
+//! input.device handler itself (0x151b08) is replaced by the engine's event queue
+//! ([`crate::Io::next_key`], [`crate::Io::take_pointer`]); the pointer sprite is drawn over the
+//! published frame by the engine ([`pointer::vblank`]).
 //!
 //! Original functions this module will own (milestone 1):
 //!
@@ -75,12 +77,14 @@
 //! - 0x151cdc [input] remove the input handler
 //! - 0x151d00 [input] raw key code to key/command, qualifier state
 
+pub mod click;
 pub mod cursor;
 pub mod effects;
 pub mod globals;
 pub mod input;
 pub mod keyread;
 pub mod panels;
+pub mod pointer;
 pub mod print;
 pub mod printf;
 pub mod seams;
@@ -117,6 +121,7 @@ pub struct UiState {
     pub text: TextState,
     pub input: InputState,
     pub panel: PanelState,
+    pub pointer: pointer::PointerState,
 }
 
 impl UiState {
@@ -135,7 +140,10 @@ impl UiState {
         };
         let font = BitFont::parse(get("u6.ch")?).map_err(format("u6.ch"))?;
         let tables = UiTables::load(get("game")?).map_err(format("game"))?;
-        Ok(UiState::from_parts(Some(font), tables))
+        let pointer = pointer::PointerTables::load(get("game")?).map_err(format("game"))?;
+        let mut ui = UiState::from_parts(Some(font), tables);
+        ui.pointer = pointer::PointerState::from_tables(pointer);
+        Ok(ui)
     }
 
     /// The initial state for given tables (tests build tables by hand).
@@ -146,6 +154,7 @@ impl UiState {
             text: TextState::from_tables(&tables),
             input: InputState::from_tables(&tables),
             panel: PanelState::from_tables(&tables),
+            pointer: pointer::PointerState::default(),
             tables,
         }
     }

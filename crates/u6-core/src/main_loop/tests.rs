@@ -5,8 +5,11 @@ use std::path::Path;
 
 use super::*;
 use crate::files::Files;
+use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
+/// Image address of the prompt format the command loop prints (the leader's name, a newline).
+const FMT_PROMPT: u32 = 0x0010_1f3c;
 
 #[allow(clippy::disallowed_methods)] // tests may read files
 fn files() -> Option<Files> {
@@ -14,7 +17,7 @@ fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -22,31 +25,38 @@ fn files() -> Option<Files> {
     Some(Files::new(r.files))
 }
 
-/// The boot on the user's files: 60 ticks reach the command prompt with only the three stub
-/// points a boot passes (character creation, combat start for the disk's combat byte, the egg
-/// in the start window); the screen shows the window, the panel and the prompt.
+/// The boot of `game` on the user's files (started without the launcher): 60 ticks reach the
+/// command prompt without a stub point (the character `u` makes is the launcher's; since
+/// milestone 2 the egg in the start window hatches through the objects port 0x1319b2, its
+/// placement through combat 0x121e88 and the combat song of 0x121c64 through sound 0x110878);
+/// the screen shows the window, the panel and the prompt.
 #[test]
-fn boot_reaches_the_prompt_with_three_stub_points() {
+fn boot_reaches_the_prompt_without_stub_points() {
     let Some(files) = files() else { return };
-    let mut e = crate::Engine::new(files).unwrap_or_else(|err| panic!("{err}"));
+    let mut e = crate::Engine::game_first(files, 0).quiet();
     for _ in 0..60 {
         e.tick(&[], 16);
     }
-    let ids: Vec<&str> = e.stub_hits().keys().map(|k| &k[..8]).collect();
-    assert_eq!(ids, ["0x121c64", "0x1319b2", "0x1351d8"]);
+    let ids: Vec<&str> = e.stub_hits().keys().copied().collect();
+    assert!(ids.is_empty(), "{ids:?}");
     let s = e.state();
-    assert_eq!(s.ui.text.current, crate::ui::WindowId::Messages);
+    assert!(s.ui.text.current == crate::ui::WindowId::Messages);
+    // The prompt's first line: the leader's name through the format, both from the user's files.
+    let fmt = game_string(e.io(), FMT_PROMPT);
+    let first = fmt.split(|&b| b == b'\n').next().unwrap_or_default();
+    let name = String::from_utf8_lossy(&leader_name(&s)).into_owned();
+    let prompt = String::from_utf8_lossy(first).replace("%s", &name);
+    assert!(prompt.len() > name.len(), "the format at {FMT_PROMPT:#x}");
     assert!(
-        s.ui.messages.iter().any(|l| l.starts_with("Avatar:")),
-        "{:?}",
-        s.ui.messages
+        s.ui.messages.iter().any(|l| l.starts_with(&prompt)),
+        "no scroll line is the prompt"
     );
     assert!(
         s.objects.draw.cell.iter().any(|&n| n != 0),
         "objects in the window"
     );
-    assert_eq!(
-        s.actors.objlist_tail[TAIL_CREATED], 1,
+    assert!(
+        s.actors.objlist_tail[TAIL_CREATED] == 1,
         "portrait byte of the new game"
     );
 }
@@ -243,14 +253,12 @@ fn says_port_line(s: &State) -> bool {
     m.concat().contains(line) || m.join(" ").contains(line)
 }
 
-/// Every cut handler the loop reaches (Attack, Cast, Look, Get, Drop, Move, Use, Rest, combat
-/// begin and break, Save, Restore, the debug teleport): the port's line, the command state
-/// cleared, no movement points spent, no turn, and no key read (a queued key stays queued).
+/// The cut handler the loop still reaches (the debug teleport): the port's line, the command
+/// state cleared, no movement points spent, no turn, and no key read (a queued key stays
+/// queued).
 #[test]
 fn cut_commands_say_so_clear_the_command_and_take_no_turn() {
-    let codes = [
-        0x81, 0x82, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0xaa, 0x12, 0xd6,
-    ];
+    let codes = [0xd6];
     for combat in [0, 1] {
         for &code in &codes {
             let mut st = State::empty();
@@ -278,8 +286,65 @@ fn cut_commands_say_so_clear_the_command_and_take_no_turn() {
     }
 }
 
-/// Talk is not cut: it still waits for its target (a key that confirms nothing: "what?", which
-/// the test text layer cannot print without the game's strings) and takes the turn.
+/// Cast is magic's 0x11af10 (it reads its own input): with no spellbook readied it ends at once,
+/// the turn taken, the command state cleared, no port line.
+#[test]
+fn cast_without_a_book_takes_the_turn() {
+    let mut st = State::empty();
+    st.actors.objlist_tail[commands::TAIL_SOLO] = 0xff;
+    st.actors.party.leader_index = 0;
+    let (code, s) = dispatched(0x82, &[], st);
+    assert_eq!(code, 0x82);
+    assert_eq!((s.ui.input.target_pending, s.ui.input.targeting), (0, 0));
+    assert_eq!(s.ui.input.target_command, crate::ui::globals::NO_COMMAND);
+    assert!(!says_port_line(&s));
+}
+
+/// Rest is 0x127b1a: in combat it refuses at once; the turn is taken and the cursor state
+/// cleared (0x104abe..0x104ac8), no port line.
+#[test]
+fn rest_in_combat_refuses_and_takes_the_turn() {
+    let mut st = State::empty();
+    st.actors.objlist_tail[commands::TAIL_SOLO] = 0xff;
+    st.actors.objlist_tail[TAIL_COMBAT] = 1;
+    st.actors.party.leader_index = 0;
+    st.ui.input.targeting = 1;
+    st.ui.input.target_pending = 1;
+    let (code, s) = dispatched(0x89, &[], st);
+    assert_eq!(code, 0x89);
+    assert_eq!((s.ui.input.target_pending, s.ui.input.targeting), (0, 0));
+    assert!(!says_port_line(&s));
+}
+
+/// Ctrl-Z (0x1a) is sound's toggle: on sets the flag (A4-0x7b5c) and starts the area song; off
+/// stops the song and clears the flag.
+#[test]
+fn control_z_toggles_the_sound_flag_and_the_song() {
+    let mut st = State::empty();
+    st.sound.names = (1..=13).map(|n| format!("song{n}")).collect();
+    st.map.centre.z = 1; // a dungeon: song 9, no RNG draw
+    let (_, s) = dispatched(0x1a, &[], st);
+    assert!(crate::sound::sound_on(&s));
+    assert_eq!(s.sound.current, 9);
+    let calls: Vec<_> = s.sound.calls.iter().map(|(_, c)| c.clone()).collect();
+    assert_eq!(
+        calls,
+        [
+            crate::sound::MedCall::Load("song9".into()),
+            crate::sound::MedCall::PlayBuffer
+        ]
+    );
+    let (_, s) = dispatched(0x1a, &[], s);
+    assert!(!crate::sound::sound_on(&s));
+    assert_eq!(s.sound.current, 0);
+    assert_eq!(
+        s.sound.calls.back().map(|(_, c)| c.clone()),
+        Some(crate::sound::MedCall::Stop)
+    );
+}
+
+/// Talk is not cut: it still waits for its target (a key that confirms nothing: the no-target
+/// word, which the test text layer cannot print without the game's strings) and takes the turn.
 #[test]
 fn talk_still_reads_its_target() {
     let (code, s) = dispatched(0x83, &[crate::Key::Char('q')], State::empty());
@@ -288,9 +353,9 @@ fn talk_still_reads_its_target() {
     assert!(!says_port_line(&s));
 }
 
-/// The loop on a cut command: the prompt again, no world turn (the clock and the movement
-/// points stay), and an arrow pressed after `A` walks the party (NICE-2: Attack used to leave
-/// its cross-hair up).
+/// Attack (0x124caa) given a key that confirms no target (the no-target word) takes its turn
+/// and leaves no cursor up, so an arrow pressed after it walks the party (NICE-2: Attack used
+/// to leave its cross-hair up).
 #[test]
 fn after_attack_an_arrow_walks() {
     use crate::Key;
@@ -311,7 +376,7 @@ fn after_attack_an_arrow_walks() {
             w.borrow_mut().push((code, targeting));
         }
     });
-    for k in [Key::Char('A'), Key::Right, Key::Right] {
+    for k in [Key::Char('A'), Key::Char('q'), Key::Right, Key::Right] {
         e.tick(&[crate::InputEvent::Key(k)], 16);
         for _ in 0..5 {
             e.tick(&[], 16);
@@ -320,51 +385,76 @@ fn after_attack_an_arrow_walks() {
     let got = walked.borrow().clone();
     assert_eq!(
         got,
-        [(commands::NO_TURN, 0), (0x80, 0), (0x80, 0)],
-        "A: cut, cursor off; each arrow is a walk"
+        [(0x81, 0), (0x80, 0), (0x80, 0)],
+        "A: the turn, cursor off; each arrow is a walk"
     );
 }
 
-/// On the user's files: `A` prints the port's line, runs no world turn (clock and every actor
-/// where they were) and leaves no cursor up, so `A` then an arrow ends where the arrow alone
-/// ends.
+/// On the user's files: `A` then a key that confirms no target runs the Attack command
+/// (0x124caa: its lines, no cursor left up), and the arrow after it walks the party.
 #[test]
-fn real_attack_is_cut_and_the_next_arrow_walks() {
+fn real_attack_without_a_target_and_the_next_arrow_walks() {
     let Some(files) = files() else { return };
-    let boot = |files: Files| {
-        let mut e = crate::Engine::with_seed(files, 7).unwrap_or_else(|err| panic!("{err}"));
-        for _ in 0..60 {
-            e.tick(&[], 16);
-        }
-        e
-    };
+    let mut e = crate::Engine::game_first(files, 7).quiet();
+    for _ in 0..60 {
+        e.tick(&[], 16);
+    }
+    // The world turn after the Attack plays the start fight's hit flashes: enough ticks for it
+    // to hand the turn back.
     let press = |e: &mut crate::Engine, k: crate::Key| {
         e.tick(&[crate::InputEvent::Key(k)], 16);
-        for _ in 0..30 {
+        for _ in 0..600 {
             e.tick(&[], 16);
         }
     };
-    let snapshot = |e: &crate::Engine| {
+    let lines = e.state().ui.messages.len();
+    press(&mut e, crate::Key::Char('a'));
+    press(&mut e, crate::Key::Char('q'));
+    let s = e.state();
+    assert!(!says_port_line(&s), "a port line in the scroll");
+    assert!(s.ui.messages.len() > lines, "Attack printed its lines");
+    assert!((s.ui.input.targeting, s.ui.input.target_pending) == (0, 0));
+    let centre = s.map.centre;
+    drop(s);
+    press(&mut e, crate::Key::Right);
+    assert!(e.state().map.centre != centre, "the arrow walked");
+}
+
+#[test]
+fn the_end_of_turn_quake_is_shown_before_the_next_key() {
+    // 0x10348c shakes the view (0x133a1a(10, 2)) for a volcano (0x133) found in view, inside
+    // the end of turn: the ten shakes and the window after them are on the screen by the time
+    // the command loop waits for the next key.
+    let mut s = State::empty();
+    s.ui = test_support::test_ui();
+    s.actors.party.members[0] = 1;
+    s.actors.party.size = 1;
+    s.objects.type_frame[1] = 0x17a;
+    s.actors.worktype[1] = 2;
+    s.actors.movement_points[1] = 20;
+    s.actors.attrs.dexterity[1] = 10;
+    s.objects.type_frame[300] = 0x133;
+    s.objects.draw.volcano_probe = 300;
+    let mut e = crate::Engine::with_game(s, Files::default(), |st, io| async move {
+        commands::command_loop(&st, &io).await;
+    });
+    e.tick(&[], 16);
+    e.tick(&[crate::InputEvent::Key(crate::Key::Char(' '))], 16);
+    let mut erupted = false;
+    let mut at_prompt = None;
+    for _ in 0..200 {
+        e.tick(&[], 16);
         let s = e.state();
-        (s.map.centre, s.actors.calendar, s.objects.location.clone())
-    };
-    let mut cut = boot(files.clone());
-    let before = snapshot(&cut);
-    press(&mut cut, crate::Key::Char('a'));
-    assert_eq!(snapshot(&cut), before, "no turn");
-    assert!(
-        says_port_line(&cut.state()),
-        "{:?}",
-        cut.state().ui.messages
-    );
-    assert_eq!(cut.state().ui.input.targeting, 0);
-    press(&mut cut, crate::Key::Right);
-    let mut plain = boot(files);
-    press(&mut plain, crate::Key::Right);
+        erupted |= s.objects.draw.volcano_probe == 0;
+        if erupted && s.main.reading == 1 {
+            at_prompt = Some((s.combat.shown, s.combat.effects.len()));
+            break;
+        }
+    }
+    assert!(erupted, "the end of turn ran the volcano");
     assert_eq!(
-        snapshot(&cut),
-        snapshot(&plain),
-        "A then an arrow = the arrow"
+        at_prompt,
+        Some((11, 0)),
+        "(frames shown, frames left) at the next key"
     );
-    assert_ne!(snapshot(&plain).0, before.0, "the arrow walked");
 }

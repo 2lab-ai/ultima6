@@ -45,8 +45,11 @@ impl ViewWindow {
 }
 
 /// Replaces: 0x162358 (copies the 32 OCS colours into the copper list)
+/// Replaces: 0x16236a (installs the copper list: the five bitplane pointers, the pointer sprite)
 ///
-/// The chunky buffer carries its palette; every window draw writes the 32 game colours.
+/// The chunky buffer carries its palette; every window draw writes the 32 game colours. The
+/// engine's buffers are the bitplanes, and the pointer sprite is its overlay
+/// ([`crate::ui::pointer::vblank`]).
 fn load_palette(state: &State, fb: &mut Framebuffer) {
     for (dst, c) in fb.palette.iter_mut().zip(&state.tables.palette) {
         *dst = Rgb::new(c.r, c.g, c.b);
@@ -184,4 +187,56 @@ pub fn refresh_view(state: &mut State, io: &Io) {
         state.gfx.panel_redraw = 0;
         seams::quake(state, io, shakes);
     }
+}
+
+/// Original: 0x132338 (ui: flash an actor in the map window: its tile in outline mode over its
+/// cell, the window presented dissolving, then the window again without it)
+///
+/// Nothing for an actor off the map (status A4+0x190c & 0x18) or more than five cells from the
+/// view centre on either axis (`(x - centre + 5) & 0x3ff < 11`). The tile word is the type's base
+/// tile (0x13a940) plus the frame, plus 0x1800 (`bright`, D1 non-zero) or 0x1000; it goes into
+/// the cell's current draw list on top (0x10e596 mode 2), then A4-0x6578 = 1 and 0x102c90 with
+/// D0 = 1; the draw lists rebuilt (0x10e81e), A4-0x6578 = 1 and 0x102c90 again. The original
+/// shows the flash for as long as its second render takes; the port records both windows as
+/// frames (the hit flash's way), each after its time ([`crate::combat::present::ACTOR_FLASH_MS`]).
+/// The caller plays them ([`crate::combat::play_effects`]) where the original draws, before
+/// anything else is drawn or awaited: the async callers right after the call (the spells
+/// wrapper `magic::spells::flash_actor`, Ready / Unready, Pickpocket, Drop), the synchronous
+/// ones at the next print or the end of the command.
+pub fn flash_actor(state: &mut State, io: &Io, actor: u16, bright: bool) {
+    let a = usize::from(actor);
+    let (Some(&status), Some(&at), Some(&tf)) = (
+        state.objects.obj_status.get(a),
+        state.objects.location.get(a),
+        state.objects.type_frame.get(a),
+    ) else {
+        return;
+    };
+    if status & 0x18 != 0 {
+        return;
+    }
+    let c = state.map.centre;
+    let col = (at.x & 0x3ff).wrapping_sub(c.x).wrapping_add(5) & 0x3ff;
+    let row = (at.y & 0x3ff).wrapping_sub(c.y).wrapping_add(5) & 0x3ff;
+    let base = state
+        .tables
+        .basetile
+        .base
+        .get(usize::from(tf & 0x3ff))
+        .copied();
+    let word = base
+        .unwrap_or(0)
+        .wrapping_add(tf >> 10)
+        .wrapping_add(if bright { 0x1800 } else { 0x1000 });
+    if col >= 11 || row >= 11 {
+        return;
+    }
+    crate::objects::add_tile(state, word, col as i16, row as i16, 2);
+    state.gfx.dissolve = 1;
+    render_window(state, io, true);
+    crate::combat::present::capture_dissolve(state, crate::combat::present::ACTOR_FLASH_MS);
+    crate::objects::build_draw_lists(state);
+    state.gfx.dissolve = 1;
+    render_window(state, io, true);
+    crate::combat::present::capture_dissolve(state, crate::combat::present::ACTOR_FLASH_MS);
 }

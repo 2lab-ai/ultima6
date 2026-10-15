@@ -214,3 +214,59 @@ fn tick_substitutes_frames_by_mode_and_merges_on_even_counts() {
     anim_tick(&mut s, &mut g);
     assert_eq!(g.anim_counter, 7, "paused: no tick");
 }
+
+/// 0x132338 on the synthetic world (actor 1 at the centre): the effects it leaves.
+fn flash(mut s: State, actor: u16, bright: bool) -> State {
+    let out = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let keep = std::rc::Rc::clone(&out);
+    let mut e = Engine::with_game(
+        State::empty(),
+        Files::default(),
+        move |_st, io| async move {
+            crate::gfx::flash_actor(&mut s, &io, actor, bright);
+            *keep.borrow_mut() = Some(s);
+        },
+    );
+    e.tick(&[], 0);
+    out.borrow_mut().take().expect("the flash ran")
+}
+
+#[test]
+fn flash_outlines_the_actor_then_shows_the_window_without_it() {
+    let (mut s, mut g) = world();
+    // The avatar's tile: one opaque pixel of colour 0 at (8, 8), which outline mode paints.
+    install(
+        &mut g,
+        usize::from(AVATAR_BASE),
+        object_tile(Span::Full, |r, c| (r == 8 && c == 8).then_some(0)),
+    );
+    s.gfx = g;
+    let at = |e: &crate::combat::Effect, x: usize, y: usize| e.pixels[y * e.w + x];
+    let a = flash(s.clone(), 1, true);
+    let fx = &a.combat.effects;
+    assert_eq!(fx.len(), 2, "the flashed window, then the plain one");
+    let flash_ms = crate::combat::present::ACTOR_FLASH_MS;
+    assert_eq!((fx[0].cost, fx[1].cost), (flash_ms, flash_ms));
+    assert_eq!((fx[0].w, fx[0].h), (176, 176));
+    // Bright: the outline colour of 0x1800 at the avatar's pixel; the plain window has the tile.
+    assert_eq!((at(&fx[0], 88, 88), at(&fx[1], 88, 88)), (3, 0));
+    let differ = (0..176 * 176)
+        .filter(|&i| fx[0].pixels[i] != fx[1].pixels[i])
+        .count();
+    assert_eq!(differ, 1, "only the outlined pixel differs");
+    assert_eq!(a.gfx.dissolve, 0, "both presents dissolved");
+    assert!(
+        a.objects.draw.tiles(5, 5).iter().all(|&w| w & 0x1800 == 0),
+        "the lists are rebuilt without the flash"
+    );
+    // Not bright: the 0x1000 outline colour.
+    let b = flash(s.clone(), 1, false);
+    assert_eq!(at(&b.combat.effects[0], 88, 88), 4);
+    // Off the map, or six cells from the centre: nothing.
+    let mut off = s.clone();
+    off.objects.obj_status[1] = crate::objects::IN_INVENTORY;
+    assert!(flash(off, 1, true).combat.effects.is_empty());
+    let mut far = s;
+    far.objects.location[1].x += 6;
+    assert!(flash(far, 1, true).combat.effects.is_empty());
+}

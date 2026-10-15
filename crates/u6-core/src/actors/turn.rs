@@ -11,6 +11,24 @@ use super::{clock, leaves, npc, path, tail, walk};
 /// Refills (clock minutes) without anyone able to act after which the scheduler yields to the
 /// host once (port checkpoint, spec 03 §1: a yield changes no game state).
 const IDLE_REFILLS_PER_YIELD: u32 = 60;
+/// [replaced] Engine milliseconds of the refresh after a turn (0x102f2a with the view changed:
+/// the view flags 0x109e74, then 0x102ef0 draws the window and copies it to the screen): 427 ms,
+/// 21.375 PAL frames, the median of 38 such calls traced in the oracle (19.96..23.80: the start
+/// fight and the castle without it, 7 steps each; tools/oracle/trace.mjs on the CPU clock, the
+/// reduction tools/oracle/trace.py). With the view unchanged the call returns at once. The
+/// original has no wait there: that is the 68000's drawing time, which the port, drawing at
+/// once, waits on the engine clock instead.
+pub const AFTER_TURN_MS: u16 = 427;
+/// [replaced] Engine milliseconds of one pick of the scheduler 0x1213de (its pass over the 256
+/// actors, the refills and clock minutes, the formation and schedule passes, spread over the
+/// picks): 20 ms, 0.994 PAL frames, the world turn's time outside its NPC turns and refreshes
+/// over its picks (each NPC turn and the player's): 179 picks traced in the same runs.
+pub const PICK_MS: u16 = 20;
+/// [replaced] Engine milliseconds of an NPC turn in a combat worktype (below 0x80: the party's
+/// combat modes, assault) besides what it draws, prints and names: 47 ms, 2.338 PAL frames, the
+/// mean of 43 traced in the start fight (0.95..4.04). A turn in a schedule worktype (0x80 and
+/// up) takes 0.05 frames (n = 122) and waits nothing.
+pub const COMBAT_NPC_MS: u16 = 47;
 
 fn healthy(s: &State, actor: usize) -> bool {
     s.actors.attrs.status[actor] & 0x16 == 0
@@ -29,20 +47,35 @@ fn centre_on(s: &mut State, i: usize) {
     s.map.centre.y = p.y;
 }
 
-/// Original: 0x121020 (actors: the Avatar has died: "An unending darkness engulfs thee")
+/// Original: 0x121020 (actors: the Avatar has died: the darkness lines)
 ///
 /// Unless the leader index is 16: music off, the two lines with a full redraw between, then
 /// the resurrection 0x1095bc.
+///
+/// Port: 0x1095bc ([`crate::map::travel::resurrect_party`]) waits (the rejoin prints), and
+/// this runs inside synchronous code (the bookkeeping, a killing blow in 0x1231be), so it only
+/// marks the resurrection pending; [`world_turn`] awaits it at its next bookkeeping point,
+/// before it picks an actor again. The rest of a killing blow therefore runs before the raise.
+/// While it is pending the lines are not printed again (the original's raise has cleared the
+/// death by then).
 pub fn darkness(s: &mut State) {
-    if s.actors.party.leader_index == 0x10 {
+    if s.actors.party.leader_index == 0x10 || s.actors.work.resurrect_pending {
         return;
     }
-    crate::todo_stub!("0x110878 music off (fallback: silence)", ());
+    crate::sound::play_song(s, 0);
     seams::print(s, -0x7435, &[]);
     s.gfx.window_shown = 1;
     seams::full_redraw(s);
     seams::print(s, -0x740e, &[]);
-    crate::todo_stub!("0x1095bc resurrect the party (fallback: none)", ());
+    s.actors.work.resurrect_pending = true;
+}
+
+/// The resurrection [`darkness`] left pending, awaited (0x1095bc).
+async fn raise_if_dead(state: &RefCell<State>, io: &Io) {
+    let pending = std::mem::take(&mut state.borrow_mut().actors.work.resurrect_pending);
+    if pending {
+        crate::map::travel::resurrect_party(state, io).await;
+    }
 }
 
 /// Original: 0x121056 (party: leader and solo-mode bookkeeping per turn)
@@ -74,7 +107,7 @@ pub fn leader_bookkeeping(s: &mut State) {
     }
     let leader = member(s, li);
     if !healthy(s, leader) {
-        for i in 0..usize::from(size) {
+        for i in 0..s.actors.party.count() {
             let m = member(s, i);
             if healthy(s, m) && s.actors.worktype[m] != 0 {
                 s.actors.worktype[leader] = 1;
@@ -115,7 +148,7 @@ pub fn leader_bookkeeping(s: &mut State) {
 /// advanced party member and the flanks of both sides among the actors in worktype 2 or 3. A
 /// hostile centre on the party centre is pushed one step ahead of member 0.
 pub fn formation(s: &mut State) {
-    let size = usize::from(s.actors.party.size);
+    let size = s.actors.party.count();
     let (mut n, mut sx, mut sy) = (0i32, 0i32, 0i32);
     for i in 0..size {
         let m = member(s, i);
@@ -245,8 +278,8 @@ pub fn after_load(s: &mut State) {
 
 /// Original: 0x11c6c2 (actors: a swallowed actor fights its way out: true = still inside)
 ///
-/// Only actors with movement flag 0x10. The player's own character prints "ARGH!". On
-/// `random(1, 30)` below its strength it is freed (" regurgitated!", redraw requested);
+/// Only actors with movement flag 0x10. The player's own character cries out (A4-0x75e1). On
+/// `random(1, 30)` below its strength it is freed (its name and A4-0x75d3, redraw requested);
 /// otherwise it loses 1..15 hit points and its turn.
 pub fn swallowed(s: &mut State, actor: u16) -> bool {
     let a = usize::from(actor);
@@ -357,7 +390,7 @@ fn pick_actor(s: &mut State, mask: u16, pick: &mut Pick) {
     let c = s.map.centre;
     let wx = c.x.wrapping_sub(16) & 0x3f8;
     let wy = c.y.wrapping_sub(16) & 0x3f8;
-    for i in 1..usize::from(s.actors.party.size) {
+    for i in 1..s.actors.party.count() {
         let m = member(s, i);
         if s.actors.worktype[m] == 1 && s.actors.mp(m) <= 0 {
             let first = member(s, 0);
@@ -430,10 +463,16 @@ fn refill(s: &mut State) {
 /// may be swallowed ([`swallowed`]); an NPC (not worktype 1 or 2) runs [`npc::npc_turn`], then
 /// the bookkeeping again. Returns when the pick is the player's character (worktype 2, not
 /// swallowed), after making it the leader if it is another party member.
+///
+/// Port: the original draws as it goes and is as slow as that drawing; the port waits the
+/// measured time on the engine clock instead, at each pick ([`PICK_MS`], and [`COMBAT_NPC_MS`]
+/// before an NPC turn in a combat worktype) and before each refresh of a changed view
+/// ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile.
 pub async fn world_turn(state: &RefCell<State>, io: &Io) {
+    leader_bookkeeping(&mut state.borrow_mut());
+    raise_if_dead(state, io).await;
     let mask = {
         let mut s = state.borrow_mut();
-        leader_bookkeeping(&mut s);
         formation(&mut s);
         go_to_schedules(&mut s);
         let leader = member(&s, usize::from(s.actors.party.leader_index));
@@ -464,18 +503,28 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
                 io.vblank().await;
             }
         }
+        // A death in the clock's ticks above (a hazard tile, 0x1032b6) left the raise pending.
+        raise_if_dead(state, io).await;
         let actor = pick.actor as u16;
         let a = usize::from(actor);
         let held = swallowed(&mut state.borrow_mut(), actor);
+        let wt = state.borrow().actors.worktype[a];
+        let npc = !held && wt != 2 && wt != 1;
+        let fights = npc && wt < 0x80;
+        let ms = PICK_MS + if fights { COMBAT_NPC_MS } else { 0 };
+        crate::combat::present::pace(state, io, ms).await;
         if !held {
-            let wt = state.borrow().actors.worktype[a];
-            if wt != 2 && wt != 1 {
+            if npc {
                 npc::npc_turn(state, io, actor).await;
+                leader_bookkeeping(&mut state.borrow_mut());
+                raise_if_dead(state, io).await;
                 let mut s = state.borrow_mut();
-                leader_bookkeeping(&mut s);
                 if (2..0x10).contains(&s.actors.worktype[a]) {
                     s.actors.attrs.unknown_18f1[a] = actor as u8;
                 }
+            }
+            if state.borrow().map.view_dirty != 0 {
+                crate::combat::present::pace(state, io, AFTER_TURN_MS).await;
             }
             seams::after_turn_refresh(&mut state.borrow_mut());
         }
@@ -487,7 +536,7 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
             }
             let leader = member(&s, usize::from(s.actors.party.leader_index));
             if usize::from(chosen) != leader {
-                for i in 0..usize::from(s.actors.party.size) {
+                for i in 0..s.actors.party.count() {
                     if member(&s, i) == usize::from(chosen) {
                         seams::switch_leader(&mut s, i as u8);
                         s.actors.work.prompt = 1;
@@ -606,7 +655,8 @@ mod tests {
             world_turn(&st, &io).await;
             r.set(r.get() + 1);
         });
-        for _ in 0..10 {
+        // Two NPC turns and the refreshes paced on the engine clock (well under 2 s).
+        for _ in 0..125 {
             e.tick(&[], 16);
         }
         assert!(e.finished());
@@ -617,6 +667,53 @@ mod tests {
         assert!(s.actors.mp(1) > 0, "the player has points again");
     }
 
+    /// The engine time one world turn of `world(npcs)` takes at host ticks of `tick_ms` (a poll
+    /// with no time elapsed after each when `zero_polls`), the view changed before it, and the
+    /// NPC turns it ran.
+    fn turn_ms(npcs: &[(i8, u8)], tick_ms: u32, zero_polls: bool) -> (u64, u32) {
+        let mut s = world(npcs);
+        s.actors.movement_points[1] = 0;
+        s.map.view_dirty = 1;
+        let done = Rc::new(std::cell::Cell::new(None));
+        let out = Rc::clone(&done);
+        let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+            let t0 = io.now_ms();
+            world_turn(&st, &io).await;
+            let n = st.borrow().combat.paced.get(&PICK_MS).copied();
+            out.set(Some((io.now_ms() - t0, n.unwrap_or(0))));
+        });
+        for _ in 0..10_000 {
+            if done.get().is_some() {
+                break;
+            }
+            e.tick(&[], tick_ms);
+            if zero_polls {
+                e.tick(&[], 0);
+            }
+        }
+        done.get().expect("the turn ends")
+    }
+
+    #[test]
+    fn a_world_turn_waits_the_originals_time_at_any_host_tick() {
+        // Spec 03 §1: the turn's waits (an NPC turn each, the refresh of the changed view) run
+        // on the engine clock: the same time at 16 ms and 8 ms ticks and with polls of no time.
+        let (ms, npcs) = turn_ms(&[(6, 10), (6, 10)], 16, false);
+        println!("two NPCs: {npcs} NPC turns, {ms} ms");
+        assert!(npcs >= 2, "both acted: {npcs}");
+        let least = u64::from(npcs) * u64::from(PICK_MS) + u64::from(AFTER_TURN_MS);
+        assert!(ms >= least, "{ms} ms, at least {least}");
+        for (tick, zero) in [(8, false), (16, true), (5, true)] {
+            let (other, n) = turn_ms(&[(6, 10), (6, 10)], tick, zero);
+            assert_eq!(n, npcs, "the same turns");
+            // Each run ends within its own tick of the same deadline.
+            assert!(
+                other + 16 >= ms && other <= ms + u64::from(tick),
+                "16 ms ticks {ms}, {tick} ms {other}"
+            );
+        }
+    }
+
     #[test]
     fn a_dead_avatar_brings_the_darkness_once_per_bookkeeping() {
         let mut s = world(&[]);
@@ -624,6 +721,34 @@ mod tests {
         s.gfx.window_shown = 0;
         leader_bookkeeping(&mut s);
         assert_eq!(s.gfx.window_shown, 1);
+    }
+
+    #[test]
+    fn a_dead_avatar_is_raised_before_the_world_turn_picks_again() {
+        let mut s = world(&[]);
+        s.actors.attrs.status[1] = 0x90;
+        s.actors.calendar.hour = 9;
+        let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+            world_turn(&st, &io).await;
+        });
+        e.tick(&[], 16);
+        let s = e.state();
+        // The raise ran (bits reset, the view moved to the castle) before any pick; the
+        // Avatar of this bare world is not carried along, so the turn then idles.
+        assert!(!s.actors.work.resurrect_pending);
+        assert_eq!(s.actors.attrs.status[1] & 0x10, 0, "the Avatar lives again");
+        assert_eq!((s.map.centre.x, s.map.centre.y), (0x133, 0x160));
+    }
+
+    #[test]
+    fn a_pending_resurrection_is_not_announced_twice() {
+        let mut s = world(&[]);
+        s.actors.attrs.status[1] = 0x90;
+        leader_bookkeeping(&mut s);
+        assert!(s.actors.work.resurrect_pending);
+        s.gfx.window_shown = 0;
+        leader_bookkeeping(&mut s);
+        assert_eq!(s.gfx.window_shown, 0, "the darkness lines once per death");
     }
 
     #[test]

@@ -9,10 +9,13 @@ publish.workspace = true
 [dependencies]
 u6-formats.workspace = true
 u6-render.workspace = true
+u6-audio.workspace = true
 
 [dev-dependencies]
 # Real-data test only: zip -> files, exactly as the platforms do it.
 u6-intake.workspace = true
+# Content-free equality for the real-data tests (spec 01 §Rights).
+u6-testkit.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # Runs the executor gate (tests/nested_prompt.rs) under wasm-bindgen-test-runner (node).

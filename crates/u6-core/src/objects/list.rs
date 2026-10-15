@@ -42,8 +42,13 @@ impl Objects {
         if b == NONE {
             return -1;
         }
+        // Port bound (as in [`Self::contained_in`]): the climbs of 0x10d890 / 0x10d8c2 have
+        // none and spin on a cyclic chain; past OBJECT_SLOTS steps the climb stops where it is.
         let root = |mut s: Slot| {
-            while self.place(s) == IN_CONTAINER {
+            for _ in 0..OBJECT_SLOTS {
+                if self.place(s) != IN_CONTAINER {
+                    break;
+                }
                 s = self.parent(s);
             }
             s
@@ -164,8 +169,12 @@ impl Objects {
     }
 
     /// Original: 0x10c928 (objects: `slot` is inside `owner`, at any depth)
+    ///
+    /// Port bound: the original climbs the parent words until a map object or `owner` with no
+    /// limit (0x10c932-0x10c964), so a cyclic or garbage chain spins; the port gives false
+    /// after OBJECT_SLOTS steps, more than any well-formed chain takes.
     pub(crate) fn contained_in(&self, mut slot: Slot, owner: Slot) -> bool {
-        loop {
+        for _ in 0..OBJECT_SLOTS {
             if self.place(slot) == 0 {
                 return false;
             }
@@ -174,6 +183,20 @@ impl Objects {
                 return true;
             }
         }
+        false
+    }
+
+    /// The map object `slot` lies in at any depth (`slot` itself when on the map), or -1 when
+    /// the parent words do not reach the map within OBJECT_SLOTS steps (a cycle). The walks of
+    /// 0x10c810 and 0x12db7e, bounded as [`Self::contained_in`] is.
+    pub(crate) fn map_holder(&self, mut slot: Slot) -> Slot {
+        for _ in 0..OBJECT_SLOTS {
+            if self.place(slot) == 0 {
+                return slot;
+            }
+            slot = self.parent(slot);
+        }
+        NONE
     }
 
     /// Original: 0x10c970 (objects: last list entry of `slot`'s contents, `slot` if empty)

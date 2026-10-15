@@ -130,7 +130,8 @@ pub struct ObjectDefs {
     pub monster_types: Vec<u16>,
     /// Initial value of the save-mode word.
     pub save_mode: u16,
-    /// "nothing" (0x10ee76 for an empty look string) and "Nothing" (0x10eef8 for slot -1).
+    /// The nothing word in lower case (0x10ee76 for an empty look string) and capitalised
+    /// (0x10eef8 for slot -1).
     pub nothing_lower: String,
     pub nothing: String,
     /// The article prefixes of 0x12904c (flags3 bits 6-7 = 1, 2, 3) and the count format of

@@ -43,12 +43,12 @@ mod tests {
 
     #[test]
     fn reads_big_endian() {
-        // formats.md dump `00 00 02 00 02 01 02 02` -> 0, 512, 513, 514.
+        // Made-up words `00 00 01 10 01 11 03 05` -> 0, 272, 273, 773.
         let mut d = vec![0u8; BASETILE_LEN];
-        d[..8].copy_from_slice(&[0x00, 0x00, 0x02, 0x00, 0x02, 0x01, 0x02, 0x02]);
+        d[..8].copy_from_slice(&[0x00, 0x00, 0x01, 0x10, 0x01, 0x11, 0x03, 0x05]);
         let b = BaseTiles::parse(&d).unwrap();
-        assert_eq!(&b.base[..4], &[0, 512, 513, 514]);
-        assert_eq!(b.tile(2, 3), Some(516));
+        assert_eq!(&b.base[..4], &[0, 272, 273, 773]);
+        assert_eq!(b.tile(2, 3), Some(276));
         assert_eq!(b.tile(1024, 0), None);
         assert!(BaseTiles::parse(&d[..2046]).is_err());
     }

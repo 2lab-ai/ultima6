@@ -365,7 +365,11 @@ fn object_verdict(
         return Verdict::Neutral;
     }
     let status = &s.actors.attrs.status;
-    if status[usize::from(actor)] & 0x80 != 0 {
+    // The original reads A4+0x3d0c + mover for any mover, an object slot (≥ 0x100: a vessel
+    // being boarded, a dropped or pushed object) included, i.e. past the 256 status bytes into
+    // the tables after them. The port reads 0 there: an object is not a party member.
+    let mover_status = status.get(usize::from(actor)).copied().unwrap_or(0);
+    if mover_status & 0x80 != 0 {
         let fellow = id.0 != leader
             && s.actors.work.swap_ok != 0
             && id.0 < 0x100
@@ -393,7 +397,8 @@ fn object_verdict(
 ///
 /// Only creatures with flag 0x4000 outside the party. A door (0x129..0x12c) at the actor's
 /// location gets frame `4 × closed + (frame & 3)` and the view flags are recomputed; a
-/// portcullis (0x116 / 0x118) is operated through 0x1301e2 with A4-0x7a4c cleared around it.
+/// portcullis (0x116 / 0x118) is operated through 0x1301e2 with the text output (A4-0x7a4c,
+/// `ui.text.on`) off around it.
 pub fn door_at_actor(s: &mut State, actor: u16, closed: u16) {
     let a = usize::from(actor);
     let ci = seams::creature_index(s, s.objects.type_frame[a] & 0x3ff);
@@ -413,14 +418,14 @@ pub fn door_at_actor(s: &mut State, actor: u16, closed: u16) {
             return;
         }
         if t == 0x116 || t == 0x118 {
-            s.actors.work.portcullis_guard = 0;
+            s.ui.text.on = false;
             operate_portcullis(s, id);
-            s.actors.work.portcullis_guard = 1;
+            s.ui.text.on = true;
         }
     }
 }
 
-/// [objects] 0x1301e2 (Use on a portcullis; "Not now!"). Stub contract: argument the
+/// [objects] 0x1301e2 (Use on a portcullis; its refusal). Stub contract: argument the
 /// portcullis object, no result; the portcullis stays as it is; reached only by door-opening
 /// NPCs standing in a portcullis (not in the start area).
 fn operate_portcullis(_s: &mut State, _id: ObjectId) {
@@ -746,6 +751,19 @@ pub(crate) mod tests {
             !can_move_to(&mut s, 10, 21, 20),
             "not while swapping is off"
         );
+    }
+
+    /// 0x11b1c0 asked for an object slot (Use boarding a vessel, Drop and Move): the party test
+    /// reads past the 256 actor status bytes (the original's A4+0x3d0c + slot); the port reads
+    /// "not in the party" there and goes on to the blocking checks.
+    #[test]
+    fn an_object_slot_mover_is_not_a_party_member() {
+        let mut s = two_actors();
+        s.objects.type_frame[0x200] = 0x17a;
+        s.objects.location[0x200] = Position { x: 22, y: 20, z: 0 };
+        link_objects(&mut s);
+        assert!(!can_move_to(&mut s, 0x200, 21, 20), "an actor stands there");
+        assert!(can_move_to(&mut s, 0x200, 22, 21));
     }
 
     #[test]

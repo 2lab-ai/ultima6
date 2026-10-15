@@ -11,7 +11,6 @@ use super::seams;
 use super::text::{WindowId, fill_rect};
 use crate::engine::Io;
 use crate::state::State;
-use crate::todo_stub;
 
 /// The panel area 0x1109e0 / 0x110d2c / 0x111c30 clear (inclusive pixels).
 const PANEL: (i32, i32, i32, i32) = (0xa8, 6, 0x138, 0x67);
@@ -102,7 +101,7 @@ fn name(s: &State, i: i16) -> Vec<u8> {
 }
 
 /// The actor slot of party member `i` (A4+0x47ec).
-fn member_actor(s: &State, i: i16) -> u8 {
+pub(crate) fn member_actor(s: &State, i: i16) -> u8 {
     usize::try_from(i)
         .ok()
         .and_then(|i| s.actors.party.members.get(i))
@@ -132,9 +131,8 @@ pub async fn redraw_panel(state: &RefCell<State>, io: &Io) {
         0x90 => stats(state, io, member).await,
         0x92 => inventory(state, io).await,
         0x9e => {
-            // Contract: draw the contents panel of member `member`'s actor (objects). Fallback:
-            // the panel keeps its old picture.
-            todo_stub!("0x128ce8 container contents panel", ());
+            let actor = member_actor(&state.borrow(), member);
+            Box::pin(crate::inventory::show_actor(state, io, i16::from(actor))).await;
         }
         _ => {}
     }
@@ -330,10 +328,10 @@ pub async fn stats(state: &RefCell<State>, io: &Io, member: i16) {
     select_window(state, io, WindowId::Messages).await;
 }
 
-/// Original: 0x111c30 (inventory: inventory panel) [partial]
+/// Original: 0x111c30 (inventory: inventory panel)
 ///
-/// Name, figure frame, the weight labels, the bottom icons; the equipment and the list are
-/// drawn by 0x111be0 (not ported: declared stub).
+/// Name, figure frame, the weight labels, the bottom icons; the equipment, the list and the
+/// weights are drawn by 0x111be0 ([`crate::inventory::panel_contents`]).
 pub async fn inventory(state: &RefCell<State>, io: &Io) {
     let (open, member, n, p) = {
         let mut s = state.borrow_mut();
@@ -362,7 +360,7 @@ pub async fn inventory(state: &RefCell<State>, io: &Io) {
     figure_frame(&state.borrow(), io, 0xc0, 0x20);
     at(state, io, 0, 9, &p.weights[0], &[]).await;
     at(state, io, 9, 9, &p.weights[1], &[]).await;
-    {
+    let shown = {
         let mut s = state.borrow_mut();
         if open == 0 {
             icon_row(&s, io, member, [0x180, 0x181]);
@@ -382,10 +380,9 @@ pub async fn inventory(state: &RefCell<State>, io: &Io) {
         {
             *f = 0;
         }
-    }
-    // Contract: draw the equipment of the shown actor or container and its inventory list.
-    // Fallback: the panel shows the frame and labels only.
-    todo_stub!("0x111be0 inventory panel contents", ());
+        shown
+    };
+    crate::inventory::panel_contents(state, io, shown as i16).await;
     combat_mode_line(state, io).await;
     select_window(state, io, WindowId::Messages).await;
 }

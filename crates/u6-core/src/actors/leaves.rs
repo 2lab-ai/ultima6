@@ -108,16 +108,20 @@ pub fn max_magic(s: &State, actor: u16) -> u16 {
 
 /// Original: 0x1224ea (combat: can `viewer` see `target` (visible, same level, not hidden))
 ///
-/// `target` is any object. Visible = not invisible; an invisible party member is seen by a
-/// party member. Object flags exist for actor slots only: past them the original reads the next
-/// table, the port reads 0 (visible). Never: a swallowed actor, the object word 0x165 (type 0x165 frame 0), an object
-/// whose tile has flags3 bit 0x10, or one on another level.
+/// `viewer` and `target` are any objects (a cannon's ball is seen from the cannon's slot).
+/// Visible = not invisible; an invisible party member is seen by a party member. The object
+/// flags (A4+0x190c, read at 0x1224f6) cover every slot; the actor status (A4+0x3d0c, read for
+/// the viewer at 0x122506 without a bound) exists for actor slots only: past them the original
+/// reads the next table (status of a viewer ≥ 0x100 is a talk-flags byte), the port reads 0
+/// (not in the party). Never: a swallowed actor, the object word 0x165 (type 0x165 frame 0), an
+/// object whose tile has flags3 bit 0x10, or one on another level.
 pub fn can_see(s: &State, viewer: u16, target: u16) -> bool {
     let (v, t) = (usize::from(viewer), usize::from(target));
     let flags = |i: usize| s.objects.obj_status.get(i).copied().unwrap_or(0);
     let mut seen = flags(t) & 0x02 == 0;
     let status = &s.actors.attrs.status;
-    if status[v] & 0x80 != 0 && !seen && t < 0x100 && status[t] & 0x80 != 0 {
+    let in_party = status.get(v).copied().unwrap_or(0) & 0x80 != 0;
+    if in_party && !seen && t < 0x100 && status[t] & 0x80 != 0 {
         seen = true;
     }
     if t < 0x100 && s.actors.attrs.movement_flags[t] & 0x10 != 0 {
@@ -237,5 +241,17 @@ mod tests {
         s.actors.attrs.movement_flags[2] = 0;
         s.objects.location[2].z = 1;
         assert!(!can_see(&s, 1, 2));
+    }
+
+    #[test]
+    fn an_object_viewer_reads_no_party_bit() {
+        // A cannon ball's shooter is the cannon object (slot 0x101): 0x1224ea reads its status
+        // past the 256 actors; here that reads 0, so an invisible member stays unseen.
+        let mut s = State::empty();
+        s.actors.attrs.status[2] = 0x80;
+        s.objects.obj_status[2] = 0x02;
+        assert!(!can_see(&s, 0x101, 2));
+        s.objects.obj_status[2] = 0;
+        assert!(can_see(&s, 0x101, 2));
     }
 }

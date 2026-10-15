@@ -178,7 +178,7 @@ pub(crate) async fn exec(cx: &Cx<'_>, op: u8, npc: i16) -> i16 {
                 }
                 o
             });
-            cx.st(|s| seams::resurrect(s, body));
+            Box::pin(crate::magic::resurrect_and_rejoin(cx.state, cx.io, body)).await;
         }
         0xd8 | 0xdf => {
             let a = actor(cx).await;

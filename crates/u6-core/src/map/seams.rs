@@ -8,7 +8,6 @@ use u6_formats::position::Position;
 
 use crate::objects::{OBJECT_SLOTS, ObjectId};
 use crate::state::State;
-use crate::todo_stub;
 
 /// Status byte of object `id` (A4+0x190c, byte per object slot: 0x18 = not on the map, 0x20 =
 /// temporary, 0x40 = egg active, ...).
@@ -101,10 +100,9 @@ pub(crate) fn build_view_objects(state: &mut State) {
     crate::objects::build_draw_lists(state);
 }
 
-/// Offer egg `id` to hatch (owner `objects/`, 0x1319b2: may create monsters). Reached when an
-/// egg is in the window. Fallback: nothing hatches.
-pub(crate) fn hatch_egg(_state: &mut State, _id: ObjectId) {
-    todo_stub!("0x1319b2 hatch an egg", ())
+/// Offer egg `id` to hatch (owner `objects/`, 0x1319b2: may create monsters).
+pub(crate) fn hatch_egg(state: &mut State, id: ObjectId) {
+    crate::objects::hatch_egg(state, id.slot());
 }
 
 /// A byte of the objlist block A4-0x7b84 (`actors.objlist_tail`, objlist 0x1BF1..0x1C73) that
@@ -178,10 +176,9 @@ pub(crate) fn step_toward(state: &mut State, id: ObjectId, x: u16, y: u16) -> i1
     i16::from(crate::actors::npc::approach(state, id.0, x, y))
 }
 
-/// Distance from actor `id` to (x, y) (owner: combat leaf 0x121b08, an M1 stub point; uses
-/// `abs`). Fallback: 0, so a gathering member joins the leader at once (0x108fba).
-pub(crate) fn distance(_state: &State, _id: ObjectId, _x: u16, _y: u16) -> i16 {
-    todo_stub!("0x121b08 distance from an actor to a location", 0)
+/// Distance from actor `id` to (x, y) (combat 0x121b08).
+pub(crate) fn distance(state: &State, id: ObjectId, x: u16, y: u16) -> i16 {
+    crate::combat::leaves::distance(state, id.slot(), x as i16, y as i16)
 }
 
 /// Walk actor `id` one step in direction `dir` (0, 2, 4, 6) with flag 1 (actors 0x11f0a0).
@@ -191,24 +188,23 @@ pub(crate) fn walk(state: &mut State, id: ObjectId, dir: u16) {
 
 /// The routine 0x108fba runs for a party member whose type is 0x1af before leaving (owner
 /// `objects/`, 0x12f8fe, uses "No room!"). Fallback: nothing.
-pub(crate) fn before_leaving(_state: &mut State, _id: ObjectId) {
-    todo_stub!("0x12f8fe party member of type 0x1af leaves", ())
+pub(crate) fn before_leaving(state: &mut State, id: ObjectId) {
+    crate::objects::commands::dismount(state, id.slot());
 }
 
-/// End combat mode (0x121d78, an M1 stub point: the B command handler). Fallback: nothing; M1
-/// starts out of combat.
-pub(crate) fn break_off_combat(_state: &mut State) {
-    todo_stub!("0x121d78 break off combat", ())
+/// End combat mode (combat 0x121d78).
+pub(crate) fn break_off_combat(state: &mut State) {
+    crate::combat::mode::break_off(state);
 }
 
-/// Start the song for the current area (0x110912, an M1 stub point). Fallback: silence.
-pub(crate) fn play_area_song(_state: &mut State) {
-    todo_stub!("0x110912 pick and play the area song", ())
+/// Start the song for the current area (0x110912).
+pub(crate) fn play_area_song(state: &mut State) {
+    crate::sound::play_area_song(state)
 }
 
-/// Play song `n` (0x110878, an M1 stub point). Fallback: silence.
-pub(crate) fn play_song(_state: &mut State, _n: u16) {
-    todo_stub!("0x110878 play a song", ())
+/// Play song `n` (0x110878).
+pub(crate) fn play_song(state: &mut State, n: u16) {
+    crate::sound::play_song(state, n)
 }
 
 /// Shamino names the place a dungeon entrance of quality `q` (1..=20) leads to (0x11d1d4):
@@ -257,12 +253,6 @@ pub(crate) fn scan_hostiles(state: &mut State) {
 /// Put the Avatar back from its body object (objects 0x10c810).
 pub(crate) fn raise_avatar_body(state: &mut State, body: ObjectId) {
     crate::objects::actor_from_body(state, body.slot());
-}
-
-/// Resurrect the companion lying as body object `body` (0x11785e, an M1 stub point in the
-/// magic code). Fallback: nothing.
-pub(crate) fn resurrect_body(_state: &mut State, _body: ObjectId) {
-    todo_stub!("0x11785e resurrect a companion's body", ())
 }
 
 /// Objects of the region list (A4-0xf84 head = slot 0x100, A4-0x1184 next links) in list order.

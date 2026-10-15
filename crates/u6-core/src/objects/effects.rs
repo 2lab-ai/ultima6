@@ -6,7 +6,6 @@ use std::cell::RefCell;
 
 use crate::engine::Io;
 use crate::state::State;
-use crate::todo_stub;
 
 /// Original: 0x10a4d6 (objects: frame of an actor type for animation step / direction `n`)
 ///
@@ -51,8 +50,13 @@ pub fn in_type_set_670c(o: &Objects, kind: u16) -> bool {
     o.defs.type_set_670c.iter().take(9).any(|&k| k == kind)
 }
 
-/// Original: 0x128b0e (objects: mark an object and everything inside it "ok to take")
+/// Original: 0x128b0e (objects: mark an object and everything inside it as fine to take)
+///
+/// Slot -1 does nothing (the original sets bit 0 of the byte before the status table).
 pub fn mark_takeable(o: &mut Objects, slot: Slot) {
+    if slot < 0 {
+        return;
+    }
     o.obj_status[slot as usize] |= 0x01;
     let mut c = o.next_of(slot);
     while c >= 0 && o.place(c) != 0 {
@@ -98,10 +102,13 @@ pub fn monster_index(o: &Objects, kind: u16) -> i16 {
 /// Original: 0x1301e2 (objects: open or close a passthrough (sliding wall section))
 ///
 /// Closed (frame 0): the section slides one tile — up for type 0x116, else left — takes
-/// frame | 2 and "Open the passthrough" is printed. Open: unless the first object where it
-/// closes is an actor ("Not now!"), it slides back, keeps frame bit 0 and prints "Close the
-/// passthrough".
+/// frame | 2 and the opening line (0x12cf20) is printed. Open: unless the first object where
+/// it closes is an actor (the refusal at 0x12cee2), it slides back, keeps frame bit 0 and
+/// prints the closing line (0x12cf38). Slot -1 does nothing.
 pub fn toggle_passthrough(s: &mut State, slot: Slot) {
+    if slot < 0 {
+        return;
+    }
     let o = &s.objects;
     let tf = o.tf(slot);
     let (x, y) = (o.x(slot), o.y(slot));
@@ -137,98 +144,13 @@ const STR_OPEN: u32 = 0x0012_cf20;
 const STR_NOT_NOW: u32 = 0x0012_cee2;
 const STR_CLOSE: u32 = 0x0012_cf38;
 
-/// Stub of 0x128ce8 (objects: show an actor's portrait, equipment and name, wait for a key)
-///
-/// Stub contract: draws the actor's portrait (converse 0x133d3e) and equipment panel (ui
-/// 0x133fe0 / 0x1113fe), prints its name (0x10eef8 or its converse name) and, unless A4-0x71b5
-/// is set, awaits a key (0x10790a) — so the port's signature is async. Fallback: nothing shown,
-/// no key consumed; the caller continues. Reached by Talk's start (0x114afa) and its opcode
-/// executor (0x11404c), the side panel (0x103f64) and Look: the M1 Talk scenario reaches it,
-/// and the missing key wait is a command-boundary difference there.
-pub async fn show_actor(_state: &RefCell<State>, _io: &Io, _actor: Slot) {
-    todo_stub!("0x128ce8 show an actor's portrait, equipment and name", ())
+/// 0x128ce8 (an actor's portrait, equipment and name, then a key unless a conversation runs):
+/// ported in [`crate::inventory::show_actor`]; this entry keeps the objects-side signature.
+pub async fn show_actor(state: &RefCell<State>, io: &Io, actor: Slot) {
+    Box::pin(crate::inventory::show_actor(state, io, actor)).await
 }
 
-/// Stub of 0x12ba36 (objects: spring a trap: acid, poison, bomb or gas)
-///
-/// Stub contract: one RNG draw 0..=3 picks the effect, damages or poisons the actor and those in
-/// the blast (combat 0x1231be / 0x1230ce, ui animation 0x1331b4), then removes the trap. Fallback:
-/// the trap is removed without effect and no RNG draw is made. Not reached by the M1 scenarios.
-pub fn spring_trap(s: &mut State, trap: Slot) {
-    todo_stub!("0x12ba36 trap effects (acid, poison, bomb, gas)", ());
-    super::moves::remove(s, trap);
-}
+pub use super::commands::{blast_doors, explode_keg, spring_trap};
 
-/// Stub of 0x12db7e (objects: explode a powder keg)
-///
-/// Stub contract: removes the keg, damages the actors in the blast (ui 0x1331b4, combat
-/// 0x1231be), chains to 0x12d9ee and refreshes the view. Fallback: the keg is removed only. Not
-/// reached by the M1 scenarios.
-pub fn explode_keg(s: &mut State, keg: Slot) {
-    todo_stub!("0x12db7e explode a powder keg", ());
-    super::moves::remove(s, keg);
-}
-
-/// Stub of 0x12d9ee (objects: blow up kegs and doors around (x, y))
-///
-/// Stub contract: lights kegs (0xdf) and removes closed doors (0x12c / 0x129 / 0x12a / 0x12b)
-/// in x − 2..=x + 2, y − 2..y + 2, printing "The door is blown up!". Fallback: nothing. Not
-/// reached by the M1 scenarios.
-pub fn blast_doors(_s: &mut State, _x: u16, _y: u16) {
-    todo_stub!("0x12d9ee blow up kegs and doors around a tile", ())
-}
-
-/// Stub of 0x12f6ee (objects: mount / place a horse)
-///
-/// Stub contract: moves the rider, sets its type to the mounted horse (0x1af) and places or
-/// re-types the horse object, then rebuilds the tile cache and refreshes. Fallback: nothing.
-/// Not reached by the M1 scenarios (no Use command).
-pub fn mount_horse(_s: &mut State, _rider: Slot, _x: u16, _y: u16, _frame: u16, _here: u16) {
-    todo_stub!("0x12f6ee mount a horse", ())
-}
-
-/// Stub of 0x12f8fe (objects: dismount: put the horse next to the rider, "No room!")
-///
-/// Stub contract: restores the rider's base type, removes the mounted-horse object and places a
-/// horse on a free neighbouring tile (0x11b1c0), else prints "No room!". Fallback: nothing. Not
-/// reached by the M1 scenarios.
-pub fn dismount(_s: &mut State) {
-    todo_stub!("0x12f8fe dismount a horse", ())
-}
-
-/// Stub of 0x128b98 (objects: parse a typed number or direction answer)
-///
-/// Stub contract: digits give a number; with `mode` 1 a trailing N / S (2: E / W) gives the
-/// sign, any other letter 100; mode 0 with no digits gives -1 or, with A4-0x7a44 set, the value
-/// read so far. Fallback -2 ("no answer"). Reached only from Use handlers (not M1).
-pub fn parse_answer(_text: &str, _mode: i16) -> i16 {
-    todo_stub!("0x128b98 parse a typed number or direction", -2)
-}
-
-/// Stub of 0x131646 (objects: create a monster of `kind` at (x, y, z) with stats)
-///
-/// Stub contract: takes a temporary-actor slot (0x10bec8), sets stats from the monster tables
-/// (0x131196 / 0x1311d2, combat 0x122176), its frame and extra parts, and gives it equipment
-/// (0x13121a). Fallback -1 (no monster). Reached by random encounters (0x1319b2) only.
-pub fn spawn_monster(_s: &mut State, _kind: u16, _x: u16, _y: u16, _z: u16) -> Slot {
-    todo_stub!("0x131646 create a monster with stats and equipment", -1)
-}
-
-/// Stub of 0x13121a (objects: give a new monster its equipment from the A4-0x7cbe table)
-///
-/// Stub contract: RNG-weighted items into the monster's inventory. Fallback: none given. Reached
-/// only through 0x131646.
-pub fn equip_monster(_s: &mut State, _monster: Slot, _index: i16) {
-    todo_stub!("0x13121a give a new monster its equipment", ())
-}
-
-/// Stub of 0x1319b2 (objects: hatch an egg: spawn its monsters, "Shamino says, I hear something")
-///
-/// Stub contract: called by map 0x1321dc for every egg (type 0x14f) on the leader's level in the
-/// 40 × 40 window each time the window is rebuilt (0x108d10, i.e. whenever walking shifts the
-/// window), unless A4-0x7afb is set; with RNG checks it spawns the egg's monsters out of view
-/// (0x131646) and may print Shamino's warning. Fallback: no monster and no RNG draw. Reached on
-/// the M1 walk path: RNG parity diverges at the first window shift with an egg in range.
-pub fn hatch_egg(_s: &mut State, _egg: Slot) {
-    todo_stub!("0x1319b2 hatch an egg (spawn its monsters)", ())
-}
+pub use super::commands::{dismount, mount_horse, parse_answer};
+pub use super::commands::{equip_monster, hatch_egg, spawn_monster};

@@ -12,12 +12,13 @@ use crate::state::State;
 /// Replaces: 0x134e7c (take the next game code, 0 when none is queued; with the drain flag
 /// A4-0x7a46 it empties the ring and keeps the last code)
 ///
-/// The port reads the engine queue: one pending event is consumed and mapped through the raw
-/// map 0x151d00; nothing pending gives 0. The drain is not applied: the engine contract (spec
+/// The port reads the engine queue: a key at its front is consumed and mapped through the raw
+/// map 0x151d00; anything else gives 0 (a pointer event in front is the event wait's to take,
+/// [`crate::engine::Io::take_pointer`]). The drain is not applied: the engine contract (spec
 /// 03 §1) consumes input in order, and the platform delivers presses only (no key-up codes
 /// that the drain would otherwise skip past).
 async fn poll(state: &RefCell<State>, io: &Io) -> u16 {
-    if io.pending_events() == 0 {
+    if !io.key_ready() {
         return 0;
     }
     let key = io.next_key().await;
@@ -75,7 +76,10 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
                 seams::refresh_view(&mut s, io);
                 seams::anim_step(&mut s);
             }
+            // 0x105d4c: the pointer sample (0x14f12c); the event wait takes the events.
+            super::pointer::sample(&mut s, io.pointer());
         }
+        super::effects::show_recorded(state, io).await;
         io.present();
         io.vblank().await;
     }
@@ -151,6 +155,9 @@ pub async fn read_line(state: &RefCell<State>, io: &Io, max: i16) -> (i16, Vec<u
     state.borrow_mut().ui.input.drain = false;
     loop {
         let k = loop {
+            // Port: nothing here reads the pointer; its queued events are applied (as the
+            // handler would) so the keys behind them arrive.
+            io.take_pointer();
             let k = idle_poll(state, io).await;
             if k != 0 {
                 break k;

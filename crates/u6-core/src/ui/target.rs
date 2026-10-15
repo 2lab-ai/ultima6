@@ -1,17 +1,16 @@
-//! The event wait 0x106bbc: keys to commands and directions, the cross-hair and the panel
-//! cursor, the panel keys. Everything but the pointer (mouse) part is ported; the port has no
-//! pointer device, so the click mapping 0x10658e is behind a seam that reports no buttons.
+//! The event wait 0x106bbc: the pointer (clicks, [`super::click`]), keys to commands and
+//! directions, the cross-hair and the panel cursor, the panel keys.
 
 use std::cell::RefCell;
 
 pub use super::cursor::panel_cursor;
 use super::cursor::{select_command, target_from_pointer};
 use super::keyread::idle_poll;
+use super::pointer;
 use super::print::put_raw;
 use super::seams;
 use crate::engine::Io;
 use crate::state::State;
-use crate::todo_stub;
 
 const TAB: u16 = 0x09;
 const RETURN: u16 = 0x0d;
@@ -19,6 +18,18 @@ const ESCAPE: u16 = 0x1b;
 const SPACE: u16 = 0x20;
 /// First function key code (F1 = 0x13b): F1 + n picks party member n in the panel.
 const F1: u16 = 0x13b;
+/// [replaced] Milliseconds from one sample of a held walk to the next: 33 PAL frames (20 ms each),
+/// from the oracle (tools/oracle/pace.mjs: game-first disks, the throne room with every actor
+/// outside the party passed over and the fight broken off, a press held three cells south, 6
+/// boots). In 4 boots the steps came 25..41 frames apart (median 29, mean 31.7, alternating about
+/// 27 and 38), the first 1..12 frames after the press and the second 28..37; in the other 2,
+/// whose followers were still forming up, 26..108 (median 72). A sample every 33 frames from the
+/// press puts the port's cells per held time within one of those 4 boots at every hold up to
+/// their 8 free cells (100 ms: 1, 1 s: 2, 4 s: 7 against their 6), so no separate first-repeat
+/// delay is needed. The waits of the step's world turn (its refresh,
+/// [`crate::actors::turn::AFTER_TURN_MS`], and in a fight its NPC turns and effects) count inside
+/// the pace, not on top of it.
+pub(crate) const HELD_WALK_MS: u32 = 660;
 
 /// Alt + letter codes (0x100 + PC scan code) that select a command (0x106ca0 switch).
 const COMMAND_KEYS: [(u16, u8); 10] = [
@@ -45,18 +56,12 @@ const DIRECTION_KEYS: [(u16, i16); 8] = [
     (0x147, 7),
 ];
 
-/// 0x14f12c (copy the pointer position and buttons) — the port has no pointer device:
-/// buttons are never down. Seam for the platform (an `InputEvent` for the mouse).
-fn pointer_buttons() -> u16 {
-    0
-}
-
-/// Original: 0x106bbc (ui: wait for the next input event, map it to a game code) [partial]
+/// Original: 0x106bbc (ui: wait for the next input event, map it to a game code)
 ///
-/// Commands, directions, the cross-hair, the panel cursor and the panel keys are handled here;
-/// the result is non-zero. Not ported: the pointer (mouse) branch (no pointer device: the
-/// click map 0x10658e is a declared stub that the keyboard never reaches) and the inline spell
-/// syllable entry and spellbook keys (Cast, outside M1; declared stubs).
+/// Each round samples the pointer first: while a button is down the click map gives the code
+/// ([`pointer_click`]); else a key: commands, directions, the cross-hair, the panel cursor and
+/// the panel keys. The result is non-zero. The inline spell syllable entry and the spellbook
+/// keys are magic's ([`crate::magic::spell_key`], [`crate::magic::book_panel_key`]).
 pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
     if state.borrow().ui.input.accept {
         put_raw(state, io, -1).await;
@@ -71,9 +76,8 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
         if key != 0 {
             return key;
         }
-        if pointer_buttons() & 3 != 0 {
-            // Contract: map a click to a code (0 = none). Unreachable: no pointer device.
-            key = todo_stub!("0x10658e map a click to a command", 0);
+        key = pointer_click(state, io).await;
+        if key != 0 {
             continue;
         }
         key = idle_poll(state, io).await;
@@ -92,18 +96,167 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
         } else {
             tab_key(state, io, key)
         };
-        key = panel_key(state, io, key);
+        key = if crate::magic::takes_book_key(&state.borrow(), key) {
+            crate::magic::book_panel_key(state, io, key).await
+        } else {
+            panel_key(state, io, key).await
+        };
     }
+}
+
+/// 0x106be6..0x106c5e: the pointer sample (0x14f12c copies the handler's position 0x1623b8 /
+/// 0x1623ba and its button word 0x161bd4; the port takes the queued events up to the next button
+/// change, [`Io::take_pointer`]); with a button down the click map 0x10658e gives the code.
+/// A4-0x7a34 marks the press (the first sample with a button down, A4-0x7a36 then set); while
+/// held only the press's code repeats. With no button down both clear.
+///
+/// A held button (A4-0x7a36 set and still down) repeats at once in the original: nothing in
+/// 0x106bbc or 0x14f12c waits, the input.device handler runs beside the game and the release
+/// shows in the next sample. The port's handler is the engine's queue, which fills only between
+/// polls, so a held repeat first waits one display frame and samples again (a prompt that drops
+/// the walk code then still sees the release). A key queued in front of the pointer events holds
+/// them back (input in order), the release perhaps among them, so a button still held behind a
+/// key gives way to the key poll.
+///
+/// [replaced] What paces a held walk in the original is the step itself: it redraws the view
+/// (more than once while the followers form up) and every redraw costs the 68000 its CPU and
+/// blitter time, about 25 frames in the oracle, so a sample comes [`HELD_WALK_MS`] after the one
+/// before it. The port draws a step at once, so while the command loop's last pointer code was
+/// a walk (read with A4-0x7a2c set) and that step went through (A4-0x6a90 clear), the repeat
+/// waits on the engine clock for the next sample's due time ([`super::pointer::PointerState`]
+/// `walk_due`). Each due time is a pace after the previous one, not after the tick the repeat
+/// woke at, and the sample is taken as of the due time: an event comes at the clock of the tick
+/// that queued it, so when the waking tick strictly passes the due time, what it queued (a
+/// release, a key) came after the sample, and when a tick lands exactly on the due time, its
+/// events count as before it; the walk goes where the pointer was then. A held move in front of
+/// a release does not hide the release from the sample. So step n comes exactly when the press
+/// plus n paces is before the release, in the direction the pointer had at that time, at any
+/// host tick size. Time the step waits for itself (an effect, a prompt) counts toward its pace,
+/// not on top of it: added, the tick rounding of those waits would build up over a walk again (a
+/// 100 ms wait lasts 112 ms at 16 ms ticks, 104 at 8). The cost: in the original such a wait
+/// comes before its redraw, so each step that waits comes up to a pace early, and over a walk of
+/// such steps that adds up (unmeasured: the oracle captures have no held walk whose steps wait,
+/// only single clicks in the start fight, whose 143..541-frame turns mix the 68000's work with
+/// its waits).
+/// A step whose own waits outlast the pace samples on the next frame and the cadence starts
+/// again from that sample (no burst of the paces it outlasted). A hold that gives no walk (the
+/// pointer on the Avatar's cell or off the map, a blocked step) keeps the frame pace, and so does
+/// a prompt (A4-0x7a2c clear), which keeps the due time: the step after a short prompt still
+/// comes a pace after the one before it. The release ends the pace. Not reproduced: 0x14f12c
+/// reads the handler's button word 0x161bd4 once per pass of this wait, so the original misses a
+/// click shorter than a pass (in the oracle 10 of 18 presses of 5 frames); the queue keeps every
+/// press.
+async fn pointer_click(state: &RefCell<State>, io: &Io) -> u16 {
+    let mut due = None;
+    if sample(state, io) != 0 && state.borrow().actors.work.mouse_walk != 0 {
+        let walk = {
+            let mut s = state.borrow_mut();
+            if s.actors.work.step_blocked != 0 {
+                s.ui.pointer.walk_due = None;
+            }
+            s.ui.pointer.walk_due.filter(|_| s.main.reading == 1)
+        };
+        // The events queued at the last poll before the wake: they came no later than it.
+        let entry = io.now_ms();
+        let mut queued = io.pending_events();
+        io.vblank().await;
+        // Kept exact while not yet passed; passed already (the step's own waits outlasted it):
+        // this sample, now.
+        due = walk.map(|at| if at < entry { io.now_ms() } else { at });
+        while due.is_some_and(|at| io.now_ms() < at) {
+            queued = io.pending_events();
+            io.vblank().await;
+        }
+        // Woken by a tick that strictly passed the due time: what that tick queued came after
+        // the sample, so the sample takes only the `queued` events that came before it (none:
+        // the pointer as it was). A take is the first event and the moves after it that keep its
+        // buttons; when the first take keeps the held buttons (a move), a second one takes the
+        // button change behind it, so a held move does not hide a release. Else (no due time, a
+        // tick on the due time, or a due already passed at entry) both takes are unbounded: on a
+        // repeat with no due time a release behind a move is then seen a frame sooner. A key is
+        // in front only if it came before.
+        let early = due.is_some_and(|at| io.now_ms() > at);
+        let before = io.pending_events();
+        let left = |io: &Io| {
+            if early {
+                queued.saturating_sub(before - io.pending_events())
+            } else {
+                usize::MAX
+            }
+        };
+        let buttons = io.pointer().buttons;
+        let mut held = sample_upto(state, io, left(io));
+        if io.pointer().buttons == buttons {
+            held = sample_upto(state, io, left(io));
+        }
+        if held != 0 && io.key_ready() && left(io) > 0 {
+            return 0;
+        }
+    }
+    {
+        let mut s = state.borrow_mut();
+        let buttons = pointer_buttons(&s);
+        if buttons & 3 == 0 {
+            s.ui.pointer.pressed = false;
+            s.ui.pointer.walk_due = None;
+            s.actors.work.mouse_walk = 0;
+            return 0;
+        }
+        let pressed = s.actors.work.mouse_walk == 0;
+        s.actors.work.mouse_walk = 1;
+        s.ui.pointer.pressed = pressed;
+        s.ui.pointer.buttons = buttons;
+        s.ui.input.pointer = s.ui.pointer.at;
+    }
+    let code = super::click::click(state, io).await;
+    let mut s = state.borrow_mut();
+    let reading = s.main.reading == 1;
+    let ptr = &mut s.ui.pointer;
+    let code = if ptr.pressed {
+        ptr.press_code = code;
+        code
+    } else if ptr.press_code == code {
+        code
+    } else {
+        0
+    };
+    if reading {
+        // A walk: the next sample is due a pace after this one's due time (an unpaced sample's
+        // is now); any other code or none: no pace.
+        let at = due.unwrap_or_else(|| io.now_ms());
+        ptr.walk_due = (code == super::wait::WALK).then(|| at + u64::from(HELD_WALK_MS));
+    }
+    code
+}
+
+/// 0x106be6: the handler's pointer into the sample (0x14f12c); the buttons as 0x106bbc reads
+/// them (1 left, 2 right; both down reads as neither).
+fn sample(state: &RefCell<State>, io: &Io) -> u16 {
+    sample_upto(state, io, usize::MAX)
+}
+
+/// As [`sample`], from at most the first `n` queued events ([`Io::take_pointer_upto`]; with
+/// `usize::MAX` the take is [`Io::take_pointer`]'s).
+fn sample_upto(state: &RefCell<State>, io: &Io, n: usize) -> u16 {
+    let p = io.take_pointer_upto(n);
+    let mut s = state.borrow_mut();
+    pointer::sample(&mut s, p);
+    pointer_buttons(&s)
+}
+
+/// The buttons of the last sample, as [`sample`] gives them.
+fn pointer_buttons(s: &State) -> u16 {
+    u16::from(s.ui.pointer.left) | u16::from(s.ui.pointer.right)
 }
 
 /// 0x106c6c..0x106de6: the key from the poll: case, commands, directions; and the flags the
 /// rest of the iteration tests.
 fn map_key(s: &mut State, io: &Io, key: u16) -> (u16, bool, bool, bool, u8) {
     let mut key = key;
-    let input = &mut s.ui.input;
     if key != 0 {
-        input.key_marks = (-1, -1);
+        s.actors.work.mouse_target = (-1, -1);
     }
+    let input = &mut s.ui.input;
     if input.upcase && key < 0x100 && (key as u8).is_ascii_lowercase() {
         key -= 0x20;
     }
@@ -160,9 +313,26 @@ fn start_cross_hair(s: &mut State, io: &Io) {
 }
 
 /// 0x10765e..0x1078c4: keys of the panel modes: `*` / `/` switch between stats, inventory and
-/// roster, `+` / `-` step the member (or scroll the roster), F1.. pick a member.
-fn panel_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
-    let mut s = state.borrow_mut();
+/// roster, `+` / `-` step the member (or scroll the roster), F1.. pick a member; `` ` `` / `~`
+/// click the inventory's combat-mode icon (0x10619c with the pointer at (0xf8, 0x60)).
+async fn panel_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
+    let combat_icon = {
+        let mut s = state.borrow_mut();
+        let hit = !s.converse.active && s.ui.panel.mode == 0x92 && matches!(key, 0x60 | 0x7e);
+        if hit {
+            s.ui.input.pointer = (0xf8, 0x60);
+        }
+        hit
+    };
+    if combat_icon {
+        Box::pin(super::click::inventory_click(state, io)).await;
+        return 0;
+    }
+    panel_key_in(&mut state.borrow_mut(), key)
+}
+
+/// [`panel_key`] for every key but the combat-mode icon's.
+fn panel_key_in(s: &mut State, key: u16) -> u16 {
     let (mode, size) = (s.ui.panel.mode, u16::from(s.actors.party.size));
     if s.converse.active {
         return key;
@@ -180,15 +350,6 @@ fn panel_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
                 0x2f | 0x144 => 0x91,
                 0x2b => 0x99,
                 0x2d => 0x9a,
-                0x60 | 0x7e if mode == 0x92 => {
-                    input.pointer = (0xf8, 0x60);
-                    drop(s);
-                    // Contract: act on the inventory slot under the pointer (the panel's click
-                    // handler). Fallback: nothing happens.
-                    todo_stub!("0x10619c inventory click at the pointer", ());
-                    let _ = io;
-                    0
-                }
                 _ if member_key => {
                     input.selection = (key - F1) as i16;
                     mode
@@ -213,15 +374,7 @@ fn panel_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
                 input.target = (-1, -1);
                 0x8f
             }
-            RETURN => {
-                // Contract: cast the spell under the spellbook cursor (magic, not in M1).
-                // Fallback: no spell; the key is consumed.
-                todo_stub!("0x115da4 spellbook select", 0)
-            }
-            0x80 => {
-                // Contract: move the spellbook cursor (0x106812). Fallback: consumed.
-                todo_stub!("0x106812 spellbook cursor step", 0)
-            }
+            // Return and a direction go to crate::magic::book_panel_key (wait_event).
             _ => key,
         },
         _ => key,
@@ -257,8 +410,7 @@ async fn targeting_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
         key
     };
     if cmd == 0x82 && targeting == 3 {
-        // Contract: enter a spell syllable (Cast, not in M1). Fallback: consumed.
-        return todo_stub!("0x10674e spell syllable entry", 0);
+        return Box::pin(crate::magic::spell_key(state, io, key)).await;
     }
     match key {
         TAB => {
@@ -298,14 +450,14 @@ async fn targeting_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
             state.borrow_mut().ui.input.targeting = 0;
             0
         }
-        RETURN => confirm(state, io, targeting),
+        RETURN => confirm(state, io, targeting).await,
         super::wait::WALK => step(state, io, targeting),
         _ => member_key(state, key, targeting),
     }
 }
 
 /// Return with a cursor up (0x107218..0x1072c8).
-fn confirm(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
+async fn confirm(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
     if targeting == 1 {
         let mut s = state.borrow_mut();
         let mut key = super::wait::REPEAT;
@@ -329,12 +481,10 @@ fn confirm(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
         return RETURN;
     }
     panel_cursor(state, io, 2);
-    // Contract: act on the inventory / stats slot under the pointer (0x10619c / 0x10613a) and
-    // give the resulting code, 0 for none. Fallback: none.
     let key: u16 = if mode == 0x92 {
-        todo_stub!("0x10619c inventory click at the pointer", 0)
+        Box::pin(super::click::inventory_click(state, io)).await
     } else {
-        todo_stub!("0x10613a stats panel click at the pointer", 0)
+        super::click::stats_click(&mut state.borrow_mut())
     };
     let mut s = state.borrow_mut();
     if key == 0 && s.ui.input.target_pending == 1 && target_from_pointer(&mut s) != 0 {
@@ -356,7 +506,7 @@ fn step(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
         let range = s.ui.input.range;
         if (0..11).contains(&nx)
             && (0..11).contains(&ny)
-            && seams::distance(nx, ny, 5, 5) <= i16::from(range)
+            && seams::distance(&s, nx, ny, 5, 5) <= i16::from(range)
         {
             s.ui.input.cursor = (nx as i8, ny as i8);
             seams::present_map(&mut s, io, 1);

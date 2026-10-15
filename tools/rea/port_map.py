@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Port map: every original `game` function -> Rust path -> status (re/notes/port-map.md).
+"""Port map: every original `game` and `u` function -> Rust path -> status (re/notes/port-map.md).
 
 Scans crates/u6-core/src/**/*.rs for the porting markers of spec 03 §3 and joins them with the
 function inventory (milestone flags, subsystem):
@@ -10,12 +10,17 @@ function inventory (milestone flags, subsystem):
     todo_stub!("0xADDR ...", fallback)      stubbed
     //! - 0xADDR ...                        planned (the module listing it will own it)
 
+The intro program `u` has its own table: markers written `u 0xADDR` (`/// Original: u 0x...`,
+`/// Replaces: u 0x...` with its paragraph, `todo_stub!("u 0x...")`, and every `u 0x...` on a `//!` line = planned)
+against the procedures of `u` (REA's u-procedures.json plus the code hunk bases of u.json, less
+the `jmp abs.l` thunks read from u.bin).
+
 Subsystems the spec replaces wholesale (03 §4: SAS/C runtime -> Rust std, dos.library file
 layer -> Files, OS setup -> Engine/Io) count as replaced unless a marker says otherwise.
 Addresses below the image base 0x100000 (doc examples, tests) are ignored; marker addresses
 that are not function entries (data tables cited on fields) are listed separately.
 
-    python3 -I -B tools/rea/port_map.py [--inventory PATH] [--check]
+    python3 -I -B tools/rea/port_map.py [--inventory PATH] [--u-procedures PATH] [--check]
 """
 import argparse
 import json
@@ -27,6 +32,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 SRC = os.path.join(ROOT, "crates", "u6-core", "src")
 OUT = os.path.join(ROOT, "re", "notes", "port-map.md")
 INVENTORY = os.path.expanduser("~/Games/ultima6/re/inventory.json")
+U_PROCEDURES = os.path.expanduser("~/Games/ultima6/re/rea/u-procedures.json")
+U_LAYOUT = os.path.expanduser("~/Games/ultima6/re/u.json")
+U_IMAGE = os.path.expanduser("~/Games/ultima6/re/u.bin")
 IMAGE_BASE = 0x100000
 
 RANK = ["ported", "partial", "placeholder", "stubbed", "replaced", "planned"]
@@ -41,6 +49,10 @@ RE_REPLACES = re.compile(r"^\s*///\s*Replaces:(.*)$")
 RE_STUB = re.compile(r"todo_stub!\(\s*\"0x([0-9a-fA-F]+)")
 RE_PLANNED = re.compile(r"^\s*//!\s*-\s*0x([0-9a-fA-F]+)\b")
 RE_ADDR = re.compile(r"0x([0-9a-fA-F]+)")
+RE_U_ORIGINAL = re.compile(r"^\s*///\s*Original:\s*u\s+0x([0-9a-fA-F]+)\b(.*)$")
+RE_U_ADDR = re.compile(r"\bu\s+0x([0-9a-fA-F]+)")
+RE_U_STUB = re.compile(r"todo_stub!\(\s*\"u\s+0x([0-9a-fA-F]+)")
+RE_U_PLANNED = re.compile(r"^\s*//!")
 RE_ITEM = re.compile(r"\b(?:fn|struct|enum|const|static|type|trait|mod)\s+([A-Za-z_][A-Za-z0-9_]*)")
 RE_FIELD = re.compile(r"^\s*(?:pub(?:\([a-z]+\))?\s+)?([a-z_][a-z0-9_]*)\s*:")
 
@@ -103,6 +115,110 @@ def scan(src):
             if m:
                 add(int(m.group(1), 16), "planned", module)
     return marks
+
+
+def scan_u(src):
+    """`u` address -> list of (status, rust path), from the `u 0x...` markers."""
+    marks = {}
+
+    def add(addr, status, path):
+        if addr >= IMAGE_BASE:
+            marks.setdefault(addr, []).append((status, path))
+
+    for path in rust_files(src):
+        rel = os.path.relpath(path, src)
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().split("\n")
+        module = os.path.dirname(rel) + "/" if os.path.dirname(rel) else rel
+        for i, line in enumerate(lines):
+            m = RE_U_ORIGINAL.match(line)
+            if m:
+                tail = m.group(2)
+                status = "partial" if "[partial]" in tail else (
+                    "placeholder" if "[placeholder]" in tail else "ported")
+                add(int(m.group(1), 16), status, f"{rel}::{item_after(lines, i)}")
+                continue
+            m = RE_REPLACES.match(line)
+            if m:
+                text = m.group(1)
+                for more in lines[i + 1:]:
+                    rest = more.strip()
+                    if not rest.startswith("///") or rest == "///":
+                        break
+                    text += " " + rest[3:]
+                for a in RE_U_ADDR.findall(text):
+                    add(int(a, 16), "replaced", f"{rel}::{item_after(lines, i)}")
+                continue
+            for a in RE_U_STUB.findall(line):
+                add(int(a, 16), "stubbed", f"{rel}:{i + 1} in {enclosing_fn(lines, i)}")
+            if RE_U_PLANNED.match(line):
+                for a in RE_U_ADDR.findall(line):
+                    add(int(a, 16), "planned", module)
+    return marks
+
+
+def u_procedures(proc_path, layout_path, image_path):
+    """The function entries of `u`: REA's procedures and the code hunk bases, less the
+    `jmp abs.l` thunks (first word 0x4ef9 in the image). address -> hunk index."""
+    with open(proc_path, encoding="utf-8") as f:
+        procs = {int(p["address"], 16) for p in json.load(f)["normalized_result"]}
+    with open(layout_path, encoding="utf-8") as f:
+        segments = json.load(f)["segments"]
+    code = [(int(g["base"], 16), int(g["base"], 16) + g["size"], g["index"])
+            for g in segments if g["type"] == "CODE"]
+    procs |= {base for base, _, _ in code}
+    image = b""
+    if os.path.exists(image_path):
+        with open(image_path, "rb") as f:
+            image = f.read()
+
+    def thunk(a):
+        o = a - IMAGE_BASE
+        return image[o:o + 2] == b"\x4e\xf9"
+
+    def hunk(a):
+        return next((i for lo, hi, i in code if lo <= a < hi), None)
+
+    return {a: hunk(a) for a in sorted(procs) if not thunk(a) and hunk(a) is not None}
+
+
+def build_u(procs, marks):
+    rows, totals = [], {}
+    for addr, hunk in procs.items():
+        entries = marks.get(addr, [])
+        if entries:
+            status = min((s for s, _ in entries), key=RANK.index)
+            paths = sorted({path for s, path in entries if s == status})
+            where = "; ".join(f"`{x}`" for x in paths)
+        else:
+            status, where = "-", ""
+        totals[status] = totals.get(status, 0) + 1
+        rows.append(f"| u 0x{addr:06x} | {hunk} | {where} | {status} |")
+    data = sorted(a for a in marks if a not in procs)
+    return rows, totals, len(procs), data
+
+
+def render_u(rows, totals, n, data, marks):
+    out = [
+        "",
+        "## u (the intro program)",
+        "",
+        "Markers written `u 0x...` against the functions of `u` (REA's procedure list plus the code",
+        "hunk bases, less the `jmp abs.l` thunks). Same status precedence as above.",
+        "",
+        f"Totals: u functions {summary(totals, n)}.",
+        "",
+        "| address | hunk | Rust path | status |",
+        "|---|---|---|---|",
+        *rows,
+    ]
+    if data:
+        out += ["", "### u data addresses cited by markers", "",
+                "Marker addresses of `u` that are not function entries (globals cited on fields):", ""]
+        for a in data:
+            paths = sorted({path for _, path in marks[a]})
+            out.append(f"- u 0x{a:06x}: " + "; ".join(f"`{x}`" for x in paths))
+    return "\n".join(out) + "\n"
 
 
 def m1_flag(p):
@@ -173,6 +289,9 @@ def render(rows, totals, m1_totals, n, data, marks):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--inventory", default=INVENTORY)
+    ap.add_argument("--u-procedures", default=U_PROCEDURES)
+    ap.add_argument("--u-layout", default=U_LAYOUT)
+    ap.add_argument("--u-image", default=U_IMAGE)
     ap.add_argument("--src", default=SRC)
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--check", action="store_true", help="exit 1 if --out is not up to date")
@@ -182,6 +301,13 @@ def main():
     marks = scan(args.src)
     rows, totals, m1_totals, n, data = build(inventory, marks)
     text = render(rows, totals, m1_totals, n, data, marks)
+    u_line = ""
+    if os.path.exists(args.u_procedures) and os.path.exists(args.u_layout):
+        u_marks = scan_u(args.src)
+        u_rows, u_totals, u_n, u_data = build_u(
+            u_procedures(args.u_procedures, args.u_layout, args.u_image), u_marks)
+        text += render_u(u_rows, u_totals, u_n, u_data, u_marks)
+        u_line = f"u {summary(u_totals, u_n)}"
     if args.check:
         try:
             with open(args.out, encoding="utf-8") as f:
@@ -194,6 +320,8 @@ def main():
         f.write(text)
     print(f"wrote {os.path.relpath(args.out, ROOT)}: functions {summary(totals, n)}")
     print(f"milestone 1 {summary(m1_totals, sum(m1_totals.values()))}")
+    if u_line:
+        print(u_line)
     return 0
 
 

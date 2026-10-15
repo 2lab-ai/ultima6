@@ -1,5 +1,6 @@
 //! Real data: the user's archive.org zip → u6-intake → `Files` → `State::new_game`, then the
-//! object code. Skips when the zip is absent; reads only, prints numbers and names only.
+//! object code. Skips when the zip is absent; reads only, prints slots and counts only (names
+//! and strings of the game by length).
 #![allow(clippy::disallowed_methods)] // the test reads the zip
 
 use std::collections::BTreeMap;
@@ -10,6 +11,8 @@ use super::*;
 use crate::files::Files;
 use crate::state::State;
 use u6_formats::objblk::ObjLocation;
+use u6_testkit::Quiet;
+use u6_testkit::assert_same;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
@@ -18,7 +21,7 @@ fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -29,8 +32,8 @@ fn files() -> Option<Files> {
 /// The state after load: tables, objlist, the object tables from `game`, slots reset and
 /// actors linked (no region yet).
 fn loaded(files: &Files) -> State {
-    let mut s = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
-    s.objects.load_defs(files).unwrap_or_else(|e| panic!("{e}"));
+    let mut s = State::new_game(files).quiet();
+    s.objects.load_defs(files).quiet();
     let o = &mut s.objects;
     init_slots(o);
     link_actors(o);
@@ -41,11 +44,30 @@ fn loaded(files: &Files) -> State {
 fn every_block_loads_through_the_slot_tables() {
     let Some(files) = files() else { return };
     let mut s = loaded(&files);
-    assert_eq!(s.objects.defs.stackable.len(), 21);
+    // 0x10cef2 compares with 21 table words (the loop bound is the code's).
+    assert!(s.objects.defs.stackable.len() == 21);
+    // What the block files hold, read from the raw files (formats.md §5: a BE record count, then
+    // 8-byte records whose byte 0 has the location in bits 3-4).
+    let mut raw_total = 0usize;
+    let mut raw_hist: BTreeMap<u8, usize> = BTreeMap::new();
+    for i in 0..BLOCK_COUNT {
+        let raw = files
+            .get(&crate::saveload::block_file(i))
+            .expect("the block file");
+        let n = usize::from(u16::from_be_bytes([raw[0], raw[1]]));
+        for k in 0..n {
+            *raw_hist.entry(raw[2 + 8 * k] & 0x18).or_default() += 1;
+        }
+        raw_total += n;
+    }
     // The strings came out of the data hunk (shape only; the text is the user's).
     let d = &s.objects.defs;
     assert!(d.nothing.starts_with(|c: char| c.is_ascii_uppercase()));
-    assert_eq!(d.nothing.to_ascii_lowercase(), d.nothing_lower);
+    assert_same!(
+        d.nothing.to_ascii_lowercase(),
+        d.nothing_lower,
+        "the lower-case nothing word"
+    );
     assert!(d.count_format.contains("%d"));
     let mut hist: BTreeMap<u8, usize> = BTreeMap::new();
     let mut total = 0;
@@ -55,43 +77,40 @@ fn every_block_loads_through_the_slot_tables() {
         load_block(&mut s.objects, i);
         s.objects.fix_inventory();
         let n = (before - s.objects.free.1) as usize;
-        assert_eq!(n, file_count, "block {i}: every record took a slot");
+        assert!(n == file_count, "block {i}: every record took a slot");
         for k in 0..n {
             let slot = s.objects.rec_slots[k];
             *hist.entry(s.objects.status(slot) & WHERE_MASK).or_default() += 1;
         }
         total += n;
         write_back_block(&mut s, i);
-        let tmp = s.objects.tmp[i].clone().unwrap();
-        assert_eq!(
-            u16::from_be_bytes([tmp[0], tmp[1]]) as usize,
-            n,
+        let tmp = s.objects.tmp[i].clone().quiet();
+        assert!(
+            u16::from_be_bytes([tmp[0], tmp[1]]) as usize == n,
             "block {i} wrote back"
         );
     }
-    println!("records {total}, by location bits {hist:?}");
-    assert_eq!(total, 16838);
-    assert_eq!(
-        hist,
-        BTreeMap::from([(0x00, 15071), (0x08, 1638), (0x10, 62), (0x18, 67)])
+    assert!(total == raw_total, "every record of the files");
+    let by_place = |h: &BTreeMap<u8, usize>| h.iter().map(|(&k, &n)| (k, n)).collect::<Vec<_>>();
+    assert_same!(
+        by_place(&hist),
+        by_place(&raw_hist),
+        "the records by location bits"
     );
-    assert_eq!(s.objects.free.1, 0xaff, "every slot came back");
+    // 0x10ed44's free count (an immediate of the code).
+    assert!(s.objects.free.1 == 0xaff, "every slot came back");
 }
 
 #[test]
 fn the_party_start_region_and_its_objects() {
     let Some(files) = files() else { return };
     let mut s = loaded(&files);
-    let at = s.leader_position().unwrap();
+    let at = s.leader_position().quiet();
     s.objects
         .set_window((at.x - 0x10) & 0x3f8, (at.y - 0x10) & 0x3f8, at.z);
     load_region(&mut s, at.x, at.y, u16::from(at.z));
     let mut loaded: Vec<i16> = s.objects.loaded_surface.to_vec();
     loaded.sort();
-    println!(
-        "leader at {at:?}; superchunks in slots {loaded:?}; free {}",
-        s.objects.free.1
-    );
     assert!(loaded.iter().all(|&b| b >= 0));
     s.objects.rebuild_grid();
 
@@ -130,11 +149,10 @@ fn the_party_start_region_and_its_objects() {
         .into_iter()
         .map(|(id, _)| (s.objects.obj_type(id), s.objects.frame(id)))
         .collect();
-    println!("objects_at(party start) = {got:?}");
     let (mut g, mut w) = (got.clone(), want.clone());
     g.sort();
     w.sort();
-    assert_eq!(g, w);
+    assert_same!(g, w, "the objects at the party's start");
     assert!(got.contains(&(
         s.objects.obj_type(ObjectId(1)),
         s.objects.frame(ObjectId(1))
@@ -145,12 +163,8 @@ fn the_party_start_region_and_its_objects() {
 fn names_of_twenty_objects_near_the_party() {
     let Some(files) = files() else { return };
     let mut s = loaded(&files);
-    let at = s.leader_position().unwrap();
+    let at = s.leader_position().quiet();
     load_region(&mut s, at.x, at.y, u16::from(at.z));
-    println!(
-        "articles {:?}, count format {:?}",
-        s.objects.defs.articles, s.objects.defs.count_format
-    );
     // The first 10 visible stacks of more than one item (plurals) in list order, then visible
     // map objects from the party's row on.
     let (mut stacks, mut near) = (Vec::new(), Vec::new());
@@ -167,12 +181,12 @@ fn names_of_twenty_objects_near_the_party() {
         c = o.next_of(c);
     }
     let picks: Vec<Slot> = stacks.into_iter().chain(near).collect();
-    assert_eq!(picks.len(), 20);
+    assert!(picks.len() == 20);
     let t = &s.tables;
     for &c in &picks {
         let o = &s.objects;
         let tile = tile_of(t, o.tf(c));
-        let (prefix, count) = name_prefix(&s, c);
+        let (prefix, count) = name_prefix_text(&s, c);
         let d = &o.defs;
         let count_text = |n: u16| d.count_format.replace("%d", &n.to_string());
         let want_prefix = match stack_kind(o, o.kind(c)) {
@@ -187,15 +201,10 @@ fn names_of_twenty_objects_near_the_party() {
         };
         let want = format!(
             "{want_prefix}{}",
-            t.look.description(tile, count != 1).unwrap()
+            t.look.description(tile, count != 1).quiet()
         );
         let got = described_name(&s, c);
-        println!(
-            "slot {c:#05x} type {:#05x} frame {} count {count}: {got:?}",
-            o.kind(c),
-            o.tf(c) >> 10
-        );
         assert!(got.starts_with(&prefix));
-        assert_eq!(got, want);
+        assert_same!(got, want, "the name of slot {c:#05x}");
     }
 }

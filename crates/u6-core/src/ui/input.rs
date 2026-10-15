@@ -18,6 +18,7 @@ pub const RELEASE: u16 = 0x80;
 /// First qualifier raw code (left shift); 0x60..=0x67 are the qualifiers.
 pub const QUALIFIERS: u16 = 0x60;
 const LSHIFT: u16 = 0x60;
+const CTRL: u16 = 0x63;
 
 /// Original: A4-0x3272..-0x3262 (qualifier words 0x151d00 keeps, and the Alt + keypad number)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,8 +119,9 @@ const RAW_BACKSPACE: u16 = 0x41;
 
 /// The raw codes a press of `key` sends: named keys by their hardware code; a character by the
 /// first raw key whose plain entry in the game's own table is that character, else the first
-/// whose shifted entry is (wrapped in a left-shift press and release). A character the table
-/// cannot produce sends nothing.
+/// whose shifted entry is (wrapped in a left-shift press and release), else the first whose
+/// control entry is (wrapped in a control press and release: Ctrl-S 0x13 Save, Ctrl-R 0x12
+/// Restore). A character the table cannot produce sends nothing.
 pub fn raw_events(table: &[[u16; 4]], key: Key) -> Vec<u16> {
     let raw = match key {
         Key::Up => RAW_UP,
@@ -141,8 +143,11 @@ pub fn raw_events(table: &[[u16; 4]], key: Key) -> Vec<u16> {
             if let Some(r) = find(0) {
                 return vec![r];
             }
-            return match find(1) {
-                Some(r) => vec![LSHIFT, r, LSHIFT | RELEASE],
+            if let Some(r) = find(1) {
+                return vec![LSHIFT, r, LSHIFT | RELEASE];
+            }
+            return match find(2) {
+                Some(r) => vec![CTRL, r, CTRL | RELEASE],
                 None => Vec::new(),
             };
         }

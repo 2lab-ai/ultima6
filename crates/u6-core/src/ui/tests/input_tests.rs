@@ -55,6 +55,17 @@ fn bridge_finds_characters_in_the_game_table() {
     assert_eq!(key_code(&mut q, &t, Key::Escape), 0x1b);
 }
 
+/// A control character (Ctrl-A = 0x01 here) comes from the control column of the game's table,
+/// wrapped in a control press and release.
+#[test]
+fn bridge_sends_control_characters_with_control_held() {
+    let t = tables().keymap;
+    assert_eq!(raw_events(&t, Key::Char('\u{1}')), [0x63, 0x20, 0xe3]);
+    let mut q = Qualifiers::default();
+    assert_eq!(key_code(&mut q, &t, Key::Char('\u{1}')), 0x01);
+    assert_eq!(q, Qualifiers::default(), "control released again");
+}
+
 /// Reads one command key and stores it in `vars[0]`.
 fn read_one(s: State, keys: &[Key]) -> Engine {
     run(s, keys, 8, |st, io| async move {

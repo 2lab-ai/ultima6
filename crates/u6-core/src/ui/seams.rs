@@ -6,7 +6,6 @@ use u6_render::Framebuffer;
 
 use crate::engine::Io;
 use crate::state::State;
-use crate::todo_stub;
 
 /// 0x122144 (actors: maximum hit points of actor slot `actor`).
 pub(crate) fn max_hp(s: &State, actor: u8) -> u8 {
@@ -70,22 +69,15 @@ pub(crate) fn present_map(s: &mut State, io: &Io, flag: i16) {
     crate::gfx::render_window(s, io, flag != 0);
 }
 
-/// 0x124e0e (combat: distance between two window cells; the cross-hair passes (5, 5) and the
-/// cell). Contract: → distance in cells. Fallback [추정]: the larger of |dx| and |dy|.
-pub(crate) fn distance(x0: i16, y0: i16, x1: i16, y1: i16) -> i16 {
-    let d = (x1 - x0).abs().max((y1 - y0).abs());
-    todo_stub!("0x124e0e distance between cells", d)
+/// 0x124e0e (combat: distance between two window cells from the A4-0x69a0 table; the
+/// cross-hair passes (5, 5) and the cell).
+pub(crate) fn distance(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) -> i16 {
+    crate::combat::leaves::cell_distance(s, x0, y0, x1, y1)
 }
 
-/// 0x1225c0 (combat: the actor at a map location, starting from `actor`'s level): walks the
-/// objects at (x, y) (0x10ad1a / 0x10aaca), skipping any that 0x1224ea says `actor` cannot see;
-/// the first visible actor slot below 0x100 without status bit 0x10 wins, else the first visible
-/// object, else -1. Not ported (a combat leaf outside milestone 1). Fallback: the first actor
-/// standing there (objects 0x10b20e), visibility not checked.
-pub(crate) fn actor_at(s: &State, actor: u8, x: i16, y: i16) -> i16 {
-    let _ = actor;
-    let found = crate::objects::actor_at(s, 1, x as u16, y as u16);
-    todo_stub!("0x1225c0 actor at a location", found)
+/// 0x1225c0 (combat: the object at a map location a hit lands on, as `actor` sees it).
+pub(crate) fn actor_at(s: &mut State, actor: u8, x: i16, y: i16) -> i16 {
+    crate::combat::leaves::actor_at(s, i16::from(actor), x, y)
 }
 
 /// Map-window caches A4-0x15f0 (byte per window cell, 11 × 11: first draw-list node, non-zero =
@@ -106,4 +98,33 @@ pub(crate) fn anim_step(s: &mut State) {
 /// random wind change, so this call draws no random number.
 pub(crate) fn sky_bar_tail(s: &mut State) {
     crate::main_loop::wind_change(s, 1);
+}
+
+/// The NUL-terminated string at image address `addr` of the user's `game` (main_loop's reader).
+pub(crate) fn game_string(io: &Io, addr: u32) -> Vec<u8> {
+    crate::main_loop::game_string(io, addr)
+}
+
+/// 0x12ba36(chest) (objects: spring the trap in a chest: acid, poison, bomb or gas, then remove
+/// the trap): [`crate::objects::spring_trap`]. 0x10619c passes the chest itself (0x10643c: D0 =
+/// A4-0x2f04, the selection); 0x12ba36 finds the trap in it (0x116526 with type 0x151, quality
+/// 0x16, at 0x12bb8e..0x12bb94).
+pub(crate) fn spring_trap(s: &mut State, chest: i16) {
+    crate::objects::spring_trap(s, chest);
+}
+
+/// [magic] A4+0x181a + `tab` (bytes: the spellbook's page tabs: previous circle, previous page,
+/// next page, next circle; 0xff = none, 0x106474 reads them by `(x - 0xb0) >> 4`): the magic
+/// state's page fields.
+pub(crate) fn spellbook_tab(s: &State, tab: usize) -> u8 {
+    let m = &s.magic;
+    [m.prev_circle, m.prev_page, m.next_page, m.next_circle]
+        .get(tab)
+        .copied()
+        .unwrap_or(0xff)
+}
+
+/// [magic] A4+0x1809 (byte: lines on the shown spellbook page): `magic.page_lines`.
+pub(crate) fn spellbook_lines(s: &State) -> u8 {
+    s.magic.page_lines
 }

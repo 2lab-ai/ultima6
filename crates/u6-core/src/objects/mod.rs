@@ -92,19 +92,20 @@
 //! - 0x128b98 [objects] leaf; callers 4, from 3 subsystems
 //! - 0x128ce8 [objects] unnamed; calls 0x10790a (read a command key; handles p~)
 //! - 0x12ba36 [objects] trap effects (acid, poison, bomb, gas)
-//! - 0x12d9ee [objects] uses "The door is blown up!"
+//! - 0x12d9ee [objects] uses the blown-up-door line (0x12ca12)
 //! - 0x12db7e [objects] unnamed; calls 0x102ef0 (post-step refresh: rebuild vi~)
 //! - 0x12dcbe [objects] unnamed; calls 0x10aaca (next object of the iteration)
 //! - 0x12f6ee [objects] unnamed; calls 0x102ef0 (post-step refresh: rebuild vi~)
-//! - 0x12f8fe [objects] uses "No room!"
-//! - 0x1301e2 [objects] uses "Not now!"
+//! - 0x12f8fe [objects] uses the no-room line (0x12cbd4)
+//! - 0x1301e2 [objects] uses the not-now line (0x12cee2)
 //! - 0x131196 [unknown] index of a value in a small-data word list
 //! - 0x1311d2 [unknown] unnamed; calls 0x151f06 (random number in [lo, hi])
 //! - 0x13121a [unknown] unnamed; calls 0x151f06 (random number in [lo, hi])
 //! - 0x131646 [unknown] unnamed; calls 0x131196 (index of a value in a small-d~)
-//! - 0x1319b2 [objects] uses "Shamino says, "I hear somet~" (hatch an egg; stub)
+//! - 0x1319b2 [objects] uses Shamino's warning (A4-0x763a) (hatch an egg)
 
 mod blocks;
+pub mod commands;
 mod defs;
 mod draw;
 mod effects;
@@ -124,9 +125,9 @@ pub use blocks::{
     load_surface, prune_far, write_back_block, write_back_level, write_back_surface,
 };
 #[allow(unused_imports)]
-pub(crate) use blocks::{load_region_objects, unload_region_objects};
+pub(crate) use blocks::{load_region_objects, parse_lenient, unload_region_objects};
 pub use defs::{DefsError, ObjectDefs};
-pub use draw::{DRAW_CELLS, DRAW_NODES, DrawLists, build_draw_lists};
+pub use draw::{DRAW_CELLS, DRAW_NODES, DrawLists, add_tile, build_draw_lists};
 pub use effects::*;
 pub use iter::{
     AreaCursor, ChildCursor, LocationCursor, actor_at, begin_area, begin_at, find_child,
@@ -139,8 +140,8 @@ pub use moves::{
     move_into, move_to, remove, take_from_owner,
 };
 pub use names::{
-    article, count_of_kind, described_name, display_name, look_text, name_prefix, quantity,
-    stack_kind,
+    article_text, count_of_kind, described_name, display_name, look_text, name_prefix_text,
+    quantity, stack_kind,
 };
 pub use parts::{
     find_segment_at, move_monster_parts, move_serpent, owner_of_part, update_vine_frames,

@@ -39,7 +39,7 @@ the loop file.
 ## Build
 
 ```sh
-scripts/cargo.sh test --workspace --release       # rustup stable toolchain pinned by the wrapper
+scripts/cargo.sh test --workspace --profile gate  # release + overflow and debug-assertion checks; the wrapper pins rustup stable
 scripts/cargo.sh run -p u6-native --release -- --zip ultima-vi.zip
 bash scripts/build-web.sh && node tools/web/test-web.mjs
 scripts/deploy-web.sh main                          # Cloudflare Pages project ultima6

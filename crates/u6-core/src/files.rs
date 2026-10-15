@@ -103,6 +103,23 @@ impl Files {
             .find_map(|layer| Some((layer.name.as_str(), layer.resolve(name)?)))
     }
 
+    /// `name` looked up in layer `layer` alone: its stored path and bytes (a platform reading
+    /// back the files it supplied, under any layers added on top).
+    pub fn get_in(&self, layer: &str, name: &str) -> Option<(&str, &[u8])> {
+        let l = self.layers.iter().find(|l| l.name == layer)?;
+        let key = l.resolve(name)?;
+        Some((key, l.files.get(key)?.as_slice()))
+    }
+
+    /// Number of files in layer `layer` (0 when there is none).
+    pub fn layer_len(&self, layer: &str) -> usize {
+        self.layers
+            .iter()
+            .filter(|l| l.name == layer)
+            .map(|l| l.files.len())
+            .sum()
+    }
+
     /// Layer names, bottom first.
     pub fn layers(&self) -> impl Iterator<Item = &str> {
         self.layers.iter().map(|l| l.name.as_str())
@@ -162,6 +179,26 @@ mod tests {
         assert_eq!(f.get("x"), Some(&b"1"[..]));
         // An exact path still reaches the others.
         assert_eq!(f.get("C/X"), Some(&b"3"[..]));
+    }
+
+    #[test]
+    fn one_layer_reads_past_the_layers_above() {
+        let mut f = Files::new(map(&[("U6/objlist", b"new")]));
+        f.overlay("save", map(&[("savegame/objlist", b"saved")]));
+        assert_eq!(
+            f.get("U6/objlist"),
+            Some(&b"saved"[..]),
+            "the save wins a lookup"
+        );
+        assert_eq!(
+            f.get_in("base", "U6/objlist"),
+            Some(("U6/objlist", &b"new"[..]))
+        );
+        assert_eq!(f.get_in("nope", "U6/objlist"), None);
+        assert_eq!(
+            (f.layer_len("base"), f.layer_len("save"), f.layer_len("x")),
+            (1, 1, 0)
+        );
     }
 
     #[test]

@@ -393,14 +393,14 @@ fn look_text_takes_the_next_entry_and_names_actors_by_party_name() {
     s.objects.qq[loaf as usize] = 3;
     // Type 60 is a quantity stack only for frame 0 (0x10cef2 compares the whole word): the
     // prefix counts by type, the quantity by type + frame.
-    assert_eq!(name_prefix(&s, loaf), ("3#".to_string(), 3));
+    assert_eq!(name_prefix_text(&s, loaf), ("3#".to_string(), 3));
     assert_eq!(display_name(&s, NONE), "<none>");
     s.actors.attrs.status = vec![0; 256];
     s.actors.attrs.status[3] = 0x80;
     s.actors.party.members[0] = 3;
     s.actors.party.size = 1;
-    s.actors.party.names = vec!["Iolo".into()];
-    assert_eq!(display_name(&s, 3), "Iolo");
+    s.actors.party.names = vec!["<member 3>".into()];
+    assert_eq!(display_name(&s, 3), "<member 3>");
 }
 
 #[test]
@@ -468,4 +468,69 @@ fn taking_and_counting_by_type_at_any_depth() {
     assert_eq!(s.objects.qq_of(deep), 0x0003);
     assert_eq!(count_of_kind(&mut s.objects, actor, 60), 3);
     assert_eq!(count_of_kind(&mut s.objects, bag, 60), 3);
+}
+
+/// Runs `f` on a watchdog thread and gives its result, or fails the test when it does not
+/// return within 10 s: a regression to an endless walk fails instead of stalling the suite.
+#[allow(clippy::disallowed_methods)] // test only: the watchdog thread
+pub(super) fn returns<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap_or_else(|e| panic!("{what} did not return: {e}"))
+}
+
+/// Two objects "inside" each other (status 0x08, each the other's parent), off the map: a
+/// chain 0x10c928 and its kin walk without a bound in the original.
+fn cyclic_pair(s: &mut State) -> (Slot, Slot) {
+    let a = put(s, 0x63, 7, 7);
+    let b = put(s, 0x63, 8, 8);
+    s.objects.obj_status[a as usize] = IN_CONTAINER;
+    s.objects.obj_status[b as usize] = IN_CONTAINER;
+    s.objects.set_parent(a, b);
+    s.objects.set_parent(b, a);
+    (a, b)
+}
+
+#[test]
+fn a_cyclic_holder_chain_is_not_inside_anything_else() {
+    let (inside, other_first) = returns("contained_in", || {
+        let mut s = world();
+        let (a, b) = cyclic_pair(&mut s);
+        let c = put(&mut s, 0x63, 9, 9);
+        (s.objects.contained_in(a, b), s.objects.contained_in(a, c))
+    });
+    assert!(inside, "a well-formed step of the chain still counts");
+    assert!(!other_first, "an owner the chain never reaches");
+}
+
+#[test]
+fn sorting_an_object_on_a_cyclic_chain_ends() {
+    let r = returns("compare", || {
+        let mut s = world();
+        let (a, _) = cyclic_pair(&mut s);
+        let c = put(&mut s, 0x63, 9, 9);
+        s.objects.compare(a, c)
+    });
+    assert!((-1..=1).contains(&r.signum()));
+}
+
+#[test]
+fn a_body_on_a_cyclic_chain_raises_nobody() {
+    let (got, actor_at, flag, body_kind) = returns("actor_from_body", || {
+        let mut s = world();
+        let (body, _) = cyclic_pair(&mut s);
+        s.objects.qq[body as usize] = 5 << 8;
+        s.objects.type_frame[5] = 0x19a;
+        s.objects.set_xyz(5, 40, 40, 0);
+        let got = actor_from_body(&mut s, body);
+        let at = (s.objects.x(5), s.objects.y(5));
+        (got, at, s.objects.allow_type_4c, s.objects.kind(body))
+    });
+    assert_eq!(got, NONE);
+    assert_eq!(actor_at, (40, 40), "the actor stays where it was");
+    assert_eq!(flag, 0, "type 0x4c refused again");
+    assert_eq!(body_kind, 0x63, "the body stays");
 }

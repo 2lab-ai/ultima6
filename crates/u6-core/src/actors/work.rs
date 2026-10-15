@@ -77,7 +77,7 @@ pub struct ActorWork {
     pub force_teleport: u16,
     /// Original: A4-0x6a8c (word: party members may swap places in 0x11b1c0; data hunk 1)
     pub swap_ok: u16,
-    /// Original: A4-0x6a92 (byte: a drunk "Hic!" is pending; set by 0x11d4ee)
+    /// Original: A4-0x6a92 (byte: a drunk's hiccup is pending; set by 0x11d4ee)
     pub hic: u8,
     /// Original: A4+0x184a (byte: path slot being filled)
     pub slot: u8,
@@ -106,8 +106,9 @@ pub struct ActorWork {
     pub mouse_walk: u16,
     /// Original: A4-0x7a2a / -0x7a28 (words: the clicked target; data hunk -1, -1)
     pub mouse_target: (i16, i16),
-    /// Original: A4-0x7a4c (word: cleared around the portcullis call in 0x11db7c; data hunk 1)
-    pub portcullis_guard: u16,
+    /// Port-only: 0x121020 (the Avatar's death) ran inside synchronous code and could not
+    /// await the resurrection 0x1095bc; the world turn awaits it at its next bookkeeping point.
+    pub resurrect_pending: bool,
 }
 
 impl Default for ActorWork {
@@ -138,7 +139,7 @@ impl Default for ActorWork {
             step_blocked: 0,
             mouse_walk: 0,
             mouse_target: (-1, -1),
-            portcullis_guard: 1,
+            resurrect_pending: false,
         }
     }
 }

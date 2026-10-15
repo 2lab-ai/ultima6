@@ -15,9 +15,9 @@ pub enum StepResult {
     Moved,
     /// [`walk::can_move_to`] refused the tile (or, diagonally, both orthogonal neighbours).
     Blocked,
-    /// A sailing vessel with no wind ("Thou canst not move without wind!").
+    /// A sailing vessel with no wind (the message at A4-0x73aa).
     NoWind,
-    /// 0x10c9d2 refused the move ("Object mismatch").
+    /// 0x10c9d2 refused the move (the message at 0x11b918).
     Mismatch,
 }
 
@@ -138,7 +138,7 @@ pub fn follow(s: &mut State, leader: u16, strict: bool) {
     let (fdx, fdy) = (DX8[f], DY8[f]);
     for pass in 0..2 {
         let mut rank = 1usize;
-        for i in 0..usize::from(s.actors.party.size) {
+        for i in 0..s.actors.party.count() {
             let m = s.actors.party.members[i];
             if let Some(slot) = s.actors.work.follow.get_mut(rank) {
                 *slot = m;
@@ -195,7 +195,7 @@ fn current_at(s: &State, x: u16, y: u16) -> Option<u16> {
 
 /// Original: 0x11d4ee (party: the player's step in direction `dir` (0 = north, clockwise))
 ///
-/// A drunk party (alcohol > 3) staggers on a coin flip ("Hic!", random direction). Sailing
+/// A drunk party (alcohol > 3) staggers on a coin flip (a hiccup, random direction). Sailing
 /// vessels (0x19f, 0x1a7) go with the wind (0x19f along a current by the sailing table);
 /// without wind nothing moves. The step must be enterable; a diagonal one also needs one of
 /// its two orthogonal neighbours (with a clicked target, a blocked diagonal slides along the
@@ -214,7 +214,7 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
     s.actors.work.step_blocked = 0;
     let mut dir = dir as i16;
     if s.actors.tail(super::tail::ALCOHOL) > 3 && s.rng.range(0, 1) != 0 {
-        // "Hic!" (PC-relative string at 0x11b912).
+        // The hiccup (PC-relative string at 0x11b912).
         seams::print_image(s, 0x11b912);
         dir = s.rng.range(0, 7) as i16;
     }
@@ -284,7 +284,7 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
         s.map.centre.x = p.x;
         s.map.centre.y = p.y;
         seams::rebuild_window(s);
-        // "Object mismatch" (PC-relative string at 0x11b918).
+        // The mismatch message (PC-relative string at 0x11b918).
         seams::print_image(s, 0x11b918);
         StepResult::Mismatch
     };
@@ -319,7 +319,7 @@ fn slide(s: &mut State, l: u16, (cx, cy): (u16, u16), (nx, ny): (&mut u16, &mut 
 fn swap_member(s: &mut State, (cx, cy): (u16, u16), (nx, ny): (u16, u16), d: usize) {
     let z = walk::party_z(s);
     let li = usize::from(s.actors.party.leader_index);
-    for i in 0..usize::from(s.actors.party.size) {
+    for i in 0..s.actors.party.count() {
         if i == li {
             continue;
         }
@@ -371,16 +371,14 @@ fn pay_step(s: &mut State, l: u16, d: usize, diagonal: bool, (cx, cy): (u16, u16
     }
 }
 
-/// [combat] 0x1230ce (a hit's flash and redraw on `actor`). Stub contract: argument the actor;
-/// no result; nothing drawn. Reached only from hazards ([`tile_effect`]).
-fn flash(_s: &mut State, _actor: u16) {
-    crate::todo_stub!("0x1230ce flash a hit actor (fallback: none)", ())
+/// [combat] 0x1230ce (a hit's flash on `actor`). Reached from hazards ([`tile_effect`]).
+fn flash(s: &mut State, actor: u16) {
+    crate::combat::damage::flash(s, actor as i16);
 }
 
-/// [combat] 0x1221da (put an actor to sleep / knock it down). Stub contract: argument the
-/// actor; no result; the sleep status bit is already set by the caller.
-fn fall_asleep(_s: &mut State, _actor: u16) {
-    crate::todo_stub!("0x1221da lie down without a bed (fallback: none)", ())
+/// [combat] 0x1221da (put an actor to sleep / knock it down: its lying frame).
+fn fall_asleep(s: &mut State, actor: u16) {
+    crate::combat::damage::lie_down(s, actor as i16);
 }
 
 /// [objects] 0x10b18c / 0x10b0ba (the first object of type `t` carried by `actor`, then the
@@ -493,7 +491,7 @@ pub fn tile_effect(s: &mut State, actor: u16, tile: u16) {
 }
 
 /// Original: 0x1279d4 (party: member `i` heals (rest): half the missing hit points plus a
-/// random part of that half, magic points to the maximum; "has healed." when `announce`)
+/// random part of that half, magic points to the maximum; announced when `announce`)
 pub fn heal(s: &mut State, i: usize, announce: bool) {
     let m = s.actors.party.members.get(i).copied().unwrap_or(0);
     let mi = usize::from(m);
@@ -510,7 +508,7 @@ pub fn heal(s: &mut State, i: usize, announce: bool) {
         s.actors.attrs.hp[mi] = if hp < max as i16 { hp as u8 } else { max as u8 };
         if announce {
             seams::print(s, 0, &[seams::Arg::PartyName(i as u8)]);
-            // " has healed." (PC-relative string at 0x1272a8).
+            // The healed line (PC-relative string at 0x1272a8).
             seams::print_image(s, 0x1272a8);
         }
     }

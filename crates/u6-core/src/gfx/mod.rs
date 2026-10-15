@@ -26,6 +26,7 @@
 //! - 0x102bf2 [main] clock hands (a step of 0x102c90; main_loop's listing names it too)
 //! - 0x102c90 [map] render the 11×11 map window, border, present
 //! - 0x102ef0 [main] post-step refresh: rebuild view if dirty, redraw
+//! - 0x132338 [ui] flash an actor in the map window (the seam of inventory, magic and Use)
 //! - 0x14f16c [graphics] object-tile cache prefill (subsumed: all records are decoded at load)
 //! - 0x151f5a [graphics] copy the map window rect back → front
 //! - 0x151fe6 [graphics] unnamed; 1 callees
@@ -66,6 +67,7 @@ pub mod blit;
 pub(crate) mod idle;
 mod load;
 pub mod seams;
+pub mod sprite;
 pub mod tables;
 pub mod view;
 
@@ -73,4 +75,4 @@ pub mod view;
 mod tests;
 
 pub use load::GfxState;
-pub use view::{ViewWindow, WINDOW_TILES, refresh_view, render_window};
+pub use view::{ViewWindow, WINDOW_TILES, flash_actor, refresh_view, render_window};

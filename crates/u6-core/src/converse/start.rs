@@ -329,7 +329,7 @@ async fn input_loop(cx: &Cx<'_>, npc: i16) {
                 if tag != 0xb2 {
                     break;
                 }
-                let v = match seams::parse_number(&line) {
+                let v = match cx.st(|s| seams::parse_number(s, &line)) {
                     -1 | -2 => 0,
                     v => v,
                 };
@@ -343,7 +343,7 @@ async fn input_loop(cx: &Cx<'_>, npc: i16) {
                     let key = seams::read_key(cx).await;
                     let one = key_input(key);
                     cx.cv(|c| c.input = one.clone());
-                    let mut v = seams::parse_number(&one);
+                    let mut v = cx.st(|s| seams::parse_number(s, &one));
                     if key == 0x0d || key == 0x1b {
                         v = 0;
                     }

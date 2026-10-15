@@ -12,7 +12,6 @@ use crate::engine::{Io, with_current_io};
 use crate::main_loop::PrintArg;
 use crate::objects::{OBJECT_SLOTS, ObjectId};
 use crate::state::State;
-use crate::todo_stub;
 
 /// One object found at a location: its id and the part of a multi-tile object that covers the
 /// location (the original leaves it in A4-0x78dc; 0 = the object's own tile).
@@ -59,7 +58,7 @@ pub fn objects_in_rect(s: &mut State, x0: u16, y0: u16, x1: u16, y1: u16, z: u16
 }
 
 /// [objects] 0x10c9d2: moves an object or actor to (x, y, z), keeping the region lists;
-/// negative = failed (the player step then prints "Object mismatch").
+/// negative = failed (the player step then prints the mismatch message at 0x11b918).
 pub fn move_object(s: &mut State, id: ObjectId, x: u16, y: u16, z: u16) -> i16 {
     crate::objects::move_to(s, id.slot(), x, y, z)
 }
@@ -283,17 +282,9 @@ pub fn set_obj_quality(s: &mut State, id: ObjectId, q: u8) {
     }
 }
 
-/// [combat] 0x121b08: Chebyshev distance from `actor` to (x, y) (max of the axis distances; a
-/// combat stub point that only calls the runtime `abs` 0x101ea8). Contract kept as a stub: the
-/// combat leaf is outside milestone 1; the fallback is the distance itself.
+/// [combat] 0x121b08: distance from `actor` to (x, y) (the larger axis distance).
 pub fn distance(s: &State, actor: u16, x: u16, y: u16) -> i16 {
-    let p = s.objects.location[usize::from(actor)];
-    let dx = (p.x as i16).wrapping_sub(x as i16).wrapping_abs();
-    let dy = (p.y as i16).wrapping_sub(y as i16).wrapping_abs();
-    todo_stub!(
-        "0x121b08 distance to a tile (fallback: max axis distance)",
-        dx.max(dy)
-    )
+    crate::combat::leaves::distance(s, actor as i16, x as i16, y as i16)
 }
 
 /// [ui] 0x10790a: waits for a command key and returns its game code; the queued lines are
@@ -311,20 +302,16 @@ pub async fn talk(state: &RefCell<State>, io: &Io, speaker: u16, npc: u16, annou
     crate::converse::talk(&cx, speaker as u8, npc as i16, announce).await;
 }
 
-/// [ui] 0x133b0e: full redraw of the view (panels, map window, window cache, view flags).
-/// Contract: 0x133a96 (redraw the side panels), A4-0x6a8e = 0, A4-0x6578 = 1, 0x102c90, 0x108d10,
-/// 0x109e74. Ported part: the flags, the window cache and the view flags; the panel and window
-/// redraws (async in the ui port) follow at the loop's next panel redraw and refresh.
+/// [ui] 0x133b0e: full redraw of the view (the window caches reset 0x133a96, the flags, the
+/// map window, the tile cache, the view flags).
 pub fn full_redraw(s: &mut State) {
-    todo_stub!(
-        "0x133a96 redraw the side panels (fallback: next loop redraw)",
-        ()
-    );
-    s.map.view_dirty = 0;
-    s.gfx.dissolve = 1;
-    present_map(s);
-    crate::map::region::rebuild_window(s);
-    crate::map::view::update_view(s);
+    if with_current_io(|io| crate::ui::effects::redraw_view(s, io)).is_none() {
+        crate::ui::effects::reset_window(s);
+        s.map.view_dirty = 0;
+        s.gfx.dissolve = 1;
+        crate::map::region::rebuild_window(s);
+        crate::map::view::update_view(s);
+    }
 }
 
 /// [main] 0x102ef0: post-step refresh (rebuild the view and present).
@@ -332,9 +319,9 @@ pub fn refresh_view(s: &mut State) {
     with_current_io(|io| crate::gfx::refresh_view(s, io));
 }
 
-/// [sound] 0x110912: picks and starts the song for the current area. Fallback: silence.
-pub fn area_music(_s: &mut State) {
-    todo_stub!("0x110912 area music (fallback: silence)", ());
+/// [sound] 0x110912: picks and starts the song for the current area.
+pub fn area_music(s: &mut State) {
+    crate::sound::play_area_song(s);
 }
 
 /// [map] 0x1092fc: moves the party to (x, y, z) (jail).
