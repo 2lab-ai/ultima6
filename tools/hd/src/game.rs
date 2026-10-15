@@ -25,7 +25,7 @@ use crate::img::Classic;
 /// Original: 0x133d3e patches this byte of the portrait file name with the archive letter
 /// (`u6_core::converse::script`, `NAME_LETTER`).
 const NAME_LETTER: usize = 9;
-/// The portrait archives `load_portrait` opens: `a` and `b` for the slots, `z` for the hero.
+/// The portrait archives `portrait_ref` names: `a` and `b` for the slots, `z` for the hero.
 const PORTRAIT_LETTERS: [u8; 3] = [b'a', b'b', b'z'];
 /// Original: A4-0x61e2 (pointer to the paper bitmap's file name, read by 0x1350d8) and
 /// A4-0x61de (the spellbook picture's, read by 0x116028).

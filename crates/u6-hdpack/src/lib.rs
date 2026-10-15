@@ -8,7 +8,7 @@
 //! - `index.bin`: one 24-byte entry per image ([`Entry`], layout at [`INDEX_MAGIC`]);
 //! - `atlas-N.webp`: the tile images, [`ATLAS_CELLS`] × [`ATLAS_CELLS`] cells of 64 px, filled
 //!   row by row in record order (N from 0; an atlas is as tall as its rows);
-//! - `portrait/<letter>-<item>.webp` (the `load_portrait` pair) and `bitmap/<role>.webp`.
+//! - `portrait/<letter>-<item>.webp` (the `portrait_ref` pair) and `bitmap/<role>.webp`.
 //!
 //! **Codec: lossless WebP (VP8L) RGBA**, encoded and decoded by the pure-Rust `image-webp`
 //! crate, which builds for wasm and which browsers decode natively; the reader refuses lossy or
@@ -18,7 +18,7 @@
 //! and then one byte per pixel, row-major, of the classic image as the engine holds it:
 //! - a tile record ([`tile_hash`]): its colour index (0..31), or `0xFF` where the record is
 //!   transparent (the AND mask / unwritten rows), so the mask is part of the image;
-//! - a portrait: the 56×64 bytes `load_portrait` returns; a bitmap: the `width × height`
+//! - a portrait: the 56×64 bytes `portrait_pixels` returns; a bitmap: the `width × height`
 //!   bytes of `u6_formats::bitmap::Bitmap::pixels` (before the bitmap colour table).
 //!
 //! The engine computes the same hash of a record's current bytes, so an HD image made from
