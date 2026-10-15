@@ -59,7 +59,8 @@ pub struct OfsVolume {
     /// twice (the key and an index copy, with room for the intake's volume prefix in front of
     /// each), each directory path and each listed warning, and [`ENTRY_BYTES`] for each of them
     /// (strings are built at their exact length, so the charge is what they hold); and, kept as
-    /// spent, a failed read's bytes and a block for each extension table any read walks.
+    /// spent, the bytes a failed read copied and a block for each extension table any read
+    /// walks.
     pub held: usize,
     /// The walk stopped where the next charge would have passed the limit given to
     /// [`read_ofs_within`]: the rest of the volume is not read.
@@ -198,8 +199,10 @@ impl Reader<'_> {
 impl Reader<'_> {
     /// The file's bytes, or `None` when they and `key` (what its path costs) would pass the
     /// limit (nothing is read then), or when the tables it walks do. Both are charged before
-    /// the bytes are reserved. A failed read keeps its charge: what it copied counts as spent,
-    /// so headers that share one bad chain cannot copy it again and again past the limit.
+    /// the bytes are reserved. A failed read gives back all but the work it did: the bytes it
+    /// copied stay charged (with the tables it walked), so headers that share one bad chain
+    /// cannot copy it again and again past the limit, and a damaged byte size costs only what
+    /// was read for it.
     fn read_file(&mut self, hdr: usize, path: &str, key: usize) -> Result<Option<Vec<u8>>, Error> {
         let size = u32_at(self.img, hdr * BS + 324) as usize;
         // A file's bytes sit in the image's blocks, at most a block's worth in each, so no file
@@ -214,18 +217,29 @@ impl Reader<'_> {
         if !self.charge(size + key) {
             return Ok(None);
         }
-        self.read_blocks(hdr, path, size)
+        // Exactly the byte size, so the bytes never move to a larger block as they grow.
+        let mut out = Vec::with_capacity(size);
+        match self.read_blocks(hdr, path, size, &mut out) {
+            Ok(true) => Ok(Some(out)),
+            // The limit was reached on a table: the walk stops, the charge stays.
+            Ok(false) => Ok(None),
+            Err(err) => {
+                self.held -= size - out.len() + key;
+                Err(err)
+            }
+        }
     }
 
+    /// Reads the file's `size` bytes into `out` (reserved for them); false when a table would
+    /// pass the limit. On an error `out` holds what was copied.
     fn read_blocks(
         &mut self,
         hdr: usize,
         path: &str,
         size: usize,
-    ) -> Result<Option<Vec<u8>>, Error> {
+        out: &mut Vec<u8>,
+    ) -> Result<bool, Error> {
         let img = self.img;
-        // Exactly the byte size, so the bytes never move to a larger block as they grow.
-        let mut out = Vec::with_capacity(size);
         let per_block = if self.ffs { BS } else { BS - 24 };
         let mut table = hdr as u32;
         let mut hops = 0usize;
@@ -237,7 +251,7 @@ impl Reader<'_> {
             // whole), charged and kept: empty tables copy nothing, but many headers can walk
             // one long chain of them.
             if hops > 0 && !self.charge(BS) {
-                return Ok(None);
+                return Ok(false);
             }
             hops += 1;
             let t = table as usize;
@@ -283,7 +297,7 @@ impl Reader<'_> {
                 out.len()
             )));
         }
-        Ok(Some(out))
+        Ok(true)
     }
 
     /// Walks the directory at `dir_block`, `depth` levels below the root (the root is 0).

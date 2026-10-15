@@ -372,3 +372,46 @@ pub fn empty_table_loops(count: usize) -> Vec<u8> {
     }
     img
 }
+
+/// An OFS image of 881 blocks (just room for the root) whose root's 72 hash slots all name
+/// block 1, which no entry can be: 72 warnings.
+pub fn bad_slots_root() -> Vec<u8> {
+    let mut img = vec![0u8; 881 * BS];
+    img[..4].copy_from_slice(b"DOS\0");
+    put32(&mut img, 880, 0, 2);
+    put32(&mut img, 880, 12, 72);
+    for slot in 0..72 {
+        put32(&mut img, 880, 24 + slot * 4, 1);
+    }
+    put32(&mut img, 880, BS - 4, 1);
+    put_name(&mut img, 880, "BAD");
+    checksum_block(&mut img, 880);
+    img
+}
+
+/// An FFS volume: "a" (one 512-byte block), then `count` headers whose byte size is damaged
+/// (900,000 bytes claimed, one 512-byte block in the table), then "z" (the same block as "a").
+pub fn damaged_sizes(count: usize) -> Vec<u8> {
+    let mut img = ImageBuilder::new(true).build("DAMAGED", &[Node::File("a", vec![0x33; BS])]);
+    let mut prev = 882;
+    for k in 0..=count {
+        let hdr = 884 + k;
+        let (name, size) = if k == count {
+            ("z".to_string(), BS as u32)
+        } else {
+            (format!("s{k:03}"), 900_000)
+        };
+        put32(&mut img, hdr, 0, 2);
+        put32(&mut img, hdr, 4, hdr as u32);
+        put32(&mut img, hdr, 8, 1);
+        put32(&mut img, hdr, 24 + 71 * 4, 883);
+        put32(&mut img, hdr, 324, size);
+        put_name(&mut img, hdr, &name);
+        put32(&mut img, hdr, BS - 4, (-3i32) as u32);
+        checksum_block(&mut img, hdr);
+        put32(&mut img, prev, BS - 16, hdr as u32); // the hash chain
+        checksum_block(&mut img, prev);
+        prev = hdr;
+    }
+    img
+}

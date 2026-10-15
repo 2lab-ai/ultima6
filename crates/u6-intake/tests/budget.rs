@@ -8,10 +8,11 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use common::ofs_builder::{
-    ImageBuilder, Node, deep_latin1_files, empty_table_loops, nested_dirs, shared_block_volume,
-    shared_short_chain,
+    ImageBuilder, Node, bad_slots_root, damaged_sizes, deep_latin1_files, empty_table_loops,
+    nested_dirs, shared_block_volume, shared_short_chain,
 };
 use common::pp20_encoder::max_ratio_pp20;
+use common::zip_writer::zip;
 use u6_intake::{
     InputFile, Intake, decrunch_pp20_within, intake, pp20_declared_len, read_ofs, read_ofs_within,
 };
@@ -465,11 +466,14 @@ fn reads_that_fail_on_a_shared_chain_copy_at_most_the_limit() {
     let vol = read_ofs_within(&img, limit).unwrap();
     let reads = failed_reads(&vol.warnings, "short read 884736/884737");
     assert!(vol.limit_reached, "{:?}", vol.warnings);
-    assert!(
-        reads * 884_736 <= limit,
-        "{reads} reads copied {} bytes under a limit of {limit}",
-        reads * 884_736
-    );
+    // Each read is charged what it copied and the 23 tables it walked: 896,512 bytes, so the
+    // limit holds nine, and they are made.
+    assert_eq!(reads, 9, "{:?}", vol.warnings);
+    assert!(reads * 884_736 <= limit);
+    // With no limit every one of them is made (and fails).
+    let all = read_ofs(&img).unwrap();
+    assert!(!all.limit_reached);
+    assert_eq!(failed_reads(&all.warnings, "short read 884736/884737"), 200);
 }
 
 #[test]
@@ -481,9 +485,66 @@ fn reads_that_walk_empty_tables_stop_at_the_limit() {
     let vol = read_ofs_within(&img, limit).unwrap();
     let reads = failed_reads(&vol.warnings, "broken extension chain");
     assert!(vol.limit_reached, "{:?}", vol.warnings);
+    // 1,760 tables after the first at 512 bytes each: the limit holds nine walks.
+    assert_eq!(reads, 9, "{:?}", vol.warnings);
+    assert!(reads * 1760 * 512 <= limit);
+    let all = read_ofs(&img).unwrap();
+    assert!(!all.limit_reached);
+    assert_eq!(failed_reads(&all.warnings, "broken extension chain"), 200);
+}
+
+#[test]
+fn damaged_byte_sizes_spend_only_what_they_read() {
+    // 100 headers claim 900,000 bytes and hold one block: each read copies 512 bytes and fails.
+    // Charged by their claims they would take 90 MB and stop the intake; charged by what they
+    // copied, the files after them are read.
+    let adf = damaged_sizes(100);
+    let r = intake(vec![file("damaged.adf".into(), adf)]);
+    let keys: Vec<&str> = r.files.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["DAMAGED/a", "DAMAGED/z"], "{:#?}", r.report);
     assert!(
-        reads * 1760 * 512 <= limit,
-        "{reads} reads walked {} tables under a limit of {limit}",
-        reads * 1761
+        r.report
+            .iter()
+            .any(|l| l == "damaged.adf: 68 more warnings not listed")
     );
+    assert!(
+        !r.report.iter().any(|l| l.contains("budget")),
+        "{:#?}",
+        r.report
+    );
+}
+
+#[test]
+fn long_entry_names_and_many_warnings_keep_the_report_bounded() {
+    // 20 ADF entries named with 8,000 two-byte characters, which a zip without the UTF-8 flag
+    // reads as ISO 8859-1 (32,006 bytes each), every root with 72 bad hash slots. Each name
+    // would be copied into every line about its disk.
+    let adf = bad_slots_root();
+    let names: Vec<String> = (0..20)
+        .map(|i| format!("{i:02}{}.adf", "\u{e9}".repeat(8000)))
+        .collect();
+    let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), adf.as_slice())).collect();
+    let archive = zip(&entries, false);
+    let adfs = 20 * adf.len();
+    let (r, peak) = peak_of(|| intake(vec![file("names.zip".into(), archive)]));
+    let report: usize = r.report.iter().map(String::capacity).sum();
+    assert!(report < 512 << 10, "the report holds {report} bytes");
+    assert!(
+        peak < adfs + MIB,
+        "the intake held {peak} bytes at once for {adfs} bytes of ADF"
+    );
+    // Each disk is named by its label: the name's first 254 bytes (the index, then 126
+    // characters of two bytes; 255 would cut one) and an ellipsis.
+    assert_eq!(r.disks.len(), 20);
+    for d in &r.disks {
+        assert_eq!(d.label.len(), 254 + "\u{2026}".len());
+        assert!(d.label.ends_with('\u{2026}'));
+        let lines = lines_of(&r, &d.label);
+        // ADF, volume, 32 warnings, the count of the rest.
+        assert_eq!(lines.len(), 35, "{:#?}", &lines[..lines.len().min(3)]);
+        assert_eq!(
+            lines[34],
+            format!("{}: 40 more warnings not listed", d.label)
+        );
+    }
 }
