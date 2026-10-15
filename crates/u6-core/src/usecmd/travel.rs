@@ -12,8 +12,9 @@ const STR_NOT_SOLO: u32 = 0x0012_cd66;
 const STR_ONLY_LAND: u32 = 0x0012_cd7a;
 const STR_DEED: u32 = 0x0012_cd90;
 const STR_NOT_BOARDABLE: u32 = 0x0012_cdac;
-const STR_SHERRY: u32 = 0x0012_cdbe;
-const STR_BEHLEM: u32 = 0x0012_cdee;
+/// The refusals of the two leaders who cannot ride (actor 9, actor 0xa4).
+const STR_LEADER_9: u32 = 0x0012_cdbe;
+const STR_LEADER_A4: u32 = 0x0012_cdee;
 const STR_ON_HORSE: u32 = 0x0012_ce14;
 const STR_NO_ROOM: u32 = 0x0012_cbd4;
 const STR_NO_BAG: u32 = 0x0012_cb62;
@@ -40,7 +41,7 @@ fn z(s: &State) -> u16 {
     u16::from(s.map.centre.z)
 }
 
-/// Original: 0x12f3fa (objects: can the Avatar step off at (x, y)?)
+/// Original: 0x12f3fa (objects: can the hero step off at (x, y)?)
 ///
 /// For a ship (0x19c) the two tiles beside it (its frame direction ± 2); for any other vessel
 /// the 8 tiles around, from the table at A4-0x65ba / -0x65b2; each through 0x11b1c0 for the
@@ -126,7 +127,7 @@ pub fn leave_vessel(s: &mut State, keep_skiff: bool) -> Slot {
 /// the vessel, the party leaves the region (0x108fba mode 2); actor 0 becomes the vessel
 /// (type + frame, hit points from the quantity, status in party, worktype 2) and the object
 /// goes; every member and the kept skiff go into its inventory (0x10cda8 with 0x10); the vessel
-/// leads with the Avatar's name; draw lists, view flags and the area song.
+/// leads with the hero's name; draw lists, view flags and the area song.
 pub fn board_vessel(s: &mut State, obj: Slot) {
     let mut v = obj;
     if s.objects.kind(v) == 0x19c {
@@ -203,7 +204,7 @@ pub fn board_vessel(s: &mut State, obj: Slot) {
 /// Original: 0x12f502 (objects: board or leave a vessel: ship, skiff, raft, balloon)
 ///
 /// Party mode only (the solo refusal 0x12cd66). Used on the vessel the party is in: it leaves
-/// when the Avatar can step off (0x12f3fa; 0x11d0a4(1), the skiff stays in the hold; a balloon
+/// when the hero can step off (0x12f3fa; 0x11d0a4(1), the skiff stays in the hold; a balloon
 /// deflates into its object 0x1a4); a ship that cannot land with a skiff aboard puts the party
 /// into the skiff (0x11d0a4(0), asm 0x12f620); else the land refusal 0x12cd7a. The original's
 /// two halves differ and the port keeps both: the test looks for a skiff of quality 0 only
@@ -286,9 +287,9 @@ pub async fn board(ux: Ux<'_>, obj: Slot) {
 
 /// Original: 0x12f7ea (objects: mount a horse 0x1ae)
 ///
-/// Only a temporary actor (≥ 0xe0) is boardable; Sherry and Beh Lem refuse, a rider is
-/// already on one. The horse turns into the empty type 0x58 and goes, the leader takes its place
-/// mounted (0x12f6ee with the horse's frame, its rear re-typed).
+/// Only a temporary actor (≥ 0xe0) is boardable; a leader that is actor 9 or actor 0xa4 refuses,
+/// a rider is already on one. The horse turns into the empty type 0x58 and goes, the leader takes
+/// its place mounted (0x12f6ee with the horse's frame, its rear re-typed).
 pub async fn mount(ux: Ux<'_>, obj: Slot) {
     let (h, lead) = {
         let mut s = ux.s();
@@ -297,9 +298,9 @@ pub async fn mount(ux: Ux<'_>, obj: Slot) {
     let msg = if h < 0xe0 {
         Some(STR_NOT_BOARDABLE)
     } else if lead == 9 {
-        Some(STR_SHERRY)
+        Some(STR_LEADER_9)
     } else if lead == 0xa4 {
-        Some(STR_BEHLEM)
+        Some(STR_LEADER_A4)
     } else if ux.s().objects.kind(Slot::from(lead)) == 0x1af {
         Some(STR_ON_HORSE)
     } else {
@@ -404,10 +405,10 @@ pub async fn inflate(ux: Ux<'_>, obj: Slot) {
 
 /// Original: 0x12fb0a (objects: the orb of the moons: a red moongate where the player points)
 ///
-/// Only the Avatar knows how (actor 5's talk flags bit 5, A4+0x3e11; else the line 0x12ce42).
+/// Only the hero knows how (actor 5's talk flags bit 5, A4+0x3e11; else the line 0x12ce42).
 /// The target prompt (0x12ce68) and a target within 2 tiles of the centre: a red moongate
 /// (0x54) is made whose quality is the cell (0 next to the centre on its row, else
-/// (dy + 2) · 5 + dx + 3); where the Avatar could stand and no gate (0x12d / 0x12e marker) is,
+/// (dy + 2) · 5 + dx + 3); where the hero could stand and no gate (0x12d / 0x12e marker) is,
 /// the line 0x12ce70 and it moves there with a dissolve; else the failed message and it goes.
 pub async fn orb(ux: Ux<'_>) {
     let knows = ux

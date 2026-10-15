@@ -1,12 +1,12 @@
 //! The introduction story of the main menu (0x1078e6, `intro.new`, song 3, palette 2): the
-//! Avatar comes through the portal onto the gargoyles' plain, is bound to their altar, and the
+//! hero comes through the portal onto the gargoyles' plain, is bound to their altar, and the
 //! companions come through a moongate and carry him off.
 //!
 //! `intro.new`: item 6 the plain at night, 5 the altar's front, 3 / 4 the gargoyle crowds that
-//! walk in from the left and the right, 9 the Avatar bound on the altar and 0xc the bonds, 8 /
+//! walk in from the left and the right, 9 the hero bound on the altar and 0xc the bonds, 8 /
 //! 0xb the gargoyle priest rising with the dagger (0xa once the arrow has struck), 7 the red
 //! moongate rising behind the altar, 0 / 2 / 1 the three companions who vault from it and carry
-//! the Avatar (9) off. Passages 0xc8 .. 0xdb tell the story, each until a key. The crowds sway:
+//! the hero (9) off. Passages 0xc8 .. 0xdb tell the story, each until a key. The crowds sway:
 //! each frame a crowd moves its step with probability 2/3 and turns at ±3 (later ±4).
 //!
 //! Movements from one set of positions to another go through 0x10f8f2, which steps every

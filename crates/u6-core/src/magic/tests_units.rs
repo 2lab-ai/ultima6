@@ -247,7 +247,7 @@ fn slime_and_tremor_strike_evil_actors_only() {
 }
 
 #[test]
-fn armageddon_spares_the_avatar_and_actor_5() {
+fn armageddon_spares_the_hero_and_actor_5() {
     let mut s = world_with(&[
         (2, 0x178, 101, 100),
         (5, 0x178, 99, 100),

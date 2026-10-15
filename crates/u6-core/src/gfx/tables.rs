@@ -1,9 +1,10 @@
 //! Tables the draw path reads out of the user's `game` executable at run time (spec 03 §5: data
 //! is extracted, never compiled in). Addresses are image addresses (base 0x00100000), read
 //! through the shared hunk loader [`crate::image::GameImage`]. The version check is the hunk
-//! layout the addresses were measured on: hunk 30 (CODE) at 0x151ee0 with 0x16f0 bytes, hunk
-//! 33 (DATA) at 0x1536f0 with 0x4f0c bytes. The bytes read here carry no relocations (word
-//! tables and data words); a real-data test compares them with the flattened image.
+//! layout the addresses were read on: hunk 30 (CODE) at 0x151ee0 and hunk 33 (DATA) at
+//! 0x1536f0; every read must lie in its hunk's loaded bytes, whose length is the hunk header's.
+//! The bytes read here carry no relocations (word tables and data words); a real-data test
+//! compares them with the flattened image.
 
 use u6_formats::FormatError;
 
@@ -18,23 +19,19 @@ pub const DISSOLVE_TAPS: usize = 15;
 struct Hunk {
     /// Hunk number.
     n: usize,
-    /// Loaded bytes.
-    len: usize,
     /// Image address of the first data byte.
     base: u32,
 }
 
-/// Hunk 30 (CODE, 0x16f0 bytes at 0x151ee0): the graphics code with its embedded tables.
+/// Hunk 30 (CODE at 0x151ee0): the graphics code with its embedded tables.
 const HUNK_30: Hunk = Hunk {
     n: 30,
-    len: 0x16f0,
     base: 0x0015_1EE0,
 };
 
-/// Hunk 33 (DATA, 0x4f0c loaded bytes at 0x1536f0): the small-data globals (A4 = 0x15b6f0).
+/// Hunk 33 (DATA at 0x1536f0): the small-data globals (A4 = 0x15b6f0).
 const HUNK_33: Hunk = Hunk {
     n: 33,
-    len: 0x4f0c,
     base: 0x0015_36F0,
 };
 
@@ -46,17 +43,13 @@ fn invalid(offset: usize, detail: String) -> FormatError {
     }
 }
 
-/// Checks the two hunks this module reads are where they were measured.
+/// Checks the two hunks this module reads are at their bases.
 fn check_layout(img: &GameImage<'_>) -> Result<(), FormatError> {
     for h in [&HUNK_30, &HUNK_33] {
-        let got = (img.segment_base(h.n), img.loaded(h.n).map(<[u8]>::len));
-        if got != (Some(h.base), Some(h.len)) {
+        if img.segment_base(h.n) != Some(h.base) {
             return Err(invalid(
                 0,
-                format!(
-                    "hunk {} layout {got:x?}, expected {:#x} / {:#x}",
-                    h.n, h.base, h.len
-                ),
+                format!("hunk {} layout: not at {:#x}", h.n, h.base),
             ));
         }
     }
@@ -70,9 +63,10 @@ fn image_bytes<'a>(
     addr: u32,
     len: usize,
 ) -> Result<&'a [u8], FormatError> {
+    let loaded = img.loaded(hunk.n).map_or(0, <[u8]>::len);
     let inside = addr
         .checked_sub(hunk.base)
-        .is_some_and(|d| d as usize + len <= hunk.len);
+        .is_some_and(|d| d as usize + len <= loaded);
     if !inside {
         return Err(invalid(0, format!("{addr:#x} outside hunk {}", hunk.n)));
     }
@@ -168,10 +162,15 @@ impl GameTables {
 mod tests {
     use super::*;
 
-    /// A synthetic `game`: hunk 30 and 33 at their measured bases and sizes, chosen bytes.
+    /// Synthetic loaded lengths for hunks 30 and 33: past the last table read here, not the
+    /// shipped hunks' lengths.
+    const H30_LEN: usize = 0x1000;
+    const H33_LEN: usize = 0x4900;
+
+    /// A synthetic `game`: hunk 30 and 33 at their bases, synthetic lengths, chosen bytes.
     pub(crate) fn synthetic_game() -> Vec<u8> {
-        let mut h30 = vec![0u8; HUNK_30.len];
-        let mut h33 = vec![0u8; HUNK_33.len];
+        let mut h30 = vec![0u8; H30_LEN];
+        let mut h33 = vec![0u8; H33_LEN];
         let at30 = |a: u32| (a - HUNK_30.base) as usize;
         let at33 = |a: u32| (a - HUNK_33.base) as usize;
         for i in 0..SHORE_MERGES {
@@ -238,7 +237,7 @@ mod tests {
         assert!(GameTables::from_game(&g).is_err());
         let other = crate::image::SyntheticGame::new()
             .place_at(HUNK_30.n, HUNK_30.base + 8)
-            .loaded(false, vec![0; HUNK_30.len])
+            .loaded(false, vec![0; H30_LEN])
             .build();
         let e = GameTables::from_game(&other).unwrap_err().to_string();
         assert!(e.contains("hunk 30 layout"), "{e}");

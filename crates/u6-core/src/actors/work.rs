@@ -106,7 +106,7 @@ pub struct ActorWork {
     pub mouse_walk: u16,
     /// Original: A4-0x7a2a / -0x7a28 (words: the clicked target; data hunk -1, -1)
     pub mouse_target: (i16, i16),
-    /// Port-only: 0x121020 (the Avatar's death) ran inside synchronous code and could not
+    /// Port-only: 0x121020 (the hero's death) ran inside synchronous code and could not
     /// await the resurrection 0x1095bc; the world turn awaits it at its next bookkeeping point.
     pub resurrect_pending: bool,
 }

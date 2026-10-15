@@ -22,7 +22,7 @@
 //! - 0x105f7c [ui] unnamed; 3 callees
 //! - 0x106092 [ui] leaf; callers 1, from 1 subsystems
 //! - 0x10613a [ui] leaf; callers 2, from 1 subsystems
-//! - 0x10619c [ui] uses "It's locked."
+//! - 0x10619c [ui] uses string 0x104fe6
 //! - 0x106474 [ui] leaf; callers 1, from 1 subsystems
 //! - 0x106506 [ui] unnamed; 2 callees
 //! - 0x10658e [ui] step of 0x106bbc (wait for next input event, map cl~)
@@ -52,8 +52,8 @@
 //! - 0x1111ca [ui] unnamed; 2 callees
 //! - 0x1112cc [ui] unnamed; calls 0x10ae52 (object stacked on / contained~)
 //! - 0x1113fe [ui] unnamed; calls 0x153002 (tile blitter, entry B [likely])
-//! - 0x111882 [ui] step of 0x1118c6 (uses "")
-//! - 0x1118c6 [ui] uses ""
+//! - 0x111882 [ui] step of 0x1118c6 (uses string 0x110bfc)
+//! - 0x1118c6 [ui] uses string 0x110bfc
 //! - 0x111be0 [ui] unnamed; 2 callees
 //! - 0x111c30 [inventory] inventory panel [likely]
 //! - 0x111dca [ui] step of 0x10790a (read a command key; handles panel~)

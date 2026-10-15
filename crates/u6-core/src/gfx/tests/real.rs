@@ -127,13 +127,13 @@ fn real_shore_masks_fit_and_the_window_draws_the_party() {
     let window = view_window(&state);
     let centre = &window.objects[5 * 11 + 5];
     let leader = crate::objects::ObjectId(1);
-    let avatar = state.tables.basetile.base[usize::from(state.objects.obj_type(leader))]
+    let hero = state.tables.basetile.base[usize::from(state.objects.obj_type(leader))]
         + u16::from(state.objects.frame(leader));
     assert!(
-        centre.last() == Some(&avatar),
+        centre.last() == Some(&hero),
         "leader drawn last in cell (5, 5)"
     );
-    let (rec, _, _) = gfx.record(avatar);
+    let (rec, _, _) = gfx.record(hero);
     let expect: Vec<(usize, usize, u8)> = (0..256)
         .filter(|&i| !rec.transparent[i])
         .map(|i| (80 + i % 16, 80 + i / 16, rec.pixels[i]))
@@ -148,6 +148,6 @@ fn real_shore_masks_fit_and_the_window_draws_the_party() {
     let fb = e.frame();
     assert!(expect.len() > 50);
     for (x, y, p) in expect {
-        assert!(fb.get(x, y) == Some(p), "avatar pixel at ({x}, {y})");
+        assert!(fb.get(x, y) == Some(p), "hero pixel at ({x}, {y})");
     }
 }

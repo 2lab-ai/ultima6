@@ -13,10 +13,8 @@ use crate::error::{FormatError, Result};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-/// Number of colours: 5 bitplanes (copper `BPLCON0 = 0x5200`).
+/// Number of colours: 5 bitplanes (as the game's copper list sets `BPLCON0`).
 pub const PALETTE_LEN: usize = 32;
-/// Size of the PowerPacker-decrunched `game` executable the offsets below are measured on.
-pub const GAME_EXE_LEN: usize = 267_332;
 /// File offset of hunk 33's `HUNK_DATA` block header in the decrunched `game`.
 pub const GAME_HUNK33_BLOCK: usize = 243_036;
 /// Offset of the palette inside hunk 33's data (the block's data starts 8 bytes after its header).
@@ -24,10 +22,11 @@ pub const GAME_PALETTE_IN_HUNK: usize = 0x4A3C;
 /// File offset of the palette in the decrunched `game`: `243036 + 8 + 0x4A3C`.
 pub const GAME_PALETTE_OFFSET: usize = GAME_HUNK33_BLOCK + 8 + GAME_PALETTE_IN_HUNK;
 
-/// `HUNK_HEADER` magic that starts every AmigaDOS executable.
-const HUNK_HEADER: [u8; 4] = [0x00, 0x00, 0x03, 0xF3];
-/// `HUNK_DATA` id, then hunk 33's loaded length in longwords (0x13C3 × 4 = 20236 bytes).
-const HUNK33_DATA_BLOCK: [u8; 8] = [0x00, 0x00, 0x03, 0xEA, 0x00, 0x00, 0x13, 0xC3];
+/// `HUNK_HEADER` id (AmigaDOS hunk format) that starts every executable.
+const HUNK_HEADER: u32 = 0x3F3;
+/// `HUNK_DATA` id (AmigaDOS hunk format); the longword after it is the block's length in
+/// longwords, then that many longwords of data.
+const HUNK_DATA: u32 = 0x3EA;
 
 /// One colour, 8 bits per channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -72,26 +71,42 @@ pub fn palette_from_ocs_words(words: &[u8]) -> Result<[Rgb; PALETTE_LEN]> {
 }
 
 /// Reads the game palette from the decrunched `game` executable (`d1/INSTALL/game`, after
-/// PowerPacker; the disk copy is PP20-crunched). Checks the file length, the hunk-file magic and
-/// hunk 33's `HUNK_DATA` header before trusting the fixed offset.
+/// PowerPacker; the disk copy is PP20-crunched). Checks the hunk-file id, then hunk 33's block
+/// header at its offset: the `HUNK_DATA` id and a length field whose data lies inside the file
+/// and holds the palette at its offset, before it reads.
 pub fn palette(game: &[u8]) -> Result<[Rgb; PALETTE_LEN]> {
-    bytes::expect_len(
-        game,
-        GAME_EXE_LEN,
-        "game executable (PowerPacker-decrunched)",
-    )?;
-    if bytes::slice(game, 0, 4, "game hunk header")? != HUNK_HEADER {
+    if bytes::u32_be(game, 0, "game hunk header")? != HUNK_HEADER {
         return Err(FormatError::invalid(
             "game hunk header",
             0,
             "not an AmigaDOS executable (HUNK_HEADER 0x3F3)",
         ));
     }
-    if bytes::slice(game, GAME_HUNK33_BLOCK, 8, "game hunk 33 header")? != HUNK33_DATA_BLOCK {
+    if bytes::u32_be(game, GAME_HUNK33_BLOCK, "game hunk 33 header")? != HUNK_DATA {
         return Err(FormatError::invalid(
             "game hunk 33 header",
             GAME_HUNK33_BLOCK,
-            "expected HUNK_DATA (0x3EA) of 0x13C3 longwords; unknown game version",
+            "expected HUNK_DATA (0x3EA); unknown game version",
+        ));
+    }
+    let longs = bytes::u32_be(game, GAME_HUNK33_BLOCK + 4, "game hunk 33 length")?;
+    let data = GAME_HUNK33_BLOCK + 8;
+    let end = usize::try_from(longs)
+        .ok()
+        .and_then(|n| n.checked_mul(4))
+        .and_then(|n| n.checked_add(data));
+    if end.is_none_or(|e| e > game.len()) {
+        return Err(FormatError::invalid(
+            "game hunk 33 length",
+            GAME_HUNK33_BLOCK + 4,
+            "the block's data runs past the end of the file",
+        ));
+    }
+    if (u64::from(longs) * 4) < (GAME_PALETTE_IN_HUNK + PALETTE_LEN * 2) as u64 {
+        return Err(FormatError::invalid(
+            "game hunk 33 length",
+            GAME_HUNK33_BLOCK + 4,
+            "the block is too short to hold the palette; unknown game version",
         ));
     }
     let words = bytes::slice(game, GAME_PALETTE_OFFSET, PALETTE_LEN * 2, "game palette")?;

@@ -1,5 +1,5 @@
 // Walk pace of a held mouse button in the original: boot the game-first floppies (as play.mjs),
-// find the game's data hunk in memory, put the pointer on a map cell beside the Avatar and hold
+// find the game's data hunk in memory, put the pointer on a map cell beside the hero and hold
 // the left button for N PAL frames, pressed and released at frame boundaries; the view centre
 // (A4-0x7b78/-0x7b76, where the leader is) is read after every emulated frame, so each step's
 // frame is known.
@@ -29,9 +29,10 @@ mkdirSync(out, { recursive: true });
 const LOG = join(out, 'pace.log');
 const log = (s) => { appendFileSync(LOG, `${new Date().toISOString()} ${s}\n`); console.log(s); };
 
-// Image layout of `game` (re/notes/game-layout.md): hunk 33 = DATA at 0x1536f0, 0x4f0c bytes
-// loaded; SAS/C A4 = hunk base + 0x8000. Globals read (A4-relative, words):
-const IMAGE_BASE = 0x100000, HUNK33 = 0x1536f0, HUNK33_LOADED = 0x4f0c, A4_OFF = 0x8000;
+// Image layout of `game` (re/notes/game-layout.md): hunk 33 = DATA at 0x1536f0, its loaded
+// length read from the hunk header (tools/hunk2raw.py's JSON next to the image); SAS/C A4 =
+// hunk base + 0x8000. Globals read (A4-relative, words):
+const IMAGE_BASE = 0x100000, HUNK33 = 0x1536f0, A4_OFF = 0x8000;
 const CENTRE = -0x7b78; // x, y, z (map/mod.rs)
 const HELD = -0x7a36; // 1 while a button stays down after its press (0x106bbc)
 const READING = -0x7a2c; // 1 while the command loop waits for a command key
@@ -68,7 +69,9 @@ async function setup(page, a4, name) {
 // range, at any even offset) and is not filler: its runtime copy is byte-equal to the image.
 function signature() {
   const img = readFileSync(GAME_BIN);
-  const h = img.subarray(HUNK33 - IMAGE_BASE, HUNK33 - IMAGE_BASE + HUNK33_LOADED);
+  const seg = JSON.parse(readFileSync(GAME_BIN.replace(/\.bin$/, '.json'), 'utf8')).segments[33];
+  if (parseInt(seg.base, 16) !== HUNK33) throw new Error('hunk 33 is not where game-layout.md has it');
+  const h = img.subarray(HUNK33 - IMAGE_BASE, HUNK33 - IMAGE_BASE + seg.loaded_bytes);
   const looksRelocated = (i) => { const v = h.readUInt32BE(i); return v >= IMAGE_BASE && v < 0x163000; };
   for (let off = 0x100; off + 52 < h.length; off += 2) {
     const w = h.subarray(off, off + 48);

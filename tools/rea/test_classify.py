@@ -167,13 +167,14 @@ class ClassifyTests(unittest.TestCase):
             r["callers"] = sorted(c for c, q in p.items()
                                   if q["kind"] != "thunk" and a in q["calls"])
         p[0x200400]["callers"] = p[0x200000]["callers"]
-        self.data = {"procs": p, "strings": {0x300000: "\nNo response\n"}, "segments": SEGS}
-        self.saved = classify.MILESTONE_SEEDS, classify.MILESTONE_STOP
+        self.data = {"procs": p, "strings": {0x300000: "synthetic"}, "segments": SEGS}
+        self.saved = classify.MILESTONE_SEEDS, classify.MILESTONE_STOP, classify.STRING_VOTES
         classify.MILESTONE_SEEDS, classify.MILESTONE_STOP = [0x200000], {0x200300: "x"}
+        classify.STRING_VOTES = {0x300000: "converse"}   # the string votes by its address
         classify.classify(self.data)
 
     def tearDown(self):
-        classify.MILESTONE_SEEDS, classify.MILESTONE_STOP = self.saved
+        classify.MILESTONE_SEEDS, classify.MILESTONE_STOP, classify.STRING_VOTES = self.saved
 
     def test_hunk_default_and_strings(self):
         p = self.data["procs"]
@@ -183,6 +184,12 @@ class ClassifyTests(unittest.TestCase):
     def test_unknown_takes_caller_subsystem(self):
         r = self.data["procs"][0x200100]
         self.assertEqual((r["subsystem"], r["confidence"], r["rule"]), ("magic", "low", "callers"))
+
+    def test_roles_and_evidence_cite_string_addresses(self):
+        r = self.data["procs"][0x200200]
+        self.assertEqual(r["role"], "uses string 0x300000")
+        self.assertIn("string 0x300000", r["evidence"])
+        self.assertNotIn("synthetic", " ".join([r["role"]] + r["evidence"]))
 
     def test_thunk_inherits_target(self):
         r = self.data["procs"][0x200400]

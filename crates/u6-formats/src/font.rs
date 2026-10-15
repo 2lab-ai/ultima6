@@ -1,7 +1,8 @@
 //! Fonts — formats.md §4.5.
 //!
 //! - `u6.ch` (N: fonts/font_manager.cpp:76-97, u6_font.cpp:62-70): 256 glyphs × 8 bytes, one
-//!   byte per row, bit 7 = leftmost pixel. Glyphs 0-127 English, 128-255 runic/gargish.
+//!   byte per row, bit 7 = leftmost pixel. Glyphs 0-127 English, 128-255 the runic and the
+//!   gargoyles' script.
 //! - `u6.set` (N: script/script_cutscene.cpp:1183, fonts/wou_font.cpp:45-59,105-118): U6-LZW →
 //!   `[0]` height, `[2]` ink value, `[4+c]` width, `[0x104+c]` offset lo, `[0x204+c]` offset hi;
 //!   glyph = width×height bytes at `hi*256+lo`, a byte equal to ink = set pixel.
@@ -116,8 +117,8 @@ mod tests {
     #[test]
     fn bit_font_bit7_is_leftmost() {
         let mut d = vec![0u8; U6CH_LEN];
-        // formats.md: 'A' = `1e 36 66 7e 66 66 c6 00`.
-        d[0x41 * 8..0x42 * 8].copy_from_slice(&[0x1e, 0x36, 0x66, 0x7e, 0x66, 0x66, 0xc6, 0x00]);
+        // A synthetic glyph for 'A': row 0 lit from x = 3, row 6 from x = 0.
+        d[0x41 * 8..0x42 * 8].copy_from_slice(&[0x18, 0x3c, 0x66, 0x66, 0x7e, 0x66, 0xc3, 0x00]);
         let f = BitFont::parse(&d).unwrap();
         assert_eq!(f.glyphs.len(), 256);
         assert!(!f.pixel(b'A', 0, 0) && f.pixel(b'A', 3, 0) && f.pixel(b'A', 0, 6));

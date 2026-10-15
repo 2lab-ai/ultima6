@@ -187,7 +187,7 @@ pub(crate) fn walk(state: &mut State, id: ObjectId, dir: u16) {
 }
 
 /// The routine 0x108fba runs for a party member whose type is 0x1af before leaving (owner
-/// `objects/`, 0x12f8fe, uses "No room!"). Fallback: nothing.
+/// `objects/`, 0x12f8fe, uses string 0x12cbd4). Fallback: nothing.
 pub(crate) fn before_leaving(state: &mut State, id: ObjectId) {
     crate::objects::commands::dismount(state, id.slot());
 }
@@ -207,9 +207,9 @@ pub(crate) fn play_song(state: &mut State, n: u16) {
     crate::sound::play_song(state, n)
 }
 
-/// Shamino names the place a dungeon entrance of quality `q` (1..=20) leads to (0x11d1d4):
-/// printf of the string at A4-0x7303, then "dungeon " (0x11b8f8) for q < 8 or "shrine of "
-/// (0x11b902) for q 9..=11, then the name the pointer table A4-0x6a60 + 4q points at, then the
+/// Actor 3 names the place a dungeon entrance of quality `q` (1..=20) leads to (0x11d1d4):
+/// printf of the string at A4-0x7303, then the prefix string at 0x11b8f8 for q < 8 or the one
+/// at 0x11b902 for q 9..=11, then the name the pointer table A4-0x6a60 + 4q points at, then the
 /// string at 0x11b90e; all read from the user's `game`, queued for the loop to print.
 pub(crate) fn say_place_name(state: &mut State, q: u8) {
     use crate::image::A4;
@@ -233,8 +233,8 @@ pub(crate) fn say_place_name(state: &mut State, q: u8) {
     }
 }
 
-/// Print A4-0x72cf, "You must be in party mode to enter." (printf 0x108658 of the string in
-/// the user's `game`, queued for the loop to print).
+/// Print A4-0x72cf, the line that the party must be in party mode (printf 0x108658 of the
+/// string in the user's `game`, queued for the loop to print).
 pub(crate) fn say_party_mode_needed(state: &mut State) {
     let line = crate::engine::with_current_io(|io| crate::main_loop::a4_string(io, 0x72cf));
     crate::main_loop::queue_print(state, line.unwrap_or_default(), Vec::new());
@@ -250,8 +250,8 @@ pub(crate) fn scan_hostiles(state: &mut State) {
     crate::actors::turn::go_to_schedules(state);
 }
 
-/// Put the Avatar back from its body object (objects 0x10c810).
-pub(crate) fn raise_avatar_body(state: &mut State, body: ObjectId) {
+/// Put the hero back from its body object (objects 0x10c810).
+pub(crate) fn raise_hero_body(state: &mut State, body: ObjectId) {
     crate::objects::actor_from_body(state, body.slot());
 }
 

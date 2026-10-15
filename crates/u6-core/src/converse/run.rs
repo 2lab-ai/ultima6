@@ -66,7 +66,7 @@ fn strtok(buf: &mut [u8], at: &mut usize, delims: &[u8]) -> Option<usize> {
 /// Original: 0x1148f0 (print converse text, run ops, keyword blocks)
 ///
 /// Runs from the read position: bytes 0x20..0x7f and `\n` print through 0x108376, another
-/// control byte prints "Try to print out a control char" and stops; `ef` starts a keyword block
+/// control byte prints the line 0x1129e4 and stops; `ef` starts a keyword block
 /// (0x1149d6) unless an answer was already given, in which case the block is skipped to `ee`;
 /// other bytes 0x80..0xee are ops (0x11404c, `npc` = the NPC talked to). Stops before 0, `ee`
 /// and every byte from `f0` (input ops, `ff`), and after an op that set "bye".

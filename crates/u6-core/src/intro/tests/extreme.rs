@@ -45,6 +45,7 @@ use crate::intro::{IntroOutcome, IntroState, LAUNCHER_ARGS, main};
 use crate::sound::MedCall;
 use crate::state::State;
 
+use super::asm::*;
 use super::synthetic::{font_bytes, keyboard};
 
 /// Bytes of the synthetic image: up to the end of u's last hunk (0x11a010).
@@ -59,6 +60,8 @@ const CHAIN: u32 = 0x0010_ac7a;
 const CASE: u32 = 0x0010_ac80;
 const FORMAT: u32 = 0x0010_ad40;
 const STUB: u32 = 0x0010_ad60;
+/// The print routine the stub jumps to.
+const PRINT: u32 = 0x0011_42f0;
 /// The fill routine 0x10f898 the case calls.
 const FILL_VIEW: u32 = 0x0010_f898;
 
@@ -75,28 +78,27 @@ fn case_words() -> Vec<u16> {
     let (max, min) = (i16::MAX as u16, i16::MIN as u16);
     let mut w: Vec<u16> = Vec::new();
     // The scroll frame: blocks item 1 at (0x10, 0x10).
-    w.extend([
-        0x397c, 0x10, 0x2cfc, 0x397c, 0x10, 0x2cfe, 0x397c, 1, 0x2d00,
-    ]);
-    // The box and its place: the volume word, MIN and MAX (move.w off(a4),d0; move.w d0 /
-    // #imm,off(a4)).
-    w.extend([
-        0x302c, 0x08d2, 0x3940, 0x2d0a, 0x397c, min, 0x2d0c, 0x3940, 0x2d0e,
-    ]);
-    w.extend([0x397c, max, 0x2d10, 0x3940, 0x2d1c, 0x397c, min, 0x2d1e]);
+    w.extend([MOVE_W_IMM_TO_A4, 0x10, 0x2cfc]);
+    w.extend([MOVE_W_IMM_TO_A4, 0x10, 0x2cfe]);
+    w.extend([MOVE_W_IMM_TO_A4, 1, 0x2d00]);
+    // The box and its place: the volume word, MIN and MAX.
+    w.extend([MOVE_W_A4_TO_D0, 0x08d2, MOVE_W_D0_TO_A4, 0x2d0a]);
+    w.extend([MOVE_W_IMM_TO_A4, min, 0x2d0c, MOVE_W_D0_TO_A4, 0x2d0e]);
+    w.extend([MOVE_W_IMM_TO_A4, max, 0x2d10, MOVE_W_D0_TO_A4, 0x2d1c]);
+    w.extend([MOVE_W_IMM_TO_A4, min, 0x2d1e]);
     // moveq #5,d0; lea $2d02(a4),a0; jsr fill.
-    w.extend([0x7005, 0x41ec, 0x2d02, 0x4eba]);
+    w.extend([moveq_d0(5), LEA_A4_A0, 0x2d02, JSR_PC]);
     w.push(disp(CASE + 2 * w.len() as u32 - 2, FILL_VIEW));
     // −1 (%d); the volume-name pointer of entry 0 (%s); the volume word twice (%X, %Y).
-    w.extend([
-        0x70ff, 0x3f00, 0x554f, 0x554f, 0x41ec, 0x08ac, 0x7000, 0x2eb0, 0x0800,
-    ]);
-    w.extend([0x302c, 0x08d2, 0x3f00, 0x3f00, 0x487a]);
+    w.extend([moveq_d0(-1), PUSH_W_D0, SUBQ_W_2_A7, SUBQ_W_2_A7]);
+    w.extend([LEA_A4_A0, 0x08ac, moveq_d0(0)]);
+    w.extend(MOVE_L_A0_D0_TO_SP);
+    w.extend([MOVE_W_A4_TO_D0, 0x08d2, PUSH_W_D0, PUSH_W_D0, PEA_PC]);
     w.push(disp(CASE + 2 * w.len() as u32 - 2, FORMAT));
-    w.push(0x4eba);
+    w.push(JSR_PC);
     w.push(disp(CASE + 2 * w.len() as u32 - 2, STUB));
     // lea 14(a7),a7; bra.w (to the tail).
-    w.extend([0x4fef, 14, 0x6000, 0]);
+    w.extend([LEA_A7_A7, 14, BRA_W, 0]);
     w
 }
 
@@ -119,10 +121,10 @@ fn extreme(words: [i16; 2]) -> UExe {
     arg.push(0);
     e.poke(ARG, &arg);
     // move.l d7,d0; bra.w CASE.
-    poke_words(&mut e, CHAIN, &[0x2007, 0x6000, disp(CHAIN + 2, CASE)]);
+    poke_words(&mut e, CHAIN, &[MOVE_L_D7_D0, BRA_W, disp(CHAIN + 2, CASE)]);
     poke_words(&mut e, CASE, &case_words());
     e.poke(FORMAT, b"%Y%X%s%d ab\0");
-    poke_words(&mut e, STUB, &[0x4ef9, 0x0011, 0x42f0]);
+    poke_words(&mut e, STUB, &jmp_abs(PRINT));
     e.volume_ptrs = vec![VOLUME_PTR; 4];
     // Song files named by number, so the run's log says which songs main asked for.
     e.song_names = (0..13).map(|n| format!("song{n}").into_bytes()).collect();

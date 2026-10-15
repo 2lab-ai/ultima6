@@ -4,20 +4,20 @@
 //! message-scroll stand-in uses). This module holds only their image addresses; the hunks'
 //! bytes come from the shared hunk loader [`crate::image::GameImage`].
 //!
-//! Version check: 35 hunks, hunk 2 = CODE 0x3a28 bytes, hunk 9 = CODE 0x318 bytes, hunk 10 = CODE 0x2958 bytes, hunk 33 =
-//! DATA with 0x4f0c bytes loaded (`re/notes/game-layout.md`, "`game` segments"); every message
-//! must end in a NUL inside its hunk.
+//! Version check: 35 hunks, and hunks 2, 9, 10 and 33 at their image bases
+//! (`re/notes/game-layout.md`, "`game` segments"); every message must lie in its hunk's loaded
+//! bytes (their length is the hunk header's) and end in a NUL there.
 
 use crate::image::GameImage;
 
 /// Hunk count of the `game` executable this table was measured on.
 const GAME_HUNKS: usize = 35;
-/// (hunk, image base, loaded bytes) of the three hunks the messages live in.
-const HUNKS: [(usize, u32, usize); 4] = [
-    (2, 0x0010_4fb0, 0x3a28),
-    (9, 0x0011_25b8, 0x318),
-    (10, 0x0011_28d0, 0x2958),
-    (33, 0x0015_36f0, 0x4f0c),
+/// (hunk, image base) of the hunks the messages live in.
+const HUNKS: [(usize, u32); 4] = [
+    (2, 0x0010_4fb0),
+    (9, 0x0011_25b8),
+    (10, 0x0011_28d0),
+    (33, 0x0015_36f0),
 ];
 
 /// One message the converse code prints or uses, named after its role.
@@ -136,23 +136,25 @@ impl ConverseText {
                 img.segment_count()
             ));
         }
-        for &(n, _, len) in &HUNKS {
-            let got = img.loaded(n).map(<[u8]>::len).filter(|&l| l > 0);
-            if got != Some(len) {
-                return Err(format!(
-                    "game: hunk {n} holds {got:?} bytes, expected {len:#x}"
-                ));
+        for &(n, base) in &HUNKS {
+            if img.segment_base(n) != Some(base) {
+                return Err(format!("game: hunk {n} is not at {base:#x}"));
             }
         }
         let mut pairs = Vec::with_capacity(MESSAGES.len());
         for (msg, addr) in MESSAGES {
-            let (n, base, len) = HUNKS
+            // The last known hunk that starts at or below the address holds it, if anywhere.
+            let (n, base) = HUNKS
                 .iter()
                 .copied()
-                .find(|&(_, base, len)| addr >= base && ((addr - base) as usize) < len)
+                .filter(|&(_, base)| addr >= base)
+                .max_by_key(|&(_, base)| base)
                 .ok_or_else(|| format!("{msg:?}: {addr:#x} outside the known hunks"))?;
             let hunk = img.loaded(n).unwrap_or_default();
-            let bytes = &hunk[(addr - base) as usize..len];
+            let bytes = hunk
+                .get((addr - base) as usize..)
+                .filter(|b| !b.is_empty())
+                .ok_or_else(|| format!("{msg:?}: {addr:#x} past the loaded bytes of hunk {n}"))?;
             let end = bytes
                 .iter()
                 .position(|&b| b == 0)

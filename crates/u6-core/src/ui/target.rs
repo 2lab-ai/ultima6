@@ -140,7 +140,7 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
 /// its waits).
 /// A step whose own waits outlast the pace samples on the next frame and the cadence starts
 /// again from that sample (no burst of the paces it outlasted). A hold that gives no walk (the
-/// pointer on the Avatar's cell or off the map, a blocked step) keeps the frame pace, and so does
+/// pointer on the hero's cell or off the map, a blocked step) keeps the frame pace, and so does
 /// a prompt (A4-0x7a2c clear), which keeps the due time: the step after a short prompt still
 /// comes a pace after the one before it. The release ends the pace. Not reproduced: 0x14f12c
 /// reads the handler's button word 0x161bd4 once per pass of this wait, so the original misses a

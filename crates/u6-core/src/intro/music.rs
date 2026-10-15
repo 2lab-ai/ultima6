@@ -1,4 +1,5 @@
-//! The music of `u`: the `ULTIMA_?a.MOD` songs through its copy of the MED replay routine.
+//! The music of `u`: the songs named by its pointer table A4+0xa0 (read at 0x1036fc..0x103704,
+//! as `game` reads its own) through its copy of the MED replay routine.
 //!
 //! `u` links the same MED routine as `game` into its hunk 0: 0x1001f8..0x101130 and the
 //! routine's tables are byte for byte `game`'s but for one relocated pointer (0x1002dc, the

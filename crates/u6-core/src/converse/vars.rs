@@ -15,7 +15,7 @@ pub enum StrRef {
     Null,
     /// One of the ten 100-byte buffers at A4+0x140b (slots 0..9 point there).
     Buffer(u8),
-    /// A message in the code (milady / milord, morning / afternoon / evening, "you").
+    /// A message in the code (the forms of address, the times of day, the word at 0x1129ce).
     Text(Msg),
     /// The NPC-name buffer 0x112768 (slot 0x17).
     NpcName,

@@ -59,7 +59,7 @@
 //! - 0x1206e2 [actors] unnamed; 3 callees
 //! - 0x120a1c [actors] scan nearby hostiles, combat-state toggle [likely]
 //! - 0x120b64 [party] party centre / formation anchor [likely]
-//! - 0x121020 [actors] prints the Avatar's death
+//! - 0x121020 [actors] prints the hero's death
 //! - 0x121056 [party] leader / solo-mode bookkeeping per turn [likely]
 //! - 0x1213de [actors] turn scheduler: next actor by movement points; NPC turns; tick clock
 //! - 0x1217d4 [actors] unnamed; calls 0x120b64 (party centre / formation anch~)

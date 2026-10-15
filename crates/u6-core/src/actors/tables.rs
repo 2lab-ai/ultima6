@@ -120,7 +120,7 @@ impl GameTables {
     /// Extracts the tables from the PowerPacker-decrunched `game` executable through the shared
     /// hunk loader [`GameImage`].
     pub fn from_game(game: &[u8]) -> Result<Self, FormatError> {
-        // Same version check as the palette: length, hunk magic, hunk 33 header.
+        // Same version check as the palette: hunk-file id, hunk 33's block header and length.
         gfx::palette(game)?;
         let img = GameImage::parse(game)?;
         let bytes = |a4: i32, n: usize| img.a4_bytes(a4, n);
@@ -258,9 +258,10 @@ mod tests {
         assert!(GameTables::from_game(&[0u8; 64]).is_err());
     }
 
-    /// Code hunk 14 (0x127278, 0x113c bytes) with the four `move.w #kind, D7` of 0x12783c.
+    /// Code hunk 14 at 0x127278 (a synthetic length past them) with the four `move.w #kind, D7`
+    /// of 0x12783c.
     fn hunk_14(kinds: [u16; 4], op: u16) -> Vec<u8> {
-        let mut code = vec![0u8; 0x113c];
+        let mut code = vec![0u8; 0x800];
         for (k, kind) in kinds.into_iter().enumerate() {
             let at = (AMBUSH_KINDS - 0x0012_7278) as usize + 6 * k;
             code[at..at + 2].copy_from_slice(&op.to_be_bytes());

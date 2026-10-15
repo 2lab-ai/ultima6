@@ -1,7 +1,7 @@
-//! The MED replay routine linked into hunk 0 ("MED - Player routine", OctaMED's player for
+//! The MED replay routine linked into hunk 0 (its name string at 0x101233; OctaMED's player for
 //! MMD0 modules, with synth sounds): its globals, entry points and the CIA tempo.
 //!
-//! The routine runs from a CIA-B timer interrupt ("MEDTimerInterrupt", 0x10118a, code 0x100890)
+//! The routine runs from a CIA-B timer interrupt (its name string at 0x101221, 0x10118a, code 0x100890)
 //! and talks to Paula and the CIAs directly; in the port it drives [`u6_audio::Machine`], which
 //! calls [`MedPlayer::timer_interrupt`] at each timer underflow. Addresses below are the chip
 //! memory of that machine (the module, the null sample).

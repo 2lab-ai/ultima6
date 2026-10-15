@@ -284,7 +284,7 @@ pub(crate) async fn refresh_view(cx: &Cx<'_>) {
     cx.io.vblank().await;
 }
 
-/// A4-0x7afb: non-zero refuses conversations ("No response"; `map.flag_7afb`).
+/// A4-0x7afb: non-zero refuses conversations (the line 0x112a5a; `map.flag_7afb`).
 pub(crate) fn talk_refused(s: &State) -> bool {
     s.map.flag_7afb != 0
 }
@@ -332,7 +332,7 @@ pub(crate) fn solo_member(s: &State) -> i8 {
         .map_or(-1, |&b| b as i8)
 }
 
-/// A4-0x7b04: the avatar is female.
+/// A4-0x7b04: the hero is female.
 pub(crate) fn female(s: &State) -> bool {
     s.actors
         .objlist_tail
