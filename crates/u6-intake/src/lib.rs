@@ -844,8 +844,8 @@ mod tests {
     #[test]
     fn comparing_names_allocates_nothing() {
         // Digit runs of 100,000 digits each, equal up to the last: compared in place.
-        let a = format!("disk {}1.adf", "0".repeat(1) + &"7".repeat(99_999));
-        let b = format!("disk {}2.adf", "0".repeat(1) + &"7".repeat(99_999));
+        let a = format!("disk 0{}1.adf", "7".repeat(99_999));
+        let b = format!("disk 0{}2.adf", "7".repeat(99_999));
         let start = LIVE.with(Cell::get);
         PEAK.with(|p| p.set(start));
         let ord = by_label(&a, &b);
