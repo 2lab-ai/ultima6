@@ -42,22 +42,57 @@ impl Bits<'_> {
     }
 }
 
+/// Output bytes per stream byte a decrunch can reach at most: 56/3. Each pass of the loop
+/// below reads a flag bit, maybe a literal run (8 bits a byte), then a match. A match of class
+/// 0-2 reads at least its 2 class bits for at most 4 bytes; a class-3 match reads at least
+/// 3 + 3g bits (class, offset-width bit, `g` length groups) for at most 7g + 4 bytes. So no
+/// output byte costs less than 3/7 of a bit: a stream of `s` bytes yields at most 56s/3, and a
+/// file that declares more runs out of bits before it is done.
+pub const MAX_EXPANSION: (u64, u64) = (56, 3);
+
+/// The output length the trailer declares (24 bits), or `None` when `data` is not a PP20 file
+/// long enough to hold its header and trailer.
+pub fn pp20_declared_len(data: &[u8]) -> Option<usize> {
+    let n = data.len();
+    (is_pp20(data) && n >= 12).then(|| {
+        (usize::from(data[n - 4]) << 16)
+            | (usize::from(data[n - 3]) << 8)
+            | usize::from(data[n - 2])
+    })
+}
+
 pub fn decrunch_pp20(data: &[u8]) -> Result<Vec<u8>, Error> {
+    // The declared length is 24 bits, so no limit refuses it here.
+    decrunch_pp20_within(data, usize::MAX).map(Option::unwrap_or_default)
+}
+
+/// As [`decrunch_pp20`], but a file that declares more than `limit` bytes is refused before
+/// anything is allocated: `Ok(None)` (the intake passes what is left of its budget). A file
+/// that declares more than its stream can hold ([`MAX_EXPANSION`]) is an error, also before
+/// anything is allocated.
+pub fn decrunch_pp20_within(data: &[u8], limit: usize) -> Result<Option<Vec<u8>>, Error> {
     if !is_pp20(data) {
         return Err(Error::new("not a PP20 file"));
     }
-    if data.len() < 12 {
+    let Some(dest_len) = pp20_declared_len(data) else {
         return Err(Error::new("PP20 file truncated"));
-    }
+    };
     let n = data.len();
+    // u64: 56 times a stream of hundreds of MiB passes a 32-bit usize (wasm32).
+    let (num, den) = MAX_EXPANSION;
+    if dest_len as u64 * den > (n as u64 - 12) * num {
+        return Err(Error::new(format!(
+            "PP20: declares {dest_len} bytes, more than its stream can hold"
+        )));
+    }
+    if dest_len > limit {
+        return Ok(None);
+    }
     let offset_lens = &data[4..8];
     let mut bits = Bits {
         src: &data[8..n - 4],
         cursor: 0,
     };
-    let dest_len = (usize::from(data[n - 4]) << 16)
-        | (usize::from(data[n - 3]) << 8)
-        | usize::from(data[n - 2]);
     let skip_bits = usize::from(data[n - 1]);
     let mut out = vec![0u8; dest_len];
     let mut pos = dest_len;
@@ -117,5 +152,5 @@ pub fn decrunch_pp20(data: &[u8]) -> Result<Vec<u8>, Error> {
             out[pos] = out[pos + 1 + offset];
         }
     }
-    Ok(out)
+    Ok(Some(out))
 }
