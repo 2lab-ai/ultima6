@@ -153,8 +153,9 @@ fn real_shore_masks_fit_and_the_window_draws_the_party() {
 }
 
 /// Spec 06 O2 on the user's game (`game` started at once, seed 0): 3000 steps with the render
-/// cache and without it, idle at the prompt with four walks between; the shown frame after every
-/// step and the whole `State` every 10 steps are the same. The cache drew less than the whole
+/// cache and without it, idle at the prompt with four walks between; the shown frame and the back
+/// buffer (the border's outer halves too) after every step and the whole `State` every 10 steps
+/// are the same. The cache drew less than the whole
 /// window, and no shore merge is crossed; only counts are printed.
 #[test]
 fn real_idle_with_the_cache_shows_what_it_shows_without() {
@@ -186,6 +187,8 @@ fn real_idle_with_the_cache_shows_what_it_shows_without() {
             on.frame().palette == off.frame().palette,
             "step {step}: palette"
         );
+        let back = |e: &Engine| e.io().peek_back(|b| b.pixels().to_vec());
+        assert_same!(back(&on), back(&off), "step {step}: the back buffer");
         if step % 10 == 9 {
             assert!(*on.state() == *off.state(), "step {step}: the whole State");
         }

@@ -23,10 +23,11 @@
 //! differ, which is what [`super::blit::copy_window`] would change). Never with the sparkle (it
 //! draws from the RNG), the dissolve (it clears its flag) or XOR plots on.
 //!
-//! Tables the render also reads are loaded once and never written: [`super::tables::GameTables`], the
-//! animmask overlays and the base tiles. The records are written only by the shore merge
-//! (`anim::merge_rows`); a writer of [`super::GfxState::records`] elsewhere must report the
-//! record ([`RenderCache::record_changed`]).
+//! Tables the render also reads are loaded once and never written:
+//! [`super::tables::GameTables`], the animmask overlays and the base tiles. The records are
+//! written only by the shore merge (`anim::merge_rows`); a writer of
+//! [`super::GfxState::records`] elsewhere must report the record
+//! ([`RenderCache::record_changed`]).
 //!
 //! The shore merge 0x152dac rewrites each target record from its source record under the
 //! merge's mask. Its output is decided by the record each source and target tile draws
@@ -112,7 +113,7 @@ pub(super) struct WindowKey {
     pub(super) clock: bool,
 }
 
-/// Where the values before the first box's end.
+/// The values before the first box's: the clock's tile word.
 const GLOBAL: usize = 1;
 
 impl WindowKey {
