@@ -1243,6 +1243,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "u6-hdtool"
+version = "0.1.0"
+dependencies = [
+ "png",
+ "serde",
+ "serde_json",
+ "u6-core",
+ "u6-formats",
+ "u6-hdpack",
+ "u6-intake",
+]
+
+[[package]]
 name = "u6-intake"
 version = "0.1.0"
 dependencies = [

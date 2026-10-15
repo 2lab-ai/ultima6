@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/u6-intake", "crates/u6-formats", "crates/u6-core", "crates/u6-render", "crates/u6-native", "crates/u6-web", "crates/u6-audio", "crates/u6-testkit", "crates/u6-hdpack"]
+members = ["crates/u6-intake", "crates/u6-formats", "crates/u6-core", "crates/u6-render", "crates/u6-native", "crates/u6-web", "crates/u6-audio", "crates/u6-testkit", "crates/u6-hdpack", "tools/hd"]
 
 [workspace.package]
 version = "0.1.0"
