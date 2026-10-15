@@ -1011,9 +1011,9 @@ const HOLD_CELLS = [[88, 88 + 48], [88, 88 - 48], [88 + 48, 88], [88 - 48, 88]];
 // back at once, not after the fight's turns), so the boot is as fresh for the next direction;
 // up to the four of them (as `stepSideways` tries the other way).
 async function freshHeldWalk(page, ms) {
-  for (const cell of HOLD_CELLS) {
+  for (const [i, cell] of HOLD_CELLS.entries()) {
     const walk = await heldWalk(page, ms, cell);
-    if (walk.steps > 0) return walk;
+    if (walk.steps > 0) return { ...walk, direction: i };
   }
   assert.fail('a held press walks a cell in one of the four directions');
 }
@@ -1038,14 +1038,16 @@ test('the mouse: a press held on the map walks at the original\'s pace: 100 ms o
   const first = await boot();
   const click = await freshHeldWalk(first.page, 100);
   await first.context.close();
-  assert.ok(click.hold >= 100, 'the game took the press for at least 100 ms of its clock');
-  assert.ok(click.steps === 1, 'a 100 ms press walks one cell');
   const second = await boot();
   const held = await freshHeldWalk(second.page, 1000);
+  // Before the checks, so a failing run shows what the game took.
+  const line = (ms, w) => `${ms} ms held ${w.hold} ms on the engine clock, ${w.steps} cell${w.steps === 1 ? '' : 's'} (direction ${w.direction})`;
+  console.log(`  receipt: from fresh boots, ${line(100, click)}; ${line(1000, held)}`);
+  assert.ok(click.hold >= 100, 'the game took the press for at least 100 ms of its clock');
+  assert.ok(click.steps === 1, 'a 100 ms press walks one cell');
   assert.ok(held.hold >= 1000, 'the game took the press for at least 1 s of its clock');
   assert.ok(held.steps >= 1 && held.steps <= 2, 'a 1 s press from a fresh boot walks the original\'s one cell, within one');
   assert.ok(paced(click) && paced(held), 'no more cells than the pace allows for the hold the game took, none before its pace');
-  console.log(`  receipt: from fresh boots, the game took the 100 ms press as ${click.hold} ms (one cell) and the 1 s press as ${held.hold} ms (the original's cell within one)`);
 }, { needs: h.haveHfes });
 
 test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {
