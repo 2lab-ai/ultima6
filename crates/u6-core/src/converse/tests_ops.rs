@@ -90,7 +90,7 @@ fn arithmetic_and_logic() {
     let (v, s) = ev_in(state(&[7, 0, 0x93, 0xa7]));
     assert_eq!(v, 7);
     assert_eq!(scroll(&s), "[DivideError]");
-    // Two values left: "Error occured.", the bottom one is the result.
+    // Two values left: the error line (0x1129be), the bottom one is the result.
     let (v, s) = ev_in(state(&[1, 2, 0xa7]));
     assert_eq!((v, scroll(&s)), (1, "[ErrorOccured]".into()));
 }
@@ -291,7 +291,7 @@ fn join_and_leave_ops() {
     assert_eq!((s.actors.party.size, s.actors.party.members[0]), (1, 2));
     assert_eq!(s.actors.party.names[0], "Friend");
     assert_eq!((s.actors.attrs.status[1], s.actors.worktype[1]), (0, 0x8f));
-    assert_eq!(ev(&[7, 0xcc, 0xa7]), 2, "not a member");
+    assert_eq!(ev(&[7, 0xcc, 0xa7]), 2, "outside the party");
 }
 
 // ---- 0x11404c via the text runner 0x1148f0 -----------------------------------------------------

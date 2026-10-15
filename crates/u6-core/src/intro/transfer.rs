@@ -48,10 +48,10 @@ const LABELS_2: u32 = 0x0010_99f6;
 const FMT_NAMES: u32 = 0x0010_99b0;
 const FMT_NUMBERS: u32 = 0x0010_99ba;
 /// Original: A4+0x94b (the Ultima IV class names, 9 bytes each: the eight classes, then the
-/// Avatar's)
+/// hero's)
 const CLASSES: u32 = A4 + 0x94b;
-/// Original: A4+0x993 (the Avatar's class name)
-const AVATAR: u32 = A4 + 0x993;
+/// Original: A4+0x993 (the hero's class name)
+const HERO_CLASS: u32 = A4 + 0x993;
 /// Original: A4+0x99c (the sheet's keys: N, S, C, A, Escape)
 const SHEET_KEYS: u32 = A4 + 0x99c;
 
@@ -77,8 +77,8 @@ pub struct Found {
     pub class: Vec<u8>,
     /// Original: A4+0x2c42 (byte: status, 'G')
     pub status: u8,
-    /// Original: A4+0x2c43 (byte: the save's player is the Avatar)
-    pub avatar: u8,
+    /// Original: A4+0x2c43 (byte: the save's player is the hero)
+    pub is_hero: u8,
     /// Original: A4+0x2c44 / A4+0x2c46 / A4+0x2c48 / A4+0x2c4a / A4+0x2c4c
     pub exp: i16,
     pub level: i16,
@@ -117,7 +117,7 @@ fn word(b: &[u8], i: usize) -> i16 {
 ///
 /// Name bytes 0..8, sex byte 0x10 ('\\' = male), strength / dexterity / intelligence 0x13..0x15,
 /// magic 0x16, hit points 0x18, maximum 0x1a (level = maximum / 100), experience 0x1c, class 0x11
-/// (8 = Avatar when the second record's name is empty, written back into the roster).
+/// (8 = the hero's class when the second record's name is empty, written back into the roster).
 pub fn read_ultima_iv(st: &mut IntroState) -> bool {
     let save = &mut st.transfer.save;
     if save.len() < 0x108 {
@@ -135,8 +135,8 @@ pub fn read_ultima_iv(st: &mut IntroState) -> bool {
     let sex = if save[0x10] == 0x5c { MALE } else { FEMALE };
     f.sex = st.exe.cstr(sex);
     f.status = b'G';
-    f.avatar = u8::from(save[0x100..0x108].iter().all(|&b| b == 0));
-    if f.avatar != 0 {
+    f.is_hero = u8::from(save[0x100..0x108].iter().all(|&b| b == 0));
+    if f.is_hero != 0 {
         save[0x11] = 8;
     }
     let class = save[0x11];
@@ -159,7 +159,7 @@ pub fn read_ultima_iv(st: &mut IntroState) -> bool {
 /// A4+0x2c14) — true when a value is out of range (the caller ignores it)
 ///
 /// Name bytes 0..8, sex byte 9 (0xb = male), strength / dexterity / intelligence 0xc..0xe,
-/// magic 0xf, hit points 0x10, maximum 0x12, experience 0x14, level 0x16; the class is Avatar.
+/// magic 0xf, hit points 0x10, maximum 0x12, experience 0x14, level 0x16; the class is the hero's.
 pub fn read_ultima_v(st: &mut IntroState) -> bool {
     let r: Vec<u8> = (0..0x17).map(|i| byte(&st.transfer.save, 2 + i)).collect();
     let f = &mut st.transfer.found;
@@ -170,8 +170,8 @@ pub fn read_ultima_v(st: &mut IntroState) -> bool {
     let sex = if r[9] == 0xb { MALE } else { FEMALE };
     f.sex = st.exe.cstr(sex);
     f.status = b'G';
-    f.avatar = 1;
-    f.class = st.exe.cstr(AVATAR);
+    f.is_hero = 1;
+    f.class = st.exe.cstr(HERO_CLASS);
     f.exp = word(&r, 0x14);
     f.level = i16::from(r[0x16]);
     f.hp = word(&r, 0x10);
@@ -203,7 +203,7 @@ fn convert(st: &mut IntroState, attrs: [i16; 3]) {
     let h = &mut st.hero;
     [h.str, h.dex, h.int] = attrs;
     h.sex = f.sex.clone();
-    h.class = st.exe.cstr(AVATAR);
+    h.class = st.exe.cstr(HERO_CLASS);
     h.status = b'G';
     h.exp = f.exp / 10;
     h.level = 1;

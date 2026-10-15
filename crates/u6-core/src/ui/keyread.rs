@@ -62,7 +62,7 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
     };
     let key = poll(state, io).await;
     if key == 0 {
-        {
+        let refresh = {
             let mut s = state.borrow_mut();
             let ui = &mut s.ui;
             let frame = ui.input.cursor_frame;
@@ -72,14 +72,26 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
             io.draw(|fb| text::draw_char(fb, ui.font.as_ref(), &w, glyph as u8, col, row));
             let refresh = ui.input.idle_refresh;
             s.gfx.actor_anim_due = 1;
+            refresh
+        };
+        // Port: the original drew every frame where it made it, so a wait shows those recorded
+        // frames whose lines are printed and keeps the rest for after their lines; the refresh
+        // draws here too, a print's more prompt included, and its frames (a shake request) are
+        // played in this wait. Both through an interrupt of whatever print waits here
+        // (crate::combat::present::interrupt), which leaves its queue and its held newline
+        // alone.
+        let outer = crate::combat::present::interrupt(state, io).await;
+        {
+            let mut s = state.borrow_mut();
             if refresh {
+                // 0x105d44 / 0x105d48: 0x102ef0 and the animation step.
                 seams::refresh_view(&mut s, io);
                 seams::anim_step(&mut s);
             }
             // 0x105d4c: the pointer sample (0x14f12c); the event wait takes the events.
             super::pointer::sample(&mut s, io.pointer());
         }
-        super::effects::show_recorded(state, io).await;
+        crate::combat::present::resume(state, io, outer).await;
         io.present();
         io.vblank().await;
     }

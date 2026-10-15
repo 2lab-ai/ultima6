@@ -6,11 +6,15 @@
 // one CPU sample per frame (counts and lengths).
 // usage: node trace.mjs OUTDIR SNAPSHOT [KEY ...]   (default UP RIGHT LEFT RIGHT LEFT RIGHT LEFT)
 //   env U6_FIGHT_SETUP=town: the town setup of fight.mjs (no fight) before the steps
-// Output: OUTDIR/trace.json ({steps: [{key, read, prompt, calls: [{fn, at, frames, depth}]}]}).
+// Output: OUTDIR/trace.json ({bases, keys, steps: [{key, read, prompt, calls: [{fn, at, frames,
+// depth, actor, worktype, followers}]}], complete}), written after every step; `complete` turns
+// true only once every key's step is in (trace.py refuses a file without it). An NPC turn has
+// its actor and worktype, a followers' pass the count of members it may move.
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
 import { cpuFrames, hunkBases, loadSnapshot, runtime, townSetup } from './game.mjs';
+import { closeAt, stopPrompt } from './tracecore.mjs';
 
 const [out, snap, ...keyArgs] = process.argv.slice(2);
 if (!out || !snap) throw new Error('usage: node trace.mjs OUTDIR SNAPSHOT [KEY ...]');
@@ -23,23 +27,20 @@ const hex = (v) => `$${v.toString(16)}`;
 // step is ~540 frames; a traced one runs ~30 wall seconds a frame-hundred).
 const STEP_FRAMES = 6000;
 const STEP_WALL_MS = 40 * 60000;
-// The traced routines (image addresses).
+// The traced routines (image addresses): the party step 0x11d4ee, with the followers' pass it
+// ends in (0x11c910), is the walk command's own work before the world turn.
 const TRACED = {
   0x1213de: 'world turn', 0x1200b0: 'NPC turn', 0x102f2a: 'refresh after a turn',
   0x132706: 'flight', 0x1230ce: 'hit flash', 0x108658: 'printf', 0x10eef8: 'object name',
+  0x11d4ee: 'party step', 0x11c910: 'follow',
 };
 
 const h = await o.launch({ log: (s) => appendFileSync(join(out, 'trace.log'), `${s}\n`) });
 const { page } = h;
 // The console prompt printed since the last resume (`mark` = the console's length right after
-// it; the emulator does not run while a command is typed, so a prompt past it is a new stop,
-// and the one the resume was typed at, which shows the old PC, is never taken for it).
+// it; tracecore.mjs stopPrompt).
 let mark = 0;
-const prompt = async () => {
-  const t = await page.evaluate(() => wasm_retro_shell_get_text());
-  const m = [...t.matchAll(/\((\d+),(\d+)\) \$([0-9a-f]+):/g)].filter((x) => x.index >= mark).at(-1);
-  return m ? { v: Number(m[1]), pc: parseInt(m[3], 16) } : null;
-};
+const prompt = async () => stopPrompt(await page.evaluate(() => wasm_retro_shell_get_text()), mark);
 // Runs on (`g`) or steps (`s`) from a stop, and marks the console there: typed and marked in
 // one page call, so no frame can run (and stop) between the command and the mark.
 const resume = async (cmd) => {
@@ -141,22 +142,28 @@ try {
         // An NPC turn's actor (D0) and its worktype then (0x139188 = hunk 23 + 0x3c00).
         const actor = fn === 0x1200b0 ? d0 & 0xff : null;
         const worktype = actor === null ? null : await page.evaluate((a) => Module._wasm_peek(a), bases[23] + 0x3c00 + actor);
-        open.push({ fn, ret, a7, at, depth: open.length, actor, worktype });
+        // The followers' pass (leader in D0): how many members besides the leader are in
+        // worktype 1, the ones it may move (the party list A4+0x47ec, its size A4+0x4b00).
+        const followers = fn !== 0x11c910 ? null : await page.evaluate(([a4, wt, leader]) => {
+          let n = 0;
+          for (let i = 0; i < Module._wasm_peek(a4 + 0x4b00); i++) {
+            const m = Module._wasm_peek(a4 + 0x47ec + i);
+            if (m !== leader && Module._wasm_peek(wt + m) === 1) n++;
+          }
+          return n;
+        }, [a4, bases[23] + 0x3c00, d0 & 0xff]);
+        open.push({ fn, ret, a7, at, depth: open.length, actor, worktype, followers });
       }
       if (returns.has(p.pc)) {
-        // Only the youngest open call may return, to its own return address with A7 back above
-        // its return long; that address reached otherwise (a loop through the call site) is no
-        // return; an older call returning with younger ones open is a trace gone wrong.
-        const top = open.at(-1);
-        if (top && top.ret === p.pc && top.a7 + 4 === a7) {
-          open.pop();
-          calls.push({ fn: top.fn, at: top.at, frames: at - top.at, depth: top.depth, actor: top.actor, worktype: top.worktype });
-        } else {
-          const k = open.findIndex((c) => c.ret === p.pc && c.a7 + 4 === a7);
-          if (k >= 0) {
-            throw new Error(`${key}: ${TRACED[open[k].fn]} returned with ${open.length - 1 - k} younger calls open (${open.slice(k + 1).map((c) => TRACED[c.fn]).join(', ')})`);
-          }
+        // The youngest open call returns, or none does (tracecore.mjs closeAt); an older one
+        // returning with younger ones open ends the trace.
+        let top;
+        try {
+          top = closeAt(open, p.pc, a7, (fn) => TRACED[fn]);
+        } catch (e) {
+          throw new Error(`${key}: ${e.message}`);
         }
+        if (top) calls.push({ fn: top.fn, at: top.at, frames: at - top.at, depth: top.depth, actor: top.actor, worktype: top.worktype, followers: top.followers });
       }
       await resume('g');
     }
@@ -165,8 +172,10 @@ try {
     const by = {};
     for (const c of calls) (by[TRACED[c.fn]] ??= []).push(c.frames);
     log(`${key}: read ${read}, prompt ${done}: ${Object.entries(by).map(([k, v]) => `${k} ${v.length}× ${v.reduce((a, b) => a + b, 0).toFixed(1)}`).join(', ')}`);
-    writeFileSync(join(out, 'trace.json'), JSON.stringify({ bases, steps }, null, 1));
+    writeFileSync(join(out, 'trace.json'), JSON.stringify({ bases, keys: KEYS, steps, complete: false }, null, 1));
   }
+  writeFileSync(join(out, 'trace.json'), JSON.stringify({ bases, keys: KEYS, steps, complete: true }, null, 1));
+  log(`complete: ${steps.length} steps`);
 } finally {
   await o.close(h);
 }

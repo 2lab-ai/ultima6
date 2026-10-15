@@ -29,7 +29,7 @@ fn word(files: &Files, spell: u8) -> String {
     w.iter().map(|&b| char::from(b)).collect()
 }
 
-/// Boots, gives the Avatar a book with `spell` and the reagents, runs `setup`, casts: the
+/// Boots, gives the hero a book with `spell` and the reagents, runs `setup`, casts: the
 /// incantation, return, then `after` one key per tick. Returns the engine when it is over.
 fn cast(files: &Files, spell: u8, setup: Setup, after: &str) -> Engine {
     let mut e = start(files, spell, setup, after);
@@ -144,7 +144,7 @@ fn frame(e: &Engine, name: &str) {
     eprintln!("  frame {path}");
 }
 
-/// Intelligence 2: an actor that cannot resist the Avatar (0x122076: random 1..30 below
+/// Intelligence 2: an actor that cannot resist the hero (0x122076: random 1..30 below
 /// 2 / 2 − 15 + 15).
 fn dull(s: &mut State, a: Slot) {
     s.actors.attrs.intelligence[a as usize] = 2;
@@ -165,7 +165,7 @@ fn mass_sleep_on_a_group() {
         crate::map::view::update_view(s);
     });
     let e = cast(&files, 0x26, setup, ">>^^^\n");
-    let tail = show("Mass Sleep two right, three up", &e);
+    let tail = show("spell 0x26 two right, three up", &e);
     let s = e.state();
     let asleep: Vec<Slot> = [6, 7, 8]
         .into_iter()
@@ -179,7 +179,7 @@ fn mass_sleep_on_a_group() {
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
-/// Fire Field (0x33) one tile north-west of the Avatar (cross-hair one left, one up): the field
+/// Fire Field (0x33) one tile north-west of the hero (cross-hair one left, one up): the field
 /// object lies there; Dispel Field (0x21) aimed at it (the object as 0x1225c0 would pick it)
 /// takes it away again.
 #[test]
@@ -188,7 +188,7 @@ fn fire_field_then_dispel_field() {
     let c = start_centre(&files);
     let (fx, fy) = (c.0 - 1, c.1 - 1);
     let e = cast(&files, 0x33, Box::new(|_| {}), "<^\n");
-    let tail = show("Fire Field one left, one up", &e);
+    let tail = show("spell 0x33 one left, one up", &e);
     frame(&e, "fire-field");
     let field = {
         let mut s = e.state().clone();
@@ -207,20 +207,20 @@ fn fire_field_then_dispel_field() {
         s.ui.input.target = (fx as i16, fy as i16);
     });
     let e = dispatch_chosen(&files, 0x21, setup, "");
-    let tail = show("Dispel Field on it", &e);
+    let tail = show("spell 0x21 on it", &e);
     let s = e.state();
     assert!(s.objects.type_frame[field as usize] == 0, "{tail:?}");
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
-/// Conjure (0x31): a creature of the five Conjure types appears within 5 of the Avatar on its
+/// Conjure (0x31): a creature of the five Conjure types appears within 5 of the hero on its
 /// side (alignment 0x40, worktype 8).
 #[test]
 fn conjure_makes_a_creature() {
     let Some(files) = files() else { return };
     let c = start_centre(&files);
     let e = cast(&files, 0x31, Box::new(|_| {}), "");
-    let tail = show("Conjure", &e);
+    let tail = show("spell 0x31", &e);
     let s = e.state();
     let made: Vec<usize> = (0xe0..0x100)
         .filter(|&a| {
@@ -237,7 +237,7 @@ fn conjure_makes_a_creature() {
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
-/// Telekinesis (0x15) on an object two tiles east of the Avatar (picked the way 0x1225c0
+/// Telekinesis (0x15) on an object two tiles east of the hero (picked the way 0x1225c0
 /// would), pushed one tile north with the up arrow.
 #[test]
 fn telekinesis_pushes_an_object() {
@@ -256,7 +256,7 @@ fn telekinesis_pushes_an_object() {
         s.ui.input.target = (x as i16, y as i16);
     });
     let e = dispatch_chosen(&files, 0x15, setup, "^");
-    let tail = show("Telekinesis on an object two east, north", &e);
+    let tail = show("spell 0x15 on an object two east, north", &e);
     let s = e.state();
     let o = s.ui.input.selection;
     assert!(at(&s, o) == (c.0 + 2, c.1 - 1), "one tile north: {tail:?}");
@@ -271,7 +271,7 @@ fn telekinesis_pushes_an_object() {
 fn gate_travel_to_a_moonstone() {
     let Some(files) = files() else { return };
     let e = cast(&files, 0x64, Box::new(|_| {}), "1\n");
-    let tail = show("Gate Travel to phase 1", &e);
+    let tail = show("spell 0x64 to phase 1", &e);
     frame(&e, "gate-travel");
     let s = e.state();
     let stone = (
@@ -315,7 +315,7 @@ fn wizard_eye_moves_the_view() {
         e.tick(&[k], 16);
     }
     finish(&mut e);
-    let tail = show("Wizard Eye: east ×3, escape", &e);
+    let tail = show("spell 0x69: east ×3, escape", &e);
     frame(&e, "wizard-eye-back");
     let s = e.state();
     assert!(
@@ -337,7 +337,7 @@ fn tremor_hurts_evil_actors() {
     });
     let before = State::new_game(&files).quiet().actors.attrs.hp;
     let e = cast(&files, 0x79, setup, "");
-    let tail = show("Tremor", &e);
+    let tail = show("spell 0x79", &e);
     let s = e.state();
     assert!((30..60).contains(&s.actors.attrs.hp[7]), "1..30 damage");
     let start = State::new_game(&files).quiet();
@@ -357,7 +357,7 @@ fn tremor_hurts_evil_actors() {
 fn locate_prints_the_degrees() {
     let Some(files) = files() else { return };
     let e = cast(&files, 0x35, Box::new(|_| {}), "");
-    let tail = show("Locate", &e);
+    let tail = show("spell 0x35", &e);
     let c = e.state().map.centre;
     let lat = (c.y as i16 - 0x168) >> 3;
     let long = (c.x as i16 - 0x130) >> 3;
@@ -373,13 +373,13 @@ fn locate_prints_the_degrees() {
     assert!(tail.has(&want), "{tail:?}");
 }
 
-/// Armageddon (0x70): every actor slot below 0xff but the Avatar and actor 5 is gone,
-/// the party is the Avatar alone and the eggs stop.
+/// Armageddon (0x70): every actor slot below 0xff but the hero and actor 5 is gone,
+/// the party is the hero alone and the eggs stop.
 #[test]
 fn armageddon_leaves_two() {
     let Some(files) = files() else { return };
     let e = cast(&files, 0x70, Box::new(|_| {}), "");
-    show("Armageddon", &e);
+    show("spell 0x70", &e);
     frame(&e, "armageddon");
     let s = e.state();
     let left: Vec<usize> = (0..0xff)
@@ -390,7 +390,7 @@ fn armageddon_leaves_two() {
     assert!(s.map.flag_7afb == 1);
 }
 
-/// Energy Wind (0x62) north from the Avatar to four tiles up (cross-hair four up): actors 6 and
+/// Energy Wind (0x62) north from the hero to four tiles up (cross-hair four up): actors 6 and
 /// 7 put on the way and actor 5 at the end are hit; the other members, put behind the caster,
 /// are not.
 #[test]
@@ -417,7 +417,7 @@ fn energy_wind_hurts_along_its_path() {
     });
     let before = State::new_game(&files).quiet();
     let e = cast(&files, 0x62, setup, "^^^^\n");
-    let tail = show("Energy Wind four up", &e);
+    let tail = show("spell 0x62 four up", &e);
     frame(&e, "energy-wind");
     let s = e.state();
     for a in [6usize, 7] {
@@ -456,7 +456,7 @@ fn slime_turns_evil_actors() {
     let start = State::new_game(&files).quiet();
     let before = start.objects.type_frame.clone();
     let e = cast(&files, 0x76, setup, "");
-    show("Slime", &e);
+    show("spell 0x76", &e);
     let s = e.state();
     assert!(s.objects.type_frame[7] == 0x177);
     let others: Vec<usize> = (1..0xe0)
@@ -477,7 +477,7 @@ fn insect_swarm_makes_eight() {
     let Some(files) = files() else { return };
     let c = start_centre(&files);
     let e = cast(&files, 0x42, Box::new(|_| {}), "");
-    let tail = show("Insect Swarm", &e);
+    let tail = show("spell 0x42", &e);
     let s = e.state();
     let swarms: Vec<usize> = (0xe0..0x100)
         .filter(|&a| s.objects.type_frame[a] & 0x3ff == 0x157)
@@ -491,7 +491,7 @@ fn insect_swarm_makes_eight() {
     assert!(tail.has(&msg(&e, Msg::Success)), "{tail:?}");
 }
 
-/// Web (0x59) three tiles west of the Avatar: webs (0x35) on the free cells of the 3 × 3 there
+/// Web (0x59) three tiles west of the hero: webs (0x35) on the free cells of the 3 × 3 there
 /// (no actor in it: 0x11b1c0 tested with an object slot next to an actor panics in the actors
 /// port, reported).
 #[test]
@@ -499,7 +499,7 @@ fn web_covers_the_square() {
     let Some(files) = files() else { return };
     let c = start_centre(&files);
     let e = cast(&files, 0x59, Box::new(|_| {}), "<<<\n");
-    let tail = show("Web three left", &e);
+    let tail = show("spell 0x59 three left", &e);
     frame(&e, "web");
     let mut s = e.state().clone();
     let mut webs = Vec::new();
@@ -533,7 +533,7 @@ fn wing_strike_hits_a_foe() {
         s.actors.attrs.hp[7] = 60;
     });
     let e = cast(&files, 0x68, setup, "");
-    let tail = show("Wing Strike", &e);
+    let tail = show("spell 0x68", &e);
     frame(&e, "wing-strike");
     let s = e.state();
     assert!((40..60).contains(&s.actors.attrs.hp[7]), "1..20 damage");
@@ -553,7 +553,7 @@ fn wing_strike_hits_a_foe() {
 fn wing_strike_without_foes() {
     let Some(files) = files() else { return };
     let e = cast(&files, 0x68, Box::new(|_| {}), "");
-    let tail = show("Wing Strike, no foes", &e);
+    let tail = show("spell 0x68, no foes", &e);
     let none = text_at(e.io(), super::creatures::MSG_NO_FOES);
     assert!(tail.has(&none), "{tail:?}");
 }
@@ -569,7 +569,7 @@ fn hail_storm_falls() {
         crate::map::view::update_view(s);
     });
     let e = cast(&files, 0x54, setup, "^^^^\n");
-    let tail = show("Hail Storm four up", &e);
+    let tail = show("spell 0x54 four up", &e);
     let s = e.state();
     // A stone hit it: hit points lost, or 0xff when it is creature 0x1f (0x1231be).
     let hp = s.actors.attrs.hp[5];
@@ -602,7 +602,7 @@ fn reappear_brings_back_what_vanished() {
         s.ui.input.target = (x as i16, y as i16);
     });
     let e = dispatch_chosen(&files, 0x19, setup, "");
-    show("Vanish", &e);
+    show("spell 0x19", &e);
     let tf = e.state().actors.tail_word(0x22);
     assert!(tf != 0);
     let after = e.state().clone();
@@ -612,7 +612,7 @@ fn reappear_brings_back_what_vanished() {
         s.ui.input.target = (c.0 as i16 - 1, c.1 as i16 - 1);
     });
     let e = dispatch_chosen(&files, 0x13, setup, "");
-    let tail = show("Reappear one left, one up", &e);
+    let tail = show("spell 0x13 one left, one up", &e);
     let mut s = e.state().clone();
     let mut back = false;
     let mut o = crate::objects::begin_at(&mut s.objects, &s.tables, c.0 - 1, c.1 - 1, c.2);

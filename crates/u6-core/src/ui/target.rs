@@ -26,9 +26,10 @@ const F1: u16 = 0x13b;
 /// whose followers were still forming up, 26..108 (median 72). A sample every 33 frames from the
 /// press puts the port's cells per held time within one of those 4 boots at every hold up to
 /// their 8 free cells (100 ms: 1, 1 s: 2, 4 s: 7 against their 6), so no separate first-repeat
-/// delay is needed. The waits of the step's world turn (its refresh,
-/// [`crate::actors::turn::AFTER_TURN_MS`], and in a fight its NPC turns and effects) count inside
-/// the pace, not on top of it.
+/// delay is needed. The step's own wait ([`crate::actors::walk::STEP_MS`], and
+/// [`crate::actors::walk::FOLLOW_MS`] when members follow) and the waits of its world turn (its
+/// refresh, [`crate::actors::turn::AFTER_TURN_MS`], and in a fight its NPC turns and effects)
+/// count inside the pace, not on top of it.
 pub(crate) const HELD_WALK_MS: u32 = 660;
 
 /// Alt + letter codes (0x100 + PC scan code) that select a command (0x106ca0 switch).
@@ -140,7 +141,7 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
 /// its waits).
 /// A step whose own waits outlast the pace samples on the next frame and the cadence starts
 /// again from that sample (no burst of the paces it outlasted). A hold that gives no walk (the
-/// pointer on the Avatar's cell or off the map, a blocked step) keeps the frame pace, and so does
+/// pointer on the hero's cell or off the map, a blocked step) keeps the frame pace, and so does
 /// a prompt (A4-0x7a2c clear), which keeps the due time: the step after a short prompt still
 /// comes a pace after the one before it. The release ends the pace. Not reproduced: 0x14f12c
 /// reads the handler's button word 0x161bd4 once per pass of this wait, so the original misses a

@@ -4,7 +4,7 @@
 // the routine runs in its place (`g` to it, so its rts goes back to the render's caller) and a
 // breakpoint at that return address stops it again; the CPU's clock between the two stops, as
 // PAL frames (142,102 cycles each), is its time. D0 = 1 at that entry is a valid
-// argument for both targets below (circle 1, the Avatar), D1 the caller's (non-zero: bright).
+// argument for both targets below (circle 1, the hero), D1 the caller's (non-zero: bright).
 // usage: node timeit.mjs OUTDIR SNAPSHOT NAME
 //   NAME = render (0x102c90 itself), dissolve (0x102c90 with A4-0x6578 = 1: the window copied
 //   pixel by pixel, 0x1520e2), actor (the actor flash 0x132338), window (the window flash

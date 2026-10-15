@@ -366,6 +366,14 @@ pub fn steal(s: &mut State, actor: u16, target: u16) {
     }
 }
 
+/// Does 0x1200b0 run worktype `wt` through a combat routine (its dispatch 0x120184..0x120248:
+/// 3..=11, 13, 14, 0x13, 0x9a, 0x9b, [`crate::combat::npc::worktype`])? The others it sends to
+/// the wander (12, 0x8f), the random walk (15, 16, 0x8b..0x8e), the arrest (0x12), the
+/// schedule arms, or the default arm (0x11 and the rest).
+pub(crate) fn runs_combat_routine(wt: u8) -> bool {
+    matches!(wt, 3..=11 | 13 | 14 | 0x13 | 0x9a | 0x9b)
+}
+
 /// The synchronous part of [`npc_turn`] (0x1200b0 up to its epilogue).
 ///
 /// A party member who is not charmed is first uncharmed ([`leaves::uncharm`]: resets its
@@ -388,7 +396,7 @@ pub fn npc_turn_sync(s: &mut State, actor: u16) -> Option<(i8, Wait)> {
     let wt = s.actors.worktype[a];
     let mut wait = Wait::None;
     match wt {
-        3..=11 | 13 | 14 | 0x13 | 0x9a | 0x9b => combat_worktype(s, actor, wt),
+        wt if runs_combat_routine(wt) => combat_worktype(s, actor, wt),
         12 | 0x8f => wander(s, actor),
         15 | 16 | 0x8b..=0x8e => random_walk(s, actor, tx, ty),
         0x12 => {

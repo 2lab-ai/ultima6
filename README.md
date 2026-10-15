@@ -8,18 +8,20 @@ decoded in your browser, kept in its IndexedDB for the next visit, and never upl
 Ultima VI is © Origin Systems / Electronic Arts. This project is not affiliated with or endorsed
 by EA. See `.prd/01-spec.md` "Rights boundary" for what this repository does and does not contain.
 
-## Status (milestone 1, 2026-10-14)
+## Status (milestone 2, 2026-10-15)
 
-Works: boot into Britannia from the shipped new-game state, the full Amiga screen (map window,
-party panel, message scroll, command bar), walking, passing a turn, party/solo mode, NPCs
-following their schedules as the clock runs, talking to NPCs (portrait + the original
-conversation scripts). Not yet: combat, magic, Look/Get/Drop/Move/Use, inventory, save/restore,
-music, mouse, the intro and character creation — milestone 2 is in progress
-(`.prd/browser-port/loop.md`).
+Works: the launcher as on the Amiga — the opening, the menu, character creation, the
+introduction, the transfer of an Ultima IV/V character, Journey Onward — and the game: the full
+screen, walking by keys or mouse, NPCs on their schedules, conversations, combat, all spells,
+Look/Get/Drop/Move/Use, inventory with Ready/Unready, Rest, Save/Restore (the savegame is the
+original's format), music and sound effects. The port map (`re/notes/port-map.md`) lists the
+few routines still stubbed or planned.
 
-Fidelity check: the original game running in an Amiga emulator (vAmigaWeb + AROS, `tools/oracle`)
-and this port agree on 98.8% of the start screen by palette index; the differences are listed in
-the loop file.
+Fidelity checks against the original running in an Amiga emulator (vAmigaWeb + AROS,
+`tools/oracle`): the start screen agrees on 98.8% by palette index, the menu and the inventory
+panel on 100%; timing is taken from traces of the original — a fight turn in the start scene
+takes 301 PAL frames against the original's 277, a quiet step in the castle 31 against 33.
+Open items are in `.prd/browser-port/loop.md`.
 
 ## How it was built
 
@@ -49,8 +51,8 @@ scripts/deploy-web.sh main                          # Cloudflare Pages project u
 
 | Path | What |
 |---|---|
-| `.prd/` | spec (01), architecture (02), core port contract (03), P3 refactor plan (04), loop |
-| `crates/u6-intake` · `u6-formats` · `u6-core` · `u6-render` · `u6-native` · `u6-web` | Rust workspace |
+| `.prd/` | spec (01), architecture (02), core port contract (03), P3 refactor plan (04), HD/4K output design (05), loop |
+| `crates/u6-intake` · `u6-formats` · `u6-core` · `u6-render` · `u6-audio` · `u6-native` · `u6-web` · `u6-testkit` | Rust workspace (`u6-audio`: the emulated Amiga audio machine; `u6-testkit`: content-free comparisons for the real-data tests) |
 | `re/notes/` | reverse-engineering notes (formats, graphics, functions, subsystems, oracle, port map) |
 | `tools/` | PP20, hunk flattener, REA drivers, Amiga emulator oracle, web test harness |
 | `site/` | the static page |

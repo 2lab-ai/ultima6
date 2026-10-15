@@ -719,7 +719,7 @@ fn a_stalled_tick_does_not_squeeze_the_waits_after_it() {
 fn a_stall_on_the_first_tick_of_a_run_squeezes_no_wait() {
     // The run's first observed tick is a stall (the host's longest step), then normal ticks of
     // 16 or 7 ms: every wait after the one the stall falls in keeps its time, less one normal
-    // tick at most (the bound on carried lateness comes from the normal ticks, not the stall).
+    // tick at most (a wait gives up at most the tick it ends on: a normal one, not the stall).
     const COSTS: [u16; 6] = [46, 311, 46, 311, 23, 129];
     for normal in [16u32, 7] {
         let d = wait_lengths(&COSTS, move |t| if t == 1 { HOST_MAX_TICK } else { normal });
@@ -730,6 +730,152 @@ fn a_stall_on_the_first_tick_of_a_run_squeezes_no_wait() {
                 "wait {i} of {cost} ms lasted {ms} ms at {normal} ms ticks: {d:?}"
             );
         }
+    }
+}
+
+/// Each wait of `costs` (one run of waits from the game's first poll, ticks given by `tick(n)`):
+/// the engine ms it took and the length of the host tick it ended on.
+fn wait_ends(costs: &'static [u16], tick: impl Fn(usize) -> u32) -> Vec<(u64, u64)> {
+    let ends = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let out = std::rc::Rc::clone(&ends);
+    let mut e = crate::Engine::with_game(
+        State::empty(),
+        crate::Files::default(),
+        move |st, io| async move {
+            out.borrow_mut().push(io.now_ms());
+            for &cost in costs {
+                present::pace(&st, &io, cost).await;
+                out.borrow_mut().push(io.now_ms());
+            }
+        },
+    );
+    // The engine time after each host tick, and that tick's length.
+    let mut after = std::collections::HashMap::new();
+    let mut now = 0u64;
+    for t in 0..100_000 {
+        if e.finished() {
+            break;
+        }
+        let ms = tick(t);
+        now += u64::from(ms);
+        after.insert(now, u64::from(ms));
+        e.tick(&[], ms);
+    }
+    assert!(e.finished(), "every wait ended");
+    let ends = ends.borrow();
+    assert_eq!(ends.len(), costs.len() + 1, "every wait ended");
+    ends.windows(2)
+        .map(|w| {
+            (
+                w[1] - w[0],
+                after.get(&w[1]).copied().expect("a wait ends on a tick"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_stall_after_lateness_built_up_shortens_no_wait_by_more_than_its_tick() {
+    // Two stalls of the hosts' cap in a row early in a run of 46 ms waits at 16 ms ticks build
+    // up lateness the waits after them pay back; a third stall then falls inside a long wait,
+    // with that debt not yet paid. Every wait lasts its cost less the tick it ended on at most,
+    // and the run ends within the longest tick of the waits' sum.
+    const COSTS: [u16; 12] = [46, 46, 46, 46, 46, 427, 46, 46, 46, 311, 46, 46];
+    let stalls = [4usize, 5, 20];
+    let tick = move |t: usize| {
+        if stalls.contains(&t) {
+            HOST_MAX_TICK
+        } else {
+            16
+        }
+    };
+    let d = wait_ends(&COSTS, tick);
+    println!("waits (ms, tick ended on) around stalls at ticks {stalls:?}: {d:?} for {COSTS:?}");
+    // The scenario: the third stall lands inside a long wait while the run is still behind its
+    // schedule (the waits ended before it ended after they were due). The engine clock moves a
+    // tick before each poll, so the run starts at the end of tick 0 and the stall spans the
+    // engine time from the end of the tick before it to its own end.
+    let clock = |t: usize| -> u64 { (0..=t).map(|u| u64::from(tick(u))).sum() };
+    let (from, to) = (clock(stalls[2] - 1), clock(stalls[2]));
+    let (mut ended, mut due) = (clock(0), clock(0));
+    let mut spanning = None;
+    for (i, (&(ms, _), &cost)) in d.iter().zip(&COSTS).enumerate() {
+        if ended + ms > from {
+            spanning = Some((i, ended + ms));
+            break;
+        }
+        ended += ms;
+        due += u64::from(cost);
+    }
+    let (i, end) = spanning.expect("a wait is in progress when the third stall lands");
+    assert!(
+        end >= to && COSTS[i] > HOST_MAX_TICK as u16,
+        "the third stall falls inside wait {i} ({} ms, ends at {end}): {d:?}",
+        COSTS[i]
+    );
+    assert!(
+        ended > due,
+        "lateness outstanding when the third stall lands: the waits before it ended at {ended}, \
+         due at {due}: {d:?}"
+    );
+    let paid = d
+        .iter()
+        .zip(&COSTS)
+        .any(|(&(ms, _), &cost)| ms < u64::from(cost));
+    assert!(paid, "some wait paid lateness back: {d:?}");
+    for (i, (&(ms, tick), &cost)) in d.iter().zip(&COSTS).enumerate() {
+        assert!(
+            ms + tick >= u64::from(cost),
+            "wait {i} of {cost} ms lasted {ms} ms, ending on a {tick} ms tick: {d:?}"
+        );
+    }
+    let took: u64 = d.iter().map(|&(ms, _)| ms).sum();
+    let want: u64 = COSTS.iter().map(|&c| u64::from(c)).sum();
+    assert!(
+        took >= want && took <= want + u64::from(HOST_MAX_TICK),
+        "the run took {took} ms for {want}"
+    );
+}
+
+/// A host's ticks for [`wait_lengths`]: a label, the length (ms) of tick n, its longest tick.
+type Host = (&'static str, fn(usize) -> u32, u64);
+
+#[test]
+fn an_uneven_host_tick_loses_no_time_over_a_run() {
+    // Forty waits of mixed lengths at a host jittering between one frame and two (16, 17, 16,
+    // 33, 16 ms over and over) and at a native-like one (17, 17, 16 ms, one tick of 2 ms early
+    // in the run): every wait ends within the run's longest tick of the sum of the waits up to
+    // it, so what one wait ends late the waits after it make up, whatever tick it ended on.
+    const BASE: [u16; 10] = [46, 20, 311, 24, 26, 128, 47, 20, 427, 24];
+    const COSTS: [u16; 40] = {
+        let mut a = [0; 40];
+        let mut i = 0;
+        while i < 40 {
+            a[i] = BASE[i % 10];
+            i += 1;
+        }
+        a
+    };
+    let hosts: [Host; 2] = [
+        ("16/17/16/33/16 ms", |t| [16, 17, 16, 33, 16][t % 5], 33),
+        (
+            "17/17/16 ms, one of 2 ms",
+            |t| if t == 3 { 2 } else { [17, 17, 16][t % 3] },
+            17,
+        ),
+    ];
+    for (label, tick, longest) in hosts {
+        let d = wait_lengths(&COSTS, tick);
+        let (mut took, mut want) = (0, 0);
+        for (i, (&ms, &cost)) in d.iter().zip(&COSTS).enumerate() {
+            took += ms;
+            want += u64::from(cost);
+            assert!(
+                took >= want && took <= want + longest,
+                "{label}: waits 0..={i} took {took} ms, want {want} + up to {longest}"
+            );
+        }
+        println!("{label}: {} waits, {took} ms for {want}", d.len());
     }
 }
 
@@ -804,4 +950,248 @@ fn a_dissolving_window_is_revealed_over_its_time() {
         "{at16} ms at 16 ms ticks"
     );
     assert!(at8 >= want && at8 <= want + 8, "{at8} ms at 8 ms ticks");
+}
+
+#[test]
+fn frames_left_after_a_flush_come_before_the_lines_queued_after_it() {
+    // Synchronous code records a frame after three lines; a flush prints the lines and leaves
+    // the frame (main_loop/commands.rs end_of_turn, objects/commands/get.rs). Its lines are
+    // printed, so at the next playback it comes before the lines queued since, not after that
+    // many of them.
+    use crate::main_loop::{PrintArg, flush_prints, queue_print};
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    let line = |s: &mut State, f: &[u8], i: u16| {
+        queue_print(s, f.to_vec(), vec![PrintArg::Word(i)]);
+    };
+    for i in 0..3 {
+        line(&mut s, b"q%d\n", i);
+    }
+    let mut e = crate::Engine::with_game(s, crate::Files::default(), move |st, io| async move {
+        present::capture(&mut st.borrow_mut(), 0, 0, 0, 0, present::FLASH_MS);
+        flush_prints(&st, &io).await;
+        for i in 0..2 {
+            line(&mut st.borrow_mut(), b"n%d\n", i);
+        }
+        play_effects(&st, &io).await;
+    });
+    let mut at_frame = None;
+    for _ in 0..200 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+        let s = e.state();
+        if at_frame.is_none() && s.combat.shown > 0 {
+            at_frame = Some(s.ui.messages.clone());
+        }
+    }
+    assert!(e.finished(), "the playback ended");
+    let at_frame = at_frame.expect("the frame is shown");
+    let new = |l: &String| l == "n0" || l == "n1";
+    assert!(
+        !at_frame.iter().any(new),
+        "no line queued after the flush comes before the frame: {at_frame:?}"
+    );
+    let s = e.state();
+    assert_eq!(
+        s.ui.messages.iter().filter(|l| new(l)).count(),
+        2,
+        "the later lines are printed"
+    );
+    assert_eq!(s.combat.shown, 1, "the frame is shown once");
+}
+
+/// A message scroll two rows high that pages on its next newline: each line after a more
+/// prompt pages again (the prompt leaves one row, 0x107f2e..0x107fb4).
+fn paging_scroll() -> State {
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    let t = s.ui.tables.clone();
+    s.ui.text
+        .open(&t, crate::ui::WindowId::Messages, 0, 0, 0x27, 1);
+    s.ui.text.win_mut().flags = crate::ui::text::SCROLL | crate::ui::text::PAGED;
+    s.ui.text.more_rows = 1;
+    s
+}
+
+/// Runs a flush of `before` (queued first), a frame recorded after them, then `after` and the
+/// playback, in [`paging_scroll`]: per more prompt the frames shown when it waits (and the frame's
+/// mark then), then the frames shown at the end.
+fn frame_between(
+    before: Vec<crate::main_loop::Pending>,
+    after: &[&[u8]],
+) -> (Vec<(u64, Vec<usize>)>, u64) {
+    use crate::main_loop::{Pending, flush_prints};
+    let mut s = paging_scroll();
+    s.main.pending_print = before;
+    let after: Vec<Pending> = after
+        .iter()
+        .map(|f| Pending::Print(f.to_vec(), Vec::new()))
+        .collect();
+    let mut e = crate::Engine::with_game(s, crate::Files::default(), move |st, io| async move {
+        {
+            let mut s = st.borrow_mut();
+            present::capture(&mut s, 0, 0, 0, 0, present::FLASH_MS);
+            s.main.pending_print.extend(after);
+        }
+        flush_prints(&st, &io).await;
+        play_effects(&st, &io).await;
+    });
+    let mut prompts = Vec::new();
+    for _ in 0..8 {
+        for _ in 0..60 {
+            e.tick(&[], 16);
+        }
+        if e.finished() {
+            break;
+        }
+        let s = e.state();
+        let marks = s.combat.effects.iter().map(|f| f.mark).collect();
+        prompts.push((s.combat.shown, marks));
+        drop(s);
+        e.tick(&[crate::InputEvent::Key(crate::Key::Space)], 16);
+    }
+    assert!(e.finished(), "the flush and the playback ended");
+    (prompts, e.state().combat.shown)
+}
+
+#[test]
+fn a_frame_after_the_last_line_waits_for_its_more_key() {
+    // A flush whose more prompt comes on its last line, a frame recorded after that line, no
+    // newline held: the line is still being printed in the prompt, so the frame is not due
+    // there (the original draws it after the line, after the key); it is shown once, after.
+    use crate::main_loop::Pending;
+    let line = Pending::Print(b"a\n".to_vec(), Vec::new());
+    let (prompts, end) = frame_between(vec![line], &[]);
+    assert_eq!(
+        (prompts, end),
+        (vec![(0, vec![1])], 1),
+        "(frames shown, marks) at the prompt; frames shown at the end"
+    );
+}
+
+#[test]
+fn a_frame_after_a_line_is_due_once_that_line_is_printed() {
+    // The frame recorded right after the first line: not due at that line's own prompt (mark
+    // 1, the line in flight), due once it is printed, so the next line's prompt shows it; once.
+    use crate::main_loop::Pending;
+    let line = Pending::Print(b"a\n".to_vec(), Vec::new());
+    let (prompts, end) = frame_between(vec![line], &[b"b\n"]);
+    assert_eq!(
+        (prompts, end),
+        (vec![(0, vec![1]), (1, vec![])], 1),
+        "(frames shown, marks) at each prompt; frames shown at the end"
+    );
+}
+
+#[test]
+fn entries_that_print_no_text_count_before_a_frame() {
+    // A window select, a cursor move and an empty message (0x107dd8, 0x107e00, 0x108658 of
+    // nothing) are entries of the queue like the lines: a frame recorded after them is due
+    // once they are done, so the prompt of the line after it shows it.
+    use crate::main_loop::Pending;
+    use crate::ui::WindowId;
+    let before = vec![
+        Pending::Window(WindowId::Messages),
+        Pending::Cursor(0, 0),
+        Pending::Print(Vec::new(), Vec::new()),
+    ];
+    let (prompts, end) = frame_between(before, &[b"a\n"]);
+    assert_eq!(
+        (prompts, end),
+        (vec![(1, vec![])], 1),
+        "(frames shown, marks) at the prompt; frames shown at the end"
+    );
+}
+
+#[test]
+fn interrupted_prints_come_back_in_reverse_order() {
+    // Two actions, the second inside the first: each sets aside the print it interrupts (its
+    // queue, the frames not yet due, the held newline) after showing the frames that are due,
+    // and before giving it back plays whatever it left itself. The second gives the first its
+    // print back, then the first gives back the outermost.
+    use crate::main_loop::{Pending, PrintArg, queue_print};
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    let words = |s: &State| -> Vec<u16> {
+        s.main
+            .pending_print
+            .iter()
+            .map(|p| match p {
+                Pending::Print(_, a) => match a.as_slice() {
+                    [PrintArg::Word(w)] => *w,
+                    _ => 0,
+                },
+                _ => 0,
+            })
+            .collect()
+    };
+    let marks = |s: &State| -> Vec<(u16, usize)> {
+        s.combat.effects.iter().map(|e| (e.cost, e.mark)).collect()
+    };
+    let line = |s: &mut State, i: u16| queue_print(s, b"%d\n".to_vec(), vec![PrintArg::Word(i)]);
+    let checks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let out = std::rc::Rc::clone(&checks);
+    let mut e = crate::Engine::with_game(s, crate::Files::default(), move |st, io| async move {
+        {
+            let mut s = st.borrow_mut();
+            present::capture(&mut s, 0, 0, 0, 0, 1);
+            line(&mut s, 10);
+            line(&mut s, 11);
+            present::capture(&mut s, 0, 0, 0, 0, 2);
+            s.combat.swallow = true;
+        }
+        let first = present::interrupt(&st, &io).await;
+        {
+            let s = st.borrow();
+            let state = (words(&s), marks(&s), s.combat.swallow, s.combat.shown);
+            out.borrow_mut().push(("first set aside", state));
+        }
+        {
+            let mut s = st.borrow_mut();
+            line(&mut s, 20);
+            present::capture(&mut s, 0, 0, 0, 0, 3);
+        }
+        let second = present::interrupt(&st, &io).await;
+        line(&mut st.borrow_mut(), 30);
+        present::resume(&st, &io, second).await;
+        {
+            let s = st.borrow();
+            let state = (words(&s), marks(&s), s.combat.swallow, s.combat.shown);
+            out.borrow_mut().push(("second gave back", state));
+        }
+        present::resume(&st, &io, first).await;
+        let s = st.borrow();
+        let state = (words(&s), marks(&s), s.combat.swallow, s.combat.shown);
+        out.borrow_mut().push(("first gave back", state));
+    });
+    for _ in 0..200 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished(), "the actions ended");
+    assert_eq!(
+        *checks.borrow(),
+        [
+            ("first set aside", (vec![], vec![], false, 1)),
+            ("second gave back", (vec![20], vec![(3, 1)], false, 1)),
+            ("first gave back", (vec![10, 11], vec![(2, 2)], true, 2)),
+        ],
+        "(queued lines, frames (cost, mark), newline held, frames shown) at each step: the due \
+         frame shown at the first interrupt, the first action's own line and frame played \
+         before the outermost print comes back as it was"
+    );
+    let lines = &e.state().ui.messages;
+    assert_eq!(
+        (line_index(lines, "30"), line_index(lines, "20")),
+        (Some(0), Some(1)),
+        "the second action's line, then the first's: {lines:?}"
+    );
+}
+
+fn line_index(lines: &[String], want: &str) -> Option<usize> {
+    lines.iter().position(|l| l == want)
 }

@@ -75,7 +75,7 @@ fn str_of(s: &State, v: u32) -> Vec<u8> {
 /// `d2`/`d3`/`d4` prefix a 32/8/16-bit little-endian literal; every other byte is pushed as
 /// itself and, if it names an op, the op replaces itself and its operands with the result.
 /// Comparisons are unsigned 32-bit; `86` compares strings without case once a `b3` string slot
-/// was read in this expression. More than one value left prints "Error occured."
+/// was read in this expression. More than one value left prints the error line 0x1129be.
 pub(crate) async fn eval(cx: &Cx<'_>) -> u32 {
     let mut st = Stack {
         v: [0; STACK],

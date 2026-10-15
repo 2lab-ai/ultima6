@@ -15,7 +15,8 @@ the hunk file at run time), the PROGRAM boot block is the one installu6 writes w
 trackdisk.device, and PP20 files are decrunched with tools/pp20.py where installu6 calls its
 decruncher. Evidence (installu6 flattened by tools/hunk2raw.py, base 0x100000):
 
-  0x102ee6 lea $24(a4),a3 / 0x102f00 moveq #$14,d1   table at a4+$24, 20-byte entries
+  0x102ee6, 0x102f00   the table is at a4+$24 with 20-byte entries (the lea there, the entry
+                       size the moveq there loads for the multiply 0x1016d8)
   entry:  +0 src name  +4 dst volume (index into a4+0)  +5 flags  +6 dst name
           +$a buffer  +$e size  +$12 state  +$13 src disk (index into a4+$14)
   0x103000..0x103026   written iff flags < 2, or (floppy and flags & 2), or (HD and flags & 4)
@@ -25,23 +26,28 @@ decruncher. Evidence (installu6 flattened by tools/hunk2raw.py, base 0x100000):
   hunk 3 +$160         1024-byte boot block (DOS\\0, root 880, FindResident("dos.library"))
   0x1452f4             its checksum (add with carry, invert), written by CMD_WRITE at 0x145318
 
-One table entry has no source: INSTALL:gypsya.new is not on disk 1. installu6 ignores stat()'s
-result (0x102e26), so the size is the previous entry's (gypsy.new, 72,880 bytes); it AllocMem's
-that much without MEMF_CLEAR (0x102e5c), read() on the failed open() reads nothing, and the
-buffer is written out as gypsya.new. Its content is whatever was in that memory; here, zeros.
-No program reads it (`u` names only gypsy.new).
+No game byte is kept here: the tool checks installu6 by its sha256 and the four code regions
+above (0x102ee6, 0x102f00, 0x103000, the boot block's DOS type at 0x145368) by one sha256 over
+their bytes, so a different build is refused before its table is read.
+
+One table entry has no source on disk 1. installu6 ignores stat()'s result (0x102e26), so its
+size is the previous entry's; it AllocMem's that much without MEMF_CLEAR (0x102e5c), read() on the
+failed open() reads nothing, and the buffer is written out under the entry's name. Its content is
+whatever was in that memory; the tool writes zeros of that size. No program reads it.
 
 `--game-first` is NOT what the installer writes. It exists because `u` (intro, menu, character
 creation) stops in its intro under the AROS ROM (re/notes/oracle.md), so no character can be
-created there. Two patches, both checked against the expected bytes first:
-  PROGRAM:ultima6 (= ultcli)  hunk 1 +8  moveq #0,d7 -> moveq #1,d7. ultcli's state machine
-      (0x100440 jump table: 0 = run u, 1 = run game, 2 = run end) starts at state 1, so it
-      launches PORTRAIT:game with its normal arguments and skips u.
-  PLAYER:savegame/objlist  0x1C71 = 1, 0x1C72 = 1 (gender, avatar portrait). game's main()
-      (0x1351d8) prints "You must first create or transfer a character." when the byte at
-      a4-0x7b03 is 0; 0x105578 reads objlist 0x1BF1..0x1C72 to a4-0x7b84, so that byte is
-      objlist 0x1C72, which the stock DATA1 file leaves 0. Values = Nuvie's new-game mapping
-      for a male avatar with the first portrait (re/notes/formats.md section 7).
+created there. Two patches, both checked first (the launcher's sha256; for the objlist, that
+the two bytes do not mark a character yet):
+  PROGRAM:ultima6 (= ultcli)  hunk 1 +8: its first state becomes 1 (the tool writes the word of
+      `moveq #1,d7` there). ultcli's state machine (0x100440 jump table: 0 = run u, 1 = run game,
+      2 = run end) then starts at state 1, so it launches PORTRAIT:game with its normal
+      arguments and skips u.
+  PLAYER:savegame/objlist  0x1C71 = 1, 0x1C72 = 1 (gender, hero portrait). game's main()
+      (0x1351d8) prints its no-character line (0x1350a6) when the byte at a4-0x7b03 is 0;
+      0x105578 reads objlist 0x1BF1..0x1C72 to a4-0x7b84, so that byte is objlist 0x1C72.
+      Values = Nuvie's new-game mapping for a male hero with the first portrait
+      (re/notes/formats.md section 7).
 """
 import hashlib
 import importlib.util
@@ -67,14 +73,10 @@ INSTALLU6_SHA256 = '580ff939de83bea61a0bfc9a6efb2503d2f9e0156d3653ffd39befff78ea
 BASE = 0x100000
 VOLUMES = ('PROGRAM', 'POPULACE', 'PLAYER', 'PORTRAIT')  # installu6 prompt order
 DIRS = {'PROGRAM': ('c', 's'), 'PLAYER': ('savegame',)}
-# installu6 code bytes the table layout is read against (address -> expected bytes)
-CODE_CHECKS = {
-    0x102ee6: '47ec0024',      # lea $24(a4),a3
-    0x102f00: '7214',          # moveq #20,d1 (entry size, multiplied by 0x1016d8)
-    0x103000: '123308057402',  # move.b 5(a3,d0.l),d1 ; moveq #2,d2
-    0x145368: '444f5300',      # boot block "DOS\0"
-}
-
+# installu6 code regions the table layout is read against (address, length), and the sha256 of
+# their bytes in that order: the check needs no byte of installu6 in the repo.
+CODE_REGIONS = ((0x102ee6, 4), (0x102f00, 2), (0x103000, 6), (0x145368, 4))
+CODE_SHA256 = 'b1155489f21264cef818ff1b3d9d68004391f3c4987584c6f28da6db59047682'
 
 def make(label: str, ffs: bool) -> bytes:
     """Empty volume as AmigaDOS Format leaves it: root 880, bitmap 881, everything else free."""
@@ -87,10 +89,10 @@ def install_table(installu6: bytes):
         raise ValueError('installu6 is not the known build (sha256 mismatch)')
     hunk2raw = _load('hunk2raw', os.path.join(HERE, '..', 'hunk2raw.py'))
     img, info = hunk2raw.convert(installu6, BASE)
-    for addr, hexbytes in CODE_CHECKS.items():
-        got = img[addr - BASE:addr - BASE + len(hexbytes) // 2].hex()
-        if got != hexbytes:
-            raise ValueError(f'installu6 code at {addr:#x} is {got}, expected {hexbytes}')
+    regions = b''.join(img[a - BASE:a - BASE + n] for a, n in CODE_REGIONS)
+    if hashlib.sha256(regions).hexdigest() != CODE_SHA256:
+        raise ValueError('installu6 code regions ' + ', '.join(f'{a:#x}+{n}' for a, n in CODE_REGIONS)
+                         + ' are not the known build (sha256 mismatch)')
     seg = {s['index']: s for s in info['segments']}
     a4 = int(seg[4]['base'], 16)   # startup: lea <hunk 4 + 0>,a4
     boot_at = int(seg[3]['base'], 16) + 0x160
@@ -117,7 +119,12 @@ def install_table(installu6: bytes):
     return entries, boot
 
 
-ULTCLI_STATE = (8, '7e007c007a00', '7e01')  # hunk 1 offset, expected bytes, patch
+# ultcli (the floppy's PROGRAM:ultima6) as decrunched: its sha256, and where the first state
+# word sits (hunk 1 offset, length). The patch is the tool's own instruction, `moveq #1,d7`
+# (0111 rrr0 dddddddd with register 7 and data 1).
+ULTCLI_SHA256 = 'dfd96f65b66fdccd9f98ea939f522e04fce1e92d83186aa4d685be0781125a1b'
+ULTCLI_STATE = (8, 2)
+ULTCLI_PATCH = (0x7000 | 7 << 9 | 1).to_bytes(2, 'big')
 OBJLIST_CREATED = {0x1C71: 1, 0x1C72: 1}
 
 
@@ -125,13 +132,12 @@ def game_first_patches(path: str, data: bytes) -> tuple[bytes, str] | None:
     """The --game-first changes for one floppy file, or None if the file is untouched."""
     if path == 'ultima6':
         hunk2raw = _load('hunk2raw', os.path.join(HERE, '..', 'hunk2raw.py'))
+        if hashlib.sha256(data).hexdigest() != ULTCLI_SHA256:
+            raise ValueError('ultcli is not the known build (sha256 mismatch)')
         h1 = next(s for s in hunk2raw.convert(data, BASE)[1]['segments'] if s['index'] == 1)
         at = h1['file_offset'] + 8 + ULTCLI_STATE[0]  # skip the HUNK_CODE type + size longwords
-        want = bytes.fromhex(ULTCLI_STATE[1])
-        if data[at:at + len(want)] != want:
-            raise ValueError(f'ultcli: expected {want.hex()} at file offset {at:#x}')
         out = bytearray(data)
-        out[at:at + 2] = bytes.fromhex(ULTCLI_STATE[2])
+        out[at:at + ULTCLI_STATE[1]] = ULTCLI_PATCH
         return bytes(out), f'ultcli first state 0 -> 1 (file offset {at:#x}: moveq #1,d7)'
     if path == 'savegame/objlist':
         out = bytearray(data)

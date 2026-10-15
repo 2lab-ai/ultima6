@@ -4,8 +4,8 @@
 #   run.sh setup                 fetch vAmigaWeb build + node deps (idempotent)
 #   run.sh floppies              the 4 game floppies from installu6's copy table: adf/ (as the
 #                                installer lays them out) and adf-gamefirst/ (launcher starts game)
-#   run.sh play [KEY ...]        adf-gamefirst/: boot to Britannia, shots: first frame, settled, steps
-#   run.sh intro                 adf/: boot through ORIGIN/intro until the picture stops; shots
+#   run.sh play [KEY ...]        adf-gamefirst/: boot to the world map, shots: first frame, settled, steps
+#   run.sh intro                 adf/: boot through the title cards and intro until the picture stops; shots
 #   run.sh build                 original ADFs -> installer under AROS -> oracle HDFs (HD layout)
 #   run.sh boot [step ...]       boot oracle HDFs, run steps, save shots (see boot.mjs)
 #   run.sh serve                 control server on 127.0.0.1:${U6_ORACLE_PORT:-8765} (ctl.sh)

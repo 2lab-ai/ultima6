@@ -8,7 +8,7 @@
 //! modules call are in [`main_hunk`].
 //!
 //! Character check: main tests A4-0x7b03 (byte 0x81 of the objlist block at A4-0x7b84, objlist
-//! 0x1C72, the Avatar's portrait, 1-based) and, when it is 0, prints the message that a
+//! 0x1C72, the hero's portrait, 1-based) and, when it is 0, prints the message that a
 //! character must be created first (0x1350a6), waits for a key and exits with code 0, which
 //! makes the launcher run `u` again. The shipped `DATA1:objlist` holds 0 there: the character
 //! is made by `u` ([`crate::intro`]), which writes it into `savegame/objlist`. Started without
@@ -140,6 +140,7 @@ pub async fn flush_prints(state: &RefCell<State>, io: &Io) {
                 printf(state, io, &fmt, &args).await;
             }
         }
+        crate::combat::present::printed_one(&mut state.borrow_mut());
     }
 }
 

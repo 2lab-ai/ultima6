@@ -433,10 +433,10 @@ export function mapShift(before, after, width = 320) {
 export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /// One step east or west from the prompt: the seed is the clock's, so the start fight sometimes
-/// leaves a foe or a member beside the Avatar and the step is blocked; then the other way, up
-/// to `STEP_TRIES` tries. A blocked step runs no world turn (the prompt is back at once), so the
-/// fight would not move on by itself and a boot with both sides blocked would stay blocked on
-/// every try: after each blocked try a pass (`passTurn`) runs the world turn. Returns the key
+/// leaves a gargoyle or a member beside the hero and the step is blocked; then the other way,
+/// up to `STEP_TRIES` tries. A blocked step runs no world turn (the prompt is back at once), so
+/// the fight would not move on by itself and a boot with both sides blocked would stay blocked
+/// on every try: after each blocked try a pass (`passTurn`) runs the world turn. Returns the key
 /// that walked, the leader before and after, and the frame before that step.
 export const STEP_TRIES = 16;
 export async function stepSideways(page) {

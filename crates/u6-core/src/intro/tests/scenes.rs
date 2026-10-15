@@ -114,7 +114,7 @@ fn an_ultima_iv_roster_maps_into_the_creation_globals() {
         (f.sex.as_slice(), f.class.as_slice()),
         (&b"Mm"[..], &b"Cl1"[..])
     );
-    assert_eq!(f.avatar, 0);
+    assert_eq!(f.is_hero, 0);
     transfer::convert_ultima_iv(&mut st);
     let h = &st.hero;
     assert_eq!(h.name_str(), b"Abel");
@@ -131,7 +131,7 @@ fn an_ultima_iv_roster_maps_into_the_creation_globals() {
 }
 
 #[test]
-fn an_ultima_iv_avatar_record_becomes_class_8_and_reads_as_out_of_range() {
+fn an_ultima_iv_hero_record_becomes_class_8_and_reads_as_out_of_range() {
     let mut st = transfer_state();
     let mut r = vec![0u8; 0x200];
     r[..6].copy_from_slice(b"Zhuge\0");
@@ -140,7 +140,7 @@ fn an_ultima_iv_avatar_record_becomes_class_8_and_reads_as_out_of_range() {
     st.transfer.save = r;
     let bad = transfer::read_ultima_iv(&mut st);
     let f = &st.transfer.found;
-    assert_eq!((f.avatar, f.class.as_slice()), (1, &b"ClA"[..]));
+    assert_eq!((f.is_hero, f.class.as_slice()), (1, &b"ClA"[..]));
     assert_eq!(st.transfer.save[0x11], 8, "written back into the roster");
     assert!(bad, "class 8 > 7");
     assert_eq!(f.sex, b"Ff");

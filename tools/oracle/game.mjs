@@ -5,18 +5,24 @@ import * as o from './lib.mjs';
 
 const GAME_BIN = process.env.U6_GAME_BIN || '/Users/zhugehyuk/Games/ultima6/re/game.bin';
 
-// Hunk table of `game` (re/notes/game-layout.md): image base and size of each of the 35 hunks.
+// Image base of each of the 35 hunks of `game` (re/notes/game-layout.md); their lengths come from
+// the hunk headers at run time (tools/hunk2raw.py's JSON beside the image, its bases checked).
 // The game's A4 = hunk 33 + 0x8000. Globals read: A4-0x7a2c (the command loop reads a command
 // key), A4-0x7b78/-0x7b76 (view centre), A4+0x460c (hit points); objects' locations = hunk 23.
-export const HUNKS = [
-  [0x100000, 0x1eb0], [0x101eb0, 0x3100], [0x104fb0, 0x3a28], [0x1089d8, 0x10dc], [0x109ab8, 0x964],
-  [0x10a420, 0x4c60], [0x10f080, 0x171c], [0x1107a0, 0x240], [0x1109e0, 0x1bd4], [0x1125b8, 0x318],
-  [0x1128d0, 0x2958], [0x115228, 0x5f94], [0x11b1c0, 0x6944], [0x121b08, 0x5770], [0x127278, 0x113c],
-  [0x1283b8, 0x4500], [0x12c8b8, 0x4880], [0x131138, 0x1200], [0x132338, 0x2238], [0x134570, 0xf8],
-  [0x134668, 0x38], [0x1346a0, 0x868], [0x134f08, 0x680], [0x135588, 0x114b8], [0x146a40, 0x7530],
-  [0x14df70, 0xf00], [0x14ee70, 0x454], [0x14f2c8, 0x2000], [0x1512c8, 0x83c], [0x151b08, 0x3d4],
-  [0x151ee0, 0x16f0], [0x1535d0, 0x4], [0x1535d8, 0x118], [0x1536f0, 0xe7d8], [0x161ec8, 0x668],
+const BASES = [
+  0x100000, 0x101eb0, 0x104fb0, 0x1089d8, 0x109ab8, 0x10a420, 0x10f080, 0x1107a0,
+  0x1109e0, 0x1125b8, 0x1128d0, 0x115228, 0x11b1c0, 0x121b08, 0x127278, 0x1283b8,
+  0x12c8b8, 0x131138, 0x132338, 0x134570, 0x134668, 0x1346a0, 0x134f08, 0x135588,
+  0x146a40, 0x14df70, 0x14ee70, 0x14f2c8, 0x1512c8, 0x151b08, 0x151ee0, 0x1535d0,
+  0x1535d8, 0x1536f0, 0x161ec8,
 ];
+const SEGS = JSON.parse(readFileSync(GAME_BIN.replace(/\.bin$/, '.json'), 'utf8')).segments;
+const num = (v) => (typeof v === 'number' ? v : parseInt(v, 16));
+if (SEGS.length !== BASES.length || SEGS.some((g, i) => num(g.base) !== BASES[i])) {
+  throw new Error('the hunks of the image do not start where game-layout.md has them');
+}
+// [image base, length in memory] of each hunk.
+export const HUNKS = BASES.map((b, i) => [b, num(SEGS[i].size)]);
 export const CODE = HUNKS.map((_, i) => i).filter((i) => ![6, 20, 23, 24, 25, 27, 28, 31, 33].includes(i));
 const IMG = readFileSync(GAME_BIN);
 

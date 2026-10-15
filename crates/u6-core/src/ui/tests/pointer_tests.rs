@@ -398,7 +398,7 @@ fn the_event_wait_takes_a_click_then_its_release() {
         }
     });
     let ev = |x, y, b| InputEvent::Pointer { x, y, buttons: b };
-    // The Talk icon, then a press held south of the Avatar (the walk repeats a pace later).
+    // The Talk icon, then a press held south of the hero (the walk repeats a pace later).
     e.tick(&[ev(44, 184, 1), ev(44, 184, 0), ev(88, 104, 1)], 16);
     for _ in 0..HELD_WALK_MS_TEST.div_ceil(16) + 1 {
         e.tick(&[], 16);
@@ -409,7 +409,7 @@ fn the_event_wait_takes_a_click_then_its_release() {
 }
 
 /// The codes `reads` command-key reads give, each with the engine clock (ms) it came at, while
-/// the press south of the Avatar (88, 104) is held `held_ms` and then released, at host ticks of
+/// the press south of the hero (88, 104) is held `held_ms` and then released, at host ticks of
 /// `tick_ms`; `after_ms` follow. The press goes in at the first tick. Whether the game finished
 /// (all reads done).
 fn held_walk(tick_ms: u32, reads: usize, held_ms: u32, after_ms: u32) -> (Vec<(u64, u16)>, bool) {
@@ -436,7 +436,7 @@ fn held_walk_at(
     press_and_events(ticks, reads, &[(held_ms, up)], after_ms, step)
 }
 
-/// The press south of the Avatar (88, 104) at the first tick of `ticks` (cycled, ms each), then
+/// The press south of the hero (88, 104) at the first tick of `ticks` (cycled, ms each), then
 /// each of `events` at the tick that ends exactly its ms after the press (that tick shortened
 /// when the cycle would pass it; in order), then `after_ms`. The codes the command-key reads
 /// gave, each with the engine clock (ms) it came at, and whether all `reads` were done; after
@@ -640,8 +640,8 @@ fn a_move_before_the_release_does_not_hide_it_from_the_due_sample() {
 
 #[test]
 fn a_due_sample_walks_where_the_pointer_was_at_its_due_time() {
-    // Held south of the Avatar, the pointer moves within its cell 650 ms after the press, then
-    // into the cell east of the Avatar at 662 ms, past the first repeat's due time (660 ms). At
+    // Held south of the hero, the pointer moves within its cell 650 ms after the press, then
+    // into the cell east of the hero at 662 ms, past the first repeat's due time (660 ms). At
     // 10 ms ticks a tick lands on 660, before the second move; at the others the tick that
     // passes 660 queues it, behind the first move. Either way the repeat walks south, where the
     // pointer was at 660, and the next one east.
@@ -893,7 +893,7 @@ fn walk_and_prompt(events: &[&[InputEvent]], ticks: usize, prompt: bool) -> Walk
 
 #[test]
 fn a_hold_that_gives_no_walk_keeps_the_frame_pace() {
-    // A walk south, then the pointer dragged onto the Avatar's own cell with the button still
+    // A walk south, then the pointer dragged onto the hero's own cell with the button still
     // down: the click map gives nothing there (0x1065f8, not a press), so no step is paced. Once
     // the pace from the last step is over, every pass of the event wait is a frame again: the
     // key poll spins its cursor, a key typed is read at once, the release ends the hold.
@@ -1111,11 +1111,12 @@ fn back_from_a_container_goes_to_its_parent_or_from_the_map_to_the_actor() {
 
 #[test]
 fn pointer_tables_from_a_synthetic_game() {
-    // Hunk 28 (sprite data), hunk 33 (the A4 data), hunk 34 (the shape tables) at their bases.
-    let mut h28 = vec![0u8; 0x83c];
-    // Hunk 33 as long as the shipped one, so hunk 34 follows it at 0x161ec8.
-    let mut h33 = vec![0u8; 0xe7d8];
-    let mut h34 = vec![0u8; 0x668];
+    // Hunk 28 (sprite data), hunk 33 (the A4 data), hunk 34 (the shape tables) at their bases;
+    // hunks 28 and 34 of synthetic lengths past the bytes read. Hunk 33 runs up to hunk 34's base
+    // (the two bases set its length), so hunk 34 follows it at 0x161ec8.
+    let mut h28 = vec![0u8; 0x600];
+    let mut h33 = vec![0u8; (0x161ec8 - 0x1536f0) as usize];
+    let mut h34 = vec![0u8; 0x700];
     let put = |h: &mut Vec<u8>, base: u32, addr: u32, b: &[u8]| {
         let o = (addr - base) as usize;
         h[o..o + b.len()].copy_from_slice(b);

@@ -30,8 +30,8 @@ const OBJ_BODY_B: u16 = 0x162;
 const OBJ_CLEARED_ON_WAKE: u16 = 0x17e;
 /// The level members are parked on between places.
 const PARKED: u16 = 15;
-/// Shamino (actor 3) names a dungeon entrance within this distance (0x11d1d4).
-const SHAMINO: ObjectId = ObjectId(3);
+/// The companion (actor 3) who names a dungeon entrance within this distance (0x11d1d4).
+const SCOUT: ObjectId = ObjectId(3);
 /// Party mode: the solo-member byte holds 0xff.
 const PARTY_MODE: u8 = 0xff;
 
@@ -287,12 +287,12 @@ pub fn moongate(state: &mut State, stone: u8) {
 /// Nothing in combat or when the leader index equals the party size. Otherwise the first object
 /// at the centre (not the leader) that is a red moongate (0x55), a blue moongate (0x54) or a
 /// ladder / hole (0x134 / 0x146) decides; a moongate counts only with stacking word 0. Outside
-/// party mode the party refuses: "You must be in party mode to enter." A red moongate at
+/// party mode the party refuses (the line at A4-0x72cf). A red moongate at
 /// 00:00..00:09 leads to (0x18, 0x1d, 1) with song 8 and a clock tick (0x0a); else to the stone
 /// of the moon whose phase is nearer 7 (a tie goes to moon 2 exactly when "minute < 30" and
 /// "phase 1 < phase 2" differ). A blue moongate of quality q leads to the
 /// destination tables' entry q - 1 (then the area song), quality 0 nowhere. A ladder or hole
-/// climbs (0x109374), Shamino first naming a dungeon entrance (quality 1..=20) when he is in
+/// climbs (0x109374), actor 3 first naming a dungeon entrance (quality 1..=20) when he is in
 /// the party, awake and within 6 tiles.
 pub fn after_step(state: &mut State) {
     if seams::tail_byte(state, 0x78) != 0 {
@@ -326,11 +326,11 @@ pub fn after_step(state: &mut State) {
                 }
             }
             OBJ_HOLE | OBJ_LADDER => {
-                let shamino = state.actors.attrs.status[SHAMINO.index()];
+                let scout = state.actors.attrs.status[SCOUT.index()];
                 let q = seams::object_quality(state, id);
-                if shamino & 0x80 != 0
-                    && shamino & 0x10 == 0
-                    && seams::distance(state, SHAMINO, cx, cy) < 6
+                if scout & 0x80 != 0
+                    && scout & 0x10 == 0
+                    && seams::distance(state, SCOUT, cx, cy) < 6
                     && (1..0x15).contains(&q)
                 {
                     seams::say_place_name(state, q);
@@ -394,11 +394,11 @@ fn blue_moongate(state: &mut State, gate: ObjectId) {
     }
 }
 
-/// Original: 0x1095bc (map: the party wakes in Lord British's castle after a total defeat)
+/// Original: 0x1095bc (map: the party wakes in the castle of actor 5 after a total defeat)
 ///
 /// The leader index becomes 0xff. For actors 0..0xe0 with status bits 0x80 and 0x10, the
 /// first body object (type 0x153 or 0x162) in the region list whose quality is the actor is
-/// stored in A4-0x2f04 and raised: the Avatar through 0x10c810 with its type, magic points
+/// stored in A4-0x2f04 and raised: the hero through 0x10c810 with its type, magic points
 /// (= intelligence) and status restored and, below karma 98, its experience scaled by karma
 /// / 100; a companion through 0x11785e. Worktype 0x9b becomes 0x81. Every member then gets its
 /// base type back, status bits reset, full hit points (0x122144) and movement points; type
@@ -427,7 +427,7 @@ pub async fn resurrect_party(cell: &RefCell<State>, io: &Io) {
             if let Some(body) = body {
                 state.ui.input.selection = body.0 as i16;
                 if a == 1 {
-                    raise_avatar(state, body);
+                    raise_hero(state, body);
                 } else {
                     state.map.flag_784e = 0;
                 }
@@ -489,10 +489,10 @@ pub async fn resurrect_party(cell: &RefCell<State>, io: &Io) {
     state.map.flag_784e = 1;
 }
 
-/// 0x1095bc's raise step for the Avatar lying as `body` (a companion goes through 0x11785e,
+/// 0x1095bc's raise step for the hero lying as `body` (a companion goes through 0x11785e,
 /// [`crate::magic::resurrect_and_rejoin`]).
-fn raise_avatar(state: &mut State, body: ObjectId) {
-    seams::raise_avatar_body(state, body);
+fn raise_hero(state: &mut State, body: ObjectId) {
+    seams::raise_hero_body(state, body);
     let attrs = &mut state.actors.attrs;
     attrs.status[1] &= 0xef;
     state.objects.type_frame[1] = attrs.base_type_frame[1];
@@ -664,7 +664,7 @@ mod tests {
         put(&mut s, 210, OBJ_HOLE, at(300, 300, 0));
         after_step(&mut s);
         assert_eq!(s.map.centre, at(300, 300, 0));
-        // "You must be in party mode to enter." is queued for the command loop to print.
+        // The party-mode line (A4-0x72cf) is queued for the command loop to print.
         assert_eq!(s.main.pending_print.len(), 1);
         assert_eq!(s.actors.work.prompt, 1);
         // In combat nothing happens; with leader index == size neither.
@@ -708,8 +708,8 @@ mod tests {
         assert_eq!(s.actors.attrs.exp[1], 1000, "no body matched");
         assert_eq!(s.actors.attrs.status[1], ((0x90 & 0x9f) | 0x40) & 0xe1);
         assert_eq!((s.actors.work.force_teleport, s.ui.panel.dirty), (0, true));
-        // The Avatar's raise step itself.
-        raise_avatar(&mut s, body);
+        // The hero's raise step itself.
+        raise_hero(&mut s, body);
         assert_eq!(s.actors.attrs.exp[1], 500);
         assert_eq!(s.actors.attrs.magic[1], 25);
         assert_eq!(s.objects.type_frame[1], 0x19a);

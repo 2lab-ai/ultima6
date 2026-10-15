@@ -30,6 +30,16 @@ Follow-ups 2026-10-14 (verbatim, supersede the engine choice below):
 
 > 그러니까 일단 메인 소스는 rust로 만들고 웹에 올리는건 니가 알아서 해줘
 
+Follow-up 2026-10-15 (verbatim; a later improvement, "not now"):
+
+> 추가 앞으로 개선 사항 다음을 고려해줘,. (지금 하라는게 아님)
+>
+> 모든 리소스를 x2나 x4로 HD와 4k 화면에 맞게 기초 리소스 업스케일하고 기본 맵 화면을 hd나 4k에 맞게 리소스도 업스케일하고 전체 맵도 훨씬 더 많이 보여주는 식으로 개선 예정임. 이렇게 하기위해서 미리 ui나 출력등을 고려해줘 작업 완료후 이 내용에 대해서도 리서치해줘
+
+Read as:
+- Now: P3 designs UI and output so a later HD/4K phase can follow. This means x2 and x4 resources, an HD/4K map view, and a much wider view of the map. The design is in `.prd/05-hd-output.md`; P3 builds its seam (04 W0, W10).
+- After the current work (P3 → P4 redeploy): research the HD/4K phase.
+
 Fixed scope (rev 2, 2026-10-14):
 - Main source = Rust, written from the reverse engineering of the Amiga `game` (68k)
   so behavior follows the original code's intent. Web delivery = Rust → wasm, shell
@@ -46,4 +56,4 @@ Fixed scope (rev 1, superseded where it conflicts with rev 2):
 - Item 3 = REA (extended to m68k) analysis of `game` → Amiga data support in the
   ScummVM `ultima6` engine → WebAssembly build.
 - Item 4 = engine + shell at https://ultima6.2lab.ai, user drops their own files.
-- First acceptance line: the game boots into Britannia; intro skipped.
+- First acceptance line: the game boots into the world map; intro skipped.

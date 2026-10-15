@@ -18,7 +18,7 @@ fn raw_map_takes_the_column_of_the_held_qualifier() {
     for raw in [0x63 | 0x80, 0x60 | 0x80, 0x64] {
         assert_eq!(map_raw(&mut q, &t, raw), 0);
     }
-    assert_eq!(map_raw(&mut q, &t, 0x21), 0x8f);
+    assert_eq!(map_raw(&mut q, &t, 0x21), 0x8e);
     assert_eq!(map_raw(&mut q, &t, 0x64 | 0x80), 0);
     // Caps lock upper-cases letters only.
     map_raw(&mut q, &t, 0x62);
@@ -130,7 +130,7 @@ fn cross_hair_moves_within_range_and_the_command_letter_confirms() {
     input.targeting = 1;
     input.cursor = (5, 5);
     input.range = 7;
-    s.ui.tables.keymap[0x14] = [0x74, 0x54, 0x14, 0x84];
+    s.ui.tables.keymap[0x14] = [0x74, 0x54, 0x14, 0];
     let e = read_one(s.clone(), &[Key::Right, Key::Up, Key::Char('t')]);
     let st = e.state();
     assert_eq!(st.converse.ints[0], wait::REPEAT, "T confirms like Return");

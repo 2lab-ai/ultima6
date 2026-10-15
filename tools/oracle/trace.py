@@ -1,10 +1,13 @@
 """The port's timing constants from trace.mjs runs (trace.json: every traced call with its PAL
-frames): what actors/turn.rs and combat/present.rs take, rebuilt from the oracle's data.
+frames): what actors/turn.rs, actors/walk.rs and combat/present.rs take, rebuilt from the
+oracle's data.
 
 usage: python3 -I -B trace.py RUN/trace.json ...
-Prints per constant n, median, mean and range in PAL frames, and the ms (20 a frame) the port
-uses: the median where one call is one cost, the mean where the port pays one cost per call of
-a varying routine (messages, names, NPC turns, picks).
+Refuses a file of a run that did not finish (trace.mjs writes after every step and marks the
+file complete only once every key's step is in), and a followers' pass without its count of
+followers. Prints per constant n, median, mean and range in PAL frames, and the ms (20 a frame)
+the port uses: the median where one call is one cost, the mean where the port pays one cost per
+call of a varying routine (messages, names, NPC turns, picks, steps, followers' passes).
 """
 
 import json
@@ -13,11 +16,32 @@ import sys
 
 WORLD_TURN, NPC_TURN, AFTER_TURN = 0x1213DE, 0x1200B0, 0x102F2A
 FLIGHT, HIT_FLASH, PRINTF, NAME = 0x132706, 0x1230CE, 0x108658, 0x10EEF8
+# The party step and the followers' pass it ends in.
+STEP, FOLLOW = 0x11D4EE, 0x11C910
+# The worktypes 0x1200b0 runs through a combat routine (its dispatch 0x120184..0x120248; the
+# port's actors/npc.rs runs_combat_routine): the NPC turns COMBAT_NPC_MS is the time of.
+COMBAT_ROUTINES = frozenset([*range(3, 12), 13, 14, 0x13, 0x9A, 0x9B])
 # Called inside an NPC turn and paid as costs of their own.
 OWN_COSTS = (FLIGHT, HIT_FLASH, PRINTF, NAME)
-# A name read longer than this loaded look.lzd from the floppy (the boot's first): not a cost
-# the port pays.
-FLOPPY_NAME = 20.0
+# A name read or a step longer than this waited on the floppy (the boot's first name read loads
+# look.lzd, its first step a map region): not a cost the port pays.
+FLOPPY = 20.0
+
+
+class Incomplete(Exception):
+    """A trace.json of a run that did not trace every one of its keys, or that lacks a field a
+    constant needs."""
+
+
+def steps_of(doc):
+    """The steps of a trace.json `doc`, refused (Incomplete) unless the run marked it complete
+    with one step per key, in the keys' order."""
+    if doc.get("complete") is not True:
+        raise Incomplete("not marked complete: the run stopped before its last step")
+    keys, steps = doc.get("keys"), doc.get("steps", [])
+    if not isinstance(keys, list) or [s.get("key") for s in steps] != keys:
+        raise Incomplete(f"{len(steps)} steps for {len(keys or [])} keys: not one step per key")
+    return steps
 
 
 def stats(values):
@@ -38,9 +62,10 @@ def inside(outer, c):
 
 def constants(steps):
     """Per constant, the statistics of its traced calls over `steps` (trace.json's steps)."""
-    out = {k: [] for k in ("refresh after a turn", "combat NPC turn", "schedule NPC turn",
+    out = {k: [] for k in ("refresh after a turn", "combat NPC turn", "other NPC turn",
                            "scheduler pick", "hit flash", "flight", "flight without a step",
-                           "message", "object name")}
+                           "message", "object name", "party step", "follow",
+                           "follow, no one to move")}
     pick_frames = picks = 0.0
     for s in steps:
         calls = s["calls"]
@@ -55,15 +80,25 @@ def constants(steps):
                     out["flight without a step"].append(c["frames"])
             elif c["fn"] == PRINTF:
                 out["message"].append(c["frames"])
-            elif c["fn"] == NAME and c["frames"] < FLOPPY_NAME:
+            elif c["fn"] == NAME and c["frames"] < FLOPPY:
                 out["object name"].append(c["frames"])
+            elif c["fn"] == STEP and c["frames"] < FLOPPY:
+                # Its own time: the followers' pass and what it prints and names are paid apart.
+                own = sum(x["frames"] for x in calls if x is not c
+                          and x["fn"] in (FOLLOW, *OWN_COSTS)
+                          and x["depth"] == c["depth"] + 1 and inside(c, x))
+                out["party step"].append(c["frames"] - own)
+            elif c["fn"] == FOLLOW:
+                if c.get("followers") is None:
+                    raise Incomplete("a followers' pass without its count of followers")
+                out["follow" if c["followers"] else "follow, no one to move"].append(c["frames"])
         for world in (c for c in calls if c["fn"] == WORLD_TURN):
             turns = [c for c in calls if c["fn"] == NPC_TURN and inside(world, c)]
             refreshes = [c for c in calls if c["fn"] == AFTER_TURN and inside(world, c)]
             for n in turns:
                 own = sum(c["frames"] for c in calls if c is not n and c["fn"] in OWN_COSTS
                           and c["depth"] == n["depth"] + 1 and inside(n, c))
-                key = "combat NPC turn" if n["worktype"] < 0x80 else "schedule NPC turn"
+                key = "combat NPC turn" if n["worktype"] in COMBAT_ROUTINES else "other NPC turn"
                 out[key].append(n["frames"] - own)
             pick_frames += world["frames"] - sum(c["frames"] for c in turns + refreshes)
             picks += len(turns) + 1
@@ -77,11 +112,14 @@ USES = {
     "refresh after a turn": ("actors/turn.rs AFTER_TURN_MS", "median"),
     "scheduler pick": ("actors/turn.rs PICK_MS", "mean"),
     "combat NPC turn": ("actors/turn.rs COMBAT_NPC_MS", "mean"),
-    "schedule NPC turn": ("(no wait)", "mean"),
+    "other NPC turn": ("(no wait)", "mean"),
     "hit flash": ("combat/present.rs FLASH_MS", "median"),
     "flight without a step": ("combat/present.rs RENDER_MS", "median"),
     "message": ("combat/present.rs PRINT_MS", "mean"),
     "object name": ("combat/present.rs NAME_MS", "mean"),
+    "party step": ("actors/walk.rs STEP_MS", "mean"),
+    "follow": ("actors/walk.rs FOLLOW_MS", "mean"),
+    "follow, no one to move": ("(no wait)", "mean"),
     "flight": ("(start + steps + end; check only)", "median"),
 }
 
@@ -91,7 +129,12 @@ def main():
         raise SystemExit(__doc__)
     steps = []
     for path in sys.argv[1:]:
-        steps += json.load(open(path))["steps"]
+        try:
+            run = steps_of(json.load(open(path)))
+            constants(run)
+        except Incomplete as e:
+            raise SystemExit(f"{path}: {e}") from None
+        steps += run
     for k, v in constants(steps).items():
         use, how = USES[k]
         if not v.get("n"):

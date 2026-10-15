@@ -3,8 +3,9 @@
 use super::MedCall;
 use crate::state::State;
 
-/// Song 13 (`ULTIMA_Ha.MOD`): the instrument notes. 0x110878 loads it even with sound off and
-/// does not start it; the instrument Use step plays it per key.
+/// Song 13 (its file name is the pointer at A4-0x779a + 4 · 13, the 13th of the song table
+/// A4-0x7796): the instrument notes. 0x110878 loads it even with sound off and does not start
+/// it; the instrument Use step plays it per key.
 pub const SONG_INSTRUMENT: u16 = 0xd;
 /// 0x110878's read length into the module buffer (`move.l #$c350`).
 pub const MODULE_BUFFER: usize = 50_000;
@@ -92,7 +93,7 @@ pub fn play_area_song(s: &mut State) {
 
 /// The control-Z branch of the command loop 0x1041d8 (code 0x1a) without its message: on →
 /// flag, area song; off → song 0, flag. Returns whether sound is now on (the caller prints
-/// "Sound on" / "Sound off").
+/// the on or off line).
 pub fn toggle_sound(s: &mut State) -> bool {
     if sound_on(s) {
         play_song(s, 0);

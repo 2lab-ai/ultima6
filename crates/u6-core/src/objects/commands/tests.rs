@@ -275,7 +275,7 @@ fn the_view_direction_of_a_pixel() {
 }
 
 /// A world with a 2-entry monster list (types 0x16b, 0x1ac), their stat bytes, one spell for
-/// both, and the Avatar (actor 1) leading at (500, 500) at noon.
+/// both, and the hero (actor 1) leading at (500, 500) at noon.
 fn monster_world() -> State {
     let mut s = world();
     s.objects.defs.monster_types = vec![0x16b, 0x1ac, 0];
@@ -409,7 +409,7 @@ fn friends_of_gargoyles_get_peaceful_gargoyles() {
     s.objects.qq[egg as usize] = 100;
     s.objects.obj_status[egg as usize] = 0x20;
     create_in(&mut s, 0x16b, 0x08, 0x0801, egg);
-    // The Avatar carries the amulet 0x4c.
+    // The hero carries the amulet 0x4c.
     create_in(&mut s, 0x4c, 0x10, 0, 1);
     hatch_egg(&mut s, egg);
     let m = monsters(&s)[0];

@@ -354,8 +354,8 @@ fn use_on_eight_kinds_of_objects() {
     let e = use_on(s, &files, 0, (c.x as i16, c.y as i16), &[]);
     report(&e, "7-ship-leave", n);
 
-    // 8. The orb of the moons (0x57, carried by the Avatar). At the start nobody has told the
-    // Avatar how to use it (actor 5's talk flag bit 5, set in actor 5's conversation): the
+    // 8. The orb of the moons (0x57, carried by the hero). At the start nobody has told the
+    // hero how to use it (actor 5's talk flag bit 5, set in actor 5's conversation): the
     // line 0x12ce42. With the flag set it makes a red moongate (0x54) two tiles north.
     for told in [false, true] {
         let mut s = start(&files);
@@ -364,7 +364,7 @@ fn use_on_eight_kinds_of_objects() {
         while orb >= 0 && s.objects.kind(orb) != 0x57 {
             orb = crate::objects::next_child(&mut s.objects);
         }
-        assert!(orb >= 0, "the Avatar carries the orb");
+        assert!(orb >= 0, "the hero carries the orb");
         assert!(
             s.actors.attrs.talk_flags[5] & 0x20 == 0,
             "not told at the start"
@@ -428,7 +428,7 @@ fn anywhere(files: &Files, kind: u16) -> Option<(u16, u16, u8)> {
 }
 
 /// The drawbridge crank (0x120) and the serpent figure (0x139) reach unported routines
-/// (0x12de3a, 0x12ff50); their fallbacks print the game's own line for "nothing happened"
+/// (0x12de3a, 0x12ff50); their fallbacks print the game's own line that nothing happened
 /// (0x12ca48, 0x12ceee) instead of ending silently.
 #[test]
 fn unported_drawbridge_and_serpent_figure_print_a_line() {

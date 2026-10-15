@@ -276,7 +276,7 @@ fn aim(s: &mut State, slot: Slot) {
     input.target_void = false;
 }
 
-/// Puts the leader (the Avatar) at (x, y) with the view on it.
+/// Puts the leader (the hero) at (x, y) with the view on it.
 fn stand_at(s: &mut State, x: u16, y: u16) {
     let z = u16::from(s.map.centre.z);
     crate::objects::move_to(s, 1, x, y, z);
@@ -460,19 +460,19 @@ fn get_the_bread_then_drop_it_on_a_table() {
     let (mut s, lines) = run(s, &files, &[], get);
     print_lines("Get the bread", &lines);
     let after = weight(&mut s);
-    // The loaf stacks into the Avatar's inventory (0x10cf7c merges it into a stack he has or
-    // keeps this object); either way the Avatar now carries a loaf and the weight rose by its
+    // The loaf stacks into the hero's inventory (0x10cf7c merges it into a stack he has or
+    // keeps this object); either way the hero now carries a loaf and the weight rose by its
     // own; Get takes 3 movement points (0x1285b6's).
     let loaf = (0x100..crate::objects::OBJECT_SLOTS as Slot)
         .find(|&o| s.objects.kind(o) == 0x80 && carried_by(&s, 1, o))
-        .expect("a loaf in the Avatar's inventory");
+        .expect("a loaf in the hero's inventory");
     assert!(
         after.1 - before.1 == loaf_weight,
         "the weight rose by the loaf's"
     );
     assert!(s.actors.movement_points[1] == mp.wrapping_sub(3));
 
-    // Drop it on a table, the Avatar standing beside it (the inventory panel of member 0 shows
+    // Drop it on a table, the hero standing beside it (the inventory panel of member 0 shows
     // the loaf): the spot test's surface branch (`surface_at`) takes it.
     let ((ax, ay), (tx, ty)) = table(&s).expect("a table near the start");
     stand_at(&mut s, tx, ty);

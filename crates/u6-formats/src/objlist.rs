@@ -53,12 +53,12 @@ const VANISH_OBJ: usize = 0x1C13;
 const ALCOHOL: usize = 0x1C17;
 const MOONSTONES: usize = 0x1C1B;
 const KEG_TIMER: usize = 0x1C4B;
-const GARGISH_FLAG: usize = 0x1C5F;
+const GARGOYLE_TONGUE_FLAG: usize = 0x1C5F;
 const PLAYER_COMBAT_MODE: usize = 0x1C69;
 const SOLO_MEMBER: usize = 0x1C6A;
 const COMMAND_BAR: usize = 0x1C6C;
 const GENDER: usize = 0x1C71;
-const AVATAR_PORTRAIT: usize = 0x1C72;
+const HERO_PORTRAIT: usize = 0x1C72;
 
 /// Per-actor fields (each from its own 256-entry array).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -165,7 +165,7 @@ pub struct PlayerState {
     /// 0x1C17 (player.cpp:91).
     pub alcohol: u8,
     /// 0x1C5F (player.cpp:94-98).
-    pub gargish_flag: u8,
+    pub gargoyle_tongue_flag: u8,
     /// 0x1C69.
     pub combat_mode: u8,
     /// 0x1C6A: party member in solo mode, 0xFF = whole party (party.cpp:112).
@@ -175,7 +175,7 @@ pub struct PlayerState {
     /// 0x1C71 (player.cpp:100).
     pub gender: u8,
     /// 0x1C72, 1-based (portrait_u6.cpp:80-82).
-    pub avatar_portrait: u8,
+    pub hero_portrait: u8,
 }
 
 /// The parsed `objlist`.
@@ -272,12 +272,12 @@ impl ObjList {
             karma: d[KARMA],
             wind_direction: d[WIND],
             alcohol: d[ALCOHOL],
-            gargish_flag: d[GARGISH_FLAG],
+            gargoyle_tongue_flag: d[GARGOYLE_TONGUE_FLAG],
             combat_mode: d[PLAYER_COMBAT_MODE],
             solo_member: d[SOLO_MEMBER],
             command_bar: d[COMMAND_BAR],
             gender: d[GENDER],
-            avatar_portrait: d[AVATAR_PORTRAIT],
+            hero_portrait: d[HERO_PORTRAIT],
         };
         Ok(ObjList {
             actors,
@@ -354,12 +354,12 @@ impl ObjList {
             (KARMA, p.karma),
             (WIND, p.wind_direction),
             (ALCOHOL, p.alcohol),
-            (GARGISH_FLAG, p.gargish_flag),
+            (GARGOYLE_TONGUE_FLAG, p.gargoyle_tongue_flag),
             (PLAYER_COMBAT_MODE, p.combat_mode),
             (SOLO_MEMBER, p.solo_member),
             (COMMAND_BAR, p.command_bar),
             (GENDER, p.gender),
-            (AVATAR_PORTRAIT, p.avatar_portrait),
+            (HERO_PORTRAIT, p.hero_portrait),
         ] {
             d[off] = v;
         }
@@ -416,7 +416,7 @@ mod tests {
         d[UNKNOWN_1BFB..UNKNOWN_1BFB + 8].copy_from_slice(&[0, 0x11, 0, 0x22, 0, 0x33, 0, 0x44]);
         d[TIMERS + 15] = 9;
         d[SOLO_MEMBER] = 0xFF;
-        d[AVATAR_PORTRAIT] = 3;
+        d[HERO_PORTRAIT] = 3;
         d[OBJLIST_LEN - 1] = 0x77; // residue byte, never decoded
         d
     }
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(o.moonstones[0], [100, 200, 0]);
         assert_eq!(o.unknown_1bfb, [0x11, 0x22, 0x33, 0x44]);
         assert_eq!(
-            (o.eclipse(), o.player.solo_member, o.player.avatar_portrait),
+            (o.eclipse(), o.player.solo_member, o.player.hero_portrait),
             (9, 0xFF, 3)
         );
     }
