@@ -23,6 +23,16 @@ const MASK: u32 = 0x5555_5555;
 // info 2x32, label 8x32, header sum 2x32, data sum 2x32, data 2x4096.
 const SECTOR_CELLS: usize = 64 + 256 + 64 + 64 + 8192;
 
+/// The most [`decode_amiga_disk`] holds besides the ADF it returns, from the formats: one
+/// side's cells expanded to a byte each (an HFE side is at most 32,767 bytes of 8 cells) plus
+/// the wrap, that track's 11 sectors, and the list of missing blocks (1,760 indices of at most
+/// 8 bytes): 290,552 bytes.
+pub const DECODE_WORK_BYTES: usize = (u16::MAX as usize >> 1) * 8
+    + SECTOR_CELLS
+    + 64
+    + SECTORS_PER_TRACK * SECTOR_SIZE
+    + ADF_CYLINDERS * ADF_HEADS * SECTORS_PER_TRACK * 8;
+
 #[derive(Clone, Debug, Default)]
 pub struct TrackDecode {
     /// Sector number -> 512 bytes, first copy with good checksums.

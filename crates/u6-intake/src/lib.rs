@@ -26,22 +26,36 @@ pub mod ofs;
 pub mod pp20;
 pub mod zip;
 
-pub use hfe::{HfeHeader, HfeImage, is_hfe, parse_hfe};
+pub use hfe::{HfeHeader, HfeImage, hfe_track_bytes, is_hfe, parse_hfe};
 pub use mfm::{ADF_SIZE, DiskDecode, TrackDecode, decode_amiga_disk, decode_amiga_track};
 pub use ofs::{OfsVolume, adf_dos_type, read_ofs, read_ofs_within};
 pub use pp20::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
 
-/// The bytes the intake may hold in all (64 MiB): the ADFs, the volumes' files and the loose
-/// files it keeps, and the PP20 output that replaces crunched files. Each step that produces or
-/// keeps bytes is charged before it allocates them; bytes it drops (a crunched file once
-/// decrunched, the earlier copy of a repeated path) are given back.
+/// The bytes the intake may hold in all (64 MiB). Each is charged before it is allocated and
+/// given back when the intake drops it:
+/// - each ADF it keeps: a dropped one as it is, an HFE's decoded one; while an HFE decodes, also
+///   the tracks the parser copies out ([`hfe_track_bytes`]) and the decode's working bytes
+///   ([`mfm::DECODE_WORK_BYTES`]);
+/// - each volume's files as reserved, their paths (twice, as key and index), the directory
+///   paths and the listed warnings, each with [`ofs::ENTRY_BYTES`] for its list and map entries
+///   ([`OfsVolume::held`]);
+/// - each loose file it keeps, and each PP20 output (its crunched bytes given back once done).
+///
+/// Not charged, and bounded apart from it: the inputs and their names (the caller's), the zip
+/// entries `zip.rs` inflates, the report lines that name an input, per volume two fixed lines
+/// past its [`ofs::MAX_WARNINGS`] warnings, and the walk's visited set for blocks it keeps
+/// nothing for (one entry per block of an ADF already charged). The walk enters at most [`ofs::MAX_DEPTH`]
+/// directory levels, so its recursion is shallow and a path at most 1,984 bytes.
 ///
 /// From the formats, not from any game file: the game is three Amiga DD disks of
 /// [`ADF_SIZE`] (901,120) bytes, 2,703,360 bytes of ADF. A volume's files fit in its blocks, at
 /// most 2,703,360 bytes on the three, and PP20 output is at most 56/3 of its crunched stream
 /// ([`pp20::MAX_EXPANSION`]), 50,462,720 bytes. While a file decrunches, its crunched bytes
-/// (at most one disk, 901,120) are held as well: 54,067,200 bytes (51.6 MiB) in the worst case.
-/// 64 MiB leaves 24% over that (the same 64 MiB the web page allows the game files).
+/// (at most one disk, 901,120) are held as well. The entries take at most 1,760 a disk, each
+/// 256 bytes plus its name twice with its volume (2 x 61 at the root): 1,995,840 bytes. That
+/// is 56,063,040 bytes (53.5 MiB) in the worst case, with the HFE decode (at most an HFE's
+/// size and 290,552 bytes) given back before any PP20 output. 64 MiB leaves 19.7% over that
+/// (the same 64 MiB the web page allows the game files).
 pub const INTAKE_BUDGET: usize = 64 << 20;
 
 const BUDGET_MIB: usize = INTAKE_BUDGET >> 20;
@@ -255,7 +269,34 @@ fn unzip_disks(name: &str, data: &[u8], report: &mut Vec<String>) -> Result<Vec<
 }
 
 /// HFE -> ADF with its report lines, or `None` (reported) when the container is unreadable.
-fn hfe_to_adf(label: &str, data: &[u8], report: &mut Vec<String>) -> Option<Vec<u8>> {
+/// Charges the ADF, the track copy and the decode's working bytes before it parses, and gives
+/// back all but the ADF once the decode is done.
+fn hfe_to_adf(
+    label: &str,
+    data: &[u8],
+    budget: &mut Budget,
+    report: &mut Vec<String>,
+) -> Option<Vec<u8>> {
+    let work = match hfe_track_bytes(data) {
+        Ok(tracks) => tracks + mfm::DECODE_WORK_BYTES,
+        Err(err) => {
+            report.push(format!("{label}: HFE unreadable: {err}"));
+            return None;
+        }
+    };
+    if let Err(line) = budget.charge(label, ADF_SIZE + work) {
+        report.push(line);
+        return None;
+    }
+    let adf = decode_hfe(label, data, report);
+    budget.give_back(work);
+    if adf.is_none() {
+        budget.give_back(ADF_SIZE);
+    }
+    adf
+}
+
+fn decode_hfe(label: &str, data: &[u8], report: &mut Vec<String>) -> Option<Vec<u8>> {
     let hfe = match parse_hfe(data) {
         Ok(hfe) => hfe,
         Err(err) => {
@@ -322,24 +363,16 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
     let mut raw = Collected::default();
     for f in disk_inputs {
         // An HFE decodes to a whole ADF whatever its size; a dropped ADF is kept as it is.
-        let size = if is_hfe(&f.data) {
-            ADF_SIZE
-        } else {
-            f.data.len()
-        };
-        if let Err(line) = budget.charge(&f.name, size) {
-            report.push(line);
-            continue;
-        }
         let adf = if is_hfe(&f.data) {
-            match hfe_to_adf(&f.name, &f.data, &mut report) {
+            match hfe_to_adf(&f.name, &f.data, &mut budget, &mut report) {
                 Some(adf) => adf,
-                None => {
-                    budget.give_back(ADF_SIZE);
-                    continue;
-                }
+                None => continue,
             }
         } else {
+            if let Err(line) = budget.charge(&f.name, f.data.len()) {
+                report.push(line);
+                continue;
+            }
             report.push(format!("{}: ADF {} bytes", f.name, f.data.len()));
             f.data
         };
@@ -347,7 +380,8 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
         let volume = match read_ofs_within(&adf, budget.left) {
             Ok(vol) => {
                 let count = vol.files.len();
-                budget.take_within(vol.files.iter().map(|(_, b)| b.len()).sum());
+                // The walk's charge covers the keys and warning lines made from it below.
+                budget.take_within(vol.held);
                 for (path, bytes) in vol.files {
                     let dropped = raw.put(format!("{}/{path}", vol.name), bytes, &mut report);
                     budget.give_back(dropped);
@@ -362,8 +396,8 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
                 if vol.limit_reached {
                     budget.spent = true;
                     report.push(format!(
-                        "{}: volume {}: the next file would pass the intake's {BUDGET_MIB} MiB \
-                         budget; it and the files after it are not read",
+                        "{}: volume {}: the rest of it would pass the intake's {BUDGET_MIB} MiB \
+                         budget and is not read",
                         f.name, vol.name
                     ));
                 }

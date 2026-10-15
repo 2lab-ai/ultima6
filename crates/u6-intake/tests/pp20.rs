@@ -6,7 +6,7 @@ use std::path::Path;
 
 use common::pp20_encoder::{crunch_pp20, max_ratio_pp20};
 use common::text;
-use u6_intake::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
+use u6_intake::{decrunch_pp20, is_pp20};
 
 fn lcg(n: usize, seed: u32) -> Vec<u8> {
     let mut x = seed;
@@ -114,22 +114,6 @@ fn the_capacity_check_admits_the_formats_best_ratio_and_refuses_past_it() {
         decrunch_pp20(&packed).unwrap_err().to_string(),
         format!("PP20: declares {over} bytes, more than its stream can hold")
     );
-}
-
-#[test]
-fn a_limit_refuses_a_longer_claim_before_decoding() {
-    let packed = max_ratio_pp20(10_000, 7);
-    assert_eq!(pp20_declared_len(&packed), Some(10_000));
-    assert_eq!(decrunch_pp20_within(&packed, 9_999), Ok(None));
-    assert_eq!(
-        decrunch_pp20_within(&packed, 10_000),
-        Ok(Some(vec![7; 10_000]))
-    );
-    // A bad file is an error under any limit, and the capacity check comes first.
-    assert!(decrunch_pp20_within(b"PP20", 0).is_err());
-    assert_eq!(pp20_declared_len(b"PP20"), None);
-    let tiny = [b"PP20".as_slice(), &[0; 4], &[0; 4], &[0xff, 0xff, 0xff, 0]].concat();
-    assert!(decrunch_pp20_within(&tiny, 0).is_err());
 }
 
 #[test]

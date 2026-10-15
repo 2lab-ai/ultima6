@@ -176,3 +176,81 @@ impl ImageBuilder {
         self.img
     }
 }
+
+/// Writes the big-endian long `v` at `off` in `block` of a raw image.
+pub fn put32(img: &mut [u8], block: usize, off: usize, v: u32) {
+    img[block * BS + off..block * BS + off + 4].copy_from_slice(&v.to_be_bytes());
+}
+
+/// Sets the checksum long (offset 20) so the block's longs sum to zero.
+pub fn checksum_block(img: &mut [u8], block: usize) {
+    put32(img, block, 20, 0);
+    let sum = (0..BS).step_by(4).fold(0u32, |s, i| {
+        let at = block * BS + i;
+        s.wrapping_add(u32::from_be_bytes(img[at..at + 4].try_into().unwrap()))
+    });
+    put32(img, block, 20, sum.wrapping_neg());
+}
+
+fn put_name(img: &mut [u8], block: usize, name: &str) {
+    img[block * BS + 432] = name.len() as u8;
+    img[block * BS + 433..block * BS + 433 + name.len()].copy_from_slice(name.as_bytes());
+}
+
+/// An FFS volume (FFS data blocks name no owner) whose `count` file headers, chained from the
+/// root, all point at the one data block 883 and are their own extension blocks, so each reads
+/// `size` bytes out of a single block of the image.
+pub fn shared_block_volume(count: usize, size: u32) -> Vec<u8> {
+    // The builder lays out root 880, the header of "a" at 882 and its data block at 883.
+    let mut img = ImageBuilder::new(true).build("SHARED", &[Node::File("a", vec![0x33; BS])]);
+    let mut prev = 882;
+    for k in 0..count {
+        let hdr = 884 + k;
+        put32(&mut img, hdr, 0, 2); // header
+        put32(&mut img, hdr, 4, hdr as u32);
+        put32(&mut img, hdr, 8, 72); // a full table of data block pointers
+        for i in 0..72 {
+            put32(&mut img, hdr, 24 + i * 4, 883);
+        }
+        put32(&mut img, hdr, 324, size);
+        put_name(&mut img, hdr, &format!("s{k:03}"));
+        put32(&mut img, hdr, BS - 8, hdr as u32); // the extension: itself
+        put32(&mut img, hdr, BS - 4, (-3i32) as u32); // a file
+        checksum_block(&mut img, hdr);
+        put32(&mut img, prev, BS - 16, hdr as u32); // the hash chain
+        checksum_block(&mut img, prev);
+        prev = hdr;
+    }
+    img
+}
+
+/// An OFS volume that is one chain of `depth` directories, each the only entry of the one above
+/// (hash slot 0), with 30-character names. With `loops`, each directory's other 71 hash slots
+/// name the directory itself, a block the walk has already seen. Uses every block but the boot
+/// blocks and the root, so at most 1,757 levels.
+pub fn nested_dirs(volume: &str, depth: usize, loops: bool) -> Vec<u8> {
+    let mut img = ImageBuilder::new(false).build(volume, &[]);
+    let blocks: Vec<usize> = (2..ADF_SIZE / BS)
+        .filter(|&b| b != 880)
+        .take(depth)
+        .collect();
+    assert_eq!(blocks.len(), depth, "at most 1,757 levels fit");
+    let mut parent = 880;
+    for (k, &b) in blocks.iter().enumerate() {
+        put32(&mut img, b, 0, 2); // header
+        put32(&mut img, b, 4, b as u32);
+        put32(&mut img, b, BS - 12, parent as u32);
+        put32(&mut img, b, BS - 4, 2); // a directory
+        put_name(&mut img, b, &format!("level{k:025}"));
+        if loops {
+            for slot in 1..72 {
+                put32(&mut img, b, 24 + slot * 4, b as u32);
+            }
+        }
+        put32(&mut img, parent, 24, b as u32); // slot 0 of the one above
+        checksum_block(&mut img, parent);
+        parent = b;
+    }
+    checksum_block(&mut img, parent);
+    img
+}

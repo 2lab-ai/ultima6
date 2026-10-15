@@ -7,9 +7,9 @@ mod common;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use common::ofs_builder::{ImageBuilder, Node};
+use common::ofs_builder::{ImageBuilder, Node, nested_dirs, shared_block_volume};
 use common::pp20_encoder::max_ratio_pp20;
-use u6_intake::{InputFile, Intake, intake, read_ofs};
+use u6_intake::{InputFile, Intake, decrunch_pp20_within, intake, pp20_declared_len, read_ofs};
 
 /// The budget these tests hold the intake to: 64 MiB (the derivation is at `INTAKE_BUDGET` in
 /// the crate). Stated here, not imported, so the tests run against any version of the intake.
@@ -213,12 +213,36 @@ fn empty_hfe() -> Vec<u8> {
     h
 }
 
+/// An HFE of `cylinders` cylinders, two sides, each naming `length` bytes of (blank) track data
+/// in its own run of blocks, which the parser copies out whole before decoding.
+fn tracked_hfe(cylinders: usize, length: u16) -> Vec<u8> {
+    let blocks = usize::from(length).div_ceil(512);
+    let first = 1 + (cylinders * 4).div_ceil(512); // after the header and the track table
+    let mut h = vec![0u8; (first + cylinders * blocks) * 512];
+    h[..8].copy_from_slice(b"HXCPICFE");
+    h[9] = cylinders as u8;
+    h[10] = 2;
+    h[11] = 1;
+    h[12] = 250;
+    h[18] = 1;
+    for cyl in 0..cylinders {
+        let at = 512 + cyl * 4;
+        h[at..at + 2].copy_from_slice(&((first + cyl * blocks) as u16).to_le_bytes());
+        h[at + 2..at + 4].copy_from_slice(&length.to_le_bytes());
+    }
+    h
+}
+
 #[test]
 fn disk_images_past_the_budget_are_not_decoded() {
-    // 76 blank disks would come to 68,485,120 bytes; 74 fit.
+    // 80 cylinders of 1,024 bytes: each disk holds its ADF, 81,920 bytes of tracks and the
+    // decode's 290,552 working bytes while it decodes, and keeps its 901,120-byte ADF.
+    // 76 disks would keep 68,485,120 bytes; 74 fit.
+    let hfe = tracked_hfe(80, 1024);
     let inputs: Vec<InputFile> = (0..76)
-        .map(|i| file(format!("disk {i}.hfe"), empty_hfe()))
+        .map(|i| file(format!("disk {i}.hfe"), hfe.clone()))
         .collect();
+    drop(hfe);
     let (r, peak) = peak_of(|| intake(inputs));
     assert!(
         peak <= BOUND,
@@ -228,7 +252,7 @@ fn disk_images_past_the_budget_are_not_decoded() {
     assert!(out <= BOUND, "the intake kept {out} bytes, over {BOUND}");
     assert_eq!(
         lines_of(&r, "disk 74.hfe"),
-        ["disk 74.hfe: not read: 901120 more bytes would pass the intake's 64 MiB budget"]
+        ["disk 74.hfe: not read: 1273592 more bytes would pass the intake's 64 MiB budget"]
     );
     assert_eq!(
         lines_of(&r, "disk 75.hfe"),
@@ -243,48 +267,89 @@ fn disk_images_past_the_budget_are_not_decoded() {
     assert!(r.disks.is_empty() && r.files.is_empty());
 }
 
-const BS: usize = 512;
-
-fn w32(img: &mut [u8], block: usize, off: usize, v: u32) {
-    img[block * BS + off..block * BS + off + 4].copy_from_slice(&v.to_be_bytes());
+#[test]
+fn an_hfe_whose_track_copy_passes_the_budget_is_not_decoded() {
+    // 73 blank disks keep 65,781,760 bytes. The 74th disk's ADF would fit after them; the
+    // 16,711,170 bytes of tracks its decode copies out first (255 cylinders of 65,534 bytes,
+    // the most an HFE can name without overlap) would not.
+    let mut inputs: Vec<InputFile> = (0..73)
+        .map(|i| file(format!("disk {i}.hfe"), empty_hfe()))
+        .collect();
+    inputs.push(file("disk 99.hfe".into(), tracked_hfe(255, 65_534)));
+    let (r, peak) = peak_of(|| intake(inputs));
+    assert!(
+        peak <= BOUND,
+        "the intake held {peak} bytes at once, over {BOUND}"
+    );
+    assert_eq!(
+        lines_of(&r, "disk 99.hfe"),
+        ["disk 99.hfe: not read: 17902842 more bytes would pass the intake's 64 MiB budget"]
+    );
+    assert_eq!(r.report.last().map(String::as_str), Some(STOP_LINE));
+    assert!(r.disks.is_empty() && r.files.is_empty());
 }
 
-fn checksum(img: &mut [u8], block: usize) {
-    w32(img, block, 20, 0);
-    let sum = (0..BS).step_by(4).fold(0u32, |s, i| {
-        let at = block * BS + i;
-        s.wrapping_add(u32::from_be_bytes(img[at..at + 4].try_into().unwrap()))
-    });
-    w32(img, block, 20, sum.wrapping_neg());
+#[test]
+fn deep_directories_stop_at_the_depth_cap() {
+    // 1,757 nested directories with 30-character names (every block of the disk): their paths
+    // alone come to 31 x 1,757^2 / 2, about 48 MB.
+    let adf = nested_dirs("DEEP", 1757, false);
+    let (r, peak) = peak_of(|| intake(vec![file("deep.adf".into(), adf)]));
+    assert!(peak < 2 * MIB, "the intake held {peak} bytes at once");
+    assert_eq!(
+        lines_of(&r, "deep.adf"),
+        [
+            "deep.adf: ADF 901120 bytes",
+            "deep.adf: volume DEEP (DOS0), 0 files",
+            "deep.adf: directories nested more than 64 levels deep are not read",
+        ]
+    );
+    assert_eq!(r.disks.len(), 1);
+    assert_eq!(read_ofs(&r.disks[0].adf).unwrap().dirs.len(), 64);
 }
 
-/// An FFS volume (FFS data blocks name no owner) whose `count` file headers, chained from the
-/// root, all point at the one data block 883 and are their own extension blocks, so each reads
-/// `size` bytes out of a single block of the image.
-fn shared_block_volume(count: usize, size: u32) -> Vec<u8> {
-    // The builder lays out root 880, the header of "a" at 882 and its data block at 883.
-    let mut img = ImageBuilder::new(true).build("SHARED", &[Node::File("a", vec![0x33; BS])]);
-    let mut prev = 882;
-    for k in 0..count {
-        let hdr = 884 + k;
-        w32(&mut img, hdr, 0, 2); // header
-        w32(&mut img, hdr, 4, hdr as u32);
-        w32(&mut img, hdr, 8, 72); // a full table of data block pointers
-        for i in 0..72 {
-            w32(&mut img, hdr, 24 + i * 4, 883);
-        }
-        w32(&mut img, hdr, 324, size);
-        let name = format!("s{k:03}");
-        img[hdr * BS + 432] = name.len() as u8;
-        img[hdr * BS + 433..hdr * BS + 433 + name.len()].copy_from_slice(name.as_bytes());
-        w32(&mut img, hdr, BS - 8, hdr as u32); // the extension: itself
-        w32(&mut img, hdr, BS - 4, (-3i32) as u32); // a file
-        checksum(&mut img, hdr);
-        w32(&mut img, prev, BS - 16, hdr as u32); // the hash chain
-        checksum(&mut img, prev);
-        prev = hdr;
-    }
-    img
+#[test]
+fn loop_warnings_are_capped_per_volume() {
+    // 200 levels whose other 71 hash slots each name a block the walk has seen: 71 warnings
+    // on every level, each carrying the level's whole path.
+    let adf = nested_dirs("LOOPS", 200, true);
+    let (r, peak) = peak_of(|| intake(vec![file("loops.adf".into(), adf)]));
+    assert!(peak < 2 * MIB, "the intake held {peak} bytes at once");
+    let lines = lines_of(&r, "loops.adf");
+    // The ADF and volume lines, 32 warnings, the depth line, then the count of the rest: 64
+    // levels are read, 71 warnings each. The deepest level read comes first (slot 0 holds the
+    // level below, walked before the other slots), at block 65.
+    assert_eq!(lines.len(), 36, "{:#?}", &lines[..lines.len().min(40)]);
+    let deepest: Vec<String> = (0..64).map(|k| format!("level{k:025}")).collect();
+    assert_eq!(
+        lines[2],
+        format!("loops.adf: {}: loop at block 65", deepest.join("/"))
+    );
+    assert_eq!(
+        lines[34],
+        "loops.adf: directories nested more than 64 levels deep are not read"
+    );
+    assert_eq!(lines[35], "loops.adf: 4512 more warnings not listed");
+    assert_eq!(r.disks.len(), 1);
+}
+
+#[test]
+fn a_limit_refuses_a_longer_claim_before_allocating() {
+    let len = 4 << 20;
+    let packed = max_ratio_pp20(len, 7);
+    assert_eq!(pp20_declared_len(&packed), Some(len));
+    let (refused, peak) = peak_of(|| decrunch_pp20_within(&packed, len - 1));
+    assert!(matches!(refused, Ok(None)));
+    assert!(peak < 64 << 10, "a refused claim held {peak} bytes");
+    // The same call within the limit allocates the output (the counter sees it).
+    let (done, peak) = peak_of(|| decrunch_pp20_within(&packed, len));
+    assert!(matches!(&done, Ok(Some(v)) if v.len() == len && v.iter().all(|&b| b == 7)));
+    assert!(peak >= len, "{peak}");
+    // A bad file is an error under any limit, and the capacity check comes first.
+    assert!(decrunch_pp20_within(b"PP20", 0).is_err());
+    assert_eq!(pp20_declared_len(b"PP20"), None);
+    let tiny = [b"PP20".as_slice(), &[0; 4], &[0; 4], &[0xff, 0xff, 0xff, 0]].concat();
+    assert!(decrunch_pp20_within(&tiny, 0).is_err());
 }
 
 #[test]
@@ -301,8 +366,8 @@ fn volume_files_that_share_blocks_stop_at_the_budget() {
     let lines = lines_of(&r, "shared.adf");
     assert!(
         lines.contains(
-            &"shared.adf: volume SHARED: the next file would pass the intake's 64 MiB budget; \
-              it and the files after it are not read"
+            &"shared.adf: volume SHARED: the rest of it would pass the intake's 64 MiB budget \
+              and is not read"
         ),
         "{lines:#?}"
     );
@@ -326,5 +391,32 @@ fn a_file_header_claiming_more_than_its_image_allocates_nothing_for_it() {
             .any(|w| w == "s000: byte size 67108864 passes the image size 901120"),
         "{:?}",
         vol.warnings
+    );
+}
+
+#[test]
+fn many_small_files_are_charged_for_their_bookkeeping() {
+    // 877 empty files with 30-character names (every block the builder can give them): their
+    // bytes are nothing, their list and map entries are not.
+    let names: Vec<String> = (0..877).map(|i| format!("f{i:029}")).collect();
+    let nodes: Vec<Node> = names
+        .iter()
+        .map(|n| Node::File(Box::leak(n.clone().into_boxed_str()), Vec::new()))
+        .collect();
+    let adf = ImageBuilder::new(false).build("BOOK", &nodes);
+    let (vol, walk) = peak_of(|| read_ofs(&adf).unwrap());
+    assert_eq!(vol.files.len(), 877);
+    assert!(
+        walk <= vol.held,
+        "the walk held {walk} bytes, charged {}",
+        vol.held
+    );
+    let held = vol.held;
+    drop(vol);
+    let (r, whole) = peak_of(|| intake(vec![file("book.adf".into(), adf)]));
+    assert_eq!(r.files.len(), 877);
+    assert!(
+        whole <= held,
+        "the intake held {whole} bytes, charged {held}"
     );
 }

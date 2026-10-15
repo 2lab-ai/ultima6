@@ -23,6 +23,22 @@ const ST_ROOT: i32 = 1;
 const ST_USERDIR: i32 = 2;
 const ST_FILE: i32 = -3;
 
+/// Directory levels below the root the walk enters; a directory deeper than that is not read
+/// (one warning per volume). Real Amiga floppies nest a few levels. 64 keeps a path under
+/// 64 x 31 = 1,984 bytes (names are at most 30 characters) and the walk's recursion shallow
+/// on the 1 MiB stack a wasm build gets.
+pub const MAX_DEPTH: usize = 64;
+/// Warnings a volume lists; the rest are counted in one more line.
+pub const MAX_WARNINGS: usize = 32;
+/// Room the intake needs in front of a path for its key: the volume name (at most 30
+/// characters) and a slash.
+const KEY_PREFIX: usize = 31;
+/// What each file, directory and warning the walk keeps is charged besides its bytes and text:
+/// its list and map entries, the `String` and `Vec` headers, its block in the visited set, and
+/// the same again in the intake's maps. An empty file costs about 270 bytes through the whole
+/// intake, its 61 bytes of name twice included; it is charged 378 (tests/budget.rs).
+pub const ENTRY_BYTES: usize = 256;
+
 #[derive(Clone, Debug, Default)]
 pub struct OfsVolume {
     pub name: String,
@@ -31,10 +47,15 @@ pub struct OfsVolume {
     pub files: Vec<(String, Vec<u8>)>,
     /// Directory paths seen (relative to the volume, "" omitted).
     pub dirs: Vec<String>,
-    /// Problems found while walking (bad checksums, broken chains).
+    /// Problems found while walking (bad checksums, broken chains): at most [`MAX_WARNINGS`],
+    /// then a line for directories past [`MAX_DEPTH`] and one counting the warnings not listed.
     pub warnings: Vec<String>,
-    /// The walk stopped at a file whose bytes would take `files` past the limit given to
-    /// [`read_ofs_within`]: that file and the ones after it are not read.
+    /// What the walk charged against its limit: each file's bytes (as reserved) and its path
+    /// twice (the key and an index copy, with room for the intake's volume prefix in front of
+    /// each), each directory path and each listed warning, and [`ENTRY_BYTES`] for each of them.
+    pub held: usize,
+    /// The walk stopped where the next charge would have passed the limit given to
+    /// [`read_ofs_within`]: the rest of the volume is not read.
     pub limit_reached: bool,
 }
 
@@ -91,9 +112,13 @@ struct Reader<'a> {
     index: BTreeMap<String, usize>,
     dirs: Vec<String>,
     warnings: Vec<String>,
-    /// Bytes `files` may hold together, and hold now.
+    /// Warnings past [`MAX_WARNINGS`]: counted, not kept.
+    unlisted: usize,
+    /// A directory past [`MAX_DEPTH`] was met (and not entered).
+    too_deep: bool,
+    /// Bytes the lists may hold together ([`OfsVolume::held`]), and hold now.
     limit: usize,
-    total: usize,
+    held: usize,
     limit_reached: bool,
 }
 
@@ -102,20 +127,42 @@ impl Reader<'_> {
         b > 1 && (b as usize) < self.blocks
     }
 
-    fn check_header(&mut self, b: usize, what: &str) {
-        if !block_checksum_ok(self.img, b) {
-            self.warnings
-                .push(format!("{what}: bad block checksum at {b}"));
+    /// Charges `n` bytes, or stops the walk when they would pass the limit.
+    fn charge(&mut self, n: usize) -> bool {
+        if self.limit_reached || n > self.limit - self.held {
+            self.limit_reached = true;
+            return false;
+        }
+        self.held += n;
+        true
+    }
+
+    /// Lists a warning while fewer than [`MAX_WARNINGS`] are listed; counts it after that.
+    fn warn(&mut self, msg: impl FnOnce() -> String) {
+        if self.warnings.len() >= MAX_WARNINGS {
+            self.unlisted += 1;
+            return;
+        }
+        let w = msg();
+        if self.charge(w.len() + ENTRY_BYTES) {
+            self.warnings.push(w);
         }
     }
 
-    /// Map semantics: a repeated path replaces the bytes but keeps its first position.
-    fn set_file(&mut self, path: String, bytes: Vec<u8>) {
-        self.total += bytes.len();
+    fn check_header(&mut self, b: usize, what: &str) {
+        if !block_checksum_ok(self.img, b) {
+            self.warn(|| format!("{what}: bad block checksum at {b}"));
+        }
+    }
+
+    /// Map semantics: a repeated path replaces the bytes but keeps its first position. The
+    /// bytes and `key` were charged by [`Reader::read_file`]; a repeated path gives back its
+    /// earlier bytes and the key it does not store again.
+    fn set_file(&mut self, path: String, bytes: Vec<u8>, key: usize) {
         match self.index.get(&path) {
             Some(&i) => {
                 let old = std::mem::replace(&mut self.files[i].1, bytes);
-                self.total -= old.len();
+                self.held -= old.capacity() + key;
             }
             None => {
                 self.index.insert(path.clone(), self.files.len());
@@ -126,26 +173,34 @@ impl Reader<'_> {
 }
 
 impl Reader<'_> {
-    /// The file's bytes, or `None` when they would take the files read past the limit (nothing
-    /// is read then).
-    fn read_file(&mut self, hdr: usize, path: &str) -> Result<Option<Vec<u8>>, Error> {
-        let img = self.img;
-        let size = u32_at(img, hdr * BS + 324) as usize;
+    /// The file's bytes, or `None` when they and `key` (what its path costs) would pass the
+    /// limit (nothing is read then). Both are charged before the bytes are reserved and given
+    /// back if the read fails.
+    fn read_file(&mut self, hdr: usize, path: &str, key: usize) -> Result<Option<Vec<u8>>, Error> {
+        let size = u32_at(self.img, hdr * BS + 324) as usize;
         // A file's bytes sit in the image's blocks, at most a block's worth in each, so no file
         // is larger than its image. A larger byte_size is corrupt: refused before any read (a
         // self-linked extension chain would otherwise read up to `blocks` tables of it).
-        if size > img.len() {
+        if size > self.img.len() {
             return Err(Error::new(format!(
                 "{path}: byte size {size} passes the image size {}",
-                img.len()
+                self.img.len()
             )));
         }
-        // At most byte_size bytes are read, so this keeps the files within the limit.
-        if size > self.limit - self.total {
+        if !self.charge(size + key) {
             return Ok(None);
         }
-        // Reserves at most the image (byte_size was checked against it above).
-        let mut out = Vec::with_capacity(size.min(self.blocks * BS));
+        let read = self.read_blocks(hdr, path, size);
+        if read.is_err() {
+            self.held -= size + key;
+        }
+        read.map(Some)
+    }
+
+    fn read_blocks(&mut self, hdr: usize, path: &str, size: usize) -> Result<Vec<u8>, Error> {
+        let img = self.img;
+        // Exactly the byte size, so the bytes never move to a larger block as they grow.
+        let mut out = Vec::with_capacity(size);
         let per_block = if self.ffs { BS } else { BS - 24 };
         let mut table = hdr as u32;
         let mut hops = 0usize;
@@ -181,8 +236,7 @@ impl Reader<'_> {
                         )));
                     }
                     if !block_checksum_ok(img, db as usize) {
-                        self.warnings
-                            .push(format!("{path}: bad data block checksum at {db}"));
+                        self.warn(|| format!("{path}: bad data block checksum at {db}"));
                     }
                     n = (u32_at(img, from + 12) as usize).min(n);
                     from += 24;
@@ -198,10 +252,11 @@ impl Reader<'_> {
                 out.len()
             )));
         }
-        Ok(Some(out))
+        Ok(out)
     }
 
-    fn walk_dir(&mut self, dir_block: usize, prefix: &str) {
+    /// Walks the directory at `dir_block`, `depth` levels below the root (the root is 0).
+    fn walk_dir(&mut self, dir_block: usize, prefix: &str, depth: usize) {
         let img = self.img;
         let here = if prefix.is_empty() { "/" } else { prefix };
         for i in 0..TABLE_LONGS {
@@ -211,12 +266,12 @@ impl Reader<'_> {
                     return;
                 }
                 if !self.valid(b) {
-                    self.warnings.push(format!("{here}: bad hash entry {b}"));
+                    self.warn(|| format!("{here}: bad hash entry {b}"));
                     break;
                 }
                 let blk = b as usize;
                 if !self.seen.insert(blk) {
-                    self.warnings.push(format!("{here}: loop at block {b}"));
+                    self.warn(|| format!("{here}: loop at block {b}"));
                     break;
                 }
                 let name = bcpl_name(img, blk);
@@ -228,25 +283,27 @@ impl Reader<'_> {
                 let kind = s32_at(img, blk * BS);
                 let sec = s32_at(img, blk * BS + BS - 4);
                 if kind != T_HEADER {
-                    self.warnings
-                        .push(format!("{path}: block {b} has type {kind}"));
+                    self.warn(|| format!("{path}: block {b} has type {kind}"));
                 } else {
                     self.check_header(blk, &path);
                     if sec == ST_FILE {
-                        match self.read_file(blk, &path) {
-                            Ok(Some(bytes)) => self.set_file(path, bytes),
-                            Ok(None) => {
-                                self.limit_reached = true;
-                                return;
-                            }
-                            Err(err) => self.warnings.push(err.to_string()),
+                        let key = 2 * (KEY_PREFIX + path.len()) + ENTRY_BYTES;
+                        match self.read_file(blk, &path, key) {
+                            Ok(Some(bytes)) => self.set_file(path, bytes, key),
+                            Ok(None) => return,
+                            Err(err) => self.warn(|| err.to_string()),
                         }
                     } else if sec == ST_USERDIR {
-                        self.dirs.push(path.clone());
-                        self.walk_dir(blk, &path);
+                        if depth >= MAX_DEPTH {
+                            self.too_deep = true;
+                        } else if self.charge(path.len() + ENTRY_BYTES) {
+                            self.dirs.push(path.clone());
+                            self.walk_dir(blk, &path, depth + 1);
+                        } else {
+                            return;
+                        }
                     } else {
-                        self.warnings
-                            .push(format!("{path}: skipped entry with sec_type {sec}"));
+                        self.warn(|| format!("{path}: skipped entry with sec_type {sec}"));
                     }
                 }
                 b = u32_at(img, blk * BS + BS - 16);
@@ -259,9 +316,9 @@ pub fn read_ofs(img: &[u8]) -> Result<OfsVolume, Error> {
     read_ofs_within(img, usize::MAX)
 }
 
-/// As [`read_ofs`], but the files read come to at most `limit` bytes together: the walk stops
-/// before the first file that would pass it ([`OfsVolume::limit_reached`]). The intake passes
-/// what is left of its budget.
+/// As [`read_ofs`], but what the walk keeps ([`OfsVolume::held`]) comes to at most `limit`
+/// bytes: it stops before the first charge that would pass it ([`OfsVolume::limit_reached`]).
+/// The intake passes what is left of its budget.
 pub fn read_ofs_within(img: &[u8], limit: usize) -> Result<OfsVolume, Error> {
     let dos_type = adf_dos_type(img)
         .ok_or_else(|| Error::new("not an AmigaDOS image (boot block lacks DOS signature)"))?;
@@ -289,18 +346,31 @@ pub fn read_ofs_within(img: &[u8], limit: usize) -> Result<OfsVolume, Error> {
         index: BTreeMap::new(),
         dirs: Vec::new(),
         warnings: Vec::new(),
+        unlisted: 0,
+        too_deep: false,
         limit,
-        total: 0,
+        held: 0,
         limit_reached: false,
     };
     r.check_header(root, "root");
-    r.walk_dir(root, "");
+    r.walk_dir(root, "", 0);
+    // Two fixed lines, not charged.
+    let mut warnings = r.warnings;
+    if r.too_deep {
+        warnings.push(format!(
+            "directories nested more than {MAX_DEPTH} levels deep are not read"
+        ));
+    }
+    if r.unlisted > 0 {
+        warnings.push(format!("{} more warnings not listed", r.unlisted));
+    }
     Ok(OfsVolume {
         name: bcpl_name(img, root),
         dos_type,
         files: r.files,
         dirs: r.dirs,
-        warnings: r.warnings,
+        warnings,
+        held: r.held,
         limit_reached: r.limit_reached,
     })
 }

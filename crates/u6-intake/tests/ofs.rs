@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::ofs_builder::{ImageBuilder, Node, amiga_hash};
+use common::ofs_builder::{ImageBuilder, Node, amiga_hash, nested_dirs, shared_block_volume};
 use common::text;
 use u6_intake::{ADF_SIZE, read_ofs, read_ofs_within};
 
@@ -116,14 +116,49 @@ fn a_limit_stops_the_walk_before_the_file_that_would_pass_it() {
             Node::File("c", bytes(10, 3)),
         ],
     );
-    let all = read_ofs_within(&img, 3010).unwrap();
+    // Each file is charged its bytes, its path twice with 31 bytes of room, and 256 bytes.
+    let charge = |n: usize| n + 2 * (31 + 1) + 256;
+    let whole = read_ofs(&img).unwrap();
+    assert_eq!(whole.held, charge(1000) + charge(2000) + charge(10));
+    let all = read_ofs_within(&img, whole.held).unwrap();
     assert!(!all.limit_reached);
     assert_eq!(all.files.len(), 3);
-    let vol = read_ofs_within(&img, 2999).unwrap();
+    let vol = read_ofs_within(&img, charge(1000) + charge(2000) - 1).unwrap();
     assert!(vol.limit_reached);
+    assert_eq!(vol.held, charge(1000));
     let paths: Vec<&str> = vol.files.iter().map(|(p, _)| p.as_str()).collect();
     assert_eq!(paths, ["a"]);
     assert_eq!(vol.file("a"), Some(bytes(1000, 1).as_slice()));
     assert!(vol.warnings.is_empty(), "{:?}", vol.warnings);
     assert!(!read_ofs(&img).unwrap().limit_reached);
+}
+
+#[test]
+fn a_directory_chain_as_deep_as_the_disk_reads_on_a_small_stack() {
+    // 1,757 levels, every block of the disk; 512 KiB is half the stack a wasm build runs on.
+    let img = nested_dirs("DEEP", 1757, false);
+    let vol = std::thread::Builder::new()
+        .stack_size(512 << 10)
+        .spawn(move || read_ofs(&img).unwrap())
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(vol.dirs.len(), 64);
+    assert_eq!(
+        vol.warnings,
+        ["directories nested more than 64 levels deep are not read"]
+    );
+}
+
+#[test]
+fn a_file_keeps_no_more_capacity_than_its_bytes() {
+    // An image 300 bytes longer than its 1,760 blocks, holding an FFS file of 901,400 bytes
+    // read out of one data block (its header is its own extension block): longer than the
+    // blocks, within the image.
+    let mut img = shared_block_volume(1, 901_400);
+    img.extend_from_slice(&[0; 300]);
+    let vol = read_ofs(&img).unwrap();
+    let kept = &vol.files.iter().find(|(p, _)| p == "s000").expect("read").1;
+    assert_eq!(kept.len(), 901_400);
+    assert_eq!(kept.capacity(), kept.len());
 }
