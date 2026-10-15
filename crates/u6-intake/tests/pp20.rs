@@ -4,7 +4,7 @@ mod common;
 
 use std::path::Path;
 
-use common::pp20_encoder::crunch_pp20;
+use common::pp20_encoder::{crunch_pp20, max_ratio_pp20};
 use common::text;
 use u6_intake::{decrunch_pp20, is_pp20};
 
@@ -88,6 +88,31 @@ fn hostile_headers_error_instead_of_panicking() {
     assert_eq!(
         decrunch_pp20(b"PP20").unwrap_err().to_string(),
         "PP20 file truncated"
+    );
+}
+
+#[test]
+fn the_capacity_check_admits_the_formats_best_ratio_and_refuses_past_it() {
+    for len in [6, 7, 13, 100, 4097, 65_536, 1 << 20] {
+        let packed = max_ratio_pp20(len, 0x42);
+        assert!(decrunch_pp20(&packed) == Ok(vec![0x42; len]), "{len}");
+        // 56/3 output bytes per stream byte, less a fixed overhead (the literal, the match's
+        // class and offset bits, the padding): the bound is the format's own.
+        let cap = 56 * (packed.len() - 12) / 3;
+        assert!(len <= cap, "{len}: capacity {cap}");
+        if len > 4096 {
+            assert!(cap - len < 64, "{len}: capacity {cap}");
+        }
+    }
+    // One byte more than the stream can hold is refused before anything is decoded (the
+    // stream would run out of bits anyway).
+    let mut packed = max_ratio_pp20(65_536, 0x42);
+    let n = packed.len();
+    let over = 56 * (n - 12) / 3 + 1;
+    packed[n - 4..n - 1].copy_from_slice(&[(over >> 16) as u8, (over >> 8) as u8, over as u8]);
+    assert_eq!(
+        decrunch_pp20(&packed).unwrap_err().to_string(),
+        format!("PP20: declares {over} bytes, more than its stream can hold")
     );
 }
 

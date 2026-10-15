@@ -152,3 +152,42 @@ Live check2 on preview `cf99e9f2` and on production: 10 requests, 0 foreign, 0 e
 
 Gates on `517b2ba`: fmt, clippy, 793 tests (`--profile gate`), web 29/29. The wasm is unchanged at 1,759,472 B, so no redeploy was needed.
 
+
+## intake-budget — closed 2026-10-16
+
+| Unit | Branch | Result |
+|---|---|---|
+| intake-budget | fix/m2r6-intake-budget | Merged as `dca61f5` (head `43c747d`). See the notes below. |
+
+- **What was built:** the intake's whole output is bounded at 64 MiB.
+  - Every kept byte is charged by capacity: disks, labels, loose files and their keys, the report lines.
+  - The staging lists and the sort scratch are charged.
+  - 4,096 B of first allocations are reserved.
+  - Give-backs are capped at the starting amount, with a `debug_assert`.
+  - Names are compared in place.
+  - The worst case is 57.5 MB.
+- **Review rounds:**
+  - 3–4 (opus): uncharged label and key copies, a 351 MiB report.
+  - 5 (gpt6): length charged instead of capacity.
+  - 6–7 (both): the nice items.
+  - Final: gpt6 APPROVE, and opus APPROVE with all its hostile probes stopping at the budget.
+- **Gates on dca61f5:** fmt, clippy, 856 tests (`--profile gate`), web 41/41; amifs OK; real-data identity PASS against 3349a83.
+- **Deploys:** preview 3080f5b7, then production f6c06291. live-check2 on both: 10 requests, 0 foreign, 0 errors. The dispatcher read the Journey Onward frame.
+
+## zip-slice — closed 2026-10-16
+
+| Unit | Branch | Result |
+|---|---|---|
+| zip-slice | fix/m2r6-zip-slice | Merged as `0fff6c3` (head `0939b17`). See the notes below. |
+
+- **What was built:** a dropped zip is read with `Blob.slice`: the central directory and the wanted disk entries only.
+  - The end record is chosen once, on the original bytes, by one documented rule: containment, then best fit, then EOF, then the last one.
+  - A directory must start with a central record and lie before its end records before it can rank.
+  - The rebuilt zip is padded with a 65,535-byte zero comment, so it cannot choose its end record again.
+  - The end of the file is read at most 3 times.
+- **Review rounds 2–7** (opus and gpt6 each round). Planted records, fake Zip64 locators, the rebuilt-offset attacks XRB0/XRB1, a declared directory that does not exist (XR2), the read bound (XF, XN1), the directory limit (XN4), a directory running past its record (XN5).
+- **Final:** both reviewers APPROVE. Opus's 60k fuzz found 0 disagreements and 0 panics.
+- **Tests:** an end-record table of 20+ rows, and every rule's mutation fails its own row.
+- **Gates on 0fff6c3:** 887 tests (`--profile gate`), web 45/45, amifs OK.
+- **Memory, measured on the merged main:** wasm after start 192.2 → 13.9 MiB; ArrayBuffer peak 186.9 → 8.5 MiB; renderer RSS peak 517.6 → 157.9 MiB.
+- **Deploys:** preview, then production 6847a75d. live-check2 found 0 foreign requests and 0 errors. The dispatcher read the walked-into-the-fight frame.

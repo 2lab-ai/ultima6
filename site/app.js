@@ -1,7 +1,10 @@
 // Static shell: loads the wasm engine, feeds it dropped files, keys and time, and paints its
 // RGBA frames. No game bytes are fetched or uploaded. Dropping files runs the intake
 // (zip/HFE/ADF -> game files) and boots the engine; the game files are kept in this browser's
-// IndexedDB so a reload starts the game again without a new drop. The engine runs the
+// IndexedDB so a reload starts the game again without a new drop. A large zip (the archive.org
+// one: flux streams and scans around three disk images) is not read whole: the engine names the
+// parts to read, its directory and its disk images, and the page reads only those (Blob.slice);
+// the input limit counts the bytes read of it, not its size. The engine runs the
 // original launcher's sequence: `u` (the opening, the main menu, character creation), then
 // `game`; when it ends (Quit in the menu) the page says so and offers Restart.
 //
@@ -32,7 +35,8 @@
 // The speed (1x .. 8x, Max) is the viewer's, kept in localStorage; - and = / + on the canvas,
 // the keypad - and +, and the Speed buttons change it.
 import init, {
-  Game, budget_ms, max_input_bytes, max_save_bytes, max_save_file_bytes, step_ms,
+  Game, budget_ms, input_too_large, max_input_bytes, max_save_bytes, max_save_file_bytes, step_ms,
+  zip_sliced,
 } from './pkg/u6_web.js';
 import {
   collect, forgetFiles, forgetSaves, loadFiles, loadSaves, saveFiles, storeSaves,
@@ -597,21 +601,35 @@ async function readSaves(saveItems) {
   return { files, note };
 }
 
+// A zip the engine reads in slices (`zip_sliced`): it names each part to read (the end of the
+// file, the directory if it starts before that, then each disk-image entry) and checks it, and
+// the page reads just that part. The engine collects the zip as one file of its disk images; a
+// part that does not check out, or one that would pass the input limit, fails the import before
+// it is read.
+async function readZipSlices(next, path, file) {
+  next.zip_open(path, file.size);
+  for (let part = next.zip_need(); part.length > 0; part = next.zip_need()) {
+    next.zip_give(new Uint8Array(await file.slice(part[0], part[1]).arrayBuffer()));
+  }
+}
+
 // An import: `items` ({ path, file }) read one at a time into a new Game, booted, kept. The
 // files of a `savegame/` folder among them are the save it starts from, and become the stored
 // save (replacing the old one) once it started; a drop of only such a folder resumes it with
-// the kept game files. It runs with the Saves paused (`queueImport`).
+// the kept game files. It runs with the Saves paused (`queueImport`). The input limit is
+// checked before anything is read for the files read whole, and again before each of them
+// with what wasm already holds (the parts read of a zip read in slices included); a zip read in
+// slices is checked part by part before each is read (only those parts count).
 async function importFiles(dropped) {
   needEngine();
-  const total = dropped.reduce((sum, { file }) => sum + file.size, 0);
+  const total = dropped.reduce(
+    (sum, { path, file }) => sum + (zip_sliced(path, file.size) ? 0 : file.size), 0);
   if (dropped.length === 0) {
     setStatus('No files in the drop.');
     return;
   }
   if (total > max_input_bytes()) {
-    setStatus(`The dropped files are ${Math.floor(total / 2 ** 20)} MiB together; this page ` +
-      `takes at most ${max_input_bytes() / 2 ** 20} MiB (the archive.org zip, the three disks ` +
-      'or the extracted files).');
+    setStatus(input_too_large(total));
     return;
   }
   const saveItems = dropped.filter(({ path }) => SAVE_PATH.test(path));
@@ -635,10 +653,23 @@ async function importFiles(dropped) {
   const next = new Game();
   let started = false;
   try {
+    // The files still to be read whole, together.
+    let whole = items.reduce(
+      (sum, { path, file }) => sum + (zip_sliced(path, file.size) ? 0 : file.size), 0);
     for (const { path, file } of items) {
-      setStatus(`Reading ${path}…`);
-      // The JS copy lives only until wasm has its own (load_file copies it in).
-      next.load_file(path, new Uint8Array(await file.arrayBuffer()));
+      if (zip_sliced(path, file.size)) {
+        setStatus(`Reading ${path}…`);
+        await readZipSlices(next, path, file);
+      } else {
+        if (next.input_held() + whole > max_input_bytes()) {
+          setStatus(input_too_large(next.input_held() + whole));
+          return;
+        }
+        whole -= file.size;
+        setStatus(`Reading ${path}…`);
+        // The JS copy lives only until wasm has its own (load_file copies it in).
+        next.load_file(path, new Uint8Array(await file.arrayBuffer()));
+      }
     }
     await attachSaves(next, imported);
     const report = await boot(next, 'read');
