@@ -171,11 +171,22 @@ fn print_with_a_more_prompt(mut s: State, shape: Shape, rows: u8) -> Engine {
         (2, 1),
         "the more prompt after two lines"
     );
+    // A frame already due is shown in the prompt (its lines are printed: the original drew it
+    // before the prompt), the queue set aside while it plays.
+    if shape.due() {
+        for _ in 0..60 {
+            if e.state().combat.shown == 1 {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        e.tick(&[], 16);
+    }
     let queued = if shape.playback { 0 } else { shape.lines - 3 };
     assert_eq!(
-        e.state().main.pending_print.len(),
-        usize::from(queued),
-        "lines still queued at the click"
+        (e.state().main.pending_print.len(), e.state().combat.shown),
+        (usize::from(queued), u64::from(shape.due())),
+        "(lines still queued, frames shown) at the click"
     );
     e
 }
@@ -307,18 +318,13 @@ fn the_outer_print_waits(seen: &Seen, shape: Shape, first: &str, prompt: &str) {
         seen.before
     );
     let at = line_at(&seen.lines, prompt);
-    let rest: Vec<usize> = (0..seen.lines.len())
-        .filter(|&i| later(&seen.lines[i]))
-        .collect();
+    // After the prompt: the end of the line the more prompt waited in (its text went out with
+    // the action's first newline), then every queued line in order.
+    let want = ["", "q3", "q4", "q5"];
     assert_eq!(
-        rest.len(),
-        usize::from(shape.lines - 3),
-        "every queued line is printed: {:?}",
-        seen.lines
-    );
-    assert!(
-        rest.iter().all(|&i| i > at),
-        "the queued lines follow the prompt: {:?}",
+        seen.lines[at + 1..],
+        want[..usize::from(shape.lines - 2)],
+        "the interrupted print's rest after the prompt, exactly: {:?}",
         seen.lines
     );
     assert_eq!(
@@ -527,8 +533,9 @@ fn a_frame_whose_lines_were_printed_comes_before_the_action() {
     // The end of turn and Get print their lines with a flush and show the frames after it
     // (main_loop/commands.rs end_of_turn, objects/commands/get.rs); the original drew each frame
     // where it was made (0x1213de / 0x12a962), before the lines after it. A frame made after the
-    // first line is on the screen by the time the more prompt of the third waits, so a ring
-    // readied there flashes after it, not before it (and the frame is not shown again later).
+    // first line is on the screen while the more prompt of the third waits (the prompt shows
+    // it), so a ring readied there flashes after it, not before it (and the frame is not shown
+    // again later).
     for shape in [EARLY, EARLY_LAST] {
         let seen = a_ring(shape, false);
         let ready = line_with(&seen.before, "R ");
@@ -611,10 +618,12 @@ fn an_action_inside_an_actions_more_prompt_comes_back_first() {
     );
     let s = e.state();
     let lines = &s.ui.messages;
-    let rest: Vec<usize> = (0..lines.len()).filter(|&i| later(&lines[i])).collect();
-    assert!(
-        rest.len() == 3 && rest.iter().all(|&i| i > ready),
-        "the interrupted print after both actions: {lines:?}"
+    // After the ring's prompt: the end of the trap's prompt line (its text went out with the
+    // ring's first newline), the end of the interrupted line, then every queued line in order.
+    assert_eq!(
+        lines[ready + 1..],
+        ["", "", "q3", "q4", "q5"],
+        "the interrupted print after both actions, exactly: {lines:?}"
     );
     assert_eq!(s.combat.shown, 4, "the interrupted frame after the queue");
     assert!(

@@ -965,10 +965,115 @@ fn frames_left_after_a_flush_come_before_the_lines_queued_after_it() {
         !at_frame.iter().any(new),
         "no line queued after the flush comes before the frame: {at_frame:?}"
     );
+    let s = e.state();
     assert_eq!(
-        e.state().ui.messages.iter().filter(|l| new(l)).count(),
+        s.ui.messages.iter().filter(|l| new(l)).count(),
         2,
         "the later lines are printed"
+    );
+    assert_eq!(s.combat.shown, 1, "the frame is shown once");
+}
+
+/// A message scroll two rows high that pages on its next newline: each line after a more
+/// prompt pages again (the prompt leaves one row, 0x107f2e..0x107fb4).
+fn paging_scroll() -> State {
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    let t = s.ui.tables.clone();
+    s.ui.text
+        .open(&t, crate::ui::WindowId::Messages, 0, 0, 0x27, 1);
+    s.ui.text.win_mut().flags = crate::ui::text::SCROLL | crate::ui::text::PAGED;
+    s.ui.text.more_rows = 1;
+    s
+}
+
+/// Runs a flush of `before` (queued first), a frame recorded after them, then `after` and the
+/// playback, in [`paging_scroll`]: per more prompt the frames shown when it waits (and the frame's
+/// mark then), then the frames shown at the end.
+fn frame_between(
+    before: Vec<crate::main_loop::Pending>,
+    after: &[&[u8]],
+) -> (Vec<(u64, Vec<usize>)>, u64) {
+    use crate::main_loop::{Pending, flush_prints};
+    let mut s = paging_scroll();
+    s.main.pending_print = before;
+    let after: Vec<Pending> = after
+        .iter()
+        .map(|f| Pending::Print(f.to_vec(), Vec::new()))
+        .collect();
+    let mut e = crate::Engine::with_game(s, crate::Files::default(), move |st, io| async move {
+        {
+            let mut s = st.borrow_mut();
+            present::capture(&mut s, 0, 0, 0, 0, present::FLASH_MS);
+            s.main.pending_print.extend(after);
+        }
+        flush_prints(&st, &io).await;
+        play_effects(&st, &io).await;
+    });
+    let mut prompts = Vec::new();
+    for _ in 0..8 {
+        for _ in 0..60 {
+            e.tick(&[], 16);
+        }
+        if e.finished() {
+            break;
+        }
+        let s = e.state();
+        let marks = s.combat.effects.iter().map(|f| f.mark).collect();
+        prompts.push((s.combat.shown, marks));
+        drop(s);
+        e.tick(&[crate::InputEvent::Key(crate::Key::Space)], 16);
+    }
+    assert!(e.finished(), "the flush and the playback ended");
+    (prompts, e.state().combat.shown)
+}
+
+#[test]
+fn a_frame_after_the_last_line_waits_for_its_more_key() {
+    // A flush whose more prompt comes on its last line, a frame recorded after that line, no
+    // newline held: the line is still being printed in the prompt, so the frame is not due
+    // there (the original draws it after the line, after the key); it is shown once, after.
+    use crate::main_loop::Pending;
+    let line = Pending::Print(b"a\n".to_vec(), Vec::new());
+    let (prompts, end) = frame_between(vec![line], &[]);
+    assert_eq!(
+        (prompts, end),
+        (vec![(0, vec![1])], 1),
+        "(frames shown, marks) at the prompt; frames shown at the end"
+    );
+}
+
+#[test]
+fn a_frame_after_a_line_is_due_once_that_line_is_printed() {
+    // The frame recorded right after the first line: not due at that line's own prompt (mark
+    // 1, the line in flight), due once it is printed, so the next line's prompt shows it; once.
+    use crate::main_loop::Pending;
+    let line = Pending::Print(b"a\n".to_vec(), Vec::new());
+    let (prompts, end) = frame_between(vec![line], &[b"b\n"]);
+    assert_eq!(
+        (prompts, end),
+        (vec![(0, vec![1]), (1, vec![])], 1),
+        "(frames shown, marks) at each prompt; frames shown at the end"
+    );
+}
+
+#[test]
+fn entries_that_print_no_text_count_before_a_frame() {
+    // A window select, a cursor move and an empty message (0x107dd8, 0x107e00, 0x108658 of
+    // nothing) are entries of the queue like the lines: a frame recorded after them is due
+    // once they are done, so the prompt of the line after it shows it.
+    use crate::main_loop::Pending;
+    use crate::ui::WindowId;
+    let before = vec![
+        Pending::Window(WindowId::Messages),
+        Pending::Cursor(0, 0),
+        Pending::Print(Vec::new(), Vec::new()),
+    ];
+    let (prompts, end) = frame_between(before, &[b"a\n"]);
+    assert_eq!(
+        (prompts, end),
+        (vec![(1, vec![])], 1),
+        "(frames shown, marks) at the prompt; frames shown at the end"
     );
 }
 

@@ -164,7 +164,12 @@ pub struct Effect {
     /// before showing it.
     pub cost: u16,
     /// Messages queued (`main.pending_print`) before it was presented, the one being printed
-    /// included: one less after each is printed ([`printed_one`]), 0 once they all are.
+    /// included: one less after each is printed ([`printed_one`]), 0 once they all are. That
+    /// holds for frames recorded before the entry in flight left the queue. A frame recorded
+    /// inside that entry's key wait (its more prompt) would be marked after the entries still
+    /// queued and come due one entry early; none is: everything that runs in a key wait records
+    /// inside an [`interrupt`] (the idle poll 0x105c8e, Ready, Unready, a trapped chest),
+    /// marked against an empty queue.
     pub mark: usize,
     /// The window was presented dissolving (0x1520e2): playback reveals it over its time.
     pub dissolve: bool,

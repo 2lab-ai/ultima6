@@ -1,7 +1,5 @@
 //! Map-window effects of hunk 18: the quake, the view reset and the full view redraw.
 
-use std::cell::RefCell;
-
 use super::seams;
 use crate::combat::present::capture_window;
 use crate::engine::Io;
@@ -33,24 +31,6 @@ pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
     }
     seams::refresh_view(s, io);
     capture_window(s, crate::combat::present::REFRESH_MS);
-}
-
-/// Port: frames that synchronous code recorded before a key wait and left unplayed are shown
-/// before the wait goes on, not after the next command. Left for a later playback while lines
-/// are queued (a print's more prompt waits here too, and playing would print the rest of its
-/// queue inside it) or Attack's newline is held ([`crate::combat::CombatState::swallow`],
-/// which the playback hands on). What runs inside the wait plays its own frames in place, the
-/// print's queue set aside ([`crate::combat::present::interrupt`]): the idle refresh 0x102ef0
-/// of 0x105c8e (a shake request) and the actions the key read runs (Ready, Unready, a trapped
-/// chest clicked in the inventory).
-pub async fn show_recorded(state: &RefCell<State>, io: &Io) {
-    let ready = {
-        let s = state.borrow();
-        !s.combat.effects.is_empty() && s.main.pending_print.is_empty() && !s.combat.swallow
-    };
-    if ready {
-        crate::combat::play_effects(state, io).await;
-    }
 }
 
 /// Original: 0x133a96 (ui: forget the map window's caches: every cell's tile 0xff (unknown),
