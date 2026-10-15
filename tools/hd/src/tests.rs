@@ -1400,19 +1400,29 @@ fn an_actor_over_two_sheets_is_one_group() {
     assert!(accepted(&w).is_disjoint(&ids));
     assert_eq!(r.get(Class::Actor, Status::Fallback), 100);
     let _ = first;
-    // A clean run of the same atlas: the group is generated, each frame listed once.
+    // A clean run of the same atlas: the group is generated, each of its frames listed once
+    // (and no image listed twice), and every one of them in the pack as it decodes.
     let w2 = work("big-actor-clean");
     atlas_into(&g, &w2);
     generate(&w2, |_, s| s);
-    ingest::ingest(&g, &w2, &t).unwrap();
+    let r = ingest::ingest(&g, &w2, &t).unwrap();
+    assert_eq!(r.get(Class::Actor, Status::Generated), 100 + 12);
     let list: Vec<ingest::Accepted> =
         serde_json::from_slice(&std::fs::read(w2.path("ingest.json")).unwrap()).unwrap();
-    let mine: Vec<&str> = list
-        .iter()
-        .map(|a| a.image.as_str())
-        .filter(|n| ids.contains(*n))
-        .collect();
-    assert_eq!(mine.len(), 100);
+    let mut all: Vec<&str> = list.iter().map(|a| a.image.as_str()).collect();
+    all.sort_unstable();
+    let n = all.len();
+    all.dedup();
+    assert_eq!(all.len(), n, "an image listed twice");
+    let mine: Vec<&str> = all.into_iter().filter(|n| ids.contains(*n)).collect();
+    let want: Vec<&str> = ids.iter().map(String::as_str).collect();
+    assert_eq!(mine, want);
+    let in_pack = packed(&w2);
+    assert!(
+        ids.is_subset(&in_pack),
+        "{:?}",
+        ids.difference(&in_pack).count()
+    );
     let _ = std::fs::remove_dir_all(&w.root);
     let _ = std::fs::remove_dir_all(&w2.root);
 }
