@@ -143,11 +143,11 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
 /// plus n paces is before the release, in the direction the pointer had at that time, at any
 /// host tick size. Time the step waits for itself (an effect, a prompt) counts toward its pace,
 /// not on top of it: added, the tick rounding of those waits would build up over a walk again (a
-/// 100 ms wait lasts 112 ms at 16 ms ticks, 104 at 8). The cost: in the original such a wait
-/// comes before its redraw, so each step that waits comes up to a pace early, and over a walk of
-/// such steps that adds up (unmeasured: the oracle captures have no held walk whose steps wait,
-/// only single clicks in the start fight, whose 143..541-frame turns mix the 68000's work with
-/// its waits).
+/// 110 ms wait lasts 120 ms at the hosts' 20 ms step, 112 at 8 ms ticks). The cost: in the
+/// original such a wait comes before its redraw, so each step that waits comes up to a pace
+/// early, and over a walk of such steps that adds up (unmeasured: the oracle captures have no
+/// held walk whose steps wait, only single clicks in the start fight, whose 143..541-frame turns
+/// mix the 68000's work with its waits).
 /// A step whose own waits outlast the pace samples on the next frame and the cadence starts
 /// again from that sample (no burst of the paces it outlasted). A hold that gives no walk (the
 /// pointer on the hero's cell or off the map, a blocked step) keeps the frame pace, and so does

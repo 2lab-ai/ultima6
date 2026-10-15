@@ -689,7 +689,8 @@ fn wait_lengths(costs: &'static [u16], tick: impl Fn(usize) -> u32) -> Vec<u64> 
     ends.windows(2).map(|w| w[1] - w[0]).collect()
 }
 
-/// The host's longest step (site/app.js caps a tick at 100 ms; u6-native steps 20 ms, spec 06).
+/// A stalled host tick. The hosts step [`crate::pacer::STEP_MS`] with the Pacer (spec 06);
+/// [`crate::Engine::tick`] still takes any length, and a tick this long is a host that stalls.
 const HOST_MAX_TICK: u32 = 100;
 
 #[test]

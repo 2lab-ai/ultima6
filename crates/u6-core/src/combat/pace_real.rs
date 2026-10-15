@@ -20,6 +20,7 @@ use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, PICK_MS};
 use crate::actors::walk::{FOLLOW_MS, STEP_MS};
 use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
+use crate::pacer::STEP_MS as HOST_STEP_MS;
 use crate::state::State;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
@@ -152,7 +153,8 @@ fn play_keys(
             }
         }
         tick(&mut e, &[InputEvent::Key(Key::Char('b'))]);
-        for _ in 0..30 {
+        // 480 ms for the break-off.
+        for _ in 0..480 / tick_ms {
             tick(&mut e, &[]);
         }
         settle(&mut e);
@@ -230,7 +232,7 @@ fn the_start_fight_turns_take_the_originals_time() {
     let (mut all, mut first5) = (Vec::new(), Vec::new());
     let mut spent: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
     for seed in SEEDS {
-        let turns = play(&files, seed, 16, false);
+        let turns = play(&files, seed, HOST_STEP_MS, false);
         let row: Vec<String> = turns
             .iter()
             .map(|t| format!("{}{}", frames(t.ms), if t.moved { "" } else { "*" }))
@@ -336,7 +338,7 @@ fn the_castle_without_the_fight_takes_the_originals_time() {
     let mut spent: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
     let mut all = Vec::new();
     for seed in SEEDS {
-        let turns = play_keys(&files, seed, &TOWN_KEYS, true, 16, false);
+        let turns = play_keys(&files, seed, &TOWN_KEYS, true, HOST_STEP_MS, false);
         let row: Vec<String> = turns
             .iter()
             .map(|t| format!("{}{}", frames(t.ms), if t.moved { "" } else { "*" }))

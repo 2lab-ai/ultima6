@@ -495,6 +495,9 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
         if speed != pacer.speed() {
             pacer.set_speed(speed);
             window.set_title(&pace::title(speed));
+            if let Some((_, out)) = sound.as_mut() {
+                out.set_speed(speed);
+            }
         }
         // The mouse, once per frame when it changed: window pixels to screen pixels.
         if let Some((x, y)) = window.get_mouse_pos(MouseMode::Clamp) {
