@@ -1,7 +1,8 @@
 //! Real data: the pace of the start fight against the original's. The game booted as the
 //! oracle's game-first disks start it (the shipped start state, its combat byte set), then party
 //! steps by arrow keys; per turn the engine time from the key to the next prompt, and what the
-//! waits were for. Skips without the zip; prints times and counts only.
+//! waits were for. Skips without the zip. Prints and fails with timings, seeds, step indices and
+//! counts the test made only (spec 01 §Rights): nothing read from the user's files.
 #![allow(clippy::disallowed_methods)] // the test reads the zip
 
 use std::cell::RefCell;
@@ -10,6 +11,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use u6_intake::{InputFile, intake};
+use u6_testkit::Quiet;
 
 use super::present::{
     FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, FRAME_MS, NAME_MS, PRINT_MS, REFRESH_MS,
@@ -74,7 +76,7 @@ fn files() -> Option<Files> {
         println!("skipped: no game files ({ZIP} not present)");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -114,7 +116,7 @@ fn play_keys(
     tick_ms: u32,
     zero_polls: bool,
 ) -> Vec<Turn> {
-    let mut state = State::new_game(files).unwrap_or_else(|_| panic!("the game files do not load"));
+    let mut state = State::new_game(files).quiet();
     state.rng.seed(seed);
     let keep = Rc::new(RefCell::new(None));
     let k = Rc::clone(&keep);
