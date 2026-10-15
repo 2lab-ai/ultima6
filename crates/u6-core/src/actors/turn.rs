@@ -455,8 +455,6 @@ fn refill(s: &mut State) {
     }
 }
 
-/// Original: 0x1213de (actors: world turn: let NPCs act until the player's character is next)
-///
 /// What the port waits at the pick of `actor` ([`PICK_MS`]), with [`COMBAT_NPC_MS`] more when
 /// an NPC turn (`npc`) in a combat worktype runs: in a time stop, or on another level than the
 /// party, 0x1200b0 ends the turn at once (0x1200e8..0x120112, [`npc::npc_turn_sync`]) and no
@@ -468,6 +466,8 @@ fn pick_ms(s: &State, actor: usize, npc: bool) -> u16 {
     PICK_MS + if fights { COMBAT_NPC_MS } else { 0 }
 }
 
+/// Original: 0x1213de (actors: world turn: let NPCs act until the player's character is next)
+///
 /// After the bookkeeping ([`leader_bookkeeping`], [`formation`], [`go_to_schedules`]), picks
 /// the next actor by movement points again and again; when nobody near the party has points
 /// left all actors are refilled and the clock advances one minute ([`clock::tick`]). The pick
@@ -478,8 +478,7 @@ fn pick_ms(s: &State, actor: usize, npc: bool) -> u16 {
 /// Port: the original draws as it goes and is as slow as that drawing; the port waits the
 /// measured time on the engine clock instead, at each pick ([`pick_ms`]: [`PICK_MS`], and
 /// [`COMBAT_NPC_MS`] before an NPC turn in a combat worktype that runs) and before each refresh
-/// of a changed view
-/// ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile.
+/// of a changed view ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile.
 pub async fn world_turn(state: &RefCell<State>, io: &Io) {
     leader_bookkeeping(&mut state.borrow_mut());
     raise_if_dead(state, io).await;
