@@ -14,8 +14,8 @@
 //!   the common violations into lint errors.
 //!
 //! Layout (one directory per work unit, spec 03 §6): `engine` (executor, `Io`), `state`
-//! (aggregate + loading), `rng`, `files`, `stub`, then `gfx/`, `map/`, `objects/`, `ui/`,
-//! `actors/`, `converse/` and `main_loop`.
+//! (aggregate + loading), `rng`, `files`, `stub`, `pacer` (the hosts' fixed step and speed,
+//! spec 06), then `gfx/`, `map/`, `objects/`, `ui/`, `actors/`, `converse/` and `main_loop`.
 
 pub mod actors;
 pub mod combat;
@@ -30,6 +30,7 @@ pub mod magic;
 pub mod main_loop;
 pub mod map;
 pub mod objects;
+pub mod pacer;
 pub mod rng;
 pub mod saveload;
 pub mod sound;
