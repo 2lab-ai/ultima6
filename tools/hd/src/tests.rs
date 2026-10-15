@@ -2111,3 +2111,163 @@ fn ingest_never_empties_a_directory_slices_points_at() {
     let _ = std::fs::remove_dir_all(&w.root);
     let _ = std::fs::remove_dir_all(&t);
 }
+
+/// A runner whose answer per sheet is set between runs: the sheet as sent (passes), noise of
+/// the sheet's size (fails its gates), or an image two pixels narrower (another size). Each
+/// image is left outside the work dir under a name of its own, and removed when finished.
+struct Script {
+    at: PathBuf,
+    wrong: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    noise: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    calls: std::sync::Mutex<Vec<String>>,
+    n: AtomicUsize,
+}
+
+impl Runner for Script {
+    fn generate(&self, sheet: &Path, _prompt: &str, _dir: &Path) -> Result<PathBuf, String> {
+        let stem = sheet.file_stem().unwrap().to_str().unwrap().to_string();
+        let k = self.n.fetch_add(1, Ordering::SeqCst);
+        let to = self.at.join(format!("{stem}~{k}.png"));
+        let (w, h) = img::png_size(&std::fs::read(sheet).unwrap())?;
+        if self.wrong.lock().unwrap().contains(&stem) {
+            img::write_png(&to, &Rgba::new(w - 2, h))?;
+        } else if self.noise.lock().unwrap().contains(&stem) {
+            let mut out = Rgba::new(w, h);
+            for (i, p) in out.pixels.chunks_exact_mut(4).enumerate() {
+                let v = (i as u32).wrapping_mul(0x9e37_79b9).rotate_left(7);
+                p.copy_from_slice(&[v as u8, (v >> 8) as u8, (v >> 16) as u8, 255]);
+            }
+            img::write_png(&to, &out)?;
+        } else {
+            std::fs::copy(sheet, &to).map_err(|e| e.to_string())?;
+        }
+        self.calls.lock().unwrap().push(stem);
+        Ok(to)
+    }
+
+    fn finish(&self, image: &Path) {
+        std::fs::remove_file(image).unwrap();
+    }
+}
+
+#[test]
+fn a_wrong_size_output_end_to_end() {
+    use std::collections::BTreeSet;
+    let g = synthetic::game();
+    let plan = group::plan(&g);
+    let w = work("wrong-size");
+    let jobs = atlas_into(&g, &w);
+    let tile: Vec<&Job> = jobs.iter().filter(|j| j.kind == SheetKind::Tile).collect();
+    assert_eq!(tile.len(), 1);
+    let x = tile[0].sheet.clone();
+    let on_x: BTreeSet<u32> = tile[0].places.iter().map(|p| p.item).collect();
+    let s = Script {
+        at: temp("wrong-size-codex"),
+        wrong: Default::default(),
+        noise: Default::default(),
+        calls: Default::default(),
+        n: AtomicUsize::new(0),
+    };
+    let set = |m: &std::sync::Mutex<BTreeSet<String>>, v: &[&String]| {
+        *m.lock().unwrap() = v.iter().map(|s| (*s).clone()).collect();
+    };
+    // One run: the sheets it called, sorted, and its summary.
+    let run_once = |s: &Script| {
+        s.calls.lock().unwrap().clear();
+        let opts = RunOptions {
+            send: true,
+            limit: None,
+            parallel: 2,
+        };
+        let r = run::run(&w, s, &opts, &mut Vec::new()).unwrap();
+        let mut calls = s.calls.lock().unwrap().clone();
+        calls.sort();
+        (calls, r.ok, r.failed)
+    };
+    let sorted = |v: &[&Job]| {
+        let mut v: Vec<String> = v.iter().map(|j| j.sheet.clone()).collect();
+        v.sort();
+        v
+    };
+    let kept = |s: &Script| {
+        let mut v: Vec<String> = std::fs::read_dir(&s.at)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let all: Vec<&Job> = jobs.iter().collect();
+    let n = jobs.len();
+    // Run: the tile sheet comes back two pixels narrower. That call fails and records
+    // nothing; its image is kept where the call left it; every other sheet is done.
+    set(&s.wrong, &[&x]);
+    assert_eq!(run_once(&s), (sorted(&all), n - 1, 1));
+    assert!(run::output(&w, tile[0]).is_none());
+    let rejected = kept(&s);
+    assert_eq!(rejected.len(), 1);
+    assert!(rejected[0].starts_with(&format!("{x}~")));
+    // Resume: that sheet alone is called again (attempt 1 still); now it comes back the right
+    // size, as noise.
+    set(&s.wrong, &[]);
+    set(&s.noise, &[&x]);
+    assert_eq!(run_once(&s), (vec![x.clone()], 1, 0));
+    // Ingest: every item of that sheet fails, and is queued for its one re-roll.
+    let t = Thresholds::default();
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert_eq!(r.rerolled_items, on_x.len());
+    assert_eq!(r.refused_sheets, 0);
+    let jobs2 = w.read_jobs().unwrap();
+    let rerolls: Vec<&Job> = jobs2.iter().filter(|j| j.attempt == 2).collect();
+    assert_eq!(rerolls.len(), r.reroll_sheets);
+    let rerolled: BTreeSet<u32> = rerolls
+        .iter()
+        .flat_map(|j| j.places.iter().map(|p| p.item))
+        .collect();
+    assert_eq!(rerolled, on_x);
+    // Run: only the re-rolls are called, and come back the wrong size: failed, kept.
+    let rr: Vec<&String> = rerolls.iter().map(|j| &j.sheet).collect();
+    set(&s.noise, &[]);
+    set(&s.wrong, &rr);
+    assert_eq!(run_once(&s), (sorted(&rerolls), 0, rerolls.len()));
+    // Resume: the re-rolls alone again, as noise.
+    set(&s.wrong, &[]);
+    set(&s.noise, &rr);
+    assert_eq!(run_once(&s), (sorted(&rerolls), rerolls.len(), 0));
+    // Ingest: the second failure falls back, each group whole; no third attempt.
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert_eq!((r.rerolled_items, r.reroll_sheets), (0, 0));
+    assert_eq!(w.read_jobs().unwrap().len(), jobs2.len());
+    for class in Class::ALL {
+        let records: usize = on_x
+            .iter()
+            .map(|&i| &plan.items[i as usize])
+            .filter(|i| i.class == class)
+            .map(|i| members(&g, i).len())
+            .sum();
+        assert_eq!(r.get(class, Status::Fallback), records, "{class:?}");
+        assert_eq!(r.get(class, Status::Pending), 0, "{class:?}");
+        assert_eq!(r.get(class, Status::Failed), 0, "{class:?}");
+    }
+    assert!(r.get(Class::Actor, Status::Fallback) > 0);
+    // Nothing is left to run, and the rejected originals (two runs' worth) are all that is
+    // left where the calls put their images.
+    assert_eq!(run_once(&s), (vec![], 0, 0));
+    let left = kept(&s);
+    assert_eq!(left.len(), 1 + rerolls.len());
+    let mut stems: Vec<String> = left
+        .iter()
+        .map(|f| f.split('~').next().unwrap().to_string())
+        .collect();
+    stems.sort();
+    let mut want: Vec<String> = rr.iter().map(|s| (*s).clone()).collect();
+    want.push(x.clone());
+    want.sort();
+    assert_eq!(stems, want);
+    for f in &left {
+        let (fw, fh) = img::png_size(&std::fs::read(s.at.join(f)).unwrap()).unwrap();
+        assert_eq!((fw, fh), (SHEET_W - 2, SHEET_H), "{f}");
+    }
+    let _ = std::fs::remove_dir_all(&s.at);
+    let _ = std::fs::remove_dir_all(&w.root);
+}
