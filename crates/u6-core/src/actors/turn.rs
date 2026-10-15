@@ -1120,6 +1120,34 @@ mod tests {
         }
     }
 
+    /// The oracle's trace tool keeps its own copy of the worktypes that run a combat routine
+    /// (`COMBAT_ROUTINES` in tools/oracle/trace.mjs: it writes an NPC turn's `combat` from it, so
+    /// the traces never hold a worktype). It must be the port's set, every worktype the same.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // reads the tool's source, not the user's files
+    fn the_trace_tools_combat_worktypes_are_the_ports() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/oracle/trace.mjs");
+        let src = std::fs::read_to_string(path).expect("tools/oracle/trace.mjs");
+        let decl = "const COMBAT_ROUTINES = new Set([";
+        let start = src.find(decl).expect("the tool declares COMBAT_ROUTINES") + decl.len();
+        let list = &src[start..start + src[start..].find(']').expect("the set's end")];
+        let tool: std::collections::BTreeSet<u8> = list
+            .split(',')
+            .map(|v| {
+                let v = v.trim();
+                match v.strip_prefix("0x") {
+                    Some(h) => u8::from_str_radix(h, 16),
+                    None => v.parse(),
+                }
+                .unwrap_or_else(|_| panic!("a worktype in the tool's set: {v:?}"))
+            })
+            .collect();
+        let port: std::collections::BTreeSet<u8> = (0..=255)
+            .filter(|&wt| npc::runs_combat_routine(wt))
+            .collect();
+        assert_eq!(tool, port);
+    }
+
     #[test]
     fn a_dead_hero_brings_the_darkness_once_per_bookkeeping() {
         let mut s = world(&[]);

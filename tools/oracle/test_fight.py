@@ -25,9 +25,9 @@ trace = load("trace")
 
 
 def row(frame, reading, gap=0):
-    """A fight.mjs row with no CPU sample: [frame, reading, skipped, view, scroll, panel,
-    moved, hurt, sample, centre]."""
-    return [frame, reading, gap, 1, 1, 1, [], [], None, [0, 0]]
+    """A fight.mjs row with no CPU sample: [frame, reading, skipped, view changed, scroll
+    changed, panel changed, actors moved, actors hurt, sample, centre changed]."""
+    return [frame, reading, gap, False, False, False, 0, 0, None, False]
 
 
 def step(before=5, turn=30, after=60, first=1000):
@@ -64,6 +64,14 @@ class FramesOfStep(unittest.TestCase):
         s["rows"][-10][2] = 1
         with self.assertRaises(fight.Incomplete):
             fight.frames_of(s, IMAGE)
+
+    def test_a_capture_with_picture_hashes_instead_of_changes_is_refused(self):
+        # fight.mjs writes whether the view and the scroll changed, never their hashes (spec 01
+        # §Rights); a row with a hash is an old capture to rewrite.
+        t = step()
+        t["rows"][3][3] = 1743465692
+        with self.assertRaises(fight.Incomplete):
+            fight.frames_of(t, IMAGE)
 
     def test_a_capture_that_ends_before_the_prompt_settled_is_refused(self):
         with self.assertRaises(fight.Incomplete):

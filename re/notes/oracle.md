@@ -134,7 +134,15 @@ game's is another task: the game waits on the floppy. `fight.py` maps PCs to ima
 step 0x11d4ee, NPC turn 0x1200b0, scheduler 0x1213de in the routine and its callers (an object
 name 0x10eef8 apart). A capture is refused unless it holds every frame, none skipped, from a
 row before the key was taken to 60 frames of prompt after the turn (synthetic cases in
-`test_fight.py`), and lengths come from the frame numbers.
+`test_fight.py`), and lengths come from the frame numbers. Besides the sample, a row holds only
+booleans and counts (spec 01 §Rights): whether the view, the message scroll, the party panel and
+the view centre changed against the frame before, and how many actors moved or changed hit
+points; fight.mjs compares the picture hashes, places and hit points in the emulator and
+writes none of them, and fight.py refuses a row with a hash. The captures written before
+(`pace/fight-*`, 2026-10-14..15) were rewritten that way on 2026-10-16 by a one-off script
+outside the repo (and their logs' view centre, memory dumps and disassembly removed); fight.py
+gives every run the same output as before (the early-layout `fight-exp3` it could not read
+before either).
 
 Start fight, keys UP RIGHT LEFT RIGHT LEFT RIGHT LEFT, 3 boots (`pace/fight-r0..r2`), frames
 from the key taken to the prompt: 535 396 300 283 364 270 215 / 439 334 169 137 261 138 255 /

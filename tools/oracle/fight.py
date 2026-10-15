@@ -100,7 +100,8 @@ def frames_of(turn, image):
 
     Raises Incomplete unless the capture holds every emulated frame from before the key was
     taken (a row with the command loop still reading) through the turn to 60 frames of the
-    prompt after it, one row each, none skipped."""
+    prompt after it, one row each, none skipped, each with its view and message changes as
+    booleans (fight.mjs writes no picture hash, spec 01 §Rights)."""
     rows = turn["rows"]
     if not rows:
         raise Incomplete(f"step {turn['key']}: no rows")
@@ -120,11 +121,13 @@ def frames_of(turn, image):
         r[8][2] >> 12 for r in rows if r[8] and image.function(r[8][1]) is not None
     )
     page = pages.most_common(1)[0][0] if pages else None
-    out, pv, pm = [], None, None
+    if any(not isinstance(r[3], bool) or not isinstance(r[4], bool) for r in rows):
+        raise Incomplete(f"step {turn['key']}: a row without its view and message changes")
+    out = []
     for r in rows:
-        vch = pv is not None and r[3] != pv
-        mch = pm is not None and r[4] != pm
-        pv, pm = r[3], r[4]
+        # The view and the scroll changed against the frame before (fight.mjs compares them in
+        # the emulator; the step's first row is false).
+        vch, mch = r[3], r[4]
         if not lo <= r[0] <= hi:
             continue
         s = r[8]
