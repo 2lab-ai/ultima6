@@ -64,12 +64,13 @@ fn sent(w: &Work, job: &Job) -> Rgba {
 }
 
 /// "Generates" every sheet not done with `f` (sheet sent -> sheet back), recorded as run
-/// records a call's image.
+/// records a call's image, but whatever its size: what ingest does with an output of another
+/// size than its sheet (run itself refuses one).
 fn generate(w: &Work, f: impl Fn(&Job, Rgba) -> Rgba) {
     for job in w.read_jobs().unwrap() {
         if run::output(w, &job).is_none() {
             let back = f(&job, sent(w, &job));
-            run::record(w, &job, &img::encode_png(&back).unwrap()).unwrap();
+            run::record_unchecked(w, &job, &img::encode_png(&back).unwrap()).unwrap();
         }
     }
 }
@@ -1166,12 +1167,20 @@ fn resume_is_bound_to_the_job_and_a_valid_output() {
     img::put(&mut sheet, 0, 0, [1, 2, 3, 255]);
     img::write_png(&w.sheet(&j1.sheet), &sheet).unwrap();
     assert!(run::output(&w, j1).is_none());
-    // A call whose image does not decode records nothing.
+    // A call whose image does not decode, or is not the sheet's size, records nothing.
+    let before = std::fs::read(w.out(&jobs[2].sheet)).unwrap();
     assert!(run::record(&w, &jobs[2], b"\x89PNG\r\n\x1a\nnot really").is_err());
+    let (jw, jh) = (jobs[2].width, jobs[2].height);
+    for (dw, dh) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+        let other = Rgba::new(jw.saturating_add_signed(dw), jh.saturating_add_signed(dh));
+        let e = run::record(&w, &jobs[2], &img::encode_png(&other).unwrap()).unwrap_err();
+        assert!(e.contains(&format!("the sheet {jw} x {jh}")), "{e}");
+    }
     assert!(
         run::output(&w, &jobs[2]).is_some(),
         "the earlier output stays"
     );
+    assert_eq!(std::fs::read(w.out(&jobs[2].sheet)).unwrap(), before);
     // The fake runner sees exactly the jobs that are not done.
     let fake = Counting {
         calls: AtomicUsize::new(0),
@@ -1348,7 +1357,7 @@ fn an_actor_over_two_sheets_is_one_group() {
     // The second comes back the wrong size: refused, the whole group queued for its re-roll
     // (with every other item that sheet held).
     let small = img::encode_png(&Rgba::new(SHEET_W - 2, SHEET_H)).unwrap();
-    run::record(&w, &second, &small).unwrap();
+    run::record_unchecked(&w, &second, &small).unwrap();
     let r = ingest::ingest(&g, &w, &t).unwrap();
     let on_second: std::collections::BTreeSet<u32> = second.places.iter().map(|p| p.item).collect();
     assert_eq!(r.rerolled_items, on_second.len());
@@ -1889,4 +1898,170 @@ fn the_generated_image_is_moved_out_of_codex_home() {
     c.finish(&elsewhere);
     assert!(elsewhere.exists());
     let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
+fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
+    use std::time::{Duration, Instant};
+    let t = temp("pipes");
+    let home = t.join("home");
+    let dir = crate::work::ensure_dir(&t.join("dir")).unwrap();
+    std::fs::write(t.join("sheet.png"), b"x").unwrap();
+    let call = |bin: PathBuf, secs: u64, prompt: &str| {
+        let c = run::Codex {
+            bin,
+            home: home.clone(),
+            timeout: Duration::from_secs(secs),
+        };
+        let start = Instant::now();
+        (
+            c.generate(&t.join("sheet.png"), prompt, &dir),
+            start.elapsed(),
+        )
+    };
+    let big = "x".repeat(1 << 20);
+    // Keeps its input open and never reads it, so the prompt's write blocks: the deadline
+    // still stops it (the write is not what the call waits on).
+    let stuck = review_stub(&t, "stuck.sh", "sleep 30");
+    let (r, took) = call(stuck, 2, &big);
+    assert!(r.as_ref().unwrap_err().contains("timed out"), "{r:?}");
+    assert!(
+        took < Duration::from_secs(6),
+        "{took:?} (before: 30 s, the helper's sleep)"
+    );
+    // A helper that left the call's group (its own session) and holds the output open: the
+    // call ends, and the stream is given a bounded grace, not the rest of the deadline.
+    let thread = r#"echo '{"type":"thread.started","thread_id":"t1"}'"#;
+    for (name, then, secs) in [
+        ("escaped-exit.sh", "exit 0", 30),
+        ("escaped-hang.sh", "sleep 30", 2),
+    ] {
+        let pid = t.join(format!("{name}.pid"));
+        let body = format!(
+            "cat > /dev/null\n{thread}\n/usr/bin/perl -MPOSIX -e 'exit if fork; POSIX::setsid(); \
+             open(my $f, \">\", $ARGV[0]); print $f $$; close $f; sleep 20' \"{}\"\n{then}",
+            pid.display()
+        );
+        let (r, took) = call(review_stub(&t, name, &body), secs, "PROMPT");
+        let e = r.unwrap_err();
+        // The grace is 1 s; before it, the hang took the deadline + 5 s and the exit 20 s (the
+        // helper's life). Slack for a loaded machine.
+        let limit = Duration::from_secs(if secs == 2 { 6 } else { 8 });
+        assert!(took < limit, "{name}: {took:?} ({e})");
+        if secs == 2 {
+            assert!(e.contains("timed out"), "{name}: {e}");
+        } else {
+            assert_eq!(e, "the call's output did not end", "{name}");
+        }
+        let start = Instant::now();
+        while !pid.exists() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pid = std::fs::read_to_string(&pid).unwrap();
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-s", "KILL", pid.trim()])
+            .status();
+    }
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
+fn the_event_reader_holds_one_line_at_most() {
+    // A line over the cap is dropped up to its newline; the lines around it are kept, and
+    // only the first thread id is reported.
+    let mut stream = Vec::new();
+    stream.extend_from_slice(b"{\"type\":\"turn.started\"}\n");
+    stream.extend(std::iter::repeat_n(b'x', run::LINE_MAX + 1));
+    stream.extend_from_slice(b"{\"type\":\"thread.started\",\"thread_id\":\"hidden\"}\n");
+    stream.extend_from_slice(b"{\"type\":\"thread.started\",\"thread_id\":\"t-1\"}\n");
+    stream.extend_from_slice(b"{\"type\":\"thread.started\",\"thread_id\":\"t-2\"}\n");
+    let exact = format!("{{\"pad\":\"{}\"}}", "y".repeat(run::LINE_MAX - 10));
+    assert_eq!(exact.len(), run::LINE_MAX);
+    stream.extend_from_slice(exact.as_bytes());
+    stream.extend_from_slice(b"\n{\"last\":1}");
+    let mut kept = Vec::new();
+    let mut ids = Vec::new();
+    run::read_events(stream.as_slice(), &mut kept, |id| ids.push(id));
+    assert_eq!(ids, ["t-1"]);
+    let lines: Vec<&[u8]> = kept.split(|&b| b == b'\n').collect();
+    assert_eq!(lines.len(), 6, "five lines, each with its newline");
+    assert_eq!(lines[0], b"{\"type\":\"turn.started\"}");
+    assert!(lines[1].ends_with(b"\"t-1\"}"));
+    assert_eq!(lines[3], exact.as_bytes());
+    assert_eq!(lines[4], b"{\"last\":1}");
+    // The file keeps at most EVENTS_MAX bytes of a longer stream.
+    let line = b"{\"type\":\"item\"}\n";
+    let n = (run::EVENTS_MAX as usize / line.len()) * 2;
+    let long: Vec<u8> = line.iter().copied().cycle().take(n * line.len()).collect();
+    let mut kept = Vec::new();
+    run::read_events(long.as_slice(), &mut kept, |_| {});
+    assert!(kept.len() as u64 <= run::EVENTS_MAX && kept.len() as u64 > run::EVENTS_MAX - 64);
+}
+
+/// A runner that leaves each image outside the work dir (as codex does) and, when told to
+/// remove it, checks the output and its receipt are already written, byte for byte.
+struct Leaves {
+    at: PathBuf,
+    out: PathBuf,
+    small: String,
+    finished: std::sync::Mutex<Vec<String>>,
+}
+
+impl Runner for Leaves {
+    fn generate(&self, sheet: &Path, _prompt: &str, _dir: &Path) -> Result<PathBuf, String> {
+        let stem = sheet.file_stem().unwrap().to_str().unwrap();
+        let to = self.at.join(format!("{stem}.png"));
+        if stem == self.small {
+            img::write_png(&to, &Rgba::new(4, 4))?;
+        } else {
+            std::fs::copy(sheet, &to).map_err(|e| e.to_string())?;
+        }
+        Ok(to)
+    }
+
+    fn finish(&self, image: &Path) {
+        let stem = image.file_stem().unwrap().to_str().unwrap().to_string();
+        let out = std::fs::read(self.out.join(format!("{stem}.png"))).unwrap();
+        assert_eq!(out, std::fs::read(image).unwrap(), "{stem}: not the image");
+        assert!(
+            self.out.join(format!("{stem}.json")).exists(),
+            "{stem}: no receipt"
+        );
+        std::fs::remove_file(image).unwrap();
+        self.finished.lock().unwrap().push(stem);
+    }
+}
+
+#[test]
+fn the_call_s_image_is_removed_only_once_recorded() {
+    let g = synthetic::game();
+    let w = work("leaves");
+    let jobs = atlas_into(&g, &w);
+    let at = temp("leaves-codex");
+    let fake = Leaves {
+        at: at.clone(),
+        out: w.path("out"),
+        small: jobs[1].sheet.clone(),
+        finished: std::sync::Mutex::new(Vec::new()),
+    };
+    let opts = RunOptions {
+        send: true,
+        limit: None,
+        parallel: 2,
+    };
+    let s = run::run(&w, &fake, &opts, &mut Vec::new()).unwrap();
+    assert_eq!((s.ok, s.failed), (jobs.len() - 1, 1));
+    let mut finished = fake.finished.into_inner().unwrap();
+    finished.sort();
+    let mut want: Vec<String> = jobs.iter().map(|j| j.sheet.clone()).collect();
+    want.retain(|s| *s != jobs[1].sheet);
+    want.sort();
+    assert_eq!(finished, want);
+    // The image that was not recorded (another size) is where the call left it.
+    assert!(at.join(format!("{}.png", jobs[1].sheet)).exists());
+    assert!(run::output(&w, &jobs[1]).is_none());
+    let left: Vec<_> = std::fs::read_dir(&at).unwrap().collect();
+    assert_eq!(left.len(), 1);
+    let _ = std::fs::remove_dir_all(&at);
+    let _ = std::fs::remove_dir_all(&w.root);
 }

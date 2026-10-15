@@ -9,9 +9,10 @@
 //! sheet, the attempt, the prompt text and the sheet's bytes) and the output's digest, and the
 //! output still has that digest and the size the receipt records. Anything else — no receipt,
 //! another atlas generation, a changed prompt or sheet, a changed or truncated output — is not
-//! done, and is run again. A call whose image is not a decodable PNG fails and leaves nothing.
+//! done, and is run again. A call whose image is not a decodable PNG of the sheet's size fails,
+//! records nothing and leaves the image where the call put it.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -32,7 +33,8 @@ pub trait Runner: Sync {
     /// generated image's path.
     fn generate(&self, sheet: &Path, prompt: &str, dir: &Path) -> Result<PathBuf, String>;
 
-    /// After the image at `image` was read: removes what the call left of it.
+    /// After the image at `image` was recorded (output and receipt written): removes what the
+    /// call left of it.
     fn finish(&self, image: &Path) {
         let _ = image;
     }
@@ -69,6 +71,11 @@ impl Codex {
     }
 }
 
+/// Most bytes of one codex event line; a longer line is read and dropped whole.
+pub const LINE_MAX: usize = 64 << 10;
+/// How long the event reader is given, once the call's group is gone, to report its end.
+const CLEANUP: Duration = Duration::from_secs(1);
+
 /// Kills every process of the group `pgid` (the call and anything it started).
 fn kill_group(pgid: u32) {
     let _ = Command::new("/bin/kill")
@@ -78,19 +85,98 @@ fn kill_group(pgid: u32) {
         .status();
 }
 
+/// A spawned call: on drop, on every way out of [`Codex::generate`], its whole process group is
+/// killed and the call reaped.
+struct Group {
+    child: std::process::Child,
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        kill_group(self.child.id());
+        let _ = self.child.wait();
+    }
+}
+
+/// Reads codex's event stream `r` to its end in 8 KiB chunks: each line of at most
+/// [`LINE_MAX`] bytes goes to `events` while they hold under [`EVENTS_MAX`] bytes, and the first
+/// `thread.started` event's id goes to `thread` (once). A longer line is dropped up to its
+/// newline without being held, so memory stays bounded whatever the stream holds.
+pub fn read_events(mut r: impl Read, mut events: impl Write, mut thread: impl FnMut(String)) {
+    let mut kept = 0u64;
+    let mut sent = false;
+    let mut on_line = |line: &[u8]| {
+        if !sent
+            && let Ok(v) = serde_json::from_slice::<serde_json::Value>(line)
+            && v["type"] == "thread.started"
+            && let Some(id) = v["thread_id"].as_str()
+        {
+            sent = true;
+            thread(id.to_string());
+        }
+        if kept + (line.len() as u64) < EVENTS_MAX {
+            kept += line.len() as u64 + 1;
+            let _ = events
+                .write_all(line)
+                .and_then(|()| events.write_all(b"\n"));
+        }
+    };
+    let mut chunk = [0u8; 8192];
+    let mut line: Vec<u8> = Vec::new();
+    let mut dropping = false;
+    loop {
+        let n = match r.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let mut rest = &chunk[..n];
+        while !rest.is_empty() {
+            let (part, ends) = match rest.iter().position(|&b| b == b'\n') {
+                Some(i) => (&rest[..i], true),
+                None => (rest, false),
+            };
+            if !dropping && line.len() + part.len() <= LINE_MAX {
+                line.extend_from_slice(part);
+            } else {
+                dropping = true;
+                line = Vec::new();
+            }
+            if ends {
+                if !dropping {
+                    on_line(&line);
+                }
+                line.clear();
+                dropping = false;
+                rest = &rest[part.len() + 1..];
+            } else {
+                rest = &[];
+            }
+        }
+    }
+    if !dropping && !line.is_empty() {
+        on_line(&line);
+    }
+}
+
 enum Event {
     Thread(String),
     Done,
 }
 
 impl Runner for Codex {
+    /// One deadline covers the call: the prompt is written by its own thread and the events
+    /// read by another, while this one waits for the call to exit, the prompt to fail or the
+    /// deadline, whichever comes first; then the call's group is killed (on every path) and the
+    /// reader is given [`CLEANUP`] to report the stream's end.
     fn generate(&self, sheet: &Path, prompt: &str, dir: &Path) -> Result<PathBuf, String> {
         use std::os::unix::process::CommandExt;
         let deadline = Instant::now() + self.timeout;
         let (stderr, stderr_tmp, stderr_path) = work::create_temp(&dir.join("stderr.txt"), 0o644)?;
-        let (mut events, events_tmp, events_path) =
+        let (events, events_tmp, events_path) =
             work::create_temp(&dir.join("events.jsonl"), 0o644)?;
-        let mut child = Command::new(&self.bin)
+        let child = Command::new(&self.bin)
             .args(["exec", "-m", MODEL, "-c", "model_reasoning_effort=low"])
             .args([
                 "-s",
@@ -109,66 +195,71 @@ impl Runner for Codex {
             .process_group(0)
             .spawn()
             .map_err(|e| format!("{}: {e}", self.bin.display()))?;
-        let pgid = child.id();
-        let stdout = child.stdout.take().ok_or("no stdout")?;
-        let (tx, rx) = mpsc::channel();
-        // The reader streams the events to their file (up to EVENTS_MAX) and reports the
-        // thread id; it ends when every process of the group has closed the pipe.
+        let mut group = Group { child };
+        let (Some(stdout), Some(mut stdin)) = (group.child.stdout.take(), group.child.stdin.take())
+        else {
+            return Err("no pipes to the call".into());
+        };
+        // Two messages at most: the first thread id and the end.
+        let (tx, rx) = mpsc::sync_channel(2);
         std::thread::spawn(move || {
-            let mut kept = 0u64;
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
-                    && v["type"] == "thread.started"
-                    && let Some(id) = v["thread_id"].as_str()
-                {
-                    let _ = tx.send(Event::Thread(id.to_string()));
-                }
-                if kept + (line.len() as u64) < EVENTS_MAX {
-                    kept += line.len() as u64 + 1;
-                    let _ = writeln!(events, "{line}");
-                }
-            }
-            let _ = tx.send(Event::Done);
+            read_events(stdout, events, |id| {
+                let _ = tx.try_send(Event::Thread(id));
+            });
+            let _ = tx.try_send(Event::Done);
         });
-        if let Some(mut stdin) = child.stdin.take()
-            && let Err(e) = stdin.write_all(prompt.as_bytes())
-        {
-            // A call that does not take its prompt is stopped at once, with all it started.
-            kill_group(pgid);
-            let _ = child.wait();
-            let _ = work::commit(&stderr_tmp, &stderr_path);
-            let _ = work::commit(&events_tmp, &events_path);
-            return Err(format!("the call did not take its prompt: {e}"));
-        }
-        let status = loop {
-            if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
-                break Some(s);
+        let (wtx, wrx) = mpsc::sync_channel(1);
+        let text = prompt.to_owned();
+        std::thread::spawn(move || {
+            let r = stdin.write_all(text.as_bytes());
+            drop(stdin);
+            let _ = wtx.try_send(r);
+        });
+        let mut wrote = None;
+        let waited = loop {
+            if wrote.is_none()
+                && let Ok(r) = wrx.try_recv()
+            {
+                wrote = Some(r);
             }
-            if Instant::now() >= deadline {
-                break None;
+            if let Some(Err(e)) = &wrote {
+                break Err(format!("the call did not take its prompt: {e}"));
             }
-            std::thread::sleep(Duration::from_millis(200));
+            match group.child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {}
+                Err(e) => break Err(e.to_string()),
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                break Err(format!("timed out after {} s", self.timeout.as_secs()));
+            }
+            std::thread::sleep((deadline - now).min(Duration::from_millis(50)));
         };
         // Whatever the call left running goes with it.
-        kill_group(pgid);
-        let _ = child.wait();
-        let mut thread_id = None;
-        let mut ended = false;
-        while !ended {
-            let left = deadline
-                .saturating_duration_since(Instant::now())
-                .max(Duration::from_secs(5));
-            match rx.recv_timeout(left) {
-                Ok(Event::Thread(id)) => thread_id = Some(id),
-                Ok(Event::Done) | Err(mpsc::RecvTimeoutError::Disconnected) => ended = true,
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-            }
+        drop(group);
+        let grace = Instant::now() + CLEANUP;
+        if wrote.is_none() {
+            wrote = wrx
+                .recv_timeout(grace.saturating_duration_since(Instant::now()))
+                .ok();
         }
+        let mut thread_id = None;
+        let ended = loop {
+            match rx.recv_timeout(grace.saturating_duration_since(Instant::now())) {
+                Ok(Event::Thread(id)) => thread_id = Some(id),
+                Ok(Event::Done) | Err(mpsc::RecvTimeoutError::Disconnected) => break true,
+                Err(mpsc::RecvTimeoutError::Timeout) => break false,
+            }
+        };
         let _ = work::commit(&stderr_tmp, &stderr_path);
         let _ = work::commit(&events_tmp, &events_path);
-        let Some(status) = status else {
-            return Err(format!("timed out after {} s", self.timeout.as_secs()));
-        };
+        let status = waited?;
+        match wrote {
+            Some(Ok(())) => {}
+            Some(Err(e)) => return Err(format!("the call did not take its prompt: {e}")),
+            None => return Err("the call did not take its prompt".into()),
+        }
         if !ended {
             return Err("the call's output did not end".into());
         }
@@ -194,7 +285,7 @@ impl Runner for Codex {
     }
 
     /// The image is moved, not copied: its thread's folder under `generated_images` goes once
-    /// the image was read (codex's own session log, outside the tool's reach, keeps the sheet
+    /// the image was recorded (codex's own session log, outside the tool's reach, keeps the sheet
     /// that was sent).
     fn finish(&self, image: &Path) {
         let Some(thread) = image.parent() else { return };
@@ -238,8 +329,22 @@ pub fn identity(work: &Work, job: &Job) -> Result<String, String> {
     ]))
 }
 
-/// Records `png` as `job`'s output: refused unless it decodes; the image, then its receipt.
+/// Records `png` as `job`'s output: refused unless its header is the size of the sheet that was
+/// sent and it decodes at that size; the image, then its receipt.
 pub fn record(work: &Work, job: &Job, png: &[u8]) -> Result<(), String> {
+    let (width, height) = img::png_size(png).map_err(|e| format!("not a PNG: {e}"))?;
+    if (width, height) != (job.width, job.height) {
+        return Err(format!(
+            "the image is {width} x {height}, the sheet {} x {}",
+            job.width, job.height
+        ));
+    }
+    record_unchecked(work, job, png)
+}
+
+/// [`record`] without the size check: the image as it is, for tests of what ingest does with an
+/// output of another size (recorded by an earlier tool, or edited in the work dir).
+pub(crate) fn record_unchecked(work: &Work, job: &Job, png: &[u8]) -> Result<(), String> {
     let (width, height) = img::png_size(png).map_err(|e| format!("not a PNG: {e}"))?;
     img::decode_png(png, width, height).map_err(|e| format!("does not decode: {e}"))?;
     let receipt = Receipt {
@@ -360,12 +465,14 @@ pub fn run(
     Ok(summary)
 }
 
-/// One call: the generated image recorded as the job's output.
+/// One call: the generated image recorded as the job's output, its receipt written, and only
+/// then what the call left of it removed. A call whose image is not recorded keeps it there.
 fn call(work: &Work, runner: &dyn Runner, job: &Job) -> Result<(), String> {
     let dir = work::ensure_dir(&work.codex_dir(&job.sheet))?;
     let sheet = work.sheet(&job.sheet);
     let got = runner.generate(&sheet, &prompt::text(job), &dir)?;
-    let png = img::read_capped(&got, img::PNG_MAX_BYTES);
+    let png = img::read_capped(&got, img::PNG_MAX_BYTES)?;
+    record(work, job, &png)?;
     runner.finish(&got);
-    record(work, job, &png?)
+    Ok(())
 }
