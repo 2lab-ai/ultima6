@@ -10,6 +10,7 @@
 use super::real_tests::{files, png};
 use super::*;
 use crate::objects::{ObjectId, READIED};
+use u6_testkit::Quiet;
 
 const OUT: &str = "/tmp/claude-501/m2-mouse";
 
@@ -22,7 +23,7 @@ struct Play {
 impl Play {
     fn boot(files: &Files) -> Play {
         let mut p = Play {
-            e: Engine::game_first(files.clone(), 0).unwrap_or_else(|e| panic!("{e}")),
+            e: Engine::game_first(files.clone(), 0).quiet(),
         };
         p.idle(200);
         p
@@ -31,7 +32,7 @@ impl Play {
     /// As [`Play::boot`] (seed 0, `game` at once), with a handle on the state to change it
     /// between ticks.
     fn boot_with_state(files: &Files) -> (Play, Rc<RefCell<State>>) {
-        let mut state = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+        let mut state = State::new_game(files).quiet();
         state.rng.seed(0);
         let keep = Rc::new(RefCell::new(None));
         let k = Rc::clone(&keep);
@@ -72,7 +73,7 @@ impl Play {
         let path = self.hold((88, 88 + 48), ((ms + 8) / 16) as usize);
         self.settle(4000);
         let at = self.leader_at();
-        steps(from, &path).iter().sum::<u16>() + steps(*path.last().unwrap(), &[at])[0]
+        steps(from, &path).iter().sum::<u16>() + steps(*path.last().quiet(), &[at])[0]
     }
 
     /// The command loop waits for a command key and nothing is queued.
@@ -137,7 +138,7 @@ impl Play {
             }
             self.e.tick(&[], 16);
         }
-        assert_eq!(self.e.io().pending_events(), 0, "the game took {evs:?}");
+        assert!(self.e.io().pending_events() == 0, "the game took {evs:?}");
         self.idle(40);
     }
 
@@ -158,9 +159,9 @@ impl Play {
     }
 
     fn receipt(&self, name: &str) {
-        std::fs::create_dir_all(OUT).unwrap();
+        std::fs::create_dir_all(OUT).quiet();
         let path = format!("{OUT}/{name}.png");
-        std::fs::write(&path, png(self.e.frame())).unwrap();
+        std::fs::write(&path, png(self.e.frame())).quiet();
         println!("receipt {path}");
     }
 
@@ -174,7 +175,7 @@ impl Play {
     fn member_cell(&self, i: usize) -> (i16, i16) {
         let s = self.e.state();
         let actor = s.actors.party.members[i];
-        let p = s.objects.location(ObjectId(u16::from(actor))).unwrap();
+        let p = s.objects.location(ObjectId(u16::from(actor))).quiet();
         let c = s.map.centre;
         let col = p.x as i16 - c.x as i16 + 5;
         let row = p.y as i16 - c.y as i16 + 5;
@@ -205,10 +206,9 @@ fn sprite_shown(p: &Play) -> (u16, usize) {
         for (c, &v) in row.iter().enumerate() {
             let (x, y) = (i32::from(sp.x) + c as i32, i32::from(sp.y) + r as i32);
             if v != 0 && (0..320).contains(&x) && (0..200).contains(&y) {
-                assert_eq!(
-                    fb.get(x as usize, y as usize),
-                    Some(16 + v),
-                    "sprite pixel ({x}, {y})"
+                assert!(
+                    fb.get(x as usize, y as usize) == Some(16 + v),
+                    "a sprite pixel"
                 );
                 n += 1;
             }
@@ -222,12 +222,8 @@ fn sprite_shown(p: &Play) -> (u16, usize) {
 fn the_game_played_with_the_pointer() {
     let Some(files) = files() else { return };
     let mut p = Play::boot(&files);
-    assert_eq!(p.e.state().ui.panel.mode, 0x91, "the roster at the start");
-    let (shape, n) = sprite_shown(&p);
-    println!(
-        "boot: pointer {:?} shape {shape}, {n} sprite pixels",
-        p.e.io().pointer()
-    );
+    assert!(p.e.state().ui.panel.mode == 0x91, "the roster at the start");
+    sprite_shown(&p);
     p.receipt("boot");
 
     // The pointer over the map: the walk arrow toward it.
@@ -237,25 +233,22 @@ fn the_game_played_with_the_pointer() {
         buttons: 0,
     });
     let (shape, _) = sprite_shown(&p);
-    assert_eq!(shape, 3, "north-east of the Avatar: the north-east arrow");
+    assert!(shape == 3, "north-east of the Avatar: the north-east arrow");
     p.receipt("arrow-ne");
 
     // Talk (the third icon), then member 1 on the map.
     p.click(48, 184);
-    assert_eq!(
-        p.e.state().ui.input.target_pending,
-        1,
+    assert!(
+        p.e.state().ui.input.target_pending == 1,
         "Talk waits for its target"
     );
     p.idle(2);
-    assert_eq!(
-        sprite_shown(&p).0,
-        1,
+    assert!(
+        sprite_shown(&p).0 == 1,
         "the cross-hair while a target is pending"
     );
     p.receipt("talk-target");
     let (dx, dy) = p.member_cell(1);
-    println!("member 1 at pixel ({dx}, {dy})");
     p.click(dx, dy);
     for _ in 0..8 {
         if p.e.state().ui.input.line_input {
@@ -264,9 +257,8 @@ fn the_game_played_with_the_pointer() {
         p.send(InputEvent::Key(Key::Space));
     }
     assert!(p.e.state().ui.input.line_input, "member 1 waits for words");
-    p.receipt("talk-dupre");
+    p.receipt("talk-member1");
     let talk = p.scroll(12);
-    println!("talk: {} scroll lines", talk.len());
     let talk_name = p.command_name(0x83);
     assert!(
         talk.iter().any(|l| l.contains(&talk_name)),
@@ -288,9 +280,8 @@ fn the_game_played_with_the_pointer() {
     {
         let s = p.e.state();
         let line = String::from_utf8_lossy(&s.ui.text.transcript_line).into_owned();
-        assert_eq!(
-            (s.ui.input.target_pending, s.ui.input.target_command),
-            (1, 0x84),
+        assert!(
+            (s.ui.input.target_pending, s.ui.input.target_command) == (1, 0x84),
             "Look waits for its target"
         );
         assert!(line.contains(&look_name), "the command's name on the line");
@@ -305,7 +296,6 @@ fn the_game_played_with_the_pointer() {
         p.send(InputEvent::Key(Key::Space));
     }
     let look = p.scroll(8);
-    println!("look: {} scroll lines", look.len());
     assert!(
         look.iter().any(|l| l.contains(&look_name)),
         "Look in the scroll"
@@ -314,17 +304,15 @@ fn the_game_played_with_the_pointer() {
         look.iter().any(|l| l.contains(&member_name)),
         "Look names member 1"
     );
-    assert_eq!(p.e.state().ui.input.target_pending, 0);
-    p.receipt("look-dupre");
+    assert!(p.e.state().ui.input.target_pending == 0);
+    p.receipt("look-member1");
 
     // A map cell south of the Avatar: one step south.
     let before = p.e.state().map.centre;
     p.click(88, 104);
     let after = p.e.state().map.centre;
-    println!("walk: centre {before:?} -> {after:?}");
-    assert_eq!(
-        (after.x, after.y),
-        (before.x, before.y + 1),
+    assert!(
+        (after.x, after.y) == (before.x, before.y + 1),
         "one step south"
     );
     p.receipt("walked-south");
@@ -333,23 +321,21 @@ fn the_game_played_with_the_pointer() {
     p.click(0xe0, 0x34);
     {
         let s = p.e.state();
-        assert_eq!(
-            (s.ui.panel.mode, s.ui.panel.member),
-            (0x90, 1),
+        assert!(
+            (s.ui.panel.mode, s.ui.panel.member) == (0x90, 1),
             "member 1's stats"
         );
     }
-    p.receipt("dupre-stats");
+    p.receipt("member1-stats");
 
     // The roster icon, then the Avatar's figure: the Avatar's inventory.
     p.click(0xc8, 0x60);
-    assert_eq!(p.e.state().ui.panel.mode, 0x91);
+    assert!(p.e.state().ui.panel.mode == 0x91);
     p.click(0xb8, 0x20);
     {
         let s = p.e.state();
-        assert_eq!(
-            (s.ui.panel.mode, s.ui.panel.member),
-            (0x92, 0),
+        assert!(
+            (s.ui.panel.mode, s.ui.panel.member) == (0x92, 0),
             "the Avatar's inventory"
         );
     }
@@ -363,31 +349,29 @@ fn the_game_played_with_the_pointer() {
     let off = p.weights();
     let k = {
         let s = p.e.state();
-        assert_eq!(s.inventory.equip(2), 0, "the hand is empty");
-        assert_ne!(s.objects.place(sword), READIED);
+        assert!(s.inventory.equip(2) == 0, "the hand is empty");
+        assert!(s.objects.place(sword) != READIED);
         s.inventory
             .cells
             .iter()
             .position(|&c| c == sword)
             .expect("the sword in the list")
     };
-    println!("Unready by click: equip/carried tenths {held:?} -> {off:?}, list cell {k}");
     p.receipt("sword-off");
 
     // The sword in the list: on again (Ready, 0xa7).
     let (x, y) = Play::list_cell(k);
     p.click(x, y);
     let on = p.weights();
-    assert_eq!(
-        p.e.state().inventory.equip(2),
-        sword,
+    assert!(
+        p.e.state().inventory.equip(2) == sword,
         "the sword in hand again"
     );
-    assert_eq!(on, held);
-    println!("Ready by click: equip/carried tenths {off:?} -> {on:?}");
+    assert!(on == held, "the weights as before the Unready");
+    assert!(off != held, "the Unready changed the weights");
     sprite_shown(&p);
     p.receipt("sword-on");
-    println!("stubs: {:?}", p.e.stub_hits());
+    println!("stubs: {:?}", p.e.stub_hits().keys().collect::<Vec<_>>());
 }
 
 /// Cells moved between consecutive positions (the larger axis).
@@ -423,15 +407,12 @@ fn a_held_press_walks_a_cell_a_step_and_stops_at_the_release() {
         p.settle(4000);
         let st = steps(from, &path);
         let moved: u16 = st.iter().sum();
-        let walked: Vec<usize> = (0..st.len()).filter(|&t| st[t] != 0).collect();
-        println!("held {held} ticks toward ({dx}, {dy}): {moved} cells, at ticks {walked:?}");
         if moved < 2 {
             continue;
         }
-        assert!(st.iter().all(|&d| d <= 1), "one cell a step: {st:?}");
-        assert_eq!(
-            Some(&p.leader_at()),
-            path.last(),
+        assert!(st.iter().all(|&d| d <= 1), "one cell a step");
+        assert!(
+            Some(&p.leader_at()) == path.last(),
             "no step after the release"
         );
         assert!(p.at_prompt(), "the prompt again");
@@ -470,15 +451,14 @@ fn a_held_press_walks_at_the_originals_pace() {
             port_counts(|| Play::boot(&files), &ORACLE_START),
         ),
     ] {
-        println!("{name}: (PAL frames held, original cells, port cells) {counts:?}");
         for &(frames, orig, port) in &counts {
             if frames * 20 < crate::ui::target::HELD_WALK_MS {
                 // Shorter than a step (100 ms included): one cell, as the original.
-                assert_eq!(port, orig, "{name}: a press of {frames} frames");
+                assert!(port == orig, "{name}: a press of {frames} frames");
             } else {
                 assert!(
                     port.abs_diff(orig) <= 1,
-                    "{name}: held {frames} frames, the original's {orig} cells within one: {port}"
+                    "{name}: held {frames} frames, the original's {orig} cells within one"
                 );
             }
         }
@@ -512,15 +492,17 @@ fn a_held_press_in_a_calm_balloon_does_not_hang() {
         let buttons = u8::from(t < 12);
         p.e.tick(&[InputEvent::Pointer { x, y, buttons }], 16);
         grown.push(lines(&p) - before);
-        assert_eq!(p.leader_at(), from, "no wind: no move (tick {t})");
+        assert!(p.leader_at() == from, "no wind: no move (tick {t})");
     }
     p.settle(600);
     // Each try prints the same lines: the press's try is the first tick's growth.
     let per_try = grown.iter().copied().find(|&g| g > 0).unwrap_or(0);
     let total: usize = grown.iter().sum();
-    println!("calm balloon, held 12 ticks: scroll lines per tick {grown:?}");
-    assert!(per_try > 0 && total.is_multiple_of(per_try), "{grown:?}");
-    assert!(total / per_try <= 13, "one try a frame at most: {grown:?}");
+    assert!(
+        per_try > 0 && total.is_multiple_of(per_try),
+        "the same lines each try"
+    );
+    assert!(total / per_try <= 13, "one try a frame at most");
     assert!(p.at_prompt(), "the prompt again after the release");
 }
 
@@ -542,5 +524,5 @@ fn a_held_map_press_during_the_exit_question_does_not_hang() {
     assert!(!p.at_prompt(), "still asking after the release");
     p.send(InputEvent::Key(Key::Char('n')));
     assert!(p.at_prompt(), "N: the prompt again");
-    assert_eq!(p.leader_at(), from);
+    assert!(p.leader_at() == from);
 }

@@ -2,6 +2,7 @@
 //! when the unpacked game files are absent.
 
 use super::*;
+use u6_testkit::Quiet;
 
 /// One synthetic map record: offset, first row, per-row words for planes 0..4, anim ref.
 type MapRec<'a> = (usize, u8, &'a [[u16; PLANES]], Option<u16>);
@@ -320,7 +321,7 @@ fn sheet(
     let mut img = vec![0x40u8; w * h * 3];
     for (n, t) in range.clone().enumerate() {
         let tile = &set.tiles[t];
-        let pixels = tile.frame(am, 0).unwrap();
+        let pixels = tile.frame(am, 0).quiet();
         let (ox, oy) = (2 + (n % cols) * cell, 2 + (n / cols) * cell);
         for y in 0..TILE_H * scale {
             for x in 0..TILE_W * scale {
@@ -345,11 +346,11 @@ fn sheet(
 
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 fn write_png(path: &std::path::Path, (w, h, data): (u32, u32, Vec<u8>)) {
-    let file = std::fs::File::create(path).unwrap();
+    let file = std::fs::File::create(path).quiet();
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().unwrap().write_image_data(&data).unwrap();
+    enc.write_header().quiet().write_image_data(&data).quiet();
 }
 
 #[test]
@@ -360,28 +361,38 @@ fn gfx_real_data_all_tiles_and_contact_sheet() {
         eprintln!("skipped: {UNPACKED} not present");
         return;
     }
-    let read = |p: &str| std::fs::read(root.join(p)).unwrap();
+    let read = |p: &str| std::fs::read(root.join(p)).quiet();
     let set = decode_tiles(
         &read("d2/DATA1/maptiles.ega"),
         &read("d2/DATA1/objtiles.ega"),
         &read("d2/DATA1/tileindx.ega"),
         &read("d2/DATA1/masktype.ega"),
     )
-    .unwrap();
-    let am = AnimMask::parse(&read("d2/DATA1/animmask.ega")).unwrap();
-    let pal = palette(&read("d1/INSTALL/game")).unwrap();
+    .quiet();
+    let am = AnimMask::parse(&read("d2/DATA1/animmask.ega")).quiet();
+    let pal = palette(&read("d1/INSTALL/game")).quiet();
 
-    assert_eq!(set.tiles.len(), TILE_COUNT);
-    let count = |k: TileKind| set.tiles.iter().filter(|t| t.kind == k).count();
-    assert_eq!(count(TileKind::Map), 488);
-    assert_eq!(count(TileKind::Object(Span::Full)), 1470);
-    assert_eq!(count(TileKind::Object(Span::Left)), 41);
-    assert_eq!(count(TileKind::Object(Span::Right)), 49);
+    assert!(set.tiles.len() == TILE_COUNT);
+    // The kinds and the overlays against the user's masktype bytes, decoded here by the LZW
+    // decoder (round-trip tested on its own) and read without the tile decoder: `& 3` = 0 map,
+    // 3 full, 2 left half, 1 right half; `& 4` an overlay.
+    let mt = crate::lzw::decode(&read("d2/DATA1/masktype.ega")).quiet();
+    let kinds: Vec<TileKind> = set.tiles.iter().map(|t| t.kind).collect();
+    let raw_kinds: Vec<TileKind> = mt
+        .iter()
+        .map(|&m| match m & 3 {
+            0 => TileKind::Map,
+            3 => TileKind::Object(Span::Full),
+            2 => TileKind::Object(Span::Left),
+            _ => TileKind::Object(Span::Right),
+        })
+        .collect();
+    u6_testkit::assert_same!(kinds, raw_kinds, "the tile kinds by masktype");
     let animated: Vec<&Tile> = set.tiles.iter().filter(|t| t.anim_ref.is_some()).collect();
-    assert_eq!(animated.len(), 98);
+    assert!(animated.len() == mt.iter().filter(|&&m| m & 4 != 0).count());
     for t in &animated {
-        let ov = am.overlay(t.anim_ref.unwrap()).unwrap();
-        // Overlay bits land only on pixels the tile itself draws (measured: 0 of 12412 bits).
+        let ov = am.overlay(t.anim_ref.quiet()).quiet();
+        // Overlay bits land only on pixels the tile itself draws.
         for f in 0..ANIM_FRAMES {
             for (i, bits) in ov.frames[f].iter().enumerate() {
                 let y = usize::from(ov.first_row) + i;
@@ -393,16 +404,22 @@ fn gfx_real_data_all_tiles_and_contact_sheet() {
             }
         }
     }
-    // Structure only (the table itself stays in the user's file): black first, white at 15.
-    assert_eq!(pal[0], Rgb { r: 0, g: 0, b: 0 });
-    assert_eq!(
-        pal[15],
-        Rgb {
-            r: 255,
-            g: 255,
-            b: 255
-        }
-    );
+    // The palette against the 32 big-endian OCS words at its place in `game` (graphics.md §2),
+    // read and expanded (4 bits -> x * 17) here without the parser.
+    let game = read("d1/INSTALL/game");
+    let raw_pal: Vec<Rgb> = (0..PALETTE_LEN)
+        .map(|i| {
+            let at = GAME_PALETTE_OFFSET + 2 * i;
+            let w = u16::from_be_bytes([game[at], game[at + 1]]);
+            let ch = |shift: u16| ((w >> shift) & 0xf) as u8 * 17;
+            Rgb {
+                r: ch(8),
+                g: ch(4),
+                b: ch(0),
+            }
+        })
+        .collect();
+    u6_testkit::assert_same!(pal, raw_pal, "the palette words");
 
     let out = std::path::Path::new(SHEET_DIR);
     if out.is_dir() {

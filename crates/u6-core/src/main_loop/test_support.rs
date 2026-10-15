@@ -1,7 +1,26 @@
 //! Fixtures shared by the modules' tests (integration, WU-P7).
 
+use crate::engine::Io;
 use crate::objects::{NONE, OBJECT_SLOTS, Slot};
 use crate::state::State;
+
+/// The load-state steps of game's main (`game_main`, 0x1351d8) after its screen, in its order,
+/// for the receipts that boot by hand: A4+0x64ce = 1, the save mode at its data-hunk value
+/// (A4-0x637a, which the block reads check), 0x105350's tail ([`super::finish_load_state`]),
+/// one tile substitution per animdata slot (0x152cd2). The start window's egg stays unhatched
+/// (A4-0x7afb set around the region load, which 0x1321dc / 0x1319b2 check), so its monsters are
+/// not foes in a receipt's view.
+pub(crate) fn load_state_like_main(s: &mut State, io: &Io) {
+    s.main.flag_64ce = 1;
+    s.objects.save_mode = s.objects.defs.save_mode;
+    s.map.flag_7afb = 1;
+    super::finish_load_state(s, io);
+    s.map.flag_7afb = 0;
+    let anim = s.tables.anim.clone();
+    for slot in anim.slots.iter().take(usize::from(anim.count)) {
+        crate::gfx::anim::substitute(&mut s.gfx, slot.tile_to_animate, slot.first_anim_frame);
+    }
+}
 
 /// Test fixtures place objects by writing the slot tables; this links them into the object list
 /// the way load state and the region load leave it, keeping their slot numbers: the slots reset

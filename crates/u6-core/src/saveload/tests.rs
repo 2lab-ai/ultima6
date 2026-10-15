@@ -193,8 +193,8 @@ fn an_unchanged_name_keeps_the_bytes_after_its_nul() {
     decode(&mut s, &f);
     assert_eq!(s.actors.party.names[0], "Name0");
     assert_eq!(&encode(&s)[0x0F00..0x0F0E], b"Name0\0garbage!");
-    s.actors.party.names[0] = "Iolo".into();
-    assert_eq!(&encode(&s)[0x0F00..0x0F0E], b"Iolo\0\0\0\0\0\0\0\0\0\0");
+    s.actors.party.names[0] = "Wxyz".into();
+    assert_eq!(&encode(&s)[0x0F00..0x0F0E], b"Wxyz\0\0\0\0\0\0\0\0\0\0");
 }
 
 fn block(records: &[[u8; 8]]) -> ObjBlock {

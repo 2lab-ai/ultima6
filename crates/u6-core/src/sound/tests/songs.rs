@@ -261,6 +261,94 @@ fn the_old_runs_unsynced_calls_come_before_the_new_process_and_its_calls() {
     );
 }
 
+/// The driver state a trace compares: the module buffer, whether the player has a module and
+/// whether its timer runs.
+fn driver_state(d: &AudioDriver) -> (Vec<u8>, bool, bool) {
+    let at = CHIP_BUFFER as usize;
+    (
+        d.machine.chip[at..at + MODULE_BUFFER].to_vec(),
+        d.player.module.is_some(),
+        d.machine.timer.running(),
+    )
+}
+
+/// The trace of a relaunch synced at once, marked as the launcher marks it (the new State takes
+/// the log over, then [`MedCall::NewProcess`]). The driver's test-only record of the calls it
+/// applies ([`crate::sound::driver::APPLIED`]) shows, within the one sync, the old run's
+/// unsynced calls applied before the marker and the new run's after it. The states agree: each
+/// prefix of the log synced on a fresh driver is that prefix applied one call at a time; the
+/// prefix up to the marker has the old run's file loaded, played and stopped, the marker starts
+/// the new process on an empty buffer, and the one sync ends in the state of the whole trace.
+#[test]
+fn a_relaunch_applies_the_old_runs_pending_calls_before_the_new_process_starts() {
+    let short = Mmd::new(vec![vec![[cell(13, 1, 0, 0), EMPTY, EMPTY, EMPTY]; 2]]).build();
+    let long = Mmd::new(vec![vec![[cell(13, 1, 0, 0), EMPTY, EMPTY, EMPTY]; 8]; 4]).build();
+    assert!(long.len() > short.len() + 16);
+    let files = Files::new(BTreeMap::from([
+        ("S7".to_string(), short.clone()),
+        ("S9".to_string(), long.clone()),
+    ]));
+    let mut s = state(true);
+    play_song(&mut s, 9);
+    play_song(&mut s, 0);
+    let mut fresh = state(true);
+    fresh.sound.continue_calls(&mut s.sound);
+    fresh.sound.call(MedCall::NewProcess);
+    play_song(&mut fresh, 7);
+    let log: Vec<(u64, MedCall)> = fresh.sound.calls.iter().cloned().collect();
+    let marker = log
+        .iter()
+        .position(|(_, c)| *c == MedCall::NewProcess)
+        .expect("the relaunch marker");
+    assert!(marker > 0, "old calls queued before the marker");
+    let mut once = AudioDriver::with_tables(tables(), b"MMD0");
+    crate::sound::driver::APPLIED.with(|t| t.borrow_mut().clear());
+    once.sync(&fresh.sound, &files);
+    let applied = crate::sound::driver::APPLIED.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let calls_in_order: Vec<MedCall> = log.iter().map(|(_, c)| c.clone()).collect();
+    assert_eq!(
+        applied, calls_in_order,
+        "one sync applies every call of the log, the old run's before the marker"
+    );
+    assert_eq!(
+        applied.iter().position(|c| *c == MedCall::NewProcess),
+        Some(marker),
+        "the old run's calls come first"
+    );
+    let mut by_call = AudioDriver::with_tables(tables(), b"MMD0");
+    let mut trace = Vec::new();
+    for k in 0..=log.len() {
+        if k > 0 {
+            by_call.apply(&log[k - 1].1, &files);
+        }
+        let mut part = fresh.sound.clone();
+        part.calls.truncate(k);
+        part.next_call = log[0].0 + k as u64;
+        let mut d = AudioDriver::with_tables(tables(), b"MMD0");
+        d.sync(&part, &files);
+        assert!(
+            driver_state(&d) == driver_state(&by_call),
+            "prefix {k}: the sync is the calls in order"
+        );
+        trace.push(driver_state(&d));
+    }
+    let (buffer, module, _) = &trace[marker];
+    assert!(
+        buffer[short.len()..long.len()].iter().any(|&b| b != 0),
+        "before the marker the old run's longer file is in the buffer"
+    );
+    assert!(!module, "and its Stop was applied");
+    let (buffer, module, running) = &trace[marker + 1];
+    assert!(
+        buffer.iter().all(|&b| b == 0) && !module && !running,
+        "the marker: the new process on an empty buffer, nothing playing"
+    );
+    assert!(
+        driver_state(&once) == trace[log.len()],
+        "one sync ends where the trace ends"
+    );
+}
+
 /// Only the marker starts the player over, whatever the calls around it: a new run whose first
 /// call is the old run's last (the case a guess from call numbers and contents could take
 /// either way) is a new process, the same call again within one process is not, and a marker

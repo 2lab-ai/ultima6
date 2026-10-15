@@ -181,6 +181,7 @@ fn drain(ring: &Ring, out: &mut [f32], channels: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use u6_testkit::Quiet;
 
     #[test]
     fn levels_and_the_wav_header() {
@@ -227,17 +228,17 @@ mod tests {
         }
         let r = u6_intake::intake(vec![u6_intake::InputFile {
             name: "ultima-vi.zip".into(),
-            data: std::fs::read(zip).unwrap(),
+            data: std::fs::read(zip).quiet(),
         }]);
         let mut files = u6_core::Files::new(r.files);
-        let mut game = files.get("game").unwrap().to_vec();
+        let mut game = files.get("game").quiet().to_vec();
         let at = u6_core::image::GameImage::parse(&game)
-            .unwrap()
+            .quiet()
             .file_offset(u6_core::sound::tables::PERIODS)
-            .unwrap();
+            .quiet();
         game[at..at + 2 * 96].fill(0);
         files.overlay("broken", [("game".to_string(), game)].into());
-        let mut engine = Engine::game_first(files, 0).unwrap();
+        let mut engine = Engine::game_first(files, 0).quiet();
         assert!(Audio::or_silent(&engine, WAV_RATE).is_none());
         for _ in 0..120 {
             engine.tick(&[], 16);
@@ -277,22 +278,18 @@ mod tests {
         }
         let r = u6_intake::intake(vec![u6_intake::InputFile {
             name: "ultima-vi.zip".into(),
-            data: std::fs::read(zip).unwrap(),
+            data: std::fs::read(zip).quiet(),
         }]);
-        let mut engine = Engine::game_first(u6_core::Files::new(r.files), 0).unwrap();
-        let mut audio = Audio::new(&engine, WAV_RATE).unwrap();
+        let mut engine = Engine::game_first(u6_core::Files::new(r.files), 0).quiet();
+        let mut audio = Audio::new(&engine, WAV_RATE).quiet();
         let mut samples = Vec::new();
         for _ in 0..120 {
             engine.tick(&[], 16);
             audio.sync(&engine);
             audio.render_ms(16, &mut samples);
         }
-        assert_eq!(samples.len(), 2 * (120 * 16 * WAV_RATE as usize / 1000));
+        assert!(samples.len() == 2 * (120 * 16 * WAV_RATE as usize / 1000));
         let (rms, peak) = levels(&samples);
-        eprintln!(
-            "song {}, rms {rms:.4}, peak {peak:.4}",
-            engine.state().sound.current
-        );
-        assert!(rms > 0.001 && peak <= 1.0, "rms {rms}, peak {peak}");
+        assert!(rms > 0.001 && peak <= 1.0, "audible and in range");
     }
 }

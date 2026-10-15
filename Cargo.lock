@@ -1214,6 +1214,7 @@ version = "0.1.0"
 dependencies = [
  "miniz_oxide 0.8.9",
  "sha2",
+ "u6-testkit",
 ]
 
 [[package]]
@@ -1225,6 +1226,7 @@ dependencies = [
  "png",
  "u6-core",
  "u6-intake",
+ "u6-testkit",
 ]
 
 [[package]]

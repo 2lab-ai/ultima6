@@ -12,6 +12,7 @@ use crate::gfx::anim::shore_mask;
 use crate::gfx::seams::view_window;
 use crate::gfx::tables::GameTables;
 use crate::state::State;
+use u6_testkit::Quiet;
 use u6_testkit::assert_same;
 
 /// The window render with `g` as the state's graphics for the call.
@@ -45,7 +46,7 @@ fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -56,7 +57,7 @@ fn files() -> Option<Files> {
 #[test]
 fn real_tables_match_the_image() {
     let Some(files) = files() else { return };
-    let t = GameTables::from_game(files.get("game").unwrap()).unwrap();
+    let t = GameTables::from_game(files.get("game").quiet()).quiet();
     if let Ok(img) = std::fs::read(IMAGE) {
         let at = |a: usize, n: usize| img[a - 0x0010_0000..a - 0x0010_0000 + n].to_vec();
         let be = |v: &[u16]| v.iter().flat_map(|w| w.to_be_bytes()).collect::<Vec<_>>();
@@ -82,54 +83,55 @@ fn real_tables_match_the_image() {
     } else {
         eprintln!("image comparison skipped: {IMAGE} not present");
     }
-    // Shore merges: 4 sources, the 32 shore tiles 16..48 as targets.
+    // Shore merges: the source tiles, the 32 shore targets (graphics.md: tiles 16..48).
     let mut src: Vec<u16> = t.shore_src.iter().map(|w| w / 4).collect();
     src.sort_unstable();
     src.dedup();
-    let dst: Vec<u16> = t.shore_dst.iter().map(|w| w / 4).collect();
-    println!("{} shore source tiles, {} targets", src.len(), dst.len());
+    assert!(!src.is_empty(), "shore sources");
     assert!(t.shore_dst.iter().chain(&t.shore_src).all(|w| w % 4 == 0));
-    assert_eq!(t.window_shown, 1);
+    // A flag word (its image value is compared above when the flattened image is present).
+    assert!(t.window_shown <= 1, "the window-shown flag");
 }
 
 #[test]
 fn real_shore_masks_fit_and_the_window_draws_the_party() {
     let Some(files) = files() else { return };
-    let mut state = State::new_game(&files).unwrap();
+    let mut state = State::new_game(&files).quiet();
     crate::main_loop::load_state_tail(&mut state);
-    let mut gfx = GfxState::load(&files).unwrap();
+    let mut gfx = GfxState::load(&files).quiet();
     let maps = gfx
         .records
         .iter()
         .filter(|r| r.kind == TileKind::Map)
         .count();
-    assert_eq!(maps, 488);
+    // The map tiles are those whose masktype byte has `& 3 == 0` (graphics.md §4), counted in
+    // the user's masktype file.
+    let masktype = u6_formats::lzw::decode(files.get("masktype.ega").quiet()).quiet();
+    assert!(maps == masktype.iter().filter(|&&m| m & 3 == 0).count());
     // Two ticks: the animdata frames reach the water tiles, the second (even) one merges.
     anim_tick(&mut state, &mut gfx);
     anim_tick(&mut state, &mut gfx);
     for i in 0..32 {
         let (skip, masks) = shore_mask(&gfx.animmask.block2, i).expect("mask record");
-        assert_eq!(skip % 2, 0);
+        assert!(skip % 2 == 0);
         let rows = usize::from(skip / 2) + masks.len();
         for w in [gfx.tables.shore_src[i], gfx.tables.shore_dst[i]] {
             let (rec, _, mt) = gfx.record(w / 4);
-            assert_eq!((rec.kind, mt & 3), (TileKind::Map, 0), "merge {i}");
-            assert!(rows <= usize::from(rec.rows), "merge {i}: {rows} rows");
+            assert!((rec.kind, mt & 3) == (TileKind::Map, 0), "merge {i}");
+            assert!(
+                rows <= usize::from(rec.rows),
+                "merge {i}: the mask fits the tile"
+            );
         }
     }
     let window = view_window(&state);
     let centre = &window.objects[5 * 11 + 5];
-    let avatar = state.tables.basetile.base[0x19a]
-        + u16::from(state.objects.frame(crate::objects::ObjectId(1)));
-    assert_eq!(
-        centre.last(),
-        Some(&avatar),
+    let leader = crate::objects::ObjectId(1);
+    let avatar = state.tables.basetile.base[usize::from(state.objects.obj_type(leader))]
+        + u16::from(state.objects.frame(leader));
+    assert!(
+        centre.last() == Some(&avatar),
         "leader drawn last in cell (5, 5)"
-    );
-    let listed: usize = window.objects.iter().map(Vec::len).sum();
-    println!(
-        "centre {:?}: {listed} object tiles in the window, cell (5, 5) = {centre:?}",
-        state.map.centre
     );
     let (rec, _, _) = gfx.record(avatar);
     let expect: Vec<(usize, usize, u8)> = (0..256)
@@ -146,6 +148,6 @@ fn real_shore_masks_fit_and_the_window_draws_the_party() {
     let fb = e.frame();
     assert!(expect.len() > 50);
     for (x, y, p) in expect {
-        assert_eq!(fb.get(x, y), Some(p), "avatar pixel at ({x}, {y})");
+        assert!(fb.get(x, y) == Some(p), "avatar pixel at ({x}, {y})");
     }
 }

@@ -16,6 +16,7 @@ use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::image::GameImage;
 use crate::objects::{READIED, Slot, display_name, first_child, next_child};
 use crate::state::State;
+use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 const OUT: &str = "/tmp/claude-501/m2-inventory";
@@ -25,7 +26,7 @@ fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -34,7 +35,7 @@ fn files() -> Option<Files> {
 }
 
 fn start(files: &Files) -> State {
-    let mut s = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    let mut s = State::new_game(files).quiet();
     crate::main_loop::load_state_tail(&mut s);
     let t = s.ui.tables.clone();
     s.ui.text.main_windows(&t);
@@ -115,9 +116,9 @@ fn receipt(fb: &Framebuffer, name: &str) {
     chunk(&mut out, b"IHDR", &ihdr);
     chunk(&mut out, b"IDAT", &z);
     chunk(&mut out, b"IEND", &[]);
-    std::fs::create_dir_all(OUT).unwrap();
-    std::fs::write(format!("{OUT}/{name}.png"), out).unwrap();
-    std::fs::write(format!("{OUT}/{name}.idx"), fb.pixels()).unwrap();
+    std::fs::create_dir_all(OUT).quiet();
+    std::fs::write(format!("{OUT}/{name}.png"), out).quiet();
+    std::fs::write(format!("{OUT}/{name}.idx"), fb.pixels()).quiet();
     println!("receipt {OUT}/{name}.png");
 }
 
@@ -137,10 +138,10 @@ fn panel(s: State, files: &Files, mode: u16, member: i16) -> Engine {
     s.ui.panel.mode = mode;
     s.ui.panel.member = member;
     s.ui.panel.dirty = true;
-    let prompt = GameImage::parse(files.get("game").unwrap())
-        .unwrap()
+    let prompt = GameImage::parse(files.get("game").quiet())
+        .quiet()
         .cstr(crate::ui::PROMPT)
-        .unwrap();
+        .quiet();
     run(s, files, &[], move |st, io| async move {
         crate::ui::debug_render(&st, &io, &prompt).await;
     })
@@ -177,26 +178,21 @@ fn unready_ready(files: &Files, mut s: State, obj: Slot, slot: i16, tag: &str) -
     });
     let mut s = e.state().clone();
     let off = weights(&s);
-    assert_eq!(
-        s.objects.place(obj),
-        crate::objects::IN_INVENTORY,
+    assert!(
+        s.objects.place(obj) == crate::objects::IN_INVENTORY,
         "{obj:#05x}"
     );
-    assert_eq!(s.inventory.equip(slot), 0);
-    println!("Unready object {obj:#05x} (slot {slot}): equip/carried tenths {before:?} -> {off:?}");
+    assert!(s.inventory.equip(slot) == 0);
     receipt(e.frame(), &format!("unready-{tag}"));
     s.ui.input.selection = obj;
     let e = run(s, files, &[], |st, io| async move {
         ready(&st, &io).await;
     });
     let s = e.state().clone();
-    assert_eq!(s.objects.place(obj), READIED, "{obj:#05x} readied again");
-    assert_eq!(s.inventory.equip(slot), obj);
-    assert_eq!(weights(&s), before);
-    println!(
-        "Ready object {obj:#05x}: equip/carried tenths {off:?} -> {:?}",
-        weights(&s)
-    );
+    assert!(s.objects.place(obj) == READIED, "{obj:#05x} readied again");
+    assert!(s.inventory.equip(slot) == obj);
+    assert!(weights(&s) == before, "the weights as before");
+    assert!(off != before, "the Unready changed the weights");
     s
 }
 
@@ -206,22 +202,12 @@ fn list(s: &mut State, member: usize) {
         !s.actors.party.names[member].is_empty(),
         "member {member} has a name"
     );
-    println!(
-        "member {member} = actor {actor}, strength {}",
-        s.actors.attrs.strength[actor as usize]
+    // Each object inside the member has a name ([`contents`] checks); nothing is printed of
+    // them: types, slots and weights are the user's data.
+    assert!(
+        !contents(s, actor).is_empty(),
+        "member {member} carries objects"
     );
-    for (c, ty, place) in contents(s, actor) {
-        println!(
-            "  {c:#05x} type {ty:#05x} {} slot {:2} weight {:3}",
-            if place == READIED {
-                "readied"
-            } else {
-                "carried"
-            },
-            ready_slot(s, c),
-            weight::object_weight(s, c)
-        );
-    }
 }
 
 #[test]
@@ -235,43 +221,33 @@ fn inventory_ready_unready_and_panels() {
     receipt(e.frame(), "inventory-member0");
     let s = e.state().clone();
     println!(
-        "member 0 panel: equip/carried tenths {:?}, list {} objects, cells {:?}; stubs {:?}",
-        weights(&s),
-        s.ui.panel.inventory_count,
-        s.inventory.cells,
+        "member 0 panel: stubs {:?}",
         e.stub_hits().keys().collect::<Vec<_>>()
     );
     let sword = s.inventory.equip(2);
     assert!(sword > 1, "member 0 starts with a weapon in hand");
     let s = unready_ready(&files, s, sword, 2, "member0-weapon");
-    // Dupre's panel (F2) and his armour (slot 4) off and on.
+    // Member 1's panel (F2) and the armour (slot 4) off and on.
     let e = panel(s, &files, 0x92, 1);
     receipt(e.frame(), "inventory-member1");
     let s = e.state().clone();
-    println!(
-        "member 1 panel: equip/carried tenths {:?}, list {} objects, equipment {:?}",
-        weights(&s),
-        s.ui.panel.inventory_count,
-        &s.inventory.cells[EQUIP..]
-    );
     let armour = s.inventory.equip(4);
     assert!(armour > 1, "member 1 starts in armour");
     let s = unready_ready(&files, s, armour, 4, "member1-armour");
-    println!("scroll: {} lines", s.ui.messages.len());
 
-    // The portrait / equipment panel 0x128ce8 of Dupre from the roster, as Look shows it (one
+    // The portrait / equipment panel 0x128ce8 of member 1 from the roster, as Look shows it (one
     // key ends it).
     let mut s = s;
     s.ui.panel.mode = 0x91;
-    let dupre = Slot::from(s.actors.party.members[1]);
+    let member1 = Slot::from(s.actors.party.members[1]);
     let e = run(s, &files, &[Key::Space], move |st, io| async move {
         palette(&st, &io);
-        show_actor(&st, &io, dupre).await;
+        show_actor(&st, &io, member1).await;
         io.present();
     });
     receipt(e.frame(), "portrait-member1");
     let mut s = e.state().clone();
-    assert_eq!(s.ui.panel.mode, 0x91, "the panel mode comes back");
+    assert!(s.ui.panel.mode == 0x91, "the panel mode comes back");
     println!("stubs hit: {:?}", e.stub_hits().keys().collect::<Vec<_>>());
     // The Avatar's, as Look at the Avatar shows it, with the oracle's game-first patch of the
     // avatar portrait byte (objlist 0x1C72 = 1, re/notes/oracle.md §D) so the two compare.
@@ -284,24 +260,33 @@ fn inventory_ready_unready_and_panels() {
     receipt(e.frame(), "portrait-actor1");
 }
 
-/// Finds a wilderness spot east of Britain where Rest has nothing to refuse (a 16-tile grid,
-/// rows first).
+/// Finds a wilderness spot near the start where Rest has nothing to refuse: a 16-tile grid of
+/// surface places around the leader, nearest rings first.
 fn camp_site(files: &Files) -> Option<State> {
     let base = start(files);
-    for y in (0x160..0x260).step_by(0x10) {
-        for x in (0x180..0x280).step_by(0x10) {
-            let mut s = base.clone();
-            crate::map::travel::teleport(&mut s, x, y, 0, 0);
-            s.main.pending_print.clear();
-            let mut t = s.clone();
-            let refused = crate::actors::rest::not_wilderness(&t)
-                || crate::actors::rest::foes_near(&t)
-                || crate::actors::rest::others_near(&t)
-                || crate::actors::rest::no_room(&mut t);
-            if !refused {
-                println!("camp site ({x:#x}, {y:#x}): centre {:?}", s.map.centre);
-                return Some(s);
+    let c = base.map.centre;
+    let mut spots: Vec<(i32, u16, u16)> = Vec::new();
+    for dy in -8..=8i32 {
+        for dx in -8..=8i32 {
+            let (x, y) = (i32::from(c.x) + 16 * dx, i32::from(c.y) + 16 * dy);
+            if (0..1024).contains(&x) && (0..1024).contains(&y) && (dx, dy) != (0, 0) {
+                spots.push((dx.abs().max(dy.abs()), x as u16, y as u16));
             }
+        }
+    }
+    spots.sort_unstable();
+    for (_, x, y) in spots {
+        let mut s = base.clone();
+        crate::map::travel::teleport(&mut s, x, y, 0, 0);
+        s.main.pending_print.clear();
+        let mut t = s.clone();
+        let refused = crate::actors::rest::not_wilderness(&t)
+            || crate::actors::rest::foes_near(&t)
+            || crate::actors::rest::others_near(&t)
+            || crate::actors::rest::no_room(&mut t);
+        if !refused {
+            println!("camp site found");
+            return Some(s);
         }
     }
     None
@@ -326,12 +311,7 @@ fn rest_eight_hours_in_the_wilderness() {
             .map(|i| s.actors.attrs.hp[usize::from(s.actors.party.members[i])])
             .collect()
     };
-    let max: Vec<u16> = (0..n)
-        .map(|i| crate::actors::leaves::max_hp(&s, u16::from(s.actors.party.members[i])))
-        .collect();
-    println!("max hp {max:?}");
     let before = (hp(&s), s.actors.calendar);
-    println!("before: hp {:?}, clock {:?}", before.0, before.1);
     // R, 8 hours, no guard (space).
     let e = run(
         s,
@@ -348,14 +328,12 @@ fn rest_eight_hours_in_the_wilderness() {
     receipt(e.frame(), "rest-8h");
     let s = e.state();
     let after = (hp(&s), s.actors.calendar);
-    println!("after:  hp {:?}, clock {:?}", after.0, after.1);
-    println!("scroll: {} lines", s.ui.messages.len());
-    println!("stubs hit: {:?}", e.stub_hits());
+    println!("stubs hit: {:?}", e.stub_hits().keys().collect::<Vec<_>>());
     let minutes = |c: crate::actors::Calendar| {
         (u32::from(c.day) * 24 + u32::from(c.hour)) * 60 + u32::from(c.minute)
     };
     let slept = minutes(after.1) - minutes(before.1);
-    assert!(slept <= 8 * 60, "at most eight hours ({slept} minutes)");
+    assert!(slept <= 8 * 60, "at most eight hours");
     if slept == 8 * 60 {
         assert!(after.0.iter().zip(&before.0).all(|(a, b)| a >= b));
         assert!(

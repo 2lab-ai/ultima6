@@ -21,6 +21,7 @@ use crate::ui::printf::{Arg, printf};
 
 use super::tables::Msg;
 use u6_render::Framebuffer;
+use u6_testkit::Quiet;
 
 pub(super) const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 pub(super) const AVATAR: u16 = 1;
@@ -30,7 +31,7 @@ pub(super) fn files() -> Option<Files> {
         eprintln!("skipped: {ZIP} not present");
         return None;
     }
-    let data = std::fs::read(ZIP).unwrap();
+    let data = std::fs::read(ZIP).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -53,16 +54,9 @@ pub(super) async fn boot(state: &RefCell<State>, io: &Io) {
         crate::main_loop::draw_paper(&s, io);
         s.ui.text.main_windows(&tables);
         crate::objects::init_slots(&mut s.objects);
-        s.main.flag_64ce = 1;
-        // The start window's egg stays unhatched (A4-0x7afb, which 0x1321dc / 0x1319b2 check),
-        // as in combat's receipt: its gargoyles would be foes in every spell's view.
-        s.map.flag_7afb = 1;
-        crate::main_loop::finish_load_state(&mut s, io);
-        s.map.flag_7afb = 0;
-        let anim = s.tables.anim.clone();
-        for slot in anim.slots.iter().take(usize::from(anim.count)) {
-            crate::gfx::anim::substitute(&mut s.gfx, slot.tile_to_animate, slot.first_anim_frame);
-        }
+        // As game's main, the start window's egg unhatched: its monsters would be foes in every
+        // spell's view.
+        crate::main_loop::test_support::load_state_like_main(&mut s, io);
         s.actors.objlist_tail[0x81] = 1;
         crate::actors::turn::after_load(&mut s);
         crate::actors::clock::tick(&mut s, 0);
@@ -113,8 +107,9 @@ pub(super) async fn cast_command(state: &RefCell<State>, io: &Io) {
 }
 
 /// Lines of the message scroll. They are the game's text, so the debug form (the assertion
-/// messages) shows only how many there are and their lengths; the tests compare them with
-/// strings read from the user's `game` at run time ([`text_at`], [`msg`], [`printed`]).
+/// messages) is a label only: not their text, how many there are nor their lengths (the count
+/// and lengths of the user's records are not shown either); the tests compare them with strings
+/// read from the user's `game` at run time ([`text_at`], [`msg`], [`printed`]).
 pub(super) struct Scroll(Vec<String>);
 
 impl std::ops::Deref for Scroll {
@@ -126,8 +121,7 @@ impl std::ops::Deref for Scroll {
 
 impl std::fmt::Debug for Scroll {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let lengths: Vec<usize> = self.0.iter().map(String::len).collect();
-        write!(f, "{} lines of lengths {lengths:?}", lengths.len())
+        f.write_str("the message scroll (its lines are not shown)")
     }
 }
 
@@ -244,7 +238,7 @@ pub(super) fn keys(spec: &str) -> Vec<InputEvent> {
 /// A booted engine that sets the state up with `setup`, then casts once; `input` is typed
 /// one key per tick. Returns the engine when the cast is over.
 pub(super) fn cast_with(files: &Files, setup: fn(&mut State), input: &str) -> Engine {
-    let state = State::new_game(files).unwrap_or_else(|e| panic!("{e}"));
+    let state = State::new_game(files).quiet();
     let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {
         boot(&st, &io).await;
         setup(&mut st.borrow_mut());
@@ -276,8 +270,8 @@ pub(super) fn reagents(s: &State) -> Vec<i16> {
         .collect()
 }
 
-/// The scroll from the last Cast line on ([`cast_line_text`]); prints its line count and
-/// the stub hits (the lines themselves are the game's text).
+/// The scroll from the last Cast line on ([`cast_line_text`]); prints the label and the stub
+/// ids hit (the lines and their count are the game's).
 pub(super) fn show(name: &str, e: &Engine) -> Scroll {
     let lines = lines_of(&e.state());
     let cast = cast_line_text(e.io());
@@ -287,7 +281,7 @@ pub(super) fn show(name: &str, e: &Engine) -> Scroll {
         lines.iter().rposition(|l| l.contains(&cast)).unwrap_or(0)
     };
     let tail = Scroll(lines[from..].to_vec());
-    eprintln!("--- {name}: {} scroll lines", tail.len());
+    eprintln!("--- {name}");
     eprintln!(
         "  stub hits: {:?}",
         e.stub_hits().keys().collect::<Vec<_>>()
@@ -370,11 +364,10 @@ pub(super) fn spent(before: &[i16], after: &[i16], mp: (u8, u8), s: &State, spel
     let mask = s.magic.tables.mask(spell);
     for (i, (b, a)) in before.iter().zip(after).enumerate() {
         let want = b - i16::from(mask >> i & 1);
-        assert_eq!(*a, want, "reagent {i} of spell {spell:#x}");
+        assert!(*a == want, "reagent {i} of spell {spell:#x}");
     }
-    assert_eq!(
-        mp.1,
-        mp.0 - (spell / 16 + 1) as u8,
+    assert!(
+        mp.1 == mp.0 - (spell / 16 + 1) as u8,
         "magic points of spell {spell:#x}"
     );
 }
@@ -386,9 +379,22 @@ fn night_book(s: &mut State) {
     crate::map::view::update_view(s);
 }
 
+/// The Avatar's magic points in the shipped objlist (its byte of the table at 0x13F1,
+/// formats.md §6), read from the raw file: what a cast from the start spends from.
+fn start_magic(files: &Files) -> u8 {
+    files.get("savegame/objlist").quiet()[0x13F1 + usize::from(AVATAR)]
+}
+
+/// The NPC the casts below aim at: actor 7, put on the tile the cross-hair reaches with two
+/// rights and three ups.
+const TARGET: usize = 7;
+
 fn day_book(s: &mut State) {
     give_book(s, &[0, 1, 6, 9, 0x11, 0x14, 0x34]);
     s.actors.attrs.hp[2] = 10;
+    let c = s.map.centre;
+    let z = u16::from(c.z);
+    crate::objects::move_to(s, TARGET as i16, c.x + 2, c.y - 3, z);
     // A potion on the floor two cells east of the Avatar, for Detect Magic.
     let c = s.map.centre;
     crate::objects::create_on_map(
@@ -406,7 +412,7 @@ fn day_book(s: &mut State) {
 #[test]
 fn light_at_night_lights_the_view() {
     let Some(files) = files() else { return };
-    let state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
+    let state = State::new_game(&files).quiet();
     let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {
         boot(&st, &io).await;
         night_book(&mut st.borrow_mut());
@@ -418,14 +424,13 @@ fn light_at_night_lights_the_view() {
         let s = e.state();
         (lit_cells(&s), reagents(&s), s.actors.attrs.magic[1])
     };
-    std::fs::write("/tmp/claude-501/m2-magic-light-before.png", png(e.frame())).unwrap();
+    std::fs::write("/tmp/claude-501/m2-magic-light-before.png", png(e.frame())).quiet();
     // The book picture 0x116028 draws is the user's file named at A4-0x61de.
     let name = pointed_string(e.io(), A4.wrapping_sub(0x61de));
     let bmp = files
         .get(&String::from_utf8_lossy(&name))
         .and_then(|f| u6_formats::bitmap::Bitmap::from_lzw(f).ok());
-    let bmp = bmp.expect("the book picture decodes");
-    eprintln!("  book picture {}×{}", bmp.width, bmp.height);
+    assert!(bmp.is_some(), "the book picture decodes");
     for k in keys("IL\n") {
         e.tick(&[k], 16);
     }
@@ -434,18 +439,14 @@ fn light_at_night_lights_the_view() {
     }
     assert!(e.finished());
     let tail = show("Light at 22:00", &e);
-    std::fs::write("/tmp/claude-501/m2-magic-light-after.png", png(e.frame())).unwrap();
+    std::fs::write("/tmp/claude-501/m2-magic-light-after.png", png(e.frame())).quiet();
     let s = e.state();
     let lit = lit_cells(&s);
-    eprintln!(
-        "  lit view cells: {dark} before, {lit} after; light timer {}",
-        s.actors.timers[0]
-    );
     let light = plain(s.magic.tables.name(9));
     let announced = printed(e.io(), super::cast::FMT_PAREN, &[&light]);
     assert!(tail.has(&announced), "{tail:?}");
-    assert_eq!(s.actors.timers[0], 100);
-    assert!(lit > dark, "{lit} lit cells after, {dark} before");
+    assert!(s.actors.timers[0] == 100);
+    assert!(lit > dark, "more view cells lit after the cast");
     spent(
         &before,
         &reagents(&s),
@@ -463,14 +464,14 @@ fn create_food_adds_food() {
     let tail = show("Create Food", &e);
     let s = e.state();
     let n = food(&s);
-    assert!((1..=10).contains(&n), "{n} food");
+    assert!((1..=10).contains(&n), "1..=10 food made");
     let line = printed(e.io(), super::spells::MSG_FOOD, &[&n.to_string()]);
     assert!(tail.has(&line), "{tail:?}");
-    assert_eq!(s.magic.current, 0, "the books remember the spell");
+    assert!(s.magic.current == 0, "the books remember the spell");
     spent(
         &[10; 8],
         &reagents(&s),
-        (30, s.actors.attrs.magic[1]),
+        (start_magic(&files), s.actors.attrs.magic[1]),
         &s,
         0,
     );
@@ -482,7 +483,7 @@ fn create_food_adds_food() {
 #[test]
 fn detect_magic_on_a_potion() {
     let Some(files) = files() else { return };
-    let state = State::new_game(&files).unwrap_or_else(|e| panic!("{e}"));
+    let state = State::new_game(&files).quiet();
     let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {
         boot(&st, &io).await;
         {
@@ -507,9 +508,8 @@ fn detect_magic_on_a_potion() {
     let tail = show("Detect Magic", &e);
     let s = e.state();
     let sel = s.ui.input.selection;
-    assert_eq!(
-        s.objects.kind(sel),
-        super::detect::POTION,
+    assert!(
+        s.objects.kind(sel) == super::detect::POTION,
         "a potion two east"
     );
     let kind = usize::from(s.objects.tf(sel) >> 10);
@@ -525,11 +525,11 @@ fn heal_and_great_heal_on_a_member() {
     show("Heal on member 2", &e);
     let s = e.state();
     let hp = s.actors.attrs.hp[2];
-    assert!((11..=40).contains(&hp), "Heal gives 1..30: {hp}");
+    assert!((11..=40).contains(&hp), "Heal gives 1..30");
     spent(
         &[10; 8],
         &reagents(&s),
-        (30, s.actors.attrs.magic[1]),
+        (start_magic(&files), s.actors.attrs.magic[1]),
         &s,
         6,
     );
@@ -537,14 +537,11 @@ fn heal_and_great_heal_on_a_member() {
     let e = cast_with(&files, day_book, "VM\n2");
     show("Great Heal on member 2", &e);
     let s = e.state();
-    assert_eq!(
-        u16::from(s.actors.attrs.hp[2]),
-        crate::actors::leaves::max_hp(&s, 2)
-    );
+    assert!(u16::from(s.actors.attrs.hp[2]) == crate::actors::leaves::max_hp(&s, 2));
     spent(
         &[10; 8],
         &reagents(&s),
-        (30, s.actors.attrs.magic[1]),
+        (start_magic(&files), s.actors.attrs.magic[1]),
         &s,
         0x34,
     );
@@ -554,10 +551,9 @@ fn heal_and_great_heal_on_a_member() {
 fn sleep_on_an_npc() {
     let Some(files) = files() else { return };
     let e = cast_with(&files, day_book, "IZ\n>>^^^\n");
-    let tail = show("Sleep on actor 7", &e);
+    let tail = show("Sleep on the target", &e);
     let s = e.state();
-    let asleep = s.actors.attrs.status[7] & 4 != 0;
-    eprintln!("  actor 7 status {:#x}", s.actors.attrs.status[7]);
+    let asleep = s.actors.attrs.status[TARGET] & 4 != 0;
     assert!(
         asleep || tail.has(&msg(&e, Msg::Failed)) || tail.has(&msg(&e, Msg::NoEffect)),
         "{tail:?}"
@@ -565,7 +561,7 @@ fn sleep_on_an_npc() {
     spent(
         &[10; 8],
         &reagents(&s),
-        (30, s.actors.attrs.magic[1]),
+        (start_magic(&files), s.actors.attrs.magic[1]),
         &s,
         0x14,
     );
@@ -574,12 +570,11 @@ fn sleep_on_an_npc() {
 #[test]
 fn magic_arrow_goes_through_the_combat_seams() {
     let Some(files) = files() else { return };
-    let before = State::new_game(&files).unwrap().actors.attrs.hp[7];
+    let before = State::new_game(&files).quiet().actors.attrs.hp[TARGET];
     let e = cast_with(&files, day_book, "OJ\n>>^^^\n");
-    let tail = show("Magic Arrow on actor 7", &e);
+    let tail = show("Magic Arrow on the target", &e);
     let hits = e.stub_hits();
     let s = e.state();
-    eprintln!("  actor 7 hp {before} -> {}", s.actors.attrs.hp[7]);
     // The flight (0x1228ba) and the hit (0x1231be, 0x123c56, 0x12395a) are combat's ports.
     assert!(
         !hits
@@ -587,7 +582,7 @@ fn magic_arrow_goes_through_the_combat_seams() {
             .any(|k| k.starts_with("0x1228ba") || k.starts_with("0x1231be"))
     );
     let failed = tail.has(&msg(&e, Msg::Failed));
-    assert!(failed || s.actors.attrs.hp[7] < before, "{tail:?}");
+    assert!(failed || s.actors.attrs.hp[TARGET] < before, "{tail:?}");
     if !failed {
         // 0x11669e's order: the target's reaction (0x123c56) before the newline and the wound
         // line (0x12395a).
@@ -601,7 +596,7 @@ fn magic_arrow_goes_through_the_combat_seams() {
     spent(
         &[10; 8],
         &reagents(&s),
-        (30, s.actors.attrs.magic[1]),
+        (start_magic(&files), s.actors.attrs.magic[1]),
         &s,
         0x11,
     );

@@ -16,3 +16,11 @@ u6-core = { path = "crates/u6-core" }
 u6-render = { path = "crates/u6-render" }
 u6-audio = { path = "crates/u6-audio" }
 u6-testkit = { path = "crates/u6-testkit" }
+
+# The test gate (`scripts/cargo.sh test --workspace --profile gate`): release speed with the
+# integer-overflow and debug-assertion checks on, so a test of a wrapping fix fails in the gate
+# when the wrap regresses (plain release would wrap silently and stay green).
+[profile.gate]
+inherits = "release"
+overflow-checks = true
+debug-assertions = true

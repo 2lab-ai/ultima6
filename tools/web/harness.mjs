@@ -2,7 +2,7 @@
 // IndexedDB view, frame comparisons. Game files are read from the user's local copy at run
 // time and never written anywhere.
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -16,11 +16,37 @@ export const ZIP = join(ORIGINAL, 'ultima-vi.zip');
 export const HFES = [1, 2, 3].map((n) => join(ORIGINAL, `Ultima VI Disk ${n}.hfe`));
 export const haveHfes = () => HFES.every((p) => existsSync(p));
 export const haveZip = () => existsSync(ZIP);
+// The user's disks as tools/pp20.py left them: one directory per volume under d1..d3.
+export const UNPACKED = join(ORIGINAL, '..', 'unpacked');
+const SIDE_CARS = ['.blkdev', '.bootcode', '.xdfmeta'];
+
+/// How many game files an intake of the user's disks keeps: the files of the decrunched volumes
+/// (unpacked/d1..d3, xdftool's side-car files left out), counted at run time like the Rust
+/// intake test does; `undefined` without that copy (the count is the user's data, not ours), or
+/// with `U6_TEST_NO_UNPACKED` set (to run the tests' run-time baseline path).
+export function gameFileCount() {
+  if (process.env.U6_TEST_NO_UNPACKED || !existsSync(UNPACKED)) return undefined;
+  const count = (dir) => readdirSync(dir, { withFileTypes: true }).reduce((n, e) => {
+    if (e.isDirectory()) return n + count(join(dir, e.name));
+    return n + (SIDE_CARS.some((x) => e.name.endsWith(x)) ? 0 : 1);
+  }, 0);
+  return ['d1', 'd2', 'd3'].reduce((n, d) => n + count(join(UNPACKED, d)), 0);
+}
+
+/// The objlist and the 69 block files a whole save holds (u6-core `objects::BLOCK_COUNT`).
+export const WHOLE_SAVE = 1 + 69;
+
+/// The save path of surface block `i` (`savegame/objblk` + column + row letter, as u6-core
+/// `saveload::block_file`).
+export const blockFile = (i) => `savegame/objblk${'abcdefgh'[i & 7]}${'abcdefgh'[i >> 3]}`;
 
 /// Deep equality for values that hold content of the user's files (save bytes, names): when
 /// they differ the error names `label` and, per differing path (object keys are file paths),
-/// the lengths and the first differing index, never the values (spec 01 §Rights; assert's own
-/// message would print both). Strings, arrays and typed arrays count as sequences.
+/// whether the lengths differ and the first differing index, never the values nor the lengths
+/// (spec 01 §Rights: the length of a list of the user's records or paths is a count of them;
+/// assert's own message would print both). A prefix is named without an index (it would be the
+/// shorter length), equal elements in sequences of two kinds as such. Strings, arrays and typed
+/// arrays count as sequences.
 export function assertSame(actual, expected, label) {
   if (isDeepStrictEqual(actual, expected)) return;
   const found = [];
@@ -32,7 +58,7 @@ const isSequence = (v) => typeof v === 'string' || Array.isArray(v) || ArrayBuff
 const isRecord = (v) => typeof v === 'object' && v !== null && !isSequence(v);
 const kind = (v) => {
   if (v === null || v === undefined) return String(v);
-  if (isSequence(v)) return `${typeof v === 'string' ? 'a string' : 'a sequence'} of length ${v.length}`;
+  if (isSequence(v)) return typeof v === 'string' ? 'a string' : 'a sequence';
   return isRecord(v) ? 'an object' : `a ${typeof v}`;
 };
 
@@ -46,7 +72,9 @@ function difference(a, b, path, out) {
     const nested = i < n && typeof a !== 'string' && (isRecord(a[i]) || isSequence(a[i]))
       && (isRecord(b[i]) || isSequence(b[i]));
     if (nested) difference(a[i], b[i], `${path}[${i}]`, out);
-    else out.push(`${at}lengths ${a.length} and ${b.length}, first difference at index ${i}`);
+    else if (i < n) out.push(`${at}lengths ${a.length === b.length ? 'equal' : 'differ'}, first difference at index ${i}`);
+    else if (a.length !== b.length) out.push(`${at}lengths differ, one is a prefix of the other`);
+    else out.push(`${at}the same elements, different kinds`);
   } else if (isRecord(a) && isRecord(b)) {
     for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
       const p = path ? `${path}.${k}` : k;
@@ -57,6 +85,56 @@ function difference(a, b, path, out) {
   } else {
     out.push(`${at}${kind(a)} and ${kind(b)}`);
   }
+}
+
+// The error classes a failure is shown by; any other name (a page can set its own) shows as
+// `Error`.
+const ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError',
+  'TimeoutError', 'AbortError', 'RuntimeError', 'AssertionError']);
+const HERE = join(dirname(fileURLToPath(import.meta.url)), '/');
+// The files whose places a failure shows: the runner's own (not every path under tools/web).
+const RUNNER_FILES = new Set(['test-web.mjs', 'harness.mjs']);
+// A stack frame's place: node writes a module's as a file URL, Playwright's rewritten stacks a
+// plain path.
+const FRAME = /^\s+at (?:async )?(?:[^()]*\()?((?:file:\/\/)?\/[^\s()]+):(\d+):(\d+)\)?$/;
+const framePath = (place) => {
+  try { return place.startsWith('file:') ? fileURLToPath(place) : place; } catch { return ''; }
+};
+
+/// The kind of `err` as one of the fixed names above (`Error` for a thrown value that is not
+/// an Error).
+export const errorName = (err) => (err instanceof Error && ERROR_NAMES.has(err.name) ? err.name : 'Error');
+
+/// What the runner shows of a failure (spec 01 §Rights): an error's message can carry the
+/// user's data (an assertion's compared values; a page, Playwright or helper error quoting the
+/// page's text, a selector or a status line), so the lines are a fixed head and the places in
+/// these test files only. The head is an assertion's own label (the first line of the test's
+/// message: node appends the compared values after it) or, for any other error, its kind. The
+/// places are read from an Error's stack after its message (whose lines could look like
+/// frames; a stack that does not hold the message shows none) and shown as file:line:column of
+/// the runner's own files only. A thrown value that is not an Error shows no places: its
+/// `stack`, if any, is anyone's text.
+export function failureLines(err) {
+  let head = `${errorName(err)} (its message is not shown)`;
+  if (err instanceof assert.AssertionError) {
+    head = err.generatedMessage
+      ? 'AssertionError (the compared values are not shown)'
+      : `AssertionError: ${String(err.message).split('\n')[0]}`;
+  }
+  let stack = err instanceof Error && typeof err.stack === 'string' ? err.stack : '';
+  const message = err instanceof Error && typeof err.message === 'string' ? err.message : '';
+  if (message) {
+    const end = stack.indexOf(message);
+    stack = end >= 0 ? stack.slice(end + message.length) : '';
+  }
+  const places = [];
+  for (const line of stack.split('\n')) {
+    const m = FRAME.exec(line);
+    const path = m ? framePath(m[1]) : '';
+    const file = path.startsWith(HERE) ? path.slice(HERE.length) : '';
+    if (RUNNER_FILES.has(file) && places.length < 5) places.push(`at ${file}:${m[2]}:${m[3]}`);
+  }
+  return [head, ...places];
 }
 
 // Runs in the page before its scripts: named gates the test holds and releases, an event log,
@@ -191,7 +269,9 @@ export async function openPage(env, { gated = true, gameFirst = true } = {}) {
     });
   }
   const page = await context.newPage();
-  page.on('pageerror', (err) => console.error(`  page error: ${err.message}`));
+  // A page error's text can quote the game's data (an engine panic names its values): its kind
+  // only.
+  page.on('pageerror', (err) => console.error(`  page error: ${errorName(err)}`));
   return { context, page };
 }
 

@@ -21,8 +21,25 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import * as h from './harness.mjs';
 
 const MARKER = { name: 'port-test-marker.txt', text: 'not a game file' };
+// The game files an import of the user's disks keeps: counted from their decrunched copy, else
+// the count the first started import showed, a run-time baseline every later import and
+// storage check compares with (no count of the user's files is written here). `FILES` and
+// `WITH_MARKER` (one more: the marker) stand for that count in `started` and `kept`.
+let baseline = h.gameFileCount();
+const FILES = Symbol('the game files');
+const WITH_MARKER = Symbol('the game files and the marker');
+const count = (want) => {
+  if (want === FILES) return baseline;
+  return want === WITH_MARKER ? baseline + 1 : want;
+};
 const tests = [];
 const test = (name, fn, { needs } = {}) => tests.push({ name, fn, needs });
+
+// Output rule (spec 01 §Rights): what a test prints, its receipts and its failure messages,
+// holds labels, indices, counts of what the test itself made and pass/fail only; the page's
+// status text, positions, counts of the user's files and the lengths of their records or paths
+// (a count of them) are compared, never printed. A failure shows its label or kind and its
+// places in these files, never its message (the runner, h.failureLines).
 
 // The page once a start finished (nothing queued) and the started game ran a frame. The page
 // writes the canvas fields (leader, prompt, program, name, keys) only in its frame callback,
@@ -31,9 +48,27 @@ async function started(page, files) {
   await h.waitSettled(page);
   await h.waitFrames(page, 1);
   const s = await h.state(page);
-  assert.equal(s.state, 'running', s.status);
-  if (files !== undefined) assert.equal(s.files, files, s.status);
+  assert.ok(s.state === 'running', 'the game runs');
+  if (files !== undefined) {
+    if (baseline === undefined && files === FILES) baseline = s.files;
+    if (baseline === undefined && files === WITH_MARKER) baseline = s.files - 1;
+    assert.ok(typeof files === 'number' || (Number.isInteger(baseline) && baseline > 0), 'a count of game files');
+    assert.ok(s.files === count(files), 'the files the start kept');
+  }
   return s;
+}
+
+// The kept paths are as many as `want` stands for (`FILES` or `WITH_MARKER`); before any
+// started import the baseline is the count of the game on screen.
+async function kept(page, want, label) {
+  if (baseline === undefined) {
+    const files = (await h.state(page)).files;
+    baseline = want === WITH_MARKER ? files - 1 : files;
+    assert.ok(Number.isInteger(baseline) && baseline > 0, 'a count of game files');
+  }
+  const paths = await h.keptPaths(page);
+  assert.ok(paths !== null && paths.length === count(want), label);
+  return paths;
 }
 
 // The page once the game waits at its prompt (its boot and the start fight's turns ran): where
@@ -45,8 +80,10 @@ async function atPrompt(page) {
 
 const promptNow = (page) => page.evaluate(() => document.getElementById('screen').dataset.prompt);
 
-// No page: the harness's content-free comparison (synthetic values) names paths and lengths only.
-test('assertSame: a mismatch names the label, the paths, the lengths and the index, never the values', async () => {
+// No page: the harness's content-free comparison (synthetic values) names paths, whether the
+// lengths differ and the index only; a prefix without an index (it would be the shorter
+// length), equal elements of two kinds as such.
+test('assertSame: a mismatch names the label, the paths, equal or differing lengths and the index, never the values', async () => {
   const failure = (f) => {
     try { f(); } catch (err) { return err.message; }
     return null;
@@ -57,13 +94,68 @@ test('assertSame: a mismatch names the label, the paths, the lengths and the ind
     { 'savegame/objblkaa': [7, 88, 9] },
     'the store',
   ));
-  assert.equal(store, 'the store: savegame/objblkaa: lengths 3 and 3, first difference at index 1; savegame/objlist: not expected');
+  assert.equal(store, 'the store: savegame/objblkaa: lengths equal, first difference at index 1; savegame/objlist: not expected');
   const name = failure(() => h.assertSame('Zhuge', 'Zhugx', 'the name'));
-  assert.equal(name, 'the name: lengths 5 and 5, first difference at index 4');
+  assert.equal(name, 'the name: lengths equal, first difference at index 4');
   const list = failure(() => h.assertSame([{ path: 'a', bytes: [1] }], [{ path: 'a', bytes: [2, 3] }], 'files'));
-  assert.equal(list, 'files: [0].bytes: lengths 1 and 2, first difference at index 0');
-  for (const leak of ['83', '88', 'Zhug']) {
-    assert.ok(![store, name, list].some((m) => m.includes(leak)), `a message shows ${leak}`);
+  assert.equal(list, 'files: [0].bytes: lengths differ, first difference at index 0');
+  const kinds = failure(() => h.assertSame({ a: 'xyz', b: [1, 2, 3, 4] }, { a: 7, b: null }, 'kinds'));
+  assert.equal(kinds, 'kinds: a: a string and a number; b: a sequence and null');
+  const prefix = failure(() => h.assertSame({ files: ['a', 'b', 'c'] }, { files: ['a', 'b', 'c', 'd', 'e'] }, 'paths'));
+  assert.equal(prefix, 'paths: files: lengths differ, one is a prefix of the other');
+  const shorter = failure(() => h.assertSame('Zhug', 'Zhuge', 'the name'));
+  assert.equal(shorter, 'the name: lengths differ, one is a prefix of the other');
+  const typed = failure(() => h.assertSame(new Uint8Array([1, 2]), [1, 2], 'bytes'));
+  assert.equal(typed, 'bytes: the same elements, different kinds');
+  for (const leak of ['83', '88', 'Zhug', '3', '5']) {
+    assert.ok(![store, name, list, kinds, prefix, shorter, typed].some((m) => m.includes(leak)), `a message shows ${leak}`);
+  }
+  assert.ok(![prefix, shorter, typed].some((m) => /\d/.test(m)), 'a prefix or a kind shows no number');
+});
+
+// The runner's failure lines (h.failureLines) on errors whose text holds a sentinel: plain,
+// multi-line with lines shaped as frames of this directory, a thrown string, a page-chosen name,
+// assertions with a label and generated, Playwright's own (a page's thrown error, a timeout on
+// a selector), a frame of another file in this directory, a thrown object with a stack and an
+// Error whose stack lost its message. None shows the sentinel; each shows its fixed head, and
+// places in this file only where they are an Error's frames after its message.
+test('the runner shows a failure by its label or kind and its places here, never its message', async (env) => {
+  const S = 'QX7SENTINELZ9';
+  const caught = async (f) => {
+    try { await f(); } catch (err) { return err; }
+    throw new Error('no failure');
+  };
+  const here = (lines) => lines.slice(1).some((l) => /^at test-web\.mjs:\d+:\d+$/.test(l));
+  const fake = new URL(`${S}.mjs`, import.meta.url).href;
+  const named = new Error(S);
+  named.name = S;
+  const thisFile = new URL(import.meta.url).pathname;
+  const other = new Error('m');
+  other.stack = `Error: m\n    at f (${new URL(fake).pathname}:3:3)\n    at ${thisFile}:5:5`;
+  const object = { name: 'TypeError', message: S, stack: `    at ${new URL(fake).pathname}:1:1\n    at ${thisFile}:4:4` };
+  const lost = new Error(S);
+  lost.stack = `    at ${thisFile}:7:7`;
+  const page = await (await env.browser.newContext()).newPage();
+  const cases = [
+    ['plain', await caught(() => { throw new Error(S); }), 'Error (its message is not shown)'],
+    ['multi-line', await caught(() => { throw new TypeError(`a\n    at ${S} (${fake}:1:1)\n    at ${new URL(fake).pathname}:2:2\n${S}`); }), 'TypeError (its message is not shown)'],
+    ['a page-chosen name', named, 'Error (its message is not shown)'],
+    ['a labelled assertion', await caught(() => assert.equal(S, `${S}-other`, 'the label')), 'AssertionError: the label'],
+    ['a generated assertion', await caught(() => assert.deepEqual([S], [`${S}-other`])), 'AssertionError (the compared values are not shown)'],
+    ['a page error', await caught(() => page.evaluate((s) => { throw new Error(s); }, S)), 'Error (its message is not shown)'],
+    ['a timeout', await caught(() => page.waitForSelector(`#${S}`, { timeout: 50 })), 'TimeoutError (its message is not shown)'],
+    ['another file here', other, 'Error (its message is not shown)'],
+    ['an object with a stack', await caught(() => { throw object; }), 'Error (its message is not shown)', false],
+    ['a stack without its message', lost, 'Error (its message is not shown)', false],
+    ['a string', await caught(() => { throw S; }), 'Error (its message is not shown)', false],
+  ];
+  for (const [what, err, head, placed = true] of cases) {
+    const lines = h.failureLines(err);
+    assert.ok(lines[0] === head, `${what}: the head`);
+    assert.ok(!lines.join('\n').includes(S), `${what}: no message text`);
+    assert.ok(lines.slice(1).every((l) => /^at [\w./-]+\.mjs:\d+:\d+$/.test(l)), `${what}: places only`);
+    if (placed) assert.ok(here(lines), `${what}: a place in this file`);
+    else assert.ok(lines.length === 1, `${what}: no place`);
   }
 });
 
@@ -80,7 +172,7 @@ test('headers and CSP: the page runs under its policy, third-party requests are 
     assert.equal(hd['cache-control'], 'public, max-age=0, must-revalidate');
   }
   const s = await h.state(page);
-  assert.equal(s.state, 'idle', s.status);
+  assert.ok(s.state === 'idle', 'idle before a game');
   assert.equal(s.pickerDisabled, false);
   const egress = await page.evaluate(() => fetch('https://example.com/').then(() => 'fetched', (e) => `blocked: ${e}`));
   assert.match(egress, /^blocked/);
@@ -88,7 +180,7 @@ test('headers and CSP: the page runs under its policy, third-party requests are 
   assert.deepEqual(csp, ['connect-src https://example.com/'], 'only the probe was refused');
   if (h.haveHfes()) {
     await page.setInputFiles('#picker', h.HFES);
-    await started(page, 130);
+    await started(page, FILES);
     await h.waitPrompt(page); // the boot ran to the prompt
     assert.deepEqual(await page.evaluate(() => window.__csp), csp, 'the game boots without violations');
   }
@@ -105,7 +197,7 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   assert.equal((await h.state(page)).focused, 'picker');
   const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Space')]);
   await chooser.setFiles(h.HFES);
-  const s = await started(page, 130);
+  const s = await started(page, FILES);
   assert.equal(s.focused, 'screen', 'focus lands on the canvas after the import');
   assert.equal(await page.evaluate(() => getComputedStyle(document.activeElement).outlineColor), 'rgb(255, 209, 102)');
   // From the prompt, one step east (west when the start fight blocks it), then the prompt again.
@@ -113,7 +205,7 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), [key, true], 'the canvas took the arrow');
   const walked = h.mapShift(before, await h.frame(page));
   const want = key === 'ArrowRight' ? 16 : -16;
-  assert.ok(walked.shift === want && walked.score > 0.5, `one step (${key}) scrolled the map: ${JSON.stringify(walked)}`);
+  assert.ok(walked.shift === want && walked.score > 0.5, `one step (${key}) scrolled the map`);
   await page.keyboard.press('Tab');
   assert.notEqual((await h.state(page)).focused, 'screen', 'Tab leaves the canvas');
   const at = (await h.state(page)).leader;
@@ -124,7 +216,7 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   assert.equal(await page.evaluate(() => document.getElementById('screen').dataset.keys), '0');
   assert.equal((await h.state(page)).leader, at, 'no walk without focus');
   const after = h.mapShift(still, await h.frame(page));
-  assert.equal(after.shift, 0, `the map stayed: ${JSON.stringify(after)}`);
+  assert.ok(after.shift === 0, 'the map stayed');
 }, { needs: h.haveHfes });
 
 test('two rapid imports: one after the other, the second one runs and is kept', async (env) => {
@@ -137,22 +229,22 @@ test('two rapid imports: one after the other, the second one runs and is kept', 
   assert.equal((await h.state(page)).ops, 2, 'both imports queued');
   assert.equal((await h.log(page)).filter((e) => e.startsWith('read:start')).length, 1, 'the second waits');
   await page.evaluate(() => window.__release('read'));
-  await started(page, 131);
+  await started(page, WITH_MARKER);
   const log = await h.log(page);
   const firstSave = log.indexOf('save:end:true');
   const secondRead = log.findIndex((e, i) => i > 0 && e.startsWith('read:start') && log.slice(0, i).includes('save:end:true'));
-  assert.ok(firstSave > 0 && secondRead > firstSave, `the second import starts after the first is kept: ${log}`);
-  const kept = await h.keptPaths(page);
-  assert.equal(kept.length, 131);
-  assert.ok(kept.includes(MARKER.name), 'storage holds the second import');
-  assert.match((await h.state(page)).status, /The 131 game files are kept/);
+  assert.ok(firstSave > 0 && secondRead > firstSave, 'the second import starts after the first is kept');
+  const paths = await kept(page, WITH_MARKER, 'storage holds the second import\'s files');
+  assert.ok(paths.includes(MARKER.name), 'storage holds the second import');
+  const status = (await h.state(page)).status;
+  assert.ok(new RegExp(`The ${paths.length} game files are kept`).test(status), 'the kept count shown');
 }, { needs: h.haveHfes });
 
 test('an import during the restore waits for it, then replaces the restored game', async (env) => {
   const { page } = await h.openPage(env);
   await h.load(page, env);
   await h.dropFiles(page, h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   await page.evaluate(() => sessionStorage.setItem('__holds', '["load"]'));
   await page.reload();
   await h.waitLog(page, 'load:start');
@@ -162,10 +254,11 @@ test('an import during the restore waits for it, then replaces the restored game
   assert.equal(during.ops, 2, 'the drop is queued behind the restore');
   assert.ok(!(await h.log(page)).some((e) => e.startsWith('read:')), 'nothing read before the restore');
   await page.evaluate(() => window.__release('load'));
-  await started(page, 131);
+  await started(page, WITH_MARKER);
   const log = await h.log(page);
-  assert.ok(log.indexOf('load:end:130') < log.findIndex((e) => e.startsWith('read:start')), String(log));
-  assert.equal((await h.keptPaths(page)).length, 131);
+  const restored = log.indexOf(`load:end:${count(FILES)}`);
+  assert.ok(restored >= 0 && restored < log.findIndex((e) => e.startsWith('read:start')), 'the restore ends before the read');
+  await kept(page, WITH_MARKER, 'the import replaced the restored files');
   assert.equal((await h.state(page)).pickerDisabled, false);
 }, { needs: h.haveHfes });
 
@@ -182,8 +275,8 @@ test('forget during a pending save runs after the save and reports only once com
   await page.evaluate(() => window.__release('save'));
   await h.waitLog(page, 'forget:start');
   const log = await h.log(page);
-  assert.ok(log.indexOf('save:end:true') < log.indexOf('forget:start'), String(log));
-  assert.equal((await h.keptPaths(page)).length, 130, 'the save committed first');
+  assert.ok(log.indexOf('save:end:true') < log.indexOf('forget:start'), 'the save before the forget');
+  await kept(page, FILES, 'the save committed first');
   assert.doesNotMatch((await h.state(page)).status, /were removed/, 'no success before the delete');
   await page.evaluate(() => window.__release('forget'));
   await h.waitSettled(page);
@@ -191,7 +284,7 @@ test('forget during a pending save runs after the save and reports only once com
   assert.equal(await h.keptPaths(page), null, 'storage empty');
   assert.match(s.status, /The kept game files were removed/);
   assert.equal(s.state, 'running');
-  assert.equal(s.files, 130, 'the game on screen keeps running');
+  assert.ok(s.files === count(FILES), 'the game on screen keeps running');
 }, { needs: h.haveHfes });
 
 test('read and forget failures are shown and the page stays usable', async (env) => {
@@ -244,7 +337,7 @@ test('an engine trap stops the loop; Restart loads the kept files again', async 
   const { page } = await h.openPage(env);
   await h.load(page, env);
   await h.dropFiles(page, h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   await page.evaluate(() => { globalThis.__trap = true; });
   await page.waitForFunction(() => document.body.dataset.state === 'crashed');
   let s = await h.state(page);
@@ -255,7 +348,7 @@ test('an engine trap stops the loop; Restart loads the kept files again', async 
   assert.equal(await page.evaluate(() => globalThis.__ticks), ticks, 'not ticked again');
   await page.click('#restart');
   await page.waitForLoadState('load');
-  await started(page, 130);
+  await started(page, FILES);
   s = await h.state(page);
   assert.equal(s.focused, 'screen', 'the user asked: focus on the canvas');
   assert.equal(s.restartHidden, true);
@@ -265,7 +358,7 @@ test('A on the canvas: Attack asks for a target, a stray key ends it, then the a
   const { page } = await h.openPage(env, { gated: false });
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   await h.waitPrompt(page);
   await h.press(page, 'a', 30);
   assert.equal(await promptNow(page), '0', 'Attack waits for its target');
@@ -275,14 +368,14 @@ test('A on the canvas: Attack asks for a target, a stray key ends it, then the a
   const { key, before } = await h.stepSideways(page);
   const walked = h.mapShift(before, await h.frame(page));
   const want = key === 'ArrowRight' ? 16 : -16;
-  assert.ok(walked.shift === want && walked.score > 0.5, `one step (${key}) after A: ${JSON.stringify(walked)}`);
+  assert.ok(walked.shift === want && walked.score > 0.5, `one step (${key}) after A`);
 }, { needs: h.haveHfes });
 
 test('Ctrl+S and Ctrl+R on the canvas are the game\'s Save and Restore, not the browser\'s', async (env) => {
   const { page } = await h.openPage(env, { gated: false });
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   await h.waitPrompt(page);
   for (const key of ['Control+s', 'Control+r']) {
     await h.press(page, key, 30);
@@ -315,23 +408,23 @@ test('a save (Ctrl-S, Y) is kept; a reload resumes it there; forgetting it start
   const { page } = await h.openPage(env);
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   const { start, moved } = await walkAndSave(page);
   const saved = await h.savedPaths(page);
-  assert.ok(saved.includes('savegame/objlist') && saved.length > 1, String(saved));
+  assert.ok(saved.includes('savegame/objlist') && saved.length > 1, 'the objlist and blocks saved');
   assert.ok((await h.log(page)).includes('saves:store:end'), 'stored through the queue');
   await page.reload();
-  let s = await started(page, 130);
+  let s = await started(page, FILES);
   assert.equal(s.saves, saved.length, 'the stored save is laid over the game files');
   assert.equal((await atPrompt(page)).leader, moved, 'resumed where it was saved');
   assert.match(s.status, /the game saved in this browser, resumed/);
   await page.click('#forget-save');
   await h.waitSettled(page);
   assert.deepEqual(await h.savedPaths(page), [], 'the save is gone');
-  assert.equal((await h.keptPaths(page)).length, 130, 'the game files stay');
+  await kept(page, FILES, 'the game files stay');
   assert.match((await h.state(page)).status, /The saved game was removed/);
   await page.reload();
-  s = await started(page, 130);
+  s = await started(page, FILES);
   assert.equal(s.saves, 0);
   assert.equal((await atPrompt(page)).leader, start, 'a new game');
   assert.match(s.status, /a new game \(no game saved in this browser\)/);
@@ -347,14 +440,14 @@ test('an original savegame folder dropped becomes the saved game', async (env) =
   const { page } = await h.openPage(env);
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   const { moved } = await walkAndSave(page);
   const folder = asFolder(await h.savedFiles(page));
   await page.click('#forget-save');
   await h.waitSettled(page);
   assert.deepEqual(await h.savedPaths(page), []);
   await h.dropFiles(page, [], folder);
-  const s = await started(page, 130);
+  const s = await started(page, FILES);
   assert.match(s.status, /The saved game \(\d+ files\) was imported/);
   assert.equal(s.saves, folder.length);
   assert.equal((await atPrompt(page)).leader, moved, 'the imported save resumes');
@@ -365,7 +458,7 @@ test('a Save of the game an import replaces, made while the import reads: the im
   const { page } = await h.openPage(env);
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   const { moved } = await walkAndSave(page);
   const folder = asFolder(await h.savedFiles(page));
   const { to: later } = await h.stepSideways(page);
@@ -380,7 +473,7 @@ test('a Save of the game an import replaces, made while the import reads: the im
   await h.press(page, 'y', 60);
   await page.waitForFunction(() => globalThis.__saveGen === 2, null, { timeout: 30_000 });
   await page.evaluate(() => window.__release('read'));
-  let s = await started(page, 130);
+  let s = await started(page, FILES);
   const stores = (await h.log(page)).slice(from).filter((e) => e.startsWith('saves:store:start'));
   assert.deepEqual(stores, [`saves:store:start:${folder.length}`], 'only the import stored');
   h.assertSame(byName(await h.savedFiles(page)), byName(folder), 'the store holds the imported files');
@@ -388,7 +481,7 @@ test('a Save of the game an import replaces, made while the import reads: the im
   assert.equal(s.saved, 1, 'the replaced game\'s Save was not stored');
   assert.equal((await atPrompt(page)).leader, moved, 'the imported save resumes');
   await page.reload();
-  await started(page, 130);
+  await started(page, FILES);
   assert.equal((await atPrompt(page)).leader, moved, 'a reload resumes the imported save');
 }, { needs: h.haveHfes });
 
@@ -396,12 +489,12 @@ test('an import that does not start leaves the stored save; the game on screen s
   const { page } = await h.openPage(env);
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   await walkAndSave(page);
   const stored = await h.savedFiles(page);
   // A folder with only the objlist, and no game files: the import cannot start.
   const folder = asFolder(stored.filter(({ path }) => path === 'savegame/objlist'));
-  assert.ok(folder.length === 1 && stored.length > 1, String(stored.length));
+  assert.ok(folder.length === 1 && stored.length > 1, 'an objlist-only folder of a larger save');
   await h.dropFiles(page, [], [...folder, MARKER]);
   await h.waitSettled(page);
   let s = await h.state(page);
@@ -421,13 +514,17 @@ test('a Save after the saved game was forgotten stores the whole game; a reload 
   const { page } = await h.openPage(env);
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   await walkAndSave(page);
   // The game on screen starts from a save holding a block its Saves near the start never
-  // rewrite (synthetic: the far block 63 empty).
-  const folder = [...asFolder(await h.savedFiles(page)), { name: 'PLAYER/SAVEGAME/OBJBLKHH', bytes: [0, 0] }];
+  // rewrite (synthetic: empty; the last block the first Save left out).
+  const first = await h.savedFiles(page);
+  const listed = new Set(first.map(({ path }) => path.toLowerCase()));
+  const far = [...Array(64).keys()].reverse().map(h.blockFile).find((p) => !listed.has(p));
+  assert.ok(far, 'a Save near the start leaves blocks out');
+  const folder = [...asFolder(first), { name: `PLAYER/${far.toUpperCase()}`, bytes: [0, 0] }];
   await h.dropFiles(page, [], folder);
-  let s = await started(page, 130);
+  let s = await started(page, FILES);
   assert.equal(s.saves, folder.length);
   // A Save taken while the forget runs is not stored after the delete.
   await page.evaluate(() => window.__hold('saves-forget'));
@@ -443,18 +540,18 @@ test('a Save after the saved game was forgotten stores the whole game; a reload 
   await h.waitSettled(page);
   assert.deepEqual(await h.savedPaths(page), [], 'the Save taken before the forget was not stored');
   assert.match((await h.state(page)).status, /The saved game was removed/);
-  // The next Save stores the whole game: the objlist and all 69 blocks, the far block included.
+  // The next Save stores the whole game: the objlist and all 69 blocks, the far one included.
   const { to: later } = await h.stepSideways(page);
   await h.press(page, 'Control+s', 30);
   await h.press(page, 'y', 60);
   await page.waitForFunction(() => document.body.dataset.saved === '2', null, { timeout: 60_000 });
   await h.waitSettled(page);
   const stored = byName(await h.savedFiles(page));
-  assert.equal(Object.keys(stored).length, 70, 'the objlist and every block');
-  h.assertSame(stored['savegame/objblkhh'], [0, 0], 'the far block as the game had it');
+  assert.equal(Object.keys(stored).length, h.WHOLE_SAVE, 'the objlist and every block');
+  h.assertSame(stored[far], [0, 0], 'the far block as the game had it');
   await page.reload();
-  s = await started(page, 130);
-  assert.equal(s.saves, 70, 'the whole save is laid over the game files');
+  s = await started(page, FILES);
+  assert.equal(s.saves, h.WHOLE_SAVE, 'the whole save is laid over the game files');
   assert.equal((await atPrompt(page)).leader, later, 'resumed where it was saved');
 }, { needs: h.haveHfes });
 
@@ -462,16 +559,16 @@ test('a Save of a game that did not own the stored save, then the forget: it is 
   const { page } = await h.openPage(env);
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   // No kept files: a drop of only a savegame folder starts nothing, it becomes the stored save
-  // and the game on screen no longer owns it (synthetic: the far block 63 empty).
+  // and the game on screen no longer owns it (synthetic: one empty block file).
   await page.click('#forget');
   await h.waitSettled(page);
   assert.equal(await h.keptPaths(page), null);
   await h.dropFiles(page, [], [{ name: 'PLAYER/SAVEGAME/OBJBLKHH', bytes: [0, 0] }]);
   await h.waitSettled(page);
   let s = await h.state(page);
-  assert.equal(s.state, 'running', s.status);
+  assert.ok(s.state === 'running', 'the game runs on');
   assert.match(s.status, /The game on screen is not saved in this browser any more/);
   const lower = async () => (await h.savedPaths(page)).map((p) => p.toLowerCase());
   assert.deepEqual(await lower(), ['savegame/objblkhh']);
@@ -503,7 +600,7 @@ test('a Save of a game that did not own the stored save, then the forget: it is 
   await h.press(page, 'y', 60);
   await page.waitForFunction(() => document.body.dataset.saved === '2', null, { timeout: 60_000 });
   await h.waitSettled(page);
-  assert.equal((await h.savedPaths(page)).length, 70, 'the objlist and every block');
+  assert.equal((await h.savedPaths(page)).length, h.WHOLE_SAVE, 'the objlist and every block');
 }, { needs: h.haveHfes });
 
 test('a savegame folder file over the save limit is left out before it is read', async (env) => {
@@ -542,7 +639,7 @@ test('zip: a click starts the sound, the worklet gets chunks, Mute; save and rel
   await started(page);
   s = await atPrompt(page);
   await writeFile('/tmp/claude-501/int-b-web-restored.png', await page.locator('#screen').screenshot());
-  console.log(`  receipt: saved at ${moved}, after the reload ${s.leader} (${s.saves} save files)`);
+  console.log(`  receipt: saved, after the reload at the saved place: ${s.leader === moved}`);
   assert.equal(s.leader, moved, 'restored position');
 }, { needs: h.haveZip });
 
@@ -598,15 +695,16 @@ test('a game whose MED tables fail the checks starts and plays silent: sound on 
   page.on('console', (m) => { if (m.type() === 'warning' && m.text().startsWith('sound is off')) silent.push(m.text()); });
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   await page.click('#screen');
   await page.waitForFunction(() => document.body.dataset.audio === 'running', null, { timeout: 15_000 });
   assert.equal(silent.length, 0, 'the user\'s game has its audio machine');
   // The sound is on: the boot of the new game finds no audio machine for it.
   const dropped = await dropWithoutMedTables(page);
+  assert.ok(dropped === count(FILES), 'every kept file dropped again');
   let s = await started(page);
   assert.match(s.status, /Started\./, 'the dropped files started');
-  assert.equal(silent.length, 1, `the boot said the sound is off: ${silent}`);
+  assert.equal(silent.length, 1, 'the boot said the sound is off');
   let ticks = await page.evaluate(() => globalThis.__ticks);
   let step = await h.stepSideways(page);
   assert.notEqual(step.to, step.from, 'the game plays');
@@ -619,14 +717,14 @@ test('a game whose MED tables fail the checks starts and plays silent: sound on 
   assert.equal(silent.length, 1);
   await page.click('#screen');
   for (let i = 0; i < 150 && silent.length < 2; i += 1) await h.sleep(100);
-  assert.equal(silent.length, 2, `the gesture said the sound is off: ${silent}`);
+  assert.equal(silent.length, 2, 'the gesture said the sound is off');
   s = await h.state(page);
-  assert.equal(s.state, 'running', s.status);
+  assert.ok(s.state === 'running', 'the game runs');
   ticks = await page.evaluate(() => globalThis.__ticks);
   step = await h.stepSideways(page);
   assert.notEqual(step.to, step.from, 'the game plays on');
   assert.ok(await page.evaluate(() => globalThis.__ticks) > ticks, 'the engine ticks');
-  console.log(`  receipt: ${dropped} files dropped with the period table zeroed; sound off at the boot and at the gesture, the game walks after each`);
+  console.log('  receipt: the files dropped with the period table zeroed; sound off at the boot and at the gesture, the game walks after each');
 }, { needs: h.haveHfes });
 
 // The creation from the menu (u6-core intro tests `create_from_menu`): C, the name, male, the
@@ -690,7 +788,7 @@ test('zip as a player: the opening, Escape, the menu, a character created and pl
   s = await h.state(page);
   h.assertSame(s.name, 'Zhuge', 'J in the menu plays the stored character');
   await shot('05-journey-onward');
-  console.log(`  receipt: created ${s.name}; after the reload J in the menu plays ${s.name} (${s.saves} save file)`);
+  console.log(`  receipt: created ${s.name}; after the reload J in the menu plays ${s.name}`);
 }, { needs: h.haveZip });
 
 test('zip: Quit in the menu ends the game; the page says so and Restart starts it again', async (env) => {
@@ -771,7 +869,7 @@ async function clickStep(page) {
     if (to === from) continue;
     const [fx, fy, fz] = from.split(',').map(Number);
     const [tx, ty, tz] = to.split(',').map(Number);
-    assert.deepEqual([tx - fx, ty - fy, tz - fz], [dx, 0, 0], `one cell ${dx > 0 ? 'east' : 'west'}: ${from} -> ${to}`);
+    assert.ok(tx - fx === dx && ty === fy && tz === fz, `one cell ${dx > 0 ? 'east' : 'west'}`);
     return { dx, from, to };
   }
   throw new Error(`${h.STEP_TRIES} click steps blocked in a row`);
@@ -781,7 +879,7 @@ test('the mouse: the Look icon, then Look on the Avatar, then clicks walk; the k
   const { page } = await h.openPage(env, { gated: false });
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   await h.waitPrompt(page);
   const before = await h.frame(page);
   const described = await lookAtAvatar(page, false);
@@ -817,7 +915,7 @@ test('the mouse: a press held 300 ms on the map walks and yields; held through t
   const { page } = await h.openPage(env); // gated: the glue counts the ticks
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
-  await started(page, 130);
+  await started(page, FILES);
   await h.waitPrompt(page);
   // Three cells south of the Avatar, at the prompt.
   const ran = await holdOnMap(page, 88, 88 + 48);
@@ -873,17 +971,17 @@ test('the mouse: a press held on the map walks at the original\'s pace: 100 ms o
     const opened = await h.openPage(env, { gated: false });
     await h.load(opened.page, env);
     await opened.page.setInputFiles('#picker', h.HFES);
-    await started(opened.page, 130);
+    await started(opened.page, FILES);
     return opened;
   };
   const first = await boot();
   const click = await heldWalk(first.page, 100);
   await first.context.close();
-  assert.equal(click.steps, 1, `a 100 ms press walks one cell: ${JSON.stringify(click)}`);
+  assert.ok(click.steps === 1, 'a 100 ms press walks one cell');
   const second = await boot();
   const held = await heldWalk(second.page, 1000);
-  assert.ok(held.steps >= 1 && held.steps <= 2, `a 1 s press from a fresh boot walks the original's one cell, within one: ${JSON.stringify(held)}`);
-  console.log(`  receipt: from fresh boots, held 100 ms = ${click.steps} cell; held 1 s = ${held.steps} cells, at ms ${JSON.stringify(held.at)} after the press`);
+  assert.ok(held.steps >= 1 && held.steps <= 2, 'a 1 s press from a fresh boot walks the original\'s one cell, within one');
+  console.log('  receipt: from fresh boots, held 100 ms = one cell, held 1 s = the original\'s cell within one');
 }, { needs: h.haveHfes });
 
 test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {
@@ -919,7 +1017,7 @@ test('zip: the first press on the canvas is one game click and starts the sound;
   assert.equal((await h.state(page)).leader, to, 'Mute is not a game click');
   await page.click('#mute');
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'false');
-  console.log(`  receipt: first press -> Look waits, audioContext.state=${s.audio}, chunks=${s.audioChunks}; click walk ${from} -> ${to}`);
+  console.log(`  receipt: first press -> Look waits, audioContext.state=${s.audio}, chunks=${s.audioChunks}; the click walked ${from !== to}`);
 }, { needs: h.haveZip });
 
 const filter = process.argv[2];
@@ -939,7 +1037,9 @@ try {
       console.log(`ok - ${t.name}`);
     } catch (err) {
       failed += 1;
-      console.log(`not ok - ${t.name}\n  ${String(err.stack ?? err).split('\n').slice(0, 6).join('\n  ')}`);
+      // A fixed head (an assertion's own label, else the error's kind) and the places in these
+      // files: no message text (h.failureLines).
+      console.log(`not ok - ${t.name}\n  ${h.failureLines(err).join('\n  ')}`);
     } finally {
       for (const context of env.browser.contexts()) await context.close();
     }

@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn latin1_stops_at_nul() {
-        assert_eq!(latin1_until_nul(b"Avatar\0\0x"), "Avatar");
+        assert_eq!(latin1_until_nul(b"Abcdef\0\0x"), "Abcdef");
         assert_eq!(latin1_until_nul(&[0x41, 0xE9]), "A\u{e9}");
     }
 }
