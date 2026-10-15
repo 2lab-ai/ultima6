@@ -1120,12 +1120,13 @@ test('zip: the first press on the canvas is one game click and starts the sound;
 const STEP_MS = 20; // one PAL frame: every step the page runs (u6-core pacer::STEP_MS)
 
 // What the page shows of the speed: data-speed (1, 1.5, .. 8, max), the badge's state and text,
-// the Speed group's label.
+// the Speed group's label as shown and its announced part (the live region: the speed's name).
 const speedShown = (page) => page.evaluate(() => ({
   speed: document.getElementById('screen').dataset.speed,
   badge: !document.getElementById('speed-badge').hidden,
   text: document.getElementById('speed-badge').textContent,
-  label: document.getElementById('speed-label').textContent,
+  label: document.getElementById('speed-shown').textContent,
+  announced: document.getElementById('speed-label').textContent,
 }));
 
 // What the glue saw on a gated page (h.openPage): the steps run and the engine clock, the
@@ -1211,6 +1212,10 @@ test('the steps follow the clock: 10 virtual seconds are 500 steps of 20 ms at 6
   const shown = await speedShown(page);
   assert.equal(shown.label, 'Max 76.8×', 'Max shows the speed reached (64 steps of 20 ms a 60 Hz frame)');
   assert.ok(shown.badge && shown.text === shown.label, 'the badge shows it');
+  assert.equal(shown.announced, 'Max', 'the live label announces Max, not each measure of it');
+  const a11y = await page.evaluate(() => [document.getElementById('speed-badge').getAttribute('aria-hidden'),
+    document.getElementById('speed-label').getAttribute('aria-live'), document.getElementById('speed-reached').getAttribute('aria-hidden')]);
+  assert.deepEqual(a11y, ['true', 'polite', 'true'], 'the badge and the reached speed are hidden from assistive technology, the label is live');
   console.log(`  receipt: 10 virtual seconds: ${receipts.join(', ')}; Max at 60 Hz: ${after.steps - before.steps} steps a virtual second, "${shown.label}"`);
 }, { needs: h.haveHfes });
 
@@ -1280,6 +1285,7 @@ test('the speed keys at the prompt: + and = faster, - slower, the keypad always,
     shown = await speedShown(page);
     assert.equal(shown.speed, want, `${key}: the speed`);
     assert.ok(shown.badge && shown.text === `${want}×` && shown.label === shown.text, `${key}: the badge and the label show it`);
+    assert.equal(shown.announced, `${want}×`, `${key}: the live label has it`);
     const [, prevented] = await page.evaluate(() => window.__keys.at(-1));
     assert.ok(prevented, `${key}: taken by the page`);
   }
@@ -1425,7 +1431,8 @@ test('Max is bounded by the frame budget and by the step cap, and is never behin
   await engineSpeed(page, 0);
   await h.virtualDisplay(page, 60);
   const receipts = [];
-  for (const [hz, cost] of [[60, 1], [144, 1], [240, 1], [60, 0.1]]) {
+  // Costs that do not divide the budget: a step's check is never `budget < budget`.
+  for (const [hz, cost] of [[60, 1], [144, 1], [240, 1.1], [60, 0.1]]) {
     await h.displayCost(page, cost);
     await h.displayRate(page, hz);
     await h.runFrames(page, 120); // the page's measure of the frame interval settles on the display's
@@ -1471,6 +1478,26 @@ test('a change of speed in the page forgets the debt: steps owed at 8x on a slow
   assert.equal(after.speed, 1, 'the game runs at 1x');
 }, { needs: h.haveHfes });
 
+test('a game put on screen starts its clock at the boot: a new import during a running loop at 8x runs no catch-up steps in its first frame (virtual 60 Hz display)', async (env) => {
+  const page = await bootGame(env);
+  await h.virtualDisplay(page, 60);
+  await speedTo(page, '8');
+  await h.runFrames(page, 2);
+  // Time passes with no frame before the new game is on screen, as the synchronous intake
+  // takes it; then the same disks imported again replace the game.
+  await h.displayStall(page, 1000);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  const before = await glue(page);
+  await h.runFrames(page, 1);
+  const after = await glue(page);
+  const steps = after.steps - before.steps;
+  console.log(`  receipt: the new game's first frame at 8x: ${steps} steps (its own 16.7 ms: 6)`);
+  assert.equal(after.speed, 8, 'the new game runs at the chosen 8x');
+  assert.ok(steps <= 7, 'the first frame runs its own interval at 8x (6.67 steps), no catch-up');
+  assert.ok(after.lost === before.lost, 'nothing clamped or dropped');
+}, { needs: h.haveHfes });
+
 // The canvas pixels as one FNV-1a hash, computed in the page (the frame is the user's data:
 // only whether two hashes are equal is used, never the hash).
 const canvasHash = (page) => page.evaluate(() => {
@@ -1514,7 +1541,9 @@ test('layout: the Speed group sits on Mute\'s line at 1280 and 1024 px; at 375 p
   for (const width of [1280, 1024, 375]) {
     await page.setViewportSize({ width, height: 900 });
     const m = await page.evaluate(() => {
-      for (const id of ['speed-label', 'speed-badge']) document.getElementById(id).textContent = 'Max 307.2×';
+      document.getElementById('speed-label').textContent = 'Max';
+      document.getElementById('speed-reached').textContent = ' 307.2×';
+      document.getElementById('speed-badge').textContent = 'Max 307.2×';
       document.getElementById('behind').hidden = false;
       document.getElementById('speed-badge').hidden = false;
       const box = (id) => document.getElementById(id).getBoundingClientRect();

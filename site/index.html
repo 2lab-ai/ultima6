@@ -45,7 +45,7 @@
     #playback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
     #playback button { margin-left: 0; }
     #speed-group { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-    #speed-label { display: inline-block; min-width: 5.5em; text-align: center; }
+    #speed-shown { display: inline-block; min-width: 5.5em; text-align: center; }
     #behind { color: #ff9a9a; }
     #behind[hidden] { display: inline; visibility: hidden; }
     #drop {
@@ -76,7 +76,7 @@
     <div id="screen-box">
       <canvas id="screen" width="320" height="200" tabindex="0"
               aria-label="Game screen. Click it or Tab to it; then arrow keys walk and letter keys are game commands. Tab leaves it."></canvas>
-      <span id="speed-badge" hidden
+      <span id="speed-badge" hidden aria-hidden="true"
             title="Game speed: - slower, = or + faster, unless the game is using that key: while a line or a name is typed, in the stats and inventory panels (- and + pick the member), in a party list that scrolls, and in the opening's menu. The keypad - and + and the Speed buttons always change it.">1&times;</span>
     </div>
     <section id="drop" aria-labelledby="drop-title">
@@ -95,7 +95,9 @@
         <span id="speed-group" role="group" aria-label="Game speed"
               title="On the game screen: - slower, = or + faster, unless the game is using that key (a line or a name being typed, the stats and inventory panels, a party list that scrolls, the opening's menu). The keypad - and + and these buttons always change the speed.">
           Speed <button id="slower" type="button" aria-label="Slower">&minus;</button><span
-            id="speed-label">1&times;</span><button id="faster" type="button" aria-label="Faster">+</button>
+            id="speed-shown"><span id="speed-label" aria-live="polite">1&times;</span><span
+            id="speed-reached" aria-hidden="true"></span></span><button id="faster" type="button"
+            aria-label="Faster">+</button>
           <span id="behind" hidden>behind</span>
         </span>
       </div>

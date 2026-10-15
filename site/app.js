@@ -50,6 +50,7 @@ const badge = document.getElementById('speed-badge');
 const slower = document.getElementById('slower');
 const faster = document.getElementById('faster');
 const speedLabel = document.getElementById('speed-label');
+const speedReached = document.getElementById('speed-reached');
 const behindMark = document.getElementById('behind');
 
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
@@ -314,9 +315,11 @@ function resetReach() {
   Object.assign(reach, { steps: 0, wall: 0, rate: 0 });
 }
 
-// A game put on screen runs at the chosen speed and has dropped nothing yet.
+// A game put on screen runs at the chosen speed, has dropped nothing yet, and its clock starts
+// now: the time its start took (the synchronous intake, with no frame) is not owed to it.
 function paceGame(g) {
   g.set_speed(SPEEDS[speedAt]);
+  last = performance.now();
   dropped = 0;
   droppedAt = -Infinity;
   resetReach();
@@ -343,11 +346,12 @@ function changeSpeed(by) {
   showSpeed();
 }
 
-// The speed as shown: 2×, or at Max the speed reached once measured (Max 5.3×).
+// The chosen speed's name as shown (2×, Max) and at Max the speed reached once measured
+// (` 5.3×`, shown after the name: Max 5.3×).
 function speedText() {
   const speed = SPEEDS[speedAt];
-  if (speed !== 0) return `${speed}×`;
-  return reach.rate > 0 ? `Max ${reach.rate.toFixed(1)}×` : 'Max';
+  if (speed !== 0) return [`${speed}×`, ''];
+  return ['Max', reach.rate > 0 ? ` ${reach.rate.toFixed(1)}×` : ''];
 }
 
 // Sets `el`'s `key` (a property such as hidden or textContent) only when it changes: the page
@@ -356,10 +360,13 @@ function put(el, key, value) {
   if (el[key] !== value) el[key] = value;
 }
 
+// The label announces a change of the chosen speed (a live region); the speed Max reaches,
+// which moves every REACH_MS, is beside it and not announced.
 function showSpeed() {
-  const text = speedText();
-  put(speedLabel, 'textContent', text);
-  put(badge, 'textContent', text);
+  const [name, reached] = speedText();
+  put(speedLabel, 'textContent', name);
+  put(speedReached, 'textContent', reached);
+  put(badge, 'textContent', name + reached);
   put(canvas.dataset, 'speed', speedName(speedAt));
   put(badge, 'hidden', SPEEDS[speedAt] === 1 && !badgeRecent);
 }
