@@ -61,6 +61,15 @@ pub const POINTER_LEFT: u8 = 1;
 /// Right button bit (0x161bd4 bit 1).
 pub const POINTER_RIGHT: u8 = 2;
 
+/// [`Io::keys_owned`] bit: the game takes `-` now.
+pub const OWN_MINUS: u8 = 1;
+/// [`Io::keys_owned`] bit: the game takes `+` now.
+pub const OWN_PLUS: u8 = 2;
+/// [`Io::keys_owned`] bit: the game takes `=` now.
+pub const OWN_EQUALS: u8 = 4;
+/// All three [`Io::keys_owned`] bits (a line being typed).
+pub const OWN_ALL: u8 = OWN_MINUS | OWN_PLUS | OWN_EQUALS;
+
 /// The pointer as the input handler keeps it: position 0x1623b8 / 0x1623ba (pixels, clamped to
 /// the screen) and the button word 0x161bd4.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -99,6 +108,10 @@ pub struct Io {
     /// The layout of `game` in `files`, parsed at the first [`Io::game_image`] (`files` never
     /// changes, so it stays valid for the run).
     image: OnceCell<Option<crate::image::ImageLayout>>,
+    /// Port-only, no original address: the [`OWN_MINUS`] / [`OWN_PLUS`] / [`OWN_EQUALS`] keys
+    /// the game takes now where its state is not in [`State`] (`u`'s), set while an
+    /// [`OwnedKeys`] lives ([`Io::own_keys`]).
+    owned_keys: Cell<u8>,
 }
 
 impl Io {
@@ -114,6 +127,7 @@ impl Io {
             published: RefCell::new(Framebuffer::new()),
             files,
             image: OnceCell::new(),
+            owned_keys: Cell::new(0),
         }
     }
 
@@ -139,8 +153,9 @@ impl Io {
 
     /// The pointer where the input handler has it: the last queued pointer event (the handler
     /// moves the position as events come, 0x151b08), else the last one taken. For the display
-    /// (the VBlank server's sprite); the game's own sample is [`Io::take_pointer`]'s.
-    fn handler_pointer(&self) -> Pointer {
+    /// (the VBlank server's sprite) and the platforms (a button held paces the steps at 1×,
+    /// spec 06); the game's own sample is [`Io::take_pointer`]'s.
+    pub fn handler_pointer(&self) -> Pointer {
         let events = self.events.borrow();
         let last = events.iter().rev().find_map(|e| match *e {
             InputEvent::Pointer { x, y, buttons } => Some(Pointer::apply(x, y, buttons)),
@@ -263,11 +278,38 @@ impl Io {
         f(&mut self.back.borrow_mut(), &mut self.front.borrow_mut())
     }
 
+    /// Port-only (spec 06 §Design 6): the keys among [`OWN_MINUS`], [`OWN_PLUS`] and
+    /// [`OWN_EQUALS`] that game code waiting now has claimed with [`Io::own_keys`], so the page
+    /// leaves them to it instead of changing the speed.
+    pub fn keys_owned(&self) -> u8 {
+        self.owned_keys.get()
+    }
+
+    /// Port-only: claims `bits` of [`Io::keys_owned`] until the guard drops (the end of the wait
+    /// that reads them, also an early return), which puts back what was claimed before it.
+    pub fn own_keys(&self, bits: u8) -> OwnedKeys<'_> {
+        let before = self.owned_keys.get();
+        self.owned_keys.set(before | bits);
+        OwnedKeys { io: self, before }
+    }
+
     /// Marks the screen (front buffer) as shown: the engine publishes it after this poll. The
     /// Amiga displays its screen buffer continuously; the port publishes at the points where
     /// the original waits (key poll, VBlank), so a frame is never shown half drawn.
     pub fn present(&self) {
         self.front_version.set(self.front_version.get() + 1);
+    }
+}
+
+/// Keys claimed by [`Io::own_keys`], given back on drop.
+pub struct OwnedKeys<'a> {
+    io: &'a Io,
+    before: u8,
+}
+
+impl Drop for OwnedKeys<'_> {
+    fn drop(&mut self) {
+        self.io.owned_keys.set(self.before);
     }
 }
 
@@ -557,6 +599,17 @@ impl Engine {
     pub fn take_log(&mut self) -> Vec<String> {
         self.stubs.take_lines()
     }
+
+    /// Port-only (spec 06 §Design 6): which of `-`, `+` and `=` ([`OWN_MINUS`], [`OWN_PLUS`],
+    /// [`OWN_EQUALS`]) the game takes now, as of the last tick: those `u` claimed on the `Io`
+    /// ([`Io::keys_owned`]) and those `game`'s state reads ([`crate::ui::target::keys_owned`]).
+    /// None once the game finished.
+    pub fn keys_owned(&self) -> u8 {
+        if self.finished {
+            return 0;
+        }
+        self.io.keys_owned() | crate::ui::target::keys_owned(&self.state.borrow())
+    }
 }
 
 #[cfg(test)]
@@ -752,6 +805,38 @@ mod tests {
             "the game took nothing"
         );
         assert_eq!(e.frame().get(99, 48), Some(17), "drawn there");
+    }
+
+    #[test]
+    fn claimed_keys_last_while_their_guard_does_and_nest() {
+        let mut e = engine_with(|_state, io| async move {
+            let plus = io.own_keys(OWN_PLUS);
+            io.vblank().await;
+            {
+                let _inner = io.own_keys(OWN_MINUS | OWN_EQUALS);
+                io.vblank().await;
+            }
+            io.vblank().await;
+            drop(plus);
+            io.vblank().await;
+            let _last = io.own_keys(OWN_ALL);
+        });
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            e.tick(&[], 20);
+            seen.push(e.keys_owned());
+        }
+        assert_eq!(
+            seen,
+            [OWN_PLUS, OWN_ALL, OWN_PLUS, 0, 0],
+            "each given back at its drop"
+        );
+        assert!(e.finished());
+        assert_eq!(
+            e.io().keys_owned(),
+            0,
+            "a claim at the end ended with the game"
+        );
     }
 
     #[test]
