@@ -327,6 +327,38 @@ state, so runs are not bit-identical end to end.
   the full installed tree plus `ultcli` (PP20-decrunched by `tools/pp20.py`). PROGRAM's
   `s/startup-sequence` is `ultcli`. With DF0 and DH0 both bootable, DF0 boots first.
 
+### Held-walk pace (`pace.mjs`, runs `pace/run-b1..b6`)
+
+One boot (one time seed) per run, game-first disks, holds of 5..500 frames (b4..b6: 50 and 300),
+three trials per hold at different press phases (b4..b6: two), a press held three cells south
+(b4 also north and east). Gaps = PAL frames between two steps of one held press, recounted from
+the runs' `pace.json` on 2026-10-15. `quiet` = the actors outside the party passed over and the
+fight broken off; `start` = the start fight as booted, where a gap is a whole world turn (only
+the longest holds outlast one).
+
+| Run | Setup | Trials | Gaps n | Min | Median | Max |
+|---|---|---|---|---|---|---|
+| b1 | quiet | 18 | 51 | 25 | 29 | 123 |
+| b1 | start | 18 | 1 | 473 | 473 | 473 |
+| b2 | quiet | 18 | 51 | 25 | 29 | 123 |
+| b2 | start | 18 | 0 | – | – | – |
+| b3 | quiet | 18 | 31 | 26 | 74 | 108 |
+| b3 | start | 18 | 3 | 422 | 424 | 424 |
+| b4 | quiet | 12 | 6 | 35 | 50.5 | 85 |
+| b5 | quiet | 4 | 16 | 25 | 28 | 41 |
+| b6 | quiet | 4 | 16 | 26 | 29 | 40 |
+| all | quiet | 74 | 171 | 25 | 34 | 123 |
+| b1 b2 b5 b6 | quiet, first 8 cells | 44 | 122 | 25 | 29 | 41 |
+| b3 b4 | quiet | 30 | 37 | 26 | 72 | 108 |
+
+The 8 cells south are the free ones: past the 8th, b1 and b2 (500-frame holds) add two gaps per
+trial, 121..123 then 26..28 frames. In b3 and b4 the followers were still forming up; b4's gaps
+come from its press held east (its presses south and north walked no cell). Two figures come
+from these runs: the port's `HELD_WALK_MS` (`ui/target.rs`, 33 frames: a sample every 30..37
+frames keeps the port's cells per held time within one of b1, b2, b5, b6 up to their 8th cell;
+its doc has the derivation) and the web test's `ORIGINAL_FASTEST_REPEAT_MS`
+(`tools/web/test-web.mjs`, the fastest gap: 25 frames = 500 ms, a floor no repeat may beat).
+
 ## 5. Blocking points
 
 **Floppy set (the game's own layout):** the intro stops after its first scene with a garbled
