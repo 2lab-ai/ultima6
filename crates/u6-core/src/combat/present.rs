@@ -55,9 +55,10 @@ pub const FLIGHT_STEP_MS: u16 = 46;
 /// the view flags before it, the traced refresh after a turn
 /// ([`crate::actors::turn::AFTER_TURN_MS`], 21.336).
 pub const REFRESH_MS: u16 = 11 * FRAME_MS;
-/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 22 ms, 1.125
-/// PAL frames, the mean of 128 calls traced in the oracle (0.06..3.60, the ones that scroll the
-/// longest). Per call, as the port prints one queued message a call.
+/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 22 ms, the
+/// mean of 128 calls traced in the oracle, 1.12476 PAL frames = 22.495 ms (0.06..3.60, the ones
+/// that scroll the longest), to the nearest ms as the other constants. Per call, as the port
+/// prints one queued message a call.
 pub const PRINT_MS: u16 = 22;
 /// [replaced] Time of an object's name read for a message (0x10eef8: 0x10ee76 decodes it out of
 /// the look.lzd copy in memory, 0x161ec8): 26 ms, 1.289 PAL frames, the mean of 70 calls traced
@@ -162,8 +163,8 @@ pub struct Effect {
     /// Engine milliseconds the original spends making it: [`play_effects`] waits that long
     /// before showing it.
     pub cost: u16,
-    /// Messages queued (`main.pending_print`) before it was presented; 0 once the queue has run
-    /// empty since ([`queue_printed`]).
+    /// Messages queued (`main.pending_print`) before it was presented, the one being printed
+    /// included: one less after each is printed ([`printed_one`]), 0 once they all are.
     pub mark: usize,
     /// The window was presented dissolving (0x1520e2): playback reveals it over its time.
     pub dissolve: bool,
@@ -236,25 +237,27 @@ pub(crate) fn capture_pause(s: &mut State, cost: u16) {
     });
 }
 
-/// Port: the queue ran empty ([`crate::main_loop::flush_prints`]). The lines that frames still
-/// recorded were marked after are printed, so those frames come before anything queued from
-/// now on, not after that many of the new lines.
-pub(crate) fn queue_printed(s: &mut State) {
+/// Port: one queued entry was printed ([`crate::main_loop::flush_prints`], after it ran): the
+/// frames recorded after it are one entry nearer, and those whose entries are all printed are
+/// due (mark 0). A flush that leaves the frames for later (the end of turn, Get) leaves them
+/// due, so at the next playback they come before anything queued since.
+pub(crate) fn printed_one(s: &mut State) {
     for e in &mut s.combat.effects {
-        e.mark = 0;
+        e.mark = e.mark.saturating_sub(1);
     }
 }
 
 /// Port: what an action run inside a key wait sets aside of the print it interrupts
-/// ([`interrupt`]): the queued lines, the frames recorded among them and Attack's held newline
-/// ([`crate::combat::CombatState::swallow`]).
+/// ([`interrupt`]): the queued lines, the frames recorded among them that are not due yet and
+/// Attack's held newline ([`crate::combat::CombatState::swallow`]).
 ///
 /// The original prints and draws synchronously. An action that the key read 0x10790a runs
-/// while a print waits for its more key (0x107f4c in 0x107e5a), such as Ready, Unready or a
-/// trapped chest clicked in the inventory, prints and draws right there, and the print's other
-/// lines come after the key. The port queues lines and frames, so the action sets the
-/// interrupted ones aside, plays its own in place ([`play_effects`]) and puts them back
-/// ([`resume`]).
+/// while a print waits for its more key (0x107f4c in 0x107e5a), such as Ready, Unready, a
+/// trapped chest clicked in the inventory, or the idle refresh of 0x105c8e, prints and draws
+/// right there: after whatever the interrupted code drew before the prompt, and before the
+/// print's other lines, which come after the key. The port queues lines and frames, so the
+/// action shows the interrupted frames that are due, sets the rest aside, plays its own in
+/// place ([`play_effects`]) and puts the interrupted ones back ([`resume`]).
 #[must_use]
 pub(crate) struct Interrupted {
     pending: Vec<crate::main_loop::Pending>,
@@ -262,32 +265,35 @@ pub(crate) struct Interrupted {
     swallow: bool,
 }
 
-/// Sets the interrupted print's queue, frames and held newline aside ([`Interrupted`]).
-pub(crate) fn interrupt(s: &mut State) -> Interrupted {
-    Interrupted {
-        pending: std::mem::take(&mut s.main.pending_print),
-        effects: std::mem::take(&mut s.combat.effects),
-        swallow: std::mem::replace(&mut s.combat.swallow, false),
-    }
+/// Shows the interrupted print's frames whose lines are printed (mark 0: the original drew them
+/// before the prompt), then sets its queue, its other frames and its held newline aside
+/// ([`Interrupted`]).
+pub(crate) async fn interrupt(state: &RefCell<State>, io: &Io) -> Interrupted {
+    let outer = {
+        let mut s = state.borrow_mut();
+        let (due, later) = std::mem::take(&mut s.combat.effects)
+            .into_iter()
+            .partition(|e| e.mark == 0);
+        s.combat.effects = due;
+        Interrupted {
+            pending: std::mem::take(&mut s.main.pending_print),
+            effects: later,
+            swallow: std::mem::replace(&mut s.combat.swallow, false),
+        }
+    };
+    // Nothing is queued and no newline held: this plays the due frames and prints nothing.
+    play_effects(state, io).await;
+    outer
 }
 
-/// Puts the interrupted print back as it was. Whatever the action left came before the
-/// interrupted print's rest, so it stays first (a key wait inside the action can leave frames,
-/// [`crate::ui::effects::show_recorded`]) and the interrupted frames keep their place among
-/// the interrupted lines.
-pub(crate) fn resume(s: &mut State, outer: Interrupted) {
-    let Interrupted {
-        pending,
-        mut effects,
-        swallow,
-    } = outer;
-    let ahead = s.main.pending_print.len();
-    for e in &mut effects {
-        e.mark += ahead;
-    }
-    s.main.pending_print.extend(pending);
-    s.combat.effects.extend(effects);
-    s.combat.swallow = swallow;
+/// Plays whatever the action still left (its lines and frames came before the interrupted
+/// print's rest), then puts the interrupted print back exactly as it was.
+pub(crate) async fn resume(state: &RefCell<State>, io: &Io, outer: Interrupted) {
+    play_effects(state, io).await;
+    let mut s = state.borrow_mut();
+    s.main.pending_print.extend(outer.pending);
+    s.combat.effects.extend(outer.effects);
+    s.combat.swallow = outer.swallow;
 }
 
 /// Prints the first `n` queued messages and keeps the rest queued.
@@ -329,10 +335,13 @@ async fn print_paced(state: &RefCell<State>, io: &Io, n: usize) {
 /// The synchronous code that recorded the frames left its last picture on the screen (the
 /// window renders present as they go); the original showed the window as it last was until its
 /// first new picture was drawn, so the playback starts from the window as last published and
-/// puts the step's last picture back after the recorded ones.
+/// puts the step's last picture back after the recorded ones. An action run inside a more
+/// prompt of the lines before a frame ([`interrupt`]) that shows frames of its own ends on the
+/// window as it leaves it, which the game then has: that becomes the picture to end on, not
+/// the one taken before it (the frames still to come are pictures made before it, as recorded).
 pub async fn play_effects(state: &RefCell<State>, io: &Io) {
     let effects = std::mem::take(&mut state.borrow_mut().combat.effects);
-    let last = effects
+    let mut last = effects
         .iter()
         .any(|e| e.w > 0 && e.h > 0)
         .then(|| io.draw(|fb| window_of(fb)));
@@ -343,8 +352,12 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
     let mut printed = 0;
     for e in effects {
         if e.mark > printed {
+            let before = state.borrow().combat.shown;
             print_paced(state, io, e.mark - printed).await;
             printed = e.mark;
+            if last.is_some() && state.borrow().combat.shown != before {
+                last = Some(io.draw(|fb| window_of(fb)));
+            }
         }
         if e.dissolve && (e.w, e.h) == WINDOW {
             reveal(state, io, &e).await;

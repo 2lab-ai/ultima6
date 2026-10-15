@@ -62,7 +62,7 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
     };
     let key = poll(state, io).await;
     if key == 0 {
-        {
+        let refresh = {
             let mut s = state.borrow_mut();
             let ui = &mut s.ui;
             let frame = ui.input.cursor_frame;
@@ -72,12 +72,25 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
             io.draw(|fb| text::draw_char(fb, ui.font.as_ref(), &w, glyph as u8, col, row));
             let refresh = ui.input.idle_refresh;
             s.gfx.actor_anim_due = 1;
+            refresh
+        };
+        // The refresh draws here, a print's more prompt included: its frames (a shake request)
+        // are played in this wait, the print's queue set aside meanwhile.
+        let outer = match refresh {
+            true => Some(crate::combat::present::interrupt(state, io).await),
+            false => None,
+        };
+        {
+            let mut s = state.borrow_mut();
             if refresh {
                 seams::refresh_view(&mut s, io);
                 seams::anim_step(&mut s);
             }
             // 0x105d4c: the pointer sample (0x14f12c); the event wait takes the events.
             super::pointer::sample(&mut s, io.pointer());
+        }
+        if let Some(outer) = outer {
+            crate::combat::present::resume(state, io, outer).await;
         }
         super::effects::show_recorded(state, io).await;
         io.present();

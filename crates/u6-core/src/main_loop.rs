@@ -124,7 +124,7 @@ pub async fn flush_prints(state: &RefCell<State>, io: &Io) {
             (!q.is_empty()).then(|| q.remove(0))
         };
         match next {
-            None => return crate::combat::present::queue_printed(&mut state.borrow_mut()),
+            None => return,
             Some(Pending::Window(id)) => crate::ui::panels::select_window(state, io, id).await,
             Some(Pending::Cursor(col, row)) => {
                 crate::ui::panels::set_cursor(state, io, col, row).await
@@ -140,6 +140,7 @@ pub async fn flush_prints(state: &RefCell<State>, io: &Io) {
                 printf(state, io, &fmt, &args).await;
             }
         }
+        crate::combat::present::printed_one(&mut state.borrow_mut());
     }
 }
 

@@ -35,15 +35,14 @@ pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
     capture_window(s, crate::combat::present::REFRESH_MS);
 }
 
-/// Port: frames that synchronous code recorded inside a key wait (a shake request carried out
-/// by the idle refresh 0x102ef0 of 0x105c8e) are shown before the wait goes on, not after the
-/// next command. Left for a later playback while lines are queued (a print's more prompt waits
-/// here too, and playing would print the rest of its queue inside it) or Attack's newline is
-/// held ([`crate::combat::CombatState::swallow`], which the playback hands on); once the queue
-/// has run empty they come before anything queued after it
-/// ([`crate::combat::present::queue_printed`]). The actions the key read runs (Ready, Unready,
-/// a trapped chest clicked in the inventory) do not wait here: they set the interrupted print
-/// aside and play their own ([`crate::combat::present::interrupt`]).
+/// Port: frames that synchronous code recorded before a key wait and left unplayed are shown
+/// before the wait goes on, not after the next command. Left for a later playback while lines
+/// are queued (a print's more prompt waits here too, and playing would print the rest of its
+/// queue inside it) or Attack's newline is held ([`crate::combat::CombatState::swallow`],
+/// which the playback hands on). What runs inside the wait plays its own frames in place, the
+/// print's queue set aside ([`crate::combat::present::interrupt`]): the idle refresh 0x102ef0
+/// of 0x105c8e (a shake request) and the actions the key read runs (Ready, Unready, a trapped
+/// chest clicked in the inventory).
 pub async fn show_recorded(state: &RefCell<State>, io: &Io) {
     let ready = {
         let s = state.borrow();
@@ -179,6 +178,59 @@ mod tests {
             got.get(),
             Some((0x41, 3, 0)),
             "(key, frames shown, frames left): two shakes and the window"
+        );
+    }
+
+    #[test]
+    fn a_quake_in_a_more_prompt_is_shown_in_the_prompt() {
+        // The same request carried out by the idle refresh of a more prompt while three lines
+        // are still queued (a flush that pages after two): the shakes and the window are shown
+        // in the prompt, as the original draws them there, and the queued lines still wait for
+        // the more key.
+        use crate::main_loop::{PrintArg, flush_prints, queue_print};
+        let mut s = shaking();
+        s.ui.input.idle_refresh = true;
+        s.gfx.panel_redraw = 2;
+        s.ui.text.win_mut().flags |= crate::ui::text::PAGED;
+        s.ui.text.more_rows = 3;
+        for i in 0..6 {
+            queue_print(&mut s, b"q%d\n".to_vec(), vec![PrintArg::Word(i)]);
+        }
+        let mut e =
+            crate::Engine::with_game(s, crate::Files::default(), move |st, io| async move {
+                flush_prints(&st, &io).await;
+            });
+        for _ in 0..30 {
+            e.tick(&[], 16);
+        }
+        assert!(!e.finished(), "the more prompt waits");
+        let later = |l: &String| ["q3", "q4", "q5"].contains(&l.as_str());
+        {
+            let s = e.state();
+            assert_eq!(
+                (
+                    s.combat.shown,
+                    s.combat.effects.len(),
+                    s.main.pending_print.len()
+                ),
+                (3, 0, 3),
+                "(frames shown, frames left, lines queued) in the prompt"
+            );
+            assert!(!s.ui.messages.iter().any(later), "the queue waits");
+        }
+        e.tick(&[crate::InputEvent::Key(crate::Key::Space)], 16);
+        for _ in 0..10 {
+            e.tick(&[], 16);
+        }
+        assert!(e.finished(), "the flush ended after the more key");
+        let s = e.state();
+        assert_eq!(
+            (
+                s.combat.shown,
+                s.ui.messages.iter().filter(|l| later(l)).count()
+            ),
+            (3, 3),
+            "nothing shown again, the queued lines printed"
         );
     }
 }

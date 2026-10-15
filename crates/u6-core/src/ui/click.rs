@@ -298,11 +298,11 @@ pub async fn inventory_click(state: &RefCell<State>, io: &Io) -> u16 {
         }
         Inventory::Trap => {
             let chest = state.borrow().ui.input.selection;
-            let outer = crate::combat::present::interrupt(&mut state.borrow_mut());
+            let outer = crate::combat::present::interrupt(state, io).await;
             seams::spring_trap(&mut state.borrow_mut(), chest);
             crate::combat::play_effects(state, io).await;
             prompt(state, io).await;
-            crate::combat::present::resume(&mut state.borrow_mut(), outer);
+            crate::combat::present::resume(state, io, outer).await;
             0xa0
         }
     }

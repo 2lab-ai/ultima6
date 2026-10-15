@@ -81,7 +81,7 @@ fn set_sparkle(s: &mut State, v: u8) {
 /// and puts them back after its prompt ([`crate::combat::present::interrupt`]): the original
 /// prints those lines after the more key.
 pub async fn ready(state: &RefCell<State>, io: &Io) {
-    let outer = crate::combat::present::interrupt(&mut state.borrow_mut());
+    let outer = crate::combat::present::interrupt(state, io).await;
     let (actor, obj, ty, strength) = {
         let s = state.borrow();
         let actor = shown_actor(&s);
@@ -116,7 +116,7 @@ pub async fn ready(state: &RefCell<State>, io: &Io) {
     }
     crate::combat::play_effects(state, io).await;
     prompt(state, io).await;
-    crate::combat::present::resume(&mut state.borrow_mut(), outer);
+    crate::combat::present::resume(state, io, outer).await;
 }
 
 /// The checks and the move of [`ready`]; the refusal message when it does not happen.
@@ -242,7 +242,7 @@ pub async fn unready(state: &RefCell<State>, io: &Io) {
     if obj == 1 {
         return;
     }
-    let outer = crate::combat::present::interrupt(&mut state.borrow_mut());
+    let outer = crate::combat::present::interrupt(state, io).await;
     let name = display_name(&state.borrow(), obj);
     say(state, io, STR_UNREADY, &[Arg::Str(name.as_bytes())]).await;
     let (ty, actor) = {
@@ -279,5 +279,5 @@ pub async fn unready(state: &RefCell<State>, io: &Io) {
     crate::combat::play_effects(state, io).await;
     panel_contents(state, io, actor).await;
     prompt(state, io).await;
-    crate::combat::present::resume(&mut state.borrow_mut(), outer);
+    crate::combat::present::resume(state, io, outer).await;
 }
