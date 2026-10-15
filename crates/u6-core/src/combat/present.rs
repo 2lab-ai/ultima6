@@ -46,14 +46,14 @@ pub const FLIGHT_START_MS: u16 = RENDER_MS;
 /// [replaced] Time of one drawn step of a flight (the rounds up to it, the sprites saved and
 /// drawn, what lies over them, the rectangle copied, 0x151fe6): 46 ms, 2.31 PAL frames. A
 /// sampled estimate: fight.py's 525 frames over 227 changes of the view in the steps of the 40
-/// flights that drew any (no routine boundary to trace; the traced whole flights, median 11.8
-/// frames over 58, agree with start + steps + end).
+/// flights that drew any (no routine boundary to trace; the 51 whole flights traced in the start
+/// fight, 6.15..35.58 frames, carry no count of their steps to check it against).
 pub const FLIGHT_STEP_MS: u16 = 46;
 /// [replaced] Time of a view refresh with the window shown (0x102ef0: the animation tick, the
 /// window rendered by 0x102c90 and copied to the screen): 11 PAL frames. A sampled estimate:
 /// the median of the 40 flights whose CPU samples end in one (9..42, 29 of them 10 or 11); with
 /// the view flags before it, the traced refresh after a turn
-/// ([`crate::actors::turn::AFTER_TURN_MS`], 21.58).
+/// ([`crate::actors::turn::AFTER_TURN_MS`], 21.375).
 pub const REFRESH_MS: u16 = 11 * FRAME_MS;
 /// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 24 ms, 1.185
 /// PAL frames, the mean of 57 calls traced in the oracle (0.06..3.60, the ones that scroll the
