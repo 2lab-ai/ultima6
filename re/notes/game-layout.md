@@ -15,19 +15,23 @@ outside the repo: `~/Games/ultima6/re/<name>.{bin,json}`.
 
 Ghidra import: raw binary, `68000:BE:32:default`, base = entry = `0x00100000`. Cross-check: a
 throwaway scanner (not committed) agreed with the tool on every hunk's type, loaded bytes and
-reloc count in all five files (the file sizes and reloc counts, values of the user's files, are
-not reproduced); `image_size` = last base + size − base; no tool warnings (incl. the check that
-each reloc's stored offset ≤ the target segment size).
+reloc count in all five files; `image_size` = last base + size − base; no tool warnings (incl.
+the check that each reloc's stored offset ≤ the target segment size).
+
+The hunks' sizes and loaded lengths, the file sizes and the reloc counts are values of the
+user's files and are not reproduced: they come from the hunk headers at run time
+(`tools/hunk2raw.py`; the port's `crates/u6-core/src/image.rs`). The tables keep each hunk's
+number, what it holds (type and memory) and its base address in the flattened image.
 
 ## Summary
 
-| file | input sha256 (16) | hunks CODE/DATA/BSS | CHIP hunks | symbols | overlay | entry | image bytes |
-|---|---|---|---|---|---|---|---|
-| `game` | `34a6e9dd66d58ff2` | 35 = 26/5/4 | 28, 31 (DATA) | 0 | none | 0x00100000 | 402,736 |
-| `u` | `2e9267dbb9fb509d` | 24 = 18/5/1 | 16 (DATA), 17 (CODE), 20 (DATA) | 0 | none | 0x00100000 | 106,512 |
-| `ultima6` | `79ebabd9281f105c` | 7 = 5/2/0 | 2 (DATA) | 0 | none | 0x00100000 | 9,320 |
-| `ultcli` | `dfd96f65b66fdccd` | 7 = 5/2/0 | 2 (DATA) | 0 | none | 0x00100000 | 8,632 |
-| `installu6` | `580ff939de83bea6` | 11 = 9/1/1 | 3 (CODE) | 0 | none | 0x00100000 | 289,380 |
+| file | input sha256 (16) | hunks CODE/DATA/BSS | CHIP hunks | symbols | overlay | entry |
+|---|---|---|---|---|---|---|
+| `game` | `34a6e9dd66d58ff2` | 35 = 26/5/4 | 28, 31 (DATA) | 0 | none | 0x00100000 |
+| `u` | `2e9267dbb9fb509d` | 24 = 18/5/1 | 16 (DATA), 17 (CODE), 20 (DATA) | 0 | none | 0x00100000 |
+| `ultima6` | `79ebabd9281f105c` | 7 = 5/2/0 | 2 (DATA) | 0 | none | 0x00100000 |
+| `ultcli` | `dfd96f65b66fdccd` | 7 = 5/2/0 | 2 (DATA) | 0 | none | 0x00100000 |
+| `installu6` | `580ff939de83bea6` | 11 = 9/1/1 | 3 (CODE) | 0 | none | 0x00100000 |
 
 All five: no resident libraries, `first` = 0, `table_size` = `last` + 1. The only block types
 present are HEADER, CODE, DATA, BSS, RELOC32, END — no SYMBOL, DEBUG, NAME, EXT,
@@ -36,100 +40,100 @@ tests in `tools/test_hunk2raw.py`, not by real data.
 
 ### `game` segments
 
-| # | type | mem | base | size | loaded |
-|---|---|---|---|---|---|
-| 0 | CODE | ANY | 0x00100000 | 0x1eb0 | 0x1eb0 |
-| 1 | CODE | ANY | 0x00101eb0 | 0x3100 | 0x3100 |
-| 2 | CODE | ANY | 0x00104fb0 | 0x3a28 | 0x3a28 |
-| 3 | CODE | ANY | 0x001089d8 | 0x10dc | 0x10dc |
-| 4 | CODE | ANY | 0x00109ab8 | 0x964 | 0x964 |
-| 5 | CODE | ANY | 0x0010a420 | 0x4c60 | 0x4c60 |
-| 6 | BSS | ANY | 0x0010f080 | 0x171c | 0x0 |
-| 7 | CODE | ANY | 0x001107a0 | 0x240 | 0x240 |
-| 8 | CODE | ANY | 0x001109e0 | 0x1bd4 | 0x1bd4 |
-| 9 | CODE | ANY | 0x001125b8 | 0x318 | 0x318 |
-| 10 | CODE | ANY | 0x001128d0 | 0x2958 | 0x2958 |
-| 11 | CODE | ANY | 0x00115228 | 0x5f94 | 0x5f94 |
-| 12 | CODE | ANY | 0x0011b1c0 | 0x6944 | 0x6944 |
-| 13 | CODE | ANY | 0x00121b08 | 0x5770 | 0x5770 |
-| 14 | CODE | ANY | 0x00127278 | 0x113c | 0x113c |
-| 15 | CODE | ANY | 0x001283b8 | 0x4500 | 0x4500 |
-| 16 | CODE | ANY | 0x0012c8b8 | 0x4880 | 0x4880 |
-| 17 | CODE | ANY | 0x00131138 | 0x1200 | 0x1200 |
-| 18 | CODE | ANY | 0x00132338 | 0x2238 | 0x2238 |
-| 19 | CODE | ANY | 0x00134570 | 0xf8 | 0xf8 |
-| 20 | DATA | ANY | 0x00134668 | 0x38 | 0x38 |
-| 21 | CODE | ANY | 0x001346a0 | 0x868 | 0x868 |
-| 22 | CODE | ANY | 0x00134f08 | 0x680 | 0x680 |
-| 23 | BSS | ANY | 0x00135588 | 0x114b8 | 0x0 |
-| 24 | BSS | ANY | 0x00146a40 | 0x7530 | 0x0 |
-| 25 | BSS | ANY | 0x0014df70 | 0xf00 | 0x0 |
-| 26 | CODE | ANY | 0x0014ee70 | 0x454 | 0x454 |
-| 27 | DATA | ANY | 0x0014f2c8 | 0x2000 | 0x2000 |
-| 28 | DATA | CHIP | 0x001512c8 | 0x83c | 0x83c |
-| 29 | CODE | ANY | 0x00151b08 | 0x3d4 | 0x3d4 |
-| 30 | CODE | ANY | 0x00151ee0 | 0x16f0 | 0x16f0 |
-| 31 | DATA | CHIP | 0x001535d0 | 0x4 | 0x4 |
-| 32 | CODE | ANY | 0x001535d8 | 0x118 | 0x118 |
-| 33 | DATA | ANY | 0x001536f0 | 0xe7d8 | 0x4f0c |
-| 34 | CODE | ANY | 0x00161ec8 | 0x668 | 0x668 |
+| # | type | mem | base |
+|---|---|---|---|
+| 0 | CODE | ANY | 0x00100000 |
+| 1 | CODE | ANY | 0x00101eb0 |
+| 2 | CODE | ANY | 0x00104fb0 |
+| 3 | CODE | ANY | 0x001089d8 |
+| 4 | CODE | ANY | 0x00109ab8 |
+| 5 | CODE | ANY | 0x0010a420 |
+| 6 | BSS | ANY | 0x0010f080 |
+| 7 | CODE | ANY | 0x001107a0 |
+| 8 | CODE | ANY | 0x001109e0 |
+| 9 | CODE | ANY | 0x001125b8 |
+| 10 | CODE | ANY | 0x001128d0 |
+| 11 | CODE | ANY | 0x00115228 |
+| 12 | CODE | ANY | 0x0011b1c0 |
+| 13 | CODE | ANY | 0x00121b08 |
+| 14 | CODE | ANY | 0x00127278 |
+| 15 | CODE | ANY | 0x001283b8 |
+| 16 | CODE | ANY | 0x0012c8b8 |
+| 17 | CODE | ANY | 0x00131138 |
+| 18 | CODE | ANY | 0x00132338 |
+| 19 | CODE | ANY | 0x00134570 |
+| 20 | DATA | ANY | 0x00134668 |
+| 21 | CODE | ANY | 0x001346a0 |
+| 22 | CODE | ANY | 0x00134f08 |
+| 23 | BSS | ANY | 0x00135588 |
+| 24 | BSS | ANY | 0x00146a40 |
+| 25 | BSS | ANY | 0x0014df70 |
+| 26 | CODE | ANY | 0x0014ee70 |
+| 27 | DATA | ANY | 0x0014f2c8 |
+| 28 | DATA | CHIP | 0x001512c8 |
+| 29 | CODE | ANY | 0x00151b08 |
+| 30 | CODE | ANY | 0x00151ee0 |
+| 31 | DATA | CHIP | 0x001535d0 |
+| 32 | CODE | ANY | 0x001535d8 |
+| 33 | DATA | ANY | 0x001536f0 |
+| 34 | CODE | ANY | 0x00161ec8 |
 
 ### `u` segments
 
-| # | type | mem | base | size | loaded |
-|---|---|---|---|---|---|
-| 0 | CODE | ANY | 0x00100000 | 0x29cc | 0x29cc |
-| 1 | CODE | ANY | 0x001029d0 | 0xe60 | 0xe60 |
-| 2 | CODE | ANY | 0x00103830 | 0x1ea0 | 0x1ea0 |
-| 3 | DATA | ANY | 0x001056d0 | 0x30 | 0x30 |
-| 4 | CODE | ANY | 0x00105700 | 0x19bc | 0x19bc |
-| 5 | CODE | ANY | 0x001070c0 | 0x720 | 0x720 |
-| 6 | CODE | ANY | 0x001077e0 | 0x5c | 0x5c |
-| 7 | CODE | ANY | 0x00107840 | 0x202c | 0x202c |
-| 8 | CODE | ANY | 0x00109870 | 0x1398 | 0x1398 |
-| 9 | CODE | ANY | 0x0010ac08 | 0x493c | 0x493c |
-| 10 | CODE | ANY | 0x0010f548 | 0x5a0 | 0x5a0 |
-| 11 | CODE | ANY | 0x0010fae8 | 0x74 | 0x74 |
-| 12 | DATA | ANY | 0x0010fb60 | 0x4 | 0x4 |
-| 13 | BSS | ANY | 0x0010fb68 | 0x4000 | 0x0 |
-| 14 | CODE | ANY | 0x00113b68 | 0x504 | 0x504 |
-| 15 | CODE | ANY | 0x00114070 | 0x2b8 | 0x2b8 |
-| 16 | DATA | CHIP | 0x00114328 | 0x584 | 0x584 |
-| 17 | CODE | CHIP | 0x001148b0 | 0x47c | 0x47c |
-| 18 | CODE | ANY | 0x00114d30 | 0x338 | 0x338 |
-| 19 | CODE | ANY | 0x00115068 | 0x1610 | 0x1610 |
-| 20 | DATA | CHIP | 0x00116678 | 0x4 | 0x4 |
-| 21 | CODE | ANY | 0x00116680 | 0x118 | 0x118 |
-| 22 | DATA | ANY | 0x00116798 | 0x3160 | 0x1718 |
-| 23 | CODE | ANY | 0x001198f8 | 0x718 | 0x718 |
+| # | type | mem | base |
+|---|---|---|---|
+| 0 | CODE | ANY | 0x00100000 |
+| 1 | CODE | ANY | 0x001029d0 |
+| 2 | CODE | ANY | 0x00103830 |
+| 3 | DATA | ANY | 0x001056d0 |
+| 4 | CODE | ANY | 0x00105700 |
+| 5 | CODE | ANY | 0x001070c0 |
+| 6 | CODE | ANY | 0x001077e0 |
+| 7 | CODE | ANY | 0x00107840 |
+| 8 | CODE | ANY | 0x00109870 |
+| 9 | CODE | ANY | 0x0010ac08 |
+| 10 | CODE | ANY | 0x0010f548 |
+| 11 | CODE | ANY | 0x0010fae8 |
+| 12 | DATA | ANY | 0x0010fb60 |
+| 13 | BSS | ANY | 0x0010fb68 |
+| 14 | CODE | ANY | 0x00113b68 |
+| 15 | CODE | ANY | 0x00114070 |
+| 16 | DATA | CHIP | 0x00114328 |
+| 17 | CODE | CHIP | 0x001148b0 |
+| 18 | CODE | ANY | 0x00114d30 |
+| 19 | CODE | ANY | 0x00115068 |
+| 20 | DATA | CHIP | 0x00116678 |
+| 21 | CODE | ANY | 0x00116680 |
+| 22 | DATA | ANY | 0x00116798 |
+| 23 | CODE | ANY | 0x001198f8 |
 
 ### `installu6` segments
 
-| # | type | mem | base | size | loaded |
-|---|---|---|---|---|---|
-| 0 | CODE | ANY | 0x00100000 | 0x1a48 | 0x1a48 |
-| 1 | CODE | ANY | 0x00101a48 | 0x1910 | 0x1910 |
-| 2 | BSS | ANY | 0x00103358 | 0x41eb0 | 0x0 |
-| 3 | CODE | CHIP | 0x00145208 | 0x560 | 0x560 |
-| 4 | DATA | ANY | 0x00145768 | 0xfe0 | 0xc34 |
-| 5 | CODE | ANY | 0x00146748 | 0xf8 | 0xf8 |
-| 6 | CODE | ANY | 0x00146840 | 0x94 | 0x94 |
-| 7 | CODE | ANY | 0x001468d8 | 0x14 | 0x14 |
-| 8 | CODE | ANY | 0x001468f0 | 0xdc | 0xdc |
-| 9 | CODE | ANY | 0x001469d0 | 0x24 | 0x24 |
-| 10 | CODE | ANY | 0x001469f8 | 0x6c | 0x6c |
+| # | type | mem | base |
+|---|---|---|---|
+| 0 | CODE | ANY | 0x00100000 |
+| 1 | CODE | ANY | 0x00101a48 |
+| 2 | BSS | ANY | 0x00103358 |
+| 3 | CODE | CHIP | 0x00145208 |
+| 4 | DATA | ANY | 0x00145768 |
+| 5 | CODE | ANY | 0x00146748 |
+| 6 | CODE | ANY | 0x00146840 |
+| 7 | CODE | ANY | 0x001468d8 |
+| 8 | CODE | ANY | 0x001468f0 |
+| 9 | CODE | ANY | 0x001469d0 |
+| 10 | CODE | ANY | 0x001469f8 |
 
 ### `ultima6` / `ultcli` segments (same hunk types and memory flags)
 
-| # | type | mem | ultima6 base | size | loaded | ultcli base | size | loaded |
-|---|---|---|---|---|---|---|---|---|
-| 0 | CODE | ANY | 0x00100000 | 0x35c | 0x35c | 0x00100000 | 0x35c | 0x35c |
-| 1 | CODE | ANY | 0x00100360 | 0x580 | 0x580 | 0x00100360 | 0x510 | 0x510 |
-| 2 | DATA | CHIP | 0x001008e0 | 0xd0 | 0xd0 | 0x00100870 | 0xd0 | 0xd0 |
-| 3 | CODE | ANY | 0x001009b0 | 0x14 | 0x14 | 0x00100940 | 0x14 | 0x14 |
-| 4 | CODE | ANY | 0x001009c8 | 0x118 | 0x118 | 0x00100958 | 0x118 | 0x118 |
-| 5 | DATA | ANY | 0x00100ae0 | 0x638 | 0x400 | 0x00100a70 | 0x5ec | 0x3b8 |
-| 6 | CODE | ANY | 0x00101118 | 0x1350 | 0x1350 | 0x00101060 | 0x1158 | 0x1158 |
+| # | type | mem | ultima6 base | ultcli base |
+|---|---|---|---|---|
+| 0 | CODE | ANY | 0x00100000 | 0x00100000 |
+| 1 | CODE | ANY | 0x00100360 | 0x00100360 |
+| 2 | DATA | CHIP | 0x001008e0 | 0x00100870 |
+| 3 | CODE | ANY | 0x001009b0 | 0x00100940 |
+| 4 | CODE | ANY | 0x001009c8 | 0x00100958 |
+| 5 | DATA | ANY | 0x00100ae0 | 0x00100a70 |
+| 6 | CODE | ANY | 0x00101118 | 0x00101060 |
 
 ## Entry and startup code
 
@@ -138,9 +142,10 @@ RELOC32 entries. The listing itself is not reproduced; what it does:
 
 `game`, hunk 0 `+0x00..+0x2f`: save d1-d6/a0-a6 on the stack (`+00`), keep a0 in a2 (`+04`)
 and d0 in d2 (`+06`), point a4 at `0x0015b6f0` (`+08`, RELOC32 → hunk 33 (DATA) + 0x8000),
-load AbsExecBase (`4.w`) into a6 (`+0e`), point a3 at `0x001585fc` (`+12`, RELOC32 → hunk 33
-+ 0x4f0c), then clear `0x2633 + 1` longwords from a3 up with a `dbf` loop (`+18..+24`), and store
-a7 at `-$30b4(a4)` (`+28`) and a6 at `-$30bc(a4)` (`+2c`).
+load AbsExecBase (`4.w`) into a6 (`+0e`), point a3 at the end of hunk 33's loaded part (`+12`,
+a RELOC32 into hunk 33), then clear the rest of that hunk from a3 up with a `dbf` loop
+(`+18..+24`, its count the immediate at `+1a`), and store a7 at `-$30b4(a4)` (`+28`) and a6 at
+`-$30bc(a4)` (`+2c`).
 
 Over hunk 0 `+0x000..+0x1f3`, `game`, `u` and `installu6` are byte-identical except for
 relocated longwords and 2-byte fields: `+0x1e` (BSS-length immediate), `+0x2a`/`+0x2e` (d16 of
@@ -153,17 +158,19 @@ d2 as above, a4 → hunk 5 + 0, a6 = AbsExecBase, a6 stored at `$5a(a4)`, a7 at 
 `$5e(a4)` cleared, a3 → hunk 5 + loaded size, then the same clear loop. Their `dos.library`
 string is in DATA hunk 5 `+0x7a`, not in code.
 
-### BSS tail cleared by the startup loop (measured)
+### BSS tail cleared by the startup loop
 
-| file | a4 = | a3 = | d0 (longs) | hunk size | loaded | loaded + d0×4 |
-|---|---|---|---|---|---|---|
-| `game` | h33 + 0x8000 | h33 + 0x4f0c | 0x2633 | 0xe7d8 | 0x4f0c | 0xe7d8 |
-| `u` | h22 + 0 | h22 + 0x1718 | 0x692 | 0x3160 | 0x1718 | 0x3160 |
-| `installu6` | h4 + 0 | h4 + 0xc34 | 0xeb | 0xfe0 | 0xc34 | 0xfe0 |
-| `ultima6` | h5 + 0 | h5 + 0x400 | 0x8e | 0x638 | 0x400 | 0x638 |
-| `ultcli` | h5 + 0 | h5 + 0x3b8 | 0x8d | 0x5ec | 0x3b8 | 0x5ec |
+| file | a4 = |
+|---|---|
+| `game` | h33 + 0x8000 |
+| `u` | h22 + 0 |
+| `installu6` | h4 + 0 |
+| `ultima6` | h5 + 0 |
+| `ultcli` | h5 + 0 |
 
-So the loop zero-fills exactly the not-loaded tail of the hunk a4 points into (data + BSS).
+In each file a3 points at the end of the loaded part of the hunk a4 points into, and the loop
+count is the longwords from there to the hunk's end (both checked against the hunk headers). So
+the loop zero-fills exactly the not-loaded tail of that hunk (data + BSS).
 
 ### Compiler identification
 
@@ -177,7 +184,8 @@ So the loop zero-fills exactly the not-loaded tail of the hunk a4 points into (d
   substring `SAS` occurs 3× in `game` only, all inside binary bytes (h12 CODE
   `+0x57c4`/`+0x5836` and `0x00152340`, h30 CODE `+0x460`) — not a signature.
 - [추정] `game`'s a4 bias of +0x8000 (the others use +0) lets signed 16-bit displacements
-  reach its 0xe7d8-byte data hunk; its startup displacements are negative (`-$30b4`).
+  reach all of its data hunk, which is longer than 0x8000 bytes; its startup displacements are
+  negative (`-$30b4`).
 
 ### Strings that locate subsystems (image addresses)
 

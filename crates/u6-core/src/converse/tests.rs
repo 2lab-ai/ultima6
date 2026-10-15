@@ -154,58 +154,67 @@ pub(super) fn files(entries: &[(&str, Vec<u8>)]) -> Files {
 
 // ---- text extraction ---------------------------------------------------------------------------
 
-/// A hunk executable with 35 hunks: CODE/DATA hunks of the measured sizes for 2, 9, 10 and 33
-/// (one marker byte `A` + n at the address of message n, zeros elsewhere), 4-byte CODE hunks
-/// otherwise.
-fn exe(hunk10_len: usize) -> Vec<u8> {
-    let sizes: Vec<usize> = (0..35)
-        .map(|n| match n {
-            2 => 0x3a28,
-            9 => 0x318,
-            10 => hunk10_len,
-            33 => 0x4f0c,
-            _ => 4,
-        })
-        .collect();
+/// A hunk executable with 35 hunks: CODE hunks 2, 9 and 10 and DATA hunk 33 at their image bases
+/// (one marker byte `A` + n at the address of message n, zeros elsewhere), empty BSS hunks
+/// between. Hunks 2, 10 and 33 are just long enough for their messages (synthetic lengths, not
+/// the shipped hunks'); hunk 9 reaches hunk 10's base, which its length sets. `short10` ends hunk
+/// 10 at its last message.
+fn exe(short10: bool) -> Vec<u8> {
     let base = |n: usize| match n {
         2 => 0x0010_4fb0u32,
         9 => 0x0011_25b8,
         10 => 0x0011_28d0,
         _ => 0x0015_36f0,
     };
-    let mut f = Vec::new();
-    let long = |f: &mut Vec<u8>, v: u32| f.extend_from_slice(&v.to_be_bytes());
-    for v in [0x3f3, 0, 35, 0, 34] {
-        long(&mut f, v);
-    }
-    for &n in &sizes {
-        long(&mut f, (n / 4) as u32);
-    }
-    for (n, &len) in sizes.iter().enumerate() {
+    let in_hunk = |n: usize, addr: u32| {
+        let next = match n {
+            2 => base(9),
+            9 => base(10),
+            10 => base(33),
+            _ => u32::MAX,
+        };
+        addr >= base(n) && addr < next
+    };
+    let last = |n: usize| {
+        MESSAGES
+            .iter()
+            .filter(|&&(_, addr)| in_hunk(n, addr))
+            .map(|&(_, addr)| (addr - base(n)) as usize)
+            .max()
+            .unwrap_or(0)
+    };
+    let hunk = |n: usize, len: usize| {
         let mut data = vec![0u8; len];
         for (i, &(_, addr)) in MESSAGES.iter().enumerate() {
-            let hit = [2, 9, 10, 33].contains(&n) && addr >= base(n);
-            if hit && ((addr - base(n)) as usize) < len {
-                data[(addr - base(n)) as usize] = b'A' + i as u8;
+            let at = addr.wrapping_sub(base(n)) as usize;
+            if in_hunk(n, addr) && at < len {
+                data[at] = b'A' + i as u8;
             }
         }
-        long(&mut f, if n == 33 { 0x3ea } else { 0x3e9 });
-        long(&mut f, (len / 4) as u32);
-        f.extend_from_slice(&data);
-        for v in [0x3ec, 1, 0, 0, 0, 0x3f2] {
-            long(&mut f, v);
-        }
-    }
-    f
+        data
+    };
+    let fit = |n: usize| (last(n) + 8) & !3;
+    let len10 = if short10 { last(10) & !3 } else { fit(10) };
+    crate::image::SyntheticGame::new()
+        .place_at(2, base(2))
+        .loaded(false, hunk(2, fit(2)))
+        .place_at(9, base(9))
+        .loaded(false, hunk(9, (base(10) - base(9)) as usize))
+        .loaded(false, hunk(10, len10))
+        .place_at(33, base(33))
+        .loaded(true, hunk(33, fit(33)))
+        .bss(0)
+        .build()
 }
 
 #[test]
 fn messages_come_out_of_the_hunks_at_their_addresses() {
-    let t = ConverseText::from_game(&exe(0x2958)).unwrap();
+    let t = ConverseText::from_game(&exe(false)).unwrap();
     for (i, &(m, _)) in MESSAGES.iter().enumerate() {
         assert_eq!(t.get(m), [b'A' + i as u8], "{m:?}");
     }
-    let err = ConverseText::from_game(&exe(0x2954)).unwrap_err();
+    // Hunk 10 ending before its last message's NUL (or the message itself) is refused.
+    let err = ConverseText::from_game(&exe(true)).unwrap_err();
     assert!(err.contains("hunk 10"), "{err}");
     assert!(ConverseText::from_game(b"not a hunk file").is_err());
 }

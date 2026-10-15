@@ -1111,11 +1111,12 @@ fn back_from_a_container_goes_to_its_parent_or_from_the_map_to_the_actor() {
 
 #[test]
 fn pointer_tables_from_a_synthetic_game() {
-    // Hunk 28 (sprite data), hunk 33 (the A4 data), hunk 34 (the shape tables) at their bases.
-    let mut h28 = vec![0u8; 0x83c];
-    // Hunk 33 as long as the shipped one, so hunk 34 follows it at 0x161ec8.
-    let mut h33 = vec![0u8; 0xe7d8];
-    let mut h34 = vec![0u8; 0x668];
+    // Hunk 28 (sprite data), hunk 33 (the A4 data), hunk 34 (the shape tables) at their bases;
+    // hunks 28 and 34 of synthetic lengths past the bytes read. Hunk 33 runs up to hunk 34's base
+    // (the two bases set its length), so hunk 34 follows it at 0x161ec8.
+    let mut h28 = vec![0u8; 0x600];
+    let mut h33 = vec![0u8; (0x161ec8 - 0x1536f0) as usize];
+    let mut h34 = vec![0u8; 0x700];
     let put = |h: &mut Vec<u8>, base: u32, addr: u32, b: &[u8]| {
         let o = (addr - base) as usize;
         h[o..o + b.len()].copy_from_slice(b);
