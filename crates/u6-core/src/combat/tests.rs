@@ -923,3 +923,129 @@ fn a_dissolving_window_is_revealed_over_its_time() {
     );
     assert!(at8 >= want && at8 <= want + 8, "{at8} ms at 8 ms ticks");
 }
+
+#[test]
+fn frames_left_from_a_more_prompt_come_before_the_lines_queued_after_it() {
+    // The idle refresh of a more prompt (0x105c8e calls 0x102ef0) carries out a shake request
+    // (A4-0x7afc) while three lines are still queued: its frames wait (playing them would print
+    // the rest of the queue inside the prompt), recorded after those three. The flush prints
+    // them after the more key; the frames then come before anything queued later, not after
+    // that many of the new lines.
+    use crate::main_loop::{PrintArg, flush_prints, queue_print};
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    s.gfx.window_shown = 1;
+    s.ui.input.idle_refresh = true;
+    s.gfx.panel_redraw = 2;
+    s.ui.text.win_mut().flags |= crate::ui::text::PAGED;
+    s.ui.text.more_rows = 3;
+    for i in 0..6 {
+        queue_print(&mut s, b"q%d\n".to_vec(), vec![PrintArg::Word(i)]);
+    }
+    let mut e = crate::Engine::with_game(s, crate::Files::default(), |st, io| async move {
+        flush_prints(&st, &io).await;
+        for i in 0..2 {
+            queue_print(
+                &mut st.borrow_mut(),
+                b"n%d\n".to_vec(),
+                vec![PrintArg::Word(i)],
+            );
+        }
+        play_effects(&st, &io).await;
+    });
+    for _ in 0..5 {
+        e.tick(&[], 16);
+    }
+    {
+        let s = e.state();
+        let marks: Vec<usize> = s.combat.effects.iter().map(|f| f.mark).collect();
+        assert_eq!(
+            (marks, s.combat.shown),
+            (vec![3, 3, 3], 0),
+            "two shakes and the window wait in the more prompt, after the three queued lines"
+        );
+    }
+    let mut at_first = None;
+    let mut keys = vec![crate::InputEvent::Key(crate::Key::Space)];
+    for _ in 0..200 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&keys, 16);
+        keys.clear();
+        let s = e.state();
+        if at_first.is_none() && s.combat.shown > 0 {
+            at_first = Some(s.ui.messages.clone());
+        }
+    }
+    assert!(e.finished(), "the playback ended");
+    let at_first = at_first.expect("the frames are shown");
+    let later = |l: &String| l == "n0" || l == "n1";
+    assert!(
+        !at_first.iter().any(later),
+        "no line queued after the more prompt comes before the frames: {at_first:?}"
+    );
+    let s = e.state();
+    assert_eq!(s.combat.shown, 3, "every frame is shown");
+    assert_eq!(
+        s.ui.messages.iter().filter(|l| later(l)).count(),
+        2,
+        "the later lines are printed: {:?}",
+        s.ui.messages
+    );
+}
+
+#[test]
+fn an_interrupted_print_comes_back_after_what_the_action_left() {
+    // An action run inside a more prompt sets the interrupted queue, its frames and the held
+    // newline aside; what it leaves (lines, frames) came before the interrupted rest, so it
+    // stays first, and the interrupted frames keep their place among the interrupted lines.
+    use crate::main_loop::{Pending, PrintArg, queue_print};
+    let frame = |cost: u16, mark: usize| Effect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+        pixels: Vec::new(),
+        cost,
+        mark,
+        dissolve: false,
+    };
+    let line = |s: &mut State, i: u16| queue_print(s, b"%d".to_vec(), vec![PrintArg::Word(i)]);
+    let mut s = State::empty();
+    line(&mut s, 0);
+    line(&mut s, 1);
+    s.combat.effects.push(frame(1, 2));
+    s.combat.swallow = true;
+    let outer = present::interrupt(&mut s);
+    assert_eq!(
+        (
+            s.main.pending_print.len(),
+            s.combat.effects.len(),
+            s.combat.swallow
+        ),
+        (0, 0, false),
+        "the action starts with nothing of the interrupted print"
+    );
+    line(&mut s, 9);
+    s.combat.effects.push(frame(2, 1));
+    present::resume(&mut s, outer);
+    let words: Vec<u16> = s
+        .main
+        .pending_print
+        .iter()
+        .map(|p| match p {
+            Pending::Print(_, a) if a == &[PrintArg::Word(9)] => 9,
+            Pending::Print(_, a) if a == &[PrintArg::Word(1)] => 1,
+            _ => 0,
+        })
+        .collect();
+    assert_eq!(words, [9, 0, 1], "the action's line first");
+    let frames: Vec<(u16, usize)> = s.combat.effects.iter().map(|e| (e.cost, e.mark)).collect();
+    assert_eq!(
+        frames,
+        [(2, 1), (1, 3)],
+        "the action's frame first; the interrupted one still after both interrupted lines"
+    );
+    assert!(s.combat.swallow, "the held newline is back");
+}

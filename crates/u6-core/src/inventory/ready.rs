@@ -74,14 +74,14 @@ fn set_sparkle(s: &mut State, v: u8) {
 /// does (a container on the map, a broken chain; `weight::holder`), before anything is written.
 /// A torch is taken off its stack and a new single torch is readied. The ring of
 /// invisibility (0x102) makes the actor invisible and 0x51 starts the sparkle, both with the
-/// actor's flash (0x132338) after the panel contents are redrawn. The prompt follows in every
-/// case. Ready from the panel runs inside a key read (any of them, a print's more prompt too),
-/// so the flash's frames are shown before the prompt only when no lines are queued and
-/// Attack's newline is not held ([`crate::ui::effects::show_recorded`]): playing them then
-/// would print the rest of the outer queue, and hand on its held newline, before Ready's
-/// prompt, where the original prints those lines after the more key. Else the next playback
-/// shows them.
+/// actor's flash (0x132338, 0x112286 / 0x1122b4) after the panel contents are redrawn
+/// (0x111be0), and the flash's frames are shown there. The prompt follows in every case
+/// (0x1122ce). Ready from the panel runs inside a key read (any of them, a print's more prompt
+/// too), so it sets the interrupted print's queued lines, frames and held newline aside first
+/// and puts them back after its prompt ([`crate::combat::present::interrupt`]): the original
+/// prints those lines after the more key.
 pub async fn ready(state: &RefCell<State>, io: &Io) {
+    let outer = crate::combat::present::interrupt(&mut state.borrow_mut());
     let (actor, obj, ty, strength) = {
         let s = state.borrow();
         let actor = shown_actor(&s);
@@ -114,8 +114,9 @@ pub async fn ready(state: &RefCell<State>, io: &Io) {
             _ => {}
         }
     }
-    crate::ui::effects::show_recorded(state, io).await;
+    crate::combat::play_effects(state, io).await;
     prompt(state, io).await;
+    crate::combat::present::resume(&mut state.borrow_mut(), outer);
 }
 
 /// The checks and the move of [`ready`]; the refusal message when it does not happen.
@@ -232,14 +233,16 @@ pub fn equipped_index(s: &State, obj: Slot) -> i16 {
 /// name; the amulet of submission stays readied; a lit torch burns out; otherwise the slot is
 /// cleared, the effects end, a both-hands weapon frees slot 5, and the object goes back to the
 /// inventory (a torch onto the actor's torch stack when it has one). The frames of the effect's
-/// flash (0x11236c) are shown (nothing between it and the panel draws) unless lines are
-/// queued or Attack's newline is held, as in [`ready`]; then the panel contents are redrawn
-/// and the prompt printed.
+/// flash (0x11236c, called at 0x112456) are shown (nothing between it and the panel draws);
+/// then the panel contents are redrawn (0x1124ea) and the prompt printed (0x112504). As in
+/// [`ready`], the interrupted print's queued lines, frames and held newline are set aside for
+/// all of it.
 pub async fn unready(state: &RefCell<State>, io: &Io) {
     let obj = state.borrow().ui.input.selection;
     if obj == 1 {
         return;
     }
+    let outer = crate::combat::present::interrupt(&mut state.borrow_mut());
     let name = display_name(&state.borrow(), obj);
     say(state, io, STR_UNREADY, &[Arg::Str(name.as_bytes())]).await;
     let (ty, actor) = {
@@ -273,7 +276,8 @@ pub async fn unready(state: &RefCell<State>, io: &Io) {
             }
         }
     }
-    crate::ui::effects::show_recorded(state, io).await;
+    crate::combat::play_effects(state, io).await;
     panel_contents(state, io, actor).await;
     prompt(state, io).await;
+    crate::combat::present::resume(&mut state.borrow_mut(), outer);
 }

@@ -162,7 +162,8 @@ pub struct Effect {
     /// Engine milliseconds the original spends making it: [`play_effects`] waits that long
     /// before showing it.
     pub cost: u16,
-    /// Messages queued (`main.pending_print`) before it was presented.
+    /// Messages queued (`main.pending_print`) before it was presented; 0 once the queue has run
+    /// empty since ([`queue_printed`]).
     pub mark: usize,
     /// The window was presented dissolving (0x1520e2): playback reveals it over its time.
     pub dissolve: bool,
@@ -233,6 +234,60 @@ pub(crate) fn capture_pause(s: &mut State, cost: u16) {
         mark,
         dissolve: false,
     });
+}
+
+/// Port: the queue ran empty ([`crate::main_loop::flush_prints`]). The lines that frames still
+/// recorded were marked after are printed, so those frames come before anything queued from
+/// now on, not after that many of the new lines.
+pub(crate) fn queue_printed(s: &mut State) {
+    for e in &mut s.combat.effects {
+        e.mark = 0;
+    }
+}
+
+/// Port: what an action run inside a key wait sets aside of the print it interrupts
+/// ([`interrupt`]): the queued lines, the frames recorded among them and Attack's held newline
+/// ([`crate::combat::CombatState::swallow`]).
+///
+/// The original prints and draws synchronously. An action that the key read 0x10790a runs
+/// while a print waits for its more key (0x107f4c in 0x107e5a), such as Ready, Unready or a
+/// trapped chest clicked in the inventory, prints and draws right there, and the print's other
+/// lines come after the key. The port queues lines and frames, so the action sets the
+/// interrupted ones aside, plays its own in place ([`play_effects`]) and puts them back
+/// ([`resume`]).
+#[must_use]
+pub(crate) struct Interrupted {
+    pending: Vec<crate::main_loop::Pending>,
+    effects: Vec<Effect>,
+    swallow: bool,
+}
+
+/// Sets the interrupted print's queue, frames and held newline aside ([`Interrupted`]).
+pub(crate) fn interrupt(s: &mut State) -> Interrupted {
+    Interrupted {
+        pending: std::mem::take(&mut s.main.pending_print),
+        effects: std::mem::take(&mut s.combat.effects),
+        swallow: std::mem::replace(&mut s.combat.swallow, false),
+    }
+}
+
+/// Puts the interrupted print back as it was. Whatever the action left came before the
+/// interrupted print's rest, so it stays first (a key wait inside the action can leave frames,
+/// [`crate::ui::effects::show_recorded`]) and the interrupted frames keep their place among
+/// the interrupted lines.
+pub(crate) fn resume(s: &mut State, outer: Interrupted) {
+    let Interrupted {
+        pending,
+        mut effects,
+        swallow,
+    } = outer;
+    let ahead = s.main.pending_print.len();
+    for e in &mut effects {
+        e.mark += ahead;
+    }
+    s.main.pending_print.extend(pending);
+    s.combat.effects.extend(effects);
+    s.combat.swallow = swallow;
 }
 
 /// Prints the first `n` queued messages and keeps the rest queued.

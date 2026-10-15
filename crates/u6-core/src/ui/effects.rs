@@ -39,7 +39,11 @@ pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
 /// by the idle refresh 0x102ef0 of 0x105c8e) are shown before the wait goes on, not after the
 /// next command. Left for a later playback while lines are queued (a print's more prompt waits
 /// here too, and playing would print the rest of its queue inside it) or Attack's newline is
-/// held ([`crate::combat::CombatState::swallow`], which the playback hands on).
+/// held ([`crate::combat::CombatState::swallow`], which the playback hands on); once the queue
+/// has run empty they come before anything queued after it
+/// ([`crate::combat::present::queue_printed`]). The actions the key read runs (Ready, Unready,
+/// a trapped chest clicked in the inventory) do not wait here: they set the interrupted print
+/// aside and play their own ([`crate::combat::present::interrupt`]).
 pub async fn show_recorded(state: &RefCell<State>, io: &Io) {
     let ready = {
         let s = state.borrow();
