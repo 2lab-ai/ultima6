@@ -46,6 +46,10 @@ pub const PASS_MOVED_MS: u16 = 95;
 /// the mean of the other 19 traced (0.16..0.48; trace.py "follow, Pass, none moved"). With no
 /// member to move at all (in a fight every member is in its combat mode) it waits nothing, as
 /// the step's pass with no one to move.
+///
+/// The unit tests (`pass_waits_the_originals_followers_pass_at_any_host_tick`) pin which of the
+/// two a Pass pays, not their values; the values are pinned by trace.py's reduction of the
+/// `q1`..`q6` traces recorded in re/notes/oracle.md §E (14 and 19 passes, the means above).
 pub const PASS_STILL_MS: u16 = 4;
 
 /// Port: the walk command's step ([`super::party::player_step`], 0x11d4ee), then the time the

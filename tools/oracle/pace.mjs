@@ -15,7 +15,8 @@
 // press, when the press was sampled, a timeline of the reading/held flags and view redraws),
 // and pace.log. Spec 01 §Rights: the view centre, the party's actors and the click map's code
 // are compared here and never written; a step is a frame where the centre changed, the timeline
-// says where the press code changed (`c`), the log counts the party.
+// says where the press code changed (`c`), the log counts the party and does not give a
+// snapshot's size (it follows the emulated RAM's content).
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
@@ -273,13 +274,16 @@ try {
   await page.evaluate((a4) => { window.__pace.a4 = a4; }, a4);
   log(`A4 = ${a4.toString(16)}`);
   await idle(page, a4);
-  log(`base snapshot ${await snapshot(page, 'base')} bytes at frame ${await o.frame(page)}`);
+  // The snapshot's size follows the emulated RAM's content: not logged (spec 01 §Rights).
+  await snapshot(page, 'base');
+  log(`base snapshot taken at frame ${await o.frame(page)}`);
   for (const name of SETUPS) {
     await restore(page, 'base');
     await o.waitFrames(page, 5);
     await setup(page, a4, name);
     await shot(page, name);
-    log(`${name} snapshot ${await snapshot(page, name)} bytes`);
+    await snapshot(page, name);
+    log(`${name} snapshot taken`);
     for (const hold of HOLDS) {
       for (let run = 0; run < RUNS; run++) {
         for (const [dx, dy] of CELLS) {

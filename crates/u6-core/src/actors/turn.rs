@@ -521,10 +521,11 @@ fn turn_worktype(s: &State, actor: usize) -> u8 {
 /// changed view ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile. A pick is shorter
 /// than a host frame, and [`crate::combat::present::pace`] waits at least one (so a run of them
 /// would end later at a coarser tick), so picks are owed and paid with the next wait of the
-/// turn: before a combat NPC turn, before an NPC turn that shows something (frames or lines it
-/// queued, an arrest, a conversation), at a refill, before a refresh, before a raise of the dead
-/// party, or at the end of the turn. So whatever the turn shows comes after every pass before
-/// it, as in the original. The setup is paid with the end of the turn: that last wait is then
+/// turn: before a combat NPC turn, first in the playback of an NPC turn that shows something
+/// (frames or lines it queued, an arrest, a conversation: [`owe_first`], so what its
+/// synchronous part drew stays off the screen meanwhile), at a refill, before a refresh, before
+/// a raise of the dead party, or at the end of the turn. So whatever the turn shows comes after
+/// every pass before it, as in the original. The setup is paid with the end of the turn: that last wait is then
 /// never shorter than a frame and makes up what the waits before it ended late, while the
 /// turn's pictures come at most the setup's 16 ms (under a frame) early. In a time stop the
 /// refills wait nothing (the minute only counts the stop down), so the passes of up to 255
@@ -583,7 +584,7 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
             if npc {
                 let started = npc::npc_turn_sync(&mut state.borrow_mut(), actor);
                 if shows(&state.borrow(), started.as_ref()) {
-                    pay(state, io, &mut owed, 0).await;
+                    owe_first(&mut state.borrow_mut(), &mut owed);
                 }
                 npc::npc_turn_rest(state, io, actor, started).await;
                 leader_bookkeeping(&mut state.borrow_mut());
@@ -614,6 +615,31 @@ async fn pay(state: &RefCell<State>, io: &Io, owed: &mut u32, more: u16) {
         crate::combat::present::pace(state, io, part).await;
         ms -= u32::from(part);
     }
+}
+
+/// What the world turn `owed`, put at the front of the NPC turn's playback (pauses: recorded
+/// effects of no picture, at most `u16::MAX` ms each, before any line): [`npc::npc_turn_rest`]'s
+/// playback waits them first with the window as last published put back, so a picture the
+/// turn's synchronous part drew and presented (a guard's strike renders its flash) is not
+/// published before the passes and its own time, as a wait between the two parts would.
+fn owe_first(s: &mut State, owed: &mut u32) {
+    let mut ms = std::mem::take(owed);
+    let mut pauses = Vec::new();
+    while ms > 0 {
+        let part = ms.min(u32::from(u16::MAX)) as u16;
+        pauses.push(crate::combat::present::Effect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+            pixels: Vec::new(),
+            cost: part,
+            mark: 0,
+            dissolve: false,
+        });
+        ms -= u32::from(part);
+    }
+    s.combat.effects.splice(0..0, pauses);
 }
 
 /// Whether the NPC turn [`npc::npc_turn_sync`] started (`started`) shows something before it
@@ -1116,6 +1142,114 @@ mod tests {
             assert!(
                 ms >= want && ms <= want + u64::from(tick),
                 "the key read {ms} ms in at {tick} ms ticks (zero polls {zero}), want {want}"
+            );
+        }
+    }
+
+    /// The published map window (176 × 176 from the top left) of `e`.
+    fn published_window(e: &Engine) -> Vec<u8> {
+        e.io().published(|fb| {
+            (0..176)
+                .flat_map(|y| (0..176).map(move |x| (x, y)))
+                .map(|(x, y)| fb.get(x, y).unwrap_or(0))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn a_guards_strike_after_owed_passes_shows_its_flash_only_after_them_and_its_time() {
+        // A guard at its post (0x99, not a combat routine: no combat turn's wait before it)
+        // beside the player, after five NPCs (0x11) that only spend points, each with one
+        // turn's points (5 of dexterity 5, the guard too, so it acts once, sixth): six passes
+        // owed when its turn strikes the player (0x1230ce: the window rendered and presented, then
+        // recorded to show after its FLASH_MS). The window as published before the turn (a
+        // marker) must stay up until the flash shows: no earlier than the passes and the
+        // flash's time, within a tick. The post is the schedule's (0, 0) here, so the scene is
+        // near it; a generator state whose coin strikes (`draws` draws on from the start) is
+        // looked for first.
+        let scene = |draws: u16| {
+            let mut s = world(&[(5, 5); 5]);
+            s.ui = crate::main_loop::test_support::test_ui();
+            s.gfx.window_shown = 1;
+            s.combat.flash = 1;
+            let at = Position { x: 2, y: 2, z: 0 };
+            s.map.centre = at;
+            s.objects.location[1] = at;
+            s.actors.movement_points[1] = 0;
+            // In the 40 × 40 window around the player (else they lose their points), more than 8
+            // tiles from the guard (else it might take one of them for its target).
+            for (i, a) in (10..15).enumerate() {
+                s.actors.worktype[a] = 0x11;
+                s.objects.location[a] = Position {
+                    x: 15 + i as u16,
+                    y: 12,
+                    z: 0,
+                };
+            }
+            let guard = 20;
+            s.objects.location[guard] = Position { x: 3, y: 2, z: 0 };
+            s.objects.type_frame[guard] = 0x17a;
+            s.actors.worktype[guard] = 0x99;
+            s.actors.attrs.dexterity[guard] = 5;
+            s.actors.movement_points[guard] = 5;
+            crate::main_loop::test_support::link_placed_objects(&mut s);
+            for _ in 0..draws {
+                s.rng.range(0, 3);
+            }
+            s
+        };
+        let marker = vec![5u8; 176 * 176];
+        // When (ms after the turn began) the published window first differs from the marker,
+        // and how many recorded frames were shown.
+        let run = |s: State, tick: u32, zero: bool| {
+            let start = Rc::new(std::cell::Cell::new(None));
+            let done = Rc::new(std::cell::Cell::new(false));
+            let (st0, dn) = (Rc::clone(&start), Rc::clone(&done));
+            let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+                io.draw(|fb| {
+                    for y in 0..176 {
+                        for x in 0..176 {
+                            fb.set(x, y, 5);
+                        }
+                    }
+                });
+                io.present();
+                io.vblank().await;
+                st0.set(Some(io.now_ms()));
+                world_turn(&st, &io).await;
+                dn.set(true);
+            });
+            let mut changed = None;
+            for _ in 0..MAX_TICKS {
+                if done.get() {
+                    break;
+                }
+                e.tick(&[], tick);
+                if zero {
+                    e.tick(&[], 0);
+                }
+                if let Some(t0) = start.get()
+                    && changed.is_none()
+                    && published_window(&e) != marker
+                {
+                    changed = Some(e.io().now_ms() - t0);
+                }
+            }
+            assert!(done.get(), "the turn ends");
+            (changed, e.state().combat.shown)
+        };
+        let draws = (0..200)
+            .find(|&n| run(scene(n), 16, false).1 > 0)
+            .expect("a generator state whose guard strikes");
+        let want = 6 * u64::from(PICK_MS) + u64::from(crate::combat::present::FLASH_MS);
+        for (tick, zero) in [(16, false), (7, false), (16, true)] {
+            let (changed, shown) = run(scene(draws), tick, zero);
+            assert!(shown > 0, "the flash was shown");
+            let ms = changed.expect("the flash reached the screen");
+            assert!(
+                ms >= want && ms <= want + u64::from(tick),
+                "the window changed {ms} ms in at {tick} ms ticks (zero polls {zero}), want \
+                 {want}"
             );
         }
     }

@@ -65,12 +65,27 @@ class FramesOfStep(unittest.TestCase):
         with self.assertRaises(fight.Incomplete):
             fight.frames_of(s, IMAGE)
 
-    def test_a_capture_with_picture_hashes_instead_of_changes_is_refused(self):
-        # fight.mjs writes whether the view and the scroll changed, never their hashes (spec 01
-        # §Rights); a row with a hash is an old capture to rewrite.
+    def test_a_row_outside_the_contract_is_refused(self):
+        # fight.mjs writes booleans and counts, never a picture hash, the view centre or the
+        # actors (spec 01 §Rights); a capture with any such row, or a malformed one, is refused.
+        self.assertEqual(len(fight.frames_of(step(), IMAGE)), 30)
+        for name, field, value in [
+            ("a view hash", 3, 1743465692),
+            ("a scroll hash", 4, 1945367669),
+            ("a panel hash", 5, 4264608019),
+            ("the moved actors' list", 6, [10, 11]),
+            ("the hurt actors with their hit points", 7, [[10, 30, 24]]),
+            ("the view centre", 9, [307, 352]),
+            ("a count as a flag", 6, True),
+            ("a sample without its words", 8, ["U", 0x2EF000, 0x358B58, 0x358B60]),
+        ]:
+            t = step()
+            t["rows"][3][field] = value
+            with self.assertRaises(fight.Incomplete, msg=name):
+                fight.frames_of(t, IMAGE)
         t = step()
-        t["rows"][3][3] = 1743465692
-        with self.assertRaises(fight.Incomplete):
+        t["rows"][3] = t["rows"][3][:9]
+        with self.assertRaises(fight.Incomplete, msg="an early 9-field row"):
             fight.frames_of(t, IMAGE)
 
     def test_a_capture_that_ends_before_the_prompt_settled_is_refused(self):

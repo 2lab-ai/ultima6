@@ -138,11 +138,13 @@ row before the key was taken to 60 frames of prompt after the turn (synthetic ca
 booleans and counts (spec 01 §Rights): whether the view, the message scroll, the party panel and
 the view centre changed against the frame before, and how many actors moved or changed hit
 points; fight.mjs compares the picture hashes, places and hit points in the emulator and
-writes none of them, and fight.py refuses a row with a hash. The captures written before
+writes none of them, and fight.py refuses a capture with any row outside that contract (a hash,
+a centre, an actor list, a field missing). The captures written before
 (`pace/fight-*`, 2026-10-14..15) were rewritten that way on 2026-10-16 by a one-off script
 outside the repo (and their logs' view centre, memory dumps and disassembly removed); fight.py
-gives every run the same output as before (the early-layout `fight-exp3` it could not read
-before either).
+gives `fight-r0`..`r2`, `fight-town`, `fight-town-b` and `fight-tool-snap` the same output as
+before; the early-layout experiments `fight-exp3` and `fight-exp5` (8 and 9 fields a row) are
+refused.
 
 Start fight, keys UP RIGHT LEFT RIGHT LEFT RIGHT LEFT, 3 boots (`pace/fight-r0..r2`), frames
 from the key taken to the prompt: 535 396 300 283 364 270 215 / 439 334 169 137 261 138 255 /
@@ -287,8 +289,8 @@ above got `fresh` in the 2026-10-16 rewrite: true for the fight runs, false for 
 whose break-off ran a world turn first). Why that pass is long is not established. The port pays the minute with the pass after
 it, and in a time stop (where 0x10368a only counts the stop down; not traced) the pass alone. A
 pass (11 ms) is shorter than a host frame and `pace` waits at least one, so the port owes the
-passes and pays them with the turn's next wait (before a combat NPC turn, an NPC turn that shows
-something, a refresh, a raise, a minute), and the setup with its last (actors/turn.rs
+passes and pays them with the turn's next wait (before a combat NPC turn, first in the playback
+of an NPC turn that shows something, a refresh, a raise, a minute), and the setup with its last (actors/turn.rs
 `world_turn`; in a time stop the owed passes of many refills can pass a u16 of ms). Paced one
 by one, the start fight's steps came out up to 48 ms longer at 16 ms host ticks than at 8 ms
 (seed 0; the receipt allows one tick). The receipts at the hosts' step (`pacer::STEP_MS`, 20
@@ -422,9 +424,10 @@ three trials per hold at different press phases (b4..b6: two), a press held thre
 (b4 also north and east). Gaps = PAL frames between two steps of one held press, recounted from
 the runs' `pace.json` on 2026-10-15. pace.mjs writes a step as the frame the view centre
 changed and the press code as a timeline flag; the centre and the party's actors are compared
-in the emulator and never written (spec 01 §Rights). These runs were rewritten that way on
+in the emulator and never written, nor is a snapshot's size (it follows the emulated RAM's
+content; spec 01 §Rights). These runs were rewritten that way on
 2026-10-16 by a one-off script outside the repo (each trial's centre and step deltas dropped,
-the press code made a flag, the logs' centre and party actors removed); the gaps below and every
+the press code made a flag, the logs' centre, party actors and snapshot sizes removed); the gaps below and every
 trial's steps, press, release and timeline read the same before and after. `quiet` = the actors outside the party passed over and the
 fight broken off; `start` = the start fight as booted, where a gap is a whole world turn (only
 the longest holds outlast one).
