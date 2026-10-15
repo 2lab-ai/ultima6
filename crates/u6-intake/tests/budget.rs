@@ -248,7 +248,7 @@ fn tracked_hfe(cylinders: usize, length: u16) -> Vec<u8> {
 fn disk_images_past_the_budget_are_not_decoded() {
     // 80 cylinders of 1,024 bytes: each disk holds its ADF, 81,920 bytes of tracks and the
     // decode's 290,552 working bytes while it decodes, and keeps its 901,120-byte ADF.
-    // 76 disks would keep 68,485,120 bytes; 74 fit.
+    // 76 disks would keep 68,485,120 bytes; 73 fit with their labels, lines and slots.
     let hfe = tracked_hfe(80, 1024);
     let inputs: Vec<InputFile> = (0..76)
         .map(|i| file(format!("disk {i}.hfe"), hfe.clone()))
@@ -262,15 +262,19 @@ fn disk_images_past_the_budget_are_not_decoded() {
     let out = output_bytes(&r);
     assert!(out <= BOUND, "the intake kept {out} bytes, over {BOUND}");
     assert_eq!(
-        lines_of(&r, "disk 74.hfe"),
-        ["disk 74.hfe: not read: 1273603 more bytes would pass the intake's 64 MiB budget"]
+        lines_of(&r, "disk 73.hfe"),
+        ["disk 73.hfe: not read: 1273603 more bytes would pass the intake's 64 MiB budget"]
     );
-    assert_eq!(
-        lines_of(&r, "disk 75.hfe"),
-        ["disk 75.hfe: not read: the intake's 64 MiB budget is spent"]
-    );
+    for i in [74, 75] {
+        assert_eq!(
+            lines_of(&r, &format!("disk {i}.hfe")),
+            [format!(
+                "disk {i}.hfe: not read: the intake's 64 MiB budget is spent"
+            )]
+        );
+    }
     assert!(
-        lines_of(&r, "disk 73.hfe")
+        lines_of(&r, "disk 72.hfe")
             .iter()
             .all(|l| !l.contains("budget"))
     );
@@ -627,4 +631,28 @@ fn a_report_that_fills_the_budget_stops_the_intake() {
     );
     assert_eq!(r.report[n - 1], STOP_LINE);
     assert!(r.files.is_empty() && r.disks.is_empty());
+}
+
+#[test]
+fn spare_capacity_in_the_inputs_is_charged() {
+    // A dropped ADF and a loose file of 1 KiB each, in buffers of 40 MiB: kept by their length
+    // they would fit; kept, they hold 80 MiB.
+    let mut adf = Vec::with_capacity(40 << 20);
+    adf.extend_from_slice(b"DOS\0");
+    adf.resize(1024, 0);
+    let mut loose = Vec::with_capacity(40 << 20);
+    loose.resize(1024, 1);
+    let r = intake(vec![
+        file("spare.adf".into(), adf),
+        file("spare.bin".into(), loose),
+    ]);
+    let held = r.disks.iter().map(|d| d.adf.capacity()).sum::<usize>()
+        + r.files.values().map(Vec::capacity).sum::<usize>();
+    assert!(held <= BOUND, "the intake keeps {held} bytes, over {BOUND}");
+    // The ADF's buffer fits; the file's, its 9-byte path twice and 384 bytes of slots do not.
+    assert_eq!(
+        lines_of(&r, "spare.bin"),
+        ["spare.bin: not read: 41943442 more bytes would pass the intake's 64 MiB budget"]
+    );
+    assert_eq!(r.report.last().map(String::as_str), Some(STOP_LINE));
 }

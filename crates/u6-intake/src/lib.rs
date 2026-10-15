@@ -37,15 +37,20 @@ pub use pp20::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
 /// Retained, charged before it is allocated and given back when the intake drops it. Strings
 /// are built at their exact length and a list's growth is charged as it is made (old and new
 /// buffers while it moves), so a charge is what the allocation holds:
-/// - each ADF it keeps: a dropped one as it is, an HFE's decoded one; while an HFE decodes, also
+/// - the [`FIRST_ALLOCATIONS`] of its lists and maps, once; the lists the inputs are sorted
+///   into (48-byte slots) and, while the disk images are sorted, the sort's scratch (one slot
+///   each);
+/// - each ADF it keeps: a dropped one's buffer as it came (spare capacity included), an HFE's
+///   decoded one; while an HFE decodes, also
 ///   the tracks the parser copies out ([`hfe_track_bytes`]) and the decode's working bytes
 ///   ([`mfm::DECODE_WORK_BYTES`]: one track's cells, its sectors, the missing list); with it
 ///   the disk's label (at most 258 bytes) and the disk list's 72-byte slots;
 /// - each volume's name, its files as reserved, their paths (twice, as key and index, with
 ///   room for the volume name), the directory paths and the listed warnings, each with
 ///   [`ofs::ENTRY_BYTES`] for its slots in lists and maps ([`OfsVolume::held`]);
-/// - each loose file it keeps: its bytes, its path twice and [`ofs::ENTRY_BYTES`], as a
-///   volume's file; and each PP20 output (its crunched bytes given back once done);
+/// - each loose file it keeps: its buffer as it came (spare capacity included), its path twice
+///   and [`ofs::ENTRY_BYTES`], as a volume's file; and each PP20 output (the crunched buffer
+///   given back once done);
 /// - each report line while the budget lasts, and the list's slots, which always keep room
 ///   for the 35 lines that may follow the spend. A line names its input by a label of at most
 ///   258 bytes ([`LABEL_BYTES`] and an ellipsis), so no line passes 8,704 bytes (the zip line,
@@ -61,13 +66,16 @@ pub use pp20::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
 /// - one string while it is made, before it is cut to its length: a report line, a warning or
 ///   an error, at most twice 8,704 bytes;
 /// - a loose file's path while it is made and charged: twice its name, one at a time;
+/// - two names compared while the disk images are sorted: a copy of each one's digit runs, at
+///   most both names' lengths, one comparison at a time;
 /// - the walk's directory paths along its recursion: at most [`ofs::MAX_DEPTH`] of at most
 ///   3,903 bytes, 249,792 bytes;
 /// - the visited set's entries for blocks the walk keeps nothing for: one per block of an ADF
 ///   already charged, at most 28 bytes each (a B-tree leaf of 104 bytes holds at least 5
 ///   keys, with its share of the inner nodes), under 5.5% of that ADF;
 /// - an HFE's track table as read before its charge: at most 255 entries of 16 bytes;
-/// - the inputs and their names: the caller's, each freed once read;
+/// - the inputs until the intake takes them over, and their names: the caller's, each freed once
+///   read (an HFE's buffer too: only its decoded ADF is kept);
 /// - the zip entries `zip.rs` extracts and their names, each held until its disk is read:
 ///   bounded by `zip.rs` (at most `MAX_ENTRIES`, 65,534, entries and `MAX_DIRECTORY_BYTES`,
 ///   16 MiB, of directory, so at most 32 MiB of names read as ISO 8859-1) and by the web page's
@@ -82,10 +90,11 @@ pub use pp20::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
 /// a disk, 5,367 on three; with every name at the root (at most 60 bytes) each is charged
 /// 384 + 2 x (61 + 60) = 626 bytes, 3,359,742 in all. The report is at most 38 lines a disk
 /// of at most 380 bytes with such names and the zip line, with its list: 55,345 bytes; the
-/// disks' labels, slots and volume names 1,530. That is 57,522,217 bytes (54.9 MiB), and
-/// 64 MiB is 16.7% above it (the same 64 MiB the web page allows the game files). Deeper names
-/// cost more: a set of three disks fits while its paths average at most 953 bytes (about 15
-/// levels of 60-byte names); past that the intake stops at the budget, it does not pass it.
+/// disks' labels, slots and volume names 1,530; the first allocations, the inputs' list and
+/// the sort's scratch 4,624. That is 57,526,841 bytes (54.9 MiB), and 64 MiB is 16.7% above it
+/// (the same 64 MiB the web page allows the game files). Deeper names cost more: a set of
+/// three disks fits while its paths average at most 952 bytes (about 15 levels of 60-byte
+/// names); past that the intake stops at the budget, it does not pass it.
 /// The HFE decodes (at most an HFE's size and 290,552 bytes) are given back before any PP20
 /// output.
 pub const INTAKE_BUDGET: usize = 64 << 20;
@@ -103,6 +112,12 @@ pub const LINES_AFTER_SPENT: usize = 32;
 /// Room the report's list always keeps, charged: the lines after the budget is spent and the
 /// three closing lines, so adding them never grows it.
 const TAIL: usize = LINES_AFTER_SPENT + 3;
+/// The first allocations of the lists and maps that [`ofs::ENTRY_BYTES`] does not cover while
+/// they hold few entries, charged once: the collected files' list (4 slots of 48 bytes) and
+/// index (a 368-byte root leaf), the result's map (a 540-byte root leaf), and the walk's
+/// lists and maps for the volume being read (files 192, index 368, visited set 100, directories
+/// and warnings 96 each): 1,952 bytes, 4,096 with room to spare.
+const FIRST_ALLOCATIONS: usize = 4096;
 
 /// `name`, or its first [`LABEL_BYTES`] bytes (to a character boundary) and an ellipsis, at its
 /// exact length.
@@ -127,17 +142,38 @@ struct Ledger {
     /// Lines added after the budget was spent, and those counted past [`LINES_AFTER_SPENT`].
     after_spent: usize,
     unlisted: usize,
+    /// The least `left` has been: the most the intake had charged at once.
+    low: usize,
 }
 
 impl Ledger {
-    /// The whole budget, less the report list's first [`TAIL`] slots.
+    /// The whole budget, less the report list's first [`TAIL`] slots and the
+    /// [`FIRST_ALLOCATIONS`].
     fn new(budget: usize) -> Ledger {
+        let left = budget - TAIL * size_of::<String>() - FIRST_ALLOCATIONS;
         Ledger {
-            left: budget - TAIL * size_of::<String>(),
+            left,
             spent: false,
             lines: Vec::with_capacity(TAIL),
             after_spent: 0,
             unlisted: 0,
+            low: left,
+        }
+    }
+
+    /// Takes `n` bytes the caller has checked fit.
+    fn take(&mut self, n: usize) {
+        self.left = self.left.saturating_sub(n);
+        self.low = self.low.min(self.left);
+    }
+
+    /// Makes room for `v` to take over one more input, as [`Ledger::room`]; when it does not
+    /// fit, the input is refused in the report instead.
+    fn stage(&mut self, v: &mut Vec<InputFile>, f: InputFile) {
+        if self.room(v, 0) {
+            v.push(f);
+        } else {
+            self.charge(&label(&f.name), 0);
         }
     }
 
@@ -155,12 +191,12 @@ impl Ledger {
             self.spent = true;
             return false;
         }
-        self.left -= need;
+        self.take(need);
         v.reserve_exact(want - len);
         self.give_back(cap * size_of::<T>());
         // The allocator may hand out more than was asked: that is held too.
         let extra = v.capacity().saturating_sub(want) * size_of::<T>();
-        self.left = self.left.saturating_sub(extra);
+        self.take(extra);
         true
     }
 
@@ -180,7 +216,7 @@ impl Ledger {
             ));
             return false;
         }
-        self.left -= n;
+        self.take(n);
         true
     }
 
@@ -191,7 +227,7 @@ impl Ledger {
     fn note(&mut self, mut line: String) {
         line.shrink_to_fit();
         if !self.spent && line.len() <= self.left {
-            self.left -= line.len();
+            self.take(line.len());
             let mut lines = std::mem::take(&mut self.lines);
             let min = lines.len() + 1 + TAIL;
             let fits = self.room(&mut lines, min);
@@ -215,7 +251,7 @@ impl Ledger {
     /// refused past it).
     fn take_within(&mut self, n: usize) {
         debug_assert!(n <= self.left, "charged past the budget");
-        self.left = self.left.saturating_sub(n);
+        self.take(n);
     }
 
     fn give_back(&mut self, n: usize) {
@@ -361,7 +397,8 @@ impl Collected {
     fn put(&mut self, path: String, bytes: Vec<u8>, key: usize, ledger: &mut Ledger) {
         match self.index.get(&path) {
             Some(&i) => {
-                let dropped = std::mem::replace(&mut self.entries[i].1, bytes).len();
+                // The earlier copy was charged its capacity.
+                let dropped = std::mem::replace(&mut self.entries[i].1, bytes).capacity();
                 ledger.give_back(dropped + key);
                 ledger.note(format!("{}: duplicate path, later copy kept", label(&path)));
             }
@@ -479,14 +516,24 @@ fn decode_hfe(label: &str, data: &[u8], ledger: &mut Ledger) -> Option<Vec<u8>> 
 /// it get a line, PP20 files not yet decrunched stay crunched (one count in the PP20 line), and
 /// the result keeps no disks and no files, so nothing starts from part of a set.
 pub fn intake(files: Vec<InputFile>) -> Intake {
-    let mut ledger = Ledger::new(INTAKE_BUDGET);
+    intake_within(files, INTAKE_BUDGET).0
+}
+
+/// [`intake`] against `budget`, with the most it charged at once.
+fn intake_within(files: Vec<InputFile>, budget: usize) -> (Intake, usize) {
+    let mut ledger = Ledger::new(budget);
+    // The inputs move into these lists, whose slots are charged as they grow.
     let mut disk_inputs: Vec<InputFile> = Vec::new();
     let mut loose: Vec<InputFile> = Vec::new();
 
     for f in files {
         if zip::is_zip(&f.data) {
             match unzip_disks(&f.name, &f.data, &mut ledger) {
-                Ok(found) => disk_inputs.extend(found),
+                Ok(found) => {
+                    for entry in found {
+                        ledger.stage(&mut disk_inputs, entry);
+                    }
+                }
                 Err(err) => ledger.note(format!(
                     "{}: zip unreadable: {}",
                     label(&f.name),
@@ -494,12 +541,22 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
                 )),
             }
         } else if is_hfe(&f.data) || is_adf(&f.name, &f.data) {
-            disk_inputs.push(f);
+            ledger.stage(&mut disk_inputs, f);
         } else {
-            loose.push(f);
+            ledger.stage(&mut loose, f);
         }
     }
-    disk_inputs.sort_by(|a, b| by_label(&a.name, &b.name));
+    // The sort's scratch holds at most one slot per disk input while it runs.
+    let scratch = disk_inputs.len() * size_of::<InputFile>();
+    if !ledger.spent && scratch <= ledger.left {
+        ledger.take(scratch);
+        disk_inputs.sort_by(|a, b| by_label(&a.name, &b.name));
+        ledger.give_back(scratch);
+    } else {
+        ledger.spent = true;
+    }
+    let staged = |v: &Vec<InputFile>| v.capacity() * size_of::<InputFile>();
+    let (disk_slots, loose_slots) = (staged(&disk_inputs), staged(&loose));
 
     let mut disks = Vec::new();
     let mut raw = Collected::default();
@@ -514,7 +571,8 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
                 None => continue,
             }
         } else {
-            if !ledger.charge(&name, f.data.len() + name.capacity()) {
+            // Its buffer as it came, spare capacity included.
+            if !ledger.charge(&name, f.data.capacity() + name.capacity()) {
                 continue;
             }
             ledger.note(format!("{name}: ADF {} bytes", f.data.len()));
@@ -563,15 +621,19 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
         }
     }
 
+    ledger.give_back(disk_slots);
+
     for f in loose {
-        // Its bytes, and its path kept twice (key and index) with its slots, as a volume's file.
+        // Its buffer as it came (spare capacity included), and its path kept twice (key and
+        // index) with its slots, as a volume's file.
         let path = normalize_path(&f.name);
         let key = 2 * path.capacity() + ofs::ENTRY_BYTES;
-        if !ledger.charge(&label(&f.name), f.data.len() + key) {
+        if !ledger.charge(&label(&f.name), f.data.capacity() + key) {
             continue;
         }
         raw.put(path, f.data, key, &mut ledger);
     }
+    ledger.give_back(loose_slots);
 
     let mut out = BTreeMap::new();
     let (mut packed, mut failed, mut left_crunched) = (0usize, 0usize, 0usize);
@@ -588,8 +650,9 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
         // Capped by what is left before the output is allocated.
         match decrunch_pp20_within(&bytes, ledger.left) {
             Ok(Some(plain)) => {
-                ledger.take_within(plain.len());
-                ledger.give_back(bytes.len());
+                // Both as held: the output exactly its length, the crunched file as charged.
+                ledger.take_within(plain.capacity());
+                ledger.give_back(bytes.capacity());
                 out.insert(path, plain);
                 packed += 1;
             }
@@ -642,22 +705,146 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
         report.push(format!(
             "The intake stopped at its {BUDGET_MIB} MiB budget: no disks or files are kept"
         ));
-        return Intake {
+        let empty = Intake {
             disks: Vec::new(),
             files: BTreeMap::new(),
             report,
         };
+        return (empty, budget - ledger.low);
     }
-    Intake {
+    let kept = Intake {
         disks,
         files: out,
         report,
-    }
+    };
+    (kept, budget - ledger.low)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    /// Counts the bytes allocated on each thread, as tests/budget.rs does.
+    struct Counting;
+
+    thread_local! {
+        static LIVE: Cell<isize> = const { Cell::new(0) };
+        static PEAK: Cell<isize> = const { Cell::new(0) };
+    }
+
+    fn count(delta: isize) {
+        let _ = LIVE.try_with(|live| {
+            let now = live.get() + delta;
+            live.set(now);
+            let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+        });
+    }
+
+    // SAFETY: every call is forwarded to the system allocator unchanged; only counters change.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let p = unsafe { System.alloc(layout) };
+            if !p.is_null() {
+                count(layout.size() as isize);
+            }
+            p
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let p = unsafe { System.alloc_zeroed(layout) };
+            if !p.is_null() {
+                count(layout.size() as isize);
+            }
+            p
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) };
+            count(-(layout.size() as isize));
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let p = unsafe { System.realloc(ptr, layout, new_size) };
+            if !p.is_null() {
+                count(new_size as isize);
+                count(-(layout.size() as isize));
+            }
+            p
+        }
+    }
+
+    #[global_allocator]
+    static ALLOC: Counting = Counting;
+
+    /// The most `intake_within` held at once beyond its inputs, and the most it had charged
+    /// beyond the inputs' buffers it keeps (charged, but not allocated by it).
+    fn held_and_charged(files: Vec<InputFile>) -> (usize, usize) {
+        let moved: usize = files.iter().map(|f| f.data.capacity()).sum();
+        let start = LIVE.with(Cell::get);
+        PEAK.with(|p| p.set(start));
+        let (_, charged) = intake_within(files, INTAKE_BUDGET);
+        let peak = PEAK.with(Cell::get) - start;
+        (peak.max(0) as usize, charged - moved)
+    }
+
+    /// An ADF whose root holds `n` empty files (no checksums set: each block warns).
+    fn adf_with_files(n: usize) -> Vec<u8> {
+        let mut img = vec![0u8; ADF_SIZE];
+        img[..4].copy_from_slice(b"DOS\0");
+        let w = |img: &mut [u8], b: usize, off: usize, v: u32| {
+            img[b * 512 + off..b * 512 + off + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        w(&mut img, 880, 0, 2);
+        w(&mut img, 880, 12, 72);
+        w(&mut img, 880, 508, 1);
+        img[880 * 512 + 432] = 1;
+        img[880 * 512 + 433] = b'V';
+        for k in 0..n {
+            let b = 882 + k;
+            w(&mut img, b, 0, 2);
+            w(&mut img, b, 4, b as u32);
+            w(&mut img, b, 508, (-3i32) as u32);
+            img[b * 512 + 432] = 2;
+            img[b * 512 + 433] = b'f';
+            img[b * 512 + 434] = b'a' + k as u8;
+            w(&mut img, 880, 24 + k * 4, b as u32);
+        }
+        img
+    }
+
+    #[test]
+    fn few_entries_are_charged_for_the_first_allocations() {
+        // With nothing or a handful of entries, the lists' and maps' first allocations (root
+        // nodes, first capacities) are most of what the intake holds.
+        let loose = |n: usize| -> Vec<InputFile> {
+            (0..n)
+                .map(|i| InputFile {
+                    name: format!("f{i}"),
+                    data: vec![i as u8; 10],
+                })
+                .collect()
+        };
+        let disk = |n: usize| {
+            vec![InputFile {
+                name: "d.adf".into(),
+                data: adf_with_files(n),
+            }]
+        };
+        let cases: Vec<(String, Vec<InputFile>)> = vec![
+            ("nothing".into(), Vec::new()),
+            ("1 loose".into(), loose(1)),
+            ("5 loose".into(), loose(5)),
+            ("1 file on a disk".into(), disk(1)),
+            ("2 files on a disk".into(), disk(2)),
+            ("5 files on a disk".into(), disk(5)),
+        ];
+        for (what, files) in cases {
+            let (held, charged) = held_and_charged(files);
+            assert!(held <= charged, "{what}: held {held}, charged {charged}");
+        }
+    }
 
     #[test]
     fn the_report_is_charged_for_the_list_that_holds_it() {

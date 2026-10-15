@@ -43,8 +43,10 @@ const KEY_PREFIX: usize = MAX_NAME_BYTES + 1;
 /// walk's list (48-byte slots, at most twice as many as used: 96 a file), the intake's list
 /// while it grows (old and new buffers at once: 144) and its index (a B-tree leaf of 368 bytes
 /// holds at least 5 keys, with its share of the inner nodes: 93), 333 bytes; later the result's
-/// map takes the list's place (128 with the list and index: 317). An empty file at the root
-/// measures about 150 (tests/budget.rs).
+/// map takes the list's place (128 with the list and index: 317). That holds once the maps
+/// have split and the lists have grown; the root nodes and first capacities a few entries sit
+/// in are the intake's `FIRST_ALLOCATIONS`, charged once. An empty file at the root measures
+/// about 150 (tests/budget.rs).
 pub const ENTRY_BYTES: usize = 384;
 
 /// What a file's path costs in the intake: kept twice (key and index), each with room for the
