@@ -152,3 +152,24 @@ Live check2 on preview `cf99e9f2` and on production: 10 requests, 0 foreign, 0 e
 
 Gates on `517b2ba`: fmt, clippy, 793 tests (`--profile gate`), web 29/29. The wasm is unchanged at 1,759,472 B, so no redeploy was needed.
 
+
+## intake-budget — closed 2026-10-16
+
+| Unit | Branch | Result |
+|---|---|---|
+| intake-budget | fix/m2r6-intake-budget | Merged as `dca61f5` (head `43c747d`). See the notes below. |
+
+- **What was built:** the intake's whole output is bounded at 64 MiB.
+  - Every kept byte is charged by capacity: disks, labels, loose files and their keys, the report lines.
+  - The staging lists and the sort scratch are charged.
+  - 4,096 B of first allocations are reserved.
+  - Give-backs are capped at the starting amount, with a `debug_assert`.
+  - Names are compared in place.
+  - The worst case is 57.5 MB.
+- **Review rounds:**
+  - 3–4 (opus): uncharged label and key copies, a 351 MiB report.
+  - 5 (gpt6): length charged instead of capacity.
+  - 6–7 (both): the nice items.
+  - Final: gpt6 APPROVE, and opus APPROVE with all its hostile probes stopping at the budget.
+- **Gates on dca61f5:** fmt, clippy, 856 tests (`--profile gate`), web 41/41; amifs OK; real-data identity PASS against 3349a83.
+- **Deploys:** preview 3080f5b7, then production f6c06291. live-check2 on both: 10 requests, 0 foreign, 0 errors. The dispatcher read the Journey Onward frame.
