@@ -281,9 +281,14 @@ it, and in a time stop (where 0x10368a only counts the stop down; not traced) th
 pass (11 ms) is shorter than a host frame and `pace` waits at least one, so the port owes the
 passes and pays them with the turn's next wait (before a combat NPC turn, an NPC turn that shows
 something, a refresh, a raise, a minute), and the setup with its last (actors/turn.rs
-`world_turn`; in a time stop the owed passes of many refills can pass a u16 of ms); paced one by one, the start fight's steps came out up to 48 ms longer at 16 ms
-host ticks than at 8 ms (seed 0, the receipt allows one tick). The castle's steps in the port then follow the original's alternation
-(31 43 31 43 30 43 31 frames against 28 43 33 48 32 41 32).
+`world_turn`; in a time stop the owed passes of many refills can pass a u16 of ms). Paced one
+by one, the start fight's steps came out up to 48 ms longer at 16 ms host ticks than at 8 ms
+(seed 0; the receipt allows one tick). The receipts at the hosts' step (`pacer::STEP_MS`, 20
+ms; combat/pace_real.rs, 2026-10-16): the castle's steps follow the original's alternation (32
+43 32 43 31 43 32 frames against 28 43 33 48 32 41 32; median 32 against 33, −3.0%, 57
+steps), the start fight's median step 305 frames against 277 (+10.1%, 60 steps) and its first
+five 319 against 300 (+6.3%, 45 steps); the quiet held walk's cells as the original's at every
+hold (1 1 1 2 6, ui/tests/pointer_real.rs).
 
 The flight step (46 ms) and the closing refresh of a flight (`REFRESH_MS`, 11 frames) have no
 routine boundary to trace and stay sampled estimates (fight.py). The sampled estimates held
