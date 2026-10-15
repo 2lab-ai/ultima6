@@ -6,10 +6,16 @@
 // one CPU sample per frame (counts and lengths).
 // usage: node trace.mjs OUTDIR SNAPSHOT [KEY ...]   (default UP RIGHT LEFT RIGHT LEFT RIGHT LEFT)
 //   env U6_FIGHT_SETUP=town: the town setup of fight.mjs (no fight) before the steps
-// Output: OUTDIR/trace.json ({bases, keys, steps: [{key, read, prompt, calls: [{fn, at, frames,
-// depth, actor, worktype, followers}]}], complete}), written after every step; `complete` turns
-// true only once every key's step is in (trace.py refuses a file without it). An NPC turn has
-// its actor and worktype, a followers' pass the count of members it may move.
+// Output: OUTDIR/trace.json ({bases, keys, steps: [{key, read, back, prompt, from, to, calls:
+// [{fn, at, frames, depth, actor, worktype, followers, strict, mp}]}], complete}), written after
+// every step; `complete` turns true only once every key's step is in (trace.py refuses a file
+// without it). A step's `read` is the first frame the command loop's reading flag A4-0x7a2c was
+// clear, `back` the first frame it was set again (the next key read: key to prompt = back -
+// read), `prompt` the frame the step was taken as done (60 frames after); `from` and `to` are
+// the leader's [actor, x, y, z] before the key and at the prompt. An NPC turn has its actor and
+// worktype, a followers' pass the count of members it may move and `strict` (its D1: 1 from
+// Pass 0x104c0a, 0 from the party step), a party step the leader's movement points (A4+0x430c)
+// at its entry and at its return.
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
@@ -56,6 +62,15 @@ try {
   await o.waitFrames(page, 30);
   const bases = await hunkBases(page, log);
   const a4 = bases[33] + 0x8000;
+  // The leader (the party list A4+0x47ec at the leader's index A4-0x7b7a): [actor, x, y, z] from
+  // its location (3 bytes at hunk 23 + 3 actor, decoded as 0x11d51c..0x11d55c), and its movement
+  // points (A4+0x430c, a signed byte).
+  const leaderAt = () => page.evaluate(([a4, locs]) => {
+    const actor = Module._wasm_peek(a4 + 0x47ec + Module._wasm_peek(a4 - 0x7b7a));
+    const b = [0, 1, 2].map((i) => Module._wasm_peek(locs + 3 * actor + i));
+    const mp = (Module._wasm_peek(a4 + 0x430c + actor) << 24) >> 24;
+    return { at: [actor, ((b[1] << 8) | b[0]) & 0x3ff, (((b[2] << 8) | b[1]) >> 2) & 0x3ff, b[2] >> 4], mp };
+  }, [a4, bases[23]]);
   if (process.env.U6_FIGHT_SETUP === 'town') log(`town: ${await townSetup(page, bases, a4)}`);
   // Key held until the game takes it (A4-0x7a2c cleared), as fight.mjs; the reading flag kept.
   await page.evaluate((a4) => {
@@ -93,7 +108,8 @@ try {
   for (const key of KEYS) {
     await page.evaluate((k) => { window.__trace.key = k; window.__trace.reading = []; }, o.KEY[key]);
     const calls = [], open = [];
-    let seenZero = false, read = null, done = null, stuck = 0, last = null, strays = 0;
+    let seenZero = false, read = null, back = null, done = null, stuck = 0, last = null, strays = 0;
+    const from = (await leaderAt()).at;
     const startFrame = await o.frame(page), startWall = Date.now();
     for (;;) {
       if ((await o.frame(page)) - startFrame > STEP_FRAMES || Date.now() - startWall > STEP_WALL_MS) {
@@ -113,7 +129,11 @@ try {
         const rd = await page.evaluate(() => window.__trace.reading);
         const z = rd.filter(([, r]) => r === 0);
         if (z.length) { seenZero = true; read ??= z[0][0]; }
-        if (seenZero && rd.length && rd.at(-1)[1] === 1 && rd.at(-1)[0] - (z.at(-1)?.[0] ?? rd.at(-1)[0]) >= 60) { done = rd.at(-1)[0]; break; }
+        if (seenZero && rd.length && rd.at(-1)[1] === 1 && rd.at(-1)[0] - (z.at(-1)?.[0] ?? rd.at(-1)[0]) >= 60) {
+          done = rd.at(-1)[0];
+          back = rd.find(([f, r]) => f > z.at(-1)[0] && r === 1)[0];
+          break;
+        }
         // Stopped where nothing is traced (after a one-instruction step): run on.
         if (f1 === f2 && p && ++stuck > 3) {
           if (++strays > 50) throw new Error(`stopped at ${JSON.stringify(p)} again and again, not a traced address`);
@@ -133,7 +153,7 @@ try {
       last = { pc: p.pc, f: f2, v: p.v };
       const regs = await o.shellKeys(page, 'r cpu');
       const a7 = parseInt(/A4 - A7 : (?:0x[0-9a-f]+ ){3}0x([0-9a-f]+)/.exec(regs)[1], 16);
-      const d0 = parseInt(/D0 - D3 : 0x([0-9a-f]+)/.exec(regs)[1], 16);
+      const [, d0, d1] = /D0 - D3 : 0x([0-9a-f]+) 0x([0-9a-f]+)/.exec(regs).map((v) => parseInt(v, 16));
       const at = await cpuFrames(page);
       if (entries.has(p.pc)) {
         const ret = await o.peekL(page, a7);
@@ -152,7 +172,10 @@ try {
           }
           return n;
         }, [a4, bases[23] + 0x3c00, d0 & 0xff]);
-        open.push({ fn, ret, a7, at, depth: open.length, actor, worktype, followers });
+        // The followers' pass's D1 (Pass's strict pass is 1); the party step's leader points.
+        const strict = fn === 0x11c910 ? ((d1 & 0xffff) !== 0 ? 1 : 0) : null;
+        const mp = fn === 0x11d4ee ? [(await leaderAt()).mp] : null;
+        open.push({ fn, ret, a7, at, depth: open.length, actor, worktype, followers, strict, mp });
       }
       if (returns.has(p.pc)) {
         // The youngest open call returns, or none does (tracecore.mjs closeAt); an older one
@@ -163,15 +186,19 @@ try {
         } catch (e) {
           throw new Error(`${key}: ${e.message}`);
         }
-        if (top) calls.push({ fn: top.fn, at: top.at, frames: at - top.at, depth: top.depth, actor: top.actor, worktype: top.worktype, followers: top.followers });
+        if (top) {
+          if (top.mp) top.mp.push((await leaderAt()).mp);
+          calls.push({ fn: top.fn, at: top.at, frames: at - top.at, depth: top.depth, actor: top.actor, worktype: top.worktype, followers: top.followers, strict: top.strict, mp: top.mp });
+        }
       }
       await resume('g');
     }
     if (open.length) throw new Error(`${key}: calls still open at the prompt: ${JSON.stringify(open)}`);
-    steps.push({ key, read, prompt: done, calls });
+    const to = (await leaderAt()).at;
+    steps.push({ key, read, back, prompt: done, from, to, calls });
     const by = {};
     for (const c of calls) (by[TRACED[c.fn]] ??= []).push(c.frames);
-    log(`${key}: read ${read}, prompt ${done}: ${Object.entries(by).map(([k, v]) => `${k} ${v.length}× ${v.reduce((a, b) => a + b, 0).toFixed(1)}`).join(', ')}`);
+    log(`${key}: read ${read}, back ${back}, prompt ${done}, leader ${from.join(',')} -> ${to.join(',')}: ${Object.entries(by).map(([k, v]) => `${k} ${v.length}× ${v.reduce((a, b) => a + b, 0).toFixed(1)}`).join(', ')}`);
     writeFileSync(join(out, 'trace.json'), JSON.stringify({ bases, keys: KEYS, steps, complete: false }, null, 1));
   }
   writeFileSync(join(out, 'trace.json'), JSON.stringify({ bases, keys: KEYS, steps, complete: true }, null, 1));

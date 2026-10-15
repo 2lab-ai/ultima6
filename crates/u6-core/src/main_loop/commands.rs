@@ -382,24 +382,29 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
 }
 
 /// Pass (0x104b62): its message, the leader's movement points 0, the cursor off; a ship (0x19f)
-/// or balloon (0x1a7) leader drifts one step with the wind (A4-0x7b7b ≥ 0); the party follows
-/// (0x11c910 with D1 = 1).
+/// or balloon (0x1a7) leader drifts one step with the wind (A4-0x7b7b ≥ 0, 0x11d4ee); the party
+/// follows (0x11c910 with D1 = 1), paced ([`crate::actors::walk::paced_pass_follow`]). The
+/// drift step waits nothing: no vessel was reachable in the oracle to trace it (aboard, its own
+/// followers' pass and Pass's have no one to move).
 async fn pass(state: &RefCell<State>, io: &Io) {
     say(state, io, MSG_PASS, &[]).await;
-    let mut s = state.borrow_mut();
-    let leader =
-        usize::from(s.actors.party.members[usize::from(s.actors.party.leader_index).min(15)]);
-    s.actors.movement_points[leader] = 0;
-    crate::ui::cursor::panel_cursor_in(&mut s, io, 0);
-    s.ui.input.target_pending = 0;
-    s.ui.input.targeting = 0;
-    crate::ui::pointer::update_shape(&mut s);
-    let ty = s.objects.obj_type(ObjectId(leader as u16));
-    let wind = s.actors.wind as i8;
-    if (ty == 0x19f || ty == 0x1a7) && wind >= 0 {
-        crate::actors::party::player_step(&mut s, wind as u16);
-    }
-    crate::actors::party::follow(&mut s, leader as u16, true);
+    let leader = {
+        let mut s = state.borrow_mut();
+        let leader =
+            usize::from(s.actors.party.members[usize::from(s.actors.party.leader_index).min(15)]);
+        s.actors.movement_points[leader] = 0;
+        crate::ui::cursor::panel_cursor_in(&mut s, io, 0);
+        s.ui.input.target_pending = 0;
+        s.ui.input.targeting = 0;
+        crate::ui::pointer::update_shape(&mut s);
+        let ty = s.objects.obj_type(ObjectId(leader as u16));
+        let wind = s.actors.wind as i8;
+        if (ty == 0x19f || ty == 0x1a7) && wind >= 0 {
+            crate::actors::party::player_step(&mut s, wind as u16);
+        }
+        leader as u16
+    };
+    crate::actors::walk::paced_pass_follow(state, io, leader).await;
 }
 
 /// `0` (0x1045ae..0x1046bc): party mode, when not aboard and out of combat, if every member is

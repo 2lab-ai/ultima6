@@ -90,9 +90,10 @@ class FramesOfStep(unittest.TestCase):
         self.assertEqual([fight.length(r) for r in fight.runs(frames, "flight")], [2, 1])
 
 
-def call(fn, at, frames, depth=1, actor=None, worktype=None, followers=None):
+def call(fn, at, frames, depth=1, actor=None, worktype=None, followers=None, **more):
+    """A traced call; `more` adds a followers' pass's `strict` or a party step's `mp`."""
     return {"fn": fn, "at": at, "frames": frames, "depth": depth, "actor": actor,
-            "worktype": worktype, "followers": followers}
+            "worktype": worktype, "followers": followers, **more}
 
 
 class TraceConstants(unittest.TestCase):
@@ -156,6 +157,62 @@ class TraceConstants(unittest.TestCase):
     def test_a_followers_pass_without_its_count_is_refused(self):
         calls = [call(0x11D4EE, 0.0, 2.0, depth=0), call(0x11C910, 0.5, 1.0)]
         del calls[1]["followers"]
+        with self.assertRaises(trace.Incomplete):
+            trace.constants([{"key": "UP", "read": 0, "prompt": 100, "calls": calls}])
+
+    def test_passs_strict_pass_is_counted_apart_from_the_steps(self):
+        # A step whose pass (D1 0, 3 members) takes 4 frames; Pass's strict passes (D1 1) at
+        # the top: one of 5 frames with 3 members, one of 0.2 with 3, one of 0.05 with none.
+        calls = [
+            call(0x11D4EE, 0.0, 5.0, depth=0),
+            call(0x11C910, 0.5, 4.0, followers=3, strict=0),
+        ]
+        steps = [{"key": "UP", "read": 0, "prompt": 100, "calls": calls}]
+        for at, frames, followers in ((10.0, 5.0, 3), (20.0, 0.2, 3), (30.0, 0.05, 0)):
+            calls = [call(0x11C910, at, frames, depth=0, followers=followers, strict=1)]
+            steps.append({"key": "SPACE", "read": 0, "prompt": 100, "calls": calls})
+        c = trace.constants(steps)
+        self.assertEqual(c["follow"]["n"], 1)
+        self.assertAlmostEqual(c["follow"]["mean"], 4.0)
+        self.assertEqual(c["follow, Pass"]["n"], 2)
+        self.assertAlmostEqual(c["follow, Pass"]["mean"], 2.6)
+        self.assertEqual(c["follow, Pass, no one to move"]["n"], 1)
+        self.assertEqual(c["party step"]["n"], 1)
+
+    def test_a_followers_pass_outside_a_step_without_its_d1_is_refused(self):
+        # A trace from before D1 was recorded only had the steps' passes: one at the top is
+        # neither a step's nor known to be Pass's.
+        calls = [call(0x11C910, 0.0, 1.0, depth=0, followers=3)]
+        with self.assertRaises(trace.Incomplete):
+            trace.constants([{"key": "SPACE", "read": 0, "prompt": 100, "calls": calls}])
+
+    def test_a_blocked_step_is_counted_apart_with_its_key_to_prompt(self):
+        # A blocked step (no followers' pass inside it, the leader's points 10 before and
+        # after) whose world turn of 1.5 frames has its one refresh and no NPC turn; its key
+        # read 3 frames after the key. Then a step that moved, which is not blocked.
+        blocked = [
+            call(0x11D4EE, 0.0, 0.06, depth=0, mp=[10, 10]),
+            call(0x1213DE, 0.1, 1.5, depth=0),
+            call(0x102F2A, 1.5, 0.0),
+        ]
+        moved = [
+            call(0x11D4EE, 0.0, 6.0, depth=0, mp=[15, 10]),
+            call(0x11C910, 1.0, 4.0, followers=3, strict=0),
+        ]
+        c = trace.constants([
+            {"key": "UP", "read": 10, "back": 13, "prompt": 73, "calls": blocked},
+            {"key": "DOWN", "read": 80, "back": 110, "prompt": 170, "calls": moved},
+        ])
+        self.assertEqual(c["party step, blocked"]["n"], 1)
+        self.assertAlmostEqual(c["party step, blocked"]["mean"], 0.06)
+        self.assertEqual(c["party step"]["n"], 1)
+        self.assertAlmostEqual(c["party step"]["mean"], 2.0)
+        self.assertEqual(c["blocked step, key to prompt"]["max"], 3)
+        self.assertAlmostEqual(c["blocked step, world turn"]["mean"], 1.5)
+        self.assertEqual(c["blocked steps"], {"steps": 1, "points spent": [0], "NPC turns": 0})
+
+    def test_a_blocked_step_without_its_prompt_frame_is_refused(self):
+        calls = [call(0x11D4EE, 0.0, 0.06, depth=0)]
         with self.assertRaises(trace.Incomplete):
             trace.constants([{"key": "UP", "read": 0, "prompt": 100, "calls": calls}])
 

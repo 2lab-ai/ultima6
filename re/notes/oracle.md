@@ -173,8 +173,9 @@ is rejected. A resume and the console mark are one page call and the console is 
 so a stop's prompt is never missed or read stale (an earlier version did, and its silent
 unwinding hid it). The emulator stands still while stopped; the stops cost the game nothing.
 `trace.py` reduces trace.json to the port's constants; it refuses a file the run did not mark
-`complete` (trace.mjs sets it in its write after the last step), and a followers' pass without
-its count of followers. The constants below come from the start fight, the same keys, and the
+`complete` (trace.mjs sets it in its write after the last step), a followers' pass without its
+count of followers, one outside a party step without its D1, and a blocked step without the
+frame its prompt came back. The constants below come from the start fight, the same keys, and the
 castle without the fight (`U6_FIGHT_SETUP=town`: the assault actors e0..e2 passed over, `b` held
 until taken, party worktypes 2,1,1,1; keys DOWN ×5, UP ×2), two runs of each pooled:
 `pace/trace-fight-r4`, `pace/trace-town-r4`, `pace/trace-fight-r5`, `pace/trace-town-r5`. The
@@ -209,6 +210,36 @@ combat mode), the same setups and keys as above, 2026-10-15:
 The whole step in the castle: 1.13..5.98 frames (median 1.99, mean 3.19, n 21); its world turn
 25.95..41.43 (median 29.49). So the original's 33-frame castle step is the world turn plus a
 step of about 3 frames.
+
+**A blocked step and Pass.** trace.mjs also keeps per step the frame of the next key read
+(`back`: the reading flag set again, so key to prompt = back − read by the frame counter), the
+leader before the key and at the prompt, the leader's movement points at the party step's
+entry and return, and each followers' pass's D1 (`strict`: 1 from Pass, 0x104c0a; 0 from the
+step, 0x11db66). The asm: a blocked step (A4-0x6a90 set) leaves 0x11d4ee at 0x11d800 with the
+view centre put back on the leader and no points spent, no message, no followers' pass and no
+level test (0x11d806..0x11d856, 0x11db6e); its caller, the walk arm 0x1048dc, goes on to the end
+of turn 0x104d98 like any command, so the world turn 0x1213de runs. Pass (0x104b62) prints its
+line, sets the leader's points to 0, drops the cursor, lets a ship or balloon leader drift with
+the wind through 0x11d4ee, then calls 0x11c910 with D1 = 1 (0x104c0a), and ends the turn. The
+castle setup as above, 2026-10-15: UP ×7 twice (`pace/trace-town-blocked-b1`, `-b2`: the first
+step moves the hero one tile north, the six after it each meet the tile beyond, which is not
+enterable); SPACE ×7 three times (`pace/trace-town-pass-p1`, `p3`, `p5`); DOWN SPACE DOWN SPACE
+DOWN SPACE SPACE (`p2`), DOWN SPACE DOWN SPACE UP SPACE SPACE (`p4`), DOWN SPACE UP SPACE DOWN
+SPACE SPACE (`p6`). PAL frames:
+
+| call | value | constant (ms) |
+|---|---|---|
+| party step 0x11d4ee, blocked (no followers' pass inside it) | mean 0.082 (n 12, 0.06..0.37); the leader's points the same at its entry and return in all 12 | no wait |
+| the world turn after it | mean 1.504 (n 12, 1.13..1.72): no NPC turn, one pick (the hero again: its points were not spent), the refresh after it with the view unchanged (0.00) | one pick, PICK_MS 20 |
+| key to the next key read, blocked step (frame counter) | 1..2 (n 12, mean 1.667) | the port: PICK_MS 20 |
+| Pass's followers' pass 0x11c910 (D1 = 1), three followers | mean 2.110 (n 33, 0.16..5.39: 14 took 1.82..5.39, 19 took 0.16..0.47; in the runs of Pass alone the first two of seven were the long ones) | PASS_FOLLOW_MS 42 |
+
+A one-pick world turn costs more than the pooled pick (1.50 against 0.994): the turn's own
+bookkeeping before its picks (0x121056, 0x120b64, 0x120a1c, the formation and the schedules)
+falls on that one pick, while PICK_MS spreads it over every pick of the 359. Pass's prints are
+three a pass (n 33 each): its line (0.19..1.94), one inside its world turn (0.73..1.01) and the
+prompt again (0.30..2.97). No vessel is reachable from the start snapshot (the party is on foot in the
+castle), so Pass's drift step aboard is not traced and the port does not pace it.
 
 The flight step (46 ms) and the closing refresh of a flight (`REFRESH_MS`, 11 frames) have no
 routine boundary to trace and stay sampled estimates (fight.py). The sampled estimates held
