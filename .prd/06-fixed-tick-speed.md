@@ -93,7 +93,7 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review: `ran
 | O1 | One RGBA conversion per rAF, only when the frame changed | `write_rgba` 0.05 ms per step | (steps in the frame − 1) × 0.05 ms per frame |
 | O2 | Skip the idle map re-render when nothing it draws changed: the substituted tile frames, the actor-idle `changed` result, the window's tiles and objects, the cursor and the palette. Never skip while `sparkle` or `dissolve` is on (the render draws from the RNG and clears `dissolve`). Run `merge_shores` only when a substituted water frame changed | `render_window` 49% | idle step 0.2 → ~0.1 ms |
 | O3 | Opening: row- and word-wide planar blits instead of per-pixel `set_pixel`/`blit_masked` | 71% of the opening step | 3–5× on the opening |
-| O4 | `[profile.release] codegen-units = 1`, no LTO (Cargo skips LTO for u6-web's cdylib + rlib anyway, and a cdylib-only fat-LTO wasm measured 9.8% bigger) | — | wasm −19.5% in size (1,759,472 → 1,416,563 B); no speed gain |
+| O4 | `[profile.release] codegen-units = 1`, no LTO (Cargo skips LTO for u6-web's cdylib + rlib anyway, and a cdylib-only fat-LTO wasm measured 9.8% bigger) | — | wasm −19.6% in size (1,759,472 → 1,415,380 B); no speed gain |
 
 O1 is also the contract the HD renderer (07) depends on: an HD frame must not be produced per step.
 
