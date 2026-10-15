@@ -788,8 +788,9 @@ pub(crate) mod tests {
 
     #[test]
     fn a_step_waits_the_originals_time_at_any_host_tick() {
-        // Each case: the setup, what its step costs (counted here: the step, its followers'
-        // pass when someone follows) and where the leader ends.
+        // Each case: the setup, the branch its step takes (checked on a copy), what it costs
+        // (counted here: the step, its followers' pass when someone follows) and where the
+        // leader ends.
         let follow_on: fn(&mut State) = |_| {};
         let in_combat: fn(&mut State) = |s| {
             // The members in a combat worktype: the pass has no one to move.
@@ -800,17 +801,54 @@ pub(crate) mod tests {
             s.objects.location[9].y = 19;
             link_objects(s);
         };
+        let unlinked: fn(&mut State) = |s| {
+            // The leader linked into the list at a tile before its own, so the move's walk of
+            // the list from its tile finds no predecessor and the move is refused after the
+            // step was paid.
+            s.objects.location[1].y = 10;
+            link_objects(s);
+            s.objects.location[1].y = 20;
+        };
+        let calm_balloon: fn(&mut State) = |s| {
+            s.objects.type_frame[1] = 0x1a7;
+            s.actors.wind = 0xff;
+        };
         let cases = [
-            ("two followers", follow_on, STEP_MS + FOLLOW_MS, (20, 19)),
-            ("no one follows", in_combat, STEP_MS, (20, 19)),
-            ("blocked", blocked, 0, (20, 20)),
+            (
+                "two followers",
+                follow_on,
+                StepResult::Moved,
+                STEP_MS + FOLLOW_MS,
+                (20, 19),
+            ),
+            (
+                "no one follows",
+                in_combat,
+                StepResult::Moved,
+                STEP_MS,
+                (20, 19),
+            ),
+            (
+                "the move refused",
+                unlinked,
+                StepResult::Mismatch,
+                STEP_MS + FOLLOW_MS,
+                (20, 20),
+            ),
+            ("blocked", blocked, StepResult::Blocked, 0, (20, 20)),
+            ("no wind", calm_balloon, StepResult::NoWind, 0, (20, 20)),
         ];
-        for (name, setup, want, at) in cases {
+        for (name, setup, branch, want, at) in cases {
+            let mut s = column();
+            setup(&mut s);
+            assert_eq!(
+                super::super::party::player_step(&mut s.clone(), 0),
+                branch,
+                "{name}: the branch"
+            );
             let want = u64::from(want);
             for (tick, zeros) in [(16, 0), (7, 0), (16, 3)] {
-                let mut s = column();
-                setup(&mut s);
-                let (ms, to) = walk_ms(s, tick, zeros);
+                let (ms, to) = walk_ms(s.clone(), tick, zeros);
                 assert_eq!(to, at, "{name}: where the leader ends");
                 assert!(
                     ms >= want && ms <= want + u64::from(tick),
