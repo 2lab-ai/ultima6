@@ -38,11 +38,20 @@ pub const MAX_PATH_BYTES: usize = (MAX_DEPTH + 1) * MAX_NAME_BYTES + MAX_DEPTH;
 pub const MAX_WARNINGS: usize = 32;
 /// Room the intake needs in front of a path for its key: the volume name and a slash.
 const KEY_PREFIX: usize = MAX_NAME_BYTES + 1;
-/// What each file, directory and warning the walk keeps is charged besides its bytes and text:
-/// its list and map entries, the `String` and `Vec` headers, its block in the visited set, and
-/// the same again in the intake's maps. An empty file at the root costs about 270 bytes through
-/// the whole intake, its name twice included (tests/budget.rs).
-pub const ENTRY_BYTES: usize = 256;
+/// What each file, directory and warning kept is charged besides its bytes and text: its slots
+/// in lists and maps. A file's worst moment is the intake taking it over from the walk: the
+/// walk's list (48-byte slots, at most twice as many as used: 96 a file), the intake's list
+/// while it grows (old and new buffers at once: 144) and its index (a B-tree leaf of 368 bytes
+/// holds at least 5 keys, with its share of the inner nodes: 93), 333 bytes; later the result's
+/// map takes the list's place (128 with the list and index: 317). An empty file at the root
+/// measures about 150 (tests/budget.rs).
+pub const ENTRY_BYTES: usize = 384;
+
+/// What a file's path costs in the intake: kept twice (key and index), each with room for the
+/// volume name in front, and [`ENTRY_BYTES`].
+pub(crate) fn key_charge(path_bytes: usize) -> usize {
+    2 * (KEY_PREFIX + path_bytes) + ENTRY_BYTES
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct OfsVolume {
@@ -55,12 +64,12 @@ pub struct OfsVolume {
     /// Problems found while walking (bad checksums, broken chains): at most [`MAX_WARNINGS`],
     /// then a line for directories past [`MAX_DEPTH`] and one counting the warnings not listed.
     pub warnings: Vec<String>,
-    /// What the walk charged against its limit: each file's bytes (as reserved) and its path
-    /// twice (the key and an index copy, with room for the intake's volume prefix in front of
-    /// each), each directory path and each listed warning, and [`ENTRY_BYTES`] for each of them
-    /// (strings are built at their exact length, so the charge is what they hold); and, kept as
-    /// spent, the bytes a failed read copied and a block for each extension table any read
-    /// walks.
+    /// What the walk charged against its limit: the volume name; each file's bytes (as reserved)
+    /// and its path twice (the key and an index copy, with room for the intake's volume prefix
+    /// in front of each), each directory path and each listed warning, and [`ENTRY_BYTES`] for
+    /// each of them (strings are built at their exact length, so the charge is what they hold);
+    /// and, kept as spent, the bytes a failed read copied and a block for each extension table
+    /// any read walks.
     pub held: usize,
     /// The walk stopped where the next charge would have passed the limit given to
     /// [`read_ofs_within`]: the rest of the volume is not read.
@@ -327,7 +336,7 @@ impl Reader<'_> {
                 } else {
                     self.check_header(blk, &path);
                     if sec == ST_FILE {
-                        let key = 2 * (KEY_PREFIX + path.capacity()) + ENTRY_BYTES;
+                        let key = key_charge(path.capacity());
                         match self.read_file(blk, &path, key) {
                             Ok(Some(bytes)) => self.set_file(path, bytes, key),
                             Ok(None) => return,
@@ -392,6 +401,9 @@ pub fn read_ofs_within(img: &[u8], limit: usize) -> Result<OfsVolume, Error> {
         held: 0,
         limit_reached: false,
     };
+    // The volume name is kept with its disk.
+    let name = bcpl_name(img, root);
+    r.charge(name.capacity());
     r.check_header(root, "root");
     r.walk_dir(root, "", 0);
     // Two fixed lines, not charged.
@@ -405,7 +417,7 @@ pub fn read_ofs_within(img: &[u8], limit: usize) -> Result<OfsVolume, Error> {
         warnings.push(format!("{} more warnings not listed", r.unlisted));
     }
     Ok(OfsVolume {
-        name: bcpl_name(img, root),
+        name,
         dos_type,
         files: r.files,
         dirs: r.dirs,

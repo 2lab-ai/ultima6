@@ -31,39 +31,47 @@ pub use mfm::{ADF_SIZE, DiskDecode, TrackDecode, decode_amiga_disk, decode_amiga
 pub use ofs::{OfsVolume, adf_dos_type, read_ofs, read_ofs_within};
 pub use pp20::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
 
-/// The bytes the intake may hold in all (64 MiB).
+/// The bytes the intake may hold in all (64 MiB). Every byte it keeps is in one of the lists
+/// below: charged, or outside the budget with its own bound.
 ///
 /// Retained, charged before it is allocated and given back when the intake drops it. Strings
-/// are built at their exact length, so a charge is what the allocation holds:
+/// are built at their exact length and a list's growth is charged as it is made (old and new
+/// buffers while it moves), so a charge is what the allocation holds:
 /// - each ADF it keeps: a dropped one as it is, an HFE's decoded one; while an HFE decodes, also
 ///   the tracks the parser copies out ([`hfe_track_bytes`]) and the decode's working bytes
-///   ([`mfm::DECODE_WORK_BYTES`]: one track's cells, its sectors, the missing list);
-/// - each volume's files as reserved, their paths (twice, as key and index, with room for the
-///   volume name), the directory paths and the listed warnings, each with
-///   [`ofs::ENTRY_BYTES`] for its list and map entries ([`OfsVolume::held`]);
-/// - each loose file it keeps, and each PP20 output (its crunched bytes given back once done);
-/// - each report line while the budget lasts, its text and its slot. A line names its input
-///   by a label of at most 258 bytes ([`LABEL_BYTES`] and an ellipsis), so no line passes
-///   8,704 bytes (the zip line, which lists 32 labels and counts the rest; any other is under
-///   4,400).
+///   ([`mfm::DECODE_WORK_BYTES`]: one track's cells, its sectors, the missing list); with it
+///   the disk's label (at most 258 bytes) and the disk list's 72-byte slots;
+/// - each volume's name, its files as reserved, their paths (twice, as key and index, with
+///   room for the volume name), the directory paths and the listed warnings, each with
+///   [`ofs::ENTRY_BYTES`] for its slots in lists and maps ([`OfsVolume::held`]);
+/// - each loose file it keeps: its bytes, its path twice and [`ofs::ENTRY_BYTES`], as a
+///   volume's file; and each PP20 output (its crunched bytes given back once done);
+/// - each report line while the budget lasts, and the list's slots, which always keep room
+///   for the 35 lines that may follow the spend. A line names its input by a label of at most
+///   258 bytes ([`LABEL_BYTES`] and an ellipsis), so no line passes 8,704 bytes (the zip line,
+///   which lists 32 labels and counts the rest; any other is under 4,400).
 ///
 /// Spent, charged and never given back, so the work an image can cause is bounded too: the bytes
 /// a failed file read copied, and a block for each extension table a read walks.
 ///
-/// Transient or outside it, not charged, each bounded apart from it:
-/// - the report lines added after the budget is spent: at most [`LINES_AFTER_SPENT`] (32) of
-///   at most 8,704 bytes, 278,528 bytes, and three fixed closing lines;
-/// - one warning or error string while it is made, before `warn` lists or counts it: a path
-///   (at most [`ofs::MAX_PATH_BYTES`], 3,964 bytes) and a few words, reserved at most twice;
+/// Outside the budget, each bounded apart from it:
+/// - the text of the report lines added after the budget is spent: at most
+///   [`LINES_AFTER_SPENT`] (32) of at most 8,704 bytes, 278,528 bytes, and three closing lines
+///   of under 100 bytes (their slots are charged);
+/// - one string while it is made, before it is cut to its length: a report line, a warning or
+///   an error, at most twice 8,704 bytes;
+/// - a loose file's path while it is made and charged: twice its name, one at a time;
 /// - the walk's directory paths along its recursion: at most [`ofs::MAX_DEPTH`] of at most
 ///   3,903 bytes, 249,792 bytes;
-/// - the visited set's entries for blocks the walk keeps nothing for (one per block, of an ADF
-///   already charged; a kept entry's is in [`ofs::ENTRY_BYTES`]);
+/// - the visited set's entries for blocks the walk keeps nothing for: one per block of an ADF
+///   already charged, at most 28 bytes each (a B-tree leaf of 104 bytes holds at least 5
+///   keys, with its share of the inner nodes), under 5.5% of that ADF;
 /// - an HFE's track table as read before its charge: at most 255 entries of 16 bytes;
-/// - the inputs and their names (the caller's), and the zip entries `zip.rs` inflates with their
-///   names (at most twice the bytes the zip stores a name in, read as ISO 8859-1), each held
-///   until its disk is read; per volume two fixed lines past its [`ofs::MAX_WARNINGS`]
-///   warnings.
+/// - the inputs and their names: the caller's, each freed once read;
+/// - the zip entries `zip.rs` extracts and their names, each held until its disk is read:
+///   bounded by `zip.rs` (at most `MAX_ENTRIES`, 65,534, entries and `MAX_DIRECTORY_BYTES`,
+///   16 MiB, of directory, so at most 32 MiB of names read as ISO 8859-1) and by the web page's
+///   64 MiB cap on what the disk entries unpack to.
 ///
 /// The size, from the formats, not from any game file: the game is three Amiga DD disks of
 /// [`ADF_SIZE`] (901,120) bytes, 2,703,360 bytes of ADF. A volume's files fit in its blocks, at
@@ -72,13 +80,14 @@ pub use pp20::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
 /// (at most one disk, 901,120) are held as well, and the extension tables of 1,757 data blocks
 /// cost 25 blocks a disk (38,400 bytes). The entries are at most 1,757 headers and 32 warnings
 /// a disk, 5,367 on three; with every name at the root (at most 60 bytes) each is charged
-/// 256 + 2 x (61 + 60) = 498 bytes, 2,672,766 in all. The report is at most 38 lines a disk
-/// of at most 380 bytes with such names, and the zip line: 47,161 bytes with their slots. That
-/// is 56,825,527 bytes (54.2 MiB), and 64 MiB is 18.1% above it (the same 64 MiB the web page
-/// allows the game files). Deeper names cost more: a set of three disks fits while its paths
-/// average at most 1,018 bytes (about 16 levels of 60-byte names); past that the intake stops
-/// at the budget, it does not pass it. The HFE decodes (at most an HFE's size and 290,552 bytes) are given back before
-/// any PP20 output.
+/// 384 + 2 x (61 + 60) = 626 bytes, 3,359,742 in all. The report is at most 38 lines a disk
+/// of at most 380 bytes with such names and the zip line, with its list: 55,345 bytes; the
+/// disks' labels, slots and volume names 1,530. That is 57,522,217 bytes (54.9 MiB), and
+/// 64 MiB is 16.7% above it (the same 64 MiB the web page allows the game files). Deeper names
+/// cost more: a set of three disks fits while its paths average at most 953 bytes (about 15
+/// levels of 60-byte names); past that the intake stops at the budget, it does not pass it.
+/// The HFE decodes (at most an HFE's size and 290,552 bytes) are given back before any PP20
+/// output.
 pub const INTAKE_BUDGET: usize = 64 << 20;
 
 const BUDGET_MIB: usize = INTAKE_BUDGET >> 20;
@@ -91,8 +100,9 @@ const BUDGET_MIB: usize = INTAKE_BUDGET >> 20;
 pub const LABEL_BYTES: usize = 255;
 /// Report lines added after the budget is spent; the rest are counted in one line.
 pub const LINES_AFTER_SPENT: usize = 32;
-/// What a report line costs besides its text: its `String` in the list.
-const LINE_SLOT: usize = 24;
+/// Room the report's list always keeps, charged: the lines after the budget is spent and the
+/// three closing lines, so adding them never grows it.
+const TAIL: usize = LINES_AFTER_SPENT + 3;
 
 /// `name`, or its first [`LABEL_BYTES`] bytes (to a character boundary) and an ellipsis, at its
 /// exact length.
@@ -120,6 +130,40 @@ struct Ledger {
 }
 
 impl Ledger {
+    /// The whole budget, less the report list's first [`TAIL`] slots.
+    fn new(budget: usize) -> Ledger {
+        Ledger {
+            left: budget - TAIL * size_of::<String>(),
+            spent: false,
+            lines: Vec::with_capacity(TAIL),
+            after_spent: 0,
+            unlisted: 0,
+        }
+    }
+
+    /// Makes room for one more element in `v`, charging the growth before it is allocated:
+    /// twice the capacity (at least `min`, and 8), with the old buffer counted until the move is
+    /// done. False (nothing allocated, the budget spent) when it does not fit.
+    fn room<T>(&mut self, v: &mut Vec<T>, min: usize) -> bool {
+        let (len, cap) = (v.len(), v.capacity());
+        if cap >= min.max(len + 1) {
+            return true;
+        }
+        let want = (cap * 2).max(min).max(len + 1).max(8);
+        let need = want * size_of::<T>();
+        if self.spent || need > self.left {
+            self.spent = true;
+            return false;
+        }
+        self.left -= need;
+        v.reserve_exact(want - len);
+        self.give_back(cap * size_of::<T>());
+        // The allocator may hand out more than was asked: that is held too.
+        let extra = v.capacity().saturating_sub(want) * size_of::<T>();
+        self.left = self.left.saturating_sub(extra);
+        true
+    }
+
     /// Charges `n` bytes for the input labelled `name`, or adds its report line when they do not
     /// fit (false).
     fn charge(&mut self, name: &str, n: usize) -> bool {
@@ -140,20 +184,25 @@ impl Ledger {
         true
     }
 
-    /// Adds a report line at its exact length, charged with [`LINE_SLOT`] while the budget
-    /// lasts; a line that does not fit spends it. After that at most [`LINES_AFTER_SPENT`]
-    /// lines are added, uncharged, and the rest counted.
+    /// Adds a report line at its exact length, charged (with any growth of the list) while the
+    /// budget lasts; a line that does not fit spends it. After that at most
+    /// [`LINES_AFTER_SPENT`] lines are added, uncharged, in the room the list keeps, and the
+    /// rest counted.
     fn note(&mut self, mut line: String) {
         line.shrink_to_fit();
-        if !self.spent {
-            let n = line.len() + LINE_SLOT;
-            if n <= self.left {
-                self.left -= n;
+        if !self.spent && line.len() <= self.left {
+            self.left -= line.len();
+            let mut lines = std::mem::take(&mut self.lines);
+            let min = lines.len() + 1 + TAIL;
+            let fits = self.room(&mut lines, min);
+            self.lines = lines;
+            if fits {
                 self.lines.push(line);
                 return;
             }
-            self.spent = true;
+            self.give_back(line.len());
         }
+        self.spent = true;
         if self.after_spent < LINES_AFTER_SPENT {
             self.after_spent += 1;
             self.lines.push(line);
@@ -306,14 +355,15 @@ struct Collected {
 }
 
 impl Collected {
-    /// Keeps `bytes` at `path`; a repeated path reports itself and gives back the length of the
-    /// earlier copy it drops.
-    fn put(&mut self, path: String, bytes: Vec<u8>, ledger: &mut Ledger) {
+    /// Keeps `bytes` at `path`, which was charged `key` for its two copies and slots; a
+    /// repeated path reports itself and gives back the earlier copy it drops and the `key` it
+    /// does not keep again.
+    fn put(&mut self, path: String, bytes: Vec<u8>, key: usize, ledger: &mut Ledger) {
         match self.index.get(&path) {
             Some(&i) => {
-                ledger.note(format!("{}: duplicate path, later copy kept", label(&path)));
                 let dropped = std::mem::replace(&mut self.entries[i].1, bytes).len();
-                ledger.give_back(dropped);
+                ledger.give_back(dropped + key);
+                ledger.note(format!("{}: duplicate path, later copy kept", label(&path)));
             }
             None => {
                 self.index.insert(path.clone(), self.entries.len());
@@ -375,13 +425,15 @@ fn hfe_to_adf(label: &str, data: &[u8], ledger: &mut Ledger) -> Option<Vec<u8>> 
             return None;
         }
     };
-    if !ledger.charge(label, ADF_SIZE + work) {
+    // The disk keeps its label: charged with the ADF.
+    let kept = ADF_SIZE + label.len();
+    if !ledger.charge(label, kept + work) {
         return None;
     }
     let adf = decode_hfe(label, data, ledger);
     ledger.give_back(work);
     if adf.is_none() {
-        ledger.give_back(ADF_SIZE);
+        ledger.give_back(kept);
     }
     adf
 }
@@ -427,13 +479,7 @@ fn decode_hfe(label: &str, data: &[u8], ledger: &mut Ledger) -> Option<Vec<u8>> 
 /// it get a line, PP20 files not yet decrunched stay crunched (one count in the PP20 line), and
 /// the result keeps no disks and no files, so nothing starts from part of a set.
 pub fn intake(files: Vec<InputFile>) -> Intake {
-    let mut ledger = Ledger {
-        left: INTAKE_BUDGET,
-        spent: false,
-        lines: Vec::new(),
-        after_spent: 0,
-        unlisted: 0,
-    };
+    let mut ledger = Ledger::new(INTAKE_BUDGET);
     let mut disk_inputs: Vec<InputFile> = Vec::new();
     let mut loose: Vec<InputFile> = Vec::new();
 
@@ -458,7 +504,8 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
     let mut disks = Vec::new();
     let mut raw = Collected::default();
     for f in disk_inputs {
-        // Every line about this disk names it by this, and so does its Disk.
+        // Every line about this disk names it by this, and so does its Disk, which keeps it:
+        // charged with the ADF.
         let name = label(&f.name);
         // An HFE decodes to a whole ADF whatever its size; a dropped ADF is kept as it is.
         let adf = if is_hfe(&f.data) {
@@ -467,7 +514,7 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
                 None => continue,
             }
         } else {
-            if !ledger.charge(&name, f.data.len()) {
+            if !ledger.charge(&name, f.data.len() + name.capacity()) {
                 continue;
             }
             ledger.note(format!("{name}: ADF {} bytes", f.data.len()));
@@ -481,7 +528,8 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
                 // the keys are built at their exact length, as the walk charged them.
                 ledger.take_within(vol.held);
                 for (path, bytes) in vol.files {
-                    raw.put(joined(&vol.name, "/", &path), bytes, &mut ledger);
+                    let key = ofs::key_charge(path.len());
+                    raw.put(joined(&vol.name, "/", &path), bytes, key, &mut ledger);
                 }
                 ledger.note(format!(
                     "{name}: volume {} ({}), {count} files",
@@ -505,18 +553,24 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
                 None
             }
         };
-        disks.push(Disk {
-            label: name,
-            volume,
-            adf,
-        });
+        // Once the budget is spent nothing is kept: the disk is not added (nor its slot grown).
+        if ledger.room(&mut disks, 0) {
+            disks.push(Disk {
+                label: name,
+                volume,
+                adf,
+            });
+        }
     }
 
     for f in loose {
-        if !ledger.charge(&label(&f.name), f.data.len()) {
+        // Its bytes, and its path kept twice (key and index) with its slots, as a volume's file.
+        let path = normalize_path(&f.name);
+        let key = 2 * path.capacity() + ofs::ENTRY_BYTES;
+        if !ledger.charge(&label(&f.name), f.data.len() + key) {
             continue;
         }
-        raw.put(normalize_path(&f.name), f.data, &mut ledger);
+        raw.put(path, f.data, key, &mut ledger);
     }
 
     let mut out = BTreeMap::new();
@@ -604,6 +658,40 @@ pub fn intake(files: Vec<InputFile>) -> Intake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_report_is_charged_for_the_list_that_holds_it() {
+        // Short lines until they spend a 1 MiB budget, then 100 more: what the report holds,
+        // the list's capacity included, is within the budget but for the lines kept after it.
+        let budget = 1 << 20;
+        let mut l = Ledger::new(budget);
+        let mut n = 0;
+        while !l.spent {
+            l.note(format!("{n}"));
+            n += 1;
+        }
+        for k in 0..100 {
+            l.note(format!("after {k}"));
+        }
+        assert_eq!((l.after_spent, l.unlisted), (32, 100 - 31));
+        let after: usize = l.lines[l.lines.len() - 32..]
+            .iter()
+            .map(String::capacity)
+            .sum();
+        let held = l.lines.capacity() * size_of::<String>()
+            + l.lines.iter().map(String::capacity).sum::<usize>();
+        assert!(
+            held - after <= budget,
+            "the report holds {} bytes for a budget of {budget}",
+            held - after
+        );
+        // The closing lines fit without growing the list.
+        let cap = l.lines.capacity();
+        for _ in 0..3 {
+            l.lines.push(String::new());
+        }
+        assert_eq!(l.lines.capacity(), cap);
+    }
 
     #[test]
     fn labels_sort_numerically_and_case_insensitively() {

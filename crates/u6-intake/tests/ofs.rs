@@ -119,16 +119,17 @@ fn a_limit_stops_the_walk_before_the_file_that_would_pass_it() {
         ],
     );
     // Each file is charged its bytes, its path twice with 61 bytes of room (a volume name of
-    // 30 two-byte characters and a slash), and 256 bytes.
-    let charge = |n: usize| n + 2 * (61 + 1) + 256;
+    // 30 two-byte characters and a slash), and 384 bytes; the volume its name.
+    let charge = |n: usize| n + 2 * (61 + 1) + 384;
+    let name = "LIMIT".len();
     let whole = read_ofs(&img).unwrap();
-    assert_eq!(whole.held, charge(1000) + charge(2000) + charge(10));
+    assert_eq!(whole.held, name + charge(1000) + charge(2000) + charge(10));
     let all = read_ofs_within(&img, whole.held).unwrap();
     assert!(!all.limit_reached);
     assert_eq!(all.files.len(), 3);
-    let vol = read_ofs_within(&img, charge(1000) + charge(2000) - 1).unwrap();
+    let vol = read_ofs_within(&img, name + charge(1000) + charge(2000) - 1).unwrap();
     assert!(vol.limit_reached);
-    assert_eq!(vol.held, charge(1000));
+    assert_eq!(vol.held, name + charge(1000));
     let paths: Vec<&str> = vol.files.iter().map(|(p, _)| p.as_str()).collect();
     assert_eq!(paths, ["a"]);
     assert_eq!(vol.file("a"), Some(bytes(1000, 1).as_slice()));

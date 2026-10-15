@@ -187,7 +187,8 @@ fn tiny_pp20_files_claiming_16_mib_allocate_nothing_for_it() {
 
 #[test]
 fn a_loose_file_set_over_the_budget_stops_there() {
-    // 66 plain files of 1 MiB: the first 64 fill the budget exactly.
+    // 66 plain files of 1 MiB: each is charged its megabyte, its 9-byte path twice and 384
+    // bytes of slots, so 63 fit and the 64th does not.
     let inputs: Vec<InputFile> = (0..66)
         .map(|i| file(format!("loose/f{i:02}"), vec![i as u8; MIB]))
         .collect();
@@ -195,14 +196,18 @@ fn a_loose_file_set_over_the_budget_stops_there() {
     let out = output_bytes(&r);
     assert!(out <= BOUND, "the intake kept {out} bytes, over {BOUND}");
     assert_eq!(
-        lines_of(&r, "loose/f64"),
-        ["loose/f64: not read: 1048576 more bytes would pass the intake's 64 MiB budget"]
+        lines_of(&r, "loose/f63"),
+        ["loose/f63: not read: 1048978 more bytes would pass the intake's 64 MiB budget"]
     );
-    assert_eq!(
-        lines_of(&r, "loose/f65"),
-        ["loose/f65: not read: the intake's 64 MiB budget is spent"]
-    );
-    for i in 0..64 {
+    for i in [64, 65] {
+        assert_eq!(
+            lines_of(&r, &format!("loose/f{i}")),
+            [format!(
+                "loose/f{i}: not read: the intake's 64 MiB budget is spent"
+            )]
+        );
+    }
+    for i in 0..63 {
         assert!(lines_of(&r, &format!("loose/f{i:02}")).is_empty());
     }
     assert_eq!(r.report.last().map(String::as_str), Some(STOP_LINE));
@@ -258,7 +263,7 @@ fn disk_images_past_the_budget_are_not_decoded() {
     assert!(out <= BOUND, "the intake kept {out} bytes, over {BOUND}");
     assert_eq!(
         lines_of(&r, "disk 74.hfe"),
-        ["disk 74.hfe: not read: 1273592 more bytes would pass the intake's 64 MiB budget"]
+        ["disk 74.hfe: not read: 1273603 more bytes would pass the intake's 64 MiB budget"]
     );
     assert_eq!(
         lines_of(&r, "disk 75.hfe"),
@@ -289,7 +294,7 @@ fn an_hfe_whose_track_copy_passes_the_budget_is_not_decoded() {
     );
     assert_eq!(
         lines_of(&r, "disk 99.hfe"),
-        ["disk 99.hfe: not read: 17902842 more bytes would pass the intake's 64 MiB budget"]
+        ["disk 99.hfe: not read: 17902853 more bytes would pass the intake's 64 MiB budget"]
     );
     assert_eq!(r.report.last().map(String::as_str), Some(STOP_LINE));
     assert!(r.disks.is_empty() && r.files.is_empty());
@@ -547,4 +552,79 @@ fn long_entry_names_and_many_warnings_keep_the_report_bounded() {
             format!("{}: 40 more warnings not listed", d.label)
         );
     }
+}
+
+#[test]
+fn loose_files_are_charged_for_their_paths() {
+    // 18,000 empty loose files named with 4,000 bytes each: their bytes are nothing, their
+    // paths (kept as key and index) 144 MB, 72 MB more than the names given.
+    let inputs: Vec<InputFile> = (0..18_000)
+        .map(|i| file(format!("{i:05}{}", "n".repeat(3995)), Vec::new()))
+        .collect();
+    let (r, peak) = peak_of(|| intake(inputs));
+    assert!(
+        peak <= BOUND,
+        "the intake held {peak} bytes at once, over {BOUND}"
+    );
+    assert_eq!(r.report.last().map(String::as_str), Some(STOP_LINE));
+    assert!(r.files.is_empty());
+}
+
+#[test]
+fn disks_are_charged_for_their_labels_and_slots() {
+    // 450,000 dropped ADFs of four bytes (a boot signature, no filesystem) with 10-byte
+    // names: each keeps its label and a Disk besides its two report lines.
+    let inputs: Vec<InputFile> = (0..450_000)
+        .map(|i| file(format!("{i:06}.adf"), b"DOS\0".to_vec()))
+        .collect();
+    let (r, peak) = peak_of(|| intake(inputs));
+    assert!(
+        peak <= BOUND,
+        "the intake held {peak} bytes at once, over {BOUND}"
+    );
+    assert_eq!(r.report.last().map(String::as_str), Some(STOP_LINE));
+    assert!(r.disks.is_empty());
+}
+
+#[test]
+fn a_report_that_fills_the_budget_stops_the_intake() {
+    // 230,000 empty loose files with one 255-byte name: every copy after the first only adds
+    // a line saying so, until the lines spend the budget.
+    let name = "r".repeat(255);
+    let inputs: Vec<InputFile> = (0..230_000)
+        .map(|_| file(name.clone(), Vec::new()))
+        .collect();
+    let (r, peak) = peak_of(|| intake(inputs));
+    assert!(
+        peak <= BOUND,
+        "the intake held {peak} bytes at once, over {BOUND}"
+    );
+    // Each copy after the first has one line: a duplicate while the budget lasts (each is
+    // charged its path and slots, 894 bytes, until it is found a duplicate and given them
+    // back), then the copy those 894 bytes no longer fit for, the first of the 32 lines kept
+    // after the spend, then 31 refusals; the rest are counted.
+    let dup = format!("{name}: duplicate path, later copy kept");
+    let first = format!("{name}: not read: 894 more bytes would pass the intake's 64 MiB budget");
+    let refused = format!("{name}: not read: the intake's 64 MiB budget is spent");
+    let dups = r.report.iter().filter(|l| **l == dup).count();
+    let n = r.report.len();
+    let tail = &r.report[n - 35..n - 3];
+    assert_eq!(tail[0], first);
+    assert!(tail[1..].iter().all(|l| *l == refused), "{tail:#?}");
+    let unlisted: usize = r.report[n - 3]
+        .strip_suffix(" more report lines not listed: the intake's 64 MiB budget is spent")
+        .expect("the count of the lines left out")
+        .parse()
+        .unwrap();
+    assert_eq!(dups + 32 + unlisted, 229_999);
+    assert!(unlisted > 0);
+    // The duplicates spent the budget: each of the lines but their slots and text is nothing.
+    assert!(dups > 150_000, "{dups}");
+    assert_eq!(n, dups + 32 + 3, "{:#?}", &r.report[n - 4..]);
+    assert_eq!(
+        r.report[n - 2],
+        "PP20: decrunched 0 file(s); 1 file(s) total"
+    );
+    assert_eq!(r.report[n - 1], STOP_LINE);
+    assert!(r.files.is_empty() && r.disks.is_empty());
 }
