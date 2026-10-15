@@ -2,9 +2,9 @@
 //! former TypeScript intake (removed after the Rust port reached parity): find the
 //! end-of-central-directory record, walk the central directory, ask the filter per entry name
 //! *before* touching its data, then locate the data through the local header. Every entry read
-//! ([`entry`], [`read_zip`]) is checked against its central record: a deflated entry must
-//! inflate to exactly the size it declares, and its CRC-32 must match. Zip64 sizes and offsets
-//! are honoured.
+//! ([`entry`], [`read_zip`]) is checked against its central record: stored or deflated, its
+//! bytes must be exactly the uncompressed size it declares, and its CRC-32 must match. Zip64
+//! sizes and offsets are honoured.
 //!
 //! A zip too large to copy whole is read in slices instead: the caller reads the end of the
 //! file from [`tail_start`]; [`directory`] walks the central directory (naming an earlier offset
@@ -476,18 +476,16 @@ pub fn entry(data: &[u8], s: &Slice) -> Result<Vec<u8>, Error> {
     let (_, body) = s.local(range.ok_or_else(invalid)?)?;
     let bytes = match s.method {
         0 => body.to_vec(),
-        8 => {
-            let out = miniz_oxide::inflate::decompress_to_vec_with_limit(body, to_usize(s.full)?)
-                .map_err(|err| Error::new(format!("{name}: inflate failed: {err}")))?;
-            if out.len() as u64 != s.full {
-                return Err(Error::new(format!(
-                    "{name}: inflates to another size than it declares"
-                )));
-            }
-            out
-        }
+        8 => miniz_oxide::inflate::decompress_to_vec_with_limit(body, to_usize(s.full)?)
+            .map_err(|err| Error::new(format!("{name}: inflate failed: {err}")))?,
         m => return Err(unknown_method(m)),
     };
+    // Stored or inflated, the bytes are the uncompressed size the central record declares.
+    if bytes.len() as u64 != s.full {
+        return Err(Error::new(format!(
+            "{name}: holds another size than it declares"
+        )));
+    }
     if crc32fast::hash(&bytes) != s.crc {
         return Err(Error::new(format!("{name}: CRC-32 mismatch")));
     }
@@ -1038,34 +1036,69 @@ mod tests {
         let disk: Vec<u8> = (0..4000u32).map(|i| (i * 7 % 251) as u8).collect();
         let (zip, exact) = make(&[stored("Disk 1.adf", &disk)], 0, false);
         assert_eq!(both(&zip, "intact"), Ok(entries(&[("Disk 1.adf", &disk)])));
-        // One data bit flipped: the CRC no longer matches, on the whole and the sliced read.
+        let refused = |z: &[u8], what: &str, why: &str| {
+            let (whole, sliced) = paths(z);
+            for (path, r) in [("whole", whole), ("sliced", sliced)] {
+                let e = match r {
+                    Ok(read) => panic!("{what} ({path}) read {} entries", read.len()),
+                    Err(e) => e.to_string(),
+                };
+                assert!(e.contains(why), "{what} ({path}): {e}");
+            }
+        };
+        // One data bit flipped: the CRC no longer matches.
         let mut flipped = zip.clone();
         flipped[exact[0].0 as usize + 30 + 10 + 100] ^= 0x04;
-        let (whole, sliced) = paths(&flipped);
-        for r in [whole, sliced] {
-            assert!(r.unwrap_err().to_string().contains("CRC-32"));
+        refused(&flipped, "a flipped bit", "CRC-32");
+        // The central record declaring another uncompressed size: stored (its data is the
+        // packed size) and deflated (it inflates to what it holds).
+        for (entry, delta) in [
+            (stored("Disk 1.adf", &disk), 1i64),
+            (stored("Disk 1.adf", &disk), -1),
+            (deflated("Disk 1.adf", &disk), 1),
+            (deflated("Disk 1.adf", &disk), -1),
+        ] {
+            let (mut z, _) = make(&[entry], 0, false);
+            let cd = central_at(&z);
+            let full = u32::from_le_bytes(z[cd + 24..cd + 28].try_into().unwrap());
+            let full = (i64::from(full) + delta) as u32;
+            z[cd + 24..cd + 28].copy_from_slice(&full.to_le_bytes());
+            let why = if delta < 0 && z[cd + 10] == 8 {
+                "inflate failed"
+            } else {
+                "another size"
+            };
+            refused(&z, &format!("declared size {delta:+}"), why);
         }
-        // A deflated entry declaring more than it inflates to.
-        let (mut z, _) = make(&[deflated("Disk 1.adf", &disk)], 0, false);
-        let cd = central_at(&z);
-        let full = u32::from_le_bytes(z[cd + 24..cd + 28].try_into().unwrap()) + 1;
-        z[cd + 24..cd + 28].copy_from_slice(&full.to_le_bytes());
-        assert!(
-            read_zip(&z, disks)
-                .unwrap_err()
-                .to_string()
-                .contains("another size")
-        );
         // A wrong CRC in the central record alone.
         let (mut z, _) = make(&[deflated("Disk 1.adf", &disk)], 0, false);
         let cd = central_at(&z);
         z[cd + 16] ^= 1;
-        assert!(
-            read_zip(&z, disks)
-                .unwrap_err()
-                .to_string()
-                .contains("CRC-32")
+        refused(&z, "a changed central CRC", "CRC-32");
+        // A genuine CRC of 0 (an empty entry) reads, on both paths.
+        let (z, _) = make(
+            &[stored("Disk 2.adf", b""), stored("Disk 1.adf", &disk)],
+            0,
+            false,
         );
+        assert_eq!(crc32fast::hash(b""), 0);
+        assert_eq!(
+            both(&z, "an empty entry"),
+            Ok(entries(&[("Disk 2.adf", b""), ("Disk 1.adf", &disk)]))
+        );
+        // Complete slices given to the rebuilt zip in another order: the same entries, checked.
+        let two: Vec<u8> = disk.iter().rev().copied().collect();
+        let (z, _) = make(
+            &[stored("Disk 1.adf", &disk), deflated("Disk 2.adf", &two)],
+            0,
+            false,
+        );
+        let (mut slices, _) = read_directory(&z).unwrap();
+        slices.reverse();
+        let rebuilt = rebuild(&z, &slices).unwrap();
+        let mut got = read_zip(&rebuilt, disks).unwrap();
+        got.sort();
+        assert_eq!(got, entries(&[("Disk 1.adf", &disk), ("Disk 2.adf", &two)]));
     }
 
     /// [`paths`]: the two must agree; returns what they read.
