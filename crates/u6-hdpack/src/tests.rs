@@ -117,7 +117,7 @@ fn round_trip() {
     let pack = written();
     let read = read_pack(&pack).unwrap();
     assert_eq!(read.manifest.format, FORMAT);
-    assert_eq!((read.manifest.tile, read.manifest.scale), (16, 8));
+    assert_eq!((read.manifest.tile, read.manifest.scale), (16, 4));
     assert!(read.manifest.derived);
     assert_eq!(read.manifest.generator, generator());
     assert_eq!(read.manifest.images, 5);
@@ -158,7 +158,8 @@ fn tiles_fill_atlases_in_order() {
     let pack = write_pack(&images, &generator(), true).unwrap();
     let index = index_of(&pack);
     assert_eq!(index[0].cell, Some((0, 0, 0)));
-    assert_eq!(index[17].cell, Some((0, 1, 1)));
+    let next_row = usize::from(ATLAS_CELLS as u16) + 1;
+    assert_eq!(index[next_row].cell, Some((0, 1, 1)));
     assert_eq!(index[usize::from(per)].cell, Some((1, 0, 0)));
     let read = read_pack(&pack).unwrap();
     assert_eq!(read.images, images);
@@ -166,7 +167,8 @@ fn tiles_fill_atlases_in_order() {
     let files = files_of(&pack);
     let (_, a1) = files.iter().find(|(n, _)| n == "atlas-1.webp").unwrap();
     let dec = image_webp::WebPDecoder::new(Cursor::new(a1.as_slice())).unwrap();
-    assert_eq!(dec.dimensions(), (2048, 128));
+    assert_eq!(dec.dimensions(), (ATLAS_CELLS * TILE_HD, TILE_HD));
+    assert_eq!(ATLAS_CELLS * TILE_HD, 2048);
 }
 
 #[test]
@@ -265,7 +267,7 @@ fn refuses_a_wrong_manifest() {
     let cases: [(&str, Change); 6] = [
         ("format", Box::new(|m| m.format = "u6-hdpack/2".into())),
         ("tile", Box::new(|m| m.tile = 8)),
-        ("scale", Box::new(|m| m.scale = 4)),
+        ("scale", Box::new(|m| m.scale = 8)),
         ("base", Box::new(|m| m.base = hex(1))),
         ("images", Box::new(|m| m.images += 1)),
         (
@@ -357,19 +359,19 @@ fn refuses_wrong_entries() {
     ));
     // Sizes: a tile, a portrait, bitmaps not 8x or past the screen.
     assert!(matches!(
-        refused(&|e| e[0].width = 64),
+        refused(&|e| e[0].width = 128),
         Err(PackError::Index(_))
     ));
     assert!(matches!(
-        refused(&|e| e[3].height = 511),
+        refused(&|e| e[3].height = PORTRAIT_HD.1 as u16 - 1),
         Err(PackError::Index(_))
     ));
     assert!(matches!(
-        refused(&|e| e[4].width = 191),
+        refused(&|e| e[4].width = 95),
         Err(PackError::Index(_))
     ));
     assert!(matches!(
-        refused(&|e| e[4].width = 321 * 8),
+        refused(&|e| e[4].width = (BITMAP_MAX.0 + 1) as u16 * SCALE as u16),
         Err(PackError::Index(_))
     ));
     // A record past the 2048, a portrait letter that is not a-z.
@@ -390,7 +392,7 @@ fn refuses_wrong_entries() {
         Err(PackError::Index(_))
     ));
     assert!(matches!(
-        refused(&|e| e[1].cell = Some((0, 16, 0))),
+        refused(&|e| e[1].cell = Some((0, ATLAS_CELLS as u16, 0))),
         Err(PackError::Index(_))
     ));
     assert!(matches!(
@@ -407,7 +409,7 @@ fn refuses_wrong_entries() {
         Err(PackError::Image(_))
     ));
     assert!(matches!(
-        refused(&|e| e[4].width = 32 * 8),
+        refused(&|e| e[4].width = 32 * SCALE as u16),
         Err(PackError::Image(_))
     ));
     // The alpha flag must say what the pixels say.
@@ -415,6 +417,45 @@ fn refuses_wrong_entries() {
         refused(&|e| e[0].alpha = !e[0].alpha),
         Err(PackError::Image(_))
     ));
+}
+
+#[test]
+fn a_full_pack_fits_the_limit() {
+    // Every record, 300 portraits and two screen-sized bitmaps, as the index counts them.
+    let mut entries: Vec<Entry> = (0..TILE_COUNT as u16)
+        .map(|r| {
+            let per = (ATLAS_CELLS * ATLAS_CELLS) as u16;
+            let k = r % per;
+            Entry {
+                id: ImageId::Tile(r),
+                alpha: true,
+                cell: Some((r / per, k % ATLAS_CELLS as u16, k / ATLAS_CELLS as u16)),
+                width: TILE_HD as u16,
+                height: TILE_HD as u16,
+                hash: 0,
+            }
+        })
+        .collect();
+    entries.extend((0..300).map(|i| Entry {
+        id: ImageId::Portrait {
+            letter: b'a',
+            item: i,
+        },
+        alpha: false,
+        cell: None,
+        width: PORTRAIT_HD.0 as u16,
+        height: PORTRAIT_HD.1 as u16,
+        hash: 0,
+    }));
+    entries.extend(Role::ALL.map(|role| Entry {
+        id: ImageId::Bitmap(role),
+        alpha: false,
+        cell: None,
+        width: (BITMAP_MAX.0 * SCALE) as u16,
+        height: (BITMAP_MAX.1 * SCALE) as u16,
+        hash: 0,
+    }));
+    assert_eq!(check_entries(&entries).unwrap(), [32, 32]);
 }
 
 #[test]
@@ -439,10 +480,12 @@ fn refuses_past_the_limits() {
         })
         .collect();
     assert!(matches!(check_entries(&entries), Err(PackError::Limit(_))));
-    // 164 portraits are 150.5 MB decoded: refused from the index, before any file is looked at.
-    let portraits = with_index(&pack, &entries[..164]);
+    // 654 portraits are 150.01 MB decoded: refused from the index, before any file is looked at.
+    let over = 654;
+    assert!(over as u64 * u64::from(PORTRAIT_HD.0 * PORTRAIT_HD.1) * 4 > MAX_DECODED_BYTES);
+    let portraits = with_index(&pack, &entries[..over]);
     assert!(matches!(read_pack(&portraits), Err(PackError::Limit(_))));
-    assert!(check_entries(&entries[..163]).is_ok());
+    assert!(check_entries(&entries[..over - 1]).is_ok());
     // What the zip's entries declare is bounded too, before anything is inflated: a deflated
     // entry of 5 bytes that declares one byte past the limit.
     let bomb = deflated_zip("bitmap/paper.webp", MAX_FILE_BYTES as u32 + 1);
@@ -452,7 +495,7 @@ fn refuses_past_the_limits() {
         Err(PackError::Files(_))
     ));
     // The writer will not write past them either.
-    let images: Vec<PackImage> = (0..164)
+    let images: Vec<PackImage> = (0..over as u16)
         .map(|i| PackImage {
             id: ImageId::Portrait {
                 letter: b'a',
@@ -478,7 +521,8 @@ fn refuses_images_that_are_not_lossless_stills() {
     });
     assert!(matches!(read_pack(&png), Err(PackError::Image(_))));
     // A lossy (VP8) header of the right size: refused by kind, before its data is read.
-    let lossy = with_file(&pack, "portrait/b-7.webp", |b| *b = vp8_header(448, 512));
+    let (w, h) = (PORTRAIT_HD.0 as u16, PORTRAIT_HD.1 as u16);
+    let lossy = with_file(&pack, "portrait/b-7.webp", |b| *b = vp8_header(w, h));
     match read_pack(&lossy) {
         Err(PackError::Image(d)) => assert!(d.contains("not a lossless still"), "{d}"),
         other => panic!("{other:?}"),
@@ -543,7 +587,7 @@ fn the_writer_refuses_what_the_reader_would() {
         Err(PackError::Index(_))
     ));
     let mut images = sample();
-    images[0].image = image(64, 64, 0, false);
+    images[0].image = image(TILE_HD * 2, TILE_HD * 2, 0, false);
     assert!(matches!(
         write_pack(&images, &generator(), true),
         Err(PackError::Index(_))

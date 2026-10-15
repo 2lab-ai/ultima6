@@ -400,6 +400,76 @@ pub fn structure(classic: &Classic, raw: &Rgba, key: [u8; 3]) -> Option<f32> {
     ncc(&a, &b)
 }
 
+/// Portraits are judged at the layout scale: a quarter of the source size.
+pub const LAYOUT_SHRINK: u32 = 4;
+
+/// The colour image at 1 / [`LAYOUT_SHRINK`] of the classic size: box averages, transparent
+/// pixels as grey.
+fn layout_classic(c: &Classic) -> Vec<[f64; 3]> {
+    let k = LAYOUT_SHRINK;
+    let (w, h) = (c.width / k, c.height / k);
+    let mut out = vec![[0.0; 3]; (w * h) as usize];
+    for y in 0..h * k {
+        for x in 0..w * k {
+            let p = c.at(x, y).map_or([GREY as f64; 3], |p| p.map(f64::from));
+            let o = &mut out[((y / k) * w + x / k) as usize];
+            for i in 0..3 {
+                o[i] += p[i] / f64::from(k * k);
+            }
+        }
+    }
+    out
+}
+
+/// The same for an HD image `s` times the classic size (alpha composited over grey).
+fn layout_hd(img: &Rgba, s: u32) -> Vec<[f64; 3]> {
+    let k = LAYOUT_SHRINK * s;
+    let (w, h) = (img.width / k, img.height / k);
+    let mut out = vec![[0.0; 3]; (w * h) as usize];
+    for y in 0..h * k {
+        for x in 0..w * k {
+            let p = img::get(img, x, y);
+            let a = f64::from(p[3]) / 255.0;
+            let o = &mut out[((y / k) * w + x / k) as usize];
+            for i in 0..3 {
+                let v = f64::from(p[i]) * a + f64::from(GREY) * (1.0 - a);
+                o[i] += v / f64::from(k * k);
+            }
+        }
+    }
+    out
+}
+
+/// Layout correlation (portraits): the classic image and the slice, both box-averaged to a
+/// quarter of the source size, correlated as colour images: each channel centred on its own
+/// mean, the three channels' products and variances pooled. At that scale the measure is where
+/// the face, hair, clothes and background sit and in which colours; a repaint keeps that and
+/// changes every edge, which the source-scale [`structure`] counts against it (synthetic
+/// portraits: 0.55–0.66 there, 0.904–0.913 here). `None` for a flat image.
+pub fn layout(classic: &Classic, raw: &Rgba) -> Option<f32> {
+    let a = layout_classic(classic);
+    let b = layout_hd(raw, raw.width / classic.width);
+    let n = a.len() as f64;
+    let (mut cov, mut va, mut vb) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..3 {
+        let ma = a.iter().map(|p| p[i]).sum::<f64>() / n;
+        let mb = b.iter().map(|p| p[i]).sum::<f64>() / n;
+        for (p, q) in a.iter().zip(&b) {
+            let (x, y) = (p[i] - ma, q[i] - mb);
+            cov += x * y;
+            va += x * x;
+            vb += y * y;
+        }
+    }
+    if va / n < 1e-6 {
+        return None;
+    }
+    if vb / n < 1e-6 {
+        return Some(0.0);
+    }
+    Some((cov / (va * vb).sqrt()) as f32)
+}
+
 /// Reach of the shift search in HD pixels, and its step (r1 `measure.py`: 2 HD px steps).
 const SHIFT_REACH: i64 = 16;
 const SHIFT_STEP: i64 = 2;
@@ -523,16 +593,38 @@ impl Metrics {
     }
 }
 
+/// The scale structure is measured at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scale {
+    /// Edge maps at the source pixel ([`structure`]): tiles and bitmaps.
+    Source,
+    /// Colour layout at a quarter of the source size ([`layout`]): portraits.
+    Layout,
+}
+
+impl Scale {
+    pub fn name(self) -> &'static str {
+        match self {
+            Scale::Source => "source",
+            Scale::Layout => "layout",
+        }
+    }
+}
+
 /// Keys, transfers and measures one slice: the HD image to keep and its metrics.
 ///
-/// Structure, shift and purity are measured on the slice as it came back, against the classic
-/// image as it was sent (r1's measurements); IoU and the colour error on the image kept.
-pub fn judge(raw: &Rgba, classic: &Classic, key: [u8; 3]) -> (Rgba, Metrics) {
+/// Structure (at `scale`), shift and purity are measured on the slice as it came back, against
+/// the classic image as it was sent (r1's measurements); IoU and the colour error on the image
+/// kept.
+pub fn judge(raw: &Rgba, classic: &Classic, key: [u8; 3], scale: Scale) -> (Rgba, Metrics) {
     let mut hd = key_out(raw, classic, key);
     let drift_raw = drift(classic, &hd);
     colour_transfer(&mut hd, classic);
     let m = Metrics {
-        structure: structure(classic, raw, key),
+        structure: match scale {
+            Scale::Source => structure(classic, raw, key),
+            Scale::Layout => layout(classic, raw),
+        },
         shift: shift(classic, raw, key),
         iou: iou(classic, &hd),
         purity: purity(raw, classic, key),

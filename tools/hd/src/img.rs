@@ -118,6 +118,36 @@ pub fn resize(img: &Rgba, w: u32, h: u32) -> Rgba {
     out
 }
 
+/// Box-averages `img` by `k` (alpha-weighted colour, mean alpha), as `pack` turns the ×8
+/// masters into the pack's ×4.
+pub fn shrink(img: &Rgba, k: u32) -> Rgba {
+    let mut out = Rgba::new(img.width / k, img.height / k);
+    for y in 0..out.height {
+        for x in 0..out.width {
+            let (mut c, mut a) = ([0u32; 3], 0u32);
+            for yy in y * k..(y + 1) * k {
+                for xx in x * k..(x + 1) * k {
+                    let p = get(img, xx, yy);
+                    let w = u32::from(p[3]);
+                    for i in 0..3 {
+                        c[i] += u32::from(p[i]) * w;
+                    }
+                    a += w;
+                }
+            }
+            let n = k * k;
+            let px = if a == 0 {
+                [0, 0, 0, 0]
+            } else {
+                let ch = |v: u32| ((v + a / 2) / a) as u8;
+                [ch(c[0]), ch(c[1]), ch(c[2]), ((a + n / 2) / n) as u8]
+            };
+            put(&mut out, x, y, px);
+        }
+    }
+    out
+}
+
 /// Luminance (0..255) of a colour.
 pub fn luma(c: [u8; 3]) -> f32 {
     0.299 * f32::from(c[0]) + 0.587 * f32::from(c[1]) + 0.114 * f32::from(c[2])

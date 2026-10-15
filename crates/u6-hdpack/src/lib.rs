@@ -3,10 +3,10 @@
 //! the page will read it (H2). Platform-free: no I/O, builds for `wasm32-unknown-unknown`.
 //!
 //! A pack holds, as stored (uncompressed) zip entries:
-//! - `manifest.json`: [`Manifest`] — `format` = [`FORMAT`], `tile` = 16, `scale` = 8,
+//! - `manifest.json`: [`Manifest`] — `format` = [`FORMAT`], `tile` = 16, `scale` = 4,
 //!   `derived`, `generator`, `base` (the digest of the index, [`base_digest`]) and the count;
 //! - `index.bin`: one 24-byte entry per image ([`Entry`], layout at [`INDEX_MAGIC`]);
-//! - `atlas-N.webp`: the tile images, [`ATLAS_CELLS`] × [`ATLAS_CELLS`] cells of 128 px, filled
+//! - `atlas-N.webp`: the tile images, [`ATLAS_CELLS`] × [`ATLAS_CELLS`] cells of 64 px, filled
 //!   row by row in record order (N from 0; an atlas is as tall as its rows);
 //! - `portrait/<letter>-<item>.webp` (the `load_portrait` pair) and `bitmap/<role>.webp`.
 //!
@@ -24,11 +24,16 @@
 //! The engine computes the same hash of a record's current bytes, so an HD image made from
 //! other bytes (another dump, a merged shore record) never matches and the scaler is used.
 //!
+//! **Scale: ×4** ([`SCALE`]), the page's largest display scale. The imagegen tool keeps its ×8
+//! masters in its work dir and writes them here 2 × 2 box-averaged.
+//!
 //! **Limits** (spec 07 HD1; the reader refuses past them and the writer will not write them):
 //! at most [`MAX_ENTRIES`] images, at most [`MAX_DECODED_BYTES`] of RGBA when every image is
 //! decoded (counted from the index before anything is decoded), and exact sizes: a tile is
-//! 128 × 128, a portrait 448 × 512, a bitmap 8× its classic size (at most the 320 × 200 screen;
-//! the classic size itself is checked through the hash, which covers it). Anything else that
+//! 64 × 64, a portrait 224 × 256, a bitmap 4× its classic size (at most the 320 × 200 screen;
+//! the classic size itself is checked through the hash, which covers it). Every record, a few
+//! hundred portraits and two screen-sized bitmaps fit in the limit (the test
+//! `a_full_pack_fits_the_limit`). Anything else that
 //! does not match this description — an unknown or repeated entry, an unreferenced file, a
 //! wrong digest, a file whose size differs from its index entry — is refused; a read returns
 //! the whole pack or an error, never part of one.
@@ -49,7 +54,7 @@ mod tests;
 /// The manifest's `format`.
 pub const FORMAT: &str = "u6-hdpack/1";
 /// HD pixels per classic pixel.
-pub const SCALE: u32 = 8;
+pub const SCALE: u32 = 4;
 /// Side of a classic tile.
 pub const TILE: u32 = TILE_W as u32;
 /// Side of an HD tile.
@@ -62,7 +67,7 @@ pub const PORTRAIT_HD: (u32, u32) = (
 /// The largest classic bitmap: the screen.
 pub const BITMAP_MAX: (u32, u32) = (320, 200);
 /// Cells per atlas row and column (an atlas is at most 2048 px square).
-pub const ATLAS_CELLS: u32 = 16;
+pub const ATLAS_CELLS: u32 = 32;
 /// Most images in a pack.
 pub const MAX_ENTRIES: usize = 4096;
 /// Most RGBA bytes a pack decodes to (150 MB).
@@ -373,7 +378,7 @@ fn expected_size(id: ImageId, width: u32, height: u32) -> Result<(u32, u32), Pac
                 && height / SCALE <= BITMAP_MAX.1;
             if !ok {
                 return Err(PackError::Index(format!(
-                    "bitmap {width}x{height} is not 8x a classic size within the screen"
+                    "bitmap {width}x{height} is not 4x a classic size within the screen"
                 )));
             }
             Ok((width, height))
@@ -733,7 +738,7 @@ pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
         return Err(PackError::Manifest("format is not u6-hdpack/1".into()));
     }
     if manifest.tile != TILE || manifest.scale != SCALE {
-        return Err(PackError::Manifest("tile or scale is not 16 / 8".into()));
+        return Err(PackError::Manifest("tile or scale is not 16 / 4".into()));
     }
     let g = &manifest.generator;
     if [&g.name, &g.version, &g.engine, &g.date]

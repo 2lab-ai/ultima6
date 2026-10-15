@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use u6_hdpack::{ImageId, SCALE};
+use u6_hdpack::ImageId;
 
-use crate::atlas::{self, Job, Place};
+use crate::atlas::{self, Job, MASTER, Place};
 use crate::game::Game;
 use crate::gate::{self, Metrics, Thresholds};
 use crate::group::{self, Class, Item};
@@ -136,10 +136,18 @@ pub fn slice(out: &Rgba, place: &Place) -> Rgba {
         place.w * place.scale,
         place.h * place.scale,
     );
-    if place.scale == SCALE {
+    if place.scale == MASTER {
         raw
     } else {
-        img::resize(&raw, place.w * SCALE, place.h * SCALE)
+        img::resize(&raw, place.w * MASTER, place.h * MASTER)
+    }
+}
+
+/// Portraits are judged at the layout scale, everything else at the source pixel.
+pub fn scale_of(class: Class) -> gate::Scale {
+    match class {
+        Class::Portrait => gate::Scale::Layout,
+        _ => gate::Scale::Source,
     }
 }
 
@@ -162,7 +170,7 @@ fn judge_sheet(game: &Game, job: &Job, out: &Rgba) -> Result<Vec<Judged>, &'stat
         {
             return Err("cell map");
         }
-        let (hd, metrics) = gate::judge(&slice(out, p), &classic, job.key);
+        let (hd, metrics) = gate::judge(&slice(out, p), &classic, job.key, scale_of(p.class));
         v.push(Judged {
             place: p.clone(),
             id,
@@ -195,7 +203,7 @@ fn compose(parts: &[&Judged]) -> (Classic, Rgba) {
         height: h * rows,
         px: vec![None; (w * cols * h * rows) as usize],
     };
-    let mut hd = Rgba::new(w * cols * SCALE, h * rows * SCALE);
+    let mut hd = Rgba::new(w * cols * MASTER, h * rows * MASTER);
     for j in parts {
         let (cx, cy) = ((j.place.x - x0) / cell, (j.place.y - y0) / cell);
         for y in 0..h {
@@ -204,7 +212,7 @@ fn compose(parts: &[&Judged]) -> (Classic, Rgba) {
                 classic.px[to] = j.classic.at(x, y);
             }
         }
-        hd.paste(&j.hd, cx * w * SCALE, cy * h * SCALE);
+        hd.paste(&j.hd, cx * w * MASTER, cy * h * MASTER);
     }
     (classic, hd)
 }
@@ -308,6 +316,7 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
                         "structure": m.structure, "shift": m.shift, "iou": m.iou,
                         "purity": m.purity, "drift_raw": m.drift_raw, "drift": m.drift,
                         "seam": seam, "gates": t.text(),
+                        "structure_scale": scale_of(j.place.class).name(),
                     });
                     let _ = writeln!(gates_log, "{line}");
                     let slot = attempts

@@ -1,5 +1,6 @@
 //! `pack`: the `u6-hdpack/1` zip of the images ingest accepted, with the content hashes of the
-//! classic images they were made from, `derived: true`. The pack is read back by the strict
+//! classic images they were made from, `derived: true`, at the pack's ×4: each ×8 master in
+//! `slices/` box-averaged 2 × 2 (the masters stay in the work dir). The pack is read back by the strict
 //! reader before it is kept. There is no export: a derived pack is never shared (spec 07
 //! Rights), so the tool has no command that writes one anywhere but the work dir or `--out`
 //! outside the repository.
@@ -7,9 +8,9 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use u6_hdpack::{Generator, Kind, PackImage, read_pack, write_pack};
+use u6_hdpack::{Generator, Kind, PackImage, SCALE, read_pack, write_pack};
 
-use crate::atlas;
+use crate::atlas::{self, MASTER};
 use crate::img;
 use crate::ingest::Accepted;
 use crate::run::MODEL;
@@ -52,7 +53,8 @@ pub fn pack(work: &Work, out: Option<&Path>) -> Result<PackSummary, String> {
             atlas::parse_image(&a.image).ok_or_else(|| format!("bad image id {:?}", a.image))?;
         let hash =
             u64::from_str_radix(&a.hash, 16).map_err(|_| format!("bad hash for {}", a.image))?;
-        let image = img::read_png(&work.root.join(&a.slice))?;
+        let master = img::read_png(&work.root.join(&a.slice))?;
+        let image = img::shrink(&master, MASTER / SCALE);
         images.push(PackImage { id, hash, image });
     }
     let secs = SystemTime::now()

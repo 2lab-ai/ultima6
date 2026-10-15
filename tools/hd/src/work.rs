@@ -8,7 +8,7 @@
 //! out/<id>.png        what came back
 //! runs.jsonl          one line per call: sheet, ok, seconds
 //! gates.jsonl         one line per image per attempt: ids and metrics
-//! slices/<image>.png  the images that passed (×8 RGBA)
+//! slices/<image>.png  the images that passed: the ×8 RGBA masters (the pack is ×4)
 //! ingest.json         the images pack takes: id, hash, slice
 //! coverage.txt        records by class: generated / fallback / failed / pending (counts)
 //! pack/u6-hdpack.zip  the pack

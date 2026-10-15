@@ -627,14 +627,18 @@ pub mod synthetic {
         for y in 0..PORTRAIT_HEIGHT {
             for x in 0..PORTRAIT_WIDTH {
                 let (xi, yi) = (x as i32, y as i32);
-                let face = (xi - 28).pow(2) * 4 / 3 + (yi - 30).pow(2) <= 300;
-                let hair = (xi - 28).pow(2) + (yi - 18).pow(2) <= 280 && yi < 24;
-                let eye = yi == 28 && (xi == 21 || xi == 22 || xi == 34 || xi == 35);
-                let mouth = yi == 41 && (24..33).contains(&xi);
-                let shoulders = yi > 50 && (xi - 28).abs() < 26;
+                // Turned a little to the right, the hair falling on the left, a clasp on the
+                // right shoulder: no portrait is its own mirror image.
+                let face = (xi - 30).pow(2) * 4 / 3 + (yi - 30).pow(2) <= 300;
+                let hair =
+                    (xi - 29).pow(2) + (yi - 18).pow(2) <= 280 && (yi < 24 || (xi < 17 && yi < 44));
+                let eye = yi == 28 && (xi == 24 || xi == 25 || xi == 36 || xi == 37);
+                let mouth = yi == 41 && (28..36).contains(&xi);
+                let shoulders = yi > 50 && (xi - 30).abs() < 26;
+                let clasp = (xi - 44).pow(2) + (yi - 56).pow(2) <= 6;
                 out[y * PORTRAIT_WIDTH + x] = if eye {
                     0
-                } else if mouth {
+                } else if mouth || clasp {
                     16
                 } else if hair {
                     if seed == 0 { 12 } else { 19 }

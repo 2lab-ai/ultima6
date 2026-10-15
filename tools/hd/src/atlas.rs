@@ -14,21 +14,28 @@
 //! [`KEY_COLOURS`], the one farthest from every colour the sheet's images use.
 
 use serde::{Deserialize, Serialize};
-use u6_hdpack::{ImageId, Role, SCALE};
+use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_WIDTH};
+use u6_hdpack::{ImageId, Role};
 
 use crate::game::Game;
 use crate::group::{Class, Item};
 use crate::img::{self, Classic, Rgba};
 
+/// The scale the sheets are drawn and judged at, and of the masters ingest keeps (×8, r1 §2.3:
+/// the best grid fit); `pack` writes them at the pack's ×4.
+pub const MASTER: u32 = 8;
 pub const SHEET_W: u32 = 1536;
 pub const SHEET_H: u32 = 1024;
 pub const CELL: u32 = 128;
 pub const GRID: (u32, u32) = (SHEET_W / CELL, SHEET_H / CELL);
 /// Wrap border of a terrain cell, in source pixels.
 pub const BORDER: u32 = 4;
-pub const TERRAIN_CELL: u32 = CELL + 2 * BORDER * SCALE;
+pub const TERRAIN_CELL: u32 = CELL + 2 * BORDER * MASTER;
 pub const TERRAIN_GRID: (u32, u32) = (SHEET_W / TERRAIN_CELL, SHEET_H / TERRAIN_CELL);
-pub const PORTRAIT: (u32, u32) = u6_hdpack::PORTRAIT_HD;
+pub const PORTRAIT: (u32, u32) = (
+    PORTRAIT_WIDTH as u32 * MASTER,
+    PORTRAIT_HEIGHT as u32 * MASTER,
+);
 pub const PORTRAIT_GRID: (u32, u32) = (SHEET_W / PORTRAIT.0, SHEET_H / PORTRAIT.1);
 
 /// Key candidates: saturated colours, magenta and green first (the imagegen skill's keys).
@@ -229,13 +236,13 @@ fn place_piece(draft: &mut Draft, game: &Game, item_no: u32, item: &Item, k: usi
         let (dx, dy) = (i as u32 % piece.w, i as u32 / piece.w);
         let classic = game.classic(id).expect("planned images exist");
         let (x, y, scale) = match draft.kind {
-            SheetKind::Tile => ((c + dx) * CELL, (r + dy) * CELL, SCALE),
+            SheetKind::Tile => ((c + dx) * CELL, (r + dy) * CELL, MASTER),
             SheetKind::Terrain => (
-                c * TERRAIN_CELL + BORDER * SCALE,
-                r * TERRAIN_CELL + BORDER * SCALE,
-                SCALE,
+                c * TERRAIN_CELL + BORDER * MASTER,
+                r * TERRAIN_CELL + BORDER * MASTER,
+                MASTER,
             ),
-            SheetKind::Portrait => (c * PORTRAIT.0, r * PORTRAIT.1, SCALE),
+            SheetKind::Portrait => (c * PORTRAIT.0, r * PORTRAIT.1, MASTER),
             SheetKind::Bitmap => (0, 0, bitmap_scale(&classic)),
         };
         let hash = game.hash(id).expect("planned images exist");
@@ -260,7 +267,7 @@ fn place_piece(draft: &mut Draft, game: &Game, item_no: u32, item: &Item, k: usi
 
 /// The sheet scale of a bitmap: the largest whole one up to 8 that fits.
 pub fn bitmap_scale(c: &Classic) -> u32 {
-    (SHEET_W / c.width).min(SHEET_H / c.height).clamp(1, SCALE)
+    (SHEET_W / c.width).min(SHEET_H / c.height).clamp(1, MASTER)
 }
 
 /// Places every piece of `item` in `draft`, or none.
@@ -369,7 +376,11 @@ fn render(game: &Game, d: Draft, attempt: u8, n: usize) -> (Job, Rgba) {
     );
     for ((p, _), c) in d.places.iter().zip(&classics) {
         if d.kind == SheetKind::Terrain {
-            sheet.paste(&wrapped(c, key), p.x - BORDER * SCALE, p.y - BORDER * SCALE);
+            sheet.paste(
+                &wrapped(c, key),
+                p.x - BORDER * MASTER,
+                p.y - BORDER * MASTER,
+            );
         } else {
             sheet.paste(&c.scaled(p.scale, key), p.x, p.y);
         }
@@ -403,5 +414,5 @@ pub fn wrapped(c: &Classic, key: [u8; 3]) -> Rgba {
             src.px.push(c.at(tx, ty));
         }
     }
-    src.scaled(SCALE, key)
+    src.scaled(MASTER, key)
 }

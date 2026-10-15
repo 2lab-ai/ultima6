@@ -593,7 +593,12 @@ fn ingest_slices_gates_rerolls_and_reports() {
         assert_eq!(Some(img.hash), g.hash(img.id), "{:?}", img.id);
     }
     let paper = p.get(ImageId::Bitmap(Role::Paper)).unwrap();
-    assert_eq!((paper.image.width, paper.image.height), (64 * 8, 40 * 8));
+    // The pack is x4: the x8 masters box-averaged.
+    assert_eq!((paper.image.width, paper.image.height), (64 * 4, 40 * 4));
+    let t0 = p.get(tile(synthetic::OBJECTS)).unwrap();
+    assert_eq!((t0.image.width, t0.image.height), (64, 64));
+    let master = img::read_png(&w.slice(&atlas::slice_name(tile(synthetic::OBJECTS)))).unwrap();
+    assert_eq!(t0.image, img::shrink(&master, 2));
     // A pack is never written into the repository.
     let inside = crate::work::repo_root().join("site/u6-hdpack.zip");
     assert!(pack::pack(&w, Some(&inside)).is_err());
@@ -725,4 +730,129 @@ fn the_civil_date() {
     assert_eq!(pack::date(0), "1970-01-01");
     assert_eq!(pack::date(1_792_108_800), "2026-10-16");
     assert_eq!(pack::date(951_782_400), "2000-02-29");
+}
+
+/// A stand-in for imagegen's repaint of a portrait, made in code: the classic image smoothed
+/// (bilinear at x8, then a 3 x 3 box), its colours drifted, a light gradient, strands and folds
+/// a few source pixels apart, and a fine deterministic texture added. It keeps where things are and in which colours, and changes
+/// every edge, as the repaints on the synthetic sheets did.
+fn painted(c: &Classic) -> Rgba {
+    let (w, h) = (c.width * 8, c.height * 8);
+    let mut s = Rgba::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let fx = ((x as f32 + 0.5) / 8.0 - 0.5).clamp(0.0, (c.width - 1) as f32);
+            let fy = ((y as f32 + 0.5) / 8.0 - 0.5).clamp(0.0, (c.height - 1) as f32);
+            let (x0, y0) = (fx.floor() as u32, fy.floor() as u32);
+            let (x1, y1) = ((x0 + 1).min(c.width - 1), (y0 + 1).min(c.height - 1));
+            let (tx, ty) = (fx.fract(), fy.fract());
+            let at = |x, y| c.at(x, y).unwrap_or(KEY).map(f32::from);
+            let (a, b, cc, d) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
+            let mix = |i: usize| {
+                let top = a[i] * (1.0 - tx) + b[i] * tx;
+                let bot = cc[i] * (1.0 - tx) + d[i] * tx;
+                top * (1.0 - ty) + bot * ty
+            };
+            // Brush strands and painted-in shading: edges two to four source pixels apart that
+            // the classic image never had (the repaints add a nose, brows, folds and strands).
+            let strand = ((x as f32 * 0.28 + y as f32 * 0.11).sin() * 30.0).round();
+            let fold = ((y as f32 * 0.19).sin() * (x as f32 * 0.07).cos() * 24.0).round();
+            let texture = ((x * 7 + y * 13) % 11) as f32 - 5.0 + strand + fold;
+            let light = 10.0 - 20.0 * y as f32 / h as f32;
+            let drift = [12.0, -8.0, 6.0];
+            let px: [u8; 3] = std::array::from_fn(|i| {
+                (mix(i) + drift[i] + light + texture)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            });
+            img::put(&mut s, x, y, [px[0], px[1], px[2], 255]);
+        }
+    }
+    let mut out = s.clone();
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            let mut acc = [0u32; 3];
+            for dy in -1..=1i64 {
+                for dx in -1..=1i64 {
+                    let xx = (x + dx).clamp(0, w as i64 - 1) as u32;
+                    let yy = (y + dy).clamp(0, h as i64 - 1) as u32;
+                    let p = img::get(&s, xx, yy);
+                    for i in 0..3 {
+                        acc[i] += u32::from(p[i]);
+                    }
+                }
+            }
+            let px = acc.map(|v| (v / 9) as u8);
+            img::put(&mut out, x as u32, y as u32, [px[0], px[1], px[2], 255]);
+        }
+    }
+    out
+}
+
+fn mirrored(img: &Rgba) -> Rgba {
+    let mut out = img.clone();
+    for y in 0..img.height {
+        for x in 0..img.width {
+            img::put(&mut out, x, y, img::get(img, img.width - 1 - x, y));
+        }
+    }
+    out
+}
+
+/// Moved right by `dx` pixels, wrapping around (the colours stay the same).
+fn rolled(img: &Rgba, dx: u32) -> Rgba {
+    let mut out = img.clone();
+    for y in 0..img.height {
+        for x in 0..img.width {
+            img::put(&mut out, (x + dx) % img.width, y, img::get(img, x, y));
+        }
+    }
+    out
+}
+
+#[test]
+fn portraits_are_judged_at_the_layout_scale() {
+    let g = synthetic::game();
+    let t = Thresholds::default();
+    let id = |item| ImageId::Portrait { letter: b'a', item };
+    let classic = [g.classic(id(0)).unwrap(), g.classic(id(1)).unwrap()];
+    let out = [painted(&classic[0]), painted(&classic[1])];
+    let judge = |c: &Classic, raw: &Rgba| gate::judge(raw, c, KEY, gate::Scale::Layout).1;
+    for i in 0..2 {
+        let real = judge(&classic[i], &out[i]);
+        let mirror = judge(&classic[i], &mirrored(&out[i]));
+        let shifted = judge(&classic[i], &rolled(&out[i], out[i].width / 8));
+        let swapped = judge(&classic[i], &out[1 - i]);
+        let source = gate::structure(&classic[i], &out[i], KEY);
+        println!(
+            "portrait {i}: layout real {:.3} (source scale {:.3}), mirrored {:.3} {:?}, \
+             shifted 1/8 {:.3} {:?}, swapped {:.3} {:?}",
+            real.structure.unwrap(),
+            source.unwrap(),
+            mirror.structure.unwrap(),
+            mirror.failures(&t),
+            shifted.structure.unwrap(),
+            shifted.failures(&t),
+            swapped.structure.unwrap(),
+            swapped.failures(&t),
+        );
+        assert!(real.pass(&t), "{real:?}");
+        // The source-scale edge measure fails the same repaint.
+        assert!(source.unwrap() < t.structure);
+        // Each control fails, and the layout correlation alone would catch it.
+        for (what, m) in [
+            ("mirrored", mirror),
+            ("shifted", shifted),
+            ("swapped", swapped),
+        ] {
+            assert!(!m.pass(&t), "{what} {i}: {m:?}");
+            assert!(m.failures(&t).contains(&"structure"), "{what} {i}: {m:?}");
+        }
+    }
+    // Bitmaps keep the source-scale gate.
+    let paper = g.classic(ImageId::Bitmap(Role::Paper)).unwrap();
+    let m = gate::judge(&paper.scaled(8, KEY), &paper, KEY, gate::Scale::Source).1;
+    assert!(m.structure.unwrap() > 0.99);
+    assert_eq!(ingest::scale_of(Class::Portrait), gate::Scale::Layout);
+    assert_eq!(ingest::scale_of(Class::Bitmap), gate::Scale::Source);
 }
