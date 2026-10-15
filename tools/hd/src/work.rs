@@ -1,21 +1,36 @@
-//! The work dir (default `~/Games/ultima6/hd/`), where every output lives: never inside the
-//! repository this tool was built from (spec 07 Rights).
+//! The work dir (default `~/Games/ultima6/hd/`), where every output lives, and the one way the
+//! tool writes: never inside a git work tree or the repository this tool was built from (spec 07
+//! Rights).
 //!
 //! ```text
+//! atlas.json          the atlas generation every job and output is bound to
 //! jobs.jsonl          one line per sheet (atlas, then the re-rolls ingest adds)
 //! sheets/<id>.png     what run sends
-//! codex/<id>/         the codex call's working dir and its event log
-//! out/<id>.png        what came back
+//! codex/<id>/         the codex call's working dir, its event log and stderr
+//! out/<id>.png        what came back, and out/<id>.json its receipt (run::Receipt)
 //! runs.jsonl          one line per call: sheet, ok, seconds
 //! gates.jsonl         one line per image per attempt: ids and metrics
 //! slices/<image>.png  the images that passed: the ×8 RGBA masters (the pack is ×4)
-//! ingest.json         the images pack takes: id, hash, slice
+//! ingest.json         the images pack takes: id, hash, size, slice
 //! coverage.txt        records by class: generated / fallback / failed / pending (counts)
+//! diagnostic.txt      details of a failed game load (0600; the terminal gets a category)
 //! pack/u6-hdpack.zip  the pack
 //! ```
+//!
+//! Every write goes through [`write_file`], [`create_temp`] or [`ensure_dir`], which check the
+//! actual target when it is written: the path is absolute with no `..`; its directory, resolved
+//! through every symlink, lies outside every protected tree (any directory with a `.git` entry
+//! above it, which covers the primary checkout and every linked worktree, and the build tree
+//! itself); the file itself is not a symlink; the bytes go to a fresh temporary file created
+//! with `O_EXCL` (which never follows or reuses an existing name) and are renamed over the
+//! target. A directory swapped for a symlink between the check and the write is not caught (the
+//! owner's own machine; the window is a few system calls).
 
+use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::atlas::Job;
 
@@ -31,43 +46,149 @@ pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// `path` with its nearest existing ancestor resolved (the rest appended as given).
-fn resolved(path: &Path) -> PathBuf {
-    let mut rest = Vec::new();
-    let mut p = path.to_path_buf();
-    loop {
-        if let Ok(c) = p.canonicalize() {
-            let mut out = c;
-            for part in rest.iter().rev() {
-                out.push(part);
-            }
-            return out;
-        }
-        match (p.file_name().map(|n| n.to_os_string()), p.parent()) {
-            (Some(name), Some(parent)) => {
-                rest.push(name);
-                p = parent.to_path_buf();
-            }
-            _ => return path.to_path_buf(),
-        }
+/// `path` made absolute; refused with a `..` component.
+fn absolute(path: &Path) -> Result<PathBuf, String> {
+    let abs = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if abs.components().any(|c| c == Component::ParentDir) {
+        return Err(format!("{}: a path with `..` is refused", path.display()));
     }
+    Ok(abs)
 }
 
-/// Refuses an output path inside the repository.
-pub fn check_outside_repo(path: &Path) -> Result<(), String> {
-    let p = resolved(&std::path::absolute(path).map_err(|e| e.to_string())?);
-    let repo = resolved(&repo_root());
-    if p.starts_with(&repo) {
+/// Why `dir` (resolved, existing) is protected, if it is.
+fn protected(dir: &Path) -> Option<String> {
+    let build = repo_root();
+    let build = build.canonicalize().unwrap_or(build);
+    if dir.starts_with(&build) {
+        return Some("inside the repository".into());
+    }
+    dir.ancestors()
+        .find(|a| std::fs::symlink_metadata(a.join(".git")).is_ok())
+        .map(|a| format!("inside the git work tree {}", a.display()))
+}
+
+/// Refuses `path` (made absolute) if its nearest existing ancestor, resolved, is protected.
+pub fn check_target(path: &Path) -> Result<(), String> {
+    let abs = absolute(path)?;
+    let existing = abs
+        .ancestors()
+        .find(|a| std::fs::symlink_metadata(a).is_ok())
+        .ok_or_else(|| format!("{}: no existing ancestor", path.display()))?;
+    let resolved = existing
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", existing.display()))?;
+    if let Some(why) = protected(&resolved) {
         return Err(format!(
-            "{}: inside the repository; the tool writes only outside it (spec 07 Rights)",
+            "{}: {why}; the tool writes only outside it (spec 07 Rights)",
             path.display()
         ));
     }
     Ok(())
 }
 
+/// Creates `dir` and its parents after checking them; returns it resolved (and checked again).
+pub fn ensure_dir(dir: &Path) -> Result<PathBuf, String> {
+    check_target(dir)?;
+    let abs = absolute(dir)?;
+    std::fs::create_dir_all(&abs).map_err(|e| format!("{}: {e}", abs.display()))?;
+    let resolved = abs
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", abs.display()))?;
+    if let Some(why) = protected(&resolved) {
+        return Err(format!("{}: {why}", dir.display()));
+    }
+    Ok(resolved)
+}
+
+static TEMP: AtomicU64 = AtomicU64::new(0);
+
+/// A new temporary file for `path` (created with `O_EXCL`, so never an existing name or a
+/// symlink) in `path`'s checked directory: the file, its path, and the target to commit to.
+pub fn create_temp(path: &Path, mode: u32) -> Result<(std::fs::File, PathBuf, PathBuf), String> {
+    let abs = absolute(path)?;
+    let (Some(parent), Some(name)) = (abs.parent(), abs.file_name()) else {
+        return Err(format!("{}: not a file path", path.display()));
+    };
+    let dir = ensure_dir(parent)?;
+    let target = dir.join(name);
+    if let Ok(md) = std::fs::symlink_metadata(&target)
+        && !md.file_type().is_file()
+    {
+        return Err(format!(
+            "{}: exists and is not a plain file",
+            path.display()
+        ));
+    }
+    let n = TEMP.fetch_add(1, Ordering::SeqCst);
+    let tmp = dir.join(format!(
+        ".{}.{}.{n}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)
+        .map_err(|e| format!("{}: {e}", tmp.display()))?;
+    Ok((file, tmp, target))
+}
+
+/// Moves a finished temporary file over its target (refused if the target became a symlink).
+pub fn commit(tmp: &Path, target: &Path) -> Result<(), String> {
+    if let Ok(md) = std::fs::symlink_metadata(target)
+        && !md.file_type().is_file()
+    {
+        let _ = std::fs::remove_file(tmp);
+        return Err(format!(
+            "{}: exists and is not a plain file",
+            target.display()
+        ));
+    }
+    std::fs::rename(tmp, target).map_err(|e| format!("{}: {e}", target.display()))
+}
+
+/// Writes `bytes` to `path` with `mode`, the safe way (see the module doc).
+pub fn write_file_mode(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+    let (mut f, tmp, target) = create_temp(path, mode)?;
+    let written = f.write_all(bytes).and_then(|()| f.sync_all());
+    drop(f);
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", tmp.display()));
+    }
+    commit(&tmp, &target)
+}
+
+/// Writes `bytes` to `path` (0644), the safe way.
+pub fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_file_mode(path, bytes, 0o644)
+}
+
+/// Appends `text` to `path` (read, extended, written whole the safe way).
+pub fn append_file(path: &Path, text: &str) -> Result<(), String> {
+    let mut all = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    all.extend_from_slice(text.as_bytes());
+    write_file(path, &all)
+}
+
+/// FNV-1a 64 of `parts`, each prefixed by its length, as 16 hex digits.
+pub fn digest(parts: &[&[u8]]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for p in parts {
+        for b in (p.len() as u64).to_le_bytes().iter().chain(p.iter()) {
+            h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{h:016x}")
+}
+
 impl Work {
-    /// The work dir at `dir`, or the default; refused inside the repository.
+    /// The work dir at `dir`, or the default under `HOME`; refused inside a protected tree.
     pub fn open(dir: Option<&Path>) -> Result<Work, String> {
         let root = match dir {
             Some(d) => d.to_path_buf(),
@@ -76,9 +197,9 @@ impl Work {
                 Path::new(&home).join(DEFAULT_DIR)
             }
         };
-        check_outside_repo(&root)?;
+        check_target(&root)?;
         // Absolute, since the codex calls run in their own working dirs.
-        let root = std::path::absolute(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+        let root = absolute(&root)?;
         Ok(Work { root })
     }
 
@@ -94,6 +215,10 @@ impl Work {
         self.root.join("out").join(format!("{id}.png"))
     }
 
+    pub fn receipt(&self, id: &str) -> PathBuf {
+        self.root.join("out").join(format!("{id}.json"))
+    }
+
     pub fn codex_dir(&self, id: &str) -> PathBuf {
         self.root.join("codex").join(id)
     }
@@ -104,8 +229,7 @@ impl Work {
 
     pub fn mkdirs(&self) -> Result<(), String> {
         for d in ["sheets", "out", "codex", "slices", "pack"] {
-            std::fs::create_dir_all(self.root.join(d))
-                .map_err(|e| format!("{}: {e}", self.root.join(d).display()))?;
+            ensure_dir(&self.root.join(d))?;
         }
         Ok(())
     }
@@ -123,25 +247,26 @@ impl Work {
             .collect()
     }
 
-    pub fn append_jobs(&self, jobs: &[Job]) -> Result<(), String> {
-        let p = self.path("jobs.jsonl");
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&p)
-            .map_err(|e| format!("{}: {e}", p.display()))?;
+    fn jobs_text(jobs: &[Job]) -> Result<String, String> {
+        let mut text = String::new();
         for j in jobs {
-            let line = serde_json::to_string(j).map_err(|e| e.to_string())?;
-            writeln!(f, "{line}").map_err(|e| format!("{}: {e}", p.display()))?;
+            text.push_str(&serde_json::to_string(j).map_err(|e| e.to_string())?);
+            text.push('\n');
         }
-        Ok(())
+        Ok(text)
     }
 
-    /// Writes `text` to `rel` (through a temporary file).
-    pub fn write(&self, rel: &str, text: &[u8]) -> Result<(), String> {
-        let p = self.path(rel);
-        let tmp = p.with_extension("tmp");
-        std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &p).map_err(|e| format!("{}: {e}", p.display()))
+    pub fn append_jobs(&self, jobs: &[Job]) -> Result<(), String> {
+        append_file(&self.path("jobs.jsonl"), &Self::jobs_text(jobs)?)
+    }
+
+    /// Replaces `jobs.jsonl` (a new atlas).
+    pub fn write_jobs(&self, jobs: &[Job]) -> Result<(), String> {
+        write_file(&self.path("jobs.jsonl"), Self::jobs_text(jobs)?.as_bytes())
+    }
+
+    /// Writes `bytes` to `rel` under the root.
+    pub fn write(&self, rel: &str, bytes: &[u8]) -> Result<(), String> {
+        write_file(&self.path(rel), bytes)
     }
 }

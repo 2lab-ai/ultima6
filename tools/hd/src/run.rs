@@ -2,19 +2,28 @@
 //! `image_gen` tool (`codex exec -m gpt-6-astra`, the imagegen skill's default path: the
 //! ChatGPT account Codex is signed in to, no API key, never the CLI fallback). The built-in
 //! tool saves under `$CODEX_HOME/generated_images/<thread id>/`; the runner copies the image to
-//! `out/<sheet>.png`. A sheet is done when that file exists, so a run that stops resumes where
-//! it was. Nothing is sent without `--send`.
+//! `out/<sheet>.png` with a [`Receipt`]. Nothing is sent without `--send`.
+//!
+//! A sheet is done when its receipt names the job's [`identity`] (the atlas generation, the
+//! sheet, the attempt, the prompt text and the sheet's bytes) and the output's digest, and the
+//! output still has that digest and the size the receipt records. Anything else — no receipt,
+//! another atlas generation, a changed prompt or sheet, a changed or truncated output — is not
+//! done, and is run again. A call whose image is not a decodable PNG fails and leaves nothing.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::atlas::Job;
+use crate::img;
 use crate::prompt;
-use crate::work::Work;
+use crate::work::{self, Work};
 
 /// What makes an image from a sheet and a prompt.
 pub trait Runner: Sync {
@@ -25,12 +34,15 @@ pub trait Runner: Sync {
 
 /// The model of every call.
 pub const MODEL: &str = "gpt-6-astra";
+/// Most bytes of codex events kept per call (the rest are read and dropped).
+pub const EVENTS_MAX: u64 = 4 << 20;
 
 /// `codex exec` with the built-in image tool.
 pub struct Codex {
     pub bin: PathBuf,
     /// `$CODEX_HOME` (default `~/.codex`).
     pub home: PathBuf,
+    /// One deadline for the call: the process group, its output and the event reader.
     pub timeout: Duration,
 }
 
@@ -51,9 +63,27 @@ impl Codex {
     }
 }
 
+/// Kills every process of the group `pgid` (the call and anything it started).
+fn kill_group(pgid: u32) {
+    let _ = Command::new("/bin/kill")
+        .args(["-s", "KILL", "--", &format!("-{pgid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+enum Event {
+    Thread(String),
+    Done,
+}
+
 impl Runner for Codex {
     fn generate(&self, sheet: &Path, prompt: &str, dir: &Path) -> Result<PathBuf, String> {
-        let log = std::fs::File::create(dir.join("stderr.txt")).map_err(|e| e.to_string())?;
+        use std::os::unix::process::CommandExt;
+        let deadline = Instant::now() + self.timeout;
+        let (stderr, stderr_tmp, stderr_path) = work::create_temp(&dir.join("stderr.txt"), 0o644)?;
+        let (mut events, events_tmp, events_path) =
+            work::create_temp(&dir.join("events.jsonl"), 0o644)?;
         let mut child = Command::new(&self.bin)
             .args(["exec", "-m", MODEL, "-c", "model_reasoning_effort=low"])
             .args([
@@ -69,48 +99,74 @@ impl Runner for Codex {
             .arg("-")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(log)
+            .stderr(stderr)
+            .process_group(0)
             .spawn()
             .map_err(|e| format!("{}: {e}", self.bin.display()))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(prompt.as_bytes())
-                .map_err(|e| format!("prompt: {e}"))?;
-        }
+        let pgid = child.id();
         let stdout = child.stdout.take().ok_or("no stdout")?;
-        let events_path = dir.join("events.jsonl");
-        let reader = std::thread::spawn(move || {
-            let mut thread_id = None;
-            let mut events = String::new();
+        let (tx, rx) = mpsc::channel();
+        // The reader streams the events to their file (up to EVENTS_MAX) and reports the
+        // thread id; it ends when every process of the group has closed the pipe.
+        std::thread::spawn(move || {
+            let mut kept = 0u64;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
                     && v["type"] == "thread.started"
+                    && let Some(id) = v["thread_id"].as_str()
                 {
-                    thread_id = v["thread_id"].as_str().map(str::to_string);
+                    let _ = tx.send(Event::Thread(id.to_string()));
                 }
-                events.push_str(&line);
-                events.push('\n');
+                if kept + (line.len() as u64) < EVENTS_MAX {
+                    kept += line.len() as u64 + 1;
+                    let _ = writeln!(events, "{line}");
+                }
             }
-            let _ = std::fs::write(events_path, events);
-            thread_id
+            let _ = tx.send(Event::Done);
         });
-        let start = Instant::now();
+        if let Some(mut stdin) = child.stdin.take() {
+            // A child that does not read its prompt fails the call; the deadline still holds.
+            let _ = stdin.write_all(prompt.as_bytes());
+        }
         let status = loop {
             if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
-                break s;
+                break Some(s);
             }
-            if start.elapsed() > self.timeout {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("timed out after {} s", self.timeout.as_secs()));
+            if Instant::now() >= deadline {
+                break None;
             }
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(200));
         };
-        let thread_id = reader.join().map_err(|_| "event reader panicked")?;
+        // Whatever the call left running goes with it.
+        kill_group(pgid);
+        let _ = child.wait();
+        let mut thread_id = None;
+        let mut ended = false;
+        while !ended {
+            let left = deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_secs(5));
+            match rx.recv_timeout(left) {
+                Ok(Event::Thread(id)) => thread_id = Some(id),
+                Ok(Event::Done) | Err(mpsc::RecvTimeoutError::Disconnected) => ended = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+            }
+        }
+        let _ = work::commit(&stderr_tmp, &stderr_path);
+        let _ = work::commit(&events_tmp, &events_path);
+        let Some(status) = status else {
+            return Err(format!("timed out after {} s", self.timeout.as_secs()));
+        };
+        if !ended {
+            return Err("the call's output did not end".into());
+        }
         if !status.success() {
             return Err(format!("codex exited with {status}"));
         }
         let id = thread_id.ok_or("no thread id in the codex events")?;
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return Err("an unexpected thread id in the codex events".into());
+        }
         let images = self.home.join("generated_images").join(&id);
         let mut found: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&images)
             .map_err(|_| "no image generated".to_string())?
@@ -124,6 +180,62 @@ impl Runner for Codex {
             .map(|(_, p)| p)
             .ok_or("no image generated".into())
     }
+}
+
+/// What `out/<sheet>.json` says about `out/<sheet>.png`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Receipt {
+    pub sheet: String,
+    /// The job's [`identity`] when the call was made.
+    pub identity: String,
+    pub width: u32,
+    pub height: u32,
+    /// [`work::digest`] of the PNG bytes.
+    pub digest: String,
+}
+
+/// The identity of `job` as it is now: its atlas generation, sheet, attempt, prompt text and
+/// the bytes of the sheet that is sent.
+pub fn identity(work: &Work, job: &Job) -> Result<String, String> {
+    let sheet = img::read_capped(&work.sheet(&job.sheet), img::PNG_MAX_BYTES)?;
+    Ok(work::digest(&[
+        job.generation.as_bytes(),
+        job.sheet.as_bytes(),
+        &[job.attempt],
+        prompt::text(job).as_bytes(),
+        &sheet,
+    ]))
+}
+
+/// Records `png` as `job`'s output: refused unless it decodes; the image, then its receipt.
+pub fn record(work: &Work, job: &Job, png: &[u8]) -> Result<(), String> {
+    let (width, height) = img::png_size(png).map_err(|e| format!("not a PNG: {e}"))?;
+    img::decode_png(png, width, height).map_err(|e| format!("does not decode: {e}"))?;
+    let receipt = Receipt {
+        sheet: job.sheet.clone(),
+        identity: identity(work, job)?,
+        width,
+        height,
+        digest: work::digest(&[png]),
+    };
+    work::write_file(&work.out(&job.sheet), png)?;
+    let json = serde_json::to_vec(&receipt).map_err(|e| e.to_string())?;
+    work::write_file(&work.receipt(&job.sheet), &json)
+}
+
+/// `job`'s recorded output, if it is done (see the module doc): its PNG bytes and size.
+pub fn output(work: &Work, job: &Job) -> Option<(Vec<u8>, u32, u32)> {
+    let text = img::read_capped(&work.receipt(&job.sheet), 1 << 16).ok()?;
+    let r: Receipt = serde_json::from_slice(&text).ok()?;
+    if r.sheet != job.sheet || r.identity != identity(work, job).ok()? {
+        return None;
+    }
+    let png = img::read_capped(&work.out(&job.sheet), img::PNG_MAX_BYTES).ok()?;
+    if work::digest(&[&png]) != r.digest || img::png_size(&png).ok()? != (r.width, r.height) {
+        return None;
+    }
+    Some((png, r.width, r.height))
 }
 
 pub struct RunOptions {
@@ -158,10 +270,7 @@ pub fn run(
     out: &mut (dyn Write + Send),
 ) -> Result<RunSummary, String> {
     let jobs = work.read_jobs()?;
-    let mut pending: Vec<&Job> = jobs
-        .iter()
-        .filter(|j| !work.out(&j.sheet).exists())
-        .collect();
+    let mut pending: Vec<&Job> = jobs.iter().filter(|j| output(work, j).is_none()).collect();
     if let Some(n) = opts.limit {
         pending.truncate(n);
     }
@@ -212,25 +321,15 @@ pub fn run(
         }
     });
     let (_, _, log) = shared.into_inner().unwrap_or_else(|e| e.into_inner());
-    let path = work.path("runs.jsonl");
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    f.write_all(log.as_bytes())
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    work::append_file(&work.path("runs.jsonl"), &log)?;
     Ok(summary)
 }
 
-/// One call: the generated image copied to `out/<sheet>.png` (through a temporary name).
+/// One call: the generated image recorded as the job's output.
 fn call(work: &Work, runner: &dyn Runner, job: &Job) -> Result<(), String> {
-    let dir = work.codex_dir(&job.sheet);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let dir = work::ensure_dir(&work.codex_dir(&job.sheet))?;
     let sheet = work.sheet(&job.sheet);
     let got = runner.generate(&sheet, &prompt::text(job), &dir)?;
-    let dest = work.out(&job.sheet);
-    let tmp = dest.with_extension("png.tmp");
-    std::fs::copy(&got, &tmp).map_err(|e| format!("{}: {e}", got.display()))?;
-    std::fs::rename(&tmp, &dest).map_err(|e| format!("{}: {e}", dest.display()))
+    let png = img::read_capped(&got, img::PNG_MAX_BYTES)?;
+    record(work, job, &png)
 }

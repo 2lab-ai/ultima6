@@ -8,12 +8,12 @@ use u6_hdtool::game::{Game, synthetic};
 use u6_hdtool::gate::Thresholds;
 use u6_hdtool::group::{self, Class, Item};
 use u6_hdtool::run::{Codex, RunOptions};
-use u6_hdtool::work::Work;
+use u6_hdtool::work::{self, Work};
 use u6_hdtool::{img, ingest, pack, run};
 
 const USAGE: &str = "usage:
-  u6-hd inventory (--game PATH | --synthetic)
-  u6-hd atlas     (--game PATH | --synthetic) [--work DIR]
+  u6-hd inventory (--game PATH | --synthetic) [--work DIR]
+  u6-hd atlas     (--game PATH | --synthetic) [--work DIR] [--rebuild]
   u6-hd run       [--work DIR] [--send] [--limit N] [--parallel N] [--codex PATH]
   u6-hd ingest    (--game PATH | --synthetic) [--work DIR] [--gate NAME=VALUE]...
   u6-hd pack      [--work DIR] [--out FILE]";
@@ -29,6 +29,7 @@ struct Args {
     codex: Option<PathBuf>,
     out: Option<PathBuf>,
     gates: Thresholds,
+    rebuild: bool,
 }
 
 fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -43,6 +44,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--synthetic" => a.synthetic = true,
             "--work" => a.work = Some(value("a directory")?.into()),
             "--send" => a.send = true,
+            "--rebuild" => a.rebuild = true,
             "--limit" => {
                 let n = value("a number")?;
                 a.limit = Some(n.parse().map_err(|_| format!("bad --limit {n:?}"))?);
@@ -63,9 +65,21 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(a)
 }
 
+/// The game: the owner's files or the synthetic set. A failed load prints its category only;
+/// its details (which can name the owner's files) go to `diagnostic.txt` (0600) in the work dir.
 fn game(a: &Args) -> Result<Game, String> {
     match (&a.game, a.synthetic) {
-        (Some(p), false) => Game::load(p),
+        (Some(p), false) => Game::load(p).map_err(|f| {
+            let written = Work::open(a.work.as_deref()).and_then(|w| {
+                let text = format!("{}\n{}\n", f.category, f.detail);
+                work::write_file_mode(&w.path("diagnostic.txt"), text.as_bytes(), 0o600)?;
+                Ok(w.path("diagnostic.txt"))
+            });
+            match written {
+                Ok(p) => format!("{} (details in {})", f.category, p.display()),
+                Err(_) => f.category.to_string(),
+            }
+        }),
         (None, true) => Ok(synthetic::game()),
         _ => Err("give --game PATH (the owner's files) or --synthetic".into()),
     }
@@ -113,6 +127,10 @@ fn inventory(a: &Args) -> Result<(), String> {
     println!("portraits: {}", plan.count(Class::Portrait));
     println!("bitmaps: {}", plan.count(Class::Bitmap));
     println!("empty records: {}", plan.empty);
+    println!(
+        "mosaics joined to another that shares a record: {}",
+        plan.overlaps
+    );
     let counts = atlas::sheet_counts(&g, &numbered(&plan));
     let total: usize = counts.iter().map(|(_, n)| n).sum();
     let name = |k: SheetKind| match k {
@@ -132,21 +150,31 @@ fn inventory(a: &Args) -> Result<(), String> {
 fn atlas_cmd(a: &Args) -> Result<(), String> {
     let g = game(a)?;
     let work = Work::open(a.work.as_deref())?;
-    if work.path("jobs.jsonl").exists() {
+    if work.path("jobs.jsonl").exists() && !a.rebuild {
         return Err(format!(
-            "{} exists: the atlas is built (remove the work dir's jobs.jsonl to rebuild)",
+            "{} exists: the atlas is built (atlas --rebuild makes a new one, and every output \
+             made for the old one stops counting)",
             work.path("jobs.jsonl").display()
         ));
     }
     work.mkdirs()?;
     let plan = group::plan(&g);
+    let stamp = atlas::Stamp {
+        attempt: 1,
+        generation: atlas::new_generation(),
+        plan: plan.fingerprint(),
+    };
     let mut jobs = Vec::new();
-    atlas::layout_each(&g, &numbered(&plan), 1, 0, |job, sheet| {
+    atlas::layout_each(&g, &numbered(&plan), &stamp, 0, |job, sheet| {
         img::write_png(&work.sheet(&job.sheet), &sheet)?;
         jobs.push(job);
         Ok(())
     })?;
-    work.append_jobs(&jobs)?;
+    let meta = serde_json::json!({ "generation": stamp.generation, "plan": stamp.plan });
+    work.write("atlas.json", meta.to_string().as_bytes())?;
+    work.write_jobs(&jobs)?;
+    // What an earlier atlas accepted is not this one's.
+    work.write("ingest.json", b"[]")?;
     println!(
         "atlas: {} sheets, {} images, in {}",
         jobs.len(),
@@ -168,6 +196,12 @@ fn run_cmd(a: &Args) -> Result<(), String> {
     let s = run::run(&work, &codex, &opts, &mut out)?;
     if a.send {
         println!("run: {} calls, {} ok, {} failed", s.calls, s.ok, s.failed);
+    }
+    if s.failed > 0 {
+        return Err(format!(
+            "{} call(s) failed; the sheets that came back are kept, run again to retry the rest",
+            s.failed
+        ));
     }
     Ok(())
 }

@@ -15,7 +15,7 @@ use crate::group::{self, Class, Item};
 use crate::img::{self, Classic, Rgba};
 use crate::ingest::{self, Status};
 use crate::run::{self, RunOptions, Runner};
-use crate::work::{Work, check_outside_repo};
+use crate::work::{Work, check_target};
 use crate::{pack, prompt};
 
 /// A fresh work dir outside the repository.
@@ -35,11 +35,20 @@ fn numbered(plan: &group::Plan) -> Vec<(u32, &Item)> {
         .collect()
 }
 
-/// The synthetic game's atlas, written to `w`.
+/// The stamp of a first attempt of `plan`.
+fn stamp(plan: &group::Plan) -> atlas::Stamp {
+    atlas::Stamp {
+        attempt: 1,
+        generation: "test".into(),
+        plan: plan.fingerprint(),
+    }
+}
+
+/// `g`'s atlas, written to `w`.
 fn atlas_into(g: &Game, w: &Work) -> Vec<Job> {
     let plan = group::plan(g);
     let mut jobs = Vec::new();
-    atlas::layout_each(g, &numbered(&plan), 1, 0, |job, sheet| {
+    atlas::layout_each(g, &numbered(&plan), &stamp(&plan), 0, |job, sheet| {
         img::write_png(&w.sheet(&job.sheet), &sheet)?;
         jobs.push(job);
         Ok(())
@@ -49,15 +58,26 @@ fn atlas_into(g: &Game, w: &Work) -> Vec<Job> {
     jobs
 }
 
-/// "Generates" every pending sheet with `f` (sheet sent -> sheet back).
+/// The sheet `job` sends.
+fn sent(w: &Work, job: &Job) -> Rgba {
+    img::read_png(&w.sheet(&job.sheet), job.width, job.height).unwrap()
+}
+
+/// "Generates" every sheet not done with `f` (sheet sent -> sheet back), recorded as run
+/// records a call's image.
 fn generate(w: &Work, f: impl Fn(&Job, Rgba) -> Rgba) {
     for job in w.read_jobs().unwrap() {
-        if w.out(&job.sheet).exists() {
-            continue;
+        if run::output(w, &job).is_none() {
+            let back = f(&job, sent(w, &job));
+            run::record(w, &job, &img::encode_png(&back).unwrap()).unwrap();
         }
-        let sent = img::read_png(&w.sheet(&job.sheet)).unwrap();
-        img::write_png(&w.out(&job.sheet), &f(&job, sent)).unwrap();
     }
+}
+
+/// Records `f`'s picture for `job` again (a changed output, as from another call).
+fn regenerate(w: &Work, job: &Job, f: impl Fn(Rgba) -> Rgba) {
+    let back = f(sent(w, job));
+    run::record(w, job, &img::encode_png(&back).unwrap()).unwrap();
 }
 
 fn tile(r: u16) -> ImageId {
@@ -126,7 +146,7 @@ fn the_plan_classifies_from_the_tables() {
 fn the_atlas_lays_out_cells_by_kind() {
     let g = synthetic::game();
     let plan = group::plan(&g);
-    let sheets = atlas::layout(&g, &numbered(&plan), 1, 0);
+    let sheets = atlas::layout(&g, &numbered(&plan), &stamp(&plan), 0);
     let kinds: Vec<SheetKind> = sheets.iter().map(|(j, _)| j.kind).collect();
     assert_eq!(
         kinds,
@@ -202,7 +222,7 @@ fn the_atlas_lays_out_cells_by_kind() {
             .any(|p| p.image == atlas::image_name(tile(a + f)))
     }));
     // The same plan gives the same sheets.
-    let again = atlas::layout(&g, &numbered(&plan), 1, 0);
+    let again = atlas::layout(&g, &numbered(&plan), &stamp(&plan), 0);
     assert!(sheets.iter().zip(&again).all(|(a, b)| a == b));
 }
 
@@ -221,7 +241,7 @@ fn an_actor_goes_whole_to_a_new_sheet_when_the_current_one_is_full() {
     // 92 single cells (the objects repeated), then the 8-frame actor: 4 cells are left.
     let mut items: Vec<(u32, &Item)> = (0..92).map(|k| objects[k % objects.len()]).collect();
     items.push(actor);
-    let sheets = atlas::layout(&g, &items, 1, 0);
+    let sheets = atlas::layout(&g, &items, &stamp(&plan), 0);
     assert_eq!(sheets.len(), 2);
     assert_eq!(sheets[0].0.places.len(), 92);
     assert!(sheets[1].0.places.iter().all(|p| p.item == actor.0));
@@ -597,7 +617,12 @@ fn ingest_slices_gates_rerolls_and_reports() {
     assert_eq!((paper.image.width, paper.image.height), (64 * 4, 40 * 4));
     let t0 = p.get(tile(synthetic::OBJECTS)).unwrap();
     assert_eq!((t0.image.width, t0.image.height), (64, 64));
-    let master = img::read_png(&w.slice(&atlas::slice_name(tile(synthetic::OBJECTS)))).unwrap();
+    let master = img::read_png(
+        &w.slice(&atlas::slice_name(tile(synthetic::OBJECTS))),
+        128,
+        128,
+    )
+    .unwrap();
     assert_eq!(t0.image, img::shrink(&master, 2));
     // A pack is never written into the repository.
     let inside = crate::work::repo_root().join("site/u6-hdpack.zip");
@@ -694,7 +719,7 @@ fn run_sends_nothing_without_send_and_resumes() {
 fn prompts_name_the_layout_and_the_key() {
     let g = synthetic::game();
     let plan = group::plan(&g);
-    for (job, _) in atlas::layout(&g, &numbered(&plan), 1, 0) {
+    for (job, _) in atlas::layout(&g, &numbered(&plan), &stamp(&plan), 0) {
         let p = prompt::text(&job);
         let key = format!("#{:02x}{:02x}{:02x}", job.key[0], job.key[1], job.key[2]);
         assert!(p.contains(&key), "{:?}", job.kind);
@@ -706,10 +731,10 @@ fn prompts_name_the_layout_and_the_key() {
 #[test]
 fn outputs_stay_outside_the_repository() {
     let repo = crate::work::repo_root();
-    assert!(check_outside_repo(&repo.join("site/pack.zip")).is_err());
-    assert!(check_outside_repo(&repo.join("target/../x/y")).is_err());
+    assert!(check_target(&repo.join("site/pack.zip")).is_err());
+    assert!(check_target(&repo.join("target/../x/y")).is_err());
     assert!(Work::open(Some(&repo.join("hd"))).is_err());
-    assert!(check_outside_repo(&std::env::temp_dir().join("u6-hd-elsewhere")).is_ok());
+    assert!(check_target(&std::env::temp_dir().join("u6-hd-elsewhere")).is_ok());
 }
 
 #[test]
@@ -855,4 +880,710 @@ fn portraits_are_judged_at_the_layout_scale() {
     assert!(m.structure.unwrap() > 0.99);
     assert_eq!(ingest::scale_of(Class::Portrait), gate::Scale::Layout);
     assert_eq!(ingest::scale_of(Class::Bitmap), gate::Scale::Source);
+}
+
+#[test]
+fn motion_is_gated_on_every_moving_pair() {
+    // Grey frames: classic b is 20 levels lighter than a; an HD b at +40 keeps 2x the change,
+    // one equal to its a keeps none.
+    let grey = |v: u8| Classic {
+        width: 16,
+        height: 16,
+        px: vec![Some([v, v, v]); 256],
+    };
+    let hd = |v: u8| grey(v).scaled(8, KEY);
+    let (a, b) = (grey(100), grey(120));
+    let kept_twice = (a.clone(), b.clone(), hd(100), hd(140));
+    let kept_none = (a.clone(), b.clone(), hd(100), hd(100));
+    let pairs = vec![
+        kept_twice.clone(),
+        kept_none.clone(),
+        kept_none.clone(),
+        kept_none,
+    ];
+    // The mean of 2, 0, 0, 0 would pass a 0.5 gate; the minimum does not.
+    assert_eq!(gate::motion(&pairs), Some(0.0));
+    assert!((gate::motion(&[kept_twice]).unwrap() - 2.0).abs() < 1e-3);
+    assert!(gate::motion(&pairs).unwrap() < Thresholds::default().motion);
+}
+
+#[test]
+fn nonfinite_gates_and_metrics_fail_closed() {
+    let mut t = Thresholds::default();
+    for bad in [
+        "structure=NaN",
+        "structure=inf",
+        "shift=-1",
+        "iou=1.5",
+        "purity=-0.1",
+        "motion=3",
+        "flat=NaN",
+        "seam=-inf",
+    ] {
+        assert!(t.set(bad).is_err(), "{bad}");
+    }
+    assert_eq!(t, Thresholds::default());
+    for m in [
+        gate::Metrics {
+            structure: Some(f32::NAN),
+            ..Default::default()
+        },
+        gate::Metrics {
+            shift: Some(f32::NAN),
+            ..Default::default()
+        },
+        gate::Metrics {
+            iou: Some(f32::INFINITY),
+            ..Default::default()
+        },
+        gate::Metrics {
+            purity: Some(f32::NAN),
+            ..Default::default()
+        },
+        gate::Metrics {
+            flat: Some(f32::NAN),
+            ..Default::default()
+        },
+    ] {
+        assert!(!m.pass(&t), "{m:?}");
+    }
+    assert!(!gate::seam_passes((f32::NAN, 1.5)));
+}
+
+#[test]
+fn a_flat_source_must_stay_flat() {
+    let f = flat();
+    let t = Thresholds::default();
+    // Grain inside each source pixel (every 8 x 8 block keeps its mean): passes.
+    let mut grain = f.scaled(8, KEY);
+    for y in 0..128 {
+        for x in 0..128 {
+            let d: i32 = if (x + y) % 2 == 0 { 20 } else { -20 };
+            let v = (90 + d) as u8;
+            img::put(&mut grain, x, y, [v, v, v, 255]);
+        }
+    }
+    let m = gate::judge(&grain, &f, KEY, gate::Scale::Source).1;
+    assert_eq!(
+        (m.structure, m.shift, m.iou, m.purity),
+        (None, None, None, None)
+    );
+    assert!(m.flat.unwrap() < 1.0 && m.pass(&t), "{m:?}");
+    // An invented checker of source pixels on the flat tile: fails.
+    let mut checker = f.scaled(8, KEY);
+    for y in 0..128 {
+        for x in 0..128 {
+            let v = if (x / 8 + y / 8) % 2 == 0 { 60 } else { 120 };
+            img::put(&mut checker, x, y, [v, v, v, 255]);
+        }
+    }
+    let m = gate::judge(&checker, &f, KEY, gate::Scale::Source).1;
+    assert_eq!(m.failures(&t), ["flat"], "{m:?}");
+    // Any image with something to measure has no flatness metric.
+    assert_eq!(gate::flatness(&sprite(), &repaint(&sprite())), None);
+}
+
+#[test]
+fn hashes_are_the_engines() {
+    use u6_core::converse::{ConverseText, Msg, load_portrait};
+    use u6_formats::bitmap::Bitmap;
+    use u6_formats::lzw;
+    use u6_formats::portrait::PORTRAIT_LEN;
+    use u6_hdpack::{image_hash, tile_hash};
+    // Records: the tool's copy of an engine record hashes as the engine record does, after a
+    // change to it in place (a merged shore).
+    let mut engine = u6_core::gfx::GfxState::default();
+    engine.records[5].pixels[17] = 9;
+    engine.records[5].transparent[17] = false;
+    engine.records[5].transparent[18] = false;
+    let mut g = synthetic::game();
+    g.records = engine.records.iter().map(crate::game::Record::of).collect();
+    for r in [0u16, 5, 2047] {
+        let e = &engine.records[usize::from(r)];
+        assert_eq!(
+            g.hash(tile(r)),
+            tile_hash(&e.pixels, &e.transparent),
+            "record {r}"
+        );
+    }
+    // Portraits: the tool reads an archive as the engine's load_portrait does.
+    let images: Vec<Vec<u8>> = (0..3u8)
+        .map(|k| {
+            (0..PORTRAIT_LEN)
+                .map(|i| (i as u8).wrapping_mul(k + 3))
+                .collect()
+        })
+        .collect();
+    let items: Vec<Vec<u8>> = images.iter().map(|i| lzw::encode(i).unwrap()).collect();
+    let mut lib = Vec::new();
+    let mut at = 4 * items.len() as u32;
+    for it in &items {
+        lib.extend_from_slice(&at.to_le_bytes());
+        at += it.len() as u32;
+    }
+    for it in &items {
+        lib.extend_from_slice(it);
+    }
+    let name = b"facefile.?".to_vec();
+    let files = u6_core::Files::new([("DISK/facefile.a".to_string(), lib)].into_iter().collect());
+    let mut state = u6_core::State::empty();
+    state.converse.text = Some(ConverseText::from_pairs([(
+        Msg::PortraitFile,
+        name.clone(),
+    )]));
+    let ours = crate::game::portraits(&files, &name);
+    assert_eq!(ours.len(), 3);
+    g.portraits = ours;
+    for item in 0..3u16 {
+        // Slot s reads item s - 1 of archive a (slot 0 reads item 0; slot 1 is the hero's).
+        let npc = if item == 0 { 0 } else { item as i16 + 1 };
+        let theirs = load_portrait(&state, &files, npc).unwrap();
+        let id = ImageId::Portrait { letter: b'a', item };
+        assert_eq!(
+            g.hash(id),
+            Some(image_hash(56, 64, theirs.iter().copied())),
+            "{item}"
+        );
+    }
+    // Bitmaps: the bytes the engine's reader returns.
+    let mut raw = vec![5, 0, 3, 0];
+    raw.extend((0..15u8).map(|i| i * 7));
+    let file = lzw::encode(&raw).unwrap();
+    let bmp = Bitmap::from_lzw(&file).unwrap();
+    g.bitmaps = vec![(Role::Paper, bmp.width, bmp.height, bmp.pixels.clone())];
+    assert_eq!(
+        g.hash(ImageId::Bitmap(Role::Paper)),
+        Some(image_hash(5, 3, bmp.pixels.iter().copied()))
+    );
+}
+
+/// A temp dir for one test, outside the repository.
+fn temp(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("u6-hdtool-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.canonicalize().unwrap()
+}
+
+#[test]
+fn writes_are_checked_where_they_land() {
+    use crate::work::{ensure_dir, write_file};
+    use std::os::unix::fs::symlink;
+    let repo = crate::work::repo_root().canonicalize().unwrap();
+    let t = temp("contain");
+    let decoy = repo
+        .join("site")
+        .join(format!("u6-hd-decoy-{}.zip", std::process::id()));
+    // A symlinked output file pointing into the repository: refused, nothing written there.
+    symlink(&decoy, t.join("out.zip")).unwrap();
+    assert!(write_file(&t.join("out.zip"), b"x").is_err());
+    assert!(!decoy.exists());
+    // A symlinked ancestor into the repository with a suffix that does not exist yet.
+    symlink(repo.join("site"), t.join("link")).unwrap();
+    assert!(write_file(&t.join("link/new/deeper/file.png"), b"x").is_err());
+    assert!(ensure_dir(&t.join("link/new")).is_err());
+    assert!(!repo.join("site/new").exists());
+    // `..` anywhere.
+    assert!(write_file(&t.join("a/../b.png"), b"x").is_err());
+    assert!(Work::open(Some(&t.join("w/../w"))).is_err());
+    // A work dir's child symlinked into the repository (`sheets`).
+    let w = t.join("work");
+    std::fs::create_dir_all(&w).unwrap();
+    symlink(repo.join("site"), w.join("sheets")).unwrap();
+    let work = Work::open(Some(&w)).unwrap();
+    assert!(img::write_png(&work.sheet("s0000-a1"), &Rgba::new(2, 2)).is_err());
+    assert!(work.mkdirs().is_err());
+    assert!(!repo.join("site/s0000-a1.png").exists());
+    // Any git work tree: a directory with a `.git` entry above the target.
+    std::fs::create_dir_all(t.join("other/repo")).unwrap();
+    std::fs::write(t.join("other/repo/.git"), "gitdir: elsewhere\n").unwrap();
+    assert!(Work::open(Some(&t.join("other/repo/hd"))).is_err());
+    assert!(write_file(&t.join("other/repo/x/y.png"), b"x").is_err());
+    // The primary checkout and every linked worktree of this repository.
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let common =
+        PathBuf::from(git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
+    let mut trees = vec![common.parent().unwrap().to_path_buf()];
+    trees.extend(
+        git(&["worktree", "list", "--porcelain"])
+            .lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .map(PathBuf::from),
+    );
+    assert!(trees.len() >= 2);
+    for tree in &trees {
+        assert!(
+            Work::open(Some(&tree.join("hd-out"))).is_err(),
+            "{}",
+            tree.display()
+        );
+        assert!(check_target(&tree.join("deep/new/file.zip")).is_err());
+    }
+    // A plain write outside: lands, and a planted temp-name symlink is never followed.
+    let target = repo
+        .join("site")
+        .join(format!("u6-hd-planted-{}", std::process::id()));
+    symlink(&target, t.join("free.zip.tmp")).unwrap();
+    write_file(&t.join("free.zip"), b"ok").unwrap();
+    assert_eq!(std::fs::read(t.join("free.zip")).unwrap(), b"ok");
+    assert!(!target.exists());
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
+fn resume_is_bound_to_the_job_and_a_valid_output() {
+    let g = synthetic::game();
+    let w = work("resume");
+    let jobs = atlas_into(&g, &w);
+    generate(&w, |_, s| s);
+    assert!(jobs.iter().all(|j| run::output(&w, j).is_some()));
+    let j0 = &jobs[0];
+    // A changed output (bytes no longer the receipt's): not done.
+    let mut png = std::fs::read(w.out(&j0.sheet)).unwrap();
+    png.truncate(png.len() / 2);
+    std::fs::write(w.out(&j0.sheet), &png).unwrap();
+    assert!(run::output(&w, j0).is_none());
+    // A receipt for another attempt, sheet or generation: not done.
+    let j1 = &jobs[1];
+    let mut other = j1.clone();
+    other.attempt = 2;
+    assert!(run::output(&w, &other).is_none());
+    other = j1.clone();
+    other.generation = "rebuilt".into();
+    assert!(run::output(&w, &other).is_none());
+    // A changed sheet (what is sent): not done.
+    let mut sheet = sent(&w, j1);
+    img::put(&mut sheet, 0, 0, [1, 2, 3, 255]);
+    img::write_png(&w.sheet(&j1.sheet), &sheet).unwrap();
+    assert!(run::output(&w, j1).is_none());
+    // A call whose image does not decode records nothing.
+    assert!(run::record(&w, &jobs[2], b"\x89PNG\r\n\x1a\nnot really").is_err());
+    assert!(
+        run::output(&w, &jobs[2]).is_some(),
+        "the earlier output stays"
+    );
+    // The fake runner sees exactly the jobs that are not done.
+    let fake = Counting {
+        calls: AtomicUsize::new(0),
+    };
+    let opts = RunOptions {
+        send: true,
+        limit: None,
+        parallel: 2,
+    };
+    let s = run::run(&w, &fake, &opts, &mut Vec::new()).unwrap();
+    assert_eq!((s.pending, s.calls), (2, 2));
+    let _ = std::fs::remove_dir_all(&w.root);
+}
+
+/// The names `ingest.json` lists.
+fn accepted(w: &Work) -> std::collections::BTreeSet<String> {
+    let list: Vec<ingest::Accepted> =
+        serde_json::from_slice(&std::fs::read(w.path("ingest.json")).unwrap()).unwrap();
+    list.into_iter().map(|a| a.image).collect()
+}
+
+/// The ids in the decoded pack, after `pack`.
+fn packed(w: &Work) -> std::collections::BTreeSet<String> {
+    pack::pack(w, None).unwrap();
+    let p = read_pack(&std::fs::read(w.path("pack/u6-hdpack.zip")).unwrap()).unwrap();
+    p.images.iter().map(|i| atlas::image_name(i.id)).collect()
+}
+
+/// The names of `item`'s records that draw something.
+fn members(g: &Game, item: &Item) -> std::collections::BTreeSet<String> {
+    item.images()
+        .filter(|&id| g.classic(id).is_some_and(|c| c.has_opaque()))
+        .map(atlas::image_name)
+        .collect()
+}
+
+#[test]
+fn a_group_accepted_before_is_revoked_whole() {
+    let g = synthetic::game();
+    let plan = group::plan(&g);
+    let w = work("revoke");
+    let jobs = atlas_into(&g, &w);
+    generate(&w, |_, s| s);
+    let t = Thresholds::default();
+    ingest::ingest(&g, &w, &t).unwrap();
+    let all = accepted(&w);
+    assert_eq!(packed(&w), all);
+    let actor = of_class(&plan, Class::Actor)[0];
+    let tree = of_class(&plan, Class::Multi)[0];
+    let (actor_ids, tree_ids) = (members(&g, actor), members(&g, tree));
+    assert!(actor_ids.is_subset(&all) && tree_ids.is_subset(&all));
+    // One frame of the actor and one part of the tree come back wrong from another call.
+    let tile_job = jobs.iter().find(|j| j.kind == SheetKind::Tile).unwrap();
+    let at = |id: ImageId| {
+        let p = tile_job
+            .places
+            .iter()
+            .find(|p| p.image == atlas::image_name(id))
+            .unwrap();
+        (p.x, p.y)
+    };
+    let frame = at(tile(synthetic::ACTOR_A + 5));
+    let part = at(tile(synthetic::TREE + 2));
+    regenerate(&w, tile_job, |mut s| {
+        img::fill(&mut s, frame.0, frame.1, CELL, CELL / 2, [10, 10, 10, 255]);
+        img::fill(&mut s, part.0, part.1, CELL, CELL, [250, 250, 250, 255]);
+        s
+    });
+    ingest::ingest(&g, &w, &t).unwrap();
+    let now = accepted(&w);
+    let want: std::collections::BTreeSet<String> = all
+        .difference(&actor_ids)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .difference(&tree_ids)
+        .cloned()
+        .collect();
+    assert_eq!(now, want);
+    assert_eq!(packed(&w), want);
+    // Their masters are gone from the work dir too.
+    for name in actor_ids.iter().chain(&tree_ids) {
+        let id = atlas::parse_image(name).unwrap();
+        assert!(!w.slice(&atlas::slice_name(id)).exists(), "{name}");
+    }
+    // A motion-only failure: the same outputs as at first, a stricter motion gate.
+    let w2 = work("revoke-motion");
+    atlas_into(&g, &w2);
+    generate(&w2, |_, s| s);
+    ingest::ingest(&g, &w2, &t).unwrap();
+    let before = accepted(&w2);
+    let mut strict = t;
+    strict.set("motion=1.5").unwrap();
+    ingest::ingest(&g, &w2, &strict).unwrap();
+    let mut actors = std::collections::BTreeSet::new();
+    for a in of_class(&plan, Class::Actor) {
+        actors.extend(members(&g, a));
+    }
+    let want: std::collections::BTreeSet<String> = before.difference(&actors).cloned().collect();
+    assert_eq!(accepted(&w2), want);
+    assert_eq!(packed(&w2), want);
+    let _ = std::fs::remove_dir_all(&w.root);
+    let _ = std::fs::remove_dir_all(&w2.root);
+}
+
+/// The synthetic game with one more actor type of `frames` frames (records from 400).
+fn with_big_actor(frames: u16) -> Game {
+    let mut g = synthetic::game();
+    let base = 400u16;
+    let sample = g.records[usize::from(synthetic::ACTOR_A)].clone();
+    for f in 0..frames {
+        let mut r = sample.clone();
+        // Each frame its own: one pixel of the body moves along.
+        let at = 5 * 16 + 6 + usize::from(f % 5);
+        r.pixels[at] = (f % 20) as u8 + 1;
+        r.transparent[at] = false;
+        g.records[usize::from(base + f)] = r;
+    }
+    let ty = g
+        .basetile
+        .iter()
+        .position(|&b| b == synthetic::END)
+        .unwrap();
+    g.basetile[ty] = base;
+    g.basetile[ty + 1] = base + frames;
+    g.actor_types.push(ty as u16);
+    g
+}
+
+#[test]
+fn an_actor_over_two_sheets_is_one_group() {
+    let g = with_big_actor(100);
+    let plan = group::plan(&g);
+    let big = plan
+        .items
+        .iter()
+        .position(|i| i.class == Class::Actor && i.pieces.len() == 100)
+        .unwrap() as u32;
+    let ids = members(&g, &plan.items[big as usize]);
+    assert_eq!(ids.len(), 100);
+    let w = work("big-actor");
+    let jobs = atlas_into(&g, &w);
+    let sheets: Vec<&Job> = jobs
+        .iter()
+        .filter(|j| j.places.iter().any(|p| p.item == big))
+        .collect();
+    assert_eq!(sheets.len(), 2);
+    // Every frame on exactly one place.
+    let mut placed: Vec<&str> = sheets
+        .iter()
+        .flat_map(|j| {
+            j.places
+                .iter()
+                .filter(|p| p.item == big)
+                .map(|p| p.image.as_str())
+        })
+        .collect();
+    placed.sort_unstable();
+    assert_eq!(placed.len(), 100);
+    placed.dedup();
+    assert_eq!(placed.len(), 100);
+    let t = Thresholds::default();
+    // Only the first sheet back: pending, nothing accepted, nothing re-rolled.
+    let (first, second) = (sheets[0].clone(), sheets[1].clone());
+    let others: Vec<Job> = jobs
+        .iter()
+        .filter(|j| j.sheet != second.sheet)
+        .cloned()
+        .collect();
+    for j in &others {
+        regenerate(&w, j, |s| s);
+    }
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert!(accepted(&w).is_disjoint(&ids));
+    assert_eq!(r.rerolled_items, 0);
+    // The second comes back the wrong size: refused, the whole group queued for its re-roll
+    // (with every other item that sheet held).
+    let small = img::encode_png(&Rgba::new(SHEET_W - 2, SHEET_H)).unwrap();
+    run::record(&w, &second, &small).unwrap();
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    let on_second: std::collections::BTreeSet<u32> = second.places.iter().map(|p| p.item).collect();
+    assert_eq!(r.rerolled_items, on_second.len());
+    assert!(accepted(&w).is_disjoint(&ids));
+    let rerolls: Vec<Job> = w
+        .read_jobs()
+        .unwrap()
+        .into_iter()
+        .filter(|j| j.attempt == 2)
+        .collect();
+    assert!(rerolls.len() >= 2);
+    let again: usize = rerolls
+        .iter()
+        .map(|j| j.places.iter().filter(|p| p.item == big).count())
+        .sum();
+    assert_eq!(again, 100);
+    // The re-roll with one frame painted over: the group falls back whole.
+    let victim = rerolls
+        .iter()
+        .flat_map(|j| j.places.iter().map(move |p| (j, p)))
+        .find(|(_, p)| p.item == big)
+        .map(|(j, p)| (j.sheet.clone(), p.x, p.y))
+        .unwrap();
+    for j in &rerolls {
+        regenerate(&w, j, |mut s| {
+            if j.sheet == victim.0 {
+                img::fill(
+                    &mut s,
+                    victim.1,
+                    victim.2,
+                    CELL,
+                    CELL / 2,
+                    [10, 10, 10, 255],
+                );
+            }
+            s
+        });
+    }
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert!(accepted(&w).is_disjoint(&ids));
+    assert_eq!(r.get(Class::Actor, Status::Fallback), 100);
+    let _ = first;
+    // A clean run of the same atlas: the group is generated, each frame listed once.
+    let w2 = work("big-actor-clean");
+    atlas_into(&g, &w2);
+    generate(&w2, |_, s| s);
+    ingest::ingest(&g, &w2, &t).unwrap();
+    let list: Vec<ingest::Accepted> =
+        serde_json::from_slice(&std::fs::read(w2.path("ingest.json")).unwrap()).unwrap();
+    let mine: Vec<&str> = list
+        .iter()
+        .map(|a| a.image.as_str())
+        .filter(|n| ids.contains(*n))
+        .collect();
+    assert_eq!(mine.len(), 100);
+    let _ = std::fs::remove_dir_all(&w.root);
+    let _ = std::fs::remove_dir_all(&w2.root);
+}
+
+#[test]
+fn a_moved_place_in_the_jobs_is_refused() {
+    let g = synthetic::game();
+    let w = work("topology");
+    let mut jobs = atlas_into(&g, &w);
+    generate(&w, |_, s| s);
+    // Two parts of the tree swapped in the cell map (the sheet and its output unchanged).
+    let tile_job = jobs.iter_mut().find(|j| j.kind == SheetKind::Tile).unwrap();
+    let find = |j: &Job, id: ImageId| {
+        j.places
+            .iter()
+            .position(|p| p.image == atlas::image_name(id))
+            .unwrap()
+    };
+    let (a, b) = (
+        find(tile_job, tile(synthetic::TREE)),
+        find(tile_job, tile(synthetic::TREE + 3)),
+    );
+    let (pa, pb) = (tile_job.places[a].clone(), tile_job.places[b].clone());
+    tile_job.places[a].x = pb.x;
+    tile_job.places[a].y = pb.y;
+    tile_job.places[b].x = pa.x;
+    tile_job.places[b].y = pa.y;
+    w.write_jobs(&jobs).unwrap();
+    ingest::ingest(&g, &w, &Thresholds::default()).unwrap();
+    let plan = group::plan(&g);
+    let tree = members(&g, of_class(&plan, Class::Multi)[0]);
+    assert!(accepted(&w).is_disjoint(&tree));
+    // Jobs of another plan: refused whole.
+    let mut other = w.read_jobs().unwrap();
+    other[0].plan = "another".into();
+    w.write_jobs(&other).unwrap();
+    assert!(ingest::ingest(&g, &w, &Thresholds::default()).is_err());
+    let _ = std::fs::remove_dir_all(&w.root);
+}
+
+#[test]
+fn a_rearranged_bitmap_falls_back() {
+    let g = synthetic::game();
+    let w = work("wrong-picture");
+    atlas_into(&g, &w);
+    let paper = g.classic(ImageId::Bitmap(Role::Paper)).unwrap();
+    let (pw, ph) = (paper.width * 8, paper.height * 8);
+    // The paper comes back with its left and right halves exchanged: the same size, colours
+    // and histogram, the layout wrong. Everything else comes back as sent.
+    let swap = |job: &Job, s: Rgba| {
+        if !job.places.iter().any(|p| p.image == "b:paper") {
+            return s;
+        }
+        let mut o = s.clone();
+        let half = pw / 2;
+        o.paste(&s.rect(half, 0, half, ph), 0, 0);
+        o.paste(&s.rect(0, 0, half, ph), half, 0);
+        o
+    };
+    let t = Thresholds::default();
+    generate(&w, swap);
+    ingest::ingest(&g, &w, &t).unwrap();
+    generate(&w, swap);
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert_eq!(r.get(Class::Bitmap, Status::Fallback), 1);
+    assert_eq!(
+        r.get(Class::Bitmap, Status::Generated),
+        1,
+        "the spellbook passes"
+    );
+    assert!(!accepted(&w).contains("b:paper"));
+    assert!(accepted(&w).contains("b:spellbook"));
+    let p = packed(&w);
+    assert!(!p.contains("b:paper") && p.contains("b:spellbook"));
+    let _ = std::fs::remove_dir_all(&w.root);
+}
+
+#[test]
+fn overlapping_mosaics_are_one_item() {
+    let mut g = synthetic::game();
+    // Tiles 300, 301, 302 drawn as two double-width objects that share 301 (anchor 302 takes
+    // 301, anchor 301 takes 300).
+    let rec = g.records[usize::from(synthetic::OBJECTS)].clone();
+    for r in [300usize, 301, 302] {
+        g.records[r] = rec.clone();
+        g.records[r].pixels[0] = r as u8 % 31;
+        g.records[r].transparent[0] = false;
+    }
+    g.flags2[301] = crate::game::DOUBLE_WIDTH;
+    g.flags2[302] = crate::game::DOUBLE_WIDTH;
+    // An empty part named by two anchors: 320 is empty, 321 and 322 are double height over it
+    // (322's part is 321, 321's part is 320).
+    g.records[321] = rec.clone();
+    g.records[322] = rec;
+    g.flags2[321] = crate::game::DOUBLE_HEIGHT;
+    g.flags2[322] = crate::game::DOUBLE_HEIGHT;
+    let plan = group::plan(&g);
+    assert_eq!(plan.overlaps, 2);
+    let find = |r: u16| {
+        plan.items
+            .iter()
+            .position(|i| i.images().any(|id| id == tile(r)))
+            .unwrap()
+    };
+    assert_eq!(find(300), find(302));
+    assert_eq!(find(320), find(322));
+    let item = &plan.items[find(300)];
+    assert_eq!(item.class, Class::Multi);
+    let mut ids: Vec<ImageId> = item.images().collect();
+    ids.sort();
+    assert_eq!(ids, [tile(300), tile(301), tile(302)]);
+    // No record in two pieces anywhere.
+    let mut all: Vec<ImageId> = plan.items.iter().flat_map(|i| i.images()).collect();
+    let n = all.len();
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), n);
+}
+
+/// A `codex` stand-in that leaves `sleep 100` running with the event pipe open (its pid in
+/// `pid`), then waits `wait` seconds (or prints a thread event and exits at once when 0).
+fn lingering_stub(dir: &Path, wait: u32) -> PathBuf {
+    let p = dir.join("codex");
+    let body = format!(
+        "#!/bin/sh\ncat > /dev/null\nsleep 100 &\necho $! > \"{}\"\n\
+         echo '{{\"type\":\"thread.started\",\"thread_id\":\"t-1\"}}'\nsleep {wait}\n",
+        dir.join("pid").display()
+    );
+    std::fs::write(&p, body).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+fn alive(pid_file: &Path) -> bool {
+    let pid = std::fs::read_to_string(pid_file).unwrap();
+    std::process::Command::new("/bin/kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn one_deadline_covers_the_call_and_what_it_started() {
+    use std::time::{Duration, Instant};
+    let t = temp("deadline");
+    let codex = |wait, timeout| run::Codex {
+        bin: lingering_stub(&t, wait),
+        home: t.join("codex-home"),
+        timeout: Duration::from_secs(timeout),
+    };
+    let dir = crate::work::ensure_dir(&t.join("call")).unwrap();
+    std::fs::write(t.join("sheet.png"), b"x").unwrap();
+    // A call that hangs: stopped at the deadline, its whole group killed.
+    let start = Instant::now();
+    let r = codex(100, 2).generate(&t.join("sheet.png"), "prompt", &dir);
+    assert!(r.unwrap_err().contains("timed out"));
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        start.elapsed()
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!alive(&t.join("pid")), "the call's child outlived it");
+    // A call that exits but leaves a child holding its output: the child goes with it and
+    // the event stream ends (here with no image, so the call fails, promptly).
+    let start = Instant::now();
+    let r = codex(0, 30).generate(&t.join("sheet.png"), "prompt", &dir);
+    assert_eq!(r.unwrap_err(), "no image generated");
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        start.elapsed()
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!alive(&t.join("pid")));
+    // The events were kept, with the thread line.
+    let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    assert!(events.contains("thread.started"));
+    let _ = std::fs::remove_dir_all(&t);
 }

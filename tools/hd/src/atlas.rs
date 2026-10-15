@@ -98,6 +98,11 @@ pub struct Place {
 pub struct Job {
     /// The sheet's id: `sheets/<id>.png` is sent, `out/<id>.png` is what came back.
     pub sheet: String,
+    /// The atlas generation (`atlas.json`): a rebuilt atlas has a new one, and outputs made
+    /// for another generation are not this job's ([`crate::run::identity`]).
+    pub generation: String,
+    /// The fingerprint of the plan the item numbers refer to ([`crate::group::Plan::fingerprint`]).
+    pub plan: String,
     pub kind: SheetKind,
     /// 1 for the first call, 2 for the re-roll.
     pub attempt: u8,
@@ -323,11 +328,32 @@ fn drafts(game: &Game, items: &[(u32, &Item)]) -> Vec<Draft> {
 }
 
 /// The sheets of `items` for `attempt`, ids from `first`, rendered.
-pub fn layout(game: &Game, items: &[(u32, &Item)], attempt: u8, first: usize) -> Vec<(Job, Rgba)> {
+/// A new atlas generation: the clock and the process, digested.
+pub fn new_generation() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    crate::work::digest(&[&now.to_le_bytes(), &std::process::id().to_le_bytes()])
+}
+
+/// What every job of one layout carries: the attempt, the atlas generation, the plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    pub attempt: u8,
+    pub generation: String,
+    pub plan: String,
+}
+
+pub fn layout(
+    game: &Game,
+    items: &[(u32, &Item)],
+    stamp: &Stamp,
+    first: usize,
+) -> Vec<(Job, Rgba)> {
     drafts(game, items)
         .into_iter()
         .enumerate()
-        .map(|(n, d)| render(game, d, attempt, first + n))
+        .map(|(n, d)| render(game, d, stamp, first + n))
         .collect()
 }
 
@@ -335,12 +361,12 @@ pub fn layout(game: &Game, items: &[(u32, &Item)], attempt: u8, first: usize) ->
 pub fn layout_each(
     game: &Game,
     items: &[(u32, &Item)],
-    attempt: u8,
+    stamp: &Stamp,
     first: usize,
     mut f: impl FnMut(Job, Rgba) -> Result<(), String>,
 ) -> Result<(), String> {
     for (n, d) in drafts(game, items).into_iter().enumerate() {
-        let (job, sheet) = render(game, d, attempt, first + n);
+        let (job, sheet) = render(game, d, stamp, first + n);
         f(job, sheet)?;
     }
     Ok(())
@@ -358,7 +384,8 @@ pub fn sheet_counts(game: &Game, items: &[(u32, &Item)]) -> [(SheetKind, usize);
     .map(|k| (k, d.iter().filter(|x| x.kind == k).count()))
 }
 
-fn render(game: &Game, d: Draft, attempt: u8, n: usize) -> (Job, Rgba) {
+fn render(game: &Game, d: Draft, stamp: &Stamp, n: usize) -> (Job, Rgba) {
+    let attempt = stamp.attempt;
     let classics: Vec<Classic> = d
         .places
         .iter()
@@ -387,6 +414,8 @@ fn render(game: &Game, d: Draft, attempt: u8, n: usize) -> (Job, Rgba) {
     }
     let job = Job {
         sheet: format!("s{n:04}-a{attempt}"),
+        generation: stamp.generation.clone(),
+        plan: stamp.plan.clone(),
         kind: d.kind,
         attempt,
         prompt: d.kind.prompt_id().into(),

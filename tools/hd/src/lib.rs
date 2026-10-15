@@ -3,8 +3,8 @@
 //! every output stays in the work dir outside the repository (see [`work`]).
 //!
 //! ```text
-//! u6-hd inventory (--game PATH | --synthetic)          counts by kind, printed locally
-//! u6-hd atlas     (--game PATH | --synthetic) [--work DIR]
+//! u6-hd inventory (--game PATH | --synthetic) [--work DIR]   counts by kind, printed locally
+//! u6-hd atlas     (--game PATH | --synthetic) [--work DIR] [--rebuild]
 //! u6-hd run       [--work DIR] [--send] [--limit N] [--parallel N] [--codex PATH]
 //! u6-hd ingest    (--game PATH | --synthetic) [--work DIR] [--gate NAME=VALUE]...
 //! u6-hd pack      [--work DIR] [--out FILE]
@@ -14,7 +14,7 @@
 //! purity, seam, motion; the defaults are the spec's). `--game` takes the owner's zip, disk images or a folder of files (the page's intake reads
 //! them). `--synthetic` takes the made-up set of [`game::synthetic`] instead, so the whole
 //! pipeline (real imagegen calls included) can be run without any game art. `run` sends
-//! nothing without `--send`. There is no `export`: packs made from the game's art are derived
+//! nothing without `--send`, and exits non-zero when a call failed. There is no `export`: packs made from the game's art are derived
 //! (`derived: true`) and are never shared.
 
 pub mod atlas;

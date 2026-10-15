@@ -14,7 +14,7 @@ use crate::atlas::{self, MASTER};
 use crate::img;
 use crate::ingest::Accepted;
 use crate::run::MODEL;
-use crate::work::{Work, check_outside_repo};
+use crate::work::{self, Work};
 
 /// The civil date (UTC) of `secs` since the epoch, `YYYY-MM-DD`.
 pub fn date(secs: u64) -> String {
@@ -42,10 +42,9 @@ pub struct PackSummary {
 /// Writes the pack to `out` (default `<work>/pack/u6-hdpack.zip`).
 pub fn pack(work: &Work, out: Option<&Path>) -> Result<PackSummary, String> {
     let dest = out.map_or_else(|| work.path("pack/u6-hdpack.zip"), Path::to_path_buf);
-    check_outside_repo(&dest)?;
+    work::check_target(&dest)?;
     let list = work.path("ingest.json");
-    let text =
-        std::fs::read(&list).map_err(|e| format!("{}: {e} (run ingest first)", list.display()))?;
+    let text = img::read_capped(&list, 64 << 20).map_err(|e| format!("{e} (run ingest first)"))?;
     let accepted: Vec<Accepted> = serde_json::from_slice(&text).map_err(|e| e.to_string())?;
     let mut images = Vec::with_capacity(accepted.len());
     for a in &accepted {
@@ -53,7 +52,11 @@ pub fn pack(work: &Work, out: Option<&Path>) -> Result<PackSummary, String> {
             atlas::parse_image(&a.image).ok_or_else(|| format!("bad image id {:?}", a.image))?;
         let hash =
             u64::from_str_radix(&a.hash, 16).map_err(|_| format!("bad hash for {}", a.image))?;
-        let master = img::read_png(&work.root.join(&a.slice))?;
+        let stem = atlas::slice_name(id);
+        if a.slice != format!("slices/{stem}.png") {
+            return Err(format!("{}: not the slice of {}", a.slice, a.image));
+        }
+        let master = img::read_png(&work.slice(&stem), a.width, a.height)?;
         let image = img::shrink(&master, MASTER / SCALE);
         images.push(PackImage { id, hash, image });
     }
@@ -72,12 +75,7 @@ pub fn pack(work: &Work, out: Option<&Path>) -> Result<PackSummary, String> {
     if back.images.len() != images.len() {
         return Err("the written pack lost images".into());
     }
-    if let Some(dir) = dest.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    let tmp = dest.with_extension("zip.tmp");
-    std::fs::write(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    work::write_file(&dest, &bytes)?;
     let count = |k: Kind| back.images.iter().filter(|p| p.id.kind() == k).count();
     Ok(PackSummary {
         tiles: count(Kind::Tile),

@@ -1,7 +1,5 @@
 //! Image plumbing: PNG files, nearest scaling, the classic image type, luminance planes.
 
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
 pub use u6_hdpack::Rgba;
@@ -211,49 +209,101 @@ pub fn hd_luma(img: &Rgba, k: u32) -> Plane {
     Plane { w, h, v }
 }
 
-pub fn read_png(path: &Path) -> Result<Rgba, String> {
-    let f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut dec = png::Decoder::new(BufReader::new(f));
+/// Most bytes of PNG data the tool reads (a 1536 × 1024 RGBA sheet is 6 MiB raw).
+pub const PNG_MAX_BYTES: u64 = 64 << 20;
+
+/// A PNG's size from its header, without decoding it.
+pub fn png_size(bytes: &[u8]) -> Result<(u32, u32), String> {
+    let dec = png::Decoder::new(std::io::Cursor::new(bytes));
+    let reader = dec.read_info().map_err(|e| e.to_string())?;
+    let info = reader.info();
+    Ok((info.width, info.height))
+}
+
+/// Decodes PNG `bytes` that must be `width × height` (checked from the header before anything
+/// is allocated for the pixels) as RGBA; the decoder is held to the bytes that size needs.
+pub fn decode_png(bytes: &[u8], width: u32, height: u32) -> Result<Rgba, String> {
+    if bytes.len() as u64 > PNG_MAX_BYTES {
+        return Err("PNG file too large".into());
+    }
+    let n = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or("size overflows")?;
+    let rgba = n.checked_mul(4).ok_or("size overflows")?;
+    let mut dec = png::Decoder::new_with_limits(
+        std::io::Cursor::new(bytes),
+        png::Limits {
+            bytes: rgba.checked_add(1 << 20).ok_or("size overflows")?,
+        },
+    );
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = dec
-        .read_info()
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut buf = vec![0; reader.output_buffer_size().unwrap_or(0)];
-    let info = reader
-        .next_frame(&mut buf)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    let n = (info.width * info.height) as usize;
+    let mut reader = dec.read_info().map_err(|e| e.to_string())?;
+    let (w, h) = (reader.info().width, reader.info().height);
+    if (w, h) != (width, height) {
+        return Err(format!("{w}x{h}, expected {width}x{height}"));
+    }
+    let size = reader
+        .output_buffer_size()
+        .ok_or("PNG output size overflows")?;
+    if size > rgba {
+        return Err("PNG output larger than RGBA".into());
+    }
+    let mut buf = vec![0; size];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    let take = |k: usize| buf.get(..n * k).ok_or("PNG frame shorter than its size");
     let pixels = match info.color_type {
-        png::ColorType::Rgba => buf[..n * 4].to_vec(),
-        png::ColorType::Rgb => buf[..n * 3]
+        png::ColorType::Rgba => take(4)?.to_vec(),
+        png::ColorType::Rgb => take(3)?
             .chunks_exact(3)
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
-        png::ColorType::Grayscale => buf[..n].iter().flat_map(|&g| [g, g, g, 255]).collect(),
-        png::ColorType::GrayscaleAlpha => buf[..n * 2]
+        png::ColorType::Grayscale => take(1)?.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::GrayscaleAlpha => take(2)?
             .chunks_exact(2)
             .flat_map(|p| [p[0], p[0], p[0], p[1]])
             .collect(),
-        png::ColorType::Indexed => return Err(format!("{}: palette not expanded", path.display())),
+        png::ColorType::Indexed => return Err("palette not expanded".into()),
     };
     Ok(Rgba {
-        width: info.width,
-        height: info.height,
+        width,
+        height,
         pixels,
     })
 }
 
-pub fn write_png(path: &Path, img: &Rgba) -> Result<(), String> {
-    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    let tmp = path.with_extension("png.tmp");
+/// Reads a PNG file that must be `width × height`.
+pub fn read_png(path: &Path, width: u32, height: u32) -> Result<Rgba, String> {
+    let bytes = read_capped(path, PNG_MAX_BYTES)?;
+    decode_png(&bytes, width, height).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Reads a file of at most `max` bytes.
+pub fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    let len = std::fs::metadata(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
+    if len > max {
+        return Err(format!("{}: larger than {max} bytes", path.display()));
+    }
+    std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The PNG encoding of `img`.
+pub fn encode_png(img: &Rgba) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
     {
-        let f = File::create(&tmp).map_err(|e| err(&e))?;
-        let mut enc = png::Encoder::new(BufWriter::new(f), img.width, img.height);
+        let mut enc = png::Encoder::new(&mut out, img.width, img.height);
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
-        let mut w = enc.write_header().map_err(|e| err(&e))?;
-        w.write_image_data(&img.pixels).map_err(|e| err(&e))?;
-        w.finish().map_err(|e| err(&e))?;
+        let mut w = enc.write_header().map_err(|e| e.to_string())?;
+        w.write_image_data(&img.pixels).map_err(|e| e.to_string())?;
+        w.finish().map_err(|e| e.to_string())?;
     }
-    std::fs::rename(&tmp, path).map_err(|e| err(&e))
+    Ok(out)
+}
+
+/// Writes `img` as PNG to `path` through the tool's one safe write ([`crate::work`]).
+pub fn write_png(path: &Path, img: &Rgba) -> Result<(), String> {
+    let bytes = encode_png(img).map_err(|e| format!("{}: {e}", path.display()))?;
+    crate::work::write_file(path, &bytes)
 }

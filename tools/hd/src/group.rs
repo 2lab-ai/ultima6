@@ -92,6 +92,8 @@ pub struct Plan {
     pub shore: usize,
     /// Records that draw nothing.
     pub empty: usize,
+    /// Mosaics that shared a record with another and joined its item.
+    pub overlaps: usize,
 }
 
 impl Plan {
@@ -102,6 +104,23 @@ impl Plan {
             .filter(|i| i.class == class)
             .map(|i| i.images().count())
             .sum()
+    }
+
+    /// A digest of every item: its class and pieces (shape and images), in order. Jobs carry
+    /// it; ingest refuses jobs of another plan, since their item numbers mean other items.
+    pub fn fingerprint(&self) -> String {
+        let mut text = String::new();
+        for item in &self.items {
+            text.push_str(item.class.name());
+            for p in &item.pieces {
+                text.push_str(&format!("|{}x{}", p.w, p.h));
+                for id in &p.images {
+                    text.push_str(&format!(",{id:?}"));
+                }
+            }
+            text.push('\n');
+        }
+        crate::work::digest(&[text.as_bytes()])
     }
 
     /// Items of `class`.
@@ -147,7 +166,10 @@ pub fn plan(game: &Game) -> Plan {
             plan.empty += 1;
         }
     }
-    let free = |taken: &[bool], r: usize| r < n && (!taken[r] || empty[r]);
+    // A record is in at most one piece: `used` marks the empty records a mosaic took.
+    let mut used = vec![false; n];
+    let free =
+        |taken: &[bool], used: &[bool], r: usize| r < n && (!taken[r] || (empty[r] && !used[r]));
     for &s in &game.shore {
         let s = usize::from(s);
         if s < n && !taken[s] {
@@ -224,7 +246,9 @@ pub fn plan(game: &Game) -> Plan {
     };
 
     // Pieces of a range of tiles, anchors first from the top (a part is below its anchor).
-    let pieces_in = |range: std::ops::Range<usize>, taken: &mut Vec<bool>| -> Vec<Piece> {
+    // A mosaic that would share a record with an earlier one is not composed: its records are
+    // single pieces of the same item (an actor is accepted or falls back whole anyway).
+    let pieces_in = |range: std::ops::Range<usize>, taken: &mut Vec<bool>, used: &mut Vec<bool>| {
         let mut out: Vec<(usize, Piece)> = Vec::new();
         for t in range.clone().rev() {
             if taken[t] {
@@ -233,11 +257,12 @@ pub fn plan(game: &Game) -> Plan {
             if let Some(m) = mosaic(game, t)
                 && m.images.iter().all(|&id| {
                     let r = record(id);
-                    range.contains(&r) && free(taken, r)
+                    range.contains(&r) && free(taken, used, r)
                 })
             {
                 for &id in &m.images {
                     taken[record(id)] = true;
+                    used[record(id)] = true;
                 }
                 out.push((t, m));
             }
@@ -249,7 +274,7 @@ pub fn plan(game: &Game) -> Plan {
             }
         }
         out.sort_by_key(|(t, _)| *t);
-        out.into_iter().map(|(_, p)| p).collect()
+        out.into_iter().map(|(_, p)| p).collect::<Vec<Piece>>()
     };
 
     let mut actor_bases: Vec<usize> = game
@@ -262,7 +287,7 @@ pub fn plan(game: &Game) -> Plan {
     actor_bases.sort_unstable();
     actor_bases.dedup();
     for b in actor_bases {
-        let pieces = pieces_in(span(b), &mut taken);
+        let pieces = pieces_in(span(b), &mut taken, &mut used);
         if !pieces.is_empty() {
             plan.items.push(Item {
                 class: Class::Actor,
@@ -271,26 +296,66 @@ pub fn plan(game: &Game) -> Plan {
         }
     }
 
-    // Multi-record objects anywhere else, then the rest one by one.
+    // Multi-record objects anywhere else. Mosaics that share a record (two anchors whose parts
+    // overlap, or an empty part both name) are one item, accepted or falling back together: the
+    // first found keeps its composition, the records of the others not yet in it join as single
+    // pieces. Then the rest one by one.
+    let mut groups: Vec<(usize, Vec<Piece>)> = Vec::new();
+    let mut owner: Vec<Option<usize>> = vec![None; n];
     for t in (0..n).rev() {
         if taken[t] {
             continue;
         }
-        if let Some(m) = mosaic(game, t)
-            && m.images.iter().all(|&id| free(&taken, record(id)))
+        let Some(m) = mosaic(game, t) else { continue };
+        let records: Vec<usize> = m.images.iter().map(|&id| record(id)).collect();
+        if !records
+            .iter()
+            .all(|&r| r < n && (!taken[r] || empty[r]) && !(empty[r] && used[r]))
         {
-            for &id in &m.images {
-                taken[record(id)] = true;
+            continue;
+        }
+        let mut owners: Vec<usize> = records.iter().filter_map(|&r| owner[r]).collect();
+        owners.sort_unstable();
+        owners.dedup();
+        let Some((&into, rest)) = owners.split_first() else {
+            let g = groups.len();
+            for &r in &records {
+                owner[r] = Some(g);
             }
-            plan.items.push(Item {
-                class: Class::Multi,
-                pieces: vec![m],
-            });
+            groups.push((t, vec![m]));
+            continue;
+        };
+        for &other in rest {
+            let moved = std::mem::take(&mut groups[other].1);
+            for p in &moved {
+                for &id in &p.images {
+                    owner[record(id)] = Some(into);
+                }
+            }
+            groups[into].1.extend(moved);
+        }
+        for &r in &records {
+            if owner[r].is_none() {
+                owner[r] = Some(into);
+                groups[into].1.push(Piece::single(ImageId::Tile(r as u16)));
+            }
+        }
+        plan.overlaps += 1;
+    }
+    for (r, o) in owner.iter().enumerate() {
+        if o.is_some() {
+            taken[r] = true;
         }
     }
+    groups.retain(|(_, pieces)| !pieces.is_empty());
     // Found from the top down; listed from the bottom up.
-    let multi_at = plan.items.len() - plan.groups(Class::Multi);
-    plan.items[multi_at..].reverse();
+    groups.reverse();
+    for (_, pieces) in groups {
+        plan.items.push(Item {
+            class: Class::Multi,
+            pieces,
+        });
+    }
     for (t, done) in taken.iter_mut().enumerate() {
         if !*done {
             *done = true;

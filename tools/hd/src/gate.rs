@@ -25,8 +25,11 @@ pub struct Thresholds {
     pub purity: f32,
     /// Terrain: the wrap seam's step at most this times the interior step.
     pub seam: f32,
-    /// Actor groups: at least this share of the frame-to-frame motion kept.
+    /// Actor groups: every moving frame pair keeps at least this share of its motion.
     pub motion: f32,
+    /// A flat classic image (no structure to correlate): the slice's spread at the source
+    /// pixel, at most this many levels ([`flatness`]).
+    pub flat: f32,
 }
 
 impl Default for Thresholds {
@@ -38,6 +41,7 @@ impl Default for Thresholds {
             purity: 12.0,
             seam: 1.5,
             motion: 0.5,
+            flat: 12.0,
         }
     }
 }
@@ -51,15 +55,20 @@ impl Thresholds {
         let v: f32 = value
             .parse()
             .map_err(|_| format!("--gate {spec:?}: not a number"))?;
-        let slot = match name {
-            "structure" => &mut self.structure,
-            "shift" => &mut self.shift,
-            "iou" => &mut self.iou,
-            "purity" => &mut self.purity,
-            "seam" => &mut self.seam,
-            "motion" => &mut self.motion,
+        // Each gate's domain; NaN and the infinities are outside every one.
+        let (slot, lo, hi) = match name {
+            "structure" => (&mut self.structure, -1.0, 1.0),
+            "shift" => (&mut self.shift, 0.0, 16.0),
+            "iou" => (&mut self.iou, 0.0, 1.0),
+            "purity" => (&mut self.purity, 0.0, 255.0),
+            "seam" => (&mut self.seam, 0.0, 1000.0),
+            "motion" => (&mut self.motion, 0.0, 2.0),
+            "flat" => (&mut self.flat, 0.0, 255.0),
             _ => return Err(format!("--gate {spec:?}: unknown gate")),
         };
+        if !v.is_finite() || v < lo || v > hi {
+            return Err(format!("--gate {spec:?}: outside {lo}..={hi}"));
+        }
         *slot = v;
         Ok(())
     }
@@ -67,8 +76,8 @@ impl Thresholds {
     /// `structure>=0.9 shift<=0.5 ...`
     pub fn text(&self) -> String {
         format!(
-            "structure>={} shift<={} iou>={} purity<={} seam<={} motion>={}",
-            self.structure, self.shift, self.iou, self.purity, self.seam, self.motion
+            "structure>={} shift<={} iou>={} purity<={} seam<={} motion>={} flat<={}",
+            self.structure, self.shift, self.iou, self.purity, self.seam, self.motion, self.flat
         )
     }
 }
@@ -564,6 +573,8 @@ pub struct Metrics {
     pub shift: Option<f32>,
     pub iou: Option<f32>,
     pub purity: Option<f32>,
+    /// Only for a flat classic image ([`flatness`]).
+    pub flat: Option<f32>,
     /// Colour error before and after the transfer (reported, not gated).
     pub drift_raw: Option<f32>,
     pub drift: Option<f32>,
@@ -574,23 +585,64 @@ impl Metrics {
         self.failures(t).is_empty()
     }
 
-    /// The names of the gates it fails.
+    /// The names of the gates it fails. A metric that is not a finite number fails.
     pub fn failures(&self, t: &Thresholds) -> Vec<&'static str> {
+        let below = |v: Option<f32>, min: f32| v.is_some_and(|v| !v.is_finite() || v < min);
+        let above = |v: Option<f32>, max: f32| v.is_some_and(|v| !v.is_finite() || v > max);
         let mut out = Vec::new();
-        if self.structure.is_some_and(|v| v < t.structure) {
+        if below(self.structure, t.structure) {
             out.push("structure");
         }
-        if self.shift.is_some_and(|v| v > t.shift) {
+        if above(self.shift, t.shift) {
             out.push("shift");
         }
-        if self.iou.is_some_and(|v| v < t.iou) {
+        if below(self.iou, t.iou) {
             out.push("iou");
         }
-        if self.purity.is_some_and(|v| v > t.purity) {
+        if above(self.purity, t.purity) {
             out.push("purity");
+        }
+        if above(self.flat, t.flat) {
+            out.push("flat");
         }
         out
     }
+}
+
+/// Flat-source fidelity: for a classic image of one colour, opaque (nothing to correlate, no
+/// edge to shift, no silhouette, no background), the largest standard deviation over the three
+/// channels of the slice box-averaged to the source pixel. A repaint may add grain inside a
+/// pixel; at the source pixel it stays flat. `None` for any other image.
+pub fn flatness(classic: &Classic, raw: &Rgba) -> Option<f32> {
+    let first = classic.px[0]?;
+    if classic.px.iter().any(|p| *p != Some(first)) {
+        return None;
+    }
+    let k = raw.width / classic.width;
+    let n = f64::from(k * k);
+    let mut blocks: Vec<[f64; 3]> = Vec::with_capacity(classic.px.len());
+    for by in 0..classic.height {
+        for bx in 0..classic.width {
+            let mut acc = [0.0f64; 3];
+            for y in by * k..(by + 1) * k {
+                for x in bx * k..(bx + 1) * k {
+                    let p = img::get(raw, x, y);
+                    for i in 0..3 {
+                        acc[i] += f64::from(p[i]) / n;
+                    }
+                }
+            }
+            blocks.push(acc);
+        }
+    }
+    let m = blocks.len() as f64;
+    let sd = (0..3)
+        .map(|i| {
+            let mean = blocks.iter().map(|b| b[i]).sum::<f64>() / m;
+            (blocks.iter().map(|b| (b[i] - mean).powi(2)).sum::<f64>() / m).sqrt()
+        })
+        .fold(0.0, f64::max);
+    Some(sd as f32)
 }
 
 /// The scale structure is measured at.
@@ -628,6 +680,7 @@ pub fn judge(raw: &Rgba, classic: &Classic, key: [u8; 3], scale: Scale) -> (Rgba
         shift: shift(classic, raw, key),
         iou: iou(classic, &hd),
         purity: purity(raw, classic, key),
+        flat: flatness(classic, raw),
         drift_raw,
         drift: drift(classic, &hd),
     };
@@ -695,8 +748,9 @@ pub fn seam_passes((ratio, limit): (f32, f32)) -> bool {
 /// Motion kept across consecutive frames: for each pair (classic a, classic b, HD a, HD b) of
 /// one shape, the regression of the HD change on the classic change at source resolution
 /// (luminance over grey), Σ(ΔH·ΔC) / Σ(ΔC²): 1 when the change is repainted at full size, 0
-/// when the frames came out alike. Pairs whose classic frames are equal are skipped. The mean
-/// over the pairs (each held to 0..2), or `None` without a pair.
+/// when the frames came out alike. Pairs whose classic frames are equal are skipped. The
+/// minimum over the pairs (each held to 0..2; not a number counts as 0): every moving pair must
+/// keep its share. `None` without a pair.
 pub fn motion(pairs: &[(Classic, Classic, Rgba, Rgba)]) -> Option<f32> {
     let mut kept = Vec::new();
     for (ca, cb, ha, hb) in pairs {
@@ -711,8 +765,13 @@ pub fn motion(pairs: &[(Classic, Classic, Rgba, Rgba)]) -> Option<f32> {
             den += dc * dc;
         }
         if den > 1.0 {
-            kept.push((num / den).clamp(0.0, 2.0) as f32);
+            let r = num / den;
+            kept.push(if r.is_finite() {
+                r.clamp(0.0, 2.0) as f32
+            } else {
+                0.0
+            });
         }
     }
-    (!kept.is_empty()).then(|| kept.iter().sum::<f32>() / kept.len() as f32)
+    kept.into_iter().reduce(f32::min)
 }

@@ -46,6 +46,15 @@ pub struct Record {
 }
 
 impl Record {
+    /// The record as the engine holds it (`GfxState::records`).
+    pub fn of(t: &u6_formats::gfx::Tile) -> Record {
+        Record {
+            pixels: t.pixels.clone(),
+            transparent: t.transparent.clone(),
+            map: t.kind == TileKind::Map,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.transparent.iter().all(|&t| t)
     }
@@ -75,6 +84,20 @@ pub struct Game {
     pub portraits: Vec<(u8, u16, Vec<u8>)>,
     /// (role, width, height, bytes).
     pub bitmaps: Vec<(Role, u16, u16, Vec<u8>)>,
+}
+
+/// A failed load: a fixed category for the terminal, and the details (which may name the
+/// owner's game files or carry what the engine read) for the 0600 diagnostic file only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadFailure {
+    pub category: &'static str,
+    pub detail: String,
+}
+
+impl LoadFailure {
+    fn new(category: &'static str) -> impl FnOnce(String) -> LoadFailure {
+        move |detail| LoadFailure { category, detail }
+    }
 }
 
 /// The owner's files at `path`: a zip, an HFE or ADF image, or a folder of any of them or of
@@ -114,26 +137,20 @@ fn collect(root: &Path, path: &Path, out: &mut Vec<InputFile>) -> Result<(), Str
 }
 
 impl Game {
-    /// Loads the owner's files. Errors name a file or a table, never a value.
-    pub fn load(path: &Path) -> Result<Game, String> {
-        let files = read_files(path)?;
-        let state = State::new_game(&files).map_err(|e| format!("loading the game: {e}"))?;
+    /// Loads the owner's files.
+    pub fn load(path: &Path) -> Result<Game, LoadFailure> {
+        let files =
+            read_files(path).map_err(LoadFailure::new("the game files could not be read"))?;
+        let state = State::new_game(&files)
+            .map_err(|e| e.to_string())
+            .map_err(LoadFailure::new("the game files did not load as Ultima VI"))?;
         let palette = state
             .tables
             .palette
             .iter()
             .map(|c| [c.r, c.g, c.b])
             .collect();
-        let records = state
-            .gfx
-            .records
-            .iter()
-            .map(|t| Record {
-                pixels: t.pixels.clone(),
-                transparent: t.transparent.clone(),
-                map: t.kind == TileKind::Map,
-            })
-            .collect();
+        let records = state.gfx.records.iter().map(Record::of).collect();
         let mut in_chunks = vec![false; TILE_COUNT];
         for chunk in &state.map.chunks.chunks {
             for row in chunk {
@@ -171,7 +188,9 @@ impl Game {
             .collect();
         actor_types.sort_unstable();
         actor_types.dedup();
-        let game = files.get("game").ok_or("no game file")?;
+        let game = files.get("game").ok_or_else(|| {
+            LoadFailure::new("the game files did not load as Ultima VI")("no executable".into())
+        })?;
         let portrait_name = state
             .converse
             .text
@@ -237,7 +256,7 @@ impl Game {
         match id {
             ImageId::Tile(r) => {
                 let rec = self.records.get(usize::from(r))?;
-                Some(tile_hash(&rec.pixels, &rec.transparent))
+                tile_hash(&rec.pixels, &rec.transparent)
             }
             ImageId::Portrait { letter, item } => {
                 let (_, _, b) = self
@@ -260,7 +279,7 @@ impl Game {
 
 /// Every item of the three portrait archives, read as `load_portrait` reads one: the item's
 /// offset from the table, LZW from there, the first 56×64 bytes.
-fn portraits(files: &Files, name: &[u8]) -> Vec<(u8, u16, Vec<u8>)> {
+pub fn portraits(files: &Files, name: &[u8]) -> Vec<(u8, u16, Vec<u8>)> {
     let mut out = Vec::new();
     for letter in PORTRAIT_LETTERS {
         let mut n = name.to_vec();

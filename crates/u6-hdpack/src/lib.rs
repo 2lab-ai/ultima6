@@ -331,16 +331,20 @@ pub fn image_hash(width: u16, height: u16, pixels: impl IntoIterator<Item = u8>)
 }
 
 /// The content hash of a 16×16 tile record: its colour index per pixel, `0xFF` where it is
-/// transparent (`u6_formats::gfx::Tile::{pixels, transparent}`).
-pub fn tile_hash(pixels: &[u8], transparent: &[bool]) -> u64 {
-    image_hash(
-        TILE as u16,
-        TILE as u16,
-        pixels
-            .iter()
-            .zip(transparent)
-            .map(|(&p, &t)| if t { 0xFF } else { p }),
-    )
+/// transparent (`u6_formats::gfx::Tile::{pixels, transparent}`); `None` unless both hold
+/// exactly 256 entries.
+pub fn tile_hash(pixels: &[u8], transparent: &[bool]) -> Option<u64> {
+    let n = (TILE * TILE) as usize;
+    (pixels.len() == n && transparent.len() == n).then(|| {
+        image_hash(
+            TILE as u16,
+            TILE as u16,
+            pixels
+                .iter()
+                .zip(transparent)
+                .map(|(&p, &t)| if t { 0xFF } else { p }),
+        )
+    })
 }
 
 /// The manifest's `base`: FNV-1a 64 over (kind, letter, id LE, hash LE) of every entry in index
