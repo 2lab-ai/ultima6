@@ -733,6 +733,82 @@ fn a_stall_on_the_first_tick_of_a_run_squeezes_no_wait() {
     }
 }
 
+/// Each wait of `costs` (one run of waits from the game's first poll, ticks given by `tick(n)`):
+/// the engine ms it took and the length of the host tick it ended on.
+fn wait_ends(costs: &'static [u16], tick: impl Fn(usize) -> u32) -> Vec<(u64, u64)> {
+    let ends = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let out = std::rc::Rc::clone(&ends);
+    let mut e = crate::Engine::with_game(
+        State::empty(),
+        crate::Files::default(),
+        move |st, io| async move {
+            out.borrow_mut().push(io.now_ms());
+            for &cost in costs {
+                present::pace(&st, &io, cost).await;
+                out.borrow_mut().push(io.now_ms());
+            }
+        },
+    );
+    // The engine time after each host tick, and that tick's length.
+    let mut after = std::collections::HashMap::new();
+    let mut now = 0u64;
+    for t in 0..100_000 {
+        if e.finished() {
+            break;
+        }
+        let ms = tick(t);
+        now += u64::from(ms);
+        after.insert(now, u64::from(ms));
+        e.tick(&[], ms);
+    }
+    assert!(e.finished(), "every wait ended");
+    let ends = ends.borrow();
+    assert_eq!(ends.len(), costs.len() + 1, "every wait ended");
+    ends.windows(2)
+        .map(|w| {
+            (
+                w[1] - w[0],
+                after.get(&w[1]).copied().expect("a wait ends on a tick"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_stall_after_lateness_built_up_shortens_no_wait_by_more_than_its_tick() {
+    // Two stalls of the hosts' cap in a row early in a run of 46 ms waits at 16 ms ticks build
+    // up lateness the waits after them pay back; a third stall then falls inside a long wait,
+    // with that debt not yet paid. Every wait lasts its cost less the tick it ended on at most,
+    // and the run ends within the longest tick of the waits' sum.
+    const COSTS: [u16; 12] = [46, 46, 46, 46, 46, 427, 46, 46, 46, 311, 46, 46];
+    let stalls = [4usize, 5, 20];
+    let d = wait_ends(&COSTS, move |t| {
+        if stalls.contains(&t) {
+            HOST_MAX_TICK
+        } else {
+            16
+        }
+    });
+    println!("waits (ms, tick ended on) around stalls at ticks {stalls:?}: {d:?} for {COSTS:?}");
+    let paid = d
+        .iter()
+        .zip(&COSTS)
+        .any(|(&(ms, _), &cost)| ms < u64::from(cost));
+    assert!(paid, "some wait paid lateness back: {d:?}");
+    for (i, (&(ms, tick), &cost)) in d.iter().zip(&COSTS).enumerate() {
+        assert!(
+            ms + tick >= u64::from(cost),
+            "wait {i} of {cost} ms lasted {ms} ms, ending on a {tick} ms tick: {d:?}"
+        );
+    }
+    let took: u64 = d.iter().map(|&(ms, _)| ms).sum();
+    let want: u64 = COSTS.iter().map(|&c| u64::from(c)).sum();
+    assert!(
+        took >= want && took <= want + u64::from(HOST_MAX_TICK),
+        "the run took {took} ms for {want}"
+    );
+}
+
 /// A host's ticks for [`wait_lengths`]: a label, the length (ms) of tick n, its longest tick.
 type Host = (&'static str, fn(usize) -> u32, u64);
 

@@ -14,7 +14,7 @@ installer's own copy table (§A), with two documented deviations: a PAL fix appl
 after boot, and the `--game-first` disk set, which starts `game` directly with the byte that
 marks a character as created set, because `u` (intro, menu, character creation) stops in its intro (§C). The
 party (the hero and three companions) stands in the ruler's throne room in a fight
-with gargoyles (DATA1's objlist has the combat byte 0x1C69 = 1; [추정] the game's normal opening);
+with gargoyles (DATA1's objlist has the combat byte 0x1C69 set; [추정] the game's normal opening);
 three arrow-key presses that move the party each scroll the view by one tile (§D).
 No character-creation screen was captured: `u` never reaches its menu.
 
@@ -30,18 +30,18 @@ any picture (§5).
 
 | what | where | finding |
 |---|---|---|
-| copy table | `lea $24(a4),a3` 0x102ee6, entry size `moveq #$14,d1` 0x102f00; a4 = hunk 4 + 0 | 129 entries of 20 bytes: +0 src name, +4 dst volume (index into a4+0: PROGRAM, PORTRAIT, PLAYER, POPULACE), +5 flags, +6 dst name, +$a/+$e buffer/size, +$12 state, +$13 src disk (a4+$14: INSTALL, DATA1, DATA2) |
-| which entries a path writes | 0x103000..0x103026 | written iff flags < 2, or floppy and flags & 2, or HD and flags & 4. Floppy: 126 files. HD only: `ultima6` (Workbench launcher), its icon and the disk's icon (written as `<dir>.info`). Floppy only: `ultcli` → `PROGRAM:ultima6`, `start` → `PROGRAM:s/startup-sequence`, `c/endcli` |
+| copy table | `lea $24(a4),a3` 0x102ee6, entry size `moveq #$14,d1` 0x102f00; a4 = hunk 4 + 0 | 20-byte entries: +0 src name, +4 dst volume (index into a4+0: PROGRAM, PORTRAIT, PLAYER, POPULACE), +5 flags, +6 dst name, +$a/+$e buffer/size, +$12 state, +$13 src disk (a4+$14: INSTALL, DATA1, DATA2) |
+| which entries a path writes | 0x103000..0x103026 | written iff flags < 2, or floppy and flags & 2, or HD and flags & 4. Floppy: every entry but the HD-only ones. HD only: `ultima6` (Workbench launcher), its icon and the disk's icon (written as `<dir>.info`). Floppy only: `ultcli` → `PROGRAM:ultima6`, `start` → `PROGRAM:s/startup-sequence`, `c/endcli` |
 | decrunch | flags & 1 → 0x146748 before the write (0x102f1e/0x102f48) | every flag-1 source is PP20 and every PP20 source has flag 1; `tools/pp20.py` output = `unpacked/` byte for byte |
 | target path | 0x102f8a..0x102fe2 | floppy: `<VOLUME>:` + dst name; HD: `<dir>/` + dst name |
-| directories | 0x101cde/0x101d02 `PROGRAM:c`, `PROGRAM:s`; 0x101e3a `CreateDir("savegame")` | the PLAYER one is relative to the CLI's current dir, not `PLAYER:`. [추정] that is why the AROS run left PLAYER without `savegame/`. The builder puts it on PLAYER, where the table writes `PLAYER:savegame/*` (objlist + 69 OBJBLK) |
+| directories | 0x101cde/0x101d02 `PROGRAM:c`, `PROGRAM:s`; 0x101e3a `CreateDir("savegame")` | the PLAYER one is relative to the CLI's current dir, not `PLAYER:`. [추정] that is why the AROS run left PLAYER without `savegame/`. The builder puts it on PLAYER, where the table writes `PLAYER:savegame/*` (the save's object list and object blocks) |
 | boot block | hunk 3 + $160, written by trackdisk CMD_WRITE (0x145318), checksum 0x1452f4 | standard 1.x block: `DOS\0`, root 880, FindResident("dos.library"). PROGRAM only. All disks OFS (the installer writes `DOS\0`) |
 | entry 7's file | entry 7 (counting from 1): a picture of `u`'s on INSTALL, not on disk 1 | the read pass ignores stat()'s result (0x102e26), reuses the previous entry's size (entry 6, the picture beside it), AllocMem's it without MEMF_CLEAR (0x102e5c), read() on the failed open() reads nothing: the file is uninitialised memory. The builder writes that many zero bytes. `u` names only entry 6's file |
 
 Readback: `mkadf.py verify` compares every file with `manifest.json` through `amifs.py` and through
-amitools (`uvx --from amitools xdftool <adf> unpack`): 126/126 equal, both readers. Against the
-WU-O HD install, 122 shared names are byte-identical; entry 7's file and `PROGRAM:ultima6` (= ultcli,
-by design) differ. Free blocks: PROGRAM 48, POPULACE 403, PLAYER 408, PORTRAIT 873. The build is
+amitools (`uvx --from amitools xdftool <adf> unpack`): every file equal, both readers. Against the
+WU-O HD install, every shared name is byte-identical but entry 7's file and `PROGRAM:ultima6` (= ultcli,
+by design). Every disk keeps free blocks. The build is
 deterministic (fixed date 1991-11-21): `adf/` PROGRAM `a944beac…`, POPULACE `7dbbc468…`, PLAYER
 `e0e1daad…`, PORTRAIT `9bfef693…`.
 
@@ -91,8 +91,8 @@ expected bytes: ultcli hunk 1 +8 `moveq #0,d7` → `moveq #1,d7` (file offset `0
 run `PORTRAIT:game`, u skipped), and objlist `0x1C71 = 1`, `0x1C72 = 1`. Why the objlist bytes:
 with the stock objlist the game shows its parchment UI and the no-character message (the string
 at 0x1350a6; main 0x1351d8 tests the byte at a4-0x7b03); the loader 0x105350 reads objlist
-0x1BF1..0x1C72 to a4-0x7b84 (0x105578), so the byte is objlist 0x1C72 (the hero's portrait), 0 in
-DATA1. Values = Nuvie's new-game mapping for a male hero with portrait 1 (formats.md §7), not
+0x1BF1..0x1C72 to a4-0x7b84 (0x105578), so the byte is objlist 0x1C72 (the hero's portrait), unset
+in DATA1. Values = Nuvie's new-game mapping for a male hero with portrait 1 (formats.md §7), not
 what `u` would write. The hero's name and stats stay DATA1's.
 
 Final run `shots/play-20261014-190647/` (lores 456×313 / hires 912×313, uncropped):
@@ -172,10 +172,15 @@ other unwind rejects the run; a step not back at the prompt within 6000 frames o
 is rejected. A resume and the console mark are one page call and the console is cleared first,
 so a stop's prompt is never missed or read stale (an earlier version did, and its silent
 unwinding hid it). The emulator stands still while stopped; the stops cost the game nothing.
-`trace.py` reduces trace.json to the port's constants. Start fight, the same keys
-(`pace/trace-fight-r4`), and the castle without the fight (`U6_FIGHT_SETUP=town`: the assault
-actors e0..e2 passed over, `b` held until taken, party worktypes 2,1,1,1; keys DOWN ×5, UP ×2;
-`pace/trace-town-r4`), PAL frames, CPU clock:
+`trace.py` reduces trace.json to the port's constants; it refuses a file the run did not mark
+`complete` (trace.mjs sets it in its write after the last step). The constants below come from
+the start fight, the same keys (`pace/trace-fight-r4`), and the castle without the fight
+(`U6_FIGHT_SETUP=town`: the assault actors e0..e2 passed over, `b` held until taken, party
+worktypes 2,1,1,1; keys DOWN ×5, UP ×2; `pace/trace-town-r4`). Those two runs predate the
+`complete` flag (each logged all seven of its steps, but trace.py now refuses their files); both
+setups rerun with the flagged tool (`pace/trace-fight-r5`, `pace/trace-town-r5`) finished all
+seven steps each and are marked complete. Runs are not identical (§3), so r5 is a second
+sample, not a copy; the constants stay r4's here. PAL frames, CPU clock:
 
 | call | value | constant |
 |---|---|---|
@@ -225,7 +230,7 @@ That leaves netplay as the only injection path. To remove it: `brew uninstall fs
   PROGRAM, POPULACE, PLAYER, PORTRAIT. The HD path asks for a directory (its example in the string at 0x102a10).
 - The floppy path (measured, §3) writes `PROGRAM:s/startup-sequence` = `ultima6` / `endcli`
   (= disk 1's `start`), and `PROGRAM:ultima6` is the **CLI launcher**: byte-identical to the
-  decrunched `ultcli`. The HD path installs the Workbench `ultima6` instead (9,212 bytes).
+  decrunched `ultcli`. The HD path installs the Workbench `ultima6` instead (a different file).
   Per-disk split: PROGRAM = launcher, `u`, intro/title/menu `.new`, `.MOD` music, `c/endcli`;
   POPULACE = `book.dat`, `converse.*`, `portrait.*`, `*.bmp`; PLAYER = map/tiles/`look.lzd`;
   PORTRAIT = `game`, `end*`, `tileflag`, `schedule`, `u6.ch`, `u6.set`, `basetile`, `anim*`, `paper.bmp`.
@@ -235,15 +240,15 @@ That leaves netplay as the only injection path. To remove it: `brew uninstall fs
 | step | result | shot (lores sha256 / hires sha256) |
 |---|---|---|
 | disk1 in DF0 | the installer console window appears at about frame 2250 (45 s) | `shots/probe/t45.png` `9309e99d…`; `shots/install/01-prompt.hires.png` `6b6867d8…` |
-| floppy install, blank OFS ADFs from `mkadf.py` | asks for and fills all four disks (PROGRAM, POPULACE, PLAYER, PORTRAIT), then keeps copying (its copy message 0x102d9c, a PLAYER tile file). Not run to the end; disks not exported | `shots/install/07-disk4.hires.png` `86dd7c64…`, `09-later.hires.png` `8c467c5f…` |
-| HD install (`h`, `DH0:ULTIMA6`, `y`) on a blank 16 MB FFS HDF | completes: its decrunch message (0x102d84) for `game`, copies `savegame/*`, then the window closes (empty Workbench screen, texhash 34535989) | `shots/hd/02-path-prompt.hires.png` `204fe891…`, `04-after-copy` `99f12c12…`, `05-warp` `52cfb642…`, `06-done` `130e32ea…` |
-| installed tree | 125 files, 2,461,018 bytes. 53 top-level files and all 70 `savegame/` files (the save's object blocks and object list) are byte-identical to the PP20-unpacked set in `~/Games/ultima6/unpacked`. Extras: entry 7's file, the launcher's icon. Not installed: `installu6`, `ultcli`, `start`, `s/`, `c/` | manual run: `prev/u6-installed.hdf` `ca6c61b4…`; scripted run: `disks/u6-installed.hdf` `49fca0cd…` |
+| floppy install, blank OFS ADFs from `mkadf.py` | asks for and fills all four disks (PROGRAM, POPULACE, PLAYER, PORTRAIT), then keeps copying (its copy message: the string at 0x102d9c, three console control sequences, then the text from 0x102da2; here a PLAYER tile file). Not run to the end; disks not exported | `shots/install/07-disk4.hires.png` `86dd7c64…`, `09-later.hires.png` `8c467c5f…` |
+| HD install (`h`, `DH0:ULTIMA6`, `y`) on a blank 16 MB FFS HDF | completes: its decrunch message for `game` (the string at 0x102d84, three console control sequences, then the text from 0x102d8a), copies `savegame/*`, then the window closes (empty Workbench screen, texhash 34535989) | `shots/hd/02-path-prompt.hires.png` `204fe891…`, `04-after-copy` `99f12c12…`, `05-warp` `52cfb642…`, `06-done` `130e32ea…` |
+| installed tree | every top-level file and every `savegame/` file (the save's object blocks and object list) is byte-identical to the PP20-unpacked set in `~/Games/ultima6/unpacked`, the two extras aside. Extras: entry 7's file, the launcher's icon. Not installed: `installu6`, `ultcli`, `start`, `s/`, `c/` | manual run: `prev/u6-installed.hdf` `ca6c61b4…`; scripted run: `disks/u6-installed.hdf` `49fca0cd…` |
 | **entry 7's file defect** | the installer writes it as long as entry 6's file and all zero except one long at offset 4 (`$000925D0` in one run, `$00092668` in the other; looks like a memory address); entry 6's file is mostly nonzero. Explained in §A: the source file does not exist and the installer writes an uninitialised buffer (not an AROS fault). Replacing it with entry 6's file does not change the crash below (that swap's run under `diag/`) | — |
 | scripted `run.sh build` (exit 0) | the same prompts (installer prompt texhash 1482153914), install finished in 13,641 frames. The extracted tree is identical to the manual run's except bytes 4-7 of entry 7's file | `shots/build/01..03*.hires.png` |
 | `ultima6` from a CLI startup-sequence | prints its Workbench-only notice (0x100820) and returns (rc 0). The AROS ROM alone boots to a CLI, not a Workbench | `shots/game/diag-10.hires.png` `60121032…` |
 | `ultcli` from `DH1:ULTIMA6` | "ultcli: object not found" (the HD install does not copy it) | `boot-tree/o2.txt` |
 | `ultcli` with volumes PROGRAM/POPULACE/PLAYER/PORTRAIT on DH0-DH3 (`run.sh build` layout; `v4-*` shots from the manual-run volumes now in `prev/`, `boot-20261014-160059` from the scripted `disks/`) | grey AROS screen, then black from about frame 500 (texhash 2847054613), then a crash at about frame 1631 (§5). No picture is ever drawn; SPACE/RETURN/ESC change nothing | `shots/game/v4-10.png` = `v4-60.png` `cda9039b…`; `run.sh boot` default run: `shots/boot-20261014-160059/t10.png` = `t30.png` `cda9039b…`, `t60.png` `fb75b891…` (still black, shorter display window; [추정] from post-crash register writes) |
-| floppy install, sources on HDFs (INSTALL/DATA1/DATA2 volume HDFs from `files/d*`, the four blanks in DF0, then moved to DF1-DF3 after each label) | completes. Copying takes 32,600 frames (about 11 min, real floppy speed), then the empty Workbench screen. Result has **defects**: the map on PLAYER and the ending program and its picture on PORTRAIT are 0 bytes; a conversation file on POPULACE is shorter than the original and differs; PLAYER has no `savegame/`; entry 7's file is again near-zero. 48 other files are byte-identical to the HD install | `shots/floppy/01-prompt.hires.png` `6b6867d8…`, `02-program` `8e64fa44…` (same as the earlier floppy run), `04-copy-done` `130e32ea…`; ADFs `floppy/PROGRAM.adf` `1d496d94…`, `POPULACE.adf` `41e7d5f0…`, `PLAYER.adf` `a4e3b7c7…`, `PORTRAIT.adf` `6d3cf554…` |
+| floppy install, sources on HDFs (INSTALL/DATA1/DATA2 volume HDFs from `files/d*`, the four blanks in DF0, then moved to DF1-DF3 after each label) | completes. Copying takes 32,600 frames (about 11 min, real floppy speed), then the empty Workbench screen. Result has **defects**: the map on PLAYER and the ending program and its picture on PORTRAIT are 0 bytes; a conversation file on POPULACE is shorter than the original and differs; PLAYER has no `savegame/`; entry 7's file is again near-zero. The other files compared are byte-identical to the HD install | `shots/floppy/01-prompt.hires.png` `6b6867d8…`, `02-program` `8e64fa44…` (same as the earlier floppy run), `04-copy-done` `130e32ea…`; ADFs `floppy/PROGRAM.adf` `1d496d94…`, `POPULACE.adf` `41e7d5f0…`, `PLAYER.adf` `a4e3b7c7…`, `PORTRAIT.adf` `6d3cf554…` |
 | **boot of that floppy set** (DF0 PROGRAM, DF1 POPULACE, DF2 PLAYER, DF3 PORTRAIT) | AROS boot console (frame 1750); bitplane DMA on (0.52) from about frame 1828; heavy disk loading until about 3350; **the first title card** at about frame 3606 (audio on); **first intro scene** at about 3859; from about 4114 a garbled composite that stays unchanged (texhash 3218773203 to frame 6159; music keeps going, blitter and disk idle). In a second run the picture was already garbled at about frame 3850, and SPACE/ESC/RETURN changed nothing up to frame 7158 | `diag/floppyboot2/f03500.png` `09bdf668…` (first title card), `f03750.png` `3c21d33a…` (intro scene), `f04000.png` = `final.png` `97eb2956…` (garbled), `final.hires.png` `3bd4c185…`; keys: `shots/floppy-keys/boot-20261014-162550/*` |
 | A500-like machine (OCS, 512 KB chip + 512 KB slow, no fast) with the same volumes | AROS stays on its grey boot screen for 2319 frames (texhash 3314420245, no disk DMA). The startup-sequence never runs | `diag/a500/final.png` `36075656…` |
 

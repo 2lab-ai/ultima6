@@ -9,7 +9,7 @@
 //       U6_FIGHT_SAVE=file      save the settled start there (a full boot takes ~3 min)
 //       U6_FIGHT_SETUP=town     no fight: the start's assault actors passed over, combat broken
 //                               off (game.mjs townSetup), so the steps are the castle's world turns
-//       U6_GAME_BIN = flattened game image (hunk table and signatures)
+//       U6_GAME_BIN = flattened game image (signatures; the hunk lengths from its hunk2raw JSON)
 // The CPU sample: vAmiga's debugger console runs a command between two frames, where the
 // VBlank interrupt has just been taken (PC = the AROS level-3 handler, registers still the
 // interrupted task's); the interrupted PC is in its exception frame on the supervisor stack
