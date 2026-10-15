@@ -1,9 +1,10 @@
 //! Every wait the original's drawing time became (spec 03 §1): run through its own call site and
-//! the playback, at 16 ms ticks, at 7 ms ticks (no divisor of the costs, so the deadlines chain
-//! across ticks) and at 16 ms ticks with three polls of no time after each. Each fixture states
-//! what it should cost (the constants it charges, counted by the fixture, not read back from
-//! the pacing's own tally); the time from the game's first poll is that, to within the run's
-//! tick, at every tick pattern.
+//! the playback at each of [`TICKS`]: 16 ms ticks, 7 ms ticks (no divisor of the costs, so the
+//! deadlines chain across ticks), 16 ms ticks with three polls of no time after each, a jittery
+//! host (16, 17, 16, 33, 16 ms over and over) and a native-like one (17, 17, 16 ms, one tick of
+//! 2 ms early in the run). Each fixture states what it should cost (the constants it charges,
+//! counted by the fixture, not read back from the pacing's own tally); the time from the game's
+//! first poll is that, to within the run's longest tick, at every tick pattern.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -22,9 +23,26 @@ use crate::magic::WINDOW_FLASH_MS;
 use crate::state::State;
 use crate::ui::effects::SHAKE_MS;
 
-/// Runs `game` at ticks of `tick_ms` with `zeros` polls of no time after each: the engine time
-/// from its first poll to its end.
-fn timed<G, F>(state: State, tick_ms: u32, zeros: usize, game: G) -> u64
+/// A host's ticks: a label, the length (ms) of tick `t` (from 0), and the polls of no time
+/// after each.
+type Ticks = (&'static str, fn(usize) -> u32, usize);
+
+/// The tick patterns every fixture runs at.
+const TICKS: [Ticks; 5] = [
+    ("16 ms", |_| 16, 0),
+    ("7 ms", |_| 7, 0),
+    ("16 ms, 3 zero polls", |_| 16, 3),
+    ("16/17/16/33/16 ms", |t| [16, 17, 16, 33, 16][t % 5], 0),
+    (
+        "17/17/16 ms, one of 2 ms",
+        |t| if t == 3 { 2 } else { [17, 17, 16][t % 3] },
+        0,
+    ),
+];
+
+/// Runs `game` at the host ticks `tick` with `zeros` polls of no time after each: the engine
+/// time from its first poll to its end, and the longest tick it ran at.
+fn timed<G, F>(state: State, tick: fn(usize) -> u32, zeros: usize, game: G) -> (u64, u32)
 where
     G: FnOnce(Rc<RefCell<State>>, Rc<Io>) -> F + 'static,
     F: Future<Output = ()> + 'static,
@@ -36,35 +54,38 @@ where
         game(Rc::clone(&st), Rc::clone(&io)).await;
         out.set(Some(io.now_ms() - t0));
     });
-    for _ in 0..1_000_000 {
+    let mut longest = 0;
+    for t in 0..1_000_000 {
         if done.get().is_some() {
             break;
         }
-        e.tick(&[], tick_ms);
+        let ms = tick(t);
+        longest = longest.max(ms);
+        e.tick(&[], ms);
         for _ in 0..zeros {
             e.tick(&[], 0);
         }
     }
-    done.get().expect("the game ends")
+    (done.get().expect("the game ends"), longest)
 }
 
 /// `name`'s waits, made by `game` on a fresh `state()`, take `want` ms (the fixture's own count
-/// of the constants it charges) to within one tick at each tick pattern.
+/// of the constants it charges) to within the run's longest tick at each of [`TICKS`].
 fn same_at_any_tick<G, F>(name: &str, want: u64, state: fn() -> State, game: G)
 where
     G: Fn(Rc<RefCell<State>>, Rc<Io>) -> F + Clone + 'static,
     F: Future<Output = ()> + 'static,
 {
     let mut seen = Vec::new();
-    for (tick, zeros) in [(16u32, 0usize), (7, 0), (16, 3)] {
-        let ms = timed(state(), tick, zeros, game.clone());
-        seen.push((tick, zeros, ms));
+    for (label, tick, zeros) in TICKS {
+        let (ms, longest) = timed(state(), tick, zeros, game.clone());
+        seen.push((label, ms));
         assert!(
-            ms >= want && ms <= want + u64::from(tick),
-            "{name}: {ms} ms at {tick} ms ticks ({zeros} zero polls), want {want} + up to a tick"
+            ms >= want && ms <= want + u64::from(longest),
+            "{name}: {ms} ms at ticks of {label}, want {want} + up to {longest}"
         );
     }
-    println!("{name}: want {want} ms; (tick ms, zero polls, engine ms) {seen:?}");
+    println!("{name}: want {want} ms; (ticks, engine ms) {seen:?}");
 }
 
 /// The map window shown, centre (20, 20), actor 2 next to it (its type has a base tile), the

@@ -719,7 +719,7 @@ fn a_stalled_tick_does_not_squeeze_the_waits_after_it() {
 fn a_stall_on_the_first_tick_of_a_run_squeezes_no_wait() {
     // The run's first observed tick is a stall (the host's longest step), then normal ticks of
     // 16 or 7 ms: every wait after the one the stall falls in keeps its time, less one normal
-    // tick at most (the bound on carried lateness comes from the normal ticks, not the stall).
+    // tick at most (a wait gives up at most the tick it ends on: a normal one, not the stall).
     const COSTS: [u16; 6] = [46, 311, 46, 311, 23, 129];
     for normal in [16u32, 7] {
         let d = wait_lengths(&COSTS, move |t| if t == 1 { HOST_MAX_TICK } else { normal });
@@ -730,6 +730,48 @@ fn a_stall_on_the_first_tick_of_a_run_squeezes_no_wait() {
                 "wait {i} of {cost} ms lasted {ms} ms at {normal} ms ticks: {d:?}"
             );
         }
+    }
+}
+
+/// A host's ticks for [`wait_lengths`]: a label, the length (ms) of tick n, its longest tick.
+type Host = (&'static str, fn(usize) -> u32, u64);
+
+#[test]
+fn an_uneven_host_tick_loses_no_time_over_a_run() {
+    // Forty waits of mixed lengths at a host jittering between one frame and two (16, 17, 16,
+    // 33, 16 ms over and over) and at a native-like one (17, 17, 16 ms, one tick of 2 ms early
+    // in the run): every wait ends within the run's longest tick of the sum of the waits up to
+    // it, so what one wait ends late the waits after it make up, whatever tick it ended on.
+    const BASE: [u16; 10] = [46, 20, 311, 24, 26, 128, 47, 20, 427, 24];
+    const COSTS: [u16; 40] = {
+        let mut a = [0; 40];
+        let mut i = 0;
+        while i < 40 {
+            a[i] = BASE[i % 10];
+            i += 1;
+        }
+        a
+    };
+    let hosts: [Host; 2] = [
+        ("16/17/16/33/16 ms", |t| [16, 17, 16, 33, 16][t % 5], 33),
+        (
+            "17/17/16 ms, one of 2 ms",
+            |t| if t == 3 { 2 } else { [17, 17, 16][t % 3] },
+            17,
+        ),
+    ];
+    for (label, tick, longest) in hosts {
+        let d = wait_lengths(&COSTS, tick);
+        let (mut took, mut want) = (0, 0);
+        for (i, (&ms, &cost)) in d.iter().zip(&COSTS).enumerate() {
+            took += ms;
+            want += u64::from(cost);
+            assert!(
+                took >= want && took <= want + longest,
+                "{label}: waits 0..={i} took {took} ms, want {want} + up to {longest}"
+            );
+        }
+        println!("{label}: {} waits, {took} ms for {want}", d.len());
     }
 }
 
