@@ -88,6 +88,7 @@ fn engine_boots_draws_and_moves_the_view() {
     let mut sorted = logged.clone();
     sorted.sort_unstable();
     ids.sort_unstable();
-    assert!(sorted == ids, "{log:?}");
+    // The engine's log can quote the game: a fixed label only (spec 01 §Rights).
+    u6_testkit::assert_same!(sorted, ids, "stub log lines vs stub ids hit");
     assert!(engine.take_log().is_empty());
 }
