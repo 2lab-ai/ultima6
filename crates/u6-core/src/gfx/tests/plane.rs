@@ -813,9 +813,8 @@ fn pointer_covers(p: &Playback, x: usize, y: usize) -> bool {
 
 /// Records 1 and 5 have the same pixels. The screen shows record 1, the synchronous code presents
 /// the recorded frame ([`Playback::shot`], recorded), then record 1 again (its last picture); then
-/// the playback. Returns the engine after it and its (frame version, source version) after each
-/// tick.
-fn equal_colours(p: Playback) -> (Engine, Vec<(u64, u64)>) {
+/// the playback. Returns the engine after it and what each tick left ([`Tick`]).
+fn equal_colours(p: Playback) -> (Engine, Vec<Tick>) {
     let mut s = State::empty();
     s.ui = crate::main_loop::test_support::test_ui();
     let same = |r: usize, c: usize| ((r * 16 + c) % 31 + 1) as u8;
@@ -869,28 +868,49 @@ fn equal_colours(p: Playback) -> (Engine, Vec<(u64, u64)>) {
                 .filter(|_| t == 0)
                 .map(|(x, y, _)| InputEvent::Pointer { x, y, buttons: 0 });
             e.tick(at.as_slice(), 16);
-            (e.frame_version(), e.src_version())
+            let of = |f: &Framebuffer| (f.pixels().to_vec(), f.palette);
+            Tick {
+                frame: e.frame_version(),
+                src: e.src_version(),
+                buffers: [
+                    e.io().peek_back(of),
+                    e.io().draw(|f| of(f)),
+                    e.io().published(of),
+                    of(e.frame()),
+                ],
+            }
         })
         .collect();
     (e, versions)
 }
 
-/// [`equal_colours`] with the plane off and on: the frame versions and the colours of both, the
-/// last tick's source version, and checks that the shown frame names record 1 off the pointer
-/// and nothing under it, and that the published frame and the screen name record 1.
+/// What a tick of [`equal_colours`] left: the frame and source versions, and the colours and
+/// palette of the back buffer, the screen, the published frame and the shown one.
+struct Tick {
+    frame: u64,
+    src: u64,
+    buffers: [(Vec<u8>, [u6_render::Rgb; 256]); 4],
+}
+
+/// [`equal_colours`] with the plane off and on: after every tick the frame versions, and the
+/// colours and palettes of the four buffers (back, screen, published, shown), are the same; the
+/// run without the plane has no source version. Then checks that the shown frame names record 1
+/// off the pointer and nothing under it, and that the published frame and the screen name record
+/// 1. Returns the last tick's source version.
 fn equal_colours_pair(p: Playback, what: &str) -> u64 {
     let (off, plain) = equal_colours(Playback { plane: false, ..p });
-    let (on, versions) = equal_colours(Playback { plane: true, ..p });
-    let frames = |v: &[(u64, u64)]| v.iter().map(|p| p.0).collect::<Vec<_>>();
-    assert_eq!(
-        frames(&versions),
-        frames(&plain),
-        "{what}: the frame versions"
-    );
-    assert!(
-        plain.iter().all(|p| p.1 == 0),
-        "{what}: no plane, no source version"
-    );
+    let (on, ticks) = equal_colours(Playback { plane: true, ..p });
+    assert_eq!(ticks.len(), plain.len());
+    let names = ["back buffer", "screen", "published frame", "shown frame"];
+    for (t, (a, b)) in plain.iter().zip(&ticks).enumerate() {
+        assert_eq!(a.frame, b.frame, "{what}: tick {t}: the frame version");
+        assert_eq!(a.src, 0, "{what}: tick {t}: no plane, no source version");
+        for (k, name) in names.iter().enumerate() {
+            let ((pa, la), (pb, lb)) = (&a.buffers[k], &b.buffers[k]);
+            assert!(pa == pb, "{what}: tick {t}: the {name}'s colours");
+            assert!(la == lb, "{what}: tick {t}: the {name}'s palette");
+        }
+    }
     assert!(on.state().combat.effects.is_empty(), "{what}: all played");
     assert!(
         off.frame().pixels() == on.frame().pixels(),
