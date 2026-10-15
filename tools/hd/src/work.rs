@@ -100,6 +100,25 @@ pub fn ensure_dir(dir: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+/// [`ensure_dir`] for a directory the tool owns and empties (`slices/`): refused where `dir` is
+/// itself a symlink or not a directory, so what is enumerated and removed there is never a
+/// directory it points at; the resolved path.
+pub fn own_dir(dir: &Path) -> Result<PathBuf, String> {
+    let abs = absolute(dir)?;
+    match std::fs::symlink_metadata(&abs) {
+        Ok(m) if !m.file_type().is_dir() => {
+            return Err(format!(
+                "{}: not a directory of the work dir (a symlink is not followed)",
+                dir.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+    }
+    ensure_dir(&abs)
+}
+
 static TEMP: AtomicU64 = AtomicU64::new(0);
 
 /// A new temporary file for `path` (created with `O_EXCL`, so never an existing name or a

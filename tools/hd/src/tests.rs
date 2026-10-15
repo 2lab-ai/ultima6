@@ -2065,3 +2065,36 @@ fn the_call_s_image_is_removed_only_once_recorded() {
     let _ = std::fs::remove_dir_all(&at);
     let _ = std::fs::remove_dir_all(&w.root);
 }
+
+#[test]
+fn ingest_never_empties_a_directory_slices_points_at() {
+    let g = synthetic::game();
+    let t = temp("slices-link");
+    // A repository (a `.git` entry above it) and a plain directory, each with a file in it.
+    std::fs::create_dir_all(t.join("repo/.git")).unwrap();
+    std::fs::create_dir_all(t.join("repo/site")).unwrap();
+    std::fs::create_dir_all(t.join("plain")).unwrap();
+    for target in [t.join("repo/site"), t.join("plain")] {
+        std::fs::write(target.join("t-1.png"), b"planted").unwrap();
+        std::fs::write(target.join("index.html"), b"planted").unwrap();
+        let w = work("slices-link");
+        atlas_into(&g, &w);
+        std::fs::remove_dir(w.path("slices")).unwrap();
+        std::os::unix::fs::symlink(&target, w.path("slices")).unwrap();
+        let e = ingest::ingest(&g, &w, &Thresholds::default()).unwrap_err();
+        assert!(e.contains("a symlink is not followed"), "{e}");
+        for f in ["t-1.png", "index.html"] {
+            assert_eq!(std::fs::read(target.join(f)).unwrap(), b"planted", "{f}");
+        }
+        let _ = std::fs::remove_dir_all(&w.root);
+    }
+    // A file in place of the directory: refused too, left as it is.
+    let w = work("slices-file");
+    atlas_into(&g, &w);
+    std::fs::remove_dir(w.path("slices")).unwrap();
+    std::fs::write(w.path("slices"), b"x").unwrap();
+    assert!(ingest::ingest(&g, &w, &Thresholds::default()).is_err());
+    assert_eq!(std::fs::read(w.path("slices")).unwrap(), b"x");
+    let _ = std::fs::remove_dir_all(&w.root);
+    let _ = std::fs::remove_dir_all(&t);
+}

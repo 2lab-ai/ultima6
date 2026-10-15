@@ -18,7 +18,7 @@ use crate::gate::{self, Metrics, Thresholds};
 use crate::group::{self, Class, Item};
 use crate::img::{self, Classic, Rgba};
 use crate::run;
-use crate::work::Work;
+use crate::work::{self, Work};
 
 /// Where an item stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -334,6 +334,8 @@ fn matches_item(item: &Item, judged: &[Judged]) -> bool {
 /// Runs ingest over the work dir with the thresholds `t`.
 pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String> {
     let jobs = work.read_jobs()?;
+    // Checked before anything is written there, and again before it is emptied.
+    work::own_dir(&work.path("slices"))?;
     let plan = group::plan(game);
     let fingerprint = plan.fingerprint();
     let generation = jobs
@@ -507,13 +509,16 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
     // A master no longer accepted (its group failed since, or the atlas was rebuilt) goes.
     let keep: std::collections::BTreeSet<String> =
         accepted.iter().map(|a| a.slice.clone()).collect();
-    if let Ok(dir) = std::fs::read_dir(work.path("slices")) {
-        for e in dir.flatten() {
-            let rel = format!("slices/{}", e.file_name().to_string_lossy());
-            let plain = e.file_type().is_ok_and(|t| t.is_file());
-            if plain && !keep.contains(&rel) {
-                std::fs::remove_file(e.path()).map_err(|err| format!("{rel}: {err}"))?;
-            }
+    let slices = work::own_dir(&work.path("slices"))?;
+    let entries = std::fs::read_dir(&slices).map_err(|e| format!("{}: {e}", slices.display()))?;
+    for e in entries {
+        let e = e.map_err(|e| format!("{}: {e}", slices.display()))?;
+        let rel = format!("slices/{}", e.file_name().to_string_lossy());
+        // The entry itself (a symlink is not followed, and not removed either).
+        let plain = e.file_type().is_ok_and(|t| t.is_file());
+        if plain && !keep.contains(&rel) {
+            std::fs::remove_file(slices.join(e.file_name()))
+                .map_err(|err| format!("{rel}: {err}"))?;
         }
     }
     work.write("gates.jsonl", gates_log.as_bytes())?;
