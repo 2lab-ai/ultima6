@@ -415,8 +415,9 @@ async function readZipSlices(next, path, file) {
 // files of a `savegame/` folder among them are the save it starts from, and become the stored
 // save (replacing the old one) once it started; a drop of only such a folder resumes it with
 // the kept game files. It runs with the Saves paused (`queueImport`). The input limit is
-// checked before anything is read for the files read whole; a zip read in slices is checked
-// part by part as it is read (only those parts count).
+// checked before anything is read for the files read whole, and again before each of them
+// with what wasm already holds (the parts read of a zip read in slices included); a zip read in
+// slices is checked part by part before each is read (only those parts count).
 async function importFiles(dropped) {
   needEngine();
   const total = dropped.reduce(
@@ -450,11 +451,20 @@ async function importFiles(dropped) {
   const next = new Game();
   let started = false;
   try {
+    // The files still to be read whole, together.
+    let whole = items.reduce(
+      (sum, { path, file }) => sum + (zip_sliced(path, file.size) ? 0 : file.size), 0);
     for (const { path, file } of items) {
-      setStatus(`Reading ${path}…`);
       if (zip_sliced(path, file.size)) {
+        setStatus(`Reading ${path}…`);
         await readZipSlices(next, path, file);
       } else {
+        if (next.input_held() + whole > max_input_bytes()) {
+          setStatus(input_too_large(next.input_held() + whole));
+          return;
+        }
+        whole -= file.size;
+        setStatus(`Reading ${path}…`);
         // The JS copy lives only until wasm has its own (load_file copies it in).
         next.load_file(path, new Uint8Array(await file.arrayBuffer()));
       }

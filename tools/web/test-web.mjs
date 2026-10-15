@@ -1022,15 +1022,61 @@ test('zip: the first press on the canvas is one game click and starts the sound;
 
 // --- a large zip is read in slices ----------------------------------------------------------
 // A dropped zip over the slicing threshold (u6-web `zip_sliced`) is not copied into wasm whole:
-// the page reads its directory and its disk-image entries with Blob.slice. What the page read
-// from a dropped zip is counted in the page itself (`countZipReads`); for the user's zip the
-// counts are compared with its size and never printed (they are lengths of the user's data), for
-// a zip a test made they are printed.
+// the page reads its first bytes, its directory and its disk-image entries with Blob.slice. What
+// the page read from a dropped zip is counted in the page itself (`countZipReads`); for the
+// user's zip the counts are compared with its size and never printed (they are lengths of the
+// user's data), for a zip a test made they are printed. A zip larger than the page could hold is
+// a virtual file (`virtualFiles`): only the parts a test made exist, and a read of any other
+// byte is a forbidden request that fails.
 
 // The bound on the wasm memory after a start from the user's zip (our measurement of the
 // engine's memory, not a value of the game's files): the base copied the whole zip in.
 const ZIP_START_MEMORY_MIB = 48;
 const MiB = (n) => Math.round((n / 2 ** 20) * 10) / 10;
+
+// Page init script, before `countZipReads`: dropped files that claim another size
+// (`window.__claims`: name -> bytes) and virtual zips (`window.__virtual`: name -> { size,
+// pieces: [[offset, bytes]] }). A slice of a virtual zip is made of its pieces and zeros in its
+// last bytes (the tail the first read of a sliced zip takes, u6-intake `tail_start`); a slice
+// that touches any other byte is a forbidden request: it is recorded in `window.__forbidden` and
+// throws, so the import fails.
+function virtualFiles() {
+  window.__claims = {};
+  window.__virtual = {};
+  window.__forbidden = [];
+  const TAIL = 65_558 + 20 + 56;
+  const virtual = (b) => (b instanceof File ? window.__virtual[b.name] : undefined);
+  const size = Object.getOwnPropertyDescriptor(Blob.prototype, 'size').get;
+  Object.defineProperty(Blob.prototype, 'size', {
+    configurable: true,
+    get() {
+      const claim = (b) => (b instanceof File ? window.__claims[b.name] : undefined);
+      return virtual(this)?.size ?? claim(this) ?? size.call(this);
+    },
+  });
+  const slice = Blob.prototype.slice;
+  Blob.prototype.slice = function sliceVirtual(start = 0, end = undefined) {
+    const v = virtual(this);
+    if (!v) return slice.call(this, start, end);
+    const stop = end ?? v.size;
+    const spans = [...v.pieces.map(([at, b]) => [at, at + b.length]), [Math.max(0, v.size - TAIL), v.size]];
+    for (let at = start; at < stop;) {
+      const span = spans.find(([a, b]) => a <= at && at < b);
+      if (!span) {
+        window.__forbidden.push([start, stop]);
+        throw new Error('a forbidden request');
+      }
+      at = span[1];
+    }
+    const out = new Uint8Array(stop - start);
+    for (const [at, b] of v.pieces) {
+      const from = Math.max(start, at);
+      const to = Math.min(stop, at + b.length);
+      if (from < to) out.set(b.subarray(from - at, to - at), from - start);
+    }
+    return new Blob([out]);
+  };
+}
 
 // Page init script: the reads of dropped zips (File objects named *.zip), whole and of the slices
 // taken from them, and the zip's size.
@@ -1061,69 +1107,148 @@ function countZipReads() {
   };
 }
 
-const zipReads = (page) => page.evaluate(() => ({ ...window.__zipReads }));
+const zipReads = (page) => page.evaluate(() => ({ ...window.__zipReads, forbidden: window.__forbidden.length }));
 
-// In the page: a stored zip of `entries` ([name, length, fill byte]) made of synthetic bytes, as
-// a File named `name` dropped on the drop zone. CRCs are left 0 (the intake does not check them).
-// `localName` (same length) replaces the name in the last entry's local header only: a local
-// header that disagrees with its central entry.
-function dropMadeZip(page, name, entries, localName = null) {
-  return page.evaluate(({ name, entries, localName }) => {
-    const u16 = (v) => [v & 255, (v >>> 8) & 255];
-    const u32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
-    const parts = [];
-    const central = [];
+// Page init script: `window.__makeZip(entries)`, a zip of synthetic bytes. Each entry is
+// { name, length, fill, method, csize, full, localName }: `length` bytes of `fill` as its data,
+// `method` (default stored), the packed and unpacked sizes its records declare (default
+// `length`), and `localName` (same length) in its local header instead of `name` (a local header
+// that disagrees with its central record). CRCs are 0 (the intake does not check them). Returns
+// { head, dir, end(at) }: the local headers and data, the central directory, and the end record
+// for a directory at `at`.
+function zipKit() {
+  const u16 = (v) => [v & 255, (v >>> 8) & 255];
+  const u32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+  window.__makeZip = (entries) => {
+    const head = [];
+    const dir = [];
     let offset = 0;
-    entries.forEach(([entry, length, fill], i) => {
-      const n = [...new TextEncoder().encode(entry)];
-      const local = i === entries.length - 1 && localName ? [...new TextEncoder().encode(localName)] : n;
-      const sizes = [...u32(0), ...u32(length), ...u32(length)]; // CRC, compressed, uncompressed
-      const head = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u32(0), ...sizes,
+    for (const e of entries) {
+      const name = [...new TextEncoder().encode(e.name)];
+      const local = e.localName ? [...new TextEncoder().encode(e.localName)] : name;
+      const method = e.method ?? 0;
+      const sizes = [...u32(0), ...u32(e.csize ?? e.length), ...u32(e.full ?? e.length)];
+      const header = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(method), ...u32(0), ...sizes,
         ...u16(local.length), ...u16(0), ...local];
-      parts.push(new Uint8Array(head), new Uint8Array(length).fill(fill));
-      central.push(...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u32(0),
-        ...sizes, ...u16(n.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0),
-        ...u32(offset), ...n);
-      offset += head.length + length;
-    });
-    const end = [...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(entries.length),
-      ...u16(entries.length), ...u32(central.length), ...u32(offset), ...u16(0)];
-    parts.push(new Uint8Array(central), new Uint8Array(end));
-    const dt = new DataTransfer();
-    dt.items.add(new File(parts, name));
-    document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
-  }, { name, entries, localName });
+      head.push(new Uint8Array(header), new Uint8Array(e.length).fill(e.fill ?? 0));
+      dir.push(...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(method), ...u32(0),
+        ...sizes, ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0),
+        ...u32(offset), ...name);
+      offset += header.length + e.length;
+    }
+    const joined = new Uint8Array(offset);
+    let at = 0;
+    for (const part of head) {
+      joined.set(part, at);
+      at += part.length;
+    }
+    const end = (cd) => new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(entries.length),
+      ...u16(entries.length), ...u32(dir.length), ...u32(cd), ...u16(0)]);
+    return { head: joined, dir: new Uint8Array(dir), end };
+  };
 }
 
-test('a large zip (synthetic) is read in slices: its directory and its disk image only; one whose local header disagrees is refused and nothing is kept', async (env) => {
+// In the page: drops the files `files` on the drop zone, in this order. Each is { zip, name }
+// (a zip of the entries `zip`, see `zipKit`), { virtual, size, name } (the zip of the entries
+// `virtual` as a file of `size` bytes: its entries at the start, with the zeros an entry's range
+// may run on when no record follows it, the longest local extra field, its directory and end
+// record at the end), or { claims, name } (a file of a few bytes that claims `claims` bytes).
+function dropMade(page, files) {
+  return page.evaluate((files) => {
+    const dt = new DataTransfer();
+    for (const f of files) {
+      if (f.zip) {
+        const z = window.__makeZip(f.zip);
+        dt.items.add(new File([z.head, z.dir, z.end(z.head.length)], f.name));
+      } else if (f.virtual) {
+        const z = window.__makeZip(f.virtual);
+        const at = f.size - 22 - z.dir.length;
+        const head = new Uint8Array(z.head.length + 0xffff);
+        head.set(z.head);
+        const tail = new Uint8Array([...z.dir, ...z.end(at)]);
+        window.__virtual[f.name] = { size: f.size, pieces: [[0, head], [at, tail]] };
+        dt.items.add(new File(['virtual'], f.name));
+      } else {
+        window.__claims[f.name] = f.claims;
+        dt.items.add(new File(['claims more'], f.name));
+      }
+    }
+    document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  }, files);
+}
+
+async function zipPage(env) {
   const { context, page } = await h.openPage(env);
-  await context.addInitScript(countZipReads);
+  for (const script of [virtualFiles, countZipReads, zipKit]) await context.addInitScript(script);
   await h.load(page, env);
-  // 17 MiB of filler (over the slicing threshold) before one small disk-image entry.
-  const filler = ['scans/filler.bin', 17 * 2 ** 20, 1];
-  await dropMadeZip(page, 'made.zip', [filler, ['disks/Made 1.adf', 4096, 2]]);
+  return page;
+}
+
+const FILLER = { name: 'scans/filler.bin', length: 17 * 2 ** 20, fill: 1 }; // over the threshold
+const DISK = { name: 'disks/Made 1.adf', length: 4096, fill: 2 };
+const NOTHING_KEPT = 'nothing kept';
+
+test('a large zip (synthetic) is read in slices: its directory and its disk image only; one whose local header disagrees is refused and nothing is kept', async (env) => {
+  const page = await zipPage(env);
+  await dropMade(page, [{ name: 'made.zip', zip: [FILLER, DISK] }]);
   await h.waitSettled(page);
   let s = await h.state(page);
   let r = await zipReads(page);
   console.log(`  receipt: the made zip (${r.size} bytes): ${r.whole} bytes read whole, ${r.sliced} in ${r.slices} slices`);
   assert.ok(r.whole === 0, 'the zip is not read whole');
-  assert.ok(r.slices >= 2 && r.sliced > 4096 && r.sliced < 2 ** 20, 'its directory and the disk image only');
+  assert.ok(r.slices === 3 && r.sliced > 4096 && r.sliced < 2 ** 20, 'its first bytes, its directory and the disk image only');
   assert.match(s.status, /^Could not start the game:\nmade\.zip: zip, 1 disk image\(s\): Made 1\.adf\n/);
   assert.equal(s.state, 'idle');
-  await dropMadeZip(page, 'bent.zip', [filler, ['disks/Made 1.adf', 4096, 2]], 'disks/Made 2.adf');
+  await dropMade(page, [{ name: 'bent.zip', zip: [FILLER, { ...DISK, localName: 'disks/Made 2.adf' }] }]);
   await h.waitSettled(page);
   s = await h.state(page);
   r = await zipReads(page);
   assert.ok(r.whole === 0, 'the bent zip is not read whole either');
   assert.equal(s.status, 'Loading the files failed: bent.zip: zip unreadable: invalid zip data');
   assert.equal(s.state, 'idle');
-  assert.equal(await h.keptPaths(page), null, 'nothing kept');
+  assert.equal(await h.keptPaths(page), null, NOTHING_KEPT);
+});
+
+test('a zip of 600 MiB with a small disk image is taken (only what is read counts); one whose entry would take the drop past 512 MiB is refused before that entry is read', async (env) => {
+  const page = await zipPage(env);
+  const size = 600 * 2 ** 20;
+  await dropMade(page, [{ name: 'big.zip', virtual: [DISK], size }]);
+  await h.waitSettled(page);
+  let s = await h.state(page);
+  let r = await zipReads(page);
+  console.log(`  receipt: the virtual zip (${r.size} bytes): ${r.whole} bytes read whole, ${r.sliced} in ${r.slices} slices, ${r.forbidden} forbidden requests`);
+  assert.ok(r.size === size && r.whole === 0 && r.forbidden === 0, 'read in slices, nothing else asked for');
+  assert.match(s.status, /^Could not start the game:\nbig\.zip: zip, 1 disk image\(s\): Made 1\.adf\n/);
+  // Deflated, declaring 1 MiB unpacked: its 550 MiB of data would pass the input limit.
+  const packed = { name: 'disks/Made 1.adf', length: 2, method: 8, csize: 550 * 2 ** 20, full: 2 ** 20 };
+  await dropMade(page, [{ name: 'packed.zip', virtual: [packed], size }]);
+  await h.waitSettled(page);
+  s = await h.state(page);
+  r = await zipReads(page);
+  console.log(`  receipt: the packed zip: ${r.slices - 3} slices read, ${r.forbidden} forbidden requests`);
+  assert.ok(r.slices === 3 + 2 && r.forbidden === 0, 'its first bytes and its tail, not the entry');
+  assert.match(s.status, /^Loading the files failed: The dropped files are \d+ MiB together; this page takes at most 512 MiB \(a zip over 16 MiB counts only what is read of it/);
+  assert.equal(s.state, 'idle');
+  assert.equal(await h.keptPaths(page), null, NOTHING_KEPT);
+});
+
+test('a zip read in slices and a file read whole that fit alone but not together: the file is refused before it is read', async (env) => {
+  const page = await zipPage(env);
+  // The file alone fits under 512 MiB; with what was read of the zip it does not.
+  const claims = 512 * 2 ** 20 - 1024;
+  await dropMade(page, [{ name: 'made.zip', zip: [FILLER, DISK] }, { name: 'big.bin', claims }]);
+  await h.waitSettled(page);
+  const s = await h.state(page);
+  const r = await zipReads(page);
+  assert.ok(r.whole === 0 && r.slices >= 2, 'the zip read in slices first');
+  assert.match(s.status, /^The dropped files are 512 MiB together; this page takes at most 512 MiB/);
+  assert.ok(!(await h.log(page)).includes('read:start:big.bin'), 'the file is not read');
+  assert.equal(s.state, 'idle');
+  assert.equal(await h.keptPaths(page), null, NOTHING_KEPT);
 });
 
 test('the user\'s zip is read in slices: the game starts, the wasm memory after the start stays under the bound, and a reload starts from the kept files (receipt)', async (env) => {
-  const { context, page } = await h.openPage(env);
-  await context.addInitScript(countZipReads);
-  await h.load(page, env);
+  const page = await zipPage(env);
   const idle = await page.evaluate(() => __u6mem());
   await h.dropFiles(page, [h.ZIP]);
   await started(page, FILES);
