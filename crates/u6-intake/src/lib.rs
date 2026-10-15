@@ -75,9 +75,9 @@ pub use pp20::{decrunch_pp20, decrunch_pp20_within, is_pp20, pp20_declared_len};
 /// - the inputs until the intake takes them over, and their names: the caller's, each freed once
 ///   read (an HFE's buffer too: only its decoded ADF is kept);
 /// - the zip entries `zip.rs` extracts and their names, each held until its disk is read:
-///   bounded by `zip.rs` (at most `MAX_ENTRIES`, 65,534, entries and `MAX_DIRECTORY_BYTES`,
-///   16 MiB, of directory, so at most 32 MiB of names read as ISO 8859-1) and by the web page's
-///   64 MiB cap on what the disk entries unpack to.
+///   bounded by the zip reader's entry and directory limits (the names at most twice the
+///   directory's bytes, read as ISO 8859-1) and by the web page's 64 MiB cap on what the disk
+///   entries unpack to.
 ///
 /// The size, from the formats, not from any game file: the game is three Amiga DD disks of
 /// [`ADF_SIZE`] (901,120) bytes, 2,703,360 bytes of ADF. A volume's files fit in its blocks, at
