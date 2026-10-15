@@ -35,15 +35,18 @@ pub const STEP_MS: u16 = 24;
 /// frames (n = 7): no wait.
 pub const FOLLOW_MS: u16 = 41;
 /// [replaced] Engine milliseconds of Pass's followers' pass (0x11c910 with D1 = 1, called by
-/// the command loop at 0x104c0a), when it has members to move ([`super::party::has_followers`]):
-/// 42 ms, 2.110 PAL frames to the nearest ms, the mean of 33 passes traced in the castle without
-/// the fight, three followers at each (0.16..5.39: 14 took 1.82..5.39 and 19 took 0.16..0.47;
-/// in the runs of Pass alone the first two of seven were the long ones; 6 runs of 7 keys, Pass
-/// repeated and Pass after a step; tools/oracle/trace.mjs on the CPU clock, the reduction
-/// tools/oracle/trace.py).
-/// The port pays the mean flat, as [`FOLLOW_MS`]. With no member to move (in a fight every
-/// member is in its combat mode) it waits nothing, as the step's pass with no one to move.
-pub const PASS_FOLLOW_MS: u16 = 42;
+/// the command loop at 0x104c0a) when it has members to move ([`super::party::has_followers`])
+/// and moves one or more of them back to their spots: 95 ms, 4.773 PAL frames to the nearest
+/// ms, the mean of the 14 such passes traced in the castle without the fight, three followers at
+/// each (1.72..5.41: after a step, or the first two of a run of Passes; 6 runs of 7 keys, Pass
+/// repeated and Pass after a step, `pace/trace-town-pass-q1`..`q6`; tools/oracle/trace.mjs on the
+/// CPU clock, tools/oracle/trace.py "follow, Pass, moved").
+pub const PASS_MOVED_MS: u16 = 95;
+/// [replaced] The same pass when no member moves (all on their spots): 4 ms, 0.192 PAL frames,
+/// the mean of the other 19 traced (0.16..0.48; trace.py "follow, Pass, none moved"). With no
+/// member to move at all (in a fight every member is in its combat mode) it waits nothing, as
+/// the step's pass with no one to move.
+pub const PASS_STILL_MS: u16 = 4;
 
 /// Port: the walk command's step ([`super::party::player_step`], 0x11d4ee), then the time the
 /// original spends in it, on the engine clock: [`STEP_MS`], and [`FOLLOW_MS`] more when the
@@ -71,14 +74,28 @@ pub async fn paced_player_step(state: &RefCell<State>, io: &Io, dir: u16) -> Ste
 }
 
 /// Port: Pass's followers' pass ([`super::party::follow`] strict, 0x11c910 with D1 = 1 from
-/// 0x104c0a) behind `leader`, then its time on the engine clock: [`PASS_FOLLOW_MS`] when the
-/// pass has members to move ([`super::party::has_followers`], asked after it, as for the step),
-/// nothing otherwise (aboard a vessel the pass returns at its first test and no one is
-/// counted). Nothing is drawn meanwhile: the world turn's refresh draws the view it left.
+/// 0x104c0a) behind `leader`, then its time on the engine clock when the pass has members to
+/// move ([`super::party::has_followers`], asked after it, as for the step): [`PASS_MOVED_MS`]
+/// when a member stands elsewhere after it, [`PASS_STILL_MS`] when none does; nothing when it
+/// has none to move (aboard a vessel the pass returns at its first test and no one is counted).
+/// Nothing is drawn meanwhile: the world turn's refresh draws the view it left.
 pub async fn paced_pass_follow(state: &RefCell<State>, io: &Io, leader: u16) {
+    let places = |s: &State| {
+        let p = &s.actors.party;
+        p.members[..p.count()]
+            .iter()
+            .map(|&m| s.objects.location[usize::from(m)])
+            .collect::<Vec<_>>()
+    };
+    let before = places(&state.borrow());
     super::party::follow(&mut state.borrow_mut(), leader, true);
-    if super::party::has_followers(&state.borrow()) {
-        crate::combat::present::pace(state, io, PASS_FOLLOW_MS).await;
+    let ms = {
+        let s = state.borrow();
+        let moved = places(&s) != before;
+        super::party::has_followers(&s).then_some(if moved { PASS_MOVED_MS } else { PASS_STILL_MS })
+    };
+    if let Some(ms) = ms {
+        crate::combat::present::pace(state, io, ms).await;
     }
 }
 
@@ -901,8 +918,8 @@ pub(crate) mod tests {
     fn pass_waits_the_originals_followers_pass_at_any_host_tick() {
         // Pass (the space key's code) on the column: the leader's points spent, then its
         // followers' strict pass (0x11c910 with D1 = 1). Each case: the setup, what it costs
-        // (counted here: the pass's time when it has members to move, none when no one is
-        // eligible), and where member 3 ends.
+        // (counted here: the pass's time when it has members to move, by whether one moves;
+        // none when no one is eligible), whether a member moved, and where member 3 ends.
         let in_line: fn(&mut State) = |_| {};
         let off_spot: fn(&mut State) = |s| {
             // Member 3 beside member 2 but a tile east of its spot (20, 22): only a strict
@@ -911,23 +928,34 @@ pub(crate) mod tests {
             link_objects(s);
         };
         let cases = [
-            ("two followers in line", in_line, PASS_FOLLOW_MS, (20, 22)),
+            (
+                "two followers in line",
+                in_line,
+                PASS_STILL_MS,
+                false,
+                (20, 22),
+            ),
             (
                 "a follower off its spot",
                 off_spot,
-                PASS_FOLLOW_MS,
+                PASS_MOVED_MS,
+                true,
                 (20, 22),
             ),
-            ("no one follows", members_in_combat, 0, (20, 22)),
-            ("the followers asleep", members_asleep, 0, (20, 22)),
+            ("no one follows", members_in_combat, 0, false, (20, 22)),
+            ("the followers asleep", members_asleep, 0, false, (20, 22)),
         ];
-        for (name, setup, want, at) in cases {
+        for (name, setup, want, moves, at) in cases {
             let mut s = column();
             setup(&mut s);
             let want = u64::from(want);
             for (tick, zeros) in [(16, 0), (7, 0), (16, 3)] {
                 let (ms, after) = command_ms(s.clone(), 0x20, tick, zeros);
                 assert_eq!(after.actors.mp(1), 0, "{name}: the leader's points spent");
+                let moved = [2, 3]
+                    .iter()
+                    .any(|&m| after.objects.location[m] != s.objects.location[m]);
+                assert_eq!(moved, moves, "{name}: a member moved");
                 let p = after.objects.location[3];
                 assert_eq!((p.x, p.y), at, "{name}: where member 3 ends");
                 assert!(

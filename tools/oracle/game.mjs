@@ -104,7 +104,8 @@ export function runtime(bases, img) {
 // The castle without the fight: every actor in the assault worktype (8: the start's gargoyles;
 // worktypes at 0x139188 = hunk 23 + 0x3c00) gets status bit 0x10 (A4+0x3d0c), which the world
 // turn 0x1213de passes over (as pace.mjs's poke), then `b` breaks off combat; the castle's
-// people go on with their own worktypes and schedules.
+// people go on with their own worktypes and schedules. Returns counts only (spec 01 §Rights: no
+// actor or worktype read from the game is written to a log).
 export async function townSetup(page, bases, a4) {
   const peekN = (a, n) => page.evaluate(([a, n]) => Array.from({ length: n }, (_, i) => Module._wasm_peek(a + i)), [a, n]);
   const worktype = await peekN(bases[23] + 0x3c00, 256);
@@ -123,11 +124,12 @@ export async function townSetup(page, bases, a4) {
   await o.waitFrames(page, 400);
   const party = await peekN(a4 + 0x47ec, (await o.peekW(page, a4 + 0x4b00)) >> 8);
   const after = await peekN(bases[23] + 0x3c00, 256);
-  const wts = party.map((a) => after[a].toString(16)).join(',');
-  if (!taken || party.slice(1).some((a) => after[a] >= 2 && after[a] < 0x10)) {
-    throw new Error(`town: combat not broken off (b taken ${taken}; party worktypes ${wts})`);
+  const fighting = party.slice(1).filter((a) => after[a] >= 2 && after[a] < 0x10).length;
+  const following = party.slice(1).filter((a) => after[a] === 1).length;
+  if (!taken || fighting) {
+    throw new Error(`town: combat not broken off (b taken ${taken}; ${fighting} members in a combat mode)`);
   }
-  return `assault actors passed over: ${assault.map((a) => a.toString(16)).join(',')}; b taken; party worktypes ${wts}`;
+  return `${assault.length} assault actors passed over; b taken; ${following} of ${party.length - 1} members following`;
 }
 
 // CPU cycles of a PAL frame (313 lines × 227 colour clocks × 2): the emulator's CPU clock read as

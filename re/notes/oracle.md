@@ -176,8 +176,8 @@ unwinding hid it). The emulator stands still while stopped; the stops cost the g
 `complete` (trace.mjs sets it in its write after the last step), a followers' pass without its
 count of followers, one outside a party step without its D1, and a blocked step without the
 frame its prompt came back. The constants below come from the start fight, the same keys, and the
-castle without the fight (`U6_FIGHT_SETUP=town`: the assault actors e0..e2 passed over, `b` held
-until taken, party worktypes 2,1,1,1; keys DOWN ×5, UP ×2), two runs of each pooled:
+castle without the fight (`U6_FIGHT_SETUP=town`: the start's three assault actors passed over,
+`b` held until taken, the three other members following; keys DOWN ×5, UP ×2), two runs of each pooled:
 `pace/trace-fight-r4`, `pace/trace-town-r4`, `pace/trace-fight-r5`, `pace/trace-town-r5`. The
 r4 runs predate the `complete` flag; a one-off check (outside the repo) found each one's seven
 steps, in its keys' order, in trace.json, trace.log and the run's output, with nothing thrown,
@@ -212,33 +212,42 @@ The whole step in the castle: 1.13..5.98 frames (median 1.99, mean 3.19, n 21); 
 step of about 3 frames.
 
 **A blocked step and Pass.** trace.mjs also keeps per step the frame of the next key read
-(`back`: the reading flag set again, so key to prompt = back − read by the frame counter), the
-leader before the key and at the prompt, the leader's movement points at the party step's
-entry and return, and each followers' pass's D1 (`strict`: 1 from Pass, 0x104c0a; 0 from the
-step, 0x11db66). The asm: a blocked step (A4-0x6a90 set) leaves 0x11d4ee at 0x11d800 with the
+(`back`: the reading flag set again, so key to prompt = back − read by the frame counter) and
+whether the leader stands elsewhere at the prompt (`moved`), per party step whether the
+leader's movement points differ at its return (`spent`), and per followers' pass its D1
+(`strict`: 1 from Pass, 0x104c0a; 0 from the step, 0x11db66) and whether a member stands
+elsewhere at its return (`moved`). What it reads from the game's memory for these (the leader,
+places, points, and an NPC turn's worktype, kept as `combat`) is compared in the tool and
+written only as these booleans and counts (spec 01 §Rights; since 2026-10-16. The runs before
+were rewritten then by a one-off script outside the repo to the same fields, with their
+reductions unchanged, and their logs' leader places, actor ids and worktypes, and a debug line's
+console text, removed). The asm: a blocked step (A4-0x6a90 set) leaves 0x11d4ee at 0x11d800 with the
 view centre put back on the leader and no points spent, no message, no followers' pass and no
 level test (0x11d806..0x11d856, 0x11db6e); its caller, the walk arm 0x1048dc, goes on to the end
 of turn 0x104d98 like any command, so the world turn 0x1213de runs. Pass (0x104b62) prints its
 line, sets the leader's points to 0, drops the cursor, lets a ship or balloon leader drift with
 the wind through 0x11d4ee, then calls 0x11c910 with D1 = 1 (0x104c0a), and ends the turn. The
-castle setup as above, 2026-10-15: UP ×7 twice (`pace/trace-town-blocked-b1`, `-b2`: the first
+castle setup as above: UP ×7 twice, 2026-10-15 (`pace/trace-town-blocked-b1`, `-b2`: the first
 step moves the hero one tile north, the six after it each meet the tile beyond, which is not
-enterable); SPACE ×7 three times (`pace/trace-town-pass-p1`, `p3`, `p5`); DOWN SPACE DOWN SPACE
-DOWN SPACE SPACE (`p2`), DOWN SPACE DOWN SPACE UP SPACE SPACE (`p4`), DOWN SPACE UP SPACE DOWN
-SPACE SPACE (`p6`). PAL frames:
+enterable), and once more with the new fields, 2026-10-16 (`-c1`); Pass, 2026-10-16, SPACE ×7
+three times (`pace/trace-town-pass-q1`, `q3`, `q5`; `q3`'s first run was rejected by the tool,
+a return seen with a younger call open, and rerun), DOWN SPACE DOWN SPACE DOWN SPACE SPACE
+(`q2`), DOWN SPACE DOWN SPACE UP SPACE SPACE (`q4`), DOWN SPACE UP SPACE DOWN SPACE SPACE (`q6`);
+the same keys as the earlier `p1`..`p6`, which lack `moved` and are refused. PAL frames:
 
 | call | value | constant (ms) |
 |---|---|---|
-| party step 0x11d4ee, blocked (no followers' pass inside it) | mean 0.082 (n 12, 0.06..0.37); the leader's points the same at its entry and return in all 12 | no wait |
+| party step 0x11d4ee, blocked (no followers' pass inside it) | mean 0.082 (n 12, 0.06..0.37); the leader's points spent in none of the 12 (none of 18 with `c1`) | no wait |
 | the world turn after it | mean 1.504 (n 12, 1.13..1.72): no NPC turn, one pick (the hero again: its points were not spent), the refresh after it with the view unchanged (0.00) | its setup and one pass, SETUP_MS + PICK_MS 27 |
 | key to the next key read, blocked step (frame counter) | 1..2 (n 12, mean 1.667) | the port: SETUP_MS + PICK_MS 27 |
-| Pass's followers' pass 0x11c910 (D1 = 1), three followers | mean 2.110 (n 33, 0.16..5.39: 14 took 1.82..5.39, 19 took 0.16..0.47; in the runs of Pass alone the first two of seven were the long ones) | PASS_FOLLOW_MS 42 |
+| Pass's followers' pass 0x11c910 (D1 = 1), three followers, a member moved | mean 4.773 (n 14, 1.72..5.41: after a step, or the first two of a run of Passes) | PASS_MOVED_MS 95 |
+| the same, none moved | mean 0.192 (n 19, 0.16..0.48) | PASS_STILL_MS 4 |
 
 A one-pick world turn costs more than the pooled pick (1.50 against 0.994): the turn's own
 setup before its picks falls on that one pick, while the old PICK_MS spread it over every pick
 of the 359 (the split below). Pass's prints are
-three a pass (n 33 each): its line (0.19..1.94), one inside its world turn (0.73..1.01) and the
-prompt again (0.30..2.97). No vessel is reachable from the start snapshot (the party is on foot in the
+three a pass (n 33 each, `p1`..`p6`): its line (0.19..1.94), one inside its world turn
+(0.73..1.01) and the prompt again (0.30..2.97). No vessel is reachable from the start snapshot (the party is on foot in the
 castle), so Pass's drift step aboard is not traced and the port does not pace it.
 
 **The world turn split.** 0x1213de's own time is three costs, not one a pick: its setup, once
@@ -263,12 +272,16 @@ mean 0.990, n 374, against 0.994), so the added stops change nothing. PAL frames
 | clock minute 0x10368a, own time | mean 9.130 (n 6, 8.86..9.38) | mean 9.482 (n 6, 9.14..9.76) | mean 9.306 (n 12) | MINUTE_MS 186 |
 
 The start fight's first world turn after the boot took 8.71 frames of setup in both runs
-(0x120a1c alone 8.08) and is left out of SETUP_MS as a one-off (trace.py `ONE_OFF_SETUP`, 5
-frames); why that pass is long is not established. The port pays the minute with the pass after
+(0x120a1c alone 8.08) and is left out of SETUP_MS as a one-off; trace.py leaves out the setup of
+the first world turn of a run whose `fresh` says no command ran since the snapshot (the settled
+start after the boot) and refuses a traced setup in a run that does not say (the five runs
+above got `fresh` in the 2026-10-16 rewrite: true for the fight runs, false for the castle's,
+whose break-off ran a world turn first). Why that pass is long is not established. The port pays the minute with the pass after
 it, and in a time stop (where 0x10368a only counts the stop down; not traced) the pass alone. A
 pass (11 ms) is shorter than a host frame and `pace` waits at least one, so the port owes the
-passes and pays them with the turn's next wait, and the setup with its last (actors/turn.rs
-`world_turn`); paced one by one, the start fight's steps came out up to 48 ms longer at 16 ms
+passes and pays them with the turn's next wait (before a combat NPC turn, an NPC turn that shows
+something, a refresh, a raise, a minute), and the setup with its last (actors/turn.rs
+`world_turn`; in a time stop the owed passes of many refills can pass a u16 of ms); paced one by one, the start fight's steps came out up to 48 ms longer at 16 ms
 host ticks than at 8 ms (seed 0, the receipt allows one tick). The castle's steps in the port then follow the original's alternation
 (31 43 31 43 30 43 31 frames against 28 43 33 48 32 41 32).
 

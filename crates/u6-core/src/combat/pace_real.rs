@@ -14,10 +14,11 @@ use u6_intake::{InputFile, intake};
 use u6_testkit::Quiet;
 
 use super::present::{
-    FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, FRAME_MS, NAME_MS, PRINT_MS, REFRESH_MS,
+    ACTOR_FLASH_MS, DISSOLVE_MS, FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, FRAME_MS, NAME_MS,
+    PRINT_MS, REFRESH_MS, WINDOW_MS,
 };
 use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, MINUTE_MS, PICK_MS, SETUP_MS};
-use crate::actors::walk::{FOLLOW_MS, STEP_MS};
+use crate::actors::walk::{FOLLOW_MS, PASS_MOVED_MS, PASS_STILL_MS, STEP_MS};
 use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
 use crate::state::State;
@@ -204,24 +205,69 @@ fn median(v: &mut [u32]) -> u32 {
 /// shorter than a frame) with its next wait (actors/turn.rs `world_turn`): a combat NPC turn's,
 /// a clock minute's, a refresh's, or its setup's at the end; such a wait is named by that one,
 /// with passes (a run of passes alone is never a wait, so two of them, as long as a message, are
-/// not taken for one).
+/// not taken for one). The exact constants are matched first, so a wait of one of them is named
+/// by it even where a world-turn wait with passes would add up to it (a combat NPC turn with 12
+/// passes is as long as a window render).
 fn what(ms: u16) -> &'static str {
     let passes = |rest: u16| rest.is_multiple_of(PICK_MS);
     match ms {
         v if v == STEP_MS + FOLLOW_MS => "party step and its followers",
         v if v == STEP_MS && v == PRINT_MS => "message or party step",
         v if v == STEP_MS => "party step",
-        v if v >= AFTER_TURN_MS && passes(v - AFTER_TURN_MS) => "refresh after a turn, with passes",
-        v if v >= PICK_MS + MINUTE_MS && passes(v - MINUTE_MS) => "clock minute, with passes",
-        v if v > COMBAT_NPC_MS && passes(v - COMBAT_NPC_MS) => "combat NPC turn, with passes",
-        v if v >= SETUP_MS + PICK_MS && passes(v - SETUP_MS) => "turn setup, with passes",
         NAME_MS => "object name",
         FLASH_MS => "hit flash",
         FLIGHT_START_MS => "flight start",
         FLIGHT_STEP_MS => "flight step",
         REFRESH_MS => "refresh (flight end)",
         PRINT_MS => "message",
+        WINDOW_MS => "window render",
+        DISSOLVE_MS => "dissolving window",
+        ACTOR_FLASH_MS => "actor flash",
+        PASS_MOVED_MS => "Pass's followers, moved",
+        PASS_STILL_MS => "Pass's followers, none moved",
+        v if v >= AFTER_TURN_MS && passes(v - AFTER_TURN_MS) => "refresh after a turn, with passes",
+        v if v >= PICK_MS + MINUTE_MS && passes(v - MINUTE_MS) => "clock minute, with passes",
+        v if v > COMBAT_NPC_MS && passes(v - COMBAT_NPC_MS) => "combat NPC turn, with passes",
+        v if v >= SETUP_MS + PICK_MS && passes(v - SETUP_MS) => "turn setup, with passes",
         _ => "other",
+    }
+}
+
+#[test]
+fn a_wait_of_a_constant_is_named_by_it_before_the_world_turns_sums() {
+    // Each exact constant names itself, also the ones a world-turn wait with passes adds up to
+    // (window render = combat NPC turn + 12 passes); the sums name their main part.
+    for (ms, name) in [
+        (WINDOW_MS, "window render"),
+        (FLASH_MS, "hit flash"),
+        (FLIGHT_START_MS, "flight start"),
+        (FLIGHT_STEP_MS, "flight step"),
+        (REFRESH_MS, "refresh (flight end)"),
+        (PRINT_MS, "message"),
+        (NAME_MS, "object name"),
+        (DISSOLVE_MS, "dissolving window"),
+        (ACTOR_FLASH_MS, "actor flash"),
+        (PASS_MOVED_MS, "Pass's followers, moved"),
+        (PASS_STILL_MS, "Pass's followers, none moved"),
+    ] {
+        assert_eq!(what(ms), name, "{ms} ms");
+    }
+    assert_eq!(
+        COMBAT_NPC_MS + 12 * PICK_MS,
+        WINDOW_MS,
+        "the sum that collides"
+    );
+    let sums = [
+        (
+            AFTER_TURN_MS + 2 * PICK_MS,
+            "refresh after a turn, with passes",
+        ),
+        (MINUTE_MS + PICK_MS, "clock minute, with passes"),
+        (COMBAT_NPC_MS + PICK_MS, "combat NPC turn, with passes"),
+        (SETUP_MS + PICK_MS, "turn setup, with passes"),
+    ];
+    for (ms, name) in sums {
+        assert_eq!(what(ms), name, "{ms} ms");
     }
 }
 

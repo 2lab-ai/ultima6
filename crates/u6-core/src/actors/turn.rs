@@ -86,10 +86,12 @@ pub fn darkness(s: &mut State) {
     s.actors.work.resurrect_pending = true;
 }
 
-/// The resurrection [`darkness`] left pending, awaited (0x1095bc).
-async fn raise_if_dead(state: &RefCell<State>, io: &Io) {
+/// The resurrection [`darkness`] left pending, awaited (0x1095bc), after what the world turn
+/// `owed` till then.
+async fn raise_if_dead(state: &RefCell<State>, io: &Io, owed: &mut u32) {
     let pending = std::mem::take(&mut state.borrow_mut().actors.work.resurrect_pending);
     if pending {
+        pay(state, io, owed, 0).await;
         crate::map::travel::resurrect_party(state, io).await;
     }
 }
@@ -519,15 +521,18 @@ fn turn_worktype(s: &State, actor: usize) -> u8 {
 /// changed view ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile. A pick is shorter
 /// than a host frame, and [`crate::combat::present::pace`] waits at least one (so a run of them
 /// would end later at a coarser tick), so picks are owed and paid with the next wait of the
-/// turn: before a combat NPC turn, at a refill, before a refresh, or at the end of the turn. The
-/// port's NPC turns and picks take no engine time, so the pictures keep their times. The setup
-/// is paid with the end of the turn: that last wait is then never shorter than a frame and
-/// makes up what the waits before it ended late, while the turn's pictures come at most the
-/// setup's 16 ms (under a frame) early. A raise of the dead party (rare, long) waits with what
-/// is owed still outstanding.
+/// turn: before a combat NPC turn, before an NPC turn that shows something (frames or lines it
+/// queued, an arrest, a conversation), at a refill, before a refresh, before a raise of the dead
+/// party, or at the end of the turn. So whatever the turn shows comes after every pass before
+/// it, as in the original. The setup is paid with the end of the turn: that last wait is then
+/// never shorter than a frame and makes up what the waits before it ended late, while the
+/// turn's pictures come at most the setup's 16 ms (under a frame) early. In a time stop the
+/// refills wait nothing (the minute only counts the stop down), so the passes of up to 255
+/// refills of up to 256 picks stay owed: hence a u32.
 pub async fn world_turn(state: &RefCell<State>, io: &Io) {
+    let mut owed: u32 = 0;
     leader_bookkeeping(&mut state.borrow_mut());
-    raise_if_dead(state, io).await;
+    raise_if_dead(state, io, &mut owed).await;
     let mask = {
         let mut s = state.borrow_mut();
         formation(&mut s);
@@ -538,7 +543,6 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
         }
         if s.map.centre.z == 0 { 0x3ff } else { 0xff }
     };
-    let mut owed = 0;
     loop {
         let mut pick = Pick {
             actor: -1,
@@ -557,7 +561,7 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
                 // time, and the pass stays owed (the stop ends within its count of refills).
                 let stopped = s.actors.timers[timer::TIME_STOP] > 1;
                 clock::tick(&mut s, 1);
-                owed += PICK_MS;
+                owed += u32::from(PICK_MS);
                 !stopped
             };
             if minute {
@@ -565,21 +569,25 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
             }
         }
         // A death in the clock's ticks above (a hazard tile, 0x1032b6) left the raise pending.
-        raise_if_dead(state, io).await;
+        raise_if_dead(state, io, &mut owed).await;
         let actor = pick.actor as u16;
         let a = usize::from(actor);
         let held = swallowed(&mut state.borrow_mut(), actor);
         let wt = state.borrow().actors.worktype[a];
         let npc = !held && wt != 2 && wt != 1;
-        owed += PICK_MS;
+        owed += u32::from(PICK_MS);
         if fights(&state.borrow(), a, npc) {
             pay(state, io, &mut owed, COMBAT_NPC_MS).await;
         }
         if !held {
             if npc {
-                npc::npc_turn(state, io, actor).await;
+                let started = npc::npc_turn_sync(&mut state.borrow_mut(), actor);
+                if shows(&state.borrow(), started.as_ref()) {
+                    pay(state, io, &mut owed, 0).await;
+                }
+                npc::npc_turn_rest(state, io, actor, started).await;
                 leader_bookkeeping(&mut state.borrow_mut());
-                raise_if_dead(state, io).await;
+                raise_if_dead(state, io, &mut owed).await;
                 let mut s = state.borrow_mut();
                 if (2..0x10).contains(&s.actors.worktype[a]) {
                     s.actors.attrs.unknown_18f1[a] = actor as u8;
@@ -597,12 +605,24 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
     }
 }
 
-/// [`world_turn`]'s waits: what is `owed` and `more`, in one wait (none when both are 0).
-async fn pay(state: &RefCell<State>, io: &Io, owed: &mut u16, more: u16) {
-    let ms = std::mem::take(owed) + more;
-    if ms > 0 {
-        crate::combat::present::pace(state, io, ms).await;
+/// [`world_turn`]'s waits: what is `owed` and `more`, in one wait (none when both are 0; in
+/// waits of at most `u16::MAX` ms each when longer, one schedule, so the same total).
+async fn pay(state: &RefCell<State>, io: &Io, owed: &mut u32, more: u16) {
+    let mut ms = std::mem::take(owed) + u32::from(more);
+    while ms > 0 {
+        let part = ms.min(u32::from(u16::MAX)) as u16;
+        crate::combat::present::pace(state, io, part).await;
+        ms -= u32::from(part);
     }
+}
+
+/// Whether the NPC turn [`npc::npc_turn_sync`] started (`started`) shows something before it
+/// ends: frames or lines queued (played by [`npc::npc_turn_rest`]), an arrest or a
+/// conversation.
+fn shows(s: &State, started: Option<&(i8, npc::Wait)>) -> bool {
+    !s.combat.effects.is_empty()
+        || !s.main.pending_print.is_empty()
+        || matches!(started, Some((_, npc::Wait::Arrest | npc::Wait::Talk(_))))
 }
 
 /// The end of [`world_turn`]'s loop (0x121760..0x1217cc): true when the pick `actor` is the
@@ -768,7 +788,7 @@ mod tests {
             world_turn(&st, &io).await;
             out.set(Some(io.now_ms() - t0));
         });
-        for _ in 0..10_000 {
+        for _ in 0..MAX_TICKS {
             if done.get().is_some() {
                 break;
             }
@@ -780,6 +800,9 @@ mod tests {
         let ms = done.get().expect("the turn ends");
         (ms, e.state().clone())
     }
+
+    /// [`turn_ms`] with the loop long enough for a turn of minutes.
+    const MAX_TICKS: usize = 100_000;
 
     #[test]
     fn only_a_combat_npc_turn_that_runs_takes_combat_turn_time() {
@@ -982,6 +1005,119 @@ mod tests {
         s.actors.timers[timer::TIME_STOP] = 5;
         let want = u64::from(SETUP_MS) + 4 * u64::from(PICK_MS);
         assert_turn_ms("two NPCs, time stopped", &s, want, 0);
+    }
+
+    #[test]
+    fn an_idle_stretch_through_an_expiring_time_stop_waits_each_minute_that_passes() {
+        // The player in debt (35 points owed, dexterity 10): refilled four times before it has
+        // points (-25, -15, -5, 5), no one else. A time stop of 2: the first refill's minute
+        // only counts it down (no minute), the second's ends it and passes in full, as the
+        // third's and fourth's. The setup, five passes (four refills and the player's pick) and
+        // three minutes.
+        let mut s = world(&[]);
+        s.actors.movement_points[1] = (-35i8) as u8;
+        s.actors.timers[timer::TIME_STOP] = 2;
+        s.actors.calendar.minute = 30;
+        let want = u64::from(SETUP_MS) + 5 * u64::from(PICK_MS) + 3 * u64::from(MINUTE_MS);
+        assert_turn_ms("the stop expiring", &s, want, 3);
+        let (_, after) = turn_ms(s, 16, false);
+        assert_eq!(after.actors.timers[timer::TIME_STOP], 0, "the stop is over");
+    }
+
+    #[test]
+    fn a_long_time_stop_with_many_actors_near_pays_every_pass() {
+        // 250 NPCs (dexterity 5, no points) near the player, who owes 128 points (dexterity 5):
+        // 26 refills before it has points (-128 + 5 x 26 = 2), all in a time stop of 100, so no
+        // minute passes and nothing is waited until the turn ends. After each refill every NPC
+        // is full and is picked once (its turn ends at once in the stop); after the 26th they
+        // come before the player (full, it is not). The setup and 26 x 250 + 26 + 1 passes:
+        // more than a u16 of milliseconds.
+        let mut s = world(&[]);
+        s.actors.attrs.dexterity[1] = 5;
+        s.actors.movement_points[1] = 0x80;
+        s.actors.timers[timer::TIME_STOP] = 100;
+        for i in 0..250u16 {
+            let a = usize::from(2 + i);
+            s.objects.location[a] = Position {
+                x: 2 + i % 36,
+                y: 2 + i / 36,
+                z: 0,
+            };
+            s.objects.type_frame[a] = 0x17a;
+            s.actors.worktype[a] = 0x90;
+            s.actors.attrs.dexterity[a] = 5;
+        }
+        let passes = 26 * 250 + 26 + 1;
+        let want = u64::from(SETUP_MS) + passes * u64::from(PICK_MS);
+        assert!(want > u64::from(u16::MAX));
+        assert_turn_ms("250 NPCs in a time stop", &s, want, 0);
+        let (_, after) = turn_ms(s, 16, false);
+        assert_eq!(
+            after.actors.timers[timer::TIME_STOP],
+            74,
+            "26 refills counted it down"
+        );
+    }
+
+    #[test]
+    fn an_npc_turn_that_shows_something_comes_after_the_passes_before_it() {
+        // Five NPCs (0x11: their turn only spends 5 points) and a guard (0x12) beside the
+        // player, all full: picked in slot order, the guard sixth. The guard closes in and
+        // asks for surrender (0x11fd20, the flag it needs set): a line and a key read. In the
+        // original its turn comes after the six passes before it; the key (N) is read no
+        // earlier than their 66 ms, and within a tick of them.
+        let mut s = world(&[(10, 10); 5]);
+        s.ui = crate::main_loop::test_support::test_ui();
+        s.actors.movement_points[1] = 0;
+        for a in 10..15 {
+            s.actors.worktype[a] = 0x11;
+        }
+        let guard = 20;
+        s.objects.location[guard] = Position { x: 21, y: 20, z: 0 };
+        s.objects.type_frame[guard] = 0x17a;
+        s.actors.worktype[guard] = 0x12;
+        s.actors.attrs.dexterity[guard] = 10;
+        s.actors.movement_points[guard] = 10;
+        s.actors.attrs.talk_flags[5] |= 0x80;
+        crate::main_loop::test_support::link_placed_objects(&mut s);
+        let want = 6 * u64::from(PICK_MS);
+        for (tick, zero) in [(16, false), (7, false), (16, true)] {
+            let start = Rc::new(std::cell::Cell::new(None));
+            let done = Rc::new(std::cell::Cell::new(false));
+            let (st0, dn) = (Rc::clone(&start), Rc::clone(&done));
+            let mut e = Engine::with_game(s.clone(), Files::default(), move |st, io| async move {
+                st0.set(Some(io.now_ms()));
+                world_turn(&st, &io).await;
+                dn.set(true);
+            });
+            let mut read = None;
+            for i in 0..MAX_TICKS {
+                if done.get() {
+                    break;
+                }
+                let key = [crate::engine::InputEvent::Key(crate::engine::Key::Char(
+                    'N',
+                ))];
+                e.tick(if i == 0 { &key } else { &[] }, tick);
+                if zero {
+                    e.tick(&[], 0);
+                }
+                if read.is_none() && e.io().pending_events() == 0 {
+                    read = Some(e.io().now_ms());
+                }
+            }
+            assert!(done.get(), "the turn ends");
+            assert_eq!(
+                e.state().actors.worktype[guard],
+                8,
+                "N: the guard turned hostile"
+            );
+            let ms = read.expect("the key was read") - start.get().expect("the turn began");
+            assert!(
+                ms >= want && ms <= want + u64::from(tick),
+                "the key read {ms} ms in at {tick} ms ticks (zero polls {zero}), want {want}"
+            );
+        }
     }
 
     #[test]
