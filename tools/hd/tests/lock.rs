@@ -2,8 +2,13 @@
 //! test takes and drops the lock lets a child hold a copy of the lock's open handle for the
 //! moment between its fork and its exec (measured: 18 of 3000 takes refused beside a thread
 //! spawning `/usr/bin/true`), which the library tests, spawning calls in parallel, would see as
-//! a holder. Nothing here spawns a process. (For the tool this is moot: a command holds the
-//! lock until it exits, and its children exec at once with the handle closed on exec.)
+//! a holder. Nothing here spawns a process.
+//!
+//! For the tool: a command holds the lock until it exits, so a child's copy matters only if
+//! the command dies while a child it forked has not yet exec'd (stopped, say, between its fork
+//! and its exec): that child holds the lock until it execs or exits, and a command started
+//! meanwhile is refused for that while, which clears by itself. Codex itself never holds it:
+//! std opens the lock file close-on-exec, so once its exec succeeds the copy is gone.
 
 use std::path::Path;
 
