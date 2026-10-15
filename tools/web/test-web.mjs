@@ -312,8 +312,8 @@ test('read and forget failures are shown and the page stays usable', async (env)
 test('inputs over 512 MiB together are refused before anything is read', async (env) => {
   const { page } = await h.openPage(env);
   await h.load(page, env);
-  await page.evaluate(() => { window.__bigName = 'big.zip'; });
-  await h.dropFiles(page, [], [{ name: 'big.zip', text: 'PK' }, MARKER]);
+  await page.evaluate(() => { window.__bigName = 'big.adf'; });
+  await h.dropFiles(page, [], [{ name: 'big.adf', text: 'PK' }, MARKER]);
   await h.waitSettled(page);
   const s = await h.state(page);
   assert.match(s.status, /600 MiB together; this page takes at most 512 MiB/);
@@ -1018,6 +1018,129 @@ test('zip: the first press on the canvas is one game click and starts the sound;
   await page.click('#mute');
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'false');
   console.log(`  receipt: first press -> Look waits, audioContext.state=${s.audio}, chunks=${s.audioChunks}; the click walked ${from !== to}`);
+}, { needs: h.haveZip });
+
+// --- a large zip is read in slices ----------------------------------------------------------
+// A dropped zip over the slicing threshold (u6-web `zip_sliced`) is not copied into wasm whole:
+// the page reads its directory and its disk-image entries with Blob.slice. What the page read
+// from a dropped zip is counted in the page itself (`countZipReads`); for the user's zip the
+// counts are compared with its size and never printed (they are lengths of the user's data), for
+// a zip a test made they are printed.
+
+// The bound on the wasm memory after a start from the user's zip (our measurement of the
+// engine's memory, not a value of the game's files): the base copied the whole zip in.
+const ZIP_START_MEMORY_MIB = 48;
+const MiB = (n) => Math.round((n / 2 ** 20) * 10) / 10;
+
+// Page init script: the reads of dropped zips (File objects named *.zip), whole and of the slices
+// taken from them, and the zip's size.
+function countZipReads() {
+  const parts = new WeakSet();
+  const count = { whole: 0, sliced: 0, slices: 0, size: 0 };
+  window.__zipReads = count;
+  const isZip = (b) => b instanceof File && /\.zip$/i.test(b.name);
+  const slice = Blob.prototype.slice;
+  Blob.prototype.slice = function sliceCounted(...args) {
+    const part = slice.apply(this, args);
+    if (isZip(this)) {
+      parts.add(part);
+      count.size = this.size;
+    }
+    return part;
+  };
+  const read = Blob.prototype.arrayBuffer;
+  Blob.prototype.arrayBuffer = function arrayBufferCounted() {
+    if (parts.has(this)) {
+      count.sliced += this.size;
+      count.slices += 1;
+    } else if (isZip(this)) {
+      count.whole += this.size;
+      count.size = this.size;
+    }
+    return read.call(this);
+  };
+}
+
+const zipReads = (page) => page.evaluate(() => ({ ...window.__zipReads }));
+
+// In the page: a stored zip of `entries` ([name, length, fill byte]) made of synthetic bytes, as
+// a File named `name` dropped on the drop zone. CRCs are left 0 (the intake does not check them).
+// `localName` (same length) replaces the name in the last entry's local header only: a local
+// header that disagrees with its central entry.
+function dropMadeZip(page, name, entries, localName = null) {
+  return page.evaluate(({ name, entries, localName }) => {
+    const u16 = (v) => [v & 255, (v >>> 8) & 255];
+    const u32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+    const parts = [];
+    const central = [];
+    let offset = 0;
+    entries.forEach(([entry, length, fill], i) => {
+      const n = [...new TextEncoder().encode(entry)];
+      const local = i === entries.length - 1 && localName ? [...new TextEncoder().encode(localName)] : n;
+      const sizes = [...u32(0), ...u32(length), ...u32(length)]; // CRC, compressed, uncompressed
+      const head = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u32(0), ...sizes,
+        ...u16(local.length), ...u16(0), ...local];
+      parts.push(new Uint8Array(head), new Uint8Array(length).fill(fill));
+      central.push(...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u32(0),
+        ...sizes, ...u16(n.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0),
+        ...u32(offset), ...n);
+      offset += head.length + length;
+    });
+    const end = [...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(entries.length),
+      ...u16(entries.length), ...u32(central.length), ...u32(offset), ...u16(0)];
+    parts.push(new Uint8Array(central), new Uint8Array(end));
+    const dt = new DataTransfer();
+    dt.items.add(new File(parts, name));
+    document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  }, { name, entries, localName });
+}
+
+test('a large zip (synthetic) is read in slices: its directory and its disk image only; one whose local header disagrees is refused and nothing is kept', async (env) => {
+  const { context, page } = await h.openPage(env);
+  await context.addInitScript(countZipReads);
+  await h.load(page, env);
+  // 17 MiB of filler (over the slicing threshold) before one small disk-image entry.
+  const filler = ['scans/filler.bin', 17 * 2 ** 20, 1];
+  await dropMadeZip(page, 'made.zip', [filler, ['disks/Made 1.adf', 4096, 2]]);
+  await h.waitSettled(page);
+  let s = await h.state(page);
+  let r = await zipReads(page);
+  console.log(`  receipt: the made zip (${r.size} bytes): ${r.whole} bytes read whole, ${r.sliced} in ${r.slices} slices`);
+  assert.ok(r.whole === 0, 'the zip is not read whole');
+  assert.ok(r.slices >= 2 && r.sliced > 4096 && r.sliced < 2 ** 20, 'its directory and the disk image only');
+  assert.match(s.status, /^Could not start the game:\nmade\.zip: zip, 1 disk image\(s\): Made 1\.adf\n/);
+  assert.equal(s.state, 'idle');
+  await dropMadeZip(page, 'bent.zip', [filler, ['disks/Made 1.adf', 4096, 2]], 'disks/Made 2.adf');
+  await h.waitSettled(page);
+  s = await h.state(page);
+  r = await zipReads(page);
+  assert.ok(r.whole === 0, 'the bent zip is not read whole either');
+  assert.equal(s.status, 'Loading the files failed: bent.zip: zip unreadable: invalid zip data');
+  assert.equal(s.state, 'idle');
+  assert.equal(await h.keptPaths(page), null, 'nothing kept');
+});
+
+test('the user\'s zip is read in slices: the game starts, the wasm memory after the start stays under the bound, and a reload starts from the kept files (receipt)', async (env) => {
+  const { context, page } = await h.openPage(env);
+  await context.addInitScript(countZipReads);
+  await h.load(page, env);
+  const idle = await page.evaluate(() => __u6mem());
+  await h.dropFiles(page, [h.ZIP]);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  const memory = await page.evaluate(() => __u6mem());
+  const r = await zipReads(page);
+  console.log(`  receipt: wasm memory ${MiB(idle)} MiB before the drop, ${MiB(memory)} MiB after the start (bound ${ZIP_START_MEMORY_MIB} MiB)`);
+  assert.ok(r.whole === 0, 'the zip is not read whole');
+  assert.ok(r.slices >= 2 && r.sliced > 0 && r.sliced < r.size / 10, 'at most a tenth of the zip is read');
+  assert.ok(memory < ZIP_START_MEMORY_MIB * 2 ** 20, `the wasm memory after the start is under ${ZIP_START_MEMORY_MIB} MiB`);
+  await kept(page, FILES, 'the game files are kept');
+  await page.reload();
+  const s = await started(page, FILES);
+  assert.match(s.status, /Started from the files kept in this browser/);
+  await h.waitPrompt(page);
+  const reloaded = await page.evaluate(() => __u6mem());
+  console.log(`  receipt: after the reload the game started from the kept files; wasm memory ${MiB(reloaded)} MiB`);
 }, { needs: h.haveZip });
 
 const filter = process.argv[2];
