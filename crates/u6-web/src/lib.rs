@@ -1,8 +1,8 @@
 //! Browser entry point: collects the dropped files, runs u6-intake, boots `u6_core::Engine`
 //! and hands frames back as RGBA8 (see `site/app.js`).
 //!
-//! JS owns the clock and the DOM. Key callbacks only queue events; [`Game::tick`] delivers them
-//! to the engine with the elapsed time, so game code never runs inside an input handler.
+//! JS owns the clock and the DOM. Key callbacks only queue events; [`Game::step`] delivers them
+//! to the engine with the step's time, so game code never runs inside an input handler.
 //!
 //! The fixed step (spec 06): each display frame the page asks [`Game::pace`] how many steps of
 //! [`step_ms`] its wall time is worth, runs them with [`Game::step`] while its budget
@@ -11,10 +11,10 @@
 //! `-`, `+` and `=` the game takes itself.
 //!
 //! Sound: once the page has an AudioContext it calls [`Game::audio_start`] with its sample
-//! rate; every tick then replays the game's MED calls on the emulated A500 audio machine
+//! rate; every step then replays the game's MED calls on the emulated A500 audio machine
 //! (`u6_core::sound::AudioDriver`) and [`Game::audio_render`] renders the samples the page
 //! posts to its AudioWorklet. Saves: the page lays the stored `savegame/*` files over the
-//! new-game files before the boot ([`Game::load_save`], `saveload::attach`), and after a tick
+//! new-game files before the boot ([`Game::load_save`], `saveload::attach`), and after a frame
 //! whose Save committed ([`Game::save_generation`] moved) it stores what [`Game::save_collect`]
 //! lists, then reports the generation committed ([`Game::save_committed`]). The character `u`
 //! makes is such a write too (its `savegame/objlist`). A list holds what the Saves since the
@@ -480,13 +480,6 @@ impl Game {
         self.engine.is_some()
     }
 
-    /// Advances the engine by `ms` with the keys queued since the previous tick and converts
-    /// the frame: [`Game::step`] then [`Game::present`].
-    pub fn tick(&mut self, ms: u32) {
-        self.step(ms);
-        self.present();
-    }
-
     /// One engine tick of `ms` (the page's fixed step: [`step_ms`]) with the keys queued since
     /// the previous one: the engine's log taken, the sound machine given the game's calls, the
     /// queue emptied. The RGBA frame is left as it was ([`Game::present`]).
@@ -814,7 +807,8 @@ mod tests {
         assert!(game.key_down("ArrowUp", "ArrowUp", false));
         assert!(!game.key_down("ShiftLeft", "Shift", false));
         assert!(game.pending.is_empty());
-        game.tick(16);
+        game.step(16);
+        game.present();
         assert!(!game.started());
     }
 
@@ -876,7 +870,7 @@ mod tests {
         assert!(report.contains("savegame/objblkAA"), "{report}");
     }
 
-    /// A game on synthetic state and no files: palette entry v = (v, 3v, 255 - v), then each tick
+    /// A game on synthetic state and no files: palette entry v = (v, 3v, 255 - v), then each step
     /// a pixel per generation on row 0, each key taken drawn on row 1 (its character as the
     /// index) and logged as a stub hit, the pointer's cell lit, presented before the frame's
     /// wait.
@@ -916,60 +910,50 @@ mod tests {
         )
     }
 
-    /// A tick is a step then a present: the same input through both gives the same frames (and
-    /// log), while a step alone leaves the RGBA frame as it was. The keys queued reach the game
-    /// in the tick after them (the queues empty, their characters drawn in the synthetic
-    /// palette's colours) and its log line comes through.
+    /// The keys queued reach the game in the step after them (the queues empty, their characters
+    /// drawn in the synthetic palette's colours) and its log line comes through; a step alone
+    /// leaves the RGBA frame as it was, the present shows it. Before a start the frame stays
+    /// black.
     #[test]
-    fn a_tick_is_a_step_then_a_present() {
-        let (mut a, mut b) = (Game::new(), Game::new());
-        a.engine = Some(synthetic_engine());
-        b.engine = Some(synthetic_engine());
-        let first = a.frame_rgba();
+    fn a_step_takes_the_keys_and_a_present_shows_it() {
+        let mut game = Game::new();
+        game.engine = Some(synthetic_engine());
+        let first = game.frame_rgba();
         let rgba = |v: u8| [v, v.wrapping_mul(3), 255 - v, 255];
         let pixel = |g: &Game, x: usize, y: usize| {
             let at = (y * 320 + x) * 4;
             g.frame_rgba()[at..at + 4].to_vec()
         };
         for i in 0..60u32 {
-            for g in [&mut a, &mut b] {
-                if i % 7 == 3 {
-                    g.key_down("KeyT", "t", false);
-                    g.key_down("Minus", "-", false);
-                }
-                if i % 5 == 1 {
-                    g.pointer(i as i32 * 3, 50 + i as i32, (i % 3) as u8);
-                }
+            if i % 7 == 3 {
+                game.key_down("KeyT", "t", false);
+                game.key_down("Minus", "-", false);
             }
-            let ms = [20, 16, 7, 33][i as usize % 4];
-            a.tick(ms);
-            b.step(ms);
-            b.present();
-            assert!(a.frame_rgba() == b.frame_rgba(), "tick {i}: the same frame");
-            let log = a.take_log();
-            assert_eq!(log, b.take_log());
-            assert_eq!(a.keys_pending(), b.keys_pending());
+            if i % 5 == 1 {
+                game.pointer(i as i32 * 3, 50 + i as i32, (i % 3) as u8);
+            }
+            game.step([20, 16, 7, 33][i as usize % 4]);
+            game.present();
+            let log = game.take_log();
             if i == 3 {
                 assert_eq!(log, "stub: synthetic.key", "the first key's line");
-                for g in [&a, &b] {
-                    assert!(
-                        g.pending.is_empty() && g.keys_pending() == 0,
-                        "both keys taken"
-                    );
-                    assert_eq!(pixel(g, 0, 1), rgba(b't'), "t drawn");
-                    assert_eq!(pixel(g, 1, 1), rgba(b'-'), "- drawn after it");
-                }
+                assert!(
+                    game.pending.is_empty() && game.keys_pending() == 0,
+                    "both keys taken"
+                );
+                assert_eq!(pixel(&game, 0, 1), rgba(b't'), "t drawn");
+                assert_eq!(pixel(&game, 1, 1), rgba(b'-'), "- drawn after it");
             } else {
-                assert_eq!(log, "", "tick {i}: one line per stub id");
+                assert_eq!(log, "", "step {i}: one line per stub id");
             }
         }
-        assert_eq!(pixel(&a, 17, 1), rgba(b'-'), "the ninth pair's -");
-        assert!(a.frame_rgba() != first, "the frames changed");
-        let shown = b.frame_rgba();
-        b.step(20);
-        assert!(b.frame_rgba() == shown, "a step alone converts nothing");
-        b.present();
-        assert!(b.frame_rgba() != shown, "the present shows the step");
+        assert_eq!(pixel(&game, 17, 1), rgba(b'-'), "the ninth pair's -");
+        assert!(game.frame_rgba() != first, "the frames changed");
+        let shown = game.frame_rgba();
+        game.step(20);
+        assert!(game.frame_rgba() == shown, "a step alone converts nothing");
+        game.present();
+        assert!(game.frame_rgba() != shown, "the present shows the step");
         let mut idle = Game::new();
         idle.step(20);
         idle.present();
@@ -1066,7 +1050,7 @@ mod tests {
                     io.sleep(u32::MAX).await;
                 },
             ));
-            game.tick(20);
+            game.step(20);
             game.keys_owned()
         };
         let roster = |size: u8, first: u8| {
@@ -1119,7 +1103,7 @@ mod tests {
             Files::default(),
             |_s, _io| async {},
         ));
-        ended.tick(20);
+        ended.step(20);
         assert!(ended.finished());
         assert_eq!(ended.keys_owned(), 0, "after the end");
     }
@@ -1160,8 +1144,10 @@ mod tests {
         again.boot(1, false).quiet();
         assert!(again.game_files() == n);
         for _ in 0..60 {
-            game.tick(16);
-            again.tick(16);
+            for g in [&mut game, &mut again] {
+                g.step(16);
+                g.present();
+            }
         }
         assert!(game.frame_rgba() == again.frame_rgba(), "same first frames");
         assert!(
@@ -1187,7 +1173,8 @@ mod tests {
         game.boot(1, true).quiet();
         let ticks = |game: &mut Game, n: u32| {
             for _ in 0..n {
-                game.tick(16);
+                game.step(16);
+                game.present();
             }
         };
         ticks(&mut game, 120);
@@ -1245,7 +1232,8 @@ mod tests {
         assert!(fresh.audio_start(48_000).quiet());
         let mut heard = 0f32;
         for _ in 0..60 {
-            fresh.tick(16);
+            fresh.step(16);
+            fresh.present();
             let n = fresh.audio_render(768);
             assert!(n == 1536);
             heard = heard.max(fresh.audio_buf.iter().fold(0f32, |m, &v| m.max(v.abs())));
@@ -1266,7 +1254,8 @@ mod tests {
         }
         let ticks = |game: &mut Game, n: u32| {
             for _ in 0..n {
-                game.tick(16);
+                game.step(16);
+                game.present();
             }
         };
         let save = |game: &mut Game| {
