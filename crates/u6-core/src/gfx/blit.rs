@@ -266,6 +266,17 @@ pub fn copy_window(back: &Framebuffer, front: &mut Framebuffer) {
     }
 }
 
+/// [`copy_window`]'s result by rows: each row of its rect that differs between the buffers is
+/// copied, the others (which the copy would leave as they are) are not.
+pub fn copy_window_rows(back: &Framebuffer, front: &mut Framebuffer) {
+    for y in 8..168 {
+        let row = y * WIDTH + 8..y * WIDTH + 168;
+        if back.pixels()[row.clone()] != front.pixels()[row.clone()] {
+            front.blit(8, y as i32, 160, 1, &back.pixels()[row], None);
+        }
+    }
+}
+
 /// Original: 0x151fe6 (copy the pixel rectangle (x0, y0)..=(x1, y1) of the back buffer to
 /// (dx, dy) on the screen: whole bytes of 8 pixels, all five planes)
 ///

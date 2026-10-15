@@ -40,6 +40,9 @@
 //! and its release in the same tick; `wait:N` idles N ticks. `--png-every N:prefix` also writes the frame every
 //! N ticks. The RNG seed defaults to 0 headless (reproducible) and to the wall clock in the
 //! window (as the original seeds from `time()`). In the window the mouse is the pointer.
+//! Headless, `U6_WINDOW_CACHE=off` renders the map window at every refresh, without the cache
+//! that leaves out a render that would change nothing (spec 06 O2): the equivalence runs
+//! compare the frames of both.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -498,6 +501,8 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
     window.set_target_fps(60);
     let mut rgba = Vec::new();
     let mut screen = vec![0u32; w * h];
+    // The engine frame `screen` shows (`Engine::frame_version`; none yet: the window opens black).
+    let mut shown = None;
     let mut last = Instant::now();
     let mut mouse = None;
     let mut pending: Vec<InputEvent> = Vec::new();
@@ -557,10 +562,12 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
             out.top_up(audio);
         }
         print_log(&mut engine);
-        // A frame that ran no step shows the picture it had.
-        if steps > 0 {
+        // A frame whose steps composed no new picture, or that ran none, shows the picture it
+        // had (spec 06 O1).
+        if steps > 0 && shown != Some(engine.frame_version()) {
             engine.frame().write_rgba(&mut rgba);
             upscale(&rgba, &mut screen);
+            shown = Some(engine.frame_version());
         }
         window
             .update_with_buffer(&screen, w, h)
@@ -592,6 +599,9 @@ fn run(args: Args) -> Result<(), String> {
     match &args.headless_png {
         Some(path) => {
             let mut engine = boot(zip, args.seed.unwrap_or(0), saves.as_ref(), args.game_first)?;
+            if std::env::var_os("U6_WINDOW_CACHE").is_some_and(|v| v == "off") {
+                engine.io().set_window_cache(false);
+            }
             let mut audio = match &args.wav {
                 Some(_) => Some(Audio::new(&engine, WAV_RATE)?),
                 None => None,

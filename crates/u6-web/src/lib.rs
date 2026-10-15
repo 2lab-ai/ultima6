@@ -6,9 +6,10 @@
 //!
 //! The fixed step (spec 06): each display frame the page asks [`Game::pace`] how many steps of
 //! [`step_ms`] its wall time is worth, runs them with [`Game::step`] while its budget
-//! ([`budget_ms`]) lasts, reports them ([`Game::ran`]) and converts the frame once
-//! ([`Game::present`]). [`Game::set_speed`] picks the speed; [`Game::keys_owned`] says which of
-//! `-`, `+` and `=` the game takes itself.
+//! ([`budget_ms`]) lasts, reports them ([`Game::ran`]) and converts the frame once, if the steps
+//! changed it ([`Game::present`]; the page draws the canvas only when [`Game::frame_version`]
+//! moved). [`Game::set_speed`] picks the speed; [`Game::keys_owned`] says which of `-`, `+` and
+//! `=` the game takes itself.
 //!
 //! Sound: once the page has an AudioContext it calls [`Game::audio_start`] with its sample
 //! rate; every step then replays the game's MED calls on the emulated A500 audio machine
@@ -154,6 +155,11 @@ pub struct Game {
     pending: Vec<InputEvent>,
     blank: Framebuffer,
     rgba: Vec<u8>,
+    /// The engine frame `rgba` holds ([`Engine::frame_version`]); `None` while it holds the
+    /// black frame before a start.
+    rgba_holds: Option<u64>,
+    /// Conversions into `rgba` so far ([`Game::frame_version`]).
+    conversions: u64,
     log: Vec<String>,
     /// Paths of the game files the last start booted from, until the page has kept them (their
     /// bytes are read in place from the engine's file map, never copied in wasm).
@@ -197,6 +203,8 @@ impl Game {
             pending: Vec::new(),
             blank: Framebuffer::new(),
             rgba: Vec::new(),
+            rgba_holds: None,
+            conversions: 0,
             log: Vec::new(),
             kept: Vec::new(),
             saves: BTreeMap::new(),
@@ -494,10 +502,22 @@ impl Game {
         self.pending.clear();
     }
 
-    /// Converts the engine's frame (black before a start) into the RGBA frame
-    /// ([`Game::frame_ptr`]): once per display frame, after its steps.
+    /// Converts the engine's frame into the RGBA frame ([`Game::frame_ptr`]) when it changed
+    /// since the last conversion (spec 06 O1, [`Engine::frame_version`]): once per display
+    /// frame, after its steps; steps that composed no new frame convert nothing. Before a start
+    /// the RGBA frame stays black.
     pub fn present(&mut self) {
-        self.redraw();
+        let version = self.engine.as_ref().map(Engine::frame_version);
+        if version.is_some() && version != self.rgba_holds {
+            self.redraw();
+        }
+    }
+
+    /// Changes whenever the RGBA frame was converted again ([`Game::present`], a start): the
+    /// page draws the canvas only when it moved since its last draw. It never goes back, also
+    /// across starts.
+    pub fn frame_version(&self) -> f64 {
+        self.conversions as f64
     }
 
     /// Adds `dt` wall milliseconds since the previous display frame and returns the steps they
@@ -710,9 +730,14 @@ impl Game {
         buttons.is_some_and(|b| b & 3 != 0)
     }
 
+    /// Converts the engine's frame (black before a start) into the RGBA frame, whatever it holds
+    /// now (a new engine's versions start again at 0, so a start converts here, never through
+    /// the version check of [`Game::present`]).
     fn redraw(&mut self) {
         let fb = self.engine.as_ref().map_or(&self.blank, |e| e.frame());
         fb.write_rgba(&mut self.rgba);
+        self.rgba_holds = self.engine.as_ref().map(Engine::frame_version);
+        self.conversions += 1;
     }
 }
 
@@ -958,6 +983,101 @@ mod tests {
         idle.step(20);
         idle.present();
         assert!(idle.frame_rgba() == first, "before a start: black");
+    }
+
+    /// A game on synthetic state that presents only when it takes a key (the key's character
+    /// drawn on row 1), with a one-shape pointer sprite shown: a step with no key and no pointer
+    /// move composes no new frame.
+    fn still_engine() -> Engine {
+        use u6_core::ui::pointer::{PointerState, PointerTables, Shape};
+        let mut s = u6_core::State::empty();
+        s.ui.pointer = PointerState::from_tables(PointerTables {
+            shapes: vec![Shape {
+                dx: -1,
+                dy: -2,
+                rows: vec![[1; 16]],
+            }],
+            shown: true,
+            ..Default::default()
+        });
+        Engine::with_game(s, Files::default(), |_state, io| async move {
+            io.draw(|fb| {
+                for (i, c) in fb.palette.iter_mut().enumerate() {
+                    let v = i as u8;
+                    *c = u6_core::Rgb::new(v, 255 - v, v.wrapping_mul(5));
+                }
+            });
+            let mut typed = 0;
+            loop {
+                io.take_pointer();
+                while io.key_ready() {
+                    if let Key::Char(c) = io.next_key().await {
+                        io.draw(|fb| fb.set(typed % 320, 1, c as u8));
+                    }
+                    typed += 1;
+                    io.present();
+                }
+                io.vblank().await;
+            }
+        })
+    }
+
+    /// Spec 06 O1: a present converts only a frame the steps changed (a key presented, the
+    /// pointer sprite moved, the first step), once however many steps ran, and the RGBA frame
+    /// after every present is the one the old path (a conversion at every present) gave. The
+    /// version the page reads moves with each conversion; a start that fails converts nothing.
+    #[test]
+    fn a_present_converts_only_a_changed_frame() {
+        let mut game = Game::new();
+        game.engine = Some(still_engine());
+        let mut changes = 0;
+        for i in 0..60u32 {
+            let key = i % 5 == 2;
+            let moved = i % 7 == 3;
+            if key {
+                game.key_down(
+                    "KeyA",
+                    &char::from(b'a' + (i % 26) as u8).to_string(),
+                    false,
+                );
+            }
+            if moved {
+                game.pointer(10 + i as i32, 40, 0);
+            }
+            if i % 11 == 4 && !moved {
+                // The pointer where it already is: the sprite stays.
+                let at = game
+                    .engine
+                    .as_ref()
+                    .map(|e| e.io().handler_pointer())
+                    .unwrap();
+                game.pointer(i32::from(at.x), i32::from(at.y), 0);
+            }
+            let steps = 1 + i % 3;
+            for _ in 0..steps {
+                game.step(20);
+            }
+            let before = game.conversions;
+            game.present();
+            let expect = u64::from(i == 0 || key || moved);
+            assert_eq!(game.conversions - before, expect, "frame {i}: conversions");
+            changes += expect;
+            let mut old = Vec::new();
+            game.engine.as_ref().unwrap().frame().write_rgba(&mut old);
+            assert!(game.rgba == old, "frame {i}: the old path's RGBA");
+            assert_eq!(game.frame_version(), game.conversions as f64);
+        }
+        // The first, 12 with a key, 9 with a move, 2 of them with both.
+        assert_eq!(changes, 20, "frames that changed");
+        let before = game.frame_version();
+        game.collect("notes.txt", b"hello".to_vec()).unwrap();
+        assert!(game.boot(0, false).is_err());
+        game.present();
+        assert_eq!(
+            game.frame_version(),
+            before,
+            "a failed start keeps the frame"
+        );
     }
 
     /// The speed: 1 at first; a preset, 0 for Max (the step cap per frame) and back; a negative,

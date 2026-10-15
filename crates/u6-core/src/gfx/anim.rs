@@ -37,8 +37,10 @@ pub fn set_frame(gfx: &mut GfxState, value: u8) {
 /// Original: 0x152dac (shore merge: 0x152d52 once per plane, D6 stepping by the plane size)
 ///
 /// Merges the animated water tiles into the 32 shore tiles. The five passes differ only in the
-/// plane they touch; on chunky records each pass rewrites one colour bit.
+/// plane they touch; on chunky records each pass rewrites one colour bit. A record whose pixels
+/// it changes gets a new version, and the merge's memo is forgotten ([`super::cache`]).
 pub fn merge_shores(gfx: &mut GfxState) {
+    super::cache::forget_shores(gfx);
     for plane in 0..PLANES as u8 {
         merge_plane(gfx, plane);
     }
@@ -100,6 +102,7 @@ fn merge_rows(gfx: &mut GfxState, src: usize, dst: usize, plane: u8, skip: u8, m
     };
     let bit = 1u8 << plane;
     let mut out = d.pixels.clone();
+    let mut changed = false;
     for (k, &mask) in masks.iter().enumerate() {
         let j = usize::from(skip / 2) + k;
         let (Some(rs), Some(rd)) = (stored(s, j), stored(d, j)) else {
@@ -109,11 +112,16 @@ fn merge_rows(gfx: &mut GfxState, src: usize, dst: usize, plane: u8, skip: u8, m
             if mask & (0x8000 >> c) != 0 {
                 let from = s.pixels[rs * TILE_W + c] & bit;
                 let p = &mut out[rd * TILE_W + c];
-                *p = (*p & !bit) | from;
+                let merged = (*p & !bit) | from;
+                changed |= merged != *p;
+                *p = merged;
             }
         }
     }
-    gfx.records[dst].pixels = out;
+    if changed {
+        gfx.records[dst].pixels = out;
+        gfx.cache.record_changed(dst);
+    }
 }
 
 /// Original: 0x10202e (animation tick: animdata frames, shore merge, actor idle frames)
@@ -128,6 +136,12 @@ fn merge_rows(gfx: &mut GfxState, src: usize, dst: usize, plane: u8, skip: u8, m
 /// each idle step (0x105c8e). The flag is cleared, and if a frame changed the window object
 /// lists are rebuilt (0x10e81e).
 pub fn anim_tick(state: &mut State) {
+    anim_tick_with(state, false);
+}
+
+/// [`anim_tick`]; with `cached` (spec 06 O2) the shore merge is left out when it would change
+/// no record ([`super::cache::merge_shores_if_changed`]).
+pub(crate) fn anim_tick_with(state: &mut State, cached: bool) {
     let State {
         gfx, tables, map, ..
     } = state;
@@ -148,7 +162,11 @@ pub fn anim_tick(state: &mut State) {
         substitute(gfx, slot.tile_to_animate, frame);
     }
     if counter & 1 == 0 {
-        merge_shores(gfx);
+        if cached {
+            super::cache::merge_shores_if_changed(gfx);
+        } else {
+            merge_shores(gfx);
+        }
     }
     let changed = actor_idle_frames(state);
     state.gfx.actor_anim_due = 0;

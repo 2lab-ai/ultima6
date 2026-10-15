@@ -10,8 +10,9 @@
 // both the sound's gesture and exactly one game click) and the fixed step with its speed
 // control (spec 06: the steps follow the clock on a virtual 60 Hz and 144 Hz display and on
 // the real one, the speed keys and the keys the game keeps, the badge, the buttons, the stored
-// choice, a held press at 1x whatever the speed, the music above 4x). Most tests start `game` at once
-// (harness `gameFirst`); the launcher tests run the page as it is.
+// choice, a held press at 1x whatever the speed, the music above 4x, a frame converted and
+// drawn only when it changed). Most tests start `game` at once (harness `gameFirst`); the
+// launcher tests run the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. The game is read once it reached what a check asserts, by its own signals (the
 // prompt, the key queue, the program, its ticks: the page's fixed steps of 20 ms), never after a
@@ -1386,6 +1387,39 @@ test('a press held 150 ms at 8x walks as at 1x: the game takes it at 1x (virtual
   }
   assert.ok(one.cells === 1 && eight.cells === 1, 'one cell at either speed');
   assert.ok(Math.abs(eight.hold - one.hold) <= STEP_MS, 'the 8x hold is the 1x one, within a step');
+}, { needs: h.haveHfes });
+
+test('a display frame converts the game\'s frame at most once however many steps ran, and draws the canvas only for a conversion (virtual 60 Hz display, spec 06 O1)', async (env) => {
+  const page = await bootGame(env, () => {
+    const put = CanvasRenderingContext2D.prototype.putImageData;
+    window.__draws = 0;
+    CanvasRenderingContext2D.prototype.putImageData = function (...args) {
+      window.__draws += 1;
+      return put.apply(this, args);
+    };
+  });
+  await h.waitPrompt(page);
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const read = () => page.evaluate(() => ({
+    draws: window.__draws, presents: globalThis.__presents, converted: globalThis.__converted, steps: globalThis.__ticks,
+  }));
+  const receipts = [];
+  for (const speed of ['1', '8']) {
+    await speedTo(page, speed);
+    await h.runFrames(page, 1);
+    const a = await read();
+    const { called } = await h.runFrames(page, 300);
+    const b = await read();
+    const d = (k) => b[k] - a[k];
+    assert.ok(called === 300, `${speed}x: the loop ran in every virtual frame`);
+    assert.ok(d('presents') <= 300 && d('converted') <= d('presents'), `${speed}x: at most one conversion a display frame`);
+    assert.ok(d('draws') === d('converted'), `${speed}x: the canvas drawn once for each frame converted, never without one`);
+    assert.ok(d('converted') > 0, `${speed}x: the game's frames reach the canvas`);
+    if (speed === '8') assert.ok(d('steps') > 4 * d('converted'), '8x: several steps a frame, one conversion');
+    receipts.push(`${speed}x ${d('steps')} steps, ${d('presents')} presents, ${d('converted')} conversions, ${d('draws')} draws`);
+  }
+  console.log(`  receipt: 300 virtual frames: ${receipts.join('; ')}`);
 }, { needs: h.haveHfes });
 
 test('"behind" shows while the frame budget drops steps (a slow host at 8x), not after a stall past the cap; it clears at 1x (virtual 60 Hz display)', async (env) => {

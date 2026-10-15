@@ -9,9 +9,10 @@
 
 use u6_render::{Framebuffer, Rgb};
 
-use super::anim::anim_tick;
-use super::blit::{blit_back, plot, set_plot_colour};
-use super::{GfxState, seams};
+use super::blit::{blit_back, copy_window_rows, plot, set_plot_colour};
+use super::cache::{BOXES, WindowKey, cell_box};
+use super::tables::GameTables;
+use super::{GfxState, anim, cache, seams};
 use crate::actors::Calendar;
 use crate::engine::Io;
 use crate::state::State;
@@ -62,7 +63,18 @@ fn load_palette(state: &State, fb: &mut Framebuffer) {
 /// step from it in direction `hour_dir[hour % 12]`, the minute hand in direction
 /// `minute · 2 / 15` (hour A4-0x7b81, minute A4-0x7b82; `divs.w`). The plot colour stays set.
 fn clock_hands(cal: &Calendar, gfx: &mut GfxState, fb: &mut Framebuffer, x: u16, y: u16) {
-    let t = &gfx.tables;
+    let points = clock_points(cal, &gfx.tables, x, y);
+    set_plot_colour(gfx, gfx.tables.clock_colour);
+    gfx.plot_back = true;
+    for (hx, hy) in points {
+        plot(gfx, fb, hx, hy);
+    }
+    gfx.plot_back = false;
+}
+
+/// The three pixels [`clock_hands`] plots for a clock tile at (x, y): the pivot, the hour
+/// hand's tip, the minute hand's tip.
+pub(super) fn clock_points(cal: &Calendar, t: &GameTables, x: u16, y: u16) -> [(u16, u16); 3] {
     let (px, py) = (x.wrapping_add(4), y.wrapping_add(0xe));
     let hour = usize::from(t.hour_dir[usize::from(cal.hour % 12)]);
     let minute = usize::from(cal.minute) * 2 / 15;
@@ -71,33 +83,49 @@ fn clock_hands(cal: &Calendar, gfx: &mut GfxState, fb: &mut Framebuffer, x: u16,
         let step = |v: u16, s: Option<i8>| v.wrapping_add(s.unwrap_or(0) as i16 as u16);
         (step(px, dx), step(py, dy))
     };
-    let (hand, mark) = (tip(hour), tip(minute));
-    set_plot_colour(gfx, gfx.tables.clock_colour);
-    gfx.plot_back = true;
-    for (hx, hy) in [(px, py), hand, mark] {
-        plot(gfx, fb, hx, hy);
-    }
-    gfx.plot_back = false;
+    [(px, py), tip(hour), tip(minute)]
 }
 
 /// The border of 0x102c90 (`0x00102E16..0x00102EC2`): corners 0x1b0 (0, 0), 0x1b2 (0xa0, 0),
 /// 0x1b3 (0, 0xa0), 0x1b5 (0xa0, 0xa0), then for i = 1..10 the edges 0x1b1 (16i, 0),
-/// 0x1b4 (16i, 0xa0), 0x1b6 (0, 16i), 0x1b7 (0xa0, 16i).
-fn draw_border(gfx: &GfxState, fb: &mut Framebuffer) {
-    for (t, x, y) in [
+/// 0x1b4 (16i, 0xa0), 0x1b6 (0, 16i), 0x1b7 (0xa0, 16i). Each tile lies on an edge cell;
+/// `only` keeps those of the boxes it marks.
+fn draw_border(gfx: &GfxState, fb: &mut Framebuffer, only: Option<&[bool; BOXES]>) {
+    for (t, x, y) in border_tiles() {
+        if only.is_none_or(|d| cell_box(x, y).is_some_and(|b| d[b])) {
+            blit_back(gfx, fb, t, x, y);
+        }
+    }
+}
+
+/// The border's (tile, x, y) in the order [`draw_border`] draws them.
+fn border_tiles() -> impl Iterator<Item = (u16, u16, u16)> {
+    let corners = [
         (0x1b0, 0, 0),
         (0x1b2, 0xa0, 0),
         (0x1b3, 0, 0xa0),
         (0x1b5, 0xa0, 0xa0),
-    ] {
-        blit_back(gfx, fb, t, x, y);
+    ];
+    let edges = (1..10).flat_map(|i| {
+        [
+            (0x1b1, i * CELL, 0),
+            (0x1b4, i * CELL, 0xa0),
+            (0x1b6, 0, i * CELL),
+            (0x1b7, 0xa0, i * CELL),
+        ]
+    });
+    corners.into_iter().chain(edges)
+}
+
+/// The border word of each cell's box ([`border_tiles`]).
+fn border_of_boxes() -> [Option<u16>; BOXES] {
+    let mut at = [None; BOXES];
+    for (t, x, y) in border_tiles() {
+        if let Some(b) = cell_box(x, y) {
+            at[b] = Some(t);
+        }
     }
-    for i in 1..10 {
-        blit_back(gfx, fb, 0x1b1, i * CELL, 0);
-        blit_back(gfx, fb, 0x1b4, i * CELL, 0xa0);
-        blit_back(gfx, fb, 0x1b6, 0, i * CELL);
-        blit_back(gfx, fb, 0x1b7, 0xa0, i * CELL);
-    }
+    at
 }
 
 /// Original: 0x102c90 (render the map window into the back buffer; with `framed`, add the cursor
@@ -112,6 +140,20 @@ fn draw_border(gfx: &GfxState, fb: &mut Framebuffer) {
 /// then the window goes to the front, dissolved when A4-0x6578 is set (cleared after), copied
 /// otherwise.
 pub fn render_window(state: &mut State, io: &Io, framed: bool) {
+    let inputs = window_inputs(state, io, framed);
+    draw_window(state, io, framed, &inputs);
+}
+
+/// What 0x102c90 takes before it draws: the window contents, the clock's tile word, and with
+/// `framed` the target cursor (whose call 0x106932 may redraw the panel cursor). The plot
+/// colour is set first.
+struct WindowInputs {
+    window: ViewWindow,
+    clock: Option<u16>,
+    cursor: Option<(u16, u16, u16)>,
+}
+
+fn window_inputs(state: &mut State, io: &Io, framed: bool) -> WindowInputs {
     let colour = state.gfx.tables.window_colour;
     set_plot_colour(&mut state.gfx, colour);
     let window = seams::view_window(state);
@@ -121,14 +163,54 @@ pub fn render_window(state: &mut State, io: &Io, framed: bool) {
     } else {
         None
     };
+    WindowInputs {
+        window,
+        clock,
+        cursor,
+    }
+}
+
+/// The rest of 0x102c90: the palettes, the cells into the back buffer, the sparkle, with
+/// `framed` the cursor, the border and the present.
+fn draw_window(state: &mut State, io: &Io, framed: bool, inputs: &WindowInputs) {
     io.draw(|fb| load_palette(state, fb));
     io.draw_back(|fb| load_palette(state, fb));
+    draw_boxes(state, io, framed, inputs, None);
+    if framed {
+        let gfx = &mut state.gfx;
+        let dissolve = gfx.dissolve != 0;
+        seams::present_window(io, gfx, dissolve);
+        if dissolve {
+            gfx.dissolve = 0;
+        }
+    }
+}
+
+/// The back-buffer draws of 0x102c90: the cells (rows, then columns), the sparkle, with `framed`
+/// the cursor and the border. With `only`, the draws in the boxes it marks, in the same order
+/// (no sparkle then: [`render_window_cached`]).
+fn draw_boxes(
+    state: &mut State,
+    io: &Io,
+    framed: bool,
+    inputs: &WindowInputs,
+    only: Option<&[bool; BOXES]>,
+) {
+    let WindowInputs {
+        window,
+        clock,
+        cursor,
+    } = inputs;
+    let clock = *clock;
     let State {
         gfx, actors, rng, ..
     } = state;
     io.draw_back(|fb| {
         for (row, tiles) in window.tiles.iter().enumerate() {
             for (col, &tile) in tiles.iter().enumerate() {
+                if only.is_some_and(|d| !d[row * WINDOW_TILES + col]) {
+                    continue;
+                }
                 let (x, y) = (col as u16 * CELL, row as u16 * CELL);
                 blit_back(gfx, fb, tile, x, y);
                 for &word in &window.objects[row * WINDOW_TILES + col] {
@@ -152,19 +234,14 @@ pub fn render_window(state: &mut State, io: &Io, framed: bool) {
             gfx.plot_back = false;
         }
         if framed {
-            if let Some((tile, x, y)) = cursor {
+            if let Some((tile, x, y)) = *cursor
+                && only.is_none_or(|d| cell_box(x, y).is_some_and(|b| d[b]))
+            {
                 blit_back(gfx, fb, tile, x, y);
             }
-            draw_border(gfx, fb);
+            draw_border(gfx, fb, only);
         }
     });
-    if framed {
-        let dissolve = gfx.dissolve != 0;
-        seams::present_window(io, gfx, dissolve);
-        if dissolve {
-            gfx.dissolve = 0;
-        }
-    }
 }
 
 /// Original: 0x102ef0 (post-step refresh: rebuild the view flags if stale, redraw the window,
@@ -173,20 +250,72 @@ pub fn render_window(state: &mut State, io: &Io, framed: bool) {
 /// A4-0x6a8e set: 0x109e74, then clear. A4-0x7af8 set: the animation tick 0x10202e and
 /// 0x102c90 with D0 = 1. A4-0x7afc non-zero: clear it and redraw that panel (0x133a1a with
 /// D1 = 1).
+///
+/// Port (spec 06 O2, [`Io::set_window_cache`], on by default): the tick's shore merge and the
+/// render's draws are left out where they would change nothing ([`super::cache`]); the frames
+/// and the state are those of the original's every-time render.
 pub fn refresh_view(state: &mut State, io: &Io) {
     if state.map.view_dirty != 0 {
         seams::view_flags(state);
         state.map.view_dirty = 0;
     }
     if state.gfx.window_shown != 0 {
-        anim_tick(state);
-        render_window(state, io, true);
+        let cached = io.window_cache();
+        anim::anim_tick_with(state, cached);
+        if cached {
+            render_window_cached(state, io);
+        } else {
+            render_window(state, io, true);
+        }
     }
     if state.gfx.panel_redraw != 0 {
         let shakes = state.gfx.panel_redraw;
         state.gfx.panel_redraw = 0;
         seams::quake(state, io, shakes);
     }
+}
+
+/// [`render_window`] framed, drawing only the boxes whose draws read a changed value, none when
+/// none did ([`cache::dirty_boxes`]; the other boxes in the back buffer are what their draws
+/// would draw again). Then the palettes are loaded as the render loads them, the plot colour and
+/// plane are those the clock hands leave, and the window is presented (the rows of its rect
+/// where the screen differs from the back buffer copied: what [`super::blit::copy_window`]
+/// changes). Every box is drawn, as by [`render_window`], when nothing is remembered, and the
+/// render is not remembered with the sparkle, the dissolve or XOR plots on, or a draw that would
+/// leave its box ([`WindowKey::of`]).
+fn render_window_cached(state: &mut State, io: &Io) {
+    let inputs = window_inputs(state, io, true);
+    let border = border_of_boxes();
+    let key = WindowKey::of(state, &inputs.window, inputs.clock, inputs.cursor, &border);
+    let dirty = key
+        .as_ref()
+        .and_then(|key| cache::dirty_boxes(&state.gfx, io.back_mark(), key));
+    match (&key, dirty) {
+        (Some(key), Some(dirty)) => {
+            io.draw(|fb| load_palette(state, fb));
+            io.draw_back(|fb| load_palette(state, fb));
+            let redrawn = dirty.iter().filter(|&&d| d).count();
+            if redrawn > 0 {
+                draw_boxes(state, io, true, &inputs, Some(&dirty));
+            }
+            let gfx = &mut state.gfx;
+            if key.clock {
+                set_plot_colour(gfx, gfx.tables.clock_colour);
+                gfx.plot_back = false;
+            }
+            io.with_buffers(|back, front| copy_window_rows(back, front));
+            io.present();
+            if redrawn == 0 {
+                gfx.cache.window_skips += 1;
+            } else {
+                gfx.cache.window_partial += 1;
+                gfx.cache.boxes_redrawn += redrawn as u64;
+            }
+        }
+        _ => draw_window(state, io, true, &inputs),
+    }
+    let memo = key.map(|key| (key, io.back_mark()));
+    cache::remember_window(&mut state.gfx, memo);
 }
 
 /// Original: 0x132338 (ui: flash an actor in the map window: its tile in outline mode over its

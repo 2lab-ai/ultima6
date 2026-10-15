@@ -53,6 +53,10 @@ pub struct GfxState {
     pub dissolve: u16,
     /// The turned sprites of the flights (0x15265a / 0x152800 / 0x152876).
     pub sprites: super::sprite::Sprites,
+    /// Port-only (spec 06 O2): what the idle refresh last rendered and merged, so it can leave
+    /// out a render or a merge that would change nothing. Not game state: it compares equal
+    /// whatever it holds, and a clone starts empty ([`super::cache::RenderCache`]).
+    pub cache: super::cache::RenderCache,
 }
 
 impl Default for GfxState {
@@ -90,6 +94,7 @@ impl Default for GfxState {
             sparkle: 0,
             dissolve: 0,
             sprites: super::sprite::Sprites::default(),
+            cache: super::cache::RenderCache::default(),
         }
     }
 }
@@ -122,6 +127,7 @@ impl GfxState {
             },
             tables: self.tables.clone(),
             sprites: super::sprite::Sprites::none(),
+            cache: super::cache::RenderCache::default(),
             ..*self
         }
     }
