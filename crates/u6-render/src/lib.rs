@@ -971,6 +971,8 @@ mod tests {
         );
     }
 
+    /// A clone_from brings the plane or takes it away; over a plane already there it marks every
+    /// chunk, for the buffer synced from this one and for this one's next sync.
     #[test]
     fn clone_from_carries_the_plane_and_its_absence() {
         let mut on = Framebuffer::new();
@@ -984,9 +986,27 @@ mod tests {
             (dst.get(1, 1), dst.palette[4]),
             (Some(4), Rgb::new(1, 2, 3))
         );
+        // Some to some between syncs: `dst` synced from `feed` and into `copy`, then made `on`
+        // again. Every chunk counts as written, so the next syncs copy it all, both ways.
+        let (mut feed, mut copy) = (planed(), planed());
+        feed.set_src(7, 7, 2, tile(8, 1, 1));
+        dst.sync_from(&mut feed);
+        copy.sync_from(&mut dst);
         on.set_src(2, 1, 6, tile(4, 0, 0));
         dst.clone_from(&on);
         assert_eq!(dst.src_at(2, 1), Some(tile(4, 0, 0)), "some to some");
+        copy.sync_from(&mut dst);
+        assert!(
+            copy.src() == dst.src() && dst.src() == on.src(),
+            "the buffer synced from it copies the clone"
+        );
+        dst.sync_from(&mut feed);
+        assert!(
+            dst.src() == feed.src(),
+            "and it copies again the buffer it syncs from"
+        );
+        copy.sync_from(&mut dst);
+        assert!(copy.src() == feed.src());
         dst.clone_from(&Framebuffer::new());
         assert!(
             dst.src().is_none() && dst.get(1, 1) == Some(0),
