@@ -15,7 +15,7 @@
 //! the same check of each entry's range ([`Slice`]), so both refuse alike (each of these is
 //! stricter than the reader before slicing):
 //! - more than [`MAX_ENTRIES`] central records, or a central directory starting more than
-//!   [`MAX_DIRECTORY_BYTES`] before the end of the file (both before any record is read);
+//!   [`MAX_DIRECTORY_BYTES`] before the end of its end record (both before any record is read);
 //! - an entry the filter takes with a method other than stored or deflate, or 4 GiB or more
 //!   packed or declared unpacked;
 //! - an entry whose local header and data do not fit before the end of the file;
@@ -46,14 +46,20 @@
 //! 5. of the candidates that fit best, the last in the file (the first found scanning back).
 //!
 //! All candidates are weighed in one pass. When some need bytes before those read, the sliced
-//! reader asks once for the lowest of them (each within [`MAX_DIRECTORY_BYTES`] of the end): the
-//! Zip64 end records they name, then the directories those name; the end of a file is read at
-//! most three times (the tail, from a Zip64 end record, from a directory). The end-record bytes
-//! cannot tell the real zip from a complete one planted in its entry data or its comment, with a
-//! central directory that lists records: a planted one whose comment holds the real record is
-//! read instead of it (the outer of two nested zips wins), on both paths alike. A planted record
-//! that is not such a zip (no records, no central record where its directory should start, its
-//! directory ending elsewhere) does not win over the real one. The zip [`Rebuilt`] assembles is
+//! reader asks once for the lowest of them, each within [`MAX_DIRECTORY_BYTES`] of the end of
+//! the candidate's record, so within that and 64 KiB of the end of the file. What a candidate
+//! names is known from the tail (its Zip64 end record, or its directory) or from its Zip64 end
+//! record (the directory there), and every candidate with records within the limits has the
+//! start of its directory read while it is weighed, so the walk of the one chosen reads nothing
+//! more: a sliced read from [`tail_start`] reads the end of the file at most three times (the
+//! tail, once from the lowest Zip64 end record or directory the tail names, once from the
+//! lowest directory a Zip64 end record names). The end-record bytes cannot tell the real zip
+//! from any record whose directory starts with a central record and ends at it, a prefix of the
+//! real directory included (a record in a central record's comment field), or a whole zip
+//! planted in entry data or in the comment: such a record whose comment holds the real record
+//! is read instead of it (the outer wins), on both paths alike. A planted record that is not
+//! such a one (no records, no central record where its directory should start, its directory
+//! ending elsewhere) does not win over the real one. The zip [`Rebuilt`] assembles is
 //! read at its own end record ([`REBUILT_COMMENT`]), so the choice made on the original holds.
 //!
 //! The one difference left: [`Rebuilt`] refuses to grow past 4 GiB (its offsets are 32-bit),
@@ -83,8 +89,10 @@ pub const REBUILT_COMMENT: usize = 0xffff;
 /// writes 0xffff for "see the Zip64 record"), so a zip of the entries taken ([`Rebuilt`])
 /// always holds them.
 pub const MAX_ENTRIES: u64 = 0xfffe;
-/// The most bytes from the first central record to the end of the file: the central directory
-/// and the end records and comment after it (65,534 records with 200-byte names fit).
+/// The most bytes from the first central record to the end of the end-of-central-directory
+/// record that names it: the central directory and the end records (the comment and any bytes
+/// after it not counted, so a zip and the zip of its entries [`Rebuilt`] assembles, which adds
+/// a comment, are held to the same limit; 65,534 records with 200-byte names fit).
 pub const MAX_DIRECTORY_BYTES: u64 = 16 << 20;
 
 /// Local-file-header or empty-archive signature at the start.
@@ -230,7 +238,7 @@ fn candidate(v: &View, e: u64, size: u64) -> Result<Option<Candidate>, Stop> {
     let zip64 = ends.at == u64::from(SENTINEL32) || ends.count == 0xffff;
     if zip64 && e >= 20 + 56 && v.u32(e - 20)? == EOCD64_LOCATOR {
         let z = v.u64(e - 12)?;
-        if z <= e - 20 - 56 && near_end(z, size).is_ok() && signed(v, z, size, EOCD64)? {
+        if z <= e - 20 - 56 && near_end(z, e + 22).is_ok() && signed(v, z, size, EOCD64)? {
             ends = Ends {
                 count: v.u64(z + 32)?,
                 len: v.u64(z + 40)?,
@@ -239,12 +247,13 @@ fn candidate(v: &View, e: u64, size: u64) -> Result<Option<Candidate>, Stop> {
             };
         }
     }
-    // The directory is read last, and only for one within the limits (one over them is
-    // refused once chosen, before any of it is read).
-    let listed = (1..=MAX_ENTRIES).contains(&ends.count)
-        && ends.at.checked_add(ends.len) == Some(ends.records)
-        && near_end(ends.at, size).is_ok()
+    // Whether the directory starts with a central record is read for every candidate within
+    // the limits (one over them is refused once chosen, before any of it is read), so the
+    // bytes the walk of the chosen one reads are held by then.
+    let headed = (1..=MAX_ENTRIES).contains(&ends.count)
+        && near_end(ends.at, e + 22).is_ok()
         && signed(v, ends.at, size, CENTRAL)?;
+    let listed = headed && ends.at.checked_add(ends.len) == Some(ends.records);
     let fit = match () {
         _ if listed => Fit::Listed,
         _ if end == size => Fit::ToEnd,
@@ -315,10 +324,11 @@ fn end_record(v: &View, size: u64) -> Result<Candidate, Stop> {
     }
 }
 
-/// A central directory or Zip64 end record at `at` lies in the file and at most
-/// [`MAX_DIRECTORY_BYTES`] before its end.
-fn near_end(at: u64, size: u64) -> Result<(), Stop> {
-    match size.checked_sub(at) {
+/// A central directory or Zip64 end record at `at` lies at most [`MAX_DIRECTORY_BYTES`] before
+/// `end`, the end of the end-of-central-directory record that names it (its comment and any
+/// bytes after it not counted).
+fn near_end(at: u64, end: u64) -> Result<(), Stop> {
+    match end.checked_sub(at) {
         Some(n) if n <= MAX_DIRECTORY_BYTES => Ok(()),
         _ => Err(invalid().into()),
     }
@@ -331,7 +341,8 @@ fn end_records(v: &View, size: u64) -> Result<Ends, Stop> {
     if size < 22 {
         return Err(invalid().into());
     }
-    let ends = end_record(v, size)?.ends;
+    let chosen = end_record(v, size)?;
+    let ends = chosen.ends;
     if ends.count == 0 {
         return Ok(Ends {
             at: ends.records,
@@ -341,7 +352,7 @@ fn end_records(v: &View, size: u64) -> Result<Ends, Stop> {
     if ends.count > MAX_ENTRIES {
         return Err(invalid().into());
     }
-    near_end(ends.at, size)?;
+    near_end(ends.at, chosen.at + 22)?;
     Ok(ends)
 }
 
@@ -1273,6 +1284,8 @@ mod tests {
     /// records come from the reviews (gpt6 r2/r3, opus r2/r3).
     #[test]
     fn the_end_record_read_by_one_rule() {
+        // Rows whose fixture is not what it says (checked as they are made, not asserted).
+        let mut setup: Vec<String> = Vec::new();
         let disk = b"the disk".to_vec();
         let pair = [stored("scan.bin", &[1; 50]), stored("Disk 1.adf", &disk)];
         let read_disk = || Ok(entries(&[("Disk 1.adf", &disk)]));
@@ -1428,10 +1441,9 @@ mod tests {
             &[stored("scan.bin", &filler), stored("Disk 1.adf", &disk)],
             opts,
         );
-        assert!(
-            1000 + 64 * fakes as u64 <= tail_start(zip.len() as u64),
-            "before the tail"
-        );
+        if 1000 + 64 * fakes as u64 > tail_start(zip.len() as u64) {
+            setup.push("opus r3: the Zip64 end records named are not before the tail".to_string());
+        }
         let record = zip.len() - 22 - comment.len();
         rows.push(plain(
             "opus r3: 1,560 false records after Zip64 locators",
@@ -1547,7 +1559,9 @@ mod tests {
         let (probe, exact) = in_last(&inner(0, b"Disk 1.adf", &fake, 0));
         let p0 = at_scan(&exact);
         let (zip, _) = in_last(&inner(p0, b"Disk 1.adf", &fake, 0));
-        assert_eq!(zip.len(), probe.len());
+        if zip.len() != probe.len() {
+            setup.push("of two listing records: the planted zip moved".to_string());
+        }
         rows.push(plain(
             "of two listing records, the last",
             zip.clone(),
@@ -1568,6 +1582,88 @@ mod tests {
             record: Some(0),
             read: Ok(Vec::new()),
             reads: Some(1),
+        });
+
+        // opus XN1: the chosen record does not list (bytes between its directory and it); a
+        // false record in its comment names Zip64 records naming a directory that is not
+        // there. Every directory start is read while the candidates are weighed: two reads.
+        let filler = vec![7u8; 300_000];
+        let (base, _) = make(
+            &[stored("Disk 1.adf", &disk), stored("scan.bin", &filler)],
+            0,
+            false,
+        );
+        let cd = central_at(&base);
+        let cd_len = base.len() - 22 - cd;
+        let mut z = base[..cd + cd_len].to_vec();
+        let (a1, z1) = (z.len() as u64 + 50, z.len() as u64 + 100);
+        z.resize(z1 as usize, 0);
+        put32(&mut z, EOCD64);
+        put64(&mut z, 44);
+        z.extend_from_slice(&[45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        for v in [1, 1, z1 - a1, a1] {
+            put64(&mut z, v);
+        }
+        z.resize(z.len() + 250_000, 0);
+        let mut comment = Vec::new();
+        put32(&mut comment, EOCD64_LOCATOR);
+        put32(&mut comment, 0);
+        put64(&mut comment, z1);
+        put32(&mut comment, 1);
+        put_eocd(&mut comment, 0, 0, SENTINEL, 0);
+        let real = z.len();
+        put_eocd(&mut z, 2, cd_len as u32, cd as u32, comment.len());
+        z.extend_from_slice(&comment);
+        rows.push(Row {
+            what: "opus XN1: a chosen record that does not list",
+            record: Some(real),
+            read: Ok(entries(&[("Disk 1.adf", &disk)])),
+            reads: Some(2),
+            zip: z,
+        });
+
+        // opus XN2: a record in the last central record's comment field, listing the directory
+        // up to it (a prefix: the skipped first entry only), its comment holding the real
+        // record: the end-record bytes cannot tell it from a real one; both paths read it.
+        let (zip, _) = make(
+            &[stored("scan.bin", &[1; 50]), stored("Disk 1.adf", &disk)],
+            0,
+            false,
+        );
+        let cd = central_at(&zip);
+        let second = cd + 46 + "scan.bin".len();
+        let mut z = zip[..second + 46 + "Disk 1.adf".len()].to_vec();
+        z[second + 32..second + 34].copy_from_slice(&22u16.to_le_bytes());
+        let planted = z.len();
+        put_eocd(&mut z, 1, (planted - cd) as u32, cd as u32, 0);
+        let real = z.len();
+        put_eocd(&mut z, 2, (real - cd) as u32, cd as u32, 0);
+        let reach = (z.len() - planted - 22) as u16;
+        z[planted + 20..planted + 22].copy_from_slice(&reach.to_le_bytes());
+        rows.push(Row {
+            what: "opus XN2: a record listing a prefix of the directory",
+            record: Some(planted),
+            read: Ok(Vec::new()),
+            reads: Some(1),
+            zip: z,
+        });
+
+        // opus XN4: a directory and end record just under the directory limit, every entry
+        // taken: the zip of the entries (its comment past the limit) reads as the original.
+        let names: Vec<String> = (0..279).map(|i| format!("{i:0>59996}.adf")).collect();
+        let list: Vec<E> = names.iter().map(|n| stored(n, b"d")).collect();
+        let (zip, _) = make(&list, 0, false);
+        if zip.len() - central_at(&zip) > MAX_DIRECTORY_BYTES as usize {
+            setup.push("opus XN4: the directory is not under the limit".to_string());
+        }
+        let all: Vec<(String, Vec<u8>)> =
+            names.iter().map(|n| (n.clone(), b"d".to_vec())).collect();
+        rows.push(Row {
+            what: "opus XN4: a directory near the limit, every entry taken",
+            record: Some(zip.len() - 22),
+            read: Ok(all),
+            reads: Some(2),
+            zip,
         });
 
         // The comment-length field: longer than the bytes after the record (the comment does not
@@ -1591,29 +1687,45 @@ mod tests {
             1,
         ));
 
-        let mut failed = Vec::new();
-        for row in rows {
-            let size = row.zip.len() as u64;
-            let view = View {
-                d: &row.zip,
-                base: 0,
-            };
-            let chosen = end_record(&view, size).ok().map(|c| c.at as usize);
-            let (whole, sliced) = paths(&row.zip);
-            let reads = read_directory(&row.zip).ok().map(|(_, n)| n);
-            let checks = [
-                ("the record", chosen == row.record),
-                ("the paths agree", whole == sliced),
-                ("what is read", whole == row.read),
-                ("the reads", reads == row.reads),
-            ];
-            for (what, ok) in checks {
-                if !ok {
-                    failed.push(format!("{}: {what}", row.what));
+        // Every row is checked to its end, a panic in one recorded as its failure, and all the
+        // failures are reported together.
+        let mut failed = setup;
+        for row in &rows {
+            let checked = std::panic::catch_unwind(|| {
+                let size = row.zip.len() as u64;
+                let view = View {
+                    d: &row.zip,
+                    base: 0,
+                };
+                let chosen = end_record(&view, size).ok().map(|c| c.at as usize);
+                let (whole, sliced) = paths(&row.zip);
+                let reads = read_directory(&row.zip).ok().map(|(_, n)| n);
+                [
+                    ("the record", chosen == row.record),
+                    ("the paths agree", whole == sliced),
+                    ("what is read", whole == row.read),
+                    ("the reads", reads == row.reads),
+                ]
+            });
+            match checked {
+                Ok(checks) => {
+                    for (what, ok) in checks {
+                        if !ok {
+                            failed.push(format!("{}: {what}", row.what));
+                        }
+                    }
                 }
+                Err(_) => failed.push(format!("{}: panicked", row.what)),
             }
         }
-        assert!(failed.is_empty(), "rows failed: {failed:#?}");
+        for line in &failed {
+            eprintln!("row failed: {line}");
+        }
+        assert!(
+            failed.is_empty(),
+            "{} row checks failed (listed above)",
+            failed.len()
+        );
     }
 
     /// Shapes other writers make, read alike by both paths and as the fixture holds them: data
