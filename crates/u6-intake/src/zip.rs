@@ -1,8 +1,10 @@
 //! Minimal zip reader (stored and deflate entries), after fflate's `unzipSync` as used by the
 //! former TypeScript intake (removed after the Rust port reached parity): find the
 //! end-of-central-directory record, walk the central directory, ask the filter per entry name
-//! *before* touching its data, then locate the data through the local header. CRCs are not
-//! checked (fflate does not either). Zip64 sizes and offsets are honoured.
+//! *before* touching its data, then locate the data through the local header. Every entry read
+//! ([`entry`], [`read_zip`]) is checked against its central record: a deflated entry must
+//! inflate to exactly the size it declares, and its CRC-32 must match. Zip64 sizes and offsets
+//! are honoured.
 //!
 //! A zip too large to copy whole is read in slices instead: the caller reads the end of the
 //! file from [`tail_start`]; [`directory`] walks the central directory (naming an earlier offset
@@ -454,14 +456,7 @@ pub fn read_zip(data: &[u8], keep: impl Fn(&str) -> bool) -> Result<Vec<(String,
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     let mut at: Vec<usize> = vec![usize::MAX; slices.len()];
     for ((i, s), name) in slices.iter().enumerate().zip(names) {
-        let range = data.get(to_usize(s.start)?..to_usize(s.end)?);
-        let (_, body) = s.local(range.ok_or_else(invalid)?)?;
-        let bytes = match s.method {
-            0 => body.to_vec(),
-            8 => miniz_oxide::inflate::decompress_to_vec_with_limit(body, to_usize(s.full)?)
-                .map_err(|err| Error::new(format!("{name}: inflate failed: {err}")))?,
-            m => return Err(unknown_method(m)),
-        };
+        let bytes = entry(data, s)?;
         if place[i] == i {
             at[i] = out.len();
             out.push((name, bytes));
@@ -470,6 +465,33 @@ pub fn read_zip(data: &[u8], keep: impl Fn(&str) -> bool) -> Result<Vec<(String,
         }
     }
     Ok(out)
+}
+
+/// The bytes of the entry `s` of the zip `data` (the whole file, as [`directory`] was given
+/// it from offset 0): its local header checked, inflated up to the size it declares, then held
+/// to exactly that size and to its CRC-32.
+pub fn entry(data: &[u8], s: &Slice) -> Result<Vec<u8>, Error> {
+    let name = s.name();
+    let range = data.get(to_usize(s.start)?..to_usize(s.end)?);
+    let (_, body) = s.local(range.ok_or_else(invalid)?)?;
+    let bytes = match s.method {
+        0 => body.to_vec(),
+        8 => {
+            let out = miniz_oxide::inflate::decompress_to_vec_with_limit(body, to_usize(s.full)?)
+                .map_err(|err| Error::new(format!("{name}: inflate failed: {err}")))?;
+            if out.len() as u64 != s.full {
+                return Err(Error::new(format!(
+                    "{name}: inflates to another size than it declares"
+                )));
+            }
+            out
+        }
+        m => return Err(unknown_method(m)),
+    };
+    if crc32fast::hash(&bytes) != s.crc {
+        return Err(Error::new(format!("{name}: CRC-32 mismatch")));
+    }
+    Ok(bytes)
 }
 
 fn unknown_method(m: usize) -> Error {
@@ -510,6 +532,11 @@ impl Slice {
 
     pub fn is_empty(&self) -> bool {
         self.end == self.start
+    }
+
+    /// The CRC-32 its central record declares (checked by [`entry`]).
+    pub fn crc(&self) -> u32 {
+        self.crc
     }
 
     /// The entry's name as [`read_zip`] reports it.
@@ -832,6 +859,7 @@ mod tests {
             } else {
                 e.data.to_vec()
             };
+            let crc = crc32fast::hash(e.data);
             let field = |v: u64| if o.zip64 { SENTINEL } else { v as u32 };
             let flags = 0x800 | if e.descriptor.is_some() { 8 } else { 0 };
             let local = match e.share {
@@ -865,7 +893,7 @@ mod tests {
                     put16(&mut out, flags);
                     put16(&mut out, e.method);
                     put32(&mut out, 0); // DOS time + date
-                    put32(&mut out, 0); // CRC, not checked
+                    put32(&mut out, if e.descriptor.is_some() { 0 } else { crc });
                     put32(&mut out, sizes[0]);
                     put32(&mut out, sizes[1]);
                     put16(&mut out, e.name.len());
@@ -878,7 +906,7 @@ mod tests {
                         if signed {
                             put32(&mut out, 0x0807_4b50);
                         }
-                        put32(&mut out, 0); // CRC
+                        put32(&mut out, crc);
                         if zip64 {
                             put64(&mut out, csize);
                             put64(&mut out, full);
@@ -905,7 +933,7 @@ mod tests {
             put16(&mut central, flags);
             put16(&mut central, e.method);
             put32(&mut central, 0);
-            put32(&mut central, 0);
+            put32(&mut central, crc);
             put32(&mut central, field(body.len() as u64));
             put32(&mut central, field(e.data.len() as u64));
             put16(&mut central, e.name.len());
@@ -1003,6 +1031,41 @@ mod tests {
             .and_then(|(slices, _)| rebuild(zip, &slices))
             .and_then(|rebuilt| read_zip(&rebuilt, disks));
         (whole, sliced)
+    }
+
+    #[test]
+    fn crc_and_inflated_size_are_checked_on_both_paths() {
+        let disk: Vec<u8> = (0..4000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let (zip, exact) = make(&[stored("Disk 1.adf", &disk)], 0, false);
+        assert_eq!(both(&zip, "intact"), Ok(entries(&[("Disk 1.adf", &disk)])));
+        // One data bit flipped: the CRC no longer matches, on the whole and the sliced read.
+        let mut flipped = zip.clone();
+        flipped[exact[0].0 as usize + 30 + 10 + 100] ^= 0x04;
+        let (whole, sliced) = paths(&flipped);
+        for r in [whole, sliced] {
+            assert!(r.unwrap_err().to_string().contains("CRC-32"));
+        }
+        // A deflated entry declaring more than it inflates to.
+        let (mut z, _) = make(&[deflated("Disk 1.adf", &disk)], 0, false);
+        let cd = central_at(&z);
+        let full = u32::from_le_bytes(z[cd + 24..cd + 28].try_into().unwrap()) + 1;
+        z[cd + 24..cd + 28].copy_from_slice(&full.to_le_bytes());
+        assert!(
+            read_zip(&z, disks)
+                .unwrap_err()
+                .to_string()
+                .contains("another size")
+        );
+        // A wrong CRC in the central record alone.
+        let (mut z, _) = make(&[deflated("Disk 1.adf", &disk)], 0, false);
+        let cd = central_at(&z);
+        z[cd + 16] ^= 1;
+        assert!(
+            read_zip(&z, disks)
+                .unwrap_err()
+                .to_string()
+                .contains("CRC-32")
+        );
     }
 
     /// [`paths`]: the two must agree; returns what they read.
@@ -1161,8 +1224,10 @@ mod tests {
     /// local header, its central record and its end record with a comment length.
     fn inner(p0: u64, name: &[u8], data: &[u8], comment_len: usize) -> Vec<u8> {
         let mut p = Vec::new();
+        let crc = crc32fast::hash(data);
         put32(&mut p, LOCAL);
-        p.extend_from_slice(&[20, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // version, flags, method, time, CRC
+        p.extend_from_slice(&[20, 0, 0, 8, 0, 0, 0, 0, 0, 0]); // version, flags, method, time
+        put32(&mut p, crc);
         put32(&mut p, data.len() as u32);
         put32(&mut p, data.len() as u32);
         put16(&mut p, name.len());
@@ -1171,7 +1236,8 @@ mod tests {
         p.extend_from_slice(data);
         let cd = p0 + p.len() as u64;
         put32(&mut p, CENTRAL);
-        p.extend_from_slice(&[20, 0, 20, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        p.extend_from_slice(&[20, 0, 20, 0, 0, 8, 0, 0, 0, 0, 0, 0]);
+        put32(&mut p, crc);
         put32(&mut p, data.len() as u32);
         put32(&mut p, data.len() as u32);
         put16(&mut p, name.len());
@@ -1344,6 +1410,12 @@ mod tests {
         let reach = (zip.len() - planted - 22) as u16;
         zip[planted + 20..planted + 22].copy_from_slice(&reach.to_le_bytes());
         let body = zip[exact[0].0 as usize + 40..][..1000].to_vec();
+        // The data changed: its CRC in the local header and the central record follows.
+        let crc = crc32fast::hash(&body).to_le_bytes();
+        let local = exact[0].0 as usize;
+        zip[local + 14..local + 18].copy_from_slice(&crc);
+        let central = exact[0].1 as usize;
+        zip[central + 16..central + 20].copy_from_slice(&crc);
         rows.push(Row {
             what: "opus r2: planted in a stored disk's data, its comment reaching the end",
             record: Some(zip.len() - 30),

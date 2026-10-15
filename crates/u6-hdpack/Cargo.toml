@@ -18,3 +18,7 @@ image-webp = "0.2"
 crc32fast = "1"
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+# Real deflated entries for the zip-bomb and size-disagreement tests.
+miniz_oxide = "0.8"

@@ -1236,6 +1236,7 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "image-webp",
+ "miniz_oxide 0.8.9",
  "serde",
  "serde_json",
  "u6-formats",
@@ -1259,6 +1260,7 @@ dependencies = [
 name = "u6-intake"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "miniz_oxide 0.8.9",
  "sha2",
  "u6-testkit",

@@ -175,10 +175,14 @@ fn tiles_fill_atlases_in_order() {
 fn hashes_cover_mask_size_and_order() {
     let mut px = vec![0u8; 256];
     let mut clear = vec![false; 256];
-    let opaque = tile_hash(&px, &clear);
+    let opaque = tile_hash(&px, &clear).unwrap();
     clear[17] = true;
     let masked = tile_hash(&px, &clear);
-    assert_ne!(opaque, masked, "a transparent pixel is not colour 0");
+    assert_ne!(Some(opaque), masked, "a transparent pixel is not colour 0");
+    // Only a whole record has a hash (no hash of the shorter of two slices).
+    assert_eq!(tile_hash(&px[..255], &clear), None);
+    assert_eq!(tile_hash(&px, &clear[..255]), None);
+    assert_eq!(tile_hash(&[0; 257], &[false; 257]), None);
     px[17] = 9;
     assert_eq!(
         tile_hash(&px, &clear),
@@ -529,6 +533,175 @@ fn refuses_images_that_are_not_lossless_stills() {
     }
 }
 
+/// One entry of [`zip_of`]: name, the bytes stored, method (0 stored, 8 deflate), the
+/// uncompressed size declared in the central and in the local header, the CRC.
+struct Raw {
+    name: String,
+    data: Vec<u8>,
+    method: u16,
+    central_size: u32,
+    local_size: u32,
+    crc: u32,
+}
+
+impl Raw {
+    /// `plain` deflated, declaring `declared` bytes in both headers.
+    fn deflated(name: &str, plain: &[u8], declared: u32) -> Raw {
+        Raw {
+            name: name.into(),
+            data: miniz_oxide::deflate::compress_to_vec(plain, 6),
+            method: 8,
+            central_size: declared,
+            local_size: declared,
+            crc: crc32fast::hash(plain),
+        }
+    }
+
+    fn stored(name: &str, plain: &[u8]) -> Raw {
+        Raw {
+            name: name.into(),
+            data: plain.to_vec(),
+            method: 0,
+            central_size: plain.len() as u32,
+            local_size: plain.len() as u32,
+            crc: crc32fast::hash(plain),
+        }
+    }
+}
+
+/// A zip of `entries`, headers written field by field.
+fn zip_of(entries: &[Raw]) -> Vec<u8> {
+    let head = |e: &Raw, size: u32| {
+        let mut h = Vec::new();
+        for v in [20u16, 0, e.method, 0, 0x21] {
+            h.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [e.crc, e.data.len() as u32, size] {
+            h.extend_from_slice(&v.to_le_bytes());
+        }
+        h.extend_from_slice(&(e.name.len() as u16).to_le_bytes());
+        h.extend_from_slice(&0u16.to_le_bytes());
+        h
+    };
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for e in entries {
+        let at = out.len() as u32;
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&head(e, e.local_size));
+        out.extend_from_slice(e.name.as_bytes());
+        out.extend_from_slice(&e.data);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&head(e, e.central_size));
+        central.extend_from_slice(&[0; 10]);
+        central.extend_from_slice(&at.to_le_bytes());
+        central.extend_from_slice(e.name.as_bytes());
+    }
+    let cd = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    let n = entries.len() as u16;
+    for v in [0u16, 0, n, n] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&cd.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// The pack's entries, all deflated as declared, one of them (`name`) declaring `declared`.
+fn redeflated(pack: &[u8], name: &str, declared: impl Fn(usize) -> u32) -> Vec<u8> {
+    let raws: Vec<Raw> = files_of(pack)
+        .iter()
+        .map(|(n, b)| {
+            let size = if n == name {
+                declared(b.len())
+            } else {
+                b.len() as u32
+            };
+            Raw::deflated(n, b, size)
+        })
+        .collect();
+    zip_of(&raws)
+}
+
+#[test]
+fn inflating_is_bounded_by_what_the_entries_declare() {
+    let pack = written();
+    // The same pack with deflated entries, each declaring its size: it reads.
+    let ok = redeflated(&pack, "portrait/b-7.webp", |n| n as u32);
+    assert_eq!(read_pack(&ok).unwrap(), read_pack(&pack).unwrap());
+    // One entry declares less than it inflates to: inflating stops at the declared size and
+    // the pack is refused, not read short.
+    let under = redeflated(&pack, "portrait/b-7.webp", |n| n as u32 / 2);
+    assert!(matches!(read_pack(&under), Err(PackError::Zip(_))));
+    let under = redeflated(&pack, "index.bin", |n| n as u32 - 1);
+    assert!(matches!(read_pack(&under), Err(PackError::Zip(_))));
+    // A byte past the entries' limit in zeros, a few hundred kB of deflate, declared
+    // honestly: refused from the declaration, nothing inflated.
+    let zeros = vec![0u8; MAX_FILE_BYTES as usize + 1];
+    let mut raws: Vec<Raw> = files_of(&pack)
+        .iter()
+        .map(|(n, b)| Raw::stored(n, b))
+        .collect();
+    raws.push(Raw::deflated(
+        "bitmap/paper.webp",
+        &zeros,
+        zeros.len() as u32,
+    ));
+    let mut big = zip_of(&raws);
+    assert!(big.len() < 1 << 20);
+    assert!(matches!(read_pack(&big), Err(PackError::Limit(_))));
+    // The same entry declaring 1 MiB, which the index does not name: refused before it is
+    // inflated.
+    let last = raws.len() - 1;
+    raws[last].central_size = 1 << 20;
+    raws[last].local_size = 1 << 20;
+    big = zip_of(&raws);
+    match read_pack(&big) {
+        Err(PackError::Files(d)) => assert!(d.contains("not in the index"), "{d}"),
+        other => panic!("{other:?}"),
+    }
+    // In place of an image the index names, declaring 1 MiB: inflating stops there, refused.
+    raws.pop();
+    let k = raws
+        .iter()
+        .position(|r| r.name == "portrait/b-7.webp")
+        .unwrap();
+    raws[k] = Raw::deflated("portrait/b-7.webp", &zeros, 1 << 20);
+    drop(zeros);
+    assert!(matches!(read_pack(&zip_of(&raws)), Err(PackError::Zip(_))));
+}
+
+#[test]
+fn local_and_central_records_must_agree() {
+    let pack = written();
+    let mut raws: Vec<Raw> = files_of(&pack)
+        .iter()
+        .map(|(n, b)| Raw::stored(n, b))
+        .collect();
+    assert_eq!(
+        read_pack(&zip_of(&raws)).unwrap(),
+        read_pack(&pack).unwrap()
+    );
+    // A local header with another name than its central record: refused by the zip reader.
+    let mut renamed = zip_of(&raws);
+    let at = renamed
+        .windows(b"index.bin".len())
+        .position(|w| w == b"index.bin")
+        .unwrap();
+    renamed[at] = b'I';
+    assert!(matches!(read_pack(&renamed), Err(PackError::Zip(_))));
+    // A local header declaring another size than the central one: the reader goes by the
+    // central record (u6-intake), so the bytes read are the same and the pack is the same.
+    let k = raws.iter().position(|r| r.name == "index.bin").unwrap();
+    raws[k].local_size += 7;
+    let differs = zip_of(&raws);
+    assert_eq!(read_pack(&differs).unwrap(), read_pack(&pack).unwrap());
+}
+
 /// A zip of one deflated entry `name` (an empty final stored block) declaring `declared` bytes.
 fn deflated_zip(name: &str, declared: u32) -> Vec<u8> {
     let data = [0x01, 0x00, 0x00, 0xff, 0xff];
@@ -562,6 +735,58 @@ fn deflated_zip(name: &str, declared: u32) -> Vec<u8> {
     out.extend_from_slice(&cd.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
     out
+}
+
+/// A valid animated WebP of one frame: the encoder's lossless frame of `img` inside the
+/// VP8X, ANIM and ANMF chunks.
+fn animated_webp(img: &Rgba) -> Vec<u8> {
+    let still = encode_webp(img).unwrap();
+    // RIFF, size, WEBP, then the one VP8L chunk (tag, size, data, pad).
+    let vp8l = &still[12..];
+    let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+    let chunk = |tag: &[u8], body: &[u8]| {
+        let mut c = tag.to_vec();
+        c.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        c.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            c.push(0);
+        }
+        c
+    };
+    let mut vp8x = vec![0x02 | 0x10, 0, 0, 0];
+    vp8x.extend(u24(img.width - 1));
+    vp8x.extend(u24(img.height - 1));
+    let anim = [0u8, 0, 0, 0, 0, 0];
+    let mut anmf = Vec::new();
+    for v in [0, 0, img.width - 1, img.height - 1, 100] {
+        anmf.extend(u24(v));
+    }
+    anmf.push(0);
+    anmf.extend_from_slice(vp8l);
+    let mut body = b"WEBP".to_vec();
+    body.extend(chunk(b"VP8X", &vp8x));
+    body.extend(chunk(b"ANIM", &anim));
+    body.extend(chunk(b"ANMF", &anmf));
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend(body);
+    out
+}
+
+#[test]
+fn an_animated_webp_is_refused() {
+    let pack = written();
+    let img = image(PORTRAIT_HD.0, PORTRAIT_HD.1, 3, false);
+    let anim = animated_webp(&img);
+    // It is a valid animation of that size.
+    let dec = image_webp::WebPDecoder::new(Cursor::new(anim.as_slice())).unwrap();
+    assert!(dec.is_animated());
+    assert_eq!(dec.dimensions(), (PORTRAIT_HD.0, PORTRAIT_HD.1));
+    let bad = with_file(&pack, "portrait/b-7.webp", |b| *b = anim.clone());
+    match read_pack(&bad) {
+        Err(PackError::Image(d)) => assert!(d.contains("not a lossless still"), "{d}"),
+        other => panic!("{other:?}"),
+    }
 }
 
 /// The headers of a lossy WebP key frame of `w × h` (no image data after them).

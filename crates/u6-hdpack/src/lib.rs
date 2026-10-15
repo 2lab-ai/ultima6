@@ -33,7 +33,9 @@
 //! 64 × 64, a portrait 224 × 256, a bitmap 4× its classic size (at most the 320 × 200 screen;
 //! the classic size itself is checked through the hash, which covers it). Every record, a few
 //! hundred portraits and two screen-sized bitmaps fit in the limit (the test
-//! `a_full_pack_fits_the_limit`). Anything else that
+//! `a_full_pack_fits_the_limit`). The zip must hold exactly the entries the index names
+//! (checked before any image entry is inflated), and every entry read must match its declared
+//! size and CRC-32. Anything else that
 //! does not match this description — an unknown or repeated entry, an unreferenced file, a
 //! wrong digest, a file whose size differs from its index entry — is refused; a read returns
 //! the whole pack or an error, never part of one.
@@ -90,6 +92,8 @@ const OWN_FILE: u16 = 0xFFFF;
 const FLAG_ALPHA: u8 = 1;
 /// Longest generator string.
 const MAX_TEXT: usize = 256;
+/// Largest `manifest.json` read.
+const MAX_MANIFEST: u64 = 64 << 10;
 
 /// What an image is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -729,13 +733,19 @@ pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
             "entries hold {declared} bytes, at most {MAX_FILE_BYTES}"
         )));
     }
-    let mut files = zip::read_zip(bytes, |_| true).map_err(zip_err)?;
-    let mut take = |name: &str| -> Option<Vec<u8>> {
-        let at = files.iter().position(|(n, _)| n == name)?;
-        Some(files.swap_remove(at).1)
+    // An entry is inflated only when it is wanted, one at a time; every one is checked for its
+    // declared size and its CRC-32 (u6_intake::zip::entry).
+    let read = |name: &str, max: u64| -> Result<Vec<u8>, PackError> {
+        let s = slices
+            .iter()
+            .find(|s| s.name() == name)
+            .ok_or_else(|| PackError::Files(format!("no {name}")))?;
+        if s.unpacked() > max {
+            return Err(PackError::Limit(format!("{name} is larger than it can be")));
+        }
+        zip::entry(bytes, s).map_err(zip_err)
     };
-    let manifest =
-        take("manifest.json").ok_or_else(|| PackError::Files("no manifest.json".into()))?;
+    let manifest = read("manifest.json", MAX_MANIFEST)?;
     let manifest: Manifest =
         serde_json::from_slice(&manifest).map_err(|e| PackError::Manifest(e.to_string()))?;
     if manifest.format != FORMAT {
@@ -751,7 +761,7 @@ pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
     {
         return Err(PackError::Manifest("generator text too long".into()));
     }
-    let index = take("index.bin").ok_or_else(|| PackError::Files("no index.bin".into()))?;
+    let index = read("index.bin", (INDEX_HEAD + ENTRY_LEN * MAX_ENTRIES) as u64)?;
     let entries = decode_index(&index)?;
     let atlas_rows = check_entries(&entries)?;
     if manifest.images as usize != entries.len() {
@@ -764,43 +774,66 @@ pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
             "base digest differs from the index".into(),
         ));
     }
+    // The zip holds exactly what the index names: nothing else is ever inflated.
+    let mut want: Vec<String> = vec!["manifest.json".into(), "index.bin".into()];
+    want.extend((0..atlas_rows.len()).map(atlas_name));
+    want.extend(entries.iter().filter_map(|e| e.id.file_name()));
+    want.sort_unstable();
+    if let Some(n) = names.iter().find(|n| want.binary_search(n).is_err()) {
+        return Err(PackError::Files(format!("{n} is not in the index")));
+    }
+    if let Some(n) = want.iter().find(|n| names.binary_search(n).is_err()) {
+        return Err(PackError::Files(format!("no {n}")));
+    }
+    // One atlas decoded at a time: its tiles are cut out and it is dropped before the next,
+    // so the peak is the images, one atlas and one entry's bytes.
     let side = ATLAS_CELLS * TILE_HD;
-    let mut atlases = Vec::with_capacity(atlas_rows.len());
+    let mut images: Vec<Option<PackImage>> = vec![None; entries.len()];
     for (n, &rows) in atlas_rows.iter().enumerate() {
         let name = atlas_name(n);
-        let data = take(&name).ok_or_else(|| PackError::Files(format!("no {name}")))?;
-        atlases.push(decode_webp(&name, &data, side, rows * TILE_HD)?);
-    }
-    let mut images = Vec::with_capacity(entries.len());
-    for e in &entries {
-        let (w, h) = (u32::from(e.width), u32::from(e.height));
-        let image = match (e.cell, e.id.file_name()) {
-            (Some((atlas, col, row)), _) => atlases[usize::from(atlas)].rect(
-                u32::from(col) * TILE_HD,
-                u32::from(row) * TILE_HD,
-                w,
-                h,
-            ),
-            (None, Some(name)) => {
-                let data = take(&name).ok_or_else(|| PackError::Files(format!("no {name}")))?;
-                decode_webp(&name, &data, w, h)?
+        let data = read(&name, MAX_FILE_BYTES)?;
+        let atlas = decode_webp(&name, &data, side, rows * TILE_HD)?;
+        drop(data);
+        for (i, e) in entries.iter().enumerate() {
+            if let Some((a, col, row)) = e.cell
+                && usize::from(a) == n
+            {
+                let (w, h) = (u32::from(e.width), u32::from(e.height));
+                let image = atlas.rect(u32::from(col) * TILE_HD, u32::from(row) * TILE_HD, w, h);
+                images[i] = Some(PackImage {
+                    id: e.id,
+                    hash: e.hash,
+                    image,
+                });
             }
-            (None, None) => return Err(PackError::Index("tile without a cell".into())),
-        };
-        if image.has_alpha() != e.alpha {
-            return Err(PackError::Image(format!(
-                "{:?}: alpha differs from its flag",
-                e.id
-            )));
         }
-        images.push(PackImage {
+    }
+    for (i, e) in entries.iter().enumerate() {
+        if e.cell.is_some() {
+            continue;
+        }
+        let name =
+            e.id.file_name()
+                .ok_or_else(|| PackError::Index("tile without a cell".into()))?;
+        let data = read(&name, MAX_FILE_BYTES)?;
+        let image = decode_webp(&name, &data, u32::from(e.width), u32::from(e.height))?;
+        images[i] = Some(PackImage {
             id: e.id,
             hash: e.hash,
             image,
         });
     }
-    if let Some((name, _)) = files.first() {
-        return Err(PackError::Files(format!("{name} is not in the index")));
+    let images: Vec<PackImage> = images
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| PackError::Index("an entry without its image".into()))?;
+    for (p, e) in images.iter().zip(&entries) {
+        if p.image.has_alpha() != e.alpha {
+            return Err(PackError::Image(format!(
+                "{:?}: alpha differs from its flag",
+                e.id
+            )));
+        }
     }
     Ok(Pack { manifest, images })
 }
