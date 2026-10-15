@@ -15,7 +15,7 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 | `08-i18n-ko.md` | 2 |
 | `09-npc-voice.md` | 3 |
 
-Spec review: gpt-6-astra reviewed 06–09 (all CHANGES); every must-fix is folded into rev 2 of each spec. opus reviewed 06 rev 2 (CHANGES, 5 must-fix, checked against the code), folded into rev 3. opus reviewed 07 rev 2 (CHANGES, 3 must-fix), folded into rev 3 as a per-pixel source plane; gpt-6-astra re-reviewed rev 3 (CHANGES: image versions, HD re-entry), folded into rev 4. The opus reviews of 08–09 are pending (claude capacity). In flight: T1 (with the rev-3 scope), T6 (998cfac, in review).
+Spec review: gpt-6-astra reviewed 06–09 (all CHANGES); every must-fix is folded into rev 2 of each spec. opus reviewed 06 rev 2 (CHANGES, 5 must-fix, checked against the code), folded into rev 3. opus reviewed 07 rev 2 (CHANGES, 3 must-fix), folded into rev 3 as a per-pixel source plane; gpt-6-astra re-reviewed rev 3 (CHANGES: image versions, HD re-entry), folded into rev 4. opus reviewed 08 rev 2 (CHANGES, 8 must-fix), folded into rev 3: unit = one run. The opus review of 09 is pending (claude capacity). In flight: T1 (with the rev-3 scope), T6 (998cfac, in review).
 
 ## Order, and why it differs from the user's numbering
 
@@ -41,10 +41,10 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 | H2 | 07 | HD pack format, drop classification before `importFiles`, IndexedDB/forget, limits | H1 |
 | H3 | 07 | `tools/hd` inventory/atlas/run/ingest/pack with the gate; synthetic tests | H2 |
 | H4 | 07 | ops: run `tools/hd` on the owner's files with imagegen (portraits → bitmaps → terrain → actors), load the pack in the owner's browser, read the frames | H3 |
-| L1 | 08 | text path: `u16` line, UTF-8 assembler, Hangul table, runic guard, cell padding, josa, `%1$s` | — |
-| L2 | 08 | locale layer + print-boundary and converse hooks + pack parser; identity-pack receipt | L1 |
-| L3 | 08 | conversation disassembler (04 W3a's table) + run/group extractor; the catalog shared with 09 | — |
-| L4 | 08 | page: language gate, en/ko UI catalog, pack drop/forget, hidden-input IME, keyword aliases | L2 |
+| L1 | 08 | text path: `i32` chars, `u16` line and narrowing sites, UTF-8 assembler (invalid bytes pass), Hangul table, runic guard, cell padding, josa, `%1$s`, empty articles; the `u` program's text path by code point (1b) | — |
+| L2 | 08 | locale layer + run, table-string and outermost-print hooks + pack parser; identity-pack receipt with `wide` on | L1, L3 |
+| L3 | 08 | conversation disassembler (04 W3a's table) + run and table-string extractor; the catalog shared with 09 | — |
+| L4 | 08 | page: language gate, en/ko UI catalog, pack drop/forget, hidden-input IME focused by the line bit; engine `InputEvent::Text` into `read_line`; aliases on a matching copy | L2 |
 | L5 | 08 | `tools/i18n` glossary, speakers, translate, review, pack, coverage receipt, upload boundary; style guide | L3 |
 | L6 | 08 | ops: run L5 on the owner's files, owner sample, full run, load, read frames | L4, L5 |
 | V1 | 09 | `u6-core::speech` tap + `take_speech` | L1 |
