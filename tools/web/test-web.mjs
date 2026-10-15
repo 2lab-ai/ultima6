@@ -17,7 +17,7 @@
 //
 //   node tools/web/test-web.mjs [name-filter]      (build first: bash scripts/build-web.sh)
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import * as h from './harness.mjs';
 
 const MARKER = { name: 'port-test-marker.txt', text: 'not a game file' };
@@ -861,7 +861,8 @@ async function lookAtHero(page, shot) {
 
 // One step by clicks: the cell east of the hero, else (blocked by the start fight) west,
 // up to the harness's `STEP_TRIES` tries, a pass after each blocked one (as `stepSideways`:
-// a blocked step runs no world turn); asserts the step is one cell along x.
+// after a blocked step the world turn picks the hero again at once, no NPC moves); asserts the
+// step is one cell along x.
 async function clickStep(page) {
   for (let i = 0; i < h.STEP_TRIES; i += 1) {
     const dx = i % 2 === 0 ? 1 : -1;
@@ -939,23 +940,13 @@ test('the mouse: a press held 300 ms on the map walks and yields; held through t
   console.log(`  receipt: held 300 ms at the prompt = ${ran} ticks; in the exit question = ${during} ticks, no step, N back to the prompt`);
 }, { needs: h.haveHfes });
 
-// The pace of a held walk (u6-core `ui::target::HELD_WALK_MS`), read from its source at run
-// time so the bound below follows the port's constant.
-async function heldWalkMs() {
-  const src = await readFile(`${h.REPO}/crates/u6-core/src/ui/target.rs`, 'utf8');
-  const m = /const HELD_WALK_MS: u32 = (\d+);/.exec(src);
-  assert.ok(m, 'the held-walk pace is in its source');
-  return Number(m[1]);
-}
-
-// The cells the port walks for a press held `hold` ms on the engine clock while every read
-// comes back within a pace (the Rust tests' rule): the press, then step n when the press plus
-// n paces is before the release. A step whose world turn runs longer than a pace walks fewer.
-function cellsByPace(hold, pace) {
-  let n = 1;
-  while (n * pace < hold) n += 1;
-  return n;
-}
+// The original's fastest held walk: the shortest gap between two steps of one held press, 25
+// PAL frames (20 ms each), measured in the oracle with tools/oracle/pace.mjs (re/notes/oracle.md
+// §4; game-first disks, a press held three cells south, 6 boots: runs pace/run-b1..b6, the
+// shortest gap over all of them). The test's own figure, not the port's constant: no repeat
+// may come sooner than the original's did. The port's exact pace rule is pinned by the Rust
+// tests (ui/tests/pointer_tests.rs).
+const ORIGINAL_FASTEST_REPEAT_MS = 25 * 20;
 
 // Holds the left button at game pixel (x, y) from the prompt until the game ran `ms` on its
 // clock since it took the press, then releases (the oracle's holds are frames of the game's
@@ -1010,9 +1001,11 @@ const HOLD_CELLS = [[88, 88 + 48], [88, 88 - 48], [88 + 48, 88], [88 - 48, 88]];
 
 // A held walk from the boot as it is: the seed is the clock's, so in some boots the start
 // fight puts a foe in the cell beside the hero the press walks toward. The game takes that
-// press (waitTaken) and walks no cell, and a blocked step runs no world turn (the prompt is
-// back at once, not after the fight's turns), so the boot is as fresh for the next direction;
-// up to the four of them (as `stepSideways` tries the other way).
+// press (waitTaken) and walks no cell; a blocked step costs no movement points, so the world
+// turn after it picks the hero again at once and no NPC moves (the prompt is back, not after
+// the fight's turns): the boot is as fresh for the next direction, up to the four of them (as
+// `stepSideways` tries the other way). The receipt names the direction that walked, so a walk
+// broken in one direction shows there although the retry passes.
 async function freshHeldWalk(page, ms) {
   for (const [i, cell] of HOLD_CELLS.entries()) {
     const walk = await heldWalk(page, ms, cell);
@@ -1024,11 +1017,10 @@ async function freshHeldWalk(page, ms) {
 // The original's steps for the same holds in the same start (the throne-room fight as booted),
 // measured in the oracle with tools/oracle/pace.mjs, each from a fresh boot: a 5-frame (100 ms)
 // hold walks one cell when the game samples it, a 50-frame (1 s) hold walks one cell (its first
-// world turn takes 420..470 frames). So each hold here starts from a fresh boot too, is timed
-// on the engine clock and is checked against the hold the game took: no more cells than the
-// pace allows for it, no step before its pace.
+// world turn takes 420..470 frames). So each hold here starts from a fresh boot too and is
+// timed on the engine clock; no repeat comes sooner than the original's fastest (with one cell
+// per hold, the usual boot, there is no repeat to time and the receipt says so).
 test('the mouse: a press held on the map walks at the original\'s pace: 100 ms one cell, 1 s the original\'s count', async (env) => {
-  const pace = await heldWalkMs();
   const boot = async () => {
     const opened = await h.openPage(env); // gated: the glue keeps the engine clock
     await h.load(opened.page, env);
@@ -1036,8 +1028,8 @@ test('the mouse: a press held on the map walks at the original\'s pace: 100 ms o
     await started(opened.page, FILES);
     return opened;
   };
-  const paced = (walk) => walk.steps <= cellsByPace(walk.hold, pace)
-    && walk.shown.every((t, n) => t >= n * pace);
+  // Step n (from 0) shows at least n of the original's fastest repeats after the press.
+  const notSooner = (walk) => walk.shown.every((t, n) => t >= n * ORIGINAL_FASTEST_REPEAT_MS);
   const first = await boot();
   const click = await freshHeldWalk(first.page, 100);
   await first.context.close();
@@ -1045,12 +1037,19 @@ test('the mouse: a press held on the map walks at the original\'s pace: 100 ms o
   const held = await freshHeldWalk(second.page, 1000);
   // Before the checks, so a failing run shows what the game took.
   const line = (ms, w) => `${ms} ms held ${w.hold} ms on the engine clock, ${w.steps} cell${w.steps === 1 ? '' : 's'} (direction ${w.direction})`;
-  console.log(`  receipt: from fresh boots, ${line(100, click)}; ${line(1000, held)}`);
-  assert.ok(click.hold >= 100, 'the game took the press for at least 100 ms of its clock');
+  const repeats = Math.max(0, click.steps - 1) + Math.max(0, held.steps - 1);
+  const timed = repeats === 0
+    ? 'no repeat to time against the original\'s fastest (one cell each)'
+    : `${repeats} repeat${repeats === 1 ? '' : 's'} timed against the original's fastest`;
+  console.log(`  receipt: from fresh boots, ${line(100, click)}; ${line(1000, held)}; ${timed}`);
+  // Harness guards: the release reached the game after the asked hold (heldWalk waits for the
+  // clock) and, for the click, within the original's fastest repeat (a release held back by
+  // host load would otherwise read as a pace fault).
+  assert.ok(click.hold >= 100 && held.hold >= 1000, 'the harness: no early release reached the game');
+  assert.ok(click.hold < ORIGINAL_FASTEST_REPEAT_MS, 'the harness released within a pace');
   assert.ok(click.steps === 1, 'a 100 ms press walks one cell');
-  assert.ok(held.hold >= 1000, 'the game took the press for at least 1 s of its clock');
   assert.ok(held.steps >= 1 && held.steps <= 2, 'a 1 s press from a fresh boot walks the original\'s one cell, within one');
-  assert.ok(paced(click) && paced(held), 'no more cells than the pace allows for the hold the game took, none before its pace');
+  assert.ok(notSooner(click) && notSooner(held), 'no repeat sooner than the original\'s fastest');
 }, { needs: h.haveHfes });
 
 test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {
