@@ -404,7 +404,7 @@ pub fn hail(s: &mut State, io: &Io, x: i16, y: i16) -> i16 {
         }
     }
     crate::gfx::view::refresh_view(s, io);
-    crate::combat::present::capture_window(s, 0);
+    crate::combat::present::capture_window(s, crate::combat::present::REFRESH_MS);
     exp
 }
 

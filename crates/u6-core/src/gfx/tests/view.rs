@@ -245,10 +245,8 @@ fn flash_outlines_the_actor_then_shows_the_window_without_it() {
     let a = flash(s.clone(), 1, true);
     let fx = &a.combat.effects;
     assert_eq!(fx.len(), 2, "the flashed window, then the plain one");
-    assert_eq!(
-        (fx[0].hold, fx[1].hold),
-        (crate::combat::present::FLASH_HOLD, 0)
-    );
+    let flash_ms = crate::combat::present::ACTOR_FLASH_MS;
+    assert_eq!((fx[0].cost, fx[1].cost), (flash_ms, flash_ms));
     assert_eq!((fx[0].w, fx[0].h), (176, 176));
     // Bright: the outline colour of 0x1800 at the hero's pixel; the plain window has the tile.
     assert_eq!((at(&fx[0], 88, 88), at(&fx[1], 88, 88)), (3, 0));

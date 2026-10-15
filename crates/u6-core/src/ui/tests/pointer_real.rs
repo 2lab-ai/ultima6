@@ -389,8 +389,8 @@ fn a_held_press_walks_a_cell_a_step_and_stops_at_the_release() {
     let Some(files) = files() else { return };
     let mut p = Play::boot(&files);
     assert!(p.at_prompt(), "boot reaches the prompt");
-    // Four paces: past the start fight's first world turn and two held repeats.
-    let held = (4 * crate::ui::target::HELD_WALK_MS / 16) as usize;
+    // 15 s: past the start fight's first world turn (its NPCs' turns take seconds) and a repeat.
+    let held = (15_000 / 16) as usize;
     // Three cells away in each direction: the first hold that walks more than one cell.
     for (dx, dy) in [
         (0, 3),
@@ -404,7 +404,7 @@ fn a_held_press_walks_a_cell_a_step_and_stops_at_the_release() {
     ] {
         let from = p.leader_at();
         let path = p.hold((88 + 16 * dx, 88 + 16 * dy), held);
-        p.idle(400);
+        p.settle(4000);
         let st = steps(from, &path);
         let moved: u16 = st.iter().sum();
         if moved < 2 {
@@ -496,7 +496,7 @@ fn a_held_press_in_a_calm_balloon_does_not_hang() {
     }
     p.settle(600);
     // Each try prints the same lines: the press's try is the first tick's growth.
-    let per_try = grown[0];
+    let per_try = grown.iter().copied().find(|&g| g > 0).unwrap_or(0);
     let total: usize = grown.iter().sum();
     assert!(
         per_try > 0 && total.is_multiple_of(per_try),

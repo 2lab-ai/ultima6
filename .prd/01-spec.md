@@ -38,7 +38,14 @@ publishing it is permitted depends on facts and jurisdiction this project has no
 (reported to the user 2026-10-14; deploy proceeds on the user's instruction). Extracted strings,
 tables, artwork and executable fragments never go into source, fixtures, build artifacts, logs or
 review captures. Original files and extracted content stay browser-local and are excluded from
-telemetry and error reports. A later AI-model integration needs its own explicit payload/consent
+telemetry and error reports. Fixed 2026-10-15 (milestone 2 reviews): this covers names,
+identifiers and comments, and every value read out of the game files, numbers included. A test
+that reads the user's files derives its expected values from those files at run time (an
+independent read at a documented offset, an invariant, or a constant the original's code
+defines), never from a value written in the repo. Its normal and failure output shows only
+labels, indices or offsets, counts and timings the test made itself, and pass/fail. It never
+shows a value or a length of the user's data (`u6-testkit::assert_same!`, `Quiet`; the web
+runner's `assertSame` and `failureLines`). A later AI-model integration needs its own explicit payload/consent
 boundary and must not upload dialogue, files or extracted content silently. Public branding must
 not imply EA endorsement.
 

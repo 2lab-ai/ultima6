@@ -110,6 +110,91 @@ the unshifted comparison by more than 0.1; observed 0.92-0.97 equal pixels).
 Where the party blocks the requested direction, play.mjs tries the other arrows; each press is a
 game turn. Step outcomes, gargoyle moves and combat messages differ between runs.
 
+## E. Fight pace (`fight.mjs`, `fight.py`, 2026-10-15)
+
+The original never waits for the display in a fight. Its VBlank server 0x14f27a is `jmp
+0x162294`: BEAMCON0 from 0x1624a4 when that is not negative, clear the flag 0x1624b0, the
+pointer shape (0x162518 = `jmp 0x1051a6`) and the pointer sprite's position (0x1622d6); no
+counter. The only routine that spins on 0x1624b0 is 0x1622be, reached from the shutdown 0x14ee70
+and from 0x1623be (D0 + 1 VBlanks), whose one caller is the Use machine 0x12cfe4. A fight is as
+slow as the 68000 and the blitter draw it. These are not delay loops but the work itself; in the
+oracle the game's code hunks sit in fast RAM (seglist bases 0x2ee…–0x354…), so a stock A500 (all
+of it on the chip bus, with display DMA) would be somewhat slower. The port's constants are the
+oracle's numbers.
+
+How it is measured: `fight.mjs` finds every hunk's runtime base (hunk 0 by a reloc-free window,
+then the seglist), takes party steps by key (held until A4-0x7a2c clears) and logs one row per
+emulated frame. Its CPU sample comes from vAmiga's debugger console, which runs a command between
+two frames, just after the VBlank interrupt was taken: `r cpu` gives the interrupted task's
+registers, `m.w $3fffe0` its exception frame (SR, PC), and the user stack copied at the end of
+the frame before gives the callers' return addresses. A sample whose user stack is not the
+game's is another task: the game waits on the floppy. `fight.py` maps PCs to image functions
+(the REA dump names) and counts frames by the first of flight 0x132706 / 0x1331b4, hit flash
+0x1230ce, message 0x108658…, refresh after a turn 0x102f2a, refresh 0x102ef0 / 0x102c90, party
+step 0x11d4ee, NPC turn 0x1200b0, scheduler 0x1213de in the routine and its callers (an object
+name 0x10eef8 apart). A capture is refused unless it holds every frame, none skipped, from a
+row before the key was taken to 60 frames of prompt after the turn (synthetic cases in
+`test_fight.py`), and lengths come from the frame numbers.
+
+Start fight, keys UP RIGHT LEFT RIGHT LEFT RIGHT LEFT, 3 boots (`pace/fight-r0..r2`), frames
+from the key taken to the prompt: 535 396 300 283 364 270 215 / 439 334 169 137 261 138 255 /
+440 336 169 133 277 180 317; median 277, first 5 steps 300. Only the first step waits on the
+floppy (135..140 frames: a map region and the object names, look.lzd); later name lookups
+decode the cached file (0x161ec8, about 9 frames a step, counted under NPC turn). Per step:
+refresh after a turn 101.5 frames, flight 75.9, hit flash 33.9, NPC turn 21.0, floppy 19.6,
+scheduler 12.7, message 7.0, party step 6.0. Per operation (PAL frames): refresh after a turn
+21 (n 103, 19..22), hit flash 16 (n 45, 14..18), a flight's first render 6 (n 87), a drawn step
+2.31 (525 / 227), its closing refresh 11 (n 40), a message 1.12 per change of the scroll (147 /
+131), NPC turns and scheduler 33 a step (n 21, 19..77). Not seen in this fight: the actor flash
+0x132338, the window flash 0x115b7c, the quake 0x133a1a, a dissolve (0x1520e2).
+
+Those are timed by `timeit.mjs` from a saved start (`U6_FIGHT_SAVE`): the debugger stops at the
+entry of the prompt's idle render 0x102c90 (D0 = 1, from the key wait 0x105c8e), the routine runs
+in its place (`g <address>` moves the PC and stops, a plain `g` runs on; its `rts` returns to
+the render's caller) and a breakpoint at that return address stops it again. The tool fails
+unless the first stop is that entry with D0 = 1 in user mode and the last is the caller's return
+with A7 four bytes up. Times are the CPU clock between the two stops (`_wasm_get_cpu_cycles`,
+142,102 cycles a PAL frame, measured: 50 frames = 7,105,066..7,105,118); frame + line / 313 is
+not monotonic (the emulator's frame counter does not step at line 0: one traced call came out at
+−0.99 frames). PAL frames (`pace/timeit-r4`; the earlier frame + line runs in brackets): the
+render itself 8.90 (8.74), the render with the dissolve flag A4-0x6578 set 171.08 (171.07;
+0x1520e2 copies the 25,600 window pixels one at a time), the actor flash 0x132338 on the Avatar
+345.83 (345.83; two dissolving renders), the window flash 0x115b7c (circle 1) 17.21 (16.96). The
+first stop falls on one of two idle renders (frame 8308 or 8319 of the snapshot, by host
+timing), which moves the render and the window flash by about 0.2 frames. Not timed: the quake
+(its D1, the amplitude, is the caller's word there, and the console's `w` writes memory and
+custom registers, not CPU registers).
+
+**Exact calls, `trace.mjs`.** The CPU samples estimate; the debugger counts. A breakpoint at
+each traced routine's entry; at a stop there its return address gets one too, and the stop
+there with A7 four bytes up ends the call; only the youngest open call may return, and any
+other unwind rejects the run; a step not back at the prompt within 6000 frames or 40 minutes
+is rejected. A resume and the console mark are one page call and the console is cleared first,
+so a stop's prompt is never missed or read stale (an earlier version did, and its silent
+unwinding hid it). The emulator stands still while stopped; the stops cost the game nothing.
+`trace.py` reduces trace.json to the port's constants. Start fight, the same keys
+(`pace/trace-fight-r4`), and the castle without the fight (`U6_FIGHT_SETUP=town`: the assault
+actors e0..e2 passed over, `b` held until taken, party worktypes 2,1,1,1; keys DOWN ×5, UP ×2;
+`pace/trace-town-r4`), PAL frames, CPU clock:
+
+| call | value | constant |
+|---|---|---|
+| refresh after a turn 0x102f2a, view changed | median 21.375 (n 38, 19.96..23.80) | AFTER_TURN_MS 427 |
+| hit flash 0x1230ce | median 15.602 (n 18, 15.34..16.03) | FLASH_MS 312 |
+| flight 0x132706 with no step drawn | median 6.397 (n 27, 6.15..7.33) | RENDER_MS 128 |
+| printf 0x108658 | mean 1.185 (n 57, 0.06..3.60) | PRINT_MS 24 |
+| object name 0x10eef8 (the boot's first, 132.23 with the floppy, aside) | mean 1.294 (n 32) | NAME_MS 26 |
+| NPC turn 0x1200b0, own time, combat worktype | mean 2.338 (n 43, 0.95..4.04) | COMBAT_NPC_MS 47 |
+| the same, schedule worktype (0x80 and up) | mean 0.05 (n 122) | no wait |
+| world turn outside NPC turns and refreshes, per pick | 0.994 (179 picks) | PICK_MS 20 |
+
+The flight step (46 ms) and the closing refresh of a flight (`REFRESH_MS`, 11 frames) have no
+routine boundary to trace and stay sampled estimates (fight.py). The sampled estimates held
+where they name one routine (refresh after a turn 21, hit flash 16); the stack-scan split did
+not: it put the name reads (about 9 frames a step) under NPC turn and much of the message time
+under names. The castle's steps, key taken to prompt (`pace/fight-town-b`): 28 43 33 48 32 41
+32, median 33; the scheduler's own work comes every other step (the clock minute).
+
 ## 1. Emulator, versions, sources
 
 | part | version / id | source |
@@ -177,6 +262,12 @@ state, so runs are not bit-identical end to end.
     tools/oracle/run.sh play [KEY ...]    # adf-gamefirst/ -> Britannia shots in shots/play-<ts>/ (§D)
     tools/oracle/run.sh intro      # adf/ -> ORIGIN/intro shots until the picture stops, shots/intro-<ts>/ (§C)
     node tools/oracle/pace.mjs OUT [HOLD ...]   # adf-gamefirst/: held-button walk, step frames per hold (ui/target.rs HELD_WALK_MS)
+    node tools/oracle/fight.mjs OUT [KEY ...]   # adf-gamefirst/: party steps in the start fight, a CPU sample per frame (§E)
+    python3 -I -B tools/oracle/fight.py OUT/turns.json ...   # where those frames go
+    node tools/oracle/timeit.mjs OUT SNAPSHOT render|dissolve|actor|window   # one routine's PAL frames (§E)
+    node tools/oracle/trace.mjs OUT SNAPSHOT [KEY ...]   # exact calls of the traced routines per step (§E)
+    python3 -I -B tools/oracle/trace.py OUT/trace.json ...   # the port's timing constants from them
+    python3 -I -B tools/oracle/test_fight.py   # fight.py and trace.py on synthetic captures
     tools/oracle/run.sh build      # ADFs -> installer under AROS -> disks/{PROGRAM,POPULACE,PLAYER,PORTRAIT}.hdf
     tools/oracle/run.sh boot [step ...]   # boot those, run steps, PNGs into shots/boot-<ts>/
     tools/oracle/run.sh serve &    # control server 127.0.0.1:8765, then:

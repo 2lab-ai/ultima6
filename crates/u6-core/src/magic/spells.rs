@@ -16,9 +16,12 @@ pub(super) const MSG_FOOD: u32 = 0x0011_59ca;
 const MSG_TOO_OLD: u32 = 0x0011_58ea;
 /// Food object type.
 const FOOD: u16 = 0x81;
-/// Display frames the XORed window of [`flash_window`] stays on the screen. The original shows
-/// it for as long as its second XOR and copy take; that time is not measured, so one PAL frame.
-pub const WINDOW_FLASH_HOLD: u8 = 1;
+/// [replaced] Engine milliseconds of one pass of [`flash_window`] (the XOR 0x1521f4, the border,
+/// the copy), which is how long the XORed window stays on the screen: 108 ms, 5.41 PAL frames,
+/// half of what is left of the flash's 17.21 frames (timed on the CPU clock,
+/// tools/oracle/timeit.mjs window; 16.96 from the other idle render it can stop at) after its
+/// render ([`crate::combat::present::RENDER_MS`]).
+pub const WINDOW_FLASH_MS: u16 = 108;
 
 /// The caster flash 0x132338 (`mode` 0 on the caster, 1 on a target) through its seam, then
 /// its frames played: the original draws the flash inside the call, so it is on the screen
@@ -36,8 +39,8 @@ pub async fn flash_actor(state: &RefCell<State>, io: &Io, actor: u16, mode: u16)
 /// copied to the screen (0x151f5a); then the same XOR again, which restores it.
 ///
 /// The XORed window is on the screen while the second pass draws; the engine publishes only
-/// the last present of a poll, so the port waits [`WINDOW_FLASH_HOLD`] display frames between
-/// the passes (no borrow held).
+/// the last present of a poll, so the port waits on the engine clock before each pass is shown,
+/// the render and a pass before the first, [`WINDOW_FLASH_MS`] before the second (no borrow held).
 pub async fn flash_window(state: &RefCell<State>, io: &Io, circle: u16) {
     if circle >= 9 {
         return;
@@ -49,6 +52,8 @@ pub async fn flash_window(state: &RefCell<State>, io: &Io, circle: u16) {
         s.gfx.plot_xor = true;
         crate::gfx::view::render_window(&mut s, io, false);
     }
+    let first = crate::combat::present::RENDER_MS + WINDOW_FLASH_MS;
+    crate::combat::present::pace(state, io, first).await;
     for pass in 0..2 {
         {
             let mut s = state.borrow_mut();
@@ -58,9 +63,7 @@ pub async fn flash_window(state: &RefCell<State>, io: &Io, circle: u16) {
             io.present();
         }
         if pass == 0 {
-            for _ in 0..WINDOW_FLASH_HOLD {
-                io.vblank().await;
-            }
+            crate::combat::present::pace(state, io, WINDOW_FLASH_MS).await;
         }
     }
     let mut s = state.borrow_mut();
@@ -299,8 +302,9 @@ pub async fn wind_change(state: &RefCell<State>, io: &Io) {
 /// Original: 0x119200 (magic: X-ray: the flashes, every view tile shown (A4-0x794c = 1, view
 /// flags) for 100 view refreshes (0x102ef0), then the normal view and `Msg::Done`)
 ///
-/// The port waits one display frame per refresh (the original's redraws take display time;
-/// without a wait the port would publish none of them).
+/// The port waits each refresh's time on the engine clock before drawing it (the original's
+/// redraws take that long: [`crate::combat::present::REFRESH_MS`], 0x102ef0 as measured in the
+/// oracle; without a wait the port would publish none of them).
 pub async fn xray(state: &RefCell<State>, io: &Io, spell: u16) {
     flash_window(state, io, spell / 16 + 1).await;
     let caster = super::cast::caster(&state.borrow());
@@ -311,9 +315,11 @@ pub async fn xray(state: &RefCell<State>, io: &Io, spell: u16) {
         crate::map::view::update_view(&mut s);
     }
     for _ in 0..100 {
+        crate::combat::present::pace(state, io, crate::combat::present::REFRESH_MS).await;
         crate::gfx::view::refresh_view(&mut state.borrow_mut(), io);
-        io.vblank().await;
     }
+    // The last X-ray view stays up while the normal one is drawn.
+    crate::combat::present::pace(state, io, crate::combat::present::REFRESH_MS).await;
     {
         let mut s = state.borrow_mut();
         s.map.reveal_all = 0;

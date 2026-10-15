@@ -508,3 +508,300 @@ fn tame_looks_for_the_party_within_the_roster_only() {
     npc::tame(&mut s, 0x10);
     assert!(s.objects.location[0x10].x >= 59, "it ambled or waited");
 }
+
+/// The colour of window pixel (88, 88) in the frame the engine shows.
+fn centre(e: &crate::Engine) -> u8 {
+    e.frame().get(88, 88).unwrap_or(0)
+}
+
+/// Fills the map window's inside (8..168) on the screen with colour `c`.
+fn fill_window(io: &crate::engine::Io, c: u8) {
+    io.draw(|fb| {
+        for y in 8..168 {
+            for x in 8..168 {
+                fb.set(x, y, c);
+            }
+        }
+    });
+}
+
+/// Ticks `e` (each tick of `tick_ms` followed by `zeros` polls with no time) until `done`, at
+/// most 20 000 ticks; per tick (engine ms since the first tick, the centre colour shown).
+fn run_until(
+    e: &mut crate::Engine,
+    done: &std::rc::Rc<std::cell::Cell<Option<u64>>>,
+    tick_ms: u32,
+    zeros: usize,
+) -> Vec<(u64, u8)> {
+    let mut seen = Vec::new();
+    let mut t0 = None;
+    for _ in 0..20_000 {
+        if done.get().is_some() {
+            break;
+        }
+        e.tick(&[], tick_ms);
+        for _ in 0..zeros {
+            e.tick(&[], 0);
+        }
+        let now = e.io().now_ms();
+        let t0 = *t0.get_or_insert(now);
+        seen.push((now - t0, centre(e)));
+    }
+    seen
+}
+
+/// A step as production code leaves the screen: the window published in colour 1, then in one
+/// poll its frames drawn and presented on the screen and recorded (colours 2, 3, 4, each with
+/// `cost` ms), a last draw in colour `last` that is not recorded (if any), and the playback.
+/// The engine time (from the first tick) the playback took, and per tick the time and the
+/// colour shown.
+fn recorded_step(cost: u16, last: Option<u8>, tick_ms: u32, zeros: usize) -> (u64, Vec<(u64, u8)>) {
+    let done = std::rc::Rc::new(std::cell::Cell::new(None));
+    let out = std::rc::Rc::clone(&done);
+    let mut e = crate::Engine::with_game(
+        State::empty(),
+        crate::Files::default(),
+        move |st, io| async move {
+            fill_window(&io, 1);
+            io.present();
+            io.vblank().await;
+            let t0 = io.now_ms();
+            for c in [2, 3, 4] {
+                fill_window(&io, c);
+                io.present();
+                present::capture_window(&mut st.borrow_mut(), cost);
+            }
+            if let Some(c) = last {
+                fill_window(&io, c);
+                io.present();
+            }
+            play_effects(&st, &io).await;
+            out.set(Some(io.now_ms() - t0));
+        },
+    );
+    let seen = run_until(&mut e, &done, tick_ms, zeros);
+    (done.get().expect("the playback ends"), seen)
+}
+
+#[test]
+fn the_old_picture_stays_until_the_first_recorded_frame() {
+    // The original draws a step's pictures one after the other while the last one it showed
+    // stays up: the published window is the old one (1) until the first recorded frame's time,
+    // then each recorded frame in turn, and the step's last draw (9) only at the end.
+    let cost = present::FLASH_MS;
+    let (_, seen) = recorded_step(cost, Some(9), 16, 0);
+    let before: Vec<u8> = seen
+        .iter()
+        .filter(|&&(t, _)| t > 0 && t < u64::from(cost))
+        .map(|&(_, c)| c)
+        .collect();
+    println!("shown while the first frame is drawn: {before:?}");
+    assert!(
+        !before.is_empty() && before.iter().all(|&c| c == 1),
+        "{before:?}"
+    );
+    let order: Vec<u8> = seen.iter().map(|&(_, c)| c).fold(Vec::new(), |mut v, c| {
+        if v.last() != Some(&c) {
+            v.push(c);
+        }
+        v
+    });
+    assert_eq!(
+        order,
+        [1, 2, 3, 4, 9],
+        "each frame in turn, the last draw at the end"
+    );
+}
+
+#[test]
+fn recorded_frames_take_their_time_at_any_host_tick() {
+    // Spec 03 §1: display waits run on the engine clock. Three frames of a cost that is no
+    // multiple of the tick take their total (to within a tick) at 16 ms and 8 ms ticks and with
+    // polls of no time between, and every frame is published.
+    let cost = 333;
+    let want = 3 * u64::from(cost);
+    for (tick, zeros) in [(16, 0), (8, 0), (16, 3), (5, 2)] {
+        let (ms, seen) = recorded_step(cost, None, tick, zeros);
+        println!("three frames of {cost} ms: {ms} ms at {tick} ms ticks, {zeros} zero polls");
+        assert!(
+            ms >= want && ms <= want + u64::from(tick),
+            "{tick} ms ticks: {ms} ms, want {want} + up to a tick"
+        );
+        for c in [2, 3, 4] {
+            assert!(
+                seen.iter().any(|&(_, s)| s == c),
+                "frame {c} shown at {tick} ms"
+            );
+        }
+    }
+    // Polls with no time do not pass a deadline: after the first tick, a thousand of them
+    // leave the old picture up and the playback waiting.
+    let done = std::rc::Rc::new(std::cell::Cell::new(None));
+    let out = std::rc::Rc::clone(&done);
+    let mut e = crate::Engine::with_game(
+        State::empty(),
+        crate::Files::default(),
+        move |st, io| async move {
+            fill_window(&io, 1);
+            io.present();
+            io.vblank().await;
+            fill_window(&io, 2);
+            io.present();
+            present::capture_window(&mut st.borrow_mut(), cost);
+            play_effects(&st, &io).await;
+            out.set(Some(io.now_ms()));
+        },
+    );
+    e.tick(&[], 16);
+    e.tick(&[], 16);
+    for _ in 0..1000 {
+        e.tick(&[], 0);
+    }
+    assert!(done.get().is_none(), "zero-time polls passed the deadline");
+    assert_eq!(centre(&e), 1, "the old picture while it waits");
+}
+
+/// The engine ms each wait of `costs` took (one run of waits, from the game's first poll), with
+/// the host's ticks given by `tick(n)` for tick n (0 = the game's first poll).
+fn wait_lengths(costs: &'static [u16], tick: impl Fn(usize) -> u32) -> Vec<u64> {
+    let ends = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let out = std::rc::Rc::clone(&ends);
+    let mut e = crate::Engine::with_game(
+        State::empty(),
+        crate::Files::default(),
+        move |st, io| async move {
+            out.borrow_mut().push(io.now_ms());
+            for &cost in costs {
+                present::pace(&st, &io, cost).await;
+                out.borrow_mut().push(io.now_ms());
+            }
+        },
+    );
+    for t in 0..100_000 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], tick(t));
+    }
+    assert!(e.finished(), "every wait ended");
+    let ends = ends.borrow();
+    assert_eq!(ends.len(), costs.len() + 1, "every wait ended");
+    ends.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+/// The host's longest step (site/app.js and u6-native cap a tick at 100 ms).
+const HOST_MAX_TICK: u32 = 100;
+
+#[test]
+fn a_stalled_tick_does_not_squeeze_the_waits_after_it() {
+    // A host that stalls (a tick of the hosts' cap, once or three times in a row) in the
+    // middle of a run of ten 46 ms waits at 16 ms ticks: the waits keep their time, less a tick
+    // at most, the one the stall falls in aside.
+    const COSTS: [u16; 10] = [46; 10];
+    for stalls in [8..9, 8..11] {
+        let st = stalls.clone();
+        let d = wait_lengths(
+            &COSTS,
+            move |t| if st.contains(&t) { HOST_MAX_TICK } else { 16 },
+        );
+        println!("waits of 46 ms around stalled ticks {stalls:?}: {d:?}");
+        let crossing = d.iter().position(|&ms| ms >= u64::from(HOST_MAX_TICK));
+        let crossing = crossing.expect("a wait spans the stall");
+        let after = &d[crossing + 1..];
+        assert!(!after.is_empty(), "waits follow the stall: {d:?}");
+        for (i, &ms) in d.iter().enumerate().filter(|&(i, _)| i != crossing) {
+            assert!(ms + 16 >= 46, "wait {i} lasted {ms} ms: {d:?}");
+        }
+    }
+}
+
+#[test]
+fn a_stall_on_the_first_tick_of_a_run_squeezes_no_wait() {
+    // The run's first observed tick is a stall (the host's longest step), then normal ticks of
+    // 16 or 7 ms: every wait after the one the stall falls in keeps its time, less one normal
+    // tick at most (the bound on carried lateness comes from the normal ticks, not the stall).
+    const COSTS: [u16; 6] = [46, 311, 46, 311, 23, 129];
+    for normal in [16u32, 7] {
+        let d = wait_lengths(&COSTS, move |t| if t == 1 { HOST_MAX_TICK } else { normal });
+        println!("first tick {HOST_MAX_TICK} ms then {normal} ms: waits {d:?} for {COSTS:?}");
+        for (i, (&ms, &cost)) in d.iter().zip(&COSTS).enumerate().skip(1) {
+            assert!(
+                ms + u64::from(normal) >= u64::from(cost),
+                "wait {i} of {cost} ms lasted {ms} ms at {normal} ms ticks: {d:?}"
+            );
+        }
+    }
+}
+
+/// A window recorded dissolving (colour 5 over colour 0) with `cost` ms and played at ticks of
+/// `tick_ms`: per tick, how many of its 160 × 160 dissolving pixels the published frame shows,
+/// and the engine time the playback took.
+fn dissolve_run(cost: u16, tick_ms: u32) -> (Vec<usize>, u64) {
+    let done = std::rc::Rc::new(std::cell::Cell::new(None));
+    let out = std::rc::Rc::clone(&done);
+    let mut e = crate::Engine::with_game(
+        State::empty(),
+        crate::Files::default(),
+        move |st, io| async move {
+            let fill = |c: u8| {
+                io.draw(|fb| {
+                    for y in 8..168 {
+                        for x in 8..168 {
+                            fb.set(x, y, c);
+                        }
+                    }
+                })
+            };
+            fill(0);
+            io.present();
+            io.vblank().await;
+            let t0 = io.now_ms();
+            fill(5);
+            io.present();
+            present::capture_dissolve(&mut st.borrow_mut(), cost);
+            play_effects(&st, &io).await;
+            out.set(Some(io.now_ms() - t0));
+        },
+    );
+    let mut shown = Vec::new();
+    for _ in 0..10_000 {
+        if done.get().is_some() {
+            break;
+        }
+        e.tick(&[], tick_ms);
+        let f = e.frame();
+        let n = (8..168)
+            .flat_map(|y| (8..168).map(move |x| (x, y)))
+            .filter(|&(x, y)| f.get(x, y) == Some(5))
+            .count();
+        shown.push(n);
+    }
+    (shown, done.get().expect("the playback ends"))
+}
+
+#[test]
+fn a_dissolving_window_is_revealed_over_its_time() {
+    // The original copies a dissolving window pixel by pixel for 171 frames (0x1520e2): the
+    // playback shows it growing over its time, not all at once at the end, at any tick size.
+    let cost = present::DISSOLVE_MS;
+    let (shown, at16) = dissolve_run(cost, 16);
+    let (_, at8) = dissolve_run(cost, 8);
+    let partial = shown.iter().filter(|&&n| n > 0 && n < 160 * 160).count();
+    println!(
+        "dissolve of {cost} ms: done at {at16} ms (16 ms ticks), {at8} ms (8 ms); \
+         {partial} ticks partly shown"
+    );
+    assert!(shown.windows(2).all(|w| w[0] <= w[1]), "it only grows");
+    assert_eq!(*shown.last().unwrap(), 160 * 160, "all of it at the end");
+    assert!(
+        partial > shown.len() / 2,
+        "most ticks show part of it: {partial} of {}",
+        shown.len()
+    );
+    let want = u64::from(cost);
+    assert!(
+        at16 >= want && at16 <= want + 16,
+        "{at16} ms at 16 ms ticks"
+    );
+    assert!(at8 >= want && at8 <= want + 8, "{at8} ms at 8 ms ticks");
+}

@@ -262,14 +262,14 @@ pub(crate) fn hail_start(s: &mut State) {
 }
 
 /// The copy of the changed back-buffer rectangle to the screen (0x151fe6, whole bytes of 8
-/// pixels), recorded as a frame that [`crate::combat::play_effects`] shows for `hold` vblanks.
-fn show_rect(s: &mut State, io: &Io, [x0, y0, x1, y1]: [i16; 4], hold: u8) {
+/// pixels), recorded as a frame that [`crate::combat::play_effects`] shows after `cost` ms.
+fn show_rect(s: &mut State, io: &Io, [x0, y0, x1, y1]: [i16; 4], cost: u16) {
     let w = |v: i16| v as u16;
     io.with_buffers(|back, front| {
         crate::gfx::blit::copy_rect(back, front, w(x0), w(y0), w(x1), w(y1), w(x0), w(y0));
     });
     let (cx0, cx1) = ((x0 as usize) & !7, (x1 as usize) | 7);
-    crate::combat::present::capture(s, cx0, y0 as usize, cx1, y1 as usize, hold);
+    crate::combat::present::capture(s, cx0, y0 as usize, cx1, y1 as usize, cost);
 }
 
 /// [gfx] the stones of 0x133562 (0x1336f8..0x133892), window pixels `stones`: the background
@@ -293,7 +293,7 @@ pub(crate) fn draw_hail(s: &mut State, io: &Io, stones: &[(i16, i16)]) {
     }
     let rect = s.combat.dirty;
     if rect[0] <= rect[2] && rect[1] <= rect[3] {
-        show_rect(s, io, rect, 1);
+        show_rect(s, io, rect, crate::combat::present::FRAME_MS);
     }
     s.combat.dirty = NO_RECT;
     for (k, &(x, y)) in stones.iter().enumerate() {

@@ -758,7 +758,7 @@ fn a_dropped_ring_of_invisibility_flashes_before_the_panel() {
     let mut trace = vec![sample(&e)];
     e.tick(&[crate::InputEvent::Key(crate::Key::Enter)], 16);
     trace.push(sample(&e));
-    for _ in 0..60 {
+    for _ in 0..1000 {
         if e.finished() {
             break;
         }
