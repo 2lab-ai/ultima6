@@ -61,5 +61,5 @@ Open items carried from WU-P7b (assign in M2-int):
 ## Next
 
 - After the follow-ups: merge → gates → preview → live check → production → live check.
-- Then P3 per `.prd/04-refactor-p3.md` (rev 5). Trinity: 2 of 3 approved rev 4; the grok-4.7 slot is retried at 15:04 for the P3 and AI-transport briefs. Rev 5 (the HD/4K seam: W10, acceptance 7, `05-hd-output.md`) still needs all three engines. User step 4 = redeploy.
+- Then P3 per `.prd/04-refactor-p3.md` (rev 5). Trinity: 2 of 3 approved rev 4. The grok-4.7 slot was rate-limited at 13:05 and again at 15:04 on 2026-10-15: one account is paused, and the other is at 100% of its weekly limit until 2026-10-16 15:34 KST. Retry 2026-10-16 15:41; no 2-of-3. Rev 5 (the HD/4K seam: W10, acceptance 7, `05-hd-output.md`) still needs all three engines. User step 4 = redeploy.
 - After P4: research the HD/4K phase (user 2026-10-15, `05-hd-output.md` §Research). The research list is there.
