@@ -15,7 +15,7 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 | `08-i18n-ko.md` | 2 |
 | `09-npc-voice.md` | 3 |
 
-Next: a dual-engine spec review (opus + gpt-6-astra), then the units below in order.
+Spec review: gpt-6-astra reviewed 06–09 (all CHANGES); every must-fix is folded into rev 2 of each spec. Next: the opus spec review of rev 2, then the units below in order, starting with T1.
 
 ## Order, and why it differs from the user's numbering
 
@@ -44,13 +44,14 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 | L1 | 08 | text path: `u16` line, UTF-8 assembler, Hangul table, runic guard, cell padding, josa, `%1$s` | — |
 | L2 | 08 | locale layer + print-boundary and converse hooks + pack parser; identity-pack receipt | L1 |
 | L3 | 08 | conversation disassembler (04 W3a's table) + run/group extractor; the catalog shared with 09 | — |
-| L4 | 08 | page: language gate, en/ko UI catalog, pack drop, hidden-input IME, keyword aliases | L2 |
-| L5 | 08 | `tools/i18n` glossary, speakers, translate, review, pack; style guide | L3 |
+| L4 | 08 | page: language gate, en/ko UI catalog, pack drop/forget, hidden-input IME, keyword aliases | L2 |
+| L5 | 08 | `tools/i18n` glossary, speakers, translate, review, pack, coverage receipt, upload boundary; style guide | L3 |
 | L6 | 08 | ops: run L5 on the owner's files, owner sample, full run, load, read frames | L4, L5 |
 | V1 | 09 | `u6-core::speech` tap + `take_speech` | L1 |
 | V2 | 09 | `tools/speech/fetch-models.sh`, parts + manifest + LICENSE/NOTICE; preview deploy | — |
 | V3 | 09 | `site/voice/` worker and player, opt-in, chip, terms notice | V1, V2 |
-| V4 | 09 | profiles: mixer, type-class table, local voice pack tool | V3 |
+| V4 | 09 | profiles: mixer, type-class table (no LLM) | V3 |
+| V6 | 09 | personality profiles from bundles, local voice pack tool, coverage receipt, upload boundary | V4, V5 |
 | V5 | 09 | NPC bundle exporter (wasm), IndexedDB, download | L3 |
 
 Each unit is reviewed by gpt-6-astra and opus before it merges. Each item ends with a merge, a preview deploy with a live check and a frame read, then production.

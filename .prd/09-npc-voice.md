@@ -6,7 +6,7 @@ tags: [ultima6, npc, tts, supertonic]
 
 # 09 — Per-NPC dialogue bundles, voice profiles, on-device Supertonic-3 TTS
 
-Status: planned (rev 1, 2026-10-15). This is user item 3 (`hd-i18n-voice/ssot.md`, verbatim):
+Status: planned (rev 2, 2026-10-15: gpt-6-astra review folded in: the bundle exporter before profiles, a consent boundary for the profile LLM, exact-text tap tests, defined latency, failure recovery, click-through model terms). This is user item 3 (`hd-i18n-voice/ssot.md`, verbatim):
 - Bundle each NPC's name and dialogue separately, for a later NpcBrain to imitate the NPC's speech.
 - Give each NPC a voice profile from its personality, for on-device TTS.
 - Attach real-time Supertonic-3 TTS, played when an NPC speaks.
@@ -67,7 +67,10 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
 4. **Voice profiles (`site/voice/profile.js`).**
    - A profile is `{mix: [{style, w} ≤ 3], speed 0.9–1.15, pitch −2..+2 st, steps, seedSalt}`.
    - The default comes from the type-class table plus the actor number as a tie-breaker, so that neighbours in one place get distinct voices.
-   - A local voice pack, `voices.u6vp`, can override any actor. It is built by `tools/speech/profile` from the NPC bundles through the owner's LLM (personality → profile parameters only) and dropped like the other packs.
+   - A local voice pack, `voices.u6vp`, holds a personality-derived profile for every exported actor. It is built by `tools/speech/profile` from the NPC bundles (5) and dropped like the other packs.
+     - The LLM receives the actor's bundle and returns profile parameters only, plus a short personality note that stays local.
+     - The LLM runs through the owner's llmux, so bundle text leaves the machine. The tool uses 08's upload boundary unchanged: it names the route, writes the exact first payload to a private 0600 file under `~/Games/ultima6/voice/preview/` and prints only its path and size, and sends nothing without a typed `yes` or `--send`. The same zero-request tests apply. A `--local-only` mode uses a local model when one is configured.
+     - The tool writes a coverage receipt that reconciles exported actors against generated profiles and lists failures by actor number. It holds counts and numbers only.
    - The seed is `hash(actor, line)`, so a repeated line sounds the same.
 5. **NPC bundles (`u6.npc-bundle/1`).** One JSON per actor, keyed by the actor number:
    - the script and portrait sources;
@@ -84,20 +87,39 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
 
 1. The speech tap.
 2. Model hosting, on the preview deploy.
-3. The worker and player in English, with type-class voices.
-4. Profiles and the local voice pack.
-5. The NPC bundle exporter, after W3a's disassembler.
+3. The worker and player in English, with type-class voices: the generic loader, no LLM.
+4. The NPC bundle exporter, after 08's conversation disassembler (L3).
+5. Personality profile generation from the bundles, then the local voice pack, with its coverage receipt.
 6. Korean speech, after 08.
 
 ## Acceptance
 
 1. **No frame changes.** With voices off, every parity receipt is identical and nothing is downloaded.
-2. **Tap.** On synthetic scripts, the event count, speakers and turns are correct and no text is printed. A real-data receipt prints pass/fail and counts only.
+2. **Tap.** On synthetic scripts, the test asserts the exact captured text, the speaker, the turn and the flush order for each case:
+   - a greeting;
+   - an answer;
+   - look text, which is excluded;
+   - the player's echo, which is excluded;
+   - an engine message printed inside an answer, which is excluded or flushed separately;
+   - both `0xb5` forms;
+   - a portrait-speaker switch (`0xbf`) in the middle of a turn.
+
+   The real-data receipt prints pass/fail and counts only.
 3. **Hosting.** Every file under `site/models` is ≤ 24 MiB and the manifest hashes match. `_headers` is unchanged. The preview deploy serves every part.
 4. **Speech.**
-   - On the live site with voices on, talking to an NPC plays speech within 1 s of the line appearing, measured headless with WebGPU and checked by ASR on a synthetic line.
+   - The page shows a ready state after download, verification and warm-up.
+   - Reference: headless Chromium with WebGPU on the owner's Mac, a 60-character synthetic English line.
+   - Cold start, from opt-in to ready, is reported separately.
+   - In the ready state, first audio comes within 1 s of the line appearing, and ASR on the synthetic line matches.
    - A key press cancels the speech.
    - Two NPCs of different classes sound different: their F0 or style differs.
    - The machine-generated chip and the terms notice are visible.
-5. **Local outputs.** The owner's voice pack overrides a profile. The NPC bundles export and download, and none of it is in git or under `site/`.
-6. **Gates.** All gates pass.
+5. **Local outputs.**
+   - The owner's voice pack gives every exported actor its personality profile; the coverage receipt shows 0 unexplained gaps.
+   - The NPC bundles export and download.
+   - None of it is in git or under `site/`.
+6. **Failures are recoverable, and the game keeps running in every case.**
+   - A failed download, a corrupted cached part (hash mismatch, then refetch), a storage quota denial and a lost GPU device each disable voices with a content-free message.
+7. **Upload boundary.** 08's zero-request tests pass for the profile tool.
+8. **Model terms.** Before the first download, the page shows the model's use restrictions, and the visitor accepts them by clicking through. That acceptance is the agreement OpenRAIL-M §4(a) asks for. The licence and the notice are served beside the parts.
+9. **Gates.** All gates pass.

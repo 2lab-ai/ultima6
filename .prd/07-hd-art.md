@@ -6,7 +6,7 @@ tags: [ultima6, hd, rendering, imagegen]
 
 # 07 — HD art: imagegen upscale with a scaler baseline
 
-Status: planned (rev 1, 2026-10-15). This is user item 1 (`hd-i18n-voice/ssot.md`, verbatim): "hd 이미지 업스케일을 이미지젠 스킬로 해주고 hd 업스케일해줘". It builds the seam designed in `05-hd-output.md` (scene output, assets by id) for the map, portraits and panels. The research notes are kept outside the repo: `~/Games/ultima6/research/2026-10-15/r1-hd-findings.md`.
+Status: planned (rev 2, 2026-10-15: gpt-6-astra review folded in: portrait and panel entries, a classic overlay mask for effects and text, scaling of the classic cell for outline and dirty cells, terrain-seam and animation-group gates, a defined performance reference). This is user item 1 (`hd-i18n-voice/ssot.md`, verbatim): "hd 이미지 업스케일을 이미지젠 스킬로 해주고 hd 업스케일해줘". It builds the seam designed in `05-hd-output.md` (scene output, assets by id) for the map, portraits and panels. The research notes are kept outside the repo: `~/Games/ultima6/research/2026-10-15/r1-hd-findings.md`.
 
 ## Measured facts
 
@@ -21,7 +21,7 @@ Status: planned (rev 1, 2026-10-15). This is user item 1 (`hd-i18n-voice/ssot.md
   - the clock hands, sparkles and dissolve write pixels directly.
 - **`blit_back` (`gfx/blit.rs:49`) is the single choke point** for every tile drawn into the map window (`gfx/view.rs:114-168`). Portraits are 56×64 (`converse/script.rs:183`); panels and the world map come from `bitmaps`.
 - **imagegen (Codex built-in `image_gen` via `codex exec -m gpt-6-astra`) repaints; it does not upscale.** It was measured on synthetic tiles drawn for the test, never on game art.
-  - The output is always 1536×1024 RGB, 76–103 s per call.
+  - The 3 sample calls each returned 1536×1024 RGB, at 76–103 s per call. That size is an observation, not a guarantee: the tool checks the dimensions before slicing and refuses a sheet that does not match.
   - Kept well: the grid (content shift ≤ 0.25 source px at a 128 px pitch), structure (correlation 0.97–0.99), silhouettes (IoU 0.90) and a flat chroma key (worst 7 levels).
   - Kept poorly: colour (mean error ~14/255), 1-px dither (correlation 0.39), seams between tiles (a wrap border lowers them 35–65% but does not remove them), and 1-px animation motion (19–47% of it kept).
 - **A pixel-art scaler is the deterministic baseline.** MMPX is MIT-licensed, has a Rust crate, keeps square corners and adds no colours. xBRZ is GPL-3 and not used.
@@ -36,18 +36,20 @@ Status: planned (rev 1, 2026-10-15). This is user item 1 (`hd-i18n-voice/ssot.md
 ## Design
 
 1. **HD0: scene tap and HD layer (engine and page, no AI).**
-   - When HD is on, `blit_back` also appends `(word, x, y, record, dirty)` to a per-present draw list owned by `Io`. This is the 05 scene for the map, in the original's draw order, including the cursor and border. The parity frame is untouched, and the list costs nothing when HD is off.
-   - A record is "pristine" unless a shore merge touched it.
+   - **Scene entries.** When HD is on, the engine appends scene entries per present. Each records what it drew, where, and the identity of the asset. The list costs nothing when HD is off, and the parity frame is untouched. Three kinds of entry:
+     - **map cells:** `blit_back` appends `(word, x, y, record, dirty)` in the original's draw order, including the cursor and border. A record is "pristine" unless a shore merge touched it.
+     - **portraits:** the portrait blit (`gfx/blit.rs:335`, called from `converse/script.rs`) appends `(portrait file, item, x, y, w, h)`.
+     - **panel bitmaps:** the bitmap draws (paper, spellbook, world map) append `(role, x, y, w, h)`.
    - `u6-web` exports `scene_ptr`, `scene_len` and `scene_version`.
-   - `site/hd.js` draws on a canvas S× larger (S = 2, 3 or 4, chosen by device pixels):
-     - the 320×200 frame scaled ×S (nearest);
-     - then the list replayed with `drawImage(atlas, rect)`, clipped to the map window.
-   - Pointer mapping stays on the 320×200 logical size.
-   - Record source:
-     - the pack image if the pack has the record and the record's content hash matches;
-     - otherwise the MMPX×4 image built in wasm from the live record pixels.
-   - Dirty, outline and missing records always take the MMPX path.
-   - Overlay shimmer is drawn by the renderer: the HD image is lightened under the overlay mask by the record's palette delta, so one HD image per record is enough.
+   - **Composition (`site/hd.js`, canvas S×, S = 2, 3 or 4 by device pixels).** Pointer mapping stays on the 320×200 logical size.
+     1. Draw the 320×200 classic frame scaled ×S (nearest).
+     2. Replay the entries, each with its HD image and clipped to its rect.
+     3. Draw the classic overlay on top: the pixels of the final classic frame that differ from what the replaced image alone would have drawn there. This keeps everything drawn after or over an image visible exactly as the classic frame has it: text over a portrait or panel, the clock hands, sparkles, the dissolve, and outline flashes. The engine computes the overlay mask per entry from the classic pixels it already has, and exports it with the scene.
+   - **Image source per entry:**
+     - the pack image, if the pack has it and the content hash matches;
+     - otherwise MMPX×4 built in wasm. For a dirty, outline or missing map cell, MMPX scales the 16×16 cell as the classic frame drew it (word and mask already applied), not the raw record. That keeps outline semantics and shore merges correct.
+   - **Overlay shimmer** is drawn by the renderer: the HD image is lightened under the overlay mask by the record's palette delta, so one HD image per record is enough.
+   - **Lifecycle.** An entry lives for one present. The HD layer redraws only when `scene_version` changes (06 O1).
 2. **HD1: pack format and loading.** One zip containing:
    - `manifest.json`: `format: "u6-hdpack/1"`, `tile`, `scale`, `derived`, generator, and a base digest over the record hashes;
    - `index.bin`: per record id, content hash, atlas, column, row, flags;
@@ -62,7 +64,13 @@ Status: planned (rev 1, 2026-10-15). This is user item 1 (`hd-i18n-voice/ssot.md
    - `ingest`: slices at the fixed pitch, keys out the background, then gates each cell.
    - `pack`: writes the pack.
 
-   Gate per cell: structure correlation ≥ 0.9, shift ≤ 0.5 source px, silhouette IoU ≥ 0.85, key purity ≤ 12 levels. Thresholds are tuned on synthetic sheets first. A failing cell is re-rolled once, then falls back to MMPX. The run order, best fit first:
+   Gate per cell: structure correlation ≥ 0.9, shift ≤ 0.5 source px, silhouette IoU ≥ 0.85, key purity ≤ 12 levels.
+
+   Two group gates on top of the per-cell gate:
+   - **Terrain seams.** Each terrain record is tiled 3×3 against itself and against its common neighbours. Neighbours are counted from the map's adjacency on the owner's machine; the counts are printed locally only. The seam step must stay ≤ 1.5× the interior step.
+   - **Animation sequences.** For each actor frame group (all its directions and frames), the frame-pair motion kept must be ≥ 50% of the source's.
+
+   Thresholds are tuned on synthetic sheets first. A failing cell is re-rolled once. A failing group falls back to MMPX as a whole, so a group never mixes generated and scaled frames. The run order, best fit first:
    1. portraits;
    2. panel bitmaps;
    3. terrain;
@@ -80,8 +88,18 @@ Status: planned (rev 1, 2026-10-15). This is user item 1 (`hd-i18n-voice/ssot.md
 
 ## Acceptance
 
-1. **HD off.** Every parity receipt is bit-identical, and the draw list is empty.
-2. **HD on with no pack.** The map window and portraits show MMPX ×4. The page is checked by screenshot comparison on synthetic state, plus a headless capture that the dispatcher reads. The pointer still hits the right cell.
-3. **The owner's pack.** It is built by `tools/hd` from the owner's files with imagegen and loaded by drop. Portraits and panels show the imagegen art; map cells that failed the gate show MMPX. The pack survives a reload. The pack is not in git, and the site serves no pack file (checked by a test over `site/` and `git ls-files`).
-4. **Performance.** At 4× speed the HD layer adds ≤ 4 ms per rAF at 60 Hz. The page draws a frame only when it changed (06 O1).
+1. **HD off.** Every parity receipt is bit-identical, and the scene list is empty.
+2. **HD on with no pack.** The map window, portraits and panels show MMPX ×4. The pointer still hits the right cell. Synthetic tests check:
+   - each entry's placement and clipping;
+   - that the overlay mask keeps text over a portrait, the clock hands, a sparkle and an outline-flash cell exactly as the classic frame has them;
+   - that an outline-word cell's fallback equals the scaled classic cell.
+
+   A headless capture is read by the dispatcher.
+3. **The owner's pack.** It is built by `tools/hd` from the owner's files with imagegen and loaded by drop.
+   - Portraits and panels show the imagegen art.
+   - Map cells and groups that failed a gate show MMPX, and no actor group mixes the two.
+   - The tool prints a local coverage report: records by kind, as generated, fallback or failed.
+   - The pack survives a reload.
+   - The pack is not in git, and the site serves no pack file (checked by a test over `site/` and `git ls-files`).
+4. **Performance.** Reference: headless Chromium on the owner's Mac (M5 Max), 60 Hz rAF, 4× speed, a castle walk with MMPX updates for dirty cells and a full pack loaded. The HD composite, including scaler updates and the overlay, adds ≤ 4 ms per rAF at the median and ≤ 8 ms at p95. The page draws a frame only when it changed (06 O1).
 5. **Gates and live check.** All gates pass. On the live site, HD switches on and off with no foreign requests.
