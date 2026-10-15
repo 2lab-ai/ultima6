@@ -108,6 +108,8 @@ pub struct Io {
     back: RefCell<Framebuffer>,
     front: RefCell<Framebuffer>,
     front_version: Cell<u64>,
+    /// Port-only (spec 07 HD0): [`Io::present_sources`] was called since the last publish.
+    sources_due: Cell<bool>,
     /// The screen as the engine last published it (what the player sees, without the pointer).
     published: RefCell<Framebuffer>,
     files: Files,
@@ -136,6 +138,7 @@ impl Io {
             back: RefCell::new(Framebuffer::new()),
             front: RefCell::new(Framebuffer::new()),
             front_version: Cell::new(0),
+            sources_due: Cell::new(false),
             published: RefCell::new(Framebuffer::new()),
             files,
             image: OnceCell::new(),
@@ -379,6 +382,14 @@ impl Io {
     pub fn present(&self) {
         self.front_version.set(self.front_version.get() + 1);
     }
+
+    /// Port-only (spec 07 HD0): the screen's sources changed where its colours did not (pixels
+    /// put back in the colours they had, naming other images): the engine publishes the source
+    /// plane alone after this poll, no new frame ([`Engine::src_version`]). A [`Io::present`] in
+    /// the same poll publishes them anyway.
+    pub fn present_sources(&self) {
+        self.sources_due.set(true);
+    }
 }
 
 /// Keys claimed by [`Io::own_keys`], given back on drop.
@@ -525,6 +536,8 @@ pub struct Engine {
     shown: Framebuffer,
     /// Bumped each time `shown` is composed again ([`Engine::frame_version`]).
     shown_version: u64,
+    /// Bumped each time only `shown`'s source plane changed ([`Engine::src_version`]).
+    src_version: u64,
     sprite: Option<crate::ui::pointer::SpriteFrame>,
     stubs: Rc<StubLog>,
 }
@@ -590,6 +603,7 @@ impl Engine {
             published_version: 0,
             shown: Framebuffer::new(),
             shown_version: 0,
+            src_version: 0,
             sprite: None,
             stubs,
         }
@@ -631,14 +645,21 @@ impl Engine {
         self.io.generation.set(self.io.generation() + 1);
         let version = self.io.front_version.get();
         let presented = version != self.published_version;
+        // The published frame is the one buffer synced from the screen, and the shown frame the
+        // one synced from it: with a source plane only its changed chunks are copied. Sources
+        // presented alone ([`Io::present_sources`]) are published with the plane alone, where
+        // the colours already are the screen's; the colours and the frames are as without them.
+        let sources = self.io.sources_due.replace(false);
+        let mut src_only = false;
         if presented {
-            // The published frame is the one buffer synced from the screen, and the shown frame
-            // the one synced from it: with a source plane only its changed chunks are copied.
             self.io
                 .published
                 .borrow_mut()
                 .sync_from(&mut self.io.front.borrow_mut());
             self.published_version = version;
+        } else if sources {
+            let mut front = self.io.front.borrow_mut();
+            src_only = self.io.published.borrow_mut().sync_src_from(&mut front) > 0;
         }
         let at = self.io.handler_pointer();
         let sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
@@ -649,7 +670,21 @@ impl Engine {
             }
             self.sprite = sprite;
             self.shown_version += 1;
+        } else if src_only {
+            self.shown
+                .sync_src_from(&mut self.io.published.borrow_mut());
+            // The sprite again, in the colours it has there: its pixels classic.
+            if let Some(sp) = &self.sprite {
+                sp.draw(&mut self.shown);
+            }
+            self.src_version += 1;
         }
+    }
+
+    /// The pointer sprite drawn over the shown frame, if any (tests).
+    #[cfg(test)]
+    pub(crate) fn sprite(&self) -> Option<&crate::ui::pointer::SpriteFrame> {
+        self.sprite.as_ref()
     }
 
     /// The last published frame (320×200 indices plus the palette) with the pointer sprite.
@@ -671,6 +706,13 @@ impl Engine {
     /// left the frame as it was.
     pub fn frame_version(&self) -> u64 {
         self.shown_version
+    }
+
+    /// Port-only (spec 07 HD0): changes whenever only the source plane of [`Engine::frame`]
+    /// changed, its colours not ([`Io::present_sources`]); 0 until then. A consumer of the plane
+    /// recomposes when this or [`Engine::frame_version`] moved.
+    pub fn src_version(&self) -> u64 {
+        self.src_version
     }
 
     /// True once the game future returned (it is never polled again).

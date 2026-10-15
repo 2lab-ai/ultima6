@@ -381,13 +381,19 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
         io.present();
         state.borrow_mut().combat.shown += 1;
     }
-    if let Some(last) = last
-        && !same(&io.draw(|fb| window_of(fb)), &last)
-    {
-        // The last recorded frame is seen before the step's own last picture replaces it.
-        pace(state, io, 0).await;
-        io.draw(|fb| put_window(fb, &last));
-        io.present();
+    if let Some(last) = last {
+        if !same(&io.draw(|fb| window_of(fb)), &last) {
+            // The last recorded frame is seen before the step's own last picture replaces it.
+            pace(state, io, 0).await;
+            io.draw(|fb| put_window(fb, &last));
+            io.present();
+        } else if last.1.0.is_some() {
+            // The same colours, but the frame put up may name other images (or none): the last
+            // picture's sources go back, published with the plane alone, so the frames and their
+            // times are those without the plane (spec 07 HD0).
+            io.draw(|fb| put_window(fb, &last));
+            io.present_sources();
+        }
     }
     let rest = state.borrow().main.pending_print.len();
     print_paced(state, io, rest).await;

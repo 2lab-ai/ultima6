@@ -330,6 +330,35 @@ impl Framebuffer {
         copied
     }
 
+    /// [`Framebuffer::sync_from`] for the source plane alone, the colours left as they are: of
+    /// the chunks that may differ, those whose colours here already equal `from`'s are copied
+    /// (their sources are those of the pixels shown here); a chunk whose colours differ keeps its
+    /// marks for the next `sync_from`, which copies it with its colours. For the same one buffer
+    /// synced from `from`. Returns the chunks it copied.
+    pub fn sync_src_from(&mut self, from: &mut Framebuffer) -> usize {
+        let (Some(to), Some(src)) = (&mut self.src, &mut from.src) else {
+            return 0;
+        };
+        let mut copied = 0;
+        for w in 0..MARK_WORDS {
+            let mut bits = src.out[w] | to.own[w];
+            while bits != 0 {
+                let bit = bits & bits.wrapping_neg();
+                bits &= bits - 1;
+                let i = chunk_start(w * 64 + bit.trailing_zeros() as usize);
+                if self.pixels[i..i + CHUNK] != from.pixels[i..i + CHUNK] {
+                    continue;
+                }
+                to.src[i..i + CHUNK].copy_from_slice(&src.src[i..i + CHUNK]);
+                src.out[w] &= !bit;
+                to.own[w] &= !bit;
+                to.out[w] |= bit;
+                copied += 1;
+            }
+        }
+        copied
+    }
+
     /// The rect `xs` × `ys` of `from` copied here: each row of it whose colours differ is copied,
     /// and of the source plane the chunks of the rect that may differ (as [`Framebuffer::sync_from`]
     /// marks them, for the one buffer synced from `from`, always over the same rect). With no plane
@@ -732,6 +761,34 @@ mod tests {
             copied.iter().all(|&c| c > 0 && c < all),
             "copied {copied:?} of {all}"
         );
+    }
+
+    /// The plane alone: the chunks whose colours are already the source's are copied and their
+    /// marks taken; a chunk whose colours differ keeps them, and the next full sync copies it.
+    #[test]
+    fn a_sync_of_the_plane_alone_copies_only_chunks_of_equal_colours() {
+        let (mut from, mut to) = (Framebuffer::new(), Framebuffer::new());
+        from.enable_src();
+        to.enable_src();
+        assert_eq!(to.sync_from(&mut from), CHUNKS);
+        from.set_src(3, 2, 0, tile(5, 3, 2));
+        from.set_src(40, 2, 6, tile(5, 8, 2));
+        assert_eq!(to.sync_src_from(&mut from), 1, "the chunk of equal colours");
+        assert_eq!(to.src_at(3, 2), Some(tile(5, 3, 2)));
+        assert_eq!(
+            (to.get(40, 2), kind(&to, 40, 2)),
+            (Some(0), Some(Kind::Classic))
+        );
+        assert_eq!(
+            to.sync_src_from(&mut from),
+            0,
+            "the other waits for its colours"
+        );
+        assert_eq!(to.sync_from(&mut from), 1, "and the next sync copies it");
+        assert!(to.src() == from.src() && to.pixels == from.pixels);
+        let mut plain = Framebuffer::new();
+        assert_eq!(plain.sync_src_from(&mut from), 0);
+        assert!(plain.src().is_none());
     }
 
     #[test]

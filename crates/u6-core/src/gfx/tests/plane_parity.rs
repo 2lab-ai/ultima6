@@ -7,11 +7,13 @@
 //! writes is attributed: checks that read the records and the window's lists, not the plane's
 //! writers. No game data.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use u6_formats::font::BitFont;
 use u6_formats::gfx::{Span, TileKind};
-use u6_render::{Framebuffer, Kind};
+use u6_render::{Framebuffer, Kind, Src, WIDTH};
 
 use super::adv::{self, Lists, X};
 use crate::Files;
@@ -245,11 +247,14 @@ fn pointer() -> crate::ui::pointer::PointerState {
 /// An engine over the adversarial scene: every step its edits and the idle refresh; every 17th
 /// a flight (the block under it saved, the sprite drawn and shown, the block put back); every
 /// 23rd a glyph and a text scroll over the window on the screen; every 41st a quake and its
-/// playback. The plane on or off.
-fn paired(seed: u64, plane: bool) -> Engine {
+/// playback. The plane on or off; on, after each refresh that presented the window the window
+/// rect of the screen's plane must be the back buffer's (counted in the returned cell).
+fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>) {
     let (mut s, words) = adv::scene();
     s.ui = crate::main_loop::test_support::test_ui();
     s.ui.pointer = pointer();
+    let windows = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&windows);
     let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
         let mut x = X(seed | 1);
         let mut lists = Lists {
@@ -275,6 +280,18 @@ fn paired(seed: u64, plane: bool) -> Engine {
                 let mut s = st.borrow_mut();
                 adv::edit(&mut s, &io, &mut x, &mut lists, &words, step);
                 crate::gfx::refresh_view(&mut s, &io);
+                if plane && s.gfx.window_shown != 0 {
+                    let rect = |f: &Framebuffer| {
+                        let at = (8..168).flat_map(|y| (8..168).map(move |x| (x, y)));
+                        at.map(|(x, y)| f.src_at(x, y)).collect::<Vec<_>>()
+                    };
+                    let (back, front) = (io.peek_back(rect), io.draw(|f| rect(f)));
+                    assert!(
+                        back == front,
+                        "step {step}: the window presented with its sources"
+                    );
+                    counted.set(counted.get() + 1);
+                }
                 if step % 17 == 5 {
                     let gfx = &mut s.gfx;
                     let (fx, fy) = (40 + (step % 7) as u16 * 16, 56 + (step % 3) as u16 * 8);
@@ -302,7 +319,23 @@ fn paired(seed: u64, plane: bool) -> Engine {
     if plane {
         e.enable_src_plane();
     }
-    e
+    (e, windows)
+}
+
+/// The pixels the pointer sprite covers in the shown frame.
+fn sprite_pixels(e: &Engine) -> BTreeSet<usize> {
+    let mut at = BTreeSet::new();
+    if let Some(sp) = e.sprite() {
+        for (r, row) in sp.rows.iter().enumerate() {
+            for (c, &v) in row.iter().enumerate() {
+                let (x, y) = (i32::from(sp.x) + c as i32, i32::from(sp.y) + r as i32);
+                if v != 0 && (0..WIDTH as i32).contains(&x) && (0..200).contains(&y) {
+                    at.insert(y as usize * WIDTH + x as usize);
+                }
+            }
+        }
+    }
+    at
 }
 
 /// The colours and palettes of the four buffers: back, screen, published, shown.
@@ -319,11 +352,15 @@ fn buffers(e: &Engine) -> [(Vec<u8>, [u6_render::Rgb; 256]); 4] {
 /// Paired engines, the plane off and on, the same input (pointer moves every tick): after every
 /// tick the four buffers' colours and palettes (the pointer sprite in the shown one), the frame
 /// version, the State, the RNG and the cache's decisions are equal; the plane engine's buffers
-/// hold only right attributions and its back buffer covers what the records draw.
+/// hold only right attributions and its back buffer covers what the records draw. And with plain
+/// asserts, live without debug assertions: after every tick the published plane is the screen's
+/// in full and the shown plane the published one's but for the pointer sprite's pixels, which
+/// are classic; after every window present the screen's window rect is the back buffer's.
 #[test]
 fn paired_engines_show_the_same_with_the_plane_off_and_on() {
     let seed = 0x2545_F491_4F6C_DD1D;
-    let (mut off, mut on) = (paired(seed, false), paired(seed, true));
+    let ((mut off, _), (mut on, windows)) = (paired(seed, false), paired(seed, true));
+    let mut sprites = 0;
     let mut dice = X(7);
     let (mut images, mut covered) = (0, 0);
     for t in 0..1500 {
@@ -353,14 +390,34 @@ fn paired_engines_show_the_same_with_the_plane_off_and_on() {
         images += on.io().draw(|f| check_images(f, &b, &what));
         images += on.io().peek_back(|f| check_images(f, &b, &what));
         covered += on.io().peek_back(|f| check_coverage(f, &b, &what));
+        let front = on.io().draw(|f| f.src().unwrap().to_vec());
+        let published = on.io().published(|p| p.src().unwrap().to_vec());
+        assert!(
+            published == front,
+            "tick {t}: the published plane is the screen's"
+        );
+        let sprite = sprite_pixels(&on);
+        sprites += usize::from(!sprite.is_empty());
+        let shown = on.frame().src().unwrap();
+        for (i, (p, s)) in published.iter().zip(shown).enumerate() {
+            let want = if sprite.contains(&i) {
+                Src::CLASSIC
+            } else {
+                *p
+            };
+            assert!(*s == want, "tick {t}: the shown plane at pixel {i}");
+        }
     }
     let s = on.state();
     println!(
         "paired engines: 1500 ticks, {images} pixels checked against their records, {covered} \
-         covered; {} frames played back, decisions {:?}",
+         covered; {} frames played back, decisions {:?}; {} window presents checked, the sprite \
+         shown in {sprites} ticks",
         s.combat.shown,
-        decisions(&s)
+        decisions(&s),
+        windows.get()
     );
+    assert!(windows.get() > 0 && sprites > 0);
     assert!(off.frame().src().is_none() && on.frame().src().is_some());
     assert!(s.combat.shown > 0, "quakes were played back");
     assert!(images > 0 && covered > 0);

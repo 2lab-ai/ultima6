@@ -431,7 +431,9 @@ fn text_over_a_portrait_is_classic() {
 
 /// A text window scrolled over the paper: each pixel moved up keeps its source (the paper's
 /// pixel it was, with its (u, v)), a glyph moved up stays classic, and the row the scroll clears
-/// is classic; nothing outside the window changes.
+/// is classic; nothing outside the window changes. Checked on a copy synced from the screen
+/// before and after the scroll (as the published frame is), against sources and colours
+/// computed from the layout: a write that forgot its mark would leave the copy as it was.
 #[test]
 fn a_text_scroll_moves_the_sources_under_it() {
     let mut fb = plane();
@@ -444,7 +446,8 @@ fn a_text_scroll_moves_the_sources_under_it() {
     let font = BitFont {
         glyphs: vec![[0x81; 8]; 256],
     };
-    // A glyph in the window's second row.
+    // A glyph in the window's second row: ink in its first and last columns, paper colour 2
+    // between.
     crate::ui::text::draw_glyph(&mut fb, &font, 192, 112, b'A', 1, 2);
     let w = crate::ui::text::TextWindow {
         x: 22,
@@ -457,33 +460,40 @@ fn a_text_scroll_moves_the_sources_under_it() {
         bg: 2,
         flags: 0,
     };
-    let before = fb.clone();
+    let mut copy = plane();
+    copy.sync_from(&mut fb);
     crate::ui::text::scroll_window(&mut fb, &w);
+    copy.sync_from(&mut fb);
+    // What the screen showed at (x, y) before the scroll.
+    let was = |x: usize, y: usize| {
+        if (192..200).contains(&x) && (112..120).contains(&y) {
+            (if x == 192 || x == 199 { 1 } else { 2 }, Src::CLASSIC)
+        } else {
+            (paper.pixels[y * 320 + x], picture(Kind::Bitmap, 0, (x, y)))
+        }
+    };
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let inside = (176..304).contains(&x) && (104..184).contains(&y);
-            if !inside {
-                same(&fb, (x, y), &before, (x, y));
-            } else if y < 176 {
-                same(&fb, (x, y), &before, (x, y + 8));
-            } else {
-                assert_eq!((fb.get(x, y), kind(&fb, x, y)), (Some(2), Kind::Classic));
-            }
+            let want = match (inside, y < 176) {
+                (false, _) => was(x, y),
+                (true, true) => was(x, y + 8),
+                (true, false) => (2, Src::CLASSIC),
+            };
+            assert_eq!(
+                (copy.get(x, y), copy.src_at(x, y)),
+                (Some(want.0), Some(want.1)),
+                "({x}, {y})"
+            );
         }
     }
-    let paper_at = |u, v| Some(picture(Kind::Bitmap, 0, (u, v)));
+    assert!(copy.src() == fb.src() && copy.pixels() == fb.pixels());
     assert_eq!(
-        fb.src_at(180, 104),
-        paper_at(180, 112),
+        copy.src_at(180, 104),
+        Some(picture(Kind::Bitmap, 0, (180, 112))),
         "the paper moved up"
     );
-    assert_eq!(fb.get(180, 104), Some(paper.pixels[112 * 320 + 180]));
-    assert_eq!(kind(&fb, 192, 104), Kind::Classic, "the glyph moved up");
-    assert_eq!(
-        fb.src_at(192, 112),
-        paper_at(192, 120),
-        "the paper under it"
-    );
+    assert_eq!(kind(&copy, 192, 104), Kind::Classic, "the glyph moved up");
 }
 
 /// The world of the view tests in `s.gfx`, with the clock's hands on the hero's tile and its
@@ -548,6 +558,10 @@ fn clock_hands_and_the_sparkle_are_classic() {
 /// A flight: the block under the sprite saved (slot 3), the sprite drawn (slot 2: its pixels
 /// classic), the block put back: every pixel of the block has its colour and its source again,
 /// those the sprite covered and those it did not (its clear last column, the block's third byte).
+/// Checked in the back buffer and on the screen synced from it over the window rect (as the
+/// present does) before the flight, with the sprite up and after the put-back, against sources
+/// and colours computed from the layout: a write that forgot its mark would leave the screen as
+/// it was.
 #[test]
 fn a_missile_is_classic_and_the_block_it_put_back_is_named_again() {
     let (mut gfx, mut back) = window_back();
@@ -562,9 +576,34 @@ fn a_missile_is_classic_and_the_block_it_put_back_is_named_again() {
         }),
     );
     crate::gfx::sprite::prepare(&mut gfx, 2, 7, 0, 128, 128);
+    // The window as `window_back` draws it, and with the sprite over it.
+    let ground = |x: usize, y: usize| {
+        let n = window_record(x, y);
+        let (r, c) = (y % 16, x % 16);
+        let colour = ((r * 16 + c + usize::from(n)) % 31 + 1) as u8;
+        (colour, tile(n, u32::from(n), (c as u16, r as u16), 0))
+    };
+    let flying = |x: usize, y: usize| match (x.checked_sub(32), y.checked_sub(32)) {
+        (Some(c), Some(r)) if c < 15 && r < 16 => (((r * 16 + c) % 31 + 1) as u8, Src::CLASSIC),
+        _ => ground(x, y),
+    };
+    let mut screen = plane();
+    let window = |screen: &Framebuffer, want: &dyn Fn(usize, usize) -> (u8, Src)| {
+        for y in 8..168 {
+            for x in 8..168 {
+                let (colour, src) = want(x, y);
+                let got = (screen.get(x, y), screen.src_at(x, y));
+                assert_eq!(got, (Some(colour), Some(src)), "the screen at ({x}, {y})");
+            }
+        }
+    };
+    screen.sync_rect_from(&mut back, 8..168, 8..168);
+    window(&screen, &ground);
     let before = back.clone();
     crate::gfx::sprite::save(&mut gfx, &back, 3, 40, 40);
     crate::gfx::sprite::draw(&gfx, &mut back, 2, 40, 40);
+    screen.sync_rect_from(&mut back, 8..168, 8..168);
+    window(&screen, &flying);
     // The block is bytes 4..=6 of rows 32..48 (x 32..56); the sprite covers x 32..47.
     for y in 32..48 {
         for x in 32..56 {
@@ -576,6 +615,8 @@ fn a_missile_is_classic_and_the_block_it_put_back_is_named_again() {
         }
     }
     crate::gfx::sprite::draw(&gfx, &mut back, 3, 40, 40);
+    screen.sync_rect_from(&mut back, 8..168, 8..168);
+    window(&screen, &ground);
     for y in 32..48 {
         for x in 32..56 {
             same(&back, (x, y), &before, (x, y));
@@ -747,6 +788,101 @@ fn combat_playback_puts_back_the_sources_it_recorded() {
         "the published window, the two frames, the last picture"
     );
     assert!(e.state().combat.effects.is_empty(), "all played");
+}
+
+/// The playback of [`equal_colours`]: the screen shows record 1, the synchronous code presents
+/// record 5 (the same pixels: recorded), then record 1 again (its last picture); with `pause` a
+/// pause is recorded after the frame. Returns the engine after the playback and its
+/// (frame version, source version) after each tick.
+fn equal_colours(plane: bool, pause: bool) -> (Engine, Vec<(u64, u64)>) {
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    let same = |r: usize, c: usize| ((r * 16 + c) % 31 + 1) as u8;
+    install(&mut s.gfx, 1, map_tile(0, 16, same));
+    install(&mut s.gfx, 5, map_tile(0, 16, same));
+    let fill = |gfx: &GfxState, f: &mut Framebuffer, n: u16| {
+        for row in 0..11 {
+            for col in 0..11 {
+                blit_front(gfx, f, n, col * 16, row * 16);
+            }
+        }
+    };
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        io.draw(|f| fill(&st.borrow().gfx, f, 1));
+        io.present();
+        io.vblank().await;
+        {
+            let mut s = st.borrow_mut();
+            io.draw(|f| fill(&s.gfx, f, 5));
+            io.present();
+            crate::combat::present::capture_window(&mut s, 40);
+            if pause {
+                crate::combat::present::capture_pause(&mut s, 60);
+            }
+            io.draw(|f| fill(&s.gfx, f, 1));
+            io.present();
+        }
+        crate::combat::play_effects(&st, &io).await;
+        io.sleep(u32::MAX).await;
+    });
+    if plane {
+        e.enable_src_plane();
+    }
+    let versions = (0..40)
+        .map(|_| {
+            e.tick(&[], 16);
+            (e.frame_version(), e.src_version())
+        })
+        .collect();
+    (e, versions)
+}
+
+/// A playback whose last picture has the colours of the frame put up last (records 1 and 5 have
+/// the same pixels): the last picture's sources go back all the same, in the published and the
+/// shown frame, with no new frame: right after the frame (its present publishes them), and after
+/// a pause (published with the plane alone, the source version moved). The frame versions are
+/// those of the run without the plane.
+#[test]
+fn a_playback_ending_on_equal_colours_puts_back_the_last_sources() {
+    for pause in [false, true] {
+        let (off, plain) = equal_colours(false, pause);
+        let (on, versions) = equal_colours(true, pause);
+        let frames = |v: &[(u64, u64)]| v.iter().map(|p| p.0).collect::<Vec<_>>();
+        assert_eq!(
+            frames(&versions),
+            frames(&plain),
+            "pause {pause}: the frame versions"
+        );
+        assert!(
+            plain.iter().all(|p| p.1 == 0),
+            "no plane: no source version"
+        );
+        assert_eq!(
+            on.src_version(),
+            u64::from(pause),
+            "pause {pause}: published alone"
+        );
+        assert!(
+            on.state().combat.effects.is_empty() && off.frame().pixels() == on.frame().pixels()
+        );
+        let named = |fb: &Framebuffer, n: u16| {
+            (0..176).all(|y| {
+                (0..176).all(|x| {
+                    let uv = ((x % 16) as u16, (y % 16) as u16);
+                    fb.src_at(x, y) == Some(tile(n, 0, uv, 0))
+                })
+            })
+        };
+        assert!(
+            named(on.frame(), 1),
+            "pause {pause}: shown names the last picture's record"
+        );
+        assert!(
+            on.io().published(|p| named(p, 1)),
+            "pause {pause}: published"
+        );
+        assert!(on.io().draw(|f| named(f, 1)), "pause {pause}: the screen");
+    }
 }
 
 /// The water record and the shore record it merges into ([`shore_state`]).
