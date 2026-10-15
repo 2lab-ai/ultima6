@@ -24,10 +24,13 @@
 //! draws from the RNG), the dissolve (it clears its flag) or XOR plots on.
 //!
 //! Tables the render also reads are loaded once and never written:
-//! [`super::tables::GameTables`], the animmask overlays and the base tiles. The records are
-//! written only by the shore merge (`anim::merge_rows`); a writer of
-//! [`super::GfxState::records`] elsewhere must report the record
+//! [`super::tables::GameTables`], the animmask overlays and block 2, and the base tiles. Debug
+//! builds check the first three against their fingerprint at the load at every window key
+//! ([`check_static`]). The records are written only by the shore merge (`anim::merge_rows`); a
+//! writer of [`super::GfxState::records`] elsewhere must report the record
 //! ([`RenderCache::record_changed`]).
+
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::GfxState;
 use super::view::{ViewWindow, WINDOW_TILES};
@@ -46,6 +49,8 @@ pub struct RenderCache {
     window: Option<WindowMemo>,
     /// Per record: changes of its pixels so far (empty until the first).
     versions: Vec<u32>,
+    /// Debug builds: the fingerprint of the tables that never change ([`check_static`]).
+    static_tables: Option<u64>,
     /// Window renders left out whole so far (the tests read them).
     pub(crate) window_skips: u64,
     /// Window renders that redrew some boxes only, and the boxes they redrew.
@@ -54,8 +59,12 @@ pub struct RenderCache {
 }
 
 impl Clone for RenderCache {
+    /// Empty but for the static tables' fingerprint (the clone holds the same tables).
     fn clone(&self) -> Self {
-        Self::default()
+        Self {
+            static_tables: self.static_tables,
+            ..Self::default()
+        }
     }
 }
 
@@ -234,4 +243,31 @@ pub(super) fn dirty_boxes(
 /// (a render the memo cannot stand for).
 pub(super) fn remember_window(gfx: &mut GfxState, memo: Option<(WindowKey, (u64, u64))>) {
     gfx.cache.window = memo.map(|(key, back)| WindowMemo { back, key });
+}
+
+/// The fingerprint of what the window render reads and nothing writes after the load: the game
+/// tables, the overlays and the animmask blocks.
+fn static_fingerprint(gfx: &GfxState) -> u64 {
+    let mut h = DefaultHasher::new();
+    gfx.tables.hash(&mut h);
+    gfx.overlays.hash(&mut h);
+    gfx.animmask.hash(&mut h);
+    h.finish()
+}
+
+/// Debug builds: takes the static tables' fingerprint at the load (or, for a state built
+/// otherwise, at its first window key), and panics when a later call finds them written: the
+/// window cache would then stand for draws of other tables. Nothing in release builds.
+pub(super) fn check_static(gfx: &mut GfxState) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let now = static_fingerprint(gfx);
+    match gfx.cache.static_tables {
+        None => gfx.cache.static_tables = Some(now),
+        Some(was) => debug_assert!(
+            was == now,
+            "the game tables, overlays or animmask were written after the load (spec 06 O2)"
+        ),
+    }
 }

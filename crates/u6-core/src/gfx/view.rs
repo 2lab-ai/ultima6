@@ -283,6 +283,7 @@ pub fn refresh_view(state: &mut State, io: &Io) {
 /// render is not remembered with the sparkle, the dissolve or XOR plots on, or a draw that would
 /// leave its box ([`WindowKey::of`]).
 fn render_window_cached(state: &mut State, io: &Io) {
+    cache::check_static(&mut state.gfx);
     let inputs = window_inputs(state, io, true);
     let border = border_of_boxes();
     let key = WindowKey::of(state, &inputs.window, inputs.clock, inputs.cursor, &border);

@@ -322,3 +322,31 @@ fn the_cache_stands_aside_where_it_cannot_stand_for_the_render() {
     }
     assert_eq!(renders(&tall), 0, "overlay rows past the tile: everything");
 }
+
+/// Debug builds: a game table, an overlay or the animmask written after the window cache began
+/// (the render it remembers read the old ones) stops the refresh.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "written after the load")]
+fn a_static_table_written_after_the_first_render_is_caught() {
+    let mut s = scene();
+    let io = Io::new(Files::default());
+    crate::gfx::refresh_view(&mut s, &io);
+    s.gfx.tables.dir_dx[3] = 2;
+    crate::gfx::refresh_view(&mut s, &io);
+}
+
+/// The same for an overlay, in a clone of the state (the clone keeps the fingerprint).
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "written after the load")]
+fn an_overlay_written_in_a_clone_is_caught() {
+    let mut s = scene();
+    let io = Io::new(Files::default());
+    crate::gfx::refresh_view(&mut s, &io);
+    let mut copy = s.clone();
+    if let Some(ov) = copy.gfx.overlays[OVERLAID].as_mut() {
+        ov.frames[0][0] ^= 1;
+    }
+    crate::gfx::refresh_view(&mut copy, &io);
+}
