@@ -1495,7 +1495,9 @@ test('a game put on screen starts its clock at the boot: a new import during a r
   console.log(`  receipt: the new game's first frame at 8x: ${steps} steps (its own 16.7 ms: 6)`);
   assert.equal(after.speed, 8, 'the new game runs at the chosen 8x');
   assert.ok(steps <= 7, 'the first frame runs its own interval at 8x (6.67 steps), no catch-up');
-  assert.ok(after.lost === before.lost, 'nothing clamped or dropped');
+  // The new game's own counters (its Pacer starts at 0; `before` still holds the old game's).
+  const lost = await page.evaluate(() => [globalThis.__clamped, globalThis.__dropped]);
+  assert.deepEqual(lost, [0, 0], 'the new game clamped and dropped nothing');
 }, { needs: h.haveHfes });
 
 // The canvas pixels as one FNV-1a hash, computed in the page (the frame is the user's data:
