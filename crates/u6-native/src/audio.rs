@@ -343,10 +343,17 @@ mod tests {
         const RATE: u32 = 1000; // a frame a millisecond
         let fade = FADE_MS as usize;
         let mut gain = Gain::default();
+        // Left 0.5, right -0.25: each frame's gain read from both sides, which must agree.
         let run = |gain: &mut Gain, frames: usize| {
-            let mut buf = vec![0.5f32; 2 * frames];
+            let mut buf = [0.5f32, -0.25].repeat(frames);
             gain.apply(&mut buf, RATE);
-            buf.chunks(2).map(|f| f[0] * 2.0).collect::<Vec<f32>>()
+            buf.chunks(2)
+                .map(|f| {
+                    let (l, r) = (f[0] / 0.5, f[1] / -0.25);
+                    assert!((l - r).abs() < 1e-6, "left {l} and right {r}");
+                    l
+                })
+                .collect::<Vec<f32>>()
         };
         let smooth = |g: &[f32]| {
             g.windows(2)
@@ -389,6 +396,28 @@ mod tests {
         gain.set_speed(Speed::Finite(2.0));
         both.extend(run(&mut gain, fade));
         assert!(smooth(&both) && *both.last().unwrap() == 1.0, "{both:?}");
+        // One render equals the same frames rendered in pieces, across both fades: 50 frames
+        // at 6× (the fade out), then 100 at 1× (the fade in, then full).
+        let signal: Vec<f32> = (0..3 * fade)
+            .flat_map(|i| [i as f32, -(i as f32) / 2.0])
+            .collect();
+        let (mut whole, mut pieces) = (signal.clone(), signal);
+        let mut gain = Gain::default();
+        gain.set_speed(Speed::Finite(6.0));
+        gain.apply(&mut whole[..2 * fade], RATE);
+        gain.set_speed(Speed::Finite(1.0));
+        gain.apply(&mut whole[2 * fade..], RATE);
+        let mut gain = Gain::default();
+        let mut at = 0;
+        for (speed, frames) in [(6.0, &[1, 7, 13, 4, 25][..]), (1.0, &[30, 20, 50][..])] {
+            gain.set_speed(Speed::Finite(speed));
+            for &n in frames {
+                gain.apply(&mut pieces[at..at + 2 * n], RATE);
+                at += 2 * n;
+            }
+        }
+        assert_eq!(at, whole.len());
+        assert_eq!(pieces, whole, "pieces as one render");
         // At a device rate the fade takes FADE_MS of samples.
         let mut gain = Gain::default();
         gain.set_speed(Speed::Finite(8.0));

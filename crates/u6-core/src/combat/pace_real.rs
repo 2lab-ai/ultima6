@@ -286,28 +286,35 @@ fn the_start_fight_turns_take_the_originals_time() {
 
 #[test]
 fn the_start_fight_takes_the_same_time_at_any_host_tick() {
-    // Spec 03 §1: the same steps take the same engine time at 16 ms and 8 ms ticks, and polls
-    // with no time elapsed add nothing (to within a host tick per step).
+    // Spec 03 §1: the same steps take the same engine time at the hosts' step (spec 06) and at
+    // ticks of half of it, and at 16 ms and 8 ms ticks; polls with no time elapsed add nothing
+    // (to within a host tick per step). The finer tick divides the coarser one: where it does
+    // not (20 against 8), the key's tick and the end's rounding differ by more than a tick.
     let Some(files) = files() else {
         return;
     };
-    for seed in [0, 5] {
-        let base: Vec<u64> = play(&files, seed, 16, false).iter().map(|t| t.ms).collect();
-        for (tick, zero) in [(8, false), (16, true)] {
-            let other: Vec<u64> = play(&files, seed, tick, zero)
+    for (coarse, finer) in [(HOST_STEP_MS, HOST_STEP_MS / 2), (16, 8)] {
+        for seed in [0, 5] {
+            let base: Vec<u64> = play(&files, seed, coarse, false)
                 .iter()
                 .map(|t| t.ms)
                 .collect();
-            println!(
-                "seed {seed}: ms per step at 16 ms ticks {base:?}, at {tick} ms (zero polls \
-                 {zero}) {other:?}"
-            );
-            // Each step ends within its own run's tick of the same deadline.
-            for (a, b) in base.iter().zip(&other) {
-                assert!(
-                    b + 16 >= *a && *b <= a + u64::from(tick),
-                    "seed {seed}: {base:?} vs {other:?}"
+            for (tick, zero) in [(finer, false), (coarse, true)] {
+                let other: Vec<u64> = play(&files, seed, tick, zero)
+                    .iter()
+                    .map(|t| t.ms)
+                    .collect();
+                println!(
+                    "seed {seed}: ms per step at {coarse} ms ticks {base:?}, at {tick} ms \
+                     (zero polls {zero}) {other:?}"
                 );
+                // Each step ends within its own run's tick of the same deadline.
+                for (a, b) in base.iter().zip(&other) {
+                    assert!(
+                        b + u64::from(coarse) >= *a && *b <= a + u64::from(tick),
+                        "seed {seed}: {base:?} vs {other:?}"
+                    );
+                }
             }
         }
     }
