@@ -6,7 +6,7 @@ use crate::engine::Io;
 use crate::state::State;
 
 use super::seams::{self, Arg};
-use super::{clock, leaves, npc, path, tail, walk};
+use super::{clock, leaves, npc, path, tail, timer, walk};
 
 /// Refills (clock minutes) without anyone able to act after which the scheduler yields to the
 /// host once (port checkpoint, spec 03 §1: a yield changes no game state).
@@ -457,6 +457,17 @@ fn refill(s: &mut State) {
 
 /// Original: 0x1213de (actors: world turn: let NPCs act until the player's character is next)
 ///
+/// What the port waits at the pick of `actor` ([`PICK_MS`]), with [`COMBAT_NPC_MS`] more when
+/// an NPC turn (`npc`) in a combat worktype runs: in a time stop, or on another level than the
+/// party, 0x1200b0 ends the turn at once (0x1200e8..0x120112, [`npc::npc_turn_sync`]) and no
+/// worktype takes its time.
+fn pick_ms(s: &State, actor: usize, npc: bool) -> u16 {
+    let runs =
+        s.actors.timers[timer::TIME_STOP] == 0 && s.objects.location[actor].z == s.map.centre.z;
+    let fights = npc && runs && s.actors.worktype[actor] < 0x80;
+    PICK_MS + if fights { COMBAT_NPC_MS } else { 0 }
+}
+
 /// After the bookkeeping ([`leader_bookkeeping`], [`formation`], [`go_to_schedules`]), picks
 /// the next actor by movement points again and again; when nobody near the party has points
 /// left all actors are refilled and the clock advances one minute ([`clock::tick`]). The pick
@@ -465,8 +476,9 @@ fn refill(s: &mut State) {
 /// swallowed), after making it the leader if it is another party member.
 ///
 /// Port: the original draws as it goes and is as slow as that drawing; the port waits the
-/// measured time on the engine clock instead, at each pick ([`PICK_MS`], and [`COMBAT_NPC_MS`]
-/// before an NPC turn in a combat worktype) and before each refresh of a changed view
+/// measured time on the engine clock instead, at each pick ([`pick_ms`]: [`PICK_MS`], and
+/// [`COMBAT_NPC_MS`] before an NPC turn in a combat worktype that runs) and before each refresh
+/// of a changed view
 /// ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile.
 pub async fn world_turn(state: &RefCell<State>, io: &Io) {
     leader_bookkeeping(&mut state.borrow_mut());
@@ -510,8 +522,7 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
         let held = swallowed(&mut state.borrow_mut(), actor);
         let wt = state.borrow().actors.worktype[a];
         let npc = !held && wt != 2 && wt != 1;
-        let fights = npc && wt < 0x80;
-        let ms = PICK_MS + if fights { COMBAT_NPC_MS } else { 0 };
+        let ms = pick_ms(&state.borrow(), a, npc);
         crate::combat::present::pace(state, io, ms).await;
         if !held {
             if npc {
@@ -692,6 +703,24 @@ mod tests {
             }
         }
         done.get().expect("the turn ends")
+    }
+
+    #[test]
+    fn only_a_combat_npc_turn_that_runs_takes_combat_turn_time() {
+        // NPC 10 in a combat worktype (3) on the party's level.
+        let mut s = world(&[(6, 10)]);
+        s.actors.worktype[10] = 3;
+        let fights = PICK_MS + COMBAT_NPC_MS;
+        assert_eq!(pick_ms(&s, 10, true), fights, "the turn runs");
+        assert_eq!(pick_ms(&s, 10, false), PICK_MS, "not an NPC turn");
+        s.actors.worktype[10] = 0x90;
+        assert_eq!(pick_ms(&s, 10, true), PICK_MS, "a schedule worktype");
+        s.actors.worktype[10] = 3;
+        s.actors.timers[timer::TIME_STOP] = 5;
+        assert_eq!(pick_ms(&s, 10, true), PICK_MS, "time stop");
+        s.actors.timers[timer::TIME_STOP] = 0;
+        s.objects.location[10].z = 1;
+        assert_eq!(pick_ms(&s, 10, true), PICK_MS, "another level");
     }
 
     #[test]
