@@ -17,7 +17,7 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 
 Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 4, 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
-In flight: T2 (page loop, keys, badge), T5 (opening blits by byte); T3 (native) dispatches when capacity allows.
+Shipped: 06's speed control is live in production (Cloudflare Pages 269ed8c1 at main 810df38). In flight: T5 (opening blits by byte, approved, final test round), then T4 (O1 + O2).
 
 ## Order, and why it differs from the user's numbering
 
@@ -32,8 +32,6 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 
 | Unit | Spec | Scope | Needs |
 |---|---|---|---|
-| T2 | 06 | `site/app.js` fixed-step loop, key intercept by DOM `key`, badge and Speed buttons, `localStorage`, gain ramp above 4×; harness `GLUE_HOOKS` wraps `step` + rAF/now shim; delete `Game::tick`; web tests | T1 |
-| T3 | 06 | native `run_window` on `Pacer`, `HEADLESS_TICK_MS` 20, keys, speed in the title; re-run the 16 ms receipts at 20 ms | T1 |
 | T4 | 06 | O1 + O2: one RGBA per changed frame; skip idle map re-render; `merge_shores` on its counter | T2 |
 | T5 | 06 | O3: planar row/word blits in the opening | T1 |
 | H0 | 07 | `Framebuffer` source plane (`Src` with image version, `set_src`, `copy_px`), set by `gfx::blit`/`blit_bitmap`, copied by `copy_pixel`/`copy_rect`/dissolve; record versions bumped by the shore merge; enabled by u6-web; source receipt | T4 |

@@ -89,11 +89,12 @@ impl Pacer {
     /// taken off until [`Pacer::ran`]. The frame counts from 0 to [`CAP_MS`] (what lies beyond
     /// goes to [`Pacer::clamped_ms`]; a time that is not finite counts 0), at the speed, or at 1×
     /// while `held` (a pointer button is down), at [`Speed::Max`] too. A press (`held` after a
-    /// frame without) is a change of mode: what was owed is forgotten, neither dropped nor
-    /// clamped, so the hold runs exactly its 1× steps. At [`Speed::Max`] with no button held:
-    /// [`MAX_STEPS`], nothing added or cut.
+    /// frame without) at any speed but 1× is a change of rate: what was owed is forgotten,
+    /// neither dropped nor clamped, so the hold runs exactly its 1× steps. At 1× the rate stays
+    /// and so does what was owed. At [`Speed::Max`] with no button held: [`MAX_STEPS`], nothing
+    /// added or cut.
     pub fn due(&mut self, wall_dt_ms: f64, held: bool) -> u32 {
-        if held && !self.held {
+        if held && !self.held && self.speed != Speed::Finite(1.0) {
             self.acc = 0.0;
         }
         self.held = held;
@@ -314,6 +315,38 @@ mod tests {
             q.ran(0);
             assert_eq!(q.dropped_ms(), 0.0, "{speed:?}: not behind");
             assert_eq!(n, 5, "{speed:?}: 100 ms at 1×");
+        }
+    }
+
+    /// At 1× a press changes no rate, so it forgets nothing: a step's remainder and a behind
+    /// host's debt stay owed, and presses on and off keep the count at `floor(T / 20)` ± 1.
+    #[test]
+    fn a_press_at_1x_keeps_what_is_owed() {
+        let mut p = Pacer::new();
+        assert_eq!(p.due(30.0, false), 1);
+        p.ran(1);
+        assert_eq!(p.due(5.0, true), 0, "the press");
+        assert_eq!(p.acc, 15.0, "the remainder kept through the press");
+        let mut q = Pacer::new();
+        q.due(250.0, false);
+        q.ran(0);
+        assert_eq!(q.due(0.0, true), 12, "the debt owed before the press");
+        assert_eq!((q.clamped_ms(), q.dropped_ms()), (0.0, 0.0));
+        const T: f64 = 10_000.0;
+        for frame in [1000.0 / 60.0, 1000.0 / 144.0, 7.0, 33.0f64] {
+            let mut p = Pacer::new();
+            let (mut t, mut steps) = (0.0, 0u64);
+            while t < T {
+                let dt = frame.min(T - t);
+                t += dt;
+                // Pressed 150 ms of every 400.
+                let n = p.due(dt, t % 400.0 < 150.0);
+                p.ran(n);
+                steps += u64::from(n);
+            }
+            let want = (T / f64::from(STEP_MS)).floor() as u64;
+            println!("1× with presses at {frame:.2} ms frames: {steps} steps, want {want}");
+            assert!(steps.abs_diff(want) <= 1, "{frame} ms: {steps} vs {want}");
         }
     }
 
