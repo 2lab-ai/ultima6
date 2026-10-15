@@ -124,3 +124,23 @@ Redeploy: main 2b4551b → production 8999b6ca; 765 tests (--profile gate), web 
 ## WU-P7b carried item closed 2026-10-15
 
 - "Panel keys inside `ui::wait::read_key` do nothing silently" was closed by inspection on main `3349a83`. read_key now dispatches inventory scroll, Ready/Unready, the spellbook page and containers (`crates/u6-core/src/ui/wait.rs:135-155`).
+
+## M2 round 5 — closed 2026-10-15
+
+Playback and walkstep merged into main `a99c2bf` and deployed to production `36aa4826` (https://ultima6.2lab.ai).
+
+| Unit | Branch | Result |
+|---|---|---|
+| playback | fix/m2r5-playback | merged `3ed544c` (head `800767e`). An action inside a more prompt (Ready, Unready, a trapped chest) plays its own lines and frames in place, while the outer print, its frames and the held newline are set aside and put back. Frames come due by printed marks (`present::printed_one`). The idle poll shows due frames in every wait (`show_recorded` removed). The idle-refresh quake plays in its prompt. PRINT_MS 22 (pooled 22.495 ms). Reviews: gpt6 ×4 and opus ×3 rounds, all APPROVE at the end. |
+| walkstep | fix/m2r5-walkstep | merged `a99c2bf` (head `b094f0b`). The step's own time is STEP_MS 24 plus FOLLOW_MS 41 when a follower is eligible. Constants are pooled from r4+r5. COMBAT_NPC_MS 46 is charged by the routine a worktype runs (`npc::runs_combat_routine`). Followers are checked with follow()'s own guards. Receipts: castle 34 vs 33, start fight 302 vs 277, quiet held walk 1/1/1/2/7 vs 1/1/1/2/6. Reviews: gpt6 + opus ×2 rounds, APPROVE. |
+
+Gates on `a99c2bf`:
+- fmt and clippy clean
+- `--profile gate`: 793 passed, 0 failed, 6 ignored
+- build-web: wasm 1,759,472 B
+- web 28/28
+- test_amifs, test_fight and test_trace pass
+- port_map clean
+
+Live check2 on preview `cf99e9f2` and on production: 10 requests, 0 foreign, 0 errors. Frames read by the dispatcher: menu, game start, walk into the start fight with wound lines, Journey Onward after reload.
+

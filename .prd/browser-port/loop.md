@@ -47,10 +47,11 @@ re-verified: G1 · gargoyles stand in the throne room in the M2 production frame
 | Unit | Branch | Scope | State |
 |---|---|---|---|
 | webpace | fix/m2r4-webpace | browser pace test flakes under load: expect cells from the delivered engine-time hold; 5+5 loaded runs | in flight |
-| playback | fix/m2r5-playback | nested playback scope: an inventory action inside a key wait (more prompt) prints its own lines and shows its own frames in place — trapped chest (ui/click.rs:295), ring flash from Ready/Unready; stale queue mark and stale capture of a deferred flash | in flight |
 | intake-budget | fix/m2r6-intake-budget | the intake's total output bounded (PP20 per-file only today; WU-P7b) | in flight |
 | zip-slice | fix/m2r6-zip-slice | a dropped zip is read by `Blob.slice` (central directory + wanted entries only), wasm ~192 MiB → measured | in flight |
-| walkstep | fix/m2r5-walkstep | a quiet keyboard step pays the 420 ms refresh only; measure the walk handler 0x11d4ee (~12 frames) and charge it there | in flight; also pooled r4+r5 trace constants, pick_ms worktype order, a combat-NPC world_turn fixture |
+
+Open items from the round-5 reviews:
+- The Pass command's followers' pass and vessel drift step are unpaced (`main_loop/commands.rs:400-402`). Trace the original's pass first (`tools/oracle/trace.mjs`), then charge it as walk.rs does.
 
 Open items carried from WU-P7b (assign in M2-int):
 - PP20 output is bounded per file (16 MiB) but not in aggregate (u6-intake).
