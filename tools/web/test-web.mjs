@@ -942,10 +942,9 @@ test('the mouse: a press held 300 ms on the map walks and yields; held through t
 
 // The original's fastest held walk: the shortest gap between two steps of one held press, 25
 // PAL frames (20 ms each), measured in the oracle with tools/oracle/pace.mjs (re/notes/oracle.md
-// §4; game-first disks, a press held three cells south, 6 boots: runs pace/run-b1..b6, the
-// shortest gap over all of them). The test's own figure, not the port's constant: no repeat
-// may come sooner than the original's did. The port's exact pace rule is pinned by the Rust
-// tests (ui/tests/pointer_tests.rs).
+// §4 "Held-walk pace", the table's Min over runs pace/run-b1..b6). The test's own figure, not
+// the port's constant: no repeat may come sooner than the original's did. The port's exact
+// pace rule is pinned by the Rust tests (ui/tests/pointer_tests.rs).
 const ORIGINAL_FASTEST_REPEAT_MS = 25 * 20;
 
 // Holds the left button at game pixel (x, y) from the prompt until the game ran `ms` on its
