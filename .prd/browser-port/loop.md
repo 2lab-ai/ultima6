@@ -46,6 +46,7 @@ re-verified: G1 · gargoyles stand in the throne room in the M2 production frame
 
 | Unit | Branch | Scope | State |
 |---|---|---|---|
+| web-flake | `fix/web-step-flake` | `tools/web` `stepSideways` threw "16 steps blocked in a row" in 2 of 17 runs on H0 code, at load 16–22: once at the worker's round 1, once in the dispatcher's merged gate (2026-10-16). It did not recur in 10 paired runs, 5 on main 0e7ebfa and 5 on the merged tree, up to load 29. Find out why the hero stays boxed in for 16 tries (seed from the clock? stale page state under load?), from a captured failure with counts only, and fix the test or the page | open, to dispatch after H1 starts |
 
 Open items carried from WU-P7b (assign in M2-int):
 
