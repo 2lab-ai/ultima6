@@ -199,8 +199,8 @@ fn median(v: &mut [u32]) -> u32 {
     }
 }
 
-/// What a wait of `ms` is for (the constants have distinct values in these runs, but a party
-/// step without followers takes as long as a message).
+/// What a wait of `ms` is for (the constants have distinct values, but a party step without
+/// followers may take as long as a message).
 fn what(ms: u16) -> &'static str {
     match ms {
         v if v == STEP_MS + FOLLOW_MS => "party step and its followers",

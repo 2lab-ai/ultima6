@@ -24,10 +24,12 @@ pub const AFTER_TURN_MS: u16 = 427;
 /// picks): 20 ms, 0.994 PAL frames, the world turn's time outside its NPC turns and refreshes
 /// over its picks (each NPC turn and the player's): 359 picks traced in the same runs.
 pub const PICK_MS: u16 = 20;
-/// [replaced] Engine milliseconds of an NPC turn that runs a combat worktype (3 to 0x7f: the
-/// party's combat modes, assault; [`turn_worktype`]) besides what it draws, prints and names:
-/// 46 ms, 2.278 PAL frames, the mean of 87 traced in the start fight's two runs (0.89..4.04). A
-/// turn in a schedule worktype (0x80 and up) takes 0.033 frames (n = 244) and waits nothing.
+/// [replaced] Engine milliseconds of an NPC turn that runs a combat routine (the worktype the
+/// turn runs, [`turn_worktype`], in [`npc::runs_combat_routine`]: the party's combat modes,
+/// assault, retreat) besides what it draws, prints and names: 46 ms, 2.278 PAL frames, the mean
+/// of 87 traced in the start fight's two runs (0.89..4.04), every one in a combat routine. The
+/// 244 other turns traced (all in schedule worktypes, 0x80 and up, none in 0x9a or 0x9b) took
+/// 0.033 frames: any turn outside a combat routine waits nothing.
 pub const COMBAT_NPC_MS: u16 = 46;
 
 fn healthy(s: &State, actor: usize) -> bool {
@@ -456,14 +458,14 @@ fn refill(s: &mut State) {
 }
 
 /// What the port waits at the pick of `actor` ([`PICK_MS`]), with [`COMBAT_NPC_MS`] more when
-/// an NPC turn (`npc`) runs a combat worktype: in a time stop, or on another level than the
+/// an NPC turn (`npc`) runs a combat routine: in a time stop, or on another level than the
 /// party, 0x1200b0 ends the turn at once (0x1200e8..0x120112, [`npc::npc_turn_sync`]) and no
 /// worktype takes its time. The worktype is the one the turn runs ([`turn_worktype`]), not the
 /// one the pick saw.
 fn pick_ms(s: &State, actor: usize, npc: bool) -> u16 {
     let runs =
         s.actors.timers[timer::TIME_STOP] == 0 && s.objects.location[actor].z == s.map.centre.z;
-    let fights = npc && runs && (3..0x80).contains(&turn_worktype(s, actor));
+    let fights = npc && runs && npc::runs_combat_routine(turn_worktype(s, actor));
     PICK_MS + if fights { COMBAT_NPC_MS } else { 0 }
 }
 
@@ -473,8 +475,8 @@ fn pick_ms(s: &State, actor: usize, npc: bool) -> u16 {
 /// [`super::leaves::uncharm`]), which gives it the party's worktype back: its combat mode in
 /// combat, else 1 (follow) in party mode or 0 in solo mode. Anyone else runs its own. Below 3
 /// (0 wait, 1 follow, 2 the player's character's, also the first combat mode a member can be
-/// set to: 0x1061de cycles them 2..8) the turn only spends its points (the default arm) and
-/// waits nothing; no traced turn began below 3.
+/// set to: 0x1061de cycles them 2..8) the turn only spends its points (the default arm), no
+/// combat routine; no traced turn began below 3.
 fn turn_worktype(s: &State, actor: usize) -> u8 {
     let member = s.actors.attrs.status[actor] & 0x80 != 0;
     if !member || s.objects.obj_status[actor] & 0x04 != 0 {
@@ -742,6 +744,34 @@ mod tests {
         s.actors.timers[timer::TIME_STOP] = 0;
         s.objects.location[10].z = 1;
         assert_eq!(pick_ms(&s, 10, true), PICK_MS, "another level");
+    }
+
+    #[test]
+    fn the_combat_charge_follows_the_routine_a_worktype_runs() {
+        // 0x1200b0's dispatch (0x120184..0x120248): the combat routines run for 3..=11, 13, 14,
+        // 0x13, 0x9a and 0x9b; 12 runs the wander of 0x8f, 15 and 16 the random walk of
+        // 0x8b..0x8e, 0x12 the arrest, 0x11 the default arm.
+        let fights = PICK_MS + COMBAT_NPC_MS;
+        let mut s = world(&[(6, 10)]);
+        for (wt, want) in [
+            (15, PICK_MS),
+            (0x9b, fights),
+            (3, fights),
+            (11, fights),
+            (13, fights),
+            (14, fights),
+            (0x13, fights),
+            (0x9a, fights),
+            (12, PICK_MS),
+            (16, PICK_MS),
+            (0x11, PICK_MS),
+            (0x12, PICK_MS),
+            (0x8b, PICK_MS),
+            (0x8f, PICK_MS),
+        ] {
+            s.actors.worktype[10] = wt;
+            assert_eq!(pick_ms(&s, 10, true), want, "worktype {wt:#x}");
+        }
     }
 
     #[test]

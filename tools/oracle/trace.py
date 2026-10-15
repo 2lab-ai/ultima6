@@ -18,6 +18,9 @@ WORLD_TURN, NPC_TURN, AFTER_TURN = 0x1213DE, 0x1200B0, 0x102F2A
 FLIGHT, HIT_FLASH, PRINTF, NAME = 0x132706, 0x1230CE, 0x108658, 0x10EEF8
 # The party step and the followers' pass it ends in.
 STEP, FOLLOW = 0x11D4EE, 0x11C910
+# The worktypes 0x1200b0 runs through a combat routine (its dispatch 0x120184..0x120248; the
+# port's actors/npc.rs runs_combat_routine): the NPC turns COMBAT_NPC_MS is the time of.
+COMBAT_ROUTINES = frozenset([*range(3, 12), 13, 14, 0x13, 0x9A, 0x9B])
 # Called inside an NPC turn and paid as costs of their own.
 OWN_COSTS = (FLIGHT, HIT_FLASH, PRINTF, NAME)
 # A name read or a step longer than this waited on the floppy (the boot's first name read loads
@@ -59,7 +62,7 @@ def inside(outer, c):
 
 def constants(steps):
     """Per constant, the statistics of its traced calls over `steps` (trace.json's steps)."""
-    out = {k: [] for k in ("refresh after a turn", "combat NPC turn", "schedule NPC turn",
+    out = {k: [] for k in ("refresh after a turn", "combat NPC turn", "other NPC turn",
                            "scheduler pick", "hit flash", "flight", "flight without a step",
                            "message", "object name", "party step", "follow",
                            "follow, no one to move")}
@@ -95,7 +98,7 @@ def constants(steps):
             for n in turns:
                 own = sum(c["frames"] for c in calls if c is not n and c["fn"] in OWN_COSTS
                           and c["depth"] == n["depth"] + 1 and inside(n, c))
-                key = "combat NPC turn" if n["worktype"] < 0x80 else "schedule NPC turn"
+                key = "combat NPC turn" if n["worktype"] in COMBAT_ROUTINES else "other NPC turn"
                 out[key].append(n["frames"] - own)
             pick_frames += world["frames"] - sum(c["frames"] for c in turns + refreshes)
             picks += len(turns) + 1
@@ -109,7 +112,7 @@ USES = {
     "refresh after a turn": ("actors/turn.rs AFTER_TURN_MS", "median"),
     "scheduler pick": ("actors/turn.rs PICK_MS", "mean"),
     "combat NPC turn": ("actors/turn.rs COMBAT_NPC_MS", "mean"),
-    "schedule NPC turn": ("(no wait)", "mean"),
+    "other NPC turn": ("(no wait)", "mean"),
     "hit flash": ("combat/present.rs FLASH_MS", "median"),
     "flight without a step": ("combat/present.rs RENDER_MS", "median"),
     "message": ("combat/present.rs PRINT_MS", "mean"),

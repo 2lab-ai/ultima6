@@ -29,21 +29,25 @@ pub const DY8: [i16; 8] = [-1, -1, 0, 1, 1, 1, 0, -1];
 /// engine clock instead.
 pub const STEP_MS: u16 = 24;
 /// [replaced] Engine milliseconds of the followers' pass 0x11c910 the step ends in, when it has
-/// members to move (in worktype 1, besides the leader): 41 ms, 2.065 PAL frames, the mean of
-/// the castle's 21 passes, 3 followers each (0.16..5.27). In the fight every member is in its
-/// combat mode and the pass took 0.049 frames (n = 7): no wait.
+/// members to move ([`super::party::has_followers`]): 41 ms, 2.065 PAL frames, the mean of the
+/// castle's 21 passes (0.16..5.27), traced with three followers only; the port pays it flat for
+/// one to three. In the fight every member is in its combat mode and the pass took 0.049
+/// frames (n = 7): no wait.
 pub const FOLLOW_MS: u16 = 41;
 
 /// Port: the walk command's step ([`super::party::player_step`], 0x11d4ee), then the time the
 /// original spends in it, on the engine clock: [`STEP_MS`], and [`FOLLOW_MS`] more when the
-/// followers' pass has members to move ([`follows`]). Only a step past its blocking tests waits
-/// (moved, or refused by 0x10c9d2 after the move was paid: both end in the followers' pass and
-/// the level test); a blocked or windless step returns before them, is not traced and waits
-/// nothing. Nothing is drawn meanwhile: the world turn's refresh draws the view the step left.
+/// followers' pass has members to move ([`super::party::has_followers`], asked after the
+/// step). Only a step past its blocking tests waits (moved, or refused by 0x10c9d2 after the
+/// move was paid: both end in the followers' pass and the level test); a blocked or windless
+/// step returns before them, is not traced and waits nothing. Nothing is drawn meanwhile: the
+/// world turn's refresh draws the view the step left. A line the step queues (the hiccup, the
+/// refused move's) plays after this wait, up to [`STEP_MS`] + [`FOLLOW_MS`] later than the
+/// original prints it.
 pub async fn paced_player_step(state: &RefCell<State>, io: &Io, dir: u16) -> StepResult {
     let result = super::party::player_step(&mut state.borrow_mut(), dir);
     if matches!(result, StepResult::Moved | StepResult::Mismatch) {
-        let follow = if follows(&state.borrow()) {
+        let follow = if super::party::has_followers(&state.borrow()) {
             FOLLOW_MS
         } else {
             0
@@ -51,21 +55,6 @@ pub async fn paced_player_step(state: &RefCell<State>, io: &Io, dir: u16) -> Ste
         crate::combat::present::pace(state, io, STEP_MS + follow).await;
     }
     result
-}
-
-/// Does the followers' pass 0x11c910 have members to move: not while a vessel carries the party
-/// (the leader index at the party size, its first test 0x11c91c..0x11c926; no vessel step was
-/// traced), and a member besides the leader in worktype 1 (what tools/oracle/trace.mjs counts at
-/// the pass's entry).
-fn follows(s: &State) -> bool {
-    let p = &s.actors.party;
-    if p.leader_index == p.size {
-        return false;
-    }
-    let leader = p.members.get(usize::from(p.leader_index)).copied();
-    p.members[..p.count()]
-        .iter()
-        .any(|&m| Some(m) != leader && s.actors.worktype[usize::from(m)] == 1)
 }
 
 pub(crate) fn flags1(s: &State, tile: u16) -> u8 {
@@ -797,6 +786,11 @@ pub(crate) mod tests {
             s.actors.worktype[2] = 3;
             s.actors.worktype[3] = 3;
         };
+        let asleep: fn(&mut State) = |s| {
+            // Both followers asleep (status 0x04): the pass passes them over.
+            s.actors.attrs.status[2] |= 0x04;
+            s.actors.attrs.status[3] |= 0x04;
+        };
         let blocked: fn(&mut State) = |s| {
             s.objects.location[9].y = 19;
             link_objects(s);
@@ -824,6 +818,13 @@ pub(crate) mod tests {
             (
                 "no one follows",
                 in_combat,
+                StepResult::Moved,
+                STEP_MS,
+                (20, 19),
+            ),
+            (
+                "the followers asleep",
+                asleep,
                 StepResult::Moved,
                 STEP_MS,
                 (20, 19),

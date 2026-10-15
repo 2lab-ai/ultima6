@@ -188,10 +188,10 @@ are not identical (§3), so r5 is a second sample, not a copy. PAL frames, CPU c
 | refresh after a turn 0x102f2a, view changed | median 21.375 (n 38) | median 21.336 (n 73, 19.86..23.98) | AFTER_TURN_MS 427 |
 | hit flash 0x1230ce | median 15.602 (n 18) | median 15.602 (n 38, 15.32..16.03) | FLASH_MS 312 |
 | flight 0x132706 with no step drawn | median 6.397 (n 27) | median 6.379 (n 57, 6.15..7.33) | RENDER_MS 128 |
-| printf 0x108658 | mean 1.185 (n 57) | mean 1.125 (n 128, 0.06..3.60) | PRINT_MS 22 (was 24) |
+| printf 0x108658 | mean 1.185 (n 57) | mean 1.125 (n 128, 0.06..3.60) | PRINT_MS pooled 22 — applied in present.rs by fix/m2r5-playback |
 | object name 0x10eef8 (the boot's first, 132.23 with the floppy, aside) | mean 1.294 (n 32) | mean 1.289 (n 70, 1.01..1.72) | NAME_MS 26 |
-| NPC turn 0x1200b0, own time, combat worktype | mean 2.338 (n 43) | mean 2.278 (n 87, 0.89..4.04) | COMBAT_NPC_MS 46 (was 47) |
-| the same, schedule worktype (0x80 and up) | mean 0.050 (n 122) | mean 0.033 (n 244) | no wait |
+| NPC turn 0x1200b0, own time, worktype in a combat routine (3..=11, 13, 14, 0x13, 0x9a, 0x9b) | mean 2.338 (n 43) | mean 2.278 (n 87, 0.89..4.04) | COMBAT_NPC_MS 46 (was 47) |
+| the same, any other worktype (all traced ones schedule worktypes, 0x80 and up) | mean 0.050 (n 122) | mean 0.033 (n 244) | no wait |
 | world turn outside NPC turns and refreshes, per pick | 0.994 (179 picks) | 0.994 (359 picks) | PICK_MS 20 |
 
 **The party step.** trace.mjs also traces the party step 0x11d4ee and the followers' pass it

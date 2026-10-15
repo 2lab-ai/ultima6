@@ -113,12 +113,24 @@ class TraceConstants(unittest.TestCase):
         self.assertEqual(c["refresh after a turn"]["n"], 1)
         self.assertAlmostEqual(c["refresh after a turn"]["median"], 21.0)
         self.assertAlmostEqual(c["combat NPC turn"]["mean"], 40.0 - 15.5 - 1.5)
-        self.assertAlmostEqual(c["schedule NPC turn"]["mean"], 0.02)
+        self.assertAlmostEqual(c["other NPC turn"]["mean"], 0.02)
         # Picks: the two NPC turns and the player's; outside them and the refreshes 100 -
         # 40 - 21 - 0.02 - 0 frames.
         self.assertAlmostEqual(c["scheduler pick"]["mean"], (100 - 40 - 21 - 0.02) / 3)
         self.assertAlmostEqual(c["hit flash"]["median"], 15.5)
         self.assertAlmostEqual(c["object name"]["mean"], 1.5)
+
+    def test_npc_turns_are_combat_ones_by_the_routine_their_worktype_runs(self):
+        # Worktypes 0x9b (assault, at 0x80 and up) and 0x13 run combat routines; 15 (a random
+        # walk) and 12 (a wander, below 0x80) do not.
+        calls = [call(0x1213DE, 0.0, 100.0, depth=0)]
+        for i, (wt, frames) in enumerate([(0x9B, 3.0), (0x13, 1.0), (15, 0.5), (12, 0.25)]):
+            calls.append(call(0x1200B0, 10.0 * (i + 1), frames, actor=10 + i, worktype=wt))
+        c = trace.constants([{"key": "UP", "read": 0, "prompt": 160, "calls": calls}])
+        self.assertEqual(c["combat NPC turn"]["n"], 2)
+        self.assertAlmostEqual(c["combat NPC turn"]["mean"], 2.0)
+        self.assertEqual(c["other NPC turn"]["n"], 2)
+        self.assertAlmostEqual(c["other NPC turn"]["mean"], 0.375)
 
     def test_a_party_step_pays_its_followers_pass_and_messages_apart(self):
         # A step of 6 frames whose followers' pass (3 members to move) takes 4 and a message
