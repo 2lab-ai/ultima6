@@ -5,7 +5,9 @@ captures only, no game data.
 Run: python3 -I -B tools/oracle/test_fight.py
 """
 import importlib.util
+import json
 import os
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -38,7 +40,7 @@ def step(before=5, turn=30, after=60, first=1000):
     return {"key": "UP", "pressedAt": first, "rows": rows}
 
 
-IMAGE = fight.Image([0] * len(fight.HUNKS), [0x100000])
+IMAGE = fight.Image([0] * len(fight.BASES), [0x100000], [0x100] * len(fight.BASES))
 
 
 class FramesOfStep(unittest.TestCase):
@@ -66,6 +68,21 @@ class FramesOfStep(unittest.TestCase):
     def test_a_capture_that_ends_before_the_prompt_settled_is_refused(self):
         with self.assertRaises(fight.Incomplete):
             fight.frames_of(step(after=59), IMAGE)
+
+    def test_hunk_lengths_come_from_the_json_when_its_bases_match(self):
+        # Synthetic lengths: the n-th hunk n * 0x10 + 8 bytes, its base given as int or hex.
+        segs = [{"base": b if i % 2 else f"0x{b:08x}", "size": i * 0x10 + 8}
+                for i, b in enumerate(fight.BASES)]
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "image.json")
+            with open(path, "w") as f:
+                json.dump({"segments": segs}, f)
+            self.assertEqual(fight.hunk_sizes(path), [i * 0x10 + 8 for i in range(len(segs))])
+            segs[3]["base"] = fight.BASES[3] + 8
+            with open(path, "w") as f:
+                json.dump({"segments": segs}, f)
+            with self.assertRaises(SystemExit):
+                fight.hunk_sizes(path)
 
     def test_runs_break_at_a_gap_in_frame_numbers(self):
         frames = [(1, "flight", [], False, False), (2, "flight", [], False, False),
@@ -102,6 +119,43 @@ class TraceConstants(unittest.TestCase):
         self.assertAlmostEqual(c["scheduler pick"]["mean"], (100 - 40 - 21 - 0.02) / 3)
         self.assertAlmostEqual(c["hit flash"]["median"], 15.5)
         self.assertAlmostEqual(c["object name"]["mean"], 1.5)
+
+
+def doc(keys, done, complete=True):
+    """A trace.json: the steps of the first `done` of `keys`, and its completion flag."""
+    steps = [{"key": k, "read": 0, "prompt": 100, "calls": []} for k in keys[:done]]
+    return {"bases": [0], "keys": keys, "steps": steps, "complete": complete}
+
+
+class TraceFile(unittest.TestCase):
+    def test_a_complete_run_gives_its_steps(self):
+        self.assertEqual(len(trace.steps_of(doc(["UP", "LEFT"], 2))), 2)
+
+    def test_a_run_written_before_its_end_is_refused(self):
+        with self.assertRaises(trace.Incomplete):
+            trace.steps_of(doc(["UP", "LEFT"], 1, complete=False))
+
+    def test_a_file_without_the_completion_flag_is_refused(self):
+        d = doc(["UP", "LEFT"], 2)
+        del d["complete"]
+        with self.assertRaises(trace.Incomplete):
+            trace.steps_of(d)
+
+    def test_a_complete_run_missing_a_step_is_refused(self):
+        with self.assertRaises(trace.Incomplete):
+            trace.steps_of(doc(["UP", "LEFT"], 1))
+
+    def test_steps_of_other_keys_are_refused(self):
+        d = doc(["UP", "LEFT"], 2)
+        d["steps"][1]["key"] = "RIGHT"
+        with self.assertRaises(trace.Incomplete):
+            trace.steps_of(d)
+
+    def test_a_file_without_its_keys_is_refused(self):
+        d = doc(["UP"], 1)
+        del d["keys"]
+        with self.assertRaises(trace.Incomplete):
+            trace.steps_of(d)
 
 
 if __name__ == "__main__":

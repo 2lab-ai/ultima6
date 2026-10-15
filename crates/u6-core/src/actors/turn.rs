@@ -6,7 +6,7 @@ use crate::engine::Io;
 use crate::state::State;
 
 use super::seams::{self, Arg};
-use super::{clock, leaves, npc, path, tail, walk};
+use super::{clock, leaves, npc, path, tail, timer, walk};
 
 /// Refills (clock minutes) without anyone able to act after which the scheduler yields to the
 /// host once (port checkpoint, spec 03 §1: a yield changes no game state).
@@ -47,7 +47,7 @@ fn centre_on(s: &mut State, i: usize) {
     s.map.centre.y = p.y;
 }
 
-/// Original: 0x121020 (actors: the Avatar has died: the darkness lines)
+/// Original: 0x121020 (actors: the hero has died: the darkness lines)
 ///
 /// Unless the leader index is 16: music off, the two lines with a full redraw between, then
 /// the resurrection 0x1095bc.
@@ -81,7 +81,7 @@ async fn raise_if_dead(state: &RefCell<State>, io: &Io) {
 /// Original: 0x121056 (party: leader and solo-mode bookkeeping per turn)
 ///
 /// With the leader index at the party size (a vehicle carries the party) actor 0 is cleaned
-/// up. A dead Avatar (actor 1) ends in [`darkness`]. In solo mode a leader who cannot act ends
+/// up. A dead hero (actor 1) ends in [`darkness`]. In solo mode a leader who cannot act ends
 /// it (0x104094). In party mode a leader who cannot act hands over to the first member who
 /// can; and member 0 takes the lead back from any other member once it can act (in combat the
 /// old leader returns to its combat worktype instead of following).
@@ -455,6 +455,17 @@ fn refill(s: &mut State) {
     }
 }
 
+/// What the port waits at the pick of `actor` ([`PICK_MS`]), with [`COMBAT_NPC_MS`] more when
+/// an NPC turn (`npc`) in a combat worktype runs: in a time stop, or on another level than the
+/// party, 0x1200b0 ends the turn at once (0x1200e8..0x120112, [`npc::npc_turn_sync`]) and no
+/// worktype takes its time.
+fn pick_ms(s: &State, actor: usize, npc: bool) -> u16 {
+    let runs =
+        s.actors.timers[timer::TIME_STOP] == 0 && s.objects.location[actor].z == s.map.centre.z;
+    let fights = npc && runs && s.actors.worktype[actor] < 0x80;
+    PICK_MS + if fights { COMBAT_NPC_MS } else { 0 }
+}
+
 /// Original: 0x1213de (actors: world turn: let NPCs act until the player's character is next)
 ///
 /// After the bookkeeping ([`leader_bookkeeping`], [`formation`], [`go_to_schedules`]), picks
@@ -465,9 +476,9 @@ fn refill(s: &mut State) {
 /// swallowed), after making it the leader if it is another party member.
 ///
 /// Port: the original draws as it goes and is as slow as that drawing; the port waits the
-/// measured time on the engine clock instead, at each pick ([`PICK_MS`], and [`COMBAT_NPC_MS`]
-/// before an NPC turn in a combat worktype) and before each refresh of a changed view
-/// ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile.
+/// measured time on the engine clock instead, at each pick ([`pick_ms`]: [`PICK_MS`], and
+/// [`COMBAT_NPC_MS`] before an NPC turn in a combat worktype that runs) and before each refresh
+/// of a changed view ([`AFTER_TURN_MS`]), so the old picture stays up meanwhile.
 pub async fn world_turn(state: &RefCell<State>, io: &Io) {
     leader_bookkeeping(&mut state.borrow_mut());
     raise_if_dead(state, io).await;
@@ -510,8 +521,7 @@ pub async fn world_turn(state: &RefCell<State>, io: &Io) {
         let held = swallowed(&mut state.borrow_mut(), actor);
         let wt = state.borrow().actors.worktype[a];
         let npc = !held && wt != 2 && wt != 1;
-        let fights = npc && wt < 0x80;
-        let ms = PICK_MS + if fights { COMBAT_NPC_MS } else { 0 };
+        let ms = pick_ms(&state.borrow(), a, npc);
         crate::combat::present::pace(state, io, ms).await;
         if !held {
             if npc {
@@ -695,6 +705,24 @@ mod tests {
     }
 
     #[test]
+    fn only_a_combat_npc_turn_that_runs_takes_combat_turn_time() {
+        // NPC 10 in a combat worktype (3) on the party's level.
+        let mut s = world(&[(6, 10)]);
+        s.actors.worktype[10] = 3;
+        let fights = PICK_MS + COMBAT_NPC_MS;
+        assert_eq!(pick_ms(&s, 10, true), fights, "the turn runs");
+        assert_eq!(pick_ms(&s, 10, false), PICK_MS, "not an NPC turn");
+        s.actors.worktype[10] = 0x90;
+        assert_eq!(pick_ms(&s, 10, true), PICK_MS, "a schedule worktype");
+        s.actors.worktype[10] = 3;
+        s.actors.timers[timer::TIME_STOP] = 5;
+        assert_eq!(pick_ms(&s, 10, true), PICK_MS, "time stop");
+        s.actors.timers[timer::TIME_STOP] = 0;
+        s.objects.location[10].z = 1;
+        assert_eq!(pick_ms(&s, 10, true), PICK_MS, "another level");
+    }
+
+    #[test]
     fn a_world_turn_waits_the_originals_time_at_any_host_tick() {
         // Spec 03 §1: the turn's waits (an NPC turn each, the refresh of the changed view) run
         // on the engine clock: the same time at 16 ms and 8 ms ticks and with polls of no time.
@@ -715,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_avatar_brings_the_darkness_once_per_bookkeeping() {
+    fn a_dead_hero_brings_the_darkness_once_per_bookkeeping() {
         let mut s = world(&[]);
         s.actors.attrs.status[1] = 0x90;
         s.gfx.window_shown = 0;
@@ -724,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_avatar_is_raised_before_the_world_turn_picks_again() {
+    fn a_dead_hero_is_raised_before_the_world_turn_picks_again() {
         let mut s = world(&[]);
         s.actors.attrs.status[1] = 0x90;
         s.actors.calendar.hour = 9;
@@ -734,9 +762,9 @@ mod tests {
         e.tick(&[], 16);
         let s = e.state();
         // The raise ran (bits reset, the view moved to the castle) before any pick; the
-        // Avatar of this bare world is not carried along, so the turn then idles.
+        // hero of this bare world is not carried along, so the turn then idles.
         assert!(!s.actors.work.resurrect_pending);
-        assert_eq!(s.actors.attrs.status[1] & 0x10, 0, "the Avatar lives again");
+        assert_eq!(s.actors.attrs.status[1] & 0x10, 0, "the hero lives again");
         assert_eq!((s.map.centre.x, s.map.centre.y), (0x133, 0x160));
     }
 

@@ -108,9 +108,6 @@ pub struct CombatState {
     pub due_ms: u64,
     /// Port-only: the engine time (ms) at which the last [`present::pace`] returned.
     pub paced_at_ms: u64,
-    /// Port-only: the shortest host tick (ms) of the current run of waits: the lateness
-    /// [`present::pace`] carries at most.
-    pub tick_ms: u64,
     /// Port-only: how many waits [`present::pace`] took of each length (ms), for receipts.
     pub paced: std::collections::BTreeMap<u16, u32>,
 }
@@ -135,7 +132,6 @@ impl Default for CombatState {
             said: Vec::new(),
             due_ms: 0,
             paced_at_ms: u64::MAX,
-            tick_ms: u64::MAX,
             paced: std::collections::BTreeMap::new(),
         }
     }

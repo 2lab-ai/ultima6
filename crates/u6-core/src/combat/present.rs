@@ -46,14 +46,14 @@ pub const FLIGHT_START_MS: u16 = RENDER_MS;
 /// [replaced] Time of one drawn step of a flight (the rounds up to it, the sprites saved and
 /// drawn, what lies over them, the rectangle copied, 0x151fe6): 46 ms, 2.31 PAL frames. A
 /// sampled estimate: fight.py's 525 frames over 227 changes of the view in the steps of the 40
-/// flights that drew any (no routine boundary to trace; the traced whole flights, median 11.8
-/// frames over 58, agree with start + steps + end).
+/// flights that drew any (no routine boundary to trace; the 51 whole flights traced in the start
+/// fight, 6.15..35.58 frames, carry no count of their steps to check it against).
 pub const FLIGHT_STEP_MS: u16 = 46;
 /// [replaced] Time of a view refresh with the window shown (0x102ef0: the animation tick, the
 /// window rendered by 0x102c90 and copied to the screen): 11 PAL frames. A sampled estimate:
 /// the median of the 40 flights whose CPU samples end in one (9..42, 29 of them 10 or 11); with
 /// the view flags before it, the traced refresh after a turn
-/// ([`crate::actors::turn::AFTER_TURN_MS`], 21.58).
+/// ([`crate::actors::turn::AFTER_TURN_MS`], 21.375).
 pub const REFRESH_MS: u16 = 11 * FRAME_MS;
 /// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 24 ms, 1.185
 /// PAL frames, the mean of 57 calls traced in the oracle (0.06..3.60, the ones that scroll the
@@ -70,7 +70,7 @@ pub const NAME_MS: u16 = 26;
 pub const DISSOLVE_MS: u16 = 3422;
 /// [replaced] Time of each window of the actor flash 0x132338 (the outlined actor presented
 /// dissolving, then the window without it, dissolving too): half of its 345.83 PAL frames, timed
-/// at the prompt on the Avatar (tools/oracle/timeit.mjs actor, the same on the CPU clock).
+/// at the prompt on the hero (tools/oracle/timeit.mjs actor, the same on the CPU clock).
 pub const ACTOR_FLASH_MS: u16 = 3458;
 /// The map window with its border, in screen pixels.
 const WINDOW: (usize, usize) = (176, 176);
@@ -79,16 +79,17 @@ const WINDOW: (usize, usize) = (176, 176);
 /// clock, and at least one display frame, so what was presented before is published.
 ///
 /// The waits of one run (nothing else waited in between) follow one schedule: each is due `ms`
-/// after the previous one was due, so what a wait loses to the host's tick the next one makes
-/// up, and the run takes the same engine time at any tick size. Lateness is carried at most one
-/// tick, the shortest the run has seen so far, applied anew at every frame of the wait: a host
-/// that stalls for one long tick (even the run's first) does not squeeze the waits after it.
-/// After anything else waited (a key, a prompt) the schedule starts again from now.
+/// after the previous one was due, so what a wait ends late on the host's tick the waits after
+/// it make up, and the run takes the same engine time at any tick size. No wait ends more than
+/// one tick early for it, the tick it ends on (judged anew at every frame of the wait), so a
+/// host that stalls for one long tick (even the run's first) squeezes no wait after it by more
+/// than a tick: the stall is made up a tick a wait. After anything else waited (a key, a
+/// prompt) the schedule starts again from now.
 pub async fn pace(state: &RefCell<State>, io: &Io, ms: u16) {
     let due = schedule(state, io, ms);
     loop {
-        let now = display_frame(state, io).await;
-        if now >= due.at(&state.borrow()) {
+        let (now, tick) = display_frame(io).await;
+        if now >= due.at(tick) {
             break;
         }
     }
@@ -105,13 +106,16 @@ struct Due {
 }
 
 impl Due {
-    /// When it is due with the run's shortest tick as the lateness carried.
-    fn at(&self, s: &State) -> u64 {
-        let from = match self.prev {
-            Some(p) => p.max(self.start.saturating_sub(s.combat.tick_ms)),
-            None => self.start,
-        };
-        from + u64::from(self.ms)
+    /// When it is due on the schedule: `ms` after the wait before it, or after it began.
+    fn on_schedule(&self) -> u64 {
+        self.prev.unwrap_or(self.start) + u64::from(self.ms)
+    }
+
+    /// When it may end at a frame that took `tick` ms: on the schedule, but not more than that
+    /// tick before its own `ms` are up.
+    fn at(&self, tick: u64) -> u64 {
+        let own = self.start + u64::from(self.ms);
+        self.on_schedule().max(own.saturating_sub(tick))
     }
 }
 
@@ -120,12 +124,7 @@ fn schedule(state: &RefCell<State>, io: &Io, ms: u16) -> Due {
     let mut s = state.borrow_mut();
     let now = io.now_ms();
     let c = &mut s.combat;
-    let prev = if now == c.paced_at_ms {
-        Some(c.due_ms)
-    } else {
-        c.tick_ms = u64::MAX;
-        None
-    };
+    let prev = (now == c.paced_at_ms).then_some(c.due_ms);
     *c.paced.entry(ms).or_default() += 1;
     Due {
         prev,
@@ -134,23 +133,20 @@ fn schedule(state: &RefCell<State>, io: &Io, ms: u16) -> Due {
     }
 }
 
-/// The end of a wait: the run goes on from when it was due.
+/// The end of a wait: the run goes on from when it was due on the schedule (what it ended late
+/// or early is the next waits' to make up).
 fn finish(state: &RefCell<State>, io: &Io, due: &Due) {
     let mut s = state.borrow_mut();
-    s.combat.due_ms = due.at(&s);
+    s.combat.due_ms = due.on_schedule();
     s.combat.paced_at_ms = io.now_ms();
 }
 
-/// One display frame of a paced wait: the engine time after it, the run's shortest tick kept.
-async fn display_frame(state: &RefCell<State>, io: &Io) -> u64 {
+/// One display frame of a paced wait: the engine time after it and the tick it took.
+async fn display_frame(io: &Io) -> (u64, u64) {
     let before = io.now_ms();
     io.vblank().await;
     let now = io.now_ms();
-    if now > before {
-        let t = &mut state.borrow_mut().combat.tick_ms;
-        *t = (*t).min(now - before);
-    }
-    now
+    (now, now - before)
 }
 
 /// One presented rectangle of the screen.
@@ -356,8 +352,8 @@ async fn reveal(state: &RefCell<State>, io: &Io, e: &Effect) {
     let render = u64::from(WINDOW_MS.min(e.cost));
     let mut done = 0;
     loop {
-        let now = display_frame(state, io).await;
-        let due = wait.at(&state.borrow());
+        let (now, tick) = display_frame(io).await;
+        let due = wait.at(tick);
         let begin = due - u64::from(e.cost) + render;
         let upto = if now >= due {
             order.len()

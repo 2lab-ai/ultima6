@@ -2,7 +2,7 @@
 every sampled frame down to what the game was doing, from the routine it was in and its
 callers (function starts = the REA dump file names, read at run time).
 
-usage: python3 -I -B fight.py [--dumps DIR] RUN/turns.json ...
+usage: python3 -I -B fight.py [--dumps DIR] [--image-json game.json] RUN/turns.json ...
 Prints per step the frames from the key taken to the prompt (and how many of them other tasks
 ran: the game waiting on the floppy), then the per-operation costs over all steps.
 """
@@ -15,20 +15,19 @@ import os
 import statistics
 
 DUMPS = "/Users/zhugehyuk/Games/ultima6/re/dumps/game"
+GAME_JSON = "/Users/zhugehyuk/Games/ultima6/re/game.json"
 
-# Image base and size of the 35 hunks (re/notes/game-layout.md); code hunks only are mapped.
-HUNKS = [
-    (0x100000, 0x1EB0), (0x101EB0, 0x3100), (0x104FB0, 0x3A28), (0x1089D8, 0x10DC),
-    (0x109AB8, 0x964), (0x10A420, 0x4C60), (0x10F080, 0x171C), (0x1107A0, 0x240),
-    (0x1109E0, 0x1BD4), (0x1125B8, 0x318), (0x1128D0, 0x2958), (0x115228, 0x5F94),
-    (0x11B1C0, 0x6944), (0x121B08, 0x5770), (0x127278, 0x113C), (0x1283B8, 0x4500),
-    (0x12C8B8, 0x4880), (0x131138, 0x1200), (0x132338, 0x2238), (0x134570, 0xF8),
-    (0x134668, 0x38), (0x1346A0, 0x868), (0x134F08, 0x680), (0x135588, 0x114B8),
-    (0x146A40, 0x7530), (0x14DF70, 0xF00), (0x14EE70, 0x454), (0x14F2C8, 0x2000),
-    (0x1512C8, 0x83C), (0x151B08, 0x3D4), (0x151EE0, 0x16F0), (0x1535D0, 0x4),
-    (0x1535D8, 0x118), (0x1536F0, 0xE7D8), (0x161EC8, 0x668),
+# Image base of each of the 35 hunks (re/notes/game-layout.md). Their lengths come from the hunk
+# headers at run time (tools/hunk2raw.py's JSON beside the image, `hunk_sizes`); code hunks only
+# are mapped.
+BASES = [
+    0x100000, 0x101EB0, 0x104FB0, 0x1089D8, 0x109AB8, 0x10A420, 0x10F080,
+    0x1107A0, 0x1109E0, 0x1125B8, 0x1128D0, 0x115228, 0x11B1C0, 0x121B08,
+    0x127278, 0x1283B8, 0x12C8B8, 0x131138, 0x132338, 0x134570, 0x134668,
+    0x1346A0, 0x134F08, 0x135588, 0x146A40, 0x14DF70, 0x14EE70, 0x14F2C8,
+    0x1512C8, 0x151B08, 0x151EE0, 0x1535D0, 0x1535D8, 0x1536F0, 0x161EC8,
 ]
-CODE = [i for i in range(len(HUNKS)) if i not in (6, 20, 23, 24, 25, 27, 28, 31, 33)]
+CODE = [i for i in range(len(BASES)) if i not in (6, 20, 23, 24, 25, 27, 28, 31, 33)]
 
 # What a frame was spent on: the first of these found among the routine and its callers.
 KINDS = [
@@ -50,16 +49,26 @@ def procedures(dumps):
     return sorted(int(f[:-5], 16) for f in os.listdir(dumps) if f.startswith("0x"))
 
 
+def hunk_sizes(path):
+    """Each hunk's length in memory, read from hunk2raw's JSON at `path`; refused unless its
+    hunks start at BASES."""
+    segs = json.load(open(path))["segments"]
+    num = lambda v: v if isinstance(v, int) else int(v, 16)  # noqa: E731
+    if [num(s["base"]) for s in segs] != BASES:
+        raise SystemExit(f"{path}: the hunks do not start where game-layout.md has them")
+    return [num(s["size"]) for s in segs]
+
+
 class Image:
-    def __init__(self, bases, procs):
-        self.bases, self.procs = bases, procs
+    def __init__(self, bases, procs, sizes):
+        self.bases, self.procs, self.sizes = bases, procs, sizes
 
     def function(self, addr):
         """The image function containing runtime address `addr`, or None outside the code."""
         for i in CODE:
-            base, size = self.bases[i], HUNKS[i][1]
+            base, size = self.bases[i], self.sizes[i]
             if base <= addr < base + size:
-                a = HUNKS[i][0] + addr - base
+                a = BASES[i] + addr - base
                 k = bisect.bisect_right(self.procs, a) - 1
                 return self.procs[k] if k >= 0 else None
         return None
@@ -171,14 +180,16 @@ def show(name, values):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--dumps", default=DUMPS)
+    ap.add_argument("--image-json", default=GAME_JSON)
     ap.add_argument("runs", nargs="+")
     a = ap.parse_args()
     procs = procedures(a.dumps)
+    sizes = hunk_sizes(a.image_json)
     totals, per_step = collections.Counter(), []
     cost = collections.defaultdict(list)
     for path in a.runs:
         d = json.load(open(path))
-        image = Image(d["bases"], procs)
+        image = Image(d["bases"], procs, sizes)
         for n, turn in enumerate(d["turns"]):
             try:
                 frames = frames_of(turn, image)
