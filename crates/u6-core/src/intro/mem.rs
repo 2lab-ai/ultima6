@@ -212,6 +212,53 @@ impl Chip {
             }
         }
     }
+
+    /// Runs `f` on at most `len` bytes from `src` on and the mutable bytes from `dst` on (as
+    /// [`Chip::bytes`] and [`Chip::bytes_mut`] give them). When both lie in one region the
+    /// source is a copy taken first, so `f` reads the bytes as they were before it wrote any.
+    fn with_split(&mut self, src: Ptr, dst: Ptr, len: usize, f: impl FnOnce(&[u8], &mut [u8])) {
+        if src.region == dst.region {
+            let s = self.bytes(src);
+            let s = s[..len.min(s.len())].to_vec();
+            f(&s, self.bytes_mut(dst));
+        } else if let Ok([s, d]) = self
+            .mem
+            .get_disjoint_mut([src.region.index(), dst.region.index()])
+        {
+            let s = s.get(src.offset as usize..).unwrap_or(&[]);
+            let o = (dst.offset as usize).min(d.len());
+            f(&s[..len.min(s.len())], &mut d[o..]);
+        }
+    }
+}
+
+/// At most `len` bytes of `src` from `at` on (empty past its end).
+fn row_at(src: &[u8], at: usize, len: usize) -> &[u8] {
+    src.get(at..).map_or(&[], |s| &s[..len.min(s.len())])
+}
+
+/// The 8 pixels of a plane row from pixel `x` on (bit 7 = pixel `x`); a pixel off the row is 0.
+fn bits_at(row: &[u8], x: i32) -> u8 {
+    let byte = |i: i32| {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| row.get(i))
+            .copied()
+            .unwrap_or(0)
+    };
+    let (i, s) = (x >> 3, (x & 7) as u32);
+    if s == 0 {
+        byte(i)
+    } else {
+        (byte(i) << s) | (byte(i + 1) >> (8 - s))
+    }
+}
+
+/// The bits of destination byte `bx` (pixels `8 bx .. 8 bx + 7`) that lie in pixels `x0..x1`.
+fn span_mask(bx: i32, x0: i32, x1: i32) -> u8 {
+    let lo = (x0 - 8 * bx).clamp(0, 8) as u32;
+    let hi = (x1 - 8 * bx).clamp(0, 8) as u32;
+    ((0xffu32 >> lo) & !(0xffu32 >> hi)) as u8
 }
 
 /// One item of a `.new` file as 0x1163fc reads it: the 10-byte header (words x0, x1, y0, y1,
@@ -288,7 +335,65 @@ pub fn draw_item(chip: &mut Chip, dst: &View, x: i16, y: i16, file: Ptr, index: 
 /// Where the mask bit is set, each destination plane takes the item's plane when its flag bit
 /// is set and is cleared when it is not; elsewhere the destination is kept. Nothing is drawn
 /// when the item starts at or below `ymax`, at or right of x = 320, or ends left of x = 0.
+///
+/// The port works on whole destination bytes (spec 06 O3): per row, each byte the item covers
+/// takes the item's mask shifted by `dx & 7` (two source bytes combined) and, in each plane,
+/// `(dst & !mask) | (plane & mask)`. Rows below y = 200 and bytes past the bitmap's region are
+/// left alone, as the per-pixel form's `Chip::set_pixel` left them.
 pub fn blit_masked(
+    chip: &mut Chip,
+    dst: Ptr,
+    item: Ptr,
+    h: &ItemHeader,
+    dx: i16,
+    dy: i16,
+    ymax: i16,
+) {
+    let row_bytes = h.row_bytes();
+    let width = (row_bytes * 8) as i32;
+    let (dx, dy, ymax) = (i32::from(dx), i32::from(dy), i32::from(ymax));
+    if dy >= ymax || dx + width < 0 || dx >= W {
+        return;
+    }
+    let plane_size = row_bytes * h.rows();
+    // Plane p's place among the stored planes; the mask follows the last of them.
+    let mut place = [None; 5];
+    let mut stored = 0;
+    for (p, at) in place.iter_mut().enumerate() {
+        if h.flags >> p & 1 != 0 {
+            *at = Some(stored);
+            stored += 1;
+        }
+    }
+    let (bx0, bx1) = (dx.max(0) >> 3, ((dx + width).min(W) - 1) >> 3);
+    let rows = dy.max(0)..(dy + h.rows() as i32).min(ymax).min(H);
+    chip.with_split(item.add(10), dst, (stored + 1) * plane_size, |src, d| {
+        // Row r of stored plane k (the mask is k = `stored`), cut at the region's end.
+        let row = move |k: usize, r: usize| row_at(src, k * plane_size + r * row_bytes, row_bytes);
+        for y in rows {
+            let r = (y - dy) as usize;
+            let mask = row(stored, r);
+            let planes = place.map(|k| k.map(|k| row(k, r)));
+            for bx in bx0..=bx1 {
+                let m = bits_at(mask, 8 * bx - dx);
+                if m == 0 {
+                    continue;
+                }
+                let at = y as usize * ROW + bx as usize;
+                for (p, plane) in planes.iter().enumerate() {
+                    if let Some(b) = d.get_mut(p * PLANE + at) {
+                        let v = plane.map_or(0, |plane| bits_at(plane, 8 * bx - dx));
+                        *b = (*b & !m) | (v & m);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// The per-pixel form of [`blit_masked`] it replaced, the reference of its equivalence tests.
+#[cfg(test)]
+pub(crate) fn blit_masked_ref(
     chip: &mut Chip,
     dst: Ptr,
     item: Ptr,
@@ -344,8 +449,62 @@ pub fn blit_masked(
 /// `and` set (the last argument) ANDs the source into the destination instead of copying, except
 /// in the aligned fast path (both x on a 16-pixel boundary and w a multiple of 16), which always
 /// copies.
+///
+/// The port works on whole destination bytes (spec 06 O3): per row and plane, each byte the
+/// rectangle covers takes the source row shifted by `(sx − dx) & 7` under the mask of the
+/// rectangle's columns. Every source byte is read before any destination byte is written (a
+/// source sharing the destination's region is read from a copy), source pixels off the bitmap
+/// read 0, and bytes past the destination's region are left alone.
 #[allow(clippy::too_many_arguments)]
 pub fn copy_rect(
+    chip: &mut Chip,
+    src: Ptr,
+    (sx, sy): (i16, i16),
+    (w, h): (i16, i16),
+    dst: Ptr,
+    (dx, dy): (i16, i16),
+    and: bool,
+) {
+    let fast = sx & 15 == 0 && dx & 15 == 0 && w & 15 == 0;
+    let and = and && !fast;
+    let (sx, sy, dx, dy) = (i32::from(sx), i32::from(sy), i32::from(dx), i32::from(dy));
+    // Only the part that lands on the destination bitmap changes anything, so the loops stop
+    // there: a rectangle as wide as a word allows costs no more than the screen.
+    let rows = (-dy).max(0)..i32::from(h).min(H - dy);
+    let (x0, x1) = (dx.max(0), (dx + i32::from(w)).min(W));
+    if rows.is_empty() || x0 >= x1 {
+        return;
+    }
+    chip.with_split(src, dst, SCREEN, |s, d| {
+        for r in rows {
+            let (ys, yd) = (sy + r, dy + r);
+            for p in 0..5 {
+                let row = if (0..H).contains(&ys) {
+                    row_at(s, p * PLANE + ys as usize * ROW, ROW)
+                } else {
+                    &[]
+                };
+                for bx in x0 >> 3..=(x1 - 1) >> 3 {
+                    let Some(b) = d.get_mut(p * PLANE + yd as usize * ROW + bx as usize) else {
+                        continue;
+                    };
+                    let m = span_mask(bx, x0, x1);
+                    let v = bits_at(row, 8 * bx + sx - dx);
+                    *b = if and {
+                        *b & (v | !m)
+                    } else {
+                        (*b & !m) | (v & m)
+                    };
+                }
+            }
+        }
+    });
+}
+
+/// The per-pixel form of [`copy_rect`] it replaced, the reference of its equivalence tests.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn copy_rect_ref(
     chip: &mut Chip,
     src: Ptr,
     (sx, sy): (i16, i16),
