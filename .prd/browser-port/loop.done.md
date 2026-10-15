@@ -80,3 +80,34 @@ main `aa145b8` (merge of port/main `0864d8b`): 323 tests, web tests 10/10. Produ
 `a549b08a`; https://ultima6.2lab.ai serves the corrected notice (party/solo listed under "not yet":
 the shipped state starts in combat mode and leaving combat is not ported). Live playthrough:
 requests 10, foreign 0, console errors 0.
+
+## Round 2 — closed 2026-10-15
+
+Milestone 2 shipped: main `624477d` (merge of integrate/m2 `093f583`), production deployment `332fdd9e`, https://ultima6.2lab.ai. Gates on 093f583: fmt/clippy clean, 762 tests (`--profile gate`), web 28/28, test_amifs + test_fight OK. Live check on production: 10 requests, 0 foreign, 0 console errors; frames read by the dispatcher (creation question screen, start fight at the oracle-measured pace, Journey Onward).
+
+Review rounds after M2-review: round 1 = 10 fix units (both engines re-reviewed, APPROVE); round 2 = web, usecmd, objects, sound, tests, state, flash, pace, intro; round 3/4 = ready, sound (first launch is a new process), tests (no game values in tests, strict output rule, `--profile gate`), pace (held-walk cadence on the engine clock, release/move ordering, bounded take), webrace, combat-pace (fight and effects on the engine clock from oracle traces: start fight 277 vs 301 PAL frames per step, castle 33 vs 31). Ledgers in the session scratchpad review/rr2 and review/rr3.
+
+## Round 2 — milestone 2 (rest of the game), dispatched 2026-10-14
+
+Base origin/port/main `6dce550`. One worktree per unit (`.worktrees/m2-<unit>`, branch `m2/<unit>`).
+`u` (intro executable) REA: 479 procedures, 317 strings, 479/479 decompiled (`~/Games/ultima6/re/dumps/u/`).
+
+| WU | Scope | State |
+|---|---|---|
+| M2-combat | hunk 13 + Attack + combat mode + NPC combat worktypes + missile effects | m2/combat `114621d`; 53 + 7 hunk-18 fns; 334 tests; gargoyle fight messages match oracle wording | done → M2-int-a |
+| M2-magic | hunk 11 + Cast + spellbook + reagents | m2/magic `4c4ba6f` + m2/magic2 `4814fc5`; all 22 remaining spell routines ported; 384 tests; 17 spell receipts | done → M2-int-b |
+| M2-objcmds | hunk 15 Look/Get/Drop/Move/doors/traps + eggs/monster spawn | m2/objcmds `5eea93a`; 339 tests; start frame 99.20% vs oracle (seed 0x1d3), 98.76% seed 0; Move-to-member partial | done → M2-int-a |
+| M2-usecmd | hunk 16 Use + per-object handlers | m2/usecmd `73300c7`; 53/59; 329 tests; 8 object kinds; duplicated 10 hunk-15 fns (dedupe in int) | done → M2-int-a |
+| M2-inventory | hunk 8 inventory/Ready/Unready + 0x128ce8 panel + hunk 14 Rest | m2/inventory `3227cc3`; 332 tests; inventory panel 100.00% vs oracle (Avatar + Dupre, controls 85.6%/86.0%); Rest 8 h receipt; Ready/Unready reachable only by click 0x10619c → M2-mouse | done → M2-int-b |
+| M2-saveload | Save/Restore, byte-compatible savegame, SaveStore trait | m2/saveload `ad43c95`; 333 tests; original's save loads in port, port re-save = original re-save except frame bits + 1 stack-garbage byte | done → M2-int-a |
+| M2-sound | MED player + Paula emulation (u6-audio) + music state | m2/sound `0f7958c`; 362 tests; start song = song 7 ULTIMA_Da; envelope vs oracle audio r 0.952, tempo drift +0.01 s / 7.5 s; host wiring (AudioDriver + AudioWorklet) + 4 commands.rs edits pending | done → M2-int-b |
+| M2-intro | `u`: intro, menu, character creation, hand-off | m2/intro `355253d` + m2/intro2 `59d1008`; 351 tests; opening (storm/stones/moongate), Introduction story, Transfer (U4 rost.bin / U5 saved.gam) ported; `u` port map 110 ported / 3 stubbed (music, local time); oracle intro unblocked by patching OwnBlitter/DisownBlitter (recipe ~/Games/ultima6/oracle/patch-intro2/) → static frames 100% vs original | done → M2-int-c |
+| M2-mouse+ui | pointer input, ui mouse subtree incl. 0x10619c, pointer sprite, remaining planned ui/gfx | m2/mouse `6cfc225`; 359 tests, web 11/11; whole click-only playthrough (talk, walk, inventory, Unready/Ready (14,2)↔(0,16)); turned flight sprites; sprite alignment vs oracle unverified | done → M2-int-c |
+| M2-int-a | merge combat+objcmds+saveload+usecmd, dedupe hunk 15, wire seams + commands.rs, ctrl keys | integrate/m2 `b324737`; 396 tests, web 11/11; Attack/B/Look/Get/Drop/Move/Use/Ctrl-S/Ctrl-R/overview live in the command loop; port map ported 357/599 | done |
+| M2-int-b | merge magic2+inventory+sound, wire Cast/Rest/sound, web IndexedDB saves + AudioWorklet | integrate/m2 `b312930`; 543 tests, web 14/14, port map ported 471/599 (gates re-run by dispatcher 2026-10-15); Light/Magic Arrow/Rest/inventory/save→reload frames read by dispatcher | done |
+| M2-int-intro | merge m2/intro2, run `u` first as the launcher does, persist a created character | int/intro `630777e`; launcher ultcli 0x100360 states read from asm (u → game → u on no character); 583 tests, web 16/16 (re-run by dispatcher); menu 100% vs oracle; create → reload → Journey Onward frames read by dispatcher | done |
+| M2-int-mouse | merge m2/mouse, reconcile pointer/sprite/fill/spellbook seams, first click = audio start + game click | int/mouse `561b10b`; trap seam RED→GREEN, sprite/fill to gfx, hail sprites ported; 565 tests, web 16/16 ×3; Look/walk/spellbook click frames read by dispatcher | done |
+| M2-int-c | dispatcher merges int/intro + int/mouse into integrate/m2 | integrate/m2 `4ab938d`; 605 tests, web 18/18 ×3 (dispatcher) | done |
+| M2-review | external merge-gate review, 10 modules × (gpt-6-astra + opus) | 20 reports; sound APPROVE ×2; 9 modules CHANGES: panics on malformed files/saves (sprite first_row, party size, actor tables by object slot, -1 slots), fishing BorrowMutError, held mouse button never yields (walk burst, y/n and more prompts freeze), intro TV loop, items lost on failed Animate/scatter/balloon/Codex, egg cursor, stale-session save race; ledger in the session scratchpad review/findings.md | done |
+| M2-fix | 10 fix units (`.worktrees/fix-<unit>`, branch `fix/m2-<unit>` from `4ab938d`): combat, state (actors+saveload), objects, magic, usecmd, inventory, sound, intro (+ intro music), mouse (+ 0x132338 shared seam), web; RED test per MUST-FIX | dispatched 2026-10-15 | in flight |
+| M2-ship | merge fix branches → gates → re-review of the fix diffs → main → preview → live check → production → live check | after M2-fix | next |
