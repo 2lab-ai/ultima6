@@ -104,5 +104,42 @@ class TraceConstants(unittest.TestCase):
         self.assertAlmostEqual(c["object name"]["mean"], 1.5)
 
 
+def doc(keys, done, complete=True):
+    """A trace.json: the steps of the first `done` of `keys`, and its completion flag."""
+    steps = [{"key": k, "read": 0, "prompt": 100, "calls": []} for k in keys[:done]]
+    return {"bases": [0], "keys": keys, "steps": steps, "complete": complete}
+
+
+class TraceFile(unittest.TestCase):
+    def test_a_complete_run_gives_its_steps(self):
+        self.assertEqual(len(trace.steps_of(doc(["UP", "LEFT"], 2))), 2)
+
+    def test_a_run_written_before_its_end_is_refused(self):
+        with self.assertRaises(trace.Incomplete):
+            trace.steps_of(doc(["UP", "LEFT"], 1, complete=False))
+
+    def test_a_file_without_the_completion_flag_is_refused(self):
+        d = doc(["UP", "LEFT"], 2)
+        del d["complete"]
+        with self.assertRaises(trace.Incomplete):
+            trace.steps_of(d)
+
+    def test_a_complete_run_missing_a_step_is_refused(self):
+        with self.assertRaises(trace.Incomplete):
+            trace.steps_of(doc(["UP", "LEFT"], 1))
+
+    def test_steps_of_other_keys_are_refused(self):
+        d = doc(["UP", "LEFT"], 2)
+        d["steps"][1]["key"] = "RIGHT"
+        with self.assertRaises(trace.Incomplete):
+            trace.steps_of(d)
+
+    def test_a_file_without_its_keys_is_refused(self):
+        d = doc(["UP"], 1)
+        del d["keys"]
+        with self.assertRaises(trace.Incomplete):
+            trace.steps_of(d)
+
+
 if __name__ == "__main__":
     unittest.main()

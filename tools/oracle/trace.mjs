@@ -6,7 +6,9 @@
 // one CPU sample per frame (counts and lengths).
 // usage: node trace.mjs OUTDIR SNAPSHOT [KEY ...]   (default UP RIGHT LEFT RIGHT LEFT RIGHT LEFT)
 //   env U6_FIGHT_SETUP=town: the town setup of fight.mjs (no fight) before the steps
-// Output: OUTDIR/trace.json ({steps: [{key, read, prompt, calls: [{fn, at, frames, depth}]}]}).
+// Output: OUTDIR/trace.json ({bases, keys, steps: [{key, read, prompt, calls: [{fn, at, frames,
+// depth}]}], complete}), written after every step; `complete` turns true only once every key's
+// step is in (trace.py refuses a file without it).
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
@@ -157,8 +159,10 @@ try {
     const by = {};
     for (const c of calls) (by[TRACED[c.fn]] ??= []).push(c.frames);
     log(`${key}: read ${read}, prompt ${done}: ${Object.entries(by).map(([k, v]) => `${k} ${v.length}× ${v.reduce((a, b) => a + b, 0).toFixed(1)}`).join(', ')}`);
-    writeFileSync(join(out, 'trace.json'), JSON.stringify({ bases, steps }, null, 1));
+    writeFileSync(join(out, 'trace.json'), JSON.stringify({ bases, keys: KEYS, steps, complete: false }, null, 1));
   }
+  writeFileSync(join(out, 'trace.json'), JSON.stringify({ bases, keys: KEYS, steps, complete: true }, null, 1));
+  log(`complete: ${steps.length} steps`);
 } finally {
   await o.close(h);
 }

@@ -2,7 +2,8 @@
 frames): what actors/turn.rs and combat/present.rs take, rebuilt from the oracle's data.
 
 usage: python3 -I -B trace.py RUN/trace.json ...
-Prints per constant n, median, mean and range in PAL frames, and the ms (20 a frame) the port
+Refuses a file of a run that did not finish (trace.mjs writes after every step and marks the
+file complete only once every key's step is in). Prints per constant n, median, mean and range in PAL frames, and the ms (20 a frame) the port
 uses: the median where one call is one cost, the mean where the port pays one cost per call of
 a varying routine (messages, names, NPC turns, picks).
 """
@@ -18,6 +19,21 @@ OWN_COSTS = (FLIGHT, HIT_FLASH, PRINTF, NAME)
 # A name read longer than this loaded look.lzd from the floppy (the boot's first): not a cost
 # the port pays.
 FLOPPY_NAME = 20.0
+
+
+class Incomplete(Exception):
+    """A trace.json of a run that did not trace every one of its keys."""
+
+
+def steps_of(doc):
+    """The steps of a trace.json `doc`, refused (Incomplete) unless the run marked it complete
+    with one step per key, in the keys' order."""
+    if doc.get("complete") is not True:
+        raise Incomplete("not marked complete: the run stopped before its last step")
+    keys, steps = doc.get("keys"), doc.get("steps", [])
+    if not isinstance(keys, list) or [s.get("key") for s in steps] != keys:
+        raise Incomplete(f"{len(steps)} steps for {len(keys or [])} keys: not one step per key")
+    return steps
 
 
 def stats(values):
@@ -91,7 +107,10 @@ def main():
         raise SystemExit(__doc__)
     steps = []
     for path in sys.argv[1:]:
-        steps += json.load(open(path))["steps"]
+        try:
+            steps += steps_of(json.load(open(path)))
+        except Incomplete as e:
+            raise SystemExit(f"{path}: {e}") from None
     for k, v in constants(steps).items():
         use, how = USES[k]
         if not v.get("n"):
