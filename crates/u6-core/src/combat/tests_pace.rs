@@ -16,7 +16,7 @@ use super::present::{
     self, ACTOR_FLASH_MS, DISSOLVE_MS, FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, NAME_MS,
     PRINT_MS, REFRESH_MS, RENDER_MS,
 };
-use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, PICK_MS};
+use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, MINUTE_MS, PICK_MS, SETUP_MS};
 use crate::engine::{Engine, Io};
 use crate::files::Files;
 use crate::magic::WINDOW_FLASH_MS;
@@ -263,9 +263,14 @@ fn running_combat_npcs() -> State {
 
 #[test]
 fn combat_npc_turns_that_run_take_their_turn_time_at_any_tick() {
-    // Three picks (the two NPCs, then the player after the refill), a combat NPC turn for each
-    // NPC, and the one refresh of the view the turn started with changed.
-    let want = 3 * u64::from(PICK_MS) + 2 * u64::from(COMBAT_NPC_MS) + u64::from(AFTER_TURN_MS);
+    // The world turn's setup, three picks (the two NPCs, then the player after the refill), a
+    // combat NPC turn for each NPC, the refill's clock minute with its pass, and the one
+    // refresh of the view the turn started with changed.
+    let want = u64::from(SETUP_MS)
+        + 4 * u64::from(PICK_MS)
+        + u64::from(MINUTE_MS)
+        + 2 * u64::from(COMBAT_NPC_MS)
+        + u64::from(AFTER_TURN_MS);
     same_at_any_tick(
         "running combat NPC turns",
         want,
@@ -285,10 +290,11 @@ fn combat_npc_turns_that_run_take_their_turn_time_at_any_tick() {
 
 #[test]
 fn combat_npc_turns_lost_to_a_time_stop_take_no_turn_time_at_any_tick() {
-    // Three picks (the two NPCs, then the player) and the one refresh of the view the turn
-    // started with changed. The NPC turns end at once (0x1200e8..0x120112: no worktype runs),
-    // so no combat NPC turn time.
-    let want = 3 * u64::from(PICK_MS) + u64::from(AFTER_TURN_MS);
+    // The world turn's setup, three picks (the two NPCs, then the player), the pass after the
+    // refill and the one refresh of the view the turn started with changed. The NPC turns end
+    // at once (0x1200e8..0x120112: no worktype runs), so no combat NPC turn time, and the
+    // refill's minute only counts the time stop down (no minute's time).
+    let want = u64::from(SETUP_MS) + 4 * u64::from(PICK_MS) + u64::from(AFTER_TURN_MS);
     same_at_any_tick(
         "time-stopped NPC turns",
         want,

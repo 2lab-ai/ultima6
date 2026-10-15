@@ -504,6 +504,17 @@ fn guard_post(s: &mut State, actor: u16, tx: u16, ty: u16) {
 /// movement points did not change pays 10, so every turn makes progress.
 pub async fn npc_turn(state: &RefCell<State>, io: &Io, actor: u16) {
     let started = npc_turn_sync(&mut state.borrow_mut(), actor);
+    npc_turn_rest(state, io, actor, started).await;
+}
+
+/// [`npc_turn`] after [`npc_turn_sync`] returned `started` (apart, so the world turn can wait what
+/// it owes before what the turn shows).
+pub(crate) async fn npc_turn_rest(
+    state: &RefCell<State>,
+    io: &Io,
+    actor: u16,
+    started: Option<(i8, Wait)>,
+) {
     crate::combat::play_effects(state, io).await;
     let Some((before, wait)) = started else {
         return;

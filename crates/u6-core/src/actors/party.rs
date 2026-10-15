@@ -286,6 +286,8 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
         }
     }
     if s.actors.work.step_blocked != 0 {
+        // 0x11d800..0x11d856, then 0x11db6e: the centre back on the leader and out; no points
+        // spent, no message, no followers' pass, no level test.
         let p = s.objects.location[li];
         s.map.centre.x = p.x;
         s.map.centre.y = p.y;

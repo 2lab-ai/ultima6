@@ -3,11 +3,19 @@ frames): what actors/turn.rs, actors/walk.rs and combat/present.rs take, rebuilt
 oracle's data.
 
 usage: python3 -I -B trace.py RUN/trace.json ...
-Refuses a file of a run that did not finish (trace.mjs writes after every step and marks the
-file complete only once every key's step is in), and a followers' pass without its count of
-followers. Prints per constant n, median, mean and range in PAL frames, and the ms (20 a frame)
-the port uses: the median where one call is one cost, the mean where the port pays one cost per
-call of a varying routine (messages, names, NPC turns, picks, steps, followers' passes).
+Refuses (fails closed on) a file of a run that did not finish (trace.mjs writes after every step
+and marks the file complete only once every key's step is in), an NPC turn without `combat`, a
+followers' pass without its count of followers, one outside a party step without its D1 (Pass's
+is strict), Pass's pass with members to move without `moved`, a blocked step without the frame
+its prompt came back or a party step of it without `spent`, and a world turn whose setup was
+traced in a run that does not say whether it is the first since the boot (`fresh`). Prints per
+constant n, median, mean and range in PAL frames, and the ms (20 a frame) the port uses: the
+median where one call is one cost, the mean where the port pays one cost per call of a varying
+routine (messages, names, NPC turns, picks, steps, followers' passes). A party step that returned
+before its followers' pass (blocked: no followers' pass inside it) is counted apart from the
+steps that reached it, with the key-to-prompt frames of its command and in how many of them the
+leader's points were spent. The files hold no value read from the game (spec 01 §Rights):
+trace.mjs writes what it compared as booleans and counts.
 """
 
 import json
@@ -18,9 +26,11 @@ WORLD_TURN, NPC_TURN, AFTER_TURN = 0x1213DE, 0x1200B0, 0x102F2A
 FLIGHT, HIT_FLASH, PRINTF, NAME = 0x132706, 0x1230CE, 0x108658, 0x10EEF8
 # The party step and the followers' pass it ends in.
 STEP, FOLLOW = 0x11D4EE, 0x11C910
-# The worktypes 0x1200b0 runs through a combat routine (its dispatch 0x120184..0x120248; the
-# port's actors/npc.rs runs_combat_routine): the NPC turns COMBAT_NPC_MS is the time of.
-COMBAT_ROUTINES = frozenset([*range(3, 12), 13, 14, 0x13, 0x9A, 0x9B])
+# The world turn's setup before its first pick: 0x121056 (called again after each NPC turn),
+# 0x120b64, then 0x120a1c, whose return ends it; and the clock minute 0x10368a it advances after
+# refilling everyone's points when no one near has any left.
+SETUP_END, MINUTE = 0x120A1C, 0x10368A
+
 # Called inside an NPC turn and paid as costs of their own.
 OWN_COSTS = (FLIGHT, HIT_FLASH, PRINTF, NAME)
 # A name read or a step longer than this waited on the floppy (the boot's first name read loads
@@ -35,12 +45,17 @@ class Incomplete(Exception):
 
 def steps_of(doc):
     """The steps of a trace.json `doc`, refused (Incomplete) unless the run marked it complete
-    with one step per key, in the keys' order."""
+    with one step per key, in the keys' order. Each step gets `since_boot`: whether its world
+    turn is the first since the boot (the first step of a `fresh` run), None for the first step
+    of a run that does not say."""
     if doc.get("complete") is not True:
         raise Incomplete("not marked complete: the run stopped before its last step")
     keys, steps = doc.get("keys"), doc.get("steps", [])
     if not isinstance(keys, list) or [s.get("key") for s in steps] != keys:
         raise Incomplete(f"{len(steps)} steps for {len(keys or [])} keys: not one step per key")
+    fresh = doc.get("fresh")
+    for i, s in enumerate(steps):
+        s["since_boot"] = (fresh if isinstance(fresh, bool) else None) if i == 0 else False
     return steps
 
 
@@ -60,15 +75,59 @@ def inside(outer, c):
     return outer["at"] <= c["at"] and c["at"] + c["frames"] <= outer["at"] + outer["frames"]
 
 
+def nested(outer, calls, fn):
+    """The calls of `fn` one level inside `outer`."""
+    return [c for c in calls if c["fn"] == fn and c["depth"] == outer["depth"] + 1
+            and inside(outer, c)]
+
+
+def flag(c, name, what):
+    """Boolean field `name` of call `c`, refused (Incomplete) when it is not one: `what` says
+    which call lacked it."""
+    v = c.get(name)
+    if not isinstance(v, bool):
+        raise Incomplete(f"{what} without `{name}`")
+    return v
+
+
+def strict_pass(c, calls):
+    """Whether followers' pass `c` is Pass's strict one (D1 = 1, 0x104c0a) rather than a party
+    step's (D1 = 0). A trace without D1 (before trace.mjs recorded it) only had the steps' passes:
+    one inside a party step is a step's; one outside, there, is refused."""
+    if c.get("strict") is not None:
+        return bool(c["strict"])
+    if any(s["fn"] == STEP and s["depth"] == c["depth"] - 1 and inside(s, c) for s in calls):
+        return False
+    raise Incomplete("a followers' pass outside a party step without its D1")
+
+
 def constants(steps):
-    """Per constant, the statistics of its traced calls over `steps` (trace.json's steps)."""
+    """Per constant, the statistics of its traced calls over `steps` (trace.json's steps), and
+    under "blocked steps" what the steps whose party step was blocked spent and ran."""
     out = {k: [] for k in ("refresh after a turn", "combat NPC turn", "other NPC turn",
-                           "scheduler pick", "hit flash", "flight", "flight without a step",
-                           "message", "object name", "party step", "follow",
-                           "follow, no one to move")}
+                           "world turn setup", "clock minute", "hit flash", "flight", "flight without a step",
+                           "message", "object name", "party step", "party step, blocked",
+                           "follow", "follow, no one to move", "follow, Pass, moved",
+                           "follow, Pass, none moved", "follow, Pass, no one to move",
+                           "blocked step, world turn", "blocked step, key to prompt")}
+    blocked = {"steps": 0, "party steps": 0, "points spent": 0, "NPC turns": 0}
     pick_frames = picks = 0.0
+    pass_frames = passes = 0.0
     for s in steps:
         calls = s["calls"]
+        party_steps = [c for c in calls if c["fn"] == STEP]
+        if party_steps and not any(nested(c, calls, FOLLOW) for c in party_steps):
+            # Every party step of the command returned before its followers' pass.
+            if s.get("back") is None:
+                raise Incomplete("a blocked step without the frame its prompt came back")
+            blocked["steps"] += 1
+            out["blocked step, key to prompt"].append(s["back"] - s["read"])
+            for c in party_steps:
+                blocked["party steps"] += 1
+                blocked["points spent"] += flag(c, "spent", "a blocked step's party step")
+            for w in (c for c in calls if c["fn"] == WORLD_TURN):
+                out["blocked step, world turn"].append(w["frames"])
+                blocked["NPC turns"] += len(nested(w, calls, NPC_TURN))
         for c in calls:
             if c["fn"] == AFTER_TURN and c["frames"] > 1:
                 out["refresh after a turn"].append(c["frames"])
@@ -87,30 +146,69 @@ def constants(steps):
                 own = sum(x["frames"] for x in calls if x is not c
                           and x["fn"] in (FOLLOW, *OWN_COSTS)
                           and x["depth"] == c["depth"] + 1 and inside(c, x))
-                out["party step"].append(c["frames"] - own)
+                key = "party step" if nested(c, calls, FOLLOW) else "party step, blocked"
+                out[key].append(c["frames"] - own)
             elif c["fn"] == FOLLOW:
                 if c.get("followers") is None:
                     raise Incomplete("a followers' pass without its count of followers")
-                out["follow" if c["followers"] else "follow, no one to move"].append(c["frames"])
+                if not strict_pass(c, calls):
+                    out["follow" if c["followers"] else "follow, no one to move"].append(
+                        c["frames"])
+                elif not c["followers"]:
+                    out["follow, Pass, no one to move"].append(c["frames"])
+                else:
+                    moved = flag(c, "moved", "Pass's followers' pass")
+                    out["follow, Pass, moved" if moved else "follow, Pass, none moved"].append(
+                        c["frames"])
         for world in (c for c in calls if c["fn"] == WORLD_TURN):
             turns = [c for c in calls if c["fn"] == NPC_TURN and inside(world, c)]
             refreshes = [c for c in calls if c["fn"] == AFTER_TURN and inside(world, c)]
             for n in turns:
                 own = sum(c["frames"] for c in calls if c is not n and c["fn"] in OWN_COSTS
                           and c["depth"] == n["depth"] + 1 and inside(n, c))
-                key = "combat NPC turn" if n["worktype"] in COMBAT_ROUTINES else "other NPC turn"
-                out[key].append(n["frames"] - own)
+                combat = flag(n, "combat", "an NPC turn")
+                out["combat NPC turn" if combat else "other NPC turn"].append(n["frames"] - own)
             pick_frames += world["frames"] - sum(c["frames"] for c in turns + refreshes)
             picks += len(turns) + 1
+            # With its setup traced: the setup (entry to 0x120a1c's return) and the clock
+            # minutes apart; the rest over the passes over the actors, one a pick (each NPC turn
+            # and the player's) and one after each minute's refill.
+            top = [c for c in calls if c["depth"] == world["depth"] + 1 and inside(world, c)]
+            ends = [c for c in top if c["fn"] == SETUP_END]
+            if ends:
+                setup = ends[0]["at"] + ends[0]["frames"] - world["at"]
+                first = s.get("since_boot")
+                if first is None:
+                    raise Incomplete("a traced setup in a run that does not say it is fresh")
+                # The first world turn since the boot is a one-off (the start fight's took 8.71
+                # frames in both runs, 0x120a1c alone 8.08): out of the setup's cost, still
+                # out of the turn's passes.
+                if not first:
+                    out["world turn setup"].append(setup)
+                minutes = [c for c in top if c["fn"] == MINUTE]
+                for m in minutes:
+                    # Its own time: the date line it prints is paid apart.
+                    own = sum(c["frames"] for c in calls if c["fn"] in OWN_COSTS
+                              and c["depth"] == m["depth"] + 1 and inside(m, c))
+                    out["clock minute"].append(m["frames"] - own)
+                parts = sum(c["frames"] for c in top if c["fn"] in (NPC_TURN, AFTER_TURN, MINUTE))
+                pass_frames += world["frames"] - setup - parts
+                passes += len(turns) + 1 + len(minutes)
     res = {k: stats(v) for k, v in out.items()}
-    res["scheduler pick"] = {"n": int(picks), "mean": pick_frames / picks if picks else 0.0}
+    res["scheduler pick, setup and minutes in"] = {
+        "n": int(picks), "mean": pick_frames / picks if picks else 0.0}
+    res["scheduler pass"] = {"n": int(passes), "mean": pass_frames / passes if passes else 0.0}
+    res["blocked steps"] = blocked
     return res
 
 
 # The constant each line feeds, and whether the port pays the median or the mean.
 USES = {
     "refresh after a turn": ("actors/turn.rs AFTER_TURN_MS", "median"),
-    "scheduler pick": ("actors/turn.rs PICK_MS", "mean"),
+    "world turn setup": ("actors/turn.rs SETUP_MS", "mean"),
+    "clock minute": ("actors/turn.rs MINUTE_MS", "mean"),
+    "scheduler pass": ("actors/turn.rs PICK_MS", "mean"),
+    "scheduler pick, setup and minutes in": ("(check: the old PICK_MS)", "mean"),
     "combat NPC turn": ("actors/turn.rs COMBAT_NPC_MS", "mean"),
     "other NPC turn": ("(no wait)", "mean"),
     "hit flash": ("combat/present.rs FLASH_MS", "median"),
@@ -118,8 +216,14 @@ USES = {
     "message": ("combat/present.rs PRINT_MS", "mean"),
     "object name": ("combat/present.rs NAME_MS", "mean"),
     "party step": ("actors/walk.rs STEP_MS", "mean"),
+    "party step, blocked": ("(no wait)", "mean"),
     "follow": ("actors/walk.rs FOLLOW_MS", "mean"),
     "follow, no one to move": ("(no wait)", "mean"),
+    "follow, Pass, moved": ("actors/walk.rs PASS_MOVED_MS", "mean"),
+    "follow, Pass, none moved": ("actors/walk.rs PASS_STILL_MS", "mean"),
+    "follow, Pass, no one to move": ("(no wait)", "mean"),
+    "blocked step, world turn": ("(check: actors/turn.rs SETUP_MS + PICK_MS)", "mean"),
+    "blocked step, key to prompt": ("(check: the frame counter's, actors/walk.rs tests)", "mean"),
     "flight": ("(start + steps + end; check only)", "median"),
 }
 
@@ -135,7 +239,9 @@ def main():
         except Incomplete as e:
             raise SystemExit(f"{path}: {e}") from None
         steps += run
-    for k, v in constants(steps).items():
+    res = constants(steps)
+    blocked = res.pop("blocked steps")
+    for k, v in res.items():
         use, how = USES[k]
         if not v.get("n"):
             print(f"{k}: no calls")
@@ -143,6 +249,10 @@ def main():
         val = v[how]
         rng = f", {v['min']:.2f}..{v['max']:.2f}" if "min" in v else ""
         print(f"{k}: n {v['n']}, {how} {val:.3f} frames{rng} -> {round(val * 20)} ms ({use})")
+    if blocked["steps"]:
+        print(f"blocked steps: {blocked['steps']}; the leader's points spent in "
+              f"{blocked['points spent']} of their {blocked['party steps']} party steps; NPC "
+              f"turns in their world turns {blocked['NPC turns']}")
 
 
 if __name__ == "__main__":

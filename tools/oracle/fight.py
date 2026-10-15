@@ -91,7 +91,35 @@ def kind(chain):
 
 
 class Incomplete(Exception):
-    """A capture that does not hold every emulated frame of a step."""
+    """A capture that does not hold every emulated frame of a step, or a row outside the
+    contract of fight.mjs's rows."""
+
+
+def is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def row_ok(r):
+    """A fight.mjs row as written since 2026-10-16 (spec 01 §Rights): [frame, reading, frames
+    skipped, view changed, scroll changed, panel changed, actors moved, actors hurt, sample,
+    centre changed]: integers, booleans and counts, the sample None or [kind, pc, usp, a5,
+    [[offset, address], ...]] (the emulated CPU's addresses). Nothing else: no picture hash,
+    no centre, no actor list."""
+    if not isinstance(r, list) or len(r) != 10:
+        return False
+    frame, reading, gap, view, scroll, panel, moved, hurt, sample, centre = r
+    if not all(is_int(v) for v in (frame, reading, gap, moved, hurt)):
+        return False
+    if not all(isinstance(v, bool) for v in (view, scroll, panel, centre)):
+        return False
+    if sample is None:
+        return True
+    if not isinstance(sample, list) or len(sample) != 5 or not isinstance(sample[0], str):
+        return False
+    words = sample[4]
+    return (all(is_int(v) for v in sample[1:4]) and isinstance(words, list)
+            and all(isinstance(w, list) and len(w) == 2 and all(is_int(v) for v in w)
+                    for w in words))
 
 
 def frames_of(turn, image):
@@ -100,10 +128,14 @@ def frames_of(turn, image):
 
     Raises Incomplete unless the capture holds every emulated frame from before the key was
     taken (a row with the command loop still reading) through the turn to 60 frames of the
-    prompt after it, one row each, none skipped."""
+    prompt after it, one row each, none skipped, every row in fight.mjs's contract
+    (`row_ok`: booleans and counts, no hash, centre or actor list; spec 01 §Rights)."""
     rows = turn["rows"]
     if not rows:
         raise Incomplete(f"step {turn['key']}: no rows")
+    bad = sum(1 for r in rows if not row_ok(r))
+    if bad:
+        raise Incomplete(f"step {turn['key']}: {bad} rows outside fight.mjs's row contract")
     ids = [r[0] for r in rows]
     if ids != list(range(ids[0], ids[0] + len(ids))) or any(r[2] for r in rows):
         raise Incomplete(f"step {turn['key']}: frames {ids[0]}..{ids[-1]} not all captured")
@@ -120,11 +152,11 @@ def frames_of(turn, image):
         r[8][2] >> 12 for r in rows if r[8] and image.function(r[8][1]) is not None
     )
     page = pages.most_common(1)[0][0] if pages else None
-    out, pv, pm = [], None, None
+    out = []
     for r in rows:
-        vch = pv is not None and r[3] != pv
-        mch = pm is not None and r[4] != pm
-        pv, pm = r[3], r[4]
+        # The view and the scroll changed against the frame before (fight.mjs compares them in
+        # the emulator; the step's first row is false).
+        vch, mch = r[3], r[4]
         if not lo <= r[0] <= hi:
             continue
         s = r[8]

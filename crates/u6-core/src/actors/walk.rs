@@ -34,16 +34,36 @@ pub const STEP_MS: u16 = 24;
 /// one to three. In the fight every member is in its combat mode and the pass took 0.049
 /// frames (n = 7): no wait.
 pub const FOLLOW_MS: u16 = 41;
+/// [replaced] Engine milliseconds of Pass's followers' pass (0x11c910 with D1 = 1, called by
+/// the command loop at 0x104c0a) when it has members to move ([`super::party::has_followers`])
+/// and moves one or more of them back to their spots: 95 ms, 4.773 PAL frames to the nearest
+/// ms, the mean of the 14 such passes traced in the castle without the fight, three followers at
+/// each (1.72..5.41: after a step, or the first two of a run of Passes; 6 runs of 7 keys, Pass
+/// repeated and Pass after a step, `pace/trace-town-pass-q1`..`q6`; tools/oracle/trace.mjs on the
+/// CPU clock, tools/oracle/trace.py "follow, Pass, moved").
+pub const PASS_MOVED_MS: u16 = 95;
+/// [replaced] The same pass when no member moves (all on their spots): 4 ms, 0.192 PAL frames,
+/// the mean of the other 19 traced (0.16..0.48; trace.py "follow, Pass, none moved"). With no
+/// member to move at all (in a fight every member is in its combat mode) it waits nothing, as
+/// the step's pass with no one to move.
+///
+/// The unit tests (`pass_waits_the_originals_followers_pass_at_any_host_tick`) pin which of the
+/// two a Pass pays, not their values; the values are pinned by trace.py's reduction of the
+/// `q1`..`q6` traces recorded in re/notes/oracle.md §E (14 and 19 passes, the means above).
+pub const PASS_STILL_MS: u16 = 4;
 
 /// Port: the walk command's step ([`super::party::player_step`], 0x11d4ee), then the time the
 /// original spends in it, on the engine clock: [`STEP_MS`], and [`FOLLOW_MS`] more when the
 /// followers' pass has members to move ([`super::party::has_followers`], asked after the
 /// step). Only a step past its blocking tests waits (moved, or refused by 0x10c9d2 after the
-/// move was paid: both end in the followers' pass and the level test); a blocked or windless
-/// step returns before them, is not traced and waits nothing. Nothing is drawn meanwhile: the
-/// world turn's refresh draws the view the step left. A line the step queues (the hiccup, the
-/// refused move's) plays after this wait, up to [`STEP_MS`] + [`FOLLOW_MS`] later than the
-/// original prints it.
+/// move was paid: both end in the followers' pass and the level test). A blocked step returns
+/// before them and waits nothing: traced, it took 0.082 PAL frames (n 12, 0.06..0.37; the
+/// castle, tools/oracle/trace.py "party step, blocked") with the leader's points unchanged, and
+/// the command's world turn then picked the leader again at once (its setup and one pass, no
+/// NPC turn, the view unchanged: the next key read 1 to 2 frames after the key). A windless step was not
+/// traced and waits nothing. Nothing is drawn meanwhile: the world turn's refresh draws the view
+/// the step left. A line the step queues (the hiccup, the refused move's) plays after this
+/// wait, up to [`STEP_MS`] + [`FOLLOW_MS`] later than the original prints it.
 pub async fn paced_player_step(state: &RefCell<State>, io: &Io, dir: u16) -> StepResult {
     let result = super::party::player_step(&mut state.borrow_mut(), dir);
     if matches!(result, StepResult::Moved | StepResult::Mismatch) {
@@ -55,6 +75,32 @@ pub async fn paced_player_step(state: &RefCell<State>, io: &Io, dir: u16) -> Ste
         crate::combat::present::pace(state, io, STEP_MS + follow).await;
     }
     result
+}
+
+/// Port: Pass's followers' pass ([`super::party::follow`] strict, 0x11c910 with D1 = 1 from
+/// 0x104c0a) behind `leader`, then its time on the engine clock when the pass has members to
+/// move ([`super::party::has_followers`], asked after it, as for the step): [`PASS_MOVED_MS`]
+/// when a member stands elsewhere after it, [`PASS_STILL_MS`] when none does; nothing when it
+/// has none to move (aboard a vessel the pass returns at its first test and no one is counted).
+/// Nothing is drawn meanwhile: the world turn's refresh draws the view it left.
+pub async fn paced_pass_follow(state: &RefCell<State>, io: &Io, leader: u16) {
+    let places = |s: &State| {
+        let p = &s.actors.party;
+        p.members[..p.count()]
+            .iter()
+            .map(|&m| s.objects.location[usize::from(m)])
+            .collect::<Vec<_>>()
+    };
+    let before = places(&state.borrow());
+    super::party::follow(&mut state.borrow_mut(), leader, true);
+    let ms = {
+        let s = state.borrow();
+        let moved = places(&s) != before;
+        super::party::has_followers(&s).then_some(if moved { PASS_MOVED_MS } else { PASS_STILL_MS })
+    };
+    if let Some(ms) = ms {
+        crate::combat::present::pace(state, io, ms).await;
+    }
 }
 
 pub(crate) fn flags1(s: &State, tile: u16) -> u8 {
@@ -754,11 +800,16 @@ pub(crate) mod tests {
     /// of `tick` ms with `zeros` polls of no time after each: the engine time it took and the
     /// state after it.
     fn walk_ms(s: State, tick: u32, zeros: usize) -> (u64, State) {
+        command_ms(s, 0x80, tick, zeros)
+    }
+
+    /// Command `code` through the command loop's dispatch on `s`, as [`walk_ms`].
+    fn command_ms(s: State, code: u16, tick: u32, zeros: usize) -> (u64, State) {
         let done = Rc::new(Cell::new(None));
         let out = Rc::clone(&done);
         let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
             let t0 = io.now_ms();
-            crate::main_loop::commands::dispatch(&st, &io, 0x80).await;
+            crate::main_loop::commands::dispatch(&st, &io, code).await;
             out.set(Some(io.now_ms() - t0));
         });
         for _ in 0..10_000 {
@@ -781,20 +832,9 @@ pub(crate) mod tests {
         // (counted here: the step, its followers' pass when someone follows) and where the
         // leader ends.
         let follow_on: fn(&mut State) = |_| {};
-        let in_combat: fn(&mut State) = |s| {
-            // The members in a combat worktype: the pass has no one to move.
-            s.actors.worktype[2] = 3;
-            s.actors.worktype[3] = 3;
-        };
-        let asleep: fn(&mut State) = |s| {
-            // Both followers asleep (status 0x04): the pass passes them over.
-            s.actors.attrs.status[2] |= 0x04;
-            s.actors.attrs.status[3] |= 0x04;
-        };
-        let blocked: fn(&mut State) = |s| {
-            s.objects.location[9].y = 19;
-            link_objects(s);
-        };
+        let in_combat: fn(&mut State) = members_in_combat;
+        let asleep: fn(&mut State) = members_asleep;
+        let blocked: fn(&mut State) = npc_ahead;
         let unlinked: fn(&mut State) = |s| {
             // The leader linked into the list at a tile before its own, so the move's walk of
             // the list from its tile finds no predecessor and the move is refused after the
@@ -857,6 +897,140 @@ pub(crate) mod tests {
                     "{name}: {ms} ms at {tick} ms ticks ({zeros} zero polls), want {want}"
                 );
             }
+        }
+    }
+
+    /// The members of [`column`] in a combat worktype: a followers' pass has no one to move.
+    fn members_in_combat(s: &mut State) {
+        s.actors.worktype[2] = 3;
+        s.actors.worktype[3] = 3;
+    }
+
+    /// Both followers of [`column`] asleep (status 0x04): a followers' pass passes them over.
+    fn members_asleep(s: &mut State) {
+        s.actors.attrs.status[2] |= 0x04;
+        s.actors.attrs.status[3] |= 0x04;
+    }
+
+    /// NPC 9 of [`column`] moved to (20, 19), the tile north of the leader.
+    fn npc_ahead(s: &mut State) {
+        s.objects.location[9].y = 19;
+        link_objects(s);
+    }
+
+    #[test]
+    fn pass_waits_the_originals_followers_pass_at_any_host_tick() {
+        // Pass (the space key's code) on the column: the leader's points spent, then its
+        // followers' strict pass (0x11c910 with D1 = 1). Each case: the setup, what it costs
+        // (counted here: the pass's time when it has members to move, by whether one moves;
+        // none when no one is eligible), whether a member moved, and where member 3 ends.
+        let in_line: fn(&mut State) = |_| {};
+        let off_spot: fn(&mut State) = |s| {
+            // Member 3 beside member 2 but a tile east of its spot (20, 22): only a strict
+            // pass walks it back.
+            s.objects.location[3].x = 21;
+            link_objects(s);
+        };
+        let cases = [
+            (
+                "two followers in line",
+                in_line,
+                PASS_STILL_MS,
+                false,
+                (20, 22),
+            ),
+            (
+                "a follower off its spot",
+                off_spot,
+                PASS_MOVED_MS,
+                true,
+                (20, 22),
+            ),
+            ("no one follows", members_in_combat, 0, false, (20, 22)),
+            ("the followers asleep", members_asleep, 0, false, (20, 22)),
+        ];
+        for (name, setup, want, moves, at) in cases {
+            let mut s = column();
+            setup(&mut s);
+            let want = u64::from(want);
+            for (tick, zeros) in [(16, 0), (7, 0), (16, 3)] {
+                let (ms, after) = command_ms(s.clone(), 0x20, tick, zeros);
+                assert_eq!(after.actors.mp(1), 0, "{name}: the leader's points spent");
+                let moved = [2, 3]
+                    .iter()
+                    .any(|&m| after.objects.location[m] != s.objects.location[m]);
+                assert_eq!(moved, moves, "{name}: a member moved");
+                let p = after.objects.location[3];
+                assert_eq!((p.x, p.y), at, "{name}: where member 3 ends");
+                assert!(
+                    ms >= want && ms <= want + u64::from(tick),
+                    "{name}: {ms} ms at {tick} ms ticks ({zeros} zero polls), want {want}"
+                );
+            }
+        }
+    }
+
+    /// The command loop on `s` (with the test text layer and the up arrow on its raw key) fed
+    /// the up arrow at host ticks of `tick` ms with `zeros` polls of no time after each: the
+    /// engine time from the key taken (the loop's reading flag cleared) to the next key read
+    /// (set again), and the state then.
+    fn up_to_prompt_ms(mut s: State, tick: u32, zeros: usize) -> (u64, State) {
+        use crate::engine::{InputEvent, Key};
+        s.ui = crate::main_loop::test_support::test_ui();
+        s.ui.tables.keymap[0x4c] = [0x148; 4];
+        let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+            crate::main_loop::commands::command_loop(&st, &io).await;
+        });
+        let run = |e: &mut Engine, input: &[InputEvent]| {
+            e.tick(input, tick);
+            for _ in 0..zeros {
+                e.tick(&[], 0);
+            }
+        };
+        run(&mut e, &[]);
+        assert_eq!(e.state().main.reading, 1, "the loop waits for a key");
+        run(&mut e, &[InputEvent::Key(Key::Up)]);
+        let mut taken = None;
+        for _ in 0..1000 {
+            let reading = e.state().main.reading;
+            match (taken, reading) {
+                (None, 0) => taken = Some(e.io().now_ms()),
+                (Some(t0), 1) => return (e.io().now_ms() - t0, e.state().clone()),
+                _ => {}
+            }
+            run(&mut e, &[]);
+        }
+        panic!("no next key read (key taken: {taken:?})");
+    }
+
+    /// A step into an occupied tile (0x11d4ee's blocked branch, 0x11d800..0x11d856: the centre
+    /// back on the leader, no points spent, no message, no followers' pass) and its turn
+    /// (0x1048dc, the end of turn 0x104d98: the world turn 0x1213de, which picks the leader
+    /// again at once). The oracle (tools/oracle/trace.mjs, the castle without the fight, 12
+    /// steps north into a tile that is not enterable): the leader's points unchanged, a world
+    /// turn of one pick and no NPC turn (1.13..1.72 frames), the next key read 1 to 2 PAL
+    /// frames after the key (mean 1.667, by the frame counter). The port: the world turn's setup
+    /// and one pass (no step wait, no refresh: the view did not change) and nothing else.
+    #[test]
+    fn a_blocked_step_takes_one_pick_and_keeps_the_leaders_points() {
+        // The traced key-to-prompt bound, in engine ms (20 a PAL frame).
+        let (lo, hi) = (20, 40);
+        let want = u64::from(super::super::turn::SETUP_MS + super::super::turn::PICK_MS);
+        assert!((lo..=hi).contains(&want), "one pick within 1..2 frames");
+        let mut s = column();
+        npc_ahead(&mut s);
+        for (tick, zeros) in [(16, 0), (7, 0), (16, 3)] {
+            let (ms, after) = up_to_prompt_ms(s.clone(), tick, zeros);
+            let p = after.objects.location[1];
+            assert_eq!((p.x, p.y), (20, 20), "the leader stays");
+            assert_eq!(after.actors.mp(1), 30, "the leader's points unchanged");
+            for m in [2, 3] {
+                assert_eq!(after.actors.mp(m), 30, "member {m} did not follow");
+            }
+            assert!(
+                ms >= want && ms <= want + u64::from(tick),
+                "{ms} ms at {tick} ms ticks ({zeros} zero polls), want {want}"
+            );
         }
     }
 

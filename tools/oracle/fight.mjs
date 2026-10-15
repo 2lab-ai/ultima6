@@ -1,8 +1,8 @@
 // Fight pace of the original: boot the game-first floppies (as pace.mjs), take party steps in
-// the start fight and record every emulated frame: the command loop's reading flag, the view
-// centre, hashes of the map view, the message scroll and the party panel, the actors that moved
-// or lost hit points, and a CPU sample (where the game is and who called it), so each frame of a
-// turn can be put down to what the game was doing (fight.py).
+// the start fight and record every emulated frame: the command loop's reading flag, whether the
+// view centre, the map view, the message scroll and the party panel changed, how many actors
+// moved or changed hit points, and a CPU sample (where the game is and who called it), so each
+// frame of a turn can be put down to what the game was doing (fight.py).
 // usage: node fight.mjs OUTDIR [KEY ...]   keys = lib.mjs KEY names, one party step each
 //                                          (default UP RIGHT LEFT RIGHT LEFT RIGHT LEFT)
 //   env U6_FIGHT_SNAPSHOT=file  start from a snapshot fight.mjs saved instead of booting
@@ -30,10 +30,15 @@ const log = (s) => { appendFileSync(LOG, `${new Date().toISOString()} ${s}\n`); 
 
 // In-page recorder, after every emulated frame: the key of the step goes down at a frame
 // boundary and up once the game has taken it (reading cleared) or after 50 frames; then one row
-// [frame, reading, frames skipped, view hash, message hash, panel hash, actors moved,
-// [actor, hp before, hp after], sample, centre]. sample = [kind, pc, usp, a5, code words on the
-// user stack from usp up: [offset, address]]; kind U = the CPU was in user mode, SU = the VBlank
-// interrupt had just taken it from user mode (pc from the exception frame), SS / S? otherwise.
+// [frame, reading, frames skipped, view changed, messages changed, panel changed, actors moved,
+// actors hurt, sample, centre changed]: the three picture regions and the view centre against
+// the frame before (false in a step's first row), how many actors stand elsewhere and how many
+// have other hit points than the frame before. Spec 01 §Rights: the pictures' hashes, the
+// places, the hit points and the centre are compared here and never written, only these
+// booleans and counts. sample = [kind, pc, usp, a5, code words on the user stack from usp up:
+// [offset, address]] (the emulated CPU's addresses); kind U = the CPU was in user mode, SU = the
+// VBlank interrupt had just taken it from user mode (pc from the exception frame), SS / S?
+// otherwise.
 async function installRecorder(page, a4, bases) {
   await page.evaluate(([a4, bases, code]) => {
     const P = (a) => (Module._wasm_peek16(a) << 16) >> 16;
@@ -49,7 +54,7 @@ async function installRecorder(page, a4, bases) {
       return h >>> 0;
     };
     const inCode = (a) => code.some((i) => a >= bases[i] && a < bases[i] + 0x7000);
-    let prevLoc = null, prevHp = null, stack = null, stackLo = 0, lastUsp = 0;
+    let prevLoc = null, prevHp = null, prevPics = null, stack = null, stackLo = 0, lastUsp = 0;
     const hook = () => {
       const now = f();
       if (now === last) return;
@@ -88,15 +93,20 @@ async function installRecorder(page, a4, bases) {
       const loc = new Uint8Array(768), hp = new Uint8Array(256);
       for (let i = 0; i < 768; i++) loc[i] = Module._wasm_peek(bases[23] + i);
       for (let i = 0; i < 256; i++) hp[i] = Module._wasm_peek(a4 + 0x460c + i);
-      const moved = [], hurt = [];
+      let moved = 0, hurt = 0;
       if (prevLoc) {
         for (let a = 0; a < 256; a++) {
-          if ([0, 1, 2].some((j) => loc[3 * a + j] !== prevLoc[3 * a + j])) moved.push(a);
-          if (hp[a] !== prevHp[a]) hurt.push([a, prevHp[a], hp[a]]);
+          if ([0, 1, 2].some((j) => loc[3 * a + j] !== prevLoc[3 * a + j])) moved++;
+          if (hp[a] !== prevHp[a]) hurt++;
         }
       }
       prevLoc = loc; prevHp = hp;
-      R.rows.push([now, reading, gap, hash(0, 0, 176, 176), hash(176, 112, 312, 192), hash(176, 8, 312, 104), moved, hurt, sample, [P(a4 - 0x7b78), P(a4 - 0x7b76)]]);
+      // View, messages, panel, centre: changed against the frame before, within the step.
+      const pics = [hash(0, 0, 176, 176), hash(176, 112, 312, 192), hash(176, 8, 312, 104), `${P(a4 - 0x7b78)},${P(a4 - 0x7b76)}`];
+      const first = R.rows.length === 0;
+      const ch = pics.map((v, i) => !first && prevPics !== null && v !== prevPics[i]);
+      prevPics = pics;
+      R.rows.push([now, reading, gap, ch[0], ch[1], ch[2], moved, hurt, sample, ch[3]]);
     };
     for (const k of ['_wasm_draw_one_frame', '_wasm_execute']) {
       const orig = Module[k];
@@ -138,7 +148,7 @@ try {
   }
   const bases = await hunkBases(page, log);
   const a4 = bases[33] + 0x8000;
-  log(`hunk bases ${bases.map((b) => b.toString(16)).join(',')}; A4 ${a4.toString(16)}; centre ${await o.peekW(page, a4 - 0x7b78)},${await o.peekW(page, a4 - 0x7b76)}`);
+  log(`hunk bases ${bases.map((b) => b.toString(16)).join(',')}; A4 ${a4.toString(16)}`);
   if (process.env.U6_FIGHT_SETUP === 'town') log(`town: ${await townSetup(page, bases, a4)}`);
   await page.evaluate(() => wasm_retro_shell('debugger'));
   await o.waitFrames(page, 3);

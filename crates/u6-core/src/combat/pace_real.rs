@@ -14,10 +14,11 @@ use u6_intake::{InputFile, intake};
 use u6_testkit::Quiet;
 
 use super::present::{
-    FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, FRAME_MS, NAME_MS, PRINT_MS, REFRESH_MS,
+    ACTOR_FLASH_MS, DISSOLVE_MS, FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, FRAME_MS, NAME_MS,
+    PRINT_MS, REFRESH_MS, WINDOW_MS,
 };
-use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, PICK_MS};
-use crate::actors::walk::{FOLLOW_MS, STEP_MS};
+use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, MINUTE_MS, PICK_MS, SETUP_MS};
+use crate::actors::walk::{FOLLOW_MS, PASS_MOVED_MS, PASS_STILL_MS, STEP_MS};
 use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
 use crate::pacer::STEP_MS as HOST_STEP_MS;
@@ -201,24 +202,86 @@ fn median(v: &mut [u32]) -> u32 {
     }
 }
 
-/// What a wait of `ms` is for (the constants have distinct values, but a party step without
-/// followers may take as long as a message).
+/// What a wait of `ms` is for: a named constant, or a world-turn wait with passes. The world
+/// turn pays its passes ([`PICK_MS`] each, shorter than a frame) with its next wait
+/// (actors/turn.rs `world_turn`): a combat NPC turn's, a clock minute's, a refresh's, or its
+/// setup's at the end; such a wait is named by that one, with passes (a run of passes alone is
+/// never a wait). A wait that is more than one of these (a combat NPC turn with 12 passes is as
+/// long as a window render) is "ambiguous", not one of them picked.
 fn what(ms: u16) -> &'static str {
-    match ms {
-        v if v == STEP_MS + FOLLOW_MS => "party step and its followers",
-        v if v == STEP_MS && v == PRINT_MS => "message or party step",
-        v if v == STEP_MS => "party step",
-        AFTER_TURN_MS => "refresh after a turn",
-        PICK_MS => "scheduler pick",
-        v if v == PICK_MS + COMBAT_NPC_MS => "pick + combat NPC turn",
-        NAME_MS => "object name",
-        FLASH_MS => "hit flash",
-        FLIGHT_START_MS => "flight start",
-        FLIGHT_STEP_MS => "flight step",
-        REFRESH_MS => "refresh (flight end)",
-        PRINT_MS => "message",
-        _ => "other",
+    let passes =
+        |base: u16, least: u16| ms >= base + least * PICK_MS && (ms - base).is_multiple_of(PICK_MS);
+    let named = [
+        (STEP_MS + FOLLOW_MS, "party step and its followers"),
+        (STEP_MS, "party step"),
+        (NAME_MS, "object name"),
+        (FLASH_MS, "hit flash"),
+        (FLIGHT_START_MS, "flight start"),
+        (FLIGHT_STEP_MS, "flight step"),
+        (REFRESH_MS, "refresh (flight end)"),
+        (PRINT_MS, "message"),
+        (WINDOW_MS, "window render"),
+        (DISSOLVE_MS, "dissolving window"),
+        (ACTOR_FLASH_MS, "actor flash"),
+        (PASS_MOVED_MS, "Pass's followers, moved"),
+        (PASS_STILL_MS, "Pass's followers, none moved"),
+    ];
+    let sums = [
+        (
+            passes(AFTER_TURN_MS, 0),
+            "refresh after a turn, with passes",
+        ),
+        (passes(MINUTE_MS, 1), "clock minute, with passes"),
+        (passes(COMBAT_NPC_MS, 1), "combat NPC turn, with passes"),
+        (passes(SETUP_MS, 1), "turn setup, with passes"),
+    ];
+    let mut found = named
+        .iter()
+        .filter(|&&(v, _)| v == ms)
+        .map(|&(_, name)| name)
+        .chain(sums.iter().filter(|&&(hit, _)| hit).map(|&(_, name)| name));
+    match (found.next(), found.next()) {
+        (Some(name), None) => name,
+        (Some(_), Some(_)) => "ambiguous",
+        (None, _) => "other",
     }
+}
+
+#[test]
+fn a_wait_is_named_by_the_one_constant_or_sum_it_is_or_called_ambiguous() {
+    // Each named constant names itself where nothing else adds up to it; the sums name their
+    // main part; a wait that is two of them (window render = combat NPC turn + 12 passes) is
+    // ambiguous.
+    for (ms, name) in [
+        (FLASH_MS, "hit flash"),
+        (FLIGHT_START_MS, "flight start"),
+        (FLIGHT_STEP_MS, "flight step"),
+        (REFRESH_MS, "refresh (flight end)"),
+        (PRINT_MS, "message"),
+        (NAME_MS, "object name"),
+        (DISSOLVE_MS, "dissolving window"),
+        (ACTOR_FLASH_MS, "actor flash"),
+        (PASS_MOVED_MS, "Pass's followers, moved"),
+        (PASS_STILL_MS, "Pass's followers, none moved"),
+        (STEP_MS, "party step"),
+        (STEP_MS + FOLLOW_MS, "party step and its followers"),
+        (
+            AFTER_TURN_MS + 2 * PICK_MS,
+            "refresh after a turn, with passes",
+        ),
+        (MINUTE_MS + PICK_MS, "clock minute, with passes"),
+        (COMBAT_NPC_MS + PICK_MS, "combat NPC turn, with passes"),
+        (SETUP_MS + PICK_MS, "turn setup, with passes"),
+    ] {
+        assert_eq!(what(ms), name, "{ms} ms");
+    }
+    assert_eq!(
+        COMBAT_NPC_MS + 12 * PICK_MS,
+        WINDOW_MS,
+        "the sum that collides"
+    );
+    assert_eq!(what(WINDOW_MS), "ambiguous");
+    assert_eq!(what(1), "other");
 }
 
 #[test]
@@ -227,8 +290,9 @@ fn the_start_fight_turns_take_the_originals_time() {
         return;
     };
     let frames = |ms: u64| (ms / u64::from(FRAME_MS)) as u32;
-    // The port: every seed, the steps that moved the party (a blocked step runs no world turn,
-    // in the original either).
+    // The port: every seed, the steps that moved the party. A blocked step is left out: it runs
+    // a world turn of one pick (its setup and one pass), in the original as in the port
+    // (tools/oracle/trace.mjs, re/notes/oracle.md §E), not a step's.
     let (mut all, mut first5) = (Vec::new(), Vec::new());
     let mut spent: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
     for seed in SEEDS {

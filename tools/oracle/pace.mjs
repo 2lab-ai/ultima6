@@ -13,7 +13,10 @@
 // snapshotted, and every trial starts from its setup's snapshot. Output (keep it outside the
 // repo): OUTDIR/pace.json, one row per trial (setup, hold, cell, frames of the steps from the
 // press, when the press was sampled, a timeline of the reading/held flags and view redraws),
-// and pace.log.
+// and pace.log. Spec 01 §Rights: the view centre, the party's actors and the click map's code
+// are compared here and never written; a step is a frame where the centre changed, the timeline
+// says where the press code changed (`c`), the log counts the party and does not give a
+// snapshot's size (it follows the emulated RAM's content).
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
@@ -56,7 +59,7 @@ async function setup(page, a4, name) {
     const party = await page.evaluate(([a, n]) => Array.from({ length: n }, (_, i) => Module._wasm_peek(a + i)), [a4 + PARTY, size]);
     const status = await page.evaluate((a) => Array.from({ length: 256 }, (_, i) => Module._wasm_peek(a + i)), a4 + STATUS);
     await o.poke(page, a4 + STATUS, status.map((v, i) => (party.includes(i) ? v : v | 0x10)));
-    log(`${name}: party ${party.join(',')}; status bit 0x10 on ${256 - party.length} actors`);
+    log(`${name}: party of ${party.length}; status bit 0x10 on ${256 - party.length} actors`);
   }
   if (name === 'b' || name === 'quiet') {
     await o.tap(page, 'b');
@@ -236,7 +239,7 @@ async function trial(page, a4, hold) {
       const steps = [];
       for (let i = 1; i < r.rows.length; i++) {
         const [fr, x, y] = r.rows[i], [, px, py] = r.rows[i - 1];
-        if (x !== px || y !== py) steps.push({ frame: fr - press, dx: x - px, dy: y - py });
+        if (x !== px || y !== py) steps.push({ frame: fr - press });
       }
       const seen = r.rows.find((row) => row[4] === 1);
       // Timeline relative to the press: reading flag changes (r0/r1), held flag, view redraws.
@@ -247,7 +250,7 @@ async function trial(page, a4, hold) {
         if (held !== p[4]) tl.push(`${fr - press}:h${held}`);
         if (hh !== p[7]) tl.push(`${fr - press}:v`);
         if (r.rows[i][8] !== p[8]) tl.push(`${fr - press}:p${r.rows[i][8]}`);
-        if (r.rows[i][9] !== p[9]) tl.push(`${fr - press}:c${(r.rows[i][9] & 0xffff).toString(16)}`);
+        if (r.rows[i][9] !== p[9]) tl.push(`${fr - press}:c`);
       }
       return { hold, press, release: release - press, held_seen: seen ? seen[0] - press : null, steps, gaps: r.gaps, timeline: tl.join(' ') };
     }
@@ -269,15 +272,18 @@ try {
   await installRecorder(page);
   const a4 = await findA4(page);
   await page.evaluate((a4) => { window.__pace.a4 = a4; }, a4);
-  log(`A4 = ${a4.toString(16)}; centre ${await centre(page, a4)}`);
+  log(`A4 = ${a4.toString(16)}`);
   await idle(page, a4);
-  log(`base snapshot ${await snapshot(page, 'base')} bytes at frame ${await o.frame(page)}`);
+  // The snapshot's size follows the emulated RAM's content: not logged (spec 01 §Rights).
+  await snapshot(page, 'base');
+  log(`base snapshot taken at frame ${await o.frame(page)}`);
   for (const name of SETUPS) {
     await restore(page, 'base');
     await o.waitFrames(page, 5);
     await setup(page, a4, name);
     await shot(page, name);
-    log(`${name} snapshot ${await snapshot(page, name)} bytes; centre ${await centre(page, a4)}`);
+    await snapshot(page, name);
+    log(`${name} snapshot taken`);
     for (const hold of HOLDS) {
       for (let run = 0; run < RUNS; run++) {
         for (const [dx, dy] of CELLS) {
@@ -285,8 +291,7 @@ try {
           await o.waitFrames(page, 5);
           const at = await pointTo(page, a4, 88 + 16 * dx, 88 + 16 * dy);
           await idle(page, a4, 20 + 7 * run); // a different press phase per run
-          const c0 = await centre(page, a4);
-          const row = { setup: name, ...(await trial(page, a4, hold)), cell: [dx, dy], pointer: at, from: c0, run };
+          const row = { setup: name, ...(await trial(page, a4, hold)), cell: [dx, dy], pointer: at, run };
           await shot(page, `${name}-h${hold}-r${run}-c${dx}_${dy}`);
           log(`${name} hold ${hold} run ${run} cell ${dx},${dy}: ${row.steps.length} steps at ${row.steps.map((s) => s.frame).join(',')} (held seen +${row.held_seen}, gaps ${row.gaps})`);
           results.push(row);
