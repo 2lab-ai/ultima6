@@ -350,14 +350,18 @@ function speedText() {
   return reach.rate > 0 ? `Max ${reach.rate.toFixed(1)}×` : 'Max';
 }
 
+// Sets `el`'s `key` (a property such as hidden or textContent) only when it changes: the page
+// writes these every frame.
+function put(el, key, value) {
+  if (el[key] !== value) el[key] = value;
+}
+
 function showSpeed() {
   const text = speedText();
-  if (speedLabel.textContent !== text) {
-    speedLabel.textContent = text;
-    badge.textContent = text;
-  }
-  canvas.dataset.speed = speedName(speedAt);
-  badge.hidden = SPEEDS[speedAt] === 1 && !badgeRecent;
+  put(speedLabel, 'textContent', text);
+  put(badge, 'textContent', text);
+  put(canvas.dataset, 'speed', speedName(speedAt));
+  put(badge, 'hidden', SPEEDS[speedAt] === 1 && !badgeRecent);
 }
 
 // A speed key (spec 06 §Design 6): 1 faster, -1 slower, 0 none. The keypad's + and - by `code`,
@@ -391,10 +395,10 @@ function paced(now, dt, k) {
   if (d > dropped) droppedAt = now;
   dropped = d;
   const behind = now - droppedAt < BEHIND_MS;
-  canvas.dataset.behind = behind ? '1' : '0';
-  behindMark.hidden = !behind;
+  put(canvas.dataset, 'behind', behind ? '1' : '0');
+  put(behindMark, 'hidden', !behind);
   showSpeed();
-  if (audio.gain) document.body.dataset.gain = audio.gain.gain.value.toFixed(2);
+  if (audio.gain) put(document.body.dataset, 'gain', audio.gain.gain.value.toFixed(2));
 }
 
 // --- engine and frames ---------------------------------------------------------------------
