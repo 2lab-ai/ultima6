@@ -10,7 +10,7 @@ by EA. See `.prd/01-spec.md` "Rights boundary" for what this repository does and
 
 ## Status (milestone 1, 2026-10-14)
 
-Works: boot into Britannia from the shipped new-game state, the full Amiga screen (map window,
+Works: boot into the world map from the shipped new-game state, the full Amiga screen (map window,
 party panel, message scroll, command bar), walking, passing a turn, party/solo mode, NPCs
 following their schedules as the clock runs, talking to NPCs (portrait + the original
 conversation scripts). Not yet: combat, magic, Look/Get/Drop/Move/Use, inventory, save/restore,
@@ -50,7 +50,7 @@ scripts/deploy-web.sh main                          # Cloudflare Pages project u
 | Path | What |
 |---|---|
 | `.prd/` | spec (01), architecture (02), core port contract (03), P3 refactor plan (04), loop |
-| `crates/u6-intake` · `u6-formats` · `u6-core` · `u6-render` · `u6-native` · `u6-web` | Rust workspace |
+| `crates/u6-intake` · `u6-formats` · `u6-core` · `u6-render` · `u6-audio` · `u6-native` · `u6-web` · `u6-testkit` | Rust workspace (`u6-audio`: the emulated Amiga audio machine; `u6-testkit`: content-free comparisons for the real-data tests) |
 | `re/notes/` | reverse-engineering notes (formats, graphics, functions, subsystems, oracle, port map) |
 | `tools/` | PP20, hunk flattener, REA drivers, Amiga emulator oracle, web test harness |
 | `site/` | the static page |

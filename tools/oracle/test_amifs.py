@@ -187,7 +187,7 @@ class Writer(unittest.TestCase):
 
     def test_boot_block(self):
         w = amifs.Writer("B")
-        w.set_boot(bytes.fromhex("43fa001c4eaeffa04a806700000c20402068001670004e7570ff6000fffa") + b"dos.library\0")
+        w.set_boot(bytes(range(0x10, 0x30)) + b"dos.library\0")  # synthetic boot code
         img = w.image()
         total = 0
         for (v,) in struct.iter_unpack(">I", img[:1024]):
@@ -212,7 +212,7 @@ class Writer(unittest.TestCase):
 
     def test_hash_matches_reference(self):
         # reference values from the loop the existing synthetic writer above uses
-        for n in ("startup-sequence", "OBJBLKAA", "u6.set", "ULTIMA_Aa.MOD", "savegame"):
+        for n in ("startup-sequence", "OBJBLKAA", "u6.set", "Mixed_Case.TXT", "savegame"):
             self.assertEqual(amifs.name_hash(n), name_hash(n))
 
 
@@ -279,7 +279,7 @@ class InstallTable(unittest.TestCase):
         # One byte differs: the low byte of the tool's patch word (moveq #1,d7), which ends there.
         diff = [i for i, (a, b) in enumerate(zip(out, ultcli)) if a != b]
         self.assertTrue(len(diff) == 1, "one byte differs")
-        patch = bytes.fromhex(mkadf.ULTCLI_STATE[2])
+        patch = mkadf.ULTCLI_PATCH
         self.assertTrue(out[diff[0] + 1 - len(patch):diff[0] + 1] == patch, "the tool's patch word")
 
         def moveq(word):
@@ -293,14 +293,14 @@ class InstallTable(unittest.TestCase):
         after = moveq(int.from_bytes(out[at:at + 2], "big"))
         self.assertTrue((before, after) == ((7, 0), (7, 1)), "moveq #0,d7 became moveq #1,d7")
         with self.assertRaises(ValueError):
-            mkadf.game_first_patches("ultima6", out)  # already patched: expected bytes absent
+            mkadf.game_first_patches("ultima6", out)  # already patched: not the known build
         with open(os.path.join(GAMES, "files", "d2", "DATA1", "objlist"), "rb") as f:
             objlist = pp20.decrunch(f.read())
         out, _ = mkadf.game_first_patches("savegame/objlist", objlist)
         self.assertTrue({o: out[o] for o in mkadf.OBJLIST_CREATED} == mkadf.OBJLIST_CREATED, "the patch bytes")
         changed = sum(a != b for a, b in zip(out, objlist))
         self.assertTrue(changed == len(mkadf.OBJLIST_CREATED), "only the patch bytes change")
-        # formats.md section 6: 0x1C71 = gender, 0x1C72 = the avatar portrait (non-zero = a character).
+        # formats.md section 6: 0x1C71 = gender, 0x1C72 = the hero portrait (non-zero = a character).
         self.assertTrue(set(mkadf.OBJLIST_CREATED) == {0x1C71, 0x1C72}, "the patched offsets")
         self.assertTrue(out[0x1C72] != 0, "the patched save holds a character")
         self.assertIsNone(mkadf.game_first_patches("game", b"x"))

@@ -58,10 +58,10 @@ const SEG_FRAME: i32 = -0x658a;
 const TAIL_FRAME: i32 = -0x6586;
 /// Original: A4-0x763a (the warning format, a direction name for its `%s`) and A4-0x61be
 /// (pointers to the 8 direction names)
-const MSG_SHAMINO: i32 = -0x763a;
+const MSG_WARNING: i32 = -0x763a;
 const DIR_NAMES: i32 = -0x61be;
-/// The party member who warns (actor 3) and the status bits he needs.
-const SHAMINO: u16 = 3;
+/// The companion who warns (actor 3) and the status bits he needs.
+const SCOUT: u16 = 3;
 
 fn byte(s: &State, off: i32, i: i16) -> u8 {
     s.objcmds.data.a4_byte(off + i32::from(i))
@@ -326,12 +326,12 @@ fn treasure(s: &mut State, m: Slot, index: i16, b: u8) {
     }
 }
 
-/// Original: 0x1319b2 (objects: hatch egg `egg`: its monsters and objects, and Shamino's
-/// warning of the direction they came from)
+/// Original: 0x1319b2 (objects: hatch egg `egg`: its monsters and objects, and the warning of
+/// companion actor 3 about the direction they came from)
 ///
 /// Nothing while A4-0x7afb is set, or outside the egg's hours (quality tens 1: 6..=18 only,
 /// 2: never then). First it notes whether the gargoyles are friends: a gargoyle in the party, or
-/// the Avatar (actor 1) carrying the amulet 0x4c. An egg already hatched (status 0x40) is only
+/// the hero (actor 1) carrying the amulet 0x4c. An egg already hatched (status 0x40) is only
 /// marked again; else one draw 1..=100 against its quantity. Each template then makes 1..=its
 /// quantity (one draw; the whole quantity when the egg's is 100, one silver serpent): objects
 /// below type 0x156 (except a chest) are created on the egg's tile, monsters by 0x131646 with
@@ -343,7 +343,7 @@ fn treasure(s: &mut State, m: Slot, index: i16, b: u8) {
 /// egg's worktype, the quality of the first actor hatchling's template, a removed one's too
 /// (taken again while it is 0; 12 from a template of gargoyles that are friends on), with the
 /// movement flags of worktypes 15 / 16, and an attacking gargoyle doubled stats. A hostile
-/// hatched out of an egg without status 0x20 may make Shamino warn of its direction once per
+/// hatched out of an egg without status 0x20 may make actor 3 warn of its direction once per
 /// fight (A4-0x6a88). The egg ends with status 0x40 (hatched) and 0x02.
 pub fn hatch_egg(s: &mut State, egg: Slot) {
     let mut friends = false;
@@ -504,15 +504,15 @@ fn hatch_templates(
             (dx << 4).wrapping_add(i16::from(rx)),
             (dy << 4).wrapping_add(i16::from(ry)),
         );
-        let st = s.actors.attrs.status[usize::from(SHAMINO)];
+        let st = s.actors.attrs.status[usize::from(SCOUT)];
         if s.rng.range(0, 3) != 0
             && st & 0x80 != 0
             && st & 0x10 == 0
-            && seams::distance(s, SHAMINO, c.x, c.y) < 6
+            && seams::distance(s, SCOUT, c.x, c.y) < 6
         {
             let at = super::GameData::a4(DIR_NAMES).wrapping_add_signed(i32::from(dir) * 4);
             let name = s.objcmds.data.pointed(at);
-            let fmt = text::a4_string(s, MSG_SHAMINO);
+            let fmt = text::a4_string(s, MSG_WARNING);
             text::queue(s, fmt, vec![PrintArg::Str(name)]);
             s.actors.work.prompt = 1;
         }

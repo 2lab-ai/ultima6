@@ -39,7 +39,7 @@ fn start() -> Option<(State, Files)> {
     state.map.flag_784e = 1;
     // The start window's egg stays unhatched (A4-0x7afb, which 0x1321dc / 0x1319b2 check), as
     // in combat's receipt: since the eggs hatch at boot its gargoyles fight the party, and the
-    // Avatar died around pass 70 (resurrected in the castle), so the schedules this receipt
+    // hero died around pass 70 (resurrected in the castle), so the schedules this receipt
     // watches were no longer the ones around the start.
     state.map.flag_7afb = 1;
     crate::map::region::refresh_region(&mut state);
@@ -165,7 +165,7 @@ fn world_turns_move_npcs_toward_their_schedules() {
     let after = engine.state().clone();
     assert!(
         lowest.get() == before.actors.attrs.hp[1],
-        "no fight at the start: nothing hurts the Avatar"
+        "no fight at the start: nothing hurts the hero"
     );
     let c1 = after.actors.calendar;
     let trace = trace.borrow();

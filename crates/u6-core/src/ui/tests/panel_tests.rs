@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Three members: actors 1..=3, the first an Avatar-type figure (object type 0x19a).
+/// Three members: actors 1..=3, the first a hero-type figure (object type 0x19a).
 fn party_state() -> State {
     let mut s = state();
     let p = &mut s.actors.party;

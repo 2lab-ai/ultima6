@@ -132,35 +132,24 @@ tests in `tools/test_hunk2raw.py`, not by real data.
 
 ## Entry and startup code
 
-Entry = hunk 0 base `0x00100000` in all five. Hand-decoded from image bytes; reloc targets
-from hunk 0's RELOC32 entries.
+Entry = hunk 0 base `0x00100000` in all five. Read off the image; reloc targets from hunk 0's
+RELOC32 entries. The listing itself is not reproduced; what it does:
 
-`game`, hunk 0 `+0x00..+0x2f`:
-
-    +00 48e7 7efe           movem.l d1-d6/a0-a6,-(a7)
-    +04 2448                movea.l a0,a2
-    +06 2400                move.l  d0,d2
-    +08 49f9 0015 b6f0      lea     $0015b6f0,a4     ; RELOC32 -> hunk 33 (DATA) + 0x8000
-    +0e 2c78 0004           movea.l 4.w,a6           ; AbsExecBase
-    +12 47f9 0015 85fc      lea     $001585fc,a3     ; RELOC32 -> hunk 33 + 0x4f0c
-    +18 7200                moveq   #0,d1
-    +1a 203c 0000 2633      move.l  #$2633,d0
-    +20 6002                bra.s   +24
-    +22 26c1                move.l  d1,(a3)+
-    +24 51c8 fffc           dbf     d0,+22
-    +28 294f cf4c           move.l  a7,-$30b4(a4)
-    +2c 294e cf44           move.l  a6,-$30bc(a4)
+`game`, hunk 0 `+0x00..+0x2f`: save d1-d6/a0-a6 on the stack (`+00`), keep a0 in a2 (`+04`)
+and d0 in d2 (`+06`), point a4 at `0x0015b6f0` (`+08`, RELOC32 → hunk 33 (DATA) + 0x8000),
+load AbsExecBase (`4.w`) into a6 (`+0e`), point a3 at `0x001585fc` (`+12`, RELOC32 → hunk 33
++ 0x4f0c), then clear `0x2633 + 1` longwords from a3 up with a `dbf` loop (`+18..+24`), and store
+a7 at `-$30b4(a4)` (`+28`) and a6 at `-$30bc(a4)` (`+2c`).
 
 Over hunk 0 `+0x000..+0x1f3`, `game`, `u` and `installu6` are byte-identical except for
 relocated longwords and 2-byte fields: `+0x1e` (BSS-length immediate), `+0x2a`/`+0x2e` (d16 of
 the two a4-relative moves above), more further on (not decoded one by one). All three continue
-`+0x30 42ac <d16>` (clr.l (d16,a4)), `+0x34 7000 223c 0000 3000 4eae fece` = `moveq #0,d0;
-move.l #$3000,d1; jsr -$132(a6)`, and hold `dos.library` at hunk 0 `+0x1e7`.
+at `+0x30` with a `clr.l (d16,a4)` and at `+0x34` with exec SetSignal(0, 0x3000) (LVO
+−0x132), and hold `dos.library` at hunk 0 `+0x1e7`.
 
-`ultima6`/`ultcli` use a different prologue: `48e7 7efe`, `4bef 0034` (lea $34(a7),a5),
-`2448`, `2400`, `49f9` (lea → hunk 5 + 0, a4), `2c78 0004`, `294e 005a` (move.l a6,$5a(a4)),
-`294f 0062` (move.l a7,$62(a4)), `42ac 005e` (clr.l $5e(a4)), `47f9` (lea → hunk 5 + loaded
-size, a3), `7200`, `203c <len>`, then the same `6002 26c1 51c8 fffc` loop. Their `dos.library`
+`ultima6`/`ultcli` use a different prologue: the same register save, then a5 = a7 + 0x34, a2 /
+d2 as above, a4 → hunk 5 + 0, a6 = AbsExecBase, a6 stored at `$5a(a4)`, a7 at `$62(a4)`,
+`$5e(a4)` cleared, a3 → hunk 5 + loaded size, then the same clear loop. Their `dos.library`
 string is in DATA hunk 5 `+0x7a`, not in code.
 
 ### BSS tail cleared by the startup loop (measured)
@@ -184,16 +173,16 @@ So the loop zero-fills exactly the not-loaded tail of the hunk a4 points into (d
   are [추정] a different variant of the same family.
 - No string confirms this: none of `$VER:`, `SAS/C`, `Lattice`, `LATTICE`, `Manx`, `Aztec`,
   `AZTEC`, `DICE`, `GNU`, `GCC`, `gcc`, `__MERGED` occurs in any image; no symbol hunks. The
-  substring `SAS` occurs 3× in `game` only, all inside binary bytes: `SAS@UO?` at h12 CODE
-  `+0x57c4`/`+0x5836` and `SASC4` at `0x00152340` (h30 CODE `+0x460`) — not a signature.
+  substring `SAS` occurs 3× in `game` only, all inside binary bytes (h12 CODE
+  `+0x57c4`/`+0x5836` and `0x00152340`, h30 CODE `+0x460`) — not a signature.
 - [추정] `game`'s a4 bias of +0x8000 (the others use +0) lets signed 16-bit displacements
   reach its 0xe7d8-byte data hunk; its startup displacements are negative (`-$30b4`).
 
 ### Strings that locate subsystems (image addresses)
 
 - `game`: `dos.library` 0x001001e7 and `audio.device` 0x00101206 (h0); `intuition.library`
-  0x0014eec6, `graphics.library` 0x0014eed8 (h26); `input.device` 0x00151c4e (h29); music
-  names `ULTIMA_Da.MOD`, `ULTIMA_Aa.MOD`, … from 0x00110806 (h7 `+0x66`).
-- `u`: "Ultima VI", "click on 'A' for Ultima IV" (h5, h8). `ultima6`: "Must be run from
-  Workbench, with no other windows open" (h1 `+0x4c0`). `installu6`: `trackdisk.device`
+  0x0014eec6, `graphics.library` 0x0014eed8 (h26); `input.device` 0x00151c4e (h29); the song
+  file names from 0x00110806 (h7 `+0x66`; the table at A4-0x779a points at them).
+- `u`: the title and the transfer menu's prompt (h5, h8; e.g. 0x00109a5a). `ultima6`: the line
+  that refuses a start outside Workbench (h1 `+0x4c0`). `installu6`: `trackdisk.device`
   (h3 `+0x9a`), `NIL:` (h0 `+0x67c`).

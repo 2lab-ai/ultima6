@@ -216,7 +216,7 @@ fn inventory_ready_unready_and_panels() {
     let mut s = start(&files);
     list(&mut s, 0);
     list(&mut s, 1);
-    // The Avatar's inventory panel (F1 in the roster), then the weapon off and on.
+    // The hero's inventory panel (F1 in the roster), then the weapon off and on.
     let e = panel(s, &files, 0x92, 0);
     receipt(e.frame(), "inventory-member0");
     let s = e.state().clone();
@@ -249,8 +249,8 @@ fn inventory_ready_unready_and_panels() {
     let mut s = e.state().clone();
     assert!(s.ui.panel.mode == 0x91, "the panel mode comes back");
     println!("stubs hit: {:?}", e.stub_hits().keys().collect::<Vec<_>>());
-    // The Avatar's, as Look at the Avatar shows it, with the oracle's game-first patch of the
-    // avatar portrait byte (objlist 0x1C72 = 1, re/notes/oracle.md §D) so the two compare.
+    // The hero's, as Look at the hero shows it, with the oracle's game-first patch of the
+    // hero portrait byte (objlist 0x1C72 = 1, re/notes/oracle.md §D) so the two compare.
     s.actors.objlist_tail[0x81] = 1;
     let e = run(s, &files, &[Key::Space], move |st, io| async move {
         palette(&st, &io);

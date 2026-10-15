@@ -20,7 +20,7 @@ const NAME_FMT: u32 = 0x0010_9a14;
 pub(super) const MALE: u32 = 0x0010_99a2;
 pub(super) const FEMALE: u32 = 0x0010_99a8;
 /// The class name the creation gives (the string at 0x10586e).
-const AVATAR: u32 = 0x0010_586e;
+const HERO_CLASS: u32 = 0x0010_586e;
 /// Original: A4+0x9a2 (the keys of the portrait buttons: sex, portrait, accept, abort, Escape)
 const PORTRAIT_KEYS: u32 = super::exe::A4 + 0x9a2;
 
@@ -506,7 +506,7 @@ async fn wagon(st: &mut IntroState, io: &Io) {
     let file = st.gypsy.file;
     super::load::load_into(&mut st.video.chip, &st.files, b"gypsy.new", file);
     st.views.draw.planes = st.views.screen.planes;
-    st.hero.class = st.exe.cstr(AVATAR);
+    st.hero.class = st.exe.cstr(HERO_CLASS);
     st.hero.status = b'G';
     st.hero.str = 0xf;
     st.hero.dex = 0xf;

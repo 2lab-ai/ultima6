@@ -1,6 +1,6 @@
 //! Real data: spells cast from the start state of the user's archive.org zip, through the
 //! engine with typed keys (the Cast command's own steps, as 0x1041d8 runs them before
-//! 0x11af10). The Avatar gets a readied spellbook and reagents through the objects API.
+//! 0x11af10). The hero gets a readied spellbook and reagents through the objects API.
 //! Compares the message scroll with strings read from the user's `game` and prints only its
 //! line count; the Light test writes headless frames to /tmp/claude-501/. Skips where the zip
 //! is missing; no game data in the repo.
@@ -24,7 +24,7 @@ use u6_render::Framebuffer;
 use u6_testkit::Quiet;
 
 pub(super) const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-pub(super) const AVATAR: u16 = 1;
+pub(super) const HERO: u16 = 1;
 
 pub(super) fn files() -> Option<Files> {
     if !Path::new(ZIP).exists() {
@@ -66,14 +66,14 @@ pub(super) async fn boot(state: &RefCell<State>, io: &Io) {
     crate::gfx::view::refresh_view(&mut state.borrow_mut(), io);
 }
 
-/// A readied spellbook with `spells` inside for the Avatar, and 10 of each reagent.
+/// A readied spellbook with `spells` inside for the hero, and 10 of each reagent.
 pub(super) fn give_book(s: &mut State, spells: &[u8]) -> i16 {
-    let book = crate::objects::create_in(s, super::SPELLBOOK, READIED, 0, AVATAR as i16);
+    let book = crate::objects::create_in(s, super::SPELLBOOK, READIED, 0, HERO as i16);
     for &n in spells {
         crate::objects::create_in(s, super::SPELL, IN_CONTAINER, u16::from(n) << 8, book);
     }
     for kind in s.magic.tables.reagents {
-        crate::objects::add_to_owner(s, AVATAR as i16, kind, 10);
+        crate::objects::add_to_owner(s, HERO as i16, kind, 10);
     }
     book
 }
@@ -262,11 +262,11 @@ pub(super) fn cast_with(files: &Files, setup: fn(&mut State), input: &str) -> En
     e
 }
 
-/// Reagent counts the Avatar carries, in reagent order.
+/// Reagent counts the hero carries, in reagent order.
 pub(super) fn reagents(s: &State) -> Vec<i16> {
     let t = s.magic.tables.reagents;
     t.iter()
-        .map(|&k| super::book::carried_count(&s.objects, AVATAR as i16, k, 0))
+        .map(|&k| super::book::carried_count(&s.objects, HERO as i16, k, 0))
         .collect()
 }
 
@@ -379,10 +379,10 @@ fn night_book(s: &mut State) {
     crate::map::view::update_view(s);
 }
 
-/// The Avatar's magic points in the shipped objlist (its byte of the table at 0x13F1,
+/// The hero's magic points in the shipped objlist (its byte of the table at 0x13F1,
 /// formats.md §6), read from the raw file: what a cast from the start spends from.
 fn start_magic(files: &Files) -> u8 {
-    files.get("savegame/objlist").quiet()[0x13F1 + usize::from(AVATAR)]
+    files.get("savegame/objlist").quiet()[0x13F1 + usize::from(HERO)]
 }
 
 /// The NPC the casts below aim at: actor 7, put on the tile the cross-hair reaches with two
@@ -395,7 +395,7 @@ fn day_book(s: &mut State) {
     let c = s.map.centre;
     let z = u16::from(c.z);
     crate::objects::move_to(s, TARGET as i16, c.x + 2, c.y - 3, z);
-    // A potion on the floor two cells east of the Avatar, for Detect Magic.
+    // A potion on the floor two cells east of the hero, for Detect Magic.
     let c = s.map.centre;
     crate::objects::create_on_map(
         &mut s.objects,
@@ -438,7 +438,7 @@ fn light_at_night_lights_the_view() {
         e.tick(&[], 16);
     }
     assert!(e.finished());
-    let tail = show("Light at 22:00", &e);
+    let tail = show("spell 0x09 at 22:00", &e);
     std::fs::write("/tmp/claude-501/m2-magic-light-after.png", png(e.frame())).quiet();
     let s = e.state();
     let lit = lit_cells(&s);
@@ -461,7 +461,7 @@ fn create_food_adds_food() {
     let Some(files) = files() else { return };
     let food = |s: &State| super::book::carried_count(&s.objects, 1, 0x81, 0);
     let e = cast_with(&files, day_book, "IMY\n");
-    let tail = show("Create Food", &e);
+    let tail = show("spell 0x00", &e);
     let s = e.state();
     let n = food(&s);
     assert!((1..=10).contains(&n), "1..=10 food made");
@@ -505,7 +505,7 @@ fn detect_magic_on_a_potion() {
         e.tick(&[], 16);
     }
     assert!(e.finished());
-    let tail = show("Detect Magic", &e);
+    let tail = show("spell 0x01 on the potion", &e);
     let s = e.state();
     let sel = s.ui.input.selection;
     assert!(
@@ -522,7 +522,7 @@ fn detect_magic_on_a_potion() {
 fn heal_and_great_heal_on_a_member() {
     let Some(files) = files() else { return };
     let e = cast_with(&files, day_book, "IM\n2");
-    show("Heal on member 2", &e);
+    show("spell 0x06 on member 2", &e);
     let s = e.state();
     let hp = s.actors.attrs.hp[2];
     assert!((11..=40).contains(&hp), "Heal gives 1..30");
@@ -535,7 +535,7 @@ fn heal_and_great_heal_on_a_member() {
     );
     drop(s);
     let e = cast_with(&files, day_book, "VM\n2");
-    show("Great Heal on member 2", &e);
+    show("spell 0x34 on member 2", &e);
     let s = e.state();
     assert!(u16::from(s.actors.attrs.hp[2]) == crate::actors::leaves::max_hp(&s, 2));
     spent(
@@ -551,7 +551,7 @@ fn heal_and_great_heal_on_a_member() {
 fn sleep_on_an_npc() {
     let Some(files) = files() else { return };
     let e = cast_with(&files, day_book, "IZ\n>>^^^\n");
-    let tail = show("Sleep on the target", &e);
+    let tail = show("spell 0x14 on the target", &e);
     let s = e.state();
     let asleep = s.actors.attrs.status[TARGET] & 4 != 0;
     assert!(
@@ -572,7 +572,7 @@ fn magic_arrow_goes_through_the_combat_seams() {
     let Some(files) = files() else { return };
     let before = State::new_game(&files).quiet().actors.attrs.hp[TARGET];
     let e = cast_with(&files, day_book, "OJ\n>>^^^\n");
-    let tail = show("Magic Arrow on the target", &e);
+    let tail = show("spell 0x11 on the target", &e);
     let hits = e.stub_hits();
     let s = e.state();
     // The flight (0x1228ba) and the hit (0x1231be, 0x123c56, 0x12395a) are combat's ports.

@@ -1,5 +1,5 @@
 // Walk pace of a held mouse button in the original: boot the game-first floppies (as play.mjs),
-// find the game's data hunk in memory, put the pointer on a map cell beside the Avatar and hold
+// find the game's data hunk in memory, put the pointer on a map cell beside the hero and hold
 // the left button for N PAL frames, pressed and released at frame boundaries; the view centre
 // (A4-0x7b78/-0x7b76, where the leader is) is read after every emulated frame, so each step's
 // frame is known.

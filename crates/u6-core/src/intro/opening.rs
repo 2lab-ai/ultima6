@@ -1,4 +1,4 @@
-//! The opening of `u`: ORIGIN, Lord British, the TV room (0x1041b0 and its helpers in hunk 2);
+//! The opening of `u`: the two title cards, the TV room (0x1041b0 and its helpers in hunk 2);
 //! the storm and the stones follow in [`super::storm`], the moongate and the portal in
 //! [`super::gate`].
 //!
@@ -260,7 +260,7 @@ fn room_frame(st: &mut IntroState, with_passage: bool) {
     draw_clock(st, 0xdd, draw, file);
 }
 
-/// Original: u 0x1041b0 (opening: ORIGIN, Lord British, the TV room, the storm and the stones,
+/// Original: u 0x1041b0 (opening: the two title cards, the TV room, the storm and the stones,
 /// the moongate and the gargoyles' portal; Escape skips to the end)
 ///
 /// From `intro_2.new` on (0x1046c2..0x10558e) the body continues in [`super::storm::storm`]

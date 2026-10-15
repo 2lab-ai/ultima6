@@ -66,7 +66,7 @@ impl Play {
         p
     }
 
-    /// Holds the left button three cells south of the Avatar for `ms` (16 ms ticks, rounded),
+    /// Holds the left button three cells south of the hero for `ms` (16 ms ticks, rounded),
     /// then idles until the prompt is back; the cells walked.
     fn held_steps(&mut self, ms: u32) -> u16 {
         let from = self.leader_at();
@@ -233,7 +233,7 @@ fn the_game_played_with_the_pointer() {
         buttons: 0,
     });
     let (shape, _) = sprite_shown(&p);
-    assert!(shape == 3, "north-east of the Avatar: the north-east arrow");
+    assert!(shape == 3, "north-east of the hero: the north-east arrow");
     p.receipt("arrow-ne");
 
     // Talk (the third icon), then member 1 on the map.
@@ -307,7 +307,7 @@ fn the_game_played_with_the_pointer() {
     assert!(p.e.state().ui.input.target_pending == 0);
     p.receipt("look-member1");
 
-    // A map cell south of the Avatar: one step south.
+    // A map cell south of the hero: one step south.
     let before = p.e.state().map.centre;
     p.click(88, 104);
     let after = p.e.state().map.centre;
@@ -328,7 +328,7 @@ fn the_game_played_with_the_pointer() {
     }
     p.receipt("member1-stats");
 
-    // The roster icon, then the Avatar's figure: the Avatar's inventory.
+    // The roster icon, then the hero's figure: the hero's inventory.
     p.click(0xc8, 0x60);
     assert!(p.e.state().ui.panel.mode == 0x91);
     p.click(0xb8, 0x20);
@@ -336,13 +336,13 @@ fn the_game_played_with_the_pointer() {
         let s = p.e.state();
         assert!(
             (s.ui.panel.mode, s.ui.panel.member) == (0x92, 0),
-            "the Avatar's inventory"
+            "the hero's inventory"
         );
     }
     let sword = p.e.state().inventory.equip(2);
-    assert!(sword > 1, "a weapon in the Avatar's hand");
+    assert!(sword > 1, "a weapon in the hero's hand");
     let held = p.weights();
-    p.receipt("avatar-inventory");
+    p.receipt("hero-inventory");
 
     // The sword in hand: off (Unready, 0xa8).
     p.click(0xb8, 0x30);
@@ -421,7 +421,7 @@ fn a_held_press_walks_a_cell_a_step_and_stops_at_the_release() {
     panic!("no held walk got past one cell");
 }
 
-/// The original's held walks three cells south of the Avatar, measured in the oracle
+/// The original's held walks three cells south of the hero, measured in the oracle
 /// (tools/oracle/pace.mjs, game-first disks, 3 to 6 boots): (PAL frames held, the cells walked
 /// in most trials). A press of 5 or 10 frames counts when the game sampled it; 200 frames = the
 /// steps by frame 200 of the 300-frame holds. Quiet = every actor outside the party passed over

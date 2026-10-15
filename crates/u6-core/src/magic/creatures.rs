@@ -230,9 +230,9 @@ pub async fn spell_0x80(state: &RefCell<State>, io: &Io) {
     say(state, io, FMT_NL_S_NL, m).await;
 }
 
-/// Original: 0x11a550 (magic: Armageddon: every actor slot 0..0xfe but the Avatar (1) and Lord
-/// British (5) is removed (0x10c1d6); the view flags and refresh; the eggs stop (A4-0x7afb = 1)
-/// and the party is the Avatar alone (A4+0x4b00 = 1))
+/// Original: 0x11a550 (magic: Armageddon: every actor slot 0..0xfe but the hero (1) and the
+/// ruler (5) is removed (0x10c1d6); the view flags and refresh; the eggs stop (A4-0x7afb = 1)
+/// and the party is the hero alone (A4+0x4b00 = 1))
 pub async fn armageddon(state: &RefCell<State>, io: &Io) {
     let mut s = state.borrow_mut();
     for a in 0..0xffi16 {

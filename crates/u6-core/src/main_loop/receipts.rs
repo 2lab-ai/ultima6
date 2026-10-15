@@ -17,7 +17,7 @@ use crate::state::State;
 use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-const AVATAR: i16 = 1;
+const HERO: i16 = 1;
 /// Where the receipts read the lines they look for (the user's `game`): the command-name table
 /// at A4-0x7c8e and the format its names are printed with (0x101f48), Cast's code, Rest's own
 /// name line (0x1272cc) and the line after the guard's name (0x1273fc).
@@ -131,9 +131,9 @@ fn holds(lines: &[String], want: &str) -> bool {
     !want.is_empty() && flat(&lines.join(" ")).contains(&want)
 }
 
-/// A readied spellbook holding `spells` for the Avatar and 10 of each reagent.
+/// A readied spellbook holding `spells` for the hero and 10 of each reagent.
 fn give_book(s: &mut State, spells: &[u8]) {
-    let book = crate::objects::create_in(s, crate::magic::SPELLBOOK, READIED, 0, AVATAR);
+    let book = crate::objects::create_in(s, crate::magic::SPELLBOOK, READIED, 0, HERO);
     for &n in spells {
         crate::objects::create_in(
             s,
@@ -144,7 +144,7 @@ fn give_book(s: &mut State, spells: &[u8]) {
         );
     }
     for kind in s.magic.tables.reagents {
-        crate::objects::add_to_owner(s, AVATAR, kind, 10);
+        crate::objects::add_to_owner(s, HERO, kind, 10);
     }
 }
 

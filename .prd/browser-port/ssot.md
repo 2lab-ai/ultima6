@@ -46,4 +46,4 @@ Fixed scope (rev 1, superseded where it conflicts with rev 2):
 - Item 3 = REA (extended to m68k) analysis of `game` → Amiga data support in the
   ScummVM `ultima6` engine → WebAssembly build.
 - Item 4 = engine + shell at https://ultima6.2lab.ai, user drops their own files.
-- First acceptance line: the game boots into Britannia; intro skipped.
+- First acceptance line: the game boots into the world map; intro skipped.

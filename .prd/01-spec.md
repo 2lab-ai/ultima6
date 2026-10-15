@@ -51,7 +51,7 @@ not imply EA endorsement.
 | P3 | Refactor: 3a NPC action set offered to an AI model, reply applied · 3b characters, world map and systems editable as data · 3c Steam-style mod packages |
 | P4 | Redeploy |
 
-Deploys follow milestones. Milestone 1 = the game boots into Britannia from the
+Deploys follow milestones. Milestone 1 = the game boots into the world map from the
 user's disks; the party walks; NPCs follow schedules; talking works. Combat, magic,
 inventory and the rest ride later milestones, each deployed when verified.
 
@@ -68,7 +68,7 @@ inventory and the rest ride later milestones, each deployed when verified.
 2. `https://ultima6.2lab.ai` with no files → the page asks for the user's Ultima VI
    files and loads no game bytes from the network.
 3. Drop `ultima-vi.zip` (sha256 `a65e911d…22e8a2`) → disks decode in-browser → the Rust
-   engine renders Britannia with party and UI; keyboard movement works. Evidence:
+   engine renders the world map with party and UI; keyboard movement works. Evidence:
    screenshot of the live site next to the same scene from the original game running
    in an Amiga emulator (parity sheet).
 4. Reload → files persist (IndexedDB) and the game starts without re-dropping.

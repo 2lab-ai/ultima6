@@ -278,9 +278,10 @@ fn gfx_palette_words_and_exe_checks() {
     assert!(palette_from_ocs_words(&words).is_err());
 
     let mut exe = vec![0u8; GAME_EXE_LEN];
-    exe[..4].copy_from_slice(&[0, 0, 3, 0xF3]);
-    exe[GAME_HUNK33_BLOCK..GAME_HUNK33_BLOCK + 8]
-        .copy_from_slice(&[0, 0, 3, 0xEA, 0, 0, 0x13, 0xC3]);
+    // HUNK_HEADER, then hunk 33's block: HUNK_DATA and its length in longwords.
+    exe[..4].copy_from_slice(&0x3F3u32.to_be_bytes());
+    exe[GAME_HUNK33_BLOCK..GAME_HUNK33_BLOCK + 4].copy_from_slice(&0x3EAu32.to_be_bytes());
+    exe[GAME_HUNK33_BLOCK + 4..GAME_HUNK33_BLOCK + 8].copy_from_slice(&0x13C3u32.to_be_bytes());
     exe[GAME_PALETTE_OFFSET + 62..GAME_PALETTE_OFFSET + 64].copy_from_slice(&[0x0F, 0xFF]);
     assert_eq!(
         palette(&exe).unwrap()[31],

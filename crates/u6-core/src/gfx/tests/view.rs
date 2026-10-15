@@ -36,8 +36,8 @@ fn anim_tick(s: &mut State, g: &mut GfxState) {
     std::mem::swap(&mut s.gfx, g);
 }
 
-const AVATAR_TYPE: usize = 0x19a;
-const AVATAR_BASE: u16 = 1000;
+const HERO_TYPE: usize = 0x19a;
+const HERO_BASE: u16 = 1000;
 
 /// Surface of chunk 1 everywhere, chunk 1 tile (col, row) = row·8 + col; map tile n has colour
 /// n % 32 + 1 in every pixel; the leader (actor 1) stands at (19, 10).
@@ -61,18 +61,18 @@ fn world() -> (State, GfxState) {
         flags3: vec![0; 2048],
     };
     let mut base = vec![0u16; 1024];
-    base[AVATAR_TYPE] = AVATAR_BASE;
+    base[HERO_TYPE] = HERO_BASE;
     s.tables.basetile = BaseTiles { base };
     s.map.centre = Position { x: 19, y: 10, z: 0 };
     s.objects.location[1] = s.map.centre;
-    s.objects.type_frame[1] = AVATAR_TYPE as u16;
+    s.objects.type_frame[1] = HERO_TYPE as u16;
     let mut g = GfxState::default();
     for n in 0..64 {
         install(&mut g, n, map_tile(0, 16, |_, _| (n % 32 + 1) as u8));
     }
     install(
         &mut g,
-        usize::from(AVATAR_BASE),
+        usize::from(HERO_BASE),
         object_tile(Span::Full, |r, c| (r == 8 && c == 8).then_some(30)),
     );
     g.window_shown = 1;
@@ -112,7 +112,7 @@ fn window_cells_follow_the_centre_and_the_leader_sits_at_80_96() {
     // 8..168 reach the screen (0x151f5a).
     assert_eq!(fb.get(8, 8), Some(15));
     assert_eq!(fb.get(0, 0), Some(0));
-    // The avatar's one opaque pixel, over the map tile.
+    // The hero's one opaque pixel, over the map tile.
     assert_eq!(fb.get(88, 88), Some(30));
     // Nothing past the 11 cells.
     assert_eq!(fb.get(176, 100), Some(0));
@@ -234,10 +234,10 @@ fn flash(mut s: State, actor: u16, bright: bool) -> State {
 #[test]
 fn flash_outlines_the_actor_then_shows_the_window_without_it() {
     let (mut s, mut g) = world();
-    // The avatar's tile: one opaque pixel of colour 0 at (8, 8), which outline mode paints.
+    // The hero's tile: one opaque pixel of colour 0 at (8, 8), which outline mode paints.
     install(
         &mut g,
-        usize::from(AVATAR_BASE),
+        usize::from(HERO_BASE),
         object_tile(Span::Full, |r, c| (r == 8 && c == 8).then_some(0)),
     );
     s.gfx = g;
@@ -250,7 +250,7 @@ fn flash_outlines_the_actor_then_shows_the_window_without_it() {
         (crate::combat::present::FLASH_HOLD, 0)
     );
     assert_eq!((fx[0].w, fx[0].h), (176, 176));
-    // Bright: the outline colour of 0x1800 at the avatar's pixel; the plain window has the tile.
+    // Bright: the outline colour of 0x1800 at the hero's pixel; the plain window has the tile.
     assert_eq!((at(&fx[0], 88, 88), at(&fx[1], 88, 88)), (3, 0));
     let differ = (0..176 * 176)
         .filter(|&i| fx[0].pixels[i] != fx[1].pixels[i])

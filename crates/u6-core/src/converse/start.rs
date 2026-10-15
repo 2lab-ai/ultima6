@@ -30,9 +30,9 @@ fn byte(v: &[u8], a: i16) -> u8 {
 ///
 /// `talker` = the party index that talks (the main loop passes A4-0x7b7a), `target` = the object
 /// picked. A horse's rider talks instead of the horse. Anything that is neither an actor slot
-/// (0..256) nor a shrine/statue prints "nothing!". With `print_name` the target's name follows
-/// the prompt: "shrine", "statue", the actor's name once met (talk flag bit 0), else its
-/// display name. Then 0x1125b8.
+/// (0..256) nor a shrine/statue prints the line 0x1127ba. With `print_name` the target's name
+/// follows the prompt: the word 0x1127aa (shrine) or 0x1127b2 (statue), the actor's name once met
+/// (talk flag bit 0), else its display name. Then 0x1125b8.
 pub async fn talk(cx: &Cx<'_>, talker: u8, target: i16, print_name: bool) {
     let ty = cx.st(|s| obj_type(s, target));
     let target = if HORSES.contains(&ty) {
@@ -79,7 +79,7 @@ fn load_text(cx: &Cx<'_>) {
 
 /// Original: 0x1125b8 (conversation set-up: variables, then 0x114afa)
 ///
-/// String slots: `$G` (0x10) milady / milord by the avatar's gender, `$N` (0x17) the NPC-name
+/// String slots: `$G` (0x10) milady / milord by the hero's gender, `$N` (0x17) the NPC-name
 /// buffer, `$P` (0x19) the talker's party name, `$T` (0x1d) morning (hour < 12) / afternoon
 /// (< 18) / evening, `$0`..`$9` the ten buffers. Word variables: 10 dexterity, 13 day,
 /// 14 experience, 16 female, 17 hour, 18 intelligence, 20 karma, 21 A4-0x7b26, 22 month,
@@ -164,14 +164,14 @@ fn set_vars(s: &mut State, talker: u8, target: i16) {
 /// Original: 0x114afa (start conversation: checks, load script, greeting, input loop)
 ///
 /// `talker` = the actor who talks, `target` = the object talked to. Refusals, in order: a party
-/// member off screen ("Not on screen."), solo mode for another member than the first ("Not in
-/// solo mode."), a dead NPC 0 / ≥ 0xe0 reached by spell ("You hear a deep moan."), an actor
-/// that cannot answer (dead without the spell, asleep / paralysed (status bits 2, 1), silent
-/// worktypes, alignment 0x20 / 0x60: "No response"), A4-0x7afb set ("No response"), talking to
-/// oneself, and no script ("Funny, no response."). Then: NPC name from the script, the
-/// portrait panel and "You see" + look text (not by spell), the greeting after `f2`, and the
-/// input loop until `b6` (bye) or a malformed / ending op. After each input "look" replays the
-/// look text; anything else runs the text with its keyword blocks.
+/// member off screen (line 0x112a0c), solo mode for another member than the first (0x112a1e),
+/// a dead NPC 0 / ≥ 0xe0 reached by spell (0x112a32), an actor that cannot answer (dead without
+/// the spell, asleep / paralysed (status bits 2, 1), silent worktypes, alignment 0x20 / 0x60:
+/// 0x112a4a), A4-0x7afb set (0x112a5a), talking to oneself (0x112a68), and no script
+/// (0x112a80). Then: NPC name from the script, the portrait panel and the line 0x112a96 + look
+/// text (not by spell), the greeting after `f2`, and the input loop until `b6` (bye) or a
+/// malformed / ending op. After each input the look word (0x112afa) replays the look text;
+/// anything else runs the text with its keyword blocks.
 pub async fn converse(cx: &Cx<'_>, talker: i16, target: i16) {
     load_text(cx);
     let refusal = cx.st(|s| refusal(s, talker, target));

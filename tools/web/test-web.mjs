@@ -829,7 +829,7 @@ function scrollChanged(before, after) {
 
 const OUT = '/tmp/claude-501/int-mouse';
 
-// Clicks the map cell `dx` cells east of the Avatar (its window cell (5, 5) is centred on
+// Clicks the map cell `dx` cells east of the hero (its window cell (5, 5) is centred on
 // game pixel (88, 88)), then waits until the game took the click and shows the prompt again;
 // the leader before and after.
 async function clickCell(page, dx) {
@@ -840,15 +840,15 @@ async function clickCell(page, dx) {
   return { from, to: (await h.state(page)).leader };
 }
 
-// Look by clicks: the Look icon, then the Avatar's own cell. Look on a person shows the portrait
-// panel and waits for a key or a click; a click on the Avatar's cell answers it (0x8f, nothing
+// Look by clicks: the Look icon, then the hero's own cell. Look on a person shows the portrait
+// panel and waits for a key or a click; a click on the hero's cell answers it (0x8f, nothing
 // else happens). Returns the frame with the description in the scroll, read 90 ticks after the
 // game took the target click (1.5 s at 60 frames a second).
-async function lookAtAvatar(page, shot) {
+async function lookAtHero(page, shot) {
   await h.click(page, 64, 184, 30); // the fourth icon: Look
   assert.equal(await promptNow(page), '0', 'Look waits for its target');
   if (shot) await writeFile(`${OUT}/web-look-target.png`, await page.locator('#screen').screenshot());
-  await h.click(page, 88, 88, 90); // Look's target: the Avatar
+  await h.click(page, 88, 88, 90); // Look's target: the hero
   assert.equal(await promptNow(page), '0', 'the portrait waits for a key or a click');
   const described = await h.frame(page);
   if (shot) await writeFile(`${OUT}/web-look.png`, await page.locator('#screen').screenshot());
@@ -859,7 +859,7 @@ async function lookAtAvatar(page, shot) {
   return described;
 }
 
-// One step by clicks: the cell east of the Avatar, else (blocked by the start fight) west,
+// One step by clicks: the cell east of the hero, else (blocked by the start fight) west,
 // up to the harness's `STEP_TRIES` tries (as `stepSideways`); asserts the step is one cell
 // along x.
 async function clickStep(page) {
@@ -875,14 +875,14 @@ async function clickStep(page) {
   throw new Error(`${h.STEP_TRIES} click steps blocked in a row`);
 }
 
-test('the mouse: the Look icon, then Look on the Avatar, then clicks walk; the keys still work', async (env) => {
+test('the mouse: the Look icon, then Look on the hero, then clicks walk; the keys still work', async (env) => {
   const { page } = await h.openPage(env, { gated: false });
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
   await h.waitPrompt(page);
   const before = await h.frame(page);
-  const described = await lookAtAvatar(page, false);
+  const described = await lookAtHero(page, false);
   assert.ok(scrollChanged(before, described), 'Look printed in the scroll');
   assert.equal((await h.state(page)).focused, 'screen', 'the click focused the canvas');
   await clickStep(page);
@@ -917,7 +917,7 @@ test('the mouse: a press held 300 ms on the map walks and yields; held through t
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
   await h.waitPrompt(page);
-  // Three cells south of the Avatar, at the prompt.
+  // Three cells south of the hero, at the prompt.
   const ran = await holdOnMap(page, 88, 88 + 48);
   assert.ok(ran >= 5, `the engine ticked through the hold: ${ran} ticks`);
   await h.waitPrompt(page);
@@ -937,7 +937,7 @@ test('the mouse: a press held 300 ms on the map walks and yields; held through t
 }, { needs: h.haveHfes });
 
 // Holds the left button `ms` (a real press: mouse down, wait, up) three cells south of the
-// Avatar at the prompt; the cells the leader moved until the prompt is back (the page's leader
+// hero at the prompt; the cells the leader moved until the prompt is back (the page's leader
 // read every frame) and the ms after the press at which each step showed.
 async function heldWalk(page, ms) {
   await h.waitPrompt(page);
@@ -1002,7 +1002,7 @@ test('zip: the first press on the canvas is one game click and starts the sound;
   assert.equal(await promptNow(page), '0', 'Look still waits for its target: the press came once');
   await page.keyboard.press('Escape'); // no target: the no-target word, the prompt again
   await h.waitPrompt(page);
-  const described = await lookAtAvatar(page, true);
+  const described = await lookAtHero(page, true);
   assert.ok(scrollChanged(before, described), 'Look printed in the scroll');
   const { from, to } = await clickStep(page);
   await h.waitTicks(page, 60);

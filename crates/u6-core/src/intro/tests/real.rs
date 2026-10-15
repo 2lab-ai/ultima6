@@ -145,7 +145,7 @@ impl Run {
 
 /// The scripted creation: answers A, B alternately; name "Zhuge", male, second portrait.
 fn script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
-    // Opening: ORIGIN (palette 0 faded in by tick ~18), the second title card, the TV room.
+    // Opening: the first title card (palette 0 faded in by tick ~18), the second, the TV room.
     r.tick(30);
     shot("origin", r);
     r.tick(85);

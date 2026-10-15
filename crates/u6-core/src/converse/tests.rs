@@ -303,9 +303,9 @@ fn portraits_map_slots_to_archives() {
     assert_eq!(px(&s, 5), Some(14), "slot n = item n - 1");
     assert_eq!(px(&s, 0x63), Some(20), "from 0x62 on: portrait.b");
     s.actors.objlist_tail[0x81] = 3;
-    assert_eq!(px(&s, 1), Some(30), "the avatar: portrait.z item n - 1");
+    assert_eq!(px(&s, 1), Some(30), "the hero: portrait.z item n - 1");
     s.actors.objlist_tail[0x81] = 0;
-    assert_eq!(px(&s, 1), None, "no avatar portrait");
+    assert_eq!(px(&s, 1), None, "no hero portrait");
     s.objects.type_frame[0xf0] = 0x16b;
     assert_eq!(
         px(&s, 0xf0),
@@ -385,7 +385,7 @@ pub(super) fn talk_to(s: State, f: Files, target: i16, keys: &str) -> State {
 #[test]
 fn talk_refuses_in_the_original_order() {
     let f = script_files();
-    // An object slot past the actors that is no shrine: "nothing!".
+    // An object slot past the actors that is no shrine: the nothing line (0x1127ba).
     let s = talk_to(state(&[]), f.clone(), 300, "");
     assert_eq!(scroll(&s), "[Nothing]");
     // Talking to oneself (actor 1 is the talker, party index 0).

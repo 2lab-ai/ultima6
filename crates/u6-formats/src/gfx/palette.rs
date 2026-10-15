@@ -13,7 +13,7 @@ use crate::error::{FormatError, Result};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-/// Number of colours: 5 bitplanes (copper `BPLCON0 = 0x5200`).
+/// Number of colours: 5 bitplanes (as the game's copper list sets `BPLCON0`).
 pub const PALETTE_LEN: usize = 32;
 /// Size of the PowerPacker-decrunched `game` executable the offsets below are measured on.
 pub const GAME_EXE_LEN: usize = 267_332;
@@ -24,10 +24,12 @@ pub const GAME_PALETTE_IN_HUNK: usize = 0x4A3C;
 /// File offset of the palette in the decrunched `game`: `243036 + 8 + 0x4A3C`.
 pub const GAME_PALETTE_OFFSET: usize = GAME_HUNK33_BLOCK + 8 + GAME_PALETTE_IN_HUNK;
 
-/// `HUNK_HEADER` magic that starts every AmigaDOS executable.
-const HUNK_HEADER: [u8; 4] = [0x00, 0x00, 0x03, 0xF3];
-/// `HUNK_DATA` id, then hunk 33's loaded length in longwords (0x13C3 × 4 = 20236 bytes).
-const HUNK33_DATA_BLOCK: [u8; 8] = [0x00, 0x00, 0x03, 0xEA, 0x00, 0x00, 0x13, 0xC3];
+/// `HUNK_HEADER` id (AmigaDOS hunk format) that starts every executable.
+const HUNK_HEADER: u32 = 0x3F3;
+/// `HUNK_DATA` id (AmigaDOS hunk format).
+const HUNK_DATA: u32 = 0x3EA;
+/// Hunk 33's loaded length in longwords (0x13C3 × 4 = 20236 bytes), the word after its id.
+const HUNK33_LONGS: u32 = 0x13C3;
 
 /// One colour, 8 bits per channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -80,14 +82,18 @@ pub fn palette(game: &[u8]) -> Result<[Rgb; PALETTE_LEN]> {
         GAME_EXE_LEN,
         "game executable (PowerPacker-decrunched)",
     )?;
-    if bytes::slice(game, 0, 4, "game hunk header")? != HUNK_HEADER {
+    if bytes::u32_be(game, 0, "game hunk header")? != HUNK_HEADER {
         return Err(FormatError::invalid(
             "game hunk header",
             0,
             "not an AmigaDOS executable (HUNK_HEADER 0x3F3)",
         ));
     }
-    if bytes::slice(game, GAME_HUNK33_BLOCK, 8, "game hunk 33 header")? != HUNK33_DATA_BLOCK {
+    let block = (
+        bytes::u32_be(game, GAME_HUNK33_BLOCK, "game hunk 33 header")?,
+        bytes::u32_be(game, GAME_HUNK33_BLOCK + 4, "game hunk 33 header")?,
+    );
+    if block != (HUNK_DATA, HUNK33_LONGS) {
         return Err(FormatError::invalid(
             "game hunk 33 header",
             GAME_HUNK33_BLOCK,

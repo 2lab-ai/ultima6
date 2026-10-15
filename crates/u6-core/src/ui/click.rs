@@ -257,7 +257,7 @@ enum Inventory {
     Code(u16),
     /// The combat mode changed: redraw its line (0x110c76).
     CombatMode,
-    /// "It's locked." and the prompt.
+    /// The locked line (0x104fe6) and the prompt.
     Locked,
     /// Open the chest (0xa0) after springing its trap (0x12ba36) and printing the prompt.
     Trap,
