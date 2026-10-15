@@ -87,18 +87,23 @@ impl Pacer {
 
     /// Adds a frame of `wall_dt_ms` and returns the steps owed, at most [`MAX_STEPS`]; nothing is
     /// taken off until [`Pacer::ran`]. The frame counts from 0 to [`CAP_MS`] (what lies beyond
-    /// goes to [`Pacer::clamped_ms`]), at the speed, or at 1× while `held` (a pointer button is
-    /// down), at [`Speed::Max`] too. At [`Speed::Max`] with no button held: [`MAX_STEPS`],
-    /// nothing added or cut.
+    /// goes to [`Pacer::clamped_ms`]; a time that is not finite counts 0), at the speed, or at 1×
+    /// while `held` (a pointer button is down), at [`Speed::Max`] too. A press (`held` after a
+    /// frame without) is a change of mode: what was owed is forgotten, neither dropped nor
+    /// clamped, so the hold runs exactly its 1× steps. At [`Speed::Max`] with no button held:
+    /// [`MAX_STEPS`], nothing added or cut.
     pub fn due(&mut self, wall_dt_ms: f64, held: bool) -> u32 {
+        if held && !self.held {
+            self.acc = 0.0;
+        }
         self.held = held;
         let Some(rate) = self.rate() else {
             return MAX_STEPS;
         };
-        let dt = if wall_dt_ms.is_nan() {
-            0.0
-        } else {
+        let dt = if wall_dt_ms.is_finite() {
             wall_dt_ms.max(0.0)
+        } else {
+            0.0
         };
         let taken = dt.min(CAP_MS);
         self.clamped += dt - taken;
@@ -284,6 +289,34 @@ mod tests {
         }
     }
 
+    /// A press while steps are still owed (a frame past the cap, a host that ran none) starts
+    /// from nothing: the hold is the 1× count, and none of the old debt is counted lost.
+    #[test]
+    fn a_press_forgets_the_debt_and_counts_nothing_lost() {
+        for speed in [Speed::Finite(8.0), Speed::Max] {
+            let mut p = at(speed);
+            p.due(400.0, false);
+            p.ran(0);
+            let (clamped, dropped) = (p.clamped_ms(), p.dropped_ms());
+            let held = run_held(&mut p, 1000.0 / 60.0, 150.0, true);
+            println!("{speed:?}: 150 ms held after a debt: {held} steps");
+            assert_eq!(held, 7, "{speed:?}: the 1× count");
+            assert_eq!(
+                (p.clamped_ms(), p.dropped_ms()),
+                (clamped, dropped),
+                "{speed:?}: the press counts nothing lost"
+            );
+            // The first held frame alone, the host running none of it: still nothing dropped.
+            let mut q = at(speed);
+            q.due(250.0, false);
+            q.ran(0);
+            let n = q.due(100.0, true);
+            q.ran(0);
+            assert_eq!(q.dropped_ms(), 0.0, "{speed:?}: not behind");
+            assert_eq!(n, 5, "{speed:?}: 100 ms at 1×");
+        }
+    }
+
     #[test]
     fn a_change_of_speed_forgets_the_debt() {
         let mut p = Pacer::new();
@@ -311,8 +344,12 @@ mod tests {
             0,
             "a clock that went back adds nothing"
         );
-        assert_eq!(p.due(f64::NAN, false), 0);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(p.due(bad, false), 0, "{bad} counts 0");
+            assert_eq!(p.due(bad, true), 0, "{bad} held counts 0");
+        }
         assert_eq!((p.clamped_ms(), p.dropped_ms()), (0.0, 0.0));
+        assert_eq!(p.due(20.0, false), 3, "the pace goes on after them");
         p.due(10.0, false);
         p.ran(5);
         assert_eq!(

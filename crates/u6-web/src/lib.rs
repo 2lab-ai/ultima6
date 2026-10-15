@@ -876,9 +876,10 @@ mod tests {
         assert!(report.contains("savegame/objblkAA"), "{report}");
     }
 
-    /// A game on synthetic state and no files: a grey palette, then each tick a pixel per
-    /// generation on row 0, each key taken drawn on row 1 and the pointer's cell lit, presented
-    /// before the frame's wait.
+    /// A game on synthetic state and no files: palette entry v = (v, 3v, 255 - v), then each tick
+    /// a pixel per generation on row 0, each key taken drawn on row 1 (its character as the
+    /// index) and logged as a stub hit, the pointer's cell lit, presented before the frame's
+    /// wait.
     fn synthetic_engine() -> Engine {
         Engine::with_game(
             u6_core::State::empty(),
@@ -900,6 +901,7 @@ mod tests {
                             _ => 0xff,
                         };
                         io.draw(|fb| fb.set(typed % 320, 1, code));
+                        u6_core::stub::hit("synthetic.key");
                         typed += 1;
                     }
                     let g = io.generation();
@@ -915,13 +917,20 @@ mod tests {
     }
 
     /// A tick is a step then a present: the same input through both gives the same frames (and
-    /// log), while a step alone leaves the RGBA frame as it was.
+    /// log), while a step alone leaves the RGBA frame as it was. The keys queued reach the game
+    /// in the tick after them (the queues empty, their characters drawn in the synthetic
+    /// palette's colours) and its log line comes through.
     #[test]
     fn a_tick_is_a_step_then_a_present() {
         let (mut a, mut b) = (Game::new(), Game::new());
         a.engine = Some(synthetic_engine());
         b.engine = Some(synthetic_engine());
         let first = a.frame_rgba();
+        let rgba = |v: u8| [v, v.wrapping_mul(3), 255 - v, 255];
+        let pixel = |g: &Game, x: usize, y: usize| {
+            let at = (y * 320 + x) * 4;
+            g.frame_rgba()[at..at + 4].to_vec()
+        };
         for i in 0..60u32 {
             for g in [&mut a, &mut b] {
                 if i % 7 == 3 {
@@ -937,9 +946,24 @@ mod tests {
             b.step(ms);
             b.present();
             assert!(a.frame_rgba() == b.frame_rgba(), "tick {i}: the same frame");
-            assert_eq!(a.take_log(), b.take_log());
+            let log = a.take_log();
+            assert_eq!(log, b.take_log());
             assert_eq!(a.keys_pending(), b.keys_pending());
+            if i == 3 {
+                assert_eq!(log, "stub: synthetic.key", "the first key's line");
+                for g in [&a, &b] {
+                    assert!(
+                        g.pending.is_empty() && g.keys_pending() == 0,
+                        "both keys taken"
+                    );
+                    assert_eq!(pixel(g, 0, 1), rgba(b't'), "t drawn");
+                    assert_eq!(pixel(g, 1, 1), rgba(b'-'), "- drawn after it");
+                }
+            } else {
+                assert_eq!(log, "", "tick {i}: one line per stub id");
+            }
         }
+        assert_eq!(pixel(&a, 17, 1), rgba(b'-'), "the ninth pair's -");
         assert!(a.frame_rgba() != first, "the frames changed");
         let shown = b.frame_rgba();
         b.step(20);
