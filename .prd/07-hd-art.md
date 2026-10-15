@@ -6,7 +6,7 @@ tags: [ultima6, hd, rendering, imagegen]
 
 # 07 — HD art: imagegen upscale with a scaler baseline
 
-Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 3 folds in the opus review, checked against the code: the scene list is replaced by a per-pixel source plane in the framebuffer, which follows every copy, offset, effect and persistence by construction. rev 4 folds in the gpt-6-astra re-review: each source carries the image version it was drawn from, and the plane is kept whenever the web build runs, so switching HD on loses nothing). This is user item 1 (`hd-i18n-voice/ssot.md`, verbatim): "hd 이미지 업스케일을 이미지젠 스킬로 해주고 hd 업스케일해줘". It builds the seam designed in `05-hd-output.md` (scene output, assets by id) for the map, portraits and panels. The research notes are kept outside the repo: `~/Games/ultima6/research/2026-10-15/r1-hd-findings.md`.
+Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 3 folds in the opus review, checked against the code: the scene list is replaced by a per-pixel source plane in the framebuffer, which follows every copy, offset, effect and persistence by construction. rev 4 folds in the gpt-6-astra re-review: each source carries the image version it was drawn from, and the plane is kept whenever the web build runs, so switching HD on loses nothing. rev 5, 2026-10-16, folds in what H0 and H3 measured: a pixel is current only when its `ver` equals the record's version, S is 2 or 4, the pack stores ×4, and portraits are gated on their layout). This is user item 1 (`hd-i18n-voice/ssot.md`, verbatim): "hd 이미지 업스케일을 이미지젠 스킬로 해주고 hd 업스케일해줘". It builds the seam designed in `05-hd-output.md` (scene output, assets by id) for the map, portraits and panels. The research notes are kept outside the repo: `~/Games/ultima6/research/2026-10-15/r1-hd-findings.md`.
 
 ## Measured facts
 
@@ -55,9 +55,9 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
    - **What this buys.**
      - The source follows every copy, offset, quake shift, dissolve and persisted front-buffer pixel by construction. That covers the scratch compositing at back (0,0) and (0,4), and a frame left on screen by a skipped render (06 O2).
      - Everything drawn directly (text, clock hands, sparkles, missiles, the pointer sprite, combat pixel replays) is classic. It is shown as the classic pixel scaled, so it can never be painted over.
-     - No list and no mask are needed. The one lifetime rule left is the image version: a pixel whose `ver` is older than its record's current version was drawn from bytes that no longer exist, so the compositor shows it classic until the game redraws it.
+     - No list and no mask are needed. The one lifetime rule left is the image version: a pixel whose `ver` differs from its record's current version was drawn from bytes that no longer exist, so the compositor shows it classic until the game redraws it. The test is equality, not "older": a relaunch replaces the State, and its versions restart, so the relaunch also resets every plane to classic (its colours untouched), and no old pixel can match a new version.
    - **Compositor (`u6-render`, in wasm).** It runs when its input key changes: `frame_version` (bumped on every change of `shown`) together with `hd_version` (bumped by the HD toggle, a scale change, and a pack load or forget).
-     - It writes an S×-sized RGBA frame, S = 2, 3 or 4 by device pixels.
+     - It writes an S×-sized RGBA frame, S = 2 or 4: MMPX is a 2× scaler and 4× is MMPX applied twice. The page picks 4 when the canvas's device-pixel size is at least 3× the logical 320 × 200, else 2.
      - For each screen pixel, it writes an S×S block:
        - a tile, portrait or bitmap pixel without flags and with a current `ver` takes the block `(u·S.., v·S..)` of that image's HD version;
        - an HD sub-pixel that is transparent takes the classic colour;
@@ -72,9 +72,9 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
    - `index.bin`: per record id, content hash, atlas, column, row, flags;
    - `atlas-N.webp` (lossless RGBA);
    - optional `portrait/<letter>-<item>.webp` (the `load_portrait` pair) and `bitmap/<role>.webp` (`paper`, `spellbook`);
-   - every image's entry in `index.bin` names its kind, id, the content hash of the classic image it was made from, and its size. Tiles are 16·8 px square; portraits and bitmaps are 8× their classic size. An image whose hash does not match the owner's classic image is ignored, and the MMPX fallback is used.
+   - every image's entry in `index.bin` names its kind, id, the content hash of the classic image it was made from, and its size. Tiles are 16·4 px square; portraits and bitmaps are 4× their classic size (the page's largest S; the tool keeps its ×8 slices as local masters and writes the pack at ×4, so a full pack of about 80 MB decoded fits the limit, where ×8 would need over 300 MB). An image whose hash does not match the owner's classic image is ignored, and the MMPX fallback is used.
 
-   The page accepts it through the existing drop or file picker. The page classifies a drop before `importFiles`: a zip with a `manifest.json` whose `format` is `u6-hdpack/1` goes to the HD loader and never starts a game. The page stores it in IndexedDB under `hd:*` (`site/store.js`) and reloads it on later visits. "Forget the HD pack" sits next to the other forget buttons. The page never fetches a pack. The limits are written here, because 04 W6a is not built (07 HD0–HD1 supersede 04 W10 and W6a for HD): ≤ 150 MB decoded, ≤ 4096 entries, each image exactly 16·8 px square for tiles or 8× its classic size for portraits and bitmaps; a malformed pack is refused with no change.
+   The page accepts it through the existing drop or file picker. The page classifies a drop before `importFiles`: a zip with a `manifest.json` whose `format` is `u6-hdpack/1` goes to the HD loader and never starts a game. The page stores it in IndexedDB under `hd:*` (`site/store.js`) and reloads it on later visits. "Forget the HD pack" sits next to the other forget buttons. The page never fetches a pack. The limits are written here, because 04 W6a is not built (07 HD0–HD1 supersede 04 W10 and W6a for HD): ≤ 150 MB decoded, ≤ 4096 entries, each image exactly 16·4 px square for tiles or 4× its classic size for portraits and bitmaps; a malformed pack is refused with no change.
 3. **HD2: the local imagegen tool (`tools/hd`, native Rust plus a driver).** Commands:
    - `inventory`: counts by kind, printed locally only.
    - `atlas`: builds sheets of 12×8 cells at 128 px (×8) per call, plus a cell map and `jobs.jsonl`. All frames of one actor go in one sheet; multi-record objects are composed into one mosaic; terrain uses wrap-border sheets.
@@ -82,7 +82,7 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
    - `ingest`: slices at the fixed pitch, keys out the background, then gates each cell.
    - `pack`: writes the pack.
 
-   Gate per cell: structure correlation ≥ 0.9, shift ≤ 0.5 source px, silhouette IoU ≥ 0.85, key purity ≤ 12 levels.
+   Gate per cell: structure correlation ≥ 0.9, shift ≤ 0.5 source px, silhouette IoU ≥ 0.85, key purity ≤ 12 levels. Portraits measure structure at the layout scale: both images box-averaged to 1/4 of the source size, then correlated, still ≥ 0.9. At the source pixel a faithful repaint scores 0.55–0.66, measured by H3 on synthetic portraits: 1-px features become drawn ones. Negative controls on synthetic portraits (mirrored, shifted by 1/8, two portraits swapped) must each fail a gate.
 
    Two group gates on top of the per-cell gate:
    - **Terrain seams.** Each terrain record is tiled 3×3 against itself. The seam step must stay ≤ 1.5× the interior step.
@@ -94,7 +94,7 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
    3. terrain;
    4. actors and objects.
 
-   Colour transfer to the record's own palette histogram reduces drift. Output is ×8 on disk; the page builds a ×4 atlas at load.
+   Colour transfer to the record's own palette histogram reduces drift. Sheets and slices are ×8 on disk in the work dir; the pack is written at ×4, and the page downsamples it to ×2 for S = 2.
 4. **HD3, later:**
    - an HD shore merge: the merge's single mask selecting between the HD versions of its two sources (all five planes share one mask, `anim.rs:42-60`); until then, coastlines show MMPX;
    - HD tints for the overlay OR and outline flashes, which v1 shows as classic pixels;
