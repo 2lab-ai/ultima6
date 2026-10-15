@@ -110,7 +110,7 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
 
 ## Acceptance
 
-1. **HD off.** Every parity receipt is bit-identical, and no plane is allocated.
+1. **HD off.** Every parity receipt is bit-identical. Native and the tests allocate no plane; the web build keeps writing it, and its classic frame is unchanged by it.
 2. **HD on, no pack.** The map, UI tiles, portraits and panels show MMPX ×S, and the pointer still hits the right cell. Synthetic tests check:
    - that the plane follows `copy_window`, `copy_rect` at an offset, the dissolve, the quake shift and a front pixel that persists across presents;
    - that text over a portrait, the clock hands, a sparkle, a missile and the pointer sprite stay classic;
@@ -134,5 +134,5 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
    - The pack survives a reload.
    - The dispatcher reads the frames on the owner's machine.
    - The pack is not in git, and the site serves no pack file. A test over `site/` and `git ls-files` checks this. A dropped pack never starts a game.
-5. **Performance.** Reference: headless Chromium on the owner's Mac (M5 Max), 60 Hz rAF, 4× speed, a castle walk with a full pack loaded. The compositor plus the canvas draw adds ≤ 4 ms per rAF at the median and ≤ 8 ms at p95. The page composes only when `frame_version` changed (06 O1).
+5. **Performance.** Reference: headless Chromium on the owner's Mac (M5 Max), 60 Hz rAF, 4× speed, a castle walk with a full pack loaded. The compositor plus the canvas draw adds ≤ 4 ms per rAF at the median and ≤ 8 ms at p95. The page composes only when `(frame_version, hd_version)` changed (06 O1).
 6. **Gates and live check.** All gates pass. On the live site, HD switches on and off with no foreign requests.
