@@ -52,14 +52,14 @@ enum Outcome<'a> {
 }
 
 #[derive(Clone, Debug)]
-struct Judged {
+pub(crate) struct Judged {
     /// The sheet it was on (a piece's images share one).
-    sheet: String,
-    place: Place,
-    id: ImageId,
-    classic: Classic,
-    hd: Rgba,
-    metrics: Metrics,
+    pub(crate) sheet: String,
+    pub(crate) place: Place,
+    pub(crate) id: ImageId,
+    pub(crate) classic: Classic,
+    pub(crate) hd: Rgba,
+    pub(crate) metrics: Metrics,
 }
 
 /// A line of `ingest.json`.
@@ -235,37 +235,57 @@ fn compose(parts: &[&Judged]) -> (Classic, Rgba) {
 }
 
 /// Whether a judged attempt of `item` passes: every image, then its group gate.
-fn passes(class: Class, judged: &[Judged], t: &Thresholds) -> bool {
-    judged.iter().all(|j| j.metrics.pass(t)) && group_passes(class, judged, t)
+fn passes(item: &Item, judged: &[Judged], t: &Thresholds) -> bool {
+    judged.iter().all(|j| j.metrics.pass(t)) && group_passes(item, judged, t)
 }
 
 /// The group gate of an item's images: the terrain seam, the actor motion.
-fn group_passes(class: Class, judged: &[Judged], t: &Thresholds) -> bool {
-    match class {
+fn group_passes(item: &Item, judged: &[Judged], t: &Thresholds) -> bool {
+    match item.class {
         Class::Terrain => judged
             .iter()
             .all(|j| gate::seam_passes(gate::seam(&j.classic, &j.hd, t.seam))),
-        Class::Actor => motion_of(judged).is_none_or(|m| m.is_finite() && m >= t.motion),
+        Class::Actor => motion_of(item, judged).is_none_or(|m| m.is_finite() && m >= t.motion),
         _ => true,
     }
 }
 
-/// The motion kept across an actor item's consecutive pieces of one shape.
-fn motion_of(judged: &[Judged]) -> Option<f32> {
+/// The motion kept between an actor item's frames of one facing: consecutive pieces of one
+/// shape whose frames (anchor record − base tile) fall in the same facing; a turn is not
+/// motion. A type of unknown layout pairs every consecutive piece (under the minimum a turn
+/// pair can only lower the result).
+pub(crate) fn motion_of(item: &Item, judged: &[Judged]) -> Option<f32> {
     let mut pieces: BTreeMap<u32, Vec<&Judged>> = BTreeMap::new();
     for j in judged {
         pieces.entry(j.place.piece).or_default().push(j);
     }
-    let composed: Vec<(Classic, Rgba)> = pieces.values().map(|parts| compose(parts)).collect();
+    let facing = |k: u32| -> Option<u32> {
+        let l = item.layout?;
+        let per = u32::from(l.per_facing?);
+        let anchor = item.pieces.get(k as usize)?.images.last()?;
+        let ImageId::Tile(r) = *anchor else {
+            return None;
+        };
+        Some(u32::from(r.checked_sub(l.base)?) / per.max(1))
+    };
+    let known = item.layout.is_some_and(|l| l.per_facing.is_some());
+    let composed: Vec<(Option<u32>, Classic, Rgba)> = pieces
+        .iter()
+        .map(|(&k, parts)| {
+            let (c, h) = compose(parts);
+            (facing(k), c, h)
+        })
+        .collect();
     let pairs: Vec<(Classic, Classic, Rgba, Rgba)> = composed
         .windows(2)
-        .filter(|w| (w[0].0.width, w[0].0.height) == (w[1].0.width, w[1].0.height))
+        .filter(|w| (w[0].1.width, w[0].1.height) == (w[1].1.width, w[1].1.height))
+        .filter(|w| !known || (w[0].0.is_some() && w[0].0 == w[1].0))
         .map(|w| {
             (
-                w[0].0.clone(),
-                w[1].0.clone(),
                 w[0].1.clone(),
                 w[1].1.clone(),
+                w[0].2.clone(),
+                w[1].2.clone(),
             )
         })
         .collect();
@@ -428,11 +448,11 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
             if item.class == Class::Actor {
                 let line = serde_json::json!({
                     "item": no, "attempt": attempt, "class": "actor",
-                    "motion": motion_of(v), "gates": t.text(),
+                    "motion": motion_of(item, v), "gates": t.text(),
                 });
                 let _ = writeln!(gates_log, "{line}");
             }
-            if passes(item.class, v, t) {
+            if passes(item, v, t) {
                 passed = Some(v);
                 break;
             }

@@ -187,7 +187,64 @@ pub fn digest(parts: &[&[u8]]) -> String {
     format!("{h:016x}")
 }
 
+/// The work dir's lock, held while a command writes there; removed when dropped.
+#[derive(Debug)]
+pub struct Lock {
+    path: PathBuf,
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Whether process `pid` is running.
+fn alive(pid: &str) -> bool {
+    !pid.is_empty()
+        && pid.bytes().all(|b| b.is_ascii_digit())
+        && std::process::Command::new("/bin/kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+}
+
 impl Work {
+    /// Takes the work dir's lock (`.u6-hd.lock`, created with `O_EXCL`, holding the pid): a
+    /// second command on the same work dir is refused while the first runs; a lock whose
+    /// process is gone is taken over.
+    pub fn lock(&self) -> Result<Lock, String> {
+        let dir = ensure_dir(&self.root)?;
+        let path = dir.join(".u6-hd.lock");
+        for _ in 0..2 {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    let _ = write!(f, "{}", std::process::id());
+                    return Ok(Lock { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let pid = std::fs::read_to_string(&path).unwrap_or_default();
+                    if alive(pid.trim()) {
+                        return Err(format!(
+                            "{}: another u6-hd (pid {}) is using this work dir",
+                            path.display(),
+                            pid.trim()
+                        ));
+                    }
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            }
+        }
+        Err(format!("{}: could not take the lock", path.display()))
+    }
+
     /// The work dir at `dir`, or the default under `HOME`; refused inside a protected tree.
     pub fn open(dir: Option<&Path>) -> Result<Work, String> {
         let root = match dir {

@@ -13,6 +13,21 @@ pub struct Classic {
 }
 
 impl Classic {
+    /// A tile record in the synthetic palette (tests and the synthetic runs).
+    pub fn from_record(r: &crate::game::Record) -> Classic {
+        let pal = crate::game::synthetic::PALETTE;
+        Classic {
+            width: 16,
+            height: 16,
+            px: r
+                .pixels
+                .iter()
+                .zip(&r.transparent)
+                .map(|(&p, &t)| (!t).then(|| pal[usize::from(p) % pal.len()]))
+                .collect(),
+        }
+    }
+
     pub fn at(&self, x: u32, y: u32) -> Option<[u8; 3]> {
         self.px[(y * self.width + x) as usize]
     }

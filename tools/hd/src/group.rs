@@ -76,6 +76,39 @@ impl Piece {
 pub struct Item {
     pub class: Class,
     pub pieces: Vec<Piece>,
+    /// Actor items: how the type's frames are laid out.
+    pub layout: Option<Layout>,
+}
+
+/// The frames of an actor type: its base tile, how many, and how many per facing (a facing's
+/// frames are consecutive; `None` when the type's layout is not known, see [`actor_layout`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layout {
+    pub base: u16,
+    pub frames: u16,
+    pub per_facing: Option<u16>,
+}
+
+/// Frames and frames per facing of actor type `t`, as the original's face routine 0x11ba5e
+/// sets them (`u6_core::actors::walk::face`): humanoids four facings of four, 0x16a of twelve,
+/// 0x16b of three, 0x164 two random frames, the two-frame walkers four facings of two (from
+/// 0x1aa with the rear half's eight more), facing-only types one per facing, 0x1a8 eight per
+/// facing, 0x19b and the ship 0x19c (bow, hull and stern) pairs. `None` for every other type:
+/// its frames run to the next type's base tile and are paired in order.
+pub fn actor_layout(t: u16) -> Option<(u16, u16)> {
+    Some(match t {
+        0x178..=0x183 | 0x199 | 0x19a => (16, 4),
+        0x16a => (48, 12),
+        0x164 => (2, 2),
+        0x16b => (12, 3),
+        0x15a | 0x156 | 0x15c..=0x15f | 0x166 | 0x169 | 0x16f..=0x174 | 0x188 => (8, 2),
+        0x1aa.. => (16, 2),
+        0x19c => (24, 2),
+        0x162 | 0x167 | 0x19e | 0x184 => (4, 1),
+        0x1a8 => (32, 8),
+        0x19b => (8, 2),
+        _ => return None,
+    })
 }
 
 impl Item {
@@ -106,12 +139,40 @@ impl Plan {
             .sum()
     }
 
+    /// The actor spans split over more than one item (none, by construction; inventory and the
+    /// tests check it): an actor's records that draw are all in its item.
+    pub fn split_actors(&self, game: &Game) -> usize {
+        let owner = |r: u16| {
+            self.items
+                .iter()
+                .position(|i| i.images().any(|id| id == ImageId::Tile(r)))
+        };
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(k, i)| i.layout.map(|l| (k, l)))
+            .filter(|&(k, l)| {
+                (l.base..l.base.saturating_add(l.frames)).any(|r| {
+                    let draws = game
+                        .records
+                        .get(usize::from(r))
+                        .is_some_and(|rec| !rec.is_empty());
+                    let shore = game.shore.contains(&r);
+                    draws && !shore && owner(r).is_some_and(|o| o != k)
+                })
+            })
+            .count()
+    }
+
     /// A digest of every item: its class and pieces (shape and images), in order. Jobs carry
     /// it; ingest refuses jobs of another plan, since their item numbers mean other items.
     pub fn fingerprint(&self) -> String {
         let mut text = String::new();
         for item in &self.items {
             text.push_str(item.class.name());
+            if let Some(l) = item.layout {
+                text.push_str(&format!("|{l:?}"));
+            }
             for p in &item.pieces {
                 text.push_str(&format!("|{}x{}", p.w, p.h));
                 for id in &p.images {
@@ -184,6 +245,7 @@ pub fn plan(game: &Game) -> Plan {
                 letter: *letter,
                 item: *item,
             })],
+            layout: None,
         });
     }
     for role in Role::ALL {
@@ -191,6 +253,7 @@ pub fn plan(game: &Game) -> Plan {
             plan.items.push(Item {
                 class: Class::Bitmap,
                 pieces: vec![Piece::single(ImageId::Bitmap(role))],
+                layout: None,
             });
         }
     }
@@ -227,6 +290,7 @@ pub fn plan(game: &Game) -> Plan {
             plan.items.push(Item {
                 class: Class::Terrain,
                 pieces: vec![Piece::single(ImageId::Tile(t as u16))],
+                layout: None,
             });
         }
     }
@@ -277,21 +341,42 @@ pub fn plan(game: &Game) -> Plan {
         out.into_iter().map(|(_, p)| p).collect::<Vec<Piece>>()
     };
 
-    let mut actor_bases: Vec<usize> = game
-        .actor_types
-        .iter()
-        .filter_map(|&t| game.basetile.get(usize::from(t)))
-        .map(|&b| usize::from(b))
-        .filter(|&b| b < n)
-        .collect();
-    actor_bases.sort_unstable();
-    actor_bases.dedup();
-    for b in actor_bases {
-        let pieces = pieces_in(span(b), &mut taken, &mut used);
+    // An actor's frames: as many as its type has, from its base tile (another type's base
+    // tile among them does not cut them); a type of unknown layout up to the next base tile.
+    let mut actors: Vec<Layout> = Vec::new();
+    for &t in &game.actor_types {
+        let Some(&b) = game.basetile.get(usize::from(t)) else {
+            continue;
+        };
+        if usize::from(b) >= n {
+            continue;
+        }
+        let (frames, per_facing) = match actor_layout(t) {
+            Some((f, p)) => (f, Some(p)),
+            None => (span(usize::from(b)).len() as u16, None),
+        };
+        match actors.iter_mut().find(|l| l.base == b) {
+            Some(l) if l.frames < frames => {
+                (l.frames, l.per_facing) = (frames, per_facing);
+            }
+            Some(_) => {}
+            None => actors.push(Layout {
+                base: b,
+                frames,
+                per_facing,
+            }),
+        }
+    }
+    actors.sort_by_key(|l| l.base);
+    for l in actors {
+        let b = usize::from(l.base);
+        let range = b..(b + usize::from(l.frames)).min(n);
+        let pieces = pieces_in(range, &mut taken, &mut used);
         if !pieces.is_empty() {
             plan.items.push(Item {
                 class: Class::Actor,
                 pieces,
+                layout: Some(l),
             });
         }
     }
@@ -354,6 +439,7 @@ pub fn plan(game: &Game) -> Plan {
         plan.items.push(Item {
             class: Class::Multi,
             pieces,
+            layout: None,
         });
     }
     for (t, done) in taken.iter_mut().enumerate() {
@@ -362,6 +448,7 @@ pub fn plan(game: &Game) -> Plan {
             plan.items.push(Item {
                 class: Class::Object,
                 pieces: vec![Piece::single(ImageId::Tile(t as u16))],
+                layout: None,
             });
         }
     }

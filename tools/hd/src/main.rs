@@ -131,6 +131,14 @@ fn inventory(a: &Args) -> Result<(), String> {
         "mosaics joined to another that shares a record: {}",
         plan.overlaps
     );
+    let unknown = plan
+        .items
+        .iter()
+        .filter_map(|i| i.layout)
+        .filter(|l| l.per_facing.is_none())
+        .count();
+    println!("actor frame groups of no known layout (to the next base tile): {unknown}");
+    println!("actor spans split over items: {}", plan.split_actors(&g));
     let counts = atlas::sheet_counts(&g, &numbered(&plan));
     let total: usize = counts.iter().map(|(_, n)| n).sum();
     let name = |k: SheetKind| match k {
@@ -150,6 +158,7 @@ fn inventory(a: &Args) -> Result<(), String> {
 fn atlas_cmd(a: &Args) -> Result<(), String> {
     let g = game(a)?;
     let work = Work::open(a.work.as_deref())?;
+    let _lock = work.lock()?;
     if work.path("jobs.jsonl").exists() && !a.rebuild {
         return Err(format!(
             "{} exists: the atlas is built (atlas --rebuild makes a new one, and every output \
@@ -186,6 +195,7 @@ fn atlas_cmd(a: &Args) -> Result<(), String> {
 
 fn run_cmd(a: &Args) -> Result<(), String> {
     let work = Work::open(a.work.as_deref())?;
+    let _lock = work.lock()?;
     let codex = Codex::from_env(a.codex.clone())?;
     let opts = RunOptions {
         send: a.send,
@@ -209,6 +219,7 @@ fn run_cmd(a: &Args) -> Result<(), String> {
 fn ingest_cmd(a: &Args) -> Result<(), String> {
     let g = game(a)?;
     let work = Work::open(a.work.as_deref())?;
+    let _lock = work.lock()?;
     let report = ingest::ingest(&g, &work, &a.gates)?;
     print!("{}", report.text());
     Ok(())
@@ -216,6 +227,7 @@ fn ingest_cmd(a: &Args) -> Result<(), String> {
 
 fn pack_cmd(a: &Args) -> Result<(), String> {
     let work = Work::open(a.work.as_deref())?;
+    let _lock = work.lock()?;
     let s = pack::pack(&work, a.out.as_deref())?;
     println!(
         "pack: {} tiles, {} portraits, {} bitmaps, {} bytes (derived: true; never shared)",

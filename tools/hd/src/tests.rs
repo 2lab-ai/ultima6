@@ -968,7 +968,8 @@ fn a_flat_source_must_stay_flat() {
         (m.structure, m.shift, m.iou, m.purity),
         (None, None, None, None)
     );
-    assert!(m.flat.unwrap() < 1.0 && m.pass(&t), "{m:?}");
+    // Grain of ±20 inside each pixel: 5 levels (a quarter of its own spread), passes.
+    assert!(m.flat.unwrap() <= 5.0 && m.pass(&t), "{m:?}");
     // An invented checker of source pixels on the flat tile: fails.
     let mut checker = f.scaled(8, KEY);
     for y in 0..128 {
@@ -1264,11 +1265,10 @@ fn a_group_accepted_before_is_revoked_whole() {
     let mut strict = t;
     strict.set("motion=1.5").unwrap();
     ingest::ingest(&g, &w2, &strict).unwrap();
-    let mut actors = std::collections::BTreeSet::new();
-    for a in of_class(&plan, Class::Actor) {
-        actors.extend(members(&g, a));
-    }
-    let want: std::collections::BTreeSet<String> = before.difference(&actors).cloned().collect();
+    // The walker's frame pairs move and fail; the facing-only beast has no moving pair.
+    let walker = members(&g, of_class(&plan, Class::Actor)[0]);
+    let want: std::collections::BTreeSet<String> = before.difference(&walker).cloned().collect();
+    assert!(members(&g, of_class(&plan, Class::Actor)[1]).is_subset(&want));
     assert_eq!(accepted(&w2), want);
     assert_eq!(packed(&w2), want);
     let _ = std::fs::remove_dir_all(&w.root);
@@ -1585,5 +1585,283 @@ fn one_deadline_covers_the_call_and_what_it_started() {
     // The events were kept, with the thread line.
     let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
     assert!(events.contains("thread.started"));
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
+fn an_actor_span_is_its_frame_count() {
+    let mut g = synthetic::game();
+    // Another type's base tile among the walker's frames (as an object sharing its tiles).
+    let free = g
+        .basetile
+        .iter()
+        .position(|&b| b == synthetic::END)
+        .unwrap();
+    g.basetile[free] = synthetic::ACTOR_A + 4;
+    let plan = group::plan(&g);
+    let actor = of_class(&plan, Class::Actor)[0];
+    assert_eq!(actor.pieces.len(), 8, "the walker's 8 frames stay one item");
+    assert_eq!(
+        actor.layout,
+        Some(group::Layout {
+            base: synthetic::ACTOR_A,
+            frames: 8,
+            per_facing: Some(2)
+        })
+    );
+    assert_eq!(plan.split_actors(&g), 0);
+    assert_eq!(group::actor_layout(synthetic::WALKER), Some((8, 2)));
+    assert_eq!(group::actor_layout(0x178), Some((16, 4)));
+    assert_eq!(group::actor_layout(0x1b0), Some((16, 2)));
+    assert_eq!(group::actor_layout(0x100), None);
+    // A record of the span taken by another item first is a split, and is counted.
+    let mut g2 = synthetic::game();
+    g2.in_chunks[usize::from(synthetic::ACTOR_A + 2)] = true;
+    g2.records[usize::from(synthetic::ACTOR_A + 2)].map = true;
+    let plan2 = group::plan(&g2);
+    assert_eq!(plan2.split_actors(&g2), 1);
+}
+
+/// The ingest-side record of one judged image, for the group gates.
+fn judged(piece: u32, id: ImageId, classic: Classic, hd: Rgba) -> ingest::Judged {
+    ingest::Judged {
+        sheet: "s".into(),
+        place: atlas::Place {
+            item: 0,
+            class: Class::Actor,
+            piece,
+            image: atlas::image_name(id),
+            hash: String::new(),
+            x: piece * CELL,
+            y: 0,
+            w: 16,
+            h: 16,
+            scale: 8,
+        },
+        id,
+        classic,
+        hd,
+        metrics: gate::Metrics::default(),
+    }
+}
+
+#[test]
+fn a_turn_is_not_motion() {
+    let g = synthetic::game();
+    let plan = group::plan(&g);
+    let walker = of_class(&plan, Class::Actor)[0];
+    let a = synthetic::ACTOR_A;
+    let classic = |f: u16| g.classic(tile(a + f)).unwrap();
+    // Every frame repainted facing the first way with its own step: each facing's step is kept
+    // whole, every turn is lost.
+    let facing_lost: Vec<ingest::Judged> = (0..8u16)
+        .map(|f| {
+            let drawn = Classic::from_record(&synthetic::figure(0, usize::from(f % 2), 10));
+            let hd = gate::key_out(&drawn.scaled(8, KEY), &classic(f), KEY);
+            judged(u32::from(f), tile(a + f), classic(f), hd)
+        })
+        .collect();
+    let m = ingest::motion_of(walker, &facing_lost).unwrap();
+    assert!(m > 0.95, "within-facing motion {m}");
+    // The same frames paired in order, turns included, would fail the gate.
+    let mut in_order = walker.clone();
+    in_order.layout = in_order.layout.map(|l| group::Layout {
+        per_facing: None,
+        ..l
+    });
+    let all = ingest::motion_of(&in_order, &facing_lost).unwrap();
+    assert!(
+        all < Thresholds::default().motion,
+        "consecutive pairs {all}"
+    );
+    // Each step kept at 30%: fails either way (the review's probe).
+    let damped: Vec<ingest::Judged> = (0..8u16)
+        .map(|f| {
+            let c = classic(f);
+            let base = classic(f - f % 2);
+            let mut hd = base.scaled(8, KEY);
+            if f % 2 == 1 {
+                let full = c.scaled(8, KEY);
+                for (o, (b, s)) in hd
+                    .pixels
+                    .iter_mut()
+                    .zip(base.scaled(8, KEY).pixels.iter().zip(&full.pixels))
+                {
+                    *o = (f32::from(*b) + 0.3 * (f32::from(*s) - f32::from(*b))).round() as u8;
+                }
+            }
+            let hd = gate::key_out(&hd, &c, KEY);
+            judged(u32::from(f), tile(a + f), c, hd)
+        })
+        .collect();
+    let m = ingest::motion_of(walker, &damped).unwrap();
+    assert!(m < Thresholds::default().motion, "damped {m}");
+}
+
+#[test]
+fn a_flat_tile_takes_no_other_picture() {
+    // The review's probe: a flat opaque tile against noise and a checker.
+    let t = Thresholds::default();
+    let f = Classic {
+        width: 16,
+        height: 16,
+        px: vec![Some([20, 20, 30]); 256],
+    };
+    let mut noise = Rgba::new(128, 128);
+    let mut s: u32 = 7;
+    for p in noise.pixels.chunks_exact_mut(4) {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        p.copy_from_slice(&[s as u8, (s >> 8) as u8, (s >> 16) as u8, 255]);
+    }
+    let mut checker = Rgba::new(128, 128);
+    for y in 0..128u32 {
+        for x in 0..128u32 {
+            let on = ((x / 32) + (y / 32)) % 2 == 0;
+            let v = if on { 250 } else { 0 };
+            img::put(&mut checker, x, y, [v, v, v, 255]);
+        }
+    }
+    for (what, raw) in [("noise", noise), ("checker", checker)] {
+        let m = gate::judge(&raw, &f, KEY, gate::Scale::Source).1;
+        assert!(!m.pass(&t), "{what}: {m:?}");
+    }
+}
+
+#[test]
+fn the_work_dir_takes_one_command_at_a_time() {
+    let w = work("lock");
+    let first = w.lock().unwrap();
+    assert!(w.lock().unwrap_err().contains("another u6-hd"));
+    drop(first);
+    let again = w.lock().unwrap();
+    drop(again);
+    // A lock left by a process that is gone is taken over.
+    let mut gone = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    std::fs::write(w.path(".u6-hd.lock"), pid.to_string()).unwrap();
+    assert!(w.lock().is_ok());
+    let _ = std::fs::remove_dir_all(&w.root);
+}
+
+#[test]
+fn the_review_paths_are_refused() {
+    let repo = crate::work::repo_root().canonicalize().unwrap();
+    let parent = repo.parent().unwrap().to_path_buf();
+    let name = repo.file_name().unwrap().to_str().unwrap().to_string();
+    let refused = |p: &Path| check_target(p).is_err();
+    assert!(refused(&repo.join("site/hd")));
+    assert!(refused(&repo.join("nonexist/../site/hd")));
+    assert!(refused(
+        &parent
+            .join("zz-nonexist")
+            .join("..")
+            .join(&name)
+            .join("site/hd")
+    ));
+    // Another case of the same path (APFS ignores case): the git work tree still holds it.
+    let upper = PathBuf::from(repo.to_str().unwrap().to_uppercase());
+    if upper.exists() {
+        assert!(refused(&upper.join("site/hd")));
+        assert!(refused(&upper.join("newdir/x")));
+    }
+    let t = temp("review-paths");
+    std::os::unix::fs::symlink(&repo, t.join("link-to-repo")).unwrap();
+    assert!(refused(&t.join("link-to-repo/site/hd")));
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+/// A `codex` stand-in from the review: `body` after reading the prompt or not.
+fn review_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, format!("#!/bin/bash\n{body}\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+#[test]
+fn the_review_codex_shapes_end_in_time() {
+    use std::time::{Duration, Instant};
+    let t = temp("review-codex");
+    let home = t.join("home");
+    std::fs::create_dir_all(home.join("generated_images/t1")).unwrap();
+    let dir = crate::work::ensure_dir(&t.join("dir")).unwrap();
+    std::fs::write(t.join("sheet.png"), b"x").unwrap();
+    let call = |bin: PathBuf, secs: u64, prompt: &str| {
+        let c = run::Codex {
+            bin,
+            home: home.clone(),
+            timeout: Duration::from_secs(secs),
+        };
+        let start = Instant::now();
+        (
+            c.generate(&t.join("sheet.png"), prompt, &dir),
+            start.elapsed(),
+        )
+    };
+    let thread = r#"echo '{"type":"thread.started","thread_id":"t1"}'"#;
+    // Reads the prompt to its end, prints a thread id, no image: fails promptly, prompt whole.
+    let seen = t.join("prompt-seen.txt");
+    let ok = review_stub(
+        &t,
+        "ok.sh",
+        &format!("cat > \"{}\"\n{thread}", seen.display()),
+    );
+    let (r, took) = call(ok, 5, "PROMPT");
+    assert_eq!(r.unwrap_err(), "no image generated");
+    assert!(took < Duration::from_secs(4), "{took:?}");
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "PROMPT");
+    // A helper left running with the output open: ends with the call, not 12 s later.
+    let bg = review_stub(
+        &t,
+        "bg.sh",
+        &format!("cat > /dev/null\n{thread}\n( sleep 12 ) &\nexit 0"),
+    );
+    let (r, took) = call(bg, 5, "PROMPT");
+    assert!(r.is_err());
+    assert!(took < Duration::from_secs(4), "{took:?}");
+    // Hangs: stopped at the deadline.
+    let hang = review_stub(
+        &t,
+        "hang.sh",
+        &format!("cat > /dev/null\n{thread}\n( sleep 12 ) &\nsleep 30"),
+    );
+    let (r, took) = call(hang, 2, "PROMPT");
+    assert!(r.unwrap_err().contains("timed out"));
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    // Does not take its prompt: stopped at once, long before the deadline.
+    let deaf = review_stub(&t, "deaf.sh", "exec 0<&-\nsleep 30");
+    let big = "x".repeat(1 << 20);
+    let (r, took) = call(deaf, 30, &big);
+    assert!(r.unwrap_err().contains("did not take its prompt"));
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
+fn the_generated_image_is_moved_out_of_codex_home() {
+    let t = temp("move");
+    let home = t.join("home");
+    let thread = home.join("generated_images/t-9");
+    std::fs::create_dir_all(&thread).unwrap();
+    let image = thread.join("exec-1.png");
+    std::fs::write(&image, b"png").unwrap();
+    let c = run::Codex {
+        bin: PathBuf::from("/nonexistent"),
+        home: home.clone(),
+        timeout: std::time::Duration::from_secs(1),
+    };
+    c.finish(&image);
+    assert!(!thread.exists());
+    assert!(home.join("generated_images").exists());
+    // Anything not under generated_images/<thread>/ is left alone.
+    let elsewhere = t.join("other/exec.png");
+    std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+    std::fs::write(&elsewhere, b"png").unwrap();
+    c.finish(&elsewhere);
+    assert!(elsewhere.exists());
     let _ = std::fs::remove_dir_all(&t);
 }

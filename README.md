@@ -56,5 +56,5 @@ scripts/deploy-web.sh main                          # Cloudflare Pages project u
 | `re/notes/` | reverse-engineering notes (formats, graphics, functions, subsystems, oracle, port map) |
 | `crates/u6-hdpack` | the HD pack format `u6-hdpack/1` (spec 07 HD1): writer, strict reader, the content hash of a classic image; no game data |
 | `tools/` | PP20, hunk flattener, REA drivers, Amiga emulator oracle, web test harness |
-| `tools/hd` | `u6-hd`, the local imagegen HD tool (spec 07 HD2): run by the owner on the owner's files; its sheets, outputs and packs stay in `~/Games/ultima6/hd/`, outside the repo |
+| `tools/hd` | `u6-hd`, the local imagegen HD tool (spec 07 HD2): run by the owner on the owner's files; its sheets, outputs and packs stay in `~/Games/ultima6/hd/`, outside the repo. It moves each generated image out of `~/.codex/generated_images/`; codex's own session log (`~/.codex/sessions/`) still keeps every sheet that was sent |
 | `site/` | the static page |

@@ -122,6 +122,13 @@ fn run_sends_nothing_without_send() {
     let o = e.run(&["run", "--work", w, "--codex", c, "--send"]);
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(e.calls(), jobs);
+    // Each image was moved out of codex's folder, its thread folder with it.
+    let left = std::fs::read_dir(e.home.join(".codex/generated_images"))
+        .unwrap()
+        .count();
+    assert_eq!(left, 0);
+    let runs = std::fs::read_to_string(work.join("runs.jsonl")).unwrap();
+    assert_eq!(runs.lines().count(), jobs);
     let o = e.run(&["run", "--work", w, "--codex", c, "--send"]);
     assert!(text(&o).contains("0 sheet(s) to generate"));
     assert_eq!(e.calls(), jobs);

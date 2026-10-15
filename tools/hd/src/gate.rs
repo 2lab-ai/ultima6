@@ -610,9 +610,12 @@ impl Metrics {
 }
 
 /// Flat-source fidelity: for a classic image of one colour, opaque (nothing to correlate, no
-/// edge to shift, no silhouette, no background), the largest standard deviation over the three
-/// channels of the slice box-averaged to the source pixel. A repaint may add grain inside a
-/// pixel; at the source pixel it stays flat. `None` for any other image.
+/// edge to shift, no silhouette, no background), the largest of three spreads, in levels:
+/// the slice box-averaged to the source pixel (a repaint may add grain inside a pixel; at the
+/// source pixel it stays flat), and a quarter of each of the slice's own spread and of its mean
+/// colour's distance from the classic colour (texture and colour may move, up to 4 × the gate:
+/// 48 levels by default). Each is the largest over the three channels. `None` for any other
+/// image.
 pub fn flatness(classic: &Classic, raw: &Rgba) -> Option<f32> {
     let first = classic.px[0]?;
     if classic.px.iter().any(|p| *p != Some(first)) {
@@ -635,14 +638,26 @@ pub fn flatness(classic: &Classic, raw: &Rgba) -> Option<f32> {
             blocks.push(acc);
         }
     }
-    let m = blocks.len() as f64;
-    let sd = (0..3)
-        .map(|i| {
-            let mean = blocks.iter().map(|b| b[i]).sum::<f64>() / m;
-            (blocks.iter().map(|b| (b[i] - mean).powi(2)).sum::<f64>() / m).sqrt()
-        })
+    let spread = |vals: &mut dyn Iterator<Item = [f64; 3]>| -> ([f64; 3], f64) {
+        let v: Vec<[f64; 3]> = vals.collect();
+        let m = v.len() as f64;
+        let mean: [f64; 3] = std::array::from_fn(|i| v.iter().map(|b| b[i]).sum::<f64>() / m);
+        let sd = (0..3)
+            .map(|i| (v.iter().map(|b| (b[i] - mean[i]).powi(2)).sum::<f64>() / m).sqrt())
+            .fold(0.0, f64::max);
+        (mean, sd)
+    };
+    let (_, block_sd) = spread(&mut blocks.into_iter());
+    let (mean, pixel_sd) = spread(
+        &mut raw
+            .pixels
+            .chunks_exact(4)
+            .map(|p| [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])]),
+    );
+    let offset = (0..3)
+        .map(|i| (mean[i] - f64::from(first[i])).abs())
         .fold(0.0, f64::max);
-    Some(sd as f32)
+    Some(block_sd.max(pixel_sd / 4.0).max(offset / 4.0) as f32)
 }
 
 /// The scale structure is measured at.

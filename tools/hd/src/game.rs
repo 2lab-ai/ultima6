@@ -370,6 +370,10 @@ pub mod synthetic {
     pub const WATER_FRAMES: u16 = 64;
     pub const SHORE: u16 = 11;
     pub const ACTOR_A: u16 = 128;
+    /// Actor types (constants of the original's face routine, `group::actor_layout`): four
+    /// facings of two frames, and four facings of one.
+    pub const WALKER: u16 = 0x15a;
+    pub const FACING_ONLY: u16 = 0x162;
     pub const ACTOR_B: u16 = 136;
     pub const TREE: u16 = 144;
     pub const TABLE: u16 = 148;
@@ -483,7 +487,7 @@ pub mod synthetic {
     }
 
     /// A walking figure: `dir` 0..4 turns the face, `step` 0/1 moves the legs one pixel.
-    fn figure(dir: usize, step: usize, body: u8) -> Record {
+    pub fn figure(dir: usize, step: usize, body: u8) -> Record {
         rec(
             |x, y| {
                 let (x, y) = (x as i32, y as i32);
@@ -730,8 +734,6 @@ pub mod synthetic {
         flags2[usize::from(BANNER) + 1] = DOUBLE_HEIGHT;
         let mut basetile = vec![END; 1024];
         let bases = [
-            ACTOR_A,
-            ACTOR_B,
             TREE,
             TABLE,
             BANNER,
@@ -740,8 +742,12 @@ pub mod synthetic {
             OBJECTS + 2,
             LEFT_HALF,
         ];
-        // Type 0 is no object, as in the files; the types start at 1.
+        // Type 0 is no object, as in the files; the objects' types start at 1. The actors have
+        // types of known frame layouts (group::actor_layout): a two-frame walker and a
+        // facing-only creature.
         basetile[1..=bases.len()].copy_from_slice(&bases);
+        basetile[usize::from(WALKER)] = ACTOR_A;
+        basetile[usize::from(FACING_ONLY)] = ACTOR_B;
         let mut in_chunks = vec![false; TILE_COUNT];
         for t in TERRAIN {
             in_chunks[usize::from(t)] = true;
@@ -759,7 +765,7 @@ pub mod synthetic {
                 shift: 0,
             }],
             shore: vec![SHORE],
-            actor_types: vec![1, 2],
+            actor_types: vec![WALKER, FACING_ONLY],
             bitmap_colours: (0..=255u8).map(|b| b & 0x1f).collect(),
             portraits: vec![(b'a', 0, portrait(0)), (b'a', 1, portrait(1))],
             bitmaps: vec![

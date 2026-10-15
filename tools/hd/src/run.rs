@@ -1,8 +1,9 @@
 //! `run`: one imagegen call per sheet not yet done, 2–4 at a time, through Codex's built-in
 //! `image_gen` tool (`codex exec -m gpt-6-astra`, the imagegen skill's default path: the
 //! ChatGPT account Codex is signed in to, no API key, never the CLI fallback). The built-in
-//! tool saves under `$CODEX_HOME/generated_images/<thread id>/`; the runner copies the image to
-//! `out/<sheet>.png` with a [`Receipt`]. Nothing is sent without `--send`.
+//! tool saves under `$CODEX_HOME/generated_images/<thread id>/`; the runner moves the image to
+//! `out/<sheet>.png` with a [`Receipt`] (the thread's folder is removed). Nothing is sent without
+//! `--send`. One command at a time uses a work dir ([`crate::work::Work::lock`]).
 //!
 //! A sheet is done when its receipt names the job's [`identity`] (the atlas generation, the
 //! sheet, the attempt, the prompt text and the sheet's bytes) and the output's digest, and the
@@ -30,6 +31,11 @@ pub trait Runner: Sync {
     /// Runs one call with `sheet` attached and `prompt`, `dir` as its working dir; returns the
     /// generated image's path.
     fn generate(&self, sheet: &Path, prompt: &str, dir: &Path) -> Result<PathBuf, String>;
+
+    /// After the image at `image` was read: removes what the call left of it.
+    fn finish(&self, image: &Path) {
+        let _ = image;
+    }
 }
 
 /// The model of every call.
@@ -124,9 +130,15 @@ impl Runner for Codex {
             }
             let _ = tx.send(Event::Done);
         });
-        if let Some(mut stdin) = child.stdin.take() {
-            // A child that does not read its prompt fails the call; the deadline still holds.
-            let _ = stdin.write_all(prompt.as_bytes());
+        if let Some(mut stdin) = child.stdin.take()
+            && let Err(e) = stdin.write_all(prompt.as_bytes())
+        {
+            // A call that does not take its prompt is stopped at once, with all it started.
+            kill_group(pgid);
+            let _ = child.wait();
+            let _ = work::commit(&stderr_tmp, &stderr_path);
+            let _ = work::commit(&events_tmp, &events_path);
+            return Err(format!("the call did not take its prompt: {e}"));
         }
         let status = loop {
             if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
@@ -179,6 +191,24 @@ impl Runner for Codex {
             .pop()
             .map(|(_, p)| p)
             .ok_or("no image generated".into())
+    }
+
+    /// The image is moved, not copied: its thread's folder under `generated_images` goes once
+    /// the image was read (codex's own session log, outside the tool's reach, keeps the sheet
+    /// that was sent).
+    fn finish(&self, image: &Path) {
+        let Some(thread) = image.parent() else { return };
+        let images = self.home.join("generated_images");
+        let inside = match (
+            thread.parent().map(Path::canonicalize),
+            images.canonicalize(),
+        ) {
+            (Some(Ok(a)), Ok(b)) => a == b,
+            _ => false,
+        };
+        if inside {
+            let _ = std::fs::remove_dir_all(thread);
+        }
     }
 }
 
@@ -314,14 +344,19 @@ pub fn run(
                         "sheet": job.sheet, "ok": result.is_ok(), "seconds": secs,
                         "error": result.err(),
                     });
-                    log.push_str(&rec.to_string());
-                    log.push('\n');
+                    // Written after every call, so a run that stops keeps its record.
+                    let line = format!("{rec}\n");
+                    if let Err(e) = work::append_file(&work.path("runs.jsonl"), &line) {
+                        log.push_str(&e);
+                    }
                 }
             });
         }
     });
     let (_, _, log) = shared.into_inner().unwrap_or_else(|e| e.into_inner());
-    work::append_file(&work.path("runs.jsonl"), &log)?;
+    if !log.is_empty() {
+        return Err(log);
+    }
     Ok(summary)
 }
 
@@ -330,6 +365,7 @@ fn call(work: &Work, runner: &dyn Runner, job: &Job) -> Result<(), String> {
     let dir = work::ensure_dir(&work.codex_dir(&job.sheet))?;
     let sheet = work.sheet(&job.sheet);
     let got = runner.generate(&sheet, &prompt::text(job), &dir)?;
-    let png = img::read_capped(&got, img::PNG_MAX_BYTES)?;
-    record(work, job, &png)
+    let png = img::read_capped(&got, img::PNG_MAX_BYTES);
+    runner.finish(&got);
+    record(work, job, &png?)
 }
