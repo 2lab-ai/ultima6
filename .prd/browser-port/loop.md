@@ -47,11 +47,8 @@ re-verified: G1 · gargoyles stand in the throne room in the M2 production frame
 | Unit | Branch | Scope | State |
 |---|---|---|---|
 | nostep | fix/m2r6-nostep | the cost of commands that do not walk: a blocked step (the port runs no world turn; check the asm and trace) and Pass (followers' pass + vessel drift unpaced, commands.rs:400-402) | in flight |
-| zip-slice | fix/m2r6-zip-slice | a dropped zip is read by `Blob.slice` (central directory + wanted entries only), wasm ~192 MiB → measured | in flight |
 
 Open items carried from WU-P7b (assign in M2-int):
-- wasm memory stays ~192 MiB per tab because the whole zip is copied in; read only the disk
-  entries with `Blob.slice` (~30× less).
 
 ## Next
 
