@@ -29,3 +29,28 @@ Append-only. Closed units, with their receipts.
   - Reviews:
     - gpt-6-astra, in three parts: pacer CHANGES (accelerated debt spent under a held press), then APPROVE; owner APPROVE; web CHANGES (the same defect).
     - opus: CHANGES (the same defect, measured at 60 steps against 1×'s 7), then APPROVE.
+
+| T2 | 06 | `site/app.js` fixed-step loop, key intercept by DOM `key`, badge and Speed buttons, `localStorage`, gain ramp above 4×; harness `GLUE_HOOKS` wraps `step` + rAF/now shim; delete `Game::tick`; web tests | T1 |
+| T3 | 06 | native `run_window` on `Pacer`, `HEADLESS_TICK_MS` 20, keys, speed in the title; re-run the 16 ms receipts at 20 ms | T1 |
+
+- **T3** merged at 558eb5e (branch 433c071 + 395cfe9 + 14972e1).
+  - Native `run_window` is paced by the Pacer within a frame budget, and a frame's input goes to its first step.
+  - Keys: `-`/`=` and numpad ±, with the speed shown in the title. Music fades above 4×. Headless runs at 20 ms.
+  - The real-data receipts now run at `STEP_MS`, all within ±15%: start fight median 325 (+8.3%) and 302 (+9.0%), castle 35 (+6.1%), held-walk cells unchanged.
+  - The tick-independence check runs at 20 vs 10 ms. The 4 ms miss at 20 vs 8 ms was measured as key-tick delay plus end rounding, not drift.
+  - Gates on the merge: 823 passed, web 29/29, oracle and trace tests pass.
+  - Reviews: gpt-6-astra in three parts, no must-fix; opus APPROVE, then APPROVE again for round 3.
+- **T2** merged at 810df38 (branch 0b6fb34 + 3fbc365 + 3800d1d + ea582a8 + 402f78e).
+  - The page loop runs pace → bounded 20 ms steps → ran → present only when a step ran.
+  - Keys: `-`/`=`/`+` by DOM key unless the game owns them; numpad always changes the speed.
+  - Presets 1×–8× and Max, kept in localStorage. Badge, Speed buttons and "behind".
+  - The music fade has τ ≈ 50/3 ms. `Game::tick` is deleted. The harness counts steps on a virtual 60/144 Hz display.
+  - Gates on the merge: 824 passed, web 41/41 (twice on the branch).
+  - Reviews: gpt-6-astra crates and site APPROVE; tests CHANGES (a direction printed from game state, a stall test mixing pre-existing loss, a zero-hold false pass), then APPROVE. opus APPROVE through round 4.
+- **Deploys.**
+  - Preview 3ed52338, then production 269ed8c1, both at main 810df38.
+  - Live check on production with the owner's files:
+    - speed 1 → 4 (`=`), 3 (`-`), 4 (numpad +), Max shown as 76.5×, back down to 1, and 1.5 kept across a reload;
+    - a pass in the opening fight took 5.3–12.3 s at 1× and 0.6–1.9 s at 4×;
+    - 0 foreign requests, 0 console errors.
+  - The dispatcher read frames 07 (4× badge and controls) and 08 (Max 76.8× on preview).
