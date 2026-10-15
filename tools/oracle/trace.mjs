@@ -11,6 +11,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
 import { cpuFrames, hunkBases, loadSnapshot, runtime, townSetup } from './game.mjs';
+import { closeAt, stopPrompt } from './tracecore.mjs';
 
 const [out, snap, ...keyArgs] = process.argv.slice(2);
 if (!out || !snap) throw new Error('usage: node trace.mjs OUTDIR SNAPSHOT [KEY ...]');
@@ -32,14 +33,9 @@ const TRACED = {
 const h = await o.launch({ log: (s) => appendFileSync(join(out, 'trace.log'), `${s}\n`) });
 const { page } = h;
 // The console prompt printed since the last resume (`mark` = the console's length right after
-// it; the emulator does not run while a command is typed, so a prompt past it is a new stop,
-// and the one the resume was typed at, which shows the old PC, is never taken for it).
+// it; tracecore.mjs stopPrompt).
 let mark = 0;
-const prompt = async () => {
-  const t = await page.evaluate(() => wasm_retro_shell_get_text());
-  const m = [...t.matchAll(/\((\d+),(\d+)\) \$([0-9a-f]+):/g)].filter((x) => x.index >= mark).at(-1);
-  return m ? { v: Number(m[1]), pc: parseInt(m[3], 16) } : null;
-};
+const prompt = async () => stopPrompt(await page.evaluate(() => wasm_retro_shell_get_text()), mark);
 // Runs on (`g`) or steps (`s`) from a stop, and marks the console there: typed and marked in
 // one page call, so no frame can run (and stop) between the command and the mark.
 const resume = async (cmd) => {
@@ -144,19 +140,15 @@ try {
         open.push({ fn, ret, a7, at, depth: open.length, actor, worktype });
       }
       if (returns.has(p.pc)) {
-        // Only the youngest open call may return, to its own return address with A7 back above
-        // its return long; that address reached otherwise (a loop through the call site) is no
-        // return; an older call returning with younger ones open is a trace gone wrong.
-        const top = open.at(-1);
-        if (top && top.ret === p.pc && top.a7 + 4 === a7) {
-          open.pop();
-          calls.push({ fn: top.fn, at: top.at, frames: at - top.at, depth: top.depth, actor: top.actor, worktype: top.worktype });
-        } else {
-          const k = open.findIndex((c) => c.ret === p.pc && c.a7 + 4 === a7);
-          if (k >= 0) {
-            throw new Error(`${key}: ${TRACED[open[k].fn]} returned with ${open.length - 1 - k} younger calls open (${open.slice(k + 1).map((c) => TRACED[c.fn]).join(', ')})`);
-          }
+        // The youngest open call returns, or none does (tracecore.mjs closeAt); an older one
+        // returning with younger ones open ends the trace.
+        let top;
+        try {
+          top = closeAt(open, p.pc, a7, (fn) => TRACED[fn]);
+        } catch (e) {
+          throw new Error(`${key}: ${e.message}`);
         }
+        if (top) calls.push({ fn: top.fn, at: top.at, frames: at - top.at, depth: top.depth, actor: top.actor, worktype: top.worktype });
       }
       await resume('g');
     }
