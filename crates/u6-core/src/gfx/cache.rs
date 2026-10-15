@@ -41,9 +41,11 @@ use u6_formats::gfx::{ANIM_FRAMES, TILE_COUNT, TILE_H, TILE_W};
 pub(super) const BOXES: usize = WINDOW_TILES * WINDOW_TILES;
 
 /// Port-only, no original address: what the last map window render of the refresh drew, and the
-/// records' versions. A cache, not game state: equal
-/// whatever it holds (the same game with and without it is the same `State`), and empty in a
-/// clone (a copy cannot know which back buffer it would describe).
+/// records' versions. A cache, not game state: equal whatever it holds (the same game with and
+/// without it is the same `State`). A clone has no window memo (a copy cannot know which back
+/// buffer it would describe) and keeps the versions: the records are cloned with it, so a pixel
+/// drawn from one before the clone is current or stale for the clone as for the original (spec 07
+/// source plane).
 #[derive(Debug, Default)]
 pub struct RenderCache {
     window: Option<WindowMemo>,
@@ -59,9 +61,11 @@ pub struct RenderCache {
 }
 
 impl Clone for RenderCache {
-    /// Empty but for the static tables' fingerprint (the clone holds the same tables).
+    /// No window memo and no counts; the records' versions and the static tables' fingerprint
+    /// (the clone holds the same records and tables).
     fn clone(&self) -> Self {
         Self {
+            versions: self.versions.clone(),
             static_tables: self.static_tables,
             ..Self::default()
         }
@@ -87,8 +91,33 @@ impl RenderCache {
         }
     }
 
-    fn version(&self, r: usize) -> u32 {
+    /// Record `r`'s version: the changes of its pixels so far, 0 before the first. The source
+    /// plane names it with each pixel drawn from the record (spec 07; a clone of the cache
+    /// starts again at 0).
+    pub fn version(&self, r: usize) -> u32 {
         self.versions.get(r).copied().unwrap_or(0)
+    }
+}
+
+/// Port-only (spec 07 HD0): the sources of pixels kept beside game state (the block under a
+/// flight sprite, a recorded frame), so that pixels put back name their images again. Not game
+/// state: equal whatever it holds (a run with the source plane and one without are the same
+/// `State`); `None` when the buffer they came from had no plane.
+#[derive(Clone, Debug, Default)]
+pub struct Sources(pub Option<Vec<u6_render::Src>>);
+
+impl PartialEq for Sources {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Sources {}
+
+impl Sources {
+    /// The source at `i`, if there are sources.
+    pub fn at(&self, i: usize) -> Option<u6_render::Src> {
+        self.0.as_ref().and_then(|s| s.get(i).copied())
     }
 }
 

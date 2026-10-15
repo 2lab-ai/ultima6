@@ -43,4 +43,4 @@ pub use engine::{BootError, Engine, InputEvent, Io, Key};
 pub use files::Files;
 pub use rng::Rng;
 pub use state::{LoadError, State};
-pub use u6_render::{Framebuffer, HEIGHT, Rgb, WIDTH};
+pub use u6_render::{Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH};

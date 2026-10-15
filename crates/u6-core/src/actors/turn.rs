@@ -633,6 +633,7 @@ fn owe_first(s: &mut State, owed: &mut u32) {
             w: 0,
             h: 0,
             pixels: Vec::new(),
+            src: Default::default(),
             cost: part,
             mark: 0,
             dissolve: false,

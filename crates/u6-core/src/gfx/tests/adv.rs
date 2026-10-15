@@ -18,7 +18,7 @@ use crate::state::State;
 
 /// A xorshift64 stream (the edits' dice).
 #[derive(Clone)]
-struct X(u64);
+pub(super) struct X(pub(super) u64);
 
 impl X {
     fn next(&mut self) -> u64 {
@@ -33,7 +33,7 @@ impl X {
         self.next() % n
     }
     /// Per mille.
-    fn pm(&mut self, p: u64) -> bool {
+    pub(super) fn pm(&mut self, p: u64) -> bool {
         self.below(1000) < p
     }
 }
@@ -59,7 +59,7 @@ fn mask_record(b2: &mut Vec<u8>, skip: u8, rows: &[u16]) -> u16 {
 /// and one ([`TALL`]) whose rows pass its tile, the clock's tables, three animation slots, a
 /// palette; and the mask words of four shore mask records (overlapping, partial, an odd skip)
 /// and one past the block.
-fn scene() -> (State, Vec<u16>) {
+pub(super) fn scene() -> (State, Vec<u16>) {
     let mut s = State::empty();
     let mut g = crate::gfx::GfxState::default();
     for n in 0..MAPS {
@@ -216,13 +216,13 @@ fn write_lists(s: &mut State, base: &[u16], lists: &[Vec<u16>]) {
 }
 
 /// Each cell's base word and object list, as the edits keep them.
-struct Lists {
-    base: Vec<u16>,
-    lists: Vec<Vec<u16>>,
+pub(super) struct Lists {
+    pub(super) base: Vec<u16>,
+    pub(super) lists: Vec<Vec<u16>>,
 }
 
 /// Step `step`'s random edits (the same stream on both sides).
-fn edit(s: &mut State, io: &Io, x: &mut X, l: &mut Lists, words: &[u16], step: u32) {
+pub(super) fn edit(s: &mut State, io: &Io, x: &mut X, l: &mut Lists, words: &[u16], step: u32) {
     if step == 0 || x.pm(15) {
         for b in 0..121 {
             l.base[b] = word(x) & if x.pm(800) { 0x7ff } else { 0xffff };
@@ -394,7 +394,7 @@ fn run(seed: u64, steps: u32) -> (u64, u64, u64) {
         edit(&mut off, &io_off, &mut rng, &mut l, &words, i);
         assert!(rng.0 == x_on.0, "the same edits");
         if rng.pm(5) {
-            // A clone of the State takes over (an empty cache).
+            // A clone of the State takes over (no window memo, the versions kept).
             on = on.clone();
             off = off.clone();
         }
@@ -413,7 +413,7 @@ fn run(seed: u64, steps: u32) -> (u64, u64, u64) {
             crate::gfx::refresh_view(&mut other_on, &io_on);
             crate::gfx::refresh_view(&mut other_off, &io_off);
         }
-        // Counted on the state that refreshes (a clone above started at 0).
+        // Counted on the state that refreshes (a clone above started its counts at 0).
         let before = counts(&on);
         crate::gfx::refresh_view(&mut on, &io_on);
         crate::gfx::refresh_view(&mut off, &io_off);

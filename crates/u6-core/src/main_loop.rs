@@ -45,6 +45,8 @@
 pub mod commands;
 pub mod main_hunk;
 #[cfg(test)]
+mod plane_receipt;
+#[cfg(test)]
 mod receipts;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -256,10 +258,18 @@ pub async fn game_first(state: Rc<RefCell<State>>, io: Rc<Io>) {
 /// Save is a command, and the end of the command loop ends the launcher), so the block files
 /// are the user's. Unchanged when the files no longer load.
 fn relaunch(state: &RefCell<State>, io: &Io) {
-    let Ok(mut fresh) = State::new_game(io.files()) else {
+    let Ok(fresh) = State::new_game(io.files()) else {
         return;
     };
-    let mut s = state.borrow_mut();
+    take_over(&mut state.borrow_mut(), fresh, io);
+}
+
+/// The new process `fresh` takes the place of `s` ([`relaunch`]): the RNG, the save state and
+/// the sound log go on, the character `u` made is read in. Its records' versions start again at
+/// 0 while the screen buffers keep what the old records drew, so every source plane is reset to
+/// classic, the colours untouched ([`Io::reset_src_plane`]): no old pixel can match a new
+/// version (spec 07 HD0).
+pub(crate) fn take_over(s: &mut State, mut fresh: State, io: &Io) {
     fresh.rng = s.rng;
     fresh.saveload = std::mem::take(&mut s.saveload);
     fresh.sound.continue_calls(&mut s.sound);
@@ -268,6 +278,7 @@ fn relaunch(state: &RefCell<State>, io: &Io) {
         fresh.place_party();
     }
     *s = fresh;
+    io.reset_src_plane();
 }
 
 /// Original: 0x1351d8 (main(): setup, load data, character check, music, command loop) [partial]
@@ -365,15 +376,21 @@ fn boot_screen(state: &RefCell<State>, io: &Io) {
 ///
 /// The file name is the pointer at A4-0x61e2; 0x1346a0 reads and LZW-decodes it, 0x153384 draws
 /// it at (0, 0) through the bitmap colour map. A missing or bad file draws nothing, as the
-/// original skips the draw when the open fails.
+/// original skips the draw when the open fails. The source plane names it the paper.
 pub fn draw_paper(s: &State, io: &Io) {
-    let name = pointed_string(io, A4.wrapping_sub(0x61e2));
-    let name = String::from_utf8_lossy(&name).into_owned();
-    let Some(bmp) = io.files().get(&name).and_then(|f| Bitmap::from_lzw(f).ok()) else {
+    let Some(bmp) = paper_bitmap(io) else {
         return;
     };
     let colours = &s.gfx.tables.bitmap_colours;
-    io.draw(|fb| crate::gfx::blit::blit_bmp(colours, fb, &bmp, 0, 0));
+    let role = u6_render::BITMAP_PAPER;
+    io.draw(|fb| crate::gfx::blit::blit_bmp(colours, fb, &bmp, 0, 0, role));
+}
+
+/// The bitmap [`draw_paper`] draws, decoded; `None` for a missing or bad file.
+pub(crate) fn paper_bitmap(io: &Io) -> Option<Bitmap> {
+    let name = pointed_string(io, A4.wrapping_sub(0x61e2));
+    let name = String::from_utf8_lossy(&name).into_owned();
+    io.files().get(&name).and_then(|f| Bitmap::from_lzw(f).ok())
 }
 
 /// The calls 0x105350 makes after its reads, in its order: link the actors (0x10edb4),

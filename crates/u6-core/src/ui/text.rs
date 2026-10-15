@@ -153,7 +153,8 @@ pub fn fill_rect(fb: &mut Framebuffer, x0: i32, y0: i32, x1: i32, y1: i32, colou
 ///
 /// Columns are whole bytes (`x >> 3`); the corners are swapped into order. Only a negative
 /// `dy` moves anything: the positive branch adjusts its pointers and returns without copying,
-/// and so does this port.
+/// and so does this port. The pixels moved keep their sources (spec 07 HD0: a panel bitmap under
+/// the text stays named; the glyphs, drawn classic, stay classic).
 pub fn scroll_rect(fb: &mut Framebuffer, x0: u16, y0: u16, x1: u16, y1: u16, dy: i16) {
     let (mut c0, mut c1) = (x0 >> 3, x1 >> 3);
     let (mut r0, mut r1) = (y0, y1);
@@ -175,8 +176,7 @@ pub fn scroll_rect(fb: &mut Framebuffer, x0: u16, y0: u16, x1: u16, y1: u16, dy:
             continue;
         }
         for x in px0..px1.min(WIDTH) {
-            let p = fb.get(x, src).unwrap_or(0);
-            fb.set(x, dst, p);
+            fb.copy_px_within(src * WIDTH + x, dst * WIDTH + x);
         }
     }
 }

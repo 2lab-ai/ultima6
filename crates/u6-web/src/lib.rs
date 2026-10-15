@@ -828,7 +828,10 @@ impl Game {
             Engine::with_seed(files, seed)
         };
         match engine {
-            Ok(engine) => {
+            Ok(mut engine) => {
+                // Spec 07 HD0: the source plane is kept whether or not HD is shown, so switching
+                // HD on loses nothing.
+                engine.enable_src_plane();
                 // A path that differs from another only in case is shadowed (the game's lookups
                 // ignore case): the engine never reads it, so it is not kept either.
                 let files = engine.io().files();
@@ -1414,6 +1417,61 @@ mod tests {
             "a start runs the launcher: `u` first"
         );
         assert!(!game.finished());
+    }
+
+    /// On the user's zip (skipped when absent; read only): a start gives every buffer the source
+    /// plane (spec 07 HD0), the frames name images (counted, never printed), and the frames and
+    /// the page's RGBA are those of an engine without the plane, step by step.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn a_start_keeps_the_source_plane_and_the_same_frames() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let data = std::fs::read(ZIP).quiet();
+        let r = intake(vec![InputFile {
+            name: "ultima-vi.zip".into(),
+            data: data.clone(),
+        }]);
+        let mut plain = Engine::game_first(Files::new(r.files), 1).quiet();
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", data).quiet();
+        game.boot(1, true).quiet();
+        let mut attributed = 0;
+        for step in 0..600u32 {
+            game.step(16);
+            game.present();
+            plain.tick(&[], 16);
+            let e = game.engine.as_ref().quiet();
+            let src = e.frame().src().quiet();
+            attributed = src
+                .iter()
+                .filter(|s| s.kind != u6_core::Kind::Classic)
+                .count();
+            assert!(
+                e.io().published(|p| p.src().is_some()),
+                "the published frame"
+            );
+            assert!(e.io().draw(|f| f.src().is_some()), "the screen");
+            assert_same!(
+                e.frame().pixels(),
+                plain.frame().pixels(),
+                "step {step}: frame"
+            );
+            assert!(
+                e.frame().palette == plain.frame().palette,
+                "step {step}: palette"
+            );
+        }
+        let mut rgba = Vec::new();
+        plain.frame().write_rgba(&mut rgba);
+        assert_same!(game.frame_rgba(), rgba, "the page's RGBA");
+        assert!(
+            plain.frame().src().is_none(),
+            "an engine alone has no plane"
+        );
+        assert!(attributed > 0, "the last frame names images");
     }
 
     /// On the user's zip (skipped when absent): a start over a running game converts the new

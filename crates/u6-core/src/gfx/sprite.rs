@@ -4,9 +4,10 @@
 //! a block is 3 plane bytes (24 pixels) wide from byte column `(x - 8) / 8`, rows y - 8 .. y + 7.
 
 use u6_formats::gfx::{Span, TILE_W, TileKind};
-use u6_render::{Framebuffer, HEIGHT, WIDTH};
+use u6_render::{Framebuffer, HEIGHT, Src, WIDTH};
 
 use super::GfxState;
+use super::cache::Sources;
 
 /// Sprite slots (0x15265a ignores `slot >= 16`; 0x14df70 holds 16 blocks of 0xf0 bytes).
 pub const SLOTS: usize = 16;
@@ -30,6 +31,9 @@ pub struct Sprites {
     pub saved: [bool; SLOTS],
     /// Original: 0x14df70 (16 × 0xf0 bytes: the 24 × 16 pixels under each slot)
     pub under: Vec<[u8; BLOCK_W * TILE_W]>,
+    /// Port-only (spec 07 HD0): the sources of those pixels when the back buffer has a source
+    /// plane, put back with them. Not game state ([`Sources`]).
+    pub under_src: Vec<Sources>,
     /// Original: 0x1525d4 / 0x1525d6 (words: the turning centre the last call passed, × 8)
     pub centre: (i16, i16),
 }
@@ -42,6 +46,7 @@ impl Sprites {
             slots: Vec::new(),
             saved: [false; SLOTS],
             under: Vec::new(),
+            under_src: Vec::new(),
             centre: (0, 0),
         }
     }
@@ -54,6 +59,7 @@ impl Default for Sprites {
             slots: vec![[CLEAR; PIXELS]; SLOTS],
             saved: [false; SLOTS],
             under: vec![[0; BLOCK_W * TILE_W]; SLOTS],
+            under_src: vec![Sources::default(); SLOTS],
             centre: (0, 0),
         }
     }
@@ -75,6 +81,14 @@ fn get(fb: &Framebuffer, i: usize) -> u8 {
 
 fn set(fb: &mut Framebuffer, i: usize, v: u8) {
     fb.set(i % WIDTH, i / WIDTH, v);
+}
+
+/// [`set`] with the pixel's source, when there is one.
+fn put(fb: &mut Framebuffer, i: usize, v: u8, src: Option<Src>) {
+    match src {
+        Some(src) => fb.set_src(i % WIDTH, i / WIDTH, v, src),
+        None => set(fb, i, v),
+    }
 }
 
 /// Original: 0x15265a (graphics: prepare sprite `slot` from object tile `tile` turned by `angle`
@@ -160,17 +174,31 @@ fn decode(gfx: &mut GfxState, tile: u16) {
 
 /// Original: 0x152800 (graphics: save the back-buffer block under a sprite at (x, y): 24 × 16
 /// pixels from byte column x / 8 - 1, rows y - 8 .. y + 7; marks the slot as holding it)
+///
+/// With a source plane on the back buffer the pixels' sources are saved beside them
+/// ([`Sprites::under_src`]), and put back with them.
 pub fn save(gfx: &mut GfxState, back: &Framebuffer, slot: u16, x: u16, y: u16) {
     let slot = usize::from(slot) % SLOTS;
     gfx.sprites.saved[slot] = true;
     let col = i32::from(x >> 3) - 1;
-    let Some(under) = gfx.sprites.under.get_mut(slot) else {
+    let Sprites {
+        under, under_src, ..
+    } = &mut gfx.sprites;
+    let Some(under) = under.get_mut(slot) else {
         return;
     };
+    let plane = back.src();
+    let mut srcs = under_src.get_mut(slot).and_then(|s| match plane {
+        Some(_) => Some(s.0.get_or_insert_with(|| vec![Src::CLASSIC; BLOCK_W * TILE_W])),
+        None => s.0.take().and(None),
+    });
     for r in 0..TILE_W {
         for c in 0..BLOCK_W {
             if let Some(i) = at(i32::from(y) - 8 + r as i32, col, c) {
                 under[r * BLOCK_W + c] = get(back, i);
+                if let (Some(s), Some(plane)) = (srcs.as_mut(), plane) {
+                    s[r * BLOCK_W + c] = plane[i];
+                }
             }
         }
     }
@@ -179,6 +207,8 @@ pub fn save(gfx: &mut GfxState, back: &Framebuffer, slot: u16, x: u16, y: u16) {
 /// Original: 0x152876 (graphics: draw sprite `slot` into the back buffer with its top left at
 /// (x - 8, y - 8), clear pixels left alone; a slot holding a saved background puts the block
 /// back instead)
+///
+/// The sprite's pixels are classic; a block put back names the sources saved with it.
 pub fn draw(gfx: &GfxState, back: &mut Framebuffer, slot: u16, x: u16, y: u16) {
     let slot = usize::from(slot) % SLOTS;
     let left = x.wrapping_sub(8);
@@ -189,10 +219,12 @@ pub fn draw(gfx: &GfxState, back: &mut Framebuffer, slot: u16, x: u16, y: u16) {
         return;
     };
     if gfx.sprites.saved[slot] {
+        let srcs = gfx.sprites.under_src.get(slot);
         for r in 0..TILE_W {
             for c in 0..BLOCK_W {
                 if let Some(i) = at(top + r as i32, col, c) {
-                    set(back, i, under[r * BLOCK_W + c]);
+                    let k = r * BLOCK_W + c;
+                    put(back, i, under[k], srcs.and_then(|s| s.at(k)));
                 }
             }
         }

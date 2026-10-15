@@ -57,7 +57,9 @@ use std::cell::RefCell;
 
 pub(crate) use party::member_with_object;
 pub use party::{actor_name, join_party, leave_party, on_screen};
-pub use script::{SCRIPT_LEN, draw_portrait, load_portrait, load_script};
+pub use script::{
+    SCRIPT_LEN, draw_portrait, load_portrait, load_script, portrait_pixels, portrait_ref,
+};
 pub use start::{begin, converse, talk};
 pub use text::{ConverseText, Msg};
 pub use vars::{StrRef, int_var, string_var, var_letter};
