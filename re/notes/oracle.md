@@ -132,8 +132,9 @@ game's is another task: the game waits on the floppy. `fight.py` maps PCs to ima
 (the REA dump names) and counts frames by the first of flight 0x132706 / 0x1331b4, hit flash
 0x1230ce, message 0x108658…, refresh after a turn 0x102f2a, refresh 0x102ef0 / 0x102c90, party
 step 0x11d4ee, NPC turn 0x1200b0, scheduler 0x1213de in the routine and its callers (an object
-name 0x10eef8 apart). A capture with a skipped frame, a row missing, or no settled prompt after
-the step is refused, and lengths come from the frame numbers.
+name 0x10eef8 apart). A capture is refused unless it holds every frame, none skipped, from a
+row before the key was taken to 60 frames of prompt after the turn (synthetic cases in
+`test_fight.py`), and lengths come from the frame numbers.
 
 Start fight, keys UP RIGHT LEFT RIGHT LEFT RIGHT LEFT, 3 boots (`pace/fight-r0..r2`), frames
 from the key taken to the prompt: 535 396 300 283 364 270 215 / 439 334 169 137 261 138 255 /
@@ -152,39 +153,47 @@ entry of the prompt's idle render 0x102c90 (D0 = 1, from the key wait 0x105c8e),
 in its place (`g <address>` moves the PC and stops, a plain `g` runs on; its `rts` returns to
 the render's caller) and a breakpoint at that return address stops it again. The tool fails
 unless the first stop is that entry with D0 = 1 in user mode and the last is the caller's return
-with A7 four bytes up. PAL frames (beam lines as the fraction): the render itself 8.74, the
-render with the dissolve flag A4-0x6578 set 171.07 (0x1520e2 copies the 25,600 window pixels one
-at a time), the actor flash 0x132338 on the Avatar 345.83 (two dissolving renders), the window
-flash 0x115b7c (circle 1) 17.21 and 16.96 (two runs). Not timed: the quake (its D1, the
-amplitude, is the caller's word there, and the console's `w` writes memory and custom
-registers, not CPU registers).
+with A7 four bytes up. Times are the CPU clock between the two stops (`_wasm_get_cpu_cycles`,
+142,102 cycles a PAL frame, measured: 50 frames = 7,105,066..7,105,118); frame + line / 313 is
+not monotonic (the emulator's frame counter does not step at line 0: one traced call came out at
+−0.99 frames). PAL frames (`pace/timeit-r4`; the earlier frame + line runs in brackets): the
+render itself 8.90 (8.74), the render with the dissolve flag A4-0x6578 set 171.08 (171.07;
+0x1520e2 copies the 25,600 window pixels one at a time), the actor flash 0x132338 on the Avatar
+345.83 (345.83; two dissolving renders), the window flash 0x115b7c (circle 1) 17.21 (16.96). The
+first stop falls on one of two idle renders (frame 8308 or 8319 of the snapshot, by host
+timing), which moves the render and the window flash by about 0.2 frames. Not timed: the quake
+(its D1, the amplitude, is the caller's word there, and the console's `w` writes memory and
+custom registers, not CPU registers).
 
 **Exact calls, `trace.mjs`.** The CPU samples estimate; the debugger counts. A breakpoint at
 each traced routine's entry; at a stop there its return address gets one too, and the stop
-there with A7 four bytes up ends the call (the emulator stands still while stopped; the first
-step of a traced run matched the sampled one, 534 against 535 frames). Start fight, the same
-keys (`pace/trace-fight7`), and the castle without the fight (`U6_FIGHT_SETUP=town`: the
-assault actors e0..e2 passed over, `b` held until taken, party worktypes 2,1,1,1; keys DOWN ×5,
-UP ×2; `pace/trace-town7b`), PAL frames:
+there with A7 four bytes up ends the call; only the youngest open call may return, and any
+other unwind rejects the run; a step not back at the prompt within 6000 frames or 40 minutes
+is rejected. A resume and the console mark are one page call and the console is cleared first,
+so a stop's prompt is never missed or read stale (an earlier version did, and its silent
+unwinding hid it). The emulator stands still while stopped; the stops cost the game nothing.
+`trace.py` reduces trace.json to the port's constants. Start fight, the same keys
+(`pace/trace-fight-r4`), and the castle without the fight (`U6_FIGHT_SETUP=town`: the assault
+actors e0..e2 passed over, `b` held until taken, party worktypes 2,1,1,1; keys DOWN ×5, UP ×2;
+`pace/trace-town-r4`), PAL frames, CPU clock:
 
-| call | fight | castle |
+| call | value | constant |
 |---|---|---|
-| refresh after a turn 0x102f2a, view changed | 20.43 (n 31, 19.94..21.61) | 22.64 (n 31 with `trace-town7`, 21.40..23.99) |
-| the same, view unchanged | 0.00 (n 109) | 0.00 |
-| hit flash 0x1230ce | 15.56 (n 20, 15.31..15.95) | — |
-| flight 0x132706 | 11.8 (n 58); 6.45 with no step (n 29) | — |
-| object name 0x10eef8 | 1.28 (n 33; the boot's first 133: the floppy) | — |
-| printf 0x108658 | mean 1.17, median 0.39 (n 63) | 0.7..0.8 |
-| NPC turn 0x1200b0, own time, combat worktype | 2.35 (n 45; 1.49 with no foe) | — |
-| the same, schedule worktype (0x80 and up) | 0.01 (n 59) | 0.02 |
-| world turn outside NPC turns and refreshes, a pick | 0.975 (111 picks) | 1.04 (70 picks) |
-| NPC turns a step | 13..18 | 6..11 |
+| refresh after a turn 0x102f2a, view changed | median 21.375 (n 38, 19.96..23.80) | AFTER_TURN_MS 427 |
+| hit flash 0x1230ce | median 15.602 (n 18, 15.34..16.03) | FLASH_MS 312 |
+| flight 0x132706 with no step drawn | median 6.397 (n 27, 6.15..7.33) | RENDER_MS 128 |
+| printf 0x108658 | mean 1.185 (n 57, 0.06..3.60) | PRINT_MS 24 |
+| object name 0x10eef8 (the boot's first, 132.23 with the floppy, aside) | mean 1.294 (n 32) | NAME_MS 26 |
+| NPC turn 0x1200b0, own time, combat worktype | mean 2.338 (n 43, 0.95..4.04) | COMBAT_NPC_MS 47 |
+| the same, schedule worktype (0x80 and up) | mean 0.05 (n 122) | no wait |
+| world turn outside NPC turns and refreshes, per pick | 0.994 (179 picks) | PICK_MS 20 |
 
-The sampled estimates hold where they name one routine (refresh after a turn 21 against 20.4,
-hit flash 16 against 15.6); the stack-scan split did not: it put the name reads (about 9
-frames a step) under NPC turn and much of the message time under names. The castle's steps,
-key taken to prompt (`pace/fight-town-b`): 28 43 33 48 32 41 32, median 33; the scheduler's
-own work comes every other step (the clock minute).
+The flight step (46 ms) and the closing refresh of a flight (`REFRESH_MS`, 11 frames) have no
+routine boundary to trace and stay sampled estimates (fight.py). The sampled estimates held
+where they name one routine (refresh after a turn 21, hit flash 16); the stack-scan split did
+not: it put the name reads (about 9 frames a step) under NPC turn and much of the message time
+under names. The castle's steps, key taken to prompt (`pace/fight-town-b`): 28 43 33 48 32 41
+32, median 33; the scheduler's own work comes every other step (the clock minute).
 
 ## 1. Emulator, versions, sources
 
@@ -257,6 +266,8 @@ state, so runs are not bit-identical end to end.
     python3 -I -B tools/oracle/fight.py OUT/turns.json ...   # where those frames go
     node tools/oracle/timeit.mjs OUT SNAPSHOT render|dissolve|actor|window   # one routine's PAL frames (§E)
     node tools/oracle/trace.mjs OUT SNAPSHOT [KEY ...]   # exact calls of the traced routines per step (§E)
+    python3 -I -B tools/oracle/trace.py OUT/trace.json ...   # the port's timing constants from them
+    python3 -I -B tools/oracle/test_fight.py   # fight.py and trace.py on synthetic captures
     tools/oracle/run.sh build      # ADFs -> installer under AROS -> disks/{PROGRAM,POPULACE,PLAYER,PORTRAIT}.hdf
     tools/oracle/run.sh boot [step ...]   # boot those, run steps, PNGs into shots/boot-<ts>/
     tools/oracle/run.sh serve &    # control server 127.0.0.1:8765, then:

@@ -1,8 +1,8 @@
 // Exact routine times in the original's fight (or town) steps, by the debugger: a breakpoint at
 // each traced routine's entry; at a stop there the return address ([A7]) gets a breakpoint of
-// its own, and the stop there with A7 four bytes higher ends that call. The frame counter and
-// the beam line (313 a frame) at both stops give its length in PAL frames; the emulator stands
-// still while stopped, so the stops cost the game nothing. Checks what fight.py estimates from
+// its own, and the stop there with A7 four bytes higher ends that call. The CPU's clock at both
+// stops gives its length in PAL frames (142,102 cycles a frame); the emulator stands still while
+// stopped, so the stops cost the game nothing. Checks what fight.py estimates from
 // one CPU sample per frame (counts and lengths).
 // usage: node trace.mjs OUTDIR SNAPSHOT [KEY ...]   (default UP RIGHT LEFT RIGHT LEFT RIGHT LEFT)
 //   env U6_FIGHT_SETUP=town: the town setup of fight.mjs (no fight) before the steps
@@ -10,7 +10,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
-import { hunkBases, loadSnapshot, runtime, townSetup } from './game.mjs';
+import { cpuFrames, hunkBases, loadSnapshot, runtime, townSetup } from './game.mjs';
 
 const [out, snap, ...keyArgs] = process.argv.slice(2);
 if (!out || !snap) throw new Error('usage: node trace.mjs OUTDIR SNAPSHOT [KEY ...]');
@@ -133,7 +133,7 @@ try {
       const regs = await o.shellKeys(page, 'r cpu');
       const a7 = parseInt(/A4 - A7 : (?:0x[0-9a-f]+ ){3}0x([0-9a-f]+)/.exec(regs)[1], 16);
       const d0 = parseInt(/D0 - D3 : 0x([0-9a-f]+)/.exec(regs)[1], 16);
-      const at = f2 + p.v / 313;
+      const at = await cpuFrames(page);
       if (entries.has(p.pc)) {
         const ret = await o.peekL(page, a7);
         if (!returns.has(ret) && !entries.has(ret)) { await o.shellKeys(page, `break at ${hex(ret)}`); returns.add(ret); }

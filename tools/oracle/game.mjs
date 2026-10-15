@@ -123,3 +123,9 @@ export async function townSetup(page, bases, a4) {
   }
   return `assault actors passed over: ${assault.map((a) => a.toString(16)).join(',')}; b taken; party worktypes ${wts}`;
 }
+
+// CPU cycles of a PAL frame (313 lines × 227 colour clocks × 2): the emulator's CPU clock read as
+// PAL frames is monotonic, also across the point where its frame counter steps (which is not
+// line 0, so frame + line / 313 can run backwards there).
+export const CYCLES_PER_FRAME = 142102;
+export const cpuFrames = (page) => page.evaluate(() => Number(Module._wasm_get_cpu_cycles())).then((c) => c / CYCLES_PER_FRAME);

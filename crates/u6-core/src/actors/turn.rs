@@ -12,26 +12,23 @@ use super::{clock, leaves, npc, path, tail, walk};
 /// host once (port checkpoint, spec 03 §1: a yield changes no game state).
 const IDLE_REFILLS_PER_YIELD: u32 = 60;
 /// [replaced] Engine milliseconds of the refresh after a turn (0x102f2a with the view changed:
-/// the view flags 0x109e74, then 0x102ef0 draws the window and copies it to the screen): 432 ms,
-/// 21.58 PAL frames, the median of 62 such calls traced in the oracle (19.94..23.99: 31 in the
-/// start fight, 31 in the castle without it; tools/oracle/trace.mjs). fight.py's CPU samples
-/// give 21 (n = 103). With the view unchanged the call returns at once (0.00 frames). The
+/// the view flags 0x109e74, then 0x102ef0 draws the window and copies it to the screen): 427 ms,
+/// 21.375 PAL frames, the median of 38 such calls traced in the oracle (19.96..23.80: the start
+/// fight and the castle without it, 7 steps each; tools/oracle/trace.mjs on the CPU clock, the
+/// reduction tools/oracle/trace.py). With the view unchanged the call returns at once. The
 /// original has no wait there: that is the 68000's drawing time, which the port, drawing at
 /// once, waits on the engine clock instead.
-pub const AFTER_TURN_MS: u16 = 432;
+pub const AFTER_TURN_MS: u16 = 427;
 /// [replaced] Engine milliseconds of one pick of the scheduler 0x1213de (its pass over the 256
 /// actors, the refills and clock minutes, the formation and schedule passes, spread over the
-/// picks): 20 ms, 0.975 PAL frames, the world turn's time outside its NPC turns and refreshes
-/// over its picks (each NPC turn and the player's), traced in the oracle: 256.6 frames over 263
-/// picks in 21 steps (the start fight 0.975, the castle without it 1.04, the castle with the
-/// party still in its combat modes 0.92).
+/// picks): 20 ms, 0.994 PAL frames, the world turn's time outside its NPC turns and refreshes
+/// over its picks (each NPC turn and the player's): 179 picks traced in the same runs.
 pub const PICK_MS: u16 = 20;
 /// [replaced] Engine milliseconds of an NPC turn in a combat worktype (below 0x80: the party's
-/// combat modes, assault) besides what it draws, prints and names: 40 ms, 2.01 PAL frames, the
-/// mean of 69 traced in the oracle (2.28 over the 45 of the start fight, 1.49 over 24 with no
-/// foe in the castle). A turn in a schedule worktype (0x80 and up) takes 0.02 frames (n = 173)
-/// and waits nothing.
-pub const COMBAT_NPC_MS: u16 = 40;
+/// combat modes, assault) besides what it draws, prints and names: 47 ms, 2.338 PAL frames, the
+/// mean of 43 traced in the start fight (0.95..4.04). A turn in a schedule worktype (0x80 and
+/// up) takes 0.05 frames (n = 122) and waits nothing.
+pub const COMBAT_NPC_MS: u16 = 47;
 
 fn healthy(s: &State, actor: usize) -> bool {
     s.actors.attrs.status[actor] & 0x16 == 0

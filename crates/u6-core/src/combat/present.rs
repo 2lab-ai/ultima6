@@ -29,17 +29,18 @@ use super::tables::at;
 /// Milliseconds of one PAL frame (the original's display runs at 50 Hz).
 pub const FRAME_MS: u16 = 20;
 /// [replaced] Time of the hit flash 0x1230ce (draw lists, the window with tile 0x101 rendered
-/// and copied, draw lists again): 311 ms, 15.56 PAL frames, the median of 20 calls traced in the
-/// oracle's start fight (15.31..15.95; tools/oracle/trace.mjs). fight.py's CPU samples give 16
-/// (n = 45).
-pub const FLASH_MS: u16 = 311;
+/// and copied, draw lists again): 312 ms, 15.602 PAL frames, the median of 18 calls traced in
+/// the oracle's start fight (15.34..16.03; tools/oracle/trace.mjs on the CPU clock, reduced by
+/// trace.py). fight.py's CPU samples give 16 (n = 45).
+pub const FLASH_MS: u16 = 312;
 /// [replaced] Time of a render of the window into the back buffer (0x102c90 without the frame)
-/// and what a flight does before its first step: 129 ms, 6.45 PAL frames, the median of the 29
-/// traced flights that drew no step (6.19..6.88; the CPU samples of 87 flights give 6).
-pub const RENDER_MS: u16 = 129;
+/// and what a flight does before its first step: 128 ms, 6.397 PAL frames, the median of the 27
+/// traced flights that drew no step (6.15..7.33; the CPU samples of 87 flights give 6).
+pub const RENDER_MS: u16 = 128;
 /// [replaced] Time of a render of the window with its frame, copied to the screen (0x102c90 with
-/// D0 = 1): 8.74 PAL frames, timed at the prompt (tools/oracle/timeit.mjs render).
-pub const WINDOW_MS: u16 = 175;
+/// D0 = 1): 178 ms, 8.90 PAL frames, timed at the prompt on the CPU clock (tools/oracle/timeit.mjs
+/// render; 8.74 from the other idle render it can stop at).
+pub const WINDOW_MS: u16 = 178;
 /// A flight's first render (0x102c90 at the top of 0x132706, before the first step).
 pub const FLIGHT_START_MS: u16 = RENDER_MS;
 /// [replaced] Time of one drawn step of a flight (the rounds up to it, the sprites saved and
@@ -54,22 +55,22 @@ pub const FLIGHT_STEP_MS: u16 = 46;
 /// the view flags before it, the traced refresh after a turn
 /// ([`crate::actors::turn::AFTER_TURN_MS`], 21.58).
 pub const REFRESH_MS: u16 = 11 * FRAME_MS;
-/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 23 ms, 1.17
-/// PAL frames, the mean of 63 calls traced in the oracle (tools/oracle/trace.mjs; median 0.39,
-/// the ones that scroll take up to 3.5). Per call, as the port prints one queued message a call.
-pub const PRINT_MS: u16 = 23;
+/// [replaced] Time of one message (0x108658 drawing into the scroll, scrolling it): 24 ms, 1.185
+/// PAL frames, the mean of 57 calls traced in the oracle (0.06..3.60, the ones that scroll the
+/// longest). Per call, as the port prints one queued message a call.
+pub const PRINT_MS: u16 = 24;
 /// [replaced] Time of an object's name read for a message (0x10eef8: 0x10ee76 decodes it out of
-/// the look.lzd copy in memory, 0x161ec8): 27 ms, 1.33 PAL frames, the mean of 33 calls traced
-/// in the oracle's fight (median 1.28). The first read of a boot also loads the file from the
-/// floppy (133 frames): not modelled.
-pub const NAME_MS: u16 = 27;
+/// the look.lzd copy in memory, 0x161ec8): 26 ms, 1.294 PAL frames, the mean of 32 calls traced
+/// in the oracle's fight (1.01..1.66). The first read of a boot also loads the file from the
+/// floppy (132.23 frames traced): not modelled.
+pub const NAME_MS: u16 = 26;
 /// [replaced] Time of a window presented dissolving (0x102c90 with A4-0x6578 set: 0x1520e2
-/// copies the 25,600 pixels of the window one by one): 171.07 PAL frames, timed at the prompt
-/// (tools/oracle/timeit.mjs dissolve; none happens in the start fight).
-pub const DISSOLVE_MS: u16 = 3421;
+/// copies the 25,600 pixels of the window one by one): 3422 ms, 171.08 PAL frames, timed at the
+/// prompt on the CPU clock (tools/oracle/timeit.mjs dissolve; none happens in the start fight).
+pub const DISSOLVE_MS: u16 = 3422;
 /// [replaced] Time of each window of the actor flash 0x132338 (the outlined actor presented
 /// dissolving, then the window without it, dissolving too): half of its 345.83 PAL frames, timed
-/// at the prompt on the Avatar (tools/oracle/timeit.mjs actor).
+/// at the prompt on the Avatar (tools/oracle/timeit.mjs actor, the same on the CPU clock).
 pub const ACTOR_FLASH_MS: u16 = 3458;
 /// The map window with its border, in screen pixels.
 const WINDOW: (usize, usize) = (176, 176);

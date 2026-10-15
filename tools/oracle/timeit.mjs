@@ -2,8 +2,8 @@
 // fight.mjs saved, U6_FIGHT_SAVE) the debugger stops at the entry of the prompt's idle render
 // 0x102c90 (D0 = 1: framed and copied to the screen, called from the key wait 0x105c8e), then
 // the routine runs in its place (`g` to it, so its rts goes back to the render's caller) and a
-// breakpoint at that return address stops it again; the frames between the two stops, with the
-// beam lines (313 a frame) as the fraction, are its time. D0 = 1 at that entry is a valid
+// breakpoint at that return address stops it again; the CPU's clock between the two stops, as
+// PAL frames (142,102 cycles each), is its time. D0 = 1 at that entry is a valid
 // argument for both targets below (circle 1, the Avatar), D1 the caller's (non-zero: bright).
 // usage: node timeit.mjs OUTDIR SNAPSHOT NAME
 //   NAME = render (0x102c90 itself), dissolve (0x102c90 with A4-0x6578 = 1: the window copied
@@ -12,7 +12,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import * as o from './lib.mjs';
-import { hunkBases, loadSnapshot, runtime } from './game.mjs';
+import { cpuFrames, hunkBases, loadSnapshot, runtime } from './game.mjs';
 
 const [out, snap, name] = process.argv.slice(2);
 const TARGETS = { render: null, dissolve: null, actor: 0x132338, window: 0x115b7c };
@@ -53,6 +53,7 @@ try {
   await o.waitFrames(page, 3);
   await page.evaluate((c) => { wasm_retro_shell('clear'); wasm_retro_shell(c); }, `break at ${hex(runtime(bases, 0x102c90))}`);
   const f0 = await stopped(page, [runtime(bases, 0x102c90)]);
+  const c0 = await cpuFrames(page);
   const regs = await o.shellKeys(page, 'r cpu');
   const a7 = parseInt(/A4 - A7 : (?:0x[0-9a-f]+ ){3}0x([0-9a-f]+)/.exec(regs)[1], 16);
   const d01 = /D0 - D3 : 0x([0-9a-f]+) 0x([0-9a-f]+)/.exec(regs);
@@ -79,13 +80,14 @@ try {
   }
   f1 = await stopped(page, [ret]);
   b1 = await where(page);
+  const c1 = await cpuFrames(page);
   await o.shellKeys(page, 'clear');
   const back = await o.shellKeys(page, 'r cpu');
   const a7b = parseInt([...back.matchAll(/A4 - A7 : (?:0x[0-9a-f]+ ){3}0x([0-9a-f]+)/g)].at(-1)[1], 16);
   if (b1.pc !== ret || a7b !== a7 + 4) {
     throw new Error(`${name}: did not come back to the render's caller: stopped at ${hex(b1.pc)} (want ${hex(ret)}), A7 ${hex(a7b)} (want ${hex(a7 + 4)})`);
   }
-  const frames = f1 - f0 + (b1.v - b0.v) / 313;
+  const frames = c1 - c0;
   log(`${name}: stopped at 0x102c90 (D0 ${d01[1]}, D1 ${d01[2]}) frame ${f0} line ${b0.v}; back at ${hex(b1.pc)} (the caller ${hex(ret)}) frame ${f1} line ${b1.v}: ${frames.toFixed(2)} PAL frames`);
   await o.shot(page, `${name}-after`, { dir: out });
 } finally {
