@@ -9,6 +9,10 @@
 //! write also marks the 16-pixel chunk it wrote, so that a buffer kept as a copy of another
 //! ([`Framebuffer::sync_from`], [`Framebuffer::sync_rect_from`]) copies only the chunks of the
 //! plane that may differ; the colours are copied as before.
+//!
+//! [`hd`]: the HD compositor (spec 07 HD0), the frame at 2× or 4× from the source plane.
+
+pub mod hd;
 
 /// Screen width in pixels (Amiga low-res).
 pub const WIDTH: usize = 320;
