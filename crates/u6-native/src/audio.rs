@@ -4,7 +4,10 @@
 //! After every engine tick the host hands the driver the calls the tick made ([`Audio::sync`])
 //! and renders samples: headless exactly the tick's length (so `--wav` is the boot's audio,
 //! bit-reproducible), in the window enough to keep the device's ring [`AHEAD_MS`] ahead (the
-//! device thread only drains the ring; it never touches the engine).
+//! device thread only drains the ring; it never touches the engine). Above [`LOUD_UP_TO`] the
+//! window's sound fades out over [`FADE_MS`] and comes back the same way at [`LOUD_UP_TO`] or
+//! less (spec 06 §5: the music plays in wall time, so at those speeds it no longer follows the
+//! game).
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -13,6 +16,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use u6_core::Engine;
+use u6_core::pacer::Speed;
 use u6_core::sound::AudioDriver;
 
 /// The headless render rate.
@@ -104,6 +108,64 @@ pub fn write_wav(path: &Path, samples: &[f32], rate: u32) -> Result<(), String> 
     w.flush().map_err(err)
 }
 
+/// The fastest speed the window's sound plays at (spec 06 §5).
+pub const LOUD_UP_TO: f64 = 4.0;
+/// Wall milliseconds of the fade from full gain to silence, and back.
+pub const FADE_MS: f32 = 50.0;
+
+/// The gain the window's sound heads for at `speed`: full up to [`LOUD_UP_TO`], silence above
+/// it and at Max.
+pub fn loudness(speed: Speed) -> f32 {
+    match speed {
+        Speed::Finite(x) if x <= LOUD_UP_TO => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// The window's output gain: before each sample frame it moves toward its target by the share
+/// of [`FADE_MS`] one frame lasts, so a change of speed across [`LOUD_UP_TO`] fades instead of
+/// clicking.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gain {
+    now: f32,
+    target: f32,
+}
+
+impl Default for Gain {
+    fn default() -> Self {
+        Gain {
+            now: 1.0,
+            target: 1.0,
+        }
+    }
+}
+
+impl Gain {
+    /// Heads for the [`loudness`] of `speed`.
+    pub fn set_speed(&mut self, speed: Speed) {
+        self.target = loudness(speed);
+    }
+
+    /// Scales interleaved stereo `samples` rendered at `rate` frames a second. At full gain they
+    /// stay as they are.
+    pub fn apply(&mut self, samples: &mut [f32], rate: u32) {
+        if self.now == 1.0 && self.target == 1.0 {
+            return;
+        }
+        let step = 1000.0 / (FADE_MS * rate.max(1) as f32);
+        for frame in samples.chunks_mut(2) {
+            self.now = if self.now < self.target {
+                (self.now + step).min(self.target)
+            } else {
+                (self.now - step).max(self.target)
+            };
+            for s in frame {
+                *s *= self.now;
+            }
+        }
+    }
+}
+
 /// The samples the device thread drains (interleaved stereo).
 pub type Ring = Arc<Mutex<VecDeque<f32>>>;
 
@@ -112,6 +174,7 @@ pub type Ring = Arc<Mutex<VecDeque<f32>>>;
 pub struct Output {
     pub ring: Ring,
     pub rate: u32,
+    gain: Gain,
     _stream: cpal::Stream,
 }
 
@@ -144,17 +207,25 @@ impl Output {
         Ok(Self {
             ring,
             rate,
+            gain: Gain::default(),
             _stream: stream,
         })
     }
 
-    /// Tops the ring up to [`AHEAD_MS`] of audio.
-    pub fn top_up(&self, audio: &mut Audio) {
+    /// The game's speed changed: the sound fades out above [`LOUD_UP_TO`], back in at or
+    /// below it ([`Gain`]; it takes effect behind the [`AHEAD_MS`] already in the ring).
+    pub fn set_speed(&mut self, speed: Speed) {
+        self.gain.set_speed(speed);
+    }
+
+    /// Tops the ring up to [`AHEAD_MS`] of audio, at the [`Gain`].
+    pub fn top_up(&mut self, audio: &mut Audio) {
         let want = (self.rate * AHEAD_MS / 1000) as usize * 2;
         let have = self.ring.lock().map_or(want, |r| r.len());
         if have < want {
             let mut buf = Vec::with_capacity(want - have);
             audio.render_frames((want - have) / 2, &mut buf);
+            self.gain.apply(&mut buf, self.rate);
             if let Ok(mut r) = self.ring.lock() {
                 r.extend(buf);
             }
@@ -181,7 +252,11 @@ fn drain(ring: &Ring, out: &mut [f32], channels: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use u6_core::pacer::STEP_MS;
     use u6_testkit::Quiet;
+
+    /// The boot's first 1.92 s in ticks of the fixed step, as the headless runner ticks.
+    const BOOT_TICKS: u32 = 1920 / STEP_MS;
 
     #[test]
     fn levels_and_the_wav_header() {
@@ -240,14 +315,116 @@ mod tests {
         files.overlay("broken", [("game".to_string(), game)].into());
         let mut engine = Engine::game_first(files, 0).quiet();
         assert!(Audio::or_silent(&engine, WAV_RATE).is_none());
-        for _ in 0..120 {
-            engine.tick(&[], 16);
+        for _ in 0..BOOT_TICKS {
+            engine.tick(&[], STEP_MS);
         }
         assert!(!engine.finished());
         assert!(
             engine.state().sound.next_call > 0,
             "the game's music calls go on"
         );
+    }
+
+    #[test]
+    fn the_sound_is_full_up_to_4x_and_silent_above() {
+        let at: Vec<f32> = [1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0]
+            .map(Speed::Finite)
+            .into_iter()
+            .chain([Speed::Max])
+            .map(loudness)
+            .collect();
+        assert_eq!(at, [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// The gain on a constant stereo signal: untouched at 1×; at 6× a fade to silence over
+    /// [`FADE_MS`] with no frame-to-frame jump; back at 4× the same fade up, then untouched.
+    #[test]
+    fn the_gain_fades_out_above_4x_and_back_in() {
+        const RATE: u32 = 1000; // a frame a millisecond
+        let fade = FADE_MS as usize;
+        let mut gain = Gain::default();
+        // Left 0.5, right -0.25: each frame's gain read from both sides, which must agree.
+        let run = |gain: &mut Gain, frames: usize| {
+            let mut buf = [0.5f32, -0.25].repeat(frames);
+            gain.apply(&mut buf, RATE);
+            buf.chunks(2)
+                .map(|f| {
+                    let (l, r) = (f[0] / 0.5, f[1] / -0.25);
+                    assert!((l - r).abs() < 1e-6, "left {l} and right {r}");
+                    l
+                })
+                .collect::<Vec<f32>>()
+        };
+        let smooth = |g: &[f32]| {
+            g.windows(2)
+                .all(|w| (w[1] - w[0]).abs() <= 1.0 / FADE_MS + 1e-6)
+        };
+        gain.set_speed(Speed::Finite(1.0));
+        assert!(
+            run(&mut gain, 100).iter().all(|&g| g == 1.0),
+            "1×: as rendered"
+        );
+        gain.set_speed(Speed::Finite(6.0));
+        let down = run(&mut gain, 2 * fade);
+        println!(
+            "6×: gain {:.2} after 1 ms, {:.2} after 25 ms",
+            down[0], down[24]
+        );
+        assert!(
+            (down[0] - (1.0 - 1.0 / FADE_MS)).abs() < 1e-6,
+            "no jump at the switch"
+        );
+        assert!((down[24] - 0.5).abs() < 1e-3, "half way at half the fade");
+        assert!(
+            smooth(&down) && down[fade..].iter().all(|&g| g == 0.0),
+            "{down:?}"
+        );
+        assert!(
+            run(&mut gain, 10).iter().all(|&g| g == 0.0),
+            "silent while above 4×"
+        );
+        gain.set_speed(Speed::Finite(4.0));
+        let up = run(&mut gain, 2 * fade);
+        assert!(
+            smooth(&up) && up[0] > 0.0 && up[fade..].iter().all(|&g| g == 1.0),
+            "{up:?}"
+        );
+        assert_eq!(gain, Gain::default(), "back to full: untouched again");
+        // A switch half way through the fade turns it around where it is.
+        gain.set_speed(Speed::Max);
+        let mut both = run(&mut gain, fade / 2);
+        gain.set_speed(Speed::Finite(2.0));
+        both.extend(run(&mut gain, fade));
+        assert!(smooth(&both) && *both.last().unwrap() == 1.0, "{both:?}");
+        // One render equals the same frames rendered in pieces, across both fades: 50 frames
+        // at 6× (the fade out), then 100 at 1× (the fade in, then full).
+        let signal: Vec<f32> = (0..3 * fade)
+            .flat_map(|i| [i as f32, -(i as f32) / 2.0])
+            .collect();
+        let (mut whole, mut pieces) = (signal.clone(), signal);
+        let mut gain = Gain::default();
+        gain.set_speed(Speed::Finite(6.0));
+        gain.apply(&mut whole[..2 * fade], RATE);
+        gain.set_speed(Speed::Finite(1.0));
+        gain.apply(&mut whole[2 * fade..], RATE);
+        let mut gain = Gain::default();
+        let mut at = 0;
+        for (speed, frames) in [(6.0, &[1, 7, 13, 4, 25][..]), (1.0, &[30, 20, 50][..])] {
+            gain.set_speed(Speed::Finite(speed));
+            for &n in frames {
+                gain.apply(&mut pieces[at..at + 2 * n], RATE);
+                at += 2 * n;
+            }
+        }
+        assert_eq!(at, whole.len());
+        assert_eq!(pieces, whole, "pieces as one render");
+        // At a device rate the fade takes FADE_MS of samples.
+        let mut gain = Gain::default();
+        gain.set_speed(Speed::Finite(8.0));
+        let mut buf = vec![1.0f32; 2 * 48_000 / 10];
+        gain.apply(&mut buf, 48_000);
+        let silent = buf.chunks(2).position(|f| f[0] == 0.0).unwrap();
+        assert!(silent.abs_diff(2400) <= 1, "{silent} frames at 48 kHz");
     }
 
     #[test]
@@ -283,12 +460,12 @@ mod tests {
         let mut engine = Engine::game_first(u6_core::Files::new(r.files), 0).quiet();
         let mut audio = Audio::new(&engine, WAV_RATE).quiet();
         let mut samples = Vec::new();
-        for _ in 0..120 {
-            engine.tick(&[], 16);
+        for _ in 0..BOOT_TICKS {
+            engine.tick(&[], STEP_MS);
             audio.sync(&engine);
-            audio.render_ms(16, &mut samples);
+            audio.render_ms(STEP_MS, &mut samples);
         }
-        assert!(samples.len() == 2 * (120 * 16 * WAV_RATE as usize / 1000));
+        assert!(samples.len() == 2 * (1920 * WAV_RATE as usize / 1000));
         let (rms, peak) = levels(&samples);
         assert!(rms > 0.001 && peak <= 1.0, "audible and in range");
     }

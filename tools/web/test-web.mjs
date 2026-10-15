@@ -6,13 +6,17 @@
 // whole, a folder file over the save limit left out), the sound output (AudioContext after a
 // gesture, chunks into the worklet; a game whose MED tables fail the checks plays silent) and the
 // launcher's sequence as a player meets it (the opening, the menu, a character created and
-// kept, the menu's J after a reload, Quit) and the mouse on the canvas (the first press is
-// both the sound's gesture and exactly one game click). Most tests start `game` at once
+// kept, the menu's J after a reload, Quit), the mouse on the canvas (the first press is
+// both the sound's gesture and exactly one game click) and the fixed step with its speed
+// control (spec 06: the steps follow the clock on a virtual 60 Hz and 144 Hz display and on
+// the real one, the speed keys and the keys the game keeps, the badge, the buttons, the stored
+// choice, a held press at 1x whatever the speed, the music above 4x). Most tests start `game` at once
 // (harness `gameFirst`); the launcher tests run the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. The game is read once it reached what a check asserts, by its own signals (the
-// prompt, the key queue, the program, its ticks), never after a fixed sleep: a loaded host
-// draws fewer frames per second and each tick moves the game at most 100 ms, so a sleep there
+// prompt, the key queue, the program, its ticks: the page's fixed steps of 20 ms), never after a
+// fixed sleep: a loaded host draws fewer frames per second, a frame moves the game at most
+// 250 ms (the pace's cap) and a host past its frame budget drops steps, so a sleep there
 // covers less of the game. Tests that need the user's disks skip when they are absent.
 //
 //   node tools/web/test-web.mjs [name-filter]      (build first: bash scripts/build-web.sh)
@@ -111,6 +115,21 @@ test('assertSame: a mismatch names the label, the paths, equal or differing leng
     assert.ok(![store, name, list, kinds, prefix, shorter, typed].some((m) => m.includes(leak)), `a message shows ${leak}`);
   }
   assert.ok(![prefix, shorter, typed].some((m) => /\d/.test(m)), 'a prefix or a kind shows no number');
+});
+
+// No page: the held walk's pace floor on synthetic step times (ms after the press, floor 500),
+// so the check is exercised even when a boot walks one cell.
+test('the held-walk pace floor: a late first step does not let the next come sooner; a step at the pace passes', async () => {
+  const f = 500;
+  for (const [shown, label] of [[[], 'no step'], [[0], 'the press only'], [[12, 660, 1320], 'a repeat each pace'],
+    [[400, 900], 'a late first step, the next a floor after it'], [[0, 500, 1000], 'repeats at the floor itself']]) {
+    assert.ok(notSooner(shown, f), `passes: ${label}`);
+  }
+  for (const [shown, label] of [[[500, 500], 'two steps at once after a late first'],
+    [[400, 700], 'a late first step, the next a short gap after it'], [[0, 499], 'a repeat before the floor'],
+    [[0, 660, 1000], 'a fast third step'], [[-100, 450], 'a step before the press, the next within its floor of the press']]) {
+    assert.ok(!notSooner(shown, f), `fails: ${label}`);
+  }
 });
 
 // The runner's failure lines (h.failureLines) on errors whose text holds a sentinel: plain,
@@ -344,7 +363,7 @@ test('an engine trap stops the loop; Restart loads the kept files again', async 
   assert.equal(s.restartHidden, false);
   assert.match(s.status, /internal error[\s\S]*Restart/);
   const ticks = await page.evaluate(() => globalThis.__ticks);
-  await h.waitFrames(page, 30); // a running loop would tick in each
+  await h.waitFrames(page, 30); // a running loop would step in most of them
   assert.equal(await page.evaluate(() => globalThis.__ticks), ticks, 'not ticked again');
   await page.click('#restart');
   await page.waitForLoadState('load');
@@ -807,7 +826,7 @@ test('zip: Quit in the menu ends the game; the page says so and Restart starts i
   assert.match(s.status, /The game has ended\. Restart starts it again/);
   assert.equal(s.restartHidden, false);
   const ticks = await page.evaluate(() => globalThis.__ticks);
-  await h.waitFrames(page, 30); // a running loop would tick in each
+  await h.waitFrames(page, 30); // a running loop would step in most of them
   assert.equal(await page.evaluate(() => globalThis.__ticks), ticks, 'not ticked after the end');
   await page.click('#restart');
   await page.waitForLoadState('load');
@@ -843,7 +862,7 @@ async function clickCell(page, dx) {
 // Look by clicks: the Look icon, then the hero's own cell. Look on a person shows the portrait
 // panel and waits for a key or a click; a click on the hero's cell answers it (0x8f, nothing
 // else happens). Returns the frame with the description in the scroll, read 90 ticks after the
-// game took the target click (1.5 s at 60 frames a second).
+// game took the target click (1.8 s of the game's time on a gated page, 90 frames elsewhere).
 async function lookAtHero(page, shot) {
   await h.click(page, 64, 184, 30); // the fourth icon: Look
   assert.equal(await promptNow(page), '0', 'Look waits for its target');
@@ -860,13 +879,17 @@ async function lookAtHero(page, shot) {
 }
 
 // One step by clicks: the cell east of the hero, else (blocked by the start fight) west,
-// up to the harness's `STEP_TRIES` tries (as `stepSideways`); asserts the step is one cell
-// along x.
+// up to the harness's `STEP_TRIES` tries, a pass after each blocked one (as `stepSideways`:
+// after a blocked step the world turn picks the hero again at once, no NPC moves); asserts the
+// step is one cell along x.
 async function clickStep(page) {
   for (let i = 0; i < h.STEP_TRIES; i += 1) {
     const dx = i % 2 === 0 ? 1 : -1;
     const { from, to } = await clickCell(page, dx);
-    if (to === from) continue;
+    if (to === from) {
+      await h.passTurn(page); // the click focused the canvas
+      continue;
+    }
     const [fx, fy, fz] = from.split(',').map(Number);
     const [tx, ty, tz] = to.split(',').map(Number);
     assert.ok(tx - fx === dx && ty === fy && tz === fz, `one cell ${dx > 0 ? 'east' : 'west'}`);
@@ -892,7 +915,7 @@ test('the mouse: the Look icon, then Look on the hero, then clicks walk; the key
 
 // Holds the left button at game pixel (x, y) for 300 ms, longer (up to 30 s) until five engine
 // ticks ran (a loaded host draws fewer frames in 300 ms); returns the ticks run during the
-// hold, which the caller checks. A page whose tick never returns answers no evaluate: that is
+// hold, which the caller checks. A page whose step never returns answers no evaluate: that is
 // a frozen tab, not a slow one; a loop that stopped answers with a count that does not grow.
 async function holdOnMap(page, x, y) {
   const ticks = () => Promise.race([
@@ -936,52 +959,124 @@ test('the mouse: a press held 300 ms on the map walks and yields; held through t
   console.log(`  receipt: held 300 ms at the prompt = ${ran} ticks; in the exit question = ${during} ticks, no step, N back to the prompt`);
 }, { needs: h.haveHfes });
 
-// Holds the left button `ms` (a real press: mouse down, wait, up) three cells south of the
-// hero at the prompt; the cells the leader moved until the prompt is back (the page's leader
-// read every frame) and the ms after the press at which each step showed.
-async function heldWalk(page, ms) {
+// The original's fastest held walk: the shortest gap between two steps of one held press, 25
+// PAL frames (20 ms each), measured in the oracle with tools/oracle/pace.mjs (re/notes/oracle.md
+// §4 "Held-walk pace", the table's Min over runs pace/run-b1..b6). The test's own figure, not
+// the port's constant: no repeat may come sooner than the original's did. The port's exact
+// pace rule is pinned by the Rust tests (ui/tests/pointer_tests.rs).
+const ORIGINAL_FASTEST_REPEAT_MS = 25 * 20;
+
+// Whether the steps of one held walk, shown at `shown` ms after the press (the first is the
+// press's own step), keep the original's pace floor `floor` ms: step n at least n floors after
+// the press, and each repeat at least a floor after the step before it (a late first step does
+// not let the next one come sooner).
+function notSooner(shown, floor) {
+  return shown.every((t, n) => t >= n * floor && (n === 0 || t - shown[n - 1] >= floor));
+}
+
+// Holds the left button at game pixel (x, y) from the prompt until the game ran `ms` on its
+// clock since it took the press, then releases (the oracle's holds are frames of the game's
+// time; a wall-time hold reaches a loaded page's engine shorter, a frame moving it at most
+// 250 ms). The glue stamps the press and the release with the clock of the step that took
+// them (h.openPage, gated). Returns the cells the leader moved until the prompt is back (the
+// page's leader read every frame), the engine ms after the press at which each showed (at or
+// after the step that walked it) and the hold the game took: the release's clock less the
+// press's.
+async function heldWalk(page, ms, [x, y]) {
   await h.waitPrompt(page);
-  await page.mouse.move(...(await h.screenPoint(page, 88, 88 + 48)));
+  await page.mouse.move(...(await h.screenPoint(page, x, y)));
   await page.evaluate(() => {
     const c = document.getElementById('screen');
-    const seen = [[performance.now(), c.dataset.leader]];
+    const seen = [[globalThis.__clock, c.dataset.leader]];
     window.__walk = seen;
+    globalThis.__buttons.length = 0;
     const poll = () => {
       if (window.__walk !== seen) return;
-      if (c.dataset.leader !== seen.at(-1)[1]) seen.push([performance.now(), c.dataset.leader]);
+      if (c.dataset.leader !== seen.at(-1)[1]) seen.push([globalThis.__clock, c.dataset.leader]);
       requestAnimationFrame(poll);
     };
     requestAnimationFrame(poll);
   });
   await page.mouse.down();
-  await h.sleep(ms);
+  await page.waitForFunction((hold) => {
+    const press = globalThis.__buttons.find(([b]) => b === 1);
+    return press !== undefined && globalThis.__clock >= press[1] + hold;
+  }, ms, { timeout: 60_000, polling: 'raf' });
   await page.mouse.up();
   await h.waitTaken(page);
   await h.waitPrompt(page);
-  const seen = await page.evaluate(() => { const s = window.__walk; window.__walk = null; return s; });
-  return { steps: seen.length - 1, at: seen.slice(1).map(([t]) => Math.round(t - seen[0][0])) };
+  const { seen, buttons } = await page.evaluate(() => {
+    const walk = window.__walk;
+    window.__walk = null;
+    return { seen: walk, buttons: [...globalThis.__buttons] };
+  });
+  const press = buttons.findIndex(([b]) => b === 1);
+  const release = buttons.findIndex(([b], i) => i > press && b === 0);
+  assert.ok(press >= 0 && release > press, 'the game took the press and its release');
+  const pressed = buttons[press][1];
+  return {
+    steps: seen.length - 1,
+    shown: seen.slice(1).map(([t]) => t - pressed),
+    hold: buttons[release][1] - pressed,
+  };
+}
+
+// The cells three away from the hero's (its window cell (5, 5) is centred on game pixel
+// (88, 88)): south, north, east, west.
+const HOLD_CELLS = [[88, 88 + 48], [88, 88 - 48], [88 + 48, 88], [88 - 48, 88]];
+
+// A held walk from the boot as it is: the seed is the clock's, so in some boots the start
+// fight puts a foe in the cell beside the hero the press walks toward. The game takes that
+// press (waitTaken) and walks no cell; a blocked step costs no movement points, so the world
+// turn after it picks the hero again at once and no NPC moves (the prompt is back, not after
+// the fight's turns): the boot is as fresh for the next direction, up to the four of them (as
+// `stepSideways` tries the other way). Which direction walked depends on the boot's game state,
+// so the receipt does not name it.
+async function freshHeldWalk(page, ms) {
+  for (const cell of HOLD_CELLS) {
+    const walk = await heldWalk(page, ms, cell);
+    if (walk.steps > 0) return walk;
+  }
+  assert.fail('a held press walks a cell in one of the four directions');
 }
 
 // The original's steps for the same holds in the same start (the throne-room fight as booted),
 // measured in the oracle with tools/oracle/pace.mjs, each from a fresh boot: a 5-frame (100 ms)
 // hold walks one cell when the game samples it, a 50-frame (1 s) hold walks one cell (its first
-// world turn takes 420..470 frames). So each hold here starts from a fresh boot too.
+// world turn takes 422..473 frames). So each hold here starts from a fresh boot too and is
+// timed on the engine clock; no repeat comes sooner than the original's fastest (with one cell
+// per hold, the usual boot, there is no repeat to time and the receipt says so).
 test('the mouse: a press held on the map walks at the original\'s pace: 100 ms one cell, 1 s the original\'s count', async (env) => {
   const boot = async () => {
-    const opened = await h.openPage(env, { gated: false });
+    const opened = await h.openPage(env); // gated: the glue keeps the engine clock
     await h.load(opened.page, env);
     await opened.page.setInputFiles('#picker', h.HFES);
     await started(opened.page, FILES);
     return opened;
   };
   const first = await boot();
-  const click = await heldWalk(first.page, 100);
+  const click = await freshHeldWalk(first.page, 100);
   await first.context.close();
-  assert.ok(click.steps === 1, 'a 100 ms press walks one cell');
   const second = await boot();
-  const held = await heldWalk(second.page, 1000);
+  const held = await freshHeldWalk(second.page, 1000);
+  // Before the checks, so a failing run shows what the game took.
+  const line = (ms, w) => `${ms} ms held ${w.hold} ms on the engine clock, ${w.steps} cell${w.steps === 1 ? '' : 's'}`;
+  const repeats = Math.max(0, click.steps - 1) + Math.max(0, held.steps - 1);
+  const timed = repeats === 0
+    ? 'no repeat to time against the original\'s fastest (one cell each)'
+    : `${repeats} repeat${repeats === 1 ? '' : 's'} timed against the original's fastest`;
+  console.log(`  receipt: from fresh boots, ${line(100, click)}; ${line(1000, held)}; ${timed}`);
+  // Harness guards: the release reached the game after the asked hold (heldWalk waits for the
+  // clock) and within the original's fastest repeat after it (a release held back by host load
+  // would otherwise read as a pace fault).
+  const late = 'the harness released within the original\'s fastest repeat';
+  assert.ok(click.hold >= 100 && held.hold >= 1000, 'the harness: no early release reached the game');
+  assert.ok(click.hold < ORIGINAL_FASTEST_REPEAT_MS, late);
+  assert.ok(held.hold < 1000 + ORIGINAL_FASTEST_REPEAT_MS, `${late} after the 1 s hold`);
+  assert.ok(click.steps === 1, 'a 100 ms press walks one cell');
   assert.ok(held.steps >= 1 && held.steps <= 2, 'a 1 s press from a fresh boot walks the original\'s one cell, within one');
-  console.log('  receipt: from fresh boots, held 100 ms = one cell, held 1 s = the original\'s cell within one');
+  const floor = ORIGINAL_FASTEST_REPEAT_MS;
+  assert.ok(notSooner(click.shown, floor) && notSooner(held.shown, floor), 'no repeat sooner than the original\'s fastest');
 }, { needs: h.haveHfes });
 
 test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {
@@ -1019,6 +1114,540 @@ test('zip: the first press on the canvas is one game click and starts the sound;
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'false');
   console.log(`  receipt: first press -> Look waits, audioContext.state=${s.audio}, chunks=${s.audioChunks}; the click walked ${from !== to}`);
 }, { needs: h.haveZip });
+
+// --- the fixed step and the speed (spec 06) -------------------------------------------------
+
+const STEP_MS = 20; // one PAL frame: every step the page runs (u6-core pacer::STEP_MS)
+
+// What the page shows of the speed: data-speed (1, 1.5, .. 8, max), the badge's state and text,
+// the Speed group's label as shown and its announced part (the live region: the speed's name).
+const speedShown = (page) => page.evaluate(() => ({
+  speed: document.getElementById('screen').dataset.speed,
+  badge: !document.getElementById('speed-badge').hidden,
+  text: document.getElementById('speed-badge').textContent,
+  label: document.getElementById('speed-shown').textContent,
+  announced: document.getElementById('speed-label').textContent,
+}));
+
+// What the glue saw on a gated page (h.openPage): the steps run and the engine clock, the
+// game's speed (0 = Max) and its lost time after the last frame, the keys the game keeps, the
+// keys sent to it.
+const glue = (page) => page.evaluate(() => ({
+  steps: globalThis.__ticks,
+  clock: globalThis.__clock,
+  speed: globalThis.__speed,
+  lost: globalThis.__dropped + globalThis.__clamped,
+  owned: globalThis.__owned,
+  sent: globalThis.__sent.length,
+  lastSent: globalThis.__sent.at(-1),
+}));
+
+// Waits until the running game took speed `x` (the glue reads it after each frame).
+const engineSpeed = (page, x) => page.waitForFunction((want) => globalThis.__speed === want, x,
+  { timeout: 10_000 });
+
+// A gated page (gameFirst) with the user's disks started; the canvas focused. `init` (with its
+// `arg`) runs in the page before its scripts.
+async function bootGame(env, init, arg) {
+  const { context, page } = await h.openPage(env);
+  if (init) await context.addInitScript(init, arg);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await page.focus('#screen');
+  return page;
+}
+
+// On the real clock, about `ms` of wall time from one display frame to a later one: the wall
+// time between them, the steps run and the clock advanced in it, and whether any time was lost
+// (dropped_ms or clamped_ms moved).
+function realRun(page, ms) {
+  return page.evaluate(async (wait) => {
+    const read = (t) => ({ t, steps: globalThis.__ticks, clock: globalThis.__clock, lost: globalThis.__dropped + globalThis.__clamped });
+    const a = read(await new Promise(requestAnimationFrame));
+    await new Promise((done) => setTimeout(done, wait));
+    const b = read(await new Promise(requestAnimationFrame));
+    return { wall: b.t - a.t, steps: b.steps - a.steps, clock: b.clock - a.clock, lost: b.lost !== a.lost };
+  }, ms);
+}
+
+test('the steps follow the clock: 10 virtual seconds are 500 steps of 20 ms at 60 Hz and at 144 Hz, Max the step cap; 2 s of the real clock (receipt)', async (env) => {
+  const page = await bootGame(env);
+  // The real clock first: the count is asserted only when no time was lost (spec 06 Acceptance 1).
+  const real = await realRun(page, 2000);
+  const want = Math.floor(real.wall / STEP_MS);
+  assert.ok(real.clock === real.steps * STEP_MS, 'real clock: every step is 20 ms');
+  if (real.lost) {
+    console.log(`  receipt: real clock ${real.wall.toFixed(0)} ms, ${real.steps} steps (want ${want}): time was lost (dropped or clamped), the count is not asserted`);
+  } else {
+    assert.ok(Math.abs(real.steps - want) <= 2, 'real clock: the steps the wall time is worth, within two');
+    console.log(`  receipt: real clock ${real.wall.toFixed(0)} ms, ${real.steps} steps (want ${want})`);
+  }
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2); // the first virtual frame's time is about one interval after the last real one
+  const receipts = [];
+  for (const hz of [60, 144]) {
+    await h.displayRate(page, hz);
+    await h.runFrames(page, 1);
+    const before = await glue(page);
+    const { called } = await h.runFrames(page, 10 * hz);
+    const after = await glue(page);
+    const steps = after.steps - before.steps;
+    assert.ok(called === 10 * hz, `${hz} Hz: the loop ran in every virtual frame`);
+    assert.ok(Math.abs(steps - 500) <= 1, `${hz} Hz: 10 virtual seconds are 500 steps, within one`);
+    assert.ok(after.clock - before.clock === steps * STEP_MS, `${hz} Hz: the engine clock is the steps x 20 ms`);
+    assert.ok(after.lost === before.lost, `${hz} Hz: nothing lost`);
+    receipts.push(`${hz} Hz ${steps} steps`);
+  }
+  // Max: on a virtual clock a step takes no time, so every frame runs the step cap (64).
+  await h.displayRate(page, 60);
+  for (let i = 0; i < 7; i += 1) await page.keyboard.press('Equal');
+  assert.equal((await speedShown(page)).speed, 'max', 'seven presets up: Max');
+  await h.runFrames(page, 1);
+  const before = await glue(page);
+  await h.runFrames(page, 60);
+  const after = await glue(page);
+  assert.equal(after.speed, 0, 'the game runs at Max');
+  assert.ok(after.steps - before.steps === 64 * 60, 'Max: the step cap in every frame');
+  const shown = await speedShown(page);
+  assert.equal(shown.label, 'Max 76.8×', 'Max shows the speed reached (64 steps of 20 ms a 60 Hz frame)');
+  assert.ok(shown.badge && shown.text === shown.label, 'the badge shows it');
+  assert.equal(shown.announced, 'Max', 'the live label announces Max, not each measure of it');
+  const a11y = await page.evaluate(() => [document.getElementById('speed-badge').getAttribute('aria-hidden'),
+    document.getElementById('speed-label').getAttribute('aria-live'), document.getElementById('speed-reached').getAttribute('aria-hidden')]);
+  assert.deepEqual(a11y, ['true', 'polite', 'true'], 'the badge and the reached speed are hidden from assistive technology, the label is live');
+  console.log(`  receipt: 10 virtual seconds: ${receipts.join(', ')}; Max at 60 Hz: ${after.steps - before.steps} steps a virtual second, "${shown.label}"`);
+}, { needs: h.haveHfes });
+
+// Presses = or - on the canvas until the page shows speed `name` (1, 1.5, .. 8, max).
+async function speedTo(page, name) {
+  const names = ['1', '1.5', '2', '3', '4', '6', '8', 'max'];
+  for (let i = 0; i < names.length; i += 1) {
+    const at = names.indexOf((await speedShown(page)).speed);
+    if (at === names.indexOf(name)) return;
+    await page.keyboard.press(at < names.indexOf(name) ? 'Equal' : 'Minus');
+  }
+  assert.fail(`the speed reaches ${name}`);
+}
+
+test('at 2x, 4x and 8x 10 virtual seconds are exactly that many times 500 steps at 60 Hz and 144 Hz; on the real clock 4x runs about four times 1x (receipt)', async (env) => {
+  const page = await bootGame(env);
+  const one = await realRun(page, 2000);
+  await speedTo(page, '4');
+  await engineSpeed(page, 4);
+  const four = await realRun(page, 2000);
+  const ratio = (four.clock / four.wall) / (one.clock / one.wall);
+  const line = `1x ${one.clock} engine ms in ${one.wall.toFixed(0)} ms, 4x ${four.clock} in ${four.wall.toFixed(0)} ms: ratio ${ratio.toFixed(2)}`;
+  if (one.lost || four.lost) {
+    console.log(`  receipt: ${line}; time was lost (dropped or clamped), the ratio is not asserted`);
+  } else {
+    assert.ok(ratio > 3.6 && ratio < 4.4, 'the 4x clock is four times the 1x one, within 10%');
+    console.log(`  receipt: ${line}`);
+  }
+  // The same rule without the host: on a virtual display the budget never runs out.
+  await h.virtualDisplay(page, 60);
+  const counts = [];
+  for (const hz of [60, 144]) {
+    await h.displayRate(page, hz);
+    for (const speed of [2, 4, 8]) {
+      await speedTo(page, String(speed));
+      await h.runFrames(page, 1);
+      const before = await glue(page);
+      await h.runFrames(page, 10 * hz);
+      const after = await glue(page);
+      const steps = after.steps - before.steps;
+      assert.equal(after.speed, speed, `${hz} Hz: the game runs at ${speed}x`);
+      assert.ok(Math.abs(steps - speed * 500) <= 1, `${hz} Hz at ${speed}x: 10 virtual seconds are ${speed * 500} steps, within one`);
+      assert.ok(after.lost === before.lost, `${hz} Hz at ${speed}x: nothing lost`);
+      counts.push(`${hz} Hz ${speed}x ${steps}`);
+    }
+  }
+  console.log(`  receipt: 10 virtual seconds: ${counts.join(', ')} steps`);
+}, { needs: h.haveHfes });
+
+// A keydown on the canvas as another layout sends it (synthetic: the character on another
+// key); whether the page took it (prevented its default).
+const layoutKey = (page, key, code, shiftKey = false) => page.evaluate(([k, c, shift]) =>
+  !document.getElementById('screen').dispatchEvent(new KeyboardEvent('keydown', {
+    key: k, code: c, shiftKey: shift, bubbles: true, cancelable: true,
+  })), [key, code, shiftKey]);
+
+test('the speed keys at the prompt: + and = faster, - slower, the keypad always, another layout\'s too; the badge shows it; the choice survives a reload, an invalid one is 1x', async (env) => {
+  const page = await bootGame(env);
+  await h.waitPrompt(page);
+  let g = await glue(page);
+  assert.equal(g.owned, 0, 'at the prompt the game keeps none of - + =');
+  let shown = await speedShown(page);
+  assert.ok(shown.speed === '1' && !shown.badge, 'the default is 1x, no badge');
+  const sent = g.sent;
+  for (const [key, want] of [['+', '1.5'], ['Equal', '2'], ['Minus', '1.5'], ['NumpadAdd', '2'], ['NumpadSubtract', '1.5']]) {
+    await page.keyboard.press(key);
+    shown = await speedShown(page);
+    assert.equal(shown.speed, want, `${key}: the speed`);
+    assert.ok(shown.badge && shown.text === `${want}×` && shown.label === shown.text, `${key}: the badge and the label show it`);
+    assert.equal(shown.announced, `${want}×`, `${key}: the live label has it`);
+    const [, prevented] = await page.evaluate(() => window.__keys.at(-1));
+    assert.ok(prevented, `${key}: taken by the page`);
+  }
+  for (const [key, code, shift, want] of [['+', 'BracketRight', false, '2'], ['-', 'Slash', false, '1.5'], ['=', 'Digit0', true, '2']]) {
+    assert.ok(await layoutKey(page, key, code, shift), `${key} on ${code}: taken by the page`);
+    assert.equal((await speedShown(page)).speed, want, `${key} on ${code}: the speed`);
+  }
+  await engineSpeed(page, 2);
+  g = await glue(page);
+  assert.equal(g.sent, sent, 'no speed key reached the game');
+  for (let i = 0; i < 2; i += 1) await page.keyboard.press('Minus');
+  shown = await speedShown(page);
+  assert.ok(shown.speed === '1' && shown.badge, 'back at 1x the badge stays a moment');
+  await page.waitForFunction(() => document.getElementById('speed-badge').hidden, null, { timeout: 5000 });
+  for (let i = 0; i < 3; i += 1) await page.keyboard.press('Equal');
+  await engineSpeed(page, 3);
+  await page.reload();
+  await started(page, FILES);
+  shown = await speedShown(page);
+  assert.ok(shown.speed === '3' && shown.badge, 'the choice survives a reload, the badge up while not 1x');
+  await engineSpeed(page, 3);
+  for (const [stored, want, speed] of [['max', 'max', 0], ['fast', '1', 1], ['2.50', '1', 1]]) {
+    await page.evaluate((v) => localStorage.setItem('u6.speed', v), stored);
+    await page.reload();
+    await started(page, FILES);
+    assert.equal((await speedShown(page)).speed, want, `stored ${stored}: the speed`);
+    await engineSpeed(page, speed);
+  }
+}, { needs: h.haveHfes });
+
+test('in the stats panel - and + are the game\'s and the speed stays; the keypad and = still change it', async (env) => {
+  const page = await bootGame(env);
+  await h.waitPrompt(page);
+  // The roster's first member, right of the figures: their stats panel (ui click.rs roster_click).
+  await h.click(page, 240, 36, 0);
+  await page.waitForFunction(() => globalThis.__owned === 3, null, { timeout: 10_000 });
+  for (const [key, char] of [['+', '+'], ['Minus', '-']]) {
+    const before = (await glue(page)).sent;
+    await h.press(page, key, 0);
+    const g = await glue(page);
+    assert.ok(g.sent === before + 1 && g.lastSent === char, `${char}: the game got it`);
+    assert.equal((await speedShown(page)).speed, '1', `${char}: the speed stays`);
+    assert.equal(g.owned, 3, `${char}: the panel is still open`);
+  }
+  const sent = (await glue(page)).sent;
+  for (const [key, want] of [['NumpadAdd', '1.5'], ['NumpadSubtract', '1'], ['Equal', '1.5']]) {
+    await page.keyboard.press(key);
+    assert.equal((await speedShown(page)).speed, want, `${key} in the panel: the speed`);
+  }
+  await engineSpeed(page, 1.5);
+  assert.equal((await glue(page)).sent, sent, 'the keypad and = did not reach the game');
+}, { needs: h.haveHfes });
+
+// On the virtual display: holds the left button on game pixel `cell` for `frames` frames, then
+// releases and runs frames until the prompt is back. Returns the hold the game took (its
+// release's clock less its press's) and the cells the leader moved, during the hold and after.
+async function virtualHold(page, cell, frames) {
+  await page.mouse.move(...(await h.screenPoint(page, ...cell)));
+  await page.evaluate(() => { globalThis.__buttons.length = 0; });
+  await page.mouse.down();
+  const held = await h.runFrames(page, frames);
+  await page.mouse.up();
+  const after = await h.runFramesToPrompt(page, 60 * 60);
+  const seen = [...held.seen, ...after.seen.slice(1)];
+  const buttons = await page.evaluate(() => [...globalThis.__buttons]);
+  const press = buttons.findIndex(([b]) => b === 1);
+  const release = buttons.findIndex(([b], i) => i > press && b === 0);
+  assert.ok(press >= 0 && release > press, 'the game took the press and its release');
+  return { hold: buttons[release][1] - buttons[press][1], cells: seen.length - 1 };
+}
+
+// A virtual hold that walks: the start fight can block a direction (as `freshHeldWalk`), so the
+// next of the four is tried (a blocked step costs no movement points, the prompt is back at once).
+async function virtualHeldWalk(page, frames) {
+  for (const cell of HOLD_CELLS) {
+    const walk = await virtualHold(page, cell, frames);
+    if (walk.cells > 0) return walk;
+  }
+  assert.fail('a held press walks a cell in one of the four directions');
+}
+
+test('a press held 150 ms at 8x walks as at 1x: the game takes it at 1x (virtual 60 Hz display, receipt)', async (env) => {
+  const page = await bootGame(env);
+  await h.waitPrompt(page);
+  await h.virtualDisplay(page, 60);
+  await h.runFramesToPrompt(page, 600);
+  const one = await virtualHeldWalk(page, 9); // 9 frames at 60 Hz: 150 ms
+  for (let i = 0; i < 6; i += 1) await page.keyboard.press('Equal');
+  assert.equal((await speedShown(page)).speed, '8', 'six presets up: 8x');
+  const eight = await virtualHeldWalk(page, 9);
+  const line = (w) => `${w.hold} ms on the engine clock, ${w.cells} cell`;
+  console.log(`  receipt: 150 ms held: 1x ${line(one)}; 8x ${line(eight)}`);
+  assert.equal((await glue(page)).speed, 8, 'the game ran at 8x');
+  // 150 ms of frames is 7 or 8 steps between the press and the release (the step's remainder
+  // at the press), so the game holds 140..160 ms at either speed.
+  for (const [w, at] of [[one, '1x'], [eight, '8x']]) {
+    assert.ok(w.hold >= 150 - STEP_MS / 2 && w.hold <= 150 + STEP_MS / 2, `${at}: the game held the button 150 ms, within half a step either way`);
+  }
+  assert.ok(one.cells === 1 && eight.cells === 1, 'one cell at either speed');
+  assert.ok(Math.abs(eight.hold - one.hold) <= STEP_MS, 'the 8x hold is the 1x one, within a step');
+}, { needs: h.haveHfes });
+
+test('"behind" shows while the frame budget drops steps (a slow host at 8x), not after a stall past the cap; it clears at 1x (virtual 60 Hz display)', async (env) => {
+  const page = await bootGame(env);
+  const behind = () => page.evaluate(() => ({
+    data: document.getElementById('screen').dataset.behind,
+    shown: !document.getElementById('behind').hidden,
+  }));
+  const lost = () => page.evaluate(() => ({ clamped: globalThis.__clamped, dropped: globalThis.__dropped }));
+  await h.virtualDisplay(page, 60);
+  // A second at 1x lets go of any "behind" from the real frames before (a loaded host).
+  await h.runFrames(page, 61);
+  assert.deepEqual(await behind(), { data: '0', shown: false }, 'not behind at 1x');
+  // A stall: the frame after it is cut at the cap (clamped), which is not behind.
+  const before = await lost();
+  await h.displayStall(page, 5000);
+  await h.runFrames(page, 1);
+  const stalled = await lost();
+  assert.ok(stalled.clamped > before.clamped, 'the stall was clamped');
+  assert.ok(stalled.dropped === before.dropped, 'the stall dropped nothing');
+  assert.deepEqual(await behind(), { data: '0', shown: false }, 'a stall is not behind');
+  // 8x on a host whose clock reads cost 3 ms: the 8 ms budget of a 60 Hz frame holds 3 steps,
+  // 8x wants 6.67.
+  for (let i = 0; i < 6; i += 1) await page.keyboard.press('Equal');
+  await h.displayCost(page, 3);
+  const g = await glue(page);
+  await h.runFrames(page, 60);
+  const after = await glue(page);
+  assert.ok(after.steps - g.steps === 3 * 60, 'the budget held three steps a frame');
+  assert.ok((await lost()).dropped > stalled.dropped, 'steps dropped');
+  assert.deepEqual(await behind(), { data: '1', shown: true }, 'behind');
+  // Back at 1x the budget holds the pace again; "behind" goes a second after the last drop.
+  for (let i = 0; i < 6; i += 1) await page.keyboard.press('Minus');
+  const dropped = await page.evaluate(() => globalThis.__dropped);
+  await h.runFrames(page, 61);
+  assert.ok(await page.evaluate(() => globalThis.__dropped) === dropped, 'nothing dropped at 1x');
+  assert.deepEqual(await behind(), { data: '0', shown: false }, 'not behind after a second at 1x');
+}, { needs: h.haveHfes });
+
+test('Max is bounded by the frame budget and by the step cap, and is never behind (virtual displays, clock reads that cost time)', async (env) => {
+  const page = await bootGame(env);
+  for (let i = 0; i < 7; i += 1) await page.keyboard.press('Equal');
+  await engineSpeed(page, 0);
+  await h.virtualDisplay(page, 60);
+  const receipts = [];
+  // Costs that do not divide the budget: a step's check is never `budget < budget`.
+  for (const [hz, cost] of [[60, 1], [144, 1], [240, 1.1], [60, 0.1]]) {
+    await h.displayCost(page, cost);
+    await h.displayRate(page, hz);
+    await h.runFrames(page, 120); // the page's measure of the frame interval settles on the display's
+    const before = await glue(page);
+    const dropped = await page.evaluate(() => globalThis.__dropped);
+    await h.runFrames(page, hz);
+    const after = await glue(page);
+    // Spec 06 §Design 2: the budget is half the frame interval, at least 3 ms; a step starts
+    // only while the frame is within it (the first always), at most 64 a frame.
+    const budget = Math.max(0.5 * (1000 / hz), 3);
+    const allowed = Math.min(Math.ceil(budget / cost), 64);
+    const steps = after.steps - before.steps;
+    assert.equal(after.speed, 0, `${hz} Hz: the game runs at Max`);
+    assert.ok(steps === allowed * hz, `${hz} Hz, clock reads of ${cost} ms: the steps the budget and the cap allow in every frame`);
+    assert.ok(await page.evaluate(() => globalThis.__dropped) === dropped, `${hz} Hz: Max drops nothing`);
+    assert.equal((await speedShown(page)).speed, 'max');
+    assert.ok(await page.evaluate(() => document.getElementById('screen').dataset.behind) === '0', `${hz} Hz: not behind`);
+    receipts.push(`${hz} Hz at ${cost} ms a read: ${steps / hz} a frame`);
+  }
+  console.log(`  receipt: Max ${receipts.join('; ')}`);
+}, { needs: h.haveHfes });
+
+test('a change of speed in the page forgets the debt: steps owed at 8x on a slow host are not run at 1x (virtual 60 Hz display)', async (env) => {
+  const page = await bootGame(env);
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  for (let i = 0; i < 6; i += 1) await page.keyboard.press('Equal');
+  await h.displayCost(page, 3); // the 8 ms budget of a 60 Hz frame holds 3 steps; 8x wants 6.67
+  await h.runFrames(page, 60);
+  const behind = await page.evaluate(() => [globalThis.__speed, globalThis.__dropped, document.getElementById('screen').dataset.behind]);
+  assert.ok(behind[0] === 8 && behind[1] > 0 && behind[2] === '1', 'behind at 8x: steps owed past the cap, dropped');
+  for (let i = 0; i < 6; i += 1) await page.keyboard.press('Minus');
+  assert.equal((await speedShown(page)).speed, '1');
+  const before = await glue(page);
+  const first = await h.runFrames(page, 1);
+  const one = (await glue(page)).steps - before.steps;
+  await h.runFrames(page, 59);
+  const after = await glue(page);
+  const steps = after.steps - before.steps;
+  console.log(`  receipt: after 1 s behind at 8x, the first second at 1x: ${steps} steps (want 50), ${one} in its first frame`);
+  assert.ok(first.called === 1 && one <= 1, 'the first frame at 1x runs no old debt');
+  assert.ok(Math.abs(steps - 50) <= 1, 'the second at 1x is 50 steps, within one');
+  assert.equal(after.speed, 1, 'the game runs at 1x');
+}, { needs: h.haveHfes });
+
+test('a game put on screen starts its clock at the boot: a new import during a running loop at 8x runs no catch-up steps in its first frame (virtual 60 Hz display)', async (env) => {
+  const page = await bootGame(env);
+  await h.virtualDisplay(page, 60);
+  await speedTo(page, '8');
+  await h.runFrames(page, 2);
+  // Time passes with no frame before the new game is on screen, as the synchronous intake
+  // takes it; then the same disks imported again replace the game.
+  await h.displayStall(page, 1000);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  const before = await glue(page);
+  await h.runFrames(page, 1);
+  const after = await glue(page);
+  const steps = after.steps - before.steps;
+  console.log(`  receipt: the new game's first frame at 8x: ${steps} steps (its own 16.7 ms: 6)`);
+  assert.equal(after.speed, 8, 'the new game runs at the chosen 8x');
+  assert.ok(steps <= 7, 'the first frame runs its own interval at 8x (6.67 steps), no catch-up');
+  // The new game's own counters (its Pacer starts at 0; `before` still holds the old game's).
+  const lost = await page.evaluate(() => [globalThis.__clamped, globalThis.__dropped]);
+  assert.deepEqual(lost, [0, 0], 'the new game clamped and dropped nothing');
+}, { needs: h.haveHfes });
+
+// The canvas pixels as one FNV-1a hash, computed in the page (the frame is the user's data:
+// only whether two hashes are equal is used, never the hash).
+const canvasHash = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen');
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  let x = 0x811c9dc5;
+  for (let i = 0; i < d.length; i += 1) x = Math.imul(x ^ d[i], 0x01000193) >>> 0;
+  return x;
+});
+
+test('the opening\'s frame at a step is the same on a 60 Hz and a 144 Hz display (virtual displays, one seed)', async (env) => {
+  const STEPS = [50, 200, 500, 1000];
+  const seedTime = Date.now(); // both boots seed the game from this clock (app.js clockSeed)
+  const frames = {};
+  for (const hz of [60, 144]) {
+    const { context, page } = await h.openPage(env, { gameFirst: false });
+    await context.addInitScript((t) => { Date.now = () => t; }, seedTime);
+    await h.load(page, env);
+    await h.virtualDisplay(page, hz, { loop: false }); // the loop starts on it, at the boot
+    await page.setInputFiles('#picker', h.HFES);
+    await started(page, FILES);
+    frames[hz] = [];
+    for (const n of STEPS) {
+      const at = await h.runFramesToStep(page, n, 4 * n + 10);
+      assert.ok(at === n, `${hz} Hz: one step at a time up to step ${n}`);
+      assert.equal((await h.state(page)).program, 'u', `${hz} Hz: the opening runs at step ${n}`);
+      frames[hz].push(await canvasHash(page));
+    }
+    await context.close();
+  }
+  assert.ok(new Set(frames[60]).size > 1, 'the opening moves between these steps');
+  const same = STEPS.map((n, i) => `${n} ${frames[60][i] === frames[144][i] ? 'same' : 'differs'}`);
+  console.log(`  receipt: the opening's frame at 60 Hz and 144 Hz, by step: ${same.join(', ')}`);
+  STEPS.forEach((n, i) => assert.ok(frames[60][i] === frames[144][i], `step ${n}: the same frame at 60 Hz and 144 Hz`));
+}, { needs: h.haveHfes });
+
+// No game: the controls only. The widest speed text and "behind" shown.
+test('layout: the Speed group sits on Mute\'s line at 1280 and 1024 px; at 375 px the page does not scroll sideways', async (env) => {
+  const { page } = await h.openPage(env, { gated: false });
+  await h.load(page, env);
+  for (const width of [1280, 1024, 375]) {
+    await page.setViewportSize({ width, height: 900 });
+    const m = await page.evaluate(() => {
+      document.getElementById('speed-label').textContent = 'Max';
+      document.getElementById('speed-reached').textContent = ' 307.2×';
+      document.getElementById('speed-badge').textContent = 'Max 307.2×';
+      document.getElementById('behind').hidden = false;
+      document.getElementById('speed-badge').hidden = false;
+      const box = (id) => document.getElementById(id).getBoundingClientRect();
+      const [mute, group, behind] = [box('mute'), box('speed-group'), box('behind')];
+      return {
+        sameLine: Math.abs((mute.top + mute.bottom) / 2 - (group.top + group.bottom) / 2) < 2 && group.left > mute.right,
+        inside: behind.right <= document.getElementById('drop').getBoundingClientRect().right,
+        sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      };
+    });
+    if (width >= 1024) assert.ok(m.sameLine, `${width} px: Speed on Mute's line`);
+    assert.ok(m.inside, `${width} px: the group inside the drop zone`);
+    assert.ok(!m.sideways, `${width} px: no sideways scroll`);
+  }
+});
+
+// Before the page's scripts: every scheduling call on an AudioParam (the page's only one is its
+// gain) logged as [method, ...arguments].
+function logGainSchedule() {
+  const log = [];
+  window.__gainLog = log;
+  for (const name of ['cancelScheduledValues', 'setTargetAtTime', 'setValueAtTime']) {
+    const real = AudioParam.prototype[name];
+    AudioParam.prototype[name] = function (...args) {
+      log.push([name, ...args]);
+      return real.apply(this, args);
+    };
+  }
+}
+
+// The fade's time constant (site/app.js FADE_S): ~95% of the way in 50 ms.
+const FADE_TAU_S = 0.05 / 3;
+
+test('the Speed buttons change the speed by click; the music fades out above 4x and back at 4x or below, a quick reversal included; Mute is 0 at once at any speed', async (env) => {
+  const page = await bootGame(env, logGainSchedule);
+  const gain = (want) => page.waitForFunction((g) => document.body.dataset.gain === g, want, { timeout: 10_000 });
+  // The schedule since the last call, each change as [kind, value, at]: kind 'fade' (a cancel
+  // and setTargetAtTime with the fade's time constant), 'set' (a cancel and setValueAtTime),
+  // anything else 'other'.
+  const schedule = () => page.evaluate((tau) => {
+    const log = window.__gainLog.splice(0);
+    const out = [];
+    for (let i = 0; i < log.length; i += 1) {
+      const [name, value, at, constant] = log[i];
+      const cancelled = i > 0 && log[i - 1][0] === 'cancelScheduledValues' && log[i - 1][1] === at;
+      if (name === 'cancelScheduledValues') continue;
+      if (name === 'setTargetAtTime' && cancelled && Math.abs(constant - tau) < 1e-9) out.push(['fade', value, at]);
+      else if (name === 'setValueAtTime' && cancelled) out.push(['set', value, at]);
+      else out.push(['other', value, at]);
+    }
+    return out;
+  }, FADE_TAU_S);
+  const kinds = (changes) => changes.map(([kind, value]) => `${kind} ${value}`);
+  const click = async (id, times = 1) => { for (let i = 0; i < times; i += 1) await page.click(`#${id}`); };
+  await click('faster');
+  assert.equal((await speedShown(page)).speed, '1.5', 'the + button');
+  await engineSpeed(page, 1.5);
+  await click('slower');
+  assert.equal((await speedShown(page)).speed, '1', 'the - button');
+  await engineSpeed(page, 1);
+  await click('mute'); // the gesture that starts the sound, muted
+  await page.waitForFunction(() => document.body.dataset.audio === 'running', null, { timeout: 15_000 });
+  await gain('0.00');
+  await schedule();
+  await click('mute');
+  assert.deepEqual(kinds(await schedule()), ['fade 1'], 'unmuted at 1x: the fade back');
+  await gain('1.00');
+  await click('faster', 4);
+  assert.equal((await speedShown(page)).speed, '4');
+  assert.deepEqual(kinds(await schedule()), ['fade 1', 'fade 1', 'fade 1', 'fade 1'], 'up to 4x: loud');
+  await click('faster');
+  assert.equal((await speedShown(page)).speed, '6', 'above 4x');
+  assert.deepEqual(kinds(await schedule()), ['fade 0'], 'above 4x: the fade out');
+  await gain('0.00');
+  await click('slower');
+  assert.equal((await speedShown(page)).speed, '4', 'back at 4x');
+  assert.deepEqual(kinds(await schedule()), ['fade 1'], 'at 4x: the fade back');
+  await gain('1.00');
+  // A quick reversal: up and down again in one task; the second cancels the first's fade.
+  await page.evaluate(() => {
+    document.getElementById('faster').click();
+    document.getElementById('slower').click();
+  });
+  const reversal = await schedule();
+  assert.deepEqual(kinds(reversal), ['fade 0', 'fade 1'], 'a quick reversal: out, then back, the out cancelled');
+  assert.ok(reversal[1][2] - reversal[0][2] < 0.05, 'the reversal comes within the fade');
+  await h.waitFrames(page, 10);
+  await gain('1.00');
+  // Muted: 0 at once, at any speed, and no fade back while muted.
+  await click('mute');
+  assert.deepEqual(kinds(await schedule()), ['set 0'], 'Mute at 4x: 0 at once');
+  await click('faster', 2);
+  assert.equal((await speedShown(page)).speed, '8', 'muted, up to 8x');
+  await click('slower', 3);
+  assert.equal((await speedShown(page)).speed, '3', 'muted, down to 3x');
+  assert.deepEqual(kinds(await schedule()), ['set 0', 'set 0', 'set 0', 'set 0', 'set 0'], 'muted, 8x and back to 3x: 0 at once each time, no fade');
+  await h.waitFrames(page, 20);
+  assert.equal(await page.evaluate(() => document.body.dataset.gain), '0.00', 'muted at 3x: silent');
+  await click('mute');
+  assert.deepEqual(kinds(await schedule()), ['fade 1'], 'unmuted at 3x: the fade back');
+  await gain('1.00');
+}, { needs: h.haveHfes });
 
 const filter = process.argv[2];
 const env = await h.setup();

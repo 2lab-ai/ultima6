@@ -42,7 +42,7 @@ Open items are in `.prd/browser-port/loop.md`.
 
 ```sh
 scripts/cargo.sh test --workspace --profile gate  # release + overflow and debug-assertion checks; the wrapper pins rustup stable
-scripts/cargo.sh run -p u6-native --release -- --zip ultima-vi.zip
+scripts/cargo.sh run -p u6-native --release -- --zip ultima-vi.zip  # the window: - / = (or numpad -/+) slower / faster, 1x to 8x and Max, shown in the title
 bash scripts/build-web.sh && node tools/web/test-web.mjs
 scripts/deploy-web.sh main                          # Cloudflare Pages project ultima6
 ```
@@ -51,7 +51,7 @@ scripts/deploy-web.sh main                          # Cloudflare Pages project u
 
 | Path | What |
 |---|---|
-| `.prd/` | spec (01), architecture (02), core port contract (03), P3 refactor plan (04), HD/4K output design (05), loop |
+| `.prd/` | spec (01), architecture (02), core port contract (03), P3 refactor plan (04), HD/4K output design (05), fixed tick and speed (06), HD art (07), Korean i18n (08), NPC voices (09), loops |
 | `crates/u6-intake` · `u6-formats` · `u6-core` · `u6-render` · `u6-audio` · `u6-native` · `u6-web` · `u6-testkit` | Rust workspace (`u6-audio`: the emulated Amiga audio machine; `u6-testkit`: content-free comparisons for the real-data tests) |
 | `re/notes/` | reverse-engineering notes (formats, graphics, functions, subsystems, oracle, port map) |
 | `tools/` | PP20, hunk flattener, REA drivers, Amiga emulator oracle, web test harness |

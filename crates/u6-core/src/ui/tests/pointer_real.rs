@@ -10,12 +10,18 @@
 use super::real_tests::{files, png};
 use super::*;
 use crate::objects::{ObjectId, READIED};
+use crate::pacer::STEP_MS;
 use u6_testkit::Quiet;
 
 const OUT: &str = "/tmp/claude-501/m2-mouse";
 
-/// The booted game, fed like the headless runner: an event once the queue is empty, then idle
-/// ticks until the game waits again.
+/// Ticks of the hosts' step ([`STEP_MS`], spec 06) in `ms` of engine time, to the nearest.
+fn ticks(ms: u32) -> usize {
+    ((ms + STEP_MS / 2) / STEP_MS) as usize
+}
+
+/// The booted game, fed like the headless runner: ticks of [`STEP_MS`], an event once the
+/// queue is empty, then idle ticks until the game waits again.
 struct Play {
     e: Engine,
 }
@@ -25,7 +31,7 @@ impl Play {
         let mut p = Play {
             e: Engine::game_first(files.clone(), 0).quiet(),
         };
-        p.idle(200);
+        p.idle(ticks(3200));
         p
     }
 
@@ -41,7 +47,7 @@ impl Play {
             crate::main_loop::game_first(st, io)
         });
         let mut p = Play { e };
-        p.idle(200);
+        p.idle(ticks(3200));
         let st = keep
             .borrow_mut()
             .take()
@@ -62,16 +68,16 @@ impl Play {
             }
         }
         p.send(InputEvent::Key(Key::Char('b')));
-        p.settle(2000);
+        p.settle(ticks(32_000));
         p
     }
 
-    /// Holds the left button three cells south of the hero for `ms` (16 ms ticks, rounded),
-    /// then idles until the prompt is back; the cells walked.
+    /// Holds the left button three cells south of the hero for `ms` ([`ticks`]), then idles
+    /// until the prompt is back; the cells walked.
     fn held_steps(&mut self, ms: u32) -> u16 {
         let from = self.leader_at();
-        let path = self.hold((88, 88 + 48), ((ms + 8) / 16) as usize);
-        self.settle(4000);
+        let path = self.hold((88, 88 + 48), ticks(ms));
+        self.settle(ticks(64_000));
         let at = self.leader_at();
         steps(from, &path).iter().sum::<u16>() + steps(*path.last().quiet(), &[at])[0]
     }
@@ -109,20 +115,22 @@ impl Play {
     /// position after every tick of the hold and after the release.
     fn hold(&mut self, (x, y): (i16, i16), ticks: usize) -> Vec<(u16, u16)> {
         let mut at = Vec::with_capacity(ticks + 1);
-        self.e.tick(&[InputEvent::Pointer { x, y, buttons: 1 }], 16);
+        self.e
+            .tick(&[InputEvent::Pointer { x, y, buttons: 1 }], STEP_MS);
         at.push(self.leader_at());
         for _ in 1..ticks {
-            self.e.tick(&[], 16);
+            self.e.tick(&[], STEP_MS);
             at.push(self.leader_at());
         }
-        self.e.tick(&[InputEvent::Pointer { x, y, buttons: 0 }], 16);
+        self.e
+            .tick(&[InputEvent::Pointer { x, y, buttons: 0 }], STEP_MS);
         at.push(self.leader_at());
         at
     }
 
     fn idle(&mut self, ticks: usize) {
         for _ in 0..ticks {
-            self.e.tick(&[], 16);
+            self.e.tick(&[], STEP_MS);
         }
     }
 
@@ -131,15 +139,15 @@ impl Play {
     }
 
     fn send_all(&mut self, evs: &[InputEvent]) {
-        self.e.tick(evs, 16);
-        for _ in 0..2000 {
+        self.e.tick(evs, STEP_MS);
+        for _ in 0..ticks(32_000) {
             if self.e.io().pending_events() == 0 {
                 break;
             }
-            self.e.tick(&[], 16);
+            self.e.tick(&[], STEP_MS);
         }
         assert!(self.e.io().pending_events() == 0, "the game took {evs:?}");
-        self.idle(40);
+        self.idle(ticks(640));
     }
 
     /// A press and its release in one tick: the event wait samples the press, then the
@@ -265,7 +273,7 @@ fn the_game_played_with_the_pointer() {
         "the command's name is in the scroll"
     );
     p.keys("bye\n");
-    p.idle(60);
+    p.idle(ticks(960));
     for _ in 0..4 {
         if p.e.state().main.reading == 1 {
             break;
@@ -390,7 +398,7 @@ fn a_held_press_walks_a_cell_a_step_and_stops_at_the_release() {
     let mut p = Play::boot(&files);
     assert!(p.at_prompt(), "boot reaches the prompt");
     // 15 s: past the start fight's first world turn (its NPCs' turns take seconds) and a repeat.
-    let held = (15_000 / 16) as usize;
+    let held = ticks(15_000);
     // Three cells away in each direction: the first hold that walks more than one cell.
     for (dx, dy) in [
         (0, 3),
@@ -404,7 +412,7 @@ fn a_held_press_walks_a_cell_a_step_and_stops_at_the_release() {
     ] {
         let from = p.leader_at();
         let path = p.hold((88 + 16 * dx, 88 + 16 * dy), held);
-        p.settle(4000);
+        p.settle(ticks(64_000));
         let st = steps(from, &path);
         let moved: u16 = st.iter().sum();
         if moved < 2 {
@@ -451,6 +459,9 @@ fn a_held_press_walks_at_the_originals_pace() {
             port_counts(|| Play::boot(&files), &ORACLE_START),
         ),
     ] {
+        println!(
+            "held walk, {name}: (PAL frames held, the original's cells, the port's) {counts:?}"
+        );
         for &(frames, orig, port) in &counts {
             if frames * 20 < crate::ui::target::HELD_WALK_MS {
                 // Shorter than a step (100 ms included): one cell, as the original.
@@ -490,11 +501,11 @@ fn a_held_press_in_a_calm_balloon_does_not_hang() {
         st.borrow_mut().actors.wind = 0xff;
         let before = lines(&p);
         let buttons = u8::from(t < 12);
-        p.e.tick(&[InputEvent::Pointer { x, y, buttons }], 16);
+        p.e.tick(&[InputEvent::Pointer { x, y, buttons }], STEP_MS);
         grown.push(lines(&p) - before);
         assert!(p.leader_at() == from, "no wind: no move (tick {t})");
     }
-    p.settle(600);
+    p.settle(ticks(9600));
     // Each try prints the same lines: the press's try is the first tick's growth.
     let per_try = grown.iter().copied().find(|&g| g > 0).unwrap_or(0);
     let total: usize = grown.iter().sum();
@@ -515,8 +526,8 @@ fn a_held_map_press_during_the_exit_question_does_not_hang() {
     // Ctrl-Q (0x11): the exit question, read with 0x10790a until Y or N.
     p.send(InputEvent::Key(Key::Char('\u{11}')));
     assert!(!p.at_prompt(), "the exit question waits");
-    let path = p.hold((88 + 48, 88), 12);
-    p.idle(20);
+    let path = p.hold((88 + 48, 88), ticks(192));
+    p.idle(ticks(320));
     assert!(
         path.iter().all(|&a| a == from),
         "the question takes no walk"

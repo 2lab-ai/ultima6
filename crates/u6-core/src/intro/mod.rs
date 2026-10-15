@@ -248,7 +248,9 @@ pub fn journey_onward(st: &mut IntroState) -> IntroOutcome {
 ///
 /// I, C, T, A, J choose; Return takes the highlighted entry (the first, without a mouse);
 /// the digits, `-` and `=` switch songs; ^Q quits. The extended codes H / K and M / P move the
-/// highlight. The pictures are drawn only when the menu is not on the screen yet.
+/// highlight. The pictures are drawn only when the menu is not on the screen yet. Port: while
+/// the menu reads its keys, `-` and `=` are claimed for it on the `Io` ([`Io::own_keys`]), so
+/// the page does not take them for the speed.
 pub async fn menu(st: &mut IntroState, io: &Io) -> i16 {
     let menu_file = st.files_ptr;
     let title = st.files_ptr.add(0x9c40);
@@ -283,6 +285,7 @@ pub async fn menu(st: &mut IntroState, io: &Io) -> i16 {
     st.views.draw.planes = st.video.other();
     st.video.pointer = 1;
     let mut choice: i16 = 0;
+    let keys = io.own_keys(crate::engine::OWN_MINUS | crate::engine::OWN_EQUALS);
     loop {
         if !st.keys.ready(io) {
             st.video.wait_frame(io).await;
@@ -345,6 +348,7 @@ pub async fn menu(st: &mut IntroState, io: &Io) -> i16 {
             break;
         }
     }
+    drop(keys);
     st.video.pointer = 0;
     if choice != 3 {
         music::play_song(st, 0);
