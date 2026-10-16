@@ -1,0 +1,22 @@
+[package]
+name = "u6-hdtool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The local imagegen HD tool (spec 07 HD2): inventory, atlas, run, ingest, pack"
+
+[[bin]]
+name = "u6-hd"
+path = "src/main.rs"
+
+[dependencies]
+u6-core.workspace = true
+u6-formats.workspace = true
+u6-intake.workspace = true
+u6-hdpack.workspace = true
+libc = "0.2"
+png = "0.18"
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = "1"
