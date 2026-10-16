@@ -2004,9 +2004,21 @@ const hdShown = (page) => page.evaluate(() => {
   };
 });
 
+// Page init script: the media queries the page makes, in `window.__mediaQueries`.
+function watchMedia() {
+  const made = [];
+  window.__mediaQueries = made;
+  const real = window.matchMedia.bind(window);
+  window.matchMedia = (query) => {
+    const q = real(query);
+    made.push(q);
+    return q;
+  };
+}
+
 // A gated page (gameFirst) on the user's disks, started, the canvas focused; every request to
 // another origin counted in `foreign`.
-async function bootHd(env, foreign, init) {
+async function bootHd(env, foreign, init = watchMedia) {
   const { context, page } = await h.openPage(env);
   context.on('request', (r) => {
     const url = r.url();
@@ -2020,7 +2032,7 @@ async function bootHd(env, foreign, init) {
   return page;
 }
 
-test('HD: on by default and kept across a reload; the button switches it at once with no game step; off the canvas is the RGBA frame at 320 x 200, on the HD frame at 320·S x 200·S in the same box; no foreign request', async (env) => {
+test('HD: on by default and kept across a reload; the button switches it at once with no game step; off the canvas is the RGBA frame at 320 x 200, on the HD frame at 320·S x 200·S in the same box (S 2 in a smaller box, S 4 again at twice the pixel ratio); no foreign request', async (env) => {
   const foreign = [];
   const page = await bootHd(env, foreign);
   await h.waitPrompt(page);
@@ -2071,6 +2083,25 @@ test('HD: on by default and kept across a reload; the button switches it at once
   assert.ok(shown.height === 400 && shown.box[0] < 960, 'S 2 in a smaller box');
   await h.waitFrames(page, 2);
   assert.ok(await canvasShowsGame(page), 'S 2: the HD frame');
+  // The same box on a display of twice the pixel ratio (the window moved to another screen):
+  // S 4, with no resize of the box. Headless Chromium changes the ratio under the emulation
+  // but fires no media-query change for it, so the test fires the one a display change fires
+  // on the page's own query (`watchMedia`).
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 700, height: 900, deviceScaleFactor: 2, mobile: false });
+  assert.equal(await page.evaluate(() => devicePixelRatio), 2);
+  assert.equal(await page.evaluate(() => document.getElementById('screen').width), 640, 'no resize: S 2 still');
+  const fired = await page.evaluate(() => {
+    const ratio = window.__mediaQueries.filter((q) => q.media.includes('dppx'));
+    for (const q of ratio) q.dispatchEvent(new Event('change'));
+    return ratio.length;
+  });
+  assert.equal(fired, 1, 'the page watches one pixel-ratio query');
+  await page.waitForFunction(() => document.getElementById('screen').width === 1280, null, { timeout: 10_000 });
+  assert.deepEqual((await hdShown(page)).box, shown.box, 'the same box');
+  await h.waitFrames(page, 2);
+  assert.ok(await canvasShowsGame(page), 'the pixel ratio doubled: S 4');
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
   assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP violation');
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });

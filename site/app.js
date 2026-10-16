@@ -885,6 +885,15 @@ new ResizeObserver(() => {
 window.addEventListener('resize', () => {
   if (hdOn) applyHd();
 });
+// A move to a display of another pixel ratio changes the device pixels of the same CSS box
+// (no resize): one query per ratio, armed again for the new one.
+function watchRatio() {
+  matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`).addEventListener('change', () => {
+    if (hdOn) applyHd();
+    watchRatio();
+  }, { once: true });
+}
+watchRatio();
 slower.addEventListener('click', () => changeSpeed(-1));
 faster.addEventListener('click', () => changeSpeed(1));
 // The pointer: the position through the canvas's CSS box onto the game's 320 x 200 pixels
