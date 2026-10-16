@@ -37,7 +37,7 @@ Follow-up 2026-10-15 (verbatim; a later improvement, "not now"):
 > 모든 리소스를 x2나 x4로 HD와 4k 화면에 맞게 기초 리소스 업스케일하고 기본 맵 화면을 hd나 4k에 맞게 리소스도 업스케일하고 전체 맵도 훨씬 더 많이 보여주는 식으로 개선 예정임. 이렇게 하기위해서 미리 ui나 출력등을 고려해줘 작업 완료후 이 내용에 대해서도 리서치해줘
 
 Read as:
-- Now: P3 designs UI and output so a later HD/4K phase can follow. This means x2 and x4 resources, an HD/4K map view, and a much wider view of the map. The design is in `.prd/05-hd-output.md`; P3 builds its seam (04 W0, W10).
+- Now: P3 designs UI and output so a later HD/4K phase can follow. This means x2 and x4 resources, an HD/4K map view, and a much wider view of the map. Spec 07 built the seam for x2/x4 resources and shipped it (source plane, HD compositor, pack format). The wider view stays research in `.prd/05-hd-output.md` §4. P3 builds no HD seam (04 rev 6).
 - After the current work (P3 → P4 redeploy): research the HD/4K phase.
 
 Fixed scope (rev 2, 2026-10-14):
