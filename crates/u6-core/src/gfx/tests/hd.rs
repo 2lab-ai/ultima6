@@ -1007,3 +1007,179 @@ fn a_portrait_from_its_archive_shows_mmpx_of_its_colours() {
         );
     }
 }
+
+/// A game for the content keys (spec 07 HD1), every file synthetic: a one-item portrait archive
+/// `facefile.a` of `face`, the paper and spellbook bitmaps `paper.bmp` and `book.bmp` (named in a
+/// synthetic `game` at A4-0x61e2 and A4-0x61de, as the original names them), and a bitmap colour
+/// table that every raw byte goes through (`colours`), so the drawn pixels are not the bytes.
+/// With `portrait` the game draws the portrait (letter `a`, item 0) at (0xd8, 0x18) and presents.
+fn keyed_game(face: &[u8], paper: (u16, u16, &[u8]), colours: [u8; 256], portrait: bool) -> Engine {
+    use crate::converse::text::{ConverseText, MESSAGES, Msg};
+    use crate::image::{A4, SyntheticGame};
+    let mut lib = 4u32.to_le_bytes().to_vec();
+    lib.extend(u6_formats::lzw::encode(face).unwrap());
+    let bitmap = |(w, h, px): (u16, u16, &[u8])| {
+        let mut raw = w.to_le_bytes().to_vec();
+        raw.extend(h.to_le_bytes());
+        raw.extend(px);
+        u6_formats::lzw::encode(&raw).unwrap()
+    };
+    let book: Vec<u8> = (0..12).map(|i| (i * 7) as u8).collect();
+    let base = (A4 - 0x61e2) & !15;
+    let mut data = vec![0u8; 64];
+    let at = |a: u32| (a - base) as usize;
+    let (name_paper, name_book) = (base + 32, base + 48);
+    data[at(A4 - 0x61e2)..][..4].copy_from_slice(&name_paper.to_be_bytes());
+    data[at(A4 - 0x61de)..][..4].copy_from_slice(&name_book.to_be_bytes());
+    data[at(name_paper)..][..10].copy_from_slice(b"paper.bmp\0");
+    data[at(name_book)..][..9].copy_from_slice(b"book.bmp\0");
+    let game = SyntheticGame::new()
+        .place_at(1, base)
+        .loaded(true, data)
+        .build();
+    let files = Files::new(BTreeMap::from([
+        ("game".to_string(), game),
+        ("facefile.a".to_string(), lib),
+        ("paper.bmp".to_string(), bitmap(paper)),
+        ("book.bmp".to_string(), bitmap((4, 3, &book))),
+    ]));
+    let mut s = State::empty();
+    s.converse.text = Some(ConverseText::from_pairs(MESSAGES.iter().map(|&(m, _)| {
+        let t: &[u8] = if m == Msg::PortraitFile {
+            b"facefile.?"
+        } else {
+            b""
+        };
+        (m, t.to_vec())
+    })));
+    s.gfx.tables.bitmap_colours = colours;
+    // Record 7: transparent on a diagonal, with bytes of its own under the transparency.
+    install(&mut s.gfx, 7, map_tile(0, 16, pattern(2)));
+    let rec = &mut s.gfx.records[7];
+    for i in 0..256 {
+        rec.transparent[i] = i % 17 == 0;
+        if rec.transparent[i] {
+            rec.pixels[i] = 9;
+        }
+    }
+    let mut e = Engine::with_game(s, files, move |st, io| async move {
+        if portrait {
+            crate::converse::draw_portrait(&st.borrow(), &io, 0, 0xd8, 0x18);
+            io.present();
+        }
+        io.sleep(u32::MAX).await
+    });
+    e.enable_src_plane();
+    e.tick(&[], 16);
+    e
+}
+
+/// SF3: the engine's content keys are those the pack is keyed by (`u6_hdpack`): a tile's of its
+/// pixels and transparency (the mask is part of it), a portrait's of the 56 × 64 bytes
+/// `portrait_pixels` reads, a bitmap's of the bytes the file holds, both before the colour
+/// table (not of the pixels drawn).
+#[test]
+fn the_engines_content_keys_are_the_packs() {
+    use u6_hdpack::{image_hash, tile_hash};
+    use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, portrait_id};
+    let face: Vec<u8> = (0..56 * 64).map(|i| (i % 97) as u8 + 40).collect();
+    let paper: Vec<u8> = (0..10 * 6).map(|i| (i * 3) as u8).collect();
+    let colours: [u8; 256] = std::array::from_fn(|i| (i as u8).wrapping_sub(40) | 0x20);
+    let e = keyed_game(&face, (10, 6, &paper), colours, false);
+    let key = |kind, id| crate::hd::image_key(&e, kind, id);
+    let drawn = |raw: &[u8]| {
+        raw.iter()
+            .map(|&b| colours[usize::from(b)] & 0x1f)
+            .collect::<Vec<u8>>()
+    };
+    // The tile: the mask is in its key.
+    let s = e.state();
+    let rec = &s.gfx.records[7];
+    let tile = key(Kind::Tile, 7).unwrap();
+    assert_eq!(Some(tile), tile_hash(&rec.pixels, &rec.transparent));
+    assert_ne!(
+        tile,
+        image_hash(16, 16, rec.pixels.iter().copied()),
+        "the mask counts"
+    );
+    // The portrait: its bytes before the colour table.
+    let portrait = key(Kind::Portrait, portrait_id(b'a', 0).unwrap()).unwrap();
+    assert_eq!(portrait, image_hash(56, 64, face.iter().copied()));
+    assert_ne!(
+        portrait,
+        image_hash(56, 64, drawn(&face).into_iter()),
+        "not the pixels drawn"
+    );
+    // The paper and the spellbook: their bytes as the files hold them.
+    let p = key(Kind::Bitmap, BITMAP_PAPER).unwrap();
+    assert_eq!(p, image_hash(10, 6, paper.iter().copied()));
+    assert_ne!(p, image_hash(10, 6, drawn(&paper).into_iter()));
+    let book: Vec<u8> = (0..12).map(|i| (i * 7) as u8).collect();
+    assert_eq!(
+        key(Kind::Bitmap, BITMAP_SPELLBOOK),
+        Some(image_hash(4, 3, book.iter().copied()))
+    );
+    // No such image: no key.
+    assert_eq!(key(Kind::Portrait, portrait_id(b'b', 3).unwrap()), None);
+    assert_eq!(key(Kind::Classic, 0), None);
+}
+
+/// A new game whose portrait has other bytes that look the same through its colour table (every
+/// byte to one colour) does not show the pack image of the first game's bytes: the view's
+/// restart makes the compositor look every image up again ([`Compositor::forget`]), so the
+/// portrait's key is asked again.
+#[test]
+fn after_a_restart_a_portrait_of_other_bytes_that_look_the_same_is_not_the_packs() {
+    use std::rc::Rc;
+    use u6_hdpack::{Generator, ImageId, PackImage, Rgba, image_hash, read_pack, write_pack};
+    let flat: [u8; 256] = [0x20 | 5; 256];
+    let (a, b): (Vec<u8>, Vec<u8>) = (
+        (0..56 * 64).map(|i| (i % 7) as u8).collect(),
+        (0..56 * 64).map(|i| (i % 11) as u8).collect(),
+    );
+    let mut picture = Rgba::new(224, 256);
+    for (i, p) in picture.pixels.chunks_exact_mut(4).enumerate() {
+        p.copy_from_slice(&[(i % 224) as u8, (i / 224) as u8, 77, 255]);
+    }
+    let image = PackImage {
+        id: ImageId::Portrait {
+            letter: b'a',
+            item: 0,
+        },
+        hash: image_hash(56, 64, a.iter().copied()),
+        image: picture,
+    };
+    let g = Generator {
+        name: "test".into(),
+        version: "0".into(),
+        engine: "none".into(),
+        date: "2026-10-16".into(),
+    };
+    let pack = Rc::new(crate::hd::HdPack::new(
+        read_pack(&write_pack(&[image], &g, true).unwrap()).unwrap(),
+    ));
+    let draw = |face: &[u8]| keyed_game(face, (2, 2, &[1, 2, 3, 4]), flat, true);
+    let (first, second) = (draw(&a), draw(&b));
+    assert!(
+        first.frame().pixels() == second.frame().pixels(),
+        "the two games look the same"
+    );
+    let mut view = HdView::new();
+    view.set(true, Scale::X4);
+    view.set_pack(Some(pack));
+    let blank = Framebuffer::new();
+    view.present(Some(&first), &blank);
+    let block_at = |view: &HdView| block(view.rgba(), Scale::X4, (0xd8 + 5, 0x18 + 7));
+    let classic =
+        word(first.frame().palette[usize::from(first.frame().get(0xd8 + 5, 0x18 + 7).unwrap())]);
+    assert!(
+        block_at(&view).iter().any(|&c| c != classic),
+        "the first game: the pack's image"
+    );
+    view.restart();
+    view.present(Some(&second), &blank);
+    assert!(
+        block_at(&view).iter().all(|&c| c == classic),
+        "the second: MMPX of a flat portrait"
+    );
+}

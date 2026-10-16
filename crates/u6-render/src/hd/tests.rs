@@ -103,12 +103,15 @@ impl X {
 /// A synthetic image: kind, id, version, width, height, pixels, transparency.
 type Pic = (Kind, u16, u32, usize, usize, Vec<u8>, Option<Vec<bool>>);
 
-/// Synthetic images by (kind, id), and how often they and their keys were asked for.
+/// Synthetic images by (kind, id), and how often they and their keys were asked for; `salt`
+/// changes every key without changing a pixel (an image whose bytes changed where its pixels do
+/// not show it).
 #[derive(Clone, Default)]
 struct Pics {
     images: Vec<Pic>,
     asked: usize,
     keys: usize,
+    salt: u64,
 }
 
 impl Pics {
@@ -171,7 +174,7 @@ impl Images for Pics {
     fn key(&mut self, kind: Kind, id: u16) -> Option<u64> {
         self.keys += 1;
         let e = self.images.iter().find(|e| (e.0, e.1) == (kind, id))?;
-        Some(pic_key(e))
+        Some(pic_key(e) ^ self.salt)
     }
 }
 
@@ -1676,8 +1679,9 @@ fn keys_are_asked_only_with_a_pack_and_only_for_an_image_whose_hd_image_is_not_k
 }
 
 /// Two images of equal content share one MMPX image; a pack that has an image for one of them
-/// only, set after both were shown (and set again after a forget), shows it for that one and
-/// MMPX for the other, whatever order the composition reaches them in.
+/// only, set after both were shown (and set again after a removal), shows it for that one and
+/// MMPX for the other, with either one met first in the composition (fresh frames and
+/// compositors for each order).
 #[test]
 fn images_of_equal_content_keep_their_own_pack_images() {
     let mut pics = Pics::default();
@@ -1687,34 +1691,100 @@ fn images_of_equal_content_keep_their_own_pack_images() {
     }
     let mut pack = TestPack::default();
     pack.put(Kind::Tile, 2, key_of(&pics, Kind::Tile, 2), (64, 64), 5);
-    let mut fb = plane();
-    fb.palette = palette(7);
-    // Tile 1 before tile 2 in raster order, then tile 2 before tile 1.
-    draw(&mut fb, &pics, Kind::Tile, 1, (16, 16));
-    draw(&mut fb, &pics, Kind::Tile, 2, (48, 16));
-    for scale in [Scale::X4, Scale::X2] {
-        let mut c = Compositor::new();
-        for (step, set) in [None, Some(&pack), None, Some(&pack), Some(&pack)]
-            .into_iter()
-            .enumerate()
-        {
-            if step == 4 {
-                draw(&mut fb, &pics, Kind::Tile, 2, (16, 64));
-                draw(&mut fb, &pics, Kind::Tile, 1, (48, 64));
+    for (first, second) in [(1u16, 2u16), (2, 1)] {
+        for scale in [Scale::X4, Scale::X2] {
+            let mut fb = plane();
+            fb.palette = palette(7);
+            draw(&mut fb, &pics, Kind::Tile, first, (16, 16));
+            draw(&mut fb, &pics, Kind::Tile, second, (48, 16));
+            let mut c = Compositor::new();
+            for (step, set) in [None, Some(&pack), None, Some(&pack)]
+                .into_iter()
+                .enumerate()
+            {
+                c.set_pack(set.map(|p| Rc::new(p.clone()) as Rc<dyn Pack>));
+                for _ in 0..2 {
+                    c.compose(&fb, &mut pics, scale);
+                    assert!(
+                        c.rgba() == expected(&fb, &pics, set, scale).as_slice(),
+                        "tile {first} first, {scale:?} step {step}"
+                    );
+                }
             }
-            c.set_pack(set.map(|p| Rc::new(p.clone()) as Rc<dyn Pack>));
-            c.compose(&fb, &mut pics, scale);
-            assert!(
-                c.rgba() == expected(&fb, &pics, set, scale).as_slice(),
-                "{scale:?} step {step}"
-            );
-            c.compose(&fb, &mut pics, scale);
-            assert!(c.rgba() == expected(&fb, &pics, set, scale).as_slice());
+            assert_eq!(c.cache().made(), 1, "one MMPX image for the content");
         }
-        assert_eq!(
-            c.cache().made(),
-            1,
-            "{scale:?}: one MMPX image for the content"
+    }
+}
+
+/// Pixels flagged by the blit (an overlay OR, an outline) over a record whose pack image matches
+/// are their classic colour; the record's other pixels show the pack's image.
+#[test]
+fn flagged_pixels_over_a_pack_image_are_classic() {
+    let mut pics = Pics::default();
+    pics.put(Kind::Tile, 9, (16, 16), art(9, 16, 16, 4), None);
+    let mut pack = TestPack::default();
+    pack.put(Kind::Tile, 9, key_of(&pics, Kind::Tile, 9), (64, 64), 9);
+    let mut fb = plane();
+    fb.palette = palette(9);
+    draw(&mut fb, &pics, Kind::Tile, 9, (32, 32));
+    for (k, flag) in [(0usize, FLAG_OVERLAY), (1, FLAG_OUTLINE)] {
+        for i in 0..16 {
+            let (x, y) = (32 + i, 32 + 2 * k + 3);
+            let p = fb.get(x, y).unwrap() ^ 1;
+            fb.set_src(x, y, p, tile(9, 0, (i, 2 * k + 3), flag));
+        }
+    }
+    for scale in [Scale::X2, Scale::X4] {
+        let got = fresh_with(&fb, &pics, Some(&pack), scale);
+        assert!(got == expected(&fb, &pics, Some(&pack), scale), "{scale:?}");
+        for (x, y) in [(40, 35), (40, 37)] {
+            let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+            assert!(
+                block(&got, scale, (x, y)).iter().all(|&c| c == classic),
+                "flagged: classic"
+            );
+        }
+        let classic = word(fb.palette[usize::from(fb.get(40, 40).unwrap())]);
+        assert!(
+            block(&got, scale, (40, 40)).iter().any(|&c| c != classic),
+            "the pack's"
         );
     }
+}
+
+/// The key contract ([`Images::key`]): a key that changes while the image's pixels do not is not
+/// asked again (the memo stands) until [`Compositor::forget`], after which the image is looked
+/// up again and its new key decides.
+#[test]
+fn a_key_that_changes_without_its_pixels_is_followed_after_forget() {
+    let mut pics = Pics::default();
+    pics.put(Kind::Portrait, 0x6101, (56, 64), art(3, 56, 64, 5), None);
+    let mut pack = TestPack::default();
+    pack.put(
+        Kind::Portrait,
+        0x6101,
+        key_of(&pics, Kind::Portrait, 0x6101),
+        (224, 256),
+        3,
+    );
+    let mut fb = plane();
+    fb.palette = palette(2);
+    draw(&mut fb, &pics, Kind::Portrait, 0x6101, (100, 40));
+    let mut c = Compositor::new();
+    c.set_pack(Some(Rc::new(pack.clone())));
+    c.compose(&fb, &mut pics, Scale::X4);
+    let with = expected(&fb, &pics, Some(&pack), Scale::X4);
+    assert!(c.rgba() == with.as_slice());
+    pics.salt = 1;
+    c.compose(&fb, &mut pics, Scale::X4);
+    assert!(
+        c.rgba() == with.as_slice(),
+        "the same pixels: the memo stands"
+    );
+    c.forget();
+    c.compose(&fb, &mut pics, Scale::X4);
+    assert!(
+        c.rgba() == expected(&fb, &pics, None, Scale::X4).as_slice(),
+        "after forget: the new key, which the pack has no image for"
+    );
 }

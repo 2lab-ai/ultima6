@@ -1,7 +1,9 @@
 //! A full-size pack of the scaler's own images, for timing the page with a pack loaded (spec 07
-//! Acceptance 5): every classic image of the owner's files (the 2048 tile records, every
-//! portrait, the paper and spellbook bitmaps) as MMPX ×4 (the compositor's scaler) in the
-//! game's palette, keyed by its content hash, so every image the page draws is a pack hit. It is
+//! Acceptance 5): every classic image of the owner's files as loaded (the 2048 tile records,
+//! every portrait, the paper and spellbook bitmaps) as MMPX ×4 (the compositor's scaler) in the
+//! game's palette, keyed by its content hash, so every image the page draws from its original
+//! bytes is a pack hit; a record the game rewrites as it runs (the merged shore records) has other
+//! bytes then, matches no entry and is drawn by MMPX, as with any pack. It is
 //! made from the owner's art, so it is `derived: true`, and it is written only outside the
 //! repository (the tool's own check, `work::check_target`), like every output of the tool.
 //!

@@ -93,7 +93,11 @@ pub trait Images {
     /// The content key a pack keys image (kind, id) by, as the image is now (spec 07 HD1: the
     /// content hash of the classic image as the engine holds it, `u6_hdpack`'s); `None` when it
     /// has none. Asked only with a pack set, right after [`Images::image`] gave the image, and
-    /// only when the image's HD version is not the one it had last.
+    /// only when the image's HD version is not the one it had last: while the image gives the
+    /// same pixels and transparency its key is taken to be the same, so a key must change only
+    /// with them, or the platform calls [`Compositor::forget`] when it may change otherwise (a
+    /// tile's key is of its pixels and transparency; a portrait's or a bitmap's is of its bytes
+    /// before the colour table, which within one game are those of one file).
     fn key(&mut self, _kind: Kind, _id: u16) -> Option<u64> {
         None
     }
@@ -230,12 +234,15 @@ impl Source {
     }
 }
 
-/// What an HD image was made from: MMPX of its content, or the image of the pack of a generation
-/// ([`Compositor::set_pack`]) at its index ([`PackHd::index`]).
+/// What an HD image was made from: MMPX of its content, or the image of the pack set at its index
+/// ([`PackHd::index`]). Every entry made from a pack is dropped when another pack is set or the
+/// pack is removed ([`HdImages::drop_packed`], which also frees them), so an index names an image
+/// of the pack set now: no generation is kept here. The image's memo keeps one
+/// ([`Slot::memo`]), since MMPX entries outlive the pack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Origin {
     Mmpx,
-    Pack(u64, u32),
+    Pack(u32),
 }
 
 /// One HD image: the content it was made from and the result.
@@ -399,10 +406,10 @@ impl HdImages {
     }
 
     /// The slot of the HD image of `input` (`width` × `height` words) at `scale`, made now if it
-    /// is not held: from the pack image `art` (the pack's generation and image) when given
-    /// (spec 07 H2: the pack's image in front of MMPX), else by MMPX. An entry made from a pack
-    /// image is keyed by that image as well as by `input`, so a pack set or removed never shows
-    /// an entry of another ([`HdImages::drop_packed`] drops them all then).
+    /// is not held: from the pack image `art` when given (spec 07 H2: the pack's image in front
+    /// of MMPX), else by MMPX. An entry made from a pack image is keyed by that image as well as
+    /// by `input`; a pack set or removed drops them all ([`HdImages::drop_packed`]), so none of
+    /// another pack is ever shown.
     ///
     /// `source` is what the image was reached from now (its indices under the palette now): the
     /// entry keeps it for [`HdImages::reached`].
@@ -412,9 +419,9 @@ impl HdImages {
         (width, height): (usize, usize),
         scale: Scale,
         source: Source,
-        art: Option<(u64, PackHd<'_>)>,
+        art: Option<PackHd<'_>>,
     ) -> usize {
-        let origin = art.map_or(Origin::Mmpx, |(pack, a)| Origin::Pack(pack, a.index));
+        let origin = art.map_or(Origin::Mmpx, |a| Origin::Pack(a.index));
         let hash = (self.hash)(input, width, height, scale);
         if let Some(slots) = self.by_hash.get(&hash) {
             for &slot in slots {
@@ -435,7 +442,7 @@ impl HdImages {
         }
         let mut hd = Vec::new();
         match art {
-            Some((_, a)) => {
+            Some(a) => {
                 pack_words(a.rgba, a.width, a.height, scale, &mut hd);
                 self.packed += 1;
             }
@@ -649,7 +656,12 @@ impl Compositor {
             .map(|[x0, y0, x1, y1]| [x0, y0, x1 - x0, y1 - y0])
     }
 
-    /// The next composition writes every block.
+    /// The next composition writes every block and looks every image up again: with no last
+    /// composition it takes a new palette generation, which no image's memo was made under
+    /// ([`HdImages::reached`]), so each is found by its content and, with a pack set, its key is
+    /// asked again ([`Images::key`]). A platform calls it when the images may change in a way
+    /// their pixels do not show (a new game: another file can give a portrait other bytes that
+    /// look the same through the colour table).
     pub fn forget(&mut self) {
         self.last = None;
     }
@@ -849,13 +861,11 @@ impl Resolver<'_> {
                             let source = Source::of(&img, self.palette);
                             let art = self.pack.and_then(|pack| {
                                 let key = self.images.key(kind, id)?;
-                                pack.hd(kind, id, key)
-                                    .filter(|a| {
-                                        a.width == w * PACK_SCALE
-                                            && a.height == h * PACK_SCALE
-                                            && a.rgba.len() == a.width * a.height * 4
-                                    })
-                                    .map(|a| (self.pack_gen, a))
+                                pack.hd(kind, id, key).filter(|a| {
+                                    a.width == w * PACK_SCALE
+                                        && a.height == h * PACK_SCALE
+                                        && a.rgba.len() == a.width * a.height * 4
+                                })
                             });
                             let at = self.hd.get(self.input, (w, h), self.scale, source, art);
                             (at, self.hd.entry(at).token)
