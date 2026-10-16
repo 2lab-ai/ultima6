@@ -553,13 +553,17 @@ export const pageSteps = (page) => ({
 /// member's cell is open (the step swaps them), and the start fight has fewer foes than the hero
 /// has sides (at most three near him at the first prompt, over 10000 seeds). Only after a round of
 /// four blocked does a pass spend the hero's turn, so the fight moves on, up to `STEP_ROUNDS`
-/// rounds; after a try that ended on the wake cell the next direction is tried from there. With
-/// `withFrame` the frame before each try is read (a whole canvas over the protocol, at S 4 1280 x
-/// 800: only for a check of the step's scroll). Returns the step (key, dx, dy), the leader before
-/// and after and, with `withFrame`, the frame before it. After the bound it fails with each try's
-/// key and outcome and the passes between, in order (`what` names it: a click step).
+/// rounds; after a try that ended on the wake cell the next direction is tried from there, and a
+/// walk back onto the cell the call started on ('back': a walk into the wake cell from beside it,
+/// not counted, then the next direction leads back) does not count either, so the step always
+/// leaves the leader elsewhere than it found him. With `withFrame` the frame before each try is
+/// read (a whole canvas over the protocol, at S 4 1280 x 800: only for a check of the step's
+/// scroll). Returns the step (key, dx, dy), the leader before and after and, with `withFrame`, the
+/// frame before it. After the bound it fails with each try's key and outcome and the passes
+/// between, in order (`what` names it: a click step).
 export async function stepOnce(page, { withFrame = false, io = pageSteps(page), what = 'step' } = {}) {
   const tried = [];
+  let start;
   for (let round = 0; round < STEP_ROUNDS; round += 1) {
     if (round > 0) {
       await io.pass();
@@ -568,10 +572,12 @@ export async function stepOnce(page, { withFrame = false, io = pageSteps(page), 
     for (const step of STEPS) {
       await io.prompt();
       const from = await io.leader();
+      start ??= from;
       const before = withFrame ? await io.frame() : undefined;
       await io.act(step);
       const to = await io.leader();
-      const result = stepResult(from, to, step);
+      let result = stepResult(from, to, step);
+      if (result === 'walked' && to === start) result = 'back';
       tried.push(`${step.key} ${result}`);
       if (result === 'walked') return { ...step, from, to, before };
     }

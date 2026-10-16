@@ -177,10 +177,11 @@ test('a step\'s bookkeeping: the scroll of a step east, west, south or north; bl
 // passes so far), the leader moved by each step it allows. Pinned: the order of the directions
 // (east and west blocked, south walks: an east-or-west step fails it), a pass only after a round
 // of four blocked, the bound (16 tries, 3 passes) and its failure, naming each try's key and
-// outcome; a try that ends on the wake cell, then the next direction from there; the frame read
-// only with `withFrame`; a failure of the step itself (the game never took the input) not
-// retried.
-test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 rounds; the wake cell; the frame only when asked; a step that fails stops it', async () => {
+// outcome; a try that ends on the wake cell, then the next direction from there; a walk back
+// onto the cell the call started on not counted (from beside the wake cell: east into it, then
+// west back); the frame read only with `withFrame`; a failure of the step itself (the game never
+// took the input) not retried.
+test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 rounds; the wake cell; never back where it started; the frame only when asked; a step that fails stops it', async () => {
   const stub = ({ at = '300,300,0', open = () => false, wakeOn = null, failOn = null } = {}) => {
     const io = { at, passes: 0, acts: [], frames: 0, prompts: 0 };
     Object.assign(io, {
@@ -228,6 +229,16 @@ test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 ro
   got = await h.stepOnce(null, { io });
   assert.deepEqual(io.acts, keys.slice(0, 3), 'east blocked, west ends on the wake cell, then south');
   assert.ok(got.from === h.WAKE_CELL && got.key === 'ArrowDown', 'the step walked from the wake cell');
+  // West of the wake cell, everything open: east ends on it (not counted), west walks back to
+  // the start (not counted), then south walks from the start: the leader ends elsewhere.
+  const west = `${wx - 1},${wy},${wz}`;
+  io = stub({ at: west, open: () => true });
+  got = await h.stepOnce(null, { io });
+  assert.deepEqual(io.acts, keys.slice(0, 3), 'east onto the wake cell, west back, then south');
+  assert.ok(got.from === west && got.to === `${wx - 1},${wy + 1},${wz}` && got.to !== west, 'a walk back to the start is no step');
+  io = stub({ at: west, open: () => false, wakeOn: 1 });
+  const back = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
+  assert.ok(back instanceof assert.AssertionError && back.message.startsWith('no test step in 4 rounds of the four directions: ArrowRight wake cell, ArrowLeft blocked'), 'the outcomes named: wake cell');
   // A step whose input the game never took fails as it did, not as a blocked try.
   io = stub({ failOn: 1 });
   const failed = await h.stepOnce(null, { io }).then(() => null, (err) => err);
