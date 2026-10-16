@@ -133,6 +133,38 @@ test('the held-walk pace floor: a late first step does not let the next come soo
   }
 });
 
+// No page: the harness's step bookkeeping on synthetic frames and positions, so every direction
+// is exercised whichever one a boot walks: the map's scroll for a step along either axis, and
+// what a key toward a cell did.
+test('a step\'s bookkeeping: the scroll of a step east, west, south or north; blocked, walked, woken on the start cell; any other cell fails', async () => {
+  const shown = (cx, cy) => {
+    const f = new Array(320 * 200 * 4).fill(0);
+    for (let y = 0; y < 200; y += 1) {
+      for (let x = 0; x < 320; x += 1) {
+        const v = Math.imul(x + 16 * cx, 73856093) ^ Math.imul(y + 16 * cy, 19349663);
+        f.fill(v & 255, (y * 320 + x) * 4, (y * 320 + x) * 4 + 3);
+      }
+    }
+    return f;
+  };
+  const before = shown(0, 0);
+  for (const step of h.STEPS) {
+    const walked = h.mapShift(before, shown(step.dx, step.dy));
+    assert.ok(walked.dx === 16 * step.dx && walked.dy === 16 * step.dy && walked.score === 1, `the scroll of ${step.key}`);
+    assert.ok(walked.still < 0.5, `${step.key}: not still`);
+  }
+  const still = h.mapShift(before, before);
+  assert.ok(still.dx === 0 && still.dy === 0 && still.still === 1, 'no step: no scroll');
+  const [east, , south] = h.STEPS;
+  assert.equal(h.stepResult('300,300,0', '300,300,0', east), 'blocked');
+  assert.equal(h.stepResult('300,300,0', '301,300,0', east), 'walked');
+  assert.equal(h.stepResult('300,300,0', '300,301,0', south), 'walked');
+  assert.equal(h.stepResult('300,300,0', h.WAKE_CELL, east), 'woke');
+  for (const [to, label] of [['302,300,0', 'two cells'], ['299,300,0', 'the other way'], ['301,301,0', 'a diagonal'], ['301,300,1', 'another level']]) {
+    assert.throws(() => h.stepResult('300,300,0', to, east), assert.AssertionError, `fails: ${label}`);
+  }
+});
+
 // The runner's failure lines (h.failureLines) on errors whose text holds a sentinel: plain,
 // multi-line with lines shaped as frames of this directory, a thrown string, a page-chosen name,
 // assertions with a label and generated, Playwright's own (a page's thrown error, a timeout on
@@ -220,12 +252,12 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   const s = await started(page, FILES);
   assert.equal(s.focused, 'screen', 'focus lands on the canvas after the import');
   assert.equal(await page.evaluate(() => getComputedStyle(document.activeElement).outlineColor), 'rgb(255, 209, 102)');
-  // From the prompt, one step east (west when the start fight blocks it), then the prompt again.
-  const { key, before } = await h.stepSideways(page);
+  // From the prompt, one step east (another way when the start fight blocks it), then the
+  // prompt again.
+  const { key, dx, dy, before } = await h.stepOnce(page);
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), [key, true], 'the canvas took the arrow');
   const walked = h.mapShift(before, await h.frame(page));
-  const want = key === 'ArrowRight' ? 16 : -16;
-  assert.ok(walked.shift === want && walked.score > 0.5, `one step (${key}) scrolled the map`);
+  assert.ok(walked.dx === 16 * dx && walked.dy === 16 * dy && walked.score > 0.5, `one step (${key}) scrolled the map`);
   await page.keyboard.press('Tab');
   assert.notEqual((await h.state(page)).focused, 'screen', 'Tab leaves the canvas');
   const at = (await h.state(page)).leader;
@@ -236,7 +268,7 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   assert.equal(await page.evaluate(() => document.getElementById('screen').dataset.keys), '0');
   assert.equal((await h.state(page)).leader, at, 'no walk without focus');
   const after = h.mapShift(still, await h.frame(page));
-  assert.ok(after.shift === 0, 'the map stayed');
+  assert.ok(after.dx === 0 && after.dy === 0, 'the map stayed');
 }, { needs: h.haveHfes });
 
 test('two rapid imports: one after the other, the second one runs and is kept', async (env) => {
@@ -385,10 +417,9 @@ test('A on the canvas: Attack asks for a target, a stray key ends it, then the a
   await h.press(page, 'q', 0); // confirms no target: the no-target word, the turn (the start fight) runs
   await h.waitPrompt(page);
   await writeFile('/tmp/claude-501/m2-attack-what.png', await page.locator('#screen').screenshot());
-  const { key, before } = await h.stepSideways(page);
+  const { key, dx, dy, before } = await h.stepOnce(page);
   const walked = h.mapShift(before, await h.frame(page));
-  const want = key === 'ArrowRight' ? 16 : -16;
-  assert.ok(walked.shift === want && walked.score > 0.5, `one step (${key}) after A`);
+  assert.ok(walked.dx === 16 * dx && walked.dy === 16 * dy && walked.score > 0.5, `one step (${key}) after A`);
 }, { needs: h.haveHfes });
 
 test('Ctrl+S and Ctrl+R on the canvas are the game\'s Save and Restore, not the browser\'s', async (env) => {
@@ -409,12 +440,12 @@ test('Ctrl+S and Ctrl+R on the canvas are the game\'s Save and Restore, not the 
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['KeyL', false], 'other Ctrl shortcuts stay the browser\'s');
 }, { needs: h.haveHfes });
 
-// Walks one step (east or west), then saves (Ctrl-S, Y) and waits until the save is stored;
+// Walks one step (h.stepOnce), then saves (Ctrl-S, Y) and waits until the save is stored;
 // returns the leader's position before and after the step.
 async function walkAndSave(page) {
   await h.waitPrompt(page); // the boot reaches the prompt
   const start = (await h.state(page)).leader;
-  const { to: moved } = await h.stepSideways(page);
+  const { to: moved } = await h.stepOnce(page);
   await h.press(page, 'Control+s', 30);
   await h.press(page, 'y', 60);
   await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
@@ -481,7 +512,7 @@ test('a Save of the game an import replaces, made while the import reads: the im
   await started(page, FILES);
   const { moved } = await walkAndSave(page);
   const folder = asFolder(await h.savedFiles(page));
-  const { to: later } = await h.stepSideways(page);
+  const { to: later } = await h.stepOnce(page);
   assert.notEqual(later, moved);
   await page.evaluate(() => window.__hold('read'));
   const from = (await h.log(page)).length;
@@ -561,7 +592,7 @@ test('a Save after the saved game was forgotten stores the whole game; a reload 
   assert.deepEqual(await h.savedPaths(page), [], 'the Save taken before the forget was not stored');
   assert.match((await h.state(page)).status, /The saved game was removed/);
   // The next Save stores the whole game: the objlist and all 69 blocks, the far one included.
-  const { to: later } = await h.stepSideways(page);
+  const { to: later } = await h.stepOnce(page);
   await h.press(page, 'Control+s', 30);
   await h.press(page, 'y', 60);
   await page.waitForFunction(() => document.body.dataset.saved === '2', null, { timeout: 60_000 });
@@ -726,7 +757,7 @@ test('a game whose MED tables fail the checks starts and plays silent: sound on 
   assert.match(s.status, /Started\./, 'the dropped files started');
   assert.equal(silent.length, 1, 'the boot said the sound is off');
   let ticks = await page.evaluate(() => globalThis.__ticks);
-  let step = await h.stepSideways(page);
+  let step = await h.stepOnce(page);
   assert.notEqual(step.to, step.from, 'the game plays');
   assert.ok(await page.evaluate(() => globalThis.__ticks) > ticks, 'the engine ticks');
   // The patched files are the kept ones now: a reload restores them before any gesture, and
@@ -741,7 +772,7 @@ test('a game whose MED tables fail the checks starts and plays silent: sound on 
   s = await h.state(page);
   assert.ok(s.state === 'running', 'the game runs');
   ticks = await page.evaluate(() => globalThis.__ticks);
-  step = await h.stepSideways(page);
+  step = await h.stepOnce(page);
   assert.notEqual(step.to, step.from, 'the game plays on');
   assert.ok(await page.evaluate(() => globalThis.__ticks) > ticks, 'the engine ticks');
   console.log('  receipt: the files dropped with the period table zeroed; sound off at the boot and at the gesture, the game walks after each');
@@ -849,13 +880,13 @@ function scrollChanged(before, after) {
 
 const OUT = '/tmp/claude-501/int-mouse';
 
-// Clicks the map cell `dx` cells east of the hero (its window cell (5, 5) is centred on
-// game pixel (88, 88)), then waits until the game took the click and shows the prompt again;
-// the leader before and after.
-async function clickCell(page, dx) {
+// Clicks the map cell `dx` cells east and `dy` south of the hero (its window cell (5, 5) is
+// centred on game pixel (88, 88)), then waits until the game took the click and shows the
+// prompt again; the leader before and after.
+async function clickCell(page, dx, dy) {
   await h.waitPrompt(page);
   const from = (await h.state(page)).leader;
-  await h.click(page, 88 + 16 * dx, 88, 0);
+  await h.click(page, 88 + 16 * dx, 88 + 16 * dy, 0);
   await h.waitPrompt(page);
   return { from, to: (await h.state(page)).leader };
 }
@@ -879,24 +910,20 @@ async function lookAtHero(page, shot) {
   return described;
 }
 
-// One step by clicks: the cell east of the hero, else (blocked by the start fight) west,
-// up to the harness's `STEP_TRIES` tries, a pass after each blocked one (as `stepSideways`:
-// after a blocked step the world turn picks the hero again at once, no NPC moves); asserts the
-// step is one cell along x.
+// One step by clicks: the cell east of the hero, else (blocked by the start fight) west, south,
+// north, as `h.stepOnce` tries the arrows (after a blocked step the world turn picks the hero
+// again at once, no NPC moves; a pass after a round of four blocked, up to the harness's
+// `STEP_ROUNDS` rounds); asserts a click that walked walks the one cell clicked
+// (`h.stepResult`).
 async function clickStep(page) {
-  for (let i = 0; i < h.STEP_TRIES; i += 1) {
-    const dx = i % 2 === 0 ? 1 : -1;
-    const { from, to } = await clickCell(page, dx);
-    if (to === from) {
-      await h.passTurn(page); // the click focused the canvas
-      continue;
+  for (let round = 0; round < h.STEP_ROUNDS; round += 1) {
+    if (round > 0) await h.passTurn(page); // the clicks focused the canvas
+    for (const step of h.STEPS) {
+      const { from, to } = await clickCell(page, step.dx, step.dy);
+      if (h.stepResult(from, to, step) === 'walked') return { ...step, from, to };
     }
-    const [fx, fy, fz] = from.split(',').map(Number);
-    const [tx, ty, tz] = to.split(',').map(Number);
-    assert.ok(tx - fx === dx && ty === fy && tz === fz, `one cell ${dx > 0 ? 'east' : 'west'}`);
-    return { dx, from, to };
   }
-  throw new Error(`${h.STEP_TRIES} click steps blocked in a row`);
+  throw new Error(`no click step in ${h.STEP_ROUNDS} rounds of the four directions`);
 }
 
 test('the mouse: the Look icon, then Look on the hero, then clicks walk; the keys still work', async (env) => {
@@ -910,7 +937,7 @@ test('the mouse: the Look icon, then Look on the hero, then clicks walk; the key
   assert.ok(scrollChanged(before, described), 'Look printed in the scroll');
   assert.equal((await h.state(page)).focused, 'screen', 'the click focused the canvas');
   await clickStep(page);
-  const { from, to } = await h.stepSideways(page);
+  const { from, to } = await h.stepOnce(page);
   assert.notEqual(to, from, 'the arrows still walk after the mouse');
 }, { needs: h.haveHfes });
 
@@ -1031,8 +1058,8 @@ const HOLD_CELLS = [[88, 88 + 48], [88, 88 - 48], [88 + 48, 88], [88 - 48, 88]];
 // press (waitTaken) and walks no cell; a blocked step costs no movement points, so the world
 // turn after it picks the hero again at once and no NPC moves (the prompt is back, not after
 // the fight's turns): the boot is as fresh for the next direction, up to the four of them (as
-// `stepSideways` tries the other way). Which direction walked depends on the boot's game state,
-// so the receipt does not name it.
+// `h.stepOnce` tries the next). Which direction walked depends on the boot's game state, so the
+// receipt does not name it.
 async function freshHeldWalk(page, ms) {
   for (const cell of HOLD_CELLS) {
     const walk = await heldWalk(page, ms, cell);
