@@ -220,10 +220,10 @@ fn a_saved_block_shared_with_a_clone_is_copied_before_it_is_written() {
     assert_eq!(saved(&clone), (at, every(2)), "the clone shares them");
     draw(&mut back, 3);
     save(&mut g, &back, 3, 64, 64);
+    assert_eq!(saved(&clone), (at, every(2)), "the clone keeps its block");
     let (moved, ids) = saved(&g);
     assert!(
         moved != at && ids == every(3),
         "shared: copied, then written"
     );
-    assert_eq!(saved(&clone), (at, every(2)), "the clone keeps its block");
 }
