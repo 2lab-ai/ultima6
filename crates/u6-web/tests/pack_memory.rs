@@ -1,6 +1,7 @@
 //! Spec 07 H2's memory budget for a loaded HD pack, measured with a counting allocator over the
 //! system one around [`HdPack::load`] of a full-size synthetic pack (every tile record, 206
-//! portraits, two screen-sized panel bitmaps: about the owner's pack, ~86 MB decoded): the page
+//! portraits of noise, two screen-sized panel bitmaps: about the owner's pack, ~89 MB decoded,
+//! the file over 32 MB): the page
 //! decodes every picture once at load and keeps them, so what a loaded pack holds is its pictures
 //! decoded and a few words per picture, never a copy of the file; the peak while loading is
 //! those, one atlas and the reader's entry bytes on top of the file. One test, so nothing else
@@ -48,6 +49,19 @@ fn picture(w: u32, h: u32, seed: u16) -> Rgba {
     img
 }
 
+/// A `w × h` picture of noise (no encoder shrinks it), seeded.
+fn noise(w: u32, h: u32, seed: u16) -> Rgba {
+    let mut x = u64::from(seed).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut img = Rgba::new(w, h);
+    for p in img.pixels.chunks_exact_mut(4) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        p.copy_from_slice(&[x as u8, (x >> 8) as u8, (x >> 16) as u8, 255]);
+    }
+    img
+}
+
 #[test]
 fn a_loaded_pack_holds_its_pictures_decoded_and_no_copy_of_the_file() {
     let mut images: Vec<PackImage> = (0..2048u16)
@@ -63,7 +77,7 @@ fn a_loaded_pack_holds_its_pictures_decoded_and_no_copy_of_the_file() {
             item: i % 100,
         },
         hash: 10_000 + u64::from(i),
-        image: picture(PORTRAIT_HD.0, PORTRAIT_HD.1, i),
+        image: noise(PORTRAIT_HD.0, PORTRAIT_HD.1, i),
     }));
     images.extend(Role::ALL.map(|role| PackImage {
         id: ImageId::Bitmap(role),
@@ -78,8 +92,11 @@ fn a_loaded_pack_holds_its_pictures_decoded_and_no_copy_of_the_file() {
         engine: "none".into(),
         date: "2026-10-16".into(),
     };
-    let bytes = write_pack(&images, &g, true).unwrap();
+    let mut bytes = write_pack(&images, &g, true).unwrap();
     drop(images);
+    // The file's allocation is what its drop frees: exactly its bytes.
+    bytes.shrink_to_fit();
+    assert_eq!(bytes.capacity(), bytes.len());
     let file = bytes.len();
     let largest_entry = u6_intake::zip::read_zip(&bytes, |_| true)
         .unwrap()
@@ -98,13 +115,21 @@ fn a_loaded_pack_holds_its_pictures_decoded_and_no_copy_of_the_file() {
     };
     let peak = PEAK.load(Ordering::SeqCst) - base;
     let held = NOW.load(Ordering::SeqCst) + file - base;
-    assert_eq!(pack.counts(), [2048, 206, 2]);
-    assert_eq!(pack.decoded_bytes() as usize, decoded);
+    let counts: [u32; 3] = pack.counts().try_into().unwrap();
+    let decoded_pack = pack.decoded_bytes() as usize;
+    drop(pack);
+    // Measured before anything else allocates (the test's own output is captured in memory).
+    let left = NOW.load(Ordering::SeqCst);
     println!(
         "a full pack: file {file} bytes, {decoded} decoded; held after the load {held}, \
          peak during it {peak} over the file"
     );
-    // Held: the pictures and a few words per picture; no copy of the file.
+    assert_eq!(counts, [2048, 206, 2]);
+    assert_eq!(decoded_pack, decoded);
+    assert!(left <= base - file, "everything freed with the pack");
+    // Held: the pictures and a few words per picture; no copy of the file (the portraits are
+    // noise, so the file is many times the slack).
+    assert!(file > 32 << 20, "an incompressible fixture: {file} bytes");
     assert!(
         held >= decoded && held <= decoded + (1 << 20),
         "held {held}, decoded {decoded}"
@@ -113,9 +138,4 @@ fn a_loaded_pack_holds_its_pictures_decoded_and_no_copy_of_the_file() {
     // or decoded, and the reader's small tables.
     let budget = decoded + atlas + 2 * largest_entry.max(largest_picture) + (1 << 20);
     assert!(peak <= budget, "peak {peak}, budget {budget}");
-    drop(pack);
-    assert!(
-        NOW.load(Ordering::SeqCst) <= base - file,
-        "everything freed with the pack"
-    );
 }

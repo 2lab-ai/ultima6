@@ -46,13 +46,17 @@
 //
 // An HD pack (spec 07 H2: a zip the owner's local tool made from the owner's own files): a
 // dropped `.zip` is first classified from its zip directory and its manifest.json alone (the
-// engine names the parts to read); a pack never starts or touches a game. It is read whole,
-// checked and decoded by the engine (refused whole, with nothing changed, when it does not
-// read), set on the game on screen and on every game started after, and kept in IndexedDB so
-// the next visit loads it before its first HD frame (storage that refuses it: the pack works
-// for this visit only). "Forget the HD pack" removes it from the page and the browser. Its
-// images go in front of MMPX for the images whose classic bytes they were made from. The page
-// never fetches a pack. A drop that holds a pack and other files is refused as a whole.
+// engine names the parts to read); a pack never starts or touches a game. A zip whose
+// manifest.json names the pack format but does not read is taken for a pack and refused, never
+// started as a game. A pack whose directory already breaks the format is refused before it is
+// read; else it is read whole, checked and decoded by the engine (refused whole, with nothing
+// changed, when it does not read), set on the game on screen and on every game started after,
+// and kept in IndexedDB so the next visit loads it before its first HD frame (storage that
+// refuses it: the pack works for this visit only, and the one kept before is removed). "Forget
+// the HD pack" removes it from the page and the browser. Its images go in front of MMPX for the
+// images whose classic bytes they were made from. The page never fetches a pack. A drop that
+// holds a pack and other files is refused as a whole. Loading a pack while another is set holds
+// both decoded until the new one is checked (so a refusal changes nothing).
 import init, {
   Game, HdPack, PackProbe, budget_ms, input_too_large, max_input_bytes, max_pack_bytes,
   max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
@@ -546,15 +550,16 @@ function reflectPack() {
   document.body.dataset.hdMatched = hdPack && game && !crashed ? game.hd_pack_matches().join(',') : '';
 }
 
-// Whether `file` is an HD pack: the engine names the parts to read (the end of the file, its zip
-// directory, its manifest.json) and tells from them.
-async function isPack(file) {
+// Whether `file` is an HD pack, and if so why it is refused already ('' when nothing in its
+// directory or manifest breaks the format): the engine names the parts to read (the end of the
+// file, its zip directory, at most 192 KiB of its manifest.json) and tells from them.
+async function probePack(file) {
   const probe = new PackProbe(file.size);
   try {
     for (let part = probe.need(); part.length > 0; part = probe.need()) {
       probe.give(new Uint8Array(await file.slice(part[0], part[1]).arrayBuffer()));
     }
-    return probe.is_pack();
+    return { pack: probe.is_pack(), refusal: probe.refusal() };
   } finally {
     probe.free();
   }
@@ -585,13 +590,20 @@ function attachPack(next) {
   reflectPack();
 }
 
-// A dropped pack: read whole, checked and decoded by the engine, set on the game on screen,
-// kept in this browser. A pack that does not read is refused and nothing changes.
-async function loadPackFile(file) {
+// A dropped pack (`refusal`: why its directory or manifest already refuses it, '' if nothing
+// does): read whole, checked and decoded by the engine, set on the game on screen, kept in this
+// browser. A pack that does not read is refused and nothing changes; one too large or refused by
+// its directory is refused before it is read whole. When the browser does not keep the new pack,
+// the one kept before is removed too (else the next visit would bring it back unsaid).
+async function loadPackFile(file, refusal) {
   needEngine();
   if (file.size > max_pack_bytes()) {
-    setStatus(`The HD pack was not loaded: the file is ${Math.ceil(file.size / 2 ** 20)} MiB; ` +
-      `this page reads at most ${max_pack_bytes() / 2 ** 20} MiB.`);
+    setStatus(`The HD pack was not loaded: the file is over the ` +
+      `${Math.floor(max_pack_bytes() / 2 ** 20)} MiB a pack can be.`);
+    return;
+  }
+  if (refusal) {
+    setStatus(`The HD pack was not loaded: ${refusal}`);
     return;
   }
   setStatus('Reading the HD pack…');
@@ -608,8 +620,18 @@ async function loadPackFile(file) {
   attachPack(next);
   const kept = await storePack(bytes);
   bytes = null;
-  setStatus(`${packStatus()}${kept ? ' It is kept in this browser for the next visit.'
-    : ' (It could not be kept in this browser: it works until the page is left.)'}`);
+  let note = ' It is kept in this browser for the next visit.';
+  if (!kept) {
+    let old = 'no HD pack is kept for the next visit';
+    try {
+      await forgetPack();
+    } catch (err) {
+      console.warn(`could not remove the HD pack kept before: ${message(err)}`);
+      old = 'an HD pack kept here before, if any, stays and comes back on the next visit';
+    }
+    note = ` (It could not be kept in this browser: it works until the page is left, and ${old}.)`;
+  }
+  setStatus(`${packStatus()}${note}`);
 }
 
 // The pack kept from the last visit, loaded before the first game is put on screen (so its first
@@ -989,7 +1011,9 @@ async function takeDrop(dropped) {
   needEngine();
   const packs = [];
   for (const item of dropped) {
-    if (/\.zip$/i.test(item.path) && await isPack(item.file)) packs.push(item);
+    if (!/\.zip$/i.test(item.path)) continue;
+    const told = await probePack(item.file);
+    if (told.pack) packs.push({ ...item, refusal: told.refusal });
   }
   if (packs.length === 0) {
     await importFiles(dropped);
@@ -998,7 +1022,7 @@ async function takeDrop(dropped) {
       ? 'The drop holds more than one HD pack: drop one at a time. Nothing was loaded.'
       : 'The drop holds an HD pack and other files: drop the HD pack on its own. Nothing was loaded.');
   } else {
-    await loadPackFile(packs[0].file);
+    await loadPackFile(packs[0].file, packs[0].refusal);
   }
 }
 

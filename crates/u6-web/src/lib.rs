@@ -139,6 +139,16 @@ impl PackProbe {
     pub fn is_pack(&self) -> bool {
         self.0.is_pack() == Some(true)
     }
+
+    /// For a pack whose zip directory or manifest already breaks the format (an entry a pack
+    /// does not have, entries over the limit, a manifest that does not read or is not this
+    /// format's): why it is refused, the fixed sentence [`HdPack::load`] gives, so the page
+    /// refuses it without reading it whole; empty otherwise.
+    pub fn refusal(&self) -> String {
+        self.0
+            .refusal()
+            .map_or_else(String::new, |e| refusal(e).into())
+    }
 }
 
 /// Spec 07 H2: an HD pack the page loaded ([`HdPack::load`]): one for the page, set on each game
@@ -172,30 +182,38 @@ impl HdPack {
 /// [`HdPack::load`] without the JS error type. A refusal says which rule of the format the pack
 /// breaks, in a fixed sentence: nothing of the pack (its names, its manifest's text) is in it.
 fn load_pack(bytes: &[u8]) -> Result<HdPack, String> {
-    use u6_hdpack::PackError;
     if bytes.len() as u64 > MAX_PACK_FILE_BYTES {
         return Err(format!(
             "the file is over the {} MiB a pack can be.",
             MAX_PACK_FILE_BYTES >> 20
         ));
     }
-    let pack = u6_hdpack::read_pack(bytes).map_err(|e| {
-        match e {
-            PackError::Zip(_) => "it does not read as a zip (an entry's size or CRC-32 is wrong).",
-            PackError::Entry(_) => "it holds a file an HD pack does not have, or one twice.",
-            PackError::Files(_) => "its files are not the ones its index names.",
-            PackError::Manifest(_) => "its manifest.json is not that of a u6-hdpack/1 pack.",
-            PackError::Index(_) => "its index.bin does not read.",
-            PackError::Limit(_) => "it is over the format's limits (4096 images, 150 MB decoded).",
-            PackError::Image(_) => {
-                "a picture is not a lossless WebP of the size its index gives it."
-            }
-        }
-        .to_string()
-    })?;
+    if !u6_intake::zip::is_zip(bytes) {
+        return Err(NOT_A_ZIP.into());
+    }
+    let pack = u6_hdpack::read_pack(bytes).map_err(|e| refusal(&e).to_string())?;
     Ok(HdPack {
         pack: Rc::new(u6_core::hd::HdPack::new(pack)),
     })
+}
+
+/// The refusal of a file that does not start as a zip.
+const NOT_A_ZIP: &str = "it is not a zip.";
+
+/// The fixed sentence for a pack the reader refuses: which rule of the format it breaks.
+fn refusal(e: &u6_hdpack::PackError) -> &'static str {
+    use u6_hdpack::PackError;
+    match e {
+        PackError::Zip(_) => {
+            "it does not read as a zip (its directory, or an entry's size or CRC-32, is wrong)."
+        }
+        PackError::Entry(_) => "it holds a file an HD pack does not have, or one twice.",
+        PackError::Files(_) => "its files are not the ones its index names.",
+        PackError::Manifest(_) => "its manifest.json is not that of a u6-hdpack/1 pack.",
+        PackError::Index(_) => "its index.bin does not read.",
+        PackError::Limit(_) => "it is over the format's limits (4096 images, 150 MB decoded).",
+        PackError::Image(_) => "a picture is not a lossless WebP of the size its index gives it.",
+    }
 }
 
 fn counts(c: PackCounts) -> Vec<u32> {
@@ -2973,6 +2991,51 @@ mod tests {
         assert_eq!(game.hd_pack_matches(), [1, 0, 0]);
     }
 
+    /// One pixel by hand (no reference code): record 1's first pixel is colour 1, (40, 90, 254)
+    /// in [`tile_engine`]'s palette, drawn at (16, 32). The pack's picture repeats one 2 × 2
+    /// block: (200, 10, 0) opaque, (100, 30, 0) opaque, then two transparent pixels. At 4× the
+    /// pixel's block is those (the transparent ones the classic colour); at 2× every sub-pixel is
+    /// the block's mean, (150, 20, 0) at alpha 128 ((200·255 + 100·255 + 255) / 510 = 150,
+    /// (10·255 + 30·255 + 255) / 510 = 20, (510 + 2) / 4 = 128), over the classic colour:
+    /// (150·128 + 40·127 + 127) / 255 = 95, (20·128 + 90·127 + 127) / 255 = 55,
+    /// (0·128 + 254·127 + 127) / 255 = 127.
+    #[test]
+    fn a_pack_pixel_by_hand_at_4x_and_2x() {
+        let mut game = Game::new();
+        game.put_on_screen(tile_engine());
+        press(&mut game, "a");
+        let mut image = u6_hdpack::Rgba::new(64, 64);
+        for (i, p) in image.pixels.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i % 64, i / 64);
+            p.copy_from_slice(match (x % 2, y % 2) {
+                (0, 0) => &[200, 10, 0, 255],
+                (1, 0) => &[100, 30, 0, 255],
+                _ => &[0, 0, 0, 0],
+            });
+        }
+        let hash = key_of(&game, 1);
+        let (pack, _) = loaded(&[u6_hdpack::PackImage {
+            id: u6_hdpack::ImageId::Tile(1),
+            hash,
+            image,
+        }]);
+        game.set_hd_pack(&pack);
+        let px = |game: &Game, s: usize, (x, y): (usize, usize)| {
+            let at = (y * 320 * s + x) * 4;
+            game.hd_frame_rgba()[at..at + 4].to_vec()
+        };
+        assert_eq!(&game.rgba[(32 * 320 + 16) * 4..][..4], [40, 90, 254, 255]);
+        game.set_hd(true, 4);
+        assert_eq!(px(&game, 4, (64, 128)), [200, 10, 0, 255]);
+        assert_eq!(px(&game, 4, (65, 128)), [100, 30, 0, 255]);
+        assert_eq!(px(&game, 4, (64, 129)), [40, 90, 254, 255]);
+        assert_eq!(px(&game, 4, (65, 129)), [40, 90, 254, 255]);
+        game.set_hd(true, 2);
+        for (x, y) in [(32, 64), (33, 64), (32, 65), (33, 65)] {
+            assert_eq!(px(&game, 2, (x, y)), [95, 55, 127, 255], "({x}, {y})");
+        }
+    }
+
     /// The pack's limits and refusals as the page sees them: a pack that does not read is
     /// refused with the reader's reason, a file over [`MAX_PACK_FILE_BYTES`] before it is read,
     /// and the probe tells a pack from a zip of game files.
@@ -2994,6 +3057,10 @@ mod tests {
         let huge = vec![0u8; MAX_PACK_FILE_BYTES as usize + 1];
         let over = load_pack(&huge).err().unwrap();
         assert!(over.starts_with("the file is over the 159 MiB"), "{over}");
+        assert_eq!(
+            load_pack(b"PP20 not a zip").err().unwrap(),
+            "it is not a zip."
+        );
         let tell = |file: &[u8]| {
             let mut p = PackProbe::new(file.len() as f64);
             while let [start, end] = p.need()[..] {
@@ -3005,6 +3072,23 @@ mod tests {
         assert!(
             tell(&bytes) && tell(&bad),
             "a pack (a broken one is refused by the loader)"
+        );
+        // A pack whose directory breaks the format is refused by the probe already.
+        let mut p = PackProbe::new(0.0);
+        assert!(p.refusal().is_empty());
+        let entries: Vec<zipscan::tests::Entry> = files
+            .iter()
+            .map(|(n, b)| zipscan::tests::stored(n, b))
+            .collect();
+        let extra = zipscan::tests::zip(&entries);
+        p = PackProbe::new(extra.len() as f64);
+        while let [start, end] = p.need()[..] {
+            p.give(&extra[start as usize..end as usize]);
+        }
+        assert!(p.is_pack());
+        assert_eq!(
+            p.refusal(),
+            "it holds a file an HD pack does not have, or one twice."
         );
         let disks = zipscan::tests::zip(&[zipscan::tests::stored("Disk 1.adf", &[1; 64])]);
         assert!(!tell(&disks) && !tell(b"PP20") && !tell(&[]));

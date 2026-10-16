@@ -2263,7 +2263,7 @@ const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.floor(q 
 // pack loaded is H2's receipt. Not measured here: a change of the palette (the opening's fades)
 // runs MMPX again on every image shown, since an HD image is made in the frame's colours; the
 // fades lie outside Acceptance 5's walk, and in `game` the palette does not change.
-test('HD performance, H1 no-pack baseline (spec 07 Acceptance 5 with a full pack is H2\'s): a walk in the castle at 4x on the real display, the present and the canvas draw per display frame at S 4 and S 2: median at most 4 ms, p95 at most 8 ms (receipt)', async (env) => {
+test('HD performance, H1 no-pack baseline (spec 07 Acceptance 5 with a full pack is H2\'s): a walk in the castle at 4x on the real display, the present and the canvas draw per display frame at S 4 and S 2, all frames and the drawn ones: median at most 4 ms, p95 at most 8 ms (receipt)', async (env) => {
   const { context, page } = await h.openPage(env);
   await context.addInitScript(timeHdFrames);
   await h.load(page, env);
@@ -2302,6 +2302,10 @@ test('HD performance, H1 no-pack baseline (spec 07 Acceptance 5 with a full pack
     assert.ok(drawn.length >= 30, `S ${s}: the walk changed the frame`);
     assert.ok(median <= 4, `S ${s}: median at most 4 ms`);
     assert.ok(p95 <= 8, `S ${s}: p95 at most 8 ms`);
+    // The frames that drew: a walk that pressed fewer keys has more idle frames, which would
+    // lower the all-frames figures alone.
+    assert.ok(quantile(drawn, 0.5) <= 4, `S ${s}: drawn frames median at most 4 ms`);
+    assert.ok(quantile(drawn, 0.95) <= 8, `S ${s}: drawn frames p95 at most 8 ms`);
   }
   for (const r of receipts) console.log(`  receipt: ${r}`);
   console.log('  receipt: note: a palette change (the opening\'s fades) runs MMPX again on every image shown; fades are outside this walk');
@@ -2366,10 +2370,15 @@ function hdPackPage() {
       return window.__zipFiles(files, { crcOf: ['atlas-0.webp', original] });
     }
     if (variant === 'size') {
+      // A lossless picture (its VP8L chunk checked) four rows short of the atlas the index
+      // names, so only its size is wrong.
       const canvas = new OffscreenCanvas(2048, 60);
       canvas.getContext('2d').fillRect(0, 0, 2048, 60);
       const blob = await canvas.convertToBlob({ type: 'image/webp', quality: 1 });
-      files[at('atlas-0.webp')][1] = new Uint8Array(await blob.arrayBuffer());
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const text = String.fromCharCode(...bytes.subarray(0, 4096));
+      if (!text.includes('VP8L') || text.includes('VP8 ')) throw new Error('not a lossless WebP');
+      files[at('atlas-0.webp')][1] = bytes;
     }
     if (variant === 'entry') files.push(['notes.txt', new TextEncoder().encode('not a pack file')]);
     if (variant === 'index') new DataView(files[at('index.bin')][1].buffer).setUint32(12, 5000, true);
@@ -2379,7 +2388,12 @@ function hdPackPage() {
     const dt = new DataTransfer();
     for (const [i, v] of variants.entries()) {
       if (v === 'marker') dt.items.add(new File(['not a game file'], 'port-test-marker.txt'));
-      else dt.items.add(new File([await window.__packTile(v)], `test-pack-${i}.zip`));
+      else if (v === 'claim') {
+        // A zip of a disk image and a manifest.json that names the pack format but is cut short.
+        const files = [['disks/Made 1.adf', new Uint8Array(4096).fill(2)],
+          ['manifest.json', new TextEncoder().encode('{"format": "u6-hdpack/1", "tile"')]];
+        dt.items.add(new File([window.__zipFiles(files)], 'claim.zip'));
+      } else dt.items.add(new File([await window.__packTile(v)], `test-pack-${i}.zip`));
     }
     document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
   };
@@ -2554,18 +2568,35 @@ test('HD pack: a broken pack (a CRC-32, a picture\'s size, a file it does not ha
     assert.ok(await cellShowsPack(page), `${what}: the pack's image still shown`);
   };
   const REFUSED = {
-    crc: /^The HD pack was not loaded: it does not read as a zip \(an entry's size or CRC-32 is wrong\)\.$/,
+    crc: /^The HD pack was not loaded: it does not read as a zip \(its directory, or an entry's size or CRC-32, is wrong\)\.$/,
     size: /^The HD pack was not loaded: a picture is not a lossless WebP of the size its index gives it\.$/,
     entry: /^The HD pack was not loaded: it holds a file an HD pack does not have, or one twice\.$/,
     index: /^The HD pack was not loaded: it is over the format's limits \(4096 images, 150 MB decoded\)\.$/,
   };
+  // The entry a pack does not have is seen in the directory: refused before the file is read
+  // whole; the others need the reader.
+  const WHOLE = { crc: true, size: true, entry: false, index: true };
   for (const [variant, why] of Object.entries(REFUSED)) {
     const from = (await h.log(page)).length;
     await page.evaluate((v) => window.__dropPack([v]), variant);
     await h.waitSettled(page);
     assert.match((await h.state(page)).status, why, `${variant}: refused`);
+    assert.equal((await h.log(page)).slice(from).includes('read:start:test-pack-0.zip'), WHOLE[variant], `${variant}: read whole or not`);
     assert.ok(!(await h.log(page)).slice(from).some((e) => e.startsWith('pack:') || e.startsWith('save:')), `${variant}: no storage call`);
     await unchanged(variant);
+  }
+  // A zip of a disk image whose manifest.json names the pack format but does not read: taken
+  // for a pack and refused from its directory (the disk image is not a pack's), never read
+  // whole, never started as a game.
+  {
+    const from = (await h.log(page)).length;
+    await page.evaluate(() => window.__dropPack(['claim']));
+    await h.waitSettled(page);
+    assert.match((await h.state(page)).status, /^The HD pack was not loaded: it holds a file an HD pack does not have, or one twice\.$/);
+    const log = (await h.log(page)).slice(from);
+    assert.ok(!log.includes('read:start:claim.zip'), 'claim: not read whole');
+    assert.ok(!log.some((e) => e.startsWith('pack:') || e.startsWith('save:')), 'claim: nothing stored');
+    await unchanged('claim');
   }
   for (const [variants, why] of [
     [['good', 'marker'], /^The drop holds an HD pack and other files: drop the HD pack on its own\. Nothing was loaded\.$/],
@@ -2609,7 +2640,9 @@ test('HD pack with storage that throws: the pack is loaded and shown for this vi
   const mmpx = await cellHashes(page);
   await page.evaluate(() => window.__dropPack(['good']));
   await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
-  assert.match((await h.state(page)).status, /^HD pack loaded: 1 of its 1 tiles.* \(It could not be kept in this browser: it works until the page is left\.\)$/);
+  // The storage that refuses the pack refuses the removal of an older one too: the status says
+  // what may stay.
+  assert.match((await h.state(page)).status, /^HD pack loaded: 1 of its 1 tiles.* \(It could not be kept in this browser: it works until the page is left, and an HD pack kept here before, if any, stays and comes back on the next visit\.\)$/);
   assert.ok(await cellShowsPack(page), 'shown for this visit');
   await page.reload();
   await h.waitSettled(page);
@@ -2630,6 +2663,78 @@ test('HD pack with storage that throws: the pack is loaded and shown for this vi
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
 
+// Page init script: a put of the HD pack's record fails as a full disk does once
+// `window.__quota` is set (the rest of the storage works).
+function packQuota() {
+  const put = IDBObjectStore.prototype.put;
+  IDBObjectStore.prototype.put = function quotaPut(value, key) {
+    if (key === 'hd:pack' && window.__quota) throw new DOMException('test: quota', 'QuotaExceededError');
+    return put.call(this, value, key);
+  };
+}
+
+test('HD pack: a new pack the browser cannot keep (its put fails, a full disk) works for this visit, and the pack kept before is removed, not brought back on the next visit', async (env) => {
+  const foreign = [];
+  const page = await bootPack(env, foreign, packQuota);
+  assert.equal(await page.evaluate(() => window.__icon()), true);
+  const mmpx = await cellHashes(page);
+  await page.evaluate(() => window.__dropPack(['good']));
+  await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
+  assert.ok(await h.keptPackBytes(page) > 0, 'the first pack is kept');
+  await page.evaluate(() => { window.__quota = true; });
+  await page.evaluate(() => window.__dropPack(['other']));
+  await h.waitSettled(page);
+  assert.match((await h.state(page)).status, /^HD pack loaded: 1 of its 1 tiles.* \(It could not be kept in this browser: it works until the page is left, and no HD pack is kept for the next visit\.\)$/);
+  assert.ok(await cellShowsPack(page, 'other'), 'the new pack shows for this visit');
+  assert.equal(await h.keptPackBytes(page), null, 'the pack kept before is removed');
+  await page.reload();
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  assert.equal(await page.evaluate(() => window.__icon()), true);
+  assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true }, 'no pack comes back');
+  assert.deepEqual(await cellHashes(page), mmpx, 'MMPX after the reload');
+  assert.equal(foreign.length, 0, 'no request to another origin');
+}, { needs: h.haveHfes });
+
+test('HD pack on a page with no game: the drop loads it and starts nothing (no import, no game files kept); the owner\'s files dropped next start a game that shows it, and a reload brings both back', async (env) => {
+  // The pack is made on another page whose game computes the record's key; only its bytes (the
+  // test's own pictures and the key) pass to the cold page.
+  const foreign = [];
+  const maker = await bootPack(env, foreign);
+  assert.equal(await maker.evaluate(() => window.__icon()), true);
+  const bytes = await maker.evaluate(async () => [...await window.__packTile('good')]);
+  await maker.context().close();
+  const { context, page } = await h.openPage(env);
+  context.on('request', (r) => {
+    const url = r.url();
+    if (!url.startsWith(env.server.url) && !url.startsWith('data:') && !url.startsWith('blob:')) foreign.push(url);
+  });
+  await context.addInitScript(h.packKit);
+  await context.addInitScript(hdPackPage);
+  await h.load(page, env);
+  assert.equal((await h.state(page)).state, 'idle');
+  await h.dropFiles(page, [], [{ name: 'cold-pack.zip', bytes }]);
+  await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
+  const s = await h.state(page);
+  assert.match(s.status, /^HD pack loaded: 1 tiles, 0 portraits and 0 panel pictures; it is used once a game runs\. It is kept in this browser for the next visit\.$/);
+  assert.equal(s.state, 'idle', 'no game started');
+  assert.equal(await h.keptPaths(page), null, 'no game files kept');
+  assert.ok(!(await h.log(page)).some((e) => e.startsWith('save:')), 'no import ran');
+  assert.ok(await h.keptPackBytes(page) > 0, 'the pack is kept');
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  assert.equal(await page.evaluate(() => window.__icon()), true);
+  assert.deepEqual(await packShown(page), { pack: '1,0,0', matched: '1,0,0', forgetEnabled: true });
+  assert.ok(await cellShowsPack(page), 'the game started after shows the pack');
+  await page.reload();
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  assert.equal(await page.evaluate(() => window.__icon()), true);
+  assert.ok(await cellShowsPack(page), 'after the reload: the kept files and the kept pack');
+  assert.equal(foreign.length, 0, 'no request to another origin');
+}, { needs: h.haveHfes });
+
 // The owner's full-size pack for spec 07 Acceptance 5: every classic image of the owner's files
 // as MMPX ×4 (so every image the game draws is a pack hit), written outside the repository by
 //   scripts/cargo.sh run -p u6-hdtool --release --example scaler_pack -- --game <the zip> --out <this>
@@ -2641,7 +2746,16 @@ const havePack = () => h.haveZip() && existsSync(SCALER_PACK);
 // one atlas decoded while it loads (2048 x 2048 RGBA) and the pack file copied in for the load.
 const ATLAS_MIB = (2048 * 2048 * 4) / 2 ** 20;
 
-test('HD performance with a full pack (spec 07 Acceptance 5): the owner\'s scaler pack dropped on a game started from the zip, its load time and the wasm memory within the budget; a walk in the castle at 4x on the real display, the present and the canvas draw per display frame at S 4 and S 2: median at most 4 ms, p95 at most 8 ms (receipt)', async (env) => {
+// Drops `path` on the page and waits for the status of the pack load; returns its wall ms.
+async function dropPackFile(page, path) {
+  const t0 = Date.now();
+  await page.evaluate(() => { document.getElementById('status').textContent = ''; });
+  await h.dropFiles(page, [path]);
+  await page.waitForFunction(() => document.body.dataset.ops === '0' && /^HD pack loaded: /.test(document.getElementById('status').textContent), null, { timeout: 120_000 });
+  return Date.now() - t0;
+}
+
+test('HD performance with a full pack (spec 07 Acceptance 5): the owner\'s scaler pack (every record, every portrait and both panel pictures) dropped on a game started from the zip, every portrait and panel picture and nearly every tile matched, the frames composed from it; a walk in the castle at 4x on the real display, the present and the canvas draw per display frame at S 4 and S 2, all frames and the drawn ones: median at most 4 ms, p95 at most 8 ms; the load time and the wasm memory within the budget, and again after the same pack is dropped a second time (both held until the second is checked) (receipt)', async (env) => {
   const { context, page } = await h.openPage(env);
   await context.addInitScript(timeHdFrames);
   await h.load(page, env);
@@ -2651,16 +2765,21 @@ test('HD performance with a full pack (spec 07 Acceptance 5): the owner\'s scale
   await h.waitFrames(page, 30);
   const before = await page.evaluate(() => __u6mem());
   const file = (await stat(SCALER_PACK)).size;
-  const t0 = Date.now();
-  await h.dropFiles(page, [SCALER_PACK]);
-  await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack !== 'none', null, { timeout: 120_000 });
-  const loadMs = Date.now() - t0;
+  const made = () => page.evaluate(() => globalThis.__shownGame.hd_cache_counts());
+  const made0 = await made();
+  const loadMs = await dropPackFile(page, SCALER_PACK);
   const after = await page.evaluate(() => __u6mem());
   const shown = await packShown(page);
   const pack = shown.pack.split(',').map(Number);
   const matched = shown.matched.split(',').map(Number);
-  assert.ok(pack[0] > 0 && matched[0] >= 0.9 * pack[0], 'nearly every tile matches (the merged shore records do not)');
+  // The fixture is complete: every record (the format's 2048), portraits, both panel pictures.
+  assert.ok(pack[0] === 2048 && pack[1] > 0 && pack[2] === 2, 'the scaler pack holds every image');
+  assert.ok(matched[0] >= 0.9 * pack[0], 'nearly every tile matches (the merged shore records do not)');
   assert.ok(matched[1] === pack[1] && matched[2] === pack[2], 'every portrait and panel picture matches');
+  // The frame composed at the load is the pack's: its images made from the pack, none by MMPX.
+  const made1 = await made();
+  assert.ok(made1[1] - made0[1] > 0, 'HD images made from the pack');
+  assert.equal(made1[0] - made0[0], 0, 'none made by MMPX for the frame on screen');
   await page.focus('#screen');
   await speedTo(page, '4');
   await engineSpeed(page, 4);
@@ -2669,7 +2788,7 @@ test('HD performance with a full pack (spec 07 Acceptance 5): the owner\'s scale
     await page.setViewportSize({ width, height: 900 });
     await page.waitForFunction((w) => document.getElementById('screen').width === w, 320 * s, { timeout: 10_000 });
     await h.waitFrames(page, 20);
-    const made0 = await page.evaluate(() => globalThis.__shownGame.hd_cache_counts());
+    const at0 = await made();
     await page.evaluate(() => { window.__hdTimes = []; });
     const end = Date.now() + 8000;
     const places = new Set([(await h.state(page)).leader]);
@@ -2684,25 +2803,36 @@ test('HD performance with a full pack (spec 07 Acceptance 5): the owner\'s scale
       window.__hdTimes = null;
       return t;
     });
-    const made1 = await page.evaluate(() => globalThis.__shownGame.hd_cache_counts());
+    const at1 = await made();
     const all = times.map((f) => f[0]).sort((a, b) => a - b);
     const drawn = times.filter((f) => f[1] > 0).map((f) => f[0]).sort((a, b) => a - b);
     const hz = (times.length - 1) / ((times.at(-1)[2] - times[0][2]) / 1000);
     const [median, p95] = [quantile(all, 0.5), quantile(all, 0.95)];
-    const fromPack = made1[1] - made0[1];
-    const byMmpx = made1[0] - made0[0];
-    const share = fromPack + byMmpx > 0 ? Math.round((100 * fromPack) / (fromPack + byMmpx)) : 100;
-    receipts.push(`full pack, S ${s}: ${times.length} frames at ${hz.toFixed(0)} Hz, ${drawn.length} drawn; per frame median ${median.toFixed(2)} ms, p95 ${p95.toFixed(2)} ms, max ${all.at(-1).toFixed(2)} ms; drawn frames median ${quantile(drawn, 0.5).toFixed(2)} ms, p95 ${quantile(drawn, 0.95).toFixed(2)} ms; HD images made during the walk: ${share}% from the pack`);
+    const [drawnMedian, drawnP95] = [quantile(drawn, 0.5), quantile(drawn, 0.95)];
+    const fromPack = at1[1] - at0[1];
+    const byMmpx = at1[0] - at0[0];
+    const share = fromPack + byMmpx > 0 ? (100 * fromPack) / (fromPack + byMmpx) : 100;
+    receipts.push(`full pack, S ${s}: ${times.length} frames at ${hz.toFixed(0)} Hz, ${drawn.length} drawn; per frame median ${median.toFixed(2)} ms, p95 ${p95.toFixed(2)} ms, max ${all.at(-1).toFixed(2)} ms; drawn frames median ${drawnMedian.toFixed(2)} ms, p95 ${drawnP95.toFixed(2)} ms; HD images made during the walk: ${Math.round(share)}% from the pack`);
     assert.ok(drawn.length >= 30, `S ${s}: the walk changed the frame`);
-    assert.ok(median <= 4, `S ${s}: median at most 4 ms`);
-    assert.ok(p95 <= 8, `S ${s}: p95 at most 8 ms`);
+    assert.ok(share >= 95, `S ${s}: the walk's HD images are the pack's`);
+    assert.ok(median <= 4 && drawnMedian <= 4, `S ${s}: median at most 4 ms, all frames and drawn ones`);
+    assert.ok(p95 <= 8 && drawnP95 <= 8, `S ${s}: p95 at most 8 ms, all frames and drawn ones`);
   }
   const walked = await page.evaluate(() => __u6mem());
-  const limit = (ZIP_START_MEMORY_MIB + ATLAS_MIB) * 2 ** 20 + (await packBytes(page)) + file;
-  console.log(`  receipt: the full pack loaded in ${loadMs} ms (drop to status: read, checked, decoded, set, stored); matched: tiles ${Math.round((100 * matched[0]) / pack[0])}%, portraits ${Math.round((100 * matched[1]) / pack[1])}%, panel pictures ${Math.round((100 * matched[2]) / pack[2])}%`);
-  console.log(`  receipt: wasm memory ${MiB(before)} MiB after the zip start, ${MiB(after)} MiB after the pack load, ${MiB(walked)} MiB after the walks (budget ${MiB(limit)} MiB: the zip-start bound + the pack's pictures decoded + one atlas + the file)`);
+  const decoded = await packBytes(page);
+  const limit = (ZIP_START_MEMORY_MIB + ATLAS_MIB) * 2 ** 20 + decoded + file;
+  // The same pack dropped again: it is checked and decoded while the first is set (a refusal
+  // must change nothing), so both are held at once for a moment.
+  const againMs = await dropPackFile(page, SCALER_PACK);
+  await h.waitFrames(page, 10);
+  const again = await page.evaluate(() => __u6mem());
+  const limitAgain = limit + decoded;
+  console.log(`  receipt: the full pack loaded in ${loadMs} ms (drop to status: read, checked, decoded, set, stored), again in ${againMs} ms; matched: tiles ${Math.round((100 * matched[0]) / pack[0])}%, portraits ${Math.round((100 * matched[1]) / pack[1])}%, panel pictures ${Math.round((100 * matched[2]) / pack[2])}%`);
+  console.log(`  receipt: wasm memory ${MiB(before)} MiB after the zip start, ${MiB(after)} MiB after the pack load, ${MiB(walked)} MiB after the walks (budget ${MiB(limit)} MiB: the zip-start bound + the pack's pictures decoded + one atlas + the file), ${MiB(again)} MiB after the second load (budget ${MiB(limitAgain)} MiB: and a second pack decoded)`);
   for (const r of receipts) console.log(`  receipt: ${r}`);
   assert.ok(walked <= limit, 'the wasm memory within the budget');
+  assert.ok(again <= limitAgain, 'after a second load, within its budget');
+  assert.deepEqual(await packShown(page), shown, 'the second load: the same pack and matches');
 }, { needs: havePack });
 
 const filter = process.argv[2];
