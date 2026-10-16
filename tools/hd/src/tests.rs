@@ -2335,7 +2335,7 @@ fn calls_that_keep_failing_are_given_up_after_two() {
     s.calls.lock().unwrap().clear();
     let r = run::run(&w, &s, &opts, &mut out).unwrap();
     assert_eq!((r.calls, r.given_up), (0, 1));
-    assert!(String::from_utf8_lossy(&out).contains("1 sheet(s) given up after 2 paid calls"));
+    assert!(String::from_utf8_lossy(&out).contains("1 sheet(s) given up after 2 reserved calls"));
     // Ingest refuses it and re-rolls its items once; the re-rolls get their own two calls.
     let r = ingest::ingest(&g, &w, &t).unwrap();
     assert_eq!((r.refused_sheets, r.rerolled_items), (1, on_x.len()));
@@ -2660,7 +2660,7 @@ fn stderr_written_after_the_events_end_is_still_kept() {
 }
 
 #[test]
-fn every_paid_call_counts_whatever_became_of_it() {
+fn every_reserved_call_counts_whatever_became_of_it() {
     let g = synthetic::game();
     let t = Thresholds::default();
     let opts = RunOptions {
@@ -2727,6 +2727,27 @@ fn every_paid_call_counts_whatever_became_of_it() {
     assert!(e.contains(run::LEDGER_FAILED), "{e}");
     assert!(s.calls.lock().unwrap().is_empty());
     assert!(!w.path("runs.jsonl").exists());
+    let _ = std::fs::remove_dir_all(&w.root);
+    // The line written, then its directory's sync failing: not sent (the reservation is not
+    // durable), and counted all the same (conservative: it is in the file).
+    let w = work("paid-dirsync");
+    let jobs = atlas_into(&g, &w);
+    *crate::work::FAIL_DIR_SYNC.lock().unwrap() = Some(w.root.canonicalize().unwrap());
+    s.calls.lock().unwrap().clear();
+    let e = run::run(&w, &s, &opts, &mut Vec::new()).unwrap_err();
+    *crate::work::FAIL_DIR_SYNC.lock().unwrap() = None;
+    assert!(
+        e.contains(run::LEDGER_FAILED) && e.contains("sync failed"),
+        "{e}"
+    );
+    assert!(s.calls.lock().unwrap().is_empty());
+    let book = run::ledger(&w).unwrap();
+    let reserved: usize = book.reserved.values().sum();
+    assert!((1..=2).contains(&reserved), "{reserved}");
+    let id = run::identity(&w, &jobs[0]).unwrap();
+    let r = run::run(&w, &s, &opts, &mut Vec::new()).unwrap();
+    assert_eq!(r.given_up, 0);
+    assert!(run::ledger(&w).unwrap().reserved[&id] >= 1);
     let _ = std::fs::remove_dir_all(&w.root);
     // Lines from before reservations existed count for no sheet, and the run says so.
     let w = work("paid-legacy");

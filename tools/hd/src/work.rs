@@ -196,17 +196,54 @@ pub fn append_file(path: &Path, text: &str) -> Result<(), String> {
 }
 
 /// [`append_file`], made durable: the file is synced before it replaces the old one (as every
-/// write here), and its directory after, so the line survives a crash once this returns.
+/// write here), and its directory after, so the line survives a crash once this returns. An
+/// error from the directory's sync comes after the line was written: the caller must treat
+/// it as written (the run ledger counts it, conservatively) and as not durable.
 pub fn append_durable(path: &Path, text: &str) -> Result<(), String> {
     append_file(path, text)?;
     let dir = ensure_dir(
         path.parent()
             .ok_or_else(|| format!("{}: no parent", path.display()))?,
     )?;
+    #[cfg(test)]
+    if FAIL_DIR_SYNC
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        == Some(dir.as_path())
+    {
+        return Err(format!("{}: sync failed (injected)", dir.display()));
+    }
     std::fs::File::open(&dir)
         .and_then(|d| d.sync_all())
         .map_err(|e| format!("{}: {e}", dir.display()))
 }
+
+/// Tests only: the directory whose sync [`append_durable`] fails, after the line is written.
+#[cfg(test)]
+pub(crate) static FAIL_DIR_SYNC: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Now, in ns since the epoch (the run ledger's `at`).
+pub fn now_ns() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
+/// Test builds only (`debug_assertions`, which the gate profile keeps): appends
+/// `<what> <ns since the epoch>` to the file `U6_HD_TEST_NOTES` names, if it is set.
+#[cfg(debug_assertions)]
+pub(crate) fn test_note(what: &str) {
+    let Some(p) = std::env::var_os("U6_HD_TEST_NOTES") else {
+        return;
+    };
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(p) {
+        let _ = writeln!(f, "{what} {}", now_ns());
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn test_note(_: &str) {}
 
 /// FNV-1a 64 of `parts`, each prefixed by its length, as 16 hex digits.
 pub fn digest(parts: &[&[u8]]) -> String {
@@ -273,6 +310,7 @@ impl Work {
         file.set_len(0)
             .and_then(|()| file.write_all(pid.as_bytes()))
             .map_err(|e| format!("{}: {e}", path.display()))?;
+        test_note("locked");
         Ok(Lock { _file: file })
     }
 

@@ -1,5 +1,5 @@
 //! `ingest`: every sheet that came back is checked for its size (a sheet of another size is
-//! refused whole, before it is decoded, as is a sheet given up after `run::CALLS_MAX` paid
+//! refused whole, before it is decoded, as is a sheet given up after `run::CALLS_MAX` reserved
 //! calls or one whose sheet cannot be read), sliced at the fixed pitch, keyed, colour-transferred and gated image by
 //! image; then each item is judged whole (its images, and the terrain seam or the actor motion
 //! gate). An item that fails its first attempt is queued for one re-roll (new sheets, attempt
@@ -375,7 +375,7 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
             }
         };
         let Some((png, w, h)) = run::output(work, job) else {
-            // Given up after CALLS_MAX paid calls, or a sheet that cannot be read (so never
+            // Given up after CALLS_MAX reserved calls, or a sheet that cannot be read (so never
             // sent): refused as a sheet that came back unusable.
             let why = match run::standing(work, job, &book) {
                 run::Standing::Open(_) => None,

@@ -12,10 +12,10 @@
 //! done, and is run again. A call whose image is not a PNG, or is of the sheet's size and does
 //! not decode, fails, records nothing and leaves the image where the call put it; an image of
 //! another size is recorded undecoded and ingest refuses it ([`record`]). Every call is
-//! reserved in the run ledger before it is made ([`Ledger`]); a job with [`CALLS_MAX`] paid
-//! calls of its identity that is still not done (timeouts, no image, cut off, its output lost
-//! or invalid) is given up: not called again, refused by ingest, as is one whose sheet cannot
-//! be read. Either way its items are re-rolled once, then left to the scaler.
+//! reserved in the run ledger before it is made ([`Ledger`]); a job with [`CALLS_MAX`]
+//! reserved calls (conservative) of its identity that is still not done (timeouts, no image,
+//! cut off, its output lost or invalid) is given up: not called again, refused by ingest, as
+//! is one whose sheet cannot be read. Either way its items are re-rolled once, then left to the scaler.
 //!
 //! Stopped by SIGINT, SIGTERM or SIGHUP ([`stop_calls_on_signals`]), the run starts no call,
 //! each running call kills and reaps its group at its next turn, and the command ends by the
@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::atlas::Job;
 use crate::img;
 use crate::prompt;
-use crate::work::{self, Work};
+use crate::work::{self, Work, now_ns, test_note};
 
 /// What makes an image from a sheet and a prompt.
 pub trait Runner: Sync {
@@ -41,10 +41,12 @@ pub trait Runner: Sync {
     /// generated image's path.
     fn generate(&self, sheet: &Path, prompt: &str, dir: &Path) -> Result<PathBuf, String>;
 
-    /// [`Runner::generate`], paid for: `book(Book::Reserve)` writes the run ledger's line that
+    /// [`Runner::generate`], reserved: `book(Book::Reserve)` writes the run ledger's line that
     /// the call is made, and the call is made only once it has; `book(Book::Void)` takes it
-    /// back when the call could not be started after all (nothing was sent). Nothing is
-    /// reserved or called while the tool is stopping ([`NOT_STARTED`]).
+    /// back when the call is not started after all (nothing was sent). The admission point is
+    /// the last look at the stop, after the reservation is durable and before the call: a
+    /// stop seen there voids the reservation ([`NOT_STARTED`]); a call past it is admitted
+    /// (and is stopped at its first turn if the stop comes later).
     fn dispatch(
         &self,
         sheet: &Path,
@@ -56,6 +58,9 @@ pub trait Runner: Sync {
             return Err(NOT_STARTED.into());
         }
         book(Book::Reserve)?;
+        if stopped_by().is_some() {
+            return Err(not_started(book));
+        }
         self.generate(sheet, prompt, dir)
     }
 
@@ -66,10 +71,19 @@ pub trait Runner: Sync {
     }
 }
 
+/// A call not started at its admission point: its reservation voided, [`NOT_STARTED`] (with
+/// the void's own failure, if it could not be written: the reservation then stands).
+fn not_started(book: &mut dyn FnMut(Book) -> Result<(), String>) -> String {
+    match book(Book::Void) {
+        Ok(()) => NOT_STARTED.into(),
+        Err(v) => format!("{NOT_STARTED} (also: {v})"),
+    }
+}
+
 /// What [`Runner::dispatch`] asks of the run ledger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Book {
-    /// The call is about to be made (paid).
+    /// The call is about to be made (reserved, so counted from here on).
     Reserve,
     /// The call reserved could not be started (its process never existed): nothing was sent.
     Void,
@@ -203,43 +217,53 @@ pub fn reraise(sig: libc::c_int) -> ! {
     std::process::exit(128 + sig)
 }
 
-/// Test builds only (`debug_assertions`, which the gate profile keeps): with
-/// `U6_HD_TEST_SIGNAL=<signal number>` and `U6_HD_TEST_SIGNAL_AT=<point>`, the tool sends that
-/// signal to its own process group (as a terminal does) once, at that point of the first call:
-/// `before-spawn` (inside spawn admission, before the check), `after-spawn` (the group owned,
-/// before the first turn of its loop; once the file `U6_HD_TEST_SPAWN_WAIT` names exists, the
-/// stand-in's sign that it runs) or `reap` (the group killed, before it is waited for); then,
-/// the signal handled, it waits `U6_HD_TEST_DELAY_MS`.
+/// Test builds only (`debug_assertions`, which the gate profile keeps), all from the
+/// environment. `U6_HD_TEST_SIGNAL_AT=<point>` names a point of a call's life: `before-spawn`
+/// (in spawn admission, before its first look at the stop), `reserve` (the reservation
+/// written, before the admission point), `after-spawn` (the group owned, before its first
+/// turn) or `reap` (the group killed, before it is waited for). The `U6_HD_TEST_NTH`-th time
+/// (default 1) the point is reached: it waits until the file `U6_HD_TEST_WAIT` has
+/// `U6_HD_TEST_WAIT_LINES` lines (default 1, at most 15 s), writes the file
+/// `U6_HD_TEST_MARK`, sends `U6_HD_TEST_SIGNAL` (if set) to its own process group as a terminal
+/// does, noting `stop` first and waiting until it is handled, then waits
+/// `U6_HD_TEST_DELAY_MS`.
 #[cfg(debug_assertions)]
 fn test_point(at: &str) {
-    static FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if std::env::var("U6_HD_TEST_SIGNAL_AT").as_deref() != Ok(at) {
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+    let var = |k: &str| std::env::var(k).ok();
+    if var("U6_HD_TEST_SIGNAL_AT").as_deref() != Some(at) {
         return;
     }
-    let Some(sig) = std::env::var("U6_HD_TEST_SIGNAL")
-        .ok()
-        .and_then(|v| v.parse::<libc::c_int>().ok())
-    else {
-        return;
-    };
-    if FIRED.swap(true, Ordering::SeqCst) {
+    let nth: usize = var("U6_HD_TEST_NTH")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    if SEEN.fetch_add(1, Ordering::SeqCst) + 1 != nth {
         return;
     }
-    if let Some(wait) = std::env::var_os("U6_HD_TEST_SPAWN_WAIT") {
+    if let Some(wait) = var("U6_HD_TEST_WAIT") {
+        let lines: usize = var("U6_HD_TEST_WAIT_LINES")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
         let start = Instant::now();
-        while !Path::new(&wait).exists() && start.elapsed() < Duration::from_secs(10) {
+        while std::fs::read_to_string(&wait).map_or(0, |t| t.lines().count()) < lines
+            && start.elapsed() < Duration::from_secs(15)
+        {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    // SAFETY: kill(2) to this process's group.
-    unsafe { libc::kill(0, sig) };
-    // Delivered (to whichever thread takes it) before this point goes on.
-    let start = Instant::now();
-    while stopped_by().is_none() && start.elapsed() < Duration::from_secs(2) {
-        std::thread::sleep(Duration::from_millis(1));
+    if let Some(mark) = var("U6_HD_TEST_MARK") {
+        let _ = std::fs::write(mark, now_ns().to_string());
     }
-    let ms = std::env::var("U6_HD_TEST_DELAY_MS")
-        .ok()
+    if let Some(sig) = var("U6_HD_TEST_SIGNAL").and_then(|v| v.parse::<libc::c_int>().ok()) {
+        test_note("stop");
+        // SAFETY: kill(2) to this process's group.
+        unsafe { libc::kill(0, sig) };
+        let start = Instant::now();
+        while stopped_by().is_none() && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let ms = var("U6_HD_TEST_DELAY_MS")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     std::thread::sleep(Duration::from_millis(ms));
@@ -259,6 +283,7 @@ impl Drop for Group {
         kill_group(self.child.id());
         test_point("reap");
         let _ = self.child.wait();
+        test_note(&format!("reaped {}", self.child.id()));
     }
 }
 
@@ -641,8 +666,9 @@ impl Runner for Codex {
     /// its own (each wait bounded as [`Pipes::step`] says: the files' writes are assumed to
     /// return; no grace when stopping). Then the pipes are closed, whatever still holds their
     /// other ends: nothing of the call outlives it here, no thread, no descriptor. The spawn
-    /// is admitted under [`ADMIT`]: not once the tool is stopping, and only after its
-    /// reservation, which a spawn that fails (no process made: nothing sent) takes back.
+    /// is admitted under [`ADMIT`]: its reservation written, the stop looked at once more (the
+    /// admission point: a stop seen there voids the reservation), then the spawn; a spawn that
+    /// fails (no process made: nothing sent) voids it too.
     fn dispatch(
         &self,
         sheet: &Path,
@@ -669,6 +695,10 @@ impl Runner for Codex {
                 return Err(unmade(NOT_STARTED.into()));
             }
             book(Book::Reserve).map_err(unmade)?;
+            // The admission point: the reservation durable, the last look at the stop.
+            if stopped_by().is_some() {
+                return Err(unmade(not_started(book)));
+            }
             let child = Command::new(&self.bin)
                 .args(["exec", "-m", MODEL, "-c", "model_reasoning_effort=low"])
                 .args([
@@ -907,9 +937,9 @@ pub struct RunSummary {
     /// Of `ok`: images of another size than their sheet, recorded for ingest to refuse.
     pub other_size: usize,
     pub failed: usize,
-    /// Calls cut off because the tool is stopping (paid: their reservations count).
+    /// Calls cut off because the tool is stopping (their reservations count).
     pub stopped: usize,
-    /// Jobs not called again: [`CALLS_MAX`] paid calls of their identity (ingest refuses
+    /// Jobs not called again: [`CALLS_MAX`] reserved calls of their identity (ingest refuses
     /// them).
     pub given_up: usize,
     /// Jobs whose sheet cannot be read, so not sent (ingest refuses them).
@@ -918,21 +948,25 @@ pub struct RunSummary {
     pub legacy: usize,
 }
 
-/// Paid calls of one job identity after which the job is given up: not called again, and
+/// Reserved calls of one job identity after which the job is given up: not called again, and
 /// refused by ingest like a sheet of another size (its items re-rolled once, then left to the
-/// scaler). A call is paid once it is reserved (`runs.jsonl`), before it is made: a call that
+/// scaler). A call counts once it is reserved (`runs.jsonl`), before it is made: a call that
 /// times out, brings back no image, is cut off by a signal or a kill, or whose output is
-/// later lost or invalid counts the same.
+/// later lost or invalid counts the same. The count is conservative: a reservation whose call
+/// was never sent counts too when nothing could take it back (the tool killed between the
+/// reservation and the spawn, a directory sync that failed after the line was written).
 pub const CALLS_MAX: usize = 2;
 
 /// `runs.jsonl`, the run ledger: a `dispatched` line written and synced before each call is
-/// made (the reservation), a `voided` one when its process could not be started after all,
-/// and a `result` line after it. Paid calls per identity are its `dispatched` lines less its
-/// `voided` ones. Lines without an `event` were written before reservations existed:
+/// made (the reservation), a `voided` one when the call was not started after all, and a
+/// `result` line after it, each with its time (`at`, ns since the epoch). Reserved calls per
+/// identity (conservative, see [`CALLS_MAX`]) are its `dispatched` lines less its `voided`
+/// ones. Lines without an `event` were written before reservations existed:
 /// they count for no job (the bound counts from this version on), and `run` says how many.
 #[derive(Debug, Default)]
 pub struct Ledger {
-    pub paid: std::collections::BTreeMap<String, usize>,
+    /// Reserved calls (conservative) per job identity.
+    pub reserved: std::collections::BTreeMap<String, usize>,
     pub legacy: usize,
 }
 
@@ -950,9 +984,11 @@ pub fn ledger(work: &Work) -> Result<Ledger, String> {
             continue;
         };
         match (v["event"].as_str(), v["identity"].as_str()) {
-            (Some("dispatched"), Some(id)) => *out.paid.entry(id.to_string()).or_default() += 1,
+            (Some("dispatched"), Some(id)) => {
+                *out.reserved.entry(id.to_string()).or_default() += 1;
+            }
             (Some("voided"), Some(id)) => {
-                let n = out.paid.entry(id.to_string()).or_default();
+                let n = out.reserved.entry(id.to_string()).or_default();
                 *n = n.saturating_sub(1);
             }
             (Some(_), _) => {}
@@ -967,7 +1003,7 @@ pub fn ledger(work: &Work) -> Result<Ledger, String> {
 pub enum Standing {
     /// To be called: its identity.
     Open(String),
-    /// [`CALLS_MAX`] paid calls of its identity: not called again.
+    /// [`CALLS_MAX`] reserved calls of its identity: not called again.
     GivenUp,
     /// Its identity cannot be had (the sheet cannot be read): not sent, never with another.
     Unreadable(String),
@@ -977,7 +1013,7 @@ pub enum Standing {
 pub fn standing(work: &Work, job: &Job, ledger: &Ledger) -> Standing {
     match identity(work, job) {
         Err(e) => Standing::Unreadable(e),
-        Ok(id) if ledger.paid.get(&id).copied().unwrap_or(0) >= CALLS_MAX => Standing::GivenUp,
+        Ok(id) if ledger.reserved.get(&id).copied().unwrap_or(0) >= CALLS_MAX => Standing::GivenUp,
         Ok(id) => Standing::Open(id),
     }
 }
@@ -1029,8 +1065,9 @@ pub fn run(
     if summary.given_up > 0 {
         let _ = writeln!(
             out,
-            "{} sheet(s) given up after {CALLS_MAX} paid calls each (not sent again; ingest \
-             re-rolls their items once, then leaves them to the scaler).",
+            "{} sheet(s) given up after {CALLS_MAX} reserved calls each (conservative: a call \
+             reserved and never sent counts; not sent again; ingest re-rolls their items once, \
+             then leaves them to the scaler).",
             summary.given_up
         );
     }
@@ -1115,7 +1152,7 @@ pub fn run(
                     let _ = writeln!(out, "{line}");
                     let rec = serde_json::json!({
                         "event": "result", "sheet": job.sheet, "identity": id,
-                        "ok": result.is_ok(), "seconds": secs,
+                        "ok": result.is_ok(), "seconds": secs, "at": now_ns(),
                         "stopped": stopping && result.is_err(), "error": result.err(),
                     });
                     let line = format!("{rec}\n");
@@ -1141,7 +1178,7 @@ pub const LEDGER_FAILED: &str = "the run ledger could not be written, so nothing
 /// generated image recorded as the job's output, its receipt written, and only then what the
 /// call left of it removed (whether it is the sheet's size, see [`record`]). A call whose
 /// image is not recorded keeps it there. Returns the result and whether the call was reserved
-/// (paid).
+/// (and not voided).
 fn call(
     work: &Work,
     runner: &dyn Runner,
@@ -1160,11 +1197,17 @@ fn call(
             };
             let rec = serde_json::json!({
                 "event": event, "sheet": job.sheet, "identity": id, "attempt": job.attempt,
+                "at": now_ns(),
             });
-            let _books = books.lock().unwrap_or_else(|e| e.into_inner());
-            work::append_durable(&work.path("runs.jsonl"), &format!("{rec}\n"))
-                .map_err(|e| format!("{LEDGER_FAILED}: {e}"))?;
+            {
+                let _books = books.lock().unwrap_or_else(|e| e.into_inner());
+                work::append_durable(&work.path("runs.jsonl"), &format!("{rec}\n"))
+                    .map_err(|e| format!("{LEDGER_FAILED}: {e}"))?;
+            }
             reserved = b == Book::Reserve;
+            if b == Book::Reserve {
+                test_point("reserve");
+            }
             Ok(())
         };
         let got = runner.dispatch(&sheet, &prompt::text(job), &dir, &mut book)?;

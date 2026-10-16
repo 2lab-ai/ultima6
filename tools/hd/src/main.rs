@@ -226,7 +226,7 @@ fn run_cmd(a: &Args) -> Result<(), String> {
     if s.failed > 0 {
         return Err(format!(
             "{} call(s) failed; the sheets that came back are kept; run again to retry the rest \
-             (a sheet with {} paid calls is given up and refused by ingest)",
+             (a sheet with {} reserved calls is given up and refused by ingest)",
             s.failed,
             run::CALLS_MAX
         ));
