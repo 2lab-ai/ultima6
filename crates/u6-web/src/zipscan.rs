@@ -201,7 +201,24 @@ pub(crate) mod tests {
         }
     }
 
-    /// A synthetic zip of `entries` (no extra fields, no comment, CRCs 0).
+    /// CRC-32 (IEEE), bit by bit: the intake checks every entry it reads against it.
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// A synthetic zip of `entries` (no extra fields, no comment; each CRC the CRC-32 of the
+    /// bytes written as its data).
     pub(crate) fn zip(entries: &[Entry]) -> Vec<u8> {
         let (mut out, mut central) = (Vec::new(), Vec::new());
         let le16 = |v: &mut Vec<u8>, x: u16| v.extend_from_slice(&x.to_le_bytes());
@@ -212,8 +229,9 @@ pub(crate) mod tests {
             le16(&mut out, 20);
             le16(&mut out, 0);
             le16(&mut out, e.method);
+            let crc = crc32(e.body);
             le32(&mut out, 0); // time, date
-            le32(&mut out, 0); // CRC
+            le32(&mut out, crc);
             le32(&mut out, e.csize);
             le32(&mut out, e.full);
             le16(&mut out, e.name.len() as u16);
@@ -226,7 +244,7 @@ pub(crate) mod tests {
             le16(&mut central, 0);
             le16(&mut central, e.method);
             le32(&mut central, 0);
-            le32(&mut central, 0);
+            le32(&mut central, crc);
             le32(&mut central, e.csize);
             le32(&mut central, e.full);
             le16(&mut central, e.name.len() as u16);

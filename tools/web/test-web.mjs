@@ -1290,12 +1290,24 @@ const zipReads = (page) => page.evaluate(() => ({ ...window.__zipReads, forbidde
 // { name, length, fill, method, csize, full, localName }: `length` bytes of `fill` as its data,
 // `method` (default stored), the packed and unpacked sizes its records declare (default
 // `length`), and `localName` (same length) in its local header instead of `name` (a local header
-// that disagrees with its central record). CRCs are 0 (the intake does not check them). Returns
-// { head, dir, end(at) }: the local headers and data, the central directory, and the end record
-// for a directory at `at`.
+// that disagrees with its central record). Each CRC is the CRC-32 of the entry's data (the
+// intake checks it for every entry it reads), except for an entry of more than 16 MiB, never one
+// the intake reads here, whose CRC is 0. Returns { head, dir, end(at) }: the local headers and
+// data, the central directory, and the end record for a directory at `at`.
 function zipKit() {
   const u16 = (v) => [v & 255, (v >>> 8) & 255];
   const u32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+  const table = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crcOf = (fill, length) => {
+    if (length > 16 << 20) return 0;
+    let c = 0xffffffff;
+    for (let i = 0; i < length; i++) c = table[(c ^ fill) & 255] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
   window.__makeZip = (entries) => {
     const head = [];
     const dir = [];
@@ -1304,7 +1316,8 @@ function zipKit() {
       const name = [...new TextEncoder().encode(e.name)];
       const local = e.localName ? [...new TextEncoder().encode(e.localName)] : name;
       const method = e.method ?? 0;
-      const sizes = [...u32(0), ...u32(e.csize ?? e.length), ...u32(e.full ?? e.length)];
+      const crc = crcOf(e.fill ?? 0, e.length);
+      const sizes = [...u32(crc), ...u32(e.csize ?? e.length), ...u32(e.full ?? e.length)];
       const header = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(method), ...u32(0), ...sizes,
         ...u16(local.length), ...u16(0), ...local];
       head.push(new Uint8Array(header), new Uint8Array(e.length).fill(e.fill ?? 0));
