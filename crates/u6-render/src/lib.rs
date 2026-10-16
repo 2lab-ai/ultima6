@@ -343,14 +343,14 @@ impl Framebuffer {
     /// published one), and synced from no other: another buffer syncing from `from` would take
     /// the marks this one needs. The first sync between two planes links them, and a sync of
     /// either with another plane after that panics (with or without debug assertions; a plane
-    /// made here is a new one, and reads, clones and pixel copies of `from` are no syncs). The
-    /// colours and the palette are copied whole, as by `clone_from`.
+    /// made here is a new one, and reads, clones and pixel copies of `from` are no syncs; a
+    /// refused sync changes neither buffer). The colours and the palette are copied whole, as by
+    /// `clone_from`.
     ///
     /// Returns the chunks of the plane it copied (all of them for a plane it had to create).
     pub fn sync_from(&mut self, from: &mut Framebuffer) -> usize {
-        self.pixels.clone_from(&from.pixels);
-        self.palette = from.palette;
         let mut copied = 0;
+        // The plane first: its link is checked before anything is copied.
         match (&mut self.src, &mut from.src) {
             (Some(to), Some(src)) => {
                 src.link(to);
@@ -377,6 +377,8 @@ impl Framebuffer {
             }
             (to, None) => *to = None,
         }
+        self.pixels.clone_from(&from.pixels);
+        self.palette = from.palette;
         debug_assert!(self.src() == from.src(), "a sync leaves the planes equal");
         copied
     }
@@ -414,8 +416,9 @@ impl Framebuffer {
     /// The rect `xs` × `ys` of `from` copied here: each row of it whose colours differ is copied,
     /// and of the source plane the chunks of the rect that may differ (as [`Framebuffer::sync_from`]
     /// marks them, for the one buffer synced from `from`, always over the same rect, and checked as
-    /// `sync_from` checks it). With no plane in `from` the rect's sources become classic. A rect
-    /// reaching past the screen copies nothing. Returns the chunks of the plane it copied.
+    /// `sync_from` checks it, before anything is copied). With no plane in `from` the rect's
+    /// sources become classic. A rect reaching past the screen copies nothing, and so does an
+    /// empty one. Returns the chunks of the plane it copied.
     pub fn sync_rect_from(
         &mut self,
         from: &mut Framebuffer,
@@ -424,12 +427,6 @@ impl Framebuffer {
     ) -> usize {
         if xs.start > xs.end || ys.start > ys.end || xs.end > WIDTH || ys.end > HEIGHT {
             return 0;
-        }
-        for y in ys.clone() {
-            let row = y * WIDTH + xs.start..y * WIDTH + xs.end;
-            if self.pixels[row.clone()] != from.pixels[row.clone()] {
-                self.pixels[row.clone()].copy_from_slice(&from.pixels[row]);
-            }
         }
         if xs.is_empty() || ys.is_empty() {
             return 0;
@@ -474,6 +471,12 @@ impl Framebuffer {
                 }
             }
             (None, _) => {}
+        }
+        for y in ys.clone() {
+            let row = y * WIDTH + xs.start..y * WIDTH + xs.end;
+            if self.pixels[row.clone()] != from.pixels[row.clone()] {
+                self.pixels[row.clone()].copy_from_slice(&from.pixels[row]);
+            }
         }
         #[cfg(debug_assertions)]
         if let Some(to) = &self.src {
@@ -885,6 +888,64 @@ mod tests {
         from.set_src(41, 9, 7, tile(9, 2, 2));
         to.sync_from(&mut from);
         assert!(to.src() == from.src() && to.pixels == from.pixels);
+    }
+
+    /// Everything a buffer holds: its colours, its palette, and its sources, marks and links.
+    type Whole = (
+        Vec<u8>,
+        Vec<Rgb>,
+        Option<(Vec<Src>, Marks, Marks, [u64; 3])>,
+    );
+
+    fn whole(fb: &Framebuffer) -> Whole {
+        let plane = fb.src.as_ref().map(|p| {
+            let links = [p.id, p.consumer, p.producer];
+            (p.src.clone(), p.out, p.own, links)
+        });
+        (fb.pixels.clone(), fb.palette.to_vec(), plane)
+    }
+
+    /// A refused sync changes neither buffer: by each of the three syncs, a second consumer (and
+    /// for the full sync one without a plane, which it would make) and a second source leave the
+    /// colours, the palette, the sources, the marks and the links of both as they were. The
+    /// linked pair then goes on with the marks it left.
+    #[test]
+    fn a_refused_sync_changes_neither_buffer() {
+        let (mut from, mut to, mut other) = (planed(), planed(), planed());
+        to.sync_from(&mut from);
+        from.set_src(40, 9, 6, tile(9, 1, 2));
+        from.palette[6] = Rgb::new(9, 9, 9);
+        other.set_src(41, 9, 7, tile(8, 1, 2));
+        other.palette[7] = Rgb::new(7, 7, 7);
+        let mut second = planed();
+        second.set_src(12, 12, 5, tile(7, 0, 0));
+        let mut bare = Framebuffer::new();
+        bare.set(12, 12, 2);
+        type Sync = fn(&mut Framebuffer, &mut Framebuffer);
+        let syncs: [(&str, Sync); 3] = [
+            ("sync_from", |a, b| _ = a.sync_from(b)),
+            ("sync_src_from", |a, b| _ = a.sync_src_from(b)),
+            ("sync_rect_from", |a, b| {
+                _ = a.sync_rect_from(b, 8..168, 8..168)
+            }),
+        ];
+        for (name, sync) in syncs {
+            let check = |what: &str, dst: &mut Framebuffer, src: &mut Framebuffer| {
+                let before = (whole(dst), whole(src));
+                assert!(refused(|| sync(dst, src)), "{name}: {what} is refused");
+                assert!(
+                    (whole(dst), whole(src)) == before,
+                    "{name}: {what} changes nothing"
+                );
+            };
+            check("a second consumer", &mut second, &mut from);
+            check("a second source", &mut to, &mut other);
+            if name == "sync_from" {
+                check("a second consumer without a plane", &mut bare, &mut from);
+            }
+        }
+        assert_eq!(to.sync_from(&mut from), 1, "the chunk written since");
+        assert!(to.src() == from.src() && to.pixels == from.pixels && to.palette == from.palette);
     }
 
     /// The plane alone: the chunks whose colours are already the source's are copied and their
