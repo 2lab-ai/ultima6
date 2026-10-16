@@ -180,14 +180,21 @@ pub struct Effect {
 }
 
 /// Records the screen rectangle (x0, y0)..=(x1, y1) as it is now (after a present), shown after
-/// `cost` ms.
+/// `cost` ms. Sources equal to those of the frame recorded before it (the shakes of a quake that
+/// land on the same offset, a window recorded again unchanged) share that frame's allocation.
 pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize, cost: u16) {
     if x1 < x0 || y1 < y0 {
         return;
     }
     let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
     let shot = with_current_io(|io| io.draw(|fb| rect_of(fb, (x0, y0), (w, h))));
-    if let Some((pixels, src)) = shot {
+    if let Some((pixels, mut src)) = shot {
+        let before = s.combat.effects.iter().rev().find_map(|e| e.src.0.as_ref());
+        if let (Some(new), Some(old)) = (&src.0, before)
+            && new[..] == old[..]
+        {
+            src.0 = Some(std::rc::Rc::clone(old));
+        }
         let mark = s.main.pending_print.len();
         s.combat.effects.push(Effect {
             x: x0,

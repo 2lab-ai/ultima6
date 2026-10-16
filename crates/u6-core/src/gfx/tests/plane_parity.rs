@@ -5,7 +5,8 @@
 //! with their playback). In the runs with the plane, every attributed pixel equals its record's
 //! pixel at (u, v) when its version is current, and every pixel a record drawn in a window cell
 //! writes is attributed: checks that read the records and the window's lists, not the plane's
-//! writers. No game data.
+//! writers. And a quake's recorded frames share equal sources and play back as with their own.
+//! No game data.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -450,4 +451,136 @@ fn paired_engines_show_the_same_with_the_plane_off_and_on() {
         on.src_publishes() > 0 && off.src_publishes() == 0,
         "the paused quakes published their last sources with the plane alone"
     );
+}
+
+/// What [`quake_run`] saw of the frames its quake recorded: per two frames recorded in a row,
+/// whether their sources are equal and whether they are one allocation; the allocations of the
+/// shakes' sources and of all, and the distinct sources; whether the first frame names a record.
+#[derive(Debug, Default)]
+struct Shared {
+    pairs: Vec<(bool, bool)>,
+    shakes: usize,
+    all: usize,
+    distinct: usize,
+    named: bool,
+}
+
+/// The adversarial scene shown with the plane, then a quake of 20 shakes of `amp` pixels and its
+/// playback. With `unshare`, every recorded frame is given sources of its own before the
+/// playback (as without the sharing). Returns the engine and what the quake recorded.
+fn quake_run(amp: i16, unshare: bool) -> (Engine, Rc<std::cell::RefCell<Shared>>) {
+    let (mut s, words) = adv::scene();
+    s.ui = crate::main_loop::test_support::test_ui();
+    let seen = Rc::new(std::cell::RefCell::new(Shared::default()));
+    let out = Rc::clone(&seen);
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        {
+            let mut s = st.borrow_mut();
+            let mut lists = Lists {
+                base: vec![0; 121],
+                lists: vec![Vec::new(); 121],
+            };
+            adv::edit(&mut s, &io, &mut X(0x9E37_79B9), &mut lists, &words, 0);
+            crate::gfx::refresh_view(&mut s, &io);
+        }
+        io.present();
+        io.vblank().await;
+        {
+            let mut s = st.borrow_mut();
+            crate::ui::effects::quake(&mut s, &io, 20, amp);
+            let shots: Vec<Rc<[Src]>> = s
+                .combat
+                .effects
+                .iter()
+                .filter_map(|e| e.src.0.clone())
+                .collect();
+            let allocations = |shots: &[Rc<[Src]>]| {
+                let at = shots.iter().map(|r| Rc::as_ptr(r).cast::<Src>() as usize);
+                at.collect::<BTreeSet<_>>().len()
+            };
+            let mut o = out.borrow_mut();
+            o.pairs = shots
+                .windows(2)
+                .map(|p| (p[0][..] == p[1][..], Rc::ptr_eq(&p[0], &p[1])))
+                .collect();
+            o.shakes = allocations(&shots[..20]);
+            o.all = allocations(&shots);
+            o.distinct = (0..shots.len())
+                .filter(|&i| shots[..i].iter().all(|b| b[..] != shots[i][..]))
+                .count();
+            o.named = shots[0].iter().any(|src| src.kind == Kind::Tile);
+            if unshare {
+                for e in &mut s.combat.effects {
+                    if let Some(v) = &e.src.0 {
+                        e.src.0 = Some(Rc::from(&v[..]));
+                    }
+                }
+            }
+        }
+        crate::combat::play_effects(&st, &io).await;
+        io.sleep(u32::MAX).await;
+    });
+    e.enable_src_plane();
+    (e, seen)
+}
+
+/// The four planes: back, screen, published, shown.
+fn planes(e: &Engine) -> [Option<Vec<Src>>; 4] {
+    let of = |f: &Framebuffer| f.src().map(<[Src]>::to_vec);
+    [
+        e.io().peek_back(of),
+        e.io().draw(|f| of(f)),
+        e.io().published(of),
+        of(e.frame()),
+    ]
+}
+
+/// A quake's recorded frames whose sources equal the frame's before hold one allocation, the
+/// others their own: a quake of 0 pixels (every shake the same window) shares one between its 20
+/// shakes, one of 3 pixels shares only where a shake lands where the one before it did. The
+/// playback shows the same with the sharing as with every frame's sources its own: after every
+/// tick the colours, palettes and planes of the four buffers, the frame and source versions and
+/// the State.
+#[test]
+fn a_quakes_equal_frames_share_their_sources_and_play_back_the_same() {
+    let mut pairs = Vec::new();
+    for amp in [0, 3] {
+        let ((mut shared, seen), (mut own, _)) = (quake_run(amp, false), quake_run(amp, true));
+        for t in 0..200 {
+            shared.tick(&[], 20);
+            own.tick(&[], 20);
+            let what = format!("amplitude {amp} tick {t}");
+            assert!(buffers(&shared) == buffers(&own), "{what}: the colours");
+            assert!(planes(&shared) == planes(&own), "{what}: the planes");
+            assert_eq!(
+                (shared.frame_version(), shared.src_version()),
+                (own.frame_version(), own.src_version()),
+                "{what}: the versions"
+            );
+            assert!(*shared.state() == *own.state(), "{what}: the State");
+        }
+        let seen = seen.borrow();
+        println!(
+            "quake of {amp} pixels: {} frames recorded, their sources in {} allocations ({} for \
+             the 20 shakes) and {} distinct, {} of {} pairs in a row equal",
+            seen.pairs.len() + 1,
+            seen.all,
+            seen.shakes,
+            seen.distinct,
+            seen.pairs.iter().filter(|p| p.0).count(),
+            seen.pairs.len()
+        );
+        assert_eq!(seen.pairs.len(), 20, "20 shakes and the window");
+        assert!(seen.named, "the frames name records");
+        assert_eq!(shared.state().combat.shown, 21, "all played back");
+        assert!(shared.state().combat.effects.is_empty());
+        if amp == 0 {
+            assert_eq!(seen.shakes, 1, "the shakes of 0 pixels hold one allocation");
+        }
+        pairs.extend_from_slice(&seen.pairs);
+    }
+    for (k, &(equal, one)) in pairs.iter().enumerate() {
+        assert_eq!(equal, one, "pair {k}: one allocation if and only if equal");
+    }
+    assert!(pairs.iter().any(|p| p.0) && pairs.iter().any(|p| !p.0));
 }

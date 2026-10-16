@@ -102,9 +102,11 @@ impl RenderCache {
 /// Port-only (spec 07 HD0): the sources of pixels kept beside game state (the block under a
 /// flight sprite, a recorded frame), so that pixels put back name their images again. Not game
 /// state: equal whatever it holds (a run with the source plane and one without are the same
-/// `State`); `None` when the buffer they came from had no plane.
+/// `State`); `None` when the buffer they came from had no plane. Shared: a clone, and a recorded
+/// frame whose sources are the frame's before it ([`crate::combat::present`]), hold the same
+/// allocation; a write copies a shared one first ([`std::rc::Rc::make_mut`]).
 #[derive(Clone, Debug, Default)]
-pub struct Sources(pub Option<Vec<u6_render::Src>>);
+pub struct Sources(pub Option<std::rc::Rc<[u6_render::Src]>>);
 
 impl PartialEq for Sources {
     fn eq(&self, _: &Self) -> bool {
