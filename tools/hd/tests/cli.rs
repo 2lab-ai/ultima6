@@ -69,6 +69,7 @@ impl Env {
 
     fn cmd(&self, args: &[&str]) -> Command {
         let mut c = Command::new(BIN);
+        stop_signals_default(&mut c);
         c.args(args)
             .env("HOME", &self.home)
             .env("CODEX_HOME", self.home.join(".codex"))
@@ -84,6 +85,23 @@ impl Env {
 
     fn calls(&self) -> usize {
         std::fs::read_to_string(&self.log).map_or(0, |t| t.lines().count())
+    }
+}
+
+/// The stop signals (SIGINT, SIGTERM, SIGHUP, SIGQUIT) at their default action in `c`'s
+/// process, whatever this test inherited (a background job has SIGINT and SIGQUIT ignored,
+/// `nohup` SIGHUP): the tests that send them, or start the tool with them ignored on purpose
+/// (`trap ''` in their own shell), start from the same place on any runner.
+fn stop_signals_default(c: &mut Command) {
+    // SAFETY: the closure runs in the child between fork and exec and calls only signal(2),
+    // which is async-signal-safe.
+    unsafe {
+        c.pre_exec(|| {
+            for s in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
+                libc::signal(s, libc::SIG_DFL);
+            }
+            Ok(())
+        });
     }
 }
 
@@ -265,7 +283,7 @@ fn a_running_command_holds_the_work_dir_until_it_is_gone() {
 }
 
 /// Whether process `pid` is gone: not even a zombie (reaped, by its parent or by launchd once
-/// orphaned; callers poll).
+/// orphaned; callers poll under their own deadlines, assuming each `ps` returns).
 fn gone(pid: &str) -> bool {
     let o = Command::new("/bin/ps")
         .args(["-o", "stat=", "-p", pid])
@@ -341,9 +359,14 @@ fn wait_until(
 /// one deadline of `secs` (a descendant holding a pipe counts); past it, its group is killed
 /// and the test fails.
 fn output_within(cmd: &mut Command, secs: u64, what: &str) -> Output {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    output_until(cmd, deadline, what)
+}
+
+/// [`output_within`] with an absolute `deadline`.
+fn output_until(cmd: &mut Command, deadline: std::time::Instant, what: &str) -> Output {
     use std::io::Read;
     use std::os::unix::process::CommandExt;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     let mut child = cmd
         .process_group(0)
         .stdout(std::process::Stdio::piped())
@@ -374,7 +397,7 @@ fn output_within(cmd: &mut Command, secs: u64, what: &str) -> Output {
             Ok((n, v)) => got[n] = v,
             Err(_) => {
                 drop(guard);
-                panic!("{what}: its output did not end in {secs} s");
+                panic!("{what}: its output did not end by its deadline");
             }
         }
     }
@@ -861,7 +884,9 @@ fn ignored_signals_during_a_stopped_cleanup_change_nothing() {
         "trap '' HUP INT; exec \"{BIN}\" run --work \"{w}\" --codex \"{}\" --send --limit 1",
         bin.display()
     );
-    let mut tool = Command::new("/bin/sh")
+    let mut sh = Command::new("/bin/sh");
+    stop_signals_default(&mut sh);
+    let mut tool = sh
         .args(["-c", &line])
         .env("HOME", &e.home)
         .env("CODEX_HOME", e.home.join(".codex"))
@@ -966,12 +991,13 @@ fn a_call_starts_with_no_signal_blocked() {
         // Once it is `sleep` (its exec done): a signal to the shell before that, while it waits
         // for its `mv`, is held by the shell until the `mv` ends, then dropped (the `mv` did not
         // die of it), and the stand-in would sleep on through it.
+        // The poll, ps included, is under one 10 s deadline.
         let start = std::time::Instant::now();
+        let poll = start + std::time::Duration::from_secs(10);
         loop {
-            let o = Command::new("/bin/ps")
-                .args(["-o", "comm=", "-p", &call])
-                .output()
-                .unwrap();
+            let mut ps = Command::new("/bin/ps");
+            ps.args(["-o", "comm=", "-p", &call]);
+            let o = output_until(&mut ps, poll, "ps");
             if String::from_utf8_lossy(&o.stdout).trim().ends_with("sleep") {
                 break;
             }
@@ -1138,7 +1164,9 @@ fn a_signal_the_tool_was_started_ignoring_lets_its_calls_finish() {
             format!("trap '' INT; exec {tool_args}")
         };
         use std::os::unix::process::{CommandExt, ExitStatusExt};
-        let mut tool = Command::new("/bin/sh")
+        let mut sh = Command::new("/bin/sh");
+        stop_signals_default(&mut sh);
+        let mut tool = sh
             .args(["-c", &line])
             .env("HOME", &e.home)
             .env("CODEX_HOME", e.home.join(".codex"))
@@ -1212,13 +1240,16 @@ fn a_codex_that_cannot_be_started_spends_nothing() {
 #[test]
 fn run_turns_core_dumps_off_before_anything() {
     // Started with core dumps allowed as far as the inherited hard limit lets a shell raise
-    // them (to min(1000, hard); not at all when hard is 0, as on a hardened runner), run sets
-    // both limits to 0 first: a SIGQUIT at any time leaves no core holding the sheets. Run as
-    // inherited, and with the hard limit lowered to 0 first (the hardened case, here).
+    // the soft limit (to min(1000, hard); not at all when hard is 0, as on a hardened runner),
+    // run sets both limits to 0 first: a SIGQUIT at any time leaves no core holding the
+    // sheets. Run as inherited (the run that fails if the tool stops zeroing them, wherever
+    // the hard limit is above 0), and with both limits lowered to 0 first (`ulimit -c 0`: no
+    // -H, which a soft limit above 0 would refuse), a compatibility check for hardened
+    // runners, where there is nothing left to zero.
     if !cfg!(debug_assertions) {
         return;
     }
-    for (name, harden) in [("inherited", ""), ("hardened", "ulimit -Hc 0 || exit 98; ")] {
+    for (name, harden) in [("inherited", ""), ("hardened", "ulimit -c 0 || exit 98; ")] {
         let e = Env::new(&format!("core-{name}"));
         let work = e.dir.join("work");
         let w = work.to_str().unwrap();
@@ -1228,20 +1259,22 @@ fn run_turns_core_dumps_off_before_anything() {
                 .success()
         );
         let (notes_file, raised) = (e.dir.join("notes"), e.dir.join("raised"));
-        // The shell reads the hard limit first, in its own units, and raises the soft one only
-        // where it can, noting which (its check of the raise is the positive control).
+        // The shell reads the hard limit first, in its own units, and raises the soft limit
+        // only (-S: the hard one stays as inherited) where it can, noting which (its check of
+        // the raise is the positive control).
         let line = format!(
             "{harden}h=$(ulimit -Hc); \
              if [ \"$h\" = unlimited ]; then n=1000; \
              elif [ \"$h\" -gt 0 ]; then if [ \"$h\" -lt 1000 ]; then n=$h; else n=1000; fi; \
              else n=; fi; \
-             if [ -n \"$n\" ]; then ulimit -c \"$n\" && [ \"$(ulimit -c)\" = \"$n\" ] || exit 99; \
+             if [ -n \"$n\" ]; then ulimit -Sc \"$n\" && [ \"$(ulimit -Sc)\" = \"$n\" ] || exit 99; \
              echo \"raised $n\" > \"{}\"; else echo \"hard 0\" > \"{}\"; fi; \
              exec \"{BIN}\" run --work \"{w}\"",
             raised.display(),
             raised.display()
         );
         let mut sh = Command::new("/bin/sh");
+        stop_signals_default(&mut sh);
         sh.args(["-c", &line])
             .env("HOME", &e.home)
             .env("CODEX_HOME", e.home.join(".codex"))
@@ -1251,6 +1284,13 @@ fn run_turns_core_dumps_off_before_anything() {
         let how = std::fs::read_to_string(&raised).unwrap();
         if name == "hardened" {
             assert_eq!(how.trim(), "hard 0", "{name}");
+        } else if how.trim() == "hard 0" {
+            // A runner whose hard core limit is 0 leaves nothing for the tool to zero: say so,
+            // rather than pass as if the zeroing were checked.
+            eprintln!(
+                "run_turns_core_dumps_off_before_anything: this runner's hard core limit is 0, \
+                 so whether run zeroes the limits is not checked here"
+            );
         }
         let limits: Vec<String> = notes(&notes_file)
             .into_iter()

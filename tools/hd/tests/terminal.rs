@@ -34,7 +34,17 @@ impl Env {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
+        use std::os::unix::process::CommandExt;
         let mut c = Command::new(BIN);
+        // SAFETY: only signal(2) in the child before exec: the stop signals at their default.
+        unsafe {
+            c.pre_exec(|| {
+                for s in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
+                    libc::signal(s, libc::SIG_DFL);
+                }
+                Ok(())
+            });
+        }
         c.args(args)
             .env("HOME", &self.home)
             .env("CODEX_HOME", self.home.join(".codex"))
@@ -50,7 +60,7 @@ impl Env {
 }
 
 /// Whether process `pid` is gone: not even a zombie (reaped, by its parent or by launchd once
-/// orphaned; callers poll).
+/// orphaned; callers poll under their own deadlines, assuming each `ps` returns).
 fn gone(pid: &str) -> bool {
     let o = Command::new("/bin/ps")
         .args(["-o", "stat=", "-p", pid])
@@ -189,8 +199,13 @@ fn closing_the_terminal_under_zsh_stops_every_call() {
         };
         assert!(zsh >= 0);
         if zsh == 0 {
-            // SAFETY: in the child: execve, then _exit if it failed.
+            // SAFETY: in the child: signal(2) (the stop signals at their default, whatever this
+            // test inherited, as for every tool the tests start), execve, then _exit if it
+            // failed; all async-signal-safe.
             unsafe {
+                for s in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
+                    libc::signal(s, libc::SIG_DFL);
+                }
                 libc::execve(argv_p[0], argv_p.as_ptr(), env_p.as_ptr());
                 libc::_exit(127);
             }
