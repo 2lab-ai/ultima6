@@ -2032,7 +2032,7 @@ async function bootHd(env, foreign, init = watchMedia) {
   return page;
 }
 
-test('HD: on by default and kept across a reload; the button switches it at once with no game step; off the canvas is the RGBA frame at 320 x 200, on the HD frame at 320·S x 200·S in the same box (S 2 in a smaller box, S 4 again at twice the pixel ratio); no foreign request', async (env) => {
+test('HD: on by default and kept across a reload; the button switches it at once with no game step; off the canvas is the RGBA frame at 320 x 200, on the HD frame at 320·S x 200·S in the same box (S 2 in a smaller box, S 4 at twice the pixel ratio, S 2 again back on the first display); no foreign request', async (env) => {
   const foreign = [];
   const page = await bootHd(env, foreign);
   await h.waitPrompt(page);
@@ -2101,8 +2101,61 @@ test('HD: on by default and kept across a reload; the button switches it at once
   assert.deepEqual((await hdShown(page)).box, shown.box, 'the same box');
   await h.waitFrames(page, 2);
   assert.ok(await canvasShowsGame(page), 'the pixel ratio doubled: S 4');
+  // Back to the first display: the query the page armed for the new ratio fires, S 2 again.
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 700, height: 900, deviceScaleFactor: 1, mobile: false });
+  assert.equal(await page.evaluate(() => devicePixelRatio), 1);
+  const armed = await page.evaluate(() => {
+    const ratio = window.__mediaQueries.filter((q) => q.media.includes('dppx'));
+    ratio.at(-1).dispatchEvent(new Event('change'));
+    return [ratio.length, ratio.at(-1).media.includes('2dppx')];
+  });
+  assert.deepEqual(armed, [2, true], 'one query armed per ratio, the second for the doubled one');
+  await page.waitForFunction(() => document.getElementById('screen').width === 640, null, { timeout: 10_000 });
+  assert.deepEqual((await hdShown(page)).box, shown.box, 'the same box');
+  await h.waitFrames(page, 2);
+  assert.ok(await canvasShowsGame(page), 'the pixel ratio back: S 2');
   await cdp.send('Emulation.clearDeviceMetricsOverride');
   assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP violation');
+  assert.equal(foreign.length, 0, 'no request to another origin');
+}, { needs: h.haveHfes });
+
+// Page init script: every read and write of the page's storage throws (a browser that refuses
+// it), and the page's media queries are kept (`watchMedia`).
+function storageThrows() {
+  for (const name of ['getItem', 'setItem', 'removeItem']) {
+    Storage.prototype[name] = () => {
+      throw new DOMException('test: storage refused', 'SecurityError');
+    };
+  }
+}
+
+test('HD: the button works from the keyboard (Space, Enter); with storage that throws HD is on, switches, and nothing is kept across a reload; no page error', async (env) => {
+  const foreign = [];
+  const page = await bootHd(env, foreign, storageThrows);
+  const errors = [];
+  page.on('pageerror', () => errors.push(1));
+  await h.waitPrompt(page);
+  let shown = await hdShown(page);
+  assert.ok(shown.stored === 'unreadable', 'the storage throws');
+  assert.ok(shown.pressed === 'true' && shown.width === 1280, 'on by default');
+  await page.focus('#hd');
+  await page.keyboard.press('Space');
+  shown = await hdShown(page);
+  assert.ok(shown.pressed === 'false' && shown.width === 320, 'Space: off');
+  assert.ok(await canvasShowsGame(page), 'off: the RGBA frame');
+  await page.keyboard.press('Enter');
+  shown = await hdShown(page);
+  assert.ok(shown.pressed === 'true' && shown.width === 1280, 'Enter: on');
+  assert.ok(await canvasShowsGame(page), 'on: the HD frame');
+  await page.keyboard.press('Space');
+  assert.equal((await hdShown(page)).pressed, 'false', 'off again');
+  await page.reload();
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  shown = await hdShown(page);
+  assert.ok(shown.pressed === 'true' && shown.width === 1280, 'nothing kept: on after the reload');
+  assert.ok(await canvasShowsGame(page), 'the HD frame');
+  assert.equal(errors.length, 0, 'no page error');
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
 
@@ -2159,7 +2212,9 @@ function timeHdFrames() {
 
 const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
 
-test('HD performance (spec 07 Acceptance 5): a walk in the castle at 4x on the real display, the present and the canvas draw per display frame at S 4 and S 2: median at most 4 ms, p95 at most 8 ms (receipt)', async (env) => {
+// The H1 no-pack baseline: MMPX for every image. Spec 07 Acceptance 5 with the owner's full
+// pack loaded is H2's receipt.
+test('HD performance, H1 no-pack baseline (spec 07 Acceptance 5 with a full pack is H2\'s): a walk in the castle at 4x on the real display, the present and the canvas draw per display frame at S 4 and S 2: median at most 4 ms, p95 at most 8 ms (receipt)', async (env) => {
   const { context, page } = await h.openPage(env);
   await context.addInitScript(timeHdFrames);
   await h.load(page, env);
@@ -2177,11 +2232,14 @@ test('HD performance (spec 07 Acceptance 5): a walk in the castle at 4x on the r
     await page.evaluate(() => { window.__hdTimes = []; });
     const end = Date.now() + 8000;
     // Steps both ways and a pass between (the start fight's foes move on, a blocked step
-    // passes).
+    // passes). The leader's places are compared here, never printed: the party must walk.
+    const places = new Set([(await h.state(page)).leader]);
     for (let i = 0; Date.now() < end; i += 1) {
       await page.keyboard.press(['ArrowRight', 'ArrowRight', 'ArrowLeft', 'ArrowLeft', 'Space', 'ArrowDown', 'ArrowUp'][i % 7]);
       await h.sleep(60);
+      places.add((await h.state(page)).leader);
     }
+    assert.ok(places.size >= 3, `S ${s}: the party walked during the timed frames`);
     const times = await page.evaluate(() => {
       const t = window.__hdTimes;
       window.__hdTimes = null;
@@ -2191,7 +2249,7 @@ test('HD performance (spec 07 Acceptance 5): a walk in the castle at 4x on the r
     const drawn = times.filter((f) => f[1] > 0).map((f) => f[0]).sort((a, b) => a - b);
     const hz = (times.length - 1) / ((times.at(-1)[2] - times[0][2]) / 1000);
     const [median, p95] = [quantile(all, 0.5), quantile(all, 0.95)];
-    receipts.push(`S ${s}: ${times.length} frames at ${hz.toFixed(0)} Hz, ${drawn.length} drawn; per frame median ${median.toFixed(2)} ms, p95 ${p95.toFixed(2)} ms, max ${all.at(-1).toFixed(2)} ms; drawn frames median ${quantile(drawn, 0.5).toFixed(2)} ms, p95 ${quantile(drawn, 0.95).toFixed(2)} ms`);
+    receipts.push(`H1 no-pack baseline, S ${s}: ${times.length} frames at ${hz.toFixed(0)} Hz, ${drawn.length} drawn; per frame median ${median.toFixed(2)} ms, p95 ${p95.toFixed(2)} ms, max ${all.at(-1).toFixed(2)} ms; drawn frames median ${quantile(drawn, 0.5).toFixed(2)} ms, p95 ${quantile(drawn, 0.95).toFixed(2)} ms`);
     assert.ok(drawn.length >= 30, `S ${s}: the walk changed the frame`);
     assert.ok(median <= 4, `S ${s}: median at most 4 ms`);
     assert.ok(p95 <= 8, `S ${s}: p95 at most 8 ms`);
