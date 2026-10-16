@@ -3,8 +3,9 @@
 //! outline flash and an overlay, the pointer sprite, a combat replay and one that ends on equal
 //! colours (composed on its sources alone), the HD switch ([`HdView`], the platform's) off and on
 //! over a persistent panel and a skipped render and a scale change, and a portrait read from its
-//! archive. Every frame is checked against [`oracle`], the frame by the definition with no cache
-//! and no memory of an earlier frame. No game data.
+//! archive; with an HD pack set (spec 07 H2), a shore record the merge rewrote after the pack was
+//! made from its earlier bytes. Every frame is checked against [`oracle`], the frame by the
+//! definition with no cache and no memory of an earlier frame. No game data.
 
 use std::collections::BTreeMap;
 
@@ -233,6 +234,142 @@ fn a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
                 )
         });
         assert_eq!(then.count(), 0, "not the bytes it had");
+    }
+}
+
+/// Spec 07 acceptance 2 with a pack loaded (H2): a pack whose images of the shore and the water
+/// records were made from their bytes before the merge (the test's own pictures, keyed by
+/// `u6_hdpack::tile_hash` of those bytes). Before the merge both cells show the pack's images;
+/// once the merge rewrote the shore record, its pack entry (made from its earlier bytes) is not
+/// used: the redrawn shore cell shows MMPX of its bytes now, the water (unchanged) still the
+/// pack's image.
+#[test]
+fn with_a_pack_a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
+    use std::rc::Rc;
+    use u6_hdpack::{Generator, ImageId, PackImage, Rgba, read_pack, tile_hash, write_pack};
+    use u6_render::hd::{over, pack_words};
+
+    let original = shore_state().gfx;
+    let key = |r: usize| {
+        tile_hash(
+            &original.records[r].pixels,
+            &original.records[r].transparent,
+        )
+    };
+    let picture = |seed: u8| {
+        let mut img = Rgba::new(64, 64);
+        for (i, p) in img.pixels.chunks_exact_mut(4).enumerate() {
+            let a = if i % 13 == 0 { 0 } else { 255 };
+            p.copy_from_slice(&[(i % 64) as u8 * 4, seed, (i / 64) as u8 * 3, a]);
+        }
+        img
+    };
+    let images = [SHORE, WATER].map(|r| PackImage {
+        id: ImageId::Tile(r as u16),
+        hash: key(r).unwrap(),
+        image: picture(r as u8),
+    });
+    let g = Generator {
+        name: "test".into(),
+        version: "0".into(),
+        engine: "none".into(),
+        date: "2026-10-16".into(),
+    };
+    let read = read_pack(&write_pack(&images, &g, true).unwrap()).unwrap();
+    let pack = Rc::new(crate::hd::HdPack::new(read));
+    let mut e = Engine::with_game(shore_state(), Files::default(), |st, io| async move {
+        {
+            let s = st.borrow();
+            io.draw_back(|b| {
+                blit_back(&s.gfx, b, SHORE as u16, 16, 16);
+                blit_back(&s.gfx, b, WATER as u16, 48, 16);
+            });
+            io.with_buffers(|b, f| copy_window(b, f));
+        }
+        io.present();
+        let _ = io.next_key().await;
+        {
+            let mut s = st.borrow_mut();
+            merge_shores(&mut s.gfx);
+            io.draw_back(|b| blit_back(&s.gfx, b, SHORE as u16, 16, 16));
+            io.with_buffers(|b, f| copy_window(b, f));
+        }
+        io.present();
+        io.sleep(u32::MAX).await;
+    });
+    e.enable_src_plane();
+    e.tick(&[], 16);
+    let cell = |x0: usize| (16..32).flat_map(move |y| (x0..x0 + 16).map(move |x| (x, y)));
+    // Pack image `i`'s block (u, v) at `scale` over `classic`.
+    let pack_block = |i: usize, (u, v): (usize, usize), scale: Scale, classic: u32| {
+        let mut words = Vec::new();
+        pack_words(&images[i].image.pixels, 64, 64, scale, &mut words);
+        let s = scale.factor();
+        (0..s * s)
+            .map(|k| over(words[(v * s + k / s) * 16 * s + u * s + k % s], classic))
+            .collect::<Vec<u32>>()
+    };
+    let mut fb = e.frame().clone();
+    palette(&mut fb);
+    let mut kept = [Compositor::new(), Compositor::new()];
+    for (c, scale) in kept.iter_mut().zip(SCALES) {
+        c.set_pack(Some(pack.clone()));
+        let s = e.state();
+        c.compose(&fb, &mut ImageCache::new().images(&s, e.io()), scale);
+        for (i, x0) in [(0, 16), (1, 48)] {
+            for (x, y) in cell(x0) {
+                let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+                let want = pack_block(i, (x - x0, y - 16), scale, classic);
+                assert_eq!(
+                    block(c.rgba(), scale, (x, y)),
+                    want,
+                    "before the merge: the pack's"
+                );
+            }
+        }
+    }
+    e.tick(&[InputEvent::Key(Key::Char('m'))], 16);
+    let s = e.state();
+    assert!(s.gfx.cache.version(SHORE) > 0 && s.gfx.records[SHORE] != original.records[SHORE]);
+    assert_eq!(
+        key(WATER),
+        tile_hash(
+            &s.gfx.records[WATER].pixels,
+            &s.gfx.records[WATER].transparent
+        )
+    );
+    let mut fb = e.frame().clone();
+    palette(&mut fb);
+    for (c, scale) in kept.iter_mut().zip(SCALES) {
+        let mut fresh = Compositor::new();
+        fresh.set_pack(Some(pack.clone()));
+        for c in [&mut *c, &mut fresh] {
+            c.compose(&fb, &mut ImageCache::new().images(&s, e.io()), scale);
+            for (x, y) in cell(16) {
+                let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+                let now = record_block(&s.gfx, &fb, SHORE as u16, (x - 16, y - 16), scale, classic);
+                assert_eq!(
+                    block(c.rgba(), scale, (x, y)),
+                    now,
+                    "the shore: MMPX of its bytes now"
+                );
+                let packed = pack_block(0, (x - 16, y - 16), scale, classic);
+                assert_ne!(block(c.rgba(), scale, (x, y)), packed, "not its pack image");
+            }
+            for (x, y) in cell(48) {
+                let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+                let want = pack_block(1, (x - 48, y - 16), scale, classic);
+                assert_eq!(
+                    block(c.rgba(), scale, (x, y)),
+                    want,
+                    "the water: still the pack's"
+                );
+            }
+        }
+        assert!(
+            c.rgba() == fresh.rgba(),
+            "the kept compositor equals a new one"
+        );
     }
 }
 
