@@ -4,42 +4,33 @@ type: spec
 tags: [ultima6, rendering, hd, ui]
 ---
 
-# 05 — Output for HD / 4K: designed in P3, built later
+# 05 — Output for HD / 4K: what shipped in 07, and the wider view still to come
 
-Status: planned (rev 1, 2026-10-15). The seam is built in P3 (04 W0, W10, acceptance 7). The HD phase follows the research listed at the end.
+Status: rev 2, 2026-10-16. Rev 1 (2026-10-15) designed a seam for P3 to build (04 W0, W10, acceptance 7). It is superseded for resources ×2/×4: spec 07 built the seam in another form and shipped it (H0, H0b, H1, H3 in production 80cdffb2). Rev 1's scene output was not adopted; 07 rev 3 replaced it, measured, with a per-pixel source plane. This file now records how the shipped seam meets the user's three asks, and keeps the one ask still open: a wider map view (§4) and its research. Nothing here is built in P3.
 
-The user's words are in `browser-port/ssot.md`: x2 or x4 resources, an HD or 4K map view, and much more of the map shown, "not now"; P3 should take the UI and the output into account in advance. The HD phase itself is not part of P3. P3 keeps that phase possible and leaves the parity output unchanged.
+The user's words are in `browser-port/ssot.md`: x2 or x4 resources, an HD or 4K map view, and much more of the map shown, "not now"; P3 should take the UI and the output into account in advance.
 
-Measured (main `3349a83`):
-- **Frame buffers.** The engine draws palette indices into two 320×200 frame buffers (`u6-render/src/lib.rs:7-9`; front and back, `engine.rs:251-262`). The page shows a 320×200 canvas, scaled with `image-rendering: pixelated` (`site/index.html:29,61`).
+Measured (main `eb71371`):
+- **Frame buffers.** The engine draws palette indices into 320×200 frame buffers (`u6-render/src/lib.rs`; back and front at `engine.rs:108-109`, the shown frame at `engine.rs:536`). With HD off the page shows that frame on a 320×200 canvas, scaled with `image-rendering: pixelated`.
 - **Map view.** The view is 11×11 cells of 16 px, of which pixels 8..168 are shown (`gfx/view.rs:3-8`; `map/mod.rs:61` `VIEW`).
 - **Window cache.** The 40×40-tile window cache (`map/mod.rs:57`) also bounds:
   - sight and the light flood (`map/view.rs`);
-  - which NPCs walk by steps and which are sent home (`actors/path.rs:528`).
-- **Screen coordinates.** Panels and hit tests use fixed screen-pixel coordinates (e.g. `ui/panels.rs:16`, `ui/pointer.rs:172`).
+  - which NPCs walk by steps and which are sent home (`actors/path.rs:503-529`).
+- **Screen coordinates.** Panels and hit tests use fixed screen-pixel coordinates (e.g. `ui/panels.rs:16`; the click regions at `ui/pointer.rs:19-23`).
 
 Design:
-1. **Two outputs.**
+1. **Two outputs — shipped in 07, as a source plane, not a scene.**
    - The 320×200 indexed frame stays the parity output (04 §Invariant).
-   - Alongside it, the engine publishes a **scene** each time it presents:
-     - the map view as cells: tile id, animation frame, object tiles in draw order, light and outline bits (what `ViewWindow` already holds, `gfx/view.rs:27`), plus the view centre;
-     - the UI as widgets: kind, rect in logical units, and content ids.
-   - A renderer at any scale draws from the scene instead of scaling pixels.
-   - The scene lives only in memory, in the user's browser or process.
-2. **Logical input.** Pointer events enter in logical units: the 320×200 space of the classic layout. An HD layout maps its own screen onto them, so the hit tests (`ui/click.rs`, `ui/pointer.rs`) do not change in P3.
-3. **Assets by id.** Tiles, sprites, portraits and font glyphs are read through one provider keyed by kind, id and frame, at a scale.
-   - The base is the user's files at 1×.
-   - An **HD pack** is a mod content type (04 W0 schema, W6a limits): images per id at 2× or 4×, either drawn by an author or generated in the user's browser from the user's own files.
-   - Art upscaled from the game's tiles is extracted content (04 §Rights). It is never hosted, never committed, and never part of a shareable package; only author-drawn images are.
-4. **View size as a parameter.**
-   - P3 changes neither `VIEW`, `WINDOW` nor `WINDOW_TILES`.
-   - New code (scene, renderer, layout) takes the view size from state, not from a constant.
-   - A wider view changes game behaviour: sight, light, the window cache and which NPCs walk by steps. Whether simulation follows the view is the HD phase's first research question.
+   - Each frame buffer carries a per-pixel source plane (`Src`, `u6-render/src/lib.rs:89`): which record, portrait or panel bitmap the pixel came from, with its version and position. The HD compositor reads the shown frame and its plane and writes a 320·S × 200·S frame (`u6-render/src/hd.rs:499`, S = 2 or 4). Why not a scene: the drawn pixel is not a pure function of the records (the shore merge rewrites records in place; overlay, outline, clock, sparkles and missiles write pixels directly), and a scene list cannot follow copies, offsets, quakes, dissolves and pixels that persist in the front buffer (07 Measured facts, 07 rev 3).
+2. **Logical input — shipped.** The pointer maps through the canvas box onto the game's 320×200 pixels whatever the canvas size (`site/app.js:914`), so the hit tests do not change.
+3. **Assets by id — the format shipped (`u6-hdpack/1`, 07 H3); the page's pack load and the compositor's lookup are 07 H2, in progress.** HD images are keyed by the content hash of the classic record, portrait or bitmap they were made from (07 Design 2). A record whose bytes differ, such as a merged shore, falls back to MMPX of its own current pixels. Rights as in 07: art upscaled from the game's files is never hosted, committed or shared; the manifest says `derived` and the export path refuses it.
+4. **View size — still open, not built in P3.**
+   - P3 changes neither `VIEW`, `WINDOW` nor `WINDOW_TILES`, and no P3 code reads a view size.
+   - A wider view changes game behaviour: sight, light, the window cache and which NPCs walk by steps. Whether simulation follows the view is the first research question of the wider-view phase.
 
-Research after P4 (queued in `browser-port/loop.md`):
-- pixel-art scalers and learned upscalers that run in the browser;
+Research for the wider view, after P4 (queued in `browser-port/loop.md`):
 - prior art in other Ultima VI engines and remakes [추정 — to be checked];
 - wide-view game semantics;
 - a 16:9 UI layout and fonts;
 - GPU rendering cost at 4K and 60 Hz;
-- the rights of HD packs.
+- (the scaler and the HD packs' rights are settled in 07.)

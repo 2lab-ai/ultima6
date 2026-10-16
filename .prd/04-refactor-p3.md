@@ -6,8 +6,7 @@ tags: [ultima6, rust, refactor, ai, modding]
 
 # 04 — P3 refactor: AI-driven NPCs, editable systems, mods
 
-Status: planned (rev 5, 2026-10-15 — trinity rounds 1–2: gpt-6-astra and fable MUST-FIX folded in;
-grok-4.7 slot pending; rev 5 adds the HD/4K seam (05-hd-output.md), W10 and acceptance 7, not yet reviewed). Starts after the M2 port is deployed (P2).
+Status: planned (rev 10, 2026-10-16 — trinity rounds 1–3 on rev 1–4: gpt-6-astra and fable MUST-FIX folded in, both APPROVE at round 3. Rev 5 added an HD/4K seam; rev 6 removed it, after the grok-4.7 slot's round 1 on rev 5, because spec 07 built and shipped that seam in another form. Rev 7 folded in round 2 of all three slots: acceptance 7 keeps only what a v1 mod can affect and is gated by W6b, and §3.a records the transport decided 3 of 3. Rev 8 folds in round 3: grok-4.7 and fable APPROVE; gpt-6-astra's transport items (keys never in a URL or a log; gateway authentication; the owner gate with a real model) and fable's notes (the llmux half of W7b split into W7c, acceptance 7's last sentence); rev 9 folds in round 4: gpt-6-astra and grok-4.7 APPROVE; fable's two W7c items (an `Origin`-bearing request is never keyless even from loopback, since llmux exempts keyless loopback today; one allowed origin set in the gateway's config, so the preview gate can run). Rev 10 folds in round 5: gpt-6-astra and grok-4.7 APPROVE; fable's W7c gate item (a key that is not an issued key is refused too, since llmux serves an unknown loopback key as `local`) and the preview's stable alias origin. Starts after the M2 port is deployed (P2).
 
 User command (verbatim, `browser-port/ssot.md`): "3. rust 코드를 고치기 좋도록 리팩토링 /
 3.a npc의 가능한 행동을 ai model에게 주고 응답 받을수 있도록 / 3.b 캐릭터 월드맵 등 전체적인
@@ -125,13 +124,21 @@ real-data tests.
   replies fall back and are logged; one request in flight per NPC; bounded reply size.
 - **Payload boundary:** structured state and legal action ids only; dialogue text only if enabled
   per NPC; exact JSON shown before the first request and on demand; no endpoint preconfigured; keys
-  in memory unless the user keeps them; changing the destination or the field set asks again.
-- **Transport:** open security decision (trinity 2026-10-15, then the user): the page's CSP is
-  `connect-src 'self'`; candidates are `https:` + loopback for a user-entered endpoint, loopback
-  only, or native only. Whatever ships, the browser receipt is behavioural: AI off → zero
-  off-origin requests during play; AI on against a stub endpoint → only the allowed fields sent and
-  the chosen id applied. The `test-web.mjs` header assertion stays, updated to the decided CSP
-value; the behavioural receipt is added next to it.
+  in memory unless the user keeps them, never in a URL or a log; changing the destination or the field set asks again.
+- **Transport:** decided by trinity on 2026-10-16, 3 of 3 in round 2 (grok-4.7, gpt-6-astra, fable). The CSP widening is a security change to a public site, so it ships only with the user's approval, asked when W7b is ready.
+  - **Web = loopback only:** `connect-src 'self' http://localhost:* http://127.0.0.1:*`, every other directive unchanged. `http://[::1]:*` is added only if the owner's measurement shows it is needed. No `https:`: today the header is the one control that blocks third-party egress for every visitor, whatever the page's code does (`site/_headers:12`, a static origin with no receiver; pinned by `tools/web/test-web.mjs:189,199-202`). Reverting a header does not recall what left while it was open. No same-origin proxy: it would make our server the processor of game-derived payloads and keys (01 §Rights).
+  - **Owner now = u6-native**, over plain HTTP to the owner's gateway. That needs no header change.
+  - **Gate before the web path is offered:** one owner browser and one gateway, end to end with a real model. A public HTTPS page calls the owner's gateway at `http://127.0.0.1:<port>`, the gateway gets a reply from a real model, and the chosen action is applied to that NPC's turn. The stub receipts below are regression tests; they do not pass this gate.
+    - The gateway binds loopback only and allows exactly one origin, set in the gateway's own config: the preview branch's stable alias `https://preview.ultima6.pages.dev` during the gate (each deployment's own hash subdomain changes), `https://ultima6.2lab.ai` after approval. It answers the CORS preflight (allowing the key header and `content-type`) and checks authentication on every request that carries an `Origin`, even from a loopback peer. The key is an issued data-plane key (llmux `lmk-`), never the admin key. Loopback, origin and CORS are not authentication: a simple POST is sent without a preflight. Whatever extra preflight header the browser's local-network policy asks for is set by that measurement, not named in advance. llmux has no CORS today; adding it is a llmux change.
+    - "Loopback" means the machine the browser runs on. A remote gateway is mapped there (e.g. `ssh -L`).
+    - If the call fails, the public page shows web AI as unsupported and keeps it off. The fallbacks are u6-native and the page served locally by `tools/web/serve.mjs`, which is loopback to loopback.
+    - The page never widens to `https:` and never tells users to disable browser protections. A native or locally served success is not reported as public-web success.
+  - **Consent screen:** it shows the address the browser connects to apart from where the model runs. If the gateway can forward to a hosted model, it says so; if that cannot be checked, it says "may forward to an outside provider; final location unconfirmed". The payload boundary above applies unchanged.
+  - **Receipts:**
+    - The `test-web.mjs` header assertion is updated to the decided value, and the `https://example.com/` probe stays refused.
+    - A behavioural receipt is added next to it: AI off → zero off-origin requests during boot and play. AI on against a loopback stub → exactly the allowed fields are sent, the key appears in no URL, and the chosen id is applied. Invalid, oversized, timed-out and stale replies → the original routine decides and the reply is logged, without payload, reply bodies or the key.
+  - **Docs:** the `site/_headers` comment and `workflow/repos.md` say "no third party; only the loopback endpoint the user enables".
+  - Hosted models straight from the browser with a visitor's own key are not a requirement today. If the user asks for that, it is a new decision on a separate origin or a separate path with its own header.
 
 ## Code that is easy to change
 
@@ -143,26 +150,26 @@ value; the behavioural receipt is added next to it.
 
 ## Output for HD / 4K
 
-The user's 2026-10-15 requirement (x2/x4 resources, an HD/4K map view, more of the map shown; "not now") is designed in [`05-hd-output.md`](05-hd-output.md). P3 builds only its seam: the scene and asset-provider contracts and HD-pack type in W0, the scene output in W10, and acceptance 7. The parity frame stays unchanged.
+The user's 2026-10-15 requirement (x2/x4 resources, an HD/4K map view, more of the map shown; "not now") is owned by spec 07 and, for the wider view, by [`05-hd-output.md`](05-hd-output.md) §4. Spec 07 built the seam and shipped it: a per-pixel source plane in the frame buffers, the HD compositor reading the shown frame, the pointer on the logical 320×200, and the `u6-hdpack/1` format keyed by the classic image's content hash (`07-hd-art.md` Design 1–2; `u6-render/src/lib.rs:89`, `u6-render/src/hd.rs:499`, `u6-hdpack/src/lib.rs:58`). P3 does not reimplement any of it, adds no scene output, and changes neither `VIEW`, `WINDOW` nor `WINDOW_TILES` (05 §4 keeps the wider view as research). What P3 owes the HD output is acceptance 7. A v1 mod changes which records are drawn (map cells, object types, rules), never a record's pixels: art is out of v1, and the tile, portrait and bitmap files are not in the definition set. So the plane and the compositor apply unchanged, and the source receipt must still pass with a mod set loaded. Looking up a pack image by content hash belongs to 07 (its unit H2) and is tested there. The parity frame stays unchanged.
 
 ## Work units (one agent each)
 
 | WU | Scope | Needs | Gate |
 |---|---|---|---|
-| W0 | contracts: definition / override schema, stable ids, codec API, save sidecar, load-order and conflict rules, scene and asset-provider contracts, HD-pack content type | — | spec review |
+| W0 | contracts: definition / override schema, stable ids, codec API, save sidecar, load-order and conflict rules; the mod package's manifest `format` id, distinct from `u6-hdpack/1`, so that the page's drop classifier (07 H2) takes it as a third branch, not a second switch | — | spec review |
 | W1 | map + chunks + basetile + tileflag + animdata writers, look.lzd table writer through the existing LZW encoder, text forms | W0 | local byte-identity |
 | W2 | objlist codec unification (both profiles) + schedule writer + actor files | W0 | parity suite + byte-identity of both profiles |
 | W3a | converse disassembler (opcode table from the interpreter's arms; data-in-code tables kept as data) + relocating rebuild (jump and table operands **and** the addresses of runtime script writes, `converse/exec.rs:268`, `converse/eval.rs:245` → `script.rs:41`) + name / price edits; a rebuilt script longer than `SCRIPT_LEN` 0x2800 is refused | W0 | identity rebuild of every script, **and** every name lengthened by N bytes → interpreter receipts identical except the names |
 | W4 | executable tables as `rules/*.toml` (in-place patch) | W0 | unchanged values → identical `game` bytes |
 | W5a | `u6-defs` library: export / build / merge / validate / sparse diff, wasm-callable (browser and CLI both call it; neither re-implements merge or validation) | W1–W4 | full export → build identical for every file the engine reads |
 | W5b | CLI adapter: file I/O and the commands export, build, validate, new-mod, pack | W5a | each command on the user's files |
-| W6a | mod resolver + save sidecar + package limits | W5a | acceptance 4–5 |
-| W6b | page mod manager + end-to-end in native and in the browser | W6a, W5b, W8 (first family) | acceptance 3, in native and in the browser |
+| W6a | mod resolver + save sidecar + package limits (read through `u6_intake::zip`: its budget, entry cap, inflate bound and CRC checks; no second zip reader) | W5a | acceptance 4–5 |
+| W6b | page mod manager + end-to-end in native and in the browser; the source receipt (`main_loop/plane_receipt.rs`) run once more with acceptance 3's mod set as a `Files::overlay` layer | W6a, W5b, W8 (first family) | acceptance 3 (native and browser) and 7 (native, owner-local, counts only) |
 | W7a | NPC seam + OriginalBrain | — | acceptance 1 + RNG-free enumeration test |
-| W7b | ModelBrain + budget + transport | W7a, transport decision | acceptance 2 |
+| W7b | ModelBrain + budget + transport (loopback, as decided in §3.a) | W7a (stub half); W7c (real-model half) | acceptance 2 with a loopback stub (before the user's approval); the §3.a owner-browser gate with a real model (after it, on a Pages preview carrying the widened header) |
+| W7c | llmux (its own repository, its own PR and gates): loopback bind; one allowed origin from config; the preflight answer; a request carrying an `Origin` is never keyless, even from a loopback peer (keyless loopback requests without `Origin`, such as local CLI clients, keep today's `local` tenant) | — | from 127.0.0.1, on the API path W7b uses: a preflight and a request keyed with an issued data-plane key (`lmk-`) from the configured origin answered; any other origin refused; a request carrying the configured `Origin` refused when it has no key and when its key is not an issued key (llmux today serves an unknown key from loopback as `local`, `src/proxy/keys.rs:162-167`); a keyless request without `Origin` still served |
 | W8 | rules extraction, one family per dispatch (missile weapons first) | W4 | behaviour test + parity |
 | W9 | rights cleanup of notes and docs | — | grep: no quoted game strings |
-| W10 | scene output next to the frame (map cells + UI widgets, logical units); view size read from state in new code | W0 | parity identical + scene/frame agreement on synthetic state |
 | W3b | full conversation text form | W3a | later |
 
 ## Acceptance (P3)
@@ -178,4 +185,4 @@ The user's 2026-10-15 requirement (x2/x4 resources, an HD/4K map view, more of t
 5. A save made with a mod set resumes with that set; with a mod missing, changed or reordered it is
    refused before boot with the difference listed; a save without a sidecar loads only with no mods.
 6. Export → build of the base game is byte-identical for every file the engine reads.
-7. Every presented frame has a scene, and drawing that scene at 1× with the base assets reproduces the frame's map window and panels (synthetic state, then the real-data receipts as pass/fail).
+7. With acceptance 3's mod set loaded as a `Files` layer, spec 07's source receipt still passes. Every unflagged tile, portrait or bitmap pixel with a current version equals its image's classic pixel; flagged, stale and classic pixels keep the classic output. The receipt runs native and owner-local and prints counts only. With HD off, the 1× frame is drawn by the same code as before HD whether or not a mod is loaded (its content differs only by what the mod changes).
