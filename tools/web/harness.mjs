@@ -523,6 +523,12 @@ export function stepResult(from, to, { dx, dy }) {
   return 'walked';
 }
 
+/// The cell one step toward `step` ({ dx, dy }) from `at` (x,y,z as the page writes the leader).
+const cellToward = (at, { dx, dy }) => {
+  const [x, y, z] = at.split(',').map(Number);
+  return `${x + dx},${y + dy},${z}`;
+};
+
 /// The page's side of a step (`stepOnce`): wait for the prompt, read the leader, read the frame,
 /// do `step` (its arrow, then until the game took it and shows the prompt again), pass. A test
 /// drives `stepOnce` with its own: `act` a click (the mouse tests' `clickStep`), or all of them
@@ -553,14 +559,14 @@ export const pageSteps = (page) => ({
 /// member's cell is open (the step swaps them), and the start fight has fewer foes than the hero
 /// has sides (at most three near him at the first prompt, over 10000 seeds). Only after a round of
 /// four blocked does a pass spend the hero's turn, so the fight moves on, up to `STEP_ROUNDS`
-/// rounds; after a try that ended on the wake cell the next direction is tried from there, and a
-/// walk back onto the cell the call started on ('back': a walk into the wake cell from beside it,
-/// not counted, then the next direction leads back) does not count either, so the step always
-/// leaves the leader elsewhere than it found him. With `withFrame` the frame before each try is
-/// read (a whole canvas over the protocol, at S 4 1280 x 800: only for a check of the step's
-/// scroll). Returns the step (key, dx, dy), the leader before and after and, with `withFrame`, the
-/// frame before it. After the bound it fails with each try's key and outcome and the passes
-/// between, in order (`what` names it: a click step).
+/// rounds. After a try that ended on the wake cell the next directions are tried from there, but
+/// not the one toward the cell the call started on ('skipped': from beside the wake cell a walk
+/// into it is not counted, and the way back would end where the step began; tried, the two
+/// alternate to the bound), so the step always leaves the leader elsewhere than it found him. With
+/// `withFrame` the frame before each try is read (a whole canvas over the protocol, 1280 x 800 at
+/// S 4: only for a check of the step's scroll). Returns the step (key, dx, dy), the leader before
+/// and after and, with `withFrame`, the frame before it. After the bound it fails with each try's
+/// key and outcome and the passes between, in order (`what` names it: a click step).
 export async function stepOnce(page, { withFrame = false, io = pageSteps(page), what = 'step' } = {}) {
   const tried = [];
   let start;
@@ -573,11 +579,14 @@ export async function stepOnce(page, { withFrame = false, io = pageSteps(page), 
       await io.prompt();
       const from = await io.leader();
       start ??= from;
+      if (cellToward(from, step) === start) {
+        tried.push(`${step.key} skipped`);
+        continue;
+      }
       const before = withFrame ? await io.frame() : undefined;
       await io.act(step);
       const to = await io.leader();
-      let result = stepResult(from, to, step);
-      if (result === 'walked' && to === start) result = 'back';
+      const result = stepResult(from, to, step);
       tried.push(`${step.key} ${result}`);
       if (result === 'walked') return { ...step, from, to, before };
     }
