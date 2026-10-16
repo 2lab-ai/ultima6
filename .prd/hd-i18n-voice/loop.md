@@ -17,9 +17,9 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 
 Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 5 (what H0 and H3 measured), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
-Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane) and H0b (plane hardening) are in production (2cc201d2 at main 392d5b1). In flight:
-- H3, the pack format and imagegen tool, in review round 11 (test-only changes); it merges main before it merges;
-- H1, the compositor, approved in round 3; it merges main (H0b) and re-runs its gates before it merges.
+Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening) and H1 (the HD compositor, MMPX at 2× or 4×, on by default) are in production (2ae0a36c at main 2257e21). In flight:
+- H3, the pack format and imagegen tool: rounds 11–12 approved, round 13 closes three small test items; then the merge gate with main.
+Next: H4 (run the tool on the owner's files) and H2 (the page loads the pack), both after H3.
 
 ## Order, and why it differs from the user's numbering
 
@@ -34,7 +34,6 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 
 | Unit | Spec | Scope | Needs |
 |---|---|---|---|
-| H1 | 07 | `u6-render` compositor + MMPX×S (cached by content hash) in wasm; `u6-web` HD exports; page S× canvas, HD toggle, logical pointer mapping | H0 |
 | H2 | 07 | the page loads a pack through `u6-hdpack` (from H3): drop classification before `importFiles`, IndexedDB/forget, limits | H1, H3 |
 | H3 | 07 | `crates/u6-hdpack` (the pack format: writer, strict reader, limits, content hash) + the `tools/hd` binary: inventory/atlas/run(`--send`)/ingest/pack with the gates; synthetic tests; gate tuning on synthetic sheets | — (in parallel with H0) |
 | H4 | 07 | ops: run `tools/hd` on the owner's files with imagegen (portraits → bitmaps → terrain → actors), load the pack in the owner's browser, read the frames | H3 |

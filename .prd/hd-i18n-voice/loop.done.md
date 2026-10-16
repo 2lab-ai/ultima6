@@ -117,3 +117,19 @@ Append-only. Closed units, with their receipts.
   - **Deploys:** preview 7a547e16, then production 2cc201d2, both at main 392d5b1.
     - live-check2 on preview: 0 foreign requests, 0 errors. The dispatcher read the menu, castle hall, walked-into-the-fight and Journey Onward frames; they are unchanged.
     - live-speed on production: 1×→4×→3×→4×→Max (76.3×)→1×; 1.5× kept across a reload; 0 foreign requests, 0 errors.
+
+| H1 | 07 | `u6-render` compositor + MMPX×S (cached by content hash) in wasm; `u6-web` HD exports; page S× canvas, HD toggle, logical pointer mapping | H0 |
+
+- **H1** merged at 2257e21 (branch e9d2fd9 … c7ac41b, three rounds, then f1ab76f merging main with H0b).
+  - **MMPX** in `u6-render`, ported from the authors' MIT reference and tested against vectors from it on synthetic images; 4× is MMPX twice. The notice ships as `site/NOTICE.txt`, linked from the HD paragraph.
+  - **Compositor:** each tile, portrait and panel bitmap pixel with a current `ver` and no flags takes its block of the image's MMPX×S, cached by content (a palette change runs MMPX again); classic, flagged and stale pixels stay classic. It reads the shown frame only and runs when `(frame_version, src_version, hd_version)` changes.
+  - **Page:** an HD button next to Mute, on by default, kept in `u6.hd`; the canvas is 320·S × 200·S in the same box (S 4 at ≥ 3 device pixels per game pixel, else 2) and the pointer maps onto the logical 320 × 200.
+  - **Receipts:**
+    - owner-local HD receipt: pass, 1353 frames at 4×, 0 blocks off the definition, a fresh compositor on 27 frames 0 differ, retained cache peak 7607 KiB of 24576 KiB;
+    - no-pack performance on this Mac at 4× speed: per display frame p95 0.9–1.4 ms at S 4 and S 2 over 6 runs at load 51–73 (limit 8 ms);
+    - wasm 1,513,810 bytes (+28 KB).
+  - **Gates on the merge** (e177b48, same tree as 2257e21): 974 passed, 7 ignored; web 52/52 in 6 of 7 full runs (the one failure was not recorded by test name; the web-flake unit in browser-port tracks the known one) and the HD tests 30/30 in 6 filtered runs; oracles OK, port_map ok.
+  - **Reviews:** gpt-6-astra in parts: round 1 seven parts (CHANGES on render tests, core images and receipt, core tests), round 2 four parts APPROVE, round 3 APPROVE; opus: round 1 on the whole unit, round 2 APPROVE.
+  - **Deploys:** preview 62548a40, then production 2ae0a36c, both at 2257e21.
+    - live check on preview at device pixel ratio 2: HD on gives a 1280 × 800 canvas in a 960-pixel box, off gives 320 × 200, and on again restores it, in the menu, the game, after a walk and after a reload; 0 foreign requests, 0 errors. The dispatcher read the frames side by side: the map, figures and party icons show MMPX's smoothed diagonals, text stays classic, the opening menu is pixel-identical to classic, and HD differs from classic in about 0.5% of pixels in every game frame, after the reload too.
+    - on production: live-speed Max 76.8×, 1.5× kept across a reload; HD on, off and on again in the game and after a reload; 0 foreign requests, 0 errors.
