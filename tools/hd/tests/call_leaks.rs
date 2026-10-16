@@ -60,9 +60,11 @@ fn stub(
     after: &str,
 ) -> PathBuf {
     let p = dir.join(name);
+    // `$ARGV[1]` is the helper's start acknowledgment: its pid is appended to make a file name.
     let helper = format!(
-        "/usr/bin/perl -MPOSIX -e 'exit if fork; POSIX::setsid(); {perl} while -e $ARGV[0]' \"{}\"\n",
-        mark.display()
+        "/usr/bin/perl -MPOSIX -e 'exit if fork; POSIX::setsid(); {perl} while -e $ARGV[0]' \"{}\" \"{}\"\n",
+        mark.display(),
+        dir.join(format!("{name}.ack")).display()
     );
     let body = format!("#!/bin/sh\n{before}\n{}{after}\n", helper.repeat(n));
     std::fs::write(&p, body).unwrap();
@@ -99,8 +101,9 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
     let thread = r#"echo '{"type":"thread.started","thread_id":"t1"}'"#;
     let takes = format!("cat > /dev/null\n{thread}");
     let idle = "select(undef, undef, undef, 0.2)";
-    // Four writers of 64 KiB at a time: the output is never found empty.
-    let spew = r#"syswrite(STDOUT, "y\n" x 32768)"#;
+    // Four writers of 64 KiB at a time: the output is never found empty. Each acknowledges its
+    // first write that went in (a file `<stub>.ack.<pid>`), so it is known to be writing.
+    let spew = r#"do { my $w = syswrite(STDOUT, "y\n" x 32768); if ($w && !$n++) { open(my $f, ">", "$ARGV[1].$$"); close $f } }"#;
     // (name, stub, its prompt is never read, deadline in seconds). The flooders' exiting call
     // gets a deadline it surely exits before (it starts four perls first).
     let shapes = [
@@ -154,6 +157,20 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
             };
             println!("{name} round {round}: {took:?}: {e}");
             assert!(e.contains(want), "{name} round {round}: {e}");
+            if name.starts_with("floods") {
+                // All four writers were writing: each acknowledged a write that went in.
+                let acks = std::fs::read_dir(&t)
+                    .unwrap()
+                    .filter(|e| {
+                        let n = e.as_ref().unwrap().file_name();
+                        n.to_string_lossy().starts_with(&format!("{name}.ack."))
+                    })
+                    .count();
+                let events = std::fs::metadata(t.join("dir/events.jsonl")).unwrap().len();
+                println!("{name}: {acks} writers acknowledged, {events} bytes of events kept");
+                assert_eq!(acks, 4, "{name}: writers that wrote");
+                assert!(events > 1 << 16, "{name}: {events} bytes read");
+            }
             // Within the deadline and the 1 s grace, with 2 s of slack for a loaded machine.
             let limit = Duration::from_secs(secs + 1 + 2);
             assert!(took < limit, "{name} round {round}: {took:?} ({e})");
