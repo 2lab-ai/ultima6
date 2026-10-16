@@ -59,7 +59,7 @@ impl Read for Stream {
 fn measure(s: Stream) -> (usize, Option<String>) {
     let base = NOW.load(Ordering::SeqCst);
     PEAK.store(base, Ordering::SeqCst);
-    let id = read_events(s, std::io::sink());
+    let id = read_events(s, std::io::sink()).thread;
     (PEAK.load(Ordering::SeqCst) - base, id)
 }
 

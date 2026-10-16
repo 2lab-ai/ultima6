@@ -1999,8 +1999,9 @@ fn the_event_reader_holds_one_line_at_most() {
     stream.extend_from_slice(exact.as_bytes());
     stream.extend_from_slice(b"\n{\"last\":1}");
     let mut kept = Vec::new();
-    let id = run::read_events(stream.as_slice(), &mut kept);
-    assert_eq!(id.as_deref(), Some("t-1"));
+    let ended = run::read_events(stream.as_slice(), &mut kept);
+    assert_eq!(ended.thread.as_deref(), Some("t-1"));
+    assert!(ended.error.is_none());
     let lines: Vec<&[u8]> = kept.split(|&b| b == b'\n').collect();
     assert_eq!(lines.len(), 6, "five lines, each with its newline");
     assert_eq!(lines[0], b"{\"type\":\"turn.started\"}");
@@ -2275,4 +2276,130 @@ fn a_wrong_size_output_end_to_end() {
     }
     let _ = std::fs::remove_dir_all(&s.at);
     let _ = std::fs::remove_dir_all(&w.root);
+}
+
+/// An event file that takes `room` bytes, then fails every write with ENOSPC (counting the
+/// writes tried after that); its flush fails when `flush_fails`.
+struct Full {
+    room: usize,
+    got: Vec<u8>,
+    tried_after: usize,
+    flush_fails: bool,
+}
+
+impl std::io::Write for Full {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if self.got.len() >= self.room {
+            self.tried_after += 1;
+            return Err(std::io::Error::from_raw_os_error(libc::ENOSPC));
+        }
+        let n = b.len().min(self.room - self.got.len());
+        self.got.extend_from_slice(&b[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.flush_fails {
+            return Err(std::io::Error::other("flush refused"));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn an_event_file_that_fails_is_reported_not_lost() {
+    let full = |room, flush_fails| Full {
+        room,
+        got: Vec::new(),
+        tried_after: 0,
+        flush_fails,
+    };
+    let mut stream = b"{\"type\":\"thread.started\",\"thread_id\":\"t-1\"}\n".to_vec();
+    for i in 0..10 {
+        stream.extend_from_slice(
+            format!("{{\"n\":{i},\"pad\":\"{}\"}}\n", "z".repeat(80)).as_bytes(),
+        );
+    }
+    // Out of room after 250 bytes: the first error is kept, and nothing is written after it
+    // (one write tried and refused); the thread id is still read.
+    let mut file = full(250, false);
+    let ended = run::read_events(stream.as_slice(), &mut file);
+    assert_eq!(ended.thread.as_deref(), Some("t-1"));
+    assert_eq!(
+        ended.error.map(|e| e.raw_os_error()),
+        Some(Some(libc::ENOSPC))
+    );
+    assert_eq!(file.tried_after, 1);
+    assert_eq!(file.got.len(), 250);
+    // Through a buffer, as a call writes its events: the error comes out when the buffer is
+    // written, at the end at the latest.
+    let mut lines = run::EventLines::new(std::io::BufWriter::new(full(250, false)));
+    lines.feed(&stream);
+    assert_eq!(
+        lines.finish().error.map(|e| e.raw_os_error()),
+        Some(Some(libc::ENOSPC))
+    );
+    // Room enough, the flush refused: that is the error.
+    let mut lines = run::EventLines::new(full(1 << 20, true));
+    lines.feed(&stream);
+    let ended = lines.finish();
+    assert_eq!(
+        ended.error.map(|e| e.to_string()).as_deref(),
+        Some("flush refused")
+    );
+    // Nothing wrong: no error.
+    let mut file = full(1 << 20, false);
+    assert!(
+        run::read_events(stream.as_slice(), &mut file)
+            .error
+            .is_none()
+    );
+    assert_eq!(file.got, stream);
+}
+
+#[test]
+fn a_call_s_save_failure_is_its_error_after_the_call_s_own() {
+    use std::os::unix::process::ExitStatusExt;
+    let ok = std::process::ExitStatus::from_raw(0);
+    let exit1 = std::process::ExitStatus::from_raw(1 << 8);
+    let why = "the call's events were not saved: No space left on device".to_string();
+    let saved = Some(why.clone());
+    let settled = |waited, taken, ended, saved: &Option<String>| run::Settled {
+        waited,
+        taken,
+        refused: None,
+        ended,
+        saved: saved.clone(),
+    };
+    let id = || Some("t-1".to_string());
+    // The call went right: the save failure is its error; without one, the thread id.
+    assert_eq!(
+        run::settle(settled(Ok(ok), true, true, &saved), id()),
+        Err(why.clone())
+    );
+    assert_eq!(
+        run::settle(settled(Ok(ok), true, true, &None), id()),
+        Ok("t-1".into())
+    );
+    // The call's own failure comes first.
+    for (s, want) in [
+        (
+            settled(Err("timed out after 1 s".into()), true, true, &saved),
+            "timed out",
+        ),
+        (
+            settled(Ok(ok), false, true, &saved),
+            "did not take its prompt",
+        ),
+        (settled(Ok(ok), true, false, &saved), "output did not end"),
+        (settled(Ok(exit1), true, true, &saved), "codex exited with"),
+    ] {
+        let e = run::settle(s, id()).unwrap_err();
+        assert!(e.contains(want), "{e}");
+    }
+    // A save failure before a missing thread id.
+    assert_eq!(
+        run::settle(settled(Ok(ok), true, true, &saved), None),
+        Err(why)
+    );
 }

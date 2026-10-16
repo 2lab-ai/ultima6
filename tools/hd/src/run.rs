@@ -100,13 +100,23 @@ impl Drop for Group {
 /// Codex's event stream, line by line as its bytes arrive: each line of at most [`LINE_MAX`]
 /// bytes goes to `events` while they hold under [`EVENTS_MAX`] bytes, and the first
 /// `thread.started` event's id is kept. A longer line is dropped up to its newline without
-/// being held, so memory stays bounded whatever the stream holds.
+/// being held, so memory stays bounded whatever the stream holds. The first error writing to
+/// `events` is kept, and no line is written after it ([`Ended::error`]).
 pub struct EventLines<W: Write> {
     events: W,
     kept: u64,
     thread: Option<String>,
+    error: Option<std::io::Error>,
     line: Vec<u8>,
     dropping: bool,
+}
+
+/// What an event stream came to: its first thread id, and the first error writing its lines
+/// to the event file or flushing them there, if there was one.
+#[derive(Debug)]
+pub struct Ended {
+    pub thread: Option<String>,
+    pub error: Option<std::io::Error>,
 }
 
 impl<W: Write> EventLines<W> {
@@ -115,6 +125,7 @@ impl<W: Write> EventLines<W> {
             events,
             kept: 0,
             thread: None,
+            error: None,
             line: Vec::new(),
             dropping: false,
         }
@@ -128,12 +139,15 @@ impl<W: Write> EventLines<W> {
         {
             self.thread = Some(id.to_string());
         }
-        if self.kept + (line.len() as u64) < EVENTS_MAX {
-            self.kept += line.len() as u64 + 1;
-            let _ = self
+        if self.error.is_none() && self.kept + (line.len() as u64) < EVENTS_MAX {
+            match self
                 .events
                 .write_all(line)
-                .and_then(|()| self.events.write_all(b"\n"));
+                .and_then(|()| self.events.write_all(b"\n"))
+            {
+                Ok(()) => self.kept += line.len() as u64 + 1,
+                Err(e) => self.error = Some(e),
+            }
         }
     }
 
@@ -166,20 +180,26 @@ impl<W: Write> EventLines<W> {
     }
 
     /// The end of the stream: its last line (without a newline), the lines flushed to
-    /// `events`, then the first thread id.
-    pub fn finish(mut self) -> Option<String> {
+    /// `events`; the first thread id and the first write or flush error.
+    pub fn finish(mut self) -> Ended {
         if !self.dropping && !self.line.is_empty() {
             let line = std::mem::take(&mut self.line);
             self.on_line(&line);
         }
-        let _ = self.events.flush();
-        self.thread
+        if self.error.is_none()
+            && let Err(e) = self.events.flush()
+        {
+            self.error = Some(e);
+        }
+        Ended {
+            thread: self.thread,
+            error: self.error,
+        }
     }
 }
 
-/// Reads codex's event stream `r` to its end in 8 KiB chunks ([`EventLines`]); returns the
-/// first thread id.
-pub fn read_events(mut r: impl Read, events: impl Write) -> Option<String> {
+/// Reads codex's event stream `r` to its end in 8 KiB chunks ([`EventLines`]).
+pub fn read_events(mut r: impl Read, events: impl Write) -> Ended {
     let mut lines = EventLines::new(events);
     let mut chunk = [0u8; 8192];
     loop {
@@ -225,9 +245,11 @@ struct Pipes<'a, W: Write> {
 
 impl<W: Write> Pipes<'_, W> {
     /// One turn: waits until either pipe is ready or `until` passes, then writes and reads what
-    /// it can, at most [`TURN_BYTES`] and [`TURN_CALLS`] each way and never past `until`, so
-    /// the caller's checks (the call's exit, the deadline, the grace) run between turns
-    /// whatever the call does with its pipes.
+    /// it can, at most [`TURN_BYTES`] and [`TURN_CALLS`] each way, starting no read or write
+    /// once `until` has passed, so the caller's checks (the call's exit, the deadline, the
+    /// grace) run between turns whatever the call does with its pipes. The work between checks
+    /// is bounded on the assumption that the event file's writes return: they are synchronous
+    /// (buffered, a turn writes at most what it read), so a stalled disk stalls the turn.
     fn step(&mut self, until: Instant) {
         use std::os::fd::AsRawFd;
         let left = until.saturating_duration_since(Instant::now());
@@ -320,13 +342,55 @@ impl<W: Write> Pipes<'_, W> {
     }
 }
 
+/// How a call ended, its process cleaned up and its files put in place.
+pub(crate) struct Settled {
+    /// The call's exit status, or why it was stopped (timed out, the prompt refused).
+    pub(crate) waited: Result<std::process::ExitStatus, String>,
+    /// The prompt went in whole.
+    pub(crate) taken: bool,
+    pub(crate) refused: Option<std::io::Error>,
+    /// The event stream ended.
+    pub(crate) ended: bool,
+    /// The first failure saving the call's events or output.
+    pub(crate) saved: Option<String>,
+}
+
+/// The call's thread id, or why the call failed, in this precedence: how it was stopped, its
+/// prompt not taken, its stream not ended, its exit status, then a failure saving what it
+/// printed (the call itself having gone right), then the thread id missing or malformed.
+pub(crate) fn settle(s: Settled, thread: Option<String>) -> Result<String, String> {
+    let status = s.waited?;
+    if !s.taken {
+        return Err(match s.refused {
+            Some(e) => format!("the call did not take its prompt: {e}"),
+            None => "the call did not take its prompt".into(),
+        });
+    }
+    if !s.ended {
+        return Err("the call's output did not end".into());
+    }
+    if !status.success() {
+        return Err(format!("codex exited with {status}"));
+    }
+    if let Some(e) = s.saved {
+        return Err(e);
+    }
+    let id = thread.ok_or("no thread id in the codex events")?;
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err("an unexpected thread id in the codex events".into());
+    }
+    Ok(id)
+}
+
 impl Runner for Codex {
     /// One deadline covers the call, all of it in this thread: the prompt is written and the
     /// events read as the pipes are ready (both non-blocking, one `poll` for the two), while
     /// the call is watched for its exit, until it exits, the prompt fails or the deadline
     /// passes; then the call's group is killed (on every path) and the stream given [`CLEANUP`]
-    /// to end. Then both pipes are closed, whatever still holds their other ends: nothing of
-    /// the call outlives it here, no thread, no descriptor.
+    /// to end (each wait bounded as [`Pipes::step`] says: the event file's writes are assumed
+    /// to return). Then both pipes are closed, whatever still holds their other ends: nothing
+    /// of the call outlives it here, no thread, no descriptor. A failure to save the call's
+    /// events or output is the call's error when the call itself went right ([`settle`]).
     fn generate(&self, sheet: &Path, prompt: &str, dir: &Path) -> Result<PathBuf, String> {
         use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
@@ -399,26 +463,26 @@ impl Runner for Codex {
         // Our ends of both pipes close here, whoever holds the others.
         drop(pipes.stdin.take());
         drop(pipes.stdout.take());
-        let thread_id = pipes.lines.finish();
-        let _ = work::commit(&stderr_tmp, &stderr_path);
-        let _ = work::commit(&events_tmp, &events_path);
-        let status = waited?;
-        if !taken {
-            return Err(match refused {
-                Some(e) => format!("the call did not take its prompt: {e}"),
-                None => "the call did not take its prompt".into(),
-            });
+        let stream = pipes.lines.finish();
+        // Both files are put in place whatever happened; the first failure of either is kept.
+        let mut saved = stream
+            .error
+            .map(|e| format!("the call's events were not saved: {e}"));
+        for (tmp, path) in [(&stderr_tmp, &stderr_path), (&events_tmp, &events_path)] {
+            if let Err(e) = work::commit(tmp, path) {
+                saved.get_or_insert(format!("the call's output was not saved: {e}"));
+            }
         }
-        if !ended {
-            return Err("the call's output did not end".into());
-        }
-        if !status.success() {
-            return Err(format!("codex exited with {status}"));
-        }
-        let id = thread_id.ok_or("no thread id in the codex events")?;
-        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-            return Err("an unexpected thread id in the codex events".into());
-        }
+        let id = settle(
+            Settled {
+                waited,
+                taken,
+                refused,
+                ended,
+                saved,
+            },
+            stream.thread,
+        )?;
         let images = self.home.join("generated_images").join(&id);
         let mut found: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&images)
             .map_err(|_| "no image generated".to_string())?
