@@ -53,8 +53,7 @@ mod tests_spells;
 #[cfg(test)]
 mod tests_units;
 
-#[cfg(test)]
-pub(crate) use book::book_bitmap;
+pub(crate) use book::{book_bitmap, book_file};
 pub use book::{draw_book, draw_book_page, load_book, set_current_spell};
 pub use cast::{book_cast, cast};
 pub use detect::{carried_object, is_door};

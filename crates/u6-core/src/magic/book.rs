@@ -182,8 +182,14 @@ pub fn draw_book(s: &mut State, io: &Io) {
 
 /// The bitmap [`draw_book`] draws, decoded; `None` for a missing or bad file.
 pub(crate) fn book_bitmap(io: &Io) -> Option<Bitmap> {
-    let name = a4_pointed(io, BOOK_BMP);
-    io.files().get(&name).and_then(|f| Bitmap::from_lzw(f).ok())
+    io.files()
+        .get(&book_file(io))
+        .and_then(|f| Bitmap::from_lzw(f).ok())
+}
+
+/// The name of the file [`book_bitmap`] reads (named at A4-0x61de).
+pub(crate) fn book_file(io: &Io) -> String {
+    a4_pointed(io, BOOK_BMP)
 }
 
 async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {

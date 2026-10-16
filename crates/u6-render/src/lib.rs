@@ -11,6 +11,11 @@
 //! plane that may differ; the colours are copied as before. A sync takes the marks it reads, so
 //! the first sync between two planes links them, and a later sync of either with another plane
 //! panics, with or without debug assertions.
+//!
+//! [`hd`]: the HD compositor (spec 07 HD0), the frame at 2× or 4× from the source plane. It only
+//! reads a plane ([`Framebuffer::src`]), never syncs from one.
+
+pub mod hd;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
