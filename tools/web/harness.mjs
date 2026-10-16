@@ -437,7 +437,10 @@ export async function waitLog(page, entry, timeout = 30_000) {
 }
 
 /// The canvas pixels (RGBA), one per game pixel (320 x 200): with HD on (a canvas S times that,
-/// spec 07) the top-left device pixel of each game pixel's S x S block, read in the page.
+/// spec 07) the top-left device pixel of each game pixel's S x S block, read in the page. That
+/// sub-pixel is MMPX's where the pixel shows HD art, not always the game's colour: it serves
+/// comparisons of frames with each other (a scroll, a change); a check of the game's colours
+/// reads the game's RGBA frame (`Game.frame_rgba`) instead.
 export function frame(page) {
   return page.evaluate(() => {
     const c = document.getElementById('screen');

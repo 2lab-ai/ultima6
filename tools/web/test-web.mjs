@@ -11,8 +11,9 @@
 // control (spec 06: the steps follow the clock on a virtual 60 Hz and 144 Hz display and on
 // the real one, the speed keys and the keys the game keeps, the badge, the buttons, the stored
 // choice, a held press at 1x whatever the speed, the music above 4x, a frame converted and
-// drawn only when it changed). Most tests start `game` at once (harness `gameFirst`); the
-// launcher tests run the page as it is.
+// drawn only when it changed), and HD (spec 07: the switch and its storage, the S× canvas and
+// its scaling, the pointer, the MMPX notice the site ships, the performance baseline). Most
+// tests start `game` at once (harness `gameFirst`); the launcher tests run the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. The game is read once it reached what a check asserts, by its own signals (the
 // prompt, the key queue, the program, its ticks: the page's fixed steps of 20 ms), never after a
@@ -22,7 +23,8 @@
 //
 //   node tools/web/test-web.mjs [name-filter]      (build first: bash scripts/build-web.sh)
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import * as h from './harness.mjs';
 
 const MARKER = { name: 'port-test-marker.txt', text: 'not a game file' };
@@ -2001,8 +2003,12 @@ const hdShown = (page) => page.evaluate(() => {
     height: c.height,
     box: [Math.round(box.width), Math.round(box.height)],
     stored,
+    rendering: getComputedStyle(c).imageRendering,
   };
 });
+
+// The stylesheet's sharp scaling (pixelated, or crisp-edges where the browser takes it).
+const SHARP = ['pixelated', 'crisp-edges'];
 
 // Page init script: the media queries the page makes, in `window.__mediaQueries`.
 function watchMedia() {
@@ -2039,6 +2045,7 @@ test('HD: on by default and kept across a reload; the button switches it at once
   let shown = await hdShown(page);
   assert.ok(shown.pressed === 'true' && shown.stored === null, 'on by default, nothing stored');
   assert.ok(shown.width === 1280 && shown.height === 800, 'S 4: the box holds 3 device pixels per game pixel');
+  assert.ok(shown.box[0] < 1280 && shown.rendering === 'auto', 'more canvas pixels than box pixels: smooth');
   assert.ok(await canvasShowsGame(page), 'the canvas is the HD frame');
   const box = shown.box;
   // The switch on a frozen display: the canvas changes with no frame of the game run.
@@ -2049,6 +2056,7 @@ test('HD: on by default and kept across a reload; the button switches it at once
   shown = await hdShown(page);
   assert.ok(shown.pressed === 'false' && shown.stored === 'off', 'off, stored');
   assert.ok(shown.width === 320 && shown.height === 200, 'off: 320 x 200');
+  assert.ok(SHARP.includes(shown.rendering), 'off: sharp');
   assert.deepEqual(shown.box, box, 'the same box');
   assert.ok(await canvasShowsGame(page), 'off: the RGBA frame, byte for byte');
   await press();
@@ -2081,6 +2089,7 @@ test('HD: on by default and kept across a reload; the button switches it at once
   await page.waitForFunction(() => document.getElementById('screen').width === 640, null, { timeout: 10_000 });
   shown = await hdShown(page);
   assert.ok(shown.height === 400 && shown.box[0] < 960, 'S 2 in a smaller box');
+  assert.ok(shown.box[0] >= 640 && SHARP.includes(shown.rendering), 'S 2, a larger box: sharp');
   await h.waitFrames(page, 2);
   assert.ok(await canvasShowsGame(page), 'S 2: the HD frame');
   // The same box on a display of twice the pixel ratio (the window moved to another screen):
@@ -2099,6 +2108,7 @@ test('HD: on by default and kept across a reload; the button switches it at once
   assert.equal(fired, 1, 'the page watches one pixel-ratio query');
   await page.waitForFunction(() => document.getElementById('screen').width === 1280, null, { timeout: 10_000 });
   assert.deepEqual((await hdShown(page)).box, shown.box, 'the same box');
+  assert.ok(SHARP.includes((await hdShown(page)).rendering), 'S 4 in a box of more device pixels: sharp');
   await h.waitFrames(page, 2);
   assert.ok(await canvasShowsGame(page), 'the pixel ratio doubled: S 4');
   // Back to the first display: the query the page armed for the new ratio fires, S 2 again.
@@ -2114,10 +2124,30 @@ test('HD: on by default and kept across a reload; the button switches it at once
   assert.deepEqual((await hdShown(page)).box, shown.box, 'the same box');
   await h.waitFrames(page, 2);
   assert.ok(await canvasShowsGame(page), 'the pixel ratio back: S 2');
+  assert.ok(SHARP.includes((await hdShown(page)).rendering), 'back: sharp');
   await cdp.send('Emulation.clearDeviceMetricsOverride');
   assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP violation');
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
+
+test('the MMPX notice ships with the site: NOTICE.txt is the repository\'s NOTICE, as text, linked from the HD paragraph', async (env) => {
+  const { page } = await h.openPage(env, { gated: false });
+  await h.load(page, env);
+  const served = await page.request.get(`${env.server.url}NOTICE.txt`);
+  assert.equal(served.status(), 200);
+  assert.match(served.headers()['content-type'], /^text\/plain/);
+  const repo = await readFile(join(h.REPO, 'NOTICE'));
+  assert.ok(Buffer.from(await served.body()).equals(repo), 'the repository\'s NOTICE, byte for byte');
+  const text = repo.toString('utf8');
+  for (const part of ['MMPX', 'Copyright 2020 Morgan McGuire & Mara Gagiu', 'Permission is hereby granted, free of charge']) {
+    assert.ok(text.includes(part), `the notice holds: ${part}`);
+  }
+  const link = await page.evaluate(() => {
+    const a = document.querySelector('#hd-credits a[href="NOTICE.txt"]');
+    return a ? new URL(a.href).pathname : null;
+  });
+  assert.equal(link, '/NOTICE.txt', 'linked from the HD paragraph');
+});
 
 // Page init script: every read and write of the page's storage throws (a browser that refuses
 // it), and the page's media queries are kept (`watchMedia`).
@@ -2213,7 +2243,9 @@ function timeHdFrames() {
 const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
 
 // The H1 no-pack baseline: MMPX for every image. Spec 07 Acceptance 5 with the owner's full
-// pack loaded is H2's receipt.
+// pack loaded is H2's receipt. Not measured here: a change of the palette (the opening's fades)
+// runs MMPX again on every image shown, since an HD image is made in the frame's colours; the
+// fades lie outside Acceptance 5's walk, and in `game` the palette does not change.
 test('HD performance, H1 no-pack baseline (spec 07 Acceptance 5 with a full pack is H2\'s): a walk in the castle at 4x on the real display, the present and the canvas draw per display frame at S 4 and S 2: median at most 4 ms, p95 at most 8 ms (receipt)', async (env) => {
   const { context, page } = await h.openPage(env);
   await context.addInitScript(timeHdFrames);
@@ -2255,6 +2287,7 @@ test('HD performance, H1 no-pack baseline (spec 07 Acceptance 5 with a full pack
     assert.ok(p95 <= 8, `S ${s}: p95 at most 8 ms`);
   }
   for (const r of receipts) console.log(`  receipt: ${r}`);
+  console.log('  receipt: note: a palette change (the opening\'s fades) runs MMPX again on every image shown; fades are outside this walk');
 }, { needs: h.haveZip });
 
 const filter = process.argv[2];

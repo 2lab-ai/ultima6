@@ -249,6 +249,14 @@ int main() {
                     c[(m & 2 ? 4 - y : y) * 5 + (m & 1 ? 4 - x : x)] = corner[y * 5 + x];
             emit(names[m], 5, 5, 2, p5, c);
         }
+        // The guard of the second group of 2:1 rules (F != D): a two-colour witness whose
+        // output a port without the guard changes.
+        emit("guard-f-ne-d", 3, 5, 2, p2, {
+            1, 1, 0,
+            1, 0, 1,
+            1, 0, 1,
+            0, 1, 0,
+            0, 1, 1});
     }
     struct Spec { const char* tag; int w, h, s; const std::vector<uint32_t>* pal; int pl, pu, pd; };
     const Spec specs[] = {

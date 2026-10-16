@@ -41,7 +41,8 @@
 // tile, a portrait or a panel picture are MMPX-magnified, computed in this browser from the
 // user's own files; text and everything drawn directly are the classic pixels scaled. Off, the
 // canvas is the 320 × 200 frame as before. The pointer maps onto the game's 320 × 200 pixels
-// either way.
+// either way. The canvas is scaled into its box pixelated, or smoothly when the HD frame has
+// more device pixels than the box.
 import init, {
   Game, budget_ms, input_too_large, max_input_bytes, max_save_bytes, max_save_file_bytes, step_ms,
   zip_sliced,
@@ -450,6 +451,7 @@ function draw() {
     canvas.width = w;
     canvas.height = h;
     drawnGame = null; // the resize cleared it
+    fitRendering(hd);
   }
   const over = hd && drawnHd && game === drawnGame;
   drawnGame = game;
@@ -497,12 +499,25 @@ function showHd() {
   hdButton.setAttribute('aria-pressed', String(hdOn));
 }
 
+// How the browser scales the canvas into its box: pixelated (each canvas pixel a sharp block)
+// by the stylesheet, but smooth when the HD frame has more device pixels than the box (S 4 in
+// a box of 3 to 4 device pixels per game pixel): pixelated would drop one HD row and column in
+// four there.
+function fitRendering(hd) {
+  const box = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const down = canvas.width > box.width * dpr || canvas.height > box.height * dpr;
+  const want = hd && down ? 'auto' : '';
+  if (canvas.style.imageRendering !== want) canvas.style.imageRendering = want;
+}
+
 // The game on screen shows HD as chosen, at the scale for the box now, drawn at once with no
 // new game frame (the canvas takes the size of the frame it shows: `draw`).
 function applyHd() {
   if (!game || crashed) return;
   game.set_hd(hdOn, hdScale());
   draw();
+  fitRendering(game.hd_on());
 }
 
 function toggleHd() {
