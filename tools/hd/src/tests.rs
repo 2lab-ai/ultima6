@@ -2849,18 +2849,20 @@ fn a_run_makes_at_most_four_calls_at_once() {
 
 #[test]
 fn a_turn_of_drain_is_bounded_whatever_the_pipe_holds() {
+    use std::cell::Cell;
     use std::time::{Duration, Instant};
     /// A pipe that always has `each` bytes ready: never empty (no WouldBlock), never at its
-    /// end, until `cap` reads, then an end, so a drain that is not bounded ends too.
-    struct Endless {
+    /// end, until `cap` reads, then an end, so a drain that is not bounded ends too. The count
+    /// of reads lives outside, so it is still there when the drain drops a pipe at its end.
+    struct Endless<'a> {
         each: usize,
-        reads: usize,
+        reads: &'a Cell<usize>,
         cap: usize,
     }
-    impl std::io::Read for Endless {
+    impl std::io::Read for Endless<'_> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.reads += 1;
-            if self.reads > self.cap {
+            self.reads.set(self.reads.get() + 1);
+            if self.reads.get() > self.cap {
                 return Ok(0);
             }
             let n = self.each.min(buf.len());
@@ -2870,19 +2872,21 @@ fn a_turn_of_drain_is_bounded_whatever_the_pipe_holds() {
     }
     let until = Instant::now() + Duration::from_secs(60);
     for each in [1, 100, 8192, 1 << 20] {
+        let reads = Cell::new(0);
         let mut pipe = Some(Endless {
             each,
-            reads: 0,
+            reads: &reads,
             cap: 100_000,
         });
         let mut got = 0;
         let start = Instant::now();
         assert!(run::drain(&mut pipe, until, |b| got += b.len()).is_none());
-        let reads = pipe.as_ref().map_or(usize::MAX, |p| p.reads);
         // One turn: at most TURN_CALLS reads and TURN_BYTES bytes, the pipe still open.
+        let (reads, open) = (reads.get(), pipe.is_some());
         assert!(
-            reads <= run::TURN_CALLS,
-            "{each}-byte reads: {reads} in one turn"
+            reads <= run::TURN_CALLS && open,
+            "{each}-byte reads: {reads} in one turn, the pipe {}",
+            if open { "open" } else { "read to its end" }
         );
         assert!(
             got <= run::TURN_BYTES,
@@ -2891,11 +2895,12 @@ fn a_turn_of_drain_is_bounded_whatever_the_pipe_holds() {
         assert!(start.elapsed() < Duration::from_secs(1));
     }
     // A turn whose time is up reads nothing.
+    let reads = Cell::new(0);
     let mut pipe = Some(Endless {
         each: 8,
-        reads: 0,
+        reads: &reads,
         cap: 10,
     });
     assert!(run::drain(&mut pipe, Instant::now(), |_| {}).is_none());
-    assert_eq!(pipe.map(|p| p.reads), Some(0));
+    assert_eq!((reads.get(), pipe.is_some()), (0, true));
 }
