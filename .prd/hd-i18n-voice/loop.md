@@ -17,9 +17,9 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 
 Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 5 (what H0 and H3 measured), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
-Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening) and H1 (the HD compositor, MMPX at 2× or 4×, on by default) are in production (2ae0a36c at main 2257e21). In flight:
-- H3, the pack format and imagegen tool: rounds 11–12 approved, round 13 closes three small test items; then the merge gate with main.
-Next: H4 (run the tool on the owner's files) and H2 (the page loads the pack), both after H3.
+Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening), H1 (the HD compositor, MMPX at 2× or 4×, on by default) and H3 (the pack format and the imagegen tool) are in production (80cdffb2 at main 8826434). In flight:
+- H2, the page loads the pack (branch `feat/h2-pack-load`);
+- H4, the dispatcher runs the tool on the owner's files (portraits first).
 
 ## Order, and why it differs from the user's numbering
 
@@ -35,7 +35,6 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 | Unit | Spec | Scope | Needs |
 |---|---|---|---|
 | H2 | 07 | the page loads a pack through `u6-hdpack` (from H3): drop classification before `importFiles`, IndexedDB/forget, limits | H1, H3 |
-| H3 | 07 | `crates/u6-hdpack` (the pack format: writer, strict reader, limits, content hash) + the `tools/hd` binary: inventory/atlas/run(`--send`)/ingest/pack with the gates; synthetic tests; gate tuning on synthetic sheets | — (in parallel with H0) |
 | H4 | 07 | ops: run `tools/hd` on the owner's files with imagegen (portraits → bitmaps → terrain → actors), load the pack in the owner's browser, read the frames | H3 |
 | L1 | 08 | text path: `i32` chars, `u16` line and narrowing sites, UTF-8 assembler (invalid bytes pass), Hangul table, runic guard, cell padding, josa, `%1$s`, empty articles; the `u` program's text path by code point (1b) | — |
 | L2 | 08 | locale layer + run, table-string and outermost-print hooks + pack parser; identity-pack receipt with `wide` on | L1, L3 |
