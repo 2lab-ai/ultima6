@@ -894,11 +894,20 @@ fn the_probe_tells_a_pack_from_its_directory_and_manifest() {
     assert_eq!(manifest_range(&pack).0, 0);
     // Its entries deflated (the owner zipped it again): still a pack.
     assert_eq!(probe(&redeflated(&pack, "", |n| n as u32)).0, Some(""));
-    // A zip of game-like files: the end of it only. One whose manifest parses as JSON that is
-    // not an object whose format is the pack's (another format, a web manifest naming the
-    // format elsewhere, no format at all while mentioning it, a format that is not a string,
-    // not an object), or does not parse and declares no format: not a pack, whatever it
-    // mentions.
+    // The key written as a JSON escape is the same key: a pack.
+    let escaped = with_file(&pack, "manifest.json", |b| {
+        let text = String::from_utf8(b.clone()).unwrap();
+        assert!(text.contains("\"format\""));
+        *b = text
+            .replacen("\"format\"", "\"\\u0066ormat\"", 1)
+            .into_bytes();
+    });
+    assert_eq!(probe(&escaped).0, Some(""));
+    assert!(read_pack(&escaped).is_ok());
+    // A zip of game-like files: the end of it only. One whose manifest is not a JSON object
+    // whose root format is the pack's (another format, one that only starts like it, a web
+    // manifest naming the format elsewhere, the format named deeper in it, no format while
+    // mentioning it, a format that is not a string, not an object, not JSON): not a pack.
     let other = rezip(&[
         ("game".into(), vec![1; 300]),
         ("Disk 1.adf".into(), vec![2; 900]),
@@ -906,7 +915,9 @@ fn the_probe_tells_a_pack_from_its_directory_and_manifest() {
     assert_eq!(probe(&other), (None, vec![tail(&other)]));
     for m in [
         &br#"{"format": "webmanifest"}"#[..],
+        br#"{"format": "u6-hdpack/10"}"#,
         br#"{"format": "webmanifest", "note": "u6-hdpack/1"}"#,
+        br#"{"a": {"format": "u6-hdpack/1"}}"#,
         br#"{"name": "game", "description": "supports u6-hdpack/1"}"#,
         br#"{"format": 1}"#,
         br#"["u6-hdpack/1"]"#,
@@ -934,14 +945,13 @@ fn the_probe_tells_a_pack_from_its_directory_and_manifest() {
     assert_eq!(p.is_pack(), Some(false));
 }
 
-/// Spec 07 H2's policy for a zip whose manifest says it is a pack but does not read: it is taken
-/// for one and refused (not imported): a manifest whose CRC-32 is wrong while its stored data is
-/// an object whose format is the pack's, one cut short or not JSON that declares the format (a
-/// `"format"` key with the pack's value, whitespace between), one over the reader's limit,
-/// beside game files. One whose data parses as JSON without the pack's format, one that
-/// declares nothing, and a deflated one (looked at as stored) are not a pack's.
+/// Spec 07 H2's rule for a manifest that does not read or parse: not a pack, so the zip goes to
+/// the import (which takes only disk images): a manifest with a wrong CRC-32 (one of the pack's
+/// format included), cut short, a bare declaration that is not JSON, the format named deeper in
+/// it, no format while mentioning it, over the reader's limit (not read at all), deflated and
+/// broken; beside disk images and alone.
 #[test]
-fn a_manifest_that_names_the_format_but_does_not_read_is_a_pack_refused() {
+fn a_manifest_that_does_not_read_or_parse_is_not_a_pack() {
     let disks = |manifest: Raw| {
         zip_of(&[
             Raw::stored("Ultima VI Disk 1.adf", &[1; 900]),
@@ -949,88 +959,123 @@ fn a_manifest_that_names_the_format_but_does_not_read_is_a_pack_refused() {
             Raw::stored("Ultima VI Disk 2.adf", &[2; 700]),
         ])
     };
-    let claim = br#"{"format": "u6-hdpack/1", "tile": 16"#;
-    let bare = b"\"format\" :\n \"u6-hdpack/1\", \"tile\": 16";
-    let mut bad_crc = Raw::stored("manifest.json", br#"{"format": "u6-hdpack/1"}"#);
-    bad_crc.crc ^= 1;
-    for (what, m, why) in [
-        ("a wrong CRC-32", bad_crc, "zip"),
-        ("cut short", Raw::stored("manifest.json", claim), "manifest"),
-        ("not JSON", Raw::stored("manifest.json", bare), "manifest"),
-        (
-            "over the limit",
-            Raw::stored(
-                "manifest.json",
-                &[claim.as_slice(), &vec![b' '; MAX_MANIFEST as usize]].concat(),
-            ),
-            "limit",
-        ),
-    ] {
-        let z = disks(m);
-        let (told, reads) = probe(&z);
-        // The directory is the pack's too: the disk images are not entries a pack has.
-        assert_eq!(
-            told,
-            Some("entry"),
-            "{what}: a pack, refused by its directory first"
-        );
-        let (start, end) = manifest_range(&z);
-        assert_eq!(
-            reads,
-            [tail(&z), (start, end.min(start + MAX_MANIFEST_RANGE))],
-            "{what}"
-        );
-        // Alone (no other entry), the manifest's own refusal.
-        let alone = zip_of(&[match what {
-            "a wrong CRC-32" => {
-                let mut r = Raw::stored("manifest.json", br#"{"format": "u6-hdpack/1"}"#);
-                r.crc ^= 1;
-                r
-            }
-            "cut short" => Raw::stored("manifest.json", claim),
-            "not JSON" => Raw::stored("manifest.json", bare),
-            _ => Raw::stored(
-                "manifest.json",
-                &[claim.as_slice(), &vec![b' '; MAX_MANIFEST as usize]].concat(),
-            ),
-        }]);
-        assert_eq!(probe(&alone).0, Some(why), "{what}, alone");
-        assert!(
-            read_pack(&alone).is_err(),
-            "{what}: the reader refuses it too"
-        );
-    }
-    // A manifest beside the disk images, readable or broken, whose data parses as an object
-    // without the pack's format (though it mentions it) or declares nothing: not a pack, the
-    // zip goes to the import as before.
-    for m in [
-        &br#"{"name": "a game"}"#[..],
-        br#"{"name": "game", "description": "supports u6-hdpack/1"}"#,
-        b"u6-hdpack/1 manifest",
-    ] {
-        let mut quiet = Raw::stored("manifest.json", m);
-        assert_eq!(
-            probe(&disks(quiet.clone())).0,
-            None,
-            "{}",
-            String::from_utf8_lossy(m)
-        );
-        quiet.crc ^= 1;
-        assert_eq!(
-            probe(&disks(quiet)).0,
-            None,
-            "{}, broken",
-            String::from_utf8_lossy(m)
-        );
-    }
-    // Deflated and broken: looked at as stored, not a pack.
-    let mut deflated = Raw::deflated("manifest.json", br#"{"format": "u6-hdpack/1"}"#, 24);
+    let bad = |m: &[u8]| {
+        let mut r = Raw::stored("manifest.json", m);
+        r.crc ^= 1;
+        r
+    };
+    let format = br#"{"format": "u6-hdpack/1"}"#;
+    let nested = br#"{"a": {"format": "u6-hdpack/1"}}"#;
+    let over = [
+        br#"{"format": "u6-hdpack/1"}"#.as_slice(),
+        &vec![b' '; MAX_MANIFEST as usize],
+    ]
+    .concat();
+    let mut deflated = Raw::deflated("manifest.json", format, format.len() as u32);
     deflated.crc ^= 1;
-    assert_eq!(probe(&disks(deflated)).0, None);
+    let cases: Vec<(&str, Raw, bool)> = vec![
+        ("the format, a wrong CRC-32", bad(format), true),
+        (
+            "cut short",
+            Raw::stored("manifest.json", br#"{"format": "u6-hdpack/1", "tile": 16"#),
+            true,
+        ),
+        (
+            "a bare declaration",
+            Raw::stored("manifest.json", b"\"format\": \"u6-hdpack/1\""),
+            true,
+        ),
+        ("named deeper", Raw::stored("manifest.json", nested), true),
+        ("named deeper, a wrong CRC-32", bad(nested), true),
+        (
+            "mentioned",
+            Raw::stored("manifest.json", br#"{"description": "u6-hdpack/1"}"#),
+            true,
+        ),
+        (
+            "mentioned, a wrong CRC-32",
+            bad(br#"{"description": "u6-hdpack/1"}"#),
+            true,
+        ),
+        ("over the limit", Raw::stored("manifest.json", &over), false),
+        ("deflated, a wrong CRC-32", deflated, true),
+    ];
+    for (what, m, read) in cases {
+        for (z, beside) in [
+            (disks(m.clone()), "beside the disks"),
+            (zip_of(std::slice::from_ref(&m)), "alone"),
+        ] {
+            let (told, reads) = probe(&z);
+            assert_eq!(told, None, "{what}, {beside}: not a pack");
+            let want = if read {
+                vec![tail(&z), manifest_range(&z)]
+            } else {
+                vec![tail(&z)]
+            };
+            assert_eq!(reads, want, "{what}, {beside}: the ranges read");
+        }
+    }
 }
 
-/// The probe's reads are bounded by what it asks for: a stored manifest holding 1 MiB that
-/// declares 100 bytes unpacked is read only up to [`MAX_MANIFEST_RANGE`] of its range; a
+/// A manifest whose local header carries an extra field (its length above 0, which the central
+/// record does not have) reads as it would without one: the pack is a pack, and reads.
+#[test]
+fn a_manifest_with_a_local_extra_field_reads() {
+    let files = files_of(&written());
+    let extra = [0x55u8, 0x54, 4, 0, 1, 2, 3, 4];
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in &files {
+        let at = out.len() as u32;
+        let local_extra: &[u8] = if name == "manifest.json" { &extra } else { &[] };
+        let head = |extra_len: u16| {
+            let mut h = Vec::new();
+            for v in [20u16, 0, 0, 0, 0x21] {
+                h.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in [crc32fast::hash(data), data.len() as u32, data.len() as u32] {
+                h.extend_from_slice(&v.to_le_bytes());
+            }
+            h.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            h.extend_from_slice(&extra_len.to_le_bytes());
+            h
+        };
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&head(local_extra.len() as u16));
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(local_extra);
+        out.extend_from_slice(data);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&head(0));
+        central.extend_from_slice(&[0; 10]);
+        central.extend_from_slice(&at.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let cd = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    let n = files.len() as u16;
+    for v in [0u16, 0, n, n] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&cd.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    assert_eq!(
+        &out[28..30],
+        &(extra.len() as u16).to_le_bytes(),
+        "the manifest's extra length"
+    );
+    let (told, reads) = probe(&out);
+    assert_eq!(told, Some(""), "a pack");
+    assert_eq!(reads, [tail(&out), manifest_range(&out)]);
+    assert!(read_pack(&out).is_ok(), "and the reader reads it");
+}
+
+/// The probe's reads are bounded by what it asks for: a manifest over the reader's limits (a
+/// stored one holding 1 MiB, though it declares 100 bytes; a deflated one declaring 100 bytes
+/// whose data runs on for 1 MiB) is not read at all, and is not a pack's; a
 /// directory starting more than 16 MiB before the end, or an entry whose local header lies past
 /// the file, is refused from the end read first; a directory that starts before the end read is
 /// read from where it starts.
@@ -1045,15 +1090,13 @@ fn the_probe_reads_only_the_ranges_it_names() {
     let z = zip_of(&[huge]);
     let (start, end) = manifest_range(&z);
     assert!(end - start > 1 << 20, "its range holds the 1 MiB");
-    let (told, reads) = probe(&z);
-    assert_eq!(reads, [tail(&z), (start, start + MAX_MANIFEST_RANGE)]);
     assert_eq!(
-        told,
-        Some("limit"),
-        "it declares the format: a pack, over the limit"
+        probe(&z),
+        (None, vec![tail(&z)]),
+        "over the limit: not read, not a pack"
     );
     // Deflated, declaring 100 bytes unpacked (within the limit) while its data runs on for
-    // 1 MiB: its range is past what is read, so it is over the limit too (not read as an entry).
+    // 1 MiB: its range is past what is read, so it is over the limit too (not read at all).
     let data = [br#"{"format": "u6-hdpack/1"}"#.as_slice(), &[b' '; 1 << 20]].concat();
     let long = Raw {
         name: "manifest.json".into(),
@@ -1066,9 +1109,11 @@ fn the_probe_reads_only_the_ranges_it_names() {
     let z = zip_of(&[long]);
     let (start, end) = manifest_range(&z);
     assert!(end - start > MAX_MANIFEST_RANGE);
-    let (told, reads) = probe(&z);
-    assert_eq!(reads, [tail(&z), (start, start + MAX_MANIFEST_RANGE)]);
-    assert_eq!(told, Some("limit"), "its range is over the limit");
+    assert_eq!(
+        probe(&z),
+        (None, vec![tail(&z)]),
+        "its range over the limit: not read"
+    );
     // A directory over the 16 MiB cap: its end record names it 17 MiB before the end.
     let mut far = vec![0u8; 17 << 20];
     far.extend_from_slice(&0x0605_4b50u32.to_le_bytes());

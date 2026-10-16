@@ -59,7 +59,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use probe::{MAX_MANIFEST_RANGE, Probe, is_manifest};
+pub use probe::{MAX_MANIFEST_RANGE, Probe};
 
 /// The manifest's `format`.
 pub const FORMAT: &str = "u6-hdpack/1";
