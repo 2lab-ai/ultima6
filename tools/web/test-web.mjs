@@ -2859,7 +2859,7 @@ test('HD pack: a new pack the browser cannot keep (its put throws at once, or it
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
 
-test('HD pack: a zip of the owner\'s disk images with a manifest.json that mentions the pack format without declaring it (no format) starts the game as before; that manifest on its own goes to the import too, not refused as a pack', async (env) => {
+test('HD pack: a zip of the owner\'s disk images with a manifest.json that only mentions the pack format (its root format is not the pack\'s: it has none) starts the game as before; that manifest on its own goes to the import too, not refused as a pack', async (env) => {
   const foreign = [];
   const { context, page } = await h.openPage(env);
   context.on('request', (r) => {
