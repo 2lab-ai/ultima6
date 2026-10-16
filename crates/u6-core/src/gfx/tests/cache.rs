@@ -350,3 +350,55 @@ fn an_overlay_written_in_a_clone_is_caught() {
     }
     crate::gfx::refresh_view(&mut copy, &io);
 }
+
+/// Spec 07 HD0: recorded sources share an allocation only with earlier ones of the same hash and
+/// the same contents (the newest such), never on a hash alone (two contents given one hash stay
+/// apart) and never with sources kept without one (the block under a flight sprite).
+#[test]
+fn sources_share_on_equal_contents_after_equal_hashes() {
+    use crate::gfx::cache::Sources;
+    use std::rc::Rc;
+    use u6_render::{Kind, Src};
+    let of = |ids: &[u16]| {
+        let src = ids.iter().map(|&id| Src {
+            id,
+            kind: Kind::Tile,
+            ..Src::CLASSIC
+        });
+        Sources::new(Some(src.collect()))
+    };
+    let one = |a: &Sources, b: &Sources| Rc::ptr_eq(a.0.as_ref().unwrap(), b.0.as_ref().unwrap());
+    let (a, b) = (of(&[1, 2, 3]).hashed(), of(&[1, 2, 4]).hashed());
+    assert!(
+        a.1.is_some() && a.1 != b.1,
+        "other contents, another hash here"
+    );
+    let again = of(&[1, 2, 3]).hashed();
+    let newer = of(&[1, 2, 3]).hashed();
+    let shared = again.clone().shared([&newer, &b, &a]);
+    assert!(
+        one(&shared, &newer) && !one(&shared, &a),
+        "the newest equal one"
+    );
+    assert!(!one(&again.clone().shared([&b]), &b), "other contents");
+    let mut forged = b.clone();
+    forged.1 = a.1;
+    assert!(
+        !one(&again.clone().shared([&forged]), &forged),
+        "one hash, other contents"
+    );
+    let plain = of(&[1, 2, 3]);
+    assert!(
+        plain.1.is_none() && !one(&again.clone().shared([&plain]), &plain),
+        "no hash"
+    );
+    assert!(
+        !one(&of(&[1, 2, 3]).shared([&a]), &a),
+        "nor without its own hash"
+    );
+    let none = Sources::default().hashed().shared([&a]);
+    assert!(
+        none.0.is_none() && none.1.is_none(),
+        "no sources, nothing shared"
+    );
+}

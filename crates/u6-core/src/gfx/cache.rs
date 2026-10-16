@@ -31,11 +31,13 @@
 //! ([`RenderCache::record_changed`]).
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::rc::Rc;
 
 use super::GfxState;
 use super::view::{ViewWindow, WINDOW_TILES};
 use crate::state::State;
 use u6_formats::gfx::{ANIM_FRAMES, TILE_COUNT, TILE_H, TILE_W};
+use u6_render::Src;
 
 /// Boxes of the window: its cells.
 pub(super) const BOXES: usize = WINDOW_TILES * WINDOW_TILES;
@@ -103,10 +105,15 @@ impl RenderCache {
 /// flight sprite, a recorded frame), so that pixels put back name their images again. Not game
 /// state: equal whatever it holds (a run with the source plane and one without are the same
 /// `State`); `None` when the buffer they came from had no plane. Shared: a clone, and a recorded
-/// frame whose sources are the frame's before it ([`crate::combat::present`]), hold the same
-/// allocation; a write copies a shared one first ([`std::rc::Rc::make_mut`]).
+/// frame whose sources are those of a frame recorded before it and not played yet
+/// ([`Sources::shared`]), hold the same allocation; a write copies a shared one first
+/// ([`std::rc::Rc::make_mut`]).
+///
+/// The second field is the hash of the sources ([`Sources::hashed`]) for those kept as they were
+/// taken (a recorded frame), `None` for those written in place (the block under a flight
+/// sprite): a write would leave it stale.
 #[derive(Clone, Debug, Default)]
-pub struct Sources(pub Option<std::rc::Rc<[u6_render::Src]>>);
+pub struct Sources(pub Option<Rc<[Src]>>, pub(crate) Option<u64>);
 
 impl PartialEq for Sources {
     fn eq(&self, _: &Self) -> bool {
@@ -117,10 +124,61 @@ impl PartialEq for Sources {
 impl Eq for Sources {}
 
 impl Sources {
+    /// Sources taken from a buffer, without their hash.
+    pub fn new(src: Option<Vec<Src>>) -> Sources {
+        Sources(src.map(Rc::from), None)
+    }
+
     /// The source at `i`, if there are sources.
-    pub fn at(&self, i: usize) -> Option<u6_render::Src> {
+    pub fn at(&self, i: usize) -> Option<Src> {
         self.0.as_ref().and_then(|s| s.get(i).copied())
     }
+
+    /// The same sources with their hash, to be kept as they are.
+    pub fn hashed(self) -> Sources {
+        let hash = self.0.as_deref().map(hash_of);
+        Sources(self.0, hash)
+    }
+
+    /// These sources ([`Sources::hashed`]) in the allocation of the first of `earlier` whose
+    /// sources are equal, if any, else in their own. Only sources of the same hash are compared,
+    /// so the frames waiting to be played back hold one allocation per distinct sources at the
+    /// cost of one hash per frame recorded.
+    pub fn shared<'a>(self, earlier: impl IntoIterator<Item = &'a Sources>) -> Sources {
+        let (Some(new), Some(hash)) = (&self.0, self.1) else {
+            return self;
+        };
+        let same = |old: &&Sources| {
+            old.1 == Some(hash) && old.0.as_ref().is_some_and(|o| o[..] == new[..])
+        };
+        match earlier.into_iter().find(same) {
+            Some(old) => old.clone(),
+            None => self,
+        }
+    }
+}
+
+/// A hash of `src`: FxHash's multiply and rotate over one word of each source's fields, in four
+/// lanes (a frame's 30,976 sources hash in tens of microseconds).
+fn hash_of(src: &[Src]) -> u64 {
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mix = |h: u64, w: u64| (h.rotate_left(5) ^ w).wrapping_mul(K);
+    let word = |s: &Src| {
+        let a = u64::from(s.ver) | u64::from(s.id) << 32 | u64::from(s.u) << 48;
+        let b = u64::from(s.v) | u64::from(s.kind as u8) << 16 | u64::from(s.flags) << 24;
+        a ^ b.rotate_left(23)
+    };
+    let mut lanes = [src.len() as u64, 1, 2, 3];
+    let (quads, rest) = src.as_chunks::<4>();
+    for quad in quads {
+        for (h, s) in lanes.iter_mut().zip(quad) {
+            *h = mix(*h, word(s));
+        }
+    }
+    for (h, s) in lanes.iter_mut().zip(rest) {
+        *h = mix(*h, word(s));
+    }
+    lanes.into_iter().fold(0, mix)
 }
 
 /// A window render: what it read, and the back buffer it drew into as it stood after its
