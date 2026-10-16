@@ -47,12 +47,21 @@ fn none_eq4(b: u32, a0: u32, a1: u32, a2: u32, a3: u32) -> bool {
     b != a0 && b != a1 && b != a2 && b != a3
 }
 
+/// The largest image [`mmpx2x`] takes: the screen at 2× (the second pass of a 4× magnification
+/// of a screen-sized image, the largest the compositor gives, [`super::Image`]). The bound keeps
+/// every size and coordinate below in range.
+pub const MAX_2X: (usize, usize) = (2 * crate::WIDTH, 2 * crate::HEIGHT);
+
 /// `src` (`w` × `h` words, row-major) magnified 2× into `dst`, which is resized to `2w × 2h`.
 /// Samples past the image take the nearest border pixel. An empty image gives an empty one.
+///
+/// Panics for an image past [`MAX_2X`] or smaller than `w` × `h` words.
 pub fn mmpx2x(src: &[u32], w: usize, h: usize, dst: &mut Vec<u32>) {
-    assert!(src.len() >= w * h, "an image smaller than {w}x{h}");
+    assert!(w <= MAX_2X.0 && h <= MAX_2X.1, "an image past {MAX_2X:?}");
+    let n = w.checked_mul(h).expect("bounded above");
+    assert!(src.len() >= n, "an image smaller than {w}x{h}");
     dst.clear();
-    dst.resize(4 * w * h, 0);
+    dst.resize(n.checked_mul(4).expect("bounded above"), 0);
     if w == 0 || h == 0 {
         return;
     }
@@ -185,7 +194,13 @@ pub fn mmpx2x(src: &[u32], w: usize, h: usize, dst: &mut Vec<u32>) {
 
 /// `src` (`w` × `h`) magnified by `scale` (2: MMPX once; 4: MMPX twice) into `dst`, which is
 /// resized to `scale·w × scale·h`.
+///
+/// Panics for an image past the screen ([`crate::WIDTH`] × [`crate::HEIGHT`]).
 pub fn mmpx(src: &[u32], w: usize, h: usize, scale: super::Scale, dst: &mut Vec<u32>) {
+    assert!(
+        w <= crate::WIDTH && h <= crate::HEIGHT,
+        "an image past the screen"
+    );
     match scale {
         super::Scale::X2 => mmpx2x(src, w, h, dst),
         super::Scale::X4 => {

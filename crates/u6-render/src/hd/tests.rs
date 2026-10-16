@@ -282,20 +282,27 @@ fn a_frame_without_a_plane_or_without_images_is_its_classic_pixels_scaled() {
     }
 }
 
+/// The index under a test tile's transparent pixels: its colour appears nowhere else.
+const UNDER_CLEAR: u8 = 200;
+
 #[test]
 fn a_current_unflagged_pixel_shows_its_block_of_the_hd_image() {
     let mut pics = Pics::default();
+    // Transparent outside a diamond (MMPX rounds its edges into the transparency) and on a
+    // diagonal lattice inside it.
     let mut clear = vec![false; 256];
     for (i, c) in clear.iter_mut().enumerate() {
-        *c = (i / 16 + i % 16) % 9 == 0; // a diagonal lattice of transparent pixels
+        let (r, col) = ((i / 16) as i32, (i % 16) as i32);
+        *c = (2 * r - 15).abs() + (2 * col - 15).abs() > 16 || (r + col) % 9 == 0;
     }
-    pics.put(
-        Kind::Tile,
-        5,
-        (16, 16),
-        art(5, 16, 16, 4),
-        Some(clear.clone()),
-    );
+    // Under each transparent pixel the record holds a colour of its own, which must never show.
+    let mut pixels = art(5, 16, 16, 4);
+    for (p, &c) in pixels.iter_mut().zip(&clear) {
+        if c {
+            *p = UNDER_CLEAR;
+        }
+    }
+    pics.put(Kind::Tile, 5, (16, 16), pixels, Some(clear.clone()));
     pics.put(Kind::Portrait, 0x6103, (56, 64), art(6, 56, 64, 6), None);
     pics.put(Kind::Bitmap, 1, (40, 30), art(7, 40, 30, 5), None);
     for scale in [Scale::X2, Scale::X4] {
@@ -308,7 +315,7 @@ fn a_current_unflagged_pixel_shows_its_block_of_the_hd_image() {
         let mut c = Compositor::new();
         c.compose(&fb, &mut pics.clone(), scale);
         let s = scale.factor();
-        let mut hd_blocks = 0;
+        let (mut hd_blocks, mut mixed) = (0, 0);
         for (kind, id, at, (w, h)) in [
             (Kind::Tile, 5, (16, 16), (16, 16)),
             (Kind::Portrait, 0x6103, (200, 20), (56, 64)),
@@ -327,67 +334,284 @@ fn a_current_unflagged_pixel_shows_its_block_of_the_hd_image() {
                         );
                         continue;
                     }
-                    let want: Vec<u32> = (0..s * s)
+                    let raw: Vec<u32> = (0..s * s)
                         .map(|k| hd[(v * s + k / s) * hw + u * s + k % s])
-                        .map(|c| if c == 0 { classic } else { c })
+                        .collect();
+                    let want: Vec<u32> = raw
+                        .iter()
+                        .map(|&c| if c == 0 { classic } else { c })
                         .collect();
                     assert!(got == want, "{kind:?} ({u}, {v}): its block");
                     hd_blocks += usize::from(got.iter().any(|&g| g != classic));
+                    // A block that takes the classic colour where MMPX left transparency and
+                    // the HD words elsewhere.
+                    let fallback = raw.iter().zip(&got).any(|(&r, &g)| r == 0 && g == classic);
+                    let opaque = raw.iter().zip(&got).any(|(&r, &g)| r != 0 && g == r);
+                    mixed += usize::from(fallback && opaque);
                 }
             }
         }
         assert!(hd_blocks > 50, "{s}x: MMPX changed blocks");
-        // A transparent pixel's colour (index 0 under it in the record) never shows in the tile.
-        let zero = word(fb.palette[0]);
         assert!(
-            (16..32).all(
-                |y| (16..32).all(|x| block(c.rgba(), scale, (x, y)).iter().all(|&g| g != zero))
-            )
+            mixed > 0,
+            "{s}x: a block with both transparent fallback and HD sub-pixels"
+        );
+        let under = word(fb.palette[usize::from(UNDER_CLEAR)]);
+        assert!(
+            fb.pixels().iter().all(|&p| p != UNDER_CLEAR),
+            "the colour under the transparency is on no screen pixel"
+        );
+        assert!(
+            c.rgba().iter().all(|&g| g != under),
+            "{s}x: and in no HD block"
         );
     }
 }
 
+/// Tile pixels whose block at `scale` is not their classic colour S × S (MMPX changed it), in
+/// raster order.
+fn reshaped(
+    c: &Compositor,
+    fb: &Framebuffer,
+    scale: Scale,
+    area: (usize, usize, usize, usize),
+) -> Vec<(usize, usize)> {
+    let (x0, y0, w, h) = area;
+    (y0..y0 + h)
+        .flat_map(|y| (x0..x0 + w).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+            block(c.rgba(), scale, (x, y)).iter().any(|&g| g != classic)
+        })
+        .collect()
+}
+
+/// A labelled change of a pixel's source.
+type Change = (&'static str, fn(Src) -> Src);
+
+/// Each kind of pixel shown classic, one at a time at a pixel whose block is HD before: the
+/// overlay and outline flags, a version not current, u or v past the image, an image the images
+/// do not have, a classic source. The colour stays; only that block changes, to the classic
+/// colour.
 #[test]
 fn classic_flagged_stale_and_unknown_pixels_are_their_classic_colour() {
     let mut pics = Pics::default();
     pics.put(Kind::Tile, 2, (16, 16), art(2, 16, 16, 3), None);
-    let mut fb = plane();
-    fb.palette = palette(1);
-    fb.clear(12);
-    draw(&mut fb, &pics, Kind::Tile, 2, (32, 32));
-    let px = |fb: &Framebuffer, x, y| fb.get(x, y).unwrap();
-    let cases = [
-        ((33, 33), tile(2, 0, (1, 1), FLAG_OVERLAY)),
-        ((34, 33), tile(2, 0, (2, 1), FLAG_OUTLINE)),
-        ((35, 33), tile(2, 1, (3, 1), 0)), // drawn at a version that is not current
-        ((36, 33), tile(2, 0, (16, 1), 0)), // outside the image
-        ((37, 33), tile(9, 0, (5, 1), 0)), // an image the images do not have
-        ((38, 33), Src::CLASSIC),
+    let mut base = plane();
+    base.palette = palette(1);
+    base.clear(12);
+    draw(&mut base, &pics, Kind::Tile, 2, (32, 32));
+    let cases: [Change; 8] = [
+        ("overlay", |s| Src {
+            flags: FLAG_OVERLAY,
+            ..s
+        }),
+        ("outline", |s| Src {
+            flags: FLAG_OUTLINE,
+            ..s
+        }),
+        ("stale", |s| Src {
+            ver: s.ver + 1,
+            ..s
+        }),
+        ("u past the image", |s| Src { u: 16, ..s }),
+        ("v past the image", |s| Src { v: 16, ..s }),
+        ("both past", |s| Src { u: 16, v: 16, ..s }),
+        ("an unknown image", |s| Src { id: 9, ..s }),
+        ("classic", |_| Src::CLASSIC),
     ];
-    for ((x, y), src) in cases {
-        let p = px(&fb, x, y);
-        fb.set_src(x, y, p, src);
-    }
     for scale in [Scale::X2, Scale::X4] {
         let mut c = Compositor::new();
-        c.compose(&fb, &mut pics.clone(), scale);
-        for ((x, y), _) in cases {
-            let classic = word(fb.palette[usize::from(px(&fb, x, y))]);
+        c.compose(&base, &mut pics.clone(), scale);
+        let before = c.rgba().to_vec();
+        let hd = reshaped(&c, &base, scale, (32, 32, 16, 16));
+        assert!(hd.len() >= cases.len(), "{scale:?}: enough HD blocks");
+        for ((what, change), &(x, y)) in cases.iter().zip(&hd) {
+            let classic = word(base.palette[usize::from(base.get(x, y).unwrap())]);
             assert!(
-                block(c.rgba(), scale, (x, y)).iter().all(|&g| g == classic),
-                "({x}, {y}): classic"
+                block(&before, scale, (x, y)).iter().any(|&g| g != classic),
+                "{what}: HD before"
             );
+            let mut fb = base.clone();
+            let src = change(fb.src_at(x, y).unwrap());
+            let p = fb.get(x, y).unwrap();
+            fb.set_src(x, y, p, src);
+            let mut kept = Compositor::new();
+            kept.compose(&base, &mut pics.clone(), scale);
+            kept.take_dirty();
+            kept.compose(&fb, &mut pics.clone(), scale);
+            assert_eq!(
+                kept.take_dirty(),
+                Some([x, y, 1, 1]),
+                "{what}: only its block"
+            );
+            for got in [kept.rgba(), fresh(&fb, &pics, scale).as_slice()] {
+                assert!(
+                    block(got, scale, (x, y)).iter().all(|&g| g == classic),
+                    "{what} ({x}, {y}): classic"
+                );
+                let (s, ow) = (scale.factor(), WIDTH * scale.factor());
+                let elsewhere = (0..got.len())
+                    .filter(|&i| (i % ow / s, i / ow / s) != (x, y))
+                    .all(|i| got[i] == before[i]);
+                assert!(elsewhere, "{what}: the other blocks as before");
+            }
         }
+    }
+}
+
+/// Changes one at a time over a kept compositor, each compared with a new compositor's frame:
+/// a pixel's source alone flagged then current again (its colour the same), the record
+/// rewritten with no pixel drawn (every pixel of it stale, classic) then drawn again at its new
+/// version, and a pixel naming a valid column but a row past the image.
+#[test]
+fn isolated_transitions_change_exactly_their_blocks() {
+    let mut pics = Pics::default();
+    pics.put(Kind::Tile, 2, (16, 16), art(2, 16, 16, 3), None);
+    let mut fb = plane();
+    fb.palette = palette(4);
+    fb.clear(12);
+    draw(&mut fb, &pics, Kind::Tile, 2, (64, 48));
+    for scale in [Scale::X2, Scale::X4] {
+        let mut c = Compositor::new();
+        let mut fb = fb.clone();
+        c.compose(&fb, &mut pics.clone(), scale);
+        c.take_dirty();
+        let first = c.rgba().to_vec();
+        let (x, y) = reshaped(&c, &fb, scale, (64, 48, 16, 16))[0];
+        let current = fb.src_at(x, y).unwrap();
+        let p = fb.get(x, y).unwrap();
+        let classic = word(fb.palette[usize::from(p)]);
+        let step = |c: &mut Compositor, fb: &Framebuffer, pics: &Pics, what: &str| {
+            c.compose(fb, &mut pics.clone(), scale);
+            assert!(
+                c.rgba() == fresh(fb, pics, scale).as_slice(),
+                "{what}: a new compositor's frame"
+            );
+            c.take_dirty()
+        };
+        fb.set_src(
+            x,
+            y,
+            p,
+            Src {
+                flags: FLAG_OVERLAY,
+                ..current
+            },
+        );
+        assert_eq!(step(&mut c, &fb, &pics, "flagged"), Some([x, y, 1, 1]));
+        assert!(block(c.rgba(), scale, (x, y)).iter().all(|&g| g == classic));
+        fb.set_src(x, y, p, current);
+        assert_eq!(
+            step(&mut c, &fb, &pics, "current again"),
+            Some([x, y, 1, 1])
+        );
+        assert!(c.rgba() == first.as_slice(), "the first frame again");
+        // The record rewritten in place: nothing drawn, every pixel of it now stale.
+        let mut pics = pics.clone();
+        pics.rewrite(Kind::Tile, 2, art(77, 16, 16, 3));
+        assert_eq!(step(&mut c, &fb, &pics, "stale"), Some([64, 48, 16, 16]));
+        let rgba = fb_rgba(&fb, scale);
+        assert!(
+            c.rgba() == rgba.as_slice(),
+            "stale: the classic frame scaled"
+        );
+        draw(&mut fb, &pics, Kind::Tile, 2, (64, 48));
+        assert_eq!(
+            step(&mut c, &fb, &pics, "drawn again"),
+            Some([64, 48, 16, 16])
+        );
         let (hw, hd) = hd_of(&pics, Kind::Tile, 2, &fb.palette, scale);
         let s = scale.factor();
         let want: Vec<u32> = (0..s * s)
-            .map(|k| hd[(4 * s + k / s) * hw + 4 * s + k % s])
+            .map(|k| hd[(3 * s + k / s) * hw + 5 * s + k % s])
             .collect();
         assert_eq!(
-            block(c.rgba(), scale, (36, 36)),
+            block(c.rgba(), scale, (69, 51)),
             want,
-            "its neighbour stays HD"
+            "the new version's block"
         );
+        // A valid column, a row past the image.
+        let (x, y) = (70, 50);
+        let src = fb.src_at(x, y).unwrap();
+        let p = fb.get(x, y).unwrap();
+        fb.set_src(x, y, p, Src { v: 16, ..src });
+        assert_eq!(step(&mut c, &fb, &pics, "v past"), Some([x, y, 1, 1]));
+        let classic = word(fb.palette[usize::from(p)]);
+        assert!(block(c.rgba(), scale, (x, y)).iter().all(|&g| g == classic));
+    }
+}
+
+/// `fb`'s classic colours, each S × S.
+fn fb_rgba(fb: &Framebuffer, scale: Scale) -> Vec<u32> {
+    let s = scale.factor();
+    (0..WIDTH * s * HEIGHT * s)
+        .map(|i| {
+            let (x, y) = (i % (WIDTH * s) / s, i / (WIDTH * s) / s);
+            word(fb.palette[usize::from(fb.get(x, y).unwrap())])
+        })
+        .collect()
+}
+
+/// Literal goldens: a 4 × 4 tile (a staircase of three colours, one transparent corner) over a
+/// background, composed at 2× and 4×. The expected bytes (r, g, b, a per sub-pixel) were made by
+/// the MMPX reference C++ on the tile's words (the corner alpha 0), with the transparent pixel
+/// showing the background and every other sub-pixel the reference's word, by a separate script:
+/// none of this crate's code made them.
+#[test]
+fn a_tile_composes_to_the_reference_bytes() {
+    const X2: [&str; 8] = [
+        "102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0ff800040ff800040ff",
+        "102030ff102030fff0e0d0fff0e0d0fff0e0d0ff800040ff800040ff800040ff",
+        "006600ff006600fff0e0d0fff0e0d0ff800040ff800040ff800040ff800040ff",
+        "006600ff006600fff0e0d0fff0e0d0ff800040ff800040ff800040ff800040ff",
+    ];
+    const X4: [&str; 16] = [
+        "102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff",
+        "102030ff102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff800040ff800040ff800040ff800040ff",
+        "102030ff102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff800040ff800040ff800040ff800040ff800040ff",
+        "102030ff102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff800040ff800040ff800040ff800040ff800040ff800040ff",
+        "102030ff102030ff102030ff102030fff0e0d0fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff800040ff800040ff800040ff800040ff800040ff800040ff800040ff",
+        "006600ff006600ff006600ff006600fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff800040ff800040ff800040ff800040ff800040ff800040ff800040ff800040ff",
+        "006600ff006600ff006600ff006600fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff800040ff800040ff800040ff800040ff800040ff800040ff800040ff800040ff",
+        "006600ff006600ff006600ff006600fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff800040ff800040ff800040ff800040ff800040ff800040ff800040ff800040ff",
+        "006600ff006600ff006600ff006600fff0e0d0fff0e0d0fff0e0d0fff0e0d0ff800040ff800040ff800040ff800040ff800040ff800040ff800040ff800040ff",
+    ];
+    let mut pics = Pics::default();
+    let (t, a, b, c) = (0u8, 1u8, 2u8, 3u8);
+    let pixels = vec![a, a, a, b, a, a, b, b, a, b, b, c, t, b, c, c];
+    let clear: Vec<bool> = pixels.iter().map(|&p| p == t).collect();
+    pics.put(Kind::Tile, 1, (4, 4), pixels, Some(clear));
+    let mut fb = plane();
+    fb.palette[1] = Rgb::new(0x10, 0x20, 0x30);
+    fb.palette[2] = Rgb::new(0xf0, 0xe0, 0xd0);
+    fb.palette[3] = Rgb::new(0x80, 0x00, 0x40);
+    fb.palette[4] = Rgb::new(0x00, 0x66, 0x00);
+    fb.clear(4);
+    draw(&mut fb, &pics, Kind::Tile, 1, (10, 10));
+    for (scale, golden) in [(Scale::X2, &X2[..]), (Scale::X4, &X4[..])] {
+        let mut comp = Compositor::new();
+        comp.compose(&fb, &mut pics.clone(), scale);
+        let s = scale.factor();
+        let ow = WIDTH * s;
+        for (r, row) in golden.iter().enumerate() {
+            let got: String = (0..4 * s)
+                .flat_map(|k| comp.rgba()[(10 * s + r) * ow + 10 * s + k].to_le_bytes())
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(got, *row, "{s}x: row {r}");
+        }
     }
 }
 
@@ -601,6 +825,138 @@ fn the_cache_stays_under_its_bound_and_the_frame_is_the_same() {
         "evicted images were made again"
     );
     assert!(big.cache().bytes() <= HD_CACHE_BYTES && !big.cache().is_empty());
+}
+
+/// Every image hashed alike (a forced collision): each still gets its own HD image, by its
+/// content and its shape; the same flattened words as 2 × 8 and as 4 × 4 are two images; the
+/// frames are those of the real hash.
+#[test]
+fn colliding_hashes_and_equal_words_of_other_shapes_keep_their_own_images() {
+    let words = art(31, 4, 4, 4);
+    let mut pics = Pics::default();
+    pics.put(Kind::Tile, 1, (2, 8), words.clone(), None);
+    pics.put(Kind::Tile, 2, (4, 4), words, None);
+    for id in 3..9u16 {
+        pics.put(
+            Kind::Tile,
+            id,
+            (16, 16),
+            art(u64::from(id), 16, 16, 4),
+            None,
+        );
+    }
+    let mut fb = plane();
+    fb.palette = palette(6);
+    draw(&mut fb, &pics, Kind::Tile, 1, (0, 0));
+    draw(&mut fb, &pics, Kind::Tile, 2, (8, 0));
+    for id in 3..9u16 {
+        draw(&mut fb, &pics, Kind::Tile, id, (16 * usize::from(id), 32));
+    }
+    for scale in [Scale::X2, Scale::X4] {
+        let mut collide =
+            Compositor::with_cache(HdImages::with_hash(HD_CACHE_BYTES, |_, _, _, _| 7));
+        collide.compose(&fb, &mut pics.clone(), scale);
+        assert_eq!(collide.cache().len(), 8, "one image each");
+        assert!(
+            collide.rgba() == fresh(&fb, &pics, scale).as_slice(),
+            "the real hash's frame"
+        );
+        // And by the definition, block by block, for the two shapes.
+        let s = scale.factor();
+        for (id, at, (w, h)) in [(1u16, (0, 0), (2, 8)), (2, (8, 0), (4, 4))] {
+            let (hw, hd) = hd_of(&pics, Kind::Tile, id, &fb.palette, scale);
+            for v in 0..h {
+                for u in 0..w {
+                    let want: Vec<u32> = (0..s * s)
+                        .map(|k| hd[(v * s + k / s) * hw + u * s + k % s])
+                        .collect();
+                    assert_eq!(block(collide.rgba(), scale, (at.0 + u, at.1 + v)), want);
+                }
+            }
+        }
+        let (_, two) = hd_of(&pics, Kind::Tile, 1, &fb.palette, scale);
+        let (_, four) = hd_of(&pics, Kind::Tile, 2, &fb.palette, scale);
+        assert!(two != four, "the shapes give other HD images");
+        // Composed again: every image found again among the colliding ones, none made again.
+        let made = collide.cache().made();
+        collide.forget();
+        collide.compose(&fb, &mut pics.clone(), scale);
+        assert_eq!(collide.cache().made(), made);
+    }
+}
+
+/// A bound smaller than one image: each composition makes what it shows and the cache is empty
+/// after it; the frame is the same. The bytes counted are the words in and out and the indices
+/// the image was reached from.
+#[test]
+fn a_bound_smaller_than_one_image_and_the_bytes_counted() {
+    let mut pics = Pics::default();
+    let clear: Vec<bool> = (0..256).map(|i| i % 5 == 0).collect();
+    pics.put(Kind::Tile, 1, (16, 16), art(1, 16, 16, 4), Some(clear));
+    pics.put(Kind::Bitmap, 0, (40, 30), art(2, 40, 30, 4), None);
+    let mut fb = plane();
+    fb.palette = palette(2);
+    draw(&mut fb, &pics, Kind::Tile, 1, (16, 16));
+    draw(&mut fb, &pics, Kind::Bitmap, 0, (100, 100));
+    let mut tiny = Compositor::with_cap(100);
+    for scale in [Scale::X2, Scale::X4, Scale::X2] {
+        tiny.compose(&fb, &mut pics.clone(), scale);
+        assert!(tiny.rgba() == fresh(&fb, &pics, scale).as_slice());
+        assert_eq!(tiny.cache().bytes(), 0, "nothing kept");
+        assert!(
+            tiny.cache().peak() > tiny.cache().cap(),
+            "the composition held what it showed"
+        );
+    }
+    let mut c = Compositor::new();
+    c.compose(&fb, &mut pics.clone(), Scale::X2);
+    // The tile: 256 words in, 1024 out, 256 indices and 256 transparency flags; the bitmap:
+    // 1200 words in, 4800 out, 1200 indices.
+    let want = (256 + 1024) * 4 + 256 + 256 + (1200 + 4800) * 4 + 1200;
+    assert_eq!(c.cache().bytes(), want);
+    assert_eq!(c.cache().peak(), want);
+}
+
+#[test]
+#[should_panic(expected = "an image past")]
+fn mmpx_refuses_an_image_past_twice_the_screen() {
+    mmpx2x(&[], 2 * WIDTH + 1, 1, &mut Vec::new());
+}
+
+#[test]
+#[should_panic(expected = "an image past the screen")]
+fn mmpx_refuses_an_image_past_the_screen() {
+    mmpx(&[], WIDTH, HEIGHT + 1, Scale::X4, &mut Vec::new());
+}
+
+#[test]
+fn an_image_past_the_screen_is_shown_classic() {
+    let mut pics = Pics::default();
+    pics.put(
+        Kind::Bitmap,
+        0,
+        (WIDTH + 1, 1),
+        art(3, WIDTH + 1, 1, 4),
+        None,
+    );
+    let mut fb = plane();
+    fb.palette = palette(8);
+    for x in 0..WIDTH {
+        fb.set_src(
+            x,
+            0,
+            1 + (x % 3) as u8,
+            Src {
+                u: x as u16,
+                kind: Kind::Bitmap,
+                ..Src::CLASSIC
+            },
+        );
+    }
+    let mut c = Compositor::new();
+    c.compose(&fb, &mut pics, Scale::X4);
+    assert!(c.rgba() == fb_rgba(&fb, Scale::X4).as_slice());
+    assert_eq!(c.cache().made(), 0);
 }
 
 /// Timings only (run with `--ignored --nocapture`): a walk-like scene, the paper bitmap under a

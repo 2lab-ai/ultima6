@@ -14,6 +14,13 @@
 //! only the blocks whose inputs changed; what it writes is what a new compositor would write
 //! from the same frame.
 //!
+//! Memory: the HD images within the bound (each with the indices it was last reached from, which
+//! [`HdImages::bytes`] counts; [`HdImages::peak`] is the most it held, during a composition whose
+//! images alone exceed the bound); outside it, the frame (`WIDTH·S × HEIGHT·S` words), the last
+//! composition's inputs (a [`Src`], an index and a token per screen pixel) and a few words per
+//! image named so far: per tile record up to the largest record id named (the game's records
+//! are 2048), per portrait (letter, item) and per panel bitmap (two) named.
+//!
 //! The output is packed RGBA words, `u32::from_le_bytes([r, g, b, a])`: in wasm memory (little
 //! endian) the bytes the page's `ImageData` takes.
 
@@ -50,7 +57,9 @@ impl Scale {
     }
 }
 
-/// An image as the game holds it now: palette indices, row-major.
+/// An image as the game holds it now: palette indices, row-major, at most [`WIDTH`] ×
+/// [`HEIGHT`] (the largest image the game draws, the paper bitmap; a larger one is shown
+/// classic).
 pub struct Image<'a> {
     /// The image's version now ([`Src::ver`]): a pixel drawn at another version is stale.
     pub ver: u32,
@@ -91,6 +100,29 @@ pub const fn word(c: Rgb) -> u32 {
 /// The word of a transparent pixel in an image given to MMPX (alpha 0).
 const CLEAR: u32 = 0;
 
+/// The palette indices and transparency an HD image was last reached from, under the palette of
+/// composition generation `palette`: an image whose pixels are these again, under the same
+/// palette, has this HD image with no lookup by content.
+struct Source {
+    pixels: Vec<u8>,
+    transparent: Option<Vec<bool>>,
+    palette: u64,
+}
+
+impl Source {
+    fn of(img: &Image<'_>, palette: u64) -> Source {
+        Source {
+            pixels: img.pixels.to_vec(),
+            transparent: img.transparent.map(<[bool]>::to_vec),
+            palette,
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.pixels.len() + self.transparent.as_ref().map_or(0, Vec::len)
+    }
+}
+
 /// One HD image: the content it was made from and the result.
 struct Entry {
     /// Never reused: an equal token is the same image ([`Compositor`] compares them).
@@ -103,15 +135,20 @@ struct Entry {
     input: Vec<u32>,
     /// `scale·width × scale·height` words.
     hd: Vec<u32>,
+    /// What it was last reached from.
+    source: Source,
     /// The composition that used it last ([`HdImages::stamp`]).
     used: u64,
 }
 
 impl Entry {
     fn bytes(&self) -> usize {
-        (self.input.len() + self.hd.len()) * 4
+        (self.input.len() + self.hd.len()) * 4 + self.source.bytes()
     }
 }
+
+/// The lookup hash of an image's words, its shape and the scale.
+type Hasher = fn(&[u32], usize, usize, Scale) -> u64;
 
 /// HD images by content: the image's pixels as words and the scale give the HD version, made
 /// once and kept until the bound needs room for another. Least recently used goes first; one in
@@ -122,12 +159,15 @@ pub struct HdImages {
     free: Vec<usize>,
     by_hash: HashMap<u64, Vec<usize>>,
     bytes: usize,
+    /// The most `bytes` was.
+    peak: usize,
     cap: usize,
     next_token: u32,
     /// The composition running (or the last one).
     stamp: u64,
     /// HD images made so far.
     made: u64,
+    hash: Hasher,
 }
 
 /// FNV-1a over the words and the shape: a hash for the lookup (equal content is compared too).
@@ -148,16 +188,34 @@ impl HdImages {
             free: Vec::new(),
             by_hash: HashMap::new(),
             bytes: 0,
+            peak: 0,
             cap,
             next_token: 1,
             stamp: 0,
             made: 0,
+            hash: content_hash,
         }
     }
 
-    /// Bytes held now (inputs and outputs).
+    /// As [`HdImages::new`] with another lookup hash (tests force collisions with it).
+    #[cfg(test)]
+    fn with_hash(cap: usize, hash: Hasher) -> Self {
+        Self {
+            hash,
+            ..Self::new(cap)
+        }
+    }
+
+    /// Bytes held now: each image's input and output words and the indices it was last reached
+    /// from.
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// The most bytes held so far, within a composition included (it keeps the images it shows
+    /// even past the bound, and is back under it when it ends).
+    pub fn peak(&self) -> usize {
+        self.peak
     }
 
     /// The bound.
@@ -183,11 +241,25 @@ impl HdImages {
         self.slab[slot].as_ref().expect("a live entry")
     }
 
-    /// The entry in `slot` if it is still the one with `token`, marked used now.
-    fn touch(&mut self, slot: usize, token: u32) -> bool {
+    /// Whether the entry in `slot` is still the one with `token`, at `scale`, last reached from
+    /// `img`'s pixels under palette generation `palette`; marked used now if so.
+    fn reached(
+        &mut self,
+        (slot, token): (usize, u32),
+        img: &Image<'_>,
+        palette: u64,
+        scale: Scale,
+    ) -> bool {
         let stamp = self.stamp;
         match self.slab.get_mut(slot).and_then(Option::as_mut) {
-            Some(e) if e.token == token => {
+            Some(e)
+                if e.token == token
+                    && e.scale == scale
+                    && (e.width, e.height) == (img.width, img.height)
+                    && e.source.palette == palette
+                    && e.source.pixels == img.pixels
+                    && e.source.transparent.as_deref() == img.transparent =>
+            {
                 e.used = stamp;
                 true
             }
@@ -203,13 +275,25 @@ impl HdImages {
     /// would pass the pack image found, and an entry made from a pack image is keyed by that image
     /// as well as by `input`, so a pack loaded or forgotten (which moves the platform's HD
     /// version) never shows an entry of the other.
-    fn get(&mut self, input: &[u32], width: usize, height: usize, scale: Scale) -> usize {
-        let hash = content_hash(input, width, height, scale);
+    ///
+    /// `source` is what the image was reached from now (its indices under the palette now): the
+    /// entry keeps it for [`HdImages::reached`].
+    fn get(
+        &mut self,
+        input: &[u32],
+        (width, height): (usize, usize),
+        scale: Scale,
+        source: Source,
+    ) -> usize {
+        let hash = (self.hash)(input, width, height, scale);
         if let Some(slots) = self.by_hash.get(&hash) {
             for &slot in slots {
                 let e = self.slab[slot].as_mut().expect("an indexed entry");
                 if e.scale == scale && e.width == width && e.height == height && e.input == input {
                     e.used = self.stamp;
+                    self.bytes = self.bytes - e.source.bytes() + source.bytes();
+                    e.source = source;
+                    self.peak = self.peak.max(self.bytes);
                     return slot;
                 }
             }
@@ -227,10 +311,12 @@ impl HdImages {
             height,
             input: input.to_vec(),
             hd,
+            source,
             used: self.stamp,
         };
         while self.bytes + entry.bytes() > self.cap && self.evict(self.stamp) {}
         self.bytes += entry.bytes();
+        self.peak = self.peak.max(self.bytes);
         let slot = match self.free.pop() {
             Some(s) => {
                 self.slab[s] = Some(entry);
@@ -301,26 +387,14 @@ impl Resolved {
     };
 }
 
-/// The content an image had when last resolved, so that an image shown again unchanged needs no
-/// lookup by content.
-#[derive(Default)]
-struct Memo {
-    pixels: Vec<u8>,
-    transparent: Option<Vec<bool>>,
-    width: usize,
-    height: usize,
-    palette: u64,
-    scale: Option<Scale>,
-    token: u32,
-    slot: usize,
-}
-
-/// One image (kind, id): what it is in the composition `stamp`, and its memo.
+/// One image (kind, id): what it is in the composition `stamp`, and the slot and token of the HD
+/// image it had when last resolved (an image shown again unchanged needs no lookup by content:
+/// [`HdImages::reached`]).
 #[derive(Default)]
 struct Slot {
     stamp: u64,
     resolved: Option<Resolved>,
-    memo: Memo,
+    memo: Option<(usize, u32)>,
 }
 
 /// The inputs of the last composition, per screen pixel.
@@ -339,7 +413,7 @@ pub struct Compositor {
     /// `WIDTH·S × HEIGHT·S` packed RGBA words.
     out: Vec<u32>,
     last: Option<Last>,
-    /// Per tile record id.
+    /// Per tile record id, up to the largest named.
     tiles: Vec<Slot>,
     /// Portraits and bitmaps.
     others: HashMap<(Kind, u16), Slot>,
@@ -365,8 +439,12 @@ impl Compositor {
 
     /// A compositor whose HD images take at most `cap` bytes.
     pub fn with_cap(cap: usize) -> Self {
+        Self::with_cache(HdImages::new(cap))
+    }
+
+    fn with_cache(hd: HdImages) -> Self {
         Self {
-            hd: HdImages::new(cap),
+            hd,
             scale: Scale::X2,
             out: Vec::new(),
             last: None,
@@ -556,48 +634,39 @@ impl Resolver<'_> {
         let resolved = match self.images.image(kind, id) {
             Some(img) => {
                 let (w, h) = (img.width, img.height);
-                let shaped = w > 0
-                    && h > 0
+                let shaped = (1..=WIDTH).contains(&w)
+                    && (1..=HEIGHT).contains(&h)
                     && img.pixels.len() == w * h
                     && img.transparent.is_none_or(|t| t.len() == w * h);
                 if !shaped {
                     Resolved::CLASSIC
                 } else {
-                    let m = &mut slot.memo;
-                    let same = m.width == w
-                        && m.height == h
-                        && m.palette == self.palette
-                        && m.scale == Some(self.scale)
-                        && m.pixels == img.pixels
-                        && m.transparent.as_deref() == img.transparent
-                        && self.hd.touch(m.slot, m.token);
-                    if !same {
-                        self.input.clear();
-                        self.input
-                            .extend(img.pixels.iter().enumerate().map(|(i, &p)| {
-                                match img.transparent {
-                                    Some(t) if t[i] => CLEAR,
-                                    _ => self.pal[usize::from(p)],
-                                }
-                            }));
-                        let at = self.hd.get(self.input, w, h, self.scale);
-                        *m = Memo {
-                            pixels: img.pixels.to_vec(),
-                            transparent: img.transparent.map(<[bool]>::to_vec),
-                            width: w,
-                            height: h,
-                            palette: self.palette,
-                            scale: Some(self.scale),
-                            token: self.hd.entry(at).token,
-                            slot: at,
-                        };
-                    }
+                    let memo = slot
+                        .memo
+                        .filter(|&m| self.hd.reached(m, &img, self.palette, self.scale));
+                    let (at, token) = match memo {
+                        Some(m) => m,
+                        None => {
+                            self.input.clear();
+                            self.input
+                                .extend(img.pixels.iter().enumerate().map(|(i, &p)| {
+                                    match img.transparent {
+                                        Some(t) if t[i] => CLEAR,
+                                        _ => self.pal[usize::from(p)],
+                                    }
+                                }));
+                            let source = Source::of(&img, self.palette);
+                            let at = self.hd.get(self.input, (w, h), self.scale, source);
+                            (at, self.hd.entry(at).token)
+                        }
+                    };
+                    slot.memo = Some((at, token));
                     Resolved {
-                        token: m.token,
+                        token,
                         ver: img.ver,
                         width: w,
                         height: h,
-                        slot: m.slot,
+                        slot: at,
                     }
                 }
             }

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cstdlib>
 
 typedef uint32_t uint32;
 typedef uint32_t ABGR8;
@@ -86,7 +87,11 @@ static void emit(const char* name, int w, int h, int s, const std::vector<uint32
         for (int x = 0; x < ow; x++) {
             uint32_t c = out[y * ow + x];
             int k = (int)(std::find(pal.begin(), pal.end(), c) - pal.begin());
-            if (k == (int)pal.size()) { fprintf(stderr, "a new colour in %s\n", name); return; }
+            if (k == (int)pal.size()) {
+                // MMPX adds no colours: a word outside the palette is a broken run. No fixture.
+                fprintf(stderr, "a new colour in %s\n", name);
+                exit(1);
+            }
             putchar(DIGITS[k]);
             if (c != in[(y * h / oh) * w + (x * w / ow)]) differ++;
         }
@@ -270,5 +275,9 @@ int main() {
         emit(name, s.w, s.h, s.s, *s.pal, shapes(s.w, s.h, (int)s.pal->size()));
     }
     fprintf(stderr, "%d cases, %d with output beyond nearest\n", total_cases, nontrivial);
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        fprintf(stderr, "the fixture could not be written\n");
+        return 1;
+    }
     return 0;
 }
