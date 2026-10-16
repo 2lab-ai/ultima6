@@ -602,55 +602,154 @@ export function frame(page) {
   });
 }
 
-/// The horizontal shift (in pixels, multiples of 16) that best maps `before` onto `after` in
-/// the map window (11 x 11 tiles from (8, 8)), and how well each shift matches.
+/// The shift along one axis (in pixels, multiples of 16; `dx` or `dy`, the other 0) that best
+/// maps `before` onto `after` in the map window (11 x 11 tiles from (8, 8)), how well it matches
+/// and how well no shift does (`still`). A step east shows as `dx` 16, south as `dy` 16. A shift
+/// along x is compared over the window's middle 48 columns, one along y over its middle 48 rows,
+/// so a shift of up to 4 cells stays inside the window; no shift over the columns.
 export function mapShift(before, after, width = 320) {
-  const scores = {};
-  for (let s = -64; s <= 64; s += 16) {
+  const whole = [8, 8 + 176];
+  const middle = [8 + 64, 8 + 176 - 64];
+  const score = (dx, dy) => {
+    const [xs, ys] = dy === 0 ? [middle, whole] : [whole, middle];
     let same = 0;
     let n = 0;
-    for (let y = 8; y < 8 + 176; y += 2) {
-      for (let x = 8 + 64; x < 8 + 176 - 64; x += 2) {
-        const a = (y * width + x + s) * 4;
+    for (let y = ys[0]; y < ys[1]; y += 2) {
+      for (let x = xs[0]; x < xs[1]; x += 2) {
+        const a = ((y + dy) * width + x + dx) * 4;
         const b = (y * width + x) * 4;
         n += 1;
         if (before[a] === after[b] && before[a + 1] === after[b + 1] && before[a + 2] === after[b + 2]) same += 1;
       }
     }
-    scores[s] = same / n;
+    return same / n;
+  };
+  const still = score(0, 0);
+  let best = { dx: 0, dy: 0, score: still };
+  for (let s = -64; s <= 64; s += 16) {
+    for (const [dx, dy] of s === 0 ? [] : [[s, 0], [0, s]]) {
+      const v = score(dx, dy);
+      if (v > best.score) best = { dx, dy, score: v };
+    }
   }
-  const best = Object.entries(scores).sort((p, q) => q[1] - p[1])[0];
-  return { shift: Number(best[0]), score: best[1], still: scores[0] };
+  return { ...best, still };
 }
 
 export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
-/// One step east or west from the prompt: the seed is the clock's, so the start fight sometimes
-/// leaves a gargoyle or a member beside the hero and the step is blocked; then the other way,
-/// up to `STEP_TRIES` tries. A blocked step costs no movement points, so the world turn after
-/// it picks the hero again at once: no NPC turn runs, the prompt is back and the fight does not
-/// move on, and a boot with both sides blocked would stay blocked on every try. After each
-/// blocked try a pass (`passTurn`) spends the hero's turn, so the NPCs move. Returns the key
-/// that walked, the leader before and after, and the frame before that step.
-export const STEP_TRIES = 16;
-export async function stepSideways(page) {
-  for (let i = 0; i < STEP_TRIES; i += 1) {
-    await waitPrompt(page);
-    const key = i % 2 === 0 ? 'ArrowRight' : 'ArrowLeft';
-    const from = (await state(page)).leader;
-    const before = await frame(page);
-    await page.keyboard.press(key);
+/// The directions a step tries, in this order, by arrow key and by the cell it walks to from the
+/// hero's (dx, dy): east, west, south, north.
+export const STEPS = [
+  { key: 'ArrowRight', dx: 1, dy: 0 },
+  { key: 'ArrowLeft', dx: -1, dy: 0 },
+  { key: 'ArrowDown', dx: 0, dy: 1 },
+  { key: 'ArrowUp', dx: 0, dy: -1 },
+];
+/// How many times a step tries the four directions, a pass between two rounds.
+export const STEP_ROUNDS = 4;
+/// Where a killed hero wakes, as the page writes the leader: (0x133, 0x160, 0), the start cell
+/// itself (u6-core `map::travel::resurrect_party`, 0x1095bc; pinned by its test
+/// `resurrection_wakes_the_party_in_the_castle`, crates/u6-core/src/map/travel.rs:685, the cell
+/// at :702-703). The page shows no death, so a leader there is only on an allowed wake
+/// destination.
+export const WAKE_CELL = '307,352,0';
+
+/// What a key or click toward `step` ({ dx, dy }) did, from the leader at `from` to `to` (as the
+/// page writes them: x,y,z): 'blocked' (no cell walked); 'walked' (the one cell toward `step`);
+/// 'wake cell' (the leader ended on `WAKE_CELL`, the allowed wake destination, from a cell not
+/// beside it that way: the turn after the step killed the hero). Anything else fails as a walk
+/// of the wrong cells. A step that ends on the wake cell from the cell beside it, toward it, is
+/// a walk: a blocked step runs no NPC turn (it costs the leader no points, and the world turn
+/// picks him again at once: pinned outside a fight by u6-core's test
+/// `a_blocked_step_takes_one_pick_and_keeps_the_leaders_points`,
+/// crates/u6-core/src/actors/walk.rs:1015; in a fight that rests on the scheduler picking the
+/// same actor again over the state the blocked step left unchanged, `actors::turn::pick_actor`,
+/// turn.rs:402-407, not on a test), so a turn that kills him comes only after a step that moved
+/// him there, and the cell is the one walked to; only a move the game refused after its cost
+/// (0x10c9d2, `StepResult::Mismatch`), with a death in its turn, would end there unwalked.
+/// Checked the other way round, every walk into the wake cell would go uncounted: a step from
+/// beside it walking in then back out (to where it began), or none at all where that is the one
+/// way out.
+export function stepResult(from, to, { dx, dy }) {
+  if (to === from) return 'blocked';
+  const [fx, fy, fz] = from.split(',').map(Number);
+  const [tx, ty, tz] = to.split(',').map(Number);
+  if (tx - fx === dx && ty - fy === dy && tz === fz) return 'walked';
+  assert.ok(to === WAKE_CELL, 'a step walks the one cell toward its key, or ends on the allowed wake destination');
+  return 'wake cell';
+}
+
+/// The page's side of a step (`stepOnce`): wait for the prompt, read the leader, read the frame,
+/// count the inputs the page handed the game (`sent`: the keys passed to `Game.key_down`,
+/// `__sent`, on a gated page; else the keys the canvas took for the game, the `__keys` entries
+/// it prevented), do `step` (its arrow, then until the game took it and shows the prompt again),
+/// pass. A test drives `stepOnce` with its own: `act` a click (the mouse tests' `clickStep`), or
+/// all of them a stub (the no-page test of the tries).
+export const pageSteps = (page) => ({
+  prompt: () => waitPrompt(page),
+  leader: async () => (await state(page)).leader,
+  frame: () => frame(page),
+  sent: () => page.evaluate(() => globalThis.__sent?.length ?? window.__keys.filter(([, taken]) => taken).length),
+  act: async (step) => {
+    await page.keyboard.press(step.key);
     await waitTaken(page);
     await waitPrompt(page);
-    const to = (await state(page)).leader;
-    if (to !== from) return { key, from, to, before };
-    await passTurn(page);
+  },
+  pass: () => passTurn(page),
+});
+
+/// One step from the prompt: east, else west, south, north (`STEPS`), by arrow (or `io.act`). The
+/// seed is the clock's and every frame at the prompt draws from the game's RNG (its idle
+/// animation), so each boot's start fight goes its own way and can leave a gargoyle on any side of
+/// the hero. A blocked step costs no movement points, so the world turn after it picks the hero
+/// again at once: no NPC turn runs and the next direction meets the fight as it was. A gargoyle in
+/// assault beside the hero strikes him every turn and stays while it fights; passes mostly end that
+/// (in boots of seeds that start with gargoyles east and west of him, the old east-or-west step
+/// walked at its first call in 29 of 45, after 2 to 6 passes, at 1x and at a 4x CPU throttle), but
+/// a hero they kill wakes on the start cell (`WAKE_CELL`) out of combat, so the members no longer
+/// strike back, between the same gargoyles, and from then on east and west stay blocked on every
+/// turn (seen with gargoyles north, east and west of the start cell, across the hero's deaths). A
+/// member's cell is open (the step swaps them), and the start fight has fewer foes than the hero
+/// has sides (at most three near him at the first prompt, over 10000 seeds). Only after a round of
+/// four blocked does a pass spend the hero's turn, so the fight moves on, up to `STEP_ROUNDS`
+/// rounds; after a try that ended on the wake cell the next direction is tried from there. A walk
+/// that ends on the cell the call started on ('back': the hero killed in a pass, woken beside it,
+/// then walking that way) is not the step either, so the step always leaves the leader elsewhere
+/// than it found him. With `withFrame` the frame before each try is read (a whole canvas over the
+/// protocol, 1280 x 800 at S 4: only for a check of the step's scroll). Returns the step (key, dx,
+/// dy), the leader before and after and, with `withFrame`, the frame before it. After the bound it
+/// fails with each try's key, outcome and the inputs the page sent the game for it (`io.sent`: 0
+/// for a key that never reached the game, '?' where they are not counted) and the passes
+/// between, in order (`what` names it: a click step).
+export async function stepOnce(page, { withFrame = false, io = pageSteps(page), what = 'step' } = {}) {
+  const tried = [];
+  let start;
+  for (let round = 0; round < STEP_ROUNDS; round += 1) {
+    if (round > 0) {
+      await io.pass();
+      tried.push('pass');
+    }
+    for (const step of STEPS) {
+      await io.prompt();
+      const from = await io.leader();
+      start ??= from;
+      const before = withFrame ? await io.frame() : undefined;
+      const sentBefore = io.sent ? await io.sent() : null;
+      await io.act(step);
+      const to = await io.leader();
+      const sentAfter = io.sent ? await io.sent() : null;
+      let result = stepResult(from, to, step);
+      if (result === 'walked' && to === start) result = 'back';
+      const sent = sentBefore === null || sentAfter === null ? '?' : sentAfter - sentBefore;
+      tried.push(`${step.key} ${result} (sent ${sent})`);
+      if (result === 'walked') return { ...step, from, to, before };
+    }
   }
-  throw new Error(`${STEP_TRIES} steps blocked in a row`);
+  assert.fail(`no ${what} in ${STEP_ROUNDS} rounds of the four directions: ${tried.join(', ')}`);
 }
 
 /// At the prompt, a pass (Space on the focused canvas): the hero's turn is spent, so the world
-/// turn runs the NPCs' turns (the start fight's foes move on), then the prompt again.
+/// turn runs the NPCs' turns (the start fight's foes take theirs), then the prompt again.
 export async function passTurn(page) {
   await waitPrompt(page);
   await page.keyboard.press('Space');

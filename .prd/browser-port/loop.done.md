@@ -214,3 +214,47 @@ Gates on `517b2ba`: fmt, clippy, 793 tests (`--profile gate`), web 29/29. The wa
 - **Deploys:** production 9f831837. Live checks pass, with 0 foreign requests and 0 errors.
 
 Round 6 of M2's follow-ups is complete: intake-budget, zip-slice and nostep are all merged and live.
+
+## web-flake — closed 2026-10-16
+
+| Unit | Branch | Result |
+|---|---|---|
+| web-flake | fix/web-step-flake | Fixed in `f1ea2b5`, merged with main e1e6e5c (H1) at `306477a`. See the notes below. |
+
+- **Mechanism:** the page and the engine lost no input. Every arrow reached the engine, and its step code refused each one.
+  - The seed comes from the clock, and every frame at the prompt draws from the RNG (the idle animation). So each boot's start fight goes its own way, and load only changes which boot.
+  - In 54 of 10,000 seeds the first prompt has gargoyles in assault (worktype 8) east and west of the hero. They strike him every turn and stay.
+  - A blocked step costs nothing, and a pass only gives them another turn.
+  - A hero they kill wakes on the start cell (0x1095bc: (0x133, 0x160, 0)) with combat broken off, so the members no longer strike back. He wakes between the same gargoyles, and east and west then stay blocked on every turn. The old `stepSideways` tried only east and west.
+- **Captured failure** (browser, seed 1161, counts only):
+  - 16 of 16 tries were taken by the canvas, and the engine counted 16 walks, 16 blocked, 0 moved, and 15 passes.
+  - The leader stayed at 307,352,0. Speed was 1×, with 0 ms dropped.
+  - East held actor 226 and west actor 225 (gargoyles in assault). North held actor 224 from try 1 on.
+  - Combat was off from try 4 on: the hero was killed and woke on the same cell.
+- **Fix:**
+  - `stepOnce` tries east, west, south and north. It passes only after a round of four blocked, for 4 rounds (at most 16 tries, as before).
+  - It counts a step only when the hero walked the one cell toward the key. A wake on the start cell is named, and any other cell fails.
+  - `mapShift` measures either axis, and `clickStep` clicks the four cells the same way.
+  - A no-page test pins each direction.
+  - The merge moved H1's performance walk onto `stepOnce`.
+- **Counts before → after:**
+  - Browser, the 5 trapped seeds, 1×: 8 failed calls of 30 (4 of 15 boots) → 0 of 30.
+  - Browser, the same seeds at CPU throttle 4×: 24 of 60 (12 of 30 boots) → 0 of 60.
+  - Headless, seeds 200..10199, 3 calls each: 15 of 30,000 (the 5 seeds on every call) → 0 of 30,000, at most 3 tries. The same on the merged tree.
+- **Gates on 306477a:** fmt, clippy, 974 tests (`--profile gate`), web 53/53 three times (load 22–61), test_fight OK, test_trace 8/8, amifs OK, port_map unchanged.
+- **Follow-up:** `wake-in-fight` in loop.md. Does the original wake the party between the same gargoyles?
+
+## web-flake rounds 2–3 — closed 2026-10-16
+
+- Round 2 (8cbc118, d1f43bb, 655c341, d784390) and round 3 (630d414) close the reviews of round 1:
+  - the frame is read only when asked, which doubles the steps walked in the HD perf window;
+  - the 16-try bound fails with a labelled list of each try's key, outcome and what the page sent (`sent N`), counts only;
+  - a walk into the wake cell from beside it counts as a walk, and a step back onto its start does not ('back'); checking the wake cell first broke two cases in the gates;
+  - a no-page test drives `stepOnce` against a stub grid and asserts the prompt is waited before every try;
+  - the comments cite travel.rs:702-703 and walk.rs:1015.
+- Reviews: round 2 and round 3 APPROVE from gpt-6-astra and opus. Opus killed 15 of 15 mutants of the harness, re-ran the trapped seeds 90/90 and withdrew its round-1 NH4.
+- Merged at the merge commit on main after 3193c09. Gates on its tree (5e24ad0): 1077 passed; web 53/54, 54/54, 54/54 at load 114–192.
+  - The one failure was `keyboard only` timing out at `test-web.mjs:359`, waiting for the file chooser, in code this unit did not change.
+  - It passed 4 of 4 alone at load 157–251. It is opened as `chooser-flake` in loop.md.
+- Test code only, with the site unchanged, so there was no deploy.
+
