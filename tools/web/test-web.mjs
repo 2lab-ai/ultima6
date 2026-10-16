@@ -2898,6 +2898,37 @@ test('HD pack: a zip of the owner\'s disk images with a manifest.json that only 
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
 
+test('HD pack: a zip of the owner\'s disk images beside a manifest.json that declares the pack\'s format at its root but does not read (its CRC-32 wrong, as the broken-pack test breaks it) is not a pack: the game starts from it, no pack is set or kept, no foreign request', async (env) => {
+  const foreign = [];
+  const { context, page } = await h.openPage(env);
+  context.on('request', (r) => {
+    const url = r.url();
+    if (!url.startsWith(env.server.url) && !url.startsWith('data:') && !url.startsWith('blob:')) foreign.push(url);
+  });
+  await context.addInitScript(h.packKit);
+  await h.load(page, env);
+  await page.evaluate(() => {
+    const input = Object.assign(document.createElement('input'), { type: 'file', id: '__disks', multiple: true });
+    input.style.display = 'none';
+    document.body.append(input);
+  });
+  await page.setInputFiles('#__disks', h.HFES);
+  await page.evaluate(async () => {
+    const files = [];
+    for (const f of document.getElementById('__disks').files) files.push([f.name, new Uint8Array(await f.arrayBuffer())]);
+    files.push(['manifest.json', new TextEncoder().encode('{"format": "u6-hdpack/1"}')]);
+    const zip = window.__zipFiles(files, { crcOf: ['manifest.json', new Uint8Array(1)] });
+    const dt = new DataTransfer();
+    dt.items.add(new File([zip], 'disks.zip'));
+    document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
+  const s = await started(page, FILES);
+  assert.match(s.status, /Started\./, 'the game started from the zip');
+  assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true }, 'no pack set');
+  assert.equal(await h.keptPackBytes(page), null, 'no pack kept');
+  assert.equal(foreign.length, 0, 'no request to another origin');
+}, { needs: h.haveHfes });
+
 test('HD pack: a pack whose manifest does not read (its CRC-32) dropped on a page with no game is not taken for a pack: the import refuses it, nothing is started, kept or stored', async (env) => {
   const foreign = [];
   const { context, page } = await h.openPage(env);
