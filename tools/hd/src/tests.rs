@@ -2846,3 +2846,56 @@ fn a_run_makes_at_most_four_calls_at_once() {
         let _ = std::fs::remove_dir_all(&w.root);
     }
 }
+
+#[test]
+fn a_turn_of_drain_is_bounded_whatever_the_pipe_holds() {
+    use std::time::{Duration, Instant};
+    /// A pipe that always has `each` bytes ready: never empty (no WouldBlock), never at its
+    /// end, until `cap` reads, then an end, so a drain that is not bounded ends too.
+    struct Endless {
+        each: usize,
+        reads: usize,
+        cap: usize,
+    }
+    impl std::io::Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            if self.reads > self.cap {
+                return Ok(0);
+            }
+            let n = self.each.min(buf.len());
+            buf[..n].fill(b'y');
+            Ok(n)
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(60);
+    for each in [1, 100, 8192, 1 << 20] {
+        let mut pipe = Some(Endless {
+            each,
+            reads: 0,
+            cap: 100_000,
+        });
+        let mut got = 0;
+        let start = Instant::now();
+        assert!(run::drain(&mut pipe, until, |b| got += b.len()).is_none());
+        let reads = pipe.as_ref().map_or(usize::MAX, |p| p.reads);
+        // One turn: at most TURN_CALLS reads and TURN_BYTES bytes, the pipe still open.
+        assert!(
+            reads <= run::TURN_CALLS,
+            "{each}-byte reads: {reads} in one turn"
+        );
+        assert!(
+            got <= run::TURN_BYTES,
+            "{each}-byte reads: {got} bytes in one turn"
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+    // A turn whose time is up reads nothing.
+    let mut pipe = Some(Endless {
+        each: 8,
+        reads: 0,
+        cap: 10,
+    });
+    assert!(run::drain(&mut pipe, Instant::now(), |_| {}).is_none());
+    assert_eq!(pipe.map(|p| p.reads), Some(0));
+}

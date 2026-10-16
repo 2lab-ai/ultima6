@@ -66,9 +66,12 @@ fn stub(
         mark.display(),
         dir.join(format!("{name}.ack")).display()
     );
-    // Helpers that acknowledge (the writers): the call goes on to `after` only once every one
-    // has (at most 10 s). One slow to start on a loaded machine would otherwise begin after
-    // the call ended and never write, and the test could not tell it from one that cannot.
+    // Helpers that acknowledge (the writers): the stand-in goes on to `after` once every one
+    // has, so that one slow to start on a loaded machine does not begin after the call ended
+    // and never write (the test could not tell it from one that cannot). What bounds the wait:
+    // the call's own deadline first (it kills the stand-in's group; the writers, in sessions
+    // of their own, go on), else 1000 tries (each forks ls and wc and sleeps 10 ms: 10 s at
+    // the least, more under load), and in any case the test's 30 s watchdog over the call.
     let wait = if perl.contains("$ARGV[1]") {
         format!(
             "i=0; while [ \"$(ls \"{}\".* 2>/dev/null | wc -l)\" -lt {n} ] && [ $i -lt 1000 ]; \
@@ -113,12 +116,17 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
     let thread = r#"echo '{"type":"thread.started","thread_id":"t1"}'"#;
     let takes = format!("cat > /dev/null\n{thread}");
     let idle = "select(undef, undef, undef, 0.2)";
-    // Four writers of 64 KiB at a time: the output is never found empty. Each acknowledges its
-    // first write that went in (a file `<stub>.ack.<pid>`), so it is known to be writing.
+    // Four writers of 64 KiB at a time keep the output full most of the time (the reader still
+    // finds it empty between their writes, and ends a turn there). Each acknowledges its first
+    // write that went in (a file `<stub>.ack.<pid>`), so it is known to be writing.
     let spew = r#"do { my $w = syswrite(STDOUT, "y\n" x 32768); if ($w && !$n++) { open(my $f, ">", "$ARGV[1].$$"); close $f } }"#;
-    // (name, stub, its prompt is never read, deadline in seconds). The flooders' calls get
-    // deadlines past their four writers' start (each waits for their acknowledgments), the
-    // exiting one a deadline it surely exits before.
+    // (name, stub, its prompt is never read, deadline in seconds). The flooders' stand-ins
+    // wait for their four writers' acknowledgments, which took 2.75 s at a load of 118
+    // (measured by the review): their deadlines, 12 s for the one that exits (its call ends
+    // when it exits, so this costs nothing unloaded) and 8 s for the one that hangs (its call
+    // runs to it), are meant to fall after that at a load of 200, about 4.7 s if it grows with
+    // the load, with room; a writer that starts later still is reported as one that did not
+    // write.
     let shapes = [
         // Keeps the output: takes the prompt, exits; the stream never ends.
         (
@@ -139,13 +147,13 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
             "floods-exit.sh",
             stub(&t, "floods-exit.sh", &takes, 4, spew, &flood.0, "exit 0"),
             false,
-            5,
+            12,
         ),
         (
             "floods-hang.sh",
             stub(&t, "floods-hang.sh", &takes, 4, spew, &flood.0, "sleep 30"),
             false,
-            4,
+            8,
         ),
     ];
     let big = "x".repeat(1 << 20);
@@ -162,7 +170,7 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
             };
             let hangs = *unread || name.ends_with("hang.sh");
             let prompt = if *unread { big.as_str() } else { "PROMPT" };
-            let (e, took) = watched(c, &t, prompt, Duration::from_secs(20), name);
+            let (e, took) = watched(c, &t, prompt, Duration::from_secs(30), name);
             let want = if hangs {
                 "timed out"
             } else {

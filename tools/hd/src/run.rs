@@ -478,8 +478,8 @@ fn nonblocking(fd: i32) -> Result<(), String> {
 
 /// Most bytes, and most system calls, one turn of [`Pipes::step`] moves in each direction:
 /// a pipe that is never found empty (or never full) still hands the caller back its turn.
-const TURN_BYTES: usize = 64 << 10;
-const TURN_CALLS: usize = 8;
+pub(crate) const TURN_BYTES: usize = 64 << 10;
+pub(crate) const TURN_CALLS: usize = 8;
 
 /// The call's three pipes, driven from the calling thread: the prompt written to its input,
 /// its events and its stderr read (each to its file, under its cap), as each is ready.
