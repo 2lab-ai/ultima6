@@ -336,7 +336,7 @@ pub struct Compositor {
     /// Per tile record id.
     tiles: Vec<Slot>,
     /// Portraits and bitmaps.
-    others: Vec<(Kind, u16, Slot)>,
+    others: HashMap<(Kind, u16), Slot>,
     /// Counts the palettes the compositions saw (a memo of another palette is not used).
     palette: u64,
     /// Scratch: an image's pixels as words.
@@ -365,7 +365,7 @@ impl Compositor {
             out: Vec::new(),
             last: None,
             tiles: Vec::new(),
-            others: Vec::new(),
+            others: HashMap::new(),
             palette: 0,
             input: Vec::new(),
             dirty: None,
@@ -519,7 +519,7 @@ impl Compositor {
 struct Resolver<'a> {
     hd: &'a mut HdImages,
     tiles: &'a mut Vec<Slot>,
-    others: &'a mut Vec<(Kind, u16, Slot)>,
+    others: &'a mut HashMap<(Kind, u16), Slot>,
     input: &'a mut Vec<u32>,
     images: &'a mut dyn Images,
     pal: &'a [u32; 256],
@@ -539,14 +539,7 @@ impl Resolver<'_> {
             }
             &mut self.tiles[i]
         } else {
-            let at = match self.others.iter().position(|o| o.0 == kind && o.1 == id) {
-                Some(at) => at,
-                None => {
-                    self.others.push((kind, id, Slot::default()));
-                    self.others.len() - 1
-                }
-            };
-            &mut self.others[at].2
+            self.others.entry((kind, id)).or_default()
         };
         if slot.stamp == stamp
             && let Some(r) = slot.resolved
