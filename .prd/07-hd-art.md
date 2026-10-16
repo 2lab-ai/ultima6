@@ -116,6 +116,7 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
    - that text over a portrait, the clock hands, a sparkle, a missile and the pointer sprite stay classic;
    - that an outline-flash and an overlay pixel are flagged;
    - that a merged shore record falls back to MMPX of its current bytes;
+   - with a pack loaded (H2): a pack entry made from a record's earlier bytes is not used once the record's bytes change; the record shows MMPX of its current bytes;
    - that a pixel drawn from a record, then left in place while the record is rewritten, then copied and presented, is shown classic (stale `ver`);
    - that switching HD off and on over a persistent panel and a skipped render, and loading a pack or changing the scale with unchanged game pixels, recompose the frame exactly;
    - the final S× RGBA, not only the plane, for overlapping HD art, an outline flash, an overlay pixel, the pointer and a combat replay;
