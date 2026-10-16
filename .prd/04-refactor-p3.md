@@ -6,8 +6,7 @@ tags: [ultima6, rust, refactor, ai, modding]
 
 # 04 — P3 refactor: AI-driven NPCs, editable systems, mods
 
-Status: planned (rev 5, 2026-10-15 — trinity rounds 1–2: gpt-6-astra and fable MUST-FIX folded in;
-grok-4.7 slot pending; rev 5 adds the HD/4K seam (05-hd-output.md), W10 and acceptance 7, not yet reviewed). Starts after the M2 port is deployed (P2).
+Status: planned (rev 6, 2026-10-16 — trinity rounds 1–3 on rev 1–4: gpt-6-astra and fable MUST-FIX folded in, both APPROVE at round 3; rev 5 added an HD/4K seam; rev 6 folds in the grok-4.7 slot's round 1 on rev 5: spec 07 has since built and shipped that seam in another form, so P3 no longer builds it — W10 is removed, W0 keeps no scene or HD-pack contract, and acceptance 7 now asks that mods keep 07's receipts green). Starts after the M2 port is deployed (P2).
 
 User command (verbatim, `browser-port/ssot.md`): "3. rust 코드를 고치기 좋도록 리팩토링 /
 3.a npc의 가능한 행동을 ai model에게 주고 응답 받을수 있도록 / 3.b 캐릭터 월드맵 등 전체적인
@@ -143,13 +142,13 @@ value; the behavioural receipt is added next to it.
 
 ## Output for HD / 4K
 
-The user's 2026-10-15 requirement (x2/x4 resources, an HD/4K map view, more of the map shown; "not now") is designed in [`05-hd-output.md`](05-hd-output.md). P3 builds only its seam: the scene and asset-provider contracts and HD-pack type in W0, the scene output in W10, and acceptance 7. The parity frame stays unchanged.
+The user's 2026-10-15 requirement (x2/x4 resources, an HD/4K map view, more of the map shown; "not now") is owned by spec 07 and, for the wider view, by [`05-hd-output.md`](05-hd-output.md) §4. Spec 07 built the seam and shipped it: a per-pixel source plane in the frame buffers, the HD compositor reading the shown frame, the pointer on the logical 320×200, and the `u6-hdpack/1` format keyed by the classic image's content hash (`07-hd-art.md` Design 1–2; `u6-render/src/lib.rs:89`, `u6-render/src/hd.rs:499`, `u6-hdpack/src/lib.rs:58`). P3 does not reimplement any of it, adds no scene output, and changes neither `VIEW`, `WINDOW` nor `WINDOW_TILES` (05 §4 keeps the wider view as research). What P3 owes the HD output is acceptance 7: a mod changes records the way the original files would, so the plane and the compositor keep working, and a modded record falls back to MMPX by its hash. The parity frame stays unchanged.
 
 ## Work units (one agent each)
 
 | WU | Scope | Needs | Gate |
 |---|---|---|---|
-| W0 | contracts: definition / override schema, stable ids, codec API, save sidecar, load-order and conflict rules, scene and asset-provider contracts, HD-pack content type | — | spec review |
+| W0 | contracts: definition / override schema, stable ids, codec API, save sidecar, load-order and conflict rules | — | spec review |
 | W1 | map + chunks + basetile + tileflag + animdata writers, look.lzd table writer through the existing LZW encoder, text forms | W0 | local byte-identity |
 | W2 | objlist codec unification (both profiles) + schedule writer + actor files | W0 | parity suite + byte-identity of both profiles |
 | W3a | converse disassembler (opcode table from the interpreter's arms; data-in-code tables kept as data) + relocating rebuild (jump and table operands **and** the addresses of runtime script writes, `converse/exec.rs:268`, `converse/eval.rs:245` → `script.rs:41`) + name / price edits; a rebuilt script longer than `SCRIPT_LEN` 0x2800 is refused | W0 | identity rebuild of every script, **and** every name lengthened by N bytes → interpreter receipts identical except the names |
@@ -162,7 +161,6 @@ The user's 2026-10-15 requirement (x2/x4 resources, an HD/4K map view, more of t
 | W7b | ModelBrain + budget + transport | W7a, transport decision | acceptance 2 |
 | W8 | rules extraction, one family per dispatch (missile weapons first) | W4 | behaviour test + parity |
 | W9 | rights cleanup of notes and docs | — | grep: no quoted game strings |
-| W10 | scene output next to the frame (map cells + UI widgets, logical units); view size read from state in new code | W0 | parity identical + scene/frame agreement on synthetic state |
 | W3b | full conversation text form | W3a | later |
 
 ## Acceptance (P3)
@@ -178,4 +176,4 @@ The user's 2026-10-15 requirement (x2/x4 resources, an HD/4K map view, more of t
 5. A save made with a mod set resumes with that set; with a mod missing, changed or reordered it is
    refused before boot with the difference listed; a save without a sidecar loads only with no mods.
 6. Export → build of the base game is byte-identical for every file the engine reads.
-7. Every presented frame has a scene, and drawing that scene at 1× with the base assets reproduces the frame's map window and panels (synthetic state, then the real-data receipts as pass/fail).
+7. With a mod set active, spec 07's receipts still pass: the source receipt (every attributed pixel with a current version equals its image's classic pixel) and the HD compositor tests; a record the mod changed is shown as MMPX of its new bytes, never as a pack image made from the old ones (its content hash differs).
