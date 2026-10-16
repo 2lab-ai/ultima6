@@ -348,6 +348,136 @@ fn a_signal_to_the_tool_stops_its_calls_first() {
     }
 }
 
+/// A `codex` stand-in that writes its pid to `$STUB_HOLD` first thing, takes its prompt and
+/// sleeps.
+fn eager_stub(dir: &Path) -> PathBuf {
+    let p = dir.join("codex-eager");
+    std::fs::write(
+        &p,
+        "#!/bin/sh\necho $$ > \"$STUB_HOLD.tmp\"\nmv \"$STUB_HOLD.tmp\" \"$STUB_HOLD\"\ncat > /dev/null\nexec sleep 60\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// Test builds hold the hook that signals the tool between a call's spawn and its group's
+/// registration, once the stand-in runs (`U6_HD_TEST_SIGNAL_IN_SPAWN`,
+/// `U6_HD_TEST_SPAWN_WAIT`, `U6_HD_TEST_SIGNAL_TO`); release builds have none.
+#[cfg(debug_assertions)]
+#[test]
+fn a_signal_while_a_call_is_being_spawned_still_stops_it() {
+    use std::os::unix::process::ExitStatusExt;
+    // To the process (any thread may take it: it must wait for the group) and to the spawning
+    // thread itself (it must hold it until the group is in the table).
+    for (sig, to) in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP]
+        .into_iter()
+        .flat_map(|s| [(s, "process"), (s, "thread")])
+    {
+        let e = Env::new(&format!("spawn-signal-{sig}-{to}"));
+        let work = e.dir.join("work");
+        let w = work.to_str().unwrap();
+        let hold = e.dir.join("held");
+        assert!(
+            e.run(&["atlas", "--synthetic", "--work", w])
+                .status
+                .success()
+        );
+        let eager = eager_stub(&e.dir);
+        let status = e
+            .cmd(&[
+                "run",
+                "--work",
+                w,
+                "--codex",
+                eager.to_str().unwrap(),
+                "--send",
+                "--limit",
+                "1",
+            ])
+            .env("STUB_HOLD", &hold)
+            .env("U6_HD_TEST_SIGNAL_IN_SPAWN", sig.to_string())
+            .env("U6_HD_TEST_SPAWN_WAIT", &hold)
+            .env("U6_HD_TEST_SIGNAL_TO", to)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(sig), "{to} {status:?}");
+        // The stand-in was running when the signal came (the hook waited for its pid) and is
+        // gone too; it would have lived 60 s past its prompt's end, which the tool's death
+        // brings.
+        let call = std::fs::read_to_string(&hold).unwrap().trim().to_string();
+        let _cleanup = KillOnDrop(call.clone());
+        let start = std::time::Instant::now();
+        while !gone(&call) {
+            assert!(
+                start.elapsed().as_secs() < 2,
+                "signal {sig} to the {to}: the call spawned meanwhile outlived the tool"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_dir_all(&e.dir);
+    }
+}
+
+#[test]
+fn a_call_starts_with_no_signal_blocked() {
+    // Each stop signal sent to the stand-in itself ends it: the tool's mask while it spawns is
+    // not the call's.
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        let e = Env::new(&format!("mask-{sig}"));
+        let work = e.dir.join("work");
+        let w = work.to_str().unwrap();
+        let hold = e.dir.join("held");
+        assert!(
+            e.run(&["atlas", "--synthetic", "--work", w])
+                .status
+                .success()
+        );
+        let slow = slow_stub(&e.dir);
+        let tool = e
+            .cmd(&[
+                "run",
+                "--work",
+                w,
+                "--codex",
+                slow.to_str().unwrap(),
+                "--send",
+                "--limit",
+                "1",
+            ])
+            .env("STUB_HOLD", &hold)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        while !hold.exists() {
+            assert!(start.elapsed().as_secs() < 30, "the call never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let call = std::fs::read_to_string(&hold).unwrap().trim().to_string();
+        let _cleanup = KillOnDrop(call.clone());
+        // SAFETY: kill(2) to the stand-in.
+        assert_eq!(unsafe { libc::kill(call.parse().unwrap(), sig) }, 0);
+        let start = std::time::Instant::now();
+        while !gone(&call) {
+            assert!(
+                start.elapsed().as_secs() < 2,
+                "signal {sig}: blocked in the call"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // The call failed as one whose codex was killed by a signal.
+        let o = tool.wait_with_output().unwrap();
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(out.contains("codex exited with signal"), "{out}");
+        let _ = std::fs::remove_dir_all(&e.dir);
+    }
+}
+
 #[test]
 fn the_default_and_relative_work_dirs_are_checked() {
     let e = Env::new("contain");

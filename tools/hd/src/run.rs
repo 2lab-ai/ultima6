@@ -95,10 +95,27 @@ fn kill_group(pgid: u32) {
 static LIVE: [std::sync::atomic::AtomicI32; 16] =
     [const { std::sync::atomic::AtomicI32::new(0) }; 16];
 
-/// SIGINT, SIGTERM or SIGHUP: every running call's group is killed, then the signal is raised
-/// again with its default action, so the tool ends as it would have, its lock freed only
-/// after its calls are gone. (Atomics, kill, signal and raise only: async-signal-safe.)
+/// Calls being spawned now, whose groups are not in [`LIVE`] yet. A spawning thread blocks
+/// the stop signals from before its spawn until its group is in the table, so [`on_signal`]
+/// runs on another thread and waits for this to be 0 before it kills the groups.
+static SPAWNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The signals that stop a command with its calls.
+const STOP: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+/// SIGINT, SIGTERM or SIGHUP: once no call is between its spawn and its slot in [`LIVE`]
+/// (waited for at most about 2 s), every running call's group is killed, then the signal is
+/// raised again with its default action, so the tool ends as it would have, its lock freed
+/// only after its calls are gone. (Atomics, poll, kill, signal and raise only:
+/// async-signal-safe.)
 extern "C" fn on_signal(sig: libc::c_int) {
+    for _ in 0..2000 {
+        if SPAWNING.load(Ordering::SeqCst) == 0 {
+            break;
+        }
+        // SAFETY: poll(2) with no descriptors is a 1 ms sleep, async-signal-safe.
+        unsafe { libc::poll(std::ptr::null_mut(), 0, 1) };
+    }
     for slot in &LIVE {
         let p = slot.load(Ordering::SeqCst);
         if p > 0 {
@@ -116,10 +133,10 @@ extern "C" fn on_signal(sig: libc::c_int) {
 
 /// Installs [`on_signal`] for SIGINT, SIGTERM and SIGHUP (the terminal's Ctrl-C, a `kill`, a
 /// closed terminal): a command stopped so takes its codex calls with it, which run in process
-/// groups of their own that those signals do not reach. A signal that comes between a call's
-/// spawn and its slot being taken (a few instructions) misses that one call.
+/// groups of their own that those signals do not reach. A signal that comes while a call is
+/// being spawned waits for its group to be in the table ([`SPAWNING`]).
 pub fn stop_calls_on_signals() {
-    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+    for sig in STOP {
         // SAFETY: a zeroed sigaction with only the handler and an empty mask set is valid; the
         // handler is an extern "C" fn of the expected signature.
         unsafe {
@@ -129,6 +146,86 @@ pub fn stop_calls_on_signals() {
             libc::sigaction(sig, &action, std::ptr::null_mut());
         }
     }
+}
+
+/// The stop signals blocked in this thread while held (a call is being spawned and
+/// registered); the thread's earlier mask restored on drop, when a signal held meanwhile is
+/// delivered.
+struct Blocked {
+    old: libc::sigset_t,
+}
+
+impl Blocked {
+    fn new() -> Blocked {
+        // SAFETY: sigset_t is plain data, filled by sigemptyset/sigaddset and pthread_sigmask.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            for sig in STOP {
+                libc::sigaddset(&mut set, sig);
+            }
+            let mut old: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old);
+            Blocked { old }
+        }
+    }
+}
+
+impl Drop for Blocked {
+    fn drop(&mut self) {
+        // SAFETY: restores the mask this thread had, saved by Blocked::new.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.old, std::ptr::null_mut()) };
+    }
+}
+
+/// Counted in [`SPAWNING`] while held.
+struct Spawning;
+
+impl Spawning {
+    fn new() -> Spawning {
+        SPAWNING.fetch_add(1, Ordering::SeqCst);
+        Spawning
+    }
+}
+
+impl Drop for Spawning {
+    fn drop(&mut self) {
+        SPAWNING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Test builds only (`debug_assertions`, which the gate profile keeps): with
+/// `U6_HD_TEST_SIGNAL_IN_SPAWN` set to a signal number, the first call's spawn, between the
+/// spawn and the group's registration, waits (at most 10 s) for the file
+/// `U6_HD_TEST_SPAWN_WAIT` names (the stand-in's sign that it runs), sends that signal to the
+/// tool (or, with `U6_HD_TEST_SIGNAL_TO=thread`, to this very thread, which holds it blocked),
+/// then waits 200 ms: the signal comes while the group is not in the table yet.
+#[cfg(debug_assertions)]
+fn signal_in_spawn_for_tests() {
+    static FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(sig) = std::env::var("U6_HD_TEST_SIGNAL_IN_SPAWN")
+        .ok()
+        .and_then(|v| v.parse::<libc::c_int>().ok())
+    else {
+        return;
+    };
+    if FIRED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(wait) = std::env::var_os("U6_HD_TEST_SPAWN_WAIT") {
+        let start = Instant::now();
+        while !Path::new(&wait).exists() && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    if std::env::var("U6_HD_TEST_SIGNAL_TO").as_deref() == Ok("thread") {
+        // SAFETY: pthread_kill(3) to this thread.
+        unsafe { libc::pthread_kill(libc::pthread_self(), sig) };
+    } else {
+        // SAFETY: kill(2) to this process.
+        unsafe { libc::kill(libc::getpid(), sig) };
+    }
+    std::thread::sleep(Duration::from_millis(200));
 }
 
 /// A spawned call: its group in [`LIVE`] while it runs; on drop, on every way out of
@@ -516,7 +613,24 @@ impl Runner for Codex {
             work::create_temp(&dir.join("stderr.txt"), 0o644)?;
         let (events, events_tmp, events_path) =
             work::create_temp(&dir.join("events.jsonl"), 0o644)?;
-        let child = Command::new(&self.bin)
+        // From before the spawn until the group is in LIVE, a stop signal is held for this
+        // thread and waited for by the handler on any other (Blocked, then Spawning, dropped
+        // in the reverse order on every way out).
+        let blocked = Blocked::new();
+        let spawning = Spawning::new();
+        let mut command = Command::new(&self.bin);
+        // SAFETY: the closure runs in the child between fork and exec and calls only
+        // sigemptyset and sigprocmask, which are async-signal-safe. The child inherits the
+        // blocked mask; codex starts with none blocked.
+        unsafe {
+            command.pre_exec(|| {
+                let mut none: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut none);
+                libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+        let child = command
             .args(["exec", "-m", MODEL, "-c", "model_reasoning_effort=low"])
             .args([
                 "-s",
@@ -535,7 +649,11 @@ impl Runner for Codex {
             .process_group(0)
             .spawn()
             .map_err(|e| format!("{}: {e}", self.bin.display()))?;
+        #[cfg(debug_assertions)]
+        signal_in_spawn_for_tests();
         let mut group = Group::new(child);
+        drop(spawning);
+        drop(blocked);
         let (Some(stdout), Some(stdin), Some(stderr)) = (
             group.child.stdout.take(),
             group.child.stdin.take(),
