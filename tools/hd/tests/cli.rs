@@ -963,6 +963,24 @@ fn a_call_starts_with_no_signal_blocked() {
         }
         let call = std::fs::read_to_string(&hold).unwrap().trim().to_string();
         let _cleanup = KillOnDrop(call.clone());
+        // Once it is `sleep` (its exec done): a signal to the shell before that, while it waits
+        // for its `mv`, is held by the shell until the `mv` ends, then dropped (the `mv` did not
+        // die of it), and the stand-in would sleep on through it.
+        let start = std::time::Instant::now();
+        loop {
+            let o = Command::new("/bin/ps")
+                .args(["-o", "comm=", "-p", &call])
+                .output()
+                .unwrap();
+            if String::from_utf8_lossy(&o.stdout).trim().ends_with("sleep") {
+                break;
+            }
+            assert!(
+                start.elapsed().as_secs() < 10,
+                "signal {sig}: never exec'd sleep"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         // SAFETY: kill(2) to the stand-in.
         assert_eq!(unsafe { libc::kill(call.parse().unwrap(), sig) }, 0);
         let start = std::time::Instant::now();
