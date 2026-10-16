@@ -189,7 +189,10 @@ pub fn save(gfx: &mut GfxState, back: &Framebuffer, slot: u16, x: u16, y: u16) {
     };
     let plane = back.src();
     let mut srcs = under_src.get_mut(slot).and_then(|s| match plane {
-        Some(_) => Some(s.0.get_or_insert_with(|| vec![Src::CLASSIC; BLOCK_W * TILE_W])),
+        Some(_) => {
+            let block = || std::rc::Rc::from(vec![Src::CLASSIC; BLOCK_W * TILE_W]);
+            Some(std::rc::Rc::make_mut(s.0.get_or_insert_with(block)))
+        }
         None => s.0.take().and(None),
     });
     for r in 0..TILE_W {
