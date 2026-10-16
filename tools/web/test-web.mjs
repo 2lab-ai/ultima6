@@ -355,8 +355,22 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   await page.keyboard.press('ArrowDown');
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['ArrowDown', false], 'no game: arrows stay the page\'s');
   await page.keyboard.press('Tab');
+  // The chooser is armed, and the arming has taken effect, before the key. Playwright turns on
+  // Chromium's chooser interception when the first 'filechooser' listener is added, by a
+  // protocol call nothing awaits; a chooser the page opens before the interception took effect
+  // is not intercepted and no event comes. The focus read after the wait is sent to the page
+  // after that call and answered after it, so the key follows the interception. Enter, not
+  // Space: Space clicks on its keyup, an input event of its own, and the keydown's user
+  // activation lapses within seconds (a Space held 4 s opened the chooser, 6 s did not); a
+  // loaded host has delivered the keyup over 6 s after the keydown, and the chooser was refused.
+  // Enter clicks in its keydown's own task. When the focus check fails the wait is never
+  // awaited: the `.catch` keeps its rejection (the page is closed) from going unhandled and
+  // ending the run; `await chosen` still throws.
+  const chosen = page.waitForEvent('filechooser');
+  chosen.catch(() => {});
   assert.equal((await h.state(page)).focused, 'picker');
-  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Space')]);
+  await page.keyboard.press('Enter');
+  const chooser = await chosen;
   await chooser.setFiles(h.HFES);
   const s = await started(page, FILES);
   assert.equal(s.focused, 'screen', 'focus lands on the canvas after the import');
