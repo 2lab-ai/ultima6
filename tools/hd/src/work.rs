@@ -195,6 +195,19 @@ pub fn append_file(path: &Path, text: &str) -> Result<(), String> {
     write_file(path, &all)
 }
 
+/// [`append_file`], made durable: the file is synced before it replaces the old one (as every
+/// write here), and its directory after, so the line survives a crash once this returns.
+pub fn append_durable(path: &Path, text: &str) -> Result<(), String> {
+    append_file(path, text)?;
+    let dir = ensure_dir(
+        path.parent()
+            .ok_or_else(|| format!("{}: no parent", path.display()))?,
+    )?;
+    std::fs::File::open(&dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| format!("{}: {e}", dir.display()))
+}
+
 /// FNV-1a 64 of `parts`, each prefixed by its length, as 16 hex digits.
 pub fn digest(parts: &[&[u8]]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;

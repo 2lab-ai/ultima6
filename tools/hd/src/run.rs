@@ -11,9 +11,15 @@
 //! another atlas generation, a changed prompt or sheet, a changed or truncated output — is not
 //! done, and is run again. A call whose image is not a PNG, or is of the sheet's size and does
 //! not decode, fails, records nothing and leaves the image where the call put it; an image of
-//! another size is recorded undecoded and ingest refuses it ([`record`]). A job whose calls
-//! failed [`CALLS_MAX`] times (timeouts, no image) is given up: not called again, refused by
-//! ingest. Either way its items are re-rolled once, then left to the scaler.
+//! another size is recorded undecoded and ingest refuses it ([`record`]). Every call is
+//! reserved in the run ledger before it is made ([`Ledger`]); a job with [`CALLS_MAX`] paid
+//! calls of its identity that is still not done (timeouts, no image, cut off, its output lost
+//! or invalid) is given up: not called again, refused by ingest, as is one whose sheet cannot
+//! be read. Either way its items are re-rolled once, then left to the scaler.
+//!
+//! Stopped by SIGINT, SIGTERM or SIGHUP ([`stop_calls_on_signals`]), the run starts no call,
+//! each running call kills and reaps its group at its next turn, and the command ends by the
+//! signal once all of them have returned.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -34,6 +40,23 @@ pub trait Runner: Sync {
     /// Runs one call with `sheet` attached and `prompt`, `dir` as its working dir; returns the
     /// generated image's path.
     fn generate(&self, sheet: &Path, prompt: &str, dir: &Path) -> Result<PathBuf, String>;
+
+    /// [`Runner::generate`], paid for: `reserve` writes the run ledger's line that the call
+    /// is made, and the call is made only once it has. Nothing is reserved or called while the
+    /// tool is stopping ([`NOT_STARTED`]).
+    fn dispatch(
+        &self,
+        sheet: &Path,
+        prompt: &str,
+        dir: &Path,
+        reserve: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<PathBuf, String> {
+        if stopped_by().is_some() {
+            return Err(NOT_STARTED.into());
+        }
+        reserve()?;
+        self.generate(sheet, prompt, dir)
+    }
 
     /// After the image at `image` was recorded (output and receipt written): removes what the
     /// call left of it.
@@ -90,51 +113,38 @@ fn kill_group(pgid: u32) {
     }
 }
 
-/// The process groups of the calls running now (0 = a free slot; `run` makes at most 4 at
-/// once), for [`on_signal`], which may read only what is safe in a signal handler.
-static LIVE: [std::sync::atomic::AtomicI32; 16] =
-    [const { std::sync::atomic::AtomicI32::new(0) }; 16];
+/// The signal stopping the tool (0: none). Set by [`on_signal`] only; read before every spawn
+/// and on every turn of every call's loop, where the stopping is done.
+static SHUTDOWN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
-/// Calls being spawned now, whose groups are not in [`LIVE`] yet. A spawning thread blocks
-/// the stop signals from before its spawn until its group is in the table, so [`on_signal`]
-/// runs on another thread and waits for this to be 0 before it kills the groups.
-static SPAWNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Held around "not stopping? reserve, spawn, own the group" (spawn admission): no call is
+/// spawned once [`SHUTDOWN`] is seen.
+static ADMIT: Mutex<()> = Mutex::new(());
 
 /// The signals that stop a command with its calls.
 const STOP: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
-/// SIGINT, SIGTERM or SIGHUP: once no call is between its spawn and its slot in [`LIVE`]
-/// (waited for at most about 2 s), every running call's group is killed, then the signal is
-/// raised again with its default action, so the tool ends as it would have, its lock freed
-/// only after its calls are gone. (Atomics, poll, kill, signal and raise only:
-/// async-signal-safe.)
+/// A call that was not started: the tool is stopping (nothing reserved, the job left unrun).
+pub const NOT_STARTED: &str = "not started: the tool is stopping";
+/// A call stopped because the tool is stopping (its group killed and reaped).
+pub const STOPPED: &str = "stopped: the tool is stopping";
+
+/// SIGINT, SIGTERM or SIGHUP: notes the signal for the calls to see, and puts back the
+/// default action of all three, so a second one ends the tool at once. (An atomic store and
+/// signal(2): async-signal-safe; everything else is done by the calls, in normal context.)
 extern "C" fn on_signal(sig: libc::c_int) {
-    for _ in 0..2000 {
-        if SPAWNING.load(Ordering::SeqCst) == 0 {
-            break;
-        }
-        // SAFETY: poll(2) with no descriptors is a 1 ms sleep, async-signal-safe.
-        unsafe { libc::poll(std::ptr::null_mut(), 0, 1) };
-    }
-    for slot in &LIVE {
-        let p = slot.load(Ordering::SeqCst);
-        if p > 0 {
-            // SAFETY: kill(2) is async-signal-safe.
-            unsafe { libc::kill(-p, libc::SIGKILL) };
-        }
-    }
-    // SAFETY: signal(2) and raise(3) are async-signal-safe; the signal stays blocked until
-    // this handler returns, and then ends the process with its default action.
-    unsafe {
-        libc::signal(sig, libc::SIG_DFL);
-        libc::raise(sig);
+    let _ = SHUTDOWN.compare_exchange(0, sig, Ordering::SeqCst, Ordering::SeqCst);
+    for s in STOP {
+        // SAFETY: signal(2) is async-signal-safe.
+        unsafe { libc::signal(s, libc::SIG_DFL) };
     }
 }
 
 /// Installs [`on_signal`] for SIGINT, SIGTERM and SIGHUP (the terminal's Ctrl-C, a `kill`, a
-/// closed terminal): a command stopped so takes its codex calls with it, which run in process
-/// groups of their own that those signals do not reach. A signal that comes while a call is
-/// being spawned waits for its group to be in the table ([`SPAWNING`]).
+/// closed terminal). The calls run in process groups of their own, which those signals do not
+/// reach: stopped so, the tool starts no call, each running call kills and reaps its group at
+/// its next turn, and the command, its workers returned, lets go of its lock and ends by the
+/// signal ([`reraise`]).
 pub fn stop_calls_on_signals() {
     for sig in STOP {
         // SAFETY: a zeroed sigaction with only the handler and an empty mask set is valid; the
@@ -148,62 +158,36 @@ pub fn stop_calls_on_signals() {
     }
 }
 
-/// The stop signals blocked in this thread while held (a call is being spawned and
-/// registered); the thread's earlier mask restored on drop, when a signal held meanwhile is
-/// delivered.
-struct Blocked {
-    old: libc::sigset_t,
+/// The signal that is stopping the tool, if one is.
+pub fn stopped_by() -> Option<libc::c_int> {
+    let s = SHUTDOWN.load(Ordering::SeqCst);
+    (s != 0).then_some(s)
 }
 
-impl Blocked {
-    fn new() -> Blocked {
-        // SAFETY: sigset_t is plain data, filled by sigemptyset/sigaddset and pthread_sigmask.
-        unsafe {
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
-            for sig in STOP {
-                libc::sigaddset(&mut set, sig);
-            }
-            let mut old: libc::sigset_t = std::mem::zeroed();
-            libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old);
-            Blocked { old }
-        }
+/// Ends the tool by `sig` with its default action (the caller has let go of its lock).
+pub fn reraise(sig: libc::c_int) -> ! {
+    // SAFETY: signal(2) and raise(3) on this process.
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
     }
-}
-
-impl Drop for Blocked {
-    fn drop(&mut self) {
-        // SAFETY: restores the mask this thread had, saved by Blocked::new.
-        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.old, std::ptr::null_mut()) };
-    }
-}
-
-/// Counted in [`SPAWNING`] while held.
-struct Spawning;
-
-impl Spawning {
-    fn new() -> Spawning {
-        SPAWNING.fetch_add(1, Ordering::SeqCst);
-        Spawning
-    }
-}
-
-impl Drop for Spawning {
-    fn drop(&mut self) {
-        SPAWNING.fetch_sub(1, Ordering::SeqCst);
-    }
+    std::process::exit(128 + sig)
 }
 
 /// Test builds only (`debug_assertions`, which the gate profile keeps): with
-/// `U6_HD_TEST_SIGNAL_IN_SPAWN` set to a signal number, the first call's spawn, between the
-/// spawn and the group's registration, waits (at most 10 s) for the file
-/// `U6_HD_TEST_SPAWN_WAIT` names (the stand-in's sign that it runs), sends that signal to the
-/// tool (or, with `U6_HD_TEST_SIGNAL_TO=thread`, to this very thread, which holds it blocked),
-/// then waits 200 ms: the signal comes while the group is not in the table yet.
+/// `U6_HD_TEST_SIGNAL=<signal number>` and `U6_HD_TEST_SIGNAL_AT=<point>`, the tool sends that
+/// signal to its own process group (as a terminal does) once, at that point of the first call:
+/// `before-spawn` (inside spawn admission, before the check), `after-spawn` (the group owned,
+/// before the first turn of its loop; once the file `U6_HD_TEST_SPAWN_WAIT` names exists, the
+/// stand-in's sign that it runs) or `reap` (the group killed, before it is waited for); then,
+/// the signal handled, it waits `U6_HD_TEST_DELAY_MS`.
 #[cfg(debug_assertions)]
-fn signal_in_spawn_for_tests() {
+fn test_point(at: &str) {
     static FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let Some(sig) = std::env::var("U6_HD_TEST_SIGNAL_IN_SPAWN")
+    if std::env::var("U6_HD_TEST_SIGNAL_AT").as_deref() != Ok(at) {
+        return;
+    }
+    let Some(sig) = std::env::var("U6_HD_TEST_SIGNAL")
         .ok()
         .and_then(|v| v.parse::<libc::c_int>().ok())
     else {
@@ -218,41 +202,34 @@ fn signal_in_spawn_for_tests() {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    if std::env::var("U6_HD_TEST_SIGNAL_TO").as_deref() == Ok("thread") {
-        // SAFETY: pthread_kill(3) to this thread.
-        unsafe { libc::pthread_kill(libc::pthread_self(), sig) };
-    } else {
-        // SAFETY: kill(2) to this process.
-        unsafe { libc::kill(libc::getpid(), sig) };
+    // SAFETY: kill(2) to this process's group.
+    unsafe { libc::kill(0, sig) };
+    // Delivered (to whichever thread takes it) before this point goes on.
+    let start = Instant::now();
+    while stopped_by().is_none() && start.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(1));
     }
-    std::thread::sleep(Duration::from_millis(200));
+    let ms = std::env::var("U6_HD_TEST_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    std::thread::sleep(Duration::from_millis(ms));
 }
 
-/// A spawned call: its group in [`LIVE`] while it runs; on drop, on every way out of
-/// [`Codex::generate`], its whole process group is killed, the call reaped, its slot freed.
+#[cfg(not(debug_assertions))]
+fn test_point(_: &str) {}
+
+/// A spawned call: on drop, on every way out of [`Codex::generate`], its whole process group is
+/// killed and the call reaped.
 struct Group {
     child: std::process::Child,
-    slot: Option<usize>,
-}
-
-impl Group {
-    fn new(child: std::process::Child) -> Group {
-        let pgid = i32::try_from(child.id()).unwrap_or(0);
-        let slot = LIVE.iter().position(|s| {
-            s.compare_exchange(0, pgid, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-        });
-        Group { child, slot }
-    }
 }
 
 impl Drop for Group {
     fn drop(&mut self) {
         kill_group(self.child.id());
+        test_point("reap");
         let _ = self.child.wait();
-        if let Some(i) = self.slot {
-            LIVE[i].store(0, Ordering::SeqCst);
-        }
     }
 }
 
@@ -401,6 +378,9 @@ struct Pipes<'a, W: Write, E: Write> {
     written: usize,
     /// The prompt's write failed: the call's input was closed before it took it all.
     refused: Option<std::io::Error>,
+    /// Reading the events or the stderr failed (that pipe is closed, not ended cleanly).
+    out_failed: Option<std::io::Error>,
+    err_failed: Option<std::io::Error>,
     lines: EventLines<W>,
     errs: Capped<E>,
 }
@@ -439,11 +419,16 @@ impl<E: Write> Capped<E> {
 }
 
 /// Reads what `pipe` has, at most a turn's worth ([`TURN_BYTES`], [`TURN_CALLS`]) and nothing
-/// once `until` has passed, handing each chunk to `sink`; closes it at its end.
-fn drain<R: Read>(pipe: &mut Option<R>, until: Instant, mut sink: impl FnMut(&[u8])) {
-    let Some(p) = pipe.as_mut() else { return };
+/// once `until` has passed, handing each chunk to `sink`; closes it at its end, or on a read
+/// error that a retry does not clear, which it returns (an end, but not a clean one).
+pub(crate) fn drain<R: Read>(
+    pipe: &mut Option<R>,
+    until: Instant,
+    mut sink: impl FnMut(&[u8]),
+) -> Option<std::io::Error> {
+    let p = pipe.as_mut()?;
     let mut chunk = [0u8; 8192];
-    let (mut moved, mut end) = (0, false);
+    let (mut moved, mut end, mut failed) = (0, false, None);
     for _ in 0..TURN_CALLS {
         if moved >= TURN_BYTES || Instant::now() >= until {
             break;
@@ -459,8 +444,9 @@ fn drain<R: Read>(pipe: &mut Option<R>, until: Instant, mut sink: impl FnMut(&[u
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => {
+            Err(e) => {
                 end = true;
+                failed = Some(e);
                 break;
             }
         }
@@ -468,6 +454,7 @@ fn drain<R: Read>(pipe: &mut Option<R>, until: Instant, mut sink: impl FnMut(&[u
     if end {
         *pipe = None;
     }
+    failed
 }
 
 impl<W: Write, E: Write> Pipes<'_, W, E> {
@@ -547,11 +534,15 @@ impl<W: Write, E: Write> Pipes<'_, W, E> {
         }
         if self.stdout.as_ref().is_some_and(|o| ready(o.as_raw_fd())) {
             let lines = &mut self.lines;
-            drain(&mut self.stdout, until, |b| lines.feed(b));
+            if let Some(e) = drain(&mut self.stdout, until, |b| lines.feed(b)) {
+                self.out_failed.get_or_insert(e);
+            }
         }
         if self.stderr.as_ref().is_some_and(|e| ready(e.as_raw_fd())) {
             let errs = &mut self.errs;
-            drain(&mut self.stderr, until, |b| errs.put(b));
+            if let Some(e) = drain(&mut self.stderr, until, |b| errs.put(b)) {
+                self.err_failed.get_or_insert(e);
+            }
         }
     }
 }
@@ -563,31 +554,43 @@ pub(crate) struct Settled {
     /// The prompt went in whole.
     pub(crate) taken: bool,
     pub(crate) refused: Option<std::io::Error>,
-    /// The event stream ended.
+    /// The event stream ended (cleanly: not a read error).
     pub(crate) ended: bool,
-    /// The first failure saving the call's events or output.
+    /// Reading the event stream failed.
+    pub(crate) unread: Option<std::io::Error>,
+    /// The first failure saving (or reading) the call's events, stderr or output.
     pub(crate) saved: Option<String>,
 }
 
 /// The call's thread id, or why the call failed, in this precedence: how it was stopped, its
-/// prompt not taken, its stream not ended, its exit status, then a failure saving what it
-/// printed (the call itself having gone right), then the thread id missing or malformed.
+/// prompt not taken, its events unreadable or not ended, its exit status; then a failure
+/// saving what it printed, which is the error when the call itself went right and is kept
+/// beside the call's own error otherwise; then the thread id missing or malformed.
 pub(crate) fn settle(s: Settled, thread: Option<String>) -> Result<String, String> {
-    let status = s.waited?;
-    if !s.taken {
-        return Err(match s.refused {
-            Some(e) => format!("the call did not take its prompt: {e}"),
-            None => "the call did not take its prompt".into(),
-        });
-    }
-    if !s.ended {
-        return Err("the call's output did not end".into());
-    }
-    if !status.success() {
-        return Err(format!("codex exited with {status}"));
-    }
-    if let Some(e) = s.saved {
-        return Err(e);
+    let call = (|| {
+        let status = s.waited?;
+        if !s.taken {
+            return Err(match s.refused {
+                Some(e) => format!("the call did not take its prompt: {e}"),
+                None => "the call did not take its prompt".into(),
+            });
+        }
+        if let Some(e) = s.unread {
+            return Err(format!("the call's output could not be read: {e}"));
+        }
+        if !s.ended {
+            return Err("the call's output did not end".into());
+        }
+        if !status.success() {
+            return Err(format!("codex exited with {status}"));
+        }
+        Ok(())
+    })();
+    match (call, s.saved) {
+        (Err(e), Some(saved)) => return Err(format!("{e} (also: {saved})")),
+        (Err(e), None) => return Err(e),
+        (Ok(()), Some(saved)) => return Err(saved),
+        (Ok(()), None) => {}
     }
     let id = thread.ok_or("no thread id in the codex events")?;
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
@@ -597,15 +600,26 @@ pub(crate) fn settle(s: Settled, thread: Option<String>) -> Result<String, Strin
 }
 
 impl Runner for Codex {
-    /// One deadline covers the call, all of it in this thread: the prompt is written and the
-    /// events read as the pipes are ready (both non-blocking, one `poll` for the two), while
-    /// the call is watched for its exit, until it exits, the prompt fails or the deadline
-    /// passes; then the call's group is killed (on every path) and the stream given [`CLEANUP`]
-    /// to end (each wait bounded as [`Pipes::step`] says: the event file's writes are assumed
-    /// to return). Then both pipes are closed, whatever still holds their other ends: nothing
-    /// of the call outlives it here, no thread, no descriptor. A failure to save the call's
-    /// events or output is the call's error when the call itself went right ([`settle`]).
     fn generate(&self, sheet: &Path, prompt: &str, dir: &Path) -> Result<PathBuf, String> {
+        self.dispatch(sheet, prompt, dir, &mut || Ok(()))
+    }
+
+    /// One deadline covers the call, all of it in this thread: the prompt is written and the
+    /// events and stderr read as the pipes are ready (non-blocking, one `poll` for the three),
+    /// while the call is watched for its exit, until it exits, the prompt fails, the deadline
+    /// passes or the tool is stopping ([`STOPPED`]); then the call's group is killed and
+    /// reaped (on every path) and its output pipes given [`CLEANUP`] to end, each tracked on
+    /// its own (each wait bounded as [`Pipes::step`] says: the files' writes are assumed to
+    /// return; no grace when stopping). Then the pipes are closed, whatever still holds their
+    /// other ends: nothing of the call outlives it here, no thread, no descriptor. The spawn
+    /// is admitted under [`ADMIT`]: not once the tool is stopping, and only after `reserve`.
+    fn dispatch(
+        &self,
+        sheet: &Path,
+        prompt: &str,
+        dir: &Path,
+        reserve: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<PathBuf, String> {
         use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
         let deadline = Instant::now() + self.timeout;
@@ -613,47 +627,40 @@ impl Runner for Codex {
             work::create_temp(&dir.join("stderr.txt"), 0o644)?;
         let (events, events_tmp, events_path) =
             work::create_temp(&dir.join("events.jsonl"), 0o644)?;
-        // From before the spawn until the group is in LIVE, a stop signal is held for this
-        // thread and waited for by the handler on any other (Blocked, then Spawning, dropped
-        // in the reverse order on every way out).
-        let blocked = Blocked::new();
-        let spawning = Spawning::new();
-        let mut command = Command::new(&self.bin);
-        // SAFETY: the closure runs in the child between fork and exec and calls only
-        // sigemptyset and sigprocmask, which are async-signal-safe. The child inherits the
-        // blocked mask; codex starts with none blocked.
-        unsafe {
-            command.pre_exec(|| {
-                let mut none: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&mut none);
-                libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
-                Ok(())
-            });
-        }
-        let child = command
-            .args(["exec", "-m", MODEL, "-c", "model_reasoning_effort=low"])
-            .args([
-                "-s",
-                "workspace-write",
-                "--skip-git-repo-check",
-                "--json",
-                "-C",
-            ])
-            .arg(dir)
-            .arg("-i")
-            .arg(sheet)
-            .arg("-")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .map_err(|e| format!("{}: {e}", self.bin.display()))?;
-        #[cfg(debug_assertions)]
-        signal_in_spawn_for_tests();
-        let mut group = Group::new(child);
-        drop(spawning);
-        drop(blocked);
+        let mut group = {
+            let _admit = ADMIT.lock().unwrap_or_else(|e| e.into_inner());
+            test_point("before-spawn");
+            let unmade = |e: String| {
+                let _ = std::fs::remove_file(&stderr_tmp);
+                let _ = std::fs::remove_file(&events_tmp);
+                e
+            };
+            if stopped_by().is_some() {
+                return Err(unmade(NOT_STARTED.into()));
+            }
+            reserve().map_err(unmade)?;
+            let child = Command::new(&self.bin)
+                .args(["exec", "-m", MODEL, "-c", "model_reasoning_effort=low"])
+                .args([
+                    "-s",
+                    "workspace-write",
+                    "--skip-git-repo-check",
+                    "--json",
+                    "-C",
+                ])
+                .arg(dir)
+                .arg("-i")
+                .arg(sheet)
+                .arg("-")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .map_err(|e| unmade(format!("{}: {e}", self.bin.display())))?;
+            Group { child }
+        };
+        test_point("after-spawn");
         let (Some(stdout), Some(stdin), Some(stderr)) = (
             group.child.stdout.take(),
             group.child.stdin.take(),
@@ -671,6 +678,8 @@ impl Runner for Codex {
             prompt: prompt.as_bytes(),
             written: 0,
             refused: None,
+            out_failed: None,
+            err_failed: None,
             // Buffered: a stream of short lines is not a write per line.
             lines: EventLines::new(std::io::BufWriter::new(events)),
             // Read like the events, so a call that writes its stderr without end fills no disk.
@@ -685,6 +694,9 @@ impl Runner for Codex {
             pipes.stdin = None;
         }
         let waited = loop {
+            if stopped_by().is_some() {
+                break Err(STOPPED.to_string());
+            }
             if let Some(e) = &pipes.refused {
                 break Err(format!("the call did not take its prompt: {e}"));
             }
@@ -699,16 +711,21 @@ impl Runner for Codex {
             }
             pipes.step(deadline.min(now + Duration::from_millis(50)));
         };
-        // Whatever the call left running goes with it.
+        // Whatever the call left running goes with it: killed and reaped.
         drop(group);
+        // Each output pipe is drained until its own end, within the grace (none when stopping).
         let grace = Instant::now() + CLEANUP;
-        while pipes.stdout.is_some() && Instant::now() < grace {
+        while (pipes.stdout.is_some() || pipes.stderr.is_some())
+            && Instant::now() < grace
+            && stopped_by().is_none()
+        {
             pipes.step(grace);
         }
-        let ended = pipes.stdout.is_none();
+        let unread = pipes.out_failed.take();
+        let ended = pipes.stdout.is_none() && unread.is_none();
         let taken = pipes.stdin.is_none() && pipes.refused.is_none();
         let refused = pipes.refused.take();
-        // Our ends of both pipes close here, whoever holds the others.
+        // Our ends of the pipes close here, whoever holds the others.
         drop(pipes.stdin.take());
         drop(pipes.stdout.take());
         drop(pipes.stderr.take());
@@ -718,7 +735,11 @@ impl Runner for Codex {
         let mut saved = stream
             .error
             .map(|e| format!("the call's events were not saved: {e}"))
-            .or(errs.map(|e| format!("the call's stderr was not saved: {e}")));
+            .or(errs.map(|e| format!("the call's stderr was not saved: {e}")))
+            .or(pipes
+                .err_failed
+                .take()
+                .map(|e| format!("the call's stderr could not be read: {e}")));
         for (tmp, path) in [(&stderr_tmp, &stderr_path), (&events_tmp, &events_path)] {
             if let Err(e) = work::commit(tmp, path) {
                 saved.get_or_insert(format!("the call's output was not saved: {e}"));
@@ -730,6 +751,7 @@ impl Runner for Codex {
                 taken,
                 refused,
                 ended,
+                unread,
                 saved,
             },
             stream.thread,
@@ -846,19 +868,37 @@ pub struct RunSummary {
     /// Of `ok`: images of another size than their sheet, recorded for ingest to refuse.
     pub other_size: usize,
     pub failed: usize,
-    /// Jobs not called again: [`CALLS_MAX`] calls of theirs failed (ingest refuses them).
+    /// Calls cut off because the tool is stopping (paid: their reservations count).
+    pub stopped: usize,
+    /// Jobs not called again: [`CALLS_MAX`] paid calls of their identity (ingest refuses
+    /// them).
     pub given_up: usize,
+    /// Jobs whose sheet cannot be read, so not sent (ingest refuses them).
+    pub unreadable: usize,
+    /// Lines of `runs.jsonl` from before calls were reserved: they count for no job.
+    pub legacy: usize,
 }
 
-/// Failed calls of one job identity after which the job is given up: not called again, and
+/// Paid calls of one job identity after which the job is given up: not called again, and
 /// refused by ingest like a sheet of another size (its items re-rolled once, then left to the
-/// scaler). Timeouts and calls that bring back no image are paid at most this often.
+/// scaler). A call is paid once it is reserved (`runs.jsonl`), before it is made: a call that
+/// times out, brings back no image, is cut off by a signal or a kill, or whose output is
+/// later lost or invalid counts the same.
 pub const CALLS_MAX: usize = 2;
 
-/// Failed calls per job identity, from `runs.jsonl` (lines without an identity, written by an
-/// earlier tool, count for none).
-pub fn failed_calls(work: &Work) -> Result<std::collections::BTreeMap<String, usize>, String> {
-    let mut out = std::collections::BTreeMap::new();
+/// `runs.jsonl`, the run ledger: a `dispatched` line written and synced before each call is
+/// made (the reservation), and a `result` line after it. Paid calls per identity are its
+/// `dispatched` lines. Lines without an `event` were written before reservations existed:
+/// they count for no job (the bound counts from this version on), and `run` says how many.
+#[derive(Debug, Default)]
+pub struct Ledger {
+    pub paid: std::collections::BTreeMap<String, usize>,
+    pub legacy: usize,
+}
+
+/// Reads the run ledger (none yet: empty).
+pub fn ledger(work: &Work) -> Result<Ledger, String> {
+    let mut out = Ledger::default();
     let p = work.path("runs.jsonl");
     let text = match img::read_capped(&p, 256 << 20) {
         Ok(t) => t,
@@ -869,22 +909,37 @@ pub fn failed_calls(work: &Work) -> Result<std::collections::BTreeMap<String, us
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
             continue;
         };
-        if v["ok"] == false
-            && let Some(id) = v["identity"].as_str()
-        {
-            *out.entry(id.to_string()).or_default() += 1;
+        match v["event"].as_str() {
+            Some("dispatched") => {
+                if let Some(id) = v["identity"].as_str() {
+                    *out.paid.entry(id.to_string()).or_default() += 1;
+                }
+            }
+            Some(_) => {}
+            None => out.legacy += 1,
         }
     }
     Ok(out)
 }
 
-/// Whether `job` is given up: [`CALLS_MAX`] failed calls of its identity as it is now.
-pub fn given_up(
-    work: &Work,
-    job: &Job,
-    failed: &std::collections::BTreeMap<String, usize>,
-) -> bool {
-    identity(work, job).is_ok_and(|id| failed.get(&id).copied().unwrap_or(0) >= CALLS_MAX)
+/// Where a job that is not done stands.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// To be called: its identity.
+    Open(String),
+    /// [`CALLS_MAX`] paid calls of its identity: not called again.
+    GivenUp,
+    /// Its identity cannot be had (the sheet cannot be read): not sent, never with another.
+    Unreadable(String),
+}
+
+/// Where `job` (not done) stands against `ledger`.
+pub fn standing(work: &Work, job: &Job, ledger: &Ledger) -> Standing {
+    match identity(work, job) {
+        Err(e) => Standing::Unreadable(e),
+        Ok(id) if ledger.paid.get(&id).copied().unwrap_or(0) >= CALLS_MAX => Standing::GivenUp,
+        Ok(id) => Standing::Open(id),
+    }
 }
 
 /// The notice printed before anything is sent (and instead of sending without `--send`).
@@ -897,6 +952,8 @@ pub fn notice(n: usize) -> String {
 }
 
 /// Runs the pending jobs (all, or the first `limit`), printing one line per sheet to `out`.
+/// Stops starting calls once the tool is stopping ([`stopped_by`]); returns when every call
+/// it started has returned (its group killed and reaped).
 pub fn run(
     work: &Work,
     runner: &dyn Runner,
@@ -904,26 +961,45 @@ pub fn run(
     out: &mut (dyn Write + Send),
 ) -> Result<RunSummary, String> {
     let jobs = work.read_jobs()?;
-    let failed = failed_calls(work)?;
-    let not_done: Vec<&Job> = jobs.iter().filter(|j| output(work, j).is_none()).collect();
-    let (dropped, mut pending): (Vec<&Job>, Vec<&Job>) = not_done
-        .into_iter()
-        .partition(|j| given_up(work, j, &failed));
-    let given_up = dropped.len();
+    let book = ledger(work)?;
+    let mut summary = RunSummary {
+        legacy: book.legacy,
+        ..RunSummary::default()
+    };
+    let mut pending: Vec<(&Job, String)> = Vec::new();
+    for job in jobs.iter().filter(|j| output(work, j).is_none()) {
+        match standing(work, job, &book) {
+            Standing::Open(id) => pending.push((job, id)),
+            Standing::GivenUp => summary.given_up += 1,
+            Standing::Unreadable(e) => {
+                summary.unreadable += 1;
+                let _ = writeln!(
+                    out,
+                    "{}: not sent, its sheet cannot be read: {e}",
+                    job.sheet
+                );
+            }
+        }
+    }
     if let Some(n) = opts.limit {
         pending.truncate(n);
     }
-    let mut summary = RunSummary {
-        pending: pending.len(),
-        given_up,
-        ..RunSummary::default()
-    };
+    summary.pending = pending.len();
     let _ = writeln!(out, "{}", notice(pending.len()));
-    if given_up > 0 {
+    if summary.given_up > 0 {
         let _ = writeln!(
             out,
-            "{given_up} sheet(s) given up after {CALLS_MAX} failed calls each (not sent again; \
-             ingest re-rolls their items once, then leaves them to the scaler)."
+            "{} sheet(s) given up after {CALLS_MAX} paid calls each (not sent again; ingest \
+             re-rolls their items once, then leaves them to the scaler).",
+            summary.given_up
+        );
+    }
+    if book.legacy > 0 {
+        let _ = writeln!(
+            out,
+            "runs.jsonl has {} line(s) from before calls were reserved; they count for no \
+             sheet.",
+            book.legacy
         );
     }
     if !opts.send {
@@ -932,22 +1008,52 @@ pub fn run(
     }
     work.mkdirs()?;
     let next = AtomicUsize::new(0);
+    // The ledger is read and written whole: one writer at a time.
+    let books = Mutex::new(());
+    let abort = std::sync::atomic::AtomicBool::new(false);
     let shared = Mutex::new((out, &mut summary, String::new()));
     let parallel = opts.parallel.clamp(2, 4).min(pending.len().max(1));
     std::thread::scope(|s| {
         for _ in 0..parallel {
             s.spawn(|| {
                 loop {
+                    if stopped_by().is_some() || abort.load(Ordering::SeqCst) {
+                        break;
+                    }
                     let i = next.fetch_add(1, Ordering::SeqCst);
-                    let Some(job) = pending.get(i) else { break };
+                    let Some((job, id)) = pending.get(i) else {
+                        break;
+                    };
                     let t = Instant::now();
-                    let id = identity(work, job).unwrap_or_default();
-                    let result = call(work, runner, job);
+                    let (result, reserved) = call(work, runner, job, id, &books);
                     let secs = t.elapsed().as_secs();
+                    let stopping = stopped_by().is_some();
                     let mut g = shared.lock().unwrap_or_else(|e| e.into_inner());
                     let (out, summary, log) = &mut *g;
+                    if !reserved {
+                        // Nothing was sent: the tool is stopping, or the ledger cannot be
+                        // written (then nothing more is sent), or the call's dir is refused.
+                        if let Err(e) = &result
+                            && !stopping
+                        {
+                            summary.failed += 1;
+                            let _ = writeln!(out, "{}: not sent: {e}", job.sheet);
+                            if e.starts_with(LEDGER_FAILED) {
+                                abort.store(true, Ordering::SeqCst);
+                                log.push_str(e);
+                            }
+                        }
+                        continue;
+                    }
                     summary.calls += 1;
                     let line = match &result {
+                        _ if stopping && result.is_err() => {
+                            summary.stopped += 1;
+                            format!(
+                                "{}: stopped after {secs} s (the tool is stopping)",
+                                job.sheet
+                            )
+                        }
                         Ok(true) => {
                             summary.ok += 1;
                             format!("{}: ok in {secs} s", job.sheet)
@@ -968,12 +1074,13 @@ pub fn run(
                     };
                     let _ = writeln!(out, "{line}");
                     let rec = serde_json::json!({
-                        "sheet": job.sheet, "identity": id, "ok": result.is_ok(),
-                        "seconds": secs, "error": result.err(),
+                        "event": "result", "sheet": job.sheet, "identity": id,
+                        "ok": result.is_ok(), "seconds": secs,
+                        "stopped": stopping && result.is_err(), "error": result.err(),
                     });
-                    // Written after every call, so a run that stops keeps its record.
                     let line = format!("{rec}\n");
-                    if let Err(e) = work::append_file(&work.path("runs.jsonl"), &line) {
+                    let _books = books.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Err(e) = work::append_durable(&work.path("runs.jsonl"), &line) {
                         log.push_str(&e);
                     }
                 }
@@ -987,15 +1094,41 @@ pub fn run(
     Ok(summary)
 }
 
-/// One call: the generated image recorded as the job's output, its receipt written, and only
-/// then what the call left of it removed (whether it is the sheet's size, see [`record`]). A
-/// call whose image is not recorded keeps it there.
-fn call(work: &Work, runner: &dyn Runner, job: &Job) -> Result<bool, String> {
-    let dir = work::ensure_dir(&work.codex_dir(&job.sheet))?;
-    let sheet = work.sheet(&job.sheet);
-    let got = runner.generate(&sheet, &prompt::text(job), &dir)?;
-    let png = img::read_capped(&got, img::PNG_MAX_BYTES)?;
-    let fits = record(work, job, &png)?;
-    runner.finish(&got);
-    Ok(fits)
+/// The start of the error of a call not made because its reservation could not be written.
+pub const LEDGER_FAILED: &str = "the run ledger could not be written, so nothing was sent";
+
+/// One call of `job` (identity `id`): reserved in the ledger (synced) before it is made, the
+/// generated image recorded as the job's output, its receipt written, and only then what the
+/// call left of it removed (whether it is the sheet's size, see [`record`]). A call whose
+/// image is not recorded keeps it there. Returns the result and whether the call was reserved
+/// (paid).
+fn call(
+    work: &Work,
+    runner: &dyn Runner,
+    job: &Job,
+    id: &str,
+    books: &Mutex<()>,
+) -> (Result<bool, String>, bool) {
+    let mut reserved = false;
+    let result = (|| {
+        let dir = work::ensure_dir(&work.codex_dir(&job.sheet))?;
+        let sheet = work.sheet(&job.sheet);
+        let mut reserve = || {
+            let rec = serde_json::json!({
+                "event": "dispatched", "sheet": job.sheet, "identity": id,
+                "attempt": job.attempt,
+            });
+            let _books = books.lock().unwrap_or_else(|e| e.into_inner());
+            work::append_durable(&work.path("runs.jsonl"), &format!("{rec}\n"))
+                .map_err(|e| format!("{LEDGER_FAILED}: {e}"))?;
+            reserved = true;
+            Ok(())
+        };
+        let got = runner.dispatch(&sheet, &prompt::text(job), &dir, &mut reserve)?;
+        let png = img::read_capped(&got, img::PNG_MAX_BYTES)?;
+        let fits = record(work, job, &png)?;
+        runner.finish(&got);
+        Ok(fits)
+    })();
+    (result, reserved)
 }

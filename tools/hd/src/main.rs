@@ -199,17 +199,24 @@ fn atlas_cmd(a: &Args) -> Result<(), String> {
 
 fn run_cmd(a: &Args) -> Result<(), String> {
     let work = Work::open(a.work.as_deref())?;
-    let _lock = work.lock()?;
+    let lock = work.lock()?;
     let codex = Codex::from_env(a.codex.clone())?;
     let opts = RunOptions {
         send: a.send,
         limit: a.limit,
         parallel: a.parallel,
     };
-    // Ctrl-C, a kill or a closed terminal stops the calls too, before the lock is let go.
+    // Ctrl-C, a kill or a closed terminal: no new call, every running one killed and reaped,
+    // then the lock let go and the tool ended by that signal.
     run::stop_calls_on_signals();
     let mut out = std::io::stdout();
-    let s = run::run(&work, &codex, &opts, &mut out)?;
+    let result = run::run(&work, &codex, &opts, &mut out);
+    if let Some(sig) = run::stopped_by() {
+        drop(lock);
+        eprintln!("u6-hd: stopped by signal {sig}; every call it started is ended");
+        run::reraise(sig);
+    }
+    let s = result?;
     if a.send {
         println!(
             "run: {} calls, {} ok ({} not the sheet's size), {} failed",
@@ -219,7 +226,7 @@ fn run_cmd(a: &Args) -> Result<(), String> {
     if s.failed > 0 {
         return Err(format!(
             "{} call(s) failed; the sheets that came back are kept; run again to retry the rest \
-             (a sheet whose calls failed {} times is given up and refused by ingest)",
+             (a sheet with {} paid calls is given up and refused by ingest)",
             s.failed,
             run::CALLS_MAX
         ));

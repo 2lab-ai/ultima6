@@ -127,8 +127,9 @@ fn run_sends_nothing_without_send() {
         .unwrap()
         .count();
     assert_eq!(left, 0);
+    // A reservation and a result per call.
     let runs = std::fs::read_to_string(work.join("runs.jsonl")).unwrap();
-    assert_eq!(runs.lines().count(), jobs);
+    assert_eq!(runs.lines().count(), 2 * jobs);
     let o = e.run(&["run", "--work", w, "--codex", c, "--send"]);
     assert!(text(&o).contains("0 sheet(s) to generate"));
     assert_eq!(e.calls(), jobs);
@@ -284,77 +285,17 @@ impl Drop for KillOnDrop {
     }
 }
 
-#[test]
-fn a_signal_to_the_tool_stops_its_calls_first() {
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
-    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-        let e = Env::new(&format!("signal-{sig}"));
-        let work = e.dir.join("work");
-        let w = work.to_str().unwrap();
-        let hold = e.dir.join("held");
-        assert!(
-            e.run(&["atlas", "--synthetic", "--work", w])
-                .status
-                .success()
-        );
-        let slow = slow_stub(&e.dir);
-        // In a group of its own, as a shell runs a foreground job; the signal goes to that
-        // group, as the terminal sends Ctrl-C. The stand-in is in another group (the call's).
-        let mut tool = e
-            .cmd(&[
-                "run",
-                "--work",
-                w,
-                "--codex",
-                slow.to_str().unwrap(),
-                "--send",
-                "--limit",
-                "1",
-            ])
-            .env("STUB_HOLD", &hold)
-            .process_group(0)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let start = std::time::Instant::now();
-        while !hold.exists() {
-            assert!(start.elapsed().as_secs() < 30, "the call never started");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let call = std::fs::read_to_string(&hold).unwrap().trim().to_string();
-        let _cleanup = KillOnDrop(call.clone());
-        assert!(!gone(&call));
-        // SAFETY: kill(2) to the tool's process group.
-        assert_eq!(unsafe { libc::kill(-(tool.id() as i32), sig) }, 0);
-        let status = tool.wait().unwrap();
-        // Ended by that signal, raised again after the calls were stopped.
-        assert_eq!(status.signal(), Some(sig), "{status:?}");
-        // The stand-in (sleeping 60 s, in its own group) went with it.
-        let start = std::time::Instant::now();
-        while !gone(&call) {
-            assert!(
-                start.elapsed().as_secs() < 2,
-                "signal {sig}: the call outlived the tool"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        // Then the work dir is free.
-        let codex = stub(&e.dir);
-        let o = e.run(&["run", "--work", w, "--codex", codex.to_str().unwrap()]);
-        assert!(o.status.success(), "{}", text(&o));
-        assert!(text(&o).contains("Nothing was sent"));
-        let _ = std::fs::remove_dir_all(&e.dir);
-    }
-}
-
-/// A `codex` stand-in that writes its pid to `$STUB_HOLD` first thing, takes its prompt and
-/// sleeps.
-fn eager_stub(dir: &Path) -> PathBuf {
-    let p = dir.join("codex-eager");
+/// A `codex` stand-in that appends its pid to `$STUB_PIDS` and writes it to `$STUB_HOLD`
+/// first thing, takes its prompt, then sleeps (`slow`) or exits at once with no image.
+fn signal_stub(dir: &Path, slow: bool) -> PathBuf {
+    let p = dir.join(if slow { "codex-sleeps" } else { "codex-quits" });
+    let then = if slow { "exec sleep 60" } else { "exit 0" };
     std::fs::write(
         &p,
-        "#!/bin/sh\necho $$ > \"$STUB_HOLD.tmp\"\nmv \"$STUB_HOLD.tmp\" \"$STUB_HOLD\"\ncat > /dev/null\nexec sleep 60\n",
+        format!(
+            "#!/bin/sh\necho $$ >> \"$STUB_PIDS\"\necho $$ > \"$STUB_HOLD.tmp\"\n\
+             mv \"$STUB_HOLD.tmp\" \"$STUB_HOLD\"\ncat > /dev/null\n{then}\n"
+        ),
     )
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -362,63 +303,149 @@ fn eager_stub(dir: &Path) -> PathBuf {
     p
 }
 
-/// Test builds hold the hook that signals the tool between a call's spawn and its group's
-/// registration, once the stand-in runs (`U6_HD_TEST_SIGNAL_IN_SPAWN`,
-/// `U6_HD_TEST_SPAWN_WAIT`, `U6_HD_TEST_SIGNAL_TO`); release builds have none.
+/// Whether process `pid` does not exist at all (not even as a zombie: reaped).
+#[cfg(debug_assertions)]
+fn reaped(pid: &str) -> bool {
+    let o = Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().is_empty()
+}
+
+/// The pids in `file` (one per line; none if it is missing).
+fn pids(file: &Path) -> Vec<String> {
+    std::fs::read_to_string(file)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// The stop signals at each point of a call's life (test builds hold the hook that sends one
+/// at the points in the tool: `U6_HD_TEST_SIGNAL*`; release builds have none): before the
+/// spawn, after it (the group owned, before the first turn of its loop, held there 2.5 s,
+/// past any budget the tool once had), in the middle of the call (sent by the test to the
+/// tool's process group, as a terminal sends Ctrl-C), and while the call's group is reaped.
+/// Each time: the tool ends by that signal; every stand-in it started is reaped by then; a
+/// second command, trying all along, gets the lock only after that; no call starts once the
+/// signal is in.
 #[cfg(debug_assertions)]
 #[test]
-fn a_signal_while_a_call_is_being_spawned_still_stops_it() {
-    use std::os::unix::process::ExitStatusExt;
-    // To the process (any thread may take it: it must wait for the group) and to the spawning
-    // thread itself (it must hold it until the group is in the table).
-    for (sig, to) in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP]
-        .into_iter()
-        .flat_map(|s| [(s, "process"), (s, "thread")])
-    {
-        let e = Env::new(&format!("spawn-signal-{sig}-{to}"));
-        let work = e.dir.join("work");
-        let w = work.to_str().unwrap();
-        let hold = e.dir.join("held");
-        assert!(
-            e.run(&["atlas", "--synthetic", "--work", w])
-                .status
-                .success()
-        );
-        let eager = eager_stub(&e.dir);
-        let status = e
-            .cmd(&[
+fn a_stop_signal_at_any_point_ends_every_call_before_the_lock_goes() {
+    use std::io::BufRead;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let points = ["before-spawn", "after-spawn", "mid-call", "reap"];
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        for at in points {
+            let what = format!("signal {sig} at {at}");
+            let e = Env::new(&format!("stop-{sig}-{at}"));
+            let work = e.dir.join("work");
+            let w = work.to_str().unwrap().to_string();
+            let (hold, started) = (e.dir.join("held"), e.dir.join("started"));
+            assert!(
+                e.run(&["atlas", "--synthetic", "--work", &w])
+                    .status
+                    .success()
+            );
+            let bin = signal_stub(&e.dir, at != "reap");
+            // Three sheets, two at a time: after the signal, the third must never start.
+            let mut cmd = e.cmd(&[
                 "run",
                 "--work",
-                w,
+                &w,
                 "--codex",
-                eager.to_str().unwrap(),
+                bin.to_str().unwrap(),
                 "--send",
                 "--limit",
-                "1",
-            ])
-            .env("STUB_HOLD", &hold)
-            .env("U6_HD_TEST_SIGNAL_IN_SPAWN", sig.to_string())
-            .env("U6_HD_TEST_SPAWN_WAIT", &hold)
-            .env("U6_HD_TEST_SIGNAL_TO", to)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert_eq!(status.signal(), Some(sig), "{to} {status:?}");
-        // The stand-in was running when the signal came (the hook waited for its pid) and is
-        // gone too; it would have lived 60 s past its prompt's end, which the tool's death
-        // brings.
-        let call = std::fs::read_to_string(&hold).unwrap().trim().to_string();
-        let _cleanup = KillOnDrop(call.clone());
-        let start = std::time::Instant::now();
-        while !gone(&call) {
+                "3",
+                "--parallel",
+                "2",
+            ]);
+            cmd.env("STUB_HOLD", &hold)
+                .env("STUB_PIDS", &started)
+                .process_group(0)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+            if at != "mid-call" {
+                cmd.env("U6_HD_TEST_SIGNAL", sig.to_string())
+                    .env("U6_HD_TEST_SIGNAL_AT", at);
+            }
+            if at == "after-spawn" {
+                cmd.env("U6_HD_TEST_SPAWN_WAIT", &hold)
+                    .env("U6_HD_TEST_DELAY_MS", "2500");
+            }
+            let mut tool = cmd.spawn().unwrap();
+            let pgid = tool.id() as i32;
+            // The tool holds the lock once it prints its notice.
+            let mut lines = std::io::BufReader::new(tool.stdout.take().unwrap()).lines();
+            let notice = lines.next().unwrap().unwrap();
+            assert!(notice.contains("sheet(s) to generate"), "{what}: {notice}");
+            let rest = std::thread::spawn(move || lines.count());
+            // A second command, tried all along: when it gets the lock, every stand-in started
+            // must be reaped already.
+            let contender = {
+                let (bin, w, started) = (BIN.to_string(), w.clone(), started.clone());
+                let (home, log) = (e.home.clone(), e.log.clone());
+                std::thread::spawn(move || {
+                    let t = std::time::Instant::now();
+                    loop {
+                        assert!(t.elapsed().as_secs() < 30, "the lock never came free");
+                        let o = Command::new(&bin)
+                            .args(["run", "--work", &w])
+                            .env("HOME", &home)
+                            .env("CODEX_HOME", home.join(".codex"))
+                            .env("STUB_LOG", &log)
+                            .output()
+                            .unwrap();
+                        if o.status.success() {
+                            let all: Vec<String> = pids(&started);
+                            return (all.iter().all(|p| reaped(p)), all);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                })
+            };
+            if at == "mid-call" {
+                let t = std::time::Instant::now();
+                while !hold.exists() {
+                    assert!(t.elapsed().as_secs() < 30, "{what}: the call never started");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                // SAFETY: kill(2) to the tool's process group.
+                assert_eq!(unsafe { libc::kill(-pgid, sig) }, 0);
+            }
+            let status = tool.wait().unwrap();
+            let _ = rest.join();
+            let all = pids(&started);
+            let _cleanup: Vec<KillOnDrop> = all.iter().map(|p| KillOnDrop(p.clone())).collect();
+            assert_eq!(status.signal(), Some(sig), "{what}: {status:?}");
+            for p in &all {
+                assert!(reaped(p), "{what}: stand-in {p} outlived the tool");
+            }
+            let (all_reaped, seen) = contender.join().unwrap();
             assert!(
-                start.elapsed().as_secs() < 2,
-                "signal {sig} to the {to}: the call spawned meanwhile outlived the tool"
+                all_reaped,
+                "{what}: the lock came free before {seen:?} were reaped"
             );
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            // No call starts once the signal is in: none before the spawn, at most the two
+            // running ones otherwise.
+            let runs = std::fs::read_to_string(work.join("runs.jsonl")).unwrap_or_default();
+            let dispatched = runs
+                .lines()
+                .filter(|l| l.contains("\"dispatched\""))
+                .count();
+            if at == "before-spawn" {
+                assert_eq!((all.len(), dispatched), (0, 0), "{what}");
+            } else {
+                assert!(
+                    dispatched <= 2 && all.len() <= dispatched,
+                    "{what}: {dispatched}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&e.dir);
         }
-        let _ = std::fs::remove_dir_all(&e.dir);
     }
 }
 
@@ -476,6 +503,88 @@ fn a_call_starts_with_no_signal_blocked() {
         assert!(out.contains("codex exited with signal"), "{out}");
         let _ = std::fs::remove_dir_all(&e.dir);
     }
+}
+
+#[test]
+fn a_call_killed_before_its_result_still_counts() {
+    // The tool killed outright (no handler runs) while its call works, twice: each call was
+    // reserved before it was made, so each counts, and the sheet is then given up.
+    let e = Env::new("killed-calls");
+    let work = e.dir.join("work");
+    let w = work.to_str().unwrap();
+    let (hold, started) = (e.dir.join("held"), e.dir.join("started"));
+    assert!(
+        e.run(&["atlas", "--synthetic", "--work", w])
+            .status
+            .success()
+    );
+    let slow = signal_stub(&e.dir, true);
+    let first = |runs: &str| {
+        runs.lines()
+            .find(|l| l.contains("\"dispatched\""))
+            .and_then(|l| l.split("\"identity\":\"").nth(1))
+            .map(|r| r.split('"').next().unwrap().to_string())
+            .unwrap()
+    };
+    let mut ids = Vec::new();
+    for round in 0..2 {
+        let _ = std::fs::remove_file(&hold);
+        let mut tool = e
+            .cmd(&[
+                "run",
+                "--work",
+                w,
+                "--codex",
+                slow.to_str().unwrap(),
+                "--send",
+                "--limit",
+                "1",
+            ])
+            .env("STUB_HOLD", &hold)
+            .env("STUB_PIDS", &started)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let t = std::time::Instant::now();
+        while !hold.exists() {
+            assert!(
+                t.elapsed().as_secs() < 30,
+                "round {round}: the call never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        tool.kill().unwrap();
+        tool.wait().unwrap();
+        let runs = std::fs::read_to_string(work.join("runs.jsonl")).unwrap();
+        assert_eq!(
+            runs.lines()
+                .filter(|l| l.contains("\"dispatched\""))
+                .count(),
+            round + 1
+        );
+        assert_eq!(runs.lines().filter(|l| l.contains("\"result\"")).count(), 0);
+        ids.push(first(&runs));
+    }
+    for p in pids(&started) {
+        drop(KillOnDrop(p));
+    }
+    // One sheet, called twice, never recorded: given up, and ingest refuses it.
+    assert_eq!(ids[0], ids[1]);
+    let o = e.run(&["run", "--work", w]);
+    assert!(
+        text(&o).contains("1 sheet(s) given up after 2 paid calls"),
+        "{}",
+        text(&o)
+    );
+    let o = e.run(&["ingest", "--synthetic", "--work", w]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        text(&o).contains("sheets refused (size, unreadable or source changed): 1"),
+        "{}",
+        text(&o)
+    );
+    let _ = std::fs::remove_dir_all(&e.dir);
 }
 
 #[test]

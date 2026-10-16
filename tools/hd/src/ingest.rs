@@ -1,6 +1,6 @@
 //! `ingest`: every sheet that came back is checked for its size (a sheet of another size is
-//! refused whole, before it is decoded, as is a sheet given up after `run::CALLS_MAX` failed
-//! calls), sliced at the fixed pitch, keyed, colour-transferred and gated image by
+//! refused whole, before it is decoded, as is a sheet given up after `run::CALLS_MAX` paid
+//! calls or one whose sheet cannot be read), sliced at the fixed pitch, keyed, colour-transferred and gated image by
 //! image; then each item is judged whole (its images, and the terrain seam or the actor motion
 //! gate). An item that fails its first attempt is queued for one re-roll (new sheets, attempt
 //! 2); one that fails again falls back to the scaler as a whole. The images of passing items
@@ -359,7 +359,7 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
         thresholds: t.text(),
         ..Report::default()
     };
-    let failed = run::failed_calls(work)?;
+    let book = run::ledger(work)?;
     // item -> attempt -> what its sheets came to.
     let mut attempts: BTreeMap<u32, BTreeMap<u8, Attempt>> = BTreeMap::new();
     let mut gates_log = String::new();
@@ -375,10 +375,17 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
             }
         };
         let Some((png, w, h)) = run::output(work, job) else {
-            if run::given_up(work, job, &failed) {
-                // Its calls failed CALLS_MAX times: refused as a sheet that came back unusable.
+            // Given up after CALLS_MAX paid calls, or a sheet that cannot be read (so never
+            // sent): refused as a sheet that came back unusable.
+            let why = match run::standing(work, job, &book) {
+                run::Standing::Open(_) => None,
+                run::Standing::GivenUp => Some("calls"),
+                run::Standing::Unreadable(_) => Some("sheet"),
+            };
+            if let Some(why) = why {
                 report.refused_sheets += 1;
-                let line = serde_json::json!({"sheet": job.sheet, "attempt": job.attempt, "refused": "calls"});
+                let line =
+                    serde_json::json!({"sheet": job.sheet, "attempt": job.attempt, "refused": why});
                 let _ = writeln!(gates_log, "{line}");
                 mark(&mut attempts, &|a| a.refused = true);
             } else {

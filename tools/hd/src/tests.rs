@@ -710,8 +710,18 @@ fn run_sends_nothing_without_send_and_resumes() {
     let s = run::run(&w, &fake, &opts(true, None), &mut out).unwrap();
     assert_eq!(s.calls, 0);
     assert!(jobs.iter().all(|j| w.out(&j.sheet).exists()));
+    // Each call: its reservation, synced before it was made, and its result.
     let runs = std::fs::read_to_string(w.path("runs.jsonl")).unwrap();
-    assert_eq!(runs.lines().count(), jobs.len());
+    let count = |event: &str| {
+        runs.lines()
+            .filter(|l| l.contains(&format!("\"event\":\"{event}\"")))
+            .count()
+    };
+    assert_eq!(
+        (count("dispatched"), count("result")),
+        (jobs.len(), jobs.len())
+    );
+    assert_eq!(runs.lines().count(), 2 * jobs.len());
     let _ = std::fs::remove_dir_all(&w.root);
 }
 
@@ -2325,7 +2335,7 @@ fn calls_that_keep_failing_are_given_up_after_two() {
     s.calls.lock().unwrap().clear();
     let r = run::run(&w, &s, &opts, &mut out).unwrap();
     assert_eq!((r.calls, r.given_up), (0, 1));
-    assert!(String::from_utf8_lossy(&out).contains("1 sheet(s) given up after 2 failed calls"));
+    assert!(String::from_utf8_lossy(&out).contains("1 sheet(s) given up after 2 paid calls"));
     // Ingest refuses it and re-rolls its items once; the re-rolls get their own two calls.
     let r = ingest::ingest(&g, &w, &t).unwrap();
     assert_eq!((r.refused_sheets, r.rerolled_items), (1, on_x.len()));
@@ -2458,6 +2468,7 @@ fn a_call_s_save_failure_is_its_error_after_the_call_s_own() {
         taken,
         refused: None,
         ended,
+        unread: None,
         saved: saved.clone(),
     };
     let id = || Some("t-1".to_string());
@@ -2485,6 +2496,8 @@ fn a_call_s_save_failure_is_its_error_after_the_call_s_own() {
     ] {
         let e = run::settle(s, id()).unwrap_err();
         assert!(e.contains(want), "{e}");
+        // The save failure is kept beside it, as context.
+        assert!(e.ends_with(&format!("(also: {why})")), "{e}");
     }
     // A save failure before a missing thread id.
     assert_eq!(
@@ -2564,4 +2577,218 @@ fn a_call_s_stderr_is_kept_to_its_cap() {
     println!("64 MiB of stderr in {took:?}: {kept} bytes kept");
     assert_eq!(kept, run::STDERR_MAX);
     let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
+fn a_read_error_on_a_call_s_pipe_is_kept_not_taken_for_its_end() {
+    use std::io::{Error, ErrorKind};
+    use std::time::{Duration, Instant};
+    /// Hands out `steps` in order, then a clean end.
+    struct Steps(Vec<std::io::Result<Vec<u8>>>);
+    impl std::io::Read for Steps {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0.is_empty() {
+                return Ok(0);
+            }
+            let b = self.0.remove(0)?;
+            buf[..b.len()].copy_from_slice(&b);
+            Ok(b.len())
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(5);
+    let mut got = Vec::new();
+    // Interrupted is retried; a failure that is not ends the pipe with that error.
+    let mut pipe = Some(Steps(vec![
+        Ok(b"ab".to_vec()),
+        Err(Error::from(ErrorKind::Interrupted)),
+        Ok(b"c".to_vec()),
+        Err(Error::other("the disk went away")),
+        Ok(b"never".to_vec()),
+    ]));
+    let e = run::drain(&mut pipe, until, |b| got.extend_from_slice(b)).unwrap();
+    assert_eq!(e.to_string(), "the disk went away");
+    assert!(pipe.is_none());
+    assert_eq!(got, b"abc");
+    // Would-block leaves it open; a clean end closes it with no error.
+    let mut pipe = Some(Steps(vec![Err(Error::from(ErrorKind::WouldBlock))]));
+    assert!(run::drain(&mut pipe, until, |_| {}).is_none());
+    assert!(pipe.is_some());
+    assert!(run::drain(&mut pipe, until, |_| {}).is_none());
+    assert!(pipe.is_none());
+    // In the call: an unreadable event stream is the call's error, not a clean end.
+    let s = run::Settled {
+        waited: Ok(std::os::unix::process::ExitStatusExt::from_raw(0)),
+        taken: true,
+        refused: None,
+        ended: false,
+        unread: Some(Error::other("the disk went away")),
+        saved: None,
+    };
+    let e = run::settle(s, Some("t-1".into())).unwrap_err();
+    assert_eq!(e, "the call's output could not be read: the disk went away");
+}
+
+#[test]
+fn stderr_written_after_the_events_end_is_still_kept() {
+    use std::time::Duration;
+    let t = temp("late-stderr");
+    let dir = crate::work::ensure_dir(&t.join("dir")).unwrap();
+    std::fs::write(t.join("sheet.png"), b"x").unwrap();
+    // The call prints its thread and exits; a helper of its own session, holding only its
+    // stderr, writes there 300 ms later: the events have ended long before.
+    let late = review_stub(
+        &t,
+        "late.sh",
+        "cat > /dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}'\n\
+         /usr/bin/perl -MPOSIX -e 'exit if fork; POSIX::setsid(); select(undef, undef, undef, \
+         0.3); print STDERR \"late\\n\"' > /dev/null\nexit 0",
+    );
+    let c = run::Codex {
+        bin: late,
+        home: t.join("home"),
+        timeout: Duration::from_secs(10),
+    };
+    let e = c
+        .generate(&t.join("sheet.png"), "PROMPT", &dir)
+        .unwrap_err();
+    assert_eq!(e, "no image generated");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("stderr.txt")).unwrap(),
+        "late\n"
+    );
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
+fn every_paid_call_counts_whatever_became_of_it() {
+    let g = synthetic::game();
+    let t = Thresholds::default();
+    let opts = RunOptions {
+        send: true,
+        limit: None,
+        parallel: 2,
+    };
+    let dispatched = |w: &Work, sheet: &str| {
+        std::fs::read_to_string(w.path("runs.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"dispatched\"") && l.contains(&format!("\"{sheet}\"")))
+            .count()
+    };
+    // A successful output later lost, then later corrupt: each call counted, then given up.
+    let w = work("paid-lost");
+    let jobs = atlas_into(&g, &w);
+    let x = jobs[0].sheet.clone();
+    let s = script("paid-lost-codex");
+    assert_eq!(run_once(&w, &s).1, jobs.len());
+    std::fs::remove_file(w.out(&x)).unwrap();
+    assert_eq!(run_once(&w, &s), (vec![x.clone()], 1, 0));
+    let mut png = std::fs::read(w.out(&x)).unwrap();
+    png.truncate(png.len() / 2);
+    std::fs::write(w.out(&x), &png).unwrap();
+    assert_eq!(run_once(&w, &s), (vec![], 0, 0));
+    assert_eq!(dispatched(&w, &x), 2);
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert_eq!(r.refused_sheets, 1);
+    assert!(r.rerolled_items > 0);
+    let _ = std::fs::remove_dir_all(&w.root);
+    // A sheet that cannot be read: never sent (no identity, so no call), refused by ingest.
+    let w = work("paid-unreadable");
+    let jobs = atlas_into(&g, &w);
+    let x = jobs[0].sheet.clone();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(w.sheet(&x), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let mut out = Vec::new();
+    s.calls.lock().unwrap().clear();
+    let r = run::run(&w, &s, &opts, &mut out).unwrap();
+    assert_eq!((r.unreadable, r.calls), (1, jobs.len() - 1));
+    assert!(!s.calls.lock().unwrap().contains(&x));
+    assert!(
+        String::from_utf8_lossy(&out).contains(&format!("{x}: not sent, its sheet cannot be read"))
+    );
+    assert_eq!(dispatched(&w, &x), 0);
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert_eq!(r.refused_sheets, 1);
+    std::fs::set_permissions(w.sheet(&x), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let _ = std::fs::remove_dir_all(&w.root);
+    // A ledger that cannot be read, or cannot be written: nothing is sent.
+    let w = work("paid-ledger");
+    atlas_into(&g, &w);
+    std::fs::create_dir_all(w.path("runs.jsonl")).unwrap();
+    s.calls.lock().unwrap().clear();
+    assert!(run::run(&w, &s, &opts, &mut Vec::new()).is_err());
+    assert!(s.calls.lock().unwrap().is_empty());
+    std::fs::remove_dir(w.path("runs.jsonl")).unwrap();
+    // Readable (absent), but its directory takes no new file: each reservation fails, so no
+    // call is made, and the run says why.
+    std::fs::set_permissions(&w.root, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let e = run::run(&w, &s, &opts, &mut Vec::new()).unwrap_err();
+    std::fs::set_permissions(&w.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(e.contains(run::LEDGER_FAILED), "{e}");
+    assert!(s.calls.lock().unwrap().is_empty());
+    assert!(!w.path("runs.jsonl").exists());
+    let _ = std::fs::remove_dir_all(&w.root);
+    // Lines from before reservations existed count for no sheet, and the run says so.
+    let w = work("paid-legacy");
+    let jobs = atlas_into(&g, &w);
+    let old = format!(
+        "{{\"sheet\":\"{}\",\"ok\":false,\"seconds\":1,\"error\":\"timed out\"}}\n",
+        jobs[0].sheet
+    );
+    std::fs::write(w.path("runs.jsonl"), old.repeat(3)).unwrap();
+    let mut out = Vec::new();
+    let r = run::run(
+        &w,
+        &s,
+        &RunOptions {
+            send: false,
+            limit: None,
+            parallel: 2,
+        },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!((r.legacy, r.given_up, r.pending), (3, 0, jobs.len()));
+    assert!(String::from_utf8_lossy(&out).contains("3 line(s) from before calls were reserved"));
+    let _ = std::fs::remove_dir_all(&w.root);
+    let _ = std::fs::remove_dir_all(&s.at);
+}
+
+#[test]
+fn a_run_makes_at_most_four_calls_at_once() {
+    /// Counts the calls in flight, each 30 ms long.
+    struct Busy {
+        now: AtomicUsize,
+        most: AtomicUsize,
+    }
+    impl Runner for Busy {
+        fn generate(&self, sheet: &Path, _: &str, dir: &Path) -> Result<PathBuf, String> {
+            let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(n, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            self.now.fetch_sub(1, Ordering::SeqCst);
+            let to = dir.join("made.png");
+            std::fs::copy(sheet, &to).map_err(|e| e.to_string())?;
+            Ok(to)
+        }
+    }
+    let g = synthetic::game();
+    for (asked, most) in [(9, 4), (4, 4), (1, 2)] {
+        let w = work(&format!("parallel-{asked}"));
+        let jobs = atlas_into(&g, &w);
+        assert!(jobs.len() >= 4);
+        let b = Busy {
+            now: AtomicUsize::new(0),
+            most: AtomicUsize::new(0),
+        };
+        let opts = RunOptions {
+            send: true,
+            limit: None,
+            parallel: asked,
+        };
+        run::run(&w, &b, &opts, &mut Vec::new()).unwrap();
+        assert!(b.most.load(Ordering::SeqCst) <= most, "asked {asked}");
+        assert!(b.most.load(Ordering::SeqCst) >= 1);
+        let _ = std::fs::remove_dir_all(&w.root);
+    }
 }
