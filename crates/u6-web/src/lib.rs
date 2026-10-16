@@ -45,14 +45,14 @@ mod zipscan;
 
 use std::collections::BTreeMap;
 
-use u6_core::hd::ImageCache;
+use u6_core::hd::HdView;
 use u6_core::objects::{BLOCK_COUNT, MAX_RECORDS};
 use u6_core::pacer::{self, Pacer, Speed};
 use u6_core::saveload::{MemStore, OBJLIST_FILE, attach, block_file, changed_since};
 use u6_core::sound::AudioDriver;
 use u6_core::{Engine, Files, Framebuffer, InputEvent, Key};
 use u6_intake::{InputFile, intake};
-use u6_render::hd::{Compositor, NoImages, Scale};
+use u6_render::hd::Scale;
 use wasm_bindgen::prelude::*;
 
 /// The dropped files together, as copied into wasm: a file read whole counts its size; a zip
@@ -230,21 +230,7 @@ pub struct Game {
     /// The steps the page's wall time is worth, at the viewer's speed.
     pacer: Pacer,
     /// The HD frame ([`Game::set_hd`]).
-    hd: Hd,
-}
-
-/// The HD frame and what it was composed from.
-struct Hd {
-    on: bool,
-    scale: Scale,
-    /// Moves at every change of `on` or `scale`.
-    version: u64,
-    compositor: Compositor,
-    images: ImageCache,
-    /// What the HD frame holds: the engine frame's [`Engine::frame_version`] and
-    /// [`Engine::src_version`] (`None` before a start) and `version`; `None` before the first
-    /// composition and after a start.
-    holds: Option<(Option<(u64, u64)>, u64)>,
+    hd: HdView,
 }
 
 impl Default for Game {
@@ -280,14 +266,7 @@ impl Game {
             audio_rate: 0,
             audio_buf: Vec::new(),
             pacer: Pacer::new(),
-            hd: Hd {
-                on: false,
-                scale: Scale::X2,
-                version: 0,
-                compositor: Compositor::new(),
-                images: ImageCache::new(),
-                holds: None,
-            },
+            hd: HdView::new(),
         };
         game.redraw();
         game
@@ -636,51 +615,48 @@ impl Game {
     /// or the RGBA frame as without HD. A change composes the HD frame at once (when on) and
     /// moves [`Game::frame_version`], with no step: the page draws it right away.
     pub fn set_hd(&mut self, on: bool, scale: u32) {
-        let scale = Scale::from_factor(scale);
-        if (on, scale) == (self.hd.on, self.hd.scale) {
-            return;
+        if self.hd.set(on, Scale::from_factor(scale)) {
+            self.conversions += 1;
+            self.compose_hd();
         }
-        self.hd.on = on;
-        self.hd.scale = scale;
-        self.hd.version += 1;
-        self.conversions += 1;
-        self.compose_hd();
     }
 
     /// Whether the page shows the HD frame ([`Game::set_hd`]).
     pub fn hd_on(&self) -> bool {
-        self.hd.on
+        self.hd.on()
     }
 
     /// The HD frame's scale: 2 or 4 ([`Game::set_hd`]; 2 until then).
     pub fn hd_scale(&self) -> u32 {
-        self.hd.scale.factor() as u32
+        self.hd.scale().factor() as u32
     }
 
     /// Address of the HD frame in wasm memory: `320·S × 200·S` RGBA8 pixels while HD is on
     /// (S = [`Game::hd_scale`]). Views over it are invalidated when memory grows.
     pub fn hd_frame_ptr(&self) -> *const u8 {
-        self.hd.compositor.rgba().as_ptr().cast()
+        self.hd.rgba().as_ptr().cast()
     }
 
     /// Bytes of the HD frame (0 before its first composition).
     pub fn hd_frame_len(&self) -> usize {
-        self.hd.compositor.rgba().len() * 4
+        self.hd.rgba().len() * 4
     }
 
     /// The HD frame as RGBA8 (a copy).
     pub fn hd_frame_rgba(&self) -> Vec<u8> {
-        let words = self.hd.compositor.rgba();
-        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+        self.hd
+            .rgba()
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect()
     }
 
     /// The rect of the HD frame (x, y, width, height in its pixels) the compositions since the
     /// last call wrote, empty when they wrote nothing: the page that drew the frame before them
     /// redraws only that.
     pub fn hd_take_dirty(&mut self) -> Vec<u32> {
-        let s = self.hd.scale.factor() as u32;
+        let s = self.hd.scale().factor() as u32;
         self.hd
-            .compositor
             .take_dirty()
             .map_or_else(Vec::new, |r| r.iter().map(|&v| v as u32 * s).collect())
     }
@@ -929,19 +905,7 @@ impl Game {
                 let files = engine.io().files();
                 paths.retain(|p| files.get_in("base", p).is_some_and(|(key, _)| key == p));
                 self.kept = paths;
-                self.saved_gen = 0;
-                self.save_out = Vec::new();
-                self.save_whole = false;
-                self.save_out_whole = false;
-                self.audio = None;
-                self.engine = Some(engine);
-                self.pending.clear();
-                self.redraw();
-                // The new engine's versions start again at 0: its first frame is composed whole.
-                self.hd.holds = None;
-                self.hd.compositor.forget();
-                self.hd.images = ImageCache::new();
-                self.compose_hd();
+                self.put_on_screen(engine);
                 Ok(report)
             }
             Err(e) => {
@@ -967,30 +931,27 @@ impl Game {
         buttons.is_some_and(|b| b & 3 != 0)
     }
 
+    /// `engine`, just started, becomes the game on screen: no Save of it taken yet, no sound
+    /// machine, no queued input; its first frame converted and, with HD on, composed whole (its
+    /// versions start again at 0).
+    fn put_on_screen(&mut self, engine: Engine) {
+        self.saved_gen = 0;
+        self.save_out = Vec::new();
+        self.save_whole = false;
+        self.save_out_whole = false;
+        self.audio = None;
+        self.engine = Some(engine);
+        self.pending.clear();
+        self.redraw();
+        self.hd.restart();
+        self.compose_hd();
+    }
+
     /// With HD on: composes the HD frame from the engine's frame (black before a start) when it
-    /// does not hold that frame's colours and sources at the HD setting now.
+    /// does not hold that frame's colours and sources at the HD setting now
+    /// ([`HdView::present`]).
     fn compose_hd(&mut self) {
-        if !self.hd.on {
-            return;
-        }
-        let frame = self
-            .engine
-            .as_ref()
-            .map(|e| (e.frame_version(), e.src_version()));
-        let key = (frame, self.hd.version);
-        if self.hd.holds == Some(key) {
-            return;
-        }
-        let hd = &mut self.hd;
-        let wrote = match &self.engine {
-            Some(e) => {
-                let state = e.state();
-                let mut images = hd.images.images(&state, e.io());
-                hd.compositor.compose(e.frame(), &mut images, hd.scale)
-            }
-            None => hd.compositor.compose(&self.blank, &mut NoImages, hd.scale),
-        };
-        hd.holds = Some(key);
+        let wrote = self.hd.present(self.engine.as_ref(), &self.blank);
         self.conversions += u64::from(wrote);
     }
 
@@ -1004,7 +965,7 @@ impl Game {
         let fb = self.engine.as_ref().map_or(&self.blank, |e| e.frame());
         fb.write_rgba(&mut self.rgba);
         self.rgba_holds = self.engine.as_ref().map(Engine::frame_version);
-        self.conversions += u64::from(!self.hd.on);
+        self.conversions += u64::from(!self.hd.on());
     }
 }
 
@@ -1499,7 +1460,9 @@ mod tests {
 
     /// On the user's zip (skipped when absent; read only): the disk entries declare well under
     /// the unzip limit, the start keeps every game file in place, and those files given back as
-    /// loose files start the same game.
+    /// loose files start the same game. The second start runs with HD on at 4× (spec 07 HD0):
+    /// the start moves the page's version and composes its first HD frame whole, and the frames
+    /// after it are the definition's.
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn real_zip_keeps_its_game_files_and_restarts_from_them() {
@@ -1530,8 +1493,22 @@ mod tests {
         for (path, bytes) in kept {
             again.collect(&path, bytes).quiet();
         }
+        again.set_hd(true, 4);
+        again.hd_take_dirty();
+        let v = again.frame_version();
         again.boot(1, false).quiet();
         assert!(again.game_files() == n);
+        assert!(again.frame_version() > v, "the start moves the version");
+        assert_eq!(again.hd_frame_len(), 1280 * 800 * 4);
+        assert_eq!(
+            again.hd_take_dirty(),
+            vec![0, 0, 1280, 800],
+            "composed whole"
+        );
+        assert!(
+            again.hd_frame_rgba() == expected_hd(&again, Scale::X4),
+            "the first HD frame"
+        );
         for _ in 0..60 {
             for g in [&mut game, &mut again] {
                 g.step(16);
@@ -1539,6 +1516,10 @@ mod tests {
             }
         }
         assert!(game.frame_rgba() == again.frame_rgba(), "same first frames");
+        assert!(
+            again.hd_frame_rgba() == expected_hd(&again, Scale::X4),
+            "the HD frame then"
+        );
         assert!(
             game.program() == "u",
             "a start runs the launcher: `u` first"
@@ -2305,7 +2286,9 @@ mod tests {
     /// A game on synthetic state for HD: records 1 and 2 hold patterns MMPX changes, record 3
     /// the colours of record 1; a key `a` draws record 1 at the next cell of row 2 and presents,
     /// `c` draws the pixels of the last cell drawn again in the same colours but classic and
-    /// presents the sources alone, `b` draws record 2 over the first cell and presents.
+    /// presents the sources alone, `d` draws record 1 over that cell again (its colours the same,
+    /// its sources the record's) and presents the sources alone, `b` draws record 2 over the
+    /// first cell and presents.
     fn tile_engine() -> Engine {
         let mut state = u6_core::State::empty();
         for (r, seed) in [(1usize, 3u32), (2, 7), (3, 3)] {
@@ -2350,6 +2333,12 @@ mod tests {
                             });
                             io.present_sources();
                         }
+                        Key::Char('d') => {
+                            io.draw(|fb| {
+                                u6_core::gfx::blit::blit_front(&s.gfx, fb, 1, cell * 16, 32)
+                            });
+                            io.present_sources();
+                        }
                         _ => {}
                     }
                 }
@@ -2360,16 +2349,71 @@ mod tests {
         engine
     }
 
-    /// The HD frame a new compositor makes of the engine's frame at `scale`, as bytes.
-    fn fresh_hd(game: &Game, scale: Scale) -> Vec<u8> {
+    /// The HD frame of the engine's shown frame at `scale` by the definition, as RGBA bytes,
+    /// built here pixel by pixel (no compositor): a tile pixel without flags whose version is its
+    /// record's now takes its block of MMPX ×S of the record (transparent sub-pixels its classic
+    /// colour), every other pixel its classic colour S × S.
+    fn expected_hd(game: &Game, scale: Scale) -> Vec<u8> {
         let e = game.engine.as_ref().unwrap();
-        let mut c = Compositor::new();
-        c.compose(
-            e.frame(),
-            &mut ImageCache::new().images(&e.state(), e.io()),
-            scale,
-        );
-        c.rgba().iter().flat_map(|w| w.to_le_bytes()).collect()
+        let (fb, st) = (e.frame(), e.state());
+        let s = scale.factor();
+        let rgba = |c: u6_core::Rgb| [c.r, c.g, c.b, 255];
+        let mut out = vec![0u8; 320 * s * 200 * s * 4];
+        let mut made: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
+        for y in 0..200 {
+            for x in 0..320 {
+                let src = fb.src_at(x, y).unwrap();
+                let classic = rgba(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+                let id = usize::from(src.id);
+                let hd = src.kind == u6_core::Kind::Tile
+                    && src.flags == 0
+                    && src.ver == st.gfx.cache.version(id);
+                for k in 0..s * s {
+                    let (sx, sy) = (x * s + k % s, y * s + k / s);
+                    let c = if hd {
+                        let words = made.entry(src.id).or_insert_with(|| {
+                            let rec = &st.gfx.records[id];
+                            let input: Vec<u32> = (0..256)
+                                .map(|i| {
+                                    if rec.transparent[i] {
+                                        0
+                                    } else {
+                                        u32::from_le_bytes(rgba(
+                                            fb.palette[usize::from(rec.pixels[i])],
+                                        ))
+                                    }
+                                })
+                                .collect();
+                            let mut out = Vec::new();
+                            u6_render::hd::mmpx(&input, 16, 16, scale, &mut out);
+                            out
+                        });
+                        let (u, v) = (usize::from(src.u), usize::from(src.v));
+                        let w = words[(v * s + k / s) * 16 * s + u * s + k % s];
+                        if w >> 24 == 0 {
+                            classic
+                        } else {
+                            w.to_le_bytes()
+                        }
+                    } else {
+                        classic
+                    };
+                    out[(sy * 320 * s + sx) * 4..][..4].copy_from_slice(&c);
+                }
+            }
+        }
+        out
+    }
+
+    /// The HD frame's bytes of cell (`col`, row 2) of [`tile_engine`] at scale `s`.
+    fn cell_bytes(game: &Game, col: usize, s: usize) -> Vec<u8> {
+        let rgba = game.hd_frame_rgba();
+        (32 * s..48 * s)
+            .flat_map(|y| {
+                let at = (y * 320 * s + col * 16 * s) * 4;
+                rgba[at..at + 16 * s * 4].to_vec()
+            })
+            .collect()
     }
 
     fn press(game: &mut Game, key: &str) {
@@ -2380,13 +2424,15 @@ mod tests {
 
     /// Spec 07 HD0 in the platform: off (the default), the compositor never runs and the RGBA
     /// frame is the old path's; on, each present composes when the shown frame's colours or
-    /// sources changed (once, and the page's version moves only then), into what a new
-    /// compositor makes of it; switching on, a scale change and switching off take effect at
-    /// once, with no step; a start composes the new game's first frame whole.
+    /// sources changed (once, and the page's version moves only then), into the frame by the
+    /// definition ([`expected_hd`]); a change of the sources alone, either way (an HD cell put
+    /// back classic in its colours, then the record's sources put back), is composed on the
+    /// source version alone; switching on, a scale change and switching off take effect at once,
+    /// with no step.
     #[test]
     fn the_hd_frame_follows_the_shown_frame_and_the_switch() {
         let mut game = Game::new();
-        game.engine = Some(tile_engine());
+        game.put_on_screen(tile_engine());
         for k in ["a", "a", "x"] {
             press(&mut game, k);
         }
@@ -2405,7 +2451,7 @@ mod tests {
         assert_eq!((game.hd_on(), game.hd_scale()), (true, 4));
         assert_eq!(game.hd_frame_len(), 1280 * 800 * 4);
         assert!(
-            game.hd_frame_rgba() == fresh_hd(&game, Scale::X4),
+            game.hd_frame_rgba() == expected_hd(&game, Scale::X4),
             "a new compositor's frame"
         );
         let nearest = |g: &Game, s: usize| -> Vec<u8> {
@@ -2444,26 +2490,44 @@ mod tests {
             vec![48 * 4, 32 * 4, 16 * 4, 16 * 4],
             "the cell drawn"
         );
-        assert!(game.hd_frame_rgba() == fresh_hd(&game, Scale::X4));
-        // The same colours, the sources alone changed: composed again (src_version), classic.
-        let e = game.engine.as_ref().unwrap();
-        let (fv, sv) = (e.frame_version(), e.src_version());
-        let v = game.frame_version();
-        press(&mut game, "c");
-        let e = game.engine.as_ref().unwrap();
-        assert_eq!(
-            (e.frame_version(), e.src_version()),
-            (fv, sv + 1),
-            "a source-only change"
-        );
-        assert_eq!(game.frame_version(), v + 1.0, "composed for the sources");
-        assert!(game.hd_frame_rgba() == fresh_hd(&game, Scale::X4));
+        assert!(game.hd_frame_rgba() == expected_hd(&game, Scale::X4));
+        // The same colours, the sources alone changed: composed again on the source version
+        // alone, the cell's blocks classic; then the record's sources back, the blocks HD again.
+        let hd_cell = cell_bytes(&game, 3, 4);
+        for (key, what) in [("c", "classic"), ("d", "the record again")] {
+            let e = game.engine.as_ref().unwrap();
+            let (fv, sv) = (e.frame_version(), e.src_version());
+            let v = game.frame_version();
+            press(&mut game, key);
+            let e = game.engine.as_ref().unwrap();
+            assert_eq!(
+                (e.frame_version(), e.src_version()),
+                (fv, sv + 1),
+                "{what}: a source-only change"
+            );
+            assert_eq!(
+                game.frame_version(),
+                v + 1.0,
+                "{what}: composed for the sources"
+            );
+            assert_eq!(
+                game.hd_take_dirty(),
+                vec![48 * 4, 32 * 4, 16 * 4, 16 * 4],
+                "{what}"
+            );
+            assert!(
+                game.hd_frame_rgba() == expected_hd(&game, Scale::X4),
+                "{what}"
+            );
+            let cell = cell_bytes(&game, 3, 4);
+            assert_eq!(cell == hd_cell, key == "d", "{what}: the cell's blocks");
+        }
         // 2x: composed at once.
         let v = game.frame_version();
         game.set_hd(true, 2);
         assert!(game.frame_version() > v);
         assert_eq!((game.hd_scale(), game.hd_frame_len()), (2, 640 * 400 * 4));
-        assert!(game.hd_frame_rgba() == fresh_hd(&game, Scale::X2));
+        assert!(game.hd_frame_rgba() == expected_hd(&game, Scale::X2));
         game.set_hd(true, 3);
         assert_eq!(game.hd_scale(), 2, "any other scale is 2");
         // Off: the RGBA frame; on again over frames composed meanwhile: exact at once.
@@ -2479,15 +2543,28 @@ mod tests {
         assert!(game.rgba == old, "off: the RGBA path");
         game.set_hd(true, 2);
         assert!(
-            game.hd_frame_rgba() == fresh_hd(&game, Scale::X2),
+            game.hd_frame_rgba() == expected_hd(&game, Scale::X2),
             "on again: exact"
         );
-        // A start replaces the engine: its first frame is composed whole.
-        game.engine = Some(tile_engine());
-        game.hd.holds = None;
-        game.hd.compositor.forget();
-        game.present();
-        assert!(game.hd_frame_rgba() == fresh_hd(&game, Scale::X2));
+        // A start puts a new engine on screen (the start path's own step): its versions start
+        // again at 0, and its first frame is composed whole at once.
+        let v = game.frame_version();
+        game.hd_take_dirty();
+        game.put_on_screen(tile_engine());
+        assert!(game.frame_version() > v, "the start moves the version");
+        assert_eq!(game.hd_frame_len(), 640 * 400 * 4);
+        assert_eq!(game.hd_take_dirty(), vec![0, 0, 640, 400], "composed whole");
+        assert!(
+            game.hd_frame_rgba() == expected_hd(&game, Scale::X2),
+            "its first frame"
+        );
+        for k in ["a", "a"] {
+            press(&mut game, k);
+        }
+        assert!(
+            game.hd_frame_rgba() == expected_hd(&game, Scale::X2),
+            "and its next"
+        );
     }
 
     /// Before a start the HD frame is the black frame scaled.

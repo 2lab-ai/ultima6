@@ -1,9 +1,10 @@
 //! Spec 07 HD0, the compositor over the game's routines on synthetic art: the final S× RGBA of
 //! a merged shore record, a pixel left from a record rewritten since, overlapping records, an
-//! outline flash and an overlay, the pointer sprite, a combat replay, a persistent panel and a
-//! skipped render with HD off and on and a scale change, and a portrait read from its archive.
-//! Every frame is checked against [`oracle`], the frame by the definition with no cache and no
-//! memory of an earlier frame. No game data.
+//! outline flash and an overlay, the pointer sprite, a combat replay and one that ends on equal
+//! colours (composed on its sources alone), the HD switch ([`HdView`], the platform's) off and on
+//! over a persistent panel and a skipped render and a scale change, and a portrait read from its
+//! archive. Every frame is checked against [`oracle`], the frame by the definition with no cache
+//! and no memory of an earlier frame. No game data.
 
 use std::collections::BTreeMap;
 
@@ -15,11 +16,11 @@ use super::plane::{kind, plane, tile};
 use super::view::world;
 use super::{install, map_tile, object_tile};
 use crate::Files;
-use crate::engine::{Engine, InputEvent, Io};
+use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::gfx::GfxState;
 use crate::gfx::anim::{merge_shores, set_frame};
 use crate::gfx::blit::{blit_back, blit_front, copy_window};
-use crate::hd::ImageCache;
+use crate::hd::{HdView, ImageCache};
 use crate::state::State;
 
 const SCALES: [Scale; 2] = [Scale::X2, Scale::X4];
@@ -335,6 +336,25 @@ fn overlapping_records_an_outline_and_an_overlay_in_the_final_frame() {
     blit_back(&s.gfx, &mut fb, 3, 64, 64);
     blit_back(&s.gfx, &mut fb, 6, 16, 0);
     blit_back(&s.gfx, &mut fb, 4 | 0x0800, 128, 32);
+    // Who owns each pixel of the overlap, from the object's transparency formula alone: the
+    // object where it is opaque, the map record under it elsewhere, each at the pixel's place.
+    let owner = |c: usize, r: usize| {
+        if !(r * 3 + c).is_multiple_of(7) {
+            3u16
+        } else {
+            10
+        }
+    };
+    for r in 0..16 {
+        for c in 0..16 {
+            let want = tile(owner(c, r), 0, (c as u16, r as u16), 0);
+            assert_eq!(
+                fb.src_at(64 + c, 64 + r),
+                Some(want),
+                "({c}, {r}): its owner"
+            );
+        }
+    }
     let io = Io::new(Files::default());
     for scale in SCALES {
         let mut c = Compositor::new();
@@ -346,6 +366,18 @@ fn overlapping_records_an_outline_and_an_overlay_in_the_final_frame() {
             scale,
             "overlapping",
         );
+        for r in 0..16 {
+            for col in 0..16 {
+                let (x, y) = (64 + col, 64 + r);
+                let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+                let want = record_block(&s.gfx, &fb, owner(col, r), (col, r), scale, classic);
+                assert_eq!(
+                    block(c.rgba(), scale, (x, y)),
+                    want,
+                    "({col}, {r}): its owner's block"
+                );
+            }
+        }
         let mut seen = BTreeMap::new();
         for y in 0..HEIGHT {
             for x in 0..WIDTH {
@@ -539,67 +571,207 @@ fn a_combat_replay_composes_the_hd_art_it_put_back() {
     assert!(frames >= 4);
 }
 
-/// A panel drawn once on the screen and a map window whose second refresh draws nothing (spec
-/// 06 O2): a kept compositor, run (HD on), then left out over refreshes and presents (HD off),
-/// then run again (on), makes the definition's frame each time, and so does a change of scale
-/// over the same pixels. The panel stays HD throughout.
+/// The platform's HD switch ([`HdView`], what the page's `Game::set_hd` and `Game::present`
+/// run) over the engine's shown frame: a panel drawn once and never again, and a map window
+/// refreshed every tick (spec 06 O2: a refresh with nothing changed draws nothing). On, every
+/// frame is the definition's; off, ticks with skipped renders and text drawn on the panel run
+/// and nothing is composed; on again, the frame is the definition's at once, with no tick, and a
+/// new compositor's; then the scale changes over the same pixels and back. The panel and the
+/// window show HD art throughout.
 #[test]
-fn hd_off_and_on_over_a_persistent_panel_and_a_skipped_render_is_exact() {
+fn the_hd_switch_over_a_persistent_panel_and_a_skipped_render_is_exact() {
     let (mut s, mut g) = world();
     for n in 0..64 {
         install(&mut g, n, map_tile(0, 16, pattern(n)));
     }
     s.gfx = g;
-    let io = Io::new(Files::default());
-    io.enable_src_plane();
-    io.draw(|f| {
-        for k in 0..8u16 {
-            blit_front(&s.gfx, f, 40 + k, 176 + 16 * (k % 4), 8 + 16 * (k / 4));
+    for (i, c) in s.tables.palette.iter_mut().enumerate() {
+        *c = u6_formats::gfx::Rgb {
+            r: (i * 8) as u8,
+            g: (i * 37 % 256) as u8,
+            b: 255 - (i * 5) as u8,
+        };
+    }
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        io.draw(|f| {
+            let gfx = &st.borrow().gfx;
+            for k in 0..8u16 {
+                blit_front(gfx, f, 40 + k, 176 + 16 * (k % 4), 8 + 16 * (k / 4));
+            }
+        });
+        loop {
+            while io.key_ready() {
+                if io.next_key().await == Key::Char('t') {
+                    io.draw(|f| {
+                        for x in 180..200 {
+                            f.set(x, 12, 3);
+                        }
+                    });
+                }
+            }
+            crate::gfx::refresh_view(&mut st.borrow_mut(), &io);
+            io.vblank().await;
         }
     });
+    e.enable_src_plane();
+    let blank = Framebuffer::new();
     let panel = || (8..40).flat_map(|y| (176..240).map(move |x| (x, y)));
-    let (mut c, mut images) = (Compositor::new(), ImageCache::new());
-    let shown = || {
-        let mut fb = io.draw(|f| f.clone());
-        palette(&mut fb);
-        fb
-    };
-    let compose = |c: &mut Compositor, images: &mut ImageCache, s: &State, scale, what: &str| {
-        let fb = shown();
-        check(c, images, &fb, (s, &io), scale, what);
+    let window = || (8..168).flat_map(|y| (8..168).map(move |x| (x, y)));
+    let exact = |view: &HdView, e: &Engine, scale, what: &str| {
+        let fb = e.frame();
         assert!(
-            reshaped(c.rgba(), &fb, scale, panel()) > 50,
+            view.rgba() == oracle(fb, &e.state().gfx, scale).as_slice(),
+            "{what}: the definition's frame"
+        );
+        assert!(
+            reshaped(view.rgba(), fb, scale, panel()) > 50,
             "{what}: the panel is HD"
         );
+        assert!(
+            reshaped(view.rgba(), fb, scale, window()) > 1000,
+            "{what}: the window is HD"
+        );
     };
-    crate::gfx::refresh_view(&mut s, &io);
-    compose(&mut c, &mut images, &s, Scale::X4, "on");
-    // Off: a refresh that draws nothing, text on the panel, a present; nothing composed.
-    let skips = s.gfx.cache.window_skips;
-    crate::gfx::refresh_view(&mut s, &io);
-    assert_eq!(
-        s.gfx.cache.window_skips,
-        skips + 1,
-        "the render was left out"
-    );
-    io.draw(|f| {
-        for x in 180..200 {
-            f.set(x, 12, 3);
-        }
-    });
-    io.present();
-    crate::gfx::refresh_view(&mut s, &io);
-    compose(&mut c, &mut images, &s, Scale::X4, "on again");
-    let fb = shown();
-    let mut fresh = Compositor::new();
-    fresh.compose(&fb, &mut ImageCache::new().images(&s, &io), Scale::X4);
-    assert!(fresh.rgba() == c.rgba(), "a new compositor's frame");
-    // The scale changes over the same pixels, and back.
-    compose(&mut c, &mut images, &s, Scale::X2, "2x");
-    compose(&mut c, &mut images, &s, Scale::X4, "4x again");
+    let mut view = HdView::new();
+    assert!(view.set(true, Scale::X4));
+    for t in 0..4 {
+        e.tick(&[], 16);
+        view.present(Some(&e), &blank);
+        exact(&view, &e, Scale::X4, &format!("on, tick {t}"));
+    }
+    // Off: the refreshes left out, the text drawn on the panel, presents; nothing composed.
+    assert!(view.set(false, Scale::X4));
+    let held = view.rgba().to_vec();
+    let skips = e.state().gfx.cache.window_skips;
+    e.tick(&[InputEvent::Key(Key::Char('t'))], 16);
+    for _ in 0..5 {
+        e.tick(&[], 16);
+        assert!(!view.present(Some(&e), &blank), "off: nothing composed");
+    }
     assert!(
-        (8..168).all(|y| (8..168).all(|x| kind(&fb, x, y) == Kind::Tile)),
-        "the window is attributed"
+        e.state().gfx.cache.window_skips >= skips + 5,
+        "the renders were left out"
+    );
+    assert!(e.frame().get(185, 12) == Some(3), "the text is shown");
+    assert!(
+        view.rgba() == held.as_slice(),
+        "off: the HD frame as it was"
+    );
+    // On again: composed at once, with no tick.
+    assert!(view.set(true, Scale::X4));
+    assert!(
+        view.present(Some(&e), &blank),
+        "on: the text's blocks changed"
+    );
+    exact(&view, &e, Scale::X4, "on again");
+    let mut fresh = Compositor::new();
+    let st = e.state();
+    fresh.compose(
+        e.frame(),
+        &mut ImageCache::new().images(&st, e.io()),
+        Scale::X4,
+    );
+    drop(st);
+    assert!(fresh.rgba() == view.rgba(), "a new compositor's frame");
+    let text = word(e.frame().palette[3]);
+    assert!(
+        block(view.rgba(), Scale::X4, (185, 12))
+            .iter()
+            .all(|&c| c == text),
+        "the text classic"
+    );
+    // The scale changes over the same pixels, and back.
+    for scale in [Scale::X2, Scale::X4] {
+        assert!(view.set(true, scale));
+        view.present(Some(&e), &blank);
+        exact(&view, &e, scale, &format!("{scale:?}"));
+    }
+    // And the ticks after it.
+    for t in 0..3 {
+        e.tick(&[], 16);
+        view.present(Some(&e), &blank);
+        exact(&view, &e, Scale::X4, &format!("after, tick {t}"));
+    }
+}
+
+/// A replay whose recorded frame has the colours of the screen drawn classic and whose last
+/// picture is the record again (equal colours, after a pause): the end puts back the record's
+/// sources with no new frame. The platform's switch ([`HdView`]) composes on the source version
+/// alone there, and the HD frame changes (classic blocks back to the record's MMPX ones); every
+/// frame is the definition's.
+#[test]
+fn a_replay_ending_on_equal_colours_is_composed_on_its_sources_alone() {
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    install(&mut s.gfx, 1, map_tile(0, 16, pattern(1)));
+    let tiles = |gfx: &GfxState, f: &mut Framebuffer| {
+        for row in 0..11 {
+            for col in 0..11 {
+                blit_front(gfx, f, 1, col * 16, row * 16);
+            }
+        }
+    };
+    let classic = |gfx: &GfxState, f: &mut Framebuffer| {
+        let rec = &gfx.records[1];
+        for y in 0..176 {
+            for x in 0..176 {
+                f.set(x, y, rec.pixels[y % 16 * 16 + x % 16]);
+            }
+        }
+    };
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        io.draw(|f| {
+            palette(f);
+            tiles(&st.borrow().gfx, f);
+        });
+        io.present();
+        io.vblank().await;
+        {
+            let mut s = st.borrow_mut();
+            io.draw(|f| classic(&s.gfx, f));
+            io.present();
+            crate::combat::present::capture_window(&mut s, 40);
+            crate::combat::present::capture_pause(&mut s, 60);
+            io.draw(|f| tiles(&s.gfx, f));
+            io.present();
+        }
+        crate::combat::play_effects(&st, &io).await;
+        io.sleep(u32::MAX).await;
+    });
+    e.enable_src_plane();
+    let blank = Framebuffer::new();
+    let mut view = HdView::new();
+    view.set(true, Scale::X4);
+    let (mut last, mut sources_alone, mut composed) = ((0, 0), 0, 0);
+    for t in 0..300 {
+        e.tick(&[], 16);
+        let now = (e.frame_version(), e.src_version());
+        let before = view.rgba().to_vec();
+        composed += usize::from(view.present(Some(&e), &blank));
+        assert!(
+            view.rgba() == oracle(e.frame(), &e.state().gfx, Scale::X4).as_slice(),
+            "tick {t}: the definition's frame"
+        );
+        if now.0 == last.0 && now.1 != last.1 {
+            sources_alone += 1;
+            assert!(
+                view.rgba() != before.as_slice(),
+                "tick {t}: the sources alone changed the HD frame"
+            );
+        }
+        last = now;
+    }
+    assert!(e.state().combat.effects.is_empty(), "all played");
+    assert_eq!(sources_alone, 1, "one change of the sources alone");
+    assert!(
+        composed >= 3,
+        "the record, the classic frame, the record again"
+    );
+    let fb = e.frame();
+    let window = (0..176).flat_map(|y| (0..176).map(move |x| (x, y)));
+    assert!(
+        reshaped(view.rgba(), fb, Scale::X4, window) > 1000,
+        "HD art at the end"
     );
 }
 
@@ -671,5 +843,30 @@ fn a_portrait_from_its_archive_shows_mmpx_of_its_colours() {
         c.forget();
         c.compose(&fb, &mut images.images(s, e.io()), scale);
         assert!(c.rgba() == before.as_slice());
+        // A portrait pixel naming another version (portraits stay at 0 while loaded): its HD
+        // block before, its classic colour then.
+        let (x, y) = (0..64)
+            .flat_map(|v| (0..56).map(move |u| (x0 + u, y0 + v)))
+            .find(|&(x, y)| {
+                let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+                block(c.rgba(), scale, (x, y)).iter().any(|&g| g != classic)
+            })
+            .unwrap();
+        let mut stale = fb.clone();
+        let src = stale.src_at(x, y).unwrap();
+        let p = stale.get(x, y).unwrap();
+        stale.set_src(x, y, p, u6_render::Src { ver: 1, ..src });
+        c.take_dirty();
+        c.compose(&stale, &mut images.images(s, e.io()), scale);
+        let classic = word(fb.palette[usize::from(p)]);
+        assert!(
+            block(c.rgba(), scale, (x, y)).iter().all(|&g| g == classic),
+            "another version: classic"
+        );
+        assert_eq!(
+            c.take_dirty().map(|d| d[2] * d[3]),
+            Some(1),
+            "only that block"
+        );
     }
 }

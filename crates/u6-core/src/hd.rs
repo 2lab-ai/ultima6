@@ -8,15 +8,125 @@
 //!   bitmap colour table as `blit_bitmap` draws them, opaque, version 0. [`ImageCache`] keeps
 //!   each with what it was decoded from (the file name and the colour table), so a composition
 //!   decodes it again only when one of those differs.
+//!
+//! [`HdView`] is the HD frame a platform shows of its engine: the switch, the scale and when to
+//! compose (the web page's `Game::set_hd` and `Game::present` are it).
 
 use u6_formats::gfx::{TILE_H, TILE_W};
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_WIDTH};
-use u6_render::hd::{Image, Images};
-use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, Kind, portrait_of};
+use u6_render::hd::{Compositor, Image, Images, NoImages, Scale};
+use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, Framebuffer, Kind, portrait_of};
 
 use crate::converse::Msg;
-use crate::engine::Io;
+use crate::engine::{Engine, Io};
 use crate::state::State;
+
+/// Port-only (spec 07 HD0): the HD frame of an engine's shown frame, on or off, at 2× or 4×. On,
+/// [`HdView::present`] composes it when the shown frame's colours ([`Engine::frame_version`]) or
+/// sources ([`Engine::src_version`]) or the setting changed since the frame it holds; off, it
+/// does nothing.
+pub struct HdView {
+    on: bool,
+    scale: Scale,
+    /// Moves at every change of `on` or `scale`.
+    version: u64,
+    compositor: Compositor,
+    images: ImageCache,
+    /// What the frame holds: the engine frame's versions (`None` for the black frame before a
+    /// start) and `version`; `None` before the first composition and after a start.
+    holds: Option<(Option<(u64, u64)>, u64)>,
+}
+
+impl Default for HdView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HdView {
+    /// Off, at 2×.
+    pub fn new() -> Self {
+        Self {
+            on: false,
+            scale: Scale::X2,
+            version: 0,
+            compositor: Compositor::new(),
+            images: ImageCache::new(),
+            holds: None,
+        }
+    }
+
+    /// Switches the HD frame on or off and sets its scale; true when either changed (the next
+    /// [`HdView::present`] composes, when on).
+    pub fn set(&mut self, on: bool, scale: Scale) -> bool {
+        if (on, scale) == (self.on, self.scale) {
+            return false;
+        }
+        self.on = on;
+        self.scale = scale;
+        self.version += 1;
+        true
+    }
+
+    pub fn on(&self) -> bool {
+        self.on
+    }
+
+    pub fn scale(&self) -> Scale {
+        self.scale
+    }
+
+    /// A new engine (a start): its versions start again, so its first frame is composed whole,
+    /// and its images are decoded again.
+    pub fn restart(&mut self) {
+        self.holds = None;
+        self.compositor.forget();
+        self.images = ImageCache::new();
+    }
+
+    /// With HD on: composes the shown frame of `engine` (`blank` before a start) when the HD
+    /// frame does not hold its colours and sources at the setting now. Returns whether a block
+    /// of the HD frame changed.
+    pub fn present(&mut self, engine: Option<&Engine>, blank: &Framebuffer) -> bool {
+        if !self.on {
+            return false;
+        }
+        let key = (
+            engine.map(|e| (e.frame_version(), e.src_version())),
+            self.version,
+        );
+        if self.holds == Some(key) {
+            return false;
+        }
+        let wrote = match engine {
+            Some(e) => {
+                let state = e.state();
+                let mut images = self.images.images(&state, e.io());
+                self.compositor.compose(e.frame(), &mut images, self.scale)
+            }
+            None => self.compositor.compose(blank, &mut NoImages, self.scale),
+        };
+        self.holds = Some(key);
+        wrote
+    }
+
+    /// The HD frame: `WIDTH·S × HEIGHT·S` packed RGBA words (`u6_render::hd`), the last
+    /// composition's (empty before the first).
+    pub fn rgba(&self) -> &[u32] {
+        self.compositor.rgba()
+    }
+
+    /// The rect the compositions since the last call wrote, in screen pixels
+    /// ([`Compositor::take_dirty`]).
+    pub fn take_dirty(&mut self) -> Option<[usize; 4]> {
+        self.compositor.take_dirty()
+    }
+
+    /// The compositor (its cache's counts).
+    pub fn compositor(&self) -> &Compositor {
+        &self.compositor
+    }
+}
 
 /// A portrait or panel bitmap decoded: what from, and its width, height and screen colours
 /// (`None`: nothing to show, a missing or bad file).

@@ -36,8 +36,6 @@ struct Receipt {
     wrong: u64,
     /// Frames a new compositor made too, and those that differed.
     fresh: (u64, u64),
-    /// The most bytes the compositor's cache held.
-    peak: usize,
     compositor: Compositor,
     images: ImageCache,
     /// MMPX ×4 by input content.
@@ -48,7 +46,9 @@ struct Receipt {
 
 impl Receipt {
     /// The image of a current unflagged pixel's source as the definition takes it: width, height
-    /// and words (transparent 0); `None` for a pixel shown classic.
+    /// and words (transparent 0); `None` for a pixel shown classic: a record at another version
+    /// than its own now, a portrait or a panel bitmap at any version but 0 (they stay at 0 while
+    /// loaded), an image missing or shorter than its size.
     fn image(
         (paper, book): (Option<&Bitmap>, Option<&Bitmap>),
         e: &Engine,
@@ -73,6 +73,7 @@ impl Receipt {
                     (16, 16, w.collect())
                 })
             }
+            Kind::Portrait | Kind::Bitmap if src.ver != 0 => None,
             Kind::Portrait => {
                 let (letter, item) = portrait_of(src.id);
                 let px =
@@ -86,11 +87,8 @@ impl Receipt {
                     _ => None,
                 }?;
                 let (w, h) = (usize::from(b.width), usize::from(b.height));
-                Some((
-                    w,
-                    h,
-                    b.pixels[..w * h].iter().map(|&p| through(p)).collect(),
-                ))
+                let pixels = b.pixels.get(..w * h)?;
+                Some((w, h, pixels.iter().map(|&p| through(p)).collect()))
             }
             Kind::Classic => None,
         }
@@ -108,7 +106,6 @@ impl Receipt {
         let fb = e.frame();
         self.compositor
             .compose(fb, &mut self.images.images(&s, e.io()), SCALE);
-        self.peak = self.peak.max(self.compositor.cache().bytes());
         let pal: [u32; 256] = std::array::from_fn(|i| word(fb.palette[i]));
         let sf = SCALE.factor();
         let src = fb.src().quiet();
@@ -245,10 +242,74 @@ fn the_hd_frame_of_the_users_game_is_the_definitions() {
         r.wrong,
         r.fresh.0,
         r.fresh.1,
-        r.peak >> 10,
+        r.compositor.cache().peak() >> 10,
         r.compositor.cache().cap() >> 10,
     );
     assert_eq!(r.wrong, 0, "blocks off the definition");
     assert_eq!(r.fresh.1, 0, "a new compositor's frame");
     assert!(covered, "every kind was shown HD");
+}
+
+/// The receipt's own reference on synthetic images: a portrait (a one-item archive) and a panel
+/// bitmap at version 0 are their images; at any other version, and a bitmap shorter than its
+/// size, they are classic (`None`).
+#[test]
+fn the_reference_shows_a_portrait_or_a_bitmap_at_another_version_classic() {
+    use crate::converse::text::{ConverseText, MESSAGES, Msg};
+    use std::collections::BTreeMap;
+    let face: Vec<u8> = (0..56 * 64).map(|i| (i % 7) as u8 + 1).collect();
+    let mut lib = 4u32.to_le_bytes().to_vec();
+    lib.extend(u6_formats::lzw::encode(&face).quiet());
+    let files = crate::Files::new(BTreeMap::from([("facefile.a".to_string(), lib)]));
+    let mut s = State::empty();
+    s.converse.text = Some(ConverseText::from_pairs(MESSAGES.iter().map(|&(m, _)| {
+        let t: &[u8] = if m == Msg::PortraitFile {
+            b"facefile.?"
+        } else {
+            b""
+        };
+        (m, t.to_vec())
+    })));
+    s.gfx.tables.bitmap_colours = std::array::from_fn(|i| i as u8);
+    let e = Engine::with_game(s, files, |_, _| async {});
+    let st = e.state();
+    let pal: [u32; 256] = std::array::from_fn(|i| 0xff00_0000 | i as u32);
+    let paper = Bitmap {
+        width: 8,
+        height: 4,
+        pixels: (0..32).map(|i| (i % 5) as u8).collect(),
+    };
+    let short = Bitmap {
+        pixels: vec![1; 31],
+        ..paper.clone()
+    };
+    let src = |kind, id, ver| u6_render::Src {
+        ver,
+        id,
+        kind,
+        ..u6_render::Src::CLASSIC
+    };
+    let face_id = u6_render::portrait_id(b'a', 0).quiet();
+    let image = |bitmaps, sp| Receipt::image(bitmaps, &e, &st, sp, &pal).map(|(w, h, _)| (w, h));
+    assert_eq!(
+        image((None, None), src(Kind::Portrait, face_id, 0)),
+        Some((56, 64))
+    );
+    assert_eq!(image((None, None), src(Kind::Portrait, face_id, 1)), None);
+    assert_eq!(
+        image((Some(&paper), None), src(Kind::Bitmap, BITMAP_PAPER, 0)),
+        Some((8, 4))
+    );
+    assert_eq!(
+        image((Some(&paper), None), src(Kind::Bitmap, BITMAP_PAPER, 3)),
+        None
+    );
+    assert_eq!(
+        image((None, Some(&paper)), src(Kind::Bitmap, BITMAP_SPELLBOOK, 1)),
+        None
+    );
+    assert_eq!(
+        image((Some(&short), None), src(Kind::Bitmap, BITMAP_PAPER, 0)),
+        None
+    );
 }
