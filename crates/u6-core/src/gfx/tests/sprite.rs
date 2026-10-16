@@ -183,3 +183,47 @@ fn a_fill_over_wrapped_corners_stays_on_the_screen() {
     fill_colour(&mut fb, 0, 0, 0xffff, 0xffff, 5);
     assert_eq!(fb.pixels().iter().filter(|&&p| p == 5).count(), 320 * 200);
 }
+
+/// Spec 07 HD0: a flight's saved block writes its sources in place, but when a clone of the
+/// state shares them it copies them first (`Rc::make_mut`): the clone keeps the block it saved.
+#[test]
+fn a_saved_block_shared_with_a_clone_is_copied_before_it_is_written() {
+    use std::rc::Rc;
+    use u6_render::{Kind, Src};
+    let mut g = gfx();
+    let mut back = Framebuffer::new();
+    back.enable_src();
+    // The 24 × 16 block under a sprite at (64, 64): x 56..80, y 56..72, every pixel of record `id`.
+    let draw = |back: &mut Framebuffer, id: u16| {
+        for y in 56..72 {
+            for x in 56..80 {
+                let uv = ((x % 16) as u16, (y % 16) as u16);
+                back.set_src(x, y, 3, super::plane::tile(id, 0, uv, 0));
+            }
+        }
+    };
+    let saved = |g: &GfxState| {
+        let src: &Rc<[Src]> = g.sprites.under_src[3].0.as_ref().expect("sources saved");
+        let ids: Vec<u16> = src.iter().map(|s| s.id).collect();
+        assert!(src.iter().all(|s| s.kind == Kind::Tile));
+        (Rc::as_ptr(src).cast::<Src>() as usize, ids)
+    };
+    let every = |id: u16| vec![id; 24 * 16];
+    draw(&mut back, 1);
+    save(&mut g, &back, 3, 64, 64);
+    let (at, ids) = saved(&g);
+    assert_eq!(ids, every(1));
+    draw(&mut back, 2);
+    save(&mut g, &back, 3, 64, 64);
+    assert_eq!(saved(&g), (at, every(2)), "unshared: written in place");
+    let clone = g.clone();
+    assert_eq!(saved(&clone), (at, every(2)), "the clone shares them");
+    draw(&mut back, 3);
+    save(&mut g, &back, 3, 64, 64);
+    let (moved, ids) = saved(&g);
+    assert!(
+        moved != at && ids == every(3),
+        "shared: copied, then written"
+    );
+    assert_eq!(saved(&clone), (at, every(2)), "the clone keeps its block");
+}
