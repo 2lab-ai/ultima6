@@ -48,7 +48,8 @@ impl Receipt {
     /// The image of a current unflagged pixel's source as the definition takes it: width, height
     /// and words (transparent 0); `None` for a pixel shown classic: a record at another version
     /// than its own now, a portrait or a panel bitmap at any version but 0 (they stay at 0 while
-    /// loaded), an image missing or shorter than its size.
+    /// loaded), an image missing or shorter than its size, and a bitmap past the screen (the
+    /// compositor shows it classic: `u6_render::hd::Image`).
     fn image(
         (paper, book): (Option<&Bitmap>, Option<&Bitmap>),
         e: &Engine,
@@ -87,6 +88,9 @@ impl Receipt {
                     _ => None,
                 }?;
                 let (w, h) = (usize::from(b.width), usize::from(b.height));
+                if w > WIDTH || h > HEIGHT {
+                    return None;
+                }
                 let pixels = b.pixels.get(..w * h)?;
                 Some((w, h, pixels.iter().map(|&p| through(p)).collect()))
             }
@@ -231,7 +235,7 @@ fn the_hd_frame_of_the_users_game_is_the_definitions() {
     println!(
         "hd receipt: {}; {} frames at 4x; HD blocks {} tile, {} portrait, {} paper, {} spellbook; \
          {} classic; {} blocks off the definition; a new compositor on {} frames, {} differ; \
-         cache peak {} KiB of {} KiB",
+         retained cache payload peak {} KiB of {} KiB",
         if pass { "pass" } else { "FAIL" },
         r.frames,
         r.hd[0],
@@ -251,8 +255,8 @@ fn the_hd_frame_of_the_users_game_is_the_definitions() {
 }
 
 /// The receipt's own reference on synthetic images: a portrait (a one-item archive) and a panel
-/// bitmap at version 0 are their images; at any other version, and a bitmap shorter than its
-/// size, they are classic (`None`).
+/// bitmap at version 0 are their images; at any other version, a bitmap shorter than its size
+/// and one past the screen, they are classic (`None`).
 #[test]
 fn the_reference_shows_a_portrait_or_a_bitmap_at_another_version_classic() {
     use crate::converse::text::{ConverseText, MESSAGES, Msg};
@@ -312,4 +316,23 @@ fn the_reference_shows_a_portrait_or_a_bitmap_at_another_version_classic() {
         image((Some(&short), None), src(Kind::Bitmap, BITMAP_PAPER, 0)),
         None
     );
+    // Past the screen one way or the other (full pixel data): classic, as the compositor shows
+    // it; the screen's own size is an image.
+    let sizes = [
+        (WIDTH + 1, 1, false),
+        (1, HEIGHT + 1, false),
+        (WIDTH, HEIGHT, true),
+    ];
+    let bigs: Vec<Bitmap> = sizes
+        .iter()
+        .map(|&(w, h, _)| Bitmap {
+            width: w as u16,
+            height: h as u16,
+            pixels: vec![2; w * h],
+        })
+        .collect();
+    for (big, &(w, h, want)) in bigs.iter().zip(&sizes) {
+        let got = image((Some(big), None), src(Kind::Bitmap, BITMAP_PAPER, 0));
+        assert_eq!(got, want.then_some((w, h)), "{w} x {h}");
+    }
 }

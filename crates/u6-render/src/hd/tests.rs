@@ -133,6 +133,17 @@ impl Pics {
         e.5 = pixels;
     }
 
+    /// Image (kind, id) given transparency `clear` with its pixels and version kept (a change
+    /// of the mask alone, which the compositor must not take for the same image).
+    fn remask(&mut self, kind: Kind, id: u16, clear: Option<Vec<bool>>) {
+        let e = self
+            .images
+            .iter_mut()
+            .find(|e| (e.0, e.1) == (kind, id))
+            .unwrap();
+        e.6 = clear;
+    }
+
     fn ver(&self, kind: Kind, id: u16) -> u32 {
         self.images
             .iter()
@@ -616,7 +627,8 @@ fn a_tile_composes_to_the_reference_bytes() {
 }
 
 /// Random edits between compositions (pixels drawn from images and classic ones, an image
-/// rewritten, the palette changed, the scale switched, the plane reset): after each, the kept
+/// rewritten, an image's transparency alone changed (pixels, version and palette kept), the
+/// palette changed, the scale switched, the plane reset): after each, the kept
 /// compositor's frame is a new compositor's, and every block that changed lies in the rect it
 /// reported.
 #[test]
@@ -647,7 +659,13 @@ fn a_kept_compositor_equals_a_new_one_after_every_change() {
                 x.below(WIDTH as u64 - 16) as usize,
                 x.below(HEIGHT as u64 - 16) as usize,
             );
-            match x.below(10) {
+            match x.below(11) {
+                10 => {
+                    let id = x.below(12) as u16;
+                    let k = 2 + x.below(9) as usize;
+                    let clear = (0..256).map(|i| (i * k).is_multiple_of(13)).collect();
+                    pics.remask(Kind::Tile, id, Some(clear));
+                }
                 0..=4 => draw(&mut fb, &pics, Kind::Tile, x.below(12) as u16, (px, py)),
                 5 => draw(
                     &mut fb,
@@ -915,6 +933,111 @@ fn a_bound_smaller_than_one_image_and_the_bytes_counted() {
     let want = (256 + 1024) * 4 + 256 + 256 + (1200 + 4800) * 4 + 1200;
     assert_eq!(c.cache().bytes(), want);
     assert_eq!(c.cache().peak(), want);
+}
+
+/// The transparency alone changed (the pixels, the version and the palette the same): a new HD
+/// image, not the one the memo holds; equal to a new compositor's frame at each step, and
+/// different from the frame before.
+#[test]
+fn a_change_of_the_transparency_alone_is_another_image() {
+    let mut pics = Pics::default();
+    let pixels = art(12, 16, 16, 4);
+    pics.put(Kind::Tile, 4, (16, 16), pixels, None);
+    let mut fb = plane();
+    fb.palette = palette(7);
+    draw(&mut fb, &pics, Kind::Tile, 4, (32, 32));
+    for scale in [Scale::X2, Scale::X4] {
+        let mut c = Compositor::new();
+        let mut pics = pics.clone();
+        c.compose(&fb, &mut pics, scale);
+        let mut last = c.rgba().to_vec();
+        for (k, mask) in [
+            Some(
+                (0..256)
+                    .map(|i| (i / 16 + i % 16) % 4 == 0)
+                    .collect::<Vec<_>>(),
+            ),
+            Some(vec![false; 256]),
+            Some((0..256).map(|i| i % 3 == 0).collect()),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let changes = mask.as_ref().is_some_and(|m| m.iter().any(|&t| t));
+            pics.remask(Kind::Tile, 4, mask);
+            c.compose(&fb, &mut pics, scale);
+            let want = fresh(&fb, &pics, scale);
+            assert!(
+                c.rgba() == want.as_slice(),
+                "{scale:?} mask {k}: a new compositor's frame"
+            );
+            if changes {
+                assert!(
+                    c.rgba() != last.as_slice(),
+                    "{scale:?} mask {k}: the frame changed"
+                );
+            }
+            last = c.rgba().to_vec();
+        }
+    }
+}
+
+/// One HD image reached from both shapes of an opaque mask (`None`, and `Some` of all false:
+/// the same words, so the same entry), alternately and in one composition: the bytes counted
+/// are always the sum of the entries', with the source last reached counted.
+#[test]
+fn an_image_reached_from_another_mask_shape_is_counted_again() {
+    let mut pics = Pics::default();
+    let pixels = art(21, 16, 16, 4);
+    pics.put(Kind::Tile, 1, (16, 16), pixels.clone(), None);
+    pics.put(Kind::Tile, 2, (16, 16), pixels, Some(vec![false; 256]));
+    let (none, some) = ((256 + 1024) * 4 + 256, (256 + 1024) * 4 + 256 + 256);
+    for (cells, want) in [
+        (&[1u16][..], none),
+        (&[2][..], some),
+        (&[1][..], none),
+        (&[1, 2][..], some),
+        (&[2, 1][..], none),
+    ] {
+        let mut fb = plane();
+        fb.palette = palette(3);
+        for (k, &id) in cells.iter().enumerate() {
+            draw(&mut fb, &pics, Kind::Tile, id, (16 * k, 0));
+        }
+        let mut c = Compositor::new();
+        c.compose(&fb, &mut pics.clone(), Scale::X2);
+        assert_eq!(c.cache().len(), 1, "{cells:?}: one entry");
+        assert_eq!(
+            c.cache().bytes(),
+            c.cache().entries_bytes(),
+            "{cells:?}: the sum"
+        );
+        assert_eq!(
+            c.cache().bytes(),
+            want,
+            "{cells:?}: the last reached counted"
+        );
+    }
+    // One compositor across compositions that alternate the shapes.
+    let mut c = Compositor::new();
+    for k in 0..6 {
+        let id = 1 + (k % 2) as u16;
+        let mut fb = plane();
+        fb.palette = palette(3);
+        draw(&mut fb, &pics, Kind::Tile, id, (0, 0));
+        c.compose(&fb, &mut pics.clone(), Scale::X2);
+        assert_eq!(
+            c.cache().bytes(),
+            c.cache().entries_bytes(),
+            "composition {k}: the sum"
+        );
+        assert_eq!(
+            c.cache().bytes(),
+            if id == 1 { none } else { some },
+            "composition {k}"
+        );
+    }
 }
 
 #[test]

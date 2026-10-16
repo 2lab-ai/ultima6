@@ -15,11 +15,12 @@
 //! from the same frame.
 //!
 //! Memory: the HD images within the bound (each with the indices it was last reached from, which
-//! [`HdImages::bytes`] counts; [`HdImages::peak`] is the most it held, during a composition whose
-//! images alone exceed the bound); outside it, the frame (`WIDTH·S × HEIGHT·S` words), the last
-//! composition's inputs (a [`Src`], an index and a token per screen pixel) and a few words per
-//! image named so far: per tile record up to the largest record id named (the game's records
-//! are 2048), per portrait (letter, item) and per panel bitmap (two) named.
+//! [`HdImages::bytes`] counts; [`HdImages::peak`] is the retained cache payload peak, the most it
+//! held, also during a composition whose images alone exceed the bound); outside it, the 2×
+//! intermediate of a 4× magnification while it is made, the frame (`WIDTH·S × HEIGHT·S`
+//! words), the last composition's inputs (a [`Src`], an index and a token per screen pixel) and
+//! a few words per image named so far: per tile record up to the largest record id named (the
+//! game's records are 2048), per portrait (letter, item) and per panel bitmap (two) named.
 //!
 //! The output is packed RGBA words, `u32::from_le_bytes([r, g, b, a])`: in wasm memory (little
 //! endian) the bytes the page's `ImageData` takes.
@@ -212,10 +213,18 @@ impl HdImages {
         self.bytes
     }
 
-    /// The most bytes held so far, within a composition included (it keeps the images it shows
-    /// even past the bound, and is back under it when it ends).
+    /// The retained cache payload peak: the most [`HdImages::bytes`] held so far, within a
+    /// composition included (it keeps the images it shows even past the bound, and is back under
+    /// it when it ends). Scratch outside the entries is not in it: the 2× intermediate of a 4×
+    /// magnification while it is made, the compositor's frame and its last inputs.
     pub fn peak(&self) -> usize {
         self.peak
+    }
+
+    /// The bytes of the entries held, summed one by one ([`HdImages::bytes`] keeps the total).
+    #[cfg(test)]
+    fn entries_bytes(&self) -> usize {
+        self.slab.iter().flatten().map(Entry::bytes).sum()
     }
 
     /// The bound.
