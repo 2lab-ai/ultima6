@@ -196,7 +196,13 @@ impl HdImages {
     }
 
     /// The slot of the HD image of `input` (`width` × `height` words) at `scale`, made now if it
-    /// is not held: H2's pack image goes in front of MMPX here.
+    /// is not held.
+    ///
+    /// The seam for spec 07 H2: the pack's image goes in front of MMPX here. [`Resolver::resolve`]
+    /// has what its lookup needs (the image's kind, id, palette indices and transparency); it
+    /// would pass the pack image found, and an entry made from a pack image is keyed by that image
+    /// as well as by `input`, so a pack loaded or forgotten (which moves the platform's HD
+    /// version) never shows an entry of the other.
     fn get(&mut self, input: &[u32], width: usize, height: usize, scale: Scale) -> usize {
         let hash = content_hash(input, width, height, scale);
         if let Some(slots) = self.by_hash.get(&hash) {
