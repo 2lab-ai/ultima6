@@ -43,6 +43,8 @@
 //! - 0x1351d8 [boot] main(): setup, load data, character check, music, command loop
 
 pub mod commands;
+#[cfg(test)]
+mod hd_receipt;
 pub mod main_hunk;
 #[cfg(test)]
 mod plane_receipt;

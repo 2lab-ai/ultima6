@@ -1979,6 +1979,195 @@ test('the Speed buttons change the speed by click; the music fades out above 4x 
   await gain('1.00');
 }, { needs: h.haveHfes });
 
+// --- HD (spec 07 HD0) ------------------------------------------------------------------------
+// The HD button beside Mute: on by default and kept in localStorage; with it on the canvas is
+// the HD frame at 320·S × 200·S (S 4 when its box holds 3 device pixels per game pixel, else 2)
+// in the same CSS box, off it is the RGBA frame at 320 × 200 as before; the pointer maps onto
+// the game's 320 × 200 either way. The frames are compared in the page, by equality only.
+
+// What the page shows of HD: the button, the canvas size and box, the stored choice.
+const hdShown = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen');
+  const box = c.getBoundingClientRect();
+  let stored = null;
+  try {
+    stored = localStorage.getItem('u6.hd');
+  } catch {
+    stored = 'unreadable';
+  }
+  return {
+    pressed: document.getElementById('hd').getAttribute('aria-pressed'),
+    width: c.width,
+    height: c.height,
+    box: [Math.round(box.width), Math.round(box.height)],
+    stored,
+  };
+});
+
+// A gated page (gameFirst) on the user's disks, started, the canvas focused; every request to
+// another origin counted in `foreign`.
+async function bootHd(env, foreign, init) {
+  const { context, page } = await h.openPage(env);
+  context.on('request', (r) => {
+    const url = r.url();
+    if (!url.startsWith(env.server.url) && !url.startsWith('data:') && !url.startsWith('blob:')) foreign.push(url);
+  });
+  if (init) await context.addInitScript(init);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await page.focus('#screen');
+  return page;
+}
+
+test('HD: on by default and kept across a reload; the button switches it at once with no game step; off the canvas is the RGBA frame at 320 x 200, on the HD frame at 320·S x 200·S in the same box; no foreign request', async (env) => {
+  const foreign = [];
+  const page = await bootHd(env, foreign);
+  await h.waitPrompt(page);
+  let shown = await hdShown(page);
+  assert.ok(shown.pressed === 'true' && shown.stored === null, 'on by default, nothing stored');
+  assert.ok(shown.width === 1280 && shown.height === 800, 'S 4: the box holds 3 device pixels per game pixel');
+  assert.ok(await canvasShowsGame(page), 'the canvas is the HD frame');
+  const box = shown.box;
+  // The switch on a frozen display: the canvas changes with no frame of the game run.
+  await h.virtualDisplay(page, 60);
+  const ticks = await page.evaluate(() => globalThis.__ticks);
+  const press = () => page.evaluate(() => document.getElementById('hd').click());
+  await press();
+  shown = await hdShown(page);
+  assert.ok(shown.pressed === 'false' && shown.stored === 'off', 'off, stored');
+  assert.ok(shown.width === 320 && shown.height === 200, 'off: 320 x 200');
+  assert.deepEqual(shown.box, box, 'the same box');
+  assert.ok(await canvasShowsGame(page), 'off: the RGBA frame, byte for byte');
+  await press();
+  shown = await hdShown(page);
+  assert.ok(shown.pressed === 'true' && shown.stored === 'on' && shown.width === 1280, 'on again');
+  assert.deepEqual(shown.box, box, 'the same box');
+  assert.ok(await canvasShowsGame(page), 'on: the HD frame at once');
+  assert.equal(await page.evaluate(() => globalThis.__ticks), ticks, 'no game step ran');
+  await h.runFrames(page, 30);
+  assert.ok(await canvasShowsGame(page), 'and after frames');
+  // Kept across reloads; anything but off stored is on.
+  await press();
+  await page.reload();
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  shown = await hdShown(page);
+  assert.ok(shown.pressed === 'false' && shown.width === 320, 'off survives a reload');
+  assert.ok(await canvasShowsGame(page), 'the RGBA frame after the reload');
+  for (const [stored, want] of [['on', 1280], ['dark', 1280]]) {
+    await page.evaluate((v) => localStorage.setItem('u6.hd', v), stored);
+    await page.reload();
+    await started(page, FILES);
+    await h.waitPrompt(page);
+    shown = await hdShown(page);
+    assert.ok(shown.pressed === 'true' && shown.width === want, `stored ${stored}: on`);
+    assert.ok(await canvasShowsGame(page), `stored ${stored}: the HD frame`);
+  }
+  // A box under 3 device pixels per game pixel: S 2; the canvas follows a resize.
+  await page.setViewportSize({ width: 700, height: 900 });
+  await page.waitForFunction(() => document.getElementById('screen').width === 640, null, { timeout: 10_000 });
+  shown = await hdShown(page);
+  assert.ok(shown.height === 400 && shown.box[0] < 960, 'S 2 in a smaller box');
+  await h.waitFrames(page, 2);
+  assert.ok(await canvasShowsGame(page), 'S 2: the HD frame');
+  assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP violation');
+  assert.equal(foreign.length, 0, 'no request to another origin');
+}, { needs: h.haveHfes });
+
+test('HD: a pointer on a game pixel reaches the game at that pixel with HD off, at 2x and at 4x; a click on the Look icon is Look in each', async (env) => {
+  const foreign = [];
+  const page = await bootHd(env, foreign);
+  await h.waitPrompt(page);
+  const POINTS = [[0, 0], [319, 199], [88, 88], [160, 100], [17, 183], [303, 9]];
+  const modes = [['4x', 1024, 1280], ['2x', 700, 640], ['off', 1024, 320]];
+  for (const [mode, width, canvasWidth] of modes) {
+    await page.setViewportSize({ width, height: 900 });
+    if (mode === 'off') await page.click('#hd');
+    await page.waitForFunction((w) => document.getElementById('screen').width === w, canvasWidth, { timeout: 10_000 });
+    await h.waitFrames(page, 2);
+    for (const [x, y] of POINTS) {
+      await page.mouse.move(...(await h.screenPoint(page, x, y)));
+      await page.waitForFunction(([px, py]) => {
+        const at = globalThis.__pointerAt;
+        return at !== null && at[0] === px && at[1] === py;
+      }, [x, y], { timeout: 5000 }).catch(() => assert.fail(`${mode}: (${x}, ${y}) queued at that pixel`));
+    }
+    await page.focus('#screen');
+    await h.click(page, 64, 184, 30); // the fourth icon: Look
+    assert.equal(await promptNow(page), '0', `${mode}: Look waits for its target`);
+    await page.keyboard.press('Escape');
+    await h.waitPrompt(page);
+  }
+  assert.equal(foreign.length, 0, 'no request to another origin');
+}, { needs: h.haveHfes });
+
+// Page init script: per display frame of the page's loop (its `frame` callback), the wall ms
+// of the presents (the glue's `__presentMs`) and the canvas draws (putImageData) in it, and
+// whether it drew, in `window.__hdTimes` while that is an array.
+function timeHdFrames() {
+  window.__hdTimes = null;
+  let drawMs = 0;
+  let draws = 0;
+  const put = CanvasRenderingContext2D.prototype.putImageData;
+  CanvasRenderingContext2D.prototype.putImageData = function (...args) {
+    const t = performance.now();
+    put.apply(this, args);
+    drawMs += performance.now() - t;
+    draws += 1;
+  };
+  const raf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (callback) => raf((now) => {
+    if (callback.name !== 'frame' || !Array.isArray(window.__hdTimes)) return callback(now);
+    const [p, d, n] = [globalThis.__presentMs, drawMs, draws];
+    const out = callback(now);
+    window.__hdTimes.push([globalThis.__presentMs - p + drawMs - d, draws - n, now]);
+    return out;
+  });
+}
+
+const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+
+test('HD performance (spec 07 Acceptance 5): a walk in the castle at 4x on the real display, the present and the canvas draw per display frame at S 4 and S 2: median at most 4 ms, p95 at most 8 ms (receipt)', async (env) => {
+  const { context, page } = await h.openPage(env);
+  await context.addInitScript(timeHdFrames);
+  await h.load(page, env);
+  await h.dropFiles(page, [h.ZIP]);
+  await started(page);
+  await h.waitPrompt(page);
+  await page.focus('#screen');
+  await speedTo(page, '4');
+  await engineSpeed(page, 4);
+  const receipts = [];
+  for (const [s, width] of [[4, 1024], [2, 700]]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForFunction((w) => document.getElementById('screen').width === w, 320 * s, { timeout: 10_000 });
+    await h.waitFrames(page, 10);
+    await page.evaluate(() => { window.__hdTimes = []; });
+    const end = Date.now() + 8000;
+    // Steps both ways and a pass between (the start fight's foes move on, a blocked step
+    // passes).
+    for (let i = 0; Date.now() < end; i += 1) {
+      await page.keyboard.press(['ArrowRight', 'ArrowRight', 'ArrowLeft', 'ArrowLeft', 'Space', 'ArrowDown', 'ArrowUp'][i % 7]);
+      await h.sleep(60);
+    }
+    const times = await page.evaluate(() => {
+      const t = window.__hdTimes;
+      window.__hdTimes = null;
+      return t;
+    });
+    const all = times.map((f) => f[0]).sort((a, b) => a - b);
+    const drawn = times.filter((f) => f[1] > 0).map((f) => f[0]).sort((a, b) => a - b);
+    const hz = (times.length - 1) / ((times.at(-1)[2] - times[0][2]) / 1000);
+    const [median, p95] = [quantile(all, 0.5), quantile(all, 0.95)];
+    receipts.push(`S ${s}: ${times.length} frames at ${hz.toFixed(0)} Hz, ${drawn.length} drawn; per frame median ${median.toFixed(2)} ms, p95 ${p95.toFixed(2)} ms, max ${all.at(-1).toFixed(2)} ms; drawn frames median ${quantile(drawn, 0.5).toFixed(2)} ms, p95 ${quantile(drawn, 0.95).toFixed(2)} ms`);
+    assert.ok(drawn.length >= 30, `S ${s}: the walk changed the frame`);
+    assert.ok(median <= 4, `S ${s}: median at most 4 ms`);
+    assert.ok(p95 <= 8, `S ${s}: p95 at most 8 ms`);
+  }
+  for (const r of receipts) console.log(`  receipt: ${r}`);
+}, { needs: h.haveZip });
+
 const filter = process.argv[2];
 const env = await h.setup();
 let failed = 0;
