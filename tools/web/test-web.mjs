@@ -2526,14 +2526,25 @@ function hdPackPage() {
     }
     if (variant === 'entry') files.push(['notes.txt', new TextEncoder().encode('not a pack file')]);
     if (variant === 'index') new DataView(files[at('index.bin')][1].buffer).setUint32(12, 5000, true);
+    if (variant === 'manifest') {
+      // The manifest's CRC-32 taken from other bytes: it does not read, so the zip is not a
+      // pack (spec 07 H2's rule) and goes to the import.
+      return window.__zipFiles(files, { crcOf: ['manifest.json', new Uint8Array(1)] });
+    }
     return window.__zipFiles(files);
+  };
+  // A pack of one made-up record (no game needed) whose manifest's CRC-32 is wrong.
+  window.__brokenPack = async () => {
+    const tile = { kind: 1, id: 1, letter: 0, hash: '0000000000000001', width: 64, height: 64, rgba: rgbaOf(64, 64, pattern('good')) };
+    return window.__zipFiles(await window.__packFiles([tile]), { crcOf: ['manifest.json', new Uint8Array(1)] });
   };
   window.__dropPack = async (variants) => {
     const dt = new DataTransfer();
     for (const [i, v] of variants.entries()) {
       if (v === 'marker') dt.items.add(new File(['not a game file'], 'port-test-marker.txt'));
       else if (v === 'claim') {
-        // A zip of a disk image and a manifest.json that names the pack format but is cut short.
+        // A zip of a disk image and a manifest.json that names the pack format but is cut short:
+        // not a pack (it does not parse), so the import takes it.
         const files = [['disks/Made 1.adf', new Uint8Array(4096).fill(2)],
           ['manifest.json', new TextEncoder().encode('{"format": "u6-hdpack/1", "tile"')]];
         dt.items.add(new File([window.__zipFiles(files)], 'claim.zip'));
@@ -2694,7 +2705,7 @@ test('HD pack: a dropped pack starts no game and touches no kept file; its count
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
 
-test('HD pack: a broken pack (a CRC-32, a picture\'s size, a file it does not have, an index over the limit) is refused with nothing changed; a drop of a pack with a game file, or of two packs, is refused; another pack replaces the first', async (env) => {
+test('HD pack: a broken pack (a CRC-32, a picture\'s size, a file it does not have, an index over the limit) is refused with nothing changed; a zip whose manifest does not read or parse goes to the import, which starts and stores nothing, the game, its kept files and the kept pack as they were; a drop of a pack with a game file, or of two packs, is refused; another pack replaces the first', async (env) => {
   const foreign = [];
   const page = await bootPack(env, foreign);
   assert.equal(await page.evaluate(() => window.__icon()), true);
@@ -2729,18 +2740,19 @@ test('HD pack: a broken pack (a CRC-32, a picture\'s size, a file it does not ha
     assert.ok(!(await h.log(page)).slice(from).some((e) => e.startsWith('pack:') || e.startsWith('save:')), `${variant}: no storage call`);
     await unchanged(variant);
   }
-  // A zip of a disk image whose manifest.json names the pack format but does not read: taken
-  // for a pack and refused from its directory (the disk image is not a pack's), never read
-  // whole, never started as a game.
-  {
+  // Zips whose manifest.json does not read or parse are not packs (spec 07 H2's rule): a pack
+  // whose manifest's CRC-32 is wrong, and a disk image beside a manifest cut short. The import
+  // takes them, starts nothing from them (no game files in them) and stores nothing; the game
+  // on screen, its kept files and the kept pack stay as they were.
+  for (const variant of ['manifest', 'claim']) {
     const from = (await h.log(page)).length;
-    await page.evaluate(() => window.__dropPack(['claim']));
+    await page.evaluate((v) => window.__dropPack([v]), variant);
     await h.waitSettled(page);
-    assert.match((await h.state(page)).status, /^The HD pack was not loaded: it holds a file an HD pack does not have, or one twice\.$/);
+    assert.match((await h.state(page)).status, /^Could not start the game:/, `${variant}: the import refused it`);
     const log = (await h.log(page)).slice(from);
-    assert.ok(!log.includes('read:start:claim.zip'), 'claim: not read whole');
-    assert.ok(!log.some((e) => e.startsWith('pack:') || e.startsWith('save:')), 'claim: nothing stored');
-    await unchanged('claim');
+    assert.ok(log.some((e) => e.startsWith('read:start:')), `${variant}: the import read it`);
+    assert.ok(!log.some((e) => e.startsWith('pack:') || e.startsWith('save:') || e.startsWith('saves:store')), `${variant}: nothing stored`);
+    await unchanged(variant);
   }
   for (const [variants, why] of [
     [['good', 'marker'], /^The drop holds an HD pack and other files: drop the HD pack on its own\. Nothing was loaded\.$/],
@@ -2885,6 +2897,35 @@ test('HD pack: a zip of the owner\'s disk images with a manifest.json that menti
   assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true }, 'no pack');
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
+
+test('HD pack: a pack whose manifest does not read (its CRC-32) dropped on a page with no game is not taken for a pack: the import refuses it, nothing is started, kept or stored', async (env) => {
+  const foreign = [];
+  const { context, page } = await h.openPage(env);
+  context.on('request', (r) => {
+    const url = r.url();
+    if (!url.startsWith(env.server.url) && !url.startsWith('data:') && !url.startsWith('blob:')) foreign.push(url);
+  });
+  await context.addInitScript(h.packKit);
+  await context.addInitScript(hdPackPage);
+  await h.load(page, env);
+  const from = (await h.log(page)).length;
+  await page.evaluate(async () => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([await window.__brokenPack()], 'broken-pack.zip'));
+    document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
+  await h.waitSettled(page);
+  const s = await h.state(page);
+  assert.match(s.status, /^Could not start the game:/, 'the import refused it');
+  assert.equal(s.state, 'idle', 'nothing started');
+  assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true }, 'no pack');
+  assert.equal(await h.keptPackBytes(page), null, 'no pack kept');
+  assert.equal(await h.keptPaths(page), null, 'no game files kept');
+  const log = (await h.log(page)).slice(from);
+  assert.ok(log.includes('read:start:broken-pack.zip'), 'the import read it');
+  assert.ok(!log.some((e) => e.startsWith('pack:') || e.startsWith('save:') || e.startsWith('saves:store')), 'nothing stored');
+  assert.equal(foreign.length, 0, 'no request to another origin');
+});
 
 test('HD pack on a page with no game: the drop loads it and starts nothing (no import, no game files kept); the owner\'s files dropped next start a game that shows it, and a reload brings both back', async (env) => {
   // The pack is made on another page whose game computes the record's key; only its bytes (the

@@ -1122,10 +1122,38 @@ fn the_engines_content_keys_are_the_packs() {
     // No such image: no key. The archives hold one portrait (the HD tool's and the page's count).
     assert_eq!(key(Kind::Portrait, portrait_id(b'b', 3).unwrap()), None);
     assert_eq!(
-        crate::converse::portrait_items(&s, e.io().files()),
-        [(b'a', 0)]
+        crate::converse::portraits(&s, e.io().files()),
+        [(b'a', 0, face.clone())]
     );
     assert_eq!(key(Kind::Classic, 0), None);
+}
+
+/// A portrait file name too short to carry the archive letter (the original patches its tenth
+/// byte) lists no portraits, as the HD tool before it did, even when a file of that very name
+/// holds one.
+#[test]
+fn a_portrait_file_name_too_short_for_its_letter_lists_no_portraits() {
+    use crate::converse::text::{ConverseText, MESSAGES, Msg};
+    let mut lib = 4u32.to_le_bytes().to_vec();
+    lib.extend(u6_formats::lzw::encode(&vec![7u8; 56 * 64]).unwrap());
+    let files = Files::new(BTreeMap::from([("face.?".to_string(), lib)]));
+    let mut s = State::empty();
+    s.converse.text = Some(ConverseText::from_pairs(MESSAGES.iter().map(|&(m, _)| {
+        let t: &[u8] = if m == Msg::PortraitFile {
+            b"face.?"
+        } else {
+            b""
+        };
+        (m, t.to_vec())
+    })));
+    assert!(
+        crate::converse::portrait_pixels(&s, &files, b'a', 0).is_some(),
+        "the file reads"
+    );
+    assert!(
+        crate::converse::portraits(&s, &files).is_empty(),
+        "but no portrait is listed"
+    );
 }
 
 /// A new game whose portrait has other bytes that look the same through its colour table (every

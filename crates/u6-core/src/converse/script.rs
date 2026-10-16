@@ -218,15 +218,19 @@ pub fn portrait_ref(state: &State, npc: i16) -> Option<(u8, u16)> {
 /// for the hero.
 pub const PORTRAIT_LETTERS: [u8; 3] = [b'a', b'b', b'z'];
 
-/// Port-only (spec 07 H2): every portrait the game's archives hold, as (letter, item): each item
-/// of the three archives' tables that is not empty and whose pixels read ([`portrait_pixels`]).
-/// The HD tool packs these; the page counts them.
-pub fn portrait_items(state: &State, files: &Files) -> Vec<(u8, u16)> {
+/// Port-only (spec 07 H2): every portrait the game's archives hold, as (letter, item, its 56×64
+/// palette indices): each item of the three archives' tables that is not empty and whose pixels
+/// read ([`portrait_pixels`]), each read once. None when the portrait file's name is too short to
+/// carry the archive letter. The HD tool packs these; the page counts them.
+pub fn portraits(state: &State, files: &Files) -> Vec<(u8, u16, Vec<u8>)> {
     use u6_formats::u6lib::{EntryWidth, U6Lib};
     let Some(text) = state.converse.text.as_ref() else {
         return Vec::new();
     };
     let name = text.get(Msg::PortraitFile).to_vec();
+    if name.len() <= NAME_LETTER {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for letter in PORTRAIT_LETTERS {
         let Some(file) = files.get(&archive(&name, letter)) else {
@@ -239,8 +243,11 @@ pub fn portrait_items(state: &State, files: &Files) -> Vec<(u8, u16)> {
             let (Some(off), Ok(item)) = (le32(file, item * 4), u16::try_from(item)) else {
                 continue;
             };
-            if !it.is_empty() && off != 0 && portrait_pixels(state, files, letter, item).is_some() {
-                out.push((letter, item));
+            if it.is_empty() || off == 0 {
+                continue;
+            }
+            if let Some(px) = portrait_pixels(state, files, letter, item) {
+                out.push((letter, item, px));
             }
         }
     }

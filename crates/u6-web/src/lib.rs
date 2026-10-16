@@ -827,11 +827,11 @@ impl Game {
         }
     }
 
-    /// The portraits the running game's archives hold (`u6_core::converse::portrait_items`, what
+    /// The portraits the running game's archives hold (`u6_core::converse::portraits`, what
     /// the HD tool packs); 0 before a start. For tests and diagnostics.
     pub fn hd_portraits(&self) -> u32 {
         self.engine.as_ref().map_or(0, |e| {
-            u6_core::converse::portrait_items(&e.state(), e.io().files()).len() as u32
+            u6_core::converse::portraits(&e.state(), e.io().files()).len() as u32
         })
     }
 

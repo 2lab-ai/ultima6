@@ -8,7 +8,6 @@
 
 use std::path::Path;
 
-use u6_core::converse::{portrait_items, portrait_pixels};
 use u6_core::image::{A4, GameImage};
 use u6_core::objects::{ACTOR_SLOTS, ObjectId};
 use u6_core::{Files, State};
@@ -261,14 +260,9 @@ impl Game {
 }
 
 /// Every portrait of the three archives, its pixels as the engine reads them
-/// (`u6_core::converse::portrait_items`, `portrait_pixels`: the loading half of 0x133d3e).
+/// (`u6_core::converse::portraits`, `portrait_pixels`: the loading half of 0x133d3e).
 pub fn portraits(state: &State, files: &Files) -> Vec<(u8, u16, Vec<u8>)> {
-    portrait_items(state, files)
-        .into_iter()
-        .filter_map(|(letter, item)| {
-            portrait_pixels(state, files, letter, item).map(|px| (letter, item, px))
-        })
-        .collect()
+    u6_core::converse::portraits(state, files)
 }
 
 /// The paper and spellbook bitmaps, by the file names `game` points to.
