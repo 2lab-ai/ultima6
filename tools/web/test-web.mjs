@@ -1683,8 +1683,9 @@ test('a display frame converts the game\'s frame at most once however many steps
   console.log(`  receipt: 300 virtual frames: ${receipts.join('; ')}`);
 }, { needs: h.haveHfes });
 
-// Whether the canvas shows the RGBA frame of the game that presented last, compared in the page
-// by an FNV-1a hash of each (the frame is the user's data: only the equality leaves the page).
+// Whether the canvas shows the frame of the game that presented last (its HD frame with HD on,
+// else its RGBA frame), compared in the page by an FNV-1a hash of each (the frame is the user's
+// data: only the equality leaves the page).
 const canvasShowsGame = (page) => page.evaluate(() => {
   const hash = (d) => {
     let x = 0x811c9dc5;
@@ -1692,7 +1693,8 @@ const canvasShowsGame = (page) => page.evaluate(() => {
     return x;
   };
   const c = document.getElementById('screen');
-  return hash(c.getContext('2d').getImageData(0, 0, c.width, c.height).data) === hash(globalThis.__shownGame.frame_rgba());
+  const g = globalThis.__shownGame;
+  return hash(c.getContext('2d').getImageData(0, 0, c.width, c.height).data) === hash(g.hd_on() ? g.hd_frame_rgba() : g.frame_rgba());
 });
 
 test('a new game put on screen repaints the canvas with its own frame: an import over the running game (spec 06 O1)', async (env) => {

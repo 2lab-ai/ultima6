@@ -230,7 +230,8 @@ export async function forgetSaves() {
 // of the buttons the page queued, at the clock of the step that took it: a press's delivered
 // hold is its release's clock less its own, whatever the wall time between them. `__presents`
 // counts the page's presents, `__converted` those that converted a new frame (frame_version
-// moved: spec 06 O1); `__shownGame` is the game that presented last.
+// moved: spec 06 O1); `__shownGame` is the game that presented last. `__pointerAt` is the last
+// game pixel the page queued for the pointer, `__presentMs` the wall ms the presents took.
 const GLUE_HOOKS = `
 globalThis.__u6mem = () => (wasm ? wasm.memory.buffer.byteLength : 0);
 globalThis.__ticks = 0;
@@ -239,6 +240,8 @@ globalThis.__buttons = [];
 globalThis.__sent = [];
 globalThis.__presents = 0;
 globalThis.__converted = 0;
+globalThis.__pointerAt = null;
+globalThis.__presentMs = 0;
 {
   const step = Game.prototype.step;
   const ran = Game.prototype.ran;
@@ -249,6 +252,7 @@ globalThis.__converted = 0;
   let held = 0;
   Game.prototype.pointer = function (x, y, buttons) {
     if (this.started()) queued.push(buttons & 3);
+    globalThis.__pointerAt = [x, y];
     return pointer.call(this, x, y, buttons);
   };
   Game.prototype.key_down = function (code, key, ctrl) {
@@ -270,7 +274,9 @@ globalThis.__converted = 0;
   };
   Game.prototype.present = function () {
     const before = this.frame_version();
+    const t = performance.now();
     present.call(this);
+    globalThis.__presentMs += performance.now() - t;
     globalThis.__presents += 1;
     if (this.frame_version() !== before) globalThis.__converted += 1;
     globalThis.__shownGame = this;
@@ -430,11 +436,21 @@ export async function waitLog(page, entry, timeout = 30_000) {
   await page.waitForFunction((e) => window.__log.some((l) => l.startsWith(e)), entry, { timeout });
 }
 
-/// The canvas pixels (RGBA) at backing-store size.
+/// The canvas pixels (RGBA), one per game pixel (320 x 200): with HD on (a canvas S times that,
+/// spec 07) the top-left device pixel of each game pixel's S x S block, read in the page.
 export function frame(page) {
   return page.evaluate(() => {
     const c = document.getElementById('screen');
-    return Array.from(c.getContext('2d').getImageData(0, 0, c.width, c.height).data);
+    const s = c.width / 320;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const out = new Array(320 * 200 * 4);
+    for (let y = 0; y < 200; y += 1) {
+      for (let x = 0; x < 320; x += 1) {
+        const from = (y * s * c.width + x * s) * 4;
+        for (let k = 0; k < 4; k += 1) out[(y * 320 + x) * 4 + k] = d[from + k];
+      }
+    }
+    return out;
   });
 }
 

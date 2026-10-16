@@ -11,6 +11,7 @@ use super::blit::{
 
 mod adv;
 mod cache;
+mod hd;
 mod idle;
 mod plane;
 mod plane_parity;

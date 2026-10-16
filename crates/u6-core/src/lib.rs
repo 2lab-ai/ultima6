@@ -15,7 +15,8 @@
 //!
 //! Layout (one directory per work unit, spec 03 §6): `engine` (executor, `Io`), `state`
 //! (aggregate + loading), `rng`, `files`, `stub`, `pacer` (the hosts' fixed step and speed,
-//! spec 06), then `gfx/`, `map/`, `objects/`, `ui/`, `actors/`, `converse/` and `main_loop`.
+//! spec 06), then `gfx/`, `map/`, `objects/`, `ui/`, `actors/`, `converse/` and `main_loop`;
+//! `hd` gives the HD compositor the images the source plane names (spec 07).
 
 pub mod actors;
 pub mod combat;
@@ -23,6 +24,7 @@ pub mod converse;
 pub mod engine;
 pub mod files;
 pub mod gfx;
+pub mod hd;
 pub mod image;
 pub mod intro;
 pub mod inventory;

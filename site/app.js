@@ -34,6 +34,14 @@
 // them (`ran`) and shows the result once, if they changed it (`present`, `frame_version`).
 // The speed (1x .. 8x, Max) is the viewer's, kept in localStorage; - and = / + on the canvas,
 // the keypad - and +, and the Speed buttons change it.
+//
+// HD (spec 07 HD0): with the HD button on (the default, kept in localStorage) the canvas holds
+// the game's HD frame, 320·S × 200·S device pixels (S = 4 when its box holds at least three
+// device pixels per game pixel, else 2) in the same CSS box: the pixels the game drew from a
+// tile, a portrait or a panel picture are MMPX-magnified, computed in this browser from the
+// user's own files; text and everything drawn directly are the classic pixels scaled. Off, the
+// canvas is the 320 × 200 frame as before. The pointer maps onto the game's 320 × 200 pixels
+// either way.
 import init, {
   Game, budget_ms, input_too_large, max_input_bytes, max_save_bytes, max_save_file_bytes, step_ms,
   zip_sliced,
@@ -48,6 +56,7 @@ const picker = document.getElementById('picker');
 const forget = document.getElementById('forget');
 const forgetSave = document.getElementById('forget-save');
 const mute = document.getElementById('mute');
+const hdButton = document.getElementById('hd');
 const restart = document.getElementById('restart');
 const statusLine = document.getElementById('status');
 const badge = document.getElementById('speed-badge');
@@ -424,18 +433,87 @@ let stepMs = 20; // step_ms(), once the engine loaded
 
 let drawnGame = null; // the game whose frame the canvas shows
 let drawnVersion = -1; // its frame_version() then
+let drawnHd = false; // that frame was its HD frame
 
-// Draws the game's RGBA frame on the canvas, unless the canvas already shows that frame of
-// that game (spec 06 O1: `present` converts only a changed frame, and so the page draws only
-// a changed one; a start resizes, and so clears, the canvas, and its first frame is drawn).
+// Draws the game's frame on the canvas (its HD frame with HD on, else its RGBA frame), unless
+// the canvas already shows that frame of that game (spec 06 O1: `present` converts only a
+// changed frame, and so the page draws only a changed one; a start or an HD switch resizes,
+// and so clears, the canvas, and its first frame is drawn whole). Over the HD frame it drew
+// last, only the rect the compositions since then wrote is drawn.
 function draw() {
   const version = game.frame_version();
   if (game === drawnGame && version === drawnVersion) return;
+  const hd = game.hd_on();
+  const s = hd ? game.hd_scale() : 1;
+  const [w, h] = [game.width() * s, game.height() * s];
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+    drawnGame = null; // the resize cleared it
+  }
+  const over = hd && drawnHd && game === drawnGame;
   drawnGame = game;
   drawnVersion = version;
+  drawnHd = hd;
+  const ctx = canvas.getContext('2d');
   // Re-create the view every frame: wasm memory growth detaches old buffers.
-  const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.frame_ptr(), game.frame_len());
-  canvas.getContext('2d').putImageData(new ImageData(pixels, canvas.width, canvas.height), 0, 0);
+  if (!hd) {
+    const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.frame_ptr(), game.frame_len());
+    ctx.putImageData(new ImageData(pixels, w, h), 0, 0);
+    return;
+  }
+  const rect = game.hd_take_dirty();
+  if (over && rect.length === 0) return;
+  const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len());
+  const image = new ImageData(pixels, w, h);
+  if (over) ctx.putImageData(image, 0, 0, rect[0], rect[1], rect[2], rect[3]);
+  else ctx.putImageData(image, 0, 0);
+}
+
+// --- HD ------------------------------------------------------------------------------------
+
+const HD_KEY = 'u6.hd'; // localStorage: 'off' when the viewer switched HD off
+
+// The stored choice; unreadable storage or any other value is on.
+function storedHd() {
+  try {
+    return localStorage.getItem(HD_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+let hdOn = storedHd();
+
+// The HD scale for the canvas's box now: 4 when it holds at least 3 device pixels per game
+// pixel each way, else 2 (MMPX doubles; there is no 3x).
+function hdScale() {
+  const box = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  return box.width * dpr >= 3 * 320 && box.height * dpr >= 3 * 200 ? 4 : 2;
+}
+
+function showHd() {
+  hdButton.setAttribute('aria-pressed', String(hdOn));
+}
+
+// The game on screen shows HD as chosen, at the scale for the box now, drawn at once with no
+// new game frame (the canvas takes the size of the frame it shows: `draw`).
+function applyHd() {
+  if (!game || crashed) return;
+  game.set_hd(hdOn, hdScale());
+  draw();
+}
+
+function toggleHd() {
+  hdOn = !hdOn;
+  try {
+    localStorage.setItem(HD_KEY, hdOn ? 'on' : 'off');
+  } catch {
+    // No storage: the choice lasts until the page is left.
+  }
+  showHd();
+  applyHd();
 }
 
 // One display frame: the steps its wall time is worth at the chosen speed (`pace`; the first
@@ -543,8 +621,7 @@ async function boot(next, origin) {
     // No audio machine for this game (its MED tables fail the engine's checks): it runs silent.
     console.warn(`sound is off: ${message(err)}`);
   }
-  canvas.width = next.width();
-  canvas.height = next.height();
+  applyHd();
   restart.hidden = true;
   reflect('running');
   startLoop();
@@ -800,9 +877,18 @@ mute.addEventListener('click', () => {
   setMuted(!audio.muted);
   gesture();
 });
+hdButton.addEventListener('click', toggleHd);
+// A box that grows or shrinks (the window, the zoom) may want the other scale.
+new ResizeObserver(() => {
+  if (hdOn) applyHd();
+}).observe(canvas);
+window.addEventListener('resize', () => {
+  if (hdOn) applyHd();
+});
 slower.addEventListener('click', () => changeSpeed(-1));
 faster.addEventListener('click', () => changeSpeed(1));
-// The pointer: the position through the canvas's CSS box onto its 320 x 200 pixels, the buttons
+// The pointer: the position through the canvas's CSS box onto the game's 320 x 200 pixels
+// (whatever the canvas's own size: HD makes it S times that), the buttons
 // as DOM `buttons` (bit 0 left, bit 1 right). The canvas captures a press so the release reaches
 // the game even off the canvas; the context menu stays off it while a game runs. A press is, in
 // this order, the focus, the game's pointer event (queued for the next step, exactly once) and
@@ -812,8 +898,8 @@ function sendPointer(e) {
   if (!game || crashed) return;
   const box = canvas.getBoundingClientRect();
   if (box.width === 0 || box.height === 0) return;
-  const x = Math.floor(((e.clientX - box.left) * canvas.width) / box.width);
-  const y = Math.floor(((e.clientY - box.top) * canvas.height) / box.height);
+  const x = Math.floor(((e.clientX - box.left) * game.width()) / box.width);
+  const y = Math.floor(((e.clientY - box.top) * game.height()) / box.height);
   game.pointer(x, y, e.buttons & 3);
 }
 canvas.addEventListener('pointerdown', (e) => {
@@ -892,6 +978,7 @@ function takeFocusFlag() {
 reflect('loading');
 reflectAudio();
 showSpeed();
+showHd();
 canvas.dataset.behind = '0';
 enqueue('Loading the engine', async () => {
   try {

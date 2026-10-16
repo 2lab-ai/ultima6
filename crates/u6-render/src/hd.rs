@@ -402,7 +402,8 @@ impl Compositor {
     }
 
     /// Composes `frame` at `scale` from the images `images` names ([`Compositor::rgba`]).
-    pub fn compose(&mut self, frame: &Framebuffer, images: &mut dyn Images, scale: Scale) {
+    /// Returns whether it wrote any block.
+    pub fn compose(&mut self, frame: &Framebuffer, images: &mut dyn Images, scale: Scale) -> bool {
         let s = scale.factor();
         let ow = WIDTH * s;
         let n = WIDTH * HEIGHT;
@@ -500,15 +501,17 @@ impl Compositor {
             }
         }
         self.hd.shrink();
-        if dirty[2] > 0 {
-            let d = self.dirty.get_or_insert(dirty);
-            *d = [
-                d[0].min(dirty[0]),
-                d[1].min(dirty[1]),
-                d[2].max(dirty[2]),
-                d[3].max(dirty[3]),
-            ];
+        if dirty[2] == 0 {
+            return false;
         }
+        let d = self.dirty.get_or_insert(dirty);
+        *d = [
+            d[0].min(dirty[0]),
+            d[1].min(dirty[1]),
+            d[2].max(dirty[2]),
+            d[3].max(dirty[3]),
+        ];
+        true
     }
 }
 

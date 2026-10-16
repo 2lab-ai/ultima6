@@ -602,3 +602,68 @@ fn the_cache_stays_under_its_bound_and_the_frame_is_the_same() {
     );
     assert!(big.cache().bytes() <= HD_CACHE_BYTES && !big.cache().is_empty());
 }
+
+/// Timings only (run with `--ignored --nocapture`): a walk-like scene, the paper bitmap under a
+/// map window of 11 × 11 cells of 300 synthetic records that scrolls one cell each composition.
+#[test]
+#[ignore]
+fn bench_a_walk() {
+    let mut pics = Pics::default();
+    for id in 0..300u16 {
+        let clear: Vec<bool> = (0..256)
+            .map(|i| id % 3 == 0 && (i % 16 + i / 16) % 5 == 0)
+            .collect();
+        pics.put(
+            Kind::Tile,
+            id,
+            (16, 16),
+            art(u64::from(id), 16, 16, 6),
+            Some(clear),
+        );
+    }
+    pics.put(Kind::Bitmap, 0, (320, 200), art(4242, 320, 200, 8), None);
+    for scale in [Scale::X4, Scale::X2] {
+        let mut fb = plane();
+        fb.palette = palette(1);
+        draw(&mut fb, &pics, Kind::Bitmap, 0, (0, 0));
+        let mut c = Compositor::new();
+        let t = std::time::Instant::now();
+        c.compose(&fb, &mut pics, scale);
+        let cold = t.elapsed();
+        let mut times = Vec::new();
+        for step in 0..200usize {
+            for cy in 0..11 {
+                for cx in 0..11 {
+                    let id = ((cx + step) * 7 + cy * 13) % 300;
+                    draw(
+                        &mut fb,
+                        &pics,
+                        Kind::Tile,
+                        id as u16,
+                        (8 + cx * 16, 8 + cy * 16),
+                    );
+                }
+            }
+            let t = std::time::Instant::now();
+            c.compose(&fb, &mut pics, scale);
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        times.sort_by(f64::total_cmp);
+        let mut full = Compositor::new();
+        full.compose(&fb, &mut pics, scale);
+        let t = std::time::Instant::now();
+        full.forget();
+        full.compose(&fb, &mut pics, scale);
+        let whole = t.elapsed();
+        println!(
+            "{}x: cold {:.2} ms, walk median {:.3} ms p95 {:.3} ms, whole frame (warm cache) {:.3} ms, cache {} images {} KiB",
+            scale.factor(),
+            cold.as_secs_f64() * 1e3,
+            times[100],
+            times[190],
+            whole.as_secs_f64() * 1e3,
+            c.cache().len(),
+            c.cache().bytes() >> 10
+        );
+    }
+}

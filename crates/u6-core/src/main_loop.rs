@@ -388,9 +388,14 @@ pub fn draw_paper(s: &State, io: &Io) {
 
 /// The bitmap [`draw_paper`] draws, decoded; `None` for a missing or bad file.
 pub(crate) fn paper_bitmap(io: &Io) -> Option<Bitmap> {
-    let name = pointed_string(io, A4.wrapping_sub(0x61e2));
-    let name = String::from_utf8_lossy(&name).into_owned();
-    io.files().get(&name).and_then(|f| Bitmap::from_lzw(f).ok())
+    io.files()
+        .get(&paper_file(io))
+        .and_then(|f| Bitmap::from_lzw(f).ok())
+}
+
+/// The name of the file [`paper_bitmap`] reads (the pointer at A4-0x61e2).
+pub(crate) fn paper_file(io: &Io) -> String {
+    String::from_utf8_lossy(&pointed_string(io, A4.wrapping_sub(0x61e2))).into_owned()
 }
 
 /// The calls 0x105350 makes after its reads, in its order: link the actors (0x10edb4),
