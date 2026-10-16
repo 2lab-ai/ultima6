@@ -1119,8 +1119,12 @@ fn the_engines_content_keys_are_the_packs() {
         key(Kind::Bitmap, BITMAP_SPELLBOOK),
         Some(image_hash(4, 3, book.iter().copied()))
     );
-    // No such image: no key.
+    // No such image: no key. The archives hold one portrait (the HD tool's and the page's count).
     assert_eq!(key(Kind::Portrait, portrait_id(b'b', 3).unwrap()), None);
+    assert_eq!(
+        crate::converse::portrait_items(&s, e.io().files()),
+        [(b'a', 0)]
+    );
     assert_eq!(key(Kind::Classic, 0), None);
 }
 

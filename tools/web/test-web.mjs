@@ -2663,36 +2663,82 @@ test('HD pack with storage that throws: the pack is loaded and shown for this vi
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
 
-// Page init script: a put of the HD pack's record fails as a full disk does once
-// `window.__quota` is set (the rest of the storage works).
+// Page init script: a put of the HD pack's record fails as a full disk does, while
+// `window.__quota` says how: 'throw' (the put throws at once) or 'abort' (the put's request is
+// made and its transaction then aborts: the request's error and the abort come later); the rest
+// of the storage works.
 function packQuota() {
   const put = IDBObjectStore.prototype.put;
   IDBObjectStore.prototype.put = function quotaPut(value, key) {
-    if (key === 'hd:pack' && window.__quota) throw new DOMException('test: quota', 'QuotaExceededError');
-    return put.call(this, value, key);
+    const pack = key === 'hd:pack';
+    if (pack && window.__quota === 'throw') throw new DOMException('test: quota', 'QuotaExceededError');
+    const req = put.call(this, value, key);
+    if (pack && window.__quota === 'abort') this.transaction.abort();
+    return req;
   };
 }
 
-test('HD pack: a new pack the browser cannot keep (its put fails, a full disk) works for this visit, and the pack kept before is removed, not brought back on the next visit', async (env) => {
+test('HD pack: a new pack the browser cannot keep (its put throws at once, or its transaction aborts later: a full disk) works for this visit, and the pack kept before is removed, not brought back on the next visit', async (env) => {
   const foreign = [];
   const page = await bootPack(env, foreign, packQuota);
   assert.equal(await page.evaluate(() => window.__icon()), true);
   const mmpx = await cellHashes(page);
-  await page.evaluate(() => window.__dropPack(['good']));
-  await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
-  assert.ok(await h.keptPackBytes(page) > 0, 'the first pack is kept');
-  await page.evaluate(() => { window.__quota = true; });
-  await page.evaluate(() => window.__dropPack(['other']));
+  for (const mode of ['throw', 'abort']) {
+    await page.evaluate(() => window.__dropPack(['good']));
+    await page.waitForFunction(() => document.body.dataset.ops === '0' && /^HD pack loaded: /.test(document.getElementById('status').textContent), null, { timeout: 30_000 });
+    assert.ok(await h.keptPackBytes(page) > 0, `${mode}: the first pack is kept`);
+    await page.evaluate((m) => { window.__quota = m; }, mode);
+    await page.evaluate(() => window.__dropPack(['other']));
+    await h.waitSettled(page);
+    assert.match((await h.state(page)).status, /^HD pack loaded: 1 of its 1 tiles.* \(It could not be kept in this browser: it works until the page is left, and no HD pack is kept for the next visit\.\)$/, `${mode}: the status`);
+    assert.ok(await cellShowsPack(page, 'other'), `${mode}: the new pack shows for this visit`);
+    assert.equal(await h.keptPackBytes(page), null, `${mode}: the pack kept before is removed`);
+    await page.reload();
+    await started(page, FILES);
+    await h.waitPrompt(page);
+    assert.equal(await page.evaluate(() => window.__icon()), true);
+    assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true }, `${mode}: no pack comes back`);
+    assert.deepEqual(await cellHashes(page), mmpx, `${mode}: MMPX after the reload`);
+  }
+  assert.equal(foreign.length, 0, 'no request to another origin');
+}, { needs: h.haveHfes });
+
+test('HD pack: a zip of the owner\'s disk images with a manifest.json that mentions the pack format without declaring it (no format) starts the game as before; that manifest on its own goes to the import too, not refused as a pack', async (env) => {
+  const foreign = [];
+  const { context, page } = await h.openPage(env);
+  context.on('request', (r) => {
+    const url = r.url();
+    if (!url.startsWith(env.server.url) && !url.startsWith('data:') && !url.startsWith('blob:')) foreign.push(url);
+  });
+  await context.addInitScript(h.packKit);
+  await h.load(page, env);
+  await page.evaluate(() => {
+    const input = Object.assign(document.createElement('input'), { type: 'file', id: '__disks', multiple: true });
+    input.style.display = 'none';
+    document.body.append(input);
+  });
+  await page.setInputFiles('#__disks', h.HFES);
+  const MENTION = '{"name": "game", "description": "supports u6-hdpack/1"}';
+  const dropZip = (withDisks) => page.evaluate(async ([disks, manifest]) => {
+    const files = [];
+    if (disks) {
+      for (const f of document.getElementById('__disks').files) files.push([f.name, new Uint8Array(await f.arrayBuffer())]);
+    }
+    files.push(['manifest.json', new TextEncoder().encode(manifest)]);
+    const dt = new DataTransfer();
+    dt.items.add(new File([window.__zipFiles(files)], disks ? 'disks.zip' : 'notes.zip'));
+    document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  }, [withDisks, MENTION]);
+  await dropZip(true);
+  const s = await started(page, FILES);
+  assert.match(s.status, /Started\./, 'the game started from the zip');
+  assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true }, 'no pack');
+  await page.evaluate(() => { window.__g0 = globalThis.__shownGame; });
+  await dropZip(false);
   await h.waitSettled(page);
-  assert.match((await h.state(page)).status, /^HD pack loaded: 1 of its 1 tiles.* \(It could not be kept in this browser: it works until the page is left, and no HD pack is kept for the next visit\.\)$/);
-  assert.ok(await cellShowsPack(page, 'other'), 'the new pack shows for this visit');
-  assert.equal(await h.keptPackBytes(page), null, 'the pack kept before is removed');
-  await page.reload();
-  await started(page, FILES);
-  await h.waitPrompt(page);
-  assert.equal(await page.evaluate(() => window.__icon()), true);
-  assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true }, 'no pack comes back');
-  assert.deepEqual(await cellHashes(page), mmpx, 'MMPX after the reload');
+  assert.match((await h.state(page)).status, /^Could not start the game:/, 'on its own: imported (no game files in it)');
+  assert.ok(await page.evaluate(() => globalThis.__shownGame === window.__g0), 'the game on screen runs on');
+  assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true }, 'no pack');
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
 
@@ -2772,8 +2818,10 @@ test('HD performance with a full pack (spec 07 Acceptance 5): the owner\'s scale
   const shown = await packShown(page);
   const pack = shown.pack.split(',').map(Number);
   const matched = shown.matched.split(',').map(Number);
-  // The fixture is complete: every record (the format's 2048), portraits, both panel pictures.
-  assert.ok(pack[0] === 2048 && pack[1] > 0 && pack[2] === 2, 'the scaler pack holds every image');
+  // The fixture is complete: every record (the format's 2048), every portrait the game's
+  // archives hold (the engine's count), both panel pictures.
+  const portraits = await page.evaluate(() => globalThis.__shownGame.hd_portraits());
+  assert.ok(pack[0] === 2048 && portraits > 0 && pack[1] === portraits && pack[2] === 2, 'the scaler pack holds every image');
   assert.ok(matched[0] >= 0.9 * pack[0], 'nearly every tile matches (the merged shore records do not)');
   assert.ok(matched[1] === pack[1] && matched[2] === pack[2], 'every portrait and panel picture matches');
   // The frame composed at the load is the pack's: its images made from the pack; MMPX only for
@@ -2834,7 +2882,12 @@ test('HD performance with a full pack (spec 07 Acceptance 5): the owner\'s scale
   for (const r of receipts) console.log(`  receipt: ${r}`);
   assert.ok(walked <= limit, 'the wasm memory within the budget');
   assert.ok(again <= limitAgain, 'after a second load, within its budget');
-  assert.deepEqual(await packShown(page), shown, 'the second load: the same pack and matches');
+  // The same pack again; its matches as at the first load (the shore merge rewrote its records
+  // in between, so the tiles matched are not compared exactly).
+  const second = await packShown(page);
+  assert.ok(second.pack === shown.pack && second.forgetEnabled === shown.forgetEnabled, 'the second load: the same pack');
+  const matchedAgain = second.matched.split(',').map(Number);
+  assert.ok(matchedAgain[0] >= 0.9 * pack[0] && matchedAgain[1] === pack[1] && matchedAgain[2] === pack[2], 'the second load: matched as the first');
 }, { needs: havePack });
 
 const filter = process.argv[2];

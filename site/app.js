@@ -46,9 +46,12 @@
 //
 // An HD pack (spec 07 H2: a zip the owner's local tool made from the owner's own files): a
 // dropped `.zip` is first classified from its zip directory and its manifest.json alone (the
-// engine names the parts to read); a pack never starts or touches a game. A zip whose
-// manifest.json names the pack format but does not read is taken for a pack and refused, never
-// started as a game. A pack whose directory already breaks the format is refused before it is
+// engine names the parts to read); a pack never starts or touches a game. A manifest.json that
+// parses as JSON makes a pack only when its `format` is u6-hdpack/1 (any other zip goes to the
+// import as before). One that does not read or parse but declares that format (stored, as the
+// tool writes it) is taken for a pack and refused; a broken deflated one (only a pack zipped
+// again by other means) is not seen as one and goes to the import, which takes only the disk
+// images in a zip. A pack whose directory already breaks the format is refused before it is
 // read; else it is read whole, checked and decoded by the engine (refused whole, with nothing
 // changed, when it does not read), set on the game on screen and on every game started after,
 // and kept in IndexedDB so the next visit loads it before its first HD frame (storage that
