@@ -137,9 +137,9 @@ test('the held-walk pace floor: a late first step does not let the next come soo
 
 // No page: the harness's step bookkeeping on synthetic frames and positions, so every direction
 // is exercised whichever one a boot walks: the map's scroll for a step along either axis, and
-// what a key toward a cell did (the wake cell before a walk: a step into it from beside it in a
-// turn that killed the hero ends there too).
-test('a step\'s bookkeeping: the scroll of a step east, west, south or north; blocked, walked, on the allowed wake destination (also from beside it); any other cell fails', async () => {
+// what a key toward a cell did (a step into the wake cell from beside it, toward it, is a walk:
+// h.stepResult says why; ending there from anywhere else is the allowed wake destination).
+test('a step\'s bookkeeping: the scroll of a step east, west, south or north; blocked, walked (into the wake cell too), on the allowed wake destination; any other cell fails', async () => {
   const shown = (cx, cy) => {
     const f = new Array(320 * 200 * 4).fill(0);
     for (let y = 0; y < 200; y += 1) {
@@ -164,7 +164,8 @@ test('a step\'s bookkeeping: the scroll of a step east, west, south or north; bl
   assert.equal(h.stepResult('300,300,0', '300,301,0', south), 'walked');
   assert.equal(h.stepResult('300,300,0', h.WAKE_CELL, east), 'wake cell');
   const [wx, wy, wz] = h.WAKE_CELL.split(',').map(Number);
-  assert.equal(h.stepResult(`${wx - 1},${wy},${wz}`, h.WAKE_CELL, east), 'wake cell', 'a step east into the wake cell is not counted as walked');
+  assert.equal(h.stepResult(`${wx - 1},${wy},${wz}`, h.WAKE_CELL, east), 'walked', 'a step east into the wake cell from beside it is a walk');
+  assert.equal(h.stepResult(`${wx},${wy - 1},${wz}`, h.WAKE_CELL, east), 'wake cell', 'from beside it the other way: the wake destination');
   assert.equal(h.stepResult(h.WAKE_CELL, `${wx},${wy + 1},${wz}`, south), 'walked', 'a step out of it is');
   assert.equal(h.stepResult(h.WAKE_CELL, h.WAKE_CELL, east), 'blocked');
   for (const [to, label] of [['302,300,0', 'two cells'], ['299,300,0', 'the other way'], ['301,301,0', 'a diagonal'], ['301,300,1', 'another level']]) {
@@ -177,13 +178,13 @@ test('a step\'s bookkeeping: the scroll of a step east, west, south or north; bl
 // passes so far), the leader moved by each step it allows. Pinned: the order of the directions
 // (east and west blocked, south walks: an east-or-west step fails it), a pass only after a round
 // of four blocked, the bound (16 tries, 3 passes) and its failure, naming each try's key and
-// outcome; a try that ends on the wake cell, then the next directions from there but not the
-// one back to where the call started (from beside the wake cell: east into it, west back is
-// skipped; with the cell beyond it open only after a pass, no alternation to the bound); the
-// frame read only with `withFrame`; a failure of the step itself (the game never took the input)
-// not retried.
-test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 rounds; the wake cell, never the way back; the frame only when asked; a step that fails stops it', async () => {
-  const stub = ({ at = '300,300,0', open = () => false, wakeOn = null, failOn = null } = {}) => {
+// outcome; a try that ends on the wake cell, then the next direction from there; a walk into the
+// wake cell from beside it is the step (counted otherwise, the step would walk in and back out
+// or, where that is the one way out, not at all); a walk back onto the cell the call started on
+// (the hero killed in a pass, woken beside it) is not; the frame read only with `withFrame`; a
+// failure of the step itself (the game never took the input) not retried.
+test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 rounds; the wake cell; never back where it began; the frame only when asked; a step that fails stops it', async () => {
+  const stub = ({ at = '300,300,0', open = () => false, wakeOn = null, wakeOnPass = null, failOn = null } = {}) => {
     const io = { at, passes: 0, acts: [], frames: 0, prompts: 0 };
     Object.assign(io, {
       prompt: async () => { io.prompts += 1; },
@@ -200,7 +201,10 @@ test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 ro
         const to = `${x + step.dx},${y + step.dy},${z}`;
         if (open(to, io.passes)) io.at = to;
       },
-      pass: async () => { io.passes += 1; },
+      pass: async () => {
+        io.passes += 1;
+        if (io.passes === wakeOnPass) io.at = h.WAKE_CELL;
+      },
     });
     return io;
   };
@@ -230,24 +234,23 @@ test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 ro
   got = await h.stepOnce(null, { io });
   assert.deepEqual(io.acts, keys.slice(0, 3), 'east blocked, west ends on the wake cell, then south');
   assert.ok(got.from === h.WAKE_CELL && got.key === 'ArrowDown', 'the step walked from the wake cell');
-  // West of the wake cell, everything open: east ends on it (not counted), west (back to the
-  // start) is skipped, then south walks from the wake cell: the leader ends elsewhere.
-  const west = `${wx - 1},${wy},${wz}`;
-  io = stub({ at: west, open: () => true });
+  // East of the wake cell with only the way into it open (the gargoyles of the woken hero on
+  // its other sides): west into it is the step, at the second try.
+  const beside = `${wx + 1},${wy},${wz}`;
+  io = stub({ at: beside, open: (to) => to === h.WAKE_CELL });
   got = await h.stepOnce(null, { io });
-  assert.deepEqual(io.acts, ['ArrowRight', 'ArrowDown'], 'east onto the wake cell, west skipped, then south');
-  assert.ok(got.from === h.WAKE_CELL && got.to === `${wx},${wy + 1},${wz}`, 'south from the wake cell');
-  // East of it, only the way into it open, and west of it after a pass: west onto the wake cell,
-  // south and north blocked; after the pass east (back) is skipped and west walks on. Trying the
-  // way back would end each round where it began, the next one west onto the wake cell again.
-  const east2 = `${wx + 1},${wy},${wz}`;
-  io = stub({ at: east2, open: (to, passes) => to === h.WAKE_CELL || (passes >= 1 && to === west) });
-  got = await h.stepOnce(null, { io });
-  assert.deepEqual(io.acts, ['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'ArrowLeft'], 'a round, a pass, then west from the wake cell');
-  assert.ok(io.passes === 1 && got.from === h.WAKE_CELL && got.to === west, 'west of the wake cell, not back east');
-  io = stub({ at: west, open: () => false, wakeOn: 1 });
-  const back = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
-  assert.ok(back instanceof assert.AssertionError && back.message.startsWith('no test step in 4 rounds of the four directions: ArrowRight wake cell, ArrowLeft skipped, ArrowDown blocked'), 'the outcomes named: wake cell, skipped');
+  assert.deepEqual(io.acts, ['ArrowRight', 'ArrowLeft'], 'east blocked, west into the wake cell');
+  assert.ok(got.from === beside && got.to === h.WAKE_CELL && io.passes === 0, 'a walk into the wake cell is the step');
+  // The same cell, every side blocked until the hero dies in the first pass and wakes beside it:
+  // east from the wake cell back onto it is not the step ('back'), west from it then is.
+  io = stub({ at: beside, wakeOnPass: 1, open: (to, passes) => passes >= 1 && (to === beside || to === h.WAKE_CELL) });
+  got = await h.stepOnce(null, { io, what: 'test step' });
+  assert.deepEqual(io.acts, [...keys, 'ArrowRight', 'ArrowLeft'], 'a round, the pass, east back, then west');
+  assert.ok(got.from === beside && got.to === h.WAKE_CELL, 'the leader ends elsewhere than he began');
+  // A try that ends on the wake cell from afar, then nothing open: the outcomes named in order.
+  io = stub({ wakeOn: 1 });
+  const named = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
+  assert.ok(named instanceof assert.AssertionError && named.message.startsWith('no test step in 4 rounds of the four directions: ArrowRight wake cell, ArrowLeft blocked, ArrowDown blocked, ArrowUp blocked, pass,'), 'the outcomes named: wake cell, blocked, pass');
   // A step whose input the game never took fails as it did, not as a blocked try.
   io = stub({ failOn: 1 });
   const failed = await h.stepOnce(null, { io }).then(() => null, (err) => err);

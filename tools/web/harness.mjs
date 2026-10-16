@@ -510,24 +510,25 @@ export const STEP_ROUNDS = 4;
 export const WAKE_CELL = '307,352,0';
 
 /// What a key or click toward `step` ({ dx, dy }) did, from the leader at `from` to `to` (as the
-/// page writes them: x,y,z): 'blocked' (no cell walked); 'wake cell' (the leader ended on
-/// `WAKE_CELL` from another cell, the allowed wake destination: the turn after the step may
-/// have killed the hero, so not even a step into it from beside it counts as walked); 'walked'
-/// (the one cell toward `step`). Anything else fails as a walk of the wrong cells.
+/// page writes them: x,y,z): 'blocked' (no cell walked); 'walked' (the one cell toward `step`);
+/// 'wake cell' (the leader ended on `WAKE_CELL`, the allowed wake destination, from a cell not
+/// beside it that way: the turn after the step killed the hero). Anything else fails as a walk
+/// of the wrong cells. A step that ends on the wake cell from the cell beside it, toward it, is
+/// a walk: a blocked step runs no NPC turn (the world turn picks the hero again at once, u6-core
+/// `actors::walk::paced_player_step`), so a turn that kills him comes only after a step that
+/// moved him there, and the cell is the one walked to; only a move the game refused after its
+/// cost (0x10c9d2, `StepResult::Mismatch`), with a death in its turn, would end there unwalked.
+/// Checked the other way round, every walk into the wake cell would go uncounted: a step from
+/// beside it walking in then back out (to where it began), or none at all where that is the one
+/// way out.
 export function stepResult(from, to, { dx, dy }) {
   if (to === from) return 'blocked';
-  if (to === WAKE_CELL) return 'wake cell';
   const [fx, fy, fz] = from.split(',').map(Number);
   const [tx, ty, tz] = to.split(',').map(Number);
-  assert.ok(tx - fx === dx && ty - fy === dy && tz === fz, 'a step walks the one cell toward its key, or ends on the allowed wake destination');
-  return 'walked';
+  if (tx - fx === dx && ty - fy === dy && tz === fz) return 'walked';
+  assert.ok(to === WAKE_CELL, 'a step walks the one cell toward its key, or ends on the allowed wake destination');
+  return 'wake cell';
 }
-
-/// The cell one step toward `step` ({ dx, dy }) from `at` (x,y,z as the page writes the leader).
-const cellToward = (at, { dx, dy }) => {
-  const [x, y, z] = at.split(',').map(Number);
-  return `${x + dx},${y + dy},${z}`;
-};
 
 /// The page's side of a step (`stepOnce`): wait for the prompt, read the leader, read the frame,
 /// do `step` (its arrow, then until the game took it and shows the prompt again), pass. A test
@@ -559,14 +560,14 @@ export const pageSteps = (page) => ({
 /// member's cell is open (the step swaps them), and the start fight has fewer foes than the hero
 /// has sides (at most three near him at the first prompt, over 10000 seeds). Only after a round of
 /// four blocked does a pass spend the hero's turn, so the fight moves on, up to `STEP_ROUNDS`
-/// rounds. After a try that ended on the wake cell the next directions are tried from there, but
-/// not the one toward the cell the call started on ('skipped': from beside the wake cell a walk
-/// into it is not counted, and the way back would end where the step began; tried, the two
-/// alternate to the bound), so the step always leaves the leader elsewhere than it found him. With
-/// `withFrame` the frame before each try is read (a whole canvas over the protocol, 1280 x 800 at
-/// S 4: only for a check of the step's scroll). Returns the step (key, dx, dy), the leader before
-/// and after and, with `withFrame`, the frame before it. After the bound it fails with each try's
-/// key and outcome and the passes between, in order (`what` names it: a click step).
+/// rounds; after a try that ended on the wake cell the next direction is tried from there. A walk
+/// that ends on the cell the call started on ('back': the hero killed in a pass, woken beside it,
+/// then walking that way) is not the step either, so the step always leaves the leader elsewhere
+/// than it found him. With `withFrame` the frame before each try is read (a whole canvas over the
+/// protocol, 1280 x 800 at S 4: only for a check of the step's scroll). Returns the step (key, dx,
+/// dy), the leader before and after and, with `withFrame`, the frame before it. After the bound it
+/// fails with each try's key and outcome and the passes between, in order (`what` names it: a click
+/// step).
 export async function stepOnce(page, { withFrame = false, io = pageSteps(page), what = 'step' } = {}) {
   const tried = [];
   let start;
@@ -579,14 +580,11 @@ export async function stepOnce(page, { withFrame = false, io = pageSteps(page), 
       await io.prompt();
       const from = await io.leader();
       start ??= from;
-      if (cellToward(from, step) === start) {
-        tried.push(`${step.key} skipped`);
-        continue;
-      }
       const before = withFrame ? await io.frame() : undefined;
       await io.act(step);
       const to = await io.leader();
-      const result = stepResult(from, to, step);
+      let result = stepResult(from, to, step);
+      if (result === 'walked' && to === start) result = 'back';
       tried.push(`${step.key} ${result}`);
       if (result === 'walked') return { ...step, from, to, before };
     }
