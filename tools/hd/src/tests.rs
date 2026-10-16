@@ -2852,16 +2852,19 @@ fn a_turn_of_drain_is_bounded_whatever_the_pipe_holds() {
     use std::cell::Cell;
     use std::time::{Duration, Instant};
     /// A pipe that always has `each` bytes ready: never empty (no WouldBlock), never at its
-    /// end, until `cap` reads, then an end, so a drain that is not bounded ends too. The count
-    /// of reads lives outside, so it is still there when the drain drops a pipe at its end.
+    /// end, until `cap` reads, then an end, so a drain that is not bounded ends too. The counts
+    /// live outside, so they are still there when the drain drops a pipe at its end: the reads,
+    /// and the largest buffer a read was given (the drain's chunk).
     struct Endless<'a> {
         each: usize,
         reads: &'a Cell<usize>,
+        chunk: &'a Cell<usize>,
         cap: usize,
     }
     impl std::io::Read for Endless<'_> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.reads.set(self.reads.get() + 1);
+            self.chunk.set(self.chunk.get().max(buf.len()));
             if self.reads.get() > self.cap {
                 return Ok(0);
             }
@@ -2870,35 +2873,43 @@ fn a_turn_of_drain_is_bounded_whatever_the_pipe_holds() {
             Ok(n)
         }
     }
-    let until = Instant::now() + Duration::from_secs(60);
     for each in [1, 100, 8192, 1 << 20] {
-        let reads = Cell::new(0);
+        let (reads, chunk) = (Cell::new(0), Cell::new(0));
         let mut pipe = Some(Endless {
             each,
             reads: &reads,
+            chunk: &chunk,
             cap: 100_000,
         });
         let mut got = 0;
-        let start = Instant::now();
+        // Each case its own time, far ahead, so it is the turn's bound that ends the turn.
+        let until = Instant::now() + Duration::from_secs(60);
         assert!(run::drain(&mut pipe, until, |b| got += b.len()).is_none());
-        // One turn: at most TURN_CALLS reads and TURN_BYTES bytes, the pipe still open.
+        // Data always ready and time to spare: one turn makes exactly TURN_CALLS reads, moves
+        // what they read, at most TURN_BYTES, and leaves the pipe open. Neither a drain that
+        // reads on (the bound dropped) nor one that returns without reading passes.
         let (reads, open) = (reads.get(), pipe.is_some());
         assert!(
-            reads <= run::TURN_CALLS && open,
+            reads == run::TURN_CALLS && open,
             "{each}-byte reads: {reads} in one turn, the pipe {}",
             if open { "open" } else { "read to its end" }
+        );
+        assert_eq!(
+            got,
+            each.min(chunk.get()) * run::TURN_CALLS,
+            "{each}-byte reads"
         );
         assert!(
             got <= run::TURN_BYTES,
             "{each}-byte reads: {got} bytes in one turn"
         );
-        assert!(start.elapsed() < Duration::from_secs(1));
     }
     // A turn whose time is up reads nothing.
-    let reads = Cell::new(0);
+    let (reads, chunk) = (Cell::new(0), Cell::new(0));
     let mut pipe = Some(Endless {
         each: 8,
         reads: &reads,
+        chunk: &chunk,
         cap: 10,
     });
     assert!(run::drain(&mut pipe, Instant::now(), |_| {}).is_none());
