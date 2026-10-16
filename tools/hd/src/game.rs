@@ -17,7 +17,7 @@ use u6_formats::bitmap::Bitmap;
 use u6_formats::gfx::{TILE_COUNT, TILE_PIXELS, TILE_W, TileKind};
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_LEN, PORTRAIT_WIDTH};
 use u6_formats::u6lib::{EntryWidth, U6Lib};
-use u6_hdpack::{ImageId, Role, image_hash, tile_hash};
+use u6_hdpack::{ImageId, Role, bitmap_hash, portrait_hash, tile_hash};
 use u6_intake::{InputFile, intake};
 
 use crate::img::Classic;
@@ -256,15 +256,11 @@ impl Game {
                     .portraits
                     .iter()
                     .find(|(l, i, _)| *l == letter && *i == item)?;
-                Some(image_hash(
-                    PORTRAIT_WIDTH as u16,
-                    PORTRAIT_HEIGHT as u16,
-                    b.iter().copied(),
-                ))
+                portrait_hash(b)
             }
             ImageId::Bitmap(role) => {
                 let (_, w, h, b) = self.bitmaps.iter().find(|(r, ..)| *r == role)?;
-                Some(image_hash(*w, *h, b.iter().copied()))
+                bitmap_hash(*w, *h, b)
             }
         }
     }

@@ -12,8 +12,8 @@
 //!   hash of the classic image as the engine holds it now, the same function the HD tool keys
 //!   the pack with, so an image whose bytes changed (a merged shore record) matches no pack image
 //!   and is shown by MMPX: a tile's record pixels and transparency ([`u6_hdpack::tile_hash`]); a
-//!   portrait's bytes as `portrait_pixels` reads them and a bitmap's as the file holds them,
-//!   both before the colour table ([`u6_hdpack::image_hash`]).
+//!   portrait's bytes as `portrait_pixels` reads them ([`u6_hdpack::portrait_hash`]) and a
+//!   bitmap's as the file holds them ([`u6_hdpack::bitmap_hash`]), both before the colour table.
 //!
 //! [`HdView`] is the HD frame a platform shows of its engine: the switch, the scale, the pack
 //! ([`HdPack`], spec 07 H2) and when to compose (the web page's `Game::set_hd`,
@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use u6_formats::gfx::{TILE_H, TILE_W};
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_WIDTH};
-use u6_hdpack::{ImageId, Role, image_hash, tile_hash};
+use u6_hdpack::{ImageId, Role, bitmap_hash, portrait_hash, tile_hash};
 use u6_render::hd::{Compositor, Image, Images, NoImages, PACK_SCALE, Pack, PackHd, Scale};
 use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, Framebuffer, Kind, portrait_id, portrait_of};
 
@@ -224,9 +224,13 @@ impl EngineImages<'_> {
                 let files = self.io.files();
                 let pixels =
                     crate::converse::portrait_pixels(self.state, files, letter, u16::from(item))?;
-                let (w, h) = (PORTRAIT_WIDTH, PORTRAIT_HEIGHT);
-                let key = image_hash(w as u16, h as u16, pixels.iter().copied());
-                Some((w, h, through(colours, &pixels), key))
+                let key = portrait_hash(&pixels)?;
+                Some((
+                    PORTRAIT_WIDTH,
+                    PORTRAIT_HEIGHT,
+                    through(colours, &pixels),
+                    key,
+                ))
             }
             Kind::Bitmap => {
                 let bmp = match id {
@@ -235,11 +239,8 @@ impl EngineImages<'_> {
                 }?;
                 let (w, h) = (usize::from(bmp.width), usize::from(bmp.height));
                 // A bitmap shorter than its header draws only its first pixels: none is shown HD.
-                (bmp.pixels.len() >= w * h).then(|| {
-                    let pixels = &bmp.pixels[..w * h];
-                    let key = image_hash(bmp.width, bmp.height, pixels.iter().copied());
-                    (w, h, through(colours, pixels), key)
-                })
+                let key = bitmap_hash(bmp.width, bmp.height, &bmp.pixels)?;
+                Some((w, h, through(colours, &bmp.pixels[..w * h]), key))
             }
             Kind::Classic | Kind::Tile => None,
         }

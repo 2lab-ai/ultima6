@@ -837,8 +837,9 @@ fn the_writer_refuses_what_the_reader_would() {
     ));
 }
 
-/// Runs the probe over `file`: whether it is a pack, and the ranges it read.
-fn probe(file: &[u8]) -> (bool, Vec<(u64, u64)>) {
+/// What the probe told of `file`: not a pack (`None`), or a pack and its refusal's kind (`""`
+/// for none); and the ranges it read, in order.
+fn probe(file: &[u8]) -> (Option<&'static str>, Vec<(u64, u64)>) {
     let mut p = Probe::new(file.len() as u64);
     let mut reads = Vec::new();
     while let Some((start, end)) = p.need() {
@@ -846,59 +847,212 @@ fn probe(file: &[u8]) -> (bool, Vec<(u64, u64)>) {
         assert!(reads.len() <= 4, "a few reads");
         p.give(&file[start as usize..end as usize]);
     }
-    (p.is_pack().expect("told once nothing is needed"), reads)
+    let told = match p.is_pack().expect("told once nothing is needed") {
+        false => {
+            assert!(p.refusal().is_none());
+            None
+        }
+        true => Some(match p.refusal() {
+            None => "",
+            Some(PackError::Zip(_)) => "zip",
+            Some(PackError::Entry(_)) => "entry",
+            Some(PackError::Limit(_)) => "limit",
+            Some(PackError::Manifest(_)) => "manifest",
+            Some(e) => panic!("not a probe refusal: {e}"),
+        }),
+    };
+    (told, reads)
+}
+
+/// The range of the root `manifest.json` entry of `file`, as the reader slices it.
+fn manifest_range(file: &[u8]) -> (u64, u64) {
+    let zip::Directory::Entries(found) =
+        zip::directory(file.len() as u64, 0, file, |n| n == "manifest.json").unwrap()
+    else {
+        panic!("a whole file")
+    };
+    (found[0].start, found[0].end)
+}
+
+/// The end of `file` the probe reads first.
+fn tail(file: &[u8]) -> (u64, u64) {
+    (zip::tail_start(file.len() as u64), file.len() as u64)
 }
 
 #[test]
 fn the_probe_tells_a_pack_from_its_directory_and_manifest() {
     let pack = written();
-    let (yes, reads) = probe(&pack);
-    assert!(yes, "a pack");
-    assert_eq!(reads.len(), 2, "the end of the file, then the manifest");
+    let (told, reads) = probe(&pack);
+    assert_eq!(told, Some(""), "a pack, nothing refused");
     assert_eq!(
-        reads[0],
-        (zip::tail_start(pack.len() as u64), pack.len() as u64)
+        reads,
+        [tail(&pack), manifest_range(&pack)],
+        "the end, then the manifest"
     );
+    // The manifest is the writer's first entry: its range starts the file.
+    assert_eq!(manifest_range(&pack).0, 0);
     // Its entries deflated (the owner zipped it again): still a pack.
-    assert!(probe(&redeflated(&pack, "", |n| n as u32)).0);
-    // A zip of game-like files, and one whose manifest is of another format or not JSON.
+    assert_eq!(probe(&redeflated(&pack, "", |n| n as u32)).0, Some(""));
+    // A zip of game-like files: the end of it only. One whose manifest is JSON of another
+    // format (a web manifest naming the format elsewhere included), or JSON whose format is
+    // not a string: not a pack.
     let other = rezip(&[
         ("game".into(), vec![1; 300]),
         ("Disk 1.adf".into(), vec![2; 900]),
     ]);
-    assert_eq!(probe(&other), (false, vec![(0, other.len() as u64)]));
-    let web = with_file(&pack, "manifest.json", |b| {
-        *b = br#"{"format": "webmanifest"}"#.to_vec()
+    assert_eq!(probe(&other), (None, vec![tail(&other)]));
+    for m in [
+        &br#"{"format": "webmanifest"}"#[..],
+        br#"{"format": "webmanifest", "note": "u6-hdpack/1"}"#,
+        br#"{"format": 1}"#,
+    ] {
+        let web = with_file(&pack, "manifest.json", |b| *b = m.to_vec());
+        assert_eq!(probe(&web).0, None, "{}", String::from_utf8_lossy(m));
+    }
+    // JSON that is not an object with a format, naming the format: a pack, refused.
+    let array = with_file(&pack, "manifest.json", |b| {
+        *b = br#"["u6-hdpack/1"]"#.to_vec()
     });
-    assert!(!probe(&web).0);
-    let broken = with_file(&pack, "manifest.json", |b| b.truncate(b.len() / 2));
-    assert!(!probe(&broken).0);
-    // A manifest that is the format's but wrong otherwise is still a pack (the reader refuses
-    // it), and one in a subfolder is not the pack's.
-    let wrong = with_manifest(&pack, |m| m.images += 1);
-    assert!(probe(&wrong).0 && read_pack(&wrong).is_err());
+    assert_eq!(probe(&array).0, Some("manifest"));
+    // A manifest of the format that is wrong otherwise: a pack, refused by its manifest.
+    let wrong = with_manifest(&pack, |m| m.tile = 8);
+    assert_eq!(probe(&wrong).0, Some("manifest"));
+    assert!(matches!(read_pack(&wrong), Err(PackError::Manifest(_))));
+    // A manifest in a subfolder is not the pack's.
     let nested: Vec<(String, Vec<u8>)> = files_of(&pack)
         .into_iter()
         .map(|(n, b)| (format!("dir/{n}"), b))
         .collect();
-    assert!(!probe(&rezip(&nested)).0);
-    // A manifest entry whose CRC-32 is wrong does not read (one letter of its generator
-    // changed: the JSON would still say the format).
-    let mut bad = pack.clone();
-    let at = bad.windows(7).position(|w| w == b"\"u6-hd\"").unwrap();
-    bad[at + 1] = b'U';
-    assert!(!probe(&bad).0);
+    assert_eq!(probe(&rezip(&nested)).0, None);
     // Not a zip, empty, or bytes that are not the range asked for.
-    assert!(!probe(b"not a zip at all").0);
-    assert_eq!(probe(b""), (false, vec![]));
+    assert_eq!(probe(b"not a zip at all").0, None);
+    assert_eq!(probe(b""), (None, vec![]));
     let mut p = Probe::new(pack.len() as u64);
     p.give(&pack[..10]);
     assert_eq!(p.is_pack(), Some(false));
 }
 
+/// Spec 07 H2's policy for a zip whose manifest says it is a pack but does not read: it is taken
+/// for one and refused (never started as a game): a manifest whose CRC-32 is wrong, one that is
+/// not JSON, one cut short, one over the reader's limit, each naming the format in its bytes,
+/// beside game files. One that does not read and does not name the format is not a pack's.
 #[test]
-fn the_probe_reads_a_large_directory_from_where_it_starts_and_skips_a_huge_manifest() {
-    // Many entries: the directory starts before the tail read first.
+fn a_manifest_that_names_the_format_but_does_not_read_is_a_pack_refused() {
+    let disks = |manifest: Raw| {
+        zip_of(&[
+            Raw::stored("Ultima VI Disk 1.adf", &[1; 900]),
+            manifest,
+            Raw::stored("Ultima VI Disk 2.adf", &[2; 700]),
+        ])
+    };
+    let claim = br#"{"format": "u6-hdpack/1", "tile": 16"#;
+    let mut bad_crc = Raw::stored("manifest.json", br#"{"format": "u6-hdpack/1"}"#);
+    bad_crc.crc ^= 1;
+    for (what, m, why) in [
+        ("a wrong CRC-32", bad_crc, "zip"),
+        ("cut short", Raw::stored("manifest.json", claim), "manifest"),
+        (
+            "not JSON",
+            Raw::stored("manifest.json", b"u6-hdpack/1 manifest"),
+            "manifest",
+        ),
+        (
+            "over the limit",
+            Raw::stored(
+                "manifest.json",
+                &[claim.as_slice(), &vec![b' '; MAX_MANIFEST as usize]].concat(),
+            ),
+            "limit",
+        ),
+    ] {
+        let z = disks(m);
+        let (told, reads) = probe(&z);
+        // The directory is the pack's too: the disk images are not entries a pack has.
+        assert_eq!(
+            told,
+            Some("entry"),
+            "{what}: a pack, refused by its directory first"
+        );
+        let (start, end) = manifest_range(&z);
+        assert_eq!(
+            reads,
+            [tail(&z), (start, end.min(start + MAX_MANIFEST_RANGE))],
+            "{what}"
+        );
+        // Alone (no other entry), the manifest's own refusal.
+        let alone = zip_of(&[match what {
+            "a wrong CRC-32" => {
+                let mut r = Raw::stored("manifest.json", br#"{"format": "u6-hdpack/1"}"#);
+                r.crc ^= 1;
+                r
+            }
+            "cut short" => Raw::stored("manifest.json", claim),
+            "not JSON" => Raw::stored("manifest.json", b"u6-hdpack/1 manifest"),
+            _ => Raw::stored(
+                "manifest.json",
+                &[claim.as_slice(), &vec![b' '; MAX_MANIFEST as usize]].concat(),
+            ),
+        }]);
+        assert_eq!(probe(&alone).0, Some(why), "{what}, alone");
+        assert!(
+            read_pack(&alone).is_err(),
+            "{what}: the reader refuses it too"
+        );
+    }
+    // Broken and not naming the format, or deflated (searched as stored): not a pack.
+    let mut quiet = Raw::stored("manifest.json", br#"{"name": "a game"}"#);
+    quiet.crc ^= 1;
+    assert_eq!(probe(&disks(quiet)).0, None);
+    let mut deflated = Raw::deflated("manifest.json", br#"{"format": "u6-hdpack/1"}"#, 24);
+    deflated.crc ^= 1;
+    assert_eq!(probe(&disks(deflated)).0, None);
+}
+
+/// The probe's reads are bounded by what it asks for: a stored manifest holding 1 MiB that
+/// declares 100 bytes unpacked is read only up to [`MAX_MANIFEST_RANGE`] of its range; a
+/// directory starting more than 16 MiB before the end, or an entry whose local header lies past
+/// the file, is refused from the end read first; a directory that starts before the end read is
+/// read from where it starts.
+#[test]
+fn the_probe_reads_only_the_ranges_it_names() {
+    let mut huge = Raw::stored(
+        "manifest.json",
+        &[br#"{"format": "u6-hdpack/1"}"#.as_slice(), &[b' '; 1 << 20]].concat(),
+    );
+    huge.central_size = 100;
+    huge.local_size = 100;
+    let z = zip_of(&[huge]);
+    let (start, end) = manifest_range(&z);
+    assert!(end - start > 1 << 20, "its range holds the 1 MiB");
+    let (told, reads) = probe(&z);
+    assert_eq!(reads, [tail(&z), (start, start + MAX_MANIFEST_RANGE)]);
+    assert_eq!(
+        told,
+        Some("limit"),
+        "it names the format: a pack, over the limit"
+    );
+    // A directory over the 16 MiB cap: its end record names it 17 MiB before the end.
+    let mut far = vec![0u8; 17 << 20];
+    far.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    for v in [0u16, 0, 1, 1] {
+        far.extend_from_slice(&v.to_le_bytes());
+    }
+    far.extend_from_slice(&(17u32 << 20).to_le_bytes());
+    far.extend_from_slice(&0u32.to_le_bytes());
+    far.extend_from_slice(&0u16.to_le_bytes());
+    assert_eq!(probe(&far), (None, vec![tail(&far)]));
+    // A manifest whose local header offset lies past the file.
+    let mut z = zip_of(&[Raw::stored(
+        "manifest.json",
+        br#"{"format": "u6-hdpack/1"}"#,
+    )]);
+    let cd = z
+        .windows(4)
+        .rposition(|w| w == 0x0201_4b50u32.to_le_bytes())
+        .unwrap();
+    z[cd + 42..cd + 46].copy_from_slice(&0x00ff_0000u32.to_le_bytes());
+    assert_eq!(probe(&z), (None, vec![tail(&z)]));
+    // Many entries: the directory starts before the tail read first; it is read from its start.
     let mut files: Vec<(String, Vec<u8>)> = (0..3000)
         .map(|i| {
             (
@@ -912,19 +1066,39 @@ fn the_probe_reads_a_large_directory_from_where_it_starts_and_skips_a_huge_manif
         br#"{"format": "u6-hdpack/1"}"#.to_vec(),
     ));
     let z = rezip(&files);
-    let (yes, reads) = probe(&z);
-    assert!(yes);
+    let eocd = z.len() - 22;
+    let dir = u64::from(u32::from_le_bytes(
+        z[eocd + 16..eocd + 20].try_into().unwrap(),
+    ));
+    assert!(dir < tail(&z).0);
+    let (told, reads) = probe(&z);
+    assert_eq!(reads, [tail(&z), (dir, z.len() as u64), manifest_range(&z)]);
+    assert_eq!(told, Some("entry"), "the filler entries are not a pack's");
+}
+
+/// The engine and the tool hash portraits and bitmaps with one definition: a portrait's 56 × 64
+/// bytes, a bitmap's first `width × height` (none of a shorter one).
+#[test]
+fn portraits_and_bitmaps_hash_by_one_definition() {
+    let px: Vec<u8> = (0..56 * 64).map(|i| (i % 251) as u8).collect();
     assert_eq!(
-        reads.len(),
-        3,
-        "the tail, the directory from its start, the manifest"
+        portrait_hash(&px),
+        Some(image_hash(56, 64, px.iter().copied()))
     );
-    assert!(reads[1].0 < reads[0].0);
-    // A manifest.json over the limit is not read: not a pack.
-    let huge = rezip(&[(
-        "manifest.json".into(),
-        vec![b' '; (MAX_MANIFEST + 1) as usize],
-    )]);
-    let (yes, reads) = probe(&huge);
-    assert!(!yes && reads.len() == 1);
+    assert_eq!(portrait_hash(&px[1..]), None);
+    let bmp: Vec<u8> = (0..30).collect();
+    assert_eq!(
+        bitmap_hash(5, 6, &bmp),
+        Some(image_hash(5, 6, bmp.iter().copied()))
+    );
+    assert_eq!(
+        bitmap_hash(5, 5, &bmp),
+        Some(image_hash(5, 5, bmp[..25].iter().copied()))
+    );
+    assert_eq!(bitmap_hash(6, 6, &bmp), None);
+    assert_ne!(
+        bitmap_hash(5, 6, &bmp),
+        bitmap_hash(6, 5, &bmp),
+        "the size is hashed"
+    );
 }
