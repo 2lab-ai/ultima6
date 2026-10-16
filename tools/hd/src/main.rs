@@ -209,12 +209,17 @@ fn run_cmd(a: &Args) -> Result<(), String> {
     let mut out = std::io::stdout();
     let s = run::run(&work, &codex, &opts, &mut out)?;
     if a.send {
-        println!("run: {} calls, {} ok, {} failed", s.calls, s.ok, s.failed);
+        println!(
+            "run: {} calls, {} ok ({} not the sheet's size), {} failed",
+            s.calls, s.ok, s.other_size, s.failed
+        );
     }
     if s.failed > 0 {
         return Err(format!(
-            "{} call(s) failed; the sheets that came back are kept, run again to retry the rest",
-            s.failed
+            "{} call(s) failed; the sheets that came back are kept; run again to retry the rest \
+             (a sheet whose calls failed {} times is given up and refused by ingest)",
+            s.failed,
+            run::CALLS_MAX
         ));
     }
     Ok(())

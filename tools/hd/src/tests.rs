@@ -64,13 +64,12 @@ fn sent(w: &Work, job: &Job) -> Rgba {
 }
 
 /// "Generates" every sheet not done with `f` (sheet sent -> sheet back), recorded as run
-/// records a call's image, but whatever its size: what ingest does with an output of another
-/// size than its sheet (run itself refuses one).
+/// records a call's image (one of another size than its sheet included, for ingest to refuse).
 fn generate(w: &Work, f: impl Fn(&Job, Rgba) -> Rgba) {
     for job in w.read_jobs().unwrap() {
         if run::output(w, &job).is_none() {
             let back = f(&job, sent(w, &job));
-            run::record_unchecked(w, &job, &img::encode_png(&back).unwrap()).unwrap();
+            run::record(w, &job, &img::encode_png(&back).unwrap()).unwrap();
         }
     }
 }
@@ -1167,20 +1166,36 @@ fn resume_is_bound_to_the_job_and_a_valid_output() {
     img::put(&mut sheet, 0, 0, [1, 2, 3, 255]);
     img::write_png(&w.sheet(&j1.sheet), &sheet).unwrap();
     assert!(run::output(&w, j1).is_none());
-    // A call whose image does not decode, or is not the sheet's size, records nothing.
+    // A call whose image is not a PNG, or is of the sheet's size and does not decode, records
+    // nothing: the earlier output stays.
     let before = std::fs::read(w.out(&jobs[2].sheet)).unwrap();
-    assert!(run::record(&w, &jobs[2], b"\x89PNG\r\n\x1a\nnot really").is_err());
     let (jw, jh) = (jobs[2].width, jobs[2].height);
-    for (dw, dh) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
-        let other = Rgba::new(jw.saturating_add_signed(dw), jh.saturating_add_signed(dh));
-        let e = run::record(&w, &jobs[2], &img::encode_png(&other).unwrap()).unwrap_err();
-        assert!(e.contains(&format!("the sheet {jw} x {jh}")), "{e}");
-    }
+    // A PNG whose data is damaged past its header (the IDAT bytes before IEND).
+    let damaged = |img: &Rgba| {
+        let mut b = img::encode_png(img).unwrap();
+        let n = b.len();
+        for x in &mut b[n - 24..n - 12] {
+            *x ^= 0x5a;
+        }
+        b
+    };
+    assert!(run::record(&w, &jobs[2], b"\x89PNG\r\n\x1a\nnot really").is_err());
+    let e = run::record(&w, &jobs[2], &damaged(&Rgba::new(jw, jh))).unwrap_err();
+    assert!(e.contains("does not decode"), "{e}");
+    assert_eq!(std::fs::read(w.out(&jobs[2].sheet)).unwrap(), before);
     assert!(
         run::output(&w, &jobs[2]).is_some(),
         "the earlier output stays"
     );
-    assert_eq!(std::fs::read(w.out(&jobs[2].sheet)).unwrap(), before);
+    // One of another size is recorded as it is, not decoded (damaged data and all), its
+    // receipt holding its header size: the attempt is spent, and ingest refuses it.
+    for (dw, dh) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+        let (ow, oh) = (jw.saturating_add_signed(dw), jh.saturating_add_signed(dh));
+        let png = damaged(&Rgba::new(ow, oh));
+        assert_eq!(run::record(&w, &jobs[2], &png), Ok(false));
+        let (got, gw, gh) = run::output(&w, &jobs[2]).unwrap();
+        assert_eq!((got, gw, gh), (png, ow, oh));
+    }
     // The fake runner sees exactly the jobs that are not done.
     let fake = Counting {
         calls: AtomicUsize::new(0),
@@ -1357,7 +1372,7 @@ fn an_actor_over_two_sheets_is_one_group() {
     // The second comes back the wrong size: refused, the whole group queued for its re-roll
     // (with every other item that sheet held).
     let small = img::encode_png(&Rgba::new(SHEET_W - 2, SHEET_H)).unwrap();
-    run::record_unchecked(&w, &second, &small).unwrap();
+    assert!(!run::record(&w, &second, &small).unwrap());
     let r = ingest::ingest(&g, &w, &t).unwrap();
     let on_second: std::collections::BTreeSet<u32> = second.places.iter().map(|p| p.item).collect();
     assert_eq!(r.rerolled_items, on_second.len());
@@ -2022,7 +2037,8 @@ fn the_event_reader_holds_one_line_at_most() {
 struct Leaves {
     at: PathBuf,
     out: PathBuf,
-    small: String,
+    /// The sheet whose "image" is not a PNG at all (a call that fails to record).
+    broken: String,
     finished: std::sync::Mutex<Vec<String>>,
 }
 
@@ -2030,8 +2046,8 @@ impl Runner for Leaves {
     fn generate(&self, sheet: &Path, _prompt: &str, _dir: &Path) -> Result<PathBuf, String> {
         let stem = sheet.file_stem().unwrap().to_str().unwrap();
         let to = self.at.join(format!("{stem}.png"));
-        if stem == self.small {
-            img::write_png(&to, &Rgba::new(4, 4))?;
+        if stem == self.broken {
+            std::fs::write(&to, b"not a png").map_err(|e| e.to_string())?;
         } else {
             std::fs::copy(sheet, &to).map_err(|e| e.to_string())?;
         }
@@ -2060,7 +2076,7 @@ fn the_call_s_image_is_removed_only_once_recorded() {
     let fake = Leaves {
         at: at.clone(),
         out: w.path("out"),
-        small: jobs[1].sheet.clone(),
+        broken: jobs[1].sheet.clone(),
         finished: std::sync::Mutex::new(Vec::new()),
     };
     let opts = RunOptions {
@@ -2076,7 +2092,7 @@ fn the_call_s_image_is_removed_only_once_recorded() {
     want.retain(|s| *s != jobs[1].sheet);
     want.sort();
     assert_eq!(finished, want);
-    // The image that was not recorded (another size) is where the call left it.
+    // The image that was not recorded (not a PNG) is where the call left it.
     assert!(at.join(format!("{}.png", jobs[1].sheet)).exists());
     assert!(run::output(&w, &jobs[1]).is_none());
     let left: Vec<_> = std::fs::read_dir(&at).unwrap().collect();
@@ -2125,8 +2141,56 @@ struct Script {
     at: PathBuf,
     wrong: std::sync::Mutex<std::collections::BTreeSet<String>>,
     noise: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Sheets whose calls fail outright (no image).
+    fail: std::sync::Mutex<std::collections::BTreeSet<String>>,
     calls: std::sync::Mutex<Vec<String>>,
     n: AtomicUsize,
+}
+
+fn script(name: &str) -> Script {
+    Script {
+        at: temp(name),
+        wrong: Default::default(),
+        noise: Default::default(),
+        fail: Default::default(),
+        calls: Default::default(),
+        n: AtomicUsize::new(0),
+    }
+}
+
+/// Sets one of a [`Script`]'s sheet sets.
+fn set(m: &std::sync::Mutex<std::collections::BTreeSet<String>>, v: &[&String]) {
+    *m.lock().unwrap() = v.iter().map(|s| (*s).clone()).collect();
+}
+
+/// One run with `s`: the sheets it called, sorted, its ok and failed counts.
+fn run_once(w: &Work, s: &Script) -> (Vec<String>, usize, usize) {
+    s.calls.lock().unwrap().clear();
+    let opts = RunOptions {
+        send: true,
+        limit: None,
+        parallel: 2,
+    };
+    let r = run::run(w, s, &opts, &mut Vec::new()).unwrap();
+    let mut calls = s.calls.lock().unwrap().clone();
+    calls.sort();
+    (calls, r.ok, r.failed)
+}
+
+fn sorted(v: &[&Job]) -> Vec<String> {
+    let mut v: Vec<String> = v.iter().map(|j| j.sheet.clone()).collect();
+    v.sort();
+    v
+}
+
+/// The images left where a [`Script`]'s calls put them.
+fn kept(s: &Script) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(&s.at)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
 }
 
 impl Runner for Script {
@@ -2135,6 +2199,10 @@ impl Runner for Script {
         let k = self.n.fetch_add(1, Ordering::SeqCst);
         let to = self.at.join(format!("{stem}~{k}.png"));
         let (w, h) = img::png_size(&std::fs::read(sheet).unwrap())?;
+        if self.fail.lock().unwrap().contains(&stem) {
+            self.calls.lock().unwrap().push(stem);
+            return Err("no image generated".into());
+        }
         if self.wrong.lock().unwrap().contains(&stem) {
             img::write_png(&to, &Rgba::new(w - 2, h))?;
         } else if self.noise.lock().unwrap().contains(&stem) {
@@ -2167,62 +2235,27 @@ fn a_wrong_size_output_end_to_end() {
     assert_eq!(tile.len(), 1);
     let x = tile[0].sheet.clone();
     let on_x: BTreeSet<u32> = tile[0].places.iter().map(|p| p.item).collect();
-    let s = Script {
-        at: temp("wrong-size-codex"),
-        wrong: Default::default(),
-        noise: Default::default(),
-        calls: Default::default(),
-        n: AtomicUsize::new(0),
-    };
-    let set = |m: &std::sync::Mutex<BTreeSet<String>>, v: &[&String]| {
-        *m.lock().unwrap() = v.iter().map(|s| (*s).clone()).collect();
-    };
-    // One run: the sheets it called, sorted, and its summary.
-    let run_once = |s: &Script| {
-        s.calls.lock().unwrap().clear();
-        let opts = RunOptions {
-            send: true,
-            limit: None,
-            parallel: 2,
-        };
-        let r = run::run(&w, s, &opts, &mut Vec::new()).unwrap();
-        let mut calls = s.calls.lock().unwrap().clone();
-        calls.sort();
-        (calls, r.ok, r.failed)
-    };
-    let sorted = |v: &[&Job]| {
-        let mut v: Vec<String> = v.iter().map(|j| j.sheet.clone()).collect();
-        v.sort();
-        v
-    };
-    let kept = |s: &Script| {
-        let mut v: Vec<String> = std::fs::read_dir(&s.at)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        v.sort();
-        v
-    };
-    let all: Vec<&Job> = jobs.iter().collect();
-    let n = jobs.len();
-    // Run: the tile sheet comes back two pixels narrower. That call fails and records
-    // nothing; its image is kept where the call left it; every other sheet is done.
-    set(&s.wrong, &[&x]);
-    assert_eq!(run_once(&s), (sorted(&all), n - 1, 1));
-    assert!(run::output(&w, tile[0]).is_none());
-    let rejected = kept(&s);
-    assert_eq!(rejected.len(), 1);
-    assert!(rejected[0].starts_with(&format!("{x}~")));
-    // Resume: that sheet alone is called again (attempt 1 still); now it comes back the right
-    // size, as noise.
-    set(&s.wrong, &[]);
-    set(&s.noise, &[&x]);
-    assert_eq!(run_once(&s), (vec![x.clone()], 1, 0));
-    // Ingest: every item of that sheet fails, and is queued for its one re-roll.
+    let s = script("wrong-size-codex");
     let t = Thresholds::default();
+    // The model always answers that sheet, and its re-rolls, two pixels narrower.
+    set(&s.wrong, &[&x]);
+    // Run: every sheet is called once; that one is recorded as it came back, undecoded, and
+    // its image moved out of the call's folder like any other.
+    assert_eq!(
+        run_once(&w, &s),
+        (sorted(&jobs.iter().collect::<Vec<_>>()), jobs.len(), 0)
+    );
+    assert_eq!(
+        run::output(&w, tile[0]).map(|(_, a, b)| (a, b)),
+        Some((SHEET_W - 2, SHEET_H))
+    );
+    assert_eq!(kept(&s), Vec::<String>::new());
+    // Resume: nothing is called again (the attempt is spent).
+    assert_eq!(run_once(&w, &s), (vec![], 0, 0));
+    // Ingest refuses it by its size, and re-rolls each item it held, once.
     let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert_eq!(r.refused_sheets, 1);
     assert_eq!(r.rerolled_items, on_x.len());
-    assert_eq!(r.refused_sheets, 0);
     let jobs2 = w.read_jobs().unwrap();
     let rerolls: Vec<&Job> = jobs2.iter().filter(|j| j.attempt == 2).collect();
     assert_eq!(rerolls.len(), r.reroll_sheets);
@@ -2231,17 +2264,15 @@ fn a_wrong_size_output_end_to_end() {
         .flat_map(|j| j.places.iter().map(|p| p.item))
         .collect();
     assert_eq!(rerolled, on_x);
-    // Run: only the re-rolls are called, and come back the wrong size: failed, kept.
+    // Run: only the re-rolls are called, and come back the wrong size too: recorded.
     let rr: Vec<&String> = rerolls.iter().map(|j| &j.sheet).collect();
-    set(&s.noise, &[]);
     set(&s.wrong, &rr);
-    assert_eq!(run_once(&s), (sorted(&rerolls), 0, rerolls.len()));
-    // Resume: the re-rolls alone again, as noise.
-    set(&s.wrong, &[]);
-    set(&s.noise, &rr);
-    assert_eq!(run_once(&s), (sorted(&rerolls), rerolls.len(), 0));
-    // Ingest: the second failure falls back, each group whole; no third attempt.
+    assert_eq!(run_once(&w, &s), (sorted(&rerolls), rerolls.len(), 0));
+    assert_eq!(run_once(&w, &s), (vec![], 0, 0));
+    // Ingest: refused again; each group is left to the scaler whole ("failed": no usable
+    // output from its last attempt), with no third attempt.
     let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert_eq!(r.refused_sheets, 1 + rerolls.len());
     assert_eq!((r.rerolled_items, r.reroll_sheets), (0, 0));
     assert_eq!(w.read_jobs().unwrap().len(), jobs2.len());
     for class in Class::ALL {
@@ -2251,31 +2282,89 @@ fn a_wrong_size_output_end_to_end() {
             .filter(|i| i.class == class)
             .map(|i| members(&g, i).len())
             .sum();
-        assert_eq!(r.get(class, Status::Fallback), records, "{class:?}");
+        assert_eq!(r.get(class, Status::Failed), records, "{class:?}");
         assert_eq!(r.get(class, Status::Pending), 0, "{class:?}");
-        assert_eq!(r.get(class, Status::Failed), 0, "{class:?}");
     }
-    assert!(r.get(Class::Actor, Status::Fallback) > 0);
-    // Nothing is left to run, and the rejected originals (two runs' worth) are all that is
-    // left where the calls put their images.
-    assert_eq!(run_once(&s), (vec![], 0, 0));
-    let left = kept(&s);
-    assert_eq!(left.len(), 1 + rerolls.len());
-    let mut stems: Vec<String> = left
-        .iter()
-        .map(|f| f.split('~').next().unwrap().to_string())
-        .collect();
-    stems.sort();
-    let mut want: Vec<String> = rr.iter().map(|s| (*s).clone()).collect();
-    want.push(x.clone());
-    want.sort();
-    assert_eq!(stems, want);
-    for f in &left {
-        let (fw, fh) = img::png_size(&std::fs::read(s.at.join(f)).unwrap()).unwrap();
-        assert_eq!((fw, fh), (SHEET_W - 2, SHEET_H), "{f}");
+    assert!(r.get(Class::Actor, Status::Failed) > 0);
+    assert_eq!(run_once(&w, &s), (vec![], 0, 0));
+    // Every wrong-size image kept its receipt, with its own size, and is nowhere else.
+    for job in [tile[0]].into_iter().chain(rerolls.iter().copied()) {
+        let (_, a, b) = run::output(&w, job).unwrap();
+        assert_eq!((a, b), (SHEET_W - 2, SHEET_H), "{}", job.sheet);
     }
+    assert_eq!(kept(&s), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&s.at);
     let _ = std::fs::remove_dir_all(&w.root);
+}
+
+#[test]
+fn calls_that_keep_failing_are_given_up_after_two() {
+    use std::collections::BTreeSet;
+    let g = synthetic::game();
+    let plan = group::plan(&g);
+    let w = work("given-up");
+    let jobs = atlas_into(&g, &w);
+    let tile: Vec<&Job> = jobs.iter().filter(|j| j.kind == SheetKind::Tile).collect();
+    let x = tile[0].sheet.clone();
+    let on_x: BTreeSet<u32> = tile[0].places.iter().map(|p| p.item).collect();
+    let s = script("given-up-codex");
+    let t = Thresholds::default();
+    let all = sorted(&jobs.iter().collect::<Vec<_>>());
+    // The tile sheet's calls always fail (as a timeout or no image does).
+    set(&s.fail, &[&x]);
+    assert_eq!(run_once(&w, &s), (all.clone(), jobs.len() - 1, 1));
+    // Not given up after one failure: called again, fails again.
+    assert_eq!(run_once(&w, &s), (vec![x.clone()], 0, 1));
+    // Given up after two: not called again, the run says so.
+    let mut out = Vec::new();
+    let opts = RunOptions {
+        send: true,
+        limit: None,
+        parallel: 2,
+    };
+    s.calls.lock().unwrap().clear();
+    let r = run::run(&w, &s, &opts, &mut out).unwrap();
+    assert_eq!((r.calls, r.given_up), (0, 1));
+    assert!(String::from_utf8_lossy(&out).contains("1 sheet(s) given up after 2 failed calls"));
+    // Ingest refuses it and re-rolls its items once; the re-rolls get their own two calls.
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert_eq!((r.refused_sheets, r.rerolled_items), (1, on_x.len()));
+    let jobs2 = w.read_jobs().unwrap();
+    let rerolls: Vec<&Job> = jobs2.iter().filter(|j| j.attempt == 2).collect();
+    let rr: Vec<&String> = rerolls.iter().map(|j| &j.sheet).collect();
+    set(&s.fail, &rr);
+    let n = rerolls.len();
+    assert_eq!(run_once(&w, &s), (sorted(&rerolls), 0, n));
+    assert_eq!(run_once(&w, &s), (sorted(&rerolls), 0, n));
+    assert_eq!(run_once(&w, &s), (vec![], 0, 0));
+    // Then the items are left to the scaler whole, with no third attempt.
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert_eq!((r.rerolled_items, r.reroll_sheets), (0, 0));
+    assert_eq!(w.read_jobs().unwrap().len(), jobs2.len());
+    let records: usize = on_x
+        .iter()
+        .map(|&i| members(&g, &plan.items[i as usize]).len())
+        .sum();
+    let failed: usize = Class::ALL.iter().map(|&c| r.get(c, Status::Failed)).sum();
+    assert_eq!(failed, records);
+    // One failure then a success is not given up: a fresh atlas, the tile sheet failing once.
+    let w2 = work("given-up-once");
+    let jobs = atlas_into(&g, &w2);
+    let x = jobs
+        .iter()
+        .find(|j| j.kind == SheetKind::Tile)
+        .unwrap()
+        .sheet
+        .clone();
+    set(&s.fail, &[&x]);
+    assert_eq!(run_once(&w2, &s).2, 1);
+    set(&s.fail, &[]);
+    assert_eq!(run_once(&w2, &s), (vec![x], 1, 0));
+    let r = ingest::ingest(&g, &w2, &t).unwrap();
+    assert_eq!((r.refused_sheets, r.rerolled_items), (0, 0));
+    let _ = std::fs::remove_dir_all(&s.at);
+    let _ = std::fs::remove_dir_all(&w.root);
+    let _ = std::fs::remove_dir_all(&w2.root);
 }
 
 /// An event file that takes `room` bytes, then fails every write with ENOSPC (counting the

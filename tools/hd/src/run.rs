@@ -9,8 +9,11 @@
 //! sheet, the attempt, the prompt text and the sheet's bytes) and the output's digest, and the
 //! output still has that digest and the size the receipt records. Anything else — no receipt,
 //! another atlas generation, a changed prompt or sheet, a changed or truncated output — is not
-//! done, and is run again. A call whose image is not a decodable PNG of the sheet's size fails,
-//! records nothing and leaves the image where the call put it.
+//! done, and is run again. A call whose image is not a PNG, or is of the sheet's size and does
+//! not decode, fails, records nothing and leaves the image where the call put it; an image of
+//! another size is recorded undecoded and ingest refuses it ([`record`]). A job whose calls
+//! failed [`CALLS_MAX`] times (timeouts, no image) is given up: not called again, refused by
+//! ingest. Either way its items are re-rolled once, then left to the scaler.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -542,24 +545,17 @@ pub fn identity(work: &Work, job: &Job) -> Result<String, String> {
     ]))
 }
 
-/// Records `png` as `job`'s output: refused unless its header is the size of the sheet that was
-/// sent and it decodes at that size; the image, then its receipt.
-pub fn record(work: &Work, job: &Job, png: &[u8]) -> Result<(), String> {
+/// Records `png` as `job`'s output, the image then its receipt (its header size included);
+/// returns whether it is the sheet's size. It must be a PNG; one of the sheet's size must
+/// decode. One of another size is recorded as it is, not decoded: the attempt is spent, and
+/// ingest refuses it by its receipt's size (its items are re-rolled once, then left to the
+/// scaler), so a model that keeps answering in another size is not paid again and again.
+pub fn record(work: &Work, job: &Job, png: &[u8]) -> Result<bool, String> {
     let (width, height) = img::png_size(png).map_err(|e| format!("not a PNG: {e}"))?;
-    if (width, height) != (job.width, job.height) {
-        return Err(format!(
-            "the image is {width} x {height}, the sheet {} x {}",
-            job.width, job.height
-        ));
+    let fits = (width, height) == (job.width, job.height);
+    if fits {
+        img::decode_png(png, width, height).map_err(|e| format!("does not decode: {e}"))?;
     }
-    record_unchecked(work, job, png)
-}
-
-/// [`record`] without the size check: the image as it is, for tests of what ingest does with an
-/// output of another size (recorded by an earlier tool, or edited in the work dir).
-pub(crate) fn record_unchecked(work: &Work, job: &Job, png: &[u8]) -> Result<(), String> {
-    let (width, height) = img::png_size(png).map_err(|e| format!("not a PNG: {e}"))?;
-    img::decode_png(png, width, height).map_err(|e| format!("does not decode: {e}"))?;
     let receipt = Receipt {
         sheet: job.sheet.clone(),
         identity: identity(work, job)?,
@@ -569,7 +565,8 @@ pub(crate) fn record_unchecked(work: &Work, job: &Job, png: &[u8]) -> Result<(),
     };
     work::write_file(&work.out(&job.sheet), png)?;
     let json = serde_json::to_vec(&receipt).map_err(|e| e.to_string())?;
-    work::write_file(&work.receipt(&job.sheet), &json)
+    work::write_file(&work.receipt(&job.sheet), &json)?;
+    Ok(fits)
 }
 
 /// `job`'s recorded output, if it is done (see the module doc): its PNG bytes and size.
@@ -598,7 +595,48 @@ pub struct RunSummary {
     pub pending: usize,
     pub calls: usize,
     pub ok: usize,
+    /// Of `ok`: images of another size than their sheet, recorded for ingest to refuse.
+    pub other_size: usize,
     pub failed: usize,
+    /// Jobs not called again: [`CALLS_MAX`] calls of theirs failed (ingest refuses them).
+    pub given_up: usize,
+}
+
+/// Failed calls of one job identity after which the job is given up: not called again, and
+/// refused by ingest like a sheet of another size (its items re-rolled once, then left to the
+/// scaler). Timeouts and calls that bring back no image are paid at most this often.
+pub const CALLS_MAX: usize = 2;
+
+/// Failed calls per job identity, from `runs.jsonl` (lines without an identity, written by an
+/// earlier tool, count for none).
+pub fn failed_calls(work: &Work) -> Result<std::collections::BTreeMap<String, usize>, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let p = work.path("runs.jsonl");
+    let text = match img::read_capped(&p, 256 << 20) {
+        Ok(t) => t,
+        Err(_) if !p.exists() => return Ok(out),
+        Err(e) => return Err(e),
+    };
+    for line in text.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v["ok"] == false
+            && let Some(id) = v["identity"].as_str()
+        {
+            *out.entry(id.to_string()).or_default() += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `job` is given up: [`CALLS_MAX`] failed calls of its identity as it is now.
+pub fn given_up(
+    work: &Work,
+    job: &Job,
+    failed: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    identity(work, job).is_ok_and(|id| failed.get(&id).copied().unwrap_or(0) >= CALLS_MAX)
 }
 
 /// The notice printed before anything is sent (and instead of sending without `--send`).
@@ -618,15 +656,28 @@ pub fn run(
     out: &mut (dyn Write + Send),
 ) -> Result<RunSummary, String> {
     let jobs = work.read_jobs()?;
-    let mut pending: Vec<&Job> = jobs.iter().filter(|j| output(work, j).is_none()).collect();
+    let failed = failed_calls(work)?;
+    let not_done: Vec<&Job> = jobs.iter().filter(|j| output(work, j).is_none()).collect();
+    let (dropped, mut pending): (Vec<&Job>, Vec<&Job>) = not_done
+        .into_iter()
+        .partition(|j| given_up(work, j, &failed));
+    let given_up = dropped.len();
     if let Some(n) = opts.limit {
         pending.truncate(n);
     }
     let mut summary = RunSummary {
         pending: pending.len(),
+        given_up,
         ..RunSummary::default()
     };
     let _ = writeln!(out, "{}", notice(pending.len()));
+    if given_up > 0 {
+        let _ = writeln!(
+            out,
+            "{given_up} sheet(s) given up after {CALLS_MAX} failed calls each (not sent again; \
+             ingest re-rolls their items once, then leaves them to the scaler)."
+        );
+    }
     if !opts.send {
         let _ = writeln!(out, "Nothing was sent: add --send to run them.");
         return Ok(summary);
@@ -642,15 +693,25 @@ pub fn run(
                     let i = next.fetch_add(1, Ordering::SeqCst);
                     let Some(job) = pending.get(i) else { break };
                     let t = Instant::now();
+                    let id = identity(work, job).unwrap_or_default();
                     let result = call(work, runner, job);
                     let secs = t.elapsed().as_secs();
                     let mut g = shared.lock().unwrap_or_else(|e| e.into_inner());
                     let (out, summary, log) = &mut *g;
                     summary.calls += 1;
                     let line = match &result {
-                        Ok(()) => {
+                        Ok(true) => {
                             summary.ok += 1;
                             format!("{}: ok in {secs} s", job.sheet)
+                        }
+                        Ok(false) => {
+                            summary.ok += 1;
+                            summary.other_size += 1;
+                            format!(
+                                "{}: back in {secs} s, not the sheet's size (recorded; ingest \
+                                 refuses it)",
+                                job.sheet
+                            )
                         }
                         Err(e) => {
                             summary.failed += 1;
@@ -659,8 +720,8 @@ pub fn run(
                     };
                     let _ = writeln!(out, "{line}");
                     let rec = serde_json::json!({
-                        "sheet": job.sheet, "ok": result.is_ok(), "seconds": secs,
-                        "error": result.err(),
+                        "sheet": job.sheet, "identity": id, "ok": result.is_ok(),
+                        "seconds": secs, "error": result.err(),
                     });
                     // Written after every call, so a run that stops keeps its record.
                     let line = format!("{rec}\n");
@@ -679,13 +740,14 @@ pub fn run(
 }
 
 /// One call: the generated image recorded as the job's output, its receipt written, and only
-/// then what the call left of it removed. A call whose image is not recorded keeps it there.
-fn call(work: &Work, runner: &dyn Runner, job: &Job) -> Result<(), String> {
+/// then what the call left of it removed (whether it is the sheet's size, see [`record`]). A
+/// call whose image is not recorded keeps it there.
+fn call(work: &Work, runner: &dyn Runner, job: &Job) -> Result<bool, String> {
     let dir = work::ensure_dir(&work.codex_dir(&job.sheet))?;
     let sheet = work.sheet(&job.sheet);
     let got = runner.generate(&sheet, &prompt::text(job), &dir)?;
     let png = img::read_capped(&got, img::PNG_MAX_BYTES)?;
-    record(work, job, &png)?;
+    let fits = record(work, job, &png)?;
     runner.finish(&got);
-    Ok(())
+    Ok(fits)
 }
