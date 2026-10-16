@@ -10,6 +10,9 @@ publish.workspace = true
 u6-formats.workspace = true
 u6-render.workspace = true
 u6-audio.workspace = true
+# Spec 07 H2: the HD pack the page loads (its images and the content hash it keys them by; the
+# engine keys its images with the same function).
+u6-hdpack.workspace = true
 
 [dev-dependencies]
 # Real-data test only: zip -> files, exactly as the platforms do it.

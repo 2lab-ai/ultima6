@@ -1,6 +1,7 @@
 //! The HD pack format `u6-hdpack/1` (spec `.prd/07-hd-art.md` Design 2, HD1): a zip of HD
 //! images keyed by the classic image they were made from. The local tool `tools/hd` writes it;
-//! the page will read it (H2). Platform-free: no I/O, builds for `wasm32-unknown-unknown`.
+//! the page reads it (H2: [`Probe`] tells a dropped pack from game files, [`read_pack`] loads
+//! it). Platform-free: no I/O, builds for `wasm32-unknown-unknown`.
 //!
 //! A pack holds, as stored (uncompressed) zip entries:
 //! - `manifest.json`: [`Manifest`] — `format` = [`FORMAT`], `tile` = 16, `scale` = 4,
@@ -49,10 +50,13 @@ use u6_formats::gfx::{TILE_COUNT, TILE_W};
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_WIDTH};
 use u6_intake::zip;
 
+mod probe;
 mod store;
 
 #[cfg(test)]
 mod tests;
+
+pub use probe::{Probe, is_manifest};
 
 /// The manifest's `format`.
 pub const FORMAT: &str = "u6-hdpack/1";

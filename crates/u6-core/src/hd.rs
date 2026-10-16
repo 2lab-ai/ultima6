@@ -8,14 +8,24 @@
 //!   bitmap colour table as `blit_bitmap` draws them, opaque, version 0. [`ImageCache`] keeps
 //!   each with what it was decoded from (the file name and the colour table), so a composition
 //!   decodes it again only when one of those differs.
+//! - Each one's content key (spec 07 HD1, asked only with a pack set): `u6_hdpack`'s content
+//!   hash of the classic image as the engine holds it now, the same function the HD tool keys
+//!   the pack with, so an image whose bytes changed (a merged shore record) matches no pack image
+//!   and is shown by MMPX: a tile's record pixels and transparency ([`u6_hdpack::tile_hash`]); a
+//!   portrait's bytes as `portrait_pixels` reads them and a bitmap's as the file holds them,
+//!   both before the colour table ([`u6_hdpack::image_hash`]).
 //!
-//! [`HdView`] is the HD frame a platform shows of its engine: the switch, the scale and when to
-//! compose (the web page's `Game::set_hd` and `Game::present` are it).
+//! [`HdView`] is the HD frame a platform shows of its engine: the switch, the scale, the pack
+//! ([`HdPack`], spec 07 H2) and when to compose (the web page's `Game::set_hd`,
+//! `Game::set_hd_pack` and `Game::present` are it).
+
+use std::rc::Rc;
 
 use u6_formats::gfx::{TILE_H, TILE_W};
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_WIDTH};
-use u6_render::hd::{Compositor, Image, Images, NoImages, Scale};
-use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, Framebuffer, Kind, portrait_of};
+use u6_hdpack::{ImageId, Role, image_hash, tile_hash};
+use u6_render::hd::{Compositor, Image, Images, NoImages, PACK_SCALE, Pack, PackHd, Scale};
+use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, Framebuffer, Kind, portrait_id, portrait_of};
 
 use crate::converse::Msg;
 use crate::engine::{Engine, Io};
@@ -24,11 +34,11 @@ use crate::state::State;
 /// Port-only (spec 07 HD0): the HD frame of an engine's shown frame, on or off, at 2× or 4×. On,
 /// [`HdView::present`] composes it when the shown frame's colours ([`Engine::frame_version`]) or
 /// sources ([`Engine::src_version`]) or the setting changed since the frame it holds; off, it
-/// does nothing.
+/// does nothing (the pack included: nothing of it runs).
 pub struct HdView {
     on: bool,
     scale: Scale,
-    /// Moves at every change of `on` or `scale`.
+    /// Moves at every change of `on`, `scale` or the pack.
     version: u64,
     compositor: Compositor,
     images: ImageCache,
@@ -70,6 +80,19 @@ impl HdView {
 
     pub fn on(&self) -> bool {
         self.on
+    }
+
+    /// Spec 07 H2: the pack whose images go in front of MMPX (`None`: none). The setting moves,
+    /// so the next [`HdView::present`] composes (when on), exactly as a new view with this pack
+    /// would.
+    pub fn set_pack(&mut self, pack: Option<Rc<HdPack>>) {
+        self.compositor.set_pack(pack.map(|p| p as Rc<dyn Pack>));
+        self.version += 1;
+    }
+
+    /// Whether a pack is set.
+    pub fn has_pack(&self) -> bool {
+        self.compositor.has_pack()
     }
 
     pub fn scale(&self) -> Scale {
@@ -128,13 +151,13 @@ impl HdView {
     }
 }
 
-/// A portrait or panel bitmap decoded: what from, and its width, height and screen colours
-/// (`None`: nothing to show, a missing or bad file).
+/// A portrait or panel bitmap decoded: what from, its width, height and screen colours and its
+/// content key (`None`: nothing to show, a missing or bad file).
 struct Decoded {
     kind: Kind,
     id: u16,
     from: (Vec<u8>, [u8; 256]),
-    image: Option<(usize, usize, Vec<u8>)>,
+    image: Option<(usize, usize, Vec<u8>, u64)>,
 }
 
 /// The portraits and panel bitmaps decoded so far (one per platform game).
@@ -191,8 +214,9 @@ impl EngineImages<'_> {
         }
     }
 
-    /// Portrait or bitmap (kind, id) decoded now.
-    fn decode(&self, kind: Kind, id: u16) -> Option<(usize, usize, Vec<u8>)> {
+    /// Portrait or bitmap (kind, id) decoded now, with its content key (of its bytes before the
+    /// colour table).
+    fn decode(&self, kind: Kind, id: u16) -> Option<(usize, usize, Vec<u8>, u64)> {
         let colours = &self.state.gfx.tables.bitmap_colours;
         match kind {
             Kind::Portrait => {
@@ -200,7 +224,9 @@ impl EngineImages<'_> {
                 let files = self.io.files();
                 let pixels =
                     crate::converse::portrait_pixels(self.state, files, letter, u16::from(item))?;
-                Some((PORTRAIT_WIDTH, PORTRAIT_HEIGHT, through(colours, &pixels)))
+                let (w, h) = (PORTRAIT_WIDTH, PORTRAIT_HEIGHT);
+                let key = image_hash(w as u16, h as u16, pixels.iter().copied());
+                Some((w, h, through(colours, &pixels), key))
             }
             Kind::Bitmap => {
                 let bmp = match id {
@@ -209,7 +235,11 @@ impl EngineImages<'_> {
                 }?;
                 let (w, h) = (usize::from(bmp.width), usize::from(bmp.height));
                 // A bitmap shorter than its header draws only its first pixels: none is shown HD.
-                (bmp.pixels.len() >= w * h).then(|| (w, h, through(colours, &bmp.pixels[..w * h])))
+                (bmp.pixels.len() >= w * h).then(|| {
+                    let pixels = &bmp.pixels[..w * h];
+                    let key = image_hash(bmp.width, bmp.height, pixels.iter().copied());
+                    (w, h, through(colours, pixels), key)
+                })
             }
             Kind::Classic | Kind::Tile => None,
         }
@@ -257,13 +287,164 @@ impl Images for EngineImages<'_> {
                 }
             }
         };
-        let (width, height, pixels) = self.cache.decoded[at].image.as_ref()?;
+        let (width, height, pixels, _) = self.cache.decoded[at].image.as_ref()?;
         Some(Image {
             ver: 0,
             width: *width,
             height: *height,
             pixels,
             transparent: None,
+        })
+    }
+
+    /// The content key of (kind, id) as [`EngineImages::image`] just gave it.
+    fn key(&mut self, kind: Kind, id: u16) -> Option<u64> {
+        if kind == Kind::Tile {
+            let rec = self.state.gfx.records.get(usize::from(id))?;
+            return tile_hash(&rec.pixels, &rec.transparent);
+        }
+        let d = self
+            .cache
+            .decoded
+            .iter()
+            .find(|d| d.kind == kind && d.id == id)?;
+        d.image.as_ref().map(|i| i.3)
+    }
+}
+
+/// The content key image (kind, id) has in `engine`'s game now ([`Images::key`], as the
+/// compositor asks it); `None` when it has none.
+pub fn image_key(engine: &Engine, kind: Kind, id: u16) -> Option<u64> {
+    let state = engine.state();
+    let mut cache = ImageCache::new();
+    let mut images = cache.images(&state, engine.io());
+    images.image(kind, id)?;
+    images.key(kind, id)
+}
+
+/// Spec 07 H2: a pack the platform loaded (`u6_hdpack::read_pack`: checked whole, every image
+/// decoded), as the compositor looks its images up ([`Pack`]): by the image (kind, id) the source
+/// plane names and the content key it has now, which must be the one the pack's image was made
+/// from.
+pub struct HdPack {
+    pack: u6_hdpack::Pack,
+    /// The index in `pack.images` of each image, by tile record and by (kind, id) for the others.
+    tiles: Vec<Option<u32>>,
+    others: Vec<((Kind, u16), u32)>,
+}
+
+/// What a pack holds and what of it a game matches, by kind: tiles, portraits, panel bitmaps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PackCounts {
+    pub tiles: usize,
+    pub portraits: usize,
+    pub bitmaps: usize,
+}
+
+impl HdPack {
+    pub fn new(pack: u6_hdpack::Pack) -> HdPack {
+        let mut tiles = Vec::new();
+        let mut others = Vec::new();
+        for (i, p) in pack.images.iter().enumerate() {
+            match plane_id(p.id) {
+                Some((Kind::Tile, r)) => {
+                    let r = usize::from(r);
+                    if tiles.len() <= r {
+                        tiles.resize(r + 1, None);
+                    }
+                    tiles[r] = Some(i as u32);
+                }
+                Some(at) => others.push((at, i as u32)),
+                None => {}
+            }
+        }
+        HdPack {
+            pack,
+            tiles,
+            others,
+        }
+    }
+
+    /// The pack image of the plane's (kind, id), whatever its key, and its index.
+    fn get(&self, kind: Kind, id: u16) -> Option<(u32, &u6_hdpack::PackImage)> {
+        let index = match kind {
+            Kind::Tile => self.tiles.get(usize::from(id)).copied().flatten(),
+            _ => self
+                .others
+                .iter()
+                .find(|(at, _)| *at == (kind, id))
+                .map(|&(_, i)| i),
+        }?;
+        Some((index, &self.pack.images[index as usize]))
+    }
+
+    /// The images the pack holds, by kind.
+    pub fn counts(&self) -> PackCounts {
+        let mut c = PackCounts::default();
+        for p in &self.pack.images {
+            match p.id {
+                ImageId::Tile(_) => c.tiles += 1,
+                ImageId::Portrait { .. } => c.portraits += 1,
+                ImageId::Bitmap(_) => c.bitmaps += 1,
+            }
+        }
+        c
+    }
+
+    /// The RGBA bytes the decoded images hold.
+    pub fn decoded_bytes(&self) -> usize {
+        self.pack.images.iter().map(|p| p.image.pixels.len()).sum()
+    }
+
+    /// The pack's images that `engine`'s game would show now, by kind: those whose content key
+    /// is the one its image of that (kind, id) has now (looked up as the compositor looks them
+    /// up). A portrait the plane cannot name (an item past 255) is not shown, so not counted.
+    pub fn matches(&self, engine: &Engine) -> PackCounts {
+        let state = engine.state();
+        let mut cache = ImageCache::new();
+        let mut images = cache.images(&state, engine.io());
+        let mut c = PackCounts::default();
+        for p in &self.pack.images {
+            let Some((kind, id)) = plane_id(p.id) else {
+                continue;
+            };
+            let size = images.image(kind, id).map(|i| (i.width, i.height));
+            let shown = size.zip(images.key(kind, id)).is_some_and(|((w, h), key)| {
+                self.hd(kind, id, key)
+                    .is_some_and(|a| (a.width, a.height) == (w * PACK_SCALE, h * PACK_SCALE))
+            });
+            let count = match kind {
+                Kind::Tile => &mut c.tiles,
+                Kind::Portrait => &mut c.portraits,
+                _ => &mut c.bitmaps,
+            };
+            *count += usize::from(shown);
+        }
+        c
+    }
+}
+
+/// The (kind, id) a source plane names pack image `id` by; `None` for a portrait it cannot name
+/// (an item past 255, which no slot reaches).
+fn plane_id(id: ImageId) -> Option<(Kind, u16)> {
+    match id {
+        ImageId::Tile(r) => Some((Kind::Tile, r)),
+        ImageId::Portrait { letter, item } => {
+            portrait_id(letter, item).map(|p| (Kind::Portrait, p))
+        }
+        ImageId::Bitmap(Role::Paper) => Some((Kind::Bitmap, BITMAP_PAPER)),
+        ImageId::Bitmap(Role::Spellbook) => Some((Kind::Bitmap, BITMAP_SPELLBOOK)),
+    }
+}
+
+impl Pack for HdPack {
+    fn hd(&self, kind: Kind, id: u16, key: u64) -> Option<PackHd<'_>> {
+        let (index, p) = self.get(kind, id)?;
+        (p.hash == key).then(|| PackHd {
+            index,
+            width: p.image.width as usize,
+            height: p.image.height as usize,
+            rgba: &p.image.pixels,
         })
     }
 }

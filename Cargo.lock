@@ -1215,6 +1215,7 @@ version = "0.1.0"
 dependencies = [
  "u6-audio",
  "u6-formats",
+ "u6-hdpack",
  "u6-intake",
  "u6-render",
  "u6-testkit",
@@ -1255,6 +1256,7 @@ dependencies = [
  "u6-formats",
  "u6-hdpack",
  "u6-intake",
+ "u6-render",
 ]
 
 [[package]]
@@ -1292,6 +1294,7 @@ name = "u6-web"
 version = "0.1.0"
 dependencies = [
  "u6-core",
+ "u6-hdpack",
  "u6-intake",
  "u6-render",
  "u6-testkit",

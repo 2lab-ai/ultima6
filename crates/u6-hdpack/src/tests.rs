@@ -836,3 +836,95 @@ fn the_writer_refuses_what_the_reader_would() {
         Err(PackError::Manifest(_))
     ));
 }
+
+/// Runs the probe over `file`: whether it is a pack, and the ranges it read.
+fn probe(file: &[u8]) -> (bool, Vec<(u64, u64)>) {
+    let mut p = Probe::new(file.len() as u64);
+    let mut reads = Vec::new();
+    while let Some((start, end)) = p.need() {
+        reads.push((start, end));
+        assert!(reads.len() <= 4, "a few reads");
+        p.give(&file[start as usize..end as usize]);
+    }
+    (p.is_pack().expect("told once nothing is needed"), reads)
+}
+
+#[test]
+fn the_probe_tells_a_pack_from_its_directory_and_manifest() {
+    let pack = written();
+    let (yes, reads) = probe(&pack);
+    assert!(yes, "a pack");
+    assert_eq!(reads.len(), 2, "the end of the file, then the manifest");
+    assert_eq!(
+        reads[0],
+        (zip::tail_start(pack.len() as u64), pack.len() as u64)
+    );
+    // Its entries deflated (the owner zipped it again): still a pack.
+    assert!(probe(&redeflated(&pack, "", |n| n as u32)).0);
+    // A zip of game-like files, and one whose manifest is of another format or not JSON.
+    let other = rezip(&[
+        ("game".into(), vec![1; 300]),
+        ("Disk 1.adf".into(), vec![2; 900]),
+    ]);
+    assert_eq!(probe(&other), (false, vec![(0, other.len() as u64)]));
+    let web = with_file(&pack, "manifest.json", |b| {
+        *b = br#"{"format": "webmanifest"}"#.to_vec()
+    });
+    assert!(!probe(&web).0);
+    let broken = with_file(&pack, "manifest.json", |b| b.truncate(b.len() / 2));
+    assert!(!probe(&broken).0);
+    // A manifest that is the format's but wrong otherwise is still a pack (the reader refuses
+    // it), and one in a subfolder is not the pack's.
+    let wrong = with_manifest(&pack, |m| m.images += 1);
+    assert!(probe(&wrong).0 && read_pack(&wrong).is_err());
+    let nested: Vec<(String, Vec<u8>)> = files_of(&pack)
+        .into_iter()
+        .map(|(n, b)| (format!("dir/{n}"), b))
+        .collect();
+    assert!(!probe(&rezip(&nested)).0);
+    // A manifest entry whose CRC-32 is wrong does not read (one letter of its generator
+    // changed: the JSON would still say the format).
+    let mut bad = pack.clone();
+    let at = bad.windows(7).position(|w| w == b"\"u6-hd\"").unwrap();
+    bad[at + 1] = b'U';
+    assert!(!probe(&bad).0);
+    // Not a zip, empty, or bytes that are not the range asked for.
+    assert!(!probe(b"not a zip at all").0);
+    assert_eq!(probe(b""), (false, vec![]));
+    let mut p = Probe::new(pack.len() as u64);
+    p.give(&pack[..10]);
+    assert_eq!(p.is_pack(), Some(false));
+}
+
+#[test]
+fn the_probe_reads_a_large_directory_from_where_it_starts_and_skips_a_huge_manifest() {
+    // Many entries: the directory starts before the tail read first.
+    let mut files: Vec<(String, Vec<u8>)> = (0..3000)
+        .map(|i| {
+            (
+                format!("filler/a-long-name-to-fill-the-directory-{i:05}.bin"),
+                vec![],
+            )
+        })
+        .collect();
+    files.push((
+        "manifest.json".into(),
+        br#"{"format": "u6-hdpack/1"}"#.to_vec(),
+    ));
+    let z = rezip(&files);
+    let (yes, reads) = probe(&z);
+    assert!(yes);
+    assert_eq!(
+        reads.len(),
+        3,
+        "the tail, the directory from its start, the manifest"
+    );
+    assert!(reads[1].0 < reads[0].0);
+    // A manifest.json over the limit is not read: not a pack.
+    let huge = rezip(&[(
+        "manifest.json".into(),
+        vec![b' '; (MAX_MANIFEST + 1) as usize],
+    )]);
+    let (yes, reads) = probe(&huge);
+    assert!(!yes && reads.len() == 1);
+}
