@@ -540,10 +540,10 @@ fn planes(e: &Engine) -> [Option<Vec<Src>>; 4] {
 /// shakes, one of 3 pixels shares only where a shake lands where the one before it did. The
 /// playback shows the same with the sharing as with every frame's sources its own: after every
 /// tick the colours, palettes and planes of the four buffers, the frame and source versions and
-/// the State.
+/// the State; and the screen, the published and the shown frame hold only right attributions.
 #[test]
 fn a_quakes_equal_frames_share_their_sources_and_play_back_the_same() {
-    let mut pairs = Vec::new();
+    let (mut pairs, mut images) = (Vec::new(), 0);
     for amp in [0, 3] {
         let ((mut shared, seen), (mut own, _)) = (quake_run(amp, false), quake_run(amp, true));
         for t in 0..200 {
@@ -558,6 +558,10 @@ fn a_quakes_equal_frames_share_their_sources_and_play_back_the_same() {
                 "{what}: the versions"
             );
             assert!(*shared.state() == *own.state(), "{what}: the State");
+            let s = shared.state();
+            images += check_images(shared.frame(), &s, &what);
+            images += shared.io().published(|p| check_images(p, &s, &what));
+            images += shared.io().draw(|f| check_images(f, &s, &what));
         }
         let seen = seen.borrow();
         println!(
@@ -583,4 +587,8 @@ fn a_quakes_equal_frames_share_their_sources_and_play_back_the_same() {
         assert_eq!(equal, one, "pair {k}: one allocation if and only if equal");
     }
     assert!(pairs.iter().any(|p| p.0) && pairs.iter().any(|p| !p.0));
+    assert!(
+        images > 0,
+        "the frames shown were checked against their records"
+    );
 }
