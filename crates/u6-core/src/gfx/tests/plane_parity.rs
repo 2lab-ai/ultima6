@@ -232,14 +232,17 @@ fn the_plane_changes_no_frame_and_follows_the_window_cache() {
     );
 }
 
-/// The pointer shape of the paired engines: 3 rows of 16.
+/// The pointer shapes of the paired engines: 3 rows of 16, the same for the arrow, the cross-hair
+/// (a target pending, which the edits set at times) and the eight walk arrows, so the sprite is
+/// drawn wherever the pointer is.
 fn pointer() -> crate::ui::pointer::PointerState {
+    let shape = crate::ui::pointer::Shape {
+        dx: -2,
+        dy: -1,
+        rows: vec![[1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0]; 3],
+    };
     crate::ui::pointer::PointerState::from_tables(crate::ui::pointer::PointerTables {
-        shapes: vec![crate::ui::pointer::Shape {
-            dx: -2,
-            dy: -1,
-            rows: vec![[1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0]; 3],
-        }],
+        shapes: vec![shape; 10],
         shown: true,
         ..Default::default()
     })
@@ -248,15 +251,19 @@ fn pointer() -> crate::ui::pointer::PointerState {
 /// An engine over the adversarial scene: every step its edits and the idle refresh; every 17th
 /// a flight (the block under it saved, the sprite drawn and shown, the block put back); every
 /// 23rd a glyph and a text scroll over the window on the screen; every 41st a quake and its
-/// playback, every third of them with a pause after its last picture. The plane on or off; on,
-/// after each refresh that presented the window the window rect of the screen's plane must be
-/// the back buffer's (counted in the returned cell).
-fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>) {
+/// playback, every third of them with a pause after its last picture, and every other of those
+/// with the pointer held still (the returned flag, set from the quake to the tick after the
+/// publish of its last sources). The plane on or off; on, after each refresh that presented the
+/// window the window rect of the screen's plane must be the back buffer's (counted in the
+/// returned cell).
+fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>, Rc<Cell<bool>>) {
     let (mut s, words) = adv::scene();
     s.ui = crate::main_loop::test_support::test_ui();
     s.ui.pointer = pointer();
     let windows = Rc::new(Cell::new(0));
     let counted = Rc::clone(&windows);
+    let still = Rc::new(Cell::new(false));
+    let hold = Rc::clone(&still);
     let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
         let mut x = X(seed | 1);
         let mut lists = Lists {
@@ -315,8 +322,10 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>) {
                 // window put back classic in its own colours (a replay): the playback then ends
                 // on the colours it shows and puts back sources other than the frame's in a poll
                 // with no present (one would publish them in full), published with the plane
-                // alone.
+                // alone. Every other of them holds the pointer still, so the shown frame is
+                // composed again from that publish alone, the sprite standing.
                 let pause = step / 41 % 3 == 1;
+                hold.set(step / 41 % 6 == 1);
                 {
                     let mut s = st.borrow_mut();
                     crate::ui::effects::quake(&mut s, &io, 2, 3);
@@ -334,6 +343,7 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>) {
                 if pause {
                     io.vblank().await;
                 }
+                hold.set(false);
             }
             io.present();
             io.vblank().await;
@@ -342,7 +352,7 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>) {
     if plane {
         e.enable_src_plane();
     }
-    (e, windows)
+    (e, windows, still)
 }
 
 /// The pixels the pointer sprite covers in the shown frame.
@@ -372,31 +382,43 @@ fn buffers(e: &Engine) -> [(Vec<u8>, [u6_render::Rgb; 256]); 4] {
     ]
 }
 
-/// Paired engines, the plane off and on, the same input (pointer moves every tick): after every
+/// Paired engines, the plane off and on, the same input (the pointer moves every tick but while
+/// the engines hold it still, [`paired`]): after every
 /// tick the four buffers' colours and palettes (the pointer sprite in the shown one), the frame
 /// version, the State, the RNG and the cache's decisions are equal; the plane engine's buffers
 /// hold only right attributions and its back buffer covers what the records draw. And with plain
 /// asserts, live without debug assertions: after every tick the published plane is the screen's
 /// in full and the shown plane the published one's but for the pointer sprite's pixels, which
 /// are classic; after every window present the screen's window rect is the back buffer's. The
-/// plane engine published the plane alone at least once (the paused quakes), the moving pointer
-/// over it.
+/// plane engine published the plane alone (the paused quakes), the pointer moving over some of
+/// those publishes, and composed the shown frame again from such a publish alone, the pointer
+/// standing over others; the engine without the plane did neither.
 #[test]
 fn paired_engines_show_the_same_with_the_plane_off_and_on() {
     let seed = 0x2545_F491_4F6C_DD1D;
-    let ((mut off, _), (mut on, windows)) = (paired(seed, false), paired(seed, true));
+    let ((mut off, _, held), (mut on, windows, still)) = (paired(seed, false), paired(seed, true));
     let mut sprites = 0;
     let mut dice = X(7);
-    let (mut images, mut covered) = (0, 0);
+    let (mut images, mut covered, mut stood, mut standing) = (0, 0, 0, 0);
+    let mut stand = None;
     for t in 0..1500 {
-        let input = [InputEvent::Pointer {
-            x: dice.0 as i16 % 330 - 5,
-            y: (dice.0 >> 16) as i16 % 210 - 5,
-            buttons: 0,
-        }];
+        assert_eq!(held.get(), still.get(), "tick {t}: the engines hold alike");
+        let moving = (dice.0 as i16 % 330 - 5, (dice.0 >> 16) as i16 % 210 - 5);
         let _ = dice.pm(1);
+        // Held, the pointer stands where the hold found it, moved inside the map window (where
+        // the last sources change).
+        stand = still.get().then(|| {
+            stood += 1;
+            stand.unwrap_or((24 + moving.0.rem_euclid(128), 24 + moving.1.rem_euclid(128)))
+        });
+        let (x, y) = stand.unwrap_or(moving);
+        let input = [InputEvent::Pointer { x, y, buttons: 0 }];
+        let before = on.src_publishes();
         off.tick(&input, 20);
         on.tick(&input, 20);
+        if stand.is_some() {
+            standing += on.src_publishes() - before;
+        }
         assert!(
             buffers(&off) == buffers(&on),
             "tick {t}: the buffers' colours or palettes"
@@ -437,11 +459,15 @@ fn paired_engines_show_the_same_with_the_plane_off_and_on() {
     println!(
         "paired engines: 1500 ticks, {images} pixels checked against their records, {covered} \
          covered; {} frames played back, decisions {:?}; {} window presents checked, the sprite \
-         shown in {sprites} ticks, {} publishes of the plane alone",
+         shown in {sprites} ticks; the pointer held in {stood} ticks; {} publishes of the plane \
+         alone, {standing} of them under the pointer held, {} shown frames composed from one, \
+         source version {}",
         s.combat.shown,
         decisions(&s),
         windows.get(),
-        on.src_publishes()
+        on.src_publishes(),
+        on.src_shows(),
+        on.src_version()
     );
     assert!(windows.get() > 0 && sprites > 0);
     assert!(off.frame().src().is_none() && on.frame().src().is_some());
@@ -451,6 +477,16 @@ fn paired_engines_show_the_same_with_the_plane_off_and_on() {
         on.src_publishes() > 0 && off.src_publishes() == 0,
         "the paused quakes published their last sources with the plane alone"
     );
+    assert!(
+        standing > 0 && standing < on.src_publishes(),
+        "the pointer stood over some of those publishes and moved over others"
+    );
+    assert_eq!(
+        on.src_shows(),
+        standing,
+        "each publish under the pointer held composed the shown frame from it"
+    );
+    assert!(on.src_version() > 0 && off.src_shows() == 0 && off.src_version() == 0);
 }
 
 /// What [`quake_run`] saw of the frames its quake recorded: per two of them (any two, the

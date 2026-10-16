@@ -541,6 +541,9 @@ pub struct Engine {
     /// The ticks whose publish took the source plane alone ([`Engine::src_publishes`]).
     #[cfg(test)]
     src_publishes: u64,
+    /// The ticks that composed `shown` again from such a publish ([`Engine::src_shows`]).
+    #[cfg(test)]
+    src_shows: u64,
     sprite: Option<crate::ui::pointer::SpriteFrame>,
     stubs: Rc<StubLog>,
 }
@@ -609,6 +612,8 @@ impl Engine {
             src_version: 0,
             #[cfg(test)]
             src_publishes: 0,
+            #[cfg(test)]
+            src_shows: 0,
             sprite: None,
             stubs,
         }
@@ -700,6 +705,10 @@ impl Engine {
             if self.shown.src() != before.as_deref() {
                 self.src_version += 1;
             }
+            #[cfg(test)]
+            {
+                self.src_shows += 1;
+            }
         }
     }
 
@@ -714,6 +723,13 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn src_publishes(&self) -> u64 {
         self.src_publishes
+    }
+
+    /// The ticks so far that composed the shown frame again from a publish of the plane alone,
+    /// the pointer sprite standing, in the colours it had ([`Engine::src_publishes`]; tests).
+    #[cfg(test)]
+    pub(crate) fn src_shows(&self) -> u64 {
+        self.src_shows
     }
 
     /// The last published frame (320×200 indices plus the palette) with the pointer sprite.
