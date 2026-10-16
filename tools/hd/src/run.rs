@@ -82,23 +82,80 @@ const CLEANUP: Duration = Duration::from_secs(1);
 
 /// Kills every process of the group `pgid` (the call and anything it started).
 fn kill_group(pgid: u32) {
-    let _ = Command::new("/bin/kill")
-        .args(["-s", "KILL", "--", &format!("-{pgid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    if let Ok(p) = i32::try_from(pgid)
+        && p > 0
+    {
+        // SAFETY: kill(2) with a negative pid signals that process group; no memory involved.
+        unsafe { libc::kill(-p, libc::SIGKILL) };
+    }
 }
 
-/// A spawned call: on drop, on every way out of [`Codex::generate`], its whole process group is
-/// killed and the call reaped.
+/// The process groups of the calls running now (0 = a free slot; `run` makes at most 4 at
+/// once), for [`on_signal`], which may read only what is safe in a signal handler.
+static LIVE: [std::sync::atomic::AtomicI32; 16] =
+    [const { std::sync::atomic::AtomicI32::new(0) }; 16];
+
+/// SIGINT, SIGTERM or SIGHUP: every running call's group is killed, then the signal is raised
+/// again with its default action, so the tool ends as it would have, its lock freed only
+/// after its calls are gone. (Atomics, kill, signal and raise only: async-signal-safe.)
+extern "C" fn on_signal(sig: libc::c_int) {
+    for slot in &LIVE {
+        let p = slot.load(Ordering::SeqCst);
+        if p > 0 {
+            // SAFETY: kill(2) is async-signal-safe.
+            unsafe { libc::kill(-p, libc::SIGKILL) };
+        }
+    }
+    // SAFETY: signal(2) and raise(3) are async-signal-safe; the signal stays blocked until
+    // this handler returns, and then ends the process with its default action.
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+/// Installs [`on_signal`] for SIGINT, SIGTERM and SIGHUP (the terminal's Ctrl-C, a `kill`, a
+/// closed terminal): a command stopped so takes its codex calls with it, which run in process
+/// groups of their own that those signals do not reach. A signal that comes between a call's
+/// spawn and its slot being taken (a few instructions) misses that one call.
+pub fn stop_calls_on_signals() {
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: a zeroed sigaction with only the handler and an empty mask set is valid; the
+        // handler is an extern "C" fn of the expected signature.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(sig, &action, std::ptr::null_mut());
+        }
+    }
+}
+
+/// A spawned call: its group in [`LIVE`] while it runs; on drop, on every way out of
+/// [`Codex::generate`], its whole process group is killed, the call reaped, its slot freed.
 struct Group {
     child: std::process::Child,
+    slot: Option<usize>,
+}
+
+impl Group {
+    fn new(child: std::process::Child) -> Group {
+        let pgid = i32::try_from(child.id()).unwrap_or(0);
+        let slot = LIVE.iter().position(|s| {
+            s.compare_exchange(0, pgid, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        });
+        Group { child, slot }
+    }
 }
 
 impl Drop for Group {
     fn drop(&mut self) {
         kill_group(self.child.id());
         let _ = self.child.wait();
+        if let Some(i) = self.slot {
+            LIVE[i].store(0, Ordering::SeqCst);
+        }
     }
 }
 
@@ -478,7 +535,7 @@ impl Runner for Codex {
             .process_group(0)
             .spawn()
             .map_err(|e| format!("{}: {e}", self.bin.display()))?;
-        let mut group = Group { child };
+        let mut group = Group::new(child);
         let (Some(stdout), Some(stdin), Some(stderr)) = (
             group.child.stdout.take(),
             group.child.stdin.take(),

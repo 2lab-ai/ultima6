@@ -206,6 +206,8 @@ fn run_cmd(a: &Args) -> Result<(), String> {
         limit: a.limit,
         parallel: a.parallel,
     };
+    // Ctrl-C, a kill or a closed terminal stops the calls too, before the lock is let go.
+    run::stop_calls_on_signals();
     let mut out = std::io::stdout();
     let s = run::run(&work, &codex, &opts, &mut out)?;
     if a.send {

@@ -259,6 +259,95 @@ fn a_running_command_holds_the_work_dir_until_it_is_gone() {
     let _ = std::fs::remove_dir_all(&e.dir);
 }
 
+/// Whether process `pid` is gone (or a zombie, dead and waiting to be reaped).
+fn gone(pid: &str) -> bool {
+    let o = Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&o.stdout);
+    stat.trim().is_empty() || stat.trim().starts_with('Z')
+}
+
+/// Kills the process group `pgid` when dropped (unwinding included): a failed assertion leaves
+/// no stand-in running.
+struct KillOnDrop(String);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if !self.0.is_empty() {
+            let _ = Command::new("/bin/kill")
+                .args(["-s", "KILL", "--", &format!("-{}", self.0)])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+}
+
+#[test]
+fn a_signal_to_the_tool_stops_its_calls_first() {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        let e = Env::new(&format!("signal-{sig}"));
+        let work = e.dir.join("work");
+        let w = work.to_str().unwrap();
+        let hold = e.dir.join("held");
+        assert!(
+            e.run(&["atlas", "--synthetic", "--work", w])
+                .status
+                .success()
+        );
+        let slow = slow_stub(&e.dir);
+        // In a group of its own, as a shell runs a foreground job; the signal goes to that
+        // group, as the terminal sends Ctrl-C. The stand-in is in another group (the call's).
+        let mut tool = e
+            .cmd(&[
+                "run",
+                "--work",
+                w,
+                "--codex",
+                slow.to_str().unwrap(),
+                "--send",
+                "--limit",
+                "1",
+            ])
+            .env("STUB_HOLD", &hold)
+            .process_group(0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        while !hold.exists() {
+            assert!(start.elapsed().as_secs() < 30, "the call never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let call = std::fs::read_to_string(&hold).unwrap().trim().to_string();
+        let _cleanup = KillOnDrop(call.clone());
+        assert!(!gone(&call));
+        // SAFETY: kill(2) to the tool's process group.
+        assert_eq!(unsafe { libc::kill(-(tool.id() as i32), sig) }, 0);
+        let status = tool.wait().unwrap();
+        // Ended by that signal, raised again after the calls were stopped.
+        assert_eq!(status.signal(), Some(sig), "{status:?}");
+        // The stand-in (sleeping 60 s, in its own group) went with it.
+        let start = std::time::Instant::now();
+        while !gone(&call) {
+            assert!(
+                start.elapsed().as_secs() < 2,
+                "signal {sig}: the call outlived the tool"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Then the work dir is free.
+        let codex = stub(&e.dir);
+        let o = e.run(&["run", "--work", w, "--codex", codex.to_str().unwrap()]);
+        assert!(o.status.success(), "{}", text(&o));
+        assert!(text(&o).contains("Nothing was sent"));
+        let _ = std::fs::remove_dir_all(&e.dir);
+    }
+}
+
 #[test]
 fn the_default_and_relative_work_dirs_are_checked() {
     let e = Env::new("contain");
