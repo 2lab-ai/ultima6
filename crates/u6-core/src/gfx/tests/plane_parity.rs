@@ -453,15 +453,19 @@ fn paired_engines_show_the_same_with_the_plane_off_and_on() {
     );
 }
 
-/// What [`quake_run`] saw of the frames its quake recorded: per two frames recorded in a row,
-/// whether their sources are equal and whether they are one allocation; the allocations of the
-/// shakes' sources and of all, and the distinct sources; whether the first frame names a record.
+/// What [`quake_run`] saw of the frames its quake recorded: per two of them (any two, the
+/// earlier first), whether their sources are equal and whether they are one allocation, and
+/// whether they were recorded in a row; the frames, the allocations of the shakes' sources and
+/// of all, the distinct sources and the bytes of sources held; whether the first frame names a
+/// record.
 #[derive(Debug, Default)]
 struct Shared {
-    pairs: Vec<(bool, bool)>,
+    pairs: Vec<(bool, bool, bool)>,
+    frames: usize,
     shakes: usize,
     all: usize,
     distinct: usize,
+    bytes: usize,
     named: bool,
 }
 
@@ -499,12 +503,17 @@ fn quake_run(amp: i16, unshare: bool) -> (Engine, Rc<std::cell::RefCell<Shared>>
                 at.collect::<BTreeSet<_>>().len()
             };
             let mut o = out.borrow_mut();
-            o.pairs = shots
-                .windows(2)
-                .map(|p| (p[0][..] == p[1][..], Rc::ptr_eq(&p[0], &p[1])))
+            o.pairs = (0..shots.len())
+                .flat_map(|j| (0..j).map(move |i| (i, j)))
+                .map(|(i, j)| {
+                    let (a, b) = (&shots[i], &shots[j]);
+                    (a[..] == b[..], Rc::ptr_eq(a, b), j == i + 1)
+                })
                 .collect();
+            o.frames = shots.len();
             o.shakes = allocations(&shots[..20]);
             o.all = allocations(&shots);
+            o.bytes = o.all * shots[0].len() * std::mem::size_of::<Src>();
             o.distinct = (0..shots.len())
                 .filter(|&i| shots[..i].iter().all(|b| b[..] != shots[i][..]))
                 .count();
@@ -535,9 +544,10 @@ fn planes(e: &Engine) -> [Option<Vec<Src>>; 4] {
     ]
 }
 
-/// A quake's recorded frames whose sources equal the frame's before hold one allocation, the
-/// others their own: a quake of 0 pixels (every shake the same window) shares one between its 20
-/// shakes, one of 3 pixels shares only where a shake lands where the one before it did. The
+/// A quake's recorded frames hold one allocation per distinct sources: two frames share one if
+/// and only if their sources are equal, recorded in a row or not. A quake of 0 pixels (every
+/// shake the same window) holds its 20 shakes' sources in one; one of 3 pixels, whose shakes
+/// land again on offsets taken before but not in a row, shares between frames apart. The
 /// playback shows the same with the sharing as with every frame's sources its own: after every
 /// tick the colours, palettes and planes of the four buffers, the frame and source versions and
 /// the State; and the screen, the published and the shown frame hold only right attributions.
@@ -564,26 +574,39 @@ fn a_quakes_equal_frames_share_their_sources_and_play_back_the_same() {
             images += shared.io().draw(|f| check_images(f, &s, &what));
         }
         let seen = seen.borrow();
+        let count = |f: fn(&(bool, bool, bool)) -> bool| seen.pairs.iter().filter(|p| f(p)).count();
         println!(
             "quake of {amp} pixels: {} frames recorded, their sources in {} allocations ({} for \
-             the 20 shakes) and {} distinct, {} of {} pairs in a row equal",
-            seen.pairs.len() + 1,
+             the 20 shakes), {} distinct; {} KB held, {} KB unshared; {} of {} pairs equal, {} of \
+             them in a row",
+            seen.frames,
             seen.all,
             seen.shakes,
             seen.distinct,
-            seen.pairs.iter().filter(|p| p.0).count(),
-            seen.pairs.len()
+            seen.bytes / 1024,
+            seen.bytes / seen.all * seen.frames / 1024,
+            count(|p| p.0),
+            seen.pairs.len(),
+            count(|p| p.0 && p.2)
         );
-        assert_eq!(seen.pairs.len(), 20, "20 shakes and the window");
+        assert_eq!(seen.frames, 21, "20 shakes and the window");
         assert!(seen.named, "the frames name records");
         assert_eq!(shared.state().combat.shown, 21, "all played back");
         assert!(shared.state().combat.effects.is_empty());
-        if amp == 0 {
-            assert_eq!(seen.shakes, 1, "the shakes of 0 pixels hold one allocation");
+        assert_eq!(
+            seen.all, seen.distinct,
+            "one allocation per distinct sources"
+        );
+        match amp {
+            0 => assert_eq!(seen.shakes, 1, "the shakes of 0 pixels hold one allocation"),
+            _ => assert!(
+                count(|p| p.0 && !p.2) > 0 && seen.all < seen.frames,
+                "frames apart share"
+            ),
         }
         pairs.extend_from_slice(&seen.pairs);
     }
-    for (k, &(equal, one)) in pairs.iter().enumerate() {
+    for (k, &(equal, one, _)) in pairs.iter().enumerate() {
         assert_eq!(equal, one, "pair {k}: one allocation if and only if equal");
     }
     assert!(pairs.iter().any(|p| p.0) && pairs.iter().any(|p| !p.0));

@@ -19,6 +19,7 @@
 //! rate (spec 03 §1).
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use crate::engine::{Io, with_current_io};
 use crate::gfx::blit::{blit_back, copy_rect};
@@ -180,8 +181,9 @@ pub struct Effect {
 }
 
 /// Records the screen rectangle (x0, y0)..=(x1, y1) as it is now (after a present), shown after
-/// `cost` ms. Sources equal to those of the frame recorded before it (the shakes of a quake that
-/// land on the same offset, a window recorded again unchanged) share that frame's allocation.
+/// `cost` ms. Sources equal to those of a frame recorded before it and not played yet (the shakes
+/// of a quake that land on an offset an earlier one did, a window recorded again unchanged) share
+/// that frame's allocation ([`shared_with`]).
 pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize, cost: u16) {
     if x1 < x0 || y1 < y0 {
         return;
@@ -189,11 +191,12 @@ pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize,
     let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
     let shot = with_current_io(|io| io.draw(|fb| rect_of(fb, (x0, y0), (w, h))));
     if let Some((pixels, mut src)) = shot {
-        let before = s.combat.effects.iter().rev().find_map(|e| e.src.0.as_ref());
-        if let (Some(new), Some(old)) = (&src.0, before)
-            && new[..] == old[..]
+        if let Some(old) = src
+            .0
+            .as_deref()
+            .and_then(|new| shared_with(&s.combat.effects, new))
         {
-            src.0 = Some(std::rc::Rc::clone(old));
+            src.0 = Some(old);
         }
         let mark = s.main.pending_print.len();
         s.combat.effects.push(Effect {
@@ -208,6 +211,24 @@ pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize,
             dissolve: false,
         });
     }
+}
+
+/// The allocation among the sources of `effects` whose contents are `new`, if any. Each distinct
+/// allocation is compared once, newest first, and a comparison ends at the first source that
+/// differs (a quake's shifted windows differ from their first shifted row on): the frames
+/// waiting to be played back hold one allocation per distinct sources.
+fn shared_with(effects: &[Effect], new: &[u6_render::Src]) -> Option<Rc<[u6_render::Src]>> {
+    let mut tried: Vec<&Rc<[u6_render::Src]>> = Vec::new();
+    for old in effects.iter().rev().filter_map(|e| e.src.0.as_ref()) {
+        if tried.iter().any(|t| Rc::ptr_eq(t, old)) {
+            continue;
+        }
+        if new == &old[..] {
+            return Some(Rc::clone(old));
+        }
+        tried.push(old);
+    }
+    None
 }
 
 /// Records the whole map window, shown after `cost` ms.
