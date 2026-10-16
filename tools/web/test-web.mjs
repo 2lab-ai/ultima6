@@ -135,6 +135,145 @@ test('the held-walk pace floor: a late first step does not let the next come soo
   }
 });
 
+// No page: the harness's step bookkeeping on synthetic frames and positions, so every direction
+// is exercised whichever one a boot walks: the map's scroll for a step along either axis, and
+// what a key toward a cell did (a step into the wake cell from beside it, toward it, is a walk:
+// h.stepResult says why; ending there from anywhere else is the allowed wake destination).
+test('a step\'s bookkeeping: the scroll of a step east, west, south or north; blocked, walked (into the wake cell too), on the allowed wake destination; any other cell fails', async () => {
+  const shown = (cx, cy) => {
+    const f = new Array(320 * 200 * 4).fill(0);
+    for (let y = 0; y < 200; y += 1) {
+      for (let x = 0; x < 320; x += 1) {
+        const v = Math.imul(x + 16 * cx, 73856093) ^ Math.imul(y + 16 * cy, 19349663);
+        f.fill(v & 255, (y * 320 + x) * 4, (y * 320 + x) * 4 + 3);
+      }
+    }
+    return f;
+  };
+  const before = shown(0, 0);
+  for (const step of h.STEPS) {
+    const walked = h.mapShift(before, shown(step.dx, step.dy));
+    assert.ok(walked.dx === 16 * step.dx && walked.dy === 16 * step.dy && walked.score === 1, `the scroll of ${step.key}`);
+    assert.ok(walked.still < 0.5, `${step.key}: not still`);
+  }
+  const still = h.mapShift(before, before);
+  assert.ok(still.dx === 0 && still.dy === 0 && still.still === 1, 'no step: no scroll');
+  const [east, , south] = h.STEPS;
+  assert.equal(h.stepResult('300,300,0', '300,300,0', east), 'blocked');
+  assert.equal(h.stepResult('300,300,0', '301,300,0', east), 'walked');
+  assert.equal(h.stepResult('300,300,0', '300,301,0', south), 'walked');
+  assert.equal(h.stepResult('300,300,0', h.WAKE_CELL, east), 'wake cell');
+  const [wx, wy, wz] = h.WAKE_CELL.split(',').map(Number);
+  assert.equal(h.stepResult(`${wx - 1},${wy},${wz}`, h.WAKE_CELL, east), 'walked', 'a step east into the wake cell from beside it is a walk');
+  assert.equal(h.stepResult(`${wx},${wy - 1},${wz}`, h.WAKE_CELL, east), 'wake cell', 'from beside it the other way: the wake destination');
+  assert.equal(h.stepResult(h.WAKE_CELL, `${wx},${wy + 1},${wz}`, south), 'walked', 'a step out of it is');
+  assert.equal(h.stepResult(h.WAKE_CELL, h.WAKE_CELL, east), 'blocked');
+  for (const [to, label] of [['302,300,0', 'two cells'], ['299,300,0', 'the other way'], ['301,301,0', 'a diagonal'], ['301,300,1', 'another level']]) {
+    assert.throws(() => h.stepResult('300,300,0', to, east), assert.AssertionError, `fails: ${label}`);
+  }
+});
+
+// No page: h.stepOnce's tries driven by a stub of the page's side (`io`: the leader, the frame,
+// the step, the pass) on a synthetic grid: the cells a step may enter (`open`, asked with the
+// passes so far), the leader moved by each step it allows. Pinned: the order of the directions
+// (east and west blocked, south walks: an east-or-west step fails it), a pass only after a round
+// of four blocked, the bound (16 tries, 3 passes) and its failure, naming each try's key and
+// outcome; a try that ends on the wake cell, then the next direction from there; a walk into the
+// wake cell from beside it is the step (counted otherwise, the step would walk in and back out
+// or, where that is the one way out, not at all); a walk back onto the cell the call started on
+// (the hero killed in a pass, woken beside it) is not; the frame read only with `withFrame`; the
+// prompt waited before every try; the label's count of what the page sent for each try (0 for a
+// key lost on the way, '?' with no count); a failure of the step itself (the game never took the
+// input) not retried.
+test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 rounds; the wake cell; never back where it began; the frame only when asked; a step that fails stops it', async () => {
+  const stub = ({ at = '300,300,0', open = () => false, wakeOn = null, wakeOnPass = null, failOn = null, lostOn = null } = {}) => {
+    const io = { at, passes: 0, acts: [], frames: 0, prompts: 0, keys: 0 };
+    Object.assign(io, {
+      prompt: async () => { io.prompts += 1; },
+      leader: async () => io.at,
+      frame: async () => { io.frames += 1; return [io.acts.length]; },
+      sent: async () => io.keys,
+      act: async (step) => {
+        io.acts.push(step.key);
+        if (io.acts.length === lostOn) return; // the key never reached the game: nothing moves
+        io.keys += 1;
+        if (io.acts.length === failOn) throw new Error('test: the input was not taken');
+        if (io.acts.length === wakeOn) {
+          io.at = h.WAKE_CELL;
+          return;
+        }
+        const [x, y, z] = io.at.split(',').map(Number);
+        const to = `${x + step.dx},${y + step.dy},${z}`;
+        if (open(to, io.passes)) io.at = to;
+      },
+      pass: async () => {
+        io.passes += 1;
+        if (io.passes === wakeOnPass) io.at = h.WAKE_CELL;
+      },
+    });
+    return io;
+  };
+  const keys = h.STEPS.map((s) => s.key);
+  // East and west blocked, south open: the third try walks, no pass.
+  let io = stub({ open: (to) => to === '300,301,0' });
+  let got = await h.stepOnce(null, { io });
+  assert.deepEqual([got.key, got.dx, got.dy, got.from, got.to], ['ArrowDown', 0, 1, '300,300,0', '300,301,0'], 'south after east and west blocked');
+  assert.deepEqual(io.acts, keys.slice(0, 3), 'east, west, then south');
+  assert.ok(io.passes === 0 && io.frames === 0 && got.before === undefined, 'no pass; no frame read without withFrame');
+  assert.equal(io.prompts, io.acts.length, 'the prompt before every try');
+  // Every side blocked until the second pass: a pass after each round of four, then east.
+  io = stub({ open: (to, passes) => passes >= 2 && to === '301,300,0' });
+  got = await h.stepOnce(null, { io, withFrame: true });
+  assert.deepEqual(io.acts, [...keys, ...keys, 'ArrowRight'], 'two rounds of four, then east');
+  assert.ok(io.passes === 2 && got.key === 'ArrowRight', 'a pass between rounds only');
+  assert.ok(io.frames === io.acts.length && got.before[0] === io.acts.length - 1, 'with withFrame: the frame before each try, the walked one returned');
+  assert.equal(io.prompts, io.acts.length, 'the prompt before every try, after the passes too');
+  // Never open: fails after 4 rounds (16 tries, 3 passes), naming every try and pass in order.
+  io = stub();
+  const bound = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
+  assert.ok(bound instanceof assert.AssertionError, 'an assertion: the runner shows its label');
+  assert.ok(io.acts.length === h.STEP_ROUNDS * h.STEPS.length && io.passes === h.STEP_ROUNDS - 1, '16 tries, 3 passes');
+  const round = keys.map((k) => `${k} blocked (sent 1)`).join(', ');
+  assert.equal(bound.message, `no test step in 4 rounds of the four directions: ${[round, round, round, round].join(', pass, ')}`);
+  assert.equal(io.prompts, io.acts.length, 'the prompt before every try of the bound');
+  // A key lost on the way reads as blocked; the label tells it by what the page sent for it.
+  io = stub({ lostOn: 1 });
+  const lost = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
+  assert.ok(lost.message.startsWith('no test step in 4 rounds of the four directions: ArrowRight blocked (sent 0), ArrowLeft blocked (sent 1),'), 'a lost key: sent 0');
+  // With no count (an io without `sent`): '?'.
+  io = stub();
+  delete io.sent;
+  const uncounted = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
+  assert.ok(uncounted.message.startsWith('no test step in 4 rounds of the four directions: ArrowRight blocked (sent ?),'), 'not counted: ?');
+  // The second try ends on the wake cell: the next direction from there (south) walks.
+  const [wx, wy, wz] = h.WAKE_CELL.split(',').map(Number);
+  io = stub({ wakeOn: 2, open: (to) => to === `${wx},${wy + 1},${wz}` });
+  got = await h.stepOnce(null, { io });
+  assert.deepEqual(io.acts, keys.slice(0, 3), 'east blocked, west ends on the wake cell, then south');
+  assert.ok(got.from === h.WAKE_CELL && got.key === 'ArrowDown', 'the step walked from the wake cell');
+  // East of the wake cell with only the way into it open (the gargoyles of the woken hero on
+  // its other sides): west into it is the step, at the second try.
+  const beside = `${wx + 1},${wy},${wz}`;
+  io = stub({ at: beside, open: (to) => to === h.WAKE_CELL });
+  got = await h.stepOnce(null, { io });
+  assert.deepEqual(io.acts, ['ArrowRight', 'ArrowLeft'], 'east blocked, west into the wake cell');
+  assert.ok(got.from === beside && got.to === h.WAKE_CELL && io.passes === 0, 'a walk into the wake cell is the step');
+  // The same cell, every side blocked until the hero dies in the first pass and wakes beside it:
+  // east from the wake cell back onto it is not the step ('back'), west from it then is.
+  io = stub({ at: beside, wakeOnPass: 1, open: (to, passes) => passes >= 1 && (to === beside || to === h.WAKE_CELL) });
+  got = await h.stepOnce(null, { io, what: 'test step' });
+  assert.deepEqual(io.acts, [...keys, 'ArrowRight', 'ArrowLeft'], 'a round, the pass, east back, then west');
+  assert.ok(got.from === beside && got.to === h.WAKE_CELL, 'the leader ends elsewhere than he began');
+  // A try that ends on the wake cell from afar, then nothing open: the outcomes named in order.
+  io = stub({ wakeOn: 1 });
+  const named = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
+  assert.ok(named instanceof assert.AssertionError && named.message.startsWith('no test step in 4 rounds of the four directions: ArrowRight wake cell (sent 1), ArrowLeft blocked (sent 1), ArrowDown blocked (sent 1), ArrowUp blocked (sent 1), pass,'), 'the outcomes named: wake cell, blocked, pass');
+  // A step whose input the game never took fails as it did, not as a blocked try.
+  io = stub({ failOn: 1 });
+  const failed = await h.stepOnce(null, { io }).then(() => null, (err) => err);
+  assert.ok(failed instanceof Error && failed.message === 'test: the input was not taken' && io.acts.length === 1, 'the failure of the step itself, at once');
+});
+
 // The runner's failure lines (h.failureLines) on errors whose text holds a sentinel: plain,
 // multi-line with lines shaped as frames of this directory, a thrown string, a page-chosen name,
 // assertions with a label and generated, Playwright's own (a page's thrown error, a timeout on
@@ -222,12 +361,12 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   const s = await started(page, FILES);
   assert.equal(s.focused, 'screen', 'focus lands on the canvas after the import');
   assert.equal(await page.evaluate(() => getComputedStyle(document.activeElement).outlineColor), 'rgb(255, 209, 102)');
-  // From the prompt, one step east (west when the start fight blocks it), then the prompt again.
-  const { key, before } = await h.stepSideways(page);
+  // From the prompt, one step east (another way when the start fight blocks it), then the
+  // prompt again.
+  const { key, dx, dy, before } = await h.stepOnce(page, { withFrame: true });
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), [key, true], 'the canvas took the arrow');
   const walked = h.mapShift(before, await h.frame(page));
-  const want = key === 'ArrowRight' ? 16 : -16;
-  assert.ok(walked.shift === want && walked.score > 0.5, `one step (${key}) scrolled the map`);
+  assert.ok(walked.dx === 16 * dx && walked.dy === 16 * dy && walked.score > 0.5, `one step (${key}) scrolled the map`);
   await page.keyboard.press('Tab');
   assert.notEqual((await h.state(page)).focused, 'screen', 'Tab leaves the canvas');
   const at = (await h.state(page)).leader;
@@ -238,7 +377,7 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   assert.equal(await page.evaluate(() => document.getElementById('screen').dataset.keys), '0');
   assert.equal((await h.state(page)).leader, at, 'no walk without focus');
   const after = h.mapShift(still, await h.frame(page));
-  assert.ok(after.shift === 0, 'the map stayed');
+  assert.ok(after.dx === 0 && after.dy === 0, 'the map stayed');
 }, { needs: h.haveHfes });
 
 test('two rapid imports: one after the other, the second one runs and is kept', async (env) => {
@@ -387,10 +526,9 @@ test('A on the canvas: Attack asks for a target, a stray key ends it, then the a
   await h.press(page, 'q', 0); // confirms no target: the no-target word, the turn (the start fight) runs
   await h.waitPrompt(page);
   await writeFile('/tmp/claude-501/m2-attack-what.png', await page.locator('#screen').screenshot());
-  const { key, before } = await h.stepSideways(page);
+  const { key, dx, dy, before } = await h.stepOnce(page, { withFrame: true });
   const walked = h.mapShift(before, await h.frame(page));
-  const want = key === 'ArrowRight' ? 16 : -16;
-  assert.ok(walked.shift === want && walked.score > 0.5, `one step (${key}) after A`);
+  assert.ok(walked.dx === 16 * dx && walked.dy === 16 * dy && walked.score > 0.5, `one step (${key}) after A`);
 }, { needs: h.haveHfes });
 
 test('Ctrl+S and Ctrl+R on the canvas are the game\'s Save and Restore, not the browser\'s', async (env) => {
@@ -411,12 +549,12 @@ test('Ctrl+S and Ctrl+R on the canvas are the game\'s Save and Restore, not the 
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['KeyL', false], 'other Ctrl shortcuts stay the browser\'s');
 }, { needs: h.haveHfes });
 
-// Walks one step (east or west), then saves (Ctrl-S, Y) and waits until the save is stored;
+// Walks one step (h.stepOnce), then saves (Ctrl-S, Y) and waits until the save is stored;
 // returns the leader's position before and after the step.
 async function walkAndSave(page) {
   await h.waitPrompt(page); // the boot reaches the prompt
   const start = (await h.state(page)).leader;
-  const { to: moved } = await h.stepSideways(page);
+  const { to: moved } = await h.stepOnce(page);
   await h.press(page, 'Control+s', 30);
   await h.press(page, 'y', 60);
   await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
@@ -483,7 +621,7 @@ test('a Save of the game an import replaces, made while the import reads: the im
   await started(page, FILES);
   const { moved } = await walkAndSave(page);
   const folder = asFolder(await h.savedFiles(page));
-  const { to: later } = await h.stepSideways(page);
+  const { to: later } = await h.stepOnce(page);
   assert.notEqual(later, moved);
   await page.evaluate(() => window.__hold('read'));
   const from = (await h.log(page)).length;
@@ -563,7 +701,7 @@ test('a Save after the saved game was forgotten stores the whole game; a reload 
   assert.deepEqual(await h.savedPaths(page), [], 'the Save taken before the forget was not stored');
   assert.match((await h.state(page)).status, /The saved game was removed/);
   // The next Save stores the whole game: the objlist and all 69 blocks, the far one included.
-  const { to: later } = await h.stepSideways(page);
+  const { to: later } = await h.stepOnce(page);
   await h.press(page, 'Control+s', 30);
   await h.press(page, 'y', 60);
   await page.waitForFunction(() => document.body.dataset.saved === '2', null, { timeout: 60_000 });
@@ -728,7 +866,7 @@ test('a game whose MED tables fail the checks starts and plays silent: sound on 
   assert.match(s.status, /Started\./, 'the dropped files started');
   assert.equal(silent.length, 1, 'the boot said the sound is off');
   let ticks = await page.evaluate(() => globalThis.__ticks);
-  let step = await h.stepSideways(page);
+  let step = await h.stepOnce(page);
   assert.notEqual(step.to, step.from, 'the game plays');
   assert.ok(await page.evaluate(() => globalThis.__ticks) > ticks, 'the engine ticks');
   // The patched files are the kept ones now: a reload restores them before any gesture, and
@@ -743,7 +881,7 @@ test('a game whose MED tables fail the checks starts and plays silent: sound on 
   s = await h.state(page);
   assert.ok(s.state === 'running', 'the game runs');
   ticks = await page.evaluate(() => globalThis.__ticks);
-  step = await h.stepSideways(page);
+  step = await h.stepOnce(page);
   assert.notEqual(step.to, step.from, 'the game plays on');
   assert.ok(await page.evaluate(() => globalThis.__ticks) > ticks, 'the engine ticks');
   console.log('  receipt: the files dropped with the period table zeroed; sound off at the boot and at the gesture, the game walks after each');
@@ -851,17 +989,6 @@ function scrollChanged(before, after) {
 
 const OUT = '/tmp/claude-501/int-mouse';
 
-// Clicks the map cell `dx` cells east of the hero (its window cell (5, 5) is centred on
-// game pixel (88, 88)), then waits until the game took the click and shows the prompt again;
-// the leader before and after.
-async function clickCell(page, dx) {
-  await h.waitPrompt(page);
-  const from = (await h.state(page)).leader;
-  await h.click(page, 88 + 16 * dx, 88, 0);
-  await h.waitPrompt(page);
-  return { from, to: (await h.state(page)).leader };
-}
-
 // Look by clicks: the Look icon, then the hero's own cell. Look on a person shows the portrait
 // panel and waits for a key or a click; a click on the hero's cell answers it (0x8f, nothing
 // else happens). Returns the frame with the description in the scroll, read 90 ticks after the
@@ -881,24 +1008,19 @@ async function lookAtHero(page, shot) {
   return described;
 }
 
-// One step by clicks: the cell east of the hero, else (blocked by the start fight) west,
-// up to the harness's `STEP_TRIES` tries, a pass after each blocked one (as `stepSideways`:
-// after a blocked step the world turn picks the hero again at once, no NPC moves); asserts the
-// step is one cell along x.
+// One step by clicks: `h.stepOnce` with a click instead of each arrow, on the map cell `dx`
+// east and `dy` south of the hero (its window cell (5, 5) is centred on game pixel (88, 88)),
+// then until the game took it and shows the prompt again: the same directions, outcomes and
+// bound (a pass after a round of four blocked: the clicks focused the canvas).
 async function clickStep(page) {
-  for (let i = 0; i < h.STEP_TRIES; i += 1) {
-    const dx = i % 2 === 0 ? 1 : -1;
-    const { from, to } = await clickCell(page, dx);
-    if (to === from) {
-      await h.passTurn(page); // the click focused the canvas
-      continue;
-    }
-    const [fx, fy, fz] = from.split(',').map(Number);
-    const [tx, ty, tz] = to.split(',').map(Number);
-    assert.ok(tx - fx === dx && ty === fy && tz === fz, `one cell ${dx > 0 ? 'east' : 'west'}`);
-    return { dx, from, to };
-  }
-  throw new Error(`${h.STEP_TRIES} click steps blocked in a row`);
+  const act = async ({ dx, dy }) => {
+    await h.click(page, 88 + 16 * dx, 88 + 16 * dy, 0);
+    await h.waitPrompt(page);
+  };
+  // What a click sent: the button changes the game took (`__buttons`, a gated page's glue: a
+  // press and its release), not counted on an ungated page.
+  const sent = () => page.evaluate(() => globalThis.__buttons?.length ?? null);
+  return h.stepOnce(page, { io: { ...h.pageSteps(page), act, sent }, what: 'click step' });
 }
 
 test('the mouse: the Look icon, then Look on the hero, then clicks walk; the keys still work', async (env) => {
@@ -912,7 +1034,7 @@ test('the mouse: the Look icon, then Look on the hero, then clicks walk; the key
   assert.ok(scrollChanged(before, described), 'Look printed in the scroll');
   assert.equal((await h.state(page)).focused, 'screen', 'the click focused the canvas');
   await clickStep(page);
-  const { from, to } = await h.stepSideways(page);
+  const { from, to } = await h.stepOnce(page);
   assert.notEqual(to, from, 'the arrows still walk after the mouse');
 }, { needs: h.haveHfes });
 
@@ -1033,8 +1155,8 @@ const HOLD_CELLS = [[88, 88 + 48], [88, 88 - 48], [88 + 48, 88], [88 - 48, 88]];
 // press (waitTaken) and walks no cell; a blocked step costs no movement points, so the world
 // turn after it picks the hero again at once and no NPC moves (the prompt is back, not after
 // the fight's turns): the boot is as fresh for the next direction, up to the four of them (as
-// `stepSideways` tries the other way). Which direction walked depends on the boot's game state,
-// so the receipt does not name it.
+// `h.stepOnce` tries the next). Which direction walked depends on the boot's game state, so the
+// receipt does not name it.
 async function freshHeldWalk(page, ms) {
   for (const cell of HOLD_CELLS) {
     const walk = await heldWalk(page, ms, cell);
@@ -2276,15 +2398,16 @@ test('HD performance, H1 no-pack baseline (spec 07 Acceptance 5 with a full pack
     await h.waitFrames(page, 10);
     await page.evaluate(() => { window.__hdTimes = []; });
     const end = Date.now() + 8000;
-    // Steps both ways and a pass between (the start fight's foes move on, a blocked step
-    // passes). The leader's places are compared here, never printed: the party must walk.
-    const places = new Set([(await h.state(page)).leader]);
-    for (let i = 0; Date.now() < end; i += 1) {
-      await page.keyboard.press(['ArrowRight', 'ArrowRight', 'ArrowLeft', 'ArrowLeft', 'Space', 'ArrowDown', 'ArrowUp'][i % 7]);
-      await h.sleep(60);
-      places.add((await h.state(page)).leader);
+    // One step after another until the time is up (h.stepOnce: east, else west, south, north,
+    // a pass after a round of four blocked; each one the one cell walked): the party must walk.
+    // No frame read before each try (`withFrame` off): a canvas read at S 4 inside the timed
+    // window would halve the steps.
+    let walked = 0;
+    while (Date.now() < end) {
+      await h.stepOnce(page);
+      walked += 1;
     }
-    assert.ok(places.size >= 3, `S ${s}: the party walked during the timed frames`);
+    assert.ok(walked >= 2, `S ${s}: the party walked during the timed frames`);
     const times = await page.evaluate(() => {
       const t = window.__hdTimes;
       window.__hdTimes = null;
@@ -2294,7 +2417,7 @@ test('HD performance, H1 no-pack baseline (spec 07 Acceptance 5 with a full pack
     const drawn = times.filter((f) => f[1] > 0).map((f) => f[0]).sort((a, b) => a - b);
     const hz = (times.length - 1) / ((times.at(-1)[2] - times[0][2]) / 1000);
     const [median, p95] = [quantile(all, 0.5), quantile(all, 0.95)];
-    receipts.push(`H1 no-pack baseline, S ${s}: ${times.length} frames at ${hz.toFixed(0)} Hz, ${drawn.length} drawn; per frame median ${median.toFixed(2)} ms, p95 ${p95.toFixed(2)} ms, max ${all.at(-1).toFixed(2)} ms; drawn frames median ${quantile(drawn, 0.5).toFixed(2)} ms, p95 ${quantile(drawn, 0.95).toFixed(2)} ms`);
+    receipts.push(`H1 no-pack baseline, S ${s}: ${times.length} frames at ${hz.toFixed(0)} Hz, ${drawn.length} drawn, ${walked} steps walked; per frame median ${median.toFixed(2)} ms, p95 ${p95.toFixed(2)} ms, max ${all.at(-1).toFixed(2)} ms; drawn frames median ${quantile(drawn, 0.5).toFixed(2)} ms, p95 ${quantile(drawn, 0.95).toFixed(2)} ms`);
     assert.ok(drawn.length >= 30, `S ${s}: the walk changed the frame`);
     assert.ok(median <= 4, `S ${s}: median at most 4 ms`);
     assert.ok(p95 <= 8, `S ${s}: p95 at most 8 ms`);
