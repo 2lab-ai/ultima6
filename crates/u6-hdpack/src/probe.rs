@@ -4,18 +4,20 @@
 //! central directory starts before what was read (at most `zip::MAX_DIRECTORY_BYTES`), then the
 //! range of the root `manifest.json` entry, at most [`MAX_MANIFEST_RANGE`] bytes of it.
 //!
-//! A file is a pack when its zip directory reads and has a root `manifest.json`, and that entry
-//! - reads (its local header, size and CRC-32 checked) as a JSON object whose `format` is
-//!   [`FORMAT`] (the rest of the manifest is checked as the reader checks it, below); or
-//! - does not read as one, being over the reader's limit for it (64 KiB), broken (its CRC-32,
-//!   its size, its local header) or not a JSON object with a `format`, while its bytes as read
-//!   name [`FORMAT`]: it says it
-//!   is a pack, so it is taken for one (and refused) rather than started as a game. A manifest
-//!   that does not read and does not name the format (a deflated one is searched as stored) is
-//!   not a pack's.
+//! A file is a pack when its zip directory reads and has a root `manifest.json` whose data
+//! (as read, or as stored when the entry does not read: over the reader's limit for it, 64 KiB,
+//! or broken, its CRC-32, its size or its local header)
+//! - parses as JSON: it is a pack when it is an object whose `format` is the string [`FORMAT`]
+//!   (the rest of the manifest is checked as the reader checks it, below), and not one for any
+//!   other JSON (no `format`, another one, not an object), whatever else it mentions;
+//! - does not parse as JSON (cut short, not JSON at all): it is a pack when it declares the
+//!   format, a `"format"` key with the value `"u6-hdpack/1"` (whitespace allowed between them),
+//!   so a pack whose manifest is broken is refused as one rather than imported.
 //!
-//! A zip without a root `manifest.json`, one whose manifest reads as JSON naming another format,
-//! and anything whose directory does not read are not packs.
+//! A manifest that does not read and is deflated is looked at as stored, so it is not a pack's:
+//! the tool writes its manifest stored, so only a pack zipped again by other means can be such
+//! a one, and it then goes to the import, which takes only disk images from a zip. A zip without
+//! a root `manifest.json`, and anything whose directory does not read, are not packs.
 //!
 //! For a pack the probe also makes the checks the reader makes before it reads any picture:
 //! those of the directory (every entry's name one a pack has, none twice, what they declare
@@ -61,9 +63,41 @@ enum Told {
     Pack(Option<PackError>),
 }
 
-/// Whether `bytes` name the format: [`FORMAT`] somewhere in them, as they are.
-fn names_format(bytes: &[u8]) -> bool {
-    bytes.windows(FORMAT.len()).any(|w| w == FORMAT.as_bytes())
+/// Whether `bytes` declare the format: a `"format"` key, then (whitespace allowed) `:` and the
+/// string `"u6-hdpack/1"`, as they are.
+fn declares_format(bytes: &[u8]) -> bool {
+    let key = b"\"format\"";
+    let value = format!("\"{FORMAT}\"");
+    let skip = |at: usize| {
+        at + bytes[at..]
+            .iter()
+            .take_while(|b| b.is_ascii_whitespace())
+            .count()
+    };
+    (0..bytes.len().saturating_sub(key.len() - 1))
+        .filter(|&i| bytes[i..].starts_with(key))
+        .any(|i| {
+            let at = skip(i + key.len());
+            bytes.get(at) == Some(&b':') && bytes[skip(at + 1)..].starts_with(value.as_bytes())
+        })
+}
+
+/// What a manifest's data says: a pack (`Some(true)`), not one (`Some(false)`), or nothing as
+/// JSON (`None`: it does not parse).
+fn json_says(data: &[u8]) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_slice(data).ok()?;
+    Some(v.get("format").and_then(serde_json::Value::as_str) == Some(FORMAT))
+}
+
+/// The data of a stored entry in `range` (its local header first), as far as it was read.
+fn stored_data(range: &[u8]) -> &[u8] {
+    let len = |at: usize| {
+        range
+            .get(at..at + 2)
+            .map_or(0, |b| usize::from(u16::from_le_bytes([b[0], b[1]])))
+    };
+    let start = 30 + len(26) + len(28);
+    range.get(start..).unwrap_or_default()
 }
 
 /// A manifest's `format` alone (any other field is let be).
@@ -178,14 +212,14 @@ fn manifest(s: &Slice, bytes: &[u8], directory: Result<(), PackError>) -> Told {
         at.start = 0;
         zip::entry(bytes, &at).map_err(|e| PackError::Zip(e.to_string()))
     };
-    let checked = match &read {
-        Ok(m) if is_manifest(m) => check_manifest(m).map(drop),
-        Ok(m) if names_format(m) && serde_json::from_slice::<Format>(m).is_err() => {
-            check_manifest(m).map(drop)
-        }
-        Ok(_) => return Told::NotPack,
-        Err(e) if names_format(bytes) => Err(e.clone()),
-        Err(_) => return Told::NotPack,
+    let data = match &read {
+        Ok(m) => m.as_slice(),
+        Err(_) => stored_data(bytes),
     };
+    let pack = json_says(data).unwrap_or_else(|| declares_format(data));
+    if !pack {
+        return Told::NotPack;
+    }
+    let checked = read.and_then(|m| check_manifest(&m).map(drop));
     Told::Pack(directory.and(checked).err())
 }
