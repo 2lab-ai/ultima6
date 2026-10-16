@@ -350,24 +350,31 @@ test('headers and CSP: the page runs under its policy, third-party requests are 
 test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', async (env) => {
   const { page } = await h.openPage(env, { gated: false });
   await h.load(page, env);
+  // The chooser wait is armed here, before the Tabs, so that the key that opens the chooser
+  // comes well after the arming. Playwright turns on Chromium's chooser interception when the
+  // first 'filechooser' listener is added, by a protocol call nothing awaits; a chooser the
+  // page opens before the interception took effect is not intercepted, headless dismisses it
+  // and no event comes. That the page round trips after the arming are answered after the
+  // interception is observed, not documented: armed in the same Promise.all as the key, Space
+  // failed 6 of 30 and Enter 21 of 26 under 10x CPU throttling; with one read between the
+  // arming and the key, the interception was answered before the key was sent in 170 of 170
+  // runs (Enter 0 of 100 failed, under 10x Enter 0 of 40 and Space 0 of 30). Here six round
+  // trips (the Tabs, the arrow, the reads) lie between them (under 10x, 30 of 30 answered
+  // before the key; the arming to the chooser took 2.1 s at most, well inside the wait's
+  // default 30 s), so keep the arming above the Tabs.
+  // Enter, not Space: Space clicks on its keyup, an input event of its own, and the keydown's
+  // user activation lapses within seconds (a Space held 4 s opened the chooser, 6 s did not);
+  // a loaded host has delivered the keyup over 6 s after the keydown, and the chooser was
+  // refused. Enter clicks in its keydown's own task. When a check fails before the wait is
+  // awaited, the `.catch` keeps its rejection (the page is closed) from going unhandled and
+  // ending the run; `await chosen` still throws.
+  const chosen = page.waitForEvent('filechooser');
+  chosen.catch(() => {});
   await page.keyboard.press('Tab');
   assert.equal((await h.state(page)).focused, 'screen', 'the canvas is in the tab order');
   await page.keyboard.press('ArrowDown');
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['ArrowDown', false], 'no game: arrows stay the page\'s');
   await page.keyboard.press('Tab');
-  // The chooser is armed, and the arming has taken effect, before the key. Playwright turns on
-  // Chromium's chooser interception when the first 'filechooser' listener is added, by a
-  // protocol call nothing awaits; a chooser the page opens before the interception took effect
-  // is not intercepted and no event comes. The focus read after the wait is sent to the page
-  // after that call and answered after it, so the key follows the interception. Enter, not
-  // Space: Space clicks on its keyup, an input event of its own, and the keydown's user
-  // activation lapses within seconds (a Space held 4 s opened the chooser, 6 s did not); a
-  // loaded host has delivered the keyup over 6 s after the keydown, and the chooser was refused.
-  // Enter clicks in its keydown's own task. When the focus check fails the wait is never
-  // awaited: the `.catch` keeps its rejection (the page is closed) from going unhandled and
-  // ending the run; `await chosen` still throws.
-  const chosen = page.waitForEvent('filechooser');
-  chosen.catch(() => {});
   assert.equal((await h.state(page)).focused, 'picker');
   await page.keyboard.press('Enter');
   const chooser = await chosen;
