@@ -258,3 +258,27 @@ Round 6 of M2's follow-ups is complete: intake-budget, zip-slice and nostep are 
   - It passed 4 of 4 alone at load 157–251. It is opened as `chooser-flake` in loop.md.
 - Test code only, with the site unchanged, so there was no deploy.
 
+## chooser-flake — closed 2026-10-17
+
+| Unit | Branch | Result |
+|---|---|---|
+| chooser-flake | fix/chooser-flake | Fixed in 48d198a and 58672af, merged to main. See the notes below. |
+
+- **Mechanism:** `keyboard only` timed out at `test-web.mjs:359` in 1 of 3 suites at load 114–131. There were two causes, both reproduced.
+  - **Interception race** (Playwright 1.63.0). The first `filechooser` listener subscribes in the background without waiting. In Chromium, `Page.setInterceptFileChooserDialog` was sometimes answered after the key events. A chooser that opens before interception is on is closed by headless (`cancel`).
+  - **Lapsed activation.** Space clicks on keyup. One keyup came 6193 ms after its keydown, past Blink's 5 s activation lifespan, so the chooser was refused.
+- **Fix:**
+  - The wait is armed right after the page load, before the Tabs, so six page round trips separate arming from the key. This order is observed, not documented, and the comment says so.
+  - The key is now Enter, which clicks on keydown. Enter opens a file input in Blink, WebKit and Gecko (opus checked).
+  - The 30 s default timeout is kept.
+- **Counts, before → after** (scratch repro, 10x CPU throttling):
+  - Space: 6/30 → 0/30.
+  - Enter at load: 3/40 → 0/100.
+  - Enter at 10x: 21/26 → 0/40.
+  - Opus re-measured 10/30 and 8/15 failing → 0/30 and 0/20, with the interception answered before the keyDown in 50 of 50 protocol logs.
+  - After the arming moved, 30/30 runs passed at 10x.
+- **Reviews:** gpt-6-astra and opus APPROVE on round 1; gpt-6-astra APPROVE on round 2.
+  - Limitation kept on record: interception readiness is observed, not awaited.
+  - Correction: the round-1 commit message lists "Space 1 of 80" among the race failures. It was the lapsed-activation case.
+- **Gates on the merged tree** (147af22): web 54/54 three times at load 130–245. Test code only, so there was no deploy.
+
