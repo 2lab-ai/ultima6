@@ -66,7 +66,19 @@ fn stub(
         mark.display(),
         dir.join(format!("{name}.ack")).display()
     );
-    let body = format!("#!/bin/sh\n{before}\n{}{after}\n", helper.repeat(n));
+    // Helpers that acknowledge (the writers): the call goes on to `after` only once every one
+    // has (at most 10 s). One slow to start on a loaded machine would otherwise begin after
+    // the call ended and never write, and the test could not tell it from one that cannot.
+    let wait = if perl.contains("$ARGV[1]") {
+        format!(
+            "i=0; while [ \"$(ls \"{}\".* 2>/dev/null | wc -l)\" -lt {n} ] && [ $i -lt 1000 ]; \
+             do sleep 0.01; i=$((i + 1)); done\n",
+            dir.join(format!("{name}.ack")).display()
+        )
+    } else {
+        String::new()
+    };
+    let body = format!("#!/bin/sh\n{before}\n{}{wait}{after}\n", helper.repeat(n));
     std::fs::write(&p, body).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -104,8 +116,9 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
     // Four writers of 64 KiB at a time: the output is never found empty. Each acknowledges its
     // first write that went in (a file `<stub>.ack.<pid>`), so it is known to be writing.
     let spew = r#"do { my $w = syswrite(STDOUT, "y\n" x 32768); if ($w && !$n++) { open(my $f, ">", "$ARGV[1].$$"); close $f } }"#;
-    // (name, stub, its prompt is never read, deadline in seconds). The flooders' exiting call
-    // gets a deadline it surely exits before (it starts four perls first).
+    // (name, stub, its prompt is never read, deadline in seconds). The flooders' calls get
+    // deadlines past their four writers' start (each waits for their acknowledgments), the
+    // exiting one a deadline it surely exits before.
     let shapes = [
         // Keeps the output: takes the prompt, exits; the stream never ends.
         (
@@ -132,7 +145,7 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
             "floods-hang.sh",
             stub(&t, "floods-hang.sh", &takes, 4, spew, &flood.0, "sleep 30"),
             false,
-            2,
+            4,
         ),
     ];
     let big = "x".repeat(1 << 20);
