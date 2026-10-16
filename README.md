@@ -54,7 +54,7 @@ scripts/deploy-web.sh main                          # Cloudflare Pages project u
 | `.prd/` | spec (01), architecture (02), core port contract (03), P3 refactor plan (04), HD/4K output design (05), fixed tick and speed (06), HD art (07), Korean i18n (08), NPC voices (09), loops |
 | `crates/u6-intake` · `u6-formats` · `u6-core` · `u6-render` · `u6-audio` · `u6-native` · `u6-web` · `u6-testkit` | Rust workspace (`u6-audio`: the emulated Amiga audio machine; `u6-testkit`: content-free comparisons for the real-data tests) |
 | `re/notes/` | reverse-engineering notes (formats, graphics, functions, subsystems, oracle, port map) |
-| `crates/u6-hdpack` | the HD pack format `u6-hdpack/1` (spec 07 HD1): writer, strict reader, the content hash of a classic image; no game data |
+| `crates/u6-hdpack` | the HD pack format `u6-hdpack/1` (spec 07 HD1): writer, strict reader, the drop classifier, the content hash of a classic image; no game data. The page loads a dropped pack (H2), keeps it in IndexedDB and draws its pictures in front of MMPX |
 | `tools/` | PP20, hunk flattener, REA drivers, Amiga emulator oracle, web test harness |
-| `tools/hd` | `u6-hd`, the local imagegen HD tool (spec 07 HD2): run by the owner on the owner's files; its sheets, outputs and packs stay in `~/Games/ultima6/hd/`, outside the repo. It moves each generated image out of `~/.codex/generated_images/`; codex's own session log (`~/.codex/sessions/`) still keeps every sheet that was sent |
+| `tools/hd` | `u6-hd`, the local imagegen HD tool (spec 07 HD2): run by the owner on the owner's files; its sheets, outputs and packs stay in `~/Games/ultima6/hd/`, outside the repo. It moves each generated image out of `~/.codex/generated_images/`; codex's own session log (`~/.codex/sessions/`) still keeps every sheet that was sent. The example `scaler_pack` writes a full-size pack of MMPX ×4 of the owner's images there, for timing the page |
 | `site/` | the static page |

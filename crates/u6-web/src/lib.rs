@@ -169,16 +169,30 @@ impl HdPack {
     }
 }
 
-/// [`HdPack::load`] without the JS error type.
+/// [`HdPack::load`] without the JS error type. A refusal says which rule of the format the pack
+/// breaks, in a fixed sentence: nothing of the pack (its names, its manifest's text) is in it.
 fn load_pack(bytes: &[u8]) -> Result<HdPack, String> {
+    use u6_hdpack::PackError;
     if bytes.len() as u64 > MAX_PACK_FILE_BYTES {
         return Err(format!(
-            "HD pack refused (limit): the file is {} MiB, at most {} MiB",
-            bytes.len() >> 20,
+            "the file is over the {} MiB a pack can be.",
             MAX_PACK_FILE_BYTES >> 20
         ));
     }
-    let pack = u6_hdpack::read_pack(bytes).map_err(|e| e.to_string())?;
+    let pack = u6_hdpack::read_pack(bytes).map_err(|e| {
+        match e {
+            PackError::Zip(_) => "it does not read as a zip (an entry's size or CRC-32 is wrong).",
+            PackError::Entry(_) => "it holds a file an HD pack does not have, or one twice.",
+            PackError::Files(_) => "its files are not the ones its index names.",
+            PackError::Manifest(_) => "its manifest.json is not that of a u6-hdpack/1 pack.",
+            PackError::Index(_) => "its index.bin does not read.",
+            PackError::Limit(_) => "it is over the format's limits (4096 images, 150 MB decoded).",
+            PackError::Image(_) => {
+                "a picture is not a lossless WebP of the size its index gives it."
+            }
+        }
+        .to_string()
+    })?;
     Ok(HdPack {
         pack: Rc::new(u6_core::hd::HdPack::new(pack)),
     })
@@ -793,6 +807,13 @@ impl Game {
             (Some(pack), Some(engine)) => counts(pack.matches(engine)),
             _ => Vec::new(),
         }
+    }
+
+    /// The HD images this game's compositor made so far, by MMPX and from the pack, and the
+    /// bytes its cache holds now. For tests and diagnostics.
+    pub fn hd_cache_counts(&self) -> Vec<f64> {
+        let c = self.hd.compositor().cache();
+        vec![c.made() as f64, c.packed() as f64, c.bytes() as f64]
     }
 
     /// The source of pixel (x, y) of the shown frame (spec 07 HD0's plane): kind (0 classic, 1
@@ -2900,7 +2921,10 @@ mod tests {
             assert!(game.hd_frame_rgba() == with, "{s}x: set again");
             fresh.set_hd_pack(&pack);
             assert!(fresh.hd_frame_rgba() == with, "{s}x: a new game given it");
-            assert!(game.hd.compositor().cache().packed() >= 1);
+            let [_, packed, _] = game.hd_cache_counts()[..] else {
+                panic!("three counts")
+            };
+            assert!(packed >= 1.0, "{s}x: made from the pack");
         }
         // Record 1 rewritten in place and drawn at the last cell (3): its key moved, so the
         // pack's image (made from its earlier bytes) is not used; the cell shows MMPX of its
@@ -2960,12 +2984,16 @@ mod tests {
         bad[mid] ^= 1;
         let refused = load_pack(&bad).err().unwrap();
         assert!(
-            refused.starts_with("HD pack refused ("),
-            "the reader's reason"
+            refused.starts_with("it does not read as a zip"),
+            "{refused}"
         );
+        let mut files = u6_intake::zip::read_zip(&bytes, |_| true).unwrap();
+        files.push(("notes.txt".into(), b"x".to_vec()));
+        let extra = refused_by(&files);
+        assert!(extra.starts_with("it holds a file"), "{extra}");
         let huge = vec![0u8; MAX_PACK_FILE_BYTES as usize + 1];
         let over = load_pack(&huge).err().unwrap();
-        assert!(over.starts_with("HD pack refused (limit)"), "{over}");
+        assert!(over.starts_with("the file is over the 159 MiB"), "{over}");
         let tell = |file: &[u8]| {
             let mut p = PackProbe::new(file.len() as f64);
             while let [start, end] = p.need()[..] {
@@ -2981,6 +3009,15 @@ mod tests {
         let disks = zipscan::tests::zip(&[zipscan::tests::stored("Disk 1.adf", &[1; 64])]);
         assert!(!tell(&disks) && !tell(b"PP20") && !tell(&[]));
         assert!(!PackProbe::new(f64::NAN).is_pack() && PackProbe::new(-1.0).told());
+    }
+
+    /// Why the pack of `files` (stored in a zip as they are) is refused.
+    fn refused_by(files: &[(String, Vec<u8>)]) -> String {
+        let entries: Vec<zipscan::tests::Entry> = files
+            .iter()
+            .map(|(n, b)| zipscan::tests::stored(n, b))
+            .collect();
+        load_pack(&zipscan::tests::zip(&entries)).err().unwrap()
     }
 
     /// The plane and the keys the page's tests read: the source of a pixel drawn from a record,

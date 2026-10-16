@@ -43,12 +43,23 @@
 // canvas is the 320 × 200 frame as before. The pointer maps onto the game's 320 × 200 pixels
 // either way. The canvas is scaled into its box pixelated, or smoothly when the HD frame has
 // more device pixels than the box.
+//
+// An HD pack (spec 07 H2: a zip the owner's local tool made from the owner's own files): a
+// dropped `.zip` is first classified from its zip directory and its manifest.json alone (the
+// engine names the parts to read); a pack never starts or touches a game. It is read whole,
+// checked and decoded by the engine (refused whole, with nothing changed, when it does not
+// read), set on the game on screen and on every game started after, and kept in IndexedDB so
+// the next visit loads it before its first HD frame (storage that refuses it: the pack works
+// for this visit only). "Forget the HD pack" removes it from the page and the browser. Its
+// images go in front of MMPX for the images whose classic bytes they were made from. The page
+// never fetches a pack. A drop that holds a pack and other files is refused as a whole.
 import init, {
-  Game, budget_ms, input_too_large, max_input_bytes, max_save_bytes, max_save_file_bytes, step_ms,
-  zip_sliced,
+  Game, HdPack, PackProbe, budget_ms, input_too_large, max_input_bytes, max_pack_bytes,
+  max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
 } from './pkg/u6_web.js';
 import {
-  collect, forgetFiles, forgetSaves, loadFiles, loadSaves, saveFiles, storeSaves,
+  collect, forgetFiles, forgetPack, forgetSaves, loadFiles, loadPack, loadSaves, saveFiles,
+  storePack, storeSaves,
 } from './store.js';
 
 const canvas = document.getElementById('screen');
@@ -56,6 +67,7 @@ const drop = document.getElementById('drop');
 const picker = document.getElementById('picker');
 const forget = document.getElementById('forget');
 const forgetSave = document.getElementById('forget-save');
+const forgetHd = document.getElementById('forget-hd');
 const mute = document.getElementById('mute');
 const hdButton = document.getElementById('hd');
 const restart = document.getElementById('restart');
@@ -84,7 +96,10 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // data-prompt = 1 while the game waits for a command key, data-program = u / game / ended,
 // data-name = the party leader's name, data-keys = keys not yet taken by the game,
 // data-speed = the chosen speed (1, 1.5, .. 8, max), data-behind = 1 while steps are dropped;
-// on the body data-gain = the music's gain now (0 muted or above 4x, 1).
+// on the body data-gain = the music's gain now (0 muted or above 4x, 1), data-hd-pack = the
+// images of the HD pack loaded (tiles,portraits,panels) or none, data-hd-pack-bytes = the bytes
+// its pictures take decoded, data-hd-matched = those the game on screen matches (empty without
+// a game).
 function reflect(state) {
   if (state) document.body.dataset.state = state;
   const live = game && !crashed;
@@ -520,6 +535,107 @@ function applyHd() {
   fitRendering(game.hd_on());
 }
 
+// --- the HD pack -------------------------------------------------------------------------------
+
+let hdPack = null; // the HdPack loaded, set on every game put on screen; null without one
+
+// The pack's counts and the game's matches on the body (data-hd-pack, data-hd-matched).
+function reflectPack() {
+  document.body.dataset.hdPack = hdPack ? hdPack.counts().join(',') : 'none';
+  document.body.dataset.hdPackBytes = String(hdPack ? hdPack.decoded_bytes() : 0);
+  document.body.dataset.hdMatched = hdPack && game && !crashed ? game.hd_pack_matches().join(',') : '';
+}
+
+// Whether `file` is an HD pack: the engine names the parts to read (the end of the file, its zip
+// directory, its manifest.json) and tells from them.
+async function isPack(file) {
+  const probe = new PackProbe(file.size);
+  try {
+    for (let part = probe.need(); part.length > 0; part = probe.need()) {
+      probe.give(new Uint8Array(await file.slice(part[0], part[1]).arrayBuffer()));
+    }
+    return probe.is_pack();
+  } finally {
+    probe.free();
+  }
+}
+
+// The status line of a loaded pack: counts only.
+function packStatus() {
+  const [tiles, portraits, panels] = hdPack.counts();
+  if (!game || crashed) {
+    return `HD pack loaded: ${tiles} tiles, ${portraits} portraits and ${panels} panel pictures; ` +
+      'it is used once a game runs.';
+  }
+  const [t, p, b] = game.hd_pack_matches();
+  return `HD pack loaded: ${t} of its ${tiles} tiles, ${p} of its ${portraits} portraits and ` +
+    `${b} of its ${panels} panel pictures match the game on screen; everything else is drawn ` +
+    'by MMPX.';
+}
+
+// `next` (an HdPack) replaces the pack loaded, on the game on screen at once (drawn with no step).
+function attachPack(next) {
+  if (game && !crashed) {
+    if (next) game.set_hd_pack(next);
+    else game.forget_hd_pack();
+    draw();
+  }
+  hdPack?.free();
+  hdPack = next;
+  reflectPack();
+}
+
+// A dropped pack: read whole, checked and decoded by the engine, set on the game on screen,
+// kept in this browser. A pack that does not read is refused and nothing changes.
+async function loadPackFile(file) {
+  needEngine();
+  if (file.size > max_pack_bytes()) {
+    setStatus(`The HD pack was not loaded: the file is ${Math.ceil(file.size / 2 ** 20)} MiB; ` +
+      `this page reads at most ${max_pack_bytes() / 2 ** 20} MiB.`);
+    return;
+  }
+  setStatus('Reading the HD pack…');
+  let bytes = new Uint8Array(await file.arrayBuffer());
+  setStatus('Checking the HD pack…');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let next;
+  try {
+    next = HdPack.load(bytes);
+  } catch (err) {
+    setStatus(`The HD pack was not loaded: ${message(err)}`);
+    return;
+  }
+  attachPack(next);
+  const kept = await storePack(bytes);
+  bytes = null;
+  setStatus(`${packStatus()}${kept ? ' It is kept in this browser for the next visit.'
+    : ' (It could not be kept in this browser: it works until the page is left.)'}`);
+}
+
+// The pack kept from the last visit, loaded before the first game is put on screen (so its first
+// HD frame has it). One that no longer reads is left where it is and not used.
+async function restorePack() {
+  const bytes = await loadPack();
+  if (!bytes) return;
+  try {
+    attachPack(HdPack.load(bytes));
+  } catch (err) {
+    console.warn(`the kept HD pack is not used: ${message(err)}`);
+  }
+}
+
+// "Forget the HD pack": off the page at once (MMPX again), then out of the browser's storage.
+async function forgetHdPack() {
+  attachPack(null);
+  try {
+    await forgetPack();
+  } catch (err) {
+    setStatus(`The HD pack is off on this page, but this browser did not remove it: ${message(err)}`);
+    return;
+  }
+  setStatus('The HD pack was removed from this page and this browser; HD shows MMPX.');
+}
+
 function toggleHd() {
   hdOn = !hdOn;
   try {
@@ -636,7 +752,9 @@ async function boot(next, origin) {
     // No audio machine for this game (its MED tables fail the engine's checks): it runs silent.
     console.warn(`sound is off: ${message(err)}`);
   }
+  if (hdPack) next.set_hd_pack(hdPack);
   applyHd();
+  reflectPack();
   restart.hidden = true;
   reflect('running');
   startLoop();
@@ -865,9 +983,28 @@ async function pausingSaves(op) {
   }
 }
 
+// A drop: an HD pack alone is loaded as one; anything else is imported as game files. A drop
+// holding a pack and other files (or two packs) is refused as a whole, nothing read further.
+async function takeDrop(dropped) {
+  needEngine();
+  const packs = [];
+  for (const item of dropped) {
+    if (/\.zip$/i.test(item.path) && await isPack(item.file)) packs.push(item);
+  }
+  if (packs.length === 0) {
+    await importFiles(dropped);
+  } else if (dropped.length > 1) {
+    setStatus(packs.length > 1
+      ? 'The drop holds more than one HD pack: drop one at a time. Nothing was loaded.'
+      : 'The drop holds an HD pack and other files: drop the HD pack on its own. Nothing was loaded.');
+  } else {
+    await loadPackFile(packs[0].file);
+  }
+}
+
 function queueImport(gather) {
   if (queued > 0) setStatus('Waiting for the previous step to finish…');
-  enqueue('Loading the files', () => pausingSaves(async () => importFiles(await gather())));
+  enqueue('Loading the files', () => pausingSaves(async () => takeDrop(await gather())));
 }
 
 // --- wiring --------------------------------------------------------------------------------
@@ -976,6 +1113,10 @@ forgetSave.addEventListener('click', () => {
   if (queued > 0) setStatus('The saved game will be removed after the current step…');
   enqueue('Removing the saved game', forgetSaved);
 });
+forgetHd.addEventListener('click', () => {
+  if (queued > 0) setStatus('The HD pack will be removed after the current step…');
+  enqueue('Removing the HD pack', forgetHdPack);
+});
 restart.addEventListener('click', () => {
   try {
     sessionStorage.setItem(FOCUS_AFTER_RELOAD, '1');
@@ -1000,6 +1141,7 @@ function takeFocusFlag() {
 }
 
 reflect('loading');
+reflectPack();
 reflectAudio();
 showSpeed();
 showHd();
@@ -1014,12 +1156,14 @@ enqueue('Loading the engine', async () => {
   stepMs = step_ms();
   forget.disabled = false;
   forgetSave.disabled = false;
+  forgetHd.disabled = false;
   reflect('idle');
 });
 // The picker opens once the kept files are back, so a choice never races the restore (a drop
 // meanwhile is queued after it).
 enqueue('Starting the kept files', async () => {
   try {
+    if (wasm) await restorePack();
     if (wasm) await restoreKept(takeFocusFlag());
   } finally {
     if (wasm) picker.disabled = false;

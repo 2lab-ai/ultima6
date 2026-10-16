@@ -215,6 +215,17 @@ export async function forgetSaves() {
   log('saves:forget:start'); await window.__gate('saves-forget');
   await real.forgetSaves(); log('saves:forget:end');
 }
+export async function storePack(bytes) {
+  log('pack:store:start'); await window.__gate('pack-store');
+  const kept = await real.storePack(bytes); log('pack:store:end:' + kept); return kept;
+}
+export async function loadPack() {
+  const bytes = await real.loadPack(); log('pack:load:' + (bytes ? 1 : 0)); return bytes;
+}
+export async function forgetPack() {
+  log('pack:forget:start'); await window.__gate('pack-forget');
+  await real.forgetPack(); log('pack:forget:end');
+}
 `;
 
 // Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch, the
@@ -296,6 +307,125 @@ globalThis.__presentMs = 0;
 const GAME_FIRST = `
 Game.prototype.start = Game.prototype.start_game_first;
 `;
+
+// Page init script: `window.__packFiles(images)` and `window.__zipFiles(files)`, a synthetic HD
+// pack (spec 07 HD1, `u6-hdpack/1`) built in the page from images the test made, the way
+// u6-hdpack's writer lays it out: `images` are { kind: 1 tile | 2 portrait | 3 bitmap, id, letter
+// (portraits; else 0), hash (16 hex digits: the classic image's content key), width, height,
+// rgba: Uint8Array } (×4 sizes); `__packFiles` resolves to its files [name, bytes] in the
+// writer's order (manifest.json, index.bin, atlas-N.webp, portrait/L-N.webp, bitmap/ROLE.webp),
+// each picture lossless WebP from the browser's own encoder (quality 1: VP8L), so a test can
+// change one before `__zipFiles` stores them in a zip (each entry's CRC-32 its bytes' unless
+// `crcOf` names a file whose CRC-32 is taken from other bytes). No game data: the pictures are
+// the test's; the hashes are keys the page itself computed.
+export function packKit() {
+  const table = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc32 = (bytes) => {
+    let c = 0xffffffff;
+    for (let i = 0; i < bytes.length; i++) c = table[(c ^ bytes[i]) & 255] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const webp = async (w, h, rgba) => {
+    const canvas = new OffscreenCanvas(w, h);
+    const ctx = canvas.getContext('2d');
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+    const blob = await canvas.convertToBlob({ type: 'image/webp', quality: 1 });
+    return new Uint8Array(await blob.arrayBuffer());
+  };
+  const ROLES = ['paper', 'spellbook'];
+  window.__packFiles = async (images) => {
+    const key = (im) => [im.kind, im.kind === 2 ? im.letter : 0, im.id];
+    const sorted = [...images].sort((a, b) => {
+      const [x, y] = [key(a), key(b)];
+      return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+    });
+    const atlases = [];
+    let tiles = 0;
+    const entries = sorted.map((im) => {
+      let cell = [0xffff, 0, 0];
+      if (im.kind === 1) {
+        const [atlas, k] = [Math.floor(tiles / 1024), tiles % 1024];
+        tiles += 1;
+        cell = [atlas, k % 32, Math.floor(k / 32)];
+        if (atlases.length === atlas) atlases.push({ rows: 0, tiles: [] });
+        atlases[atlas].rows = Math.max(atlases[atlas].rows, cell[2] + 1);
+        atlases[atlas].tiles.push([im, cell]);
+      }
+      let alpha = false;
+      for (let i = 3; i < im.rgba.length; i += 4) if (im.rgba[i] !== 255) alpha = true;
+      return { im, cell, alpha };
+    });
+    const index = new Uint8Array(16 + 24 * entries.length);
+    const view = new DataView(index.buffer);
+    index.set(new TextEncoder().encode('U6HDIDX\0'), 0);
+    view.setUint32(8, 1, true);
+    view.setUint32(12, entries.length, true);
+    let base = 0xcbf29ce484222325n;
+    const fnv = (b) => {
+      base = ((base ^ BigInt(b)) * 0x100000001b3n) & 0xffffffffffffffffn;
+    };
+    entries.forEach(({ im, cell, alpha }, i) => {
+      const at = 16 + 24 * i;
+      const [kind, letter, id] = key(im);
+      view.setUint8(at, kind);
+      view.setUint8(at + 1, alpha ? 1 : 0);
+      view.setUint16(at + 2, id, true);
+      view.setUint8(at + 4, letter);
+      [cell[0], cell[1], cell[2], im.width, im.height].forEach((v, k) => view.setUint16(at + 6 + 2 * k, v, true));
+      view.setBigUint64(at + 16, BigInt(`0x${im.hash}`), true);
+      for (const b of [kind, letter, id & 255, id >> 8]) fnv(b);
+      for (let k = 0; k < 8; k++) fnv(index[at + 16 + k]);
+    });
+    const manifest = {
+      format: 'u6-hdpack/1', tile: 16, scale: 4, derived: true,
+      generator: { name: 'test', version: '0', engine: 'none', date: '2026-10-16' },
+      base: base.toString(16).padStart(16, '0'), images: entries.length,
+    };
+    const files = [['manifest.json', new TextEncoder().encode(JSON.stringify(manifest))], ['index.bin', index]];
+    for (const [n, a] of atlases.entries()) {
+      const rgba = new Uint8Array(2048 * a.rows * 64 * 4);
+      for (const [im, [, col, row]] of a.tiles) {
+        for (let y = 0; y < 64; y++) {
+          rgba.set(im.rgba.subarray(y * 256, y * 256 + 256), ((row * 64 + y) * 2048 + col * 64) * 4);
+        }
+      }
+      files.push([`atlas-${n}.webp`, await webp(2048, a.rows * 64, rgba)]);
+    }
+    for (const { im } of entries.filter((e) => e.im.kind !== 1)) {
+      const name = im.kind === 2 ? `portrait/${String.fromCharCode(im.letter)}-${im.id}.webp` : `bitmap/${ROLES[im.id]}.webp`;
+      files.push([name, await webp(im.width, im.height, im.rgba)]);
+    }
+    return files;
+  };
+  window.__zipFiles = (files, { crcOf } = {}) => {
+    const u16 = (v) => [v & 255, (v >>> 8) & 255];
+    const u32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+    const parts = [];
+    const dir = [];
+    let offset = 0;
+    for (const [name, bytes] of files) {
+      const n = new TextEncoder().encode(name);
+      const crc = crc32(crcOf && crcOf[0] === name ? crcOf[1] : bytes);
+      const common = [...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(33), ...u32(crc), ...u32(bytes.length), ...u32(bytes.length), ...u16(n.length), ...u16(0)];
+      const head = new Uint8Array([...u32(0x04034b50), ...common, ...n]);
+      parts.push(head, bytes);
+      dir.push(...u32(0x02014b50), ...u16(20), ...common, ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset), ...n);
+      offset += head.length + bytes.length;
+    }
+    const end = [...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length), ...u32(dir.length), ...u32(offset), ...u16(0)];
+    const out = new Uint8Array(offset + dir.length + end.length);
+    let at = 0;
+    for (const p of [...parts, new Uint8Array(dir), new Uint8Array(end)]) {
+      out.set(p, at);
+      at += p.length;
+    }
+    return out;
+  };
+}
 
 /// Starts the server and a headless Chromium; `close()` stops both.
 export async function setup(root = SITE) {
@@ -393,6 +523,21 @@ export function savedPaths(page) {
       const get = db.transaction('files').objectStore('files')
         .getAll(IDBKeyRange.bound('save:', 'save:\uffff'));
       get.onsuccess = () => { db.close(); done(get.result.map((f) => f.path).sort()); };
+      get.onerror = () => fail(get.error);
+    };
+  }));
+}
+
+/// The bytes of the HD pack kept in IndexedDB (`hd:pack`), as a byte count, or null when none.
+export function keptPackBytes(page) {
+  return page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const get = db.transaction('files').objectStore('files').get('hd:pack');
+      get.onsuccess = () => { db.close(); done(get.result ? get.result.length : null); };
       get.onerror = () => fail(get.error);
     };
   }));
