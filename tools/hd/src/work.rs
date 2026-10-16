@@ -209,8 +209,8 @@ pub fn append_durable(path: &Path, text: &str) -> Result<(), String> {
     if FAIL_DIR_SYNC
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .as_deref()
-        == Some(dir.as_path())
+        .as_ref()
+        .is_some_and(|(d, needle)| *d == dir && text.contains(needle.as_str()))
     {
         return Err(format!("{}: sync failed (injected)", dir.display()));
     }
@@ -219,9 +219,11 @@ pub fn append_durable(path: &Path, text: &str) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", dir.display()))
 }
 
-/// Tests only: the directory whose sync [`append_durable`] fails, after the line is written.
+/// Tests only: the directory whose sync [`append_durable`] fails, after a line holding the
+/// text given is written there.
 #[cfg(test)]
-pub(crate) static FAIL_DIR_SYNC: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+pub(crate) static FAIL_DIR_SYNC: std::sync::Mutex<Option<(PathBuf, String)>> =
+    std::sync::Mutex::new(None);
 
 /// Now, in ns since the epoch (the run ledger's `at`).
 pub fn now_ns() -> u128 {
@@ -237,8 +239,10 @@ pub(crate) fn test_note(what: &str) {
     let Some(p) = std::env::var_os("U6_HD_TEST_NOTES") else {
         return;
     };
+    // One write per line, so lines from threads at once do not interleave (O_APPEND).
+    let line = format!("{what} {}\n", now_ns());
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(p) {
-        let _ = writeln!(f, "{what} {}", now_ns());
+        let _ = f.write_all(line.as_bytes());
     }
 }
 

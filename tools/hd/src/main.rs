@@ -1,5 +1,6 @@
 //! `u6-hd`: the command line of the HD tool (see the library doc for the commands).
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -10,6 +11,24 @@ use u6_hdtool::group::{self, Class, Item};
 use u6_hdtool::run::{Codex, RunOptions};
 use u6_hdtool::work::{self, Work};
 use u6_hdtool::{img, ingest, pack, run};
+
+/// `println!`, `eprintln!` and `print!` that do not panic when the stream is gone (a hung-up
+/// terminal): the tool's output is best effort; how it ends is what counts.
+macro_rules! say {
+    ($($t:tt)*) => {{
+        let _ = writeln!(std::io::stdout(), $($t)*);
+    }};
+}
+macro_rules! say_err {
+    ($($t:tt)*) => {{
+        let _ = writeln!(std::io::stderr(), $($t)*);
+    }};
+}
+macro_rules! say_raw {
+    ($($t:tt)*) => {{
+        let _ = write!(std::io::stdout(), $($t)*);
+    }};
+}
 
 const USAGE: &str = "usage:
   u6-hd inventory (--game PATH | --synthetic) [--work DIR]
@@ -96,13 +115,13 @@ fn numbered(plan: &group::Plan) -> Vec<(u32, &Item)> {
 fn inventory(a: &Args) -> Result<(), String> {
     let g = game(a)?;
     let plan = group::plan(&g);
-    println!("inventory (counts only)");
-    println!("terrain records: {}", plan.count(Class::Terrain));
-    println!(
+    say!("inventory (counts only)");
+    say!("terrain records: {}", plan.count(Class::Terrain));
+    say!(
         "shore records (merged at run time; the scaler draws them): {}",
         plan.shore
     );
-    println!(
+    say!(
         "actor frame groups: {} ({} records)",
         plan.groups(Class::Actor),
         plan.count(Class::Actor)
@@ -114,20 +133,20 @@ fn inventory(a: &Args) -> Result<(), String> {
         .map(|i| i.images().count())
         .max()
         .unwrap_or(0);
-    println!(
+    say!(
         "largest actor frame group: {largest} records (a tile sheet holds {})",
         atlas::GRID.0 * atlas::GRID.1
     );
-    println!(
+    say!(
         "multi-record objects: {} ({} records)",
         plan.groups(Class::Multi),
         plan.count(Class::Multi)
     );
-    println!("object records: {}", plan.count(Class::Object));
-    println!("portraits: {}", plan.count(Class::Portrait));
-    println!("bitmaps: {}", plan.count(Class::Bitmap));
-    println!("empty records: {}", plan.empty);
-    println!(
+    say!("object records: {}", plan.count(Class::Object));
+    say!("portraits: {}", plan.count(Class::Portrait));
+    say!("bitmaps: {}", plan.count(Class::Bitmap));
+    say!("empty records: {}", plan.empty);
+    say!(
         "mosaics joined to another that shares a record: {}",
         plan.overlaps
     );
@@ -137,12 +156,12 @@ fn inventory(a: &Args) -> Result<(), String> {
         .filter_map(|i| i.layout)
         .filter(|l| l.per_facing.is_none())
         .count();
-    println!("actor frame groups of no known layout (to the next base tile): {unknown}");
-    println!(
+    say!("actor frame groups of no known layout (to the next base tile): {unknown}");
+    say!(
         "actor types whose frames overlap another's (joined to its item, paired in order): {}",
         plan.actor_overlaps
     );
-    println!("actor spans split over items: {}", plan.split_actors(&g));
+    say!("actor spans split over items: {}", plan.split_actors(&g));
     let counts = atlas::sheet_counts(&g, &numbered(&plan));
     let total: usize = counts.iter().map(|(_, n)| n).sum();
     let name = |k: SheetKind| match k {
@@ -155,7 +174,7 @@ fn inventory(a: &Args) -> Result<(), String> {
         .iter()
         .map(|(k, n)| format!("{} {n}", name(*k)))
         .collect();
-    println!("sheets: {} (total {total})", parts.join(", "));
+    say!("sheets: {} (total {total})", parts.join(", "));
     Ok(())
 }
 
@@ -188,7 +207,7 @@ fn atlas_cmd(a: &Args) -> Result<(), String> {
     work.write_jobs(&jobs)?;
     // What an earlier atlas accepted is not this one's.
     work.write("ingest.json", b"[]")?;
-    println!(
+    say!(
         "atlas: {} sheets, {} images, in {}",
         jobs.len(),
         jobs.iter().map(|j| j.places.len()).sum::<usize>(),
@@ -209,18 +228,27 @@ fn run_cmd(a: &Args) -> Result<(), String> {
     // Ctrl-C, a kill or a closed terminal: no new call, every running one killed and reaped,
     // then the lock let go and the tool ended by that signal.
     run::stop_calls_on_signals();
+    run::watch_the_stop();
     let mut out = std::io::stdout();
     let result = run::run(&work, &codex, &opts, &mut out);
     if let Some(sig) = run::stopped_by() {
         drop(lock);
-        eprintln!("u6-hd: stopped by signal {sig}; every call it started is ended");
+        // Not eprintln!: after a hang-up the terminal is gone, and a failed print must not end
+        // the tool any other way than by the signal.
+        let _ = writeln!(
+            std::io::stderr(),
+            "u6-hd: stopped by signal {sig}; every call it started is ended"
+        );
         run::reraise(sig);
     }
     let s = result?;
     if a.send {
-        println!(
+        say!(
             "run: {} calls, {} ok ({} not the sheet's size), {} failed",
-            s.calls, s.ok, s.other_size, s.failed
+            s.calls,
+            s.ok,
+            s.other_size,
+            s.failed
         );
     }
     if s.failed > 0 {
@@ -239,7 +267,7 @@ fn ingest_cmd(a: &Args) -> Result<(), String> {
     let work = Work::open(a.work.as_deref())?;
     let _lock = work.lock()?;
     let report = ingest::ingest(&g, &work, &a.gates)?;
-    print!("{}", report.text());
+    say_raw!("{}", report.text());
     Ok(())
 }
 
@@ -247,9 +275,12 @@ fn pack_cmd(a: &Args) -> Result<(), String> {
     let work = Work::open(a.work.as_deref())?;
     let _lock = work.lock()?;
     let s = pack::pack(&work, a.out.as_deref())?;
-    println!(
+    say!(
         "pack: {} tiles, {} portraits, {} bitmaps, {} bytes (derived: true; never shared)",
-        s.tiles, s.portraits, s.bitmaps, s.bytes
+        s.tiles,
+        s.portraits,
+        s.bitmaps,
+        s.bytes
     );
     Ok(())
 }
@@ -257,11 +288,11 @@ fn pack_cmd(a: &Args) -> Result<(), String> {
 fn main() -> ExitCode {
     let mut it = std::env::args().skip(1);
     let Some(cmd) = it.next() else {
-        eprintln!("{USAGE}");
+        say_err!("{USAGE}");
         return ExitCode::from(2);
     };
     if cmd == "export" {
-        eprintln!(
+        say_err!(
             "export refused: packs made from the game's art are derived (manifest derived: true) \
              and are never exported, hosted or shared (spec 07 Rights)"
         );
@@ -278,7 +309,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("u6-hd: {e}");
+            say_err!("u6-hd: {e}");
             ExitCode::FAILURE
         }
     }

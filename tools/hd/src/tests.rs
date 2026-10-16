@@ -2725,6 +2725,8 @@ fn every_reserved_call_counts_whatever_became_of_it() {
     let e = run::run(&w, &s, &opts, &mut Vec::new()).unwrap_err();
     std::fs::set_permissions(&w.root, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(e.contains(run::LEDGER_FAILED), "{e}");
+    // One line per failure.
+    assert!(e.lines().all(|l| l.starts_with(run::LEDGER_FAILED)), "{e}");
     assert!(s.calls.lock().unwrap().is_empty());
     assert!(!w.path("runs.jsonl").exists());
     let _ = std::fs::remove_dir_all(&w.root);
@@ -2732,7 +2734,8 @@ fn every_reserved_call_counts_whatever_became_of_it() {
     // durable), and counted all the same (conservative: it is in the file).
     let w = work("paid-dirsync");
     let jobs = atlas_into(&g, &w);
-    *crate::work::FAIL_DIR_SYNC.lock().unwrap() = Some(w.root.canonicalize().unwrap());
+    *crate::work::FAIL_DIR_SYNC.lock().unwrap() =
+        Some((w.root.canonicalize().unwrap(), "\"dispatched\"".into()));
     s.calls.lock().unwrap().clear();
     let e = run::run(&w, &s, &opts, &mut Vec::new()).unwrap_err();
     *crate::work::FAIL_DIR_SYNC.lock().unwrap() = None;
@@ -2748,6 +2751,36 @@ fn every_reserved_call_counts_whatever_became_of_it() {
     let r = run::run(&w, &s, &opts, &mut Vec::new()).unwrap();
     assert_eq!(r.given_up, 0);
     assert!(run::ledger(&w).unwrap().reserved[&id] >= 1);
+    let _ = std::fs::remove_dir_all(&w.root);
+    // A void written, then its directory's sync failing (a codex that cannot be started):
+    // this run counts the call as reserved (it could not be sure the void is durable), the
+    // ledger replays it as voided; either way nothing was sent.
+    let w = work("paid-void-sync");
+    let jobs = atlas_into(&g, &w);
+    *crate::work::FAIL_DIR_SYNC.lock().unwrap() =
+        Some((w.root.canonicalize().unwrap(), "\"voided\"".into()));
+    let missing = run::Codex {
+        bin: w.root.join("no-such-codex"),
+        home: w.root.join("home"),
+        timeout: std::time::Duration::from_secs(5),
+    };
+    let one = RunOptions {
+        send: true,
+        limit: Some(1),
+        parallel: 2,
+    };
+    let mut out = Vec::new();
+    let r = run::run(&w, &missing, &one, &mut out).unwrap();
+    *crate::work::FAIL_DIR_SYNC.lock().unwrap() = None;
+    assert_eq!(
+        (r.calls, r.failed),
+        (1, 1),
+        "{}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(String::from_utf8_lossy(&out).contains("sync failed"));
+    let id = run::identity(&w, &jobs[0]).unwrap();
+    assert_eq!(run::ledger(&w).unwrap().reserved.get(&id).copied(), Some(0));
     let _ = std::fs::remove_dir_all(&w.root);
     // Lines from before reservations existed count for no sheet, and the run says so.
     let w = work("paid-legacy");

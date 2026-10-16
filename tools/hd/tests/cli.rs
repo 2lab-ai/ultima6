@@ -327,33 +327,52 @@ fn wait_within(child: &mut std::process::Child, secs: u64, what: &str) -> std::p
     }
 }
 
-/// `cmd`'s output, its process in a group of its own, waited for at most `secs`.
+/// `cmd`'s output, its process in a group of its own: its exit and both pipes' ends within
+/// one deadline of `secs` (a descendant holding a pipe counts); past it, its group is killed
+/// and the test fails.
 fn output_within(cmd: &mut Command, secs: u64, what: &str) -> Output {
     use std::io::Read;
     use std::os::unix::process::CommandExt;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     let mut child = cmd
         .process_group(0)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let _guard = KillOnDrop(child.id().to_string());
-    let (mut o, mut e) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
-    let ro = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = o.read_to_end(&mut v);
-        v
-    });
-    let re = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = e.read_to_end(&mut v);
-        v
-    });
-    let status = wait_within(&mut child, secs, what);
+    let guard = KillOnDrop(child.id().to_string());
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (n, mut pipe) in [
+        (
+            0,
+            Box::new(child.stdout.take().unwrap()) as Box<dyn Read + Send>,
+        ),
+        (1, Box::new(child.stderr.take().unwrap())),
+    ] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            let _ = pipe.read_to_end(&mut v);
+            let _ = tx.send((n, v));
+        });
+    }
+    let left = || deadline.saturating_duration_since(std::time::Instant::now());
+    let status = wait_within(&mut child, left().as_secs().max(1), what);
+    let mut got = [Vec::new(), Vec::new()];
+    for _ in 0..2 {
+        match rx.recv_timeout(left()) {
+            Ok((n, v)) => got[n] = v,
+            Err(_) => {
+                drop(guard);
+                panic!("{what}: its output did not end in {secs} s");
+            }
+        }
+    }
+    let [stdout, stderr] = got;
     Output {
         status,
-        stdout: ro.join().unwrap(),
-        stderr: re.join().unwrap(),
+        stdout,
+        stderr,
     }
 }
 
@@ -600,6 +619,18 @@ fn a_stop_signal_at_any_point_ends_every_call_before_the_lock_goes() {
                 kept.len(),
                 "{what}: every admitted call ran"
             );
+            // The reaped pids are the stand-ins', each once.
+            let mut reaped_pids: Vec<String> = tool_notes
+                .iter()
+                .filter_map(|(w, _)| w.strip_prefix("reaped ").map(str::to_string))
+                .collect();
+            reaped_pids.sort();
+            let mut want_pids = leaders_now.clone();
+            want_pids.sort();
+            assert_eq!(
+                reaped_pids, want_pids,
+                "{what}: the reaped are not the stand-ins"
+            );
             let want = match at {
                 "before-spawn" => (2, 0),
                 "reserve" => (3, 1),
@@ -625,6 +656,173 @@ fn scopeguard_pids(file: &Path) -> impl Drop + use<> {
         }
     }
     G(file.to_path_buf())
+}
+
+/// Waits until `file` lists `n` pids (at most 30 s).
+fn wait_for_pids(file: &Path, n: usize, what: &str) {
+    let t = std::time::Instant::now();
+    while pids(file).len() < n {
+        assert!(
+            t.elapsed().as_secs() < 30,
+            "{what}: the calls never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Every pid recorded in `stub_pids` gone within 3 s (the stand-ins and their descendants).
+fn all_gone(stub_pids: &Path, what: &str) {
+    for p in pids(stub_pids) {
+        let t = std::time::Instant::now();
+        while !gone(&p) {
+            assert!(t.elapsed().as_secs() < 3, "{what}: {p} outlived the tool");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn two_stop_signals_in_a_row_are_one_stop() {
+    // Two of the same stop signal 1 ms apart (a closed terminal sends SIGHUP twice), four
+    // calls running: the second changes nothing; every call is reaped, then the tool ends by
+    // the signal.
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    for sig in [libc::SIGHUP, libc::SIGTERM, libc::SIGINT] {
+        let what = format!("signal {sig} twice");
+        let e = Env::new(&format!("twice-{sig}"));
+        let work = e.dir.join("work");
+        let w = work.to_str().unwrap();
+        let (stub_pids, leaders, notes_file) = (
+            e.dir.join("pids"),
+            e.dir.join("leaders"),
+            e.dir.join("notes"),
+        );
+        assert!(
+            e.run(&["atlas", "--synthetic", "--work", w])
+                .status
+                .success()
+        );
+        let bin = family_stub(&e.dir);
+        let mut tool = e
+            .cmd(&[
+                "run",
+                "--work",
+                w,
+                "--codex",
+                bin.to_str().unwrap(),
+                "--send",
+                "--parallel",
+                "4",
+            ])
+            .env("STUB_PIDS", &stub_pids)
+            .env("STUB_LEADERS", &leaders)
+            .env("U6_HD_TEST_NOTES", &notes_file)
+            .process_group(0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let _tool_guard = KillOnDrop(tool.id().to_string());
+        let _stub_guard = scopeguard_pids(&stub_pids);
+        wait_for_pids(&leaders, 4, &what);
+        for _ in 0..2 {
+            // SAFETY: kill(2) to the tool's process group.
+            assert_eq!(unsafe { libc::kill(-(tool.id() as i32), sig) }, 0);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let status = wait_within(&mut tool, 30, &what);
+        assert_eq!(status.signal(), Some(sig), "{what}: {status:?}");
+        let mut leaders_now = pids(&leaders);
+        for p in &leaders_now {
+            assert!(reaped(p), "{what}: stand-in {p} not reaped");
+        }
+        all_gone(&stub_pids, &what);
+        let mut reaped_pids: Vec<String> = notes(&notes_file)
+            .iter()
+            .filter_map(|(w, _)| w.strip_prefix("reaped ").map(str::to_string))
+            .collect();
+        reaped_pids.sort();
+        leaders_now.sort();
+        assert_eq!(reaped_pids, leaders_now, "{what}");
+        let _ = std::fs::remove_dir_all(&e.dir);
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_stop_that_stalls_yields_to_a_later_signal() {
+    // The stop's cleanup held 6 s (a reap that does not return, as a stalled write would):
+    // a second signal within the grace changes nothing; one after it (the stop pending 2 s)
+    // ends the tool at once, by that signal.
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let e = Env::new("stalled");
+    let work = e.dir.join("work");
+    let w = work.to_str().unwrap();
+    let (stub_pids, leaders, mark) = (
+        e.dir.join("pids"),
+        e.dir.join("leaders"),
+        e.dir.join("mark"),
+    );
+    assert!(
+        e.run(&["atlas", "--synthetic", "--work", w])
+            .status
+            .success()
+    );
+    let bin = family_stub(&e.dir);
+    let mut tool = e
+        .cmd(&[
+            "run",
+            "--work",
+            w,
+            "--codex",
+            bin.to_str().unwrap(),
+            "--send",
+            "--limit",
+            "1",
+        ])
+        .env("STUB_PIDS", &stub_pids)
+        .env("STUB_LEADERS", &leaders)
+        .env("U6_HD_TEST_SIGNAL_AT", "reap")
+        .env("U6_HD_TEST_MARK", &mark)
+        .env("U6_HD_TEST_DELAY_MS", "6000")
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _tool_guard = KillOnDrop(tool.id().to_string());
+    let _stub_guard = scopeguard_pids(&stub_pids);
+    let pgid = tool.id() as i32;
+    wait_for_pids(&leaders, 1, "stalled");
+    // SAFETY: kill(2) to the tool's process group.
+    assert_eq!(unsafe { libc::kill(-pgid, libc::SIGTERM) }, 0);
+    let t = std::time::Instant::now();
+    while !mark.exists() {
+        assert!(t.elapsed().as_secs() < 30, "the cleanup never started");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let stalled = std::time::Instant::now();
+    // Within the grace: absorbed.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    // SAFETY: kill(2) to the tool's process group.
+    assert_eq!(unsafe { libc::kill(-pgid, libc::SIGTERM) }, 0);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        tool.try_wait().unwrap().is_none(),
+        "a signal within the grace ended the tool"
+    );
+    // After it: the default action, at once.
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+    let sent = std::time::Instant::now();
+    // SAFETY: kill(2) to the tool's process group.
+    assert_eq!(unsafe { libc::kill(-pgid, libc::SIGTERM) }, 0);
+    let status = wait_within(&mut tool, 30, "stalled");
+    assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+    assert!(sent.elapsed().as_millis() < 1500, "{:?}", sent.elapsed());
+    assert!(stalled.elapsed().as_secs() < 5, "the stall was waited out");
+    all_gone(&stub_pids, "stalled");
+    let _ = std::fs::remove_dir_all(&e.dir);
 }
 
 #[cfg(debug_assertions)]

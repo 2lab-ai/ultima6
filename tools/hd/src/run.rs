@@ -45,8 +45,9 @@ pub trait Runner: Sync {
     /// the call is made, and the call is made only once it has; `book(Book::Void)` takes it
     /// back when the call is not started after all (nothing was sent). The admission point is
     /// the last look at the stop, after the reservation is durable and before the call: a
-    /// stop seen there voids the reservation ([`NOT_STARTED`]); a call past it is admitted
-    /// (and is stopped at its first turn if the stop comes later).
+    /// stop seen there voids the reservation ([`NOT_STARTED`]); a call past it is admitted, so
+    /// a signal that comes after it, even before the spawn itself, finds the call started and
+    /// stops it at its first turn.
     fn dispatch(
         &self,
         sheet: &Path,
@@ -72,7 +73,10 @@ pub trait Runner: Sync {
 }
 
 /// A call not started at its admission point: its reservation voided, [`NOT_STARTED`] (with
-/// the void's own failure, if it could not be written: the reservation then stands).
+/// the void's own failure, if writing it failed: the call then counts as reserved here, in
+/// this run's accounting, though a void line that was written before its directory sync
+/// failed is replayed from the ledger as voided; only a crash leaves that uncertain, and
+/// nothing is overspent either way, since the call never started).
 fn not_started(book: &mut dyn FnMut(Book) -> Result<(), String>) -> String {
     match book(Book::Void) {
         Ok(()) => NOT_STARTED.into(),
@@ -158,24 +162,41 @@ pub const NOT_STARTED: &str = "not started: the tool is stopping";
 /// A call stopped because the tool is stopping (its group killed and reaped).
 pub const STOPPED: &str = "stopped: the tool is stopping";
 
-/// A stop signal: notes it for the calls to see, and puts back the default action of each stop
-/// signal it was installed for, so a second one ends the tool at once. (Atomics and
-/// signal(2): async-signal-safe; everything else is done by the calls, in normal context.)
+/// How long a stop may be pending before the stop signals take their default action again
+/// ([`watch_the_stop`]): a later one then ends the tool at once.
+pub const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// A stop signal: notes it (the first one) for the calls to see, and nothing else, so more
+/// stop signals while the calls are being stopped (a closed terminal sends SIGHUP twice, a
+/// few ms apart) change nothing. (An atomic: async-signal-safe; the stopping is done by the
+/// calls, in normal context.)
 extern "C" fn on_signal(sig: libc::c_int) {
     let _ = SHUTDOWN.compare_exchange(0, sig, Ordering::SeqCst, Ordering::SeqCst);
-    let installed = INSTALLED.load(Ordering::SeqCst);
-    for s in STOP {
-        if installed & (1 << s) != 0 {
-            // SAFETY: signal(2) is async-signal-safe.
-            unsafe { libc::signal(s, libc::SIG_DFL) };
+}
+
+/// Starts the thread that, once a stop has been pending [`STOP_GRACE`], puts back the default
+/// action of each stop signal [`on_signal`] was installed for (from normal context), so a
+/// stop that stalls (a write that does not return) still yields to a later signal.
+pub fn watch_the_stop() {
+    std::thread::spawn(|| {
+        while stopped_by().is_none() {
+            std::thread::sleep(Duration::from_millis(50));
         }
-    }
+        std::thread::sleep(STOP_GRACE);
+        let installed = INSTALLED.load(Ordering::SeqCst);
+        for s in STOP {
+            if installed & (1 << s) != 0 {
+                // SAFETY: signal(2) on this process.
+                unsafe { libc::signal(s, libc::SIG_DFL) };
+            }
+        }
+    });
 }
 
 /// Installs [`on_signal`] for SIGINT, SIGTERM, SIGHUP and SIGQUIT (Ctrl-C, a `kill`, a closed
 /// terminal, `Ctrl-\`), each unless the tool was started with it ignored (`nohup`, a script's
 /// background job): then it stays ignored, and the calls (which inherit that) run on through
-/// it. The calls run in process groups of their own, which those signals do not reach:
+/// it. Pair with [`watch_the_stop`]. The calls run in process groups of their own, which those signals do not reach:
 /// stopped so, the tool starts no call, each running call kills and reaps its group at its
 /// next turn, and the command, its workers returned, lets go of its lock and ends by the
 /// signal ([`reraise`]).
@@ -207,10 +228,16 @@ pub fn stopped_by() -> Option<libc::c_int> {
     (s != 0).then_some(s)
 }
 
-/// Ends the tool by `sig` with its default action (the caller has let go of its lock).
+/// Ends the tool by `sig` with its default action (the caller has let go of its lock), with
+/// core dumps off first, so a SIGQUIT leaves no core holding the sheets' bytes.
 pub fn reraise(sig: libc::c_int) -> ! {
-    // SAFETY: signal(2) and raise(3) on this process.
+    // SAFETY: setrlimit(2), signal(2) and raise(3) on this process.
     unsafe {
+        let none = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        libc::setrlimit(libc::RLIMIT_CORE, &none);
         libc::signal(sig, libc::SIG_DFL);
         libc::raise(sig);
     }
@@ -1117,6 +1144,9 @@ pub fn run(
                             let _ = writeln!(out, "{}: not sent: {e}", job.sheet);
                             if e.starts_with(LEDGER_FAILED) {
                                 abort.store(true, Ordering::SeqCst);
+                                if !log.is_empty() {
+                                    log.push('\n');
+                                }
                                 log.push_str(e);
                             }
                         }
@@ -1158,6 +1188,9 @@ pub fn run(
                     let line = format!("{rec}\n");
                     let _books = books.lock().unwrap_or_else(|e| e.into_inner());
                     if let Err(e) = work::append_durable(&work.path("runs.jsonl"), &line) {
+                        if !log.is_empty() {
+                            log.push('\n');
+                        }
                         log.push_str(&e);
                     }
                 }
