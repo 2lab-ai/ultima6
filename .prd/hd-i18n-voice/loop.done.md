@@ -105,3 +105,15 @@ Append-only. Closed units, with their receipts.
   - **Deploys:** preview 9f7caf87, then production 3eba8ffb, both at 8d66e1b.
     - live-speed on production: Max 76.8×; 0 foreign requests, 0 errors.
     - The dispatcher read the menu, castle hall, walked-into-the-fight and after-reload frames on preview; they are unchanged.
+
+| H0b | 07 | plane hardening from the H0 reviews: a hard (release) check of one sync consumer per plane; a `clone_from` → sync test; the paired run also takes the source-only path; quake captures share equal sources | H0 |
+
+- **H0b** merged at 5d9c930 (branch 12604da … 575da1f, three rounds); spec 07 wording at 392d5b1.
+  - **One consumer per plane:** a plane has one sync consumer and a consumer one source. Every build checks the link before a sync copies anything, release builds included. The HD compositor reads the shown frame and never syncs from front or published.
+  - **Tests added:** `clone_from` with syncs around it; the paired engines take the source-only publish and compose the shown frame under a held pointer; the flight block's copy on write.
+  - **Combat captures share sources:** a recorded frame whose sources equal an earlier frame's shares them, looked up by a hash kept beside the sources and then compared by contents (the scan over recorded frames is still O(n), with cheap hash compares). A 3-pixel quake: 21 → 10 allocations, ~7.6 → ~4.0 MB. 128 recorded frames that differ only in their last pixel: 22 ms against 507 ms.
+  - **Gates on the merge** (358bcc9, same tree as 5d9c930): 944 passed, web 47/47 twice, oracles OK, port_map ok.
+  - **Reviews:** gpt-6-astra and opus each round; round 3 APPROVE from both.
+  - **Deploys:** preview 7a547e16, then production 2cc201d2, both at main 392d5b1.
+    - live-check2 on preview: 0 foreign requests, 0 errors. The dispatcher read the menu, castle hall, walked-into-the-fight and Journey Onward frames; they are unchanged.
+    - live-speed on production: 1×→4×→3×→4×→Max (76.3×)→1×; 1.5× kept across a reload; 0 foreign requests, 0 errors.

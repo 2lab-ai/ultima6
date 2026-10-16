@@ -17,10 +17,9 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 
 Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 5 (what H0 and H3 measured), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
-Shipped: 06's speed control is live in production (Cloudflare Pages 269ed8c1 at main 810df38). 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane) is in production (3eba8ffb at main 8d66e1b). In flight:
-- H3, the pack format and imagegen tool, in review round 3; it merges main and adopts H0's u6-core API before it merges;
-- H1, the compositor, starting from main 8d66e1b;
-- H0b, the plane hardening the H0 reviews left as non-blocking.
+Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane) and H0b (plane hardening) are in production (2cc201d2 at main 392d5b1). In flight:
+- H3, the pack format and imagegen tool, in review round 11 (test-only changes); it merges main before it merges;
+- H1, the compositor, approved in round 3; it merges main (H0b) and re-runs its gates before it merges.
 
 ## Order, and why it differs from the user's numbering
 
@@ -35,7 +34,6 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 
 | Unit | Spec | Scope | Needs |
 |---|---|---|---|
-| H0b | 07 | plane hardening from the H0 reviews: a hard (release) check of one sync consumer per plane; a `clone_from` → sync test; the paired run also takes the source-only path; quake captures share equal sources | H0 |
 | H1 | 07 | `u6-render` compositor + MMPX×S (cached by content hash) in wasm; `u6-web` HD exports; page S× canvas, HD toggle, logical pointer mapping | H0 |
 | H2 | 07 | the page loads a pack through `u6-hdpack` (from H3): drop classification before `importFiles`, IndexedDB/forget, limits | H1, H3 |
 | H3 | 07 | `crates/u6-hdpack` (the pack format: writer, strict reader, limits, content hash) + the `tools/hd` binary: inventory/atlas/run(`--send`)/ingest/pack with the gates; synthetic tests; gate tuning on synthetic sheets | — (in parallel with H0) |
