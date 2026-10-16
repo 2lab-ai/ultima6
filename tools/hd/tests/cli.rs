@@ -1243,13 +1243,17 @@ fn run_turns_core_dumps_off_before_anything() {
     // the soft limit (to min(1000, hard); not at all when hard is 0, as on a hardened runner),
     // run sets both limits to 0 first: a SIGQUIT at any time leaves no core holding the
     // sheets. Run as inherited (the run that fails if the tool stops zeroing them, wherever
-    // the hard limit is above 0), and with both limits lowered to 0 first (`ulimit -c 0`: no
-    // -H, which a soft limit above 0 would refuse), a compatibility check for hardened
-    // runners, where there is nothing left to zero.
+    // the hard limit is above 0), and with both limits lowered to 0 first (soft, then hard: a
+    // hard limit below the soft one is refused, and a bare `ulimit -c 0` sets only the soft
+    // one in zsh run as sh), a compatibility check for hardened runners, where there is
+    // nothing left to zero.
     if !cfg!(debug_assertions) {
         return;
     }
-    for (name, harden) in [("inherited", ""), ("hardened", "ulimit -c 0 || exit 98; ")] {
+    for (name, harden) in [
+        ("inherited", ""),
+        ("hardened", "ulimit -Sc 0 && ulimit -Hc 0 || exit 98; "),
+    ] {
         let e = Env::new(&format!("core-{name}"));
         let work = e.dir.join("work");
         let w = work.to_str().unwrap();
@@ -1287,7 +1291,10 @@ fn run_turns_core_dumps_off_before_anything() {
         } else if how.trim() == "hard 0" {
             // A runner whose hard core limit is 0 leaves nothing for the tool to zero: say so,
             // rather than pass as if the zeroing were checked.
-            eprintln!(
+            // Straight to stderr: libtest captures eprintln! of a passing test.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
                 "run_turns_core_dumps_off_before_anything: this runner's hard core limit is 0, \
                  so whether run zeroes the limits is not checked here"
             );

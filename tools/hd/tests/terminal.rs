@@ -188,7 +188,8 @@ fn closing_the_terminal_under_zsh_stops_every_call() {
         let mut env_p: Vec<*const libc::c_char> = env.iter().map(|a| a.as_ptr()).collect();
         env_p.push(std::ptr::null());
         let mut master: libc::c_int = -1;
-        // SAFETY: forkpty(3); the child only calls execve(2) with prepared arrays, and _exit.
+        // SAFETY: forkpty(3); the child only calls signal(2), execve(2) with prepared arrays,
+        // and _exit, all async-signal-safe.
         let zsh = unsafe {
             libc::forkpty(
                 &mut master,
