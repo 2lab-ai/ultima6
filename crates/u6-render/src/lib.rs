@@ -8,11 +8,16 @@
 //! every write does what it did without it, plus one check that the plane is absent. On, each
 //! write also marks the 16-pixel chunk it wrote, so that a buffer kept as a copy of another
 //! ([`Framebuffer::sync_from`], [`Framebuffer::sync_rect_from`]) copies only the chunks of the
-//! plane that may differ; the colours are copied as before.
+//! plane that may differ; the colours are copied as before. A sync takes the marks it reads, so
+//! the first sync between two planes links them, and a later sync of either with another plane
+//! panics, with or without debug assertions.
 //!
-//! [`hd`]: the HD compositor (spec 07 HD0), the frame at 2× or 4× from the source plane.
+//! [`hd`]: the HD compositor (spec 07 HD0), the frame at 2× or 4× from the source plane. It only
+//! reads a plane ([`Framebuffer::src`]), never syncs from one.
 
 pub mod hd;
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Screen width in pixels (Amiga low-res).
 pub const WIDTH: usize = 320;
@@ -131,6 +136,9 @@ const ALL: Marks = {
     m
 };
 
+/// The number of the next [`Plane`] made ([`Plane::id`]).
+static NEXT_PLANE: AtomicU64 = AtomicU64::new(1);
+
 /// The source plane with the marks of what changed in it, which let a sync copy only the
 /// chunks that may differ ([`Framebuffer::sync_from`]).
 struct Plane {
@@ -140,6 +148,14 @@ struct Plane {
     out: Marks,
     /// Chunks written here by anything but a sync into this buffer, since it last synced.
     own: Marks,
+    /// This plane's number, distinct for every plane made ([`NEXT_PLANE`]; a clone is a new one).
+    id: u64,
+    /// The [`Plane::id`] of the one plane synced from this one, 0 before its first sync: `out`
+    /// holds that plane's marks ([`Plane::link`]).
+    consumer: u64,
+    /// The [`Plane::id`] of the one plane this one syncs from, 0 before its first sync: `own`
+    /// holds the marks for that plane.
+    producer: u64,
 }
 
 impl Plane {
@@ -148,7 +164,34 @@ impl Plane {
             src: vec![Src::CLASSIC; WIDTH * HEIGHT],
             out: ALL,
             own: ALL,
+            id: NEXT_PLANE.fetch_add(1, Ordering::Relaxed),
+            consumer: 0,
+            producer: 0,
         }
+    }
+
+    /// Before a sync from this plane into `to`: links the two at their first sync, and checks the
+    /// link at every later one. A sync takes the marks of what changed in both planes since the
+    /// last one, so a second plane synced from this one, or `to` synced from a second plane,
+    /// would miss changes and keep sources the colours no longer have.
+    ///
+    /// Panics when either plane is already linked to another (a bug of the caller), with or
+    /// without debug assertions.
+    fn link(&mut self, to: &mut Plane) {
+        if self.consumer == 0 && to.producer == 0 {
+            self.consumer = to.id;
+            to.producer = self.id;
+        }
+        assert!(
+            self.consumer == to.id && to.producer == self.id,
+            "one sync consumer per plane: plane {} syncs into {}, plane {} from {}, not {} into {}",
+            self.id,
+            self.consumer,
+            to.id,
+            to.producer,
+            self.id,
+            to.id
+        );
     }
 
     /// Writes the source of pixel (x, y), at index `i`, and marks its chunk written.
@@ -162,12 +205,15 @@ impl Plane {
 }
 
 impl Clone for Plane {
-    /// The same sources, every chunk marked (the copy is a new buffer to whoever syncs).
+    /// The same sources, every chunk marked: the copy is a new plane, linked to none.
     fn clone(&self) -> Self {
         Plane {
             src: self.src.clone(),
             out: ALL,
             own: ALL,
+            id: NEXT_PLANE.fetch_add(1, Ordering::Relaxed),
+            consumer: 0,
+            producer: 0,
         }
     }
 }
@@ -196,7 +242,8 @@ impl Clone for Framebuffer {
     }
 
     /// Copies into the buffers already held (no allocation). The plane comes along, or goes when
-    /// `source` has none; every chunk of it counts as written.
+    /// `source` has none; every chunk of it counts as written. A plane held here keeps its sync
+    /// links ([`Framebuffer::sync_from`]); one made here is a new plane.
     fn clone_from(&mut self, source: &Self) {
         self.pixels.clone_from(&source.pixels);
         self.palette = source.palette;
@@ -298,16 +345,20 @@ impl Framebuffer {
     /// plane only the chunks that may differ: those written in `from` since this buffer last
     /// synced from it, and those written here since. For a buffer that is the one buffer synced
     /// from `from` (the engine's published frame from the screen, the shown frame from the
-    /// published one): another buffer syncing from `from` takes the marks this one needs. The
-    /// colours and the palette are copied whole, as by `clone_from`.
+    /// published one), and synced from no other: another buffer syncing from `from` would take
+    /// the marks this one needs. The first sync between two planes links them, and a sync of
+    /// either with another plane after that panics (with or without debug assertions; a plane
+    /// made here is a new one, and reads, clones and pixel copies of `from` are no syncs; a
+    /// refused sync changes neither buffer). The colours and the palette are copied whole, as by
+    /// `clone_from`.
     ///
     /// Returns the chunks of the plane it copied (all of them for a plane it had to create).
     pub fn sync_from(&mut self, from: &mut Framebuffer) -> usize {
-        self.pixels.clone_from(&from.pixels);
-        self.palette = from.palette;
         let mut copied = 0;
+        // The plane first: its link is checked before anything is copied.
         match (&mut self.src, &mut from.src) {
             (Some(to), Some(src)) => {
+                src.link(to);
                 for w in 0..MARK_WORDS {
                     let mut bits = src.out[w] | to.own[w];
                     to.out[w] |= bits;
@@ -323,6 +374,7 @@ impl Framebuffer {
             }
             (to @ None, Some(src)) => {
                 let mut plane = src.clone();
+                src.link(&mut plane);
                 plane.own = [0; MARK_WORDS];
                 *to = Some(plane);
                 src.out = [0; MARK_WORDS];
@@ -330,6 +382,8 @@ impl Framebuffer {
             }
             (to, None) => *to = None,
         }
+        self.pixels.clone_from(&from.pixels);
+        self.palette = from.palette;
         debug_assert!(self.src() == from.src(), "a sync leaves the planes equal");
         copied
     }
@@ -338,11 +392,12 @@ impl Framebuffer {
     /// the chunks that may differ, those whose colours here already equal `from`'s are copied
     /// (their sources are those of the pixels shown here); a chunk whose colours differ keeps its
     /// marks for the next `sync_from`, which copies it with its colours. For the same one buffer
-    /// synced from `from`. Returns the chunks it copied.
+    /// synced from `from`, and checked as `sync_from` checks it. Returns the chunks it copied.
     pub fn sync_src_from(&mut self, from: &mut Framebuffer) -> usize {
         let (Some(to), Some(src)) = (&mut self.src, &mut from.src) else {
             return 0;
         };
+        src.link(to);
         let mut copied = 0;
         for w in 0..MARK_WORDS {
             let mut bits = src.out[w] | to.own[w];
@@ -365,9 +420,10 @@ impl Framebuffer {
 
     /// The rect `xs` × `ys` of `from` copied here: each row of it whose colours differ is copied,
     /// and of the source plane the chunks of the rect that may differ (as [`Framebuffer::sync_from`]
-    /// marks them, for the one buffer synced from `from`, always over the same rect). With no plane
-    /// in `from` the rect's sources become classic. A rect reaching past the screen copies nothing.
-    /// Returns the chunks of the plane it copied.
+    /// marks them, for the one buffer synced from `from`, always over the same rect, and checked as
+    /// `sync_from` checks it, before anything is copied). With no plane in `from` the rect's
+    /// sources become classic. A rect reaching past the screen copies nothing, and so does an
+    /// empty one. Returns the chunks of the plane it copied.
     pub fn sync_rect_from(
         &mut self,
         from: &mut Framebuffer,
@@ -376,12 +432,6 @@ impl Framebuffer {
     ) -> usize {
         if xs.start > xs.end || ys.start > ys.end || xs.end > WIDTH || ys.end > HEIGHT {
             return 0;
-        }
-        for y in ys.clone() {
-            let row = y * WIDTH + xs.start..y * WIDTH + xs.end;
-            if self.pixels[row.clone()] != from.pixels[row.clone()] {
-                self.pixels[row.clone()].copy_from_slice(&from.pixels[row]);
-            }
         }
         if xs.is_empty() || ys.is_empty() {
             return 0;
@@ -395,6 +445,7 @@ impl Framebuffer {
         };
         match (&mut self.src, &mut from.src) {
             (Some(to), Some(src)) => {
+                src.link(to);
                 let words = ys.start * ROW_CHUNKS / 64..(ys.end * ROW_CHUNKS).div_ceil(64);
                 for w in words {
                     let mut bits = src.out[w] | to.own[w];
@@ -425,6 +476,12 @@ impl Framebuffer {
                 }
             }
             (None, _) => {}
+        }
+        for y in ys.clone() {
+            let row = y * WIDTH + xs.start..y * WIDTH + xs.end;
+            if self.pixels[row.clone()] != from.pixels[row.clone()] {
+                self.pixels[row.clone()].copy_from_slice(&from.pixels[row]);
+            }
         }
         #[cfg(debug_assertions)]
         if let Some(to) = &self.src {
@@ -767,6 +824,135 @@ mod tests {
         );
     }
 
+    /// A buffer with the plane.
+    fn planed() -> Framebuffer {
+        let mut fb = Framebuffer::new();
+        fb.enable_src();
+        fb
+    }
+
+    /// Whether `f` panics on a sync link ([`Plane::link`]).
+    fn refused(f: impl FnOnce()) -> bool {
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        caught.is_err_and(|e| {
+            e.downcast_ref::<String>()
+                .is_some_and(|m| m.starts_with("one sync consumer per plane"))
+        })
+    }
+
+    /// The first sync from a plane links the two. A second buffer synced from it (by any of the
+    /// three syncs, or by the sync that makes its plane) and the linked buffer synced from a
+    /// second plane panic at that sync: their first, whose full copy (a new plane has every chunk
+    /// marked) leaves nothing for the equality check to see, and without debug assertions. A
+    /// clone is a new plane. Reads, clones, pixel copies, a reset, a clear and a clone_from are
+    /// no syncs, and the linked pair goes on as before, each in its own link the other way.
+    #[test]
+    fn a_plane_has_one_sync_consumer_and_a_consumer_one_source() {
+        let (mut from, mut to) = (planed(), planed());
+        to.sync_from(&mut from);
+        assert!(from.src().is_some() && from.src_at(3, 3).is_some());
+        let mut copy = from.clone();
+        copy.copy_px(&from, 0, 0);
+        to.copy_px(&from, 0, 1);
+        from.reset_src();
+        to.clear(2);
+        to.clone_from(&copy);
+        from.set_src(40, 9, 6, tile(9, 1, 2));
+        assert!(!refused(|| {
+            to.sync_from(&mut from);
+            to.sync_src_from(&mut from);
+            to.sync_rect_from(&mut from, 8..168, 8..168);
+        }));
+        assert!(to.src() == from.src(), "the pair goes on");
+        let mut next = planed();
+        next.sync_from(&mut to);
+        assert!(
+            next.src() == to.src(),
+            "a consumer also feeds one of its own"
+        );
+        let second = [
+            refused(|| _ = planed().sync_from(&mut from)),
+            refused(|| _ = Framebuffer::new().sync_from(&mut from)),
+            refused(|| _ = planed().sync_src_from(&mut from)),
+            refused(|| _ = planed().sync_rect_from(&mut from, 8..168, 8..168)),
+            refused(|| _ = to.clone().sync_from(&mut from)),
+            refused(|| _ = to.sync_from(&mut planed())),
+            refused(|| _ = to.sync_src_from(&mut planed())),
+            refused(|| _ = to.sync_rect_from(&mut planed(), 8..168, 8..168)),
+        ];
+        assert_eq!(second, [true; 8], "a second consumer, then a second source");
+        // The plane a first sync makes is linked too; a buffer without a plane takes no marks.
+        let (mut made, mut plain) = (Framebuffer::new(), Framebuffer::new());
+        made.sync_from(&mut copy);
+        assert!(refused(|| _ = planed().sync_from(&mut copy)));
+        assert_eq!(made.sync_from(&mut copy), 0);
+        assert!(!refused(|| {
+            planed().sync_rect_from(&mut plain, 8..168, 8..168);
+            Framebuffer::new().sync_from(&mut plain);
+        }));
+        from.set_src(41, 9, 7, tile(9, 2, 2));
+        to.sync_from(&mut from);
+        assert!(to.src() == from.src() && to.pixels == from.pixels);
+    }
+
+    /// Everything a buffer holds: its colours, its palette, and its sources, marks and links.
+    type Whole = (
+        Vec<u8>,
+        Vec<Rgb>,
+        Option<(Vec<Src>, Marks, Marks, [u64; 3])>,
+    );
+
+    fn whole(fb: &Framebuffer) -> Whole {
+        let plane = fb.src.as_ref().map(|p| {
+            let links = [p.id, p.consumer, p.producer];
+            (p.src.clone(), p.out, p.own, links)
+        });
+        (fb.pixels.clone(), fb.palette.to_vec(), plane)
+    }
+
+    /// A refused sync changes neither buffer: by each of the three syncs, a second consumer (and
+    /// for the full sync one without a plane, which it would make) and a second source leave the
+    /// colours, the palette, the sources, the marks and the links of both as they were. The
+    /// linked pair then goes on with the marks it left.
+    #[test]
+    fn a_refused_sync_changes_neither_buffer() {
+        let (mut from, mut to, mut other) = (planed(), planed(), planed());
+        to.sync_from(&mut from);
+        from.set_src(40, 9, 6, tile(9, 1, 2));
+        from.palette[6] = Rgb::new(9, 9, 9);
+        other.set_src(41, 9, 7, tile(8, 1, 2));
+        other.palette[7] = Rgb::new(7, 7, 7);
+        let mut second = planed();
+        second.set_src(12, 12, 5, tile(7, 0, 0));
+        let mut bare = Framebuffer::new();
+        bare.set(12, 12, 2);
+        type Sync = fn(&mut Framebuffer, &mut Framebuffer);
+        let syncs: [(&str, Sync); 3] = [
+            ("sync_from", |a, b| _ = a.sync_from(b)),
+            ("sync_src_from", |a, b| _ = a.sync_src_from(b)),
+            ("sync_rect_from", |a, b| {
+                _ = a.sync_rect_from(b, 8..168, 8..168)
+            }),
+        ];
+        for (name, sync) in syncs {
+            let check = |what: &str, dst: &mut Framebuffer, src: &mut Framebuffer| {
+                let before = (whole(dst), whole(src));
+                assert!(refused(|| sync(dst, src)), "{name}: {what} is refused");
+                assert!(
+                    (whole(dst), whole(src)) == before,
+                    "{name}: {what} changes nothing"
+                );
+            };
+            check("a second consumer", &mut second, &mut from);
+            check("a second source", &mut to, &mut other);
+            if name == "sync_from" {
+                check("a second consumer without a plane", &mut bare, &mut from);
+            }
+        }
+        assert_eq!(to.sync_from(&mut from), 1, "the chunk written since");
+        assert!(to.src() == from.src() && to.pixels == from.pixels && to.palette == from.palette);
+    }
+
     /// The plane alone: the chunks whose colours are already the source's are copied and their
     /// marks taken; a chunk whose colours differ keeps them, and the next full sync copies it.
     #[test]
@@ -851,6 +1037,8 @@ mod tests {
         );
     }
 
+    /// A clone_from brings the plane or takes it away; over a plane already there it marks every
+    /// chunk, for the buffer synced from this one and for this one's next sync.
     #[test]
     fn clone_from_carries_the_plane_and_its_absence() {
         let mut on = Framebuffer::new();
@@ -864,9 +1052,27 @@ mod tests {
             (dst.get(1, 1), dst.palette[4]),
             (Some(4), Rgb::new(1, 2, 3))
         );
+        // Some to some between syncs: `dst` synced from `feed` and into `copy`, then made `on`
+        // again. Every chunk counts as written, so the next syncs copy it all, both ways.
+        let (mut feed, mut copy) = (planed(), planed());
+        feed.set_src(7, 7, 2, tile(8, 1, 1));
+        dst.sync_from(&mut feed);
+        copy.sync_from(&mut dst);
         on.set_src(2, 1, 6, tile(4, 0, 0));
         dst.clone_from(&on);
         assert_eq!(dst.src_at(2, 1), Some(tile(4, 0, 0)), "some to some");
+        copy.sync_from(&mut dst);
+        assert!(
+            copy.src() == dst.src() && dst.src() == on.src(),
+            "the buffer synced from it copies the clone"
+        );
+        dst.sync_from(&mut feed);
+        assert!(
+            dst.src() == feed.src(),
+            "and it copies again the buffer it syncs from"
+        );
+        copy.sync_from(&mut dst);
+        assert!(copy.src() == feed.src());
         dst.clone_from(&Framebuffer::new());
         assert!(
             dst.src().is_none() && dst.get(1, 1) == Some(0),

@@ -180,7 +180,9 @@ pub struct Effect {
 }
 
 /// Records the screen rectangle (x0, y0)..=(x1, y1) as it is now (after a present), shown after
-/// `cost` ms.
+/// `cost` ms. Sources equal to those of a frame recorded before it and not played yet (the shakes
+/// of a quake that land on an offset an earlier one did, a window recorded again unchanged) share
+/// that frame's allocation, the newest such frame's ([`Sources::shared`]).
 pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize, cost: u16) {
     if x1 < x0 || y1 < y0 {
         return;
@@ -188,6 +190,8 @@ pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize,
     let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
     let shot = with_current_io(|io| io.draw(|fb| rect_of(fb, (x0, y0), (w, h))));
     if let Some((pixels, src)) = shot {
+        let earlier = s.combat.effects.iter().rev().map(|e| &e.src);
+        let src = src.hashed().shared(earlier);
         let mark = s.main.pending_print.len();
         s.combat.effects.push(Effect {
             x: x0,
@@ -416,7 +420,7 @@ fn rect_of(
         at.map(|(x, y)| fb.src_at(x, y).unwrap_or_default())
             .collect()
     });
-    (pixels, Sources(src))
+    (pixels, Sources::new(src))
 }
 
 /// The map window's pixels (with its border), row-major, with their sources ([`rect_of`]).
