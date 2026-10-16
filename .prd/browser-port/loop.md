@@ -46,7 +46,6 @@ re-verified: G1 · gargoyles stand in the throne room in the M2 production frame
 
 | Unit | Branch | Scope | State |
 |---|---|---|---|
-| chooser-flake | `fix/chooser-flake` | `tools/web` `keyboard only` timed out at `test-web.mjs:359` (`page.waitForEvent('filechooser')` after Space on the picker) in 1 of 3 full runs at load 114–131 on 2026-10-16. It passed 4 of 4 alone at load 157–251. Find why the chooser event is late or missed under load (focus? the default 30 s timeout? the event registered after the press?) and make the test wait for the right signal, without only raising timeouts | open |
 | wake-in-fight | `fix/wake-in-fight` | After the hero dies in the opening fight, combat breaks off and the party wakes on the start cell between the same gargoyles, which kill him again. In the port, 0x1095bc (`resurrect_party`, `crates/u6-core/src/map/travel.rs:469-470`) breaks off combat and teleports the party to (0x133, 0x160, 0), the start cell. The gargoyles in assault (worktype 8) stay beside that cell, and the members, out of combat, no longer strike back. Found by web-flake: seen headless on seeds 1161, 2957, 5113, 6074 and 7608, and in the browser. Check against the original (oracle) whether the original does the same, and fix the port if it differs | open, to dispatch |
 
 Open items carried from WU-P7b (assign in M2-int):
