@@ -46,6 +46,8 @@ pub trait Runner: Sync {
 pub const MODEL: &str = "gpt-6-astra";
 /// Most bytes of codex events kept per call (the rest are read and dropped).
 pub const EVENTS_MAX: u64 = 4 << 20;
+/// Most bytes of codex's stderr kept per call (the rest are read and dropped).
+pub const STDERR_MAX: u64 = 1 << 20;
 
 /// `codex exec` with the built-in image tool.
 pub struct Codex {
@@ -234,19 +236,87 @@ fn nonblocking(fd: i32) -> Result<(), String> {
 const TURN_BYTES: usize = 64 << 10;
 const TURN_CALLS: usize = 8;
 
-/// The call's two pipes, driven from the calling thread: the prompt written to its input and
-/// its events read, as each is ready. Closing a pipe is dropping it here.
-struct Pipes<'a, W: Write> {
+/// The call's three pipes, driven from the calling thread: the prompt written to its input,
+/// its events and its stderr read (each to its file, under its cap), as each is ready.
+/// Closing a pipe is dropping it here.
+struct Pipes<'a, W: Write, E: Write> {
     stdin: Option<std::process::ChildStdin>,
     stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
     prompt: &'a [u8],
     written: usize,
     /// The prompt's write failed: the call's input was closed before it took it all.
     refused: Option<std::io::Error>,
     lines: EventLines<W>,
+    errs: Capped<E>,
 }
 
-impl<W: Write> Pipes<'_, W> {
+/// A file that keeps the first `max` bytes written to it and drops the rest, and the first
+/// error writing them.
+struct Capped<E: Write> {
+    out: E,
+    kept: u64,
+    max: u64,
+    error: Option<std::io::Error>,
+}
+
+impl<E: Write> Capped<E> {
+    fn put(&mut self, bytes: &[u8]) {
+        let room = self.max.saturating_sub(self.kept) as usize;
+        let take = &bytes[..bytes.len().min(room)];
+        if self.error.is_some() || take.is_empty() {
+            return;
+        }
+        match self.out.write_all(take) {
+            Ok(()) => self.kept += take.len() as u64,
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Flushed: the first error writing or flushing.
+    fn finish(mut self) -> Option<std::io::Error> {
+        if self.error.is_none()
+            && let Err(e) = self.out.flush()
+        {
+            self.error = Some(e);
+        }
+        self.error
+    }
+}
+
+/// Reads what `pipe` has, at most a turn's worth ([`TURN_BYTES`], [`TURN_CALLS`]) and nothing
+/// once `until` has passed, handing each chunk to `sink`; closes it at its end.
+fn drain<R: Read>(pipe: &mut Option<R>, until: Instant, mut sink: impl FnMut(&[u8])) {
+    let Some(p) = pipe.as_mut() else { return };
+    let mut chunk = [0u8; 8192];
+    let (mut moved, mut end) = (0, false);
+    for _ in 0..TURN_CALLS {
+        if moved >= TURN_BYTES || Instant::now() >= until {
+            break;
+        }
+        match p.read(&mut chunk) {
+            Ok(0) => {
+                end = true;
+                break;
+            }
+            Ok(n) => {
+                moved += n;
+                sink(&chunk[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => {
+                end = true;
+                break;
+            }
+        }
+    }
+    if end {
+        *pipe = None;
+    }
+}
+
+impl<W: Write, E: Write> Pipes<'_, W, E> {
     /// One turn: waits until either pipe is ready or `until` passes, then writes and reads what
     /// it can, at most [`TURN_BYTES`] and [`TURN_CALLS`] each way, starting no read or write
     /// once `until` has passed, so the caller's checks (the call's exit, the deadline, the
@@ -267,9 +337,15 @@ impl<W: Write> Pipes<'_, W> {
                 revents: 0,
             });
         }
-        if let Some(o) = &self.stdout {
+        for fd in [
+            self.stdout.as_ref().map(|o| o.as_raw_fd()),
+            self.stderr.as_ref().map(|e| e.as_raw_fd()),
+        ]
+        .into_iter()
+        .flatten()
+        {
             fds.push(libc::pollfd {
-                fd: o.as_raw_fd(),
+                fd,
                 events: libc::POLLIN,
                 revents: 0,
             });
@@ -315,32 +391,13 @@ impl<W: Write> Pipes<'_, W> {
                 }
             }
         }
-        if let Some(o) = &mut self.stdout
-            && ready(o.as_raw_fd())
-        {
-            let mut chunk = [0u8; 8192];
-            let mut moved = 0;
-            for _ in 0..TURN_CALLS {
-                if moved >= TURN_BYTES || Instant::now() >= until {
-                    break;
-                }
-                match o.read(&mut chunk) {
-                    Ok(0) => {
-                        self.stdout = None;
-                        break;
-                    }
-                    Ok(n) => {
-                        moved += n;
-                        self.lines.feed(&chunk[..n]);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(_) => {
-                        self.stdout = None;
-                        break;
-                    }
-                }
-            }
+        if self.stdout.as_ref().is_some_and(|o| ready(o.as_raw_fd())) {
+            let lines = &mut self.lines;
+            drain(&mut self.stdout, until, |b| lines.feed(b));
+        }
+        if self.stderr.as_ref().is_some_and(|e| ready(e.as_raw_fd())) {
+            let errs = &mut self.errs;
+            drain(&mut self.stderr, until, |b| errs.put(b));
         }
     }
 }
@@ -398,7 +455,8 @@ impl Runner for Codex {
         use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
         let deadline = Instant::now() + self.timeout;
-        let (stderr, stderr_tmp, stderr_path) = work::create_temp(&dir.join("stderr.txt"), 0o644)?;
+        let (stderr_file, stderr_tmp, stderr_path) =
+            work::create_temp(&dir.join("stderr.txt"), 0o644)?;
         let (events, events_tmp, events_path) =
             work::create_temp(&dir.join("events.jsonl"), 0o644)?;
         let child = Command::new(&self.bin)
@@ -416,25 +474,37 @@ impl Runner for Codex {
             .arg("-")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(stderr)
+            .stderr(Stdio::piped())
             .process_group(0)
             .spawn()
             .map_err(|e| format!("{}: {e}", self.bin.display()))?;
         let mut group = Group { child };
-        let (Some(stdout), Some(stdin)) = (group.child.stdout.take(), group.child.stdin.take())
-        else {
+        let (Some(stdout), Some(stdin), Some(stderr)) = (
+            group.child.stdout.take(),
+            group.child.stdin.take(),
+            group.child.stderr.take(),
+        ) else {
             return Err("no pipes to the call".into());
         };
         nonblocking(stdin.as_raw_fd())?;
         nonblocking(stdout.as_raw_fd())?;
+        nonblocking(stderr.as_raw_fd())?;
         let mut pipes = Pipes {
             stdin: Some(stdin),
             stdout: Some(stdout),
+            stderr: Some(stderr),
             prompt: prompt.as_bytes(),
             written: 0,
             refused: None,
             // Buffered: a stream of short lines is not a write per line.
             lines: EventLines::new(std::io::BufWriter::new(events)),
+            // Read like the events, so a call that writes its stderr without end fills no disk.
+            errs: Capped {
+                out: std::io::BufWriter::new(stderr_file),
+                kept: 0,
+                max: STDERR_MAX,
+                error: None,
+            },
         };
         if pipes.prompt.is_empty() {
             pipes.stdin = None;
@@ -466,11 +536,14 @@ impl Runner for Codex {
         // Our ends of both pipes close here, whoever holds the others.
         drop(pipes.stdin.take());
         drop(pipes.stdout.take());
+        drop(pipes.stderr.take());
         let stream = pipes.lines.finish();
+        let errs = pipes.errs.finish();
         // Both files are put in place whatever happened; the first failure of either is kept.
         let mut saved = stream
             .error
-            .map(|e| format!("the call's events were not saved: {e}"));
+            .map(|e| format!("the call's events were not saved: {e}"))
+            .or(errs.map(|e| format!("the call's stderr was not saved: {e}")));
         for (tmp, path) in [(&stderr_tmp, &stderr_path), (&events_tmp, &events_path)] {
             if let Err(e) = work::commit(tmp, path) {
                 saved.get_or_insert(format!("the call's output was not saved: {e}"));

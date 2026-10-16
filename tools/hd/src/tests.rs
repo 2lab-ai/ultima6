@@ -2533,3 +2533,35 @@ fn a_capped_read_reads_no_more_than_its_cap() {
     writer.join().unwrap();
     let _ = std::fs::remove_dir_all(&t);
 }
+
+#[test]
+fn a_call_s_stderr_is_kept_to_its_cap() {
+    use std::time::{Duration, Instant};
+    let t = temp("stderr-cap");
+    let dir = crate::work::ensure_dir(&t.join("dir")).unwrap();
+    std::fs::write(t.join("sheet.png"), b"x").unwrap();
+    // 64 MiB to stderr as fast as it goes, then the thread event and a clean exit.
+    let loud = review_stub(
+        &t,
+        "loud.sh",
+        "cat > /dev/null\nhead -c 67108864 /dev/zero >&2\n\
+         echo '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}'",
+    );
+    let c = run::Codex {
+        bin: loud,
+        home: t.join("home"),
+        timeout: Duration::from_secs(30),
+    };
+    let start = Instant::now();
+    let e = c
+        .generate(&t.join("sheet.png"), "PROMPT", &dir)
+        .unwrap_err();
+    let took = start.elapsed();
+    // It ran to its end (its thread id read after all of it), and no image: the usual error.
+    assert_eq!(e, "no image generated");
+    assert!(took < Duration::from_secs(20), "{took:?}");
+    let kept = std::fs::metadata(dir.join("stderr.txt")).unwrap().len();
+    println!("64 MiB of stderr in {took:?}: {kept} bytes kept");
+    assert_eq!(kept, run::STDERR_MAX);
+    let _ = std::fs::remove_dir_all(&t);
+}
