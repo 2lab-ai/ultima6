@@ -1193,37 +1193,55 @@ fn a_codex_that_cannot_be_started_spends_nothing() {
 
 #[test]
 fn run_turns_core_dumps_off_before_anything() {
-    // Started with core dumps allowed (as a shell can), run sets both limits to 0 first: a
-    // SIGQUIT at any time leaves no core holding the sheets.
+    // Started with core dumps allowed as far as the inherited hard limit lets a shell raise
+    // them (to min(1000, hard); not at all when hard is 0, as on a hardened runner), run sets
+    // both limits to 0 first: a SIGQUIT at any time leaves no core holding the sheets. Run as
+    // inherited, and with the hard limit lowered to 0 first (the hardened case, here).
     if !cfg!(debug_assertions) {
         return;
     }
-    let e = Env::new("core");
-    let work = e.dir.join("work");
-    let w = work.to_str().unwrap();
-    assert!(
-        e.run(&["atlas", "--synthetic", "--work", w])
-            .status
-            .success()
-    );
-    let notes_file = e.dir.join("notes");
-    let line = format!(
-        "ulimit -c 1000 && [ \"$(ulimit -c)\" = 1000 ] && exec \"{BIN}\" run --work \"{w}\""
-    );
-    let mut sh = Command::new("/bin/sh");
-    sh.args(["-c", &line])
-        .env("HOME", &e.home)
-        .env("CODEX_HOME", e.home.join(".codex"))
-        .env("U6_HD_TEST_NOTES", &notes_file);
-    let o = output_within(&mut sh, 30, "core");
-    assert!(o.status.success(), "{}", text(&o));
-    let limits: Vec<String> = notes(&notes_file)
-        .into_iter()
-        .filter(|(w, _)| w.starts_with("core-limit"))
-        .map(|(w, _)| w)
-        .collect();
-    assert_eq!(limits, ["core-limit 0 0"]);
-    let _ = std::fs::remove_dir_all(&e.dir);
+    for (name, harden) in [("inherited", ""), ("hardened", "ulimit -Hc 0 || exit 98; ")] {
+        let e = Env::new(&format!("core-{name}"));
+        let work = e.dir.join("work");
+        let w = work.to_str().unwrap();
+        assert!(
+            e.run(&["atlas", "--synthetic", "--work", w])
+                .status
+                .success()
+        );
+        let (notes_file, raised) = (e.dir.join("notes"), e.dir.join("raised"));
+        // The shell reads the hard limit first, in its own units, and raises the soft one only
+        // where it can, noting which (its check of the raise is the positive control).
+        let line = format!(
+            "{harden}h=$(ulimit -Hc); \
+             if [ \"$h\" = unlimited ]; then n=1000; \
+             elif [ \"$h\" -gt 0 ]; then if [ \"$h\" -lt 1000 ]; then n=$h; else n=1000; fi; \
+             else n=; fi; \
+             if [ -n \"$n\" ]; then ulimit -c \"$n\" && [ \"$(ulimit -c)\" = \"$n\" ] || exit 99; \
+             echo \"raised $n\" > \"{}\"; else echo \"hard 0\" > \"{}\"; fi; \
+             exec \"{BIN}\" run --work \"{w}\"",
+            raised.display(),
+            raised.display()
+        );
+        let mut sh = Command::new("/bin/sh");
+        sh.args(["-c", &line])
+            .env("HOME", &e.home)
+            .env("CODEX_HOME", e.home.join(".codex"))
+            .env("U6_HD_TEST_NOTES", &notes_file);
+        let o = output_within(&mut sh, 30, name);
+        assert!(o.status.success(), "{name}: {:?} {}", o.status, text(&o));
+        let how = std::fs::read_to_string(&raised).unwrap();
+        if name == "hardened" {
+            assert_eq!(how.trim(), "hard 0", "{name}");
+        }
+        let limits: Vec<String> = notes(&notes_file)
+            .into_iter()
+            .filter(|(w, _)| w.starts_with("core-limit"))
+            .map(|(w, _)| w)
+            .collect();
+        assert_eq!(limits, ["core-limit 0 0"], "{name} ({})", how.trim());
+        let _ = std::fs::remove_dir_all(&e.dir);
+    }
 }
 
 #[test]
