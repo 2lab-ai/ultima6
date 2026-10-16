@@ -323,7 +323,7 @@ fn pids(file: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The stop signals at each point of a call's life (test builds hold the hook that sends one
+/// The stop signals (SIGINT, SIGTERM, SIGHUP, SIGQUIT) at each point of a call's life (test builds hold the hook that sends one
 /// at the points in the tool: `U6_HD_TEST_SIGNAL*`; release builds have none): before the
 /// spawn, after it (the group owned, before the first turn of its loop, held there 2.5 s,
 /// past any budget the tool once had), in the middle of the call (sent by the test to the
@@ -337,7 +337,7 @@ fn a_stop_signal_at_any_point_ends_every_call_before_the_lock_goes() {
     use std::io::BufRead;
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     let points = ["before-spawn", "after-spawn", "mid-call", "reap"];
-    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
         for at in points {
             let what = format!("signal {sig} at {at}");
             let e = Env::new(&format!("stop-{sig}-{at}"));
@@ -584,6 +584,111 @@ fn a_call_killed_before_its_result_still_counts() {
         "{}",
         text(&o)
     );
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
+
+#[test]
+fn a_signal_the_tool_was_started_ignoring_lets_its_calls_finish() {
+    // Under the real nohup (SIGHUP ignored), and with SIGINT ignored as a script's background
+    // job has it: that signal to the tool's group stops nothing; the call runs to its end.
+    for (name, how) in [("nohup", libc::SIGHUP), ("ignored-int", libc::SIGINT)] {
+        let e = Env::new(name);
+        let work = e.dir.join("work");
+        let w = work.to_str().unwrap();
+        let (hold, done) = (e.dir.join("held"), e.dir.join("done"));
+        assert!(
+            e.run(&["atlas", "--synthetic", "--work", w])
+                .status
+                .success()
+        );
+        let finishes = e.dir.join("codex-finishes");
+        std::fs::write(
+            &finishes,
+            format!(
+                "#!/bin/sh\necho $$ > \"{}\"\ncat > /dev/null\nsleep 1\necho done > \"{}\"\n",
+                hold.display(),
+                done.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&finishes, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tool_args = format!(
+            "\"{BIN}\" run --work \"{w}\" --codex \"{}\" --send --limit 1",
+            finishes.display()
+        );
+        let line = if how == libc::SIGHUP {
+            format!("exec /usr/bin/nohup {tool_args}")
+        } else {
+            format!("trap '' INT; exec {tool_args}")
+        };
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut tool = Command::new("/bin/sh")
+            .args(["-c", &line])
+            .env("HOME", &e.home)
+            .env("CODEX_HOME", e.home.join(".codex"))
+            .current_dir(&e.dir)
+            .process_group(0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let t = std::time::Instant::now();
+        while !hold.exists() {
+            assert!(t.elapsed().as_secs() < 30, "{name}: the call never started");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let call = std::fs::read_to_string(&hold).unwrap().trim().to_string();
+        let _cleanup = KillOnDrop(call);
+        // SAFETY: kill(2) to the tool's process group.
+        assert_eq!(unsafe { libc::kill(-(tool.id() as i32), how) }, 0);
+        let status = tool.wait().unwrap();
+        // The tool was not ended by it: its call ran to its end (it gave no thread id, so
+        // the run fails, as a call, not as a stop).
+        assert_eq!(status.signal(), None, "{name}: {status:?}");
+        assert!(done.exists(), "{name}: the call was cut off");
+        let runs = std::fs::read_to_string(work.join("runs.jsonl")).unwrap();
+        assert!(runs.contains("\"stopped\":false"), "{name}: {runs}");
+        assert!(runs.contains("no thread id"), "{name}: {runs}");
+        let _ = std::fs::remove_dir_all(&e.dir);
+    }
+}
+
+#[test]
+fn a_codex_that_cannot_be_started_spends_nothing() {
+    // A mistyped --codex: no process is made, nothing is sent; each reservation is taken back,
+    // so however often it is run, no sheet is given up.
+    let e = Env::new("no-codex");
+    let work = e.dir.join("work");
+    let w = work.to_str().unwrap();
+    assert!(
+        e.run(&["atlas", "--synthetic", "--work", w])
+            .status
+            .success()
+    );
+    let missing = e.dir.join("no-such-codex");
+    for _ in 0..3 {
+        let o = e.run(&[
+            "run",
+            "--work",
+            w,
+            "--codex",
+            missing.to_str().unwrap(),
+            "--send",
+        ]);
+        assert!(!o.status.success());
+        assert!(text(&o).contains("not sent"), "{}", text(&o));
+    }
+    let o = e.run(&["run", "--work", w]);
+    assert!(!text(&o).contains("given up"), "{}", text(&o));
+    let runs = std::fs::read_to_string(work.join("runs.jsonl")).unwrap();
+    let count = |ev: &str| {
+        runs.lines()
+            .filter(|l| l.contains(&format!("\"{ev}\"")))
+            .count()
+    };
+    assert!(count("dispatched") > 0);
+    assert_eq!(count("dispatched"), count("voided"));
     let _ = std::fs::remove_dir_all(&e.dir);
 }
 
