@@ -228,8 +228,41 @@ pub fn stopped_by() -> Option<libc::c_int> {
     (s != 0).then_some(s)
 }
 
+/// Turns core dumps off for the rest of the tool's life (soft and hard limits 0) and checks it
+/// took: a SIGQUIT, whenever it ends the tool (raised again by [`reraise`], or after the stop
+/// grace when [`watch_the_stop`] has put its default action back), leaves no core holding the
+/// sheets' bytes. Called before any stop machinery is installed.
+pub fn no_core_dumps() -> Result<(), String> {
+    // SAFETY: setrlimit(2) and getrlimit(2) with live structs.
+    let now = unsafe {
+        let none = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        let mut now = libc::rlimit {
+            rlim_cur: 1,
+            rlim_max: 1,
+        };
+        if libc::setrlimit(libc::RLIMIT_CORE, &none) != 0
+            || libc::getrlimit(libc::RLIMIT_CORE, &mut now) != 0
+        {
+            return Err(format!(
+                "core dumps could not be turned off: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        now
+    };
+    test_note(&format!("core-limit {} {}", now.rlim_cur, now.rlim_max));
+    if (now.rlim_cur, now.rlim_max) != (0, 0) {
+        return Err("core dumps could not be turned off".into());
+    }
+    Ok(())
+}
+
 /// Ends the tool by `sig` with its default action (the caller has let go of its lock), with
-/// core dumps off first, so a SIGQUIT leaves no core holding the sheets' bytes.
+/// core dumps off first (again: see [`no_core_dumps`]), so a SIGQUIT leaves no core holding
+/// the sheets' bytes.
 pub fn reraise(sig: libc::c_int) -> ! {
     // SAFETY: setrlimit(2), signal(2) and raise(3) on this process.
     unsafe {

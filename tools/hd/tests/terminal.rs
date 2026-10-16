@@ -49,14 +49,14 @@ impl Env {
     }
 }
 
-/// Whether process `pid` is gone (or a zombie, dead and waiting to be reaped).
+/// Whether process `pid` is gone: not even a zombie (reaped, by its parent or by launchd once
+/// orphaned; callers poll).
 fn gone(pid: &str) -> bool {
     let o = Command::new("/bin/ps")
         .args(["-o", "stat=", "-p", pid])
         .output()
         .unwrap();
-    let stat = String::from_utf8_lossy(&o.stdout);
-    stat.trim().is_empty() || stat.trim().starts_with('Z')
+    String::from_utf8_lossy(&o.stdout).trim().is_empty()
 }
 
 /// Kills the process group `pgid` when dropped (unwinding included): a failed assertion leaves
@@ -127,9 +127,9 @@ fn all_gone(stub_pids: &Path, what: &str) {
 }
 
 /// An interactive zsh on a pty, the tool its foreground job with four calls running and its
-/// stderr the terminal, the terminal closed: zsh and the terminal send SIGHUP a few ms apart;
-/// the tool ends by SIGHUP (not 101, from a print that panicked on the gone terminal), every
-/// call reaped first.
+/// stderr the terminal, the terminal closed: the tool ends by SIGHUP (not 101, from a print
+/// that panicked on the gone terminal) and every call is reaped by the tool first. (It does
+/// not show how many SIGHUPs came; repeated delivery is the cleanup-held test's, in cli.rs.)
 #[test]
 fn closing_the_terminal_under_zsh_stops_every_call() {
     use std::ffi::CString;
@@ -143,10 +143,11 @@ fn closing_the_terminal_under_zsh_stops_every_call() {
         let e = Env::new(&format!("zsh-{rep}"));
         let work = e.dir.join("work");
         let w = work.to_str().unwrap();
-        let (stub_pids, leaders, status_file) = (
+        let (stub_pids, leaders, status_file, notes_file) = (
             e.dir.join("pids"),
             e.dir.join("leaders"),
             e.dir.join("status"),
+            e.dir.join("notes"),
         );
         assert!(
             e.run(&["atlas", "--synthetic", "--work", w])
@@ -161,6 +162,7 @@ fn closing_the_terminal_under_zsh_stops_every_call() {
             format!("CODEX_HOME={}", e.home.join(".codex").display()),
             format!("STUB_PIDS={}", stub_pids.display()),
             format!("STUB_LEADERS={}", leaders.display()),
+            format!("U6_HD_TEST_NOTES={}", notes_file.display()),
             "PS1=$ ".to_string(),
             "TERM=dumb".to_string(),
         ]
@@ -260,6 +262,20 @@ fn closing_the_terminal_under_zsh_stops_every_call() {
         }
         let code = std::fs::read_to_string(&status_file).unwrap_or_default();
         assert_eq!(code.trim(), "129", "{what}");
+        // Test builds: the tool reaped exactly the stand-ins, each once.
+        if cfg!(debug_assertions) {
+            let mut reaped: Vec<String> = std::fs::read_to_string(&notes_file)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.strip_prefix("reaped "))
+                .filter_map(|l| l.split(' ').next())
+                .map(str::to_string)
+                .collect();
+            reaped.sort();
+            let mut want = pids(&leaders);
+            want.sort();
+            assert_eq!(reaped, want, "{what}");
+        }
         let mut status = 0;
         for _ in 0..200 {
             // SAFETY: waitpid(2) on the zsh this test forked.

@@ -217,6 +217,8 @@ fn atlas_cmd(a: &Args) -> Result<(), String> {
 }
 
 fn run_cmd(a: &Args) -> Result<(), String> {
+    // Before anything else, and before any stop machinery: a SIGQUIT never dumps a core.
+    run::no_core_dumps()?;
     let work = Work::open(a.work.as_deref())?;
     let lock = work.lock()?;
     let codex = Codex::from_env(a.codex.clone())?;

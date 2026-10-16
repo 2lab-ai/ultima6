@@ -264,14 +264,14 @@ fn a_running_command_holds_the_work_dir_until_it_is_gone() {
     let _ = std::fs::remove_dir_all(&e.dir);
 }
 
-/// Whether process `pid` is gone (or a zombie, dead and waiting to be reaped).
+/// Whether process `pid` is gone: not even a zombie (reaped, by its parent or by launchd once
+/// orphaned; callers poll).
 fn gone(pid: &str) -> bool {
     let o = Command::new("/bin/ps")
         .args(["-o", "stat=", "-p", pid])
         .output()
         .unwrap();
-    let stat = String::from_utf8_lossy(&o.stdout);
-    stat.trim().is_empty() || stat.trim().starts_with('Z')
+    String::from_utf8_lossy(&o.stdout).trim().is_empty()
 }
 
 /// Kills the process group `pgid` when dropped (unwinding included): a failed assertion leaves
@@ -312,16 +312,26 @@ fn pids(file: &Path) -> Vec<String> {
 /// Waits for `child` at most `secs`: past that, its process group is killed and the test
 /// fails (a hang is a failure, not a stuck gate).
 fn wait_within(child: &mut std::process::Child, secs: u64, what: &str) -> std::process::ExitStatus {
-    let t = std::time::Instant::now();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    wait_until(child, deadline, what)
+}
+
+/// Waits for `child` until `deadline` (absolute): past it, its process group is killed and the
+/// test fails.
+fn wait_until(
+    child: &mut std::process::Child,
+    deadline: std::time::Instant,
+    what: &str,
+) -> std::process::ExitStatus {
     loop {
         if let Some(s) = child.try_wait().unwrap() {
             return s;
         }
-        if t.elapsed().as_secs() >= secs {
+        if std::time::Instant::now() >= deadline {
             drop(KillOnDrop(child.id().to_string()));
             let _ = child.kill();
             let _ = child.wait();
-            panic!("{what}: still running after {secs} s");
+            panic!("{what}: still running at its deadline");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -357,7 +367,7 @@ fn output_within(cmd: &mut Command, secs: u64, what: &str) -> Output {
         });
     }
     let left = || deadline.saturating_duration_since(std::time::Instant::now());
-    let status = wait_within(&mut child, left().as_secs().max(1), what);
+    let status = wait_until(&mut child, deadline, what);
     let mut got = [Vec::new(), Vec::new()];
     for _ in 0..2 {
         match rx.recv_timeout(left()) {
@@ -1178,6 +1188,41 @@ fn a_codex_that_cannot_be_started_spends_nothing() {
     };
     assert!(count("dispatched") > 0);
     assert_eq!(count("dispatched"), count("voided"));
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
+
+#[test]
+fn run_turns_core_dumps_off_before_anything() {
+    // Started with core dumps allowed (as a shell can), run sets both limits to 0 first: a
+    // SIGQUIT at any time leaves no core holding the sheets.
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let e = Env::new("core");
+    let work = e.dir.join("work");
+    let w = work.to_str().unwrap();
+    assert!(
+        e.run(&["atlas", "--synthetic", "--work", w])
+            .status
+            .success()
+    );
+    let notes_file = e.dir.join("notes");
+    let line = format!(
+        "ulimit -c 1000 && [ \"$(ulimit -c)\" = 1000 ] && exec \"{BIN}\" run --work \"{w}\""
+    );
+    let mut sh = Command::new("/bin/sh");
+    sh.args(["-c", &line])
+        .env("HOME", &e.home)
+        .env("CODEX_HOME", e.home.join(".codex"))
+        .env("U6_HD_TEST_NOTES", &notes_file);
+    let o = output_within(&mut sh, 30, "core");
+    assert!(o.status.success(), "{}", text(&o));
+    let limits: Vec<String> = notes(&notes_file)
+        .into_iter()
+        .filter(|(w, _)| w.starts_with("core-limit"))
+        .map(|(w, _)| w)
+        .collect();
+    assert_eq!(limits, ["core-limit 0 0"]);
     let _ = std::fs::remove_dir_all(&e.dir);
 }
 
