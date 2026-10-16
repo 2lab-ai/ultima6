@@ -243,3 +243,18 @@ Round 6 of M2's follow-ups is complete: intake-budget, zip-slice and nostep are 
   - Headless, seeds 200..10199, 3 calls each: 15 of 30,000 (the 5 seeds on every call) → 0 of 30,000, at most 3 tries. The same on the merged tree.
 - **Gates on 306477a:** fmt, clippy, 974 tests (`--profile gate`), web 53/53 three times (load 22–61), test_fight OK, test_trace 8/8, amifs OK, port_map unchanged.
 - **Follow-up:** `wake-in-fight` in loop.md. Does the original wake the party between the same gargoyles?
+
+## web-flake rounds 2–3 — closed 2026-10-16
+
+- Round 2 (8cbc118, d1f43bb, 655c341, d784390) and round 3 (630d414) close the reviews of round 1:
+  - the frame is read only when asked, which doubles the steps walked in the HD perf window;
+  - the 16-try bound fails with a labelled list of each try's key, outcome and what the page sent (`sent N`), counts only;
+  - a walk into the wake cell from beside it counts as a walk, and a step back onto its start does not ('back'); checking the wake cell first broke two cases in the gates;
+  - a no-page test drives `stepOnce` against a stub grid and asserts the prompt is waited before every try;
+  - the comments cite travel.rs:702-703 and walk.rs:1015.
+- Reviews: round 2 and round 3 APPROVE from gpt-6-astra and opus. Opus killed 15 of 15 mutants of the harness, re-ran the trapped seeds 90/90 and withdrew its round-1 NH4.
+- Merged at the merge commit on main after 3193c09. Gates on its tree (5e24ad0): 1077 passed; web 53/54, 54/54, 54/54 at load 114–192.
+  - The one failure was `keyboard only` timing out at `test-web.mjs:359`, waiting for the file chooser, in code this unit did not change.
+  - It passed 4 of 4 alone at load 157–251. It is opened as `chooser-flake` in loop.md.
+- Test code only, with the site unchanged, so there was no deploy.
+
