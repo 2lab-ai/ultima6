@@ -181,17 +181,22 @@ test('a step\'s bookkeeping: the scroll of a step east, west, south or north; bl
 // outcome; a try that ends on the wake cell, then the next direction from there; a walk into the
 // wake cell from beside it is the step (counted otherwise, the step would walk in and back out
 // or, where that is the one way out, not at all); a walk back onto the cell the call started on
-// (the hero killed in a pass, woken beside it) is not; the frame read only with `withFrame`; a
-// failure of the step itself (the game never took the input) not retried.
+// (the hero killed in a pass, woken beside it) is not; the frame read only with `withFrame`; the
+// prompt waited before every try; the label's count of what the page sent for each try (0 for a
+// key lost on the way, '?' with no count); a failure of the step itself (the game never took the
+// input) not retried.
 test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 rounds; the wake cell; never back where it began; the frame only when asked; a step that fails stops it', async () => {
-  const stub = ({ at = '300,300,0', open = () => false, wakeOn = null, wakeOnPass = null, failOn = null } = {}) => {
-    const io = { at, passes: 0, acts: [], frames: 0, prompts: 0 };
+  const stub = ({ at = '300,300,0', open = () => false, wakeOn = null, wakeOnPass = null, failOn = null, lostOn = null } = {}) => {
+    const io = { at, passes: 0, acts: [], frames: 0, prompts: 0, keys: 0 };
     Object.assign(io, {
       prompt: async () => { io.prompts += 1; },
       leader: async () => io.at,
       frame: async () => { io.frames += 1; return [io.acts.length]; },
+      sent: async () => io.keys,
       act: async (step) => {
         io.acts.push(step.key);
+        if (io.acts.length === lostOn) return; // the key never reached the game: nothing moves
+        io.keys += 1;
         if (io.acts.length === failOn) throw new Error('test: the input was not taken');
         if (io.acts.length === wakeOn) {
           io.at = h.WAKE_CELL;
@@ -215,19 +220,31 @@ test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 ro
   assert.deepEqual([got.key, got.dx, got.dy, got.from, got.to], ['ArrowDown', 0, 1, '300,300,0', '300,301,0'], 'south after east and west blocked');
   assert.deepEqual(io.acts, keys.slice(0, 3), 'east, west, then south');
   assert.ok(io.passes === 0 && io.frames === 0 && got.before === undefined, 'no pass; no frame read without withFrame');
+  assert.equal(io.prompts, io.acts.length, 'the prompt before every try');
   // Every side blocked until the second pass: a pass after each round of four, then east.
   io = stub({ open: (to, passes) => passes >= 2 && to === '301,300,0' });
   got = await h.stepOnce(null, { io, withFrame: true });
   assert.deepEqual(io.acts, [...keys, ...keys, 'ArrowRight'], 'two rounds of four, then east');
   assert.ok(io.passes === 2 && got.key === 'ArrowRight', 'a pass between rounds only');
   assert.ok(io.frames === io.acts.length && got.before[0] === io.acts.length - 1, 'with withFrame: the frame before each try, the walked one returned');
+  assert.equal(io.prompts, io.acts.length, 'the prompt before every try, after the passes too');
   // Never open: fails after 4 rounds (16 tries, 3 passes), naming every try and pass in order.
   io = stub();
   const bound = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
   assert.ok(bound instanceof assert.AssertionError, 'an assertion: the runner shows its label');
   assert.ok(io.acts.length === h.STEP_ROUNDS * h.STEPS.length && io.passes === h.STEP_ROUNDS - 1, '16 tries, 3 passes');
-  const round = keys.map((k) => `${k} blocked`).join(', ');
+  const round = keys.map((k) => `${k} blocked (sent 1)`).join(', ');
   assert.equal(bound.message, `no test step in 4 rounds of the four directions: ${[round, round, round, round].join(', pass, ')}`);
+  assert.equal(io.prompts, io.acts.length, 'the prompt before every try of the bound');
+  // A key lost on the way reads as blocked; the label tells it by what the page sent for it.
+  io = stub({ lostOn: 1 });
+  const lost = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
+  assert.ok(lost.message.startsWith('no test step in 4 rounds of the four directions: ArrowRight blocked (sent 0), ArrowLeft blocked (sent 1),'), 'a lost key: sent 0');
+  // With no count (an io without `sent`): '?'.
+  io = stub();
+  delete io.sent;
+  const uncounted = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
+  assert.ok(uncounted.message.startsWith('no test step in 4 rounds of the four directions: ArrowRight blocked (sent ?),'), 'not counted: ?');
   // The second try ends on the wake cell: the next direction from there (south) walks.
   const [wx, wy, wz] = h.WAKE_CELL.split(',').map(Number);
   io = stub({ wakeOn: 2, open: (to) => to === `${wx},${wy + 1},${wz}` });
@@ -250,7 +267,7 @@ test('a step\'s tries: east, west, south, north, a pass after four blocked, 4 ro
   // A try that ends on the wake cell from afar, then nothing open: the outcomes named in order.
   io = stub({ wakeOn: 1 });
   const named = await h.stepOnce(null, { io, what: 'test step' }).then(() => null, (err) => err);
-  assert.ok(named instanceof assert.AssertionError && named.message.startsWith('no test step in 4 rounds of the four directions: ArrowRight wake cell, ArrowLeft blocked, ArrowDown blocked, ArrowUp blocked, pass,'), 'the outcomes named: wake cell, blocked, pass');
+  assert.ok(named instanceof assert.AssertionError && named.message.startsWith('no test step in 4 rounds of the four directions: ArrowRight wake cell (sent 1), ArrowLeft blocked (sent 1), ArrowDown blocked (sent 1), ArrowUp blocked (sent 1), pass,'), 'the outcomes named: wake cell, blocked, pass');
   // A step whose input the game never took fails as it did, not as a blocked try.
   io = stub({ failOn: 1 });
   const failed = await h.stepOnce(null, { io }).then(() => null, (err) => err);
@@ -1000,7 +1017,10 @@ async function clickStep(page) {
     await h.click(page, 88 + 16 * dx, 88 + 16 * dy, 0);
     await h.waitPrompt(page);
   };
-  return h.stepOnce(page, { io: { ...h.pageSteps(page), act }, what: 'click step' });
+  // What a click sent: the button changes the game took (`__buttons`, a gated page's glue: a
+  // press and its release), not counted on an ungated page.
+  const sent = () => page.evaluate(() => globalThis.__buttons?.length ?? null);
+  return h.stepOnce(page, { io: { ...h.pageSteps(page), act, sent }, what: 'click step' });
 }
 
 test('the mouse: the Look icon, then Look on the hero, then clicks walk; the keys still work', async (env) => {

@@ -505,7 +505,7 @@ export const STEP_ROUNDS = 4;
 /// Where a killed hero wakes, as the page writes the leader: (0x133, 0x160, 0), the start cell
 /// itself (u6-core `map::travel::resurrect_party`, 0x1095bc; pinned by its test
 /// `resurrection_wakes_the_party_in_the_castle`, crates/u6-core/src/map/travel.rs:685, the cell
-/// at :701-702). The page shows no death, so a leader there is only on an allowed wake
+/// at :702-703). The page shows no death, so a leader there is only on an allowed wake
 /// destination.
 export const WAKE_CELL = '307,352,0';
 
@@ -514,10 +514,14 @@ export const WAKE_CELL = '307,352,0';
 /// 'wake cell' (the leader ended on `WAKE_CELL`, the allowed wake destination, from a cell not
 /// beside it that way: the turn after the step killed the hero). Anything else fails as a walk
 /// of the wrong cells. A step that ends on the wake cell from the cell beside it, toward it, is
-/// a walk: a blocked step runs no NPC turn (the world turn picks the hero again at once, u6-core
-/// `actors::walk::paced_player_step`), so a turn that kills him comes only after a step that
-/// moved him there, and the cell is the one walked to; only a move the game refused after its
-/// cost (0x10c9d2, `StepResult::Mismatch`), with a death in its turn, would end there unwalked.
+/// a walk: a blocked step runs no NPC turn (it costs the leader no points, and the world turn
+/// picks him again at once: pinned outside a fight by u6-core's test
+/// `a_blocked_step_takes_one_pick_and_keeps_the_leaders_points`,
+/// crates/u6-core/src/actors/walk.rs:1015; in a fight that rests on the scheduler picking the
+/// same actor again over the state the blocked step left unchanged, `actors::turn::pick_actor`,
+/// turn.rs:402-407, not on a test), so a turn that kills him comes only after a step that moved
+/// him there, and the cell is the one walked to; only a move the game refused after its cost
+/// (0x10c9d2, `StepResult::Mismatch`), with a death in its turn, would end there unwalked.
 /// Checked the other way round, every walk into the wake cell would go uncounted: a step from
 /// beside it walking in then back out (to where it began), or none at all where that is the one
 /// way out.
@@ -531,13 +535,16 @@ export function stepResult(from, to, { dx, dy }) {
 }
 
 /// The page's side of a step (`stepOnce`): wait for the prompt, read the leader, read the frame,
-/// do `step` (its arrow, then until the game took it and shows the prompt again), pass. A test
-/// drives `stepOnce` with its own: `act` a click (the mouse tests' `clickStep`), or all of them
-/// a stub (the no-page test of the tries).
+/// count the inputs the page handed the game (`sent`: the keys passed to `Game.key_down`,
+/// `__sent`, on a gated page; else the keys the canvas took for the game, the `__keys` entries
+/// it prevented), do `step` (its arrow, then until the game took it and shows the prompt again),
+/// pass. A test drives `stepOnce` with its own: `act` a click (the mouse tests' `clickStep`), or
+/// all of them a stub (the no-page test of the tries).
 export const pageSteps = (page) => ({
   prompt: () => waitPrompt(page),
   leader: async () => (await state(page)).leader,
   frame: () => frame(page),
+  sent: () => page.evaluate(() => globalThis.__sent?.length ?? window.__keys.filter(([, taken]) => taken).length),
   act: async (step) => {
     await page.keyboard.press(step.key);
     await waitTaken(page);
@@ -566,8 +573,9 @@ export const pageSteps = (page) => ({
 /// than it found him. With `withFrame` the frame before each try is read (a whole canvas over the
 /// protocol, 1280 x 800 at S 4: only for a check of the step's scroll). Returns the step (key, dx,
 /// dy), the leader before and after and, with `withFrame`, the frame before it. After the bound it
-/// fails with each try's key and outcome and the passes between, in order (`what` names it: a click
-/// step).
+/// fails with each try's key, outcome and the inputs the page sent the game for it (`io.sent`: 0
+/// for a key that never reached the game, '?' where they are not counted) and the passes
+/// between, in order (`what` names it: a click step).
 export async function stepOnce(page, { withFrame = false, io = pageSteps(page), what = 'step' } = {}) {
   const tried = [];
   let start;
@@ -581,11 +589,14 @@ export async function stepOnce(page, { withFrame = false, io = pageSteps(page), 
       const from = await io.leader();
       start ??= from;
       const before = withFrame ? await io.frame() : undefined;
+      const sentBefore = io.sent ? await io.sent() : null;
       await io.act(step);
       const to = await io.leader();
+      const sentAfter = io.sent ? await io.sent() : null;
       let result = stepResult(from, to, step);
       if (result === 'walked' && to === start) result = 'back';
-      tried.push(`${step.key} ${result}`);
+      const sent = sentBefore === null || sentAfter === null ? '?' : sentAfter - sentBefore;
+      tried.push(`${step.key} ${result} (sent ${sent})`);
       if (result === 'walked') return { ...step, from, to, before };
     }
   }
