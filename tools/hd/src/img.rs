@@ -292,15 +292,19 @@ pub fn read_png(path: &Path, width: u32, height: u32) -> Result<Rgba, String> {
     decode_png(&bytes, width, height).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Reads a file of at most `max` bytes.
+/// Reads a file of at most `max` bytes: never more than `max + 1` are read, however large
+/// the file is or grows while it is read.
 pub fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, String> {
-    let len = std::fs::metadata(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?
-        .len();
-    if len > max {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if bytes.len() as u64 > max {
         return Err(format!("{}: larger than {max} bytes", path.display()));
     }
-    std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+    Ok(bytes)
 }
 
 /// The PNG encoding of `img`.

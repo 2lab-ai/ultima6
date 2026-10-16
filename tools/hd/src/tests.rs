@@ -2403,3 +2403,44 @@ fn a_call_s_save_failure_is_its_error_after_the_call_s_own() {
         Err(why)
     );
 }
+
+#[test]
+fn a_capped_read_reads_no_more_than_its_cap() {
+    let t = temp("capped");
+    let p = t.join("f");
+    std::fs::write(&p, vec![7u8; 100]).unwrap();
+    assert_eq!(img::read_capped(&p, 100).unwrap().len(), 100);
+    assert!(
+        img::read_capped(&p, 99)
+            .unwrap_err()
+            .contains("larger than 99 bytes")
+    );
+    // A file that is not a plain file of known size (a FIFO, endless while written): still
+    // refused after max + 1 bytes, not read to its end.
+    let fifo = t.join("fifo");
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let writer = std::thread::spawn({
+        let fifo = fifo.clone();
+        move || {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+            let chunk = vec![1u8; 1 << 16];
+            // Writes until the reader closes its end (EPIPE), at most 64 MiB.
+            for _ in 0..1024 {
+                if f.write_all(&chunk).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let e = img::read_capped(&fifo, 1000).unwrap_err();
+    assert!(e.contains("larger than 1000 bytes"), "{e}");
+    writer.join().unwrap();
+    let _ = std::fs::remove_dir_all(&t);
+}
