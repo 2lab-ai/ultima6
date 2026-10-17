@@ -3,23 +3,26 @@
 //! calls or one whose sheet cannot be read), sliced at the fixed pitch, keyed, colour-transferred and gated image by
 //! image; then each item is judged whole (its images, and the terrain seam or the actor motion
 //! gate). An item that fails its first attempt is queued for one re-roll (new sheets, attempt
-//! 2); one that fails again falls back to the scaler as a whole. The images of passing items
-//! are written to `slices/` and listed in `ingest.json` for `pack`; the coverage report counts
-//! records by class.
+//! 2); one that fails again falls back to the scaler as a whole. After every item is judged, the
+//! neighbour-seam gate ([`crate::neighbour`]) sends the accepted items whose records meet their
+//! neighbours in the world with a seam back to the scaler, to a fixed point. The images of the
+//! items left accepted are written to `slices/` and listed in `ingest.json` for `pack`; the
+//! coverage report counts records by class, the neighbour fallbacks apart, and the pairs. Ingest
+//! reads the sheets that came back and calls nothing: no `codex`, no upload.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use u6_hdpack::ImageId;
+use u6_hdpack::{ImageId, SCALE};
 
 use crate::atlas::{self, Job, MASTER, Place};
 use crate::game::Game;
 use crate::gate::{self, Metrics, Thresholds};
 use crate::group::{self, Class, Item};
 use crate::img::{self, Classic, Rgba};
-use crate::run;
 use crate::work::{self, Work};
+use crate::{neighbour, run};
 
 /// Where an item stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -29,6 +32,9 @@ pub enum Status {
     Generated,
     /// Failed the gates twice: the scaler draws it.
     Fallback,
+    /// Passed its gates, then a record of it met a neighbour with a seam (the neighbour gate):
+    /// the scaler draws it.
+    Neighbour,
     /// No usable output from its last attempt (sheet refused, or the source changed).
     Failed,
     /// Not run yet, or its re-roll not run yet.
@@ -86,6 +92,8 @@ pub struct Report {
     pub refused_sheets: usize,
     /// Failing gates over every judged image (a name, how many).
     pub failures: BTreeMap<&'static str, usize>,
+    /// The neighbour gate's pairs and passes.
+    pub neighbour: neighbour::Counts,
     /// The thresholds used.
     pub thresholds: String,
 }
@@ -105,20 +113,37 @@ impl Report {
         );
         let _ = writeln!(
             s,
-            "{:<30} {:>9} {:>9} {:>7} {:>8}",
-            "", "generated", "fallback", "failed", "pending"
+            "{:<30} {:>9} {:>9} {:>9} {:>7} {:>8}",
+            "", "generated", "fallback", "neighbour", "failed", "pending"
         );
         for class in Class::ALL {
             let _ = writeln!(
                 s,
-                "{:<30} {:>9} {:>9} {:>7} {:>8}",
+                "{:<30} {:>9} {:>9} {:>9} {:>7} {:>8}",
                 class.name(),
                 self.get(class, Status::Generated),
                 self.get(class, Status::Fallback),
+                self.get(class, Status::Neighbour),
                 self.get(class, Status::Failed),
                 self.get(class, Status::Pending),
             );
         }
+        let n = &self.neighbour;
+        let _ = writeln!(
+            s,
+            "neighbour pairs (distinct records in edge-adjacent cells): {} (map {}, objects {})",
+            n.pairs, n.map, n.objects
+        );
+        let _ = writeln!(
+            s,
+            "neighbour pairs checked (a generated side): {} before the fixed point, {} after",
+            n.checked, n.checked_after
+        );
+        let _ = writeln!(
+            s,
+            "neighbour pairs failing: {} before the fixed point, {} after ({} passes)",
+            n.failing_before, n.failing_after, n.passes
+        );
         let _ = writeln!(
             s,
             "shore records (scaler by rule, merged at run time): {}",
@@ -332,6 +357,52 @@ fn matches_item(item: &Item, judged: &[Judged]) -> bool {
     true
 }
 
+/// The neighbour gate over the judged items ([`neighbour::settle`]): the pairs of the world, each
+/// record's images (an accepted record's ×8 master box-averaged to the pack's ×4, as `pack`
+/// writes it; MMPX ×4 of the classic record), then the fixed point. Its counts carry the pairs'.
+fn neighbour_gate(
+    game: &Game,
+    judged: &[(Status, usize, Option<&[Judged]>)],
+    t: &Thresholds,
+) -> neighbour::Settled {
+    let pairs = neighbour::pairs(game);
+    // The records the pack would hold: the drawing records of the accepted items.
+    let mut accepted: BTreeMap<u16, (u32, &Judged)> = BTreeMap::new();
+    for (no, &(status, _, passed)) in judged.iter().enumerate() {
+        if status != Status::Generated {
+            continue;
+        }
+        for j in passed.into_iter().flatten() {
+            if let ImageId::Tile(r) = j.id
+                && j.classic.has_opaque()
+            {
+                accepted.insert(r, (no as u32, j));
+            }
+        }
+    }
+    let mut sides: BTreeMap<u16, neighbour::Side> = BTreeMap::new();
+    for p in &pairs.all {
+        for r in [p.a, p.b] {
+            if sides.contains_key(&r) {
+                continue;
+            }
+            let Some(classic) = game.classic(ImageId::Tile(r)) else {
+                continue;
+            };
+            let hd = accepted
+                .get(&r)
+                .map(|&(no, j)| (no, img::shrink(&j.hd, MASTER / SCALE)));
+            let side = neighbour::Side::new(classic, hd.as_ref().map(|(no, h)| (*no, h)));
+            sides.insert(r, side);
+        }
+    }
+    let mut settled = neighbour::settle(&pairs.all, &sides, t.seam);
+    settled.counts.pairs = pairs.all.len();
+    settled.counts.map = pairs.map;
+    settled.counts.objects = pairs.objects;
+    settled
+}
+
 /// Runs ingest over the work dir with the thresholds `t`.
 pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String> {
     let jobs = work.read_jobs()?;
@@ -439,8 +510,9 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
         }
     }
 
-    let mut accepted: Vec<Accepted> = Vec::new();
     let mut reroll: Vec<u32> = Vec::new();
+    // Per item: its status, its records that draw, and the attempt that passed.
+    let mut judged: Vec<(Status, usize, Option<&[Judged]>)> = Vec::with_capacity(plan.items.len());
     for (no, item) in plan.items.iter().enumerate() {
         let no = no as u32;
         let n_records = records(item.images().filter_map(|id| game.classic(id)));
@@ -477,18 +549,7 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
                 break;
             }
         }
-        let status = if let Some(v) = passed {
-            for j in v.iter().filter(|j| j.classic.has_opaque()) {
-                let stem = atlas::slice_name(j.id);
-                img::write_png(&work.slice(&stem), &j.hd)?;
-                accepted.push(Accepted {
-                    image: j.place.image.clone(),
-                    hash: j.place.hash.clone(),
-                    width: j.hd.width,
-                    height: j.hd.height,
-                    slice: format!("slices/{stem}.png"),
-                });
-            }
+        let status = if passed.is_some() {
             Status::Generated
         } else {
             match outcomes.last() {
@@ -501,6 +562,50 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
                 Some((_, Outcome::Judged(_))) => Status::Fallback,
             }
         };
+        judged.push((status, n_records, passed));
+    }
+
+    // The neighbour gate, once every item is judged: its fallbacks are final for this ingest
+    // (not re-rolled), and only the items it leaves accepted reach the pack.
+    let settled = neighbour_gate(game, &judged, t);
+    for (pass, p, (ratio, limit)) in &settled.failing {
+        let line = serde_json::json!({
+            "neighbour": {
+                "a": atlas::image_name(ImageId::Tile(p.a)),
+                "b": atlas::image_name(ImageId::Tile(p.b)),
+                "edge": p.edge,
+            },
+            "pass": pass, "ratio": ratio, "limit": limit, "gates": t.text(),
+        });
+        let _ = writeln!(gates_log, "{line}");
+    }
+    for (&no, &pass) in &settled.fallen {
+        judged[no as usize].0 = Status::Neighbour;
+        let line = serde_json::json!({
+            "item": no, "class": plan.items[no as usize].class, "fallback": "neighbour",
+            "pass": pass, "gates": t.text(),
+        });
+        let _ = writeln!(gates_log, "{line}");
+    }
+    report.neighbour = settled.counts;
+
+    let mut accepted: Vec<Accepted> = Vec::new();
+    for (item, &(status, n_records, passed)) in plan.items.iter().zip(&judged) {
+        if status == Status::Generated
+            && let Some(v) = passed
+        {
+            for j in v.iter().filter(|j| j.classic.has_opaque()) {
+                let stem = atlas::slice_name(j.id);
+                img::write_png(&work.slice(&stem), &j.hd)?;
+                accepted.push(Accepted {
+                    image: j.place.image.clone(),
+                    hash: j.place.hash.clone(),
+                    width: j.hd.width,
+                    height: j.hd.height,
+                    slice: format!("slices/{stem}.png"),
+                });
+            }
+        }
         *report.counts.entry((item.class, status)).or_default() += n_records;
     }
 
