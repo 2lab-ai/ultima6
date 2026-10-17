@@ -979,35 +979,27 @@ fn of_two_root_manifests_the_first_is_the_one() {
     assert!(matches!(read_pack(&pack), Err(PackError::Entry(_))));
 }
 
-/// The limits are inclusive: a manifest of exactly 64 KiB unpacked (the pack's own, padded with
-/// spaces after the object), and one whose range is exactly [`MAX_MANIFEST_RANGE`] (deflated,
-/// with bytes after the stream's final block, which inflating does not take), read and make a
-/// pack; the reader takes both packs too.
-#[test]
-fn a_manifest_at_the_limits_reads() {
-    let base = written();
-    let mut padded = files_of(&base);
-    let m = &mut padded
+/// The written pack with its manifest padded with spaces after the object to `len` bytes
+/// unpacked (stored).
+fn padded_manifest(len: u64) -> Vec<u8> {
+    let mut files = files_of(&written());
+    let m = &mut files
         .iter_mut()
         .find(|(n, _)| n == "manifest.json")
         .unwrap()
         .1;
-    m.resize(MAX_MANIFEST as usize, b' ');
-    let z = rezip(&padded);
-    let (start, end) = manifest_range(&z);
-    assert_eq!(
-        end - start,
-        30 + 13 + MAX_MANIFEST,
-        "exactly 64 KiB of data"
-    );
-    assert_eq!(probe(&z), (Some(""), vec![tail(&z), (start, end)]));
-    assert!(read_pack(&z).is_ok(), "the reader takes it");
-    // A range of exactly MAX_MANIFEST_RANGE: the deflated manifest and then bytes the stream
-    // does not reach, up to the next entry's local header.
-    let files = files_of(&base);
+    m.resize(len as usize, b' ');
+    rezip(&files)
+}
+
+/// The written pack with its manifest deflated and followed, up to the next entry's local
+/// header, by bytes the stream does not reach (inflating stops at its final block), so the
+/// manifest's range is `range` bytes.
+fn ranged_manifest(range: u64) -> Vec<u8> {
+    let files = files_of(&written());
     let (_, manifest) = files.iter().find(|(n, _)| n == "manifest.json").unwrap();
     let mut data = miniz_oxide::deflate::compress_to_vec(manifest, 6);
-    data.resize((MAX_MANIFEST_RANGE - 30 - 13) as usize, 0xA5);
+    data.resize((range - 30 - 13) as usize, 0xA5);
     let raws: Vec<Raw> = files
         .iter()
         .map(|(n, b)| {
@@ -1025,7 +1017,24 @@ fn a_manifest_at_the_limits_reads() {
             }
         })
         .collect();
-    let z = zip_of(&raws);
+    zip_of(&raws)
+}
+
+/// The limits are inclusive: a manifest of exactly 64 KiB unpacked ([`padded_manifest`]), and
+/// one whose range is exactly [`MAX_MANIFEST_RANGE`] ([`ranged_manifest`]), read and make a
+/// pack; the reader takes both packs too.
+#[test]
+fn a_manifest_at_the_limits_reads() {
+    let z = padded_manifest(MAX_MANIFEST);
+    let (start, end) = manifest_range(&z);
+    assert_eq!(
+        end - start,
+        30 + 13 + MAX_MANIFEST,
+        "exactly 64 KiB of data"
+    );
+    assert_eq!(probe(&z), (Some(""), vec![tail(&z), (start, end)]));
+    assert!(read_pack(&z).is_ok(), "the reader takes it");
+    let z = ranged_manifest(MAX_MANIFEST_RANGE);
     let (start, end) = manifest_range(&z);
     assert_eq!(
         end - start,
@@ -1034,6 +1043,32 @@ fn a_manifest_at_the_limits_reads() {
     );
     assert_eq!(probe(&z), (Some(""), vec![tail(&z), (start, end)]));
     assert!(read_pack(&z).is_ok(), "the reader takes it");
+}
+
+/// One byte over either limit, built as its twin at the limit: a manifest of 64 KiB + 1
+/// unpacked, and one whose range is [`MAX_MANIFEST_RANGE`] + 1, are not read (the tail only) and
+/// are not packs. The reader refuses the first (its limit is the unpacked size) and takes the
+/// second (the range limit is the probe's own).
+#[test]
+fn a_manifest_one_byte_over_the_limits_is_not_read() {
+    let z = padded_manifest(MAX_MANIFEST + 1);
+    let (start, end) = manifest_range(&z);
+    assert_eq!(
+        end - start,
+        30 + 13 + MAX_MANIFEST + 1,
+        "64 KiB and a byte of data"
+    );
+    assert_eq!(probe(&z), (None, vec![tail(&z)]));
+    assert!(matches!(read_pack(&z), Err(PackError::Limit(_))));
+    let z = ranged_manifest(MAX_MANIFEST_RANGE + 1);
+    let (start, end) = manifest_range(&z);
+    assert_eq!(
+        end - start,
+        MAX_MANIFEST_RANGE + 1,
+        "a range of the probe's limit and a byte"
+    );
+    assert_eq!(probe(&z), (None, vec![tail(&z)]));
+    assert!(read_pack(&z).is_ok(), "the reader has no range limit");
 }
 
 /// Spec 07 H2's rule for a manifest that does not read or parse: not a pack, so the zip goes to
