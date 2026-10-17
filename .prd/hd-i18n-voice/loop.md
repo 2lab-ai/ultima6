@@ -15,11 +15,11 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 | `08-i18n-ko.md` | 2 |
 | `09-npc-voice.md` | 3 |
 
-Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 5 (what H0 and H3 measured), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
+Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 6 (rev 5: what H0 and H3 measured; rev 6: the neighbour-seam gate), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
 Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening), H1 (the HD compositor, MMPX at 2× or 4×, on by default) and H3 (the pack format and the imagegen tool) are in production (80cdffb2 at main 8826434). In flight:
 - H2, the page loads the pack (branch `feat/h2-pack-load`);
-- H4, the dispatcher runs the tool on the owner's files (portraits first).
+- H4, the dispatcher runs the tool on the owner's files (portraits first). Its pack is built (generated: portraits 202/206, bitmaps 2/2, terrain 49/271, multi-record objects 26/278, objects 234/759, actors 0/675 by the motion gate); its frames showed seams where generated and scaled terrain meet, so H5 adds the neighbour gate before 07 closes.
 
 ## Order, and why it differs from the user's numbering
 
@@ -36,6 +36,7 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 |---|---|---|---|
 | H2 | 07 | the page loads a pack through `u6-hdpack` (from H3): drop classification before `importFiles`, IndexedDB/forget, limits | H1, H3 |
 | H4 | 07 | ops: run `tools/hd` on the owner's files with imagegen (portraits → bitmaps → terrain → actors), load the pack in the owner's browser, read the frames | H3 |
+| H5 | 07 | `tools/hd` neighbour-seam gate (spec 07 rev 6): pairs from the owner's map chunks and starting object lists, the cross-edge lattice step against the classic pair's, fallback to a fixed point, the count in the coverage report; then re-ingest locally (no new upload), rebuild the pack, read the frames | H3, H4 |
 | L1 | 08 | text path: `i32` chars, `u16` line and narrowing sites, UTF-8 assembler (invalid bytes pass), Hangul table, runic guard, cell padding, josa, `%1$s`, empty articles; the `u` program's text path by code point (1b) | — |
 | L2 | 08 | locale layer + run, table-string and outermost-print hooks + pack parser; identity-pack receipt with `wide` on | L1, L3 |
 | L3 | 08 | conversation disassembler (04 W3a's table) + run and table-string extractor; the catalog shared with 09 | — |

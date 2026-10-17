@@ -6,7 +6,7 @@ tags: [ultima6, hd, rendering, imagegen]
 
 # 07 — HD art: imagegen upscale with a scaler baseline
 
-Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 3 folds in the opus review, checked against the code: the scene list is replaced by a per-pixel source plane in the framebuffer, which follows every copy, offset, effect and persistence by construction. rev 4 folds in the gpt-6-astra re-review: each source carries the image version it was drawn from, and the plane is kept whenever the web build runs, so switching HD on loses nothing. rev 5, 2026-10-16, folds in what H0 and H3 measured: a pixel is current only when its `ver` equals the record's version, S is 2 or 4, the pack stores ×4, and portraits are gated on their layout). This is user item 1 (`hd-i18n-voice/ssot.md`, verbatim): "hd 이미지 업스케일을 이미지젠 스킬로 해주고 hd 업스케일해줘". It builds the seam designed in `05-hd-output.md` (scene output, assets by id) for the map, portraits and panels. The research notes are kept outside the repo: `~/Games/ultima6/research/2026-10-15/r1-hd-findings.md`.
+Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 3 folds in the opus review, checked against the code: the scene list is replaced by a per-pixel source plane in the framebuffer, which follows every copy, offset, effect and persistence by construction. rev 4 folds in the gpt-6-astra re-review: each source carries the image version it was drawn from, and the plane is kept whenever the web build runs, so switching HD on loses nothing. rev 5, 2026-10-16, folds in what H0 and H3 measured: a pixel is current only when its `ver` equals the record's version, S is 2 or 4, the pack stores ×4, and portraits are gated on their layout. rev 6, 2026-10-17, adds the neighbour-seam gate: H4's owner pack showed seams where a generated terrain record meets a scaled one, and the 3×3 self-tiling gate cannot see a seam between two different records). This is user item 1 (`hd-i18n-voice/ssot.md`, verbatim): "hd 이미지 업스케일을 이미지젠 스킬로 해주고 hd 업스케일해줘". It builds the seam designed in `05-hd-output.md` (scene output, assets by id) for the map, portraits and panels. The research notes are kept outside the repo: `~/Games/ultima6/research/2026-10-15/r1-hd-findings.md`.
 
 ## Measured facts
 
@@ -84,8 +84,9 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
 
    Gate per cell: structure correlation ≥ 0.9, shift ≤ 0.5 source px, silhouette IoU ≥ 0.85, key purity ≤ 12 levels. Portraits measure structure at the layout scale: both images box-averaged to 1/4 of the source size, then correlated, still ≥ 0.9. At the source pixel a faithful repaint scores 0.55–0.66, measured by H3 on synthetic portraits: 1-px features become drawn ones. Negative controls on synthetic portraits (mirrored, shifted by 1/8, two portraits swapped) must each fail a gate.
 
-   Two group gates on top of the per-cell gate:
+   Three group gates on top of the per-cell gate:
    - **Terrain seams.** Each terrain record is tiled 3×3 against itself. The seam step must stay ≤ max(1.5, the classic tile's own seam ratio) × the interior step: a tile whose own wrap already steps cannot be asked to step less, and the generated one may not step more than both.
+   - **Neighbour seams.** Two records drawn in edge-adjacent cells must meet without a seam the original does not have. The pairs come from the owner's world at run time: every pair of edge-adjacent cells in the map chunks, including across chunk edges as the world map places them; and every pair of edge-adjacent objects in the starting object lists whose shared edges are both opaque on at least half their length. For a pair with at least one generated side, the step across the shared edge, over the interior steps of the two images (the terrain-seam lattice measure), must stay ≤ max(1.5, the classic pair's own ratio across that edge). The other side is that record's final image: generated if accepted, MMPX otherwise; shore records count as MMPX, and an animated record is checked through every frame that replaces it. The gate runs after every item is judged. Each generated record in a failing pair falls back to MMPX as its whole item, and the check repeats until no pair fails (fallbacks only add, so it ends).
    - **Animation sequences.** For each actor frame group (all its directions and frames), every frame pair that moves in the source must keep ≥ 50% of its motion (the minimum over pairs, not the mean, so one exaggerated pair cannot hide frozen ones).
 
    Thresholds are tuned on synthetic sheets first. A failing cell is re-rolled once. A failing group falls back to MMPX as a whole, so a group never mixes generated and scaled frames. The run order, best fit first:
@@ -131,7 +132,8 @@ Status: planned (rev 3, 2026-10-15. rev 2 folded in the gpt-6-astra review. rev 
    - Coastlines show MMPX (HD3).
    - Actor groups are expected to be mostly MMPX, because r1 measured 19–47% of 1-px motion kept against the ≥ 50% gate.
    - No actor group mixes generated and scaled frames.
-   - The tool prints a local coverage report: records by kind, as generated, fallback or failed.
+   - The tool prints a local coverage report: records by kind, as generated, fallback or failed, with the fallbacks the neighbour gate made counted apart.
+   - Where generated and scaled records meet on the map, no seam the original does not have: the report prints the neighbour pairs checked and failing (0 failing), and the dispatcher reads frames where H4 saw one (a castle carpet) at S 4 and S 2.
    - The pack survives a reload.
    - The dispatcher reads the frames on the owner's machine.
    - The pack is not in git, and the site serves no pack file. A test over `site/` and `git ls-files` checks this. A dropped pack never starts a game.
