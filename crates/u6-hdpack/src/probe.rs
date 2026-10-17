@@ -6,13 +6,13 @@
 //! not read).
 //!
 //! The rule: a file is a pack if and only if its zip directory reads, it has a root
-//! `manifest.json` within the reader's limits for it (64 KiB unpacked, its range at most
-//! [`MAX_MANIFEST_RANGE`]), that entry reads (its local header, size and CRC-32 checked), and
-//! its data parses as a JSON object whose root `format` is the string [`FORMAT`]. Anything else
-//! is not a pack and goes to the import as any dropped zip does, which takes only the disk
-//! images in it: no root `manifest.json`, one too large, broken or unreadable, one that is not
-//! JSON or not an object, one without a root `format` or with another (a format named deeper in
-//! it included).
+//! `manifest.json` within the reader's limit (64 KiB unpacked) and the probe's for its range (at
+//! most [`MAX_MANIFEST_RANGE`] bytes), that entry reads (its local header, size and CRC-32
+//! checked), and its data parses as a JSON object whose root `format` is the string [`FORMAT`].
+//! Anything else is not a pack and goes to the import as any dropped zip does, which takes only
+//! the disk images in it: no root `manifest.json`, one too large, broken or unreadable, one that
+//! is not JSON or not an object, one without a root `format` or with another (a format named
+//! deeper in it included).
 //!
 //! For a pack the probe also makes the checks the reader makes before it reads any picture:
 //! those of the directory (every entry's name one a pack has, none twice, what they declare
@@ -115,7 +115,7 @@ impl Probe {
             },
             Err(_) => return Stage::Done(Told::NotPack),
         };
-        // A manifest over the reader's limits does not read: not a pack, nothing more read.
+        // Over the reader's limit (unpacked) or the probe's (its range): not read, not a pack.
         if slice.unpacked() > MAX_MANIFEST || slice.len() > MAX_MANIFEST_RANGE {
             return Stage::Done(Told::NotPack);
         }

@@ -907,7 +907,9 @@ fn the_probe_tells_a_pack_from_its_directory_and_manifest() {
     // A zip of game-like files: the end of it only. One whose manifest is not a JSON object
     // whose root format is the pack's (another format, one that only starts like it, a web
     // manifest naming the format elsewhere, the format named deeper in it, no format while
-    // mentioning it, a format that is not a string, not an object, not JSON): not a pack.
+    // mentioning it, a format that is not a string, not an object, not JSON; the object with
+    // data after it, or after a UTF-8 byte order mark; the format's name as a string root, the
+    // object inside a list root): not a pack.
     let other = rezip(&[
         ("game".into(), vec![1; 300]),
         ("Disk 1.adf".into(), vec![2; 900]),
@@ -923,6 +925,10 @@ fn the_probe_tells_a_pack_from_its_directory_and_manifest() {
         br#"["u6-hdpack/1"]"#,
         br#""format": u6-hdpack/1"#,
         b"u6-hdpack/1 manifest",
+        TRAILING,
+        BOM,
+        STRING_ROOT,
+        LIST_ROOT,
     ] {
         let web = with_file(&pack, "manifest.json", |b| *b = m.to_vec());
         assert_eq!(probe(&web).0, None, "{}", String::from_utf8_lossy(m));
@@ -943,6 +949,91 @@ fn the_probe_tells_a_pack_from_its_directory_and_manifest() {
     let mut p = Probe::new(pack.len() as u64);
     p.give(&pack[..10]);
     assert_eq!(p.is_pack(), Some(false));
+}
+
+/// Manifests that are not a JSON object whose root `format` is the pack's, though close to one:
+/// the object followed by other data, after a UTF-8 byte order mark (JSON has none), the name
+/// as a string root, the object inside a list root.
+const TRAILING: &[u8] = br#"{"format": "u6-hdpack/1"} x"#;
+const BOM: &[u8] = b"\xEF\xBB\xBF{\"format\": \"u6-hdpack/1\"}";
+const STRING_ROOT: &[u8] = br#""u6-hdpack/1""#;
+const LIST_ROOT: &[u8] = br#"[{"format": "u6-hdpack/1"}]"#;
+
+/// Two root `manifest.json` entries, another format's first and the pack's second: the first is
+/// the manifest (as the directory lists them), so it is not a pack; the reader refuses the name
+/// twice. The same before a whole pack's entries.
+#[test]
+fn of_two_root_manifests_the_first_is_the_one() {
+    let two = zip_of(&[
+        Raw::stored("manifest.json", br#"{"format": "webmanifest"}"#),
+        Raw::stored("manifest.json", br#"{"format": "u6-hdpack/1"}"#),
+    ]);
+    assert_eq!(probe(&two).0, None);
+    let mut files = vec![(
+        "manifest.json".to_string(),
+        br#"{"format": "webmanifest"}"#.to_vec(),
+    )];
+    files.extend(files_of(&written()));
+    let pack = rezip(&files);
+    assert_eq!(probe(&pack).0, None, "before a whole pack");
+    assert!(matches!(read_pack(&pack), Err(PackError::Entry(_))));
+}
+
+/// The limits are inclusive: a manifest of exactly 64 KiB unpacked (the pack's own, padded with
+/// spaces after the object), and one whose range is exactly [`MAX_MANIFEST_RANGE`] (deflated,
+/// with bytes after the stream's final block, which inflating does not take), read and make a
+/// pack; the reader takes both packs too.
+#[test]
+fn a_manifest_at_the_limits_reads() {
+    let base = written();
+    let mut padded = files_of(&base);
+    let m = &mut padded
+        .iter_mut()
+        .find(|(n, _)| n == "manifest.json")
+        .unwrap()
+        .1;
+    m.resize(MAX_MANIFEST as usize, b' ');
+    let z = rezip(&padded);
+    let (start, end) = manifest_range(&z);
+    assert_eq!(
+        end - start,
+        30 + 13 + MAX_MANIFEST,
+        "exactly 64 KiB of data"
+    );
+    assert_eq!(probe(&z), (Some(""), vec![tail(&z), (start, end)]));
+    assert!(read_pack(&z).is_ok(), "the reader takes it");
+    // A range of exactly MAX_MANIFEST_RANGE: the deflated manifest and then bytes the stream
+    // does not reach, up to the next entry's local header.
+    let files = files_of(&base);
+    let (_, manifest) = files.iter().find(|(n, _)| n == "manifest.json").unwrap();
+    let mut data = miniz_oxide::deflate::compress_to_vec(manifest, 6);
+    data.resize((MAX_MANIFEST_RANGE - 30 - 13) as usize, 0xA5);
+    let raws: Vec<Raw> = files
+        .iter()
+        .map(|(n, b)| {
+            if n == "manifest.json" {
+                Raw {
+                    name: n.clone(),
+                    data: data.clone(),
+                    method: 8,
+                    central_size: b.len() as u32,
+                    local_size: b.len() as u32,
+                    crc: crc32fast::hash(b),
+                }
+            } else {
+                Raw::stored(n, b)
+            }
+        })
+        .collect();
+    let z = zip_of(&raws);
+    let (start, end) = manifest_range(&z);
+    assert_eq!(
+        end - start,
+        MAX_MANIFEST_RANGE,
+        "a range of exactly the probe's limit"
+    );
+    assert_eq!(probe(&z), (Some(""), vec![tail(&z), (start, end)]));
+    assert!(read_pack(&z).is_ok(), "the reader takes it");
 }
 
 /// Spec 07 H2's rule for a manifest that does not read or parse: not a pack, so the zip goes to
@@ -999,6 +1090,22 @@ fn a_manifest_that_does_not_read_or_parse_is_not_a_pack() {
         ),
         ("over the limit", Raw::stored("manifest.json", &over), false),
         ("deflated, a wrong CRC-32", deflated, true),
+        (
+            "data after the object",
+            Raw::stored("manifest.json", TRAILING),
+            true,
+        ),
+        (
+            "a byte order mark first",
+            Raw::stored("manifest.json", BOM),
+            true,
+        ),
+        (
+            "a string root",
+            Raw::stored("manifest.json", STRING_ROOT),
+            true,
+        ),
+        ("a list root", Raw::stored("manifest.json", LIST_ROOT), true),
     ];
     for (what, m, read) in cases {
         for (z, beside) in [

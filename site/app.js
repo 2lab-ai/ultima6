@@ -44,21 +44,21 @@
 // either way. The canvas is scaled into its box pixelated, or smoothly when the HD frame has
 // more device pixels than the box.
 //
-// An HD pack (spec 07 H2: a zip the owner's local tool made from the owner's own files): a
-// dropped `.zip` is first classified from its zip directory and its manifest.json alone (the
-// engine names the parts to read); a pack never starts or touches a game. The rule: a zip is a
-// pack if and only if its root manifest.json reads (within the reader's limits, its CRC-32
-// right) and parses as a JSON object whose root `format` is u6-hdpack/1. Any other zip goes to
-// the import as before H2, which takes only the disk images in it. A pack whose directory
-// already breaks the format is refused before it is
-// read; else it is read whole, checked and decoded by the engine (refused whole, with nothing
-// changed, when it does not read), set on the game on screen and on every game started after,
-// and kept in IndexedDB so the next visit loads it before its first HD frame (storage that
-// refuses it: the pack works for this visit only, and the one kept before is removed). "Forget
-// the HD pack" removes it from the page and the browser. Its images go in front of MMPX for the
-// images whose classic bytes they were made from. The page never fetches a pack. A drop that
-// holds a pack and other files is refused as a whole. Loading a pack while another is set holds
-// both decoded until the new one is checked (so a refusal changes nothing).
+// An HD pack (spec 07 H2: a zip the owner's local tool made from the owner's own files): a dropped
+// `.zip` is first classified from its zip directory and its manifest.json alone (the engine names
+// the parts to read); a pack never starts or touches a game. The rule: a zip is a pack if and only
+// if its root manifest.json reads (within the reader's limit, 64 KiB unpacked, and the probe's for
+// its range; its CRC-32 right) and parses as a JSON object whose root `format` is u6-hdpack/1. Any
+// other zip goes to the import as before H2, which takes only the disk images in it. A pack whose
+// directory already breaks the format is refused before it is read; else it is read whole, checked
+// and decoded by the engine (refused whole, with nothing changed, when it does not read), set on
+// the game on screen and on every game started after, and kept in IndexedDB so the next visit
+// loads it before its first HD frame (storage that refuses it: the pack works for this visit only,
+// and the one kept before is removed). "Forget the HD pack" removes it from the page and the
+// browser. Its images go in front of MMPX for the images whose classic bytes they were made from.
+// The page never fetches a pack. A drop that holds a pack and other files is refused as a whole.
+// Loading a pack while another is set holds both decoded until the new one is checked (so a
+// refusal changes nothing).
 import init, {
   Game, HdPack, PackProbe, budget_ms, input_too_large, max_input_bytes, max_pack_bytes,
   max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
