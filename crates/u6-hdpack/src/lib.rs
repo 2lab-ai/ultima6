@@ -1,6 +1,7 @@
 //! The HD pack format `u6-hdpack/1` (spec `.prd/07-hd-art.md` Design 2, HD1): a zip of HD
 //! images keyed by the classic image they were made from. The local tool `tools/hd` writes it;
-//! the page will read it (H2). Platform-free: no I/O, builds for `wasm32-unknown-unknown`.
+//! the page reads it (H2: [`Probe`] tells a dropped pack from game files, [`read_pack`] loads
+//! it). Platform-free: no I/O, builds for `wasm32-unknown-unknown`.
 //!
 //! A pack holds, as stored (uncompressed) zip entries:
 //! - `manifest.json`: [`Manifest`] — `format` = [`FORMAT`], `tile` = 16, `scale` = 4,
@@ -18,8 +19,11 @@
 //! and then one byte per pixel, row-major, of the classic image as the engine holds it:
 //! - a tile record ([`tile_hash`]): its colour index (0..31), or `0xFF` where the record is
 //!   transparent (the AND mask / unwritten rows), so the mask is part of the image;
-//! - a portrait: the 56×64 bytes `portrait_pixels` returns; a bitmap: the `width × height`
-//!   bytes of `u6_formats::bitmap::Bitmap::pixels` (before the bitmap colour table).
+//! - a portrait ([`portrait_hash`]): the 56×64 bytes `portrait_pixels` returns; a bitmap
+//!   ([`bitmap_hash`]): the first `width × height` bytes of `u6_formats::bitmap::Bitmap::pixels`
+//!   (before the bitmap colour table), none for a bitmap shorter than that.
+//!
+//! The engine (`u6_core::hd`) and the HD tool call these same functions.
 //!
 //! The engine computes the same hash of a record's current bytes, so an HD image made from
 //! other bytes (another dump, a merged shore record) never matches and the scaler is used.
@@ -49,10 +53,13 @@ use u6_formats::gfx::{TILE_COUNT, TILE_W};
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_WIDTH};
 use u6_intake::zip;
 
+mod probe;
 mod store;
 
 #[cfg(test)]
 mod tests;
+
+pub use probe::{MAX_MANIFEST_RANGE, Probe};
 
 /// The manifest's `format`.
 pub const FORMAT: &str = "u6-hdpack/1";
@@ -350,6 +357,24 @@ pub fn tile_hash(pixels: &[u8], transparent: &[bool]) -> Option<u64> {
                 .map(|(&p, &t)| if t { 0xFF } else { p }),
         )
     })
+}
+
+/// The content hash of a portrait: [`image_hash`] of its 56 × 64 bytes as `portrait_pixels`
+/// returns them; `None` unless it holds exactly that many.
+pub fn portrait_hash(pixels: &[u8]) -> Option<u64> {
+    let (w, h) = (PORTRAIT_WIDTH as u16, PORTRAIT_HEIGHT as u16);
+    (pixels.len() == PORTRAIT_WIDTH * PORTRAIT_HEIGHT)
+        .then(|| image_hash(w, h, pixels.iter().copied()))
+}
+
+/// The content hash of a `width × height` panel bitmap: [`image_hash`] of the first
+/// `width × height` of its bytes (`Bitmap::pixels`, before the colour table: the bytes the blit
+/// draws); `None` when it holds fewer (none of it is shown HD).
+pub fn bitmap_hash(width: u16, height: u16, pixels: &[u8]) -> Option<u64> {
+    let n = usize::from(width) * usize::from(height);
+    pixels
+        .get(..n)
+        .map(|p| image_hash(width, height, p.iter().copied()))
 }
 
 /// The manifest's `base`: FNV-1a 64 over (kind, letter, id LE, hash LE) of every entry in index
@@ -708,21 +733,17 @@ pub fn write_pack(
     Ok(store::write_zip(&files))
 }
 
-/// Reads a pack: every check of the crate doc, then every image decoded. All or nothing.
-pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
-    let zip_err = |e: u6_intake::Error| PackError::Zip(e.to_string());
-    if !zip::is_zip(bytes) {
-        return Err(PackError::Zip("not a zip".into()));
-    }
-    // The directory first: names and declared sizes are checked before anything is inflated.
-    let zip::Directory::Entries(slices) =
-        zip::directory(bytes.len() as u64, 0, bytes, |_| true).map_err(zip_err)?
-    else {
-        return Err(PackError::Zip("directory outside the file".into()));
-    };
-    // Each name decoded once, into the one map every lookup below uses (sorted by name).
+/// The checks of a pack's zip directory alone, before anything is read of its entries: every
+/// name one this format has, none twice, and what the entries declare at most
+/// [`MAX_FILE_BYTES`] together. Returns the entries by name (sorted). [`read_pack`] makes them
+/// first, and [`Probe`] makes them on the directory it read, so a page refuses such a pack
+/// before it reads the file whole.
+pub(crate) fn check_directory(
+    slices: &[zip::Slice],
+) -> Result<BTreeMap<String, &zip::Slice>, PackError> {
+    // Each name decoded once, into the one map every lookup uses (sorted by name).
     let mut names: BTreeMap<String, &zip::Slice> = BTreeMap::new();
-    for s in &slices {
+    for s in slices {
         let n = s.name();
         if !known_name(&n) {
             return Err(PackError::Entry(format!("unknown entry {n:?}")));
@@ -731,26 +752,22 @@ pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
             return Err(PackError::Entry("an entry name twice".into()));
         }
     }
-    let declared: u64 = slices.iter().map(zip::Slice::unpacked).sum();
+    let declared = slices
+        .iter()
+        .fold(0u64, |sum, s| sum.saturating_add(s.unpacked()));
     if declared > MAX_FILE_BYTES {
         return Err(PackError::Limit(format!(
             "entries hold {declared} bytes, at most {MAX_FILE_BYTES}"
         )));
     }
-    // An entry is inflated only when it is wanted, one at a time; every one is checked for its
-    // declared size and its CRC-32 (u6_intake::zip::entry).
-    let read = |name: &str, max: u64| -> Result<Vec<u8>, PackError> {
-        let s = *names
-            .get(name)
-            .ok_or_else(|| PackError::Files(format!("no {name}")))?;
-        if s.unpacked() > max {
-            return Err(PackError::Limit(format!("{name} is larger than it can be")));
-        }
-        zip::entry(bytes, s).map_err(zip_err)
-    };
-    let manifest = read("manifest.json", MAX_MANIFEST)?;
+    Ok(names)
+}
+
+/// The checks of `manifest.json` on its own: a [`Manifest`] (no other field), this format, tile
+/// and scale, the generator's text within its length. [`read_pack`] and [`Probe`] make them.
+pub(crate) fn check_manifest(bytes: &[u8]) -> Result<Manifest, PackError> {
     let manifest: Manifest =
-        serde_json::from_slice(&manifest).map_err(|e| PackError::Manifest(e.to_string()))?;
+        serde_json::from_slice(bytes).map_err(|e| PackError::Manifest(e.to_string()))?;
     if manifest.format != FORMAT {
         return Err(PackError::Manifest("format is not u6-hdpack/1".into()));
     }
@@ -764,6 +781,34 @@ pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
     {
         return Err(PackError::Manifest("generator text too long".into()));
     }
+    Ok(manifest)
+}
+
+/// Reads a pack: every check of the crate doc, then every image decoded. All or nothing.
+pub fn read_pack(bytes: &[u8]) -> Result<Pack, PackError> {
+    let zip_err = |e: u6_intake::Error| PackError::Zip(e.to_string());
+    if !zip::is_zip(bytes) {
+        return Err(PackError::Zip("not a zip".into()));
+    }
+    // The directory first: names and declared sizes are checked before anything is inflated.
+    let zip::Directory::Entries(slices) =
+        zip::directory(bytes.len() as u64, 0, bytes, |_| true).map_err(zip_err)?
+    else {
+        return Err(PackError::Zip("directory outside the file".into()));
+    };
+    let names = check_directory(&slices)?;
+    // An entry is inflated only when it is wanted, one at a time; every one is checked for its
+    // declared size and its CRC-32 (u6_intake::zip::entry).
+    let read = |name: &str, max: u64| -> Result<Vec<u8>, PackError> {
+        let s = *names
+            .get(name)
+            .ok_or_else(|| PackError::Files(format!("no {name}")))?;
+        if s.unpacked() > max {
+            return Err(PackError::Limit(format!("{name} is larger than it can be")));
+        }
+        zip::entry(bytes, s).map_err(zip_err)
+    };
+    let manifest = check_manifest(&read("manifest.json", MAX_MANIFEST)?)?;
     let index = read("index.bin", (INDEX_HEAD + ENTRY_LEN * MAX_ENTRIES) as u64)?;
     let entries = decode_index(&index)?;
     let atlas_rows = check_entries(&entries)?;

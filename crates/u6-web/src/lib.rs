@@ -15,7 +15,12 @@
 //! ([`Game::hd_frame_ptr`], `320·S × 200·S`, S 2 or 4) from the shown frame and the images its
 //! source plane names (`u6_render::hd::Compositor`), when the frame, its sources or the HD
 //! setting changed since the last composition; off, nothing of it runs and the RGBA frame is as
-//! without it.
+//! without it. An HD pack (spec 07 H2): the page tells a dropped pack from game files with a
+//! [`PackProbe`] (its zip directory and manifest only), loads it once as an [`HdPack`] (checked
+//! whole, every image decoded: at most [`MAX_PACK_FILE_BYTES`] read, at most
+//! `u6_hdpack::MAX_DECODED_BYTES` decoded) and sets it on every game it starts
+//! ([`Game::set_hd_pack`]); a pack image whose classic image is the one the game holds now goes
+//! in front of MMPX.
 //!
 //! Sound: once the page has an AudioContext it calls [`Game::audio_start`] with its sample
 //! rate; every step then replays the game's MED calls on the emulated A500 audio machine
@@ -45,7 +50,9 @@ mod zipscan;
 
 use std::collections::BTreeMap;
 
-use u6_core::hd::HdView;
+use std::rc::Rc;
+
+use u6_core::hd::{HdView, PackCounts};
 use u6_core::objects::{BLOCK_COUNT, MAX_RECORDS};
 use u6_core::pacer::{self, Pacer, Speed};
 use u6_core::saveload::{MemStore, OBJLIST_FILE, attach, block_file, changed_since};
@@ -82,6 +89,144 @@ pub const MAX_GAME_FILES_BYTES: usize = 64 << 20;
 pub const MAX_SAVE_FILE_BYTES: usize = 2 + MAX_RECORDS * 8;
 /// The stored save together: the objlist and the 69 blocks, each at most [`MAX_SAVE_FILE_BYTES`].
 pub const MAX_SAVE_BYTES: usize = (1 + BLOCK_COUNT) * MAX_SAVE_FILE_BYTES;
+
+/// The largest HD pack file the page reads (spec 07 HD1): the entries the reader takes
+/// (`u6_hdpack::MAX_FILE_BYTES`) and the largest zip directory it reads
+/// (`u6_intake::zip::MAX_DIRECTORY_BYTES`).
+pub const MAX_PACK_FILE_BYTES: u64 =
+    u6_hdpack::MAX_FILE_BYTES + u6_intake::zip::MAX_DIRECTORY_BYTES;
+
+/// [`MAX_PACK_FILE_BYTES`] for the page (it checks a pack's size before it reads it).
+#[wasm_bindgen]
+pub fn max_pack_bytes() -> f64 {
+    MAX_PACK_FILE_BYTES as f64
+}
+
+/// Spec 07 HD1: whether a dropped file is an HD pack, read in slices (`u6_hdpack::Probe`: the
+/// end of the file, its zip directory if it starts before that, its `manifest.json`). The page
+/// reads each range [`PackProbe::need`] names and hands its bytes to [`PackProbe::give`] until
+/// [`PackProbe::told`].
+#[wasm_bindgen]
+pub struct PackProbe(u6_hdpack::Probe);
+
+#[wasm_bindgen]
+impl PackProbe {
+    /// A file of `size` bytes (a size that is not one: not a pack).
+    #[wasm_bindgen(constructor)]
+    pub fn new(size: f64) -> PackProbe {
+        let ok = size.is_finite() && size >= 0.0 && size.fract() == 0.0 && size < 2f64.powi(53);
+        PackProbe(u6_hdpack::Probe::new(if ok { size as u64 } else { 0 }))
+    }
+
+    /// The next range to read, `[start, end]` (`end` exclusive), or empty once told.
+    pub fn need(&self) -> Vec<f64> {
+        self.0
+            .need()
+            .map_or_else(Vec::new, |(start, end)| vec![start as f64, end as f64])
+    }
+
+    /// The bytes of the range [`PackProbe::need`] named.
+    pub fn give(&mut self, bytes: &[u8]) {
+        self.0.give(bytes);
+    }
+
+    /// Whether nothing more is needed.
+    pub fn told(&self) -> bool {
+        self.0.is_pack().is_some()
+    }
+
+    /// Whether the file is an HD pack (false until told).
+    pub fn is_pack(&self) -> bool {
+        self.0.is_pack() == Some(true)
+    }
+
+    /// For a pack whose zip directory or manifest already breaks the format (an entry a pack
+    /// does not have, entries over the limit, a manifest that does not read or is not this
+    /// format's): why it is refused, the fixed sentence [`HdPack::load`] gives, so the page
+    /// refuses it without reading it whole; empty otherwise.
+    pub fn refusal(&self) -> String {
+        self.0
+            .refusal()
+            .map_or_else(String::new, |e| refusal(e).into())
+    }
+}
+
+/// Spec 07 H2: an HD pack the page loaded ([`HdPack::load`]): one for the page, set on each game
+/// it starts ([`Game::set_hd_pack`]), freed when the page forgets it or loads another (a game it
+/// is set on keeps it until [`Game::forget_hd_pack`] or until it is freed).
+#[wasm_bindgen]
+pub struct HdPack {
+    pack: Rc<u6_core::hd::HdPack>,
+}
+
+#[wasm_bindgen]
+impl HdPack {
+    /// Reads and checks `bytes` as an HD pack (`u6_hdpack::read_pack`: the whole of it or
+    /// nothing, every image decoded). Fails with the reader's reason, or when `bytes` is over
+    /// [`MAX_PACK_FILE_BYTES`].
+    pub fn load(bytes: Vec<u8>) -> Result<HdPack, JsError> {
+        load_pack(&bytes).map_err(|msg| JsError::new(&msg))
+    }
+
+    /// The images the pack holds: tiles, portraits, panel bitmaps.
+    pub fn counts(&self) -> Vec<u32> {
+        counts(self.pack.counts())
+    }
+
+    /// The RGBA bytes its images take decoded.
+    pub fn decoded_bytes(&self) -> f64 {
+        self.pack.decoded_bytes() as f64
+    }
+}
+
+/// [`HdPack::load`] without the JS error type. A refusal says which rule of the format the pack
+/// breaks, in a fixed sentence: nothing of the pack (its names, its manifest's text) is in it.
+fn load_pack(bytes: &[u8]) -> Result<HdPack, String> {
+    if bytes.len() as u64 > MAX_PACK_FILE_BYTES {
+        return Err(format!(
+            "the file is over the {} MiB a pack can be.",
+            MAX_PACK_FILE_BYTES >> 20
+        ));
+    }
+    if !u6_intake::zip::is_zip(bytes) {
+        return Err(NOT_A_ZIP.into());
+    }
+    let pack = u6_hdpack::read_pack(bytes).map_err(|e| refusal(&e).to_string())?;
+    Ok(HdPack {
+        pack: Rc::new(u6_core::hd::HdPack::new(pack)),
+    })
+}
+
+/// The refusal of a file that does not start as a zip.
+const NOT_A_ZIP: &str = "it is not a zip.";
+
+/// The fixed sentence for a pack the reader refuses: which rule of the format it breaks.
+fn refusal(e: &u6_hdpack::PackError) -> &'static str {
+    use u6_hdpack::PackError;
+    match e {
+        PackError::Zip(_) => {
+            "it does not read as a zip (its directory, or an entry's size or CRC-32, is wrong)."
+        }
+        PackError::Entry(_) => "it holds a file an HD pack does not have, or one twice.",
+        PackError::Files(_) => "its files are not the ones its index names.",
+        PackError::Manifest(_) => "its manifest.json is not that of a u6-hdpack/1 pack.",
+        PackError::Index(_) => "its index.bin does not read.",
+        PackError::Limit(_) => "it is over the format's limits (4096 images, 150 MB decoded).",
+        PackError::Image(_) => "a picture is not a lossless WebP of the size its index gives it.",
+    }
+}
+
+fn counts(c: PackCounts) -> Vec<u32> {
+    [c.tiles, c.portraits, c.bitmaps].map(|n| n as u32).to_vec()
+}
+
+/// The [`u6_core::Kind`] of the page's number for it (0 classic, 1 tile, 2 portrait, 3 bitmap).
+fn kind_of(kind: u8) -> Option<u6_core::Kind> {
+    use u6_core::Kind;
+    [Kind::Classic, Kind::Tile, Kind::Portrait, Kind::Bitmap]
+        .into_iter()
+        .find(|&k| k as u8 == kind)
+}
 
 /// [`MAX_INPUT_BYTES`] for the page.
 #[wasm_bindgen]
@@ -231,6 +376,8 @@ pub struct Game {
     pacer: Pacer,
     /// The HD frame ([`Game::set_hd`]).
     hd: HdView,
+    /// The HD pack set ([`Game::set_hd_pack`]).
+    hd_pack: Option<Rc<u6_core::hd::HdPack>>,
 }
 
 impl Default for Game {
@@ -267,6 +414,7 @@ impl Game {
             audio_buf: Vec::new(),
             pacer: Pacer::new(),
             hd: HdView::new(),
+            hd_pack: None,
         };
         game.redraw();
         game
@@ -651,6 +799,79 @@ impl Game {
             .collect()
     }
 
+    /// Spec 07 H2: `pack`'s images go in front of MMPX in this game's HD frame, for this game and
+    /// every one it starts later, in place of the pack set before. With HD on it composes at once
+    /// (only the blocks whose HD image changed) and moves [`Game::frame_version`], with no step;
+    /// off, nothing of the pack runs until HD is switched on.
+    pub fn set_hd_pack(&mut self, pack: &HdPack) {
+        self.attach_pack(Some(pack.pack.clone()));
+    }
+
+    /// Spec 07 H2: no HD pack any more: MMPX for every image, at once as [`Game::set_hd_pack`].
+    pub fn forget_hd_pack(&mut self) {
+        self.attach_pack(None);
+    }
+
+    /// Whether an HD pack is set.
+    pub fn has_hd_pack(&self) -> bool {
+        self.hd_pack.is_some()
+    }
+
+    /// The images of the pack set that the running game would show now, by kind: tiles,
+    /// portraits, panel bitmaps (those whose classic image is the one the pack's image was made
+    /// from); empty without a pack or a game.
+    pub fn hd_pack_matches(&self) -> Vec<u32> {
+        match (&self.hd_pack, &self.engine) {
+            (Some(pack), Some(engine)) => counts(pack.matches(engine)),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The portraits the running game's archives hold (`u6_core::converse::portraits`, what
+    /// the HD tool packs); 0 before a start. For tests and diagnostics.
+    pub fn hd_portraits(&self) -> u32 {
+        self.engine.as_ref().map_or(0, |e| {
+            u6_core::converse::portraits(&e.state(), e.io().files()).len() as u32
+        })
+    }
+
+    /// The HD images this game's compositor made so far, by MMPX and from the pack, and the
+    /// bytes its cache holds now. For tests and diagnostics.
+    pub fn hd_cache_counts(&self) -> Vec<f64> {
+        let c = self.hd.compositor().cache();
+        vec![c.made() as f64, c.packed() as f64, c.bytes() as f64]
+    }
+
+    /// The source of pixel (x, y) of the shown frame (spec 07 HD0's plane): kind (0 classic, 1
+    /// tile, 2 portrait, 3 bitmap), id, version, u, v, flags; empty before a start or outside
+    /// the screen. For tests and diagnostics.
+    pub fn hd_source_at(&self, x: u32, y: u32) -> Vec<u32> {
+        let src = self
+            .engine
+            .as_ref()
+            .and_then(|e| e.frame().src_at(x as usize, y as usize));
+        src.map_or_else(Vec::new, |s| {
+            vec![
+                s.kind as u32,
+                u32::from(s.id),
+                s.ver,
+                u32::from(s.u),
+                u32::from(s.v),
+                u32::from(s.flags),
+            ]
+        })
+    }
+
+    /// The content key image (`kind`, `id`) has in the running game now (the hash an HD pack
+    /// keys its image by), 16 lower-case hex digits; empty when it has none. For tests and
+    /// diagnostics.
+    pub fn hd_image_key(&self, kind: u8, id: u16) -> String {
+        let (Some(engine), Some(kind)) = (&self.engine, kind_of(kind)) else {
+            return String::new();
+        };
+        u6_core::hd::image_key(engine, kind, id).map_or_else(String::new, |k| format!("{k:016x}"))
+    }
+
     /// The rect of the HD frame (x, y, width, height in its pixels) the compositions since the
     /// last call wrote, empty when they wrote nothing: the page that drew the frame before them
     /// redraws only that.
@@ -945,6 +1166,17 @@ impl Game {
         self.redraw();
         self.hd.restart();
         self.compose_hd();
+    }
+
+    /// Sets the HD pack (`None`: none): with HD on, composed at once and the page's version
+    /// moved, as [`Game::set_hd`] does.
+    fn attach_pack(&mut self, pack: Option<Rc<u6_core::hd::HdPack>>) {
+        self.hd_pack = pack.clone();
+        self.hd.set_pack(pack);
+        if self.hd.on() {
+            self.conversions += 1;
+            self.compose_hd();
+        }
     }
 
     /// With HD on: composes the HD frame from the engine's frame (black before a start) when it
@@ -2288,7 +2520,9 @@ mod tests {
     /// `c` draws the pixels of the last cell drawn again in the same colours but classic and
     /// presents the sources alone, `d` draws record 1 over that cell again (its colours the same,
     /// its sources the record's) and presents the sources alone, `b` draws record 2 over the
-    /// first cell and presents.
+    /// first cell and presents, `m` rewrites record 1 in place as the shore merge does (its
+    /// pixels and its version move), draws it at the last cell and presents (the cells drawn
+    /// before keep pixels of its old version).
     fn tile_engine() -> Engine {
         let mut state = u6_core::State::empty();
         for (r, seed) in [(1usize, 3u32), (2, 7), (3, 3)] {
@@ -2323,6 +2557,21 @@ mod tests {
                             io.draw(|fb| u6_core::gfx::blit::blit_front(&s.gfx, fb, 2, 16, 32));
                             io.present();
                         }
+                        Key::Char('m') => {
+                            drop(s);
+                            let mut w = state.borrow_mut();
+                            let rec = &mut w.gfx.records[1];
+                            for p in rec.pixels.iter_mut() {
+                                *p = *p % 4 + 1;
+                            }
+                            w.gfx.cache.record_changed(1);
+                            drop(w);
+                            let s = state.borrow();
+                            io.draw(|fb| {
+                                u6_core::gfx::blit::blit_front(&s.gfx, fb, 1, cell * 16, 32)
+                            });
+                            io.present();
+                        }
                         Key::Char('c') => {
                             io.draw(|fb| {
                                 for i in 0..256 {
@@ -2354,6 +2603,14 @@ mod tests {
     /// record's now takes its block of MMPX ×S of the record (transparent sub-pixels its classic
     /// colour), every other pixel its classic colour S × S.
     fn expected_hd(game: &Game, scale: Scale) -> Vec<u8> {
+        expected_hd_with(game, scale, None)
+    }
+
+    /// [`expected_hd`] with the pack `pack` set: a tile pixel's block is of the pack's image
+    /// instead when the pack holds one for its record made from the record's bytes now (at 2×
+    /// `u6_render::hd::pack_words`, each sub-pixel over the classic colour, both tested on their
+    /// own in u6-render).
+    fn expected_hd_with(game: &Game, scale: Scale, pack: Option<&u6_hdpack::Pack>) -> Vec<u8> {
         let e = game.engine.as_ref().unwrap();
         let (fb, st) = (e.frame(), e.state());
         let s = scale.factor();
@@ -2373,6 +2630,15 @@ mod tests {
                     let c = if hd {
                         let words = made.entry(src.id).or_insert_with(|| {
                             let rec = &st.gfx.records[id];
+                            let key = u6_hdpack::tile_hash(&rec.pixels, &rec.transparent);
+                            let art = pack
+                                .and_then(|p| p.get(u6_hdpack::ImageId::Tile(src.id)))
+                                .filter(|a| Some(a.hash) == key);
+                            if let Some(a) = art {
+                                let mut out = Vec::new();
+                                u6_render::hd::pack_words(&a.image.pixels, 64, 64, scale, &mut out);
+                                return out;
+                            }
                             let input: Vec<u32> = (0..256)
                                 .map(|i| {
                                     if rec.transparent[i] {
@@ -2390,11 +2656,7 @@ mod tests {
                         });
                         let (u, v) = (usize::from(src.u), usize::from(src.v));
                         let w = words[(v * s + k / s) * 16 * s + u * s + k % s];
-                        if w >> 24 == 0 {
-                            classic
-                        } else {
-                            w.to_le_bytes()
-                        }
+                        u6_render::hd::over(w, u32::from_le_bytes(classic)).to_le_bytes()
                     } else {
                         classic
                     };
@@ -2565,6 +2827,307 @@ mod tests {
             game.hd_frame_rgba() == expected_hd(&game, Scale::X2),
             "and its next"
         );
+    }
+
+    /// A synthetic pack image of a tile: 64 × 64 RGBA of a pattern seeded by `seed`, opaque but
+    /// for a transparent stripe and a stripe of alpha between 0 and 255.
+    fn pack_tile(r: u16, hash: u64, seed: u8) -> u6_hdpack::PackImage {
+        let mut image = u6_hdpack::Rgba::new(64, 64);
+        for (i, p) in image.pixels.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i % 64, i / 64);
+            let a = match (x + y) % 11 {
+                0 => 0,
+                1 => 90,
+                _ => 255,
+            };
+            p.copy_from_slice(&[(x as u8).wrapping_mul(seed), (y * 4) as u8, seed, a]);
+        }
+        u6_hdpack::PackImage {
+            id: u6_hdpack::ImageId::Tile(r),
+            hash,
+            image,
+        }
+    }
+
+    fn generator() -> u6_hdpack::Generator {
+        u6_hdpack::Generator {
+            name: "test".into(),
+            version: "0".into(),
+            engine: "none".into(),
+            date: "2026-10-16".into(),
+        }
+    }
+
+    /// A pack of `images` written and read back as the page reads it.
+    fn loaded(images: &[u6_hdpack::PackImage]) -> (HdPack, u6_hdpack::Pack) {
+        let bytes = u6_hdpack::write_pack(images, &generator(), true).unwrap();
+        let read = u6_hdpack::read_pack(&bytes).unwrap();
+        (load_pack(&bytes).unwrap(), read)
+    }
+
+    /// Record `r`'s content key in the running game now.
+    fn key_of(game: &Game, r: u16) -> u64 {
+        let k = game.hd_image_key(1, r);
+        assert_eq!(k.len(), 16);
+        u64::from_str_radix(&k, 16).unwrap()
+    }
+
+    /// Spec 07 H2 in the platform: a pack set on the game puts its image of record 1 (made from
+    /// the record's bytes now) in front of MMPX at 4× and 2× (the frame by the definition), its
+    /// image of record 2 (made from other bytes) is not used; setting and forgetting the pack
+    /// compose at once with no step, write only the cells whose HD image changed, and equal a
+    /// game that never had the other; once record 1 is rewritten in place (the shore merge's
+    /// path: pixels and version), the pack's image is not used: the cell drawn from its new bytes
+    /// shows MMPX of them, the cells drawn before are classic (stale). With HD off nothing of the
+    /// pack runs.
+    #[test]
+    fn an_hd_pack_goes_in_front_of_mmpx_for_the_bytes_it_was_made_from() {
+        // Record 1 at cells 2 and 3 of row 2, record 2 at cell 1.
+        let mut game = Game::new();
+        game.put_on_screen(tile_engine());
+        for k in ["a", "a", "a", "b"] {
+            press(&mut game, k);
+        }
+        let (pack, read) = loaded(&[
+            pack_tile(1, key_of(&game, 1), 7),
+            pack_tile(2, key_of(&game, 2) ^ 1, 9),
+        ]);
+        assert_eq!(pack.counts(), [2, 0, 0]);
+        assert_eq!(pack.decoded_bytes(), (2 * 64 * 64 * 4) as f64);
+        // Off: setting the pack composes nothing; the RGBA path as before.
+        let v = game.frame_version();
+        game.set_hd_pack(&pack);
+        assert!(
+            game.has_hd_pack() && game.hd_frame_len() == 0,
+            "off: no HD frame"
+        );
+        assert_eq!(game.frame_version(), v, "off: nothing to draw");
+        assert_eq!(
+            game.hd_pack_matches(),
+            [1, 0, 0],
+            "record 1 matches, 2 does not"
+        );
+        for (s, scale) in [(4, Scale::X4), (2, Scale::X2)] {
+            game.set_hd(true, s);
+            let with = expected_hd_with(&game, scale, Some(&read));
+            assert!(
+                game.hd_frame_rgba() == with,
+                "{s}x: the pack's image of record 1"
+            );
+            assert!(with != expected_hd(&game, scale), "{s}x: not MMPX's");
+            game.hd_take_dirty();
+            // Forgotten: MMPX at once, only the cells of record 1 written (cells 2 and 3).
+            let v = game.frame_version();
+            game.forget_hd_pack();
+            assert!(
+                game.frame_version() > v,
+                "{s}x: the forget is drawn at once"
+            );
+            assert!(
+                game.hd_frame_rgba() == expected_hd(&game, scale),
+                "{s}x: MMPX"
+            );
+            assert_eq!(
+                game.hd_take_dirty(),
+                vec![32 * s, 32 * s, 32 * s, 16 * s],
+                "{s}x: the cells whose HD image changed"
+            );
+            let mut fresh = Game::new();
+            fresh.put_on_screen(tile_engine());
+            for k in ["a", "a", "a", "b"] {
+                press(&mut fresh, k);
+            }
+            fresh.set_hd(true, s);
+            assert!(
+                game.hd_frame_rgba() == fresh.hd_frame_rgba(),
+                "{s}x: a game never given it"
+            );
+            // Set again: the pack's image, as a game given it from the start.
+            game.set_hd_pack(&pack);
+            assert!(game.hd_frame_rgba() == with, "{s}x: set again");
+            fresh.set_hd_pack(&pack);
+            assert!(fresh.hd_frame_rgba() == with, "{s}x: a new game given it");
+            let [_, packed, _] = game.hd_cache_counts()[..] else {
+                panic!("three counts")
+            };
+            assert!(packed >= 1.0, "{s}x: made from the pack");
+        }
+        // Record 1 rewritten in place and drawn at the last cell (3): its key moved, so the
+        // pack's image (made from its earlier bytes) is not used; the cell shows MMPX of its
+        // bytes now and cell 2, drawn before from its old version, is classic.
+        let before = cell_bytes(&game, 3, 2);
+        press(&mut game, "m");
+        assert_eq!(game.hd_pack_matches(), [0, 0, 0], "nothing matches now");
+        let now = expected_hd_with(&game, Scale::X2, Some(&read));
+        assert!(
+            now == expected_hd(&game, Scale::X2),
+            "no pack image is used"
+        );
+        assert!(
+            game.hd_frame_rgba() == now,
+            "MMPX of the new bytes, stale classic"
+        );
+        assert!(
+            cell_bytes(&game, 3, 2) != before,
+            "the last cell is drawn again"
+        );
+        let rgba = game.rgba.clone();
+        let classic: Vec<u8> = (64..96)
+            .flat_map(|y| {
+                (64..96).flat_map(move |x| {
+                    let at = ((y / 2) * 320 + x / 2) * 4;
+                    [at, at + 1, at + 2, at + 3]
+                })
+            })
+            .map(|i| rgba[i])
+            .collect();
+        assert!(
+            cell_bytes(&game, 2, 2) == classic,
+            "the old version's cell: classic"
+        );
+        // Off again: setting or forgetting the pack composes nothing.
+        game.set_hd(false, 2);
+        let held = game.hd_frame_rgba();
+        let v = game.frame_version();
+        game.forget_hd_pack();
+        game.set_hd_pack(&pack);
+        assert_eq!(game.frame_version(), v);
+        assert!(game.hd_frame_rgba() == held, "off: not composed");
+        // A start keeps the pack on the game (the page sets it on each new one too).
+        game.put_on_screen(tile_engine());
+        assert!(game.has_hd_pack());
+        assert_eq!(game.hd_pack_matches(), [1, 0, 0]);
+    }
+
+    /// One pixel by hand (no reference code): record 1's first pixel is colour 1, (40, 90, 254)
+    /// in [`tile_engine`]'s palette, drawn at (16, 32). The pack's picture repeats one 2 × 2
+    /// block: (200, 10, 0) opaque, (100, 30, 0) opaque, then two transparent pixels. At 4× the
+    /// pixel's block is those (the transparent ones the classic colour); at 2× every sub-pixel is
+    /// the block's mean, (150, 20, 0) at alpha 128 ((200·255 + 100·255 + 255) / 510 = 150,
+    /// (10·255 + 30·255 + 255) / 510 = 20, (510 + 2) / 4 = 128), over the classic colour:
+    /// (150·128 + 40·127 + 127) / 255 = 95, (20·128 + 90·127 + 127) / 255 = 55,
+    /// (0·128 + 254·127 + 127) / 255 = 127.
+    #[test]
+    fn a_pack_pixel_by_hand_at_4x_and_2x() {
+        let mut game = Game::new();
+        game.put_on_screen(tile_engine());
+        press(&mut game, "a");
+        let mut image = u6_hdpack::Rgba::new(64, 64);
+        for (i, p) in image.pixels.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i % 64, i / 64);
+            p.copy_from_slice(match (x % 2, y % 2) {
+                (0, 0) => &[200, 10, 0, 255],
+                (1, 0) => &[100, 30, 0, 255],
+                _ => &[0, 0, 0, 0],
+            });
+        }
+        let hash = key_of(&game, 1);
+        let (pack, _) = loaded(&[u6_hdpack::PackImage {
+            id: u6_hdpack::ImageId::Tile(1),
+            hash,
+            image,
+        }]);
+        game.set_hd_pack(&pack);
+        let px = |game: &Game, s: usize, (x, y): (usize, usize)| {
+            let at = (y * 320 * s + x) * 4;
+            game.hd_frame_rgba()[at..at + 4].to_vec()
+        };
+        assert_eq!(&game.rgba[(32 * 320 + 16) * 4..][..4], [40, 90, 254, 255]);
+        game.set_hd(true, 4);
+        assert_eq!(px(&game, 4, (64, 128)), [200, 10, 0, 255]);
+        assert_eq!(px(&game, 4, (65, 128)), [100, 30, 0, 255]);
+        assert_eq!(px(&game, 4, (64, 129)), [40, 90, 254, 255]);
+        assert_eq!(px(&game, 4, (65, 129)), [40, 90, 254, 255]);
+        game.set_hd(true, 2);
+        for (x, y) in [(32, 64), (33, 64), (32, 65), (33, 65)] {
+            assert_eq!(px(&game, 2, (x, y)), [95, 55, 127, 255], "({x}, {y})");
+        }
+    }
+
+    /// The pack's limits and refusals as the page sees them: a pack that does not read is
+    /// refused with the reader's reason, a file over [`MAX_PACK_FILE_BYTES`] before it is read,
+    /// and the probe tells a pack from a zip of game files.
+    #[test]
+    fn a_pack_that_does_not_read_is_refused_and_the_probe_tells_one() {
+        let bytes = u6_hdpack::write_pack(&[pack_tile(5, 1, 3)], &generator(), true).unwrap();
+        let mut bad = bytes.clone();
+        let mid = bad.len() / 2;
+        bad[mid] ^= 1;
+        let refused = load_pack(&bad).err().unwrap();
+        assert!(
+            refused.starts_with("it does not read as a zip"),
+            "{refused}"
+        );
+        let mut files = u6_intake::zip::read_zip(&bytes, |_| true).unwrap();
+        files.push(("notes.txt".into(), b"x".to_vec()));
+        let extra = refused_by(&files);
+        assert!(extra.starts_with("it holds a file"), "{extra}");
+        let huge = vec![0u8; MAX_PACK_FILE_BYTES as usize + 1];
+        let over = load_pack(&huge).err().unwrap();
+        assert!(over.starts_with("the file is over the 159 MiB"), "{over}");
+        assert_eq!(
+            load_pack(b"PP20 not a zip").err().unwrap(),
+            "it is not a zip."
+        );
+        let tell = |file: &[u8]| {
+            let mut p = PackProbe::new(file.len() as f64);
+            while let [start, end] = p.need()[..] {
+                p.give(&file[start as usize..end as usize]);
+            }
+            assert!(p.told());
+            p.is_pack()
+        };
+        assert!(
+            tell(&bytes) && tell(&bad),
+            "a pack (a broken one is refused by the loader)"
+        );
+        // A pack whose directory breaks the format is refused by the probe already.
+        let mut p = PackProbe::new(0.0);
+        assert!(p.refusal().is_empty());
+        let entries: Vec<zipscan::tests::Entry> = files
+            .iter()
+            .map(|(n, b)| zipscan::tests::stored(n, b))
+            .collect();
+        let extra = zipscan::tests::zip(&entries);
+        p = PackProbe::new(extra.len() as f64);
+        while let [start, end] = p.need()[..] {
+            p.give(&extra[start as usize..end as usize]);
+        }
+        assert!(p.is_pack());
+        assert_eq!(
+            p.refusal(),
+            "it holds a file an HD pack does not have, or one twice."
+        );
+        let disks = zipscan::tests::zip(&[zipscan::tests::stored("Disk 1.adf", &[1; 64])]);
+        assert!(!tell(&disks) && !tell(b"PP20") && !tell(&[]));
+        assert!(!PackProbe::new(f64::NAN).is_pack() && PackProbe::new(-1.0).told());
+    }
+
+    /// Why the pack of `files` (stored in a zip as they are) is refused.
+    fn refused_by(files: &[(String, Vec<u8>)]) -> String {
+        let entries: Vec<zipscan::tests::Entry> = files
+            .iter()
+            .map(|(n, b)| zipscan::tests::stored(n, b))
+            .collect();
+        load_pack(&zipscan::tests::zip(&entries)).err().unwrap()
+    }
+
+    /// The plane and the keys the page's tests read: the source of a pixel drawn from a record,
+    /// and the record's key (empty before a start, outside the screen, or for no such image).
+    #[test]
+    fn the_source_of_a_pixel_and_the_key_of_its_image() {
+        let mut game = Game::new();
+        assert!(game.hd_source_at(0, 0).is_empty() && game.hd_image_key(1, 1).is_empty());
+        game.put_on_screen(tile_engine());
+        press(&mut game, "a");
+        let src = game.hd_source_at(16 + 5, 32 + 9);
+        assert_eq!(src, vec![1, 1, 0, 5, 9, 0], "record 1 at (5, 9), version 0");
+        assert!(game.hd_source_at(320, 0).is_empty());
+        let e = game.engine.as_ref().unwrap();
+        let rec = &e.state().gfx.records[1];
+        let want = u6_hdpack::tile_hash(&rec.pixels, &rec.transparent).unwrap();
+        assert_eq!(game.hd_image_key(1, 1), format!("{want:016x}"));
+        assert!(game.hd_image_key(9, 1).is_empty() && game.hd_image_key(3, 7).is_empty());
     }
 
     /// Before a start the HD frame is the black frame scaled.

@@ -1,6 +1,7 @@
 //! The MMPX port against the reference's vectors, and the compositor on synthetic frames and
 //! images: the blocks it writes for each kind of pixel, a composition kept across changes equal to
-//! a new one, the rect it reports, the bound of its cache. No game data.
+//! a new one, the rect it reports, the bound of its cache, and a synthetic pack in front of MMPX
+//! (spec 07 H2). No game data.
 
 use super::*;
 use crate::{FLAG_OUTLINE, FLAG_OVERLAY};
@@ -102,11 +103,15 @@ impl X {
 /// A synthetic image: kind, id, version, width, height, pixels, transparency.
 type Pic = (Kind, u16, u32, usize, usize, Vec<u8>, Option<Vec<bool>>);
 
-/// Synthetic images by (kind, id), and how often they were asked for.
+/// Synthetic images by (kind, id), and how often they and their keys were asked for; `salt`
+/// changes every key without changing a pixel (an image whose bytes changed where its pixels do
+/// not show it).
 #[derive(Clone, Default)]
 struct Pics {
     images: Vec<Pic>,
     asked: usize,
+    keys: usize,
+    salt: u64,
 }
 
 impl Pics {
@@ -165,6 +170,25 @@ impl Images for Pics {
             transparent: e.6.as_deref(),
         })
     }
+
+    fn key(&mut self, kind: Kind, id: u16) -> Option<u64> {
+        self.keys += 1;
+        let e = self.images.iter().find(|e| (e.0, e.1) == (kind, id))?;
+        Some(pic_key(e) ^ self.salt)
+    }
+}
+
+/// A content key of a synthetic image (FNV-1a over its size, pixels and transparency): equal
+/// content, equal key.
+fn pic_key(e: &Pic) -> u64 {
+    let clear = e.6.iter().flatten().map(|&t| u8::from(t));
+    [e.3 as u8, e.4 as u8]
+        .into_iter()
+        .chain(e.5.iter().copied())
+        .chain(clear)
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
 }
 
 /// A `w` × `h` image of colours 1..`k` with runs (so MMPX changes it), seeded.
@@ -1145,4 +1169,622 @@ fn bench_a_walk() {
             c.cache().bytes() >> 10
         );
     }
+}
+
+// --- spec 07 H2: a pack in front of MMPX ------------------------------------------------------
+
+/// A synthetic pack: per (kind, id), the content key its image was made from, the image's size
+/// and its RGBA bytes.
+#[derive(Clone, Default)]
+struct TestPack {
+    images: Vec<(Kind, u16, u64, usize, usize, Vec<u8>)>,
+}
+
+impl TestPack {
+    /// The pack image of (kind, id) for content key `key`: `w4 × h4` RGBA of a pattern seeded by
+    /// `seed`, its alpha opaque, with a transparent band and a band of alpha between 0 and 255.
+    fn put(&mut self, kind: Kind, id: u16, key: u64, (w4, h4): (usize, usize), seed: u64) {
+        let mut x = X(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let rgba = (0..w4 * h4)
+            .flat_map(|i| {
+                let (u, v) = (i % w4, i / w4);
+                let a = match (u + 2 * v) % 13 {
+                    0 => 0,
+                    1 => 1 + x.below(254) as u8,
+                    _ => 255,
+                };
+                [x.below(256) as u8, (u * 4) as u8, (v * 3) as u8, a]
+            })
+            .collect();
+        self.images.retain(|e| (e.0, e.1) != (kind, id));
+        self.images.push((kind, id, key, w4, h4, rgba));
+    }
+}
+
+impl Pack for TestPack {
+    fn hd(&self, kind: Kind, id: u16, key: u64) -> Option<PackHd<'_>> {
+        let i = self
+            .images
+            .iter()
+            .position(|e| (e.0, e.1, e.2) == (kind, id, key))?;
+        let e = &self.images[i];
+        Some(PackHd {
+            index: i as u32,
+            width: e.3,
+            height: e.4,
+            rgba: &e.5,
+        })
+    }
+}
+
+/// The key of (kind, id) in `pics` now.
+fn key_of(pics: &Pics, kind: Kind, id: u16) -> u64 {
+    pic_key(
+        pics.images
+            .iter()
+            .find(|e| (e.0, e.1) == (kind, id))
+            .unwrap(),
+    )
+}
+
+/// `c` over `classic` by the definition, channel by channel (the reference of [`over`]).
+fn over_ref(c: [u8; 4], classic: [u8; 4]) -> [u8; 4] {
+    match c[3] {
+        255 => c,
+        0 => classic,
+        a => {
+            let a = u32::from(a);
+            let m = |i: usize| {
+                ((u32::from(c[i]) * a + u32::from(classic[i]) * (255 - a) + 127) / 255) as u8
+            };
+            [m(0), m(1), m(2), 255]
+        }
+    }
+}
+
+/// A pack image at `scale` by the definition: at 4× its bytes, at 2× each 2 × 2 block's
+/// alpha-weighted mean colour and mean alpha, rounded to nearest (no alpha: transparent).
+fn pack_ref(rgba: &[u8], w4: usize, h4: usize, scale: Scale) -> Vec<[u8; 4]> {
+    let at = |x: usize, y: usize| {
+        let i = (y * w4 + x) * 4;
+        [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+    };
+    match scale {
+        Scale::X4 => (0..w4 * h4).map(|i| at(i % w4, i / w4)).collect(),
+        Scale::X2 => (0..w4 / 2 * h4 / 2)
+            .map(|i| {
+                let (x, y) = (i % (w4 / 2), i / (w4 / 2));
+                let ps = [
+                    at(2 * x, 2 * y),
+                    at(2 * x + 1, 2 * y),
+                    at(2 * x, 2 * y + 1),
+                    at(2 * x + 1, 2 * y + 1),
+                ];
+                let a: u32 = ps.iter().map(|p| u32::from(p[3])).sum();
+                if a == 0 {
+                    return [0; 4];
+                }
+                let ch = |k: usize| {
+                    let sum: u32 = ps.iter().map(|p| u32::from(p[k]) * u32::from(p[3])).sum();
+                    ((2 * sum + a) / (2 * a)) as u8
+                };
+                [ch(0), ch(1), ch(2), ((a + 2) / 4) as u8]
+            })
+            .collect(),
+    }
+}
+
+/// An HD image's row length and its sub-pixels.
+type SubPixels = (usize, Vec<[u8; 4]>);
+
+/// The HD frame of `fb` by the definition (no compositor): a current unflagged pixel of an image
+/// takes its block of the pack's image for the image's content when the pack has one of the
+/// right size, else of MMPX; each sub-pixel over the classic colour; every other pixel its
+/// classic colour.
+fn expected(fb: &Framebuffer, pics: &Pics, pack: Option<&TestPack>, scale: Scale) -> Vec<u32> {
+    let s = scale.factor();
+    let ow = WIDTH * s;
+    let mut out = vec![0u32; ow * HEIGHT * s];
+    // Each image's HD sub-pixels and their row length, made once.
+    let mut made: HashMap<(Kind, u16), SubPixels> = HashMap::new();
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+            let src = fb.src_at(x, y).unwrap_or(Src::CLASSIC);
+            let pic = pics
+                .images
+                .iter()
+                .find(|e| (e.0, e.1) == (src.kind, src.id));
+            let shown = pic.filter(|e| {
+                src.kind != Kind::Classic
+                    && src.flags == 0
+                    && src.ver == e.2
+                    && usize::from(src.u) < e.3
+                    && usize::from(src.v) < e.4
+            });
+            for k in 0..s * s {
+                let (dx, dy) = (k % s, k / s);
+                let c = match shown {
+                    None => classic,
+                    Some(e) => {
+                        let (hw, hd) = made.entry((e.0, e.1)).or_insert_with(|| {
+                            let art = pack.and_then(|p| {
+                                p.images.iter().find(|a| {
+                                    (a.0, a.1, a.2) == (e.0, e.1, pic_key(e))
+                                        && (a.3, a.4) == (e.3 * 4, e.4 * 4)
+                                })
+                            });
+                            match art {
+                                Some(a) => (e.3 * s, pack_ref(&a.5, a.3, a.4, scale)),
+                                None => {
+                                    let (hw, hd) = hd_of(pics, e.0, e.1, &fb.palette, scale);
+                                    (hw, hd.iter().map(|w| w.to_le_bytes()).collect())
+                                }
+                            }
+                        });
+                        let (u, v) = (usize::from(src.u) * s + dx, usize::from(src.v) * s + dy);
+                        u32::from_le_bytes(over_ref(hd[v * *hw + u], classic.to_le_bytes()))
+                    }
+                };
+                out[(y * s + dy) * ow + x * s + dx] = c;
+            }
+        }
+    }
+    out
+}
+
+fn fresh_with(fb: &Framebuffer, pics: &Pics, pack: Option<&TestPack>, scale: Scale) -> Vec<u32> {
+    let mut c = Compositor::new();
+    c.set_pack(pack.map(|p| Rc::new(p.clone()) as Rc<dyn Pack>));
+    c.compose(fb, &mut pics.clone(), scale);
+    c.rgba().to_vec()
+}
+
+#[test]
+fn over_is_the_sub_pixel_its_alpha_mixed_over_the_classic_colour() {
+    let classic = u32::from_le_bytes([10, 200, 30, 255]);
+    assert_eq!(
+        over(u32::from_le_bytes([1, 2, 3, 255]), classic),
+        0xff03_0201
+    );
+    assert_eq!(over(u32::from_le_bytes([1, 2, 3, 0]), classic), classic);
+    assert_eq!(over(0, classic), classic, "MMPX's transparent word");
+    let mut x = X(3);
+    for _ in 0..20_000 {
+        let c = [0, 0, 0, 0].map(|_: u8| x.below(256) as u8);
+        let k = [
+            x.below(256) as u8,
+            x.below(256) as u8,
+            x.below(256) as u8,
+            255,
+        ];
+        let got = over(u32::from_le_bytes(c), u32::from_le_bytes(k)).to_le_bytes();
+        assert_eq!(got, over_ref(c, k));
+    }
+    // Half alpha over black: half the colour, rounded to nearest.
+    let half = over(u32::from_le_bytes([200, 101, 0, 128]), 0xff00_0000).to_le_bytes();
+    assert_eq!(half, [100, 51, 0, 255]);
+}
+
+#[test]
+fn a_pack_image_at_2x_is_its_alpha_weighted_box_mean_and_at_4x_itself() {
+    let mut x = X(11);
+    for (w4, h4) in [(4, 4), (64, 64), (224, 256), (12, 8)] {
+        let mut rgba: Vec<u8> = (0..w4 * h4 * 4).map(|_| x.below(256) as u8).collect();
+        // Blocks wholly transparent, wholly opaque, and alpha mixed.
+        for (i, p) in rgba.chunks_exact_mut(4).enumerate() {
+            let block = (i % w4 / 2) + (i / w4 / 2);
+            p[3] = match block % 4 {
+                0 => 0,
+                1 => 255,
+                _ => p[3],
+            };
+        }
+        for scale in [Scale::X2, Scale::X4] {
+            let mut out = vec![7];
+            pack_words(&rgba, w4, h4, scale, &mut out);
+            let want: Vec<u32> = pack_ref(&rgba, w4, h4, scale)
+                .into_iter()
+                .map(u32::from_le_bytes)
+                .collect();
+            assert!(out == want, "{w4}x{h4} at {scale:?}");
+        }
+    }
+    // A block of one opaque colour stays that colour; a block with one opaque pixel and three
+    // transparent ones is that pixel's colour at a quarter of its alpha (rounded: 64).
+    let mut one = vec![0u8; 2 * 2 * 4];
+    one[..4].copy_from_slice(&[9, 99, 199, 255]);
+    let mut out = Vec::new();
+    pack_words(&one, 2, 2, Scale::X2, &mut out);
+    assert_eq!(out, [u32::from_le_bytes([9, 99, 199, 64])]);
+}
+
+#[test]
+fn a_pack_image_goes_in_front_of_mmpx_where_its_content_key_matches() {
+    let mut pics = Pics::default();
+    let clear: Vec<bool> = (0..256).map(|i| (i % 16 + i / 16) % 7 == 0).collect();
+    pics.put(Kind::Tile, 1, (16, 16), art(1, 16, 16, 4), Some(clear));
+    pics.put(Kind::Tile, 2, (16, 16), art(2, 16, 16, 4), None);
+    pics.put(Kind::Tile, 3, (16, 16), art(3, 16, 16, 4), None);
+    pics.put(Kind::Tile, 4, (16, 16), art(4, 16, 16, 4), None);
+    pics.put(Kind::Portrait, 0x6105, (56, 64), art(5, 56, 64, 6), None);
+    pics.put(Kind::Bitmap, 1, (40, 30), art(6, 40, 30, 5), None);
+    let mut pack = TestPack::default();
+    // Tile 1 and the portrait: made from their content. Tile 2: made from other content. Tile
+    // 4: the right content at the wrong size. The bitmap: made from its content.
+    pack.put(Kind::Tile, 1, key_of(&pics, Kind::Tile, 1), (64, 64), 1);
+    pack.put(Kind::Tile, 2, key_of(&pics, Kind::Tile, 2) ^ 1, (64, 64), 2);
+    pack.put(Kind::Tile, 4, key_of(&pics, Kind::Tile, 4), (32, 32), 4);
+    let portrait = key_of(&pics, Kind::Portrait, 0x6105);
+    pack.put(Kind::Portrait, 0x6105, portrait, (224, 256), 5);
+    pack.put(
+        Kind::Bitmap,
+        1,
+        key_of(&pics, Kind::Bitmap, 1),
+        (160, 120),
+        6,
+    );
+    let mut fb = plane();
+    fb.palette = palette(12);
+    fb.clear(40);
+    draw(&mut fb, &pics, Kind::Bitmap, 1, (200, 120));
+    draw(&mut fb, &pics, Kind::Portrait, 0x6105, (240, 10));
+    for (i, id) in [1u16, 2, 3, 4].into_iter().enumerate() {
+        draw(&mut fb, &pics, Kind::Tile, id, (16 + 32 * i, 16));
+    }
+    for scale in [Scale::X2, Scale::X4] {
+        let mut c = Compositor::new();
+        c.set_pack(Some(Rc::new(pack.clone())));
+        c.compose(&fb, &mut pics.clone(), scale);
+        assert!(
+            c.rgba() == expected(&fb, &pics, Some(&pack), scale).as_slice(),
+            "{scale:?}: the frame by the definition"
+        );
+        assert_eq!(
+            (c.cache().packed(), c.cache().made()),
+            (3, 3),
+            "{scale:?}: tile 1, the portrait and the bitmap from the pack; tiles 2-4 by MMPX"
+        );
+        // Tile 1's blocks are the pack's (mixed over the classic colour), not MMPX's.
+        let s = scale.factor();
+        let art = pack_ref(&pack.images[0].5, 64, 64, scale);
+        let (hw, mm) = hd_of(&pics, Kind::Tile, 1, &fb.palette, scale);
+        let (mut from_pack, mut differs) = (0, 0);
+        for v in 0..16 {
+            for u in 0..16 {
+                let (x, y) = (16 + u, 16 + v);
+                if fb.src_at(x, y).unwrap().kind != Kind::Tile {
+                    continue;
+                }
+                let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+                let got = block(c.rgba(), scale, (x, y));
+                let want: Vec<u32> = (0..s * s)
+                    .map(|k| {
+                        let sub = art[(v * s + k / s) * 16 * s + u * s + k % s];
+                        u32::from_le_bytes(over_ref(sub, classic.to_le_bytes()))
+                    })
+                    .collect();
+                assert!(got == want, "{scale:?}: tile 1 ({u}, {v}) is the pack's");
+                from_pack += 1;
+                let mmpx_block: Vec<u32> = (0..s * s)
+                    .map(|k| over(mm[(v * s + k / s) * hw + u * s + k % s], classic))
+                    .collect();
+                differs += usize::from(got != mmpx_block);
+            }
+        }
+        assert!(
+            from_pack > 200 && differs > 200,
+            "{scale:?}: the pack art shows"
+        );
+        // Tiles 2, 3 and 4: MMPX.
+        for (id, at) in [(2u16, 48), (3, 80), (4, 112)] {
+            let (hw, mm) = hd_of(&pics, Kind::Tile, id, &fb.palette, scale);
+            let got = block(c.rgba(), scale, (at + 5, 16 + 7));
+            let want: Vec<u32> = (0..s * s)
+                .map(|k| mm[(7 * s + k / s) * hw + 5 * s + k % s])
+                .collect();
+            assert_eq!(got, want, "{scale:?}: tile {id} by MMPX");
+        }
+    }
+}
+
+#[test]
+fn a_rewritten_image_falls_back_to_mmpx_and_its_old_pixels_are_classic() {
+    let mut pics = Pics::default();
+    pics.put(Kind::Tile, 7, (16, 16), art(7, 16, 16, 4), None);
+    let mut pack = TestPack::default();
+    pack.put(Kind::Tile, 7, key_of(&pics, Kind::Tile, 7), (64, 64), 7);
+    let pack: Rc<dyn Pack> = Rc::new(pack.clone());
+    let mut fb = plane();
+    fb.palette = palette(3);
+    draw(&mut fb, &pics, Kind::Tile, 7, (32, 32));
+    draw(&mut fb, &pics, Kind::Tile, 7, (64, 32));
+    let mut c = Compositor::new();
+    c.set_pack(Some(pack.clone()));
+    c.compose(&fb, &mut pics, Scale::X4);
+    assert_eq!(c.cache().packed(), 1);
+    // The record rewritten in place (a shore merge): its key moves, so no pack image matches.
+    // Drawn again at one place; the other keeps pixels of the old version.
+    pics.rewrite(Kind::Tile, 7, art(70, 16, 16, 4));
+    draw(&mut fb, &pics, Kind::Tile, 7, (32, 32));
+    c.compose(&fb, &mut pics, Scale::X4);
+    let want = expected(&fb, &pics, None, Scale::X4);
+    assert!(
+        c.rgba() == want.as_slice(),
+        "MMPX of the new content; stale classic"
+    );
+    let (hw, mm) = hd_of(&pics, Kind::Tile, 7, &fb.palette, Scale::X4);
+    let got = block(c.rgba(), Scale::X4, (32 + 3, 32 + 9));
+    assert_eq!(
+        got,
+        (0..16)
+            .map(|k| mm[(9 * 4 + k / 4) * hw + 3 * 4 + k % 4])
+            .collect::<Vec<_>>()
+    );
+    let stale = block(c.rgba(), Scale::X4, (64 + 3, 32 + 9));
+    let classic = word(fb.palette[usize::from(fb.get(64 + 3, 32 + 9).unwrap())]);
+    assert!(
+        stale.iter().all(|&w| w == classic),
+        "the old version: classic"
+    );
+    assert_eq!((c.cache().packed(), c.cache().made()), (1, 1));
+}
+
+#[test]
+fn setting_changing_and_removing_the_pack_recompose_exactly() {
+    let mut pics = Pics::default();
+    for id in 0..10u16 {
+        pics.put(
+            Kind::Tile,
+            id,
+            (16, 16),
+            art(300 + u64::from(id), 16, 16, 4),
+            None,
+        );
+    }
+    pics.put(Kind::Portrait, 0x7a00, (56, 64), art(399, 56, 64, 5), None);
+    let mut a = TestPack::default();
+    let mut b = TestPack::default();
+    for id in 0..10u16 {
+        let key = key_of(&pics, Kind::Tile, id);
+        if id % 2 == 0 {
+            a.put(Kind::Tile, id, key, (64, 64), 1000 + u64::from(id));
+        }
+        if id % 3 == 0 {
+            b.put(Kind::Tile, id, key, (64, 64), 2000 + u64::from(id));
+        }
+    }
+    let portrait = key_of(&pics, Kind::Portrait, 0x7a00);
+    a.put(Kind::Portrait, 0x7a00, portrait, (224, 256), 77);
+    let packs = [None, Some(&a), Some(&b), None, Some(&a), Some(&a)];
+    let mut fb = plane();
+    fb.palette = palette(6);
+    let mut x = X(0xfeed);
+    let mut c = Compositor::new();
+    for scale in [Scale::X4, Scale::X2] {
+        for (step, pack) in packs.into_iter().enumerate() {
+            for _ in 0..1 + x.below(8) {
+                let at = (x.below(19) as usize * 16, x.below(11) as usize * 16);
+                draw(&mut fb, &pics, Kind::Tile, x.below(10) as u16, at);
+            }
+            if step == 2 {
+                draw(&mut fb, &pics, Kind::Portrait, 0x7a00, (100, 60));
+            }
+            c.compose(&fb, &mut pics, scale);
+            let before = c.rgba().to_vec();
+            c.take_dirty();
+            c.set_pack(pack.map(|p| Rc::new(p.clone()) as Rc<dyn Pack>));
+            assert!(c.has_pack() == pack.is_some());
+            c.compose(&fb, &mut pics, scale);
+            let want = fresh_with(&fb, &pics, pack, scale);
+            assert!(
+                c.rgba() == want.as_slice(),
+                "{scale:?} step {step}: the kept compositor equals a new one with that pack"
+            );
+            assert!(c.rgba() == expected(&fb, &pics, pack, scale).as_slice());
+            // Only the blocks whose HD image changed are written again.
+            let rect = c.take_dirty();
+            let s = scale.factor();
+            let changed: Vec<usize> = (0..want.len()).filter(|&i| want[i] != before[i]).collect();
+            if changed.is_empty() {
+                assert!(
+                    rect.is_none() || step == 5,
+                    "{scale:?} step {step}: no change"
+                );
+            }
+            for i in changed {
+                let (bx, by) = (i % (WIDTH * s) / s, i / (WIDTH * s) / s);
+                let [x0, y0, w, h] = rect.expect("a rect for a change");
+                assert!((x0..x0 + w).contains(&bx) && (y0..y0 + h).contains(&by));
+            }
+        }
+    }
+}
+
+#[test]
+fn the_cache_bound_holds_with_pack_images_and_the_frame_is_the_same() {
+    let mut pics = Pics::default();
+    let mut pack = TestPack::default();
+    for id in 0..60u16 {
+        pics.put(
+            Kind::Tile,
+            id,
+            (16, 16),
+            art(700 + u64::from(id), 16, 16, 4),
+            None,
+        );
+        if id % 4 != 0 {
+            let key = key_of(&pics, Kind::Tile, id);
+            pack.put(Kind::Tile, id, key, (64, 64), u64::from(id));
+        }
+    }
+    let pack: Rc<dyn Pack> = Rc::new(pack);
+    let cap = 10 * 17 * 1024 + 100;
+    let mut small = Compositor::with_cap(cap);
+    let mut big = Compositor::new();
+    small.set_pack(Some(pack.clone()));
+    big.set_pack(Some(pack));
+    let mut fb = plane();
+    fb.palette = palette(5);
+    let mut x = X(78);
+    let mut over_cap = 0;
+    for step in 0..40 {
+        for _ in 0..1 + x.below(30) {
+            let id = x.below(60) as u16;
+            let at = (x.below(20) as usize * 16, x.below(12) as usize * 16);
+            draw(&mut fb, &pics, Kind::Tile, id, at);
+        }
+        small.compose(&fb, &mut pics, Scale::X4);
+        big.compose(&fb, &mut pics, Scale::X4);
+        assert!(small.rgba() == big.rgba(), "step {step}: the same frame");
+        assert!(small.cache().bytes() <= cap, "step {step}: under the bound");
+        assert_eq!(small.cache().bytes(), small.cache().entries_bytes());
+        over_cap += usize::from(big.cache().bytes() > cap);
+    }
+    assert!(over_cap > 0, "the screens needed more than the bound");
+    assert!(
+        small.cache().packed() > big.cache().packed(),
+        "evicted pack images made again"
+    );
+    // Removing the pack drops every image made from it.
+    let held = small.cache().bytes();
+    small.set_pack(None);
+    assert!(small.cache().bytes() < held && small.cache().bytes() == small.cache().entries_bytes());
+}
+
+#[test]
+fn keys_are_asked_only_with_a_pack_and_only_for_an_image_whose_hd_image_is_not_known() {
+    let mut pics = Pics::default();
+    pics.put(Kind::Tile, 1, (16, 16), art(1, 16, 16, 4), None);
+    pics.put(Kind::Tile, 2, (16, 16), art(2, 16, 16, 4), None);
+    let mut fb = plane();
+    fb.palette = palette(4);
+    draw(&mut fb, &pics, Kind::Tile, 1, (0, 0));
+    draw(&mut fb, &pics, Kind::Tile, 2, (16, 0));
+    let mut c = Compositor::new();
+    c.compose(&fb, &mut pics, Scale::X2);
+    assert_eq!(pics.keys, 0, "no pack: no key asked");
+    let mut pack = TestPack::default();
+    pack.put(Kind::Tile, 1, key_of(&pics, Kind::Tile, 1), (64, 64), 9);
+    c.set_pack(Some(Rc::new(pack)));
+    c.compose(&fb, &mut pics, Scale::X2);
+    assert_eq!(pics.keys, 2, "a new pack: each image looked up once");
+    fb.set(200, 100, 3);
+    c.compose(&fb, &mut pics, Scale::X2);
+    assert_eq!(pics.keys, 2, "the same images: no key asked");
+    pics.rewrite(Kind::Tile, 2, art(20, 16, 16, 4));
+    draw(&mut fb, &pics, Kind::Tile, 2, (16, 0));
+    c.compose(&fb, &mut pics, Scale::X2);
+    assert_eq!(pics.keys, 3, "a rewritten image: its key asked again");
+}
+
+/// Two images of equal content share one MMPX image; a pack that has an image for one of them
+/// only, set after both were shown (and set again after a removal), shows it for that one and
+/// MMPX for the other, with either one met first in the composition (fresh frames and
+/// compositors for each order).
+#[test]
+fn images_of_equal_content_keep_their_own_pack_images() {
+    let mut pics = Pics::default();
+    let same = art(42, 16, 16, 4);
+    for id in [1u16, 2] {
+        pics.put(Kind::Tile, id, (16, 16), same.clone(), None);
+    }
+    let mut pack = TestPack::default();
+    pack.put(Kind::Tile, 2, key_of(&pics, Kind::Tile, 2), (64, 64), 5);
+    for (first, second) in [(1u16, 2u16), (2, 1)] {
+        for scale in [Scale::X4, Scale::X2] {
+            let mut fb = plane();
+            fb.palette = palette(7);
+            draw(&mut fb, &pics, Kind::Tile, first, (16, 16));
+            draw(&mut fb, &pics, Kind::Tile, second, (48, 16));
+            let mut c = Compositor::new();
+            for (step, set) in [None, Some(&pack), None, Some(&pack)]
+                .into_iter()
+                .enumerate()
+            {
+                c.set_pack(set.map(|p| Rc::new(p.clone()) as Rc<dyn Pack>));
+                for _ in 0..2 {
+                    c.compose(&fb, &mut pics, scale);
+                    assert!(
+                        c.rgba() == expected(&fb, &pics, set, scale).as_slice(),
+                        "tile {first} first, {scale:?} step {step}"
+                    );
+                }
+            }
+            assert_eq!(c.cache().made(), 1, "one MMPX image for the content");
+        }
+    }
+}
+
+/// Pixels flagged by the blit (an overlay OR, an outline) over a record whose pack image matches
+/// are their classic colour; the record's other pixels show the pack's image.
+#[test]
+fn flagged_pixels_over_a_pack_image_are_classic() {
+    let mut pics = Pics::default();
+    pics.put(Kind::Tile, 9, (16, 16), art(9, 16, 16, 4), None);
+    let mut pack = TestPack::default();
+    pack.put(Kind::Tile, 9, key_of(&pics, Kind::Tile, 9), (64, 64), 9);
+    let mut fb = plane();
+    fb.palette = palette(9);
+    draw(&mut fb, &pics, Kind::Tile, 9, (32, 32));
+    for (k, flag) in [(0usize, FLAG_OVERLAY), (1, FLAG_OUTLINE)] {
+        for i in 0..16 {
+            let (x, y) = (32 + i, 32 + 2 * k + 3);
+            let p = fb.get(x, y).unwrap() ^ 1;
+            fb.set_src(x, y, p, tile(9, 0, (i, 2 * k + 3), flag));
+        }
+    }
+    for scale in [Scale::X2, Scale::X4] {
+        let got = fresh_with(&fb, &pics, Some(&pack), scale);
+        assert!(got == expected(&fb, &pics, Some(&pack), scale), "{scale:?}");
+        for (x, y) in [(40, 35), (40, 37)] {
+            let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+            assert!(
+                block(&got, scale, (x, y)).iter().all(|&c| c == classic),
+                "flagged: classic"
+            );
+        }
+        let classic = word(fb.palette[usize::from(fb.get(40, 40).unwrap())]);
+        assert!(
+            block(&got, scale, (40, 40)).iter().any(|&c| c != classic),
+            "the pack's"
+        );
+    }
+}
+
+/// The key contract ([`Images::key`]): a key that changes while the image's pixels do not is not
+/// asked again (the memo stands) until [`Compositor::forget`], after which the image is looked
+/// up again and its new key decides.
+#[test]
+fn a_key_that_changes_without_its_pixels_is_followed_after_forget() {
+    let mut pics = Pics::default();
+    pics.put(Kind::Portrait, 0x6101, (56, 64), art(3, 56, 64, 5), None);
+    let mut pack = TestPack::default();
+    pack.put(
+        Kind::Portrait,
+        0x6101,
+        key_of(&pics, Kind::Portrait, 0x6101),
+        (224, 256),
+        3,
+    );
+    let mut fb = plane();
+    fb.palette = palette(2);
+    draw(&mut fb, &pics, Kind::Portrait, 0x6101, (100, 40));
+    let mut c = Compositor::new();
+    c.set_pack(Some(Rc::new(pack.clone())));
+    c.compose(&fb, &mut pics, Scale::X4);
+    let with = expected(&fb, &pics, Some(&pack), Scale::X4);
+    assert!(c.rgba() == with.as_slice());
+    pics.salt = 1;
+    c.compose(&fb, &mut pics, Scale::X4);
+    assert!(
+        c.rgba() == with.as_slice(),
+        "the same pixels: the memo stands"
+    );
+    c.forget();
+    c.compose(&fb, &mut pics, Scale::X4);
+    assert!(
+        c.rgba() == expected(&fb, &pics, None, Scale::X4).as_slice(),
+        "after forget: the new key, which the pack has no image for"
+    );
 }

@@ -7,12 +7,21 @@
 //!   sub-pixel that is transparent takes the pixel's classic colour;
 //! - for every other pixel (classic, flagged, stale), its classic colour.
 //!
-//! An image's HD version is MMPX ×S ([`mmpx`]) of its current pixels in the frame's palette, a
-//! transparent pixel transparent: a pure function of those pixels, the palette and S, cached by
-//! their content ([`HdImages`], at most [`HD_CACHE_BYTES`]; spec 07 H2 puts the pack's image in
-//! front of MMPX there). The compositor keeps the inputs of its last composition and writes again
-//! only the blocks whose inputs changed; what it writes is what a new compositor would write
-//! from the same frame.
+//! An image's HD version (spec 07 "HD image per id"):
+//!
+//! - the image of the pack set ([`Compositor::set_pack`], spec 07 H2) made from the image's
+//!   content now: [`Images::key`] gives the content key, [`Pack::hd`] the pack's ×4 RGBA for it,
+//!   taken as it is at 4× and 2 × 2 box-averaged at 2× ([`pack_words`]), alpha included: a
+//!   sub-pixel with alpha between 0 and 255 is mixed over the pixel's classic colour ([`over`]);
+//! - otherwise MMPX ×S ([`mmpx`]) of its current pixels in the frame's palette, a transparent
+//!   pixel transparent.
+//!
+//! Either is a pure function of those pixels, the palette, S and the pack, cached by their
+//! content ([`HdImages`], at most [`HD_CACHE_BYTES`]); an entry made from a pack image is keyed by
+//! that image (the pack's generation and the image's index) as well as by the content, so a pack
+//! set or removed never shows an entry of another. The compositor keeps the inputs of its last
+//! composition and writes again only the blocks whose inputs changed; what it writes is what a
+//! new compositor would write from the same frame and the same pack.
 //!
 //! Memory: the HD images within the bound (each with the indices it was last reached from, which
 //! [`HdImages::bytes`] counts; [`HdImages::peak`] is the retained cache payload peak, the most it
@@ -20,7 +29,8 @@
 //! intermediate of a 4× magnification while it is made, the frame (`WIDTH·S × HEIGHT·S`
 //! words), the last composition's inputs (a [`Src`], an index and a token per screen pixel) and
 //! a few words per image named so far: per tile record up to the largest record id named (the
-//! game's records are 2048), per portrait (letter, item) and per panel bitmap (two) named.
+//! game's records are 2048), per portrait (letter, item) and per panel bitmap (two) named. The
+//! pack's own images are the platform's ([`Pack`]); the compositor holds a reference to it.
 //!
 //! The output is packed RGBA words, `u32::from_le_bytes([r, g, b, a])`: in wasm memory (little
 //! endian) the bytes the page's `ImageData` takes.
@@ -30,6 +40,7 @@ mod mmpx;
 mod tests;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::{Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH};
 
@@ -78,6 +89,42 @@ pub struct Image<'a> {
 /// image's pixels classic.
 pub trait Images {
     fn image(&mut self, kind: Kind, id: u16) -> Option<Image<'_>>;
+
+    /// The content key a pack keys image (kind, id) by, as the image is now (spec 07 HD1: the
+    /// content hash of the classic image as the engine holds it, `u6_hdpack`'s); `None` when it
+    /// has none. Asked only with a pack set, right after [`Images::image`] gave the image, and
+    /// only when the image's HD version is not the one it had last: while the image gives the
+    /// same pixels and transparency its key is taken to be the same, so a key must change only
+    /// with them, or the platform calls [`Compositor::forget`] when it may change otherwise (a
+    /// tile's key is of its pixels and transparency; a portrait's or a bitmap's is of its bytes
+    /// before the colour table, which within one game are those of one file).
+    fn key(&mut self, _kind: Kind, _id: u16) -> Option<u64> {
+        None
+    }
+}
+
+/// HD pixels per classic pixel of a pack image (`u6_hdpack::SCALE`).
+pub const PACK_SCALE: usize = 4;
+
+/// Spec 07 H2: the HD images of a pack, by the classic image they were made from. The platform
+/// implements it over the pack it loaded and gives it to [`Compositor::set_pack`].
+pub trait Pack {
+    /// The pack's image for image (kind, id) whose content key is `key` now ([`Images::key`]),
+    /// when the pack has one made from that content. One whose size is not [`PACK_SCALE`]× the
+    /// image's is not used.
+    fn hd(&self, kind: Kind, id: u16, key: u64) -> Option<PackHd<'_>>;
+}
+
+/// One image of a pack: RGBA8, row-major, `width × height` (×4 of its classic image), alpha
+/// included.
+#[derive(Clone, Copy, Debug)]
+pub struct PackHd<'a> {
+    /// The image's place in the pack: no two of its images share it.
+    pub index: u32,
+    pub width: usize,
+    pub height: usize,
+    /// `width * height * 4` bytes.
+    pub rgba: &'a [u8],
 }
 
 /// No images: every pixel classic.
@@ -101,9 +148,72 @@ pub const fn word(c: Rgb) -> u32 {
 /// The word of a transparent pixel in an image given to MMPX (alpha 0).
 const CLEAR: u32 = 0;
 
+/// The HD sub-pixel `c` over the pixel's classic colour `classic` (both packed words): `c` when
+/// it is opaque, `classic` when it is transparent, else each channel mixed by `c`'s alpha `a`,
+/// `(c·a + classic·(255 − a) + 127) / 255`, opaque. MMPX's sub-pixels are opaque or transparent;
+/// a pack image's can be in between (the tool box-averages its ×8 masters).
+#[inline]
+pub fn over(c: u32, classic: u32) -> u32 {
+    let a = c >> 24;
+    if a == 255 {
+        return c;
+    }
+    if a == 0 {
+        return classic;
+    }
+    let mix = |shift: u32| {
+        let (x, y) = ((c >> shift) & 255, (classic >> shift) & 255);
+        ((x * a + y * (255 - a) + 127) / 255) << shift
+    };
+    mix(0) | mix(8) | mix(16) | 0xff00_0000
+}
+
+/// A pack image (`width × height` RGBA8 bytes, ×4 of its classic image) as the HD image at
+/// `scale`, in packed words: its own pixels at 4×; at 2× each 2 × 2 block box-averaged, the colour
+/// weighted by alpha and the alpha the mean, each rounded to nearest (a block with no alpha is
+/// transparent): the rule the HD tool uses for its ×8 masters (`tools/hd` `img::shrink`).
+pub fn pack_words(rgba: &[u8], width: usize, height: usize, scale: Scale, out: &mut Vec<u32>) {
+    out.clear();
+    debug_assert_eq!(rgba.len(), width * height * 4);
+    let px = |x: usize, y: usize| -> [u8; 4] {
+        let at = (y * width + x) * 4;
+        [rgba[at], rgba[at + 1], rgba[at + 2], rgba[at + 3]]
+    };
+    match scale {
+        Scale::X4 => out.extend(
+            rgba.chunks_exact(4)
+                .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+        ),
+        Scale::X2 => {
+            let (w, h) = (width / 2, height / 2);
+            out.reserve(w * h);
+            for y in 0..h {
+                for x in 0..w {
+                    let (mut c, mut a) = ([0u32; 3], 0u32);
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let p = px(2 * x + dx, 2 * y + dy);
+                        let weight = u32::from(p[3]);
+                        for (sum, &v) in c.iter_mut().zip(&p[..3]) {
+                            *sum += u32::from(v) * weight;
+                        }
+                        a += weight;
+                    }
+                    out.push(if a == 0 {
+                        CLEAR
+                    } else {
+                        let ch = |v: u32| ((v + a / 2) / a) as u8;
+                        u32::from_le_bytes([ch(c[0]), ch(c[1]), ch(c[2]), ((a + 2) / 4) as u8])
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// The palette indices and transparency an HD image was last reached from, under the palette of
 /// composition generation `palette`: an image whose pixels are these again, under the same
-/// palette, has this HD image with no lookup by content.
+/// palette, has this HD image with no lookup by content (with a pack, only for an image whose
+/// memo was made under the same pack: [`Slot::memo`]).
 struct Source {
     pixels: Vec<u8>,
     transparent: Option<Vec<bool>>,
@@ -124,11 +234,23 @@ impl Source {
     }
 }
 
+/// What an HD image was made from: MMPX of its content, or the image of the pack set at its index
+/// ([`PackHd::index`]). Every entry made from a pack is dropped when another pack is set or the
+/// pack is removed ([`HdImages::drop_packed`], which also frees them), so an index names an image
+/// of the pack set now: no generation is kept here. The image's memo keeps one
+/// ([`Slot::memo`]), since MMPX entries outlive the pack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    Mmpx,
+    Pack(u32),
+}
+
 /// One HD image: the content it was made from and the result.
 struct Entry {
     /// Never reused: an equal token is the same image ([`Compositor`] compares them).
     token: u32,
     hash: u64,
+    origin: Origin,
     scale: Scale,
     width: usize,
     height: usize,
@@ -166,8 +288,9 @@ pub struct HdImages {
     next_token: u32,
     /// The composition running (or the last one).
     stamp: u64,
-    /// HD images made so far.
+    /// HD images made so far by MMPX, and from a pack's images.
     made: u64,
+    packed: u64,
     hash: Hasher,
 }
 
@@ -194,6 +317,7 @@ impl HdImages {
             next_token: 1,
             stamp: 0,
             made: 0,
+            packed: 0,
             hash: content_hash,
         }
     }
@@ -241,9 +365,14 @@ impl HdImages {
         self.len() == 0
     }
 
-    /// HD images made so far (each a run of MMPX).
+    /// HD images made so far by MMPX (each a run of it).
     pub fn made(&self) -> u64 {
         self.made
+    }
+
+    /// HD images made so far from a pack's images ([`pack_words`]).
+    pub fn packed(&self) -> u64 {
+        self.packed
     }
 
     fn entry(&self, slot: usize) -> &Entry {
@@ -277,13 +406,10 @@ impl HdImages {
     }
 
     /// The slot of the HD image of `input` (`width` × `height` words) at `scale`, made now if it
-    /// is not held.
-    ///
-    /// The seam for spec 07 H2: the pack's image goes in front of MMPX here. [`Resolver::resolve`]
-    /// has what its lookup needs (the image's kind, id, palette indices and transparency); it
-    /// would pass the pack image found, and an entry made from a pack image is keyed by that image
-    /// as well as by `input`, so a pack loaded or forgotten (which moves the platform's HD
-    /// version) never shows an entry of the other.
+    /// is not held: from the pack image `art` when given (spec 07 H2: the pack's image in front
+    /// of MMPX), else by MMPX. An entry made from a pack image is keyed by that image as well as
+    /// by `input`; a pack set or removed drops them all ([`HdImages::drop_packed`]), so none of
+    /// another pack is ever shown.
     ///
     /// `source` is what the image was reached from now (its indices under the palette now): the
     /// entry keeps it for [`HdImages::reached`].
@@ -293,12 +419,19 @@ impl HdImages {
         (width, height): (usize, usize),
         scale: Scale,
         source: Source,
+        art: Option<PackHd<'_>>,
     ) -> usize {
+        let origin = art.map_or(Origin::Mmpx, |a| Origin::Pack(a.index));
         let hash = (self.hash)(input, width, height, scale);
         if let Some(slots) = self.by_hash.get(&hash) {
             for &slot in slots {
                 let e = self.slab[slot].as_mut().expect("an indexed entry");
-                if e.scale == scale && e.width == width && e.height == height && e.input == input {
+                if e.scale == scale
+                    && e.width == width
+                    && e.height == height
+                    && e.origin == origin
+                    && e.input == input
+                {
                     e.used = self.stamp;
                     self.bytes = self.bytes - e.source.bytes() + source.bytes();
                     e.source = source;
@@ -308,13 +441,22 @@ impl HdImages {
             }
         }
         let mut hd = Vec::new();
-        mmpx(input, width, height, scale, &mut hd);
-        self.made += 1;
+        match art {
+            Some(a) => {
+                pack_words(a.rgba, a.width, a.height, scale, &mut hd);
+                self.packed += 1;
+            }
+            None => {
+                mmpx(input, width, height, scale, &mut hd);
+                self.made += 1;
+            }
+        }
         let token = self.next_token;
         self.next_token = self.next_token.wrapping_add(1).max(1);
         let entry = Entry {
             token,
             hash,
+            origin,
             scale,
             width,
             height,
@@ -353,6 +495,11 @@ impl HdImages {
         let Some((_, slot)) = oldest else {
             return false;
         };
+        self.remove(slot);
+        true
+    }
+
+    fn remove(&mut self, slot: usize) {
         let e = self.slab[slot].take().expect("a live entry");
         self.bytes -= e.bytes();
         if let Some(slots) = self.by_hash.get_mut(&e.hash) {
@@ -362,7 +509,19 @@ impl HdImages {
             }
         }
         self.free.push(slot);
-        true
+    }
+
+    /// Drops every entry made from a pack image (the pack was set or removed: no later
+    /// composition can reach one).
+    fn drop_packed(&mut self) {
+        for slot in 0..self.slab.len() {
+            if self.slab[slot]
+                .as_ref()
+                .is_some_and(|e| e.origin != Origin::Mmpx)
+            {
+                self.remove(slot);
+            }
+        }
     }
 
     /// After a composition: back under the bound.
@@ -397,13 +556,15 @@ impl Resolved {
 }
 
 /// One image (kind, id): what it is in the composition `stamp`, and the slot and token of the HD
-/// image it had when last resolved (an image shown again unchanged needs no lookup by content:
-/// [`HdImages::reached`]).
+/// image it had when last resolved, under the pack of the generation beside them (an image shown
+/// again unchanged under the same pack needs no lookup: [`HdImages::reached`]). The pack's
+/// generation is the image's own, not its entry's: an MMPX entry is shared by every image of its
+/// content, and whether the pack has an image for this one is a matter of its (kind, id).
 #[derive(Default)]
 struct Slot {
     stamp: u64,
     resolved: Option<Resolved>,
-    memo: Option<(usize, u32)>,
+    memo: Option<(usize, u32, u64)>,
 }
 
 /// The inputs of the last composition, per screen pixel.
@@ -428,6 +589,10 @@ pub struct Compositor {
     others: HashMap<(Kind, u16), Slot>,
     /// Counts the palettes the compositions saw (a memo of another palette is not used).
     palette: u64,
+    /// The pack set ([`Compositor::set_pack`]) and the count of packs set or removed so far (a
+    /// memo of another pack is not used).
+    pack: Option<Rc<dyn Pack>>,
+    pack_gen: u64,
     /// Scratch: an image's pixels as words.
     input: Vec<u32>,
     /// The screen rect written since [`Compositor::take_dirty`]: x0, y0, x1, y1 (exclusive).
@@ -460,6 +625,8 @@ impl Compositor {
             tiles: Vec::new(),
             others: HashMap::new(),
             palette: 0,
+            pack: None,
+            pack_gen: 0,
             input: Vec::new(),
             dirty: None,
         }
@@ -489,9 +656,29 @@ impl Compositor {
             .map(|[x0, y0, x1, y1]| [x0, y0, x1 - x0, y1 - y0])
     }
 
-    /// The next composition writes every block.
+    /// The next composition writes every block and looks every image up again: with no last
+    /// composition it takes a new palette generation, which no image's memo was made under
+    /// ([`HdImages::reached`]), so each is found by its content and, with a pack set, its key is
+    /// asked again ([`Images::key`]). A platform calls it when the images may change in a way
+    /// their pixels do not show (a new game: another file can give a portrait other bytes that
+    /// look the same through the colour table).
     pub fn forget(&mut self) {
         self.last = None;
+    }
+
+    /// Spec 07 H2: sets the pack whose images go in front of MMPX (`None`: no pack). The next
+    /// composition looks every image up again, writes again the blocks whose HD image changed,
+    /// and is what a new compositor with this pack would write; the HD images made from the
+    /// pack set before are dropped.
+    pub fn set_pack(&mut self, pack: Option<Rc<dyn Pack>>) {
+        self.pack = pack;
+        self.pack_gen += 1;
+        self.hd.drop_packed();
+    }
+
+    /// Whether a pack is set.
+    pub fn has_pack(&self) -> bool {
+        self.pack.is_some()
     }
 
     /// Composes `frame` at `scale` from the images `images` names ([`Compositor::rgba`]).
@@ -532,8 +719,10 @@ impl Compositor {
             others: &mut self.others,
             input: &mut self.input,
             images,
+            pack: self.pack.as_deref(),
             pal: &pal,
             palette: self.palette,
+            pack_gen: self.pack_gen,
             scale,
         };
         let out = &mut self.out;
@@ -586,7 +775,7 @@ impl Compositor {
                             let from = &hd[b + k * hw..b + k * hw + s];
                             let to = &mut out[o + k * ow..o + k * ow + s];
                             for (d, &c) in to.iter_mut().zip(from) {
-                                *d = if c >> 24 == 0 { classic } else { c };
+                                *d = over(c, classic);
                             }
                         }
                     }
@@ -615,14 +804,18 @@ struct Resolver<'a> {
     others: &'a mut HashMap<(Kind, u16), Slot>,
     input: &'a mut Vec<u32>,
     images: &'a mut dyn Images,
+    /// The pack set, of generation `pack_gen`.
+    pack: Option<&'a dyn Pack>,
     pal: &'a [u32; 256],
     palette: u64,
+    pack_gen: u64,
     scale: Scale,
 }
 
 impl Resolver<'_> {
     /// What image (kind, id) is in this composition: asked of the images once, its HD image
-    /// found by its content (through the memo when the content is the memo's).
+    /// found by its content (through the memo when the content is the memo's), the pack's image
+    /// for that content in front of MMPX.
     fn resolve(&mut self, kind: Kind, id: u16) -> Resolved {
         let stamp = self.hd.stamp;
         let slot = if kind == Kind::Tile {
@@ -642,7 +835,7 @@ impl Resolver<'_> {
         slot.stamp = stamp;
         let resolved = match self.images.image(kind, id) {
             Some(img) => {
-                let (w, h) = (img.width, img.height);
+                let (w, h, ver) = (img.width, img.height, img.ver);
                 let shaped = (1..=WIDTH).contains(&w)
                     && (1..=HEIGHT).contains(&h)
                     && img.pixels.len() == w * h
@@ -650,11 +843,12 @@ impl Resolver<'_> {
                 if !shaped {
                     Resolved::CLASSIC
                 } else {
-                    let memo = slot
-                        .memo
-                        .filter(|&m| self.hd.reached(m, &img, self.palette, self.scale));
+                    let memo = slot.memo.filter(|&(at, token, pack)| {
+                        pack == self.pack_gen
+                            && self.hd.reached((at, token), &img, self.palette, self.scale)
+                    });
                     let (at, token) = match memo {
-                        Some(m) => m,
+                        Some((at, token, _)) => (at, token),
                         None => {
                             self.input.clear();
                             self.input
@@ -665,14 +859,22 @@ impl Resolver<'_> {
                                     }
                                 }));
                             let source = Source::of(&img, self.palette);
-                            let at = self.hd.get(self.input, (w, h), self.scale, source);
+                            let art = self.pack.and_then(|pack| {
+                                let key = self.images.key(kind, id)?;
+                                pack.hd(kind, id, key).filter(|a| {
+                                    a.width == w * PACK_SCALE
+                                        && a.height == h * PACK_SCALE
+                                        && a.rgba.len() == a.width * a.height * 4
+                                })
+                            });
+                            let at = self.hd.get(self.input, (w, h), self.scale, source, art);
                             (at, self.hd.entry(at).token)
                         }
                     };
-                    slot.memo = Some((at, token));
+                    slot.memo = Some((at, token, self.pack_gen));
                     Resolved {
                         token,
-                        ver: img.ver,
+                        ver,
                         width: w,
                         height: h,
                         slot: at,

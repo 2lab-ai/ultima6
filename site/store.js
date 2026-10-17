@@ -2,8 +2,9 @@
 // game without a new drop (the files the engine booted from, never uploaded), and the saved
 // game: the `savegame/` files the game's Save writes (the original's names), one record each
 // under `save:` + the lower-cased name in the same store, so a later Save replaces only the
-// blocks it wrote and an imported folder's case does not make a second copy. The page calls
-// these one at a time (its operation queue), so a read never races a write or a delete.
+// blocks it wrote and an imported folder's case does not make a second copy. The HD pack
+// loaded (spec 07 H2) is one record under `hd:pack`, its file's bytes. The page calls these one
+// at a time (its operation queue), so a read never races a write or a delete.
 
 const DB = 'ultima6-port';
 const STORE = 'files';
@@ -93,6 +94,36 @@ export async function loadSaves() {
 /// Removes the saved game; resolves once the delete is committed, throws when it is not.
 export async function forgetSaves() {
   await run('readwrite', (s) => s.delete(SAVES));
+}
+
+const PACK = 'hd:pack';
+
+/// Keeps the HD pack's bytes in place of the kept one; true once committed, false (with a
+/// console warning) when the browser does not keep it.
+export async function storePack(bytes) {
+  try {
+    await run('readwrite', (s) => s.put(bytes, PACK));
+    return true;
+  } catch (err) {
+    console.warn(`could not keep the HD pack: ${err}`);
+    return false;
+  }
+}
+
+/// The kept HD pack's bytes, or null (none, or storage unavailable).
+export async function loadPack() {
+  try {
+    const bytes = await run('readonly', (s) => s.get(PACK));
+    return bytes instanceof Uint8Array ? bytes : null;
+  } catch (err) {
+    console.warn(`could not read the kept HD pack: ${err}`);
+    return null;
+  }
+}
+
+/// Removes the kept HD pack; resolves once the delete is committed, throws when it is not.
+export async function forgetPack() {
+  await run('readwrite', (s) => s.delete(PACK));
 }
 
 function fileOf(entry) {

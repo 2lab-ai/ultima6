@@ -8,7 +8,6 @@
 
 use std::path::Path;
 
-use u6_core::converse::{Msg, portrait_pixels};
 use u6_core::image::{A4, GameImage};
 use u6_core::objects::{ACTOR_SLOTS, ObjectId};
 use u6_core::{Files, State};
@@ -16,17 +15,11 @@ use u6_formats::animdata::AnimEntry;
 use u6_formats::bitmap::Bitmap;
 use u6_formats::gfx::{TILE_COUNT, TILE_PIXELS, TILE_W, TileKind};
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_LEN, PORTRAIT_WIDTH};
-use u6_formats::u6lib::{EntryWidth, U6Lib};
-use u6_hdpack::{ImageId, Role, image_hash, tile_hash};
+use u6_hdpack::{ImageId, Role, bitmap_hash, portrait_hash, tile_hash};
 use u6_intake::{InputFile, intake};
 
 use crate::img::Classic;
 
-/// Original: 0x133d3e patches this byte of the portrait file name with the archive letter
-/// (`u6_core::converse::script`, `NAME_LETTER`).
-const NAME_LETTER: usize = 9;
-/// The portrait archives `portrait_ref` names: `a` and `b` for the slots, `z` for the hero.
-const PORTRAIT_LETTERS: [u8; 3] = [b'a', b'b', b'z'];
 /// Original: A4-0x61e2 (pointer to the paper bitmap's file name, read by 0x1350d8) and
 /// A4-0x61de (the spellbook picture's, read by 0x116028).
 const BITMAP_NAMES: [(Role, u32); 2] = [(Role::Paper, 0x61e2), (Role::Spellbook, 0x61de)];
@@ -256,59 +249,20 @@ impl Game {
                     .portraits
                     .iter()
                     .find(|(l, i, _)| *l == letter && *i == item)?;
-                Some(image_hash(
-                    PORTRAIT_WIDTH as u16,
-                    PORTRAIT_HEIGHT as u16,
-                    b.iter().copied(),
-                ))
+                portrait_hash(b)
             }
             ImageId::Bitmap(role) => {
                 let (_, w, h, b) = self.bitmaps.iter().find(|(r, ..)| *r == role)?;
-                Some(image_hash(*w, *h, b.iter().copied()))
+                bitmap_hash(*w, *h, b)
             }
         }
     }
 }
 
-/// Every item of the three portrait archives, its pixels as the engine reads them
-/// (`u6_core::converse::portrait_pixels`, the loading half of 0x133d3e): each item the
-/// archive's table lists that is not empty.
+/// Every portrait of the three archives, its pixels as the engine reads them
+/// (`u6_core::converse::portraits`, `portrait_pixels`: the loading half of 0x133d3e).
 pub fn portraits(state: &State, files: &Files) -> Vec<(u8, u16, Vec<u8>)> {
-    let name = state
-        .converse
-        .text
-        .as_ref()
-        .map(|t| t.get(Msg::PortraitFile).to_vec())
-        .unwrap_or_default();
-    let mut out = Vec::new();
-    for letter in PORTRAIT_LETTERS {
-        let mut n = name.clone();
-        let Some(b) = n.get_mut(NAME_LETTER) else {
-            continue;
-        };
-        *b = letter;
-        let n: String = n.iter().map(|&b| char::from(b)).collect();
-        let Some(file) = files.get(&n) else { continue };
-        let Ok(lib) = U6Lib::parse(file, EntryWidth::U32) else {
-            continue;
-        };
-        for (item, it) in lib.items.iter().enumerate() {
-            let Some(at) = file.get(item * 4..item * 4 + 4) else {
-                continue;
-            };
-            let off = u32::from_le_bytes([at[0], at[1], at[2], at[3]]);
-            let Ok(item) = u16::try_from(item) else {
-                continue;
-            };
-            if it.is_empty() || off == 0 {
-                continue;
-            }
-            if let Some(px) = portrait_pixels(state, files, letter, item) {
-                out.push((letter, item, px));
-            }
-        }
-    }
-    out
+    u6_core::converse::portraits(state, files)
 }
 
 /// The paper and spellbook bitmaps, by the file names `game` points to.

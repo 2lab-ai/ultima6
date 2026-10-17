@@ -13,6 +13,8 @@ crate-type = ["cdylib", "rlib"]
 u6-core.workspace = true
 u6-intake.workspace = true
 u6-render.workspace = true
+# Spec 07 H2: the HD pack the page loads (its strict reader) and the drop classifier.
+u6-hdpack.workspace = true
 # Must equal the installed wasm-bindgen CLI version (scripts/build-web.sh).
 wasm-bindgen = "=0.2.129"
 
