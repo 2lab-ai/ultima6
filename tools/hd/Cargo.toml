@@ -16,11 +16,10 @@ u6-core.workspace = true
 u6-formats.workspace = true
 u6-intake.workspace = true
 u6-hdpack.workspace = true
+# The page's scaler and compositing (MMPX, `over`): the neighbour gate measures the images the
+# page draws (spec 07 HD2 "Neighbour seams").
+u6-render.workspace = true
 libc = "0.2"
 png = "0.18"
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = "1"
-
-[dev-dependencies]
-# The scaler the example `scaler_pack` draws a full-size pack with (MMPX, the compositor's).
-u6-render.workspace = true

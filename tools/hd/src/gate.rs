@@ -8,6 +8,9 @@
 //! - key purity: only an image with background (pixels outside its mask grown by one source
 //!   pixel) shows the key.
 
+use serde::Serialize;
+use u6_render::hd::over;
+
 use crate::img::{self, Classic, GREY, Plane, Rgba};
 
 /// The gate thresholds. The defaults are spec 07's; `--gate name=value` changes one for a run
@@ -702,10 +705,14 @@ pub fn judge(raw: &Rgba, classic: &Classic, key: [u8; 3], scale: Scale) -> (Rgba
     (hd, m)
 }
 
+/// The step between two colours: the mean absolute difference of their channels.
+fn step(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (0..3).map(|i| (a[i] - b[i]).abs()).sum::<f32>() / 3.0
+}
+
 /// Mean step across the lines of a lattice of `pitch` pixels, horizontally and vertically: the
 /// wrap line (last column to first, last row to first) and the inner lines.
 fn lattice_steps(rgb: &dyn Fn(u32, u32) -> [f32; 3], w: u32, h: u32, pitch: u32) -> [f32; 4] {
-    let step = |a: [f32; 3], b: [f32; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).sum::<f32>() / 3.0;
     let (mut wrap_h, mut inner_h, mut n_inner_h) = (0.0, 0.0, 0.0);
     for y in 0..h {
         wrap_h += step(rgb(w - 1, y), rgb(0, y));
@@ -754,10 +761,126 @@ pub fn seam(classic: &Classic, hd: &Rgba, max_ratio: f32) -> (f32, f32) {
     (hd_ratio, max_ratio.max(classic_ratio))
 }
 
-/// Whether a [`seam`] result passes; a hair over the limit is rounding (an HD tile that is
-/// the classic one scaled has the classic ratio).
+/// Whether a [`seam`] or [`neighbour_seam`] result passes; a hair over the limit is rounding
+/// (an HD tile that is the classic one scaled has the classic ratio).
 pub fn seam_passes((ratio, limit): (f32, f32)) -> bool {
     ratio <= limit * 1.001
+}
+
+/// Where record B is drawn beside record A: in the cell east of A's, or south of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Edge {
+    East,
+    South,
+}
+
+/// A record's image as the page shows it where the record is drawn, `k` pixels per classic
+/// pixel: only the classic image's opaque pixels are drawn from the record (where it is
+/// transparent the blit leaves what is below, which another source names), and each of their
+/// `k × k` blocks is the HD image's block over the classic colour, as the compositor composes it
+/// (`u6_render::hd::over`: a transparent sub-pixel takes the classic colour, a part-transparent
+/// one is mixed with it). `None` where the record draws nothing.
+pub fn shown(classic: &Classic, hd: &Rgba) -> Vec<Option<[f32; 3]>> {
+    let k = hd.width / classic.width;
+    let mut out = vec![None; (hd.width * hd.height) as usize];
+    for y in 0..hd.height {
+        for x in 0..hd.width {
+            let Some(c) = classic.at(x / k, y / k) else {
+                continue;
+            };
+            let w = over(
+                u32::from_le_bytes(img::get(hd, x, y)),
+                u32::from_le_bytes([c[0], c[1], c[2], 255]),
+            );
+            let [r, g, b, _] = w.to_le_bytes();
+            out[(y * hd.width + x) as usize] = Some([f32::from(r), f32::from(g), f32::from(b)]);
+        }
+    }
+    out
+}
+
+/// Steps across the lattice lines of `pitch` pixels along x of a `w × h` picture whose pixels
+/// may be undefined: (the mean step across the line before column `join`, the mean across
+/// every other line). A step counts where both its pixels are defined; a mean of no step is
+/// `None`.
+fn join_steps(
+    px: &dyn Fn(u32, u32) -> Option<[f32; 3]>,
+    w: u32,
+    h: u32,
+    pitch: u32,
+    join: u32,
+) -> (Option<f32>, Option<f32>) {
+    let (mut at_join, mut n_join, mut inner, mut n_inner) = (0.0, 0.0f32, 0.0, 0.0f32);
+    for y in 0..h {
+        for x in (pitch..w).step_by(pitch as usize) {
+            let (Some(a), Some(b)) = (px(x - 1, y), px(x, y)) else {
+                continue;
+            };
+            if x == join {
+                at_join += step(a, b);
+                n_join += 1.0;
+            } else {
+                inner += step(a, b);
+                n_inner += 1.0;
+            }
+        }
+    }
+    let mean = |s: f32, n: f32| (n > 0.0).then(|| s / n);
+    (mean(at_join, n_join), mean(inner, n_inner))
+}
+
+/// The ratio of one picture of two images of `w0 × h0` pixels (`a` and `b`, row-major, `b` on
+/// `a`'s `edge` side), `pitch` pixels per classic pixel: the step across the join over the step
+/// across the other lattice lines of the two images, on the axis across the join. `None` when
+/// no step crosses the join (a side draws nothing along it).
+fn joined_ratio(
+    a: &[Option<[f32; 3]>],
+    b: &[Option<[f32; 3]>],
+    (w0, h0): (u32, u32),
+    pitch: u32,
+    edge: Edge,
+) -> Option<f32> {
+    let at = |img: &[Option<[f32; 3]>], x: u32, y: u32| img[(y * w0 + x) as usize];
+    // The join as the line before column `join` of a picture `w × h`: a south pair is read
+    // transposed.
+    let (w, h, join) = match edge {
+        Edge::East => (2 * w0, h0, w0),
+        Edge::South => (2 * h0, w0, h0),
+    };
+    let px = |x: u32, y: u32| -> Option<[f32; 3]> {
+        let (img, x) = if x < join { (a, x) } else { (b, x - join) };
+        match edge {
+            Edge::East => at(img, x, y),
+            Edge::South => at(img, y, x),
+        }
+    };
+    let (step, inner) = join_steps(&px, w, h, pitch, join);
+    Some(ratio(step?, inner.unwrap_or(0.0)))
+}
+
+/// Neighbour seams (spec 07 HD2): records A and B drawn in edge-adjacent cells, B on A's
+/// `edge` side, each as the page shows it ([`shown`]) at the HD scale, `k` pixels per classic
+/// pixel. The terrain-seam lattice measure across their shared edge: the step across the join
+/// line over the steps across the other lattice lines of the two images (every classic pixel,
+/// `k` HD pixels apart), on the axis across the join. Returns (the HD ratio, its limit): the
+/// limit is `max_ratio`, or the classic pair's own ratio across the same edge where that is
+/// higher (a classic pair that already steps is not held to more); [`seam_passes`] judges it.
+/// `None` when nothing is measured: a side draws nothing along the edge.
+pub fn neighbour_seam(
+    a: (&Classic, &[Option<[f32; 3]>]),
+    b: (&Classic, &[Option<[f32; 3]>]),
+    k: u32,
+    edge: Edge,
+    max_ratio: f32,
+) -> Option<(f32, f32)> {
+    let (w, h) = (a.0.width, a.0.height);
+    let hd = joined_ratio(a.1, b.1, (w * k, h * k), k, edge)?;
+    let classic = |c: &Classic| -> Vec<Option<[f32; 3]>> {
+        c.px.iter().map(|p| p.map(|c| c.map(f32::from))).collect()
+    };
+    let cl = joined_ratio(&classic(a.0), &classic(b.0), (w, h), 1, edge)?;
+    Some((hd, max_ratio.max(cl)))
 }
 
 /// Motion kept across consecutive frames: for each pair (classic a, classic b, HD a, HD b) of
