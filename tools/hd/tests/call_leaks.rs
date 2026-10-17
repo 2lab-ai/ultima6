@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use u6_hdtool::run::{Codex, Runner};
+use u6_hdtool::run::{CLEANUP, Codex, Runner};
 
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("u6-hd-leaks-{}-{name}", std::process::id()));
@@ -167,6 +167,7 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
                 bin: bin.clone(),
                 home: t.join("home"),
                 timeout: Duration::from_secs(*secs),
+                grace: CLEANUP,
             };
             let hangs = *unread || name.ends_with("hang.sh");
             let prompt = if *unread { big.as_str() } else { "PROMPT" };

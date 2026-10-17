@@ -1600,6 +1600,7 @@ fn one_deadline_covers_the_call_and_what_it_started() {
         bin: lingering_stub(&t, wait),
         home: t.join("codex-home"),
         timeout: Duration::from_secs(timeout),
+        grace: run::CLEANUP,
     };
     let dir = crate::work::ensure_dir(&t.join("call")).unwrap();
     std::fs::write(t.join("sheet.png"), b"x").unwrap();
@@ -1868,6 +1869,7 @@ fn the_review_codex_shapes_end_in_time() {
             bin,
             home: home.clone(),
             timeout: Duration::from_secs(secs),
+            grace: run::CLEANUP,
         };
         let start = Instant::now();
         (
@@ -1931,6 +1933,7 @@ fn the_generated_image_is_moved_out_of_codex_home() {
         bin: PathBuf::from("/nonexistent"),
         home: home.clone(),
         timeout: std::time::Duration::from_secs(1),
+        grace: run::CLEANUP,
     };
     c.finish(&image);
     assert!(!thread.exists());
@@ -1956,6 +1959,7 @@ fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
             bin,
             home: home.clone(),
             timeout: Duration::from_secs(secs),
+            grace: run::CLEANUP,
         };
         let start = Instant::now();
         (
@@ -2564,6 +2568,7 @@ fn a_call_s_stderr_is_kept_to_its_cap() {
         bin: loud,
         home: t.join("home"),
         timeout: Duration::from_secs(30),
+        grace: run::CLEANUP,
     };
     let start = Instant::now();
     let e = c
@@ -2635,18 +2640,24 @@ fn stderr_written_after_the_events_end_is_still_kept() {
     let dir = crate::work::ensure_dir(&t.join("dir")).unwrap();
     std::fs::write(t.join("sheet.png"), b"x").unwrap();
     // The call prints its thread and exits; a helper of its own session, holding only its
-    // stderr, writes there 300 ms later: the events have ended long before.
+    // stderr, writes there 300 ms later: the events have ended long before. The session is
+    // made before the fork, so the helper has left the call's group before the call can exit
+    // and the group be killed (made after it, a helper the loaded machine had not yet run
+    // was killed with the group, and never wrote).
     let late = review_stub(
         &t,
         "late.sh",
         "cat > /dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}'\n\
-         /usr/bin/perl -MPOSIX -e 'exit if fork; POSIX::setsid(); select(undef, undef, undef, \
-         0.3); print STDERR \"late\\n\"' > /dev/null\nexit 0",
+         /usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die \"setsid: $!\"; exit if fork; \
+         select(undef, undef, undef, 0.3); print STDERR \"late\\n\"' > /dev/null\nexit 0",
     );
+    // A grace far past the helper's 300 ms, however loaded the machine: the call still ends
+    // when the helper does (its stderr's end), not when the grace does.
     let c = run::Codex {
         bin: late,
         home: t.join("home"),
         timeout: Duration::from_secs(10),
+        grace: Duration::from_secs(30),
     };
     let e = c
         .generate(&t.join("sheet.png"), "PROMPT", &dir)
@@ -2655,6 +2666,55 @@ fn stderr_written_after_the_events_end_is_still_kept() {
     assert_eq!(
         std::fs::read_to_string(dir.join("stderr.txt")).unwrap(),
         "late\n"
+    );
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
+fn stderr_written_after_the_grace_is_not_waited_for() {
+    use std::time::{Duration, Instant, SystemTime};
+    let t = temp("later-stderr");
+    let dir = crate::work::ensure_dir(&t.join("dir")).unwrap();
+    std::fs::write(t.join("sheet.png"), b"x").unwrap();
+    // As above, but the helper holds the call's stderr while `hold` exists (at most 30 s)
+    // and writes there only then; the test removes it once the call has returned, so the
+    // write comes after the grace whatever the machine's load. The call marks its exit.
+    let (hold, exited) = (t.join("hold"), t.join("exited"));
+    std::fs::write(&hold, b"").unwrap();
+    let later = review_stub(
+        &t,
+        "later.sh",
+        &format!(
+            "cat > /dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"t1\"}}'\n\
+             /usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die \"setsid: $!\"; exit if fork; \
+             for (1 .. 3000) {{ last unless -e $ARGV[0]; select(undef, undef, undef, 0.01) }} \
+             print STDERR \"later\\n\"' \"{}\" > /dev/null\n: > \"{}\"\nexit 0",
+            hold.display(),
+            exited.display()
+        ),
+    );
+    // Twice the tool's own grace, so a call that waited this long was given this one.
+    let grace = run::CLEANUP * 2;
+    let c = run::Codex {
+        bin: later,
+        home: t.join("home"),
+        timeout: Duration::from_secs(10),
+        grace,
+    };
+    let start = Instant::now();
+    let e = c.generate(&t.join("sheet.png"), "PROMPT", &dir);
+    let (took, end) = (start.elapsed(), SystemTime::now());
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(e.unwrap_err(), "no image generated");
+    // Not waited for: nothing of it kept. The call waited out its grace (the stderr still
+    // open), then ended within it of its exit, not with the helper (30 s from before it).
+    assert_eq!(std::fs::read_to_string(dir.join("stderr.txt")).unwrap(), "");
+    assert!(took >= grace, "{took:?}");
+    let exit = std::fs::metadata(&exited).unwrap().modified().unwrap();
+    let after = end.duration_since(exit).unwrap_or_default();
+    assert!(
+        after < grace + Duration::from_secs(10),
+        "{after:?} after its exit"
     );
     let _ = std::fs::remove_dir_all(&t);
 }
@@ -2763,6 +2823,7 @@ fn every_reserved_call_counts_whatever_became_of_it() {
         bin: w.root.join("no-such-codex"),
         home: w.root.join("home"),
         timeout: std::time::Duration::from_secs(5),
+        grace: run::CLEANUP,
     };
     let one = RunOptions {
         send: true,
