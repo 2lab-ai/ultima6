@@ -1205,6 +1205,52 @@ fn a_landing_that_would_fail_in_a_table_stops_there_whichever_landing_comes_firs
     }
 }
 
+/// After [`after_an_if`]'s `a1`, whose landing reads "abcd" at `x`: the `*` block's `ee`;
+/// block `q` (the `*` block's no-match landing) jumps into "abcd" at `x + 2`, splitting the
+/// run; block `r` (`q`'s no-match landing) prints the table at `x + 2`. Three landings.
+fn a_table_at_a_split_runs_second_part() -> (Vec<u8>, u32) {
+    let x = BODY + 13;
+    let mut rest = b"abcd\0\xee\xefq\xf6".to_vec();
+    rest.extend(jump(x + 2));
+    rest.extend(b"\xee\xefr\xf6\xb5");
+    rest.extend(lit32(x + 2));
+    rest.push(0xb1);
+    rest.extend(jump(BODY));
+    rest.extend([0xee, 0xff]);
+    (after_an_if(&rest), x)
+}
+
+#[test]
+fn a_table_wins_over_the_second_part_of_another_landings_split_run() {
+    // The second part of the a1's run keeps the a1's landing as its path: block `r`'s table
+    // there wins, and the run's first part and the jump stop there.
+    let (s, x) = a_table_at_a_split_runs_second_part();
+    let d = ok(&s);
+    let Kind::Table(t) = &item(&d, x + 2).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(
+        t.entries.iter().map(|e| e.bytes(&s)).collect::<Vec<_>>(),
+        [b"cd"]
+    );
+    assert!(matches!(item(&d, x).kind, Kind::Text(_)) && item(&d, x).len == 2);
+    assert!(
+        d.hazards.contains(&Hazard {
+            at: x + 2,
+            kind: HazardKind::IntoData
+        }),
+        "{:?}",
+        d.hazards
+    );
+    assert!(
+        !d.hazards
+            .iter()
+            .any(|h| matches!(h.kind, HazardKind::Dropped(..))),
+        "{:?}",
+        d.hazards
+    );
+}
+
 /// The decode of `s` with the landings taken in script order and in the reverse order: its
 /// items, its hazards (as a set) and its catalog.
 fn both_orders(s: &[u8]) -> [(Vec<Item>, Vec<String>, String); 2] {
@@ -1242,6 +1288,7 @@ fn which_of_a_table_and_a_landings_code_wins_does_not_depend_on_the_landing_orde
     rest.extend([0xee, 0xff]);
     scripts.push(after_an_if(&rest));
     scripts.push(a_table_a_failing_landing_reaches().0);
+    scripts.push(a_table_at_a_split_runs_second_part().0);
     for (n, s) in scripts.iter().enumerate() {
         let [a, b] = both_orders(s);
         assert!(a == b, "script {n}: {:?}\n{:?}", a.1, b.1);
