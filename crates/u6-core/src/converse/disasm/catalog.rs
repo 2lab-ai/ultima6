@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::decode::ref_entry;
-use super::{Assign, Disasm, Kind, Operands, Refusal, Span, disassemble, item_starting, reachable};
+use super::{Assign, Disasm, Kind, Operands, Refusal, Span, disassemble, reachable};
 
 /// The catalog format's name (`/2`: runs carry `part_of`; copies reach the tables that follow).
 pub const FORMAT: &str = "u6-converse-catalog/2";
@@ -164,7 +164,10 @@ impl ScriptUnits {
     /// The units of `d`, decoded from `script` (the spans index it: the same bytes only).
     pub(super) fn units(d: &Disasm, script: &[u8]) -> Self {
         let mut out = Self::empty(d.archive, d.item, script, None);
-        let item_at = |a: u32| item_starting(&d.items, a);
+        let item_at = |a: u32| {
+            let i = d.items.partition_point(|it| it.offset <= a);
+            d.items.get(i.checked_sub(1)?).filter(|it| a < it.end())
+        };
         // The string slots each table string is copied into, by (table, index).
         let mut slots: BTreeMap<(u32, u32), BTreeSet<u8>> = BTreeMap::new();
         for item in &d.items {

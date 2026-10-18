@@ -351,19 +351,23 @@ impl Decoded<'_> {
 
     /// `start..end` is one string of a string table.
     fn string_ok(&self, start: u32, end: u32) -> bool {
-        self.item_at(start).is_some_and(|it| match &it.kind {
+        self.entry_at(start).is_some_and(|e| e.end() == end)
+    }
+
+    /// The string a read from `at` reads: the string-table entry that starts there, or the
+    /// rest of the one an op names `at` inside of ([`super::Table::inner`]).
+    fn entry_at(&self, at: u32) -> Option<Span> {
+        self.item_at(at).and_then(|it| match &it.kind {
             Kind::Table(t) if !t.words => t
                 .entries
                 .iter()
-                .any(|e| e.offset == start && e.end() == end),
-            _ => false,
-        })
-    }
-
-    /// The string-table entry that starts at `at`.
-    fn entry_at(&self, at: u32) -> Option<Span> {
-        self.item_at(at).and_then(|it| match &it.kind {
-            Kind::Table(t) if !t.words => t.entries.iter().find(|e| e.offset == at).copied(),
+                .find(|e| {
+                    e.offset == at || (t.inner.contains(&at) && e.offset < at && at <= e.end())
+                })
+                .map(|e| Span {
+                    offset: at,
+                    len: e.end() - at,
+                }),
             _ => None,
         })
     }

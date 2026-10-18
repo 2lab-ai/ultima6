@@ -1359,6 +1359,58 @@ fn the_evaluators_stack_bounds_are_hazards_and_a_table_beyond_them_is_none() {
 }
 
 #[test]
+fn an_address_inside_another_tables_string_reads_that_strings_rest() {
+    // Prints of the string at `t`, of its rest from `t + 1` and of the string after that rest
+    // (index 1 from `t + 1`); a copy of index 1 from `t + 1` marks that string. One table.
+    let t = BODY + 40;
+    let mut body = vec![0xb5];
+    body.extend(lit32(t));
+    body.push(0xb1);
+    body.push(0xb5);
+    body.extend(lit32(t + 1));
+    body.push(0xb1);
+    body.push(0xb5);
+    body.extend(lit32(t + 1));
+    body.extend([0x01, 0xa7]);
+    body.extend([0xa6, 0x03, 0xb3, 0xa8]);
+    body.extend(lit32(t + 1));
+    body.extend([0x01, 0xa7, 0xb6]);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"ab\0cd\0\xb8");
+    let s = script(&body);
+    let d = ok(&s);
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.inner, [t + 1]);
+    assert_eq!(
+        tb.entries.iter().map(|e| e.bytes(&s)).collect::<Vec<_>>(),
+        [&b"ab"[..], b"cd"]
+    );
+    let units = ScriptUnits::units(&d, &s);
+    let slots: Vec<&[u8]> = units.strings.iter().map(|u| &u.slots[..]).collect();
+    assert_eq!(slots, [&[][..], &[3]]);
+    // Index 2 from `t + 1` is past the table.
+    let mut far = body.clone();
+    let at = far.windows(2).position(|w| w == [0x01, 0xa7]).unwrap();
+    far[at] = 0x02;
+    assert_eq!(refused(&script(&far)).reason, Reason::TableIndex);
+    // The cross-check takes a read from `t + 1` to the string's NUL, not from any other byte.
+    let read = |from: u32| {
+        let ev: Vec<Event> = (from..t + 3)
+            .map(|at| Event::Table {
+                at: at as i32,
+                byte: s[at as usize],
+                read: Read::Copy,
+            })
+            .collect();
+        checked(&body, ev)
+    };
+    assert_eq!(read(t + 1).failures(), 0);
+    assert_eq!(read(t + 2).table_mismatches, 1);
+}
+
+#[test]
 fn indices_and_addresses_have_the_interpreters_width() {
     let t = BODY + 20;
     let strings = |op: &[u8]| {

@@ -942,20 +942,40 @@ impl<'a> Decoder<'a> {
             }
         }
         let addrs: Vec<u32> = by_addr.keys().copied().collect();
+        // Every use's address is inside the script (`add_use`).
+        debug_assert!(addrs.iter().all(|&a| a < self.len()));
         let mut out = Vec::with_capacity(addrs.len());
         // The entries the tables before still need from this one: (where it must start, its
         // kind, how many).
         let mut carry: Option<(u32, bool, usize)> = None;
-        for (n, (&addr, &(words, own))) in by_addr.iter().enumerate() {
-            let next = addrs
-                .get(n + 1)
-                .copied()
-                .unwrap_or(self.len())
-                .min(self.len());
+        let mut n = 0;
+        while let Some(&addr) = addrs.get(n) {
+            let (words, own) = by_addr[&addr];
+            // The string addresses after it that fall inside one of its strings (not at a
+            // string's start) are of this table: a read there starts in the middle of a string.
+            let (mut m, mut inner, mut inner_need) = (n + 1, Vec::new(), 0);
+            while let Some(&u) = addrs.get(m).filter(|_| !words) {
+                let (u_words, u_need) = by_addr[&u];
+                let after = addrs.get(m + 1).copied().unwrap_or(self.len());
+                let direct = (addr..after).find(|&p| self.direct_at(p)).unwrap_or(after);
+                let strings = self.table_at(addr, direct, false).entries;
+                let Some(i) = strings.iter().position(|e| e.offset < u && u <= e.end()) else {
+                    break;
+                };
+                if u_words {
+                    break;
+                }
+                // Index `k` from `u` reads string `i + k` of this table.
+                inner.push(u);
+                inner_need = inner_need.max(if u_need > 0 { i + u_need } else { 0 });
+                m += 1;
+            }
+            let next = addrs.get(m).copied().unwrap_or(self.len());
             let needed = match carry.take() {
                 Some((at, w, k)) if at == addr && w == words => own.max(k),
                 _ => own,
-            };
+            }
+            .max(inner_need);
             let direct = (addr..next).find(|&p| self.direct_at(p)).unwrap_or(next);
             let mut table = self.table_at(addr, direct, words);
             if !table.terminated {
@@ -969,7 +989,9 @@ impl<'a> Decoder<'a> {
                     carry = Some((table_end(addr, &table), words, short));
                 }
             }
+            table.inner = inner;
             out.push((addr, table));
+            n = m;
         }
         out
     }
@@ -997,7 +1019,7 @@ impl<'a> Decoder<'a> {
             let namers: BTreeSet<Origin> = self
                 .uses
                 .iter()
-                .filter(|(u, _)| u.addr == addr)
+                .filter(|(u, _)| u.addr == addr || table.inner.contains(&u.addr))
                 .map(|&(_, o)| o)
                 .collect();
             let mut own = false;
@@ -1084,7 +1106,11 @@ impl<'a> Decoder<'a> {
         let mut banned = BTreeMap::new();
         for (u, origin) in &self.uses {
             let Some(index) = u.index else { continue };
-            let count = reachable(|a| self.items.get(&a), u.addr, u.words).len();
+            let containing = |a: u32| {
+                let o = *self.owner.get(a as usize)?;
+                self.items.get(&o)
+            };
+            let count = reachable(containing, u.addr, u.words).len();
             if index as usize >= count {
                 match origin {
                     Origin::Direct => return refuse(u.at, Reason::TableIndex),
@@ -1133,6 +1159,7 @@ impl<'a> Decoder<'a> {
             words,
             entries,
             terminated,
+            inner: Vec::new(),
         }
     }
 

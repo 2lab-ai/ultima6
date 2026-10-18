@@ -30,7 +30,9 @@
 //!   `b8` at an entry's start, the next table address, the script's end or direct code. A table
 //!   without its `b8` there has no end of its own: it also ends at landing code, but never
 //!   before the last entry a constant index reads, its own or one that runs on into it from the
-//!   tables before it;
+//!   tables before it. A string address an op names inside another table's string (not at a
+//!   string's start) is of that table ([`Table::inner`]): a read there reads the string's rest;
+//!   a word address inside a word is not, and its table ends there;
 //! - what is left is [`Kind::Unreached`].
 //!
 //! Tables and the trial. A table use is checked when its op is decoded, inside the path that
@@ -359,6 +361,10 @@ pub struct Table {
     pub entries: Vec<Span>,
     /// A `b8` at an entry's start ends the table (the last byte of the item).
     pub terminated: bool,
+    /// Addresses ops name inside its strings (a string table only): a read there starts in the
+    /// middle of a string and reads its rest; an index from there counts that rest as the
+    /// first string.
+    pub inner: Vec<u32>,
 }
 
 /// A landing or entry that does not meet the items.
@@ -518,40 +524,51 @@ pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refus
     }
 }
 
-/// The item that starts at `at` (`items` in offset order).
-fn item_starting(items: &[Item], at: u32) -> Option<&Item> {
-    items
-        .binary_search_by_key(&at, |it| it.offset)
-        .ok()
-        .map(|i| &items[i])
-}
-
-/// The entries a use of the table at `addr` can reach: the table item there and, while a table
-/// has no `b8`, the one of the same kind that starts where it ends (an index runs on into it, as
-/// `table_element` counts NULs and `b4` / `c3` step over words). As (table offset, index in that
-/// table, entry). `item_at` gives the item that starts at an offset.
+/// The entries a use of the table at `addr` can reach: from the table item over `addr` (from
+/// its start, or from an address inside one of its strings, [`Table::inner`]: that string's
+/// rest first), and, while a table has no `b8`, the one of the same kind that starts where it
+/// ends (an index runs on into it, as `table_element` counts NULs and `b4` / `c3` step over
+/// words). As (table offset, index in that table, entry). `containing` gives the item over an
+/// offset.
 fn reachable<'a>(
-    item_at: impl Fn(u32) -> Option<&'a Item>,
+    containing: impl Fn(u32) -> Option<&'a Item>,
     addr: u32,
     words: bool,
 ) -> Vec<(u32, u32, Span)> {
     let mut out = Vec::new();
-    let mut at = addr;
+    let Some(first) = containing(addr) else {
+        return out;
+    };
+    if first.offset != addr
+        && !matches!(&first.kind, Kind::Table(t) if !t.words && t.inner.contains(&addr))
+    {
+        return out;
+    }
+    let mut at = first.offset;
     while let Some(Item {
+        offset,
         kind: Kind::Table(t),
         len,
-        ..
-    }) = item_at(at)
+    }) = containing(at)
     {
-        if t.words != words {
+        if *offset != at || t.words != words {
             break;
         }
-        out.extend(
-            t.entries
-                .iter()
-                .enumerate()
-                .map(|(i, &e)| (at, i as u32, e)),
-        );
+        for (i, &e) in t.entries.iter().enumerate() {
+            if e.end() < addr {
+                continue;
+            }
+            // The string `addr` falls in: its rest.
+            let e = if e.offset < addr {
+                Span {
+                    offset: addr,
+                    len: e.end() - addr,
+                }
+            } else {
+                e
+            };
+            out.push((at, i as u32, e));
+        }
         if t.terminated {
             break;
         }
