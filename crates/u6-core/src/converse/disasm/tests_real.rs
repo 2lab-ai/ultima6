@@ -1,7 +1,9 @@
 //! Real data (owner-local): the disassembler over every script of the owner's `converse.a` and
 //! `converse.b`, and the execution cross-check on the real-data conversations of
-//! `converse/tests_real.rs`, then with every actor asked every keyword of its script. Skips where
-//! the zip is missing. Its output, passing or failing, holds only counts of what the test made
+//! `converse/tests_real.rs`, then with every actor asked the keywords of its script, each at a
+//! prompt of a fresh conversation. An actor whose fresh conversation comes to no prompt (it
+//! ends first, or waits out the driver's rounds) is sent none, and those answers are not
+//! checked; how many, only the output says. Skips where the zip is missing. Its output, passing or failing, holds only counts of what the test made
 //! (scripts decoded and refused, items and hazards by kind, conversations, keywords sent,
 //! checks and mismatches), labels, actor slots and pass/fail (spec 01): never a value or a length
 //! of the owner's data, a byte, a text, a name, a keyword or a hash of them.
@@ -227,6 +229,9 @@ struct Sent {
     /// Keywords typed at a prompt, and keywords no fresh conversation came to a prompt for.
     sent: usize,
     unsent: usize,
+    /// Of those not sent, the ones whose last conversation ended before a prompt (the others'
+    /// ran out of the driver's rounds waiting elsewhere).
+    unsent_ended: usize,
     /// Conversations that ended, and that stopped waiting.
     ended: usize,
     stopped: usize,
@@ -249,6 +254,9 @@ fn send_keywords(keys: &[&str], mut talk: impl FnMut(&[&str]) -> (bool, usize)) 
         let k = took.min(chunk.len());
         if k == 0 {
             out.unsent += pending.len();
+            if done {
+                out.unsent_ended += pending.len();
+            }
             break;
         }
         out.sent += k;
@@ -277,9 +285,8 @@ fn keywords_a_conversation_did_not_take_go_to_the_next_one() {
     );
     let want = Sent {
         sent: 8,
-        unsent: 0,
         ended: 2,
-        stopped: 0,
+        ..Sent::default()
     };
     assert_eq!(k, want);
     // A conversation that takes nothing ends the retries: the rest are not sent.
@@ -288,8 +295,17 @@ fn keywords_a_conversation_did_not_take_go_to_the_next_one() {
     let want = Sent {
         sent: 2,
         unsent: 6,
-        ended: 0,
         stopped: 2,
+        ..Sent::default()
+    };
+    assert_eq!(k, want);
+    // One that ends before any prompt: none sent, the conversation ended.
+    let k = send_keywords(&keys, |_| (true, 0));
+    let want = Sent {
+        unsent: 8,
+        unsent_ended: 8,
+        ended: 1,
+        ..Sent::default()
     };
     assert_eq!(k, want);
 }
@@ -488,9 +504,10 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
         script_of.extend(loaded.map(|key| (npc, key)));
     }
     // Keywords: sent (typed at a prompt), and not sent because a fresh conversation came to no
-    // prompt within `talk_through`'s rounds. Conversations: ended and not.
-    let (mut keywords, mut sent, mut unsent) = (0, 0, 0);
-    let (mut ended, mut stopped) = (0, 0);
+    // prompt within `talk_through`'s rounds (it ended first, or it did not). Actors whose
+    // keywords were not sent. Conversations: ended and not.
+    let (mut keywords, mut sent, mut unsent, mut unsent_ended) = (0, 0, 0, 0);
+    let (mut ended, mut stopped, mut mute) = (0, 0, 0);
     for &(npc, key) in &script_of {
         let mut keys: BTreeSet<String> = BTreeSet::new();
         for it in &decoded[&key].disasm.items {
@@ -513,16 +530,21 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
             let (_, done, took) = talk(npc, lines, true, &mut total, &mut read);
             (done, took)
         });
+        // A fresh conversation comes to its first prompt the same way whatever the lines (they
+        // are typed there): one that came to none for some keywords came to none for any.
+        assert!(
+            k.unsent == 0 || k.sent == 0,
+            "actor slot {npc:#x}: some keywords sent, the others no prompt"
+        );
         (sent, unsent) = (sent + k.sent, unsent + k.unsent);
+        unsent_ended += k.unsent_ended;
         (ended, stopped) = (ended + k.ended, stopped + k.stopped);
+        mute += usize::from(k.unsent > 0);
     }
     println!(
-        "keywords {keywords} of {} actors: sent {sent}, not sent (a fresh conversation came to no prompt within {ROUNDS} driver rounds) {unsent}; keyword conversations ended {ended}, not ended {stopped}",
-        script_of.len()
-    );
-    assert!(
-        sent + unsent == keywords,
-        "every keyword sent, or no prompt for it within the driver's rounds"
+        "keywords {keywords} of {} actors: sent {sent}; not sent {unsent}, of {mute} actors whose fresh conversation came to no prompt (it ended first {unsent_ended}, it waited out {ROUNDS} driver rounds {}): their answers are not checked; keyword conversations ended {ended}, not ended {stopped}",
+        script_of.len(),
+        unsent - unsent_ended
     );
     let catalog_strings: usize = disasms
         .iter()
