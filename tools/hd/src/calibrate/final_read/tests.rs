@@ -956,6 +956,30 @@ fn classic_by_hand(g: &Game, s: u32, tiles: impl Fn(usize, usize) -> Vec<u16>) -
     out
 }
 
+/// Record `r` alone in a cell at S `s`, by hand: each pixel its colour (the palette's first
+/// colour where it is clear).
+fn record_by_hand(g: &Game, r: u16, s: u32) -> Rgba {
+    let mut out = Rgba::new(16 * s, 16 * s);
+    let rec = &g.records[usize::from(r)];
+    for i in 0..256 {
+        let c = if rec.transparent[i] {
+            g.palette[0]
+        } else {
+            g.palette[usize::from(rec.pixels[i])]
+        };
+        let (x, y) = ((i % 16) as u32 * s, (i / 16) as u32 * s);
+        img::fill(&mut out, x, y, s, s, [c[0], c[1], c[2], 255]);
+    }
+    out
+}
+
+/// Cell `(c, r)` of panel `k` of the first window of a final sheet at S `s`.
+fn cell_at(sheet: &Rgba, s: u32, k: usize, (c, r): (usize, usize)) -> Rgba {
+    let (px, py) = Layout::of(s).panel_at(0, k);
+    let cell = 16 * s;
+    sheet.rect(px + c as u32 * cell, py + r as u32 * cell, cell, cell)
+}
+
 /// Whether each pixel of the pack panel `hd` where a record of `generated` drawn in cell
 /// (column, row) by `tiles` is opaque, and in front, is that pixel's colour (the pack's image is
 /// the record at ×4, nearest).
@@ -1531,6 +1555,18 @@ fn a_window_at_a_pair_draws_the_pairs_records() {
     assert_eq!(w["frames"], "pair");
     let name = atlas::image_name(ImageId::Tile(f1));
     assert!(w["ticks"].contains(&name), "{}", w["ticks"]);
+    // The sheet draws the tile's cell as the second frame, not the first, in the classic and the
+    // pack panels, at both scales.
+    let (x, y): (usize, usize) = (w["x"].parse().unwrap(), w["y"].parse().unwrap());
+    let cell = (6 + A_CELL.0 - x, 6 + A_CELL.1 - y);
+    for (s, file) in [(4, w["sheet"].clone()), (2, w["sheet_s2"].clone())] {
+        let sheet = read_sheet(&o.out.join(&file));
+        let (want, frame0) = (record_by_hand(&g, f1, s), record_by_hand(&g, f0, s));
+        assert_ne!(want, frame0);
+        for k in [0, 2] {
+            assert_eq!(cell_at(&sheet, s, k, cell), want, "{file} {k}");
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
