@@ -610,7 +610,10 @@ fn the_pairs_of_pass_1_are_the_worlds() {
 }
 
 #[test]
-fn a_master_is_the_one_ingest_wrote() {
+fn the_final_read_holds_each_master_to_the_digest_ingest_json_lists() {
+    // The final read's side of it: an ingest.json made here, its digests the masters'. That
+    // ingest writes the digests is checked where ingest runs
+    // (the_read_of_what_ingest_and_its_gate_wrote).
     // A survivor in no pair (the chest, drawn at (12, 12)) and one drawn nowhere (the sword):
     // no pair holds their masters to the log.
     let mut g = game();
@@ -2492,6 +2495,14 @@ fn the_read_of_what_ingest_and_its_gate_wrote() {
         let p = grass(edge);
         let tick = format!("{},map,gen-gen,{},{}", edge_name(p.edge), name(0), name(0));
         assert!(gw["ticks"].contains(&tick), "{}", gw["ticks"]);
+    }
+    // Ingest listed each master with the digest of the file it wrote.
+    let list: Vec<Accepted> =
+        serde_json::from_slice(&std::fs::read(work.path("ingest.json")).unwrap()).unwrap();
+    assert!(!list.is_empty());
+    for a in &list {
+        let bytes = std::fs::read(work.path(&a.slice)).unwrap();
+        assert_eq!(a.digest, Some(work::digest(&[&bytes])), "{}", a.image);
     }
     // Every survivor's record drawn in a window; the fallen have none.
     for c in &s.classes {
