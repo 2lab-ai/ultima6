@@ -3,13 +3,13 @@
 //!
 //! 1. **A run's output is never mixed with another run's.** `--out` is made if it is not there
 //!    and opened once (a link at `--out` itself is followed); where the dir opened is then is
-//!    checked again to be outside the repository, and a run that cannot tell where it is writes
-//!    nothing. The run's first write in it is a `mkdirat` of a dir of its own,
-//!    `run-<UTC time>-<pid>/`, named from this process's clock and pid alone; when that dir is
-//!    there already the run fails, it is never reused. The run opens that dir (`openat`,
-//!    `O_NOFOLLOW`) and makes every file of it through it ([`at`]: `openat` with `O_CREAT |
-//!    O_EXCL | O_NOFOLLOW`, no temp file, no rename), never by a path: nothing outside it is
-//!    written and no file there is replaced. A run dir removed while the run
+//!    read from the system and checked again to be outside the repository, and a run that
+//!    cannot read it, or finds it inside, writes nothing. The run's first write in it is a
+//!    `mkdirat` of a dir of its own, `run-<UTC time>-<pid>/`, named from this process's clock
+//!    and pid alone; when that dir is there already the run fails, it is never reused. The run
+//!    opens that dir (`openat`, `O_NOFOLLOW`) and makes every file of it through it ([`at`]:
+//!    `openat` with `O_CREAT | O_EXCL | O_NOFOLLOW`, no temp file, no rename), never by a path:
+//!    nothing outside it is written and no file there is replaced. A run dir removed while the run
 //!    writes is never made again: the next write fails, and so does the run. A run dir renamed
 //!    away (a link put in its place or not) is never followed: the run's writes go on in the dir
 //!    it made, where that dir is now, and the run fails at its end, when it finds its dir is not
@@ -603,11 +603,12 @@ impl Written {
 }
 
 /// Runs a `calibrate` run of `mode` whose `--out` is `out` (module docs): `out` made if it is
-/// not there, and opened (where the dir opened is then, checked to be outside the repository);
-/// the incomplete runs in it listed through it; the run's own dir made in it (`mkdirat`, a
-/// failure if it is there) and opened (`openat`, not a link); `run` writes in it ([`Run`]);
-/// then [`DONE`], and the dir checked to be where it was made, with each file of the run
-/// identified. A run that fails keeps only its diagnostics ([`Run::fail`]).
+/// not there, and opened (where the dir opened is then read from the system, and checked to be
+/// outside the repository: a run that cannot read it, or finds it inside, fails before it
+/// writes anything); the incomplete runs in it listed through it; the run's own dir made in
+/// it (`mkdirat`, a failure if it is there) and opened (`openat`, not a link); `run` writes in
+/// it ([`Run`]); then [`DONE`], and the dir checked to be where it was made, with each file of
+/// the run identified. A run that fails keeps only its diagnostics ([`Run::fail`]).
 pub fn run_in<T>(
     mode: Mode,
     out: &Path,
