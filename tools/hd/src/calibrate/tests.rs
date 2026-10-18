@@ -35,8 +35,9 @@ const SWORD: u16 = synthetic::OBJECTS + 2;
 
 /// A level of 2 × 2 chunks, grass and stone alternating, water in two cells of the first chunk;
 /// a second level of one chunk. Objects: a 2 × 2 tree whose anchor is east and south of the
-/// window below and its west parts inside it, three objects in one cell (one a top tile), a tile
-/// that replaces its cell's base, and an object on the second level. The leader at (1, 1).
+/// window below and its west parts inside it, two objects that overlap in one cell, a top tile
+/// and an object it overlaps in another, a tile that replaces its cell's base, and an object on
+/// the second level. The leader at (1, 1).
 fn game() -> Game {
     let mut g = synthetic::game();
     g.world = World {
@@ -57,9 +58,10 @@ fn game() -> Game {
         ],
         objects: vec![
             placed(6, 3, 0, synthetic::TREE + 3),
-            placed(4, 0, 0, CHEST),
             placed(4, 0, 0, SWORD),
             placed(4, 0, 0, POTION),
+            placed(3, 0, 0, CHEST),
+            placed(3, 0, 0, POTION),
             placed(2, 3, 0, synthetic::LEFT_HALF),
             placed(1, 1, 1, SWORD),
         ],
@@ -121,9 +123,10 @@ fn by_hand(g: &Game) -> Framebuffer {
                 // The tree's west parts (its anchor at (6, 3) is outside the window).
                 (5, 3) => vec![GRASS, synthetic::TREE + 2],
                 (5, 2) => vec![GRASS, synthetic::TREE],
-                // The later of the starting lists first, each in front of the list; the top
-                // tile behind them.
-                (4, 0) => vec![GRASS, SWORD, POTION, CHEST],
+                // The later of the starting lists first, each in front of the list.
+                (4, 0) => vec![GRASS, SWORD, POTION],
+                // A top tile behind the others, though the later in the lists.
+                (3, 0) => vec![GRASS, POTION, CHEST],
                 // The tile that replaces the base.
                 (2, 3) => vec![synthetic::LEFT_HALF],
                 // The pair's water: its record measured; the other water at frame 0.
