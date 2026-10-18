@@ -120,9 +120,13 @@ pub(super) fn pair_line(
     .to_string()
 }
 
-/// The ×8 master of the ×4 image `img`: each pixel a 2 × 2 block whose subpixels differ (one
-/// channel up and down by as much as it can, to 8) and whose box average is the pixel, so a
-/// master reduced by any other rule than `pack`'s is not `img`.
+/// The ×8 master of the ×4 image `img`: each pixel a 2 × 2 block whose box average is the
+/// pixel, one channel of it up by `d` in the block's top-left and bottom-right subpixels and
+/// down by `d` in the other two (`d` as much as the channel allows, to 8: 0 where it is 0 or
+/// 255). It tells `pack`'s box average from nearest (the top-left subpixel, the pixel plus
+/// `d`) wherever `d` is not 0, which [`the_test_masters_tell_the_box_average_from_nearest`]
+/// checks of the tests' images; it does not tell it from every other rule (a row's mean is the
+/// pixel too).
 pub(super) fn master(img: &Rgba) -> Rgba {
     let mut m = Rgba::new(img.width * 2, img.height * 2);
     for y in 0..img.height {
@@ -138,6 +142,49 @@ pub(super) fn master(img: &Rgba) -> Rgba {
         }
     }
     m
+}
+
+#[test]
+fn the_test_masters_tell_the_box_average_from_nearest() {
+    // Each ×4 image the tests make masters of: its master box-averaged is the image, its
+    // master reduced to the top-left subpixel is not, wherever the channel moved has room.
+    let g = game();
+    let mut images = vec![red_west(&near(&g, A))];
+    for r in [
+        GRASS,
+        X,
+        A,
+        B,
+        synthetic::OBJECTS,
+        synthetic::OBJECTS + 2,
+        synthetic::TREE,
+    ] {
+        images.push(near(&g, r));
+    }
+    for (k, i) in images.iter().enumerate() {
+        let m = master(i);
+        assert_eq!(&img::shrink(&m, 2), i, "{k}");
+        let mut nearest = Rgba::new(i.width, i.height);
+        for y in 0..i.height {
+            for x in 0..i.width {
+                img::put(&mut nearest, x, y, img::get(&m, 2 * x, 2 * y));
+            }
+        }
+        // Exactly where the master's channel had room (d not 0: neither 0 nor 255), and there
+        // is such a pixel.
+        let (mut room, mut differ) = (0, 0);
+        for y in 0..i.height {
+            for x in 0..i.width {
+                let v = img::get(i, x, y)[((x + y) % 3) as usize];
+                let has = v != 0 && v != 255;
+                let moved = img::get(&nearest, x, y) != img::get(i, x, y);
+                assert_eq!(moved, has, "{k} ({x}, {y})");
+                room += usize::from(has);
+                differ += usize::from(moved);
+            }
+        }
+        assert!(room > 0 && differ == room, "{k}");
+    }
 }
 
 /// The file of [`master`] of `img`, as ingest writes it.
