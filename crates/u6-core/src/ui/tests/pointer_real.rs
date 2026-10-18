@@ -287,7 +287,12 @@ fn the_game_played_with_the_pointer() {
     p.click(64, 184);
     {
         let s = p.e.state();
-        let line = String::from_utf8_lossy(&s.ui.text.transcript_line).into_owned();
+        let line: String =
+            s.ui.text
+                .transcript_line
+                .iter()
+                .map(|&c| crate::ui::wide::cell_char(c))
+                .collect();
         assert!(
             (s.ui.input.target_pending, s.ui.input.target_command) == (1, 0x84),
             "Look waits for its target"

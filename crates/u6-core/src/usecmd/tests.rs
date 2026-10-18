@@ -445,11 +445,15 @@ where
 fn scroll_text(s: &State) -> String {
     let t = &s.ui.text;
     let mut all = s.ui.messages.join("\n");
-    all.extend(t.transcript_line.iter().map(|&b| char::from(b)));
+    all.extend(
+        t.transcript_line
+            .iter()
+            .map(|&b| crate::ui::wide::cell_char(b)),
+    );
     all.extend(
         t.line[usize::from(t.line_start)..usize::from(t.line_len)]
             .iter()
-            .map(|&b| char::from(b)),
+            .map(|&b| crate::ui::wide::cell_char(b)),
     );
     all
 }

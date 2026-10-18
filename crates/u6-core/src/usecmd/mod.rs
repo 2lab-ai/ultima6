@@ -104,7 +104,7 @@ impl<'a> Ux<'a> {
 
     /// 0x108376: one character through the escape layer.
     pub async fn put(&self, c: u8) {
-        text_out(self.state, self.io, i16::from(c)).await;
+        text_out(self.state, self.io, i32::from(c)).await;
     }
 
     /// printf of the display name 0x10eef8 of `slot`.

@@ -43,9 +43,13 @@ fn start(files: &Files) -> State {
 fn lines_of(s: &State) -> Vec<String> {
     let t = &s.ui.text;
     let mut lines = s.ui.messages.clone();
-    let mut last: String = t.transcript_line.iter().map(|&b| char::from(b)).collect();
+    let mut last: String = t
+        .transcript_line
+        .iter()
+        .map(|&b| crate::ui::wide::cell_char(b))
+        .collect();
     let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
-    last.extend(pending.iter().map(|&b| char::from(b)));
+    last.extend(pending.iter().map(|&b| crate::ui::wide::cell_char(b)));
     lines.push(last);
     lines
 }

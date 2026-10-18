@@ -8,10 +8,19 @@
 //! the buffer through the word wrapper 0x115a92, which lays it out left, right, centred or
 //! justified. Glyph pixels are one byte each; the font's two key values (ink, background) map
 //! to the context's colours, every other value is a colour of its own.
+//!
+//! Port (spec 08 §1b): with the context's `wide` on, text is read as codes, its Hangul syllables
+//! assembled from their UTF-8 bytes by the rule of the message scroll's assembler
+//! ([`crate::ui::wide::Utf8`]); a syllable is a cell 8 pixels wide and a line high, drawn from
+//! the Hangul table, and the word wrapper sums the widths per glyph. Off, every byte is a glyph
+//! as before.
 
-use u6_formats::font::WouFont;
+use std::rc::Rc;
+
+use u6_formats::font::{HangulFont, WouFont};
 
 use super::mem::{Chip, View};
+use crate::ui::wide::{self, Utf8};
 
 /// Original: A4+0x176c (a text context; 0x10f864 makes one current)
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +39,12 @@ pub struct TextCtx {
     pub buf: Vec<u8>,
     /// +0x16: 0 left, 1 right, 2 centred, 3 justified (0x115a92)
     pub align: u8,
+    /// Port-only (spec 08 §1b): text is read as codes, Hangul syllables assembled (set by the
+    /// locale layer).
+    pub wide: bool,
+    /// Port-only (spec 08 §1b): the table Hangul syllables are drawn from; `None` draws them
+    /// blank.
+    pub hangul: Option<Rc<HangulFont>>,
 }
 
 impl Default for TextCtx {
@@ -42,6 +57,8 @@ impl Default for TextCtx {
             bg: 0,
             buf: Vec::new(),
             align: 3,
+            wide: false,
+            hangul: None,
         }
     }
 }
@@ -79,6 +96,19 @@ fn width(font: &WouFont, c: u8) -> i16 {
     i16::from(font.raw[4 + usize::from(c)])
 }
 
+/// Port (spec 08 §1b): the advance of a Hangul syllable, one cell of the Hangul table.
+const HANGUL_ADVANCE: i16 = 8;
+const LF: i32 = 0x0a;
+const SPACE: i32 = 0x20;
+
+/// The width of code `c`: a byte's glyph width, a Hangul syllable's [`HANGUL_ADVANCE`].
+fn advance(font: &WouFont, c: i32) -> i16 {
+    match u8::try_from(c) {
+        Ok(b) => width(font, b),
+        Err(_) => HANGUL_ADVANCE,
+    }
+}
+
 /// Original: u 0x115544 (text: carriage return, cursor to the view's left edge)
 pub fn carriage_return(ctx: &mut TextCtx) {
     ctx.x = ctx.view.x0;
@@ -99,20 +129,31 @@ pub fn line_feed(ctx: &mut TextCtx, font: &WouFont) {
 /// CR and LF move the cursor. A glyph that would end right of the view's right edge goes to the
 /// next line first (the original retries without bound; a glyph wider than the view is drawn
 /// after one retry instead of looping). The cursor stops at the right edge.
+///
+/// Port (spec 08 §1b): [`put_code`] is this for a code; `c` is always a byte here.
 pub fn put_char(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, c: u8) {
+    put_code(chip, ctx, font, i32::from(c));
+}
+
+/// [`put_char`] of code `c`: a byte as before, a Hangul syllable as an 8-pixel cell
+/// ([`draw_hangul`]).
+fn put_code(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, c: i32) {
     match c {
         0x0d => return carriage_return(ctx),
-        0x0a => return line_feed(ctx, font),
+        LF => return line_feed(ctx, font),
         _ => {}
     }
-    let w = width(font, c);
+    let w = advance(font, c);
     for _ in 0..2 {
         if ctx.x.wrapping_add(w).wrapping_sub(1) <= ctx.view.x1 {
             break;
         }
         line_feed(ctx, font);
     }
-    draw_glyph(chip, ctx, font, c);
+    match u8::try_from(c) {
+        Ok(b) => draw_glyph(chip, ctx, font, b),
+        Err(_) => draw_hangul(chip, ctx, font, c),
+    }
     ctx.x = ctx.x.wrapping_add(w);
     if ctx.view.x1 <= ctx.x {
         ctx.x = ctx.view.x1;
@@ -147,11 +188,65 @@ pub fn draw_glyph(chip: &mut Chip, ctx: &TextCtx, font: &WouFont, c: u8) {
     }
 }
 
-/// Sends one character to `out`.
-fn emit(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, out: Out, c: u8) {
+/// Port-only (spec 08 §1b): draws Hangul syllable `c` at the cursor: a column 8 pixels wide and
+/// a line of `font` high, every pixel drawn as [`draw_glyph`] draws a glyph's (ink and paper
+/// through the context's colours). The syllable's 8 × 8 cell, whose ink lies in its rows 0..=6
+/// (`tools/font`), sits with those seven rows centred in the line: cell row 0 on line row
+/// ⌊(height − 7) / 2⌋, the rest of the column paper, cell rows outside the line not drawn.
+/// With no table the column is all paper.
+fn draw_hangul(chip: &mut Chip, ctx: &TextCtx, font: &WouFont, c: i32) {
+    let rows = ctx
+        .hangul
+        .as_deref()
+        .zip(u32::try_from(c).ok())
+        .and_then(|(t, c)| t.glyph(c))
+        .copied()
+        .unwrap_or([0; 8]);
+    let h = height(font).max(0);
+    let top = (h - 7).div_euclid(2);
+    for r in 0..h {
+        let bits = usize::try_from(r - top)
+            .ok()
+            .and_then(|i| rows.get(i).copied())
+            .unwrap_or(0);
+        for col in 0..HANGUL_ADVANCE {
+            let v = if bits & (0x80 >> col) != 0 {
+                ctx.fg
+            } else {
+                ctx.bg
+            };
+            chip.set_pixel(
+                ctx.view.planes,
+                i32::from(ctx.x) + i32::from(col),
+                i32::from(ctx.y) + i32::from(r),
+                glyph_colour(v),
+            );
+        }
+    }
+}
+
+/// Sends one character to `out`. Port (spec 08 §1b): with `wide` on, a screen character goes
+/// through `utf8` first (the buffer keeps bytes; [`wrap`] reads them as codes).
+fn emit(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, out: Out, c: u8, utf8: &mut Utf8) {
     match out {
+        Out::Screen if ctx.wide => {
+            let mut codes = Vec::new();
+            utf8.feed(c, &mut codes);
+            for c in codes {
+                put_code(chip, ctx, font, c);
+            }
+        }
         Out::Screen => put_char(chip, ctx, font, c),
         Out::Buffer => ctx.buf.push(c),
+    }
+}
+
+/// Port-only: draws the bytes `utf8` holds (a sequence cut short), each as itself.
+fn release(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, utf8: &mut Utf8) {
+    let mut codes = Vec::new();
+    utf8.drain(&mut codes);
+    for c in codes {
+        put_code(chip, ctx, font, c);
     }
 }
 
@@ -160,6 +255,10 @@ fn emit(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, out: Out, c: u8) {
 /// Codes: `%B` / `%F` set the background / ink colour, `%X` / `%Y` the cursor, `%P` flushes the
 /// buffer (0x115a84), `%c` `%s` `%d` `%u` `%x` `%D`(long `%ld`) `%U`(`%lu`) print their argument,
 /// any other `%x` prints `x`. Arguments are taken in order; a missing one reads as 0.
+///
+/// Port (spec 08 §1b): with `wide` on, the screen's characters are assembled across the
+/// format and its arguments; the bytes held are drawn as they are before a colour, cursor or
+/// flush code and at the end.
 pub fn printf(
     chip: &mut Chip,
     ctx: &mut TextCtx,
@@ -174,16 +273,20 @@ pub fn printf(
         Some(Arg::Long(l)) => (*l >> 16) as u16,
         _ => 0,
     };
+    let mut utf8 = Utf8::default();
     let mut i = 0;
     while i < fmt.len() && fmt[i] != 0 {
         let c = fmt[i];
         i += 1;
         if c != b'%' {
-            emit(chip, ctx, font, out, c);
+            emit(chip, ctx, font, out, c, &mut utf8);
             continue;
         }
         let code = fmt.get(i).copied().unwrap_or(0);
         i += 1;
+        if matches!(code, b'B' | b'F' | b'X' | b'Y' | b'P' | 0) {
+            release(chip, ctx, font, &mut utf8);
+        }
         let text: Option<String> = match code {
             b'B' => {
                 ctx.bg = word(&mut args) as u8;
@@ -207,13 +310,13 @@ pub fn printf(
                 None
             }
             b'c' => {
-                emit(chip, ctx, font, out, word(&mut args) as u8);
+                emit(chip, ctx, font, out, word(&mut args) as u8, &mut utf8);
                 None
             }
             b's' => {
                 if let Some(Arg::Str(s)) = args.next() {
                     for &b in s.iter().take_while(|&&b| b != 0) {
-                        emit(chip, ctx, font, out, b);
+                        emit(chip, ctx, font, out, b, &mut utf8);
                     }
                 }
                 None
@@ -235,16 +338,17 @@ pub fn printf(
             }
             0 => break,
             other => {
-                emit(chip, ctx, font, out, other);
+                emit(chip, ctx, font, out, other, &mut utf8);
                 None
             }
         };
         if let Some(t) = text {
             for b in t.bytes() {
-                emit(chip, ctx, font, out, b);
+                emit(chip, ctx, font, out, b, &mut utf8);
             }
         }
     }
+    release(chip, ctx, font, &mut utf8);
 }
 
 /// Original: u 0x1142a6 (text: `printf` straight to the screen)
@@ -263,14 +367,23 @@ pub fn print_more(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, fmt: &[u8]
     printf(chip, ctx, font, Out::Buffer, fmt, args);
 }
 
-/// The byte at `i` of the text (0 past the end, as after the NUL).
-fn at(text: &[u8], i: usize) -> u8 {
+/// The code at `i` of the text (0 past the end, as after the NUL).
+fn at(text: &[i32], i: usize) -> i32 {
     text.get(i).copied().unwrap_or(0)
 }
 
 /// Original: u 0x115a92 (text: word-wrap `text` into the view from the cursor, in the context's
 /// alignment; also reached as 0x115a84)
+///
+/// Port (spec 08 §1b): the text is laid out as codes, one per byte or, with `wide` on, one per
+/// Hangul syllable ([`wide::decode`]), and its widths are summed per code.
 pub fn wrap(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, text: &[u8]) {
+    let codes = if ctx.wide {
+        wide::decode(text)
+    } else {
+        text.iter().map(|&b| i32::from(b)).collect()
+    };
+    let text = &codes[..];
     let (right, left) = (ctx.view.x1, ctx.view.x0);
     let mut pos = 0usize;
     loop {
@@ -281,10 +394,10 @@ pub fn wrap(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, text: &[u8]) {
             loop {
                 let c = at(text, end);
                 end += 1;
-                if c == 0 || c == 0x0a {
+                if c == 0 || c == LF {
                     break;
                 }
-                if c == b' ' {
+                if c == SPACE {
                     end -= 1;
                     break;
                 }
@@ -295,22 +408,23 @@ pub fn wrap(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, text: &[u8]) {
         let mut d = pos;
         loop {
             let c = at(text, d);
-            if c == 0 || c == 0x0a {
+            if c == 0 || c == LF {
                 end = d + 1;
                 break;
             }
-            if c == b' ' {
+            if c == SPACE {
                 end = d;
             }
             d += 1;
-            x = x.wrapping_add(width(font, c) as u16);
+            x = x.wrapping_add(advance(font, c) as u16);
             if x >= right as u16 {
                 break;
             }
         }
         let avail = (right as u16).wrapping_sub(ctx.x as u16).wrapping_add(1);
-        let line_w =
-            (start..end).fold(0u16, |s, i| s.wrapping_add(width(font, at(text, i)) as u16));
+        let line_w = (start..end).fold(0u16, |s, i| {
+            s.wrapping_add(advance(font, at(text, i)) as u16)
+        });
         match ctx.align {
             0 => put_span(chip, ctx, font, text, start, end),
             1 => align_right(chip, ctx, font, text, (start, end), (line_w, avail), left),
@@ -319,9 +433,9 @@ pub fn wrap(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, text: &[u8]) {
         }
         pos = end;
         let last = at(text, end.wrapping_sub(1));
-        if last != 0 && last != 0x0a {
+        if last != 0 && last != LF {
             line_feed(ctx, font);
-            while at(text, pos) == b' ' {
+            while at(text, pos) == SPACE {
                 pos += 1;
             }
         }
@@ -333,7 +447,7 @@ pub fn wrap(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, text: &[u8]) {
             // the rest of the box, ends at its first space. The original (0x115bd6) lays out
             // the same line again for ever; the port drops the spaces, so the word starts the
             // line and goes on it as its first word.
-            while at(text, pos) == b' ' {
+            while at(text, pos) == SPACE {
                 pos += 1;
             }
             pos = pos.max(start + 1);
@@ -346,7 +460,7 @@ fn put_span(
     chip: &mut Chip,
     ctx: &mut TextCtx,
     font: &WouFont,
-    text: &[u8],
+    text: &[i32],
     start: usize,
     end: usize,
 ) {
@@ -355,7 +469,7 @@ fn put_span(
         if c == 0 {
             break;
         }
-        put_char(chip, ctx, font, c);
+        put_code(chip, ctx, font, c);
     }
 }
 
@@ -364,7 +478,7 @@ fn align_centre(
     chip: &mut Chip,
     ctx: &mut TextCtx,
     font: &WouFont,
-    text: &[u8],
+    text: &[i32],
     (start, end): (usize, usize),
     (line_w, avail): (u16, u16),
 ) {
@@ -380,7 +494,7 @@ fn align_right(
     chip: &mut Chip,
     ctx: &mut TextCtx,
     font: &WouFont,
-    text: &[u8],
+    text: &[i32],
     (start, end): (usize, usize),
     (line_w, avail): (u16, u16),
     left: i16,
@@ -400,34 +514,34 @@ fn justify(
     chip: &mut Chip,
     ctx: &mut TextCtx,
     font: &WouFont,
-    text: &[u8],
+    text: &[i32],
     (mut start, end): (usize, usize),
     (mut line_w, avail): (u16, u16),
 ) {
     let last = at(text, end.wrapping_sub(1));
-    if line_w >= avail || last == 0 || last == 0x0a {
+    if line_w >= avail || last == 0 || last == LF {
         return put_span(chip, ctx, font, text, start, end);
     }
     // The original runs both loops to the first non-space / space whatever the line's end
     // (0x115c82, 0x115cb0); the line's first word always ends inside it, except on a line of
     // spaces before a word wider than the box, where it drew the word twice or ran past the
     // text. The port stops at the line's end.
-    while start < end && at(text, start) == b' ' {
-        put_char(chip, ctx, font, b' ');
-        line_w = line_w.wrapping_sub(width(font, b' ') as u16);
+    while start < end && at(text, start) == SPACE {
+        put_code(chip, ctx, font, SPACE);
+        line_w = line_w.wrapping_sub(advance(font, SPACE) as u16);
         start += 1;
     }
-    while start < end && at(text, start) != b' ' {
+    while start < end && at(text, start) != SPACE {
         let c = at(text, start);
-        put_char(chip, ctx, font, c);
-        line_w = line_w.wrapping_sub(width(font, c) as u16);
+        put_code(chip, ctx, font, c);
+        line_w = line_w.wrapping_sub(advance(font, c) as u16);
         start += 1;
     }
     let slack = (ctx.view.x1 as u16)
         .wrapping_sub(ctx.x as u16)
         .wrapping_add(1)
         .wrapping_sub(line_w);
-    let spaces = (start..end).filter(|&i| at(text, i) == b' ').count() as u16;
+    let spaces = (start..end).filter(|&i| at(text, i) == SPACE).count() as u16;
     if spaces == 0 {
         return put_span(chip, ctx, font, text, start, end);
     }
@@ -437,8 +551,8 @@ fn justify(
         if c == 0 {
             break;
         }
-        put_char(chip, ctx, font, c);
-        if c == b' ' {
+        put_code(chip, ctx, font, c);
+        if c == SPACE {
             ctx.x = ctx.x.wrapping_add(i16::from(each));
             if extra != 0 {
                 extra -= 1;
