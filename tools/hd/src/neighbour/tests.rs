@@ -1308,12 +1308,13 @@ fn gates_rows(log: &str) -> BTreeMap<&'static str, usize> {
                 let at = row["at"].as_object().unwrap();
                 assert_eq!(at.len(), 3, "{line}");
                 assert!(["z", "x", "y"].iter().all(|k| at[*k].is_u64()), "{line}");
-                assert!(row["gates"].is_string());
+                assert!(row["gates"].is_string(), "{line}");
             }
             "fallback" => {
                 assert_eq!(row["fallback"], "neighbour");
                 assert!(row["item"].is_u64() && row["class"].is_string(), "{line}");
                 assert!(row["pass"].as_u64().is_some_and(|p| p >= 1), "{line}");
+                assert!(row["gates"].is_string(), "{line}");
             }
             _ => {}
         }
