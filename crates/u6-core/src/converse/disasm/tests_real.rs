@@ -221,6 +221,79 @@ const BYE: &str = "bye";
 /// types a line or presses a key.
 const ROUNDS: usize = 400;
 
+/// What [`send_keywords`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Sent {
+    /// Keywords typed at a prompt, and keywords no fresh conversation came to a prompt for.
+    sent: usize,
+    unsent: usize,
+    /// Conversations that ended, and that stopped waiting.
+    ended: usize,
+    stopped: usize,
+}
+
+/// Sends `keys` a few per conversation, then the goodbye (`talk` runs one fresh conversation
+/// on its lines and says whether it ended and how many lines it took at a prompt). The ones a
+/// conversation did not take (it ended or stopped first) go to the next one, until each is
+/// sent or a fresh conversation takes none: the rest are not sent.
+fn send_keywords(keys: &[&str], mut talk: impl FnMut(&[&str]) -> (bool, usize)) -> Sent {
+    let mut out = Sent::default();
+    let mut pending = keys;
+    while !pending.is_empty() {
+        let chunk = &pending[..pending.len().min(6)];
+        let mut lines = chunk.to_vec();
+        lines.extend([BYE; 3]);
+        let (done, took) = talk(&lines);
+        out.ended += usize::from(done);
+        out.stopped += usize::from(!done);
+        let k = took.min(chunk.len());
+        if k == 0 {
+            out.unsent += pending.len();
+            break;
+        }
+        out.sent += k;
+        pending = &pending[k..];
+    }
+    out
+}
+
+#[test]
+fn keywords_a_conversation_did_not_take_go_to_the_next_one() {
+    // Synthetic: the first conversation takes three of six keywords and ends, the second gets
+    // exactly the other three and the last two, then the goodbye.
+    let keys = ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"];
+    let mut calls: Vec<Vec<String>> = Vec::new();
+    let mut took = [3usize, 9].into_iter();
+    let k = send_keywords(&keys, |lines| {
+        calls.push(lines.iter().map(|l| l.to_string()).collect());
+        (true, took.next().unwrap())
+    });
+    assert_eq!(
+        calls,
+        [
+            vec!["k1", "k2", "k3", "k4", "k5", "k6", BYE, BYE, BYE],
+            vec!["k4", "k5", "k6", "k7", "k8", BYE, BYE, BYE],
+        ]
+    );
+    let want = Sent {
+        sent: 8,
+        unsent: 0,
+        ended: 2,
+        stopped: 0,
+    };
+    assert_eq!(k, want);
+    // A conversation that takes nothing ends the retries: the rest are not sent.
+    let mut took = [2usize, 0].into_iter();
+    let k = send_keywords(&keys, |_| (false, took.next().unwrap()));
+    let want = Sent {
+        sent: 2,
+        unsent: 6,
+        ended: 0,
+        stopped: 2,
+    };
+    assert_eq!(k, want);
+}
+
 /// What the message scroll shows: its lines and the one being written.
 fn screen(s: &State) -> (usize, Vec<u8>) {
     let t = &s.ui.text;
@@ -435,24 +508,13 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
             }
         }
         keywords += keys.len();
-        // A few per conversation, then the goodbye; the ones a conversation did not take (it
-        // ended or stopped first) again in a fresh one, until each is sent or a fresh
-        // conversation comes to no prompt within the driver's rounds.
-        let mut pending: Vec<&str> = keys.iter().map(String::as_str).collect();
-        while !pending.is_empty() {
-            let chunk = &pending[..pending.len().min(6)];
-            let mut lines = chunk.to_vec();
-            lines.extend([BYE; 3]);
-            let (_, done, took) = talk(npc, &lines, true, &mut total, &mut read);
-            (ended, stopped) = (ended + usize::from(done), stopped + usize::from(!done));
-            let k = took.min(chunk.len());
-            if k == 0 {
-                unsent += pending.len();
-                break;
-            }
-            sent += k;
-            pending.drain(..k);
-        }
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let k = send_keywords(&keys, |lines| {
+            let (_, done, took) = talk(npc, lines, true, &mut total, &mut read);
+            (done, took)
+        });
+        (sent, unsent) = (sent + k.sent, unsent + k.unsent);
+        (ended, stopped) = (ended + k.ended, stopped + k.stopped);
     }
     println!(
         "keywords {keywords} of {} actors: sent {sent}, not sent (a fresh conversation came to no prompt within {ROUNDS} driver rounds) {unsent}; keyword conversations ended {ended}, not ended {stopped}",
