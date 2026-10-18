@@ -7,8 +7,11 @@
 //! neighbour-seam gate ([`crate::neighbour`]) sends the accepted items whose records meet their
 //! neighbours in the world with a seam back to the scaler, to a fixed point. The images of the
 //! items left accepted are written to `slices/` and listed in `ingest.json` for `pack`; the
-//! coverage report counts records by class, the neighbour fallbacks apart, and the pairs. Ingest
-//! reads the sheets that came back and calls nothing: no `codex`, no upload.
+//! coverage report counts records by class, the neighbour fallbacks apart, and the pairs: all of
+//! them, then those checked and failing, which are only pairs with a generated side (a pair of
+//! two scaled records is not checked). `gates.jsonl` has a line per pair checked in the first
+//! pass and per failing pair of a later pass. Ingest reads the sheets that came back and calls
+//! nothing: no `codex`, no upload.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -136,12 +139,14 @@ impl Report {
         );
         let _ = writeln!(
             s,
-            "neighbour pairs checked (a generated side): {} before the fixed point, {} after",
+            "neighbour pairs checked (only pairs with a generated side): {} before the fixed \
+             point, {} after",
             n.checked, n.checked_after
         );
         let _ = writeln!(
             s,
-            "neighbour pairs failing: {} before the fixed point, {} after ({} passes)",
+            "neighbour pairs failing (among pairs with a generated side): {} before the fixed \
+             point, {} after ({} passes)",
             n.failing_before, n.failing_after, n.passes
         );
         let _ = writeln!(
@@ -359,12 +364,13 @@ fn matches_item(item: &Item, judged: &[Judged]) -> bool {
 
 /// The neighbour gate over the judged items ([`neighbour::settle`]): the pairs of the world, each
 /// record's images (an accepted record's ×8 master box-averaged to the pack's ×4, as `pack`
-/// writes it; MMPX ×4 of the classic record), then the fixed point. Its counts carry the pairs'.
+/// writes it; MMPX ×4 of the classic record), then the fixed point. Its counts carry the pairs';
+/// the pairs come back with it for where each occurs.
 fn neighbour_gate(
     game: &Game,
     judged: &[(Status, usize, Option<&[Judged]>)],
     t: &Thresholds,
-) -> neighbour::Settled {
+) -> (neighbour::Pairs, neighbour::Settled) {
     let pairs = neighbour::pairs(game);
     // The records the pack would hold: the drawing records of the accepted items.
     let mut accepted: BTreeMap<u16, (u32, &Judged)> = BTreeMap::new();
@@ -400,7 +406,7 @@ fn neighbour_gate(
     settled.counts.pairs = pairs.all.len();
     settled.counts.map = pairs.map;
     settled.counts.objects = pairs.objects;
-    settled
+    (pairs, settled)
 }
 
 /// Runs ingest over the work dir with the thresholds `t`.
@@ -567,15 +573,25 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
 
     // The neighbour gate, once every item is judged: its fallbacks are final for this ingest
     // (not re-rolled), and only the items it leaves accepted reach the pack.
-    let settled = neighbour_gate(game, &judged, t);
-    for (pass, p, (ratio, limit)) in &settled.failing {
+    let (pairs, settled) = neighbour_gate(game, &judged, t);
+    // Every pair checked in the first pass, and each failing pair of a later pass: its records,
+    // edge, ratio and limit (null when nothing is measured), its generated sides, its source and
+    // one cell of A where it occurs (the map's when the map has the pair).
+    for c in &settled.checked {
+        let seen = pairs.seen.get(&c.pair).copied().unwrap_or_default();
+        let at = seen
+            .example()
+            .map(|a| serde_json::json!({"z": a.z, "x": a.x, "y": a.y}));
         let line = serde_json::json!({
             "neighbour": {
-                "a": atlas::image_name(ImageId::Tile(p.a)),
-                "b": atlas::image_name(ImageId::Tile(p.b)),
-                "edge": p.edge,
+                "a": atlas::image_name(ImageId::Tile(c.pair.a)),
+                "b": atlas::image_name(ImageId::Tile(c.pair.b)),
+                "edge": c.pair.edge,
             },
-            "pass": pass, "ratio": ratio, "limit": limit, "gates": t.text(),
+            "pass": c.pass, "fail": c.fails,
+            "ratio": c.result.map(|r| r.0), "limit": c.result.map(|r| r.1),
+            "sides": if c.both { "gen-gen" } else { "gen-mmpx" },
+            "source": seen.source(), "at": at, "gates": t.text(),
         });
         let _ = writeln!(gates_log, "{line}");
     }

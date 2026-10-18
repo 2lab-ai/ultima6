@@ -88,7 +88,10 @@ fn ingest_makes_no_codex_call() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(out.contains("re-rolls queued: "), "{out}");
     assert!(!out.contains("re-rolls queued: 0 items"), "{out}");
-    assert!(out.contains("neighbour pairs failing: 0 before the fixed point, 0 after"));
+    assert!(out.contains(
+        "neighbour pairs failing (among pairs with a generated side): 0 before the fixed point, \
+         0 after"
+    ));
     assert_eq!(calls(), 0, "ingest started codex");
     let _ = std::fs::remove_dir_all(&dir);
 }

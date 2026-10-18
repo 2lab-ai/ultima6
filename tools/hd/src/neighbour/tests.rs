@@ -99,7 +99,14 @@ fn two_generated_records_that_meet_cleanly_are_kept() {
     ]);
     let pairs = [pair(1, 2, Edge::East), pair(1, 2, Edge::South)];
     let out = settle(&pairs, &s, seam());
-    assert!(out.fallen.is_empty(), "{:?}", out.failing);
+    assert!(out.fallen.is_empty(), "{:?}", out.checked);
+    // Each checked pair once, passing, measured, both sides generated.
+    assert_eq!(out.checked.len(), 2);
+    assert!(
+        out.checked
+            .iter()
+            .all(|c| c.pass == 1 && c.both && !c.fails && c.result.is_some())
+    );
     assert_eq!(
         (
             out.counts.checked,
@@ -167,8 +174,22 @@ fn a_fallback_that_makes_its_neighbour_fail_takes_it_too() {
     assert_eq!((c.failing_after, c.passes), (0, 3));
     // While B is generated, A and B meet cleanly: only the pair with C fails at first.
     assert_eq!(
-        out.failing.iter().map(|f| (f.0, f.1)).collect::<Vec<_>>(),
+        out.failing().map(|c| (c.pass, c.pair)).collect::<Vec<_>>(),
         [(1, pair(2, 3, Edge::East)), (2, pair(1, 2, Edge::East))]
+    );
+    // The first pass has every pair checked, failing or not; a later pass its failing ones.
+    let rows: Vec<(usize, Pair, bool, bool)> = out
+        .checked
+        .iter()
+        .map(|c| (c.pass, c.pair, c.both, c.fails))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (1, pair(1, 2, Edge::East), true, false),
+            (1, pair(2, 3, Edge::East), false, true),
+            (2, pair(1, 2, Edge::East), false, true),
+        ]
     );
 }
 
@@ -340,6 +361,18 @@ fn the_map_pairs_cross_chunk_edges_and_the_wrap_and_take_every_frame() {
     let mut all = p.all.clone();
     all.dedup();
     assert_eq!(all.len(), p.all.len());
+    // Each has where it first occurs, A's cell in level, row, column order: grass meets stone
+    // first at the first chunk edge, stone meets grass first across the wrap of the top row,
+    // and the water's frames meet stone across the second level's wrap.
+    let at = |a: u16, b: u16, edge| p.seen[&pair(a, b, edge)];
+    let cell = |z, x, y| Some(At { z, x, y });
+    assert_eq!(at(0, 2, Edge::East).map, cell(0, 7, 0));
+    assert_eq!(at(2, 0, Edge::East).map, cell(0, 15, 0));
+    assert_eq!(at(0, 2, Edge::South).map, cell(0, 0, 7));
+    let water = at(synthetic::WATER_FRAMES, 3, Edge::East);
+    assert_eq!((water.map, water.objects), (cell(1, 7, 7), None));
+    assert_eq!((water.source(), water.example()), ("map", cell(1, 7, 7)));
+    assert_eq!(p.seen.len(), p.all.len());
 }
 
 /// An object record: opaque, but only `west` opaque pixels in its west column.
@@ -404,6 +437,24 @@ fn object_pairs_follow_the_object_draw_and_the_half_opaque_rule() {
     assert!(has(&p, 320, 322, Edge::South) && has(&p, 321, 323, Edge::South));
     assert!(has(&p, 330, 331, Edge::South));
     assert_eq!(p.objects, 7, "{:?}", p.all);
+    // Where each occurs: A's cell, the part's own for a part.
+    let seen = |a: u16, b: u16, edge| p.seen[&pair(a, b, edge)];
+    let cell = |x, y| Some(At { z: 0, x, y });
+    let s = seen(300, 302, Edge::East);
+    assert_eq!(
+        (s.map, s.objects, s.source()),
+        (None, cell(0, 2), "objects")
+    );
+    assert_eq!(s.example(), cell(0, 2));
+    assert_eq!(seen(322, 323, Edge::East).objects, cell(8, 7));
+    assert_eq!(seen(321, 323, Edge::South).objects, cell(9, 6));
+    assert_eq!(seen(330, 331, Edge::South).objects, cell(12, 2));
+    // A pair the map has too: the map's cell first.
+    let both = Seen {
+        map: cell(1, 1),
+        objects: cell(2, 2),
+    };
+    assert_eq!((both.source(), both.example()), ("map+objects", cell(1, 1)));
 }
 
 /// One tile record for the compositor.
@@ -594,10 +645,20 @@ fn ingest_sends_a_multi_record_item_back_whole_and_counts_it_apart() {
     let n = &r.neighbour;
     assert_eq!((n.map, n.objects, n.pairs), (2, 2, 4));
     assert_eq!((n.failing_before, n.failing_after, n.passes), (1, 0, 2));
+    // Grass beside grass (map), the table's two parts and the table beside the sword (objects):
+    // every pair has a generated side in the first pass.
+    assert_eq!(n.checked, 4);
     let text = r.text();
-    assert!(text.contains("neighbour pairs failing: 1 before the fixed point, 0 after (2 passes)"));
     assert!(text.contains(
         "neighbour pairs (distinct records in edge-adjacent cells): 4 (map 2, objects 2)"
+    ));
+    assert!(text.contains(
+        "neighbour pairs checked (only pairs with a generated side): 4 before the fixed point, \
+         2 after"
+    ));
+    assert!(text.contains(
+        "neighbour pairs failing (among pairs with a generated side): 1 before the fixed \
+         point, 0 after (2 passes)"
     ));
     assert_eq!(
         std::fs::read_to_string(w.path("coverage.txt")).unwrap(),
@@ -626,13 +687,56 @@ fn ingest_sends_a_multi_record_item_back_whole_and_counts_it_apart() {
     assert_eq!(fell.len(), 2);
     assert!(fell.iter().any(|l| l["class"] == "multi"));
     assert!(fell.iter().any(|l| l["class"] == "object"));
-    let failing: Vec<&serde_json::Value> = lines
+    // A line per pair checked in the first pass, failing or not (no pair fails in the second).
+    let pairs: Vec<&serde_json::Value> = lines
         .iter()
         .filter(|l| l["neighbour"].is_object())
         .collect();
+    assert_eq!(pairs.len(), 4);
+    assert!(
+        pairs
+            .iter()
+            .all(|l| l["pass"] == 1 && l["gates"] == t.text())
+    );
+    let row = |a: u16, b: u16| -> Vec<&serde_json::Value> {
+        let (a, b) = (
+            atlas::image_name(ImageId::Tile(a)),
+            atlas::image_name(ImageId::Tile(b)),
+        );
+        pairs
+            .iter()
+            .copied()
+            .filter(|l| l["neighbour"]["a"] == a.as_str() && l["neighbour"]["b"] == b.as_str())
+            .collect()
+    };
+    let failing = row(table + 1, sword);
     assert_eq!(failing.len(), 1);
-    assert_eq!(failing[0]["neighbour"]["edge"], "east");
-    assert_eq!(failing[0]["neighbour"]["a"], anchor.as_str());
+    let f = failing[0];
+    assert_eq!(f["neighbour"]["a"], anchor.as_str());
+    assert_eq!(f["neighbour"]["edge"], "east");
+    assert_eq!((&f["fail"], &f["sides"]), (&true.into(), &"gen-gen".into()));
+    assert_eq!(f["source"], "objects");
+    assert_eq!(f["at"], serde_json::json!({"z": 0, "x": 3, "y": 3}));
+    assert!(f["ratio"].as_f64().unwrap() > f["limit"].as_f64().unwrap());
+    let parts = row(table, table + 1);
+    assert_eq!(parts.len(), 1);
+    assert_eq!(
+        (&parts[0]["fail"], &parts[0]["source"]),
+        (&false.into(), &"objects".into())
+    );
+    assert_eq!(parts[0]["at"], serde_json::json!({"z": 0, "x": 2, "y": 3}));
+    // The grass pairs: east and south, at the level's first cell.
+    let grass = row(0, 0);
+    assert_eq!(grass.len(), 2);
+    for l in grass {
+        assert_eq!(
+            (&l["fail"], &l["sides"]),
+            (&false.into(), &"gen-gen".into())
+        );
+        assert_eq!(l["source"], "map");
+        assert_eq!(l["at"], serde_json::json!({"z": 0, "x": 0, "y": 0}));
+        assert!(l["ratio"].is_number() && l["limit"].is_number());
+    }
     // A second ingest of the same sheets comes to the same.
     assert_eq!(ingest::ingest(&g, &w, &t).unwrap(), r);
     let _ = std::fs::remove_dir_all(&w.root);

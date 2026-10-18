@@ -24,6 +24,11 @@
 //!   at once sends each generated record in it back to MMPX with its whole item; the passes
 //!   repeat until none fails. Fallbacks only add, and each pass judges every pair against the
 //!   same images, so the result does not depend on the order of the pairs.
+//!
+//! Only a pair with a generated side is checked: a pair of two records MMPX draws (or the
+//! scaler draws by rule) is not measured, and none may fall back. "No failing pair after the
+//! fixed point" therefore says that no pair with a generated side fails, not that every edge
+//! the world draws is clean.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -55,6 +60,40 @@ pub struct Pairs {
     pub all: Vec<Pair>,
     pub map: usize,
     pub objects: usize,
+    /// Where each pair occurs: one example cell of A per source.
+    pub seen: BTreeMap<Pair, Seen>,
+}
+
+/// A cell of the world: level, x, y (tiles).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct At {
+    pub z: usize,
+    pub x: usize,
+    pub y: usize,
+}
+
+/// Where a pair occurs: A's cell in the first place each source has it (the map in level,
+/// row, column order; the objects in level, column, row order of their cells).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Seen {
+    pub map: Option<At>,
+    pub objects: Option<At>,
+}
+
+impl Seen {
+    /// "map", "objects" or "map+objects".
+    pub fn source(&self) -> &'static str {
+        match (self.map, self.objects) {
+            (Some(_), Some(_)) => "map+objects",
+            (None, Some(_)) => "objects",
+            _ => "map",
+        }
+    }
+
+    /// One example cell: the map's when it has one, else the objects'.
+    pub fn example(&self) -> Option<At> {
+        self.map.or(self.objects)
+    }
 }
 
 /// The records a tile draws: the frames the animation replaces it with ([`Drawn::records`]).
@@ -166,8 +205,14 @@ pub fn pairs(game: &Game) -> Pairs {
         ]
     };
 
-    // The map: the distinct (tile, tile, edge) first, then their records.
-    let mut tiles: BTreeSet<(u16, u16, Edge)> = BTreeSet::new();
+    // A's cell, in level, row, column order: the first of a pair's cells is the least.
+    let first = |seen: &mut BTreeMap<Pair, (usize, usize, usize)>, p: Pair, at| {
+        let e = seen.entry(p).or_insert(at);
+        *e = (*e).min(at);
+    };
+
+    // The map: the distinct (tile, tile, edge) first, at their first cell, then their records.
+    let mut tiles: BTreeMap<(u16, u16, Edge), (usize, usize, usize)> = BTreeMap::new();
     for (z, level) in world.levels.iter().enumerate() {
         let s = level.tiles();
         for y in 0..s {
@@ -177,23 +222,24 @@ pub fn pairs(game: &Game) -> Pairs {
                 };
                 for (edge, (bx, by)) in next(x, y, s) {
                     if let Some(b) = world.tile(z, bx, by) {
-                        tiles.insert((a, b, edge));
+                        tiles.entry((a, b, edge)).or_insert((z, y, x));
                     }
                 }
             }
         }
     }
-    let mut map: BTreeSet<Pair> = BTreeSet::new();
-    for &(a, b, edge) in &tiles {
+    let mut map: BTreeMap<Pair, (usize, usize, usize)> = BTreeMap::new();
+    for (&(a, b, edge), &at) in &tiles {
         let rb = drawn.records(b);
         for ra in drawn.records(a) {
             for &rb in &rb {
-                map.insert(Pair { a: ra, b: rb, edge });
+                first(&mut map, Pair { a: ra, b: rb, edge }, at);
             }
         }
     }
 
-    // The objects: the tiles drawn in each cell, then the pairs of neighbouring cells.
+    // The objects: the tiles drawn in each cell (level, row, column), then the pairs of
+    // neighbouring cells.
     let mut cells: BTreeMap<(usize, usize, usize), BTreeSet<u16>> = BTreeMap::new();
     for o in &world.objects {
         let z = usize::from(o.z);
@@ -208,17 +254,17 @@ pub fn pairs(game: &Game) -> Pairs {
         for (dx, dy, t) in parts(game, o.tile) {
             let cell = (
                 z,
-                wrap(i64::from(o.x) + i64::from(dx)),
                 wrap(i64::from(o.y) + i64::from(dy)),
+                wrap(i64::from(o.x) + i64::from(dx)),
             );
             cells.entry(cell).or_default().insert(t);
         }
     }
-    let mut objects: BTreeSet<Pair> = BTreeSet::new();
-    for (&(z, x, y), here) in &cells {
+    let mut objects: BTreeMap<Pair, (usize, usize, usize)> = BTreeMap::new();
+    for (&(z, y, x), here) in &cells {
         let s = world.levels[z].tiles();
         for (edge, (bx, by)) in next(x, y, s) {
-            let Some(there) = cells.get(&(z, bx, by)) else {
+            let Some(there) = cells.get(&(z, by, bx)) else {
                 continue;
             };
             for &ta in here {
@@ -227,7 +273,7 @@ pub fn pairs(game: &Game) -> Pairs {
                     for ra in drawn.records(ta) {
                         for &rb in &rb {
                             if half_opaque(game, ra, rb, edge) {
-                                objects.insert(Pair { a: ra, b: rb, edge });
+                                first(&mut objects, Pair { a: ra, b: rb, edge }, (z, y, x));
                             }
                         }
                     }
@@ -235,12 +281,19 @@ pub fn pairs(game: &Game) -> Pairs {
             }
         }
     }
-    let (n_map, n_objects) = (map.len(), objects.len());
-    map.extend(objects);
+    let at = |(z, y, x): (usize, usize, usize)| At { z, x, y };
+    let mut seen: BTreeMap<Pair, Seen> = BTreeMap::new();
+    for (&p, &c) in &map {
+        seen.entry(p).or_default().map = Some(at(c));
+    }
+    for (&p, &c) in &objects {
+        seen.entry(p).or_default().objects = Some(at(c));
+    }
     Pairs {
-        all: map.into_iter().collect(),
-        map: n_map,
-        objects: n_objects,
+        all: seen.keys().copied().collect(),
+        map: map.len(),
+        objects: objects.len(),
+        seen,
     }
 }
 
@@ -297,16 +350,29 @@ pub struct Counts {
     pub pairs: usize,
     pub map: usize,
     pub objects: usize,
-    /// Pairs measured in the first pass: those with a generated side.
+    /// Pairs checked in the first pass: those with a generated side (no other pair is checked).
     pub checked: usize,
-    /// Pairs failing in the first pass, before any neighbour fallback.
+    /// Pairs failing in the first pass, before any neighbour fallback (among those checked).
     pub failing_before: usize,
-    /// Pairs measured, and failing, in the last pass (none fails there: it is the pass that
-    /// ends the fixed point).
+    /// Pairs checked, and failing, in the last pass (none fails there: it is the pass that
+    /// ends the fixed point); again only pairs with a generated side.
     pub checked_after: usize,
     pub failing_after: usize,
     /// Passes run (the last one finds no failing pair).
     pub passes: usize,
+}
+
+/// One pair checked in one pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Checked {
+    /// The pass, 1 the first.
+    pub pass: usize,
+    pub pair: Pair,
+    /// Both sides generated (else one generated, one drawn by MMPX).
+    pub both: bool,
+    /// (ratio, limit); `None` when nothing is measured (a side draws nothing along the edge).
+    pub result: Option<(f32, f32)>,
+    pub fails: bool,
 }
 
 /// The fixed point's result.
@@ -315,13 +381,22 @@ pub struct Settled {
     pub counts: Counts,
     /// Items sent back to MMPX, with the pass that failed them (1 is the first).
     pub fallen: BTreeMap<u32, usize>,
-    /// Each failing pair, with its pass and (ratio, limit).
-    pub failing: Vec<(usize, Pair, (f32, f32))>,
+    /// Every pair checked in the first pass, failing or not, then each failing pair of a later
+    /// pass, in pass and pair order.
+    pub checked: Vec<Checked>,
+}
+
+impl Settled {
+    /// The failing pairs of every pass.
+    pub fn failing(&self) -> impl Iterator<Item = &Checked> {
+        self.checked.iter().filter(|c| c.fails)
+    }
 }
 
 /// Runs the fixed point over `pairs` with the records' images `sides` and the seam threshold
-/// `max_ratio` (module docs). A pair is measured when a side is generated (its item still
-/// accepted); a record without a side draws nothing.
+/// `max_ratio` (module docs). A pair is checked only when a side is generated (its item still
+/// accepted): a pair of two records MMPX draws is not measured, so no failing pair at the end
+/// says that none with a generated side fails. A record without a side draws nothing.
 pub fn settle(pairs: &[Pair], sides: &BTreeMap<u16, Side>, max_ratio: f32) -> Settled {
     let mut up: BTreeSet<u32> = sides
         .values()
@@ -345,17 +420,27 @@ pub fn settle(pairs: &[Pair], sides: &BTreeMap<u16, Side>, max_ratio: f32) -> Se
         };
         let (mut checked, mut fails) = (0, Vec::new());
         for &p in pairs {
-            if generated(p.a).is_none() && generated(p.b).is_none() {
+            let (ga, gb) = (generated(p.a), generated(p.b));
+            if ga.is_none() && gb.is_none() {
                 continue;
             }
             checked += 1;
-            let (Some(a), Some(b)) = (image(p.a), image(p.b)) else {
-                continue;
+            let result = match (image(p.a), image(p.b)) {
+                (Some(a), Some(b)) => gate::neighbour_seam(a, b, K, p.edge, max_ratio),
+                _ => None,
             };
-            if let Some(r) = gate::neighbour_seam(a, b, K, p.edge, max_ratio)
-                && !gate::seam_passes(r)
-            {
-                fails.push((p, r));
+            let c = Checked {
+                pass,
+                pair: p,
+                both: ga.is_some() && gb.is_some(),
+                result,
+                fails: result.is_some_and(|r| !gate::seam_passes(r)),
+            };
+            if c.fails {
+                fails.push(p);
+            }
+            if pass == 1 || c.fails {
+                out.checked.push(c);
             }
         }
         if pass == 1 {
@@ -368,10 +453,9 @@ pub fn settle(pairs: &[Pair], sides: &BTreeMap<u16, Side>, max_ratio: f32) -> Se
             return out;
         }
         let mut fall = BTreeSet::new();
-        for &(p, r) in &fails {
+        for &p in &fails {
             fall.extend(generated(p.a));
             fall.extend(generated(p.b));
-            out.failing.push((pass, p, r));
         }
         for item in fall {
             up.remove(&item);
