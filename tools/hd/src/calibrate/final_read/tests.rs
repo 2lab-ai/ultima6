@@ -1726,6 +1726,11 @@ fn a_pair_covered_in_a_window_is_marked_hidden_there() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The pairs a window's row of `samples.tsv` marks.
+fn n_pairs(row: &BTreeMap<String, String>) -> usize {
+    row["pairs"].parse().unwrap()
+}
+
 #[test]
 fn a_long_legend_line_goes_on_and_is_not_cut() {
     let g = game();
@@ -1767,6 +1772,64 @@ fn a_long_legend_line_goes_on_and_is_not_cut() {
             h >= base && (h - base).is_multiple_of(l.line_h()),
             "{scale}: {h} {base}"
         );
+        // The legend as the sheet writes it, glyph by glyph: each tick's line, the long one
+        // going on, indented, in lines of its own as many characters as fit (the last
+        // characters of the line on the last of them).
+        let png = read_sheet(&o.out.join(sheet));
+        let f = state(&g, &text, &left).unwrap();
+        let w = &rows[0];
+        let width = l.width() - 2 * l.margin;
+        let n = (1..200)
+            .take_while(|&k| (k - 1) * 4 * l.text + 3 * l.text <= width)
+            .count();
+        let mut want: Vec<String> = Vec::new();
+        for t in w["ticks"].split(';') {
+            let t: Vec<&str> = t.split(',').collect();
+            let x = f
+                .last
+                .iter()
+                .find(|x| {
+                    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
+                    (name(x.pair.a), name(x.pair.b), edge_name(x.pair.edge))
+                        == (t[5].to_string(), t[6].to_string(), t[2])
+                })
+                .unwrap();
+            let (r, lim) = x.result.unwrap();
+            let anchor = (t[2] == w["edge"]) && (t[0], t[1]) == ("3", "2");
+            let lead = if anchor { ">" } else { " " };
+            let e = &t[2][..1];
+            let line = format!(
+                "{lead}{},{} {e} {} {} {r:.2}/{lim:.2}",
+                t[0], t[1], t[3], t[4]
+            );
+            let chars: Vec<char> = line.chars().collect();
+            want.push(chars.iter().take(n).collect());
+            for rest in chars[n.min(chars.len())..].chunks(n - 2) {
+                want.push(format!("  {}", rest.iter().collect::<String>()));
+            }
+            // At S 2 the long line ends on a line of its own, its measure last.
+            if t[3].contains(long) && scale == 2 {
+                let last = want.last().unwrap();
+                assert!(
+                    last.starts_with("  ") && line.ends_with(&last[2..]),
+                    "{last}"
+                );
+                assert!(last.ends_with(&format!("{lim:.2}")), "{last}");
+            }
+        }
+        assert_eq!(want.len() > n_pairs(&rows[0]), scale == 2);
+        let ly = l.panel_at(0, 0).1 + l.h + l.margin / 2;
+        for (i, line) in want.iter().enumerate() {
+            let mut glyphs = Rgba::new(width, l.line_h());
+            img::fill(&mut glyphs, 0, 0, width, l.line_h(), BACK);
+            super::super::text(&mut glyphs, (0, 0), line, l.text, width);
+            let y = ly + i as u32 * l.line_h();
+            assert_eq!(
+                png.rect(l.margin, y, width, l.line_h()),
+                glyphs,
+                "{scale}: {line}"
+            );
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
