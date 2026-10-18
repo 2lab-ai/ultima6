@@ -1147,19 +1147,18 @@ impl<'a> Decoder<'a> {
         Some(p)
     }
 
-    /// Claims the tables of the kept uses ([`Self::table_ranges`], see the module doc). Every
-    /// address is checked first (inside the script, not in code), before any range is scanned.
-    /// The uses were checked when they were made and the rounds keep landing code out of the
-    /// ranges: an address in code here is a case the rounds missed, and the script is refused
-    /// rather than decoded with a kept read on code.
+    /// Claims the tables of the kept uses ([`Self::table_ranges`], see the module doc). Each use
+    /// was checked when it was made (inside the script, not in code: [`Self::add_use`]), and the
+    /// rounds end only with no landing code in a table's range ([`Self::revise`]), so no use's
+    /// address is outside the script or in code here (were one, its table's item would overlap
+    /// that code and refuse the script).
     pub(super) fn claim_tables(&mut self) -> Result<(), Refusal> {
-        for (u, _) in &self.uses {
-            match self.owner.get(u.addr as usize) {
-                None => return refuse(u.at, Reason::TableOutside),
-                Some(&NO_OWNER) => {}
-                Some(_) => return refuse(u.at, Reason::TableInCode),
-            }
-        }
+        debug_assert!(
+            self.uses
+                .iter()
+                .all(|(u, _)| self.owner.get(u.addr as usize) == Some(&NO_OWNER)),
+            "a table use's address outside the script or in code after the last round"
+        );
         for (addr, table) in self.table_ranges() {
             let end = table_end(addr, &table);
             if end > addr {

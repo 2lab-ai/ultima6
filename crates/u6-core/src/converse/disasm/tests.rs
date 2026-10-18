@@ -1230,6 +1230,61 @@ fn a_landing_that_joins_the_op_naming_a_table_names_it_too() {
 }
 
 #[test]
+fn a_landing_that_stops_at_a_table_it_reads_from_inside_is_dropped() {
+    // The a1's landing prints the table at `t` = "ab\0cd\0". The block's loops print from `u`,
+    // inside its second string, and jump to `t`: taken after the a1's landing they stop there
+    // at once, at a byte of a table their path reads; taken first they run "ab" as text. Either
+    // way they are dropped, and the table is the a1's landing's.
+    let x = BODY + 13;
+    let t = x + 25;
+    let u = t + 4;
+    let mut rest = vec![0xb5];
+    rest.extend(lit32(t));
+    rest.push(0xb1);
+    rest.extend(jump(BODY));
+    rest.extend([0xee, 0xb5]);
+    rest.extend(lit32(u));
+    rest.push(0xb1);
+    rest.extend(jump(t));
+    rest.extend(b"ab\0cd\0");
+    let s = after_an_if(&rest);
+    let [a, b] = both_orders(&s);
+    assert!(a == b, "{:?}\n{:?}", a.1, b.1);
+    let d = ok(&s);
+    assert_eq!(
+        sorted_hazards(&d),
+        [
+            dropped(x + 13, Scan::Answered, Reason::TableInCode),
+            dropped(x + 13, Scan::NoMatch, Reason::TableInCode)
+        ]
+    );
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.entries.len(), 2);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "after the last round")]
+fn a_claim_with_a_table_address_in_code_is_a_broken_invariant() {
+    // One round of the script where the a1's landing reads "zz" as text and block `q` prints
+    // the table there, claimed with no revision: the address is in that landing's code, which
+    // the rounds never leave in a final decode.
+    let t = BODY + 13;
+    let mut rest = b"zz\0\xee\xefq\xf6\xb5".to_vec();
+    rest.extend(lit32(t));
+    rest.push(0xb1);
+    rest.extend(jump(BODY));
+    rest.extend([0xee, 0xff]);
+    let s = after_an_if(&rest);
+    let plan = Plan::default();
+    let mut d = Decoder::new(&s, &plan);
+    d.run().unwrap();
+    let _ = d.claim_tables();
+}
+
+#[test]
 fn a_landing_whose_own_path_runs_inside_a_table_it_names_is_dropped() {
     // The `*` block's loops land after its `ee`, print the table at `x` and jump to `x + 3`,
     // the table's second string: their own code inside the table, not at its address.
