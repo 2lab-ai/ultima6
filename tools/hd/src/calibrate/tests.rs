@@ -1255,88 +1255,121 @@ fn samples_tsv_rows_are_the_samples() {
     let (_, rows) = tsv(&out.join("samples.tsv"));
     let name = |r: u16| atlas::image_name(ImageId::Tile(r));
     let pack = Slices::read(&g, &opts.slices).unwrap();
+    let pair = |a: u16, b: u16, edge: Edge| Pair { a, b, edge };
+    // A whole row: index, bucket, sides, the pair, its ratio and limit, measured again, its
+    // source, z, x, y, the sheet, its row there and its frames.
+    #[allow(clippy::too_many_arguments)]
+    let row = |index: usize,
+               bucket: &str,
+               sides: &str,
+               p: Pair,
+               ratio: &str,
+               again: String,
+               (z, x, y): (usize, usize, usize),
+               panel: usize,
+               frames: &str| {
+        let stem = format!("{bucket}-{sides}");
+        vec![
+            index.to_string(),
+            bucket.to_string(),
+            sides.to_string(),
+            name(p.a),
+            name(p.b),
+            edge_name(p.edge).to_string(),
+            ratio.to_string(),
+            "1.5000".to_string(),
+            again,
+            "map".to_string(),
+            z.to_string(),
+            x.to_string(),
+            y.to_string(),
+            format!("{stem}.png"),
+            format!("{stem}-s2.png"),
+            panel.to_string(),
+            frames.to_string(),
+        ]
+    };
     let again = |p: Pair| format!("{:.4}", remeasured(&g, &pack, p, opts.seam).unwrap());
-    let water = Pair {
-        a: WATER_PAIR,
-        b: GRASS,
-        edge: Edge::East,
-    };
-    let south = Pair {
-        a: STONE,
-        b: GRASS,
-        edge: Edge::South,
-    };
-    // In cell order, each sheet's rows by ratio / limit then pair: pass gen-mmpx (the stone
-    // over the grass), fail-1.1-1.5 gen-gen, its gen-mmpx two, then fail-gt1.5 gen-mmpx: the
-    // pair below the surface (record 3 beside itself, which the slices have no image of) before
-    // the water by pair order, their ratio / limit the same.
-    let want: Vec<Vec<String>> = [
-        vec![
-            "1".into(),
-            "pass".into(),
-            "gen-mmpx".into(),
-            name(STONE),
-            name(GRASS),
-            "south".into(),
-            "1.0000".into(),
-            "1.5000".into(),
-            again(south),
-            "map".into(),
-            "0".into(),
-            "8".into(),
-            "7".into(),
-            "pass-gen-mmpx.png".into(),
-            "pass-gen-mmpx-s2.png".into(),
-            "1".into(),
-            // The level's second water (the first chunk again, at (9, 9)) at frame 0.
-            "frame0".into(),
-        ],
-        vec![
-            "5".into(),
-            "fail-gt1.5".into(),
-            "gen-mmpx".into(),
-            name(3),
-            name(3),
-            "east".into(),
-            "3.0000".into(),
-            "1.5000".into(),
-            "-".into(),
-            "map".into(),
-            "1".into(),
-            "2".into(),
-            "5".into(),
-            "fail-gt1.5-gen-mmpx.png".into(),
-            "fail-gt1.5-gen-mmpx-s2.png".into(),
-            "1".into(),
-            "-".into(),
-        ],
-        vec![
-            "6".into(),
-            "fail-gt1.5".into(),
-            "gen-mmpx".into(),
-            name(WATER_PAIR),
-            name(GRASS),
-            "east".into(),
-            "3.0000".into(),
-            "1.5000".into(),
-            again(water),
-            "map".into(),
-            "0".into(),
-            "1".into(),
-            "1".into(),
-            "fail-gt1.5-gen-mmpx.png".into(),
-            "fail-gt1.5-gen-mmpx-s2.png".into(),
-            "2".into(),
-            "frame0+pair".into(),
-        ],
-    ]
-    .into_iter()
-    .collect();
-    assert_eq!(rows.len(), 6);
-    assert_eq!(
-        [rows[0].clone(), rows[4].clone(), rows[5].clone()],
-        want[..]
+    let (stone_grass, grass_stone) = (
+        pair(STONE, GRASS, Edge::East),
+        pair(GRASS, STONE, Edge::East),
     );
+    let water = pair(WATER_PAIR, GRASS, Edge::East);
+    // In cell order, each sheet's rows by ratio / limit then pair: pass gen-mmpx (the stone
+    // over the grass), fail-1.1-1.5 gen-gen (the grass over the stone), its gen-mmpx two (1.2,
+    // 1.33), then fail-gt1.5 gen-mmpx: the pair below the surface (record 3 beside itself, which
+    // the slices have no image of) before the water by pair order, their ratio / limit the same.
+    // A window with a water other than the pair's (the level's first chunk has two, and the
+    // level has it twice: (1, 1), (5, 1), (9, 9), (13, 9)) draws it at frame 0.
+    let want = [
+        row(
+            1,
+            "pass",
+            "gen-mmpx",
+            pair(STONE, GRASS, Edge::South),
+            "1.0000",
+            again(pair(STONE, GRASS, Edge::South)),
+            (0, 8, 7),
+            1,
+            "frame0",
+        ),
+        row(
+            2,
+            "fail-1.1-1.5",
+            "gen-gen",
+            pair(GRASS, STONE, Edge::South),
+            "2.0000",
+            again(pair(GRASS, STONE, Edge::South)),
+            (0, 0, 7),
+            1,
+            "frame0",
+        ),
+        row(
+            3,
+            "fail-1.1-1.5",
+            "gen-mmpx",
+            stone_grass,
+            "1.8000",
+            again(stone_grass),
+            (0, 15, 0),
+            1,
+            "frame0",
+        ),
+        row(
+            4,
+            "fail-1.1-1.5",
+            "gen-mmpx",
+            grass_stone,
+            "2.0000",
+            again(grass_stone),
+            (0, 7, 0),
+            2,
+            "frame0",
+        ),
+        row(
+            5,
+            "fail-gt1.5",
+            "gen-mmpx",
+            pair(3, 3, Edge::East),
+            "3.0000",
+            "-".into(),
+            (1, 2, 5),
+            1,
+            "-",
+        ),
+        row(
+            6,
+            "fail-gt1.5",
+            "gen-mmpx",
+            water,
+            "3.0000",
+            again(water),
+            (0, 1, 1),
+            2,
+            "frame0+pair",
+        ),
+    ];
+    assert_eq!(rows, want);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
