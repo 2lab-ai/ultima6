@@ -1626,6 +1626,12 @@ fn indices_and_addresses_have_the_interpreters_width() {
     };
     assert_eq!(ref_entry(table, true), Some(1));
     assert_eq!(refused(&w(0xffff)).reason, Reason::TableIndex);
+    // 0x8001 is -32767: twice it wraps to 2 in word arithmetic, word 1.
+    let d = ok(&w(0x8001));
+    let Operands::Assign(Assign::TableWord { table, .. }) = &op_at(&d, BODY).operands else {
+        panic!()
+    };
+    assert_eq!(ref_entry(table, true), Some(1));
     // `b4`'s index is its low byte: 0x101 reads word 1; with one word that is past the table.
     let b4 = [
         &[0xa6, 0x01, 0xb2, 0xa8][..],
@@ -1641,10 +1647,9 @@ fn indices_and_addresses_have_the_interpreters_width() {
         script(&body)
     };
     assert_eq!(refused(&one_word(&b4)).reason, Reason::TableIndex);
-    assert_eq!(
-        refused(&one_word(&w_op(0x0001_0001))).reason,
-        Reason::TableIndex
-    );
+    for index in [0x0001_0001, 0x8001] {
+        assert_eq!(refused(&one_word(&w_op(index))).reason, Reason::TableIndex);
+    }
     // An address is the low word of its operand.
     let d = ok(&strings(
         &[&[0xb5][..], &lit32(0x0001_0000 + t), &[0xb1, 0xb6]].concat(),
