@@ -118,9 +118,76 @@ pub fn decode(text: &[u8]) -> Vec<i32> {
     out
 }
 
-/// The cells `text` takes: its codes once assembled.
-pub fn cells(text: &[u8]) -> usize {
-    decode(text).len()
+/// A copy of the text layer's front (the assembler, the josa resolver and the last cell put)
+/// that counts, for `printf`'s padding, the cells text takes from where it stands: every code
+/// it lets through is one cell and is put to its tail, as the escape layer would put it with
+/// no escape in effect (spec 08 §1, `printf` counts cells).
+#[derive(Clone, Debug)]
+pub struct Front {
+    utf8: Utf8,
+    josa: Josa,
+    tail: Tail,
+    korean: bool,
+    /// The cells counted so far.
+    pub cells: usize,
+}
+
+impl Front {
+    /// The front as `utf8`, `josa` and `tail` hold it now, under `language`'s rules.
+    pub fn new(utf8: Utf8, josa: &Josa, tail: Tail, language: Language) -> Self {
+        Front {
+            utf8,
+            josa: josa.clone(),
+            tail,
+            korean: language == Language::Korean,
+            cells: 0,
+        }
+    }
+
+    /// Takes the text bytes `text` (the assembler is on).
+    pub fn feed(&mut self, text: &[u8]) {
+        let mut codes = Vec::new();
+        for &b in text {
+            self.utf8.feed(b, &mut codes);
+            for c in std::mem::take(&mut codes) {
+                self.code(c);
+            }
+        }
+    }
+
+    /// Lets out what it holds, as `release` does: the assembler's bytes through the josa
+    /// resolver, then the resolver's codes.
+    pub fn release(&mut self) {
+        let mut codes = Vec::new();
+        self.utf8.drain(&mut codes);
+        for c in codes {
+            self.code(c);
+        }
+        for c in self.josa.drain() {
+            self.put(c);
+        }
+    }
+
+    fn code(&mut self, c: i32) {
+        let mut out = Vec::new();
+        if self.korean {
+            self.josa.feed(c, &self.tail, &mut out);
+        } else {
+            out = self.josa.drain();
+            out.push(c);
+        }
+        for c in out {
+            self.put(c);
+        }
+    }
+
+    /// One cell; a newline (or NUL, which prints as one) is counted but is no cell of the tail.
+    fn put(&mut self, c: i32) {
+        if c > 0 && c != 0x0a {
+            self.tail.put(c);
+        }
+        self.cells += 1;
+    }
 }
 
 /// The last cell put into the line and the digit run it ends, for the josa resolver.
@@ -310,8 +377,108 @@ mod tests {
         pass(&[0xe9, 0x63, 0xea]);
         // A second lead after a lead: the first goes out, the second starts the syllable.
         assert_eq!(decode(&[0xea, 0xea, 0xb0, 0x80]), [0xea, 0xac00]);
-        assert_eq!(cells("가나다 ab".as_bytes()), 6);
-        assert_eq!(cells(&[0xea, 0xb0]), 2);
+        assert_eq!(decode("가나다 ab".as_bytes()).len(), 6);
+        assert_eq!(decode(&[0xea, 0xb0]).len(), 2);
+    }
+
+    #[test]
+    fn every_syllable_round_trips_and_nothing_else_assembles() {
+        for c in 0xac00..=0xd7a3u32 {
+            let ch = char::from_u32(c).unwrap();
+            let mut b = [0; 4];
+            assert_eq!(
+                decode(ch.encode_utf8(&mut b).as_bytes()),
+                [c as i32],
+                "U+{c:04X}"
+            );
+        }
+        // The code points around the range, three bytes each, stay bytes.
+        for c in [0xabff, 0xd7a4, 0xd7ff, 0xe000, 0x3131, 0xa000] {
+            let ch = char::from_u32(c).unwrap();
+            let mut b = [0; 4];
+            let bytes = ch.encode_utf8(&mut b).as_bytes();
+            let want: Vec<i32> = bytes.iter().map(|&x| i32::from(x)).collect();
+            assert_eq!(decode(bytes), want, "U+{c:04X}");
+        }
+    }
+
+    #[test]
+    fn a_lead_in_the_third_place_starts_again() {
+        // After two held bytes a fresh lead lets them out and begins its own syllable (its
+        // last byte 0x80 adds nothing to the code).
+        for (lead, mid, code) in [
+            (0xea, 0xb0, 0xac00),
+            (0xeb, 0x80, 0xb000),
+            (0xec, 0xbf, 0xcfc0),
+            (0xed, 0x9e, 0xd780),
+        ] {
+            assert_eq!(
+                decode(&[0xea, 0xb0, lead, mid, 0x80]),
+                [0xea, 0xb0, code],
+                "lead {lead:#x}"
+            );
+        }
+        assert_eq!(
+            decode(&[0xeb, 0x80, 0xed, 0x9e, 0xa3]),
+            [0xeb, 0x80, 0xd7a3]
+        );
+    }
+
+    #[test]
+    fn a_malformed_prefix_goes_out_and_the_next_syllable_assembles() {
+        let cases: [(&[u8], &[i32]); 6] = [
+            (&[0xed, 0xa0, 0xea, 0xb0, 0x80], &[0xed, 0xa0, 0xac00]),
+            (
+                &[0xed, 0x9e, 0xa4, 0xea, 0xb0, 0x80],
+                &[0xed, 0x9e, 0xa4, 0xac00],
+            ),
+            (&[0xea, 0xaf, 0xea, 0xb0, 0x80], &[0xea, 0xaf, 0xac00]),
+            (&[0xea, 0x41, 0xea, 0xb0, 0x80], &[0xea, 0x41, 0xac00]),
+            (
+                &[0xec, 0x80, 0xc0, 0xea, 0xb0, 0x80],
+                &[0xec, 0x80, 0xc0, 0xac00],
+            ),
+            (
+                &[0xeb, 0x80, 0x00, 0xeb, 0x80, 0x80],
+                &[0xeb, 0x80, 0x00, 0xb000],
+            ),
+        ];
+        for (bytes, want) in cases {
+            assert_eq!(decode(bytes), want, "{bytes:02x?}");
+        }
+    }
+
+    #[test]
+    fn the_front_counts_the_cells_from_what_it_holds() {
+        let count = |utf8: &[u8], language, tail: &str, text: &[u8]| {
+            let mut a = Utf8::default();
+            let mut out = Vec::new();
+            for &b in utf8 {
+                a.feed(b, &mut out);
+            }
+            assert!(out.is_empty(), "the held bytes are a prefix");
+            let mut t = Tail::default();
+            for c in tail.chars() {
+                t.put(c as i32);
+            }
+            let mut f = Front::new(a, &Josa::default(), t, language);
+            f.feed(text);
+            f.release();
+            f.cells
+        };
+        assert_eq!(count(&[], Language::English, "", "가a".as_bytes()), 2);
+        assert_eq!(count(&[0xea], Language::English, "", &[0xb0, 0x80]), 1);
+        assert_eq!(count(&[0xea], Language::English, "", b"x"), 2);
+        assert_eq!(count(&[], Language::English, "", &[b'a', 0xea]), 2);
+        assert_eq!(count(&[], Language::Korean, "검", "{이/가}".as_bytes()), 1);
+        assert_eq!(count(&[], Language::Korean, "Bob", "{이/가}".as_bytes()), 4);
+        assert_eq!(count(&[], Language::Korean, "검", "{(으)로}".as_bytes()), 2);
+        assert_eq!(count(&[], Language::English, "검", "{이/가}".as_bytes()), 5);
+        // The field's own cells are its tail: a marker after them follows them.
+        assert_eq!(
+            count(&[], Language::Korean, "Bob", "나무{을/를}".as_bytes()),
+            3
+        );
     }
 
     fn resolve(before: &str, marker: &str) -> String {

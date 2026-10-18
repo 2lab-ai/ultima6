@@ -86,7 +86,12 @@ fn lines(e: &Engine) -> Vec<String> {
 
 /// The first scroll line printed by `fmt` with `args` and a newline, in the grammar of `l`.
 fn line(l: Language, fmt: &str, args: &'static [Arg<'static>]) -> String {
-    let fmt = leak(format!("{fmt}\n").into_bytes());
+    bline(l, fmt.as_bytes(), args)
+}
+
+/// [`line`] of a format given as bytes (a UTF-8 sequence cut where the test says).
+fn bline(l: Language, fmt: &[u8], args: &'static [Arg<'static>]) -> String {
+    let fmt = leak([fmt, b"\n"].concat());
     print(wide(l), fmt, args).state().ui.messages[0].clone()
 }
 
@@ -119,11 +124,17 @@ fn a_syllable_takes_one_cell_in_a_window_a_runic_window_and_the_transcript() {
     let e = run(wide(Language::English), &[], 4, |st, io| async move {
         print::put_raw(&st, &io, 0xac00).await;
         print::put_raw(&st, &io, 0xd7a3).await;
-        assert_eq!(
-            st.borrow().ui.text.line_len,
-            2,
-            "nothing drawn before the flush"
-        );
+        // Before the flush both wait in the line: the screen and the cursor are untouched.
+        {
+            let s = st.borrow();
+            let t = &s.ui.text;
+            assert_eq!((t.line_len, t.line[0], t.line[1]), (2, 0xac00, 0xd7a3));
+            assert_eq!((t.win().col, t.win().row), (0, 0));
+        }
+        let untouched = io.draw(|fb| {
+            (22 * CELL..24 * CELL).all(|x| (14 * CELL..15 * CELL).all(|y| fb.get(x, y) == Some(0)))
+        });
+        assert!(untouched, "nothing drawn before the flush");
         print::put_raw(&st, &io, -1).await;
         print::put_raw(&st, &io, -1).await;
         io.present();
@@ -141,7 +152,19 @@ fn a_syllable_takes_one_cell_in_a_window_a_runic_window_and_the_transcript() {
 fn without_a_table_a_syllable_is_a_blank_cell() {
     let mut s = wide(Language::English);
     s.ui.hangul = None;
-    let e = put_bytes(s, "a가힣b".as_bytes());
+    // Old ink in every pixel of the two cells first.
+    let e = run(s, &[], 4, |st, io| async move {
+        io.draw(|fb| {
+            for y in 14 * CELL..15 * CELL {
+                for x in 23 * CELL..25 * CELL {
+                    fb.set(x, y, INK);
+                }
+            }
+        });
+        printf::puts(&st, &io, "a가힣b".as_bytes()).await;
+        print::put_raw(&st, &io, -1).await;
+        io.present();
+    });
     let fb = e.frame();
     assert_eq!(cell(fb, 22, 14, INK), b'a');
     // Not glyph 0 or 0xa3 of u6.ch (the low bytes of the codes): paper only.
@@ -183,6 +206,11 @@ fn other_bytes_pass_through_byte_for_byte() {
 
 #[test]
 fn wide_on_english_and_latin_1_render_as_with_it_off() {
+    // The test font gives every code its own glyph, so a byte drawn as another shows.
+    let f = font();
+    for (a, ga) in f.glyphs.iter().enumerate() {
+        assert!(f.glyphs[a + 1..].iter().all(|gb| gb != ga), "glyph {a:#x}");
+    }
     // Every byte but NUL and the key wait, then text that ends inside a sequence.
     let all: Vec<u8> = (1..=0xffu8).filter(|&b| b != b'*' && b != b'&').collect();
     let samples = [
@@ -238,8 +266,6 @@ fn positional_arguments_in_either_order_with_wide_on() {
     assert_eq!(line(Language::English, "%1$s %2$s", a), "ab cd");
     assert_eq!(line(Language::English, "%2$s %1$s", a), "cd ab");
     assert_eq!(line(Language::English, "%2$s:%3$-3d|%1$s", a), "cd:7  |ab");
-    // Positions do not move the others: the next plain directive takes the first argument.
-    assert_eq!(line(Language::English, "%2$s %s %s", a), "cd ab cd");
     // Off, `%1$s` is width 1 and the directive `$` (as before).
     assert_eq!(
         print(state(), b"%1$s\n", &[Arg::Str(b"ab")])
@@ -248,6 +274,81 @@ fn positional_arguments_in_either_order_with_wide_on() {
             .messages[0],
         "$ s"
     );
+    // Positions do not move the others: the next plain directive takes the first argument.
+    assert_eq!(line(Language::English, "%2$s %s %s", a), "cd ab cd");
+    // Off, `%1$s` is width 1 and the directive `$` (as before).
+}
+
+#[test]
+fn printf_fields_join_across_a_padding_of_zero() {
+    let en = |fmt: &str, a: &'static [Arg<'static>]| line(Language::English, fmt, a);
+    let bytes = |b: &'static [u8]| Arg::Str(b);
+    // A syllable split across two adjacent fields, across a left-aligned field with no room
+    // to pad and the next, and across the format and a field.
+    assert_eq!(
+        en("%s%s|", args(vec![bytes(&[0xea]), bytes(&[0xb0, 0x80])])),
+        "가|"
+    );
+    assert_eq!(
+        en(
+            "%-2s%s|",
+            args(vec![bytes(&[b'a', 0xea]), bytes(&[0xb0, 0x80])])
+        ),
+        "a가|"
+    );
+    let b = |fmt: &[u8], a: &'static [Arg<'static>]| bline(Language::English, fmt, a);
+    assert_eq!(b(b"\xea%s|", args(vec![bytes(&[0xb0, 0x80])])), "가|");
+    assert_eq!(b(b"%s\x80|", args(vec![bytes(&[0xea, 0xb0])])), "가|");
+    // A josa marker split across two fields, and across the format and a field.
+    let ko = |fmt: &str, a: &'static [Arg<'static>]| line(Language::Korean, fmt, a);
+    assert_eq!(
+        ko("검%s%s|", args(vec![text("{이/"), text("가}")])),
+        "검이|"
+    );
+    assert_eq!(ko("검{을%s|", args(vec![text("/를}")])), "검을|");
+    // With room to pad the held bytes go out first, as with wide off.
+    assert_eq!(
+        en(
+            "%-3s%s|",
+            args(vec![bytes(&[b'a', 0xea]), bytes(&[0xb0, 0x80])])
+        ),
+        "a\u{ea} \u{b0}\u{80}|"
+    );
+}
+
+#[test]
+fn printf_pads_by_the_cells_a_field_takes_where_it_is_put() {
+    let en = |fmt: &str, a: &'static [Arg<'static>]| line(Language::English, fmt, a);
+    let ko = |fmt: &str, a: &'static [Arg<'static>]| line(Language::Korean, fmt, a);
+    let bytes = |b: &'static [u8]| Arg::Str(b);
+    let b = |fmt: &[u8], a: &'static [Arg<'static>]| bline(Language::English, fmt, a);
+    // A syllable begun before a left-aligned field and finished in it is the field's.
+    assert_eq!(
+        b(b"\xea%-3s|", args(vec![bytes(&[0xb0, 0x80, b'x'])])),
+        "가x |"
+    );
+    // Before a right-aligned field with padding the held byte goes out first; the field is
+    // two bytes then. Without room to pad, the field finishes the syllable.
+    assert_eq!(
+        b(b"\xea%4s|", args(vec![bytes(&[0xb0, 0x80])])),
+        "\u{ea}  \u{b0}\u{80}|"
+    );
+    assert_eq!(b(b"\xea%2s|", args(vec![bytes(&[0xb0, 0x80])])), "가|");
+    // A field that ends holding bytes: the padding lets them out, and they count.
+    assert_eq!(en("%-3s|", args(vec![bytes(&[b'a', 0xea])])), "a\u{ea} |");
+    // A particle is one cell after Hangul, the paired form after a Latin name.
+    assert_eq!(ko("검%-3s|", args(vec![text("{이/가}")])), "검이  |");
+    assert_eq!(ko("Bob%-6s|", args(vec![text("{이/가}")])), "Bob이(가)  |");
+    assert_eq!(ko("Bob%-3s|", args(vec![text("{(으)로}")])), "Bob(으)로|");
+    // Padding is not text: at the start of a right-aligned field a particle follows the text
+    // before the padding, and after a padded field it follows the field.
+    assert_eq!(ko("검%3s|", args(vec![text("{이/가}")])), "검  이|");
+    assert_eq!(ko("%-4s{을/를}", args(vec![text("검")])), "검   을");
+    assert_eq!(ko("%-4s{을/를}", args(vec![text("나무")])), "나무  를");
+    // A field that finishes a marker held from the format.
+    assert_eq!(ko("검{이%-3s|", args(vec![text("/가}")])), "검이  |");
+    // Escapes in a field count as themselves (as its bytes do with wide off): `@{가}` is four.
+    assert_eq!(en("[%5s]", args(vec![text("@{가}")])), "[ 가]");
 }
 
 #[test]
@@ -278,25 +379,37 @@ fn josa_markers_follow_the_last_cell() {
         "a Latin name"
     );
     assert_eq!(ko("!{을/를}"), "!을(를)");
-    for (n, josa) in [
-        (0, "이 으로"),
-        (1, "이 로"),
-        (2, "가 로"),
-        (3, "이 으로"),
-        (6, "이 으로"),
-        (10, "이 으로"),
-        (100, "이 으로"),
-        (1000, "이 으로"),
-        (10000, "이 으로"),
-    ] {
-        let words = args(vec![Arg::Word(n), Arg::Word(n)]);
-        let (a, b) = josa.split_once(' ').unwrap();
-        assert_eq!(
-            line(Language::Korean, "%d{이/가} %d{(으)로}", words),
-            format!("{n}{a} {n}{b}"),
-            "{n}"
-        );
-    }
+    // After a number, its Korean reading: 영 일 이 삼 육, 십 백 천 만.
+    let number = |n: u16| {
+        markers.map(|m| {
+            line(
+                Language::Korean,
+                &format!("%d{m}"),
+                args(vec![Arg::Word(n)]),
+            )
+        })
+    };
+    assert_eq!(number(0), ["0이", "0은", "0을", "0과", "0으로"], "영");
+    assert_eq!(number(1), ["1이", "1은", "1을", "1과", "1로"], "일");
+    assert_eq!(number(2), ["2가", "2는", "2를", "2와", "2로"], "이");
+    assert_eq!(number(3), ["3이", "3은", "3을", "3과", "3으로"], "삼");
+    assert_eq!(number(6), ["6이", "6은", "6을", "6과", "6으로"], "육");
+    assert_eq!(number(10), ["10이", "10은", "10을", "10과", "10으로"], "십");
+    assert_eq!(
+        number(100),
+        ["100이", "100은", "100을", "100과", "100으로"],
+        "백"
+    );
+    assert_eq!(
+        number(1000),
+        ["1000이", "1000은", "1000을", "1000과", "1000으로"],
+        "천"
+    );
+    assert_eq!(
+        number(10000),
+        ["10000이", "10000은", "10000을", "10000과", "10000으로"],
+        "만"
+    );
     // `#n` prints its number through the line too.
     let mut s = wide(Language::Korean);
     s.converse.ints[3] = 2;

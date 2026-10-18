@@ -307,6 +307,29 @@ fn position<I: Iterator<Item = u8> + Clone>(f: &mut I) -> Option<usize> {
     Some(n)
 }
 
+/// Port-only (spec 08 §1): the cells a `printf` field takes where it is put, for its padding
+/// (with `wide` on; off, its bytes).
+///
+/// Each code the assembler and the josa resolver let through counts one cell, escape
+/// characters included (a field's escapes count as themselves, as its bytes do with `wide`
+/// off), and goes to the tail the resolver reads. A left-aligned field is put first, so it is
+/// counted from what the front holds (a syllable or marker begun before it and finished by it
+/// is the field's), its own held end included (the padding lets it out). A right-aligned
+/// field comes after its padding, which first lets out what is held (the text before it):
+/// it is counted from an empty front after that; when that leaves no padding, nothing is let
+/// out and the field goes on from what is held. The padding is no cell of the tail
+/// ([`put_raw_n`]), so a particle after it follows the text before it.
+fn field_cells(t: &super::textstate::TextState, field: &[u8], left: bool) -> usize {
+    let mut front = wide::Front::new(t.utf8, &t.josa, t.tail, t.language);
+    if !left {
+        front.release();
+        front.cells = 0;
+    }
+    front.feed(field);
+    front.release();
+    front.cells
+}
+
 /// Original: 0x108658 (ui: formatted output to the current window)
 ///
 /// Plain characters go through the escape layer; a field's text too (so `%s` strings may carry
@@ -314,8 +337,8 @@ fn position<I: Iterator<Item = u8> + Clone>(f: &mut I) -> Option<usize> {
 /// whole width. Every number directive sets the plural flag (`value != 1`).
 ///
 /// Port (spec 08): with `wide` on, `%N$` right after the `%` makes the directive take argument
-/// N (from 1; the others still take theirs in order), and a field's length is its cells (its
-/// codes once assembled, [`wide::cells`]) instead of its bytes.
+/// N (from 1; the others still take theirs in order), and a field's length is its cells where
+/// it is put ([`field_cells`]) instead of its bytes.
 pub async fn printf(state: &RefCell<State>, io: &Io, fmt: &[u8], args: &[Arg<'_>]) {
     let wide = {
         let t = &state.borrow().ui.text;
@@ -377,7 +400,7 @@ pub async fn printf(state: &RefCell<State>, io: &Io, fmt: &[u8], args: &[Arg<'_>
         }
         if !d.eq_ignore_ascii_case(&b'c') {
             let n = if wide {
-                wide::cells(&field)
+                field_cells(&state.borrow().ui.text, &field, left)
             } else {
                 field.len()
             };

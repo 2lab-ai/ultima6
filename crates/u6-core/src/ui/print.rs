@@ -284,9 +284,18 @@ pub(super) async fn put_cells(state: &RefCell<State>, io: &Io, s: &[u8]) {
 }
 
 /// Original: 0x10827c (ui: put `n` copies of `c` through 0x107e5a)
+///
+/// Port (spec 08): with `n` ≤ 0 it puts nothing and lets nothing out, so the text on either
+/// side still joins (a syllable or a josa marker split across `printf` fields). The copies are
+/// padding, not text: the last cell the josa resolver reads stays the one before them.
 pub async fn put_raw_n(state: &RefCell<State>, io: &Io, n: i16, c: i32) {
+    if n <= 0 {
+        return;
+    }
     super::printf::release(state, io).await;
-    for _ in 0..n.max(0) {
+    let tail = state.borrow().ui.text.tail;
+    for _ in 0..n {
         put_cell(state, io, c).await;
     }
+    state.borrow_mut().ui.text.tail = tail;
 }
