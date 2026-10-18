@@ -720,6 +720,27 @@ fn a_neighbour_field_that_is_not_a_pair_stops_the_read() {
             "{fallback}: {e}"
         );
     }
+    // A fallback line with a neighbour field: not a pair (refused as one), or a pair (a line
+    // that is both).
+    let fell: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+    let both: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    for (neighbour, said) in [
+        (
+            serde_json::json!(null),
+            "a neighbour field that is not a pair",
+        ),
+        (
+            both["neighbour"].clone(),
+            "a line that is both a pair and a fallback",
+        ),
+    ] {
+        let mut v = fell.clone();
+        v["neighbour"] = neighbour;
+        let t = text.clone() + &v.to_string() + "\n";
+        let e = record(&t).unwrap_err();
+        let n = t.lines().count();
+        assert!(e.contains(&format!("line {n}: {said}")), "{e}");
+    }
     // A line with no neighbour field is another kind of line, and not read.
     let other = text.clone() + r#"{"image":"t:1","pass":1,"fail":false}"# + "\n";
     assert_eq!(record(&other).unwrap(), record(&text).unwrap());

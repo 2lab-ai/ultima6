@@ -89,7 +89,8 @@ struct RawFell {
 /// The neighbour gate's lines of `gates.jsonl` (`text`): every pair line, of every pass, and
 /// every neighbour fallback; the other lines (the images' gates, the actors' motion, refused
 /// sheets: no `neighbour` field) are not read. A `neighbour` field that is not a pair is
-/// refused ([`pair_line`]), and a `fallback` field other than `neighbour`: the run stops before
+/// refused ([`pair_line`]) on every line, a fallback line included, as is a line with both a
+/// pair and a `fallback`, and a `fallback` field other than `neighbour`: the run stops before
 /// anything is drawn, as on any other line of the gate's it cannot read.
 pub fn record(text: &str) -> Result<Record, String> {
     let mut out = Record::default();
@@ -99,6 +100,12 @@ pub fn record(text: &str) -> Result<Record, String> {
         }
         let bad = |e: &dyn std::fmt::Display| format!("gates.jsonl line {}: {e}", i + 1);
         let v: serde_json::Value = serde_json::from_str(line).map_err(|e| bad(&e))?;
+        // A neighbour field is held to being a pair first, on every line: a fallback line has
+        // none, and one that has both is neither.
+        let pair = pair_line(&v).map_err(|e| bad(&e))?;
+        if pair && v.get("fallback").is_some() {
+            return Err(bad(&"a line that is both a pair and a fallback"));
+        }
         match v.get("fallback") {
             None => {}
             Some(f) if f.as_str() == Some("neighbour") => {
@@ -114,7 +121,7 @@ pub fn record(text: &str) -> Result<Record, String> {
             // Ingest writes no other fallback line: one is not read as a line of another kind.
             Some(_) => return Err(bad(&"a fallback field that is not the neighbour gate's")),
         }
-        if !pair_line(&v).map_err(|e| bad(&e))? {
+        if !pair {
             continue;
         }
         let labels = labels(&v);
