@@ -15,8 +15,10 @@
 //!   scan for `f2`) read raw bytes, not items (stepping over operands with `run.rs`
 //!   `operand_len`). Their landing is computed as the interpreter computes it and followed after
 //!   every direct path, on trial, one landing at a time: a landing inside an item, or one whose
-//!   path would refuse the script, is recorded as a [`Hazard`] and not decoded. Most of a
-//!   conversation is reached this way (each keyword block's successor is a no-match landing);
+//!   path would refuse the script, is recorded as a [`Hazard`] and not decoded (a failed trial
+//!   is tried again once the landings after it are in, as a table they keep may stop it first).
+//!   Most of a conversation is reached this way (each keyword block's successor is a no-match
+//!   landing);
 //! - every item is decoded from its first byte alone, so a byte has one meaning; two decodes that
 //!   disagree on a byte refuse the script ([`Reason::Overlap`]). A path that enters a text run
 //!   after its start (a `b0` target or a skip-loop landing inside the text) splits the run
@@ -35,18 +37,20 @@
 //! decodes it: the address must be a literal inside the script, read with one kind, and not in
 //! the code of a direct path or of the same path. On a direct path a failed check refuses the
 //! script; on a landing's path it drops that landing ([`HazardKind::Dropped`]). A kept use closes
-//! its address to code at once, and every byte of its table from the next round on: a landing
-//! that reaches any of them stops there ([`HazardKind::IntoData`], its only hazard); a direct
-//! path that reaches the address refuses the script ([`Reason::TableInCode`]), and direct code
-//! after it ends the table (a constant index it cuts off refuses the script,
+//! its address to code at once, and every byte of its table from the next round on: another
+//! landing that reaches any of them stops there ([`HazardKind::IntoData`], its only hazard),
+//! while a landing that reaches a table it names itself is dropped (`Dropped(_, TableInCode)`);
+//! a direct path that reaches the address refuses the script ([`Reason::TableInCode`]), and
+//! direct code after it ends the table (a constant index it cuts off refuses the script,
 //! [`Reason::TableIndex`]). Only kept paths reserve bytes. The choices the trial forces:
 //!
 //! - a table named by a kept path wins over another landing's code inside it (at its address or
 //!   past it): the decode runs again with the table's bytes closed to landing paths from the
-//!   start (that landing then stops there), so the result does not depend on which landing
-//!   came first;
+//!   start (that landing then stops there);
 //! - it never wins over direct code or over its own path's code: that landing is dropped
-//!   (`Dropped(_, TableInCode)`), and direct code is never read as a table;
+//!   (`Dropped(_, TableInCode)`), and direct code is never read as a table. A path's own code
+//!   is every byte its flow reads, the code it joins included (code another landing decoded
+//!   first, that its path then runs), not only the code it decoded;
 //! - bytes closed that way that no table of a kept path holds in the next round are opened again
 //!   and can no longer win: a landing that names a table over other landing code there is
 //!   dropped (the intruding landing, when the table is a direct path's);
@@ -56,6 +60,12 @@
 //!
 //! The rounds end: each one grows the dropped landings or the settled bytes, or (with those
 //! unchanged) the reserved bytes, all bounded by the script's length.
+//!
+//! Order. Landings are taken the loops that step over operands first, in script order. Which of
+//! a table and a landing's code wins does not depend on that order (a test takes the landings
+//! the other way round and gets the same decode and catalog). What does: two landings whose
+//! code disagrees on a byte (one would decode an item over bytes the other decoded otherwise):
+//! the one taken first keeps its code and the other is dropped (`Dropped(_, Overlap)`).
 //!
 //! Operands are decoded with the evaluator's grammar ([`Expr`]), so their bytes are never read
 //! as text. A byte the interpreter has no arm for is refused with a named [`Reason`], never

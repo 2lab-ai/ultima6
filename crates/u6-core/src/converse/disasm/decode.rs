@@ -59,6 +59,13 @@ pub(super) struct Plan {
     banned: BTreeMap<LandingKey, Reason>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: take the skip-loop landings in the reverse order (the result must not
+    /// change, see the module doc).
+    pub(super) static REVERSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// `Decoder::owner` of a byte no item holds yet.
 const NO_OWNER: u32 = u32::MAX;
 
@@ -130,6 +137,11 @@ pub(super) struct Decoder<'a> {
     /// For each byte, the start of the item that owns it.
     owner: Vec<u32>,
     seen: BTreeSet<(u32, Ctx)>,
+    /// The flow of every path: where reading goes on after the item read at a position, in a
+    /// context (a path that joins code another path read goes on along these).
+    edges: BTreeMap<(u32, Ctx), Vec<(u32, Ctx)>>,
+    /// Where each kept landing's path starts: the byte its skip loop stopped on.
+    starts: BTreeMap<LandingKey, (u32, Ctx)>,
     work: Vec<(u32, Ctx)>,
     scans: Vec<(Landing, Ctx)>,
     landed: Vec<Landing>,
@@ -155,6 +167,8 @@ impl<'a> Decoder<'a> {
             origins: BTreeMap::new(),
             owner: vec![NO_OWNER; b.len()],
             seen: BTreeSet::new(),
+            edges: BTreeMap::new(),
+            starts: BTreeMap::new(),
             work: Vec::new(),
             scans: Vec::new(),
             landed: Vec::new(),
@@ -231,7 +245,7 @@ impl<'a> Decoder<'a> {
         })?;
         self.work.push((look + 1, Ctx::Look));
         // Reached by spell, the look text is not run: the scan for `f2` starts at 0.
-        self.scan_greeting(0, Ctx::Main)?;
+        self.scan_greeting(0, None)?;
         self.drain()?;
         // Skip-loop landings come after the direct paths, so that a landing never decodes
         // bytes a direct path owns; the loops that step over operands first, in script order.
@@ -240,33 +254,100 @@ impl<'a> Decoder<'a> {
         // and its bytes and tables are as if it had never been read. Each trial keeps a copy of
         // the decoder to go back to: one copy per landing, O(len²) per round, small for scripts
         // of at most `SCRIPT_LEN` bytes.
-        while let Some(i) = (0..self.scans.len()).min_by_key(|&i| {
-            let (l, _) = self.scans[i];
-            (l.scan, l.stop)
-        }) {
-            let (landing, ctx) = self.scans.remove(i);
-            let key = LandingKey {
-                scan: landing.scan,
-                stop: landing.stop,
-                ctx,
-            };
-            if let Some(&r) = self.plan.banned.get(&key) {
-                self.hazard(landing.at, HazardKind::Dropped(landing.scan, r));
-                continue;
+        // A trial that fails is tried again once the landings after it are in: a table they
+        // keep may stop its path before the bytes that failed it (so which comes first does
+        // not decide it). A landing that still fails, with nothing more kept, is dropped.
+        let mut failed: Vec<(Landing, Ctx, Reason)> = Vec::new();
+        loop {
+            while let Some(i) = self.next_landing() {
+                let (landing, ctx) = self.scans.remove(i);
+                if let Err(r) = self.try_landing(landing, ctx) {
+                    failed.push((landing, ctx, r));
+                }
             }
-            let saved = self.clone();
-            self.phase = Origin::Landing(key);
-            self.named.clear();
-            if let Err(r) = self.land(landing, ctx).and_then(|()| self.drain()) {
-                *self = saved;
-                self.hazard(landing.at, HazardKind::Dropped(landing.scan, r.reason));
+            let before = failed.len();
+            for (landing, ctx, _) in std::mem::take(&mut failed) {
+                if let Err(r) = self.try_landing(landing, ctx) {
+                    failed.push((landing, ctx, r));
+                }
             }
+            if failed.len() == before {
+                break;
+            }
+        }
+        for (landing, _, r) in failed {
+            self.hazard(landing.at, HazardKind::Dropped(landing.scan, r));
         }
         if !self.landed.iter().any(|l| l.scan == Scan::Greeting) {
             return refuse(look, Reason::NoGreetingMarker);
         }
         self.check_landings();
         Ok(())
+    }
+
+    /// Decodes the path after `landing` on trial; on a refusal the decoder is as it was, and
+    /// the reason comes back. A banned landing is not decoded.
+    fn try_landing(&mut self, landing: Landing, ctx: Ctx) -> Result<(), Reason> {
+        let key = LandingKey {
+            scan: landing.scan,
+            stop: landing.stop,
+            ctx,
+        };
+        if let Some(&r) = self.plan.banned.get(&key) {
+            return Err(r);
+        }
+        let saved = self.clone();
+        self.phase = Origin::Landing(key);
+        self.named.clear();
+        self.starts.insert(key, (landing.stop, ctx));
+        let tried = self.land(landing, ctx).and_then(|()| self.drain());
+        if let Err(r) = tried {
+            *self = saved;
+            return Err(r.reason);
+        }
+        Ok(())
+    }
+
+    /// The landing to try next: the loops that step over operands first, in script order (a
+    /// test can take them the other way round, [`REVERSED`]).
+    fn next_landing(&self) -> Option<usize> {
+        let key = |i: &usize| {
+            let (l, _) = self.scans[*i];
+            (l.scan, l.stop)
+        };
+        #[cfg(test)]
+        if REVERSED.with(std::cell::Cell::get) {
+            return (0..self.scans.len()).max_by_key(key);
+        }
+        (0..self.scans.len()).min_by_key(key)
+    }
+
+    /// Queues `to` after the item read at `from`, and keeps the edge (a path's flow).
+    fn queue(&mut self, from: (u32, Ctx), to: (u32, Ctx)) {
+        self.edges.entry(from).or_default().push(to);
+        self.work.push(to);
+    }
+
+    /// The bytes the path of landing `k` reads as code: every position its flow reaches, with
+    /// the code it joins (read first by another path), and the items there.
+    fn reach(&self, k: LandingKey) -> BTreeSet<u32> {
+        let mut bytes = BTreeSet::new();
+        let mut done = BTreeSet::new();
+        let mut todo: Vec<(u32, Ctx)> = self.starts.get(&k).copied().into_iter().collect();
+        while let Some(n) = todo.pop() {
+            if !done.insert(n) {
+                continue;
+            }
+            let at = n.0;
+            bytes.insert(at);
+            if self.owner.get(at as usize) == Some(&at)
+                && let Some(it) = self.items.get(&at)
+            {
+                bytes.extend(at..it.end());
+            }
+            todo.extend(self.edges.get(&n).into_iter().flatten());
+        }
+        bytes
     }
 
     /// Follows every queued path.
@@ -350,7 +431,7 @@ impl<'a> Decoder<'a> {
         self.run_splits.push(at);
         for ctx in [Ctx::Look, Ctx::Main] {
             if self.seen.contains(&(start, ctx)) {
-                self.work.push((at, ctx));
+                self.queue((start, ctx), (at, ctx));
             }
         }
     }
@@ -368,22 +449,22 @@ impl<'a> Decoder<'a> {
             _ => false,
         };
         if stops && ctx == Ctx::Look {
-            return self.scan_greeting(at, ctx);
+            return self.scan_greeting(at, Some((at, ctx)));
         }
         match &item.kind {
-            Kind::Text(_) | Kind::BlockEnd | Kind::Input(_) => self.work.push((end, ctx)),
+            Kind::Text(_) | Kind::BlockEnd | Kind::Input(_) => self.queue((at, ctx), (end, ctx)),
             Kind::Op(op) => match (op.info().flow, &op.operands) {
-                (Flow::Jump, Operands::Jump { target }) => self.work.push((*target, ctx)),
+                (Flow::Jump, Operands::Jump { target }) => self.queue((at, ctx), (*target, ctx)),
                 (Flow::If, _) => {
-                    self.work.push((end, ctx));
+                    self.queue((at, ctx), (end, ctx));
                     self.scan_ops(Scan::If, end, ctx);
                 }
                 (Flow::Else, _) => self.scan_ops(Scan::Else, end, ctx),
                 (Flow::Bye, _) => {}
-                _ => self.work.push((end, ctx)),
+                _ => self.queue((at, ctx), (end, ctx)),
             },
             Kind::Keywords(_) => {
-                self.work.push((end, ctx));
+                self.queue((at, ctx), (end, ctx));
                 self.scan_ops(Scan::NoMatch, end - 1, ctx);
                 match self.first(at + 1, ops::BLOCK_END) {
                     Some(stop) => self.scans.push((
@@ -417,17 +498,23 @@ impl<'a> Decoder<'a> {
     }
 
     /// `while (script[pc++] != f2);` from `from`. The greeting is the way into the input loop,
-    /// so its landing is followed at once, as a direct path.
-    fn scan_greeting(&mut self, from: u32, _ctx: Ctx) -> Result<(), Refusal> {
+    /// so its landing is followed at once, as part of the path that reaches it (`after`: the
+    /// item that stopped the look text), or a direct path.
+    fn scan_greeting(&mut self, from: u32, after: Option<(u32, Ctx)>) -> Result<(), Refusal> {
         match self.first(from, ops::GREETING) {
-            Some(stop) => self.land(
-                Landing {
-                    scan: Scan::Greeting,
-                    stop,
-                    at: stop + 1,
-                },
-                Ctx::Main,
-            ),
+            Some(stop) => {
+                if let Some(a) = after {
+                    self.edges.entry(a).or_default().push((stop, Ctx::Main));
+                }
+                self.land(
+                    Landing {
+                        scan: Scan::Greeting,
+                        stop,
+                        at: stop + 1,
+                    },
+                    Ctx::Main,
+                )
+            }
             None => {
                 self.hazard(from, HazardKind::ScanPastEnd(Scan::Greeting));
                 Ok(())
@@ -484,7 +571,7 @@ impl<'a> Decoder<'a> {
         let o = self.owner[l.at as usize];
         let into_run = o != NO_OWNER && matches!(self.items[&o].kind, Kind::Text(_));
         if o == NO_OWNER || o == l.at || into_run {
-            self.work.push((l.at, ctx));
+            self.queue((l.stop, ctx), (l.at, ctx));
         }
         Ok(())
     }
@@ -893,12 +980,13 @@ impl<'a> Decoder<'a> {
         o != NO_OWNER && self.origins.get(&o) == Some(&Origin::Direct)
     }
 
-    /// The plan of the next round, when this one is not final (see the module doc). Landing
-    /// code inside a table of a kept use: a path's own code there drops that path; any other
-    /// landing's code makes the table's bytes closed to landings from the round's start (the
-    /// table wins), or, on bytes settled before, drops the table's landing namers (the code of
-    /// a direct table's intruder instead). Then reserved bytes no table holds any more are
-    /// taken back and settled. `None` = final.
+    /// The plan of the next round, when this one is not final (see the module doc). A landing
+    /// that names a table and whose own path reads a byte of it as code (code it decoded or
+    /// joined, [`Self::reach`]) is dropped. Any other landing's code inside a table makes the
+    /// table's bytes closed to landings from the round's start (the table wins), or, on bytes
+    /// settled before, drops the table's landing namers (the code of a direct table's intruder
+    /// instead). Then reserved bytes no table holds any more are taken back and settled.
+    /// `None` = final.
     pub(super) fn revise(&self) -> Option<Plan> {
         let mut p = self.plan.clone();
         let mut held = BTreeSet::new();
@@ -912,6 +1000,19 @@ impl<'a> Decoder<'a> {
                 .filter(|(u, _)| u.addr == addr)
                 .map(|&(_, o)| o)
                 .collect();
+            let mut own = false;
+            for o in &namers {
+                if let &Origin::Landing(n) = o
+                    && self.reach(n).range(addr..end).next().is_some()
+                {
+                    p.banned.entry(n).or_insert(Reason::TableInCode);
+                    own = true;
+                }
+            }
+            if own {
+                // The table's other namers, if any, decide in the next round.
+                continue;
+            }
             // The items over the range: the one over its address, and those that start in it.
             let over = Some(self.owner[addr as usize]).filter(|&o| o != NO_OWNER && o < addr);
             let inside: Vec<u32> = over
@@ -923,9 +1024,7 @@ impl<'a> Decoder<'a> {
                     continue;
                 };
                 let settled = (s..self.items[&s].end()).any(|b| self.plan.settled.contains(&b));
-                if namers.contains(&Origin::Landing(k)) {
-                    p.banned.entry(k).or_insert(Reason::TableInCode);
-                } else if !settled {
+                if !settled {
                     let open = (addr..end).filter(|b| !self.plan.settled.contains(b));
                     p.reserved.extend(open);
                 } else if namers.contains(&Origin::Direct) {

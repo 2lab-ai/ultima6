@@ -12,7 +12,7 @@ use super::super::eval::eval;
 use super::super::exec::exec;
 use super::super::tests::{chars, files, lib, packed, scroll, state, talk_to};
 use super::catalog::{Catalog, FORMAT, SLOT_BUFFER_CAPACITY, ScriptUnits, hash64};
-use super::decode::{Decoder, Plan, ref_entry};
+use super::decode::{Decoder, Plan, REVERSED, ref_entry};
 use super::ops::{self, Escape, Flow, STATEMENT_OPS, Shape};
 use super::trace::{self, Decoded, EscState, Event, Read, Snap};
 use super::*;
@@ -1089,6 +1089,163 @@ fn a_landings_table_with_no_entry_drops_its_namers_or_wins_never_refuses_the_scr
         "{:?}",
         d.hazards
     );
+}
+
+/// After [`after_an_if`]'s `a1`, whose landing (sorted first) jumps to `via` and runs `x`:
+/// the `*` block's `ee`, then its loops' landing prints the table at `x` and jumps to `via`
+/// itself; `via` is `x`, or a jump to `x` (the namer joins the other landing's code before the
+/// table). Then "zz" with its NUL and `b8` at `x`.
+fn a_table_its_namer_runs(joined: bool) -> (Vec<u8>, u32) {
+    // jump (5), ee, b5 d2 x b1 (7), jump (5), [jump (5)].
+    let via = BODY + 13 + 5 + 1 + 7 + 5;
+    let x = if joined { via + 5 } else { via };
+    let mut rest = jump(via);
+    rest.push(0xee);
+    rest.push(0xb5);
+    rest.extend(lit32(x));
+    rest.push(0xb1);
+    rest.extend(jump(via));
+    if joined {
+        rest.extend(jump(x));
+    }
+    rest.extend(b"zz\0\xb8");
+    (after_an_if(&rest), x)
+}
+
+#[test]
+fn a_table_never_wins_over_code_its_own_path_runs_joined_or_not() {
+    // The namer's path runs `x` as code: through code the a1's landing decoded first (at `x`,
+    // or a jump before it). Its landings are dropped, `x` stays code, in either landing order.
+    for joined in [false, true] {
+        let (s, x) = a_table_its_namer_runs(joined);
+        for reversed in [false, true] {
+            REVERSED.with(|r| r.set(reversed));
+            let d = ok(&s);
+            REVERSED.with(|r| r.set(false));
+            let what = format!("joined {joined}, reversed {reversed}");
+            assert!(
+                matches!(item(&d, x).kind, Kind::Text(_)),
+                "{what}: {:?}",
+                shape(&d)
+            );
+            for scan in [Scan::NoMatch, Scan::Answered] {
+                assert!(
+                    d.hazards.contains(&Hazard {
+                        at: BODY + 19,
+                        kind: HazardKind::Dropped(scan, Reason::TableInCode)
+                    }),
+                    "{what}: {:?}",
+                    d.hazards
+                );
+            }
+            assert!(
+                !d.items.iter().any(|i| matches!(i.kind, Kind::Table(_))),
+                "{what}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_landing_whose_own_path_runs_inside_a_table_it_names_is_dropped() {
+    // The `*` block's loops land after its `ee`, print the table at `x` and jump to `x + 3`,
+    // the table's second string: their own code inside the table, not at its address.
+    let x = BODY + 24;
+    let mut tail = vec![0xb5];
+    tail.extend(lit32(x));
+    tail.push(0xb1);
+    tail.extend(jump(x + 3));
+    tail.extend(b"ab\0cd\0\xb8");
+    let d = ok(&after_a_block(&tail));
+    assert!(both_dropped(&d, Reason::TableInCode), "{:?}", d.hazards);
+    assert!(!d.items.iter().any(|i| matches!(i.kind, Kind::Table(_))));
+}
+
+/// `f7`, a `*` block whose answer's `a1` jumps back when it holds; its false branch (the `a1`'s
+/// landing) prints the table right after the block's `ee` and jumps back too. The block's own
+/// loops land on that table, whose first byte is one the executor has no arm for. Returns the
+/// script and the table's address.
+fn a_table_a_failing_landing_reaches() -> (Vec<u8>, u32) {
+    // f7 ef * f6 (4), a1 01 a7 (3), jump (5), a2, b5 d2 t b1 (7), jump (5), ee.
+    let t = BODY + 4 + 3 + 5 + 1 + 7 + 5 + 1;
+    let mut body = b"\xf7\xef*\xf6\xa1\x01\xa7".to_vec();
+    body.extend(jump(BODY));
+    body.extend([0xa2, 0xb5]);
+    body.extend(lit32(t));
+    body.push(0xb1);
+    body.extend(jump(BODY));
+    body.push(0xee);
+    body.extend(b"\x80z\0");
+    (script(&body), t)
+}
+
+#[test]
+fn a_landing_that_would_fail_in_a_table_stops_there_whichever_landing_comes_first() {
+    // In script order the `a1`'s landing names the table first and the block's loops stop
+    // there; the other way round they read the table's bytes as code first and fail. They are
+    // tried again once the table is kept, and stop there too.
+    let (s, t) = a_table_a_failing_landing_reaches();
+    for reversed in [false, true] {
+        REVERSED.with(|r| r.set(reversed));
+        let d = ok(&s);
+        REVERSED.with(|r| r.set(false));
+        assert!(
+            matches!(item(&d, t).kind, Kind::Table(_)),
+            "reversed {reversed}: {:?}",
+            shape(&d)
+        );
+        assert_eq!(
+            d.hazards,
+            [Hazard {
+                at: t,
+                kind: HazardKind::IntoData
+            }],
+            "reversed {reversed}"
+        );
+    }
+}
+
+/// The decode of `s` with the landings taken in script order and in the reverse order: its
+/// items, its hazards (as a set) and its catalog.
+fn both_orders(s: &[u8]) -> [(Vec<Item>, Vec<String>, String); 2] {
+    [false, true].map(|reversed| {
+        REVERSED.with(|r| r.set(reversed));
+        let d = ok(s);
+        REVERSED.with(|r| r.set(false));
+        let mut hazards: Vec<String> = d.hazards.iter().map(|h| format!("{h:?}")).collect();
+        hazards.sort();
+        let catalog = Catalog::build([(b'a', 7, s)]).to_json();
+        (d.items, hazards, catalog)
+    })
+}
+
+#[test]
+fn which_of_a_table_and_a_landings_code_wins_does_not_depend_on_the_landing_order() {
+    // Scripts where a table meets a landing's code (and the landings' code does not overlap,
+    // where the earlier landing wins: the module doc). Each decodes the same either way.
+    let mut scripts = vec![
+        a_table_its_namer_runs(false).0,
+        a_table_its_namer_runs(true).0,
+        a_table_at_an_ifs_code(&[0xb1], b"zz\xb6").0,
+        a_table_at_an_ifs_code(&[0x01, 0xb2, 0xa7], b"zz\0").0,
+        a_read_into_the_next_table(b"").0,
+    ];
+    let mut later = b"\xefj\xf6A".to_vec();
+    later.extend(jump(BODY));
+    later.push(0xee);
+    scripts.push(a_read_into_the_next_table(&later).0);
+    let t = BODY + 13;
+    let mut rest = b"zz\0\xee\xefq\xf6\xb5".to_vec();
+    rest.extend(lit32(t));
+    rest.push(0xb1);
+    rest.extend(jump(BODY));
+    rest.extend([0xee, 0xff]);
+    scripts.push(after_an_if(&rest));
+    scripts.push(a_table_a_failing_landing_reaches().0);
+    for (n, s) in scripts.iter().enumerate() {
+        let [a, b] = both_orders(s);
+        assert!(a == b, "script {n}: {:?}\n{:?}", a.1, b.1);
+    }
 }
 
 #[test]
