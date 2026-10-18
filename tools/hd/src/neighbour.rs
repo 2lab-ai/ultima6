@@ -28,9 +28,8 @@
 //! Only a pair with a generated side is checked: a pair of two records MMPX draws (or the
 //! scaler draws by rule) is not measured, and none may fall back. "No failing pair after the
 //! fixed point" therefore says that no pair with a generated side fails, not that every edge
-//! the world draws is clean. A checked pair on which nothing is measured (no row across the
-//! join where both sides draw) cannot fail either; it is counted apart, as unmeasured
-//! ([`Counts::unmeasured`]).
+//! the world draws is clean. A checked pair on which nothing is measured cannot fail either;
+//! it is counted apart, as unmeasured ([`Counts::unmeasured`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -406,9 +405,14 @@ pub struct Counts {
     pub objects: usize,
     /// Pairs checked in the first pass: those with a generated side (no other pair is checked).
     pub checked: usize,
-    /// Of the pairs checked in the first pass, those on which nothing is measured: no row
-    /// across the join where both sides draw (two objects' edges each opaque on half their
-    /// length, but not in the same places). Such a pair cannot fail, so it is counted apart.
+    /// Of the pairs checked in the first pass, those on which nothing is measured: [`settle`]
+    /// counts every checked pair whose result is `None`, which is a pair with no row across
+    /// the join where both sides draw (an empty record, or two objects' edges each opaque on
+    /// half their length but not in the same places), a pair naming a record with no side, or
+    /// a pair whose images do not fit each other ([`gate::neighbour_seam`]). On the game's
+    /// data only the first happens: every record a pair names is one the game has an image of
+    /// (so it has a side), and every tile image is `TILE_W × TILE_W`, each side checked by
+    /// [`Side::new`]. Such a pair cannot fail, so it is counted apart.
     pub unmeasured: usize,
     /// Pairs failing in the first pass, before any neighbour fallback (among those checked).
     pub failing_before: usize,
@@ -429,8 +433,9 @@ pub struct Checked {
     pub pair: Pair,
     /// Both sides generated (else one generated, one drawn by MMPX).
     pub both: bool,
-    /// (ratio, limit); `None` when nothing is measured (no row across the join where both
-    /// sides draw: [`Counts::unmeasured`]).
+    /// (ratio, limit); `None` when nothing is measured, for any of the reasons
+    /// [`Counts::unmeasured`] lists (on the game's data, only when no row across the join has
+    /// both sides drawing).
     pub result: Option<(f32, f32)>,
     pub fails: bool,
 }

@@ -9,8 +9,9 @@
 //! items left accepted are written to `slices/` and listed in `ingest.json` for `pack`; the
 //! coverage report counts records by class, the neighbour fallbacks apart, and the pairs: all of
 //! them, then those checked, unmeasured and failing, which are only pairs with a generated side
-//! (a pair of two scaled records is not checked; an unmeasured pair is checked, but has no row
-//! across the join both sides draw, so it cannot fail). `gates.jsonl` has a line per pair
+//! (a pair of two scaled records is not checked; an unmeasured pair is checked, but nothing is
+//! measured on it, which on the game's data means no row across the join both sides draw, so
+//! it cannot fail). `gates.jsonl` has a line per pair
 //! checked in the first pass (an unmeasured one with a null ratio) and per failing pair of a
 //! later pass. Ingest reads the sheets that came back and calls
 //! nothing: no `codex`, no upload.
