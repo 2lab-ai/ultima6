@@ -3326,6 +3326,58 @@ fn a_final_run_whose_dir_is_removed_before_samples_tsv_fails_and_makes_nothing_a
 }
 
 #[test]
+fn a_malformed_snapshot_is_said_by_its_full_path_with_the_run_dir() {
+    // An older incomplete run in --out; then gates.jsonl with a neighbour that is not a pair at
+    // line 3, and ingest.json that is not JSON: each error names the snapshot by its path in
+    // the run's dir, then the run dir, then the incomplete run; refused.txt says the same.
+    let g = game();
+    let (text, left) = chain(&g);
+    let lines: Vec<&str> = text.lines().collect();
+    let mut v: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    v["neighbour"] = serde_json::Value::Null;
+    let mut bad: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    bad[2] = v.to_string();
+    let bad = bad.join("\n") + "\n";
+    for (k, gates, list, said) in [
+        (
+            "gates",
+            bad.as_str(),
+            None,
+            "gates.jsonl line 3: a neighbour field that is not a pair",
+        ),
+        (
+            "ingest",
+            text.as_str(),
+            Some(b"not json".as_slice()),
+            "ingest.json: expected ident",
+        ),
+    ] {
+        let (dir, work) = work_dir(&format!("malformed-{k}"), gates, &g, &left);
+        if let Some(l) = list {
+            work.write("ingest.json", l).unwrap();
+        }
+        let o = options(&dir);
+        std::fs::create_dir_all(&o.out).unwrap();
+        let older = super::super::out_dir::run_name(1, 7);
+        std::fs::create_dir(o.out.join(&older)).unwrap();
+        let e = calibrate_final(&g, &work, &o).unwrap_err();
+        let run = run_dir(&o.out).canonicalize().unwrap();
+        assert!(
+            e.starts_with(&format!("{}/{said}", run.display())),
+            "{k}: {e}"
+        );
+        let tail = format!(
+            "; run dir: {}; incomplete runs beside it (left as they are): {older}",
+            run.display()
+        );
+        assert!(e.ends_with(&tail), "{k}: {e}");
+        let refused = std::fs::read_to_string(run.join(REFUSED)).unwrap();
+        assert_eq!(refused, format!("{e}\n"), "{k}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
 fn an_error_of_the_run_names_the_file_of_its_run_dir() {
     // A sheet that cannot be written (a dir where it goes, made by another hand) and a snapshot
     // that cannot be read back (gone once written): each error, and refused.txt, name the file

@@ -1265,6 +1265,41 @@ fn a_first_pass_writes_its_own_run_dir_alone() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn a_malformed_first_pass_snapshot_is_said_by_its_full_path_with_the_run_dir() {
+    // An older incomplete run in --out, then a line of the log that is not a pair: the error
+    // names the snapshot by its path in the run's dir, then the run dir and the incomplete run;
+    // refused.txt says the same.
+    let g = game();
+    let bad = r#"{"neighbour":7,"pass":1,"fail":false}"#;
+    let (dir, work, slices) = setup("malformed", &format!("{bad}\n"));
+    let out = dir.join("calibrate");
+    std::fs::create_dir_all(&out).unwrap();
+    let older = out_dir::run_name(1, 7);
+    std::fs::create_dir(out.join(&older)).unwrap();
+    let opts = Options {
+        slices,
+        out: out.clone(),
+        per: 2,
+        seed: 1,
+        at: Vec::new(),
+        seam: Thresholds::default().seam,
+        source: Source::All,
+    };
+    let e = calibrate(&g, &work, &opts).unwrap_err();
+    let run = run_dir(&out).canonicalize().unwrap();
+    let said = "gates.jsonl line 1: a neighbour field that is not a pair";
+    assert!(e.starts_with(&format!("{}/{said}", run.display())), "{e}");
+    let tail = format!(
+        "; run dir: {}; incomplete runs beside it (left as they are): {older}",
+        run.display()
+    );
+    assert!(e.ends_with(&tail), "{e}");
+    let refused = std::fs::read_to_string(run.join("refused.txt")).unwrap();
+    assert_eq!(refused, format!("{e}\n"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A sheet of the last run under the out dir, decoded.
 fn sheet_of(out: &Path, name: &str) -> Rgba {
     let path = run_dir(out).join(name);

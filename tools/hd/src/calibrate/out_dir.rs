@@ -245,6 +245,17 @@ impl Run {
         Ok(bytes)
     }
 
+    /// An error `e` of the run's file `name` (a snapshot it read), said of that file by its
+    /// full path: a leading `name` in `e` becomes the path; any other `e` follows it.
+    pub fn named(&self, name: &str, e: &str) -> String {
+        let path = self.dir.join(name);
+        let rest = e.strip_prefix(name).unwrap_or(e);
+        match rest.chars().next() {
+            Some(':' | ' ') => format!("{}{rest}", path.display()),
+            _ => format!("{}: {rest}", path.display()),
+        }
+    }
+
     /// Whether the run's dir is no longer at its path (removed, renamed, or swapped for a link
     /// or another dir).
     fn moved(&self) -> bool {
@@ -350,12 +361,17 @@ pub fn run_in<T>(
         id,
         written: RefCell::new(Vec::new()),
     };
-    let with_incomplete = |e: String| match incomplete.as_slice() {
-        [] => e,
-        v => format!(
-            "{e}; incomplete runs beside it (left as they are): {}",
-            v.join(", ")
-        ),
+    // Every failure from here says the run dir it left, and the incomplete runs beside it.
+    let at = r.dir.clone();
+    let with_incomplete = |e: String| {
+        let e = format!("{e}; run dir: {}", at.display());
+        match incomplete.as_slice() {
+            [] => e,
+            v => format!(
+                "{e}; incomplete runs beside it (left as they are): {}",
+                v.join(", ")
+            ),
+        }
     };
     // done only in the dir the report names: a run whose dir moved fails.
     let ended = run(&r).and_then(|v| match r.moved() {

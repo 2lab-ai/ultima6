@@ -1556,10 +1556,10 @@ fn run_final(
     let list_bytes = snapshot(caps[1].0, caps[1].1)?;
     let jobs_bytes = snapshot(caps[2].0, caps[2].1)?;
     let text =
-        std::str::from_utf8(&gates_bytes).map_err(|_| "gates.jsonl is not UTF-8".to_string())?;
-    let list: Vec<Accepted> =
-        serde_json::from_slice(&list_bytes).map_err(|e| format!("ingest.json: {e}"))?;
-    let rec = record(text)?;
+        std::str::from_utf8(&gates_bytes).map_err(|_| run.named("gates.jsonl", "is not UTF-8"))?;
+    let list: Vec<Accepted> = serde_json::from_slice(&list_bytes)
+        .map_err(|e| run.named("ingest.json", &e.to_string()))?;
+    let rec = record(text).map_err(|e| run.named("gates.jsonl", &e))?;
     if list.iter().any(|a| a.digest.is_none()) {
         return Err(
             "ingest.json has no digest of its masters (written by an older ingest): run ingest \
@@ -1589,8 +1589,8 @@ fn run_final(
         .enumerate()
         .filter(|(_, l)| !l.trim().is_empty())
     {
-        let job: atlas::Job =
-            serde_json::from_str(line).map_err(|e| format!("jobs.jsonl line {}: {e}", i + 1))?;
+        let job: atlas::Job = serde_json::from_str(line)
+            .map_err(|e| run.named("jobs.jsonl", &format!("line {}: {e}", i + 1)))?;
         laid_out.extend(job.places.iter().map(|p| p.item));
         if job.plan != fingerprint {
             d.push(Disagreement {

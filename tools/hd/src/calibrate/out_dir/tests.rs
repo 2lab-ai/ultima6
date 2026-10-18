@@ -143,8 +143,8 @@ fn a_failed_run_keeps_its_diagnostics_and_deletes_nothing_it_did_not_write() {
         Ok(())
     });
     let e = run_in(FIRST, &out, fails).unwrap_err();
-    assert_eq!(e, "no rows");
-    let run = out.join(&names(&out)[0]);
+    let run = only_run(&out);
+    assert_eq!(e, format!("no rows; run dir: {}", run.display()));
     assert_eq!(names(&run), ["gates.jsonl", REFUSED, "theirs.png"]);
     assert_eq!(
         std::fs::read(run.join("theirs.png")).unwrap(),
@@ -152,7 +152,7 @@ fn a_failed_run_keeps_its_diagnostics_and_deletes_nothing_it_did_not_write() {
     );
     assert_eq!(
         std::fs::read_to_string(run.join(REFUSED)).unwrap(),
-        "no rows\n"
+        format!("{e}\n")
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -173,7 +173,10 @@ fn a_file_a_failed_run_cannot_delete_is_said_to_be_left() {
     let left = format!("{} (held)", run.join("a.png").display());
     assert_eq!(
         e,
-        format!("no rows; left, as it could not be deleted: {left}")
+        format!(
+            "no rows; left, as it could not be deleted: {left}; run dir: {}",
+            run.display()
+        )
     );
     assert_eq!(names(&run), ["a.png", "gates.jsonl", REFUSED]);
     assert_eq!(
@@ -194,9 +197,13 @@ fn a_run_lists_the_incomplete_runs_beside_it_and_touches_none_of_what_was_there(
     std::fs::create_dir_all(&out).unwrap();
     let ((), done) = run_in(FIRST, &out, writes).unwrap();
     let refused = run_in(FIRST, &out, fails).unwrap_err();
-    assert_eq!(refused, "no rows");
     let done_name = done.dir.file_name().unwrap().to_string_lossy().into_owned();
     let refused_run = names(&out).into_iter().find(|n| *n != done_name).unwrap();
+    let real = out.canonicalize().unwrap();
+    assert_eq!(
+        refused,
+        format!("no rows; run dir: {}", real.join(&refused_run).display())
+    );
     let killed = out.join(run_name(1, 7));
     std::fs::create_dir(&killed).unwrap();
     std::fs::write(killed.join("a.png"), b"half").unwrap();
@@ -219,12 +226,20 @@ fn a_run_lists_the_incomplete_runs_beside_it_and_touches_none_of_what_was_there(
     let mine = w.dir.file_name().unwrap().to_string_lossy().into_owned();
     now.retain(|k, _| !k.starts_with(&mine));
     assert_eq!(now, had);
-    // A failed run says them in its error too, and leaves them.
+    // A failed run says them in its error too, after its own dir, and leaves them.
     let e = run_in(FIRST, &out, fails).unwrap_err();
-    assert!(
-        e.starts_with("no rows; incomplete runs beside it (left as they are): ")
-            && e.contains(&run_name(1, 7)),
-        "{e}"
+    let runs: Vec<String> = names(&out)
+        .into_iter()
+        .filter(|n| n.starts_with("run-") && !had.contains_key(n) && *n != mine)
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(
+        e,
+        format!(
+            "no rows; run dir: {}; incomplete runs beside it (left as they are): {}",
+            real.join(&runs[0]).display(),
+            want.join(", ")
+        )
     );
     let mut now = tree(&out);
     now.retain(|k, _| had.contains_key(k));

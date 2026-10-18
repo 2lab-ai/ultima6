@@ -1756,8 +1756,8 @@ fn first_pass(
         .map_err(|e| format!("{e} (run ingest first)"))?;
     run.write("gates.jsonl", &bytes)?;
     let text = run.read("gates.jsonl", 1 << 30)?;
-    let text = String::from_utf8(text).map_err(|_| "gates.jsonl is not UTF-8".to_string())?;
-    let (rows, skipped) = rows(&text)?;
+    let text = String::from_utf8(text).map_err(|_| run.named("gates.jsonl", "is not UTF-8"))?;
+    let (rows, skipped) = rows(&text).map_err(|e| run.named("gates.jsonl", &e))?;
     let pack = Rc::new(Slices::read(game, &o.slices)?);
     let mut summary = Summary {
         source: o.source.clone(),
