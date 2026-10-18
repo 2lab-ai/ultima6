@@ -70,25 +70,23 @@
 //! The rounds end: each one grows the dropped landings or the settled bytes, or (with those
 //! unchanged) the reserved bytes, all bounded by the script's length.
 //!
-//! Order. Landings are taken the loops that step over operands first, in script order, and the
-//! decode is deterministic in that order. The order decides three things (a test shows each,
-//! the two orders giving two decodes):
+//! Order. Conflicts between landings are resolved in ascending landing address: the landings
+//! are taken in the order of the address where reading goes on (then by loop, stop byte and
+//! context), whatever order they are found in, and a failed trial is tried again in the same
+//! order. So the decode and the catalog are functions of the script's bytes alone (a test keeps
+//! the waiting landings in other orders and gets the same catalog, byte for byte). The
+//! conflicts that rule resolves include:
 //!
 //! - two landings whose code disagrees on a byte (one would decode an item over bytes the
-//!   other decoded otherwise): the one taken first keeps its code, the other is dropped
+//!   other decoded otherwise): the lower keeps its code, the other is dropped
 //!   (`Dropped(_, Overlap)`);
-//! - two landings that read one address with two kinds: the one taken first keeps its use, the
-//!   other is dropped (`Dropped(_, TableKinds)`);
-//! - a landing whose code holds the address of a table another landing names. Taken after the
+//! - two landings that read one address with two kinds: the lower keeps its use, the other is
+//!   dropped (`Dropped(_, TableKinds)`);
+//! - a landing whose code holds the address of a table another landing names: taken after the
 //!   namer, it stops there at once ([`HazardKind::IntoData`]), or is dropped when an item of
 //!   it would hold the address (`Dropped(_, TableInCode)`); taken first, its code is in for
-//!   that round and the table wins over it in the next. So of two landings each naming a table
-//!   over the other's code, the one taken first keeps its table; and a landing can end dropped
-//!   in one order (at once, or by what the round its code was in found) and stopped at the
-//!   table in the other.
-//!
-//! Outside these, which of a table and a landing's code wins does not depend on the order (a
-//! test takes the landings the other way round and gets the same decode and catalog).
+//!   that round and the table wins over it in the next. Of two landings each naming a table
+//!   over the other's code, the lower keeps its table.
 //!
 //! Operands are decoded with the evaluator's grammar ([`Expr`]), so their bytes are never read
 //! as text. A byte the interpreter has no arm for is refused with a named [`Reason`], never

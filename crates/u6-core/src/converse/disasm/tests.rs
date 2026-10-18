@@ -12,7 +12,7 @@ use super::super::eval::eval;
 use super::super::exec::exec;
 use super::super::tests::{chars, files, lib, packed, scroll, state, talk_to};
 use super::catalog::{Catalog, FORMAT, SLOT_BUFFER_CAPACITY, ScriptUnits, hash64};
-use super::decode::{Decoder, Plan, REVERSED, ref_entry};
+use super::decode::{Decoder, ORDER, Plan, ref_entry};
 use super::ops::{self, Escape, Flow, STATEMENT_OPS, Shape};
 use super::trace::{self, Decoded, EscState, Event, Read, Snap};
 use super::*;
@@ -1118,11 +1118,9 @@ fn a_table_never_wins_over_code_its_own_path_runs_joined_or_not() {
     // or a jump before it). Its landings are dropped, `x` stays code, in either landing order.
     for joined in [false, true] {
         let (s, x) = a_table_its_namer_runs(joined);
-        for reversed in [false, true] {
-            REVERSED.with(|r| r.set(reversed));
-            let d = ok(&s);
-            REVERSED.with(|r| r.set(false));
-            let what = format!("joined {joined}, reversed {reversed}");
+        for order in ORDERS {
+            let d = in_order(&s, order);
+            let what = format!("joined {joined}, order {order}");
             assert!(
                 matches!(item(&d, x).kind, Kind::Text(_)),
                 "{what}: {:?}",
@@ -1323,13 +1321,11 @@ fn a_landing_that_would_fail_in_a_table_stops_there_whichever_landing_comes_firs
     // there; the other way round they read the table's bytes as code first and fail. They are
     // tried again once the table is kept, and stop there too.
     let (s, t) = a_table_a_failing_landing_reaches();
-    for reversed in [false, true] {
-        REVERSED.with(|r| r.set(reversed));
-        let d = ok(&s);
-        REVERSED.with(|r| r.set(false));
+    for order in ORDERS {
+        let d = in_order(&s, order);
         assert!(
             matches!(item(&d, t).kind, Kind::Table(_)),
-            "reversed {reversed}: {:?}",
+            "order {order}: {:?}",
             shape(&d)
         );
         assert_eq!(
@@ -1338,7 +1334,7 @@ fn a_landing_that_would_fail_in_a_table_stops_there_whichever_landing_comes_firs
                 at: t,
                 kind: HazardKind::IntoData
             }],
-            "reversed {reversed}"
+            "order {order}"
         );
     }
 }
@@ -1418,14 +1414,12 @@ fn failed_trials_are_tried_again_until_none_more_is_kept() {
     // keep `t`. Tried again, the `a1`'s landing still fails (nothing keeps `u` yet), the `a3`'s
     // stops at `t` and keeps `u`; tried once more, the `a1`'s stops at `u`. Either order.
     let (s, t, u) = tables_each_landing_needs_kept_first();
-    for reversed in [false, true] {
-        REVERSED.with(|r| r.set(reversed));
-        let d = ok(&s);
-        REVERSED.with(|r| r.set(false));
+    for order in ORDERS {
+        let d = in_order(&s, order);
         for at in [t, u] {
             assert!(
                 matches!(item(&d, at).kind, Kind::Table(_)),
-                "reversed {reversed}: {:?}",
+                "order {order}: {:?}",
                 shape(&d)
             );
         }
@@ -1443,24 +1437,53 @@ fn failed_trials_are_tried_again_until_none_more_is_kept() {
                     kind: HazardKind::IntoData
                 }
             ],
-            "reversed {reversed}"
+            "order {order}"
         );
     }
 }
 
-/// The decode of `s` with the landings taken in script order and in the reverse order: its
-/// items, its hazards (as a set) and its catalog.
+/// The orders the tests keep the waiting landings in ([`ORDER`]): as found, the reverse, and
+/// two shuffles.
+const ORDERS: [u64; 4] = [0, 1, 0x5eed, 0xc0ffee];
+
+/// The decode of `s` with the waiting landings kept in `order`.
+fn in_order(s: &[u8], order: u64) -> Disasm {
+    ORDER.with(|o| o.set(order));
+    let d = ok(s);
+    ORDER.with(|o| o.set(0));
+    d
+}
+
+/// The decode of `s` with the waiting landings kept in `order`: its items, its hazards (as a
+/// set) and its catalog (it decodes again: in the same order).
+fn with_order(s: &[u8], order: u64) -> (Vec<Item>, Vec<String>, String) {
+    ORDER.with(|o| o.set(order));
+    let d = ok(s);
+    let catalog = Catalog::build([(b'a', 7, s)]).to_json();
+    ORDER.with(|o| o.set(0));
+    let mut hazards: Vec<String> = d.hazards.iter().map(|h| format!("{h:?}")).collect();
+    hazards.sort();
+    (d.items, hazards, catalog)
+}
+
+/// [`with_order`] as found and in the reverse order.
 fn both_orders(s: &[u8]) -> [(Vec<Item>, Vec<String>, String); 2] {
-    [false, true].map(|reversed| {
-        // The catalog decodes again: in the same order.
-        REVERSED.with(|r| r.set(reversed));
-        let d = ok(s);
-        let catalog = Catalog::build([(b'a', 7, s)]).to_json();
-        REVERSED.with(|r| r.set(false));
-        let mut hazards: Vec<String> = d.hazards.iter().map(|h| format!("{h:?}")).collect();
-        hazards.sort();
-        (d.items, hazards, catalog)
-    })
+    [0, 1].map(|order| with_order(s, order))
+}
+
+/// The decode of `s`, the same in every one of [`ORDERS`] (items, hazards, catalog).
+fn any_order(s: &[u8]) -> Disasm {
+    let first = with_order(s, ORDERS[0]);
+    for order in &ORDERS[1..] {
+        let other = with_order(s, *order);
+        assert!(
+            first == other,
+            "order {order}: {:?}\n{:?}",
+            first.1,
+            other.1
+        );
+    }
+    ok(s)
 }
 
 #[test]
@@ -1499,14 +1522,84 @@ fn which_of_a_table_and_a_landings_code_wins_does_not_depend_on_the_landing_orde
     }
 }
 
-/// The decode of `s` in script order and in the reverse landing order.
-fn in_both_orders(s: &[u8]) -> [Disasm; 2] {
-    [false, true].map(|reversed| {
-        REVERSED.with(|r| r.set(reversed));
-        let d = ok(s);
-        REVERSED.with(|r| r.set(false));
-        d
-    })
+/// A script of random pieces after the greeting: keyword blocks, `a1` / `a3` / `a2`, jumps,
+/// prints and copies of table addresses (a literal, a constant or computed index), searches,
+/// word writes and reads, text, NULs and `b8`s; a 64-bit LCG with seed `g`. Many landings, and
+/// many tables over their code.
+fn random_pieces(g: &mut u64) -> Vec<u8> {
+    let mut next = |n: u32| {
+        *g = g
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (*g >> 33) as u32 % n
+    };
+    let mut b = b"\xf7".to_vec();
+    for _ in 0..6 + next(14) {
+        let a = BODY + next(90);
+        let piece: Vec<u8> = match next(20) {
+            0 => b"ab".to_vec(),
+            1 => b"zz\0".to_vec(),
+            2 => vec![0xee],
+            3 => b"\xefk\xf6".to_vec(),
+            4 => vec![0xa1, 0x01, 0xa7],
+            5 => vec![0xa2],
+            6 => vec![0xa3],
+            7 => jump(a),
+            8 => [&[0xb5][..], &lit32(a), &[0xb1]].concat(),
+            9 => [&[0xb5][..], &lit32(a), &[0x01, 0xb2, 0xa7]].concat(),
+            10 => vec![0xb6],
+            11 => vec![0],
+            12 => b"cd\0ef\0".to_vec(),
+            13 => jump(BODY),
+            14 => [&[0xb5][..], &lit32(a), &[0x01, 0xa7]].concat(),
+            15 => search_of(a, false),
+            16 => [&[0xa6][..], &lit32(a), &[0xb1, 0xa8, 0x07, 0xa7]].concat(),
+            17 => [
+                &[0xa6, 0x01, 0xb2, 0xa8][..],
+                &lit32(a),
+                &[0x00, 0xb4, 0xa7],
+            ]
+            .concat(),
+            18 => vec![0x10, 0x00, 0x20, 0x00, 0xb8],
+            _ => b"\xefq\xf6".to_vec(),
+        };
+        b.extend(piece);
+    }
+    b.push(0xff);
+    script(&b)
+}
+
+#[test]
+fn the_catalog_is_the_same_in_any_order_the_landings_are_found_in() {
+    // Random scripts with many landings and tables, each decoded with its waiting landings
+    // kept in several orders: the same decode and the same catalog, byte for byte.
+    let mut g = 0x0d15_a55e_u64;
+    let (mut decoded, mut landings) = (0, 0);
+    for _ in 0..3000 {
+        let s = random_pieces(&mut g);
+        let build = |order: u64| {
+            ORDER.with(|o| o.set(order));
+            let d = disassemble(b'a', 7, &s);
+            let c = Catalog::build([(b'a', 7, s.as_slice())]).to_json();
+            ORDER.with(|o| o.set(0));
+            (d, c)
+        };
+        let (first, catalog) = build(0);
+        for order in [1, 0x5eed, 0xc0ffee, 0xbad5eed] {
+            let (d, c) = build(order);
+            assert!(d == first && c == catalog, "order {order}: {s:02x?}");
+        }
+        if let Ok(d) = first {
+            decoded += 1;
+            landings += d
+                .hazards
+                .iter()
+                .filter(|h| matches!(h.kind, HazardKind::Dropped(..) | HazardKind::IntoData))
+                .count();
+        }
+    }
+    // The scripts decode, and their landings meet tables and each other.
+    assert!(decoded > 2000 && landings > 150, "{decoded} {landings}");
 }
 
 /// `d`'s hazards, sorted.
@@ -1523,34 +1616,50 @@ fn dropped(at: u32, scan: Scan, reason: Reason) -> Hazard {
     }
 }
 
-// The order the landings are taken in decides three things (the module doc): each test below
-// shows the two orders giving two decodes.
+// Conflicts between landings are resolved in ascending landing address (the module doc): the
+// tests below show three kinds, each the same in every order the landings are found in.
 
 #[test]
-fn of_two_landings_whose_code_disagrees_on_a_byte_the_first_keeps_it() {
-    // The a1's landing jumps into the operand of the jump the block's loops run after its
-    // `ee`, and reads a newline there.
+fn of_two_landings_whose_code_disagrees_on_a_byte_the_lower_keeps_it() {
+    // The a1's landing (at `x`) jumps into the operand of the jump the block's loops (at
+    // `x + 6`) run after its `ee`, and reads a newline there: the a1's landing keeps it.
     let x = BODY + 13;
     let mut rest = jump(x + 7);
     rest.push(0xee);
     rest.extend(jump(BODY));
-    let s = after_an_if(&rest);
-    let [a, b] = in_both_orders(&s);
+    let d = any_order(&after_an_if(&rest));
     assert_eq!(
-        sorted_hazards(&a),
+        sorted_hazards(&d),
         [
             dropped(x + 6, Scan::Answered, Reason::Overlap),
             dropped(x + 6, Scan::NoMatch, Reason::Overlap)
         ]
     );
-    assert!(matches!(item(&a, x + 7).kind, Kind::Text(_)));
-    assert_eq!(sorted_hazards(&b), [dropped(x, Scan::If, Reason::Overlap)]);
-    assert!(matches!(item(&b, x + 6).kind, Kind::Op(_)));
+    assert!(matches!(item(&d, x + 7).kind, Kind::Text(_)));
+    // The loop does not decide: here the `*` block's loops land at `BODY + 10` and run a jump
+    // back; the `a1`, in the code the block's answer jumps to, lands after its `a2` and jumps
+    // into that jump's operand. The loops' landing is the lower: it keeps its jump.
+    let p = BODY + 15;
+    let mut body = b"\xf7\xef*\xf6".to_vec();
+    body.extend(jump(p));
+    body.push(0xee);
+    body.extend(jump(BODY));
+    body.extend([0xa1, 0x01, 0xa7]);
+    body.extend(jump(BODY));
+    body.push(0xa2);
+    body.extend(jump(BODY + 11));
+    let d = any_order(&script(&body));
+    assert_eq!(
+        sorted_hazards(&d),
+        [dropped(p + 9, Scan::If, Reason::Overlap)]
+    );
+    assert!(matches!(op_at(&d, BODY + 10).info().flow, Flow::Jump));
 }
 
 #[test]
-fn of_two_landings_reading_one_address_with_two_kinds_the_first_keeps_it() {
-    // The a1's landing writes word 0 of `t`; the block's loops print string 0 of `t`.
+fn of_two_landings_reading_one_address_with_two_kinds_the_lower_keeps_it() {
+    // The a1's landing writes word 0 of `t`; the block's loops, at a higher address, print
+    // string 0 of `t`: `t` is a word table and the loops are dropped.
     let t = BODY + 13 + 10 + 5 + 1 + 7 + 5;
     let mut rest = vec![0xa6];
     rest.extend(lit32(t));
@@ -1561,35 +1670,27 @@ fn of_two_landings_reading_one_address_with_two_kinds_the_first_keeps_it() {
     rest.push(0xb1);
     rest.extend(jump(BODY));
     rest.extend(b"zz\0\xb8");
-    let s = after_an_if(&rest);
-    let [a, b] = in_both_orders(&s);
-    let words = |d: &Disasm| match &item(d, t).kind {
-        Kind::Table(tb) => tb.words,
-        k => panic!("{k:?}"),
+    let d = any_order(&after_an_if(&rest));
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
     };
+    assert!(tb.words);
     let ee = BODY + 13 + 10 + 5;
-    assert!(words(&a));
     assert_eq!(
-        sorted_hazards(&a),
+        sorted_hazards(&d),
         [
             dropped(ee + 1, Scan::Answered, Reason::TableKinds),
             dropped(ee + 1, Scan::NoMatch, Reason::TableKinds)
         ]
     );
-    assert!(!words(&b));
-    assert_eq!(
-        sorted_hazards(&b),
-        [dropped(BODY + 13, Scan::If, Reason::TableKinds)]
-    );
 }
 
 #[test]
-fn a_landings_code_at_a_table_another_landing_names_is_decided_by_the_order() {
+fn a_landings_code_at_a_table_another_landing_names_is_decided_by_their_addresses() {
     let x = BODY + 13;
-    // Each of two landings names a table over the other's code: the a1's landing prints the
-    // table at `y`, where the block's loops land; they print the table at `x + 2`, inside the
-    // a1's landing's print. The one taken first keeps its table, the other stops there or is
-    // dropped.
+    // Each of two landings names a table over the other's code: the a1's landing (at `x`)
+    // prints the table at `y`, where the block's loops land; they print the table at `x + 2`,
+    // inside the a1's landing's print. The lower keeps its table; the other stops there.
     let y = x + 13;
     let mut rest = vec![0xb5];
     rest.extend(lit32(y));
@@ -1599,35 +1700,23 @@ fn a_landings_code_at_a_table_another_landing_names_is_decided_by_the_order() {
     rest.extend(lit32(x + 2));
     rest.push(0xb1);
     rest.extend(jump(BODY));
-    let s = after_an_if(&rest);
-    let [a, b] = in_both_orders(&s);
+    let d = any_order(&after_an_if(&rest));
     assert!(
-        matches!(item(&a, y).kind, Kind::Table(_)),
+        matches!(item(&d, y).kind, Kind::Table(_)),
         "{:?}",
-        shape(&a)
+        shape(&d)
     );
-    assert!(matches!(item(&a, x).kind, Kind::Op(_)));
+    assert!(matches!(item(&d, x).kind, Kind::Op(_)));
     assert_eq!(
-        sorted_hazards(&a),
+        sorted_hazards(&d),
         [Hazard {
             at: y,
             kind: HazardKind::IntoData
         }]
     );
-    assert!(
-        matches!(item(&b, x + 2).kind, Kind::Table(_)),
-        "{:?}",
-        shape(&b)
-    );
-    assert!(matches!(item(&b, y).kind, Kind::Op(_)));
-    assert_eq!(
-        sorted_hazards(&b),
-        [dropped(x, Scan::If, Reason::TableInCode)]
-    );
     // One landing names a table over the other's code (string 1 of `t` holds the block's `ee`
-    // and the start of its loops' jump, `u` is in that jump's operand). Taken after the namer,
-    // the loops' jump would hold `u`: they are dropped. Taken first, the table wins over their
-    // code in the next round: they stop at their `ee`. The same items, two hazards.
+    // and the start of its loops' jump, `u` is in that jump's operand). The namer is the
+    // lower: the loops' jump would hold `u`, and they are dropped.
     let (t, u) = (x + 20, x + 26);
     let mut rest = vec![0xb5];
     rest.extend(lit32(t));
@@ -1637,30 +1726,21 @@ fn a_landings_code_at_a_table_another_landing_names_is_decided_by_the_order() {
     rest.extend(jump(BODY));
     rest.extend(b"a\0\xee");
     rest.extend(jump(BODY));
-    let s = after_an_if(&rest);
-    let [a, b] = in_both_orders(&s);
-    assert_eq!(a.items, b.items);
-    assert!(matches!(item(&a, t).kind, Kind::Table(_)));
-    assert!(matches!(item(&a, u).kind, Kind::Table(_)));
+    let d = any_order(&after_an_if(&rest));
+    assert!(matches!(item(&d, t).kind, Kind::Table(_)));
+    assert!(matches!(item(&d, u).kind, Kind::Table(_)));
     assert_eq!(
-        sorted_hazards(&a),
+        sorted_hazards(&d),
         [
             dropped(x + 23, Scan::Answered, Reason::TableInCode),
             dropped(x + 23, Scan::NoMatch, Reason::TableInCode)
         ]
     );
-    assert_eq!(
-        sorted_hazards(&b),
-        [Hazard {
-            at: x + 23,
-            kind: HazardKind::IntoData
-        }]
-    );
     // A script from the random order probe (synthetic bytes): the a1's landing at 61 (its loop
     // stops on the `a2` at 60) jumps back into the direct code, whose print at 16 names the
-    // table at 58. Block `k`'s print at 78 reads from 60, inside that table's second string: the
-    // table keeps it, over the a1's landing's code. Taken first, that landing is dropped (its
-    // own code is in a table its path names); taken after block `k`'s landing, it stops at 60.
+    // table at 58. Block `k`'s landing (at 75) prints from 60, inside that table's second
+    // string: the table keeps it, over the a1's landing's code. The a1's landing is the lower:
+    // its code is in, in a table its path names, and it is dropped.
     let s = script(&[
         0xf7, 0x61, 0x62, 0xef, 0x71, 0xf6, 0xb5, 0xd2, 0x3a, 0x00, 0x00, 0x00, 0xb1, 0xef, 0x71,
         0xf6, 0xb5, 0xd2, 0x26, 0x00, 0x00, 0x00, 0xb1, 0xa1, 0x01, 0xa7, 0xb6, 0xb5, 0xd2, 0x19,
@@ -1669,15 +1749,11 @@ fn a_landings_code_at_a_table_another_landing_names_is_decided_by_the_order() {
         0x64, 0x00, 0x65, 0x66, 0x00, 0xef, 0x6b, 0xf6, 0xb5, 0xd2, 0x3c, 0x00, 0x00, 0x00, 0xb1,
         0x00, 0x61, 0x62, 0xff,
     ]);
-    let [a, b] = in_both_orders(&s);
-    assert_eq!(a.items, b.items);
-    let stopped = Hazard {
-        at: 61,
-        kind: HazardKind::IntoData,
-    };
-    let if_dropped = dropped(61, Scan::If, Reason::TableInCode);
-    assert!(a.hazards.contains(&if_dropped) && !a.hazards.contains(&stopped));
-    assert!(b.hazards.contains(&stopped) && !b.hazards.contains(&if_dropped));
+    let d = any_order(&s);
+    assert!(
+        d.hazards
+            .contains(&dropped(61, Scan::If, Reason::TableInCode))
+    );
 }
 
 #[test]

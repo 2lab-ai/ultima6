@@ -61,9 +61,10 @@ pub(super) struct Plan {
 
 #[cfg(test)]
 thread_local! {
-    /// Test-only: take the skip-loop landings in the reverse order (the result changes only
-    /// in the cases the module doc names).
-    pub(super) static REVERSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only: the order the landings waiting to be tried are kept in (0: as found, 1: the
+    /// reverse, any other: a shuffle with that seed). The decoder takes them in its own order
+    /// whatever this is ([`Decoder::next_landing`]).
+    pub(super) static ORDER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -274,32 +275,30 @@ impl<'a> Decoder<'a> {
         self.scan_greeting(0, None)?;
         self.drain()?;
         // Skip-loop landings come after the direct paths, so that a landing never decodes
-        // bytes a direct path owns; the loops that step over operands first, in script order.
+        // bytes a direct path owns; then in ascending landing address ([`Self::next_landing`]).
         // A loop may stop on a byte inside an operand, so a landing's path is decoded on trial,
         // its table uses included: when it would refuse the script, it is dropped as a hazard
         // and its bytes and tables are as if it had never been read. Each trial keeps a copy of
         // the decoder to go back to: one copy per landing, O(len²) per round, small for scripts
         // of at most `SCRIPT_LEN` bytes.
-        // A trial that fails is tried again once the landings after it are in: a table they
-        // keep may stop its path before the bytes that failed it (so which comes first does
-        // not decide it). A landing that still fails, with nothing more kept, is dropped.
+        // A trial that fails is tried again, in the same order, once the landings after it are
+        // in: a table they keep may stop its path before the bytes that failed it. A landing
+        // that still fails, with nothing more kept, is dropped.
         let mut failed: Vec<(Landing, Ctx, Reason)> = Vec::new();
         loop {
+            let mut kept = false;
             while let Some(i) = self.next_landing() {
                 let (landing, ctx) = self.scans.remove(i);
-                if let Err(r) = self.try_landing(landing, ctx) {
-                    failed.push((landing, ctx, r));
+                match self.try_landing(landing, ctx) {
+                    Ok(()) => kept = true,
+                    Err(r) => failed.push((landing, ctx, r)),
                 }
             }
-            let before = failed.len();
-            for (landing, ctx, _) in std::mem::take(&mut failed) {
-                if let Err(r) = self.try_landing(landing, ctx) {
-                    failed.push((landing, ctx, r));
-                }
-            }
-            if failed.len() == before {
+            if !kept || failed.is_empty() {
                 break;
             }
+            self.scans
+                .extend(failed.drain(..).map(|(landing, ctx, _)| (landing, ctx)));
         }
         for (landing, _, r) in failed {
             self.hazard(landing.at, HazardKind::Dropped(landing.scan, r));
@@ -334,17 +333,30 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// The landing to try next: the loops that step over operands first, in script order (a
-    /// test can take them the other way round, [`REVERSED`]).
-    fn next_landing(&self) -> Option<usize> {
-        let key = |i: &usize| {
-            let (l, _) = self.scans[*i];
-            (l.scan, l.stop)
-        };
+    /// The landing to try next: the one at the lowest address where reading goes on (then by
+    /// loop, stop byte and context), whatever order they were found in, so that a conflict
+    /// between two landings is resolved by their addresses alone. A test keeps the waiting
+    /// ones in another order ([`ORDER`]).
+    fn next_landing(&mut self) -> Option<usize> {
         #[cfg(test)]
-        if REVERSED.with(std::cell::Cell::get) {
-            return (0..self.scans.len()).max_by_key(key);
+        match ORDER.with(std::cell::Cell::get) {
+            0 => {}
+            1 => self.scans.reverse(),
+            seed => {
+                // A Fisher-Yates shuffle on a 64-bit LCG, reseeded by the count waiting.
+                let mut x = seed ^ self.scans.len() as u64;
+                for i in (1..self.scans.len()).rev() {
+                    x = x
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    self.scans.swap(i, (x >> 33) as usize % (i + 1));
+                }
+            }
         }
+        let key = |i: &usize| {
+            let (l, ctx) = self.scans[*i];
+            (l.at, l.scan, l.stop, ctx)
+        };
         (0..self.scans.len()).min_by_key(key)
     }
 
