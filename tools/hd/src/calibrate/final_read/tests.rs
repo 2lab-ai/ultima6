@@ -1546,7 +1546,7 @@ fn a_long_legend_line_goes_on_and_is_not_cut() {
         assert_eq!(w, l.width());
         assert_eq!(h == base, scale == 4, "{scale}: {h} {base}");
         assert!(
-            h >= base && (h - base) % l.line_h() == 0,
+            h >= base && (h - base).is_multiple_of(l.line_h()),
             "{scale}: {h} {base}"
         );
     }
