@@ -1251,6 +1251,65 @@ fn a_table_wins_over_the_second_part_of_another_landings_split_run() {
     );
 }
 
+/// `f7`, a `*` block whose answer is `a1 01 a7 a3`: the `a1`'s landing (after the `a3`) jumps
+/// into table `u`; the `a3`'s landing (after the `a2`) prints `u` and jumps into table `t`;
+/// the block's own loops print `t` and jump back. Both tables start with a byte the executor
+/// has no arm for. Returns the script, `t` and `u`.
+fn tables_each_landing_needs_kept_first() -> (Vec<u8>, u32, u32) {
+    // f7 ef * f6 (4), a1 01 a7 (3), a3, jump (5), a2, b5 d2 u b1 (7), jump (5), ee,
+    // b5 d2 t b1 (7), jump (5).
+    let t = BODY + 4 + 3 + 1 + 5 + 1 + 7 + 5 + 1 + 7 + 5;
+    let u = t + 3;
+    let mut body = b"\xf7\xef*\xf6\xa1\x01\xa7\xa3".to_vec();
+    body.extend(jump(u));
+    body.extend([0xa2, 0xb5]);
+    body.extend(lit32(u));
+    body.push(0xb1);
+    body.extend(jump(t));
+    body.extend([0xee, 0xb5]);
+    body.extend(lit32(t));
+    body.push(0xb1);
+    body.extend(jump(BODY));
+    body.extend(b"\x80a\0\x80b\0");
+    (script(&body), t, u)
+}
+
+#[test]
+fn failed_trials_are_tried_again_until_none_more_is_kept() {
+    // In script order the `a1`'s landing fails in `u` and the `a3`'s in `t`; the block's loops
+    // keep `t`. Tried again, the `a1`'s landing still fails (nothing keeps `u` yet), the `a3`'s
+    // stops at `t` and keeps `u`; tried once more, the `a1`'s stops at `u`. Either order.
+    let (s, t, u) = tables_each_landing_needs_kept_first();
+    for reversed in [false, true] {
+        REVERSED.with(|r| r.set(reversed));
+        let d = ok(&s);
+        REVERSED.with(|r| r.set(false));
+        for at in [t, u] {
+            assert!(
+                matches!(item(&d, at).kind, Kind::Table(_)),
+                "reversed {reversed}: {:?}",
+                shape(&d)
+            );
+        }
+        let mut hazards = d.hazards.clone();
+        hazards.sort_by_key(|h| h.at);
+        assert_eq!(
+            hazards,
+            [
+                Hazard {
+                    at: t,
+                    kind: HazardKind::IntoData
+                },
+                Hazard {
+                    at: u,
+                    kind: HazardKind::IntoData
+                }
+            ],
+            "reversed {reversed}"
+        );
+    }
+}
+
 /// The decode of `s` with the landings taken in script order and in the reverse order: its
 /// items, its hazards (as a set) and its catalog.
 fn both_orders(s: &[u8]) -> [(Vec<Item>, Vec<String>, String); 2] {
@@ -1289,6 +1348,7 @@ fn which_of_a_table_and_a_landings_code_wins_does_not_depend_on_the_landing_orde
     scripts.push(after_an_if(&rest));
     scripts.push(a_table_a_failing_landing_reaches().0);
     scripts.push(a_table_at_a_split_runs_second_part().0);
+    scripts.push(tables_each_landing_needs_kept_first().0);
     for (n, s) in scripts.iter().enumerate() {
         let [a, b] = both_orders(s);
         assert!(a == b, "script {n}: {:?}\n{:?}", a.1, b.1);
