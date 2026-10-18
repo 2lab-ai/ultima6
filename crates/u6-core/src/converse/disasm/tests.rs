@@ -2386,17 +2386,23 @@ fn a_table_print_must_put_out_the_string_it_read() {
     assert_eq!(prints(b""), 1, "nothing put out");
     assert_eq!(prints(b"ax"), 1, "another character");
     // A copy or a search puts nothing out: its reads are checked, not an output.
-    let copy: Vec<Event> = b"ab\0"
-        .iter()
-        .enumerate()
-        .map(|(i, &b)| Event::Table {
-            at: (t as usize + i) as i32,
-            byte: b,
-            read: Read::Copy,
-        })
-        .collect();
-    let n = checked(&body, copy);
-    assert_eq!((n.prints, n.table_strings, n.failures()), (0, 1, 0));
+    for read in [Read::Copy, Read::Search] {
+        let reads: Vec<Event> = b"ab\0"
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| Event::Table {
+                at: (t as usize + i) as i32,
+                byte: b,
+                read,
+            })
+            .collect();
+        let n = checked(&body, reads);
+        assert_eq!(
+            (n.prints, n.table_strings, n.failures()),
+            (0, 1, 0),
+            "{read:?}"
+        );
+    }
 }
 
 #[test]
