@@ -301,3 +301,93 @@ fn a_marked_out_dir_holding_a_file_the_run_did_not_write_is_refused_and_left_who
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_run_after_a_crash_at_any_step_puts_back_or_removes_what_it_left() {
+    // A run stopped (a panic: nothing after it runs) in the run, then after each step of the
+    // swap; the next run puts back the old output if no out dir is left, removes the rest of
+    // what the stopped run left, says each in its report, and leaves its own output alone.
+    for (k, step) in ["run", "ran", "moved", "checked", "published"]
+        .into_iter()
+        .enumerate()
+    {
+        let dir = temp(&format!("crash-then-run-{k}"));
+        let out = dir.join("out");
+        run_in(FIRST, &out, writes("old")).unwrap();
+        let stopped = {
+            let _h = hook(&out, step, |_| panic!("stopped"));
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_in(FIRST, &out, |d: &Path, k: &Path| {
+                    if step == "run" {
+                        let _ = std::fs::write(d.join("half.png"), b"x");
+                        seam(&out, "run", "")?;
+                    }
+                    writes("new")(d, k)
+                })
+            }))
+        };
+        assert!(stopped.is_err(), "{step}");
+        let left = beside_of(&dir, "out");
+        assert!(!left.is_empty(), "{step}");
+        let (_, notes) = run_in(FIRST, &out, writes("next")).unwrap();
+        assert_eq!(contents(&out), Some(output("next")), "{step}");
+        assert!(
+            beside_of(&dir, "out").is_empty(),
+            "{step}: {:?}",
+            beside_of(&dir, "out")
+        );
+        let said = |what: &str| notes.iter().filter(|n| n.starts_with(what)).count();
+        let put_back = usize::from(matches!(step, "moved" | "checked"));
+        let old_gone = usize::from(step == "published");
+        let wrote_gone = usize::from(step != "published");
+        assert_eq!(
+            (said("put back from "), said("removed ")),
+            (put_back, old_gone + wrote_gone),
+            "{step}: {notes:?}"
+        );
+        assert_eq!(notes.len(), left.len(), "{step}: {notes:?} {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn what_is_beside_the_out_dir_by_the_tools_names_and_not_its_own_is_left_and_refused() {
+    // An old-dir name with no marker in it; a staging name of a run still going (pid 1); an
+    // old output with a file put in it: each named, each left, and the run refused with the
+    // out dir as it was.
+    type Fill = fn(&Path);
+    let cases: [(&str, Fill); 3] = [
+        (".out.old-99999999-1", |d| {
+            std::fs::write(d.join("a.txt"), b"x").unwrap()
+        }),
+        (".out.staging-1-1", |d| {
+            std::fs::write(d.join(FIRST.marker), b"calibrate\n").unwrap()
+        }),
+        (".out.old-99999999-2", |d| {
+            std::fs::write(d.join(FIRST.marker), b"calibrate\na.txt\n").unwrap();
+            std::fs::write(d.join("a.txt"), b"old").unwrap();
+            std::fs::write(d.join("mine.txt"), b"the owner's").unwrap();
+        }),
+    ];
+    for (k, (name, fill)) in cases.into_iter().enumerate() {
+        let dir = temp(&format!("not-ours-beside-{k}"));
+        let out = dir.join("out");
+        run_in(FIRST, &out, writes("old")).unwrap();
+        let there = dir.join(name);
+        std::fs::create_dir(&there).unwrap();
+        fill(&there);
+        let had = contents(&there);
+        let e = run_in(FIRST, &out, writes("new")).unwrap_err();
+        assert!(
+            e.contains(&there.canonicalize().unwrap().display().to_string()),
+            "{k}: {e}"
+        );
+        assert!(
+            e.contains("left as they are, so the run is refused"),
+            "{k}: {e}"
+        );
+        assert_eq!(contents(&there), had, "{k}");
+        assert_eq!(contents(&out), Some(output("old")), "{k}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

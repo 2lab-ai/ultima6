@@ -7,7 +7,11 @@
 //! `--out` is replaced only when it holds the marker of the mode run and nothing but what its
 //! marker lists (the marker names every entry the run wrote, [`seal`]): a directory the tool
 //! did not write, an empty one, one the other mode wrote, or one a file was put in, is left as
-//! it is and the run fails, the files it did not write named.
+//! it is and the run fails, the files it did not write named. What a run that stopped (a crash,
+//! a kill) left beside `--out` is found when the next run begins ([`leftovers`]): an old output
+//! moved aside with no `--out` is put back, the tool's other leftovers removed, each said in
+//! the run's report; anything else there of the tool's names is said and left, and the run
+//! refused.
 
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -135,17 +139,172 @@ fn beside(out: &Path, kind: &str) -> PathBuf {
     out.with_file_name(format!(".{name}.{kind}-{stamp}"))
 }
 
-/// A fresh directory beside `out` holding `mode`'s marker (its first line alone: the run's
-/// entries are listed when it ends, [`seal`]).
-fn fresh(mode: Mode, out: &Path, kind: &str) -> Result<PathBuf, String> {
+/// The kinds of the dirs a run makes beside the out dir ([`beside`]): what it writes, its
+/// refusal, and the old out dir moved aside ([`publish`]).
+const STAGING: &str = "staging";
+const REFUSAL: &str = "refusal";
+const OLD: &str = "old";
+
+/// The dirs beside an out dir this process is making or moving now ([`Live`]).
+static LIVE: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+
+/// A dir of [`LIVE`] while this lives: dropped when the run returns, or unwinds.
+struct Live(PathBuf);
+
+impl Live {
+    fn of(dir: &Path) -> Live {
+        LIVE.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(dir.to_path_buf());
+        Live(dir.to_path_buf())
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        LIVE.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// Whether the process `pid` that named `dir` ([`beside`]) is still at it: this one when `dir`
+/// is in [`LIVE`]; another while it runs.
+fn alive(pid: u32, dir: &Path) -> bool {
+    if pid == std::process::id() {
+        return LIVE.lock().unwrap_or_else(|e| e.into_inner()).contains(dir);
+    }
+    let Ok(p) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: kill(2) with signal 0 sends nothing: it says whether the process exists.
+    let r = unsafe { libc::kill(p, 0) };
+    r == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// A fresh directory beside `out` of `kind`, holding `mode`'s marker (its first line alone: the
+/// run's entries are listed when it ends, [`seal`]), and live while the guard is.
+fn fresh(mode: Mode, out: &Path, kind: &str) -> Result<(PathBuf, Live), String> {
     let dir = beside(out, kind);
     std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let live = Live::of(&dir);
     let note = format!("{}\n", mode.name);
     if let Err(e) = work::write_file(&dir.join(mode.marker), note.as_bytes()) {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(e);
     }
-    Ok(dir)
+    Ok((dir, live))
+}
+
+/// What runs that stopped left beside an out dir, all of it the tool's: old outputs moved aside
+/// (`.<name>.old-…`, each holding its marker and nothing it does not list), by when they were
+/// moved, and the dirs they wrote (`.<name>.staging-…`, `.<name>.refusal-…`, marked).
+#[derive(Debug, Default)]
+struct Leftovers {
+    olds: Vec<(u128, PathBuf)>,
+    stale: Vec<PathBuf>,
+}
+
+/// What is beside the out dir `out` by the names a run of the tool gives ([`beside`]), of runs
+/// no longer going ([`alive`]): the tool's own ([`Leftovers`]), or an error naming each that is
+/// not (no marker of `mode`, something in it the marker does not list, a run still going),
+/// all left as they are.
+fn leftovers(mode: Mode, out: &Path) -> Result<Leftovers, String> {
+    let (Some(parent), Some(name)) = (out.parent(), out.file_name()) else {
+        return Ok(Leftovers::default());
+    };
+    let prefix = format!(".{}.", name.to_string_lossy());
+    let mut found = Leftovers::default();
+    let mut other = Vec::new();
+    let entries = std::fs::read_dir(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    for e in entries {
+        let e = e.map_err(|e| format!("{}: {e}", parent.display()))?;
+        let file = e.file_name().to_string_lossy().into_owned();
+        let Some(rest) = file.strip_prefix(&prefix) else {
+            continue;
+        };
+        let parts: Vec<&str> = rest.split('-').collect();
+        let [kind, pid, ns] = parts[..] else {
+            continue;
+        };
+        let (Ok(pid), Ok(ns)) = (pid.parse::<u32>(), ns.parse::<u128>()) else {
+            continue;
+        };
+        if ![STAGING, REFUSAL, OLD].contains(&kind) {
+            continue;
+        }
+        let path = parent.join(&file);
+        let at = path.display();
+        if alive(pid, &path) {
+            other.push(format!("{at} (a run still going writes it: pid {pid})"));
+            continue;
+        }
+        let dir = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
+        let Some(list) = dir.then(|| listed(mode, &path)).flatten() else {
+            other.push(format!("{at} (no marker {})", mode.marker));
+            continue;
+        };
+        if kind != OLD {
+            found.stale.push(path);
+            continue;
+        }
+        match unknown(mode, &path, &list) {
+            Ok(v) if v.is_empty() => found.olds.push((ns, path)),
+            Ok(v) => other.push(format!(
+                "{at} (it holds what {} did not write: {})",
+                mode.name,
+                v.join(", ")
+            )),
+            Err(e) => other.push(format!("{at} ({e})")),
+        }
+    }
+    if !other.is_empty() {
+        other.sort();
+        return Err(format!(
+            "beside {} by the names a run gives: {}; left as they are, so the run is refused: \
+             move them away, then run again",
+            out.display(),
+            other.join("; ")
+        ));
+    }
+    found.olds.sort();
+    found.stale.sort();
+    Ok(found)
+}
+
+/// Puts right what runs that stopped left beside `out` ([`leftovers`]): with no `out`, the old
+/// output moved aside last put back in its place (a run stopped between moving it and putting
+/// its own there); every other old output and every dir a run wrote removed. What was done, a
+/// line each.
+fn recover(mode: Mode, out: &Path, found: Leftovers) -> Result<Vec<String>, String> {
+    let mut notes = Vec::new();
+    let mut olds = found.olds;
+    let absent =
+        matches!(std::fs::symlink_metadata(out), Err(e) if e.kind() == io::ErrorKind::NotFound);
+    if absent && let Some((_, old)) = olds.pop() {
+        rename_new(&old, out)
+            .map_err(|e| format!("{}: putting back {}: {e}", out.display(), old.display()))?;
+        notes.push(format!(
+            "put back from {}: the output a run that stopped had moved aside",
+            old.display()
+        ));
+    }
+    for (_, old) in olds {
+        notes.push(match remove_old(mode, &old) {
+            Ok(()) => format!(
+                "removed {}: an older output a run that stopped left",
+                old.display()
+            ),
+            Err(e) => format!("left {}: {e}", old.display()),
+        });
+    }
+    for dir in found.stale {
+        notes.push(match std::fs::remove_dir_all(&dir) {
+            Ok(()) => format!("removed {}: what a run that stopped wrote", dir.display()),
+            Err(e) => format!("left {}: {e}", dir.display()),
+        });
+    }
+    Ok(notes)
 }
 
 /// The entries of `dir` but `mode`'s marker.
@@ -324,11 +483,13 @@ fn c_path(p: &Path) -> io::Result<CString> {
 ///
 /// `stage` is never removed here: the caller removes it when this fails. The window this cannot
 /// close: from 1 to 4 nothing is at `out`, so a crash there leaves no `--out`, the old output
-/// whole at `aside` (`.<name>.old-<pid>-<ns>` beside it), to be moved back by hand. A crash
-/// after 4 and before 6 leaves the new output at `out` and the old at `aside`. A swap in one
-/// step (`RENAME_SWAP`, `RENAME_EXCHANGE`) would close the first window; it is not used.
+/// whole at `aside` (`.<name>.old-<pid>-<ns>` beside it), which the next run puts back before
+/// it begins ([`leftovers`], [`recover`]). A crash after 4 and before 6 leaves the new output
+/// at `out` and the old at `aside`, which the next run removes. A swap in one step
+/// (`RENAME_SWAP`, `RENAME_EXCHANGE`) would close the first window; it is not used.
 fn publish(mode: Mode, stage: &Path, out: &Path, key: &Path) -> Result<Vec<String>, String> {
-    let aside = beside(out, "old");
+    let aside = beside(out, OLD);
+    let _live = Live::of(&aside);
     let moved = match rename_new(out, &aside) {
         Ok(()) => true,
         Err(e) if e.kind() == io::ErrorKind::NotFound => false,
@@ -407,20 +568,29 @@ pub fn run_in<T>(
     work::check_target(out)?;
     let (parent, name) = split(out)?;
     let out = parent.join(name);
+    let found = leftovers(mode, &out)?;
     if std::fs::symlink_metadata(&out).is_ok()
         && let Some(why) = not_ours(mode, &out)
     {
         return Err(refusal(&out, &why));
     }
-    let stage = fresh(mode, &out, "staging")?;
+    let mut notes = recover(mode, &out, found)?;
+    let with = |e: String, notes: &[String]| match notes {
+        [] => e,
+        n => format!("{e}; before the run: {}", n.join("; ")),
+    };
+    let (stage, _live) = fresh(mode, &out, STAGING).map_err(|e| with(e, &notes))?;
     match run(&stage, &out).and_then(|v| seal(mode, &stage).map(|()| v)) {
         Ok(v) => {
             let published = seam(key, "ran", "").and_then(|()| publish(mode, &stage, &out, key));
             match published {
-                Ok(notes) => Ok((v, notes)),
+                Ok(n) => {
+                    notes.extend(n);
+                    Ok((v, notes))
+                }
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&stage);
-                    Err(e)
+                    Err(with(e, &notes))
                 }
             }
         }
@@ -442,7 +612,7 @@ pub fn run_in<T>(
             if let Err(w) = gone {
                 said = format!("{said}; what the run wrote is left beside the out dir ({w})");
             }
-            Err(said)
+            Err(with(said, &notes))
         }
     }
 }
@@ -472,7 +642,7 @@ fn refuse(
     key: &Path,
     error: &str,
 ) -> Result<Vec<String>, String> {
-    let diag = fresh(mode, out, "refusal")?;
+    let (diag, _live) = fresh(mode, out, REFUSAL)?;
     let made = (|| {
         for &name in mode.keep {
             let from = failed.join(name);

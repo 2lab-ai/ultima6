@@ -3061,6 +3061,56 @@ fn an_include_list_put_in_the_out_dir_is_not_removed_with_it() {
 }
 
 #[test]
+fn the_run_after_a_crashed_swap_puts_the_old_output_back_and_removes_the_rest() {
+    // The reviewer's P8, by the names this protocol gives: a run killed between moving the old
+    // output aside and putting its own in place (no --out; the old output at .final.old-…, the
+    // new one in .final.staging-…, of a process gone). The next run puts the old one back,
+    // removes the staging dir, says both, then replaces --out with its own output alone.
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("crashed-swap", &text, &g, &left);
+    let o = options(&dir);
+    calibrate_final(&g, &work, &o).unwrap();
+    let old = dir.join(".final.old-99999999-1");
+    let staged = dir.join(".final.staging-99999999-2");
+    std::fs::rename(&o.out, &old).unwrap();
+    std::fs::create_dir(&staged).unwrap();
+    std::fs::write(staged.join(MARKER), b"calibrate --final\n").unwrap();
+    std::fs::write(staged.join("final-stale.png"), b"x").unwrap();
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    let mut want = s.sheets.clone();
+    want.sort();
+    let pngs: Vec<String> = files_of(&o.out)
+        .into_iter()
+        .filter(|f| f.ends_with(".png"))
+        .collect();
+    assert_eq!(pngs, want);
+    let beside: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|f| f.starts_with('.'))
+        .collect();
+    assert!(beside.is_empty(), "{beside:?}");
+    let report = s.text();
+    let line = |what: &str, p: &Path| {
+        format!(
+            "out dir: {what} {}",
+            p.canonicalize().unwrap_or(p.to_path_buf()).display()
+        )
+    };
+    let real = dir.canonicalize().unwrap();
+    assert!(
+        report.contains(&line("put back from", &real.join(".final.old-99999999-1"))),
+        "{report}"
+    );
+    assert!(
+        report.contains(&line("removed", &real.join(".final.staging-99999999-2"))),
+        "{report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
     // The chain, and B again far from it, beside a record Y (a grain of its own) east of it:
     // B's window, wherever it is placed, cannot draw both its pairs by the chain and its pair
