@@ -741,8 +741,8 @@ const GLYPHS: [(char, [u8; 5]); 49] = [
     ('J', [1, 1, 1, 5, 2]),
     ('K', [5, 5, 6, 5, 5]),
     ('L', [4, 4, 4, 4, 7]),
-    ('M', [5, 7, 7, 5, 5]),
-    ('N', [6, 5, 5, 5, 5]),
+    ('M', [7, 7, 5, 5, 5]),
+    ('N', [5, 7, 7, 5, 5]),
     ('O', [2, 5, 5, 5, 2]),
     ('P', [6, 5, 6, 4, 4]),
     ('Q', [2, 5, 5, 6, 3]),
@@ -1182,8 +1182,8 @@ fn draw(
             let framed = frame(game, e.at, e.edge, pair);
             let ratio = |r: &Row| format!("{:.2}/{:.2}", r.ratio, r.limit);
             let caption = match &e.row {
-                Some(r) => format!("#{} {} {} {}", index, e.label, r.sides.name(), ratio(r)),
-                None => format!("#{} {} not measured", index, e.label),
+                Some(r) => format!("{}: {} {} {}", index, e.label, r.sides.name(), ratio(r)),
+                None => format!("{}: {} not measured", index, e.label),
             };
             for (s, lines) in [(Scale::X4, &mut l4), (Scale::X2, &mut l2)] {
                 lines.push(Line {

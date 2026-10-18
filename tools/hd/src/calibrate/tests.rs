@@ -343,7 +343,7 @@ fn the_join_marks_sit_outside_the_panels() {
             .into_iter()
             .enumerate()
             .map(|(i, edge)| Line {
-                caption: format!("#{i} >1.5 gen-mmpx 1.62/1.50"),
+                caption: format!("{i}: >1.5 gen-mmpx 1.62/1.50"),
                 edge,
                 panels: made_panels(s, i as u32),
             })
