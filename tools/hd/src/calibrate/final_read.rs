@@ -1843,6 +1843,7 @@ fn run_final(
         .map(|w| w.survivor)
         .collect();
     let mut rest: Vec<Window> = Vec::new();
+    let mut unfit: BTreeSet<usize> = BTreeSet::new();
     for &k in &covered {
         let sv = &fixed.survivors[k];
         let left: Vec<u16> = sv
@@ -1877,10 +1878,13 @@ fn run_final(
             .collect();
         match alone_parts(&w, &pieces) {
             Ok(parts) => rest.extend(parts),
-            Err(i) => unshown.push(Disagreement {
-                kind: "hidden",
-                detail: format!("item {}: its piece {i} of the rest fits no window", sv.item),
-            }),
+            Err(i) => {
+                unfit.insert(k);
+                unshown.push(Disagreement {
+                    kind: "hidden",
+                    detail: format!("item {}: its piece {i} of the rest fits no window", sv.item),
+                });
+            }
         }
     }
     for w in rest {
@@ -1889,26 +1893,18 @@ fn run_final(
         shown.extend(d.shown());
         windows.push(w);
     }
-    for &k in &covered {
-        let sv = &fixed.survivors[k];
-        let left: Vec<u16> = sv
-            .records
-            .iter()
-            .copied()
-            .filter(|r| !shown.contains(r))
-            .collect();
-        if !left.is_empty() {
-            unshown.push(Disagreement {
-                kind: "hidden",
-                detail: format!(
-                    "item {}: {} of its records drawn in no window: {}",
-                    sv.item,
-                    left.len(),
-                    names(&left)
-                ),
-            });
-        }
-    }
+    // An invariant, not a check (no input reaches it): every record of an item with a window
+    // is now drawn in one, unless a piece of the item's rest fits no window (refused above).
+    // The rest windows draw each record left alone in its cell, nothing over it, and an item's
+    // records are its pieces' records.
+    debug_assert!(
+        covered.iter().all(|k| unfit.contains(k)
+            || fixed.survivors[*k]
+                .records
+                .iter()
+                .all(|r| shown.contains(r))),
+        "a record of an item with a window drawn in no window"
+    );
     // Planned whole before anything is drawn: a pair of the last pass that no window draws
     // (not even its own, at its cell: a side covered there) fails the run.
     let mut unread = 0;

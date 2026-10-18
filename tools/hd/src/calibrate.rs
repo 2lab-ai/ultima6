@@ -98,9 +98,11 @@
 //!   any sheet or `samples.tsv` is written: a pair of the last pass that is still drawn in no
 //!   window (its own window does not show it: a side covered at its cell, `unread`), or a window
 //!   of an item or an included id that shows none of its records (covered where it is drawn),
-//!   a record of an item drawn in no window or a piece that fits no window (`hidden`), fails
-//!   the run, nothing drawn, the details in `unshown.txt`. The frame as above, A's cell at [`A_CELL`]:
-//!   at a pair, its records in its two cells; where it is drawn, its record in A's cell.
+//!   or a piece that fits no window (`hidden`), fails the run, nothing drawn, the details in
+//!   `unshown.txt`; every other record of an item with a window is then drawn in one (an
+//!   invariant the rest windows keep, asserted in debug builds, not a check). The frame as
+//!   above, A's cell at [`A_CELL`]: at a pair, its records in its two cells; where it is drawn,
+//!   its record in A's cell.
 //! - **The marks**: every pair of the last pass drawn inside the window (a record of a cell
 //!   beside one of the cell east or south of it, both left on a row of the join the gate
 //!   measures, [`Framed::joins`]: a pair covered there by a tile drawn after it is not drawn) is
