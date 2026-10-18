@@ -781,8 +781,12 @@ pub enum Edge {
 /// `k × k` blocks is the HD image's block over the classic colour, as the compositor composes it
 /// (`u6_render::hd::over`: a transparent sub-pixel takes the classic colour, a part-transparent
 /// one is mixed with it). `None` where the record draws nothing.
-pub fn shown(classic: &Classic, hd: &Rgba) -> Vec<Option<[f32; 3]>> {
-    let k = hd.width / classic.width;
+///
+/// `None` (no image) unless the two fit: a classic image of at least one pixel whose pixels are
+/// its `width × height`, and an HD image exactly `k` times its size for some `k ≥ 1` whose bytes
+/// are its `width × height × 4`.
+pub fn shown(classic: &Classic, hd: &Rgba) -> Option<Vec<Option<[f32; 3]>>> {
+    let k = hd_scale(classic, hd)?;
     let mut out = vec![None; (hd.width * hd.height) as usize];
     for y in 0..hd.height {
         for x in 0..hd.width {
@@ -797,7 +801,25 @@ pub fn shown(classic: &Classic, hd: &Rgba) -> Vec<Option<[f32; 3]>> {
             out[(y * hd.width + x) as usize] = Some([f32::from(r), f32::from(g), f32::from(b)]);
         }
     }
-    out
+    Some(out)
+}
+
+/// Pixels of a classic image `width × height` (at least one), when its pixels are that many.
+pub fn classic_len(c: &Classic) -> Option<usize> {
+    let n = usize::try_from(u64::from(c.width) * u64::from(c.height)).ok()?;
+    (n > 0 && c.px.len() == n).then_some(n)
+}
+
+/// The `k ≥ 1` the HD image is the classic image's size times, when it is exactly that and its
+/// bytes are its size's.
+fn hd_scale(classic: &Classic, hd: &Rgba) -> Option<u32> {
+    classic_len(classic)?;
+    let k = hd.width / classic.width;
+    let fits = k >= 1
+        && u64::from(hd.width) == u64::from(classic.width) * u64::from(k)
+        && u64::from(hd.height) == u64::from(classic.height) * u64::from(k)
+        && hd.pixels.len() as u64 == u64::from(hd.width) * u64::from(hd.height) * 4;
+    fits.then_some(k)
 }
 
 /// Steps across the lattice lines of `pitch` pixels along x of a `w × h` picture whose pixels
@@ -867,6 +889,11 @@ fn joined_ratio(
 /// limit is `max_ratio`, or the classic pair's own ratio across the same edge where that is
 /// higher (a classic pair that already steps is not held to more); [`seam_passes`] judges it.
 /// `None` when nothing is measured: a side draws nothing along the edge.
+///
+/// Also `None` when the images do not fit each other, which measures nothing either: `k` is 0,
+/// the two classic images differ in size or are not [`classic_len`], or a shown image is not
+/// `k × width` by `k × height` pixels. `neighbour::Side::new` refuses such images before they
+/// reach here.
 pub fn neighbour_seam(
     a: (&Classic, &[Option<[f32; 3]>]),
     b: (&Classic, &[Option<[f32; 3]>]),
@@ -875,6 +902,16 @@ pub fn neighbour_seam(
     max_ratio: f32,
 ) -> Option<(f32, f32)> {
     let (w, h) = (a.0.width, a.0.height);
+    let n = classic_len(a.0)?;
+    let hd_n = n.checked_mul(usize::try_from(k).ok()?.checked_pow(2)?)?;
+    let fits = k >= 1
+        && (b.0.width, b.0.height) == (w, h)
+        && classic_len(b.0) == Some(n)
+        && a.1.len() == hd_n
+        && b.1.len() == hd_n;
+    if !fits {
+        return None;
+    }
     let hd = joined_ratio(a.1, b.1, (w * k, h * k), k, edge)?;
     let classic = |c: &Classic| -> Vec<Option<[f32; 3]>> {
         c.px.iter().map(|p| p.map(|c| c.map(f32::from))).collect()

@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use u6_hdpack::{ImageId, SCALE};
+use u6_hdpack::ImageId;
 
 use crate::atlas::{self, Job, MASTER, Place};
 use crate::game::Game;
@@ -363,17 +363,17 @@ fn matches_item(item: &Item, judged: &[Judged]) -> bool {
 }
 
 /// The neighbour gate over the judged items ([`neighbour::settle`]): the pairs of the world, each
-/// record's images (an accepted record's ×8 master box-averaged to the pack's ×4, as `pack`
-/// writes it; MMPX ×4 of the classic record), then the fixed point. Its counts carry the pairs';
-/// the pairs come back with it for where each occurs.
+/// record's images ([`neighbour::sides`]: an accepted record's ×8 master box-averaged to the
+/// pack's ×4, as `pack` writes it; MMPX ×4 of the classic record), then the fixed point. Its
+/// counts carry the pairs'; the pairs come back with it for where each occurs.
 fn neighbour_gate(
     game: &Game,
     judged: &[(Status, usize, Option<&[Judged]>)],
     t: &Thresholds,
-) -> (neighbour::Pairs, neighbour::Settled) {
+) -> Result<(neighbour::Pairs, neighbour::Settled), String> {
     let pairs = neighbour::pairs(game);
     // The records the pack would hold: the drawing records of the accepted items.
-    let mut accepted: BTreeMap<u16, (u32, &Judged)> = BTreeMap::new();
+    let mut accepted: BTreeMap<u16, (u32, &Rgba)> = BTreeMap::new();
     for (no, &(status, _, passed)) in judged.iter().enumerate() {
         if status != Status::Generated {
             continue;
@@ -382,31 +382,16 @@ fn neighbour_gate(
             if let ImageId::Tile(r) = j.id
                 && j.classic.has_opaque()
             {
-                accepted.insert(r, (no as u32, j));
+                accepted.insert(r, (no as u32, &j.hd));
             }
         }
     }
-    let mut sides: BTreeMap<u16, neighbour::Side> = BTreeMap::new();
-    for p in &pairs.all {
-        for r in [p.a, p.b] {
-            if sides.contains_key(&r) {
-                continue;
-            }
-            let Some(classic) = game.classic(ImageId::Tile(r)) else {
-                continue;
-            };
-            let hd = accepted
-                .get(&r)
-                .map(|&(no, j)| (no, img::shrink(&j.hd, MASTER / SCALE)));
-            let side = neighbour::Side::new(classic, hd.as_ref().map(|(no, h)| (*no, h)));
-            sides.insert(r, side);
-        }
-    }
+    let sides = neighbour::sides(game, &pairs.all, &accepted)?;
     let mut settled = neighbour::settle(&pairs.all, &sides, t.seam);
     settled.counts.pairs = pairs.all.len();
     settled.counts.map = pairs.map;
     settled.counts.objects = pairs.objects;
-    (pairs, settled)
+    Ok((pairs, settled))
 }
 
 /// Runs ingest over the work dir with the thresholds `t`.
@@ -573,7 +558,7 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
 
     // The neighbour gate, once every item is judged: its fallbacks are final for this ingest
     // (not re-rolled), and only the items it leaves accepted reach the pack.
-    let (pairs, settled) = neighbour_gate(game, &judged, t);
+    let (pairs, settled) = neighbour_gate(game, &judged, t)?;
     // Every pair checked in the first pass, and each failing pair of a later pass: its records,
     // edge, ratio and limit (null when nothing is measured), its generated sides, its source and
     // one cell of A where it occurs (the map's when the map has the pair).

@@ -82,7 +82,7 @@ type Made = (u16, Classic, Option<(u32, Rgba)>);
 /// Sides from what the test made.
 fn sides(list: Vec<Made>) -> BTreeMap<u16, Side> {
     list.into_iter()
-        .map(|(r, c, g)| (r, Side::new(c, g.as_ref().map(|(i, h)| (*i, h)))))
+        .map(|(r, c, g)| (r, Side::new(c, g.as_ref().map(|(i, h)| (*i, h))).unwrap()))
         .collect()
 }
 
@@ -233,8 +233,8 @@ fn a_classic_pair_that_already_steps_is_not_held_to_more() {
     // nearest) step as much as the original, which is more than the threshold.
     let (a, b) = (texture(11, GREEN), texture(12, SAND));
     let (ratio, limit) = gate::neighbour_seam(
-        (&a, &gate::shown(&a, &near(&a))),
-        (&b, &gate::shown(&b, &near(&b))),
+        (&a, &gate::shown(&a, &near(&a)).unwrap()),
+        (&b, &gate::shown(&b, &near(&b)).unwrap()),
         K,
         Edge::East,
         seam(),
@@ -267,6 +267,77 @@ fn a_classic_pair_that_already_steps_is_not_held_to_more() {
         settle(&[pair(1, 2, Edge::East)], &s, seam()).fallen,
         BTreeMap::from([(10, 1)])
     );
+}
+
+#[test]
+fn the_image_helpers_refuse_images_that_do_not_fit() {
+    let c = texture(30, GREEN);
+    let ok = near(&c);
+    assert!(gate::shown(&c, &ok).is_some());
+    // No classic pixel: no scale to take, nothing to scale.
+    let none = Classic {
+        width: 0,
+        height: 0,
+        px: Vec::new(),
+    };
+    assert_eq!(gate::shown(&none, &ok), None);
+    assert_eq!(mmpx4(&none), None);
+    // An HD image narrower than the classic one (k = 0), not a whole multiple of it, or of
+    // another height.
+    assert_eq!(gate::shown(&c, &Rgba::new(8, 8)), None);
+    assert_eq!(gate::shown(&c, &Rgba::new(63, 64)), None);
+    assert_eq!(gate::shown(&c, &Rgba::new(64, 32)), None);
+    // Buffers shorter than their sizes.
+    let mut short = ok.clone();
+    short.pixels.pop();
+    assert_eq!(gate::shown(&c, &short), None);
+    let mut few = c.clone();
+    few.px.pop();
+    assert_eq!(gate::shown(&few, &ok), None);
+    assert_eq!(mmpx4(&few), None);
+    // Larger than the screen: the compositor does not scale it.
+    let wide = Classic {
+        width: 321,
+        height: 1,
+        px: vec![Some([1, 2, 3]); 321],
+    };
+    assert_eq!(mmpx4(&wide), None);
+    let m = mmpx4(&c).unwrap();
+    assert_eq!((m.width, m.height, m.pixels.len()), (64, 64, 64 * 64 * 4));
+    // The measure: k = 0, classic images of other sizes or short, shown images short.
+    let px = gate::shown(&c, &ok).unwrap();
+    let s = seam();
+    for edge in [Edge::East, Edge::South] {
+        assert!(gate::neighbour_seam((&c, &px), (&c, &px), K, edge, s).is_some());
+        assert_eq!(gate::neighbour_seam((&c, &px), (&c, &px), 0, edge, s), None);
+        assert_eq!(
+            gate::neighbour_seam((&c, &px[1..]), (&c, &px), K, edge, s),
+            None
+        );
+        assert_eq!(
+            gate::neighbour_seam((&c, &px), (&c, &px[1..]), K, edge, s),
+            None
+        );
+        assert_eq!(
+            gate::neighbour_seam((&few, &px), (&c, &px), K, edge, s),
+            None
+        );
+        let small = Classic {
+            width: 8,
+            height: 8,
+            px: vec![Some([1, 2, 3]); 64],
+        };
+        let small_px = gate::shown(&small, &small.scaled(K, [0, 0, 0])).unwrap();
+        assert_eq!(
+            gate::neighbour_seam((&c, &px), (&small, &small_px), K, edge, s),
+            None
+        );
+    }
+    // A side: a generated image not x4 of its classic image is refused, as is a classic image
+    // the scaler does not take.
+    assert!(Side::new(c.clone(), Some((1, &ok))).is_ok());
+    assert!(Side::new(c.clone(), Some((1, &c.scaled(8, [0, 0, 0])))).is_err());
+    assert!(Side::new(few, None).is_err());
 }
 
 #[test]
@@ -537,7 +608,10 @@ fn the_images_measured_are_the_ones_the_page_composes() {
     // No pack: MMPX x4 of the record.
     let mut c = Compositor::new();
     c.compose(&fb, &mut images, Scale::X4);
-    check(&c, &gate::shown(&classic, &mmpx4(&classic)));
+    check(
+        &c,
+        &gate::shown(&classic, &mmpx4(&classic).unwrap()).unwrap(),
+    );
     // A pack image, opaque, clear and in between, over the classic colours.
     let mut generated = Rgba::new(64, 64);
     for y in 0..64 {
@@ -548,7 +622,7 @@ fn the_images_measured_are_the_ones_the_page_composes() {
     }
     c.set_pack(Some(Rc::new(OnePack(generated.clone()))));
     c.compose(&fb, &mut images, Scale::X4);
-    check(&c, &gate::shown(&classic, &generated));
+    check(&c, &gate::shown(&classic, &generated).unwrap());
 }
 
 // Ingest end to end on the synthetic set, in a synthetic world.

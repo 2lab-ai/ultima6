@@ -51,11 +51,8 @@ fn run() -> Result<(), String> {
     let mut images = Vec::new();
     for id in ids {
         if let (Some(c), Some(hash)) = (g.classic(id), g.hash(id)) {
-            images.push(PackImage {
-                id,
-                hash,
-                image: scaled(&c),
-            });
+            let image = scaled(&c).ok_or("an image the scaler does not take")?;
+            images.push(PackImage { id, hash, image });
         }
     }
     let generator = Generator {
