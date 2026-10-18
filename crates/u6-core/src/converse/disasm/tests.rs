@@ -1282,6 +1282,27 @@ fn an_address_a_later_round_no_longer_names_is_settled_and_its_namer_dropped() {
 }
 
 #[test]
+fn a_settled_byte_is_never_reserved_again() {
+    // The `a1`'s landing reads "zz" and its NUL in the table block `q` prints. With the NUL's
+    // byte settled before this round, the table wins over "zz" (its bytes are reserved) but not
+    // over the NUL's stop (block `q`'s landings are dropped): the settled byte stays open.
+    let t = BODY + 13;
+    let mut rest = b"zz\0\xee\xefq\xf6\xb5".to_vec();
+    rest.extend(lit32(t));
+    rest.push(0xb1);
+    rest.extend(jump(BODY));
+    rest.extend([0xee, 0xff]);
+    let s = after_an_if(&rest);
+    let plan = Plan::settled([t + 2]);
+    let mut d = Decoder::new(&s, &plan);
+    d.run().unwrap();
+    let next = d.revise().expect("another round");
+    let (reserved, settled) = next.bytes();
+    assert_eq!(settled.iter().copied().collect::<Vec<_>>(), [t + 2]);
+    assert_eq!(reserved.iter().copied().collect::<Vec<_>>(), [t, t + 1]);
+}
+
+#[test]
 fn a_constant_index_past_a_landing_paths_table_drops_that_path() {
     // Only the final tables tell an index past its table: the next round drops the landing.
     let t = BODY + 21;

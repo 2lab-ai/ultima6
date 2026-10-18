@@ -66,6 +66,22 @@ thread_local! {
     pub(super) static REVERSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+impl Plan {
+    /// A plan with `settled` settled (and nothing else), for a test of one round.
+    pub(super) fn settled(settled: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            settled: settled.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    /// The bytes reserved, and those settled.
+    pub(super) fn bytes(&self) -> (&BTreeSet<u32>, &BTreeSet<u32>) {
+        (&self.reserved, &self.settled)
+    }
+}
+
 /// `Decoder::owner` of a byte no item holds yet.
 const NO_OWNER: u32 = u32::MAX;
 
@@ -1060,17 +1076,18 @@ impl<'a> Decoder<'a> {
                 }
             }
         }
-        if p != *self.plan {
-            return Some(p);
+        if p == *self.plan {
+            let stale: Vec<u32> = self.plan.reserved.difference(&held).copied().collect();
+            if stale.is_empty() {
+                return None;
+            }
+            for b in stale {
+                p.reserved.remove(&b);
+                p.settled.insert(b);
+            }
         }
-        let stale: Vec<u32> = self.plan.reserved.difference(&held).copied().collect();
-        if stale.is_empty() {
-            return None;
-        }
-        for b in stale {
-            p.reserved.remove(&b);
-            p.settled.insert(b);
-        }
+        // The rounds end because a settled byte is never reserved again.
+        debug_assert!(p.reserved.is_disjoint(&p.settled));
         Some(p)
     }
 
