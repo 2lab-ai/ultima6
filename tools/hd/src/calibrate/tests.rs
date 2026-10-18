@@ -1249,9 +1249,22 @@ fn a_first_pass_writes_its_own_run_dir_alone() {
     let third_had = contents(&s3.written.dir);
     let wrote: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let w = wrote.clone();
+    let o = out.clone();
     let late = out_dir::hook(&out, "write", move |n| {
         w.lock().unwrap().push(n.to_string());
         if n == out_dir::DONE {
+            // The sheets and samples.tsv are there, with bytes, before done fails.
+            let run = run_dir(&o);
+            let drawn: Vec<String> = files_in(&run)
+                .into_iter()
+                .filter(|f| f.ends_with(".png") || f == "samples.tsv")
+                .collect();
+            assert!(drawn.iter().any(|f| f == "samples.tsv"), "{drawn:?}");
+            assert!(drawn.iter().any(|f| f.ends_with(".png")), "{drawn:?}");
+            for f in &drawn {
+                let n = std::fs::metadata(run.join(f)).unwrap().len();
+                assert!(n > 0, "{f}: {n} bytes before done");
+            }
             return Err("done: no room left".into());
         }
         Ok(())

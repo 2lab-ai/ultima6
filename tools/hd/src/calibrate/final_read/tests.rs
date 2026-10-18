@@ -3275,17 +3275,55 @@ fn a_run_whose_recheck_fails_keeps_its_diagnostics_alone() {
     // whatever the user's privilege): the same diagnostics alone.
     // Its effect: the sheets and samples.tsv were written before the re-check, and are gone;
     // no done; the run dir holds the diagnostics alone, refused.txt the error.
+    // At the re-check the sheets and samples.tsv are there, with bytes, before the failure.
     let f = failed("recheck-injected", |out| {
-        vec![hook(out, "recheck", |_| {
+        let o = out.to_path_buf();
+        vec![hook(out, "recheck", move |_| {
+            let run = run_dir(&o);
+            for drawn in ["final-terrain.png", "final-terrain-s2.png", "samples.tsv"] {
+                let n = std::fs::metadata(run.join(drawn)).map_or(0, |m| m.len());
+                assert!(n > 0, "{drawn}: {n} bytes at the re-check");
+            }
             Err("slices/t-5.png: Permission denied (os error 13)".into())
         })]
     });
+    assert!(
+        f.e.starts_with("slices/t-5.png: Permission denied (os error 13); run dir: "),
+        "{}",
+        f.e
+    );
     for drawn in ["final-terrain.png", "final-terrain-s2.png", "samples.tsv"] {
         assert!(f.wrote.iter().any(|w| w == drawn), "{drawn}: {:?}", f.wrote);
     }
     assert!(!f.wrote.iter().any(|w| w == DONE), "{:?}", f.wrote);
     assert_eq!(f.files, REFUSAL);
     assert_eq!(f.refused, format!("{}\n", f.e));
+}
+
+#[test]
+fn the_snapshots_are_read_through_the_run_dir_not_by_its_path() {
+    // The run dir renamed away once gates.jsonl is written, before it is read back: read
+    // through the dir the run holds open, the snapshot is there (by its path it is not), so the
+    // run goes on in the dir where it is now and fails at its end, saying where that is.
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("read-through", &text, &g, &left);
+    let o = options(&dir);
+    let away = dir.join("away");
+    let (out, to) = (o.out.clone(), away.clone());
+    let _h = hook(&o.out, "snapshot", move |name| {
+        if name == "gates.jsonl" {
+            std::fs::rename(run_dir(&out), &to).unwrap();
+        }
+        Ok(())
+    });
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(!e.contains("No such file"), "{e}");
+    let now = format!("(it is now at {})", away.canonicalize().unwrap().display());
+    assert!(e.contains(&now), "{e}");
+    assert_eq!(files_in(&away), REFUSAL);
+    assert!(files_in(&o.out).is_empty(), "{:?}", files_in(&o.out));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
