@@ -1523,9 +1523,11 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         }
     }
     let plan = group::plan(game);
-    // The plan the item numbers of the log name: the atlas's, which every job carries.
+    // The plan the item numbers of the log name: the atlas's, which every job carries; and
+    // every item the log names laid out in some job.
     let mut d: Vec<Disagreement> = Vec::new();
     let fingerprint = plan.fingerprint();
+    let mut laid_out: BTreeSet<u32> = BTreeSet::new();
     let jobs = String::from_utf8_lossy(&jobs_bytes);
     for (i, line) in jobs
         .lines()
@@ -1534,6 +1536,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
     {
         let job: atlas::Job =
             serde_json::from_str(line).map_err(|e| format!("jobs.jsonl line {}: {e}", i + 1))?;
+        laid_out.extend(job.places.iter().map(|p| p.item));
         if job.plan != fingerprint {
             d.push(Disagreement {
                 kind: "plan",
@@ -1545,7 +1548,25 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
             });
         }
     }
-    let fixed = match fixed(game, &plan, &rec, &list, &files, &slices, o.seam) {
+    let state = fixed(game, &plan, &rec, &list, &files, &slices, o.seam);
+    if let Ok(f) = &state {
+        let named: BTreeSet<u32> = f
+            .survivors
+            .iter()
+            .map(|s| s.item)
+            .chain(rec.fell.iter().map(|x| x.item))
+            .collect();
+        for item in named.difference(&laid_out) {
+            d.push(Disagreement {
+                kind: "plan",
+                detail: format!(
+                    "item {item}: in the log, and laid out in no job of jobs.jsonl (an atlas of \
+                     other files, or a jobs.jsonl that lost it)"
+                ),
+            });
+        }
+    }
+    let fixed = match state {
         Ok(f) if d.is_empty() => f,
         r => {
             d.extend(r.err().into_iter().flatten());

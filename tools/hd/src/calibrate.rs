@@ -57,7 +57,8 @@
 //!   `jobs.jsonl` (copied to the out dir and read there), the masters of the work dir's
 //!   `slices/` (listed once, each file read once, into memory, its digest kept) and the plan of
 //!   items, which must be the one every job was laid out from (its fingerprint: the log's item
-//!   numbers name its items); all read at the start. Before the run reports success it reads
+//!   numbers name its items), every item the log names (listed, or sent back) laid out in some
+//!   job; all read at the start. Before the run reports success it reads
 //!   the three files and every master of `slices/` again and fails if any is not what it read
 //!   (a re-ingest during the run: the sheets written then read no one state). `gates.jsonl` logs pass 1 whole
 //!   and a later pass's failing pairs only, so the last pass of the fixed point (the one that

@@ -219,19 +219,36 @@ fn calibrate_makes_no_codex_call() {
     fw.write("gates.jsonl", b"").unwrap();
     fw.write("ingest.json", listed.to_string().as_bytes())
         .unwrap();
-    // The atlas's jobs, laid out from the synthetic set's plan.
-    let plan = group::plan(&synthetic::game()).fingerprint();
+    // The atlas's jobs, laid out from the synthetic set's plan: the chest's item among them.
+    let plan = group::plan(&synthetic::game());
+    let item = plan
+        .items
+        .iter()
+        .position(|i| i.images().any(|id| id == chest))
+        .unwrap();
+    let place = atlas::Place {
+        item: item as u32,
+        class: plan.items[item].class,
+        piece: 0,
+        image: atlas::image_name(chest),
+        hash: String::new(),
+        x: 0,
+        y: 0,
+        w: 16,
+        h: 16,
+        scale: 1,
+    };
     let job = atlas::Job {
         sheet: "tile-0001".into(),
         generation: "made up".into(),
-        plan,
+        plan: plan.fingerprint(),
         kind: SheetKind::Tile,
         attempt: 1,
         prompt: String::new(),
         key: [0, 0, 0],
         width: 1,
         height: 1,
-        places: Vec::new(),
+        places: vec![place],
     };
     fw.write_jobs(&[job]).unwrap();
     let fout = dir.join("calibrate-final");

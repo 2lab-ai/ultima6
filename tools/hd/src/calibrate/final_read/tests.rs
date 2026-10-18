@@ -744,7 +744,9 @@ fn the_atlas_is_laid_out_from_the_plan_of_these_files() {
     let (text, left) = chain(&g);
     let (dir, work) = work_dir("plan", &text, &g, &left);
     assert!(calibrate_final(&g, &work, &options(&dir)).is_ok());
-    work.write_jobs(&[job(&group::plan(&g).fingerprint()), job("another")])
+    let plan = group::plan(&g);
+    let empty = Plan::default();
+    work.write_jobs(&[job(&plan, &plan.fingerprint()), job(&empty, "another")])
         .unwrap();
     let o = FinalOptions {
         out: dir.join("other"),
@@ -757,6 +759,43 @@ fn the_atlas_is_laid_out_from_the_plan_of_these_files() {
         detail.starts_with("plan: jobs.jsonl line 2: laid out from another plan"),
         "{detail}"
     );
+    // A jobs.jsonl that names no job, or not every item of the log: B's (a survivor), A's (sent
+    // back).
+    let (b, a) = (item_of(&plan, B), item_of(&plan, A));
+    let mut without_b = job(&plan, &plan.fingerprint());
+    without_b.places.retain(|p| p.item != b);
+    for (k, (jobs, items)) in [(vec![], vec![a, b]), (vec![without_b], vec![b])]
+        .into_iter()
+        .enumerate()
+    {
+        work.write_jobs(&jobs).unwrap();
+        let o = FinalOptions {
+            out: dir.join(format!("lost-{k}")),
+            ..options(&dir)
+        };
+        let e = calibrate_final(&g, &work, &o).unwrap_err();
+        let n = items.len();
+        assert!(
+            e.contains(&format!("disagree, nothing drawn: plan {n}")),
+            "{e}"
+        );
+        let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
+        for item in items {
+            assert!(
+                detail.contains(&format!("plan: item {item}: in the log")),
+                "{detail}"
+            );
+        }
+        assert_eq!(
+            files_of(&o.out),
+            [
+                "disagreements.txt",
+                "gates.jsonl",
+                "ingest.json",
+                "jobs.jsonl"
+            ]
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -768,8 +807,8 @@ fn work_dir(name: &str, gates: &str, g: &Game, images: &BTreeMap<u16, Rgba>) -> 
     std::fs::create_dir_all(&dir).unwrap();
     let work = Work::open(Some(&dir.join("work"))).unwrap();
     work.write("gates.jsonl", gates.as_bytes()).unwrap();
-    work.write_jobs(&[job(&group::plan(g).fingerprint())])
-        .unwrap();
+    let plan = group::plan(g);
+    work.write_jobs(&[job(&plan, &plan.fingerprint())]).unwrap();
     let list = listed(g, images);
     work.write("ingest.json", &serde_json::to_vec(&list).unwrap())
         .unwrap();
@@ -781,20 +820,40 @@ fn work_dir(name: &str, gates: &str, g: &Game, images: &BTreeMap<u16, Rgba>) -> 
     (dir, work)
 }
 
-/// A job of the atlas laid out from the plan of fingerprint `plan` (what the final read takes
-/// of `jobs.jsonl`).
-fn job(plan: &str) -> atlas::Job {
+/// A job of the atlas laid out from the plan of fingerprint `fingerprint`, a place for each
+/// item of `plan` (what the final read takes of `jobs.jsonl`: the fingerprint and the items).
+fn job(plan: &Plan, fingerprint: &str) -> atlas::Job {
+    let places = plan
+        .items
+        .iter()
+        .enumerate()
+        .map(|(k, item)| {
+            let id = item.images().next().unwrap();
+            atlas::Place {
+                item: k as u32,
+                class: item.class,
+                piece: 0,
+                image: atlas::image_name(id),
+                hash: String::new(),
+                x: 0,
+                y: 0,
+                w: 16,
+                h: 16,
+                scale: 1,
+            }
+        })
+        .collect();
     atlas::Job {
         sheet: "tile-0001".into(),
         generation: "test".into(),
-        plan: plan.into(),
+        plan: fingerprint.into(),
         kind: atlas::SheetKind::Tile,
         attempt: 1,
         prompt: String::new(),
         key: [0, 0, 0],
         width: 1,
         height: 1,
-        places: Vec::new(),
+        places,
     }
 }
 
@@ -2237,6 +2296,23 @@ fn the_read_of_what_ingest_and_its_gate_wrote() {
     assert_eq!(
         (water["placement"].as_str(), water["frames"].as_str()),
         ("alone", "pair")
+    );
+    // jobs.jsonl emptied after that ingest: the log's items are bound to no plan any more.
+    work.write("jobs.jsonl", b"").unwrap();
+    let o = FinalOptions {
+        out: dir.join("no-jobs"),
+        ..o
+    };
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(e.contains("disagree, nothing drawn: plan "), "{e}");
+    assert_eq!(
+        files_of(&o.out),
+        [
+            "disagreements.txt",
+            "gates.jsonl",
+            "ingest.json",
+            "jobs.jsonl"
+        ]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
