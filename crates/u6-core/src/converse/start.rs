@@ -296,6 +296,8 @@ async fn input_loop(cx: &Cx<'_>, npc: i16) {
             c.saved_pc = c.pos();
             c.next()
         });
+        #[cfg(test)]
+        super::disasm::trace::input_byte(cx, op);
         let ok = match op {
             0xf7 => {
                 let m = cx.msg(Msg::YouSay);

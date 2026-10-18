@@ -1,0 +1,1 @@
+//! Owner-local receipt.

@@ -222,6 +222,8 @@ async fn print_op(cx: &Cx<'_>) -> i16 {
         cx.cv(|c| c.saved_pc = back);
         loop {
             let b = cx.cv(|c| c.next());
+            #[cfg(test)]
+            super::disasm::trace::table_byte(cx.cv(|c| c.pos()) - 1, b, true);
             if b == 0 || cx.cv(|c| c.fault) {
                 break;
             }
@@ -283,6 +285,8 @@ async fn assign(cx: &Cx<'_>) -> i16 {
             let mut text = Vec::new();
             loop {
                 let b = s.converse.next();
+                #[cfg(test)]
+                super::disasm::trace::table_byte(s.converse.pos() - 1, b, false);
                 if b == 0 || s.converse.fault {
                     break;
                 }

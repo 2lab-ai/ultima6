@@ -74,6 +74,8 @@ pub(crate) fn run_text<'a>(cx: &'a Cx<'a>, npc: i16) -> Pin<Box<dyn Future<Outpu
     Box::pin(async move {
         let mut b = cx.cv(|c| c.next());
         loop {
+            #[cfg(test)]
+            super::disasm::trace::run_byte(cx, b);
             if b == 0 || b == 0xee || b >= 0xf0 || cx.cv(|c| c.fault) {
                 break;
             }

@@ -13,6 +13,10 @@ u6-audio.workspace = true
 # Spec 07 H2: the HD pack the page loads (its images and the content hash it keys them by; the
 # engine keys its images with the same function).
 u6-hdpack.workspace = true
+# The conversation catalog's JSON form (spec 08 Design 6; converse/disasm/catalog.rs), the
+# versions u6-hdpack already uses.
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 # Real-data test only: zip -> files, exactly as the platforms do it.
