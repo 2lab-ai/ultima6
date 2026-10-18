@@ -481,3 +481,40 @@ fn a_name_that_is_not_one_plain_name_is_refused_before_any_file_is_touched() {
     assert_eq!(names(&w.dir), ["a.txt", DONE]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_run_dir_that_cannot_be_read_is_listed_as_such_not_as_incomplete() {
+    // The reviewer's P5, turned around: a run that ended, its dir then unreadable (mode 000).
+    // The next run lists it as a run dir it cannot read, with why, not as incomplete, and
+    // leaves it. Needs an unprivileged user: skipped with privilege.
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid(2) reads the process's ids; no memory involved.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: it needs an unprivileged user (euid 0 reads a mode 000 dir)");
+        return;
+    }
+    let dir = temp("unreadable");
+    let out = dir.join("out");
+    let ((), done) = run_in(FIRST, &out, writes).unwrap();
+    std::fs::set_permissions(&done.dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let r = run_in(FIRST, &out, writes);
+    std::fs::set_permissions(&done.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ((), w) = r.unwrap();
+    let name = done.dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(w.incomplete.is_empty(), "{:?}", w.incomplete);
+    assert_eq!(w.unreadable.len(), 1, "{:?}", w.unreadable);
+    assert!(
+        w.unreadable[0].starts_with(&format!("{name} ("))
+            && w.unreadable[0].contains("Permission denied"),
+        "{:?}",
+        w.unreadable
+    );
+    assert!(
+        w.text()
+            .contains(&format!("{UNREADABLE}: {}", w.unreadable[0])),
+        "{}",
+        w.text()
+    );
+    assert_eq!(names(&done.dir), ["a.png", "a.txt", DONE]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

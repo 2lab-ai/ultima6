@@ -68,6 +68,9 @@ pub const DONE: &str = "done";
 /// What a run that fails writes: its error, and any file it could not delete.
 pub const REFUSED: &str = "refused.txt";
 
+/// How the report says the run dirs beside a run that it could not read.
+const UNREADABLE: &str = "run dirs beside it that cannot be read (left as they are)";
+
 /// Tests only: a hook at a step of a run ([`seam`]); its error is the step's.
 #[cfg(test)]
 pub(crate) type Hook = std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
@@ -164,10 +167,10 @@ pub fn run_name(ns: u128, pid: u32) -> String {
     )
 }
 
-/// The run dirs of `out` with no [`DONE`], sorted (the oldest first), each `(refused)` when it
-/// holds [`REFUSED`]. Read only.
-fn incomplete(out: &Path) -> Result<Vec<String>, String> {
-    let mut found = Vec::new();
+/// The run dirs of `out` with no [`DONE`] (each `(refused)` when it holds [`REFUSED`]), and those
+/// that cannot be read (with why), each sorted, the oldest first. Read only.
+fn incomplete(out: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+    let (mut found, mut unreadable) = (Vec::new(), Vec::new());
     for e in std::fs::read_dir(out).map_err(|e| format!("{}: {e}", out.display()))? {
         let e = e.map_err(|e| format!("{}: {e}", out.display()))?;
         let name = e.file_name().to_string_lossy().into_owned();
@@ -176,18 +179,21 @@ fn incomplete(out: &Path) -> Result<Vec<String>, String> {
         if !name.starts_with("run-") || !is_dir {
             continue;
         }
-        if std::fs::symlink_metadata(dir.join(DONE)).is_ok() {
-            continue;
+        let has = |file: &str| match std::fs::symlink_metadata(dir.join(file)) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        };
+        match (has(DONE), has(REFUSED)) {
+            (Ok(true), _) => {}
+            (Ok(false), Ok(true)) => found.push(format!("{name} (refused)")),
+            (Ok(false), Ok(false)) => found.push(name),
+            (Err(e), _) | (_, Err(e)) => unreadable.push(format!("{name} ({e})")),
         }
-        let refused = std::fs::symlink_metadata(dir.join(REFUSED)).is_ok();
-        found.push(if refused {
-            format!("{name} (refused)")
-        } else {
-            name
-        });
     }
     found.sort();
-    Ok(found)
+    unreadable.sort();
+    Ok((found, unreadable))
 }
 
 /// `name` when it is one plain name of a file in a dir (no separator, not `.` or `..`, not
@@ -326,12 +332,13 @@ impl Run {
     }
 }
 
-/// What a run that ends well says of where it wrote: its dir, and the incomplete runs it found
-/// in `--out` when it started (left as they are).
+/// What a run that ends well says of where it wrote: its dir, and the incomplete runs and the
+/// run dirs it could not read that it found in `--out` when it started (left as they are).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Written {
     pub dir: PathBuf,
     pub incomplete: Vec<String>,
+    pub unreadable: Vec<String>,
 }
 
 impl Written {
@@ -343,6 +350,9 @@ impl Written {
                 "incomplete runs beside it (no {DONE}; left as they are): {}\n",
                 self.incomplete.join(", ")
             ));
+        }
+        if !self.unreadable.is_empty() {
+            s.push_str(&format!("{UNREADABLE}: {}\n", self.unreadable.join(", ")));
         }
         s
     }
@@ -362,14 +372,21 @@ pub fn run_in<T>(
     }
     work::check_target(out)?;
     let parent = work::ensure_dir(out)?;
-    let incomplete = incomplete(&parent)?;
-    // Every failure from here says the incomplete runs beside the run.
-    let beside = |e: String| match incomplete.as_slice() {
-        [] => e,
-        v => format!(
-            "{e}; incomplete runs beside it (left as they are): {}",
-            v.join(", ")
-        ),
+    let (incomplete, unreadable) = incomplete(&parent)?;
+    // Every failure from here says the incomplete runs beside the run, and those it could not
+    // read.
+    let beside = |e: String| {
+        let e = match incomplete.as_slice() {
+            [] => e,
+            v => format!(
+                "{e}; incomplete runs beside it (left as they are): {}",
+                v.join(", ")
+            ),
+        };
+        match unreadable.as_slice() {
+            [] => e,
+            v => format!("{e}; {UNREADABLE}: {}", v.join(", ")),
+        }
     };
     let dir = parent.join(run_name(now(out), std::process::id()));
     std::fs::create_dir(&dir).map_err(|e| {
@@ -403,6 +420,7 @@ pub fn run_in<T>(
             Written {
                 dir: r.dir.clone(),
                 incomplete,
+                unreadable,
             },
         )),
         Err(e) => Err(r.fail(mode, &e, &with_incomplete)),
