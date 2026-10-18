@@ -30,17 +30,19 @@
 //!   `b8` at an entry's start, the next table address, the script's end or direct code. A table
 //!   without its `b8` there has no end of its own: it also ends at landing code, but never
 //!   before the last entry a constant index reads, its own or one that runs on into it from the
-//!   tables before it. A string address an op names inside another table's string (not at a
+//!   tables before it, nor before its first entry when a computed index reads it (any read of
+//!   it needs one). A string address an op names inside another table's string (not at a
 //!   string's start) is of that table ([`Table::inner`]): a read there reads the string's rest,
 //!   so the table never ends before that string; a word address inside a word is not, and its
 //!   table ends there. The bytes a direct use reads are closed to landings: its table's
-//!   needed entries, of either kind (up to a constant index's, an inner address's, all of them
-//!   for a search), and for a direct search of tables with no `b8`, the bytes it reads on past
-//!   them. A landing's table address there that does not chain (of the other kind, a word
-//!   address inside a word, or past a search's tables anywhere but where they end) drops the
-//!   landings whose path makes it (`Dropped(_, TableKinds)`), and landing code in the bytes a
-//!   search reads on is closed as a table's bytes are: the direct table is never cut, nor the
-//!   script refused, for a landing;
+//!   needed entries, of either kind (up to a constant index's, the first for a computed index,
+//!   an inner address's, all of them for a search), and for a direct search of tables with no
+//!   `b8`, the bytes it reads on past them. A landing's table address there that does not
+//!   chain (of the other kind, a word address inside a word, or past a search's tables
+//!   anywhere but where they end) drops the landings whose path makes it
+//!   (`Dropped(_, TableKinds)`), and landing code in the bytes a search reads on is closed as a
+//!   table's bytes are: what a direct use reads is never cut, nor the script refused, for a
+//!   landing;
 //! - what is left is [`Kind::Unreached`].
 //!
 //! Tables and the trial. A table use is checked when its op is decoded, inside the path that

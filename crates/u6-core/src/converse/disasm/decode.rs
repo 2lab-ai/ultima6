@@ -1058,8 +1058,9 @@ impl<'a> Decoder<'a> {
     /// byte of direct code. A table without its `b8` there has no end of its own: it also ends
     /// at the first byte of landing code, but not before the last entry a constant index of a
     /// use reads, of this table or, through the tables before it that end where it starts (an
-    /// index runs on into them, [`reachable`]), of an earlier one, nor before a string an
-    /// address inside it is read from; and not at all when a search reads it (up to a `b8`).
+    /// index runs on into them, [`reachable`]), of an earlier one, nor before its first entry
+    /// when a computed index reads it, nor before a string an address inside it is read from;
+    /// and not at all when a search reads it (up to a `b8`).
     fn table_ranges(&self) -> Vec<(u32, Table)> {
         self.table_ranges_of(|_| true)
             .into_iter()
@@ -1068,10 +1069,10 @@ impl<'a> Decoder<'a> {
     }
 
     /// [`Self::table_ranges`] of the uses of the paths `keep` keeps, each with the entries its
-    /// uses need (theirs and those carried into it: a constant index's, an inner address's,
-    /// all of them for a search).
+    /// uses need (theirs and those carried into it: a constant index's, the first for a
+    /// computed index, an inner address's, all of them for a search).
     fn table_ranges_of(&self, keep: impl Fn(Origin) -> bool) -> Vec<(u32, Table, usize)> {
-        // Per address: the kind and the entries its uses' constant indices and searches need.
+        // Per address: the kind and the entries its uses' indices and searches need.
         let mut by_addr: BTreeMap<u32, (bool, usize)> = BTreeMap::new();
         for (u, _) in self.uses.iter().filter(|&&(_, o)| keep(o)) {
             let e = by_addr.entry(u.addr).or_insert((u.words, 0));
@@ -1081,8 +1082,14 @@ impl<'a> Decoder<'a> {
                 if self.b[u.addr as usize] != ops::TABLE_END {
                     e.1 = EVERY_ENTRY;
                 }
-            } else if let Some(i) = u.index.filter(|&i| i != NO_ENTRY) {
-                e.1 = e.1.max(i as usize + 1);
+            } else {
+                match u.index {
+                    // A computed index reads one entry, at least the first: a table with no
+                    // entry it reads past ([`Self::use_holds`]).
+                    None => e.1 = e.1.max(1),
+                    Some(i) if i != NO_ENTRY => e.1 = e.1.max(i as usize + 1),
+                    Some(_) => {}
+                }
             }
         }
         let addrs: Vec<u32> = by_addr.keys().copied().collect();

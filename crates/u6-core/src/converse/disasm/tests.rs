@@ -2617,6 +2617,134 @@ fn a_landings_table_inside_a_direct_word_table_drops_the_landing() {
     assert!(tb.words && tb.terminated && tb.entries.len() == 2);
 }
 
+/// `a6 01 b2 a8 d2 <w> 01 b2 b4 a7`: a word variable set to a word of the table at `w`, with a
+/// computed index. 13 bytes.
+fn word_computed(w: u32) -> Vec<u8> {
+    [
+        &[0xa6, 0x01, 0xb2, 0xa8][..],
+        &lit32(w),
+        &[0x01, 0xb2, 0xb4, 0xa7],
+    ]
+    .concat()
+}
+
+#[test]
+fn a_direct_computed_index_keeps_the_first_entry_of_its_table_against_a_landing() {
+    // A direct print or word read with a computed index reads one entry of `t` = "abc\0de\0"
+    // (or two words), at least the first: the loops' jump into its first string stops there,
+    // and their word write or string print inside its first entry is dropped; the table keeps
+    // its entries. Their jump into its second string ends the table there, as for a constant
+    // index that reads only the first. Controls: a print of string 0 against the same loops,
+    // and a jump to the address itself, which stops there.
+    let strings: &[u8] = b"abc\0de\0";
+    let print0 = |t: u32| [&[0xb5][..], &lit32(t), &[0xb1]].concat();
+    type Code<'a> = &'a dyn Fn(u32) -> Vec<u8>;
+    // (what, direct op, loops, tail, table words and entries, the loops' hazard: none, a stop
+    // at `t + k`, or a drop for a reason)
+    type Case<'a> = (
+        &'a str,
+        Code<'a>,
+        Code<'a>,
+        &'a [u8],
+        (bool, usize),
+        Option<Result<u32, Reason>>,
+    );
+    let cases: [Case; 9] = [
+        (
+            "computed print, jump into string 0",
+            &print_computed,
+            &|t| jump(t + 1),
+            strings,
+            (false, 2),
+            Some(Ok(1)),
+        ),
+        (
+            "computed print, jump into string 1",
+            &print_computed,
+            &|t| jump(t + 4),
+            strings,
+            (false, 1),
+            None,
+        ),
+        (
+            "computed print, word write at t + 1",
+            &print_computed,
+            &|t| write_word(t + 1, 0),
+            strings,
+            (false, 2),
+            Some(Err(Reason::TableKinds)),
+        ),
+        (
+            "computed word read, string print at w + 1",
+            &word_computed,
+            &|w| print0(w + 1),
+            b"\x10\x00\x20\x00",
+            (true, 2),
+            Some(Err(Reason::TableKinds)),
+        ),
+        (
+            "print of string 0, jump into string 0",
+            &print0,
+            &|t| jump(t + 1),
+            strings,
+            (false, 2),
+            Some(Ok(1)),
+        ),
+        (
+            "print of string 0, jump into string 1",
+            &print0,
+            &|t| jump(t + 4),
+            strings,
+            (false, 1),
+            None,
+        ),
+        (
+            "print of string 0, word write at t + 1",
+            &print0,
+            &|t| write_word(t + 1, 0),
+            strings,
+            (false, 2),
+            Some(Err(Reason::TableKinds)),
+        ),
+        (
+            "computed print, jump to t",
+            &print_computed,
+            &jump,
+            strings,
+            (false, 2),
+            Some(Ok(0)),
+        ),
+        (
+            "computed word read, jump to w",
+            &word_computed,
+            &jump,
+            b"\x10\x00\x20\x00",
+            (true, 2),
+            Some(Ok(0)),
+        ),
+    ];
+    for (what, op, land, tail, table, hazard) in cases {
+        let (s, t, at) = a_direct_read_and_a_landings(op, land, tail);
+        let d = any_order(&s);
+        let expected = match hazard {
+            None => Vec::new(),
+            Some(Ok(k)) => vec![Hazard {
+                at: t + k,
+                kind: HazardKind::IntoData,
+            }],
+            Some(Err(r)) => vec![
+                dropped(at, Scan::Answered, r),
+                dropped(at, Scan::NoMatch, r),
+            ],
+        };
+        assert_eq!(sorted_hazards(&d), expected, "{what}");
+        let Kind::Table(tb) = &item(&d, t).kind else {
+            panic!("{what}: {:?}", shape(&d))
+        };
+        assert_eq!((tb.words, tb.entries.len()), table, "{what}");
+    }
+}
+
 #[test]
 fn a_b8_that_ends_a_direct_table_is_read_only_as_an_end() {
     // A direct string search of `t` = "ab\0" and a `b8`, and the loops' word search of that
