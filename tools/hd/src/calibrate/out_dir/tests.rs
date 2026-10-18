@@ -1566,7 +1566,8 @@ fn a_link_put_in_place_of_the_new_run_dir_before_it_is_opened_is_not_followed() 
         .find(|n| *n != run_name(1, 7))
         .unwrap();
     let run = parent.join(&mine);
-    // A link opened as a dir with O_NOFOLLOW: ELOOP on macOS, ENOTDIR on Linux.
+    // A link opened with O_DIRECTORY | O_NOFOLLOW: ENOTDIR, on macOS and Linux alike
+    // (measured; ELOOP is what O_NOFOLLOW alone gives).
     let said = |errno| {
         format!(
             "{}: {}: a link or a file is now at its name; the run's dir was moved or removed; \
@@ -1577,7 +1578,7 @@ fn a_link_put_in_place_of_the_new_run_dir_before_it_is_opened_is_not_followed() 
             run_name(1, 7)
         )
     };
-    assert!(e == said(libc::ELOOP) || e == said(libc::ENOTDIR), "{e}");
+    assert_eq!(e, said(libc::ENOTDIR));
     assert_eq!(tree(&sentinel), had);
     assert_eq!(std::fs::read_link(&run).unwrap(), sentinel);
     let _ = std::fs::remove_dir_all(&dir);

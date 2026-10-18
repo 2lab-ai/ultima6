@@ -272,13 +272,9 @@ fn incomplete(key: &Path, outfd: &File, out: &Path) -> Result<(Vec<String>, Vec<
         }
         let dir = match io_seam(key, "list", &name).and_then(|()| at::open_dir_at(outfd, &raw)) {
             Ok(d) => d,
-            // A link or a file at the name, or nothing there now: no run dir.
-            Err(e)
-                if matches!(
-                    e.raw_os_error(),
-                    Some(libc::ELOOP | libc::ENOTDIR | libc::ENOENT)
-                ) =>
-            {
+            // A link or a file at the name (O_DIRECTORY | O_NOFOLLOW on a link: ENOTDIR, on
+            // macOS and Linux alike), or nothing there now: no run dir.
+            Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTDIR | libc::ENOENT)) => {
                 continue;
             }
             Err(e) if e.raw_os_error() == Some(libc::EMFILE) => {
@@ -675,7 +671,9 @@ pub fn run_in<T>(
     let with_incomplete = |e: String| beside(format!("{e}; run dir: {}", at.display()));
     let unopened = |e: std::io::Error| {
         let then = match e.raw_os_error() {
-            Some(libc::ELOOP | libc::ENOTDIR) => {
+            // A link at the name, opened O_DIRECTORY | O_NOFOLLOW (ENOTDIR on macOS and Linux
+            // alike), or a file.
+            Some(libc::ENOTDIR) => {
                 "a link or a file is now at its name; the run's dir was moved or removed"
             }
             _ => {
