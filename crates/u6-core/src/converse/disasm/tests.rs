@@ -2317,6 +2317,82 @@ fn scripts_whose_landing_order_decided_a_read_past_a_table_decode_one_way() {
 }
 
 #[test]
+fn a_searchs_need_runs_on_into_the_next_table() {
+    // A direct search of `t` = "ab\0" and a print of `t2` = "cd\0ef\0" right after it; the
+    // a1's landing jumps into "ef". The search reads on from `t` into `t2` and through all of
+    // it, so `t2` keeps "ef" over that landing's code and the landing stops there; the search
+    // reads on past the script's end.
+    let t = BODY + 37;
+    let (t2, w) = (t + 3, t + 7);
+    let mut body = b"\xf7\xef*\xf6".to_vec();
+    body.extend(search_of(t, false));
+    body.push(0xb5);
+    body.extend(lit32(t2));
+    body.extend([0xb1, 0xa1, 0x01, 0xa7]);
+    body.extend(jump(BODY));
+    body.push(0xa2);
+    body.extend(jump(w));
+    body.extend(b"ab\0cd\0ef\0");
+    let s = script(&body);
+    let d = any_order(&s);
+    let Kind::Table(tb) = &item(&d, t2).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.entries.len(), 2);
+    // (The block has no `ee`: its loops find none.)
+    assert_eq!(
+        sorted_hazards(&d),
+        [
+            Hazard {
+                at: BODY + 1,
+                kind: HazardKind::ScanPastEnd(Scan::Answered)
+            },
+            Hazard {
+                at: BODY + 3,
+                kind: HazardKind::ScanPastEnd(Scan::NoMatch)
+            },
+            Hazard {
+                at: BODY + 4,
+                kind: HazardKind::SearchPastEnd(Span {
+                    offset: d.len,
+                    len: 0
+                })
+            },
+            Hazard {
+                at: w,
+                kind: HazardKind::IntoData
+            }
+        ]
+    );
+}
+
+#[test]
+fn a_string_crossing_a_word_address_holds_no_address_inside_it() {
+    // A print of `t` = "ab\0", then "c\xb8de\0"; a search from `t + 4`, the `b8`, and a word
+    // write at `t + 5`, both on direct paths. The word address ends the strings `t`'s inner
+    // addresses are looked for in: the second string runs past it, so `t + 4` is no address
+    // inside `t` but a table of its own, a `b8` alone.
+    let t = BODY + 30;
+    let mut body = vec![0xb5];
+    body.extend(lit32(t));
+    body.push(0xb1);
+    body.extend(search_of(t + 4, false));
+    body.push(0xa6);
+    body.extend(lit32(t + 5));
+    body.extend([0xb1, 0xa8, 0x07, 0xa7, 0xb6]);
+    body.extend(b"ab\0c\xb8de\0");
+    let d = any_order(&script(&body));
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert!(tb.inner.is_empty() && tb.entries.len() == 1);
+    let Kind::Table(b8) = &item(&d, t + 4).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert!(b8.terminated && b8.entries.is_empty() && !b8.words);
+}
+
+#[test]
 fn a_search_past_its_last_entry_onto_an_item_reads_past_its_table() {
     // "ab\0" at `t`, and right after it the `b6` a jump goes to: with no entry matching, the
     // search reads that code. A direct path's search refuses the script.
