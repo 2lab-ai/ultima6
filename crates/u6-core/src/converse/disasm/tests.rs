@@ -2085,6 +2085,77 @@ fn a_search_from_a_b8_inside_a_string_reads_nothing() {
     assert!(d.hazards.is_empty(), "{:?}", d.hazards);
 }
 
+/// The `*` block's answer (direct code) makes `op(t)` and jumps back; after its `ee` its loops
+/// write word 0 at `t + 3` (or, `!inside`, at `BODY`, direct code) and jump back; then `t` =
+/// "ab\0cd\0" to the script's end. Returns the script, `t` and the loops' landing.
+fn a_word_write_after_a_direct_read(
+    op: &dyn Fn(u32) -> Vec<u8>,
+    inside: bool,
+) -> (Vec<u8>, u32, u32) {
+    let n = op(0).len() as u32;
+    let at = BODY + 4 + n + 5 + 1;
+    let t = at + 10 + 5;
+    let mut b = b"\xf7\xef*\xf6".to_vec();
+    b.extend(op(t));
+    b.extend(jump(BODY));
+    b.extend([0xee, 0xa6]);
+    b.extend(lit32(if inside { t + 3 } else { BODY }));
+    b.extend([0xb1, 0xa8, 0x07, 0xa7]);
+    b.extend(jump(BODY));
+    b.extend(b"ab\0cd\0");
+    (script(&b), t, at)
+}
+
+#[test]
+fn a_landings_word_table_inside_a_direct_string_table_drops_the_landing() {
+    // The direct read is string 1 of `t` (a constant index) or a search of `t`: it keeps both
+    // strings, and the loops' word write at `t + 3`, the start of the second, is inside them.
+    // The direct table wins: it keeps both strings, the loops are dropped (one byte read as a
+    // word and as a string). Aimed at direct code instead, the write drops them as code.
+    let index1 = |t: u32| [&[0xb5][..], &lit32(t), &[0x01, 0xa7]].concat();
+    let search = |t: u32| search_of(t, false);
+    for (what, op) in [
+        ("index 1", &index1 as &dyn Fn(u32) -> Vec<u8>),
+        ("search", &search),
+    ] {
+        for inside in [true, false] {
+            let (s, t, at) = a_word_write_after_a_direct_read(op, inside);
+            let what = format!("{what}, write inside {inside}");
+            let d = any_order(&s);
+            let Kind::Table(tb) = &item(&d, t).kind else {
+                panic!("{what}: {:?}", shape(&d))
+            };
+            assert_eq!(
+                tb.entries.iter().map(|e| e.bytes(&s)).collect::<Vec<_>>(),
+                [&b"ab"[..], b"cd"],
+                "{what}"
+            );
+            let reason = if inside {
+                Reason::TableKinds
+            } else {
+                Reason::TableInCode
+            };
+            let loops: Vec<Hazard> = sorted_hazards(&d)
+                .into_iter()
+                .filter(|h| matches!(h.kind, HazardKind::Dropped(..)))
+                .collect();
+            assert_eq!(
+                loops,
+                [
+                    dropped(at, Scan::Answered, reason),
+                    dropped(at, Scan::NoMatch, reason)
+                ],
+                "{what}"
+            );
+            assert!(
+                !d.items
+                    .iter()
+                    .any(|i| matches!(&i.kind, Kind::Table(t) if t.words))
+            );
+        }
+    }
+}
+
 #[test]
 fn a_search_past_its_last_entry_onto_an_item_reads_past_its_table() {
     // "ab\0" at `t`, and right after it the `b6` a jump goes to: with no entry matching, the

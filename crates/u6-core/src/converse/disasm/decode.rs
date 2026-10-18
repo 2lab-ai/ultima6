@@ -404,6 +404,11 @@ impl<'a> Decoder<'a> {
         bytes
     }
 
+    /// Every kept landing's [`Self::reach`].
+    fn reaches(&self) -> BTreeMap<LandingKey, BTreeSet<u32>> {
+        self.starts.keys().map(|&k| (k, self.reach(k))).collect()
+    }
+
     /// Follows every queued path.
     fn drain(&mut self) -> Result<(), Refusal> {
         while let Some((at, ctx)) = self.work.pop() {
@@ -999,9 +1004,14 @@ impl<'a> Decoder<'a> {
     /// index runs on into them, [`reachable`]), of an earlier one, nor before a string an
     /// address inside it is read from; and not at all when a search reads it (up to a `b8`).
     fn table_ranges(&self) -> Vec<(u32, Table)> {
+        self.table_ranges_of(|_| true)
+    }
+
+    /// [`Self::table_ranges`] of the uses of the paths `keep` keeps.
+    fn table_ranges_of(&self, keep: impl Fn(Origin) -> bool) -> Vec<(u32, Table)> {
         // Per address: the kind and the entries its uses' constant indices and searches need.
         let mut by_addr: BTreeMap<u32, (bool, usize)> = BTreeMap::new();
-        for (u, _) in &self.uses {
+        for (u, _) in self.uses.iter().filter(|&&(_, o)| keep(o)) {
             let e = by_addr.entry(u.addr).or_insert((u.words, 0));
             if u.search {
                 // A `b8` at its address: it reads nothing (of an inner address, the string
@@ -1096,8 +1106,31 @@ impl<'a> Decoder<'a> {
     pub(super) fn revise(&self) -> Option<Plan> {
         let mut p = self.plan.clone();
         let mut held = BTreeSet::new();
-        let reaches: BTreeMap<LandingKey, BTreeSet<u32>> =
-            self.starts.keys().map(|&k| (k, self.reach(k))).collect();
+        let reaches = self.reaches();
+        // A landing's word-table address inside a direct path's string table (the strings the
+        // direct uses keep): the direct table wins and is not cut there. Every landing whose
+        // path runs that op is dropped; the next round decides the rest.
+        let direct: Vec<(u32, u32)> = self
+            .table_ranges_of(|o| o == Origin::Direct)
+            .into_iter()
+            .filter(|(_, t)| !t.words)
+            .map(|(a, t)| (a, table_end(a, &t)))
+            .collect();
+        for &(u, o) in &self.uses {
+            if u.words
+                && o != Origin::Direct
+                && direct.iter().any(|&(a, e)| a < u.addr && u.addr < e)
+            {
+                for r in runners(&reaches, u.at, o) {
+                    if let Origin::Landing(k) = r {
+                        p.banned.entry(k).or_insert(Reason::TableKinds);
+                    }
+                }
+            }
+        }
+        if p != *self.plan {
+            return Some(p);
+        }
         for (addr, table) in self.table_ranges() {
             // A table with no entry still holds its address: landing code there is inside it.
             let end = table_end(addr, &table).max(addr + 1);
@@ -1376,6 +1409,22 @@ impl<'a> Decoder<'a> {
         }
         out
     }
+}
+
+/// The paths that run the op at `at`: `first`, the one that decoded it, and every kept landing
+/// whose path joins it (`reaches`, [`Decoder::reaches`]).
+fn runners(
+    reaches: &BTreeMap<LandingKey, BTreeSet<u32>>,
+    at: u32,
+    first: Origin,
+) -> BTreeSet<Origin> {
+    let mut out: BTreeSet<Origin> = reaches
+        .iter()
+        .filter(|(_, r)| r.contains(&at))
+        .map(|(&k, _)| Origin::Landing(k))
+        .collect();
+    out.insert(first);
+    out
 }
 
 /// Splits the bytes `at..end` of `bytes` into plain text and escapes (`ui/printf.rs` `text_out`):

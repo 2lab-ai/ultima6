@@ -33,7 +33,9 @@
 //!   tables before it. A string address an op names inside another table's string (not at a
 //!   string's start) is of that table ([`Table::inner`]): a read there reads the string's rest,
 //!   so the table never ends before that string; a word address inside a word is not, and its
-//!   table ends there;
+//!   table ends there. A landing's word address inside the strings a direct path's table keeps
+//!   does not end that table: the landings whose path makes it are dropped
+//!   (`Dropped(_, TableKinds)`);
 //! - what is left is [`Kind::Unreached`].
 //!
 //! Tables and the trial. A table use is checked when its op is decoded, inside the path that
