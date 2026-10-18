@@ -596,13 +596,20 @@ fn a_run_whose_dir_is_moved_before_done_fails_and_writes_no_done() {
         let out = dir.join("out");
         let away = dir.join("away");
         let (o, to) = (out.clone(), away.clone());
+        let order: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen = order.clone();
         let _h = hook(&out, "write", move |name| {
+            seen.lock().unwrap().push(name.to_string());
             if name == at {
                 std::fs::rename(only_run(&o), &to).unwrap();
             }
             Ok(())
         });
         let e = run_in(FIRST, &out, writes).unwrap_err();
+        // A dir moved before done: done is never made (the check before it); moved at done:
+        // made, then deleted (the check after it).
+        let tried = order.lock().unwrap().iter().any(|n| n == DONE);
+        assert_eq!(tried, at == DONE, "{at}: {:?}", order.lock().unwrap());
         let now = format!("(it is now at {})", away.canonicalize().unwrap().display());
         assert_eq!(
             e.matches("was moved or removed while the run wrote it")
