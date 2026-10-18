@@ -1314,12 +1314,13 @@ fn failed_trials_are_tried_again_until_none_more_is_kept() {
 /// items, its hazards (as a set) and its catalog.
 fn both_orders(s: &[u8]) -> [(Vec<Item>, Vec<String>, String); 2] {
     [false, true].map(|reversed| {
+        // The catalog decodes again: in the same order.
         REVERSED.with(|r| r.set(reversed));
         let d = ok(s);
+        let catalog = Catalog::build([(b'a', 7, s)]).to_json();
         REVERSED.with(|r| r.set(false));
         let mut hazards: Vec<String> = d.hazards.iter().map(|h| format!("{h:?}")).collect();
         hazards.sort();
-        let catalog = Catalog::build([(b'a', 7, s)]).to_json();
         (d.items, hazards, catalog)
     })
 }
