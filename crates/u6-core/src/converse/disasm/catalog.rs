@@ -7,7 +7,9 @@
 //! - **Table strings:** each string of a string table, keyed (archive, item, string offset);
 //!   one an `a6` copies into a string slot carries the slots and their capacity. A copy's index
 //!   is resolved the way the interpreter reads it, on into the tables that follow its table
-//!   without a gap; a computed index marks every string it can reach.
+//!   without a gap; a computed index marks every string it can reach. One an op reads from
+//!   after its start lists those addresses ([`StringUnit::inner`]): such a read prints the
+//!   string's rest.
 //! - Also each script's name (bytes 2 up to `f1`) and its keywords, for the keyword aliases and
 //!   the bundles' topics.
 //! - **Hash:** [`hash64`], FNV-1a 64 (offset basis 0xcbf29ce484222325, prime 0x100000001b3)
@@ -16,7 +18,8 @@
 //! - **Form:** JSON, [`FORMAT`] `u6-converse-catalog/2` ([`Catalog::to_json`] /
 //!   [`Catalog::from_json`]). Unit text is written one character per script byte (U+0000..U+00FF),
 //!   so it reads back to the same bytes; reading back checks each unit's length, hash and
-//!   place in its script.
+//!   place in its script, the runs' `part_of` groups and that each string's inner addresses
+//!   are inside it.
 //!
 //! A catalog built from the owner's files holds game text: it stays outside the repository.
 
@@ -27,8 +30,9 @@ use serde::{Deserialize, Serialize};
 use super::decode::ref_entry;
 use super::{Assign, Disasm, Kind, Operands, Refusal, Span, disassemble, reachable};
 
-/// The catalog format's name (`/2`: runs carry `part_of`; copies reach the tables that follow).
-pub const FORMAT: &str = "u6-converse-catalog/2";
+/// The catalog format's name (`/3`: strings carry the addresses read inside them; `/2`: runs
+/// carry `part_of`, copies reach the tables that follow).
+pub const FORMAT: &str = "u6-converse-catalog/3";
 /// The hash every unit carries.
 pub const HASH: &str = "fnv1a64";
 /// The text a string slot 0..9 holds: its 100-byte buffer (A4+0x140b, `STRING_BUFFERS`) less
@@ -104,6 +108,10 @@ pub struct StringUnit {
     /// The longest text every one of `slots` holds; `None` when a slot's buffer is not known
     /// statically (slots from 10 point where the game sets them) or there is no slot.
     pub capacity: Option<u32>,
+    /// The script addresses after the string's start, up to its NUL, that an op reads from
+    /// ([`super::Table::inner`]), in order: such a read prints the string's rest, so a
+    /// translation that changes the bytes before one changes what that read prints.
+    pub inner: Vec<u32>,
 }
 
 fn latin1(b: &[u8]) -> String {
@@ -246,6 +254,12 @@ impl ScriptUnits {
                     index,
                     slots,
                     capacity,
+                    inner: t
+                        .inner
+                        .iter()
+                        .copied()
+                        .filter(|&a| e.offset < a && a <= e.end())
+                        .collect(),
                 });
             }
         }
@@ -286,6 +300,15 @@ impl ScriptUnits {
         }
         for u in units {
             u.check(self.len).map_err(|e| format!("{at}: {e}"))?;
+        }
+        for s in &self.strings {
+            let (start, end) = (s.unit.offset, s.unit.offset + s.unit.len);
+            let inside = s.inner.iter().all(|&a| start < a && a <= end);
+            if !inside || !s.inner.is_sorted_by(|a, b| a < b) {
+                return Err(format!(
+                    "{at}: string at {start:#x}: an inner address outside it"
+                ));
+            }
         }
         check_parts(&self.runs).map_err(|e| format!("{at}: {e}"))
     }

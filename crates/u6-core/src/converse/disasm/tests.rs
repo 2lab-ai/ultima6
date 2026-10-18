@@ -2610,6 +2610,41 @@ fn a_catalog_reads_back_only_as_written() {
     assert!(Catalog::from_json(&json.replacen(&text, &other, 1)).is_err());
 }
 
+#[test]
+fn a_catalog_string_lists_the_addresses_read_inside_it() {
+    // Prints from `t`, `t + 1` and `t + 3` (inside "abcd") and from `t + 6` (inside "ef").
+    let t = BODY + 40;
+    let mut body = Vec::new();
+    for at in [t, t + 1, t + 3, t + 6] {
+        body.push(0xb5);
+        body.extend(lit32(at));
+        body.push(0xb1);
+    }
+    body.push(0xb6);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"abcd\0ef\0\xb8");
+    let s = script(&body);
+    let c = Catalog::build([(b'a', 7, s.as_slice())]);
+    let inner: Vec<&[u32]> = c.scripts[0].strings.iter().map(|u| &u.inner[..]).collect();
+    assert_eq!(inner, [&[t + 1, t + 3][..], &[t + 6]]);
+    let json = c.to_json();
+    assert_eq!(Catalog::from_json(&json).unwrap(), c);
+    // An address outside its string (in the one before, at its start, past its NUL), or out
+    // of order, does not read back.
+    let written = format!("\"inner\":[{}]", t + 6);
+    assert!(json.contains(&written));
+    for bad in [t + 2, t + 5, t + 8] {
+        let other = json.replace(&written, &format!("\"inner\":[{bad}]"));
+        assert!(Catalog::from_json(&other).is_err(), "{bad}");
+    }
+    let other = json.replace(
+        &format!("\"inner\":[{},{}]", t + 1, t + 3),
+        &format!("\"inner\":[{},{}]", t + 3, t + 1),
+    );
+    assert_ne!(other, json);
+    assert!(Catalog::from_json(&other).is_err());
+}
+
 // ---- the cross-check's own checks ------------------------------------------------------------
 
 fn esc() -> EscState {
