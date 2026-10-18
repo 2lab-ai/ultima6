@@ -123,10 +123,46 @@ pub(crate) fn in_child(test: &str, shell: &str, setup: impl FnOnce(&mut std::pro
     );
 }
 
+/// A new dir of this test's own under the temp dir, made with a name no one can know before
+/// (`mkdtemp`, mode 0700), and opened with no link followed (`O_NOFOLLOW`): its path and the
+/// dir.
+fn private_dir() -> (PathBuf, File) {
+    use std::os::fd::FromRawFd as _;
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+    let mut name = std::env::temp_dir()
+        .join("u6-hdtool-nobody-XXXXXX")
+        .into_os_string()
+        .into_vec();
+    name.push(0);
+    // SAFETY: a NUL-terminated template, writable, that outlives the call.
+    let made = unsafe { libc::mkdtemp(name.as_mut_ptr().cast()) };
+    assert!(!made.is_null(), "{}", std::io::Error::last_os_error());
+    name.pop();
+    let dir = PathBuf::from(std::ffi::OsStr::from_bytes(&name));
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let path = std::ffi::CString::new(name).unwrap();
+    // SAFETY: a NUL-terminated path that outlives the call; the fd is owned below.
+    let fd = unsafe { libc::open(path.as_ptr(), flags) };
+    assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+    // SAFETY: `fd` was just returned open, and nothing else owns it.
+    (
+        dir,
+        File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }),
+    )
+}
+
+/// A [`private_dir`] given to uid and gid 65534 through the fd it was opened with (`fchown`):
+/// what is given is that dir, and nothing a link could point at.
+fn temp_for_nobody() -> PathBuf {
+    let (dir, f) = private_dir();
+    std::os::unix::fs::fchown(&f, Some(65534), Some(65534)).unwrap();
+    dir
+}
+
 /// For a test that needs an unprivileged user (`test`, its path): with privilege (euid 0), runs
-/// it in a child dropped to uid and gid 65534, with a temp dir of its own that it can enter, and
-/// gives true (the caller is done); else false, and the caller runs it here (in that child,
-/// checked to have no privilege).
+/// it in a child dropped to uid and gid 65534, with a temp dir of its own that it can enter
+/// ([`temp_for_nobody`]), and gives true (the caller is done); else false, and the caller runs
+/// it here (in that child, checked to have no privilege).
 pub(crate) fn ran_unprivileged(test: &str) -> bool {
     use std::os::unix::process::CommandExt as _;
     // SAFETY: geteuid(2) reads the process's ids; no memory involved.
@@ -138,8 +174,7 @@ pub(crate) fn ran_unprivileged(test: &str) -> bool {
     if euid != 0 {
         return false;
     }
-    let tmp = temp(&format!("nobody-{}", test.rsplit("::").next().unwrap()));
-    std::os::unix::fs::chown(&tmp, Some(65534), Some(65534)).unwrap();
+    let tmp = temp_for_nobody();
     in_child(test, ":", |c| {
         c.env("TMPDIR", &tmp);
         // SAFETY: between the fork and the exec, only setgroups(2), setgid(2) and setuid(2),
@@ -1937,4 +1972,28 @@ fn a_file_another_hand_put_at_a_kept_name_is_said() {
         format!("{e}\n")
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_dir_given_to_the_unprivileged_child_is_new_and_its_own() {
+    // Two dirs for the unprivileged child: each new (a name not known before), each a dir of
+    // mode 0700 and no link, under any user. Under euid 0 (where the child is used), each is
+    // then given to 65534 through its fd.
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let (a, b) = (private_dir(), private_dir());
+    assert_ne!(a.0, b.0);
+    // SAFETY: geteuid(2) reads the process's ids; no memory involved.
+    let root = unsafe { libc::geteuid() } == 0;
+    for (d, f) in [&a, &b] {
+        let m = std::fs::symlink_metadata(d).unwrap();
+        assert!(m.is_dir() && !m.file_type().is_symlink(), "{}", d.display());
+        assert_eq!(m.permissions().mode() & 0o777, 0o700, "{}", d.display());
+        assert_eq!(at::id(f).unwrap(), (m.dev(), m.ino()), "{}", d.display());
+        if root {
+            std::os::unix::fs::fchown(f, Some(65534), Some(65534)).unwrap();
+            let m = std::fs::symlink_metadata(d).unwrap();
+            assert_eq!((m.uid(), m.gid()), (65534, 65534), "{}", d.display());
+        }
+        std::fs::remove_dir(d).unwrap();
+    }
 }
