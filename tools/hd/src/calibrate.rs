@@ -139,9 +139,10 @@
 //! - **The out dir** ([`out_dir`], [`final_read::MARKER`]): the run is written to a fresh
 //!   directory beside `--out` and swapped in whole at the end, so after any run `--out` holds
 //!   that run's output alone: on success its sheets and `samples.tsv`, drawn from one state; on
-//!   a refusal its `refused.txt` (the error), the details (`disagreements.txt` or `unshown.txt`)
-//!   and the snapshots read, no sheet; when the work dir changed during the run, `changed.txt`
-//!   (what changed) and no sheet. An old `--out` is replaced only when it holds the marker file
+//!   a refusal, or any other failure (a sheet not written, the masters not read again), its
+//!   `refused.txt` (the error), the details (`disagreements.txt` or `unshown.txt`) and the
+//!   snapshots read, in a fresh dir, never a sheet the run drew; when the work dir changed
+//!   during the run, `changed.txt` (what changed) too. An old `--out` is replaced only when it holds the marker file
 //!   every run of this mode writes; anything else there (an empty dir too, or the first pass's)
 //!   is left as it is and the run fails.
 //!

@@ -2783,6 +2783,80 @@ fn the_out_dir_holds_one_runs_output() {
 }
 
 #[test]
+fn a_failed_run_publishes_its_refusal_alone() {
+    // Three runs that fail once their sheets are drawn, or some of them: each leaves at the
+    // out dir its refusal and the snapshots read, no sheet, no samples.tsv.
+    use super::super::out_dir::hook;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("failed", &text, &g, &left);
+    let refusal = ["gates.jsonl", "ingest.json", "jobs.jsonl", "refused.txt"];
+    let out = |k: &str| FinalOptions {
+        out: dir.join(k),
+        ..options(&dir)
+    };
+    // The masters cannot be read again at the end: slices/ is gone once they are read.
+    let o = out("recheck");
+    let (slices, moved) = (work.path("slices"), dir.join("slices-moved"));
+    let (a, b) = (slices.clone(), moved.clone());
+    AFTER_READ.lock().unwrap().push((
+        o.out.clone(),
+        Box::new(move || std::fs::rename(&a, &b).unwrap()),
+    ));
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    AFTER_READ.lock().unwrap().retain(|(k, _)| *k != o.out);
+    std::fs::rename(&moved, &slices).unwrap();
+    assert!(e.contains("slices"), "{e}");
+    assert_eq!(files_of(&o.out), refusal);
+    // The second sheet cannot be written (the first is).
+    let second = |o: &FinalOptions| {
+        let n = AtomicUsize::new(0);
+        hook(&o.out, "write", move |name| {
+            match n.fetch_add(1, Ordering::SeqCst) {
+                1 => Err(format!("{name}: no room left")),
+                _ => Ok(()),
+            }
+        })
+    };
+    let o = out("write");
+    let h = second(&o);
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    drop(h);
+    assert!(e.contains("final-terrain-s2.png: no room left"), "{e}");
+    assert_eq!(files_of(&o.out), refusal);
+    // What the run wrote cannot be removed whole: a dir in it whose file cannot leave, so the
+    // removal stops part of the way.
+    let o = out("cleanup");
+    let h = second(&o);
+    let stuck: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>> = Default::default();
+    let at = stuck.clone();
+    let h2 = hook(&o.out, "cleanup", move |stage| {
+        use std::os::unix::fs::PermissionsExt;
+        let sub = Path::new(stage).join("stuck");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("x"), b"x").unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o500)).unwrap();
+        *at.lock().unwrap() = Some(sub);
+        Ok(())
+    });
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    drop((h, h2));
+    assert!(e.contains("no room left"), "{e}");
+    assert!(
+        e.contains("what the run wrote is left beside the out dir"),
+        "{e}"
+    );
+    assert_eq!(files_of(&o.out), refusal);
+    let sub = stuck.lock().unwrap().take().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
     // The chain, and B again far from it, beside a record Y (a grain of its own) east of it:
     // B's window, wherever it is placed, cannot draw both its pairs by the chain and its pair

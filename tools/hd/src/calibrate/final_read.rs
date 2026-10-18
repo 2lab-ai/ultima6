@@ -2038,8 +2038,10 @@ fn run_final(
                     d.framed.frames(),
                 );
             }
-            img::write_png(&out.join(&s4), &final_sheet(&lines4, 4))?;
-            img::write_png(&out.join(&s2), &final_sheet(&lines2, 2))?;
+            for (name, lines, s) in [(&s4, &lines4, 4), (&s2, &lines2, 2)] {
+                super::out_dir::seam(&o.out, "write", name)?;
+                img::write_png(&out.join(name), &final_sheet(lines, s))?;
+            }
             sheets.push(s4);
             sheets.push(s2);
         }
@@ -2132,10 +2134,7 @@ fn run_final(
         changed.push(format!("{masters} masters of slices/"));
     }
     if !changed.is_empty() {
-        // The sheets drawn read no one state: none is kept.
-        for f in sheets.iter().map(String::as_str).chain(["samples.tsv"]) {
-            std::fs::remove_file(out.join(f)).map_err(|e| format!("{f}: {e}"))?;
-        }
+        // The sheets drawn read no one state: the refusal keeps none ([`super::out_dir`]).
         let what = format!("{}\n", changed.join("\n"));
         work::write_file(&out.join("changed.txt"), what.as_bytes())?;
         return Err(format!(

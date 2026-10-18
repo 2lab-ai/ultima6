@@ -52,30 +52,6 @@ fn beside_of(d: &Path, name: &str) -> Vec<PathBuf> {
     v
 }
 
-/// The hooks of `key`, removed when this is dropped.
-struct Hooked(PathBuf);
-
-impl Drop for Hooked {
-    fn drop(&mut self) {
-        HOOKS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|(k, _, _)| *k != self.0);
-    }
-}
-
-fn hook(
-    key: &Path,
-    step: &'static str,
-    h: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static,
-) -> Hooked {
-    HOOKS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((key.to_path_buf(), step, Arc::new(h)));
-    Hooked(key.to_path_buf())
-}
-
 /// A run that writes `a.txt` holding `text`.
 fn writes(text: &'static str) -> impl FnOnce(&Path, &Path) -> Result<(), String> {
     move |dir: &Path, _: &Path| work::write_file(&dir.join("a.txt"), text.as_bytes())

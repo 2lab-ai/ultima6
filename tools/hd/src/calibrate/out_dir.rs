@@ -1,9 +1,11 @@
 //! The out dir of a `calibrate` run, of either mode ([`run_in`]): the run writes to a fresh
 //! directory beside `--out`, which holds its mode's marker file, and that directory is put in
-//! place of `--out` at the end ([`publish`]). After any run `--out` holds that run's output
-//! alone, or what was there before when the run could not replace it. An old `--out` is
-//! replaced only when it holds the marker of the mode run: a directory the tool did not write,
-//! an empty one, or one the other mode wrote, is left as it is and the run fails.
+//! place of `--out` at the end ([`publish`]). A run that fails publishes none of what it wrote
+//! but its refusal: a fresh directory of `refused.txt` and the snapshots and details the mode
+//! keeps ([`Mode::keep`]), never a sheet or `samples.tsv`. After any run `--out` holds that
+//! run's output alone, or what was there before when the run could not replace it. An old
+//! `--out` is replaced only when it holds the marker of the mode run: a directory the tool did
+//! not write, an empty one, or one the other mode wrote, is left as it is and the run fails.
 
 use std::ffi::CString;
 use std::io;
@@ -15,23 +17,34 @@ use crate::work;
 #[cfg(test)]
 mod tests;
 
-/// A mode of `calibrate`: its name in messages, and the file its out dirs hold.
+/// A mode of `calibrate`: its name in messages, the file its out dirs hold, and what a failed
+/// run's refusal keeps of what it wrote (its snapshots, and the details its error points to).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mode {
     pub name: &'static str,
     pub marker: &'static str,
+    pub keep: &'static [&'static str],
 }
 
 /// The first pass's sample (`calibrate`).
 pub const FIRST: Mode = Mode {
     name: "calibrate",
     marker: ".calibrate-first-pass",
+    keep: &["gates.jsonl"],
 };
 
 /// The read of the final pack (`calibrate --final`).
 pub const FINAL: Mode = Mode {
     name: "calibrate --final",
     marker: ".calibrate-final",
+    keep: &[
+        "gates.jsonl",
+        "ingest.json",
+        "jobs.jsonl",
+        "disagreements.txt",
+        "unshown.txt",
+        "changed.txt",
+    ],
 };
 
 /// Tests only: a hook at a step of a run ([`seam`]); its error is the step's.
@@ -63,6 +76,36 @@ pub(crate) fn seam(key: &Path, step: &'static str, what: &str) -> Result<(), Str
     #[cfg(not(test))]
     let _ = (key, step, what);
     Ok(())
+}
+
+/// Tests only: the hooks of a `--out`, removed when this is dropped.
+#[cfg(test)]
+pub(crate) struct Hooked(PathBuf);
+
+#[cfg(test)]
+impl Drop for Hooked {
+    fn drop(&mut self) {
+        HOOKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(k, _, _)| *k != self.0);
+    }
+}
+
+/// Tests only: sets `h` at `step` of the runs whose `--out` is `key`, until every [`Hooked`]
+/// of `key` is dropped.
+#[cfg(test)]
+pub(crate) fn hook(
+    key: &Path,
+    step: &'static str,
+    h: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static,
+) -> Hooked {
+    HOOKS.lock().unwrap_or_else(|e| e.into_inner()).push((
+        key.to_path_buf(),
+        step,
+        std::sync::Arc::new(h),
+    ));
+    Hooked(key.to_path_buf())
 }
 
 /// `out`'s directory (made absolute, checked and created) and its name.
@@ -268,8 +311,8 @@ fn publish(mode: Mode, stage: &Path, out: &Path, key: &Path) -> Result<(), Strin
 /// Runs a `calibrate` run of `mode` whose out dir is `out` (module docs): an `out` there that
 /// this mode may not replace ([`not_ours`]) is refused before the run; `run` writes to a fresh
 /// directory (its first argument; the second is the out dir it is to be, for messages), which
-/// is put in place of `out` at the end ([`publish`]); when `run` fails, with `refused.txt`
-/// (the error) beside what it wrote.
+/// is put in place of `out` at the end ([`publish`]). When `run` fails, its refusal is put in
+/// place of `out` instead ([`refuse`]) and the directory it wrote removed.
 pub fn run_in<T>(
     mode: Mode,
     out: &Path,
@@ -285,20 +328,54 @@ pub fn run_in<T>(
         return Err(refusal(&out, &why));
     }
     let stage = fresh(mode, &out, "staging")?;
-    let r = run(&stage, &out);
-    if let Err(e) = &r
-        && let Err(w) = work::write_file(&stage.join("refused.txt"), format!("{e}\n").as_bytes())
-    {
-        let _ = std::fs::remove_dir_all(&stage);
-        return Err(format!("{e} ({w})"));
+    match run(&stage, &out) {
+        Ok(v) => {
+            let published = seam(key, "ran", "").and_then(|()| publish(mode, &stage, &out, key));
+            if let Err(e) = published {
+                let _ = std::fs::remove_dir_all(&stage);
+                return Err(e);
+            }
+            Ok(v)
+        }
+        Err(e) => {
+            let mut said = e.clone();
+            if let Err(w) = refuse(mode, &stage, &out, key, &e) {
+                said = format!("{said}; {w}");
+            }
+            // What the failed run wrote is never published: removed, whatever it holds.
+            let gone = seam(key, "cleanup", &stage.to_string_lossy()).and_then(|()| {
+                std::fs::remove_dir_all(&stage).map_err(|w| format!("{}: {w}", stage.display()))
+            });
+            if let Err(w) = gone {
+                said = format!("{said}; what the run wrote is left beside the out dir ({w})");
+            }
+            Err(said)
+        }
     }
-    let published = seam(key, "ran", "").and_then(|()| publish(mode, &stage, &out, key));
-    if published.is_err() {
-        let _ = std::fs::remove_dir_all(&stage);
+}
+
+/// The refusal of a run of `mode` that failed with `error`: a fresh directory holding the
+/// mode's marker, `refused.txt` (the error) and, of the files the run wrote to `failed`, those
+/// the mode keeps ([`Mode::keep`]: never a sheet, never `samples.tsv`), put in place of `out`
+/// ([`publish`]). Nothing is published when it cannot be made whole.
+fn refuse(mode: Mode, failed: &Path, out: &Path, key: &Path, error: &str) -> Result<(), String> {
+    let diag = fresh(mode, out, "refusal")?;
+    let made = (|| {
+        for &name in mode.keep {
+            let from = failed.join(name);
+            if !std::fs::symlink_metadata(&from).is_ok_and(|m| m.is_file()) {
+                continue;
+            }
+            seam(key, "refusal", name)?;
+            let bytes = std::fs::read(&from).map_err(|e| format!("{}: {e}", from.display()))?;
+            work::write_file(&diag.join(name), &bytes)?;
+        }
+        work::write_file(&diag.join("refused.txt"), format!("{error}\n").as_bytes())?;
+        seam(key, "ran", "")?;
+        publish(mode, &diag, out, key)
+    })();
+    if made.is_err() {
+        let _ = std::fs::remove_dir_all(&diag);
     }
-    match (r, published) {
-        (r, Ok(())) => r,
-        (Ok(_), Err(e)) => Err(e),
-        (Err(e), Err(w)) => Err(format!("{e}; {w}")),
-    }
+    made
 }
