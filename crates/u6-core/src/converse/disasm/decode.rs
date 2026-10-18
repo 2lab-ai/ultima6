@@ -617,43 +617,9 @@ impl<'a> Decoder<'a> {
         })
     }
 
-    /// Splits the run `at..end` into plain text and escapes (`ui/printf.rs` `text_out`).
+    /// Splits the run `at..end` into plain text and escapes ([`run_parts`]).
     fn run_parts(&self, at: u32, end: u32) -> Run {
-        let mut parts = Vec::new();
-        let mut i = at;
-        while i < end {
-            let b = self.b[i as usize];
-            let part = match Escape::start(b) {
-                Some(esc) => {
-                    let arg = (i + 1 < end)
-                        .then(|| self.b[i as usize + 1])
-                        .filter(|&c| Escape::start(c).is_none());
-                    match (esc, arg) {
-                        (Escape::Str(_), Some(c)) => {
-                            (2, Some(Escape::Str(Some(ops::var_index(c)))))
-                        }
-                        (Escape::Int(_), Some(c)) => {
-                            (2, Some(Escape::Int(Some(ops::var_index(c)))))
-                        }
-                        (Escape::Glyph(_), Some(c)) => (2, Some(Escape::Glyph(Some(c)))),
-                        (esc, _) => (1, Some(esc)),
-                    }
-                }
-                None => {
-                    let n = (i..end)
-                        .find(|&j| Escape::start(self.b[j as usize]).is_some())
-                        .unwrap_or(end);
-                    (n - i, None)
-                }
-            };
-            parts.push(Part {
-                offset: i,
-                len: part.0,
-                escape: part.1,
-            });
-            i += part.0;
-        }
-        Run { parts }
+        run_parts(self.b, at, end)
     }
 
     /// `ef kw , kw … f6` (`run.rs` `keywords`).
@@ -877,23 +843,32 @@ impl<'a> Decoder<'a> {
     /// up to a `b8` at an entry's start, the next table address, the script's end or the first
     /// byte of direct code. A table without its `b8` there has no end of its own: it also ends
     /// at the first byte of landing code, but not before the last entry a constant index of a
-    /// use of it reads.
+    /// use reads, of this table or, through the tables before it that end where it starts (an
+    /// index runs on into them, [`reachable`]), of an earlier one.
     fn table_ranges(&self) -> Vec<(u32, Table)> {
-        let mut by_addr: BTreeMap<u32, (bool, Option<u32>)> = BTreeMap::new();
+        // Per address: the kind and the entries its uses' constant indices need.
+        let mut by_addr: BTreeMap<u32, (bool, usize)> = BTreeMap::new();
         for (u, _) in &self.uses {
-            let e = by_addr.entry(u.addr).or_insert((u.words, None));
+            let e = by_addr.entry(u.addr).or_insert((u.words, 0));
             if let Some(i) = u.index.filter(|&i| i != NO_ENTRY) {
-                e.1 = e.1.max(Some(i));
+                e.1 = e.1.max(i as usize + 1);
             }
         }
         let addrs: Vec<u32> = by_addr.keys().copied().collect();
         let mut out = Vec::with_capacity(addrs.len());
-        for (n, (&addr, &(words, need))) in by_addr.iter().enumerate() {
+        // The entries the tables before still need from this one: (where it must start, its
+        // kind, how many).
+        let mut carry: Option<(u32, bool, usize)> = None;
+        for (n, (&addr, &(words, own))) in by_addr.iter().enumerate() {
             let next = addrs
                 .get(n + 1)
                 .copied()
                 .unwrap_or(self.len())
                 .min(self.len());
+            let needed = match carry.take() {
+                Some((at, w, k)) if at == addr && w == words => own.max(k),
+                _ => own,
+            };
             let direct = (addr..next).find(|&p| self.direct_at(p)).unwrap_or(next);
             let mut table = self.table_at(addr, direct, words);
             if !table.terminated {
@@ -901,8 +876,11 @@ impl<'a> Decoder<'a> {
                     .find(|&p| self.owner[p as usize] != NO_OWNER)
                     .unwrap_or(next);
                 let cut = self.table_at(addr, owned, words).entries.len();
-                let needed = need.map_or(0, |i| i as usize + 1);
                 table.entries.truncate(cut.max(needed));
+                let short = needed.saturating_sub(table.entries.len());
+                if short > 0 && !table.entries.is_empty() {
+                    carry = Some((table_end(addr, &table), words, short));
+                }
             }
             out.push((addr, table));
         }
@@ -1083,6 +1061,42 @@ impl<'a> Decoder<'a> {
         }
         out
     }
+}
+
+/// Splits the bytes `at..end` of `bytes` into plain text and escapes (`ui/printf.rs` `text_out`):
+/// a run's parts, or those of a table string the escape layer prints.
+pub(super) fn run_parts(bytes: &[u8], at: u32, end: u32) -> Run {
+    let mut parts = Vec::new();
+    let mut i = at;
+    while i < end {
+        let b = bytes[i as usize];
+        let part = match Escape::start(b) {
+            Some(esc) => {
+                let arg = (i + 1 < end)
+                    .then(|| bytes[i as usize + 1])
+                    .filter(|&c| Escape::start(c).is_none());
+                match (esc, arg) {
+                    (Escape::Str(_), Some(c)) => (2, Some(Escape::Str(Some(ops::var_index(c))))),
+                    (Escape::Int(_), Some(c)) => (2, Some(Escape::Int(Some(ops::var_index(c))))),
+                    (Escape::Glyph(_), Some(c)) => (2, Some(Escape::Glyph(Some(c)))),
+                    (esc, _) => (1, Some(esc)),
+                }
+            }
+            None => {
+                let n = (i..end)
+                    .find(|&j| Escape::start(bytes[j as usize]).is_some())
+                    .unwrap_or(end);
+                (n - i, None)
+            }
+        };
+        parts.push(Part {
+            offset: i,
+            len: part.0,
+            escape: part.1,
+        });
+        i += part.0;
+    }
+    Run { parts }
 }
 
 /// Where a table at `addr` with these entries ends (after the NUL of its last string, or its

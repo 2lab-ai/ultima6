@@ -410,7 +410,11 @@ fn index_of_string(cx: &Cx<'_>, table: u32, slot: u8) -> i16 {
             loop {
                 let b = c.next();
                 #[cfg(test)]
-                super::disasm::trace::table_byte(c.pos() - 1, b);
+                super::disasm::trace::table_byte(
+                    c.pos() - 1,
+                    b,
+                    super::disasm::trace::Read::Search,
+                );
                 if b == 0 || c.fault {
                     break;
                 }

@@ -27,7 +27,8 @@
 //!   the expression ops `b4`, `b7`, `c3`): NUL-ended strings or words from the address, up to a
 //!   `b8` at an entry's start, the next table address, the script's end or direct code. A table
 //!   without its `b8` there has no end of its own: it also ends at landing code, but never
-//!   before the last entry a constant index reads;
+//!   before the last entry a constant index reads, its own or one that runs on into it from the
+//!   tables before it;
 //! - what is left is [`Kind::Unreached`].
 //!
 //! Tables and the trial. A table use is checked when its op is decoded, inside the path that
@@ -364,7 +365,8 @@ pub enum HazardKind {
     Scan(Scan),
     /// A skip loop finds no stop byte before the script's end.
     ScanPastEnd(Scan),
-    /// A landing's path reaches the address of a table a kept path names: it stops there.
+    /// A landing's path reaches a byte of the range of a table a kept path names (its address
+    /// or any byte after it): it stops there.
     IntoData,
     /// The path after a skip loop's landing would refuse the script for this reason (its table
     /// uses included): it is not decoded, and the addresses it names are not tables.

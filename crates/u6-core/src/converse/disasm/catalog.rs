@@ -284,8 +284,37 @@ impl ScriptUnits {
         for u in units {
             u.check(self.len).map_err(|e| format!("{at}: {e}"))?;
         }
-        Ok(())
+        check_parts(&self.runs).map_err(|e| format!("{at}: {e}"))
     }
+}
+
+/// The runs' `part_of` links as [`ScriptUnits::build`] writes them: runs in offset order, each
+/// split run a group of two or more runs that follow each other without a gap, the first
+/// linking to itself and every other one to the first; a run outside a group links to
+/// nothing.
+fn check_parts(runs: &[RunUnit]) -> Result<(), String> {
+    for (i, r) in runs.iter().enumerate() {
+        let at = r.unit.offset;
+        let prev = i.checked_sub(1).map(|j| &runs[j]);
+        let next = runs.get(i + 1);
+        let follows = |a: &RunUnit, b: &RunUnit| a.unit.offset + a.unit.len == b.unit.offset;
+        if prev.is_some_and(|p| p.unit.offset + p.unit.len > at) {
+            return Err(format!("run at {at:#x}: runs out of order"));
+        }
+        let Some(root) = r.part_of else { continue };
+        let ok = if root == at {
+            // The first part: it starts a group, and the next run carries it on.
+            prev.is_none_or(|p| p.part_of != Some(root))
+                && next.is_some_and(|n| n.part_of == Some(root) && follows(r, n))
+        } else {
+            // A later part: the run before it is of the same group, right before it.
+            prev.is_some_and(|p| p.part_of == Some(root) && follows(p, r))
+        };
+        if !ok {
+            return Err(format!("run at {at:#x}: a part_of link outside its group"));
+        }
+    }
+    Ok(())
 }
 
 impl Catalog {

@@ -12,9 +12,9 @@ use super::super::eval::eval;
 use super::super::exec::exec;
 use super::super::tests::{chars, files, lib, packed, scroll, state, talk_to};
 use super::catalog::{Catalog, FORMAT, SLOT_BUFFER_CAPACITY, ScriptUnits, hash64};
-use super::decode::{Decoder, Plan};
+use super::decode::{Decoder, Plan, ref_entry};
 use super::ops::{self, Escape, Flow, STATEMENT_OPS, Shape};
-use super::trace::{self, Decoded, EscState, Event, Snap};
+use super::trace::{self, Decoded, EscState, Event, Read, Snap};
 use super::*;
 use crate::engine::Engine;
 use crate::files::Files;
@@ -946,6 +946,60 @@ fn a_landing_into_the_middle_of_a_table_stops_there_and_the_table_keeps_its_byte
     );
 }
 
+/// `f7`, then `prefix`, then a `k` block whose answer prints string 2 of `t` and string 0 of
+/// `u` and says bye (no `ee`, so the block's no-match loop goes on into the tables); then the
+/// tables: `t` = "a" right before `u` = "b", then an `ef` block (a no-match landing reads it as
+/// code) as `u`'s second string. Returns the script and `t`, `u`.
+fn a_read_into_the_next_table(prefix: &[u8]) -> (Vec<u8>, u32, u32) {
+    let mut body = b"\xf7".to_vec();
+    body.extend_from_slice(prefix);
+    body.extend(b"\xefk\xf6");
+    // Then `b5 d2 t 02 a7`, `b5 d2 u b1`, `b6`.
+    let t = BODY + body.len() as u32 + 8 + 7 + 1;
+    let u = t + 2;
+    body.push(0xb5);
+    body.extend(lit32(t));
+    body.extend([0x02, 0xa7, 0xb5]);
+    body.extend(lit32(u));
+    body.extend([0xb1, 0xb6]);
+    body.extend(b"a\0b\0\xefq\xf6Z\xb6\0");
+    (script(&body), t, u)
+}
+
+#[test]
+fn a_constant_index_keeps_the_entries_it_reads_in_the_tables_after_its_own() {
+    // String 2 of `t` is `u`'s second string, where a no-match landing finds code: `t`'s read
+    // needs it, so `u` keeps it and the landing stops there. The use on a direct path (the
+    // first block), and on a landing's path (a block after a first one).
+    let mut later = b"\xefj\xf6A".to_vec();
+    later.extend(jump(BODY));
+    later.push(0xee);
+    for (prefix, what) in [(&b""[..], "direct"), (&later[..], "landing")] {
+        let (s, t, u) = a_read_into_the_next_table(prefix);
+        let d = ok(&s);
+        let strings = |at: u32| match &item(&d, at).kind {
+            Kind::Table(tb) => tb.entries.len(),
+            k => panic!("{what}: {k:?} {:?}", shape(&d)),
+        };
+        assert_eq!((strings(t), strings(u)), (1, 2), "{what}");
+        assert!(
+            d.hazards.contains(&Hazard {
+                at: u + 2,
+                kind: HazardKind::IntoData
+            }),
+            "{what}: {:?}",
+            d.hazards
+        );
+        assert!(
+            !d.hazards
+                .iter()
+                .any(|h| matches!(h.kind, HazardKind::Dropped(..))),
+            "{what}: {:?}",
+            d.hazards
+        );
+    }
+}
+
 #[test]
 fn a_table_wins_over_the_code_of_a_landing_decoded_before_it() {
     // The `a1`'s landing (decoded first: its loop sorts first) reads "zz" at BODY + 13 as text;
@@ -1098,34 +1152,69 @@ fn indices_and_addresses_have_the_interpreters_width() {
         body.extend([0x10, 0x00, 0x20, 0x00, 0xb8]);
         script(&body)
     };
-    // A string index is a word: -1 reads the first string, 0x10001 the second.
-    for index in [0xffff_ffffu32, 0x0001_0001] {
-        let s = strings(&[&[0xb5][..], &lit32(t), &lit32(index), &[0xa7, 0xb6]].concat());
-        ok(&s);
-    }
-    // A word index moves by twice itself in word arithmetic: 0x10001 reads word 1, -1 no word.
-    let w = |index: u32| {
-        words(
-            &[
-                &[0xa6][..],
-                &lit32(t),
-                &lit32(index),
-                &[0xa8, 0x07, 0xa7, 0xb6],
-            ]
-            .concat(),
-        )
-    };
-    ok(&w(0x0001_0001));
-    assert_eq!(refused(&w(0xffff)).reason, Reason::TableIndex);
-    // `b4`'s index is its low byte: 0x101 reads word 1.
-    ok(&words(
-        &[
-            &[0xa6, 0x01, 0xb2, 0xa8][..],
+    // A string index is a word: -1 reads the first string, 0x10001 the second (its copy marks
+    // that string, and with one string only it is past the table).
+    let copy = |index: u32| {
+        [
+            &[0xa6, 0x03, 0xb3, 0xa8][..],
             &lit32(t),
-            &[0xd4, 0x01, 0x01, 0xb4, 0xa7, 0xb6],
+            &lit32(index),
+            &[0xa7, 0xb6],
         ]
-        .concat(),
-    ));
+        .concat()
+    };
+    for (index, picked) in [(0xffff_ffffu32, 0), (0x0001_0001, 1)] {
+        let s = strings(&copy(index));
+        let units = ScriptUnits::units(&ok(&s), &s);
+        let slots: Vec<&[u8]> = units.strings.iter().map(|u| &u.slots[..]).collect();
+        let mut want: Vec<&[u8]> = vec![&[], &[]];
+        want[picked] = &[3];
+        assert_eq!(slots, want, "index {index:#x}");
+    }
+    let one = |op: &[u8]| {
+        let mut body = op.to_vec();
+        body.resize((t - BODY) as usize, 0);
+        body.extend(b"a\0");
+        script(&body)
+    };
+    assert_eq!(refused(&one(&copy(0x0001_0001))).reason, Reason::TableIndex);
+    ok(&one(&copy(0xffff_ffff)));
+    // A word index moves by twice itself in word arithmetic: 0x10001 reads word 1, -1 no word.
+    let w_op = |index: u32| {
+        [
+            &[0xa6][..],
+            &lit32(t),
+            &lit32(index),
+            &[0xa8, 0x07, 0xa7, 0xb6],
+        ]
+        .concat()
+    };
+    let w = |index: u32| words(&w_op(index));
+    let d = ok(&w(0x0001_0001));
+    let Operands::Assign(Assign::TableWord { table, .. }) = &op_at(&d, BODY).operands else {
+        panic!()
+    };
+    assert_eq!(ref_entry(table, true), Some(1));
+    assert_eq!(refused(&w(0xffff)).reason, Reason::TableIndex);
+    // `b4`'s index is its low byte: 0x101 reads word 1; with one word that is past the table.
+    let b4 = [
+        &[0xa6, 0x01, 0xb2, 0xa8][..],
+        &lit32(t),
+        &[0xd4, 0x01, 0x01, 0xb4, 0xa7, 0xb6],
+    ]
+    .concat();
+    ok(&words(&b4));
+    let one_word = |op: &[u8]| {
+        let mut body = op.to_vec();
+        body.resize((t - BODY) as usize, 0);
+        body.extend([0x10, 0x00, 0xb8]);
+        script(&body)
+    };
+    assert_eq!(refused(&one_word(&b4)).reason, Reason::TableIndex);
+    assert_eq!(
+        refused(&one_word(&w_op(0x0001_0001))).reason,
+        Reason::TableIndex
+    );
     // An address is the low word of its operand.
     let d = ok(&strings(
         &[&[0xb5][..], &lit32(0x0001_0000 + t), &[0xb1, 0xb6]].concat(),
@@ -1393,7 +1482,7 @@ fn the_interpreter_reads_only_what_the_disassembler_found() {
     let n = trace::check(&events, &scripts);
     assert_eq!(n.failures(), 0, "{n:?}");
     assert!(
-        n.offsets > 100 && n.filled >= 6 && n.table_strings == 2,
+        n.offsets > 100 && n.filled >= 6 && n.table_strings == 2 && n.prints == 1,
         "{n:?}"
     );
     // The check is not vacuous: a wrong disassembly or a wrong byte is found.
@@ -1560,7 +1649,73 @@ fn the_parts_of_a_split_run_are_linked() {
     // Runs that only touch across an op are not one run.
     let s = script(b"Hello \xa7world.\xb6");
     let units = ScriptUnits::units(&ok(&s), &s);
-    assert!(units.runs.iter().all(|r| r.part_of.is_none()));
+    let runs: Vec<(&str, Option<u32>)> = units
+        .runs
+        .iter()
+        .map(|r| (r.unit.text.as_str(), r.part_of))
+        .collect();
+    assert_eq!(runs, [("look", None), ("Hello ", None), ("world.", None)]);
+}
+
+#[test]
+fn a_catalog_reads_back_only_with_its_split_links_as_written() {
+    // Two split runs: the first block jumps into "Hi there", the second into "Yo dude".
+    let mut body = b"Hi there\xf7\xefa\xf6".to_vec();
+    body.extend(jump(BODY + 3));
+    body.extend(b"\xee\xefb\xf6Yo dude");
+    let dude = BODY + body.len() as u32 - 4;
+    body.extend(jump(dude));
+    body.extend([0xee, 0xff]);
+    let s = script(&body);
+    let c = Catalog::build([(b'a', 7, s.as_slice())]);
+    let links: Vec<(&str, Option<u32>)> = c.scripts[0]
+        .runs
+        .iter()
+        .map(|r| (r.unit.text.as_str(), r.part_of))
+        .collect();
+    let yo = dude - 3;
+    assert_eq!(
+        links,
+        [
+            ("look", None),
+            ("Hi ", Some(BODY)),
+            ("there", Some(BODY)),
+            ("Yo ", Some(yo)),
+            ("dude", Some(yo)),
+        ]
+    );
+    assert!(Catalog::from_json(&c.to_json()).is_ok());
+    let tampered = |i: usize, link: Option<u32>| {
+        let mut t = c.clone();
+        t.scripts[0].runs[i].part_of = link;
+        Catalog::from_json(&t.to_json())
+    };
+    for (i, link, what) in [
+        (2, Some(BODY + 1), "a link to no run"),
+        (
+            1,
+            Some(BODY + 3),
+            "a first part linked to a later one (a cycle)",
+        ),
+        (3, Some(BODY), "a part of one group linked to another"),
+        (4, Some(BODY), "a part linked to a group it does not follow"),
+        (1, None, "a group whose first part links to nothing"),
+        (2, None, "a first part alone"),
+        (
+            0,
+            Some(5),
+            "a run outside a group linked to its own start, alone",
+        ),
+        (0, Some(BODY), "a run linked to a group after it"),
+    ] {
+        assert!(tampered(i, link).is_err(), "{what}");
+    }
+    let mut swapped = c.clone();
+    swapped.scripts[0].runs.swap(1, 2);
+    assert!(
+        Catalog::from_json(&swapped.to_json()).is_err(),
+        "runs out of order"
+    );
 }
 
 #[test]
@@ -1729,6 +1884,7 @@ fn a_table_read_of_one_nul_is_an_empty_string_or_a_failure() {
             vec![Event::Table {
                 at: at as i32,
                 byte: 0,
+                read: Read::Copy,
             }],
         )
     };
@@ -1743,6 +1899,139 @@ fn a_table_read_of_one_nul_is_an_empty_string_or_a_failure() {
     assert_eq!((n.byte_mismatches, n.table_mismatches), (1, 1), "{n:?}");
     let n = read(BODY + 8);
     assert_eq!((n.byte_mismatches, n.table_mismatches), (1, 1), "{n:?}");
+    // A 0 that is right but no empty string: the NUL that ends "a", the padding before the
+    // table.
+    for at in [t + 1, BODY + 12] {
+        let n = read(at);
+        assert_eq!(
+            (n.byte_mismatches, n.table_mismatches, n.failures()),
+            (0, 1, 1),
+            "{n:?}"
+        );
+    }
+}
+
+#[test]
+fn a_table_print_must_put_out_the_string_it_read() {
+    // `b5 d2 t b1` prints "ab" at `t`: the same reads with the string put out, nothing put
+    // out, or another character put out.
+    let t = BODY + 20;
+    let mut body = vec![0xb5];
+    body.extend(lit32(t));
+    body.extend([0xb1, 0xb6]);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"ab\0");
+    let prints = |out: &[u8]| {
+        let mut ev = vec![
+            Event::Run {
+                at: BODY as i32,
+                byte: 0xb5,
+                snap: None,
+            },
+            Event::PrintStart { snap: first_snap() },
+        ];
+        for (i, &b) in b"ab\0".iter().enumerate() {
+            ev.push(Event::Table {
+                at: (t as usize + i) as i32,
+                byte: b,
+                read: Read::Print,
+            });
+            if let Some(&c) = out.get(i).filter(|_| b != 0) {
+                ev.push(put(i16::from(c)));
+            }
+        }
+        let n = checked(&body, ev);
+        assert_eq!(
+            (n.prints, n.table_strings, n.failures() - n.print_mismatches),
+            (1, 1, 0)
+        );
+        n.print_mismatches
+    };
+    assert_eq!(prints(b"ab"), 0);
+    assert_eq!(prints(b""), 1, "nothing put out");
+    assert_eq!(prints(b"ax"), 1, "another character");
+    // A copy or a search puts nothing out: its reads are checked, not an output.
+    let copy: Vec<Event> = b"ab\0"
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| Event::Table {
+            at: (t as usize + i) as i32,
+            byte: b,
+            read: Read::Copy,
+        })
+        .collect();
+    let n = checked(&body, copy);
+    assert_eq!((n.prints, n.table_strings, n.failures()), (0, 1, 0));
+}
+
+#[test]
+fn a_conversation_stopped_while_it_waits_is_checked_as_far_as_it_went() {
+    // A visit of "abc" stopped after its second byte: right as far as it went, then a wrong
+    // byte after the last input-loop read, then a read outside any run.
+    let text = b"abc";
+    let body = [&text[..], &[0xb6]].concat();
+    let start = |bytes: &[(u32, u8)], out: &[u8]| {
+        let mut ev = vec![Event::Input {
+            at: BODY as i32 - 1,
+            byte: 0xf2,
+        }];
+        for (i, &(at, b)) in bytes.iter().enumerate() {
+            ev.push(Event::Run {
+                at: at as i32,
+                byte: b,
+                snap: if i == 0 { first_snap() } else { None },
+            });
+        }
+        ev.extend(out.iter().map(|&c| put(i16::from(c))));
+        ev
+    };
+    let interrupted = |ev: Vec<Event>| {
+        let s = script(&body);
+        let d = ok(&s);
+        let scripts: BTreeMap<(u8, u16), Decoded<'_>> = [(
+            (b'a', 7),
+            Decoded {
+                bytes: &s,
+                disasm: &d,
+            },
+        )]
+        .into();
+        let mut all = vec![Event::Load {
+            letter: b'a',
+            item: 7,
+        }];
+        all.extend(ev);
+        trace::check_interrupted(&all, &scripts)
+    };
+    let (a, b) = ((BODY, b'a'), (BODY + 1, b'b'));
+    // The output so far: all of the first byte's, the second byte's maybe not yet.
+    for out in [&b"ab"[..], b"a"] {
+        let n = interrupted(start(&[a, b], out));
+        assert_eq!((n.failures(), n.filled), (0, 1), "{n:?}");
+    }
+    let n = interrupted(start(&[a, b], b""));
+    assert_eq!(n.fill_mismatches, 1, "the first byte's output is missing");
+    let n = interrupted(start(&[a, (BODY + 1, b'x')], b"ax"));
+    assert!(n.byte_mismatches == 1 && n.failures() >= 1, "{n:?}");
+    let n = interrupted(start(&[(BODY + 1, b'b')], b"b"));
+    assert_eq!(n.partial_visits, 1, "a visit must start a run");
+    // Ended, the same open visit is partial.
+    let s = script(&body);
+    let d = ok(&s);
+    let scripts: BTreeMap<(u8, u16), Decoded<'_>> = [(
+        (b'a', 7),
+        Decoded {
+            bytes: &s,
+            disasm: &d,
+        },
+    )]
+    .into();
+    let mut all = vec![Event::Load {
+        letter: b'a',
+        item: 7,
+    }];
+    all.extend(start(&[a, b], b"ab"));
+    assert_eq!(trace::check(&all, &scripts).partial_visits, 1);
 }
 
 /// A conversation for actor 3 whose greeting reads tables with the expression ops: a word

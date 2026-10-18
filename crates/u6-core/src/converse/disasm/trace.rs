@@ -8,7 +8,9 @@
 //! - every byte `run_text`'s loop reads (text, ops, `ef`, stop bytes), and every op byte the
 //!   input loop reads;
 //! - every table read: the string bytes `print_op`'s and `assign`'s `d2` forms read and the
-//!   strings `b7` searches, the words `b4` and `c3` read, the `b8` that stops `b7` and `c3`,
+//!   strings `b7` searches (each read marked print, copy or search; a print also takes the
+//!   escape layer's state when it starts, so the check compares what it put out with its
+//!   string filled in), the words `b4` and `c3` read, the `b8` that stops `b7` and `c3`,
 //!   and the words `assign`'s `d2` form writes; and for `b4` / `b7` / `c3`, whether the table
 //!   address came from inside the evaluator's stack (outside it the evaluator reads 0, the
 //!   script's start, which the decoder marks with a stack hazard);
@@ -29,8 +31,9 @@ use std::collections::BTreeMap;
 
 use super::super::Cx;
 use super::super::vars;
+use super::decode::run_parts;
 use super::ops::{self, Escape};
-use super::{Disasm, HazardKind, Input, Kind, Stop};
+use super::{Disasm, HazardKind, Input, Kind, Part, Span, Stop};
 use crate::state::State;
 use crate::ui::text::{RUNIC, itoa};
 
@@ -50,8 +53,10 @@ pub(crate) enum Event {
     /// A character `put_raw` was handed (negative = a flush); `wait` = by a key wait, not by the
     /// escape layer.
     Emit { c: i16, wait: bool },
-    /// A string-table byte read (by `print_op`, `assign` or `b7`); a 0 ends the string.
-    Table { at: i32, byte: u8 },
+    /// `print_op`'s `d2` form starts printing a table string; `snap` = the state then.
+    PrintStart { snap: Option<Box<Snap>> },
+    /// A string-table byte read; a 0 ends the string.
+    Table { at: i32, byte: u8, read: Read },
     /// A table word read (by `b4` or `c3`), `at` its first byte.
     Word { at: i32, word: u16 },
     /// The `b8` that ends a table, read at an entry's start (by `b7` or `c3`).
@@ -61,6 +66,17 @@ pub(crate) enum Event {
     /// `b4` / `b7` / `c3` took its table address from inside the evaluator's stack, or (not
     /// `inside`) read 0 outside it; its table reads follow.
     Address { inside: bool },
+}
+
+/// Who reads a table string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Read {
+    /// `print_op` (`b5 d2`): each byte goes through the escape layer.
+    Print,
+    /// `assign` (`a6 … d2`): the string is copied into a string slot.
+    Copy,
+    /// `b7`: the string is matched against a slot's words.
+    Search,
 }
 
 /// The escape layer and the variables at a visit's first byte.
@@ -200,9 +216,19 @@ pub(crate) fn wait_put() {
     });
 }
 
-/// Hook: a string-table byte `b` at `at` was read.
-pub(crate) fn table_byte(at: i32, b: u8) {
-    push(Event::Table { at, byte: b });
+/// Hook: a string-table byte `b` at `at` was read, by `read`.
+pub(crate) fn table_byte(at: i32, b: u8, read: Read) {
+    push(Event::Table { at, byte: b, read });
+}
+
+/// Hook: `print_op` starts printing a table string.
+pub(crate) fn print_start(cx: &Cx<'_>) {
+    if !active() {
+        return;
+    }
+    let want = TRACE.with(|t| t.borrow().as_ref().is_some_and(|t| t.snapshots));
+    let snap = want.then(|| Box::new(snap(&cx.state.borrow())));
+    push(Event::PrintStart { snap });
 }
 
 /// Hook: the table word `word` at `at` was read.
@@ -247,6 +273,8 @@ pub(crate) struct Counts {
     pub filled: usize,
     /// Table strings read (by `print_op`, `assign` and `b7`).
     pub table_strings: usize,
+    /// Table prints whose output was compared.
+    pub prints: usize,
     /// Table words read (by `b4` and `c3`).
     pub table_words: usize,
     /// Table ends read (by `b7` and `c3`).
@@ -265,6 +293,8 @@ pub(crate) struct Counts {
     pub partial_visits: usize,
     /// Visits whose output is not the run with its escapes filled in.
     pub fill_mismatches: usize,
+    /// Table prints whose output is not the string read with its escapes filled in.
+    pub print_mismatches: usize,
     /// Table reads that are not one whole string of a string table, one word of a word table
     /// or a table's `b8`.
     pub table_mismatches: usize,
@@ -279,6 +309,7 @@ impl Counts {
         self.offsets += o.offsets;
         self.filled += o.filled;
         self.table_strings += o.table_strings;
+        self.prints += o.prints;
         self.table_words += o.table_words;
         self.table_ends += o.table_ends;
         self.table_writes += o.table_writes;
@@ -287,6 +318,7 @@ impl Counts {
         self.byte_mismatches += o.byte_mismatches;
         self.partial_visits += o.partial_visits;
         self.fill_mismatches += o.fill_mismatches;
+        self.print_mismatches += o.print_mismatches;
         self.table_mismatches += o.table_mismatches;
         self.past_item += o.past_item;
         self.unknown_script += o.unknown_script;
@@ -297,6 +329,7 @@ impl Counts {
             + self.byte_mismatches
             + self.partial_visits
             + self.fill_mismatches
+            + self.print_mismatches
             + self.table_mismatches
             + self.past_item
             + self.unknown_script
@@ -324,6 +357,14 @@ impl Decoded<'_> {
                 .iter()
                 .any(|e| e.offset == start && e.end() == end),
             _ => false,
+        })
+    }
+
+    /// The string-table entry that starts at `at`.
+    fn entry_at(&self, at: u32) -> Option<Span> {
+        self.item_at(at).and_then(|it| match &it.kind {
+            Kind::Table(t) if !t.words => t.entries.iter().find(|e| e.offset == at).copied(),
+            _ => None,
         })
     }
 
@@ -381,20 +422,54 @@ struct Visit {
     out: Vec<i16>,
 }
 
-/// Checks `events` against the disassemblies (`scripts` by (letter, item)).
+/// A table string read in progress.
+struct StrRead {
+    start: u32,
+    next: u32,
+    read: Read,
+}
+
+/// A table print in progress: the state when it started and what it put out so far.
+struct PrintOut {
+    snap: Option<Box<Snap>>,
+    out: Vec<i16>,
+}
+
+/// Checks `events` of a conversation that ended against the disassemblies (`scripts` by
+/// (letter, item)).
 pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>) -> Counts {
+    check_events(events, scripts, true)
+}
+
+/// [`check`] for a conversation stopped while it waits: a text visit or a table print still
+/// open at the end is checked as far as it went (its reads a start of whole runs or of one
+/// string, its output what those bytes put out, the last one's maybe not all yet).
+pub(crate) fn check_interrupted(
+    events: &[Event],
+    scripts: &BTreeMap<(u8, u16), Decoded<'_>>,
+) -> Counts {
+    check_events(events, scripts, false)
+}
+
+fn check_events(
+    events: &[Event],
+    scripts: &BTreeMap<(u8, u16), Decoded<'_>>,
+    ended: bool,
+) -> Counts {
     let mut n = Counts::default();
     let mut cur: Option<Loaded<'_, '_>> = None;
     let mut visit: Option<Visit> = None;
-    // A table string read in progress: (first offset, next offset).
-    let mut table: Option<(u32, u32)> = None;
+    let mut table: Option<StrRead> = None;
+    let mut print: Option<PrintOut> = None;
     // The op `run_text` read last, and whether the table reads now come from an address
     // outside the evaluator's stack.
     let (mut op, mut outside) = (None, false);
     for e in events {
-        // Any other read ends a table string read (it must have ended at its NUL).
-        if !matches!(e, Event::Table { .. } | Event::Emit { .. }) && table.take().is_some() {
-            n.table_mismatches += 1;
+        // Any other read ends a table string read (it must have ended at its NUL) and the
+        // print it was for.
+        if !matches!(e, Event::Table { .. } | Event::Emit { .. }) {
+            n.table_mismatches += usize::from(table.take().is_some());
+            print = None;
         }
         if matches!(
             e,
@@ -421,9 +496,17 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
                     bytes: d.bytes.to_vec(),
                 });
             }
+            Event::PrintStart { snap } => {
+                print = Some(PrintOut {
+                    snap: snap.clone(),
+                    out: Vec::new(),
+                });
+            }
             Event::Emit { c, wait: false } => {
                 if let Some(v) = &mut visit {
                     v.out.push(*c);
+                } else if let Some(p) = &mut print {
+                    p.out.push(*c);
                 }
             }
             Event::Emit { wait: true, .. } => {}
@@ -497,7 +580,7 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
                 });
                 n.mismatches += usize::from(!ok);
             }
-            Event::Table { at, byte } => {
+            Event::Table { at, byte, read } => {
                 n.offsets += 1;
                 let Some(s) = &cur else {
                     n.unknown_script += 1;
@@ -513,16 +596,36 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
                 }
                 if *byte == 0 {
                     // The NUL ends the string; alone, it is an empty string.
-                    let (start, next) = table.take().unwrap_or((at, at));
+                    let r = table.take().unwrap_or(StrRead {
+                        start: at,
+                        next: at,
+                        read: *read,
+                    });
                     n.table_strings += 1;
-                    n.table_mismatches += usize::from(next != at || !s.d.string_ok(start, at));
+                    let whole = r.next == at && r.read == *read && s.d.string_ok(r.start, at);
+                    n.table_mismatches += usize::from(!whole);
+                    if *read == Read::Print
+                        && let Some(PrintOut {
+                            snap: Some(first),
+                            out,
+                        }) = print.take()
+                    {
+                        n.prints += 1;
+                        let parts = run_parts(&s.bytes, r.start, at).parts;
+                        n.print_mismatches +=
+                            usize::from(fill_parts(&s.bytes, &parts, &first) != out);
+                    }
                     continue;
                 }
                 match &mut table {
-                    Some((_, next)) if *next == at => *next += 1,
+                    Some(r) if r.next == at && r.read == *read => r.next += 1,
                     _ => {
                         n.table_mismatches += usize::from(table.is_some());
-                        table = Some((at, at + 1));
+                        table = Some(StrRead {
+                            start: at,
+                            next: at + 1,
+                            read: *read,
+                        });
                     }
                 }
             }
@@ -578,14 +681,94 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
             }
         }
     }
-    if table.take().is_some() {
-        n.table_mismatches += 1;
+    if ended {
+        // A string read or a visit left open at the end did not reach its end.
+        n.table_mismatches += usize::from(table.take().is_some());
+        n.partial_visits += usize::from(visit.take().is_some());
+        return n;
     }
-    // A visit left open at the end (the run did not reach its stop byte) is partial.
-    if visit.take().is_some() {
-        n.partial_visits += 1;
+    // Stopped while it waits: only a print or a text visit can be waiting (on a key, inside
+    // the escape layer or the line assembler).
+    if let Some(r) = table.take() {
+        let open = cur
+            .as_ref()
+            .filter(|_| r.read == Read::Print)
+            .and_then(|s| {
+                let e = s.d.entry_at(r.start).filter(|e| e.end() >= r.next)?;
+                Some((s, e))
+            });
+        match (open, print.take()) {
+            (
+                Some((s, e)),
+                Some(PrintOut {
+                    snap: Some(first),
+                    out,
+                }),
+            ) => {
+                n.prints += 1;
+                let all = run_parts(&s.bytes, r.start, e.end()).parts;
+                let done = run_parts(&s.bytes, r.start, r.next - 1).parts;
+                let ok = fill_parts(&s.bytes, &all, &first).starts_with(&out)
+                    && out.starts_with(&fill_parts(&s.bytes, &done, &first));
+                n.print_mismatches += usize::from(!ok);
+            }
+            (Some(_), _) => {}
+            (None, _) => n.table_mismatches += 1,
+        }
+    }
+    if let Some(v) = visit.take() {
+        open_visit(&mut n, cur.as_ref(), v);
     }
     n
+}
+
+/// A text visit still open where a conversation stopped: its reads must start a run and go on
+/// through whole runs; with a snapshot, its output must start with what the bytes before its
+/// last one put out and be a start of what the runs put out.
+fn open_visit(n: &mut Counts, s: Option<&Loaded<'_, '_>>, v: Visit) {
+    let Some(s) = s else { return };
+    let mut runs = Vec::new();
+    let mut at = v.start;
+    while at < v.next {
+        match s.d.item_at(at) {
+            Some(it) if it.offset == at => match &it.kind {
+                Kind::Text(run) => {
+                    runs.push(run);
+                    at = it.end();
+                }
+                _ => break,
+            },
+            _ => break,
+        }
+    }
+    if at < v.next {
+        n.partial_visits += 1;
+        return;
+    }
+    let Some(first) = v.snap else {
+        return;
+    };
+    n.filled += 1;
+    let all: Vec<Part> = runs.iter().flat_map(|r| r.parts.iter().copied()).collect();
+    // The parts the bytes before the last one read make up (plain text cut there).
+    let cut = v.next - 1;
+    let mut done = Vec::new();
+    for p in &all {
+        if p.offset + p.len <= cut {
+            done.push(*p);
+        } else {
+            if p.escape.is_none() && p.offset < cut {
+                done.push(Part {
+                    len: cut - p.offset,
+                    ..*p
+                });
+            }
+            break;
+        }
+    }
+    let ok = fill_parts(&s.bytes, &all, &first).starts_with(&v.out)
+        && v.out.starts_with(&fill_parts(&s.bytes, &done, &first));
+    n.fill_mismatches += usize::from(!ok);
 }
 
 /// Ends the text visit in progress: its reads must cover whole runs, from a run's start to a
@@ -635,6 +818,12 @@ fn is_alpha(c: i16) -> bool {
 /// filled in or applied, -1 for a flush; spaces and newlines as they are (this is before word
 /// wrap). Capitalising and the runic bit of plain text are the line assembler's, after this.
 pub(crate) fn fill(script: &[u8], runs: &[&super::Run], s: &Snap) -> Vec<i16> {
+    let parts: Vec<Part> = runs.iter().flat_map(|r| r.parts.iter().copied()).collect();
+    fill_parts(script, &parts, s)
+}
+
+/// [`fill`] over parts (of runs, or of a table string the escape layer prints).
+fn fill_parts(script: &[u8], parts: &[Part], s: &Snap) -> Vec<i16> {
     let mut e = s.esc.clone();
     let mut out = Vec::new();
     let string = |out: &mut Vec<i16>, v: u8| {
@@ -650,7 +839,7 @@ pub(crate) fn fill(script: &[u8], runs: &[&super::Run], s: &Snap) -> Vec<i16> {
         let c = i16::from(c) & 0x1f;
         if e.runic { c | 0x80 } else { c }
     };
-    for p in runs.iter().flat_map(|r| &r.parts) {
+    for p in parts {
         let bytes = &script[p.offset as usize..(p.offset + p.len) as usize];
         // Hidden text drops every character but `&`, escapes included.
         if e.hidden && !e.show_hidden && p.escape != Some(Escape::Hidden) {

@@ -220,10 +220,15 @@ async fn print_op(cx: &Cx<'_>) -> i16 {
     if kind == 0xd2 {
         let back = table_element(cx, true).await;
         cx.cv(|c| c.saved_pc = back);
+        #[cfg(test)]
+        super::disasm::trace::print_start(cx);
         loop {
             let b = cx.cv(|c| c.next());
             #[cfg(test)]
-            super::disasm::trace::table_byte(cx.cv(|c| c.pos()) - 1, b);
+            {
+                use super::disasm::trace::{Read, table_byte};
+                table_byte(cx.cv(|c| c.pos()) - 1, b, Read::Print);
+            }
             if b == 0 || cx.cv(|c| c.fault) {
                 break;
             }
@@ -288,7 +293,11 @@ async fn assign(cx: &Cx<'_>) -> i16 {
             loop {
                 let b = s.converse.next();
                 #[cfg(test)]
-                super::disasm::trace::table_byte(s.converse.pos() - 1, b);
+                super::disasm::trace::table_byte(
+                    s.converse.pos() - 1,
+                    b,
+                    super::disasm::trace::Read::Copy,
+                );
                 if b == 0 || s.converse.fault {
                     break;
                 }
