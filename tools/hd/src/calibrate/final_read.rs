@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use serde::Deserialize;
@@ -158,6 +158,8 @@ pub fn record(text: &str) -> Result<Record, String> {
 /// A pair of the last pass: what the fixed point left of a pair checked in pass 1.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Last {
+    /// Its line in pass 1.
+    pub line: usize,
     pub pair: Pair,
     /// Its sides in the last pass (by the slices) and its measure there.
     pub sides: Sides,
@@ -269,6 +271,7 @@ fn tile(id: ImageId) -> Option<u16> {
 /// - `measure`: a pair of the last pass whose sides did not change since pass 1, measured from
 ///   the slices otherwise than pass 1 logged it;
 /// - `failing`: a pair of the last pass failing (the fixed point does not end there);
+/// - `cell`: a pair of the last pass logged with no cell (`at`): no window is placed at it;
 /// - `last`: a line that passes in a pass after the last; the last pass's lines, when the log
 ///   has them, other than the last pass rebuilt (a pass between the first and the last may be
 ///   logged whole: its passing lines are not checked).
@@ -539,7 +542,17 @@ pub fn fixed(
                 ),
             );
         }
+        if l.at.is_none() {
+            say!(
+                "cell",
+                format!(
+                    "line {}: a pair of the last pass with no cell (at): no window can draw it",
+                    l.line
+                ),
+            );
+        }
         last.push(Last {
+            line: l.line,
             pair: l.pair,
             sides,
             result,
@@ -745,8 +758,8 @@ pub struct Window {
 }
 
 /// The pair of the last pass to place a window for `records` at: one that a record of them
-/// meets, with a cell, of label `label` when given; the largest ratio over limit, then the
-/// first in pair order.
+/// meets (with a cell: each has one, [`fixed`]), of label `label` when given; the largest ratio
+/// over limit, then the first in pair order.
 fn at_pair(fixed: &Fixed, records: &[u16], label: Option<&str>) -> Option<usize> {
     let mut best: Option<usize> = None;
     for (i, l) in fixed.last.iter().enumerate() {
@@ -941,7 +954,7 @@ pub struct FinalSummary {
     /// `--include`: ids, windows, ids not generated.
     pub include: Option<(usize, usize, usize)>,
     /// Windows of a pair of the last pass no other window draws; pairs of the last pass (of the
-    /// label, with one) drawn in no window.
+    /// label, with one) drawn in no window: 0, since a run that leaves one fails.
     pub pair_windows: usize,
     pub unread: usize,
     pub tsv_rows: usize,
@@ -1143,6 +1156,27 @@ fn measured(result: Option<(f32, f32)>, digits: usize) -> String {
     )
 }
 
+/// Writes `d`, a line each, to `name` in the out dir `out`, and gives the run's error: `what`,
+/// nothing drawn, the kinds and how many of each (the record ids only in the file).
+fn refuse(out: &Path, name: &str, what: &str, d: &[Disagreement]) -> String {
+    let mut detail = String::new();
+    let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+    for x in d {
+        let _ = writeln!(detail, "{}: {}", x.kind, x.detail);
+        *kinds.entry(x.kind).or_default() += 1;
+    }
+    let path = out.join(name);
+    if let Err(e) = work::write_file(&path, detail.as_bytes()) {
+        return e;
+    }
+    let k: Vec<String> = kinds.iter().map(|(k, n)| format!("{k} {n}")).collect();
+    format!(
+        "{what}, nothing drawn: {} (details in {})",
+        k.join(", "),
+        path.display()
+    )
+}
+
 /// Runs `calibrate --final` (module docs of [`crate::calibrate`]) over the work dir.
 pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<FinalSummary, String> {
     let out = work::ensure_dir(&o.out)?;
@@ -1175,25 +1209,14 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
     let files: BTreeSet<u16> = masters(&dir)?.into_iter().map(|(r, _)| r).collect();
     let slices = Rc::new(Slices::read(game, &dir)?);
     let plan = group::plan(game);
-    let fixed = match fixed(game, &plan, &rec, &list, &files, &slices, o.seam) {
-        Ok(f) => f,
-        Err(d) => {
-            let mut detail = String::new();
-            let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
-            for x in &d {
-                let _ = writeln!(detail, "{}: {}", x.kind, x.detail);
-                *kinds.entry(x.kind).or_default() += 1;
-            }
-            let path = out.join("disagreements.txt");
-            work::write_file(&path, detail.as_bytes())?;
-            let k: Vec<String> = kinds.iter().map(|(k, n)| format!("{k} {n}")).collect();
-            return Err(format!(
-                "the record and the slices disagree, nothing drawn: {} (details in {})",
-                k.join(", "),
-                path.display()
-            ));
-        }
-    };
+    let fixed = fixed(game, &plan, &rec, &list, &files, &slices, o.seam).map_err(|d| {
+        refuse(
+            &out,
+            "disagreements.txt",
+            "the record and the slices disagree",
+            &d,
+        )
+    })?;
 
     // The windows: one per survivor drawn in the map's records, then one per included id.
     let label = match &o.source {
@@ -1283,6 +1306,36 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         let d = draw_window(game, &plan, &fixed, &by, &w);
         seen.extend(d.ticks.iter().map(|t| t.1));
         windows.push(w);
+    }
+    // Planned whole before anything is drawn: a pair of the last pass that no window draws
+    // (not even its own, at its cell: a side covered there) fails the run.
+    let mut unshown: Vec<Disagreement> = Vec::new();
+    for (i, l) in fixed.last.iter().enumerate() {
+        if seen.contains(&i) || label.is_some_and(|x| !l.from(x)) {
+            continue;
+        }
+        let at =
+            l.at.map_or("-".to_string(), |a| format!("{},{},{}", a.z, a.x, a.y));
+        unshown.push(Disagreement {
+            kind: "unread",
+            detail: format!(
+                "line {}: t:{} t:{} {} ({} {}) at {at}: drawn in no window",
+                l.line,
+                l.pair.a,
+                l.pair.b,
+                edge_name(l.pair.edge),
+                l.labels,
+                l.sides.name()
+            ),
+        });
+    }
+    if !unshown.is_empty() {
+        return Err(refuse(
+            &out,
+            "unshown.txt",
+            "the windows do not draw every pair of the last pass",
+            &unshown,
+        ));
     }
 
     // The sheets: coverage by class, the alone ones apart, the pairs, then the included ids.

@@ -299,7 +299,7 @@ fn the_last_pass_is_rebuilt_from_the_slices() {
     let late = with.clone() + &after + "\n";
     assert_eq!(state(&g, &late, &left).unwrap_err(), ["last"]);
     // No fallback: pass 1 is the last pass, logged whole.
-    let only = logged(&g, &left, BG, "map", None) + "\n";
+    let only = logged(&g, &left, BG, "map", Some(At { z: 0, x: 4, y: 3 })) + "\n";
     let f3 = state(&g, &only, &left).unwrap();
     assert_eq!((f3.passes, f3.logged_last, f3.last.len()), (1, true, 1));
 }
@@ -352,6 +352,12 @@ fn the_record_and_the_slices_must_agree() {
     // A failing line whose generated side was not sent back in its pass.
     let late = edit(3, &|v| v["pass"] = serde_json::json!(2));
     assert!(state(&g, &late, &left).unwrap_err().contains(&"pass"));
+    // A pair of the last pass with no cell: no window could be placed at it.
+    let nowhere = edit(2, &|v| v["at"] = serde_json::Value::Null);
+    assert_eq!(state(&g, &nowhere, &left).unwrap_err(), ["cell"]);
+    // ... nor a pass-1 pair that no side of is generated any more: it is no pair of the last pass.
+    let gone = edit(0, &|v| v["at"] = serde_json::Value::Null);
+    assert!(state(&g, &gone, &left).is_ok());
     // Gated with other thresholds: said alone.
     let t = Thresholds {
         seam: 2.0,
@@ -773,18 +779,79 @@ fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
     let (text, left) = chain(&g);
     let (dir, work) = work_dir("covered", &text, &g, &left);
     let o = options(&dir);
-    let s = calibrate_final(&g, &work, &o).unwrap();
-    // B's window does not read it, nor the pair's own window at its cell.
-    assert_eq!((s.last, s.pair_windows, s.unread), (2, 1, 1));
-    let rows = rows_of(&o.out);
-    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
-    for r in &rows {
-        assert!(!r["ticks"].contains(&name(GRASS)), "{}", r["ticks"]);
-    }
+    // B's window does not read it, nor the pair's own window at its cell: the run fails before
+    // a sheet or samples.tsv is written, the pair's line in unshown.txt.
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(
+        e.contains("do not draw every pair of the last pass, nothing drawn: unread 1"),
+        "{e}"
+    );
+    assert!(!e.contains("t:"), "{e}");
+    assert_eq!(
+        files_of(&o.out),
+        ["gates.jsonl", "ingest.json", "unshown.txt"]
+    );
+    let detail = std::fs::read_to_string(o.out.join("unshown.txt")).unwrap();
+    assert_eq!(
+        detail,
+        format!(
+            "unread: line 3: t:{B} t:{GRASS} east (map gen-mmpx) at 0,4,3: drawn in no window\n"
+        )
+    );
     // An object that leaves the grass's west side (the chest's record): read in B's window.
     g.world.objects = vec![over(synthetic::OBJECTS)];
+    let o = FinalOptions {
+        out: dir.join("chest"),
+        ..options(&dir)
+    };
     let s = calibrate_final(&g, &work, &o).unwrap();
     assert_eq!((s.pair_windows, s.unread), (0, 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pair_with_nothing_measured_is_read_where_its_sides_show() {
+    // The chain, and B again at (4, 5) beside a record T east of it whose west half is clear:
+    // the gate measures nothing across that join, and the pair is still one of the last pass.
+    const T: u16 = 6;
+    let mut g = game();
+    let rec = &mut g.records[usize::from(T)];
+    for i in 0..256 {
+        let east = i % 16 >= 8;
+        rec.pixels[i] = if east {
+            GRAIN + (hash(i as u32, 7) % 5) as u8
+        } else {
+            0
+        };
+        rec.transparent[i] = !east;
+    }
+    g.world.chunks[0][5][4] = B as u8;
+    g.world.chunks[0][5][5] = T as u8;
+    let (text, left) = chain(&g);
+    let first = BTreeMap::from([(A, red_west(&near(&g, A))), (B, near(&g, B))]);
+    let bt = Pair {
+        a: B,
+        b: T,
+        edge: Edge::East,
+    };
+    let line = logged(&g, &first, bt, "map", Some(At { z: 0, x: 4, y: 5 }));
+    let text = text + &line + "\n";
+    let (dir, work) = work_dir("unmeasured", &text, &g, &left);
+    let o = options(&dir);
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    let f = state(&g, &text, &left).unwrap();
+    let x = f.last.iter().find(|l| l.pair == bt).unwrap();
+    assert_eq!((x.result, x.first.1), (None, None));
+    // Drawn in a window: B shows along its east side, T, with nothing on its west line, in its
+    // cell.
+    assert_eq!((s.last, s.unread), (3, 0));
+    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
+    let rows = rows_of(&o.out);
+    assert!(
+        rows.iter()
+            .any(|r| r["ticks"].contains(&format!("{},{}", name(B), name(T)))),
+        "{rows:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
