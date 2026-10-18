@@ -528,7 +528,13 @@ pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refus
     // why they end): each round's plan holds the addresses closed to landing paths from the
     // start, the addresses that can no longer be, and the landings to drop.
     let mut plan = Plan::default();
+    // A bound the module doc's argument gives (a landing taken again at most once, each landing
+    // dropped at most twice for a read past a table, and the bytes reserved and settled), with
+    // room to spare: a test build checks the rounds end.
+    let mut rounds = 0usize;
     loop {
+        rounds += 1;
+        debug_assert!(rounds <= 64 * bytes.len() + 64, "the rounds end");
         let next = {
             let mut d = Decoder::new(bytes, &plan);
             d.run()?;

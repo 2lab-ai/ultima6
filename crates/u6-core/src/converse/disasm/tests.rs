@@ -2393,6 +2393,32 @@ fn a_string_crossing_a_word_address_holds_no_address_inside_it() {
 }
 
 #[test]
+fn a_search_from_a_b8_keeps_only_the_string_it_is_in() {
+    // Direct: a print of `t` = "ab\xb8cd\0" and a search from its `b8`; then "ef\0", where
+    // the a1's landing jumps and reads "ef". The search reads nothing: the table keeps the
+    // string the print reads and the `b8` is in, not "ef", and that landing's code stays.
+    let t = BODY + 37;
+    let y = t + 6;
+    let mut body = b"\xf7\xef*\xf6\xb5".to_vec();
+    body.extend(lit32(t));
+    body.push(0xb1);
+    body.extend(search_of(t + 2, false));
+    body.extend([0xa1, 0x01, 0xa7]);
+    body.extend(jump(BODY));
+    body.push(0xa2);
+    body.extend(jump(y));
+    body.extend(b"ab\xb8cd\0ef\0");
+    let s = script(&body);
+    let d = any_order(&s);
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.entries.len(), 1);
+    assert!(matches!(item(&d, y).kind, Kind::Text(_)), "{:?}", shape(&d));
+    assert!(!d.hazards.iter().any(|h| h.kind == HazardKind::IntoData));
+}
+
+#[test]
 fn a_search_past_its_last_entry_onto_an_item_reads_past_its_table() {
     // "ab\0" at `t`, and right after it the `b6` a jump goes to: with no entry matching, the
     // search reads that code. A direct path's search refuses the script.
