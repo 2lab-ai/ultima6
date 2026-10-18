@@ -50,8 +50,10 @@ impl Drop for Mark {
 /// A stand-in for `codex`: `before`, then `n` helpers, each in a session of its own and keeping
 /// every descriptor it was given (the call's input and output), running `perl` while `mark`
 /// exists, then `after`. Each makes its session before its fork, so it is out of the call's
-/// group before the stand-in can exit and the group be killed (made after it, a keeper, which
-/// does not acknowledge, could die with the group if the loaded machine had not yet run it).
+/// group before the stand-in can exit and the group be killed at that exit (made after it, a
+/// keeper, which does not acknowledge, could die with the group if the loaded machine had not
+/// yet run it). A deadline that falls before a helper has made its session still kills it with
+/// the group: keeps-both's 4 s, below, is slack for a loaded machine, not a bound on its load.
 fn stub(
     dir: &Path,
     name: &str,
@@ -134,8 +136,9 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
     // exit (0.41-0.59 s in seven more at 58-86), which a 1 s deadline nearly cut off as "timed
     // out". The one that hangs gets 4 s, 7-10x those (10x the 0.97 s would cost 27 s more
     // a run: its deadline is its run time, three rounds), so that its keeper has started, and
-    // left the group, before the deadline kills the group: one that had not would be missing
-    // from the six counted at the end.
+    // left the group, before the deadline kills the group: one that had not would end its call
+    // at the deadline, without the grace (its round fails on it), and be missing from the six
+    // counted at the end.
     let shapes = [
         // Keeps the output: takes the prompt, exits; the stream never ends.
         (
@@ -188,6 +191,16 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
             };
             println!("{name} round {round}: {took:?}: {e}");
             assert!(e.contains(want), "{name} round {round}: {e}");
+            // Its keeper holds the call's output past the deadline, so the grace is waited out; a
+            // call that ended at its deadline lost its keeper with the group (not yet in a session
+            // of its own).
+            if *name == "keeps-both.sh" {
+                assert!(
+                    took >= Duration::from_secs(*secs) + CLEANUP,
+                    "{name} round {round}: {took:?}: its keeper had not left the call's group by \
+                     the {secs} s deadline"
+                );
+            }
             if name.starts_with("floods") {
                 // All four writers were writing: each acknowledged a write that went in.
                 let acks = std::fs::read_dir(&t)
@@ -217,7 +230,8 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
         .args(["-f", keep.0.to_str().unwrap()])
         .output()
         .unwrap();
-    assert_eq!(String::from_utf8_lossy(&alive.stdout).lines().count(), 6);
+    let alive = String::from_utf8_lossy(&alive.stdout).into_owned();
+    assert_eq!(alive.lines().count(), 6, "keepers alive (pids): {alive:?}");
     drop((keep, flood));
     std::thread::sleep(Duration::from_millis(500));
     let _ = std::fs::remove_dir_all(&t);

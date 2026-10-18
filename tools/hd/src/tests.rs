@@ -1604,8 +1604,8 @@ fn one_deadline_covers_the_call_and_what_it_started() {
     };
     let dir = crate::work::ensure_dir(&t.join("call")).unwrap();
     std::fs::write(t.join("sheet.png"), b"x").unwrap();
-    // The call's child, killed with it, is gone in a moment however loaded the machine
-    // (looked for up to 10 s; one that outlived the call would sleep on for its 100 s).
+    // The call's child, killed with it, is gone in a moment: looked for up to 10 s, slack for
+    // a loaded machine (one that outlived the call would sleep on for its 100 s).
     let child_gone = || {
         let start = Instant::now();
         while alive(&t.join("pid")) {
@@ -2664,8 +2664,9 @@ fn stderr_written_after_the_events_end_is_still_kept() {
          /usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die \"setsid: $!\"; exit if fork; \
          select(undef, undef, undef, 0.3); print STDERR \"late\\n\"' > /dev/null\nexit 0",
     );
-    // A grace far past the helper's 300 ms, however loaded the machine: the call still ends
-    // before the grace does, when the helper does (its stderr's end).
+    // A grace far past the helper's 300 ms, 100 times it, as slack for a loaded machine (a
+    // longer pause would still outlast it): the call still ends before the grace does, when
+    // the helper does (its stderr's end).
     let c = run::Codex {
         bin: late,
         home: t.join("home"),
@@ -2695,10 +2696,9 @@ const INSTANT_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
 
 /// The time on [`INSTANT_CLOCK`].
 fn instant_clock() -> std::time::Duration {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
+    // Zeroed, not a literal: on some targets the struct has private padding beside its fields.
+    // SAFETY: a timespec is integers (and padding), for which all zero bytes are a value.
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
     // SAFETY: clock_gettime(2) writes the one timespec it is given; no other memory involved.
     assert_eq!(unsafe { libc::clock_gettime(INSTANT_CLOCK, &mut ts) }, 0);
     std::time::Duration::new(
