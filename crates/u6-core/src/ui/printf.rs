@@ -251,14 +251,11 @@ async fn escape(state: &RefCell<State>, io: &Io, c: i32) {
             {
                 let mut s = state.borrow_mut();
                 if s.ui.text.wide && c == ch(b'{') {
-                    // Port (spec 08): `@{` opens a brace highlight, closed by `}`.
-                    let alert = s.ui.tables.colours.alert;
+                    // Port (spec 08): `@{` opens a brace highlight, closed by `}`; the puts
+                    // between take the alert colour ([`put_cell`]).
                     let t = &mut s.ui.text;
                     t.prefix = 0;
                     t.brace = true;
-                    if t.keyword_colour {
-                        t.win_mut().fg = alert;
-                    }
                     return;
                 }
                 let ends = c == 0

@@ -341,6 +341,20 @@ fn a_brace_highlight_with_wide_on() {
     // Plain `@` as before: to the end set.
     assert_eq!(cell(fb, 30, 14, ALERT), b'c');
     assert_eq!(row_text(fb, 31..34, 14, INK), ". d");
+    // A braced phrase keeps the colour past a wrapped row and past a flush.
+    let e = print(wide(Language::English), b"@{aaaa bbbb cccc dddd} e", &[]);
+    assert_eq!(row_text(e.frame(), 22..36, 14, ALERT), "aaaa bbbb cccc");
+    assert_eq!(row_text(e.frame(), 22..26, 15, ALERT), "dddd");
+    assert_eq!(row_text(e.frame(), 26..28, 15, INK), " e");
+    let e = run(wide(Language::English), &[], 4, |st, io| async move {
+        printf(&st, &io, b"@{ab", &[]).await;
+        print::put_raw(&st, &io, -1).await;
+        printf(&st, &io, b"#1d} e", &[]).await;
+        print::put_raw(&st, &io, -1).await;
+        io.present();
+    });
+    assert_eq!(row_text(e.frame(), 22..26, 14, ALERT), "ab0d");
+    assert_eq!(row_text(e.frame(), 26..28, 14, INK), " e");
     // Off, `@{` is the plain keyword with its brace.
     let e = print(state(), b"@{x} y", &[]);
     assert_eq!(row_text(e.frame(), 22..25, 14, ALERT), "{x}");

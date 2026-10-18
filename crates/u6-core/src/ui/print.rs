@@ -97,15 +97,20 @@ pub async fn put_raw(state: &RefCell<State>, io: &Io, c: i32) {
 }
 
 /// [`put_raw`] without the release: the escape layer's own puts. The runic bit is only for the
-/// characters above space below 0x80 (a cell code past them keeps its glyph).
+/// characters above space below 0x80 (a cell code past them keeps its glyph). Inside `@{…}`
+/// every character takes the alert colour (a drawn row gives the window back its text ink).
 pub(super) async fn put_cell(state: &RefCell<State>, io: &Io, c: i32) {
     let mut c = c;
     let paging;
     {
         let mut s = state.borrow_mut();
+        let alert = s.ui.tables.colours.alert;
         let t = &mut s.ui.text;
         if !t.on {
             return;
+        }
+        if t.brace && t.keyword_colour {
+            t.win_mut().fg = alert;
         }
         if t.skip_newline && t.win().flags & SCROLL != 0 {
             if c == NL {
