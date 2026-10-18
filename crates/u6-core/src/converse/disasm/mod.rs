@@ -15,8 +15,9 @@
 //!   computes it; when it does not fall on an item start, or the byte it stopped on is not that
 //!   item's own byte, the landing is recorded as a [`Hazard`], not decoded;
 //! - every item is decoded from its first byte alone, so a byte has one meaning; two decodes that
-//!   disagree on a byte refuse the script ([`Reason::Overlap`]), except a second entry into a
-//!   text run, which is a hazard ([`HazardKind::RunEntry`]);
+//!   disagree on a byte refuse the script ([`Reason::Overlap`]). A path that enters a text run
+//!   after its start (a `b0` into a run's last newline, in the shipped scripts) splits the run
+//!   there, so every run is read from its start ([`Disasm::run_splits`]);
 //! - tables are the bytes the ops address as data (`b5 d2`, `a6 d2`, and the address operand of
 //!   the expression ops `b4`, `b7`, `c3`): NUL-ended strings or words, up to a `b8` at an
 //!   entry's start, the next decoded byte or the script's end. They are never decoded as ops;
@@ -51,8 +52,10 @@ pub struct Disasm {
     pub item: u16,
     pub len: u32,
     pub items: Vec<Item>,
-    /// Places where a skip loop or a second entry does not meet the items (see the module doc).
+    /// Places where a skip loop or a path does not meet the items (see the module doc).
     pub hazards: Vec<Hazard>,
+    /// Offsets where a path enters text in the middle: the run there was split in two.
+    pub run_splits: Vec<u32>,
 }
 
 /// A byte range of a script.
@@ -318,8 +321,6 @@ pub struct Hazard {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HazardKind {
-    /// A jump, scan or second path enters a text run after its start.
-    RunEntry,
     /// A skip loop stops on a byte inside an item, or lands inside one.
     Scan(Scan),
     /// A skip loop finds no stop byte before the script's end.
@@ -439,6 +440,7 @@ pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refus
         len: bytes.len() as u32,
         items,
         hazards: d.hazards,
+        run_splits: d.run_splits,
     })
 }
 
@@ -484,6 +486,7 @@ struct Decoder<'a> {
     scans: Vec<(Landing, Ctx)>,
     landed: Vec<Landing>,
     hazards: Vec<Hazard>,
+    run_splits: Vec<u32>,
 }
 
 fn refuse<T>(at: u32, reason: Reason) -> Result<T, Refusal> {
@@ -502,6 +505,7 @@ impl<'a> Decoder<'a> {
             scans: Vec::new(),
             landed: Vec::new(),
             hazards: Vec::new(),
+            run_splits: Vec::new(),
         }
     }
 
@@ -604,20 +608,51 @@ impl<'a> Decoder<'a> {
         let start = match self.owner[at as usize] {
             NO_OWNER => {
                 let item = self.decode(at)?;
-                self.insert(item)?
+                let end = item.end();
+                let text = matches!(item.kind, Kind::Text(_));
+                let start = self.insert(item)?;
+                // A run that stops at a run decoded earlier ends where a path entered.
+                if text && self.owner.get(end as usize).is_some_and(|&o| o == end) {
+                    self.run_splits.push(end);
+                }
+                start
             }
             s => s,
         };
         if start != at {
-            if matches!(self.items[&start].kind, Kind::Text(_)) {
-                self.hazard(at, HazardKind::RunEntry);
-                let end = self.items[&start].end();
-                self.work.push((end, ctx));
-                return Ok(());
+            if !matches!(self.items[&start].kind, Kind::Text(_)) {
+                return refuse(at, Reason::Overlap);
             }
-            return refuse(at, Reason::Overlap);
+            self.split(start, at);
         }
-        self.follow(start, ctx)
+        self.follow(at, ctx)
+    }
+
+    /// A path enters the text run at `start` at `at`: the run becomes two, so that every run
+    /// the interpreter reads is read from its start (the paths that read the first part go on
+    /// into the second).
+    fn split(&mut self, start: u32, at: u32) {
+        let end = self.items[&start].end();
+        self.items.remove(&start);
+        for (s, e) in [(start, at), (at, end)] {
+            self.items.insert(
+                s,
+                Item {
+                    offset: s,
+                    len: e - s,
+                    kind: Kind::Text(self.run_parts(s, e)),
+                },
+            );
+        }
+        for p in at..end {
+            self.owner[p as usize] = at;
+        }
+        self.run_splits.push(at);
+        for ctx in [Ctx::Look, Ctx::Main] {
+            if self.seen.contains(&(start, ctx)) {
+                self.work.push((at, ctx));
+            }
+        }
     }
 
     /// Queues the successors of the item at `at` read in `ctx`.
@@ -745,15 +780,16 @@ impl<'a> Decoder<'a> {
             self.hazard(l.at, HazardKind::ScanPastEnd(l.scan));
             return Ok(());
         }
-        match self.owner[l.at as usize] {
-            o if o == NO_OWNER || o == l.at => self.work.push((l.at, ctx)),
-            _ => {}
+        let o = self.owner[l.at as usize];
+        let into_run = o != NO_OWNER && matches!(self.items[&o].kind, Kind::Text(_));
+        if o == NO_OWNER || o == l.at || into_run {
+            self.work.push((l.at, ctx));
         }
         Ok(())
     }
 
     /// After decoding: every skip loop must stop on the first byte of a code item and land on
-    /// an item's start; a landing inside a text run is a run entry.
+    /// an item's start.
     fn check_landings(&mut self) {
         let landed = std::mem::take(&mut self.landed);
         for l in &landed {
@@ -766,29 +802,15 @@ impl<'a> Decoder<'a> {
                 })
             };
             let stop_ok = self.owner[l.stop as usize] == l.stop && code(l.stop);
-            let at_owner = self.owner.get(l.at as usize).copied();
-            if !stop_ok {
+            let at_ok = self.owner.get(l.at as usize).is_none_or(|&o| o == l.at);
+            if !stop_ok || !at_ok {
                 self.hazard(l.at, HazardKind::Scan(l.scan));
-            } else if let Some(o) = at_owner
-                && o != l.at
-            {
-                let in_run = self
-                    .items
-                    .get(&o)
-                    .is_some_and(|it| matches!(it.kind, Kind::Text(_)));
-                let kind = if in_run {
-                    HazardKind::RunEntry
-                } else {
-                    HazardKind::Scan(l.scan)
-                };
-                self.hazard(l.at, kind);
             }
         }
         self.landed = landed;
     }
 
-    /// Adds a decoded item; a text run that starts earlier than runs already decoded inside it
-    /// absorbs them (each a run entry). Returns the item's start.
+    /// Adds a decoded item. Returns the item's start.
     fn insert(&mut self, item: Item) -> Result<u32, Refusal> {
         let (s, e) = (item.offset, item.end());
         if e > self.len() {
@@ -799,26 +821,8 @@ impl<'a> Decoder<'a> {
         {
             return refuse(t, Reason::TableInCode);
         }
-        let text = matches!(item.kind, Kind::Text(_));
-        let mut absorbed = Vec::new();
-        for p in s..e {
-            match self.owner[p as usize] {
-                NO_OWNER => {}
-                o if text
-                    && o > s
-                    && matches!(self.items[&o].kind, Kind::Text(_))
-                    && self.items[&o].end() == e =>
-                {
-                    if !absorbed.contains(&o) {
-                        absorbed.push(o);
-                    }
-                }
-                _ => return refuse(p, Reason::Overlap),
-            }
-        }
-        for o in absorbed {
-            self.items.remove(&o);
-            self.hazard(o, HazardKind::RunEntry);
+        if let Some(p) = (s..e).find(|&p| self.owner[p as usize] != NO_OWNER) {
+            return refuse(p, Reason::Overlap);
         }
         for p in s..e {
             self.owner[p as usize] = s;
@@ -833,8 +837,14 @@ impl<'a> Decoder<'a> {
     fn decode(&self, at: u32) -> Result<Item, Refusal> {
         let b = self.byte(at)?;
         let (len, kind) = if ops::is_text(b) {
+            // Up to the next non-text byte, or the start of a run a path entered before (the
+            // run was split there) or of a table.
             let end = (at..self.len())
-                .find(|&i| !ops::is_text(self.b[i as usize]))
+                .find(|&i| {
+                    !ops::is_text(self.b[i as usize])
+                        || self.owner[i as usize] != NO_OWNER
+                        || self.reserved.contains(&i)
+                })
                 .unwrap_or(self.len());
             (end - at, Kind::Text(self.run_parts(at, end)))
         } else if b == 0 {

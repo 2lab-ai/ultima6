@@ -204,7 +204,7 @@ pub(crate) struct Counts {
     pub mismatches: usize,
     /// Bytes read that differ from the script's bytes.
     pub byte_mismatches: usize,
-    /// Visits of a run that do not read it whole, from its start to its end.
+    /// Text reads that do not start at a run's start and end at a run's end.
     pub partial_visits: usize,
     /// Visits whose printed output is not the run with its escapes filled in.
     pub fill_mismatches: usize,
@@ -302,9 +302,6 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
                         Some((_, next, _)) if *next == at => *next += 1,
                         _ => {
                             close_visit(&mut n, current, &mut visit, None);
-                            if item.offset != at {
-                                n.partial_visits += 1;
-                            }
                             visit = Some((at, at + 1, snap.clone()));
                         }
                     }
@@ -400,8 +397,9 @@ fn table_ok(d: Option<&Decoded<'_>>, (start, end, _): (u32, u32, bool)) -> bool 
     })
 }
 
-/// Ends the text visit in progress: it must have read its run from start to end; with both
-/// snapshots, what it printed must be the run filled in.
+/// Ends the text visit in progress: its reads must cover whole runs, from a run's start to a
+/// run's end (several runs when a path entered text in the middle and split it); with both
+/// snapshots, what it printed must be those runs filled in.
 fn close_visit(
     n: &mut Counts,
     d: Option<&Decoded<'_>>,
@@ -412,16 +410,29 @@ fn close_visit(
         return;
     };
     let Some(d) = d else { return };
-    let Some(item) = d.item_at(start) else { return };
-    if next != item.end() {
+    let mut runs = Vec::new();
+    let mut at = start;
+    while at < next {
+        match d.item_at(at) {
+            Some(it) if it.offset == at => match &it.kind {
+                Kind::Text(run) => {
+                    runs.push(run);
+                    at = it.end();
+                }
+                _ => break,
+            },
+            _ => break,
+        }
+    }
+    if at != next {
         n.partial_visits += 1;
         return;
     }
-    let (Some(first), Some(end), Kind::Text(run)) = (first, end, &item.kind) else {
+    let (Some(first), Some(end)) = (first, end) else {
         return;
     };
     n.filled += 1;
-    let want = fill(d.bytes, run, &first);
+    let want = fill(d.bytes, &runs, &first);
     let after = &end.printed;
     let ok = after.len() >= want.len() && after.ends_with(&want) && {
         let head = &after[..after.len() - want.len()];
@@ -438,10 +449,10 @@ fn is_alpha(c: u32) -> bool {
     is_lower(c) || (0x41..=0x5a).contains(&c)
 }
 
-/// What a run prints, from its parts and the state at its first byte: plain text as it is,
-/// each escape filled in or applied (`text_out`'s rules over parts, not bytes). Spaces and
-/// newlines are dropped, as [`printed`] drops them.
-pub(crate) fn fill(script: &[u8], run: &super::Run, s: &Snap) -> Vec<u32> {
+/// What runs read one after the other print, from their parts and the state at the first byte:
+/// plain text as it is, each escape filled in or applied (`text_out`'s rules over parts, not
+/// bytes). Spaces and newlines are dropped, as [`printed`] drops them.
+pub(crate) fn fill(script: &[u8], runs: &[&super::Run], s: &Snap) -> Vec<u32> {
     let mut e = s.esc.clone();
     let mut out = Vec::new();
     let raw = |e: &mut EscState, out: &mut Vec<u32>, c: i32| {
@@ -465,7 +476,7 @@ pub(crate) fn fill(script: &[u8], run: &super::Run, s: &Snap) -> Vec<u32> {
             out.push(c as u32);
         }
     };
-    for p in &run.parts {
+    for p in runs.iter().flat_map(|r| &r.parts) {
         let bytes = &script[p.offset as usize..(p.offset + p.len) as usize];
         if e.hidden && !e.show_hidden && p.escape != Some(Escape::Hidden) {
             continue;
