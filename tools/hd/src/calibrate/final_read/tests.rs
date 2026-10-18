@@ -1006,6 +1006,13 @@ fn classic_by_hand(g: &Game, s: u32, tiles: impl Fn(usize, usize) -> Vec<u16>) -
     out
 }
 
+/// Panel `k` of the window in row `row` of a final sheet at S `s` whose rows have no legend.
+fn panel_in_row(sheet: &Rgba, s: u32, row: usize, k: usize) -> Rgba {
+    let l = Layout::of(s);
+    let (px, py) = l.panel_at(row, k);
+    sheet.rect(px, py, l.w, l.h)
+}
+
 /// Record `r` alone in a cell at S `s`, by hand: each pixel its colour (the palette's first
 /// colour where it is clear).
 fn record_by_hand(g: &Game, r: u16, s: u32) -> Rgba {
@@ -2039,10 +2046,37 @@ fn every_record_of_an_item_is_drawn_in_a_window() {
         let (dir, work) = work_dir(name, &text, g, &images);
         let o = options(&dir);
         let s = calibrate_final(g, &work, &o).unwrap();
-        (dir, rows_of(&o.out), s)
+        (dir, rows_of(&o.out), s, o.out)
+    };
+    // The alone windows as the sheet has them, at both scales, against the frames by hand:
+    // `frames` in order, nine a window, at columns 1, 3, 5 of rows 1, 3, 5.
+    assert_ne!(record_by_hand(&g, base, 4), record_by_hand(&g, base + 1, 4));
+    let alone_sheet = |out: &Path, frames: &[u16]| {
+        for (s, file) in [
+            (4, "final-actor-alone.png"),
+            (2, "final-actor-alone-s2.png"),
+        ] {
+            let sheet = read_sheet(&out.join(file));
+            for (row, page) in frames.chunks(9).enumerate() {
+                let cells = |c: usize, r: usize| -> Vec<u16> {
+                    let (odd_c, odd_r) = (c % 2 == 1 && c < 7, r % 2 == 1);
+                    let j = (r / 2) * 3 + c / 2;
+                    match page.get(j).filter(|_| odd_c && odd_r) {
+                        Some(&f) => vec![f],
+                        None => vec![],
+                    }
+                };
+                let want = classic_by_hand(&g, s, cells);
+                assert_eq!(panel_in_row(&sheet, s, row, 0), want, "{file} {row}");
+                let hd = panel_in_row(&sheet, s, row, 2);
+                assert!(pack_by_hand(&g, &hd, s, frames, cells) > 0, "{file} {row}");
+            }
+        }
     };
     // Drawn nowhere in the starting world: alone, in two windows, every frame in one.
-    let (dir, rows, s) = run(&g, "actor-alone");
+    let (dir, rows, s, out) = run(&g, "actor-alone");
+    let frames: Vec<u16> = (base..base + 12).collect();
+    alone_sheet(&out, &frames);
     let notes: Vec<&str> = rows.iter().map(|r| r["note"].as_str()).collect();
     assert_eq!(
         notes,
@@ -2068,7 +2102,24 @@ fn every_record_of_an_item_is_drawn_in_a_window() {
         z: 0,
         tile: base,
     }];
-    let (dir, rows, s) = run(&g2, "actor-rest");
+    let (dir, rows, s, out) = run(&g2, "actor-rest");
+    alone_sheet(&out, &frames[1..]);
+    // ... and the window where it stands draws its first frame in A's cell, on the grass.
+    for (sc, file) in [(4, "final-actor.png"), (2, "final-actor-s2.png")] {
+        let sheet = read_sheet(&out.join(file));
+        let cells = |c: usize, r: usize| {
+            let mut v = vec![GRASS];
+            if (c, r) == A_CELL {
+                v.push(base);
+            }
+            v
+        };
+        assert_eq!(
+            panel_of(&sheet, sc, 0),
+            classic_by_hand(&g2, sc, cells),
+            "{file}"
+        );
+    }
     let places: Vec<(&str, &str)> = rows
         .iter()
         .map(|r| (r["placement"].as_str(), r["note"].as_str()))
@@ -2130,6 +2181,26 @@ fn a_window_where_the_world_draws_it_shows_its_record() {
         ("drawn", "12", "12")
     );
     assert_eq!(w["frames"], "pair");
+    // The sheet draws the chest's cell as the second frame, on the grass, at both scales.
+    for (s, file) in [(4, w["sheet"].clone()), (2, w["sheet_s2"].clone())] {
+        let sheet = read_sheet(&o.out.join(&file));
+        let world = |f: u16| {
+            move |c: usize, r: usize| {
+                let mut v = vec![GRASS];
+                if (c, r) == A_CELL {
+                    v.push(f);
+                }
+                v
+            }
+        };
+        let (want, frame0) = (
+            classic_by_hand(&g, s, world(f1)),
+            classic_by_hand(&g, s, world(f0)),
+        );
+        assert_ne!(want, frame0);
+        assert_eq!(panel_of(&sheet, s, 0), want, "{file}");
+        assert!(pack_by_hand(&g, &panel_of(&sheet, s, 2), s, &[f1], world(f1)) > 0);
+    }
     // A map tile whose cell's base an object replaces is not drawn there: where the world first
     // draws the grass is past the first cell when a replacing object stands on it.
     let wanted = BTreeSet::from([GRASS]);
