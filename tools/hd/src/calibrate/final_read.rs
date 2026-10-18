@@ -269,8 +269,8 @@ fn tile(id: ImageId) -> Option<u16> {
 }
 
 /// What the fixed point left, from the record `rec` (of `gates.jsonl`), the list `accepted` (of
-/// `ingest.json`), the tile masters `files` found in `slices/` (each with the digest of its
-/// file as read) and the images `slices` read from them; the pairs measured again with the seam
+/// `ingest.json`), the masters `files` found in `slices/` (tiles, portraits and bitmaps, each
+/// with the digest of its file as read) and the images `slices` read from them; the pairs measured again with the seam
 /// threshold `seam`; the world's pairs ([`neighbour::pairs`]) as the gate takes them. Every
 /// disagreement, or the state:
 ///
@@ -283,7 +283,7 @@ fn tile(id: ImageId) -> Option<u16> {
 /// - `plan`: a fallback naming an item the plan has not, or of another class; an image listed
 ///   that no item has;
 /// - `listed`: a listed image whose id, slice path or content hash is not the game's;
-/// - `slice`: a master not listed, or listed and missing, or of a record the game has no image of;
+/// - `slice`: a master not listed, or listed and missing, or of an image the game has not;
 /// - `master`: a master whose file is not the one ingest wrote (its digest in `ingest.json`, of
 ///   what the gates judged; none in an `ingest.json` of an older ingest);
 /// - `part`: an item listed in part;
@@ -311,7 +311,7 @@ pub fn fixed(
     plan: &Plan,
     rec: &Record,
     accepted: &[Accepted],
-    files: &BTreeMap<u16, String>,
+    files: &BTreeMap<ImageId, String>,
     slices: &Slices,
     seam: f32,
 ) -> Result<Fixed, Vec<Disagreement>> {
@@ -422,7 +422,7 @@ pub fn fixed(
             );
         }
         // The master read is the one ingest wrote, which the gates judged.
-        if let Some(read) = tile(id).and_then(|r| files.get(&r))
+        if let Some(read) = files.get(&id)
             && a.digest.as_ref() != Some(read)
         {
             say!(
@@ -438,27 +438,36 @@ pub fn fixed(
         }
         listed.insert(id);
     }
-    let listed_tiles: BTreeSet<u16> = listed.iter().filter_map(|&id| tile(id)).collect();
-    let files: BTreeSet<u16> = files.keys().copied().collect();
+    let files: BTreeSet<ImageId> = files.keys().copied().collect();
     let files = &files;
-    for r in files.difference(&listed_tiles) {
+    for &id in files.difference(&listed) {
+        let name = atlas::image_name(id);
         say!(
             "slice",
-            format!("t:{r}: a master ingest.json does not list")
+            format!("{name}: a master ingest.json does not list")
         );
     }
-    for r in listed_tiles.difference(files) {
-        say!("slice", format!("t:{r}: listed, and no master in slices/"));
+    for &id in listed.difference(files) {
+        let name = atlas::image_name(id);
+        say!("slice", format!("{name}: listed, and no master in slices/"));
     }
-    for &r in files {
-        if slices.get(r).is_none() {
+    for &id in files {
+        let known = match id {
+            ImageId::Tile(r) => slices.get(r).is_some(),
+            _ => game.hash(id).is_some(),
+        };
+        if !known {
+            let name = atlas::image_name(id);
             say!(
                 "slice",
-                format!("t:{r}: a master of a record the game has no image of")
+                format!("{name}: a master of an image the game has not")
             );
         }
     }
-    let generated: BTreeSet<u16> = listed_tiles.intersection(files).copied().collect();
+    let generated: BTreeSet<u16> = listed
+        .intersection(files)
+        .filter_map(|&id| tile(id))
+        .collect();
 
     // The survivors: the items whose images are listed, whole.
     let mut owner: BTreeMap<ImageId, usize> = BTreeMap::new();
@@ -1207,7 +1216,7 @@ pub struct FinalSummary {
     pub logged_last: bool,
     pub first: usize,
     pub last: usize,
-    /// Images listed, and tile masters.
+    /// Images listed, and masters in `slices/` (tiles, portraits and bitmaps).
     pub listed: usize,
     pub masters: usize,
     /// Per class: survivors (items, images that draw), and coverage windows by placement;
@@ -1274,7 +1283,7 @@ impl FinalSummary {
             s,
             "calibrate --final (counts only): the fixed point's last pass is pass {}, {how}; {} \
              pairs checked in pass 1, {} in the last pass; ingest.json lists {} images, slices/ \
-             has {} tile masters; the record and the slices agree",
+             has {} masters; the record and the slices agree",
             self.passes, self.first, self.last, self.listed, self.masters
         );
         if let Source::Label(l) = &self.source {
@@ -1645,7 +1654,7 @@ fn run_final(
     // The masters listed once and each read once: the records with one are the ones read.
     let dir = work.path("slices");
     let slices = Rc::new(Slices::read(game, &dir)?);
-    let files: BTreeMap<u16, String> = slices.digests().clone();
+    let files: BTreeMap<ImageId, String> = slices.digests().clone();
     #[cfg(test)]
     for (key, touch) in AFTER_READ.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         if *key == o.out {

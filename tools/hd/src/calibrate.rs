@@ -56,7 +56,8 @@
 //! (`--slices`, `--at`, `--per` and `--seed` are not taken).
 //! - **The state** ([`final_read::fixed`]): snapshots of `gates.jsonl`, `ingest.json` and
 //!   `jobs.jsonl` (copied to the out dir and read there), the masters of the work dir's
-//!   `slices/` (listed once, each file read once, into memory, its digest kept) and the plan of
+//!   `slices/` (tiles, portraits and bitmaps, listed once, each file read once, into memory, its
+//!   digest kept; the tiles' decoded) and the plan of
 //!   items, which must be the one every job was laid out from (its fingerprint: the log's item
 //!   numbers name its items), every item the log names (listed, or sent back) laid out in some
 //!   job; all read at the start. Before the run reports success it reads
@@ -994,9 +995,9 @@ impl Images for Records<'_> {
     }
 }
 
-/// The tile masters of `dir` (`t-<record>.png`, ×8, as ingest writes them to `slices/`), by
-/// record; any other file is not read.
-pub fn masters(dir: &Path) -> Result<Vec<(u16, PathBuf)>, String> {
+/// The masters of `dir` as ingest writes them to `slices/` (×8: `t-<record>.png`,
+/// `p-<letter>-<item>.png`, `b-<role>.png`), by image; any other file is not read.
+pub fn masters(dir: &Path) -> Result<Vec<(ImageId, PathBuf)>, String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut out = Vec::new();
     for e in entries {
@@ -1008,13 +1009,13 @@ pub fn masters(dir: &Path) -> Result<Vec<(u16, PathBuf)>, String> {
         else {
             continue;
         };
-        let Some(id @ ImageId::Tile(r)) = atlas::parse_image(&stem.replace('-', ":")) else {
+        let Some(id) = atlas::parse_image(&stem.replace('-', ":")) else {
             continue;
         };
         if atlas::slice_name(id) != stem || !path.is_file() {
             continue;
         }
-        out.push((r, path));
+        out.push((id, path));
     }
     out.sort();
     Ok(out)
@@ -1024,8 +1025,8 @@ pub fn masters(dir: &Path) -> Result<Vec<(u16, PathBuf)>, String> {
 /// was made for.
 pub struct Slices {
     images: BTreeMap<u16, (u64, Rgba)>,
-    /// The masters read ([`Slices::read`]), by record: the digest of each file's bytes.
-    read: BTreeMap<u16, String>,
+    /// The masters read ([`Slices::read`]), by image: the digest of each file's bytes.
+    read: BTreeMap<ImageId, String>,
 }
 
 impl Slices {
@@ -1041,17 +1042,20 @@ impl Slices {
         }
     }
 
-    /// The tile masters of `dir` ([`masters`]), each file read once, into memory: its digest
-    /// kept ([`Slices::digests`]) and its image box-averaged to ×4 as `pack` writes it.
+    /// The masters of `dir` ([`masters`]), each file read once, into memory, its digest kept
+    /// ([`Slices::digests`]); a tile master's image box-averaged to ×4 as `pack` writes it (a
+    /// portrait's or a bitmap's is not decoded: nothing is drawn from it).
     pub fn read(game: &Game, dir: &Path) -> Result<Slices, String> {
         let side = TILE_W as u32 * MASTER;
         let (mut images, mut read) = (BTreeMap::new(), BTreeMap::new());
-        for (r, path) in masters(dir)? {
+        for (id, path) in masters(dir)? {
             let bytes = img::read_capped(&path, img::PNG_MAX_BYTES)?;
-            let master = img::decode_png(&bytes, side, side)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-            read.insert(r, work::digest(&[&bytes]));
-            images.insert(r, img::shrink(&master, MASTER / SCALE));
+            read.insert(id, work::digest(&[&bytes]));
+            if let ImageId::Tile(r) = id {
+                let master = img::decode_png(&bytes, side, side)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                images.insert(r, img::shrink(&master, MASTER / SCALE));
+            }
         }
         Ok(Slices {
             read,
@@ -1059,24 +1063,24 @@ impl Slices {
         })
     }
 
-    /// Every master [`Slices::read`] read, by record (a record the game has no image of too),
-    /// with the digest of its file's bytes as read.
-    pub fn digests(&self) -> &BTreeMap<u16, String> {
+    /// Every master [`Slices::read`] read, by image (one the game has not too), with the digest
+    /// of its file's bytes as read.
+    pub fn digests(&self) -> &BTreeMap<ImageId, String> {
         &self.read
     }
 
-    /// The masters of `dir` that are not the ones read: read again, each record added, gone or
+    /// The masters of `dir` that are not the ones read: read again, each image added, gone or
     /// whose file's bytes now have another digest.
-    pub fn changed(&self, dir: &Path) -> Result<Vec<u16>, String> {
+    pub fn changed(&self, dir: &Path) -> Result<Vec<ImageId>, String> {
         let mut now = BTreeMap::new();
-        for (r, path) in masters(dir)? {
+        for (id, path) in masters(dir)? {
             let bytes = img::read_capped(&path, img::PNG_MAX_BYTES)?;
-            now.insert(r, work::digest(&[&bytes]));
+            now.insert(id, work::digest(&[&bytes]));
         }
-        let records: BTreeSet<u16> = now.keys().chain(self.read.keys()).copied().collect();
-        Ok(records
+        let ids: BTreeSet<ImageId> = now.keys().chain(self.read.keys()).copied().collect();
+        Ok(ids
             .into_iter()
-            .filter(|r| now.get(r) != self.read.get(r))
+            .filter(|id| now.get(id) != self.read.get(id))
             .collect())
     }
 

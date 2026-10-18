@@ -192,11 +192,11 @@ pub(super) fn master_png(img: &Rgba) -> Vec<u8> {
     img::encode_png(&master(img)).unwrap()
 }
 
-/// The masters of the ×4 images `images` as read: each record with its file's digest.
-pub(super) fn digests(images: &BTreeMap<u16, Rgba>) -> BTreeMap<u16, String> {
+/// The masters of the ×4 images `images` as read: each record's image with its file's digest.
+pub(super) fn digests(images: &BTreeMap<u16, Rgba>) -> BTreeMap<ImageId, String> {
     images
         .iter()
-        .map(|(&r, i)| (r, work::digest(&[&master_png(i)])))
+        .map(|(&r, i)| (ImageId::Tile(r), work::digest(&[&master_png(i)])))
         .collect()
 }
 
@@ -301,7 +301,7 @@ fn state_of(
     text: &str,
     left: &BTreeMap<u16, Rgba>,
     list: &[Accepted],
-    files: &BTreeMap<u16, String>,
+    files: &BTreeMap<ImageId, String>,
 ) -> Result<Fixed, Vec<&'static str>> {
     let plan = group::plan(g);
     let rec = record(text).unwrap();
@@ -1691,7 +1691,7 @@ fn details_of(
     text: &str,
     left: &BTreeMap<u16, Rgba>,
     list: &[Accepted],
-    files: &BTreeMap<u16, String>,
+    files: &BTreeMap<ImageId, String>,
 ) -> Vec<String> {
     let plan = group::plan(g);
     let slices = Slices::new(g, left.clone());
@@ -1759,13 +1759,13 @@ fn an_item_listed_in_part_or_an_image_of_no_item_is_a_disagreement() {
     assert_eq!(d, [format!("plan: {shore}: listed, and no item has it")]);
     let past = g.records.len() as u16 + 1;
     let mut files = digests(&left);
-    files.insert(past, "0".repeat(16));
+    files.insert(ImageId::Tile(past), "0".repeat(16));
     let d = details_of(&g, &text, &left, &listed(&g, &left), &files);
     assert_eq!(
         d,
         [
             format!("slice: t:{past}: a master ingest.json does not list"),
-            format!("slice: t:{past}: a master of a record the game has no image of"),
+            format!("slice: t:{past}: a master of an image the game has not"),
         ]
     );
 }
@@ -2561,13 +2561,92 @@ fn a_change_to_the_work_dir_while_it_is_read_fails_the_run() {
     let o = options(&dir);
     assert!(calibrate_final(&g, &work, &o).is_ok());
     let slices = Slices::read(&g, &work.path("slices")).unwrap();
-    let digests: Vec<(u16, String)> = slices
+    let digests: Vec<(ImageId, String)> = slices
         .digests()
         .iter()
-        .map(|(&r, d)| (r, d.clone()))
+        .map(|(&id, d)| (id, d.clone()))
         .collect();
-    assert_eq!(digests, [(B, work::digest(&[&originals[0].1]))]);
+    assert_eq!(
+        digests,
+        [(ImageId::Tile(B), work::digest(&[&originals[0].1]))]
+    );
     assert!(slices.changed(&work.path("slices")).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_portrait_and_bitmap_masters_are_held_like_the_tiles() {
+    // The chain, and a portrait and a bitmap generated: each listed with its master's digest,
+    // its master in slices/ (not decoded: nothing is drawn from it).
+    let g = game();
+    let (text, left) = chain(&g);
+    let others = [
+        ImageId::Portrait {
+            letter: b'a',
+            item: 0,
+        },
+        ImageId::Bitmap(u6_hdpack::Role::Paper),
+    ];
+    let png = |id: ImageId| {
+        let c = g.classic(id).unwrap();
+        img::encode_png(&Rgba::new(c.width * 8, c.height * 8)).unwrap()
+    };
+    let mut list = listed(&g, &left);
+    let mut files = digests(&left);
+    for id in others {
+        let c = g.classic(id).unwrap();
+        list.push(Accepted {
+            image: atlas::image_name(id),
+            hash: format!("{:016x}", g.hash(id).unwrap()),
+            width: c.width * 8,
+            height: c.height * 8,
+            slice: format!("slices/{}.png", atlas::slice_name(id)),
+            digest: Some(work::digest(&[&png(id)])),
+        });
+        files.insert(id, work::digest(&[&png(id)]));
+    }
+    assert!(state_of(&g, &text, &left, &list, &files).is_ok());
+    // The portrait's master not the file ingest wrote; listed, and no master; a master not
+    // listed.
+    let p = others[0];
+    let mut swapped = files.clone();
+    swapped.insert(p, "0".repeat(16));
+    let err = state_of(&g, &text, &left, &list, &swapped);
+    assert_eq!(err.unwrap_err(), ["master"]);
+    let mut gone = files.clone();
+    gone.remove(&p);
+    let err = state_of(&g, &text, &left, &list, &gone);
+    assert_eq!(err.unwrap_err(), ["slice"]);
+    let unlisted: Vec<Accepted> = list
+        .iter()
+        .filter(|a| a.image != atlas::image_name(p))
+        .cloned()
+        .collect();
+    let err = state_of(&g, &text, &left, &unlisted, &files);
+    assert_eq!(err.unwrap_err(), ["slice"]);
+    // The run reads them from slices/, each once, and reads them again at the end: one
+    // rewritten while the run reads fails it, nothing drawn kept.
+    let (dir, work) = work_dir("others", &text, &g, &left);
+    work.write("ingest.json", &serde_json::to_vec(&list).unwrap())
+        .unwrap();
+    for id in others {
+        std::fs::write(work.slice(&atlas::slice_name(id)), png(id)).unwrap();
+    }
+    let s = calibrate_final(&g, &work, &options(&dir)).unwrap();
+    assert_eq!((s.listed, s.masters), (3, 3));
+    let o = FinalOptions {
+        out: dir.join("changed"),
+        ..options(&dir)
+    };
+    let path = work.slice(&atlas::slice_name(p));
+    AFTER_READ.lock().unwrap().push((
+        o.out.clone(),
+        Box::new(move || std::fs::write(&path, b"another").unwrap()),
+    ));
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    AFTER_READ.lock().unwrap().retain(|(k, _)| *k != o.out);
+    assert!(e.contains("(1 masters of slices/)"), "{e}");
+    assert!(!o.out.join("samples.tsv").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
