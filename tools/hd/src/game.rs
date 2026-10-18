@@ -78,9 +78,15 @@ pub struct Placed {
 }
 
 impl World {
-    /// The map tile of tile (x, y) of level z: through the chunk the level places there.
+    /// The map tile of tile (x, y) of level z: through the chunk the level places there. `None`
+    /// outside the level (x or y at or past its side: no wrap here, the caller wraps), for a
+    /// level the map does not have, or where the level or the chunks are shorter than they
+    /// should be.
     pub fn tile(&self, z: usize, x: usize, y: usize) -> Option<u16> {
         let l = self.levels.get(z)?;
+        if x >= l.tiles() || y >= l.tiles() {
+            return None;
+        }
         let r = *l.refs.get((y / CHUNK_SIZE) * l.side + x / CHUNK_SIZE)?;
         let c = self.chunks.get(usize::from(r))?;
         Some(u16::from(c[y % CHUNK_SIZE][x % CHUNK_SIZE]))

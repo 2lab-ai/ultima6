@@ -64,9 +64,9 @@ use u6_render::{Framebuffer, Kind, Rgb, Src, WIDTH};
 
 use crate::atlas::{self, MASTER};
 use crate::game::Game;
-use crate::gate::{self, Edge};
+use crate::gate::Edge;
 use crate::img::{self, Rgba};
-use crate::neighbour::{self, At, Drawn, K, Pair, Side};
+use crate::neighbour::{self, At, Drawn, Pair, Side};
 use crate::work::{self, Work};
 
 #[cfg(test)]
@@ -1054,20 +1054,23 @@ fn near(game: &Game, by: &BTreeMap<Pair, &Row>, centre: At, n: usize) -> Vec<Con
 }
 
 /// The ratio of `p` measured again from the images of `slices` (a record without one is
-/// MMPX), as the gate measures it ([`gate::neighbour_seam`]); `None` when nothing is measured.
+/// MMPX), by the gate itself: each record's [`Side`], then one pass of [`neighbour::settle`]
+/// over the pair alone. `None` when nothing is measured (no side generated, a side draws
+/// nothing along the edge) or a side is refused.
 pub fn remeasured(game: &Game, slices: &Slices, p: Pair, seam: f32) -> Option<f32> {
-    let side = |r: u16| -> Option<Side> {
+    let mut sides = BTreeMap::new();
+    for r in [p.a, p.b] {
         let classic = game.classic(ImageId::Tile(r))?;
-        Some(Side::new(classic, slices.get(r).map(|h| (u32::from(r), h))))
-    };
-    let (a, b) = (side(p.a)?, side(p.b)?);
-    let px = |s: &Side| {
-        s.generated
-            .as_ref()
-            .map_or(s.scaled.clone(), |g| g.1.clone())
-    };
-    let (pa, pb) = (px(&a), px(&b));
-    gate::neighbour_seam((&a.classic, &pa), (&b.classic, &pb), K, p.edge, seam).map(|r| r.0)
+        let side = Side::new(classic, slices.get(r).map(|h| (u32::from(r), h))).ok()?;
+        sides.insert(r, side);
+    }
+    let settled = neighbour::settle(&[p], &sides, seam);
+    settled
+        .checked
+        .first()
+        .filter(|c| c.pass == 1)
+        .and_then(|c| c.result)
+        .map(|r| r.0)
 }
 
 /// What `calibrate` is given.

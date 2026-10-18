@@ -33,11 +33,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use u6_formats::gfx::{TILE_COUNT, TILE_W};
+use u6_hdpack::ImageId;
 use u6_render::hd::{Scale, mmpx};
+use u6_render::{HEIGHT, WIDTH};
 
+use crate::atlas::MASTER;
 use crate::game::{DOUBLE_HEIGHT, DOUBLE_WIDTH, Game};
 use crate::gate::{self, Edge};
-use crate::img::{Classic, Rgba};
+use crate::img::{self, Classic, Rgba};
 
 #[cfg(test)]
 mod tests;
@@ -72,8 +75,8 @@ pub struct At {
     pub y: usize,
 }
 
-/// Where a pair occurs: A's cell in the first place each source has it (the map in level,
-/// row, column order; the objects in level, column, row order of their cells).
+/// Where a pair occurs: A's cell in the first place each source has it, the cells of both
+/// sources taken in level, row, column order (`(z, y, x)`, the least first).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Seen {
     pub map: Option<At>,
@@ -298,8 +301,14 @@ pub fn pairs(game: &Game) -> Pairs {
 }
 
 /// MMPX ×4 of a classic image (the compositor's scaler and its input words: the colour opaque,
-/// a transparent pixel clear, `u6_render::hd`'s resolve).
-pub fn mmpx4(c: &Classic) -> Rgba {
+/// a transparent pixel clear, `u6_render::hd`'s resolve). `None` for an image the compositor
+/// does not scale: one of no pixel, larger than the screen, or whose pixels are not its
+/// `width × height`.
+pub fn mmpx4(c: &Classic) -> Option<Rgba> {
+    gate::classic_len(c)?;
+    if c.width as usize > WIDTH || c.height as usize > HEIGHT {
+        return None;
+    }
     let input: Vec<u32> =
         c.px.iter()
             .map(|p| p.map_or(0, |[r, g, b]| u32::from_le_bytes([r, g, b, 255])))
@@ -312,35 +321,78 @@ pub fn mmpx4(c: &Classic) -> Rgba {
         Scale::X4,
         &mut out,
     );
-    Rgba {
+    Some(Rgba {
         width: c.width * 4,
         height: c.height * 4,
         pixels: out.iter().flat_map(|w| w.to_le_bytes()).collect(),
-    }
+    })
 }
 
-/// One record's images, as the page shows them ([`gate::shown`]) at ×[`K`].
+/// One record's images, as the page shows them ([`gate::shown`]) at ×[`K`]. Made only by
+/// [`Side::new`], which checks that they fit.
 #[derive(Clone, Debug)]
 pub struct Side {
-    pub classic: Classic,
+    classic: Classic,
     /// MMPX ×4 of the classic record: what the page draws without a pack image.
-    pub scaled: Vec<Option<[f32; 3]>>,
+    scaled: Vec<Option<[f32; 3]>>,
     /// The item it was accepted with and the pack's image of it; `None` for a record no
     /// accepted item has.
-    pub generated: Option<(u32, Vec<Option<[f32; 3]>>)>,
+    generated: Option<(u32, Vec<Option<[f32; 3]>>)>,
 }
 
 impl Side {
-    /// `classic` drawn by MMPX, and `generated` (the item, its ×4 image) when accepted.
-    pub fn new(classic: Classic, generated: Option<(u32, &Rgba)>) -> Side {
-        let scaled = gate::shown(&classic, &mmpx4(&classic));
-        let generated = generated.map(|(item, hd)| (item, gate::shown(&classic, hd)));
-        Side {
+    /// `classic` drawn by MMPX, and `generated` (the item, its ×4 image) when accepted. `Err`
+    /// when the classic image is not one MMPX takes ([`mmpx4`]) or the generated image is not
+    /// exactly ×[`K`] of it.
+    pub fn new(classic: Classic, generated: Option<(u32, &Rgba)>) -> Result<Side, String> {
+        let scaled = mmpx4(&classic)
+            .and_then(|m| gate::shown(&classic, &m))
+            .ok_or("neighbour gate: a classic image the scaler does not take")?;
+        let generated = match generated {
+            Some((item, hd)) => {
+                let fits = (hd.width, hd.height) == (classic.width * K, classic.height * K);
+                let shown = fits.then(|| gate::shown(&classic, hd)).flatten();
+                Some((
+                    item,
+                    shown.ok_or("neighbour gate: an accepted image not x4 of its classic image")?,
+                ))
+            }
+            None => None,
+        };
+        Ok(Side {
             classic,
             scaled,
             generated,
+        })
+    }
+}
+
+/// The records' images the pairs name (ingest's side preparation): each record's classic
+/// image, with, for a record of an accepted item (`accepted`: record → its item and ×8 master),
+/// the master box-averaged to the pack's ×[`K`] as `pack` writes it. A record the game has no
+/// image of has no side, and draws nothing.
+pub fn sides(
+    game: &Game,
+    pairs: &[Pair],
+    accepted: &BTreeMap<u16, (u32, &Rgba)>,
+) -> Result<BTreeMap<u16, Side>, String> {
+    let mut out: BTreeMap<u16, Side> = BTreeMap::new();
+    for p in pairs {
+        for r in [p.a, p.b] {
+            if out.contains_key(&r) {
+                continue;
+            }
+            let Some(classic) = game.classic(ImageId::Tile(r)) else {
+                continue;
+            };
+            let pack = accepted
+                .get(&r)
+                .map(|&(item, master)| (item, img::shrink(master, MASTER / K)));
+            let side = Side::new(classic, pack.as_ref().map(|(item, hd)| (*item, hd)))?;
+            out.insert(r, side);
         }
     }
+    Ok(out)
 }
 
 /// What the fixed point found, in counts only.
@@ -382,7 +434,8 @@ pub struct Settled {
     /// Items sent back to MMPX, with the pass that failed them (1 is the first).
     pub fallen: BTreeMap<u32, usize>,
     /// Every pair checked in the first pass, failing or not, then each failing pair of a later
-    /// pass, in pass and pair order.
+    /// pass: by pass, and within a pass in the order of the pairs [`settle`] was given (it
+    /// keeps its input's order; ingest gives [`Pairs::all`], which is sorted).
     pub checked: Vec<Checked>,
 }
 

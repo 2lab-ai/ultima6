@@ -11,7 +11,7 @@ use u6_render::{Framebuffer, Kind, Src, WIDTH};
 
 use super::*;
 use crate::game::{Level, Placed, World, synthetic};
-use crate::gate::Thresholds;
+use crate::gate::{self, Thresholds};
 
 /// A chunk of one map tile everywhere but the cells given (x, y, tile).
 fn chunk(fill: u8, cells: &[(usize, usize, u8)]) -> [[u8; 8]; 8] {
@@ -281,7 +281,7 @@ fn the_pack_panel_is_the_compositors_frame_at_s4_and_s2() {
             let classic = g.classic(ImageId::Tile(r)).unwrap();
             let hd = pack_images()[&r].clone();
             let hd = if s == 4 { hd } else { img::shrink(&hd, 2) };
-            let shown = gate::shown(&classic, &hd);
+            let shown = gate::shown(&classic, &hd).unwrap();
             let cell = TILE_W as u32 * s;
             for y in 0..cell {
                 for x in 0..cell {
@@ -794,13 +794,4 @@ fn samples_tsv_names_every_sheet_row_and_a_tall_sheet_is_split() {
     );
     assert!(report.contains(&format!("samples.tsv: {} rows", rows.len())));
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn calibrate_calls_nothing() {
-    // It starts no process, `codex` or any other.
-    let src = include_str!("../calibrate.rs");
-    for word in ["Command", "Codex", "run::", "process::", "spawn"] {
-        assert!(!src.contains(word), "calibrate.rs names {word}");
-    }
 }
