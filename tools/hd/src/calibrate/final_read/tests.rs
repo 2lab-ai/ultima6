@@ -388,6 +388,12 @@ fn the_last_pass_is_rebuilt_from_the_slices() {
     stale.sides = Sides::GenGen;
     let wrong = text.clone() + &pass2(&[gb_s, &stale, bg, bg_s]);
     assert_eq!(state(&g, &wrong, &left).unwrap_err(), ["last"]);
+    // The sides the rebuilt pass's, the measure another (still passing).
+    let mut other = ab.clone();
+    let (r, lim) = ab.result.unwrap();
+    other.result = Some((r * 0.5, lim));
+    let measured = text.clone() + &pass2(&[gb_s, &other, bg, bg_s]);
+    assert_eq!(state(&g, &measured, &left).unwrap_err(), ["last"]);
     let short = text.clone() + &pass2(&[bg]);
     assert_eq!(state(&g, &short, &left).unwrap_err(), ["last"]);
     // A pair logged twice in one pass: the stale line before the one that agrees, or a pass-1
