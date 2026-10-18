@@ -702,14 +702,17 @@ fn objects_meet_only_with_both_edges_half_opaque_and_on_a_level() {
     let mut g = synthetic::game();
     let full = 300;
     g.records[full] = object(16);
-    // A's east edge opaque on 7 and on 8 pixels; A's south edge, then B's north edge, the same.
-    let (e7, e8, s7, s8, n7, n8) = (340, 341, 342, 343, 344, 345);
+    // A's east edge opaque on 7 and on 8 pixels; A's south edge, B's west edge and B's north
+    // edge, the same.
+    let (e7, e8, s7, s8, n7, n8, w7, w8) = (340, 341, 342, 343, 344, 345, 346, 347);
     g.records[e7] = edged(16, 7, 16, 16);
     g.records[e8] = edged(16, 8, 16, 16);
     g.records[s7] = edged(16, 16, 16, 7);
     g.records[s8] = edged(16, 16, 16, 8);
     g.records[n7] = edged(16, 16, 7, 16);
     g.records[n8] = edged(16, 16, 8, 16);
+    g.records[w7] = edged(7, 16, 16, 16);
+    g.records[w8] = edged(8, 16, 16, 16);
     // Two opaque objects side by side, but on a level the map does not have.
     let (off_a, off_b) = (350, 351);
     g.records[off_a] = object(16);
@@ -745,6 +748,10 @@ fn objects_meet_only_with_both_edges_half_opaque_and_on_a_level() {
             at(8, 9, n7),
             at(10, 8, full),
             at(10, 9, n8),
+            at(12, 4, full),
+            at(13, 4, w7),
+            at(12, 6, full),
+            at(13, 6, w8),
             off(12, off_a),
             off(13, off_b),
         ],
@@ -756,16 +763,17 @@ fn objects_meet_only_with_both_edges_half_opaque_and_on_a_level() {
         .copied()
         .filter(|q| p.seen[q].objects.is_some())
         .collect();
-    let (full, e8, s8, n8) = (full as u16, e8 as u16, s8 as u16, n8 as u16);
+    let (full, e8, s8, n8, w8) = (full as u16, e8 as u16, s8 as u16, n8 as u16, w8 as u16);
     assert_eq!(
         objects,
         BTreeSet::from([
             pair(e8, full, Edge::East),
             pair(s8, full, Edge::South),
             pair(full, n8, Edge::South),
+            pair(full, w8, Edge::East),
         ])
     );
-    assert_eq!(p.objects, 3);
+    assert_eq!(p.objects, 4);
 }
 
 #[test]
