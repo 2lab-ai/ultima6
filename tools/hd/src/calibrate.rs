@@ -1,10 +1,12 @@
 //! `calibrate`: sheets of the neighbour gate's pairs (spec 07 HD2 "Neighbour seams"), for a read
 //! by eye before its limit, its measure or the edges are changed. It reads `gates.jsonl` of the
-//! work dir through a snapshot (copied to the out dir first and read there: a re-ingest of the
-//! work dir at the same time changes nothing read here; no lock is taken) and the ×8 masters of
-//! `--slices`, and writes PNG sheets and `samples.tsv` to the out dir. It calls nothing: no
-//! `codex`, no upload. It samples the first pass (below), or, with `--final`, draws a window of
-//! every item of the final pack (the last section).
+//! work dir through a snapshot (copied to the out dir first and read there) and the ×8 masters
+//! of `--slices`, each file read once, into memory, at the start (its digest kept); nothing of
+//! either is read again while the sheets are drawn. No lock is taken: a re-ingest while they are
+//! read can mix two states, which this mode does not check for (`--final` does). It writes PNG
+//! sheets and `samples.tsv` to the out dir. It calls nothing: no `codex`, no upload. It samples
+//! the first pass (below), or, with `--final`, draws a window of every item of the final pack
+//! (the last section).
 //!
 //! - **The rows** ([`rows`]): the pairs checked in the first pass (`"pass":1`: the images ingest
 //!   judged before any neighbour fallback), each in a bucket by its result ([`Bucket`]): `pass`
@@ -51,8 +53,12 @@
 //!
 //! **`--final`** ([`final_read`]): the read of the final pack, every item of it, not a sample
 //! (`--slices`, `--at`, `--per` and `--seed` are not taken).
-//! - **The state** ([`final_read::fixed`]): snapshots of `gates.jsonl` and `ingest.json`, the
-//!   masters of the work dir's `slices/` and the plan of items. `gates.jsonl` logs pass 1 whole
+//! - **The state** ([`final_read::fixed`]): snapshots of `gates.jsonl` and `ingest.json` (copied
+//!   to the out dir and read there), the masters of the work dir's `slices/` (listed once, each
+//!   file read once, into memory, its digest kept) and the plan of items; all read at the start.
+//!   Before the run reports success it reads `gates.jsonl`, `ingest.json` and every master of
+//!   `slices/` again and fails if any is not what it read (a re-ingest during the run: the
+//!   sheets written then read no one state). `gates.jsonl` logs pass 1 whole
 //!   and a later pass's failing pairs only, so the last pass of the fixed point (the one that
 //!   fails nothing) is rebuilt: pass 1's pairs with a side still generated (a record with a
 //!   master), each measured from the slices by the gate itself ([`measure`]), its sides the
@@ -949,6 +955,8 @@ pub fn masters(dir: &Path) -> Result<Vec<(u16, PathBuf)>, String> {
 /// was made for.
 pub struct Slices {
     images: BTreeMap<u16, (u64, Rgba)>,
+    /// The masters read ([`Slices::read`]), by record: the digest of each file's bytes.
+    read: BTreeMap<u16, String>,
 }
 
 impl Slices {
@@ -958,18 +966,49 @@ impl Slices {
             .into_iter()
             .filter_map(|(r, img)| Some((r, (game.hash(ImageId::Tile(r))?, img))))
             .collect();
-        Slices { images }
+        Slices {
+            images,
+            read: BTreeMap::new(),
+        }
     }
 
-    /// The tile masters of `dir` ([`masters`]), each box-averaged to ×4 as `pack` writes it.
+    /// The tile masters of `dir` ([`masters`]), each file read once, into memory: its digest
+    /// kept ([`Slices::digests`]) and its image box-averaged to ×4 as `pack` writes it.
     pub fn read(game: &Game, dir: &Path) -> Result<Slices, String> {
         let side = TILE_W as u32 * MASTER;
-        let mut images = BTreeMap::new();
+        let (mut images, mut read) = (BTreeMap::new(), BTreeMap::new());
         for (r, path) in masters(dir)? {
-            let master = img::read_png(&path, side, side)?;
+            let bytes = img::read_capped(&path, img::PNG_MAX_BYTES)?;
+            let master = img::decode_png(&bytes, side, side)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            read.insert(r, work::digest(&[&bytes]));
             images.insert(r, img::shrink(&master, MASTER / SCALE));
         }
-        Ok(Slices::new(game, images))
+        Ok(Slices {
+            read,
+            ..Slices::new(game, images)
+        })
+    }
+
+    /// Every master [`Slices::read`] read, by record (a record the game has no image of too),
+    /// with the digest of its file's bytes as read.
+    pub fn digests(&self) -> &BTreeMap<u16, String> {
+        &self.read
+    }
+
+    /// The masters of `dir` that are not the ones read: read again, each record added, gone or
+    /// whose file's bytes now have another digest.
+    pub fn changed(&self, dir: &Path) -> Result<Vec<u16>, String> {
+        let mut now = BTreeMap::new();
+        for (r, path) in masters(dir)? {
+            let bytes = img::read_capped(&path, img::PNG_MAX_BYTES)?;
+            now.insert(r, work::digest(&[&bytes]));
+        }
+        let records: BTreeSet<u16> = now.keys().chain(self.read.keys()).copied().collect();
+        Ok(records
+            .into_iter()
+            .filter(|r| now.get(r) != self.read.get(r))
+            .collect())
     }
 
     pub fn len(&self) -> usize {

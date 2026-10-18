@@ -324,9 +324,10 @@ fn pack_cmd(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// Sheets of the neighbour gate's pairs from a snapshot of `gates.jsonl` (no lock: a re-ingest
-/// running at the same time leaves the snapshot as it was read); with `--final`, a window per
-/// item the fixed point left generated.
+/// Sheets of the neighbour gate's pairs from a snapshot of `gates.jsonl` and the masters read
+/// once at the start (no lock: `--final` reads its state again before it reports success and
+/// fails if a re-ingest changed it); with `--final`, a window per item the fixed point left
+/// generated.
 fn calibrate_cmd(a: &Args) -> Result<(), String> {
     if a.final_read {
         let other = [

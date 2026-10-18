@@ -14,8 +14,8 @@ use u6_render::hd::Scale;
 
 use super::{
     A_CELL, BACK, COLS, Framed, LABELS, Layout, MAX_HEIGHT, PANEL_NAMES, Panels, ROWS, RawAt,
-    RawPair, Sides, Slices, Source, Stack, edge_name, frame, framed, labels, mark, masters,
-    measure, pair_line, panels, parse_edge, stacks, text,
+    RawPair, Sides, Slices, Source, Stack, edge_name, frame, framed, labels, mark, measure,
+    pair_line, panels, parse_edge, stacks, text,
 };
 use crate::atlas;
 use crate::game::Game;
@@ -1157,6 +1157,13 @@ fn measured(result: Option<(f32, f32)>, digits: usize) -> String {
     )
 }
 
+/// Tests only: what to do to the work dir, once its state is read, of the final read whose out
+/// dir ([`FinalOptions::out`]) is the key (a re-ingest during the run).
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+pub(crate) static AFTER_READ: std::sync::Mutex<Vec<(PathBuf, Box<dyn Fn() + Send>)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// Writes `d`, a line each, to `name` in the out dir `out`, and gives the run's error: `what`,
 /// nothing drawn, the kinds and how many of each (the record ids only in the file).
 fn refuse(out: &Path, name: &str, what: &str, d: &[Disagreement]) -> String {
@@ -1201,14 +1208,24 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         work::write_file(&out.join(name), &bytes)?;
         img::read_capped(&out.join(name), cap)
     };
-    let text = String::from_utf8(snapshot("gates.jsonl", 1 << 30)?)
-        .map_err(|_| "gates.jsonl is not UTF-8".to_string())?;
-    let list: Vec<Accepted> = serde_json::from_slice(&snapshot("ingest.json", 64 << 20)?)
-        .map_err(|e| format!("ingest.json: {e}"))?;
-    let rec = record(&text)?;
+    let caps = [("gates.jsonl", 1 << 30), ("ingest.json", 64 << 20)];
+    let gates_bytes = snapshot(caps[0].0, caps[0].1)?;
+    let list_bytes = snapshot(caps[1].0, caps[1].1)?;
+    let text =
+        std::str::from_utf8(&gates_bytes).map_err(|_| "gates.jsonl is not UTF-8".to_string())?;
+    let list: Vec<Accepted> =
+        serde_json::from_slice(&list_bytes).map_err(|e| format!("ingest.json: {e}"))?;
+    let rec = record(text)?;
+    // The masters listed once and each read once: the records with one are the ones read.
     let dir = work.path("slices");
-    let files: BTreeSet<u16> = masters(&dir)?.into_iter().map(|(r, _)| r).collect();
     let slices = Rc::new(Slices::read(game, &dir)?);
+    let files: BTreeSet<u16> = slices.digests().keys().copied().collect();
+    #[cfg(test)]
+    for (key, touch) in AFTER_READ.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        if *key == o.out {
+            touch();
+        }
+    }
     let plan = group::plan(game);
     let fixed = fixed(game, &plan, &rec, &list, &files, &slices, o.seam).map_err(|d| {
         refuse(
@@ -1599,6 +1616,26 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
                 windows: w,
             });
         }
+    }
+    // What was read at the start, read again: a re-ingest while the run read it could have
+    // mixed two states, and these sheets would read neither.
+    let mut changed: Vec<String> = Vec::new();
+    for ((name, cap), bytes) in caps.into_iter().zip([&gates_bytes, &list_bytes]) {
+        if img::read_capped(&work.path(name), cap).ok().as_ref() != Some(bytes) {
+            changed.push(name.to_string());
+        }
+    }
+    let masters = slices.changed(&dir)?.len();
+    if masters > 0 {
+        changed.push(format!("{masters} masters of slices/"));
+    }
+    if !changed.is_empty() {
+        return Err(format!(
+            "the work dir changed while calibrate --final read it ({}): the sheets in {} read \
+             no one state; run it again",
+            changed.join(", "),
+            out.display()
+        ));
     }
     Ok(FinalSummary {
         source: o.source.clone(),

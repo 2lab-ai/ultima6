@@ -913,6 +913,74 @@ fn a_pair_with_nothing_measured_is_read_where_its_sides_show() {
 }
 
 #[test]
+fn a_change_to_the_work_dir_while_it_is_read_fails_the_run() {
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("changed", &text, &g, &left);
+    let master = work.slice(&atlas::slice_name(ImageId::Tile(B)));
+    let other = work.slice(&atlas::slice_name(ImageId::Tile(A)));
+    let (gates_path, list_path) = (work.path("gates.jsonl"), work.path("ingest.json"));
+    let originals: Vec<(PathBuf, Vec<u8>)> = [&master, &gates_path, &list_path]
+        .into_iter()
+        .map(|p| (p.clone(), std::fs::read(p).unwrap()))
+        .collect();
+    let mut blank = Rgba::new(128, 128);
+    img::fill(&mut blank, 0, 0, 128, 128, [9, 9, 9, 255]);
+    let png = img::encode_png(&blank).unwrap();
+    // A re-ingest, once the run has read the state: a master rewritten, one added, gates.jsonl
+    // or ingest.json rewritten. Each fails the run, the names and a count in the message.
+    let changes: Vec<(&str, Box<dyn Fn() + Send>)> = vec![
+        ("1 masters of slices/", {
+            let (p, b) = (master.clone(), png.clone());
+            Box::new(move || std::fs::write(&p, &b).unwrap())
+        }),
+        ("1 masters of slices/", {
+            let (p, b) = (other.clone(), png.clone());
+            Box::new(move || std::fs::write(&p, &b).unwrap())
+        }),
+        ("(gates.jsonl)", {
+            let p = gates_path.clone();
+            Box::new(move || std::fs::write(&p, b"").unwrap())
+        }),
+        ("(ingest.json)", {
+            let p = list_path.clone();
+            Box::new(move || std::fs::write(&p, b"[]").unwrap())
+        }),
+    ];
+    for (k, (said, change)) in changes.into_iter().enumerate() {
+        let o = FinalOptions {
+            out: dir.join(format!("out-{k}")),
+            ..options(&dir)
+        };
+        AFTER_READ.lock().unwrap().push((o.out.clone(), change));
+        let e = calibrate_final(&g, &work, &o).unwrap_err();
+        assert!(
+            e.contains("changed while calibrate --final read it"),
+            "{k}: {e}"
+        );
+        assert!(e.contains(said), "{k}: {e}");
+        assert!(!e.contains("t:"), "{k}: {e}");
+        AFTER_READ.lock().unwrap().retain(|(key, _)| *key != o.out);
+        for (p, b) in &originals {
+            std::fs::write(p, b).unwrap();
+        }
+        let _ = std::fs::remove_file(&other);
+    }
+    // Nothing changed: the run reports success, and what it read is the work dir's.
+    let o = options(&dir);
+    assert!(calibrate_final(&g, &work, &o).is_ok());
+    let slices = Slices::read(&g, &work.path("slices")).unwrap();
+    let digests: Vec<(u16, String)> = slices
+        .digests()
+        .iter()
+        .map(|(&r, d)| (r, d.clone()))
+        .collect();
+    assert_eq!(digests, [(B, work::digest(&[&originals[0].1]))]);
+    assert!(slices.changed(&work.path("slices")).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
     // The chain, and B again far from it, beside a record Y (a grain of its own) east of it:
     // B's window, wherever it is placed, cannot draw both its pairs by the chain and its pair
