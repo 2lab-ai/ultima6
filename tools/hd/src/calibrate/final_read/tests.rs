@@ -2701,25 +2701,26 @@ fn the_portrait_and_bitmap_masters_are_held_like_the_tiles() {
         files.insert(id, work::digest(&[&png(id)]));
     }
     assert!(state_of(&g, &text, &left, &list, &files).is_ok());
-    // The portrait's master not the file ingest wrote; listed, and no master; a master not
-    // listed.
-    let p = others[0];
-    let mut swapped = files.clone();
-    swapped.insert(p, "0".repeat(16));
-    let err = state_of(&g, &text, &left, &list, &swapped);
-    assert_eq!(err.unwrap_err(), ["master"]);
-    let mut gone = files.clone();
-    gone.remove(&p);
-    let err = state_of(&g, &text, &left, &list, &gone);
-    assert_eq!(err.unwrap_err(), ["slice"]);
-    let unlisted: Vec<Accepted> = list
-        .iter()
-        .filter(|a| a.image != atlas::image_name(p))
-        .cloned()
-        .collect();
-    let err = state_of(&g, &text, &left, &unlisted, &files);
-    assert_eq!(err.unwrap_err(), ["slice"]);
-    // The run reads them from slices/, each once, and reads them again at the end: one
+    // For the portrait and for the bitmap: its master not the file ingest wrote; listed, and
+    // no master; a master not listed.
+    for p in others {
+        let mut swapped = files.clone();
+        swapped.insert(p, "0".repeat(16));
+        let err = state_of(&g, &text, &left, &list, &swapped);
+        assert_eq!(err.unwrap_err(), ["master"], "{p:?}");
+        let mut gone = files.clone();
+        gone.remove(&p);
+        let err = state_of(&g, &text, &left, &list, &gone);
+        assert_eq!(err.unwrap_err(), ["slice"], "{p:?}");
+        let unlisted: Vec<Accepted> = list
+            .iter()
+            .filter(|a| a.image != atlas::image_name(p))
+            .cloned()
+            .collect();
+        let err = state_of(&g, &text, &left, &unlisted, &files);
+        assert_eq!(err.unwrap_err(), ["slice"], "{p:?}");
+    }
+    // The run reads them from slices/, each once, and reads them again at the end: either one
     // rewritten while the run reads fails it, nothing drawn kept.
     let (dir, work) = work_dir("others", &text, &g, &left);
     work.write("ingest.json", &serde_json::to_vec(&list).unwrap())
@@ -2729,19 +2730,23 @@ fn the_portrait_and_bitmap_masters_are_held_like_the_tiles() {
     }
     let s = calibrate_final(&g, &work, &options(&dir)).unwrap();
     assert_eq!((s.listed, s.masters), (3, 3));
-    let o = FinalOptions {
-        out: dir.join("changed"),
-        ..options(&dir)
-    };
-    let path = work.slice(&atlas::slice_name(p));
-    AFTER_READ.lock().unwrap().push((
-        o.out.clone(),
-        Box::new(move || std::fs::write(&path, b"another").unwrap()),
-    ));
-    let e = calibrate_final(&g, &work, &o).unwrap_err();
-    AFTER_READ.lock().unwrap().retain(|(k, _)| *k != o.out);
-    assert!(e.contains("(1 masters of slices/)"), "{e}");
-    assert!(!o.out.join("samples.tsv").exists());
+    for (k, p) in others.into_iter().enumerate() {
+        let o = FinalOptions {
+            out: dir.join(format!("changed-{k}")),
+            ..options(&dir)
+        };
+        let path = work.slice(&atlas::slice_name(p));
+        let (at, was) = (path.clone(), png(p));
+        AFTER_READ.lock().unwrap().push((
+            o.out.clone(),
+            Box::new(move || std::fs::write(&at, b"another").unwrap()),
+        ));
+        let e = calibrate_final(&g, &work, &o).unwrap_err();
+        AFTER_READ.lock().unwrap().retain(|(k, _)| *k != o.out);
+        assert!(e.contains("(1 masters of slices/)"), "{p:?}: {e}");
+        assert!(!o.out.join("samples.tsv").exists(), "{p:?}");
+        std::fs::write(&path, was).unwrap();
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
