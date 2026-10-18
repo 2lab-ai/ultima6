@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 
-use u6_hdpack::ImageId;
+use u6_hdpack::{ImageId, read_pack};
 use u6_render::hd::{Compositor, Image, Images, Pack, PackHd};
 use u6_render::{Framebuffer, Kind, Rgb, Src, WIDTH};
 
@@ -14,8 +14,8 @@ use crate::gate::Thresholds;
 use crate::group::{self, Class};
 use crate::img;
 use crate::ingest::{self, Status};
-use crate::run;
 use crate::work::Work;
+use crate::{pack, run};
 
 const SIDE: u32 = 16;
 
@@ -677,6 +677,152 @@ fn the_images_measured_are_the_ones_the_page_composes() {
         [0, 40, 128, 255]
     );
     assert!(by_alpha.values().all(|&n| n > 0), "{by_alpha:?}");
+}
+
+/// Mean steps across the lattice lines `pitch` apart along x of a `w × h` picture whose pixels
+/// may be undefined: (across the line before column `join`, across the others), each over the
+/// steps both of whose pixels are defined (the measure written out again, for a reference).
+fn reference_steps(
+    px: &dyn Fn(usize, usize) -> Option<[f64; 3]>,
+    (w, h): (usize, usize),
+    pitch: usize,
+    join: usize,
+) -> (f64, f64) {
+    let (mut j, mut nj, mut o, mut no) = (0.0, 0.0, 0.0, 0.0);
+    for y in 0..h {
+        for x in (pitch..w).step_by(pitch) {
+            if let (Some(a), Some(b)) = (px(x - 1, y), px(x, y)) {
+                let d = (0..3).map(|i| (a[i] - b[i]).abs()).sum::<f64>() / 3.0;
+                if x == join {
+                    (j, nj) = (j + d, nj + 1.0);
+                } else {
+                    (o, no) = (o + d, no + 1.0);
+                }
+            }
+        }
+    }
+    assert!(nj > 0.0 && no > 0.0);
+    (j / nj, o / no)
+}
+
+#[test]
+fn a_part_transparent_pair_is_measured_as_the_page_composes_it() {
+    // A beside B (east): two records with holes, along their shared edge too, in a grain of
+    // three palette colours.
+    let (a, b) = (400u16, 401u16);
+    let holes = |seed: u32, every: u32| Record {
+        pixels: (0..256)
+            .map(|i| [13u8, 14, 21][(hash(i, seed) % 3) as usize])
+            .collect(),
+        transparent: (0..256).map(|i| hash(i, seed + 7) % every == 0).collect(),
+        map: false,
+    };
+    let mut g = synthetic::game();
+    g.records[usize::from(a)] = holes(1, 5);
+    g.records[usize::from(b)] = holes(2, 6);
+    let (ra, rb) = (
+        g.records[usize::from(a)].clone(),
+        g.records[usize::from(b)].clone(),
+    );
+    // Holes on both sides of the shared edge: A's east column, B's west column.
+    assert!((0..16).any(|y| ra.transparent[y * 16 + 15]));
+    assert!((0..16).any(|y| rb.transparent[y * 16]));
+    // A's x8 master, uniform in 2 x 2 blocks so the pack's x4 keeps its alpha classes: a
+    // gradient whose x4 sub-pixels are opaque, clear, half and a little opaque in turn.
+    let alpha = |u: u32, v: u32| [255u8, 0, 128, 40][((u + v) % 4) as usize];
+    let mut master = Rgba::new(128, 128);
+    for y in 0..128 {
+        for x in 0..128 {
+            let (u, v) = (x / 2, y / 2);
+            let c = [(u * 3) as u8, (v * 2 + 40) as u8, (200 - u - v) as u8];
+            img::put(&mut master, x, y, [c[0], c[1], c[2], alpha(u, v)]);
+        }
+    }
+    // The real path: ingest's side preparation, then the fixed point's first pass.
+    let pairs = [pair(a, b, Edge::East)];
+    let accepted = BTreeMap::from([(a, (10u32, &master))]);
+    let s = super::sides(&g, &pairs, &accepted).unwrap();
+    let out = settle(&pairs, &s, seam());
+    assert_eq!(out.counts.checked, 1);
+    let (ratio, limit) = out.checked[0].result.unwrap();
+
+    // The reference: A's image read back from the pack `pack` writes, both records composed
+    // by the page's compositor at S 4, the steps taken off the composed frame.
+    let w = work("measured");
+    let id = ImageId::Tile(a);
+    let stem = atlas::slice_name(id);
+    img::write_png(&w.slice(&stem), &master).unwrap();
+    let listed = [ingest::Accepted {
+        image: atlas::image_name(id),
+        hash: format!("{:016x}", g.hash(id).unwrap()),
+        width: 128,
+        height: 128,
+        slice: format!("slices/{stem}.png"),
+    }];
+    w.write("ingest.json", &serde_json::to_vec(&listed).unwrap())
+        .unwrap();
+    pack::pack(&w, None).unwrap();
+    let p = read_pack(&std::fs::read(w.path("pack/u6-hdpack.zip")).unwrap()).unwrap();
+    let in_pack = p.get(id).unwrap().image.clone();
+    let _ = std::fs::remove_dir_all(&w.root);
+    let (x0, y0) = (40, 24);
+    let fb = frame(&[(a, &ra, x0, y0), (b, &rb, x0 + 16, y0)]);
+    let mut images = Tiles(BTreeMap::from([(a, ra.clone()), (b, rb.clone())]));
+    let mut c = Compositor::new();
+    c.set_pack(Some(Rc::new(TilePack(BTreeMap::from([(
+        a,
+        in_pack.clone(),
+    )])))));
+    c.compose(&fb, &mut images, Scale::X4);
+    // A record's pixel under HD pixel (x, y) of the pair, and whether it draws there.
+    let under = |x: usize, y: usize| -> (&Record, usize) {
+        let (r, x) = if x < 64 { (&ra, x) } else { (&rb, x - 64) };
+        (r, (y / 4) * 16 + x / 4)
+    };
+    let hd = |x: usize, y: usize| -> Option<[f64; 3]> {
+        let (r, i) = under(x, y);
+        (!r.transparent[i]).then(|| composed(&c, x0 * 4 + x, y0 * 4 + y).map(f64::from))
+    };
+    let (j, o) = reference_steps(&hd, (128, 64), 4, 64);
+    assert!(o >= 0.5, "no floor: {o}");
+    let classic = |x: usize, y: usize| -> Option<[f64; 3]> {
+        let (r, i) = under(x * 4, y * 4);
+        (!r.transparent[i]).then(|| synthetic::PALETTE[usize::from(r.pixels[i])].map(f64::from))
+    };
+    let (cj, co) = reference_steps(&classic, (32, 16), 1, 16);
+    assert!(co >= 0.5, "no floor: {co}");
+    let close = |x: f32, y: f64| (f64::from(x) - y).abs() <= 1e-4 * y.abs().max(1.0);
+    assert!(close(ratio, j / o), "{ratio} vs {}", j / o);
+    assert!(
+        close(limit, (cj / co).max(1.5)),
+        "{limit} vs {}",
+        (cj / co).max(1.5)
+    );
+    // A's measured sub-pixels include every alpha class of the pack image.
+    let mut classes = BTreeSet::new();
+    for y in 0..64usize {
+        for x in 0..64usize {
+            if hd(x, y).is_some() {
+                classes.insert(in_pack.pixels[(y * 64 + x) * 4 + 3]);
+            }
+        }
+    }
+    assert_eq!(classes.into_iter().collect::<Vec<_>>(), [0, 40, 128, 255]);
+    // And the measure is the generated image's: A drawn by MMPX measures otherwise.
+    let (sa, sb) = (&s[&a], &s[&b]);
+    let scaled = gate::neighbour_seam(
+        (&sa.classic, &sa.scaled),
+        (&sb.classic, &sb.scaled),
+        K,
+        Edge::East,
+        seam(),
+    )
+    .unwrap();
+    assert!(
+        (scaled.0 - ratio).abs() > 0.01 * ratio,
+        "{} vs {ratio}",
+        scaled.0
+    );
 }
 
 // Ingest end to end on the synthetic set, in a synthetic world.
