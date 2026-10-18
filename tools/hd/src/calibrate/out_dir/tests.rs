@@ -618,3 +618,332 @@ fn a_run_whose_dir_is_moved_before_done_fails_and_writes_no_done() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// How many of this process's open fds are the file whose (device, inode) is `id`.
+fn held(id: (u64, u64)) -> usize {
+    use std::os::fd::BorrowedFd;
+    (0..16_384)
+        .filter(|&fd| {
+            // SAFETY: fcntl(F_GETFD) only asks whether `fd` is open; it touches nothing.
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+                return false;
+            }
+            // SAFETY: `fd` is open (just asked), and is borrowed for this one call only.
+            let b = unsafe { BorrowedFd::borrow_raw(fd) };
+            b.try_clone_to_owned()
+                .ok()
+                .map(File::from)
+                .is_some_and(|f| at::id(&f).ok() == Some(id))
+        })
+        .count()
+}
+
+#[test]
+fn each_file_the_run_makes_is_held_open_until_it_ends_and_a_new_one_at_its_name_is_left() {
+    // The run's files are held open while it runs (one fd each), so their inodes stay
+    // allocated: a file another hand makes at a name of the run's, after deleting the run's,
+    // is another inode (on any filesystem), and a failed run leaves it, said so. Once the run
+    // ends, nothing of it is held.
+    let dir = temp("held");
+    let out = dir.join("out");
+    let o = out.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name == "gates.jsonl" {
+            let run = only_run(&o);
+            std::fs::remove_file(run.join("a.txt")).unwrap();
+            std::fs::write(run.join("a.txt"), b"the owner's").unwrap();
+        }
+        Ok(())
+    });
+    let ids: std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>> = Default::default();
+    let seen = ids.clone();
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        writes(run)?;
+        for m in run.made.borrow().iter() {
+            let id = m.id.unwrap();
+            assert_eq!(held(id), 1, "{}", m.name);
+            seen.lock().unwrap().push(id);
+        }
+        run.write("gates.jsonl", b"snapshot")?;
+        Err("no rows".into())
+    })
+    .unwrap_err();
+    let run = only_run(&out);
+    let theirs = std::fs::File::open(run.join("a.txt")).unwrap();
+    let theirs_id = at::id(&theirs).unwrap();
+    assert!(!ids.lock().unwrap().contains(&theirs_id));
+    assert_eq!(std::fs::read(run.join("a.txt")).unwrap(), b"the owner's");
+    let left = format!(
+        "{} (not the file the run made)",
+        run.join("a.txt").display()
+    );
+    assert!(e.contains(&left), "{e}");
+    for &id in ids.lock().unwrap().iter() {
+        assert_eq!(held(id), 0, "{id:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_out_of_open_files_fails_saying_so_and_still_cleans_up() {
+    // The third file cannot be made: the system's "too many open files" (injected at the
+    // create). The run fails saying so and how to go on; its two files are deleted (which needs
+    // no new fd) and its refusal written.
+    let dir = temp("emfile");
+    let out = dir.join("out");
+    let _h = hook(&out, "create", |name| {
+        if name == "c.txt" {
+            Err(format!("errno:{}", libc::EMFILE))
+        } else {
+            Ok(())
+        }
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        writes(run)?;
+        run.write("c.txt", b"c")
+    })
+    .unwrap_err();
+    let run = only_run(&out);
+    let said = format!(
+        "{}: Too many open files (os error {}) (a run holds each file it makes open until it \
+         ends: raise the limit on open files, ulimit -n); run dir: {}",
+        run.join("c.txt").display(),
+        libc::EMFILE,
+        run.display()
+    );
+    assert_eq!(e, said);
+    assert_eq!(names(&run), [REFUSED]);
+    assert_eq!(
+        std::fs::read_to_string(run.join(REFUSED)).unwrap(),
+        format!("{e}\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_link_put_at_a_name_the_run_made_is_said_to_be_another_file() {
+    // After the run wrote a.txt, a link put at that name: the check reads the entry itself (no
+    // open, the link not followed), so it is another file, left, said so.
+    let dir = temp("linked");
+    let out = dir.join("out");
+    let elsewhere = dir.join("elsewhere.txt");
+    std::fs::write(&elsewhere, b"the owner's").unwrap();
+    let (o, to) = (out.clone(), elsewhere.clone());
+    let _h = hook(&out, "write", move |name| {
+        if name == "gates.jsonl" {
+            let run = only_run(&o);
+            std::fs::remove_file(run.join("a.txt")).unwrap();
+            std::os::unix::fs::symlink(&to, run.join("a.txt")).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, fails).unwrap_err();
+    let run = only_run(&out);
+    let left = format!(
+        "{} (not the file the run made)",
+        run.join("a.txt").display()
+    );
+    assert!(e.contains(&left), "{e}");
+    assert_eq!(std::fs::read_link(run.join("a.txt")).unwrap(), elsewhere);
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), b"the owner's");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_of_the_run_others_may_not_read_is_still_deleted_as_its_own() {
+    // After the run wrote a.txt, its mode dropped to 000: the check needs no open, so the file
+    // is still known for the run's and deleted. Needs an unprivileged user (the point is a file
+    // the user cannot open): skipped with privilege, where the link case above still holds.
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid(2) reads the process's ids; no memory involved.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: it needs an unprivileged user (euid 0 opens a mode 000 file)");
+        return;
+    }
+    let dir = temp("mode-000");
+    let out = dir.join("out");
+    let o = out.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name == "gates.jsonl" {
+            let p = only_run(&o).join("a.txt");
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, fails).unwrap_err();
+    let run = only_run(&out);
+    assert_eq!(e, format!("no rows; run dir: {}", run.display()));
+    assert_eq!(names(&run), ["gates.jsonl", REFUSED]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_whose_identity_cannot_be_read_is_kept_and_said() {
+    // a.txt made, its identity not readable (injected at the fstat): it is listed all the same,
+    // and the failed run leaves it, said so, rather than deleting a file it cannot name.
+    let dir = temp("unidentified");
+    let out = dir.join("out");
+    let _h = hook(&out, "identify", |name| {
+        if name == "a.txt" {
+            Err(format!("errno:{}", libc::EIO))
+        } else {
+            Ok(())
+        }
+    });
+    let e = run_in(FIRST, &out, fails).unwrap_err();
+    let run = only_run(&out);
+    let left = format!(
+        "{} (could not be identified when it was made)",
+        run.join("a.txt").display()
+    );
+    assert!(e.contains(&left), "{e}");
+    assert_eq!(names(&run), ["a.txt", "gates.jsonl", REFUSED]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_dir_with_refused_and_done_is_listed_as_refused() {
+    // A run dir that holds both (a failed run whose done could not be deleted): refused.
+    let dir = temp("refused-done");
+    let out = dir.join("out");
+    let both = out.join(run_name(1, 7));
+    std::fs::create_dir_all(&both).unwrap();
+    std::fs::write(both.join(DONE), b"").unwrap();
+    std::fs::write(both.join(REFUSED), b"no rows\n").unwrap();
+    let ((), w) = run_in(FIRST, &out, writes).unwrap();
+    assert_eq!(w.incomplete, [format!("{} (refused)", run_name(1, 7))]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_done_that_fails_once_made_is_deleted_with_the_rest() {
+    // done made, then its write fails (injected after the create): no done is left, the
+    // diagnostics are, and refused.txt says the returned error.
+    let dir = temp("done-made");
+    let out = dir.join("out");
+    let _h = hook(&out, "fill", |name| {
+        if name == DONE {
+            Err(format!("errno:{}", libc::ENOSPC))
+        } else {
+            Ok(())
+        }
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        writes(run)?;
+        run.write("gates.jsonl", b"snapshot")
+    })
+    .unwrap_err();
+    let run = only_run(&out);
+    assert!(
+        e.starts_with(&format!(
+            "{}: No space left on device",
+            run.join(DONE).display()
+        )),
+        "{e}"
+    );
+    assert_eq!(names(&run), ["gates.jsonl", REFUSED]);
+    assert_eq!(
+        std::fs::read_to_string(run.join(REFUSED)).unwrap(),
+        format!("{e}\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_run_dir_is_made_in_the_out_dir_it_opened_never_by_its_path() {
+    // --out opened, then (before the run dir is made) moved away and a link to another dir put
+    // in its place: the run dir is made in the --out it opened, now away; nothing in the
+    // link's target; and the run fails at its end, its dir not at the path it named.
+    let dir = temp("out-swapped");
+    let out = dir.join("out");
+    let (away, elsewhere) = (dir.join("away"), dir.join("elsewhere"));
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let (o, a, el) = (out.clone(), away.clone(), elsewhere.clone());
+    let _h = hook(&out, "mkdir", move |_| {
+        std::fs::rename(&o, &a).unwrap();
+        std::os::unix::fs::symlink(&el, &o).unwrap();
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    assert!(
+        e.contains("was moved or removed while the run wrote it"),
+        "{e}"
+    );
+    assert!(names(&elsewhere).is_empty(), "{:?}", names(&elsewhere));
+    let runs = names(&away);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(names(&away.join(&runs[0])), [REFUSED]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_dir_that_cannot_be_opened_is_left_empty_and_said() {
+    // The run dir made, then not openable (injected at the open): the run fails saying the run
+    // dir and that it is left empty with no refused.txt; the next run lists it as incomplete.
+    let dir = temp("unopened");
+    let out = dir.join("out");
+    let e = {
+        let _h = hook(&out, "open", |_| Err(format!("errno:{}", libc::ELOOP)));
+        run_in(FIRST, &out, writes).unwrap_err()
+    };
+    let run = only_run(&out);
+    assert!(
+        e.contains("the run dir is left empty, with no refused.txt"),
+        "{e}"
+    );
+    assert!(e.ends_with(&format!("; run dir: {}", run.display())), "{e}");
+    assert!(names(&run).is_empty());
+    let name = run.file_name().unwrap().to_string_lossy().into_owned();
+    let ((), w) = run_in(FIRST, &out, writes).unwrap();
+    assert_eq!(w.incomplete, [name]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_permission_error_is_neither_reuse_nor_incomplete_whatever_the_user() {
+    // The two permission cases, injected (they hold under any uid): a run dir that cannot be
+    // made (EACCES) is not said to be reused, and a run dir whose done cannot be read is listed
+    // as one that cannot be read, not as incomplete.
+    let dir = temp("eacces");
+    let out = dir.join("out");
+    let ((), done) = run_in(FIRST, &out, writes).unwrap();
+    let name = done.dir.file_name().unwrap().to_string_lossy().into_owned();
+    let n = name.clone();
+    let e = {
+        let _h = hook(&out, "mkdir", |_| Err(format!("errno:{}", libc::EACCES)));
+        run_in(FIRST, &out, writes).unwrap_err()
+    };
+    assert!(e.contains("Permission denied"), "{e}");
+    assert!(!e.contains("never reused"), "{e}");
+    let _h = hook(&out, "stat", move |what| {
+        if what == n {
+            Err(format!("errno:{}", libc::EACCES))
+        } else {
+            Ok(())
+        }
+    });
+    let ((), w) = run_in(FIRST, &out, writes).unwrap();
+    assert!(w.incomplete.is_empty(), "{:?}", w.incomplete);
+    assert_eq!(
+        w.unreadable,
+        [format!(
+            "{name} (Permission denied (os error {}))",
+            libc::EACCES
+        )]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn oldest_first_sorts_any_order_by_time() {
+    // Names given out of their order, not made on disk: by time, the oldest first.
+    let names: Vec<String> = [4u128, 1, 5, 3, 2]
+        .into_iter()
+        .map(|k| run_name(k * 1_000_000_000, 9 - k as u32))
+        .collect();
+    let want: Vec<String> = (1..=5u128)
+        .map(|k| run_name(k * 1_000_000_000, 9 - k as u32))
+        .collect();
+    assert_eq!(oldest_first(names), want);
+}
