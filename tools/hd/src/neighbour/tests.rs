@@ -526,37 +526,48 @@ fn two_animated_tiles_side_by_side_meet_in_every_pair_of_their_frames() {
     };
     let p = pairs(&g);
     let water: Vec<u16> = (synthetic::WATER_FRAMES..synthetic::WATER_FRAMES + 4).collect();
-    let two = [80, 90, 91];
-    // Every frame of one beside every frame of the other, and nothing more between them.
-    let east: BTreeSet<(u16, u16)> = p
-        .all
-        .iter()
-        .filter(|q| q.edge == Edge::East && water.contains(&q.a) && two.contains(&q.b))
-        .map(|q| (q.a, q.b))
-        .collect();
-    let want: BTreeSet<(u16, u16)> = water
-        .iter()
-        .flat_map(|&f| two.iter().map(move |&t| (f, t)))
-        .collect();
-    assert_eq!(east, want);
-    let south: BTreeSet<u16> = p
-        .all
-        .iter()
-        .filter(|q| q.edge == Edge::South && q.b == 4)
-        .map(|q| q.a)
-        .collect();
-    assert_eq!(south, BTreeSet::from([80, 90, 91]));
-    // No animated tile is drawn as itself, nor the frame replaced in turn.
-    for t in [1, 2, 81] {
-        assert!(p.all.iter().all(|q| q.a != t && q.b != t), "{t}");
+    // What each tile draws: the water its four frames, tile 2 frame 80 and frame 81's two
+    // (never tile 2 itself, nor frame 81), tile 4 and the grass themselves.
+    let draws = |t: u16| -> Vec<u16> {
+        match t {
+            1 => water.clone(),
+            2 => vec![80, 90, 91],
+            t => vec![t],
+        }
+    };
+    // The tiles that meet, A then B, B east or south of A; grass (0) all around:
+    //
+    //          x 2  3  4  5
+    //     y 3:   0  1  2  0
+    //     y 4:   0  0  4  0
+    let tiles = [
+        (0, 0, Edge::East),
+        (0, 0, Edge::South),
+        // The water: grass west and north of it, tile 2 east, grass south.
+        (0, 1, Edge::East),
+        (0, 1, Edge::South),
+        (1, 2, Edge::East),
+        (1, 0, Edge::South),
+        // Tile 2: grass east and north, tile 4 south.
+        (2, 0, Edge::East),
+        (0, 2, Edge::South),
+        (2, 4, Edge::South),
+        // Tile 4: grass west, east and south.
+        (0, 4, Edge::East),
+        (4, 0, Edge::East),
+        (4, 0, Edge::South),
+    ];
+    // Every frame of one beside every frame of the other, and no other pair.
+    let mut want = BTreeSet::new();
+    for (ta, tb, edge) in tiles {
+        for ra in draws(ta) {
+            for rb in draws(tb) {
+                want.insert(pair(ra, rb, edge));
+            }
+        }
     }
-    // Each frame also meets the grass around it.
-    for f in water.iter().chain(&two) {
-        assert!(
-            has(&p, 0, *f, Edge::East) || has(&p, 0, *f, Edge::South),
-            "{f}"
-        );
-    }
+    assert_eq!(p.all.iter().copied().collect::<BTreeSet<_>>(), want);
+    assert_eq!((p.all.len(), p.map, p.objects), (want.len(), want.len(), 0));
 }
 
 #[test]
