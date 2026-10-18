@@ -407,12 +407,13 @@ pub struct Counts {
     pub checked: usize,
     /// Of the pairs checked in the first pass, those on which nothing is measured: [`settle`]
     /// counts every checked pair whose result is `None`, which is a pair with no row across
-    /// the join where both sides draw (an empty record, or two objects' edges each opaque on
-    /// half their length but not in the same places), a pair naming a record with no side, or
-    /// a pair whose images do not fit each other ([`gate::neighbour_seam`]). On the game's
-    /// data only the first happens: every record a pair names is one the game has an image of
-    /// (so it has a side), and every tile image is `TILE_W × TILE_W`, each side checked by
-    /// [`Side::new`]. Such a pair cannot fail, so it is counted apart.
+    /// the join where both sides draw (a side draws nothing along the edge, e.g. an empty
+    /// record, or the two draw along it in different rows, e.g. two objects' edges each opaque
+    /// on half their length), a pair naming a record with no side, or a pair whose images do
+    /// not fit each other ([`gate::neighbour_seam`]). On the game's data only the first
+    /// happens: every record a pair names is one the game has an image of (so it has a side),
+    /// and every tile image is `TILE_W × TILE_W`, each side checked by [`Side::new`]. Such a
+    /// pair cannot fail, so it is counted apart.
     pub unmeasured: usize,
     /// Pairs failing in the first pass, before any neighbour fallback (among those checked).
     pub failing_before: usize,
