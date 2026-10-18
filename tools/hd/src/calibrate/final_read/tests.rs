@@ -1501,6 +1501,13 @@ fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
         z: 0,
         tile,
     };
+    // A made-up record opaque on its west column alone (an object of it below).
+    const WEST: u16 = 200;
+    let rec = &mut g.records[usize::from(WEST)];
+    for v in 0..16 {
+        rec.pixels[v * 16] = GRAIN;
+        rec.transparent[v * 16] = false;
+    }
     g.world.objects = vec![over(X)];
     let (text, left) = chain(&g);
     let (dir, work) = work_dir("covered", &text, &g, &left);
@@ -1524,6 +1531,15 @@ fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
             "unread: line 6: t:{B} t:{GRASS} east (map gen-mmpx) at 0,4,3: drawn in no window\n"
         )
     );
+    // An object opaque on its west column alone: the grass shows in its cell, and not along
+    // the join, so the pair is not drawn there either.
+    g.world.objects = vec![over(WEST)];
+    let o = FinalOptions {
+        out: dir.join("west"),
+        ..options(&dir)
+    };
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(e.contains("nothing drawn: unread 1"), "{e}");
     // An object that leaves the grass's west side (the chest's record): read in B's window.
     g.world.objects = vec![over(synthetic::OBJECTS)];
     let o = FinalOptions {
