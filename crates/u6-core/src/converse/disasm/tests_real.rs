@@ -217,6 +217,10 @@ fn table_reads(events: &[Event], strings: &mut BTreeSet<(u8, u16, i32)>) {
 /// The goodbye typed at the end, three times: a question after it can bring the prompt back.
 const BYE: &str = "bye";
 
+/// The rounds `talk_through` gives a conversation: each one runs the game until it waits, then
+/// types a line or presses a key.
+const ROUNDS: usize = 400;
+
 /// What the message scroll shows: its lines and the one being written.
 fn screen(s: &State) -> (usize, Vec<u8>) {
     let t = &s.ui.text;
@@ -238,7 +242,7 @@ fn talk_through(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool,
         talk(&Cx::new(&st, &io), leader, npc, true).await;
     });
     let (mut sent, mut tries) = (0, 0);
-    for _ in 0..400 {
+    for _ in 0..ROUNDS {
         for _ in 0..32 {
             let before = screen(&e.state());
             e.tick(&[], 16);
@@ -410,8 +414,8 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
         });
         script_of.extend(loaded.map(|key| (npc, key)));
     }
-    // Keywords: sent (typed at a prompt), and none sent because a fresh conversation never
-    // came to a prompt. Conversations: ended and not.
+    // Keywords: sent (typed at a prompt), and not sent because a fresh conversation came to no
+    // prompt within `talk_through`'s rounds. Conversations: ended and not.
     let (mut keywords, mut sent, mut unsent) = (0, 0, 0);
     let (mut ended, mut stopped) = (0, 0);
     for &(npc, key) in &script_of {
@@ -433,7 +437,7 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
         keywords += keys.len();
         // A few per conversation, then the goodbye; the ones a conversation did not take (it
         // ended or stopped first) again in a fresh one, until each is sent or a fresh
-        // conversation takes none.
+        // conversation comes to no prompt within the driver's rounds.
         let mut pending: Vec<&str> = keys.iter().map(String::as_str).collect();
         while !pending.is_empty() {
             let chunk = &pending[..pending.len().min(6)];
@@ -451,12 +455,12 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
         }
     }
     println!(
-        "keywords {keywords} of {} actors: sent {sent}, not sent (no prompt in a fresh conversation) {unsent}; keyword conversations ended {ended}, not ended {stopped}",
+        "keywords {keywords} of {} actors: sent {sent}, not sent (a fresh conversation came to no prompt within {ROUNDS} driver rounds) {unsent}; keyword conversations ended {ended}, not ended {stopped}",
         script_of.len()
     );
     assert!(
         sent + unsent == keywords,
-        "every keyword sent or shown unsendable"
+        "every keyword sent, or no prompt for it within the driver's rounds"
     );
     let catalog_strings: usize = disasms
         .iter()
