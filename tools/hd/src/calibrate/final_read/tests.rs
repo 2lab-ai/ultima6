@@ -1160,6 +1160,107 @@ fn a_window_that_shows_none_of_its_item_fails_the_run() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `g` with an actor type of `frames` frames from record 400 (its layout not known: its frames
+/// run to the next type's base tile), each frame a figure of its own: single pieces.
+fn with_actor(mut g: Game, frames: u16) -> (Game, u16) {
+    let base = 400u16;
+    let sample = g.records[usize::from(synthetic::ACTOR_A)].clone();
+    for f in 0..frames {
+        let mut r = sample.clone();
+        let at = 5 * 16 + 6 + usize::from(f % 5);
+        r.pixels[at] = (f % 20) as u8 + 1;
+        r.transparent[at] = false;
+        g.records[usize::from(base + f)] = r;
+    }
+    let ty = g
+        .basetile
+        .iter()
+        .position(|&b| b == synthetic::END)
+        .unwrap();
+    g.basetile[ty] = base;
+    g.basetile[ty + 1] = base + frames;
+    g.actor_types.push(ty as u16);
+    (g, base)
+}
+
+#[test]
+fn every_record_of_an_item_is_drawn_in_a_window() {
+    // An actor of twelve frames, each a piece of its own: more than an alone window holds (the
+    // reviewer's probe C: nine).
+    let (g, base) = with_actor(game(), 12);
+    let plan = group::plan(&g);
+    let k = item_of(&plan, base) as usize;
+    assert_eq!(plan.items[k].class, Class::Actor);
+    assert_eq!(plan.items[k].pieces.len(), 12);
+    let (cells, fit) = alone(&plan.items[k].pieces);
+    assert_eq!(fit, 9);
+    assert_eq!(cells.iter().map(|c| c.list.len()).sum::<usize>(), 9);
+    let images: BTreeMap<u16, Rgba> = (base..base + 12).map(|r| (r, near(&g, r))).collect();
+    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
+    let all: Vec<String> = (base..base + 12).map(name).collect();
+    let run = |g: &Game, name: &str| {
+        let (text, left) = gate_log(g, &images);
+        assert_eq!(left, images);
+        let (dir, work) = work_dir(name, &text, g, &images);
+        let o = options(&dir);
+        let s = calibrate_final(g, &work, &o).unwrap();
+        (dir, rows_of(&o.out), s)
+    };
+    // Drawn nowhere in the starting world: alone, in two windows, every frame in one.
+    let (dir, rows, s) = run(&g, "actor-alone");
+    let notes: Vec<&str> = rows.iter().map(|r| r["note"].as_str()).collect();
+    assert_eq!(
+        notes,
+        [
+            "drawn nowhere in the starting world: the item alone (window 1 of 2)",
+            "drawn nowhere in the starting world: the item alone (window 2 of 2)",
+        ]
+    );
+    assert!(rows.iter().all(|r| r["records"] == all.join("+")));
+    let actor = s.classes.iter().find(|c| c.class == Class::Actor).unwrap();
+    assert_eq!(
+        (actor.items, actor.alone, actor.records, actor.shown),
+        (1, 2, 12, 12)
+    );
+    assert!(s.text().contains("12/12"), "{}", s.text());
+    let _ = std::fs::remove_dir_all(&dir);
+    // Its first frame placed in the world: its window there shows that frame, and the eleven
+    // others are drawn alone, in two windows more.
+    let mut g2 = g.clone();
+    g2.world.objects = vec![crate::game::Placed {
+        x: 12,
+        y: 12,
+        z: 0,
+        tile: base,
+    }];
+    let (dir, rows, s) = run(&g2, "actor-rest");
+    let places: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|r| (r["placement"].as_str(), r["note"].as_str()))
+        .collect();
+    assert_eq!(
+        places,
+        [
+            ("drawn", "in no pair: where the world first draws it"),
+            (
+                "alone",
+                "the rest of the item alone: 11 records no other window shows (window 1 of 2)"
+            ),
+            (
+                "alone",
+                "the rest of the item alone: 11 records no other window shows (window 2 of 2)"
+            ),
+        ]
+    );
+    assert_eq!(rows[1]["records"], all[1..].join("+"));
+    let actor = s.classes.iter().find(|c| c.class == Class::Actor).unwrap();
+    assert_eq!(
+        (actor.items, actor.drawn, actor.alone, actor.shown),
+        (1, 1, 2, 12)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_pair_with_nothing_measured_is_read_where_its_sides_show() {
     // The chain, and B again at (4, 5) beside a record T east of it whose west half is clear:

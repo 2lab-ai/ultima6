@@ -869,6 +869,11 @@ pub struct Window {
     pub edge: Edge,
     /// The pair it is placed at (its index in [`Fixed::last`]).
     pub pair: Option<usize>,
+    /// Alone: the pieces it draws, and which of the windows its item's pieces need it is (1 the
+    /// first, of how many); `rest`: of the records of its item no other window shows.
+    pub pieces: Vec<Piece>,
+    pub part: (usize, usize),
+    pub rest: bool,
 }
 
 /// The pair of the last pass to place a window for `records` at: one that a record of them
@@ -910,6 +915,9 @@ fn place(
         at,
         edge,
         pair,
+        pieces: Vec::new(),
+        part: (1, 1),
+        rest: false,
     };
     if let Some(i) = pair {
         let l = &fixed.last[i];
@@ -931,7 +939,7 @@ fn place(
 /// The cells of a window that shows `pieces` alone: each piece's records as its block of cells,
 /// the pieces in a row from the second column and the second row with a cell between them,
 /// the next row of pieces a cell below; how many pieces fit (from the first: 0 when the first
-/// does not, and the final read then fails, since the window shows none of the item).
+/// does not: a piece that fits no window, which the final read refuses).
 pub fn alone(pieces: &[Piece]) -> (Vec<Stack>, usize) {
     let mut cells = vec![Stack::default(); COLS * ROWS];
     let (mut c0, mut r0, mut tall, mut fit) = (1usize, 1usize, 0usize, 0usize);
@@ -953,6 +961,31 @@ pub fn alone(pieces: &[Piece]) -> (Vec<Stack>, usize) {
         tall = tall.max(h);
     }
     (cells, fit)
+}
+
+/// `w`, placed alone, as the windows `pieces` need: each the pieces that fit from the first
+/// left ([`alone`]), numbered. `Err` with the index of a piece that fits no window.
+fn alone_parts(w: &Window, pieces: &[Piece]) -> Result<Vec<Window>, usize> {
+    let mut parts: Vec<Vec<Piece>> = Vec::new();
+    let mut left = pieces;
+    while !left.is_empty() {
+        let (_, fit) = alone(left);
+        if fit == 0 {
+            return Err(pieces.len() - left.len());
+        }
+        parts.push(left[..fit].to_vec());
+        left = &left[fit..];
+    }
+    let n = parts.len();
+    Ok(parts
+        .into_iter()
+        .enumerate()
+        .map(|(k, p)| Window {
+            pieces: p,
+            part: (k + 1, n),
+            ..w.clone()
+        })
+        .collect())
 }
 
 /// The pairs of the last pass drawn inside a window (`f`, as [`framed`] drew it): every two
@@ -1082,9 +1115,19 @@ pub struct ClassRow {
     pub class: Class,
     pub items: usize,
     pub images: usize,
+    /// Coverage windows by placement (an item alone takes as many windows as its pieces need,
+    /// and an item placed at a pair or where it is drawn one more, alone, for the records no
+    /// other window shows).
     pub pair: usize,
     pub drawn: usize,
     pub alone: usize,
+    /// The survivors' records, and of them those drawn in a window (all of them, or the run
+    /// fails; with a label, those of the survivors that have a window).
+    pub records: usize,
+    pub shown: usize,
+    /// Survivors with no map window (portraits and bitmaps), and, with a label, those that meet
+    /// no pair of it.
+    pub no_window: usize,
     pub unlabelled: usize,
 }
 
@@ -1130,27 +1173,32 @@ impl FinalSummary {
         );
         let _ = writeln!(
             s,
-            "{:<30} {:>6} {:>7} {:>7} {:>7} {:>7} {:>9}",
-            "", "items", "images", "pair", "drawn", "alone", "no label"
+            "{:<30} {:>6} {:>7} {:>7} {:>7} {:>7} {:>9} {:>9} {:>9}",
+            "", "items", "images", "pair", "drawn", "alone", "in window", "no window", "no label"
         );
         for c in &self.classes {
             let _ = writeln!(
                 s,
-                "{:<30} {:>6} {:>7} {:>7} {:>7} {:>7} {:>9}",
+                "{:<30} {:>6} {:>7} {:>7} {:>7} {:>7} {:>9} {:>9} {:>9}",
                 c.class.name(),
                 c.items,
                 c.images,
                 c.pair,
                 c.drawn,
                 c.alone,
+                format!("{}/{}", c.shown, c.records),
+                c.no_window,
                 c.unlabelled
             );
         }
         let _ = writeln!(
             s,
-            "(pair: placed at a pair it meets; drawn: in no pair, where the world first draws \
-             it; alone: drawn nowhere in the starting world, the item by itself; no label: no \
-             window, it meets no pair of the source; portraits and bitmaps have no map window)"
+            "(windows by placement: pair, at a pair it meets; drawn, in no pair, where the world \
+             first draws it; alone, the item by itself, as many windows as its pieces need, \
+             drawn nowhere in the starting world, or the rest of an item no other window shows; \
+             in window: records drawn in a window, of the survivors' records; no window: \
+             portraits and bitmaps, which have no map window; no label: no window, it meets no \
+             pair of the source)"
         );
         let _ = writeln!(
             s,
@@ -1187,25 +1235,25 @@ impl FinalSummary {
     }
 }
 
-/// A window drawn: its frame, the pairs it ticks, and how many of an alone item's pieces fit.
+/// A window drawn: its frame, and the pairs it ticks.
 struct Drawn1 {
     framed: Framed,
     ticks: Vec<((usize, usize), usize)>,
-    fit: Option<(usize, usize)>,
+}
+
+impl Drawn1 {
+    /// The records that show in it.
+    fn shown(&self) -> impl Iterator<Item = u16> + '_ {
+        self.framed.drawn.iter().flatten().copied()
+    }
 }
 
 /// Draws window `w` (module docs of [`crate::calibrate`]).
-fn draw_window(
-    game: &Game,
-    plan: &Plan,
-    fixed: &Fixed,
-    by: &BTreeMap<Pair, usize>,
-    w: &Window,
-) -> Drawn1 {
-    let (framed, fit) = match (w.placement, w.at) {
+fn draw_window(game: &Game, fixed: &Fixed, by: &BTreeMap<Pair, usize>, w: &Window) -> Drawn1 {
+    let framed = match (w.placement, w.at) {
         (Placement::Pair, Some(at)) => {
             let p = w.pair.map(|i| fixed.last[i].pair);
-            (frame(game, at, w.edge, p), None)
+            frame(game, at, w.edge, p)
         }
         (Placement::Drawn, Some(at)) => {
             let shown = w
@@ -1216,28 +1264,28 @@ fn draw_window(
                 .take(1)
                 .collect::<Vec<u16>>();
             let want: Vec<((usize, usize), u16)> = shown.iter().map(|&r| (A_CELL, r)).collect();
-            (framed(game, &window_at(game, at), &want), None)
+            framed(game, &window_at(game, at), &want)
         }
-        _ => {
-            let item = &plan.items[fixed.survivors[w.survivor].item as usize];
-            let pieces: Vec<Piece> = if w.origin == Origin::Include {
-                w.records
-                    .iter()
-                    .map(|&r| Piece {
-                        w: 1,
-                        h: 1,
-                        images: vec![ImageId::Tile(r)],
-                    })
-                    .collect()
-            } else {
-                item.pieces.clone()
-            };
-            let (cells, fit) = alone(&pieces);
-            (framed(game, &cells, &[]), Some((fit, pieces.len())))
-        }
+        _ => framed(game, &alone(&w.pieces).0, &[]),
     };
     let ticks = ticks(&framed, by);
-    Drawn1 { framed, ticks, fit }
+    Drawn1 { framed, ticks }
+}
+
+/// What a window of `origin` for `records` of survivor `sv` draws alone: the item's pieces (an
+/// included id: the id).
+fn alone_pieces(plan: &Plan, sv: &Survivor, origin: Origin, records: &[u16]) -> Vec<Piece> {
+    match origin {
+        Origin::Include => records
+            .iter()
+            .map(|&r| Piece {
+                w: 1,
+                h: 1,
+                images: vec![ImageId::Tile(r)],
+            })
+            .collect(),
+        _ => plan.items[sv.item as usize].pieces.clone(),
+    }
 }
 
 /// Whether the cell `at` draws record `r` (some tile there, through its frames).
@@ -1370,6 +1418,33 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
     wanted.extend(ids.iter().flatten().copied());
     let first = first_drawn(game, &wanted);
     let mut windows: Vec<Window> = Vec::new();
+    let mut unshown: Vec<Disagreement> = Vec::new();
+    // A window placed alone takes as many windows as its pieces need.
+    let add = |w: Window, windows: &mut Vec<Window>, unshown: &mut Vec<Disagreement>| {
+        if w.placement != Placement::Alone {
+            windows.push(w);
+            return;
+        }
+        let sv = &fixed.survivors[w.survivor];
+        let pieces = alone_pieces(&plan, sv, w.origin, &w.records);
+        match alone_parts(&w, &pieces) {
+            Ok(parts) => windows.extend(parts),
+            Err(k) => unshown.push(Disagreement {
+                kind: "hidden",
+                detail: format!(
+                    "item {}: its piece {k} ({}) fits no window",
+                    sv.item,
+                    names(
+                        &pieces[k]
+                            .images
+                            .iter()
+                            .filter_map(|&id| tile(id))
+                            .collect::<Vec<_>>()
+                    )
+                ),
+            }),
+        }
+    };
     let mut unlabelled: BTreeMap<Class, usize> = BTreeMap::new();
     for (k, sv) in fixed.survivors.iter().enumerate() {
         if sv.records.is_empty() {
@@ -1385,22 +1460,18 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
             label.is_some(),
         );
         match w {
-            Some(w) => windows.push(w),
+            Some(w) => add(w, &mut windows, &mut unshown),
             None => *unlabelled.entry(sv.class).or_default() += 1,
         }
     }
     let mut not_generated: Vec<u16> = Vec::new();
     for &r in ids.iter().flatten() {
         match fixed.survivors.iter().position(|s| s.records.contains(&r)) {
-            Some(k) => windows.extend(place(
-                &fixed,
-                &first,
-                Origin::Include,
-                k,
-                vec![r],
-                label,
-                false,
-            )),
+            Some(k) => {
+                if let Some(w) = place(&fixed, &first, Origin::Include, k, vec![r], label, false) {
+                    add(w, &mut windows, &mut unshown);
+                }
+            }
             None => not_generated.push(r),
         }
     }
@@ -1414,24 +1485,17 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         .map(|(i, l)| (l.pair, i))
         .collect();
     let mut seen: BTreeSet<usize> = BTreeSet::new();
-    let mut unshown: Vec<Disagreement> = Vec::new();
+    let mut shown: BTreeSet<u16> = BTreeSet::new();
     for w in &windows {
-        let d = draw_window(game, &plan, &fixed, &by, w);
+        let d = draw_window(game, &fixed, &by, w);
         seen.extend(d.ticks.iter().map(|t| t.1));
+        shown.extend(d.shown());
         // A window that shows none of what it is for counts nothing: the run fails.
-        let shows = w
-            .records
-            .iter()
-            .any(|r| d.framed.drawn.iter().any(|c| c.contains(r)));
-        if !shows {
-            let why = match d.fit {
-                Some((0, n)) => format!("none of its {n} pieces fits the window"),
-                _ => "covered where it is drawn".to_string(),
-            };
+        if !w.records.iter().any(|r| d.shown().any(|x| x == *r)) {
             unshown.push(Disagreement {
                 kind: "hidden",
                 detail: format!(
-                    "item {}: its {} window ({}) shows none of {}: {why}",
+                    "item {}: its {} window ({}) shows none of {}: covered where it is drawn",
                     fixed.survivors[w.survivor].item,
                     w.origin.name(),
                     w.placement.name(),
@@ -1463,17 +1527,97 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
             at: Some(at),
             edge: l.pair.edge,
             pair: Some(i),
+            pieces: Vec::new(),
+            part: (1, 1),
+            rest: false,
         };
-        let d = draw_window(game, &plan, &fixed, &by, &w);
+        let d = draw_window(game, &fixed, &by, &w);
         seen.extend(d.ticks.iter().map(|t| t.1));
+        shown.extend(d.shown());
         windows.push(w);
+    }
+    // Every record of an item with a window drawn in one: the rest of an item that its window
+    // (at a pair, or where the world draws it: the records near A's cell) and no other shows,
+    // alone, in as many windows as its pieces need.
+    let covered: BTreeSet<usize> = windows
+        .iter()
+        .filter(|w| w.origin == Origin::Coverage)
+        .map(|w| w.survivor)
+        .collect();
+    let mut rest: Vec<Window> = Vec::new();
+    for &k in &covered {
+        let sv = &fixed.survivors[k];
+        let left: Vec<u16> = sv
+            .records
+            .iter()
+            .copied()
+            .filter(|r| !shown.contains(r))
+            .collect();
+        if left.is_empty() {
+            continue;
+        }
+        let w = Window {
+            origin: Origin::Coverage,
+            survivor: k,
+            records: left.clone(),
+            placement: Placement::Alone,
+            at: None,
+            edge: Edge::East,
+            pair: None,
+            pieces: Vec::new(),
+            part: (1, 1),
+            rest: true,
+        };
+        let pieces: Vec<Piece> = alone_pieces(&plan, sv, Origin::Coverage, &[])
+            .into_iter()
+            .filter(|p| {
+                p.images
+                    .iter()
+                    .any(|&id| tile(id).is_some_and(|r| left.contains(&r)))
+            })
+            .collect();
+        match alone_parts(&w, &pieces) {
+            Ok(parts) => rest.extend(parts),
+            Err(i) => unshown.push(Disagreement {
+                kind: "hidden",
+                detail: format!("item {}: its piece {i} of the rest fits no window", sv.item),
+            }),
+        }
+    }
+    for w in rest {
+        let d = draw_window(game, &fixed, &by, &w);
+        seen.extend(d.ticks.iter().map(|t| t.1));
+        shown.extend(d.shown());
+        windows.push(w);
+    }
+    for &k in &covered {
+        let sv = &fixed.survivors[k];
+        let left: Vec<u16> = sv
+            .records
+            .iter()
+            .copied()
+            .filter(|r| !shown.contains(r))
+            .collect();
+        if !left.is_empty() {
+            unshown.push(Disagreement {
+                kind: "hidden",
+                detail: format!(
+                    "item {}: {} of its records drawn in no window: {}",
+                    sv.item,
+                    left.len(),
+                    names(&left)
+                ),
+            });
+        }
     }
     // Planned whole before anything is drawn: a pair of the last pass that no window draws
     // (not even its own, at its cell: a side covered there) fails the run.
+    let mut unread = 0;
     for (i, l) in fixed.last.iter().enumerate() {
         if seen.contains(&i) || label.is_some_and(|x| !l.from(x)) {
             continue;
         }
+        unread += 1;
         let at =
             l.at.map_or("-".to_string(), |a| format!("{},{},{}", a.z, a.x, a.y));
         unshown.push(Disagreement {
@@ -1528,7 +1672,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         // Each window drawn once, then cut into parts under the tallest sheet.
         let drawn: Vec<(&Window, Drawn1)> = list
             .into_iter()
-            .map(|w| (w, draw_window(game, &plan, &fixed, &by, w)))
+            .map(|w| (w, draw_window(game, &fixed, &by, w)))
             .collect();
         let mut parts: Vec<Vec<usize>> = vec![Vec::new()];
         let mut height = l4.margin / 2;
@@ -1613,19 +1757,22 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
                         panels: panels(game, &d.framed.fb, &slices, s),
                     });
                 }
-                let note = match (w.placement, d.fit) {
-                    (Placement::Pair, _) if w.origin == Origin::Pair => {
+                let of_n = match w.part {
+                    (_, 1) => String::new(),
+                    (k, n) => format!(" (window {k} of {n})"),
+                };
+                let note = match w.placement {
+                    Placement::Pair if w.origin == Origin::Pair => {
                         "a pair of the last pass no other window draws".to_string()
                     }
-                    (Placement::Pair, _) => "-".to_string(),
-                    (Placement::Drawn, _) => {
-                        "in no pair: where the world first draws it".to_string()
-                    }
-                    (Placement::Alone, Some((fit, n))) if fit < n => format!(
-                        "drawn nowhere in the starting world: the item alone ({fit} of {n} pieces fit)"
+                    Placement::Pair => "-".to_string(),
+                    Placement::Drawn => "in no pair: where the world first draws it".to_string(),
+                    Placement::Alone if w.rest => format!(
+                        "the rest of the item alone: {} records no other window shows{of_n}",
+                        w.records.len()
                     ),
-                    (Placement::Alone, _) => {
-                        "drawn nowhere in the starting world: the item alone".to_string()
+                    Placement::Alone => {
+                        format!("drawn nowhere in the starting world: the item alone{of_n}")
                     }
                 };
                 let kinds_text: Vec<String> = kinds
@@ -1703,13 +1850,16 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
             pair: count(Placement::Pair),
             drawn: count(Placement::Drawn),
             alone: count(Placement::Alone),
+            records: of.iter().map(|(_, s)| s.records.len()).sum(),
+            shown: of
+                .iter()
+                .flat_map(|(_, s)| s.records.iter())
+                .filter(|r| shown.contains(r))
+                .count(),
+            no_window: of.iter().filter(|(_, s)| s.records.is_empty()).count(),
             unlabelled: unlabelled.get(&class).copied().unwrap_or(0),
         });
     }
-    let drawn_any: BTreeSet<usize> = read
-        .values()
-        .flat_map(|(set, _)| set.iter().copied())
-        .collect();
     let mut labels: Vec<String> = LABELS.iter().map(|l| l.to_string()).collect();
     for l in &fixed.last {
         for lab in l.labels.split('+') {
@@ -1776,12 +1926,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
             (v.len(), windows, not_generated.len())
         }),
         pair_windows: windows.iter().filter(|w| w.origin == Origin::Pair).count(),
-        unread: fixed
-            .last
-            .iter()
-            .enumerate()
-            .filter(|(i, l)| !drawn_any.contains(i) && label.is_none_or(|x| l.from(x)))
-            .count(),
+        unread,
         tsv_rows: rows,
         sheets,
     })

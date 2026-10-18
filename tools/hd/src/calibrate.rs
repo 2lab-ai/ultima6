@@ -81,16 +81,20 @@
 //!   limit, the first in pair order on a tie (with `--source LABEL` one of that label: a survivor
 //!   that meets none has no coverage window and is counted, an included id takes any pair);
 //!   else, in no pair, where the world first draws one of its records (level, row, column), said
-//!   in the row; else, drawn nowhere in the starting world, the item alone in an empty window,
-//!   its pieces in a row from the second column and row with a cell between them (the row says
-//!   how many fit when not all do). Then every pair of the last pass that none of those windows
-//!   draws (with one label, a pair of it) gets a window placed at it, in pair order, each
-//!   counting the pairs it draws. Every window is placed, and the pairs it draws found, before
+//!   in the row; else, drawn nowhere in the starting world, the item alone in empty windows,
+//!   its pieces in rows from the second column and row with a cell between them, in as many
+//!   windows as they need (the row says which of how many). Then every pair of the last pass
+//!   that none of those windows draws (with one label, a pair of it) gets a window placed at
+//!   it, in pair order, each counting the pairs it draws. Then the records of an item with a
+//!   window that no window shows (a window at a pair or where the world draws the item shows
+//!   the records near A's cell: one frame of an actor) are drawn alone, the item's pieces that
+//!   have them, in as many windows as they need: every record of every item with a window is
+//!   drawn in one. Every window is placed, and the pairs it draws found, before
 //!   any sheet or `samples.tsv` is written: a pair of the last pass that is still drawn in no
 //!   window (its own window does not show it: a side covered at its cell, `unread`), or a window
-//!   of an item or an included id that shows none of its records (covered where it is drawn, or
-//!   no piece fitting the alone window, `hidden`), fails the run, nothing drawn, the details in
-//!   `unshown.txt`. The frame as above, A's cell at [`A_CELL`]:
+//!   of an item or an included id that shows none of its records (covered where it is drawn),
+//!   a record of an item drawn in no window or a piece that fits no window (`hidden`), fails
+//!   the run, nothing drawn, the details in `unshown.txt`. The frame as above, A's cell at [`A_CELL`]:
 //!   at a pair, its records in its two cells; where it is drawn, its record in A's cell.
 //! - **The marks**: every pair of the last pass drawn inside the window (a record of a cell
 //!   beside one of the cell east or south of it, each showing along its side of the join,
@@ -108,7 +112,9 @@
 //!   the pairs marked, their labels × sides with counts, each pair (cell, edge, labels, sides,
 //!   A, B, ratio, limit), the sheet and row, `frames`, and a note.
 //! - **The report** ([`final_read::FinalSummary`]): survivors per class (items, images, windows by
-//!   placement); then, for each label of [`LABELS`] and any other the last pass has, both sides,
+//!   placement, the records drawn in a window of the survivors' records, the survivors with no
+//!   map window: portraits and bitmaps, and with one label the survivors that meet no pair of
+//!   it); then, for each label of [`LABELS`] and any other the last pass has, both sides,
 //!   the pairs in the last pass, of them drawn in a window, and the windows drawing one (the
 //!   pair windows too), 0 printed; the pair windows, and the pairs of the last pass drawn in
 //!   no window (0: a run that leaves one fails).
