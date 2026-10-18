@@ -2893,6 +2893,7 @@ fn failed_run(name: &str, fail: impl FnOnce(&Path) -> Vec<Hooked>) -> (String, V
     let hooks = fail(&o.out);
     let e = calibrate_final(&g, &work, &o).unwrap_err();
     drop(hooks);
+    AFTER_READ.lock().unwrap().retain(|(k, _)| *k != o.out);
     let files = files_of(&o.out);
     let _ = std::fs::remove_dir_all(&dir);
     (e, files)
@@ -2927,6 +2928,35 @@ fn a_run_whose_masters_cannot_be_read_again_publishes_its_refusal_alone() {
         Vec::new()
     });
     assert!(e.contains("slices"), "{e}");
+    assert_eq!(files, REFUSAL);
+}
+
+#[test]
+fn a_run_whose_master_cannot_be_read_again_publishes_its_refusal_alone() {
+    // The reviewer's P7b: B's master unreadable once it is read, so the re-check at the end
+    // cannot read it. The out dir: the refusal, no sheet, no samples.tsv.
+    use std::os::unix::fs::PermissionsExt;
+    let master: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>> = Default::default();
+    let at = master.clone();
+    let (e, files) = failed_run("unreadable", |out| {
+        let m = out
+            .parent()
+            .unwrap()
+            .join("work")
+            .join("slices")
+            .join(format!("{}.png", atlas::slice_name(ImageId::Tile(B))));
+        *at.lock().unwrap() = Some(m.clone());
+        AFTER_READ.lock().unwrap().push((
+            out.to_path_buf(),
+            Box::new(move || {
+                std::fs::set_permissions(&m, std::fs::Permissions::from_mode(0o000)).unwrap()
+            }),
+        ));
+        Vec::new()
+    });
+    let m = master.lock().unwrap().take().unwrap();
+    let _ = std::fs::set_permissions(&m, std::fs::Permissions::from_mode(0o644));
+    assert!(e.contains("Permission denied"), "{e}");
     assert_eq!(files, REFUSAL);
 }
 
