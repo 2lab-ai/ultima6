@@ -158,6 +158,10 @@ pub(super) struct Decoder<'a> {
     edges: BTreeMap<(u32, Ctx), Vec<(u32, Ctx)>>,
     /// Where each kept landing's path starts: the byte its skip loop stopped on.
     starts: BTreeMap<LandingKey, (u32, Ctx)>,
+    /// Where each kept landing's path goes on after that byte. Kept per landing, not in
+    /// `edges`: another path that reads the stop byte as code goes on by that byte's own flow
+    /// (an `a3` an If loop stopped on is an else to a path that runs it).
+    hops: BTreeMap<LandingKey, (u32, Ctx)>,
     work: Vec<(u32, Ctx)>,
     scans: Vec<(Landing, Ctx)>,
     landed: Vec<Landing>,
@@ -185,6 +189,7 @@ impl<'a> Decoder<'a> {
             seen: BTreeSet::new(),
             edges: BTreeMap::new(),
             starts: BTreeMap::new(),
+            hops: BTreeMap::new(),
             work: Vec::new(),
             scans: Vec::new(),
             landed: Vec::new(),
@@ -344,12 +349,22 @@ impl<'a> Decoder<'a> {
         self.work.push(to);
     }
 
-    /// The bytes the path of landing `k` reads as code: every position its flow reaches, with
-    /// the code it joins (read first by another path), and the items there.
+    /// The bytes the path of landing `k` reads as code: its stop byte, then every position its
+    /// flow reaches from where it goes on, with the code it joins (read first by another path),
+    /// and the items there.
     fn reach(&self, k: LandingKey) -> BTreeSet<u32> {
         let mut bytes = BTreeSet::new();
         let mut done = BTreeSet::new();
-        let mut todo: Vec<(u32, Ctx)> = self.starts.get(&k).copied().into_iter().collect();
+        let mut todo: Vec<(u32, Ctx)> = Vec::new();
+        if let Some(&(stop, _)) = self.starts.get(&k) {
+            bytes.insert(stop);
+            if self.owner.get(stop as usize) == Some(&stop)
+                && let Some(it) = self.items.get(&stop)
+            {
+                bytes.extend(stop..it.end());
+            }
+            todo.extend(self.hops.get(&k).copied());
+        }
         while let Some(n) = todo.pop() {
             if !done.insert(n) {
                 continue;
@@ -587,7 +602,18 @@ impl<'a> Decoder<'a> {
         let o = self.owner[l.at as usize];
         let into_run = o != NO_OWNER && matches!(self.items[&o].kind, Kind::Text(_));
         if o == NO_OWNER || o == l.at || into_run {
-            self.queue((l.stop, ctx), (l.at, ctx));
+            if l.scan == Scan::Greeting {
+                // Part of the path that reached it (or a direct path).
+                self.queue((l.stop, ctx), (l.at, ctx));
+            } else {
+                let key = LandingKey {
+                    scan: l.scan,
+                    stop: l.stop,
+                    ctx,
+                };
+                self.hops.insert(key, (l.at, ctx));
+                self.work.push((l.at, ctx));
+            }
         }
         Ok(())
     }

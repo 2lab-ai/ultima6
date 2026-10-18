@@ -1147,6 +1147,40 @@ fn a_table_never_wins_over_code_its_own_path_runs_joined_or_not() {
 }
 
 #[test]
+fn a_path_that_runs_an_else_does_not_run_the_code_an_if_landing_runs_after_it() {
+    // A `*` block answering `a1 01 a7 <jump back> a3 "zz" 00 a2 ee`: the a1's loop stops on the
+    // `a3` and its landing runs "zz" at `x`. The block's loops print the table at `x` and jump
+    // to the `a3`, which they run as an else: it skips to after the `a2`, never into `x`. The
+    // table wins and the a1's landing stops there, in either order.
+    let (a3, x) = (BODY + 12, BODY + 13);
+    let mut body = b"\xf7\xef*\xf6\xa1\x01\xa7".to_vec();
+    body.extend(jump(BODY));
+    body.extend(b"\xa3zz\0\xa2\xee\xb5");
+    body.extend(lit32(x));
+    body.push(0xb1);
+    body.extend(jump(a3));
+    body.push(0xff);
+    let s = script(&body);
+    let [a, b] = both_orders(&s);
+    assert!(a == b, "{:?}\n{:?}", a.1, b.1);
+    let d = ok(&s);
+    let Kind::Table(t) = &item(&d, x).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(
+        t.entries.iter().map(|e| e.bytes(&s)).collect::<Vec<_>>(),
+        [b"zz"]
+    );
+    assert_eq!(
+        d.hazards,
+        [Hazard {
+            at: x,
+            kind: HazardKind::IntoData
+        }]
+    );
+}
+
+#[test]
 fn a_landing_whose_own_path_runs_inside_a_table_it_names_is_dropped() {
     // The `*` block's loops land after its `ee`, print the table at `x` and jump to `x + 3`,
     // the table's second string: their own code inside the table, not at its address.
