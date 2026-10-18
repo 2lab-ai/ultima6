@@ -1162,15 +1162,17 @@ impl<'a> Decoder<'a> {
     /// Claims the tables of the kept uses ([`Self::table_ranges`], see the module doc). Each use
     /// was checked when it was made (inside the script, not in code: [`Self::add_use`]), and the
     /// rounds end only with no landing code in a table's range ([`Self::revise`]), so no use's
-    /// address is outside the script or in code here (were one, its table's item would overlap
-    /// that code and refuse the script).
+    /// address should be outside the script or in code here. One that is refuses the script,
+    /// before any range is scanned: nothing later would (a table cut to no entry has no item to
+    /// overlap that code).
     pub(super) fn claim_tables(&mut self) -> Result<(), Refusal> {
-        debug_assert!(
-            self.uses
-                .iter()
-                .all(|(u, _)| self.owner.get(u.addr as usize) == Some(&NO_OWNER)),
-            "a table use's address outside the script or in code after the last round"
-        );
+        for (u, _) in &self.uses {
+            match self.owner.get(u.addr as usize) {
+                None => return refuse(u.at, Reason::TableOutside),
+                Some(&NO_OWNER) => {}
+                Some(_) => return refuse(u.at, Reason::TableInCode),
+            }
+        }
         for (addr, table) in self.table_ranges() {
             let end = table_end(addr, &table);
             if end > addr {

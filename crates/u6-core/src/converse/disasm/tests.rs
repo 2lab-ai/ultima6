@@ -1263,12 +1263,11 @@ fn a_landing_that_stops_at_a_table_it_reads_from_inside_is_dropped() {
 }
 
 #[test]
-#[cfg(debug_assertions)]
-#[should_panic(expected = "after the last round")]
-fn a_claim_with_a_table_address_in_code_is_a_broken_invariant() {
+fn a_claim_with_a_table_address_in_code_refuses_the_script() {
     // One round of the script where the a1's landing reads "zz" as text and block `q` prints
-    // the table there, claimed with no revision: the address is in that landing's code, which
-    // the rounds never leave in a final decode.
+    // the table there, claimed with no revision (the seam the rounds never leave in a final
+    // decode): the address is in that landing's code, and the claim refuses the script at the
+    // print, before it scans the range.
     let t = BODY + 13;
     let mut rest = b"zz\0\xee\xefq\xf6\xb5".to_vec();
     rest.extend(lit32(t));
@@ -1279,7 +1278,15 @@ fn a_claim_with_a_table_address_in_code_is_a_broken_invariant() {
     let plan = Plan::default();
     let mut d = Decoder::new(&s, &plan);
     d.run().unwrap();
-    let _ = d.claim_tables();
+    assert_eq!(
+        d.claim_tables(),
+        Err(Refusal {
+            at: t + 7,
+            reason: Reason::TableInCode
+        })
+    );
+    // With the rounds, the table wins and that landing stops there.
+    assert!(matches!(item(&ok(&s), t).kind, Kind::Table(_)));
 }
 
 #[test]
