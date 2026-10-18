@@ -1044,20 +1044,26 @@ fn the_run_dir_is_made_in_the_out_dir_it_opened_never_by_its_path() {
 
 #[test]
 fn a_run_dir_that_cannot_be_opened_is_left_empty_and_said() {
-    // The run dir made, then not openable (injected at the open): the run fails saying the run
-    // dir and that it is left empty with no refused.txt; the next run lists it as incomplete.
+    // The run dir made, then not openable for a reason of the system's (injected at the open:
+    // no permission): the run fails saying the run dir and that it is left empty with no
+    // refused.txt; the next run lists it as incomplete.
     let dir = temp("unopened");
     let out = dir.join("out");
     let e = {
-        let _h = hook(&out, "open", |_| Err(format!("errno:{}", libc::ELOOP)));
+        let _h = hook(&out, "open", |_| Err(format!("errno:{}", libc::EACCES)));
         run_in(FIRST, &out, writes).unwrap_err()
     };
     let run = only_run(&out);
-    assert!(
-        e.contains("the run dir is left empty, with no refused.txt"),
-        "{e}"
+    assert_eq!(
+        e,
+        format!(
+            "{}: {}: the run dir is left empty, with no refused.txt (it could not be opened to \
+             write one); the next run lists it as incomplete; run dir: {}",
+            run.display(),
+            std::io::Error::from_raw_os_error(libc::EACCES),
+            run.display()
+        )
     );
-    assert!(e.ends_with(&format!("; run dir: {}", run.display())), "{e}");
     assert!(names(&run).is_empty());
     let name = run.file_name().unwrap().to_string_lossy().into_owned();
     let ((), w) = run_in(FIRST, &out, writes).unwrap();
@@ -1404,5 +1410,109 @@ fn a_link_at_a_name_the_run_made_to_that_very_file_is_still_another_file() {
     );
     assert_eq!(std::fs::read(run.join("a.aside")).unwrap(), b"a");
     assert_eq!(names(&run), ["a.aside", "a.txt", "gates.jsonl", REFUSED]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_incomplete_runs_are_listed_from_the_out_dir_opened_not_by_its_path() {
+    // An incomplete run in --out; once --out is opened, it is moved away, and a dir with an
+    // incomplete run of another's put at its path. The runs listed are those of the dir opened
+    // (where the run dir is made), not of the dir now at the path, which is left as it is.
+    let dir = temp("listed-opened");
+    let out = dir.join("out");
+    let away = dir.join("away");
+    std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
+    let (o, a) = (out.clone(), away.clone());
+    let _h = hook(&out, "opened", move |_| {
+        std::fs::rename(&o, &a).unwrap();
+        std::fs::create_dir_all(o.join(run_name(2, 8))).unwrap();
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    assert!(
+        e.ends_with(&format!(
+            "; incomplete runs beside it (left as they are): {}",
+            run_name(1, 7)
+        )),
+        "{e}"
+    );
+    assert!(!e.contains(&run_name(2, 8)), "{e}");
+    assert_eq!(names(&out), [run_name(2, 8)]);
+    assert!(names(&out.join(run_name(2, 8))).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_out_dir_moved_into_a_work_tree_once_opened_is_refused() {
+    // --out opened, then moved into a git work tree (a dir with a .git) before anything is
+    // made in it: where the dir opened is now is protected, so the run fails, saying so, and
+    // makes nothing there.
+    let dir = temp("opened-protected");
+    let (plain, tree) = (dir.join("plain"), dir.join("tree"));
+    let out = plain.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(tree.join(".git")).unwrap();
+    let (o, to) = (out.clone(), tree.join("out"));
+    let _h = hook(&out, "opened", move |_| {
+        std::fs::rename(&o, &to).unwrap();
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    let tree = tree.canonicalize().unwrap();
+    assert_eq!(
+        e,
+        format!(
+            "{}: the dir opened is now at {}, inside the git work tree {}; the tool writes only \
+             outside it (spec 07 Rights)",
+            out.display(),
+            tree.join("out").display(),
+            tree.display()
+        )
+    );
+    assert!(names(&tree.join("out")).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_link_put_in_place_of_the_new_run_dir_before_it_is_opened_is_not_followed() {
+    // An older incomplete run in --out; the new run dir made, then, before it is opened,
+    // replaced by a link to a dir of the owner's (a file of theirs in it). The open refuses
+    // the link: the run fails, saying a link is now at its name, with its run dir and the
+    // incomplete run beside it; nothing is written where the link points.
+    let dir = temp("unopened-link");
+    let out = dir.join("out");
+    let sentinel = dir.join("sentinel");
+    std::fs::create_dir_all(&sentinel).unwrap();
+    std::fs::write(sentinel.join("a.txt"), b"the owner's").unwrap();
+    std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
+    let had = tree(&sentinel);
+    let (o, to) = (out.clone(), sentinel.clone());
+    let _h = hook(&out, "open", move |name| {
+        let run = o.canonicalize().unwrap().join(name);
+        std::fs::remove_dir(&run).unwrap();
+        std::os::unix::fs::symlink(&to, &run).unwrap();
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    let parent = out.canonicalize().unwrap();
+    let mine = names(&parent)
+        .into_iter()
+        .find(|n| *n != run_name(1, 7))
+        .unwrap();
+    let run = parent.join(&mine);
+    // A link opened as a dir with O_NOFOLLOW: ELOOP on macOS, ENOTDIR on Linux.
+    let said = |errno| {
+        format!(
+            "{}: {}: a link or a file is now at its name; the run's dir was moved or removed; \
+             run dir: {}; incomplete runs beside it (left as they are): {}",
+            run.display(),
+            std::io::Error::from_raw_os_error(errno),
+            run.display(),
+            run_name(1, 7)
+        )
+    };
+    assert!(e == said(libc::ELOOP) || e == said(libc::ENOTDIR), "{e}");
+    assert_eq!(tree(&sentinel), had);
+    assert_eq!(std::fs::read_link(&run).unwrap(), sentinel);
     let _ = std::fs::remove_dir_all(&dir);
 }

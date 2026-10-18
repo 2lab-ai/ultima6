@@ -2,11 +2,12 @@
 //! run writes, not by a check:
 //!
 //! 1. **A run's output is never mixed with another run's.** `--out` is made if it is not there
-//!    and opened once (a link at `--out` itself is followed). The run's first write in it is a
-//!    `mkdirat` of a dir of its own, `run-<UTC time>-<pid>/`, named from this process's clock and
-//!    pid alone; when that dir is there already the run fails, it is never reused. The run opens
-//!    that dir (`openat`, `O_NOFOLLOW`) and makes every file of it through it ([`at`]: `openat`
-//!    with `O_CREAT | O_EXCL | O_NOFOLLOW`, no temp file, no rename), never by a path: nothing
+//!    and opened once (a link at `--out` itself is followed); where the dir opened is then is
+//!    checked again to be outside the repository. The run's first write in it is a `mkdirat` of
+//!    a dir of its own, `run-<UTC time>-<pid>/`, named from this process's clock and pid alone;
+//!    when that dir is there already the run fails, it is never reused. The run opens that dir
+//!    (`openat`, `O_NOFOLLOW`) and makes every file of it through it ([`at`]: `openat` with
+//!    `O_CREAT | O_EXCL | O_NOFOLLOW`, no temp file, no rename), never by a path: nothing
 //!    outside it is written and no file there is replaced. A run dir removed while the run
 //!    writes is never made again: the next write fails, and so does the run. A run dir renamed
 //!    away (a link put in its place or not) is never followed: the run's writes go on in the dir
@@ -29,13 +30,15 @@
 //! moved after it ended is outside what it reports; and `done` itself, provisional from when it
 //! is made until the run's last check passes (or, when that check fails, until it is deleted,
 //! the first of the run's files): a process killed meanwhile leaves a run dir that looks
-//! complete. When the run dir cannot be opened at all, it is left empty, with no `refused.txt`
-//! (there is nowhere to write one), and the next run lists it as incomplete.
+//! complete. When the run dir cannot be opened at all, it is left as it is, with no
+//! `refused.txt` (there is nowhere to write one): the next run lists it as incomplete when a
+//! dir is still at its name, and the error says so when a link or a file is.
 //!
 //! A run that ends well writes `done` last, and its report names its dir: that path is the only
 //! pointer to it (no link, no pointer file). A run dir with no `done`, or with a `refused.txt`,
 //! is an incomplete run (one that failed, was killed, or is still going): a run lists those it
-//! finds in `--out` when it starts, and leaves them as they are. Cleaning up old runs is the
+//! finds in the `--out` it opened (through it, not by its path) when it starts, and leaves them
+//! as they are. Cleaning up old runs is the
 //! person's job. A run holds each file it makes open until it ends, so it raises its limit on
 //! open files first, as far as the system lets it. Unix only (the crate is).
 
@@ -198,26 +201,21 @@ fn oldest_first(mut names: Vec<String>) -> Vec<String> {
     names
 }
 
-/// The run dirs of `out` with no [`DONE`], or with a [`REFUSED`] (`(refused)`: a run that failed,
-/// whose `done` may be left too), and those that cannot be read (with why), each the oldest
-/// first. Read only. `key` is `--out` as given (the test seams').
-fn incomplete(key: &Path, out: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+/// The run dirs of the open dir `outfd` (`--out`, at `out` when it was opened) with no
+/// [`DONE`], or with a [`REFUSED`] (`(refused)`: a run that failed, whose `done` may be left
+/// too), and those that cannot be read (with why), each the oldest first: listed and read
+/// through `outfd` ([`at::names`], `fstatat`), never by a path. Read only. `key` is `--out` as
+/// given (the test seams').
+fn incomplete(key: &Path, outfd: &File, out: &Path) -> Result<(Vec<String>, Vec<String>), String> {
     let (mut found, mut unreadable) = (Vec::new(), Vec::new());
-    for e in std::fs::read_dir(out).map_err(|e| format!("{}: {e}", out.display()))? {
-        let e = e.map_err(|e| format!("{}: {e}", out.display()))?;
-        let name = e.file_name().to_string_lossy().into_owned();
-        let dir = e.path();
-        let is_dir = std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir());
-        if !name.starts_with("run-") || !is_dir {
+    for raw in at::names(outfd).map_err(|e| format!("{}: {e}", out.display()))? {
+        let name = String::from_utf8_lossy(&raw).into_owned();
+        if !name.starts_with("run-") || !at::is_dir_at(outfd, &raw).unwrap_or(false) {
             continue;
         }
         let has = |file: &str| {
             io_seam(key, "stat", &name)?;
-            match std::fs::symlink_metadata(dir.join(file)) {
-                Ok(_) => Ok(true),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(e) => Err(e),
-            }
+            at::exists_at(outfd, &[&raw[..], b"/", file.as_bytes()].concat())
         };
         match (has(DONE), has(REFUSED)) {
             (Ok(_), Ok(true)) => found.push(format!("{name} (refused)")),
@@ -501,10 +499,11 @@ impl Written {
 }
 
 /// Runs a `calibrate` run of `mode` whose `--out` is `out` (module docs): `out` made if it is
-/// not there, and opened; the incomplete runs in it listed; the run's own dir made in it
-/// (`mkdirat`, a failure if it is there) and opened (`openat`, not a link); `run` writes in it
-/// ([`Run`]); then [`DONE`], and the dir checked to be where it was made, with each file of the
-/// run identified. A run that fails keeps only its diagnostics ([`Run::fail`]).
+/// not there, and opened (where the dir opened is then, checked to be outside the repository);
+/// the incomplete runs in it listed through it; the run's own dir made in it (`mkdirat`, a
+/// failure if it is there) and opened (`openat`, not a link); `run` writes in it ([`Run`]);
+/// then [`DONE`], and the dir checked to be where it was made, with each file of the run
+/// identified. A run that fails keeps only its diagnostics ([`Run::fail`]).
 pub fn run_in<T>(
     mode: Mode,
     out: &Path,
@@ -514,7 +513,19 @@ pub fn run_in<T>(
     work::check_target(out)?;
     let parent = work::ensure_dir(out)?;
     let outfd = at::open_dir(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-    let (incomplete, unreadable) = incomplete(out, &parent)?;
+    seam(out, "opened", "")?;
+    // Where the dir opened is now: outside the repository too (it was checked by its path).
+    if let Some(now) = at::id(&outfd).ok().and_then(|id| at::where_now(&outfd, id))
+        && let Some(why) = work::protected(&now)
+    {
+        return Err(format!(
+            "{}: the dir opened is now at {}, {why}; the tool writes only outside it (spec 07 \
+             Rights)",
+            out.display(),
+            now.display()
+        ));
+    }
+    let (incomplete, unreadable) = incomplete(out, &outfd, &parent)?;
     // Every failure from here says the incomplete runs beside the run, and those it could not
     // read.
     let beside = |e: String| {
@@ -545,11 +556,16 @@ pub fn run_in<T>(
     let at = dir.clone();
     let with_incomplete = |e: String| beside(format!("{e}; run dir: {}", at.display()));
     let unopened = |e: std::io::Error| {
-        with_incomplete(format!(
-            "{}: {e}: the run dir is left empty, with no {REFUSED} (it could not be opened to \
-             write one); the next run lists it as incomplete",
-            dir.display()
-        ))
+        let then = match e.raw_os_error() {
+            Some(libc::ELOOP | libc::ENOTDIR) => {
+                "a link or a file is now at its name; the run's dir was moved or removed"
+            }
+            _ => {
+                "the run dir is left empty, with no refused.txt (it could not be opened to write \
+                 one); the next run lists it as incomplete"
+            }
+        };
+        with_incomplete(format!("{}: {e}: {then}", dir.display()))
     };
     let open = io_seam(out, "open", &name)
         .and_then(|()| at::open_dir_at(&outfd, &name))

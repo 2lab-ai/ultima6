@@ -56,7 +56,7 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
 }
 
 /// Why `dir` (resolved, existing) is protected, if it is.
-fn protected(dir: &Path) -> Option<String> {
+pub(crate) fn protected(dir: &Path) -> Option<String> {
     let build = repo_root();
     let build = build.canonicalize().unwrap_or(build);
     if dir.starts_with(&build) {
