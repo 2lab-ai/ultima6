@@ -1975,6 +1975,48 @@ fn a_pair_is_drawn_only_where_a_line_the_gate_measures_shows_on_either_edge_and_
 }
 
 #[test]
+fn a_pair_with_nothing_measured_and_a_side_covered_in_its_cell_is_hidden() {
+    // The reviewer's P16: T clear on its west line, so the gate measures nothing across B's
+    // east join and the cell rule holds; B covered whole in its cell (then T instead): the
+    // pair is not drawn there, and is listed hidden, not dropped.
+    const T: u16 = 206;
+    const ALL: u16 = 207;
+    let mut g = game();
+    for i in 0..256 {
+        let east = i % 16 >= 8;
+        let t = &mut g.records[usize::from(T)];
+        t.pixels[i] = if east {
+            GRAIN + (hash(i as u32, 7) % 5) as u8
+        } else {
+            0
+        };
+        t.transparent[i] = !east;
+        let c = &mut g.records[usize::from(ALL)];
+        c.pixels[i] = GRAIN + 1;
+        c.transparent[i] = false;
+    }
+    let a = A_CELL.1 * COLS + A_CELL.0;
+    let p = Pair {
+        a: B,
+        b: T,
+        edge: Edge::East,
+    };
+    let by = BTreeMap::from([(p, 0usize)]);
+    for covered in [a, a + 1] {
+        let mut cells = vec![Stack::default(); COLS * ROWS];
+        cells[a].base = Some(B);
+        cells[a + 1].base = Some(T);
+        cells[covered].list = vec![ALL];
+        let f = framed(&g, &cells, &[]);
+        let (b, t) = (f.shows(A_CELL, B), f.shows((A_CELL.0 + 1, A_CELL.1), T));
+        assert_eq!((b, t), (covered != a, covered == a), "{covered}");
+        assert!(!f.joins(A_CELL, p), "{covered}");
+        assert_eq!(hidden(&f, &by), [(A_CELL, 0)], "{covered}");
+        assert!(ticks(&f, &by).is_empty(), "{covered}");
+    }
+}
+
+#[test]
 fn a_pair_covered_on_every_measured_row_is_not_read() {
     // The chain, and B again at (12, 12) with HALF east of it, COVER on B there: the pair's one
     // cell has no measured row left, so no window reads it, and the run fails.
