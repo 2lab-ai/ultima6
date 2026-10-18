@@ -15,7 +15,7 @@ use u6_render::hd::Scale;
 use super::{
     A_CELL, BACK, COLS, Framed, LABELS, Layout, MAX_HEIGHT, PANEL_NAMES, Panels, ROWS, RawAt,
     RawPair, Sides, Slices, Source, Stack, edge_name, frame, framed, labels, mark, masters,
-    measure, panels, parse_edge, stacks, text,
+    measure, pair_line, panels, parse_edge, stacks, text,
 };
 use crate::atlas;
 use crate::game::Game;
@@ -85,7 +85,9 @@ struct RawFell {
 
 /// The neighbour gate's lines of `gates.jsonl` (`text`): every pair line, of every pass, and
 /// every neighbour fallback; the other lines (the images' gates, the actors' motion, refused
-/// sheets) are not read.
+/// sheets: no `neighbour` field) are not read. A `neighbour` field that is not a pair is
+/// refused ([`pair_line`]): the run stops before anything is drawn, as on any other pair line
+/// it cannot read.
 pub fn record(text: &str) -> Result<Record, String> {
     let mut out = Record::default();
     for (i, line) in text.lines().enumerate() {
@@ -104,7 +106,7 @@ pub fn record(text: &str) -> Result<Record, String> {
             });
             continue;
         }
-        if !v.get("neighbour").is_some_and(serde_json::Value::is_object) {
+        if !pair_line(&v).map_err(|e| bad(&e))? {
             continue;
         }
         let labels = labels(&v);

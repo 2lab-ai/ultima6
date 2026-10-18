@@ -229,6 +229,17 @@ pub fn labels(v: &serde_json::Value) -> String {
     out.join("+")
 }
 
+/// Whether the `gates.jsonl` line `v` is a pair line: its `neighbour` is an object. A line with
+/// no `neighbour` is a line of another kind (`Ok(false)`); one whose `neighbour` is anything
+/// else (null, a string, an array, …) is refused, not taken for another kind.
+pub fn pair_line(v: &serde_json::Value) -> Result<bool, &'static str> {
+    match v.get("neighbour") {
+        None => Ok(false),
+        Some(n) if n.is_object() => Ok(true),
+        Some(_) => Err("a neighbour field that is not a pair (an object of a, b and edge)"),
+    }
+}
+
 /// The rows a run takes (`--source`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Source {
@@ -389,7 +400,7 @@ pub fn rows(text: &str) -> Result<(Vec<Row>, usize), String> {
         }
         let bad = |e: &dyn std::fmt::Display| format!("gates.jsonl line {}: {e}", i + 1);
         let v: serde_json::Value = serde_json::from_str(line).map_err(|e| bad(&e))?;
-        if !v.get("neighbour").is_some_and(serde_json::Value::is_object) {
+        if !pair_line(&v).map_err(|e| bad(&e))? {
             continue;
         }
         let source = labels(&v);

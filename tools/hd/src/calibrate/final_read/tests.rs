@@ -353,6 +353,62 @@ fn the_record_and_the_slices_must_agree() {
     assert_eq!(state(&g, &other_gates, &left).unwrap_err(), ["gates"]);
 }
 
+/// The files of the out dir `out`, sorted.
+fn files_of(out: &Path) -> Vec<String> {
+    let mut files: Vec<String> = std::fs::read_dir(out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn a_neighbour_field_that_is_not_a_pair_stops_the_read() {
+    let g = game();
+    let (text, left) = chain(&g);
+    let lines: Vec<&str> = text.lines().collect();
+    let with = |k: usize, neighbour: serde_json::Value| -> String {
+        let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let mut v: serde_json::Value = serde_json::from_str(lines[k]).unwrap();
+        v["neighbour"] = neighbour;
+        out[k] = v.to_string();
+        out.join("\n") + "\n"
+    };
+    // B beside the grass (line 3) with a neighbour that is not a pair: refused by its line, in
+    // the final read and in the first pass's rows alike, not read as a line of another kind.
+    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
+    for bad in [
+        serde_json::json!(null),
+        serde_json::json!(format!("{} {}", name(B), name(GRASS))),
+        serde_json::json!([name(B), name(GRASS), "east"]),
+        serde_json::json!(7),
+    ] {
+        let t = with(2, bad.clone());
+        let e = record(&t).unwrap_err();
+        assert!(
+            e.contains("line 3: a neighbour field that is not a pair"),
+            "{bad}: {e}"
+        );
+        let e = crate::calibrate::rows(&t).unwrap_err();
+        assert!(
+            e.contains("line 3: a neighbour field that is not a pair"),
+            "{bad}: {e}"
+        );
+    }
+    // A line with no neighbour field is another kind of line, and not read.
+    let other = text.clone() + r#"{"image":"t:1","pass":1,"fail":false}"# + "\n";
+    assert_eq!(record(&other).unwrap(), record(&text).unwrap());
+    // The run stops before it draws: no sheet, no samples.tsv.
+    let t = with(2, serde_json::json!(null));
+    let (dir, work) = work_dir("malformed", &t, &g, &left);
+    let o = options(&dir);
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(e.contains("line 3"), "{e}");
+    assert_eq!(files_of(&o.out), ["gates.jsonl", "ingest.json"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A temp dir with a work dir: `gates` as its `gates.jsonl`, the records of `images` (×4) listed
 /// in `ingest.json` and each written to `slices/` as its ×8 master (each ×4 pixel 2 × 2).
 fn work_dir(name: &str, gates: &str, g: &Game, images: &BTreeMap<u16, Rgba>) -> (PathBuf, Work) {
