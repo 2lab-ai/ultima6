@@ -12,7 +12,7 @@ use super::super::eval::eval;
 use super::super::exec::exec;
 use super::super::tests::{chars, files, lib, packed, scroll, state, talk_to};
 use super::catalog::{Catalog, FORMAT, SLOT_BUFFER_CAPACITY, ScriptUnits, hash64};
-use super::decode::Decoder;
+use super::decode::{Decoder, Plan};
 use super::ops::{self, Escape, Flow, STATEMENT_OPS, Shape};
 use super::trace::{self, Decoded};
 use super::*;
@@ -39,7 +39,7 @@ fn lit32(v: u32) -> Vec<u8> {
 
 fn ok(b: &[u8]) -> Disasm {
     let d = disassemble(b'a', 7, b).unwrap_or_else(|r| panic!("refused: {r}"));
-    assert!(covers_once(&d), "{d:#?}");
+    assert!(covers_once(&d, b), "{d:#?}");
     d
 }
 
@@ -47,7 +47,13 @@ fn refused(b: &[u8]) -> Refusal {
     disassemble(b'a', 7, b).expect_err("refused")
 }
 
-fn covers_once(d: &Disasm) -> bool {
+/// The items cover the input, every byte once, in order.
+fn covers_once(d: &Disasm, input: &[u8]) -> bool {
+    assert_eq!(
+        d.len as usize,
+        input.len(),
+        "the decode's length is the input's"
+    );
     let mut at = 0;
     for it in &d.items {
         if it.offset != at || it.len == 0 {
@@ -607,7 +613,7 @@ fn a_landing_whose_path_would_refuse_the_script_is_dropped() {
 }
 
 #[test]
-fn truncated_scripts_are_refused_and_never_panic() {
+fn every_prefix_decodes_its_whole_length_or_is_refused_and_operand_cuts_are_truncated() {
     let t = BODY + 60;
     let mut body = b"Hi $P.\xf7\xefname,job\xf6I am.".to_vec();
     body.extend([0xa6, 0x01, 0xb3, 0xa8]);
@@ -621,23 +627,46 @@ fn truncated_scripts_are_refused_and_never_panic() {
     body.extend(b"str\0");
     let s = script(&body);
     ok(&s);
-    let mut refusals = 0;
     for n in 0..s.len() {
-        match disassemble(b'a', 7, &s[..n]) {
-            Ok(d) => assert!(covers_once(&d)),
-            Err(_) => refusals += 1,
+        if let Ok(d) = disassemble(b'a', 7, &s[..n]) {
+            assert!(covers_once(&d, &s[..n]), "prefix {n}");
         }
     }
-    assert!(refusals > s.len() / 2, "{refusals} of {}", s.len());
-    // Cut inside the c9's operands.
-    let cut = BODY as usize + 25;
-    assert!(matches!(
-        disassemble(b'a', 7, &s[..cut]),
-        Err(Refusal {
-            reason: Reason::Truncated | Reason::PastEnd,
-            ..
-        })
-    ));
+    // Cuts inside each operand width, on the direct path: refused where the bytes end.
+    let assign = script(
+        &[
+            &[0xa6, 0x01, 0xb3, 0xa8][..],
+            &lit32(BODY + 12),
+            &[0x00, 0xa7, 0xb6, b's', 0],
+        ]
+        .concat(),
+    );
+    let call = script(&[
+        0xc9, 0xd3, 0x01, 0xa7, 0xd4, 0x02, 0x00, 0xa7, 0xeb, 0xa7, 0x01, 0xa7, 0xb6,
+    ]);
+    let jumps = script(&[&jump(BODY + 5)[..], &[0xb6]].concat());
+    for (s, cut, what) in [
+        (&assign, BODY + 6, "a6's table address (d2, 32 bits)"),
+        (&assign, BODY + 10, "a6's index expression, before its a7"),
+        (&call, BODY + 2, "c9's first operand, a d3 literal (8 bits)"),
+        (
+            &call,
+            BODY + 6,
+            "c9's second operand, a d4 literal (16 bits)",
+        ),
+        (&call, BODY + 9, "c9's third operand, before its a7"),
+        (&jumps, BODY + 3, "b0's address (32 bits)"),
+    ] {
+        ok(s);
+        assert_eq!(
+            disassemble(b'a', 7, &s[..cut as usize]),
+            Err(Refusal {
+                at: cut,
+                reason: Reason::Truncated
+            }),
+            "cut inside {what}"
+        );
+    }
 }
 
 #[test]
@@ -661,7 +690,7 @@ fn random_bytes_never_panic_and_every_decode_covers_its_script_once() {
             .map(|_| {
                 let r = next();
                 if r % 3 == 0 {
-                    common[(r >> 8) as usize % common.len()]
+                    common[((r >> 8) % common.len() as u64) as usize]
                 } else if r % 3 == 1 {
                     b'a' + (r >> 8) as u8 % 26
                 } else {
@@ -671,7 +700,7 @@ fn random_bytes_never_panic_and_every_decode_covers_its_script_once() {
             .collect();
         b[0] = 0xff;
         if let Ok(d) = disassemble(b'b', 1, &b) {
-            assert!(covers_once(&d), "{b:02x?}");
+            assert!(covers_once(&d, &b), "{b:02x?}");
             decoded += 1;
             runs += d
                 .items
@@ -684,6 +713,420 @@ fn random_bytes_never_panic_and_every_decode_covers_its_script_once() {
     assert!(
         decoded > 100 && runs > 100,
         "{decoded} decoded, {runs} runs"
+    );
+}
+
+// ---- tables and the landing trial ------------------------------------------------------------
+
+/// `f7`, a `*` block whose answer `Ok` jumps back to the question, its `ee` at `BODY + 11`, then
+/// `tail` at `BODY + 12`: only the block's skip loops (no match, answered) land on the tail.
+fn after_a_block(tail: &[u8]) -> Vec<u8> {
+    let mut body = b"\xf7\xef*\xf6Ok".to_vec();
+    body.extend(jump(BODY));
+    body.push(0xee);
+    body.extend_from_slice(tail);
+    script(&body)
+}
+
+/// Both skip loops of [`after_a_block`]'s block dropped for `reason`.
+fn both_dropped(d: &Disasm, reason: Reason) -> bool {
+    [Scan::NoMatch, Scan::Answered].iter().all(|&scan| {
+        d.hazards.contains(&Hazard {
+            at: BODY + 12,
+            kind: HazardKind::Dropped(scan, reason),
+        })
+    })
+}
+
+#[test]
+fn a_table_address_past_the_script_is_refused_before_any_table_is_scanned() {
+    // A table at the script's tail, then (in address order) one past the end: the review's
+    // repro of a panic in the table claim.
+    let t = BODY + 20;
+    let mut body = vec![0xb5];
+    body.extend(lit32(t));
+    body.push(0xb1);
+    body.push(0xb5);
+    body.extend(lit32(0x7000));
+    body.extend([0xb1, 0xb6]);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"x\0");
+    assert_eq!(
+        refused(&script(&body)),
+        Refusal {
+            at: BODY + 7,
+            reason: Reason::TableOutside
+        }
+    );
+}
+
+#[test]
+fn a_landing_path_whose_table_check_fails_is_dropped_never_the_script() {
+    // An address past the end; a computed address; the direct answer's text; a byte inside the
+    // direct jump's operand. Each drops the landings' path; the direct paths stay as they are.
+    let cases: [(Vec<u8>, Reason); 4] = [
+        (
+            [&[0xb5][..], &lit32(0x7000), &[0xb1, 0xff]].concat(),
+            Reason::TableOutside,
+        ),
+        (
+            vec![0xa6, 0x01, 0xb2, 0xa8, 0x05, 0xb2, 0x00, 0xb7, 0xa7, 0xff],
+            Reason::TableNotLiteral,
+        ),
+        (
+            [&[0xb5][..], &lit32(BODY + 4), &[0xb1, 0xff]].concat(),
+            Reason::TableInCode,
+        ),
+        (
+            [&[0xb5][..], &lit32(BODY + 7), &[0xb1, 0xff]].concat(),
+            Reason::TableInCode,
+        ),
+    ];
+    for (tail, reason) in cases {
+        let s = after_a_block(&tail);
+        let d = ok(&s);
+        assert!(both_dropped(&d, reason), "{reason:?}: {:?}", d.hazards);
+        assert_eq!(
+            &shape(&d)[5..],
+            [
+                "ask",
+                "kw1",
+                "text2",
+                "jump",
+                &format!("unreached{}", tail.len() + 1)
+            ],
+            "{reason:?}: the answer's text and jump are code, the rest unreached"
+        );
+        assert!(!d.items.iter().any(|i| matches!(i.kind, Kind::Table(_))));
+    }
+    // The same uses on a direct path refuse the script.
+    assert_eq!(
+        refused(&script(
+            &[&[0xb5][..], &lit32(0x7000), &[0xb1, 0xb6]].concat()
+        ))
+        .reason,
+        Reason::TableOutside
+    );
+    let own_text = [&b"Hi\xb5"[..], &lit32(BODY), &[0xb1, 0xb6]].concat();
+    assert_eq!(
+        refused(&script(&own_text)),
+        Refusal {
+            at: BODY + 2,
+            reason: Reason::TableInCode
+        }
+    );
+    // A direct path that reaches a table named before it.
+    let into = [&[0xb5][..], &lit32(BODY + 7), &[0xb1], b"zz\0"].concat();
+    assert_eq!(
+        refused(&script(&into)),
+        Refusal {
+            at: BODY + 7,
+            reason: Reason::TableInCode
+        }
+    );
+}
+
+#[test]
+fn a_landing_path_that_names_its_own_code_as_a_table_is_dropped() {
+    // "Hi" at BODY + 12, then a print of the table at BODY + 12: the path read those bytes as
+    // text. Nothing stays reserved for it: no stop there, no table.
+    let tail = [&b"Hi\xb5"[..], &lit32(BODY + 12), &[0xb1, 0xff]].concat();
+    let d = ok(&after_a_block(&tail));
+    assert!(both_dropped(&d, Reason::TableInCode), "{:?}", d.hazards);
+    assert!(
+        !d.hazards.iter().any(|h| h.kind == HazardKind::IntoData),
+        "{:?}",
+        d.hazards
+    );
+    assert_eq!(&shape(&d)[8..], ["jump", "unreached11"]);
+}
+
+#[test]
+fn a_table_after_the_last_block_stops_its_skip_loops() {
+    // Block `b`'s answer prints the table right after its `ee`; block `b`'s own skip loops land
+    // there (the owner's scripts place tables so), stop, and the bytes stay a table.
+    let t = BODY + 27;
+    let mut body = b"\xf7\xefa\xf6A".to_vec();
+    body.extend(jump(BODY));
+    body.extend(b"\xee\xefb\xf6\xb5");
+    body.extend(lit32(t));
+    body.push(0xb1);
+    body.extend(jump(BODY));
+    body.push(0xee);
+    body.extend(b"zz\0");
+    let s = script(&body);
+    let d = ok(&s);
+    assert_eq!(&shape(&d)[shape(&d).len() - 3..], ["jump", "ee", "table1"]);
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.entries[0].bytes(&s), b"zz");
+    assert!(
+        d.hazards.contains(&Hazard {
+            at: t,
+            kind: HazardKind::IntoData
+        }),
+        "{:?}",
+        d.hazards
+    );
+    assert!(
+        !d.hazards
+            .iter()
+            .any(|h| matches!(h.kind, HazardKind::Dropped(..))),
+        "{:?}",
+        d.hazards
+    );
+}
+
+/// `f7`, a `*` block whose answer is `a1 01 a7 b0 <f7> a2` (the `a1`'s skip loop lands at
+/// `BODY + 13`), then `rest` at `BODY + 13`.
+fn after_an_if(rest: &[u8]) -> Vec<u8> {
+    let mut body = b"\xf7\xef*\xf6\xa1\x01\xa7".to_vec();
+    body.extend(jump(BODY));
+    body.push(0xa2);
+    body.extend_from_slice(rest);
+    script(&body)
+}
+
+#[test]
+fn a_table_wins_over_the_code_of_a_landing_decoded_before_it() {
+    // The `a1`'s landing (decoded first: its loop sorts first) reads "zz" at BODY + 13 as text;
+    // block `q`, reached later by the `*` block's no-match landing, prints the table there. The
+    // decode runs again with the address closed to landings: the `a1`'s landing stops there.
+    let t = BODY + 13;
+    let mut rest = b"zz\0\xee\xefq\xf6\xb5".to_vec();
+    rest.extend(lit32(t));
+    rest.push(0xb1);
+    rest.extend(jump(BODY));
+    rest.extend([0xee, 0xff]);
+    let s = after_an_if(&rest);
+    let d = ok(&s);
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.entries[0].bytes(&s), b"zz");
+    assert!(
+        d.hazards.contains(&Hazard {
+            at: t,
+            kind: HazardKind::IntoData
+        }),
+        "{:?}",
+        d.hazards
+    );
+    assert!(
+        !d.hazards
+            .iter()
+            .any(|h| matches!(h.kind, HazardKind::Dropped(..))),
+        "{:?}",
+        d.hazards
+    );
+}
+
+#[test]
+fn an_address_a_later_round_no_longer_names_is_settled_and_its_namer_dropped() {
+    // The `a1`'s landing reads "zz" at BODY + 13 as text and jumps on to block `q` (reached no
+    // other way: the `*` block's no-match loop stops at the `ff`, its answered loop on an `ee`
+    // inside the jump's operand); block `q`'s skip loops reach a print of the table at
+    // BODY + 13. Closing it stops the `a1`'s landing there, so block `q` and the print are not
+    // reached and nothing names it: it is opened again, and the print's path is dropped.
+    let (t, q) = (BODY + 13, BODY + 21);
+    let mut rest = b"zz\xb0".to_vec();
+    rest.extend([q as u8, 0x00, 0xee, 0x00, 0xff]);
+    rest.extend(b"\xefq\xf6A");
+    rest.extend(jump(BODY));
+    rest.extend([0xee, 0xb5]);
+    rest.extend(lit32(t));
+    rest.extend([0xb1, 0xb6]);
+    let s = after_an_if(&rest);
+    let d = ok(&s);
+    assert!(matches!(item(&d, t).kind, Kind::Text(_)), "{:?}", shape(&d));
+    assert!(matches!(item(&d, q).kind, Kind::Keywords(_)));
+    assert!(!d.items.iter().any(|i| matches!(i.kind, Kind::Table(_))));
+    for scan in [Scan::NoMatch, Scan::Answered] {
+        assert!(
+            d.hazards.contains(&Hazard {
+                at: q + 10,
+                kind: HazardKind::Dropped(scan, Reason::TableInCode)
+            }),
+            "{:?}",
+            d.hazards
+        );
+    }
+    assert!(!d.hazards.iter().any(|h| h.kind == HazardKind::IntoData));
+}
+
+#[test]
+fn a_constant_index_past_a_landing_paths_table_drops_that_path() {
+    // Only the final tables tell an index past its table: the next round drops the landing.
+    let t = BODY + 21;
+    let mut tail = vec![0xb5];
+    tail.extend(lit32(t));
+    tail.extend([0x05, 0xa7, 0xff]);
+    tail.extend(b"a\0b\0");
+    let d = ok(&after_a_block(&tail));
+    assert!(both_dropped(&d, Reason::TableIndex), "{:?}", d.hazards);
+    assert!(!d.items.iter().any(|i| matches!(i.kind, Kind::Table(_))));
+}
+
+#[test]
+fn skip_loops_step_over_each_operand_width() {
+    // A false `a1` steps over `b0`'s 4 operand bytes, `d3`'s 1 and `d4`'s 2: a stop byte in
+    // the last one stepped over is not a stop. The interpreter lands where the decoder does.
+    let j = BODY + 9;
+    let cases: [(Vec<u8>, u16, &[&str]); 3] = [
+        (
+            vec![
+                0xa1, 0x00, 0xa7, 0xb0, j as u8, 0x00, 0x00, 0xa2, 0xa2, 0xb6,
+            ],
+            9,
+            &["if", "jump", "endif", "bye"],
+        ),
+        (
+            vec![0xa1, 0x00, 0xa7, 0xc4, 0xd3, 0xa2, 0xa7, 0xa2, 0xb6],
+            8,
+            &["if", "add_karma", "endif", "bye"],
+        ),
+        (
+            vec![0xa1, 0x00, 0xa7, 0xc4, 0xd4, 0x00, 0xa2, 0xa7, 0xa2, 0xb6],
+            9,
+            &["if", "add_karma", "endif", "bye"],
+        ),
+    ];
+    for (body, after, want) in cases {
+        let d = ok(&script(&body));
+        assert_eq!(&shape(&d)[5..], want, "{body:02x?}");
+        assert!(d.hazards.is_empty(), "{body:02x?}: {:?}", d.hazards);
+        let (_, s) = exec_on(&body, "");
+        assert_eq!(s.converse.pc, after, "{body:02x?}");
+    }
+}
+
+#[test]
+fn the_evaluators_stack_bounds_are_hazards_and_a_table_beyond_them_is_none() {
+    // `81` reads below the stack; the nullary `c0` after it does not.
+    let d = ok(&script(&[0xc4, 0x81, 0xc0, 0xa7, 0xb6]));
+    assert_eq!(
+        d.hazards,
+        [Hazard {
+            at: BODY + 1,
+            kind: HazardKind::Underflow
+        }]
+    );
+    // Ten values fill the stack; the table address above them is dropped (no table).
+    let t = BODY + 30;
+    let mut body = vec![0xa6, 0x01, 0xb2, 0xa8];
+    body.extend(1..=10u8);
+    body.extend(lit32(t));
+    body.extend([0x01, 0xb4, 0xa7, 0xb6]);
+    body.resize((t - BODY) as usize, 0);
+    body.extend([0x10, 0x00, 0xb8]);
+    let d = ok(&script(&body));
+    assert!(
+        d.hazards.contains(&Hazard {
+            at: BODY + 14,
+            kind: HazardKind::Overflow
+        }),
+        "{:?}",
+        d.hazards
+    );
+    assert!(!d.items.iter().any(|i| matches!(i.kind, Kind::Table(_))));
+}
+
+#[test]
+fn indices_and_addresses_have_the_interpreters_width() {
+    let t = BODY + 20;
+    let strings = |op: &[u8]| {
+        let mut body = op.to_vec();
+        body.resize((t - BODY) as usize, 0);
+        body.extend(b"a\0b\0");
+        script(&body)
+    };
+    let words = |op: &[u8]| {
+        let mut body = op.to_vec();
+        body.resize((t - BODY) as usize, 0);
+        body.extend([0x10, 0x00, 0x20, 0x00, 0xb8]);
+        script(&body)
+    };
+    // A string index is a word: -1 reads the first string, 0x10001 the second.
+    for index in [0xffff_ffffu32, 0x0001_0001] {
+        let s = strings(&[&[0xb5][..], &lit32(t), &lit32(index), &[0xa7, 0xb6]].concat());
+        ok(&s);
+    }
+    // A word index moves by twice itself in word arithmetic: 0x10001 reads word 1, -1 no word.
+    let w = |index: u32| {
+        words(
+            &[
+                &[0xa6][..],
+                &lit32(t),
+                &lit32(index),
+                &[0xa8, 0x07, 0xa7, 0xb6],
+            ]
+            .concat(),
+        )
+    };
+    ok(&w(0x0001_0001));
+    assert_eq!(refused(&w(0xffff)).reason, Reason::TableIndex);
+    // `b4`'s index is its low byte: 0x101 reads word 1.
+    ok(&words(
+        &[
+            &[0xa6, 0x01, 0xb2, 0xa8][..],
+            &lit32(t),
+            &[0xd4, 0x01, 0x01, 0xb4, 0xa7, 0xb6],
+        ]
+        .concat(),
+    ));
+    // An address is the low word of its operand.
+    let d = ok(&strings(
+        &[&[0xb5][..], &lit32(0x0001_0000 + t), &[0xb1, 0xb6]].concat(),
+    ));
+    assert!(
+        matches!(item(&d, t).kind, Kind::Table(_)),
+        "{:?}",
+        shape(&d)
+    );
+}
+
+#[test]
+fn a_bye_in_the_look_text_goes_on_to_the_greeting_after_it() {
+    // The look text jumps past the first `f2` to a `b6`: `run_text` returns there and the scan
+    // for `f2` starts at the `b6`, so the second greeting is read.
+    let x = 16u32;
+    let mut s = b"\xff\x05Nm\xf1lk".to_vec();
+    s.extend(jump(x));
+    s.extend(b"\xf2Hi\xb6\xb6z\xf2Yo\xb6");
+    let d = ok(&s);
+    assert_eq!(
+        shape(&d),
+        [
+            "hdr",
+            "name",
+            "f1",
+            "text2",
+            "jump",
+            "f2",
+            "text2",
+            "bye",
+            "bye",
+            "unreached1",
+            "f2",
+            "text2",
+            "bye"
+        ]
+    );
+}
+
+#[test]
+fn a_script_longer_than_the_script_buffer_is_refused() {
+    let mut s = script(&[0xb6]);
+    s.resize(crate::converse::SCRIPT_LEN, 0);
+    ok(&s);
+    s.push(0);
+    assert_eq!(
+        refused(&s),
+        Refusal {
+            at: crate::converse::SCRIPT_LEN as u32,
+            reason: Reason::TooLong
+        }
     );
 }
 
@@ -743,7 +1186,7 @@ fn the_statement_op_table_is_the_executors_arms() {
             Shape::Assign => b.extend([0x05, 0xb2, 0xa8, 0x07, 0xa7]),
         }
         b.extend([0xa2, 0xa2, 0x00, 0x00]);
-        let (len, decoded) = Decoder::new(&b, BTreeSet::new())
+        let (len, decoded) = Decoder::new(&b, &Plan::default())
             .op(0, code)
             .unwrap_or_else(|r| panic!("{code:#04x}: {r}"));
         assert_eq!(decoded.code, code);
@@ -776,7 +1219,7 @@ fn the_statement_op_table_is_the_executors_arms() {
         let mut s = b.clone();
         s.resize(20, 0xa2);
         s.extend(b"ab\0cd\0");
-        let (len, _) = Decoder::new(&s, BTreeSet::new()).op(0, s[0]).unwrap();
+        let (len, _) = Decoder::new(&s, &Plan::default()).op(0, s[0]).unwrap();
         let (r, after) = exec_on(&s, "");
         assert_eq!(r, 0, "{b:02x?}");
         assert_eq!(u32::from(after.converse.pc), len, "{b:02x?}");
@@ -813,7 +1256,7 @@ fn expression_lengths_are_the_evaluators() {
         b.push(if next() % 2 == 0 { 0xa7 } else { 0xa8 });
         let len = b.len();
         b.extend([0x55; 8]);
-        let e = Decoder::new(&b, BTreeSet::new()).expr(0).unwrap();
+        let e = Decoder::new(&b, &Plan::default()).expr(0).unwrap();
         assert_eq!(e.len as usize, len);
         let mut st = state(&b);
         st.converse.pc = 0;
@@ -938,9 +1381,10 @@ fn the_interpreter_reads_only_what_the_disassembler_found() {
 
 #[test]
 fn the_catalog_hash_is_fnv1a_64_and_its_json_reads_back() {
-    // The vectors u6-hdpack pins for its content hash.
+    // The vectors u6-hdpack pins for its content hash, and the FNV reference's "foobar".
     assert_eq!(hash64(b""), 0xcbf2_9ce4_8422_2325);
     assert_eq!(hash64(b"a"), 0xaf63_dc4c_8601_ec8c);
+    assert_eq!(hash64(b"foobar"), 0x8594_4171_f739_67e8);
     let s = conversation();
     let bad = script(&[0x80]);
     let c = Catalog::build([(b'a', 3, s.as_slice()), (b'b', 9, bad.as_slice())]);

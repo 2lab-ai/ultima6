@@ -6,13 +6,13 @@ use super::Escape;
 use super::ops::{self, Arg, Flow, Shape};
 use super::{
     Assign, Expr, Hazard, HazardKind, Input, Item, Kind, Marker, Op, Operand, Operands, Part,
-    Print, Reason, Refusal, Run, Scan, Span, Stop, Table, TableRef, Token, TokenKind,
+    Print, Reason, Refusal, Run, Scan, Span, Stop, Table, TableRef, Token, TokenKind, reachable,
 };
 
 /// The interpreter's two kinds of read position: inside the look text (a stop byte moves to
 /// the greeting) and anywhere else (a stop byte goes to the input loop).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Ctx {
+pub(super) enum Ctx {
     Look,
     Main,
 }
@@ -27,24 +27,108 @@ struct Landing {
     at: u32,
 }
 
+/// A skip-loop landing as the rounds name it: the loop, the byte it stopped on, the context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct LandingKey {
+    scan: Scan,
+    stop: u32,
+    ctx: Ctx,
+}
+
+/// The path an item or a table use comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// The paths that take no skip loop (decoded first, never on trial).
+    Direct,
+    /// The path after one skip-loop landing (decoded on trial).
+    Landing(LandingKey),
+}
+
+/// What a decode round hands the next one (see [`super::disassemble`]).
+#[derive(Clone, Debug, Default)]
+pub(super) struct Plan {
+    /// Table addresses a kept landing's path named inside an earlier landing's code: closed to
+    /// the landing paths from the round's start, so that the table wins over that code.
+    reserved: BTreeSet<u32>,
+    /// Addresses taken back out of `reserved` because no kept path named them any more: a path
+    /// that names one inside another landing's code is dropped instead.
+    settled: BTreeSet<u32>,
+    /// Landings whose path fails a check only the whole decode can make (a constant table
+    /// index past its entries): not decoded, a [`HazardKind::Dropped`] hazard.
+    banned: BTreeMap<LandingKey, Reason>,
+}
+
 /// `Decoder::owner` of a byte no item holds yet.
 const NO_OWNER: u32 = u32::MAX;
 
-/// A table use the ops make: its kind and the constant index (`None` = any).
+/// A constant index that reaches no entry of its table (a word index whose move is negative).
+const NO_ENTRY: u32 = u32::MAX;
+
+/// A table use an op makes: its kind and the entry a constant index reads (`None` = any).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TableUse {
     pub(super) addr: u32,
-    words: bool,
-    index: Option<u32>,
-    at: u32,
+    pub(super) words: bool,
+    pub(super) index: Option<u32>,
+    /// The op's offset.
+    pub(super) at: u32,
+}
+
+/// The interpreter's read position for a 32-bit script address: its low word, sign-extended
+/// (`set_pos` keeps a word, `pos` reads it signed). A negative one comes out at or above
+/// 0xffff8000, outside any script.
+pub(super) fn read_position(v: u32) -> u32 {
+    i32::from(v as u16 as i16) as u32
+}
+
+/// Entry `v` of a string table as `table_element` reads it: the index is a word (`as i16`) and
+/// a negative one skips no string (the first entry).
+pub(super) fn string_entry(v: u32) -> u32 {
+    (v as u16 as i16).max(0) as u32
+}
+
+/// Entry `v` of a word table as `table_element` reads it: the read position moves by
+/// `index * 2` in word arithmetic; a negative move reaches no entry ([`NO_ENTRY`]).
+pub(super) fn word_entry(v: u32) -> u32 {
+    let off = (v as u16 as i16).wrapping_mul(2);
+    if off < 0 { NO_ENTRY } else { off as u32 / 2 }
+}
+
+/// The entry a table operand (`d2 <table> (b1 | <index>)`) reads: `b1` the first, a constant
+/// index as [`string_entry`] / [`word_entry`] compute it, `None` for a computed index.
+pub(super) fn ref_entry(t: &TableRef, words: bool) -> Option<u32> {
+    match &t.index {
+        None => Some(0),
+        Some(e) => e.constant().map(|v| {
+            if words {
+                word_entry(v)
+            } else {
+                string_entry(v)
+            }
+        }),
+    }
 }
 
 #[derive(Clone)]
 pub(super) struct Decoder<'a> {
     b: &'a [u8],
-    /// Table addresses: no path decodes code there.
+    plan: &'a Plan,
+    /// Table addresses: a landing's path stops there, a direct path there refuses the script.
     reserved: BTreeSet<u32>,
+    /// The table uses of the direct paths and of the kept landings.
+    uses: Vec<(TableUse, Origin)>,
+    /// The kind each used address is read as (`true` = words).
+    kinds: BTreeMap<u32, bool>,
+    /// The addresses the path decoding now named.
+    named: BTreeSet<u32>,
+    /// Addresses a kept landing's path named inside an earlier landing's code (the next round
+    /// reserves them).
+    contested: BTreeSet<u32>,
+    /// The path decoding now.
+    phase: Origin,
     items: BTreeMap<u32, Item>,
+    /// The path that decoded each item (by its start).
+    origins: BTreeMap<u32, Origin>,
     /// For each byte, the start of the item that owns it.
     owner: Vec<u32>,
     seen: BTreeSet<(u32, Ctx)>,
@@ -60,11 +144,18 @@ fn refuse<T>(at: u32, reason: Reason) -> Result<T, Refusal> {
 }
 
 impl<'a> Decoder<'a> {
-    pub(super) fn new(b: &'a [u8], reserved: BTreeSet<u32>) -> Self {
+    pub(super) fn new(b: &'a [u8], plan: &'a Plan) -> Self {
         Self {
             b,
-            reserved,
+            plan,
+            reserved: plan.reserved.clone(),
+            uses: Vec::new(),
+            kinds: BTreeMap::new(),
+            named: BTreeSet::new(),
+            contested: BTreeSet::new(),
+            phase: Origin::Direct,
             items: BTreeMap::new(),
+            origins: BTreeMap::new(),
             owner: vec![NO_OWNER; b.len()],
             seen: BTreeSet::new(),
             work: Vec::new(),
@@ -147,15 +238,28 @@ impl<'a> Decoder<'a> {
         self.drain()?;
         // Skip-loop landings come after the direct paths, so that a landing never decodes
         // bytes a direct path owns; the loops that step over operands first, in script order.
-        // A loop may stop on a byte inside an operand, so a landing's path is decoded on trial:
-        // when it would refuse the script, it is dropped as a hazard and its bytes stay
-        // unreached unless another path reads them.
+        // A loop may stop on a byte inside an operand, so a landing's path is decoded on trial,
+        // its table uses included: when it would refuse the script, it is dropped as a hazard
+        // and its bytes and tables are as if it had never been read. Each trial keeps a copy of
+        // the decoder to go back to: one copy per landing, O(len²) per round, small for scripts
+        // of at most `SCRIPT_LEN` bytes.
         while let Some(i) = (0..self.scans.len()).min_by_key(|&i| {
             let (l, _) = self.scans[i];
             (l.scan, l.stop)
         }) {
             let (landing, ctx) = self.scans.remove(i);
+            let key = LandingKey {
+                scan: landing.scan,
+                stop: landing.stop,
+                ctx,
+            };
+            if let Some(&r) = self.plan.banned.get(&key) {
+                self.hazard(landing.at, HazardKind::Dropped(landing.scan, r));
+                continue;
+            }
             let saved = self.clone();
+            self.phase = Origin::Landing(key);
+            self.named.clear();
             if let Err(r) = self.land(landing, ctx).and_then(|()| self.drain()) {
                 *self = saved;
                 self.hazard(landing.at, HazardKind::Dropped(landing.scan, r.reason));
@@ -176,6 +280,17 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
+    /// A path reaches the table address `addr` (a landing at `at`). A direct path there, or a
+    /// landing's path at a table it named itself, reads one byte as code and as data: the
+    /// script (or the trial) is refused. Any other landing's path stops there.
+    fn reach_table(&mut self, addr: u32, at: u32) -> Result<(), Refusal> {
+        if self.phase == Origin::Direct || self.named.contains(&addr) {
+            return refuse(addr, Reason::TableInCode);
+        }
+        self.hazard(at, HazardKind::IntoData);
+        Ok(())
+    }
+
     /// Goes on reading at `at` in `ctx`: decodes the item there (once) and queues what follows.
     fn visit(&mut self, at: u32, ctx: Ctx) -> Result<(), Refusal> {
         if !self.seen.insert((at, ctx)) {
@@ -185,8 +300,7 @@ impl<'a> Decoder<'a> {
             return refuse(at, Reason::PastEnd);
         }
         if self.reserved.contains(&at) {
-            self.hazard(at, HazardKind::IntoData);
-            return Ok(());
+            return self.reach_table(at, at);
         }
         let start = match self.owner[at as usize] {
             NO_OWNER => {
@@ -230,6 +344,9 @@ impl<'a> Decoder<'a> {
                 },
             );
         }
+        if let Some(&o) = self.origins.get(&start) {
+            self.origins.insert(at, o);
+        }
         for p in at..end {
             self.owner[p as usize] = at;
         }
@@ -246,11 +363,13 @@ impl<'a> Decoder<'a> {
         let item = &self.items[&at];
         let end = item.end();
         // A stop byte inside the look text: `run_text` returns and the read position moves
-        // past the next `f2` (the stop byte itself is the first one the scan reads).
-        let stops = matches!(
-            item.kind,
-            Kind::BlockEnd | Kind::Input(_) | Kind::Stop(_) | Kind::Marker(_)
-        );
+        // past the next `f2` (the stop byte itself is the first one the scan reads). A `b6`
+        // there too: `run_text` returns after it, its read position back on the `b6`.
+        let stops = match &item.kind {
+            Kind::BlockEnd | Kind::Input(_) | Kind::Stop(_) | Kind::Marker(_) => true,
+            Kind::Op(op) => op.info().flow == Flow::Bye,
+            _ => false,
+        };
         if stops && ctx == Ctx::Look {
             return self.scan_greeting(at, ctx);
         }
@@ -350,8 +469,7 @@ impl<'a> Decoder<'a> {
     fn land(&mut self, l: Landing, ctx: Ctx) -> Result<(), Refusal> {
         self.landed.push(l);
         if self.reserved.contains(&l.stop) {
-            self.hazard(l.at, HazardKind::IntoData);
-            return Ok(());
+            return self.reach_table(l.stop, l.at);
         }
         match self.owner[l.stop as usize] {
             NO_OWNER if l.at != l.stop => {
@@ -396,7 +514,7 @@ impl<'a> Decoder<'a> {
         self.landed = landed;
     }
 
-    /// Adds a decoded item. Returns the item's start.
+    /// Adds a decoded item and, for an op, its table uses. Returns the item's start.
     fn insert(&mut self, item: Item) -> Result<u32, Refusal> {
         let (s, e) = (item.offset, item.end());
         if e > self.len() {
@@ -413,8 +531,50 @@ impl<'a> Decoder<'a> {
         for p in s..e {
             self.owner[p as usize] = s;
         }
+        let uses = match &item.kind {
+            Kind::Op(op) => {
+                let (uses, stack) = op_tables(op, s)?;
+                for h in stack {
+                    self.hazard(h.at, h.kind);
+                }
+                uses
+            }
+            _ => Vec::new(),
+        };
         self.items.insert(s, item);
+        self.origins.insert(s, self.phase);
+        for u in uses {
+            self.add_use(u)?;
+        }
         Ok(s)
+    }
+
+    /// Checks one table use of the path decoding now and closes its address to code. The
+    /// address must be inside the script, read with one kind, and outside the code of the
+    /// direct paths and of this path; inside an earlier landing's code it is contested (the
+    /// table wins in the next round), unless it was settled.
+    fn add_use(&mut self, u: TableUse) -> Result<(), Refusal> {
+        if u.addr >= self.len() {
+            return refuse(u.at, Reason::TableOutside);
+        }
+        if *self.kinds.entry(u.addr).or_insert(u.words) != u.words {
+            return refuse(u.at, Reason::TableKinds);
+        }
+        match self.owner[u.addr as usize] {
+            NO_OWNER => {}
+            o => match self.origins.get(&o) {
+                Some(&Origin::Landing(k))
+                    if self.phase != Origin::Landing(k) && !self.plan.settled.contains(&u.addr) =>
+                {
+                    self.contested.insert(u.addr);
+                }
+                _ => return refuse(u.at, Reason::TableInCode),
+            },
+        }
+        self.reserved.insert(u.addr);
+        self.named.insert(u.addr);
+        self.uses.push((u, self.phase));
+        Ok(())
     }
 
     // ---- items -------------------------------------------------------------------------------
@@ -588,10 +748,10 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// A table operand after its `d2` (`eval.rs` `table_element`): the address, then `b1` or
-    /// an index expression.
+    /// A table operand after its `d2` (`eval.rs` `table_element`): the address (as the read
+    /// position it becomes), then `b1` or an index expression.
     fn table_ref(&self, at: u32) -> Result<(TableRef, u32), Refusal> {
-        let addr = self.le32(at)?;
+        let addr = read_position(self.le32(at)?);
         if self.byte(at + 4)? == ops::TABLE_FIRST {
             return Ok((TableRef { addr, index: None }, at + 5));
         }
@@ -627,17 +787,11 @@ impl<'a> Decoder<'a> {
                 (i, Operands::Args(v))
             }
             Shape::Jump => {
-                let raw = self.le32(at + 1)?;
-                let target = i32::from(raw as u16 as i16);
-                if target < 0 || target as u32 >= self.len() {
+                let target = read_position(self.le32(at + 1)?);
+                if target >= self.len() {
                     return refuse(at, Reason::JumpOutside);
                 }
-                (
-                    at + 5,
-                    Operands::Jump {
-                        target: target as u32,
-                    },
-                )
+                (at + 5, Operands::Jump { target })
             }
             Shape::Print => match self.byte(at + 1)? {
                 ops::LIT32 => {
@@ -716,80 +870,51 @@ impl<'a> Decoder<'a> {
 
     // ---- tables ------------------------------------------------------------------------------
 
-    /// The table uses of the decoded ops.
-    pub(super) fn table_uses(&mut self) -> Result<Vec<TableUse>, Refusal> {
-        let mut uses = Vec::new();
-        let mut under = Vec::new();
-        for item in self.items.values() {
-            let Kind::Op(op) = &item.kind else { continue };
-            let mut exprs: Vec<&Expr> = Vec::new();
-            let mut tables: Vec<(&TableRef, bool)> = Vec::new();
-            match &op.operands {
-                Operands::Args(v) => exprs.extend(v.iter().map(|o| &o.expr)),
-                Operands::Jump { .. } | Operands::Print(_) => {}
-                Operands::Assign(Assign::TableWord { table, value }) => {
-                    tables.push((table, true));
-                    exprs.push(value);
-                }
-                Operands::Assign(Assign::Int { value, .. }) => exprs.push(value),
-                Operands::Assign(Assign::StrFromTable { table, .. }) => tables.push((table, false)),
-                Operands::Assign(Assign::StrFromSlot { .. }) => {}
-            }
-            if let Operands::Print(Print::Table(table)) = &op.operands {
-                tables.push((table, false));
-            }
-            for (t, words) in tables {
-                uses.push(TableUse {
-                    addr: t.addr,
-                    words,
-                    index: t.index.as_ref().map_or(Some(0), Expr::constant),
-                    at: item.offset,
-                });
-                exprs.extend(t.index.as_ref());
-            }
-            for e in exprs {
-                expr_tables(e, item.offset, &mut uses, &mut under)?;
-            }
+    /// The plan of the next round, when this one is not final: the contested addresses are
+    /// reserved from the start; reservations no kept path names any more are taken back and
+    /// settled. `None` = final.
+    pub(super) fn revise(&self) -> Option<Plan> {
+        if !self.contested.is_empty() {
+            let mut p = self.plan.clone();
+            p.reserved.extend(&self.contested);
+            return Some(p);
         }
-        for at in under {
-            self.hazard(at, HazardKind::Underflow);
+        let named: BTreeSet<u32> = self.uses.iter().map(|(u, _)| u.addr).collect();
+        let stale: Vec<u32> = self.plan.reserved.difference(&named).copied().collect();
+        if stale.is_empty() {
+            return None;
         }
-        Ok(uses)
+        let mut p = self.plan.clone();
+        for a in stale {
+            p.reserved.remove(&a);
+            p.settled.insert(a);
+        }
+        Some(p)
     }
 
-    /// Claims the tables the decoded ops address that no table owns yet (see the module doc):
-    /// one table item per address, up to the next address, the next decoded byte or the
-    /// script's end. An address inside a table must be one of its entries.
+    /// Claims the tables of the kept uses (see the module doc): one table item per address,
+    /// up to the next address, the next decoded byte or the script's end. Every address is
+    /// checked first (inside the script, not in code), before any range is scanned; the uses
+    /// were checked when they were made, so this refuses nothing in practice.
     pub(super) fn claim_tables(&mut self) -> Result<(), Refusal> {
-        let uses = self.table_uses()?;
-        let mut by_addr: BTreeMap<u32, Vec<TableUse>> = BTreeMap::new();
-        for u in uses {
-            by_addr.entry(u.addr).or_default().push(u);
+        let mut by_addr: BTreeMap<u32, (bool, u32)> = BTreeMap::new();
+        for (u, _) in &self.uses {
+            by_addr.entry(u.addr).or_insert((u.words, u.at));
+        }
+        for (&addr, &(_, at)) in &by_addr {
+            match self.owner.get(addr as usize) {
+                None => return refuse(at, Reason::TableOutside),
+                Some(&NO_OWNER) => {}
+                Some(_) => return refuse(at, Reason::TableInCode),
+            }
         }
         let addrs: Vec<u32> = by_addr.keys().copied().collect();
-        for (n, (&addr, uses)) in by_addr.iter().enumerate() {
-            let at = uses[0].at;
-            if addr >= self.len() {
-                return refuse(at, Reason::TableOutside);
-            }
-            let words = uses[0].words;
-            if uses.iter().any(|u| u.words != words) {
-                return refuse(at, Reason::TableKinds);
-            }
-            match self.owner[addr as usize] {
-                NO_OWNER => {}
-                o => match &self.items[&o].kind {
-                    Kind::Table(t)
-                        if t.words == words
-                            && (o == addr || t.entries.iter().any(|e| e.offset == addr)) =>
-                    {
-                        continue;
-                    }
-                    Kind::Table(_) => return refuse(at, Reason::TableKinds),
-                    _ => return refuse(at, Reason::TableInCode),
-                },
-            }
-            let next = addrs.get(n + 1).copied().unwrap_or(self.len());
+        for (n, (&addr, &(words, _))) in by_addr.iter().enumerate() {
+            let next = addrs
+                .get(n + 1)
+                .copied()
+                .unwrap_or(self.len())
+                .min(self.len());
             let owned = (addr..next)
                 .find(|&p| self.owner[p as usize] != NO_OWNER)
                 .unwrap_or(next);
@@ -810,43 +935,29 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// A constant index may run on into the tables that follow its table without a gap; past
-    /// them it refuses the script.
-    pub(super) fn check_table_indices(&mut self) -> Result<(), Refusal> {
-        for u in &self.table_uses()? {
+    /// A constant index may run on into the tables that follow its table without a gap
+    /// ([`reachable`]); past them, a direct path's use refuses the script and a landing's use
+    /// bans that landing for the next round. `None` = every index holds.
+    pub(super) fn check_table_indices(&self) -> Result<Option<Plan>, Refusal> {
+        let mut banned = BTreeMap::new();
+        for (u, origin) in &self.uses {
             let Some(index) = u.index else { continue };
-            let mut count = 0usize;
-            let mut at = match self.owner.get(u.addr as usize) {
-                Some(&o) if o != NO_OWNER => o,
-                _ => return refuse(u.at, Reason::TableIndex),
-            };
-            let mut skip = true;
-            while let Some(Item {
-                kind: Kind::Table(t),
-                len,
-                ..
-            }) = self.items.get(&at)
-            {
-                if t.words != u.words {
-                    break;
-                }
-                // Entries before the address are not this use's.
-                count += t
-                    .entries
-                    .iter()
-                    .filter(|e| !skip || e.offset >= u.addr)
-                    .count();
-                skip = false;
-                if t.terminated {
-                    break;
-                }
-                at += len;
-            }
+            let count = reachable(|a| self.items.get(&a), u.addr, u.words).len();
             if index as usize >= count {
-                return refuse(u.at, Reason::TableIndex);
+                match origin {
+                    Origin::Direct => return refuse(u.at, Reason::TableIndex),
+                    Origin::Landing(k) => {
+                        banned.insert(*k, Reason::TableIndex);
+                    }
+                }
             }
         }
-        Ok(())
+        if banned.is_empty() {
+            return Ok(None);
+        }
+        let mut p = self.plan.clone();
+        p.banned.extend(banned);
+        Ok(Some(p))
     }
 
     /// The entries of a table at `addr` that ends before `limit`.
@@ -910,15 +1021,52 @@ impl<'a> Decoder<'a> {
     }
 }
 
+/// The table uses of an op at `at` (the table operands of `b5` / `a6`, and the address operand
+/// of the expression ops `b4`, `b7`, `c3`) and the stack hazards of its expressions.
+fn op_tables(op: &Op, at: u32) -> Result<(Vec<TableUse>, Vec<Hazard>), Refusal> {
+    let mut uses = Vec::new();
+    let mut hazards = Vec::new();
+    let mut exprs: Vec<&Expr> = Vec::new();
+    let table = |t: &TableRef, words: bool, uses: &mut Vec<TableUse>| {
+        uses.push(TableUse {
+            addr: t.addr,
+            words,
+            index: ref_entry(t, words),
+            at,
+        });
+    };
+    match &op.operands {
+        Operands::Args(v) => exprs.extend(v.iter().map(|o| &o.expr)),
+        Operands::Jump { .. } | Operands::Print(Print::Nothing | Print::Slot { .. }) => {}
+        Operands::Print(Print::Table(t))
+        | Operands::Assign(Assign::StrFromTable { table: t, .. }) => {
+            table(t, false, &mut uses);
+            exprs.extend(t.index.as_ref());
+        }
+        Operands::Assign(Assign::TableWord { table: t, value }) => {
+            table(t, true, &mut uses);
+            exprs.extend(t.index.as_ref());
+            exprs.push(value);
+        }
+        Operands::Assign(Assign::Int { value, .. }) => exprs.push(value),
+        Operands::Assign(Assign::StrFromSlot { .. }) => {}
+    }
+    for e in exprs {
+        expr_tables(e, at, &mut uses, &mut hazards)?;
+    }
+    Ok((uses, hazards))
+}
+
 /// The table uses of an expression: the address operand of `b4` (words), `b7` (strings) and
 /// `c3` (words), found by running the evaluator's ten-slot stack on the tokens (`eval.rs`
-/// `Stack`: a read below it gives 0, a write there is dropped). `under` gets each op that reads
-/// below the stack.
+/// `Stack`: a read outside it gives 0, a write there is dropped). `hazards` gets each op that
+/// reads below the stack ([`HazardKind::Underflow`]) and each value put above it
+/// ([`HazardKind::Overflow`]); an address operand outside the stack names no table.
 fn expr_tables(
     e: &Expr,
     at: u32,
     uses: &mut Vec<TableUse>,
-    under: &mut Vec<u32>,
+    hazards: &mut Vec<Hazard>,
 ) -> Result<(), Refusal> {
     const SLOTS: i32 = 10;
     // `None` = not a constant; outside 0..SLOTS = below / above the array.
@@ -932,15 +1080,16 @@ fn expr_tables(
             *s = x;
         }
     };
+    let mut hazard = |at: u32, kind: HazardKind| hazards.push(Hazard { at, kind });
     for t in &e.tokens {
         match t.kind {
             TokenKind::Op(code) => {
                 let arity = ops::expr_op(code).map_or(0, |o| i32::from(o.arity));
-                if sp - arity < 0 {
-                    under.push(t.offset);
+                if arity > 0 && sp - arity < 0 {
+                    hazard(t.offset, HazardKind::Underflow);
                 }
-                // a = the slot two below the op (the address), b = the one below it. Below the
-                // stack there is no address (the evaluator reads 0, the script's start).
+                // a = the slot two below the op (the address), b = the one below it. Outside
+                // the stack there is no address (the evaluator reads 0, the script's start).
                 if matches!(code, 0xb4 | 0xb7 | 0xc3)
                     && let Some(a) = get(&v, sp - 2)
                 {
@@ -949,21 +1098,31 @@ fn expr_tables(
                     };
                     let index = get(&v, sp - 1).flatten();
                     uses.push(TableUse {
-                        addr,
+                        addr: read_position(addr),
                         words: code != 0xb7,
-                        // `b7` / `c3` search the whole table; `b4` reads entry `b`.
-                        index: if code == 0xb4 { index } else { None },
+                        // `b7` / `c3` search the whole table; `b4` reads entry `b as u8`.
+                        index: if code == 0xb4 {
+                            index.map(|i| u32::from(i as u8))
+                        } else {
+                            None
+                        },
                         at,
                     });
                 }
-                if arity == 0 {
-                    set(&mut v, sp, None);
-                } else {
-                    set(&mut v, sp - arity, None);
-                    sp -= arity;
+                // The op's value goes where its operands were (where it is, for `c0`).
+                let result = if arity == 0 { sp } else { sp - arity };
+                if result >= SLOTS {
+                    hazard(t.offset, HazardKind::Overflow);
                 }
+                set(&mut v, result, None);
+                sp = result;
             }
-            k => set(&mut v, sp, k.value()),
+            k => {
+                if sp >= SLOTS {
+                    hazard(t.offset, HazardKind::Overflow);
+                }
+                set(&mut v, sp, k.value());
+            }
         }
         sp += 1;
     }

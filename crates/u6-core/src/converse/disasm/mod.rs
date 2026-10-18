@@ -9,26 +9,54 @@
 //! - entries: the header, the look text after `f1` (run by `run_text`, then the read position
 //!   moves past the first `f2`), the greeting after that `f2`, and from each item its successors
 //!   as the interpreter computes them (the next byte, a `b0` target, both ways of an `a1`, the
-//!   answer after a keyword block's `f6`, the byte after an input op or an `ee`);
+//!   answer after a keyword block's `f6`, the byte after an input op or an `ee`). These are the
+//!   *direct* paths;
 //! - the four skip loops (`a1` / `a3`, a keyword block without a match, an answered block, the
-//!   scan for `f2`) read raw bytes, not items. Their landing is computed as the interpreter
-//!   computes it and followed after every direct path, on trial: a landing inside an item, or
-//!   one whose path would refuse the script, is recorded as a [`Hazard`] and not decoded;
+//!   scan for `f2`) read raw bytes, not items (stepping over operands with `run.rs`
+//!   `operand_len`). Their landing is computed as the interpreter computes it and followed after
+//!   every direct path, on trial, one landing at a time: a landing inside an item, or one whose
+//!   path would refuse the script, is recorded as a [`Hazard`] and not decoded. Most of a
+//!   conversation is reached this way (each keyword block's successor is a no-match landing);
 //! - every item is decoded from its first byte alone, so a byte has one meaning; two decodes that
 //!   disagree on a byte refuse the script ([`Reason::Overlap`]). A path that enters a text run
-//!   after its start (a `b0` into a run's last newline, in the shipped scripts) splits the run
-//!   there, so every run is read from its start ([`Disasm::run_splits`]);
+//!   after its start (a `b0` target or a skip-loop landing inside the text) splits the run
+//!   there, so every run is read from its start ([`Disasm::run_splits`]). The split can fall
+//!   anywhere in the text, before a trailing newline or in the middle of a sentence; the catalog
+//!   links the parts ([`catalog::RunUnit::part_of`]);
 //! - tables are the bytes the ops address as data (`b5 d2`, `a6 d2`, and the address operand of
 //!   the expression ops `b4`, `b7`, `c3`): NUL-ended strings or words, up to a `b8` at an
-//!   entry's start, the next decoded byte or the script's end. The decode runs again with every
-//!   address the ops name closed to code until no new one turns up, so a table is never decoded
-//!   as ops, even where a skip loop lands on it;
+//!   entry's start, the next decoded byte, the next table address or the script's end;
 //! - what is left is [`Kind::Unreached`].
+//!
+//! Tables and the trial. A table use is checked when its op is decoded, inside the path that
+//! decodes it: the address must be a literal inside the script, read with one kind, and not in
+//! the code of a direct path or of the same path. On a direct path a failed check refuses the
+//! script; on a landing's path it drops that landing ([`HazardKind::Dropped`]). A kept use closes
+//! its address to code, so a later landing that reaches it stops there
+//! ([`HazardKind::IntoData`]); a direct path that reaches it refuses the script
+//! ([`Reason::TableInCode`]). Only kept paths reserve addresses. The choices the trial forces:
+//!
+//! - a table named by a kept path wins over the code of an *earlier* landing that covers its
+//!   address: the decode runs again with that address closed to landing paths from the start
+//!   (that landing then stops there), so the result does not depend on which of the two
+//!   landings came first;
+//! - it never wins over direct code or over its own path's code: that landing is dropped
+//!   (`Dropped(_, TableInCode)`), and direct code is never read as a table;
+//! - an address closed that way that no kept path names in the next round is opened again and
+//!   can no longer win: a later landing that names it inside other landing code is dropped;
+//! - a constant index is checked against the final tables (its table and the ones that follow
+//!   it without a gap): past them, a direct use refuses the script and a landing's use drops
+//!   that landing in the next round.
+//!
+//! The rounds end: each one grows the dropped landings or the settled addresses, or (with those
+//! unchanged) the reserved addresses, all bounded by the script's length.
 //!
 //! Operands are decoded with the evaluator's grammar ([`Expr`]), so their bytes are never read
 //! as text. A byte the interpreter has no arm for is refused with a named [`Reason`], never
 //! guessed. The op tables are in [`ops`]; the catalog of runs and table strings built on this
-//! is in [`catalog`].
+//! is in [`catalog`]. The catalog's JSON form uses serde: no new crate (u6-hdpack already
+//! depends on serde and serde_json) and no measurable weight in the wasm build, and spec 09 V5's
+//! bundle exporter, which runs in wasm, reads the same catalog, so it stays in u6-core.
 
 pub mod catalog;
 mod decode;
@@ -41,10 +69,9 @@ mod tests;
 #[cfg(test)]
 mod tests_real;
 
-use std::collections::BTreeSet;
 use std::fmt;
 
-use decode::Decoder;
+use decode::{Decoder, Plan};
 pub use ops::Escape;
 
 /// One decoded script: its items in offset order, covering `0..len` exactly once.
@@ -212,7 +239,8 @@ pub enum Assign {
 }
 
 /// A table operand: its script address and the index expression (`None` = `b1`, the first
-/// element).
+/// element). The address is the read position the interpreter moves to: the operand's low word,
+/// sign-extended (so an operand with high bits set reads the table its low word names).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableRef {
     pub addr: u32,
@@ -331,15 +359,18 @@ pub enum HazardKind {
     Scan(Scan),
     /// A skip loop finds no stop byte before the script's end.
     ScanPastEnd(Scan),
-    /// A path (in practice one after a skip loop) reaches a table's bytes.
+    /// A landing's path reaches the address of a table a kept path names: it stops there.
     IntoData,
-    /// The path after a skip loop's landing would refuse the script for this reason: it is not
-    /// decoded.
+    /// The path after a skip loop's landing would refuse the script for this reason (its table
+    /// uses included): it is not decoded, and the addresses it names are not tables.
     Dropped(Scan, Reason),
     /// An expression op takes more values than its expression pushed: the evaluator reads 0
     /// below its stack and drops what it writes there (a `b4` / `b7` / `c3` then has no table
     /// address and claims no table).
     Underflow,
+    /// An expression puts a value above the evaluator's ten slots: it is dropped, and a read
+    /// there gives 0 (a `b4` / `b7` / `c3` whose address is up there claims no table).
+    Overflow,
 }
 
 /// The interpreter's skip loops.
@@ -368,6 +399,8 @@ pub struct Refusal {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
+    /// The script is longer than the interpreter's script buffer ([`super::SCRIPT_LEN`]).
+    TooLong,
     /// The script does not start with `ff` and one more byte.
     NoHeader,
     /// No `f1` after the header.
@@ -394,13 +427,14 @@ pub enum Reason {
     TableNotLiteral,
     /// One table read both as strings and as words.
     TableKinds,
-    /// A constant index past a table's entries.
+    /// A constant index past a table's entries (and those of the tables that follow it).
     TableIndex,
 }
 
 impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Reason::TooLong => write!(f, "longer than the script buffer"),
             Reason::NoHeader => write!(f, "no header"),
             Reason::NoLookMarker => write!(f, "no look marker"),
             Reason::NoGreetingMarker => write!(f, "no greeting marker"),
@@ -428,27 +462,75 @@ impl fmt::Display for Refusal {
 /// Decodes one script (see the module doc). Never panics: bytes that end inside an item, or a
 /// byte the interpreter has no arm for, refuse the script.
 pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refusal> {
-    // Decode, collect the table addresses the ops name, and decode again with those addresses
-    // closed to code, until no new address turns up (each round adds one at least).
-    let mut reserved = BTreeSet::new();
-    let mut d = loop {
-        let mut d = Decoder::new(bytes, reserved.clone());
-        d.run()?;
-        let addrs: BTreeSet<u32> = d.table_uses()?.iter().map(|u| u.addr).collect();
-        if addrs.is_subset(&reserved) {
-            break d;
+    if bytes.len() > super::SCRIPT_LEN {
+        return Err(Refusal {
+            at: super::SCRIPT_LEN as u32,
+            reason: Reason::TooLong,
+        });
+    }
+    // Decode rounds until one needs no other (the module doc says why each one is needed and
+    // why they end): each round's plan holds the addresses closed to landing paths from the
+    // start, the addresses that can no longer be, and the landings to drop.
+    let mut plan = Plan::default();
+    loop {
+        let next = {
+            let mut d = Decoder::new(bytes, &plan);
+            d.run()?;
+            match d.revise() {
+                Some(next) => next,
+                None => {
+                    d.claim_tables()?;
+                    match d.check_table_indices()? {
+                        Some(next) => next,
+                        None => {
+                            let items = d.finish();
+                            return Ok(Disasm {
+                                archive,
+                                item,
+                                len: bytes.len() as u32,
+                                items,
+                                hazards: d.hazards,
+                                run_splits: d.run_splits,
+                            });
+                        }
+                    }
+                }
+            }
+        };
+        plan = next;
+    }
+}
+
+/// The entries a use of the table at `addr` can reach: the table item there and, while a table
+/// has no `b8`, the one of the same kind that starts where it ends (an index runs on into it, as
+/// `table_element` counts NULs and `b4` / `c3` step over words). As (table offset, index in that
+/// table, entry). `item_at` gives the item that starts at an offset.
+fn reachable<'a>(
+    item_at: impl Fn(u32) -> Option<&'a Item>,
+    addr: u32,
+    words: bool,
+) -> Vec<(u32, u32, Span)> {
+    let mut out = Vec::new();
+    let mut at = addr;
+    while let Some(Item {
+        kind: Kind::Table(t),
+        len,
+        ..
+    }) = item_at(at)
+    {
+        if t.words != words {
+            break;
         }
-        reserved.extend(addrs);
-    };
-    d.claim_tables()?;
-    d.check_table_indices()?;
-    let items = d.finish();
-    Ok(Disasm {
-        archive,
-        item,
-        len: bytes.len() as u32,
-        items,
-        hazards: d.hazards,
-        run_splits: d.run_splits,
-    })
+        out.extend(
+            t.entries
+                .iter()
+                .enumerate()
+                .map(|(i, &e)| (at, i as u32, e)),
+        );
+        if t.terminated {
+            break;
+        }
+        at += len;
+    }
+    out
 }

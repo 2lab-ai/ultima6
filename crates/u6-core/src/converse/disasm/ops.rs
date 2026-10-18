@@ -19,8 +19,9 @@ pub enum Shape {
     Jump,
     /// `b5`: `d2 <table>` (a table string), `d5` (nothing) or `<kind> <slot> b3 <byte>`.
     Print,
-    /// `a6`: `d2 <table> a8 <expr>` (a table word), `<var> b2 a8 <expr>` (a word variable),
-    /// `<var> <kind> a8 d2 <table>` or `<var> <kind> a8 <slot> b3` (a string slot).
+    /// `a6`: `d2 <table> (b1 a8 | <index ending a8>) <expr>` (a table word), `<var> b2 a8
+    /// <expr>` (a word variable), `<var> <kind> a8 d2 <table> (b1 | <index>)` or `<var> <kind>
+    /// a8 <slot> b3` (a string slot).
     Assign,
 }
 
@@ -208,14 +209,10 @@ pub fn is_text(b: u8) -> bool {
     (0x20..0x80).contains(&b) || b == b'\n'
 }
 
-/// The operand bytes the skip loops step over after a byte (`run.rs` `operand_len`).
+/// The operand bytes the skip loops step over after a byte: the interpreter's own
+/// `run.rs` `operand_len` (4 after `b0`, 1 after `d3`, 2 after `d4`, else none).
 pub fn skip_len(b: u8) -> u32 {
-    match b {
-        0xb0 => 4,
-        0xd3 => 1,
-        0xd4 => 2,
-        _ => 0,
-    }
+    super::super::run::operand_len(b) as u32
 }
 
 /// An escape of the escape layer inside a text run (`ui/printf.rs` `text_out`).
