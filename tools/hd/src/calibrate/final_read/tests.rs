@@ -2927,7 +2927,20 @@ fn the_portrait_and_bitmap_masters_are_held_like_the_tiles() {
         let e = calibrate_final(&g, &work, &o).unwrap_err();
         AFTER_READ.lock().unwrap().retain(|(k, _)| *k != o.out);
         assert!(e.contains("(1 masters of slices/)"), "{p:?}: {e}");
-        assert!(!run_dir(&o.out).join("samples.tsv").exists(), "{p:?}");
+        // The run dir: the diagnostics alone, every one; no sheet, no samples.tsv, no done.
+        assert_eq!(
+            files_of(&o.out),
+            [
+                "changed.txt",
+                "gates.jsonl",
+                "ingest.json",
+                "jobs.jsonl",
+                "refused.txt"
+            ],
+            "{p:?}"
+        );
+        let changed = std::fs::read_to_string(run_dir(&o.out).join("changed.txt")).unwrap();
+        assert_eq!(changed, "1 masters of slices/\n", "{p:?}");
         std::fs::write(&path, was).unwrap();
     }
     let _ = std::fs::remove_dir_all(&dir);
