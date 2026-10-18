@@ -75,8 +75,8 @@ pub struct At {
     pub y: usize,
 }
 
-/// Where a pair occurs: A's cell in the first place each source has it (the map in level,
-/// row, column order; the objects in level, column, row order of their cells).
+/// Where a pair occurs: A's cell in the first place each source has it, the cells of both
+/// sources taken in level, row, column order (`(z, y, x)`, the least first).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Seen {
     pub map: Option<At>,
@@ -434,7 +434,8 @@ pub struct Settled {
     /// Items sent back to MMPX, with the pass that failed them (1 is the first).
     pub fallen: BTreeMap<u32, usize>,
     /// Every pair checked in the first pass, failing or not, then each failing pair of a later
-    /// pass, in pass and pair order.
+    /// pass: by pass, and within a pass in the order of the pairs [`settle`] was given (it
+    /// keeps its input's order; ingest gives [`Pairs::all`], which is sorted).
     pub checked: Vec<Checked>,
 }
 
