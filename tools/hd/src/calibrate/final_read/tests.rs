@@ -3406,9 +3406,10 @@ fn a_final_run_whose_dir_is_removed_before_samples_tsv_fails_and_makes_nothing_a
 
 #[test]
 fn a_malformed_snapshot_is_said_by_its_full_path_with_the_run_dir() {
-    // An older incomplete run in --out; then gates.jsonl with a neighbour that is not a pair at
-    // line 3, and ingest.json that is not JSON: each error names the snapshot by its path in
-    // the run's dir, then the run dir, then the incomplete run; refused.txt says the same.
+    // An older incomplete run in --out; then each snapshot malformed in turn (gates.jsonl with a
+    // neighbour that is not a pair, or not UTF-8; ingest.json not JSON, or with no digest;
+    // jobs.jsonl not JSON): each error names the snapshot by its path in the run's dir, then the
+    // run dir, then the incomplete run; refused.txt says the same.
     let g = game();
     let (text, left) = chain(&g);
     let lines: Vec<&str> = text.lines().collect();
@@ -3417,24 +3418,46 @@ fn a_malformed_snapshot_is_said_by_its_full_path_with_the_run_dir() {
     let mut bad: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     bad[2] = v.to_string();
     let bad = bad.join("\n") + "\n";
-    for (k, gates, list, said) in [
+    let mut no_digest: serde_json::Value =
+        serde_json::from_slice(&serde_json::to_vec(&listed(&g, &left)).unwrap()).unwrap();
+    no_digest[0].as_object_mut().unwrap().remove("digest");
+    let no_digest = no_digest.to_string();
+    // (case, the work dir's file put in place, its bytes, what the error says after the path)
+    let cases: [(&str, &str, &[u8], &str); 5] = [
         (
             "gates",
-            bad.as_str(),
-            None,
+            "gates.jsonl",
+            bad.as_bytes(),
             "gates.jsonl line 3: a neighbour field that is not a pair",
         ),
         (
+            "gates-utf8",
+            "gates.jsonl",
+            b"\xff\n",
+            "gates.jsonl is not UTF-8",
+        ),
+        (
             "ingest",
-            text.as_str(),
-            Some(b"not json".as_slice()),
+            "ingest.json",
+            b"not json",
             "ingest.json: expected ident",
         ),
-    ] {
-        let (dir, work) = work_dir(&format!("malformed-{k}"), gates, &g, &left);
-        if let Some(l) = list {
-            work.write("ingest.json", l).unwrap();
-        }
+        (
+            "ingest-digest",
+            "ingest.json",
+            no_digest.as_bytes(),
+            "ingest.json has no digest of its masters",
+        ),
+        (
+            "jobs",
+            "jobs.jsonl",
+            b"not json\n",
+            "jobs.jsonl line 1: expected ident",
+        ),
+    ];
+    for (k, file, bytes, said) in cases {
+        let (dir, work) = work_dir(&format!("malformed-{k}"), &text, &g, &left);
+        work.write(file, bytes).unwrap();
         let o = options(&dir);
         std::fs::create_dir_all(&o.out).unwrap();
         let older = super::super::out_dir::run_name(1, 7);

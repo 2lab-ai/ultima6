@@ -1555,17 +1555,17 @@ fn run_final(
     let gates_bytes = snapshot(caps[0].0, caps[0].1)?;
     let list_bytes = snapshot(caps[1].0, caps[1].1)?;
     let jobs_bytes = snapshot(caps[2].0, caps[2].1)?;
-    let text =
-        std::str::from_utf8(&gates_bytes).map_err(|_| run.named("gates.jsonl", "is not UTF-8"))?;
+    let text = std::str::from_utf8(&gates_bytes)
+        .map_err(|_| run.named("gates.jsonl", "gates.jsonl is not UTF-8"))?;
     let list: Vec<Accepted> = serde_json::from_slice(&list_bytes)
         .map_err(|e| run.named("ingest.json", &e.to_string()))?;
     let rec = record(text).map_err(|e| run.named("gates.jsonl", &e))?;
     if list.iter().any(|a| a.digest.is_none()) {
-        return Err(
+        return Err(run.named(
+            "ingest.json",
             "ingest.json has no digest of its masters (written by an older ingest): run ingest \
-             again, so that the final read can hold the masters to what the gates judged"
-                .into(),
-        );
+             again, so that the final read can hold the masters to what the gates judged",
+        ));
     }
     // The masters listed once and each read once: the records with one are the ones read.
     let dir = work.path("slices");
@@ -1590,7 +1590,7 @@ fn run_final(
         .filter(|(_, l)| !l.trim().is_empty())
     {
         let job: atlas::Job = serde_json::from_str(line)
-            .map_err(|e| run.named("jobs.jsonl", &format!("line {}: {e}", i + 1)))?;
+            .map_err(|e| run.named("jobs.jsonl", &format!("jobs.jsonl line {}: {e}", i + 1)))?;
         laid_out.extend(job.places.iter().map(|p| p.item));
         if job.plan != fingerprint {
             d.push(Disagreement {

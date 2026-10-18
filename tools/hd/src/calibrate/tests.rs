@@ -1301,7 +1301,23 @@ fn a_malformed_first_pass_snapshot_is_said_by_its_full_path_with_the_run_dir() {
     // refused.txt says the same.
     let g = game();
     let bad = r#"{"neighbour":7,"pass":1,"fail":false}"#;
-    let (dir, work, slices) = setup("malformed", &format!("{bad}\n"));
+    for (k, log, said) in [
+        (
+            "pair",
+            format!("{bad}\n").into_bytes(),
+            "gates.jsonl line 1: a neighbour field that is not a pair",
+        ),
+        ("utf8", b"\xff\n".to_vec(), "gates.jsonl is not UTF-8"),
+    ] {
+        malformed_first_pass(&g, k, &log, said);
+    }
+}
+
+/// The first pass over the log `log` (an older incomplete run beside it) fails with `said`
+/// after the snapshot's full path, then the run dir and the incomplete run; refused.txt the same.
+fn malformed_first_pass(g: &Game, k: &str, log: &[u8], said: &str) {
+    let (dir, work, slices) = setup(&format!("malformed-{k}"), "");
+    work.write("gates.jsonl", log).unwrap();
     let out = dir.join("calibrate");
     std::fs::create_dir_all(&out).unwrap();
     let older = out_dir::run_name(1, 7);
@@ -1315,10 +1331,12 @@ fn a_malformed_first_pass_snapshot_is_said_by_its_full_path_with_the_run_dir() {
         seam: Thresholds::default().seam,
         source: Source::All,
     };
-    let e = calibrate(&g, &work, &opts).unwrap_err();
+    let e = calibrate(g, &work, &opts).unwrap_err();
     let run = run_dir(&out).canonicalize().unwrap();
-    let said = "gates.jsonl line 1: a neighbour field that is not a pair";
-    assert!(e.starts_with(&format!("{}/{said}", run.display())), "{e}");
+    assert!(
+        e.starts_with(&format!("{}/{said}", run.display())),
+        "{k}: {e}"
+    );
     let tail = format!(
         "; run dir: {}; incomplete runs beside it (left as they are): {older}",
         run.display()
