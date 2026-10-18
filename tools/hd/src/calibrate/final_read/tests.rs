@@ -2385,6 +2385,21 @@ fn the_read_of_what_ingest_and_its_gate_wrote() {
         let t = w["ticks"].split(';').find(|t| t.contains(&tick)).unwrap();
         t.split(',').skip(7).collect::<Vec<_>>().join(",")
     };
+    // The rebuilt measure is the gate's for the last pass: the chest's master as ingest wrote
+    // it beside the sword drawn by MMPX, one pair through the gate's sides and fixed point.
+    let master = img::read_png(
+        &work.slice(&atlas::slice_name(ImageId::Tile(chest))),
+        128,
+        128,
+    )
+    .unwrap();
+    let plan = group::plan(&g);
+    let accepted = BTreeMap::from([(chest, (item_of(&plan, chest), &master))]);
+    let sides = neighbour::sides(&g, &[sc], &accepted).unwrap();
+    let last = neighbour::settle(&[sc], &sides, t.seam);
+    let (ratio, limit) = last.checked[0].result.unwrap();
+    assert_eq!(measure_of(w), format!("{ratio:.4},{limit:.4}"));
+    // ... which is not pass 1's (the fixture changes the pair's sides).
     let (ratio, limit) = logged.result.unwrap();
     assert_ne!(measure_of(w), format!("{ratio:.4},{limit:.4}"));
     // The grass's pairs read where the grass's window is placed.
