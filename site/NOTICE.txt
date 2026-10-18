@@ -24,3 +24,12 @@ MMPX (crates/u6-render/src/hd/mmpx.rs, tools/mmpx)
   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Galmuri7 (site/fonts, tools/font)
+  The Hangul syllables of the Galmuri7 pixel font by Lee Minseo (quiple), release v2.40.4,
+  https://github.com/quiple/galmuri, as the 8 x 8 cell table site/fonts/galmuri7-hangul.bin
+  written by tools/font/galmuri.py from the release's BDF. Licensed under the SIL Open Font
+  License, Version 1.1: site/fonts/OFL.txt is the licence, site/fonts/NOTICE.txt names the
+  source URL and the sha256s of the release zip and the table.
+
+  Copyright (c) 2019-2025 Lee Minseo (quiple@quiple.dev)

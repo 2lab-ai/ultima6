@@ -2,6 +2,7 @@
 
 use super::tables::UiTables;
 use super::text::{CAPITALISE, SCROLL, TextWindow, WRAP, WindowId};
+use super::wide::{Josa, Language, Tail, Utf8};
 
 /// Line buffer size: a window row (at most 40 cells) plus the character that overflowed it.
 pub const LINE: usize = 41;
@@ -17,8 +18,9 @@ pub struct TextState {
     pub windows: [TextWindow; 4],
     /// Original: A4-0x7a10 (pointer to the current window record)
     pub current: WindowId,
-    /// Original: A4-0x3074 (characters of the line being assembled)
-    pub line: [u8; LINE],
+    /// Original: A4-0x3074 (characters of the line being assembled); port: cell codes
+    /// ([`super::wide`]), bytes as before plus Hangul syllables
+    pub line: [u16; LINE],
     /// Original: A4-0x304b (ink colour of each of those characters)
     pub line_ink: [u8; LINE],
     /// Original: A4-0x7972 (characters in the line buffer)
@@ -45,8 +47,31 @@ pub struct TextState {
     pub drawn: bool,
     /// Original: A4-0x7a50 (`@` keywords get the alert colour)
     pub keyword_colour: bool,
-    /// Port-side: the characters of the current scroll line drawn so far (for the transcript).
-    pub transcript_line: Vec<u8>,
+    /// Port-side: the cell codes of the current scroll line drawn so far (for the transcript;
+    /// [`super::wide::cell_char`] reads them).
+    pub transcript_line: Vec<u16>,
+    /// Port-only (spec 08): text bytes go through the UTF-8 assembler ([`Utf8`]) before the
+    /// escape layer, and `printf` takes positional arguments, counts cells and reads `@{…}`.
+    /// Set by the locale layer ([`TextState::set_wide`]).
+    pub wide: bool,
+    /// Port-only (spec 08): the grammar rules, from the pack's declared language, apart from
+    /// `wide` ([`TextState::set_language`]).
+    pub language: Language,
+    /// Port-only: the bytes the assembler holds.
+    pub utf8: Utf8,
+    /// Port-only: the codes the josa resolver holds.
+    pub josa: Josa,
+    /// Port-only: inside `@{…}` (its text in the alert colour), until its `}` or the end of the
+    /// unit of text it was opened in ([`super::printf::end_unit`]).
+    pub brace: bool,
+    /// Port-only: the `@{` taken so far (wrapping), so the end of a unit of text closes only a
+    /// brace opened in it.
+    pub braces: u32,
+    /// Port-only (spec 08): the last code the escape layer took was `@`, so with `wide` on a
+    /// `{` now opens `@{…}` and goes past the josa resolver.
+    pub after_at: bool,
+    /// Port-only: the last cell put into the line, for the josa resolver.
+    pub tail: Tail,
 }
 
 impl Default for TextState {
@@ -69,6 +94,14 @@ impl Default for TextState {
             drawn: false,
             keyword_colour: false,
             transcript_line: Vec::new(),
+            wide: false,
+            language: Language::English,
+            utf8: Utf8::default(),
+            josa: Josa::default(),
+            brace: false,
+            braces: 0,
+            after_at: false,
+            tail: Tail::default(),
         }
     }
 }
@@ -89,6 +122,16 @@ impl TextState {
         };
         s.windows[WindowId::Default.index()] = t.default_window;
         s
+    }
+
+    /// Port-only (spec 08): the UTF-8 assembler on or off (the locale layer's switch).
+    pub fn set_wide(&mut self, on: bool) {
+        self.wide = on;
+    }
+
+    /// Port-only (spec 08): the grammar rules of `language`.
+    pub fn set_language(&mut self, language: Language) {
+        self.language = language;
     }
 
     /// The current window record.

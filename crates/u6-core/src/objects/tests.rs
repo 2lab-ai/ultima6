@@ -404,6 +404,28 @@ fn look_text_takes_the_next_entry_and_names_actors_by_party_name() {
 }
 
 #[test]
+fn korean_names_have_no_article_and_no_plural_letters() {
+    let mut s = world();
+    s.tables.look = LookTable {
+        entries: vec![LookEntry {
+            tile: 40,
+            text: "loa/f\\ves".into(),
+        }],
+        trailer: vec![0x00, 0x08, b'z', 0],
+    };
+    s.tables.tileflags.flags3[usize::from(tile(10, 0))] = 0x40;
+    let loaf = put(&mut s, 10, 1, 1);
+    assert_eq!(described_name(&s, loaf), "A:loaf");
+    assert_eq!(article_text(&s, tile(10, 0)), "A:");
+    s.ui.text.set_language(crate::ui::Language::Korean);
+    // Spec 08: the article is empty, `/` and `\\` and the letters after them print nothing.
+    assert_eq!(article_text(&s, tile(10, 0)), "");
+    assert_eq!(described_name(&s, loaf), "loa");
+    s.ui.text.set_language(crate::ui::Language::English);
+    assert_eq!(described_name(&s, loaf), "A:loaf");
+}
+
+#[test]
 fn draw_lists_put_wide_objects_in_two_cells_and_top_tiles_last() {
     let mut s = world();
     s.tables.tileflags.flags2[usize::from(tile(20, 0))] = 0x80;

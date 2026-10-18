@@ -11,6 +11,7 @@ use super::{SCRIPT_LEN, begin, int_var, string_var};
 use crate::engine::{Engine, InputEvent};
 use crate::files::Files;
 use crate::state::State;
+use crate::ui::Language;
 
 const NONE: Vec<InputEvent> = Vec::new();
 
@@ -399,6 +400,101 @@ fn print_op() {
     let code = [&[0xb5][..], &addr(0x40), &[1, 0xa7, b'.', 0]].concat();
     assert_eq!(scroll(&text(&with_at(&code, 0x40, b"aa\0bb\0"))), "bb.");
     assert_eq!(scroll(&text(&[0xb5, 0xd5, b'Z', 0])), "Z");
+}
+
+/// `script` through the text runner with `wide` on, the keyword colour on and the grammar of
+/// `language`: the scroll and the ink of each cell of its line (no newline and no flush, so
+/// none is drawn yet). Where the runner stops every brace is closed, the text ink back, and
+/// nothing is held.
+fn braced_in(script: &[u8], language: Language) -> (String, Vec<u8>) {
+    braced_then(script, language, b"")
+}
+
+/// [`braced_in`], then `after` printed by a `printf` of its own when it is not empty (a unit
+/// after the runner's).
+fn braced_then(script: &[u8], language: Language, after: &'static [u8]) -> (String, Vec<u8>) {
+    let mut s = state(script);
+    s.ui.text.set_wide(true);
+    s.ui.text.set_language(language);
+    s.ui.text.keyword_colour = true;
+    let (_, s) = run!(s, script_files(), NONE, |cx| {
+        run_text(cx, 9).await;
+        if !after.is_empty() {
+            crate::ui::printf::printf(cx.state, cx.io, after, &[]).await;
+        }
+    });
+    let t = &s.ui.text;
+    assert!(!t.brace, "closed where the runner stops");
+    assert_eq!(t.win().fg, s.ui.tables.colours.text, "the text ink");
+    assert!(t.utf8.is_empty() && t.josa.is_empty(), "nothing held");
+    let ink = t.line_ink[usize::from(t.line_start)..usize::from(t.line_len)].to_vec();
+    (scroll(&s), ink)
+}
+
+/// [`braced_in`] in English.
+fn braced(script: &[u8]) -> (String, Vec<u8>) {
+    braced_in(script, Language::English)
+}
+
+#[test]
+fn a_brace_left_open_closes_where_its_text_run_op_or_keyword_block_ends() {
+    let (alert, text) = (3, 1);
+    // Spec 08: a text run left with `@{` open closes it where the run ends: at the op after it
+    // (here one that prints a message), so that output and the next run are in the text ink.
+    let (out, ink) = braced(b"@{ab\xd1cd\0");
+    assert_eq!(out, "ab[UnknownCommand]cd");
+    assert_eq!(ink, [[alert; 2].as_slice(), &[text; 18]].concat());
+    // At a control byte, before the line it prints.
+    let (out, ink) = braced(b"@{ab\x01");
+    assert_eq!(out, "ab[ControlChar]");
+    assert_eq!(ink, [[alert; 2].as_slice(), &[text; 13]].concat());
+    // Where the runner stops (the helper checks it is closed).
+    let (out, ink) = braced(b"x\xd1@{ab\0");
+    assert_eq!(out, "x[UnknownCommand]ab");
+    assert_eq!(ink, [[text; 17].as_slice(), &[alert; 2]].concat());
+    // What an op puts is a unit too: a table string put a byte at a time with `@{` open, then
+    // the text run after the op.
+    let code = [&[0xb5][..], &addr(0x40), &[1, 0xa7, b'c', 0]].concat();
+    let (out, ink) = braced(&with_at(&code, 0x40, b"aa\0@{bb\0"));
+    assert_eq!(out, "bbc");
+    assert_eq!(ink, [alert, alert, text]);
+    // What a unit still holds is let out where it ends, in its ink, before its brace closes: a
+    // `{` the josa resolver holds at the end of a Korean run, before the op's message, and a
+    // UTF-8 lead at the end of a table string, before the run after it.
+    let (out, ink) = braced_in(b"@{x{\xd1y\0", Language::Korean);
+    assert_eq!(out, "x{[UnknownCommand]y");
+    assert_eq!(ink, [[alert; 2].as_slice(), &[text; 17]].concat());
+    let code = [&[0xb5][..], &addr(0x40), &[1, 0xa7, b'b', 0]].concat();
+    let (out, ink) = braced(&with_at(&code, 0x40, b"aa\0@{a\xea\0"));
+    assert_eq!(out, "a\u{ea}b");
+    assert_eq!(ink, [alert, alert, text]);
+    // Where the runner stops after a run that ends inside a josa marker: the held `{(` drawn as
+    // they are, in the brace's ink, then the brace closed and nothing held (the helper checks).
+    let (out, ink) = braced_in(b"@{x{(\0", Language::Korean);
+    assert_eq!(out, "x{(");
+    assert_eq!(ink, [alert; 3]);
+    // A UTF-8 lead cannot end a text run (a byte from 0x80 there is an op); it can end a table
+    // string, the last unit before the runner stops: drawn as itself in the brace's ink.
+    let code = [&[0xb5][..], &addr(0x40), &[1, 0xa7, 0]].concat();
+    let (out, ink) = braced(&with_at(&code, 0x40, b"aa\0@{a\xea\0"));
+    assert_eq!(out, "a\u{ea}");
+    assert_eq!(ink, [alert, alert]);
+    // A keyword block ends the run before it: the brace left open there is closed before the
+    // block's newline and answer (empty input is "bye", which the keyword `fare` matches).
+    let (out, ink) = braced(b"@{ab\xeffare\xf6B\xee\0");
+    assert_eq!(out, "ab\nB");
+    assert_eq!(ink, [text]);
+    // A brace opened in a block's answer, which ends inside a josa marker, is the answer's run:
+    // where it ends the held `{` is drawn in the brace's ink and the brace closed, so the next
+    // unit is in the text ink.
+    let (out, ink) = braced_then(b"\xeffare\xf6@{c{\xee\0", Language::Korean, b"z");
+    assert_eq!(out, "\nc{z");
+    assert_eq!(ink, [alert, alert, text]);
+    // Off, `@{` is the plain keyword, its brace printed (as before).
+    let mut s = state(b"@{ab\xd1cd\0");
+    s.ui.text.keyword_colour = true;
+    let s = text_in(s, "");
+    assert_eq!(scroll(&s), "{ab[UnknownCommand]cd");
 }
 
 #[test]

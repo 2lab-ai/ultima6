@@ -13,12 +13,14 @@ use super::text::{CELL, itoa};
 use super::*;
 use crate::{Engine, Files, InputEvent, Io, Key, State};
 
+mod escaped_tests;
 mod input_tests;
 mod panel_tests;
 mod pointer_real;
 mod pointer_tests;
 mod real_tests;
 mod text_tests;
+mod wide_tests;
 
 pub(super) const INK: u8 = 1;
 pub(super) const PAPER: u8 = 2;

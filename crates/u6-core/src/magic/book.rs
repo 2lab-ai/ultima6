@@ -25,7 +25,7 @@ const MSG_LEVEL: u32 = 0x0011_58b4;
 /// A4-0x61de: pointer to the file name of the book picture.
 const BOOK_BMP: u32 = 0x61de;
 /// The marker glyph of the current spell's line.
-pub(super) const MARKER: i16 = 0x1a;
+pub(super) const MARKER: i32 = 0x1a;
 
 /// Quality byte of a slot (the high byte of its A4+0x250c word).
 pub(crate) fn quality(o: &Objects, slot: Slot) -> u8 {

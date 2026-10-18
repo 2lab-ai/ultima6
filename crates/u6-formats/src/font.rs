@@ -6,6 +6,8 @@
 //! - `u6.set` (N: script/script_cutscene.cpp:1183, fonts/wou_font.cpp:45-59,105-118): U6-LZW →
 //!   `[0]` height, `[2]` ink value, `[4+c]` width, `[0x104+c]` offset lo, `[0x204+c]` offset hi;
 //!   glyph = width×height bytes at `hi*256+lo`, a byte equal to ink = set pixel.
+//! - The Hangul table (port-only, spec 08): [`HangulFont`], 11,172 glyphs × 8 bytes laid out as
+//!   `u6.ch`'s, U+AC00..=U+D7A3 in order.
 
 use crate::bytes;
 use crate::error::{FormatError, Result};
@@ -41,6 +43,75 @@ impl BitFont {
     /// True when pixel (x, y) of glyph `c` is set; false out of range.
     pub fn pixel(&self, c: u8, x: usize, y: usize) -> bool {
         x < 8 && y < 8 && self.glyphs[usize::from(c)][y] & (0x80 >> x) != 0
+    }
+}
+
+/// The first Hangul syllable, U+AC00, the code of glyph 0 of a [`HangulFont`].
+pub const HANGUL_FIRST: u32 = 0xAC00;
+/// The last Hangul syllable, U+D7A3.
+pub const HANGUL_LAST: u32 = 0xD7A3;
+/// Glyphs of a [`HangulFont`]: every syllable U+AC00..=U+D7A3.
+pub const HANGUL_GLYPHS: usize = (HANGUL_LAST - HANGUL_FIRST + 1) as usize;
+/// File size of the Hangul table: 8 row bytes per syllable.
+pub const HANGUL_LEN: usize = HANGUL_GLYPHS * 8;
+
+/// Port-only (spec 08 Design 1): the Hangul table, one 8×8 cell per syllable in the layout of
+/// `u6.ch` (one byte per row, bit 7 = leftmost), U+AC00..=U+D7A3 in order. Not game data: the
+/// committed `site/fonts/galmuri7-hangul.bin` (Galmuri7, OFL-1.1), written by `tools/font`.
+///
+/// It always holds exactly [`HANGUL_GLYPHS`] glyphs: the glyphs are private and both ways to
+/// make one ([`HangulFont::parse`], [`HangulFont::from_glyphs`]) check the count.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HangulFont {
+    glyphs: Box<[[u8; 8]]>,
+}
+
+impl HangulFont {
+    /// Parses the table. Fails unless it is exactly [`HANGUL_LEN`] bytes.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        bytes::expect_len(data, HANGUL_LEN, "hangul table")?;
+        let glyphs = data
+            .chunks_exact(8)
+            .map(|g| std::array::from_fn(|i| g[i]))
+            .collect();
+        Ok(HangulFont { glyphs })
+    }
+
+    /// The table of `glyphs`, U+AC00 first. Fails unless there are exactly [`HANGUL_GLYPHS`].
+    pub fn from_glyphs(glyphs: Vec<[u8; 8]>) -> Result<Self> {
+        if glyphs.len() != HANGUL_GLYPHS {
+            return Err(FormatError::bad_length(
+                "hangul table glyphs",
+                HANGUL_GLYPHS.to_string(),
+                glyphs.len(),
+            ));
+        }
+        Ok(HangulFont {
+            glyphs: glyphs.into_boxed_slice(),
+        })
+    }
+
+    /// Every glyph, U+AC00 first ([`HANGUL_GLYPHS`] of them).
+    pub fn glyphs(&self) -> &[[u8; 8]] {
+        &self.glyphs
+    }
+
+    /// The rows of syllable `c`; `None` for a code that is not a Hangul syllable
+    /// (U+AC00..=U+D7A3).
+    pub fn glyph(&self, c: u32) -> Option<&[u8; 8]> {
+        if !(HANGUL_FIRST..=HANGUL_LAST).contains(&c) {
+            return None;
+        }
+        self.glyphs.get((c - HANGUL_FIRST) as usize)
+    }
+}
+
+/// The glyph count only: the rows are 89 KB.
+impl std::fmt::Debug for HangulFont {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HangulFont")
+            .field("glyphs", &self.glyphs.len())
+            .finish()
     }
 }
 
@@ -124,6 +195,41 @@ mod tests {
         assert!(!f.pixel(b'A', 0, 0) && f.pixel(b'A', 3, 0) && f.pixel(b'A', 0, 6));
         assert!(!f.pixel(b'A', 8, 0));
         assert!(BitFont::parse(&d[..8]).is_err());
+    }
+
+    #[test]
+    fn hangul_table_is_exactly_one_cell_per_syllable() {
+        // Glyph i's rows 0..7 hold i's low byte, row 7 its high byte.
+        let mut d = Vec::with_capacity(HANGUL_LEN);
+        for i in 0..HANGUL_GLYPHS {
+            let mut rows = [i as u8; 8];
+            rows[7] = (i >> 8) as u8;
+            d.extend_from_slice(&rows);
+        }
+        let f = HangulFont::parse(&d).unwrap();
+        assert_eq!(f.glyphs().len(), 11_172);
+        assert_eq!(f.glyph(0xAC00), Some(&[0; 8]));
+        let last = HANGUL_GLYPHS - 1;
+        assert_eq!(f.glyph(0xD7A3).unwrap()[0], last as u8);
+        assert_eq!(f.glyph(0xD7A3).unwrap()[7], (last >> 8) as u8);
+        assert_eq!(f.glyph(0xABFF), None);
+        assert_eq!(f.glyph(0xD7A4), None);
+        assert_eq!(f.glyph(0xFFFF), None);
+        assert_eq!(f.glyph(u32::MAX), None);
+        assert_eq!(f.glyph(0x41), None);
+        assert_eq!(format!("{f:?}"), "HangulFont { glyphs: 11172 }");
+        assert!(HangulFont::parse(&d[..HANGUL_LEN - 1]).is_err());
+        d.push(0);
+        assert!(HangulFont::parse(&d).is_err());
+        assert!(HangulFont::parse(&[]).is_err());
+        // Built from glyphs: exactly one per syllable, or not at all.
+        let rows = f.glyphs().to_vec();
+        assert_eq!(HangulFont::from_glyphs(rows.clone()).unwrap(), f);
+        assert!(HangulFont::from_glyphs(rows[..HANGUL_GLYPHS - 1].to_vec()).is_err());
+        let mut more = rows;
+        more.push([0xff; 8]);
+        assert!(HangulFont::from_glyphs(more).is_err());
+        assert!(HangulFont::from_glyphs(Vec::new()).is_err());
     }
 
     #[test]
