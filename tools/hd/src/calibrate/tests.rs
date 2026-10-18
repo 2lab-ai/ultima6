@@ -1250,18 +1250,18 @@ fn a_first_pass_writes_its_own_run_dir_alone() {
     let wrote: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let w = wrote.clone();
     let o = out.clone();
+    // The files a run of these options makes before done: the snapshot, its sheets (as the
+    // last run that ended well drew them) and samples.tsv.
+    let mut expected: Vec<String> = s3.sheets.clone();
+    expected.extend(["gates.jsonl".to_string(), "samples.tsv".to_string()]);
+    let expected = sorted(expected);
     let late = out_dir::hook(&out, "write", move |n| {
         w.lock().unwrap().push(n.to_string());
         if n == out_dir::DONE {
-            // The sheets and samples.tsv are there, with bytes, before done fails.
+            // Those files are there, each with bytes, before done fails.
             let run = run_dir(&o);
-            let drawn: Vec<String> = files_in(&run)
-                .into_iter()
-                .filter(|f| f.ends_with(".png") || f == "samples.tsv")
-                .collect();
-            assert!(drawn.iter().any(|f| f == "samples.tsv"), "{drawn:?}");
-            assert!(drawn.iter().any(|f| f.ends_with(".png")), "{drawn:?}");
-            for f in &drawn {
+            assert_eq!(files_in(&run), expected);
+            for f in &expected {
                 let n = std::fs::metadata(run.join(f)).unwrap().len();
                 assert!(n > 0, "{f}: {n} bytes before done");
             }
@@ -1304,6 +1304,40 @@ fn a_first_pass_writes_its_own_run_dir_alone() {
         std::fs::read(theirs.join("notes.txt")).unwrap(),
         b"the owner's"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_first_pass_snapshot_is_read_through_the_run_dir_not_by_its_path() {
+    // The run dir renamed away once gates.jsonl is written, before it is read back: read
+    // through the dir the run holds open, the snapshot is there (by its path it is not), so the
+    // run goes on in the dir where it is now and fails at its end, saying where that is.
+    let g = game();
+    let (dir, work, slices) = setup("read-through", &world_rows());
+    let out = dir.join("calibrate");
+    let opts = Options {
+        slices,
+        out: out.clone(),
+        per: 2,
+        seed: 1,
+        at: Vec::new(),
+        seam: Thresholds::default().seam,
+        source: Source::All,
+    };
+    let away = dir.join("away");
+    let (o, to) = (out.clone(), away.clone());
+    let _h = out_dir::hook(&out, "snapshot", move |name| {
+        if name == "gates.jsonl" {
+            std::fs::rename(run_dir(&o), &to).unwrap();
+        }
+        Ok(())
+    });
+    let e = calibrate(&g, &work, &opts).unwrap_err();
+    assert!(!e.contains("No such file"), "{e}");
+    let now = format!("(it is now at {})", away.canonicalize().unwrap().display());
+    assert!(e.contains(&now), "{e}");
+    assert_eq!(files_in(&away), ["gates.jsonl", "refused.txt"]);
+    assert!(files_in(&out).is_empty(), "{:?}", files_in(&out));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

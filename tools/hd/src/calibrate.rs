@@ -1755,6 +1755,7 @@ fn first_pass(
     let bytes = out_dir::read_capped(&work.path("gates.jsonl"), 1 << 30)
         .map_err(|e| format!("{e} (run ingest first)"))?;
     run.write("gates.jsonl", &bytes)?;
+    out_dir::seam(&o.out, "snapshot", "gates.jsonl")?;
     let text = run.read("gates.jsonl", 1 << 30)?;
     let text = String::from_utf8(text)
         .map_err(|_| run.named("gates.jsonl", "gates.jsonl is not UTF-8"))?;
