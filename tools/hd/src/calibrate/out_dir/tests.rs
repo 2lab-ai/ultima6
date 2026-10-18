@@ -409,8 +409,16 @@ fn a_file_at_a_name_the_run_writes_is_never_replaced_or_deleted() {
         Ok(())
     });
     let e = run_in(FIRST, &out, writes).unwrap_err();
-    assert!(e.contains("a.png: File exists"), "{e}");
     let run = only_run(&out);
+    // Nothing said to be left: the run never listed a file it did not make.
+    assert_eq!(
+        e,
+        format!(
+            "{}: File exists (os error 17); run dir: {}",
+            run.join("a.png").display(),
+            run.display()
+        )
+    );
     assert_eq!(names(&run), ["a.png", REFUSED]);
     assert_eq!(std::fs::read(run.join("a.png")).unwrap(), b"the owner's");
     let _ = std::fs::remove_dir_all(&dir);
