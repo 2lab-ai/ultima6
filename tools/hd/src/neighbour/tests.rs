@@ -884,6 +884,45 @@ fn a_pair_whose_edges_draw_in_different_rows_is_checked_and_counted_unmeasured()
     ));
 }
 
+#[test]
+fn an_unmeasured_pair_whose_generated_side_falls_is_not_counted_after() {
+    // A generated, its east side repainted white against B (drawn by MMPX): that pair fails.
+    // South of A an empty record: that pair is checked and unmeasured. A falls in the first
+    // pass, so in the second no pair has a generated side: one unmeasured before, none after.
+    let (a, b) = (texture(3, GREEN), texture(4, GREEN));
+    let empty = Classic {
+        width: SIDE,
+        height: SIDE,
+        px: vec![None; (SIDE * SIDE) as usize],
+    };
+    let s = sides(vec![
+        (
+            1,
+            a.clone(),
+            Some((10, band(&near(&a), Edge::East, false, WHITE))),
+        ),
+        (2, b, None),
+        (3, empty, None),
+    ]);
+    let out = settle(
+        &[pair(1, 2, Edge::East), pair(1, 3, Edge::South)],
+        &s,
+        seam(),
+    );
+    assert_eq!(out.fallen, BTreeMap::from([(10, 1)]));
+    let n = &out.counts;
+    assert_eq!((n.checked, n.unmeasured, n.failing_before), (2, 1, 1));
+    assert_eq!(
+        (
+            n.checked_after,
+            n.unmeasured_after,
+            n.failing_after,
+            n.passes
+        ),
+        (0, 0, 0, 2)
+    );
+}
+
 /// Tile records for the compositor, each keyed by its record number.
 struct Tiles(BTreeMap<u16, Record>);
 
