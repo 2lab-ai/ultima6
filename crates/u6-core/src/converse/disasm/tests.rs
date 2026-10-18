@@ -14,7 +14,7 @@ use super::super::tests::{chars, files, lib, packed, scroll, state, talk_to};
 use super::catalog::{Catalog, FORMAT, SLOT_BUFFER_CAPACITY, ScriptUnits, hash64};
 use super::decode::{Decoder, Plan};
 use super::ops::{self, Escape, Flow, STATEMENT_OPS, Shape};
-use super::trace::{self, Decoded};
+use super::trace::{self, Decoded, EscState, Event, Snap};
 use super::*;
 use crate::engine::Engine;
 use crate::files::Files;
@@ -375,7 +375,7 @@ fn escapes_inside_a_run_are_its_placeholders() {
         at += p.len;
     }
     assert_eq!(at, BODY + run.len() as u32);
-    let units = ScriptUnits::new(&d, &s);
+    let units = ScriptUnits::units(&d, &s);
     let ph: Vec<&str> = units.runs[1]
         .placeholders
         .iter()
@@ -516,7 +516,7 @@ fn table_strings_carry_the_slots_they_are_copied_into() {
     body.extend(b"first\0second\0third\0");
     let s = script(&body);
     let d = ok(&s);
-    let units = ScriptUnits::new(&d, &s);
+    let units = ScriptUnits::units(&d, &s);
     let strings: Vec<(String, u32, Vec<u8>, Option<u32>)> = units
         .strings
         .iter()
@@ -707,7 +707,7 @@ fn random_bytes_never_panic_and_every_decode_covers_its_script_once() {
                 .iter()
                 .filter(|i| matches!(i.kind, Kind::Text(_)))
                 .count();
-            let _ = ScriptUnits::new(&d, &b);
+            let _ = ScriptUnits::units(&d, &b);
         }
     }
     assert!(
@@ -1427,8 +1427,11 @@ fn the_catalog_hash_is_fnv1a_64_and_its_json_reads_back() {
     let json = c.to_json();
     assert!(json.contains(&format!("\"hash\":\"{:016x}\"", hash64(&s))));
     assert_eq!(Catalog::from_json(&json).unwrap(), c);
-    let other = json.replace(FORMAT, "u6-converse-catalog/2");
-    assert!(Catalog::from_json(&other).is_err());
+    let other = json.replace(FORMAT, "u6-converse-catalog/1");
+    assert!(
+        Catalog::from_json(&other).is_err(),
+        "the first format is not this one"
+    );
     // Bytes from 0x80 read back unchanged.
     let high = script(&[0xb5, 0xd2, 20, 0, 0, 0, 0xb1, 0xb6, 0, 0, b'\xe9', 0xff, 0]);
     let c = Catalog::build([(b'a', 1, high.as_slice())]);
@@ -1440,4 +1443,318 @@ fn the_catalog_hash_is_fnv1a_64_and_its_json_reads_back() {
         .map(|c| c as u32 as u8)
         .collect();
     assert_eq!(t, [0xe9, 0xff]);
+}
+
+#[test]
+fn a_copy_reaches_the_tables_that_follow_its_table() {
+    // String 1 of `t` runs on into the table a print names at `t + 6`: it keeps its slot and
+    // capacity there. A computed index marks every string it can reach.
+    let t = BODY + 40;
+    let mut body = Vec::new();
+    body.extend([0xa6, 0x03, 0xb3, 0xa8]);
+    body.extend(lit32(t));
+    body.extend([0x01, 0xa7]);
+    body.extend([0xa6, 0x04, 0xb3, 0xa8]);
+    body.extend(lit32(t));
+    body.extend([0x05, 0xb2, 0xa7]);
+    body.push(0xb5);
+    body.extend(lit32(t + 6));
+    body.extend([0xb1, 0xb6]);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"first\0second\0");
+    let s = script(&body);
+    let units = ScriptUnits::units(&ok(&s), &s);
+    let strings: Vec<_> = units
+        .strings
+        .iter()
+        .map(|u| {
+            (
+                u.unit.text.as_str(),
+                u.table,
+                u.index,
+                &u.slots[..],
+                u.capacity,
+            )
+        })
+        .collect();
+    let cap = Some(SLOT_BUFFER_CAPACITY);
+    assert_eq!(
+        strings,
+        [
+            ("first", t, 0, &[4][..], cap),
+            ("second", t + 6, 0, &[3, 4][..], cap)
+        ]
+    );
+}
+
+#[test]
+fn the_parts_of_a_split_run_are_linked() {
+    // The block jumps into the middle of "Hi there": two runs, one sentence.
+    let mut body = b"Hi there\xf7\xef*\xf6".to_vec();
+    body.extend(jump(BODY + 3));
+    body.extend([0xee, 0xff]);
+    let s = script(&body);
+    let d = ok(&s);
+    assert_eq!(d.run_splits, [BODY + 3]);
+    let units = ScriptUnits::units(&d, &s);
+    let runs: Vec<(&str, Option<u32>)> = units
+        .runs
+        .iter()
+        .map(|r| (r.unit.text.as_str(), r.part_of))
+        .collect();
+    assert_eq!(
+        runs,
+        [("look", None), ("Hi ", Some(BODY)), ("there", Some(BODY))]
+    );
+    // Runs that only touch across an op are not one run.
+    let s = script(b"Hello \xa7world.\xb6");
+    let units = ScriptUnits::units(&ok(&s), &s);
+    assert!(units.runs.iter().all(|r| r.part_of.is_none()));
+}
+
+#[test]
+fn a_catalog_reads_back_only_as_written() {
+    let s = conversation();
+    let c = Catalog::build([(b'a', 3, s.as_slice())]);
+    let json = c.to_json();
+    assert_eq!(Catalog::from_json(&json).unwrap(), c);
+    let h = format!("{:016x}", c.scripts[0].hash);
+    for bad in [
+        h.to_uppercase(),
+        format!("+{}", &h[1..]),
+        format!("{}x", &h[1..]),
+    ] {
+        assert!(
+            Catalog::from_json(&json.replace(&h, &bad)).is_err(),
+            "{bad:?}"
+        );
+    }
+    // A unit whose text, length, place or hash disagree.
+    let unit = &c.scripts[0].runs[1].unit;
+    let at = format!("\"offset\":{},\"len\":{}", unit.offset, unit.len);
+    for bad in [
+        format!("\"offset\":{},\"len\":{}", unit.offset, unit.len + 1),
+        format!("\"offset\":{},\"len\":{}", s.len(), unit.len),
+    ] {
+        assert!(
+            Catalog::from_json(&json.replacen(&at, &bad, 1)).is_err(),
+            "{bad}"
+        );
+    }
+    let text = format!("\"text\":\"{}\"", unit.text);
+    let other = format!("\"text\":\"{}\"", unit.text.replace('e', "E"));
+    assert_ne!(text, other);
+    assert!(Catalog::from_json(&json.replacen(&text, &other, 1)).is_err());
+}
+
+// ---- the cross-check's own checks ------------------------------------------------------------
+
+fn esc() -> EscState {
+    EscState {
+        prefix: 0,
+        hidden: false,
+        plural: false,
+        runic: false,
+        show_hidden: false,
+        keyword_end: Vec::new(),
+    }
+}
+
+fn first_snap() -> Option<Box<Snap>> {
+    Some(Box::new(Snap {
+        esc: esc(),
+        strs: Vec::new(),
+        ints: Vec::new(),
+    }))
+}
+
+/// The cross-check of a script whose body is `body`, on `events` after its load.
+fn checked(body: &[u8], events: Vec<Event>) -> trace::Counts {
+    let s = script(body);
+    let d = ok(&s);
+    let scripts: BTreeMap<(u8, u16), Decoded<'_>> = [(
+        (b'a', 7),
+        Decoded {
+            bytes: &s,
+            disasm: &d,
+        },
+    )]
+    .into();
+    let mut ev = vec![Event::Load {
+        letter: b'a',
+        item: 7,
+    }];
+    ev.extend(events);
+    trace::check(&ev, &scripts)
+}
+
+/// The reads of a visit of `text` at `BODY` and its stop byte `b6`, with `out` put out at the
+/// visit's last byte and `before` before it.
+fn visit(text: &[u8], before: &str, out: &str) -> Vec<Event> {
+    let emit = |s: &str| {
+        s.bytes()
+            .map(|b| Event::Emit(i16::from(b)))
+            .collect::<Vec<_>>()
+    };
+    let mut ev = emit(before);
+    for (i, &b) in text.iter().enumerate() {
+        ev.push(Event::Run {
+            at: (BODY as usize + i) as i32,
+            byte: b,
+            snap: if i == 0 { first_snap() } else { None },
+        });
+    }
+    ev.extend(emit(out));
+    ev.push(Event::Run {
+        at: (BODY as usize + text.len()) as i32,
+        byte: 0xb6,
+        snap: None,
+    });
+    ev
+}
+
+#[test]
+fn a_visit_must_put_out_its_run_itself_spaces_and_newlines_included() {
+    let fills = |text: &[u8], before: &str, out: &str| {
+        let body = [text, &[0xb6]].concat();
+        let n = checked(&body, visit(text, before, out));
+        assert_eq!((n.filled, n.failures() - n.fill_mismatches), (1, 0));
+        n.fill_mismatches
+    };
+    assert_eq!(fills(b"abc", "xy", "abc"), 0);
+    // Nothing put out, whatever the scroll already shows.
+    assert_eq!(fills(b"abc", "xy", ""), 1);
+    assert_eq!(fills(b"abc", "abc", ""), 1);
+    assert_eq!(fills(b"abc", "abcabc", ""), 1);
+    // Before word wrap: a space and a newline are characters like any other.
+    assert_eq!(fills(b"a b", "", "a b"), 0);
+    assert_eq!(fills(b"a b", "", "ab"), 1);
+    assert_eq!(fills(b"a\nb", "", "a\nb"), 0);
+    assert_eq!(fills(b"a\nb", "", "ab"), 1);
+}
+
+#[test]
+fn a_table_read_of_one_nul_is_an_empty_string_or_a_failure() {
+    // Strings "a" and "" at `t`.
+    let t = BODY + 20;
+    let mut body = vec![0xb5];
+    body.extend(lit32(t));
+    body.extend([0x01, 0xa7, b'H', b'i', 0xb6]);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"a\0\0");
+    let read = |at: u32| {
+        checked(
+            &body,
+            vec![Event::Table {
+                at: at as i32,
+                byte: 0,
+            }],
+        )
+    };
+    let n = read(t + 2);
+    assert_eq!(
+        (n.failures(), n.table_strings, n.offsets),
+        (0, 1, 1),
+        "{n:?}"
+    );
+    // At a string's first byte (not 0, not an empty string); inside a run.
+    let n = read(t);
+    assert_eq!((n.byte_mismatches, n.table_mismatches), (1, 1), "{n:?}");
+    let n = read(BODY + 8);
+    assert_eq!((n.byte_mismatches, n.table_mismatches), (1, 1), "{n:?}");
+}
+
+/// A conversation for actor 3 whose greeting reads tables with the expression ops: a word
+/// written by `a6`, found by `c3`, a search past the last word to the `b8`, a word read by
+/// `b4`, a search of a string table with an empty string to its `b8`, a `b4` with nothing
+/// below its index (it reads the script's start); then bye.
+fn table_conversation() -> (Vec<u8>, u32, u32) {
+    let mut s = b"\xff\x03Ab\xf1x\xf2".to_vec();
+    let (w, t) = (100u32, 110u32);
+    s.extend([0xa6]);
+    s.extend(lit32(w));
+    s.extend([0x00, 0xa8, 0x07, 0xa7]);
+    s.extend([0xa6, 0x03, 0xb2, 0xa8, 0x07, 0xa7]);
+    for (var, op) in [
+        (0x02, [0x03, 0xc3]),
+        (0x04, [0x04, 0xc3]),
+        (0x05, [0x01, 0xb4]),
+    ] {
+        s.extend([0xa6, var, 0xb2, 0xa8]);
+        s.extend(lit32(w));
+        s.extend(op);
+        s.push(0xa7);
+    }
+    s.extend([0xa6, 0x06, 0xb2, 0xa8]);
+    s.extend(lit32(t));
+    s.extend([0x00, 0xb7, 0xa7]);
+    s.extend([0xa6, 0x07, 0xb2, 0xa8, 0x01, 0xb4, 0xa7, b'O', b'k', 0xb6]);
+    s.resize(w as usize, 0);
+    s.extend([0x10, 0x00, 0x20, 0x00, 0xb8]);
+    s.resize(t as usize, 0);
+    s.extend(b"ab\0\0cd\0\xb8");
+    (s, w, t)
+}
+
+#[test]
+fn the_expression_ops_table_reads_are_checked_too() {
+    let (s, w, _) = table_conversation();
+    let d = ok(&s);
+    let scripts: BTreeMap<(u8, u16), Decoded<'_>> = [(
+        (b'a', 3),
+        Decoded {
+            bytes: &s,
+            disasm: &d,
+        },
+    )]
+    .into();
+    trace::start(true);
+    let end = talk_to(state(&[]), conversation_files(&s), 3, "");
+    let events = trace::stop();
+    assert!(scroll(&end).contains("Ok"), "{}", scroll(&end));
+    let n = trace::check(&events, &scripts);
+    assert_eq!(n.failures(), 0, "{n:?}");
+    // c3 finds the written word (1 read), c3 reads both words to the b8, b4 reads one; b7
+    // reads three strings (one empty) to the b8.
+    assert_eq!(
+        (n.table_writes, n.table_words, n.table_ends, n.table_strings),
+        (1, 4, 2, 3),
+        "{n:?}"
+    );
+    // The `b4` below the stack reads the script's start: the decoder marked it.
+    assert_eq!(n.outside_reads, 1, "{n:?}");
+    let mut unmarked = d.clone();
+    unmarked.hazards.retain(|h| h.kind != HazardKind::Underflow);
+    let bad: BTreeMap<(u8, u16), Decoded<'_>> = [(
+        (b'a', 3),
+        Decoded {
+            bytes: &s,
+            disasm: &unmarked,
+        },
+    )]
+    .into();
+    assert_eq!(trace::check(&events, &bad).table_mismatches, 1);
+    // The written word is what c3 reads: without the write the bytes differ.
+    let unwritten: Vec<Event> = events
+        .iter()
+        .filter(|e| !matches!(e, Event::WordWrite { .. }))
+        .cloned()
+        .collect();
+    assert!(trace::check(&unwritten, &scripts).byte_mismatches > 0);
+    // A word read where the disassembly has no word table is a mismatch.
+    let mut wrong = d.clone();
+    for it in &mut wrong.items {
+        if it.offset == w {
+            it.kind = Kind::Unreached;
+        }
+    }
+    let bad: BTreeMap<(u8, u16), Decoded<'_>> = [(
+        (b'a', 3),
+        Decoded {
+            bytes: &s,
+            disasm: &wrong,
+        },
+    )]
+    .into();
+    assert!(trace::check(&events, &bad).table_mismatches >= 5);
 }

@@ -1,17 +1,25 @@
-//! Test-only: what the interpreter reads, recorded at its seams, and the check of those reads
-//! against the disassembly (the execution cross-check).
+//! Test-only: what the interpreter reads and prints, recorded at its seams, and the check of
+//! those reads against the disassembly (the execution cross-check).
 //!
-//! The hooks (`#[cfg(test)]` calls in `run.rs`, `exec.rs`, `start.rs` and `script.rs`) do
-//! nothing until a test calls [`start`] on its thread. They record:
+//! The hooks (`#[cfg(test)]` calls in `run.rs`, `exec.rs`, `eval.rs`, `start.rs`, `script.rs`
+//! and `ui/print.rs`) do nothing until a test calls [`start`] on its thread. They record:
 //!
 //! - every byte `run_text`'s loop reads (text, ops, `ef`, stop bytes), and every op byte the
 //!   input loop reads;
-//! - every byte `print_op`'s `d2` form and `assign`'s `d2` copy read from a table;
+//! - every table read: the string bytes `print_op`'s and `assign`'s `d2` forms read and the
+//!   strings `b7` searches, the words `b4` and `c3` read, the `b8` that stops `b7` and `c3`,
+//!   and the words `assign`'s `d2` form writes; and for `b4` / `b7` / `c3`, whether the table
+//!   address came from inside the evaluator's stack (outside it the evaluator reads 0, the
+//!   script's start, which the decoder marks with a stack hazard);
+//! - every character the escape layer hands to the line assembler (`put_raw`'s argument): what
+//!   the game prints, before word wrap, spaces and newlines included, with -1 for a flush;
 //! - which script `load_script` put in the script buffer.
 //!
-//! With snapshots on, the first text byte of each contiguous read of text, and the first read
-//! after it, take the printed scroll (spaces and newlines dropped) and the escape layer's state,
-//! so a test can compare what a run printed with the run filled in.
+//! With snapshots on, the first text byte of each contiguous read of text takes the escape
+//! layer's state and the variables, so the check can compare the characters a visit put out
+//! (from its first read to the read after it) with the runs filled in, character for character:
+//! spaces and newlines included, as this is before word wrap. Only what a key wait inside the
+//! visit adds is left out ([`normalised`]).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -19,16 +27,16 @@ use std::collections::BTreeMap;
 use super::super::Cx;
 use super::super::vars;
 use super::ops::{self, Escape};
-use super::{Disasm, Input, Kind, Stop};
+use super::{Disasm, HazardKind, Input, Kind, Stop};
 use crate::state::State;
-use crate::ui::text::{CAPITALISE, RUNIC, itoa};
+use crate::ui::text::{RUNIC, itoa};
 
 /// One recorded read.
 #[derive(Clone, Debug)]
 pub(crate) enum Event {
     /// `load_script` loaded item `item` of `converse.<letter>` into the script buffer.
     Load { letter: u8, item: u16 },
-    /// `run_text` read `byte` at `at`; `snap` at the start and the end of a text visit.
+    /// `run_text` read `byte` at `at`; `snap` at the first byte of a text visit.
     Run {
         at: i32,
         byte: u8,
@@ -36,29 +44,36 @@ pub(crate) enum Event {
     },
     /// The input loop read the op `byte` at `at`.
     Input { at: i32, byte: u8 },
-    /// A table string read (`print` = by `print_op`, else by `assign`).
-    Table { at: i32, byte: u8, print: bool },
+    /// A character the escape layer put (`put_raw`'s argument; negative = a flush).
+    Emit(i16),
+    /// A string-table byte read (by `print_op`, `assign` or `b7`); a 0 ends the string.
+    Table { at: i32, byte: u8 },
+    /// A table word read (by `b4` or `c3`), `at` its first byte.
+    Word { at: i32, word: u16 },
+    /// The `b8` that ends a table, read at an entry's start (by `b7` or `c3`).
+    TableEnd { at: i32 },
+    /// A table word written (by `assign`'s `d2` form).
+    WordWrite { at: i32, word: u16 },
+    /// `b4` / `b7` / `c3` took its table address from inside the evaluator's stack, or (not
+    /// `inside`) read 0 outside it; its table reads follow.
+    Address { inside: bool },
 }
 
-/// The printed scroll and the escape layer at a visit boundary.
+/// The escape layer and the variables at a visit's first byte.
 #[derive(Clone, Debug)]
 pub(crate) struct Snap {
-    pub printed: Vec<u32>,
     pub esc: EscState,
     pub strs: Vec<Vec<u8>>,
     pub ints: Vec<u16>,
 }
 
-/// The escape layer's state that decides what a run prints (`ui/printf.rs` `text_out`,
-/// `ui/print.rs` `put_raw`).
+/// The escape layer's state that decides what a run puts out (`ui/printf.rs` `text_out`).
 #[derive(Clone, Debug)]
 pub(crate) struct EscState {
     pub prefix: u8,
     pub hidden: bool,
     pub plural: bool,
-    pub capitalise: bool,
     pub runic: bool,
-    pub cap_window: bool,
     pub show_hidden: bool,
     pub keyword_end: Vec<u8>,
 }
@@ -102,28 +117,15 @@ fn push(e: Event) {
     });
 }
 
-/// The printed scroll as character codes, spaces and newlines dropped (word wrap moves them).
-pub(crate) fn printed(s: &State) -> Vec<u32> {
-    crate::converse::tests::scroll(s)
-        .chars()
-        .map(u32::from)
-        .filter(|&c| c != 0x20 && c != 0x0a)
-        .collect()
-}
-
 fn snap(s: &State) -> Snap {
     let t = &s.ui.text;
-    let flags = t.win().flags;
     let tail = &s.actors.objlist_tail;
     Snap {
-        printed: printed(s),
         esc: EscState {
             prefix: t.prefix,
             hidden: t.hidden,
             plural: t.plural,
-            capitalise: t.capitalise,
-            runic: flags & RUNIC != 0,
-            cap_window: flags & CAPITALISE != 0,
+            runic: t.win().flags & RUNIC != 0,
             show_hidden: tail.get(0x5e..0x60).is_some_and(|w| w != [0, 0]),
             keyword_end: s.ui.tables.keyword_end.clone(),
         },
@@ -148,12 +150,8 @@ pub(crate) fn run_byte(cx: &Cx<'_>, b: u8) {
         let t = t.as_ref().expect("active");
         (t.snapshots, t.last_text)
     });
-    let boundary = if text {
-        last != Some(at - 1)
-    } else {
-        last.is_some()
-    };
-    let snap = (want && boundary).then(|| Box::new(snap(&cx.state.borrow())));
+    let first = text && last != Some(at - 1);
+    let snap = (want && first).then(|| Box::new(snap(&cx.state.borrow())));
     TRACE.with(|t| {
         if let Some(t) = t.borrow_mut().as_mut() {
             t.last_text = text.then_some(at);
@@ -176,9 +174,34 @@ pub(crate) fn input_byte(cx: &Cx<'_>, b: u8) {
     push(Event::Input { at, byte: b });
 }
 
-/// Hook: a table string byte at `at` read by `print_op` (`print`) or `assign`.
-pub(crate) fn table_byte(at: i32, b: u8, print: bool) {
-    push(Event::Table { at, byte: b, print });
+/// Hook: `put_raw` was handed `c`.
+pub(crate) fn emit(c: i16) {
+    push(Event::Emit(c));
+}
+
+/// Hook: a string-table byte `b` at `at` was read.
+pub(crate) fn table_byte(at: i32, b: u8) {
+    push(Event::Table { at, byte: b });
+}
+
+/// Hook: the table word `word` at `at` was read.
+pub(crate) fn table_word(at: i32, word: u16) {
+    push(Event::Word { at, word });
+}
+
+/// Hook: a table's `b8` at `at` was read at an entry's start.
+pub(crate) fn table_end(at: i32) {
+    push(Event::TableEnd { at });
+}
+
+/// Hook: the table word `word` was written at `at`.
+pub(crate) fn table_write(at: i32, word: u16) {
+    push(Event::WordWrite { at, word });
+}
+
+/// Hook: `b4` / `b7` / `c3` took its table address from inside the stack (`inside`) or not.
+pub(crate) fn table_address(inside: bool) {
+    push(Event::Address { inside });
 }
 
 /// Hook: `load_script` filled the script buffer.
@@ -193,24 +216,36 @@ pub(crate) fn loaded(letter: u8, item: u16) {
 
 // ---- the cross-check -------------------------------------------------------------------------
 
-/// The cross-check's counts. Every field but the first three must be 0 for a pass.
+/// The cross-check's counts. The first six count what was checked; the rest must be 0 for a
+/// pass.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Counts {
-    /// Offsets checked (text bytes, op and stop bytes, input ops, table bytes).
+    /// Bytes checked (text bytes, op and stop bytes, input ops, table bytes and words).
     pub offsets: usize,
-    /// Text visits whose printed output was compared.
+    /// Text visits whose output was compared.
     pub filled: usize,
-    /// Table strings read (by `print_op` and `assign`).
+    /// Table strings read (by `print_op`, `assign` and `b7`).
     pub table_strings: usize,
+    /// Table words read (by `b4` and `c3`).
+    pub table_words: usize,
+    /// Table ends read (by `b7` and `c3`).
+    pub table_ends: usize,
+    /// Table words written (by `assign`).
+    pub table_writes: usize,
+    /// `b4` / `b7` / `c3` whose address was outside the evaluator's stack (it reads from the
+    /// script's start): each must be an op the decoder marked with a stack hazard, and its
+    /// reads are checked against the script's bytes only.
+    pub outside_reads: usize,
     /// Reads outside any item, or at an item of the wrong kind or not at its start.
     pub mismatches: usize,
-    /// Bytes read that differ from the script's bytes.
+    /// Bytes read that differ from the script's bytes (as the ops have written them).
     pub byte_mismatches: usize,
     /// Text reads that do not start at a run's start and end at a run's end.
     pub partial_visits: usize,
-    /// Visits whose printed output is not the run with its escapes filled in.
+    /// Visits whose output is not the run with its escapes filled in.
     pub fill_mismatches: usize,
-    /// Table reads that do not read one whole string of a string table.
+    /// Table reads that are not one whole string of a string table, one word of a word table
+    /// or a table's `b8`.
     pub table_mismatches: usize,
     /// Reads at or past the item's length (the buffer's leftover bytes).
     pub past_item: usize,
@@ -223,6 +258,10 @@ impl Counts {
         self.offsets += o.offsets;
         self.filled += o.filled;
         self.table_strings += o.table_strings;
+        self.table_words += o.table_words;
+        self.table_ends += o.table_ends;
+        self.table_writes += o.table_writes;
+        self.outside_reads += o.outside_reads;
         self.mismatches += o.mismatches;
         self.byte_mismatches += o.byte_mismatches;
         self.partial_visits += o.partial_visits;
@@ -255,45 +294,130 @@ impl Decoded<'_> {
         let i = items.partition_point(|it| it.offset <= at);
         items.get(i.checked_sub(1)?).filter(|it| at < it.end())
     }
+
+    /// `start..end` is one string of a string table.
+    fn string_ok(&self, start: u32, end: u32) -> bool {
+        self.item_at(start).is_some_and(|it| match &it.kind {
+            Kind::Table(t) if !t.words => t
+                .entries
+                .iter()
+                .any(|e| e.offset == start && e.end() == end),
+            _ => false,
+        })
+    }
+
+    /// `at` starts one word of a word table.
+    fn word_ok(&self, at: u32) -> bool {
+        self.item_at(at).is_some_and(|it| match &it.kind {
+            Kind::Table(t) if t.words => t.entries.iter().any(|e| e.offset == at),
+            _ => false,
+        })
+    }
+
+    /// The op at `at` has an expression the decoder found reading or writing outside the
+    /// evaluator's stack.
+    fn stack_hazard(&self, at: u32) -> bool {
+        self.item_at(at).is_some_and(|it| {
+            it.offset == at
+                && matches!(it.kind, Kind::Op(_))
+                && self.disasm.hazards.iter().any(|h| {
+                    matches!(h.kind, HazardKind::Underflow | HazardKind::Overflow)
+                        && it.offset <= h.at
+                        && h.at < it.end()
+                })
+        })
+    }
+
+    /// `at` is the `b8` that ends a table.
+    fn end_ok(&self, at: u32) -> bool {
+        self.item_at(at).is_some_and(|it| {
+            matches!(&it.kind, Kind::Table(t) if t.terminated) && it.end() == at + 1
+        })
+    }
+}
+
+/// The script loaded now: its disassembly and its bytes as the ops have written them.
+struct Loaded<'a, 'b> {
+    d: &'b Decoded<'a>,
+    bytes: Vec<u8>,
+}
+
+impl Loaded<'_, '_> {
+    /// `at` as an offset inside the script.
+    fn offset(&self, at: i32, width: u32) -> Option<u32> {
+        u32::try_from(at)
+            .ok()
+            .filter(|&a| (a + width) as usize <= self.bytes.len())
+    }
+}
+
+/// A text visit in progress: its first offset, the next offset it reads, the state at its first
+/// byte and what it put out so far.
+struct Visit {
+    start: u32,
+    next: u32,
+    snap: Option<Box<Snap>>,
+    out: Vec<i16>,
 }
 
 /// Checks `events` against the disassemblies (`scripts` by (letter, item)).
 pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>) -> Counts {
     let mut n = Counts::default();
-    let mut current: Option<&Decoded<'_>> = None;
-    let mut known = false;
-    // The text visit in progress: (first offset, next expected offset, start snapshot).
-    let mut visit: Option<(u32, u32, Option<Box<Snap>>)> = None;
-    let mut table: Option<(u32, u32, bool)> = None;
+    let mut cur: Option<Loaded<'_, '_>> = None;
+    let mut visit: Option<Visit> = None;
+    // A table string read in progress: (first offset, next offset).
+    let mut table: Option<(u32, u32)> = None;
+    // The op `run_text` read last, and whether the table reads now come from an address
+    // outside the evaluator's stack.
+    let (mut op, mut outside) = (None, false);
     for e in events {
-        if !matches!(e, Event::Table { .. })
-            && let Some(t) = table.take()
-        {
-            n.table_mismatches += usize::from(!table_ok(current, t));
+        // Any other read ends a table string read (it must have ended at its NUL).
+        if !matches!(e, Event::Table { .. } | Event::Emit(_)) && table.take().is_some() {
+            n.table_mismatches += 1;
+        }
+        if matches!(
+            e,
+            Event::Load { .. } | Event::Run { .. } | Event::Input { .. }
+        ) {
+            (op, outside) = (None, false);
         }
         match e {
+            Event::Address { inside } => {
+                outside = !inside;
+                if outside {
+                    n.outside_reads += 1;
+                    let marked = cur
+                        .as_ref()
+                        .zip(op)
+                        .is_some_and(|(s, at)| s.d.stack_hazard(at));
+                    n.table_mismatches += usize::from(!marked);
+                }
+            }
             Event::Load { letter, item } => {
-                close_visit(&mut n, current, &mut visit, None);
-                current = scripts.get(&(*letter, *item));
-                known = current.is_some();
+                close_visit(&mut n, cur.as_ref(), &mut visit);
+                cur = scripts.get(&(*letter, *item)).map(|d| Loaded {
+                    d,
+                    bytes: d.bytes.to_vec(),
+                });
+            }
+            Event::Emit(c) => {
+                if let Some(v) = &mut visit {
+                    v.out.push(*c);
+                }
             }
             Event::Run { at, byte, snap } => {
                 n.offsets += 1;
-                let Some(d) = current.filter(|_| known) else {
+                let Some(s) = &cur else {
                     n.unknown_script += 1;
                     continue;
                 };
-                let Ok(at) = u32::try_from(*at) else {
-                    n.mismatches += 1;
+                let Some(at) = s.offset(*at, 1) else {
+                    n.past_item += 1;
+                    close_visit(&mut n, cur.as_ref(), &mut visit);
                     continue;
                 };
-                if at as usize >= d.bytes.len() {
-                    n.past_item += 1;
-                    close_visit(&mut n, current, &mut visit, None);
-                    continue;
-                }
-                n.byte_mismatches += usize::from(d.bytes[at as usize] != *byte);
-                let Some(item) = d.item_at(at) else {
+                n.byte_mismatches += usize::from(s.bytes[at as usize] != *byte);
+                let Some(item) = s.d.item_at(at) else {
                     n.mismatches += 1;
                     continue;
                 };
@@ -302,14 +426,20 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
                         n.mismatches += 1;
                     }
                     match &mut visit {
-                        Some((_, next, _)) if *next == at => *next += 1,
+                        Some(v) if v.next == at => v.next += 1,
                         _ => {
-                            close_visit(&mut n, current, &mut visit, None);
-                            visit = Some((at, at + 1, snap.clone()));
+                            close_visit(&mut n, cur.as_ref(), &mut visit);
+                            visit = Some(Visit {
+                                start: at,
+                                next: at + 1,
+                                snap: snap.clone(),
+                                out: Vec::new(),
+                            });
                         }
                     }
                 } else {
-                    close_visit(&mut n, current, &mut visit, snap.as_deref());
+                    close_visit(&mut n, cur.as_ref(), &mut visit);
+                    op = Some(at);
                     let ok = item.offset == at
                         && match item.kind {
                             Kind::Op(_) => (0x80..0xee).contains(byte) && *byte != ops::KEYWORDS,
@@ -323,20 +453,17 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
             }
             Event::Input { at, byte } => {
                 n.offsets += 1;
-                close_visit(&mut n, current, &mut visit, None);
-                let Some(d) = current.filter(|_| known) else {
+                close_visit(&mut n, cur.as_ref(), &mut visit);
+                let Some(s) = &cur else {
                     n.unknown_script += 1;
                     continue;
                 };
-                let Some(at) = u32::try_from(*at)
-                    .ok()
-                    .filter(|&a| (a as usize) < d.bytes.len())
-                else {
+                let Some(at) = s.offset(*at, 1) else {
                     n.past_item += 1;
                     continue;
                 };
-                n.byte_mismatches += usize::from(d.bytes[at as usize] != *byte);
-                let ok = d.item_at(at).is_some_and(|it| {
+                n.byte_mismatches += usize::from(s.bytes[at as usize] != *byte);
+                let ok = s.d.item_at(at).is_some_and(|it| {
                     it.offset == at
                         && match it.kind {
                             Kind::Input(_) | Kind::BlockEnd | Kind::Marker(_) => true,
@@ -348,45 +475,89 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
                 });
                 n.mismatches += usize::from(!ok);
             }
-            Event::Table { at, byte, print } => {
-                let Some(d) = current.filter(|_| known) else {
-                    n.offsets += 1;
+            Event::Table { at, byte } => {
+                n.offsets += 1;
+                let Some(s) = &cur else {
                     n.unknown_script += 1;
                     continue;
                 };
-                let Some(at) = u32::try_from(*at)
-                    .ok()
-                    .filter(|&a| (a as usize) < d.bytes.len())
-                else {
-                    n.offsets += 1;
+                let Some(at) = s.offset(*at, 1) else {
                     n.past_item += 1;
                     continue;
                 };
-                if *byte == 0 {
-                    // The NUL that ends the string: it closes the read.
-                    if let Some((s, next, p)) = table.take() {
-                        n.table_strings += 1;
-                        n.table_mismatches +=
-                            usize::from(next != at || !table_ok(current, (s, at, p)));
-                    }
+                n.byte_mismatches += usize::from(s.bytes[at as usize] != *byte);
+                if outside {
                     continue;
                 }
-                n.offsets += 1;
-                n.byte_mismatches += usize::from(d.bytes[at as usize] != *byte);
+                if *byte == 0 {
+                    // The NUL ends the string; alone, it is an empty string.
+                    let (start, next) = table.take().unwrap_or((at, at));
+                    n.table_strings += 1;
+                    n.table_mismatches += usize::from(next != at || !s.d.string_ok(start, at));
+                    continue;
+                }
                 match &mut table {
-                    Some((_, next, _)) if *next == at => *next += 1,
+                    Some((_, next)) if *next == at => *next += 1,
                     _ => {
-                        if let Some(t) = table.take() {
-                            n.table_mismatches += usize::from(!table_ok(current, t));
-                        }
-                        table = Some((at, at + 1, *print));
+                        n.table_mismatches += usize::from(table.is_some());
+                        table = Some((at, at + 1));
                     }
                 }
             }
+            Event::Word { at, word } => {
+                n.offsets += 2;
+                let Some(s) = &cur else {
+                    n.unknown_script += 1;
+                    continue;
+                };
+                let Some(at) = s.offset(*at, 2) else {
+                    n.past_item += 1;
+                    continue;
+                };
+                let i = at as usize;
+                n.byte_mismatches += usize::from(s.bytes[i..i + 2] != word.to_le_bytes());
+                if outside {
+                    continue;
+                }
+                n.table_words += 1;
+                n.table_mismatches += usize::from(!s.d.word_ok(at));
+            }
+            Event::TableEnd { at } => {
+                n.offsets += 1;
+                let Some(s) = &cur else {
+                    n.unknown_script += 1;
+                    continue;
+                };
+                let Some(at) = s.offset(*at, 1) else {
+                    n.past_item += 1;
+                    continue;
+                };
+                n.byte_mismatches += usize::from(s.bytes[at as usize] != ops::TABLE_END);
+                if outside {
+                    continue;
+                }
+                n.table_ends += 1;
+                n.table_mismatches += usize::from(!s.d.end_ok(at));
+            }
+            Event::WordWrite { at, word } => {
+                n.offsets += 2;
+                let Some(s) = &mut cur else {
+                    n.unknown_script += 1;
+                    continue;
+                };
+                let Some(at) = s.offset(*at, 2) else {
+                    n.past_item += 1;
+                    continue;
+                };
+                n.table_writes += 1;
+                n.table_mismatches += usize::from(!s.d.word_ok(at));
+                let i = at as usize;
+                s.bytes[i..i + 2].copy_from_slice(&word.to_le_bytes());
+            }
         }
     }
-    if let Some(t) = table.take() {
-        n.table_mismatches += usize::from(!table_ok(current, t));
+    if table.take().is_some() {
+        n.table_mismatches += 1;
     }
     // A visit left open at the end (the run did not reach its stop byte) is partial.
     if visit.take().is_some() {
@@ -395,35 +566,18 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
     n
 }
 
-/// One table read `start..end` must be exactly one entry of a string table.
-fn table_ok(d: Option<&Decoded<'_>>, (start, end, _): (u32, u32, bool)) -> bool {
-    d.and_then(|d| d.item_at(start))
-        .is_some_and(|it| match &it.kind {
-            Kind::Table(t) if !t.words => t
-                .entries
-                .iter()
-                .any(|e| e.offset == start && e.end() == end),
-            _ => false,
-        })
-}
-
 /// Ends the text visit in progress: its reads must cover whole runs, from a run's start to a
-/// run's end (several runs when a path entered text in the middle and split it); with both
-/// snapshots, what it printed must be those runs filled in.
-fn close_visit(
-    n: &mut Counts,
-    d: Option<&Decoded<'_>>,
-    visit: &mut Option<(u32, u32, Option<Box<Snap>>)>,
-    end: Option<&Snap>,
-) {
-    let Some((start, next, first)) = visit.take() else {
+/// run's end (several runs when a path entered text in the middle and split it); with a
+/// snapshot, what it put out must be those runs filled in.
+fn close_visit(n: &mut Counts, s: Option<&Loaded<'_, '_>>, visit: &mut Option<Visit>) {
+    let Some(v) = visit.take() else {
         return;
     };
-    let Some(d) = d else { return };
+    let Some(s) = s else { return };
     let mut runs = Vec::new();
-    let mut at = start;
-    while at < next {
-        match d.item_at(at) {
+    let mut at = v.start;
+    while at < v.next {
+        match s.d.item_at(at) {
             Some(it) if it.offset == at => match &it.kind {
                 Kind::Text(run) => {
                     runs.push(run);
@@ -434,76 +588,88 @@ fn close_visit(
             _ => break,
         }
     }
-    if at != next {
+    if at != v.next {
         n.partial_visits += 1;
         return;
     }
-    let (Some(first), Some(end)) = (first, end) else {
+    let Some(first) = v.snap else {
         return;
     };
     n.filled += 1;
-    let want = fill(d.bytes, &runs, &first);
-    let after = &end.printed;
-    let ok = after.len() >= want.len() && after.ends_with(&want) && {
-        let head = &after[..after.len() - want.len()];
-        first.printed.ends_with(head)
-    };
-    n.fill_mismatches += usize::from(!ok);
+    let want = fill(&s.bytes, &runs, &first);
+    n.fill_mismatches += usize::from(normalised(&want) != normalised(&v.out));
 }
 
-fn is_lower(c: u32) -> bool {
+/// `out` without what a key wait inside a visit adds to the line assembler's input: the wait
+/// after a `*` flushes again (`wait_event`; a flush right after a flush changes nothing, so a
+/// run of flushes is one) and its cursor ends a full line with a 0 (`idle_poll`; the escape
+/// layer puts a 0 only for a `^` glyph of code 0, dropped on both sides alike).
+fn normalised(out: &[i16]) -> Vec<i16> {
+    let mut v: Vec<i16> = Vec::with_capacity(out.len());
+    for &c in out.iter().filter(|&&c| c != 0) {
+        if c > 0 || v.last().is_none_or(|&l| l > 0) {
+            v.push(c);
+        }
+    }
+    v
+}
+
+fn is_lower(c: i16) -> bool {
     (0x61..=0x7a).contains(&c)
 }
 
-fn is_alpha(c: u32) -> bool {
+fn is_alpha(c: i16) -> bool {
     is_lower(c) || (0x41..=0x5a).contains(&c)
 }
 
-/// What runs read one after the other print, from their parts and the state at the first byte:
-/// plain text as it is, each escape filled in or applied (`text_out`'s rules over parts, not
-/// bytes). Spaces and newlines are dropped, as [`printed`] drops them.
-pub(crate) fn fill(script: &[u8], runs: &[&super::Run], s: &Snap) -> Vec<u32> {
+/// What runs read one after the other hand the line assembler, from their parts and the state
+/// at the first byte: `text_out`'s rules over parts, not bytes. Plain text as it is, each escape
+/// filled in or applied, -1 for a flush; spaces and newlines as they are (this is before word
+/// wrap). Capitalising and the runic bit of plain text are the line assembler's, after this.
+pub(crate) fn fill(script: &[u8], runs: &[&super::Run], s: &Snap) -> Vec<i16> {
     let mut e = s.esc.clone();
     let mut out = Vec::new();
-    let raw = |e: &mut EscState, out: &mut Vec<u32>, c: i32| {
-        let mut c = c;
-        if e.cap_window && e.capitalise && (0x61..=0x7a).contains(&c) {
-            c -= 0x20;
-        }
-        e.capitalise = false;
-        if c < 0 {
-            // A flush (`*`) also ends hidden text (`end_line`).
-            e.hidden = false;
-            return;
-        }
-        if c == 0 {
-            c = 0x0a;
-        }
-        if e.runic && c > 0x20 {
-            c |= 0x80;
-        }
-        if c != 0x20 && c != 0x0a {
-            out.push(c as u32);
-        }
+    let string = |out: &mut Vec<i16>, v: u8| {
+        let text = s.strs.get(usize::from(v)).cloned().unwrap_or_default();
+        out.extend(text.into_iter().take_while(|&b| b != 0).map(i16::from));
+    };
+    let int = |e: &mut EscState, out: &mut Vec<i16>, v: u8| {
+        let w = s.ints.get(usize::from(v)).copied().unwrap_or(0);
+        e.plural = w != 1;
+        out.extend(itoa(w, 6, -10).into_iter().map(i16::from));
+    };
+    let glyph = |e: &EscState, c: u8| {
+        let c = i16::from(c) & 0x1f;
+        if e.runic { c | 0x80 } else { c }
     };
     for p in runs.iter().flat_map(|r| &r.parts) {
         let bytes = &script[p.offset as usize..(p.offset + p.len) as usize];
+        // Hidden text drops every character but `&`, escapes included.
         if e.hidden && !e.show_hidden && p.escape != Some(Escape::Hidden) {
             continue;
         }
         match p.escape {
             None => {
                 for &b in bytes {
-                    if e.hidden && !e.show_hidden {
-                        break;
-                    }
-                    let c = u32::from(b);
+                    let c = i16::from(b);
                     match e.prefix {
+                        b'#' => {
+                            int(&mut e, &mut out, ops::var_index(b));
+                            e.prefix = 0;
+                        }
+                        b'$' => {
+                            string(&mut out, ops::var_index(b));
+                            e.prefix = 0;
+                        }
+                        b'^' => {
+                            out.push(glyph(&e, b));
+                            e.prefix = 0;
+                        }
                         b'/' | b'\\' => {
                             if is_alpha(c) && e.plural == (e.prefix == b'/') {
                                 continue;
                             }
-                            raw(&mut e, &mut out, i32::from(b));
+                            out.push(c);
                             if !is_alpha(c) {
                                 e.prefix = 0;
                             }
@@ -512,41 +678,37 @@ pub(crate) fn fill(script: &[u8], runs: &[&super::Run], s: &Snap) -> Vec<u32> {
                             if e.keyword_end.contains(&b) {
                                 e.prefix = 0;
                             }
-                            raw(&mut e, &mut out, i32::from(b));
+                            out.push(c);
                         }
-                        _ => raw(&mut e, &mut out, i32::from(b)),
+                        _ => out.push(c),
                     }
                 }
             }
             Some(Escape::Str(Some(v))) => {
-                let text = s.strs.get(usize::from(v)).cloned().unwrap_or_default();
-                for b in text.into_iter().take_while(|&b| b != 0) {
-                    raw(&mut e, &mut out, i32::from(b));
-                }
+                string(&mut out, v);
                 e.prefix = 0;
             }
             Some(Escape::Int(Some(v))) => {
-                let w = s.ints.get(usize::from(v)).copied().unwrap_or(0);
-                e.plural = w != 1;
-                for b in itoa(w, 6, -10) {
-                    raw(&mut e, &mut out, i32::from(b));
-                }
+                int(&mut e, &mut out, v);
                 e.prefix = 0;
             }
             Some(Escape::Glyph(Some(c))) => {
-                let g = if e.runic { (c & 0x1f) | 0x80 } else { c & 0x1f };
-                raw(&mut e, &mut out, i32::from(g));
+                out.push(glyph(&e, c));
                 e.prefix = 0;
             }
             Some(Escape::Str(None)) => e.prefix = b'$',
             Some(Escape::Int(None)) => e.prefix = b'#',
             Some(Escape::Glyph(None)) => e.prefix = b'^',
-            Some(Escape::Wait) => raw(&mut e, &mut out, -1),
+            Some(Escape::Wait) => {
+                // A flush also ends hidden text (`end_line`).
+                out.push(-1);
+                e.hidden = false;
+            }
             Some(Escape::Keyword) => e.prefix = b'@',
             Some(Escape::Hidden) => e.hidden = !e.hidden,
             Some(Escape::RunicOn) => e.runic = true,
             Some(Escape::RunicOff) => e.runic = false,
-            Some(Escape::Capital) => e.capitalise = true,
+            Some(Escape::Capital) => {}
             Some(Escape::Singular) => e.prefix = b'/',
             Some(Escape::Plural) => e.prefix = b'\\',
             Some(Escape::Literal) => e.prefix = b'%',

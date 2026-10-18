@@ -70,6 +70,8 @@ async fn more(state: &RefCell<State>, io: &Io) {
 /// line / newline draw the line, word-wrap, move the cursor, scroll; `c` < 0 flushes the
 /// pending part of the line without a newline)
 pub async fn put_raw(state: &RefCell<State>, io: &Io, c: i16) {
+    #[cfg(test)]
+    crate::converse::disasm::trace::emit(c);
     let mut c = c;
     let paging;
     {

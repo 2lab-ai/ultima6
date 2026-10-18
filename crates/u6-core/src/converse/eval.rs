@@ -118,6 +118,11 @@ pub(crate) async fn eval(cx: &Cx<'_>) -> u32 {
 /// One op of 0x1130a2 on the stack (op value at `sp`).
 async fn apply(cx: &Cx<'_>, st: &mut Stack, op: u8, strings: &mut bool) {
     let (a, b) = (st.arg(2), st.arg(1));
+    #[cfg(test)]
+    if matches!(op, 0xb4 | 0xb7 | 0xc3) {
+        let at = st.sp - 2;
+        super::disasm::trace::table_address(at >= 0 && (at as usize) < STACK);
+    }
     let bool32 = |c: bool| u32::from(c);
     match op {
         0x81 => st.reduce(2, bool32(a > b)),
@@ -210,6 +215,8 @@ async fn apply(cx: &Cx<'_>, st: &mut Stack, op: u8, strings: &mut bool) {
             let v = cx.cv(|c| {
                 let at = (a as i32).wrapping_add(i32::from(b as u8) * 2) - SCRIPT_BASE;
                 let v = c.word_at(at as i16 as i32);
+                #[cfg(test)]
+                super::disasm::trace::table_word(at as i16 as i32, v);
                 c.saved_pc = c.pos();
                 v as i16
             });
@@ -392,6 +399,8 @@ fn index_of_string(cx: &Cx<'_>, table: u32, slot: u8) -> i16 {
                 break;
             }
             if c.next() == 0xb8 {
+                #[cfg(test)]
+                super::disasm::trace::table_end(c.pos() - 1);
                 end = true;
                 break;
             }
@@ -400,6 +409,8 @@ fn index_of_string(cx: &Cx<'_>, table: u32, slot: u8) -> i16 {
             let mut entry = Vec::new();
             loop {
                 let b = c.next();
+                #[cfg(test)]
+                super::disasm::trace::table_byte(c.pos() - 1, b);
                 if b == 0 || c.fault {
                     break;
                 }
@@ -427,10 +438,17 @@ fn index_of_word(cx: &Cx<'_>, table: u32, var: u8) -> u32 {
         let found = loop {
             let p = c.pos();
             if c.byte_at(p) == 0xb8 || c.fault {
+                #[cfg(test)]
+                if !c.fault {
+                    super::disasm::trace::table_end(p);
+                }
                 break false;
             }
             n += 1;
-            if c.word_at(p) == key {
+            let w = c.word_at(p);
+            #[cfg(test)]
+            super::disasm::trace::table_word(p, w);
+            if w == key {
                 break true;
             }
             c.advance(2);

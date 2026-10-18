@@ -501,6 +501,14 @@ pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refus
     }
 }
 
+/// The item that starts at `at` (`items` in offset order).
+fn item_starting(items: &[Item], at: u32) -> Option<&Item> {
+    items
+        .binary_search_by_key(&at, |it| it.offset)
+        .ok()
+        .map(|i| &items[i])
+}
+
 /// The entries a use of the table at `addr` can reach: the table item there and, while a table
 /// has no `b8`, the one of the same kind that starts where it ends (an index runs on into it, as
 /// `table_element` counts NULs and `b4` / `c3` step over words). As (table offset, index in that

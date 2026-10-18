@@ -1,26 +1,34 @@
 //! Port-only (spec 08 rev 3 Design 2 and 6, spec 09 rev 3 Design 5): the catalog of a
 //! conversation archive's translation units, built on the disassembler.
 //!
-//! - **Runs:** each text run, keyed (archive, item, run offset).
+//! - **Runs:** each text run, keyed (archive, item, run offset). A run a path entered in the
+//!   middle was split there ([`super::Disasm::run_splits`]); its parts carry the offset of the
+//!   first one ([`RunUnit::part_of`]), so a translator sees one sentence.
 //! - **Table strings:** each string of a string table, keyed (archive, item, string offset);
-//!   one an `a6` copies into a string slot carries the slots and their capacity.
+//!   one an `a6` copies into a string slot carries the slots and their capacity. A copy's index
+//!   is resolved the way the interpreter reads it, on into the tables that follow its table
+//!   without a gap; a computed index marks every string it can reach.
 //! - Also each script's name (bytes 2 up to `f1`) and its keywords, for the keyword aliases and
 //!   the bundles' topics.
 //! - **Hash:** [`hash64`], FNV-1a 64 (offset basis 0xcbf29ce484222325, prime 0x100000001b3)
 //!   over a unit's script bytes, escapes included; the HD pack's content hash uses the same
 //!   function (`u6_hdpack::image_hash`). Hashes are written as 16 lower-case hex digits.
-//! - **Form:** JSON, [`FORMAT`] `u6-converse-catalog/1` ([`Catalog::to_json`] /
+//! - **Form:** JSON, [`FORMAT`] `u6-converse-catalog/2` ([`Catalog::to_json`] /
 //!   [`Catalog::from_json`]). Unit text is written one character per script byte (U+0000..U+00FF),
-//!   so it reads back to the same bytes.
+//!   so it reads back to the same bytes; reading back checks each unit's length, hash and
+//!   place in its script.
 //!
 //! A catalog built from the owner's files holds game text: it stays outside the repository.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
-use super::{Assign, Disasm, Kind, Operands, Refusal, Span, Table, disassemble};
+use super::decode::ref_entry;
+use super::{Assign, Disasm, Kind, Operands, Refusal, Span, disassemble, item_starting, reachable};
 
-/// The catalog format's name.
-pub const FORMAT: &str = "u6-converse-catalog/1";
+/// The catalog format's name (`/2`: runs carry `part_of`; copies reach the tables that follow).
+pub const FORMAT: &str = "u6-converse-catalog/2";
 /// The hash every unit carries.
 pub const HASH: &str = "fnv1a64";
 /// The text a string slot 0..9 holds: its 100-byte buffer (A4+0x140b, `STRING_BUFFERS`) less
@@ -78,6 +86,10 @@ pub struct RunUnit {
     #[serde(flatten)]
     pub unit: Unit,
     pub placeholders: Vec<String>,
+    /// For a part of a run a path entered in the middle (split there): the offset of the first
+    /// part. The parts with one `part_of` are one run of the script, in offset order, read
+    /// whole from the first part; a path that enters at a later part reads from there.
+    pub part_of: Option<u32>,
 }
 
 /// A table string: its table and entry index, and the string slots an `a6` copies it into.
@@ -113,62 +125,110 @@ fn slot_capacity(slot: u8) -> Option<u32> {
     (usize::from(slot) < super::super::STRING_BUFFERS).then_some(SLOT_BUFFER_CAPACITY)
 }
 
+impl Unit {
+    /// The unit as [`ScriptUnits::build`] writes it: inside a script of `len` bytes, one
+    /// character per byte, its hash that of those bytes.
+    fn check(&self, len: u32) -> Result<(), String> {
+        let at = self.offset;
+        let bytes: Option<Vec<u8>> = self
+            .text
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).ok())
+            .collect();
+        let Some(bytes) = bytes else {
+            return Err(format!("unit at {at:#x}: a character above U+00FF"));
+        };
+        if bytes.len() != self.len as usize {
+            return Err(format!("unit at {at:#x}: text and length differ"));
+        }
+        if self.offset.checked_add(self.len).is_none_or(|e| e > len) {
+            return Err(format!("unit at {at:#x}: outside the script"));
+        }
+        if hash64(&bytes) != self.hash {
+            return Err(format!("unit at {at:#x}: hash differs"));
+        }
+        Ok(())
+    }
+}
+
 impl ScriptUnits {
-    /// The units of a decoded script (`script` = the bytes it was decoded from).
-    pub fn new(d: &Disasm, script: &[u8]) -> Self {
+    /// Disassembles one script (archive letter, item, bytes) and lists its units, or its
+    /// refusal.
+    pub fn build(archive: u8, item: u16, bytes: &[u8]) -> Self {
+        match disassemble(archive, item, bytes) {
+            Ok(d) => Self::units(&d, bytes),
+            Err(why) => Self::refused(archive, item, bytes, &why),
+        }
+    }
+
+    /// The units of `d`, decoded from `script` (the spans index it: the same bytes only).
+    pub(super) fn units(d: &Disasm, script: &[u8]) -> Self {
         let mut out = Self::empty(d.archive, d.item, script, None);
-        // String slots each table string is copied into: (table address, index or any).
-        let mut copies: Vec<(u32, Option<u32>, u8)> = Vec::new();
+        let item_at = |a: u32| item_starting(&d.items, a);
+        // The string slots each table string is copied into, by (table, index).
+        let mut slots: BTreeMap<(u32, u32), BTreeSet<u8>> = BTreeMap::new();
         for item in &d.items {
             if let Kind::Op(op) = &item.kind
                 && let Operands::Assign(Assign::StrFromTable { var, table, .. }) = &op.operands
             {
-                let index = table.index.as_ref().map_or(Some(0), |e| e.constant());
-                copies.push((table.addr, index, *var));
+                let reach = reachable(item_at, table.addr, false);
+                let picked = match ref_entry(table, false) {
+                    Some(i) => reach.get(i as usize..=i as usize).unwrap_or_default(),
+                    None => &reach[..],
+                };
+                for &(t, i, _) in picked {
+                    slots.entry((t, i)).or_default().insert(*var);
+                }
             }
         }
-        let tables: Vec<(u32, &Table)> = d
-            .items
-            .iter()
-            .filter_map(|it| match &it.kind {
-                Kind::Table(t) if !t.words => Some((it.offset, t)),
-                _ => None,
-            })
-            .collect();
+        let splits: BTreeSet<u32> = d.run_splits.iter().copied().collect();
         for item in &d.items {
             match &item.kind {
                 Kind::Name => out.name = Some(unit(script, item.span())),
-                Kind::Text(run) => out.runs.push(RunUnit {
-                    unit: unit(script, item.span()),
-                    placeholders: run
-                        .placeholders()
-                        .map(|p| {
-                            latin1(
-                                Span {
-                                    offset: p.offset,
-                                    len: p.len,
-                                }
-                                .bytes(script),
-                            )
-                        })
-                        .collect(),
-                }),
+                Kind::Text(run) => {
+                    let part_of = match out.runs.last_mut() {
+                        Some(prev)
+                            if splits.contains(&item.offset)
+                                && prev.unit.offset + prev.unit.len == item.offset =>
+                        {
+                            Some(*prev.part_of.get_or_insert(prev.unit.offset))
+                        }
+                        _ => None,
+                    };
+                    out.runs.push(RunUnit {
+                        unit: unit(script, item.span()),
+                        placeholders: run
+                            .placeholders()
+                            .map(|p| {
+                                latin1(
+                                    Span {
+                                        offset: p.offset,
+                                        len: p.len,
+                                    }
+                                    .bytes(script),
+                                )
+                            })
+                            .collect(),
+                        part_of,
+                    });
+                }
                 Kind::Keywords(spans) => {
                     out.keywords.extend(spans.iter().map(|&s| unit(script, s)));
                 }
                 _ => {}
             }
         }
-        for (addr, t) in &tables {
+        let tables = d.items.iter().filter_map(|it| match &it.kind {
+            Kind::Table(t) if !t.words => Some((it.offset, t)),
+            _ => None,
+        });
+        for (addr, t) in tables {
             for (index, &e) in t.entries.iter().enumerate() {
                 let index = index as u32;
-                let mut slots: Vec<u8> = copies
-                    .iter()
-                    .filter(|&&(a, i, _)| a == *addr && i.is_none_or(|i| i == index))
-                    .map(|&(_, _, s)| s)
-                    .collect();
-                slots.sort_unstable();
-                slots.dedup();
+                let slots: Vec<u8> = slots
+                    .get(&(addr, index))
+                    .map(|s| s.iter().copied().collect())
+                    .unwrap_or_default();
                 let capacity = if slots.is_empty() {
                     None
                 } else {
@@ -179,7 +239,7 @@ impl ScriptUnits {
                 };
                 out.strings.push(StringUnit {
                     unit: unit(script, e),
-                    table: *addr,
+                    table: addr,
                     index,
                     slots,
                     capacity,
@@ -207,6 +267,25 @@ impl ScriptUnits {
             keywords: Vec::new(),
         }
     }
+
+    /// Each unit as [`Unit::check`] has it; a refused script lists none.
+    fn check(&self) -> Result<(), String> {
+        let mut units = self
+            .name
+            .iter()
+            .chain(self.runs.iter().map(|r| &r.unit))
+            .chain(self.strings.iter().map(|s| &s.unit))
+            .chain(&self.keywords)
+            .peekable();
+        let at = format!("script {}{}", self.archive, self.item);
+        if self.refused.is_some() && units.peek().is_some() {
+            return Err(format!("{at}: refused, with units"));
+        }
+        for u in units {
+            u.check(self.len).map_err(|e| format!("{at}: {e}"))?;
+        }
+        Ok(())
+    }
 }
 
 impl Catalog {
@@ -214,12 +293,7 @@ impl Catalog {
     pub fn build<'a>(scripts: impl IntoIterator<Item = (u8, u16, &'a [u8])>) -> Self {
         let scripts = scripts
             .into_iter()
-            .map(
-                |(archive, item, bytes)| match disassemble(archive, item, bytes) {
-                    Ok(d) => ScriptUnits::new(&d, bytes),
-                    Err(why) => ScriptUnits::refused(archive, item, bytes, &why),
-                },
-            )
+            .map(|(archive, item, bytes)| ScriptUnits::build(archive, item, bytes))
             .collect();
         Self {
             format: FORMAT.into(),
@@ -232,17 +306,22 @@ impl Catalog {
         serde_json::to_string(self).expect("the catalog has only serialisable fields")
     }
 
-    /// Reads a catalog back; another format's name is an error.
+    /// Reads a catalog back; another format's name, or a unit whose text, length, hash or
+    /// place disagree, is an error.
     pub fn from_json(s: &str) -> Result<Self, String> {
         let c: Catalog = serde_json::from_str(s).map_err(|e| e.to_string())?;
         if c.format != FORMAT || c.hash != HASH {
             return Err(format!("not {FORMAT} with {HASH}"));
         }
+        for s in &c.scripts {
+            s.check()?;
+        }
         Ok(c)
     }
 }
 
-/// `u64` as 16 lower-case hex digits (a JSON number would lose bits in JavaScript).
+/// `u64` as 16 lower-case hex digits (a JSON number would lose bits in JavaScript); nothing
+/// else reads back.
 mod hex64 {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -252,8 +331,10 @@ mod hex64 {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
         let s = String::deserialize(d)?;
-        if s.len() != 16 {
-            return Err(serde::de::Error::custom("a hash is 16 hex digits"));
+        if s.len() != 16 || !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(serde::de::Error::custom(
+                "a hash is 16 lower-case hex digits",
+            ));
         }
         u64::from_str_radix(&s, 16).map_err(serde::de::Error::custom)
     }
