@@ -488,6 +488,14 @@ fn the_record_and_the_slices_must_agree() {
     };
     let other_gates = text.replace(&gates(), &t.text());
     assert_eq!(state(&g, &other_gates, &left).unwrap_err(), ["gates"]);
+    // A pair line with no gates field, or one that says no seam threshold: gated with what no
+    // line says.
+    let no_gates = edit(bg, &|v| {
+        v.as_object_mut().unwrap().remove("gates");
+    });
+    assert_eq!(state(&g, &no_gates, &left).unwrap_err(), ["gates"]);
+    let no_seam = edit(bg, &|v| v["gates"] = serde_json::json!("structure>=0.5"));
+    assert_eq!(state(&g, &no_seam, &left).unwrap_err(), ["gates"]);
 }
 
 #[test]

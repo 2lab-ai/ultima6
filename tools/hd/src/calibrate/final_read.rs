@@ -275,7 +275,9 @@ fn tile(id: ImageId) -> Option<u16> {
 /// disagreement, or the state:
 ///
 /// - `gates`: a pair line gated with another seam threshold (its `gates` text, as ingest writes
-///   it, says `seam<=` another value; nothing else is checked then: every limit would differ);
+///   it, says `seam<=` another value), or with none said (no `gates` field, or one with no
+///   `seam<=`: ingest writes it on every line); nothing else is checked then: every limit would
+///   differ;
 /// - `duplicate`: a pair logged twice in one pass (a pass checks each pair once; which line
 ///   would be the record is not guessed); an item sent back twice;
 /// - `plan`: a fallback naming an item the plan has not, or of another class; an image listed
@@ -328,14 +330,24 @@ pub fn fixed(
             .gates
             .as_deref()
             .and_then(|g| g.split(' ').find(|t| t.starts_with("seam<=")));
-        if let Some(t) = theirs.filter(|&t| t != want) {
-            say!(
+        match theirs {
+            Some(t) if t == want => {}
+            Some(t) => say!(
                 "gates",
                 format!(
                     "line {}: gated with {t}; calibrate measures with {want}",
                     l.line
                 ),
-            );
+            ),
+            // Ingest writes the thresholds on every line: one with none was gated with what no
+            // line says.
+            None => say!(
+                "gates",
+                format!(
+                    "line {}: no seam threshold in its gates; calibrate measures with {want}",
+                    l.line
+                ),
+            ),
         }
     }
     if !out.is_empty() {
