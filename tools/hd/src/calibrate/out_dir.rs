@@ -19,8 +19,9 @@
 //!    inode is not freed and its number cannot be given to another file meanwhile), its `done`
 //!    first, each only while the entry at its name is that file (`fstatat`, no open), through
 //!    the dir it holds open, one by one, never a tree; it keeps its diagnostics ([`Mode::keep`]
-//!    and `refused.txt`). A file another hand put at a name of the run's is left, and said; so
-//!    is a file of the run's moved to another name. A file of the run's whose identity could not
+//!    and `refused.txt`), each checked the same way and not deleted. A file another hand put at
+//!    a name of the run's is left, and said; so is a file of the run's moved to another name, a
+//!    kept one too. A file of the run's whose identity could not
 //!    be read when it was made fails the run, and is left (a diagnostic too), said so. A file the
 //!    run reads back is read only while it is the one it made. Nothing a previous process made
 //!    is removed, renamed or rewritten.
@@ -474,20 +475,37 @@ impl Run {
         Ok(())
     }
 
+    /// Whether the entry at the name `name` of the run's dir is still the file the run made as
+    /// `id` and holds as `file` (`fstatat` of the name, no open): true when it is; false when
+    /// the name is gone and the file has no name left (deleted by another hand); else why not
+    /// (moved to another name, as the file still has one; another file at the name).
+    fn still_at(&self, name: &str, id: (u64, u64), file: Option<&File>) -> Result<bool, String> {
+        match at::id_at(&self.open, name) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match file.map(at::links) {
+                Some(Ok(0)) | None => Ok(false),
+                Some(Ok(_)) => Err("moved to another name".into()),
+                Some(Err(e)) => Err(format!(
+                    "its name is gone, and whether it moved could not be read: {e}"
+                )),
+            },
+            Err(e) => Err(e.to_string()),
+            Ok(now) if now != id => Err("not the file the run made".into()),
+            Ok(_) => Ok(true),
+        }
+    }
+
     /// The run failed with `error`: deletes the files this process made in the run's dir but
     /// what `mode` keeps, `done` first, each only while the entry at its name is the file the
-    /// run holds open (`fstatat` of the name, no open), through the dir itself; then writes
-    /// [`REFUSED`] (the error, `then` added: each file it could not delete, each it could not
-    /// identify, and that the dir moved if it did, each unless the error says it already);
-    /// gives that error.
+    /// run holds open ([`Run::still_at`]), through the dir itself, and checks the kept ones the
+    /// same way, deleting none; then writes [`REFUSED`] (the error, `then` added: each file it
+    /// could not delete, each kept one not as it made it, each it could not identify, and that
+    /// the dir moved if it did, each unless the error says it already); gives that error.
     fn fail(&self, mode: Mode, error: &str, then: &dyn Fn(String) -> String) -> String {
-        let mut left = Vec::new();
+        let (mut left, mut kept) = (Vec::new(), Vec::new());
         {
             let mut made = self.made.borrow_mut();
             // done first: a run dir whose cleanup stops partway holds no done.
-            let mut order: Vec<usize> = (0..made.len())
-                .filter(|&i| !mode.keep.contains(&made[i].name.as_str()))
-                .collect();
+            let mut order: Vec<usize> = (0..made.len()).collect();
             order.sort_by_key(|&i| made[i].name != DONE);
             for i in order {
                 let m = &mut made[i];
@@ -498,23 +516,18 @@ impl Run {
                 let path = self.dir.join(&m.name);
                 let name = &m.name;
                 let file = m.file.as_ref();
+                // A file the run keeps: checked, not deleted; said when it is not as it was
+                // made (one deleted by another hand has nothing left to point at).
+                if mode.keep.contains(&name.as_str()) {
+                    if let Err(e) = self.still_at(name, id, file) {
+                        kept.push(format!("{} ({e})", path.display()));
+                    }
+                    continue;
+                }
                 let gone = seam(&self.key, "delete", name).and_then(|()| {
-                    match at::id_at(&self.open, name) {
-                        // Its name gone: deleted by another hand, or moved to another name
-                        // (the file it holds still has one).
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            match file.map(at::links) {
-                                Some(Ok(0)) | None => Ok(()),
-                                Some(Ok(_)) => Err("moved to another name".into()),
-                                Some(Err(e)) => Err(format!(
-                                    "its name is gone, and whether it moved could not be read: \
-                                     {e}"
-                                )),
-                            }
-                        }
-                        Err(e) => Err(e.to_string()),
-                        Ok(now) if now != id => Err("not the file the run made".into()),
-                        Ok(_) => match at::unlink(&self.open, name) {
+                    match self.still_at(name, id, file)? {
+                        false => Ok(()),
+                        true => match at::unlink(&self.open, name) {
                             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                                 Err(e.to_string())
                             }
@@ -534,6 +547,12 @@ impl Run {
             said = format!(
                 "{said}; left, as it could not be deleted: {}",
                 left.join(", ")
+            );
+        }
+        if !kept.is_empty() {
+            said = format!(
+                "{said}; kept, but not as the run made it: {}",
+                kept.join(", ")
             );
         }
         if !self.said_unidentified.get()

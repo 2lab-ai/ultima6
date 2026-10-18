@@ -1842,3 +1842,83 @@ fn a_run_dir_out_of_open_files_to_be_opened_says_how_to_go_on() {
     assert!(names(&run).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_kept_file_of_the_run_moved_to_another_name_is_said() {
+    // gates.jsonl (a file the run keeps when it fails) made, then renamed within the run dir
+    // by another hand; the run then fails for its own reason. The snapshot is not at its name:
+    // the error and refused.txt say so, and the file aside is left.
+    let dir = temp("kept-moved");
+    let out = dir.join("out");
+    let o = out.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name == "a.png" {
+            let run = only_run(&o);
+            std::fs::rename(run.join("gates.jsonl"), run.join("g.aside")).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        run.write("gates.jsonl", b"snapshot")?;
+        writes(run)?;
+        Err("no rows".into())
+    })
+    .unwrap_err();
+    let run = only_run(&out);
+    assert_eq!(
+        e,
+        format!(
+            "no rows; kept, but not as the run made it: {} (moved to another name); run dir: {}",
+            run.join("gates.jsonl").display(),
+            run.display()
+        )
+    );
+    assert_eq!(names(&run), ["g.aside", REFUSED]);
+    assert_eq!(std::fs::read(run.join("g.aside")).unwrap(), b"snapshot");
+    assert_eq!(
+        std::fs::read_to_string(run.join(REFUSED)).unwrap(),
+        format!("{e}\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_another_hand_put_at_a_kept_name_is_said() {
+    // gates.jsonl made, then deleted by another hand and a file of theirs put at its name; the
+    // run then fails for its own reason. The file at the name is not the run's: it is left, as
+    // a kept name always is, and said so.
+    let dir = temp("kept-swapped");
+    let out = dir.join("out");
+    let o = out.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name == "a.png" {
+            let run = only_run(&o);
+            std::fs::remove_file(run.join("gates.jsonl")).unwrap();
+            std::fs::write(run.join("gates.jsonl"), b"theirs").unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        run.write("gates.jsonl", b"snapshot")?;
+        writes(run)?;
+        Err("no rows".into())
+    })
+    .unwrap_err();
+    let run = only_run(&out);
+    assert_eq!(
+        e,
+        format!(
+            "no rows; kept, but not as the run made it: {} (not the file the run made); run \
+             dir: {}",
+            run.join("gates.jsonl").display(),
+            run.display()
+        )
+    );
+    assert_eq!(names(&run), ["gates.jsonl", REFUSED]);
+    assert_eq!(std::fs::read(run.join("gates.jsonl")).unwrap(), b"theirs");
+    assert_eq!(
+        std::fs::read_to_string(run.join(REFUSED)).unwrap(),
+        format!("{e}\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
