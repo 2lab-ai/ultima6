@@ -1604,6 +1604,18 @@ fn one_deadline_covers_the_call_and_what_it_started() {
     };
     let dir = crate::work::ensure_dir(&t.join("call")).unwrap();
     std::fs::write(t.join("sheet.png"), b"x").unwrap();
+    // The call's child, killed with it, is gone in a moment however loaded the machine
+    // (looked for up to 10 s; one that outlived the call would sleep on for its 100 s).
+    let child_gone = || {
+        let start = Instant::now();
+        while alive(&t.join("pid")) {
+            if start.elapsed() > Duration::from_secs(10) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    };
     // A call that hangs: stopped at the deadline, its whole group killed.
     let start = Instant::now();
     let r = codex(100, 2).generate(&t.join("sheet.png"), "prompt", &dir);
@@ -1613,8 +1625,7 @@ fn one_deadline_covers_the_call_and_what_it_started() {
         "{:?}",
         start.elapsed()
     );
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(!alive(&t.join("pid")), "the call's child outlived it");
+    assert!(child_gone(), "the call's child outlived it");
     // A call that exits but leaves a child holding its output: the child goes with it and
     // the event stream ends (here with no image, so the call fails, promptly).
     let start = Instant::now();
@@ -1625,8 +1636,7 @@ fn one_deadline_covers_the_call_and_what_it_started() {
         "{:?}",
         start.elapsed()
     );
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(!alive(&t.join("pid")));
+    assert!(child_gone());
     // The events were kept, with the thread line.
     let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
     assert!(events.contains("thread.started"));
@@ -1978,7 +1988,9 @@ fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
         "{took:?} (before: 30 s, the helper's sleep)"
     );
     // A helper that left the call's group (its own session) and holds the output open: the
-    // call ends, and the stream is given a bounded grace, not the rest of the deadline.
+    // call ends, and the stream is given a bounded grace, not the rest of the deadline. The
+    // session is made before the fork, so the helper is out of the group before the call can
+    // exit and the group be killed.
     let thread = r#"echo '{"type":"thread.started","thread_id":"t1"}'"#;
     for (name, then, secs) in [
         ("escaped-exit.sh", "exit 0", 30),
@@ -1986,8 +1998,9 @@ fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
     ] {
         let pid = t.join(format!("{name}.pid"));
         let body = format!(
-            "cat > /dev/null\n{thread}\n/usr/bin/perl -MPOSIX -e 'exit if fork; POSIX::setsid(); \
-             open(my $f, \">\", $ARGV[0]); print $f $$; close $f; sleep 20' \"{}\"\n{then}",
+            "cat > /dev/null\n{thread}\n/usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die \
+             \"setsid: $!\"; exit if fork; open(my $f, \">\", $ARGV[0]); print $f $$; close $f; \
+             sleep 20' \"{}\"\n{then}",
             pid.display()
         );
         let (r, took) = call(review_stub(&t, name, &body), secs, "PROMPT");

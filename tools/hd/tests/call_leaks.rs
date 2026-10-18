@@ -49,7 +49,9 @@ impl Drop for Mark {
 
 /// A stand-in for `codex`: `before`, then `n` helpers, each in a session of its own and keeping
 /// every descriptor it was given (the call's input and output), running `perl` while `mark`
-/// exists, then `after`.
+/// exists, then `after`. Each makes its session before its fork, so it is out of the call's
+/// group before the stand-in can exit and the group be killed (made after it, a keeper, which
+/// does not acknowledge, could die with the group if the loaded machine had not yet run it).
 fn stub(
     dir: &Path,
     name: &str,
@@ -62,7 +64,8 @@ fn stub(
     let p = dir.join(name);
     // `$ARGV[1]` is the helper's start acknowledgment: its pid is appended to make a file name.
     let helper = format!(
-        "/usr/bin/perl -MPOSIX -e 'exit if fork; POSIX::setsid(); {perl} while -e $ARGV[0]' \"{}\" \"{}\"\n",
+        "/usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die \"setsid: $!\"; exit if fork; \
+         {perl} while -e $ARGV[0]' \"{}\" \"{}\"\n",
         mark.display(),
         dir.join(format!("{name}.ack")).display()
     );
