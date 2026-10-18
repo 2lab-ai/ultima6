@@ -442,6 +442,14 @@ pub(crate) fn neighbour_lines(
 /// Runs ingest over the work dir with the thresholds `t`.
 pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String> {
     let jobs = work.read_jobs()?;
+    // No job: nothing to hold the plan to (every check below would pass on nothing).
+    if jobs.is_empty() {
+        return Err(format!(
+            "{}: no job (an atlas that laid out nothing, or an emptied file): nothing to \
+             ingest against; run atlas first",
+            work.path("jobs.jsonl").display()
+        ));
+    }
     // Checked before anything is written there, and again before it is emptied.
     work::own_dir(&work.path("slices"))?;
     let plan = group::plan(game);

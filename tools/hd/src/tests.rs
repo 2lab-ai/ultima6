@@ -1485,6 +1485,11 @@ fn a_moved_place_in_the_jobs_is_refused() {
     other[0].plan = "another".into();
     w.write_jobs(&other).unwrap();
     assert!(ingest::ingest(&g, &w, &Thresholds::default()).is_err());
+    // No job at all: refused, not held to nothing.
+    w.write_jobs(&[]).unwrap();
+    let e = ingest::ingest(&g, &w, &Thresholds::default()).unwrap_err();
+    assert!(e.contains("jobs.jsonl: no job"), "{e}");
+    assert!(e.contains("run atlas first"), "{e}");
     let _ = std::fs::remove_dir_all(&w.root);
 }
 
