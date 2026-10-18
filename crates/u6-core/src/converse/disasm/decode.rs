@@ -61,8 +61,8 @@ pub(super) struct Plan {
 
 #[cfg(test)]
 thread_local! {
-    /// Test-only: take the skip-loop landings in the reverse order (the result must not
-    /// change, see the module doc).
+    /// Test-only: take the skip-loop landings in the reverse order (the result changes only
+    /// in the cases the module doc names).
     pub(super) static REVERSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

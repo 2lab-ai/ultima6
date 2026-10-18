@@ -65,11 +65,25 @@
 //! The rounds end: each one grows the dropped landings or the settled bytes, or (with those
 //! unchanged) the reserved bytes, all bounded by the script's length.
 //!
-//! Order. Landings are taken the loops that step over operands first, in script order. Which of
-//! a table and a landing's code wins does not depend on that order (a test takes the landings
-//! the other way round and gets the same decode and catalog). What does: two landings whose
-//! code disagrees on a byte (one would decode an item over bytes the other decoded otherwise):
-//! the one taken first keeps its code and the other is dropped (`Dropped(_, Overlap)`).
+//! Order. Landings are taken the loops that step over operands first, in script order, and the
+//! decode is deterministic in that order. The order decides three things (a test shows each,
+//! the two orders giving two decodes):
+//!
+//! - two landings whose code disagrees on a byte (one would decode an item over bytes the
+//!   other decoded otherwise): the one taken first keeps its code, the other is dropped
+//!   (`Dropped(_, Overlap)`);
+//! - two landings that read one address with two kinds: the one taken first keeps its use, the
+//!   other is dropped (`Dropped(_, TableKinds)`);
+//! - a landing whose code holds the address of a table another landing names. Taken after the
+//!   namer, it stops there at once ([`HazardKind::IntoData`]), or is dropped when an item of
+//!   it would hold the address (`Dropped(_, TableInCode)`); taken first, its code is in for
+//!   that round and the table wins over it in the next. So of two landings each naming a table
+//!   over the other's code, the one taken first keeps its table; the landing ends dropped or
+//!   stopped at the table; and a landing that round dropped for what its code read stays
+//!   dropped.
+//!
+//! Outside these, which of a table and a landing's code wins does not depend on the order (a
+//! test takes the landings the other way round and gets the same decode and catalog).
 //!
 //! Operands are decoded with the evaluator's grammar ([`Expr`]), so their bytes are never read
 //! as text. A byte the interpreter has no arm for is refused with a named [`Reason`], never
