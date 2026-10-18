@@ -366,20 +366,16 @@ impl<'a> Decoder<'a> {
         self.work.push(to);
     }
 
-    /// The bytes the path of landing `k` reads as code: its stop byte, then every position its
-    /// flow reaches from where it goes on, with the code it joins (read first by another path),
-    /// and the items there.
+    /// The bytes the path of landing `k` reads: its stop byte (the loop compares it), then every
+    /// position its flow reaches from where it goes on, with the code it joins (read first by
+    /// another path), and the items there. A stop byte the loop goes on past is a one-byte item
+    /// (`a2`, `a3`, `ee`, `f2`); one it goes on at is where the flow starts.
     fn reach(&self, k: LandingKey) -> BTreeSet<u32> {
         let mut bytes = BTreeSet::new();
         let mut done = BTreeSet::new();
         let mut todo: Vec<(u32, Ctx)> = Vec::new();
         if let Some(&(stop, _)) = self.starts.get(&k) {
             bytes.insert(stop);
-            if self.owner.get(stop as usize) == Some(&stop)
-                && let Some(it) = self.items.get(&stop)
-            {
-                bytes.extend(stop..it.end());
-            }
             todo.extend(self.hops.get(&k).copied());
         }
         while let Some(n) = todo.pop() {

@@ -1263,6 +1263,33 @@ fn a_landing_that_stops_at_a_table_it_reads_from_inside_is_dropped() {
 }
 
 #[test]
+fn a_landing_whose_stop_byte_is_in_a_table_it_names_is_dropped() {
+    // The a1's loop steps over its jump and an "x" and stops on the `a2` after it; its landing
+    // writes word 0 of the table at that "x", whose one word holds the `a2`. The block's loops
+    // write the same word. The loop reads the `a2` as a stop byte: a byte of the table its own
+    // path names, so the a1's landing is dropped and the table is the loops'.
+    let t = BODY + 12;
+    let write = [&[0xa6][..], &lit32(t), &[0xb1, 0xa8, 0x07, 0xa7]].concat();
+    let mut body = b"\xf7\xef*\xf6\xa1\x01\xa7".to_vec();
+    body.extend(jump(BODY));
+    body.extend(b"x\xa2");
+    body.extend(&write);
+    body.extend(jump(BODY));
+    body.push(0xee);
+    body.extend(&write);
+    body.extend(jump(BODY));
+    let d = any_order(&script(&body));
+    assert_eq!(
+        sorted_hazards(&d),
+        [dropped(t + 2, Scan::If, Reason::TableInCode)]
+    );
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert!(tb.words);
+}
+
+#[test]
 fn a_claim_with_a_table_address_in_code_refuses_the_script() {
     // One round of the script where the a1's landing reads "zz" as text and block `q` prints
     // the table there, claimed with no revision (the seam the rounds never leave in a final
