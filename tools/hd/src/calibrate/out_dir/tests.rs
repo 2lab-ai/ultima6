@@ -271,7 +271,7 @@ fn a_run_lists_the_incomplete_runs_beside_it_and_touches_none_of_what_was_there(
     assert_eq!(w.incomplete, want);
     assert!(
         w.text().contains(&format!(
-            "incomplete runs beside it (no {DONE}; left as they are): {}",
+            "incomplete runs beside it (no {DONE}, or refused; left as they are): {}",
             want.join(", ")
         )),
         "{}",
@@ -353,7 +353,7 @@ fn a_run_whose_dir_is_removed_fails_and_makes_nothing_again() {
             "{whole}: {e}"
         );
         assert!(
-            e.contains("removed or replaced while the run wrote it"),
+            e.contains("was moved or removed while the run wrote it"),
             "{whole}: {e}"
         );
         if whole {
@@ -387,7 +387,7 @@ fn a_run_whose_dir_is_swapped_for_a_link_touches_nothing_where_it_points() {
     });
     let e = run_in(FIRST, &out, fails).unwrap_err();
     assert!(
-        e.contains("removed or replaced while the run wrote it"),
+        e.contains("was moved or removed while the run wrote it"),
         "{e}"
     );
     assert_eq!(tree(&elsewhere), had);
@@ -588,27 +588,33 @@ fn the_incomplete_runs_are_listed_oldest_first_whatever_order_they_were_made_in(
 
 #[test]
 fn a_run_whose_dir_is_moved_before_done_fails_and_writes_no_done() {
-    // The run dir renamed away (by another hand) after the run's last file: the path the
-    // report would name holds nothing of it, so the run fails, and no done is written in the
-    // dir it made, where it is now.
-    let dir = temp("moved");
-    let out = dir.join("out");
-    let away = dir.join("away");
-    let (o, to) = (out.clone(), away.clone());
-    let _h = hook(&out, "write", move |name| {
-        if name == "a.png" {
-            std::fs::rename(only_run(&o), &to).unwrap();
-        }
-        Ok(())
-    });
-    let e = run_in(FIRST, &out, writes).unwrap_err();
-    assert!(e.contains("the run dir moved"), "{e}");
-    assert!(
-        e.contains("removed or replaced while the run wrote it"),
-        "{e}"
-    );
-    assert!(names(&out).is_empty(), "{:?}", names(&out));
-    assert!(!away.join(DONE).exists());
-    assert_eq!(names(&away), [REFUSED]);
-    let _ = std::fs::remove_dir_all(&dir);
+    // The run dir renamed away (by another hand) at the run's last file, then at done itself:
+    // the path the report would name holds nothing of it, so the run fails, says once where
+    // the dir is now, and leaves no done in the dir it made; its refusal is written there.
+    for at in ["a.png", DONE] {
+        let dir = temp(&format!("moved-{at}"));
+        let out = dir.join("out");
+        let away = dir.join("away");
+        let (o, to) = (out.clone(), away.clone());
+        let _h = hook(&out, "write", move |name| {
+            if name == at {
+                std::fs::rename(only_run(&o), &to).unwrap();
+            }
+            Ok(())
+        });
+        let e = run_in(FIRST, &out, writes).unwrap_err();
+        let now = format!("(it is now at {})", away.canonicalize().unwrap().display());
+        assert_eq!(
+            e.matches("was moved or removed while the run wrote it")
+                .count(),
+            1,
+            "{at}: {e}"
+        );
+        assert!(e.contains(&now), "{at}: {e}");
+        assert!(names(&out).is_empty(), "{at}: {:?}", names(&out));
+        assert_eq!(names(&away), [REFUSED], "{at}");
+        let refused = std::fs::read_to_string(away.join(REFUSED)).unwrap();
+        assert_eq!(refused, format!("{e}\n"), "{at}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

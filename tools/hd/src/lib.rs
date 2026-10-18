@@ -27,6 +27,10 @@
 //! final state; it calls nothing. There is no `export`: packs made from the game's art are derived
 //! (`derived: true`) and are never shared.
 
+// The tool drives processes and files by unix calls (process groups, signals, dir fds).
+#[cfg(not(unix))]
+compile_error!("u6-hdtool is unix only: it signals process groups and writes through dir fds");
+
 pub mod atlas;
 pub mod calibrate;
 pub mod game;

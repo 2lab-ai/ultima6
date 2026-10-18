@@ -3064,7 +3064,7 @@ fn each_run_writes_its_own_run_dir_alone() {
     assert_eq!(s.written.incomplete, want);
     assert!(
         s.text().contains(&format!(
-            "incomplete runs beside it (no {DONE}; left as they are): {}",
+            "incomplete runs beside it (no {DONE}, or refused; left as they are): {}",
             want.join(", ")
         )),
         "{}",
@@ -3396,7 +3396,7 @@ fn a_final_run_whose_dir_is_removed_before_samples_tsv_fails_and_makes_nothing_a
     let e = calibrate_final(&g, &work, &o).unwrap_err();
     assert!(e.contains("samples.tsv: No such file or directory"), "{e}");
     assert!(
-        e.contains("was removed or replaced while the run wrote it"),
+        e.contains("was moved or removed while the run wrote it"),
         "{e}"
     );
     assert!(e.contains(&format!("{REFUSED} not written")), "{e}");

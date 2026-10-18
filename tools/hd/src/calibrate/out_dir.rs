@@ -1,28 +1,40 @@
 //! Where a `calibrate` run writes, in either mode ([`run_in`]). Two rules, each held by how the
 //! run writes, not by a check:
 //!
-//! 1. **A run's output is never mixed with another run's.** Once `--out` is there (made if it is
-//!    not), the run's first write is a `create_dir` of a dir of its own,
-//!    `<--out>/run-<UTC time>-<pid>/`, named from this process's clock and pid alone; when that
-//!    dir is there already the run fails, it is never reused. The run then holds that dir open
-//!    and makes every file of it through it ([`at`]: `openat` with `O_CREAT | O_EXCL |
-//!    O_NOFOLLOW`, no temp file, no rename), never by a path: nothing outside it is written, no
-//!    file there is replaced, and a dir removed, or swapped for a link, while the run writes is
-//!    never made again or followed; the next write fails, and so does the run.
+//! 1. **A run's output is never mixed with another run's.** `--out` is made if it is not there
+//!    and opened once (a link at `--out` itself is followed). The run's first write in it is a
+//!    `mkdirat` of a dir of its own, `run-<UTC time>-<pid>/`, named from this process's clock and
+//!    pid alone; when that dir is there already the run fails, it is never reused. The run opens
+//!    that dir (`openat`, `O_NOFOLLOW`) and makes every file of it through it ([`at`]: `openat`
+//!    with `O_CREAT | O_EXCL | O_NOFOLLOW`, no temp file, no rename), never by a path: nothing
+//!    outside it is written and no file there is replaced. A run dir removed while the run
+//!    writes is never made again: the next write fails, and so does the run. A run dir renamed
+//!    away (a link put in its place or not) is never followed: the run's writes go on in the dir
+//!    it made, where that dir is now, and the run fails at its end, when it finds its dir is not
+//!    at the path it made it at (checked before `done` and once `done` is written).
 //! 2. **The tool never deletes what it did not make.** A run that fails deletes only the files
-//!    this process made ([`Run::write`] lists each with the device and inode it was made with),
-//!    each only while that file is still at its name, through the dir it holds open, one by
-//!    one, never a tree; it keeps its diagnostics ([`Mode::keep`] and `refused.txt`). A file
-//!    another hand put at a name of the run's is left, and said. Nothing a previous process made
-//!    is removed, renamed or rewritten. Not closed: a file swapped in at a name between that
-//!    check and the delete (POSIX has no delete-if-this-inode), and a dir swapped in for the
-//!    run dir between its `create_dir` and its opening.
+//!    this process made ([`Run::write`] lists each, and holds it open until the run ends, so its
+//!    inode is not freed and its number cannot be given to another file meanwhile), each only
+//!    while the entry at its name is that file (`fstatat`, no open), through the dir it holds
+//!    open, one by one, never a tree; it keeps its diagnostics ([`Mode::keep`] and
+//!    `refused.txt`). A file another hand put at a name of the run's is left, and said; so is a
+//!    file of the run's whose identity could not be read when it was made. Nothing a previous
+//!    process made is removed, renamed or rewritten.
 //!
-//! A run that ends well writes `done` last, in the dir its report names (a run whose dir moved
-//! fails instead): that path is the only pointer to it (no link, no pointer file). A run dir with
-//! no `done` is an incomplete run (one that failed, was killed, or is still going): a run lists
-//! those it finds in `--out` when it starts, and leaves them as they are. Cleaning up old runs is
-//! the person's job. On a host that is not unix every run fails ([`at::UNSUPPORTED`]).
+//! What this cannot close: a file swapped in at a name between the check and the delete (POSIX
+//! has no delete-if-this-inode); a dir put in place of the new run dir, by its name in `--out`,
+//! between its `mkdirat` and its `openat` (a link there is refused); and a rename of the run dir
+//! after the run's last check, once `done` is written: no finite check pins a path, and a run
+//! moved after it ended is outside what it reports. When the run dir cannot be opened at all,
+//! it is left empty, with no `refused.txt` (there is nowhere to write one), and the next run
+//! lists it as incomplete.
+//!
+//! A run that ends well writes `done` last, and its report names its dir: that path is the only
+//! pointer to it (no link, no pointer file). A run dir with no `done`, or with a `refused.txt`,
+//! is an incomplete run (one that failed, was killed, or is still going): a run lists those it
+//! finds in `--out` when it starts, and leaves them as they are. Cleaning up old runs is the
+//! person's job. A run holds each file it makes open until it ends, so it raises its limit on
+//! open files first, as far as the system lets it. Unix only (the crate is).
 
 use std::cell::RefCell;
 use std::fs::File;
@@ -167,9 +179,26 @@ pub fn run_name(ns: u128, pid: u32) -> String {
     )
 }
 
-/// The run dirs of `out` with no [`DONE`] (each `(refused)` when it holds [`REFUSED`]), and those
-/// that cannot be read (with why), each sorted, the oldest first. Read only.
-fn incomplete(out: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+/// A test seam whose error stands for a system error: a hook's `errno:<n>` is that error (as
+/// the system would give it), any other text an error of its own.
+fn io_seam(key: &Path, step: &'static str, what: &str) -> std::io::Result<()> {
+    seam(key, step, what).map_err(|e| match e.strip_prefix("errno:").map(str::parse) {
+        Some(Ok(n)) => std::io::Error::from_raw_os_error(n),
+        _ => std::io::Error::other(e),
+    })
+}
+
+/// `names` sorted: by time, the oldest first (a run dir's name sorts by its time,
+/// [`run_name`]).
+fn oldest_first(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    names
+}
+
+/// The run dirs of `out` with no [`DONE`], or with a [`REFUSED`] (`(refused)`: a run that failed,
+/// whose `done` may be left too), and those that cannot be read (with why), each the oldest
+/// first. Read only. `key` is `--out` as given (the test seams').
+fn incomplete(key: &Path, out: &Path) -> Result<(Vec<String>, Vec<String>), String> {
     let (mut found, mut unreadable) = (Vec::new(), Vec::new());
     for e in std::fs::read_dir(out).map_err(|e| format!("{}: {e}", out.display()))? {
         let e = e.map_err(|e| format!("{}: {e}", out.display()))?;
@@ -179,21 +208,22 @@ fn incomplete(out: &Path) -> Result<(Vec<String>, Vec<String>), String> {
         if !name.starts_with("run-") || !is_dir {
             continue;
         }
-        let has = |file: &str| match std::fs::symlink_metadata(dir.join(file)) {
-            Ok(_) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e),
+        let has = |file: &str| {
+            io_seam(key, "stat", &name)?;
+            match std::fs::symlink_metadata(dir.join(file)) {
+                Ok(_) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e),
+            }
         };
         match (has(DONE), has(REFUSED)) {
-            (Ok(true), _) => {}
-            (Ok(false), Ok(true)) => found.push(format!("{name} (refused)")),
+            (Ok(_), Ok(true)) => found.push(format!("{name} (refused)")),
+            (Ok(true), Ok(false)) => {}
             (Ok(false), Ok(false)) => found.push(name),
             (Err(e), _) | (_, Err(e)) => unreadable.push(format!("{name} ({e})")),
         }
     }
-    found.sort();
-    unreadable.sort();
-    Ok((found, unreadable))
+    Ok((oldest_first(found), oldest_first(unreadable)))
 }
 
 /// `name` when it is one plain name of a file in a dir (no separator, not `.` or `..`, not
@@ -209,6 +239,15 @@ fn one_name(name: &str) -> Result<(), String> {
     }
 }
 
+/// A file the run made: its name, the (device, inode) it was made with (`None` when that could
+/// not be read), and the file, held open until the run ends, so that its inode cannot be freed
+/// and its number given to another file while the run lives.
+struct Made {
+    name: String,
+    id: Option<(u64, u64)>,
+    file: Option<File>,
+}
+
 /// A run's own dir: its path, the dir itself, open (every file of the run is made, read and
 /// deleted through it, [`at`], never by a path), and what this process made in it.
 pub struct Run {
@@ -216,7 +255,7 @@ pub struct Run {
     dir: PathBuf,
     open: File,
     id: (u64, u64),
-    written: RefCell<Vec<(String, (u64, u64))>>,
+    made: RefCell<Vec<Made>>,
 }
 
 impl Run {
@@ -227,19 +266,37 @@ impl Run {
 
     /// Writes `bytes` to a new file `name` of the run's dir, made by this call through the dir
     /// itself (`O_CREAT | O_EXCL | O_NOFOLLOW`: no temp file, no rename, nothing replaced; a
-    /// file there already, or a dir removed meanwhile, fails it), and lists it, with the
-    /// (device, inode) it was made with, as this process's (the only files a failed run
-    /// deletes).
+    /// file there already, or a dir removed meanwhile, fails it), and lists it as this process's
+    /// (the only files a failed run deletes), held open until the run ends ([`Made`]).
     pub fn write(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
         use std::io::Write as _;
         one_name(name)?;
         seam(&self.key, "write", name)?;
         let path = self.dir.join(name);
-        let say = |e: std::io::Error| format!("{}: {e}", path.display());
-        let mut f = at::create(&self.open, name).map_err(say)?;
-        let made = at::id(&f).map_err(say)?;
-        self.written.borrow_mut().push((name.to_string(), made));
-        f.write_all(bytes).and_then(|()| f.sync_all()).map_err(say)
+        let say = |e: std::io::Error| match e.raw_os_error() {
+            Some(libc::EMFILE) => format!(
+                "{}: {e} (a run holds each file it makes open until it ends: raise the limit on \
+                 open files, ulimit -n)",
+                path.display()
+            ),
+            _ => format!("{}: {e}", path.display()),
+        };
+        let mut f = io_seam(&self.key, "create", name)
+            .and_then(|()| at::create(&self.open, name))
+            .map_err(say)?;
+        let id = io_seam(&self.key, "identify", name)
+            .and_then(|()| at::id(&f))
+            .ok();
+        let written = io_seam(&self.key, "fill", name)
+            .and_then(|()| f.write_all(bytes))
+            .and_then(|()| f.sync_all())
+            .map_err(say);
+        self.made.borrow_mut().push(Made {
+            name: name.to_string(),
+            id,
+            file: Some(f),
+        });
+        written
     }
 
     /// [`Run::write`] of `img` as a PNG.
@@ -283,31 +340,56 @@ impl Run {
         at::path_id(&self.dir) != Some(self.id)
     }
 
+    /// What to say of a run dir that moved: from where, and where it is now when the system
+    /// says ([`at::where_now`]).
+    fn moved_note(&self) -> String {
+        let now = match at::where_now(&self.open) {
+            Some(p) => format!("it is now at {}", p.display()),
+            None => "where it is now is not known".into(),
+        };
+        format!(
+            "the run dir {} was moved or removed while the run wrote it ({now}): nothing is \
+             written or deleted but in the dir it made",
+            self.dir.display()
+        )
+    }
+
     /// The run failed with `error`: deletes the files this process made in the run's dir but
-    /// what `mode` keeps, each only while it is the file the run made (its device and inode),
-    /// through the dir itself; then writes [`REFUSED`] (the error, `then` added: each file it
-    /// could not delete, and that the dir moved if it did); gives that error.
+    /// what `mode` keeps, each only while the entry at its name is the file the run holds open
+    /// (`fstatat` of the name, no open), through the dir itself; then writes [`REFUSED`] (the
+    /// error, `then` added: each file it could not delete, and that the dir moved if it did);
+    /// gives that error.
     fn fail(&self, mode: Mode, error: &str, then: &dyn Fn(String) -> String) -> String {
         let mut left = Vec::new();
-        let written = self.written.borrow().clone();
-        for (name, made) in written
-            .iter()
-            .filter(|w| !mode.keep.contains(&w.0.as_str()))
         {
-            let path = self.dir.join(name);
-            let gone = seam(&self.key, "delete", name).and_then(|()| {
-                match at::open(&self.open, name).and_then(|f| at::id(&f)) {
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(e) => Err(e.to_string()),
-                    Ok(now) if now != *made => Err("not the file the run made".into()),
-                    Ok(_) => match at::unlink(&self.open, name) {
-                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
-                        _ => Ok(()),
-                    },
+            let mut made = self.made.borrow_mut();
+            for m in made
+                .iter_mut()
+                .filter(|m| !mode.keep.contains(&m.name.as_str()))
+            {
+                let path = self.dir.join(&m.name);
+                let name = &m.name;
+                let gone = seam(&self.key, "delete", name).and_then(|()| {
+                    let Some(made) = m.id else {
+                        return Err("could not be identified when it was made".into());
+                    };
+                    match at::id_at(&self.open, name) {
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(e) => Err(e.to_string()),
+                        Ok(now) if now != made => Err("not the file the run made".into()),
+                        Ok(_) => match at::unlink(&self.open, name) {
+                            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                                Err(e.to_string())
+                            }
+                            _ => Ok(()),
+                        },
+                    }
+                });
+                match gone {
+                    // Deleted: its fd is let go (for refused.txt, when fds ran short).
+                    Ok(()) => m.file = None,
+                    Err(e) => left.push(format!("{} ({e})", path.display())),
                 }
-            });
-            if let Err(e) = gone {
-                left.push(format!("{} ({e})", path.display()));
             }
         }
         let mut said = error.to_string();
@@ -318,11 +400,10 @@ impl Run {
             );
         }
         if self.moved() {
-            said = format!(
-                "{said}; the run dir {} was removed or replaced while the run wrote it: nothing \
-                 is written or deleted but in the dir it made",
-                self.dir.display()
-            );
+            let note = self.moved_note();
+            if !said.contains(&note) {
+                said = format!("{said}; {note}");
+            }
         }
         let said = then(said);
         match self.write(REFUSED, format!("{said}\n").as_bytes()) {
@@ -347,7 +428,7 @@ impl Written {
         let mut s = format!("run dir: {}\n", self.dir.display());
         if !self.incomplete.is_empty() {
             s.push_str(&format!(
-                "incomplete runs beside it (no {DONE}; left as they are): {}\n",
+                "incomplete runs beside it (no {DONE}, or refused; left as they are): {}\n",
                 self.incomplete.join(", ")
             ));
         }
@@ -359,20 +440,20 @@ impl Written {
 }
 
 /// Runs a `calibrate` run of `mode` whose `--out` is `out` (module docs): `out` made if it is
-/// not there; the incomplete runs in it listed; the run's own dir made, by `create_dir`, a
-/// failure if it is there; `run` writes in it ([`Run`]); then [`DONE`]. A run that fails keeps
+/// not there, and opened; the incomplete runs in it listed; the run's own dir made in it
+/// (`mkdirat`, a failure if it is there) and opened (`openat`, not a link); `run` writes in it
+/// ([`Run`]); then [`DONE`], and the dir checked to be where it was made. A run that fails keeps
 /// only its diagnostics ([`Run::fail`]).
 pub fn run_in<T>(
     mode: Mode,
     out: &Path,
     run: impl FnOnce(&Run) -> Result<T, String>,
 ) -> Result<(T, Written), String> {
-    if !cfg!(unix) {
-        return Err(at::UNSUPPORTED.into());
-    }
+    at::raise_open_files();
     work::check_target(out)?;
     let parent = work::ensure_dir(out)?;
-    let (incomplete, unreadable) = incomplete(&parent)?;
+    let outfd = at::open_dir(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let (incomplete, unreadable) = incomplete(out, &parent)?;
     // Every failure from here says the incomplete runs beside the run, and those it could not
     // read.
     let beside = |e: String| {
@@ -388,32 +469,48 @@ pub fn run_in<T>(
             v => format!("{e}; {UNREADABLE}: {}", v.join(", ")),
         }
     };
-    let dir = parent.join(run_name(now(out), std::process::id()));
-    std::fs::create_dir(&dir).map_err(|e| {
-        let why = match e.kind() {
-            std::io::ErrorKind::AlreadyExists => " (a run dir is never reused)",
-            _ => "",
-        };
-        beside(format!("{}: {e}{why}", dir.display()))
-    })?;
-    let say = |e: std::io::Error| beside(format!("{}: {e}", dir.display()));
-    let open = at::open_dir(&dir).map_err(say)?;
-    let id = at::id(&open).map_err(say)?;
+    let name = run_name(now(out), std::process::id());
+    let dir = parent.join(&name);
+    io_seam(out, "mkdir", &name)
+        .and_then(|()| at::mkdir(&outfd, &name))
+        .map_err(|e| {
+            let why = match e.kind() {
+                std::io::ErrorKind::AlreadyExists => " (a run dir is never reused)",
+                _ => "",
+            };
+            beside(format!("{}: {e}{why}", dir.display()))
+        })?;
+    // And, once the run dir is made, that dir first.
+    let at = dir.clone();
+    let with_incomplete = |e: String| beside(format!("{e}; run dir: {}", at.display()));
+    let unopened = |e: std::io::Error| {
+        with_incomplete(format!(
+            "{}: {e}: the run dir is left empty, with no {REFUSED} (it could not be opened to \
+             write one); the next run lists it as incomplete",
+            dir.display()
+        ))
+    };
+    let open = io_seam(out, "open", &name)
+        .and_then(|()| at::open_dir_at(&outfd, &name))
+        .map_err(unopened)?;
+    let id = at::id(&open).map_err(unopened)?;
     let r = Run {
         key: out.to_path_buf(),
         dir,
         open,
         id,
-        written: RefCell::new(Vec::new()),
+        made: RefCell::new(Vec::new()),
     };
-    // And, once the run dir is made, that dir first.
-    let at = r.dir.clone();
-    let with_incomplete = |e: String| beside(format!("{e}; run dir: {}", at.display()));
-    // done only in the dir the report names: a run whose dir moved fails.
-    let ended = run(&r).and_then(|v| match r.moved() {
-        true => Err(format!("{}: the run dir moved", r.dir.display())),
-        false => r.write(DONE, b"").map(|()| v),
-    });
+    // done only in the dir the report names: a run whose dir moved, before done or once it is
+    // written, fails (and done, then made, is deleted with the rest).
+    let here = |v| match r.moved() {
+        true => Err(r.moved_note()),
+        false => Ok(v),
+    };
+    let ended = run(&r)
+        .and_then(here)
+        .and_then(|v| r.write(DONE, b"").map(|()| v))
+        .and_then(here);
     match ended {
         Ok(v) => Ok((
             v,
