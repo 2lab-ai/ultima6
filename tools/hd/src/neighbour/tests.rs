@@ -528,91 +528,137 @@ fn object_pairs_follow_the_object_draw_and_the_half_opaque_rule() {
     assert_eq!((both.source(), both.example()), ("map+objects", cell(1, 1)));
 }
 
-/// One tile record for the compositor.
-struct One {
-    record: Record,
-}
+/// Tile records for the compositor, each keyed by its record number.
+struct Tiles(BTreeMap<u16, Record>);
 
-impl Images for One {
-    fn image(&mut self, kind: Kind, _: u16) -> Option<Image<'_>> {
-        (kind == Kind::Tile).then_some(Image {
+impl Images for Tiles {
+    fn image(&mut self, kind: Kind, id: u16) -> Option<Image<'_>> {
+        let r = self.0.get(&id).filter(|_| kind == Kind::Tile)?;
+        Some(Image {
             ver: 0,
             width: 16,
             height: 16,
-            pixels: &self.record.pixels,
-            transparent: Some(&self.record.transparent),
+            pixels: &r.pixels,
+            transparent: Some(&r.transparent),
         })
     }
 
-    fn key(&mut self, _: Kind, _: u16) -> Option<u64> {
-        Some(7)
+    fn key(&mut self, kind: Kind, id: u16) -> Option<u64> {
+        (kind == Kind::Tile).then_some(u64::from(id))
     }
 }
 
-struct OnePack(Rgba);
+/// A pack of x4 tile images, by record number.
+struct TilePack(BTreeMap<u16, Rgba>);
 
-impl Pack for OnePack {
-    fn hd(&self, kind: Kind, _: u16, key: u64) -> Option<PackHd<'_>> {
-        (kind == Kind::Tile && key == 7).then_some(PackHd {
-            index: 0,
-            width: 64,
-            height: 64,
-            rgba: &self.0.pixels,
+impl Pack for TilePack {
+    fn hd(&self, kind: Kind, id: u16, key: u64) -> Option<PackHd<'_>> {
+        if kind != Kind::Tile || key != u64::from(id) {
+            return None;
+        }
+        let (index, img) = self
+            .0
+            .iter()
+            .enumerate()
+            .find(|(_, (r, _))| **r == id)
+            .map(|(i, (_, img))| (i as u32, img))?;
+        Some(PackHd {
+            index,
+            width: img.width as usize,
+            height: img.height as usize,
+            rgba: &img.pixels,
         })
     }
 }
 
-#[test]
-fn the_images_measured_are_the_ones_the_page_composes() {
-    // A figure (transparent around it) drawn at (40, 24) over a fill, through the plane.
-    let record = synthetic::figure(1, 0, 10);
-    let classic = Classic::from_record(&record);
+/// The colour index the frames are cleared to: what the page shows where no record draws.
+const BACKGROUND: u8 = 5;
+
+/// A frame of the synthetic palette cleared to [`BACKGROUND`], with each (record number,
+/// record, x, y) blitted through the source plane: its opaque pixels name it, its transparent
+/// ones leave the frame as it is.
+fn frame(tiles: &[(u16, &Record, usize, usize)]) -> Framebuffer {
     let mut fb = Framebuffer::new();
     fb.enable_src();
     for (i, c) in synthetic::PALETTE.iter().enumerate() {
         fb.palette[i] = Rgb::new(c[0], c[1], c[2]);
     }
-    fb.clear(5);
-    let (x0, y0) = (40, 24);
-    for v in 0..16 {
-        for u in 0..16 {
-            let i = v * 16 + u;
-            if !record.transparent[i] {
-                let src = Src {
-                    ver: 0,
-                    id: 200,
-                    u: u as u16,
-                    v: v as u16,
-                    kind: Kind::Tile,
-                    flags: 0,
-                };
-                fb.set_src(x0 + u, y0 + v, record.pixels[i], src);
+    fb.clear(BACKGROUND);
+    for &(id, r, x0, y0) in tiles {
+        for v in 0..16 {
+            for u in 0..16 {
+                let i = v * 16 + u;
+                if !r.transparent[i] {
+                    let src = Src {
+                        ver: 0,
+                        id,
+                        u: u as u16,
+                        v: v as u16,
+                        kind: Kind::Tile,
+                        flags: 0,
+                    };
+                    fb.set_src(x0 + u, y0 + v, r.pixels[i], src);
+                }
             }
         }
     }
-    let mut images = One { record };
-    let check = |c: &Compositor, want: &[Option<[f32; 3]>]| {
-        let out = c.rgba();
-        let ow = WIDTH * 4;
-        let mut n = 0;
+    fb
+}
+
+/// The composed frame's colour at HD pixel (x, y) of S 4.
+fn composed(c: &Compositor, x: usize, y: usize) -> [u8; 3] {
+    let p = c.rgba()[y * WIDTH * 4 + x].to_le_bytes();
+    [p[0], p[1], p[2]]
+}
+
+#[test]
+fn the_images_measured_are_the_ones_the_page_composes() {
+    // A figure (transparent around it) drawn at (40, 24) over the background, through the
+    // plane.
+    let record = synthetic::figure(1, 0, 10);
+    let classic = Classic::from_record(&record);
+    let (id, x0, y0) = (200, 40, 24);
+    let fb = frame(&[(id, &record, x0, y0)]);
+    let mut images = Tiles(BTreeMap::from([(id, record.clone())]));
+    // What is measured, from the classic record alone: the x4 sub-pixels of its opaque
+    // pixels; the page shows the background at every other one.
+    let mask: Vec<bool> = (0..64 * 64)
+        .map(|i| !record.transparent[(i / 64 / 4) * 16 + (i % 64) / 4])
+        .collect();
+    assert!(mask.iter().any(|&m| m) && mask.iter().any(|&m| !m));
+    let background = synthetic::PALETTE[usize::from(BACKGROUND)];
+    // Every sub-pixel: the coverage exactly the mask, each measured colour the page's, each
+    // other one the background; the measured ones counted by their HD image's alpha.
+    let check = |c: &Compositor, want: &[Option<[f32; 3]>], hd: &Rgba| {
+        assert_eq!(want.len(), 64 * 64);
+        let mut by_alpha: BTreeMap<u8, usize> = BTreeMap::new();
         for y in 0..64usize {
             for x in 0..64usize {
-                let Some(w) = want[y * 64 + x] else { continue };
-                let p = out[(y0 * 4 + y) * ow + x0 * 4 + x].to_le_bytes();
-                assert_eq!([p[0], p[1], p[2]].map(f32::from), w, "({x}, {y})");
-                n += 1;
+                let i = y * 64 + x;
+                let got = composed(c, x0 * 4 + x, y0 * 4 + y);
+                assert_eq!(want[i].is_some(), mask[i], "coverage at ({x}, {y})");
+                match want[i] {
+                    Some(w) => {
+                        assert_eq!(got.map(f32::from), w, "({x}, {y})");
+                        *by_alpha.entry(hd.pixels[i * 4 + 3]).or_default() += 1;
+                    }
+                    None => assert_eq!(got, background, "below at ({x}, {y})"),
+                }
             }
         }
-        assert!(n > 0);
+        assert_eq!(
+            by_alpha.values().sum::<usize>(),
+            mask.iter().filter(|&&m| m).count()
+        );
+        by_alpha
     };
     // No pack: MMPX x4 of the record.
     let mut c = Compositor::new();
     c.compose(&fb, &mut images, Scale::X4);
-    check(
-        &c,
-        &gate::shown(&classic, &mmpx4(&classic).unwrap()).unwrap(),
-    );
-    // A pack image, opaque, clear and in between, over the classic colours.
+    let scaled = mmpx4(&classic).unwrap();
+    check(&c, &gate::shown(&classic, &scaled).unwrap(), &scaled);
+    // A pack image whose sub-pixels are opaque, half, a little and not at all, in turn, over
+    // the classic colours.
     let mut generated = Rgba::new(64, 64);
     for y in 0..64 {
         for x in 0..64 {
@@ -620,9 +666,17 @@ fn the_images_measured_are_the_ones_the_page_composes() {
             img::put(&mut generated, x, y, [(x * 4) as u8, (y * 4) as u8, 90, a]);
         }
     }
-    c.set_pack(Some(Rc::new(OnePack(generated.clone()))));
+    c.set_pack(Some(Rc::new(TilePack(BTreeMap::from([(
+        id,
+        generated.clone(),
+    )])))));
     c.compose(&fb, &mut images, Scale::X4);
-    check(&c, &gate::shown(&classic, &generated).unwrap());
+    let by_alpha = check(&c, &gate::shown(&classic, &generated).unwrap(), &generated);
+    assert_eq!(
+        by_alpha.keys().copied().collect::<Vec<_>>(),
+        [0, 40, 128, 255]
+    );
+    assert!(by_alpha.values().all(|&n| n > 0), "{by_alpha:?}");
 }
 
 // Ingest end to end on the synthetic set, in a synthetic world.
