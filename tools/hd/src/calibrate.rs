@@ -1585,6 +1585,8 @@ pub struct Summary {
     /// Lines of `samples.tsv` (header not counted) and the sheets written.
     pub tsv_rows: usize,
     pub sheets: Vec<String>,
+    /// What to say of the out dir ([`out_dir::run_in`]).
+    pub out_dir: Vec<String>,
 }
 
 impl Summary {
@@ -1630,6 +1632,9 @@ impl Summary {
         );
         let _ = writeln!(s, "samples.tsv: {} rows", self.tsv_rows);
         let _ = writeln!(s, "sheets: {}", self.sheets.join(" "));
+        for n in &self.out_dir {
+            let _ = writeln!(s, "out dir: {n}");
+        }
         s
     }
 }
@@ -1733,9 +1738,11 @@ pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, Strin
     if o.per == 0 {
         return Err("--per is at least 1".into());
     }
-    out_dir::run_in(out_dir::FIRST, &o.out, |out, _| {
+    let (mut s, notes) = out_dir::run_in(out_dir::FIRST, &o.out, |out, _| {
         first_pass(game, work, o, out)
-    })
+    })?;
+    s.out_dir = notes;
+    Ok(s)
 }
 
 /// [`calibrate`]'s run, written to `out`.

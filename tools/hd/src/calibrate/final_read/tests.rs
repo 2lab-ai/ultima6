@@ -3031,6 +3031,36 @@ fn an_error_of_the_run_names_the_out_dir() {
 }
 
 #[test]
+fn an_include_list_put_in_the_out_dir_is_not_removed_with_it() {
+    // The reviewer's P15: the owner's --include list saved in a marked --out. The next run is
+    // refused, the list named, and the out dir left as it is, the list in it.
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("include-inside", &text, &g, &left);
+    let o = options(&dir);
+    calibrate_final(&g, &work, &o).unwrap();
+    let had = files_of(&o.out);
+    let mine = o.out.join("owner-ids.txt");
+    let ids = format!("{}\n", atlas::image_name(ImageId::Tile(B)));
+    std::fs::write(&mine, &ids).unwrap();
+    let o2 = FinalOptions {
+        include: Some(mine.clone()),
+        ..options(&dir)
+    };
+    let e = calibrate_final(&g, &work, &o2).unwrap_err();
+    assert!(
+        e.contains("it holds what calibrate --final did not write: owner-ids.txt"),
+        "{e}"
+    );
+    assert_eq!(std::fs::read_to_string(&mine).unwrap(), ids);
+    let mut now = had.clone();
+    now.push("owner-ids.txt".into());
+    now.sort();
+    assert_eq!(files_of(&o.out), now);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
     // The chain, and B again far from it, beside a record Y (a grain of its own) east of it:
     // B's window, wherever it is placed, cannot draw both its pairs by the chain and its pair

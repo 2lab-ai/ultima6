@@ -60,7 +60,7 @@ fn writes(text: &'static str) -> impl FnOnce(&Path, &Path) -> Result<(), String>
 /// What a run of [`writes`]`(text)` leaves at the out dir.
 fn output(text: &str) -> BTreeMap<String, Vec<u8>> {
     BTreeMap::from([
-        (FIRST.marker.to_string(), b"calibrate\n".to_vec()),
+        (FIRST.marker.to_string(), b"calibrate\na.txt\n".to_vec()),
         ("a.txt".to_string(), text.as_bytes().to_vec()),
     ])
 }
@@ -267,5 +267,37 @@ fn an_error_names_the_out_dir_and_the_dir_the_run_wrote_first_only_after() {
     })
     .unwrap_err();
     assert_eq!(e, "no rows");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_marked_out_dir_holding_a_file_the_run_did_not_write_is_refused_and_left_whole() {
+    // The marker lists what the run wrote; a file put in after is named, and the dir kept as
+    // it is, before the run and when one is put there during it.
+    let dir = temp("foreign");
+    let out = dir.join("out");
+    run_in(FIRST, &out, writes("old")).unwrap();
+    std::fs::write(out.join("mine.txt"), b"the owner's").unwrap();
+    let mut had = output("old");
+    had.insert("mine.txt".into(), b"the owner's".to_vec());
+    let said = "it holds what calibrate did not write: mine.txt, so it is not replaced: move \
+                those out of it, or pass another --out";
+    let e = run_in(FIRST, &out, writes("new")).unwrap_err();
+    assert!(e.contains(said), "{e}");
+    assert_eq!(contents(&out), Some(had.clone()));
+    std::fs::remove_file(out.join("mine.txt")).unwrap();
+    let o = out.clone();
+    let _h = hook(&out, "ran", move |_| {
+        std::fs::write(o.join("mine.txt"), b"the owner's").unwrap();
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes("new")).unwrap_err();
+    assert!(e.contains(said), "{e}");
+    assert_eq!(contents(&out), Some(had));
+    assert!(
+        beside_of(&dir, "out").is_empty(),
+        "{:?}",
+        beside_of(&dir, "out")
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

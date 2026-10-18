@@ -1233,6 +1233,8 @@ pub struct FinalSummary {
     pub unread: usize,
     pub tsv_rows: usize,
     pub sheets: Vec<String>,
+    /// What to say of the out dir ([`super::out_dir::run_in`]).
+    pub out_dir: Vec<String>,
 }
 
 /// A class's line of the summary.
@@ -1357,6 +1359,9 @@ impl FinalSummary {
         }
         let _ = writeln!(s, "samples.tsv: {} rows", self.tsv_rows);
         let _ = writeln!(s, "sheets: {}", self.sheets.join(" "));
+        for n in &self.out_dir {
+            let _ = writeln!(s, "out dir: {n}");
+        }
         s
     }
 }
@@ -1514,9 +1519,11 @@ pub const MARKER: &str = super::out_dir::FINAL.marker;
 /// sheets and `samples.tsv` drawn from one state, or, when it fails, its refusal
 /// (`refused.txt`, the details and the snapshots read).
 pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<FinalSummary, String> {
-    super::out_dir::run_in(super::out_dir::FINAL, &o.out, |out, named| {
+    let (mut s, notes) = super::out_dir::run_in(super::out_dir::FINAL, &o.out, |out, named| {
         run_final(game, work, o, out, named)
-    })
+    })?;
+    s.out_dir = notes;
+    Ok(s)
 }
 
 /// [`calibrate_final`]'s run, written to `out`, which is to be the out dir `named`.
@@ -2166,5 +2173,6 @@ fn run_final(
         unread,
         tsv_rows: rows,
         sheets,
+        out_dir: Vec::new(),
     })
 }

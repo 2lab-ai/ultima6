@@ -4,9 +4,12 @@
 //! but its refusal: a fresh directory of `refused.txt` and the snapshots and details the mode
 //! keeps ([`Mode::keep`]), never a sheet or `samples.tsv`. After any run `--out` holds that
 //! run's output alone, or what was there before when the run could not replace it. An old
-//! `--out` is replaced only when it holds the marker of the mode run: a directory the tool did
-//! not write, an empty one, or one the other mode wrote, is left as it is and the run fails.
+//! `--out` is replaced only when it holds the marker of the mode run and nothing but what its
+//! marker lists (the marker names every entry the run wrote, [`seal`]): a directory the tool
+//! did not write, an empty one, one the other mode wrote, or one a file was put in, is left as
+//! it is and the run fails, the files it did not write named.
 
+use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -132,7 +135,8 @@ fn beside(out: &Path, kind: &str) -> PathBuf {
     out.with_file_name(format!(".{name}.{kind}-{stamp}"))
 }
 
-/// A fresh directory beside `out` holding `mode`'s marker.
+/// A fresh directory beside `out` holding `mode`'s marker (its first line alone: the run's
+/// entries are listed when it ends, [`seal`]).
 fn fresh(mode: Mode, out: &Path, kind: &str) -> Result<PathBuf, String> {
     let dir = beside(out, kind);
     std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -142,6 +146,47 @@ fn fresh(mode: Mode, out: &Path, kind: &str) -> Result<PathBuf, String> {
         return Err(e);
     }
     Ok(dir)
+}
+
+/// The entries of `dir` but `mode`'s marker.
+fn entries(mode: Mode, dir: &Path) -> io::Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for e in std::fs::read_dir(dir)? {
+        let name = e?.file_name().to_string_lossy().into_owned();
+        if name != mode.marker {
+            out.insert(name);
+        }
+    }
+    Ok(out)
+}
+
+/// Writes `dir`'s marker whole: the mode's name, then every entry of `dir` (the files the run
+/// wrote), a line each. An out dir is the tool's to replace only with nothing in it but these.
+fn seal(mode: Mode, dir: &Path) -> Result<(), String> {
+    let names = entries(mode, dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut text = format!("{}\n", mode.name);
+    for n in &names {
+        text.push_str(n);
+        text.push('\n');
+    }
+    work::write_file(&dir.join(mode.marker), text.as_bytes())
+}
+
+/// What `dir`'s marker of `mode` lists (`None`: no marker, a file).
+fn listed(mode: Mode, dir: &Path) -> Option<BTreeSet<String>> {
+    let path = dir.join(mode.marker);
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
+    Some(text.lines().skip(1).map(str::to_string).collect())
+}
+
+/// The entries of `dir` its marker of `mode` does not list (each `mode` did not write), or why
+/// they cannot be read.
+fn unknown(mode: Mode, dir: &Path, list: &BTreeSet<String>) -> Result<Vec<String>, String> {
+    let names = entries(mode, dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(names.difference(list).cloned().collect())
 }
 
 /// Why an out dir is not replaced, and how to go on.
@@ -177,8 +222,19 @@ fn not_ours(mode: Mode, dir: &Path) -> Option<Kept> {
     }
     let marked =
         |marker: &str| std::fs::symlink_metadata(dir.join(marker)).is_ok_and(|m| m.is_file());
-    if marked(mode.marker) {
-        return None;
+    if let Some(list) = listed(mode, dir) {
+        return match unknown(mode, dir, &list) {
+            Ok(v) if v.is_empty() => None,
+            Ok(v) => Some(Kept {
+                why: format!(
+                    "it holds what {} did not write: {}",
+                    mode.name,
+                    v.join(", ")
+                ),
+                recover: "move those out of it, or pass another --out",
+            }),
+            Err(e) => Some(Kept::of(e)),
+        };
     }
     let other = [FIRST, FINAL]
         .into_iter()
@@ -263,14 +319,15 @@ fn c_path(p: &Path) -> io::Result<CString> {
 /// 4. `stage` is renamed to `out` by a rename that cannot replace ([`rename_new`]);
 /// 5. when something is at `out` by then, the old dir is put back if it can be (else it stays
 ///    at `aside`, said so) and the run refused;
-/// 6. `aside` is removed: it held the marker.
+/// 6. `aside` is emptied of what its marker lists, the marker, and removed ([`remove_old`]):
+///    anything else in it by then is left, with it, and said.
 ///
 /// `stage` is never removed here: the caller removes it when this fails. The window this cannot
 /// close: from 1 to 4 nothing is at `out`, so a crash there leaves no `--out`, the old output
 /// whole at `aside` (`.<name>.old-<pid>-<ns>` beside it), to be moved back by hand. A crash
 /// after 4 and before 6 leaves the new output at `out` and the old at `aside`. A swap in one
 /// step (`RENAME_SWAP`, `RENAME_EXCHANGE`) would close the first window; it is not used.
-fn publish(mode: Mode, stage: &Path, out: &Path, key: &Path) -> Result<(), String> {
+fn publish(mode: Mode, stage: &Path, out: &Path, key: &Path) -> Result<Vec<String>, String> {
     let aside = beside(out, "old");
     let moved = match rename_new(out, &aside) {
         Ok(()) => true,
@@ -302,22 +359,50 @@ fn publish(mode: Mode, stage: &Path, out: &Path, key: &Path) -> Result<(), Strin
         return Err(format!("{}{back}", refusal(out, &why)));
     }
     seam(key, "published", "")?;
-    if moved {
-        let _ = std::fs::remove_dir_all(&aside);
+    let mut notes = Vec::new();
+    if moved && let Err(e) = remove_old(mode, &aside) {
+        notes.push(format!(
+            "the previous output is left at {}: {e}",
+            aside.display()
+        ));
     }
-    Ok(())
+    Ok(notes)
+}
+
+/// Removes the old out dir `dir` of `mode`: what its marker lists, the marker, then the dir;
+/// nothing else (a dir holding anything else is left, and why said).
+fn remove_old(mode: Mode, dir: &Path) -> Result<(), String> {
+    let list = listed(mode, dir).ok_or("its marker is gone")?;
+    let other = unknown(mode, dir, &list)?;
+    if !other.is_empty() {
+        return Err(format!(
+            "it holds what {} did not write: {}",
+            mode.name,
+            other.join(", ")
+        ));
+    }
+    for name in list.iter().map(String::as_str).chain([mode.marker]) {
+        match std::fs::remove_file(dir.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{name}: {e}")),
+        }
+    }
+    std::fs::remove_dir(dir).map_err(|e| e.to_string())
 }
 
 /// Runs a `calibrate` run of `mode` whose out dir is `out` (module docs): an `out` there that
 /// this mode may not replace ([`not_ours`]) is refused before the run; `run` writes to a fresh
 /// directory (its first argument; the second is the out dir it is to be, for messages), which
-/// is put in place of `out` at the end ([`publish`]). When `run` fails, its refusal is put in
-/// place of `out` instead ([`refuse`]) and the directory it wrote removed.
+/// is put in place of `out` at the end ([`publish`]), its marker listing what it holds
+/// ([`seal`]). When `run` fails, its refusal is put in place of `out` instead ([`refuse`]) and
+/// the directory it wrote removed. With the run's value, what to say of the out dir (an old
+/// one left, and why).
 pub fn run_in<T>(
     mode: Mode,
     out: &Path,
     run: impl FnOnce(&Path, &Path) -> Result<T, String>,
-) -> Result<T, String> {
+) -> Result<(T, Vec<String>), String> {
     let key = out;
     work::check_target(out)?;
     let (parent, name) = split(out)?;
@@ -328,20 +413,27 @@ pub fn run_in<T>(
         return Err(refusal(&out, &why));
     }
     let stage = fresh(mode, &out, "staging")?;
-    match run(&stage, &out) {
+    match run(&stage, &out).and_then(|v| seal(mode, &stage).map(|()| v)) {
         Ok(v) => {
             let published = seam(key, "ran", "").and_then(|()| publish(mode, &stage, &out, key));
-            if let Err(e) = published {
-                let _ = std::fs::remove_dir_all(&stage);
-                return Err(e);
+            match published {
+                Ok(notes) => Ok((v, notes)),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&stage);
+                    Err(e)
+                }
             }
-            Ok(v)
         }
         Err(e) => {
             let e = as_out(&e, &stage, &out);
             let mut said = e.clone();
-            if let Err(w) = refuse(mode, &stage, &out, key, &e) {
-                said = format!("{said}; {w}");
+            match refuse(mode, &stage, &out, key, &e) {
+                Ok(notes) => {
+                    for n in notes {
+                        said = format!("{said}; {n}");
+                    }
+                }
+                Err(w) => said = format!("{said}; {w}"),
             }
             // What the failed run wrote is never published: removed, whatever it holds.
             let gone = seam(key, "cleanup", &stage.to_string_lossy()).and_then(|()| {
@@ -373,7 +465,13 @@ fn as_out(error: &str, stage: &Path, out: &Path) -> String {
 /// mode's marker, `refused.txt` (the error) and, of the files the run wrote to `failed`, those
 /// the mode keeps ([`Mode::keep`]: never a sheet, never `samples.tsv`), put in place of `out`
 /// ([`publish`]). Nothing is published when it cannot be made whole.
-fn refuse(mode: Mode, failed: &Path, out: &Path, key: &Path, error: &str) -> Result<(), String> {
+fn refuse(
+    mode: Mode,
+    failed: &Path,
+    out: &Path,
+    key: &Path,
+    error: &str,
+) -> Result<Vec<String>, String> {
     let diag = fresh(mode, out, "refusal")?;
     let made = (|| {
         for &name in mode.keep {
@@ -386,6 +484,7 @@ fn refuse(mode: Mode, failed: &Path, out: &Path, key: &Path, error: &str) -> Res
             work::write_file(&diag.join(name), &bytes)?;
         }
         work::write_file(&diag.join("refused.txt"), format!("{error}\n").as_bytes())?;
+        seal(mode, &diag)?;
         seam(key, "ran", "")?;
         publish(mode, &diag, out, key)
     })();
