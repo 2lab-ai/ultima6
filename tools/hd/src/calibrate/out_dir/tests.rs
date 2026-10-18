@@ -1415,9 +1415,10 @@ fn a_link_at_a_name_the_run_made_to_that_very_file_is_still_another_file() {
 
 #[test]
 fn the_incomplete_runs_are_listed_from_the_out_dir_opened_not_by_its_path() {
-    // An incomplete run in --out; once --out is opened, it is moved away, and a dir with an
-    // incomplete run of another's put at its path. The runs listed are those of the dir opened
-    // (where the run dir is made), not of the dir now at the path, which is left as it is.
+    // An incomplete run in --out; once --out is opened, it is moved away, and a dir put at its
+    // path with an incomplete run of another's and, by the same name as the first, a run that
+    // ended (its done). The runs listed, and each one's done, are those of the dir opened (where
+    // the run dir is made), not of the dir now at the path, which is left as it is.
     let dir = temp("listed-opened");
     let out = dir.join("out");
     let away = dir.join("away");
@@ -1426,6 +1427,8 @@ fn the_incomplete_runs_are_listed_from_the_out_dir_opened_not_by_its_path() {
     let _h = hook(&out, "opened", move |_| {
         std::fs::rename(&o, &a).unwrap();
         std::fs::create_dir_all(o.join(run_name(2, 8))).unwrap();
+        std::fs::create_dir_all(o.join(run_name(1, 7))).unwrap();
+        std::fs::write(o.join(run_name(1, 7)).join(DONE), b"").unwrap();
         Ok(())
     });
     let e = run_in(FIRST, &out, writes).unwrap_err();
@@ -1437,7 +1440,8 @@ fn the_incomplete_runs_are_listed_from_the_out_dir_opened_not_by_its_path() {
         "{e}"
     );
     assert!(!e.contains(&run_name(2, 8)), "{e}");
-    assert_eq!(names(&out), [run_name(2, 8)]);
+    assert_eq!(names(&out), [run_name(1, 7), run_name(2, 8)]);
+    assert_eq!(names(&out.join(run_name(1, 7))), [DONE]);
     assert!(names(&out.join(run_name(2, 8))).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
