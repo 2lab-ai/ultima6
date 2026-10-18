@@ -76,6 +76,90 @@ fn fix_clock(key: &Path, ns: u128) -> Fixed {
     Fixed(key.to_path_buf())
 }
 
+/// A list the test and its hooks share.
+type Shared<T> = std::sync::Arc<std::sync::Mutex<Vec<T>>>;
+
+/// The env var that marks a child of this test binary started for one test ([`in_child`]): its
+/// value is the test's name.
+const CHILD: &str = "U6_HDTOOL_OUT_DIR_CHILD";
+
+/// Whether this process is the child started for the test `name` ([`in_child`]).
+fn is_child(name: &str) -> bool {
+    std::env::var_os(CHILD).is_some_and(|v| v == name)
+}
+
+/// Runs the test `name` alone in a child of this test binary (`--exact`, marked by [`CHILD`]),
+/// started as `sh -c '<shell>; exec "$0" "$@"'` and set up by `setup`; panics, with the child's
+/// output, unless that one test ran and passed.
+fn in_child(name: &str, shell: &str, setup: impl FnOnce(&mut std::process::Command)) {
+    let test = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
+    let mut c = std::process::Command::new("sh");
+    c.arg("-c")
+        .arg(format!("{shell}; exec \"$0\" \"$@\""))
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", &test, "--test-threads=1", "--nocapture"])
+        .env(CHILD, name);
+    setup(&mut c);
+    let out = c.output().unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success() && said.contains("test result: ok. 1 passed"),
+        "{test}, in a child ({}):\n{said}",
+        out.status
+    );
+}
+
+/// For a test that needs an unprivileged user: with privilege (euid 0), runs the test `name` in
+/// a child dropped to uid and gid 65534, with a temp dir of its own that it can enter, and gives
+/// true (the caller is done); else false, and the caller runs it here (in that child, checked
+/// to have no privilege).
+fn ran_unprivileged(name: &str) -> bool {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: geteuid(2) reads the process's ids; no memory involved.
+    let euid = unsafe { libc::geteuid() };
+    if is_child(name) {
+        assert_ne!(euid, 0, "the child kept its privilege");
+        return false;
+    }
+    if euid != 0 {
+        return false;
+    }
+    let tmp = temp(&format!("nobody-{name}"));
+    std::os::unix::fs::chown(&tmp, Some(65534), Some(65534)).unwrap();
+    in_child(name, ":", |c| {
+        c.env("TMPDIR", &tmp);
+        // SAFETY: between the fork and the exec, only setgroups(2), setgid(2) and setuid(2),
+        // each async-signal-safe, and errno read.
+        unsafe {
+            c.pre_exec(|| {
+                let dropped = libc::setgroups(0, std::ptr::null()) == 0
+                    && libc::setgid(65534) == 0
+                    && libc::setuid(65534) == 0;
+                match dropped {
+                    true => Ok(()),
+                    false => Err(std::io::Error::last_os_error()),
+                }
+            });
+        }
+    });
+    let _ = std::fs::remove_dir_all(&tmp);
+    true
+}
+
+/// The soft and hard limits on open files of this process now.
+fn nofile() -> (u64, u64) {
+    // SAFETY: an all-zero `rlimit` is a valid value for the call to fill.
+    let mut r: libc::rlimit = unsafe { std::mem::zeroed() };
+    // SAFETY: a `rlimit` that outlives the call.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) }, 0);
+    #[allow(clippy::unnecessary_cast)]
+    (r.rlim_cur as u64, r.rlim_max as u64)
+}
+
 #[test]
 fn a_run_dir_is_named_by_the_utc_time_and_the_pid() {
     assert_eq!(
@@ -156,11 +240,11 @@ fn a_run_dir_that_is_there_already_is_never_reused() {
 #[test]
 fn a_run_dir_that_cannot_be_made_for_another_reason_is_not_said_to_be_reused() {
     // --out where no dir can be made (read-only): the error is the system's, beside the
-    // incomplete run, not "never reused". Needs an unprivileged user: skipped with privilege.
+    // incomplete run, not "never reused". Needs an unprivileged user: with privilege, run in a
+    // child that has none.
     use std::os::unix::fs::PermissionsExt;
-    // SAFETY: geteuid(2) reads the process's ids; no memory involved.
-    if unsafe { libc::geteuid() } == 0 {
-        eprintln!("skipped: it needs an unprivileged user (euid 0 writes a read-only dir)");
+    if ran_unprivileged("a_run_dir_that_cannot_be_made_for_another_reason_is_not_said_to_be_reused")
+    {
         return;
     }
     let dir = temp("cannot-make");
@@ -507,11 +591,9 @@ fn a_name_that_is_not_one_plain_name_is_refused_before_any_file_is_touched() {
 fn a_run_dir_that_cannot_be_read_is_listed_as_such_not_as_incomplete() {
     // The reviewer's P5, turned around: a run that ended, its dir then unreadable (mode 000).
     // The next run lists it as a run dir it cannot read, with why, not as incomplete, and
-    // leaves it. Needs an unprivileged user: skipped with privilege.
+    // leaves it. Needs an unprivileged user: with privilege, run in a child that has none.
     use std::os::unix::fs::PermissionsExt;
-    // SAFETY: geteuid(2) reads the process's ids; no memory involved.
-    if unsafe { libc::geteuid() } == 0 {
-        eprintln!("skipped: it needs an unprivileged user (euid 0 reads a mode 000 dir)");
+    if ran_unprivileged("a_run_dir_that_cannot_be_read_is_listed_as_such_not_as_incomplete") {
         return;
     }
     let dir = temp("unreadable");
@@ -626,23 +708,32 @@ fn a_run_whose_dir_is_moved_before_done_fails_and_writes_no_done() {
     }
 }
 
-/// How many of this process's open fds are the file whose (device, inode) is `id`.
+/// The fd numbers looked at for this process's open files: fds are given lowest first, and the
+/// tests of this process never hold near this many at once.
+const FDS: i32 = 16_384;
+
+/// How many of this process's open fds are the file whose (device, inode) is `id`: a `fstat` of
+/// each fd number (one not open gives EBADF), with no fd borrowed or made.
 fn held(id: (u64, u64)) -> usize {
-    use std::os::fd::BorrowedFd;
-    (0..16_384)
+    (0..FDS)
         .filter(|&fd| {
-            // SAFETY: fcntl(F_GETFD) only asks whether `fd` is open; it touches nothing.
-            if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
-                return false;
-            }
-            // SAFETY: `fd` is open (just asked), and is borrowed for this one call only.
-            let b = unsafe { BorrowedFd::borrow_raw(fd) };
-            b.try_clone_to_owned()
-                .ok()
-                .map(File::from)
-                .is_some_and(|f| at::id(&f).ok() == Some(id))
+            // SAFETY: an all-zero `stat` is a valid value for the call to fill.
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: a fd number (one not open fails the call) and a `stat` that outlives it.
+            let r = unsafe { libc::fstat(fd, &mut st) };
+            r == 0 && at::ids(&st) == id
         })
         .count()
+}
+
+/// This process's open fds that resolve into `dir` (a file deleted there too: Linux says
+/// `<path> (deleted)`, macOS its old path), by their number ([`at::path_of_fd`]), with no fd
+/// borrowed or made.
+fn open_into(dir: &Path) -> Vec<(i32, PathBuf)> {
+    (0..FDS)
+        .filter_map(|fd| Some((fd, at::path_of_fd(fd)?)))
+        .filter(|(_, p)| p.starts_with(dir))
+        .collect()
 }
 
 #[test]
@@ -650,7 +741,7 @@ fn each_file_the_run_makes_is_held_open_until_it_ends_and_a_new_one_at_its_name_
     // The run's files are held open while it runs (one fd each), so their inodes stay
     // allocated: a file another hand makes at a name of the run's, after deleting the run's,
     // is another inode (on any filesystem), and a failed run leaves it, said so. Once the run
-    // ends, nothing of it is held.
+    // ends, no fd of the process is in its dir (by path: a number freed may be another file's).
     let dir = temp("held");
     let out = dir.join("out");
     let o = out.clone();
@@ -676,18 +767,19 @@ fn each_file_the_run_makes_is_held_open_until_it_ends_and_a_new_one_at_its_name_
     })
     .unwrap_err();
     let run = only_run(&out);
-    let theirs = std::fs::File::open(run.join("a.txt")).unwrap();
-    let theirs_id = at::id(&theirs).unwrap();
-    assert!(!ids.lock().unwrap().contains(&theirs_id));
+    let theirs = {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(run.join("a.txt")).unwrap();
+        (m.dev(), m.ino())
+    };
+    assert!(!ids.lock().unwrap().contains(&theirs));
     assert_eq!(std::fs::read(run.join("a.txt")).unwrap(), b"the owner's");
     let left = format!(
         "{} (not the file the run made)",
         run.join("a.txt").display()
     );
     assert!(e.contains(&left), "{e}");
-    for &id in ids.lock().unwrap().iter() {
-        assert_eq!(held(id), 0, "{id:?}");
-    }
+    assert!(open_into(&run).is_empty(), "{:?}", open_into(&run));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -760,11 +852,9 @@ fn a_link_put_at_a_name_the_run_made_is_said_to_be_another_file() {
 fn a_file_of_the_run_others_may_not_read_is_still_deleted_as_its_own() {
     // After the run wrote a.txt, its mode dropped to 000: the check needs no open, so the file
     // is still known for the run's and deleted. Needs an unprivileged user (the point is a file
-    // the user cannot open): skipped with privilege, where the link case above still holds.
+    // the user cannot open): with privilege, run in a child that has none.
     use std::os::unix::fs::PermissionsExt;
-    // SAFETY: geteuid(2) reads the process's ids; no memory involved.
-    if unsafe { libc::geteuid() } == 0 {
-        eprintln!("skipped: it needs an unprivileged user (euid 0 opens a mode 000 file)");
+    if ran_unprivileged("a_file_of_the_run_others_may_not_read_is_still_deleted_as_its_own") {
         return;
     }
     let dir = temp("mode-000");
@@ -981,4 +1071,151 @@ fn the_raise_goes_up_to_the_lower_of_the_hard_limit_and_the_cap_and_never_down()
     ] {
         assert_eq!(at::raised(cur, max, cap), want, "{cur} {max} {cap}");
     }
+}
+
+#[test]
+fn each_file_the_run_made_is_still_held_when_its_delete_is_checked() {
+    // At each delete of a failed run (its seam, before the fstatat and the unlinkat), the file
+    // the run made is still held open, once: its inode cannot have been freed and its number
+    // given to another file.
+    let dir = temp("held-at-delete");
+    let out = dir.join("out");
+    let ids: Shared<(String, (u64, u64))> = Default::default();
+    let (seen, looked) = (ids.clone(), ids.clone());
+    let checked: Shared<(String, usize)> = Default::default();
+    let c = checked.clone();
+    let _h = hook(&out, "delete", move |name| {
+        let id = looked
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|x| x.1);
+        c.lock()
+            .unwrap()
+            .push((name.to_string(), id.map_or(0, held)));
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        writes(run)?;
+        for m in run.made.borrow().iter() {
+            seen.lock().unwrap().push((m.name.clone(), m.id.unwrap()));
+        }
+        Err("no rows".into())
+    })
+    .unwrap_err();
+    assert_eq!(e, format!("no rows; run dir: {}", only_run(&out).display()));
+    assert_eq!(
+        *checked.lock().unwrap(),
+        [("a.txt".to_string(), 1), ("a.png".to_string(), 1)]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_dir_removed_while_the_run_writes_is_said_to_be_nowhere_known() {
+    // The run dir removed (not renamed) before the run's second write: the system may still
+    // give a path for the dir the run holds (macOS gives the old one, where another dir may be
+    // made), but no dir there is the run's, so where it is now is not known.
+    let dir = temp("removed-where");
+    let out = dir.join("out");
+    let o = out.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name == "b.txt" {
+            let run = only_run(&o);
+            std::fs::remove_dir_all(&run).unwrap();
+            std::fs::create_dir(&run).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        run.write("a.txt", b"a")?;
+        run.write("b.txt", b"b")
+    })
+    .unwrap_err();
+    assert!(e.contains("(where it is now is not known)"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_out_of_open_files_for_real_still_writes_its_refusal() {
+    // In a child under a limit of 64 open files (soft and hard: the raise cannot lift it), a run
+    // of 400 files meets the system's own "too many open files", not one injected. Each file
+    // the cleanup deletes lets its fd go, so refused.txt can be made: the run dir holds it alone,
+    // and the error says how to go on.
+    const NAME: &str = "a_run_out_of_open_files_for_real_still_writes_its_refusal";
+    if !is_child(NAME) {
+        return in_child(NAME, "ulimit -n 64", |_| {});
+    }
+    assert_eq!(nofile(), (64, 64));
+    let dir = temp("emfile-real");
+    let out = dir.join("out");
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        for k in 0..400 {
+            run.write(&format!("f{k}.txt"), b"x")?;
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    let run = only_run(&out);
+    assert!(
+        e.contains("Too many open files") && e.contains("ulimit -n"),
+        "{e}"
+    );
+    assert_eq!(names(&run), [REFUSED], "{e}");
+    assert_eq!(
+        std::fs::read_to_string(run.join(REFUSED)).unwrap(),
+        format!("{e}\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_low_soft_limit_on_open_files_is_raised_for_the_run() {
+    // In a child under a soft limit of 64 open files, the hard one above: the run raises the
+    // soft limit to the hard one, as far as the system caps it, so 400 files held at once fit;
+    // the hard limit is as it was.
+    const NAME: &str = "a_low_soft_limit_on_open_files_is_raised_for_the_run";
+    if !is_child(NAME) {
+        return in_child(NAME, "ulimit -Sn 64", |_| {});
+    }
+    let before = nofile();
+    assert_eq!(before.0, 64);
+    assert!(
+        before.1 > 1024,
+        "{before:?}: no room under the hard limit to raise to"
+    );
+    let dir = temp("raise");
+    let out = dir.join("out");
+    let r = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        for k in 0..400 {
+            run.write(&format!("f{k}.txt"), b"x")?;
+        }
+        Ok(())
+    });
+    assert!(r.is_ok(), "{:?}", r.err());
+    assert_eq!(nofile(), (before.1.min(at::cap()), before.1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_soft_limit_on_open_files_above_the_cap_is_kept() {
+    // In a child whose soft limit is above the system's cap, where the hard limit lets it be
+    // (on macOS: OPEN_MAX), else at the hard limit: the raise leaves both as they are.
+    const NAME: &str = "a_soft_limit_on_open_files_above_the_cap_is_kept";
+    const SOFT: &str = "U6_HDTOOL_SOFT";
+    if !is_child(NAME) {
+        let (cap, hard) = (at::cap(), nofile().1);
+        let soft = match hard > cap {
+            true => cap + (hard - cap).min(1000),
+            false => hard,
+        };
+        return in_child(NAME, &format!("ulimit -Sn {soft}"), |c| {
+            c.env(SOFT, soft.to_string());
+        });
+    }
+    let before = nofile();
+    assert_eq!(before.0.to_string(), std::env::var(SOFT).unwrap());
+    at::raise_open_files();
+    assert_eq!(nofile(), before);
 }
