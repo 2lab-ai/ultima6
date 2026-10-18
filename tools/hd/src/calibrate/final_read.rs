@@ -619,6 +619,8 @@ pub enum Origin {
     Coverage,
     /// One per id of `--include`.
     Include,
+    /// One per pair of the last pass that no other window draws.
+    Pair,
 }
 
 impl Origin {
@@ -626,6 +628,7 @@ impl Origin {
         match self {
             Origin::Coverage => "coverage",
             Origin::Include => "include",
+            Origin::Pair => "pair",
         }
     }
 }
@@ -912,6 +915,10 @@ pub struct FinalSummary {
     pub kinds: Vec<KindRow>,
     /// `--include`: ids, windows, ids not generated.
     pub include: Option<(usize, usize, usize)>,
+    /// Windows of a pair of the last pass no other window draws; pairs of the last pass (of the
+    /// label, with one) drawn in no window.
+    pub pair_windows: usize,
+    pub unread: usize,
     pub tsv_rows: usize,
     pub sheets: Vec<String>,
 }
@@ -1008,6 +1015,12 @@ impl FinalSummary {
                 k.windows
             );
         }
+        let _ = writeln!(
+            s,
+            "pair windows (a pair of the last pass that no item's or included id's window \
+             draws): {}; pairs of the last pass drawn in no window: {}",
+            self.pair_windows, self.unread
+        );
         if let Some((ids, windows, not)) = self.include {
             let _ = writeln!(
                 s,
@@ -1205,18 +1218,55 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         }
     }
 
-    // The sheets: coverage by class, the alone ones apart, then the included ids.
+    // Every pair of the last pass read: one that no window above draws gets a window of its
+    // own (with one label, a pair of it), in pair order, each counting what it draws.
     let by: BTreeMap<Pair, usize> = fixed
         .last
         .iter()
         .enumerate()
         .map(|(i, l)| (l.pair, i))
         .collect();
+    let mut seen: BTreeSet<usize> = BTreeSet::new();
+    for w in &windows {
+        let d = draw_window(game, &plan, &fixed, &by, w);
+        seen.extend(d.ticks.iter().map(|t| t.1));
+    }
+    for (i, l) in fixed.last.iter().enumerate() {
+        let Some(at) = l.at else { continue };
+        if seen.contains(&i) || label.is_some_and(|x| !l.from(x)) {
+            continue;
+        }
+        let records: Vec<u16> = [l.pair.a, l.pair.b]
+            .into_iter()
+            .filter(|r| fixed.generated.contains(r))
+            .collect();
+        let Some(k) = records
+            .first()
+            .and_then(|r| fixed.survivors.iter().position(|s| s.records.contains(r)))
+        else {
+            continue;
+        };
+        let w = Window {
+            origin: Origin::Pair,
+            survivor: k,
+            records,
+            placement: Placement::Pair,
+            at: Some(at),
+            edge: l.pair.edge,
+            pair: Some(i),
+        };
+        let d = draw_window(game, &plan, &fixed, &by, &w);
+        seen.extend(d.ticks.iter().map(|t| t.1));
+        windows.push(w);
+    }
+
+    // The sheets: coverage by class, the alone ones apart, the pairs, then the included ids.
     let stem_of = |w: &Window| -> String {
         let class = class_name(fixed.survivors[w.survivor].class);
         let p = o.source.prefix();
         match (w.origin, w.placement) {
             (Origin::Include, _) => format!("{p}final-include"),
+            (Origin::Pair, _) => format!("{p}final-pairs"),
             (_, Placement::Alone) => format!("{p}final-{class}-alone"),
             _ => format!("{p}final-{class}"),
         }
@@ -1226,7 +1276,8 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         let order = match (w.origin, w.placement) {
             (Origin::Coverage, Placement::Alone) => 1,
             (Origin::Coverage, _) => 0,
-            (Origin::Include, _) => 2,
+            (Origin::Pair, _) => 2,
+            (Origin::Include, _) => 3,
         };
         groups.entry((order, stem_of(w))).or_default().push(w);
     }
@@ -1325,6 +1376,9 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
                     });
                 }
                 let note = match (w.placement, d.fit) {
+                    (Placement::Pair, _) if w.origin == Origin::Pair => {
+                        "a pair of the last pass no other window draws".to_string()
+                    }
                     (Placement::Pair, _) => "-".to_string(),
                     (Placement::Drawn, _) => {
                         "in no pair: where the world first draws it".to_string()
@@ -1414,6 +1468,10 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
             unlabelled: unlabelled.get(&class).copied().unwrap_or(0),
         });
     }
+    let drawn_any: BTreeSet<usize> = read
+        .values()
+        .flat_map(|(set, _)| set.iter().copied())
+        .collect();
     let mut labels: Vec<String> = LABELS.iter().map(|l| l.to_string()).collect();
     for l in &fixed.last {
         for lab in l.labels.split('+') {
@@ -1459,6 +1517,13 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
                 .count();
             (v.len(), windows, not_generated.len())
         }),
+        pair_windows: windows.iter().filter(|w| w.origin == Origin::Pair).count(),
+        unread: fixed
+            .last
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| !drawn_any.contains(i) && label.is_none_or(|x| l.from(x)))
+            .count(),
         tsv_rows: rows,
         sheets,
     })

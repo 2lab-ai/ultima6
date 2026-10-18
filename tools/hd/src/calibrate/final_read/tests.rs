@@ -693,3 +693,78 @@ fn a_disagreement_fails_and_draws_nothing() {
     assert_eq!(detail.lines().count(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
+    // The chain, and B again far from it, beside a record Y (a grain of its own) east of it:
+    // B's window, wherever it is placed, cannot draw both its pairs by the chain and its pair
+    // with Y.
+    const Y: u16 = 6;
+    let mut g = game();
+    let rec = &mut g.records[usize::from(Y)];
+    for i in 0..256 {
+        rec.pixels[i] = GRAIN + (hash(i as u32, 9) % 5) as u8;
+        rec.transparent[i] = false;
+    }
+    g.world.chunks.push(chunk(&[(4, 4, B), (5, 4, Y)]));
+    g.world.levels[0].refs = vec![0, 1, 1, 2];
+    let (text, left) = chain(&g);
+    let first = BTreeMap::from([(A, red_west(&near(&g, A))), (B, near(&g, B))]);
+    let by = Pair {
+        a: B,
+        b: Y,
+        edge: Edge::East,
+    };
+    let text = text + &logged(&g, &first, by, "map", Some(At { z: 0, x: 12, y: 12 })) + "\n";
+    let (dir, work) = work_dir("every", &text, &g, &left);
+    let o = options(&dir);
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    assert_eq!(s.last, 3);
+    // Each of the three is drawn in a window: B's own, and one pair window for what it misses.
+    for k in &s.kinds {
+        assert_eq!(k.read, k.last, "{} {}", k.label, k.sides.name());
+    }
+    assert_eq!((s.pair_windows, s.unread), (1, 0));
+    let map = s
+        .kinds
+        .iter()
+        .find(|k| k.label == "map" && k.sides == Sides::GenMmpx);
+    assert_eq!(map.map(|k| (k.last, k.windows)), Some((3, 2)));
+    let rows = rows_of(&o.out);
+    let pairs: Vec<&BTreeMap<String, String>> =
+        rows.iter().filter(|r| r["origin"] == "pair").collect();
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0]["placement"], "pair");
+    assert_eq!(pairs[0]["records"], atlas::image_name(ImageId::Tile(B)));
+    assert_eq!(pairs[0]["sheet"], "final-pairs.png");
+    assert_eq!(
+        pairs[0]["note"],
+        "a pair of the last pass no other window draws"
+    );
+    // Every pair of the last pass is in some window's ticks.
+    let ticked: BTreeSet<(String, String)> = rows
+        .iter()
+        .flat_map(|r| {
+            r["ticks"]
+                .split(';')
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|t| t != "-")
+        .map(|t| {
+            let f: Vec<&str> = t.split(',').collect();
+            (f[5].to_string(), f[6].to_string())
+        })
+        .collect();
+    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
+    for p in [AB, BG, by] {
+        assert!(ticked.contains(&(name(p.a), name(p.b))), "{p:?}");
+    }
+    assert!(s.sheets.contains(&"final-pairs.png".to_string()));
+    assert!(s.sheets.contains(&"final-pairs-s2.png".to_string()));
+    assert!(
+        s.text()
+            .contains("pairs of the last pass drawn in no window: 0")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

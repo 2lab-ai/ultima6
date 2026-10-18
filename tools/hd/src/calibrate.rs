@@ -70,25 +70,30 @@
 //!   else, in no pair, where the world first draws one of its records (level, row, column), said
 //!   in the row; else, drawn nowhere in the starting world, the item alone in an empty window,
 //!   its pieces in a row from the second column and row with a cell between them (the row says
-//!   how many fit when not all do). The frame as above, A's cell at [`A_CELL`]: at a pair, its
-//!   records in its two cells; where it is drawn, its record in A's cell.
+//!   how many fit when not all do). Then every pair of the last pass with a cell that none of
+//!   those windows draws (with one label, a pair of it) gets a window placed at it, in pair
+//!   order, each counting the pairs it draws, so that every pair of the last pass is read (the
+//!   report counts any still drawn in no window). The frame as above, A's cell at [`A_CELL`]:
+//!   at a pair, its records in its two cells; where it is drawn, its record in A's cell.
 //! - **The marks**: every pair of the last pass drawn inside the window (each record a cell
 //!   draws beside each record of the cell east or south of it) is marked in the panels' margins
 //!   as above and listed under the panels: its cell (column, row of the window), edge, labels,
 //!   sides and ratio / limit, `>` before the pair the window is placed at.
 //! - **The sheets** ([`final_read::final_sheet`]): `final-<class>.png` by the class ingest
-//!   names, `final-<class>-alone.png` for the windows drawn nowhere and `final-include.png`, in
+//!   names, `final-<class>-alone.png` for the windows drawn nowhere, `final-pairs.png` for the
+//!   pairs no other window draws and `final-include.png`, in
 //!   parts under [`MAX_HEIGHT`], each with its `-s2.png`; with one `--source` every name starts
 //!   with it. A window's caption: its index, class, placement and why it is drawn.
-//! - **`samples.tsv`** ([`final_read::FINAL_TSV_HEADER`]): a line per window, then per included id
-//!   not generated: the index, `coverage` or `include`, the item, its records, its class, the
-//!   placement, A's cell (z, x, y) and edge, the pairs marked, their labels × sides with counts,
-//!   each pair (cell, edge, labels, sides, A, B, ratio, limit), the sheet and row, `frames`, and
-//!   a note.
+//! - **`samples.tsv`** ([`final_read::FINAL_TSV_HEADER`]): a line per window, then per included
+//!   id not generated: the index, `coverage`, `pair` or `include`, the item, its records (a pair
+//!   window: the pair's generated ones), its class, the placement, A's cell (z, x, y) and edge,
+//!   the pairs marked, their labels × sides with counts, each pair (cell, edge, labels, sides,
+//!   A, B, ratio, limit), the sheet and row, `frames`, and a note.
 //! - **The report** ([`final_read::FinalSummary`]): survivors per class (items, images, windows by
 //!   placement); then, for each label of [`LABELS`] and any other the last pass has, both sides,
-//!   the pairs in the last pass, of them drawn in a window, and the windows drawing one, 0
-//!   printed.
+//!   the pairs in the last pass, of them drawn in a window, and the windows drawing one (the
+//!   pair windows too), 0 printed; the pair windows, and the pairs of the last pass drawn in
+//!   no window.
 //!
 //! The object draw (`u6_core::objects::draw`, 0x10e81e, 0x10e73a, 0x10e596) as far as the
 //! starting lists tell it: the objects in list order, (y, x), and at one cell the later in the
