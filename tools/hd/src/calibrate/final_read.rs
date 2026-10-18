@@ -90,7 +90,8 @@ struct RawFell {
 /// every neighbour fallback; the other lines (the images' gates, the actors' motion, refused
 /// sheets: no `neighbour` field) are not read. A `neighbour` field that is not a pair is
 /// refused ([`pair_line`]) on every line, a fallback line included, as is a line with both a
-/// pair and a `fallback`, and a `fallback` field other than `neighbour`: the run stops before
+/// pair and a `fallback`, and a `fallback` field other than `neighbour`, and a pair line of
+/// pass 0 (ingest writes none: read, it would be held to nothing): the run stops before
 /// anything is drawn, as on any other line of the gate's it cannot read.
 pub fn record(text: &str) -> Result<Record, String> {
     let mut out = Record::default();
@@ -129,6 +130,9 @@ pub fn record(text: &str) -> Result<Record, String> {
             return Err(bad(&"a pair with no label (source, label or labels)"));
         }
         let r: RawLogged = serde_json::from_value(v).map_err(|e| bad(&e))?;
+        if r.pass == 0 {
+            return Err(bad(&"a pair line of pass 0 (the gate's passes start at 1)"));
+        }
         let record = |s: &str| match atlas::parse_image(s) {
             Some(ImageId::Tile(t)) => Ok(t),
             _ => Err(bad(&"not a pair of tile records")),

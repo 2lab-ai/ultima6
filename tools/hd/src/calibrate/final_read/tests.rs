@@ -845,6 +845,10 @@ fn a_pair_line_ingest_does_not_write_stops_the_read() {
             "{field}: {e}"
         );
     }
+    // A pair line of pass 0, which ingest never writes: refused, not held to nothing.
+    let t = edit(&|v| v["pass"] = serde_json::json!(0));
+    let e = record(&t).unwrap_err();
+    assert!(e.contains("line 3: a pair line of pass 0"), "{e}");
 }
 
 #[test]
