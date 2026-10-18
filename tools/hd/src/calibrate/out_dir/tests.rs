@@ -160,6 +160,21 @@ pub(crate) fn ran_unprivileged(test: &str) -> bool {
     true
 }
 
+/// Every fd this process may still open, taken (each a file `probe` opened), but `spare` let go
+/// again: the next `spare` opens of the process succeed, and the one after meets EMFILE.
+pub(crate) fn take_fds(probe: &Path, spare: usize) -> Vec<File> {
+    let mut taken = Vec::new();
+    let full = loop {
+        match File::open(probe) {
+            Ok(f) => taken.push(f),
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(full.raw_os_error(), Some(libc::EMFILE), "{full}");
+    taken.truncate(taken.len() - spare);
+    taken
+}
+
 /// The soft and hard limits on open files of this process now.
 fn nofile() -> (u64, u64) {
     // SAFETY: an all-zero `rlimit` is a valid value for the call to fill.

@@ -1383,6 +1383,71 @@ fn the_first_pass_snapshot_is_read_through_the_run_dir_not_by_its_path() {
 }
 
 #[test]
+fn a_first_pass_whose_log_cannot_be_read_says_why_with_its_own_hint() {
+    // The work dir's gates.jsonl not there: the error says to run ingest first. In a child
+    // under a limit of 64 open files, with every fd but the run dir's own taken (by the test):
+    // its read meets "too many open files", and the error says how to go on, not to ingest.
+    const NAME: &str = "a_first_pass_whose_log_cannot_be_read_says_why_with_its_own_hint";
+    let test = out_dir::tests::test_path(module_path!(), NAME);
+    let g = game();
+    let (dir, work, slices) = setup(
+        &format!("first-read-{}", out_dir::tests::is_child(&test)),
+        &world_rows(),
+    );
+    let out = dir.join("calibrate");
+    let opts = Options {
+        slices,
+        out: out.clone(),
+        per: 2,
+        seed: 1,
+        at: Vec::new(),
+        seam: Thresholds::default().seam,
+        source: Source::All,
+    };
+    let log = work.path("gates.jsonl");
+    if !out_dir::tests::is_child(&test) {
+        std::fs::remove_file(&log).unwrap();
+        let e = calibrate(&g, &work, &opts).unwrap_err();
+        let run = run_dir(&out).canonicalize().unwrap();
+        assert_eq!(
+            e,
+            format!(
+                "{}: {} (run ingest first); run dir: {}",
+                log.display(),
+                std::io::Error::from_raw_os_error(libc::ENOENT),
+                run.display()
+            )
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        return out_dir::tests::in_child(&test, "ulimit -n 64", |_| {});
+    }
+    let taken: std::sync::Arc<std::sync::Mutex<Vec<std::fs::File>>> = Default::default();
+    let (t, probe) = (taken.clone(), log.clone());
+    let _h = out_dir::hook(&out, "open", move |_| {
+        *t.lock().unwrap() = out_dir::tests::take_fds(&probe, 1);
+        Ok(())
+    });
+    let e = calibrate(&g, &work, &opts).unwrap_err();
+    taken.lock().unwrap().clear();
+    let run = run_dir(&out).canonicalize().unwrap();
+    let (emfile, hint) = (
+        std::io::Error::from_raw_os_error(libc::EMFILE),
+        "(a run holds each file it makes open until it ends: raise the limit on open files, \
+         ulimit -n)",
+    );
+    assert_eq!(
+        e,
+        format!(
+            "{}: {emfile} {hint}; run dir: {}; refused.txt not written ({}: {emfile} {hint})",
+            log.display(),
+            run.display(),
+            run.join("refused.txt").display()
+        )
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_malformed_first_pass_snapshot_is_said_by_its_full_path_with_the_run_dir() {
     // An older incomplete run in --out, then a line of the log that is not a pair: the error
     // names the snapshot by its path in the run's dir, then the run dir and the incomplete run;

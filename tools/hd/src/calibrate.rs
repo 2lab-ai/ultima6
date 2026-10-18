@@ -1752,8 +1752,7 @@ fn first_pass(
     run: &out_dir::Run,
 ) -> Result<Summary, String> {
     // The snapshot first; only it is read.
-    let bytes = out_dir::read_capped(&work.path("gates.jsonl"), 1 << 30)
-        .map_err(|e| format!("{e} (run ingest first)"))?;
+    let bytes = out_dir::read_from_work(&work.path("gates.jsonl"), 1 << 30)?;
     run.write("gates.jsonl", &bytes)?;
     out_dir::seam(&o.out, "snapshot", "gates.jsonl")?;
     let text = run.read("gates.jsonl", 1 << 30)?;

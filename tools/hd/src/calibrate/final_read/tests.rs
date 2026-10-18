@@ -3276,6 +3276,58 @@ fn a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone() {
 }
 
 #[test]
+fn a_snapshot_that_cannot_be_read_says_why_with_its_own_hint() {
+    // The work dir's gates.jsonl not there: the error says to run ingest first. In a child
+    // under a limit of 64 open files, with every fd but the run dir's own taken (by the test):
+    // its read meets "too many open files", and the error says how to go on, not to ingest.
+    const NAME: &str = "a_snapshot_that_cannot_be_read_says_why_with_its_own_hint";
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir(&format!("read-{}", is_child(&here(NAME))), &text, &g, &left);
+    let o = options(&dir);
+    let log = work.path("gates.jsonl");
+    if !is_child(&here(NAME)) {
+        std::fs::remove_file(&log).unwrap();
+        let e = calibrate_final(&g, &work, &o).unwrap_err();
+        assert_eq!(
+            e,
+            format!(
+                "{}: {} (run ingest first); run dir: {}",
+                log.display(),
+                std::io::Error::from_raw_os_error(libc::ENOENT),
+                run_dir(&o.out).canonicalize().unwrap().display()
+            )
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        return in_child(&here(NAME), "ulimit -n 64", |_| {});
+    }
+    let taken: std::sync::Arc<std::sync::Mutex<Vec<std::fs::File>>> = Default::default();
+    let (t, probe) = (taken.clone(), log.clone());
+    let _h = hook(&o.out, "open", move |_| {
+        *t.lock().unwrap() = super::super::out_dir::tests::take_fds(&probe, 1);
+        Ok(())
+    });
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    taken.lock().unwrap().clear();
+    let run = run_dir(&o.out).canonicalize().unwrap();
+    let (emfile, hint) = (
+        std::io::Error::from_raw_os_error(libc::EMFILE),
+        "(a run holds each file it makes open until it ends: raise the limit on open files, \
+         ulimit -n)",
+    );
+    assert_eq!(
+        e,
+        format!(
+            "{}: {emfile} {hint}; run dir: {}; {REFUSED} not written ({}: {emfile} {hint})",
+            log.display(),
+            run.display(),
+            run.join(REFUSED).display()
+        )
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_snapshot_read_again_out_of_open_files_says_how_to_go_on() {
     // In a child under a limit of 64 open files: the run reaches its re-check (its sheets and
     // samples.tsv drawn) with every fd left taken (by the test). The read again of gates.jsonl

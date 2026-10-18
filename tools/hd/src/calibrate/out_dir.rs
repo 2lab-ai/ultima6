@@ -232,6 +232,17 @@ pub fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     capped(f, path, max)
 }
 
+/// A file of the work dir that ingest writes, read for a run ([`read_capped`]): when nothing
+/// is at `path`, the error says to run ingest first; any other error is said as itself
+/// ([`os_error`]: out of open files, how to go on).
+pub fn read_from_work(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    let f = File::open(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("{}: {e} (run ingest first)", path.display()),
+        _ => os_error(path, &e),
+    })?;
+    capped(f, path, max)
+}
+
 /// The file at `path` read again, to hold it to what a run read of it at first (at most `max`
 /// bytes then): its first `max + 1` bytes (more than were read: it changed), or `None` when it is
 /// gone; any other error to read it is the run's, said ([`os_error`]).
