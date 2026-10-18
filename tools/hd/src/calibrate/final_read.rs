@@ -265,7 +265,9 @@ fn tile(id: ImageId) -> Option<u16> {
 /// - `measure`: a pair of the last pass whose sides did not change since pass 1, measured from
 ///   the slices otherwise than pass 1 logged it;
 /// - `failing`: a pair of the last pass failing (the fixed point does not end there);
-/// - `last`: lines of a later pass that do not fail, other than the last pass rebuilt.
+/// - `last`: a line that passes in a pass after the last; the last pass's lines, when the log
+///   has them, other than the last pass rebuilt (a pass between the first and the last may be
+///   logged whole: its passing lines are not checked).
 pub fn fixed(
     game: &Game,
     plan: &Plan,
@@ -470,16 +472,17 @@ pub fn fixed(
                     )
                 );
             }
-        } else if l.pass > 1 {
-            if l.pass != passes {
-                say!(
-                    "last",
-                    format!(
-                        "line {}: passes in pass {}, and the last pass is {passes}",
-                        l.line, l.pass
-                    )
-                );
-            }
+        } else if l.pass > passes {
+            say!(
+                "last",
+                format!(
+                    "line {}: passes in pass {}, after the last pass {passes}",
+                    l.line, l.pass
+                )
+            );
+        } else if l.pass == passes && passes > 1 {
+            // A pass between the first and the last, logged whole, is read and not held to
+            // anything: only the last pass's lines are.
             logged_last.insert(l.pair, l);
         }
     }

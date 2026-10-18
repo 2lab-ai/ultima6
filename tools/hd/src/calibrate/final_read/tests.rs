@@ -286,6 +286,10 @@ fn the_last_pass_is_rebuilt_from_the_slices() {
     assert_eq!(state(&g, &wrong, &left).unwrap_err(), ["last"]);
     let short = text.clone() + &last(bg) + "\n";
     assert_eq!(state(&g, &short, &left).unwrap_err(), ["last"]);
+    // A pair passing in a pass after the last.
+    let after = pair_line(3, BG, false, bg.result, bg.sides, "map", bg.at, &gates());
+    let late = with.clone() + &after + "\n";
+    assert_eq!(state(&g, &late, &left).unwrap_err(), ["last"]);
     // No fallback: pass 1 is the last pass, logged whole.
     let only = logged(&g, &left, BG, "map", None) + "\n";
     let f3 = state(&g, &only, &left).unwrap();
