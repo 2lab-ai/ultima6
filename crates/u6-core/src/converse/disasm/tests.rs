@@ -1351,10 +1351,11 @@ fn a_table_a_failing_landing_reaches() -> (Vec<u8>, u32) {
 }
 
 #[test]
-fn a_landing_that_would_fail_in_a_table_stops_there_whichever_landing_comes_first() {
-    // In script order the `a1`'s landing names the table first and the block's loops stop
-    // there; the other way round they read the table's bytes as code first and fail. They are
-    // tried again once the table is kept, and stop there too.
+fn a_landing_that_would_fail_in_a_table_stops_there() {
+    // The `a1`'s landing, the lower, names the table first; the block's loops land on it and
+    // stop there, in every order the waiting landings are kept in (they would fail on its bytes
+    // as code). Failed trials tried again are pinned by
+    // `failed_trials_are_tried_again_until_none_more_is_kept`.
     let (s, t) = a_table_a_failing_landing_reaches();
     for order in ORDERS {
         let d = in_order(&s, order);
@@ -1523,8 +1524,8 @@ fn any_order(s: &[u8]) -> Disasm {
 
 #[test]
 fn which_of_a_table_and_a_landings_code_wins_does_not_depend_on_the_landing_order() {
-    // Scripts where a table meets a landing's code (outside the cases the order decides: the
-    // module doc). Each decodes the same either way.
+    // Scripts where a table meets a landing's code: each decodes the same, catalog included,
+    // with the waiting landings kept in the order found and in the reverse.
     let mut scripts = vec![
         a_table_its_namer_runs(false).0,
         a_table_its_namer_runs(true).0,

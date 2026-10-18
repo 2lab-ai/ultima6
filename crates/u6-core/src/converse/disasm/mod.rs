@@ -539,9 +539,11 @@ pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refus
     // why they end): each round's plan holds the addresses closed to landing paths from the
     // start, the addresses that can no longer be, and the landings to drop.
     let mut plan = Plan::default();
-    // A bound the module doc's argument gives (a landing taken again at most once, each landing
-    // dropped at most twice for a read past a table, and the bytes reserved and settled), with
-    // room to spare: a test build checks the rounds end.
+    // The rounds end by the module doc's argument (a landing taken again at most once, dropped
+    // at most twice for a read past a table, each byte reserved and settled at most once: some
+    // 26 rounds per script byte at most), in every build. A build with debug assertions checks
+    // a looser bound, which that argument never reaches: it guards the argument, so that a
+    // change that breaks it fails there instead of looping.
     let mut rounds = 0usize;
     loop {
         rounds += 1;

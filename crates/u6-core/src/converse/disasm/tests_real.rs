@@ -1,9 +1,11 @@
 //! Real data (owner-local): the disassembler over every script of the owner's `converse.a` and
 //! `converse.b`, and the execution cross-check on the real-data conversations of
 //! `converse/tests_real.rs`, then with every actor asked the keywords of its script, each at a
-//! prompt of a fresh conversation. An actor whose fresh conversation comes to no prompt (it
-//! ends first, or waits out the driver's rounds) is sent none, and those answers are not
-//! checked; how many, only the output says. Skips where the zip is missing. Its output, passing or failing, holds only counts of what the test made
+//! prompt of a fresh conversation. An actor whose fresh conversation ends before any prompt is
+//! sent none, and those answers are not checked (how many, only the output says); one whose
+//! fresh conversation waits out the driver's rounds before a prompt, or that gets some of its
+//! keywords sent and not the others, fails the test. Skips where the zip is missing. Its
+//! output, passing or failing, holds only counts of what the test made
 //! (scripts decoded and refused, items and hazards by kind, conversations, keywords sent,
 //! checks and mismatches), labels, actor slots and pass/fail (spec 01): never a value or a length
 //! of the owner's data, a byte, a text, a name, a keyword or a hash of them.
