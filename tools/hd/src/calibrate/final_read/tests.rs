@@ -2,12 +2,12 @@
 //! `ingest.json` lists and masters made by the tests from the synthetic game's records.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use super::*;
 use crate::game::{Level, World, synthetic};
 use crate::gate::{Edge, Thresholds};
 use crate::group;
-use crate::img::{self, Rgba};
 
 /// Opaque terrain records of the synthetic game, each an item of its own: X, A and B in a row,
 /// east of each other; grass around them.
@@ -347,4 +347,345 @@ fn the_record_and_the_slices_must_agree() {
     };
     let other_gates = text.replace(&gates(), &t.text());
     assert_eq!(state(&g, &other_gates, &left).unwrap_err(), ["gates"]);
+}
+
+/// A temp dir with a work dir: `gates` as its `gates.jsonl`, the records of `images` (×4) listed
+/// in `ingest.json` and each written to `slices/` as its ×8 master (each ×4 pixel 2 × 2).
+fn work_dir(name: &str, gates: &str, g: &Game, images: &BTreeMap<u16, Rgba>) -> (PathBuf, Work) {
+    let dir = std::env::temp_dir().join(format!("u6-hdtool-final-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let work = Work::open(Some(&dir.join("work"))).unwrap();
+    work.write("gates.jsonl", gates.as_bytes()).unwrap();
+    let list = listed(g, images.keys().copied());
+    work.write("ingest.json", &serde_json::to_vec(&list).unwrap())
+        .unwrap();
+    std::fs::create_dir_all(work.path("slices")).unwrap();
+    for (&r, img4) in images {
+        let mut m = Rgba::new(img4.width * 2, img4.height * 2);
+        for y in 0..m.height {
+            for x in 0..m.width {
+                img::put(&mut m, x, y, img::get(img4, x / 2, y / 2));
+            }
+        }
+        let stem = atlas::slice_name(ImageId::Tile(r));
+        img::write_png(&work.slice(&stem), &m).unwrap();
+    }
+    (dir, work)
+}
+
+fn options(dir: &Path) -> FinalOptions {
+    FinalOptions {
+        out: dir.join("final"),
+        seam: seam(),
+        source: Source::All,
+        include: None,
+    }
+}
+
+/// `samples.tsv` of the out dir: the header's columns, and each row by column name.
+fn rows_of(out: &Path) -> Vec<BTreeMap<String, String>> {
+    let text = std::fs::read_to_string(out.join("samples.tsv")).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    assert_eq!(header.join("\t"), FINAL_TSV_HEADER);
+    lines
+        .map(|l| {
+            let cells: Vec<&str> = l.split('\t').collect();
+            assert_eq!(cells.len(), header.len(), "{l}");
+            header
+                .iter()
+                .zip(cells)
+                .map(|(h, c)| (h.to_string(), c.to_string()))
+                .collect()
+        })
+        .collect()
+}
+
+/// The `cell`'s pixels (column, row of the window) of panel `k` of the first row of a sheet
+/// at S 4.
+fn cell_of(sheet: &Rgba, k: usize, (c, r): (usize, usize)) -> Rgba {
+    let l = Layout::of(4);
+    let (px, py) = (
+        l.margin + k as u32 * (l.w + l.margin),
+        l.margin / 2 + l.caption_h() + l.margin,
+    );
+    let cell = 16 * 4;
+    sheet.rect(px + c as u32 * cell, py + r as u32 * cell, cell, cell)
+}
+
+fn read_sheet(path: &Path) -> Rgba {
+    let (w, h) = img::png_size(&std::fs::read(path).unwrap()).unwrap();
+    img::read_png(path, w, h).unwrap()
+}
+
+#[test]
+fn the_last_pass_is_what_the_windows_show() {
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("last", &text, &g, &left);
+    let o = options(&dir);
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    assert_eq!((s.passes, s.logged_last, s.first, s.last), (2, false, 3, 2));
+    // One survivor (B's item), placed at a pair it meets.
+    let rows = rows_of(&o.out);
+    assert_eq!(rows.len(), 1);
+    let w = &rows[0];
+    assert_eq!(
+        (
+            w["origin"].as_str(),
+            w["class"].as_str(),
+            w["placement"].as_str()
+        ),
+        ("coverage", "terrain", "pair")
+    );
+    assert_eq!(w["records"], atlas::image_name(ImageId::Tile(B)));
+    // Both pairs of the last pass drawn in the window, each ticked as the last pass has it: A
+    // beside B is gen-mmpx now (A fell), with the measure of the slices, not pass 1's gen-gen.
+    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
+    let slices = Slices::new(&g, left.clone());
+    let ticks: Vec<Vec<&str>> = w["ticks"]
+        .split(';')
+        .map(|t| t.split(',').collect())
+        .collect();
+    assert_eq!(ticks.len(), 2);
+    assert_eq!(w["pairs"], "2");
+    assert_eq!(w["kinds"], "map/gen-mmpx=2");
+    let ab = ticks.iter().find(|t| t[5] == name(A)).unwrap();
+    let (ratio, limit) = measure(&g, &slices, AB, seam()).unwrap().unwrap();
+    let want = [
+        "east".to_string(),
+        "map".into(),
+        "gen-mmpx".into(),
+        name(A),
+        name(B),
+        format!("{ratio:.4}"),
+        format!("{limit:.4}"),
+    ];
+    assert_eq!(ab[2..], want);
+    let first = record(&text).unwrap().pairs[1].clone();
+    assert_eq!(first.pair, AB);
+    assert_ne!(Some((ratio, limit)), first.result);
+    // The sheet: at A's cell the pack panel is the no-pack panel (A is MMPX in the final pack);
+    // at B's cell it is not (B's slice).
+    let a_cell: (usize, usize) = (ab[0].parse().unwrap(), ab[1].parse().unwrap());
+    let b_cell = (a_cell.0 + 1, a_cell.1);
+    let sheet = read_sheet(&o.out.join(&w["sheet"]));
+    assert_eq!(cell_of(&sheet, 2, a_cell), cell_of(&sheet, 1, a_cell));
+    assert_ne!(cell_of(&sheet, 2, b_cell), cell_of(&sheet, 1, b_cell));
+    assert_eq!(s.sheets, ["final-terrain.png", "final-terrain-s2.png"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn one_window_per_surviving_item_and_a_multi_record_item_is_one() {
+    let mut g = game();
+    // The tree (four records, one item) and a chest drawn in the world; a sword drawn nowhere.
+    let tree = synthetic::TREE;
+    g.world.objects = vec![
+        crate::game::Placed {
+            x: 10,
+            y: 10,
+            z: 0,
+            tile: tree + 3,
+        },
+        crate::game::Placed {
+            x: 12,
+            y: 12,
+            z: 0,
+            tile: synthetic::OBJECTS,
+        },
+    ];
+    let sword = synthetic::OBJECTS + 2;
+    let records = [
+        tree,
+        tree + 1,
+        tree + 2,
+        tree + 3,
+        synthetic::OBJECTS,
+        sword,
+    ];
+    let images: BTreeMap<u16, Rgba> = records.iter().map(|&r| (r, near(&g, r))).collect();
+    let (dir, work) = work_dir("items", "", &g, &images);
+    let o = options(&dir);
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    let rows = rows_of(&o.out);
+    // Three items, three windows: the tree once, with its four records.
+    assert_eq!(rows.len(), 3);
+    let by_class = |c: &str| rows.iter().filter(|r| r["class"] == c).collect::<Vec<_>>();
+    let trees = by_class("multi");
+    assert_eq!(trees.len(), 1);
+    let names: Vec<String> = (0..4)
+        .map(|k| atlas::image_name(ImageId::Tile(tree + k)))
+        .collect();
+    assert_eq!(trees[0]["records"], names.join("+"));
+    // In no pair: where the world first draws it (the tree's top-left part), and said.
+    assert_eq!(
+        (
+            trees[0]["placement"].as_str(),
+            trees[0]["x"].as_str(),
+            trees[0]["y"].as_str()
+        ),
+        ("drawn", "9", "9")
+    );
+    assert!(trees[0]["note"].starts_with("in no pair"));
+    let objects = by_class("object");
+    let places: Vec<&str> = objects.iter().map(|r| r["placement"].as_str()).collect();
+    assert_eq!(places, ["drawn", "alone"]);
+    assert!(objects[1]["note"].starts_with("drawn nowhere"));
+    // The window of a multi-record item draws all of it: each of its records in the frame.
+    let class = |c: Class| s.classes.iter().find(|x| x.class == c).unwrap().clone();
+    let m = class(Class::Multi);
+    assert_eq!(
+        (m.items, m.images, m.pair, m.drawn, m.alone),
+        (1, 4, 0, 1, 0)
+    );
+    let ob = class(Class::Object);
+    assert_eq!(
+        (ob.items, ob.images, ob.pair, ob.drawn, ob.alone),
+        (2, 2, 0, 1, 1)
+    );
+    let at = At { z: 0, x: 9, y: 9 };
+    let f = framed(&g, &super::super::window(&g, at), &[]);
+    let drawn: BTreeSet<u16> = f.drawn.iter().flatten().copied().collect();
+    assert!((0..4).all(|k| drawn.contains(&(tree + k))));
+    // The sheets: drawn windows by class, the alone one apart.
+    assert_eq!(
+        s.sheets,
+        [
+            "final-multi.png",
+            "final-multi-s2.png",
+            "final-object.png",
+            "final-object-s2.png",
+            "final-object-alone.png",
+            "final-object-alone-s2.png"
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_included_id_gets_its_window_or_a_row_of_zero() {
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("include", &text, &g, &left);
+    let list = dir.join("ids.txt");
+    let ids = format!(
+        "# the owner's list\n{}\n\n  {}  # sent back\nt:{}\n{}\n",
+        atlas::image_name(ImageId::Tile(B)),
+        A,
+        X,
+        atlas::image_name(ImageId::Tile(B)),
+    );
+    std::fs::write(&list, ids).unwrap();
+    let o = FinalOptions {
+        include: Some(list),
+        ..options(&dir)
+    };
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    // B once (each id once), A and X not generated.
+    assert_eq!(s.include, Some((3, 1, 2)));
+    let rows = rows_of(&o.out);
+    let inc: Vec<&BTreeMap<String, String>> =
+        rows.iter().filter(|r| r["origin"] == "include").collect();
+    assert_eq!(inc.len(), 3);
+    assert_eq!(inc[0]["records"], atlas::image_name(ImageId::Tile(B)));
+    assert_eq!(inc[0]["placement"], "pair");
+    assert_eq!(inc[0]["sheet"], "final-include.png");
+    for (r, id) in inc[1..].iter().zip([A, X]) {
+        assert_eq!(r["records"], atlas::image_name(ImageId::Tile(id)));
+        assert_eq!(r["note"], "not generated in the final pack (0)");
+        assert_eq!((r["sheet"].as_str(), r["pairs"].as_str()), ("-", "0"));
+    }
+    assert!(
+        s.text()
+            .contains("--include: 3 ids, 1 windows, 2 not generated")
+    );
+    // The list's lines: an id, a bare number, a comment; anything else is refused by line.
+    assert_eq!(include_ids("t:5\n7 # x\n#t:9\n\nt:5\n"), Ok(vec![5, 7]));
+    for bad in ["p:a:1", "t:x", "seven", "t:99999", "t:5 t:6"] {
+        let e = include_ids(&format!("t:1\n{bad}\n")).unwrap_err();
+        assert!(e.contains("line 2"), "{bad}: {e}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_summary_prints_every_label_and_sides_and_class_with_its_zero() {
+    let g = game();
+    let (text, left) = chain(&g);
+    // A label the gate does not write yet, on B beside the grass.
+    let text = text.replacen(r#""source":"map""#, r#""source":"map+odd""#, 3);
+    let (dir, work) = work_dir("zeros", &text, &g, &left);
+    let o = options(&dir);
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    let kinds: Vec<(&str, Sides, usize, usize, usize)> = s
+        .kinds
+        .iter()
+        .map(|k| (k.label.as_str(), k.sides, k.last, k.read, k.windows))
+        .collect();
+    let mut want = Vec::new();
+    for l in ["map", "objects", "replace", "object-terrain", "odd"] {
+        let n = if l == "map" || l == "odd" { 2 } else { 0 };
+        want.push((l, Sides::GenGen, 0, 0, 0));
+        want.push((l, Sides::GenMmpx, n, n, n.min(1)));
+    }
+    assert_eq!(kinds, want);
+    let text = s.text();
+    for line in [
+        "replace gen-gen: 0 in the last pass, 0 read, 0 windows",
+        "object-terrain gen-mmpx: 0 in the last pass, 0 read, 0 windows",
+        "odd gen-mmpx: 2 in the last pass, 2 read, 1 windows",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    // Every class, survivors or not.
+    assert_eq!(
+        s.classes.iter().map(|c| c.class).collect::<Vec<_>>(),
+        Class::ALL
+    );
+    assert!(text.contains("actor records"), "{text}");
+    // One label: only a survivor that meets a pair of it gets a window; the others are counted.
+    let o = FinalOptions {
+        source: Source::Label("objects".into()),
+        out: dir.join("objects"),
+        ..options(&dir)
+    };
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    let t = s
+        .classes
+        .iter()
+        .find(|c| c.class == Class::Terrain)
+        .unwrap();
+    assert_eq!((t.items, t.pair, t.unlabelled), (1, 0, 1));
+    assert!(s.sheets.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_disagreement_fails_and_draws_nothing() {
+    let g = game();
+    let (text, left) = chain(&g);
+    // A's master left in slices/ and listed, though the gate sent A back.
+    let mut kept = left.clone();
+    kept.insert(A, red_west(&near(&g, A)));
+    let (dir, work) = work_dir("disagree", &text, &g, &kept);
+    let o = options(&dir);
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(
+        e.contains("disagree, nothing drawn: failing 1, fallen 1"),
+        "{e}"
+    );
+    // No sheet, no samples.tsv; the details (record ids) in a file, not in the message.
+    let files: Vec<String> = std::fs::read_dir(&o.out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let mut files = files;
+    files.sort();
+    assert_eq!(files, ["disagreements.txt", "gates.jsonl", "ingest.json"]);
+    assert!(!e.contains("t:"));
+    let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
+    assert_eq!(detail.lines().count(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
 }

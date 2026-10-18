@@ -3,7 +3,8 @@
 //! work dir through a snapshot (copied to the out dir first and read there: a re-ingest of the
 //! work dir at the same time changes nothing read here; no lock is taken) and the ×8 masters of
 //! `--slices`, and writes PNG sheets and `samples.tsv` to the out dir. It calls nothing: no
-//! `codex`, no upload.
+//! `codex`, no upload. It samples the first pass (below), or, with `--final`, draws a window of
+//! every item of the final pack (the last section).
 //!
 //! - **The rows** ([`rows`]): the pairs checked in the first pass (`"pass":1`: the images ingest
 //!   judged before any neighbour fallback), each in a bucket by its result ([`Bucket`]): `pass`
@@ -45,6 +46,49 @@
 //! drawn across its edge (east when not given), with its ratio and limit when it was measured.
 //! `--at leader[,edge]` adds the window of the party leader's start cell, then the failing
 //! gen-mmpx pairs drawn within [`NEAR`] cells of it on its level, nearest first, at most `per`.
+//!
+//! **`--final`** ([`final_read`]): the read of the final pack, every item of it, not a sample
+//! (`--slices`, `--at`, `--per` and `--seed` are not taken).
+//! - **The state** ([`final_read::fixed`]): snapshots of `gates.jsonl` and `ingest.json`, the
+//!   masters of the work dir's `slices/` and the plan of items. `gates.jsonl` logs pass 1 whole
+//!   and a later pass's failing pairs only, so the last pass of the fixed point (the one that
+//!   fails nothing) is rebuilt: pass 1's pairs with a side still generated (a record with a
+//!   master), each measured from the slices by the gate itself ([`measure`]), its sides the
+//!   slices'. Where neither side changed since pass 1 the measure must be the one logged, every
+//!   pair must pass, and a log that has the last pass's lines must have exactly the rebuilt pass.
+//!   The list, the masters, the plan's items, the fallbacks and pass 1's sides must agree too
+//!   (every rule is listed at [`final_read::fixed`]). On a disagreement nothing is drawn: the
+//!   error gives its kinds and counts, `disagreements.txt` in the out dir the details.
+//! - **The windows**: one per item of tile records the fixed point left generated (listed whole
+//!   in `ingest.json`; a multi-record object is one item; portraits and bitmaps have no window);
+//!   then one per id of `--include FILE` (a record id a line, `t:N` or `N`, `#` to the line's end
+//!   a comment, each id once; the owner's file, refused inside a git work tree), and for an id
+//!   not generated in the final pack a row saying so and no window. A window is placed at the
+//!   pair of the last pass, with a cell, that one of its records meets with the largest ratio /
+//!   limit, the first in pair order on a tie (with `--source LABEL` one of that label: a survivor
+//!   that meets none has no coverage window and is counted, an included id takes any pair);
+//!   else, in no pair, where the world first draws one of its records (level, row, column), said
+//!   in the row; else, drawn nowhere in the starting world, the item alone in an empty window,
+//!   its pieces in a row from the second column and row with a cell between them (the row says
+//!   how many fit when not all do). The frame as above, A's cell at [`A_CELL`]: at a pair, its
+//!   records in its two cells; where it is drawn, its record in A's cell.
+//! - **The marks**: every pair of the last pass drawn inside the window (each record a cell
+//!   draws beside each record of the cell east or south of it) is marked in the panels' margins
+//!   as above and listed under the panels: its cell (column, row of the window), edge, labels,
+//!   sides and ratio / limit, `>` before the pair the window is placed at.
+//! - **The sheets** ([`final_read::final_sheet`]): `final-<class>.png` by the class ingest
+//!   names, `final-<class>-alone.png` for the windows drawn nowhere and `final-include.png`, in
+//!   parts under [`MAX_HEIGHT`], each with its `-s2.png`; with one `--source` every name starts
+//!   with it. A window's caption: its index, class, placement and why it is drawn.
+//! - **`samples.tsv`** ([`final_read::FINAL_TSV_HEADER`]): a line per window, then per included id
+//!   not generated: the index, `coverage` or `include`, the item, its records, its class, the
+//!   placement, A's cell (z, x, y) and edge, the pairs marked, their labels × sides with counts,
+//!   each pair (cell, edge, labels, sides, A, B, ratio, limit), the sheet and row, `frames`, and
+//!   a note.
+//! - **The report** ([`final_read::FinalSummary`]): survivors per class (items, images, windows by
+//!   placement); then, for each label of [`LABELS`] and any other the last pass has, both sides,
+//!   the pairs in the last pass, of them drawn in a window, and the windows drawing one, 0
+//!   printed.
 //!
 //! The object draw (`u6_core::objects::draw`, 0x10e81e, 0x10e73a, 0x10e596) as far as the
 //! starting lists tell it: the objects in list order, (y, x), and at one cell the later in the
@@ -612,6 +656,8 @@ pub struct Framed {
     /// A join cell draws no tile whose frames include the pair's record there: the window does
     /// not show the pair measured.
     pub missing: bool,
+    /// The records drawn in each cell, in draw order (row-major).
+    pub drawn: Vec<Vec<u16>>,
 }
 
 impl Framed {
@@ -660,6 +706,17 @@ fn window(game: &Game, at: At) -> Vec<Stack> {
 /// The frame of the window of A's cell `at` (module docs): the window's cells drawn at the
 /// frame's top-left, base first, then their lists; `pair`'s records in its two cells.
 pub fn frame(game: &Game, at: At, edge: Edge, pair: Option<Pair>) -> Framed {
+    let want: Vec<((usize, usize), u16)> = pair
+        .map(|p| vec![(A_CELL, p.a), (b_cell(edge), p.b)])
+        .unwrap_or_default();
+    framed(game, &window(game, at), &want)
+}
+
+/// The frame of the window's `cells` ([`COLS`] × [`ROWS`], row-major): each drawn at the
+/// frame's top-left, base first, then its list; in each cell of `want` (column, row) a tile
+/// whose frames include its record drawn as that record, every other tile at frame 0.
+/// `missing` when a cell of `want` draws no such tile.
+pub fn framed(game: &Game, cells: &[Stack], want: &[((usize, usize), u16)]) -> Framed {
     let mut fb = Framebuffer::new();
     fb.enable_src();
     for (i, c) in game.palette.iter().take(256).enumerate() {
@@ -670,29 +727,24 @@ pub fn frame(game: &Game, at: At, edge: Edge, pair: Option<Pair>) -> Framed {
         frame0: false,
         pair_frame: false,
         missing: false,
+        drawn: vec![Vec::new(); COLS * ROWS],
     };
-    let mut shown = [false; 2];
-    let cells = window(game, at);
+    let mut shown = vec![false; want.len()];
     let mut drawn = Drawn::of(game);
     for r in 0..ROWS {
         for c in 0..COLS {
-            let want = pair.and_then(|p| {
-                if (c, r) == A_CELL {
-                    Some((0, p.a))
-                } else if (c, r) == b_cell(edge) {
-                    Some((1, p.b))
-                } else {
-                    None
-                }
-            });
-            for t in cells[r * COLS + c].tiles() {
+            let wanted = want.iter().position(|w| w.0 == (c, r));
+            let Some(cell) = cells.get(r * COLS + c) else {
+                continue;
+            };
+            for t in cell.tiles() {
                 let frames = drawn.records(t);
                 let first = frame0(game, t);
-                let rec = match want {
-                    Some((side, w)) if frames.contains(&w) => {
-                        shown[side] = true;
-                        out.pair_frame |= w != first;
-                        w
+                let rec = match wanted {
+                    Some(k) if frames.contains(&want[k].1) => {
+                        shown[k] = true;
+                        out.pair_frame |= want[k].1 != first;
+                        want[k].1
                     }
                     _ => {
                         out.frame0 |= frames != [t];
@@ -700,10 +752,11 @@ pub fn frame(game: &Game, at: At, edge: Edge, pair: Option<Pair>) -> Framed {
                     }
                 };
                 blit(game, &mut out.fb, rec, c * TILE_W, r * TILE_W);
+                out.drawn[r * COLS + c].push(rec);
             }
         }
     }
-    out.missing = pair.is_some() && shown != [true; 2];
+    out.missing = shown.iter().any(|s| !s);
     out
 }
 
@@ -1014,9 +1067,14 @@ impl Layout {
 /// panel (east: on the two columns that meet) or left of it (south: on the two rows); along the
 /// edge, a bar left of the panel (east: the edge's rows) or above it (south: its columns).
 fn ticks(out: &mut Rgba, l: &Layout, (px, py): (u32, u32), edge: Edge) {
+    mark(out, l, (px, py), A_CELL, edge);
+}
+
+/// [`ticks`] for the join of the cell `(c, r)` of the window and the one `edge` of it.
+fn mark(out: &mut Rgba, l: &Layout, (px, py): (u32, u32), (c, r): (usize, usize), edge: Edge) {
     let cell = TILE_W as u32 * l.s;
     let m = l.margin;
-    let (ax, ay) = (A_CELL.0 as u32 * cell, A_CELL.1 as u32 * cell);
+    let (ax, ay) = (c as u32 * cell, r as u32 * cell);
     match edge {
         Edge::East => {
             img::fill(out, px + ax + cell - 1, py - m + 2, 2, m - 4, MARK);

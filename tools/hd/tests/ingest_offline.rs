@@ -1,7 +1,7 @@
 //! `ingest` and `calibrate` call nothing (spec 07 HD2: a re-ingest reads the sheets already
 //! generated, with no upload): on the synthetic set, an ingest that judges every sheet, refuses
 //! one and lays out its re-roll starts no `codex`, and neither does a calibrate that writes its
-//! sheets.
+//! sheets, nor its final read.
 //!
 //! How the tool finds `codex` (`run::Codex::from_env`): the `--codex PATH` argument when given,
 //! else the name `codex`, which the process spawn looks up on `PATH`. No environment variable
@@ -193,6 +193,44 @@ fn calibrate_makes_no_codex_call() {
         assert!(out.join(f).is_file(), "{f}");
     }
     assert_eq!(calls(), 0, "calibrate started codex");
+
+    // The final read, in a work dir of its own that ingest left with nothing generated: it
+    // reads the work dir's state, draws no window, and starts no codex either.
+    let fin = dir.join("final-work");
+    let fw = Work::open(Some(&fin)).unwrap();
+    fw.write("gates.jsonl", b"").unwrap();
+    fw.write("ingest.json", b"[]").unwrap();
+    std::fs::create_dir_all(fin.join("slices")).unwrap();
+    let fout = dir.join("calibrate-final");
+    let o = cmd(BIN)
+        .args(["calibrate", "--final", "--synthetic"])
+        .args(["--work", fin.to_str().unwrap()])
+        .args(["--out", fout.to_str().unwrap(), "--codex", c])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(text.contains("the record and the slices agree"), "{text}");
+    assert!(text.contains("samples.tsv: 0 rows"), "{text}");
+    assert!(fout.join("samples.tsv").is_file());
+    // What the final read does not take, and what only it takes.
+    let refused = [
+        vec!["--final", "--slices", "x"],
+        vec!["--final", "--at", "leader"],
+        vec!["--final", "--per", "2"],
+        vec!["--include", "x"],
+    ];
+    for extra in refused {
+        let o = cmd(BIN)
+            .args(["calibrate", "--synthetic", "--work", fin.to_str().unwrap()])
+            .args(&extra)
+            .output()
+            .unwrap();
+        assert!(!o.status.success(), "{extra:?}");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("--final"), "{extra:?}: {err}");
+    }
+    assert_eq!(calls(), 0, "calibrate --final started codex");
 
     // The routes were live: `run` (in a work dir of its own) reaches the stand-in by `PATH`,
     // then by `--codex`.

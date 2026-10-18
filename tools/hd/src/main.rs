@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use u6_hdtool::atlas::{self, SheetKind};
-use u6_hdtool::calibrate::{self, Source, Spot};
+use u6_hdtool::calibrate::{self, Source, Spot, final_read};
 use u6_hdtool::game::{Game, synthetic};
 use u6_hdtool::gate::Thresholds;
 use u6_hdtool::group::{self, Class, Item};
@@ -39,7 +39,9 @@ const USAGE: &str = "usage:
   u6-hd pack      [--work DIR] [--out FILE]
   u6-hd calibrate (--game PATH | --synthetic) [--work DIR] [--slices DIR] [--out DIR]
                   [--per N] [--seed N] [--source all|LABEL]
-                  [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...";
+                  [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...
+  u6-hd calibrate --final (--game PATH | --synthetic) [--work DIR] [--out DIR]
+                  [--source all|LABEL] [--include FILE]   (no --slices, --at, --per, --seed)";
 
 #[derive(Default)]
 struct Args {
@@ -58,6 +60,10 @@ struct Args {
     seed: u64,
     at: Vec<Spot>,
     source: Source,
+    final_read: bool,
+    include: Option<PathBuf>,
+    /// `--per` or `--seed` was given.
+    sampling: bool,
 }
 
 fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -91,6 +97,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--gate" => a.gates.set(&value("name=value")?)?,
             "--slices" => a.slices = Some(value("a directory")?.into()),
             "--per" => {
+                a.sampling = true;
                 let n = value("a number")?;
                 a.per = n.parse().map_err(|_| format!("bad --per {n:?}"))?;
                 if a.per == 0 {
@@ -98,6 +105,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
             }
             "--seed" => {
+                a.sampling = true;
                 let n = value("a number")?;
                 a.seed = n.parse().map_err(|_| format!("bad --seed {n:?}"))?;
             }
@@ -105,6 +113,8 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                 a.at.push(Spot::parse(&value("z,x,y[,edge] or leader[,edge]")?)?)
             }
             "--source" => a.source = Source::parse(&value("all or a label")?)?,
+            "--final" => a.final_read = true,
+            "--include" => a.include = Some(value("a file")?.into()),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -315,10 +325,40 @@ fn pack_cmd(a: &Args) -> Result<(), String> {
 }
 
 /// Sheets of the neighbour gate's pairs from a snapshot of `gates.jsonl` (no lock: a re-ingest
-/// running at the same time leaves the snapshot as it was read).
+/// running at the same time leaves the snapshot as it was read); with `--final`, a window per
+/// item the fixed point left generated.
 fn calibrate_cmd(a: &Args) -> Result<(), String> {
+    if a.final_read {
+        let other = [
+            (
+                a.slices.is_some(),
+                "--slices (it reads the work dir's slices/)",
+            ),
+            (!a.at.is_empty(), "--at"),
+            (a.sampling, "--per or --seed (it samples nothing)"),
+        ];
+        if let Some((_, what)) = other.iter().find(|o| o.0) {
+            return Err(format!("calibrate --final takes no {what}"));
+        }
+    } else if a.include.is_some() {
+        return Err("--include is for calibrate --final".into());
+    }
     let g = game(a)?;
     let work = Work::open(a.work.as_deref())?;
+    if a.final_read {
+        let opts = final_read::FinalOptions {
+            out: a
+                .out
+                .clone()
+                .unwrap_or_else(|| work.path("calibrate-final")),
+            seam: a.gates.seam,
+            source: a.source.clone(),
+            include: a.include.clone(),
+        };
+        let s = final_read::calibrate_final(&g, &work, &opts)?;
+        say_raw!("{}", s.text());
+        return Ok(());
+    }
     let opts = calibrate::Options {
         slices: a.slices.clone().unwrap_or_else(|| work.path("slices")),
         out: a.out.clone().unwrap_or_else(|| work.path("calibrate")),

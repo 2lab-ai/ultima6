@@ -11,6 +11,8 @@
 //! u6-hd calibrate (--game PATH | --synthetic) [--work DIR] [--slices DIR] [--out DIR]
 //!                 [--per N] [--seed N] [--source all|LABEL]
 //!                 [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...
+//! u6-hd calibrate --final (--game PATH | --synthetic) [--work DIR] [--out DIR]
+//!                 [--source all|LABEL] [--include FILE]
 //! ```
 //!
 //! `--gate` changes one threshold of `gate::Thresholds` for the run (structure, shift, iou,
@@ -19,7 +21,8 @@
 //! pipeline (real imagegen calls included) can be run without any game art. `run` sends
 //! nothing without `--send`, and exits non-zero when a call failed. `calibrate` draws sheets of
 //! the neighbour gate's pairs from a snapshot of `gates.jsonl` for a read by eye ([`calibrate`]);
-//! it calls nothing. There is no `export`: packs made from the game's art are derived
+//! `calibrate --final` a window per item the fixed point left generated, from the work dir's
+//! final state; it calls nothing. There is no `export`: packs made from the game's art are derived
 //! (`derived: true`) and are never shared.
 
 pub mod atlas;
