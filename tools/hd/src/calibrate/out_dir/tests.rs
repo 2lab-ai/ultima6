@@ -585,3 +585,30 @@ fn the_incomplete_runs_are_listed_oldest_first_whatever_order_they_were_made_in(
     assert_eq!(w.incomplete, want);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_run_whose_dir_is_moved_before_done_fails_and_writes_no_done() {
+    // The run dir renamed away (by another hand) after the run's last file: the path the
+    // report would name holds nothing of it, so the run fails, and no done is written in the
+    // dir it made, where it is now.
+    let dir = temp("moved");
+    let out = dir.join("out");
+    let away = dir.join("away");
+    let (o, to) = (out.clone(), away.clone());
+    let _h = hook(&out, "write", move |name| {
+        if name == "a.png" {
+            std::fs::rename(only_run(&o), &to).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    assert!(e.contains("the run dir moved"), "{e}");
+    assert!(
+        e.contains("removed or replaced while the run wrote it"),
+        "{e}"
+    );
+    assert!(names(&out).is_empty(), "{:?}", names(&out));
+    assert!(!away.join(DONE).exists());
+    assert_eq!(names(&away), [REFUSED]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
