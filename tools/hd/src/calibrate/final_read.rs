@@ -13,9 +13,9 @@ use u6_hdpack::ImageId;
 use u6_render::hd::Scale;
 
 use super::{
-    A_CELL, BACK, COLS, Framed, LABELS, Layout, MAX_HEIGHT, PANEL_NAMES, Panels, ROWS, RawAt,
-    RawPair, Sides, Slices, Source, Stack, edge_name, frame, framed, labels, mark, measure,
-    pair_line, panels, parse_edge, stacks, text,
+    A_CELL, BACK, COLS, Framed, LABELS, Layout, MAX_HEIGHT, PANEL_NAMES, Panels, REPLACES_BASE,
+    ROWS, RawAt, RawPair, Sides, Slices, Source, Stack, edge_name, frame, framed, labels, mark,
+    measure, pair_line, panels, parse_edge, text,
 };
 use crate::atlas;
 use crate::game::Game;
@@ -806,10 +806,33 @@ pub fn include_ids(text: &str) -> Result<Vec<u16>, String> {
 }
 
 /// Where each record of `wanted` is first drawn in the starting world (level, row, column, the
-/// least first): as a map tile or an object's tile or part, through every frame that replaces
-/// it.
+/// least first): as a map tile (but in a cell whose base an object's tile with flags3 0x20
+/// replaces) or an object's tile or part, through every frame that replaces it.
 pub fn first_drawn(game: &Game, wanted: &BTreeSet<u16>) -> BTreeMap<u16, At> {
     let world = &game.world;
+    // The cells whose base an object replaces (0x10e596): their map tile is not drawn.
+    let mut replaced: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
+    for o in &world.objects {
+        let z = usize::from(o.z);
+        let s = world.levels.get(z).map_or(0, |l| l.tiles()) as i64;
+        if s == 0 {
+            continue;
+        }
+        for (dx, dy, t) in neighbour::parts(game, o.tile) {
+            if game
+                .flags3
+                .get(usize::from(t))
+                .is_some_and(|f| f & REPLACES_BASE != 0)
+            {
+                let wrap = |v: i64| v.rem_euclid(s) as usize;
+                replaced.insert((
+                    z,
+                    wrap(i64::from(o.y) + i64::from(dy)),
+                    wrap(i64::from(o.x) + i64::from(dx)),
+                ));
+            }
+        }
+    }
     let mut drawn = Drawn::of(game);
     let mut hits: HashMap<u16, Vec<u16>> = HashMap::new();
     let mut first: BTreeMap<u16, (usize, usize, usize)> = BTreeMap::new();
@@ -827,7 +850,9 @@ pub fn first_drawn(game: &Game, wanted: &BTreeSet<u16>) -> BTreeMap<u16, At> {
         let s = level.tiles();
         for y in 0..s {
             for x in 0..s {
-                if let Some(t) = world.tile(z, x, y) {
+                if let Some(t) = world.tile(z, x, y)
+                    && !replaced.contains(&(z, y, x))
+                {
                     see(t, (z, y, x), &mut first);
                 }
             }
@@ -869,6 +894,9 @@ pub struct Window {
     pub edge: Edge,
     /// The pair it is placed at (its index in [`Fixed::last`]).
     pub pair: Option<usize>,
+    /// Where the world draws it: the record of it the world first draws there, drawn in A's
+    /// cell as that record (`missing` when it does not show there).
+    pub anchor: Option<u16>,
     /// Alone: the pieces it draws, and which of the windows its item's pieces need it is (1 the
     /// first, of how many); `rest`: of the records of its item no other window shows.
     pub pieces: Vec<Piece>,
@@ -907,7 +935,7 @@ fn place(
 ) -> Option<Window> {
     let pair = at_pair(fixed, &records, label)
         .or_else(|| (!strict).then(|| at_pair(fixed, &records, None)).flatten());
-    let window = |placement, at, edge, pair| Window {
+    let window = |placement, at, edge, pair, anchor| Window {
         origin,
         survivor,
         records: records.clone(),
@@ -915,24 +943,31 @@ fn place(
         at,
         edge,
         pair,
+        anchor,
         pieces: Vec::new(),
         part: (1, 1),
         rest: false,
     };
     if let Some(i) = pair {
         let l = &fixed.last[i];
-        return Some(window(Placement::Pair, l.at, l.pair.edge, Some(i)));
+        return Some(window(Placement::Pair, l.at, l.pair.edge, Some(i), None));
     }
     if strict {
         return None;
     }
     match records
         .iter()
-        .filter_map(|r| first.get(r))
-        .min_by_key(|a| (a.z, a.y, a.x))
+        .filter_map(|&r| first.get(&r).map(|&a| (r, a)))
+        .min_by_key(|(_, a)| (a.z, a.y, a.x))
     {
-        Some(&at) => Some(window(Placement::Drawn, Some(at), Edge::East, None)),
-        None => Some(window(Placement::Alone, None, Edge::East, None)),
+        Some((r, at)) => Some(window(
+            Placement::Drawn,
+            Some(at),
+            Edge::East,
+            None,
+            Some(r),
+        )),
+        None => Some(window(Placement::Alone, None, Edge::East, None, None)),
     }
 }
 
@@ -1256,14 +1291,8 @@ fn draw_window(game: &Game, fixed: &Fixed, by: &BTreeMap<Pair, usize>, w: &Windo
             frame(game, at, w.edge, p)
         }
         (Placement::Drawn, Some(at)) => {
-            let shown = w
-                .records
-                .iter()
-                .copied()
-                .filter(|r| first_at(game, at, *r))
-                .take(1)
-                .collect::<Vec<u16>>();
-            let want: Vec<((usize, usize), u16)> = shown.iter().map(|&r| (A_CELL, r)).collect();
+            let want: Vec<((usize, usize), u16)> =
+                w.anchor.map(|r| (A_CELL, r)).into_iter().collect();
             framed(game, &window_at(game, at), &want)
         }
         _ => framed(game, &alone(&w.pieces).0, &[]),
@@ -1286,15 +1315,6 @@ fn alone_pieces(plan: &Plan, sv: &Survivor, origin: Origin, records: &[u16]) -> 
             .collect(),
         _ => plan.items[sv.item as usize].pieces.clone(),
     }
-}
-
-/// Whether the cell `at` draws record `r` (some tile there, through its frames).
-fn first_at(game: &Game, at: At, r: u16) -> bool {
-    let cells = stacks(game, at.z, (at.x, at.y), (1, 1));
-    let mut d = Drawn::of(game);
-    cells
-        .first()
-        .is_some_and(|c| c.tiles().any(|t| d.records(t).contains(&r)))
 }
 
 /// The stacks of the window whose A's cell is `at`.
@@ -1527,6 +1547,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
             at: Some(at),
             edge: l.pair.edge,
             pair: Some(i),
+            anchor: None,
             pieces: Vec::new(),
             part: (1, 1),
             rest: false,
@@ -1564,6 +1585,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
             at: None,
             edge: Edge::East,
             pair: None,
+            anchor: None,
             pieces: Vec::new(),
             part: (1, 1),
             rest: true,

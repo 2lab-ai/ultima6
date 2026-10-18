@@ -1262,6 +1262,50 @@ fn every_record_of_an_item_is_drawn_in_a_window() {
 }
 
 #[test]
+fn a_window_where_the_world_draws_it_shows_its_record() {
+    // The chest animates through two made-up frames (each a chest of its own); the second one
+    // survives, in no pair, drawn where the chest stands (12, 12). Its window draws the chest's
+    // tile as that frame, not at frame 0.
+    let mut g = game();
+    let chest = synthetic::OBJECTS;
+    let (f0, f1) = (160, 161);
+    for (k, f) in [f0, f1].into_iter().enumerate() {
+        let mut r = g.records[usize::from(chest)].clone();
+        r.pixels[9 * 16 + 5 + k] = 4;
+        g.records[usize::from(f)] = r;
+    }
+    g.anim.push(u6_formats::animdata::AnimEntry {
+        tile_to_animate: chest,
+        first_anim_frame: f0,
+        and_mask: 1,
+        shift: 0,
+    });
+    let at = |x, y, tile| crate::game::Placed { x, y, z: 0, tile };
+    g.world.objects = vec![at(12, 12, chest)];
+    let images = BTreeMap::from([(f1, near(&g, f1))]);
+    let (text, left) = gate_log(&g, &images);
+    assert_eq!(left, images);
+    let (dir, work) = work_dir("anchor", &text, &g, &images);
+    let o = options(&dir);
+    calibrate_final(&g, &work, &o).unwrap();
+    let rows = rows_of(&o.out);
+    let w = &rows[0];
+    assert_eq!(
+        (w["placement"].as_str(), w["x"].as_str(), w["y"].as_str()),
+        ("drawn", "12", "12")
+    );
+    assert_eq!(w["frames"], "pair");
+    // A map tile whose cell's base an object replaces is not drawn there: where the world first
+    // draws the grass is past the first cell when a replacing object stands on it.
+    let wanted = BTreeSet::from([GRASS]);
+    assert_eq!(first_drawn(&g, &wanted)[&GRASS], At { z: 0, x: 0, y: 0 });
+    g.flags3[usize::from(X)] = REPLACES_BASE;
+    g.world.objects.push(at(0, 0, X));
+    assert_eq!(first_drawn(&g, &wanted)[&GRASS], At { z: 0, x: 1, y: 0 });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_pair_with_nothing_measured_is_read_where_its_sides_show() {
     // The chain, and B again at (4, 5) beside a record T east of it whose west half is clear:
     // the gate measures nothing across that join, and the pair is still one of the last pass.
