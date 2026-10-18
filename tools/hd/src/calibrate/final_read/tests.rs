@@ -461,6 +461,11 @@ fn the_record_and_the_slices_must_agree() {
     list[0].hash = "0".repeat(16);
     let err = state_of(&g, &text, &left, &list, &digests(&left));
     assert_eq!(err.unwrap_err(), ["listed"]);
+    // A listed slice that is not the image's own file.
+    let mut list = listed(&g, &left);
+    list[0].slice = format!("slices/{}.png", atlas::slice_name(ImageId::Tile(A)));
+    let err = state_of(&g, &text, &left, &list, &digests(&left));
+    assert_eq!(err.unwrap_err(), ["listed"]);
     // A master the gate refuses: not ×4 of its record.
     let small = BTreeMap::from([(B, Rgba::new(32, 32))]);
     assert_eq!(state(&g, &text, &small).unwrap_err(), ["refused"]);
