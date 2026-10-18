@@ -169,7 +169,9 @@ pub enum Operands {
     /// Expressions in order; `actor` marks the ones the executor resolves to an actor.
     Args(Vec<Operand>),
     /// `b0`: the new read position (the low word of the operand, sign-extended).
-    Jump { target: u32 },
+    Jump {
+        target: u32,
+    },
     Print(Print),
     Assign(Assign),
 }
@@ -556,6 +558,9 @@ impl<'a> Decoder<'a> {
         let Some(look) = self.first(0, ops::LOOK) else {
             return refuse(0, Reason::NoLookMarker);
         };
+        if self.first(look, ops::GREETING).is_none() {
+            return refuse(look, Reason::NoGreetingMarker);
+        }
         if look < 2 {
             return refuse(look, Reason::NoHeader);
         }
@@ -630,7 +635,10 @@ impl<'a> Decoder<'a> {
                 let text = matches!(item.kind, Kind::Text(_));
                 let start = self.insert(item)?;
                 // A run that stops at a run decoded earlier ends where a path entered.
-                if text && self.owner.get(end as usize).is_some_and(|&o| o == end) {
+                if text
+                    && self.b.get(end as usize).is_some_and(|&b| ops::is_text(b))
+                    && self.owner[end as usize] == end
+                {
                     self.run_splits.push(end);
                 }
                 start
@@ -898,8 +906,12 @@ impl<'a> Decoder<'a> {
                         .then(|| self.b[i as usize + 1])
                         .filter(|&c| Escape::start(c).is_none());
                     match (esc, arg) {
-                        (Escape::Str(_), Some(c)) => (2, Some(Escape::Str(Some(ops::var_index(c))))),
-                        (Escape::Int(_), Some(c)) => (2, Some(Escape::Int(Some(ops::var_index(c))))),
+                        (Escape::Str(_), Some(c)) => {
+                            (2, Some(Escape::Str(Some(ops::var_index(c)))))
+                        }
+                        (Escape::Int(_), Some(c)) => {
+                            (2, Some(Escape::Int(Some(ops::var_index(c)))))
+                        }
                         (Escape::Glyph(_), Some(c)) => (2, Some(Escape::Glyph(Some(c)))),
                         (esc, _) => (1, Some(esc)),
                     }
@@ -1291,10 +1303,7 @@ impl<'a> Decoder<'a> {
                 if i + 2 > limit {
                     break;
                 }
-                entries.push(Span {
-                    offset: i,
-                    len: 2,
-                });
+                entries.push(Span { offset: i, len: 2 });
                 i += 2;
             } else {
                 let Some(nul) = (i..limit).find(|&j| self.b[j as usize] == 0) else {

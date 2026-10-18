@@ -193,13 +193,15 @@ pub(crate) fn loaded(letter: u8, item: u16) {
 
 // ---- the cross-check -------------------------------------------------------------------------
 
-/// The cross-check's counts. Every field but the first two must be 0 for a pass.
+/// The cross-check's counts. Every field but the first three must be 0 for a pass.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Counts {
     /// Offsets checked (text bytes, op and stop bytes, input ops, table bytes).
     pub offsets: usize,
     /// Text visits whose printed output was compared.
     pub filled: usize,
+    /// Table strings read (by `print_op` and `assign`).
+    pub table_strings: usize,
     /// Reads outside any item, or at an item of the wrong kind or not at its start.
     pub mismatches: usize,
     /// Bytes read that differ from the script's bytes.
@@ -220,6 +222,7 @@ impl Counts {
     pub fn add(&mut self, o: &Counts) {
         self.offsets += o.offsets;
         self.filled += o.filled;
+        self.table_strings += o.table_strings;
         self.mismatches += o.mismatches;
         self.byte_mismatches += o.byte_mismatches;
         self.partial_visits += o.partial_visits;
@@ -325,7 +328,9 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
                     n.unknown_script += 1;
                     continue;
                 };
-                let Some(at) = u32::try_from(*at).ok().filter(|&a| (a as usize) < d.bytes.len())
+                let Some(at) = u32::try_from(*at)
+                    .ok()
+                    .filter(|&a| (a as usize) < d.bytes.len())
                 else {
                     n.past_item += 1;
                     continue;
@@ -349,7 +354,9 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
                     n.unknown_script += 1;
                     continue;
                 };
-                let Some(at) = u32::try_from(*at).ok().filter(|&a| (a as usize) < d.bytes.len())
+                let Some(at) = u32::try_from(*at)
+                    .ok()
+                    .filter(|&a| (a as usize) < d.bytes.len())
                 else {
                     n.offsets += 1;
                     n.past_item += 1;
@@ -358,7 +365,9 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
                 if *byte == 0 {
                     // The NUL that ends the string: it closes the read.
                     if let Some((s, next, p)) = table.take() {
-                        n.table_mismatches += usize::from(next != at || !table_ok(current, (s, at, p)));
+                        n.table_strings += 1;
+                        n.table_mismatches +=
+                            usize::from(next != at || !table_ok(current, (s, at, p)));
                     }
                     continue;
                 }
@@ -388,13 +397,14 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
 
 /// One table read `start..end` must be exactly one entry of a string table.
 fn table_ok(d: Option<&Decoded<'_>>, (start, end, _): (u32, u32, bool)) -> bool {
-    d.and_then(|d| d.item_at(start)).is_some_and(|it| match &it.kind {
-        Kind::Table(t) if !t.words => t
-            .entries
-            .iter()
-            .any(|e| e.offset == start && e.end() == end),
-        _ => false,
-    })
+    d.and_then(|d| d.item_at(start))
+        .is_some_and(|it| match &it.kind {
+            Kind::Table(t) if !t.words => t
+                .entries
+                .iter()
+                .any(|e| e.offset == start && e.end() == end),
+            _ => false,
+        })
 }
 
 /// Ends the text visit in progress: its reads must cover whole runs, from a run's start to a

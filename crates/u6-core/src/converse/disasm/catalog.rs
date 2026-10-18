@@ -32,9 +32,9 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// FNV-1a 64 of `bytes`.
 pub fn hash64(bytes: &[u8]) -> u64 {
-    bytes
-        .iter()
-        .fold(FNV_OFFSET, |h, &b| (h ^ u64::from(b)).wrapping_mul(FNV_PRIME))
+    bytes.iter().fold(FNV_OFFSET, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(FNV_PRIME)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,8 +154,7 @@ impl ScriptUnits {
                         .collect(),
                 }),
                 Kind::Keywords(spans) => {
-                    out.keywords
-                        .extend(spans.iter().map(|&s| unit(script, s)));
+                    out.keywords.extend(spans.iter().map(|&s| unit(script, s)));
                 }
                 _ => {}
             }
@@ -215,10 +214,12 @@ impl Catalog {
     pub fn build<'a>(scripts: impl IntoIterator<Item = (u8, u16, &'a [u8])>) -> Self {
         let scripts = scripts
             .into_iter()
-            .map(|(archive, item, bytes)| match disassemble(archive, item, bytes) {
-                Ok(d) => ScriptUnits::new(&d, bytes),
-                Err(why) => ScriptUnits::refused(archive, item, bytes, &why),
-            })
+            .map(
+                |(archive, item, bytes)| match disassemble(archive, item, bytes) {
+                    Ok(d) => ScriptUnits::new(&d, bytes),
+                    Err(why) => ScriptUnits::refused(archive, item, bytes, &why),
+                },
+            )
             .collect();
         Self {
             format: FORMAT.into(),

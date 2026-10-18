@@ -63,7 +63,11 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
         };
         decoded += 1;
         bytes += b.len();
-        assert!(covers_once(&d), "script {}{item}: coverage", char::from(*letter));
+        assert!(
+            covers_once(&d),
+            "script {}{item}: coverage",
+            char::from(*letter)
+        );
         once += d.items.iter().map(|i| i.len as usize).sum::<usize>();
         for it in &d.items {
             let k = match &it.kind {
@@ -98,6 +102,9 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
     }
     let catalog = Catalog::build(all.iter().map(|(l, i, b)| (*l, *i, b.as_slice())));
     let runs: usize = catalog.scripts.iter().map(|s| s.runs.len()).sum();
+    let ops = kinds.get("op").copied().unwrap_or(0) + kinds.get("op (jump)").copied().unwrap_or(0);
+    let data = kinds.get("table").copied().unwrap_or(0)
+        + kinds.get("unreached range").copied().unwrap_or(0);
     println!(
         "scripts {} decoded {decoded} refused {}",
         all.len(),
@@ -107,7 +114,9 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
         println!("refused: {r} x{n}");
     }
     println!("items by kind: {kinds:?}");
-    println!("runs {runs}, table strings {strings} in {tables} tables, unreached bytes {unreached}");
+    println!(
+        "runs {runs}, table strings {strings}, ops {ops}, data ranges {data} ({tables} tables, unreached bytes {unreached})"
+    );
     println!("hazards: {hazards:?}");
     println!(
         "bytes {bytes}, covered by exactly one item {once} ({}%)",
@@ -179,9 +188,10 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
     }
     println!("conversations {talked}");
     println!(
-        "offsets checked {}, visits filled {}, mismatches {} (bytes {}, partial visits {}, fill {}, table {}, past the item {}, unknown script {})",
+        "offsets checked {}, visits filled {}, table strings read {}, mismatches {} (bytes {}, partial visits {}, fill {}, table {}, past the item {}, unknown script {})",
         total.offsets,
         total.filled,
+        total.table_strings,
         total.mismatches,
         total.byte_mismatches,
         total.partial_visits,
