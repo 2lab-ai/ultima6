@@ -359,7 +359,8 @@ fn the_image_helpers_refuse_images_that_do_not_fit() {
     assert_eq!(mmpx4(&wide), None);
     let m = mmpx4(&c).unwrap();
     assert_eq!((m.width, m.height, m.pixels.len()), (64, 64, 64 * 64 * 4));
-    // The measure: k = 0, classic images of other sizes or short, shown images short.
+    // The measure: k = 0, classic images of other sizes or short (as A and as B), shown images
+    // short.
     let px = gate::shown(&c, &ok).unwrap();
     let s = seam();
     for edge in [Edge::East, Edge::South] {
@@ -375,6 +376,10 @@ fn the_image_helpers_refuse_images_that_do_not_fit() {
         );
         assert_eq!(
             gate::neighbour_seam((&few, &px), (&c, &px), K, edge, s),
+            None
+        );
+        assert_eq!(
+            gate::neighbour_seam((&c, &px), (&few, &px), K, edge, s),
             None
         );
         let small = Classic {
