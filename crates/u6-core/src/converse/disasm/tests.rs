@@ -1027,6 +1027,70 @@ fn a_table_wins_over_the_code_of_a_landing_decoded_before_it() {
     );
 }
 
+/// After [`after_an_if`]'s `a1` (whose landing, sorted first, jumps to `x` and runs it): a
+/// jump to `x`, the `*` block's `ee`, then block `q`, which `op`s the table at `x` and jumps
+/// back; then `tail` at `x`. The review's shape for a table with no entry.
+fn a_table_at_an_ifs_code(op: &[u8], tail: &[u8]) -> (Vec<u8>, u32) {
+    // jump (5), ee, ef q f6 (3), b5 d2 x (6), op, jump (5), ee.
+    let x = BODY + 13 + 5 + 1 + 3 + 6 + op.len() as u32 + 5 + 1;
+    let mut rest = jump(x);
+    rest.push(0xee);
+    rest.extend(b"\xefq\xf6\xb5");
+    rest.extend(lit32(x));
+    rest.extend_from_slice(op);
+    rest.extend(jump(BODY));
+    rest.push(0xee);
+    rest.extend_from_slice(tail);
+    (after_an_if(&rest), x)
+}
+
+#[test]
+fn a_landings_table_with_no_entry_drops_its_namers_or_wins_never_refuses_the_script() {
+    // No NUL after `x`: the table has no entry even once the a1's code is out of it, so the
+    // print's index is past it and its namers (both of the `*` block's loops) are dropped; the
+    // a1's code stays.
+    let (s, x) = a_table_at_an_ifs_code(&[0xb1], b"zz\xb6");
+    let d = ok(&s);
+    assert!(matches!(item(&d, x).kind, Kind::Text(_)), "{:?}", shape(&d));
+    assert!(!d.items.iter().any(|i| matches!(i.kind, Kind::Table(_))));
+    for scan in [Scan::NoMatch, Scan::Answered] {
+        assert!(
+            d.hazards.contains(&Hazard {
+                at: BODY + 19,
+                kind: HazardKind::Dropped(scan, Reason::TableIndex)
+            }),
+            "{:?}",
+            d.hazards
+        );
+    }
+    // One string and a computed index: cut to no entry by the a1's code, the table still holds
+    // its address, wins, and the a1's landing stops there.
+    let (s, x) = a_table_at_an_ifs_code(&[0x01, 0xb2, 0xa7], b"zz\0");
+    let d = ok(&s);
+    let Kind::Table(t) = &item(&d, x).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(
+        t.entries.iter().map(|e| e.bytes(&s)).collect::<Vec<_>>(),
+        [b"zz"]
+    );
+    assert!(
+        d.hazards.contains(&Hazard {
+            at: x,
+            kind: HazardKind::IntoData
+        }),
+        "{:?}",
+        d.hazards
+    );
+    assert!(
+        !d.hazards
+            .iter()
+            .any(|h| matches!(h.kind, HazardKind::Dropped(..))),
+        "{:?}",
+        d.hazards
+    );
+}
+
 #[test]
 fn an_address_a_later_round_no_longer_names_is_settled_and_its_namer_dropped() {
     // The `a1`'s landing reads "zz" at BODY + 13 as text and jumps on to block `q` (reached no

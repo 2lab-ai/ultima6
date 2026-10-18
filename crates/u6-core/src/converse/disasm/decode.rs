@@ -903,7 +903,8 @@ impl<'a> Decoder<'a> {
         let mut p = self.plan.clone();
         let mut held = BTreeSet::new();
         for (addr, table) in self.table_ranges() {
-            let end = table_end(addr, &table);
+            // A table with no entry still holds its address: landing code there is inside it.
+            let end = table_end(addr, &table).max(addr + 1);
             held.extend(addr..end);
             let namers: BTreeSet<Origin> = self
                 .uses
