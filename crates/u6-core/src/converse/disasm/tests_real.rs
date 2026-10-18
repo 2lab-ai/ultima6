@@ -121,7 +121,7 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
     println!("hazards: {hazards:?}");
     println!(
         "bytes {bytes}, covered by exactly one item {once} ({}%)",
-        if bytes == 0 { 0 } else { once * 100 / bytes }
+        (once * 100).checked_div(bytes).unwrap_or(0)
     );
     println!(
         "catalog fnv1a64 {:016x}",
