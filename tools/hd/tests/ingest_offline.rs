@@ -1,6 +1,14 @@
 //! `ingest` calls nothing (spec 07 HD2: a re-ingest reads the sheets already generated, with no
-//! upload): on the synthetic set, with a `codex` stand-in first on `PATH` that logs any call,
-//! an ingest that judges every sheet, refuses one and lays out its re-roll starts no call.
+//! upload): on the synthetic set, an ingest that judges every sheet, refuses one and lays out
+//! its re-roll starts no `codex`.
+//!
+//! How the tool finds `codex` (`run::Codex::from_env`): the `--codex PATH` argument when given,
+//! else the name `codex`, which the process spawn looks up on `PATH`. No environment variable
+//! and no config file names the binary; `CODEX_HOME` (else `$HOME/.codex`) is only the folder
+//! codex keeps its images in. So the test points both routes at a stand-in that logs every
+//! call: its folder first on `PATH`, and `--codex` given to ingest too (the argument parser is
+//! shared, so ingest takes it). `HOME` and `CODEX_HOME` are folders of the test. Afterwards
+//! `run` reaches the stand-in by each route, so the routes were live while ingest ran.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,27 +26,31 @@ fn temp(name: &str) -> PathBuf {
     dir.canonicalize().unwrap()
 }
 
-/// `bin/codex`: appends a line to `$STUB_LOG` per call.
+/// `bin/codex`: appends a line to `$STUB_LOG` per call, and gives no image.
 fn stub(dir: &Path) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let p = bin.join("codex");
-    std::fs::write(&p, "#!/bin/sh\necho call >> \"$STUB_LOG\"\n").unwrap();
+    std::fs::write(
+        &p,
+        "#!/bin/sh\necho call >> \"$STUB_LOG\"\ncat > /dev/null\n",
+    )
+    .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-    bin
+    p
 }
 
 #[test]
 fn ingest_makes_no_codex_call() {
     let dir = temp("ingest");
-    let bin = stub(&dir);
+    let codex = stub(&dir);
     let home = dir.join("home");
     std::fs::create_dir_all(home.join(".codex")).unwrap();
     let log = dir.join("calls.log");
     let path = format!(
         "{}:{}",
-        bin.display(),
+        codex.parent().unwrap().display(),
         std::env::var("PATH").unwrap_or_default()
     );
     let cmd = |prog: &str| {
@@ -50,25 +62,34 @@ fn ingest_makes_no_codex_call() {
             .current_dir(&dir);
         c
     };
-    let calls = || std::fs::read_to_string(&log).map_or(0, |t| t.lines().count());
+    // The calls logged so far: no log is none; a log that cannot be read is no answer.
+    let calls = || match std::fs::read_to_string(&log) {
+        Ok(t) => t.lines().count(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => panic!("the call log: {e}"),
+    };
     // The stand-in is the `codex` this environment finds.
     assert!(
         cmd("/bin/sh")
-            .args(["-c", "codex"])
+            .args(["-c", "codex < /dev/null"])
             .status()
             .unwrap()
             .success()
     );
     assert_eq!(calls(), 1);
     std::fs::remove_file(&log).unwrap();
+    assert_eq!(calls(), 0);
 
+    let atlas = |work: &Path| {
+        let o = cmd(BIN)
+            .args(["atlas", "--synthetic", "--work", work.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    };
     let work = dir.join("work");
     let w = work.to_str().unwrap();
-    let o = cmd(BIN)
-        .args(["atlas", "--synthetic", "--work", w])
-        .output()
-        .unwrap();
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    atlas(&work);
     // Every sheet back as sent, but the tile sheet one pixel narrower: refused, re-rolled.
     let wk = Work::open(Some(&work)).unwrap();
     for job in wk.read_jobs().unwrap() {
@@ -80,8 +101,9 @@ fn ingest_makes_no_codex_call() {
         };
         run::record(&wk, &job, &img::encode_png(&back).unwrap()).unwrap();
     }
+    let c = codex.to_str().unwrap();
     let o = cmd(BIN)
-        .args(["ingest", "--synthetic", "--work", w])
+        .args(["ingest", "--synthetic", "--work", w, "--codex", c])
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&o.stdout);
@@ -93,5 +115,18 @@ fn ingest_makes_no_codex_call() {
          0 after"
     ));
     assert_eq!(calls(), 0, "ingest started codex");
+
+    // The routes were live: `run` (in a work dir of its own) reaches the stand-in by `PATH`,
+    // then by `--codex`.
+    let other = dir.join("other");
+    atlas(&other);
+    let o = other.to_str().unwrap();
+    for args in [vec![], vec!["--codex", c]] {
+        let before = calls();
+        let mut a = vec!["run", "--work", o, "--send", "--limit", "1"];
+        a.extend(&args);
+        let _ = cmd(BIN).args(&a).output().unwrap();
+        assert!(calls() > before, "run {args:?} did not reach the stand-in");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

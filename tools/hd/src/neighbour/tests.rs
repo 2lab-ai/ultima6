@@ -1422,16 +1422,3 @@ fn ingest_sends_a_multi_record_item_back_whole_and_counts_it_apart() {
     }
     let _ = std::fs::remove_dir_all(&w.root);
 }
-
-#[test]
-fn ingest_and_the_gate_call_nothing() {
-    // Neither starts a process, `codex` or any other.
-    for (name, src) in [
-        ("ingest.rs", include_str!("../ingest.rs")),
-        ("neighbour.rs", include_str!("../neighbour.rs")),
-    ] {
-        for word in ["Command", "Codex", "run::run", "process::", "spawn"] {
-            assert!(!src.contains(word), "{name} names {word}");
-        }
-    }
-}
