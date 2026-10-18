@@ -24,9 +24,7 @@ fn syl(c: char) -> [u8; 8] {
 }
 
 fn table() -> Rc<HangulFont> {
-    Rc::new(HangulFont {
-        glyphs: (0..HANGUL_GLYPHS).map(rows).collect(),
-    })
+    Rc::new(HangulFont::from_glyphs((0..HANGUL_GLYPHS).map(rows).collect()).unwrap())
 }
 
 /// The test state with the table, `wide` on and the grammar of `language`.
@@ -367,11 +365,11 @@ fn the_committed_table_parses_and_draws() {
         "/../../site/fonts/galmuri7-hangul.bin"
     ));
     let t = HangulFont::parse(blob).unwrap();
-    assert_eq!(t.glyphs.len(), 11_172);
+    assert_eq!(t.glyphs().len(), 11_172);
     // Every syllable has ink in rows 0..=6 only and in columns 0..=6 only.
-    assert!(t.glyphs.iter().all(|g| g.iter().any(|&r| r != 0)));
+    assert!(t.glyphs().iter().all(|g| g.iter().any(|&r| r != 0)));
     assert!(
-        t.glyphs
+        t.glyphs()
             .iter()
             .all(|g| g[7] == 0 && g.iter().all(|&r| r & 1 == 0))
     );

@@ -31,9 +31,7 @@ fn rows(i: usize) -> [u8; 8] {
 }
 
 fn table() -> Rc<HangulFont> {
-    Rc::new(HangulFont {
-        glyphs: (0..HANGUL_GLYPHS).map(rows).collect(),
-    })
+    Rc::new(HangulFont::from_glyphs((0..HANGUL_GLYPHS).map(rows).collect()).unwrap())
 }
 
 fn view() -> View {
