@@ -1545,6 +1545,7 @@ fn run_final(
         let bytes = img::read_capped(&work.path(name), cap)
             .map_err(|e| format!("{e} (run ingest first)"))?;
         work::write_file(&out.join(name), &bytes)?;
+        super::out_dir::seam(&o.out, "snapshot", name)?;
         img::read_capped(&out.join(name), cap)
     };
     let caps = [

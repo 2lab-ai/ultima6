@@ -240,3 +240,32 @@ fn a_symlinked_out_dir_is_refused_and_left_as_it_is() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_error_names_the_out_dir_and_the_dir_the_run_wrote_first_only_after() {
+    // A run that fails naming a file of the dir it writes: the error, and refused.txt, name
+    // the out dir's file; the dir written first is said once, at the end.
+    let dir = temp("named");
+    let out = dir.join("out");
+    let e = run_in(FIRST, &out, |d: &Path, _: &Path| -> Result<(), String> {
+        Err(format!("{}: no room left", d.join("a.txt").display()))
+    })
+    .unwrap_err();
+    let real = dir.canonicalize().unwrap().join("out");
+    let want = format!(
+        "{}: no room left (the run wrote to ",
+        real.join("a.txt").display()
+    );
+    assert!(e.starts_with(&want), "{e}");
+    assert!(e.ends_with(", which is not kept)"), "{e}");
+    assert_eq!(e.matches(".out.staging-").count(), 1, "{e}");
+    let refused = std::fs::read_to_string(out.join("refused.txt")).unwrap();
+    assert_eq!(refused, format!("{e}\n"));
+    // An error that names no file of it is as it was.
+    let e = run_in(FIRST, &out, |_: &Path, _: &Path| -> Result<(), String> {
+        Err("no rows".into())
+    })
+    .unwrap_err();
+    assert_eq!(e, "no rows");
+    let _ = std::fs::remove_dir_all(&dir);
+}

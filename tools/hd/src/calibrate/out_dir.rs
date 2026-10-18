@@ -338,6 +338,7 @@ pub fn run_in<T>(
             Ok(v)
         }
         Err(e) => {
+            let e = as_out(&e, &stage, &out);
             let mut said = e.clone();
             if let Err(w) = refuse(mode, &stage, &out, key, &e) {
                 said = format!("{said}; {w}");
@@ -352,6 +353,20 @@ pub fn run_in<T>(
             Err(said)
         }
     }
+}
+
+/// `error` with the directory the run wrote to, `stage`, named as the out dir it was to be,
+/// `out` (a file the error names is one of `out` now, or would have been); `stage` said once,
+/// at the end, as where the run wrote first.
+fn as_out(error: &str, stage: &Path, out: &Path) -> String {
+    let at = stage.to_string_lossy();
+    if !error.contains(at.as_ref()) {
+        return error.to_string();
+    }
+    format!(
+        "{} (the run wrote to {at} first, which is not kept)",
+        error.replace(at.as_ref(), &out.to_string_lossy())
+    )
 }
 
 /// The refusal of a run of `mode` that failed with `error`: a fresh directory holding the

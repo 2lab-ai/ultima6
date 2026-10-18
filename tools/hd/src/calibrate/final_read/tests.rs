@@ -2857,6 +2857,70 @@ fn a_failed_run_publishes_its_refusal_alone() {
 }
 
 #[test]
+fn an_error_of_the_run_names_the_out_dir() {
+    // A sheet that cannot be written (a dir where it goes) and a snapshot that cannot be read
+    // back (gone once written): each error names the file of the out dir, as refused.txt
+    // does, and the dir the run writes first only once, at the end.
+    use super::super::out_dir::hook;
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("named", &text, &g, &left);
+    let real = dir.canonicalize().unwrap();
+    let staging = |out: &Path| -> PathBuf {
+        let prefix = format!(".{}.staging-", out.file_name().unwrap().to_string_lossy());
+        std::fs::read_dir(out.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(&prefix)
+            })
+            .unwrap()
+    };
+    for (k, step, file, said) in [
+        (
+            "write",
+            "write",
+            "final-terrain.png",
+            "exists and is not a plain file",
+        ),
+        (
+            "snapshot",
+            "snapshot",
+            "gates.jsonl",
+            "No such file or directory",
+        ),
+    ] {
+        let o = FinalOptions {
+            out: dir.join(k),
+            ..options(&dir)
+        };
+        let at = o.out.clone();
+        let _h = hook(&o.out, step, move |name| {
+            if name == file {
+                let p = staging(&at).join(name);
+                if step == "write" {
+                    std::fs::create_dir(&p).unwrap();
+                } else {
+                    std::fs::remove_file(&p).unwrap();
+                }
+            }
+            Ok(())
+        });
+        let e = calibrate_final(&g, &work, &o).unwrap_err();
+        let want = format!("{}: {said}", real.join(k).join(file).display());
+        assert!(e.starts_with(&want), "{k}: {e}");
+        assert!(e.ends_with(", which is not kept)"), "{k}: {e}");
+        assert_eq!(e.matches(".staging-").count(), 1, "{k}: {e}");
+        let refused = std::fs::read_to_string(o.out.join("refused.txt")).unwrap();
+        assert_eq!(refused, format!("{e}\n"), "{k}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
     // The chain, and B again far from it, beside a record Y (a grain of its own) east of it:
     // B's window, wherever it is placed, cannot draw both its pairs by the chain and its pair
