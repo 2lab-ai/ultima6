@@ -1424,7 +1424,7 @@ fn a_change_to_the_work_dir_while_it_is_read_fails_the_run() {
     let png = img::encode_png(&blank).unwrap();
     // A re-ingest, once the run has read the state: a master rewritten, one added, gates.jsonl
     // or ingest.json rewritten. Each fails the run, the names and a count in the message.
-    let changes: Vec<(&str, Box<dyn Fn() + Send>)> = vec![
+    let changes: Vec<(&str, Touch)> = vec![
         ("1 masters of slices/", {
             let (p, b) = (master.clone(), png.clone());
             Box::new(move || std::fs::write(&p, &b).unwrap())

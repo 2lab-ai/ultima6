@@ -1381,11 +1381,14 @@ fn measured(result: Option<(f32, f32)>, digits: usize) -> String {
     )
 }
 
-/// Tests only: what to do to the work dir, once its state is read, of the final read whose out
-/// dir ([`FinalOptions::out`]) is the key (a re-ingest during the run).
+/// Tests only: a change to the work dir (a re-ingest during a run).
 #[cfg(test)]
-#[allow(clippy::type_complexity)]
-pub(crate) static AFTER_READ: std::sync::Mutex<Vec<(PathBuf, Box<dyn Fn() + Send>)>> =
+pub(crate) type Touch = Box<dyn Fn() + Send>;
+
+/// Tests only: what to do to the work dir, once its state is read, of the final read whose out
+/// dir ([`FinalOptions::out`]) is the key.
+#[cfg(test)]
+pub(crate) static AFTER_READ: std::sync::Mutex<Vec<(PathBuf, Touch)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Writes `d`, a line each, to `name` in the out dir `out`, and gives the run's error: `what`,
