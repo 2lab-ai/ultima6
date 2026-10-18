@@ -2390,6 +2390,53 @@ fn a_long_legend_line_goes_on_and_is_not_cut() {
                 assert!((0..8 * t).all(|x| (0..l.line_h()).all(|y| !inked(x, y))));
             }
         }
+        // Without the renderer, each pixel: the characters drawn here, by hand (`#` ink, a row
+        // a string, top to bottom), held at the centre of every font pixel of every cell of
+        // theirs, on every line; `/` (the measure's) on a continuation line at S 2.
+        let masks: [(char, [&str; 5]); 18] = [
+            ('/', ["..#", "..#", ".#.", "#..", "#.."]),
+            ('.', ["...", "...", "...", "...", ".#."]),
+            ('-', ["...", "...", "###", "...", "..."]),
+            ('>', ["#..", ".#.", "..#", ".#.", "#.."]),
+            ('0', ["###", "#.#", "#.#", "#.#", "###"]),
+            ('1', [".#.", "##.", ".#.", ".#.", "###"]),
+            ('2', ["##.", "..#", ".#.", "#..", "###"]),
+            ('5', ["###", "#..", "##.", "..#", "##."]),
+            ('9', ["###", "#.#", "###", "..#", "##."]),
+            ('A', [".#.", "#.#", "###", "#.#", "#.#"]),
+            ('E', ["###", "#..", "##.", "#..", "###"]),
+            ('L', ["#..", "#..", "#..", "#..", "###"]),
+            ('M', ["###", "###", "#.#", "#.#", "#.#"]),
+            ('N', ["#.#", "###", "###", "#.#", "#.#"]),
+            ('O', [".#.", "#.#", "#.#", "#.#", ".#."]),
+            ('R', ["##.", "#.#", "##.", "#.#", "#.#"]),
+            ('S', [".##", "#..", ".#.", "..#", "##."]),
+            ('T', ["###", ".#.", ".#.", ".#.", ".#."]),
+        ];
+        let mut slash_on_a_continuation = false;
+        for (i, line) in want.iter().enumerate() {
+            let y0 = ly + i as u32 * l.line_h();
+            for (k, ch) in line.chars().enumerate() {
+                let up = ch.to_ascii_uppercase();
+                let Some((_, rows)) = masks.iter().find(|m| m.0 == up) else {
+                    continue;
+                };
+                slash_on_a_continuation |= ch == '/' && line.starts_with("  ");
+                for (r, row) in rows.iter().enumerate() {
+                    for (c, want_ink) in row.chars().map(|p| p == '#').enumerate() {
+                        let x = l.margin + k as u32 * 4 * t + c as u32 * t + t / 2;
+                        let y = y0 + r as u32 * t + t / 2;
+                        let got = img::get(&png, x, y);
+                        let ink = if want_ink { super::super::INK } else { BACK };
+                        assert_eq!(
+                            got, ink,
+                            "{scale}: {line:?}: {ch:?} at {k}, row {r} col {c}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(slash_on_a_continuation, scale == 2, "{scale}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
