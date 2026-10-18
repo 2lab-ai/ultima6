@@ -17,11 +17,11 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 
 Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 6 (rev 5: what H0 and H3 measured; rev 6: the neighbour-seam gate), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
-Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening), H1 (the HD compositor, MMPX at 2× or 4×, on by default), H3 (the pack format and the imagegen tool) and H2 (the page loads a pack) are in production (19effa16 at main a769a5a); H4 ran the tool on the owner's files (its pack stays local); H5 (the neighbour-seam gate, tool only, no deploy) is merged at 953e744. In flight:
-- H6, the calibration tool with its final-read mode: review round 1 found that a covered record counts as shown and that malformed, duplicated or unplaced last-pass pairs can pass; the fix round is in progress.
-- H7, the pair model's gaps (b) and (c) and the terrain constant: done and re-gated on the owner's data (counts in the owner-local coverage report); round 2 adds what an object hides to the half-opaque rule, keeps terrain out of the atlas and the upload, and rebuilds the branch with no owner counts in its messages. Review next.
-- L1 (08 text path): review round 3 fixes in progress (printf closes only a brace it opened, a text run closes its own, the spec's brace rules, galmuri.py's file modes and failure stages). Lands squashed.
-- L3 (08 disassembler): review round 1 fixes in progress.
+Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening), H1 (the HD compositor, MMPX at 2× or 4×, on by default), H3 (the pack format and the imagegen tool) and H2 (the page loads a pack) are in production (19effa16 at main a769a5a); H4 ran the tool on the owner's files (its pack stays local); H5 (the neighbour-seam gate, tool only, no deploy) is merged at 953e744. 08 L1 (the wide text path) is merged at 16be889 and on preview. In flight:
+- H6, the calibration tool with its final-read mode: review round 8 fixes in progress. Lands squashed (one early commit fails its own test).
+- H7, the pair model's gaps (b) and (c) and the terrain constant: the pair model is now a search over configurations; review round 8 fixes in progress. After H6 lands, it merges main, rebuilds the pack locally and re-gates.
+- L1's production deploy: the build at 16be889 passed its preview check; production waits on the owner's deploy run (this session's classifier refuses production deploys).
+- L3 (08 disassembler): review round 6 in progress. Next it merges main and widens its uses of the text path to `i32`. Lands squashed.
 
 Decision 2026-10-18 (trinity, converged in round 3; record `~/Games/ultima6/work/dispatch/trinity-h5-decision.md`):
 - H5 merged as gate code (953e744); item 1 stays open.
@@ -33,8 +33,8 @@ Decision 2026-10-18 (trinity, converged in round 3; record `~/Games/ultima6/work
 - Then re-gate, read the final pack at S 4 and S 2, and write spec 07 rev 7. No arbitrary loosening (option B). D, terrain re-prompted with neighbour context, comes last if at all.
 
 Decision 2026-10-18, after H6's read (trinity, unanimous in round 5; record `~/Games/ultima6/work/dispatch/trinity-h6-decision.md`). H6 read the sheets of H4's pre-gate pack:
-- Terrain: 48 rows, almost all water. The fail side is verified, and the generated tiles are a different style from MMPX.
-- Objects: 48 rows. 4 of 12 passing pairs are visibly defective at or beside the join, and 36 of 36 failing pairs are visibly defective in the window. The defects are restyle, content changes, and multi-cell mis-registration.
+- Terrain: almost all water. The fail side is verified, and the generated tiles are a different style from MMPX.
+- Objects: some passing pairs are visibly defective at or beside the join, and every failing pair read is visibly defective in the window. The defects are restyle, content changes, and multi-cell mis-registration.
 
 Outcome:
 - The v1 pack generates no terrain. This is a policy constant, not a family rule.
@@ -66,8 +66,7 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 | Unit | Spec | Scope | Needs |
 |---|---|---|---|
 | H6 | 07 | `u6-hd calibrate`: sample sheets of neighbour pairs by ratio bucket and side kind (classic / MMPX / H4 HD panels via `Compositor::compose`, ×4 and S 2), `samples.tsv`, a carpet control (read 2026-10-18: map and objects); then the final-read mode: the fixed-point pass against its final slices, one window per surviving generated item, explicit type and family inclusion, every pair label | H5 |
-| H7 | 07 | pair model gaps (b) flags3 0x20 objects over terrain, ghost base-tile pairs removed, and (c) generated objects ≥½ opaque toward terrain, counted first; the terrain constant; re-gate; final window read at S 4 and S 2 (H6's final-read mode), whole-object fallbacks to a fixed point; the run-time draw variants (type 0x7b's other frame, the doorways' side tiles) paired; spec 07 rev 7 | H5, H6 |
-| L1 | 08 | text path: `i32` chars, `u16` line and narrowing sites, UTF-8 assembler (invalid bytes pass), Hangul table, runic guard, cell padding, josa, `%1$s`, empty articles; the `u` program's text path by code point (1b) | — |
+| H7 | 07 | pair model gaps (b) flags3 0x20 objects over terrain, ghost base-tile pairs removed, and (c) generated objects ≥½ opaque toward terrain, counted first; the terrain constant; re-gate; final window read at S 4 and S 2 (H6's final-read mode), whole-object fallbacks to a fixed point; the run-time draw variants (one object type's other frame, the doorways' side tiles) paired; spec 07 rev 7 | H5, H6 |
 | L2 | 08 | locale layer + run, table-string and outermost-print hooks + pack parser; identity-pack receipt with `wide` on | L1, L3 |
 | L3 | 08 | conversation disassembler (04 W3a's table) + run and table-string extractor; the catalog shared with 09 | — |
 | L4 | 08 | page: language gate, en/ko UI catalog, pack drop/forget, hidden-input IME focused by the line bit; engine `InputEvent::Text` into `read_line`; aliases on a matching copy | L2 |

@@ -193,3 +193,19 @@ Append-only. Closed units, with their receipts.
   - **Deploys:** none; the change is to the tool, and the site is unchanged.
   - **Carried to H7:** the run-time draw variants (type 0x7b's other frame, the doorways' side tiles) were not paired.
   - **Gates on the merge** (9bbbb22, the merge 953e744 plus this loop text): fmt and clippy clean; 1125 passed, 0 failed, 7 ignored; wasm 1,872,907 bytes (unchanged); web 63/63 three times; oracles OK; port map unchanged; loop-lint 0 FAIL.
+
+| L1 | 08 | text path: `i32` chars, `u16` line and narrowing sites, UTF-8 assembler (invalid bytes pass), Hangul table, runic guard, cell padding, josa, `%1$s`, empty articles; the `u` program's text path by code point (1b) | — |
+
+- **L1** merged at 16be889, squashed as 6665cb8 from `feat/l1-text-path` at 8751380, so main's history holds only the reviewed end state.
+  - **What:** spec 08 §1 and §1b.
+    - The character path is `i32` and the line `u16`.
+    - A UTF-8 assembler sits in front of the escape layer while a locale layer is active; invalid bytes pass unchanged.
+    - The Hangul table is built from Galmuri7 (SIL OFL 1.1, notices in `site/fonts/`) by `tools/font/galmuri.py`.
+    - The runic guard; josa markers; `%1$s`; `@{…}`; empty articles.
+    - `printf` counts cells, with the fixed-point padding.
+    - The `u` program's text runs by code point.
+  - **English:** with `wide` off, output is unchanged; an owner-run comparison with the pre-change engine found no difference (counts stay local).
+  - **Tests:** synthetic text only: `escaped_tests`, `wide_tests`, the intro wide tests, the font tests, and `test_galmuri.py` in both modes; the Python 3.9 refusal holds.
+  - **Gates on the merge** (run on 6665cb8, whose tree the merge 16be889 has): fmt and clippy clean; 1176 passed, 0 failed, 7 ignored; wasm 1,882,766 bytes; web 63/63 three times; oracles OK; port map unchanged; loop-lint 0 FAIL.
+  - **Reviews:** gpt-6-astra and opus over 15 rounds; r15, both APPROVE. Rounds 10–14 each found a counterexample in doc prose that listed, case by case, what a field's first code does after a padding that exactly fills the row. Round 14 deleted the list, keeping only the measured threshold. Lesson: prose that restates a state machine case by case is unbounded review surface; state the measured invariant and defer to the code. Findings: `~/Games/ultima6/work/review/l1-text-path/`.
+  - **Deploys:** preview 409b5dea at 16be889. Live check with the owner's zip and the owner's local pack: HD on, off and on again in the menu, the game and after a look; the pack matched; 0 foreign requests, 0 errors. The dispatcher read the frames (a long wrapped question, the party list and the prompt, a look message); English text lays out as before. Production waits on the owner's deploy run.
