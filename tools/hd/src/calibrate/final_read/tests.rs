@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use super::super::out_dir::{Hooked, hook};
 use super::*;
 use crate::game::{Level, World, synthetic};
 use crate::gate::{Edge, Thresholds};
@@ -2882,78 +2883,88 @@ fn the_out_dir_holds_one_runs_output() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn a_failed_run_publishes_its_refusal_alone() {
-    // Three runs that fail once their sheets are drawn, or some of them: each leaves at the
-    // out dir its refusal and the snapshots read, no sheet, no samples.tsv.
-    use super::super::out_dir::hook;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+/// A run of the chain that fails as `fail` makes it (the hooks it sets, kept while it runs),
+/// at the out dir `name`: its error, and the files of the out dir after it.
+fn failed_run(name: &str, fail: impl FnOnce(&Path) -> Vec<Hooked>) -> (String, Vec<String>) {
     let g = game();
     let (text, left) = chain(&g);
-    let (dir, work) = work_dir("failed", &text, &g, &left);
-    let refusal = ["gates.jsonl", "ingest.json", "jobs.jsonl", "refused.txt"];
-    let out = |k: &str| FinalOptions {
-        out: dir.join(k),
-        ..options(&dir)
-    };
-    // The masters cannot be read again at the end: slices/ is gone once they are read.
-    let o = out("recheck");
-    let (slices, moved) = (work.path("slices"), dir.join("slices-moved"));
-    let (a, b) = (slices.clone(), moved.clone());
-    AFTER_READ.lock().unwrap().push((
-        o.out.clone(),
-        Box::new(move || std::fs::rename(&a, &b).unwrap()),
-    ));
+    let (dir, work) = work_dir(&format!("failed-{name}"), &text, &g, &left);
+    let o = options(&dir);
+    let hooks = fail(&o.out);
     let e = calibrate_final(&g, &work, &o).unwrap_err();
-    AFTER_READ.lock().unwrap().retain(|(k, _)| *k != o.out);
-    std::fs::rename(&moved, &slices).unwrap();
+    drop(hooks);
+    let files = files_of(&o.out);
+    let _ = std::fs::remove_dir_all(&dir);
+    (e, files)
+}
+
+/// What a failed run of the chain leaves at the out dir: its refusal and the snapshots read.
+const REFUSAL: [&str; 4] = ["gates.jsonl", "ingest.json", "jobs.jsonl", "refused.txt"];
+
+/// A hook that fails the second sheet written (the first is written).
+fn second_sheet_fails(out: &Path) -> Hooked {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let n = AtomicUsize::new(0);
+    hook(out, "write", move |name| {
+        match n.fetch_add(1, Ordering::SeqCst) {
+            1 => Err(format!("{name}: no room left")),
+            _ => Ok(()),
+        }
+    })
+}
+
+#[test]
+fn a_run_whose_masters_cannot_be_read_again_publishes_its_refusal_alone() {
+    // slices/ gone once the masters are read: they cannot be read again at the end, after the
+    // sheets are drawn. The out dir: the refusal, no sheet, no samples.tsv.
+    let (e, files) = failed_run("recheck", |out| {
+        let slices = out.parent().unwrap().join("work").join("slices");
+        let moved = out.parent().unwrap().join("slices-moved");
+        AFTER_READ.lock().unwrap().push((
+            out.to_path_buf(),
+            Box::new(move || std::fs::rename(&slices, &moved).unwrap()),
+        ));
+        Vec::new()
+    });
     assert!(e.contains("slices"), "{e}");
-    assert_eq!(files_of(&o.out), refusal);
-    // The second sheet cannot be written (the first is).
-    let second = |o: &FinalOptions| {
-        let n = AtomicUsize::new(0);
-        hook(&o.out, "write", move |name| {
-            match n.fetch_add(1, Ordering::SeqCst) {
-                1 => Err(format!("{name}: no room left")),
-                _ => Ok(()),
-            }
-        })
-    };
-    let o = out("write");
-    let h = second(&o);
-    let e = calibrate_final(&g, &work, &o).unwrap_err();
-    drop(h);
+    assert_eq!(files, REFUSAL);
+}
+
+#[test]
+fn a_run_whose_second_sheet_cannot_be_written_publishes_its_refusal_alone() {
+    let (e, files) = failed_run("write", |out| vec![second_sheet_fails(out)]);
     assert!(e.contains("final-terrain-s2.png: no room left"), "{e}");
-    assert_eq!(files_of(&o.out), refusal);
-    // What the run wrote cannot be removed whole: a dir in it whose file cannot leave, so the
-    // removal stops part of the way.
-    let o = out("cleanup");
-    let h = second(&o);
+    assert_eq!(files, REFUSAL);
+}
+
+#[test]
+fn a_failed_run_whose_dir_cannot_be_removed_whole_publishes_its_refusal_alone() {
+    // The second sheet not written, then what the run wrote not removable whole: a dir in it
+    // whose file cannot leave, so the removal stops part of the way. The out dir is still the
+    // refusal alone; what is left is said.
+    use std::os::unix::fs::PermissionsExt;
     let stuck: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>> = Default::default();
     let at = stuck.clone();
-    let h2 = hook(&o.out, "cleanup", move |stage| {
-        use std::os::unix::fs::PermissionsExt;
-        let sub = Path::new(stage).join("stuck");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::write(sub.join("x"), b"x").unwrap();
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o500)).unwrap();
-        *at.lock().unwrap() = Some(sub);
-        Ok(())
+    let (e, files) = failed_run("cleanup", |out| {
+        let h = hook(out, "cleanup", move |stage| {
+            let sub = Path::new(stage).join("stuck");
+            std::fs::create_dir(&sub).unwrap();
+            std::fs::write(sub.join("x"), b"x").unwrap();
+            std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o500)).unwrap();
+            *at.lock().unwrap() = Some(sub);
+            Ok(())
+        });
+        vec![second_sheet_fails(out), h]
     });
-    let e = calibrate_final(&g, &work, &o).unwrap_err();
-    drop((h, h2));
+    let sub = stuck.lock().unwrap().take().unwrap();
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _ = std::fs::remove_dir_all(sub.parent().unwrap().parent().unwrap());
     assert!(e.contains("no room left"), "{e}");
     assert!(
         e.contains("what the run wrote is left beside the out dir"),
         "{e}"
     );
-    assert_eq!(files_of(&o.out), refusal);
-    let sub = stuck.lock().unwrap().take().unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(files, REFUSAL);
 }
 
 #[test]
@@ -2961,7 +2972,6 @@ fn an_error_of_the_run_names_the_out_dir() {
     // A sheet that cannot be written (a dir where it goes) and a snapshot that cannot be read
     // back (gone once written): each error names the file of the out dir, as refused.txt
     // does, and the dir the run writes first only once, at the end.
-    use super::super::out_dir::hook;
     let g = game();
     let (text, left) = chain(&g);
     let (dir, work) = work_dir("named", &text, &g, &left);
