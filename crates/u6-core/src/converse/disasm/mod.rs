@@ -488,7 +488,6 @@ pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refus
                     match d.check_table_indices()? {
                         Some(next) => next,
                         None => {
-                            d.check_landings();
                             let items = d.finish();
                             return Ok(Disasm {
                                 archive,

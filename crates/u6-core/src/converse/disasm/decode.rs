@@ -265,6 +265,7 @@ impl<'a> Decoder<'a> {
         if !self.landed.iter().any(|l| l.scan == Scan::Greeting) {
             return refuse(look, Reason::NoGreetingMarker);
         }
+        self.check_landings();
         Ok(())
     }
 
@@ -488,10 +489,10 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// After the tables are claimed: every skip loop must stop on the first byte of a code item
-    /// and land on an item's start. A landing that reached a table has its hazard already
-    /// ([`HazardKind::IntoData`]): that names what the bytes are.
-    pub(super) fn check_landings(&mut self) {
+    /// After decoding: every skip loop must stop on the first byte of a code item and land on
+    /// an item's start. A landing that reached a table's bytes has its one hazard already
+    /// ([`HazardKind::IntoData`], recorded where it lands): that names what the bytes are.
+    fn check_landings(&mut self) {
         let landed = std::mem::take(&mut self.landed);
         for l in &landed {
             let into_data = Hazard {
