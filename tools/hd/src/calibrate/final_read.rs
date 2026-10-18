@@ -261,7 +261,7 @@ fn tile(id: ImageId) -> Option<u16> {
 /// - `gates`: a pair line gated with another seam threshold (its `gates` text, as ingest writes
 ///   it, says `seam<=` another value; nothing else is checked then: every limit would differ);
 /// - `duplicate`: a pair logged twice in one pass (a pass checks each pair once; which line
-///   would be the record is not guessed);
+///   would be the record is not guessed); an item sent back twice;
 /// - `plan`: a fallback naming an item the plan has not, or of another class; an image listed
 ///   that no item has;
 /// - `listed`: a listed image whose id, slice path or content hash is not the game's;
@@ -271,13 +271,15 @@ fn tile(id: ImageId) -> Option<u16> {
 /// - `part`: an item listed in part;
 /// - `fallen`: a listed image of an item the gate sent back;
 /// - `sides`: a pass-1 line whose sides are not what the slices and the fallbacks make them
-///   (generated in pass 1: listed now, or sent back);
+///   (generated in pass 1: listed now, or sent back), or a later pass's failing line whose sides
+///   are not those of that pass (generated then: not sent back before it);
 /// - `world`: the pairs pass 1 logs are not the world's pairs with a side generated in pass 1,
 ///   each once (one missing, or logged and not the world's), or a line's `source` or cell is
 ///   not where the world has the pair (`Seen::source`, `Seen::example`: where its window is
 ///   placed);
 /// - `pass`: a failing line whose generated sides were not sent back in its pass, a later pass's
-///   failing line in no pass that sent anything back, a pass with no fallback before the last;
+///   failing line in no pass that sent anything back, a pass with no fallback before the last,
+///   a fallback with no failing line of its item's in its pass;
 /// - `refused`: a slice the gate refuses (not ×4 of its record);
 /// - `measure`: a pair of the last pass whose sides did not change since pass 1, measured from
 ///   the slices otherwise than pass 1 logged it;
@@ -352,6 +354,12 @@ pub fn fixed(
             );
             continue;
         };
+        if !fallen_items.insert(f.item) {
+            say!(
+                "duplicate",
+                format!("line {}: item {} sent back again", f.line, f.item)
+            );
+        }
         if class_name(item.class) != f.class {
             say!(
                 "plan",
@@ -361,7 +369,6 @@ pub fn fixed(
                 ),
             );
         }
-        fallen_items.insert(f.item);
         for r in drawing(game, item.images()).into_iter().filter_map(tile) {
             fallen.insert(r, (f.item, f.pass));
         }
@@ -548,6 +555,32 @@ pub fn fixed(
     }
     // Generated in pass `k`: generated in pass 1 and not sent back before it.
     let up_at = |r: u16, k: usize| first_gen(r) && fallen.get(&r).is_none_or(|f| f.1 >= k);
+    // Each fallback, a failing line of its item's in its pass, with the item still up then.
+    for f in &rec.fell {
+        let Some(item) = plan.items.get(f.item as usize) else {
+            continue;
+        };
+        let of: BTreeSet<u16> = drawing(game, item.images())
+            .into_iter()
+            .filter_map(tile)
+            .collect();
+        let failed = rec.pairs.iter().any(|l| {
+            l.fail
+                && l.pass == f.pass
+                && [l.pair.a, l.pair.b]
+                    .into_iter()
+                    .any(|r| of.contains(&r) && up_at(r, l.pass))
+        });
+        if !failed {
+            say!(
+                "pass",
+                format!(
+                    "line {}: item {} sent back in pass {}, and no line of that pass fails it",
+                    f.line, f.item, f.pass
+                ),
+            );
+        }
+    }
     let mut logged_last: BTreeMap<Pair, &Logged> = BTreeMap::new();
     for l in &rec.pairs {
         if l.fail {
@@ -562,6 +595,19 @@ pub fn fixed(
                         "line {}: fails in pass {}, and its generated sides were not sent back then",
                         l.line, l.pass
                     )
+                );
+            }
+            let then = kind(up_at(l.pair.a, l.pass), up_at(l.pair.b, l.pass));
+            if l.pass > 1 && then != Some(l.sides) {
+                say!(
+                    "sides",
+                    format!(
+                        "line {}: {} in pass {}, and the fallbacks before it make it {}",
+                        l.line,
+                        l.sides.name(),
+                        l.pass,
+                        then.map_or("no generated side", Sides::name)
+                    ),
                 );
             }
         } else if l.pass > passes {

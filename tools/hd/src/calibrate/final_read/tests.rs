@@ -433,6 +433,68 @@ fn the_record_and_the_slices_must_agree() {
 }
 
 #[test]
+fn the_fallbacks_and_the_failing_lines_hold_each_other() {
+    let g = game();
+    let plan = group::plan(&g);
+    let (text, left) = chain(&g);
+    let lines: Vec<&str> = text.lines().collect();
+    let k_of = |p: Pair| {
+        record(&text)
+            .unwrap()
+            .pairs
+            .iter()
+            .position(|l| l.pair == p)
+    };
+    let (xa, bg) = (k_of(XA).unwrap(), k_of(BG).unwrap());
+    let edit = |k: usize, f: &dyn Fn(&mut serde_json::Value)| -> String {
+        let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let mut v: serde_json::Value = serde_json::from_str(lines[k]).unwrap();
+        f(&mut v);
+        out[k] = v.to_string();
+        out.join("\n") + "\n"
+    };
+    // A line failing in pass 1 whose generated side was not sent back then (B beside the
+    // grass): that rule alone.
+    let failing = edit(bg, &|v| v["fail"] = serde_json::json!(true));
+    assert_eq!(state(&g, &failing, &left).unwrap_err(), ["pass"]);
+    // A fallback with no failing line of its item's in its pass (A beside X passing).
+    let no_line = edit(xa, &|v| v["fail"] = serde_json::json!(false));
+    assert_eq!(state(&g, &no_line, &left).unwrap_err(), ["pass"]);
+    // An item sent back twice.
+    let twice = text.clone() + lines.last().unwrap() + "\n";
+    assert_eq!(state(&g, &twice, &left).unwrap_err(), ["duplicate"]);
+    // B sent back too, in a later pass, by its failing line there (none left generated): its
+    // sides there are those of that pass (gen-mmpx: the grass is not generated).
+    let b = item_of(&plan, B);
+    let later = |pass: usize, sides: Sides| -> String {
+        let bg_line = pair_line(
+            pass,
+            BG,
+            true,
+            Some((2.0, 1.5)),
+            sides,
+            "map",
+            Some(At { z: 0, x: 4, y: 3 }),
+            &gates(),
+        );
+        let fell = serde_json::json!({
+            "item": b, "class": "terrain", "fallback": "neighbour", "pass": pass,
+            "gates": gates(),
+        });
+        format!("{text}{bg_line}\n{fell}\n")
+    };
+    let none = BTreeMap::new();
+    let f = state(&g, &later(2, Sides::GenMmpx), &none).unwrap();
+    assert_eq!((f.passes, f.last.len(), f.survivors.len()), (3, 0, 0));
+    // ... logged as gen-gen in pass 2: that rule alone.
+    let gg = later(2, Sides::GenGen);
+    assert_eq!(state(&g, &gg, &none).unwrap_err(), ["sides"]);
+    // ... in pass 3, with nothing sent back in pass 2: that rule alone.
+    let gap = later(3, Sides::GenMmpx);
+    assert_eq!(state(&g, &gap, &none).unwrap_err(), ["pass"]);
+}
+
+#[test]
 fn the_pairs_of_pass_1_are_the_worlds() {
     let g = game();
     let (text, left) = chain(&g);
