@@ -28,7 +28,9 @@
 //! Only a pair with a generated side is checked: a pair of two records MMPX draws (or the
 //! scaler draws by rule) is not measured, and none may fall back. "No failing pair after the
 //! fixed point" therefore says that no pair with a generated side fails, not that every edge
-//! the world draws is clean.
+//! the world draws is clean. A checked pair on which nothing is measured (no row across the
+//! join where both sides draw) cannot fail either; it is counted apart, as unmeasured
+//! ([`Counts::unmeasured`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -404,11 +406,16 @@ pub struct Counts {
     pub objects: usize,
     /// Pairs checked in the first pass: those with a generated side (no other pair is checked).
     pub checked: usize,
+    /// Of the pairs checked in the first pass, those on which nothing is measured: no row
+    /// across the join where both sides draw (two objects' edges each opaque on half their
+    /// length, but not in the same places). Such a pair cannot fail, so it is counted apart.
+    pub unmeasured: usize,
     /// Pairs failing in the first pass, before any neighbour fallback (among those checked).
     pub failing_before: usize,
-    /// Pairs checked, and failing, in the last pass (none fails there: it is the pass that
-    /// ends the fixed point); again only pairs with a generated side.
+    /// Pairs checked, unmeasured among them, and failing, in the last pass (none fails there:
+    /// it is the pass that ends the fixed point); again only pairs with a generated side.
     pub checked_after: usize,
+    pub unmeasured_after: usize,
     pub failing_after: usize,
     /// Passes run (the last one finds no failing pair).
     pub passes: usize,
@@ -422,7 +429,8 @@ pub struct Checked {
     pub pair: Pair,
     /// Both sides generated (else one generated, one drawn by MMPX).
     pub both: bool,
-    /// (ratio, limit); `None` when nothing is measured (a side draws nothing along the edge).
+    /// (ratio, limit); `None` when nothing is measured (no row across the join where both
+    /// sides draw: [`Counts::unmeasured`]).
     pub result: Option<(f32, f32)>,
     pub fails: bool,
 }
@@ -471,7 +479,7 @@ pub fn settle(pairs: &[Pair], sides: &BTreeMap<u16, Side>, max_ratio: f32) -> Se
             };
             Some((&s.classic, px))
         };
-        let (mut checked, mut fails) = (0, Vec::new());
+        let (mut checked, mut unmeasured, mut fails) = (0, 0, Vec::new());
         for &p in pairs {
             let (ga, gb) = (generated(p.a), generated(p.b));
             if ga.is_none() && gb.is_none() {
@@ -482,6 +490,9 @@ pub fn settle(pairs: &[Pair], sides: &BTreeMap<u16, Side>, max_ratio: f32) -> Se
                 (Some(a), Some(b)) => gate::neighbour_seam(a, b, K, p.edge, max_ratio),
                 _ => None,
             };
+            if result.is_none() {
+                unmeasured += 1;
+            }
             let c = Checked {
                 pass,
                 pair: p,
@@ -498,9 +509,11 @@ pub fn settle(pairs: &[Pair], sides: &BTreeMap<u16, Side>, max_ratio: f32) -> Se
         }
         if pass == 1 {
             out.counts.checked = checked;
+            out.counts.unmeasured = unmeasured;
             out.counts.failing_before = fails.len();
         }
         out.counts.checked_after = checked;
+        out.counts.unmeasured_after = unmeasured;
         out.counts.failing_after = fails.len();
         if fails.is_empty() {
             return out;

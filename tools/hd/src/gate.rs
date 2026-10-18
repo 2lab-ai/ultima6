@@ -855,7 +855,8 @@ fn join_steps(
 /// The ratio of one picture of two images of `w0 × h0` pixels (`a` and `b`, row-major, `b` on
 /// `a`'s `edge` side), `pitch` pixels per classic pixel: the step across the join over the step
 /// across the other lattice lines of the two images, on the axis across the join. `None` when
-/// no step crosses the join (a side draws nothing along it).
+/// no step crosses the join: no row across it where both sides draw (a side draws nothing
+/// along it, or the two draw along it in different rows).
 fn joined_ratio(
     a: &[Option<[f32; 3]>],
     b: &[Option<[f32; 3]>],
@@ -888,7 +889,8 @@ fn joined_ratio(
 /// `k` HD pixels apart), on the axis across the join. Returns (the HD ratio, its limit): the
 /// limit is `max_ratio`, or the classic pair's own ratio across the same edge where that is
 /// higher (a classic pair that already steps is not held to more); [`seam_passes`] judges it.
-/// `None` when nothing is measured: a side draws nothing along the edge.
+/// `None` when nothing is measured: no row across the join where both sides draw (a side
+/// draws nothing along the edge, or the two draw along it in different rows).
 ///
 /// Also `None` when the images do not fit each other, which measures nothing either: `k` is 0,
 /// the two classic images differ in size or are not [`classic_len`], or a shown image is not

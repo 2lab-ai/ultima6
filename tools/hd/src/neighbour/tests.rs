@@ -411,7 +411,7 @@ fn shore_and_empty_neighbours_are_mmpx_or_nothing() {
         BTreeMap::from([(10, 1)])
     );
     // An empty record draws nothing: there is no edge to step across; the pair is checked (it
-    // has a generated side) and passes.
+    // has a generated side), unmeasured, and passes.
     let empty = Classic {
         width: SIDE,
         height: SIDE,
@@ -420,7 +420,8 @@ fn shore_and_empty_neighbours_are_mmpx_or_nothing() {
     let s = sides(vec![(1, a, Some((10, a_hd))), (12, empty, None)]);
     let out = settle(&[pair(1, 12, Edge::East)], &s, seam());
     assert!(out.fallen.is_empty());
-    assert_eq!((out.counts.checked, out.counts.failing_before), (1, 0));
+    let n = &out.counts;
+    assert_eq!((n.checked, n.unmeasured, n.failing_before), (1, 1, 0));
 }
 
 /// A chunk of one map tile everywhere but the cells given.
@@ -765,6 +766,98 @@ fn objects_meet_only_with_both_edges_half_opaque_and_on_a_level() {
         ])
     );
     assert_eq!(p.objects, 3);
+}
+
+#[test]
+fn a_pair_whose_edges_draw_in_different_rows_is_checked_and_counted_unmeasured() {
+    let mut g = synthetic::game();
+    // A's east edge opaque on its first 8 pixels; B's west edge on its last 8 (a control B on
+    // its first 8). Each edge is half opaque, so the objects meet, but no row across the join
+    // has both drawn: nothing is measured there.
+    let (a, b, control) = (360u16, 361u16, 362u16);
+    g.records[usize::from(a)] = edged(16, 8, 16, 16);
+    let mut last = object(16);
+    for y in 0..8 {
+        last.transparent[y * 16] = true;
+    }
+    g.records[usize::from(b)] = last;
+    g.records[usize::from(control)] = edged(8, 16, 16, 16);
+    let report = |counts: Counts| {
+        ingest::Report {
+            neighbour: counts,
+            ..Default::default()
+        }
+        .text()
+    };
+    for (b, unmeasured) in [(b, 1), (control, 0)] {
+        let at = |x, tile| Placed {
+            x,
+            y: 4,
+            z: 0,
+            tile,
+        };
+        g.world = World {
+            chunks: vec![chunk(0, &[])],
+            levels: vec![Level {
+                side: 1,
+                refs: vec![0],
+            }],
+            objects: vec![at(2, a), at(3, b)],
+        };
+        let p = pairs(&g);
+        let objects: Vec<Pair> = p
+            .all
+            .iter()
+            .copied()
+            .filter(|q| p.seen[q].objects.is_some())
+            .collect();
+        assert_eq!(objects, [pair(a, b, Edge::East)], "{b}");
+        // A generated (its master the classic record at x8), B drawn by MMPX, the grass of
+        // the map pairs too: only the pair with A is checked.
+        let master = g.classic(ImageId::Tile(a)).unwrap().scaled(8, BLACK);
+        let accepted = BTreeMap::from([(a, (10u32, &master))]);
+        let s = super::sides(&g, &p.all, &accepted).unwrap();
+        let out = settle(&p.all, &s, seam());
+        assert!(out.fallen.is_empty(), "{b}");
+        assert_eq!(out.checked.len(), 1, "{b}");
+        let c = &out.checked[0];
+        assert_eq!(
+            (c.pair, c.both, c.fails),
+            (pair(a, b, Edge::East), false, false)
+        );
+        assert_eq!(c.result.is_none(), unmeasured == 1, "{b}");
+        let n = &out.counts;
+        assert_eq!(
+            (n.checked, n.unmeasured, n.failing_before),
+            (1, unmeasured, 0),
+            "{b}"
+        );
+        assert_eq!(
+            (
+                n.checked_after,
+                n.unmeasured_after,
+                n.failing_after,
+                n.passes
+            ),
+            (1, unmeasured, 0, 1),
+            "{b}"
+        );
+        // The coverage report says so.
+        assert!(report(out.counts.clone()).contains(&format!(
+            "neighbour pairs unmeasured (checked, but no row across the join both sides draw): \
+             {unmeasured} before the fixed point, {unmeasured} after"
+        )));
+    }
+    // Before and after are each their own count.
+    let counts = Counts {
+        unmeasured: 3,
+        unmeasured_after: 2,
+        ..Default::default()
+    };
+    assert!(report(counts).contains(
+        "neighbour pairs unmeasured (checked, but no row across the join both sides draw): 3 \
+         before the fixed point, 2 after"
+    ));
 }
 
 /// Tile records for the compositor, each keyed by its record number.
@@ -1314,6 +1407,12 @@ fn ingest_sends_a_multi_record_item_back_whole_and_counts_it_apart() {
     assert!(text.contains(
         "neighbour pairs checked (only pairs with a generated side): 4 before the fixed point, \
          2 after"
+    ));
+    // Every pair checked is measured: the grass pairs and the objects' fully opaque edges.
+    assert_eq!((n.unmeasured, n.unmeasured_after), (0, 0));
+    assert!(text.contains(
+        "neighbour pairs unmeasured (checked, but no row across the join both sides draw): 0 \
+         before the fixed point, 0 after"
     ));
     assert!(text.contains(
         "neighbour pairs failing (among pairs with a generated side): 1 before the fixed \
