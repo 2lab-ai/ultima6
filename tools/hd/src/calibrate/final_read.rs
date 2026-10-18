@@ -1100,16 +1100,33 @@ pub struct FinalLine {
     pub panels: Panels,
 }
 
+/// The legend's lines as a sheet at layout `l` writes them: a line too long for the sheet's
+/// width goes on in lines of its own, each indented, so nothing of it is cut.
+pub fn wrapped(l: &Layout, legend: &[String]) -> Vec<String> {
+    let width = l.width() - 2 * l.margin;
+    // A character takes 4 font pixels, of which the last character's 3 are drawn.
+    let n = ((width - 3 * l.text) / (4 * l.text) + 1) as usize;
+    let mut out = Vec::new();
+    for line in legend {
+        let chars: Vec<char> = line.chars().collect();
+        out.push(chars.iter().take(n).collect());
+        for rest in chars.get(n..).unwrap_or_default().chunks(n - 2) {
+            out.push(format!("  {}", rest.iter().collect::<String>()));
+        }
+    }
+    out
+}
+
 /// The height of a final row at layout `l`: the sampled mode's row, and a line per legend line
-/// under the panels.
-fn row_height(l: &Layout, legend: usize) -> u32 {
-    l.row_h() + legend as u32 * l.line_h()
+/// under the panels ([`wrapped`]).
+fn row_height(l: &Layout, legend: &[String]) -> u32 {
+    l.row_h() + wrapped(l, legend).len() as u32 * l.line_h()
 }
 
 /// The size of a final sheet of `lines` at scale `s`.
 pub fn final_size(lines: &[FinalLine], s: u32) -> (u32, u32) {
     let l = Layout::of(s);
-    let h: u32 = lines.iter().map(|x| row_height(&l, x.legend.len())).sum();
+    let h: u32 = lines.iter().map(|x| row_height(&l, &x.legend)).sum();
     (l.width(), l.margin / 2 + h)
 }
 
@@ -1139,11 +1156,11 @@ pub fn final_sheet(lines: &[FinalLine], s: u32) -> Rgba {
             }
         }
         let ly = py + l.h + l.margin / 2;
-        for (i, t) in line.legend.iter().enumerate() {
+        for (i, t) in wrapped(&l, &line.legend).iter().enumerate() {
             let y = ly + i as u32 * l.line_h();
             text(&mut out, (l.margin, y), t, l.text, w - 2 * l.margin);
         }
-        top += row_height(&l, line.legend.len());
+        top += row_height(&l, &line.legend);
     }
     out
 }
@@ -1341,6 +1358,34 @@ fn draw_window(game: &Game, fixed: &Fixed, by: &BTreeMap<Pair, usize>, w: &Windo
         ticks,
         hidden,
     }
+}
+
+/// A window's legend: a line per pair it draws (where, edge, labels, sides, ratio / limit, `>`
+/// before the pair it is placed at), then per pair it draws hidden.
+fn legend_of(fixed: &Fixed, w: &Window, d: &Drawn1) -> Vec<String> {
+    let line = |lead: &str, (c, r): (usize, usize), li: usize, tail: &str| {
+        let l = &fixed.last[li];
+        let e = if l.pair.edge == Edge::East { "e" } else { "s" };
+        format!(
+            "{lead}{c},{r} {e} {} {} {}{tail}",
+            l.labels,
+            l.sides.name(),
+            measured(l.result, 2)
+        )
+    };
+    let mut out = Vec::new();
+    for &(cell, li) in &d.ticks {
+        let lead = if w.pair == Some(li) && cell == A_CELL {
+            ">"
+        } else {
+            " "
+        };
+        out.push(line(lead, cell, li, ""));
+    }
+    for &(cell, li) in &d.hidden {
+        out.push(line(" ", cell, li, " hidden"));
+    }
+    out
 }
 
 /// What a window of `origin` for `records` of survivor `sv` draws alone: the item's pieces (an
@@ -1743,8 +1788,8 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
             .collect();
         let mut parts: Vec<Vec<usize>> = vec![Vec::new()];
         let mut height = l4.margin / 2;
-        for (i, (_, d)) in drawn.iter().enumerate() {
-            let h = row_height(&l4, d.ticks.len() + d.hidden.len());
+        for (i, (w, d)) in drawn.iter().enumerate() {
+            let h = row_height(&l4, &legend_of(&fixed, w, d));
             let part = parts.last_mut().expect("a part");
             if !part.is_empty() && height + h > MAX_HEIGHT {
                 parts.push(vec![i]);
@@ -1773,25 +1818,11 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
                     w.placement.name(),
                     w.origin.name()
                 );
-                let mut legend = Vec::new();
+                let legend = legend_of(&fixed, w, d);
                 let mut kinds: BTreeMap<(String, Sides), usize> = BTreeMap::new();
                 let mut cells = Vec::new();
                 for &(cell, li) in &d.ticks {
                     let l = &fixed.last[li];
-                    let lead = if w.pair == Some(li) && cell == A_CELL {
-                        ">"
-                    } else {
-                        " "
-                    };
-                    let e = if l.pair.edge == Edge::East { "e" } else { "s" };
-                    legend.push(format!(
-                        "{lead}{},{} {e} {} {} {}",
-                        cell.0,
-                        cell.1,
-                        l.labels,
-                        l.sides.name(),
-                        measured(l.result, 2)
-                    ));
                     for lab in l.labels.split('+') {
                         *kinds.entry((lab.to_string(), l.sides)).or_default() += 1;
                         let e = read.entry((lab.to_string(), l.sides)).or_default();
@@ -1816,15 +1847,6 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
                 let mut covered = Vec::new();
                 for &(cell, li) in &d.hidden {
                     let l = &fixed.last[li];
-                    let e = if l.pair.edge == Edge::East { "e" } else { "s" };
-                    legend.push(format!(
-                        " {},{} {e} {} {} {} hidden",
-                        cell.0,
-                        cell.1,
-                        l.labels,
-                        l.sides.name(),
-                        measured(l.result, 2)
-                    ));
                     covered.push(format!(
                         "{},{},{},{},{},{},{}",
                         cell.0,

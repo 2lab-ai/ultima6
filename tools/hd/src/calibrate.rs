@@ -100,7 +100,8 @@
 //!   beside one of the cell east or south of it, each showing along its side of the join,
 //!   [`Framed::joins`]: a record covered there by a tile drawn after it draws no pair) is marked
 //!   in the panels' margins as above and listed under the panels: its cell (column, row of the
-//!   window), edge, labels, sides and ratio / limit, `>` before the pair the window is placed at.
+//!   window), edge, labels, sides and ratio / limit, `>` before the pair the window is placed at
+//!   (a line too long for the sheet goes on, indented, in lines of its own: nothing is cut).
 //!   A pair of the last pass whose two records are drawn at a join but covered there is judged
 //!   hidden: marked in a colour of its own, listed with `hidden`, and not read.
 //! - **The sheets** ([`final_read::final_sheet`]): `final-<class>.png` by the class ingest

@@ -1163,6 +1163,51 @@ fn a_pair_covered_in_a_window_is_marked_hidden_there() {
 }
 
 #[test]
+fn a_long_legend_line_goes_on_and_is_not_cut() {
+    let g = game();
+    let (text, left) = chain(&g);
+    // A label long enough that its legend line is wider than the sheet at S 2.
+    let long = "a-label-the-gate-does-not-write-yet-and-whose-name-runs-on-past-a-sheet-at-s2";
+    let text = labelled(&text, &[BG], long);
+    let (dir, work) = work_dir("legend", &text, &g, &left);
+    let o = options(&dir);
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    for (scale, sheet) in [(4, &s.sheets[0]), (2, &s.sheets[1])] {
+        let l = Layout::of(scale);
+        let fits = |t: &str| (t.chars().count() as u32 - 1) * 4 * l.text + 3 * l.text;
+        let legend = vec![
+            format!(" 4,2 e map+{long} gen-mmpx 0.95/1.50"),
+            "short".into(),
+        ];
+        let lines = wrapped(&l, &legend);
+        // Every line fits the sheet; joined again, the lines are the legend.
+        assert!(
+            lines.iter().all(|t| fits(t) <= l.width() - 2 * l.margin),
+            "{lines:?}"
+        );
+        let back: String = lines
+            .iter()
+            .map(|t| t.strip_prefix("  ").unwrap_or(t))
+            .collect();
+        assert_eq!(back, legend.concat());
+        assert_eq!(lines.len() > legend.len(), scale == 2, "{scale}");
+        // The sheet is as tall as the lines it writes: at S 4 a line per pair of the window, at
+        // S 2 more, the long one going on.
+        let (w, h) = img::png_size(&std::fs::read(o.out.join(sheet)).unwrap()).unwrap();
+        let rows = rows_of(&o.out);
+        let n = rows[0]["pairs"].parse::<u32>().unwrap();
+        let base = l.margin / 2 + l.row_h() + n * l.line_h();
+        assert_eq!(w, l.width());
+        assert_eq!(h == base, scale == 4, "{scale}: {h} {base}");
+        assert!(
+            h >= base && (h - base) % l.line_h() == 0,
+            "{scale}: {h} {base}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_window_that_shows_none_of_its_item_fails_the_run() {
     // A chest at (12, 12), and an object of X's opaque record on it later in the lists, so
     // drawn in front of it: the chest's window, where the world first draws it, shows none of
