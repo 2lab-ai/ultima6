@@ -1,0 +1,217 @@
+//! The out dir's steps on made-up runs (files the tests write, nothing else), each race made
+//! deterministic by a hook at a step ([`seam`]).
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use super::*;
+
+/// A fresh temp dir of the test's own.
+fn temp(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("u6-hdtool-outdir-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The files of `d` (name → bytes; a directory in it → `"<dir>"`), or `None` when nothing is
+/// at `d`.
+fn contents(d: &Path) -> Option<BTreeMap<String, Vec<u8>>> {
+    let entries = std::fs::read_dir(d).ok()?;
+    Some(
+        entries
+            .map(|e| {
+                let e = e.unwrap();
+                let name = e.file_name().to_string_lossy().into_owned();
+                let bytes = if e.path().is_dir() {
+                    b"<dir>".to_vec()
+                } else {
+                    std::fs::read(e.path()).unwrap()
+                };
+                (name, bytes)
+            })
+            .collect(),
+    )
+}
+
+/// The names in `d` that start with `.<name>.` (staging and moved-aside dirs of the out dir
+/// `name`).
+fn beside_of(d: &Path, name: &str) -> Vec<PathBuf> {
+    let prefix = format!(".{name}.");
+    let mut v: Vec<PathBuf> = std::fs::read_dir(d)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// The hooks of `key`, removed when this is dropped.
+struct Hooked(PathBuf);
+
+impl Drop for Hooked {
+    fn drop(&mut self) {
+        HOOKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(k, _, _)| *k != self.0);
+    }
+}
+
+fn hook(
+    key: &Path,
+    step: &'static str,
+    h: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static,
+) -> Hooked {
+    HOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((key.to_path_buf(), step, Arc::new(h)));
+    Hooked(key.to_path_buf())
+}
+
+/// A run that writes `a.txt` holding `text`.
+fn writes(text: &'static str) -> impl FnOnce(&Path, &Path) -> Result<(), String> {
+    move |dir: &Path, _: &Path| work::write_file(&dir.join("a.txt"), text.as_bytes())
+}
+
+/// What a run of [`writes`]`(text)` leaves at the out dir.
+fn output(text: &str) -> BTreeMap<String, Vec<u8>> {
+    BTreeMap::from([
+        (FIRST.marker.to_string(), b"calibrate\n".to_vec()),
+        ("a.txt".to_string(), text.as_bytes().to_vec()),
+    ])
+}
+
+#[test]
+fn an_unmarked_dir_put_at_the_out_dir_during_the_run_survives_whole() {
+    // The old output there when the run begins (it passes the check before the run), then the
+    // owner's dir put in its place before the out dir is replaced: moved aside, found unmarked,
+    // put back as it was, and the run refused.
+    let dir = temp("unmarked-ran");
+    let out = dir.join("out");
+    run_in(FIRST, &out, writes("old")).unwrap();
+    let owners = BTreeMap::from([("notes.txt".to_string(), b"the owner's".to_vec())]);
+    let (o, d) = (out.clone(), dir.clone());
+    let _h = hook(&out, "ran", move |_| {
+        std::fs::rename(&o, d.join("kept")).unwrap();
+        std::fs::create_dir(&o).unwrap();
+        std::fs::write(o.join("notes.txt"), b"the owner's").unwrap();
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes("new")).unwrap_err();
+    assert!(e.contains("(no marker .calibrate-first-pass)"), "{e}");
+    assert_eq!(contents(&out), Some(owners));
+    assert!(
+        beside_of(&dir, "out").is_empty(),
+        "{:?}",
+        beside_of(&dir, "out")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_unmarked_dir_put_at_the_out_dir_once_it_is_checked_survives_whole() {
+    // The old output moved aside and checked, then the owner's dir put at the out dir before
+    // the new one is: the rename that cannot replace fails, the owner's dir stays as it was,
+    // and the old output, which cannot go back, is said to be where it is.
+    let dir = temp("unmarked-checked");
+    let out = dir.join("out");
+    run_in(FIRST, &out, writes("old")).unwrap();
+    let owners = BTreeMap::from([("notes.txt".to_string(), b"the owner's".to_vec())]);
+    let o = out.clone();
+    let _h = hook(&out, "checked", move |_| {
+        std::fs::create_dir(&o).unwrap();
+        std::fs::write(o.join("notes.txt"), b"the owner's").unwrap();
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes("new")).unwrap_err();
+    assert!(e.contains("it is not replaced"), "{e}");
+    assert_eq!(contents(&out), Some(owners));
+    let left = beside_of(&dir, "out");
+    assert_eq!(left.len(), 1, "{left:?}");
+    let at = left[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        e.contains("the old output is at ") && e.ends_with(&at),
+        "{e}"
+    );
+    assert_eq!(contents(&left[0]), Some(output("old")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_empty_dir_put_at_an_absent_out_dir_survives_and_the_run_is_refused() {
+    // No out dir when the run begins; an empty dir made there before the new one is put in
+    // place: a plain rename would replace it, the one used cannot.
+    let dir = temp("empty-appears");
+    let out = dir.join("out");
+    let o = out.clone();
+    let _h = hook(&out, "checked", move |_| {
+        std::fs::create_dir(&o).unwrap();
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes("new")).unwrap_err();
+    assert!(e.contains("it is not replaced"), "{e}");
+    assert_eq!(contents(&out), Some(BTreeMap::new()));
+    assert!(
+        beside_of(&dir, "out").is_empty(),
+        "{:?}",
+        beside_of(&dir, "out")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_crash_between_any_two_steps_leaves_the_old_output_or_the_new() {
+    // At each step the files are what a crash there would leave: the out dir the old output,
+    // or the new, whole; or, between moving the old aside and putting the new in place, no out
+    // dir and the old output whole beside it. Never a mix, never neither.
+    let dir = temp("crash");
+    let out = dir.join("out");
+    run_in(FIRST, &out, writes("old")).unwrap();
+    let seen: Arc<std::sync::Mutex<Vec<(&'static str, &'static str)>>> = Arc::default();
+    let mut hooks = Vec::new();
+    for step in ["ran", "moved", "checked", "published"] {
+        let (o, d, seen) = (out.clone(), dir.clone(), seen.clone());
+        hooks.push(hook(&out, step, move |_| {
+            let at_out = contents(&o);
+            let old_aside = beside_of(&d, "out")
+                .iter()
+                .any(|p| contents(p) == Some(output("old")));
+            let state = if at_out == Some(output("old")) {
+                "old"
+            } else if at_out == Some(output("new")) {
+                "new"
+            } else if at_out.is_none() && old_aside {
+                "old beside"
+            } else {
+                panic!("{step}: at the out dir {at_out:?}, the old output beside it: {old_aside}")
+            };
+            seen.lock().unwrap().push((step, state));
+            Ok(())
+        }));
+    }
+    run_in(FIRST, &out, writes("new")).unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            ("ran", "old"),
+            ("moved", "old beside"),
+            ("checked", "old beside"),
+            ("published", "new")
+        ]
+    );
+    assert_eq!(contents(&out), Some(output("new")));
+    assert!(
+        beside_of(&dir, "out").is_empty(),
+        "{:?}",
+        beside_of(&dir, "out")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
