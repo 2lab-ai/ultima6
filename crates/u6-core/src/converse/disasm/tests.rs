@@ -2930,9 +2930,9 @@ fn a_b8_that_ends_a_direct_table_is_read_only_as_an_end() {
 #[test]
 fn the_bytes_a_direct_search_reads_on_are_closed_to_landings() {
     // A direct search of `t` = "ab\0" and bytes with no NUL or `b8` to the script's end: it
-    // reads on over them. The loops' word table there is dropped; their jump there stops at
-    // them; aimed at direct code, they are dropped as code; and alone the search reads on past
-    // the script's end.
+    // reads on over them. The loops' word table there is dropped; a table of its kind where
+    // the read on starts chains; their jump there stops at them; aimed at direct code, they are
+    // dropped as code; and alone the search reads on past the script's end.
     let search = |t: u32| search_of(t, false);
     let past = |d: &Disasm, t: u32| Hazard {
         at: BODY + 4,
@@ -2949,6 +2949,40 @@ fn the_bytes_a_direct_search_reads_on_are_closed_to_landings() {
             past(&d, t),
             dropped(at, Scan::Answered, Reason::TableKinds),
             dropped(at, Scan::NoMatch, Reason::TableKinds)
+        ]
+    );
+    // A table of the search's kind where its read on starts chains with it: the loops' print
+    // of string 0 there is not dropped for the kinds, but reads past a table with no entry.
+    let print0 = |t: u32| [&[0xb5][..], &lit32(t), &[0xb1]].concat();
+    let (s, t, at) = a_direct_read_and_a_landings(&search, &|t| print0(t + 3), b"ab\0cdef");
+    let d = any_order(&s);
+    assert_eq!(
+        sorted_hazards(&d),
+        [
+            past(&d, t),
+            dropped(at, Scan::Answered, Reason::TableIndex),
+            dropped(at, Scan::NoMatch, Reason::TableIndex)
+        ]
+    );
+    // So for a word search of one word and a byte, and the loops' word write at that byte.
+    let (s, w, at) = a_direct_read_and_a_landings(
+        &|w| search_of(w, true),
+        &|w| write_word(w + 2, 0),
+        b"\x10\x00\x77",
+    );
+    let d = any_order(&s);
+    assert_eq!(
+        sorted_hazards(&d),
+        [
+            Hazard {
+                at: BODY + 4,
+                kind: HazardKind::SearchPastEnd(Span {
+                    offset: w + 2,
+                    len: 1
+                }),
+            },
+            dropped(at, Scan::Answered, Reason::TableIndex),
+            dropped(at, Scan::NoMatch, Reason::TableIndex)
         ]
     );
     let (s, t, _) = a_direct_read_and_a_landings(&search, &|t| jump(t + 5), b"ab\0cd\xb6");
