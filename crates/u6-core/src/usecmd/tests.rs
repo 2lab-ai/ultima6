@@ -448,12 +448,12 @@ fn scroll_text(s: &State) -> String {
     all.extend(
         t.transcript_line
             .iter()
-            .map(|&b| crate::ui::wide::cell_char(b)),
+            .map(|&b| crate::ui::wide::latin_char(b)),
     );
     all.extend(
         t.line[usize::from(t.line_start)..usize::from(t.line_len)]
             .iter()
-            .map(|&b| crate::ui::wide::cell_char(b)),
+            .map(|&b| crate::ui::wide::latin_char(b)),
     );
     all
 }

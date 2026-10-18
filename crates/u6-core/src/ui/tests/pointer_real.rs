@@ -291,7 +291,7 @@ fn the_game_played_with_the_pointer() {
             s.ui.text
                 .transcript_line
                 .iter()
-                .map(|&c| crate::ui::wide::cell_char(c))
+                .map(|&c| crate::ui::wide::latin_char(c))
                 .collect();
         assert!(
             (s.ui.input.target_pending, s.ui.input.target_command) == (1, 0x84),

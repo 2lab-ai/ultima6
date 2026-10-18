@@ -36,6 +36,17 @@ pub fn cell_char(c: u16) -> char {
     }
 }
 
+/// Test-only: the character of a cell code in a line that holds only bytes (an English-only
+/// test reading the line or the transcript). A code from 0x100 there panics instead of being
+/// read as some other character.
+#[cfg(test)]
+pub(crate) fn latin_char(c: u16) -> char {
+    match u8::try_from(c) {
+        Ok(b) => char::from(b),
+        Err(_) => panic!("a wide cell {c:#06x} in a line of bytes"),
+    }
+}
+
 /// The UTF-8 assembler: holds the bytes that can still become a Hangul syllable, and nothing
 /// else.
 ///
@@ -379,6 +390,15 @@ mod tests {
         assert_eq!(decode(&[0xea, 0xea, 0xb0, 0x80]), [0xea, 0xac00]);
         assert_eq!(decode("가나다 ab".as_bytes()).len(), 6);
         assert_eq!(decode(&[0xea, 0xb0]).len(), 2);
+    }
+
+    #[test]
+    fn a_wide_cell_in_a_line_of_bytes_panics() {
+        assert_eq!(latin_char(0x41), 'A');
+        assert_eq!(latin_char(0xe9), 'é');
+        assert!(std::panic::catch_unwind(|| latin_char(0xac00)).is_err());
+        assert!(std::panic::catch_unwind(|| latin_char(0x100)).is_err());
+        assert_eq!(cell_char(0xac00), '가');
     }
 
     #[test]

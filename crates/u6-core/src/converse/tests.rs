@@ -114,10 +114,10 @@ pub(super) fn scroll(s: &State) -> String {
     let mut last: String = t
         .transcript_line
         .iter()
-        .map(|&b| crate::ui::wide::cell_char(b))
+        .map(|&b| crate::ui::wide::latin_char(b))
         .collect();
     let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
-    last.extend(pending.iter().map(|&b| crate::ui::wide::cell_char(b)));
+    last.extend(pending.iter().map(|&b| crate::ui::wide::latin_char(b)));
     lines.push(last);
     lines.join("\n")
 }
