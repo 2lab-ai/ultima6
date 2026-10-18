@@ -646,7 +646,8 @@ fn the_final_read_holds_each_master_to_the_digest_ingest_json_lists() {
             "disagreements.txt",
             "gates.jsonl",
             "ingest.json",
-            "jobs.jsonl"
+            "jobs.jsonl",
+            "refused.txt"
         ]
     );
     let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
@@ -673,7 +674,7 @@ fn the_final_read_holds_each_master_to_the_digest_ingest_json_lists() {
     );
     assert_eq!(
         files_of(&o.out),
-        ["gates.jsonl", "ingest.json", "jobs.jsonl"]
+        ["gates.jsonl", "ingest.json", "jobs.jsonl", "refused.txt"]
     );
     // In the state itself, too: a listed master with no digest is not the one ingest wrote.
     let fixed_of = |list: &[Accepted]| {
@@ -716,11 +717,13 @@ fn labelled(text: &str, pairs: &[Pair], label: &str) -> String {
         .collect()
 }
 
-/// The files of the out dir `out`, sorted.
+/// The files of the out dir `out`, sorted, but the [`MARKER`] (which each has).
 fn files_of(out: &Path) -> Vec<String> {
+    assert!(out.join(MARKER).is_file(), "{}", out.display());
     let mut files: Vec<String> = std::fs::read_dir(out)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|f| f != MARKER)
         .collect();
     files.sort();
     files
@@ -802,7 +805,7 @@ fn a_neighbour_field_that_is_not_a_pair_stops_the_read() {
     assert!(e.contains("line 3"), "{e}");
     assert_eq!(
         files_of(&o.out),
-        ["gates.jsonl", "ingest.json", "jobs.jsonl"]
+        ["gates.jsonl", "ingest.json", "jobs.jsonl", "refused.txt"]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -863,7 +866,8 @@ fn the_atlas_is_laid_out_from_the_plan_of_these_files() {
                 "disagreements.txt",
                 "gates.jsonl",
                 "ingest.json",
-                "jobs.jsonl"
+                "jobs.jsonl",
+                "refused.txt"
             ]
         );
     }
@@ -1586,7 +1590,8 @@ fn an_item_listed_in_part_or_an_image_of_no_item_is_a_disagreement() {
             "disagreements.txt",
             "gates.jsonl",
             "ingest.json",
-            "jobs.jsonl"
+            "jobs.jsonl",
+            "refused.txt"
         ]
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -1676,19 +1681,14 @@ fn a_disagreement_fails_and_draws_nothing() {
         "{e}"
     );
     // No sheet, no samples.tsv; the details (record ids) in a file, not in the message.
-    let files: Vec<String> = std::fs::read_dir(&o.out)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    let mut files = files;
-    files.sort();
     assert_eq!(
-        files,
+        files_of(&o.out),
         [
             "disagreements.txt",
             "gates.jsonl",
             "ingest.json",
-            "jobs.jsonl"
+            "jobs.jsonl",
+            "refused.txt"
         ]
     );
     assert!(!e.contains("t:"));
@@ -1808,7 +1808,13 @@ fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
     assert!(!e.contains("t:"), "{e}");
     assert_eq!(
         files_of(&o.out),
-        ["gates.jsonl", "ingest.json", "jobs.jsonl", "unshown.txt"]
+        [
+            "gates.jsonl",
+            "ingest.json",
+            "jobs.jsonl",
+            "refused.txt",
+            "unshown.txt"
+        ]
     );
     let detail = std::fs::read_to_string(o.out.join("unshown.txt")).unwrap();
     assert_eq!(
@@ -2026,7 +2032,13 @@ fn a_window_that_shows_none_of_its_item_fails_the_run() {
     assert!(!e.contains("t:"), "{e}");
     assert_eq!(
         files_of(&o.out),
-        ["gates.jsonl", "ingest.json", "jobs.jsonl", "unshown.txt"]
+        [
+            "gates.jsonl",
+            "ingest.json",
+            "jobs.jsonl",
+            "refused.txt",
+            "unshown.txt"
+        ]
     );
     let plan = group::plan(&g);
     let detail = std::fs::read_to_string(o.out.join("unshown.txt")).unwrap();
@@ -2407,6 +2419,119 @@ fn a_change_to_the_work_dir_while_it_is_read_fails_the_run() {
 }
 
 #[test]
+fn the_out_dir_holds_one_runs_output() {
+    // The chest at (12, 12) and the sword alone, then a re-ingest that leaves the chest only.
+    let mut g = game();
+    let (chest, sword) = (synthetic::OBJECTS, synthetic::OBJECTS + 2);
+    g.world.objects = vec![crate::game::Placed {
+        x: 12,
+        y: 12,
+        z: 0,
+        tile: chest,
+    }];
+    let images: BTreeMap<u16, Rgba> = [chest, sword].iter().map(|&r| (r, near(&g, r))).collect();
+    let (dir, work) = work_dir("one-run", "", &g, &images);
+    let o = options(&dir);
+    let pngs = |out: &Path| -> Vec<String> {
+        files_of(out)
+            .into_iter()
+            .filter(|f| f.ends_with(".png"))
+            .collect()
+    };
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let s1 = calibrate_final(&g, &work, &o).unwrap();
+    assert_eq!(pngs(&o.out), sorted(s1.sheets.clone()));
+    let one = BTreeMap::from([(chest, images[&chest].clone())]);
+    work.write(
+        "ingest.json",
+        &serde_json::to_vec(&listed(&g, &one)).unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_file(work.slice(&atlas::slice_name(ImageId::Tile(sword)))).unwrap();
+    // A second run: its sheets alone, not the first run's alone sheet (the reviewer's P2).
+    let s2 = calibrate_final(&g, &work, &o).unwrap();
+    assert_eq!(pngs(&o.out), sorted(s2.sheets.clone()));
+    assert!(s1.sheets.len() > s2.sheets.len());
+    // A refused run: its refusal alone, no sheet, no samples.tsv (P3).
+    let mut solid = Rgba::new(64, 64);
+    img::fill(&mut solid, 0, 0, 64, 64, [255, 0, 255, 255]);
+    let master = work.slice(&atlas::slice_name(ImageId::Tile(chest)));
+    let kept = std::fs::read(&master).unwrap();
+    std::fs::write(&master, master_png(&solid)).unwrap();
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(e.contains("master"), "{e}");
+    assert_eq!(
+        files_of(&o.out),
+        [
+            "disagreements.txt",
+            "gates.jsonl",
+            "ingest.json",
+            "jobs.jsonl",
+            "refused.txt"
+        ]
+    );
+    let refused = std::fs::read_to_string(o.out.join("refused.txt")).unwrap();
+    assert_eq!(refused, format!("{e}\n"));
+    std::fs::write(&master, &kept).unwrap();
+    // A run whose work dir changes while it is read: what changed, no sheet drawn kept (P4).
+    let p = work.path("gates.jsonl");
+    AFTER_READ.lock().unwrap().push((
+        o.out.clone(),
+        Box::new(move || std::fs::write(&p, b"\n").unwrap()),
+    ));
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    AFTER_READ.lock().unwrap().retain(|(k, _)| *k != o.out);
+    assert!(e.contains("nothing drawn is kept"), "{e}");
+    assert_eq!(
+        files_of(&o.out),
+        [
+            "changed.txt",
+            "gates.jsonl",
+            "ingest.json",
+            "jobs.jsonl",
+            "refused.txt"
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(o.out.join("changed.txt")).unwrap(),
+        "gates.jsonl\n"
+    );
+    work.write("gates.jsonl", b"").unwrap();
+    // A dir the tool did not write is not replaced, and nothing is left beside it; an empty
+    // one is.
+    let theirs = dir.join("theirs");
+    std::fs::create_dir_all(&theirs).unwrap();
+    std::fs::write(theirs.join("notes.txt"), b"the owner's").unwrap();
+    let o2 = FinalOptions {
+        out: theirs.clone(),
+        ..options(&dir)
+    };
+    let e = calibrate_final(&g, &work, &o2).unwrap_err();
+    assert!(
+        e.contains("calibrate --final did not write (no marker)"),
+        "{e}"
+    );
+    let left: Vec<String> = std::fs::read_dir(&theirs)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["notes.txt"]);
+    let beside: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|f| f.starts_with('.'))
+        .collect();
+    assert!(beside.is_empty(), "{beside:?}");
+    std::fs::remove_file(theirs.join("notes.txt")).unwrap();
+    assert!(calibrate_final(&g, &work, &o2).is_ok());
+    assert!(theirs.join(MARKER).is_file());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
     // The chain, and B again far from it, beside a record Y (a grain of its own) east of it:
     // B's window, wherever it is placed, cannot draw both its pairs by the chain and its pair
@@ -2688,7 +2813,8 @@ fn the_read_of_what_ingest_and_its_gate_wrote() {
             "disagreements.txt",
             "gates.jsonl",
             "ingest.json",
-            "jobs.jsonl"
+            "jobs.jsonl",
+            "refused.txt"
         ]
     );
     let _ = std::fs::remove_dir_all(&dir);

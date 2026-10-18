@@ -128,6 +128,13 @@
 //!   the pairs in the last pass, of them drawn in a window, and the windows drawing one (the
 //!   pair windows too), 0 printed; the pair windows, and the pairs of the last pass drawn in
 //!   no window (0: a run that leaves one fails).
+//! - **The out dir** ([`final_read::MARKER`]): the run is written to a fresh directory beside
+//!   `--out` and swapped in whole at the end, so after any run `--out` holds that run's output
+//!   alone: on success its sheets and `samples.tsv`, drawn from one state; on a refusal its
+//!   `refused.txt` (the error), the details (`disagreements.txt` or `unshown.txt`) and the
+//!   snapshots read, no sheet; when the work dir changed during the run, `changed.txt` (what
+//!   changed) and no sheet. An old `--out` is replaced only when it holds the marker file every
+//!   run writes, or is empty; anything else there is left as it is and the run fails.
 //!
 //! The object draw (`u6_core::objects::draw`, 0x10e81e, 0x10e73a, 0x10e596) as far as the
 //! starting lists tell it: the objects in list order, (y, x), and at one cell the later in the

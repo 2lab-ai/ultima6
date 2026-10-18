@@ -1455,30 +1455,134 @@ pub(crate) type Touch = Box<dyn Fn() + Send>;
 pub(crate) static AFTER_READ: std::sync::Mutex<Vec<(PathBuf, Touch)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Writes `d`, a line each, to `name` in the out dir `out`, and gives the run's error: `what`,
-/// nothing drawn, the kinds and how many of each (the record ids only in the file).
-fn refuse(out: &Path, name: &str, what: &str, d: &[Disagreement]) -> String {
+/// Writes `d`, a line each, to `name` in the dir `out` the run writes (to be the out dir
+/// `shown`), and gives the run's error: `what`, nothing drawn, the kinds and how many of each
+/// (the record ids only in the file).
+fn refuse(out: &Path, shown: &Path, name: &str, what: &str, d: &[Disagreement]) -> String {
     let mut detail = String::new();
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
     for x in d {
         let _ = writeln!(detail, "{}: {}", x.kind, x.detail);
         *kinds.entry(x.kind).or_default() += 1;
     }
-    let path = out.join(name);
-    if let Err(e) = work::write_file(&path, detail.as_bytes()) {
+    if let Err(e) = work::write_file(&out.join(name), detail.as_bytes()) {
         return e;
     }
     let k: Vec<String> = kinds.iter().map(|(k, n)| format!("{k} {n}")).collect();
     format!(
         "{what}, nothing drawn: {} (details in {})",
         k.join(", "),
-        path.display()
+        shown.join(name).display()
     )
 }
 
-/// Runs `calibrate --final` (module docs of [`crate::calibrate`]) over the work dir.
+/// The file every out dir of `calibrate --final` holds: the dir is the tool's, which a later
+/// run may replace whole.
+pub const MARKER: &str = ".calibrate-final";
+
+/// A run's out dir while it is written: a fresh directory beside the out dir, holding the
+/// [`MARKER`], swapped in at the end ([`Staged::swap`]) or removed.
+struct Staged {
+    dir: PathBuf,
+    out: PathBuf,
+}
+
+impl Staged {
+    /// A fresh directory beside `out` (made absolute, its parent checked and created).
+    fn begin(out: &Path) -> Result<Staged, String> {
+        let name = out
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("{}: not a directory name", out.display()))?
+            .to_string();
+        let parent = match out.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let parent = work::ensure_dir(&parent)?;
+        let stamp = format!("{}-{}", std::process::id(), work::now_ns());
+        let dir = parent.join(format!(".{name}.staging-{stamp}"));
+        std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let staged = Staged {
+            dir,
+            out: parent.join(name),
+        };
+        work::write_file(&staged.dir.join(MARKER), b"calibrate --final\n")?;
+        Ok(staged)
+    }
+
+    /// Puts the staged dir in the out dir's place: an out dir there is removed only when it is
+    /// one calibrate --final wrote (it holds the [`MARKER`]) or empty; anything else there is
+    /// left as it is, the staged dir removed, and the run fails.
+    fn swap(self) -> Result<(), String> {
+        let refuse = |why: &str| -> Result<(), String> {
+            let _ = std::fs::remove_dir_all(&self.dir);
+            Err(format!(
+                "{}: {why}; it is not replaced (give another --out, or move it)",
+                self.out.display()
+            ))
+        };
+        match std::fs::symlink_metadata(&self.out) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return refuse(&e.to_string()),
+            Ok(m) if !m.file_type().is_dir() => return refuse("not a directory"),
+            Ok(_) if self.out.join(MARKER).is_file() => {
+                // The old run moved aside, this one put in its place, then the old removed; on a
+                // failure the old put back.
+                let old = PathBuf::from(format!("{}.old", self.dir.display()));
+                if let Err(e) = std::fs::rename(&self.out, &old) {
+                    return refuse(&e.to_string());
+                }
+                if let Err(e) = std::fs::rename(&self.dir, &self.out) {
+                    let _ = std::fs::rename(&old, &self.out);
+                    return refuse(&e.to_string());
+                }
+                let _ = std::fs::remove_dir_all(&old);
+                return Ok(());
+            }
+            Ok(_) => {
+                if std::fs::remove_dir(&self.out).is_err() {
+                    return refuse("a directory calibrate --final did not write (no marker)");
+                }
+            }
+        }
+        match std::fs::rename(&self.dir, &self.out) {
+            Ok(()) => Ok(()),
+            Err(e) => refuse(&e.to_string()),
+        }
+    }
+}
+
+/// Runs `calibrate --final` (module docs of [`crate::calibrate`]) over the work dir. The run is
+/// written to a fresh directory beside the out dir and swapped in whole at the end: after any
+/// run the out dir holds that run's output alone, its sheets and `samples.tsv` drawn from one
+/// state, or, when it fails, its refusal (`refused.txt`, the details and the snapshots read).
 pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<FinalSummary, String> {
-    let out = work::ensure_dir(&o.out)?;
+    work::check_target(&o.out)?;
+    let staged = Staged::begin(&o.out)?;
+    let r = run_final(game, work, o, &staged.dir, &staged.out);
+    if let Err(e) = &r
+        && let Err(w) =
+            work::write_file(&staged.dir.join("refused.txt"), format!("{e}\n").as_bytes())
+    {
+        let _ = std::fs::remove_dir_all(&staged.dir);
+        return Err(format!("{e} ({w})"));
+    }
+    match (r, staged.swap()) {
+        (r, Ok(())) => r,
+        (Ok(_), Err(e)) => Err(e),
+        (Err(e), Err(w)) => Err(format!("{e}; {w}")),
+    }
+}
+
+/// [`calibrate_final`]'s run, written to `out`, which is to be the out dir `named`.
+fn run_final(
+    game: &Game,
+    work: &Work,
+    o: &FinalOptions,
+    out: &Path,
+    named: &Path,
+) -> Result<FinalSummary, String> {
     // The owner's list first: a bad line stops the run before anything is written.
     let ids = match &o.include {
         Some(p) => {
@@ -1578,7 +1682,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         r => {
             d.extend(r.err().into_iter().flatten());
             let what = "the record and the slices disagree";
-            return Err(refuse(&out, "disagreements.txt", what, &d));
+            return Err(refuse(out, named, "disagreements.txt", what, &d));
         }
     };
 
@@ -1814,7 +1918,8 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
     }
     if !unshown.is_empty() {
         return Err(refuse(
-            &out,
+            out,
+            named,
             "unshown.txt",
             "the windows do not show every item and every pair of the last pass",
             &unshown,
@@ -2087,11 +2192,17 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         changed.push(format!("{masters} masters of slices/"));
     }
     if !changed.is_empty() {
+        // The sheets drawn read no one state: none is kept.
+        for f in sheets.iter().map(String::as_str).chain(["samples.tsv"]) {
+            std::fs::remove_file(out.join(f)).map_err(|e| format!("{f}: {e}"))?;
+        }
+        let what = format!("{}\n", changed.join("\n"));
+        work::write_file(&out.join("changed.txt"), what.as_bytes())?;
         return Err(format!(
-            "the work dir changed while calibrate --final read it ({}): the sheets in {} read \
-             no one state; run it again",
+            "the work dir changed while calibrate --final read it ({}): nothing drawn is kept \
+             (what changed in {}); run it again",
             changed.join(", "),
-            out.display()
+            named.join("changed.txt").display()
         ));
     }
     Ok(FinalSummary {
