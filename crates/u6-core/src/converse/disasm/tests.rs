@@ -861,20 +861,13 @@ fn a_table_after_the_last_block_stops_its_skip_loops() {
         panic!("{:?}", shape(&d))
     };
     assert_eq!(tb.entries[0].bytes(&s), b"zz");
-    assert!(
-        d.hazards.contains(&Hazard {
+    // One hazard: the landing reaches a table (not a skip-loop mismatch).
+    assert_eq!(
+        d.hazards,
+        [Hazard {
             at: t,
             kind: HazardKind::IntoData
-        }),
-        "{:?}",
-        d.hazards
-    );
-    assert!(
-        !d.hazards
-            .iter()
-            .any(|h| matches!(h.kind, HazardKind::Dropped(..))),
-        "{:?}",
-        d.hazards
+        }]
     );
 }
 
@@ -886,6 +879,71 @@ fn after_an_if(rest: &[u8]) -> Vec<u8> {
     body.push(0xa2);
     body.extend_from_slice(rest);
     script(&body)
+}
+
+#[test]
+fn a_landing_into_the_middle_of_a_table_stops_there_and_the_table_keeps_its_bytes() {
+    // The block prints the table after it; its skip loops find the first `ee` inside the
+    // table's second string and land on the byte after it. The table holds all its strings,
+    // and the landing's one hazard says it reached data.
+    let strings = |op: &[u8], tail: &[u8]| {
+        let mut body = b"\xf7\xef*\xf6\xb5".to_vec();
+        // f7 ef * f6 b5, the address, the operand, the jump.
+        let t = BODY + 5 + 5 + op.len() as u32 + 5;
+        body.extend(lit32(t));
+        body.extend_from_slice(op);
+        body.extend(jump(BODY));
+        body.extend_from_slice(tail);
+        (script(&body), t)
+    };
+    // With its b8; without it, an index that reads the second string.
+    for (op, terminated) in [(&[0xb1][..], true), (&[0x01, 0xa7][..], false)] {
+        let tail: &[u8] = if terminated {
+            b"ab\0c\xeed\0\xb8\xff"
+        } else {
+            b"ab\0c\xeed\0\xff"
+        };
+        let (s, t) = strings(op, tail);
+        let d = ok(&s);
+        let Kind::Table(tb) = &item(&d, t).kind else {
+            panic!("{:?}", shape(&d))
+        };
+        let entries: Vec<&[u8]> = tb.entries.iter().map(|e| e.bytes(&s)).collect();
+        assert_eq!(entries, [&b"ab"[..], b"c\xeed"], "terminated {terminated}");
+        assert_eq!(tb.terminated, terminated);
+        assert_eq!(
+            d.hazards,
+            [Hazard {
+                at: t + 5,
+                kind: HazardKind::IntoData
+            }],
+            "terminated {terminated}"
+        );
+    }
+    // Direct code ends a table: after the strings a use reads, the table stops there; before
+    // one, the index is past the table and the script is refused.
+    let t = BODY + 17;
+    let into = |op: &[u8]| {
+        let mut body = vec![0xb5];
+        body.extend(lit32(t));
+        body.extend_from_slice(op);
+        body.extend(jump(t + 3));
+        body.resize((t - BODY) as usize, 0);
+        body.extend(b"ab\0cd\0\xb8");
+        script(&body)
+    };
+    let d = ok(&into(&[0xb1, 0xa7, 0xa7]));
+    assert_eq!(
+        &shape(&d)[shape(&d).len() - 4..],
+        ["table1", "text2", "Nul", "unreached1"]
+    );
+    assert_eq!(
+        refused(&into(&[0x01, 0xa7, 0xa7])),
+        Refusal {
+            at: BODY,
+            reason: Reason::TableIndex
+        }
+    );
 }
 
 #[test]
@@ -905,20 +963,13 @@ fn a_table_wins_over_the_code_of_a_landing_decoded_before_it() {
         panic!("{:?}", shape(&d))
     };
     assert_eq!(tb.entries[0].bytes(&s), b"zz");
-    assert!(
-        d.hazards.contains(&Hazard {
+    // One hazard: the landing reaches a table (not a skip-loop mismatch).
+    assert_eq!(
+        d.hazards,
+        [Hazard {
             at: t,
             kind: HazardKind::IntoData
-        }),
-        "{:?}",
-        d.hazards
-    );
-    assert!(
-        !d.hazards
-            .iter()
-            .any(|h| matches!(h.kind, HazardKind::Dropped(..))),
-        "{:?}",
-        d.hazards
+        }]
     );
 }
 

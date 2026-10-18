@@ -24,32 +24,37 @@
 //!   anywhere in the text, before a trailing newline or in the middle of a sentence; the catalog
 //!   links the parts ([`catalog::RunUnit::part_of`]);
 //! - tables are the bytes the ops address as data (`b5 d2`, `a6 d2`, and the address operand of
-//!   the expression ops `b4`, `b7`, `c3`): NUL-ended strings or words, up to a `b8` at an
-//!   entry's start, the next decoded byte, the next table address or the script's end;
+//!   the expression ops `b4`, `b7`, `c3`): NUL-ended strings or words from the address, up to a
+//!   `b8` at an entry's start, the next table address, the script's end or direct code. A table
+//!   without its `b8` there has no end of its own: it also ends at landing code, but never
+//!   before the last entry a constant index reads;
 //! - what is left is [`Kind::Unreached`].
 //!
 //! Tables and the trial. A table use is checked when its op is decoded, inside the path that
 //! decodes it: the address must be a literal inside the script, read with one kind, and not in
 //! the code of a direct path or of the same path. On a direct path a failed check refuses the
 //! script; on a landing's path it drops that landing ([`HazardKind::Dropped`]). A kept use closes
-//! its address to code, so a later landing that reaches it stops there
-//! ([`HazardKind::IntoData`]); a direct path that reaches it refuses the script
-//! ([`Reason::TableInCode`]). Only kept paths reserve addresses. The choices the trial forces:
+//! its address to code at once, and every byte of its table from the next round on: a landing
+//! that reaches any of them stops there ([`HazardKind::IntoData`], its only hazard); a direct
+//! path that reaches the address refuses the script ([`Reason::TableInCode`]), and direct code
+//! after it ends the table (a constant index it cuts off refuses the script,
+//! [`Reason::TableIndex`]). Only kept paths reserve bytes. The choices the trial forces:
 //!
-//! - a table named by a kept path wins over the code of an *earlier* landing that covers its
-//!   address: the decode runs again with that address closed to landing paths from the start
-//!   (that landing then stops there), so the result does not depend on which of the two
-//!   landings came first;
+//! - a table named by a kept path wins over another landing's code inside it (at its address or
+//!   past it): the decode runs again with the table's bytes closed to landing paths from the
+//!   start (that landing then stops there), so the result does not depend on which landing
+//!   came first;
 //! - it never wins over direct code or over its own path's code: that landing is dropped
 //!   (`Dropped(_, TableInCode)`), and direct code is never read as a table;
-//! - an address closed that way that no kept path names in the next round is opened again and
-//!   can no longer win: a later landing that names it inside other landing code is dropped;
+//! - bytes closed that way that no table of a kept path holds in the next round are opened again
+//!   and can no longer win: a landing that names a table over other landing code there is
+//!   dropped (the intruding landing, when the table is a direct path's);
 //! - a constant index is checked against the final tables (its table and the ones that follow
 //!   it without a gap): past them, a direct use refuses the script and a landing's use drops
 //!   that landing in the next round.
 //!
-//! The rounds end: each one grows the dropped landings or the settled addresses, or (with those
-//! unchanged) the reserved addresses, all bounded by the script's length.
+//! The rounds end: each one grows the dropped landings or the settled bytes, or (with those
+//! unchanged) the reserved bytes, all bounded by the script's length.
 //!
 //! Operands are decoded with the evaluator's grammar ([`Expr`]), so their bytes are never read
 //! as text. A byte the interpreter has no arm for is refused with a named [`Reason`], never
@@ -483,6 +488,7 @@ pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refus
                     match d.check_table_indices()? {
                         Some(next) => next,
                         None => {
+                            d.check_landings();
                             let items = d.finish();
                             return Ok(Disasm {
                                 archive,

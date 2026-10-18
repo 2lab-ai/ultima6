@@ -36,7 +36,7 @@ pub(super) struct LandingKey {
 }
 
 /// The path an item or a table use comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Origin {
     /// The paths that take no skip loop (decoded first, never on trial).
     Direct,
@@ -45,16 +45,17 @@ enum Origin {
 }
 
 /// What a decode round hands the next one (see [`super::disassemble`]).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Plan {
-    /// Table addresses a kept landing's path named inside an earlier landing's code: closed to
+    /// The bytes of tables a kept path names that another landing's code covered: closed to
     /// the landing paths from the round's start, so that the table wins over that code.
     reserved: BTreeSet<u32>,
-    /// Addresses taken back out of `reserved` because no kept path named them any more: a path
-    /// that names one inside another landing's code is dropped instead.
+    /// Bytes taken back out of `reserved` because no table of a kept path holds them any more:
+    /// a table can no longer win over landing code there.
     settled: BTreeSet<u32>,
     /// Landings whose path fails a check only the whole decode can make (a constant table
-    /// index past its entries): not decoded, a [`HazardKind::Dropped`] hazard.
+    /// index past its entries, its own code inside a table it names): not decoded, a
+    /// [`HazardKind::Dropped`] hazard.
     banned: BTreeMap<LandingKey, Reason>,
 }
 
@@ -121,9 +122,6 @@ pub(super) struct Decoder<'a> {
     kinds: BTreeMap<u32, bool>,
     /// The addresses the path decoding now named.
     named: BTreeSet<u32>,
-    /// Addresses a kept landing's path named inside an earlier landing's code (the next round
-    /// reserves them).
-    contested: BTreeSet<u32>,
     /// The path decoding now.
     phase: Origin,
     items: BTreeMap<u32, Item>,
@@ -152,7 +150,6 @@ impl<'a> Decoder<'a> {
             uses: Vec::new(),
             kinds: BTreeMap::new(),
             named: BTreeSet::new(),
-            contested: BTreeSet::new(),
             phase: Origin::Direct,
             items: BTreeMap::new(),
             origins: BTreeMap::new(),
@@ -268,7 +265,6 @@ impl<'a> Decoder<'a> {
         if !self.landed.iter().any(|l| l.scan == Scan::Greeting) {
             return refuse(look, Reason::NoGreetingMarker);
         }
-        self.check_landings();
         Ok(())
     }
 
@@ -492,11 +488,19 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// After decoding: every skip loop must stop on the first byte of a code item and land on
-    /// an item's start.
-    fn check_landings(&mut self) {
+    /// After the tables are claimed: every skip loop must stop on the first byte of a code item
+    /// and land on an item's start. A landing that reached a table has its hazard already
+    /// ([`HazardKind::IntoData`]): that names what the bytes are.
+    pub(super) fn check_landings(&mut self) {
         let landed = std::mem::take(&mut self.landed);
         for l in &landed {
+            let into_data = Hazard {
+                at: l.at,
+                kind: HazardKind::IntoData,
+            };
+            if self.hazards.contains(&into_data) {
+                continue;
+            }
             let code = |o: u32| {
                 self.items.get(&o).is_some_and(|it| {
                     !matches!(
@@ -551,8 +555,8 @@ impl<'a> Decoder<'a> {
 
     /// Checks one table use of the path decoding now and closes its address to code. The
     /// address must be inside the script, read with one kind, and outside the code of the
-    /// direct paths and of this path; inside an earlier landing's code it is contested (the
-    /// table wins in the next round), unless it was settled.
+    /// direct paths and of this path; inside an earlier landing's code the round's end decides
+    /// ([`Self::revise`]), unless the address was settled.
     fn add_use(&mut self, u: TableUse) -> Result<(), Refusal> {
         if u.addr >= self.len() {
             return refuse(u.at, Reason::TableOutside);
@@ -564,9 +568,7 @@ impl<'a> Decoder<'a> {
             NO_OWNER => {}
             o => match self.origins.get(&o) {
                 Some(&Origin::Landing(k))
-                    if self.phase != Origin::Landing(k) && !self.plan.settled.contains(&u.addr) =>
-                {
-                    self.contested.insert(u.addr);
+                    if self.phase != Origin::Landing(k) && !self.plan.settled.contains(&u.addr) => {
                 }
                 _ => return refuse(u.at, Reason::TableInCode),
             },
@@ -870,60 +872,121 @@ impl<'a> Decoder<'a> {
 
     // ---- tables ------------------------------------------------------------------------------
 
-    /// The plan of the next round, when this one is not final: the contested addresses are
-    /// reserved from the start; reservations no kept path names any more are taken back and
-    /// settled. `None` = final.
-    pub(super) fn revise(&self) -> Option<Plan> {
-        if !self.contested.is_empty() {
-            let mut p = self.plan.clone();
-            p.reserved.extend(&self.contested);
-            return Some(p);
-        }
-        let named: BTreeSet<u32> = self.uses.iter().map(|(u, _)| u.addr).collect();
-        let stale: Vec<u32> = self.plan.reserved.difference(&named).copied().collect();
-        if stale.is_empty() {
-            return None;
-        }
-        let mut p = self.plan.clone();
-        for a in stale {
-            p.reserved.remove(&a);
-            p.settled.insert(a);
-        }
-        Some(p)
-    }
-
-    /// Claims the tables of the kept uses (see the module doc): one table item per address,
-    /// up to the next address, the next decoded byte or the script's end. Every address is
-    /// checked first (inside the script, not in code), before any range is scanned; the uses
-    /// were checked when they were made, so this refuses nothing in practice.
-    pub(super) fn claim_tables(&mut self) -> Result<(), Refusal> {
-        let mut by_addr: BTreeMap<u32, (bool, u32)> = BTreeMap::new();
+    /// The table each kept use's address takes, in address order: its entries from the address
+    /// up to a `b8` at an entry's start, the next table address, the script's end or the first
+    /// byte of direct code. A table without its `b8` there has no end of its own: it also ends
+    /// at the first byte of landing code, but not before the last entry a constant index of a
+    /// use of it reads.
+    fn table_ranges(&self) -> Vec<(u32, Table)> {
+        let mut by_addr: BTreeMap<u32, (bool, Option<u32>)> = BTreeMap::new();
         for (u, _) in &self.uses {
-            by_addr.entry(u.addr).or_insert((u.words, u.at));
-        }
-        for (&addr, &(_, at)) in &by_addr {
-            match self.owner.get(addr as usize) {
-                None => return refuse(at, Reason::TableOutside),
-                Some(&NO_OWNER) => {}
-                Some(_) => return refuse(at, Reason::TableInCode),
+            let e = by_addr.entry(u.addr).or_insert((u.words, None));
+            if let Some(i) = u.index.filter(|&i| i != NO_ENTRY) {
+                e.1 = e.1.max(Some(i));
             }
         }
         let addrs: Vec<u32> = by_addr.keys().copied().collect();
-        for (n, (&addr, &(words, _))) in by_addr.iter().enumerate() {
+        let mut out = Vec::with_capacity(addrs.len());
+        for (n, (&addr, &(words, need))) in by_addr.iter().enumerate() {
             let next = addrs
                 .get(n + 1)
                 .copied()
                 .unwrap_or(self.len())
                 .min(self.len());
-            let owned = (addr..next)
-                .find(|&p| self.owner[p as usize] != NO_OWNER)
-                .unwrap_or(next);
-            let table = self.table_at(addr, owned, words);
-            let end = table
-                .entries
-                .last()
-                .map_or(addr, |e| e.end() + u32::from(!words))
-                + u32::from(table.terminated);
+            let direct = (addr..next).find(|&p| self.direct_at(p)).unwrap_or(next);
+            let mut table = self.table_at(addr, direct, words);
+            if !table.terminated {
+                let owned = (addr..next)
+                    .find(|&p| self.owner[p as usize] != NO_OWNER)
+                    .unwrap_or(next);
+                let cut = self.table_at(addr, owned, words).entries.len();
+                let needed = need.map_or(0, |i| i as usize + 1);
+                table.entries.truncate(cut.max(needed));
+            }
+            out.push((addr, table));
+        }
+        out
+    }
+
+    /// A byte of an item a direct path decoded.
+    fn direct_at(&self, p: u32) -> bool {
+        let o = self.owner[p as usize];
+        o != NO_OWNER && self.origins.get(&o) == Some(&Origin::Direct)
+    }
+
+    /// The plan of the next round, when this one is not final (see the module doc). Landing
+    /// code inside a table of a kept use: a path's own code there drops that path; any other
+    /// landing's code makes the table's bytes closed to landings from the round's start (the
+    /// table wins), or, on bytes settled before, drops the table's landing namers (the code of
+    /// a direct table's intruder instead). Then reserved bytes no table holds any more are
+    /// taken back and settled. `None` = final.
+    pub(super) fn revise(&self) -> Option<Plan> {
+        let mut p = self.plan.clone();
+        let mut held = BTreeSet::new();
+        for (addr, table) in self.table_ranges() {
+            let end = table_end(addr, &table);
+            held.extend(addr..end);
+            let namers: BTreeSet<Origin> = self
+                .uses
+                .iter()
+                .filter(|(u, _)| u.addr == addr)
+                .map(|&(_, o)| o)
+                .collect();
+            // The items over the range: the one over its address, and those that start in it.
+            let over = Some(self.owner[addr as usize]).filter(|&o| o != NO_OWNER && o < addr);
+            let inside: Vec<u32> = over
+                .into_iter()
+                .chain(self.items.range(addr..end).map(|(&s, _)| s))
+                .collect();
+            for s in inside {
+                let Some(&Origin::Landing(k)) = self.origins.get(&s) else {
+                    continue;
+                };
+                let settled = (s..self.items[&s].end()).any(|b| self.plan.settled.contains(&b));
+                if namers.contains(&Origin::Landing(k)) {
+                    p.banned.entry(k).or_insert(Reason::TableInCode);
+                } else if !settled {
+                    let open = (addr..end).filter(|b| !self.plan.settled.contains(b));
+                    p.reserved.extend(open);
+                } else if namers.contains(&Origin::Direct) {
+                    p.banned.entry(k).or_insert(Reason::TableInCode);
+                } else {
+                    for o in &namers {
+                        if let Origin::Landing(n) = o {
+                            p.banned.entry(*n).or_insert(Reason::TableInCode);
+                        }
+                    }
+                }
+            }
+        }
+        if p != *self.plan {
+            return Some(p);
+        }
+        let stale: Vec<u32> = self.plan.reserved.difference(&held).copied().collect();
+        if stale.is_empty() {
+            return None;
+        }
+        for b in stale {
+            p.reserved.remove(&b);
+            p.settled.insert(b);
+        }
+        Some(p)
+    }
+
+    /// Claims the tables of the kept uses ([`Self::table_ranges`], see the module doc). Every
+    /// address is checked first (inside the script, not in code), before any range is scanned;
+    /// the uses were checked when they were made and the rounds keep code out of the ranges,
+    /// so this refuses nothing in practice.
+    pub(super) fn claim_tables(&mut self) -> Result<(), Refusal> {
+        for (u, _) in &self.uses {
+            match self.owner.get(u.addr as usize) {
+                None => return refuse(u.at, Reason::TableOutside),
+                Some(&NO_OWNER) => {}
+                Some(_) => return refuse(u.at, Reason::TableInCode),
+            }
+        }
+        for (addr, table) in self.table_ranges() {
+            let end = table_end(addr, &table);
             if end > addr {
                 self.insert(Item {
                     offset: addr,
@@ -1019,6 +1082,15 @@ impl<'a> Decoder<'a> {
         }
         out
     }
+}
+
+/// Where a table at `addr` with these entries ends (after the NUL of its last string, or its
+/// `b8`).
+fn table_end(addr: u32, t: &Table) -> u32 {
+    t.entries
+        .last()
+        .map_or(addr, |e| e.end() + u32::from(!t.words))
+        + u32::from(t.terminated)
 }
 
 /// The table uses of an op at `at` (the table operands of `b5` / `a6`, and the address operand
