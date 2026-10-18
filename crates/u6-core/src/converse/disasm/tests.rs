@@ -1350,6 +1350,11 @@ fn which_of_a_table_and_a_landings_code_wins_does_not_depend_on_the_landing_orde
     scripts.push(a_table_a_failing_landing_reaches().0);
     scripts.push(a_table_at_a_split_runs_second_part().0);
     scripts.push(tables_each_landing_needs_kept_first().0);
+    // A run split by a jump into it: its parts are linked in the catalog.
+    let mut body = b"Hi there\xf7\xef*\xf6".to_vec();
+    body.extend(jump(BODY + 3));
+    body.extend([0xee, 0xff]);
+    scripts.push(script(&body));
     for (n, s) in scripts.iter().enumerate() {
         let [a, b] = both_orders(s);
         assert!(a == b, "script {n}: {:?}\n{:?}", a.1, b.1);
