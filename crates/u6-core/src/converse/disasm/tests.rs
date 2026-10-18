@@ -2260,6 +2260,41 @@ fn a_read_past_a_table_bans_every_landing_that_runs_it_and_lifts_when_its_cause_
 }
 
 #[test]
+fn of_two_landings_each_reading_past_the_others_table_the_lower_is_kept() {
+    // The a1's landing (at `x`) prints string 1 of `ta` and writes a word inside `tb`'s second
+    // string; the block's loops (higher) do the mirror. Each one's word table cuts the other's
+    // string table, so each one's read past comes from the other: all are dropped for it. With
+    // them out, the a1's landing's ban lifts first; tried with it in, the loops' cause is still
+    // there, and they stay dropped.
+    let print1 = |t: u32| [&[0xb5][..], &lit32(t), &[0x01, 0xa7]].concat();
+    let x = BODY + 13;
+    let loops = x + 24;
+    let ta = loops + 23;
+    let tb = ta + 6;
+    let mut rest = print1(ta);
+    rest.extend(write_word(tb + 3, 0));
+    rest.extend(jump(BODY));
+    rest.push(0xee);
+    rest.extend(print1(tb));
+    rest.extend(write_word(ta + 3, 0));
+    rest.extend(jump(BODY));
+    rest.extend(b"ab\0cd\0ef\0gh\0");
+    let d = any_order(&after_an_if(&rest));
+    assert_eq!(
+        drops(&d),
+        [
+            dropped(loops, Scan::Answered, Reason::TableIndex),
+            dropped(loops, Scan::NoMatch, Reason::TableIndex)
+        ]
+    );
+    // The a1's landing's print of string 1 reads its table.
+    let Kind::Table(t) = &item(&d, ta).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert!(t.entries.len() >= 2);
+}
+
+#[test]
 fn scripts_whose_landing_order_decided_a_read_past_a_table_decode_one_way() {
     // Scripts from a random probe of the decoder before landings were taken in a fixed order
     // (synthetic bytes): in each, the two orders gave two decodes, one through a read past a

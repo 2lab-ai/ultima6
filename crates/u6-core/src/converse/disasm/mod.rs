@@ -78,9 +78,12 @@
 //!   another direct table: landings are closed out of those bytes); past the script's end,
 //!   over bytes no item
 //!   holds, it is a hazard ([`HazardKind::SearchPastEnd`]). Such a drop is checked again at
-//!   the end of each round: a dropped landing is tried on that round's decode, and when every
-//!   read its path makes would hold there (its cause is gone), it is taken again. A landing
-//!   dropped for a read past a table after that stays dropped (else two could take turns).
+//!   the end of each round: the dropped landings are tried on that round's decode, lowest
+//!   landing first, and the first whose reads would all hold there (its cause is gone) is
+//!   taken again, one per round, so that a later one is tried with it in. A landing dropped
+//!   for a read past a table after that stays dropped: its trial can end otherwise than its
+//!   round does (its table address in another landing's code, which that round's own table
+//!   wins over), and the check would lift it again each time.
 //!
 //! The rounds end: each one grows the landings taken again, or (with those unchanged) the
 //! dropped landings or the settled bytes, or (with those unchanged) the reserved bytes, all

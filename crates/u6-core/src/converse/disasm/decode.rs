@@ -1435,16 +1435,41 @@ impl<'a> Decoder<'a> {
             );
         }
         let mut p = self.plan.clone();
-        for (&k, &r) in &self.plan.banned {
-            if r == Reason::TableIndex && !self.plan.lifted.contains(&k) && pre.cause_gone(k) {
-                p.banned.remove(&k);
-                p.lifted.insert(k);
-            }
+        // One ban lifts per round, the lowest landing's first (in the order landings are taken):
+        // a later one is tried on a decode with the earlier ones in.
+        let mut candidates: Vec<LandingKey> = self
+            .plan
+            .banned
+            .iter()
+            .filter(|&(k, &r)| r == Reason::TableIndex && !self.plan.lifted.contains(k))
+            .map(|(&k, _)| k)
+            .collect();
+        candidates.sort_by_key(|&k| (self.landing_of(k).at, k.scan, k.stop, k.ctx));
+        if let Some(k) = candidates.into_iter().find(|&k| pre.cause_gone(k)) {
+            p.banned.remove(&k);
+            p.lifted.insert(k);
         }
         for k in banned {
             p.banned.entry(k).or_insert(Reason::TableIndex);
         }
         Ok((p != *self.plan).then_some(p))
+    }
+
+    /// The landing of key `k`: where its loop goes on reading (on the stop byte for a no-match
+    /// loop stopping on `ef` / `ff`, past it otherwise).
+    fn landing_of(&self, k: LandingKey) -> Landing {
+        let at = if k.scan == Scan::NoMatch
+            && matches!(self.b[k.stop as usize], ops::KEYWORDS | ops::HEADER)
+        {
+            k.stop
+        } else {
+            k.stop + 1
+        };
+        Landing {
+            scan: k.scan,
+            stop: k.stop,
+            at,
+        }
     }
 
     /// Whether the reads past a table that banned landing `k` are gone: `k` tried on this
@@ -1453,19 +1478,7 @@ impl<'a> Decoder<'a> {
     fn cause_gone(&self, k: LandingKey) -> bool {
         let mut d = self.clone();
         d.force = Some(k);
-        let at = if k.scan == Scan::NoMatch
-            && matches!(self.b[k.stop as usize], ops::KEYWORDS | ops::HEADER)
-        {
-            k.stop
-        } else {
-            k.stop + 1
-        };
-        let landing = Landing {
-            scan: k.scan,
-            stop: k.stop,
-            at,
-        };
-        if d.try_landing(landing, k.ctx).is_err() || d.claim_tables().is_err() {
+        if d.try_landing(self.landing_of(k), k.ctx).is_err() || d.claim_tables().is_err() {
             return true;
         }
         let reach = d.reach(k);
