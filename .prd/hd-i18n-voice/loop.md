@@ -17,13 +17,14 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 
 Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 6 (rev 5: what H0 and H3 measured; rev 6: the neighbour-seam gate), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
-Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening), H1 (the HD compositor, MMPX at 2× or 4×, on by default), H3 (the pack format and the imagegen tool) and H2 (the page loads a pack) are in production (19effa16 at main a769a5a); H4 ran the tool on the owner's files (its pack stays local). In flight:
-- H5, the neighbour-seam gate (spec 07 rev 6): H4's frames show seams where generated and scaled terrain meet. On the owner's data it keeps 1 of 49 generated terrain records; 4508 of 6053 checked pairs fail the first pass, median 1.50× the limit. Review round 2 (gpt-6-astra approved the source; test items and the opus re-review open).
-- H6, the calibration tool: sheets read (decision below); the final-read mode next, then review.
-- L1 (08 text path) and L3 (08 disassembler): review round 1 fixes in progress.
+Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening), H1 (the HD compositor, MMPX at 2× or 4×, on by default), H3 (the pack format and the imagegen tool) and H2 (the page loads a pack) are in production (19effa16 at main a769a5a); H4 ran the tool on the owner's files (its pack stays local); H5 (the neighbour-seam gate, tool only, no deploy) is merged at 953e744. In flight:
+- H6, the calibration tool with its final-read mode: review round 1 found that a covered record counts as shown and that malformed, duplicated or unplaced last-pass pairs can pass; the fix round is in progress.
+- H7, the pair model's gaps (b) and (c) and the terrain constant: done and re-gated on the owner's data (counts in the owner-local coverage report); round 2 adds what an object hides to the half-opaque rule, keeps terrain out of the atlas and the upload, and rebuilds the branch with no owner counts in its messages. Review next.
+- L1 (08 text path): review round 3 fixes in progress (printf closes only a brace it opened, a text run closes its own, the spec's brace rules, galmuri.py's file modes and failure stages). Lands squashed.
+- L3 (08 disassembler): review round 1 fixes in progress.
 
 Decision 2026-10-18 (trinity, converged in round 3; record `~/Games/ultima6/work/dispatch/trinity-h5-decision.md`):
-- H5 merges as gate code; item 1 stays open.
+- H5 merged as gate code (953e744); item 1 stays open.
 - Before any limit change, H6 reads the measure against the pixels on H4's pack, at S 4, outdoor pairs. Buckets: ≤1.1, 1.1–1.5, >1.5 × the limit, gen-gen and gen-MMPX separately. Controls: the carpet seam as positive, passing pairs as negative.
 - Reading:
   - if ≤1.1 looks clean and >1.5 looks seamed, the ruler stands; a calibrated limit or C (edge-harmonise in ingest, no upload) follows;
@@ -64,9 +65,8 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 
 | Unit | Spec | Scope | Needs |
 |---|---|---|---|
-| H5 | 07 | `tools/hd` neighbour-seam gate (spec 07 rev 6): pairs from the owner's map chunks and starting object lists, the cross-edge lattice step against the classic pair's, fallback to a fixed point, the count in the coverage report; then re-ingest locally (no new upload), rebuild the pack, read the frames | H3, H4 |
 | H6 | 07 | `u6-hd calibrate`: sample sheets of neighbour pairs by ratio bucket and side kind (classic / MMPX / H4 HD panels via `Compositor::compose`, ×4 and S 2), `samples.tsv`, a carpet control (read 2026-10-18: map and objects); then the final-read mode: the fixed-point pass against its final slices, one window per surviving generated item, explicit type and family inclusion, every pair label | H5 |
-| H7 | 07 | pair model gaps (b) flags3 0x20 objects over terrain, ghost base-tile pairs removed, and (c) generated objects ≥½ opaque toward terrain, counted first; the terrain constant; re-gate; final window read at S 4 and S 2 (H6's final-read mode), whole-object fallbacks to a fixed point; spec 07 rev 7 | H5, H6 |
+| H7 | 07 | pair model gaps (b) flags3 0x20 objects over terrain, ghost base-tile pairs removed, and (c) generated objects ≥½ opaque toward terrain, counted first; the terrain constant; re-gate; final window read at S 4 and S 2 (H6's final-read mode), whole-object fallbacks to a fixed point; the run-time draw variants (type 0x7b's other frame, the doorways' side tiles) paired; spec 07 rev 7 | H5, H6 |
 | L1 | 08 | text path: `i32` chars, `u16` line and narrowing sites, UTF-8 assembler (invalid bytes pass), Hangul table, runic guard, cell padding, josa, `%1$s`, empty articles; the `u` program's text path by code point (1b) | — |
 | L2 | 08 | locale layer + run, table-string and outermost-print hooks + pack parser; identity-pack receipt with `wide` on | L1, L3 |
 | L3 | 08 | conversation disassembler (04 W3a's table) + run and table-string extractor; the catalog shared with 09 | — |

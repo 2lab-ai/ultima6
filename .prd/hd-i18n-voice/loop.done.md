@@ -178,3 +178,17 @@ Append-only. Closed units, with their receipts.
   - **Gates on the merge** (a578045): fmt and clippy clean; 1106 passed, 7 ignored; web 63/63 three times; oracles OK; loop-lint 0 FAIL.
   - **Reviews:** gpt-6-astra and opus; r2 both APPROVE, r3 (the delta) both APPROVE, and their wording items were applied in 2b75fc4.
   - **Deploys:** none; the change is to tool tests, and the site is unchanged.
+
+| H5 | 07 | `tools/hd` neighbour-seam gate (spec 07 rev 6): pairs from the owner's map chunks and starting object lists, the cross-edge lattice step against the classic pair's, fallback to a fixed point, the count in the coverage report; then re-ingest locally (no new upload), rebuild the pack, read the frames | H3, H4 |
+
+- **H5** merged at 953e744 (branch abfd815 … d081952).
+  - **Pairs:** map tiles of edge-adjacent cells, and starting objects whose shared edges are both at least half opaque (`neighbour::pairs`). Each pair is labelled by where it comes from (`map`, `objects`).
+  - **Measure:** the step across the join, over the mean interior lattice step, against the classic pair's own ratio. The limit is max(1.5, classic ratio) × 1.001.
+  - **Fallback:** a failing generated record falls back to MMPX as its whole item, repeated to a fixed point.
+  - **Coverage report:** counts the pairs checked, failing and unmeasured before and after the fixed point. An unmeasured pair is one `settle` gets no measure for, and it cannot fail.
+  - **Owner run:** re-ingested from H4's sheets with no new upload, then rebuilt the pack locally. Most first-pass pairs failed and few generated terrain records survived (counts in the owner-local coverage report). That outcome went to trinity (record `~/Games/ultima6/work/dispatch/trinity-h5-decision.md`), and then to H6's read and H7.
+  - **Tests:** synthetic records only. Pair-model controls; the ratio and limit; the fixed point; the after counts, with the mutant "after count set in pass 1 only" killed by a test where an unmeasured pair's generated side falls.
+  - **Gates on the merge:** see the merge-gate line below.
+  - **Reviews:** gpt-6-astra and opus, rounds 1–4. r3: gpt-6-astra APPROVE, opus CHANGES on one test (MF2, closed in r4 with opus's own probe). r4: both APPROVE; opus's wording item was applied in d081952. Findings: `~/Games/ultima6/work/review/h5/`.
+  - **Deploys:** none; the change is to the tool, and the site is unchanged.
+  - **Carried to H7:** the run-time draw variants (type 0x7b's other frame, the doorways' side tiles) were not paired.
