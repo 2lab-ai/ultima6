@@ -894,8 +894,10 @@ fn joined_ratio(
 ///
 /// Also `None` when the images do not fit each other, which measures nothing either: `k` is 0,
 /// the two classic images differ in size or are not [`classic_len`], or a shown image is not
-/// `k × width` by `k × height` pixels. `neighbour::Side::new` refuses such images before they
-/// reach here.
+/// `k × width` by `k × height` pixels. `neighbour::Side::new` checks each side on its own (its
+/// classic image one the scaler takes, its generated image `neighbour::K` times it); it does
+/// not compare A's classic size with B's, which are alike because every tile image is
+/// `TILE_W × TILE_W` (`Game::classic`).
 pub fn neighbour_seam(
     a: (&Classic, &[Option<[f32; 3]>]),
     b: (&Classic, &[Option<[f32; 3]>]),
