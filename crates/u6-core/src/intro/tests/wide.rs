@@ -166,14 +166,16 @@ fn a_syllable_is_a_column_of_the_line_with_its_ink_rows_centred() {
         assert_eq!(p(0, i32::from(h)), 0, "below the line, h {h}");
         assert_eq!(c.x, 8, "an 8-px advance");
     }
-    // No table: the column is paper.
+    // No table: the column is paper. U+D7A3, whose low byte 0xa3 is a glyph of the font with
+    // ink (U+AC00's, 0, is 0 px wide and draws nothing), so a syllable drawn as the font's glyph
+    // of its low byte shows.
     let mut chip = Chip::new();
     let mut c = TextCtx {
         bg: 0x1e,
         hangul: None,
         ..ctx(true)
     };
-    text::print(&mut chip, &mut c, &font(8), "가".as_bytes(), &[]);
+    text::print(&mut chip, &mut c, &font(8), "힣".as_bytes(), &[]);
     for y in 0..8 {
         for x in 0..8 {
             assert_eq!(chip.pixel(view().planes, x, y), paper);
@@ -200,21 +202,35 @@ fn printf_assembles_a_syllable_split_across_the_format_and_its_argument() {
         assert_eq!(c.x, 12, "{fmt:02x?}");
         assert!(chip.pixel(view().planes, 8, 0) == INK && chip.pixel(view().planes, 12, 0) == 0);
     }
-    // A syllable split across the format and its argument, then a whole one in the argument.
+    // A malformed prefix: U+0080 is two bytes (C2 80), not the byte 0x80, so EA B0 make no
+    // syllable. They go out as themselves, then C2 and 80, each the glyph and the width of its
+    // byte (as with wide off; every glyph of this font is its own), and the 나 after them
+    // still assembles.
+    let d = distinct_font();
     let mut chip = Chip::new();
     let mut c = ctx(true);
     text::print(
         &mut chip,
         &mut c,
-        &f,
+        &d,
         b"\xea\xb0%s",
         &arg("\u{80}나".as_bytes()),
     );
-    assert_eq!(
-        syllable(&chip, 0, 0),
-        None,
-        "U+0080 is two bytes, not the 0x80 byte"
-    );
+    let fallback = [0xea, 0xb0, 0xc2, 0x80];
+    let x: i16 = fallback
+        .iter()
+        .map(|&b| i16::from(d.glyphs[usize::from(b)].width))
+        .sum();
+    let mut want = Chip::new();
+    let mut w = ctx(false);
+    text::print(&mut want, &mut w, &d, &fallback, &[]);
+    assert_eq!(w.x, x, "the four glyphs' advance");
+    w.wide = true;
+    text::print(&mut want, &mut w, &d, "나".as_bytes(), &[]);
+    assert!(chip == want, "the four glyphs, then 나");
+    assert_eq!(syllable(&chip, i32::from(x), 0), Some('나'));
+    assert_eq!(c.x, x + 8, "the four glyphs, then an 8-px cell");
+    // A syllable split across the format and its argument, then a whole one in the argument.
     let mut chip = Chip::new();
     let mut c = ctx(true);
     let mut both = vec![0x80];
@@ -225,19 +241,28 @@ fn printf_assembles_a_syllable_split_across_the_format_and_its_argument() {
         [Some('가'), Some('나')]
     );
     assert_eq!(c.x, 16);
-    // Into the buffer as bytes (split across the format and the argument), laid out as codes
-    // by `%P`.
-    let mut chip = Chip::new();
-    let mut c = ctx(true);
-    let mut ra = vec![0x9d, 0xbc];
-    ra.splice(0..0, [b' ', 0xeb]);
-    text::print_new(&mut chip, &mut c, &font(8), "다%s".as_bytes(), &arg(&ra));
-    assert_eq!(c.buf, "다 라".as_bytes());
-    text::print(&mut chip, &mut c, &font(8), b"%P", &[]);
-    assert_eq!(
-        [syllable(&chip, 0, 0), syllable(&chip, 12, 0)],
-        [Some('다'), Some('라')]
-    );
+    // Into the buffer: 라 (EB 9D BC) split across the format and the argument, after its first
+    // byte and after its second. The buffer keeps the bytes as they come and draws nothing;
+    // `%P` lays them out as codes, where 라 joins: 다 (8 px), the space (4), then 라 one 8-px
+    // cell.
+    let head = |tail: &[u8]| ["다 ".as_bytes(), tail].concat();
+    for (fmt, a) in [
+        (head(b"\xeb%s"), arg(&[0x9d, 0xbc])),
+        (head(b"\xeb\x9d%s"), arg(&[0xbc])),
+    ] {
+        let mut chip = Chip::new();
+        let mut c = ctx(true);
+        text::print_new(&mut chip, &mut c, &f, &fmt, &a);
+        assert_eq!(c.buf, "다 라".as_bytes(), "{fmt:02x?}");
+        assert!(chip == Chip::new(), "nothing drawn before %P, {fmt:02x?}");
+        text::print(&mut chip, &mut c, &f, b"%P", &[]);
+        assert_eq!(
+            [syllable(&chip, 0, 0), syllable(&chip, 12, 0)],
+            [Some('다'), Some('라')],
+            "{fmt:02x?}"
+        );
+        assert_eq!(c.x, 20, "{fmt:02x?}");
+    }
 }
 
 #[test]

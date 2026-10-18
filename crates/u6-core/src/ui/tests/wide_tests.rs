@@ -161,13 +161,14 @@ fn without_a_table_a_syllable_is_a_blank_cell() {
                 }
             }
         });
-        printf::puts(&st, &io, "a가힣b".as_bytes()).await;
+        printf::puts(&st, &io, "a힣나b".as_bytes()).await;
         print::put_raw(&st, &io, -1).await;
         io.present();
     });
     let fb = e.frame();
     assert_eq!(cell(fb, 22, 14, INK), b'a');
-    // Not glyph 0 or 0xa3 of u6.ch (the low bytes of the codes): paper only.
+    // Not glyph 0xa3 or 0x98 of u6.ch (the low bytes of the codes, both with ink in the
+    // synthetic font, where glyph 0 has none): paper only.
     for col in [23, 24] {
         for dy in 0..CELL {
             for dx in 0..CELL {
@@ -469,6 +470,99 @@ fn a_brace_highlight_with_wide_on() {
     // Off, `@{` is the plain keyword with its brace.
     let e = print(state(), b"@{x} y", &[]);
     assert_eq!(row_text(e.frame(), 22..25, 14, ALERT), "{x}");
+}
+
+/// The cell codes `fmt` with `args` puts on the scroll's first row (flushed, no newline),
+/// checked against the frame: each drawn cell is the glyph of its code, the cell after them
+/// paper.
+fn drawn(s: State, fmt: &'static [u8], args: &'static [Arg<'static>]) -> Vec<u16> {
+    let e = print(s, fmt, args);
+    let codes = e.state().ui.text.transcript_line.clone();
+    let fb = e.frame();
+    for (i, &c) in codes.iter().enumerate() {
+        let want = match u8::try_from(c) {
+            Ok(b) => [b; 8],
+            Err(_) => syl(char::from_u32(u32::from(c)).unwrap()),
+        };
+        assert_eq!(glyph(fb, 22 + i, 14, INK), want, "cell {i} of {fmt:02x?}");
+    }
+    assert_eq!(glyph(fb, 22 + codes.len(), 14, INK), [0; 8], "{fmt:02x?}");
+    codes
+}
+
+/// The cell codes of `s`: a char below U+0100 as its byte, a Hangul syllable as its code.
+fn codes(s: &str) -> Vec<u16> {
+    s.chars()
+        .map(|c| u16::try_from(u32::from(c)).unwrap())
+        .collect()
+}
+
+/// A `printf` case: the format, its arguments, the grammar, the cells with wide on, the cells
+/// with wide off.
+type Case = (
+    &'static str,
+    Vec<Arg<'static>>,
+    Language,
+    &'static str,
+    &'static [u8],
+);
+
+#[test]
+fn printf_fields_join_at_zero_and_negative_padding_and_wide_off_draws_bytes() {
+    let b = |v: &'static [u8]| Arg::Str(v);
+    let t = |v: &'static str| Arg::Str(v.as_bytes());
+    let (ea, b080, aea, eab0, x80) = (
+        b(&[0xea]),
+        b(&[0xb0, 0x80]),
+        b(&[b'a', 0xea]),
+        b(&[0xea, 0xb0]),
+        b(&[0x80]),
+    );
+    let (open, close) = (t("{(으"), t(")로}"));
+    let en = Language::English;
+    let ko = Language::Korean;
+    // (format, arguments, grammar, the cells with wide on, the cells with wide off). Off is
+    // main's printf: each byte a cell, a field padded by its width less its bytes, never by
+    // less than nothing.
+    #[rustfmt::skip]
+    let cases: [Case; 17] = [
+        // A syllable split across adjacent fields: no width, then left-aligned with a padding
+        // of 0 and of -1, after one byte and after two.
+        ("%s%s|", vec![ea, b080], en, "가|", b"\xea\xb0\x80|"),
+        ("%-1s%s|", vec![ea, b080], en, "가|", b"\xea\xb0\x80|"),
+        ("%-1s%s|", vec![aea, b080], en, "a가|", b"a\xea\xb0\x80|"),
+        ("%-2s%s|", vec![eab0, x80], en, "가|", b"\xea\xb0\x80|"),
+        // Right-aligned, a padding of 0 and of -1 (both fields), and a right-aligned field
+        // after a held byte with a padding of 0 (nothing is let out, the field finishes it).
+        ("%1s%s|", vec![ea, b080], en, "가|", b"\xea\xb0\x80|"),
+        ("%1s%1s|", vec![aea, b080], en, "a가|", b"a\xea\xb0\x80|"),
+        ("%-1s%2s|", vec![ea, b080], en, "가|", b"\xea\xb0\x80|"),
+        // A padding above 0 lets the held byte out first, left- and right-aligned; the `0` flag.
+        ("%-2s%s|", vec![ea, b080], en, "\u{ea} \u{b0}\u{80}|", b"\xea \xb0\x80|"),
+        ("%-1s%3s|", vec![ea, b080], en, "\u{ea} \u{b0}\u{80}|", b"\xea \xb0\x80|"),
+        ("%04s|", vec![b(&[0xea, 0xb0, 0x80])], en, "000가|", b"0\xea\xb0\x80|"),
+        // A josa marker split across adjacent fields, after an open syllable, a closed one and
+        // one in ㄹ: no width, left-aligned with a padding of 0 and of -2, right-aligned with
+        // a padding of 0 and of -1 (both fields).
+        ("나%s%s|", vec![open, close], ko, "나로|", "나{(으)로}|".as_bytes()),
+        ("각%-3s%s|", vec![open, close], ko, "각으로|", "각{(으)로}|".as_bytes()),
+        ("각%-1s%s|", vec![open, close], ko, "각으로|", "각{(으)로}|".as_bytes()),
+        ("달%3s%s|", vec![open, close], ko, "달로|", "달{(으)로}|".as_bytes()),
+        ("나%1s%1s|", vec![open, close], ko, "나로|", "나{(으)로}|".as_bytes()),
+        // A padding above 0 lets the held codes out as they are, left- and right-aligned.
+        ("나%-4s%s|", vec![open, close], ko, "나{(으 )로}|", "나{(으)로}|".as_bytes()),
+        ("각%-1s%5s|", vec![open, close], ko, "각{(으  )로}|", "각{(으)로}|".as_bytes()),
+    ];
+    for (fmt, a, language, on, off) in cases {
+        let (f, a) = (leak(fmt.as_bytes().to_vec()), args(a));
+        assert_eq!(
+            drawn(wide(language), f, a),
+            codes(on),
+            "{fmt} {a:02x?} wide on"
+        );
+        let main: Vec<u16> = off.iter().map(|&b| u16::from(b)).collect();
+        assert_eq!(drawn(state(), f, a), main, "{fmt} {a:02x?} wide off");
+    }
 }
 
 #[test]
