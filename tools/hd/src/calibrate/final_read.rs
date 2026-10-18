@@ -89,8 +89,8 @@ struct RawFell {
 /// The neighbour gate's lines of `gates.jsonl` (`text`): every pair line, of every pass, and
 /// every neighbour fallback; the other lines (the images' gates, the actors' motion, refused
 /// sheets: no `neighbour` field) are not read. A `neighbour` field that is not a pair is
-/// refused ([`pair_line`]): the run stops before anything is drawn, as on any other pair line
-/// it cannot read.
+/// refused ([`pair_line`]), and a `fallback` field other than `neighbour`: the run stops before
+/// anything is drawn, as on any other line of the gate's it cannot read.
 pub fn record(text: &str) -> Result<Record, String> {
     let mut out = Record::default();
     for (i, line) in text.lines().enumerate() {
@@ -99,15 +99,20 @@ pub fn record(text: &str) -> Result<Record, String> {
         }
         let bad = |e: &dyn std::fmt::Display| format!("gates.jsonl line {}: {e}", i + 1);
         let v: serde_json::Value = serde_json::from_str(line).map_err(|e| bad(&e))?;
-        if v.get("fallback").and_then(serde_json::Value::as_str) == Some("neighbour") {
-            let f: RawFell = serde_json::from_value(v).map_err(|e| bad(&e))?;
-            out.fell.push(Fell {
-                line: i + 1,
-                item: f.item,
-                class: f.class,
-                pass: f.pass,
-            });
-            continue;
+        match v.get("fallback") {
+            None => {}
+            Some(f) if f.as_str() == Some("neighbour") => {
+                let f: RawFell = serde_json::from_value(v).map_err(|e| bad(&e))?;
+                out.fell.push(Fell {
+                    line: i + 1,
+                    item: f.item,
+                    class: f.class,
+                    pass: f.pass,
+                });
+                continue;
+            }
+            // Ingest writes no other fallback line: one is not read as a line of another kind.
+            Some(_) => return Err(bad(&"a fallback field that is not the neighbour gate's")),
         }
         if !pair_line(&v).map_err(|e| bad(&e))? {
             continue;

@@ -709,6 +709,17 @@ fn a_neighbour_field_that_is_not_a_pair_stops_the_read() {
             "{bad}: {e}"
         );
     }
+    // A fallback line of another kind than the gate's (ingest writes none) is refused too.
+    for fallback in [serde_json::json!(null), serde_json::json!("motion")] {
+        let mut v: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+        v["fallback"] = fallback.clone();
+        let t = text.clone() + &v.to_string() + "\n";
+        let e = record(&t).unwrap_err();
+        assert!(
+            e.contains("a fallback field that is not the neighbour gate's"),
+            "{fallback}: {e}"
+        );
+    }
     // A line with no neighbour field is another kind of line, and not read.
     let other = text.clone() + r#"{"image":"t:1","pass":1,"fail":false}"# + "\n";
     assert_eq!(record(&other).unwrap(), record(&text).unwrap());
