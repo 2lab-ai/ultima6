@@ -283,7 +283,8 @@ fn tile(id: ImageId) -> Option<u16> {
 /// - `plan`: a fallback naming an item the plan has not, or of another class; an image listed
 ///   that no item has;
 /// - `listed`: a listed image whose id, slice path or content hash is not the game's;
-/// - `slice`: a master not listed, or listed and missing, or of an image the game has not;
+/// - `slice`: a master not listed, or listed and missing, or a tile master of a record the
+///   game has no image of;
 /// - `master`: a master whose file is not the one ingest wrote (its digest in `ingest.json`, of
 ///   what the gates judged; none in an `ingest.json` of an older ingest);
 /// - `part`: an item listed in part;
@@ -451,16 +452,14 @@ pub fn fixed(
         let name = atlas::image_name(id);
         say!("slice", format!("{name}: listed, and no master in slices/"));
     }
-    for &id in files {
-        let known = match id {
-            ImageId::Tile(r) => slices.get(r).is_some(),
-            _ => game.hash(id).is_some(),
-        };
-        if !known {
-            let name = atlas::image_name(id);
+    // A tile master of a record the game has no image of. (A portrait's or a bitmap's master
+    // of an image the game has not is held by the rules above: not listed, `slice`; listed,
+    // `listed`'s content hash.)
+    for r in files.iter().filter_map(|&id| tile(id)) {
+        if slices.get(r).is_none() {
             say!(
                 "slice",
-                format!("{name}: a master of an image the game has not")
+                format!("t:{r}: a master of an image the game has not")
             );
         }
     }
