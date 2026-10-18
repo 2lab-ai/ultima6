@@ -968,15 +968,29 @@ fn a_part_transparent_pair_is_measured_as_the_page_composes_it() {
     // Holes on both sides of the shared edge: A's east column, B's west column.
     assert!((0..16).any(|y| ra.transparent[y * 16 + 15]));
     assert!((0..16).any(|y| rb.transparent[y * 16]));
-    // A's x8 master, uniform in 2 x 2 blocks so the pack's x4 keeps its alpha classes: a
-    // gradient whose x4 sub-pixels are opaque, clear, half and a little opaque in turn.
+    // A's x8 master: a gradient whose x4 sub-pixels are opaque, clear, half and a little opaque
+    // in turn. Within each 2 x 2 block the half and the little opaque pixels are 20 above and
+    // below their class on a checkerboard (the block's mean alpha is the class), and red is 30
+    // higher on the same squares: a block's pixels differ, and their colour follows their
+    // alpha, so taking one pixel of the block, or its unweighted mean, gives another x4 than
+    // the pack's alpha-weighted box average.
     let alpha = |u: u32, v: u32| [255u8, 0, 128, 40][((u + v) % 4) as usize];
     let mut master = Rgba::new(128, 128);
     for y in 0..128 {
         for x in 0..128 {
             let (u, v) = (x / 2, y / 2);
-            let c = [(u * 3) as u8, (v * 2 + 40) as u8, (200 - u - v) as u8];
-            img::put(&mut master, x, y, [c[0], c[1], c[2], alpha(u, v)]);
+            let odd = (x + y) % 2;
+            let a = match alpha(u, v) {
+                128 | 40 if odd == 1 => alpha(u, v) + 20,
+                128 | 40 => alpha(u, v) - 20,
+                a => a,
+            };
+            let c = [
+                (u * 3 + odd * 30) as u8,
+                (v * 2 + 40) as u8,
+                (200 - u - v) as u8,
+            ];
+            img::put(&mut master, x, y, [c[0], c[1], c[2], a]);
         }
     }
     // The real path: ingest's side preparation, then the fixed point's first pass.
@@ -1005,6 +1019,11 @@ fn a_part_transparent_pair_is_measured_as_the_page_composes_it() {
     pack::pack(&w, None).unwrap();
     let p = read_pack(&std::fs::read(w.path("pack/u6-hdpack.zip")).unwrap()).unwrap();
     let in_pack = p.get(id).unwrap().image.clone();
+    assert_eq!(
+        s[&a].generated.as_ref().unwrap().1,
+        gate::shown(&s[&a].classic, &in_pack).unwrap(),
+        "the gate's side is the pack's image"
+    );
     let _ = std::fs::remove_dir_all(&w.root);
     let (x0, y0) = (40, 24);
     let fb = frame(&[(a, &ra, x0, y0), (b, &rb, x0 + 16, y0)]);
