@@ -2154,6 +2154,23 @@ fn a_landings_word_table_inside_a_direct_string_table_drops_the_landing() {
             );
         }
     }
+    // The direct read is string 0 only: the word at `t + 3` is past what it reads, so it ends
+    // the direct table there and the loops are kept.
+    let index0 = |t: u32| [&[0xb5][..], &lit32(t), &[0xb1]].concat();
+    let (s, t, _) = a_word_write_after_a_direct_read(&index0, true);
+    let d = any_order(&s);
+    assert!(
+        !d.hazards
+            .iter()
+            .any(|h| matches!(h.kind, HazardKind::Dropped(..))),
+        "{:?}",
+        d.hazards
+    );
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.entries.len(), 1);
+    assert!(matches!(&item(&d, t + 3).kind, Kind::Table(w) if w.words));
 }
 
 #[test]

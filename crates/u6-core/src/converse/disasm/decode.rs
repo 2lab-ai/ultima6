@@ -1005,10 +1005,15 @@ impl<'a> Decoder<'a> {
     /// address inside it is read from; and not at all when a search reads it (up to a `b8`).
     fn table_ranges(&self) -> Vec<(u32, Table)> {
         self.table_ranges_of(|_| true)
+            .into_iter()
+            .map(|(addr, table, _)| (addr, table))
+            .collect()
     }
 
-    /// [`Self::table_ranges`] of the uses of the paths `keep` keeps.
-    fn table_ranges_of(&self, keep: impl Fn(Origin) -> bool) -> Vec<(u32, Table)> {
+    /// [`Self::table_ranges`] of the uses of the paths `keep` keeps, each with the entries its
+    /// uses need (theirs and those carried into it: a constant index's, an inner address's,
+    /// all of them for a search).
+    fn table_ranges_of(&self, keep: impl Fn(Origin) -> bool) -> Vec<(u32, Table, usize)> {
         // Per address: the kind and the entries its uses' constant indices and searches need.
         let mut by_addr: BTreeMap<u32, (bool, usize)> = BTreeMap::new();
         for (u, _) in self.uses.iter().filter(|&&(_, o)| keep(o)) {
@@ -1084,7 +1089,7 @@ impl<'a> Decoder<'a> {
                 }
             }
             table.inner = inner;
-            out.push((addr, table));
+            out.push((addr, table, needed));
             n = m;
         }
         out
@@ -1107,14 +1112,22 @@ impl<'a> Decoder<'a> {
         let mut p = self.plan.clone();
         let mut held = BTreeSet::new();
         let reaches = self.reaches();
-        // A landing's word-table address inside a direct path's string table (the strings the
-        // direct uses keep): the direct table wins and is not cut there. Every landing whose
-        // path runs that op is dropped; the next round decides the rest.
+        // A landing's word-table address inside the strings a direct path's table needs (those
+        // its direct uses read: up to a constant index's, an inner address's, all of them for a
+        // search): the direct table wins and is not cut there. Every landing whose path runs
+        // that op is dropped; the next round decides the rest.
         let direct: Vec<(u32, u32)> = self
             .table_ranges_of(|o| o == Origin::Direct)
             .into_iter()
-            .filter(|(_, t)| !t.words)
-            .map(|(a, t)| (a, table_end(a, &t)))
+            .filter(|(_, t, _)| !t.words)
+            .map(|(a, t, needed)| {
+                let end = match t.entries.get(needed.wrapping_sub(1)) {
+                    _ if needed == 0 => a,
+                    Some(e) => e.end() + 1,
+                    None => table_end(a, &t),
+                };
+                (a, end)
+            })
             .collect();
         for &(u, o) in &self.uses {
             if u.words
