@@ -2743,7 +2743,9 @@ fn the_out_dir_holds_one_runs_output() {
     };
     let e = calibrate_final(&g, &work, &o2).unwrap_err();
     assert!(
-        e.contains("calibrate --final did not write (no marker .calibrate-final)"),
+        e.contains(
+            "calibrate --final did not write (no marker .calibrate-final), so it is not replaced: move it away, or pass another --out"
+        ),
         "{e}"
     );
     let left: Vec<String> = std::fs::read_dir(&theirs)
@@ -2765,7 +2767,10 @@ fn the_out_dir_holds_one_runs_output() {
     let first = super::super::out_dir::FIRST.marker;
     std::fs::write(theirs.join(first), b"calibrate\n").unwrap();
     let e = calibrate_final(&g, &work, &o2).unwrap_err();
-    assert!(e.contains("(no marker .calibrate-final)"), "{e}");
+    assert!(
+        e.contains("(no marker .calibrate-final; it is calibrate's output)"),
+        "{e}"
+    );
     let left: Vec<String> = std::fs::read_dir(&theirs)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

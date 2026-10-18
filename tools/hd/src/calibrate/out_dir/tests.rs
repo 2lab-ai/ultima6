@@ -106,7 +106,8 @@ fn an_unmarked_dir_put_at_the_out_dir_during_the_run_survives_whole() {
         Ok(())
     });
     let e = run_in(FIRST, &out, writes("new")).unwrap_err();
-    assert!(e.contains("(no marker .calibrate-first-pass)"), "{e}");
+    let said = "(no marker .calibrate-first-pass), so it is not replaced: move it away, or pass another --out";
+    assert!(e.contains(said), "{e}");
     assert_eq!(contents(&out), Some(owners));
     assert!(
         beside_of(&dir, "out").is_empty(),
@@ -132,7 +133,10 @@ fn an_unmarked_dir_put_at_the_out_dir_once_it_is_checked_survives_whole() {
         Ok(())
     });
     let e = run_in(FIRST, &out, writes("new")).unwrap_err();
-    assert!(e.contains("it is not replaced"), "{e}");
+    assert!(
+        e.contains("so it is not replaced: move it away, or pass another --out"),
+        "{e}"
+    );
     assert_eq!(contents(&out), Some(owners));
     let left = beside_of(&dir, "out");
     assert_eq!(left.len(), 1, "{left:?}");
@@ -157,7 +161,10 @@ fn an_empty_dir_put_at_an_absent_out_dir_survives_and_the_run_is_refused() {
         Ok(())
     });
     let e = run_in(FIRST, &out, writes("new")).unwrap_err();
-    assert!(e.contains("it is not replaced"), "{e}");
+    assert!(
+        e.contains("so it is not replaced: move it away, or pass another --out"),
+        "{e}"
+    );
     assert_eq!(contents(&out), Some(BTreeMap::new()));
     assert!(
         beside_of(&dir, "out").is_empty(),

@@ -119,18 +119,22 @@ fn not_ours(mode: Mode, dir: &Path) -> Option<String> {
     if marked(mode.marker) {
         return None;
     }
+    let other = [FIRST, FINAL]
+        .into_iter()
+        .find(|m| *m != mode && marked(m.marker))
+        .map_or(String::new(), |m| format!("; it is {}'s output", m.name));
     Some(format!(
-        "a directory {} did not write (no marker {})",
+        "a directory {} did not write (no marker {}{other})",
         mode.name, mode.marker
     ))
 }
 
-/// The refusal of `out`: `why`, not replaced.
+/// How to go on when the out dir `out` is not replaced.
+const RECOVER: &str = "move it away, or pass another --out";
+
+/// The refusal of `out`: `why`, so it is not replaced, and how to go on.
 fn refusal(out: &Path, why: &str) -> String {
-    format!(
-        "{}: {why}; it is not replaced (give another --out, or move it)",
-        out.display()
-    )
+    format!("{}: {why}, so it is not replaced: {RECOVER}", out.display())
 }
 
 /// Renames `from` to `to` only when nothing is at `to`, in one step that cannot replace

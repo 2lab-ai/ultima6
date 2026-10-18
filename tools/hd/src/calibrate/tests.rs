@@ -1244,7 +1244,17 @@ fn a_first_pass_out_dir_holds_one_runs_output() {
         }
         let e = calibrate(&g, &work, &o3).unwrap_err();
         assert!(
-            e.contains("calibrate did not write (no marker .calibrate-first-pass)"),
+            e.contains("calibrate did not write (no marker .calibrate-first-pass"),
+            "{k}: {e}"
+        );
+        assert!(
+            e.contains("so it is not replaced: move it away, or pass another --out"),
+            "{k}: {e}"
+        );
+        // The final read's out dir is said to be one.
+        assert_eq!(
+            e.contains("it is calibrate --final's output)"),
+            k == 2,
             "{k}: {e}"
         );
         assert_eq!(names(&theirs), kept, "{k}");
