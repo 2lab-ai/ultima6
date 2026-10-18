@@ -1099,6 +1099,128 @@ fn atlas_into(g: &Game, w: &Work) -> Vec<Job> {
     jobs
 }
 
+/// Every line of a `gates.jsonl` parsed and checked against the row kinds ingest writes: its
+/// keys exactly one kind's, and a neighbour pair row's and a fallback row's fields of their
+/// types and values. Returns how many of each kind.
+fn gates_rows(log: &str) -> BTreeMap<&'static str, usize> {
+    let keys = |k: &[&str]| -> BTreeSet<String> { k.iter().map(|s| s.to_string()).collect() };
+    let kinds = [
+        (
+            "image",
+            keys(&[
+                "sheet",
+                "attempt",
+                "item",
+                "image",
+                "pass",
+                "structure",
+                "shift",
+                "iou",
+                "purity",
+                "flat",
+                "drift_raw",
+                "drift",
+                "seam",
+                "gates",
+                "structure_scale",
+            ]),
+        ),
+        ("refused", keys(&["sheet", "attempt", "refused"])),
+        (
+            "actor",
+            keys(&["item", "attempt", "class", "motion", "gates"]),
+        ),
+        (
+            "pair",
+            keys(&[
+                "neighbour",
+                "pass",
+                "fail",
+                "ratio",
+                "limit",
+                "sides",
+                "source",
+                "at",
+                "gates",
+            ]),
+        ),
+        (
+            "fallback",
+            keys(&["item", "class", "fallback", "pass", "gates"]),
+        ),
+    ];
+    let tile = |v: &serde_json::Value| {
+        v.as_str()
+            .and_then(atlas::parse_image)
+            .is_some_and(|id| matches!(id, ImageId::Tile(_)))
+    };
+    let mut out = BTreeMap::new();
+    for line in log.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        let have: BTreeSet<String> = row.as_object().unwrap().keys().cloned().collect();
+        let (kind, _) = kinds
+            .iter()
+            .find(|(_, k)| *k == have)
+            .unwrap_or_else(|| panic!("a row of no kind: {have:?}"));
+        match *kind {
+            "pair" => {
+                let n = row["neighbour"].as_object().unwrap();
+                assert_eq!(n.len(), 3, "{line}");
+                assert!(tile(&n["a"]) && tile(&n["b"]), "{line}");
+                assert!(n["edge"] == "east" || n["edge"] == "south", "{line}");
+                assert!(row["pass"].as_u64().is_some_and(|p| p >= 1), "{line}");
+                assert!(row["fail"].is_boolean(), "{line}");
+                let (ratio, limit) = (&row["ratio"], &row["limit"]);
+                assert!(
+                    (ratio.is_f64() && limit.is_f64()) || (ratio.is_null() && limit.is_null()),
+                    "{line}"
+                );
+                if row["fail"] == true {
+                    assert!(ratio.as_f64().unwrap() > limit.as_f64().unwrap(), "{line}");
+                }
+                assert!(["gen-gen", "gen-mmpx"].contains(&row["sides"].as_str().unwrap()));
+                let source = row["source"].as_str().unwrap();
+                assert!(
+                    ["map", "objects", "map+objects"].contains(&source),
+                    "{line}"
+                );
+                let at = row["at"].as_object().unwrap();
+                assert_eq!(at.len(), 3, "{line}");
+                assert!(["z", "x", "y"].iter().all(|k| at[*k].is_u64()), "{line}");
+                assert!(row["gates"].is_string());
+            }
+            "fallback" => {
+                assert_eq!(row["fallback"], "neighbour");
+                assert!(row["item"].is_u64() && row["class"].is_string(), "{line}");
+                assert!(row["pass"].as_u64().is_some_and(|p| p >= 1), "{line}");
+            }
+            _ => {}
+        }
+        *out.entry(*kind).or_default() += 1;
+    }
+    out
+}
+
+/// What ingest leaves in a work dir: `ingest.json`, `gates.jsonl`, `coverage.txt` and every
+/// file in `slices/` (name and bytes).
+fn left(w: &Work) -> (Vec<u8>, Vec<u8>, Vec<u8>, BTreeMap<String, Vec<u8>>) {
+    let read = |rel: &str| std::fs::read(w.path(rel)).unwrap();
+    let slices = std::fs::read_dir(w.path("slices"))
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            (name, std::fs::read(e.path()).unwrap())
+        })
+        .collect();
+    (
+        read("ingest.json"),
+        read("gates.jsonl"),
+        read("coverage.txt"),
+        slices,
+    )
+}
+
 #[test]
 fn ingest_sends_a_multi_record_item_back_whole_and_counts_it_apart() {
     let mut g = synthetic::game();
@@ -1250,8 +1372,54 @@ fn ingest_sends_a_multi_record_item_back_whole_and_counts_it_apart() {
         assert_eq!(l["at"], serde_json::json!({"z": 0, "x": 0, "y": 0}));
         assert!(l["ratio"].is_number() && l["limit"].is_number());
     }
-    // A second ingest of the same sheets comes to the same.
+    // Every row of gates.jsonl is of a kind ingest writes, its fields checked.
+    let kinds = gates_rows(&log);
+    assert_eq!((kinds["pair"], kinds["fallback"]), (4, 2));
+    // A second ingest of the same sheets comes to the same, and leaves the same: the accepted
+    // list, every slice (the fallen masters still absent), the coverage and gates.jsonl, which
+    // is written whole each time (not appended to).
+    let before = left(&w);
+    let names: BTreeSet<String> = accepted.iter().map(|a| a.image.clone()).collect();
+    assert_eq!(
+        before.3.keys().cloned().collect::<BTreeSet<_>>(),
+        accepted
+            .iter()
+            .map(|a| a.slice.trim_start_matches("slices/").to_string())
+            .collect()
+    );
     assert_eq!(ingest::ingest(&g, &w, &t).unwrap(), r);
+    let after = left(&w);
+    assert!(after == before, "the second ingest left something else");
+    let again: Vec<ingest::Accepted> = serde_json::from_slice(&after.0).unwrap();
+    assert_eq!(
+        again
+            .iter()
+            .map(|a| a.image.clone())
+            .collect::<BTreeSet<_>>(),
+        names
+    );
+    for t in [table, table + 1, sword] {
+        assert!(!w.slice(&atlas::slice_name(ImageId::Tile(t))).exists());
+    }
+    let again_rows = gates_rows(std::str::from_utf8(&after.1).unwrap());
+    assert_eq!(again_rows, kinds);
+    // Conservation: with no world, nothing meets and nothing falls back; then each class's
+    // generated records are this ingest's generated and neighbour records together.
+    let mut alone = g.clone();
+    alone.world = World::default();
+    let r0 = ingest::ingest(&alone, &w, &t).unwrap();
+    assert_eq!(r0.neighbour.pairs, 0);
+    for class in Class::ALL {
+        assert_eq!(r0.get(class, Status::Neighbour), 0, "{class:?}");
+        assert_eq!(
+            r0.get(class, Status::Generated),
+            r.get(class, Status::Generated) + r.get(class, Status::Neighbour),
+            "{class:?}"
+        );
+        for st in [Status::Fallback, Status::Failed, Status::Pending] {
+            assert_eq!(r0.get(class, st), r.get(class, st), "{class:?} {st:?}");
+        }
+    }
     let _ = std::fs::remove_dir_all(&w.root);
 }
 
