@@ -81,8 +81,10 @@
 //!   limit, the first in pair order on a tie (with `--source LABEL` one of that label: a survivor
 //!   that meets none has no coverage window and is counted, an included id takes any pair);
 //!   else, in no pair, where the world first draws one of its records (level, row, column), said
-//!   in the row; else, drawn nowhere in the starting world, the item alone in empty windows,
-//!   its pieces in rows from the second column and row with a cell between them, in as many
+//!   in the row; else, drawn nowhere in the starting world, the item alone in empty windows
+//!   (each record as itself: one the animation always replaces, which the world never draws
+//!   as itself, lands here), its pieces in rows from the second column and row with a cell
+//!   between them, in as many
 //!   windows as they need (the row says which of how many). Then every pair of the last pass
 //!   that none of those windows draws (with one label, a pair of it) gets a window placed at
 //!   it, in pair order, each counting the pairs it draws. Then the records of an item with a
@@ -856,7 +858,9 @@ pub fn frame(game: &Game, at: At, edge: Edge, pair: Option<Pair>) -> Framed {
 
 /// The frame of the window's `cells` ([`COLS`] × [`ROWS`], row-major): each drawn at the
 /// frame's top-left, base first, then its list; in each cell of `want` (column, row) a tile
-/// whose frames include its record drawn as that record, every other tile at frame 0.
+/// whose frames include its record, or that is the record, drawn as that record (a record the
+/// animation always replaces is drawn so only where it is wanted: an item alone), every other
+/// tile at frame 0.
 /// `missing` when the record of a cell of `want` does not show there: no tile draws it, or the
 /// tiles drawn after it cover it ([`Framed::shows`]).
 pub fn framed(game: &Game, cells: &[Stack], want: &[((usize, usize), u16)]) -> Framed {
@@ -885,7 +889,7 @@ pub fn framed(game: &Game, cells: &[Stack], want: &[((usize, usize), u16)]) -> F
                 let frames = drawn.records(t);
                 let first = frame0(game, t);
                 let rec = match wanted {
-                    Some(k) if frames.contains(&want[k].1) => {
+                    Some(k) if frames.contains(&want[k].1) || t == want[k].1 => {
                         out.pair_frame |= want[k].1 != first;
                         want[k].1
                     }

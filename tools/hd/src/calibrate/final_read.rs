@@ -1350,7 +1350,14 @@ fn draw_window(game: &Game, fixed: &Fixed, by: &BTreeMap<Pair, usize>, w: &Windo
                 w.anchor.map(|r| (A_CELL, r)).into_iter().collect();
             framed(game, &window_at(game, at), &want)
         }
-        _ => framed(game, &alone(&w.pieces).0, &[]),
+        _ => {
+            // Each record of the item as itself, whatever frames the animation shows for it.
+            let cells = alone(&w.pieces).0;
+            let want: Vec<((usize, usize), u16)> = (0..COLS * ROWS)
+                .filter_map(|i| Some(((i % COLS, i / COLS), *cells[i].list.first()?)))
+                .collect();
+            framed(game, &cells, &want)
+        }
     };
     let (ticks, hidden) = (ticks(&framed, by), hidden(&framed, by));
     Drawn1 {

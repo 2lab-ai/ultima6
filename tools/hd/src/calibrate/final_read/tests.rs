@@ -1940,3 +1940,176 @@ fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_read_of_what_ingest_and_its_gate_wrote() {
+    // The synthetic set, end to end: the table (two records, one item), the sword east of its
+    // anchor and the chest east of the sword, all three made opaque grains, on a grass chunk.
+    // Every sheet comes back as sent but the table's anchor with its east column white: the
+    // gate fails it beside the sword in pass 1 (gen-gen), sends the table and the sword back,
+    // and the sword beside the chest, gen-gen in pass 1, is gen-mmpx in pass 2.
+    use crate::game::Placed;
+    use crate::ingest::{self, Status};
+    let mut g = synthetic::game();
+    let grain = |seed: u32| crate::game::Record {
+        pixels: (0..256).map(|i| 13 + (hash(i, seed) % 2) as u8).collect(),
+        transparent: vec![false; 256],
+        map: false,
+    };
+    let (table, sword, chest) = (synthetic::TABLE, synthetic::OBJECTS + 2, synthetic::OBJECTS);
+    for (k, t) in [table, table + 1, sword, chest].into_iter().enumerate() {
+        g.records[usize::from(t)] = grain(k as u32 + 1);
+    }
+    let at = |x, tile| Placed {
+        x,
+        y: 3,
+        z: 0,
+        tile,
+    };
+    g.world = World {
+        chunks: vec![[[0u8; 8]; 8]],
+        levels: vec![Level {
+            side: 1,
+            refs: vec![0],
+        }],
+        objects: vec![at(3, table + 1), at(4, sword), at(5, chest)],
+    };
+    let dir = std::env::temp_dir().join(format!("u6-hdtool-final-{}-e2e", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let work = Work::open(Some(&dir.join("work"))).unwrap();
+    work.mkdirs().unwrap();
+    let plan = group::plan(&g);
+    let items: Vec<(u32, &group::Item)> = plan
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| (i as u32, it))
+        .collect();
+    let stamp = atlas::Stamp {
+        attempt: 1,
+        generation: "test".into(),
+        plan: plan.fingerprint(),
+    };
+    let mut jobs = Vec::new();
+    atlas::layout_each(&g, &items, &stamp, 0, |job, sheet| {
+        img::write_png(&work.sheet(&job.sheet), &sheet)?;
+        jobs.push(job);
+        Ok(())
+    })
+    .unwrap();
+    work.append_jobs(&jobs).unwrap();
+    let anchor = atlas::image_name(ImageId::Tile(table + 1));
+    for job in &jobs {
+        let mut back = img::read_png(&work.sheet(&job.sheet), job.width, job.height).unwrap();
+        for p in job.places.iter().filter(|p| p.image == anchor) {
+            let k = p.scale;
+            img::fill(
+                &mut back,
+                p.x + 15 * k,
+                p.y,
+                k,
+                16 * k,
+                [250, 250, 250, 255],
+            );
+        }
+        crate::run::record(&work, job, &img::encode_png(&back).unwrap()).unwrap();
+    }
+    let mut t = Thresholds::default();
+    t.set("structure=-1").unwrap();
+    let r = ingest::ingest(&g, &work, &t).unwrap();
+    assert_eq!((r.neighbour.passes, r.neighbour.failing_after), (2, 0));
+    assert_eq!(r.get(Class::Multi, Status::Neighbour), 2);
+    assert_eq!(r.get(Class::Object, Status::Neighbour), 1);
+
+    // The final read of that work dir: it agrees, and reads every pair of the last pass.
+    let o = FinalOptions {
+        out: dir.join("final"),
+        seam: t.seam,
+        source: Source::All,
+        include: None,
+    };
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    let log = std::fs::read_to_string(work.path("gates.jsonl")).unwrap();
+    let rec = record(&log).unwrap();
+    let first = rec.pairs.iter().filter(|l| l.pass == 1).count();
+    assert_eq!((s.passes, s.logged_last, s.first), (2, false, first));
+    assert_eq!(s.unread, 0);
+    // The last pass: the grass's two pairs and the sword beside the chest, now gen-mmpx; the
+    // table's pairs and the failing one have no side generated any more.
+    let grass = |edge| Pair { a: 0, b: 0, edge };
+    let sc = Pair {
+        a: sword,
+        b: chest,
+        edge: Edge::East,
+    };
+    assert_eq!(s.last, 3);
+    let objects = s
+        .kinds
+        .iter()
+        .find(|k| k.label == "objects" && k.sides == Sides::GenMmpx)
+        .unwrap();
+    assert_eq!((objects.last, objects.read), (1, 1));
+    let map = s
+        .kinds
+        .iter()
+        .find(|k| k.label == "map" && k.sides == Sides::GenGen)
+        .unwrap();
+    assert_eq!((map.last, map.read), (2, 2));
+    // The chest's window: at its one pair, ticked gen-mmpx with the measure of the slices,
+    // which is not pass 1's gen-gen line.
+    let rows = rows_of(&o.out);
+    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
+    let w = rows
+        .iter()
+        .find(|w| w["origin"] == "coverage" && w["records"] == name(chest))
+        .unwrap();
+    assert_eq!(
+        (w["placement"].as_str(), w["x"].as_str(), w["y"].as_str()),
+        ("pair", "4", "3")
+    );
+    let tick = format!("east,objects,gen-mmpx,{},{}", name(sword), name(chest));
+    assert!(w["ticks"].contains(&tick), "{}", w["ticks"]);
+    let logged = rec
+        .pairs
+        .iter()
+        .find(|l| l.pair == sc && l.pass == 1)
+        .unwrap();
+    assert_eq!(logged.sides, Sides::GenGen);
+    let measure_of = |w: &BTreeMap<String, String>| -> String {
+        let t = w["ticks"].split(';').find(|t| t.contains(&tick)).unwrap();
+        t.split(',').skip(7).collect::<Vec<_>>().join(",")
+    };
+    let (ratio, limit) = logged.result.unwrap();
+    assert_ne!(measure_of(w), format!("{ratio:.4},{limit:.4}"));
+    // The grass's pairs read where the grass's window is placed.
+    let gw = rows
+        .iter()
+        .find(|w| w["origin"] == "coverage" && w["records"] == name(0))
+        .unwrap();
+    for edge in [Edge::East, Edge::South] {
+        let p = grass(edge);
+        let tick = format!("{},map,gen-gen,{},{}", edge_name(p.edge), name(0), name(0));
+        assert!(gw["ticks"].contains(&tick), "{}", gw["ticks"]);
+    }
+    // Every survivor's record drawn in a window; the fallen have none.
+    for c in &s.classes {
+        assert_eq!(c.shown, c.records, "{:?}", c.class);
+    }
+    assert_eq!(
+        s.classes
+            .iter()
+            .find(|c| c.class == Class::Object)
+            .unwrap()
+            .items,
+        r.get(Class::Object, Status::Generated)
+    );
+    assert!(rows.iter().all(|w| w["records"] != name(sword)));
+    // The water's record, which the animation always replaces and the world never draws as
+    // itself: alone, drawn as itself.
+    let water = rows.iter().find(|w| w["records"] == name(1)).unwrap();
+    assert_eq!(
+        (water["placement"].as_str(), water["frames"].as_str()),
+        ("alone", "pair")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
