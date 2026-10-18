@@ -430,3 +430,54 @@ fn a_file_put_at_a_name_the_run_made_is_not_deleted_and_is_said_to_be_left() {
     assert_eq!(names(&run), ["a.txt", "gates.jsonl", REFUSED]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_name_that_is_not_one_plain_name_is_refused_before_any_file_is_touched() {
+    // A sentinel beside --out, and names that would reach it or any other place: each write
+    // and read is refused before the seam or the filesystem is reached; the sentinel is as it
+    // was, and the run dir holds what the run made of its own names alone.
+    let dir = temp("names");
+    let out = dir.join("out");
+    let sentinel = dir.join("sentinel.txt");
+    std::fs::write(&sentinel, b"outside").unwrap();
+    let abs = sentinel.display().to_string();
+    let bad = [
+        "../../sentinel.txt".to_string(),
+        "../sentinel.txt".to_string(),
+        abs.clone(),
+        "a/b.txt".to_string(),
+        "a.txt/".to_string(),
+        ".".to_string(),
+        "..".to_string(),
+        String::new(),
+    ];
+    let touched = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let t = touched.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name != "a.txt" && name != DONE {
+            t.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    });
+    let ((), w) = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        for name in &bad {
+            let e = run.write(name, b"overwritten").unwrap_err();
+            assert!(
+                e.contains("not a name of a file in the run dir"),
+                "{name:?}: {e}"
+            );
+            let e = run.read(name, 64).unwrap_err();
+            assert!(
+                e.contains("not a name of a file in the run dir"),
+                "{name:?}: {e}"
+            );
+        }
+        run.write("a.txt", b"a")
+    })
+    .unwrap();
+    assert_eq!(touched.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
+    assert_eq!(names(&dir), ["out", "sentinel.txt"]);
+    assert_eq!(names(&w.dir), ["a.txt", DONE]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

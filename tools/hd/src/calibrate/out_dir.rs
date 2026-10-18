@@ -190,6 +190,19 @@ fn incomplete(out: &Path) -> Result<Vec<String>, String> {
     Ok(found)
 }
 
+/// `name` when it is one plain name of a file in a dir (no separator, not `.` or `..`, not
+/// empty, not absolute), checked before any file is touched; else why not.
+fn one_name(name: &str) -> Result<(), String> {
+    use std::path::Component;
+    let mut parts = Path::new(name).components();
+    match (parts.next(), parts.next()) {
+        (Some(Component::Normal(n)), None) if n == name && !name.contains('/') => Ok(()),
+        _ => Err(format!(
+            "{name:?}: not a name of a file in the run dir (one name, no separator, not . or ..)"
+        )),
+    }
+}
+
 /// A run's own dir: its path, the dir itself, open (every file of the run is made, read and
 /// deleted through it, [`at`], never by a path), and what this process made in it.
 pub struct Run {
@@ -213,6 +226,7 @@ impl Run {
     /// deletes).
     pub fn write(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
         use std::io::Write as _;
+        one_name(name)?;
         seam(&self.key, "write", name)?;
         let path = self.dir.join(name);
         let say = |e: std::io::Error| format!("{}: {e}", path.display());
@@ -232,6 +246,7 @@ impl Run {
     /// The file `name` of the run's dir, read through the dir itself, at most `cap` bytes.
     pub fn read(&self, name: &str, cap: u64) -> Result<Vec<u8>, String> {
         use std::io::Read as _;
+        one_name(name)?;
         let path = self.dir.join(name);
         let say = |e: std::io::Error| format!("{}: {e}", path.display());
         let f = at::open(&self.open, name).map_err(say)?;
