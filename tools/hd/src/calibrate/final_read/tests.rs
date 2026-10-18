@@ -2017,6 +2017,35 @@ fn a_pair_with_nothing_measured_and_a_side_covered_in_its_cell_is_hidden() {
 }
 
 #[test]
+fn lines_opaque_on_no_common_row_fall_back_to_the_cell_rule() {
+    // The reviewer's P11: UPPER's east column opaque on rows 0-7 alone, HALF's west on 8-15:
+    // both lines opaque, on no common row, so the gate measures nothing across the join and the
+    // pair is drawn where each side shows in its cell.
+    const UPPER: u16 = 203;
+    let mut g = with_half_and_cover(game());
+    for i in 0..256 {
+        let (u, v) = (i % 16, i / 16);
+        let h = &mut g.records[usize::from(UPPER)];
+        h.pixels[i] = GRAIN + (hash(i as u32, 5) % 5) as u8;
+        h.transparent[i] = u == 15 && v >= 8;
+    }
+    let a = A_CELL.1 * COLS + A_CELL.0;
+    let mut cells = vec![Stack::default(); COLS * ROWS];
+    cells[a].base = Some(UPPER);
+    cells[a + 1].base = Some(HALF);
+    let p = Pair {
+        a: UPPER,
+        b: HALF,
+        edge: Edge::East,
+    };
+    let slices = Slices::new(&g, BTreeMap::from([(UPPER, near(&g, UPPER))]));
+    assert_eq!(measure(&g, &slices, p, seam()).unwrap(), None);
+    let f = framed(&g, &cells, &[]);
+    assert!(f.shows(A_CELL, UPPER) && f.shows((A_CELL.0 + 1, A_CELL.1), HALF));
+    assert!(f.joins(A_CELL, p));
+}
+
+#[test]
 fn a_pair_covered_on_every_measured_row_is_not_read() {
     // The chain, and B again at (12, 12) with HALF east of it, COVER on B there: the pair's one
     // cell has no measured row left, so no window reads it, and the run fails.
