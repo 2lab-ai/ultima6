@@ -2946,11 +2946,11 @@ fn the_read_of_what_ingest_and_its_gate_wrote() {
     );
     assert!(rows.iter().all(|w| w["records"] != name(sword)));
     // The water's record, which the animation always replaces and the world never draws as
-    // itself: alone, drawn as itself.
+    // itself: alone, drawn as itself (said so, not as a pair's frame).
     let water = rows.iter().find(|w| w["records"] == name(1)).unwrap();
     assert_eq!(
         (water["placement"].as_str(), water["frames"].as_str()),
-        ("alone", "pair")
+        ("alone", "itself")
     );
     // jobs.jsonl emptied after that ingest: the log's items are bound to no plan any more.
     work.write("jobs.jsonl", b"").unwrap();

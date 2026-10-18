@@ -122,7 +122,8 @@
 //!   window: the pair's generated ones), its class, the placement, A's cell (z, x, y) and edge,
 //!   the pairs marked, their labels × sides with counts, each pair (cell, edge, labels, sides,
 //!   A, B, ratio, limit), each pair judged hidden (cell, edge, labels, sides, A, B), the sheet
-//!   and row, `frames`, and a note.
+//!   and row, `frames` (as above; `itself` for a record drawn alone as itself where its tile's
+//!   frame 0 is another), and a note.
 //! - **The report** ([`final_read::FinalSummary`]): survivors per class (items, images, windows by
 //!   placement, the records drawn in a window of the survivors' records, the survivors with no
 //!   map window: portraits and bitmaps, and with one label the survivors that meet no pair of
@@ -732,8 +733,14 @@ pub struct Framed {
     pub fb: Framebuffer,
     /// An animated tile was drawn at frame 0.
     pub frame0: bool,
-    /// A tile of a join cell was drawn as the pair's record, not as its frame 0.
+    /// A tile of a cell of `want` was drawn as the record wanted there, not as its frame 0: a
+    /// join cell as the pair's record, or, where the world draws an item, A's cell as the record
+    /// it draws there.
     pub pair_frame: bool,
+    /// A window of an item alone ([`final_read`]): a record drawn as itself where its tile's
+    /// frame 0 is another record (one the animation replaces), set by the final read in place
+    /// of `pair_frame`.
+    pub itself: bool,
     /// The window does not show what it was asked to: a cell of `want` where its record does
     /// not show ([`Framed::shows`]); with a pair, the pair not drawn across its join
     /// ([`Framed::joins`]): the window does not show the pair measured.
@@ -750,12 +757,13 @@ pub struct Framed {
 }
 
 impl Framed {
-    /// `samples.tsv`'s `frames`: `frame0`, `pair` and `missing` as they apply, joined by `+`;
-    /// `-` for none.
+    /// `samples.tsv`'s `frames`: `frame0`, `pair`, `itself` and `missing` as they apply, joined
+    /// by `+`; `-` for none.
     pub fn frames(&self) -> String {
         let marks = [
             (self.frame0, "frame0"),
             (self.pair_frame, "pair"),
+            (self.itself, "itself"),
             (self.missing, "missing"),
         ];
         let on: Vec<&str> = marks.iter().filter(|m| m.0).map(|m| m.1).collect();
@@ -908,6 +916,7 @@ pub fn framed(game: &Game, cells: &[Stack], want: &[((usize, usize), u16)]) -> F
         fb,
         frame0: false,
         pair_frame: false,
+        itself: false,
         missing: false,
         drawn: vec![Vec::new(); COLS * ROWS],
         stacked: vec![Vec::new(); COLS * ROWS],

@@ -1384,7 +1384,10 @@ fn draw_window(game: &Game, fixed: &Fixed, by: &BTreeMap<Pair, usize>, w: &Windo
             let want: Vec<((usize, usize), u16)> = (0..COLS * ROWS)
                 .filter_map(|i| Some(((i % COLS, i / COLS), *cells[i].list.first()?)))
                 .collect();
-            framed(game, &cells, &want)
+            let mut f = framed(game, &cells, &want);
+            // No pair and no world here: a record not drawn as its frame 0 is drawn as itself.
+            f.itself = std::mem::take(&mut f.pair_frame);
+            f
         }
     };
     let (ticks, hidden) = (ticks(&framed, by), hidden(&framed, by));
