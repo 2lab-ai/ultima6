@@ -136,6 +136,23 @@ fn ingest_makes_no_codex_call() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The run dir a calibrate report names (`run dir: <path>`), which must be the one entry of
+/// the out dir `out`.
+fn run_dir(report: &str, out: &Path) -> PathBuf {
+    let named = report
+        .lines()
+        .find_map(|l| l.strip_prefix("run dir: "))
+        .unwrap_or_else(|| panic!("no run dir in: {report}"));
+    let entries: Vec<PathBuf> = std::fs::read_dir(out)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let run = entries[0].canonicalize().unwrap();
+    assert_eq!(Path::new(named), run);
+    run
+}
+
 #[test]
 fn calibrate_makes_no_codex_call() {
     // On the synthetic set, a made-up first-pass row and an empty slices dir: the sheets and
@@ -186,6 +203,8 @@ fn calibrate_makes_no_codex_call() {
         text.contains("control windows: 1 (the files place no leader)"),
         "{text}"
     );
+    // Written in the run dir the report names, the one entry of the out dir.
+    let run = run_dir(&text, &out);
     for f in [
         "gates.jsonl",
         "samples.tsv",
@@ -193,8 +212,9 @@ fn calibrate_makes_no_codex_call() {
         "fail-gt1.5-gen-mmpx-s2.png",
         "control.png",
         "control-s2.png",
+        "done",
     ] {
-        assert!(out.join(f).is_file(), "{f}");
+        assert!(run.join(f).is_file(), "{f}");
     }
     assert_eq!(calls(), 0, "calibrate started codex");
 
@@ -264,17 +284,19 @@ fn calibrate_makes_no_codex_call() {
     assert!(text.contains("the record and the slices agree"), "{text}");
     assert!(text.contains("samples.tsv: 1 rows"), "{text}");
     assert!(text.contains("final-object-alone.png"), "{text}");
+    let frun = run_dir(&text, &fout);
     for f in [
         "samples.tsv",
         "final-object-alone.png",
         "final-object-alone-s2.png",
+        "done",
     ] {
-        assert!(fout.join(f).is_file(), "{f}");
+        assert!(frun.join(f).is_file(), "{f}");
     }
     // The window shows the chest: alone, in the window's second column and row, its pack panel
     // the master's colour where the chest is opaque and the master painted, its classic panel
     // the chest's own.
-    let path = fout.join("final-object-alone.png");
+    let path = frun.join("final-object-alone.png");
     let (w, h) = img::png_size(&std::fs::read(&path).unwrap()).unwrap();
     let sheet = img::read_png(&path, w, h).unwrap();
     let l = calibrate::Layout::of(4);

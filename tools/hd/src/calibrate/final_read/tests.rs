@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::super::out_dir::{Hooked, hook};
+use super::super::out_dir::{DONE, Hooked, hook};
 use super::*;
 use crate::game::{Level, World, synthetic};
 use crate::gate::{Edge, Thresholds};
@@ -670,7 +670,7 @@ fn the_final_read_holds_each_master_to_the_digest_ingest_json_lists() {
             "refused.txt"
         ]
     );
-    let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
+    let detail = std::fs::read_to_string(run_dir(&o.out).join("disagreements.txt")).unwrap();
     assert_eq!(
         detail,
         format!("master: t:{sword}: its master is not the file ingest wrote (another digest)\n")
@@ -737,16 +737,39 @@ fn labelled(text: &str, pairs: &[Pair], label: &str) -> String {
         .collect()
 }
 
-/// The files of the out dir `out`, sorted, but the [`MARKER`] (which each has).
-fn files_of(out: &Path) -> Vec<String> {
-    assert!(out.join(MARKER).is_file(), "{}", out.display());
-    let mut files: Vec<String> = std::fs::read_dir(out)
+/// The entries of `dir`, sorted.
+fn files_in(dir: &Path) -> Vec<String> {
+    let mut files: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|f| f != MARKER)
         .collect();
     files.sort();
     files
+}
+
+/// The run dir of the last run under the out dir `out` (by its name, which sorts by time).
+fn run_dir(out: &Path) -> PathBuf {
+    files_in(out)
+        .into_iter()
+        .rfind(|f| f.starts_with("run-"))
+        .map(|f| out.join(f))
+        .unwrap_or_else(|| panic!("no run dir in {}", out.display()))
+}
+
+/// The files of the last run's dir under the out dir `out`, sorted.
+fn files_of(out: &Path) -> Vec<String> {
+    files_in(&run_dir(out))
+}
+
+/// The files of `dir`, by name, with their bytes.
+fn contents_of(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    files_in(dir)
+        .into_iter()
+        .map(|f| {
+            let bytes = std::fs::read(dir.join(&f)).unwrap();
+            (f, bytes)
+        })
+        .collect()
 }
 
 #[test]
@@ -878,7 +901,7 @@ fn the_atlas_is_laid_out_from_the_plan_of_these_files() {
     };
     let e = calibrate_final(&g, &work, &o).unwrap_err();
     assert!(e.contains("disagree, nothing drawn: plan 1"), "{e}");
-    let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
+    let detail = std::fs::read_to_string(run_dir(&o.out).join("disagreements.txt")).unwrap();
     assert!(
         detail.starts_with("plan: jobs.jsonl line 2: laid out from another plan"),
         "{detail}"
@@ -903,7 +926,7 @@ fn the_atlas_is_laid_out_from_the_plan_of_these_files() {
             e.contains(&format!("disagree, nothing drawn: plan {n}")),
             "{e}"
         );
-        let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
+        let detail = std::fs::read_to_string(run_dir(&o.out).join("disagreements.txt")).unwrap();
         for item in items {
             assert!(
                 detail.contains(&format!("plan: item {item}: in the log")),
@@ -993,7 +1016,7 @@ fn options(dir: &Path) -> FinalOptions {
 
 /// `samples.tsv` of the out dir: the header's columns, and each row by column name.
 fn rows_of(out: &Path) -> Vec<BTreeMap<String, String>> {
-    let text = std::fs::read_to_string(out.join("samples.tsv")).unwrap();
+    let text = std::fs::read_to_string(run_dir(out).join("samples.tsv")).unwrap();
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
     assert_eq!(header.join("\t"), FINAL_TSV_HEADER);
@@ -1180,7 +1203,7 @@ fn the_last_pass_is_what_the_windows_show() {
     // at B's cell it is not (B's slice).
     let a_cell: (usize, usize) = (ab[0].parse().unwrap(), ab[1].parse().unwrap());
     let b_cell = (a_cell.0 + 1, a_cell.1);
-    let sheet = read_sheet(&o.out.join(&w["sheet"]));
+    let sheet = read_sheet(&run_dir(&o.out).join(&w["sheet"]));
     assert_eq!(cell_of(&sheet, 2, a_cell), cell_of(&sheet, 1, a_cell));
     assert_ne!(cell_of(&sheet, 2, b_cell), cell_of(&sheet, 1, b_cell));
     assert_eq!(s.sheets, ["final-terrain.png", "final-terrain-s2.png"]);
@@ -1514,7 +1537,7 @@ fn one_window_per_surviving_item_and_a_multi_record_item_is_one() {
         ("final-object-alone", Box::new(alone_cells)),
     ] {
         for (s, file) in [(4, format!("{sheet}.png")), (2, format!("{sheet}-s2.png"))] {
-            let png = read_sheet(&o.out.join(&file));
+            let png = read_sheet(&run_dir(&o.out).join(&file));
             assert_eq!(
                 panel_of(&png, s, 0),
                 classic_by_hand(&g, s, &cells),
@@ -1810,7 +1833,7 @@ fn a_window_at_a_pair_draws_the_pairs_records() {
     let (x, y): (usize, usize) = (w["x"].parse().unwrap(), w["y"].parse().unwrap());
     let cell = (6 + A_CELL.0 - x, 6 + A_CELL.1 - y);
     for (s, file) in [(4, w["sheet"].clone()), (2, w["sheet_s2"].clone())] {
-        let sheet = read_sheet(&o.out.join(&file));
+        let sheet = read_sheet(&run_dir(&o.out).join(&file));
         let (want, frame0) = (record_by_hand(&g, f1, s), record_by_hand(&g, f0, s));
         assert_ne!(want, frame0);
         for k in [0, 2] {
@@ -1846,7 +1869,7 @@ fn a_disagreement_fails_and_draws_nothing() {
         ]
     );
     assert!(!e.contains("t:"));
-    let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
+    let detail = std::fs::read_to_string(run_dir(&o.out).join("disagreements.txt")).unwrap();
     assert_eq!(detail.lines().count(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2105,7 +2128,7 @@ fn a_pair_covered_on_every_measured_row_is_not_read() {
     let o = options(&dir);
     let e = calibrate_final(&g, &work, &o).unwrap_err();
     assert!(e.contains("nothing drawn: unread 1"), "{e}");
-    let detail = std::fs::read_to_string(o.out.join("unshown.txt")).unwrap();
+    let detail = std::fs::read_to_string(run_dir(&o.out).join("unshown.txt")).unwrap();
     assert!(detail.contains(&format!("t:{B} t:{HALF} east")), "{detail}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2150,7 +2173,7 @@ fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
             "unshown.txt"
         ]
     );
-    let detail = std::fs::read_to_string(o.out.join("unshown.txt")).unwrap();
+    let detail = std::fs::read_to_string(run_dir(&o.out).join("unshown.txt")).unwrap();
     assert_eq!(
         detail,
         format!(
@@ -2213,7 +2236,7 @@ fn a_pair_covered_in_a_window_is_marked_hidden_there() {
     // Marked in its own colour, dashed, over the read ones (the two share a column, and the
     // hidden one a row with other read pairs): both colours along its row and above its join,
     // only the read one's beside the row of the one read.
-    let sheet = read_sheet(&o.out.join(&w["sheet"]));
+    let sheet = read_sheet(&run_dir(&o.out).join(&w["sheet"]));
     let l = Layout::of(4);
     let py = l.margin / 2 + l.caption_h() + l.margin;
     let px = |k: u32| l.margin + k * (l.w + l.margin);
@@ -2272,7 +2295,7 @@ fn a_long_legend_line_goes_on_and_is_not_cut() {
         assert_eq!(lines.len() > legend.len(), scale == 2, "{scale}");
         // The sheet is as tall as the lines it writes: at S 4 a line per pair of the window, at
         // S 2 more, the long one going on.
-        let (w, h) = img::png_size(&std::fs::read(o.out.join(sheet)).unwrap()).unwrap();
+        let (w, h) = img::png_size(&std::fs::read(run_dir(&o.out).join(sheet)).unwrap()).unwrap();
         let rows = rows_of(&o.out);
         let n = rows[0]["pairs"].parse::<u32>().unwrap();
         let base = l.margin / 2 + l.row_h() + n * l.line_h();
@@ -2285,7 +2308,7 @@ fn a_long_legend_line_goes_on_and_is_not_cut() {
         // The legend as the sheet writes it, glyph by glyph: each tick's line, the long one
         // going on, indented, in lines of its own as many characters as fit (the last
         // characters of the line on the last of them).
-        let png = read_sheet(&o.out.join(sheet));
+        let png = read_sheet(&run_dir(&o.out).join(sheet));
         let f = state(&g, &text, &left).unwrap();
         let w = &rows[0];
         let width = l.width() - 2 * l.margin;
@@ -2402,7 +2425,7 @@ fn a_window_that_shows_none_of_its_item_fails_the_run() {
         ]
     );
     let plan = group::plan(&g);
-    let detail = std::fs::read_to_string(o.out.join("unshown.txt")).unwrap();
+    let detail = std::fs::read_to_string(run_dir(&o.out).join("unshown.txt")).unwrap();
     assert_eq!(
         detail,
         format!(
@@ -2508,7 +2531,7 @@ fn every_record_of_an_item_is_drawn_in_a_window() {
             (4, "final-actor-alone.png"),
             (2, "final-actor-alone-s2.png"),
         ] {
-            let sheet = read_sheet(&out.join(file));
+            let sheet = read_sheet(&run_dir(out).join(file));
             for (row, page) in frames.chunks(9).enumerate() {
                 let cells = |c: usize, r: usize| -> Vec<u16> {
                     let (odd_c, odd_r) = (c % 2 == 1 && c < 7, r % 2 == 1);
@@ -2558,7 +2581,7 @@ fn every_record_of_an_item_is_drawn_in_a_window() {
     alone_sheet(&out, &frames[1..]);
     // ... and the window where it stands draws its first frame in A's cell, on the grass.
     for (sc, file) in [(4, "final-actor.png"), (2, "final-actor-s2.png")] {
-        let sheet = read_sheet(&out.join(file));
+        let sheet = read_sheet(&run_dir(&out).join(file));
         let cells = |c: usize, r: usize| {
             let mut v = vec![GRASS];
             if (c, r) == A_CELL {
@@ -2635,7 +2658,7 @@ fn a_window_where_the_world_draws_it_shows_its_record() {
     assert_eq!(w["frames"], "pair");
     // The sheet draws the chest's cell as the second frame, on the grass, at both scales.
     for (s, file) in [(4, w["sheet"].clone()), (2, w["sheet_s2"].clone())] {
-        let sheet = read_sheet(&o.out.join(&file));
+        let sheet = read_sheet(&run_dir(&o.out).join(&file));
         let world = |f: u16| {
             move |c: usize, r: usize| {
                 let mut v = vec![GRASS];
@@ -2857,15 +2880,17 @@ fn the_portrait_and_bitmap_masters_are_held_like_the_tiles() {
         let e = calibrate_final(&g, &work, &o).unwrap_err();
         AFTER_READ.lock().unwrap().retain(|(k, _)| *k != o.out);
         assert!(e.contains("(1 masters of slices/)"), "{p:?}: {e}");
-        assert!(!o.out.join("samples.tsv").exists(), "{p:?}");
+        assert!(!run_dir(&o.out).join("samples.tsv").exists(), "{p:?}");
         std::fs::write(&path, was).unwrap();
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn the_out_dir_holds_one_runs_output() {
-    // The chest at (12, 12) and the sword alone, then a re-ingest that leaves the chest only.
+fn each_run_writes_its_own_run_dir_alone() {
+    // The chest at (12, 12) and the sword alone, then a re-ingest that leaves the chest only:
+    // each run's dir holds that run's output alone (the reviewer's P2, P3, P4), and no run
+    // touches another's.
     let mut g = game();
     let (chest, sword) = (synthetic::OBJECTS, synthetic::OBJECTS + 2);
     g.world.objects = vec![crate::game::Placed {
@@ -2877,8 +2902,8 @@ fn the_out_dir_holds_one_runs_output() {
     let images: BTreeMap<u16, Rgba> = [chest, sword].iter().map(|&r| (r, near(&g, r))).collect();
     let (dir, work) = work_dir("one-run", "", &g, &images);
     let o = options(&dir);
-    let pngs = |out: &Path| -> Vec<String> {
-        files_of(out)
+    let pngs = |run: &Path| -> Vec<String> {
+        files_in(run)
             .into_iter()
             .filter(|f| f.ends_with(".png"))
             .collect()
@@ -2888,7 +2913,12 @@ fn the_out_dir_holds_one_runs_output() {
         v
     };
     let s1 = calibrate_final(&g, &work, &o).unwrap();
-    assert_eq!(pngs(&o.out), sorted(s1.sheets.clone()));
+    let first = s1.written.dir.clone();
+    assert_eq!(first.parent().unwrap(), o.out.canonicalize().unwrap());
+    assert_eq!(pngs(&first), sorted(s1.sheets.clone()));
+    assert!(first.join(DONE).is_file());
+    assert!(s1.text().contains(&format!("run dir: {}", first.display())));
+    let kept = contents_of(&first);
     let one = BTreeMap::from([(chest, images[&chest].clone())]);
     work.write(
         "ingest.json",
@@ -2896,15 +2926,17 @@ fn the_out_dir_holds_one_runs_output() {
     )
     .unwrap();
     std::fs::remove_file(work.slice(&atlas::slice_name(ImageId::Tile(sword)))).unwrap();
-    // A second run: its sheets alone, not the first run's alone sheet (the reviewer's P2).
+    // A second run: a dir of its own, its sheets alone; the first run's dir as it was.
     let s2 = calibrate_final(&g, &work, &o).unwrap();
-    assert_eq!(pngs(&o.out), sorted(s2.sheets.clone()));
+    assert_ne!(s2.written.dir, first);
+    assert_eq!(pngs(&s2.written.dir), sorted(s2.sheets.clone()));
     assert!(s1.sheets.len() > s2.sheets.len());
-    // A refused run: its refusal alone, no sheet, no samples.tsv (P3).
+    assert_eq!(contents_of(&first), kept);
+    // A refused run: its diagnostics alone, no sheet, no samples.tsv, no done.
     let mut solid = Rgba::new(64, 64);
     img::fill(&mut solid, 0, 0, 64, 64, [255, 0, 255, 255]);
     let master = work.slice(&atlas::slice_name(ImageId::Tile(chest)));
-    let kept = std::fs::read(&master).unwrap();
+    let was = std::fs::read(&master).unwrap();
     std::fs::write(&master, master_png(&solid)).unwrap();
     let e = calibrate_final(&g, &work, &o).unwrap_err();
     assert!(e.contains("master"), "{e}");
@@ -2918,10 +2950,11 @@ fn the_out_dir_holds_one_runs_output() {
             "refused.txt"
         ]
     );
-    let refused = std::fs::read_to_string(o.out.join("refused.txt")).unwrap();
+    let refused = std::fs::read_to_string(run_dir(&o.out).join("refused.txt")).unwrap();
     assert_eq!(refused, format!("{e}\n"));
-    std::fs::write(&master, &kept).unwrap();
-    // A run whose work dir changes while it is read: what changed, no sheet drawn kept (P4).
+    assert!(e.contains(&run_dir(&o.out).display().to_string()), "{e}");
+    std::fs::write(&master, &was).unwrap();
+    // A run whose work dir changes while it is read: what changed, no sheet.
     let p = work.path("gates.jsonl");
     AFTER_READ.lock().unwrap().push((
         o.out.clone(),
@@ -2941,62 +2974,78 @@ fn the_out_dir_holds_one_runs_output() {
         ]
     );
     assert_eq!(
-        std::fs::read_to_string(o.out.join("changed.txt")).unwrap(),
+        std::fs::read_to_string(run_dir(&o.out).join("changed.txt")).unwrap(),
         "gates.jsonl\n"
     );
+    // The two refused runs are listed as incomplete by the next, and left; the first run's
+    // dir is as it was.
     work.write("gates.jsonl", b"").unwrap();
-    // A dir the tool did not write is not replaced, an empty one neither, and nothing is left
-    // beside it.
-    let theirs = dir.join("theirs");
-    std::fs::create_dir_all(&theirs).unwrap();
-    std::fs::write(theirs.join("notes.txt"), b"the owner's").unwrap();
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    assert_eq!(s.written.incomplete.len(), 2, "{:?}", s.written.incomplete);
+    assert!(
+        s.written
+            .incomplete
+            .iter()
+            .all(|r| r.ends_with(" (refused)"))
+    );
+    assert!(
+        s.text().contains("incomplete runs beside it"),
+        "{}",
+        s.text()
+    );
+    assert_eq!(contents_of(&first), kept);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_out_dir_holding_other_files_is_written_in_and_they_are_left() {
+    // The owner's --out: a file of theirs in it, the --include list too (the reviewer's P15),
+    // and a link: the run writes its dir in it, and touches none of them.
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("owners-out", &text, &g, &left);
+    let o = options(&dir);
+    std::fs::create_dir_all(&o.out).unwrap();
+    std::fs::write(o.out.join("notes.txt"), b"the owner's").unwrap();
+    let mine = o.out.join("owner-ids.txt");
+    let ids = format!("{}\n", atlas::image_name(ImageId::Tile(B)));
+    std::fs::write(&mine, &ids).unwrap();
     let o2 = FinalOptions {
-        out: theirs.clone(),
+        include: Some(mine.clone()),
         ..options(&dir)
     };
-    let e = calibrate_final(&g, &work, &o2).unwrap_err();
-    assert!(
-        e.contains(
-            "calibrate --final did not write (no marker .calibrate-final), so it is not replaced: move it away, or pass another --out"
-        ),
-        "{e}"
+    let s = calibrate_final(&g, &work, &o2).unwrap();
+    assert_eq!(s.include.map(|i| i.0), Some(1));
+    assert_eq!(std::fs::read_to_string(&mine).unwrap(), ids);
+    let entries = files_in(&o.out);
+    let run = s
+        .written
+        .dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(entries, ["notes.txt", "owner-ids.txt", run.as_str()]);
+    // A --out that is a link to a dir: the run dir is made in the dir it points to.
+    let real = dir.join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let o3 = FinalOptions {
+        out: link.clone(),
+        ..options(&dir)
+    };
+    let s = calibrate_final(&g, &work, &o3).unwrap();
+    assert_eq!(
+        s.written.dir.parent().unwrap(),
+        real.canonicalize().unwrap()
     );
-    let left: Vec<String> = std::fs::read_dir(&theirs)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(left, ["notes.txt"]);
-    let beside: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|f| f.starts_with('.'))
-        .collect();
-    assert!(beside.is_empty(), "{beside:?}");
-    std::fs::remove_file(theirs.join("notes.txt")).unwrap();
-    let e = calibrate_final(&g, &work, &o2).unwrap_err();
-    assert!(e.contains("(no marker .calibrate-final)"), "{e}");
-    assert_eq!(std::fs::read_dir(&theirs).unwrap().count(), 0);
-    // The first pass's out dir (its marker, not this mode's) is not replaced either.
-    let first = super::super::out_dir::FIRST.marker;
-    std::fs::write(theirs.join(first), b"calibrate\n").unwrap();
-    let e = calibrate_final(&g, &work, &o2).unwrap_err();
-    assert!(
-        e.contains("(no marker .calibrate-final; it is calibrate's output)"),
-        "{e}"
-    );
-    let left: Vec<String> = std::fs::read_dir(&theirs)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(left, [first]);
-    std::fs::remove_dir_all(&theirs).unwrap();
-    assert!(calibrate_final(&g, &work, &o2).is_ok());
-    assert!(theirs.join(MARKER).is_file());
+    assert_eq!(std::fs::read_link(&link).unwrap(), real);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A run of the chain that fails as `fail` makes it (the hooks it sets, kept while it runs),
-/// at the out dir `name`: its error, and the files of the out dir after it.
+/// at the out dir `name`: its error, and the files of its run dir after it.
 fn failed_run(name: &str, fail: impl FnOnce(&Path) -> Vec<Hooked>) -> (String, Vec<String>) {
     let g = game();
     let (text, left) = chain(&g);
@@ -3011,7 +3060,7 @@ fn failed_run(name: &str, fail: impl FnOnce(&Path) -> Vec<Hooked>) -> (String, V
     (e, files)
 }
 
-/// What a failed run of the chain leaves at the out dir: its refusal and the snapshots read.
+/// What a failed run of the chain keeps in its run dir: its refusal and the snapshots read.
 const REFUSAL: [&str; 4] = ["gates.jsonl", "ingest.json", "jobs.jsonl", "refused.txt"];
 
 /// A hook that fails the second sheet written (the first is written).
@@ -3019,6 +3068,9 @@ fn second_sheet_fails(out: &Path) -> Hooked {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let n = AtomicUsize::new(0);
     hook(out, "write", move |name| {
+        if !name.ends_with(".png") {
+            return Ok(());
+        }
         match n.fetch_add(1, Ordering::SeqCst) {
             1 => Err(format!("{name}: no room left")),
             _ => Ok(()),
@@ -3027,9 +3079,9 @@ fn second_sheet_fails(out: &Path) -> Hooked {
 }
 
 #[test]
-fn a_run_whose_masters_cannot_be_read_again_publishes_its_refusal_alone() {
-    // slices/ gone once the masters are read: they cannot be read again at the end, after the
-    // sheets are drawn. The out dir: the refusal, no sheet, no samples.tsv.
+fn a_run_whose_masters_cannot_be_read_again_keeps_its_diagnostics_alone() {
+    // slices/ gone once the masters are read (the reviewer's P7): they cannot be read again at
+    // the end, after the sheets are drawn. The run dir: the diagnostics, no sheet.
     let (e, files) = failed_run("recheck", |out| {
         let slices = out.parent().unwrap().join("work").join("slices");
         let moved = out.parent().unwrap().join("slices-moved");
@@ -3044,9 +3096,9 @@ fn a_run_whose_masters_cannot_be_read_again_publishes_its_refusal_alone() {
 }
 
 #[test]
-fn a_run_whose_master_cannot_be_read_again_publishes_its_refusal_alone() {
-    // The reviewer's P7b: B's master unreadable once it is read, so the re-check at the end
-    // cannot read it. The out dir: the refusal, no sheet, no samples.tsv.
+fn a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone() {
+    // The reviewer's P7b: B's master unreadable once it is read (mode 000), so the re-check at
+    // the end cannot read it.
     use std::os::unix::fs::PermissionsExt;
     let master: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>> = Default::default();
     let at = master.clone();
@@ -3073,64 +3125,99 @@ fn a_run_whose_master_cannot_be_read_again_publishes_its_refusal_alone() {
 }
 
 #[test]
-fn a_run_whose_second_sheet_cannot_be_written_publishes_its_refusal_alone() {
+fn a_run_whose_second_sheet_cannot_be_written_keeps_its_diagnostics_alone() {
     let (e, files) = failed_run("write", |out| vec![second_sheet_fails(out)]);
     assert!(e.contains("final-terrain-s2.png: no room left"), "{e}");
     assert_eq!(files, REFUSAL);
 }
 
 #[test]
-fn a_failed_run_whose_dir_cannot_be_removed_whole_publishes_its_refusal_alone() {
-    // The second sheet not written, then what the run wrote not removable whole: a dir in it
-    // whose file cannot leave, so the removal stops part of the way. The out dir is still the
-    // refusal alone; what is left is said.
-    use std::os::unix::fs::PermissionsExt;
-    let stuck: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>> = Default::default();
-    let at = stuck.clone();
-    let (e, files) = failed_run("cleanup", |out| {
-        let h = hook(out, "cleanup", move |stage| {
-            let sub = Path::new(stage).join("stuck");
-            std::fs::create_dir(&sub).unwrap();
-            std::fs::write(sub.join("x"), b"x").unwrap();
-            std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o500)).unwrap();
-            *at.lock().unwrap() = Some(sub);
-            Ok(())
+fn a_failed_run_that_cannot_delete_a_sheet_says_it_is_left() {
+    // The second sheet not written, then the first not deletable (a failure at the delete,
+    // injected): the run dir holds the diagnostics and that sheet alone, and the error and
+    // refused.txt name it as left.
+    let (e, files) = failed_run("delete", |out| {
+        let h = hook(out, "delete", |name| {
+            if name == "final-terrain.png" {
+                Err("held".into())
+            } else {
+                Ok(())
+            }
         });
         vec![second_sheet_fails(out), h]
     });
-    let sub = stuck.lock().unwrap().take().unwrap();
-    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let _ = std::fs::remove_dir_all(sub.parent().unwrap().parent().unwrap());
     assert!(e.contains("no room left"), "{e}");
     assert!(
-        e.contains("what the run wrote is left beside the out dir"),
+        e.contains("left, as it could not be deleted: ") && e.contains("final-terrain.png (held)"),
         "{e}"
     );
-    assert_eq!(files, REFUSAL);
+    let mut want: Vec<&str> = REFUSAL.to_vec();
+    want.push("final-terrain.png");
+    want.sort();
+    assert_eq!(files, want);
 }
 
 #[test]
-fn an_error_of_the_run_names_the_out_dir() {
-    // A sheet that cannot be written (a dir where it goes) and a snapshot that cannot be read
-    // back (gone once written): each error names the file of the out dir, as refused.txt
-    // does, and the dir the run writes first only once, at the end.
+fn a_failed_run_deletes_only_what_it_wrote() {
+    // A file put in the run dir while the run writes (by another hand), and a dir where its
+    // first sheet goes: the run fails, deletes its own files but its diagnostics, and leaves
+    // both, as it did not make them.
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("racing", &text, &g, &left);
+    let o = options(&dir);
+    let out = o.out.clone();
+    let _h = hook(&o.out, "write", move |name| {
+        let run = run_dir(&out);
+        if name == "samples.tsv" {
+            std::fs::write(run.join("theirs.txt"), b"not the run's").unwrap();
+            return Err("samples.tsv: no room left".into());
+        }
+        Ok(())
+    });
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(e.contains("no room left"), "{e}");
+    let mut want: Vec<&str> = REFUSAL.to_vec();
+    want.push("theirs.txt");
+    want.sort();
+    assert_eq!(files_of(&o.out), want);
+    let theirs = std::fs::read(run_dir(&o.out).join("theirs.txt")).unwrap();
+    assert_eq!(theirs, b"not the run's");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn done_is_written_after_every_other_file_of_the_run() {
+    // At each write of the run, no done yet; after it, done, the last file written.
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("done-last", &text, &g, &left);
+    let o = options(&dir);
+    let out = o.out.clone();
+    let order: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let seen = order.clone();
+    let _h = hook(&o.out, "write", move |name| {
+        assert!(!run_dir(&out).join(DONE).exists(), "{name}: done is there");
+        seen.lock().unwrap().push(name.to_string());
+        Ok(())
+    });
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    let order = order.lock().unwrap().clone();
+    assert_eq!(order.last().map(String::as_str), Some(DONE), "{order:?}");
+    let mut written = order.clone();
+    written.sort();
+    assert_eq!(written, files_in(&s.written.dir));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_error_of_the_run_names_the_file_of_its_run_dir() {
+    // A sheet that cannot be written (a dir where it goes, made by another hand) and a snapshot
+    // that cannot be read back (gone once written): each error, and refused.txt, name the file
+    // in the run's own dir; the dir in the sheet's place is left.
     let g = game();
     let (text, left) = chain(&g);
     let (dir, work) = work_dir("named", &text, &g, &left);
-    let real = dir.canonicalize().unwrap();
-    let staging = |out: &Path| -> PathBuf {
-        let prefix = format!(".{}.staging-", out.file_name().unwrap().to_string_lossy());
-        std::fs::read_dir(out.parent().unwrap())
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .find(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with(&prefix)
-            })
-            .unwrap()
-    };
     for (k, step, file, said) in [
         (
             "write",
@@ -3152,7 +3239,7 @@ fn an_error_of_the_run_names_the_out_dir() {
         let at = o.out.clone();
         let _h = hook(&o.out, step, move |name| {
             if name == file {
-                let p = staging(&at).join(name);
+                let p = run_dir(&at).join(name);
                 if step == "write" {
                     std::fs::create_dir(&p).unwrap();
                 } else {
@@ -3162,93 +3249,15 @@ fn an_error_of_the_run_names_the_out_dir() {
             Ok(())
         });
         let e = calibrate_final(&g, &work, &o).unwrap_err();
-        let want = format!("{}: {said}", real.join(k).join(file).display());
+        let run = run_dir(&o.out).canonicalize().unwrap();
+        let want = format!("{}: {said}", run.join(file).display());
         assert!(e.starts_with(&want), "{k}: {e}");
-        assert!(e.ends_with(", which is not kept)"), "{k}: {e}");
-        assert_eq!(e.matches(".staging-").count(), 1, "{k}: {e}");
-        let refused = std::fs::read_to_string(o.out.join("refused.txt")).unwrap();
+        let refused = std::fs::read_to_string(run.join("refused.txt")).unwrap();
         assert_eq!(refused, format!("{e}\n"), "{k}");
+        if step == "write" {
+            assert!(run.join(file).is_dir(), "{k}");
+        }
     }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn an_include_list_put_in_the_out_dir_is_not_removed_with_it() {
-    // The reviewer's P15: the owner's --include list saved in a marked --out. The next run is
-    // refused, the list named, and the out dir left as it is, the list in it.
-    let g = game();
-    let (text, left) = chain(&g);
-    let (dir, work) = work_dir("include-inside", &text, &g, &left);
-    let o = options(&dir);
-    calibrate_final(&g, &work, &o).unwrap();
-    let had = files_of(&o.out);
-    let mine = o.out.join("owner-ids.txt");
-    let ids = format!("{}\n", atlas::image_name(ImageId::Tile(B)));
-    std::fs::write(&mine, &ids).unwrap();
-    let o2 = FinalOptions {
-        include: Some(mine.clone()),
-        ..options(&dir)
-    };
-    let e = calibrate_final(&g, &work, &o2).unwrap_err();
-    assert!(
-        e.contains("it holds what calibrate --final did not write: owner-ids.txt"),
-        "{e}"
-    );
-    assert_eq!(std::fs::read_to_string(&mine).unwrap(), ids);
-    let mut now = had.clone();
-    now.push("owner-ids.txt".into());
-    now.sort();
-    assert_eq!(files_of(&o.out), now);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn the_run_after_a_crashed_swap_puts_the_old_output_back_and_removes_the_rest() {
-    // The reviewer's P8, by the names this protocol gives: a run killed between moving the old
-    // output aside and putting its own in place (no --out; the old output at .final.old-…, the
-    // new one in .final.staging-…, of a process gone). The next run puts the old one back,
-    // removes the staging dir, says both, then replaces --out with its own output alone.
-    let g = game();
-    let (text, left) = chain(&g);
-    let (dir, work) = work_dir("crashed-swap", &text, &g, &left);
-    let o = options(&dir);
-    calibrate_final(&g, &work, &o).unwrap();
-    let old = dir.join(".final.old-99999999-1");
-    let staged = dir.join(".final.staging-99999999-2");
-    std::fs::rename(&o.out, &old).unwrap();
-    std::fs::create_dir(&staged).unwrap();
-    std::fs::write(staged.join(MARKER), b"calibrate --final\n").unwrap();
-    std::fs::write(staged.join("final-stale.png"), b"x").unwrap();
-    let s = calibrate_final(&g, &work, &o).unwrap();
-    let mut want = s.sheets.clone();
-    want.sort();
-    let pngs: Vec<String> = files_of(&o.out)
-        .into_iter()
-        .filter(|f| f.ends_with(".png"))
-        .collect();
-    assert_eq!(pngs, want);
-    let beside: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|f| f.starts_with('.'))
-        .collect();
-    assert!(beside.is_empty(), "{beside:?}");
-    let report = s.text();
-    let line = |what: &str, p: &Path| {
-        format!(
-            "out dir: {what} {}",
-            p.canonicalize().unwrap_or(p.to_path_buf()).display()
-        )
-    };
-    let real = dir.canonicalize().unwrap();
-    assert!(
-        report.contains(&line("put back from", &real.join(".final.old-99999999-1"))),
-        "{report}"
-    );
-    assert!(
-        report.contains(&line("removed", &real.join(".final.staging-99999999-2"))),
-        "{report}"
-    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

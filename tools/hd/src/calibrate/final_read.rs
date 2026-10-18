@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use serde::Deserialize;
@@ -15,7 +15,7 @@ use u6_render::hd::Scale;
 use super::{
     A_CELL, BACK, COLS, Framed, LABELS, Layout, MARK, MARK_HIDDEN, MAX_HEIGHT, PANEL_NAMES, Panels,
     REPLACES_BASE, ROWS, RawAt, RawPair, Sides, Slices, Source, Stack, edge_name, frame, framed,
-    labels, mark, measure, pair_line, panels, parse_edge, text,
+    labels, mark, measure, out_dir, pair_line, panels, parse_edge, text,
 };
 use crate::atlas;
 use crate::game::Game;
@@ -25,6 +25,7 @@ use crate::img::{self, Rgba};
 use crate::ingest::Accepted;
 use crate::neighbour::{self, At, Drawn, Pair};
 use crate::work::{self, Work};
+use out_dir::{Run, Written};
 
 #[cfg(test)]
 mod tests;
@@ -766,6 +767,7 @@ pub fn fixed(
 /// What `calibrate --final` is given.
 #[derive(Clone, Debug)]
 pub struct FinalOptions {
+    /// Where each run makes its run dir ([`out_dir::run_in`]).
     pub out: PathBuf,
     /// The seam threshold the pairs are measured again with (ingest's).
     pub seam: f32,
@@ -1233,8 +1235,8 @@ pub struct FinalSummary {
     pub unread: usize,
     pub tsv_rows: usize,
     pub sheets: Vec<String>,
-    /// What to say of the out dir ([`super::out_dir::run_in`]).
-    pub out_dir: Vec<String>,
+    /// The run's dir, and the incomplete runs beside it ([`out_dir::run_in`]).
+    pub written: Written,
 }
 
 /// A class's line of the summary.
@@ -1359,9 +1361,7 @@ impl FinalSummary {
         }
         let _ = writeln!(s, "samples.tsv: {} rows", self.tsv_rows);
         let _ = writeln!(s, "sheets: {}", self.sheets.join(" "));
-        for n in &self.out_dir {
-            let _ = writeln!(s, "out dir: {n}");
-        }
+        s.push_str(&self.written.text());
         s
     }
 }
@@ -1488,51 +1488,43 @@ pub(crate) type Touch = Box<dyn Fn() + Send>;
 pub(crate) static AFTER_READ: std::sync::Mutex<Vec<(PathBuf, Touch)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Writes `d`, a line each, to `name` in the dir `out` the run writes (to be the out dir
-/// `shown`), and gives the run's error: `what`, nothing drawn, the kinds and how many of each
-/// (the record ids only in the file).
-fn refuse(out: &Path, shown: &Path, name: &str, what: &str, d: &[Disagreement]) -> String {
+/// Writes `d`, a line each, to `name` in the run's dir, and gives the run's error: `what`,
+/// nothing drawn, the kinds and how many of each (the record ids only in the file).
+fn refuse(run: &Run, name: &str, what: &str, d: &[Disagreement]) -> String {
     let mut detail = String::new();
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
     for x in d {
         let _ = writeln!(detail, "{}: {}", x.kind, x.detail);
         *kinds.entry(x.kind).or_default() += 1;
     }
-    if let Err(e) = work::write_file(&out.join(name), detail.as_bytes()) {
+    if let Err(e) = run.write(name, detail.as_bytes()) {
         return e;
     }
     let k: Vec<String> = kinds.iter().map(|(k, n)| format!("{k} {n}")).collect();
     format!(
         "{what}, nothing drawn: {} (details in {})",
         k.join(", "),
-        shown.join(name).display()
+        run.dir().join(name).display()
     )
 }
 
-/// The file every out dir of `calibrate --final` holds ([`super::out_dir::FINAL`]): the dir
-/// is the tool's, which a later run may replace whole.
-pub const MARKER: &str = super::out_dir::FINAL.marker;
-
-/// Runs `calibrate --final` (module docs of [`crate::calibrate`]) over the work dir. The run is
-/// written to a fresh directory beside the out dir and swapped in whole at the end
-/// ([`super::out_dir::run_in`]): after any run the out dir holds that run's output alone, its
-/// sheets and `samples.tsv` drawn from one state, or, when it fails, its refusal
-/// (`refused.txt`, the details and the snapshots read).
+/// Runs `calibrate --final` (module docs of [`crate::calibrate`]) over the work dir, in a run
+/// dir of its own under the out dir ([`out_dir::run_in`]): its sheets and `samples.tsv` drawn
+/// from one state, then `done`; or, when it fails, its diagnostics alone (`refused.txt`, the
+/// details and the snapshots read).
 pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<FinalSummary, String> {
-    let (mut s, notes) = super::out_dir::run_in(super::out_dir::FINAL, &o.out, |out, named| {
-        run_final(game, work, o, out, named)
-    })?;
-    s.out_dir = notes;
+    let (mut s, written) =
+        out_dir::run_in(out_dir::FINAL, &o.out, |run| run_final(game, work, o, run))?;
+    s.written = written;
     Ok(s)
 }
 
-/// [`calibrate_final`]'s run, written to `out`, which is to be the out dir `named`.
+/// [`calibrate_final`]'s run, written in `run`'s dir.
 fn run_final(
     game: &Game,
     work: &Work,
     o: &FinalOptions,
-    out: &Path,
-    named: &Path,
+    run: &Run,
 ) -> Result<FinalSummary, String> {
     // The owner's list first: a bad line stops the run before anything is written.
     let ids = match &o.include {
@@ -1551,9 +1543,9 @@ fn run_final(
     let snapshot = |name: &str, cap: u64| -> Result<Vec<u8>, String> {
         let bytes = img::read_capped(&work.path(name), cap)
             .map_err(|e| format!("{e} (run ingest first)"))?;
-        work::write_file(&out.join(name), &bytes)?;
-        super::out_dir::seam(&o.out, "snapshot", name)?;
-        img::read_capped(&out.join(name), cap)
+        run.write(name, &bytes)?;
+        out_dir::seam(&o.out, "snapshot", name)?;
+        img::read_capped(&run.dir().join(name), cap)
     };
     let caps = [
         ("gates.jsonl", 1 << 30),
@@ -1634,7 +1626,7 @@ fn run_final(
         r => {
             d.extend(r.err().into_iter().flatten());
             let what = "the record and the slices disagree";
-            return Err(refuse(out, named, "disagreements.txt", what, &d));
+            return Err(refuse(run, "disagreements.txt", what, &d));
         }
     };
 
@@ -1866,8 +1858,7 @@ fn run_final(
     }
     if !unshown.is_empty() {
         return Err(refuse(
-            out,
-            named,
+            run,
             "unshown.txt",
             "the windows do not show every item and every pair of the last pass",
             &unshown,
@@ -2047,8 +2038,7 @@ fn run_final(
                 );
             }
             for (name, lines, s) in [(&s4, &lines4, 4), (&s2, &lines2, 2)] {
-                super::out_dir::seam(&o.out, "write", name)?;
-                img::write_png(&out.join(name), &final_sheet(lines, s))?;
+                run.write_png(name, &final_sheet(lines, s))?;
             }
             sheets.push(s4);
             sheets.push(s2);
@@ -2063,7 +2053,7 @@ fn run_final(
             atlas::image_name(ImageId::Tile(r))
         );
     }
-    work::write_file(&out.join("samples.tsv"), tsv.as_bytes())?;
+    run.write("samples.tsv", tsv.as_bytes())?;
 
     // The summary.
     let mut classes = Vec::new();
@@ -2142,14 +2132,14 @@ fn run_final(
         changed.push(format!("{masters} masters of slices/"));
     }
     if !changed.is_empty() {
-        // The sheets drawn read no one state: the refusal keeps none ([`super::out_dir`]).
+        // The sheets drawn read no one state: the failed run keeps none ([`out_dir`]).
         let what = format!("{}\n", changed.join("\n"));
-        work::write_file(&out.join("changed.txt"), what.as_bytes())?;
+        run.write("changed.txt", what.as_bytes())?;
         return Err(format!(
             "the work dir changed while calibrate --final read it ({}): nothing drawn is kept \
              (what changed in {}); run it again",
             changed.join(", "),
-            named.join("changed.txt").display()
+            run.dir().join("changed.txt").display()
         ));
     }
     Ok(FinalSummary {
@@ -2173,6 +2163,6 @@ fn run_final(
         unread,
         tsv_rows: rows,
         sheets,
-        out_dir: Vec::new(),
+        written: Written::default(),
     })
 }

@@ -1,13 +1,13 @@
 //! `calibrate`: sheets of the neighbour gate's pairs (spec 07 HD2 "Neighbour seams"), for a read
 //! by eye before its limit, its measure or the edges are changed. It reads `gates.jsonl` of the
-//! work dir through a snapshot (copied to the out dir first and read there) and the ×8 masters
+//! work dir through a snapshot (copied to the run dir first and read there) and the ×8 masters
 //! of `--slices`, each file read once, into memory, at the start (its digest kept); nothing of
 //! either is read again while the sheets are drawn. No lock is taken: a re-ingest while they are
 //! read can mix two states, which this mode does not check for (`--final` does). It writes PNG
-//! sheets and `samples.tsv` to the out dir, as `--final` does ([`out_dir`]: a fresh directory
-//! beside it, swapped in whole at the end, an old one replaced only when this mode wrote it:
-//! it holds [`out_dir::FIRST`]'s marker; on a failure the snapshot and `refused.txt`, no
-//! sheet). It calls nothing: no `codex`, no upload. It samples
+//! sheets and `samples.tsv`, as `--final` does, to a run dir of its own under `--out`
+//! ([`out_dir`]: `run-<UTC time>-<pid>/`, never reused, `done` last; on a failure the snapshot
+//! and `refused.txt`, no sheet; nothing outside it written, nothing it did not write deleted).
+//! It calls nothing: no `codex`, no upload. It samples
 //! the first pass (below), or, with `--final`, draws a window of every item of the final pack
 //! (the last section).
 //!
@@ -58,7 +58,7 @@
 //! **`--final`** ([`final_read`]): the read of the final pack, every item of it, not a sample
 //! (`--slices`, `--at`, `--per` and `--seed` are not taken).
 //! - **The state** ([`final_read::fixed`]): snapshots of `gates.jsonl`, `ingest.json` and
-//!   `jobs.jsonl` (copied to the out dir and read there), the masters of the work dir's
+//!   `jobs.jsonl` (copied to the run dir and read there), the masters of the work dir's
 //!   `slices/` (tiles, portraits and bitmaps, listed once, each file read once, into memory, its
 //!   digest kept; the tiles' decoded) and the plan of
 //!   items, which must be the one every job was laid out from (its fingerprint: the log's item
@@ -79,7 +79,7 @@
 //!   sides must agree too
 //!   (every rule is listed at [`final_read::fixed`]); every pair of the last pass must have a
 //!   cell. On a disagreement nothing is drawn: the error gives its kinds and counts,
-//!   `disagreements.txt` in the out dir the details.
+//!   `disagreements.txt` in the run dir the details.
 //! - **The windows**: one per item of tile records the fixed point left generated (listed whole
 //!   in `ingest.json`; a multi-record object is one item; portraits and bitmaps have no window);
 //!   then one per id of `--include FILE` (a record id a line, `t:N` or `N`, `#` to the line's end
@@ -136,18 +136,16 @@
 //!   the pairs in the last pass, of them drawn in a window, and the windows drawing one (the
 //!   pair windows too), 0 printed; the pair windows, and the pairs of the last pass drawn in
 //!   no window (0: a run that leaves one fails).
-//! - **The out dir** ([`out_dir`], [`final_read::MARKER`]): the run is written to a fresh
-//!   directory beside `--out` and swapped in whole at the end, so after any run `--out` holds
-//!   that run's output alone: on success its sheets and `samples.tsv`, drawn from one state; on
-//!   a refusal, or any other failure (a sheet not written, the masters not read again), its
-//!   `refused.txt` (the error), the details (`disagreements.txt` or `unshown.txt`) and the
-//!   snapshots read, in a fresh dir, never a sheet the run drew; when the work dir changed
-//!   during the run, `changed.txt` (what changed) too. An old `--out` is replaced only when it
-//!   holds the marker file every run of this mode writes and nothing the marker does not list
-//!   (it names what its run wrote); anything else there (an empty dir, the first pass's, one a
-//!   file was put in) is left as it is and the run fails, saying why and how to go on. What a
-//!   run that stopped left beside `--out` is put back or removed when the next one begins, and
-//!   said in its report; what is not the tool's is said, left, and the run refused.
+//! - **The run dir** ([`out_dir`]): each run writes in a dir of its own under `--out`,
+//!   `run-<UTC time>-<pid>/`, made by its first write and never reused, and nowhere else. On
+//!   success its sheets and `samples.tsv`, drawn from one state, then `done`, the dir named in
+//!   the report. On a refusal, or any other failure (a sheet not written, the masters not read
+//!   again), the files this run wrote are deleted but `refused.txt` (the error), the details
+//!   (`disagreements.txt` or `unshown.txt`) and the snapshots read, never a sheet; when the
+//!   work dir changed during the run, `changed.txt` (what changed) too. Nothing else is deleted,
+//!   and nothing a previous run made is touched: the run dirs of `--out` with no `done` are
+//!   listed in the report as incomplete runs, and left; cleaning up old runs is the person's
+//!   job.
 //!
 //! The object draw (`u6_core::objects::draw`, 0x10e81e, 0x10e73a, 0x10e596) as far as the
 //! starting lists tell it: the objects in list order, (y, x), and at one cell the later in the
@@ -1558,6 +1556,7 @@ pub fn measure(
 pub struct Options {
     /// The masters to show (`t-<record>.png`, ×8).
     pub slices: PathBuf,
+    /// Where each run makes its run dir ([`out_dir::run_in`]).
     pub out: PathBuf,
     pub per: usize,
     pub seed: u64,
@@ -1588,8 +1587,8 @@ pub struct Summary {
     /// Lines of `samples.tsv` (header not counted) and the sheets written.
     pub tsv_rows: usize,
     pub sheets: Vec<String>,
-    /// What to say of the out dir ([`out_dir::run_in`]).
-    pub out_dir: Vec<String>,
+    /// The run's dir, and the incomplete runs beside it ([`out_dir::run_in`]).
+    pub written: out_dir::Written,
 }
 
 impl Summary {
@@ -1635,9 +1634,7 @@ impl Summary {
         );
         let _ = writeln!(s, "samples.tsv: {} rows", self.tsv_rows);
         let _ = writeln!(s, "sheets: {}", self.sheets.join(" "));
-        for n in &self.out_dir {
-            let _ = writeln!(s, "out dir: {n}");
-        }
+        s.push_str(&self.written.text());
         s
     }
 }
@@ -1662,7 +1659,7 @@ fn draw(
     game: &Game,
     pack: &Rc<Slices>,
     seam: f32,
-    out: &Path,
+    run: &out_dir::Run,
     stem: &str,
     entries: &[Entry],
     index: &mut usize,
@@ -1727,34 +1724,38 @@ fn draw(
                 framed.frames(),
             );
         }
-        img::write_png(&out.join(&s4), &sheet(&l4, 4))?;
-        img::write_png(&out.join(&s2), &sheet(&l2, 2))?;
+        run.write_png(&s4, &sheet(&l4, 4))?;
+        run.write_png(&s2, &sheet(&l2, 2))?;
         sheets.push(s4);
         sheets.push(s2);
     }
     Ok(())
 }
 
-/// Runs `calibrate` (module docs) over the work dir's `gates.jsonl`, written to a fresh
-/// directory beside the out dir and swapped in whole at the end ([`out_dir::run_in`]).
+/// Runs `calibrate` (module docs) over the work dir's `gates.jsonl`, in a run dir of its own
+/// under the out dir ([`out_dir::run_in`]).
 pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, String> {
     if o.per == 0 {
         return Err("--per is at least 1".into());
     }
-    let (mut s, notes) = out_dir::run_in(out_dir::FIRST, &o.out, |out, _| {
-        first_pass(game, work, o, out)
-    })?;
-    s.out_dir = notes;
+    let (mut s, written) =
+        out_dir::run_in(out_dir::FIRST, &o.out, |run| first_pass(game, work, o, run))?;
+    s.written = written;
     Ok(s)
 }
 
-/// [`calibrate`]'s run, written to `out`.
-fn first_pass(game: &Game, work: &Work, o: &Options, out: &Path) -> Result<Summary, String> {
+/// [`calibrate`]'s run, written in `run`'s dir.
+fn first_pass(
+    game: &Game,
+    work: &Work,
+    o: &Options,
+    run: &out_dir::Run,
+) -> Result<Summary, String> {
     // The snapshot first; only it is read.
-    let snapshot = out.join("gates.jsonl");
+    let snapshot = run.dir().join("gates.jsonl");
     let bytes = img::read_capped(&work.path("gates.jsonl"), 1 << 30)
         .map_err(|e| format!("{e} (run ingest first)"))?;
-    work::write_file(&snapshot, &bytes)?;
+    run.write("gates.jsonl", &bytes)?;
     let text = img::read_capped(&snapshot, 1 << 30)?;
     let text = String::from_utf8(text).map_err(|_| "gates.jsonl is not UTF-8".to_string())?;
     let (rows, skipped) = rows(&text)?;
@@ -1786,7 +1787,7 @@ fn first_pass(game: &Game, work: &Work, o: &Options, out: &Path) -> Result<Summa
         let stem = format!("{}{}-{}", o.source.prefix(), bucket.name(), sides.name());
         let (t, s) = (&mut tsv, &mut sheets);
         draw(
-            game, &pack, o.seam, out, &stem, &entries, &mut index, t, s, &mut same,
+            game, &pack, o.seam, run, &stem, &entries, &mut index, t, s, &mut same,
         )?;
     }
     let by: BTreeMap<Pair, &Row> = rows.iter().map(|r| (r.pair, r)).collect();
@@ -1825,10 +1826,10 @@ fn first_pass(game: &Game, work: &Work, o: &Options, out: &Path) -> Result<Summa
             .collect();
         let (t, s) = (&mut tsv, &mut sheets);
         draw(
-            game, &pack, o.seam, out, &stem, &entries, &mut index, t, s, &mut same,
+            game, &pack, o.seam, run, &stem, &entries, &mut index, t, s, &mut same,
         )?;
     }
-    work::write_file(&out.join("samples.tsv"), tsv.as_bytes())?;
+    run.write("samples.tsv", tsv.as_bytes())?;
     summary.tsv_rows = index;
     summary.sheets = sheets;
     (summary.same_ratio, summary.remeasured) = same;
