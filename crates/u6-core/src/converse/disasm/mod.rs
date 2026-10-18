@@ -324,6 +324,12 @@ pub enum HazardKind {
     Scan(Scan),
     /// A skip loop finds no stop byte before the script's end.
     ScanPastEnd(Scan),
+    /// A path (in practice one after a skip loop) reaches a table's bytes.
+    IntoData,
+    /// An expression op takes more values than its expression pushed: the evaluator reads 0
+    /// below its stack and drops what it writes there (a `b4` / `b7` / `c3` then has no table
+    /// address and claims no table).
+    Underflow,
 }
 
 /// The interpreter's skip loops.
@@ -370,8 +376,12 @@ pub enum Reason {
     JumpOutside,
     /// Two decodes disagree on a byte.
     Overlap,
-    /// A table address outside the script, inside decoded code, or not a literal.
-    TableAddress,
+    /// A table address outside the script.
+    TableOutside,
+    /// A table address inside decoded code.
+    TableInCode,
+    /// A table address of `b4` / `b7` / `c3` that is not a literal.
+    TableNotLiteral,
     /// One table read both as strings and as words.
     TableKinds,
     /// A constant index past a table's entries.
@@ -390,7 +400,9 @@ impl fmt::Display for Reason {
             Reason::Malformed(b) => write!(f, "malformed operand of op {b:#04x}"),
             Reason::JumpOutside => write!(f, "jump outside the script"),
             Reason::Overlap => write!(f, "overlapping decodes"),
-            Reason::TableAddress => write!(f, "table address"),
+            Reason::TableOutside => write!(f, "table outside the script"),
+            Reason::TableInCode => write!(f, "table inside code"),
+            Reason::TableNotLiteral => write!(f, "table address not a literal"),
             Reason::TableKinds => write!(f, "table read as strings and words"),
             Reason::TableIndex => write!(f, "table index past its entries"),
         }
@@ -406,9 +418,20 @@ impl fmt::Display for Refusal {
 /// Decodes one script (see the module doc). Never panics: bytes that end inside an item, or a
 /// byte the interpreter has no arm for, refuse the script.
 pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refusal> {
-    let mut d = Decoder::new(bytes);
-    d.run()?;
-    d.tables()?;
+    // Decode, collect the table addresses the ops name, and decode again with those addresses
+    // closed to code, until no new address turns up (each round adds one at least).
+    let mut reserved = BTreeSet::new();
+    let mut d = loop {
+        let mut d = Decoder::new(bytes, reserved.clone());
+        d.run()?;
+        let addrs: BTreeSet<u32> = d.table_uses()?.iter().map(|u| u.addr).collect();
+        if addrs.is_subset(&reserved) {
+            break d;
+        }
+        reserved.extend(addrs);
+    };
+    d.claim_tables()?;
+    d.check_table_indices()?;
     let items = d.finish();
     Ok(Disasm {
         archive,
@@ -451,6 +474,8 @@ struct TableUse {
 
 struct Decoder<'a> {
     b: &'a [u8],
+    /// Table addresses: no path decodes code there.
+    reserved: BTreeSet<u32>,
     items: BTreeMap<u32, Item>,
     /// For each byte, the start of the item that owns it.
     owner: Vec<u32>,
@@ -466,9 +491,10 @@ fn refuse<T>(at: u32, reason: Reason) -> Result<T, Refusal> {
 }
 
 impl<'a> Decoder<'a> {
-    fn new(b: &'a [u8]) -> Self {
+    fn new(b: &'a [u8], reserved: BTreeSet<u32>) -> Self {
         Self {
             b,
+            reserved,
             items: BTreeMap::new(),
             owner: vec![NO_OWNER; b.len()],
             seen: BTreeSet::new(),
@@ -544,24 +570,19 @@ impl<'a> Decoder<'a> {
         })?;
         self.work.push((look + 1, Ctx::Look));
         // Reached by spell, the look text is not run: the scan for `f2` starts at 0.
-        self.scan_greeting(0, Ctx::Main);
+        self.scan_greeting(0, Ctx::Main)?;
         loop {
             while let Some((at, ctx)) = self.work.pop() {
                 self.visit(at, ctx)?;
             }
-            // Skip-loop landings only once no direct path is left, so that a landing never
-            // decodes bytes a direct path owns.
+            // Skip-loop landings come last, so that a landing never decodes bytes a direct path
+            // owns.
             let Some((landing, ctx)) = self.scans.pop() else {
                 break;
             };
             self.land(landing, ctx)?;
         }
-        if !self
-            .landed
-            .iter()
-            .chain(self.scans.iter().map(|(l, _)| l))
-            .any(|l| l.scan == Scan::Greeting)
-        {
+        if !self.landed.iter().any(|l| l.scan == Scan::Greeting) {
             return refuse(look, Reason::NoGreetingMarker);
         }
         self.check_landings();
@@ -575,6 +596,10 @@ impl<'a> Decoder<'a> {
         }
         if at >= self.len() {
             return refuse(at, Reason::PastEnd);
+        }
+        if self.reserved.contains(&at) {
+            self.hazard(at, HazardKind::IntoData);
+            return Ok(());
         }
         let start = match self.owner[at as usize] {
             NO_OWNER => {
@@ -606,8 +631,7 @@ impl<'a> Decoder<'a> {
             Kind::BlockEnd | Kind::Input(_) | Kind::Stop(_) | Kind::Marker(_)
         );
         if stops && ctx == Ctx::Look {
-            self.scan_greeting(at, ctx);
-            return Ok(());
+            return self.scan_greeting(at, ctx);
         }
         match &item.kind {
             Kind::Text(_) | Kind::BlockEnd | Kind::Input(_) => self.work.push((end, ctx)),
@@ -655,18 +679,22 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// `while (script[pc++] != f2);` from `from`.
-    fn scan_greeting(&mut self, from: u32, ctx: Ctx) {
+    /// `while (script[pc++] != f2);` from `from`. The greeting is the way into the input loop,
+    /// so its landing is followed at once, as a direct path.
+    fn scan_greeting(&mut self, from: u32, _ctx: Ctx) -> Result<(), Refusal> {
         match self.first(from, ops::GREETING) {
-            Some(stop) => self.scans.push((
+            Some(stop) => self.land(
                 Landing {
                     scan: Scan::Greeting,
                     stop,
                     at: stop + 1,
                 },
-                if ctx == Ctx::Look { Ctx::Main } else { ctx },
-            )),
-            None => self.hazard(from, HazardKind::ScanPastEnd(Scan::Greeting)),
+                Ctx::Main,
+            ),
+            None => {
+                self.hazard(from, HazardKind::ScanPastEnd(Scan::Greeting));
+                Ok(())
+            }
         }
     }
 
@@ -700,6 +728,10 @@ impl<'a> Decoder<'a> {
     /// A stop byte no path decoded yet is decoded here (the loop reads it as that byte).
     fn land(&mut self, l: Landing, ctx: Ctx) -> Result<(), Refusal> {
         self.landed.push(l);
+        if self.reserved.contains(&l.stop) {
+            self.hazard(l.at, HazardKind::IntoData);
+            return Ok(());
+        }
         match self.owner[l.stop as usize] {
             NO_OWNER if l.at != l.stop => {
                 let item = self.decode(l.stop)?;
@@ -761,6 +793,11 @@ impl<'a> Decoder<'a> {
         let (s, e) = (item.offset, item.end());
         if e > self.len() {
             return refuse(self.len(), Reason::Truncated);
+        }
+        if !matches!(item.kind, Kind::Table(_))
+            && let Some(&t) = self.reserved.range(s..e).next()
+        {
+            return refuse(t, Reason::TableInCode);
         }
         let text = matches!(item.kind, Kind::Text(_));
         let mut absorbed = Vec::new();
@@ -1080,8 +1117,9 @@ impl<'a> Decoder<'a> {
     // ---- tables ------------------------------------------------------------------------------
 
     /// The table uses of the decoded ops.
-    fn table_uses(&self) -> Result<Vec<TableUse>, Refusal> {
+    fn table_uses(&mut self) -> Result<Vec<TableUse>, Refusal> {
         let mut uses = Vec::new();
+        let mut under = Vec::new();
         for item in self.items.values() {
             let Kind::Op(op) = &item.kind else { continue };
             let mut exprs: Vec<&Expr> = Vec::new();
@@ -1110,16 +1148,19 @@ impl<'a> Decoder<'a> {
                 exprs.extend(t.index.as_ref());
             }
             for e in exprs {
-                expr_tables(e, item.offset, &mut uses)?;
+                expr_tables(e, item.offset, &mut uses, &mut under)?;
             }
+        }
+        for at in under {
+            self.hazard(at, HazardKind::Underflow);
         }
         Ok(uses)
     }
 
-    /// Claims the tables the ops address (see the module doc): one table item per address, up
-    /// to the next address, the next decoded byte or the script's end. A constant index may run
-    /// on into the tables that follow it without a gap.
-    fn tables(&mut self) -> Result<(), Refusal> {
+    /// Claims the tables the decoded ops address that no table owns yet (see the module doc):
+    /// one table item per address, up to the next address, the next decoded byte or the
+    /// script's end. An address inside a table must be one of its entries.
+    fn claim_tables(&mut self) -> Result<(), Refusal> {
         let uses = self.table_uses()?;
         let mut by_addr: BTreeMap<u32, Vec<TableUse>> = BTreeMap::new();
         for u in uses {
@@ -1128,12 +1169,25 @@ impl<'a> Decoder<'a> {
         let addrs: Vec<u32> = by_addr.keys().copied().collect();
         for (n, (&addr, uses)) in by_addr.iter().enumerate() {
             let at = uses[0].at;
-            if addr >= self.len() || self.owner[addr as usize] != NO_OWNER {
-                return refuse(at, Reason::TableAddress);
+            if addr >= self.len() {
+                return refuse(at, Reason::TableOutside);
             }
             let words = uses[0].words;
             if uses.iter().any(|u| u.words != words) {
                 return refuse(at, Reason::TableKinds);
+            }
+            match self.owner[addr as usize] {
+                NO_OWNER => {}
+                o => match &self.items[&o].kind {
+                    Kind::Table(t)
+                        if t.words == words
+                            && (o == addr || t.entries.iter().any(|e| e.offset == addr)) =>
+                    {
+                        continue;
+                    }
+                    Kind::Table(_) => return refuse(at, Reason::TableKinds),
+                    _ => return refuse(at, Reason::TableInCode),
+                },
             }
             let next = addrs.get(n + 1).copied().unwrap_or(self.len());
             let owned = (addr..next)
@@ -1153,29 +1207,43 @@ impl<'a> Decoder<'a> {
                 })?;
             }
         }
-        for (&addr, uses) in &by_addr {
-            let Some(max) = uses.iter().filter_map(|u| u.index).max() else {
-                continue;
-            };
+        Ok(())
+    }
+
+    /// A constant index may run on into the tables that follow its table without a gap; past
+    /// them it refuses the script.
+    fn check_table_indices(&mut self) -> Result<(), Refusal> {
+        for u in &self.table_uses()? {
+            let Some(index) = u.index else { continue };
             let mut count = 0usize;
-            let mut at = addr;
+            let mut at = match self.owner.get(u.addr as usize) {
+                Some(&o) if o != NO_OWNER => o,
+                _ => return refuse(u.at, Reason::TableIndex),
+            };
+            let mut skip = true;
             while let Some(Item {
                 kind: Kind::Table(t),
                 len,
                 ..
             }) = self.items.get(&at)
             {
-                if t.words != uses[0].words {
+                if t.words != u.words {
                     break;
                 }
-                count += t.entries.len();
+                // Entries before the address are not this use's.
+                count += t
+                    .entries
+                    .iter()
+                    .filter(|e| !skip || e.offset >= u.addr)
+                    .count();
+                skip = false;
                 if t.terminated {
                     break;
                 }
                 at += len;
             }
-            if max as usize >= count {
-                return refuse(uses[0].at, Reason::TableIndex);
+            if index as usize >= count {
+                return refuse(u.at, Reason::TableIndex);
             }
         }
         Ok(())
@@ -1246,20 +1314,43 @@ impl<'a> Decoder<'a> {
 }
 
 /// The table uses of an expression: the address operand of `b4` (words), `b7` (strings) and
-/// `c3` (words), found by running the expression's stack on the tokens.
-fn expr_tables(e: &Expr, at: u32, uses: &mut Vec<TableUse>) -> Result<(), Refusal> {
-    let mut stack: Vec<Option<u32>> = Vec::new();
+/// `c3` (words), found by running the evaluator's ten-slot stack on the tokens (`eval.rs`
+/// `Stack`: a read below it gives 0, a write there is dropped). `under` gets each op that reads
+/// below the stack.
+fn expr_tables(
+    e: &Expr,
+    at: u32,
+    uses: &mut Vec<TableUse>,
+    under: &mut Vec<u32>,
+) -> Result<(), Refusal> {
+    const SLOTS: i32 = 10;
+    // `None` = not a constant; outside 0..SLOTS = below / above the array.
+    let mut v: [Option<u32>; SLOTS as usize] = [None; SLOTS as usize];
+    let mut sp: i32 = 0;
+    let get = |v: &[Option<u32>; SLOTS as usize], i: i32| -> Option<Option<u32>> {
+        usize::try_from(i).ok().and_then(|i| v.get(i)).copied()
+    };
+    let set = |v: &mut [Option<u32>; SLOTS as usize], i: i32, x: Option<u32>| {
+        if let Some(s) = usize::try_from(i).ok().and_then(|i| v.get_mut(i)) {
+            *s = x;
+        }
+    };
     for t in &e.tokens {
         match t.kind {
             TokenKind::Op(code) => {
-                let arity = ops::expr_op(code).map_or(0, |o| usize::from(o.arity));
-                let args: Vec<Option<u32>> = (0..arity).map(|_| stack.pop().flatten()).collect();
-                if matches!(code, 0xb4 | 0xb7 | 0xc3) {
-                    // args[0] is the top (b), args[1] the one below (a, the address).
-                    let Some(addr) = args.get(1).copied().flatten() else {
-                        return refuse(t.offset, Reason::TableAddress);
+                let arity = ops::expr_op(code).map_or(0, |o| i32::from(o.arity));
+                if sp - arity < 0 {
+                    under.push(t.offset);
+                }
+                // a = the slot two below the op (the address), b = the one below it. Below the
+                // stack there is no address (the evaluator reads 0, the script's start).
+                if matches!(code, 0xb4 | 0xb7 | 0xc3)
+                    && let Some(a) = get(&v, sp - 2)
+                {
+                    let Some(addr) = a else {
+                        return refuse(t.offset, Reason::TableNotLiteral);
                     };
-                    let index = args.first().copied().flatten();
+                    let index = get(&v, sp - 1).flatten();
                     uses.push(TableUse {
                         addr,
                         words: code != 0xb7,
@@ -1268,10 +1359,16 @@ fn expr_tables(e: &Expr, at: u32, uses: &mut Vec<TableUse>) -> Result<(), Refusa
                         at,
                     });
                 }
-                stack.push(None);
+                if arity == 0 {
+                    set(&mut v, sp, None);
+                } else {
+                    set(&mut v, sp - arity, None);
+                    sp -= arity;
+                }
             }
-            k => stack.push(k.value()),
+            k => set(&mut v, sp, k.value()),
         }
+        sp += 1;
     }
     Ok(())
 }
