@@ -116,6 +116,33 @@ const NO_ENTRY: u32 = u32::MAX;
 /// The entries a search needs of its table: all of them, up to the `b8` (it reads on to one).
 const EVERY_ENTRY: usize = usize::MAX;
 
+/// Bytes a direct use reads ([`Decoder::direct_reads`]): closed to landings.
+struct DirectRead {
+    start: u32,
+    end: u32,
+    words: bool,
+    /// For a table's needed entries, their starts; `None` for a search's read on.
+    entries: Option<BTreeSet<u32>>,
+}
+
+impl DirectRead {
+    /// Whether a landing's use `u` names a table in these bytes that does not chain with the
+    /// direct read: of the other kind, a word address inside a word, or, past a search's
+    /// tables, anything but a table of its kind right where its tables end.
+    fn closes(&self, u: &TableUse) -> bool {
+        if !(self.start..self.end).contains(&u.addr) {
+            return false;
+        }
+        match &self.entries {
+            Some(starts) => {
+                u.addr != self.start
+                    && !(u.words == self.words && (!u.words || starts.contains(&u.addr)))
+            }
+            None => !(u.words == self.words && u.addr == self.start),
+        }
+    }
+}
+
 /// What a search reads when no entry matches ([`Decoder::search_read`]).
 enum SearchRead {
     /// Up to a `b8` that ends one of its tables or starts another table, or nothing.
@@ -1124,6 +1151,87 @@ impl<'a> Decoder<'a> {
         out
     }
 
+    /// The bytes the direct uses read: each direct table's needed entries (theirs and those
+    /// carried into it, [`Self::table_ranges_of`] of the direct uses alone), and for a direct
+    /// search whose tables have no `b8`, the bytes it reads on past them, an entry at a time up
+    /// to a `b8` or the script's end, as far as no direct item holds them (a read on onto
+    /// direct code or another direct table is the script's own, and refuses it).
+    fn direct_reads(&self) -> Vec<DirectRead> {
+        let tables = self.table_ranges_of(|o| o == Origin::Direct);
+        let mut out = Vec::new();
+        for (addr, t, needed) in &tables {
+            let n = (*needed).min(t.entries.len());
+            if n == 0 {
+                continue;
+            }
+            let end = if *needed >= t.entries.len() {
+                table_end(*addr, t)
+            } else {
+                t.entries[n - 1].end() + u32::from(!t.words)
+            };
+            out.push(DirectRead {
+                start: *addr,
+                end,
+                words: t.words,
+                entries: Some(t.entries[..n].iter().map(|e| e.offset).collect()),
+            });
+        }
+        for (u, o) in &self.uses {
+            if *o != Origin::Direct || !u.search || self.b[u.addr as usize] == ops::TABLE_END {
+                continue;
+            }
+            let Some(i) = tables
+                .iter()
+                .position(|(a, t, _)| *a <= u.addr && u.addr < table_end(*a, t).max(*a + 1))
+            else {
+                continue;
+            };
+            // Its tables, of its kind, without a gap.
+            let mut at = tables[i].0;
+            let mut j = i;
+            let mut terminated = false;
+            while let Some((a, t, _)) = tables.get(j) {
+                if *a != at || t.words != u.words {
+                    break;
+                }
+                if t.terminated {
+                    terminated = true;
+                    break;
+                }
+                at = table_end(*a, t);
+                j += 1;
+            }
+            // A table that starts where they end stops the read with its `b8`, or is read past.
+            if terminated || at == tables[i].0 || tables.get(j).is_some_and(|(a, _, _)| *a == at) {
+                continue;
+            }
+            let mut q = at;
+            let end = loop {
+                match self.b.get(q as usize) {
+                    None => break self.len(),
+                    Some(&ops::TABLE_END) => break q + 1,
+                    Some(_) if u.words => q += 2,
+                    Some(_) => match self.first(q, 0) {
+                        Some(nul) => q = nul + 1,
+                        None => break self.len(),
+                    },
+                }
+            };
+            let end = (at..end.min(self.len()))
+                .find(|&b| self.direct_at(b))
+                .unwrap_or(end.min(self.len()));
+            if end > at {
+                out.push(DirectRead {
+                    start: at,
+                    end,
+                    words: u.words,
+                    entries: None,
+                });
+            }
+        }
+        out
+    }
+
     /// A byte of an item a direct path decoded.
     fn direct_at(&self, p: u32) -> bool {
         let o = self.owner[p as usize];
@@ -1141,28 +1249,14 @@ impl<'a> Decoder<'a> {
         let mut p = self.plan.clone();
         let mut held = BTreeSet::new();
         let reaches = self.reaches();
-        // A landing's word-table address inside the strings a direct path's table needs (those
-        // its direct uses read: up to a constant index's, an inner address's, all of them for a
-        // search): the direct table wins and is not cut there. Every landing whose path runs
-        // that op is dropped; the next round decides the rest.
-        let direct: Vec<(u32, u32)> = self
-            .table_ranges_of(|o| o == Origin::Direct)
-            .into_iter()
-            .filter(|(_, t, _)| !t.words)
-            .map(|(a, t, needed)| {
-                let end = match t.entries.get(needed.wrapping_sub(1)) {
-                    _ if needed == 0 => a,
-                    Some(e) => e.end() + 1,
-                    None => table_end(a, &t),
-                };
-                (a, end)
-            })
-            .collect();
+        // The bytes the direct uses read are closed to landings ([`Self::direct_reads`]): a
+        // landing's table address there drops every landing whose path makes that op, unless
+        // it is of the same kind and chains (a string address in a string table, a word address
+        // at a word's start, or one where a search's read on starts). The direct table is then
+        // not cut, and the next round decides the rest.
+        let reads = self.direct_reads();
         for &(u, o) in &self.uses {
-            if u.words
-                && o != Origin::Direct
-                && direct.iter().any(|&(a, e)| a < u.addr && u.addr < e)
-            {
+            if o != Origin::Direct && reads.iter().any(|r| r.closes(&u)) {
                 for r in runners(&reaches, u.at, o) {
                     if let Origin::Landing(k) = r {
                         p.banned.entry(k).or_insert(Reason::TableKinds);
@@ -1172,6 +1266,33 @@ impl<'a> Decoder<'a> {
         }
         if p != *self.plan {
             return Some(p);
+        }
+        // Landing code in the bytes a direct search reads on is closed from the round's start,
+        // as a table's bytes are (that landing then stops there); over bytes settled before, its
+        // landings are dropped.
+        for r in reads.iter().filter(|r| r.entries.is_none()) {
+            held.extend(r.start..r.end);
+            let over = Some(self.owner[r.start as usize]).filter(|&o| o != NO_OWNER && o < r.start);
+            let inside: Vec<u32> = over
+                .into_iter()
+                .chain(self.items.range(r.start..r.end).map(|(&s, _)| s))
+                .collect();
+            for s in inside {
+                let Some(&o @ Origin::Landing(_)) = self.origins.get(&s) else {
+                    continue;
+                };
+                let settled = (s..self.items[&s].end()).any(|b| self.plan.settled.contains(&b));
+                if !settled {
+                    let open = (r.start..r.end).filter(|b| !self.plan.settled.contains(b));
+                    p.reserved.extend(open);
+                } else {
+                    for k in runners(&reaches, s, o) {
+                        if let Origin::Landing(k) = k {
+                            p.banned.entry(k).or_insert(Reason::TableInCode);
+                        }
+                    }
+                }
+            }
         }
         for (addr, table) in self.table_ranges() {
             // A table with no entry still holds its address: landing code there is inside it.

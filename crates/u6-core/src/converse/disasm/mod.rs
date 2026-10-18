@@ -33,9 +33,14 @@
 //!   tables before it. A string address an op names inside another table's string (not at a
 //!   string's start) is of that table ([`Table::inner`]): a read there reads the string's rest,
 //!   so the table never ends before that string; a word address inside a word is not, and its
-//!   table ends there. A landing's word address inside the strings a direct path's table
-//!   needs (up to a constant index's, an inner address's, all of them for a search) does not
-//!   end that table: the landings whose path makes it are dropped (`Dropped(_, TableKinds)`);
+//!   table ends there. The bytes a direct use reads are closed to landings: its table's
+//!   needed entries, of either kind (up to a constant index's, an inner address's, all of them
+//!   for a search), and for a direct search of tables with no `b8`, the bytes it reads on past
+//!   them. A landing's table address there that does not chain (of the other kind, a word
+//!   address inside a word, or past a search's tables anywhere but where they end) drops the
+//!   landings whose path makes it (`Dropped(_, TableKinds)`), and landing code in the bytes a
+//!   search reads on is closed as a table's bytes are: the direct table is never cut, nor the
+//!   script refused, for a landing;
 //! - what is left is [`Kind::Unreached`].
 //!
 //! Tables and the trial. A table use is checked when its op is decoded, inside the path that
@@ -69,7 +74,9 @@
 //!   `b8` at an entry's start: one from a `b8` reads nothing; any other reads every entry of
 //!   its tables (so they never end at landing code), and with no `b8` in them it reads on
 //!   past the last one, where a `b8` that starts a table of either kind stops it. Onto any
-//!   other item that is a read past the table; past the script's end, over bytes no item
+//!   other item that is a read past the table (for a direct search, only onto direct code or
+//!   another direct table: landings are closed out of those bytes); past the script's end,
+//!   over bytes no item
 //!   holds, it is a hazard ([`HazardKind::SearchPastEnd`]). Such a drop is checked again at
 //!   the end of each round: a dropped landing is tried on that round's decode, and when every
 //!   read its path makes would hold there (its cause is gone), it is taken again. A landing

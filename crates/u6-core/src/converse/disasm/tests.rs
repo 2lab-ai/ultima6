@@ -2418,6 +2418,162 @@ fn a_search_from_a_b8_keeps_only_the_string_it_is_in() {
     assert!(!d.hazards.iter().any(|h| h.kind == HazardKind::IntoData));
 }
 
+/// `a6 d2 <w> <i> a8 07 a7` (`i` 0 is `b1`): write word `i` of the table at `w`. 10 bytes.
+fn write_word(w: u32, i: u8) -> Vec<u8> {
+    [
+        &[0xa6][..],
+        &lit32(w),
+        &[if i == 0 { 0xb1 } else { i }, 0xa8, 0x07, 0xa7],
+    ]
+    .concat()
+}
+
+/// The `*` block's answer (direct code) makes `op(t)` and jumps back; its loops (a landing)
+/// make `land(t)` and jump back; then `t` = `tail` to the script's end. Returns the script,
+/// `t` and the loops' landing.
+fn a_direct_read_and_a_landings(
+    op: &dyn Fn(u32) -> Vec<u8>,
+    land: &dyn Fn(u32) -> Vec<u8>,
+    tail: &[u8],
+) -> (Vec<u8>, u32, u32) {
+    let at = BODY + 4 + op(0).len() as u32 + 5 + 1;
+    let t = at + land(0).len() as u32 + 5;
+    let mut b = b"\xf7\xef*\xf6".to_vec();
+    b.extend(op(t));
+    b.extend(jump(BODY));
+    b.push(0xee);
+    b.extend(land(t));
+    b.extend(jump(BODY));
+    b.extend_from_slice(tail);
+    (script(&b), t, at)
+}
+
+/// The landings `d` dropped, with their reasons.
+fn drops(d: &Disasm) -> Vec<Hazard> {
+    sorted_hazards(d)
+        .into_iter()
+        .filter(|h| matches!(h.kind, HazardKind::Dropped(..)))
+        .collect()
+}
+
+#[test]
+fn a_landings_table_inside_a_direct_word_table_drops_the_landing() {
+    // The direct write of word 1 of `w` = three words needs two. The loops' string print at
+    // `w + 2`, or word write at `w + 1` (inside a word), would cut it: they are dropped and the
+    // direct table keeps its words. A word write at `w + 2` (a word's start) chains; aimed at
+    // direct code, the loops are dropped as code.
+    let words = b"\x10\x00\x20\x00\x30\x00";
+    let op = |w: u32| write_word(w, 1);
+    let both = |at: u32, reason: Reason| {
+        vec![
+            dropped(at, Scan::Answered, reason),
+            dropped(at, Scan::NoMatch, reason),
+        ]
+    };
+    let print0 = |t: u32| [&[0xb5][..], &lit32(t), &[0xb1]].concat();
+    type Land<'a> = &'a dyn Fn(u32) -> Vec<u8>;
+    let cases: [(&str, Land, Option<Reason>); 4] = [
+        (
+            "a string at w + 2",
+            &|w| print0(w + 2),
+            Some(Reason::TableKinds),
+        ),
+        (
+            "a word at w + 1",
+            &|w| write_word(w + 1, 0),
+            Some(Reason::TableKinds),
+        ),
+        ("a word at w + 2", &|w| write_word(w + 2, 0), None),
+        ("direct code", &|_| print0(BODY), Some(Reason::TableInCode)),
+    ];
+    for (what, land, reason) in cases {
+        let (s, w, at) = a_direct_read_and_a_landings(&op, land, words);
+        let d = any_order(&s);
+        assert_eq!(
+            drops(&d),
+            reason.map_or(Vec::new(), |r| both(at, r)),
+            "{what}"
+        );
+        let Kind::Table(tb) = &item(&d, w).kind else {
+            panic!("{what}: {:?}", shape(&d))
+        };
+        assert!(tb.words, "{what}");
+        if reason.is_some() {
+            assert_eq!(tb.entries.len(), 3, "{what}");
+        }
+    }
+    // A direct word search of `w` = two words and a `b8`, the loops' string print at `w + 2`.
+    let (s, w, at) = a_direct_read_and_a_landings(
+        &|w| search_of(w, true),
+        &|w| print0(w + 2),
+        b"\x10\x00\x20\x00\xb8",
+    );
+    let d = any_order(&s);
+    assert_eq!(drops(&d), both(at, Reason::TableKinds));
+    let Kind::Table(tb) = &item(&d, w).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert!(tb.words && tb.terminated && tb.entries.len() == 2);
+}
+
+#[test]
+fn the_bytes_a_direct_search_reads_on_are_closed_to_landings() {
+    // A direct search of `t` = "ab\0" and bytes with no NUL or `b8` to the script's end: it
+    // reads on over them. The loops' word table there is dropped; their jump there stops at
+    // them; aimed at direct code, they are dropped as code; and alone the search reads on past
+    // the script's end.
+    let search = |t: u32| search_of(t, false);
+    let past = |d: &Disasm, t: u32| Hazard {
+        at: BODY + 4,
+        kind: HazardKind::SearchPastEnd(Span {
+            offset: t + 3,
+            len: d.len - (t + 3),
+        }),
+    };
+    let (s, t, at) = a_direct_read_and_a_landings(&search, &|t| write_word(t + 5, 0), b"ab\0cdef");
+    let d = any_order(&s);
+    assert_eq!(
+        sorted_hazards(&d),
+        [
+            past(&d, t),
+            dropped(at, Scan::Answered, Reason::TableKinds),
+            dropped(at, Scan::NoMatch, Reason::TableKinds)
+        ]
+    );
+    let (s, t, _) = a_direct_read_and_a_landings(&search, &|t| jump(t + 5), b"ab\0cd\xb6");
+    let d = any_order(&s);
+    assert_eq!(
+        sorted_hazards(&d),
+        [
+            past(&d, t),
+            Hazard {
+                at: t + 5,
+                kind: HazardKind::IntoData
+            }
+        ]
+    );
+    let (s, t, at) = a_direct_read_and_a_landings(&search, &|_| write_word(BODY, 0), b"ab\0cdef");
+    let d = any_order(&s);
+    assert_eq!(
+        sorted_hazards(&d),
+        [
+            past(&d, t),
+            dropped(at, Scan::Answered, Reason::TableInCode),
+            dropped(at, Scan::NoMatch, Reason::TableInCode)
+        ]
+    );
+    let t = BODY + 13;
+    let mut body = search(t);
+    body.push(0xb6);
+    body.extend(b"ab\0cdef");
+    let d = any_order(&script(&body));
+    let alone = Hazard {
+        at: BODY,
+        ..past(&d, t)
+    };
+    assert_eq!(d.hazards, [alone]);
+}
+
 #[test]
 fn a_search_past_its_last_entry_onto_an_item_reads_past_its_table() {
     // "ab\0" at `t`, and right after it the `b6` a jump goes to: with no entry matching, the
