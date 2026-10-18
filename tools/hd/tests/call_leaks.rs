@@ -129,21 +129,27 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
     // when it exits, so this costs nothing unloaded) and 8 s for the one that hangs (its call
     // runs to it), are meant to fall after that at a load of 200, about 4.7 s if it grows with
     // the load, with room; a writer that starts later still is reported as one that did not
-    // write.
+    // write. The keepers do not acknowledge. The one that exits gets 12 s too: its call took
+    // 1.97 s in round 0 at a load of 84, its 1 s grace and so up to 0.97 s to its stand-in's
+    // exit (0.41-0.59 s in seven more at 58-86), which a 1 s deadline nearly cut off as "timed
+    // out". The one that hangs gets 4 s, 7-10x those (10x the 0.97 s would cost 27 s more
+    // a run: its deadline is its run time, three rounds), so that its keeper has started, and
+    // left the group, before the deadline kills the group: one that had not would be missing
+    // from the six counted at the end.
     let shapes = [
         // Keeps the output: takes the prompt, exits; the stream never ends.
         (
             "keeps-out.sh",
             stub(&t, "keeps-out.sh", &takes, 1, idle, &keep.0, "exit 0"),
             false,
-            1,
+            12,
         ),
         // Keeps the input unread and the output: the prompt never goes in; hangs.
         (
             "keeps-both.sh",
             stub(&t, "keeps-both.sh", thread, 1, idle, &keep.0, "sleep 30"),
             true,
-            1,
+            4,
         ),
         // Writes to the output without pause after the call exits, or while it hangs.
         (
