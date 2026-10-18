@@ -327,6 +327,9 @@ pub enum HazardKind {
     ScanPastEnd(Scan),
     /// A path (in practice one after a skip loop) reaches a table's bytes.
     IntoData,
+    /// The path after a skip loop's landing would refuse the script for this reason: it is not
+    /// decoded.
+    Dropped(Scan, Reason),
     /// An expression op takes more values than its expression pushed: the evaluator reads 0
     /// below its stack and drops what it writes there (a `b4` / `b7` / `c3` then has no table
     /// address and claims no table).
@@ -474,6 +477,7 @@ struct TableUse {
     at: u32,
 }
 
+#[derive(Clone)]
 struct Decoder<'a> {
     b: &'a [u8],
     /// Table addresses: no path decodes code there.
@@ -575,21 +579,35 @@ impl<'a> Decoder<'a> {
         self.work.push((look + 1, Ctx::Look));
         // Reached by spell, the look text is not run: the scan for `f2` starts at 0.
         self.scan_greeting(0, Ctx::Main)?;
-        loop {
-            while let Some((at, ctx)) = self.work.pop() {
-                self.visit(at, ctx)?;
+        self.drain()?;
+        // Skip-loop landings come after the direct paths, so that a landing never decodes
+        // bytes a direct path owns; the loops that step over operands first, in script order.
+        // A loop may stop on a byte inside an operand, so a landing's path is decoded on trial:
+        // when it would refuse the script, it is dropped as a hazard and its bytes stay
+        // unreached unless another path reads them.
+        while let Some(i) = (0..self.scans.len()).min_by_key(|&i| {
+            let (l, _) = self.scans[i];
+            (l.scan, l.stop)
+        }) {
+            let (landing, ctx) = self.scans.remove(i);
+            let saved = self.clone();
+            if let Err(r) = self.land(landing, ctx).and_then(|()| self.drain()) {
+                *self = saved;
+                self.hazard(landing.at, HazardKind::Dropped(landing.scan, r.reason));
             }
-            // Skip-loop landings come last, so that a landing never decodes bytes a direct path
-            // owns.
-            let Some((landing, ctx)) = self.scans.pop() else {
-                break;
-            };
-            self.land(landing, ctx)?;
         }
         if !self.landed.iter().any(|l| l.scan == Scan::Greeting) {
             return refuse(look, Reason::NoGreetingMarker);
         }
         self.check_landings();
+        Ok(())
+    }
+
+    /// Follows every queued path.
+    fn drain(&mut self) -> Result<(), Refusal> {
+        while let Some((at, ctx)) = self.work.pop() {
+            self.visit(at, ctx)?;
+        }
         Ok(())
     }
 
