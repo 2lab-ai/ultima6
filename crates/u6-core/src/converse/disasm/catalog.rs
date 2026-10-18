@@ -15,7 +15,7 @@
 //! - **Hash:** [`hash64`], FNV-1a 64 (offset basis 0xcbf29ce484222325, prime 0x100000001b3)
 //!   over a unit's script bytes, escapes included; the HD pack's content hash uses the same
 //!   function (`u6_hdpack::image_hash`). Hashes are written as 16 lower-case hex digits.
-//! - **Form:** JSON, [`FORMAT`] `u6-converse-catalog/2` ([`Catalog::to_json`] /
+//! - **Form:** JSON, named [`FORMAT`] ([`Catalog::to_json`] /
 //!   [`Catalog::from_json`]). Unit text is written one character per script byte (U+0000..U+00FF),
 //!   so it reads back to the same bytes; reading back checks each unit's length, hash and
 //!   place in its script, the runs' `part_of` groups and that each string's inner addresses

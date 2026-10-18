@@ -272,7 +272,7 @@ fn keywords_a_conversation_did_not_take_go_to_the_next_one() {
     // exactly the other three and the last two, then the goodbye.
     let keys = ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"];
     let mut calls: Vec<Vec<String>> = Vec::new();
-    let mut took = [3usize, 9].into_iter();
+    let mut took = [3usize, 8].into_iter();
     let k = send_keywords(&keys, |lines| {
         calls.push(lines.iter().map(|l| l.to_string()).collect());
         (true, took.next().unwrap())
@@ -309,6 +309,30 @@ fn keywords_a_conversation_did_not_take_go_to_the_next_one() {
         ..Sent::default()
     };
     assert_eq!(k, want);
+}
+
+/// The keyword pass's check of one actor: all of its keywords sent or none (a fresh
+/// conversation comes to its first prompt the same way whatever the lines: they are typed
+/// there), and every one not sent left because its conversation ended first, not because it
+/// waited out the driver's rounds (a wait no driver key ends).
+fn sent_ok(k: &Sent) -> bool {
+    (k.unsent == 0 || k.sent == 0) && k.unsent == k.unsent_ended
+}
+
+#[test]
+fn an_actor_whose_keywords_wait_out_the_driver_fails_the_keyword_check() {
+    // Synthetic: a fresh conversation that waits out the rounds before any prompt fails the
+    // check; one that ends before any prompt, or takes every keyword, passes; some sent and the
+    // rest not fails.
+    let keys = ["k1", "k2", "k3"];
+    assert!(!sent_ok(&send_keywords(&keys, |_| (false, 0))));
+    assert!(sent_ok(&send_keywords(&keys, |_| (true, 0))));
+    assert!(sent_ok(&send_keywords(&keys, |lines| (true, lines.len()))));
+    let mut took = [2usize, 0].into_iter();
+    assert!(!sent_ok(&send_keywords(&keys, |_| (
+        true,
+        took.next().unwrap()
+    ))));
 }
 
 /// What the message scroll shows: its lines and the one being written.
@@ -531,11 +555,9 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
             let (_, done, took) = talk(npc, lines, true, &mut total, &mut read);
             (done, took)
         });
-        // A fresh conversation comes to its first prompt the same way whatever the lines (they
-        // are typed there): one that came to none for some keywords came to none for any.
         assert!(
-            k.unsent == 0 || k.sent == 0,
-            "actor slot {npc:#x}: some keywords sent, the others no prompt"
+            sent_ok(&k),
+            "actor slot {npc:#x}: a keyword not sent while others were, or for a wait"
         );
         (sent, unsent) = (sent + k.sent, unsent + k.unsent);
         unsent_ended += k.unsent_ended;
