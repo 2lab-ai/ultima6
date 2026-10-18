@@ -391,3 +391,38 @@ fn what_is_beside_the_out_dir_by_the_tools_names_and_not_its_own_is_left_and_ref
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[test]
+fn an_old_out_dir_given_a_file_during_the_swap_is_left_with_it_and_said() {
+    // A file put in the old output once it is moved aside and the new one in place: the old
+    // dir is emptied of what its marker lists alone, so it is left, the file in it, and the
+    // run's report says where and why.
+    let dir = temp("foreign-aside");
+    let out = dir.join("out");
+    run_in(FIRST, &out, writes("old")).unwrap();
+    let d = dir.clone();
+    let _h = hook(&out, "published", move |_| {
+        let aside = beside_of(&d, "out");
+        std::fs::write(aside[0].join("mine.txt"), b"the owner's").unwrap();
+        Ok(())
+    });
+    let (_, notes) = run_in(FIRST, &out, writes("new")).unwrap();
+    assert_eq!(contents(&out), Some(output("new")));
+    let left = beside_of(&dir, "out");
+    assert_eq!(left.len(), 1, "{left:?}");
+    let mut had = output("old");
+    had.insert("mine.txt".into(), b"the owner's".to_vec());
+    assert_eq!(contents(&left[0]), Some(had));
+    let at = left[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].starts_with("the previous output is left at "),
+        "{notes:?}"
+    );
+    assert!(notes[0].contains(&at), "{notes:?}");
+    assert!(
+        notes[0].ends_with("it holds what calibrate did not write: mine.txt"),
+        "{notes:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
