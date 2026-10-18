@@ -1998,7 +1998,7 @@ fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
     ] {
         let pid = t.join(format!("{name}.pid"));
         let body = format!(
-            "cat > /dev/null\n{thread}\n/usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die \
+            "cat > /dev/null\n{thread}\n/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die \
              \"setsid: $!\"; exit if fork; open(my $f, \">\", $ARGV[0]); print $f $$; close $f; \
              sleep 20' \"{}\"\n{then}",
             pid.display()
@@ -2648,7 +2648,7 @@ fn a_read_error_on_a_call_s_pipe_is_kept_not_taken_for_its_end() {
 
 #[test]
 fn stderr_written_after_the_events_end_is_still_kept() {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     let t = temp("late-stderr");
     let dir = crate::work::ensure_dir(&t.join("dir")).unwrap();
     std::fs::write(t.join("sheet.png"), b"x").unwrap();
@@ -2661,20 +2661,23 @@ fn stderr_written_after_the_events_end_is_still_kept() {
         &t,
         "late.sh",
         "cat > /dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}'\n\
-         /usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die \"setsid: $!\"; exit if fork; \
+         /usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die \"setsid: $!\"; exit if fork; \
          select(undef, undef, undef, 0.3); print STDERR \"late\\n\"' > /dev/null\nexit 0",
     );
     // A grace far past the helper's 300 ms, however loaded the machine: the call still ends
-    // when the helper does (its stderr's end), not when the grace does.
+    // before the grace does, when the helper does (its stderr's end).
     let c = run::Codex {
         bin: late,
         home: t.join("home"),
         timeout: Duration::from_secs(10),
         grace: Duration::from_secs(30),
     };
+    let start = Instant::now();
     let e = c
         .generate(&t.join("sheet.png"), "PROMPT", &dir)
         .unwrap_err();
+    let took = start.elapsed();
+    assert!(took < c.grace, "{took:?}");
     assert_eq!(e, "no image generated");
     assert_eq!(
         std::fs::read_to_string(dir.join("stderr.txt")).unwrap(),
@@ -2683,15 +2686,37 @@ fn stderr_written_after_the_events_end_is_still_kept() {
     let _ = std::fs::remove_dir_all(&t);
 }
 
+/// The clock `Instant` reads (std's: CLOCK_UPTIME_RAW on Apple, CLOCK_MONOTONIC elsewhere),
+/// by its id, so that a call's stand-in can read it too and the two readings compare.
+#[cfg(target_vendor = "apple")]
+const INSTANT_CLOCK: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
+#[cfg(not(target_vendor = "apple"))]
+const INSTANT_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+
+/// The time on [`INSTANT_CLOCK`].
+fn instant_clock() -> std::time::Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime(2) writes the one timespec it is given; no other memory involved.
+    assert_eq!(unsafe { libc::clock_gettime(INSTANT_CLOCK, &mut ts) }, 0);
+    std::time::Duration::new(
+        u64::try_from(ts.tv_sec).unwrap(),
+        u32::try_from(ts.tv_nsec).unwrap(),
+    )
+}
+
 #[test]
 fn stderr_written_after_the_grace_is_not_waited_for() {
-    use std::time::{Duration, Instant, SystemTime};
+    use std::time::Duration;
     let t = temp("later-stderr");
     let dir = crate::work::ensure_dir(&t.join("dir")).unwrap();
     std::fs::write(t.join("sheet.png"), b"x").unwrap();
     // As above, but the helper holds the call's stderr while `hold` exists (at most 30 s)
     // and writes there only then; the test removes it once the call has returned, so the
-    // write comes after the grace whatever the machine's load. The call marks its exit.
+    // write comes after the grace whatever the machine's load. Just before it exits, the call
+    // marks the time on the clock its grace is timed on.
     let (hold, exited) = (t.join("hold"), t.join("exited"));
     std::fs::write(&hold, b"").unwrap();
     let later = review_stub(
@@ -2699,9 +2724,11 @@ fn stderr_written_after_the_grace_is_not_waited_for() {
         "later.sh",
         &format!(
             "cat > /dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"t1\"}}'\n\
-             /usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die \"setsid: $!\"; exit if fork; \
+             /usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die \"setsid: $!\"; exit if fork; \
              for (1 .. 3000) {{ last unless -e $ARGV[0]; select(undef, undef, undef, 0.01) }} \
-             print STDERR \"later\\n\"' \"{}\" > /dev/null\n: > \"{}\"\nexit 0",
+             print STDERR \"later\\n\"' \"{}\" > /dev/null\n\
+             /usr/bin/perl -MTime::HiRes -e 'printf \"%.9f\", Time::HiRes::clock_gettime($ARGV[0])' \
+             {INSTANT_CLOCK} > \"{}\"\nexit 0",
             hold.display(),
             exited.display()
         ),
@@ -2714,22 +2741,35 @@ fn stderr_written_after_the_grace_is_not_waited_for() {
         timeout: Duration::from_secs(10),
         grace,
     };
-    let start = Instant::now();
     let e = c.generate(&t.join("sheet.png"), "PROMPT", &dir);
-    let (took, end) = (start.elapsed(), SystemTime::now());
+    let end = instant_clock();
     std::fs::remove_file(&hold).unwrap();
     assert_eq!(e.unwrap_err(), "no image generated");
-    // Not waited for: nothing of it kept. The call waited out its grace (the stderr still
-    // open), then ended within it of its exit, not with the helper (30 s from before it).
+    // Not waited for: nothing of it kept.
     assert_eq!(std::fs::read_to_string(dir.join("stderr.txt")).unwrap(), "");
-    assert!(took >= grace, "{took:?}");
-    let exit = std::fs::metadata(&exited).unwrap().modified().unwrap();
-    let after = end.duration_since(exit).unwrap_or_default();
+    // From the mark to the call's return, on one clock (an end before the mark fails, it is
+    // not taken for no time): at least the grace, which the call waited out (the stderr still
+    // open), and less than 3 s more, then it ended (slack for a loaded machine). A drain
+    // bounded by the call's deadline instead ends 10 s from the call's start: 10 s after its
+    // exit less the stand-in's run, past these 5 s unless that run took over 5 s.
+    let mark = std::fs::read_to_string(&exited).unwrap();
+    let exit = Duration::from_secs_f64(mark.parse().unwrap_or_else(|e| panic!("{mark:?}: {e}")));
+    let after = end
+        .checked_sub(exit)
+        .unwrap_or_else(|| panic!("the call ended at {end:?}, before its exit at {exit:?}"));
+    assert!(after >= grace, "{after:?} after its exit");
     assert!(
-        after < grace + Duration::from_secs(10),
+        after < grace + Duration::from_secs(3),
         "{after:?} after its exit"
     );
     let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
+fn the_tool_s_calls_are_given_the_cleanup_grace() {
+    // The tool's calls are made by `Codex::from_env` (its only maker outside the tests), with
+    // CLEANUP; the tests above give theirs other graces.
+    assert_eq!(run::Codex::from_env(None).unwrap().grace, run::CLEANUP);
 }
 
 #[test]

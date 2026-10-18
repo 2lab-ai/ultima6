@@ -64,7 +64,7 @@ fn stub(
     let p = dir.join(name);
     // `$ARGV[1]` is the helper's start acknowledgment: its pid is appended to make a file name.
     let helper = format!(
-        "/usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die \"setsid: $!\"; exit if fork; \
+        "/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die \"setsid: $!\"; exit if fork; \
          {perl} while -e $ARGV[0]' \"{}\" \"{}\"\n",
         mark.display(),
         dir.join(format!("{name}.ack")).display()
