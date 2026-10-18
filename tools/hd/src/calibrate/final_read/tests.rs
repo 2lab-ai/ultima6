@@ -760,8 +760,8 @@ fn a_neighbour_field_that_is_not_a_pair_stops_the_read() {
         out[k] = v.to_string();
         out.join("\n") + "\n"
     };
-    // B beside the grass (line 3) with a neighbour that is not a pair: refused by its line, in
-    // the final read and in the first pass's rows alike, not read as a line of another kind.
+    // A beside X (line 3) with a neighbour that is not a pair: refused by its line, in the final
+    // read and in the first pass's rows alike, not read as a line of another kind.
     let name = |r: u16| atlas::image_name(ImageId::Tile(r));
     for bad in [
         serde_json::json!(null),
