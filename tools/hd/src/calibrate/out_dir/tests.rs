@@ -929,6 +929,39 @@ fn a_file_whose_identity_cannot_be_read_fails_the_run_which_leaves_it_and_says_s
 }
 
 #[test]
+fn a_file_whose_identity_cannot_be_read_is_not_read_back() {
+    // gates.jsonl made, its identity not readable: the run cannot tell it from a file another
+    // hand put at its name, so it does not read it back; the run fails on that, and leaves it,
+    // said so.
+    let dir = temp("unidentified-read");
+    let out = dir.join("out");
+    let _h = hook(&out, "identify", |name| match name == "gates.jsonl" {
+        true => Err(format!("errno:{}", libc::EIO)),
+        false => Ok(()),
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        run.write("gates.jsonl", b"snapshot")?;
+        run.read("gates.jsonl", 64).map(|_| ())
+    })
+    .unwrap_err();
+    let run = only_run(&out);
+    let p = run.join("gates.jsonl");
+    assert_eq!(
+        e,
+        format!(
+            "{}: not read back (it could not be identified when it was made); could not be \
+             identified when it was made, so left: {} ({}); run dir: {}",
+            p.display(),
+            p.display(),
+            std::io::Error::from_raw_os_error(libc::EIO),
+            run.display()
+        )
+    );
+    assert_eq!(names(&run), ["gates.jsonl", REFUSED]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_kept_diagnostic_whose_identity_cannot_be_read_is_said_too() {
     // gates.jsonl (a file a failed run keeps) made, its identity not readable; the run then
     // fails for its own reason. Its cleanup leaves the snapshot, as it always does, and its
@@ -1415,14 +1448,15 @@ fn a_link_at_a_name_the_run_made_to_that_very_file_is_still_another_file() {
 
 #[test]
 fn the_incomplete_runs_are_listed_from_the_out_dir_opened_not_by_its_path() {
-    // An incomplete run in --out; once --out is opened, it is moved away, and a dir put at its
-    // path with an incomplete run of another's and, by the same name as the first, a run that
+    // Two incomplete runs in --out; once --out is opened, it is moved away, and a dir put at
+    // its path with an incomplete run of another's and, by the name of the first, a run that
     // ended (its done). The runs listed, and each one's done, are those of the dir opened (where
     // the run dir is made), not of the dir now at the path, which is left as it is.
     let dir = temp("listed-opened");
     let out = dir.join("out");
     let away = dir.join("away");
     std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
+    std::fs::create_dir_all(out.join(run_name(3, 9))).unwrap();
     let (o, a) = (out.clone(), away.clone());
     let _h = hook(&out, "opened", move |_| {
         std::fs::rename(&o, &a).unwrap();
@@ -1434,8 +1468,9 @@ fn the_incomplete_runs_are_listed_from_the_out_dir_opened_not_by_its_path() {
     let e = run_in(FIRST, &out, writes).unwrap_err();
     assert!(
         e.ends_with(&format!(
-            "; incomplete runs beside it (left as they are): {}",
-            run_name(1, 7)
+            "; incomplete runs beside it (left as they are): {}, {}",
+            run_name(1, 7),
+            run_name(3, 9)
         )),
         "{e}"
     );
