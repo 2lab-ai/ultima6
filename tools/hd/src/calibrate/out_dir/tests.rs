@@ -1714,19 +1714,20 @@ fn a_refusal_whose_identity_cannot_be_read_is_said_to_be_left() {
 
 #[test]
 fn a_run_dir_swapped_for_a_link_while_it_is_listed_is_not_read_through() {
-    // An incomplete run in --out, and a link of the owner's named as a run dir, to a dir with a
-    // done. The incomplete run's dir is opened to be read, then swapped for a link to that dir
-    // (at the read of its markers): its markers are read in the dir opened, so it is still
-    // incomplete; the link that was there is no run dir; neither link is followed, and the dir
-    // they point at is as it was.
+    // An incomplete run in --out, and a link of the owner's named as a run dir, to a dir of
+    // theirs with no done. The incomplete run's dir is opened to be read, then swapped for a link
+    // to another dir of theirs, with a done (at the read of its markers): its markers are read in
+    // the dir opened, so it is still incomplete; the link that was there is no run dir, not
+    // listed; neither link is followed, and the dirs they point at are as they were.
     let dir = temp("listed-link");
     let out = dir.join("out");
-    let sentinel = dir.join("sentinel");
+    let (sentinel, empty) = (dir.join("sentinel"), dir.join("empty"));
     std::fs::create_dir_all(&sentinel).unwrap();
+    std::fs::create_dir_all(&empty).unwrap();
     std::fs::write(sentinel.join(DONE), b"").unwrap();
     std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
-    std::os::unix::fs::symlink(&sentinel, out.join(run_name(2, 8))).unwrap();
-    let had = tree(&sentinel);
+    std::os::unix::fs::symlink(&empty, out.join(run_name(2, 8))).unwrap();
+    let had = (tree(&sentinel), tree(&empty));
     let (o, aside, to) = (out.clone(), dir.join("aside"), sentinel.clone());
     let n = run_name(1, 7);
     let _h = hook(&out, "stat", move |name| {
@@ -1740,7 +1741,7 @@ fn a_run_dir_swapped_for_a_link_while_it_is_listed_is_not_read_through() {
     let ((), w) = run_in(FIRST, &out, writes).unwrap();
     assert_eq!(w.incomplete, [run_name(1, 7)]);
     assert!(w.unreadable.is_empty(), "{:?}", w.unreadable);
-    assert_eq!(tree(&sentinel), had);
+    assert_eq!((tree(&sentinel), tree(&empty)), had);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
