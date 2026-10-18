@@ -53,7 +53,7 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
     let mut hazards: BTreeMap<String, usize> = BTreeMap::new();
     let (mut decoded, mut bytes, mut once, mut unreached) = (0, 0usize, 0usize, 0usize);
-    let (mut strings, mut tables) = (0, 0);
+    let (mut strings, mut tables, mut splits) = (0, 0, 0);
     for (letter, item, b) in &all {
         let d = match disassemble(*letter, *item, b) {
             Ok(d) => d,
@@ -64,6 +64,7 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
         };
         decoded += 1;
         bytes += b.len();
+        splits += d.run_splits.len();
         assert!(
             covers_once(&d),
             "script {}{item}: coverage",
@@ -118,7 +119,7 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
     println!(
         "runs {runs}, table strings {strings}, ops {ops}, data ranges {data} ({tables} tables, unreached bytes {unreached})"
     );
-    println!("hazards: {hazards:?}");
+    println!("run splits {splits}, hazards: {hazards:?}");
     println!(
         "bytes {bytes}, covered by exactly one item {once} ({}%)",
         (once * 100).checked_div(bytes).unwrap_or(0)
