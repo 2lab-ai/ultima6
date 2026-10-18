@@ -1342,26 +1342,28 @@ fn samples_tsv_rows_are_the_samples() {
 
 #[test]
 fn a_sheet_orders_its_rows_by_ratio_over_limit_then_pair() {
-    // One bucket × sides, its pairs in the order opposite their ratio / limit, and two of one
-    // ratio / limit: by ratio / limit, then by pair.
-    let row = |a: u16, ratio: f32| {
+    // One bucket × sides whose limits differ: ordered by ratio / limit, the order of neither the
+    // ratios nor the pairs, and two of one ratio / limit (2.4) by pair.
+    let row = |a: u16, ratio: f32, limit: f32| {
         line(
             1,
             (a, a + 1, "east"),
             true,
             Some(ratio),
-            1.5,
+            limit,
             "gen-mmpx",
             "map",
             (0, 0, 0),
         )
     };
-    let text = [row(1, 4.5), row(3, 3.9), row(5, 3.0), row(7, 3.0)].join("\n");
-    let (rows, _) = rows(&text).unwrap();
+    let fixture = [(1, 6.0, 3.0), (3, 4.0, 1.0), (5, 3.0, 1.25), (7, 4.8, 2.0)];
+    let text: Vec<String> = fixture.iter().map(|&(a, r, l)| row(a, r, l)).collect();
+    let (rows, _) = rows(&text.join("\n")).unwrap();
     let taken = sample(&rows, 4, 1, Source::All);
     let t = &taken[&(Bucket::Gt15, Sides::GenMmpx)];
     let order: Vec<u16> = t.rows.iter().map(|r| r.pair.a).collect();
-    assert_eq!(order, [5, 7, 3, 1]);
+    // By hand: 2.0 (1), 2.4 (5), 2.4 (7), 4.0 (3); by ratio alone 5, 3, 7, 1.
+    assert_eq!(order, [1, 5, 7, 3]);
 }
 
 #[test]
