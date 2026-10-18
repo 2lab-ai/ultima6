@@ -20,13 +20,16 @@ committed).
 
     python3 -I -B tools/font/galmuri.py [--zip PATH] [--out DIR] [--check]
 
---zip reads that file instead of downloading (its sha256 is checked all the same); --check
-writes nothing and fails unless the files in --out are the ones the release gives.
+The release zip is kept in the cache, $XDG_CACHE_HOME/ultima6/ (~/.cache/ultima6/ without it),
+after its sha256 is checked, and read from there the next time. --zip reads that file instead
+(its sha256 is checked all the same); --check writes nothing and fails unless the files in
+--out are the ones the release gives.
 """
 import argparse
 import hashlib
 import io
 import os
+import re
 import sys
 import tempfile
 import urllib.request
@@ -39,6 +42,13 @@ VERSION = "v2.40.4"
 URL = f"https://github.com/quiple/galmuri/releases/download/{VERSION}/Galmuri-{VERSION}.zip"
 ZIP_SHA256 = "c8b3d9861a62ae73c8b1178091401cd79994812437ef386413f6dd54856e60e7"
 BLOB_SHA256 = "cc35ff5cb931f05acf6990a5f3cb9ed05d56142a8b330955468de1c83754634b"
+# The release's LICENSE.txt, written as OFL.txt byte for byte.
+LICENSE_SHA256 = "86a3ee9495f942f0243f18c103da9faca27adb88142613edb8bb852e56c892c1"
+CACHE = os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+    "ultima6",
+    f"Galmuri-{VERSION}.zip",
+)
 BDF_MEMBER = "Galmuri7.bdf"
 LICENSE_MEMBER = "LICENSE.txt"
 
@@ -61,8 +71,25 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+INTEGER = re.compile(r"-?[0-9]+")
+HEX = re.compile(r"[0-9A-Fa-f]+")
+
+
+def numbers(words, counts, line):
+    """The integer operands of a keyword line, `counts` the numbers of them it may have."""
+    ops = words[1:]
+    if len(ops) not in counts or not all(INTEGER.fullmatch(v) for v in ops):
+        raise FontError(f"line {line}: {words[0]} takes {' or '.join(map(str, counts))} integers")
+    return [int(v) for v in ops]
+
+
 def glyphs(bdf):
-    """(encoding, (w, h, xoff, yoff), [row ints]) for every STARTCHAR..ENDCHAR record."""
+    """(encoding, (w, h, xoff, yoff), [row ints]) for every STARTCHAR..ENDCHAR record.
+
+    Each record has exactly one ENCODING (one or two integers, the first the code point) and one
+    BBX (four integers, width and height not negative) before its BITMAP, then exactly height
+    rows of exactly 2 hex digits per 8 pixels of width.
+    """
     lines = bdf.split("\n")
     i, n = 0, len(lines)
     while i < n:
@@ -74,11 +101,15 @@ def glyphs(bdf):
         while i < n and lines[i].strip() != "BITMAP":
             words = lines[i].split()
             if words and words[0] == "ENCODING":
-                enc = int(words[1])
+                if enc is not None:
+                    raise FontError(f"line {i + 1}: a second ENCODING")
+                enc = numbers(words, (1, 2), i + 1)[0]
             elif words and words[0] == "BBX":
-                if len(words) != 5:
-                    raise FontError(f"line {i + 1}: BBX takes four numbers")
-                bbx = tuple(int(v) for v in words[1:])
+                if bbx is not None:
+                    raise FontError(f"line {i + 1}: a second BBX")
+                bbx = tuple(numbers(words, (4,), i + 1))
+                if bbx[0] < 0 or bbx[1] < 0:
+                    raise FontError(f"line {i + 1}: BBX width and height are not negative")
             elif words and words[0] in ("ENDCHAR", "STARTCHAR"):
                 raise FontError(f"line {i + 1}: a record without BITMAP")
             i += 1
@@ -96,10 +127,9 @@ def glyphs(bdf):
         digits = 2 * ((w + 7) // 8)
         if len(rows) != h or any(len(r) != digits for r in rows):
             raise FontError(f"U+{enc:04X}: {len(rows)} bitmap rows for BBX {w} x {h}")
-        try:
-            yield enc, bbx, [int(r, 16) for r in rows]
-        except ValueError as e:
-            raise FontError(f"U+{enc:04X}: bitmap row is not hex") from e
+        if not all(HEX.fullmatch(r) for r in rows):
+            raise FontError(f"U+{enc:04X}: a bitmap row is not hex digits")
+        yield enc, bbx, [int(r, 16) for r in rows]
 
 
 def cell(enc, bbx, rows):
@@ -150,9 +180,11 @@ def notice(blob_sha):
     )
 
 
-def fetch(path):
-    if path:
-        with open(path, "rb") as f:
+def fetch(path, cache=CACHE):
+    """The release zip's bytes: from `path`, else the cache, else downloaded (then cached)."""
+    source = path or (cache if cache and os.path.exists(cache) else None)
+    if source:
+        with open(source, "rb") as f:
             data = f.read()
     else:
         with tempfile.TemporaryDirectory() as tmp:
@@ -162,7 +194,11 @@ def fetch(path):
                 data = f.read()
     got = sha256(data)
     if got != ZIP_SHA256:
-        raise FontError(f"release zip sha256 {got}, pinned {ZIP_SHA256}")
+        raise FontError(f"release zip {source or URL}: sha256 {got}, pinned {ZIP_SHA256}")
+    if not source and cache:
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "wb") as f:
+            f.write(data)
     return data
 
 
@@ -171,6 +207,8 @@ def build(zip_bytes):
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         bdf = z.read(BDF_MEMBER).decode("utf-8")
         licence = z.read(LICENSE_MEMBER)
+    if sha256(licence) != LICENSE_SHA256:
+        raise FontError(f"{LICENSE_MEMBER} sha256 {sha256(licence)}, pinned {LICENSE_SHA256}")
     blob = table(bdf)
     if len(blob) != (LAST - FIRST + 1) * CELL:
         raise FontError(f"blob of {len(blob)} bytes")
@@ -182,21 +220,25 @@ def build(zip_bytes):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--zip", help="a local copy of the release zip (default: download it)")
+    p.add_argument("--zip", help="a local copy of the release zip (default: the cache, else download)")
     p.add_argument("--out", default=OUT, help="the directory written (default: site/fonts)")
     p.add_argument("--check", action="store_true", help="compare with --out, write nothing")
     a = p.parse_args(argv)
     try:
         files = dict(zip((BLOB, OFL, NOTICE), build(fetch(a.zip))))
-    except (FontError, OSError, KeyError, zipfile.BadZipFile) as e:
+    except (FontError, OSError, KeyError, UnicodeDecodeError, zipfile.BadZipFile) as e:
         print(f"galmuri: {e}", file=sys.stderr)
         return 1
     if a.check:
         stale = []
         for name, data in files.items():
             path = os.path.join(a.out, name)
-            if not os.path.exists(path) or open(path, "rb").read() != data:
+            if not os.path.exists(path):
                 stale.append(name)
+                continue
+            with open(path, "rb") as f:
+                if f.read() != data:
+                    stale.append(name)
         if stale:
             print(f"galmuri: differs from the release: {', '.join(stale)}", file=sys.stderr)
             return 1
