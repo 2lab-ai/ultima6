@@ -52,7 +52,7 @@ use crate::work;
 
 pub mod at;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// A mode of `calibrate`: its name in messages, and the files a run of it that fails keeps (its
 /// snapshots, and the details its error points to), with `refused.txt`.
@@ -226,6 +226,23 @@ fn capped(f: File, path: &Path, max: u64) -> Result<Vec<u8>, String> {
 pub fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     let f = File::open(path).map_err(|e| os_error(path, &e))?;
     capped(f, path, max)
+}
+
+/// The file at `path` read again, to hold it to what a run read of it at first (at most `max`
+/// bytes then): its first `max + 1` bytes (more than were read: it changed), or `None` when it is
+/// gone; any other error to read it is the run's, said ([`os_error`]).
+pub fn read_again(path: &Path, max: u64) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read as _;
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(os_error(path, &e)),
+    };
+    let mut bytes = Vec::new();
+    f.take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| os_error(path, &e))?;
+    Ok(Some(bytes))
 }
 
 /// `names` sorted: by time, the oldest first (a run dir's name sorts by its time,

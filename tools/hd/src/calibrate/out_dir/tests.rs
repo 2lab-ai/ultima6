@@ -80,25 +80,35 @@ fn fix_clock(key: &Path, ns: u128) -> Fixed {
 type Shared<T> = std::sync::Arc<std::sync::Mutex<Vec<T>>>;
 
 /// The env var that marks a child of this test binary started for one test ([`in_child`]): its
-/// value is the test's name.
+/// value is the test's path.
 const CHILD: &str = "U6_HDTOOL_OUT_DIR_CHILD";
 
-/// Whether this process is the child started for the test `name` ([`in_child`]).
-fn is_child(name: &str) -> bool {
-    std::env::var_os(CHILD).is_some_and(|v| v == name)
+/// The path of the test `name` of the module `module` (its `module_path!()`), as the test binary
+/// names it.
+pub(crate) fn test_path(module: &str, name: &str) -> String {
+    format!("{}::{name}", module.split_once("::").unwrap().1)
 }
 
-/// Runs the test `name` alone in a child of this test binary (`--exact`, marked by [`CHILD`]),
-/// started as `sh -c '<shell>; exec "$0" "$@"'` and set up by `setup`; panics, with the child's
-/// output, unless that one test ran and passed.
-fn in_child(name: &str, shell: &str, setup: impl FnOnce(&mut std::process::Command)) {
-    let test = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
+/// The path of this module's test `name`.
+fn here(name: &str) -> String {
+    test_path(module_path!(), name)
+}
+
+/// Whether this process is the child started for the test `test` (its path, [`in_child`]).
+pub(crate) fn is_child(test: &str) -> bool {
+    std::env::var_os(CHILD).is_some_and(|v| v == test)
+}
+
+/// Runs the test `test` (its path, [`test_path`]) alone in a child of this test binary
+/// (`--exact`, marked by [`CHILD`]), started as `sh -c '<shell>; exec "$0" "$@"'` and set up by
+/// `setup`; panics, with the child's output, unless that one test ran and passed.
+pub(crate) fn in_child(test: &str, shell: &str, setup: impl FnOnce(&mut std::process::Command)) {
     let mut c = std::process::Command::new("sh");
     c.arg("-c")
         .arg(format!("{shell}; exec \"$0\" \"$@\""))
         .arg(std::env::current_exe().unwrap())
-        .args(["--exact", &test, "--test-threads=1", "--nocapture"])
-        .env(CHILD, name);
+        .args(["--exact", test, "--test-threads=1", "--nocapture"])
+        .env(CHILD, test);
     setup(&mut c);
     let out = c.output().unwrap();
     let said = format!(
@@ -113,24 +123,24 @@ fn in_child(name: &str, shell: &str, setup: impl FnOnce(&mut std::process::Comma
     );
 }
 
-/// For a test that needs an unprivileged user: with privilege (euid 0), runs the test `name` in
-/// a child dropped to uid and gid 65534, with a temp dir of its own that it can enter, and gives
-/// true (the caller is done); else false, and the caller runs it here (in that child, checked
-/// to have no privilege).
-fn ran_unprivileged(name: &str) -> bool {
+/// For a test that needs an unprivileged user (`test`, its path): with privilege (euid 0), runs
+/// it in a child dropped to uid and gid 65534, with a temp dir of its own that it can enter, and
+/// gives true (the caller is done); else false, and the caller runs it here (in that child,
+/// checked to have no privilege).
+pub(crate) fn ran_unprivileged(test: &str) -> bool {
     use std::os::unix::process::CommandExt as _;
     // SAFETY: geteuid(2) reads the process's ids; no memory involved.
     let euid = unsafe { libc::geteuid() };
-    if is_child(name) {
+    if is_child(test) {
         assert_ne!(euid, 0, "the child kept its privilege");
         return false;
     }
     if euid != 0 {
         return false;
     }
-    let tmp = temp(&format!("nobody-{name}"));
+    let tmp = temp(&format!("nobody-{}", test.rsplit("::").next().unwrap()));
     std::os::unix::fs::chown(&tmp, Some(65534), Some(65534)).unwrap();
-    in_child(name, ":", |c| {
+    in_child(test, ":", |c| {
         c.env("TMPDIR", &tmp);
         // SAFETY: between the fork and the exec, only setgroups(2), setgid(2) and setuid(2),
         // each async-signal-safe, and errno read.
@@ -243,8 +253,9 @@ fn a_run_dir_that_cannot_be_made_for_another_reason_is_not_said_to_be_reused() {
     // incomplete run, not "never reused". Needs an unprivileged user: with privilege, run in a
     // child that has none.
     use std::os::unix::fs::PermissionsExt;
-    if ran_unprivileged("a_run_dir_that_cannot_be_made_for_another_reason_is_not_said_to_be_reused")
-    {
+    if ran_unprivileged(&here(
+        "a_run_dir_that_cannot_be_made_for_another_reason_is_not_said_to_be_reused",
+    )) {
         return;
     }
     let dir = temp("cannot-make");
@@ -593,7 +604,9 @@ fn a_run_dir_that_cannot_be_read_is_listed_as_such_not_as_incomplete() {
     // The next run lists it as a run dir it cannot read, with why, not as incomplete, and
     // leaves it. Needs an unprivileged user: with privilege, run in a child that has none.
     use std::os::unix::fs::PermissionsExt;
-    if ran_unprivileged("a_run_dir_that_cannot_be_read_is_listed_as_such_not_as_incomplete") {
+    if ran_unprivileged(&here(
+        "a_run_dir_that_cannot_be_read_is_listed_as_such_not_as_incomplete",
+    )) {
         return;
     }
     let dir = temp("unreadable");
@@ -854,7 +867,9 @@ fn a_file_of_the_run_others_may_not_read_is_still_deleted_as_its_own() {
     // is still known for the run's and deleted. Needs an unprivileged user (the point is a file
     // the user cannot open): with privilege, run in a child that has none.
     use std::os::unix::fs::PermissionsExt;
-    if ran_unprivileged("a_file_of_the_run_others_may_not_read_is_still_deleted_as_its_own") {
+    if ran_unprivileged(&here(
+        "a_file_of_the_run_others_may_not_read_is_still_deleted_as_its_own",
+    )) {
         return;
     }
     let dir = temp("mode-000");
@@ -1253,8 +1268,8 @@ fn a_run_out_of_open_files_for_real_still_writes_its_refusal() {
     // the cleanup deletes lets its fd go, so refused.txt can be made: the run dir holds it alone,
     // and the error says how to go on.
     const NAME: &str = "a_run_out_of_open_files_for_real_still_writes_its_refusal";
-    if !is_child(NAME) {
-        return in_child(NAME, "ulimit -n 64", |_| {});
+    if !is_child(&here(NAME)) {
+        return in_child(&here(NAME), "ulimit -n 64", |_| {});
     }
     assert_eq!(nofile(), (64, 64));
     let dir = temp("emfile-real");
@@ -1285,8 +1300,8 @@ fn a_low_soft_limit_on_open_files_is_raised_for_the_run() {
     // soft limit to the hard one, as far as the system caps it, so 400 files held at once fit;
     // the hard limit is as it was.
     const NAME: &str = "a_low_soft_limit_on_open_files_is_raised_for_the_run";
-    if !is_child(NAME) {
-        return in_child(NAME, "ulimit -Sn 64", |_| {});
+    if !is_child(&here(NAME)) {
+        return in_child(&here(NAME), "ulimit -Sn 64", |_| {});
     }
     let before = nofile();
     assert_eq!(before.0, 64);
@@ -1313,13 +1328,13 @@ fn a_soft_limit_on_open_files_above_the_cap_is_kept() {
     // (on macOS: OPEN_MAX), else at the hard limit: the raise leaves both as they are.
     const NAME: &str = "a_soft_limit_on_open_files_above_the_cap_is_kept";
     const SOFT: &str = "U6_HDTOOL_SOFT";
-    if !is_child(NAME) {
+    if !is_child(&here(NAME)) {
         let (cap, hard) = (at::cap(), nofile().1);
         let soft = match hard > cap {
             true => cap + (hard - cap).min(1000),
             false => hard,
         };
-        return in_child(NAME, &format!("ulimit -Sn {soft}"), |c| {
+        return in_child(&here(NAME), &format!("ulimit -Sn {soft}"), |c| {
             c.env(SOFT, soft.to_string());
         });
     }
@@ -1596,8 +1611,8 @@ fn a_read_out_of_open_files_says_how_to_go_on() {
     // (by the test). The read back of a.txt, a read of an input, and the list of the masters
     // each meet the system's "too many open files", and each says how to go on.
     const NAME: &str = "a_read_out_of_open_files_says_how_to_go_on";
-    if !is_child(NAME) {
-        return in_child(NAME, "ulimit -n 64", |_| {});
+    if !is_child(&here(NAME)) {
+        return in_child(&here(NAME), "ulimit -n 64", |_| {});
     }
     let dir = temp("emfile-reads");
     let out = dir.join("out");

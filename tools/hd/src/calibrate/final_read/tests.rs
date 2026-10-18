@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use super::super::out_dir::tests::{in_child, is_child, ran_unprivileged, test_path};
 use super::super::out_dir::{DONE, Hooked, REFUSED, hook};
 use super::*;
 use crate::game::{Level, World, synthetic};
@@ -2815,6 +2816,11 @@ fn a_change_to_the_work_dir_while_it_is_read_fails_the_run() {
             let p = jobs_path.clone();
             Box::new(move || std::fs::write(&p, b"").unwrap())
         }),
+        // A file gone is a change too.
+        ("(jobs.jsonl)", {
+            let p = jobs_path.clone();
+            Box::new(move || std::fs::remove_file(&p).unwrap())
+        }),
     ];
     for (k, (said, change)) in changes.into_iter().enumerate() {
         let o = FinalOptions {
@@ -3225,24 +3231,20 @@ fn a_run_whose_masters_cannot_be_read_again_keeps_its_diagnostics_alone() {
     assert_eq!(files, REFUSAL);
 }
 
-/// Whether this process runs with privilege (euid 0), when a permission it drops does not hold:
-/// a test that needs it says so and is skipped.
-fn privileged(test: &str) -> bool {
-    // SAFETY: geteuid(2) reads the process's ids; no memory involved.
-    let root = unsafe { libc::geteuid() } == 0;
-    if root {
-        eprintln!("{test}: skipped: it needs an unprivileged user (euid 0 reads any file)");
-    }
-    root
+/// The path of this module's test `name`.
+fn here(name: &str) -> String {
+    test_path(module_path!(), name)
 }
 
 #[test]
 fn a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone() {
     // The reviewer's P7b: B's master unreadable once it is read (mode 000), so the re-check at
-    // the end cannot read it. Needs an unprivileged user: skipped with privilege (the same
-    // failure injected, which needs none: the test below).
+    // the end cannot read it, and fails with the system's own error, not as a change. Needs an
+    // unprivileged user: with privilege, run in a child that has none.
     use std::os::unix::fs::PermissionsExt;
-    if privileged("a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone") {
+    if ran_unprivileged(&here(
+        "a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone",
+    )) {
         return;
     }
     let master: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>> = Default::default();
@@ -3265,8 +3267,55 @@ fn a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone() {
     });
     let m = master.lock().unwrap().take().unwrap();
     let _ = std::fs::set_permissions(&m, std::fs::Permissions::from_mode(0o644));
-    assert!(e.contains("Permission denied"), "{e}");
+    assert!(
+        e.starts_with(&format!("{}: Permission denied", m.display())),
+        "{e}"
+    );
+    assert!(!e.contains("changed while"), "{e}");
     assert_eq!(files, REFUSAL);
+}
+
+#[test]
+fn a_snapshot_read_again_out_of_open_files_says_how_to_go_on() {
+    // In a child under a limit of 64 open files: the run reaches its re-check (its sheets and
+    // samples.tsv drawn) with every fd left taken (by the test). The read again of gates.jsonl
+    // meets the system's "too many open files": the run fails with that error, saying how to go
+    // on, not as a change of the work dir; its diagnostics alone are left.
+    const NAME: &str = "a_snapshot_read_again_out_of_open_files_says_how_to_go_on";
+    if !is_child(&here(NAME)) {
+        return in_child(&here(NAME), "ulimit -n 64", |_| {});
+    }
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("reread-emfile", &text, &g, &left);
+    let o = options(&dir);
+    let taken: std::sync::Arc<std::sync::Mutex<Vec<std::fs::File>>> = Default::default();
+    let (t, probe) = (taken.clone(), work.path("ingest.json"));
+    let _h = hook(&o.out, "recheck", move |_| {
+        let mut t = t.lock().unwrap();
+        let full = loop {
+            match std::fs::File::open(&probe) {
+                Ok(f) => t.push(f),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(full.raw_os_error(), Some(libc::EMFILE), "{full}");
+        Ok(())
+    });
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    taken.lock().unwrap().clear();
+    assert_eq!(
+        e,
+        format!(
+            "{}: {} (a run holds each file it makes open until it ends: raise the limit on open \
+             files, ulimit -n); run dir: {}",
+            work.path("gates.jsonl").display(),
+            std::io::Error::from_raw_os_error(libc::EMFILE),
+            run_dir(&o.out).canonicalize().unwrap().display()
+        )
+    );
+    assert_eq!(files_of(&o.out), REFUSAL);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

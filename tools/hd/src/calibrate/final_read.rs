@@ -2118,16 +2118,17 @@ fn run_final(
     }
     // What was read at the start, read again: a re-ingest while the run read it could have
     // mixed two states, and these sheets would read neither.
+    // A file gone, or other bytes, is a change; an error to read it is the run's own.
+    out_dir::seam(&o.out, "recheck", "")?;
     let mut changed: Vec<String> = Vec::new();
     for ((name, cap), bytes) in caps
         .into_iter()
         .zip([&gates_bytes, &list_bytes, &jobs_bytes])
     {
-        if out_dir::read_capped(&work.path(name), cap).ok().as_ref() != Some(bytes) {
+        if out_dir::read_again(&work.path(name), cap)?.as_ref() != Some(bytes) {
             changed.push(name.to_string());
         }
     }
-    out_dir::seam(&o.out, "recheck", "")?;
     let masters = slices.changed(&dir)?.len();
     if masters > 0 {
         changed.push(format!("{masters} masters of slices/"));
