@@ -1839,6 +1839,39 @@ fn several_addresses_inside_one_string_are_all_of_its_table() {
     );
 }
 
+#[test]
+fn an_address_at_a_strings_nul_reads_its_empty_rest() {
+    // Prints of the string at `t`, from the NUL that ends it (an empty rest) and of index 1
+    // from there, the string after it. One table; a read at the NUL is an empty string.
+    let t = BODY + 30;
+    let mut body = vec![0xb5];
+    body.extend(lit32(t));
+    body.extend([0xb1, 0xb5]);
+    body.extend(lit32(t + 2));
+    body.extend([0xb1, 0xb5]);
+    body.extend(lit32(t + 2));
+    body.extend([0x01, 0xa7, 0xb6]);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"ab\0cd\0\xb8");
+    let s = script(&body);
+    let d = ok(&s);
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.inner, [t + 2]);
+    assert_eq!(
+        tb.entries.iter().map(|e| e.bytes(&s)).collect::<Vec<_>>(),
+        [&b"ab"[..], b"cd"]
+    );
+    let nul = Event::Table {
+        at: (t + 2) as i32,
+        byte: 0,
+        read: Read::Copy,
+    };
+    let n = checked(&body, vec![nul]);
+    assert_eq!((n.table_strings, n.failures()), (1, 0));
+}
+
 /// After [`after_an_if`]'s `a1`, whose landing jumps to `to` and runs it as text: the `*`
 /// block's `ee`, then its loops print string 0 of `t` = "ab\0cd\0" (no `b8`), read at `u` =
 /// `t + 4` (inside "cd") with `op` and jump back. `to` is `u`, or `t + 3` (the start of "cd")
