@@ -1697,6 +1697,85 @@ fn a_disagreement_fails_and_draws_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Made-up records: HALF, a grain opaque on its lower half; COVER, opaque on its east
+/// column's lower half alone.
+const HALF: u16 = 201;
+const COVER: u16 = 202;
+
+fn with_half_and_cover(mut g: Game) -> Game {
+    for i in 0..256 {
+        let (u, v) = (i % 16, i / 16);
+        let h = &mut g.records[usize::from(HALF)];
+        h.pixels[i] = GRAIN + (hash(i as u32, 11) % 5) as u8;
+        h.transparent[i] = v < 8;
+        let c = &mut g.records[usize::from(COVER)];
+        c.pixels[i] = GRAIN + 4;
+        c.transparent[i] = !(u == 15 && v >= 8);
+    }
+    g
+}
+
+#[test]
+fn a_pair_is_drawn_only_where_a_row_the_gate_measures_shows() {
+    // B, HALF east of it: the gate measures the join on HALF's lower rows alone, where both
+    // are opaque on their lines. COVER over B covers B's east column on those rows: each side
+    // still shows somewhere on its line, and no measured row of the join is left.
+    let g = with_half_and_cover(game());
+    let a = A_CELL.1 * COLS + A_CELL.0;
+    let cells = |list: &[u16]| {
+        let mut cells = vec![Stack::default(); COLS * ROWS];
+        cells[a] = Stack {
+            base: Some(B),
+            list: list.to_vec(),
+        };
+        cells[a + 1].base = Some(HALF);
+        cells
+    };
+    let p = Pair {
+        a: B,
+        b: HALF,
+        edge: Edge::East,
+    };
+    let slices = Slices::new(&g, BTreeMap::from([(B, near(&g, B))]));
+    assert!(
+        measure(&g, &slices, p, seam())
+            .unwrap()
+            .is_some_and(gate::seam_passes)
+    );
+    let f = framed(&g, &cells(&[COVER]), &[]);
+    assert!(f.shows(A_CELL, B) && f.shows((A_CELL.0 + 1, A_CELL.1), HALF));
+    assert!(!f.joins(A_CELL, p));
+    // Uncovered, it is drawn; and COVER beside HALF, whose measured rows (the lower ones) are
+    // left on both sides, is drawn.
+    assert!(framed(&g, &cells(&[]), &[]).joins(A_CELL, p));
+    let cover = Pair { a: COVER, ..p };
+    assert!(f.joins(A_CELL, cover));
+}
+
+#[test]
+fn a_pair_covered_on_every_measured_row_is_not_read() {
+    // The chain, and B again at (12, 12) with HALF east of it, COVER on B there: the pair's one
+    // cell has no measured row left, so no window reads it, and the run fails.
+    let mut g = with_half_and_cover(game());
+    g.world.chunks.push(chunk(&[(4, 4, B), (5, 4, HALF)]));
+    g.world.levels[0].refs = vec![0, 1, 1, 2];
+    g.world.objects = vec![crate::game::Placed {
+        x: 12,
+        y: 12,
+        z: 0,
+        tile: COVER,
+    }];
+    let (text, left) = chain(&g);
+    assert!(left.contains_key(&B));
+    let (dir, work) = work_dir("measured-row", &text, &g, &left);
+    let o = options(&dir);
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(e.contains("nothing drawn: unread 1"), "{e}");
+    let detail = std::fs::read_to_string(o.out.join("unshown.txt")).unwrap();
+    assert!(detail.contains(&format!("t:{B} t:{HALF} east")), "{detail}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
     // The chain, and an object of X's opaque record on the grass east of B: the only cell the

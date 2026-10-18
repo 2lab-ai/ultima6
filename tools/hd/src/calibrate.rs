@@ -29,9 +29,10 @@
 //!   in the pair's two cells a tile whose frames include the pair's record is drawn as that
 //!   record, so the join shown is the one measured. `samples.tsv` says when a frame was chosen
 //!   (`frames`: `frame0`, `pair`), and `missing` where the window does not show the pair
-//!   measured: a join cell draws no tile with the pair's record, or a tile drawn after it covers
-//!   it along its side of the join ([`Framed::joins`]: a record shows where some pixel of it is
-//!   left in the source plane, which the panels draw from).
+//!   measured: a join cell draws no tile with the pair's record, or tiles drawn after them
+//!   cover every row of the join the gate measures (a row where both records are opaque on
+//!   their lines: [`Framed::joins`]; a record shows where some pixel of it is left in the
+//!   source plane, which the panels draw from).
 //! - **The panels** ([`panels`]): the frame composed by the page's compositor
 //!   ([`Compositor::compose`]), at S 4 and at S 2: classic (the frame's colours, nearest), no pack
 //!   (MMPX of every record) and the pack of `--slices` (each master box-averaged ×8 to ×4 as
@@ -101,8 +102,9 @@
 //!   the run, nothing drawn, the details in `unshown.txt`. The frame as above, A's cell at [`A_CELL`]:
 //!   at a pair, its records in its two cells; where it is drawn, its record in A's cell.
 //! - **The marks**: every pair of the last pass drawn inside the window (a record of a cell
-//!   beside one of the cell east or south of it, each showing along its side of the join,
-//!   [`Framed::joins`]: a record covered there by a tile drawn after it draws no pair) is marked
+//!   beside one of the cell east or south of it, both left on a row of the join the gate
+//!   measures, [`Framed::joins`]: a pair covered there by a tile drawn after it is not drawn) is
+//!   marked
 //!   in the panels' margins as above and listed under the panels: its cell (column, row of the
 //!   window), edge, labels, sides and ratio / limit, `>` before the pair the window is placed at
 //!   (a line too long for the sheet goes on, indented, in lines of its own: nothing is cut).
@@ -699,12 +701,15 @@ fn blit(game: &Game, fb: &mut Framebuffer, r: u16, x: usize, y: usize) {
     }
 }
 
-/// Where a record drawn in a cell shows in the frame ([`framed`]): in the cell, and along each
-/// of its sides (north, east, south, west).
+/// Where a record drawn in a cell shows in the frame ([`framed`]): in the cell; and along each
+/// of its sides (north, east, south, west), the pixels of the side's line it is opaque at and
+/// those of them left in the plane, a bit per pixel along the line (its row on an east or west
+/// line, its column on a north or south line).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Shows {
     cell: bool,
-    sides: [bool; 4],
+    opaque: [u16; 4],
+    left: [u16; 4],
 }
 
 const NORTH: usize = 0;
@@ -763,9 +768,10 @@ impl Framed {
     }
 
     /// Whether pair `p` is drawn across the join of the window's cell `a` and the cell `p.edge`
-    /// of it, where the gate measures it: `p.a` shows along `a`'s side on the join and `p.b`
-    /// along the other cell's (some pixel of each left there). A side whose record has no pixel
-    /// on that line (the gate measures nothing of it there) shows when it shows in its cell.
+    /// of it, where the gate measures it: the gate steps across the join only on the rows (or
+    /// columns) where both records are opaque on their lines at the join, so on one of those
+    /// both pixels must be left in the plane. Where the two lines have no such row (the gate
+    /// measures nothing across the join) each record shows when it shows in its cell.
     pub fn joins(&self, (c, r): (usize, usize), p: Pair) -> bool {
         let ((bc, br), own, other) = match p.edge {
             Edge::East => ((c + 1, r), EAST, WEST),
@@ -774,15 +780,21 @@ impl Framed {
         if bc >= COLS || br >= ROWS {
             return false;
         }
-        let side = |cell, rec, i: usize| self.shown(cell, rec).is_some_and(|s| s.sides[i]);
-        side((c, r), p.a, own) && side((bc, br), p.b, other)
+        let (Some(a), Some(b)) = (self.shown((c, r), p.a), self.shown((bc, br), p.b)) else {
+            return false;
+        };
+        if a.opaque[own] & b.opaque[other] != 0 {
+            a.left[own] & b.left[other] != 0
+        } else {
+            a.cell && b.cell
+        }
     }
 }
 
 /// Where record `rec`, drawn in the window's cell `(c, r)`, shows in the source plane `plane`
 /// ([`Framed::drawn`], [`Framed::joins`]): in the cell, where some pixel of it is left (a record
-/// that draws nothing: always); along a side, where some pixel of it on that line is left (a
-/// record with no pixel on the line: where it shows in the cell).
+/// that draws nothing: always); along each side, the pixels of the line it is opaque at and
+/// those left.
 fn shows_in(game: &Game, plane: &[Src], (c, r): (usize, usize), rec: u16) -> Shows {
     let record = game.records.get(usize::from(rec));
     let opaque = |(u, v): (usize, usize)| {
@@ -807,16 +819,28 @@ fn shows_in(game: &Game, plane: &[Src], (c, r): (usize, usize), rec: u16) -> Sho
     };
     let cell = left(&mut (0..TILE_W * TILE_W).map(|i| (i % TILE_W, i / TILE_W))).unwrap_or(true);
     let last = TILE_W - 1;
-    let sides = [NORTH, EAST, SOUTH, WEST].map(|side| {
-        let mut line = (0..TILE_W).map(|k| match side {
-            NORTH => (k, 0),
-            EAST => (last, k),
-            SOUTH => (k, last),
-            _ => (0, k),
-        });
-        left(&mut line).unwrap_or(cell)
-    });
-    Shows { cell, sides }
+    let (mut opaque_on, mut left_on) = ([0u16; 4], [0u16; 4]);
+    for side in [NORTH, EAST, SOUTH, WEST] {
+        for k in 0..TILE_W {
+            let p = match side {
+                NORTH => (k, 0),
+                EAST => (last, k),
+                SOUTH => (k, last),
+                _ => (0, k),
+            };
+            if opaque(p) {
+                opaque_on[side] |= 1 << k;
+                if named(p) {
+                    left_on[side] |= 1 << k;
+                }
+            }
+        }
+    }
+    Shows {
+        cell,
+        opaque: opaque_on,
+        left: left_on,
+    }
 }
 
 /// The window's first cell (column, row of the level) for A's cell `at`.
