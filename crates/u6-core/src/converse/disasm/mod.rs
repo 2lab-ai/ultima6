@@ -61,18 +61,23 @@
 //!   and can no longer win: a landing that names a table over other landing code there is
 //!   dropped (the intruding landing, when the table is a direct path's);
 //! - a constant index is checked against the final tables (its table and the ones that follow
-//!   it without a gap): past them, a direct use refuses the script and a landing's use drops
-//!   that landing in the next round; so does any other read of a table with no entry (a
+//!   it without a gap): past them, a direct use refuses the script and a landing's use drops,
+//!   in the next round, every landing whose path runs that op (the one that decoded it and
+//!   those that join it); so does any other read of a table with no entry (a
 //!   computed index, a search with no `b8` at the address), which reads past the table. A
 //!   search reads, as the interpreter does, from its own address an entry at a time up to a
 //!   `b8` at an entry's start: one from a `b8` reads nothing; any other reads every entry of
 //!   its tables (so they never end at landing code), and with no `b8` in them it reads on
 //!   past the last one, where a `b8` that starts a table of either kind stops it. Onto any
 //!   other item that is a read past the table; past the script's end, over bytes no item
-//!   holds, it is a hazard ([`HazardKind::SearchPastEnd`]).
+//!   holds, it is a hazard ([`HazardKind::SearchPastEnd`]). Such a drop is checked again at
+//!   the end of each round: a dropped landing is tried on that round's decode, and when every
+//!   read its path makes would hold there (its cause is gone), it is taken again. A landing
+//!   dropped for a read past a table after that stays dropped (else two could take turns).
 //!
-//! The rounds end: each one grows the dropped landings or the settled bytes, or (with those
-//! unchanged) the reserved bytes, all bounded by the script's length.
+//! The rounds end: each one grows the landings taken again, or (with those unchanged) the
+//! dropped landings or the settled bytes, or (with those unchanged) the reserved bytes, all
+//! bounded: a landing is taken again at most once, and the bytes by the script's length.
 //!
 //! Order. Conflicts between landings are resolved in ascending landing address: the landings
 //! are taken in the order of the address where reading goes on (then by loop, stop byte and
@@ -530,8 +535,9 @@ pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refus
             match d.revise() {
                 Some(next) => next,
                 None => {
+                    let pre = d.clone();
                     d.claim_tables()?;
-                    match d.check_table_indices()? {
+                    match d.check_table_indices(&pre)? {
                         Some(next) => next,
                         None => {
                             d.search_hazards();

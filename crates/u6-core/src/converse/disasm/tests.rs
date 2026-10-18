@@ -1047,17 +1047,18 @@ fn a_table_at_an_ifs_code(op: &[u8], tail: &[u8]) -> (Vec<u8>, u32) {
 #[test]
 fn a_landings_table_with_no_entry_drops_its_namers_or_wins_never_refuses_the_script() {
     // No NUL after `x`: the table has no entry even once the a1's code is out of it, so the
-    // print's index is past it and its namers (both of the `*` block's loops) are dropped; the
-    // a1's code stays.
+    // print's index is past it and its namers (both of the `*` block's loops) are dropped. The
+    // a1's code comes back at `x`, no table holding it: tried again, the namers' print would
+    // read that code, and they are dropped for it. The a1's code stays.
     let (s, x) = a_table_at_an_ifs_code(&[0xb1], b"zz\xb6");
-    let d = ok(&s);
+    let d = any_order(&s);
     assert!(matches!(item(&d, x).kind, Kind::Text(_)), "{:?}", shape(&d));
     assert!(!d.items.iter().any(|i| matches!(i.kind, Kind::Table(_))));
     for scan in [Scan::NoMatch, Scan::Answered] {
         assert!(
             d.hazards.contains(&Hazard {
                 at: BODY + 19,
-                kind: HazardKind::Dropped(scan, Reason::TableIndex)
+                kind: HazardKind::Dropped(scan, Reason::TableInCode)
             }),
             "{:?}",
             d.hazards
@@ -2171,6 +2172,148 @@ fn a_landings_word_table_inside_a_direct_string_table_drops_the_landing() {
     };
     assert_eq!(tb.entries.len(), 1);
     assert!(matches!(&item(&d, t + 3).kind, Kind::Table(w) if w.words));
+}
+
+/// After [`after_an_if`]'s `a1`, whose landing jumps to the search `S` of `t` = "ab\0cd\0"
+/// (no `b8`, the script's end after it): the `*` block's `ee`, then its loops write word 0 at
+/// `t + 3` and run on into `S`. Returns the script, the a1's landing, the loops' landing and
+/// `S`'s offset.
+fn a_search_two_landings_run() -> (Vec<u8>, [u32; 3]) {
+    let x = BODY + 13;
+    let s_at = x + 5 + 1 + 10;
+    let t = s_at + 12 + 5;
+    let mut rest = jump(s_at);
+    rest.extend([0xee, 0xa6]);
+    rest.extend(lit32(t + 3));
+    rest.extend([0xb1, 0xa8, 0x07, 0xa7]);
+    rest.extend(search_of(t, false));
+    rest.extend(jump(BODY));
+    rest.extend(b"ab\0cd\0");
+    (after_an_if(&rest), [x, x + 6, s_at])
+}
+
+/// One round of `s` under `plan` up to its read-past check: the next plan, if any.
+fn index_round(s: &[u8], plan: &Plan) -> Option<Plan> {
+    let mut d = Decoder::new(s, plan);
+    d.run().unwrap();
+    assert!(d.revise().is_none(), "a round that revises");
+    let pre = d.clone();
+    d.claim_tables().unwrap();
+    d.check_table_indices(&pre).unwrap()
+}
+
+#[test]
+fn a_read_past_a_table_bans_every_landing_that_runs_it_and_lifts_when_its_cause_is_gone() {
+    // The loops' word table at `t + 3` cuts `t`, so `S` reads on onto it. The a1's landing
+    // (the lower) decodes `S`, the loops join it: all three landings are banned for it. With
+    // them banned, the a1's landing's own path reads only strings: its ban lifts; the loops'
+    // path still makes the word table that cuts `S`: theirs stays. The a1's landing is kept,
+    // its search reads on past the script's end.
+    let (s, [x, loops, s_at]) = a_search_two_landings_run();
+    let first = index_round(&s, &Plan::default()).expect("bans");
+    let (banned, lifted) = first.bans();
+    let parts: Vec<(Scan, u32, Reason)> = banned
+        .iter()
+        .map(|(k, &r)| (k.parts().0, k.parts().1, r))
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            (Scan::If, x - 1, Reason::TableIndex),
+            (Scan::NoMatch, loops - 1, Reason::TableIndex),
+            (Scan::Answered, loops - 1, Reason::TableIndex)
+        ]
+    );
+    assert!(lifted.is_empty());
+    let second = index_round(&s, &first).expect("a lift");
+    let (banned, lifted) = second.bans();
+    assert_eq!(
+        banned.keys().map(|k| k.parts().0).collect::<Vec<_>>(),
+        [Scan::NoMatch, Scan::Answered]
+    );
+    assert_eq!(
+        lifted.iter().map(|k| k.parts().0).collect::<Vec<_>>(),
+        [Scan::If]
+    );
+    let d = any_order(&s);
+    assert_eq!(
+        sorted_hazards(&d),
+        [
+            dropped(loops, Scan::Answered, Reason::TableIndex),
+            dropped(loops, Scan::NoMatch, Reason::TableIndex),
+            Hazard {
+                at: s_at,
+                kind: HazardKind::SearchPastEnd(Span {
+                    offset: d.len,
+                    len: 0
+                })
+            }
+        ]
+    );
+    assert!(!d.hazards.iter().any(|h| h.at == x));
+    // A ban lifted once and made again stays: with the a1's landing's marked lifted before,
+    // nothing more lifts.
+    let again = first
+        .clone()
+        .lifted_before(*second.bans().1.iter().next().unwrap());
+    assert_eq!(index_round(&s, &again), None);
+}
+
+#[test]
+fn scripts_whose_landing_order_decided_a_read_past_a_table_decode_one_way() {
+    // Scripts from a random probe of the decoder before landings were taken in a fixed order
+    // (synthetic bytes): in each, the two orders gave two decodes, one through a read past a
+    // table. They decode, and to the same catalog, in every order.
+    let residues: [&[u8]; 5] = [
+        &[
+            0xf7, 0xef, 0x71, 0xf6, 0xa1, 0x01, 0xa7, 0xa3, 0xb5, 0xd2, 0x47, 0x00, 0x00, 0x00,
+            0x01, 0xb2, 0xa7, 0xb5, 0xd2, 0x3e, 0x00, 0x00, 0x00, 0x01, 0xb2, 0xa7, 0x00, 0xb0,
+            0x0a, 0x00, 0x00, 0x00, 0xb6, 0xb5, 0xd2, 0x0e, 0x00, 0x00, 0x00, 0xb1, 0xb0, 0x0a,
+            0x00, 0x00, 0x00, 0xa2, 0xef, 0x6b, 0xf6, 0xef, 0x6b, 0xf6, 0xa2, 0xb5, 0xd2, 0x22,
+            0x00, 0x00, 0x00, 0x01, 0xb2, 0xa7, 0xff,
+        ],
+        &[
+            0xf7, 0xef, 0x6b, 0xf6, 0x61, 0x62, 0xb0, 0x0a, 0x00, 0x00, 0x00, 0xb0, 0x3c, 0x00,
+            0x00, 0x00, 0xef, 0x71, 0xf6, 0xa6, 0x01, 0xb2, 0xa8, 0xd2, 0x31, 0x00, 0x00, 0x00,
+            0x00, 0xb4, 0xa7, 0xef, 0x71, 0xf6, 0x10, 0x00, 0x20, 0x00, 0xb8, 0xa3, 0xee, 0xb5,
+            0xd2, 0x24, 0x00, 0x00, 0x00, 0x01, 0xb2, 0xa7, 0xef, 0x6b, 0xf6, 0xb5, 0xd2, 0x2f,
+            0x00, 0x00, 0x00, 0x01, 0xa7, 0xef, 0x6b, 0xf6, 0xff,
+        ],
+        &[
+            0xf7, 0xef, 0x71, 0xf6, 0xa3, 0x10, 0x00, 0x20, 0x00, 0xb8, 0xb0, 0x2d, 0x00, 0x00,
+            0x00, 0x7a, 0x7a, 0x00, 0xa6, 0xd2, 0x5c, 0x00, 0x00, 0x00, 0xb1, 0xa8, 0x07, 0xa7,
+            0xa2, 0xa6, 0xd2, 0x4d, 0x00, 0x00, 0x00, 0xb1, 0xa8, 0x07, 0xa7, 0x7a, 0x7a, 0x00,
+            0x63, 0x64, 0x00, 0x65, 0x66, 0x00, 0xa3, 0xa3, 0xef, 0x71, 0xf6, 0xa1, 0x01, 0xa7,
+            0xa3, 0xb5, 0xd2, 0x4e, 0x00, 0x00, 0x00, 0x01, 0xb2, 0xa7, 0xee, 0xa2, 0x61, 0x62,
+            0xff,
+        ],
+        &[
+            0xf7, 0xef, 0x6b, 0xf6, 0x10, 0x00, 0x20, 0x00, 0xb8, 0xb5, 0xd2, 0x19, 0x00, 0x00,
+            0x00, 0xb1, 0x10, 0x00, 0x20, 0x00, 0xb8, 0xa2, 0xb0, 0x5c, 0x00, 0x00, 0x00, 0xa2,
+            0x63, 0x64, 0x00, 0x65, 0x66, 0x00, 0xef, 0x71, 0xf6, 0xa6, 0x01, 0xb2, 0xa8, 0xd2,
+            0x28, 0x00, 0x00, 0x00, 0x00, 0xb4, 0xa7, 0xb5, 0xd2, 0x14, 0x00, 0x00, 0x00, 0x01,
+            0xa7, 0xee, 0xb5, 0xd2, 0x24, 0x00, 0x00, 0x00, 0x01, 0xa7, 0x00, 0xa1, 0x01, 0xa7,
+            0xff,
+        ],
+        &[
+            0xf7, 0xef, 0x71, 0xf6, 0xa3, 0xa1, 0x01, 0xa7, 0x00, 0xb6, 0xa1, 0x01, 0xa7, 0x7a,
+            0x7a, 0x00, 0xef, 0x6b, 0xf6, 0xb5, 0xd2, 0x46, 0x00, 0x00, 0x00, 0x01, 0xa7, 0x63,
+            0x64, 0x00, 0x65, 0x66, 0x00, 0xb5, 0xd2, 0x62, 0x00, 0x00, 0x00, 0x01, 0xa7, 0xee,
+            0xb5, 0xd2, 0x1f, 0x00, 0x00, 0x00, 0x01, 0xb2, 0xa7, 0xa3, 0xa2, 0xb5, 0xd2, 0x31,
+            0x00, 0x00, 0x00, 0x01, 0xb2, 0xa7, 0xb5, 0xd2, 0x2a, 0x00, 0x00, 0x00, 0x01, 0xb2,
+            0xa7, 0xff,
+        ],
+    ];
+    for (n, body) in residues.iter().enumerate() {
+        let s = script(body);
+        let first = with_order(&s, ORDERS[0]);
+        for order in &ORDERS[1..] {
+            assert!(
+                with_order(&s, *order) == first,
+                "residue {n}, order {order}"
+            );
+        }
+    }
 }
 
 #[test]

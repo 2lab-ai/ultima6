@@ -55,8 +55,13 @@ pub(super) struct Plan {
     settled: BTreeSet<u32>,
     /// Landings whose path fails a check only the whole decode can make (a constant table
     /// index past its entries, its own code inside a table it names): not decoded, a
-    /// [`HazardKind::Dropped`] hazard.
+    /// [`HazardKind::Dropped`] hazard. A read past a table ([`Reason::TableIndex`]) is checked
+    /// again each round: when its cause is gone, the ban lifts
+    /// ([`Decoder::check_table_indices`]).
     banned: BTreeMap<LandingKey, Reason>,
+    /// Landings whose read-past ban was lifted: banned for it again, they stay banned (else
+    /// two landings could take turns).
+    lifted: BTreeSet<LandingKey>,
 }
 
 #[cfg(test)]
@@ -80,6 +85,25 @@ impl Plan {
     /// The bytes reserved, and those settled.
     pub(super) fn bytes(&self) -> (&BTreeSet<u32>, &BTreeSet<u32>) {
         (&self.reserved, &self.settled)
+    }
+
+    /// The banned landings with their reasons, and those whose read-past ban was lifted.
+    pub(super) fn bans(&self) -> (&BTreeMap<LandingKey, Reason>, &BTreeSet<LandingKey>) {
+        (&self.banned, &self.lifted)
+    }
+
+    /// This plan with `k`'s read-past ban marked lifted before.
+    pub(super) fn lifted_before(mut self, k: LandingKey) -> Self {
+        self.lifted.insert(k);
+        self
+    }
+}
+
+#[cfg(test)]
+impl LandingKey {
+    /// The landing's loop and stop byte.
+    pub(super) fn parts(self) -> (Scan, u32) {
+        (self.scan, self.stop)
     }
 }
 
@@ -181,6 +205,8 @@ pub(super) struct Decoder<'a> {
     work: Vec<(u32, Ctx)>,
     scans: Vec<(Landing, Ctx)>,
     landed: Vec<Landing>,
+    /// A banned landing tried anyway, to see whether its ban's cause is still there.
+    force: Option<LandingKey>,
     pub(super) hazards: Vec<Hazard>,
     pub(super) run_splits: Vec<u32>,
 }
@@ -209,6 +235,7 @@ impl<'a> Decoder<'a> {
             work: Vec::new(),
             scans: Vec::new(),
             landed: Vec::new(),
+            force: None,
             hazards: Vec::new(),
             run_splits: Vec::new(),
         }
@@ -328,7 +355,9 @@ impl<'a> Decoder<'a> {
             stop: landing.stop,
             ctx,
         };
-        if let Some(&r) = self.plan.banned.get(&key) {
+        if self.force != Some(key)
+            && let Some(&r) = self.plan.banned.get(&key)
+        {
             return Err(r);
         }
         let saved = self.clone();
@@ -1242,40 +1271,88 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// A constant index may run on into the tables that follow its table without a gap
-    /// ([`reachable`]); past them, a direct path's use refuses the script and a landing's use
-    /// bans that landing for the next round. So does any other read of a table with no entry
-    /// (a computed index, a search with no `b8` at the address): it reads past the table; and a
-    /// search that, with no entry matching, reads on past its tables onto an item
-    /// ([`Self::search_read`]). `None` = every index holds.
-    pub(super) fn check_table_indices(&self) -> Result<Option<Plan>, Refusal> {
-        let mut banned = BTreeMap::new();
-        for (u, origin) in &self.uses {
-            let containing = |a: u32| {
-                let o = *self.owner.get(a as usize)?;
-                self.items.get(&o)
-            };
-            let count = reachable(containing, u.addr, u.words).len();
-            let past = match u.index {
-                Some(index) => index as usize >= count,
-                None if count == 0 => !(u.search && self.b[u.addr as usize] == ops::TABLE_END),
-                None => u.search && matches!(self.search_read(u), SearchRead::Onto),
-            };
-            if past {
-                match origin {
-                    Origin::Direct => return refuse(u.at, Reason::TableIndex),
-                    Origin::Landing(k) => {
-                        banned.insert(*k, Reason::TableIndex);
-                    }
-                }
-            }
+    /// Whether a use's read stays inside the final tables. A constant index may run on into
+    /// the tables that follow its table without a gap ([`reachable`]); any other read of a
+    /// table with no entry (a computed index, a search with no `b8` at the address) reads past
+    /// the table; and so does a search that, with no entry matching, reads on past its tables
+    /// onto an item ([`Self::search_read`]).
+    fn use_holds(&self, u: &TableUse) -> bool {
+        let containing = |a: u32| {
+            let o = *self.owner.get(a as usize)?;
+            self.items.get(&o)
+        };
+        let count = reachable(containing, u.addr, u.words).len();
+        match u.index {
+            Some(index) => (index as usize) < count,
+            None if count == 0 => u.search && self.b[u.addr as usize] == ops::TABLE_END,
+            None => !u.search || !matches!(self.search_read(u), SearchRead::Onto),
         }
-        if banned.is_empty() {
-            return Ok(None);
+    }
+
+    /// The reads past a table of the final decode ([`Self::use_holds`]): a direct path's use
+    /// refuses the script; a landing's use bans every landing whose path runs that op, for the
+    /// next round. A landing banned for it before is tried again on `pre` (this round's decode
+    /// before its tables were claimed), and its ban lifts when the reads its path makes hold
+    /// there (or the trial ends otherwise: the rounds then decide it as any landing). `None` =
+    /// every read holds and no ban lifts.
+    pub(super) fn check_table_indices(&self, pre: &Decoder<'_>) -> Result<Option<Plan>, Refusal> {
+        let reaches = self.reaches();
+        let mut banned = BTreeSet::new();
+        for (u, origin) in &self.uses {
+            if self.use_holds(u) {
+                continue;
+            }
+            if *origin == Origin::Direct {
+                return refuse(u.at, Reason::TableIndex);
+            }
+            banned.extend(
+                runners(&reaches, u.at, *origin)
+                    .into_iter()
+                    .filter_map(|r| match r {
+                        Origin::Landing(k) => Some(k),
+                        Origin::Direct => None,
+                    }),
+            );
         }
         let mut p = self.plan.clone();
-        p.banned.extend(banned);
-        Ok(Some(p))
+        for (&k, &r) in &self.plan.banned {
+            if r == Reason::TableIndex && !self.plan.lifted.contains(&k) && pre.cause_gone(k) {
+                p.banned.remove(&k);
+                p.lifted.insert(k);
+            }
+        }
+        for k in banned {
+            p.banned.entry(k).or_insert(Reason::TableIndex);
+        }
+        Ok((p != *self.plan).then_some(p))
+    }
+
+    /// Whether the reads past a table that banned landing `k` are gone: `k` tried on this
+    /// decode (before its tables are claimed), the tables claimed, and every use its path runs
+    /// (decoded or joined) holding.
+    fn cause_gone(&self, k: LandingKey) -> bool {
+        let mut d = self.clone();
+        d.force = Some(k);
+        let at = if k.scan == Scan::NoMatch
+            && matches!(self.b[k.stop as usize], ops::KEYWORDS | ops::HEADER)
+        {
+            k.stop
+        } else {
+            k.stop + 1
+        };
+        let landing = Landing {
+            scan: k.scan,
+            stop: k.stop,
+            at,
+        };
+        if d.try_landing(landing, k.ctx).is_err() || d.claim_tables().is_err() {
+            return true;
+        }
+        let reach = d.reach(k);
+        d.uses
+            .iter()
+            .filter(|&&(u, o)| o == Origin::Landing(k) || reach.contains(&u.at))
+            .all(|(u, _)| d.use_holds(u))
     }
 
     /// What a search reads when no entry matches, as `index_of_string` / `index_of_word` do:
