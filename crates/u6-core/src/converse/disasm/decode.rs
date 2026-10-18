@@ -128,7 +128,8 @@ struct DirectRead {
 impl DirectRead {
     /// Whether a landing's use `u` names a table in these bytes that does not chain with the
     /// direct read: of the other kind, a word address inside a word, or, past a search's
-    /// tables, anything but a table of its kind right where its tables end.
+    /// tables, anything but a table of its kind right where its tables end. (Its table would
+    /// cut the direct one, or hold a byte the direct use reads, a search's from a `b8` too.)
     fn closes(&self, u: &TableUse) -> bool {
         if !(self.start..self.end).contains(&u.addr) {
             return false;
@@ -1164,11 +1165,9 @@ impl<'a> Decoder<'a> {
             if n == 0 {
                 continue;
             }
-            let end = if *needed >= t.entries.len() {
-                table_end(*addr, t)
-            } else {
-                t.entries[n - 1].end() + u32::from(!t.words)
-            };
+            // To the last needed entry's end (a string's NUL included): a `b8` after it is read
+            // only as an end, and may start another table.
+            let end = t.entries[n - 1].end() + u32::from(!t.words);
             out.push(DirectRead {
                 start: *addr,
                 end,

@@ -2517,6 +2517,45 @@ fn a_landings_table_inside_a_direct_word_table_drops_the_landing() {
 }
 
 #[test]
+fn a_b8_that_ends_a_direct_table_is_read_only_as_an_end() {
+    // A direct string search of `t` = "ab\0" and a `b8`, and the loops' word search of that
+    // `b8`: both read it only as an end (the word search reads nothing), so the loops are not
+    // dropped. With both searches direct, the same layout decodes with no hazard.
+    let (s, t, _) = a_direct_read_and_a_landings(
+        &|t| search_of(t, false),
+        &|t| search_of(t + 3, true),
+        b"ab\0\xb8",
+    );
+    let d = any_order(&s);
+    assert!(d.hazards.is_empty(), "{:?}", d.hazards);
+    let Kind::Table(tb) = &item(&d, t + 3).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert!(tb.words && tb.terminated && tb.entries.is_empty());
+    let t = BODY + 25;
+    let mut body = search_of(t, false);
+    body.extend(search_of(t + 3, true));
+    body.push(0xb6);
+    body.extend(b"ab\0\xb8");
+    let d = any_order(&script(&body));
+    assert!(d.hazards.is_empty(), "{:?}", d.hazards);
+    // A word search from a `b8` inside a string a direct print reads reads nothing, but its
+    // table would hold that byte of the string: the loops are dropped.
+    let (s, _, at) = a_direct_read_and_a_landings(
+        &|t| [&[0xb5][..], &lit32(t), &[0xb1]].concat(),
+        &|t| search_of(t + 2, true),
+        b"ab\xb8cd\0",
+    );
+    assert_eq!(
+        drops(&any_order(&s)),
+        [
+            dropped(at, Scan::Answered, Reason::TableKinds),
+            dropped(at, Scan::NoMatch, Reason::TableKinds)
+        ]
+    );
+}
+
+#[test]
 fn the_bytes_a_direct_search_reads_on_are_closed_to_landings() {
     // A direct search of `t` = "ab\0" and bytes with no NUL or `b8` to the script's end: it
     // reads on over them. The loops' word table there is dropped; their jump there stops at
