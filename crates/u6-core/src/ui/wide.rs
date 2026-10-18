@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(forms("검"), ["이", "은", "을", "과", "으로"]);
         assert_eq!(forms("나무"), ["가", "는", "를", "와", "로"]);
         assert_eq!(
-            forms("Iolo"),
+            forms("Bob"),
             ["이(가)", "은(는)", "을(를)", "과(와)", "(으)로"]
         );
         assert_eq!(

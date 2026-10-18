@@ -267,15 +267,15 @@ fn josa_markers_follow_the_last_cell() {
         each("나무"),
         ["나무가", "나무는", "나무를", "나무와", "나무로"]
     );
-    let name = |m: &str| line(Language::Korean, &format!("%s{m}"), &[Arg::Str(b"Iolo")]);
+    let name = |m: &str| line(Language::Korean, &format!("%s{m}"), &[Arg::Str(b"Bob")]);
     assert_eq!(
         markers.map(name),
         [
-            "Iolo이(가)",
-            "Iolo은(는)",
-            "Iolo을(를)",
-            "Iolo과(와)",
-            "Iolo(으)로"
+            "Bob이(가)",
+            "Bob은(는)",
+            "Bob을(를)",
+            "Bob과(와)",
+            "Bob(으)로"
         ],
         "a Latin name"
     );
