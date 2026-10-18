@@ -1743,6 +1743,158 @@ fn a_read_of_a_table_with_no_entry_reads_past_it() {
     assert!(both_dropped(&d, Reason::TableIndex), "{:?}", d.hazards);
 }
 
+/// `a6 01 b2 a8 d2 <x> 03 b7 a7` (`b7`: a search of the strings at `x` for slot 3), or with
+/// `01 c3` (`c3`: of the words at `x` for word variable 1).
+fn search_of(x: u32, words: bool) -> Vec<u8> {
+    let op: &[u8] = if words { &[0x01, 0xc3] } else { &[0x03, 0xb7] };
+    [&[0xa6, 0x01, 0xb2, 0xa8][..], &lit32(x), op, &[0xa7]].concat()
+}
+
+#[test]
+fn a_search_reads_on_past_a_table_with_no_b8_as_the_interpreter_does() {
+    // A direct search of "ab\0cd\0zz" at `t`, then the script's end: with no entry matching,
+    // the interpreter reads "zz" and past the end. A hazard at the op, with those bytes.
+    let with = |op: Vec<u8>, tail: &[u8]| {
+        let t = BODY + op.len() as u32 + 1;
+        let mut body = op;
+        body.push(0xb6);
+        body.extend_from_slice(tail);
+        (script(&body), t)
+    };
+    let past = |d: &Disasm| -> Vec<Span> {
+        d.hazards
+            .iter()
+            .filter_map(|h| match h.kind {
+                HazardKind::SearchPastEnd(sp) if h.at == BODY => Some(sp),
+                _ => None,
+            })
+            .collect()
+    };
+    let (s, t) = with(search_of(BODY + 13, false), b"ab\0cd\0zz");
+    let d = ok(&s);
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(
+        tb.entries.iter().map(|e| e.bytes(&s)).collect::<Vec<_>>(),
+        [&b"ab"[..], b"cd"]
+    );
+    assert_eq!(
+        past(&d),
+        [Span {
+            offset: t + 6,
+            len: 2
+        }]
+    );
+    // Its last entry at the script's end; a word search with one byte left.
+    let (s, t) = with(search_of(BODY + 13, false), b"ab\0");
+    assert_eq!(
+        past(&ok(&s)),
+        [Span {
+            offset: t + 3,
+            len: 0
+        }]
+    );
+    let (s, t) = with(search_of(BODY + 13, true), b"\x10\x00\x20\x00\x30");
+    assert_eq!(
+        past(&ok(&s)),
+        [Span {
+            offset: t + 4,
+            len: 1
+        }]
+    );
+    // A search from inside the first string of the table a print names.
+    let t = BODY + 30;
+    let mut body = vec![0xb5];
+    body.extend(lit32(t));
+    body.push(0xb1);
+    body.extend(search_of(t + 1, false));
+    body.push(0xb6);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"abcd\0ef\0");
+    let d = ok(&script(&body));
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!((tb.inner.as_slice(), tb.entries.len()), (&[t + 1][..], 2));
+    assert!(d.hazards.contains(&Hazard {
+        at: BODY + 7,
+        kind: HazardKind::SearchPastEnd(Span {
+            offset: t + 8,
+            len: 0
+        })
+    }));
+    // A `b8` ends it: no hazard.
+    let (s, _) = with(search_of(BODY + 13, false), b"ab\0\xb8");
+    assert!(past(&ok(&s)).is_empty());
+}
+
+#[test]
+fn a_search_past_its_last_entry_onto_an_item_reads_past_its_table() {
+    // "ab\0" at `t`, and right after it the `b6` a jump goes to: with no entry matching, the
+    // search reads that code. A direct path's search refuses the script.
+    let t = BODY + 17;
+    let mut body = search_of(t, false);
+    body.extend(jump(t + 3));
+    body.extend(b"ab\0\xb6");
+    assert_eq!(
+        refused(&script(&body)),
+        Refusal {
+            at: BODY,
+            reason: Reason::TableIndex
+        }
+    );
+    // On a landing's path, the landing is dropped.
+    let t = BODY + 12 + 17;
+    let mut tail = search_of(t, false);
+    tail.extend(jump(t + 3));
+    tail.extend(b"ab\0\xb6");
+    let d = ok(&after_a_block(&tail));
+    assert!(both_dropped(&d, Reason::TableIndex), "{:?}", d.hazards);
+}
+
+#[test]
+fn a_searched_table_wins_over_another_landings_code_up_to_its_b8() {
+    // The a1's landing runs "cd" at `y`; the block's loops search `t` = "ab\0", then "cd\0"
+    // and the script's end. The search reads "cd" as its second entry: the table keeps it and
+    // the a1's landing stops there; the search reads on past the end.
+    let x = BODY + 13;
+    let t = x + 23;
+    let y = t + 3;
+    let mut rest = jump(y);
+    rest.push(0xee);
+    rest.extend(search_of(t, false));
+    rest.extend(jump(BODY));
+    rest.extend(b"ab\0cd\0");
+    let s = after_an_if(&rest);
+    let [a, b] = both_orders(&s);
+    assert!(a == b, "{:?}\n{:?}", a.1, b.1);
+    let d = ok(&s);
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(
+        tb.entries.iter().map(|e| e.bytes(&s)).collect::<Vec<_>>(),
+        [&b"ab"[..], b"cd"]
+    );
+    assert_eq!(
+        sorted_hazards(&d),
+        [
+            Hazard {
+                at: x + 6,
+                kind: HazardKind::SearchPastEnd(Span {
+                    offset: t + 6,
+                    len: 0
+                })
+            },
+            Hazard {
+                at: y,
+                kind: HazardKind::IntoData
+            }
+        ]
+    );
+}
+
 #[test]
 fn skip_loops_step_over_each_operand_width() {
     // A false `a1` steps over `b0`'s 4 operand bytes, `d3`'s 1 and `d4`'s 2: a stop byte in
@@ -1977,14 +2129,21 @@ fn an_inner_address_read_with_no_constant_index_keeps_its_string_in_either_order
                 "{what}"
             );
             assert_eq!(tb.inner, [u], "{what}");
-            assert_eq!(
-                d.hazards,
-                [Hazard {
-                    at: to,
-                    kind: HazardKind::IntoData
-                }],
-                "{what}"
-            );
+            let mut want = vec![Hazard {
+                at: to,
+                kind: HazardKind::IntoData,
+            }];
+            // With no `b8`, a search that matches nothing reads on past the script's end.
+            if what.starts_with("search") {
+                want.push(Hazard {
+                    at: t - 5 - op(0).len() as u32,
+                    kind: HazardKind::SearchPastEnd(Span {
+                        offset: t + 6,
+                        len: 0,
+                    }),
+                });
+            }
+            assert_eq!(d.hazards, want, "{what}");
         }
     }
 }

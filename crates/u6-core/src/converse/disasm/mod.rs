@@ -61,7 +61,11 @@
 //! - a constant index is checked against the final tables (its table and the ones that follow
 //!   it without a gap): past them, a direct use refuses the script and a landing's use drops
 //!   that landing in the next round; so does any other read of a table with no entry (a
-//!   computed index, a search with no `b8` at the address), which reads past the table.
+//!   computed index, a search with no `b8` at the address), which reads past the table. A
+//!   search reads every entry up to a `b8`, so its table never ends at landing code; with no
+//!   `b8` at its end, a search that matches no entry reads on past it: onto an item, that too
+//!   is a read past the table, and past the script's end it is a hazard
+//!   ([`HazardKind::SearchPastEnd`]).
 //!
 //! The rounds end: each one grows the dropped landings or the settled bytes, or (with those
 //! unchanged) the reserved bytes, all bounded by the script's length.
@@ -398,6 +402,10 @@ pub enum HazardKind {
     Scan(Scan),
     /// A skip loop finds no stop byte before the script's end.
     ScanPastEnd(Scan),
+    /// A search (`b7` / `c3`, at the op) of a table with no `b8`, nor one in the tables that
+    /// follow it without a gap: when no entry matches, the interpreter reads on past the last
+    /// entry over these bytes, which no item holds, and past the script's end.
+    SearchPastEnd(Span),
     /// A landing's path reaches a byte of the range of a table a kept path names (its address
     /// or any byte after it): it stops there.
     IntoData,
@@ -524,6 +532,7 @@ pub fn disassemble(archive: u8, item: u16, bytes: &[u8]) -> Result<Disasm, Refus
                     match d.check_table_indices()? {
                         Some(next) => next,
                         None => {
+                            d.search_hazards();
                             let items = d.finish();
                             return Ok(Disasm {
                                 archive,

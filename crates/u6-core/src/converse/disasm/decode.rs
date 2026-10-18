@@ -88,6 +88,9 @@ const NO_OWNER: u32 = u32::MAX;
 /// A constant index that reaches no entry of its table (a word index whose move is negative).
 const NO_ENTRY: u32 = u32::MAX;
 
+/// The entries a search needs of its table: all of them, up to the `b8` (it reads on to one).
+const EVERY_ENTRY: usize = usize::MAX;
+
 /// A table use an op makes: its kind and the entry a constant index reads (`None` = any).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TableUse {
@@ -976,13 +979,15 @@ impl<'a> Decoder<'a> {
     /// at the first byte of landing code, but not before the last entry a constant index of a
     /// use reads, of this table or, through the tables before it that end where it starts (an
     /// index runs on into them, [`reachable`]), of an earlier one, nor before a string an
-    /// address inside it is read from.
+    /// address inside it is read from; and not at all when a search reads it (up to a `b8`).
     fn table_ranges(&self) -> Vec<(u32, Table)> {
-        // Per address: the kind and the entries its uses' constant indices need.
+        // Per address: the kind and the entries its uses' constant indices and searches need.
         let mut by_addr: BTreeMap<u32, (bool, usize)> = BTreeMap::new();
         for (u, _) in &self.uses {
             let e = by_addr.entry(u.addr).or_insert((u.words, 0));
-            if let Some(i) = u.index.filter(|&i| i != NO_ENTRY) {
+            if u.search {
+                e.1 = EVERY_ENTRY;
+            } else if let Some(i) = u.index.filter(|&i| i != NO_ENTRY) {
                 e.1 = e.1.max(i as usize + 1);
             }
         }
@@ -1024,7 +1029,7 @@ impl<'a> Decoder<'a> {
                 // Index `k` from `u` reads string `i + k` of this table; any read from `u`
                 // reads string `i` at least, so the table keeps it.
                 inner.push(u);
-                inner_need = inner_need.max(i + u_need.max(1));
+                inner_need = inner_need.max(i.saturating_add(u_need.max(1)));
                 m += 1;
             }
             let next = addrs.get(m).copied().unwrap_or(self.len());
@@ -1171,8 +1176,9 @@ impl<'a> Decoder<'a> {
     /// A constant index may run on into the tables that follow its table without a gap
     /// ([`reachable`]); past them, a direct path's use refuses the script and a landing's use
     /// bans that landing for the next round. So does any other read of a table with no entry
-    /// (a computed index, a search with no `b8` at the address): it reads past the table.
-    /// `None` = every index holds.
+    /// (a computed index, a search with no `b8` at the address): it reads past the table; and a
+    /// search that, with no entry matching, reads on past its last one onto an item
+    /// ([`Self::search_past`]). `None` = every index holds.
     pub(super) fn check_table_indices(&self) -> Result<Option<Plan>, Refusal> {
         let mut banned = BTreeMap::new();
         for (u, origin) in &self.uses {
@@ -1183,7 +1189,8 @@ impl<'a> Decoder<'a> {
             let count = reachable(containing, u.addr, u.words).len();
             let past = match u.index {
                 Some(index) => index as usize >= count,
-                None => count == 0 && !(u.search && self.b[u.addr as usize] == ops::TABLE_END),
+                None if count == 0 => !(u.search && self.b[u.addr as usize] == ops::TABLE_END),
+                None => u.search && self.search_past(u).is_some_and(|(_, held)| held),
             };
             if past {
                 match origin {
@@ -1200,6 +1207,65 @@ impl<'a> Decoder<'a> {
         let mut p = self.plan.clone();
         p.banned.extend(banned);
         Ok(Some(p))
+    }
+
+    /// Where a search reads on past its last entry when none matches, if its table (with the
+    /// ones that follow it without a gap) has no `b8`: as the interpreter does, an entry at a
+    /// time from the last table's end, up to a `b8` at an entry's start or past the script's
+    /// end. The bytes it reads there, and whether an item holds any of them.
+    fn search_past(&self, u: &TableUse) -> Option<(Span, bool)> {
+        let containing = |a: u32| {
+            let o = *self.owner.get(a as usize)?;
+            self.items.get(&o)
+        };
+        let &(t, _, _) = reachable(containing, u.addr, u.words).last()?;
+        let last = &self.items[&t];
+        if matches!(&last.kind, Kind::Table(tb) if tb.terminated) {
+            return None;
+        }
+        let from = last.end();
+        let mut p = from;
+        let end = loop {
+            match self.b.get(p as usize) {
+                None => break self.len(),
+                Some(&ops::TABLE_END) => break p + 1,
+                Some(_) if u.words => p += 2,
+                Some(_) => match self.first(p, 0) {
+                    Some(nul) => p = nul + 1,
+                    None => break self.len(),
+                },
+            }
+        };
+        let held = (from..end).any(|b| self.owner[b as usize] != NO_OWNER);
+        Some((
+            Span {
+                offset: from,
+                len: end - from,
+            },
+            held,
+        ))
+    }
+
+    /// The final decode's searches that, with no entry matching, read on past their last entry
+    /// and past the script's end (onto no item: [`Self::check_table_indices`] took the others):
+    /// a [`HazardKind::SearchPastEnd`] at the op.
+    pub(super) fn search_hazards(&mut self) {
+        let past: Vec<Hazard> = self
+            .uses
+            .iter()
+            .filter(|(u, _)| u.search)
+            .filter_map(|(u, _)| {
+                let (span, held) = self.search_past(u)?;
+                debug_assert!(!held, "a search onto an item is a read past its table");
+                Some(Hazard {
+                    at: u.at,
+                    kind: HazardKind::SearchPastEnd(span),
+                })
+            })
+            .collect();
+        for h in past {
+            self.hazard(h.at, h.kind);
+        }
     }
 
     /// The entries of a table at `addr` that ends before `limit`.

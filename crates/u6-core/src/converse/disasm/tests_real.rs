@@ -66,6 +66,7 @@ fn reason_label(r: Reason) -> &'static str {
 fn hazard_label(k: HazardKind) -> String {
     match k {
         HazardKind::Dropped(scan, r) => format!("Dropped({scan:?}, {})", reason_label(r)),
+        HazardKind::SearchPastEnd(_) => "SearchPastEnd".into(),
         k => format!("{k:?}"),
     }
 }
