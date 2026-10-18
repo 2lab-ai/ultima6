@@ -1539,6 +1539,34 @@ fn an_address_inside_another_tables_string_reads_that_strings_rest() {
 }
 
 #[test]
+fn several_addresses_inside_one_string_are_all_of_its_table() {
+    // Prints of the string at `t` and of its rest from `t + 1`, `t + 2` and `t + 3`, all
+    // before its NUL; then index 1 from `t + 3`, the string after it.
+    let t = BODY + 40;
+    let mut body = Vec::new();
+    for at in [t, t + 1, t + 2, t + 3] {
+        body.push(0xb5);
+        body.extend(lit32(at));
+        body.push(0xb1);
+    }
+    body.push(0xb5);
+    body.extend(lit32(t + 3));
+    body.extend([0x01, 0xa7, 0xb6]);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"abcd\0ef\0\xb8");
+    let s = script(&body);
+    let d = ok(&s);
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.inner, [t + 1, t + 2, t + 3]);
+    assert_eq!(
+        tb.entries.iter().map(|e| e.bytes(&s)).collect::<Vec<_>>(),
+        [&b"abcd"[..], b"ef"]
+    );
+}
+
+#[test]
 fn indices_and_addresses_have_the_interpreters_width() {
     let t = BODY + 20;
     let strings = |op: &[u8]| {

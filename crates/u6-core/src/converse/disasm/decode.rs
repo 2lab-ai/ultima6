@@ -969,18 +969,29 @@ impl<'a> Decoder<'a> {
             let (words, own) = by_addr[&addr];
             // The string addresses after it that fall inside one of its strings (not at a
             // string's start) are of this table: a read there starts in the middle of a string.
+            // Its strings up to direct code or a word table's address: the string addresses
+            // after it are no boundary until each is found inside a string or at a string's
+            // start (which ends this table).
             let (mut m, mut inner, mut inner_need) = (n + 1, Vec::new(), 0);
-            while let Some(&u) = addrs.get(m).filter(|_| !words) {
+            let bound = addrs[m..]
+                .iter()
+                .copied()
+                .find(|a| by_addr[a].0)
+                .unwrap_or(self.len());
+            let direct = (addr..bound).find(|&p| self.direct_at(p)).unwrap_or(bound);
+            let strings = if words {
+                Vec::new()
+            } else {
+                self.table_at(addr, direct, false).entries
+            };
+            while let Some(&u) = addrs.get(m) {
                 let (u_words, u_need) = by_addr[&u];
-                let after = addrs.get(m + 1).copied().unwrap_or(self.len());
-                let direct = (addr..after).find(|&p| self.direct_at(p)).unwrap_or(after);
-                let strings = self.table_at(addr, direct, false).entries;
-                let Some(i) = strings.iter().position(|e| e.offset < u && u <= e.end()) else {
-                    break;
-                };
                 if u_words {
                     break;
                 }
+                let Some(i) = strings.iter().position(|e| e.offset < u && u <= e.end()) else {
+                    break;
+                };
                 // Index `k` from `u` reads string `i + k` of this table.
                 inner.push(u);
                 inner_need = inner_need.max(if u_need > 0 { i + u_need } else { 0 });
