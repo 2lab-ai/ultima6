@@ -146,10 +146,45 @@ pub(super) fn logged(
     pair_line(1, p, fail, result, sides, source, at, &gates())
 }
 
-/// The list ingest writes for the records `rs` (×8 masters of 128 × 128).
-pub(super) fn listed(g: &Game, rs: impl IntoIterator<Item = u16>) -> Vec<Accepted> {
-    rs.into_iter()
-        .map(|r| {
+/// The ×8 master of the ×4 image `img`: each pixel a 2 × 2 block whose subpixels differ (one
+/// channel up and down by as much as it can, to 8) and whose box average is the pixel, so a
+/// master reduced by any other rule than `pack`'s is not `img`.
+pub(super) fn master(img: &Rgba) -> Rgba {
+    let mut m = Rgba::new(img.width * 2, img.height * 2);
+    for y in 0..img.height {
+        for x in 0..img.width {
+            let p = img::get(img, x, y);
+            for (k, (dx, dy)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+                let mut q = p;
+                let c = (x + y) as usize % 3;
+                let d = p[c].min(255 - p[c]).min(8);
+                q[c] = if k == 0 || k == 3 { p[c] + d } else { p[c] - d };
+                img::put(&mut m, 2 * x + dx, 2 * y + dy, q);
+            }
+        }
+    }
+    m
+}
+
+/// The file of [`master`] of `img`, as ingest writes it.
+pub(super) fn master_png(img: &Rgba) -> Vec<u8> {
+    img::encode_png(&master(img)).unwrap()
+}
+
+/// The masters of the ×4 images `images` as read: each record with its file's digest.
+pub(super) fn digests(images: &BTreeMap<u16, Rgba>) -> BTreeMap<u16, String> {
+    images
+        .iter()
+        .map(|(&r, i)| (r, work::digest(&[&master_png(i)])))
+        .collect()
+}
+
+/// The list ingest writes for the ×4 images `images`: each ×8 master ([`master`]) of 128 × 128,
+/// with its file's digest.
+pub(super) fn listed(g: &Game, images: &BTreeMap<u16, Rgba>) -> Vec<Accepted> {
+    images
+        .iter()
+        .map(|(&r, i)| {
             let id = ImageId::Tile(r);
             Accepted {
                 image: atlas::image_name(id),
@@ -157,6 +192,7 @@ pub(super) fn listed(g: &Game, rs: impl IntoIterator<Item = u16>) -> Vec<Accepte
                 width: 128,
                 height: 128,
                 slice: format!("slices/{}.png", atlas::slice_name(id)),
+                digest: Some(work::digest(&[&master_png(i)])),
             }
         })
         .collect()
@@ -198,9 +234,8 @@ pub(super) fn chain(g: &Game) -> (String, BTreeMap<u16, Rgba>) {
 /// The state of `text` with the images `left` (each listed, each a master), or its kinds of
 /// disagreement.
 fn state(g: &Game, text: &str, left: &BTreeMap<u16, Rgba>) -> Result<Fixed, Vec<&'static str>> {
-    let files: BTreeSet<u16> = left.keys().copied().collect();
-    let list = listed(g, files.iter().copied());
-    state_of(g, text, left, &list, &files)
+    let list = listed(g, left);
+    state_of(g, text, left, &list, &digests(left))
 }
 
 fn state_of(
@@ -208,7 +243,7 @@ fn state_of(
     text: &str,
     left: &BTreeMap<u16, Rgba>,
     list: &[Accepted],
-    files: &BTreeSet<u16>,
+    files: &BTreeMap<u16, String>,
 ) -> Result<Fixed, Vec<&'static str>> {
     let plan = group::plan(g);
     let rec = record(text).unwrap();
@@ -330,16 +365,15 @@ fn the_record_and_the_slices_must_agree() {
     kept.insert(A, red_west(&near(&g, A)));
     assert_eq!(state(&g, &text, &kept).unwrap_err(), ["fallen", "failing"]);
     // Listed, and no master; a master not listed.
-    let files = BTreeSet::new();
     let none = BTreeMap::new();
-    let err = state_of(&g, &text, &none, &listed(&g, [B]), &files);
+    let err = state_of(&g, &text, &none, &listed(&g, &left), &BTreeMap::new());
     assert_eq!(err.unwrap_err(), ["slice", "sides"]);
-    let err = state_of(&g, &text, &left, &[], &BTreeSet::from([B]));
+    let err = state_of(&g, &text, &left, &[], &digests(&left));
     assert_eq!(err.unwrap_err(), ["slice", "sides"]);
     // A listed hash that is not the game's.
-    let mut list = listed(&g, [B]);
+    let mut list = listed(&g, &left);
     list[0].hash = "0".repeat(16);
-    let err = state_of(&g, &text, &left, &list, &BTreeSet::from([B]));
+    let err = state_of(&g, &text, &left, &list, &digests(&left));
     assert_eq!(err.unwrap_err(), ["listed"]);
     // A master the gate refuses: not ×4 of its record.
     let small = BTreeMap::from([(B, Rgba::new(32, 32))]);
@@ -365,6 +399,84 @@ fn the_record_and_the_slices_must_agree() {
     };
     let other_gates = text.replace(&gates(), &t.text());
     assert_eq!(state(&g, &other_gates, &left).unwrap_err(), ["gates"]);
+}
+
+#[test]
+fn a_master_is_the_one_ingest_wrote() {
+    // A survivor in no pair (the chest, drawn at (12, 12)) and one drawn nowhere (the sword):
+    // no pair holds their masters to the log.
+    let mut g = game();
+    let chest = synthetic::OBJECTS;
+    let sword = synthetic::OBJECTS + 2;
+    g.world.objects = vec![crate::game::Placed {
+        x: 12,
+        y: 12,
+        z: 0,
+        tile: chest,
+    }];
+    let images: BTreeMap<u16, Rgba> = [chest, sword].iter().map(|&r| (r, near(&g, r))).collect();
+    let (dir, work) = work_dir("master", "", &g, &images);
+    assert!(calibrate_final(&g, &work, &options(&dir)).is_ok());
+    // The sword's master replaced after ingest by a solid image (the reviewer's probe B): the
+    // listed digest is not the file's.
+    let mut solid = Rgba::new(64, 64);
+    img::fill(&mut solid, 0, 0, 64, 64, [255, 0, 255, 255]);
+    let path = work.slice(&atlas::slice_name(ImageId::Tile(sword)));
+    std::fs::write(&path, master_png(&solid)).unwrap();
+    let o = FinalOptions {
+        out: dir.join("replaced"),
+        ..options(&dir)
+    };
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(e.contains("disagree, nothing drawn: master 1"), "{e}");
+    assert_eq!(
+        files_of(&o.out),
+        ["disagreements.txt", "gates.jsonl", "ingest.json"]
+    );
+    let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
+    assert_eq!(
+        detail,
+        format!("master: t:{sword}: its master is not the file ingest wrote (another digest)\n")
+    );
+    // An ingest.json of an older ingest, with no digests: refused, before anything is drawn.
+    std::fs::write(&path, master_png(&images[&sword])).unwrap();
+    let mut list = listed(&g, &images);
+    list.iter_mut().for_each(|a| a.digest = None);
+    work.write("ingest.json", &serde_json::to_vec(&list).unwrap())
+        .unwrap();
+    let text = std::fs::read_to_string(work.path("ingest.json")).unwrap();
+    assert!(!text.contains("digest"));
+    let o = FinalOptions {
+        out: dir.join("older"),
+        ..options(&dir)
+    };
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(
+        e.contains("no digest of its masters") && e.contains("run ingest again"),
+        "{e}"
+    );
+    assert_eq!(files_of(&o.out), ["gates.jsonl", "ingest.json"]);
+    // In the state itself, too: a listed master with no digest is not the one ingest wrote.
+    let fixed_of = |list: &[Accepted]| {
+        let plan = group::plan(&g);
+        let slices = Slices::new(&g, images.clone());
+        fixed(
+            &g,
+            &plan,
+            &Record::default(),
+            list,
+            &digests(&images),
+            &slices,
+            seam(),
+        )
+    };
+    let e = fixed_of(&list).unwrap_err();
+    assert!(
+        e.iter().all(|d| d.kind == "master") && e.len() == 2,
+        "{e:?}"
+    );
+    assert!(fixed_of(&listed(&g, &images)).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The files of the out dir `out`, sorted.
@@ -424,26 +536,20 @@ fn a_neighbour_field_that_is_not_a_pair_stops_the_read() {
 }
 
 /// A temp dir with a work dir: `gates` as its `gates.jsonl`, the records of `images` (×4) listed
-/// in `ingest.json` and each written to `slices/` as its ×8 master (each ×4 pixel 2 × 2).
+/// in `ingest.json` and each written to `slices/` as its ×8 master ([`master`]).
 fn work_dir(name: &str, gates: &str, g: &Game, images: &BTreeMap<u16, Rgba>) -> (PathBuf, Work) {
     let dir = std::env::temp_dir().join(format!("u6-hdtool-final-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let work = Work::open(Some(&dir.join("work"))).unwrap();
     work.write("gates.jsonl", gates.as_bytes()).unwrap();
-    let list = listed(g, images.keys().copied());
+    let list = listed(g, images);
     work.write("ingest.json", &serde_json::to_vec(&list).unwrap())
         .unwrap();
     std::fs::create_dir_all(work.path("slices")).unwrap();
     for (&r, img4) in images {
-        let mut m = Rgba::new(img4.width * 2, img4.height * 2);
-        for y in 0..m.height {
-            for x in 0..m.width {
-                img::put(&mut m, x, y, img::get(img4, x / 2, y / 2));
-            }
-        }
         let stem = atlas::slice_name(ImageId::Tile(r));
-        img::write_png(&work.slice(&stem), &m).unwrap();
+        std::fs::write(work.slice(&stem), master_png(img4)).unwrap();
     }
     (dir, work)
 }

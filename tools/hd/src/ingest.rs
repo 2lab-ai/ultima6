@@ -82,6 +82,11 @@ pub struct Accepted {
     pub width: u32,
     pub height: u32,
     pub slice: String,
+    /// The digest ([`work::digest`]) of the master's file as ingest wrote it: the image the
+    /// gates judged, which `calibrate --final` holds the masters to (`pack` does not read it).
+    /// An `ingest.json` of an older ingest has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 /// What ingest found: records per class and status, and what it did.
@@ -597,13 +602,17 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
         {
             for j in v.iter().filter(|j| j.classic.has_opaque()) {
                 let stem = atlas::slice_name(j.id);
-                img::write_png(&work.slice(&stem), &j.hd)?;
+                let path = work.slice(&stem);
+                let bytes =
+                    img::encode_png(&j.hd).map_err(|e| format!("{}: {e}", path.display()))?;
+                work::write_file(&path, &bytes)?;
                 accepted.push(Accepted {
                     image: j.place.image.clone(),
                     hash: j.place.hash.clone(),
                     width: j.hd.width,
                     height: j.hd.height,
                     slice: format!("slices/{stem}.png"),
+                    digest: Some(work::digest(&[&bytes])),
                 });
             }
         }

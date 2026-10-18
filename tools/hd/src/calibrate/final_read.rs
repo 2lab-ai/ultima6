@@ -249,9 +249,9 @@ fn tile(id: ImageId) -> Option<u16> {
 }
 
 /// What the fixed point left, from the record `rec` (of `gates.jsonl`), the list `accepted` (of
-/// `ingest.json`), the tile masters `files` found in `slices/` and the images `slices` read from
-/// them; the pairs measured again with the seam threshold `seam`. Every disagreement, or the
-/// state:
+/// `ingest.json`), the tile masters `files` found in `slices/` (each with the digest of its
+/// file as read) and the images `slices` read from them; the pairs measured again with the seam
+/// threshold `seam`. Every disagreement, or the state:
 ///
 /// - `gates`: a pair line gated with another seam threshold (its `gates` text, as ingest writes
 ///   it, says `seam<=` another value; nothing else is checked then: every limit would differ);
@@ -261,6 +261,8 @@ fn tile(id: ImageId) -> Option<u16> {
 ///   that no item has;
 /// - `listed`: a listed image whose id, slice path or content hash is not the game's;
 /// - `slice`: a master not listed, or listed and missing, or of a record the game has no image of;
+/// - `master`: a master whose file is not the one ingest wrote (its digest in `ingest.json`, of
+///   what the gates judged; none in an `ingest.json` of an older ingest);
 /// - `part`: an item listed in part;
 /// - `fallen`: a listed image of an item the gate sent back;
 /// - `sides`: a pass-1 line whose sides are not what the slices and the fallbacks make them
@@ -280,7 +282,7 @@ pub fn fixed(
     plan: &Plan,
     rec: &Record,
     accepted: &[Accepted],
-    files: &BTreeSet<u16>,
+    files: &BTreeMap<u16, String>,
     slices: &Slices,
     seam: f32,
 ) -> Result<Fixed, Vec<Disagreement>> {
@@ -375,9 +377,26 @@ pub fn fixed(
                 format!("{}: the content hash is not the game's", a.image),
             );
         }
+        // The master read is the one ingest wrote, which the gates judged.
+        if let Some(read) = tile(id).and_then(|r| files.get(&r))
+            && a.digest.as_ref() != Some(read)
+        {
+            say!(
+                "master",
+                format!(
+                    "{}: its master is not the file ingest wrote ({})",
+                    a.image,
+                    a.digest
+                        .as_ref()
+                        .map_or("no digest listed: an older ingest", |_| "another digest")
+                ),
+            );
+        }
         listed.insert(id);
     }
     let listed_tiles: BTreeSet<u16> = listed.iter().filter_map(|&id| tile(id)).collect();
+    let files: BTreeSet<u16> = files.keys().copied().collect();
+    let files = &files;
     for r in files.difference(&listed_tiles) {
         say!(
             "slice",
@@ -1216,10 +1235,17 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
     let list: Vec<Accepted> =
         serde_json::from_slice(&list_bytes).map_err(|e| format!("ingest.json: {e}"))?;
     let rec = record(text)?;
+    if list.iter().any(|a| a.digest.is_none()) {
+        return Err(
+            "ingest.json has no digest of its masters (written by an older ingest): run ingest \
+             again, so that the final read can hold the masters to what the gates judged"
+                .into(),
+        );
+    }
     // The masters listed once and each read once: the records with one are the ones read.
     let dir = work.path("slices");
     let slices = Rc::new(Slices::read(game, &dir)?);
-    let files: BTreeSet<u16> = slices.digests().keys().copied().collect();
+    let files: BTreeMap<u16, String> = slices.digests().clone();
     #[cfg(test)]
     for (key, touch) in AFTER_READ.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         if *key == o.out {

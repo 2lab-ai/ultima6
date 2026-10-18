@@ -999,6 +999,7 @@ fn a_part_transparent_pair_is_measured_as_the_page_composes_it() {
         width: 128,
         height: 128,
         slice: format!("slices/{stem}.png"),
+        digest: None,
     }];
     w.write("ingest.json", &serde_json::to_vec(&listed).unwrap())
         .unwrap();
