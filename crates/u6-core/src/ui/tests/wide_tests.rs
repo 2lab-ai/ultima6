@@ -454,23 +454,116 @@ fn a_brace_highlight_with_wide_on() {
     // Plain `@` as before: to the end set.
     assert_eq!(cell(fb, 30, 14, ALERT), b'c');
     assert_eq!(row_text(fb, 31..34, 14, INK), ". d");
-    // A braced phrase keeps the colour past a wrapped row and past a flush.
+    // A braced phrase keeps the colour past a wrapped row, past the flush of a key wait (`*`)
+    // and past a `#n` inside it.
     let e = print(wide(Language::English), b"@{aaaa bbbb cccc dddd} e", &[]);
     assert_eq!(row_text(e.frame(), 22..36, 14, ALERT), "aaaa bbbb cccc");
     assert_eq!(row_text(e.frame(), 22..26, 15, ALERT), "dddd");
     assert_eq!(row_text(e.frame(), 26..28, 15, INK), " e");
-    let e = run(wide(Language::English), &[], 4, |st, io| async move {
-        printf(&st, &io, b"@{ab", &[]).await;
-        print::put_raw(&st, &io, -1).await;
-        printf(&st, &io, b"#1d} e", &[]).await;
-        print::put_raw(&st, &io, -1).await;
-        io.present();
-    });
+    let e = run(
+        wide(Language::English),
+        &[Key::Char('a')],
+        6,
+        |st, io| async move {
+            printf(&st, &io, b"@{ab*#1d} e", &[]).await;
+            print::put_raw(&st, &io, -1).await;
+            io.present();
+        },
+    );
+    assert!(e.finished(), "the key ended the wait");
     assert_eq!(row_text(e.frame(), 22..26, 14, ALERT), "ab0d");
     assert_eq!(row_text(e.frame(), 26..28, 14, INK), " e");
     // Off, `@{` is the plain keyword with its brace.
     let e = print(state(), b"@{x} y", &[]);
     assert_eq!(row_text(e.frame(), 22..25, 14, ALERT), "{x}");
+}
+
+#[test]
+fn a_brace_left_open_closes_where_the_printf_format_ends() {
+    // `@{ab` with no `}`: the brace closes at the end of its format, the text ink comes back,
+    // and a `}` in the next format is a character like any other.
+    let e = run(wide(Language::English), &[], 4, |st, io| async move {
+        printf(&st, &io, b"@{ab", &[]).await;
+        {
+            let t = &st.borrow().ui.text;
+            assert!(!t.brace, "the brace is closed");
+            assert_eq!(t.win().fg, INK, "the text ink");
+        }
+        printf(&st, &io, b"c}d", &[]).await;
+        print::put_raw(&st, &io, -1).await;
+        io.present();
+    });
+    assert_eq!(row_text(e.frame(), 22..24, 14, ALERT), "ab");
+    assert_eq!(row_text(e.frame(), 24..27, 14, INK), "c}d");
+    assert_eq!(lines(&e), ["abc}d"]);
+    // Opened in a field, it closes at the end of the format the field is in.
+    let e = run(wide(Language::English), &[], 4, |st, io| async move {
+        printf(&st, &io, b"%s-", &[Arg::Str(b"@{x")]).await;
+        printf(&st, &io, b"y", &[]).await;
+        print::put_raw(&st, &io, -1).await;
+        io.present();
+    });
+    assert_eq!(row_text(e.frame(), 22..24, 14, ALERT), "x-");
+    assert_eq!(row_text(e.frame(), 24..25, 14, INK), "y");
+    // Off, `@{` is no brace (the plain keyword, as before), and nothing is closed.
+    let e = run(state(), &[], 4, |st, io| async move {
+        printf(&st, &io, b"@{ab", &[]).await;
+        printf(&st, &io, b"c d", &[]).await;
+        print::put_raw(&st, &io, -1).await;
+        io.present();
+    });
+    assert_eq!(row_text(e.frame(), 22..26, 14, ALERT), "{abc");
+    assert_eq!(row_text(e.frame(), 26..28, 14, INK), " d");
+}
+
+#[test]
+fn the_brace_of_at_brace_comes_before_a_josa_marker() {
+    // With wide on, the `{` right after `@` opens the brace before the josa resolver can take
+    // it, so the braced text is plain text: `@{(으)로}` puts `(으)로` itself in the alert colour,
+    // where the same marker without the `@` resolves.
+    let e = print(
+        wide(Language::Korean),
+        "나@{(으)로} 다{(으)로}".as_bytes(),
+        &[],
+    );
+    let fb = e.frame();
+    assert_eq!(glyph(fb, 22, 14, INK), syl('나'));
+    assert_eq!(cell(fb, 23, 14, ALERT), b'(');
+    assert_eq!(glyph(fb, 24, 14, ALERT), syl('으'));
+    assert_eq!(cell(fb, 25, 14, ALERT), b')');
+    assert_eq!(glyph(fb, 26, 14, ALERT), syl('로'));
+    assert_eq!(cell(fb, 27, 14, INK), b' ');
+    assert_eq!(glyph(fb, 28, 14, INK), syl('다'));
+    assert_eq!(glyph(fb, 29, 14, INK), syl('로'));
+    assert_eq!(lines(&e), ["나(으)로 다로"]);
+    let ko = |fmt: &str, a: &'static [Arg<'static>]| line(Language::Korean, fmt, a);
+    // The text is text as anywhere else: a marker later in it resolves, and a `/` is still the
+    // plural escape (in Korean it prints nothing).
+    assert_eq!(ko("@{다{(으)로}}", &[]), "다로");
+    assert_eq!(ko("@{이/가}", &[]), "이가");
+    // An `@` at the end of the format and the `{` at the start of a field: the same.
+    assert_eq!(ko("나@%s|", args(vec![text("{(으)로}")])), "나(으)로|");
+    // Only the `{` right after `@` opens a brace: later in an `@` keyword it is the keyword's,
+    // and a marker there resolves.
+    let e = print(wide(Language::English), b"@ab{x} y", &[]);
+    assert_eq!(row_text(e.frame(), 22..27, 14, ALERT), "ab{x}");
+    assert_eq!(row_text(e.frame(), 27..29, 14, INK), " y");
+    assert_eq!(ko("@다{(으)로} 나", &[]), "다로 나");
+}
+
+#[test]
+fn a_field_with_at_brace_counts_the_brace_text_as_its_cells() {
+    // `@{(으)로}` is seven cells, each code as itself (the `{` is the brace's, not a marker's),
+    // so `%8s` pads it by one; were the `{` a marker's it would be five, padded by three.
+    let ko = |fmt: &str, a: &'static [Arg<'static>]| line(Language::Korean, fmt, a);
+    assert_eq!(ko("[%8s]", args(vec![text("@{(으)로}")])), "[ (으)로]");
+    assert_eq!(ko("[%-8s]", args(vec![text("@{(으)로}")])), "[(으)로 ]");
+    // An `@` the format put just before the field: the field's `{` is the brace's too, so
+    // `{(으)로}` is six cells and `%-5s` pads nothing.
+    assert_eq!(ko("@%-5s|", args(vec![text("{(으)로}")])), "(으)로|");
+    assert_eq!(ko("@%-7s|", args(vec![text("{(으)로}")])), "(으)로 |");
+    // The same field after any other code is a marker: one form, so padded.
+    assert_eq!(ko("나%-3s|", args(vec![text("{(으)로}")])), "나로  |");
 }
 
 /// The cell codes `fmt` with `args` puts on the scroll's first row (flushed, no newline),

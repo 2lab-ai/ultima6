@@ -61,8 +61,12 @@ pub struct TextState {
     pub utf8: Utf8,
     /// Port-only: the codes the josa resolver holds.
     pub josa: Josa,
-    /// Port-only: inside `@{…}` (its text in the alert colour).
+    /// Port-only: inside `@{…}` (its text in the alert colour), until its `}` or the end of the
+    /// `printf` format it was opened in.
     pub brace: bool,
+    /// Port-only (spec 08): the last code the escape layer took was `@`, so with `wide` on a
+    /// `{` now opens `@{…}` and goes past the josa resolver.
+    pub after_at: bool,
     /// Port-only: the last cell put into the line, for the josa resolver.
     pub tail: Tail,
 }
@@ -92,6 +96,7 @@ impl Default for TextState {
             utf8: Utf8::default(),
             josa: Josa::default(),
             brace: false,
+            after_at: false,
             tail: Tail::default(),
         }
     }

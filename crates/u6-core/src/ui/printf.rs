@@ -12,8 +12,9 @@
 //! Port (spec 08): in front of the escape layer, with `wide` on, the UTF-8 assembler, and with
 //! Korean grammar, the josa resolver ([`super::wide`]); with `wide` on, `printf` also takes
 //! `%N$` (argument N, from 1), counts a field's padding in cells, and `@{…}` puts exactly the
-//! braced text in the alert colour. In Korean, `/` and `\` print no letters. Off and English,
-//! every byte reaches the escape layer as before.
+//! braced text in the alert colour: `@` then at once `{` opens it (that `{` never starts a josa
+//! marker), `}` or the end of the `printf` format closes it. In Korean, `/` and `\` print no
+//! letters. Off and English, every byte reaches the escape layer as before.
 
 use std::cell::RefCell;
 
@@ -122,8 +123,13 @@ async fn josa(state: &RefCell<State>, io: &Io, c: i32) {
         let t = &mut s.ui.text;
         let mut out = Vec::new();
         if t.language == Language::Korean {
-            let tail = t.tail;
-            t.josa.feed(c, &tail, &mut out);
+            if t.wide && t.after_at && c == ch(b'{') && t.josa.is_empty() {
+                // The `{` of `@{` opens the brace ([`escape`]); it starts no marker.
+                out.push(c);
+            } else {
+                let tail = t.tail;
+                t.josa.feed(c, &tail, &mut out);
+            }
         } else {
             out.append(&mut t.josa.drain());
             out.push(c);
@@ -160,17 +166,19 @@ pub(super) async fn release(state: &RefCell<State>, io: &Io) {
 
 /// The escape layer of 0x108376 for one code.
 async fn escape(state: &RefCell<State>, io: &Io, c: i32) {
-    let prefix = {
+    let (prefix, after_at) = {
         let mut s = state.borrow_mut();
         if !s.ui.text.on {
             return;
         }
+        // Port (spec 08): whether `c` comes right after an `@`; every code ends that.
+        let after_at = std::mem::take(&mut s.ui.text.after_at);
         if c != ch(b'&') && s.ui.text.hidden && !show_hidden(&s) {
             return;
         }
         let colours = s.ui.tables.colours;
         let t = &mut s.ui.text;
-        match c {
+        let prefix = match c {
             // Port (spec 08): the brace closing `@{…}`.
             _ if t.brace && c == ch(b'}') => {
                 t.brace = false;
@@ -182,6 +190,7 @@ async fn escape(state: &RefCell<State>, io: &Io, c: i32) {
                 .contains(&c) =>
             {
                 t.prefix = c as u8;
+                t.after_at = c == ch(b'@');
                 return;
             }
             _ if c == ch(b'&') => {
@@ -202,7 +211,8 @@ async fn escape(state: &RefCell<State>, io: &Io, c: i32) {
             }
             _ if c == ch(b'*') => None,
             _ => Some(t.prefix),
-        }
+        };
+        (prefix, after_at)
     };
     let Some(prefix) = prefix else {
         put_cell(state, io, -1).await;
@@ -250,9 +260,10 @@ async fn escape(state: &RefCell<State>, io: &Io, c: i32) {
         b'@' => {
             {
                 let mut s = state.borrow_mut();
-                if s.ui.text.wide && c == ch(b'{') {
-                    // Port (spec 08): `@{` opens a brace highlight, closed by `}`; the puts
-                    // between take the alert colour ([`put_cell`]).
+                if s.ui.text.wide && after_at && c == ch(b'{') {
+                    // Port (spec 08): `@` then at once `{` opens a brace highlight, closed by
+                    // `}` or the end of the `printf` format; the puts between take the alert
+                    // colour ([`put_cell`]). A `{` later in an `@` keyword is the keyword's.
                     let t = &mut s.ui.text;
                     t.prefix = 0;
                     t.brace = true;
@@ -320,7 +331,7 @@ fn position<I: Iterator<Item = u8> + Clone>(f: &mut I) -> Option<usize> {
 /// out and the field goes on from what is held. The padding is no cell of the tail
 /// ([`put_raw_n`]), so a particle after it follows the text before it.
 fn field_cells(t: &super::textstate::TextState, field: &[u8], left: bool) -> usize {
-    let mut front = wide::Front::new(t.utf8, &t.josa, t.tail, t.language);
+    let mut front = wide::Front::new(t.utf8, &t.josa, t.tail, t.language, t.after_at);
     if !left {
         front.release();
         front.cells = 0;
@@ -338,7 +349,8 @@ fn field_cells(t: &super::textstate::TextState, field: &[u8], left: bool) -> usi
 ///
 /// Port (spec 08): with `wide` on, `%N$` right after the `%` makes the directive take argument
 /// N (from 1; the others still take theirs in order), and a field's length is its cells where
-/// it is put ([`field_cells`]) instead of its bytes.
+/// it is put ([`field_cells`]) instead of its bytes. A brace `@{…}` still open where the format
+/// ends is closed there (the text ink comes back), so text after it is not in its colour.
 pub async fn printf(state: &RefCell<State>, io: &Io, fmt: &[u8], args: &[Arg<'_>]) {
     let wide = {
         let t = &state.borrow().ui.text;
@@ -413,5 +425,12 @@ pub async fn printf(state: &RefCell<State>, io: &Io, fmt: &[u8], args: &[Arg<'_>
         if !left {
             puts(state, io, &field).await;
         }
+    }
+    let mut s = state.borrow_mut();
+    let text = s.ui.tables.colours.text;
+    let t = &mut s.ui.text;
+    if t.brace {
+        t.brace = false;
+        t.win_mut().fg = text;
     }
 }

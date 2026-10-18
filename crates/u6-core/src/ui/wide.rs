@@ -132,25 +132,30 @@ pub fn decode(text: &[u8]) -> Vec<i32> {
 /// A copy of the text layer's front (the assembler, the josa resolver and the last cell put)
 /// that counts, for `printf`'s padding, the cells text takes from where it stands: every code
 /// it lets through is one cell and is put to its tail, as the escape layer would put it with
-/// no escape in effect (spec 08 §1, `printf` counts cells).
+/// no escape in effect (spec 08 §1, `printf` counts cells). As the text layer does with `wide`
+/// on, it lets the `{` right after an `@` through as itself (it opens `@{…}`, no marker).
 #[derive(Clone, Debug)]
 pub struct Front {
     utf8: Utf8,
     josa: Josa,
     tail: Tail,
     korean: bool,
+    /// The last code let through was `@`.
+    after_at: bool,
     /// The cells counted so far.
     pub cells: usize,
 }
 
 impl Front {
-    /// The front as `utf8`, `josa` and `tail` hold it now, under `language`'s rules.
-    pub fn new(utf8: Utf8, josa: &Josa, tail: Tail, language: Language) -> Self {
+    /// The front as `utf8`, `josa` and `tail` hold it now, under `language`'s rules, `after_at`
+    /// when the escape layer's last code was `@` ([`super::TextState::after_at`]).
+    pub fn new(utf8: Utf8, josa: &Josa, tail: Tail, language: Language, after_at: bool) -> Self {
         Front {
             utf8,
             josa: josa.clone(),
             tail,
             korean: language == Language::Korean,
+            after_at,
             cells: 0,
         }
     }
@@ -181,7 +186,8 @@ impl Front {
 
     fn code(&mut self, c: i32) {
         let mut out = Vec::new();
-        if self.korean {
+        let brace = self.after_at && c == 0x7b && self.josa.is_empty();
+        if self.korean && !brace {
             self.josa.feed(c, &self.tail, &mut out);
         } else {
             out = self.josa.drain();
@@ -197,6 +203,7 @@ impl Front {
         if c > 0 && c != 0x0a {
             self.tail.put(c);
         }
+        self.after_at = c == 0x40;
         self.cells += 1;
     }
 }
@@ -481,7 +488,7 @@ mod tests {
             for c in tail.chars() {
                 t.put(c as i32);
             }
-            let mut f = Front::new(a, &Josa::default(), t, language);
+            let mut f = Front::new(a, &Josa::default(), t, language, false);
             f.feed(text);
             f.release();
             f.cells
