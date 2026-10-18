@@ -196,6 +196,59 @@ fn a_fallback_that_makes_its_neighbour_fail_takes_it_too() {
 }
 
 #[test]
+fn an_item_falls_back_whole_and_its_other_records_bring_their_neighbours() {
+    // Item 30 is records 1 and 2; item 40 is record 3. Record 1's east side is red against
+    // record 4, which MMPX draws: it fails. Records 2 and 3 share a white band where they meet,
+    // so they meet cleanly while both are generated; record 3's band against record 2 drawn
+    // by MMPX is a seam.
+    let (r1, r2, r3, r4) = (
+        texture(20, SAND),
+        texture(21, SAND),
+        texture(22, SAND),
+        texture(23, SAND),
+    );
+    let s = sides(vec![
+        (
+            1,
+            r1.clone(),
+            Some((30, band(&near(&r1), Edge::East, false, RED))),
+        ),
+        (
+            2,
+            r2.clone(),
+            Some((30, band(&near(&r2), Edge::East, false, WHITE))),
+        ),
+        (
+            3,
+            r3.clone(),
+            Some((40, band(&near(&r3), Edge::East, true, WHITE))),
+        ),
+        (4, r4, None),
+    ]);
+    let pairs = [pair(1, 4, Edge::East), pair(2, 3, Edge::East)];
+    let out = settle(&pairs, &s, seam());
+    // Record 1 takes record 2 with it (its whole item), and record 2 drawn by MMPX then takes
+    // item 40 in the second pass; falling back record by record would have kept both.
+    assert_eq!(out.fallen, BTreeMap::from([(30, 1), (40, 2)]));
+    let rows: Vec<(usize, Pair, bool, bool)> = out
+        .checked
+        .iter()
+        .map(|c| (c.pass, c.pair, c.both, c.fails))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (1, pair(1, 4, Edge::East), false, true),
+            (1, pair(2, 3, Edge::East), true, false),
+            (2, pair(2, 3, Edge::East), false, true),
+        ]
+    );
+    let c = &out.counts;
+    assert_eq!((c.checked, c.failing_before), (2, 1));
+    assert_eq!((c.checked_after, c.failing_after, c.passes), (0, 0, 3));
+}
+
+#[test]
 fn the_result_does_not_depend_on_the_pair_order() {
     let (mut pairs, mut s) = chain();
     // More records and pairs around the chain: a clean record two pairs touch, a failing
