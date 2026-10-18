@@ -2426,6 +2426,48 @@ fn a_searchs_need_runs_on_into_the_next_table() {
 }
 
 #[test]
+fn a_landings_search_need_runs_on_into_the_next_table() {
+    // The same on a landing's path, where no direct read closes the bytes: the block's loops
+    // search `t` = "ab\0" and print `t2` = "cd\0ef\0" right after it; the a1's landing (the
+    // lower) jumps to "ef" and reads it. The loops' search reads on from `t` through all of
+    // `t2`, so `t2` keeps "ef" over the a1's landing's code, which stops there, and the search
+    // reads on past the script's end.
+    let x = BODY + 13;
+    let loops = x + 6;
+    let t = loops + 12 + 7 + 5;
+    let t2 = t + 3;
+    let mut rest = jump(t2 + 3);
+    rest.push(0xee);
+    rest.extend(search_of(t, false));
+    rest.push(0xb5);
+    rest.extend(lit32(t2));
+    rest.push(0xb1);
+    rest.extend(jump(BODY));
+    rest.extend(b"ab\0cd\0ef\0");
+    let d = any_order(&after_an_if(&rest));
+    let Kind::Table(tb) = &item(&d, t2).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.entries.len(), 2);
+    assert_eq!(
+        sorted_hazards(&d),
+        [
+            Hazard {
+                at: loops,
+                kind: HazardKind::SearchPastEnd(Span {
+                    offset: d.len,
+                    len: 0
+                })
+            },
+            Hazard {
+                at: t2 + 3,
+                kind: HazardKind::IntoData
+            }
+        ]
+    );
+}
+
+#[test]
 fn a_string_crossing_a_word_address_holds_no_address_inside_it() {
     // A print of `t` = "ab\0", then "c\xb8de\0"; a search from `t + 4`, the `b8`, and a word
     // write at `t + 5`, both on direct paths. The word address ends the strings `t`'s inner
