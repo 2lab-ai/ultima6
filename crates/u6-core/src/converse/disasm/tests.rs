@@ -1337,7 +1337,7 @@ fn expression_lengths_are_the_evaluators() {
 fn conversation() -> Vec<u8> {
     let mut s = b"\xff\x03Ann\xf1a tester\xf2Hello $P.".to_vec();
     let nl = s.len() as u32;
-    s.extend(b"\n\xf7\xefname\xf6I am Ann.");
+    s.extend(b"\n\xf7\xefname\xf6I am^ Ann.");
     let table = 200u32;
     s.extend(jump(nl));
     s.extend(b"\xee\xefjob\xf6I test");
@@ -1642,12 +1642,18 @@ fn checked(body: &[u8], events: Vec<Event>) -> trace::Counts {
 /// The reads of a visit of `text` at `BODY` and its stop byte `b6`, with `out` put out at the
 /// visit's last byte and `before` before it.
 fn visit(text: &[u8], before: &str, out: &str) -> Vec<Event> {
-    let emit = |s: &str| {
-        s.bytes()
-            .map(|b| Event::Emit(i16::from(b)))
-            .collect::<Vec<_>>()
-    };
-    let mut ev = emit(before);
+    let emit = |s: &str| s.bytes().map(|b| put(i16::from(b))).collect::<Vec<_>>();
+    visit_events(text, emit(before), emit(out))
+}
+
+/// The escape layer put `c`.
+fn put(c: i16) -> Event {
+    Event::Emit { c, wait: false }
+}
+
+/// [`visit`] with the events put before and at the visit's last byte.
+fn visit_events(text: &[u8], before: Vec<Event>, out: Vec<Event>) -> Vec<Event> {
+    let mut ev = before;
     for (i, &b) in text.iter().enumerate() {
         ev.push(Event::Run {
             at: (BODY as usize + i) as i32,
@@ -1655,7 +1661,7 @@ fn visit(text: &[u8], before: &str, out: &str) -> Vec<Event> {
             snap: if i == 0 { first_snap() } else { None },
         });
     }
-    ev.extend(emit(out));
+    ev.extend(out);
     ev.push(Event::Run {
         at: (BODY as usize + text.len()) as i32,
         byte: 0xb6,
@@ -1682,6 +1688,30 @@ fn a_visit_must_put_out_its_run_itself_spaces_and_newlines_included() {
     assert_eq!(fills(b"a b", "", "ab"), 1);
     assert_eq!(fills(b"a\nb", "", "a\nb"), 0);
     assert_eq!(fills(b"a\nb", "", "ab"), 1);
+}
+
+#[test]
+fn a_glyph_of_code_0_is_checked_and_a_key_waits_own_output_is_not_the_runs() {
+    // `^` and a space put the glyph of code 0 (`@` and a back-quote would be prefixes of their
+    // own); a key wait's flush and the newline its cursor ends a full line with are not the
+    // run's.
+    let text = b"a^ b";
+    let body = [&text[..], &[0xb6]].concat();
+    let wait = |c: i16| Event::Emit { c, wait: true };
+    let (a, b) = (put(0x61), put(0x62));
+    let fills = |out: Vec<Event>| {
+        let n = checked(&body, visit_events(text, Vec::new(), out));
+        assert_eq!((n.filled, n.failures() - n.fill_mismatches), (1, 0));
+        n.fill_mismatches
+    };
+    assert_eq!(fills(vec![a.clone(), put(0), b.clone()]), 0);
+    assert_eq!(fills(vec![a.clone(), b.clone()]), 1, "the glyph is missing");
+    assert_eq!(
+        fills(vec![a.clone(), wait(0), b.clone()]),
+        1,
+        "a key wait's 0 is not the glyph"
+    );
+    assert_eq!(fills(vec![a, put(0), wait(-1), wait(0), b]), 0);
 }
 
 #[test]

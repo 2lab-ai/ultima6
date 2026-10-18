@@ -50,6 +50,8 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
         (saved, w.col >= w.width)
     };
     if cell {
+        #[cfg(test)]
+        crate::converse::disasm::trace::wait_put();
         put_raw(state, io, 0).await;
     }
     let (col, row) = {

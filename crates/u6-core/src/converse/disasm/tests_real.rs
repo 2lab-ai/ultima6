@@ -186,7 +186,7 @@ fn table_reads(events: &[Event], strings: &mut BTreeSet<(u8, u16, i32)>) {
                 }
                 last = (*byte != 0).then_some(*at);
             }
-            Event::Emit(_) | Event::Table { .. } => {}
+            Event::Emit { .. } | Event::Table { .. } => {}
             Event::Word { .. } | Event::TableEnd { .. } | Event::WordWrite { .. } => last = None,
         }
     }

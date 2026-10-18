@@ -1,8 +1,9 @@
 //! Test-only: what the interpreter reads and prints, recorded at its seams, and the check of
 //! those reads against the disassembly (the execution cross-check).
 //!
-//! The hooks (`#[cfg(test)]` calls in `run.rs`, `exec.rs`, `eval.rs`, `start.rs`, `script.rs`
-//! and `ui/print.rs`) do nothing until a test calls [`start`] on its thread. They record:
+//! The hooks (`#[cfg(test)]` calls in `run.rs`, `exec.rs`, `eval.rs`, `start.rs`, `script.rs`,
+//! `ui/print.rs`, `ui/keyread.rs` and `ui/target.rs`) do nothing until a test calls [`start`]
+//! on its thread. They record:
 //!
 //! - every byte `run_text`'s loop reads (text, ops, `ef`, stop bytes), and every op byte the
 //!   input loop reads;
@@ -11,15 +12,17 @@
 //!   and the words `assign`'s `d2` form writes; and for `b4` / `b7` / `c3`, whether the table
 //!   address came from inside the evaluator's stack (outside it the evaluator reads 0, the
 //!   script's start, which the decoder marks with a stack hazard);
-//! - every character the escape layer hands to the line assembler (`put_raw`'s argument): what
-//!   the game prints, before word wrap, spaces and newlines included, with -1 for a flush;
+//! - every character handed to the line assembler (`put_raw`'s argument): what the game prints,
+//!   before word wrap, spaces and newlines included, with -1 for a flush; and which of them a
+//!   key wait put (its flush, `wait_event`, and the newline its cursor ends a full line with,
+//!   `idle_poll`), not the escape layer;
 //! - which script `load_script` put in the script buffer.
 //!
 //! With snapshots on, the first text byte of each contiguous read of text takes the escape
 //! layer's state and the variables, so the check can compare the characters a visit put out
 //! (from its first read to the read after it) with the runs filled in, character for character:
-//! spaces and newlines included, as this is before word wrap. Only what a key wait inside the
-//! visit adds is left out ([`normalised`]).
+//! spaces and newlines included, as this is before word wrap, and what a key wait inside the
+//! visit put left out.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -44,8 +47,9 @@ pub(crate) enum Event {
     },
     /// The input loop read the op `byte` at `at`.
     Input { at: i32, byte: u8 },
-    /// A character the escape layer put (`put_raw`'s argument; negative = a flush).
-    Emit(i16),
+    /// A character `put_raw` was handed (negative = a flush); `wait` = by a key wait, not by the
+    /// escape layer.
+    Emit { c: i16, wait: bool },
     /// A string-table byte read (by `print_op`, `assign` or `b7`); a 0 ends the string.
     Table { at: i32, byte: u8 },
     /// A table word read (by `b4` or `c3`), `at` its first byte.
@@ -83,6 +87,8 @@ struct Trace {
     snapshots: bool,
     /// Offset of the last text byte `run_text` read, while a visit lasts.
     last_text: Option<i32>,
+    /// The next `put_raw` call is a key wait's.
+    wait: bool,
 }
 
 thread_local! {
@@ -96,6 +102,7 @@ pub(crate) fn start(snapshots: bool) {
             events: Vec::new(),
             snapshots,
             last_text: None,
+            wait: false,
         });
     });
 }
@@ -176,7 +183,21 @@ pub(crate) fn input_byte(cx: &Cx<'_>, b: u8) {
 
 /// Hook: `put_raw` was handed `c`.
 pub(crate) fn emit(c: i16) {
-    push(Event::Emit(c));
+    TRACE.with(|t| {
+        if let Some(t) = t.borrow_mut().as_mut() {
+            let wait = std::mem::take(&mut t.wait);
+            t.events.push(Event::Emit { c, wait });
+        }
+    });
+}
+
+/// Hook: a key wait calls `put_raw` next (not for the escape layer).
+pub(crate) fn wait_put() {
+    TRACE.with(|t| {
+        if let Some(t) = t.borrow_mut().as_mut() {
+            t.wait = true;
+        }
+    });
 }
 
 /// Hook: a string-table byte `b` at `at` was read.
@@ -372,7 +393,7 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
     let (mut op, mut outside) = (None, false);
     for e in events {
         // Any other read ends a table string read (it must have ended at its NUL).
-        if !matches!(e, Event::Table { .. } | Event::Emit(_)) && table.take().is_some() {
+        if !matches!(e, Event::Table { .. } | Event::Emit { .. }) && table.take().is_some() {
             n.table_mismatches += 1;
         }
         if matches!(
@@ -400,11 +421,12 @@ pub(crate) fn check(events: &[Event], scripts: &BTreeMap<(u8, u16), Decoded<'_>>
                     bytes: d.bytes.to_vec(),
                 });
             }
-            Event::Emit(c) => {
+            Event::Emit { c, wait: false } => {
                 if let Some(v) = &mut visit {
                     v.out.push(*c);
                 }
             }
+            Event::Emit { wait: true, .. } => {}
             Event::Run { at, byte, snap } => {
                 n.offsets += 1;
                 let Some(s) = &cur else {
@@ -597,21 +619,7 @@ fn close_visit(n: &mut Counts, s: Option<&Loaded<'_, '_>>, visit: &mut Option<Vi
     };
     n.filled += 1;
     let want = fill(&s.bytes, &runs, &first);
-    n.fill_mismatches += usize::from(normalised(&want) != normalised(&v.out));
-}
-
-/// `out` without what a key wait inside a visit adds to the line assembler's input: the wait
-/// after a `*` flushes again (`wait_event`; a flush right after a flush changes nothing, so a
-/// run of flushes is one) and its cursor ends a full line with a 0 (`idle_poll`; the escape
-/// layer puts a 0 only for a `^` glyph of code 0, dropped on both sides alike).
-fn normalised(out: &[i16]) -> Vec<i16> {
-    let mut v: Vec<i16> = Vec::with_capacity(out.len());
-    for &c in out.iter().filter(|&&c| c != 0) {
-        if c > 0 || v.last().is_none_or(|&l| l > 0) {
-            v.push(c);
-        }
-    }
-    v
+    n.fill_mismatches += usize::from(want != v.out);
 }
 
 fn is_lower(c: i16) -> bool {
