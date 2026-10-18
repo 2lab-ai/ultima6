@@ -1343,6 +1343,29 @@ fn the_default_and_relative_work_dirs_are_checked() {
     let _ = std::fs::remove_dir_all(&e.dir);
 }
 
+#[test]
+fn calibrate_per_0_is_an_ordinary_error_before_anything_is_written() {
+    let e = Env::new("per0");
+    let work = e.dir.join("work");
+    std::fs::create_dir_all(work.join("slices")).unwrap();
+    // A made-up first-pass row on the surface map, which a sample of one label takes first.
+    let row = r#"{"neighbour":{"a":"t:0","b":"t:2","edge":"east"},"pass":1,"fail":true,"ratio":3.0,"limit":1.5,"sides":"gen-mmpx","source":"map","at":{"z":0,"x":1,"y":1},"gates":"made up"}"#;
+    std::fs::write(work.join("gates.jsonl"), format!("{row}\n")).unwrap();
+    let out = e.dir.join("out");
+    let (w, o) = (work.to_str().unwrap(), out.to_str().unwrap());
+    for source in ["all", "map"] {
+        let args = ["calibrate", "--synthetic", "--work", w, "--out", o];
+        let r = e.run(&[&args[..], &["--source", source, "--per", "0"]].concat());
+        let t = text(&r);
+        // The tool's own failure (exit 1), not a panic (101), and nothing written.
+        assert_eq!(r.status.code(), Some(1), "{source}: {t}");
+        assert!(t.contains("--per is at least 1"), "{source}: {t}");
+        assert!(!t.contains("panicked"), "{source}: {t}");
+        assert!(!out.exists(), "{source}");
+    }
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
+
 /// `inventory --game files`: fails with `category` alone on the terminal, the details in the
 /// 0600 diagnostic file; returns the details, stdout and stderr.
 fn failed_load(e: &Env, files: &Path, category: &str) -> (String, String, String) {

@@ -554,6 +554,10 @@ fn sampling_is_set_by_the_seed_covers_every_cell_with_rows_and_takes_per() {
     // All three of fail-1.1-1.5 gen-gen are off the surface map: taken to fill.
     assert_eq!(take(Bucket::To15, Sides::GenGen).surface, 0);
     assert_eq!(take(Bucket::To15, Sides::GenGen).rows.len(), 3);
+    // `per` 0 takes nothing, with every row or one label (a cell with surface rows keeps no
+    // place for them).
+    assert!(sample(&rows, 0, 7, Source::All).is_empty());
+    assert!(sample(&rows, 0, 7, Source::Label("map".into())).is_empty());
     // `per` larger than every cell takes every row.
     let all = sample(&rows, 100, 7, Source::All);
     assert_eq!(

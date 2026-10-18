@@ -490,7 +490,7 @@ pub struct Taken {
 
 /// `per` rows of every bucket × sides that has rows of `source` (module docs): each cell drawn
 /// by its own generator from `seed` and the cell, so a cell's draw does not depend on another's
-/// rows.
+/// rows. `per` 0 takes nothing: no cell.
 ///
 /// With every row ([`Source::All`]) a cell takes the map's rows on the surface first and the
 /// others only to fill. With one source a cell takes, before its surface rows, one row of each
@@ -503,6 +503,9 @@ pub fn sample(
     seed: u64,
     source: Source,
 ) -> BTreeMap<(Bucket, Sides), Taken> {
+    if per == 0 {
+        return BTreeMap::new();
+    }
     let mut by: BTreeMap<(Bucket, Sides), Vec<&Row>> = BTreeMap::new();
     for r in rows.iter().filter(|r| source.takes(r)) {
         by.entry((Bucket::of(r), r.sides)).or_default().push(r);
