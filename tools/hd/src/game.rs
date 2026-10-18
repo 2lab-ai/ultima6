@@ -1,7 +1,8 @@
 //! What the tool reads from the owner's files: the classic images (the 2048 tile records, the
-//! portraits, the paper and spellbook bitmaps), the palette and the tables that group the
-//! records. Everything is loaded the way the engine loads it (`State::new_game`, the public
-//! API of `u6-core`), at run time; nothing read here is written anywhere but the work dir.
+//! portraits, the paper and spellbook bitmaps), the palette, the tables that group the records
+//! and where the records meet in the world ([`World`]). Everything is loaded the way the engine
+//! loads it (`State::new_game`, the public API of `u6-core`), at run time; nothing read here is
+//! written anywhere but the work dir.
 //!
 //! [`Game::synthetic`] is a made-up set of the same shape (drawn by code here), for the tests
 //! and for tuning the gates with real imagegen calls without sending any game art.
@@ -13,7 +14,10 @@ use u6_core::objects::{ACTOR_SLOTS, ObjectId};
 use u6_core::{Files, State};
 use u6_formats::animdata::AnimEntry;
 use u6_formats::bitmap::Bitmap;
+use u6_formats::chunks::{CHUNK_SIZE, Chunk};
 use u6_formats::gfx::{TILE_COUNT, TILE_PIXELS, TILE_W, TileKind};
+use u6_formats::map::{DUNGEON_CHUNKS, SURFACE_CHUNKS};
+use u6_formats::objblk::{ObjLocation, STATUS_INVISIBLE};
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_LEN, PORTRAIT_WIDTH};
 use u6_hdpack::{ImageId, Role, bitmap_hash, portrait_hash, tile_hash};
 use u6_intake::{InputFile, intake};
@@ -26,6 +30,135 @@ const BITMAP_NAMES: [(Role, u32); 2] = [(Role::Paper, 0x61e2), (Role::Spellbook,
 /// flags2 bits of a tile that has parts (`u6_core::objects::add_object_tiles`, 0x10e73a).
 pub const DOUBLE_WIDTH: u8 = 0x80;
 pub const DOUBLE_HEIGHT: u8 = 0x40;
+/// The egg's object type: its tile is never drawn (`u6_core::objects::add_tile`, 0x10e596).
+const OBJ_EGG: usize = 0x14f;
+/// Status bits 3-4 of a slot: where it is (0 on the map).
+const WHERE_MASK: u8 = 0x18;
+/// An actor's movement flag that keeps it out of the draw lists (0x10e81e).
+const MOVE_UNDRAWN: u8 = 0x10;
+
+/// Where records meet in the owner's world (spec 07 HD2 "Neighbour seams"): the map as the
+/// world places its chunks, on every level, and the objects of the starting object lists.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct World {
+    /// The map chunks (`chunks`): 8 × 8 map tiles each, `tiles[row][col]`.
+    pub chunks: Vec<Chunk>,
+    /// The surface, then the dungeon levels (z = index).
+    pub levels: Vec<Level>,
+    /// The objects drawn on the map at the start.
+    pub objects: Vec<Placed>,
+}
+
+/// One level of the map: `side × side` chunk refs, row-major (`map`). A level wraps at its
+/// side, as the window does: `MapState::tile_at` masks the coordinates (0x3ff on the surface,
+/// 0xff in a dungeon), so its last column is drawn beside its first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Level {
+    pub side: usize,
+    pub refs: Vec<u16>,
+}
+
+impl Level {
+    /// The level's side in tiles.
+    pub fn tiles(&self) -> usize {
+        self.side * CHUNK_SIZE
+    }
+}
+
+/// An object as the object draw places it (0x10e81e): its cell and the tile it draws there,
+/// the type's base tile plus its frame. The parts of a tile with the double flags are added
+/// where it is drawn ([`crate::neighbour`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Placed {
+    pub x: u16,
+    pub y: u16,
+    pub z: u8,
+    pub tile: u16,
+}
+
+impl World {
+    /// The map tile of tile (x, y) of level z: through the chunk the level places there. `None`
+    /// outside the level (x or y at or past its side: no wrap here, the caller wraps), for a
+    /// level the map does not have, or where the level or the chunks are shorter than they
+    /// should be.
+    pub fn tile(&self, z: usize, x: usize, y: usize) -> Option<u16> {
+        let l = self.levels.get(z)?;
+        if x >= l.tiles() || y >= l.tiles() {
+            return None;
+        }
+        let r = *l.refs.get((y / CHUNK_SIZE) * l.side + x / CHUNK_SIZE)?;
+        let c = self.chunks.get(usize::from(r))?;
+        Some(u16::from(c[y % CHUNK_SIZE][x % CHUNK_SIZE]))
+    }
+
+    /// What the owner's files place: `state` as `State::new_game` loads it, before any region
+    /// is loaded into slots: the map and chunks whole, the 69 object blocks (`savegame/objblk??`)
+    /// and the actors of `objlist` (slots 0..256). An object is drawn when it is on the map, not
+    /// invisible and not an egg; an actor also needs a type and no movement flag 0x10 (0x10e81e;
+    /// an invisible party member's outline is a flagged pixel, shown classic).
+    fn of(state: &State) -> World {
+        let map = &state.map;
+        let mut levels = vec![Level {
+            side: SURFACE_CHUNKS,
+            refs: map.world.surface.clone(),
+        }];
+        levels.extend(map.world.dungeons.iter().map(|d| Level {
+            side: DUNGEON_CHUNKS,
+            refs: d.clone(),
+        }));
+        let base = &state.tables.basetile.base;
+        let egg = base.get(OBJ_EGG).copied();
+        let tile_of = |tf: u16| {
+            let b = base.get(usize::from(tf & 0x3ff)).copied().unwrap_or(0);
+            b.wrapping_add(tf >> 10) & 0x7ff
+        };
+        let mut objects = Vec::new();
+        for (_, block) in &state.objects.blocks {
+            for o in &block.objects {
+                if o.location() != ObjLocation::Map || o.status & STATUS_INVISIBLE != 0 {
+                    continue;
+                }
+                let tile = tile_of(o.obj_n | u16::from(o.frame) << 10);
+                if Some(tile) != egg {
+                    objects.push(Placed {
+                        x: o.pos.x,
+                        y: o.pos.y,
+                        z: o.pos.z,
+                        tile,
+                    });
+                }
+            }
+        }
+        let o = &state.objects;
+        for a in 0..ACTOR_SLOTS {
+            let tf = o.type_frame[a];
+            let status = o.obj_status[a];
+            let moves = state.actors.attrs.movement_flags.get(a).copied();
+            if tf == 0
+                || status & WHERE_MASK != 0
+                || status & STATUS_INVISIBLE != 0
+                || moves.unwrap_or(0) & MOVE_UNDRAWN != 0
+            {
+                continue;
+            }
+            let p = o.location[a];
+            let tile = tile_of(tf);
+            if Some(tile) != egg {
+                objects.push(Placed {
+                    x: p.x,
+                    y: p.y,
+                    z: p.z,
+                    tile,
+                });
+            }
+        }
+        World {
+            chunks: map.chunks.chunks.clone(),
+            levels,
+            objects,
+        }
+    }
+}
 
 /// One tile record as loaded.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +209,8 @@ pub struct Game {
     pub portraits: Vec<(u8, u16, Vec<u8>)>,
     /// (role, width, height, bytes).
     pub bitmaps: Vec<(Role, u16, u16, Vec<u8>)>,
+    /// Where records meet (the neighbour gate's pairs).
+    pub world: World,
 }
 
 /// A failed load: a fixed category for the terminal, and the details (which may name the
@@ -195,6 +330,7 @@ impl Game {
             bitmap_colours: state.gfx.tables.bitmap_colours.to_vec(),
             portraits: portraits(&state, &files),
             bitmaps: bitmaps(&files, game),
+            world: World::of(&state),
         })
     }
 
@@ -726,6 +862,8 @@ pub mod synthetic {
                 (Role::Paper, 64, 40, panel(64, 40, 0)),
                 (Role::Spellbook, 48, 32, panel(48, 32, 3)),
             ],
+            // No world: no record meets another (the neighbour tests place their own).
+            world: World::default(),
         }
     }
 }
