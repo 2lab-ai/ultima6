@@ -953,7 +953,9 @@ fn a_part_transparent_pair_is_measured_as_the_page_composes_it() {
         pixels: (0..256)
             .map(|i| [13u8, 14, 21][(hash(i, seed) % 3) as usize])
             .collect(),
-        transparent: (0..256).map(|i| hash(i, seed + 7) % every == 0).collect(),
+        transparent: (0..256)
+            .map(|i| hash(i, seed + 7).is_multiple_of(every))
+            .collect(),
         map: false,
     };
     let mut g = synthetic::game();
@@ -1203,7 +1205,10 @@ fn gates_rows(log: &str) -> BTreeMap<&'static str, usize> {
 
 /// What ingest leaves in a work dir: `ingest.json`, `gates.jsonl`, `coverage.txt` and every
 /// file in `slices/` (name and bytes).
-fn left(w: &Work) -> (Vec<u8>, Vec<u8>, Vec<u8>, BTreeMap<String, Vec<u8>>) {
+type Left = (Vec<u8>, Vec<u8>, Vec<u8>, BTreeMap<String, Vec<u8>>);
+
+/// [`Left`] of `w`.
+fn left(w: &Work) -> Left {
     let read = |rel: &str| std::fs::read(w.path(rel)).unwrap();
     let slices = std::fs::read_dir(w.path("slices"))
         .unwrap()
