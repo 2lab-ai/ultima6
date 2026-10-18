@@ -3013,6 +3013,7 @@ fn each_run_writes_its_own_run_dir_alone() {
     let refused = std::fs::read_to_string(run_dir(&o.out).join("refused.txt")).unwrap();
     assert_eq!(refused, format!("{e}\n"));
     assert!(e.contains(&run_dir(&o.out).display().to_string()), "{e}");
+    let refused_1 = run_dir(&o.out);
     std::fs::write(&master, &was).unwrap();
     // A run whose work dir changes while it is read: what changed, no sheet.
     let p = work.path("gates.jsonl");
@@ -3037,23 +3038,56 @@ fn each_run_writes_its_own_run_dir_alone() {
         std::fs::read_to_string(run_dir(&o.out).join("changed.txt")).unwrap(),
         "gates.jsonl\n"
     );
-    // The two refused runs are listed as incomplete by the next, and left; the first run's
-    // dir is as it was.
+    let refused_2 = run_dir(&o.out);
+    // Every earlier run's files, by name, with their bytes: the two that ended, the two
+    // refused. A later run that ends well, then one that fails, list the refused two by name
+    // as incomplete, and leave all four as they were.
     work.write("gates.jsonl", b"").unwrap();
+    let earlier: Vec<(PathBuf, BTreeMap<String, Vec<u8>>)> = [
+        first.clone(),
+        s2.written.dir.clone(),
+        refused_1.clone(),
+        refused_2.clone(),
+    ]
+    .into_iter()
+    .map(|d| {
+        let c = contents_of(&d);
+        (d, c)
+    })
+    .collect();
+    let name = |d: &Path| d.file_name().unwrap().to_string_lossy().into_owned();
+    let want = [
+        format!("{} (refused)", name(&refused_1)),
+        format!("{} (refused)", name(&refused_2)),
+    ];
     let s = calibrate_final(&g, &work, &o).unwrap();
-    assert_eq!(s.written.incomplete.len(), 2, "{:?}", s.written.incomplete);
+    assert_eq!(s.written.incomplete, want);
     assert!(
-        s.written
-            .incomplete
-            .iter()
-            .all(|r| r.ends_with(" (refused)"))
-    );
-    assert!(
-        s.text().contains("incomplete runs beside it"),
+        s.text().contains(&format!(
+            "incomplete runs beside it (no {DONE}; left as they are): {}",
+            want.join(", ")
+        )),
         "{}",
         s.text()
     );
-    assert_eq!(contents_of(&first), kept);
+    for (d, c) in &earlier {
+        assert_eq!(&contents_of(d), c, "{}", d.display());
+    }
+    let later = s.written.dir.clone();
+    std::fs::write(&master, master_png(&solid)).unwrap();
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    std::fs::write(&master, &was).unwrap();
+    assert!(
+        e.ends_with(&format!(
+            "; incomplete runs beside it (left as they are): {}",
+            want.join(", ")
+        )),
+        "{e}"
+    );
+    for (d, c) in &earlier {
+        assert_eq!(&contents_of(d), c, "{}", d.display());
+    }
+    assert!(later.join(DONE).is_file());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
