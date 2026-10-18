@@ -53,7 +53,8 @@
 //! - it never wins over direct code or over its own path's code: that landing is dropped
 //!   (`Dropped(_, TableInCode)`), and direct code is never read as a table. A path's own code
 //!   is every byte its flow reads, the code it joins included (code another landing decoded
-//!   first, that its path then runs), not only the code it decoded;
+//!   first, that its path then runs), not only the code it decoded; and the tables it names are
+//!   those of every op it runs, joined or not;
 //! - bytes closed that way that no table of a kept path holds in the next round are opened again
 //!   and can no longer win: a landing that names a table over other landing code there is
 //!   dropped (the intruding landing, when the table is a direct path's);

@@ -1180,6 +1180,55 @@ fn a_path_that_runs_an_else_does_not_run_the_code_an_if_landing_runs_after_it() 
     );
 }
 
+/// After [`after_an_if`]'s `a1`, whose landing jumps over "a" to `z`, prints the table `t` at
+/// "a" and jumps back: the `*` block's `ee`, then its loops' path prints the string after the
+/// one `u` falls in ("ab", past all the code) and jumps back. Returns the script and `x`, `t`,
+/// `u`.
+fn a_table_over_both_paths() -> (Vec<u8>, [u32; 3]) {
+    let x = BODY + 13;
+    // jump (5), "a" 00, ee, b5 d2 u 01 a7 (8), jump (5); at z: b5 d2 t b1 (7), jump (5).
+    let (t, z) = (x + 5, x + 21);
+    let u = z + 13;
+    let mut rest = jump(z);
+    rest.extend(b"a\0\xee\xb5");
+    rest.extend(lit32(u));
+    rest.extend([0x01, 0xa7]);
+    rest.extend(jump(BODY));
+    rest.push(0xb5);
+    rest.extend(lit32(t));
+    rest.push(0xb1);
+    rest.extend(jump(BODY));
+    rest.extend(b"ab\0c\0");
+    (after_an_if(&rest), [x, t, u])
+}
+
+#[test]
+fn a_landing_that_joins_the_op_naming_a_table_names_it_too() {
+    // `u` is inside `t`'s strings, so its read keeps `t` up to the string after it: over the
+    // a1's landing's code and the block loops'. Both loops run the print from `u`, the one
+    // that decoded it and the one that joined it: the three landings are dropped, whichever
+    // comes first.
+    let (s, [x, _, _]) = a_table_over_both_paths();
+    let [a, b] = both_orders(&s);
+    assert!(a == b, "{:?}\n{:?}", a.1, b.1);
+    let d = ok(&s);
+    let mut hazards = d.hazards.clone();
+    hazards.sort_by_key(|h| (h.at, format!("{:?}", h.kind)));
+    let dropped = |at: u32, scan: Scan| Hazard {
+        at,
+        kind: HazardKind::Dropped(scan, Reason::TableInCode),
+    };
+    assert_eq!(
+        hazards,
+        [
+            dropped(x, Scan::If),
+            dropped(x + 8, Scan::Answered),
+            dropped(x + 8, Scan::NoMatch)
+        ]
+    );
+    assert!(!d.items.iter().any(|i| matches!(i.kind, Kind::Table(_))));
+}
+
 #[test]
 fn a_landing_whose_own_path_runs_inside_a_table_it_names_is_dropped() {
     // The `*` block's loops land after its `ee`, print the table at `x` and jump to `x + 3`,

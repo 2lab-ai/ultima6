@@ -1058,8 +1058,8 @@ impl<'a> Decoder<'a> {
     }
 
     /// The plan of the next round, when this one is not final (see the module doc). A landing
-    /// that names a table and whose own path reads a byte of it as code (code it decoded or
-    /// joined, [`Self::reach`]) is dropped. Any other landing's code inside a table makes the
+    /// that names a table (by an op it decoded or joined) and whose own path reads a byte of it
+    /// as code (code it decoded or joined, [`Self::reach`]) is dropped. Any other landing's code inside a table makes the
     /// table's bytes closed to landings from the round's start (the table wins), or, on bytes
     /// settled before, drops the table's landing namers (the code of a direct table's intruder
     /// instead). Then reserved bytes no table holds any more are taken back and settled.
@@ -1067,20 +1067,30 @@ impl<'a> Decoder<'a> {
     pub(super) fn revise(&self) -> Option<Plan> {
         let mut p = self.plan.clone();
         let mut held = BTreeSet::new();
+        let reaches: BTreeMap<LandingKey, BTreeSet<u32>> =
+            self.starts.keys().map(|&k| (k, self.reach(k))).collect();
         for (addr, table) in self.table_ranges() {
             // A table with no entry still holds its address: landing code there is inside it.
             let end = table_end(addr, &table).max(addr + 1);
             held.extend(addr..end);
-            let namers: BTreeSet<Origin> = self
+            // Its namers: the paths that made its uses, and every landing whose path joins an
+            // op that made one (it runs that op too).
+            let uses: Vec<&(TableUse, Origin)> = self
                 .uses
                 .iter()
                 .filter(|(u, _)| u.addr == addr || table.inner.contains(&u.addr))
-                .map(|&(_, o)| o)
                 .collect();
+            let joined = reaches
+                .iter()
+                .filter(|(_, r)| uses.iter().any(|(u, _)| r.contains(&u.at)))
+                .map(|(&k, _)| Origin::Landing(k));
+            let namers: BTreeSet<Origin> = uses.iter().map(|&&(_, o)| o).chain(joined).collect();
             let mut own = false;
             for o in &namers {
                 if let &Origin::Landing(n) = o
-                    && self.reach(n).range(addr..end).next().is_some()
+                    && reaches
+                        .get(&n)
+                        .is_some_and(|r| r.range(addr..end).next().is_some())
                 {
                     p.banned.entry(n).or_insert(Reason::TableInCode);
                     own = true;
