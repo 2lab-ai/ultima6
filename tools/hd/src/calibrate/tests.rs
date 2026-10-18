@@ -1365,8 +1365,8 @@ fn the_first_pass_snapshot_is_read_through_the_run_dir_not_by_its_path() {
     assert_eq!(
         e,
         format!(
-            "the run dir {} was moved or removed while the run wrote it (it is now at {}): \
-             nothing is written or deleted but in the dir it made; run dir: {}",
+            "the run dir {} was moved or removed while the run wrote it (it was at {} when \
+             checked): nothing is written or deleted but in the dir it made; run dir: {}",
             run.display(),
             away.canonicalize().unwrap().display(),
             run.display()

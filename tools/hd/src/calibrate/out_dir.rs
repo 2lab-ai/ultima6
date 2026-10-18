@@ -434,15 +434,16 @@ impl Run {
         at::path_id(&self.dir) != Some(self.id)
     }
 
-    /// What to say of a run dir that moved: from where, and where it is now when the system
-    /// says and the dir there is the run's ([`at::where_now`]).
+    /// What to say of a run dir that moved: from where, and where it was when this checked, when
+    /// the system says and the dir there is the run's ([`at::where_now`]): an observation then,
+    /// not a claim of where it is by the time it is read.
     fn moved_note(&self) -> String {
-        let now = match at::where_now(&self.open, self.id) {
-            Some(p) => format!("it is now at {}", p.display()),
-            None => "where it is now is not known".into(),
+        let then = match at::where_now(&self.open, self.id) {
+            Some(p) => format!("it was at {} when checked", p.display()),
+            None => "where it was when checked is not known".into(),
         };
         format!(
-            "the run dir {} was moved or removed while the run wrote it ({now}): nothing is \
+            "the run dir {} was moved or removed while the run wrote it ({then}): nothing is \
              written or deleted but in the dir it made",
             self.dir.display()
         )

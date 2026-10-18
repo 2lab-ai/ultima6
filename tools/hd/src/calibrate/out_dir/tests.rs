@@ -755,7 +755,10 @@ fn a_run_whose_dir_is_moved_before_done_fails_and_writes_no_done() {
         // made, then deleted (the check after it).
         let tried = order.lock().unwrap().iter().any(|n| n == DONE);
         assert_eq!(tried, at == DONE, "{at}: {:?}", order.lock().unwrap());
-        let now = format!("(it is now at {})", away.canonicalize().unwrap().display());
+        let now = format!(
+            "(it was at {} when checked)",
+            away.canonicalize().unwrap().display()
+        );
         assert_eq!(
             e.matches("was moved or removed while the run wrote it")
                 .count(),
@@ -1302,7 +1305,7 @@ fn each_file_the_run_made_is_still_held_when_its_delete_is_checked() {
 fn a_run_dir_removed_while_the_run_writes_is_said_to_be_nowhere_known() {
     // The run dir removed (not renamed) before the run's second write: the system may still
     // give a path for the dir the run holds (macOS gives the old one, where another dir may be
-    // made), but no dir there is the run's, so where it is now is not known.
+    // made), but no dir there is the run's, so where it was when checked is not known.
     let dir = temp("removed-where");
     let out = dir.join("out");
     let o = out.clone();
@@ -1319,7 +1322,10 @@ fn a_run_dir_removed_while_the_run_writes_is_said_to_be_nowhere_known() {
         run.write("b.txt", b"b")
     })
     .unwrap_err();
-    assert!(e.contains("(where it is now is not known)"), "{e}");
+    assert!(
+        e.contains("(where it was when checked is not known)"),
+        "{e}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1436,7 +1442,7 @@ fn a_run_dir_moved_again_while_it_is_cleaned_up_is_said_to_have_moved_once() {
         1,
         "{e}"
     );
-    let now = format!("(it is now at {})", real.join("one").display());
+    let now = format!("(it was at {} when checked)", real.join("one").display());
     assert!(e.contains(&now), "{e}");
     assert_eq!(names(&two), [REFUSED]);
     assert_eq!(
