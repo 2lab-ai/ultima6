@@ -1323,7 +1323,10 @@ fn the_summary_prints_every_label_and_sides_and_class_with_its_zero() {
     // Its record drawn in no window: counted so, 0 of 1.
     assert_eq!((t.records, t.shown), (1, 0));
     let line = s.text();
-    let line = line.lines().find(|l| l.starts_with(Class::Terrain.name())).unwrap();
+    let line = line
+        .lines()
+        .find(|l| l.starts_with(Class::Terrain.name()))
+        .unwrap();
     assert!(line.contains(" 0/1 "), "{line}");
     assert!(s.sheets.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
