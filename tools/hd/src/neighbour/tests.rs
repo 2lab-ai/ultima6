@@ -505,6 +505,48 @@ fn two_animated_tiles_side_by_side_meet_in_every_pair_of_their_frames() {
     }
 }
 
+#[test]
+fn a_map_tile_is_read_only_inside_its_level() {
+    let world = World {
+        chunks: vec![
+            chunk(0, &[]),
+            chunk(1, &[]),
+            chunk(2, &[]),
+            chunk(3, &[(7, 7, 9)]),
+        ],
+        levels: vec![
+            // 2 x 2 chunks: 16 x 16 tiles.
+            Level {
+                side: 2,
+                refs: vec![0, 1, 2, 3],
+            },
+            // Shorter than its side.
+            Level {
+                side: 1,
+                refs: Vec::new(),
+            },
+            // A chunk the chunks do not have.
+            Level {
+                side: 1,
+                refs: vec![4],
+            },
+        ],
+        objects: Vec::new(),
+    };
+    assert_eq!(world.tile(0, 0, 0), Some(0));
+    assert_eq!(world.tile(0, 8, 0), Some(1));
+    assert_eq!(world.tile(0, 0, 8), Some(2));
+    assert_eq!(world.tile(0, 15, 15), Some(9));
+    // At or past the side: nothing (x at the side would otherwise name the next chunk row).
+    assert_eq!(world.tile(0, 16, 0), None);
+    assert_eq!(world.tile(0, 0, 16), None);
+    assert_eq!(world.tile(0, 16, 16), None);
+    assert_eq!(world.tile(0, usize::MAX, 0), None);
+    for z in [1, 2, 3] {
+        assert_eq!(world.tile(z, 0, 0), None, "level {z}");
+    }
+}
+
 /// An object record: opaque, but only `west` opaque pixels in its west column.
 fn object(west: usize) -> Record {
     let mut transparent = vec![false; 256];
