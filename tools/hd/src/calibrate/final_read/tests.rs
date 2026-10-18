@@ -1607,6 +1607,26 @@ fn a_window_that_shows_none_of_its_item_fails_the_run() {
     let (cells, fit) = alone(&[piece(COLS), piece(1)]);
     assert_eq!(fit, 0);
     assert!(cells.iter().all(|c| c.tiles().next().is_none()));
+    // ... which the final read refuses rather than draw a window of none of it; a piece that
+    // fits after others goes on in the next window.
+    let w = Window {
+        origin: Origin::Coverage,
+        survivor: 0,
+        records: vec![0],
+        placement: Placement::Alone,
+        at: None,
+        edge: Edge::East,
+        pair: None,
+        anchor: None,
+        pieces: Vec::new(),
+        part: (1, 1),
+        rest: false,
+    };
+    assert_eq!(alone_parts(&w, &[piece(1), piece(COLS)]).unwrap_err(), 1);
+    let parts = alone_parts(&w, &vec![piece(1); 10]).unwrap();
+    let shape: Vec<(usize, (usize, usize))> =
+        parts.iter().map(|p| (p.pieces.len(), p.part)).collect();
+    assert_eq!(shape, [(9, (1, 2)), (1, (2, 2))]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
