@@ -92,6 +92,16 @@ const NO_ENTRY: u32 = u32::MAX;
 /// The entries a search needs of its table: all of them, up to the `b8` (it reads on to one).
 const EVERY_ENTRY: usize = usize::MAX;
 
+/// What a search reads when no entry matches ([`Decoder::search_read`]).
+enum SearchRead {
+    /// Up to a `b8` that ends one of its tables or starts another table, or nothing.
+    Within,
+    /// On past its tables, over these bytes, which no item holds, and past the script's end.
+    PastEnd(Span),
+    /// On past its tables onto an item: a read past its table.
+    Onto,
+}
+
 /// A table use an op makes: its kind and the entry a constant index reads (`None` = any).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TableUse {
@@ -994,7 +1004,11 @@ impl<'a> Decoder<'a> {
         for (u, _) in &self.uses {
             let e = by_addr.entry(u.addr).or_insert((u.words, 0));
             if u.search {
-                e.1 = EVERY_ENTRY;
+                // A `b8` at its address: it reads nothing (of an inner address, the string
+                // that `b8` is in is kept, as for any read there).
+                if self.b[u.addr as usize] != ops::TABLE_END {
+                    e.1 = EVERY_ENTRY;
+                }
             } else if let Some(i) = u.index.filter(|&i| i != NO_ENTRY) {
                 e.1 = e.1.max(i as usize + 1);
             }
@@ -1186,8 +1200,8 @@ impl<'a> Decoder<'a> {
     /// ([`reachable`]); past them, a direct path's use refuses the script and a landing's use
     /// bans that landing for the next round. So does any other read of a table with no entry
     /// (a computed index, a search with no `b8` at the address): it reads past the table; and a
-    /// search that, with no entry matching, reads on past its last one onto an item
-    /// ([`Self::search_past`]). `None` = every index holds.
+    /// search that, with no entry matching, reads on past its tables onto an item
+    /// ([`Self::search_read`]). `None` = every index holds.
     pub(super) fn check_table_indices(&self) -> Result<Option<Plan>, Refusal> {
         let mut banned = BTreeMap::new();
         for (u, origin) in &self.uses {
@@ -1199,7 +1213,7 @@ impl<'a> Decoder<'a> {
             let past = match u.index {
                 Some(index) => index as usize >= count,
                 None if count == 0 => !(u.search && self.b[u.addr as usize] == ops::TABLE_END),
-                None => u.search && self.search_past(u).is_some_and(|(_, held)| held),
+                None => u.search && matches!(self.search_read(u), SearchRead::Onto),
             };
             if past {
                 match origin {
@@ -1218,22 +1232,48 @@ impl<'a> Decoder<'a> {
         Ok(Some(p))
     }
 
-    /// Where a search reads on past its last entry when none matches, if its table (with the
-    /// ones that follow it without a gap) has no `b8`: as the interpreter does, an entry at a
-    /// time from the last table's end, up to a `b8` at an entry's start or past the script's
-    /// end. The bytes it reads there, and whether an item holds any of them.
-    fn search_past(&self, u: &TableUse) -> Option<(Span, bool)> {
-        let containing = |a: u32| {
+    /// What a search reads when no entry matches, as `index_of_string` / `index_of_word` do:
+    /// from its own address an entry at a time, up to a `b8` at an entry's start. A `b8` at the
+    /// address reads nothing. Otherwise the read runs through the table there and the tables of
+    /// its kind that follow it without a gap ([`reachable`]'s walk), and ends inside them if one
+    /// is terminated; else it reads on from the last one's end, where a `b8` that starts a table
+    /// (of either kind) stops it, and any other byte is read past the tables.
+    fn search_read(&self, u: &TableUse) -> SearchRead {
+        if self.b[u.addr as usize] == ops::TABLE_END {
+            return SearchRead::Within;
+        }
+        let item_at = |a: u32| {
             let o = *self.owner.get(a as usize)?;
             self.items.get(&o)
         };
-        let &(t, _, _) = reachable(containing, u.addr, u.words).last()?;
-        let last = &self.items[&t];
-        if matches!(&last.kind, Kind::Table(tb) if tb.terminated) {
-            return None;
+        let Some(first) =
+            item_at(u.addr).filter(|it| matches!(&it.kind, Kind::Table(t) if t.words == u.words))
+        else {
+            return SearchRead::Onto;
+        };
+        let mut at = first.offset;
+        while let Some(Item {
+            offset,
+            len,
+            kind: Kind::Table(t),
+        }) = item_at(at)
+        {
+            if *offset != at || t.words != u.words {
+                break;
+            }
+            if t.terminated {
+                return SearchRead::Within;
+            }
+            at += len;
         }
-        let from = last.end();
-        let mut p = from;
+        let starts_table = self
+            .items
+            .get(&at)
+            .is_some_and(|it| matches!(it.kind, Kind::Table(_)));
+        if self.b.get(at as usize) == Some(&ops::TABLE_END) && starts_table {
+            return SearchRead::Within;
+        }
+        let mut p = at;
         let end = loop {
             match self.b.get(p as usize) {
                 None => break self.len(),
@@ -1245,17 +1285,17 @@ impl<'a> Decoder<'a> {
                 },
             }
         };
-        let held = (from..end).any(|b| self.owner[b as usize] != NO_OWNER);
-        Some((
-            Span {
-                offset: from,
-                len: end - from,
-            },
-            held,
-        ))
+        if (at..end).any(|b| self.owner[b as usize] != NO_OWNER) {
+            SearchRead::Onto
+        } else {
+            SearchRead::PastEnd(Span {
+                offset: at,
+                len: end - at,
+            })
+        }
     }
 
-    /// The final decode's searches that, with no entry matching, read on past their last entry
+    /// The final decode's searches that, with no entry matching, read on past their tables
     /// and past the script's end (onto no item: [`Self::check_table_indices`] took the others):
     /// a [`HazardKind::SearchPastEnd`] at the op.
     pub(super) fn search_hazards(&mut self) {
@@ -1263,13 +1303,12 @@ impl<'a> Decoder<'a> {
             .uses
             .iter()
             .filter(|(u, _)| u.search)
-            .filter_map(|(u, _)| {
-                let (span, held) = self.search_past(u)?;
-                debug_assert!(!held, "a search onto an item is a read past its table");
-                Some(Hazard {
+            .filter_map(|(u, _)| match self.search_read(u) {
+                SearchRead::PastEnd(span) => Some(Hazard {
                     at: u.at,
                     kind: HazardKind::SearchPastEnd(span),
-                })
+                }),
+                SearchRead::Within | SearchRead::Onto => None,
             })
             .collect();
         for h in past {

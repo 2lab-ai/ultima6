@@ -1995,6 +1995,97 @@ fn a_search_reads_on_past_a_table_with_no_b8_as_the_interpreter_does() {
 }
 
 #[test]
+fn a_search_stops_at_a_b8_that_starts_the_next_table_of_either_kind() {
+    // Searches of `t` = "ab\0" and of `t + 3`, the `b8` after it (an empty terminated table of
+    // the same kind): the search of `t` reads "ab", then that `b8` at an entry's start, and
+    // stops. A word search of the one word at `t` and a string search of the `b8` after it (a
+    // table of the other kind): the word search reads the word, then the `b8`, and stops. No
+    // read past a table, no hazard; on a landing's path no landing is dropped.
+    let two = |first: Vec<u8>, second: Vec<u8>, tail: &[u8]| {
+        let t = BODY + first.len() as u32 + second.len() as u32 + 1;
+        let mut body = first;
+        body.extend(second);
+        body.push(0xb6);
+        body.extend_from_slice(tail);
+        (body, t)
+    };
+    let t = BODY + 25;
+    let (body, t1) = two(search_of(t, false), search_of(t + 3, false), b"ab\0\xb8");
+    assert_eq!(t1, t);
+    let d = any_order(&script(&body));
+    assert!(d.hazards.is_empty(), "{:?}", d.hazards);
+    let (body, _) = two(search_of(t, true), search_of(t + 2, false), b"\x10\x00\xb8");
+    let d = any_order(&script(&body));
+    assert!(d.hazards.is_empty(), "{:?}", d.hazards);
+    let Kind::Table(words) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert!(words.words && !words.terminated && words.entries.len() == 1);
+    // A table of the other kind that does not start with a `b8`: the word search reads its
+    // bytes, past its own table.
+    let (body, _) = two(
+        search_of(t, true),
+        search_of(t + 2, false),
+        b"\x10\x00ab\0\xb8",
+    );
+    assert_eq!(refused(&script(&body)).reason, Reason::TableIndex);
+    // The first two searches on a landing's path.
+    let t = BODY + 12 + 25;
+    let mut tail = search_of(t, false);
+    tail.extend(search_of(t + 3, false));
+    tail.push(0xb6);
+    tail.extend(b"ab\0\xb8");
+    let d = any_order(&after_a_block(&tail));
+    assert!(
+        !d.hazards
+            .iter()
+            .any(|h| matches!(h.kind, HazardKind::Dropped(..))),
+        "{:?}",
+        d.hazards
+    );
+}
+
+#[test]
+fn a_search_from_a_b8_inside_a_string_reads_nothing() {
+    // A print of `t` = "ab\xb8cd\0" and a search from `t + 2`, the `b8` inside its string: the
+    // interpreter reads that `b8` at its first entry's start and stops. With direct code after
+    // the table, with the script's end after it ("zz" no item holds), and on a landing's path:
+    // no read past the table, no hazard, and the table is only the string the print reads.
+    let with = |base: u32, tail: &[u8], code_after: bool| {
+        let t = base + 7 + 12 + if code_after { 5 } else { 1 };
+        let mut b = vec![0xb5];
+        b.extend(lit32(t));
+        b.push(0xb1);
+        b.extend(search_of(t + 2, false));
+        if code_after {
+            b.extend(jump(t + 6));
+        } else {
+            b.push(0xb6);
+        }
+        b.extend(b"ab\xb8cd\0");
+        b.extend_from_slice(tail);
+        (b, t)
+    };
+    let (body, t) = with(BODY, b"\xb6", true);
+    let d = any_order(&script(&body));
+    assert!(d.hazards.is_empty(), "{:?}", d.hazards);
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!((tb.entries.len(), tb.inner.as_slice()), (1, &[t + 2][..]));
+    let (body, t) = with(BODY, b"zz", false);
+    let d = any_order(&script(&body));
+    assert!(d.hazards.is_empty(), "{:?}", d.hazards);
+    let Kind::Table(tb) = &item(&d, t).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert_eq!(tb.entries.len(), 1);
+    let (tail, _) = with(BODY + 12, b"\xb6", true);
+    let d = any_order(&after_a_block(&tail));
+    assert!(d.hazards.is_empty(), "{:?}", d.hazards);
+}
+
+#[test]
 fn a_search_past_its_last_entry_onto_an_item_reads_past_its_table() {
     // "ab\0" at `t`, and right after it the `b6` a jump goes to: with no entry matching, the
     // search reads that code. A direct path's search refuses the script.

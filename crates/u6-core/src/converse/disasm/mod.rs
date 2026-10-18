@@ -62,10 +62,12 @@
 //!   it without a gap): past them, a direct use refuses the script and a landing's use drops
 //!   that landing in the next round; so does any other read of a table with no entry (a
 //!   computed index, a search with no `b8` at the address), which reads past the table. A
-//!   search reads every entry up to a `b8`, so its table never ends at landing code; with no
-//!   `b8` at its end, a search that matches no entry reads on past it: onto an item, that too
-//!   is a read past the table, and past the script's end it is a hazard
-//!   ([`HazardKind::SearchPastEnd`]).
+//!   search reads, as the interpreter does, from its own address an entry at a time up to a
+//!   `b8` at an entry's start: one from a `b8` reads nothing; any other reads every entry of
+//!   its tables (so they never end at landing code), and with no `b8` in them it reads on
+//!   past the last one, where a `b8` that starts a table of either kind stops it. Onto any
+//!   other item that is a read past the table; past the script's end, over bytes no item
+//!   holds, it is a hazard ([`HazardKind::SearchPastEnd`]).
 //!
 //! The rounds end: each one grows the dropped landings or the settled bytes, or (with those
 //! unchanged) the reserved bytes, all bounded by the script's length.
