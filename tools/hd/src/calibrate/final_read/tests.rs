@@ -822,6 +822,32 @@ fn a_neighbour_field_that_is_not_a_pair_stops_the_read() {
 }
 
 #[test]
+fn a_pair_line_ingest_does_not_write_stops_the_read() {
+    let g = game();
+    let (text, _) = chain(&g);
+    let lines: Vec<&str> = text.lines().collect();
+    let edit = |f: &dyn Fn(&mut serde_json::Value)| -> String {
+        let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let mut v: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+        f(&mut v);
+        out[2] = v.to_string();
+        out.join("\n") + "\n"
+    };
+    // A beside X (line 3) with a ratio and no limit, or a limit and no ratio: not read as
+    // nothing measured.
+    let x: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    assert_eq!(x["neighbour"]["a"], atlas::image_name(ImageId::Tile(X)));
+    for field in ["limit", "ratio"] {
+        let t = edit(&|v| v[field] = serde_json::Value::Null);
+        let e = record(&t).unwrap_err();
+        assert!(
+            e.contains("line 3: a ratio without its limit, or a limit without its ratio"),
+            "{field}: {e}"
+        );
+    }
+}
+
+#[test]
 fn the_atlas_is_laid_out_from_the_plan_of_these_files() {
     // The jobs of an atlas of another plan (other files, or another version of the tool): the
     // log's item numbers name other items.
