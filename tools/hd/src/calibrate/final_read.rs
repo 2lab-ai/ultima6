@@ -253,6 +253,8 @@ fn tile(id: ImageId) -> Option<u16> {
 ///
 /// - `gates`: a pair line gated with another seam threshold (its `gates` text, as ingest writes
 ///   it, says `seam<=` another value; nothing else is checked then: every limit would differ);
+/// - `duplicate`: a pair logged twice in one pass (a pass checks each pair once; which line
+///   would be the record is not guessed);
 /// - `plan`: a fallback naming an item the plan has not, or of another class; an image listed
 ///   that no item has;
 /// - `listed`: a listed image whose id, slice path or content hash is not the game's;
@@ -306,6 +308,23 @@ pub fn fixed(
     }
     if !out.is_empty() {
         return Err(out);
+    }
+
+    // A pass checks each pair once: a pair logged twice in one pass is no record of it.
+    let mut once: BTreeMap<(usize, Pair), usize> = BTreeMap::new();
+    for l in &rec.pairs {
+        match once.get(&(l.pass, l.pair)) {
+            Some(first) => say!(
+                "duplicate",
+                format!(
+                    "line {}: the pair of line {first} again, in the same pass {}",
+                    l.line, l.pass
+                ),
+            ),
+            None => {
+                once.insert((l.pass, l.pair), l.line);
+            }
+        }
     }
 
     // The items sent back, and their records that draw.

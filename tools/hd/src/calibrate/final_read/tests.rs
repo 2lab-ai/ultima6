@@ -286,6 +286,14 @@ fn the_last_pass_is_rebuilt_from_the_slices() {
     assert_eq!(state(&g, &wrong, &left).unwrap_err(), ["last"]);
     let short = text.clone() + &last(bg) + "\n";
     assert_eq!(state(&g, &short, &left).unwrap_err(), ["last"]);
+    // A pair logged twice in one pass: the stale line before the one that agrees, or a pass-1
+    // line again. Neither line is taken for the record.
+    let twice = text.clone() + &last(&stale) + "\n" + &last(ab) + "\n" + &last(bg) + "\n";
+    assert_eq!(state(&g, &twice, &left).unwrap_err(), ["duplicate"]);
+    let again = text.clone() + text.lines().nth(1).unwrap() + "\n";
+    assert_eq!(state(&g, &again, &left).unwrap_err(), ["duplicate"]);
+    // The same pair in two passes is no duplicate (the log of the last pass above).
+    assert!(state(&g, &with, &left).is_ok());
     // A pair passing in a pass after the last.
     let after = pair_line(3, BG, false, bg.result, bg.sides, "map", bg.at, &gates());
     let late = with.clone() + &after + "\n";
