@@ -1005,10 +1005,10 @@ impl Images for Records<'_> {
 /// The masters of `dir` as ingest writes them to `slices/` (×8: `t-<record>.png`,
 /// `p-<letter>-<item>.png`, `b-<role>.png`), by image; any other file is not read.
 pub fn masters(dir: &Path) -> Result<Vec<(ImageId, PathBuf)>, String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| out_dir::os_error(dir, &e))?;
     let mut out = Vec::new();
     for e in entries {
-        let path = e.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+        let path = e.map_err(|e| out_dir::os_error(dir, &e))?.path();
         let Some(stem) = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -1056,7 +1056,7 @@ impl Slices {
         let side = TILE_W as u32 * MASTER;
         let (mut images, mut read) = (BTreeMap::new(), BTreeMap::new());
         for (id, path) in masters(dir)? {
-            let bytes = img::read_capped(&path, img::PNG_MAX_BYTES)?;
+            let bytes = out_dir::read_capped(&path, img::PNG_MAX_BYTES)?;
             read.insert(id, work::digest(&[&bytes]));
             if let ImageId::Tile(r) = id {
                 let master = img::decode_png(&bytes, side, side)
@@ -1081,7 +1081,7 @@ impl Slices {
     pub fn changed(&self, dir: &Path) -> Result<Vec<ImageId>, String> {
         let mut now = BTreeMap::new();
         for (id, path) in masters(dir)? {
-            let bytes = img::read_capped(&path, img::PNG_MAX_BYTES)?;
+            let bytes = out_dir::read_capped(&path, img::PNG_MAX_BYTES)?;
             now.insert(id, work::digest(&[&bytes]));
         }
         let ids: BTreeSet<ImageId> = now.keys().chain(self.read.keys()).copied().collect();
@@ -1752,7 +1752,7 @@ fn first_pass(
     run: &out_dir::Run,
 ) -> Result<Summary, String> {
     // The snapshot first; only it is read.
-    let bytes = img::read_capped(&work.path("gates.jsonl"), 1 << 30)
+    let bytes = out_dir::read_capped(&work.path("gates.jsonl"), 1 << 30)
         .map_err(|e| format!("{e} (run ingest first)"))?;
     run.write("gates.jsonl", &bytes)?;
     let text = run.read("gates.jsonl", 1 << 30)?;

@@ -1532,7 +1532,7 @@ fn run_final(
             work::check_target(p).map_err(|e| {
                 format!("--include: {e} (the list names records: keep it outside the repository)")
             })?;
-            let bytes = img::read_capped(p, 1 << 20)?;
+            let bytes = out_dir::read_capped(p, 1 << 20)?;
             let text =
                 String::from_utf8(bytes).map_err(|_| "--include is not UTF-8".to_string())?;
             Some(include_ids(&text)?)
@@ -1541,7 +1541,7 @@ fn run_final(
     };
     // Snapshots first; only they are read.
     let snapshot = |name: &str, cap: u64| -> Result<Vec<u8>, String> {
-        let bytes = img::read_capped(&work.path(name), cap)
+        let bytes = out_dir::read_capped(&work.path(name), cap)
             .map_err(|e| format!("{e} (run ingest first)"))?;
         run.write(name, &bytes)?;
         out_dir::seam(&o.out, "snapshot", name)?;
@@ -2123,7 +2123,7 @@ fn run_final(
         .into_iter()
         .zip([&gates_bytes, &list_bytes, &jobs_bytes])
     {
-        if img::read_capped(&work.path(name), cap).ok().as_ref() != Some(bytes) {
+        if out_dir::read_capped(&work.path(name), cap).ok().as_ref() != Some(bytes) {
             changed.push(name.to_string());
         }
     }

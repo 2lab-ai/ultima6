@@ -20,8 +20,9 @@
 //!    the dir it holds open, one by one, never a tree; it keeps its diagnostics ([`Mode::keep`]
 //!    and `refused.txt`). A file another hand put at a name of the run's is left, and said; so
 //!    is a file of the run's moved to another name. A file of the run's whose identity could not
-//!    be read when it was made fails the run, and is left (a diagnostic too), said so. Nothing a
-//!    previous process made is removed, renamed or rewritten.
+//!    be read when it was made fails the run, and is left (a diagnostic too), said so. A file the
+//!    run reads back is read only while it is the one it made. Nothing a previous process made
+//!    is removed, renamed or rewritten.
 //!
 //! What this cannot close: a file swapped in at a name between the check and the delete (POSIX
 //! has no delete-if-this-inode); a dir put in place of the new run dir, by its name in `--out`,
@@ -194,6 +195,39 @@ fn io_seam(key: &Path, step: &'static str, what: &str) -> std::io::Result<()> {
     })
 }
 
+/// What to say of the system's error `e` at `path`; out of open files, how to go on too.
+pub fn os_error(path: &Path, e: &std::io::Error) -> String {
+    match e.raw_os_error() {
+        Some(libc::EMFILE) => format!(
+            "{}: {e} (a run holds each file it makes open until it ends: raise the limit on open \
+             files, ulimit -n)",
+            path.display()
+        ),
+        _ => format!("{}: {e}", path.display()),
+    }
+}
+
+/// The open file `f` at `path`, read: at most `max` bytes (never more than `max + 1` are read,
+/// however large the file is or grows while it is read).
+fn capped(f: File, path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    f.take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| os_error(path, &e))?;
+    if bytes.len() as u64 > max {
+        return Err(format!("{}: larger than {max} bytes", path.display()));
+    }
+    Ok(bytes)
+}
+
+/// [`img::read_capped`] for a run's reads (its inputs, the masters): out of open files, it says
+/// how to go on ([`os_error`]).
+pub fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    let f = File::open(path).map_err(|e| os_error(path, &e))?;
+    capped(f, path, max)
+}
+
 /// `names` sorted: by time, the oldest first (a run dir's name sorts by its time,
 /// [`run_name`]).
 fn oldest_first(mut names: Vec<String>) -> Vec<String> {
@@ -208,7 +242,7 @@ fn oldest_first(mut names: Vec<String>) -> Vec<String> {
 /// given (the test seams').
 fn incomplete(key: &Path, outfd: &File, out: &Path) -> Result<(Vec<String>, Vec<String>), String> {
     let (mut found, mut unreadable) = (Vec::new(), Vec::new());
-    for raw in at::names(outfd).map_err(|e| format!("{}: {e}", out.display()))? {
+    for raw in at::names(outfd).map_err(|e| os_error(out, &e))? {
         let name = String::from_utf8_lossy(&raw).into_owned();
         if !name.starts_with("run-") || !at::is_dir_at(outfd, &raw).unwrap_or(false) {
             continue;
@@ -279,14 +313,7 @@ impl Run {
         one_name(name)?;
         seam(&self.key, "write", name)?;
         let path = self.dir.join(name);
-        let say = |e: std::io::Error| match e.raw_os_error() {
-            Some(libc::EMFILE) => format!(
-                "{}: {e} (a run holds each file it makes open until it ends: raise the limit on \
-                 open files, ulimit -n)",
-                path.display()
-            ),
-            _ => format!("{}: {e}", path.display()),
-        };
+        let say = |e: std::io::Error| os_error(&path, &e);
         let mut f = io_seam(&self.key, "create", name)
             .and_then(|()| at::create(&self.open, name))
             .map_err(say)?;
@@ -312,21 +339,29 @@ impl Run {
         self.write(name, &bytes)
     }
 
-    /// The file `name` of the run's dir, read through the dir itself, at most `cap` bytes.
+    /// The file `name` the run made in its dir, read through the dir itself, at most `cap`
+    /// bytes: only while the file opened at the name is the one the run made (its identity),
+    /// else an error.
     pub fn read(&self, name: &str, cap: u64) -> Result<Vec<u8>, String> {
-        use std::io::Read as _;
         one_name(name)?;
         let path = self.dir.join(name);
-        let say = |e: std::io::Error| format!("{}: {e}", path.display());
-        let f = at::open(&self.open, name).map_err(say)?;
-        let mut bytes = Vec::new();
-        f.take(cap.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(say)?;
-        if bytes.len() as u64 > cap {
-            return Err(format!("{}: larger than {cap} bytes", path.display()));
+        let not = |why: &str| format!("{}: {why}", path.display());
+        let made = self
+            .made
+            .borrow()
+            .iter()
+            .find(|m| m.name == name)
+            .map(|m| m.id.clone());
+        let made = match made {
+            None => return Err(not("not a file the run made")),
+            Some(Err(_)) => return Err(not("could not be identified when it was made")),
+            Some(Ok(id)) => id,
+        };
+        let f = at::open(&self.open, name).map_err(|e| os_error(&path, &e))?;
+        if at::id(&f).map_err(|e| os_error(&path, &e))? != made {
+            return Err(not("not the file the run made"));
         }
-        Ok(bytes)
+        capped(f, &path, cap)
     }
 
     /// An error `e` of the run's file `name` (a snapshot it read), said of that file by its
@@ -512,7 +547,7 @@ pub fn run_in<T>(
     at::raise_open_files();
     work::check_target(out)?;
     let parent = work::ensure_dir(out)?;
-    let outfd = at::open_dir(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let outfd = at::open_dir(&parent).map_err(|e| os_error(&parent, &e))?;
     seam(out, "opened", "")?;
     // Where the dir opened is now: outside the repository too (it was checked by its path).
     if let Some(now) = at::id(&outfd).ok().and_then(|id| at::where_now(&outfd, id))

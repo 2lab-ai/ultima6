@@ -1516,3 +1516,79 @@ fn a_link_put_in_place_of_the_new_run_dir_before_it_is_opened_is_not_followed() 
     assert_eq!(std::fs::read_link(&run).unwrap(), sentinel);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_file_the_run_reads_back_is_read_only_while_it_is_the_one_it_made() {
+    // The run writes a.txt; another hand deletes it and puts a file of its own at the name. The
+    // run's read of a.txt fails, it is not the file the run made, and gives nothing of theirs;
+    // a file the run never made is not read either; its own c.txt is.
+    let dir = temp("read-identity");
+    let out = dir.join("out");
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        run.write("a.txt", b"a")?;
+        let a = run.dir().join("a.txt");
+        std::fs::remove_file(&a).unwrap();
+        std::fs::write(&a, b"theirs").unwrap();
+        let b = run.dir().join("b.txt");
+        std::fs::write(&b, b"theirs").unwrap();
+        run.write("c.txt", b"c")?;
+        assert_eq!(
+            run.read("a.txt", 64),
+            Err(format!("{}: not the file the run made", a.display()))
+        );
+        assert_eq!(
+            run.read("b.txt", 64),
+            Err(format!("{}: not a file the run made", b.display()))
+        );
+        assert_eq!(run.read("c.txt", 64), Ok(b"c".to_vec()));
+        Err("no rows".into())
+    })
+    .unwrap_err();
+    assert!(
+        e.starts_with("no rows; left, as it could not be deleted: "),
+        "{e}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_read_out_of_open_files_says_how_to_go_on() {
+    // In a child under a limit of 64 open files: the run's a.txt made, then every fd left taken
+    // (by the test). The read back of a.txt, a read of an input, and the list of the masters
+    // each meet the system's "too many open files", and each says how to go on.
+    const NAME: &str = "a_read_out_of_open_files_says_how_to_go_on";
+    if !is_child(NAME) {
+        return in_child(NAME, "ulimit -n 64", |_| {});
+    }
+    let dir = temp("emfile-reads");
+    let out = dir.join("out");
+    let input = dir.join("in.txt");
+    std::fs::write(&input, b"in").unwrap();
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        run.write("a.txt", b"a")?;
+        let mut taken = Vec::new();
+        let full = loop {
+            match File::open(&input) {
+                Ok(f) => taken.push(f),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(full.raw_os_error(), Some(libc::EMFILE), "{full}");
+        let said = [
+            run.read("a.txt", 64).unwrap_err(),
+            read_capped(&input, 64).unwrap_err(),
+            crate::calibrate::masters(&dir).unwrap_err(),
+        ];
+        drop(taken);
+        for s in said {
+            assert!(
+                s.contains("Too many open files") && s.contains("ulimit -n"),
+                "{s}"
+            );
+        }
+        Err("no rows".into())
+    })
+    .unwrap_err();
+    assert!(e.starts_with("no rows; run dir: "), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
