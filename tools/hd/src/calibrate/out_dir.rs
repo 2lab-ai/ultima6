@@ -354,7 +354,11 @@ impl Run {
             .map(|m| m.id.clone());
         let made = match made {
             None => return Err(not("not a file the run made")),
-            Some(Err(_)) => return Err(not("could not be identified when it was made")),
+            Some(Err(_)) => {
+                return Err(not(
+                    "not read back (it could not be identified when it was made)",
+                ));
+            }
             Some(Ok(id)) => id,
         };
         let f = at::open(&self.open, name).map_err(|e| os_error(&path, &e))?;
