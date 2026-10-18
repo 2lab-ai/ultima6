@@ -9,7 +9,7 @@
 //! u6-hd ingest    (--game PATH | --synthetic) [--work DIR] [--gate NAME=VALUE]...
 //! u6-hd pack      [--work DIR] [--out FILE]
 //! u6-hd calibrate (--game PATH | --synthetic) [--work DIR] [--slices DIR] [--out DIR]
-//!                 [--per N] [--seed N] [--source map|objects|all]
+//!                 [--per N] [--seed N] [--source all|LABEL]
 //!                 [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...
 //! ```
 //!

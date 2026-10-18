@@ -882,8 +882,11 @@ fn a_source_samples_only_its_rows_and_every_level_it_reaches() {
     let pass = (Bucket::Pass, Sides::GenGen);
     let le = (Bucket::Le11, Sides::GenGen);
     for seed in [1, 2, 3] {
-        let objects = sample(&rows, 6, seed, Source::Objects);
-        assert_eq!(objects, sample(&rows, 6, seed, Source::Objects));
+        let objects = sample(&rows, 6, seed, Source::Label("objects".into()));
+        assert_eq!(
+            objects,
+            sample(&rows, 6, seed, Source::Label("objects".into()))
+        );
         // Only the cells with rows found among the objects; only those rows, both kinds.
         assert_eq!(objects.keys().copied().collect::<Vec<_>>(), [pass, gt]);
         for t in objects.values() {
@@ -898,11 +901,14 @@ fn a_source_samples_only_its_rows_and_every_level_it_reaches() {
         assert_eq!((t.had, t.surface), (3, 0));
         assert_eq!(levels(t), [2, 2, 4]);
         // Fewer places than levels: the lower levels, and one place kept for the surface.
-        let few = sample(&rows, 3, seed, Source::Objects);
+        let few = sample(&rows, 3, seed, Source::Label("objects".into()));
         assert_eq!(levels(&few[&gt]), [0, 1, 2]);
-        assert_eq!(levels(&sample(&rows, 1, seed, Source::Objects)[&gt]), [0]);
+        assert_eq!(
+            levels(&sample(&rows, 1, seed, Source::Label("objects".into()))[&gt]),
+            [0]
+        );
         // The map: its rows and those of both.
-        let map = sample(&rows, 6, seed, Source::Map);
+        let map = sample(&rows, 6, seed, Source::Label("map".into()));
         assert_eq!(map.keys().copied().collect::<Vec<_>>(), [pass, le, gt]);
         for t in map.values() {
             assert!(t.rows.iter().all(|r| r.source.starts_with("map")));
@@ -917,10 +923,78 @@ fn a_source_samples_only_its_rows_and_every_level_it_reaches() {
         assert_eq!((t.had, t.surface), (23, 8));
         assert!(t.rows.iter().all(|r| r.surface_map()));
     }
-    assert_eq!(Source::parse("objects"), Ok(Source::Objects));
-    assert_eq!(Source::parse("map"), Ok(Source::Map));
+    assert_eq!(
+        Source::parse("objects"),
+        Ok(Source::Label("objects".into()))
+    );
+    assert_eq!(Source::parse("map"), Ok(Source::Label("map".into())));
     assert_eq!(Source::parse("all"), Ok(Source::All));
-    assert!(Source::parse("object").is_err());
+}
+
+#[test]
+fn a_source_is_any_label_of_gates_jsonl() {
+    // Every label the gate writes, and one it does not know: each is a source by its name.
+    for l in LABELS.iter().copied().chain(["object", "new_kind-2"]) {
+        let s = Source::parse(l).unwrap();
+        assert_eq!((s.name(), s.prefix()), (l, format!("{l}-")));
+    }
+    // A name that cannot name a sheet is refused.
+    for bad in ["", "a/b", "map objects", "../x", "map+objects"] {
+        assert!(Source::parse(bad).is_err(), "{bad:?}");
+    }
+    // A row's labels: its source split at +, then a label and labels when it has them.
+    let pair = (1, 2, "east");
+    let with = |extra: serde_json::Value| -> String {
+        let mut v: serde_json::Value = serde_json::from_str(&line(
+            1,
+            pair,
+            false,
+            Some(1.0),
+            1.5,
+            "gen-mmpx",
+            "map+objects",
+            (0, 0, 0),
+        ))
+        .unwrap();
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v.to_string()
+    };
+    let text = [
+        with(serde_json::json!({})),
+        with(serde_json::json!({"label": "replace"})),
+        with(serde_json::json!({"source": "map", "labels": ["object-terrain", "map", "odd"]})),
+        with(serde_json::json!({"source": null, "label": "object-terrain"})),
+    ]
+    .join("\n");
+    let (rows, _) = rows(&text).unwrap();
+    let sources: Vec<&str> = rows.iter().map(|r| r.source.as_str()).collect();
+    assert_eq!(
+        sources,
+        [
+            "map+objects",
+            "map+objects+replace",
+            "map+object-terrain+odd",
+            "object-terrain"
+        ]
+    );
+    // A label takes the rows that have it, the known ones and the others alike; one no row has
+    // takes none.
+    let took = |l: &str| -> Vec<usize> {
+        let s = Source::parse(l).unwrap();
+        (0..rows.len()).filter(|&i| s.takes(&rows[i])).collect()
+    };
+    assert_eq!(took("map"), [0, 1, 2]);
+    assert_eq!(took("objects"), [0, 1]);
+    assert_eq!(took("replace"), [1]);
+    assert_eq!(took("object-terrain"), [2, 3]);
+    assert_eq!(took("odd"), [2]);
+    assert!(took("object").is_empty());
+    assert!(sample(&rows, 6, 1, Source::parse("object").unwrap()).is_empty());
+    // A pair line with no label at all is refused.
+    let none = with(serde_json::json!({"source": null}));
+    assert!(super::rows(&none).is_err());
 }
 
 #[test]
@@ -962,7 +1036,7 @@ fn a_source_names_its_sheets_apart() {
             edge: Edge::East,
         }],
         seam: Thresholds::default().seam,
-        source: Source::Objects,
+        source: Source::Label("objects".into()),
     };
     let s = calibrate(&g, &work, &opts).unwrap();
     assert_eq!(s.rows, 7);

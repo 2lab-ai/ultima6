@@ -13,9 +13,11 @@
 //! - **The samples** ([`sample`]): `per` rows of each bucket × sides, drawn by the seed alone
 //!   (the rows in pair order, then shuffled): the rows of the map on the surface (source `map`
 //!   or `map+objects`, level 0) first, the other rows only to fill a short cell; in a sheet, by
-//!   ratio / limit. `--source map|objects` ([`Source`]) samples only the rows found in the map or
-//!   among the objects (`map+objects` in both), the surface first after one row of each other
-//!   level the cell has; `all`, the default, every row as above.
+//!   ratio / limit. `--source LABEL` ([`Source`]) samples only the rows with that label, the
+//!   surface first after one row of each other level the cell has; `all`, the default, every
+//!   row as above. A row's labels ([`labels`]) are its `source` split at `+` (`map+objects` has
+//!   both) and its `label` or `labels` when it has them: `map`, `objects`, `replace`,
+//!   `object-terrain` ([`LABELS`]), or any other by its name (a label no row has takes none).
 //! - **A window** ([`frame`]): [`COLS`] × [`ROWS`] map cells, the pair's cell A at [`A_CELL`] and
 //!   B east or south of it, drawn as the page's map window draws its cells into the frame: the
 //!   map tile of each cell as the world places it (its chunks, the level's wrap), then the
@@ -135,10 +137,10 @@ impl Row {
         }
     }
 
-    /// Whether `gates.jsonl` found the pair in `source` (`map`, `objects`): its `source` is
-    /// that or `map+objects`.
-    fn from(&self, source: &str) -> bool {
-        self.source.split('+').any(|s| s == source)
+    /// Whether the pair has label `label` (`map`, `objects`, …): one of its labels, `+` between
+    /// them in `source` ([`labels`]).
+    pub fn from(&self, label: &str) -> bool {
+        self.source.split('+').any(|s| s == label)
     }
 
     /// A pair of the map on the surface: what the samples take first.
@@ -147,62 +149,88 @@ impl Row {
     }
 }
 
-/// The rows a run samples (`--source`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The pair labels the neighbour gate writes (H5: `map`, `objects`; H7: `replace`, a 0x20 object
+/// standing in for its cell's base, and `object-terrain`, an object meeting a neighbouring cell's
+/// map record). The summary of `--final` prints each of them, 0 when no pair has it; a label
+/// `gates.jsonl` has beyond these is taken by its name.
+pub const LABELS: [&str; 4] = ["map", "objects", "replace", "object-terrain"];
+
+/// The labels of a `gates.jsonl` pair line `v`, `+` between them, in the order first found:
+/// its `source` split at `+`, then a `label` (a string) and `labels` (strings) when it has them.
+pub fn labels(v: &serde_json::Value) -> String {
+    let text = |k: &str| v.get(k).and_then(serde_json::Value::as_str);
+    let list = v
+        .get("labels")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str);
+    let mut out: Vec<&str> = Vec::new();
+    for s in text("source").into_iter().chain(text("label")).chain(list) {
+        for l in s.split('+').filter(|l| !l.is_empty()) {
+            if !out.contains(&l) {
+                out.push(l);
+            }
+        }
+    }
+    out.join("+")
+}
+
+/// The rows a run takes (`--source`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Source {
     /// Every row; the map's on the surface first.
     #[default]
     All,
-    /// Rows found in the map (`map`, `map+objects`).
-    Map,
-    /// Rows found among the objects (`objects`, `map+objects`).
-    Objects,
+    /// The rows with one label ([`LABELS`], or any other `gates.jsonl` has, by its name).
+    Label(String),
 }
 
 impl Source {
-    /// `map`, `objects` or `all`.
+    /// `all`, or a label: letters, digits, `-` and `_` (it names the sheets). A label no row
+    /// has is not refused: the run takes no row of it, and says so.
     pub fn parse(s: &str) -> Result<Source, String> {
+        let name = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
         match s {
             "all" => Ok(Source::All),
-            "map" => Ok(Source::Map),
-            "objects" => Ok(Source::Objects),
-            _ => Err(format!("bad --source {s:?} (map, objects or all)")),
+            _ if !s.is_empty() && s.chars().all(name) => Ok(Source::Label(s.to_string())),
+            _ => Err(format!(
+                "bad --source {s:?} (all, or a label of gates.jsonl: letters, digits, - and _)"
+            )),
         }
     }
 
-    pub fn name(self) -> &'static str {
+    /// `all` or the label.
+    pub fn name(&self) -> &str {
         match self {
             Source::All => "all",
-            Source::Map => "map",
-            Source::Objects => "objects",
+            Source::Label(l) => l,
         }
     }
 
-    /// Whether the run samples row `r`.
-    pub fn takes(self, r: &Row) -> bool {
+    /// Whether the run takes row `r`.
+    pub fn takes(&self, r: &Row) -> bool {
         match self {
             Source::All => true,
-            Source::Map => r.from("map"),
-            Source::Objects => r.from("objects"),
+            Source::Label(l) => r.from(l),
         }
     }
 
     /// Whether `r` is of the rows a cell takes first: the map's on the surface for every row,
-    /// the surface's for one source.
-    fn first(self, r: &Row) -> bool {
+    /// the surface's for one label.
+    fn first(&self, r: &Row) -> bool {
         match self {
             Source::All => r.surface_map(),
-            _ => r.at.z == 0,
+            Source::Label(_) => r.at.z == 0,
         }
     }
 
-    /// What the sheets' names start with: nothing for every row, else the source and a dash
+    /// What the sheets' names start with: nothing for every row, else the label and a dash
     /// (`objects-fail-gt1.5-gen-mmpx.png`).
-    pub fn prefix(self) -> &'static str {
+    pub fn prefix(&self) -> String {
         match self {
-            Source::All => "",
-            Source::Map => "map-",
-            Source::Objects => "objects-",
+            Source::All => String::new(),
+            Source::Label(l) => format!("{l}-"),
         }
     }
 }
@@ -295,7 +323,6 @@ struct RawRow {
     ratio: Option<f32>,
     limit: Option<f32>,
     sides: String,
-    source: String,
     at: Option<RawAt>,
 }
 
@@ -311,6 +338,10 @@ pub fn rows(text: &str) -> Result<(Vec<Row>, usize), String> {
         let v: serde_json::Value = serde_json::from_str(line).map_err(|e| bad(&e))?;
         if !v.get("neighbour").is_some_and(serde_json::Value::is_object) {
             continue;
+        }
+        let source = labels(&v);
+        if source.is_empty() {
+            return Err(bad(&"a pair with no label (source, label or labels)"));
         }
         let r: RawRow = serde_json::from_value(v).map_err(|e| bad(&e))?;
         if r.pass != 1 {
@@ -339,7 +370,7 @@ pub fn rows(text: &str) -> Result<(Vec<Row>, usize), String> {
             ratio,
             limit,
             sides,
-            source: r.source,
+            source,
             at: At {
                 z: at.z,
                 x: at.x,
@@ -1363,7 +1394,7 @@ pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, Strin
     let (rows, skipped) = rows(&text)?;
     let pack = Rc::new(Slices::read(game, &o.slices)?);
     let mut summary = Summary {
-        source: o.source,
+        source: o.source.clone(),
         rows: rows.len(),
         skipped,
         slices: pack.len(),
@@ -1371,7 +1402,7 @@ pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, Strin
     };
     let (mut tsv, mut index, mut same) = (format!("{TSV_HEADER}\n"), 0, (0, 0));
     let mut sheets = Vec::new();
-    for ((bucket, sides), taken) in sample(&rows, o.per, o.seed, o.source) {
+    for ((bucket, sides), taken) in sample(&rows, o.per, o.seed, o.source.clone()) {
         summary
             .cells
             .push((bucket, sides, taken.had, taken.surface, taken.rows.len()));

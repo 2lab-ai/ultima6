@@ -38,7 +38,7 @@ const USAGE: &str = "usage:
   u6-hd ingest    (--game PATH | --synthetic) [--work DIR] [--gate NAME=VALUE]...
   u6-hd pack      [--work DIR] [--out FILE]
   u6-hd calibrate (--game PATH | --synthetic) [--work DIR] [--slices DIR] [--out DIR]
-                  [--per N] [--seed N] [--source map|objects|all]
+                  [--per N] [--seed N] [--source all|LABEL]
                   [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...";
 
 #[derive(Default)]
@@ -104,7 +104,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--at" => {
                 a.at.push(Spot::parse(&value("z,x,y[,edge] or leader[,edge]")?)?)
             }
-            "--source" => a.source = Source::parse(&value("map, objects or all")?)?,
+            "--source" => a.source = Source::parse(&value("all or a label")?)?,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -326,7 +326,7 @@ fn calibrate_cmd(a: &Args) -> Result<(), String> {
         seed: a.seed,
         at: a.at.clone(),
         seam: a.gates.seam,
-        source: a.source,
+        source: a.source.clone(),
     };
     let s = calibrate::calibrate(&g, &work, &opts)?;
     say_raw!("{}", s.text());
