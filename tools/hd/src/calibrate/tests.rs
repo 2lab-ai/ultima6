@@ -458,10 +458,10 @@ fn sampling_is_set_by_the_seed_covers_every_cell_with_rows_and_takes_per() {
     let (rows, skipped) = rows(&text).unwrap();
     assert_eq!((rows.len(), skipped), (32, 1));
     let per = 3;
-    let a = sample(&rows, per, 7);
-    assert_eq!(a, sample(&rows, per, 7));
+    let a = sample(&rows, per, 7, Source::All);
+    assert_eq!(a, sample(&rows, per, 7, Source::All));
     // Another seed draws another sample somewhere.
-    assert!((8..16).any(|seed| sample(&rows, per, seed) != a));
+    assert!((8..16).any(|seed| sample(&rows, per, seed, Source::All) != a));
     // Every cell that has rows, and only those.
     let mut cells: Vec<(Bucket, Sides)> = rows.iter().map(|r| (Bucket::of(r), r.sides)).collect();
     cells.sort();
@@ -488,7 +488,7 @@ fn sampling_is_set_by_the_seed_covers_every_cell_with_rows_and_takes_per() {
     assert_eq!(take(Bucket::To15, Sides::GenGen).surface, 0);
     assert_eq!(take(Bucket::To15, Sides::GenGen).rows.len(), 3);
     // `per` larger than every cell takes every row.
-    let all = sample(&rows, 100, 7);
+    let all = sample(&rows, 100, 7, Source::All);
     assert_eq!(
         all.values().map(|t| t.rows.len()).sum::<usize>(),
         rows.len()
@@ -628,6 +628,7 @@ fn an_at_adds_a_control_panel_and_the_leader_its_near_pairs() {
             Spot::Leader { edge: Edge::East },
         ],
         seam: Thresholds::default().seam,
+        source: Source::All,
     };
     let s = calibrate(&g, &work, &opts).unwrap();
     assert_eq!((s.rows, s.skipped, s.slices), (5, 0, 3));
@@ -713,6 +714,7 @@ fn samples_tsv_names_every_sheet_row_and_a_tall_sheet_is_split() {
         seed: 3,
         at: vec![Spot::Leader { edge: Edge::South }],
         seam: Thresholds::default().seam,
+        source: Source::All,
     };
     let s = calibrate(&g, &work, &opts).unwrap();
     // The snapshot read is the work dir's file as it was.
@@ -793,5 +795,208 @@ fn samples_tsv_names_every_sheet_row_and_a_tall_sheet_is_split() {
         "{report}"
     );
     assert!(report.contains(&format!("samples.tsv: {} rows", rows.len())));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_default_samples_as_before_the_selector() {
+    // The draw of every row (`--source all`), pinned as it was before `--source` existed: the
+    // record A and level of each row taken, cell by cell.
+    let (rows, _) = rows(&many_rows()).unwrap();
+    let taken = |seed, per| -> Vec<(u16, usize)> {
+        sample(&rows, per, seed, Source::default())
+            .values()
+            .flat_map(|t| t.rows.iter().map(|r| (r.pair.a, r.at.z)))
+            .collect()
+    };
+    assert_eq!(Source::default(), Source::All);
+    let z = |v: &[u16]| v.iter().map(|&a| (a, 0)).collect::<Vec<_>>();
+    let mut want = z(&[2, 3, 9, 12, 13, 14, 15]);
+    want.extend([(16, 1), (17, 0), (18, 1)]);
+    want.extend(z(&[20, 22, 24, 26, 27, 29, 30, 31]));
+    assert_eq!(taken(7, 3), want);
+    let mut want = z(&[2, 3, 5, 6, 8, 9, 11, 12, 13, 14, 15]);
+    want.extend([
+        (16, 1),
+        (17, 0),
+        (18, 1),
+        (19, 1),
+        (20, 0),
+        (21, 1),
+        (22, 0),
+        (23, 1),
+    ]);
+    want.extend(z(&[24, 26, 27]));
+    want.extend([(28, 1), (29, 0), (30, 0), (31, 0), (32, 1)]);
+    assert_eq!(taken(1, 6), want);
+}
+
+/// Rows found in the map, among the objects and in both, on several levels:
+/// - fail-gt1.5 gen-mmpx: objects 8 on the surface, 2 on level 3, 1 on 1, 1 on 5; both 2 on the
+///   surface, 1 on 2; map 6 on the surface, 2 on 4;
+/// - pass gen-gen: objects 2 on level 2, 1 on 4 (none on the surface); map 3 on the surface;
+/// - fail-le1.1 gen-gen: map 3 on the surface.
+fn sourced_rows() -> Vec<Row> {
+    let mut text = String::new();
+    let mut n = 0u16;
+    let mut add = |count: usize, fail: bool, excess: f32, sides: &str, source: &str, z: usize| {
+        for i in 0..count {
+            n += 1;
+            let ratio = Some(1.5 * excess);
+            let at = (z, i, usize::from(n));
+            let l = line(1, (n, n + 1, "east"), fail, ratio, 1.5, sides, source, at);
+            text.push_str(&l);
+            text.push('\n');
+        }
+    };
+    for (count, source, z) in [
+        (8, "objects", 0),
+        (2, "objects", 3),
+        (1, "objects", 1),
+        (1, "objects", 5),
+        (2, "map+objects", 0),
+        (1, "map+objects", 2),
+        (6, "map", 0),
+        (2, "map", 4),
+    ] {
+        add(count, true, 2.0, "gen-mmpx", source, z);
+    }
+    add(2, false, 0.5, "gen-gen", "objects", 2);
+    add(1, false, 0.5, "gen-gen", "objects", 4);
+    add(3, false, 0.5, "gen-gen", "map", 0);
+    add(3, true, 1.05, "gen-gen", "map", 0);
+    rows(&text).unwrap().0
+}
+
+/// The levels of a cell's rows taken, in level order.
+fn levels(t: &Taken) -> Vec<usize> {
+    let mut v: Vec<usize> = t.rows.iter().map(|r| r.at.z).collect();
+    v.sort_unstable();
+    v
+}
+
+#[test]
+fn a_source_samples_only_its_rows_and_every_level_it_reaches() {
+    let rows = sourced_rows();
+    let gt = (Bucket::Gt15, Sides::GenMmpx);
+    let pass = (Bucket::Pass, Sides::GenGen);
+    let le = (Bucket::Le11, Sides::GenGen);
+    for seed in [1, 2, 3] {
+        let objects = sample(&rows, 6, seed, Source::Objects);
+        assert_eq!(objects, sample(&rows, 6, seed, Source::Objects));
+        // Only the cells with rows found among the objects; only those rows, both kinds.
+        assert_eq!(objects.keys().copied().collect::<Vec<_>>(), [pass, gt]);
+        for t in objects.values() {
+            assert!(t.rows.iter().all(|r| r.source.contains("objects")));
+        }
+        let t = &objects[&gt];
+        assert_eq!((t.had, t.surface), (15, 10));
+        // One of each other level, then the surface.
+        assert_eq!(levels(t), [0, 0, 1, 2, 3, 5]);
+        // No surface rows: the levels first, then the rest of them.
+        let t = &objects[&pass];
+        assert_eq!((t.had, t.surface), (3, 0));
+        assert_eq!(levels(t), [2, 2, 4]);
+        // Fewer places than levels: the lower levels, and one place kept for the surface.
+        let few = sample(&rows, 3, seed, Source::Objects);
+        assert_eq!(levels(&few[&gt]), [0, 1, 2]);
+        assert_eq!(levels(&sample(&rows, 1, seed, Source::Objects)[&gt]), [0]);
+        // The map: its rows and those of both.
+        let map = sample(&rows, 6, seed, Source::Map);
+        assert_eq!(map.keys().copied().collect::<Vec<_>>(), [pass, le, gt]);
+        for t in map.values() {
+            assert!(t.rows.iter().all(|r| r.source.starts_with("map")));
+        }
+        let t = &map[&gt];
+        assert_eq!((t.had, t.surface), (11, 8));
+        assert_eq!(levels(t), [0, 0, 0, 0, 2, 4]);
+        assert_eq!(map[&le].rows.len(), 3);
+        // Every row: the map's surface rows first, nothing else while they last.
+        let all = sample(&rows, 6, seed, Source::All);
+        let t = &all[&gt];
+        assert_eq!((t.had, t.surface), (23, 8));
+        assert!(t.rows.iter().all(|r| r.surface_map()));
+    }
+    assert_eq!(Source::parse("objects"), Ok(Source::Objects));
+    assert_eq!(Source::parse("map"), Ok(Source::Map));
+    assert_eq!(Source::parse("all"), Ok(Source::All));
+    assert!(Source::parse("object").is_err());
+}
+
+#[test]
+fn a_source_names_its_sheets_apart() {
+    let g = game();
+    // The test world's rows (all of the map), one found among the objects and one in both.
+    let text = world_rows()
+        + &line(
+            1,
+            (CHEST, POTION, "east"),
+            true,
+            Some(3.0),
+            1.5,
+            "gen-mmpx",
+            "objects",
+            (0, 3, 0),
+        )
+        + "\n"
+        + &line(
+            1,
+            (SWORD, POTION, "south"),
+            false,
+            Some(1.0),
+            1.5,
+            "gen-gen",
+            "map+objects",
+            (0, 4, 0),
+        )
+        + "\n";
+    let (dir, work, slices) = setup("source", &text);
+    let out = dir.join("calibrate-objects");
+    let opts = Options {
+        slices,
+        out: out.clone(),
+        per: 6,
+        seed: 1,
+        at: vec![Spot::Cell {
+            at: At { z: 0, x: 1, y: 1 },
+            edge: Edge::East,
+        }],
+        seam: Thresholds::default().seam,
+        source: Source::Objects,
+    };
+    let s = calibrate(&g, &work, &opts).unwrap();
+    assert_eq!(s.rows, 7);
+    assert_eq!(
+        s.sheets,
+        [
+            "objects-pass-gen-gen.png",
+            "objects-pass-gen-gen-s2.png",
+            "objects-fail-gt1.5-gen-mmpx.png",
+            "objects-fail-gt1.5-gen-mmpx-s2.png",
+            "objects-control.png",
+            "objects-control-s2.png",
+        ]
+    );
+    let (_, rows) = tsv(&out.join("samples.tsv"));
+    let sources: Vec<&str> = rows.iter().map(|r| r[9].as_str()).collect();
+    assert_eq!(sources, ["map+objects", "objects", "map"]);
+    assert!(rows.iter().all(|r| r[13].starts_with("objects-")));
+    let report = s.text();
+    assert!(report.contains("source objects: "), "{report}");
+    assert!(
+        report.contains("objects-fail-gt1.5-gen-mmpx: 1 of 1 (1 on the surface)"),
+        "{report}"
+    );
+    // The same out dir with every row: the default names, none of the source's overwritten.
+    let opts = Options {
+        source: Source::All,
+        ..opts
+    };
+    let s = calibrate(&g, &work, &opts).unwrap();
+    assert!(s.sheets.iter().all(|f| !f.starts_with("objects-")));
+    assert!(s.sheets.contains(&"control.png".to_string()));
+    for f in ["objects-pass-gen-gen.png", "objects-control-s2.png"] {
+        assert!(out.join(f).is_file(), "{f}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

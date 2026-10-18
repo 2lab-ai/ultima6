@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use u6_hdtool::atlas::{self, SheetKind};
-use u6_hdtool::calibrate::{self, Spot};
+use u6_hdtool::calibrate::{self, Source, Spot};
 use u6_hdtool::game::{Game, synthetic};
 use u6_hdtool::gate::Thresholds;
 use u6_hdtool::group::{self, Class, Item};
@@ -38,7 +38,8 @@ const USAGE: &str = "usage:
   u6-hd ingest    (--game PATH | --synthetic) [--work DIR] [--gate NAME=VALUE]...
   u6-hd pack      [--work DIR] [--out FILE]
   u6-hd calibrate (--game PATH | --synthetic) [--work DIR] [--slices DIR] [--out DIR]
-                  [--per N] [--seed N] [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...";
+                  [--per N] [--seed N] [--source map|objects|all]
+                  [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...";
 
 #[derive(Default)]
 struct Args {
@@ -56,6 +57,7 @@ struct Args {
     per: usize,
     seed: u64,
     at: Vec<Spot>,
+    source: Source,
 }
 
 fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -102,6 +104,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--at" => {
                 a.at.push(Spot::parse(&value("z,x,y[,edge] or leader[,edge]")?)?)
             }
+            "--source" => a.source = Source::parse(&value("map, objects or all")?)?,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -323,6 +326,7 @@ fn calibrate_cmd(a: &Args) -> Result<(), String> {
         seed: a.seed,
         at: a.at.clone(),
         seam: a.gates.seam,
+        source: a.source,
     };
     let s = calibrate::calibrate(&g, &work, &opts)?;
     say_raw!("{}", s.text());

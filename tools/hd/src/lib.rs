@@ -9,7 +9,8 @@
 //! u6-hd ingest    (--game PATH | --synthetic) [--work DIR] [--gate NAME=VALUE]...
 //! u6-hd pack      [--work DIR] [--out FILE]
 //! u6-hd calibrate (--game PATH | --synthetic) [--work DIR] [--slices DIR] [--out DIR]
-//!                 [--per N] [--seed N] [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...
+//!                 [--per N] [--seed N] [--source map|objects|all]
+//!                 [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...
 //! ```
 //!
 //! `--gate` changes one threshold of `gate::Thresholds` for the run (structure, shift, iou,

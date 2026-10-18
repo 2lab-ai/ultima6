@@ -13,7 +13,9 @@
 //! - **The samples** ([`sample`]): `per` rows of each bucket × sides, drawn by the seed alone
 //!   (the rows in pair order, then shuffled): the rows of the map on the surface (source `map`
 //!   or `map+objects`, level 0) first, the other rows only to fill a short cell; in a sheet, by
-//!   ratio / limit.
+//!   ratio / limit. `--source map|objects` ([`Source`]) samples only the rows found in the map or
+//!   among the objects (`map+objects` in both), the surface first after one row of each other
+//!   level the cell has; `all`, the default, every row as above.
 //! - **A window** ([`frame`]): [`COLS`] × [`ROWS`] map cells, the pair's cell A at [`A_CELL`] and
 //!   B east or south of it, drawn as the page's map window draws its cells into the frame: the
 //!   map tile of each cell as the world places it (its chunks, the level's wrap), then the
@@ -32,6 +34,8 @@
 //!   ratio / limit; the join marked in the margins outside the panels, never on the art: a tick
 //!   across the join line and a bar along the edge's length. A sheet taller than [`MAX_HEIGHT`] is
 //!   split into parts (`-p1`, `-p2`, … at both scales). The `--at` windows go to `control.png`.
+//!   With one source every name starts with it (`objects-fail-gt1.5-gen-mmpx.png`,
+//!   `objects-control.png`).
 //! - **`samples.tsv`**: a line per sheet row; `ratio_slices` is the ratio measured again from the
 //!   images of `--slices` (equal to `ratio` when they are the images the first pass judged).
 //!
@@ -131,9 +135,75 @@ impl Row {
         }
     }
 
+    /// Whether `gates.jsonl` found the pair in `source` (`map`, `objects`): its `source` is
+    /// that or `map+objects`.
+    fn from(&self, source: &str) -> bool {
+        self.source.split('+').any(|s| s == source)
+    }
+
     /// A pair of the map on the surface: what the samples take first.
     fn surface_map(&self) -> bool {
-        self.at.z == 0 && self.source.split('+').any(|s| s == "map")
+        self.at.z == 0 && self.from("map")
+    }
+}
+
+/// The rows a run samples (`--source`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    /// Every row; the map's on the surface first.
+    #[default]
+    All,
+    /// Rows found in the map (`map`, `map+objects`).
+    Map,
+    /// Rows found among the objects (`objects`, `map+objects`).
+    Objects,
+}
+
+impl Source {
+    /// `map`, `objects` or `all`.
+    pub fn parse(s: &str) -> Result<Source, String> {
+        match s {
+            "all" => Ok(Source::All),
+            "map" => Ok(Source::Map),
+            "objects" => Ok(Source::Objects),
+            _ => Err(format!("bad --source {s:?} (map, objects or all)")),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::All => "all",
+            Source::Map => "map",
+            Source::Objects => "objects",
+        }
+    }
+
+    /// Whether the run samples row `r`.
+    pub fn takes(self, r: &Row) -> bool {
+        match self {
+            Source::All => true,
+            Source::Map => r.from("map"),
+            Source::Objects => r.from("objects"),
+        }
+    }
+
+    /// Whether `r` is of the rows a cell takes first: the map's on the surface for every row,
+    /// the surface's for one source.
+    fn first(self, r: &Row) -> bool {
+        match self {
+            Source::All => r.surface_map(),
+            _ => r.at.z == 0,
+        }
+    }
+
+    /// What the sheets' names start with: nothing for every row, else the source and a dash
+    /// (`objects-fail-gt1.5-gen-mmpx.png`).
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Source::All => "",
+            Source::Map => "map-",
+            Source::Objects => "objects-",
+        }
     }
 }
 
@@ -304,31 +374,58 @@ impl Rng {
 /// What [`sample`] took from one bucket × sides.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Taken {
-    /// Rows the cell had, and how many of them are of the map on the surface.
+    /// Rows the cell had, and how many of them it takes first (the map's on the surface; with
+    /// one source, its rows on the surface).
     pub had: usize,
     pub surface: usize,
     /// The rows taken, in sheet order (by ratio / limit, then pair).
     pub rows: Vec<Row>,
 }
 
-/// `per` rows of every bucket × sides that has rows (module docs): each cell drawn by its own
-/// generator from `seed` and the cell, so a cell's draw does not depend on another's rows.
-pub fn sample(rows: &[Row], per: usize, seed: u64) -> BTreeMap<(Bucket, Sides), Taken> {
+/// `per` rows of every bucket × sides that has rows of `source` (module docs): each cell drawn
+/// by its own generator from `seed` and the cell, so a cell's draw does not depend on another's
+/// rows.
+///
+/// With every row ([`Source::All`]) a cell takes the map's rows on the surface first and the
+/// others only to fill. With one source a cell takes, before its surface rows, one row of each
+/// other level it has rows on (in level order, keeping a place for the surface when it has
+/// rows there), so the sheets show every level the source reaches; then its surface rows, then
+/// the rest.
+pub fn sample(
+    rows: &[Row],
+    per: usize,
+    seed: u64,
+    source: Source,
+) -> BTreeMap<(Bucket, Sides), Taken> {
     let mut by: BTreeMap<(Bucket, Sides), Vec<&Row>> = BTreeMap::new();
-    for r in rows {
+    for r in rows.iter().filter(|r| source.takes(r)) {
         by.entry((Bucket::of(r), r.sides)).or_default().push(r);
     }
     by.into_iter()
         .map(|(key, mut v)| {
             v.sort_by(|a, b| a.pair.cmp(&b.pair).then(a.at.cmp(&b.at)));
             let (mut first, mut rest): (Vec<&Row>, Vec<&Row>) =
-                v.iter().copied().partition(|r| r.surface_map());
+                v.iter().copied().partition(|r| source.first(r));
             let cell = (key.0 as u64) << 8 | key.1 as u64;
             let mut rng = Rng(seed ^ cell.wrapping_mul(0xd6e8_feb8_6659_fd93));
             rng.shuffle(&mut first);
             rng.shuffle(&mut rest);
-            let mut taken: Vec<Row> = first
+            let mut each: Vec<&Row> = Vec::new();
+            if source != Source::All {
+                // The first of each level in the drawn order, by level.
+                let mut levels = BTreeSet::new();
+                each = rest
+                    .iter()
+                    .copied()
+                    .filter(|r| levels.insert(r.at.z))
+                    .collect();
+                each.sort_by_key(|r| r.at.z);
+                each.truncate(if first.is_empty() { per } else { per - 1 });
+                rest.retain(|r| !each.iter().any(|e| std::ptr::eq(*e, *r)));
+            }
+            let mut taken: Vec<Row> = each
                 .iter()
+                .chain(&first)
                 .chain(&rest)
                 .take(per)
                 .map(|&r| r.clone())
@@ -1084,11 +1181,15 @@ pub struct Options {
     pub at: Vec<Spot>,
     /// The seam threshold the ratios are measured again with.
     pub seam: f32,
+    /// The rows sampled.
+    pub source: Source,
 }
 
 /// What `calibrate` wrote, in counts and file names.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Summary {
+    /// The rows sampled.
+    pub source: Source,
     /// First-pass pairs measured with a cell, and those skipped.
     pub rows: usize,
     pub skipped: usize,
@@ -1116,10 +1217,22 @@ impl Summary {
              measured); {} slices",
             self.rows, self.skipped, self.slices
         );
+        if self.source != Source::All {
+            let _ = writeln!(
+                s,
+                "source {}: the rows it found, the surface first after one of each other level",
+                self.source.name()
+            );
+        }
+        let first = match self.source {
+            Source::All => "of the surface map",
+            _ => "on the surface",
+        };
         for (b, sides, had, surface, taken) in &self.cells {
             let _ = writeln!(
                 s,
-                "{}-{}: {taken} of {had} ({surface} of the surface map)",
+                "{}{}-{}: {taken} of {had} ({surface} {first})",
+                self.source.prefix(),
                 b.name(),
                 sides.name()
             );
@@ -1250,6 +1363,7 @@ pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, Strin
     let (rows, skipped) = rows(&text)?;
     let pack = Rc::new(Slices::read(game, &o.slices)?);
     let mut summary = Summary {
+        source: o.source,
         rows: rows.len(),
         skipped,
         slices: pack.len(),
@@ -1257,7 +1371,7 @@ pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, Strin
     };
     let (mut tsv, mut index, mut same) = (format!("{TSV_HEADER}\n"), 0, (0, 0));
     let mut sheets = Vec::new();
-    for ((bucket, sides), taken) in sample(&rows, o.per, o.seed) {
+    for ((bucket, sides), taken) in sample(&rows, o.per, o.seed, o.source) {
         summary
             .cells
             .push((bucket, sides, taken.had, taken.surface, taken.rows.len()));
@@ -1272,7 +1386,7 @@ pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, Strin
                 row: Some(r),
             })
             .collect();
-        let stem = format!("{}-{}", bucket.name(), sides.name());
+        let stem = format!("{}{}-{}", o.source.prefix(), bucket.name(), sides.name());
         let (t, s) = (&mut tsv, &mut sheets);
         draw(
             game, &pack, o.seam, &out, &stem, &entries, &mut index, t, s, &mut same,
@@ -1301,6 +1415,7 @@ pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, Strin
     }
     summary.controls = controls.len();
     if !controls.is_empty() {
+        let stem = format!("{}control", o.source.prefix());
         let entries: Vec<Entry> = controls
             .into_iter()
             .map(|c| Entry {
@@ -1313,7 +1428,7 @@ pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, Strin
             .collect();
         let (t, s) = (&mut tsv, &mut sheets);
         draw(
-            game, &pack, o.seam, &out, "control", &entries, &mut index, t, s, &mut same,
+            game, &pack, o.seam, &out, &stem, &entries, &mut index, t, s, &mut same,
         )?;
     }
     work::write_file(&out.join("samples.tsv"), tsv.as_bytes())?;
