@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::super::out_dir::{DONE, Hooked, hook};
+use super::super::out_dir::{DONE, Hooked, REFUSED, hook};
 use super::*;
 use crate::game::{Level, World, synthetic};
 use crate::gate::{Edge, Thresholds};
@@ -3299,6 +3299,33 @@ fn done_is_written_after_every_other_file_of_the_run() {
 }
 
 #[test]
+fn a_final_run_whose_dir_is_removed_before_samples_tsv_fails_and_makes_nothing_again() {
+    // The reviewer's P1f, turned around: the run dir removed (by another hand) before
+    // samples.tsv is written. The write fails, the run fails, and nothing is made again: no
+    // run dir, no done; --out holds nothing of the run.
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("removed", &text, &g, &left);
+    let o = options(&dir);
+    let out = o.out.clone();
+    let _h = hook(&o.out, "write", move |name| {
+        if name == "samples.tsv" {
+            std::fs::remove_dir_all(run_dir(&out)).unwrap();
+        }
+        Ok(())
+    });
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(e.contains("samples.tsv: No such file or directory"), "{e}");
+    assert!(
+        e.contains("was removed or replaced while the run wrote it"),
+        "{e}"
+    );
+    assert!(e.contains(&format!("{REFUSED} not written")), "{e}");
+    assert!(files_in(&o.out).is_empty(), "{:?}", files_in(&o.out));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_error_of_the_run_names_the_file_of_its_run_dir() {
     // A sheet that cannot be written (a dir where it goes, made by another hand) and a snapshot
     // that cannot be read back (gone once written): each error, and refused.txt, name the file
@@ -3307,12 +3334,7 @@ fn an_error_of_the_run_names_the_file_of_its_run_dir() {
     let (text, left) = chain(&g);
     let (dir, work) = work_dir("named", &text, &g, &left);
     for (k, step, file, said) in [
-        (
-            "write",
-            "write",
-            "final-terrain.png",
-            "exists and is not a plain file",
-        ),
+        ("write", "write", "final-terrain.png", "File exists"),
         (
             "snapshot",
             "snapshot",

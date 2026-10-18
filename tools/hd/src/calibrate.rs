@@ -1752,11 +1752,10 @@ fn first_pass(
     run: &out_dir::Run,
 ) -> Result<Summary, String> {
     // The snapshot first; only it is read.
-    let snapshot = run.dir().join("gates.jsonl");
     let bytes = img::read_capped(&work.path("gates.jsonl"), 1 << 30)
         .map_err(|e| format!("{e} (run ingest first)"))?;
     run.write("gates.jsonl", &bytes)?;
-    let text = img::read_capped(&snapshot, 1 << 30)?;
+    let text = run.read("gates.jsonl", 1 << 30)?;
     let text = String::from_utf8(text).map_err(|_| "gates.jsonl is not UTF-8".to_string())?;
     let (rows, skipped) = rows(&text)?;
     let pack = Rc::new(Slices::read(game, &o.slices)?);

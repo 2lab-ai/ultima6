@@ -1545,7 +1545,7 @@ fn run_final(
             .map_err(|e| format!("{e} (run ingest first)"))?;
         run.write(name, &bytes)?;
         out_dir::seam(&o.out, "snapshot", name)?;
-        img::read_capped(&run.dir().join(name), cap)
+        run.read(name, cap)
     };
     let caps = [
         ("gates.jsonl", 1 << 30),

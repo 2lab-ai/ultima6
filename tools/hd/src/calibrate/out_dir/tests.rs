@@ -244,3 +244,132 @@ fn a_symlinked_out_dir_is_written_through() {
     assert_eq!(names(&w.dir), ["a.png", "a.txt", DONE]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The run dir of the one run under `out`.
+fn only_run(out: &Path) -> PathBuf {
+    let parent = out.canonicalize().unwrap();
+    let runs: Vec<String> = names(&parent)
+        .into_iter()
+        .filter(|n| n.starts_with("run-"))
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    parent.join(&runs[0])
+}
+
+#[test]
+fn a_run_whose_dir_is_removed_fails_and_makes_nothing_again() {
+    // The reviewer's P1 and P1b, turned around: the run dir, or --out whole, removed before
+    // the run's second write. The write fails, the run fails, and nothing is made again (no
+    // run dir, no --out, no done).
+    for whole in [false, true] {
+        let dir = temp(&format!("removed-{whole}"));
+        let out = dir.join("out");
+        let o = out.clone();
+        let _h = hook(&out, "write", move |name| {
+            if name == "b.txt" {
+                let gone = if whole { o.clone() } else { only_run(&o) };
+                std::fs::remove_dir_all(gone).unwrap();
+            }
+            Ok(())
+        });
+        let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+            run.write("a.txt", b"a")?;
+            run.write("b.txt", b"b")?;
+            run.write("c.txt", b"c")
+        })
+        .unwrap_err();
+        assert!(
+            e.contains("b.txt: No such file or directory"),
+            "{whole}: {e}"
+        );
+        assert!(
+            e.contains("removed or replaced while the run wrote it"),
+            "{whole}: {e}"
+        );
+        if whole {
+            assert!(!out.exists(), "{whole}");
+        } else {
+            assert!(names(&out).is_empty(), "{whole}: {:?}", names(&out));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_run_whose_dir_is_swapped_for_a_link_touches_nothing_where_it_points() {
+    // The reviewer's P2, turned around: the live run dir replaced by a link to a dir of the
+    // owner's, which holds an a.txt of theirs (a name the run wrote before the swap); the run
+    // then fails. Nothing is written there, and their a.txt is as it was.
+    let dir = temp("swapped");
+    let out = dir.join("out");
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("a.txt"), b"the owner's").unwrap();
+    let had = tree(&elsewhere);
+    let (o, to) = (out.clone(), elsewhere.clone());
+    let _h = hook(&out, "write", move |name| {
+        if name == "gates.jsonl" {
+            let run = only_run(&o);
+            std::fs::remove_dir_all(&run).unwrap();
+            std::os::unix::fs::symlink(&to, &run).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, fails).unwrap_err();
+    assert!(
+        e.contains("removed or replaced while the run wrote it"),
+        "{e}"
+    );
+    assert_eq!(tree(&elsewhere), had);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_at_a_name_the_run_writes_is_never_replaced_or_deleted() {
+    // A file of the owner's put at a name before the run writes it (the reviewer's P7, turned
+    // around): the write fails (the name is taken), the run fails, and the file, which the run
+    // never made, is not deleted with the run's own.
+    let dir = temp("taken");
+    let out = dir.join("out");
+    let o = out.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name == "a.png" {
+            std::fs::write(only_run(&o).join("a.png"), b"the owner's").unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    assert!(e.contains("a.png: File exists"), "{e}");
+    let run = only_run(&out);
+    assert_eq!(names(&run), ["a.png", REFUSED]);
+    assert_eq!(std::fs::read(run.join("a.png")).unwrap(), b"the owner's");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_put_at_a_name_the_run_made_is_not_deleted_and_is_said_to_be_left() {
+    // After the run wrote a.txt, another hand replaces it with a file of its own at that name
+    // (the reviewer's P6, turned around); the run fails. That file is not the one the run
+    // made (another inode), so it is left, and said so.
+    let dir = temp("replaced-file");
+    let out = dir.join("out");
+    let o = out.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name == "gates.jsonl" {
+            let run = only_run(&o);
+            std::fs::write(run.join("x.tmp"), b"the owner's").unwrap();
+            std::fs::rename(run.join("x.tmp"), run.join("a.txt")).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, fails).unwrap_err();
+    let run = only_run(&out);
+    assert_eq!(std::fs::read(run.join("a.txt")).unwrap(), b"the owner's");
+    let left = format!(
+        "{} (not the file the run made)",
+        run.join("a.txt").display()
+    );
+    assert!(e.contains(&left), "{e}");
+    assert_eq!(names(&run), ["a.txt", "gates.jsonl", REFUSED]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
