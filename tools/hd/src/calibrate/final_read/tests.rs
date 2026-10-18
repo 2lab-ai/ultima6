@@ -1200,6 +1200,65 @@ fn the_last_pass_is_what_the_windows_show() {
 }
 
 #[test]
+fn a_window_at_a_south_pair_of_level_1_is_listed_there() {
+    // B on level 1 alone, between two records opaque in their middle columns only (the gate
+    // measures nothing across B's east or west join): B's window is placed at a south pair, on
+    // level 1, and samples.tsv says so.
+    const MID: u16 = 6;
+    let mut g = game();
+    let rec = &mut g.records[usize::from(MID)];
+    for i in 0..256 {
+        let mid = (4..12).contains(&(i % 16));
+        rec.pixels[i] = if mid {
+            GRAIN + (hash(i as u32, 7) % 5) as u8
+        } else {
+            0
+        };
+        rec.transparent[i] = !mid;
+    }
+    g.world = World {
+        chunks: vec![chunk(&[]), chunk(&[(3, 3, MID), (4, 3, B), (5, 3, MID)])],
+        levels: vec![
+            Level {
+                side: 2,
+                refs: vec![0, 0, 0, 0],
+            },
+            Level {
+                side: 2,
+                refs: vec![1, 0, 0, 0],
+            },
+        ],
+        objects: Vec::new(),
+    };
+    let images = BTreeMap::from([(B, near(&g, B))]);
+    let (text, left) = gate_log(&g, &images);
+    assert_eq!(left, images);
+    let (dir, work) = work_dir("south-1", &text, &g, &left);
+    let o = options(&dir);
+    calibrate_final(&g, &work, &o).unwrap();
+    let f = state(&g, &text, &left).unwrap();
+    // The first pair in pair order with the largest ratio over limit.
+    let most = f
+        .last
+        .iter()
+        .map(Last::excess)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let placed = f.last.iter().find(|l| l.excess() == most).unwrap();
+    assert_eq!(placed.pair.edge, Edge::South);
+    assert!(f.last.iter().all(|l| l.at.unwrap().z == 1));
+    let at = placed.at.unwrap();
+    let rows = rows_of(&o.out);
+    let w = rows.iter().find(|r| r["origin"] == "coverage").unwrap();
+    assert_eq!(w["placement"], "pair");
+    let row = |k: &str| w[k].as_str();
+    assert_eq!(
+        [row("z"), row("x"), row("y"), row("edge")],
+        ["1", &at.x.to_string(), &at.y.to_string(), "south"]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_window_is_placed_at_the_largest_ratio_over_limit() {
     // Three pairs of record 9 whose limits differ: by ratio alone the third is the largest, by
     // ratio / limit the second and the third tie (2.0) and the second is first in pair order;
