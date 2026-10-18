@@ -1692,6 +1692,29 @@ fn of_two_landings_whose_code_disagrees_on_a_byte_the_lower_keeps_it() {
 }
 
 #[test]
+fn a_lower_landing_only_a_higher_ones_path_finds_comes_after_it() {
+    // The `*` block's loops land at `h` and jump to an `a1` only their path reaches; its
+    // landing at `l`, lower than `h`, is found only then, and jumps into the operand of the
+    // loops' jump. The loops were taken first: they keep their jump, the `a1`'s landing is
+    // dropped.
+    let a1 = BODY + 11;
+    let l = a1 + 9;
+    let h = l + 6;
+    let mut b = b"\xf7\xef*\xf6Ok".to_vec();
+    b.extend(jump(BODY));
+    b.extend([0xa1, 0x01, 0xa7]);
+    b.extend(jump(BODY));
+    b.push(0xa2);
+    b.extend(jump(h + 2));
+    b.push(0xee);
+    b.extend(jump(a1));
+    b.push(0xff);
+    let d = any_order(&script(&b));
+    assert_eq!(drops(&d), [dropped(l, Scan::If, Reason::Overlap)]);
+    assert!(matches!(op_at(&d, h).info().flow, Flow::Jump));
+}
+
+#[test]
 fn of_two_landings_reading_one_address_with_two_kinds_the_lower_keeps_it() {
     // The a1's landing writes word 0 of `t`; the block's loops, at a higher address, print
     // string 0 of `t`: `t` is a word table and the loops are dropped.

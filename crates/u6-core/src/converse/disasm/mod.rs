@@ -89,23 +89,24 @@
 //! dropped landings or the settled bytes, or (with those unchanged) the reserved bytes, all
 //! bounded: a landing is taken again at most once, and the bytes by the script's length.
 //!
-//! Order. Conflicts between landings are resolved in ascending landing address: the landings
-//! are taken in the order of the address where reading goes on (then by loop, stop byte and
-//! context), whatever order they are found in, and a failed trial is tried again in the same
-//! order. So the decode and the catalog are functions of the script's bytes alone (a test keeps
-//! the waiting landings in other orders and gets the same catalog, byte for byte). The
-//! conflicts that rule resolves include:
+//! Order. Of the landings waiting to be tried, the one at the lowest address where reading
+//! goes on (then by loop, stop byte and context) is taken first, whatever order they were found
+//! in, and a failed trial goes back among them. A landing is found only once a path that leads
+//! to it is decoded: one that only a higher landing's path leads to waits for that one, and
+//! comes after it. Nothing else orders them, so the decode and the catalog are functions of the
+//! script's bytes alone (a test keeps the waiting landings in other orders and gets the same
+//! catalog, byte for byte). Conflicts between landings are resolved by that order:
 //!
 //! - two landings whose code disagrees on a byte (one would decode an item over bytes the
-//!   other decoded otherwise): the lower keeps its code, the other is dropped
+//!   other decoded otherwise): the one taken first keeps its code, the other is dropped
 //!   (`Dropped(_, Overlap)`);
-//! - two landings that read one address with two kinds: the lower keeps its use, the other is
-//!   dropped (`Dropped(_, TableKinds)`);
+//! - two landings that read one address with two kinds: the one taken first keeps its use,
+//!   the other is dropped (`Dropped(_, TableKinds)`);
 //! - a landing whose code holds the address of a table another landing names: taken after the
 //!   namer, it stops there at once ([`HazardKind::IntoData`]), or is dropped when an item of
 //!   it would hold the address (`Dropped(_, TableInCode)`); taken first, its code is in for
 //!   that round and the table wins over it in the next. Of two landings each naming a table
-//!   over the other's code, the lower keeps its table.
+//!   over the other's code, the one taken first keeps its table.
 //!
 //! Operands are decoded with the evaluator's grammar ([`Expr`]), so their bytes are never read
 //! as text. A byte the interpreter has no arm for is refused with a named [`Reason`], never
