@@ -1121,11 +1121,12 @@ fn the_last_pass_is_what_the_windows_show() {
     assert_ne!(cell_of(&sheet, 2, b_cell), cell_of(&sheet, 1, b_cell));
     assert_eq!(s.sheets, ["final-terrain.png", "final-terrain-s2.png"]);
     // Placed at the pair of B's with the largest ratio / limit of the last pass, ranked here
-    // from the rebuilt pass; the least is somewhere else.
+    // from the rebuilt pass's ratios and limits; the least is somewhere else.
     let f = state(&g, &text, &left).unwrap();
+    let q = |l: &Last| l.result.map(|(r, lim)| r / lim).unwrap();
     let mut ranked: Vec<&Last> = f.last.iter().collect();
-    ranked.sort_by(|a, b| b.excess().total_cmp(&a.excess()));
-    assert!(ranked[0].excess() > ranked[1].excess());
+    ranked.sort_by(|a, b| q(b).total_cmp(&q(a)));
+    assert!(q(ranked[0]) > q(ranked[1]));
     let place = |l: &Last| {
         let at = l.at.unwrap();
         (at.x.to_string(), at.y.to_string(), edge_name(l.pair.edge))
@@ -1182,6 +1183,39 @@ fn the_last_pass_is_what_the_windows_show() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_window_is_placed_at_the_largest_ratio_over_limit() {
+    // Three pairs of record 9 whose limits differ: by ratio alone the third is the largest, by
+    // ratio / limit the second and the third tie (2.0) and the second is first in pair order;
+    // the first is the least (1.5). A fourth, of another label, is larger still (3.0).
+    let last = |b: u16, ratio: f32, limit: f32, labels: &str| Last {
+        line: usize::from(b),
+        pair: Pair {
+            a: 9,
+            b,
+            edge: Edge::East,
+        },
+        sides: Sides::GenMmpx,
+        result: Some((ratio, limit)),
+        labels: labels.into(),
+        at: Some(At { z: 0, x: 0, y: 0 }),
+        first: (Sides::GenMmpx, Some((ratio, limit))),
+    };
+    let fixed = Fixed {
+        last: vec![
+            last(1, 3.0, 2.0, "map"),
+            last(2, 2.0, 1.0, "map"),
+            last(3, 4.0, 2.0, "map"),
+            last(4, 4.5, 1.5, "objects"),
+        ],
+        ..Fixed::default()
+    };
+    assert_eq!(at_pair(&fixed, &[9], Some("map")), Some(1));
+    assert_eq!(at_pair(&fixed, &[9], None), Some(3));
+    // A pair the records do not meet is not one to place at.
+    assert_eq!(at_pair(&fixed, &[8], None), None);
 }
 
 #[test]
