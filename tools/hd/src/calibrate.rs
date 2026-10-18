@@ -75,6 +75,7 @@ use crate::img::{self, Rgba};
 use crate::neighbour::{self, At, Drawn, Pair, Side};
 use crate::work::{self, Work};
 
+pub mod final_read;
 #[cfg(test)]
 mod tests;
 
@@ -732,6 +733,32 @@ impl Images for Records<'_> {
     }
 }
 
+/// The tile masters of `dir` (`t-<record>.png`, ×8, as ingest writes them to `slices/`), by
+/// record; any other file is not read.
+pub fn masters(dir: &Path) -> Result<Vec<(u16, PathBuf)>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut out = Vec::new();
+    for e in entries {
+        let path = e.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+        let Some(stem) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".png"))
+        else {
+            continue;
+        };
+        let Some(id @ ImageId::Tile(r)) = atlas::parse_image(&stem.replace('-', ":")) else {
+            continue;
+        };
+        if atlas::slice_name(id) != stem || !path.is_file() {
+            continue;
+        }
+        out.push((r, path));
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// A pack of tile images at the pack's ×4, by record, each with the content key of the record it
 /// was made for.
 pub struct Slices {
@@ -748,27 +775,11 @@ impl Slices {
         Slices { images }
     }
 
-    /// The tile masters of `dir` (`t-<record>.png`, ×8, as ingest writes them to `slices/`),
-    /// each box-averaged to ×4 as `pack` writes it; any other file is not read.
+    /// The tile masters of `dir` ([`masters`]), each box-averaged to ×4 as `pack` writes it.
     pub fn read(game: &Game, dir: &Path) -> Result<Slices, String> {
-        let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let mut images = BTreeMap::new();
         let side = TILE_W as u32 * MASTER;
-        for e in entries {
-            let path = e.map_err(|e| format!("{}: {e}", dir.display()))?.path();
-            let Some(stem) = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_suffix(".png"))
-            else {
-                continue;
-            };
-            let Some(id @ ImageId::Tile(r)) = atlas::parse_image(&stem.replace('-', ":")) else {
-                continue;
-            };
-            if atlas::slice_name(id) != stem || !path.is_file() {
-                continue;
-            }
+        let mut images = BTreeMap::new();
+        for (r, path) in masters(dir)? {
             let master = img::read_png(&path, side, side)?;
             images.insert(r, img::shrink(&master, MASTER / SCALE));
         }
@@ -1181,24 +1192,37 @@ fn near(game: &Game, by: &BTreeMap<Pair, &Row>, centre: At, n: usize) -> Vec<Con
         .collect()
 }
 
-/// The ratio of `p` measured again from the images of `slices` (a record without one is
-/// MMPX), by the gate itself: each record's [`Side`], then one pass of [`neighbour::settle`]
-/// over the pair alone. `None` when nothing is measured (no side generated, a side draws
-/// nothing along the edge) or a side is refused.
+/// The ratio of `p` measured again from the images of `slices` ([`measure`]); `None` when
+/// nothing is measured or a side is refused.
 pub fn remeasured(game: &Game, slices: &Slices, p: Pair, seam: f32) -> Option<f32> {
+    measure(game, slices, p, seam).ok().flatten().map(|r| r.0)
+}
+
+/// The (ratio, limit) of `p` measured from the images of `slices` (a record without one is
+/// MMPX), by the gate itself: each record's [`Side`], then one pass of [`neighbour::settle`]
+/// over the pair alone. `Ok(None)` when nothing is measured (no side generated, a side draws
+/// nothing along the edge, a record the game has no image of); `Err` when a side is refused
+/// (an image not ×4 of its record).
+pub fn measure(
+    game: &Game,
+    slices: &Slices,
+    p: Pair,
+    seam: f32,
+) -> Result<Option<(f32, f32)>, String> {
     let mut sides = BTreeMap::new();
     for r in [p.a, p.b] {
-        let classic = game.classic(ImageId::Tile(r))?;
-        let side = Side::new(classic, slices.get(r).map(|h| (u32::from(r), h))).ok()?;
+        let Some(classic) = game.classic(ImageId::Tile(r)) else {
+            continue;
+        };
+        let side = Side::new(classic, slices.get(r).map(|h| (u32::from(r), h)))?;
         sides.insert(r, side);
     }
     let settled = neighbour::settle(&[p], &sides, seam);
-    settled
+    Ok(settled
         .checked
         .first()
         .filter(|c| c.pass == 1)
-        .and_then(|c| c.result)
-        .map(|r| r.0)
+        .and_then(|c| c.result))
 }
 
 /// What `calibrate` is given.
