@@ -10,13 +10,15 @@
 //! u6-hd pack      [--work DIR] [--out FILE]
 //! u6-hd calibrate (--game PATH | --synthetic) [--work DIR] [--slices DIR] [--out DIR]
 //!                 [--per N] [--seed N] [--source all|LABEL]
-//!                 [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...
+//!                 [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]... [--gate seam=VALUE]
 //! u6-hd calibrate --final (--game PATH | --synthetic) [--work DIR] [--out DIR]
-//!                 [--source all|LABEL] [--include FILE]
+//!                 [--source all|LABEL] [--include FILE] [--gate seam=VALUE]
 //! ```
 //!
 //! `--gate` changes one threshold of `gate::Thresholds` for the run (structure, shift, iou,
-//! purity, seam, motion; the defaults are the spec's). `--game` takes the owner's zip, disk images or a folder of files (the page's intake reads
+//! purity, seam, motion; the defaults are the spec's). `calibrate` reads only its seam: the
+//! threshold it measures the pairs again with, ingest's (`--final` refuses a `gates.jsonl` gated
+//! with another); no other gate value is a calibrate input. `--game` takes the owner's zip, disk images or a folder of files (the page's intake reads
 //! them). `--synthetic` takes the made-up set of [`game::synthetic`] instead, so the whole
 //! pipeline (real imagegen calls included) can be run without any game art. `run` sends
 //! nothing without `--send`, and exits non-zero when a call failed. `calibrate` draws sheets of

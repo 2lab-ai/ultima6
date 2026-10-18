@@ -1,7 +1,7 @@
 //! `ingest` and `calibrate` call nothing (spec 07 HD2: a re-ingest reads the sheets already
 //! generated, with no upload): on the synthetic set, an ingest that judges every sheet, refuses
 //! one and lays out its re-roll starts no `codex`, and neither does a calibrate that writes its
-//! sheets, nor its final read.
+//! sheets, nor its final read drawing a window.
 //!
 //! How the tool finds `codex` (`run::Codex::from_env`): the `--codex PATH` argument when given,
 //! else the name `codex`, which the process spawn looks up on `PATH`. No environment variable
@@ -14,8 +14,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use u6_hdtool::atlas::SheetKind;
-use u6_hdtool::work::Work;
+use u6_hdpack::ImageId;
+use u6_hdtool::atlas::{self, SheetKind};
+use u6_hdtool::game::synthetic;
+use u6_hdtool::work::{self, Work};
 use u6_hdtool::{img, run};
 
 const BIN: &str = env!("CARGO_BIN_EXE_u6-hd");
@@ -194,13 +196,28 @@ fn calibrate_makes_no_codex_call() {
     }
     assert_eq!(calls(), 0, "calibrate started codex");
 
-    // The final read, in a work dir of its own that ingest left with nothing generated: it
-    // reads the work dir's state, draws no window, and starts no codex either.
+    // The final read, in a work dir of its own where ingest left one item generated (the
+    // synthetic chest: no world, so no pair and no fallback; drawn alone): it reads the work
+    // dir's state, draws the chest's window, and starts no codex either.
     let fin = dir.join("final-work");
     let fw = Work::open(Some(&fin)).unwrap();
-    fw.write("gates.jsonl", b"").unwrap();
-    fw.write("ingest.json", b"[]").unwrap();
+    let chest = ImageId::Tile(synthetic::OBJECTS);
+    let stem = atlas::slice_name(chest);
+    let mut master = img::Rgba::new(128, 128);
+    img::fill(&mut master, 32, 48, 64, 64, [180, 120, 60, 255]);
+    let png = img::encode_png(&master).unwrap();
     std::fs::create_dir_all(fin.join("slices")).unwrap();
+    std::fs::write(fw.slice(&stem), &png).unwrap();
+    let listed = serde_json::json!([{
+        "image": atlas::image_name(chest),
+        "hash": format!("{:016x}", synthetic::game().hash(chest).unwrap()),
+        "width": 128, "height": 128,
+        "slice": format!("slices/{stem}.png"),
+        "digest": work::digest(&[&png]),
+    }]);
+    fw.write("gates.jsonl", b"").unwrap();
+    fw.write("ingest.json", listed.to_string().as_bytes())
+        .unwrap();
     let fout = dir.join("calibrate-final");
     let o = cmd(BIN)
         .args(["calibrate", "--final", "--synthetic"])
@@ -211,13 +228,23 @@ fn calibrate_makes_no_codex_call() {
     let text = String::from_utf8_lossy(&o.stdout);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(text.contains("the record and the slices agree"), "{text}");
-    assert!(text.contains("samples.tsv: 0 rows"), "{text}");
-    assert!(fout.join("samples.tsv").is_file());
+    assert!(text.contains("samples.tsv: 1 rows"), "{text}");
+    assert!(text.contains("final-object-alone.png"), "{text}");
+    for f in [
+        "samples.tsv",
+        "final-object-alone.png",
+        "final-object-alone-s2.png",
+    ] {
+        assert!(fout.join(f).is_file(), "{f}");
+    }
     // What the final read does not take, and what only it takes.
     let refused = [
         vec!["--final", "--slices", "x"],
         vec!["--final", "--at", "leader"],
         vec!["--final", "--per", "2"],
+        // The defaults given are given: refused too.
+        vec!["--final", "--seed", "1"],
+        vec!["--final", "--per", "6"],
         vec!["--include", "x"],
     ];
     for extra in refused {

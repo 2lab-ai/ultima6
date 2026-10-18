@@ -39,9 +39,12 @@ const USAGE: &str = "usage:
   u6-hd pack      [--work DIR] [--out FILE]
   u6-hd calibrate (--game PATH | --synthetic) [--work DIR] [--slices DIR] [--out DIR]
                   [--per N] [--seed N] [--source all|LABEL]
-                  [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...
+                  [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]... [--gate seam=VALUE]
   u6-hd calibrate --final (--game PATH | --synthetic) [--work DIR] [--out DIR]
-                  [--source all|LABEL] [--include FILE]   (no --slices, --at, --per, --seed)";
+                  [--source all|LABEL] [--include FILE] [--gate seam=VALUE]
+                  (no --slices, --at, --per, --seed)
+  calibrate reads one value of --gate, the seam threshold it measures the pairs again with
+  (ingest's; the final read refuses a log gated with another); it reads no other gate value.";
 
 #[derive(Default)]
 struct Args {
