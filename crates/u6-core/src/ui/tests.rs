@@ -19,6 +19,7 @@ mod pointer_real;
 mod pointer_tests;
 mod real_tests;
 mod text_tests;
+mod wide_tests;
 
 pub(super) const INK: u8 = 1;
 pub(super) const PAPER: u8 = 2;
