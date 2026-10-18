@@ -172,7 +172,8 @@ fn without_a_table_a_syllable_is_a_blank_cell() {
     for col in [23, 24] {
         for dy in 0..CELL {
             for dx in 0..CELL {
-                assert_eq!(fb.get(col * CELL + dx, 14 * CELL + dy), Some(PAPER));
+                let px = fb.get(col * CELL + dx, 14 * CELL + dy);
+                assert_eq!(px, Some(PAPER), "column {col} ({dx}, {dy})");
             }
         }
     }
