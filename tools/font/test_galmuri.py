@@ -324,6 +324,52 @@ class Cache(unittest.TestCase):
             self.assertEqual(os.listdir(out), [])
 
 
+class Output(unittest.TestCase):
+    """The files written to --out: each published whole or not at all, as the cache is."""
+
+    ZIP = b"synthetic release zip\n" * 32
+    FILES = (b"\x5a" * 512, b"a synthetic licence\n", b"a synthetic notice\n")
+
+    def main(self, argv, torn=False):
+        """galmuri.main(argv) with ZIP as the pinned release and FILES what it builds, its
+        files written half and then stopped when `torn`: (exit code, stderr)."""
+        err = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(galmuri, "ZIP_SHA256", galmuri.sha256(self.ZIP)))
+            stack.enter_context(mock.patch.object(galmuri, "build", lambda data: self.FILES))
+            if torn:
+                stack.enter_context(mock.patch.object(galmuri, "open", torn_open, create=True))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            code = galmuri.main(argv)
+        return code, err.getvalue()
+
+    def test_an_interrupted_write_leaves_the_files_as_they_were_and_a_later_run_writes_them(self):
+        names = (galmuri.BLOB, galmuri.OFL, galmuri.NOTICE)
+        for existing in (True, False):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "synthetic.zip")
+                with open(path, "wb") as f:
+                    f.write(self.ZIP)
+                out = os.path.join(tmp, "fonts")
+                if existing:
+                    os.makedirs(out)
+                    for name in names:
+                        with open(os.path.join(out, name), "wb") as f:
+                            f.write(b"an older " + name.encode() + b"\n")
+                before = snapshot(out)
+                code, err = self.main(["--zip", path, "--out", out], torn=True)
+                self.assertEqual(code, 1)
+                self.assertRegex(err, r"^galmuri: .*half-way")
+                self.assertNotIn("Traceback", err)
+                self.assertEqual(snapshot(out), before, "no partial file, nothing beside them")
+                # A run that is not stopped writes all three whole.
+                self.assertEqual(self.main(["--zip", path, "--out", out])[0], 0)
+                got = {k: v[0] for k, v in snapshot(out).items()}
+                self.assertEqual(got, dict(zip(names, self.FILES)))
+                self.assertEqual(self.main(["--zip", path, "--out", out, "--check"])[0], 0)
+
+
 class ReleaseMode(unittest.TestCase):
     """U6_FONT_REQUIRE_RELEASE=1 turns the Release tests' skip into a failure."""
 

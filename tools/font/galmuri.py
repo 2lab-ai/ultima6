@@ -21,10 +21,12 @@ committed).
     python3 -I -B tools/font/galmuri.py [--zip PATH] [--out DIR] [--check]
 
 The release zip is kept in the cache, $XDG_CACHE_HOME/ultima6/ (~/.cache/ultima6/ without it),
-after its sha256 is checked, and read from there the next time. It is published whole or not
-at all: written to a temporary file beside it, synced, then renamed into place, so an
-interrupted run leaves no partial file there. --zip reads that file instead (its sha256 is
-checked all the same).
+after its sha256 is checked, and read from there the next time. --zip reads that file instead
+(its sha256 is checked all the same).
+
+Every file the tool writes (the cached zip, each file in --out) is published whole or not at
+all: written to a temporary file beside it, synced, then renamed into place, so an
+interrupted run leaves no partial file and the one there before stays as it was.
 
 --check fails unless the files in --out are the ones the release gives, and writes nothing
 anywhere, the cache included: with no cached zip it downloads the release into memory and
@@ -290,10 +292,12 @@ def main(argv=None):
             return 1
         print(f"galmuri: {a.out} matches {VERSION}")
         return 0
-    os.makedirs(a.out, exist_ok=True)
-    for name, data in files.items():
-        with open(os.path.join(a.out, name), "wb") as f:
-            f.write(data)
+    try:
+        for name, data in files.items():
+            publish(os.path.join(a.out, name), data)
+    except OSError as e:
+        print(f"galmuri: {e}", file=sys.stderr)
+        return 1
     print(f"galmuri: wrote {', '.join(files)} to {a.out} (blob sha256 {BLOB_SHA256})")
     return 0
 
