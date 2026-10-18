@@ -3,12 +3,13 @@
 //!
 //! 1. **A run's output is never mixed with another run's.** `--out` is made if it is not there
 //!    and opened once (a link at `--out` itself is followed); where the dir opened is then is
-//!    checked again to be outside the repository. The run's first write in it is a `mkdirat` of
-//!    a dir of its own, `run-<UTC time>-<pid>/`, named from this process's clock and pid alone;
-//!    when that dir is there already the run fails, it is never reused. The run opens that dir
-//!    (`openat`, `O_NOFOLLOW`) and makes every file of it through it ([`at`]: `openat` with
-//!    `O_CREAT | O_EXCL | O_NOFOLLOW`, no temp file, no rename), never by a path: nothing
-//!    outside it is written and no file there is replaced. A run dir removed while the run
+//!    checked again to be outside the repository, and a run that cannot tell where it is writes
+//!    nothing. The run's first write in it is a `mkdirat` of a dir of its own,
+//!    `run-<UTC time>-<pid>/`, named from this process's clock and pid alone; when that dir is
+//!    there already the run fails, it is never reused. The run opens that dir (`openat`,
+//!    `O_NOFOLLOW`) and makes every file of it through it ([`at`]: `openat` with `O_CREAT |
+//!    O_EXCL | O_NOFOLLOW`, no temp file, no rename), never by a path: nothing outside it is
+//!    written and no file there is replaced. A run dir removed while the run
 //!    writes is never made again: the next write fails, and so does the run. A run dir renamed
 //!    away (a link put in its place or not) is never followed: the run's writes go on in the dir
 //!    it made, where that dir is now, and the run fails at its end, when it finds its dir is not
@@ -39,9 +40,11 @@
 //! pointer to it (no link, no pointer file). A run dir with no `done`, or with a `refused.txt`,
 //! is an incomplete run (one that failed, was killed, or is still going): a run lists those it
 //! finds in the `--out` it opened (through it, not by its path) when it starts, and leaves them
-//! as they are. Cleaning up old runs is the
-//! person's job. A run holds each file it makes open until it ends, so it raises its limit on
-//! open files first, as far as the system lets it. Unix only (the crate is).
+//! as they are.
+//! Cleaning up old runs is the person's job. A run holds each file it makes open until it ends,
+//! so it raises its limit on open files first, as far as the system lets it. Unix only (the
+//! crate is), on a system that says where an open dir is (macOS `F_GETPATH`, Linux
+//! `/proc/self/fd`): elsewhere a run cannot tell where its `--out` is, and writes nothing.
 
 use std::cell::{Cell, RefCell};
 use std::fs::File;
@@ -522,7 +525,16 @@ impl Run {
         }
         let said = then(said);
         match self.write(REFUSED, format!("{said}\n").as_bytes()) {
-            Ok(()) => said,
+            Ok(()) => {
+                let made = self.made.borrow();
+                match made.iter().rfind(|m| m.name == REFUSED).map(|m| &m.id) {
+                    Some(Err(e)) => format!(
+                        "{said}; {REFUSED} could not be identified when it was made, so it is left \
+                         ({e})"
+                    ),
+                    _ => said,
+                }
+            }
             Err(e) => format!("{said}; {REFUSED} not written ({e})"),
         }
     }
@@ -570,15 +582,25 @@ pub fn run_in<T>(
     let parent = work::ensure_dir(out)?;
     let outfd = at::open_dir(&parent).map_err(|e| os_error(&parent, &e))?;
     seam(out, "opened", "")?;
-    // Where the dir opened is now: outside the repository too (it was checked by its path).
-    if let Some(now) = at::id(&outfd).ok().and_then(|id| at::where_now(&outfd, id))
-        && let Some(why) = work::protected(&now)
-    {
+    // Where the dir opened is now: outside the repository too (it was checked by its path); a
+    // run that cannot tell where it is writes nothing.
+    let located = seam(out, "locate", "")
+        .ok()
+        .and_then(|()| at::id(&outfd).ok())
+        .and_then(|id| at::where_now(&outfd, id));
+    let Some(located) = located else {
+        return Err(format!(
+            "{}: where the dir opened is now could not be read, so the tool cannot tell it is \
+             outside the repository: nothing is written (spec 07 Rights)",
+            out.display()
+        ));
+    };
+    if let Some(why) = work::protected(&located) {
         return Err(format!(
             "{}: the dir opened is now at {}, {why}; the tool writes only outside it (spec 07 \
              Rights)",
             out.display(),
-            now.display()
+            located.display()
         ));
     }
     let (incomplete, unreadable) = incomplete(out, &outfd, &parent)?;
@@ -621,7 +643,7 @@ pub fn run_in<T>(
                  one); the next run lists it as incomplete"
             }
         };
-        with_incomplete(format!("{}: {e}: {then}", dir.display()))
+        with_incomplete(format!("{}: {then}", os_error(&dir, &e)))
     };
     let open = io_seam(out, "open", &name)
         .and_then(|()| at::open_dir_at(&outfd, &name))

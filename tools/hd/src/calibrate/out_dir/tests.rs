@@ -1646,3 +1646,110 @@ fn a_read_out_of_open_files_says_how_to_go_on() {
     assert!(e.starts_with("no rows; run dir: "), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_run_that_cannot_tell_where_its_out_dir_is_writes_nothing() {
+    // --out opened, then where it is now not known (as with no /proc and no F_GETPATH; made
+    // so at a seam): the tool cannot tell it is outside the repository, so the run fails before
+    // anything is made in it.
+    let dir = temp("unlocated");
+    let out = dir.join("out");
+    std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
+    std::fs::write(out.join("notes.txt"), b"the owner's").unwrap();
+    let had = tree(&out);
+    let _h = hook(&out, "locate", |_| Err("not known".into()));
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    assert_eq!(
+        e,
+        format!(
+            "{}: where the dir opened is now could not be read, so the tool cannot tell it is \
+             outside the repository: nothing is written (spec 07 Rights)",
+            out.display()
+        )
+    );
+    assert_eq!(tree(&out), had);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_refusal_whose_identity_cannot_be_read_is_said_to_be_left() {
+    // The run fails; its refused.txt made, its identity not readable (injected at the fstat):
+    // the error it gives says so too (refused.txt holds the error as it was written), and the
+    // file is left.
+    let dir = temp("unidentified-refused");
+    let out = dir.join("out");
+    let _h = hook(&out, "identify", |name| match name == REFUSED {
+        true => Err(format!("errno:{}", libc::EIO)),
+        false => Ok(()),
+    });
+    let e = run_in(FIRST, &out, fails).unwrap_err();
+    let run = only_run(&out);
+    let said = format!("no rows; run dir: {}", run.display());
+    assert_eq!(
+        e,
+        format!(
+            "{said}; {REFUSED} could not be identified when it was made, so it is left ({})",
+            std::io::Error::from_raw_os_error(libc::EIO)
+        )
+    );
+    assert_eq!(names(&run), ["gates.jsonl", REFUSED]);
+    assert_eq!(
+        std::fs::read_to_string(run.join(REFUSED)).unwrap(),
+        format!("{said}\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_dir_out_of_open_files_to_be_opened_says_how_to_go_on() {
+    // In a child under a limit of 64 open files: the run dir made, then every fd left taken (by
+    // the test) before it is opened. The open meets the system's "too many open files": the run
+    // fails saying how to go on, with the run dir, that it is left empty, and the incomplete
+    // run beside it.
+    const NAME: &str = "a_run_dir_out_of_open_files_to_be_opened_says_how_to_go_on";
+    if !is_child(&here(NAME)) {
+        return in_child(&here(NAME), "ulimit -n 64", |_| {});
+    }
+    let dir = temp("emfile-open");
+    let out = dir.join("out");
+    std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
+    let probe = dir.join("probe.txt");
+    std::fs::write(&probe, b"p").unwrap();
+    let taken: Shared<File> = Default::default();
+    let t = taken.clone();
+    let _h = hook(&out, "open", move |_| {
+        let mut t = t.lock().unwrap();
+        let full = loop {
+            match File::open(&probe) {
+                Ok(f) => t.push(f),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(full.raw_os_error(), Some(libc::EMFILE), "{full}");
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    taken.lock().unwrap().clear();
+    let parent = out.canonicalize().unwrap();
+    let run = parent.join(
+        names(&parent)
+            .into_iter()
+            .find(|n| *n != run_name(1, 7))
+            .unwrap(),
+    );
+    assert_eq!(
+        e,
+        format!(
+            "{}: {} (a run holds each file it makes open until it ends: raise the limit on open \
+             files, ulimit -n): the run dir is left empty, with no refused.txt (it could not be \
+             opened to write one); the next run lists it as incomplete; run dir: {}; incomplete \
+             runs beside it (left as they are): {}",
+            run.display(),
+            std::io::Error::from_raw_os_error(libc::EMFILE),
+            run.display(),
+            run_name(1, 7)
+        )
+    );
+    assert!(names(&run).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
