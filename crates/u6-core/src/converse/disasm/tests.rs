@@ -2366,6 +2366,96 @@ fn a_table_print_must_put_out_the_string_it_read() {
 }
 
 #[test]
+fn a_stopped_visit_cut_inside_an_escape_puts_out_nothing_for_it_yet() {
+    // "a$1b" read through its `$`: the escape takes the next byte, not read yet, so "a" is all
+    // the bytes read put out.
+    let text = b"a$1b";
+    let body = [&text[..], &[0xb6]].concat();
+    let s = script(&body);
+    let d = ok(&s);
+    let scripts: BTreeMap<(u8, u16), Decoded<'_>> = [(
+        (b'a', 7),
+        Decoded {
+            bytes: &s,
+            disasm: &d,
+        },
+    )]
+    .into();
+    let stopped = |out: &[u8]| {
+        let mut ev = vec![Event::Load {
+            letter: b'a',
+            item: 7,
+        }];
+        for (i, &b) in text[..2].iter().enumerate() {
+            ev.push(Event::Run {
+                at: (BODY as usize + i) as i32,
+                byte: b,
+                snap: if i == 0 { first_snap() } else { None },
+            });
+        }
+        ev.extend(out.iter().map(|&c| put(i16::from(c))));
+        trace::check_interrupted(&ev, &scripts)
+    };
+    assert_eq!(stopped(b"a").failures(), 0);
+    assert_eq!(stopped(b"a1").fill_mismatches, 1);
+}
+
+#[test]
+fn a_table_print_stopped_while_it_waits_is_checked_as_far_as_it_read() {
+    // `b5 d2 t b1` over "abc" at `t`, stopped after reading "ab".
+    let t = BODY + 20;
+    let mut body = vec![0xb5];
+    body.extend(lit32(t));
+    body.extend([0xb1, 0xb6]);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"abc\0");
+    let s = script(&body);
+    let d = ok(&s);
+    let scripts: BTreeMap<(u8, u16), Decoded<'_>> = [(
+        (b'a', 7),
+        Decoded {
+            bytes: &s,
+            disasm: &d,
+        },
+    )]
+    .into();
+    let stopped = |out: &[u8]| {
+        let mut ev = vec![
+            Event::Load {
+                letter: b'a',
+                item: 7,
+            },
+            Event::Run {
+                at: BODY as i32,
+                byte: 0xb5,
+                snap: None,
+            },
+            Event::PrintStart { snap: first_snap() },
+        ];
+        for (i, &b) in b"ab".iter().enumerate() {
+            ev.push(Event::Table {
+                at: (t as usize + i) as i32,
+                byte: b,
+                read: Read::Print,
+            });
+            ev.extend(out.get(i).map(|&c| put(i16::from(c))));
+        }
+        // The rest of the output came after the last read.
+        ev.extend(out.iter().skip(2).map(|&c| put(i16::from(c))));
+        trace::check_interrupted(&ev, &scripts)
+    };
+    for out in [&b"ab"[..], b"a"] {
+        let n = stopped(out);
+        assert_eq!((n.prints, n.failures()), (1, 0), "{n:?}");
+    }
+    // Nothing, output of a byte not read yet, another character.
+    for out in [&b""[..], b"abc", b"ax"] {
+        let n = stopped(out);
+        assert_eq!((n.print_mismatches, n.failures()), (1, 1), "{n:?}");
+    }
+}
+
+#[test]
 fn a_conversation_stopped_while_it_waits_is_checked_as_far_as_it_went() {
     // A visit of "abc" stopped after its second byte: right as far as it went, then a wrong
     // byte after the last input-loop read, then a read outside any run.
@@ -2412,6 +2502,11 @@ fn a_conversation_stopped_while_it_waits_is_checked_as_far_as_it_went() {
     }
     let n = interrupted(start(&[a, b], b""));
     assert_eq!(n.fill_mismatches, 1, "the first byte's output is missing");
+    // Output of a byte not read yet, or another character, with the reads right.
+    for out in [&b"abc"[..], b"ax"] {
+        let n = interrupted(start(&[a, b], out));
+        assert_eq!((n.fill_mismatches, n.failures()), (1, 1), "{n:?}");
+    }
     let n = interrupted(start(&[a, (BODY + 1, b'x')], b"ax"));
     assert!(n.byte_mismatches == 1 && n.failures() >= 1, "{n:?}");
     let n = interrupted(start(&[(BODY + 1, b'b')], b"b"));

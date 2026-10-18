@@ -694,27 +694,23 @@ fn check_events(
     // Stopped while it waits: only a print or a text visit can be waiting (on a key, inside
     // the escape layer or the line assembler).
     if let Some(r) = table.take() {
-        let open = cur
-            .as_ref()
-            .filter(|_| r.read == Read::Print)
-            .and_then(|s| {
-                let e = s.d.entry_at(r.start).filter(|e| e.end() >= r.next)?;
-                Some((s, e))
-            });
+        // A print that has read a start of one string.
+        let open = cur.as_ref().filter(|s| {
+            r.read == Read::Print && s.d.entry_at(r.start).is_some_and(|e| e.end() >= r.next)
+        });
         match (open, print.take()) {
             (
-                Some((s, e)),
+                Some(s),
                 Some(PrintOut {
                     snap: Some(first),
                     out,
                 }),
             ) => {
                 n.prints += 1;
-                let all = run_parts(&s.bytes, r.start, e.end()).parts;
-                let done = run_parts(&s.bytes, r.start, r.next - 1).parts;
-                let ok = fill_parts(&s.bytes, &all, &first).starts_with(&out)
-                    && out.starts_with(&fill_parts(&s.bytes, &done, &first));
-                n.print_mismatches += usize::from(!ok);
+                let upto = |end: u32| {
+                    fill_parts(&s.bytes, &run_parts(&s.bytes, r.start, end).parts, &first)
+                };
+                n.print_mismatches += usize::from(!between(&out, &upto(r.next - 1), &upto(r.next)));
             }
             (Some(_), _) => {}
             (None, _) => n.table_mismatches += 1,
@@ -726,22 +722,28 @@ fn check_events(
     n
 }
 
+/// Output put out while the bytes up to the last one read went through the escape layer, the
+/// last one maybe not all yet: it holds what the bytes before the last one put out (`done`) and
+/// is a start of what all of them put out (`upto`).
+fn between(out: &[i16], done: &[i16], upto: &[i16]) -> bool {
+    out.starts_with(done) && upto.starts_with(out)
+}
+
 /// A text visit still open where a conversation stopped: its reads must start a run and go on
-/// through whole runs; with a snapshot, its output must start with what the bytes before its
-/// last one put out and be a start of what the runs put out.
+/// through whole runs; with a snapshot, its output must lie between what the bytes before its
+/// last one put out and what the bytes through its last one put out ([`between`]; a cut inside
+/// an escape keeps the escape's prefix, as the escape layer does).
 fn open_visit(n: &mut Counts, s: Option<&Loaded<'_, '_>>, v: Visit) {
     let Some(s) = s else { return };
+    // The runs the reads go through, as (start, end).
     let mut runs = Vec::new();
     let mut at = v.start;
     while at < v.next {
         match s.d.item_at(at) {
-            Some(it) if it.offset == at => match &it.kind {
-                Kind::Text(run) => {
-                    runs.push(run);
-                    at = it.end();
-                }
-                _ => break,
-            },
+            Some(it) if it.offset == at && matches!(it.kind, Kind::Text(_)) => {
+                runs.push((it.offset, it.end()));
+                at = it.end();
+            }
             _ => break,
         }
     }
@@ -753,26 +755,17 @@ fn open_visit(n: &mut Counts, s: Option<&Loaded<'_, '_>>, v: Visit) {
         return;
     };
     n.filled += 1;
-    let all: Vec<Part> = runs.iter().flat_map(|r| r.parts.iter().copied()).collect();
-    // The parts the bytes before the last one read make up (plain text cut there).
-    let cut = v.next - 1;
-    let mut done = Vec::new();
-    for p in &all {
-        if p.offset + p.len <= cut {
-            done.push(*p);
-        } else {
-            if p.escape.is_none() && p.offset < cut {
-                done.push(Part {
-                    len: cut - p.offset,
-                    ..*p
-                });
-            }
-            break;
-        }
-    }
-    let ok = fill_parts(&s.bytes, &all, &first).starts_with(&v.out)
-        && v.out.starts_with(&fill_parts(&s.bytes, &done, &first));
-    n.fill_mismatches += usize::from(!ok);
+    // What the runs' bytes before `cut` put out: each run's parts as the escape layer splits
+    // them up to there.
+    let upto = |cut: u32| {
+        let parts: Vec<Part> = runs
+            .iter()
+            .filter(|&&(start, _)| start < cut)
+            .flat_map(|&(start, end)| run_parts(&s.bytes, start, end.min(cut)).parts)
+            .collect();
+        fill_parts(&s.bytes, &parts, &first)
+    };
+    n.fill_mismatches += usize::from(!between(&v.out, &upto(v.next - 1), &upto(v.next)));
 }
 
 /// Ends the text visit in progress: its reads must cover whole runs, from a run's start to a
