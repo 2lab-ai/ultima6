@@ -168,3 +168,13 @@ Append-only. Closed units, with their receipts.
   - **Coverage (records):** generated / fallback — portraits 202 / 4, bitmaps 2 / 0, terrain 49 / 222, multi-record objects 26 / 252, objects 234 / 525, actors 0 / 675 (the motion gate, as spec 07 expected); 32 shore records by rule, 33 empty.
   - **Pack:** 309 tiles, 202 portraits, 2 bitmaps; `read_pack` reads it, and on the owner's game every image matches (309, 202, 2). Kept in `~/Games/ultima6/hd/pack/`, never committed or hosted.
   - **Frames (read by the dispatcher on the owner's machine):** portraits and panels show the imagegen art; where a generated terrain record meets a scaled one the frames show a seam (a castle carpet), which the 3×3 self-tiling gate cannot see → spec 07 rev 6 adds the neighbour-seam gate, unit H5.
+
+| hd-stderr-flake | 07 | `tools/hd` test `stderr_written_after_the_events_end_is_still_kept` failed once in a full run under load (stderr empty: the helper's write came after the 1 s grace); reproduce, make the test load-independent without weakening it, sweep `tools/hd` for thin timing margins | H3 |
+
+- **hd-stderr-flake** merged at a578045 (branch to 2b75fc4).
+  - **Cause:** under machine load, a helper that had not yet called setsid when the call's deadline killed its group died with the group, so its output or pid file never came. The tests then failed on a missing file rather than on their own claim.
+  - **Fix:** the helpers call setsid before they fork their child. Every deadline a stand-in or helper must beat is now at least 4 s, the keeps-both one included. Each such test asserts a floor of deadline + grace, so a helper that died with the group fails with a message naming it. The comments call these bounds slack for a loaded machine, not bounds on its load. The sweep of `tools/hd` listed every call and harness deadline; none that a helper must beat is under 4 s.
+  - **Tests:** u6-hdtool lib 57, call_leaks 1, cli 16, events_memory 1, lock 2, terminal 1. RED checks: a helper 4.5 s slow before its setsid fails each new floor with its own message.
+  - **Gates on the merge** (a578045): fmt and clippy clean; 1106 passed, 7 ignored; web 63/63 three times; oracles OK; loop-lint 0 FAIL.
+  - **Reviews:** gpt-6-astra and opus; r2 both APPROVE, r3 (the delta) both APPROVE, and their wording items were applied in 2b75fc4.
+  - **Deploys:** none; the change is to tool tests, and the site is unchanged.
