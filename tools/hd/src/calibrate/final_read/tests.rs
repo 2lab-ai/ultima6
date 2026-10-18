@@ -2159,6 +2159,33 @@ fn a_long_legend_line_goes_on_and_is_not_cut() {
                 "{scale}: {line}"
             );
         }
+        // Without the renderer: on every line, a continuation line too, ink only in the cells
+        // of its characters (a character every 4 × the text scale, 3 wide, 5 high) and some in
+        // each cell that is not a space; none in the gaps, the blank row under, or past the
+        // line's end.
+        let t = l.text;
+        for (i, line) in want.iter().enumerate() {
+            let y0 = ly + i as u32 * l.line_h();
+            let chars: Vec<char> = line.chars().collect();
+            let inked = |x: u32, y: u32| img::get(&png, l.margin + x, y0 + y) != BACK;
+            for x in 0..width {
+                let k = (x / (4 * t)) as usize;
+                let cell = x % (4 * t) < 3 * t && k < chars.len() && chars[k] != ' ';
+                for y in 0..l.line_h() {
+                    if !(cell && y < 5 * t) {
+                        assert!(!inked(x, y), "{scale}: {line:?}: ink at {x},{y}");
+                    }
+                }
+            }
+            for (k, &ch) in chars.iter().enumerate().filter(|(_, c)| **c != ' ') {
+                let x0 = k as u32 * 4 * t;
+                let any = (x0..x0 + 3 * t).any(|x| (0..5 * t).any(|y| inked(x, y)));
+                assert!(any, "{scale}: {line:?}: no ink for {ch:?} at {k}");
+            }
+            if line.starts_with("  ") {
+                assert!((0..8 * t).all(|x| (0..l.line_h()).all(|y| !inked(x, y))));
+            }
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
