@@ -3111,6 +3111,10 @@ fn an_out_dir_holding_other_files_is_written_in_and_they_are_left() {
     let s = calibrate_final(&g, &work, &o2).unwrap();
     assert_eq!(s.include.map(|i| i.0), Some(1));
     assert_eq!(std::fs::read_to_string(&mine).unwrap(), ids);
+    assert_eq!(
+        std::fs::read(o.out.join("notes.txt")).unwrap(),
+        b"the owner's"
+    );
     let entries = files_in(&o.out);
     let run = s
         .written
@@ -3138,20 +3142,52 @@ fn an_out_dir_holding_other_files_is_written_in_and_they_are_left() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// What a failed run left: its error, the files of its run dir, its refused.txt, its run dir
+/// (removed since), and every name it wrote, in order.
+struct Failed {
+    e: String,
+    files: Vec<String>,
+    refused: String,
+    run: PathBuf,
+    wrote: Vec<String>,
+}
+
 /// A run of the chain that fails as `fail` makes it (the hooks it sets, kept while it runs),
-/// at the out dir `name`: its error, and the files of its run dir after it.
-fn failed_run(name: &str, fail: impl FnOnce(&Path) -> Vec<Hooked>) -> (String, Vec<String>) {
+/// at the out dir `name` ([`Failed`]).
+fn failed(name: &str, fail: impl FnOnce(&Path) -> Vec<Hooked>) -> Failed {
     let g = game();
     let (text, left) = chain(&g);
     let (dir, work) = work_dir(&format!("failed-{name}"), &text, &g, &left);
     let o = options(&dir);
-    let hooks = fail(&o.out);
+    let wrote: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let w = wrote.clone();
+    let mut hooks = vec![hook(&o.out, "write", move |n| {
+        w.lock().unwrap().push(n.to_string());
+        Ok(())
+    })];
+    hooks.extend(fail(&o.out));
     let e = calibrate_final(&g, &work, &o).unwrap_err();
     drop(hooks);
     AFTER_READ.lock().unwrap().retain(|(k, _)| *k != o.out);
-    let files = files_of(&o.out);
+    let run = run_dir(&o.out).canonicalize().unwrap();
+    let files = files_in(&run);
+    let refused = std::fs::read_to_string(run.join(REFUSED)).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    (e, files)
+    let wrote = wrote.lock().unwrap().clone();
+    Failed {
+        e,
+        files,
+        refused,
+        run,
+        wrote,
+    }
+}
+
+/// [`failed`]: its error, and the files of its run dir.
+fn failed_run(name: &str, fail: impl FnOnce(&Path) -> Vec<Hooked>) -> (String, Vec<String>) {
+    let f = failed(name, fail);
+    assert_eq!(f.refused, format!("{}\n", f.e));
+    (f.e, f.files)
 }
 
 /// What a failed run of the chain keeps in its run dir: its refusal and the snapshots read.
@@ -3237,13 +3273,19 @@ fn a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone() {
 fn a_run_whose_recheck_fails_keeps_its_diagnostics_alone() {
     // The re-check's read failing as an unreadable master makes it, injected (so it holds
     // whatever the user's privilege): the same diagnostics alone.
-    let (e, files) = failed_run("recheck-injected", |out| {
+    // Its effect: the sheets and samples.tsv were written before the re-check, and are gone;
+    // no done; the run dir holds the diagnostics alone, refused.txt the error.
+    let f = failed("recheck-injected", |out| {
         vec![hook(out, "recheck", |_| {
             Err("slices/t-5.png: Permission denied (os error 13)".into())
         })]
     });
-    assert!(e.starts_with("slices/t-5.png: Permission denied"), "{e}");
-    assert_eq!(files, REFUSAL);
+    for drawn in ["final-terrain.png", "final-terrain-s2.png", "samples.tsv"] {
+        assert!(f.wrote.iter().any(|w| w == drawn), "{drawn}: {:?}", f.wrote);
+    }
+    assert!(!f.wrote.iter().any(|w| w == DONE), "{:?}", f.wrote);
+    assert_eq!(f.files, REFUSAL);
+    assert_eq!(f.refused, format!("{}\n", f.e));
 }
 
 #[test]
@@ -3258,7 +3300,7 @@ fn a_failed_run_that_cannot_delete_a_sheet_says_it_is_left() {
     // The second sheet not written, then the first not deletable (a failure at the delete,
     // injected): the run dir holds the diagnostics and that sheet alone, and the error and
     // refused.txt name it as left.
-    let (e, files) = failed_run("delete", |out| {
+    let f = failed("delete", |out| {
         let h = hook(out, "delete", |name| {
             if name == "final-terrain.png" {
                 Err("held".into())
@@ -3268,15 +3310,18 @@ fn a_failed_run_that_cannot_delete_a_sheet_says_it_is_left() {
         });
         vec![second_sheet_fails(out), h]
     });
-    assert!(e.contains("no room left"), "{e}");
-    assert!(
-        e.contains("left, as it could not be deleted: ") && e.contains("final-terrain.png (held)"),
-        "{e}"
+    let want = format!(
+        "final-terrain-s2.png: no room left; left, as it could not be deleted: {} (held); run \
+         dir: {}\n",
+        f.run.join("final-terrain.png").display(),
+        f.run.display()
     );
-    let mut want: Vec<&str> = REFUSAL.to_vec();
-    want.push("final-terrain.png");
-    want.sort();
-    assert_eq!(files, want);
+    assert_eq!(f.refused, want);
+    assert_eq!(format!("{}\n", f.e), want);
+    let mut files: Vec<&str> = REFUSAL.to_vec();
+    files.push("final-terrain.png");
+    files.sort();
+    assert_eq!(f.files, files);
 }
 
 #[test]

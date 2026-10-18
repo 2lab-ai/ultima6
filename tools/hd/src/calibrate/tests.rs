@@ -1235,11 +1235,40 @@ fn a_first_pass_writes_its_own_run_dir_alone() {
     let refused = std::fs::read_to_string(run.join("refused.txt")).unwrap();
     assert_eq!(refused, format!("{e}\n"));
     work.write("gates.jsonl", world_rows().as_bytes()).unwrap();
-    // The next run lists the refused one as incomplete, and leaves it.
+    // The next run lists the refused one as incomplete, and leaves it, and the second run's
+    // dir, as they were, byte for byte.
+    let (refused_had, second_had) = (contents(&run), contents(&s2.written.dir));
     let s3 = calibrate(&g, &work, &opts2).unwrap();
     let name = run.file_name().unwrap().to_string_lossy().into_owned();
     assert_eq!(s3.written.incomplete, [format!("{name} (refused)")]);
-    assert_eq!(files_in(&run), ["gates.jsonl", "refused.txt"]);
+    assert_eq!(contents(&run), refused_had);
+    assert_eq!(contents(&s2.written.dir), second_had);
+    assert_eq!(contents(&s1.written.dir), kept);
+    // A run that fails late, its sheets and samples.tsv written (its done not: no room): its
+    // dir holds the snapshot and refused.txt alone; every earlier run's as it was.
+    let third_had = contents(&s3.written.dir);
+    let wrote: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let w = wrote.clone();
+    let late = out_dir::hook(&out, "write", move |n| {
+        w.lock().unwrap().push(n.to_string());
+        if n == out_dir::DONE {
+            return Err("done: no room left".into());
+        }
+        Ok(())
+    });
+    let e = calibrate(&g, &work, &opts2).unwrap_err();
+    drop(late);
+    let wrote = wrote.lock().unwrap().clone();
+    assert!(wrote.iter().any(|n| n == "samples.tsv"), "{wrote:?}");
+    assert!(wrote.iter().any(|n| n.ends_with(".png")), "{wrote:?}");
+    let failed = run_dir(&out);
+    assert_eq!(files_in(&failed), ["gates.jsonl", "refused.txt"]);
+    let refused = std::fs::read_to_string(failed.join("refused.txt")).unwrap();
+    assert_eq!(refused, format!("{e}\n"));
+    assert!(e.starts_with("done: no room left; run dir: "), "{e}");
+    assert_eq!(contents(&run), refused_had);
+    assert_eq!(contents(&s2.written.dir), second_had);
+    assert_eq!(contents(&s3.written.dir), third_had);
     assert_eq!(contents(&s1.written.dir), kept);
     // An out dir of the owner's, a file of theirs in it: written in, the file left.
     let theirs = dir.join("theirs");
