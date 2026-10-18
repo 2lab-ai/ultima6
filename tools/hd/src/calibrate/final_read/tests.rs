@@ -2732,8 +2732,8 @@ fn the_out_dir_holds_one_runs_output() {
         "gates.jsonl\n"
     );
     work.write("gates.jsonl", b"").unwrap();
-    // A dir the tool did not write is not replaced, and nothing is left beside it; an empty
-    // one is.
+    // A dir the tool did not write is not replaced, an empty one neither, and nothing is left
+    // beside it.
     let theirs = dir.join("theirs");
     std::fs::create_dir_all(&theirs).unwrap();
     std::fs::write(theirs.join("notes.txt"), b"the owner's").unwrap();
@@ -2758,6 +2758,10 @@ fn the_out_dir_holds_one_runs_output() {
         .collect();
     assert!(beside.is_empty(), "{beside:?}");
     std::fs::remove_file(theirs.join("notes.txt")).unwrap();
+    let e = calibrate_final(&g, &work, &o2).unwrap_err();
+    assert!(e.contains("(no marker)"), "{e}");
+    assert_eq!(std::fs::read_dir(&theirs).unwrap().count(), 0);
+    std::fs::remove_dir(&theirs).unwrap();
     assert!(calibrate_final(&g, &work, &o2).is_ok());
     assert!(theirs.join(MARKER).is_file());
     let _ = std::fs::remove_dir_all(&dir);

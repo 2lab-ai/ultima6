@@ -1540,8 +1540,8 @@ impl Staged {
     }
 
     /// Puts the staged dir in the out dir's place: an out dir there is removed only when it is
-    /// one calibrate --final wrote (it holds the [`MARKER`]) or empty; anything else there is
-    /// left as it is, the staged dir removed, and the run fails.
+    /// one calibrate --final wrote (it holds the [`MARKER`]); anything else there, an empty
+    /// dir too, is left as it is, the staged dir removed, and the run fails.
     fn swap(self) -> Result<(), String> {
         let refuse = |why: &str| -> Result<(), String> {
             let _ = std::fs::remove_dir_all(&self.dir);
@@ -1568,11 +1568,7 @@ impl Staged {
                 let _ = std::fs::remove_dir_all(&old);
                 return Ok(());
             }
-            Ok(_) => {
-                if std::fs::remove_dir(&self.out).is_err() {
-                    return refuse("a directory calibrate --final did not write (no marker)");
-                }
-            }
+            Ok(_) => return refuse("a directory calibrate --final did not write (no marker)"),
         }
         match std::fs::rename(&self.dir, &self.out) {
             Ok(()) => Ok(()),

@@ -139,7 +139,7 @@
 //!   `refused.txt` (the error), the details (`disagreements.txt` or `unshown.txt`) and the
 //!   snapshots read, no sheet; when the work dir changed during the run, `changed.txt` (what
 //!   changed) and no sheet. An old `--out` is replaced only when it holds the marker file every
-//!   run writes, or is empty; anything else there is left as it is and the run fails.
+//!   run writes; anything else there (an empty dir too) is left as it is and the run fails.
 //!
 //! The object draw (`u6_core::objects::draw`, 0x10e81e, 0x10e73a, 0x10e596) as far as the
 //! starting lists tell it: the objects in list order, (y, x), and at one cell the later in the
