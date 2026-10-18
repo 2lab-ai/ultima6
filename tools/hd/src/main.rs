@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use u6_hdtool::atlas::{self, SheetKind};
+use u6_hdtool::calibrate::{self, Spot};
 use u6_hdtool::game::{Game, synthetic};
 use u6_hdtool::gate::Thresholds;
 use u6_hdtool::group::{self, Class, Item};
@@ -35,7 +36,9 @@ const USAGE: &str = "usage:
   u6-hd atlas     (--game PATH | --synthetic) [--work DIR] [--rebuild]
   u6-hd run       [--work DIR] [--send] [--limit N] [--parallel N] [--codex PATH]
   u6-hd ingest    (--game PATH | --synthetic) [--work DIR] [--gate NAME=VALUE]...
-  u6-hd pack      [--work DIR] [--out FILE]";
+  u6-hd pack      [--work DIR] [--out FILE]
+  u6-hd calibrate (--game PATH | --synthetic) [--work DIR] [--slices DIR] [--out DIR]
+                  [--per N] [--seed N] [--at Z,X,Y[,EDGE] | --at leader[,EDGE]]...";
 
 #[derive(Default)]
 struct Args {
@@ -49,11 +52,17 @@ struct Args {
     out: Option<PathBuf>,
     gates: Thresholds,
     rebuild: bool,
+    slices: Option<PathBuf>,
+    per: usize,
+    seed: u64,
+    at: Vec<Spot>,
 }
 
 fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut a = Args {
         parallel: 2,
+        per: 6,
+        seed: 1,
         ..Args::default()
     };
     while let Some(arg) = it.next() {
@@ -78,6 +87,21 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--codex" => a.codex = Some(value("a path")?.into()),
             "--out" => a.out = Some(value("a path")?.into()),
             "--gate" => a.gates.set(&value("name=value")?)?,
+            "--slices" => a.slices = Some(value("a directory")?.into()),
+            "--per" => {
+                let n = value("a number")?;
+                a.per = n.parse().map_err(|_| format!("bad --per {n:?}"))?;
+                if a.per == 0 {
+                    return Err("--per is at least 1".into());
+                }
+            }
+            "--seed" => {
+                let n = value("a number")?;
+                a.seed = n.parse().map_err(|_| format!("bad --seed {n:?}"))?;
+            }
+            "--at" => {
+                a.at.push(Spot::parse(&value("z,x,y[,edge] or leader[,edge]")?)?)
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -287,6 +311,24 @@ fn pack_cmd(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Sheets of the neighbour gate's pairs from a snapshot of `gates.jsonl` (no lock: a re-ingest
+/// running at the same time leaves the snapshot as it was read).
+fn calibrate_cmd(a: &Args) -> Result<(), String> {
+    let g = game(a)?;
+    let work = Work::open(a.work.as_deref())?;
+    let opts = calibrate::Options {
+        slices: a.slices.clone().unwrap_or_else(|| work.path("slices")),
+        out: a.out.clone().unwrap_or_else(|| work.path("calibrate")),
+        per: a.per,
+        seed: a.seed,
+        at: a.at.clone(),
+        seam: a.gates.seam,
+    };
+    let s = calibrate::calibrate(&g, &work, &opts)?;
+    say_raw!("{}", s.text());
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let mut it = std::env::args().skip(1);
     let Some(cmd) = it.next() else {
@@ -306,6 +348,7 @@ fn main() -> ExitCode {
         "run" => run_cmd(&a),
         "ingest" => ingest_cmd(&a),
         "pack" => pack_cmd(&a),
+        "calibrate" => calibrate_cmd(&a),
         _ => Err(format!("unknown command {cmd:?}\n{USAGE}")),
     });
     match result {

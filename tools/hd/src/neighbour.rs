@@ -97,13 +97,13 @@ impl Seen {
 }
 
 /// The records a tile draws: the frames the animation replaces it with ([`Drawn::records`]).
-struct Drawn {
+pub(crate) struct Drawn {
     frames: BTreeMap<u16, Vec<u16>>,
     memo: HashMap<u16, Vec<u16>>,
 }
 
 impl Drawn {
-    fn of(game: &Game) -> Drawn {
+    pub(crate) fn of(game: &Game) -> Drawn {
         let n = TILE_COUNT.min(game.records.len());
         let mut frames: BTreeMap<u16, Vec<u16>> = BTreeMap::new();
         for slot in &game.anim {
@@ -126,7 +126,7 @@ impl Drawn {
 
     /// The records tile `t` draws: itself when no frame replaces it, else what each of its
     /// frames draws (a frame that leads back to a tile being expanded draws itself).
-    fn records(&mut self, t: u16) -> Vec<u16> {
+    pub(crate) fn records(&mut self, t: u16) -> Vec<u16> {
         if let Some(v) = self.memo.get(&t) {
             return v.clone();
         }
@@ -155,7 +155,7 @@ impl Drawn {
 
 /// The cells an object's tile `t` is drawn in, relative to the object's, with the tile drawn
 /// there (`u6_core::objects::add_object_tiles`, 0x10e73a).
-fn parts(game: &Game, t: u16) -> Vec<(i32, i32, u16)> {
+pub(crate) fn parts(game: &Game, t: u16) -> Vec<(i32, i32, u16)> {
     let f = game.flags2.get(usize::from(t)).copied().unwrap_or(0);
     let part = |n: u16| t.wrapping_sub(n) & 0x7ff;
     let mut v = vec![(0, 0, t)];

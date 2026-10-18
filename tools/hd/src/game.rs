@@ -19,6 +19,7 @@ use u6_formats::gfx::{TILE_COUNT, TILE_PIXELS, TILE_W, TileKind};
 use u6_formats::map::{DUNGEON_CHUNKS, SURFACE_CHUNKS};
 use u6_formats::objblk::{ObjLocation, STATUS_INVISIBLE};
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_LEN, PORTRAIT_WIDTH};
+use u6_formats::position::Position;
 use u6_hdpack::{ImageId, Role, bitmap_hash, portrait_hash, tile_hash};
 use u6_intake::{InputFile, intake};
 
@@ -187,6 +188,9 @@ pub struct Game {
     pub records: Vec<Record>,
     /// flags2 per tile.
     pub flags2: Vec<u8>,
+    /// flags3 per tile (the object draw reads bit 0x20: the tile replaces its cell's base tile,
+    /// `u6_core::objects::add_tile`, 0x10e596).
+    pub flags3: Vec<u8>,
     /// Base tile per object type.
     pub basetile: Vec<u16>,
     /// Per tile: some map chunk cell is this tile.
@@ -205,6 +209,9 @@ pub struct Game {
     pub bitmaps: Vec<(Role, u16, u16, Vec<u8>)>,
     /// Where records meet (the neighbour gate's pairs).
     pub world: World,
+    /// The cell the view is centred on at the start: the party leader's (`State::place_party`,
+    /// 0x105350); `None` when the files place no leader.
+    pub leader: Option<Position>,
 }
 
 /// A failed load: a fixed category for the terminal, and the details (which may name the
@@ -316,6 +323,7 @@ impl Game {
             palette,
             records,
             flags2: state.tables.tileflags.flags2.clone(),
+            flags3: state.tables.tileflags.flags3.clone(),
             basetile: state.tables.basetile.base.clone(),
             in_chunks,
             anim,
@@ -325,6 +333,7 @@ impl Game {
             portraits: portraits(&state, &files),
             bitmaps: bitmaps(&files, game),
             world: World::of(&state),
+            leader: state.leader_position(),
         })
     }
 
@@ -840,6 +849,7 @@ pub mod synthetic {
             palette: PALETTE.to_vec(),
             records,
             flags2,
+            flags3: vec![0; TILE_COUNT],
             basetile,
             in_chunks,
             anim: vec![AnimEntry {
@@ -858,6 +868,7 @@ pub mod synthetic {
             ],
             // No world: no record meets another (the neighbour tests place their own).
             world: World::default(),
+            leader: None,
         }
     }
 }
