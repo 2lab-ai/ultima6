@@ -10,6 +10,7 @@ use u6_formats::converse::ConverseLib;
 use u6_testkit::Quiet;
 
 use super::super::party::name_from_script;
+use super::super::script::{ScriptDst, load_script};
 use super::super::tests_real::{converse, files, with_text};
 use super::catalog::{Catalog, hash64};
 use super::trace::{self, Counts, Decoded};
@@ -152,7 +153,7 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
         .collect();
     let base = with_text(&files);
     // The conversations of `three_npcs_near_the_start_answer_name_job_bye`: the 40 actors
-    // nearest the party's leader that have a script name.
+    // nearest the party's leader (those with a script name are talked to).
     let leader = base.leader_position().quiet();
     let members: Vec<u16> = base.actors.party.active().map(|id| id.0).collect();
     let mut near: Vec<(u32, i16)> = (2..0xe0i16)
@@ -168,9 +169,20 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
         })
         .collect();
     near.sort();
+    let mut npcs: Vec<i16> = near.iter().take(40).map(|&(_, a)| a).collect();
+    // And the conversation of `greeting_substitutes_title_time_and_names`: the first actor
+    // whose script uses `$G` and `$T`.
+    let mut s = base.clone();
+    let greeter = (2..0xe0i16).find(|&npc| {
+        let mut buf = Vec::new();
+        load_script(&mut s, &files, npc, ScriptDst::Other(&mut buf)) != 0
+            && buf.windows(2).any(|w| w == b"$G")
+            && buf.windows(2).any(|w| w == b"$T")
+    });
+    npcs.extend(greeter);
     let mut total = Counts::default();
     let mut talked = 0;
-    for &(_, npc) in near.iter().take(40) {
+    for npc in npcs {
         let mut s = base.clone();
         let (name, _) = name_from_script(&mut s, &files, npc);
         if name.is_empty() {

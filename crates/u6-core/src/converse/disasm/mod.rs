@@ -467,7 +467,7 @@ struct Landing {
     at: u32,
 }
 
-/// What the interpreter does at a stop byte the input loop reads.
+/// `Decoder::owner` of a byte no item holds yet.
 const NO_OWNER: u32 = u32::MAX;
 
 /// A table use the ops make: its kind and the constant index (`None` = any).

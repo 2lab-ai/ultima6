@@ -582,6 +582,30 @@ fn skip_loops_that_stop_inside_an_operand_are_hazards() {
 }
 
 #[test]
+fn a_landing_whose_path_would_refuse_the_script_is_dropped() {
+    // The block's answer jumps back to the question, so only its skip loops get past its `ee`,
+    // onto a byte the executor has no arm for: those paths are dropped, the rest decodes.
+    let mut body = b"\xf7\xef*\xf6Ok".to_vec();
+    body.extend(jump(BODY));
+    body.extend([0xee, 0x80, 0xff]);
+    let d = ok(&script(&body));
+    assert_eq!(
+        &shape(&d)[5..],
+        ["ask", "kw1", "text2", "jump", "unreached3"]
+    );
+    for scan in [Scan::NoMatch, Scan::Answered] {
+        assert!(
+            d.hazards.contains(&Hazard {
+                at: BODY + 12,
+                kind: HazardKind::Dropped(scan, Reason::UnknownOp(0x80)),
+            }),
+            "{:?}",
+            d.hazards
+        );
+    }
+}
+
+#[test]
 fn truncated_scripts_are_refused_and_never_panic() {
     let t = BODY + 60;
     let mut body = b"Hi $P.\xf7\xefname,job\xf6I am.".to_vec();

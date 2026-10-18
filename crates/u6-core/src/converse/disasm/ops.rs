@@ -76,8 +76,8 @@ const fn flow(code: u8, name: &'static str, shape: Shape, flow: Flow) -> Stateme
     }
 }
 
-/// The executor's arms: 28 op bytes in 22 arms (`a2`/`a7`, `a4`/`a5`, `b9`/`ba`, `d8`/`df`
-/// share one).
+/// The executor's arms: 28 op bytes in 24 arms (`a2`/`a7`, `a4`/`a5`, `b9`/`ba` and `d8`/`df`
+/// each share one).
 pub const STATEMENT_OPS: [StatementOp; 28] = [
     op(0x9c, "mount", &[Actor]),
     op(0x9e, "sleep_until_five", &[]),
@@ -127,7 +127,7 @@ const fn e(code: u8, name: &'static str, arity: u8) -> ExprOp {
     ExprOp { code, name, arity }
 }
 
-/// The evaluator's op arms: 42 op bytes (`bc`/`bd` and `e2`..`e4` share an arm).
+/// The evaluator's op arms: 42 op bytes in 39 arms (`bc`/`bd` share one, `e2`..`e4` another).
 pub const EXPR_OPS: [ExprOp; 42] = [
     e(0x81, "gt", 2),
     e(0x82, "ge", 2),
