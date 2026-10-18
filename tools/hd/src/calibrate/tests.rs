@@ -1145,3 +1145,279 @@ fn a_source_names_its_sheets_apart() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A sheet of the out dir, decoded.
+fn sheet_of(out: &Path, name: &str) -> Rgba {
+    let path = out.join(name);
+    let (w, h) = img::png_size(&std::fs::read(&path).unwrap()).unwrap();
+    img::read_png(&path, w, h).unwrap()
+}
+
+#[test]
+fn a_saved_sheet_shows_the_three_panels_and_marks_its_join() {
+    // The test world's rows: fail-1.1-1.5 gen-gen has one row, the grass over the stone at
+    // (0, 7), south.
+    let g = game();
+    let (dir, work, slices) = setup("saved", &world_rows());
+    let out = dir.join("calibrate");
+    let opts = Options {
+        slices,
+        out: out.clone(),
+        per: 2,
+        seed: 1,
+        at: Vec::new(),
+        seam: Thresholds::default().seam,
+        source: Source::All,
+    };
+    calibrate(&g, &work, &opts).unwrap();
+    let at = At { z: 0, x: 0, y: 7 };
+    let pair = Pair {
+        a: GRASS,
+        b: STONE,
+        edge: Edge::South,
+    };
+    let f = frame(&g, at, Edge::South, Some(pair));
+    let pack = Rc::new(Slices::read(&g, &opts.slices).unwrap());
+    for (s, name) in [
+        (4, "fail-1.1-1.5-gen-gen.png"),
+        (2, "fail-1.1-1.5-gen-gen-s2.png"),
+    ] {
+        let sheet = sheet_of(&out, name);
+        let l = Layout::of(s);
+        assert_eq!((sheet.width, sheet.height), (l.width(), l.height(1)));
+        // The three panels as the compositor makes them for the window, each where it goes,
+        // and each another picture: the pack's grass is not MMPX's.
+        let want = panels(&g, &f.fb, &pack, scale_of(s));
+        let crops: Vec<Rgba> = (0..3)
+            .map(|k| {
+                let (px, py) = l.panel_at(0, k);
+                sheet.rect(px, py, l.w, l.h)
+            })
+            .collect();
+        assert_eq!(crops, [want.classic, want.plain, want.hd], "{name}");
+        assert!(crops[0] != crops[1] && crops[1] != crops[2], "{name}");
+        // The south join marked: across it, left of each panel, on the two rows that meet; along
+        // it, above the panel, A's columns only. Nothing marks an east join.
+        let cell = TILE_W as u32 * s;
+        let is_mark = |x: u32, y: u32| img::get(&sheet, x, y) == MARK;
+        for k in 0..3 {
+            let (px, py) = l.panel_at(0, k);
+            let jy = py + 3 * cell;
+            assert!(is_mark(px - 3, jy - 1) && is_mark(px - 3, jy), "{name} {k}");
+            assert!(
+                !is_mark(px - 3, jy + 1) && !is_mark(px - 3, jy - 2),
+                "{name} {k}"
+            );
+            assert!(is_mark(px + 3 * cell, py - 4) && is_mark(px + 4 * cell - 1, py - 4));
+            assert!(!is_mark(px + 4 * cell, py - 4) && !is_mark(px + 3 * cell - 1, py - 4));
+            // An east join's tick (above, on the columns that meet) and bar (left, A's row).
+            assert!(!is_mark(px + 4 * cell, py - 3), "{name} {k}");
+            assert!(!is_mark(px - 4, py + 2 * cell), "{name} {k}");
+        }
+        let per_panel = 2 * (l.margin - 4) + 3 * cell;
+        let marked = sheet.pixels.chunks_exact(4).filter(|p| *p == MARK).count();
+        assert_eq!(marked as u32, 3 * per_panel, "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The compositor's scale of a sheet's `s`.
+fn scale_of(s: u32) -> Scale {
+    if s == 4 { Scale::X4 } else { Scale::X2 }
+}
+
+#[test]
+fn samples_tsv_rows_are_the_samples() {
+    // The test world's rows and one on the second level, at a cell whose x and y differ.
+    let g = game();
+    let below = line(
+        1,
+        (3, 3, "east"),
+        true,
+        Some(3.0),
+        1.5,
+        "gen-mmpx",
+        "map",
+        (1, 2, 5),
+    );
+    let (dir, work, slices) = setup("rows", &(world_rows() + &below + "\n"));
+    let out = dir.join("calibrate");
+    let opts = Options {
+        slices,
+        out: out.clone(),
+        per: 2,
+        seed: 1,
+        at: Vec::new(),
+        seam: Thresholds::default().seam,
+        source: Source::All,
+    };
+    calibrate(&g, &work, &opts).unwrap();
+    let (_, rows) = tsv(&out.join("samples.tsv"));
+    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
+    let pack = Slices::read(&g, &opts.slices).unwrap();
+    let again = |p: Pair| format!("{:.4}", remeasured(&g, &pack, p, opts.seam).unwrap());
+    let water = Pair {
+        a: WATER_PAIR,
+        b: GRASS,
+        edge: Edge::East,
+    };
+    let south = Pair {
+        a: STONE,
+        b: GRASS,
+        edge: Edge::South,
+    };
+    // In cell order, each sheet's rows by ratio / limit then pair: pass gen-mmpx (the stone
+    // over the grass), fail-1.1-1.5 gen-gen, its gen-mmpx two, then fail-gt1.5 gen-mmpx: the
+    // pair below the surface (record 3 beside itself, which the slices have no image of) before
+    // the water by pair order, their ratio / limit the same.
+    let want: Vec<Vec<String>> = [
+        vec![
+            "1".into(),
+            "pass".into(),
+            "gen-mmpx".into(),
+            name(STONE),
+            name(GRASS),
+            "south".into(),
+            "1.0000".into(),
+            "1.5000".into(),
+            again(south),
+            "map".into(),
+            "0".into(),
+            "8".into(),
+            "7".into(),
+            "pass-gen-mmpx.png".into(),
+            "pass-gen-mmpx-s2.png".into(),
+            "1".into(),
+            // The level's second water (the first chunk again, at (9, 9)) at frame 0.
+            "frame0".into(),
+        ],
+        vec![
+            "5".into(),
+            "fail-gt1.5".into(),
+            "gen-mmpx".into(),
+            name(3),
+            name(3),
+            "east".into(),
+            "3.0000".into(),
+            "1.5000".into(),
+            "-".into(),
+            "map".into(),
+            "1".into(),
+            "2".into(),
+            "5".into(),
+            "fail-gt1.5-gen-mmpx.png".into(),
+            "fail-gt1.5-gen-mmpx-s2.png".into(),
+            "1".into(),
+            "-".into(),
+        ],
+        vec![
+            "6".into(),
+            "fail-gt1.5".into(),
+            "gen-mmpx".into(),
+            name(WATER_PAIR),
+            name(GRASS),
+            "east".into(),
+            "3.0000".into(),
+            "1.5000".into(),
+            again(water),
+            "map".into(),
+            "0".into(),
+            "1".into(),
+            "1".into(),
+            "fail-gt1.5-gen-mmpx.png".into(),
+            "fail-gt1.5-gen-mmpx-s2.png".into(),
+            "2".into(),
+            "frame0+pair".into(),
+        ],
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(rows.len(), 6);
+    assert_eq!(
+        [rows[0].clone(), rows[4].clone(), rows[5].clone()],
+        want[..]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_sheet_orders_its_rows_by_ratio_over_limit_then_pair() {
+    // One bucket × sides, its pairs in the order opposite their ratio / limit, and two of one
+    // ratio / limit: by ratio / limit, then by pair.
+    let row = |a: u16, ratio: f32| {
+        line(
+            1,
+            (a, a + 1, "east"),
+            true,
+            Some(ratio),
+            1.5,
+            "gen-mmpx",
+            "map",
+            (0, 0, 0),
+        )
+    };
+    let text = [row(1, 4.5), row(3, 3.9), row(5, 3.0), row(7, 3.0)].join("\n");
+    let (rows, _) = rows(&text).unwrap();
+    let taken = sample(&rows, 4, 1, Source::All);
+    let t = &taken[&(Bucket::Gt15, Sides::GenMmpx)];
+    let order: Vec<u16> = t.rows.iter().map(|r| r.pair.a).collect();
+    assert_eq!(order, [5, 7, 3, 1]);
+}
+
+#[test]
+fn a_master_is_box_averaged_to_x4() {
+    // A master whose 2 × 2 blocks are not uniform: the ×4 image is each block's average,
+    // weighted by alpha (`pack`'s reduction), worked out here by hand.
+    let g = game();
+    let dir = std::env::temp_dir().join(format!("u6-hdtool-calibrate-{}-box", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let blocks: [[[u8; 4]; 4]; 3] = [
+        // Opaque: the plain mean, rounded.
+        [
+            [0, 0, 0, 255],
+            [100, 40, 8, 255],
+            [20, 200, 60, 255],
+            [40, 1, 4, 255],
+        ],
+        // Two clear subpixels: the opaque two's colour, half the alpha.
+        [
+            [255, 0, 0, 255],
+            [0, 0, 255, 0],
+            [0, 255, 0, 255],
+            [9, 9, 9, 0],
+        ],
+        // Part-transparent: weighted by alpha.
+        [
+            [200, 0, 0, 200],
+            [0, 100, 0, 100],
+            [0, 0, 50, 50],
+            [0, 0, 0, 0],
+        ],
+    ];
+    let want: [[u8; 4]; 3] = [[40, 60, 18, 255], [128, 128, 0, 128], [114, 29, 7, 88]];
+    let mut m = Rgba::new(128, 128);
+    for y in 0..64 {
+        for x in 0..64 {
+            let b = &blocks[((x + y) % 3) as usize];
+            for (k, (dx, dy)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+                img::put(&mut m, 2 * x + dx, 2 * y + dy, b[k]);
+            }
+        }
+    }
+    let stem = atlas::slice_name(ImageId::Tile(GRASS));
+    img::write_png(&dir.join(format!("{stem}.png")), &m).unwrap();
+    let s = Slices::read(&g, &dir).unwrap();
+    let x4 = s.get(GRASS).unwrap();
+    assert_eq!((x4.width, x4.height), (64, 64));
+    for y in 0..64 {
+        for x in 0..64 {
+            assert_eq!(
+                img::get(x4, x, y),
+                want[((x + y) % 3) as usize],
+                "({x}, {y})"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
