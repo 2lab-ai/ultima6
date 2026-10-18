@@ -33,7 +33,19 @@ pub(crate) async fn print(cx: &Cx<'_>, text: &[u8]) {
 /// 0x108376: one character to the message scroll through the escape layer (`$x` / `#x` read the
 /// converse variables, `&` text shows only while A4-0x7b26 is set).
 pub(crate) async fn put_char(cx: &Cx<'_>, c: u8) {
-    Box::pin(crate::ui::printf::text_out(cx.state, cx.io, i16::from(c))).await;
+    Box::pin(crate::ui::printf::text_out(cx.state, cx.io, i32::from(c))).await;
+}
+
+/// Port-only (spec 08 Design 1): the `@{` the text layer has taken so far
+/// ([`crate::ui::TextState::braces`]), read where a unit of text begins.
+pub(crate) fn braces(cx: &Cx<'_>) -> u32 {
+    cx.st(|s| s.ui.text.braces)
+}
+
+/// Port-only (spec 08 Design 1): a unit of text ends: what the text layer holds is let out, and
+/// a brace taken since `opened` and still open is closed ([`crate::ui::printf::end_unit`]).
+pub(crate) async fn end_unit(cx: &Cx<'_>, opened: u32) {
+    Box::pin(crate::ui::printf::end_unit(cx.state, cx.io, opened)).await;
 }
 
 /// 0x107cba(buf, max): line input with echo; returns the typed bytes (no NUL), empty after Esc.

@@ -6,7 +6,7 @@
 //! port draws into the engine's chunky back buffer ([`crate::Io::draw`]) where the original
 //! writes the bitplanes of the screen at 0x161bde.
 
-use u6_formats::font::BitFont;
+use u6_formats::font::{BitFont, HangulFont};
 use u6_render::{Framebuffer, HEIGHT, WIDTH};
 
 /// Window flag (byte 8) bit: wrap at word boundaries.
@@ -116,9 +116,14 @@ impl WindowId {
 /// `x` is rounded down to a byte (8-pixel) boundary as the planar code does; set pixels get
 /// `fg`, clear pixels `bg`, both limited to colours 0..15 because plane 4 is cleared.
 pub fn draw_glyph(fb: &mut Framebuffer, font: &BitFont, x: usize, y: usize, c: u8, fg: u8, bg: u8) {
+    draw_rows(fb, x, y, &font.glyphs[usize::from(c)], fg, bg);
+}
+
+/// The pixels of one 8 × 8 cell from its row bytes (bit 7 = leftmost), as [`draw_glyph`] draws
+/// them: `x` rounded down to a byte, set pixels `fg`, clear ones `bg`, colours 0..15.
+fn draw_rows(fb: &mut Framebuffer, x: usize, y: usize, rows: &[u8; 8], fg: u8, bg: u8) {
     let x = x & !7;
-    let glyph = &font.glyphs[usize::from(c)];
-    for (dy, &row) in glyph.iter().enumerate() {
+    for (dy, &row) in rows.iter().enumerate() {
         for dx in 0..CELL {
             let set = row & (0x80 >> dx) != 0;
             fb.set(x + dx, y + dy, if set { fg & 0x0f } else { bg & 0x0f });
@@ -128,17 +133,28 @@ pub fn draw_glyph(fb: &mut Framebuffer, font: &BitFont, x: usize, y: usize, c: u
 
 /// Original: 0x105228 (ui: draw character `c` at screen cell (`col`, `row`) in the current window's
 /// colours; the target of the pointer A4-0x7a24)
+///
+/// Port (spec 08): `c` is a cell code ([`super::wide`]). A code below 0x100 is the glyph of
+/// `u6.ch` as before; a Hangul syllable is its glyph of `hangul`; any other code, and a syllable
+/// with no table, is a blank cell (the paper colour only). Without `u6.ch` nothing is drawn.
 pub fn draw_char(
     fb: &mut Framebuffer,
     font: Option<&BitFont>,
+    hangul: Option<&HangulFont>,
     w: &TextWindow,
-    c: u8,
+    c: u16,
     col: u16,
     row: u16,
 ) {
     if let Some(font) = font {
         let (x, y) = (usize::from(col) * CELL, usize::from(row) * CELL);
-        draw_glyph(fb, font, x, y, c, w.fg, w.bg);
+        match u8::try_from(c) {
+            Ok(c) => draw_glyph(fb, font, x, y, c, w.fg, w.bg),
+            Err(_) => {
+                let rows = hangul.and_then(|h| h.glyph(u32::from(c)));
+                draw_rows(fb, x, y, rows.unwrap_or(&[0; 8]), w.fg, w.bg);
+            }
+        }
     }
 }
 

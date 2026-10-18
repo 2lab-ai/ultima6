@@ -471,6 +471,32 @@ fn name_prefixes_count_stacks_and_name_articles() {
 }
 
 #[test]
+fn korean_prints_no_article() {
+    let mut s = world();
+    let short = |a: u32, t: &[u8]| (a, t.to_vec());
+    with_data(
+        &mut s,
+        vec![
+            short(0x0012_83e2, b"a\0"),
+            short(0x0012_83e6, b"n\0"),
+            short(0x0012_83ea, b"t\0"),
+        ],
+    );
+    let sword = put(&mut s, 70, 3, 1);
+    let shield = put(&mut s, 71, 4, 1);
+    s.tables.tileflags.flags3[usize::from(tile(70, 0))] = 0x80;
+    s.tables.tileflags.flags3[usize::from(tile(71, 0))] = 0xc0;
+    s.ui.text.set_language(crate::ui::Language::Korean);
+    assert_eq!(name_prefix(&mut s, sword), 1);
+    assert_eq!(name_prefix(&mut s, shield), 1);
+    assert!(queued(&s).is_empty(), "spec 08: no article in Korean");
+    s.ui.text.set_language(crate::ui::Language::English);
+    assert_eq!(name_prefix(&mut s, sword), 1);
+    assert_eq!(name_prefix(&mut s, shield), 1);
+    assert_eq!(queued(&s), ["n", "t"]);
+}
+
+#[test]
 fn a_blast_lights_kegs_and_breaks_doors_not_magic_ones() {
     let mut s = world();
     with_data(&mut s, tagged(&[0x0012_ca12]));

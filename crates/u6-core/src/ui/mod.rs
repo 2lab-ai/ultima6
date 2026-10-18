@@ -95,8 +95,11 @@ mod tests;
 pub mod text;
 pub mod textstate;
 pub mod wait;
+pub mod wide;
 
-use u6_formats::font::BitFont;
+use std::rc::Rc;
+
+use u6_formats::font::{BitFont, HangulFont};
 
 use crate::files::Files;
 use crate::state::LoadError;
@@ -106,6 +109,7 @@ pub use printf::{Arg, printf};
 pub use tables::UiTables;
 pub use text::{TextWindow, WindowId};
 pub use textstate::TextState;
+pub use wide::Language;
 
 /// Message scroll, text windows, input and side-panel state.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -116,6 +120,10 @@ pub struct UiState {
     pub messages: Vec<String>,
     /// Original: the font `u6.ch` main loads (0x1351d8 body), `None` until [`UiState::load`]
     pub font: Option<BitFont>,
+    /// Port-only (spec 08): the Hangul table the cells of Hangul syllables are drawn from,
+    /// `None` until the locale layer sets one (a syllable is then a blank cell). Shared, so a
+    /// copy of the state does not copy its 89 KB.
+    pub hangul: Option<Rc<HangulFont>>,
     /// Strings, tables and initial values read from `game`.
     pub tables: UiTables,
     pub text: TextState,
@@ -151,6 +159,7 @@ impl UiState {
         UiState {
             messages: Vec::new(),
             font,
+            hangul: None,
             text: TextState::from_tables(&tables),
             input: InputState::from_tables(&tables),
             panel: PanelState::from_tables(&tables),

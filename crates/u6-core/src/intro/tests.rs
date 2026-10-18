@@ -7,3 +7,4 @@ mod launch;
 mod real;
 mod scenes;
 mod synthetic;
+mod wide;

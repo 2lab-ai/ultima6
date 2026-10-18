@@ -121,7 +121,12 @@ pub fn display_name(s: &State, slot: Slot) -> String {
 /// The text 0x12904c prints for `tile` (flags3 bits 6-7: one of the three articles or none), as a
 /// string for [`described_name`]. The port of 0x12904c itself, which prints it, is
 /// [`crate::objects::commands::article`].
+///
+/// Port (spec 08): in Korean ([`crate::ui::Language`]) there is no article: the text is empty.
 pub fn article_text(s: &State, tile: u16) -> &str {
+    if s.ui.text.language == crate::ui::Language::Korean {
+        return "";
+    }
     let f3 = s.tables.tileflags.flags3.get(usize::from(tile)).copied();
     match f3.unwrap_or(0) & 0xc0 {
         0x40 => &s.objects.defs.articles[0],
@@ -150,14 +155,30 @@ pub fn name_prefix_text(s: &State, slot: Slot) -> (String, u16) {
 
 /// What the Look path prints for `slot`: the prefix of 0x129382 and the 0x10eef8 name with its
 /// plural markers resolved for the count, as the printer 0x108376 does (`\\` letters only for a
-/// count ≠ 1, `/` letters only for 1).
+/// count ≠ 1, `/` letters only for 1; in Korean, neither: [`drop_plural`]).
 pub fn described_name(s: &State, slot: Slot) -> String {
     let (prefix, count) = name_prefix_text(s, slot);
     let name = display_name(s, slot);
-    format!(
-        "{prefix}{}",
-        u6_formats::look::resolve_plural(&name, count != 1)
-    )
+    let name = match s.ui.text.language {
+        crate::ui::Language::English => u6_formats::look::resolve_plural(&name, count != 1),
+        crate::ui::Language::Korean => drop_plural(&name),
+    };
+    format!("{prefix}{name}")
+}
+
+/// Port-only (spec 08): the plural markers of `text` as the Korean printer reads them: each `/`
+/// or `\\` and the ASCII letters after it print nothing.
+fn drop_plural(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' || c == '/' {
+            while chars.next_if(char::is_ascii_alphabetic).is_some() {}
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Original: 0x10d2d8 (objects: how many of type `kind` `owner` holds, at any depth)
