@@ -120,32 +120,6 @@ pub(super) fn pair_line(
     .to_string()
 }
 
-/// A neighbour fallback line as ingest writes it.
-pub(super) fn fell_line(plan: &Plan, item: u32, pass: usize) -> String {
-    serde_json::json!({
-        "item": item, "class": plan.items[item as usize].class, "fallback": "neighbour",
-        "pass": pass, "gates": gates(),
-    })
-    .to_string()
-}
-
-/// The pass-1 line of `p` as the gate logs it with the images `first` (pass 1's), in `source`
-/// at A's cell `at`.
-pub(super) fn logged(
-    g: &Game,
-    first: &BTreeMap<u16, Rgba>,
-    p: Pair,
-    source: &str,
-    at: Option<At>,
-) -> String {
-    let s = Slices::new(g, first.clone());
-    let result = measure(g, &s, p, seam()).unwrap();
-    let both = first.contains_key(&p.a) && first.contains_key(&p.b);
-    let sides = if both { Sides::GenGen } else { Sides::GenMmpx };
-    let fail = result.is_some_and(|r| !gate::seam_passes(r));
-    pair_line(1, p, fail, result, sides, source, at, &gates())
-}
-
 /// The ×8 master of the ×4 image `img`: each pixel a 2 × 2 block whose subpixels differ (one
 /// channel up and down by as much as it can, to 8) and whose box average is the pixel, so a
 /// master reduced by any other rule than `pack`'s is not `img`.
@@ -198,6 +172,30 @@ pub(super) fn listed(g: &Game, images: &BTreeMap<u16, Rgba>) -> Vec<Accepted> {
         .collect()
 }
 
+/// The neighbour gate's lines of `gates.jsonl` for the world of `g` with the records of `first`
+/// generated in pass 1 (their ×4 images; their items accepted), written by the gate's own path
+/// as ingest runs it: the world's pairs ([`neighbour::pairs`]), each record's sides from its
+/// ×8 master ([`neighbour::sides`]), the fixed point ([`neighbour::settle`]) and ingest's writer
+/// ([`crate::ingest::neighbour_lines`]); and the images left (those whose items it kept).
+pub(super) fn gate_log(g: &Game, first: &BTreeMap<u16, Rgba>) -> (String, BTreeMap<u16, Rgba>) {
+    let plan = group::plan(g);
+    let pairs = neighbour::pairs(g);
+    let masters: BTreeMap<u16, Rgba> = first.iter().map(|(&r, i)| (r, master(i))).collect();
+    let accepted: BTreeMap<u16, (u32, &Rgba)> = masters
+        .iter()
+        .map(|(&r, m)| (r, (item_of(&plan, r), m)))
+        .collect();
+    let sides = neighbour::sides(g, &pairs.all, &accepted).unwrap();
+    let settled = neighbour::settle(&pairs.all, &sides, seam());
+    let text = crate::ingest::neighbour_lines(&plan, &pairs, &settled, &Thresholds::default());
+    let left = first
+        .iter()
+        .filter(|(r, _)| !settled.fallen.contains_key(&item_of(&plan, **r)))
+        .map(|(&r, i)| (r, i.clone()))
+        .collect();
+    (text, left)
+}
+
 pub(super) const AB: Pair = Pair {
     a: A,
     b: B,
@@ -213,22 +211,35 @@ const BG: Pair = Pair {
     b: GRASS,
     edge: Edge::East,
 };
+/// B over the grass, the grass over B, A over the grass and the grass over A: south.
+const BG_S: Pair = Pair {
+    a: B,
+    b: GRASS,
+    edge: Edge::South,
+};
+const GB_S: Pair = Pair {
+    a: GRASS,
+    b: B,
+    edge: Edge::South,
+};
+const AG_S: Pair = Pair {
+    a: A,
+    b: GRASS,
+    edge: Edge::South,
+};
+const GA_S: Pair = Pair {
+    a: GRASS,
+    b: A,
+    edge: Edge::South,
+};
 
-/// X–A–B–grass, east, A and B generated in pass 1: A red on its west side, so it meets X (drawn
-/// by MMPX) with a seam and falls in pass 1; A beside B meets cleanly while both are generated;
-/// B meets the grass cleanly. The lines of pass 1 and A's fallback, and the images left: B's.
+/// X–A–B–grass, east, in the grass of [`game`], A and B generated in pass 1: A red on its west
+/// side, so it meets X (drawn by MMPX) with a seam and falls in pass 1; A beside B meets cleanly
+/// while both are generated; B meets the grass cleanly on every side. The gate's lines
+/// ([`gate_log`]), and the images left: B's.
 pub(super) fn chain(g: &Game) -> (String, BTreeMap<u16, Rgba>) {
-    let plan = group::plan(g);
     let first = BTreeMap::from([(A, red_west(&near(g, A))), (B, near(g, B))]);
-    let at = |x: usize| Some(At { z: 0, x, y: 3 });
-    let lines = [
-        logged(g, &first, XA, "map", at(2)),
-        logged(g, &first, AB, "map", at(3)),
-        logged(g, &first, BG, "map", at(4)),
-        fell_line(&plan, item_of(&plan, A), 1),
-    ];
-    let left = BTreeMap::from([(B, near(g, B))]);
-    (lines.join("\n") + "\n", left)
+    gate_log(g, &first)
 }
 
 /// The state of `text` with the images `left` (each listed, each a master), or its kinds of
@@ -259,42 +270,51 @@ fn state_of(
 fn the_last_pass_is_rebuilt_from_the_slices() {
     let g = game();
     let (text, left) = chain(&g);
-    // Pass 1 as designed: A fails beside X, A and B pass together, B passes beside the grass.
+    // Pass 1 as the gate logs it: every pair of the world with A or B, in pair order. A fails
+    // beside X, and nothing else fails: A and B together, A and B beside the grass.
     let rec = record(&text).unwrap();
     let fails: Vec<(Pair, bool, Sides)> = rec
         .pairs
         .iter()
         .map(|l| (l.pair, l.fail, l.sides))
         .collect();
+    let mmpx = |p: Pair| (p, false, Sides::GenMmpx);
     assert_eq!(
         fails,
         [
+            mmpx(GA_S),
+            mmpx(GB_S),
             (XA, true, Sides::GenMmpx),
+            mmpx(AG_S),
             (AB, false, Sides::GenGen),
-            (BG, false, Sides::GenMmpx)
+            mmpx(BG),
+            mmpx(BG_S),
         ]
     );
     let f = state(&g, &text, &left).unwrap();
     // A fell in pass 1; pass 2 failed nothing and is not logged: it is rebuilt.
-    assert_eq!((f.passes, f.logged_last, f.first), (2, false, 3));
+    assert_eq!((f.passes, f.logged_last, f.first), (2, false, 7));
     assert_eq!(f.generated, BTreeSet::from([B]));
     let plan = group::plan(&g);
     assert_eq!(f.fallen, BTreeMap::from([(A, (item_of(&plan, A), 1))]));
     // The pairs left: those with B. A beside B is now generated beside MMPX, measured from the
     // slices; B beside the grass as pass 1 logged it.
     let pairs: Vec<Pair> = f.last.iter().map(|l| l.pair).collect();
-    assert_eq!(pairs, [AB, BG]);
+    assert_eq!(pairs, [GB_S, AB, BG, BG_S]);
     let slices = Slices::new(&g, left.clone());
-    let ab = &f.last[0];
+    let of = |p: Pair| f.last.iter().find(|l| l.pair == p).unwrap();
+    let ab = of(AB);
     assert_eq!((ab.sides, ab.first.0), (Sides::GenMmpx, Sides::GenGen));
     assert_eq!(ab.result, measure(&g, &slices, AB, seam()).unwrap());
     assert!(ab.result.is_some() && ab.result != ab.first.1);
-    let bg = &f.last[1];
-    assert_eq!((bg.sides, bg.first.0), (Sides::GenMmpx, Sides::GenMmpx));
-    assert_eq!(bg.result, bg.first.1);
+    for p in [GB_S, BG, BG_S] {
+        let x = of(p);
+        assert_eq!((x.sides, x.first.0), (Sides::GenMmpx, Sides::GenMmpx));
+        assert!(x.result.is_some() && x.result == x.first.1, "{p:?}");
+    }
     assert_eq!(
-        (ab.labels.as_str(), ab.at),
-        ("map", Some(At { z: 0, x: 3, y: 3 }))
+        (ab.labels.as_str(), ab.at, ab.line),
+        ("map", Some(At { z: 0, x: 3, y: 3 }), 5)
     );
     // The one survivor: B's item.
     assert_eq!(
@@ -310,20 +330,22 @@ fn the_last_pass_is_rebuilt_from_the_slices() {
 
     // A log that has the last pass (lines of pass 2 that pass) is held to the rebuilt one.
     let last = |p: &Last| pair_line(2, p.pair, false, p.result, p.sides, "map", p.at, &gates());
-    let with = text.clone() + &last(ab) + "\n" + &last(bg) + "\n";
+    let pass2 = |x: &[&Last]| -> String { x.iter().map(|l| last(l) + "\n").collect() };
+    let (gb_s, bg, bg_s) = (of(GB_S), of(BG), of(BG_S));
+    let with = text.clone() + &pass2(&[gb_s, ab, bg, bg_s]);
     let f2 = state(&g, &with, &left).unwrap();
     assert!(f2.logged_last);
     assert_eq!(f2.last, f.last);
-    // Logged otherwise: the gen-gen of pass 1 kept, or a pair missing.
+    // Logged otherwise: the gen-gen of pass 1 kept, or pairs missing.
     let mut stale = ab.clone();
     stale.sides = Sides::GenGen;
-    let wrong = text.clone() + &last(&stale) + "\n" + &last(bg) + "\n";
+    let wrong = text.clone() + &pass2(&[gb_s, &stale, bg, bg_s]);
     assert_eq!(state(&g, &wrong, &left).unwrap_err(), ["last"]);
-    let short = text.clone() + &last(bg) + "\n";
+    let short = text.clone() + &pass2(&[bg]);
     assert_eq!(state(&g, &short, &left).unwrap_err(), ["last"]);
     // A pair logged twice in one pass: the stale line before the one that agrees, or a pass-1
     // line again. Neither line is taken for the record.
-    let twice = text.clone() + &last(&stale) + "\n" + &last(ab) + "\n" + &last(bg) + "\n";
+    let twice = text.clone() + &pass2(&[gb_s, &stale, ab, bg, bg_s]);
     assert_eq!(state(&g, &twice, &left).unwrap_err(), ["duplicate"]);
     let again = text.clone() + text.lines().nth(1).unwrap() + "\n";
     assert_eq!(state(&g, &again, &left).unwrap_err(), ["duplicate"]);
@@ -333,10 +355,16 @@ fn the_last_pass_is_rebuilt_from_the_slices() {
     let after = pair_line(3, BG, false, bg.result, bg.sides, "map", bg.at, &gates());
     let late = with.clone() + &after + "\n";
     assert_eq!(state(&g, &late, &left).unwrap_err(), ["last"]);
+    // A line logged in the last pass with no side generated there (A beside X).
+    let x = XA;
+    let none = pair_line(2, x, false, None, Sides::GenMmpx, "map", None, &gates());
+    let extra = with.clone() + &none + "\n";
+    assert_eq!(state(&g, &extra, &left).unwrap_err(), ["last"]);
     // No fallback: pass 1 is the last pass, logged whole.
-    let only = logged(&g, &left, BG, "map", Some(At { z: 0, x: 4, y: 3 })) + "\n";
+    let (only, kept) = gate_log(&g, &left);
+    assert_eq!(kept, left);
     let f3 = state(&g, &only, &left).unwrap();
-    assert_eq!((f3.passes, f3.logged_last, f3.last.len()), (1, true, 1));
+    assert_eq!((f3.passes, f3.logged_last, f3.last.len()), (1, true, 4));
 }
 
 #[test]
@@ -353,11 +381,16 @@ fn the_record_and_the_slices_must_agree() {
         out[k] = v.to_string();
         out.join("\n") + "\n"
     };
+    let line_of = |p: Pair| {
+        let r = record(&text).unwrap();
+        r.pairs.iter().position(|l| l.pair == p).unwrap()
+    };
+    let (bg, fell) = (line_of(BG), lines.len() - 1);
     // B beside the grass logged with another ratio than its slice gives.
-    let other = edit(2, &|v| v["ratio"] = serde_json::json!(0.25));
+    let other = edit(bg, &|v| v["ratio"] = serde_json::json!(0.25));
     assert_eq!(state(&g, &other, &left).unwrap_err(), ["measure"]);
     // ... or as gen-gen, though the grass is not generated.
-    let gg = edit(2, &|v| v["sides"] = serde_json::json!("gen-gen"));
+    let gg = edit(bg, &|v| v["sides"] = serde_json::json!("gen-gen"));
     assert_eq!(state(&g, &gg, &left).unwrap_err(), ["sides"]);
     // A's master left in place (and listed), though A was sent back: and A then fails beside X
     // in the last pass.
@@ -379,19 +412,17 @@ fn the_record_and_the_slices_must_agree() {
     let small = BTreeMap::from([(B, Rgba::new(32, 32))]);
     assert_eq!(state(&g, &text, &small).unwrap_err(), ["refused"]);
     // A fallback of an item of another class, or one the plan has not.
-    let class = edit(3, &|v| v["class"] = serde_json::json!("object"));
+    let class = edit(fell, &|v| v["class"] = serde_json::json!("object"));
     assert_eq!(state(&g, &class, &left).unwrap_err(), ["plan"]);
-    let far = edit(3, &|v| v["item"] = serde_json::json!(plan.items.len()));
+    let far = edit(fell, &|v| v["item"] = serde_json::json!(plan.items.len()));
     assert!(state(&g, &far, &left).unwrap_err().starts_with(&["plan"]));
     // A failing line whose generated side was not sent back in its pass.
-    let late = edit(3, &|v| v["pass"] = serde_json::json!(2));
+    let late = edit(fell, &|v| v["pass"] = serde_json::json!(2));
     assert!(state(&g, &late, &left).unwrap_err().contains(&"pass"));
-    // A pair of the last pass with no cell: no window could be placed at it.
-    let nowhere = edit(2, &|v| v["at"] = serde_json::Value::Null);
-    assert_eq!(state(&g, &nowhere, &left).unwrap_err(), ["cell"]);
-    // ... nor a pass-1 pair that no side of is generated any more: it is no pair of the last pass.
-    let gone = edit(0, &|v| v["at"] = serde_json::Value::Null);
-    assert!(state(&g, &gone, &left).is_ok());
+    // A pair of the last pass with no cell: no window could be placed at it, and the world has
+    // it at one.
+    let nowhere = edit(bg, &|v| v["at"] = serde_json::Value::Null);
+    assert_eq!(state(&g, &nowhere, &left).unwrap_err(), ["world", "cell"]);
     // Gated with other thresholds: said alone.
     let t = Thresholds {
         seam: 2.0,
@@ -399,6 +430,74 @@ fn the_record_and_the_slices_must_agree() {
     };
     let other_gates = text.replace(&gates(), &t.text());
     assert_eq!(state(&g, &other_gates, &left).unwrap_err(), ["gates"]);
+}
+
+#[test]
+fn the_pairs_of_pass_1_are_the_worlds() {
+    let g = game();
+    let (text, left) = chain(&g);
+    let lines: Vec<&str> = text.lines().collect();
+    let without = |k: usize| -> String {
+        lines
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != k)
+            .map(|(_, l)| format!("{l}\n"))
+            .collect()
+    };
+    let edit = |k: usize, f: &dyn Fn(&mut serde_json::Value)| -> String {
+        let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let mut v: serde_json::Value = serde_json::from_str(lines[k]).unwrap();
+        f(&mut v);
+        out[k] = v.to_string();
+        out.join("\n") + "\n"
+    };
+    let world = neighbour::pairs(&g);
+    // A line of pass 1 dropped: B beside the grass, east, which the world has with B generated
+    // (the reviewer's probe A), or the grass over A, whose A fell since.
+    for p in [BG, GA_S] {
+        assert!(world.all.contains(&p));
+        let k = record(&text)
+            .unwrap()
+            .pairs
+            .iter()
+            .position(|l| l.pair == p);
+        let e = state(&g, &without(k.unwrap()), &left).unwrap_err();
+        assert_eq!(e, ["world"], "{p:?}");
+    }
+    // A line of a pair the world does not have (A west of X), or logged at another cell or from
+    // another source than the world's.
+    let ax = Pair {
+        a: A,
+        b: X,
+        edge: Edge::East,
+    };
+    let at = Some(At { z: 0, x: 3, y: 3 });
+    let line = pair_line(
+        1,
+        ax,
+        false,
+        Some((1.0, 1.5)),
+        Sides::GenMmpx,
+        "map",
+        at,
+        &gates(),
+    );
+    let extra = text.clone() + &line + "\n";
+    assert_eq!(state(&g, &extra, &left).unwrap_err(), ["world"]);
+    let k = record(&text)
+        .unwrap()
+        .pairs
+        .iter()
+        .position(|l| l.pair == BG)
+        .unwrap();
+    let moved = edit(k, &|v| v["at"]["x"] = serde_json::json!(5));
+    assert_eq!(state(&g, &moved, &left).unwrap_err(), ["world"]);
+    let objects = edit(k, &|v| v["source"] = serde_json::json!("objects"));
+    assert_eq!(state(&g, &objects, &left).unwrap_err(), ["world"]);
+    // A label beside the source (H7's label field) is not the source.
+    let labelled = edit(k, &|v| v["label"] = serde_json::json!("odd"));
+    assert!(state(&g, &labelled, &left).is_ok());
 }
 
 #[test]
@@ -477,6 +576,24 @@ fn a_master_is_the_one_ingest_wrote() {
     );
     assert!(fixed_of(&listed(&g, &images)).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `text` with `label` in a `label` field of the lines of `pairs`.
+fn labelled(text: &str, pairs: &[Pair], label: &str) -> String {
+    let rec = record(text).unwrap();
+    text.lines()
+        .enumerate()
+        .map(|(i, l)| {
+            let of = rec.pairs.iter().find(|x| x.line == i + 1);
+            if of.is_some_and(|x| pairs.contains(&x.pair)) {
+                let mut v: serde_json::Value = serde_json::from_str(l).unwrap();
+                v["label"] = serde_json::json!(label);
+                v.to_string() + "\n"
+            } else {
+                format!("{l}\n")
+            }
+        })
+        .collect()
 }
 
 /// The files of the out dir `out`, sorted.
@@ -606,7 +723,7 @@ fn the_last_pass_is_what_the_windows_show() {
     let (dir, work) = work_dir("last", &text, &g, &left);
     let o = options(&dir);
     let s = calibrate_final(&g, &work, &o).unwrap();
-    assert_eq!((s.passes, s.logged_last, s.first, s.last), (2, false, 3, 2));
+    assert_eq!((s.passes, s.logged_last, s.first, s.last), (2, false, 7, 4));
     // One survivor (B's item), placed at a pair it meets.
     let rows = rows_of(&o.out);
     assert_eq!(rows.len(), 1);
@@ -620,7 +737,7 @@ fn the_last_pass_is_what_the_windows_show() {
         ("coverage", "terrain", "pair")
     );
     assert_eq!(w["records"], atlas::image_name(ImageId::Tile(B)));
-    // Both pairs of the last pass drawn in the window, each ticked as the last pass has it: A
+    // Every pair of the last pass drawn in the window, each ticked as the last pass has it: A
     // beside B is gen-mmpx now (A fell), with the measure of the slices, not pass 1's gen-gen.
     let name = |r: u16| atlas::image_name(ImageId::Tile(r));
     let slices = Slices::new(&g, left.clone());
@@ -628,9 +745,9 @@ fn the_last_pass_is_what_the_windows_show() {
         .split(';')
         .map(|t| t.split(',').collect())
         .collect();
-    assert_eq!(ticks.len(), 2);
-    assert_eq!(w["pairs"], "2");
-    assert_eq!(w["kinds"], "map/gen-mmpx=2");
+    assert_eq!(ticks.len(), 4);
+    assert_eq!(w["pairs"], "4");
+    assert_eq!(w["kinds"], "map/gen-mmpx=4");
     let ab = ticks.iter().find(|t| t[5] == name(A)).unwrap();
     let (ratio, limit) = measure(&g, &slices, AB, seam()).unwrap().unwrap();
     let want = [
@@ -643,8 +760,8 @@ fn the_last_pass_is_what_the_windows_show() {
         format!("{limit:.4}"),
     ];
     assert_eq!(ab[2..], want);
-    let first = record(&text).unwrap().pairs[1].clone();
-    assert_eq!(first.pair, AB);
+    let rec = record(&text).unwrap();
+    let first = rec.pairs.iter().find(|l| l.pair == AB).unwrap();
     assert_ne!(Some((ratio, limit)), first.result);
     // The sheet: at A's cell the pack panel is the no-pack panel (A is MMPX in the final pack);
     // at B's cell it is not (B's slice).
@@ -686,7 +803,9 @@ fn one_window_per_surviving_item_and_a_multi_record_item_is_one() {
         sword,
     ];
     let images: BTreeMap<u16, Rgba> = records.iter().map(|&r| (r, near(&g, r))).collect();
-    let (dir, work) = work_dir("items", "", &g, &images);
+    let (text, left) = gate_log(&g, &images);
+    assert_eq!(left, images);
+    let (dir, work) = work_dir("items", &text, &g, &images);
     let o = options(&dir);
     let s = calibrate_final(&g, &work, &o).unwrap();
     let rows = rows_of(&o.out);
@@ -699,26 +818,28 @@ fn one_window_per_surviving_item_and_a_multi_record_item_is_one() {
         .map(|k| atlas::image_name(ImageId::Tile(tree + k)))
         .collect();
     assert_eq!(trees[0]["records"], names.join("+"));
-    // In no pair: where the world first draws it (the tree's top-left part), and said.
+    // At a pair of its parts (the gate checks them, both generated), the tree's top-left part
+    // in A's cell.
     assert_eq!(
         (
             trees[0]["placement"].as_str(),
             trees[0]["x"].as_str(),
             trees[0]["y"].as_str()
         ),
-        ("drawn", "9", "9")
+        ("pair", "9", "9")
     );
-    assert!(trees[0]["note"].starts_with("in no pair"));
+    // The chest in no pair: where the world first draws it, and said; the sword alone.
     let objects = by_class("object");
     let places: Vec<&str> = objects.iter().map(|r| r["placement"].as_str()).collect();
     assert_eq!(places, ["drawn", "alone"]);
+    assert!(objects[0]["note"].starts_with("in no pair"));
     assert!(objects[1]["note"].starts_with("drawn nowhere"));
     // The window of a multi-record item draws all of it: each of its records in the frame.
     let class = |c: Class| s.classes.iter().find(|x| x.class == c).unwrap().clone();
     let m = class(Class::Multi);
     assert_eq!(
         (m.items, m.images, m.pair, m.drawn, m.alone),
-        (1, 4, 0, 1, 0)
+        (1, 4, 1, 0, 0)
     );
     let ob = class(Class::Object);
     assert_eq!(
@@ -794,8 +915,9 @@ fn an_included_id_gets_its_window_or_a_row_of_zero() {
 fn the_summary_prints_every_label_and_sides_and_class_with_its_zero() {
     let g = game();
     let (text, left) = chain(&g);
-    // A label the gate does not write yet, on B beside the grass.
-    let text = text.replacen(r#""source":"map""#, r#""source":"map+odd""#, 3);
+    // A label the gate does not write yet (in a label field, as H7 writes its labels), on the
+    // grass over B and B beside the grass.
+    let text = labelled(&text, &[GB_S, BG], "odd");
     let (dir, work) = work_dir("zeros", &text, &g, &left);
     let o = options(&dir);
     let s = calibrate_final(&g, &work, &o).unwrap();
@@ -806,7 +928,11 @@ fn the_summary_prints_every_label_and_sides_and_class_with_its_zero() {
         .collect();
     let mut want = Vec::new();
     for l in ["map", "objects", "replace", "object-terrain", "odd"] {
-        let n = if l == "map" || l == "odd" { 2 } else { 0 };
+        let n = match l {
+            "map" => 4,
+            "odd" => 2,
+            _ => 0,
+        };
         want.push((l, Sides::GenGen, 0, 0, 0));
         want.push((l, Sides::GenMmpx, n, n, n.min(1)));
     }
@@ -901,7 +1027,7 @@ fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
     assert_eq!(
         detail,
         format!(
-            "unread: line 3: t:{B} t:{GRASS} east (map gen-mmpx) at 0,4,3: drawn in no window\n"
+            "unread: line 6: t:{B} t:{GRASS} east (map gen-mmpx) at 0,4,3: drawn in no window\n"
         )
     );
     // An object that leaves the grass's west side (the chest's record): read in B's window.
@@ -991,14 +1117,11 @@ fn a_pair_with_nothing_measured_is_read_where_its_sides_show() {
     g.world.chunks[0][5][4] = B as u8;
     g.world.chunks[0][5][5] = T as u8;
     let (text, left) = chain(&g);
-    let first = BTreeMap::from([(A, red_west(&near(&g, A))), (B, near(&g, B))]);
     let bt = Pair {
         a: B,
         b: T,
         edge: Edge::East,
     };
-    let line = logged(&g, &first, bt, "map", Some(At { z: 0, x: 4, y: 5 }));
-    let text = text + &line + "\n";
     let (dir, work) = work_dir("unmeasured", &text, &g, &left);
     let o = options(&dir);
     let s = calibrate_final(&g, &work, &o).unwrap();
@@ -1007,7 +1130,7 @@ fn a_pair_with_nothing_measured_is_read_where_its_sides_show() {
     assert_eq!((x.result, x.first.1), (None, None));
     // Drawn in a window: B shows along its east side, T, with nothing on its west line, in its
     // cell.
-    assert_eq!((s.last, s.unread), (3, 0));
+    assert_eq!((s.last, s.unread), (6, 0));
     let name = |r: u16| atlas::image_name(ImageId::Tile(r));
     let rows = rows_of(&o.out);
     assert!(
@@ -1101,18 +1224,18 @@ fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
     g.world.chunks.push(chunk(&[(4, 4, B), (5, 4, Y)]));
     g.world.levels[0].refs = vec![0, 1, 1, 2];
     let (text, left) = chain(&g);
-    let first = BTreeMap::from([(A, red_west(&near(&g, A))), (B, near(&g, B))]);
     let by = Pair {
         a: B,
         b: Y,
         edge: Edge::East,
     };
-    let text = text + &logged(&g, &first, by, "map", Some(At { z: 0, x: 12, y: 12 })) + "\n";
     let (dir, work) = work_dir("every", &text, &g, &left);
     let o = options(&dir);
     let s = calibrate_final(&g, &work, &o).unwrap();
-    assert_eq!(s.last, 3);
-    // Each of the three is drawn in a window: B's own, and one pair window for what it misses.
+    // B's pairs: by the chain the four of the chain, and here the grass west of B and B beside
+    // Y.
+    assert_eq!(s.last, 6);
+    // Each of the six is drawn in a window: B's own, and one pair window for what it misses.
     for k in &s.kinds {
         assert_eq!(k.read, k.last, "{} {}", k.label, k.sides.name());
     }
@@ -1121,7 +1244,7 @@ fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
         .kinds
         .iter()
         .find(|k| k.label == "map" && k.sides == Sides::GenMmpx);
-    assert_eq!(map.map(|k| (k.last, k.windows)), Some((3, 2)));
+    assert_eq!(map.map(|k| (k.last, k.windows)), Some((6, 2)));
     let rows = rows_of(&o.out);
     let pairs: Vec<&BTreeMap<String, String>> =
         rows.iter().filter(|r| r["origin"] == "pair").collect();

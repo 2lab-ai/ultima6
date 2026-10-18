@@ -399,6 +399,46 @@ fn neighbour_gate(
     Ok((pairs, settled))
 }
 
+/// The neighbour gate's lines of `gates.jsonl`, as ingest writes them from the fixed point
+/// `settled` over the world's `pairs`: every pair checked in the first pass, and each failing
+/// pair of a later pass (its records, edge, ratio and limit, null when nothing is measured, its
+/// generated sides, its source and one cell of A where it occurs, the map's when the map has
+/// the pair); then each item sent back, with its class and the pass that failed it.
+pub(crate) fn neighbour_lines(
+    plan: &group::Plan,
+    pairs: &neighbour::Pairs,
+    settled: &neighbour::Settled,
+    t: &Thresholds,
+) -> String {
+    let mut out = String::new();
+    for c in &settled.checked {
+        let seen = pairs.seen.get(&c.pair).copied().unwrap_or_default();
+        let at = seen
+            .example()
+            .map(|a| serde_json::json!({"z": a.z, "x": a.x, "y": a.y}));
+        let line = serde_json::json!({
+            "neighbour": {
+                "a": atlas::image_name(ImageId::Tile(c.pair.a)),
+                "b": atlas::image_name(ImageId::Tile(c.pair.b)),
+                "edge": c.pair.edge,
+            },
+            "pass": c.pass, "fail": c.fails,
+            "ratio": c.result.map(|r| r.0), "limit": c.result.map(|r| r.1),
+            "sides": if c.both { "gen-gen" } else { "gen-mmpx" },
+            "source": seen.source(), "at": at, "gates": t.text(),
+        });
+        let _ = writeln!(out, "{line}");
+    }
+    for (&no, &pass) in &settled.fallen {
+        let line = serde_json::json!({
+            "item": no, "class": plan.items[no as usize].class, "fallback": "neighbour",
+            "pass": pass, "gates": t.text(),
+        });
+        let _ = writeln!(out, "{line}");
+    }
+    out
+}
+
 /// Runs ingest over the work dir with the thresholds `t`.
 pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String> {
     let jobs = work.read_jobs()?;
@@ -564,34 +604,9 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
     // The neighbour gate, once every item is judged: its fallbacks are final for this ingest
     // (not re-rolled), and only the items it leaves accepted reach the pack.
     let (pairs, settled) = neighbour_gate(game, &judged, t)?;
-    // Every pair checked in the first pass, and each failing pair of a later pass: its records,
-    // edge, ratio and limit (null when nothing is measured), its generated sides, its source and
-    // one cell of A where it occurs (the map's when the map has the pair).
-    for c in &settled.checked {
-        let seen = pairs.seen.get(&c.pair).copied().unwrap_or_default();
-        let at = seen
-            .example()
-            .map(|a| serde_json::json!({"z": a.z, "x": a.x, "y": a.y}));
-        let line = serde_json::json!({
-            "neighbour": {
-                "a": atlas::image_name(ImageId::Tile(c.pair.a)),
-                "b": atlas::image_name(ImageId::Tile(c.pair.b)),
-                "edge": c.pair.edge,
-            },
-            "pass": c.pass, "fail": c.fails,
-            "ratio": c.result.map(|r| r.0), "limit": c.result.map(|r| r.1),
-            "sides": if c.both { "gen-gen" } else { "gen-mmpx" },
-            "source": seen.source(), "at": at, "gates": t.text(),
-        });
-        let _ = writeln!(gates_log, "{line}");
-    }
-    for (&no, &pass) in &settled.fallen {
+    gates_log.push_str(&neighbour_lines(&plan, &pairs, &settled, t));
+    for &no in settled.fallen.keys() {
         judged[no as usize].0 = Status::Neighbour;
-        let line = serde_json::json!({
-            "item": no, "class": plan.items[no as usize].class, "fallback": "neighbour",
-            "pass": pass, "gates": t.text(),
-        });
-        let _ = writeln!(gates_log, "{line}");
     }
     report.neighbour = settled.counts;
 

@@ -64,7 +64,11 @@
 //!   master), each measured from the slices by the gate itself ([`measure`]), its sides the
 //!   slices'. Where neither side changed since pass 1 the measure must be the one logged, every
 //!   pair must pass, and a log that has the last pass's lines must have exactly the rebuilt pass.
-//!   The list, the masters, the plan's items, the fallbacks and pass 1's sides must agree too
+//!   Pass 1's lines must be the world's pairs with a side generated then, by the gate's own
+//!   [`neighbour::pairs`], each once, from the source and at the cell the world has it; each
+//!   master must be the file ingest wrote (its digest in `ingest.json`; an older `ingest.json`
+//!   with none is refused). The list, the masters, the plan's items, the fallbacks and pass 1's
+//!   sides must agree too
 //!   (every rule is listed at [`final_read::fixed`]); every pair of the last pass must have a
 //!   cell. On a disagreement nothing is drawn: the error gives its kinds and counts,
 //!   `disagreements.txt` in the out dir the details.

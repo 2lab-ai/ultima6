@@ -42,6 +42,8 @@ pub struct Logged {
     pub sides: Sides,
     /// Its labels, `+` between them ([`labels`]).
     pub labels: String,
+    /// Its `source` as written (`map`, `objects`, `map+objects`), and its cell.
+    pub source: Option<String>,
     pub at: Option<At>,
     /// The thresholds it was gated with, as ingest writes them.
     pub gates: Option<String>,
@@ -72,6 +74,7 @@ struct RawLogged {
     ratio: Option<f32>,
     limit: Option<f32>,
     sides: String,
+    source: Option<String>,
     at: Option<RawAt>,
     gates: Option<String>,
 }
@@ -144,6 +147,7 @@ pub fn record(text: &str) -> Result<Record, String> {
             result,
             sides,
             labels,
+            source: r.source,
             at: r.at.map(|a| At {
                 z: a.z,
                 x: a.x,
@@ -251,7 +255,8 @@ fn tile(id: ImageId) -> Option<u16> {
 /// What the fixed point left, from the record `rec` (of `gates.jsonl`), the list `accepted` (of
 /// `ingest.json`), the tile masters `files` found in `slices/` (each with the digest of its
 /// file as read) and the images `slices` read from them; the pairs measured again with the seam
-/// threshold `seam`. Every disagreement, or the state:
+/// threshold `seam`; the world's pairs ([`neighbour::pairs`]) as the gate takes them. Every
+/// disagreement, or the state:
 ///
 /// - `gates`: a pair line gated with another seam threshold (its `gates` text, as ingest writes
 ///   it, says `seam<=` another value; nothing else is checked then: every limit would differ);
@@ -267,6 +272,10 @@ fn tile(id: ImageId) -> Option<u16> {
 /// - `fallen`: a listed image of an item the gate sent back;
 /// - `sides`: a pass-1 line whose sides are not what the slices and the fallbacks make them
 ///   (generated in pass 1: listed now, or sent back);
+/// - `world`: the pairs pass 1 logs are not the world's pairs with a side generated in pass 1,
+///   each once (one missing, or logged and not the world's), or a line's `source` or cell is
+///   not where the world has the pair (`Seen::source`, `Seen::example`: where its window is
+///   placed);
 /// - `pass`: a failing line whose generated sides were not sent back in its pass, a later pass's
 ///   failing line in no pass that sent anything back, a pass with no fallback before the last;
 /// - `refused`: a slice the gate refuses (not ×4 of its record);
@@ -493,6 +502,46 @@ pub fn fixed(
                     l.line,
                     l.sides.name(),
                     kind(a, b).map_or("no generated side", Sides::name)
+                ),
+            );
+        }
+    }
+    // Pass 1 against the world: the gate checks in pass 1 every pair of the world with a side
+    // generated then, once, each logged where the world first has it.
+    let world = neighbour::pairs(game);
+    let logged_first: BTreeSet<Pair> = first.iter().map(|l| l.pair).collect();
+    for p in &world.all {
+        if (first_gen(p.a) || first_gen(p.b)) && !logged_first.contains(p) {
+            say!(
+                "world",
+                format!(
+                    "t:{} t:{} {}: a pair of the world with a side generated in pass 1, and no \
+                     line of pass 1",
+                    p.a,
+                    p.b,
+                    edge_name(p.edge)
+                ),
+            );
+        }
+    }
+    for l in &first {
+        let Some(seen) = world.seen.get(&l.pair) else {
+            say!(
+                "world",
+                format!("line {}: a pair the world does not have", l.line)
+            );
+            continue;
+        };
+        if l.at != seen.example() || l.source.as_deref() != Some(seen.source()) {
+            say!(
+                "world",
+                format!(
+                    "line {}: logged from {} at {:?}, and the world has it from {} first at {:?}",
+                    l.line,
+                    l.source.as_deref().unwrap_or("-"),
+                    l.at,
+                    seen.source(),
+                    seen.example()
                 ),
             );
         }
