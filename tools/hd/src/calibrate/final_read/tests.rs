@@ -783,7 +783,7 @@ fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
     // a sheet or samples.tsv is written, the pair's line in unshown.txt.
     let e = calibrate_final(&g, &work, &o).unwrap_err();
     assert!(
-        e.contains("do not draw every pair of the last pass, nothing drawn: unread 1"),
+        e.contains("every pair of the last pass, nothing drawn: unread 1"),
         "{e}"
     );
     assert!(!e.contains("t:"), "{e}");
@@ -806,6 +806,63 @@ fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
     };
     let s = calibrate_final(&g, &work, &o).unwrap();
     assert_eq!((s.pair_windows, s.unread), (0, 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_window_that_shows_none_of_its_item_fails_the_run() {
+    // A chest at (12, 12), and an object of X's opaque record on it later in the lists, so
+    // drawn in front of it: the chest's window, where the world first draws it, shows none of
+    // it.
+    let mut g = game();
+    let chest = synthetic::OBJECTS;
+    let at = |tile: u16| crate::game::Placed {
+        x: 12,
+        y: 12,
+        z: 0,
+        tile,
+    };
+    g.world.objects = vec![at(chest), at(X)];
+    let images = BTreeMap::from([(chest, near(&g, chest))]);
+    let (dir, work) = work_dir("hidden", "", &g, &images);
+    let o = options(&dir);
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(e.contains("nothing drawn: hidden 1"), "{e}");
+    assert!(!e.contains("t:"), "{e}");
+    assert_eq!(
+        files_of(&o.out),
+        ["gates.jsonl", "ingest.json", "unshown.txt"]
+    );
+    let plan = group::plan(&g);
+    let detail = std::fs::read_to_string(o.out.join("unshown.txt")).unwrap();
+    assert_eq!(
+        detail,
+        format!(
+            "hidden: item {}: its coverage window (drawn) shows none of t:{chest}: covered where \
+             it is drawn\n",
+            item_of(&plan, chest)
+        )
+    );
+    // The chest in front of X instead: its window shows it.
+    g.world.objects.reverse();
+    let o = FinalOptions {
+        out: dir.join("front"),
+        ..options(&dir)
+    };
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    let ob = s.classes.iter().find(|c| c.class == Class::Object).unwrap();
+    assert_eq!((ob.items, ob.drawn), (1, 1));
+    // An alone window fits its pieces from the first: a first piece wider than the window fits
+    // none, and that window would show none of its item.
+    let piece = |w: usize| Piece {
+        w: w as u32,
+        h: 1,
+        images: (0..w).map(|k| ImageId::Tile(k as u16)).collect(),
+    };
+    assert_eq!(alone(&[piece(1), piece(2)]).1, 2);
+    let (cells, fit) = alone(&[piece(COLS), piece(1)]);
+    assert_eq!(fit, 0);
+    assert!(cells.iter().all(|c| c.tiles().next().is_none()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

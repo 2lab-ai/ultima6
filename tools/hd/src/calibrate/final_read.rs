@@ -816,7 +816,8 @@ fn place(
 
 /// The cells of a window that shows `pieces` alone: each piece's records as its block of cells,
 /// the pieces in a row from the second column and the second row with a cell between them,
-/// the next row of pieces a cell below; how many pieces fit.
+/// the next row of pieces a cell below; how many pieces fit (from the first: 0 when the first
+/// does not, and the final read then fails, since the window shows none of the item).
 pub fn alone(pieces: &[Piece]) -> (Vec<Stack>, usize) {
     let mut cells = vec![Stack::default(); COLS * ROWS];
     let (mut c0, mut r0, mut tall, mut fit) = (1usize, 1usize, 0usize, 0usize);
@@ -1275,9 +1276,31 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         .map(|(i, l)| (l.pair, i))
         .collect();
     let mut seen: BTreeSet<usize> = BTreeSet::new();
+    let mut unshown: Vec<Disagreement> = Vec::new();
     for w in &windows {
         let d = draw_window(game, &plan, &fixed, &by, w);
         seen.extend(d.ticks.iter().map(|t| t.1));
+        // A window that shows none of what it is for counts nothing: the run fails.
+        let shows = w
+            .records
+            .iter()
+            .any(|r| d.framed.drawn.iter().any(|c| c.contains(r)));
+        if !shows {
+            let why = match d.fit {
+                Some((0, n)) => format!("none of its {n} pieces fits the window"),
+                _ => "covered where it is drawn".to_string(),
+            };
+            unshown.push(Disagreement {
+                kind: "hidden",
+                detail: format!(
+                    "item {}: its {} window ({}) shows none of {}: {why}",
+                    fixed.survivors[w.survivor].item,
+                    w.origin.name(),
+                    w.placement.name(),
+                    names(&w.records)
+                ),
+            });
+        }
     }
     for (i, l) in fixed.last.iter().enumerate() {
         let Some(at) = l.at else { continue };
@@ -1309,7 +1332,6 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
     }
     // Planned whole before anything is drawn: a pair of the last pass that no window draws
     // (not even its own, at its cell: a side covered there) fails the run.
-    let mut unshown: Vec<Disagreement> = Vec::new();
     for (i, l) in fixed.last.iter().enumerate() {
         if seen.contains(&i) || label.is_some_and(|x| !l.from(x)) {
             continue;
@@ -1333,7 +1355,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         return Err(refuse(
             &out,
             "unshown.txt",
-            "the windows do not draw every pair of the last pass",
+            "the windows do not show every item and every pair of the last pass",
             &unshown,
         ));
     }

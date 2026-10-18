@@ -77,8 +77,10 @@
 //!   draws (with one label, a pair of it) gets a window placed at it, in pair order, each
 //!   counting the pairs it draws. Every window is placed, and the pairs it draws found, before
 //!   any sheet or `samples.tsv` is written: a pair of the last pass that is still drawn in no
-//!   window (its own window does not show it: a side covered at its cell) fails the run, nothing
-//!   drawn, the pairs in `unshown.txt`. The frame as above, A's cell at [`A_CELL`]:
+//!   window (its own window does not show it: a side covered at its cell, `unread`), or a window
+//!   of an item or an included id that shows none of its records (covered where it is drawn, or
+//!   no piece fitting the alone window, `hidden`), fails the run, nothing drawn, the details in
+//!   `unshown.txt`. The frame as above, A's cell at [`A_CELL`]:
 //!   at a pair, its records in its two cells; where it is drawn, its record in A's cell.
 //! - **The marks**: every pair of the last pass drawn inside the window (a record of a cell
 //!   beside one of the cell east or south of it, each showing along its side of the join,
