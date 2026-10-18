@@ -101,18 +101,36 @@ fn fresh(mode: Mode, out: &Path, kind: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Why an out dir is not replaced, and how to go on.
+struct Kept {
+    why: String,
+    recover: &'static str,
+}
+
+impl Kept {
+    fn of(why: impl Into<String>) -> Kept {
+        Kept {
+            why: why.into(),
+            recover: RECOVER,
+        }
+    }
+}
+
 /// Why `dir` is not an out dir `mode` may replace (`None`: it is one, a directory, not a
 /// link, holding the mode's marker).
-fn not_ours(mode: Mode, dir: &Path) -> Option<String> {
+fn not_ours(mode: Mode, dir: &Path) -> Option<Kept> {
     let m = match std::fs::symlink_metadata(dir) {
         Ok(m) => m,
-        Err(e) => return Some(e.to_string()),
+        Err(e) => return Some(Kept::of(e.to_string())),
     };
     if m.file_type().is_symlink() {
-        return Some("a symlink".into());
+        return Some(Kept {
+            why: "a symlink (a rename would move the link, not the directory it points to)".into(),
+            recover: "pass the directory it points to as --out, or another --out",
+        });
     }
     if !m.is_dir() {
-        return Some("not a directory".into());
+        return Some(Kept::of("not a directory"));
     }
     let marked =
         |marker: &str| std::fs::symlink_metadata(dir.join(marker)).is_ok_and(|m| m.is_file());
@@ -123,18 +141,23 @@ fn not_ours(mode: Mode, dir: &Path) -> Option<String> {
         .into_iter()
         .find(|m| *m != mode && marked(m.marker))
         .map_or(String::new(), |m| format!("; it is {}'s output", m.name));
-    Some(format!(
+    Some(Kept::of(format!(
         "a directory {} did not write (no marker {}{other})",
         mode.name, mode.marker
-    ))
+    )))
 }
 
 /// How to go on when the out dir `out` is not replaced.
 const RECOVER: &str = "move it away, or pass another --out";
 
-/// The refusal of `out`: `why`, so it is not replaced, and how to go on.
-fn refusal(out: &Path, why: &str) -> String {
-    format!("{}: {why}, so it is not replaced: {RECOVER}", out.display())
+/// The refusal of `out`: why, so it is not replaced, and how to go on.
+fn refusal(out: &Path, k: &Kept) -> String {
+    format!(
+        "{}: {}, so it is not replaced: {}",
+        out.display(),
+        k.why,
+        k.recover
+    )
 }
 
 /// Renames `from` to `to` only when nothing is at `to`, in one step that cannot replace
@@ -209,7 +232,7 @@ fn publish(mode: Mode, stage: &Path, out: &Path, key: &Path) -> Result<(), Strin
     let moved = match rename_new(out, &aside) {
         Ok(()) => true,
         Err(e) if e.kind() == io::ErrorKind::NotFound => false,
-        Err(e) => return Err(refusal(out, &e.to_string())),
+        Err(e) => return Err(refusal(out, &Kept::of(e.to_string()))),
     };
     seam(key, "moved", "")?;
     if moved && let Some(why) = not_ours(mode, &aside) {
@@ -225,7 +248,7 @@ fn publish(mode: Mode, stage: &Path, out: &Path, key: &Path) -> Result<(), Strin
     }
     seam(key, "checked", "")?;
     if let Err(e) = rename_new(stage, out) {
-        let why = format!("something is at it since the run began ({e})");
+        let why = Kept::of(format!("something is at it since the run began ({e})"));
         let back = match moved {
             false => String::new(),
             true => match rename_new(&aside, out) {

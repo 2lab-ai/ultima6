@@ -222,3 +222,45 @@ fn a_crash_between_any_two_steps_leaves_the_old_output_or_the_new() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_symlinked_out_dir_is_refused_and_left_as_it_is() {
+    // The out dir a link to an out dir this mode wrote: a rename would move the link, so it is
+    // refused, before the run and when one is put there during it; the link and the dir it
+    // points to stay as they are.
+    let dir = temp("symlink");
+    let (real, out) = (dir.join("real"), dir.join("out"));
+    run_in(FIRST, &real, writes("old")).unwrap();
+    std::os::unix::fs::symlink(&real, &out).unwrap();
+    let said = "a symlink (a rename would move the link, not the directory it points to), so it \
+                is not replaced: pass the directory it points to as --out, or another --out";
+    let e = run_in(FIRST, &out, writes("new")).unwrap_err();
+    assert!(e.contains(said), "{e}");
+    let linked = |p: &Path| std::fs::read_link(p).ok();
+    assert_eq!(linked(&out), Some(real.clone()));
+    assert_eq!(contents(&real), Some(output("old")));
+    assert!(
+        beside_of(&dir, "out").is_empty(),
+        "{:?}",
+        beside_of(&dir, "out")
+    );
+    // A dir there when the run begins, a link put in its place before it is replaced.
+    std::fs::remove_file(&out).unwrap();
+    run_in(FIRST, &out, writes("old")).unwrap();
+    let (o, d, r) = (out.clone(), dir.clone(), real.clone());
+    let _h = hook(&out, "ran", move |_| {
+        std::fs::rename(&o, d.join("kept")).unwrap();
+        std::os::unix::fs::symlink(&r, &o).unwrap();
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes("new")).unwrap_err();
+    assert!(e.contains(said), "{e}");
+    assert_eq!(linked(&out), Some(real.clone()));
+    assert_eq!(contents(&real), Some(output("old")));
+    assert!(
+        beside_of(&dir, "out").is_empty(),
+        "{:?}",
+        beside_of(&dir, "out")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
