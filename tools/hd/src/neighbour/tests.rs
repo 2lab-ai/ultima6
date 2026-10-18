@@ -9,6 +9,8 @@ use u6_render::{Framebuffer, Kind, Rgb, Src, WIDTH};
 
 use super::*;
 use crate::atlas::{self, Job};
+use u6_formats::animdata::AnimEntry;
+
 use crate::game::{Level, Placed, Record, World, synthetic};
 use crate::gate::Thresholds;
 use crate::group::{self, Class};
@@ -446,6 +448,63 @@ fn the_map_pairs_cross_chunk_edges_and_the_wrap_and_take_every_frame() {
     assert_eq!(p.seen.len(), p.all.len());
 }
 
+#[test]
+fn two_animated_tiles_side_by_side_meet_in_every_pair_of_their_frames() {
+    let mut g = synthetic::game();
+    // Beside the water (tile 1, frames 64..=67): tile 2 shows frame 80 or 81, and frame 81 is
+    // replaced in turn by 90 or 91; tile 4's frames are all at or past 0x200, which the
+    // substitution skips, so it draws itself.
+    let slot = |tile_to_animate, first_anim_frame| AnimEntry {
+        tile_to_animate,
+        first_anim_frame,
+        and_mask: 1,
+        shift: 0,
+    };
+    g.anim.extend([slot(2, 80), slot(81, 90), slot(4, 0x200)]);
+    // The water west of tile 2, tile 4 south of tile 2, on grass.
+    g.world = World {
+        chunks: vec![chunk(0, &[(3, 3, 1), (4, 3, 2), (4, 4, 4)])],
+        levels: vec![Level {
+            side: 1,
+            refs: vec![0],
+        }],
+        objects: Vec::new(),
+    };
+    let p = pairs(&g);
+    let water: Vec<u16> = (synthetic::WATER_FRAMES..synthetic::WATER_FRAMES + 4).collect();
+    let two = [80, 90, 91];
+    // Every frame of one beside every frame of the other, and nothing more between them.
+    let east: BTreeSet<(u16, u16)> = p
+        .all
+        .iter()
+        .filter(|q| q.edge == Edge::East && water.contains(&q.a) && two.contains(&q.b))
+        .map(|q| (q.a, q.b))
+        .collect();
+    let want: BTreeSet<(u16, u16)> = water
+        .iter()
+        .flat_map(|&f| two.iter().map(move |&t| (f, t)))
+        .collect();
+    assert_eq!(east, want);
+    let south: BTreeSet<u16> = p
+        .all
+        .iter()
+        .filter(|q| q.edge == Edge::South && q.b == 4)
+        .map(|q| q.a)
+        .collect();
+    assert_eq!(south, BTreeSet::from([80, 90, 91]));
+    // No animated tile is drawn as itself, nor the frame replaced in turn.
+    for t in [1, 2, 81] {
+        assert!(p.all.iter().all(|q| q.a != t && q.b != t), "{t}");
+    }
+    // Each frame also meets the grass around it.
+    for f in water.iter().chain(&two) {
+        assert!(
+            has(&p, 0, *f, Edge::East) || has(&p, 0, *f, Edge::South),
+            "{f}"
+        );
+    }
+}
+
 /// An object record: opaque, but only `west` opaque pixels in its west column.
 fn object(west: usize) -> Record {
     let mut transparent = vec![false; 256];
@@ -526,6 +585,91 @@ fn object_pairs_follow_the_object_draw_and_the_half_opaque_rule() {
         objects: cell(2, 2),
     };
     assert_eq!((both.source(), both.example()), ("map+objects", cell(1, 1)));
+}
+
+/// An opaque object record but for its edges: `west`, `east`, `north` and `south` opaque
+/// pixels along each, from the north-west corner.
+fn edged(west: usize, east: usize, north: usize, south: usize) -> Record {
+    let mut r = object(16);
+    for i in 0..16 {
+        let t = &mut r.transparent;
+        t[i * 16] |= i >= west;
+        t[i * 16 + 15] |= i >= east;
+        t[i] |= i >= north;
+        t[15 * 16 + i] |= i >= south;
+    }
+    r
+}
+
+#[test]
+fn objects_meet_only_with_both_edges_half_opaque_and_on_a_level() {
+    let mut g = synthetic::game();
+    let full = 300;
+    g.records[full] = object(16);
+    // A's east edge opaque on 7 and on 8 pixels; A's south edge, then B's north edge, the same.
+    let (e7, e8, s7, s8, n7, n8) = (340, 341, 342, 343, 344, 345);
+    g.records[e7] = edged(16, 7, 16, 16);
+    g.records[e8] = edged(16, 8, 16, 16);
+    g.records[s7] = edged(16, 16, 16, 7);
+    g.records[s8] = edged(16, 16, 16, 8);
+    g.records[n7] = edged(16, 16, 7, 16);
+    g.records[n8] = edged(16, 16, 8, 16);
+    // Two opaque objects side by side, but on a level the map does not have.
+    let (off_a, off_b) = (350, 351);
+    g.records[off_a] = object(16);
+    g.records[off_b] = object(16);
+    let at = |x, y, tile: usize| Placed {
+        x,
+        y,
+        z: 0,
+        tile: tile as u16,
+    };
+    let off = |x, tile: usize| Placed {
+        x,
+        y: 12,
+        z: 9,
+        tile: tile as u16,
+    };
+    g.world = World {
+        chunks: vec![chunk(0, &[])],
+        levels: vec![Level {
+            side: 2,
+            refs: vec![0; 4],
+        }],
+        objects: vec![
+            at(0, 4, e7),
+            at(1, 4, full),
+            at(0, 6, e8),
+            at(1, 6, full),
+            at(4, 8, s7),
+            at(4, 9, full),
+            at(6, 8, s8),
+            at(6, 9, full),
+            at(8, 8, full),
+            at(8, 9, n7),
+            at(10, 8, full),
+            at(10, 9, n8),
+            off(12, off_a),
+            off(13, off_b),
+        ],
+    };
+    let p = pairs(&g);
+    let objects: BTreeSet<Pair> = p
+        .all
+        .iter()
+        .copied()
+        .filter(|q| p.seen[q].objects.is_some())
+        .collect();
+    let (full, e8, s8, n8) = (full as u16, e8 as u16, s8 as u16, n8 as u16);
+    assert_eq!(
+        objects,
+        BTreeSet::from([
+            pair(e8, full, Edge::East),
+            pair(s8, full, Edge::South),
+            pair(full, n8, Edge::South),
+        ])
+    );
+    assert_eq!(p.objects, 3);
 }
 
 /// Tile records for the compositor, each keyed by its record number.
