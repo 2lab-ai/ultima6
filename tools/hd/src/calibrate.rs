@@ -26,8 +26,10 @@
 //!   in the source plane. An animated tile is drawn at frame 0 (counter 0 of its first slot);
 //!   in the pair's two cells a tile whose frames include the pair's record is drawn as that
 //!   record, so the join shown is the one measured. `samples.tsv` says when a frame was chosen
-//!   (`frames`: `frame0`, `pair`), and `missing` where a join cell draws no tile with the pair's
-//!   record (the window does not show the pair measured).
+//!   (`frames`: `frame0`, `pair`), and `missing` where the window does not show the pair
+//!   measured: a join cell draws no tile with the pair's record, or a tile drawn after it covers
+//!   it along its side of the join ([`Framed::joins`]: a record shows where some pixel of it is
+//!   left in the source plane, which the panels draw from).
 //! - **The panels** ([`panels`]): the frame composed by the page's compositor
 //!   ([`Compositor::compose`]), at S 4 and at S 2: classic (the frame's colours, nearest), no pack
 //!   (MMPX of every record) and the pack of `--slices` (each master box-averaged ×8 to ×4 as
@@ -75,10 +77,11 @@
 //!   order, each counting the pairs it draws, so that every pair of the last pass is read (the
 //!   report counts any still drawn in no window). The frame as above, A's cell at [`A_CELL`]:
 //!   at a pair, its records in its two cells; where it is drawn, its record in A's cell.
-//! - **The marks**: every pair of the last pass drawn inside the window (each record a cell
-//!   draws beside each record of the cell east or south of it) is marked in the panels' margins
-//!   as above and listed under the panels: its cell (column, row of the window), edge, labels,
-//!   sides and ratio / limit, `>` before the pair the window is placed at.
+//! - **The marks**: every pair of the last pass drawn inside the window (a record of a cell
+//!   beside one of the cell east or south of it, each showing along its side of the join,
+//!   [`Framed::joins`]: a record covered there by a tile drawn after it draws no pair) is marked
+//!   in the panels' margins as above and listed under the panels: its cell (column, row of the
+//!   window), edge, labels, sides and ratio / limit, `>` before the pair the window is placed at.
 //! - **The sheets** ([`final_read::final_sheet`]): `final-<class>.png` by the class ingest
 //!   names, `final-<class>-alone.png` for the windows drawn nowhere, `final-pairs.png` for the
 //!   pairs no other window draws and `final-include.png`, in
@@ -650,6 +653,19 @@ fn blit(game: &Game, fb: &mut Framebuffer, r: u16, x: usize, y: usize) {
     }
 }
 
+/// Where a record drawn in a cell shows in the frame ([`framed`]): in the cell, and along each
+/// of its sides (north, east, south, west).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Shows {
+    cell: bool,
+    sides: [bool; 4],
+}
+
+const NORTH: usize = 0;
+const EAST: usize = 1;
+const SOUTH: usize = 2;
+const WEST: usize = 3;
+
 /// A window's frame.
 pub struct Framed {
     /// The classic frame (the window at its top-left, the game's palette) and its plane.
@@ -658,11 +674,19 @@ pub struct Framed {
     pub frame0: bool,
     /// A tile of a join cell was drawn as the pair's record, not as its frame 0.
     pub pair_frame: bool,
-    /// A join cell draws no tile whose frames include the pair's record there: the window does
-    /// not show the pair measured.
+    /// The window does not show what it was asked to: a cell of `want` where its record does
+    /// not show ([`Framed::shows`]); with a pair, the pair not drawn across its join
+    /// ([`Framed::joins`]): the window does not show the pair measured.
     pub missing: bool,
-    /// The records drawn in each cell, in draw order (row-major).
+    /// The records that show in each cell (row-major), each once, in draw order: some pixel of
+    /// a record drawn there is left by the tiles drawn after it (the source plane names it, and
+    /// the panels draw it from that plane); a record that draws nothing at all counts where it
+    /// is drawn.
     pub drawn: Vec<Vec<u16>>,
+    /// Every record drawn in each cell, in draw order (row-major), covered or not.
+    pub stacked: Vec<Vec<u16>>,
+    /// Where each record of `stacked` shows, each once, per cell.
+    shows: Vec<Vec<(u16, Shows)>>,
 }
 
 impl Framed {
@@ -681,6 +705,72 @@ impl Framed {
             on.join("+")
         }
     }
+
+    fn shown(&self, (c, r): (usize, usize), rec: u16) -> Option<Shows> {
+        let cell = self.shows.get(r * COLS + c)?;
+        cell.iter().find(|s| s.0 == rec).map(|s| s.1)
+    }
+
+    /// Whether record `rec` shows in the window's cell `(c, r)` ([`Framed::drawn`]).
+    pub fn shows(&self, cell: (usize, usize), rec: u16) -> bool {
+        self.shown(cell, rec).is_some_and(|s| s.cell)
+    }
+
+    /// Whether pair `p` is drawn across the join of the window's cell `a` and the cell `p.edge`
+    /// of it, where the gate measures it: `p.a` shows along `a`'s side on the join and `p.b`
+    /// along the other cell's (some pixel of each left there). A side whose record has no pixel
+    /// on that line (the gate measures nothing of it there) shows when it shows in its cell.
+    pub fn joins(&self, (c, r): (usize, usize), p: Pair) -> bool {
+        let ((bc, br), own, other) = match p.edge {
+            Edge::East => ((c + 1, r), EAST, WEST),
+            Edge::South => ((c, r + 1), SOUTH, NORTH),
+        };
+        if bc >= COLS || br >= ROWS {
+            return false;
+        }
+        let side = |cell, rec, i: usize| self.shown(cell, rec).is_some_and(|s| s.sides[i]);
+        side((c, r), p.a, own) && side((bc, br), p.b, other)
+    }
+}
+
+/// Where record `rec`, drawn in the window's cell `(c, r)`, shows in the source plane `plane`
+/// ([`Framed::drawn`], [`Framed::joins`]): in the cell, where some pixel of it is left (a record
+/// that draws nothing: always); along a side, where some pixel of it on that line is left (a
+/// record with no pixel on the line: where it shows in the cell).
+fn shows_in(game: &Game, plane: &[Src], (c, r): (usize, usize), rec: u16) -> Shows {
+    let record = game.records.get(usize::from(rec));
+    let opaque = |(u, v): (usize, usize)| {
+        record.is_some_and(|x| x.transparent.get(v * TILE_W + u).is_some_and(|&t| !t))
+    };
+    let named = |(u, v): (usize, usize)| {
+        let s = plane[(r * TILE_W + v) * WIDTH + c * TILE_W + u];
+        s.kind == Kind::Tile && s.id == rec
+    };
+    // Whether some pixel of the record among `points` is left; `None` when it has none there.
+    let left = |points: &mut dyn Iterator<Item = (usize, usize)>| -> Option<bool> {
+        let mut has = false;
+        for p in points {
+            if opaque(p) {
+                if named(p) {
+                    return Some(true);
+                }
+                has = true;
+            }
+        }
+        has.then_some(false)
+    };
+    let cell = left(&mut (0..TILE_W * TILE_W).map(|i| (i % TILE_W, i / TILE_W))).unwrap_or(true);
+    let last = TILE_W - 1;
+    let sides = [NORTH, EAST, SOUTH, WEST].map(|side| {
+        let mut line = (0..TILE_W).map(|k| match side {
+            NORTH => (k, 0),
+            EAST => (last, k),
+            SOUTH => (k, last),
+            _ => (0, k),
+        });
+        left(&mut line).unwrap_or(cell)
+    });
+    Shows { cell, sides }
 }
 
 /// The window's first cell (column, row of the level) for A's cell `at`.
@@ -710,17 +800,23 @@ fn window(game: &Game, at: At) -> Vec<Stack> {
 
 /// The frame of the window of A's cell `at` (module docs): the window's cells drawn at the
 /// frame's top-left, base first, then their lists; `pair`'s records in its two cells.
+/// `missing` too when the pair is not drawn across its join ([`Framed::joins`]).
 pub fn frame(game: &Game, at: At, edge: Edge, pair: Option<Pair>) -> Framed {
     let want: Vec<((usize, usize), u16)> = pair
         .map(|p| vec![(A_CELL, p.a), (b_cell(edge), p.b)])
         .unwrap_or_default();
-    framed(game, &window(game, at), &want)
+    let mut f = framed(game, &window(game, at), &want);
+    if let Some(p) = pair {
+        f.missing |= !f.joins(A_CELL, Pair { edge, ..p });
+    }
+    f
 }
 
 /// The frame of the window's `cells` ([`COLS`] × [`ROWS`], row-major): each drawn at the
 /// frame's top-left, base first, then its list; in each cell of `want` (column, row) a tile
 /// whose frames include its record drawn as that record, every other tile at frame 0.
-/// `missing` when a cell of `want` draws no such tile.
+/// `missing` when the record of a cell of `want` does not show there: no tile draws it, or the
+/// tiles drawn after it cover it ([`Framed::shows`]).
 pub fn framed(game: &Game, cells: &[Stack], want: &[((usize, usize), u16)]) -> Framed {
     let mut fb = Framebuffer::new();
     fb.enable_src();
@@ -733,8 +829,9 @@ pub fn framed(game: &Game, cells: &[Stack], want: &[((usize, usize), u16)]) -> F
         pair_frame: false,
         missing: false,
         drawn: vec![Vec::new(); COLS * ROWS],
+        stacked: vec![Vec::new(); COLS * ROWS],
+        shows: vec![Vec::new(); COLS * ROWS],
     };
-    let mut shown = vec![false; want.len()];
     let mut drawn = Drawn::of(game);
     for r in 0..ROWS {
         for c in 0..COLS {
@@ -747,7 +844,6 @@ pub fn framed(game: &Game, cells: &[Stack], want: &[((usize, usize), u16)]) -> F
                 let first = frame0(game, t);
                 let rec = match wanted {
                     Some(k) if frames.contains(&want[k].1) => {
-                        shown[k] = true;
                         out.pair_frame |= want[k].1 != first;
                         want[k].1
                     }
@@ -757,11 +853,27 @@ pub fn framed(game: &Game, cells: &[Stack], want: &[((usize, usize), u16)]) -> F
                     }
                 };
                 blit(game, &mut out.fb, rec, c * TILE_W, r * TILE_W);
-                out.drawn[r * COLS + c].push(rec);
+                out.stacked[r * COLS + c].push(rec);
             }
         }
     }
-    out.missing = shown.iter().any(|s| !s);
+    // What is left of each record once every tile is drawn: the source plane names it.
+    if let Some(plane) = out.fb.src() {
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                let k = r * COLS + c;
+                let mut seen: Vec<(u16, Shows)> = Vec::new();
+                for &rec in &out.stacked[k] {
+                    if !seen.iter().any(|s| s.0 == rec) {
+                        seen.push((rec, shows_in(game, plane, (c, r), rec)));
+                    }
+                }
+                out.drawn[k] = seen.iter().filter(|s| s.1.cell).map(|s| s.0).collect();
+                out.shows[k] = seen;
+            }
+        }
+    }
+    out.missing = want.iter().any(|&(cell, rec)| !out.shows(cell, rec));
     out
 }
 

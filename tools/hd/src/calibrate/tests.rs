@@ -250,6 +250,73 @@ fn the_window_is_drawn_as_the_world_places_the_map_and_the_objects() {
 }
 
 #[test]
+fn a_covered_record_does_not_show_and_draws_no_pair() {
+    let mut g = game();
+    // Made-up records: one opaque on its east column only, one that draws nothing.
+    const EDGE: u16 = 200;
+    const EMPTY: u16 = 201;
+    let rec = &mut g.records[usize::from(EDGE)];
+    for v in 0..TILE_W {
+        rec.pixels[v * TILE_W + TILE_W - 1] = 5;
+        rec.transparent[v * TILE_W + TILE_W - 1] = false;
+    }
+    assert!(g.records[usize::from(EMPTY)].is_empty());
+    let a = A_CELL.1 * COLS + A_CELL.0;
+    let south = (A_CELL.0, A_CELL.1 + 1);
+    let cells = |list: &[u16]| {
+        let mut cells = vec![Stack::default(); COLS * ROWS];
+        cells[a] = Stack {
+            base: Some(STONE),
+            list: list.to_vec(),
+        };
+        cells[a + 1].base = Some(GRASS);
+        cells[south.1 * COLS + south.0].base = Some(GRASS);
+        cells
+    };
+    let pair = |a: u16, edge: Edge| Pair { a, b: GRASS, edge };
+    // The stone under the grass, which is opaque: drawn there, shown nowhere, no pair.
+    let f = framed(&g, &cells(&[GRASS]), &[(A_CELL, STONE)]);
+    assert_eq!(
+        (f.stacked[a].as_slice(), f.drawn[a].as_slice()),
+        (&[STONE, GRASS][..], &[GRASS][..])
+    );
+    assert!(f.missing && !f.shows(A_CELL, STONE));
+    assert!(!f.joins(A_CELL, pair(STONE, Edge::East)));
+    assert!(!f.joins(A_CELL, pair(STONE, Edge::South)));
+    assert!(f.joins(A_CELL, pair(GRASS, Edge::East)));
+    // Under the chest, which covers its middle: the stone shows, and meets the grass on both
+    // sides; the chest, with no pixel on its east or south line, draws its pairs where it shows.
+    let f = framed(&g, &cells(&[CHEST]), &[(A_CELL, STONE)]);
+    assert_eq!(f.drawn[a], [STONE, CHEST]);
+    assert!(!f.missing);
+    assert!(f.joins(A_CELL, pair(STONE, Edge::East)));
+    assert!(f.joins(A_CELL, pair(STONE, Edge::South)));
+    assert!(f.joins(A_CELL, pair(CHEST, Edge::East)));
+    // Covered along its east side only: it shows, it meets the grass south, not east.
+    let f = framed(&g, &cells(&[EDGE]), &[(A_CELL, STONE)]);
+    assert!(!f.missing && f.shows(A_CELL, STONE));
+    assert!(!f.joins(A_CELL, pair(STONE, Edge::East)));
+    assert!(f.joins(A_CELL, pair(STONE, Edge::South)));
+    assert!(f.joins(A_CELL, pair(EDGE, Edge::East)));
+    // A record that draws nothing counts where it is drawn, and only there.
+    let f = framed(&g, &cells(&[EMPTY]), &[]);
+    assert_eq!(f.drawn[a], [STONE, EMPTY]);
+    assert!(f.joins(A_CELL, pair(EMPTY, Edge::East)));
+    assert!(!f.joins(A_CELL, pair(WATER, Edge::East)));
+    let f = framed(&g, &cells(&[]), &[]);
+    assert!(!f.joins(A_CELL, pair(EMPTY, Edge::East)));
+    // In the world: an opaque object on the pair's water hides it, and the window says so.
+    let (at, p) = the_pair();
+    g.world.objects.push(placed(1, 1, 0, STONE));
+    let f = frame(&g, at, Edge::East, Some(p));
+    assert_eq!(f.drawn[a], [STONE]);
+    assert_eq!(
+        (f.missing, f.frames().as_str()),
+        (true, "frame0+pair+missing")
+    );
+}
+
+#[test]
 fn the_pack_panel_is_the_compositors_frame_at_s4_and_s2() {
     let g = game();
     let (at, pair) = the_pair();

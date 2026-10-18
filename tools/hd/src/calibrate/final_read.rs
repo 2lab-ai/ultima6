@@ -806,23 +806,27 @@ pub fn alone(pieces: &[Piece]) -> (Vec<Stack>, usize) {
     (cells, fit)
 }
 
-/// The pairs of the last pass drawn inside a window (`drawn`: the records of each cell, as
-/// [`framed`] drew them): every two edge-adjacent cells of it, each record of the one beside
-/// each of the other, that `by` (pair → its index in the last pass) has. In cell order (row,
-/// column), east before south, then the pair's index.
-pub fn ticks(drawn: &[Vec<u16>], by: &BTreeMap<Pair, usize>) -> Vec<((usize, usize), usize)> {
+/// The pairs of the last pass drawn inside a window (`f`, as [`framed`] drew it): every two
+/// edge-adjacent cells of it, each record that shows in the one beside each that shows in the
+/// other, drawn across their join ([`Framed::joins`]: each side left along its side of the
+/// join), that `by` (pair → its index in the last pass) has. In cell order (row, column), east
+/// before south, then the pair's index.
+pub fn ticks(f: &Framed, by: &BTreeMap<Pair, usize>) -> Vec<((usize, usize), usize)> {
     let mut out = Vec::new();
     for r in 0..ROWS {
         for c in 0..COLS {
-            let here = &drawn[r * COLS + c];
+            let here = &f.drawn[r * COLS + c];
             for (edge, (bc, br)) in [(Edge::East, (c + 1, r)), (Edge::South, (c, r + 1))] {
                 if bc >= COLS || br >= ROWS {
                     continue;
                 }
                 let mut found: Vec<usize> = Vec::new();
                 for &a in here {
-                    for &b in &drawn[br * COLS + bc] {
-                        if let Some(&i) = by.get(&Pair { a, b, edge }) {
+                    for &b in &f.drawn[br * COLS + bc] {
+                        let p = Pair { a, b, edge };
+                        if let Some(&i) = by.get(&p)
+                            && f.joins((c, r), p)
+                        {
                             found.push(i);
                         }
                     }
@@ -1083,7 +1087,7 @@ fn draw_window(
             (framed(game, &cells, &[]), Some((fit, pieces.len())))
         }
     };
-    let ticks = ticks(&framed.drawn, by);
+    let ticks = ticks(&framed, by);
     Drawn1 { framed, ticks, fit }
 }
 

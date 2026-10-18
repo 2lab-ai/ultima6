@@ -695,6 +695,36 @@ fn a_disagreement_fails_and_draws_nothing() {
 }
 
 #[test]
+fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
+    // The chain, and an object of X's opaque record on the grass east of B: the only cell the
+    // world has B beside the grass draws the grass covered.
+    let mut g = game();
+    let over = |tile: u16| crate::game::Placed {
+        x: 5,
+        y: 3,
+        z: 0,
+        tile,
+    };
+    g.world.objects = vec![over(X)];
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("covered", &text, &g, &left);
+    let o = options(&dir);
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    // B's window does not read it, nor the pair's own window at its cell.
+    assert_eq!((s.last, s.pair_windows, s.unread), (2, 1, 1));
+    let rows = rows_of(&o.out);
+    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
+    for r in &rows {
+        assert!(!r["ticks"].contains(&name(GRASS)), "{}", r["ticks"]);
+    }
+    // An object that leaves the grass's west side (the chest's record): read in B's window.
+    g.world.objects = vec![over(synthetic::OBJECTS)];
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    assert_eq!((s.pair_windows, s.unread), (0, 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn every_pair_of_the_last_pass_is_drawn_in_a_window() {
     // The chain, and B again far from it, beside a record Y (a grain of its own) east of it:
     // B's window, wherever it is placed, cannot draw both its pairs by the chain and its pair
