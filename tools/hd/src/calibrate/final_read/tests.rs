@@ -1104,6 +1104,65 @@ fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
 }
 
 #[test]
+fn a_pair_covered_in_a_window_is_marked_hidden_there() {
+    // B again at (4, 5), and an object of X's opaque record on the grass east of it: B beside
+    // the grass shows at (4, 3), where the gate found it, and is covered at (4, 5), which B's
+    // window draws too.
+    let mut g = game();
+    g.world.chunks[0][5][4] = B as u8;
+    g.world.objects = vec![crate::game::Placed {
+        x: 5,
+        y: 5,
+        z: 0,
+        tile: X,
+    }];
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("hidden-tick", &text, &g, &left);
+    let o = options(&dir);
+    let s = calibrate_final(&g, &work, &o).unwrap();
+    assert_eq!(s.unread, 0);
+    let rows = rows_of(&o.out);
+    let w = &rows[0];
+    let (x, y): (usize, usize) = (w["x"].parse().unwrap(), w["y"].parse().unwrap());
+    let cell = (4 + A_CELL.0 - x, 5 + A_CELL.1 - y);
+    assert_eq!(
+        w["hidden"],
+        format!("{},{},east,map,gen-mmpx,t:{B},t:{GRASS}", cell.0, cell.1)
+    );
+    // Read where it shows: its tick there, not the hidden one.
+    let shown = format!(
+        "{},{},east,map,gen-mmpx,t:{B},t:{GRASS}",
+        4 + A_CELL.0 - x,
+        3 + A_CELL.1 - y
+    );
+    assert!(w["ticks"].contains(&shown), "{}", w["ticks"]);
+    // Marked in its own colour, dashed, over the read ones (the two share a column, and the
+    // hidden one a row with other read pairs): both colours along its row and above its join,
+    // only the read one's beside the row of the one read.
+    let sheet = read_sheet(&o.out.join(&w["sheet"]));
+    let l = Layout::of(4);
+    let py = l.margin / 2 + l.caption_h() + l.margin;
+    let px = |k: u32| l.margin + k * (l.w + l.margin);
+    let bar = |k: u32, r: usize| -> BTreeSet<[u8; 4]> {
+        (0..64)
+            .map(|v| img::get(&sheet, px(k) - 4, py + r as u32 * 64 + v))
+            .collect()
+    };
+    let tick = |k: u32, c: usize| -> BTreeSet<[u8; 4]> {
+        let x = px(k) + (c as u32 + 1) * 64 - 1;
+        (3..l.margin - 2)
+            .map(|d| img::get(&sheet, x, py - d))
+            .collect()
+    };
+    for k in 0..3 {
+        assert_eq!(bar(k, cell.1), BTreeSet::from([MARK, MARK_HIDDEN]));
+        assert_eq!(tick(k, cell.0), BTreeSet::from([MARK, MARK_HIDDEN]));
+        assert_eq!(bar(k, 3 + A_CELL.1 - y), BTreeSet::from([MARK]));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_window_that_shows_none_of_its_item_fails_the_run() {
     // A chest at (12, 12), and an object of X's opaque record on it later in the lists, so
     // drawn in front of it: the chest's window, where the world first draws it, shows none of

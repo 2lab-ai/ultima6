@@ -101,6 +101,8 @@
 //!   [`Framed::joins`]: a record covered there by a tile drawn after it draws no pair) is marked
 //!   in the panels' margins as above and listed under the panels: its cell (column, row of the
 //!   window), edge, labels, sides and ratio / limit, `>` before the pair the window is placed at.
+//!   A pair of the last pass whose two records are drawn at a join but covered there is judged
+//!   hidden: marked in a colour of its own, listed with `hidden`, and not read.
 //! - **The sheets** ([`final_read::final_sheet`]): `final-<class>.png` by the class ingest
 //!   names, `final-<class>-alone.png` for the windows drawn nowhere, `final-pairs.png` for the
 //!   pairs no other window draws and `final-include.png`, in
@@ -110,7 +112,8 @@
 //!   id not generated: the index, `coverage`, `pair` or `include`, the item, its records (a pair
 //!   window: the pair's generated ones), its class, the placement, A's cell (z, x, y) and edge,
 //!   the pairs marked, their labels × sides with counts, each pair (cell, edge, labels, sides,
-//!   A, B, ratio, limit), the sheet and row, `frames`, and a note.
+//!   A, B, ratio, limit), each pair judged hidden (cell, edge, labels, sides, A, B), the sheet
+//!   and row, `frames`, and a note.
 //! - **The report** ([`final_read::FinalSummary`]): survivors per class (items, images, windows by
 //!   placement, the records drawn in a window of the survivors' records, the survivors with no
 //!   map window: portraits and bitmaps, and with one label the survivors that meet no pair of
@@ -170,6 +173,9 @@ const TOP: u8 = 0x10;
 const BACK: [u8; 4] = [40, 40, 40, 255];
 const INK: [u8; 4] = [235, 235, 235, 255];
 const MARK: [u8; 4] = [255, 0, 255, 255];
+/// The final read's mark of a pair whose sides are drawn at a join but covered there (judged
+/// hidden, not read): drawn dashed, over the others, so neither hides the other.
+const MARK_HIDDEN: [u8; 4] = [0, 200, 255, 255];
 
 /// Which sides of a pair were generated in the first pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1252,22 +1258,38 @@ impl Layout {
 /// panel (east: on the two columns that meet) or left of it (south: on the two rows); along the
 /// edge, a bar left of the panel (east: the edge's rows) or above it (south: its columns).
 fn ticks(out: &mut Rgba, l: &Layout, (px, py): (u32, u32), edge: Edge) {
-    mark(out, l, (px, py), A_CELL, edge);
+    mark(out, l, (px, py), (A_CELL, edge), MARK);
 }
 
-/// [`ticks`] for the join of the cell `(c, r)` of the window and the one `edge` of it.
-fn mark(out: &mut Rgba, l: &Layout, (px, py): (u32, u32), (c, r): (usize, usize), edge: Edge) {
+/// [`ticks`] for the join of the cell `(c, r)` of the window and the one `edge` of it, in
+/// `colour`; [`MARK_HIDDEN`] dashed (every other pixel, a checkerboard).
+fn mark(
+    out: &mut Rgba,
+    l: &Layout,
+    (px, py): (u32, u32),
+    ((c, r), edge): ((usize, usize), Edge),
+    colour: [u8; 4],
+) {
     let cell = TILE_W as u32 * l.s;
     let m = l.margin;
     let (ax, ay) = (c as u32 * cell, r as u32 * cell);
+    let mut fill = |x0: u32, y0: u32, w: u32, h: u32| {
+        for y in y0..(y0 + h).min(out.height) {
+            for x in x0..(x0 + w).min(out.width) {
+                if colour != MARK_HIDDEN || (x + y) % 2 == 0 {
+                    img::put(out, x, y, colour);
+                }
+            }
+        }
+    };
     match edge {
         Edge::East => {
-            img::fill(out, px + ax + cell - 1, py - m + 2, 2, m - 4, MARK);
-            img::fill(out, px - 5, py + ay, 3, cell, MARK);
+            fill(px + ax + cell - 1, py - m + 2, 2, m - 4);
+            fill(px - 5, py + ay, 3, cell);
         }
         Edge::South => {
-            img::fill(out, px - m + 2, py + ay + cell - 1, m - 4, 2, MARK);
-            img::fill(out, px + ax, py - 5, cell, 3, MARK);
+            fill(px - m + 2, py + ay + cell - 1, m - 4, 2);
+            fill(px + ax, py - 5, cell, 3);
         }
     }
 }

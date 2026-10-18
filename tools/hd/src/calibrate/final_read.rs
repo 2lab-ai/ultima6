@@ -13,9 +13,9 @@ use u6_hdpack::ImageId;
 use u6_render::hd::Scale;
 
 use super::{
-    A_CELL, BACK, COLS, Framed, LABELS, Layout, MAX_HEIGHT, PANEL_NAMES, Panels, REPLACES_BASE,
-    ROWS, RawAt, RawPair, Sides, Slices, Source, Stack, edge_name, frame, framed, labels, mark,
-    measure, pair_line, panels, parse_edge, text,
+    A_CELL, BACK, COLS, Framed, LABELS, Layout, MARK, MARK_HIDDEN, MAX_HEIGHT, PANEL_NAMES, Panels,
+    REPLACES_BASE, ROWS, RawAt, RawPair, Sides, Slices, Source, Stack, edge_name, frame, framed,
+    labels, mark, measure, pair_line, panels, parse_edge, text,
 };
 use crate::atlas;
 use crate::game::Game;
@@ -1057,12 +1057,45 @@ pub fn ticks(f: &Framed, by: &BTreeMap<Pair, usize>) -> Vec<((usize, usize), usi
     out
 }
 
+/// The pairs of the last pass whose two records are drawn across a join of the window but do
+/// not both show there ([`Framed::joins`]: a tile drawn after one covers it along the join):
+/// judged hidden, not read. In [`ticks`]'s order.
+pub fn hidden(f: &Framed, by: &BTreeMap<Pair, usize>) -> Vec<((usize, usize), usize)> {
+    let mut out = Vec::new();
+    for r in 0..ROWS {
+        for c in 0..COLS {
+            for (edge, (bc, br)) in [(Edge::East, (c + 1, r)), (Edge::South, (c, r + 1))] {
+                if bc >= COLS || br >= ROWS {
+                    continue;
+                }
+                let mut found: Vec<usize> = Vec::new();
+                for &a in &f.stacked[r * COLS + c] {
+                    for &b in &f.stacked[br * COLS + bc] {
+                        let p = Pair { a, b, edge };
+                        if let Some(&i) = by.get(&p)
+                            && !f.joins((c, r), p)
+                        {
+                            found.push(i);
+                        }
+                    }
+                }
+                found.sort_unstable();
+                found.dedup();
+                out.extend(found.into_iter().map(|i| ((c, r), i)));
+            }
+        }
+    }
+    out
+}
+
 /// One row of a final sheet: a window's caption, its marks and legend, its panels.
 pub struct FinalLine {
     pub caption: String,
-    /// The joins marked: A's cell in the window and the edge.
+    /// The joins marked: A's cell in the window and the edge; then those of the pairs judged
+    /// hidden, marked apart ([`hidden`]).
     pub marks: Vec<((usize, usize), Edge)>,
-    /// A line per mark: where, its label, sides and ratio / limit.
+    pub hidden: Vec<((usize, usize), Edge)>,
+    /// A line per mark: where, its label, sides and ratio / limit (a hidden one says so).
     pub legend: Vec<String>,
     pub panels: Panels,
 }
@@ -1081,8 +1114,8 @@ pub fn final_size(lines: &[FinalLine], s: u32) -> (u32, u32) {
 }
 
 /// A final sheet of `lines` at scale `s`: as [`sheet`] draws a row, every join of the window's
-/// marks marked in the margins of each panel (never on the art), and the legend under the
-/// panels.
+/// marks marked in the margins of each panel (never on the art; a hidden pair's in a colour of
+/// its own, dashed, over the others), and the legend under the panels.
 pub fn final_sheet(lines: &[FinalLine], s: u32) -> Rgba {
     let l = Layout::of(s);
     let (w, h) = final_size(lines, s);
@@ -1098,8 +1131,11 @@ pub fn final_sheet(lines: &[FinalLine], s: u32) -> Rgba {
             text(&mut out, (px, cy), &line.caption, l.text, l.w);
             text(&mut out, (px, cy + l.line_h()), PANEL_NAMES[k], l.text, l.w);
             out.paste(panel, px, py);
-            for &(cell, edge) in &line.marks {
-                mark(&mut out, &l, (px, py), cell, edge);
+            for &m in &line.marks {
+                mark(&mut out, &l, (px, py), m, MARK);
+            }
+            for &m in &line.hidden {
+                mark(&mut out, &l, (px, py), m, MARK_HIDDEN);
             }
         }
         let ly = py + l.h + l.margin / 2;
@@ -1114,7 +1150,8 @@ pub fn final_sheet(lines: &[FinalLine], s: u32) -> Rgba {
 
 /// The final read's `samples.tsv` header.
 pub const FINAL_TSV_HEADER: &str = "index\torigin\titem\trecords\tclass\tplacement\tz\tx\ty\tedge\t\
-                                    pairs\tkinds\tticks\tsheet\tsheet_s2\tpanel\tframes\tnote";
+                                    pairs\tkinds\tticks\thidden\tsheet\tsheet_s2\tpanel\tframes\t\
+                                    note";
 
 /// What the final read drew, in counts and file names.
 #[derive(Clone, Debug, PartialEq)]
@@ -1270,10 +1307,11 @@ impl FinalSummary {
     }
 }
 
-/// A window drawn: its frame, and the pairs it ticks.
+/// A window drawn: its frame, the pairs it ticks, and those it draws hidden.
 struct Drawn1 {
     framed: Framed,
     ticks: Vec<((usize, usize), usize)>,
+    hidden: Vec<((usize, usize), usize)>,
 }
 
 impl Drawn1 {
@@ -1297,8 +1335,12 @@ fn draw_window(game: &Game, fixed: &Fixed, by: &BTreeMap<Pair, usize>, w: &Windo
         }
         _ => framed(game, &alone(&w.pieces).0, &[]),
     };
-    let ticks = ticks(&framed, by);
-    Drawn1 { framed, ticks }
+    let (ticks, hidden) = (ticks(&framed, by), hidden(&framed, by));
+    Drawn1 {
+        framed,
+        ticks,
+        hidden,
+    }
 }
 
 /// What a window of `origin` for `records` of survivor `sv` draws alone: the item's pieces (an
@@ -1699,7 +1741,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         let mut parts: Vec<Vec<usize>> = vec![Vec::new()];
         let mut height = l4.margin / 2;
         for (i, (_, d)) in drawn.iter().enumerate() {
-            let h = row_height(&l4, d.ticks.len());
+            let h = row_height(&l4, d.ticks.len() + d.hidden.len());
             let part = parts.last_mut().expect("a part");
             if !part.is_empty() && height + h > MAX_HEIGHT {
                 parts.push(vec![i]);
@@ -1767,14 +1809,40 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
                 for key in kinds.keys() {
                     read.entry(key.clone()).or_default().1 += 1;
                 }
+                // The pairs drawn at a join but covered there: listed, marked apart, not read.
+                let mut covered = Vec::new();
+                for &(cell, li) in &d.hidden {
+                    let l = &fixed.last[li];
+                    let e = if l.pair.edge == Edge::East { "e" } else { "s" };
+                    legend.push(format!(
+                        " {},{} {e} {} {} {} hidden",
+                        cell.0,
+                        cell.1,
+                        l.labels,
+                        l.sides.name(),
+                        measured(l.result, 2)
+                    ));
+                    covered.push(format!(
+                        "{},{},{},{},{},{},{}",
+                        cell.0,
+                        cell.1,
+                        edge_name(l.pair.edge),
+                        l.labels,
+                        l.sides.name(),
+                        atlas::image_name(ImageId::Tile(l.pair.a)),
+                        atlas::image_name(ImageId::Tile(l.pair.b)),
+                    ));
+                }
+                let edges = |v: &[((usize, usize), usize)]| -> Vec<((usize, usize), Edge)> {
+                    v.iter()
+                        .map(|&(cell, li)| (cell, fixed.last[li].pair.edge))
+                        .collect()
+                };
                 for (s, lines) in [(Scale::X4, &mut lines4), (Scale::X2, &mut lines2)] {
                     lines.push(FinalLine {
                         caption: caption.clone(),
-                        marks: d
-                            .ticks
-                            .iter()
-                            .map(|&(cell, li)| (cell, fixed.last[li].pair.edge))
-                            .collect(),
+                        marks: edges(&d.ticks),
+                        hidden: edges(&d.hidden),
                         legend: legend.clone(),
                         panels: panels(game, &d.framed.fb, &slices, s),
                     });
@@ -1812,7 +1880,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
                     |f: fn(&At) -> usize| w.at.as_ref().map_or("-".into(), |a| f(a).to_string());
                 let _ = writeln!(
                     tsv,
-                    "{index}\t{}\t{}\t{}\t{class}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{s4}\t{s2}\t{}\t{}\t{note}",
+                    "{index}\t{}\t{}\t{}\t{class}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{s4}\t{s2}\t{}\t{}\t{note}",
                     w.origin.name(),
                     sv.item,
                     names(&w.records),
@@ -1828,6 +1896,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
                     d.ticks.len(),
                     dash(kinds_text, ","),
                     dash(cells, ";"),
+                    dash(covered, ";"),
                     row + 1,
                     d.framed.frames(),
                 );
@@ -1843,7 +1912,7 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         index += 1;
         let _ = writeln!(
             tsv,
-            "{index}\tinclude\t-\t{}\t-\t-\t-\t-\t-\t-\t0\t-\t-\t-\t-\t-\t-\tnot generated in the final pack (0)",
+            "{index}\tinclude\t-\t{}\t-\t-\t-\t-\t-\t-\t0\t-\t-\t-\t-\t-\t-\t-\tnot generated in the final pack (0)",
             atlas::image_name(ImageId::Tile(r))
         );
     }
