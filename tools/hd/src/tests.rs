@@ -1616,14 +1616,20 @@ fn one_deadline_covers_the_call_and_what_it_started() {
         }
         true
     };
-    // A call that hangs: stopped at the deadline, its whole group killed.
+    // A call that hangs: stopped at the deadline, its whole group killed. Its stand-in must
+    // have started its child, and written its pid, before the deadline kills the group: 4 s,
+    // as keeps-both's in the leak test, is slack for a loaded machine, not a bound on its load.
     let start = Instant::now();
-    let r = codex(100, 2).generate(&t.join("sheet.png"), "prompt", &dir);
+    let r = codex(100, 4).generate(&t.join("sheet.png"), "prompt", &dir);
     assert!(r.unwrap_err().contains("timed out"));
     assert!(
         start.elapsed() < Duration::from_secs(15),
         "{:?}",
         start.elapsed()
+    );
+    assert!(
+        t.join("pid").exists(),
+        "its stand-in had not started its child by the 4 s deadline"
     );
     assert!(child_gone(), "the call's child outlived it");
     // A call that exits but leaves a child holding its output: the child goes with it and
@@ -1990,11 +1996,13 @@ fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
     // A helper that left the call's group (its own session) and holds the output open: the
     // call ends, and the stream is given a bounded grace, not the rest of the deadline. The
     // session is made before the fork, so the helper is out of the group before the call can
-    // exit and the group be killed.
+    // exit and the group be killed at that exit. A deadline that falls before the helper has
+    // made its session still kills it with the group: the hang's 4 s, as keeps-both's in the
+    // leak test, is slack for a loaded machine, not a bound on its load.
     let thread = r#"echo '{"type":"thread.started","thread_id":"t1"}'"#;
     for (name, then, secs) in [
         ("escaped-exit.sh", "exit 0", 30),
-        ("escaped-hang.sh", "sleep 30", 2),
+        ("escaped-hang.sh", "sleep 30", 4),
     ] {
         let pid = t.join(format!("{name}.pid"));
         let body = format!(
@@ -2005,12 +2013,21 @@ fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
         );
         let (r, took) = call(review_stub(&t, name, &body), secs, "PROMPT");
         let e = r.unwrap_err();
-        // The grace is 1 s; before it, the hang took the deadline + 5 s and the exit 20 s (the
-        // helper's life). Slack for a loaded machine.
-        let limit = Duration::from_secs(if secs == 2 { 6 } else { 8 });
+        // The grace is 1 s: the exit ends within it of its stand-in's exit, the hang within it
+        // of its deadline; 8 s for both, slack for a loaded machine (before the grace, the hang
+        // took its deadline + 5 s, here 9 s, and the exit 20 s, the helper's life).
+        let limit = Duration::from_secs(8);
         assert!(took < limit, "{name}: {took:?} ({e})");
-        if secs == 2 {
+        if name == "escaped-hang.sh" {
             assert!(e.contains("timed out"), "{name}: {e}");
+            // Its helper holds the call's output past the deadline, so the grace is waited out;
+            // a call that ended at its deadline lost its helper with the group (not yet in a
+            // session of its own).
+            assert!(
+                took >= Duration::from_secs(secs) + run::CLEANUP,
+                "{name}: {took:?}: its helper had not left the call's group by the {secs} s \
+                 deadline"
+            );
         } else {
             assert_eq!(e, "the call's output did not end", "{name}");
         }
