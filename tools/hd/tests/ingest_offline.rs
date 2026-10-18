@@ -16,6 +16,7 @@ use std::process::Command;
 
 use u6_hdpack::ImageId;
 use u6_hdtool::atlas::{self, SheetKind};
+use u6_hdtool::calibrate;
 use u6_hdtool::game::synthetic;
 use u6_hdtool::group;
 use u6_hdtool::work::{self, Work};
@@ -270,6 +271,22 @@ fn calibrate_makes_no_codex_call() {
     ] {
         assert!(fout.join(f).is_file(), "{f}");
     }
+    // The window shows the chest: alone, in the window's second column and row, its pack panel
+    // the master's colour where the chest is opaque and the master painted, its classic panel
+    // the chest's own.
+    let path = fout.join("final-object-alone.png");
+    let (w, h) = img::png_size(&std::fs::read(&path).unwrap()).unwrap();
+    let sheet = img::read_png(&path, w, h).unwrap();
+    let l = calibrate::Layout::of(4);
+    let at = |k: usize, (u, v): (u32, u32)| {
+        let (px, py) = l.panel_at(0, k);
+        img::get(&sheet, px + 64 + u * 4 + 2, py + 64 + v * 4 + 2)
+    };
+    for p in [(4, 6), (8, 10), (11, 13)] {
+        assert_eq!(at(2, p), [180, 120, 60, 255], "{p:?}");
+        assert_ne!(at(0, p), [180, 120, 60, 255], "{p:?}");
+    }
+    assert_eq!(at(2, (0, 0)), at(0, (0, 0)));
     // What the final read does not take, and what only it takes.
     let refused = [
         vec!["--final", "--slices", "x"],
