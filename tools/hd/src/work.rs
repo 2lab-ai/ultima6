@@ -249,7 +249,10 @@ pub(crate) fn test_note(what: &str) {
 #[cfg(not(debug_assertions))]
 pub(crate) fn test_note(_: &str) {}
 
-/// FNV-1a 64 of `parts`, each prefixed by its length, as 16 hex digits.
+/// FNV-1a 64 of `parts`, each prefixed by its length, as 16 hex digits. Not a cryptographic
+/// hash: it tells a file changed by a race or an accident (a re-ingest while a command reads,
+/// another file copied over it), not one swapped on purpose for another made to the same
+/// digest.
 pub fn digest(parts: &[&[u8]]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for p in parts {

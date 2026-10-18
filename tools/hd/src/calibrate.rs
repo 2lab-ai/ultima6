@@ -70,7 +70,8 @@
 //!   Pass 1's lines must be the world's pairs with a side generated then, by the gate's own
 //!   [`neighbour::pairs`], each once, from the source and at the cell the world has it; each
 //!   master must be the file ingest wrote (its digest in `ingest.json`; an older `ingest.json`
-//!   with none is refused). The list, the masters, the plan's items, the fallbacks and pass 1's
+//!   with none is refused; the digest, [`work::digest`], catches a race or an accident, not a
+//!   file swapped on purpose). The list, the masters, the plan's items, the fallbacks and pass 1's
 //!   sides must agree too
 //!   (every rule is listed at [`final_read::fixed`]); every pair of the last pass must have a
 //!   cell. On a disagreement nothing is drawn: the error gives its kinds and counts,
