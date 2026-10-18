@@ -123,6 +123,48 @@ fn a_run_dir_that_is_there_already_is_never_reused() {
     assert!(e.contains("a run dir is never reused"), "{e}");
     assert!(e.contains(&w.dir.display().to_string()), "{e}");
     assert_eq!(tree(&out), had);
+    // Beside an incomplete run, the collision says it too.
+    std::fs::create_dir(out.join(run_name(1, 7))).unwrap();
+    let had = tree(&out);
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    assert_eq!(
+        e,
+        format!(
+            "{}: File exists (os error 17) (a run dir is never reused); incomplete runs \
+             beside it (left as they are): {}",
+            w.dir.display(),
+            run_name(1, 7)
+        )
+    );
+    assert_eq!(tree(&out), had);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_dir_that_cannot_be_made_for_another_reason_is_not_said_to_be_reused() {
+    // --out where no dir can be made (read-only): the error is the system's, beside the
+    // incomplete run, not "never reused". Needs an unprivileged user: skipped with privilege.
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid(2) reads the process's ids; no memory involved.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: it needs an unprivileged user (euid 0 writes a read-only dir)");
+        return;
+    }
+    let dir = temp("cannot-make");
+    let out = dir.join("out");
+    std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(e.contains("Permission denied"), "{e}");
+    assert!(!e.contains("never reused"), "{e}");
+    assert!(
+        e.ends_with(&format!(
+            "; incomplete runs beside it (left as they are): {}",
+            run_name(1, 7)
+        )),
+        "{e}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -348,10 +348,23 @@ pub fn run_in<T>(
     work::check_target(out)?;
     let parent = work::ensure_dir(out)?;
     let incomplete = incomplete(&parent)?;
+    // Every failure from here says the incomplete runs beside the run.
+    let beside = |e: String| match incomplete.as_slice() {
+        [] => e,
+        v => format!(
+            "{e}; incomplete runs beside it (left as they are): {}",
+            v.join(", ")
+        ),
+    };
     let dir = parent.join(run_name(now(out), std::process::id()));
-    std::fs::create_dir(&dir)
-        .map_err(|e| format!("{}: {e} (a run dir is never reused)", dir.display()))?;
-    let say = |e: std::io::Error| format!("{}: {e}", dir.display());
+    std::fs::create_dir(&dir).map_err(|e| {
+        let why = match e.kind() {
+            std::io::ErrorKind::AlreadyExists => " (a run dir is never reused)",
+            _ => "",
+        };
+        beside(format!("{}: {e}{why}", dir.display()))
+    })?;
+    let say = |e: std::io::Error| beside(format!("{}: {e}", dir.display()));
     let open = at::open_dir(&dir).map_err(say)?;
     let id = at::id(&open).map_err(say)?;
     let r = Run {
@@ -361,18 +374,9 @@ pub fn run_in<T>(
         id,
         written: RefCell::new(Vec::new()),
     };
-    // Every failure from here says the run dir it left, and the incomplete runs beside it.
+    // And, once the run dir is made, that dir first.
     let at = r.dir.clone();
-    let with_incomplete = |e: String| {
-        let e = format!("{e}; run dir: {}", at.display());
-        match incomplete.as_slice() {
-            [] => e,
-            v => format!(
-                "{e}; incomplete runs beside it (left as they are): {}",
-                v.join(", ")
-            ),
-        }
-    };
+    let with_incomplete = |e: String| beside(format!("{e}; run dir: {}", at.display()));
     // done only in the dir the report names: a run whose dir moved fails.
     let ended = run(&r).and_then(|v| match r.moved() {
         true => Err(format!("{}: the run dir moved", r.dir.display())),
