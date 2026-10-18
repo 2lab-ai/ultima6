@@ -2780,6 +2780,50 @@ fn a_table_print_must_put_out_the_string_it_read() {
 }
 
 #[test]
+fn a_string_read_has_one_reader_and_a_print_only_its_own_output() {
+    // "ab" at `t`: read for a copy up to its NUL, read there for a print: a mismatch.
+    let t = BODY + 20;
+    let mut body = vec![0xb5];
+    body.extend(lit32(t));
+    body.extend([0xb1, 0xb6]);
+    body.resize((t - BODY) as usize, 0);
+    body.extend(b"ab\0");
+    let table = |i: usize, read: Read| Event::Table {
+        at: (t as usize + i) as i32,
+        byte: b"ab\0"[i],
+        read,
+    };
+    let reads = vec![
+        table(0, Read::Copy),
+        table(1, Read::Copy),
+        table(2, Read::Print),
+    ];
+    let n = checked(&body, reads);
+    assert_eq!((n.table_strings, n.table_mismatches), (1, 1), "{n:?}");
+    // A print started, put out "x" and ended at another read (the op at BODY): a print of the
+    // string after that, with no start of its own, is not compared with that output.
+    let mut ev = vec![
+        Event::PrintStart { snap: first_snap() },
+        put(i16::from(b'x')),
+        Event::Run {
+            at: BODY as i32,
+            byte: 0xb5,
+            snap: None,
+        },
+    ];
+    for i in 0..3 {
+        ev.push(table(i, Read::Print));
+        ev.extend(b"ab".get(i).map(|&c| put(i16::from(c))));
+    }
+    let n = checked(&body, ev);
+    assert_eq!(
+        (n.prints, n.table_strings, n.failures()),
+        (0, 1, 0),
+        "{n:?}"
+    );
+}
+
+#[test]
 fn a_stopped_visit_cut_inside_an_escape_puts_out_nothing_for_it_yet() {
     // "a$1b" read through its `$`: the escape takes the next byte, not read yet, so "a" is all
     // the bytes read put out.

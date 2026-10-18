@@ -1040,7 +1040,7 @@ impl<'a> Decoder<'a> {
                 let cut = self.table_at(addr, owned, words).entries.len();
                 table.entries.truncate(cut.max(needed));
                 let short = needed.saturating_sub(table.entries.len());
-                if short > 0 && !table.entries.is_empty() {
+                if short > 0 {
                     carry = Some((table_end(addr, &table), words, short));
                 }
             }
@@ -1141,9 +1141,10 @@ impl<'a> Decoder<'a> {
     }
 
     /// Claims the tables of the kept uses ([`Self::table_ranges`], see the module doc). Every
-    /// address is checked first (inside the script, not in code), before any range is scanned;
-    /// the uses were checked when they were made and the rounds keep code out of the ranges,
-    /// so this refuses nothing in practice.
+    /// address is checked first (inside the script, not in code), before any range is scanned.
+    /// The uses were checked when they were made and the rounds keep landing code out of the
+    /// ranges: an address in code here is a case the rounds missed, and the script is refused
+    /// rather than decoded with a kept read on code.
     pub(super) fn claim_tables(&mut self) -> Result<(), Refusal> {
         for (u, _) in &self.uses {
             match self.owner.get(u.addr as usize) {
