@@ -341,9 +341,9 @@ impl Run {
     }
 
     /// What to say of a run dir that moved: from where, and where it is now when the system
-    /// says ([`at::where_now`]).
+    /// says and the dir there is the run's ([`at::where_now`]).
     fn moved_note(&self) -> String {
-        let now = match at::where_now(&self.open) {
+        let now = match at::where_now(&self.open, self.id) {
             Some(p) => format!("it is now at {}", p.display()),
             None => "where it is now is not known".into(),
         };

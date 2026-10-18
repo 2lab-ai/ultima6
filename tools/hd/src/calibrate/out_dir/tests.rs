@@ -954,3 +954,31 @@ fn oldest_first_sorts_any_order_by_time() {
         .collect();
     assert_eq!(oldest_first(names), want);
 }
+
+#[test]
+fn where_a_dir_is_now_is_said_only_for_the_identity_held() {
+    // A dir held open: where it is now is its path for its own identity, and not known for any
+    // other (the identity given is compared, not one read again from the fd).
+    let dir = temp("where-now");
+    let f = at::open_dir(&dir).unwrap();
+    let id = at::id(&f).unwrap();
+    assert_eq!(at::where_now(&f, id), Some(dir.canonicalize().unwrap()));
+    assert_eq!(at::where_now(&f, (id.0, id.1 ^ 1)), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_raise_goes_up_to_the_lower_of_the_hard_limit_and_the_cap_and_never_down() {
+    let inf = libc::RLIM_INFINITY;
+    for (cur, max, cap, want) in [
+        (64, 1 << 20, 1 << 20, Some(1 << 20)),
+        (64, inf, 10240, Some(10240)),
+        (64, 512, 10240, Some(512)),
+        (64, 64, 10240, None),
+        (10240, inf, 10240, None),
+        (20000, inf, 10240, None),
+        (20000, 30000, 10240, None),
+    ] {
+        assert_eq!(at::raised(cur, max, cap), want, "{cur} {max} {cap}");
+    }
+}
