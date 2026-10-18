@@ -1906,6 +1906,74 @@ fn a_pair_is_drawn_only_where_a_row_the_gate_measures_shows() {
 }
 
 #[test]
+fn a_pair_is_drawn_only_where_a_line_the_gate_measures_shows_on_either_edge_and_side() {
+    // As above, east and south, the cover on the first side and on the second: one record
+    // (`half`) opaque on half of its line at the join, the other (B) opaque on all of it, so
+    // the gate measures that half alone; a cover over B hides B's pixels there. Each side still
+    // shows on its line, and no measured row (or column) of the join is left.
+    let mut g = game();
+    let made = |g: &mut Game, r: u16, opaque: &dyn Fn(usize, usize) -> bool| {
+        let rec = &mut g.records[usize::from(r)];
+        for i in 0..256 {
+            rec.pixels[i] = GRAIN + (hash(i as u32, u32::from(r)) % 5) as u8;
+            rec.transparent[i] = !opaque(i % 16, i / 16);
+        }
+    };
+    // Opaque on the lower rows; on the right columns.
+    let (lower, right) = (203u16, 204u16);
+    made(&mut g, lower, &|_, v| v >= 8);
+    made(&mut g, right, &|u, _| u >= 8);
+    let a = A_CELL.1 * COLS + A_CELL.0;
+    let slices = Slices::new(&g, BTreeMap::from([(B, near(&g, B))]));
+    // (edge, B first or second, the half record, the cover's opaque pixels over B's cell).
+    type Cover = fn(usize, usize) -> bool;
+    let cases: [(Edge, bool, u16, Cover); 4] = [
+        (Edge::East, false, lower, |u, v| u == 0 && v >= 8),
+        (Edge::South, true, right, |u, v| v == 15 && u >= 8),
+        (Edge::South, false, right, |u, v| v == 0 && u >= 8),
+        (Edge::East, true, lower, |u, v| u == 15 && v >= 8),
+    ];
+    for (k, (edge, b_first, half, cover)) in cases.into_iter().enumerate() {
+        let c = 205 + k as u16;
+        made(&mut g, c, &cover);
+        let p = if b_first {
+            Pair {
+                a: B,
+                b: half,
+                edge,
+            }
+        } else {
+            Pair {
+                a: half,
+                b: B,
+                edge,
+            }
+        };
+        let other = match edge {
+            Edge::East => a + 1,
+            Edge::South => a + COLS,
+        };
+        let (b_at, half_at) = if b_first { (a, other) } else { (other, a) };
+        let cells = |list: &[u16]| {
+            let mut cells = vec![Stack::default(); COLS * ROWS];
+            cells[b_at] = Stack {
+                base: Some(B),
+                list: list.to_vec(),
+            };
+            cells[half_at].base = Some(half);
+            cells
+        };
+        let m = measure(&g, &slices, p, seam()).unwrap();
+        assert!(m.is_some_and(gate::seam_passes), "{k}: {m:?}");
+        let at = |i: usize| (i % COLS, i / COLS);
+        let f = framed(&g, &cells(&[c]), &[]);
+        assert!(f.shows(at(b_at), B) && f.shows(at(half_at), half), "{k}");
+        assert!(!f.joins(A_CELL, p), "{k}");
+        assert!(framed(&g, &cells(&[]), &[]).joins(A_CELL, p), "{k}");
+    }
+}
+
+#[test]
 fn a_pair_covered_on_every_measured_row_is_not_read() {
     // The chain, and B again at (12, 12) with HALF east of it, COVER on B there: the pair's one
     // cell has no measured row left, so no window reads it, and the run fails.
