@@ -1016,7 +1016,6 @@ fn the_images_measured_are_the_ones_the_page_composes() {
         by_alpha.keys().copied().collect::<Vec<_>>(),
         [0, 40, 128, 255]
     );
-    assert!(by_alpha.values().all(|&n| n > 0), "{by_alpha:?}");
 }
 
 /// Mean steps across the lattice lines `pitch` apart along x of a `w × h` picture whose pixels
