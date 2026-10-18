@@ -592,7 +592,12 @@ fn a_master_is_the_one_ingest_wrote() {
     assert!(e.contains("disagree, nothing drawn: master 1"), "{e}");
     assert_eq!(
         files_of(&o.out),
-        ["disagreements.txt", "gates.jsonl", "ingest.json"]
+        [
+            "disagreements.txt",
+            "gates.jsonl",
+            "ingest.json",
+            "jobs.jsonl"
+        ]
     );
     let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
     assert_eq!(
@@ -616,7 +621,10 @@ fn a_master_is_the_one_ingest_wrote() {
         e.contains("no digest of its masters") && e.contains("run ingest again"),
         "{e}"
     );
-    assert_eq!(files_of(&o.out), ["gates.jsonl", "ingest.json"]);
+    assert_eq!(
+        files_of(&o.out),
+        ["gates.jsonl", "ingest.json", "jobs.jsonl"]
+    );
     // In the state itself, too: a listed master with no digest is not the one ingest wrote.
     let fixed_of = |list: &[Accepted]| {
         let plan = group::plan(&g);
@@ -710,7 +718,34 @@ fn a_neighbour_field_that_is_not_a_pair_stops_the_read() {
     let o = options(&dir);
     let e = calibrate_final(&g, &work, &o).unwrap_err();
     assert!(e.contains("line 3"), "{e}");
-    assert_eq!(files_of(&o.out), ["gates.jsonl", "ingest.json"]);
+    assert_eq!(
+        files_of(&o.out),
+        ["gates.jsonl", "ingest.json", "jobs.jsonl"]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_atlas_is_laid_out_from_the_plan_of_these_files() {
+    // The jobs of an atlas of another plan (other files, or another version of the tool): the
+    // log's item numbers name other items.
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("plan", &text, &g, &left);
+    assert!(calibrate_final(&g, &work, &options(&dir)).is_ok());
+    work.write_jobs(&[job(&group::plan(&g).fingerprint()), job("another")])
+        .unwrap();
+    let o = FinalOptions {
+        out: dir.join("other"),
+        ..options(&dir)
+    };
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(e.contains("disagree, nothing drawn: plan 1"), "{e}");
+    let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
+    assert!(
+        detail.starts_with("plan: jobs.jsonl line 2: laid out from another plan"),
+        "{detail}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -722,6 +757,8 @@ fn work_dir(name: &str, gates: &str, g: &Game, images: &BTreeMap<u16, Rgba>) -> 
     std::fs::create_dir_all(&dir).unwrap();
     let work = Work::open(Some(&dir.join("work"))).unwrap();
     work.write("gates.jsonl", gates.as_bytes()).unwrap();
+    work.write_jobs(&[job(&group::plan(g).fingerprint())])
+        .unwrap();
     let list = listed(g, images);
     work.write("ingest.json", &serde_json::to_vec(&list).unwrap())
         .unwrap();
@@ -731,6 +768,23 @@ fn work_dir(name: &str, gates: &str, g: &Game, images: &BTreeMap<u16, Rgba>) -> 
         std::fs::write(work.slice(&stem), master_png(img4)).unwrap();
     }
     (dir, work)
+}
+
+/// A job of the atlas laid out from the plan of fingerprint `plan` (what the final read takes
+/// of `jobs.jsonl`).
+fn job(plan: &str) -> atlas::Job {
+    atlas::Job {
+        sheet: "tile-0001".into(),
+        generation: "test".into(),
+        plan: plan.into(),
+        kind: atlas::SheetKind::Tile,
+        attempt: 1,
+        prompt: String::new(),
+        key: [0, 0, 0],
+        width: 1,
+        height: 1,
+        places: Vec::new(),
+    }
 }
 
 fn options(dir: &Path) -> FinalOptions {
@@ -1314,7 +1368,12 @@ fn an_item_listed_in_part_or_an_image_of_no_item_is_a_disagreement() {
     assert!(e.contains("disagree, nothing drawn: part 1"), "{e}");
     assert_eq!(
         files_of(&o.out),
-        ["disagreements.txt", "gates.jsonl", "ingest.json"]
+        [
+            "disagreements.txt",
+            "gates.jsonl",
+            "ingest.json",
+            "jobs.jsonl"
+        ]
     );
     let _ = std::fs::remove_dir_all(&dir);
     // A listed image no item has: a shore record (the scaler draws the shore), listed with
@@ -1397,7 +1456,15 @@ fn a_disagreement_fails_and_draws_nothing() {
         .collect();
     let mut files = files;
     files.sort();
-    assert_eq!(files, ["disagreements.txt", "gates.jsonl", "ingest.json"]);
+    assert_eq!(
+        files,
+        [
+            "disagreements.txt",
+            "gates.jsonl",
+            "ingest.json",
+            "jobs.jsonl"
+        ]
+    );
     assert!(!e.contains("t:"));
     let detail = std::fs::read_to_string(o.out.join("disagreements.txt")).unwrap();
     assert_eq!(detail.lines().count(), 2);
@@ -1429,7 +1496,7 @@ fn a_pair_covered_where_the_world_draws_it_is_not_read_there() {
     assert!(!e.contains("t:"), "{e}");
     assert_eq!(
         files_of(&o.out),
-        ["gates.jsonl", "ingest.json", "unshown.txt"]
+        ["gates.jsonl", "ingest.json", "jobs.jsonl", "unshown.txt"]
     );
     let detail = std::fs::read_to_string(o.out.join("unshown.txt")).unwrap();
     assert_eq!(
@@ -1575,7 +1642,7 @@ fn a_window_that_shows_none_of_its_item_fails_the_run() {
     assert!(!e.contains("t:"), "{e}");
     assert_eq!(
         files_of(&o.out),
-        ["gates.jsonl", "ingest.json", "unshown.txt"]
+        ["gates.jsonl", "ingest.json", "jobs.jsonl", "unshown.txt"]
     );
     let plan = group::plan(&g);
     let detail = std::fs::read_to_string(o.out.join("unshown.txt")).unwrap();
@@ -1826,7 +1893,8 @@ fn a_change_to_the_work_dir_while_it_is_read_fails_the_run() {
     let master = work.slice(&atlas::slice_name(ImageId::Tile(B)));
     let other = work.slice(&atlas::slice_name(ImageId::Tile(A)));
     let (gates_path, list_path) = (work.path("gates.jsonl"), work.path("ingest.json"));
-    let originals: Vec<(PathBuf, Vec<u8>)> = [&master, &gates_path, &list_path]
+    let jobs_path = work.path("jobs.jsonl");
+    let originals: Vec<(PathBuf, Vec<u8>)> = [&master, &gates_path, &list_path, &jobs_path]
         .into_iter()
         .map(|p| (p.clone(), std::fs::read(p).unwrap()))
         .collect();
@@ -1851,6 +1919,10 @@ fn a_change_to_the_work_dir_while_it_is_read_fails_the_run() {
         ("(ingest.json)", {
             let p = list_path.clone();
             Box::new(move || std::fs::write(&p, b"[]").unwrap())
+        }),
+        ("(jobs.jsonl)", {
+            let p = jobs_path.clone();
+            Box::new(move || std::fs::write(&p, b"").unwrap())
         }),
     ];
     for (k, (said, change)) in changes.into_iter().enumerate() {

@@ -17,6 +17,7 @@ use std::process::Command;
 use u6_hdpack::ImageId;
 use u6_hdtool::atlas::{self, SheetKind};
 use u6_hdtool::game::synthetic;
+use u6_hdtool::group;
 use u6_hdtool::work::{self, Work};
 use u6_hdtool::{img, run};
 
@@ -218,6 +219,21 @@ fn calibrate_makes_no_codex_call() {
     fw.write("gates.jsonl", b"").unwrap();
     fw.write("ingest.json", listed.to_string().as_bytes())
         .unwrap();
+    // The atlas's jobs, laid out from the synthetic set's plan.
+    let plan = group::plan(&synthetic::game()).fingerprint();
+    let job = atlas::Job {
+        sheet: "tile-0001".into(),
+        generation: "made up".into(),
+        plan,
+        kind: SheetKind::Tile,
+        attempt: 1,
+        prompt: String::new(),
+        key: [0, 0, 0],
+        width: 1,
+        height: 1,
+        places: Vec::new(),
+    };
+    fw.write_jobs(&[job]).unwrap();
     let fout = dir.join("calibrate-final");
     let o = cmd(BIN)
         .args(["calibrate", "--final", "--synthetic"])

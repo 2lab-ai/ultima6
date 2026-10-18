@@ -53,12 +53,13 @@
 //!
 //! **`--final`** ([`final_read`]): the read of the final pack, every item of it, not a sample
 //! (`--slices`, `--at`, `--per` and `--seed` are not taken).
-//! - **The state** ([`final_read::fixed`]): snapshots of `gates.jsonl` and `ingest.json` (copied
-//!   to the out dir and read there), the masters of the work dir's `slices/` (listed once, each
-//!   file read once, into memory, its digest kept) and the plan of items; all read at the start.
-//!   Before the run reports success it reads `gates.jsonl`, `ingest.json` and every master of
-//!   `slices/` again and fails if any is not what it read (a re-ingest during the run: the
-//!   sheets written then read no one state). `gates.jsonl` logs pass 1 whole
+//! - **The state** ([`final_read::fixed`]): snapshots of `gates.jsonl`, `ingest.json` and
+//!   `jobs.jsonl` (copied to the out dir and read there), the masters of the work dir's
+//!   `slices/` (listed once, each file read once, into memory, its digest kept) and the plan of
+//!   items, which must be the one every job was laid out from (its fingerprint: the log's item
+//!   numbers name its items); all read at the start. Before the run reports success it reads
+//!   the three files and every master of `slices/` again and fails if any is not what it read
+//!   (a re-ingest during the run: the sheets written then read no one state). `gates.jsonl` logs pass 1 whole
 //!   and a later pass's failing pairs only, so the last pass of the fixed point (the one that
 //!   fails nothing) is rebuilt: pass 1's pairs with a side still generated (a record with a
 //!   master), each measured from the slices by the gate itself ([`measure`]), its sides the

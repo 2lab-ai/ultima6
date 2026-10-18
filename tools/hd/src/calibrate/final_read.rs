@@ -1487,9 +1487,14 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         work::write_file(&out.join(name), &bytes)?;
         img::read_capped(&out.join(name), cap)
     };
-    let caps = [("gates.jsonl", 1 << 30), ("ingest.json", 64 << 20)];
+    let caps = [
+        ("gates.jsonl", 1 << 30),
+        ("ingest.json", 64 << 20),
+        ("jobs.jsonl", 1 << 30),
+    ];
     let gates_bytes = snapshot(caps[0].0, caps[0].1)?;
     let list_bytes = snapshot(caps[1].0, caps[1].1)?;
+    let jobs_bytes = snapshot(caps[2].0, caps[2].1)?;
     let text =
         std::str::from_utf8(&gates_bytes).map_err(|_| "gates.jsonl is not UTF-8".to_string())?;
     let list: Vec<Accepted> =
@@ -1513,14 +1518,36 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
         }
     }
     let plan = group::plan(game);
-    let fixed = fixed(game, &plan, &rec, &list, &files, &slices, o.seam).map_err(|d| {
-        refuse(
-            &out,
-            "disagreements.txt",
-            "the record and the slices disagree",
-            &d,
-        )
-    })?;
+    // The plan the item numbers of the log name: the atlas's, which every job carries.
+    let mut d: Vec<Disagreement> = Vec::new();
+    let fingerprint = plan.fingerprint();
+    let jobs = String::from_utf8_lossy(&jobs_bytes);
+    for (i, line) in jobs
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+    {
+        let job: atlas::Job =
+            serde_json::from_str(line).map_err(|e| format!("jobs.jsonl line {}: {e}", i + 1))?;
+        if job.plan != fingerprint {
+            d.push(Disagreement {
+                kind: "plan",
+                detail: format!(
+                    "jobs.jsonl line {}: laid out from another plan than these files' (other \
+                     files, or another version of the tool): the log's items are other items",
+                    i + 1
+                ),
+            });
+        }
+    }
+    let fixed = match fixed(game, &plan, &rec, &list, &files, &slices, o.seam) {
+        Ok(f) if d.is_empty() => f,
+        r => {
+            d.extend(r.err().into_iter().flatten());
+            let what = "the record and the slices disagree";
+            return Err(refuse(&out, "disagreements.txt", what, &d));
+        }
+    };
 
     // The windows: one per survivor drawn in the map's records, then one per included id.
     let label = match &o.source {
@@ -2014,7 +2041,10 @@ pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<Fin
     // What was read at the start, read again: a re-ingest while the run read it could have
     // mixed two states, and these sheets would read neither.
     let mut changed: Vec<String> = Vec::new();
-    for ((name, cap), bytes) in caps.into_iter().zip([&gates_bytes, &list_bytes]) {
+    for ((name, cap), bytes) in caps
+        .into_iter()
+        .zip([&gates_bytes, &list_bytes, &jobs_bytes])
+    {
         if img::read_capped(&work.path(name), cap).ok().as_ref() != Some(bytes) {
             changed.push(name.to_string());
         }
