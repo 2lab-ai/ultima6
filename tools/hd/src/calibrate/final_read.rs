@@ -1062,9 +1062,10 @@ fn alone_parts(w: &Window, pieces: &[Piece]) -> Result<Vec<Window>, usize> {
 
 /// The pairs of the last pass drawn inside a window (`f`, as [`framed`] drew it): every two
 /// edge-adjacent cells of it, each record that shows in the one beside each that shows in the
-/// other, drawn across their join ([`Framed::joins`]: each side left along its side of the
-/// join), that `by` (pair → its index in the last pass) has. In cell order (row, column), east
-/// before south, then the pair's index.
+/// other, drawn across their join ([`Framed::joins`]: on some row, or column, of the join where
+/// both records are opaque on their lines, which the gate measures, both pixels left; where
+/// there is no such row, each record showing in its cell), that `by` (pair → its index in the
+/// last pass) has. In cell order (row, column), east before south, then the pair's index.
 pub fn ticks(f: &Framed, by: &BTreeMap<Pair, usize>) -> Vec<((usize, usize), usize)> {
     let mut out = Vec::new();
     for r in 0..ROWS {
