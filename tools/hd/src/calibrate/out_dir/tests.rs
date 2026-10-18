@@ -758,7 +758,7 @@ fn each_file_the_run_makes_is_held_open_until_it_ends_and_a_new_one_at_its_name_
     let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
         writes(run)?;
         for m in run.made.borrow().iter() {
-            let id = m.id.unwrap();
+            let id = m.id.clone().unwrap();
             assert_eq!(held(id), 1, "{}", m.name);
             seen.lock().unwrap().push(id);
         }
@@ -875,26 +875,86 @@ fn a_file_of_the_run_others_may_not_read_is_still_deleted_as_its_own() {
 }
 
 #[test]
-fn a_file_whose_identity_cannot_be_read_is_kept_and_said() {
-    // a.txt made, its identity not readable (injected at the fstat): it is listed all the same,
-    // and the failed run leaves it, said so, rather than deleting a file it cannot name.
-    let dir = temp("unidentified");
-    let out = dir.join("out");
-    let _h = hook(&out, "identify", |name| {
-        if name == "a.txt" {
-            Err(format!("errno:{}", libc::EIO))
-        } else {
+fn a_file_whose_identity_cannot_be_read_fails_the_run_which_leaves_it_and_says_so() {
+    // a.txt made, its identity not readable (injected at the fstat); every later step goes well
+    // (the run's other file, its own end). The run fails all the same, and before done: it
+    // could not tell a.txt from a file another hand put at that name, so it leaves it, said so,
+    // and deletes its other file. The same at done itself: done is left too, with refused.txt,
+    // and the next run lists the dir as refused.
+    for at in ["a.txt", DONE] {
+        let dir = temp(&format!("unidentified-{at}"));
+        let out = dir.join("out");
+        let tried: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen = tried.clone();
+        let _w = hook(&out, "write", move |name| {
+            seen.lock().unwrap().push(name.to_string());
             Ok(())
-        }
+        });
+        let _h = hook(&out, "identify", move |name| match name == at {
+            true => Err(format!("errno:{}", libc::EIO)),
+            false => Ok(()),
+        });
+        let e = run_in(FIRST, &out, writes).unwrap_err();
+        let run = only_run(&out);
+        assert_eq!(
+            e,
+            format!(
+                "could not be identified when it was made, so left: {} ({}); run dir: {}",
+                run.join(at).display(),
+                std::io::Error::from_raw_os_error(libc::EIO),
+                run.display()
+            ),
+            "{at}"
+        );
+        // At a.txt, done is never made (the check before it).
+        let want: &[&str] = match at == DONE {
+            true => &["a.txt", "a.png", DONE, REFUSED],
+            false => &["a.txt", "a.png", REFUSED],
+        };
+        assert_eq!(*tried.lock().unwrap(), want, "{at}");
+        let mut want = vec![at.to_string(), REFUSED.to_string()];
+        want.sort();
+        assert_eq!(names(&run), want, "{at}");
+        assert_eq!(
+            std::fs::read_to_string(run.join(REFUSED)).unwrap(),
+            format!("{e}\n"),
+            "{at}"
+        );
+        let name = run.file_name().unwrap().to_string_lossy().into_owned();
+        drop((_w, _h));
+        let ((), w) = run_in(FIRST, &out, writes).unwrap();
+        assert_eq!(w.incomplete, [format!("{name} (refused)")], "{at}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_kept_diagnostic_whose_identity_cannot_be_read_is_said_too() {
+    // gates.jsonl (a file a failed run keeps) made, its identity not readable; the run then
+    // fails for its own reason. Its cleanup leaves the snapshot, as it always does, and its
+    // error and refused.txt say it could not be identified.
+    let dir = temp("unidentified-kept");
+    let out = dir.join("out");
+    let _h = hook(&out, "identify", |name| match name == "gates.jsonl" {
+        true => Err(format!("errno:{}", libc::EIO)),
+        false => Ok(()),
     });
     let e = run_in(FIRST, &out, fails).unwrap_err();
     let run = only_run(&out);
-    let left = format!(
-        "{} (could not be identified when it was made)",
-        run.join("a.txt").display()
+    assert_eq!(
+        e,
+        format!(
+            "no rows; could not be identified when it was made, so left: {} ({}); run dir: {}",
+            run.join("gates.jsonl").display(),
+            std::io::Error::from_raw_os_error(libc::EIO),
+            run.display()
+        )
     );
-    assert!(e.contains(&left), "{e}");
-    assert_eq!(names(&run), ["a.txt", "gates.jsonl", REFUSED]);
+    assert_eq!(names(&run), ["gates.jsonl", REFUSED]);
+    assert_eq!(
+        std::fs::read_to_string(run.join(REFUSED)).unwrap(),
+        format!("{e}\n")
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -915,7 +975,8 @@ fn a_run_dir_with_refused_and_done_is_listed_as_refused() {
 #[test]
 fn a_done_that_fails_once_made_is_deleted_with_the_rest() {
     // done made, then its write fails (injected after the create): no done is left, the
-    // diagnostics are, and refused.txt says the returned error.
+    // diagnostics are, and refused.txt says the returned error. done is the first file the
+    // cleanup deletes: a cleanup stopped partway leaves no done.
     let dir = temp("done-made");
     let out = dir.join("out");
     let _h = hook(&out, "fill", |name| {
@@ -925,12 +986,19 @@ fn a_done_that_fails_once_made_is_deleted_with_the_rest() {
             Ok(())
         }
     });
+    let order: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let seen = order.clone();
+    let _d = hook(&out, "delete", move |name| {
+        seen.lock().unwrap().push(name.to_string());
+        Ok(())
+    });
     let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
         writes(run)?;
         run.write("gates.jsonl", b"snapshot")
     })
     .unwrap_err();
     let run = only_run(&out);
+    assert_eq!(*order.lock().unwrap(), [DONE, "a.txt", "a.png"]);
     assert!(
         e.starts_with(&format!(
             "{}: No space left on device",
@@ -1099,7 +1167,9 @@ fn each_file_the_run_made_is_still_held_when_its_delete_is_checked() {
     let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
         writes(run)?;
         for m in run.made.borrow().iter() {
-            seen.lock().unwrap().push((m.name.clone(), m.id.unwrap()));
+            seen.lock()
+                .unwrap()
+                .push((m.name.clone(), m.id.clone().unwrap()));
         }
         Err("no rows".into())
     })
@@ -1218,4 +1288,121 @@ fn a_soft_limit_on_open_files_above_the_cap_is_kept() {
     assert_eq!(before.0.to_string(), std::env::var(SOFT).unwrap());
     at::raise_open_files();
     assert_eq!(nofile(), before);
+}
+
+#[test]
+fn a_run_dir_moved_again_while_it_is_cleaned_up_is_said_to_have_moved_once() {
+    // The run dir renamed away at the run's last file (the check before done finds it there),
+    // then again while the failed run deletes its files: the error says once that it moved,
+    // where the check found it, and the refusal is written where the dir is at the end.
+    let dir = temp("moved-twice");
+    let real = dir.canonicalize().unwrap();
+    let out = dir.join("out");
+    let (one, two) = (dir.join("one"), dir.join("two"));
+    let (o, a) = (out.clone(), one.clone());
+    let _w = hook(&out, "write", move |name| {
+        if name == "a.png" {
+            std::fs::rename(only_run(&o), &a).unwrap();
+        }
+        Ok(())
+    });
+    let (a, b) = (one.clone(), two.clone());
+    let _d = hook(&out, "delete", move |name| {
+        if name == "a.txt" {
+            std::fs::rename(&a, &b).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    assert_eq!(
+        e.matches("was moved or removed while the run wrote it")
+            .count(),
+        1,
+        "{e}"
+    );
+    let now = format!("(it is now at {})", real.join("one").display());
+    assert!(e.contains(&now), "{e}");
+    assert_eq!(names(&two), [REFUSED]);
+    assert_eq!(
+        std::fs::read_to_string(two.join(REFUSED)).unwrap(),
+        format!("{e}\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_of_the_run_moved_to_another_name_is_left_and_said() {
+    // After the run wrote a.txt, a.png and c.txt, another hand renames a.txt within the run
+    // dir, links a.png elsewhere and deletes its name, and deletes c.txt. Each name the run made
+    // is gone, but a.txt and a.png still have a name (their link counts, read on the fds the run
+    // holds): both are left, said to have moved; c.txt has none, so it is taken as deleted.
+    let dir = temp("moved-name");
+    let out = dir.join("out");
+    let elsewhere = dir.join("elsewhere.png");
+    let (o, el) = (out.clone(), elsewhere.clone());
+    let _h = hook(&out, "write", move |name| {
+        if name == "gates.jsonl" {
+            let run = only_run(&o);
+            std::fs::rename(run.join("a.txt"), run.join("b.txt")).unwrap();
+            std::fs::hard_link(run.join("a.png"), &el).unwrap();
+            std::fs::remove_file(run.join("a.png")).unwrap();
+            std::fs::remove_file(run.join("c.txt")).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        writes(run)?;
+        run.write("c.txt", b"c")?;
+        run.write("gates.jsonl", b"snapshot")?;
+        Err("no rows".into())
+    })
+    .unwrap_err();
+    let run = only_run(&out);
+    assert_eq!(
+        e,
+        format!(
+            "no rows; left, as it could not be deleted: {} (moved to another name), {} (moved \
+             to another name); run dir: {}",
+            run.join("a.txt").display(),
+            run.join("a.png").display(),
+            run.display()
+        )
+    );
+    assert_eq!(names(&run), ["b.txt", "gates.jsonl", REFUSED]);
+    assert_eq!(std::fs::read(run.join("b.txt")).unwrap(), b"a");
+    assert!(elsewhere.is_file());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_link_at_a_name_the_run_made_to_that_very_file_is_still_another_file() {
+    // After the run wrote a.txt, another hand renames it aside and puts a link to it at its
+    // name: what the link points at is the run's file (the inode it holds), the link is not.
+    // The check reads the entry itself (the link not followed), so the link is left, said so;
+    // the file aside is left too (its name is not the run's).
+    let dir = temp("linked-same");
+    let out = dir.join("out");
+    let o = out.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name == "gates.jsonl" {
+            let run = only_run(&o);
+            std::fs::rename(run.join("a.txt"), run.join("a.aside")).unwrap();
+            std::os::unix::fs::symlink(run.join("a.aside"), run.join("a.txt")).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, fails).unwrap_err();
+    let run = only_run(&out);
+    let left = format!(
+        "{} (not the file the run made)",
+        run.join("a.txt").display()
+    );
+    assert!(e.contains(&left), "{e}");
+    assert_eq!(
+        std::fs::read_link(run.join("a.txt")).unwrap(),
+        run.join("a.aside")
+    );
+    assert_eq!(std::fs::read(run.join("a.aside")).unwrap(), b"a");
+    assert_eq!(names(&run), ["a.aside", "a.txt", "gates.jsonl", REFUSED]);
+    let _ = std::fs::remove_dir_all(&dir);
 }
