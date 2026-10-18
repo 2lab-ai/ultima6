@@ -92,7 +92,20 @@ fn a_run_writes_its_own_dir_alone_and_done_last() {
     // A --out not there yet: made; the run's dir in it, nothing else; done last.
     let dir = temp("own-dir");
     let out = dir.join("out");
-    let ((), w) = run_in(FIRST, &out, writes).unwrap();
+    // The order of the writes, through the seam; and no done while the run's callback runs.
+    let order: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let seen = order.clone();
+    let _h = hook(&out, "write", move |name| {
+        seen.lock().unwrap().push(name.to_string());
+        Ok(())
+    });
+    let ((), w) = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        writes(run)?;
+        assert!(!run.dir().join(DONE).exists(), "done while the run writes");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(*order.lock().unwrap(), ["a.txt", "a.png", DONE]);
     assert_eq!(w.dir.parent().unwrap(), out.canonicalize().unwrap());
     let run = w.dir.file_name().unwrap().to_string_lossy().into_owned();
     assert!(run.starts_with("run-") && run.ends_with(&format!("-{}", std::process::id())));
@@ -516,5 +529,51 @@ fn a_run_dir_that_cannot_be_read_is_listed_as_such_not_as_incomplete() {
         w.text()
     );
     assert_eq!(names(&done.dir), ["a.png", "a.txt", DONE]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_whose_done_cannot_be_written_fails_and_keeps_its_diagnostics_alone() {
+    // The reviewer's K1: done not written (no room): the run fails, its outputs are deleted,
+    // there is no done, and refused.txt says why.
+    let dir = temp("no-done");
+    let out = dir.join("out");
+    let _h = hook(&out, "write", |name| {
+        if name == DONE {
+            Err("done: no room left".into())
+        } else {
+            Ok(())
+        }
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        writes(run)?;
+        run.write("gates.jsonl", b"snapshot")
+    })
+    .unwrap_err();
+    let run = only_run(&out);
+    assert_eq!(e, format!("done: no room left; run dir: {}", run.display()));
+    assert_eq!(names(&run), ["gates.jsonl", REFUSED]);
+    assert_eq!(
+        std::fs::read_to_string(run.join(REFUSED)).unwrap(),
+        format!("{e}\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_incomplete_runs_are_listed_oldest_first_whatever_order_they_were_made_in() {
+    // Five incomplete runs made out of their order (their names, by time: 3, 1, 5, 2, 4): the
+    // list is by time, the oldest first.
+    let dir = temp("sorted");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    for k in [3u128, 1, 5, 2, 4] {
+        std::fs::create_dir(out.join(run_name(k * 1_000_000_000, 7))).unwrap();
+    }
+    let ((), w) = run_in(FIRST, &out, writes).unwrap();
+    let want: Vec<String> = (1..=5u128)
+        .map(|k| run_name(k * 1_000_000_000, 7))
+        .collect();
+    assert_eq!(w.incomplete, want);
     let _ = std::fs::remove_dir_all(&dir);
 }
