@@ -1265,6 +1265,51 @@ fn a_window_at_a_south_pair_of_level_1_is_listed_there() {
 }
 
 #[test]
+fn the_mark_before_the_pair_placed_at_is_at_as_cell_alone() {
+    // B at (4, 3) and again at (4, 5), the grass east of both: a window placed at B over the
+    // grass draws that pair twice, and its legend leads with `>` only the line at A's cell.
+    let mut g = game();
+    g.world.chunks[0] = chunk(&[(4, 3, B), (4, 5, B)]);
+    let images = BTreeMap::from([(B, near(&g, B))]);
+    let (text, left) = gate_log(&g, &images);
+    assert_eq!(left, images);
+    let f = state(&g, &text, &left).unwrap();
+    let li = f.last.iter().position(|l| l.pair == BG).unwrap();
+    let by: BTreeMap<Pair, usize> = f
+        .last
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (l.pair, i))
+        .collect();
+    let w = Window {
+        origin: Origin::Coverage,
+        survivor: 0,
+        records: vec![B],
+        placement: Placement::Pair,
+        at: f.last[li].at,
+        edge: Edge::East,
+        pair: Some(li),
+        anchor: None,
+        pieces: Vec::new(),
+        part: (1, 1),
+        rest: false,
+    };
+    let d = draw_window(&g, &f, &by, &w);
+    let cells: Vec<(usize, usize)> = d.ticks.iter().filter(|t| t.1 == li).map(|t| t.0).collect();
+    assert_eq!(cells, [A_CELL, (A_CELL.0, A_CELL.1 + 2)]);
+    let legend = legend_of(&f, &w, &d);
+    let led: Vec<&String> = legend.iter().filter(|l| l.starts_with('>')).collect();
+    let (c, r) = A_CELL;
+    assert_eq!(led.len(), 1, "{legend:?}");
+    assert!(
+        led[0].starts_with(&format!(">{c},{r} e map ")),
+        "{legend:?}"
+    );
+    let other = format!(" {c},{} e map ", r + 2);
+    assert!(legend.iter().any(|l| l.starts_with(&other)), "{legend:?}");
+}
+
+#[test]
 fn a_window_is_placed_at_the_largest_ratio_over_limit() {
     // Three pairs of record 9 whose limits differ: by ratio alone the third is the largest, by
     // ratio / limit the second and the third tie (2.0) and the second is first in pair order;
