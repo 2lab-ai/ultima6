@@ -792,6 +792,18 @@ fn each_file_the_run_makes_is_held_open_until_it_ends_and_a_new_one_at_its_name_
         run.join("a.txt").display()
     );
     assert!(e.contains(&left), "{e}");
+    // The search finds an fd into the run dir when there is one (a file of it held here, then
+    // deleted: found by its number all the same), so that it finding none says something.
+    {
+        use std::os::fd::AsRawFd as _;
+        let probe = File::open(run.join(REFUSED)).unwrap();
+        std::fs::remove_file(run.join(REFUSED)).unwrap();
+        let found = open_into(&run);
+        assert!(
+            found.iter().any(|(fd, _)| *fd == probe.as_raw_fd()),
+            "{found:?}"
+        );
+    }
     assert!(open_into(&run).is_empty(), "{:?}", open_into(&run));
     let _ = std::fs::remove_dir_all(&dir);
 }

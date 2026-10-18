@@ -1169,6 +1169,19 @@ fn run_dir(out: &Path) -> PathBuf {
         .unwrap_or_else(|| panic!("no run dir in {}", out.display()))
 }
 
+/// The sheets a first pass of the world's rows draws at `--per 2 --seed 1` with no control
+/// window: each sampled cell's, at ×4 and ×2.
+const SHEETS_PER_2: [&str; 8] = [
+    "pass-gen-mmpx.png",
+    "pass-gen-mmpx-s2.png",
+    "fail-1.1-1.5-gen-gen.png",
+    "fail-1.1-1.5-gen-gen-s2.png",
+    "fail-1.1-1.5-gen-mmpx.png",
+    "fail-1.1-1.5-gen-mmpx-s2.png",
+    "fail-gt1.5-gen-mmpx.png",
+    "fail-gt1.5-gen-mmpx-s2.png",
+];
+
 #[test]
 fn a_first_pass_writes_its_own_run_dir_alone() {
     // The cases of the final read's run dir, for the first pass: a second run's dir holds its
@@ -1250,11 +1263,15 @@ fn a_first_pass_writes_its_own_run_dir_alone() {
     let wrote: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let w = wrote.clone();
     let o = out.clone();
-    // The files a run of these options makes before done: the snapshot, its sheets (as the
-    // last run that ended well drew them) and samples.tsv.
-    let mut expected: Vec<String> = s3.sheets.clone();
+    // The files a run of these options makes before done: the snapshot, its sheets (named here,
+    // not taken from a run's report) and samples.tsv.
+    let mut expected: Vec<String> = SHEETS_PER_2.iter().map(|s| s.to_string()).collect();
     expected.extend(["gates.jsonl".to_string(), "samples.tsv".to_string()]);
     let expected = sorted(expected);
+    assert_eq!(
+        sorted(s3.sheets.clone()),
+        sorted(SHEETS_PER_2.map(String::from).to_vec())
+    );
     let late = out_dir::hook(&out, "write", move |n| {
         w.lock().unwrap().push(n.to_string());
         if n == out_dir::DONE {
@@ -1311,7 +1328,8 @@ fn a_first_pass_writes_its_own_run_dir_alone() {
 fn the_first_pass_snapshot_is_read_through_the_run_dir_not_by_its_path() {
     // The run dir renamed away once gates.jsonl is written, before it is read back: read
     // through the dir the run holds open, the snapshot is there (by its path it is not), so the
-    // run goes on in the dir where it is now and fails at its end, saying where that is.
+    // run goes on in the dir where it is now, drawing each sheet and samples.tsv, and fails at
+    // its end, at the check of where its dir is, and there alone, saying where that is.
     let g = game();
     let (dir, work, slices) = setup("read-through", &world_rows());
     let out = dir.join("calibrate");
@@ -1326,16 +1344,39 @@ fn the_first_pass_snapshot_is_read_through_the_run_dir_not_by_its_path() {
     };
     let away = dir.join("away");
     let (o, to) = (out.clone(), away.clone());
+    let was: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>> = Default::default();
+    let w = was.clone();
     let _h = out_dir::hook(&out, "snapshot", move |name| {
         if name == "gates.jsonl" {
-            std::fs::rename(run_dir(&o), &to).unwrap();
+            let run = run_dir(&o).canonicalize().unwrap();
+            std::fs::rename(&run, &to).unwrap();
+            *w.lock().unwrap() = Some(run);
         }
         Ok(())
     });
+    let wrote: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let seen = wrote.clone();
+    let _w = out_dir::hook(&out, "write", move |name| {
+        seen.lock().unwrap().push(name.to_string());
+        Ok(())
+    });
     let e = calibrate(&g, &work, &opts).unwrap_err();
-    assert!(!e.contains("No such file"), "{e}");
-    let now = format!("(it is now at {})", away.canonicalize().unwrap().display());
-    assert!(e.contains(&now), "{e}");
+    let run = was.lock().unwrap().take().unwrap();
+    assert_eq!(
+        e,
+        format!(
+            "the run dir {} was moved or removed while the run wrote it (it is now at {}): \
+             nothing is written or deleted but in the dir it made; run dir: {}",
+            run.display(),
+            away.canonicalize().unwrap().display(),
+            run.display()
+        )
+    );
+    // Every sheet and samples.tsv written after the rename, then no done: the check before it.
+    let mut want = vec!["gates.jsonl".to_string()];
+    want.extend(SHEETS_PER_2.map(String::from));
+    want.extend(["samples.tsv".to_string(), "refused.txt".to_string()]);
+    assert_eq!(*wrote.lock().unwrap(), want);
     assert_eq!(files_in(&away), ["gates.jsonl", "refused.txt"]);
     assert!(files_in(&out).is_empty(), "{:?}", files_in(&out));
     let _ = std::fs::remove_dir_all(&dir);

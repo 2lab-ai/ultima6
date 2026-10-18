@@ -3360,16 +3360,41 @@ fn the_snapshots_are_read_through_the_run_dir_not_by_its_path() {
     let o = options(&dir);
     let away = dir.join("away");
     let (out, to) = (o.out.clone(), away.clone());
+    let was: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>> = Default::default();
+    let w = was.clone();
     let _h = hook(&o.out, "snapshot", move |name| {
         if name == "gates.jsonl" {
-            std::fs::rename(run_dir(&out), &to).unwrap();
+            let run = run_dir(&out).canonicalize().unwrap();
+            std::fs::rename(&run, &to).unwrap();
+            *w.lock().unwrap() = Some(run);
         }
         Ok(())
     });
+    let wrote: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let seen = wrote.clone();
+    let _w = hook(&o.out, "write", move |name| {
+        seen.lock().unwrap().push(name.to_string());
+        Ok(())
+    });
     let e = calibrate_final(&g, &work, &o).unwrap_err();
-    assert!(!e.contains("No such file"), "{e}");
-    let now = format!("(it is now at {})", away.canonicalize().unwrap().display());
-    assert!(e.contains(&now), "{e}");
+    // It failed at the check of where its dir is, and there alone: after samples.tsv, no done.
+    let run = was.lock().unwrap().take().unwrap();
+    assert_eq!(
+        e,
+        format!(
+            "the run dir {} was moved or removed while the run wrote it (it is now at {}): \
+             nothing is written or deleted but in the dir it made; run dir: {}",
+            run.display(),
+            away.canonicalize().unwrap().display(),
+            run.display()
+        )
+    );
+    let wrote = wrote.lock().unwrap().clone();
+    assert_eq!(
+        wrote[wrote.len() - 2..],
+        ["samples.tsv", REFUSED],
+        "{wrote:?}"
+    );
     assert_eq!(files_in(&away), REFUSAL);
     assert!(files_in(&o.out).is_empty(), "{:?}", files_in(&o.out));
     let _ = std::fs::remove_dir_all(&dir);
