@@ -3095,11 +3095,26 @@ fn a_run_whose_masters_cannot_be_read_again_keeps_its_diagnostics_alone() {
     assert_eq!(files, REFUSAL);
 }
 
+/// Whether this process runs with privilege (euid 0), when a permission it drops does not hold:
+/// a test that needs it says so and is skipped.
+fn privileged(test: &str) -> bool {
+    // SAFETY: geteuid(2) reads the process's ids; no memory involved.
+    let root = unsafe { libc::geteuid() } == 0;
+    if root {
+        eprintln!("{test}: skipped: it needs an unprivileged user (euid 0 reads any file)");
+    }
+    root
+}
+
 #[test]
 fn a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone() {
     // The reviewer's P7b: B's master unreadable once it is read (mode 000), so the re-check at
-    // the end cannot read it.
+    // the end cannot read it. Needs an unprivileged user: skipped with privilege (the same
+    // failure injected, which needs none: the test below).
     use std::os::unix::fs::PermissionsExt;
+    if privileged("a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone") {
+        return;
+    }
     let master: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>> = Default::default();
     let at = master.clone();
     let (e, files) = failed_run("unreadable", |out| {
@@ -3121,6 +3136,19 @@ fn a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone() {
     let m = master.lock().unwrap().take().unwrap();
     let _ = std::fs::set_permissions(&m, std::fs::Permissions::from_mode(0o644));
     assert!(e.contains("Permission denied"), "{e}");
+    assert_eq!(files, REFUSAL);
+}
+
+#[test]
+fn a_run_whose_recheck_fails_keeps_its_diagnostics_alone() {
+    // The re-check's read failing as an unreadable master makes it, injected (so it holds
+    // whatever the user's privilege): the same diagnostics alone.
+    let (e, files) = failed_run("recheck-injected", |out| {
+        vec![hook(out, "recheck", |_| {
+            Err("slices/t-5.png: Permission denied (os error 13)".into())
+        })]
+    });
+    assert!(e.starts_with("slices/t-5.png: Permission denied"), "{e}");
     assert_eq!(files, REFUSAL);
 }
 

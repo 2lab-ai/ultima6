@@ -2127,6 +2127,7 @@ fn run_final(
             changed.push(name.to_string());
         }
     }
+    out_dir::seam(&o.out, "recheck", "")?;
     let masters = slices.changed(&dir)?.len();
     if masters > 0 {
         changed.push(format!("{masters} masters of slices/"));
