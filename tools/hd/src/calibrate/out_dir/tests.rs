@@ -1701,6 +1701,82 @@ fn a_refusal_whose_identity_cannot_be_read_is_said_to_be_left() {
 }
 
 #[test]
+fn a_run_dir_swapped_for_a_link_while_it_is_listed_is_not_read_through() {
+    // An incomplete run in --out, and a link of the owner's named as a run dir, to a dir with a
+    // done. The incomplete run's dir is opened to be read, then swapped for a link to that dir
+    // (at the read of its markers): its markers are read in the dir opened, so it is still
+    // incomplete; the link that was there is no run dir; neither link is followed, and the dir
+    // they point at is as it was.
+    let dir = temp("listed-link");
+    let out = dir.join("out");
+    let sentinel = dir.join("sentinel");
+    std::fs::create_dir_all(&sentinel).unwrap();
+    std::fs::write(sentinel.join(DONE), b"").unwrap();
+    std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
+    std::os::unix::fs::symlink(&sentinel, out.join(run_name(2, 8))).unwrap();
+    let had = tree(&sentinel);
+    let (o, aside, to) = (out.clone(), dir.join("aside"), sentinel.clone());
+    let n = run_name(1, 7);
+    let _h = hook(&out, "stat", move |name| {
+        let at = o.join(&n);
+        if name == n && !at.is_symlink() {
+            std::fs::rename(&at, &aside).unwrap();
+            std::os::unix::fs::symlink(&to, &at).unwrap();
+        }
+        Ok(())
+    });
+    let ((), w) = run_in(FIRST, &out, writes).unwrap();
+    assert_eq!(w.incomplete, [run_name(1, 7)]);
+    assert!(w.unreadable.is_empty(), "{:?}", w.unreadable);
+    assert_eq!(tree(&sentinel), had);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_dir_beside_the_run_that_cannot_be_opened_is_said_and_out_of_files_fails_the_run() {
+    // Two incomplete runs in --out. One cannot be opened to be read (an error of the system's,
+    // injected): it is listed as one that cannot be read, with why. Then out of open files at
+    // that open: the run fails before it makes anything, saying how to go on.
+    let dir = temp("list-open");
+    let out = dir.join("out");
+    std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
+    std::fs::create_dir_all(out.join(run_name(2, 8))).unwrap();
+    let errno = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(libc::EIO));
+    let (n, k) = (run_name(2, 8), errno.clone());
+    let _h = hook(&out, "list", move |name| match name == n {
+        true => Err(format!(
+            "errno:{}",
+            k.load(std::sync::atomic::Ordering::SeqCst)
+        )),
+        false => Ok(()),
+    });
+    let ((), w) = run_in(FIRST, &out, writes).unwrap();
+    assert_eq!(w.incomplete, [run_name(1, 7)]);
+    assert_eq!(
+        w.unreadable,
+        [format!(
+            "{} ({})",
+            run_name(2, 8),
+            std::io::Error::from_raw_os_error(libc::EIO)
+        )]
+    );
+    errno.store(libc::EMFILE, std::sync::atomic::Ordering::SeqCst);
+    let had = tree(&out);
+    let e = run_in(FIRST, &out, writes).unwrap_err();
+    assert_eq!(
+        e,
+        format!(
+            "{}: {} (a run holds each file it makes open until it ends: raise the limit on open \
+             files, ulimit -n)",
+            out.canonicalize().unwrap().join(run_name(2, 8)).display(),
+            std::io::Error::from_raw_os_error(libc::EMFILE)
+        )
+    );
+    assert_eq!(tree(&out), had);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_run_dir_out_of_open_files_to_be_opened_says_how_to_go_on() {
     // In a child under a limit of 64 open files: the run dir made, then every fd left taken (by
     // the test) before it is opened. The open meets the system's "too many open files": the run

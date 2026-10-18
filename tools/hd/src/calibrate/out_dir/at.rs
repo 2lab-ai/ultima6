@@ -50,8 +50,8 @@ pub fn mkdir(dir: &File, name: &str) -> io::Result<()> {
 
 /// The dir `name` of the open dir `dir`, opened: refused when it is a link (`O_NOFOLLOW`) or
 /// not a dir.
-pub fn open_dir_at(dir: &File, name: &str) -> io::Result<File> {
-    let n = c(name.as_bytes())?;
+pub fn open_dir_at(dir: &File, name: &[u8]) -> io::Result<File> {
+    let n = c(name)?;
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: an open dir and a NUL-terminated name that outlive the call.
     owned(unsafe { libc::openat(dir.as_raw_fd(), n.as_ptr(), flags) })
@@ -82,14 +82,13 @@ pub(crate) fn ids(st: &libc::stat) -> (u64, u64) {
     (st.st_dev as u64, st.st_ino as u64)
 }
 
-/// The status of the entry at `path` below the open dir `dir` (a name, or `<dir>/<name>`), of
-/// the entry itself (a link at its last part is not followed), with no file opened (`fstatat`,
-/// `AT_SYMLINK_NOFOLLOW`).
-fn stat_at(dir: &File, path: &[u8]) -> io::Result<libc::stat> {
-    let n = c(path)?;
+/// The status of the entry `name` of the open dir `dir`, of the entry itself (a link is not
+/// followed), with no file opened (`fstatat`, `AT_SYMLINK_NOFOLLOW`).
+fn stat_at(dir: &File, name: &[u8]) -> io::Result<libc::stat> {
+    let n = c(name)?;
     // SAFETY: an all-zero `stat` is a valid value for the call to fill.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: an open dir, a NUL-terminated path and a `stat` that outlive the call.
+    // SAFETY: an open dir, a NUL-terminated name and a `stat` that outlive the call.
     done(unsafe {
         libc::fstatat(
             dir.as_raw_fd(),
@@ -107,15 +106,9 @@ pub fn id_at(dir: &File, name: &str) -> io::Result<(u64, u64)> {
     stat_at(dir, name.as_bytes()).map(|st| ids(&st))
 }
 
-/// Whether the entry `name` of the open dir `dir` is a dir itself (a link to one is not).
-pub fn is_dir_at(dir: &File, name: &[u8]) -> io::Result<bool> {
-    stat_at(dir, name).map(|st| st.st_mode & libc::S_IFMT == libc::S_IFDIR)
-}
-
-/// Whether anything is at `path` below the open dir `dir` (`<dir>/<name>`), itself: a link
-/// there too, followed or not.
-pub fn exists_at(dir: &File, path: &[u8]) -> io::Result<bool> {
-    match stat_at(dir, path) {
+/// Whether anything is at the name `name` of the open dir `dir`, itself (a link there too).
+pub fn exists_at(dir: &File, name: &[u8]) -> io::Result<bool> {
+    match stat_at(dir, name) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),

@@ -39,8 +39,8 @@
 //! A run that ends well writes `done` last, and its report names its dir: that path is the only
 //! pointer to it (no link, no pointer file). A run dir with no `done`, or with a `refused.txt`,
 //! is an incomplete run (one that failed, was killed, or is still going): a run lists those it
-//! finds in the `--out` it opened (through it, not by its path) when it starts, and leaves them
-//! as they are.
+//! finds in the `--out` it opened when it starts (each run dir opened through it, a link at its
+//! name never followed, and its markers read through that dir), and leaves them as they are.
 //! Cleaning up old runs is the person's job. A run holds each file it makes open until it ends,
 //! so it raises its limit on open files first, as far as the system lets it. Unix only (the
 //! crate is), on a system that says where an open dir is (macOS `F_GETPATH`, Linux
@@ -257,19 +257,40 @@ fn oldest_first(mut names: Vec<String>) -> Vec<String> {
 
 /// The run dirs of the open dir `outfd` (`--out`, at `out` when it was opened) with no
 /// [`DONE`], or with a [`REFUSED`] (`(refused)`: a run that failed, whose `done` may be left
-/// too), and those that cannot be read (with why), each the oldest first: listed and read
-/// through `outfd` ([`at::names`], `fstatat`), never by a path. Read only. `key` is `--out` as
-/// given (the test seams').
+/// too), and those that cannot be read (with why), each the oldest first: listed through
+/// `outfd` ([`at::names`]), each run dir opened through it (a link or a file at its name is no
+/// run dir, and is not followed) and its markers read through that dir (`fstatat`), never by a
+/// path. Read only. Out of open files, the listing fails, saying how to go on. `key` is `--out`
+/// as given (the test seams').
 fn incomplete(key: &Path, outfd: &File, out: &Path) -> Result<(Vec<String>, Vec<String>), String> {
     let (mut found, mut unreadable) = (Vec::new(), Vec::new());
     for raw in at::names(outfd).map_err(|e| os_error(out, &e))? {
         let name = String::from_utf8_lossy(&raw).into_owned();
-        if !name.starts_with("run-") || !at::is_dir_at(outfd, &raw).unwrap_or(false) {
+        if !name.starts_with("run-") {
             continue;
         }
+        let dir = match io_seam(key, "list", &name).and_then(|()| at::open_dir_at(outfd, &raw)) {
+            Ok(d) => d,
+            // A link or a file at the name, or nothing there now: no run dir.
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::ELOOP | libc::ENOTDIR | libc::ENOENT)
+                ) =>
+            {
+                continue;
+            }
+            Err(e) if e.raw_os_error() == Some(libc::EMFILE) => {
+                return Err(os_error(&out.join(&name), &e));
+            }
+            Err(e) => {
+                unreadable.push(format!("{name} ({e})"));
+                continue;
+            }
+        };
         let has = |file: &str| {
             io_seam(key, "stat", &name)?;
-            at::exists_at(outfd, &[&raw[..], b"/", file.as_bytes()].concat())
+            at::exists_at(&dir, file.as_bytes())
         };
         match (has(DONE), has(REFUSED)) {
             (Ok(_), Ok(true)) => found.push(format!("{name} (refused)")),
@@ -646,7 +667,7 @@ pub fn run_in<T>(
         with_incomplete(format!("{}: {then}", os_error(&dir, &e)))
     };
     let open = io_seam(out, "open", &name)
-        .and_then(|()| at::open_dir_at(&outfd, &name))
+        .and_then(|()| at::open_dir_at(&outfd, name.as_bytes()))
         .map_err(unopened)?;
     let id = at::id(&open).map_err(unopened)?;
     let r = Run {
