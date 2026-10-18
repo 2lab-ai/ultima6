@@ -21,7 +21,8 @@
 //!   in the source plane. An animated tile is drawn at frame 0 (counter 0 of its first slot);
 //!   in the pair's two cells a tile whose frames include the pair's record is drawn as that
 //!   record, so the join shown is the one measured. `samples.tsv` says when a frame was chosen
-//!   (`frames`: `frame0`, `pair`).
+//!   (`frames`: `frame0`, `pair`), and `missing` where a join cell draws no tile with the pair's
+//!   record (the window does not show the pair measured).
 //! - **The panels** ([`panels`]): the frame composed by the page's compositor
 //!   ([`Compositor::compose`]), at S 4 and at S 2: classic (the frame's colours, nearest), no pack
 //!   (MMPX of every record) and the pack of `--slices` (each master box-averaged ×8 to ×4 as
@@ -479,16 +480,25 @@ pub struct Framed {
     pub frame0: bool,
     /// A tile of a join cell was drawn as the pair's record, not as its frame 0.
     pub pair_frame: bool,
+    /// A join cell draws no tile whose frames include the pair's record there: the window does
+    /// not show the pair measured.
+    pub missing: bool,
 }
 
 impl Framed {
-    /// `samples.tsv`'s `frames`.
-    pub fn frames(&self) -> &'static str {
-        match (self.frame0, self.pair_frame) {
-            (false, false) => "-",
-            (true, false) => "frame0",
-            (false, true) => "pair",
-            (true, true) => "frame0+pair",
+    /// `samples.tsv`'s `frames`: `frame0`, `pair` and `missing` as they apply, joined by `+`;
+    /// `-` for none.
+    pub fn frames(&self) -> String {
+        let marks = [
+            (self.frame0, "frame0"),
+            (self.pair_frame, "pair"),
+            (self.missing, "missing"),
+        ];
+        let on: Vec<&str> = marks.iter().filter(|m| m.0).map(|m| m.1).collect();
+        if on.is_empty() {
+            "-".into()
+        } else {
+            on.join("+")
         }
     }
 }
@@ -530,16 +540,18 @@ pub fn frame(game: &Game, at: At, edge: Edge, pair: Option<Pair>) -> Framed {
         fb,
         frame0: false,
         pair_frame: false,
+        missing: false,
     };
+    let mut shown = [false; 2];
     let cells = window(game, at);
     let mut drawn = Drawn::of(game);
     for r in 0..ROWS {
         for c in 0..COLS {
             let want = pair.and_then(|p| {
                 if (c, r) == A_CELL {
-                    Some(p.a)
+                    Some((0, p.a))
                 } else if (c, r) == b_cell(edge) {
-                    Some(p.b)
+                    Some((1, p.b))
                 } else {
                     None
                 }
@@ -548,7 +560,8 @@ pub fn frame(game: &Game, at: At, edge: Edge, pair: Option<Pair>) -> Framed {
                 let frames = drawn.records(t);
                 let first = frame0(game, t);
                 let rec = match want {
-                    Some(w) if frames.contains(&w) => {
+                    Some((side, w)) if frames.contains(&w) => {
+                        shown[side] = true;
                         out.pair_frame |= w != first;
                         w
                     }
@@ -561,6 +574,7 @@ pub fn frame(game: &Game, at: At, edge: Edge, pair: Option<Pair>) -> Framed {
             }
         }
     }
+    out.missing = pair.is_some() && shown != [true; 2];
     out
 }
 

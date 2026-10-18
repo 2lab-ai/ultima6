@@ -228,13 +228,22 @@ fn the_window_is_drawn_as_the_world_places_the_map_and_the_objects() {
     assert_eq!(f.fb.src(), want.src());
     // The other water at frame 0, the pair's at its own frame.
     assert_eq!(
-        (f.frame0, f.pair_frame, f.frames()),
-        (true, true, "frame0+pair")
+        (f.frame0, f.pair_frame, f.missing, f.frames().as_str()),
+        (true, true, false, "frame0+pair")
     );
     // Without the pair, the pair's water is at frame 0 too.
     let plain = frame(&g, at, Edge::East, None);
     assert_eq!(plain.frames(), "frame0");
     assert_ne!(plain.fb.pixels(), want.pixels());
+    // A pair whose record no tile of its cell draws: said.
+    let stone = Pair {
+        a: STONE,
+        b: GRASS,
+        edge: Edge::East,
+    };
+    let f = frame(&g, at, Edge::East, Some(stone));
+    assert_eq!((f.missing, f.frames().as_str()), (true, "frame0+missing"));
+    assert_eq!(f.fb.pixels(), plain.fb.pixels());
     // Off the levels: nothing drawn.
     let off = frame(&g, At { z: 5, x: 0, y: 0 }, Edge::East, None);
     assert!(off.fb.src().unwrap().iter().all(|s| *s == Src::CLASSIC));
