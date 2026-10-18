@@ -1601,31 +1601,28 @@ fn a_landings_code_at_a_table_another_landing_names_is_decided_by_the_order() {
             kind: HazardKind::IntoData
         }]
     );
-    // A script from the random order probe (synthetic bytes): taken before the landing whose
-    // table it reaches (block `k`'s no-match landing at 26, before the answered landing at 52
-    // that names the table its print at 29 holds), block `k`'s path is in for a round, and its
-    // read at 70 keeps the table at 49 over the code of the `a3`'s landing (at 63), which names
-    // that table: dropped. It stays dropped once block `k`'s path is, the next round.
+    // A script from the random order probe (synthetic bytes): the a1's landing at 61 (its loop
+    // stops on the `a2` at 60) jumps back into the direct code, whose print at 16 names the
+    // table at 58. Block `k`'s print at 78 reads from 60, inside that table's second string: the
+    // table keeps it, over the a1's landing's code. Taken first, that landing is dropped (its
+    // own code is in a table its path names); taken after block `k`'s landing, it stops at 60.
     let s = script(&[
-        0xf7, 0xef, 0x71, 0xf6, 0xa3, 0xa1, 0x01, 0xa7, 0x00, 0xb6, 0xa1, 0x01, 0xa7, 0x7a, 0x7a,
-        0x00, 0xef, 0x6b, 0xf6, 0xb5, 0xd2, 0x46, 0x00, 0x00, 0x00, 0x01, 0xa7, 0x63, 0x64, 0x00,
-        0x65, 0x66, 0x00, 0xb5, 0xd2, 0x62, 0x00, 0x00, 0x00, 0x01, 0xa7, 0xee, 0xb5, 0xd2, 0x1f,
-        0x00, 0x00, 0x00, 0x01, 0xb2, 0xa7, 0xa3, 0xa2, 0xb5, 0xd2, 0x31, 0x00, 0x00, 0x00, 0x01,
-        0xb2, 0xa7, 0xb5, 0xd2, 0x2a, 0x00, 0x00, 0x00, 0x01, 0xb2, 0xa7, 0xff,
+        0xf7, 0x61, 0x62, 0xef, 0x71, 0xf6, 0xb5, 0xd2, 0x3a, 0x00, 0x00, 0x00, 0xb1, 0xef, 0x71,
+        0xf6, 0xb5, 0xd2, 0x26, 0x00, 0x00, 0x00, 0xb1, 0xa1, 0x01, 0xa7, 0xb6, 0xb5, 0xd2, 0x19,
+        0x00, 0x00, 0x00, 0x01, 0xb2, 0xa7, 0xb5, 0xd2, 0x4d, 0x00, 0x00, 0x00, 0xb1, 0xb5, 0xd2,
+        0x4f, 0x00, 0x00, 0x00, 0xb1, 0xa2, 0xb0, 0x0a, 0x00, 0x00, 0x00, 0x7a, 0x7a, 0x00, 0x63,
+        0x64, 0x00, 0x65, 0x66, 0x00, 0xef, 0x6b, 0xf6, 0xb5, 0xd2, 0x3c, 0x00, 0x00, 0x00, 0xb1,
+        0x00, 0x61, 0x62, 0xff,
     ]);
     let [a, b] = in_both_orders(&s);
-    assert_eq!(
-        sorted_hazards(&a),
-        [
-            dropped(26, Scan::NoMatch, Reason::TableInCode),
-            dropped(63, Scan::Else, Reason::TableInCode)
-        ]
-    );
-    assert_eq!(
-        sorted_hazards(&b),
-        [dropped(26, Scan::NoMatch, Reason::TableInCode)]
-    );
-    assert!(matches!(item(&b, 63).kind, Kind::Op(_)));
+    assert_eq!(a.items, b.items);
+    let stopped = Hazard {
+        at: 61,
+        kind: HazardKind::IntoData,
+    };
+    let if_dropped = dropped(61, Scan::If, Reason::TableInCode);
+    assert!(a.hazards.contains(&if_dropped) && !a.hazards.contains(&stopped));
+    assert!(b.hazards.contains(&stopped) && !b.hazards.contains(&if_dropped));
 }
 
 #[test]
@@ -1693,6 +1690,57 @@ fn a_constant_index_past_a_landing_paths_table_drops_that_path() {
     let d = ok(&after_a_block(&tail));
     assert!(both_dropped(&d, Reason::TableIndex), "{:?}", d.hazards);
     assert!(!d.items.iter().any(|i| matches!(i.kind, Kind::Table(_))));
+}
+
+#[test]
+fn a_read_of_a_table_with_no_entry_reads_past_it() {
+    // At `x`, "zz" and the script's end, no NUL and no `b8`: a print with a computed index, or
+    // a search, reads on past the script. A direct path's read refuses the script.
+    let print = |x: u32| [&[0xb5][..], &lit32(x), &[0x01, 0xb2, 0xa7]].concat();
+    let search = |x: u32| {
+        [
+            &[0xa6, 0x01, 0xb2, 0xa8][..],
+            &lit32(x),
+            &[0x03, 0xb7, 0xa7],
+        ]
+        .concat()
+    };
+    let with = |op: &dyn Fn(u32) -> Vec<u8>, tail: &[u8]| {
+        let x = BODY + op(0).len() as u32 + 1;
+        let mut body = op(x);
+        body.push(0xb6);
+        body.extend_from_slice(tail);
+        (script(&body), x)
+    };
+    for (what, op) in [
+        ("print", &print as &dyn Fn(u32) -> Vec<u8>),
+        ("search", &search),
+    ] {
+        let (s, _) = with(op, b"zz");
+        assert_eq!(
+            refused(&s),
+            Refusal {
+                at: BODY,
+                reason: Reason::TableIndex
+            },
+            "{what}"
+        );
+    }
+    // A `b8` at the address ends a search there; a print reads past it.
+    let (s, x) = with(&search, b"\xb8");
+    let d = ok(&s);
+    let Kind::Table(t) = &item(&d, x).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert!(t.terminated && t.entries.is_empty());
+    assert_eq!(refused(&with(&print, b"\xb8").0).reason, Reason::TableIndex);
+    // On a landing's path, the landing is dropped.
+    let x = BODY + 12 + 10;
+    let mut tail = print(x);
+    tail.push(0xb6);
+    tail.extend(b"zz");
+    let d = ok(&after_a_block(&tail));
+    assert!(both_dropped(&d, Reason::TableIndex), "{:?}", d.hazards);
 }
 
 #[test]

@@ -60,7 +60,8 @@
 //!   dropped (the intruding landing, when the table is a direct path's);
 //! - a constant index is checked against the final tables (its table and the ones that follow
 //!   it without a gap): past them, a direct use refuses the script and a landing's use drops
-//!   that landing in the next round.
+//!   that landing in the next round; so does any other read of a table with no entry (a
+//!   computed index, a search with no `b8` at the address), which reads past the table.
 //!
 //! The rounds end: each one grows the dropped landings or the settled bytes, or (with those
 //! unchanged) the reserved bytes, all bounded by the script's length.
@@ -78,9 +79,9 @@
 //!   namer, it stops there at once ([`HazardKind::IntoData`]), or is dropped when an item of
 //!   it would hold the address (`Dropped(_, TableInCode)`); taken first, its code is in for
 //!   that round and the table wins over it in the next. So of two landings each naming a table
-//!   over the other's code, the one taken first keeps its table; the landing ends dropped or
-//!   stopped at the table; and a landing that round dropped for what its code read stays
-//!   dropped.
+//!   over the other's code, the one taken first keeps its table; and a landing can end dropped
+//!   in one order (at once, or by what the round its code was in found) and stopped at the
+//!   table in the other.
 //!
 //! Outside these, which of a table and a landing's code wins does not depend on the order (a
 //! test takes the landings the other way round and gets the same decode and catalog).
@@ -466,7 +467,8 @@ pub enum Reason {
     TableNotLiteral,
     /// One table read both as strings and as words.
     TableKinds,
-    /// A constant index past a table's entries (and those of the tables that follow it).
+    /// A constant index past a table's entries (and those of the tables that follow it), or
+    /// another read of a table with no entry, which reads past it.
     TableIndex,
 }
 

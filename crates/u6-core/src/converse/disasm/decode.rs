@@ -94,6 +94,8 @@ pub(super) struct TableUse {
     pub(super) addr: u32,
     pub(super) words: bool,
     pub(super) index: Option<u32>,
+    /// A search (`b7`, `c3`): it reads the entries up to a `b8` at an entry's start.
+    pub(super) search: bool,
     /// The op's offset.
     pub(super) at: u32,
 }
@@ -1168,17 +1170,22 @@ impl<'a> Decoder<'a> {
 
     /// A constant index may run on into the tables that follow its table without a gap
     /// ([`reachable`]); past them, a direct path's use refuses the script and a landing's use
-    /// bans that landing for the next round. `None` = every index holds.
+    /// bans that landing for the next round. So does any other read of a table with no entry
+    /// (a computed index, a search with no `b8` at the address): it reads past the table.
+    /// `None` = every index holds.
     pub(super) fn check_table_indices(&self) -> Result<Option<Plan>, Refusal> {
         let mut banned = BTreeMap::new();
         for (u, origin) in &self.uses {
-            let Some(index) = u.index else { continue };
             let containing = |a: u32| {
                 let o = *self.owner.get(a as usize)?;
                 self.items.get(&o)
             };
             let count = reachable(containing, u.addr, u.words).len();
-            if index as usize >= count {
+            let past = match u.index {
+                Some(index) => index as usize >= count,
+                None => count == 0 && !(u.search && self.b[u.addr as usize] == ops::TABLE_END),
+            };
+            if past {
                 match origin {
                     Origin::Direct => return refuse(u.at, Reason::TableIndex),
                     Origin::Landing(k) => {
@@ -1313,6 +1320,7 @@ fn op_tables(op: &Op, at: u32) -> Result<(Vec<TableUse>, Vec<Hazard>), Refusal> 
             addr: t.addr,
             words,
             index: ref_entry(t, words),
+            search: false,
             at,
         });
     };
@@ -1387,6 +1395,7 @@ fn expr_tables(
                         } else {
                             None
                         },
+                        search: code != 0xb4,
                         at,
                     });
                 }
