@@ -1,8 +1,10 @@
 //! Real data (owner-local): the disassembler over every script of the owner's `converse.a` and
 //! `converse.b`, and the execution cross-check on the real-data conversations of
-//! `converse/tests_real.rs`, then on the same conversations asked every keyword of their
-//! scripts. Skips where the zip is missing; prints counts, kinds, hashes and pass/fail only,
-//! never a script's bytes, text, names or keywords.
+//! `converse/tests_real.rs`, then with every actor asked every keyword of its script. Skips where
+//! the zip is missing. Its output, passing or failing, holds only counts of what the test made
+//! (scripts decoded and refused, items and hazards by kind, conversations, keywords sent,
+//! checks and mismatches), labels, actor slots and pass/fail (spec 01): never a value or a length
+//! of the owner's data, a byte, a text, a name, a keyword or a hash of them.
 #![allow(clippy::disallowed_methods)] // tests may read files
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,9 +16,9 @@ use super::super::party::name_from_script;
 use super::super::script::{ScriptDst, load_script};
 use super::super::tests_real::{converse, files, with_text};
 use super::super::{Cx, Msg, talk};
-use super::catalog::{Catalog, hash64};
+use super::catalog::Catalog;
 use super::trace::{self, Counts, Decoded, Event};
-use super::{Disasm, Kind, Operands, disassemble};
+use super::{Disasm, HazardKind, Kind, Operands, Reason, disassemble};
 use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
 use crate::objects::ObjectId;
@@ -37,11 +39,39 @@ fn scripts(files: &Files) -> Vec<(u8, u16, Vec<u8>)> {
     out
 }
 
+/// A refusal's kind, without the byte it names.
+fn reason_label(r: Reason) -> &'static str {
+    match r {
+        Reason::TooLong => "too long",
+        Reason::NoHeader => "no header",
+        Reason::NoLookMarker => "no look marker",
+        Reason::NoGreetingMarker => "no greeting marker",
+        Reason::Truncated => "truncated",
+        Reason::PastEnd => "past the end",
+        Reason::UnknownOp(_) => "unknown op",
+        Reason::Malformed(_) => "malformed operand",
+        Reason::JumpOutside => "jump outside",
+        Reason::Overlap => "overlap",
+        Reason::TableOutside => "table outside",
+        Reason::TableInCode => "table in code",
+        Reason::TableNotLiteral => "table not a literal",
+        Reason::TableKinds => "table kinds",
+        Reason::TableIndex => "table index",
+    }
+}
+
+/// A hazard's kind, its refusal reason without the byte it names.
+fn hazard_label(k: HazardKind) -> String {
+    match k {
+        HazardKind::Dropped(scan, r) => format!("Dropped({scan:?}, {})", reason_label(r)),
+        k => format!("{k:?}"),
+    }
+}
+
 /// Every byte of the input in exactly one item, in order.
 fn covers_once(d: &Disasm, input: &[u8]) -> bool {
-    assert_eq!(
-        d.len as usize,
-        input.len(),
+    assert!(
+        d.len as usize == input.len(),
         "the decode's length is the input's"
     );
     let mut at = 0;
@@ -61,7 +91,7 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
     let mut refused: BTreeMap<String, usize> = BTreeMap::new();
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
     let mut hazards: BTreeMap<String, usize> = BTreeMap::new();
-    let (mut decoded, mut bytes, mut once, mut unreached) = (0, 0usize, 0usize, 0usize);
+    let (mut decoded, mut bytes, mut once) = (0, 0usize, 0usize);
     let (mut strings, mut tables, mut splits) = (0, 0, 0);
     // Splits whose second part is one newline byte / longer (the run is cut in its text).
     let (mut newline_tails, mut mid_text) = (0, 0);
@@ -69,7 +99,9 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
         let d = match disassemble(*letter, *item, b) {
             Ok(d) => d,
             Err(r) => {
-                *refused.entry(r.reason.to_string()).or_default() += 1;
+                *refused
+                    .entry(reason_label(r.reason).to_string())
+                    .or_default() += 1;
                 continue;
             }
         };
@@ -109,15 +141,12 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
                     }
                     "table"
                 }
-                Kind::Unreached => {
-                    unreached += it.len as usize;
-                    "unreached range"
-                }
+                Kind::Unreached => "unreached range",
             };
             *kinds.entry(k).or_default() += 1;
         }
         for h in &d.hazards {
-            let k = format!("{:?}", h.kind);
+            let k = hazard_label(h.kind);
             *hazards.entry(k).or_default() += 1;
         }
     }
@@ -148,22 +177,15 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
     }
     println!("items by kind: {kinds:?}");
     println!(
-        "runs {runs} ({linked} of them parts of a split run), table strings {strings} ({slotted} copied into a slot), ops {ops}, data ranges {data} ({tables} tables, unreached bytes {unreached})"
+        "runs {runs} ({linked} of them parts of a split run), table strings {strings} ({slotted} copied into a slot), ops {ops}, data ranges {data} ({tables} tables)"
     );
     println!(
         "run splits {splits} (a one-byte newline tail {newline_tails}, a cut inside the text {mid_text}), hazards: {hazards:?}"
     );
-    println!(
-        "bytes {bytes}, covered by exactly one item {once} ({}%)",
-        (once * 100).checked_div(bytes).unwrap_or(0)
-    );
-    println!(
-        "catalog fnv1a64 {:016x}",
-        hash64(catalog.to_json().as_bytes())
-    );
     assert!(refused.is_empty(), "refused: {refused:?}");
     assert!(decoded > 0 && decoded == all.len(), "every script decodes");
-    assert_eq!(once, bytes);
+    assert!(once == bytes, "every byte in exactly one item");
+    println!("every byte in exactly one item: pass");
     let back = Catalog::from_json(&catalog.to_json());
     assert!(back.is_ok_and(|c| c == catalog), "the catalog reads back");
 }
@@ -178,7 +200,7 @@ fn table_reads(events: &[Event], strings: &mut BTreeSet<(u8, u16, i32)>) {
             }
             Event::Run { .. } | Event::Input { .. } => (last, outside) = (None, false),
             Event::Address { inside } => outside = !inside,
-            Event::Table { at, byte } if !outside => {
+            Event::Table { at, byte, .. } if !outside => {
                 if let Some((l, i)) = script
                     && last.is_none()
                 {
@@ -186,7 +208,7 @@ fn table_reads(events: &[Event], strings: &mut BTreeSet<(u8, u16, i32)>) {
                 }
                 last = (*byte != 0).then_some(*at);
             }
-            Event::Emit { .. } | Event::Table { .. } => {}
+            Event::Emit { .. } | Event::Table { .. } | Event::PrintStart { .. } => {}
             Event::Word { .. } | Event::TableEnd { .. } | Event::WordWrite { .. } => last = None,
         }
     }
@@ -206,16 +228,16 @@ fn screen(s: &State) -> (usize, Vec<u8>) {
 /// Talks to `npc` as `converse` does, typing the next of `lines` at each prompt for the
 /// player's words, and at any other wait trying space, N, Y and the digits in turn (a digit
 /// key answers `fc`), on through the keys while the screen changes (a list that waits for a key
-/// after each line ends on one of them). Whether the conversation ended.
-fn talk_through(base: &State, files: &Files, npc: i16, lines: &[&str]) -> bool {
+/// after each line ends on one of them). Whether the conversation ended, and how many of
+/// `lines` it took (typed at a prompt).
+fn talk_through(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool, usize) {
     let you_say = base.converse.text.as_ref().quiet().get(Msg::YouSay);
     let prompt: Vec<u8> = you_say.trim_ascii().to_vec();
     let leader = base.actors.party.leader_index;
     let mut e = Engine::with_game(base.clone(), files.clone(), move |st, io| async move {
         talk(&Cx::new(&st, &io), leader, npc, true).await;
     });
-    let mut lines = lines.iter();
-    let mut tries = 0;
+    let (mut sent, mut tries) = (0, 0);
     for _ in 0..400 {
         for _ in 0..32 {
             let before = screen(&e.state());
@@ -225,15 +247,15 @@ fn talk_through(base: &State, files: &Files, npc: i16, lines: &[&str]) -> bool {
             }
         }
         if e.finished() {
-            return true;
+            return (true, sent);
         }
         let shown = screen(&e.state()).1;
         let asked = e.state().ui.input.line_input || shown.trim_ascii_end().ends_with(&prompt);
         let keys: Vec<InputEvent> = if asked {
-            let Some(line) = lines.next() else {
-                return false;
+            let Some(line) = lines.get(sent) else {
+                return (false, sent);
             };
-            tries = 0;
+            (sent, tries) = (sent + 1, 0);
             line.chars()
                 .map(|c| InputEvent::Key(Key::Char(c)))
                 .chain([InputEvent::Key(Key::Enter)])
@@ -246,7 +268,7 @@ fn talk_through(base: &State, files: &Files, npc: i16, lines: &[&str]) -> bool {
         };
         e.tick(&keys, 16);
     }
-    e.finished()
+    (e.finished(), sent)
 }
 
 #[test]
@@ -256,8 +278,9 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
     let disasms: Vec<(u8, u16, &[u8], Disasm)> = all
         .iter()
         .map(|(l, i, b)| {
-            let d = disassemble(*l, *i, b)
-                .unwrap_or_else(|r| panic!("script {}{i}: {}", char::from(*l), r.reason));
+            let d = disassemble(*l, *i, b).unwrap_or_else(|r| {
+                panic!("script {}{i}: {}", char::from(*l), reason_label(r.reason))
+            });
             (*l, *i, b.as_slice(), d)
         })
         .collect();
@@ -319,32 +342,30 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
     // Each conversation's script, from its load, for the keyword pass.
     let mut script_of: Vec<(i16, (u8, u16))> = Vec::new();
     // `converse` for the first pass (its conversations, each must end); `talk_through` for
-    // the keywords, where an answer may wait on a key no generic driver gives: a conversation
-    // that does not end is checked up to its last read of the input loop (the run it is in is
-    // not cut, only not finished).
+    // the keywords, where an answer may wait on a key no generic driver gives. Every read of
+    // every conversation is checked: one that does not end, as far as it went
+    // (`trace::check_interrupted`).
     let talk = |npc: i16,
                 lines: &[&str],
                 keywords: bool,
                 total: &mut Counts,
                 read: &mut BTreeSet<(u8, u16, i32)>| {
         trace::start(true);
-        let done = if keywords {
+        let (done, sent) = if keywords {
             talk_through(&base, &files, npc, lines)
         } else {
-            converse(&base, &files, npc, lines).1
+            (converse(&base, &files, npc, lines).1, lines.len())
         };
-        let mut events = trace::stop();
+        let events = trace::stop();
         assert!(
             done || keywords,
             "actor slot {npc:#x}: the conversation ends"
         );
-        if !done {
-            let cut = events
-                .iter()
-                .rposition(|e| matches!(e, Event::Input { .. }));
-            events.truncate(cut.map_or(0, |i| i + 1));
-        }
-        let n = trace::check(&events, &decoded);
+        let n = if done {
+            trace::check(&events, &decoded)
+        } else {
+            trace::check_interrupted(&events, &decoded)
+        };
         if n.failures() > 0 {
             println!("actor slot {npc:#x}: {n:?}");
         }
@@ -354,7 +375,7 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
             Event::Load { letter, item } => Some((*letter, *item)),
             _ => None,
         });
-        (loaded, done)
+        (loaded, done, sent)
     };
     for &npc in &npcs {
         let mut s = base.clone();
@@ -364,7 +385,7 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
             continue;
         }
         let lines = ["name", "job", BYE, BYE, BYE];
-        let (loaded, _) = talk(npc, &lines, false, &mut total, &mut read);
+        let (loaded, ..) = talk(npc, &lines, false, &mut total, &mut read);
         script_of.push((npc, loaded.expect("the conversation loads its script")));
         talked += 1;
     }
@@ -389,7 +410,10 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
         });
         script_of.extend(loaded.map(|key| (npc, key)));
     }
-    let (mut asked, mut ended) = (0, 0);
+    // Keywords: sent (typed at a prompt), and none sent because a fresh conversation never
+    // came to a prompt. Conversations: ended and not.
+    let (mut keywords, mut sent, mut unsent) = (0, 0, 0);
+    let (mut ended, mut stopped) = (0, 0);
     for &(npc, key) in &script_of {
         let mut keys: BTreeSet<String> = BTreeSet::new();
         for it in &decoded[&key].disasm.items {
@@ -406,17 +430,33 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
                 }
             }
         }
-        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-        for chunk in keys.chunks(6) {
+        keywords += keys.len();
+        // A few per conversation, then the goodbye; the ones a conversation did not take (it
+        // ended or stopped first) again in a fresh one, until each is sent or a fresh
+        // conversation takes none.
+        let mut pending: Vec<&str> = keys.iter().map(String::as_str).collect();
+        while !pending.is_empty() {
+            let chunk = &pending[..pending.len().min(6)];
             let mut lines = chunk.to_vec();
             lines.extend([BYE; 3]);
-            ended += usize::from(talk(npc, &lines, true, &mut total, &mut read).1);
-            asked += 1;
+            let (_, done, took) = talk(npc, &lines, true, &mut total, &mut read);
+            (ended, stopped) = (ended + usize::from(done), stopped + usize::from(!done));
+            let k = took.min(chunk.len());
+            if k == 0 {
+                unsent += pending.len();
+                break;
+            }
+            sent += k;
+            pending.drain(..k);
         }
     }
     println!(
-        "keyword conversations {asked} (ended {ended}) with {} actors",
+        "keywords {keywords} of {} actors: sent {sent}, not sent (no prompt in a fresh conversation) {unsent}; keyword conversations ended {ended}, not ended {stopped}",
         script_of.len()
+    );
+    assert!(
+        sent + unsent == keywords,
+        "every keyword sent or shown unsendable"
     );
     let catalog_strings: usize = disasms
         .iter()
@@ -442,10 +482,11 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
 
 fn print_counts(pass: &str, n: &Counts, distinct: usize) {
     println!(
-        "{pass}: offsets checked {}, visits filled {}, table strings read {} ({distinct} distinct), table words read {}, table ends {}, table words written {}, table ops with an address outside the stack {}, mismatches {} (bytes {}, partial visits {}, fill {}, table {}, past the item {}, unknown script {})",
+        "{pass}: offsets checked {}, visits filled {}, table strings read {} ({distinct} distinct), table prints compared {}, table words read {}, table ends {}, table words written {}, table ops with an address outside the stack {}, mismatches {} (bytes {}, partial visits {}, fill {}, print {}, table {}, past the item {}, unknown script {})",
         n.offsets,
         n.filled,
         n.table_strings,
+        n.prints,
         n.table_words,
         n.table_ends,
         n.table_writes,
@@ -454,6 +495,7 @@ fn print_counts(pass: &str, n: &Counts, distinct: usize) {
         n.byte_mismatches,
         n.partial_visits,
         n.fill_mismatches,
+        n.print_mismatches,
         n.table_mismatches,
         n.past_item,
         n.unknown_script
