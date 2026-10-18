@@ -142,9 +142,12 @@
 //!   a refusal, or any other failure (a sheet not written, the masters not read again), its
 //!   `refused.txt` (the error), the details (`disagreements.txt` or `unshown.txt`) and the
 //!   snapshots read, in a fresh dir, never a sheet the run drew; when the work dir changed
-//!   during the run, `changed.txt` (what changed) too. An old `--out` is replaced only when it holds the marker file
-//!   every run of this mode writes; anything else there (an empty dir too, or the first pass's)
-//!   is left as it is and the run fails.
+//!   during the run, `changed.txt` (what changed) too. An old `--out` is replaced only when it
+//!   holds the marker file every run of this mode writes and nothing the marker does not list
+//!   (it names what its run wrote); anything else there (an empty dir, the first pass's, one a
+//!   file was put in) is left as it is and the run fails, saying why and how to go on. What a
+//!   run that stopped left beside `--out` is put back or removed when the next one begins, and
+//!   said in its report; what is not the tool's is said, left, and the run refused.
 //!
 //! The object draw (`u6_core::objects::draw`, 0x10e81e, 0x10e73a, 0x10e596) as far as the
 //! starting lists tell it: the objects in list order, (y, x), and at one cell the later in the
