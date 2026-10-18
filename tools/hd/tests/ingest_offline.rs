@@ -52,7 +52,13 @@ fn ingest_makes_no_codex_call() {
     };
     let calls = || std::fs::read_to_string(&log).map_or(0, |t| t.lines().count());
     // The stand-in is the `codex` this environment finds.
-    assert!(cmd("/bin/sh").args(["-c", "codex"]).status().unwrap().success());
+    assert!(
+        cmd("/bin/sh")
+            .args(["-c", "codex"])
+            .status()
+            .unwrap()
+            .success()
+    );
     assert_eq!(calls(), 1);
     std::fs::remove_file(&log).unwrap();
 

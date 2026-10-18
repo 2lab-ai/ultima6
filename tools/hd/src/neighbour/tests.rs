@@ -76,8 +76,11 @@ fn pair(a: u16, b: u16, edge: Edge) -> Pair {
     Pair { a, b, edge }
 }
 
-/// Sides from (record, classic, generated: (item, image)).
-fn sides(list: Vec<(u16, Classic, Option<(u32, Rgba)>)>) -> BTreeMap<u16, Side> {
+/// A record, its classic image and, when generated, its item and image.
+type Made = (u16, Classic, Option<(u32, Rgba)>);
+
+/// Sides from what the test made.
+fn sides(list: Vec<Made>) -> BTreeMap<u16, Side> {
     list.into_iter()
         .map(|(r, c, g)| (r, Side::new(c, g.as_ref().map(|(i, h)| (*i, h)))))
         .collect()
@@ -98,7 +101,11 @@ fn two_generated_records_that_meet_cleanly_are_kept() {
     let out = settle(&pairs, &s, seam());
     assert!(out.fallen.is_empty(), "{:?}", out.failing);
     assert_eq!(
-        (out.counts.checked, out.counts.failing_before, out.counts.passes),
+        (
+            out.counts.checked,
+            out.counts.failing_before,
+            out.counts.passes
+        ),
         (2, 0, 1)
     );
 }
@@ -109,7 +116,11 @@ fn a_generated_record_whose_edge_differs_from_its_scaled_neighbour_falls_back() 
     for edge in [Edge::East, Edge::South] {
         // A's side toward B repainted white; B is drawn by MMPX.
         let s = sides(vec![
-            (1, a.clone(), Some((10, band(&near(&a), edge, false, WHITE)))),
+            (
+                1,
+                a.clone(),
+                Some((10, band(&near(&a), edge, false, WHITE))),
+            ),
             (2, b.clone(), None),
         ]);
         let out = settle(&[pair(1, 2, edge)], &s, seam());
@@ -209,15 +220,26 @@ fn a_classic_pair_that_already_steps_is_not_held_to_more() {
     )
     .unwrap();
     assert!(ratio > seam(), "the step is above the threshold: {ratio}");
-    assert!(limit > seam() && gate::seam_passes((ratio, limit)), "{ratio} / {limit}");
+    assert!(
+        limit > seam() && gate::seam_passes((ratio, limit)),
+        "{ratio} / {limit}"
+    );
     let s = sides(vec![
         (1, a.clone(), Some((10, near(&a)))),
         (2, b.clone(), Some((20, near(&b)))),
     ]);
-    assert!(settle(&[pair(1, 2, Edge::East)], &s, seam()).fallen.is_empty());
+    assert!(
+        settle(&[pair(1, 2, Edge::East)], &s, seam())
+            .fallen
+            .is_empty()
+    );
     // A step beyond the original's (a black edge against sand) is still a seam.
     let s = sides(vec![
-        (1, a.clone(), Some((10, band(&near(&a), Edge::East, false, BLACK)))),
+        (
+            1,
+            a.clone(),
+            Some((10, band(&near(&a), Edge::East, false, BLACK))),
+        ),
         (2, b, None),
     ]);
     assert_eq!(
@@ -233,7 +255,10 @@ fn shore_and_empty_neighbours_are_mmpx_or_nothing() {
     // The shore record is in no item: MMPX draws it, and a generated record that does not meet
     // its MMPX image falls back.
     let shore = texture(15, GREEN);
-    let s = sides(vec![(1, a.clone(), Some((10, a_hd.clone()))), (11, shore, None)]);
+    let s = sides(vec![
+        (1, a.clone(), Some((10, a_hd.clone()))),
+        (11, shore, None),
+    ]);
     assert_eq!(
         settle(&[pair(1, 11, Edge::East)], &s, seam()).fallen,
         BTreeMap::from([(10, 1)])
@@ -478,10 +503,8 @@ fn the_images_measured_are_the_ones_the_page_composes() {
 // Ingest end to end on the synthetic set, in a synthetic world.
 
 fn work(name: &str) -> Work {
-    let dir = std::env::temp_dir().join(format!(
-        "u6-hdtool-neighbour-{}-{name}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("u6-hdtool-neighbour-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let w = Work::open(Some(&dir)).unwrap();
     w.mkdirs().unwrap();
