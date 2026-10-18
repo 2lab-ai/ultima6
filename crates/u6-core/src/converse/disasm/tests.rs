@@ -12,7 +12,7 @@ use super::super::eval::eval;
 use super::super::exec::exec;
 use super::super::tests::{chars, files, lib, packed, scroll, state, talk_to};
 use super::catalog::{Catalog, FORMAT, SLOT_BUFFER_CAPACITY, ScriptUnits, hash64};
-use super::decode::{Decoder, ORDER, Plan, ref_entry};
+use super::decode::{Decoder, NO_LANDINGS, ORDER, Plan, op_tables, ref_entry};
 use super::ops::{self, Escape, Flow, STATEMENT_OPS, Shape};
 use super::trace::{self, Decoded, EscState, Event, Read, Snap};
 use super::*;
@@ -2743,6 +2743,149 @@ fn a_direct_computed_index_keeps_the_first_entry_of_its_table_against_a_landing(
         };
         assert_eq!((tb.words, tb.entries.len()), table, "{what}");
     }
+}
+
+/// A script of random pieces after the greeting, as [`random_pieces`] but with prints of string
+/// 0 and 1, searches of both kinds, word writes and reads with a constant or computed index,
+/// and (`wide`) more pieces and table addresses right after the one before (so that tables
+/// chain, nest and cross). A 64-bit LCG with seed `g`.
+fn random_direct_reads(g: &mut u64, wide: bool) -> Vec<u8> {
+    let mut next = |n: u32| {
+        *g = g
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (*g >> 33) as u32 % n
+    };
+    let print = |t: u32, i: &[u8]| [&[0xb5][..], &lit32(t), i].concat();
+    let mut b = b"\xf7".to_vec();
+    let mut last = BODY + 20;
+    for _ in 0..6 + next(14) {
+        let mut a = BODY + next(100);
+        if wide && next(4) == 0 {
+            a = last + 1 + next(3);
+        }
+        last = a;
+        let piece: Vec<u8> = match next(if wide { 27 } else { 16 }) {
+            0 => b"ab".to_vec(),
+            1 => b"zz\0".to_vec(),
+            2 => vec![0xee],
+            3 => b"\xefk\xf6".to_vec(),
+            4 => vec![0xa1, 0x01, 0xa7],
+            5 => vec![0xa2],
+            6 => vec![0xa3],
+            7 => jump(a),
+            8 => print(a, &[0xb1]),
+            9 => print_computed(a),
+            10 => vec![0xb6],
+            11 => vec![0],
+            12 => b"cd\0ef\0".to_vec(),
+            13 => jump(BODY),
+            14 => print(a, &[0x01, 0xa7]),
+            15 => b"\xefq\xf6".to_vec(),
+            16 | 17 => search_of(a, false),
+            18 => search_of(a, true),
+            19 => write_word(a, 0),
+            20 => vec![0xb8],
+            21 => b"gh\0\xb8".to_vec(),
+            22 => vec![0x10, 0x00, 0x20, 0x00],
+            23 => write_word(a, 1),
+            24 => [
+                &[0xa6, 0x01, 0xb2, 0xa8][..],
+                &lit32(a),
+                &[0x01, 0xb4, 0xa7],
+            ]
+            .concat(),
+            25 => word_computed(a),
+            _ => b"ij\0kl".to_vec(),
+        };
+        b.extend(piece);
+    }
+    b.push(0xff);
+    script(&b)
+}
+
+/// What each table use of the ops at `ops` reads in `d`, in order: its op, its address, the
+/// entries it needs from there ([`reachable`]: a constant index's up to it, the first for a
+/// computed index, every one for a search not from a `b8`, through the tables it runs on into)
+/// and the bytes a search reads on past them ([`HazardKind::SearchPastEnd`]).
+fn reads_of(d: &Disasm, s: &[u8], ops: &[u32]) -> Vec<(u32, u32, Vec<Span>, Option<Span>)> {
+    let item_at = |a: u32| {
+        let i = d.items.partition_point(|it| it.offset <= a);
+        d.items.get(i.checked_sub(1)?).filter(|it| a < it.end())
+    };
+    let mut out = Vec::new();
+    for &at in ops {
+        let Kind::Op(op) = &item(d, at).kind else {
+            panic!("not an op at {at}")
+        };
+        for u in op_tables(op, at).expect("decoded").0 {
+            let reach: Vec<Span> = reachable(item_at, u.addr, u.words)
+                .into_iter()
+                .map(|(_, _, e)| e)
+                .collect();
+            let n = match u.index {
+                _ if u.search && s[u.addr as usize] == ops::TABLE_END => 0,
+                _ if u.search => reach.len(),
+                None => 1,
+                Some(i) => i as usize + 1,
+            };
+            let past = d.hazards.iter().find_map(|h| match h.kind {
+                HazardKind::SearchPastEnd(sp) if h.at == at => Some(sp),
+                _ => None,
+            });
+            let needed = reach[..n.min(reach.len())].to_vec();
+            out.push((at, u.addr, needed, past));
+        }
+    }
+    out
+}
+
+/// When the direct paths alone (every landing's trial failing) decode `s`: that the landings
+/// change none of what they read. It decodes with them too, with the same direct ops, each of
+/// whose table uses reads the same entries ([`reads_of`]). Whether the direct paths alone
+/// decode it, and whether its landings changed its items.
+fn direct_reads_hold(s: &[u8]) -> (bool, bool) {
+    NO_LANDINGS.with(|c| c.set(true));
+    let alone = disassemble(b'a', 7, s);
+    NO_LANDINGS.with(|c| c.set(false));
+    let Ok(alone) = alone else {
+        return (false, false);
+    };
+    let d =
+        disassemble(b'a', 7, s).unwrap_or_else(|r| panic!("refused for a landing ({r}): {s:02x?}"));
+    let ops: Vec<u32> = alone
+        .items
+        .iter()
+        .filter(|i| matches!(i.kind, Kind::Op(_)))
+        .map(|i| i.offset)
+        .collect();
+    for &at in &ops {
+        assert_eq!(item(&d, at), item(&alone, at), "{s:02x?}");
+    }
+    assert_eq!(reads_of(&d, s, &ops), reads_of(&alone, s, &ops), "{s:02x?}");
+    (true, d.items != alone.items)
+}
+
+#[test]
+fn what_a_direct_use_reads_is_the_same_with_the_landings_and_without() {
+    // Random scripts with many direct table uses and landings: each one the direct paths alone
+    // decode (every landing's trial failing) decodes with its landings too, and every direct
+    // use reads the same entries of the same tables.
+    let (mut alone, mut changed) = (0, 0);
+    for (seed, n, wide) in [
+        (0x5eed_1234_u64, 40_000, false),
+        (0xa11c_e004, 80_000, true),
+        (0x0bad_cafe, 80_000, true),
+    ] {
+        let mut g = seed;
+        for _ in 0..n {
+            let (a, c) = direct_reads_hold(&random_direct_reads(&mut g, wide));
+            alone += usize::from(a);
+            changed += usize::from(c);
+        }
+    }
+    // Not vacuous: most decode alone, and many of those keep a landing.
+    assert!(alone > 100_000 && changed > 10_000, "{alone} {changed}");
 }
 
 #[test]

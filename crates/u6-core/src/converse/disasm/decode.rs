@@ -70,6 +70,8 @@ thread_local! {
     /// reverse, any other: a shuffle with that seed). The decoder takes them in its own order
     /// whatever this is ([`Decoder::next_landing`]).
     pub(super) static ORDER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only: every landing's trial fails, so that only the direct paths are decoded.
+    pub(super) static NO_LANDINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -387,6 +389,10 @@ impl<'a> Decoder<'a> {
             && let Some(&r) = self.plan.banned.get(&key)
         {
             return Err(r);
+        }
+        #[cfg(test)]
+        if NO_LANDINGS.with(std::cell::Cell::get) {
+            return Err(Reason::TableIndex);
         }
         let saved = self.clone();
         self.phase = Origin::Landing(key);
@@ -1704,7 +1710,7 @@ fn table_end(addr: u32, t: &Table) -> u32 {
 
 /// The table uses of an op at `at` (the table operands of `b5` / `a6`, and the address operand
 /// of the expression ops `b4`, `b7`, `c3`) and the stack hazards of its expressions.
-fn op_tables(op: &Op, at: u32) -> Result<(Vec<TableUse>, Vec<Hazard>), Refusal> {
+pub(super) fn op_tables(op: &Op, at: u32) -> Result<(Vec<TableUse>, Vec<Hazard>), Refusal> {
     let mut uses = Vec::new();
     let mut hazards = Vec::new();
     let mut exprs: Vec<&Expr> = Vec::new();
