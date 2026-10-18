@@ -192,3 +192,4 @@ Append-only. Closed units, with their receipts.
   - **Reviews:** gpt-6-astra and opus, rounds 1–4. r3: gpt-6-astra APPROVE, opus CHANGES on one test (MF2, closed in r4 with opus's own probe). r4: both APPROVE; opus's wording item was applied in d081952. Findings: `~/Games/ultima6/work/review/h5/`.
   - **Deploys:** none; the change is to the tool, and the site is unchanged.
   - **Carried to H7:** the run-time draw variants (type 0x7b's other frame, the doorways' side tiles) were not paired.
+  - **Gates on the merge** (9bbbb22, the merge 953e744 plus this loop text): fmt and clippy clean; 1125 passed, 0 failed, 7 ignored; wasm 1,872,907 bytes (unchanged); web 63/63 three times; oracles OK; port map unchanged; loop-lint 0 FAIL.
