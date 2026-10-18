@@ -21,12 +21,21 @@ committed).
     python3 -I -B tools/font/galmuri.py [--zip PATH] [--out DIR] [--check]
 
 The release zip is kept in the cache, $XDG_CACHE_HOME/ultima6/ (~/.cache/ultima6/ without it),
-after its sha256 is checked, and read from there the next time. --zip reads that file instead
-(its sha256 is checked all the same); --check writes nothing and fails unless the files in
---out are the ones the release gives.
+after its sha256 is checked, and read from there the next time. It is published whole or not
+at all: written to a temporary file beside it, synced, then renamed into place, so an
+interrupted run leaves no partial file there. --zip reads that file instead (its sha256 is
+checked all the same).
+
+--check fails unless the files in --out are the ones the release gives, and writes nothing
+anywhere, the cache included: with no cached zip it downloads the release into memory and
+leaves the cache as it was (a run without --check fills it).
+
+Errors (a refused zip, a malformed font, a failed download or write) are one line on stderr
+and exit status 1.
 """
 import argparse
 import hashlib
+import http.client
 import io
 import os
 import re
@@ -80,7 +89,11 @@ def numbers(words, counts, line):
     ops = words[1:]
     if len(ops) not in counts or not all(INTEGER.fullmatch(v) for v in ops):
         raise FontError(f"line {line}: {words[0]} takes {' or '.join(map(str, counts))} integers")
-    return [int(v) for v in ops]
+    try:
+        return [int(v) for v in ops]
+    except ValueError:
+        # More digits than int() converts (sys.get_int_max_str_digits()).
+        raise FontError(f"line {line}: {words[0]} has an integer too long to read") from None
 
 
 def glyphs(bdf):
@@ -180,25 +193,47 @@ def notice(blob_sha):
     )
 
 
-def fetch(path, cache=CACHE):
-    """The release zip's bytes: from `path`, else the cache, else downloaded (then cached)."""
+def download():
+    """The release zip's bytes from URL, read into memory (nothing is written)."""
+    with urllib.request.urlopen(URL, timeout=120) as r:
+        return r.read()
+
+
+def publish(path, data):
+    """Writes `data` at `path` whole or not at all: a temporary file in the same directory,
+    flushed, synced and closed, then renamed over `path`. On any error the temporary file is
+    removed and `path` is as it was."""
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=f".{os.path.basename(path)}.", suffix=".part")
+    try:
+        with open(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def fetch(path, cache=CACHE, store=True):
+    """The release zip's bytes: from `path`, else the cache, else downloaded (then published
+    to the cache when `store`; --check does not store)."""
     source = path or (cache if cache and os.path.exists(cache) else None)
     if source:
         with open(source, "rb") as f:
             data = f.read()
     else:
-        with tempfile.TemporaryDirectory() as tmp:
-            dst = os.path.join(tmp, "galmuri.zip")
-            urllib.request.urlretrieve(URL, dst)
-            with open(dst, "rb") as f:
-                data = f.read()
+        data = download()
     got = sha256(data)
     if got != ZIP_SHA256:
         raise FontError(f"release zip {source or URL}: sha256 {got}, pinned {ZIP_SHA256}")
-    if not source and cache:
-        os.makedirs(os.path.dirname(cache), exist_ok=True)
-        with open(cache, "wb") as f:
-            f.write(data)
+    if not source and cache and store:
+        publish(cache, data)
     return data
 
 
@@ -222,11 +257,22 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--zip", help="a local copy of the release zip (default: the cache, else download)")
     p.add_argument("--out", default=OUT, help="the directory written (default: site/fonts)")
-    p.add_argument("--check", action="store_true", help="compare with --out, write nothing")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="compare with --out; write nothing anywhere, the cache included",
+    )
     a = p.parse_args(argv)
     try:
-        files = dict(zip((BLOB, OFL, NOTICE), build(fetch(a.zip))))
-    except (FontError, OSError, KeyError, UnicodeDecodeError, zipfile.BadZipFile) as e:
+        files = dict(zip((BLOB, OFL, NOTICE), build(fetch(a.zip, store=not a.check))))
+    except (
+        FontError,
+        OSError,
+        KeyError,
+        UnicodeDecodeError,
+        zipfile.BadZipFile,
+        http.client.HTTPException,
+    ) as e:
         print(f"galmuri: {e}", file=sys.stderr)
         return 1
     if a.check:
