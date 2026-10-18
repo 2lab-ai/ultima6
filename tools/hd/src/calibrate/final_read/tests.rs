@@ -2046,6 +2046,47 @@ fn lines_opaque_on_no_common_row_fall_back_to_the_cell_rule() {
 }
 
 #[test]
+fn the_second_side_of_a_south_join_is_read_on_its_north_line() {
+    // The reviewer's P12b: HALFN opaque on its upper half's right columns alone (its south row
+    // clear, its north row opaque on columns 8-15), south of B; COVERS over B on B's south
+    // row's right columns: no measured column of the join left, not drawn. Read on its south
+    // row, HALFN's line would have nothing measured, and the cell rule would draw it. (The
+    // reviewer's P12, B over a record opaque on its right half, is the south case of
+    // `a_pair_is_drawn_only_where_a_line_the_gate_measures_shows_on_either_edge_and_side`.)
+    const HALFN: u16 = 208;
+    const COVERS: u16 = 209;
+    let mut g = game();
+    for i in 0..256 {
+        let (u, v) = (i % 16, i / 16);
+        let h = &mut g.records[usize::from(HALFN)];
+        h.pixels[i] = GRAIN + (hash(i as u32, 17) % 5) as u8;
+        h.transparent[i] = !(u >= 8 && v < 8);
+        let c = &mut g.records[usize::from(COVERS)];
+        c.pixels[i] = GRAIN + 4;
+        c.transparent[i] = !(v == 15 && u >= 8);
+    }
+    let a = A_CELL.1 * COLS + A_CELL.0;
+    let cells = |list: &[u16]| {
+        let mut cells = vec![Stack::default(); COLS * ROWS];
+        cells[a] = Stack {
+            base: Some(B),
+            list: list.to_vec(),
+        };
+        cells[a + COLS].base = Some(HALFN);
+        cells
+    };
+    let p = Pair {
+        a: B,
+        b: HALFN,
+        edge: Edge::South,
+    };
+    let f = framed(&g, &cells(&[COVERS]), &[]);
+    assert!(f.shows(A_CELL, B) && f.shows((A_CELL.0, A_CELL.1 + 1), HALFN));
+    assert!(!f.joins(A_CELL, p));
+    assert!(framed(&g, &cells(&[]), &[]).joins(A_CELL, p));
+}
+
+#[test]
 fn a_pair_covered_on_every_measured_row_is_not_read() {
     // The chain, and B again at (12, 12) with HALF east of it, COVER on B there: the pair's one
     // cell has no measured row left, so no window reads it, and the run fails.
