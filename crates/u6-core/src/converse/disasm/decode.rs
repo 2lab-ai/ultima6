@@ -947,7 +947,8 @@ impl<'a> Decoder<'a> {
     /// byte of direct code. A table without its `b8` there has no end of its own: it also ends
     /// at the first byte of landing code, but not before the last entry a constant index of a
     /// use reads, of this table or, through the tables before it that end where it starts (an
-    /// index runs on into them, [`reachable`]), of an earlier one.
+    /// index runs on into them, [`reachable`]), of an earlier one, nor before a string an
+    /// address inside it is read from.
     fn table_ranges(&self) -> Vec<(u32, Table)> {
         // Per address: the kind and the entries its uses' constant indices need.
         let mut by_addr: BTreeMap<u32, (bool, usize)> = BTreeMap::new();
@@ -992,9 +993,10 @@ impl<'a> Decoder<'a> {
                 let Some(i) = strings.iter().position(|e| e.offset < u && u <= e.end()) else {
                     break;
                 };
-                // Index `k` from `u` reads string `i + k` of this table.
+                // Index `k` from `u` reads string `i + k` of this table; any read from `u`
+                // reads string `i` at least, so the table keeps it.
                 inner.push(u);
-                inner_need = inner_need.max(if u_need > 0 { i + u_need } else { 0 });
+                inner_need = inner_need.max(i + u_need.max(1));
                 m += 1;
             }
             let next = addrs.get(m).copied().unwrap_or(self.len());

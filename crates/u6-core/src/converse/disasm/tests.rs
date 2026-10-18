@@ -1572,6 +1572,75 @@ fn several_addresses_inside_one_string_are_all_of_its_table() {
     );
 }
 
+/// After [`after_an_if`]'s `a1`, whose landing jumps to `to` and runs it as text: the `*`
+/// block's `ee`, then its loops print string 0 of `t` = "ab\0cd\0" (no `b8`), read at `u` =
+/// `t + 4` (inside "cd") with `op` and jump back. `to` is `u`, or `t + 3` (the start of "cd")
+/// when `at_string`. Returns the script, `t`, `u` and `to`.
+fn an_inner_read_over_an_ifs_code(op: fn(u32) -> Vec<u8>, at_string: bool) -> (Vec<u8>, [u32; 3]) {
+    // jump (5), ee, b5 d2 t b1 (7), op, jump (5).
+    let t = BODY + 13 + 5 + 1 + 7 + op(0).len() as u32 + 5;
+    let u = t + 4;
+    let to = if at_string { t + 3 } else { u };
+    let mut rest = jump(to);
+    rest.extend([0xee, 0xb5]);
+    rest.extend(lit32(t));
+    rest.push(0xb1);
+    rest.extend(op(u));
+    rest.extend(jump(BODY));
+    rest.extend(b"ab\0cd\0");
+    (after_an_if(&rest), [t, u, to])
+}
+
+/// `b5 d2 u 01 b2 a7`: a print from `u` with a computed index.
+fn print_computed(u: u32) -> Vec<u8> {
+    [&[0xb5][..], &lit32(u), &[0x01, 0xb2, 0xa7]].concat()
+}
+
+/// `a6 01 b2 a8 d2 u 03 b7 a7`: a word variable set to a search of `u` for slot 3.
+fn search_from(u: u32) -> Vec<u8> {
+    [
+        &[0xa6, 0x01, 0xb2, 0xa8][..],
+        &lit32(u),
+        &[0x03, 0xb7, 0xa7],
+    ]
+    .concat()
+}
+
+#[test]
+fn an_inner_address_read_with_no_constant_index_keeps_its_string_in_either_order() {
+    // The read at `u` needs "cd", where the a1's landing runs: the table keeps it and wins, and
+    // the a1's landing stops there, whichever landing comes first.
+    for (what, op) in [
+        ("print", print_computed as fn(u32) -> Vec<u8>),
+        ("search", search_from),
+    ] {
+        for at_string in [false, true] {
+            let (s, [t, u, to]) = an_inner_read_over_an_ifs_code(op, at_string);
+            let what = format!("{what}, landing at the string's start {at_string}");
+            let [a, b] = both_orders(&s);
+            assert!(a == b, "{what}: {:?}\n{:?}", a.1, b.1);
+            let d = ok(&s);
+            let Kind::Table(tb) = &item(&d, t).kind else {
+                panic!("{what}: {:?}", shape(&d))
+            };
+            assert_eq!(
+                tb.entries.iter().map(|e| e.bytes(&s)).collect::<Vec<_>>(),
+                [&b"ab"[..], b"cd"],
+                "{what}"
+            );
+            assert_eq!(tb.inner, [u], "{what}");
+            assert_eq!(
+                d.hazards,
+                [Hazard {
+                    at: to,
+                    kind: HazardKind::IntoData
+                }],
+                "{what}"
+            );
+        }
+    }
+}
+
 #[test]
 fn indices_and_addresses_have_the_interpreters_width() {
     let t = BODY + 20;

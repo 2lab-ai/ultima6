@@ -31,8 +31,9 @@
 //!   without its `b8` there has no end of its own: it also ends at landing code, but never
 //!   before the last entry a constant index reads, its own or one that runs on into it from the
 //!   tables before it. A string address an op names inside another table's string (not at a
-//!   string's start) is of that table ([`Table::inner`]): a read there reads the string's rest;
-//!   a word address inside a word is not, and its table ends there;
+//!   string's start) is of that table ([`Table::inner`]): a read there reads the string's rest,
+//!   so the table never ends before that string; a word address inside a word is not, and its
+//!   table ends there;
 //! - what is left is [`Kind::Unreached`].
 //!
 //! Tables and the trial. A table use is checked when its op is decoded, inside the path that
