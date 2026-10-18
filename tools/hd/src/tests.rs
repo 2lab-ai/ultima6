@@ -1619,8 +1619,9 @@ fn one_deadline_covers_the_call_and_what_it_started() {
     // A call that hangs: stopped at the deadline, its whole group killed. Its stand-in must
     // have started its child, and written its pid, before the deadline kills the group: 4 s,
     // as keeps-both's in the leak test, is slack for a loaded machine, not a bound on its load.
+    let secs = 4;
     let start = Instant::now();
-    let r = codex(100, 4).generate(&t.join("sheet.png"), "prompt", &dir);
+    let r = codex(100, secs).generate(&t.join("sheet.png"), "prompt", &dir);
     assert!(r.unwrap_err().contains("timed out"));
     assert!(
         start.elapsed() < Duration::from_secs(15),
@@ -1629,7 +1630,7 @@ fn one_deadline_covers_the_call_and_what_it_started() {
     );
     assert!(
         t.join("pid").exists(),
-        "its stand-in had not started its child by the 4 s deadline"
+        "its stand-in had not written its child's pid by the {secs} s deadline"
     );
     assert!(child_gone(), "the call's child outlived it");
     // A call that exits but leaves a child holding its output: the child goes with it and
@@ -2013,9 +2014,10 @@ fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
         );
         let (r, took) = call(review_stub(&t, name, &body), secs, "PROMPT");
         let e = r.unwrap_err();
-        // The grace is 1 s: the exit ends within it of its stand-in's exit, the hang within it
-        // of its deadline; 8 s for both, slack for a loaded machine (before the grace, the hang
-        // took its deadline + 5 s, here 9 s, and the exit 20 s, the helper's life).
+        // The grace is 1 s: the exit ends a grace after its stand-in's exit, the hang a grace
+        // after its deadline (in both the helper holds the output, so the whole grace is waited
+        // out); 8 s for both, slack for a loaded machine (before the grace, the hang took its
+        // deadline + 5 s, here 9 s, and the exit 20 s, the helper's life).
         let limit = Duration::from_secs(8);
         assert!(took < limit, "{name}: {took:?} ({e})");
         if name == "escaped-hang.sh" {
@@ -2026,7 +2028,7 @@ fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
             assert!(
                 took >= Duration::from_secs(secs) + run::CLEANUP,
                 "{name}: {took:?}: its helper had not left the call's group by the {secs} s \
-                 deadline"
+                 deadline, or the grace was cut short"
             );
         } else {
             assert_eq!(e, "the call's output did not end", "{name}");

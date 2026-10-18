@@ -137,8 +137,9 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
     // out". The one that hangs gets 4 s, 7-10x those (10x the 0.97 s would cost 27 s more
     // a run: its deadline is its run time, three rounds), so that its keeper has started, and
     // left the group, before the deadline kills the group: one that had not would end its call
-    // at the deadline, without the grace (its round fails on it), and be missing from the six
-    // counted at the end.
+    // at the deadline, without the grace. The round's floor (the deadline and the grace) catches
+    // a missing grace unless other time in the call (its setup, a pause) makes up for it; the
+    // six keepers counted at the end stay the separate check that each one lived.
     let shapes = [
         // Keeps the output: takes the prompt, exits; the stream never ends.
         (
@@ -198,7 +199,7 @@ fn a_call_leaves_no_thread_and_no_descriptor() {
                 assert!(
                     took >= Duration::from_secs(*secs) + CLEANUP,
                     "{name} round {round}: {took:?}: its keeper had not left the call's group by \
-                     the {secs} s deadline"
+                     the {secs} s deadline, or the grace was cut short"
                 );
             }
             if name.starts_with("floods") {
