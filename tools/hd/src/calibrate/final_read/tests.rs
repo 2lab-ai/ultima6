@@ -2743,7 +2743,7 @@ fn the_out_dir_holds_one_runs_output() {
     };
     let e = calibrate_final(&g, &work, &o2).unwrap_err();
     assert!(
-        e.contains("calibrate --final did not write (no marker)"),
+        e.contains("calibrate --final did not write (no marker .calibrate-final)"),
         "{e}"
     );
     let left: Vec<String> = std::fs::read_dir(&theirs)
@@ -2759,9 +2759,19 @@ fn the_out_dir_holds_one_runs_output() {
     assert!(beside.is_empty(), "{beside:?}");
     std::fs::remove_file(theirs.join("notes.txt")).unwrap();
     let e = calibrate_final(&g, &work, &o2).unwrap_err();
-    assert!(e.contains("(no marker)"), "{e}");
+    assert!(e.contains("(no marker .calibrate-final)"), "{e}");
     assert_eq!(std::fs::read_dir(&theirs).unwrap().count(), 0);
-    std::fs::remove_dir(&theirs).unwrap();
+    // The first pass's out dir (its marker, not this mode's) is not replaced either.
+    let first = super::super::out_dir::FIRST.marker;
+    std::fs::write(theirs.join(first), b"calibrate\n").unwrap();
+    let e = calibrate_final(&g, &work, &o2).unwrap_err();
+    assert!(e.contains("(no marker .calibrate-final)"), "{e}");
+    let left: Vec<String> = std::fs::read_dir(&theirs)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, [first]);
+    std::fs::remove_dir_all(&theirs).unwrap();
     assert!(calibrate_final(&g, &work, &o2).is_ok());
     assert!(theirs.join(MARKER).is_file());
     let _ = std::fs::remove_dir_all(&dir);

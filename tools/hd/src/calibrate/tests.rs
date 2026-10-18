@@ -1132,17 +1132,131 @@ fn a_source_names_its_sheets_apart() {
         report.contains("objects-fail-gt1.5-gen-mmpx: 1 of 1 (1 on the surface)"),
         "{report}"
     );
-    // The same out dir with every row: the default names, none of the source's overwritten.
+    // Every row: the default names, none a name of the source's. The same out dir now holds
+    // this run's output alone (it is replaced whole).
+    let first = s.sheets.clone();
     let opts = Options {
         source: Source::All,
         ..opts
     };
     let s = calibrate(&g, &work, &opts).unwrap();
     assert!(s.sheets.iter().all(|f| !f.starts_with("objects-")));
+    assert!(s.sheets.iter().all(|f| !first.contains(f)));
     assert!(s.sheets.contains(&"control.png".to_string()));
     for f in ["objects-pass-gen-gen.png", "objects-control-s2.png"] {
-        assert!(out.join(f).is_file(), "{f}");
+        assert!(!out.join(f).exists(), "{f}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The files of a first pass's out dir, sorted, its marker (which it must hold) left out.
+fn files_of(out: &Path) -> Vec<String> {
+    assert!(
+        out.join(out_dir::FIRST.marker).is_file(),
+        "{}",
+        out.display()
+    );
+    let mut v: Vec<String> = std::fs::read_dir(out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|f| f != out_dir::FIRST.marker)
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_first_pass_out_dir_holds_one_runs_output() {
+    // The cases of the final read's out dir, for the first pass: a second run leaves its own
+    // sheets alone, a refused run its refusal alone, and a dir this mode did not write (the
+    // owner's, an empty one, the final read's) is not replaced.
+    let g = game();
+    let (dir, work, slices) = setup("one-run", &world_rows());
+    let out = dir.join("calibrate");
+    let opts = Options {
+        slices,
+        out: out.clone(),
+        per: 2,
+        seed: 1,
+        at: vec![Spot::Cell {
+            at: At { z: 0, x: 7, y: 3 },
+            edge: Edge::East,
+        }],
+        seam: Thresholds::default().seam,
+        source: Source::All,
+    };
+    let pngs = |out: &Path| -> Vec<String> {
+        files_of(out)
+            .into_iter()
+            .filter(|f| f.ends_with(".png"))
+            .collect()
+    };
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let s1 = calibrate(&g, &work, &opts).unwrap();
+    assert!(s1.sheets.contains(&"control.png".to_string()));
+    assert_eq!(pngs(&out), sorted(s1.sheets.clone()));
+    // A second run with no control window: its sheets alone, the first run's control gone.
+    let opts2 = Options {
+        at: Vec::new(),
+        ..opts.clone()
+    };
+    let s2 = calibrate(&g, &work, &opts2).unwrap();
+    assert!(!s2.sheets.contains(&"control.png".to_string()));
+    assert_eq!(pngs(&out), sorted(s2.sheets.clone()));
+    // A refused run (a line of the log that is not a pair): its refusal alone, no sheet, no
+    // samples.tsv.
+    let bad = r#"{"neighbour":7,"pass":1,"fail":false}"#;
+    work.write("gates.jsonl", format!("{bad}\n").as_bytes())
+        .unwrap();
+    let e = calibrate(&g, &work, &opts2).unwrap_err();
+    assert!(e.contains("not a pair"), "{e}");
+    assert_eq!(files_of(&out), ["gates.jsonl", "refused.txt"]);
+    let refused = std::fs::read_to_string(out.join("refused.txt")).unwrap();
+    assert_eq!(refused, format!("{e}\n"));
+    work.write("gates.jsonl", world_rows().as_bytes()).unwrap();
+    // A dir this mode did not write, an empty one too, or the final read's: not replaced, and
+    // nothing left beside it.
+    let theirs = dir.join("theirs");
+    let o3 = Options {
+        out: theirs.clone(),
+        ..opts2.clone()
+    };
+    let names = |d: &Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let finals = out_dir::FINAL.marker;
+    for (k, kept) in [vec!["notes.txt"], vec![], vec![finals]]
+        .into_iter()
+        .enumerate()
+    {
+        let _ = std::fs::remove_dir_all(&theirs);
+        std::fs::create_dir_all(&theirs).unwrap();
+        for f in &kept {
+            std::fs::write(theirs.join(f), b"the owner's").unwrap();
+        }
+        let e = calibrate(&g, &work, &o3).unwrap_err();
+        assert!(
+            e.contains("calibrate did not write (no marker .calibrate-first-pass)"),
+            "{k}: {e}"
+        );
+        assert_eq!(names(&theirs), kept, "{k}");
+        assert!(
+            names(&dir).iter().all(|f| !f.starts_with('.')),
+            "{k}: {:?}",
+            names(&dir)
+        );
+    }
+    std::fs::remove_dir_all(&theirs).unwrap();
+    assert!(calibrate(&g, &work, &o3).is_ok());
+    assert!(theirs.join(out_dir::FIRST.marker).is_file());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

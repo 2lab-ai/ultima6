@@ -1504,99 +1504,19 @@ fn refuse(out: &Path, shown: &Path, name: &str, what: &str, d: &[Disagreement]) 
     )
 }
 
-/// The file every out dir of `calibrate --final` holds: the dir is the tool's, which a later
-/// run may replace whole.
-pub const MARKER: &str = ".calibrate-final";
-
-/// A run's out dir while it is written: a fresh directory beside the out dir, holding the
-/// [`MARKER`], swapped in at the end ([`Staged::swap`]) or removed.
-struct Staged {
-    dir: PathBuf,
-    out: PathBuf,
-}
-
-impl Staged {
-    /// A fresh directory beside `out` (made absolute, its parent checked and created).
-    fn begin(out: &Path) -> Result<Staged, String> {
-        let name = out
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| format!("{}: not a directory name", out.display()))?
-            .to_string();
-        let parent = match out.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        let parent = work::ensure_dir(&parent)?;
-        let stamp = format!("{}-{}", std::process::id(), work::now_ns());
-        let dir = parent.join(format!(".{name}.staging-{stamp}"));
-        std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let staged = Staged {
-            dir,
-            out: parent.join(name),
-        };
-        work::write_file(&staged.dir.join(MARKER), b"calibrate --final\n")?;
-        Ok(staged)
-    }
-
-    /// Puts the staged dir in the out dir's place: an out dir there is removed only when it is
-    /// one calibrate --final wrote (it holds the [`MARKER`]); anything else there, an empty
-    /// dir too, is left as it is, the staged dir removed, and the run fails.
-    fn swap(self) -> Result<(), String> {
-        let refuse = |why: &str| -> Result<(), String> {
-            let _ = std::fs::remove_dir_all(&self.dir);
-            Err(format!(
-                "{}: {why}; it is not replaced (give another --out, or move it)",
-                self.out.display()
-            ))
-        };
-        match std::fs::symlink_metadata(&self.out) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return refuse(&e.to_string()),
-            Ok(m) if !m.file_type().is_dir() => return refuse("not a directory"),
-            Ok(_) if self.out.join(MARKER).is_file() => {
-                // The old run moved aside, this one put in its place, then the old removed; on a
-                // failure the old put back.
-                let old = PathBuf::from(format!("{}.old", self.dir.display()));
-                if let Err(e) = std::fs::rename(&self.out, &old) {
-                    return refuse(&e.to_string());
-                }
-                if let Err(e) = std::fs::rename(&self.dir, &self.out) {
-                    let _ = std::fs::rename(&old, &self.out);
-                    return refuse(&e.to_string());
-                }
-                let _ = std::fs::remove_dir_all(&old);
-                return Ok(());
-            }
-            Ok(_) => return refuse("a directory calibrate --final did not write (no marker)"),
-        }
-        match std::fs::rename(&self.dir, &self.out) {
-            Ok(()) => Ok(()),
-            Err(e) => refuse(&e.to_string()),
-        }
-    }
-}
+/// The file every out dir of `calibrate --final` holds ([`super::out_dir::FINAL`]): the dir
+/// is the tool's, which a later run may replace whole.
+pub const MARKER: &str = super::out_dir::FINAL.marker;
 
 /// Runs `calibrate --final` (module docs of [`crate::calibrate`]) over the work dir. The run is
-/// written to a fresh directory beside the out dir and swapped in whole at the end: after any
-/// run the out dir holds that run's output alone, its sheets and `samples.tsv` drawn from one
-/// state, or, when it fails, its refusal (`refused.txt`, the details and the snapshots read).
+/// written to a fresh directory beside the out dir and swapped in whole at the end
+/// ([`super::out_dir::run_in`]): after any run the out dir holds that run's output alone, its
+/// sheets and `samples.tsv` drawn from one state, or, when it fails, its refusal
+/// (`refused.txt`, the details and the snapshots read).
 pub fn calibrate_final(game: &Game, work: &Work, o: &FinalOptions) -> Result<FinalSummary, String> {
-    work::check_target(&o.out)?;
-    let staged = Staged::begin(&o.out)?;
-    let r = run_final(game, work, o, &staged.dir, &staged.out);
-    if let Err(e) = &r
-        && let Err(w) =
-            work::write_file(&staged.dir.join("refused.txt"), format!("{e}\n").as_bytes())
-    {
-        let _ = std::fs::remove_dir_all(&staged.dir);
-        return Err(format!("{e} ({w})"));
-    }
-    match (r, staged.swap()) {
-        (r, Ok(())) => r,
-        (Ok(_), Err(e)) => Err(e),
-        (Err(e), Err(w)) => Err(format!("{e}; {w}")),
-    }
+    super::out_dir::run_in(super::out_dir::FINAL, &o.out, |out, named| {
+        run_final(game, work, o, out, named)
+    })
 }
 
 /// [`calibrate_final`]'s run, written to `out`, which is to be the out dir `named`.

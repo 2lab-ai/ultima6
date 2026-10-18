@@ -4,7 +4,10 @@
 //! of `--slices`, each file read once, into memory, at the start (its digest kept); nothing of
 //! either is read again while the sheets are drawn. No lock is taken: a re-ingest while they are
 //! read can mix two states, which this mode does not check for (`--final` does). It writes PNG
-//! sheets and `samples.tsv` to the out dir. It calls nothing: no `codex`, no upload. It samples
+//! sheets and `samples.tsv` to the out dir, as `--final` does ([`out_dir`]: a fresh directory
+//! beside it, swapped in whole at the end, an old one replaced only when this mode wrote it:
+//! it holds [`out_dir::FIRST`]'s marker; on a failure the snapshot and `refused.txt`, no
+//! sheet). It calls nothing: no `codex`, no upload. It samples
 //! the first pass (below), or, with `--final`, draws a window of every item of the final pack
 //! (the last section).
 //!
@@ -133,13 +136,14 @@
 //!   the pairs in the last pass, of them drawn in a window, and the windows drawing one (the
 //!   pair windows too), 0 printed; the pair windows, and the pairs of the last pass drawn in
 //!   no window (0: a run that leaves one fails).
-//! - **The out dir** ([`final_read::MARKER`]): the run is written to a fresh directory beside
-//!   `--out` and swapped in whole at the end, so after any run `--out` holds that run's output
-//!   alone: on success its sheets and `samples.tsv`, drawn from one state; on a refusal its
-//!   `refused.txt` (the error), the details (`disagreements.txt` or `unshown.txt`) and the
-//!   snapshots read, no sheet; when the work dir changed during the run, `changed.txt` (what
-//!   changed) and no sheet. An old `--out` is replaced only when it holds the marker file every
-//!   run writes; anything else there (an empty dir too) is left as it is and the run fails.
+//! - **The out dir** ([`out_dir`], [`final_read::MARKER`]): the run is written to a fresh
+//!   directory beside `--out` and swapped in whole at the end, so after any run `--out` holds
+//!   that run's output alone: on success its sheets and `samples.tsv`, drawn from one state; on
+//!   a refusal its `refused.txt` (the error), the details (`disagreements.txt` or `unshown.txt`)
+//!   and the snapshots read, no sheet; when the work dir changed during the run, `changed.txt`
+//!   (what changed) and no sheet. An old `--out` is replaced only when it holds the marker file
+//!   every run of this mode writes; anything else there (an empty dir too, or the first pass's)
+//!   is left as it is and the run fails.
 //!
 //! The object draw (`u6_core::objects::draw`, 0x10e81e, 0x10e73a, 0x10e596) as far as the
 //! starting lists tell it: the objects in list order, (y, x), and at one cell the later in the
@@ -171,6 +175,7 @@ use crate::neighbour::{self, At, Drawn, Pair, Side};
 use crate::work::{self, Work};
 
 pub mod final_read;
+pub mod out_dir;
 #[cfg(test)]
 mod tests;
 
@@ -1721,12 +1726,19 @@ fn draw(
     Ok(())
 }
 
-/// Runs `calibrate` (module docs) over the work dir's `gates.jsonl`.
+/// Runs `calibrate` (module docs) over the work dir's `gates.jsonl`, written to a fresh
+/// directory beside the out dir and swapped in whole at the end ([`out_dir::run_in`]).
 pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, String> {
     if o.per == 0 {
         return Err("--per is at least 1".into());
     }
-    let out = work::ensure_dir(&o.out)?;
+    out_dir::run_in(out_dir::FIRST, &o.out, |out, _| {
+        first_pass(game, work, o, out)
+    })
+}
+
+/// [`calibrate`]'s run, written to `out`.
+fn first_pass(game: &Game, work: &Work, o: &Options, out: &Path) -> Result<Summary, String> {
     // The snapshot first; only it is read.
     let snapshot = out.join("gates.jsonl");
     let bytes = img::read_capped(&work.path("gates.jsonl"), 1 << 30)
@@ -1763,7 +1775,7 @@ pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, Strin
         let stem = format!("{}{}-{}", o.source.prefix(), bucket.name(), sides.name());
         let (t, s) = (&mut tsv, &mut sheets);
         draw(
-            game, &pack, o.seam, &out, &stem, &entries, &mut index, t, s, &mut same,
+            game, &pack, o.seam, out, &stem, &entries, &mut index, t, s, &mut same,
         )?;
     }
     let by: BTreeMap<Pair, &Row> = rows.iter().map(|r| (r.pair, r)).collect();
@@ -1802,7 +1814,7 @@ pub fn calibrate(game: &Game, work: &Work, o: &Options) -> Result<Summary, Strin
             .collect();
         let (t, s) = (&mut tsv, &mut sheets);
         draw(
-            game, &pack, o.seam, &out, &stem, &entries, &mut index, t, s, &mut same,
+            game, &pack, o.seam, out, &stem, &entries, &mut index, t, s, &mut same,
         )?;
     }
     work::write_file(&out.join("samples.tsv"), tsv.as_bytes())?;
