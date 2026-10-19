@@ -22,7 +22,8 @@ Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source 
 - On preview, not in production: the first-run chooser (`first-run`), voice V1–V3 with the CPU path (`voice`, main 882cff2) and the NPC bundles button V5 (`npc`, main aa4018a). Production waits on the owner keeping a preview.
 - On preview `npc-voices` (main 2aaa396): V4, a voice per NPC from the committed type-class table and the actor number.
 - On preview `voice-pack` (main 70e2d23): V6, the personality voice pack tool (`tools/speech/profile.mjs`) and the page's pack loader. The owner's real run (his bundles to the LLM) waits on his typed `yes`; my own dry run on his bundles was refused by the auto-mode classifier (PII Data Handling), so the first payload is shown by his run.
-- Next: item 2's in-game Korean (L2 locale layer, then L5 translate tool, which also needs the owner's `yes`).
+- On preview `korean` (main 605c32f): K1, one NPC in archaic Korean. The engine's locale pack for conversation runs (hash-checked, English for a missing run), the page's drop/keep/forget of `ko.u6lp`, and `tools/i18n/translate.mjs` with the style guide. Live check with the owner's files and a synthetic pack: Hangul cells in the message window, hits 2 misses 0, forget gives English. The owner's one-NPC run waits on his typed `yes`.
+- Next: item 2's remaining 08 units: table and executable strings (the fill-in words and "You see" stay English today), look/book text, keyword aliases and the IME, then the full translation run.
 
 Decision 2026-10-18 (trinity, converged in round 3; record `~/Games/ultima6/work/dispatch/trinity-h5-decision.md`):
 - H5 merged as gate code (953e744); item 1 stays open.
