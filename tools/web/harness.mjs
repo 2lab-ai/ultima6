@@ -2,11 +2,13 @@
 // IndexedDB view, frame comparisons. Game files are read from the user's local copy at run
 // time and never written anywhere.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { chromium } from 'playwright';
+import { gate } from '../../functions/_middleware.js';
 import { serve } from './serve.mjs';
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -427,19 +429,53 @@ export function packKit() {
   };
 }
 
-/// Starts the server and a headless Chromium; `close()` stops both.
+/// The tests' own pack key (the site's is in no file: its Function holds only its SHA-256).
+export const PACK_KEY = 'test-pack-key';
+
+/// Starts the server and a headless Chromium; `close()` stops both. The server answers /packs/*
+/// through the site's gate (functions/_middleware.js) set to `PACK_KEY`, from `packs`
+/// (name -> body, a string or bytes the test made; nothing on disk), and logs each of those
+/// requests in `packRequests` as [path, its X-Pack-Key or null, the status answered].
 export async function setup(root = SITE) {
-  const server = await serve({ root });
+  const packs = new Map();
+  const packRequests = [];
+  const sha256 = createHash('sha256').update(PACK_KEY).digest('hex');
+  const files = (request) => {
+    const body = packs.get(decodeURIComponent(new URL(request.url).pathname.slice('/packs/'.length)));
+    return body === undefined ? new Response('not found', { status: 404 }) : new Response(body);
+  };
+  const front = gate(sha256);
+  const server = await serve({
+    root,
+    packs: async (request) => {
+      const response = await front({ request, next: async () => files(request) });
+      packRequests.push([new URL(request.url).pathname, request.headers.get('X-Pack-Key'), response.status]);
+      return response;
+    },
+  });
   const browser = await chromium.launch();
-  return { server, browser, close: async () => { await browser.close(); await server.close(); } };
+  return { server, browser, packs, packRequests, close: async () => { await browser.close(); await server.close(); } };
 }
+
+/// The choice a page starts with unless a test asks for the chooser (`openPage`'s `setup`).
+export const CHOSEN = { lang: 'en' };
 
 /// A fresh context (empty storage) and page with the hooks; `gated` adds the store and glue
 /// wrappers; `gameFirst` (default) starts `game` without the launcher's `u` (the page itself is
-/// unchanged).
-export async function openPage(env, { gated = true, gameFirst = true } = {}) {
+/// unchanged); `setup` is the chooser's choice the page finds kept (`CHOSEN`: no chooser), null
+/// for a first visit (the chooser shows).
+export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN } = {}) {
   const context = await env.browser.newContext({ viewport: { width: 1024, height: 900 } });
   await context.addInitScript(pageHooks);
+  if (setup) {
+    await context.addInitScript((value) => {
+      try {
+        if (localStorage.getItem('u6.setup') === null) localStorage.setItem('u6.setup', value);
+      } catch {
+        // An opaque origin (about:blank) has no storage.
+      }
+    }, JSON.stringify(setup));
+  }
   if (gated) {
     await context.route(/\/store\.js(\?real)?$/, async (route) => {
       if (route.request().url().endsWith('?real')) return route.continue();

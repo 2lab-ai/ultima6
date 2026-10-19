@@ -56,9 +56,19 @@
 // loads it before its first HD frame (storage that refuses it: the pack works for this visit only,
 // and the one kept before is removed). "Forget the HD pack" removes it from the page and the
 // browser. Its images go in front of MMPX for the images whose classic bytes they were made from.
-// The page never fetches a pack. A drop that holds a pack and other files is refused as a whole.
-// Loading a pack while another is set holds both decoded until the new one is checked (so a
-// refusal changes nothing).
+// A drop that holds a pack and other files is refused as a whole. Loading a pack while another is
+// set holds both decoded until the new one is checked (so a refusal changes nothing).
+//
+// The chooser (first run, and Settings): the page's language (English or 한글: the page's own
+// labels, buttons and status lines, from site/i18n.js; the game's text stays English) and HD:
+// MMPX, or one of the packs the site lists for the owner. Those are fetched only with the key
+// the owner's link carries once (`?k=`, kept in localStorage and taken off the address bar),
+// sent as X-Pack-Key on every /packs/ request; the site's Pages Function
+// (functions/_middleware.js) answers 404 to any other, so a visitor without the key gets MMPX
+// only. A listed pack is downloaded and then loaded and kept exactly as a dropped one. The
+// chooser shows the pack active (none, a dropped one, or the listed one it came from), and OK
+// makes the entry checked the active one. The choice made is kept in localStorage; while there
+// is none the chooser shows first.
 import init, {
   Game, HdPack, PackProbe, budget_ms, input_too_large, max_input_bytes, max_pack_bytes,
   max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
@@ -67,6 +77,7 @@ import {
   collect, forgetFiles, forgetPack, forgetSaves, loadFiles, loadPack, loadSaves, saveFiles,
   storePack, storeSaves,
 } from './store.js';
+import { TEXT } from './i18n.js';
 
 const canvas = document.getElementById('screen');
 const drop = document.getElementById('drop');
@@ -84,12 +95,15 @@ const faster = document.getElementById('faster');
 const speedLabel = document.getElementById('speed-label');
 const speedReached = document.getElementById('speed-reached');
 const behindMark = document.getElementById('behind');
+const settings = document.getElementById('settings');
+const setup = document.getElementById('setup');
+const setupNote = document.getElementById('setup-note');
+const setupHd = document.getElementById('setup-hd');
+const setupDropped = document.getElementById('setup-dropped');
+const setupOk = document.getElementById('setup-ok');
+const setupStatus = document.getElementById('setup-status');
 
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
-const HOW_TO_PLAY = 'Click the game screen or Tab to it, then: Escape skips the opening; in ' +
-  'the menu C creates a character, J journeys onward; in the game arrow keys walk, T talks, ' +
-  'space passes. The mouse works as in the original: click the map to walk, the command icons, ' +
-  'the party and the inventory.';
 
 let wasm = null; // the wasm exports, once loaded
 let game = null; // the running game, or null
@@ -113,8 +127,55 @@ function reflect(state) {
   canvas.dataset.saves = String(live ? game.save_files() : 0);
 }
 
+// --- the page's language ---------------------------------------------------------------------
+
+const SETUP_KEY = 'u6.setup'; // localStorage: the chooser's choice made, {"lang":"en"|"ko"}
+
+// The stored choice, or null (none yet, or storage that cannot be read).
+function storedSetup() {
+  try {
+    const value = JSON.parse(localStorage.getItem(SETUP_KEY));
+    return value && typeof value === 'object' && Object.hasOwn(TEXT, value.lang) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+let lang = storedSetup()?.lang ?? 'en';
+
+// The page's text `key` in its language (a function of `args` where the line shows values).
+function t(key, ...args) {
+  const text = TEXT[lang][key] ?? TEXT.en[key];
+  return typeof text === 'function' ? text(...args) : text;
+}
+
+// The status line: `text`, also on the chooser's line while a pack it chose loads (`mirror`).
+// `say` writes one key's line and remembers it, so a change of language rewrites it.
+let mirror = false;
+let said = null;
 function setStatus(text) {
+  said = null;
   statusLine.textContent = text;
+  if (mirror) setupStatus.textContent = text;
+}
+
+function say(key, ...args) {
+  setStatus(t(key, ...args));
+  said = [key, args];
+}
+
+// Puts the page's text in `next` language: the labels and buttons index.html names by key, the
+// buttons whose text is a state, the last line `say` wrote.
+function setLang(next) {
+  lang = Object.hasOwn(TEXT, next) ? next : 'en';
+  document.documentElement.lang = lang;
+  for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
+  for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
+  for (const el of document.querySelectorAll('[data-i18n-label]')) el.setAttribute('aria-label', t(el.dataset.i18nLabel));
+  setupNote.hidden = lang === 'en';
+  mute.textContent = t(audio.muted ? 'unmute' : 'mute');
+  showSpeed();
+  if (said) say(said[0], ...said[1]);
 }
 
 function message(err) {
@@ -131,7 +192,8 @@ function clockSeed() {
 let tail = Promise.resolve();
 let queued = 0;
 
-// Runs `op` after every operation queued before it; a failure is shown and ends only that one.
+// Runs `op` after every operation queued before it; a failure is shown (`what`: the key of its
+// name) and ends only that one.
 function enqueue(what, op) {
   queued += 1;
   document.body.dataset.ops = String(queued);
@@ -140,7 +202,7 @@ function enqueue(what, op) {
       await op();
     } catch (err) {
       console.error(err);
-      setStatus(`${what} failed: ${message(err)}`);
+      setStatus(t('failed', t(what), message(err)));
     } finally {
       queued -= 1;
       document.body.dataset.ops = String(queued);
@@ -244,7 +306,7 @@ function applyGain() {
 function setMuted(muted) {
   audio.muted = muted;
   applyGain();
-  mute.textContent = muted ? 'Unmute' : 'Mute';
+  mute.textContent = t(muted ? 'unmute' : 'mute');
   mute.setAttribute('aria-pressed', String(muted));
 }
 
@@ -280,12 +342,12 @@ function checkSave() {
     const len = g.save_len(i);
     files.push({ path, bytes: new Uint8Array(wasm.memory.buffer, ptr, len).slice() });
   }
-  enqueue('Saving the game', async () => {
+  enqueue('opSave', async () => {
     if (g !== owner || era !== forgets) return;
     await storeSaves(files);
     if (g === game && !crashed) g.save_committed(gen);
     document.body.dataset.saved = String(gen);
-    setStatus(`Saved in this browser (${files.length} files): the next visit resumes this game.`);
+    say('saved', files.length);
   });
 }
 
@@ -306,7 +368,7 @@ async function adoptSaves(imported) {
   } catch (err) {
     console.warn(`could not keep the imported save: ${message(err)}`);
     owner = null;
-    return ' (The imported save could not be kept in this browser, nor will this game\'s Saves.)';
+    return t('importedSaveNotKept');
   }
 }
 
@@ -386,7 +448,7 @@ function changeSpeed(by) {
 function speedText() {
   const speed = SPEEDS[speedAt];
   if (speed !== 0) return [`${speed}×`, ''];
-  return ['Max', reach.rate > 0 ? ` ${reach.rate.toFixed(1)}×` : ''];
+  return [t('max'), reach.rate > 0 ? ` ${reach.rate.toFixed(1)}×` : ''];
 }
 
 // Sets `el`'s `key` (a property such as hidden or textContent) only when it changes: the page
@@ -545,6 +607,33 @@ function applyHd() {
 
 let hdPack = null; // the HdPack loaded, set on every game put on screen; null without one
 
+// Where the pack loaded came from: '' (none), DROPPED (a drop, or a pack kept from before the
+// chooser) or the name of the listed pack it was downloaded as. The kept pack's source is kept
+// beside it (SOURCE_KEY) for the next visit.
+const DROPPED = ':dropped';
+const SOURCE_KEY = 'u6.hdSource';
+const PACK_NAME = /^\w[\w.-]*$/; // a listed pack's file: a plain name
+let packSource = '';
+
+// The source of the pack kept in this browser: DROPPED unless a listed name is kept with it.
+function keptSource() {
+  try {
+    const source = localStorage.getItem(SOURCE_KEY);
+    return source !== null && PACK_NAME.test(source) ? source : DROPPED;
+  } catch {
+    return DROPPED;
+  }
+}
+
+function keepSource(source) {
+  try {
+    if (source) localStorage.setItem(SOURCE_KEY, source);
+    else localStorage.removeItem(SOURCE_KEY);
+  } catch {
+    // No storage: a pack kept without its source comes back as a dropped one.
+  }
+}
+
 // The pack's counts and the game's matches on the body (data-hd-pack, data-hd-matched).
 function reflectPack() {
   document.body.dataset.hdPack = hdPack ? hdPack.counts().join(',') : 'none';
@@ -570,18 +659,14 @@ async function probePack(file) {
 // The status line of a loaded pack: counts only.
 function packStatus() {
   const [tiles, portraits, panels] = hdPack.counts();
-  if (!game || crashed) {
-    return `HD pack loaded: ${tiles} tiles, ${portraits} portraits and ${panels} panel pictures; ` +
-      'it is used once a game runs.';
-  }
-  const [t, p, b] = game.hd_pack_matches();
-  return `HD pack loaded: ${t} of its ${tiles} tiles, ${p} of its ${portraits} portraits and ` +
-    `${b} of its ${panels} panel pictures match the game on screen; everything else is drawn ` +
-    'by MMPX.';
+  if (!game || crashed) return t('packLoaded', tiles, portraits, panels);
+  const [matchedTiles, matchedPortraits, matchedPanels] = game.hd_pack_matches();
+  return t('packMatched', matchedTiles, matchedPortraits, matchedPanels, tiles, portraits, panels);
 }
 
-// `next` (an HdPack) replaces the pack loaded, on the game on screen at once (drawn with no step).
-function attachPack(next) {
+// `next` (an HdPack, from `source`) replaces the pack loaded, on the game on screen at once
+// (drawn with no step), and on the chooser if it is open.
+function attachPack(next, source = '') {
   if (game && !crashed) {
     if (next) game.set_hd_pack(next);
     else game.forget_hd_pack();
@@ -589,51 +674,56 @@ function attachPack(next) {
   }
   hdPack?.free();
   hdPack = next;
+  packSource = next ? source : '';
   reflectPack();
+  if (!setup.hidden) showHdChoice();
 }
 
 // A dropped pack (`refusal`: why its directory or manifest already refuses it, '' if nothing
 // does): read whole, checked and decoded by the engine, set on the game on screen, kept in this
 // browser. A pack that does not read is refused and nothing changes; one too large or refused by
 // its directory is refused before it is read whole. When the browser does not keep the new pack,
-// the one kept before is removed too (else the next visit would bring it back unsaid).
-async function loadPackFile(file, refusal) {
+// the one kept before is removed too (else the next visit would bring it back unsaid). `source`:
+// DROPPED, or the listed name it was downloaded as. Returns whether the pack was loaded.
+async function loadPackFile(file, refusal, source = DROPPED) {
   needEngine();
   if (file.size > max_pack_bytes()) {
-    setStatus(`The HD pack was not loaded: the file is over the ` +
-      `${Math.floor(max_pack_bytes() / 2 ** 20)} MiB a pack can be.`);
-    return;
+    say('packTooLarge', Math.floor(max_pack_bytes() / 2 ** 20));
+    return false;
   }
   if (refusal) {
-    setStatus(`The HD pack was not loaded: ${refusal}`);
-    return;
+    say('packRefused', refusal);
+    return false;
   }
-  setStatus('Reading the HD pack…');
+  say('packReading');
   let bytes = new Uint8Array(await file.arrayBuffer());
-  setStatus('Checking the HD pack…');
+  say('packChecking');
   await new Promise((resolve) => setTimeout(resolve, 0));
   let next;
   try {
     next = HdPack.load(bytes);
   } catch (err) {
-    setStatus(`The HD pack was not loaded: ${message(err)}`);
-    return;
+    say('packRefused', message(err));
+    return false;
   }
-  attachPack(next);
+  attachPack(next, source);
   const kept = await storePack(bytes);
   bytes = null;
-  let note = ' It is kept in this browser for the next visit.';
+  let note = t('packKept');
+  if (kept) keepSource(source);
   if (!kept) {
-    let old = 'no HD pack is kept for the next visit';
+    let old = t('packOldGone');
     try {
       await forgetPack();
+      keepSource('');
     } catch (err) {
       console.warn(`could not remove the HD pack kept before: ${message(err)}`);
-      old = 'an HD pack kept here before, if any, stays and comes back on the next visit';
+      old = t('packOldStays');
     }
-    note = ` (It could not be kept in this browser: it works until the page is left, and ${old}.)`;
+    note = t('packNotKept', old);
   }
   setStatus(`${packStatus()}${note}`);
+  return true;
 }
 
 // The pack kept from the last visit, loaded before the first game is put on screen (so its first
@@ -642,7 +732,7 @@ async function restorePack() {
   const bytes = await loadPack();
   if (!bytes) return;
   try {
-    attachPack(HdPack.load(bytes));
+    attachPack(HdPack.load(bytes), keptSource());
   } catch (err) {
     console.warn(`the kept HD pack is not used: ${message(err)}`);
   }
@@ -654,10 +744,11 @@ async function forgetHdPack() {
   try {
     await forgetPack();
   } catch (err) {
-    setStatus(`The HD pack is off on this page, but this browser did not remove it: ${message(err)}`);
+    say('packForgetFailed', message(err));
     return;
   }
-  setStatus('The HD pack was removed from this page and this browser; HD shows MMPX.');
+  keepSource('');
+  say('packForgot');
 }
 
 function toggleHd() {
@@ -725,7 +816,7 @@ function frame(now) {
 // again from the kept files.
 function ended() {
   looping = false;
-  setStatus('The game has ended. Restart starts it again from the files kept in this browser.');
+  say('ended');
   restart.hidden = false;
   reflect('ended');
 }
@@ -740,26 +831,25 @@ function startLoop() {
 // A trap or exception inside the engine: its state is unknown, so it is never stepped again.
 function stopOnTrap(err) {
   console.error(err);
-  setStatus(`The game stopped on an internal error (${message(err)}). Restart loads the ` +
-    'kept files again.');
+  say('trap', message(err));
   crashed = true;
   looping = false;
   restart.hidden = false;
   reflect('crashed');
 }
 
-// Boots `next` (its files loaded); on success it replaces the running game. Returns the intake
-// report, or null when it did not start (the status says why; the caller frees `next`).
+// Boots `next` (its files loaded; `origin` the key of the line that says where from); on success
+// it replaces the running game. Returns the intake report, or null when it did not start (the
+// status says why; the caller frees `next`).
 async function boot(next, origin) {
-  const n = next.files_loaded();
-  setStatus(`${n} file${n === 1 ? '' : 's'} ${origin}; decoding the disks…`);
+  say(origin, next.files_loaded());
   // Let the status paint before the (synchronous) intake runs.
   await new Promise((resolve) => setTimeout(resolve, 0));
   let report;
   try {
     report = next.start(clockSeed());
   } catch (err) {
-    setStatus(`Could not start the game:\n${message(err)}`);
+    say('cannotStart', message(err));
     return null;
   }
   const old = game;
@@ -806,8 +896,8 @@ async function keep(started) {
 // --- operations (each runs on the queue) ---------------------------------------------------
 
 function needEngine() {
-  if (!wasm) throw new Error('the engine is not loaded');
-  if (crashed) throw new Error('the engine stopped; press Restart');
+  if (!wasm) throw new Error(t('engineNotLoaded'));
+  if (crashed) throw new Error(t('engineStopped'));
 }
 
 // Files of an original `savegame/` folder (the PLAYER disk's saved game).
@@ -825,13 +915,12 @@ async function readSaves(saveItems) {
       left.push(path);
       continue;
     }
-    setStatus(`Reading ${path}…`);
+    say('reading', path);
     total += file.size;
     files.push({ path: `savegame/${path.split('/').pop()}`, bytes: new Uint8Array(await file.arrayBuffer()) });
   }
-  const note = left.length === 0 ? '' : `Left out of the saved game (a save file holds at most ` +
-    `${max_save_file_bytes()} bytes, the saved game ${max_save_bytes()} bytes together): ` +
-    `${left.join(', ')}.\n`;
+  const note = left.length === 0 ? ''
+    : t('savesLeftOut', max_save_file_bytes(), max_save_bytes(), left.join(', '));
   return { files, note };
 }
 
@@ -859,7 +948,7 @@ async function importFiles(dropped) {
   const total = dropped.reduce(
     (sum, { path, file }) => sum + (zip_sliced(path, file.size) ? 0 : file.size), 0);
   if (dropped.length === 0) {
-    setStatus('No files in the drop.');
+    say('noFiles');
     return;
   }
   if (total > max_input_bytes()) {
@@ -876,10 +965,9 @@ async function importFiles(dropped) {
     if (read.files.length > 0) imported = read.files;
     if (items.length === 0) {
       if (imported) {
-        await restoreKept(true, `${lead}The saved game (${imported.length} files) was imported.`,
-          imported);
+        await restoreKept(true, `${lead}${t('savesImported', imported.length)}`, imported);
       } else {
-        setStatus(`${lead}Nothing was imported.`);
+        setStatus(`${lead}${t('nothingImported')}`);
       }
       return;
     }
@@ -892,7 +980,7 @@ async function importFiles(dropped) {
       (sum, { path, file }) => sum + (zip_sliced(path, file.size) ? 0 : file.size), 0);
     for (const { path, file } of items) {
       if (zip_sliced(path, file.size)) {
-        setStatus(`Reading ${path}…`);
+        say('reading', path);
         await readZipSlices(next, path, file);
       } else {
         if (next.input_held() + whole > max_input_bytes()) {
@@ -900,22 +988,20 @@ async function importFiles(dropped) {
           return;
         }
         whole -= file.size;
-        setStatus(`Reading ${path}…`);
+        say('reading', path);
         // The JS copy lives only until wasm has its own (load_file copies it in).
         next.load_file(path, new Uint8Array(await file.arrayBuffer()));
       }
     }
     await attachSaves(next, imported);
-    const report = await boot(next, 'read');
+    const report = await boot(next, 'bootRead');
     if (report === null) return;
     started = true;
     canvas.focus();
     const saved = imported ? await adoptSaves(imported) : '';
-    const kept = (await keep(next))
-      ? ` The ${next.game_files()} game files are kept in this browser for the next visit.`
-      : ' (The files could not be kept in this browser; drop them again next time.)';
-    const resumed = next.save_files() > 0 ? ' Resumed the game saved in this browser.' : '';
-    setStatus(`${lead}${report}\nStarted.${resumed}${saved}${kept}\n${HOW_TO_PLAY}`);
+    const kept = (await keep(next)) ? t('filesKept', next.game_files()) : t('filesNotKept');
+    const resumed = next.save_files() > 0 ? t('resumed') : '';
+    setStatus(`${lead}${report}\n${t('started')}${resumed}${saved}${kept}\n${t('howToPlay')}`);
   } finally {
     if (started) {
       if (!crashed) next.release_kept();
@@ -940,10 +1026,11 @@ async function restoreKept(focus, note = '', imported = null) {
       await storeSaves(imported, true);
       if (game) {
         owner = null;
-        after = ' The game on screen is not saved in this browser any more.';
+        after = t('notSavedAnyMore');
       }
     }
-    setStatus(`${lead}No files loaded yet: drop or choose your Ultima VI files.${after}`);
+    if (lead || after) setStatus(`${lead}${t('noFilesYet')}${after}`);
+    else say('noFilesYet');
     return;
   }
   const next = new Game();
@@ -955,17 +1042,14 @@ async function restoreKept(focus, note = '', imported = null) {
     }
     kept = null;
     await attachSaves(next, imported);
-    const report = await boot(next, 'kept from the last visit');
+    const report = await boot(next, 'bootKept');
     if (report === null) return;
     started = true;
     next.release_kept();
     if (focus) canvas.focus();
     const saved = imported ? await adoptSaves(imported) : '';
-    const what = next.save_files() > 0
-      ? 'the game saved in this browser, resumed'
-      : 'a new game (no game saved in this browser)';
-    setStatus(`${lead}${report}\nStarted from the files kept in this browser: ${what}.${saved}\n` +
-      HOW_TO_PLAY);
+    const what = t(next.save_files() > 0 ? 'keptResumed' : 'keptNew');
+    setStatus(`${lead}${report}\n${t('startedKept', what)}${saved}\n${t('howToPlay')}`);
   } finally {
     if (!started) next.free();
   }
@@ -973,10 +1057,7 @@ async function restoreKept(focus, note = '', imported = null) {
 
 async function forgetKept() {
   await forgetFiles();
-  setStatus(game
-    ? 'The kept game files were removed from this browser. The game on screen runs until ' +
-      'the page is left or reloaded.'
-    : 'The kept game files were removed from this browser.');
+  say(game ? 'forgotFilesRunning' : 'forgotFiles');
 }
 
 // The stored save removed: a save job taken before writes nothing, and the game on screen owns
@@ -992,9 +1073,7 @@ async function forgetSaved() {
     owner = game;
     saveSeen = game.save_generation();
   }
-  setStatus('The saved game was removed from this browser; the next start is a new game. The ' +
-    'game on screen runs on until the page is left or reloaded; a Save in it stores the whole ' +
-    'game again.');
+  say('forgotSave');
 }
 
 // Runs `op` (an import, which may replace the running game) with no Save taken meanwhile.
@@ -1020,17 +1099,196 @@ async function takeDrop(dropped) {
   if (packs.length === 0) {
     await importFiles(dropped);
   } else if (dropped.length > 1) {
-    setStatus(packs.length > 1
-      ? 'The drop holds more than one HD pack: drop one at a time. Nothing was loaded.'
-      : 'The drop holds an HD pack and other files: drop the HD pack on its own. Nothing was loaded.');
+    say(packs.length > 1 ? 'dropTwoPacks' : 'dropPackAndFiles');
   } else {
     await loadPackFile(packs[0].file, packs[0].refusal);
   }
 }
 
 function queueImport(gather) {
-  if (queued > 0) setStatus('Waiting for the previous step to finish…');
-  enqueue('Loading the files', () => pausingSaves(async () => takeDrop(await gather())));
+  if (queued > 0) say('waiting');
+  enqueue('opLoad', () => pausingSaves(async () => takeDrop(await gather())));
+}
+
+// --- the chooser -----------------------------------------------------------------------------
+
+const PACK_KEY = 'u6.packKey'; // localStorage: the key the owner's link brought (`?k=`)
+
+// The key: taken once from the address (`?k=`; empty forgets it), kept, and taken off the
+// address bar (and so off the history and a copied link); else the one kept, '' without one.
+// `fresh`: the address brought a key other than the one kept.
+function takePackKey() {
+  let kept = '';
+  try {
+    kept = localStorage.getItem(PACK_KEY) ?? '';
+  } catch {
+    // No storage: a key lasts until the page is left.
+  }
+  const url = new URL(location.href);
+  const given = url.searchParams.get('k');
+  if (given === null) return { key: kept, fresh: false };
+  url.searchParams.delete('k');
+  history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  try {
+    if (given) localStorage.setItem(PACK_KEY, given);
+    else localStorage.removeItem(PACK_KEY);
+  } catch {
+    // No storage: the key lasts until the page is left.
+  }
+  return { key: given, fresh: given !== '' && given !== kept };
+}
+
+const packKey = takePackKey();
+
+// /packs/`name` with the key, never cached by the browser (it is kept in IndexedDB once
+// loaded); null without a key: no request is made.
+function packFetch(name) {
+  if (!packKey.key) return null;
+  return fetch(`/packs/${encodeURIComponent(name)}`, {
+    headers: { 'X-Pack-Key': packKey.key }, cache: 'no-store',
+  });
+}
+
+// The packs the site lists for this visitor (/packs/index.json: {"packs": [{"file", "label"}]}),
+// asked once a visit; [] when it lists none (no key, a 404, anything that does not read). A
+// file is a plain name; a label is text.
+let packList = null;
+function listPacks() {
+  packList ??= (async () => {
+    try {
+      const response = await packFetch('index.json');
+      if (!response?.ok) return [];
+      const { packs } = await response.json();
+      return (Array.isArray(packs) ? packs : [])
+        .filter((p) => typeof p?.file === 'string' && PACK_NAME.test(p.file))
+        .map((p) => ({ file: p.file, label: typeof p.label === 'string' && p.label ? p.label : p.file }));
+    } catch {
+      return [];
+    }
+  })();
+  return packList;
+}
+
+// The chooser's HD entries checked as the pack active now: MMPX for none, "Dropped pack" (shown
+// only then) for a dropped one, the listed one it was downloaded as (none checked when that one
+// is not listed: OK leaves the HD as it is).
+function showHdChoice() {
+  setupDropped.hidden = packSource !== DROPPED;
+  for (const input of setupHd.querySelectorAll('input')) input.checked = input.value === packSource;
+}
+
+// The chooser's listed HD entries, after MMPX (and "Dropped pack"): each pack listed, by its label
+// (as text); the active one checked unless another entry was checked meanwhile. Its data-packs
+// is the count listed, once the list is in (for scripts and tests).
+async function showPacks() {
+  const packs = await listPacks();
+  for (const row of setupHd.querySelectorAll('label[data-pack]')) row.remove();
+  for (const { file, label } of packs) {
+    const input = Object.assign(document.createElement('input'), { type: 'radio', name: 'setup-hd', value: file });
+    const text = document.createElement('span');
+    text.textContent = label;
+    const row = document.createElement('label');
+    row.dataset.pack = file;
+    row.append(input, ' ', text);
+    setupHd.append(row);
+    if (file === packSource && !setupHd.querySelector('input:checked')) input.checked = true;
+  }
+  setupHd.dataset.packs = String(packs.length);
+}
+
+// Opens the chooser on the language and the HD choice now.
+function openSetup() {
+  for (const input of setup.querySelectorAll('input[name="setup-lang"]')) input.checked = input.value === lang;
+  setupStatus.textContent = '';
+  setup.hidden = false;
+  showHdChoice();
+  showPacks();
+}
+
+// Keeps the choice made (the language now) and closes the chooser.
+function keepSetup() {
+  try {
+    localStorage.setItem(SETUP_KEY, JSON.stringify({ lang }));
+  } catch {
+    // No storage: the choice lasts until the page is left.
+  }
+  setup.hidden = true;
+}
+
+// A listed pack: downloaded with the key (its progress on the status line), then loaded and kept
+// as a dropped one (`loadPackFile`). Returns whether it was loaded.
+async function downloadPack(name) {
+  needEngine();
+  const limit = max_pack_bytes();
+  const tooLarge = () => say('packTooLarge', Math.floor(limit / 2 ** 20));
+  say('packDownload', 0, 0);
+  const parts = [];
+  try {
+    const response = await packFetch(name);
+    if (!response?.ok) {
+      say('packNotDownloaded', `HTTP ${response?.status ?? 404}`);
+      return false;
+    }
+    const total = Number(response.headers.get('Content-Length')) || 0;
+    if (total > limit) {
+      await response.body?.cancel();
+      tooLarge();
+      return false;
+    }
+    const reader = response.body.getReader();
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      got += value.length;
+      if (got > limit) {
+        await reader.cancel();
+        tooLarge();
+        return false;
+      }
+      parts.push(value);
+      say('packDownload', got, total);
+    }
+  } catch (err) {
+    say('packNotDownloaded', message(err));
+    return false;
+  }
+  const file = new File([new Blob(parts)], name);
+  const told = await probePack(file);
+  if (!told.pack) {
+    say('packNotAPack');
+    return false;
+  }
+  return loadPackFile(file, told.refusal, name);
+}
+
+// OK: the language is kept, and the HD entry checked becomes the active pack, on the queue (so
+// after a restore or a load queued before): the active pack's own entry (or none checked)
+// changes nothing; MMPX removes the active pack, whatever its source; another listed pack is
+// downloaded and loaded, the chooser open and saying what the status line says until it is (it
+// stays open with the reason when it is not).
+function applySetup() {
+  const chosen = setupHd.querySelector('input:checked')?.value;
+  setupOk.disabled = true;
+  enqueue('opPack', async () => {
+    mirror = true;
+    try {
+      if (chosen === undefined || chosen === packSource || chosen === DROPPED) {
+        keepSetup();
+      } else if (chosen === '') {
+        await forgetHdPack();
+        keepSetup();
+      } else if (await downloadPack(chosen)) {
+        keepSetup();
+      }
+    } catch (err) {
+      console.error(err);
+      setStatus(t('failed', t('opPack'), message(err)));
+    } finally {
+      mirror = false;
+      setupOk.disabled = false;
+    }
+  });
 }
 
 // --- wiring --------------------------------------------------------------------------------
@@ -1056,6 +1314,14 @@ mute.addEventListener('click', () => {
   gesture();
 });
 hdButton.addEventListener('click', toggleHd);
+settings.addEventListener('click', () => {
+  openSetup();
+  setup.querySelector('input[name="setup-lang"]:checked')?.focus();
+});
+for (const input of setup.querySelectorAll('input[name="setup-lang"]')) {
+  input.addEventListener('change', () => setLang(input.value));
+}
+setupOk.addEventListener('click', applySetup);
 // A box that grows or shrinks (the window, the zoom) may want the other scale.
 new ResizeObserver(() => {
   if (hdOn) applyHd();
@@ -1132,16 +1398,16 @@ picker.addEventListener('change', () => {
   queueImport(async () => items);
 });
 forget.addEventListener('click', () => {
-  if (queued > 0) setStatus('The kept files will be removed after the current step…');
-  enqueue('Removing the kept files', forgetKept);
+  if (queued > 0) say('forgetFilesLater');
+  enqueue('opForgetFiles', forgetKept);
 });
 forgetSave.addEventListener('click', () => {
-  if (queued > 0) setStatus('The saved game will be removed after the current step…');
-  enqueue('Removing the saved game', forgetSaved);
+  if (queued > 0) say('forgetSaveLater');
+  enqueue('opForgetSave', forgetSaved);
 });
 forgetHd.addEventListener('click', () => {
-  if (queued > 0) setStatus('The HD pack will be removed after the current step…');
-  enqueue('Removing the HD pack', forgetHdPack);
+  if (queued > 0) say('forgetPackLater');
+  enqueue('opForgetPack', forgetHdPack);
 });
 restart.addEventListener('click', () => {
   try {
@@ -1153,7 +1419,7 @@ restart.addEventListener('click', () => {
 });
 window.addEventListener('unhandledrejection', (e) => {
   console.error(e.reason);
-  setStatus(`Unexpected error: ${message(e.reason)}`);
+  say('unexpected', message(e.reason));
 });
 
 function takeFocusFlag() {
@@ -1169,15 +1435,18 @@ function takeFocusFlag() {
 reflect('loading');
 reflectPack();
 reflectAudio();
-showSpeed();
+setLang(lang);
+say('loadingEngine');
 showHd();
 canvas.dataset.behind = '0';
-enqueue('Loading the engine', async () => {
+// The chooser first while no choice is kept, or when the address brought a new key.
+if (!storedSetup() || packKey.fresh) openSetup();
+enqueue('opEngine', async () => {
   try {
     wasm = await init();
   } catch (err) {
     reflect('failed');
-    throw new Error(`the engine could not load (${message(err)})`);
+    throw new Error(t('engineFailed', message(err)));
   }
   stepMs = step_ms();
   forget.disabled = false;
@@ -1187,7 +1456,7 @@ enqueue('Loading the engine', async () => {
 });
 // The picker opens once the kept files are back, so a choice never races the restore (a drop
 // meanwhile is queued after it).
-enqueue('Starting the kept files', async () => {
+enqueue('opRestore', async () => {
   try {
     if (wasm) await restorePack();
     if (wasm) await restoreKept(takeFocusFlag());

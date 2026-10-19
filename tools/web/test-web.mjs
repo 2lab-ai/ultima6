@@ -13,7 +13,8 @@
 // choice, a held press at 1x whatever the speed, the music above 4x, a frame converted and
 // drawn only when it changed), and HD (spec 07: the switch and its storage, the S× canvas and
 // its scaling, the pointer, the MMPX notice the site ships, the performance baseline; an HD
-// pack dropped, shown, kept, forgotten and refused, its performance with a full pack). Most
+// pack dropped, shown, kept, forgotten and refused, its performance with a full pack), and the
+// first-run chooser (the page's language, a pack the site lists behind its key gate). Most
 // tests start `game` at once (harness `gameFirst`); the launcher tests run the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. The game is read once it reached what a check asserts, by its own signals (the
@@ -24,6 +25,7 @@
 //
 //   node tools/web/test-web.mjs [name-filter]      (build first: bash scripts/build-web.sh)
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -2996,6 +2998,400 @@ test('HD pack on a page with no game: the drop loads it and starts nothing (no i
   assert.ok(await cellShowsPack(page), 'after the reload: the kept files and the kept pack');
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
+
+// --- the first-run chooser and the pack gate ------------------------------------------------
+// The chooser (the page's language and HD: MMPX or a pack the site lists for the owner's key),
+// the gate in front of /packs/ (functions/_middleware.js) and the catalog of the page's
+// own text (site/i18n.js). The packs are the test's: one made-up record (h.packKit), served by
+// the test server from memory through the gate set to the tests' key (h.setup). No game data.
+
+const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+
+// No page: the gate runs on every path and canonicalises it (decoded until stable, \ as /,
+// empty, . and .. segments resolved, lowercased) before it tells a pack path: every spelling of
+// /packs without the key is a 404 with an empty body, the files not reached; with the key each
+// reaches them; other paths go on with no key; a path that does not decode, or is not stable
+// within five decodes, is a 404 whatever it names.
+test('the pack gate: every spelling of /packs (encoded, doubly encoded, any case, \\, //, . and ..) without the key is a 404 with an empty body; with the key it reaches the files; other paths need none; a path that does not decode is a 404; the site\'s gate holds the hash of the owner\'s key and runs on every path', async () => {
+  const middleware = await import('../../functions/_middleware.js');
+  assert.equal(middleware.KEY_SHA256, '637302b222111324a562643c3e206768a1e5bd8b3ee897d9f0695b3528c56922');
+  const call = async (onRequest, path, key) => {
+    let reached = 0;
+    const headers = key === null ? {} : { 'X-Pack-Key': key };
+    const response = await onRequest({
+      request: new Request(`https://ultima6.test${path}`, { headers }),
+      next: async () => {
+        reached += 1;
+        return new Response('the files');
+      },
+    });
+    return { status: response.status, body: await response.text(), reached };
+  };
+  const KEY = 'a key of the test';
+  const front = middleware.gate(sha256(KEY));
+  const PASSED = { status: 200, body: 'the files', reached: 1 };
+  const REFUSED = { status: 404, body: '', reached: 0 };
+  // %70 is p, %25 is %, %2f is /, %5c is a backslash. /%252525%370acks is /packs after four decodes
+  // (the fifth finds it stable); with one more %25 it would need a sixth, past the cap.
+  const packs = ['/packs/x', '/PACKS/x', '/Packs/x', '/%70acks/x', '/%2570acks/x', '/%252525%370acks/x', '/packs%2fx',
+    '/packs%5cx', '/%5cpacks/x', '//packs/x', '/./packs/x', '/x/../packs/x', '/%2e%2e/packs/x', '/packs/%2e%2e/packs/x',
+    '/x/%2e%2e%2fpacks/x', '/packs', '/packs/', '/packs/index.json'];
+  for (const path of packs) {
+    for (const [key, what] of [[null, 'no key'], ['another key', 'a wrong key'], ['', 'an empty key'], [sha256(KEY), 'the hash as the key']]) {
+      assert.deepEqual(await call(front, path, key), REFUSED, `${path}, ${what}`);
+      assert.deepEqual(await call(middleware.onRequest, path, key), REFUSED, `the site's gate: ${path}, ${what}`);
+    }
+    assert.deepEqual(await call(front, path, KEY), PASSED, `${path}, the key`);
+    assert.deepEqual(await call(middleware.onRequest, path, KEY), REFUSED, `the site's gate: ${path}, the test's key`);
+  }
+  for (const path of ['/', '/app.js', '/pkg/u6_web_bg.wasm', '/i18n.js', '/index.html', '/packsx', '/x/packs/y', '/NOTICE.txt']) {
+    assert.deepEqual(await call(front, path, null), PASSED, `${path}: no key needed`);
+    assert.deepEqual(await call(middleware.onRequest, path, null), PASSED, `the site's gate: ${path}: no key needed`);
+  }
+  for (const path of ['/%E0%A4%A', '/packs/%E0%A4%A', '/%', '/%25252525%370acks/x']) {
+    for (const key of [null, KEY]) assert.deepEqual(await call(front, path, key), REFUSED, `${path}: does not decode`);
+  }
+  assert.equal(middleware.canonicalPath('/A/./b//c/../%2E%2e/%44'), '/a/d', 'the canonical path');
+  const routes = JSON.parse(await readFile(join(h.SITE, '_routes.json'), 'utf8'));
+  assert.deepEqual(routes, { version: 1, include: ['/*'], exclude: [] }, 'every path invokes the gate');
+  assert.ok(!existsSync(join(h.REPO, 'functions', 'packs')), 'no Function of its own under /packs');
+});
+
+// No page: both languages hold the same keys, each a string in both or a function of as many
+// values in both, and every key index.html names is there.
+test('the page\'s text: English and Korean hold the same keys, of the same shape; every key index.html names is in the catalog', async () => {
+  const { TEXT } = await import('../../site/i18n.js');
+  assert.deepEqual(Object.keys(TEXT), ['en', 'ko']);
+  assert.deepEqual(Object.keys(TEXT.ko), Object.keys(TEXT.en), 'the same keys in the same order');
+  for (const [key, en] of Object.entries(TEXT.en)) {
+    const ko = TEXT.ko[key];
+    assert.equal(typeof ko, typeof en, `${key}: the same kind`);
+    if (typeof en === 'function') assert.equal(ko.length, en.length, `${key}: as many values`);
+    else assert.ok(en.length > 0 && ko.length > 0 && ko !== en, `${key}: a text in each`);
+  }
+  const html = await readFile(join(h.SITE, 'index.html'), 'utf8');
+  const named = [...html.matchAll(/data-i18n(?:-title|-label)?="([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(named.length >= 20, 'index.html names its labels');
+  for (const key of named) assert.ok(typeof TEXT.en[key] === 'string', `index.html's ${key} is in the catalog`);
+});
+
+// What the chooser shows: whether it is on screen and above the game screen, its entries
+// (each label's text; the HD entries shown), the HD entry checked, its status line, the note on
+// the game's text, the choice, the kept pack's source and the key kept.
+const chooser = (page) => page.evaluate(() => {
+  const setup = document.getElementById('setup');
+  const box = setup.getBoundingClientRect();
+  const labels = (name) => [...setup.querySelectorAll(`input[name="${name}"]`)].map((i) => i.parentElement.textContent.trim());
+  const note = document.getElementById('setup-note');
+  return {
+    shown: !setup.hidden && box.height > 0,
+    first: box.bottom <= document.getElementById('screen').getBoundingClientRect().top,
+    langs: labels('setup-lang'),
+    lang: setup.querySelector('input[name="setup-lang"]:checked')?.value ?? null,
+    hd: [...setup.querySelectorAll('input[name="setup-hd"]')].filter((i) => !i.parentElement.hidden)
+      .map((i) => i.parentElement.textContent.trim()),
+    checked: setup.querySelector('input[name="setup-hd"]:checked')?.value ?? null,
+    markup: setup.querySelectorAll('#setup-hd b').length,
+    status: document.getElementById('setup-status').textContent,
+    note: note.hidden ? null : note.textContent,
+    stored: JSON.parse(localStorage.getItem('u6.setup')),
+    source: localStorage.getItem('u6.hdSource'),
+    key: localStorage.getItem('u6.packKey'),
+  };
+});
+
+// Waits until the chooser's HD entries hold the list the site gave (`n` packs).
+const listed = (page, n) => page.waitForFunction((want) => document.getElementById('setup-hd').dataset.packs === want,
+  String(n), { timeout: 10_000 });
+
+// The tests' pack: `tiles` made-up tile records (no game: their keys match nothing), built in a
+// page the way u6-hdpack writes one (h.packKit); its bytes.
+async function madePack(env, tiles = 1) {
+  const { context, page } = await h.openPage(env, { gated: false });
+  await context.addInitScript(h.packKit);
+  await h.load(page, env);
+  const bytes = await page.evaluate(async (n) => {
+    const rgba = new Uint8Array(64 * 64 * 4);
+    for (let i = 0; i < 64 * 64; i += 1) rgba.set([(i * 4) & 255, (i >> 4) & 255, 77, 255], i * 4);
+    const records = Array.from({ length: n }, (_, k) => ({ kind: 1, id: k + 1, letter: 0, hash: String(k + 1).padStart(16, '0'), width: 64, height: 64, rgba }));
+    return [...window.__zipFiles(await window.__packFiles(records))];
+  }, tiles);
+  await context.close();
+  return Uint8Array.from(bytes);
+}
+
+// The site's /packs/ for a test: `files` (name -> body), its request log emptied.
+function sitePacks(env, files) {
+  env.packs.clear();
+  for (const [name, body] of Object.entries(files)) env.packs.set(name, body);
+  env.packRequests.length = 0;
+}
+
+test('first visit: the chooser shows first, above the game screen: English | 한글, and HD with MMPX only when the site lists no pack for the visitor (no key: no request to /packs/ at all); OK keeps the choice and a reload skips the chooser; Settings opens it again', async (env) => {
+  sitePacks(env, { 'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }] }) });
+  const { page } = await h.openPage(env, { setup: null });
+  await h.load(page, env);
+  await listed(page, 0);
+  let c = await chooser(page);
+  assert.ok(c.shown && c.first, 'the chooser shows, above the game screen');
+  assert.deepEqual(c.langs, ['English', '한글']);
+  assert.equal(c.lang, 'en', 'English to start with');
+  assert.deepEqual(c.hd, ['MMPX (no pack)'], 'MMPX only');
+  assert.equal(c.checked, '', 'MMPX checked');
+  assert.equal(c.note, null, 'no note in English');
+  assert.equal(c.stored, null, 'nothing kept yet');
+  assert.deepEqual(env.packRequests, [], 'no key: no request to /packs/');
+  assert.equal((await h.state(page)).state, 'idle', 'the page runs behind it');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  c = await chooser(page);
+  assert.ok(!c.shown, 'OK closes it');
+  assert.deepEqual(c.stored, { lang: 'en' }, 'the choice is kept');
+  assert.equal(c.source, null, 'no pack');
+  await page.reload();
+  await h.waitSettled(page);
+  assert.ok(!(await chooser(page)).shown, 'a kept choice skips it');
+  await page.click('#settings');
+  c = await chooser(page);
+  assert.ok(c.shown && c.lang === 'en' && c.checked === '', 'Settings opens it on the choice kept');
+  assert.equal(await page.evaluate(() => document.activeElement?.value), 'en', 'on the language chosen');
+  assert.deepEqual(env.packRequests, [], 'still no request to /packs/');
+});
+
+test('the pack list: the key from the address is kept and taken off the address bar; a wrong key gets the gate\'s 404 and MMPX only; the owner\'s key gets the packs listed, by their labels as text (a file that is not a plain name left out), and a new key opens the chooser again', async (env) => {
+  sitePacks(env, {
+    'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: '<b>Test</b> pack' }, { file: '../up.zip', label: 'Up' },
+      { file: 'plain.zip' }] }),
+  });
+  const { page } = await h.openPage(env, { setup: null });
+  await page.goto(`${env.server.url}?k=wrong-key&x=1#here`);
+  await h.waitSettled(page);
+  await listed(page, 0);
+  let c = await chooser(page);
+  assert.ok(c.shown, 'the chooser shows');
+  assert.deepEqual(c.hd, ['MMPX (no pack)'], 'a wrong key: MMPX only');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 'wrong-key', 404]], 'the gate refused the index');
+  assert.equal(c.key, 'wrong-key', 'the key is kept');
+  assert.equal(page.url(), `${env.server.url}?x=1#here`, 'and taken off the address bar');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  env.packRequests.length = 0;
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await h.waitSettled(page);
+  await listed(page, 2);
+  c = await chooser(page);
+  assert.ok(c.shown, 'a new key opens the chooser over the kept choice');
+  assert.deepEqual(c.hd, ['MMPX (no pack)', '<b>Test</b> pack', 'plain.zip'], 'the packs by their labels (a file without one by its name)');
+  assert.equal(c.markup, 0, 'a label is text, not markup');
+  assert.equal(c.checked, '', 'MMPX, the HD now, checked');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200]], 'the index asked once, with the key');
+  assert.equal(c.key, h.PACK_KEY, 'the new key is kept');
+  assert.equal(page.url(), env.server.url, 'and taken off the address bar');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await page.reload();
+  await h.waitSettled(page);
+  assert.ok(!(await chooser(page)).shown, 'the same key again: no chooser');
+});
+
+test('a listed pack chosen: downloaded with the key, its progress shown, loaded and kept as a dropped pack (no game needed); the chooser closes; a reload brings it back with no chooser and no download; one the site does not have leaves the chooser open with the reason and nothing loaded; MMPX then forgets it', async (env) => {
+  const bytes = await madePack(env);
+  sitePacks(env, {
+    'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }, { file: 'gone.zip', label: 'Gone' }] }),
+    'test-pack.zip': bytes,
+  });
+  const { page } = await h.openPage(env, { setup: null });
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await h.waitSettled(page);
+  await listed(page, 2);
+  assert.deepEqual((await chooser(page)).hd, ['MMPX (no pack)', 'Test pack', 'Gone']);
+  await page.evaluate(() => {
+    window.__setupLines = [];
+    const line = document.getElementById('setup-status');
+    new MutationObserver(() => window.__setupLines.push(line.textContent)).observe(line, { childList: true, characterData: true, subtree: true });
+  });
+  await page.check('input[name="setup-hd"][value="gone.zip"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  let c = await chooser(page);
+  assert.ok(c.shown, 'not loaded: the chooser stays open');
+  assert.equal(c.status, 'The HD pack was not loaded: it could not be downloaded (HTTP 404).', 'with the reason');
+  assert.equal(c.stored, null, 'nothing kept');
+  assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true }, 'no pack');
+  await page.check('input[name="setup-hd"][value="test-pack.zip"]');
+  await page.click('#setup-ok');
+  await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
+  c = await chooser(page);
+  const lines = await page.evaluate(() => window.__setupLines);
+  const mib = (bytes.length / 2 ** 20).toFixed(1);
+  assert.ok(lines.some((l) => l === `Downloading the HD pack: ${mib} of ${mib} MiB…`), 'the download\'s progress, of its size');
+  assert.ok(lines.includes('Checking the HD pack…'), 'then the check');
+  assert.ok(!c.shown, 'loaded: the chooser closes');
+  assert.match((await h.state(page)).status, /^HD pack loaded: 1 tiles, 0 portraits and 0 panel pictures; it is used once a game runs\. It is kept in this browser for the next visit\.$/);
+  assert.deepEqual(c.stored, { lang: 'en' }, 'the choice is kept');
+  assert.equal(c.source, 'test-pack.zip', 'and where the kept pack came from');
+  assert.equal(await h.keptPackBytes(page), bytes.length, 'the pack is kept as a dropped one is');
+  assert.equal((await h.state(page)).state, 'idle', 'no game started');
+  assert.deepEqual(env.packRequests.slice(1), [['/packs/gone.zip', h.PACK_KEY, 404], ['/packs/test-pack.zip', h.PACK_KEY, 200]],
+    'each download with the key');
+  env.packRequests.length = 0;
+  await page.reload();
+  await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
+  assert.ok(!(await chooser(page)).shown, 'a reload: no chooser');
+  assert.deepEqual(env.packRequests, [], 'and no download: the kept pack');
+  await page.click('#settings');
+  await listed(page, 2);
+  assert.equal((await chooser(page)).checked, 'test-pack.zip', 'Settings: the pack chosen is checked');
+  await page.check('input[name="setup-hd"][value=""]');
+  await page.click('#setup-ok');
+  await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === 'none', null, { timeout: 30_000 });
+  c = await chooser(page);
+  assert.ok(!c.shown && c.source === null, 'MMPX: no pack, no source kept');
+  assert.equal(await h.keptPackBytes(page), null, 'the pack forgotten');
+});
+
+// The pack on the page by its counts (data-hd-pack: one tile for the listed pack, two for the
+// dropped one), once nothing is queued.
+const packIs = (page, counts) => page.waitForFunction((want) => document.body.dataset.ops === '0'
+  && document.body.dataset.hdPack === want, counts, { timeout: 30_000 });
+
+test('a dropped pack still loads; the chooser then shows it as the active pack ("Dropped pack" checked), OK with nothing changed keeps it, and after a reload it is shown so again; MMPX then removes it', async (env) => {
+  const dropped = await madePack(env, 2);
+  sitePacks(env, {});
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  assert.ok(!(await chooser(page)).shown, 'MMPX kept: no chooser');
+  await h.dropFiles(page, [], [{ name: 'dropped-pack.zip', bytes: [...dropped] }]);
+  await packIs(page, '2,0,0');
+  assert.equal((await chooser(page)).source, ':dropped', 'a dropped pack kept as one');
+  await page.click('#settings');
+  await listed(page, 0);
+  let c = await chooser(page);
+  assert.deepEqual(c.hd, ['MMPX (no pack)', 'Dropped pack'], 'the dropped pack is an entry');
+  assert.equal(c.checked, ':dropped', 'and the one checked');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.ok(!(await chooser(page)).shown, 'OK closes it');
+  assert.equal(await page.evaluate(() => document.body.dataset.hdPack), '2,0,0', 'OK unchanged: the dropped pack stays');
+  assert.equal(await h.keptPackBytes(page), dropped.length, 'and stays kept');
+  await page.reload();
+  await packIs(page, '2,0,0');
+  await page.click('#settings');
+  await listed(page, 0);
+  c = await chooser(page);
+  assert.ok(c.hd.includes('Dropped pack') && c.checked === ':dropped', 'after a reload: "Dropped pack" checked');
+  await page.check('input[name="setup-hd"][value=""]');
+  await page.click('#setup-ok');
+  await packIs(page, 'none');
+  c = await chooser(page);
+  assert.ok(!c.shown && c.source === null, 'MMPX removes the dropped pack');
+  assert.equal(await h.keptPackBytes(page), null, 'from the browser too');
+  await page.click('#settings');
+  await listed(page, 0);
+  c = await chooser(page);
+  assert.ok(c.hd.length === 1 && c.checked === '', 'no pack: MMPX only, checked');
+  assert.deepEqual(env.packRequests, [], 'no key: no request to /packs/');
+});
+
+test('a listed pack chosen, then another pack dropped: the chooser shows the dropped one as active, and the listed pack chosen again is downloaded and replaces it', async (env) => {
+  const [listedPack, dropped] = [await madePack(env, 1), await madePack(env, 2)];
+  sitePacks(env, {
+    'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }] }),
+    'test-pack.zip': listedPack,
+  });
+  const { page } = await h.openPage(env, { setup: null });
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await h.waitSettled(page);
+  await listed(page, 1);
+  await page.check('input[name="setup-hd"][value="test-pack.zip"]');
+  await page.click('#setup-ok');
+  await packIs(page, '1,0,0');
+  assert.equal((await chooser(page)).source, 'test-pack.zip');
+  await h.dropFiles(page, [], [{ name: 'dropped-pack.zip', bytes: [...dropped] }]);
+  await packIs(page, '2,0,0');
+  await page.click('#settings');
+  await listed(page, 1);
+  let c = await chooser(page);
+  assert.deepEqual(c.hd, ['MMPX (no pack)', 'Dropped pack', 'Test pack']);
+  assert.equal(c.checked, ':dropped', 'the dropped pack is the active one, not the listed one chosen before');
+  env.packRequests.length = 0;
+  await page.check('input[name="setup-hd"][value="test-pack.zip"]');
+  await page.click('#setup-ok');
+  await packIs(page, '1,0,0');
+  c = await chooser(page);
+  assert.ok(!c.shown && c.source === 'test-pack.zip', 'the listed pack is active again');
+  assert.deepEqual(env.packRequests, [['/packs/test-pack.zip', h.PACK_KEY, 200]], 'downloaded again');
+  assert.equal(await h.keptPackBytes(page), listedPack.length, 'and kept in place of the dropped one');
+  await page.click('#settings');
+  await listed(page, 1);
+  c = await chooser(page);
+  assert.ok(c.checked === 'test-pack.zip' && !c.hd.includes('Dropped pack'), 'the listed one checked, no dropped entry');
+  env.packRequests.length = 0;
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.deepEqual(env.packRequests, [], 'the active listed pack again: no download');
+});
+
+// The page's own text as shown: the language of the page, buttons and labels, the status line.
+const pageText = (page) => page.evaluate(() => {
+  const text = (id) => document.getElementById(id).textContent.trim();
+  return {
+    lang: document.documentElement.lang,
+    forget: text('forget'),
+    forgetHd: text('forget-hd'),
+    settings: text('settings'),
+    mute: text('mute'),
+    choose: document.querySelector('label[for="picker"]').textContent.trim(),
+    drop: text('drop-title').replace(/\s+/g, ' '),
+    canvas: document.getElementById('screen').getAttribute('aria-label'),
+    status: text('status'),
+    mmpx: document.querySelector('#setup-hd input[value=""]').parentElement.textContent.trim(),
+  };
+});
+
+test('한글: the page\'s labels, buttons and status lines switch to Korean at once and the chooser says the game\'s text is still English; the choice survives a reload; English switches back', async (env) => {
+  sitePacks(env, {});
+  const { page } = await h.openPage(env, { setup: null });
+  await h.load(page, env);
+  let shown = await pageText(page);
+  assert.deepEqual({ lang: shown.lang, forget: shown.forget, mute: shown.mute, status: shown.status },
+    { lang: 'en', forget: 'Forget the kept files', mute: 'Mute', status: 'No files loaded yet: drop or choose your Ultima VI files.' });
+  const english = shown;
+  await page.check('input[name="setup-lang"][value="ko"]');
+  shown = await pageText(page);
+  assert.deepEqual(shown, {
+    lang: 'ko',
+    forget: '보관한 파일 지우기',
+    forgetHd: 'HD 팩 지우기',
+    settings: '설정',
+    mute: '소리 끄기',
+    choose: '또는 파일 고르기:',
+    drop: '울티마 VI 파일을 여기에 놓으세요: archive.org의 zip, ADF 세 개, 또는 풀어 놓은 파일 — 아무것도 업로드되지 않습니다. 원본 PLAYER 디스크의 savegame 폴더를 여기에 놓으면 저장된 게임이 됩니다.',
+    canvas: '게임 화면. 클릭하거나 Tab으로 옮겨 오면 화살표 키로 걷고 글자 키는 게임 명령입니다. Tab을 누르면 빠져나갑니다.',
+    status: '아직 불러온 파일이 없습니다: 울티마 VI 파일을 놓거나 고르세요.',
+    mmpx: 'MMPX (팩 없음)',
+  }, 'Korean at once, the status line too');
+  assert.equal((await chooser(page)).note, '게임 안의 글(대화, 메뉴, 이름)은 아직 영어로 나옵니다.', 'the game\'s text is still English');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.deepEqual((await chooser(page)).stored, { lang: 'ko' });
+  await page.click('#forget');
+  await h.waitSettled(page);
+  assert.equal((await h.state(page)).status, '보관한 게임 파일을 이 브라우저에서 지웠습니다.', 'a status line of app.js in Korean');
+  await page.click('#mute');
+  assert.equal((await pageText(page)).mute, '소리 켜기', 'a button\'s state in Korean');
+  await page.click('#mute');
+  await page.reload();
+  await h.waitSettled(page);
+  shown = await pageText(page);
+  assert.ok(!(await chooser(page)).shown, 'no chooser after the reload');
+  assert.ok(shown.lang === 'ko' && shown.forget === '보관한 파일 지우기' && shown.status === '아직 불러온 파일이 없습니다: 울티마 VI 파일을 놓거나 고르세요.',
+    'Korean after the reload');
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="en"]');
+  assert.deepEqual(await pageText(page), english, 'English again, as it was');
+  assert.equal((await chooser(page)).note, null, 'no note in English');
+});
 
 // The owner's full-size pack for spec 07 Acceptance 5: every classic image of the owner's files
 // as MMPX ×4 (so every image the game draws is a pack hit), written outside the repository by

@@ -1,6 +1,8 @@
 // Static server for site/ that applies site/_headers the way Cloudflare Pages does (every rule
 // whose path pattern matches adds its headers; `*` matches anything, `:name` one segment), so
-// the page can be checked under its real CSP before a deploy. Local only; no game data.
+// the page can be checked under its real CSP before a deploy. Local only; no game data. It runs
+// no Pages Functions: with `packs` (a module caller's) it answers /packs/* itself, as the site's
+// Function in front of them does.
 //
 //   node tools/web/serve.mjs [--root site] [--port 8787] [--headers <root>/_headers]
 //
@@ -70,16 +72,29 @@ async function loadRules(file) {
   }
 }
 
-/// Serves `root` on 127.0.0.1:`port` (0 = any free port).
-export async function serve({ root = 'site', port = 0, headersFile } = {}) {
+/// Serves `root` on 127.0.0.1:`port` (0 = any free port). `packs`, when given, answers every
+/// request under /packs/ in place of the files there: a function from the request (a fetch
+/// Request) to its Response.
+export async function serve({ root = 'site', port = 0, headersFile, packs } = {}) {
   const base = resolve(root);
   const rules = await loadRules(headersFile ?? join(base, '_headers'));
+  let url = '';
   const server = createServer(async (req, res) => {
     try {
       const path = decodeURIComponent(new URL(req.url, 'http://local').pathname);
       let file = normalize(join(base, path));
       if (file !== base && !file.startsWith(base + sep)) throw Object.assign(new Error(), { code: 'ENOENT' });
-      if (path === '/_headers') throw Object.assign(new Error(), { code: 'ENOENT' });
+      if (path === '/_headers' || path === '/_routes.json') throw Object.assign(new Error(), { code: 'ENOENT' });
+      if (packs && path.startsWith('/packs/')) {
+        const headers = Object.entries(req.headers).filter(([, value]) => typeof value === 'string');
+        const response = await packs(new Request(new URL(req.url, url), { method: req.method, headers }));
+        const body = Buffer.from(await response.arrayBuffer());
+        for (const [name, value] of headersFor(rules, path)) res.setHeader(name, value);
+        response.headers.forEach((value, name) => res.setHeader(name, value));
+        res.statusCode = response.status;
+        res.end(body);
+        return;
+      }
       if ((await stat(file)).isDirectory()) file = join(file, 'index.html');
       const body = await readFile(file);
       for (const [name, value] of headersFor(rules, path)) res.setHeader(name, value);
@@ -91,7 +106,7 @@ export async function serve({ root = 'site', port = 0, headersFile } = {}) {
     }
   });
   await new Promise((done) => server.listen(port, '127.0.0.1', done));
-  const url = `http://127.0.0.1:${server.address().port}/`;
+  url = `http://127.0.0.1:${server.address().port}/`;
   return { url, rules, close: () => new Promise((done) => server.close(done)) };
 }
 

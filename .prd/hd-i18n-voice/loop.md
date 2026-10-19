@@ -52,6 +52,18 @@ Outcome:
 
 Decision 2026-10-17: items still close one at a time and in order (07 closes before 08 is reported done), but 08's first units (L1, L3) start while 07's last work is tool-only (H5, hd-stderr-flake in `tools/hd`), since their files are disjoint and waiting idles the machine.
 
+## Re-plan (2026-10-19, owner correction + trinity round 4, unanimous)
+
+Nothing the owner could see changed after 2026-10-17 21:15 while H6, H7 and L3 ran review rounds. The plan from here:
+
+1. **First-run chooser (done, on preview `first-run`).** Language English | 한글 for the page chrome, and HD: MMPX or a pack the site lists. Packs are hosted under `/packs/`, gitignored, and served only with the owner's key (a root Pages Function gates every spelling of the path). Owner instruction (verbatim): "hd pack은 드랍하게 하지말고 올려서 내가 고를수 있게 해줘 처음 실행활시에".
+2. **Voice, after the owner has used that preview.** Spec 09 steps 1–3 only: the speech tap (V1), the Supertonic-3 weights with the licence click-through before the first download (V2), one English default voice (V3), so a real NPC line plays. If the tap is not standing within 2 review rounds, ship one fixed Speak sentence instead.
+3. The next unit is picked from the owner's answers to 1 and 2.
+
+Parked, no new commits or reviews: H6 at 4443e4b, H7 at c74bccd (local only), L3 at a253067 (unparked when L5 starts). The L1 production deploy line issued 2026-10-19 07:50 is withdrawn: it changes no English pixel.
+
+Process: one code unit in flight; review at most 2 rounds (round 2 checks round 1's MUST fixes only); NICE findings neither block nor get fixed; reviews look only at user-visible behaviour, rights, security and data damage; a unit's exit names a URL, what the owner does, and the pixel or sound that changes. Commit subjects: English, imperative, ≤72 characters, no round or reviewer ids; one squash per unit on main.
+
 ## Order, and why it differs from the user's numbering
 
 The work runs one item at a time, as the user asked. The order follows dependencies:
@@ -79,7 +91,7 @@ The work runs one item at a time, as the user asked. The order follows dependenc
 | V6 | 09 | personality profiles from bundles, local voice pack tool, coverage receipt, upload boundary | V4, V5 |
 | V5 | 09 | NPC bundle exporter (wasm) keyed by (archive, item) on 08's run catalog, `npc-bundle:` keys, download | L3 |
 
-Each unit is reviewed by gpt-6-astra and opus before it merges. Each item ends with a merge, a preview deploy with a live check and a frame read, then production.
+Review and landing follow the re-plan above (at most 2 rounds, one squash per unit). Each unit ends with a preview deploy, a live check and a frame read; production follows once the owner keeps the preview.
 
 ## Carried from browser-port (still open there)
 

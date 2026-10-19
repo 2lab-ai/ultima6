@@ -68,40 +68,70 @@
     #limits p { margin: 0 0 8px; }
     #limits p:last-child { margin-bottom: 0; }
     .hint { color: #9a9aa6; font-size: 0.875rem; }
+    /* The first-run chooser (and Settings): above the game screen until a choice is made. */
+    #setup { margin: 0 0 16px; padding: 12px 16px; border: 2px solid #9ab8ff; border-radius: 8px;
+             background: #141a2a; }
+    #setup[hidden] { display: none; }
+    #setup fieldset { margin: 0 0 8px; padding: 4px 12px 8px; border: 1px solid #555a66;
+                      border-radius: 4px; }
+    #setup label { display: inline-block; margin-right: 16px; }
+    #setup label[hidden] { display: none; }
+    #setup p { margin: 0 0 8px; }
+    #setup button { margin-left: 0; }
   </style>
 </head>
 <body>
   <main>
     <h1>Ultima VI (Rust port)</h1>
+    <section id="setup" hidden aria-labelledby="setup-title">
+      <h2 id="setup-title" data-i18n="settings">Settings</h2>
+      <fieldset>
+        <legend data-i18n="language">Language</legend>
+        <label><input type="radio" name="setup-lang" value="en" checked> English</label>
+        <label lang="ko"><input type="radio" name="setup-lang" value="ko"> 한글</label>
+      </fieldset>
+      <p id="setup-note" data-i18n="gameText" hidden></p>
+      <fieldset id="setup-hd">
+        <legend>HD</legend>
+        <label><input type="radio" name="setup-hd" value=""> <span data-i18n="mmpx">MMPX (no pack)</span></label>
+        <label id="setup-dropped" hidden><input type="radio" name="setup-hd" value=":dropped"> <span
+          data-i18n="droppedPack">Dropped pack</span></label>
+      </fieldset>
+      <button id="setup-ok" type="button" data-i18n="ok">OK</button>
+      <p id="setup-status" role="status" aria-live="polite"></p>
+    </section>
     <div id="screen-box">
       <canvas id="screen" width="320" height="200" tabindex="0"
+              data-i18n-label="canvasLabel"
               aria-label="Game screen. Click it or Tab to it; then arrow keys walk and letter keys are game commands. Tab leaves it."></canvas>
-      <span id="speed-badge" hidden aria-hidden="true"
+      <span id="speed-badge" hidden aria-hidden="true" data-i18n-title="badgeTitle"
             title="Game speed: - slower, = or + faster, unless the game is using that key: while a line or a name is typed, in the stats and inventory panels (- and + pick the member), in a party list that scrolls, and in the opening's menu. The keypad - and + and the Speed buttons always change it.">1&times;</span>
     </div>
     <section id="drop" aria-labelledby="drop-title">
-      <p id="drop-title">
-        Drop your Ultima VI files: the archive.org zip, the three ADFs, or the
-        extracted files &mdash; nothing is uploaded. A <code>savegame</code> folder from the
-        original's PLAYER disk dropped here becomes the saved game.
-      </p>
-      <label for="picker">Or choose files:</label>
+      <p id="drop-title"><span data-i18n="dropBefore">Drop your Ultima VI files: the archive.org
+        zip, the three ADFs, or the extracted files &mdash; nothing is uploaded. A </span><code
+        >savegame</code><span data-i18n="dropAfter"> folder from the original's PLAYER disk
+        dropped here becomes the saved game.</span></p>
+      <label for="picker" data-i18n="choose">Or choose files:</label>
       <input id="picker" type="file" multiple disabled>
-      <button id="forget" type="button" disabled>Forget the kept files</button>
-      <button id="forget-save" type="button" disabled>Forget the saved game</button>
-      <button id="forget-hd" type="button" disabled>Forget the HD pack</button>
-      <button id="restart" type="button" hidden>Restart</button>
+      <button id="forget" type="button" disabled data-i18n="forget">Forget the kept files</button>
+      <button id="forget-save" type="button" disabled data-i18n="forgetSave">Forget the saved game</button>
+      <button id="forget-hd" type="button" disabled data-i18n="forgetHd">Forget the HD pack</button>
+      <button id="restart" type="button" hidden data-i18n="restart">Restart</button>
       <div id="playback">
         <button id="mute" type="button" aria-pressed="false">Mute</button>
-        <button id="hd" type="button" aria-pressed="true"
+        <button id="hd" type="button" aria-pressed="true" data-i18n-title="hdTitle"
                 title="HD: the map, the portraits and the panels magnified (MMPX) from your own files, in this browser. Off shows the original 320 x 200 pixels.">HD</button>
-        <span id="speed-group" role="group" aria-label="Game speed"
+        <button id="settings" type="button" data-i18n="settings">Settings</button>
+        <span id="speed-group" role="group" aria-label="Game speed" data-i18n-label="speedLabel"
+              data-i18n-title="speedTitle"
               title="On the game screen: - slower, = or + faster, unless the game is using that key (a line or a name being typed, the stats and inventory panels, a party list that scrolls, the opening's menu). The keypad - and + and these buttons always change the speed.">
-          Speed <button id="slower" type="button" aria-label="Slower">&minus;</button><span
+          <span data-i18n="speed">Speed</span> <button id="slower" type="button" aria-label="Slower"
+            data-i18n-label="slower">&minus;</button><span
             id="speed-shown"><span id="speed-label" aria-live="polite">1&times;</span><span
             id="speed-reached" aria-hidden="true"></span></span><button id="faster" type="button"
-            aria-label="Faster">+</button>
-          <span id="behind" hidden>behind</span>
+            aria-label="Faster" data-i18n-label="faster">+</button>
+          <span id="behind" hidden data-i18n="behind">behind</span>
         </span>
       </div>
       <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
