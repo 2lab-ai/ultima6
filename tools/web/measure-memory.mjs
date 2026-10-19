@@ -1,7 +1,10 @@
-// Peak memory of a drop of the user's archive.org zip in headless Chromium: JS heap and
-// ArrayBuffer backing stores (CDP Runtime.getHeapUsage, sampled while the import runs), the
-// wasm memory (its size never shrinks, so the size after the start is the peak), and the
-// renderer's resident size (ps, sampled). Optionally a full-page screenshot after the drop.
+// The memory of the page in headless Chromium before a drop of the user's archive.org zip: JS
+// heap and ArrayBuffer backing stores (CDP Runtime.getHeapUsage), the wasm memory and the
+// renderer's resident size (ps); then the drop, timed to its status, and whether the game
+// started. Output rule (spec 01 §Rights): only measures taken before the user's files are
+// imported, the tool's own timing and pass/fail; what the import takes (its memory rises with
+// the size of his files) and the page's status text are not printed. Optionally a full-page
+// screenshot after the drop.
 //
 //   node tools/web/measure-memory.mjs [--root site] [--shot out.png]
 import { execFile } from 'node:child_process';
@@ -42,41 +45,21 @@ try {
   };
   await cdp.send('HeapProfiler.collectGarbage');
   const base = { heap: (await cdp.send('Runtime.getHeapUsage')), rss: await rss(), wasm: await page.evaluate(() => __u6mem()) };
-  const peak = { heap: base.heap.usedSize, backing: base.heap.backingStorageSize ?? 0, rss: base.rss };
-  let sampling = true;
-  const sampler = (async () => {
-    while (sampling) {
-      try {
-        const u = await cdp.send('Runtime.getHeapUsage');
-        peak.heap = Math.max(peak.heap, u.usedSize);
-        peak.backing = Math.max(peak.backing, u.backingStorageSize ?? 0);
-      } catch {
-        // page busy or gone
-      }
-      peak.rss = Math.max(peak.rss, await rss());
-      await h.sleep(20);
-    }
-  })();
   const t0 = Date.now();
   await h.dropFiles(page, [h.ZIP]);
   await page.waitForFunction(() => /Started\.|failed|Could not/.test(document.getElementById('status').textContent), null, { timeout: 120_000 });
-  await h.sleep(300);
-  sampling = false;
-  await sampler;
   const ms = Date.now() - t0;
   const ok = await done();
-  const wasm = await page.evaluate(() => __u6mem());
-  await cdp.send('HeapProfiler.collectGarbage');
-  const after = await cdp.send('Runtime.getHeapUsage');
   const result = {
     root: arg('root', 'site'),
-    started: ok,
+    before_the_drop_MiB: {
+      wasm_memory: MiB(base.wasm),
+      js_heap_used: MiB(base.heap.usedSize),
+      array_buffer_backing: MiB(base.heap.backingStorageSize ?? 0),
+      renderer_rss: MiB(base.rss),
+    },
     import_ms: ms,
-    wasm_memory_MiB: { before: MiB(base.wasm), after_start: MiB(wasm) },
-    js_heap_used_MiB: { before: MiB(base.heap.usedSize), peak: MiB(peak.heap), after_gc: MiB(after.usedSize) },
-    array_buffer_backing_MiB: { before: MiB(base.heap.backingStorageSize ?? 0), peak: MiB(peak.backing), after_gc: MiB(after.backingStorageSize ?? 0) },
-    renderer_rss_MiB: { before: MiB(base.rss), peak: MiB(peak.rss) },
-    status: (await page.textContent('#status')).split('\n').slice(-3).join(' | '),
+    started: ok ? 'pass' : 'fail',
   };
   console.log(JSON.stringify(result, null, 2));
   const shot = arg('shot');

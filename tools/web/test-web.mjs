@@ -49,8 +49,9 @@ const test = (name, fn, { needs } = {}) => tests.push({ name, fn, needs });
 // Output rule (spec 01 §Rights): what a test prints, its receipts and its failure messages,
 // holds labels, indices, counts of what the test itself made and pass/fail only; the page's
 // status text, positions, counts of the user's files and the lengths of their records or paths
-// (a count of them) are compared, never printed. A failure shows its label or kind and its
-// places in these files, never its message (the runner, h.failureLines).
+// (a count of them), and the sizes of anything made from them (an export, the bundles, a pack's
+// entries or bytes, a share of them) are compared, never printed. A failure shows its label or
+// kind and its places in these files, never its message (the runner, h.failureLines).
 
 // The page once a start finished (nothing queued) and the started game ran a frame. The page
 // writes the canvas fields (leader, prompt, program, name, keys) only in its frame callback,
@@ -1275,7 +1276,8 @@ test('zip: the first press on the canvas is one game click and starts the sound;
 // byte is a forbidden request that fails.
 
 // The bound on the wasm memory after a start from the user's zip (our measurement of the
-// engine's memory, not a value of the game's files): the base copied the whole zip in.
+// engine's memory, not a value of the game's files): the base copied the whole zip in. The
+// memory once his files are in holds them, so it is checked against the bound, never printed.
 const ZIP_START_MEMORY_MIB = 48;
 const MiB = (n) => Math.round((n / 2 ** 20) * 10) / 10;
 
@@ -1515,7 +1517,8 @@ test('the user\'s zip is read in slices: the game starts, the wasm memory after 
   await h.waitPrompt(page);
   const memory = await page.evaluate(() => __u6mem());
   const r = await zipReads(page);
-  console.log(`  receipt: wasm memory ${MiB(idle)} MiB before the drop, ${MiB(memory)} MiB after the start (bound ${ZIP_START_MEMORY_MIB} MiB)`);
+  const under = (n) => (n < ZIP_START_MEMORY_MIB * 2 ** 20 ? 'pass' : 'fail');
+  console.log(`  receipt: wasm memory ${MiB(idle)} MiB before the drop; after the start under the bound (${ZIP_START_MEMORY_MIB} MiB): ${under(memory)}`);
   assert.ok(r.whole === 0, 'the zip is not read whole');
   assert.ok(r.slices >= 2 && r.sliced > 0 && r.sliced < r.size / 10, 'at most a tenth of the zip is read');
   assert.ok(memory < ZIP_START_MEMORY_MIB * 2 ** 20, `the wasm memory after the start is under ${ZIP_START_MEMORY_MIB} MiB`);
@@ -1525,7 +1528,9 @@ test('the user\'s zip is read in slices: the game starts, the wasm memory after 
   assert.match(s.status, /Started from the files kept in this browser/);
   await h.waitPrompt(page);
   const reloaded = await page.evaluate(() => __u6mem());
-  console.log(`  receipt: after the reload the game started from the kept files; wasm memory ${MiB(reloaded)} MiB`);
+  // Checked, not shown: the print was the only place a reload's memory showed.
+  console.log(`  receipt: after the reload the game started from the kept files; wasm memory under the bound (${ZIP_START_MEMORY_MIB} MiB): ${under(reloaded)}`);
+  assert.ok(reloaded < ZIP_START_MEMORY_MIB * 2 ** 20, `the wasm memory after the reload is under ${ZIP_START_MEMORY_MIB} MiB`);
 }, { needs: h.haveZip });
 
 // --- the fixed step and the speed (spec 06) -------------------------------------------------
@@ -3409,9 +3414,10 @@ test('한글: the page\'s labels, buttons and status lines switch to Korean at o
 // The test skips without it.
 const SCALER_PACK = join(h.ORIGINAL, '..', 'hd', 'scaler', 'u6-hdpack-scaler.zip');
 const havePack = () => h.haveZip() && existsSync(SCALER_PACK);
-// The wasm memory budget with a full pack (spec 07 H2, our bound, not a value of the game's
-// files): the zip-start bound of a session without a pack, plus the pack's decoded pictures, plus
-// one atlas decoded while it loads (2048 x 2048 RGBA) and the pack file copied in for the load.
+// The wasm memory budget with a full pack (spec 07 H2): the zip-start bound of a session without
+// a pack, plus the pack's decoded pictures, plus one atlas decoded while it loads (2048 x 2048
+// RGBA) and the pack file copied in for the load. It holds two sizes of the owner's pack (decoded
+// and its file), so it is checked, never printed.
 const ATLAS_MIB = (2048 * 2048 * 4) / 2 ** 20;
 
 // Drops `path` on the page and waits for the status of the pack load; returns its wall ms.
@@ -3431,12 +3437,10 @@ test('HD performance with a full pack (spec 07 Acceptance 5): the owner\'s scale
   await started(page);
   await h.waitPrompt(page);
   await h.waitFrames(page, 30);
-  const before = await page.evaluate(() => __u6mem());
   const file = (await stat(SCALER_PACK)).size;
   const made = () => page.evaluate(() => globalThis.__shownGame.hd_cache_counts());
   const made0 = await made();
   const loadMs = await dropPackFile(page, SCALER_PACK);
-  const after = await page.evaluate(() => __u6mem());
   const shown = await packShown(page);
   const pack = shown.pack.split(',').map(Number);
   const matched = shown.matched.split(',').map(Number);
@@ -3500,8 +3504,12 @@ test('HD performance with a full pack (spec 07 Acceptance 5): the owner\'s scale
   await h.waitFrames(page, 10);
   const again = await page.evaluate(() => __u6mem());
   const limitAgain = limit + decoded;
-  console.log(`  receipt: the full pack loaded in ${loadMs} ms (drop to status: read, checked, decoded, set, stored), again in ${againMs} ms; matched: tiles ${Math.round((100 * matched[0]) / pack[0])}%, portraits ${Math.round((100 * matched[1]) / pack[1])}%, panel pictures ${Math.round((100 * matched[2]) / pack[2])}%`);
-  console.log(`  receipt: wasm memory ${MiB(before)} MiB after the zip start, ${MiB(after)} MiB after the pack load, ${MiB(walked)} MiB after the walks (budget ${MiB(limit)} MiB: the zip-start bound + the pack's pictures decoded + one atlas + the file), ${MiB(again)} MiB after the second load (budget ${MiB(limitAgain)} MiB: and a second pack decoded)`);
+  // The share of the pack's entries matched and the budgets (they add the pack's decoded size and
+  // its file's) are sizes of the owner's data, and so is the wasm memory once his zip is in: the
+  // checks are shown, not the figures.
+  console.log(`  receipt: the full pack loaded in ${loadMs} ms (drop to status: read, checked, decoded, set, stored), again in ${againMs} ms; matched: every portrait and panel picture, at least 90% of the tiles: pass`);
+  const within = (ok) => (ok ? 'pass' : 'fail');
+  console.log(`  receipt: wasm memory after the walks within the budget (the zip-start bound + the pack's pictures decoded + one atlas + the file): ${within(walked <= limit)}; after the second load within its budget (and a second pack decoded): ${within(again <= limitAgain)}`);
   for (const r of receipts) console.log(`  receipt: ${r}`);
   assert.ok(walked <= limit, 'the wasm memory within the budget');
   assert.ok(again <= limitAgain, 'after a second load, within its budget');
@@ -4707,24 +4715,29 @@ test('NPC bundles from the user\'s files: one press after the import downloads o
   const greeting = bundles.filter((b) => b.speech.greeting.some((s) => s.kind === 'text')).length;
   const turns = bundles.filter((b) => b.turns.length > 0).length;
   const refused = bundles.filter((b) => b.refused !== null).length;
+  // How many bundles there are, and of which kind, are sizes of the user's scripts: checked, never
+  // shown (the Rust real-data bundle test holds the same rules on these files).
+  assert.ok(refused === 0, 'no script refused');
+  assert.ok(named > 0 && greeting > 0 && turns > 0, 'bundles with a name, with a greeting and with a turn');
   const kept = await h.keptBundles(page);
-  // Compared here, never shown: the keys name the user's scripts (a failure gives counts only).
-  // The scripts come from the kept archives themselves, not from the export or the store.
+  // Compared here, never shown: the keys name the user's scripts and their number is a size of
+  // his files (a failure gives the rule only). The scripts come from the kept archives
+  // themselves, not from the export or the store.
   const scripts = await h.keptScripts(page);
   const same = (x, y) => x.length === y.length && x.every((k, i) => k === y[i]);
-  assert.ok(same([...keys].sort(), scripts), `one bundle per script (bundles ${keys.length}, scripts ${scripts.length})`);
+  assert.ok(same([...keys].sort(), scripts), 'one bundle per script');
   const want = scripts.map((k) => `npc-bundle:${k}`).sort();
-  assert.ok(same(kept.keys, want), `one kept record per script (kept ${kept.keys.length}, scripts ${want.length})`);
+  assert.ok(same(kept.keys, want), 'one kept record per script');
   assert.ok(bundles.every((b) => JSON.stringify(kept.byKey[`npc-bundle:${b.archive}/${b.item}`]) === JSON.stringify(b)), 'the kept ones are the download');
   const said = new Set(bundles.flatMap((b) => segments(b)).filter((s) => s.kind === 'text' && s.text.length >= 8).map((s) => s.text));
   assert.ok(!text.some((m) => [...said].some((t) => m.includes(t))), 'no bundle text in the console');
   await page.click('#forget-npc-bundles');
   await h.waitSettled(page);
   const left = (await h.keptBundles(page)).keys.length;
-  assert.ok(left === 0, `forgotten (${left} left)`);
+  assert.ok(left === 0, 'forgotten: none left');
   const reports = (await page.evaluate(() => window.__csp)).length;
   assert.ok(reports === 0, `no CSP report (${reports})`);
-  console.log(`  receipt: bundles ${bundles.length}, refused ${refused}, with a name ${named}, with a greeting ${greeting}, with a turn ${turns}; text segments ${texts}, keyed to their script ${own}; kept ${kept.keys.length}; press to download ${ms} ms`);
+  console.log(`  receipt: one bundle per script, each once, in order, every text segment keyed to its own script, none refused, the kept ones the download, forgotten: pass; press to download ${ms} ms`);
 }, { needs: h.haveHfes });
 
 // --- the Korean pack (spec 08, slice K1) ---------------------------------------------------
@@ -5054,7 +5067,7 @@ test('Korean pack with game strings in a game (the user\'s disks, a synthetic co
   const line = ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks, (exported.texts ?? []).length - looks, (exported.u ?? []).length);
   assert.equal((await h.state(page)).status, line, 'the line, counts only');
   const fx = await koStringsFixture(exported);
-  assert.ok(fx.strings > 0 && fx.refused < fx.strings, `strings kept ${fx.strings}, refused by the gates ${fx.refused}`);
+  assert.ok(fx.strings > 0 && fx.refused < fx.strings, 'strings kept within the gates, fewer refused than kept');
   // The test's converse.a in place of the user's, then the pack: the game restarts with it.
   assert.equal(await h.replaceKept(page, 'converse.a', fx.archive), 1, 'one archive replaced');
   await page.reload();
@@ -5227,7 +5240,9 @@ test('Korean pack with object names and books in a game (the user\'s disks): Gam
   assert.ok(texts.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len === Buffer.from(e.text, 'latin1').length), 'each keyed by its hash');
   assert.equal((await h.state(page)).status, ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks.length, books.length, (exported.u ?? []).length), 'the line, counts only');
   const fx = await koTextsFixture(exported);
-  assert.ok(fx.look > 0 && fx.books > 0, `names kept ${fx.look}, books kept ${fx.books}, refused by the gates ${fx.refused}`);
+  assert.ok(fx.look > 0 && fx.books > 0, 'object names and books kept within the gates');
+  // How many the gates refused is a count of the user's texts: checked, not shown.
+  assert.ok(fx.refused < fx.look + fx.books, 'fewer refused by the gates than kept');
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: fx.pack }]);
   await h.waitSettled(page);
   await h.waitPrompt(page);
@@ -5267,7 +5282,8 @@ test('Korean pack with object names and books in a game (the user\'s disks): Gam
     assert.ok(!words.some((m) => m.includes(w)), 'nor in the console');
   }
   assert.ok(!where.includes(KO_NAME), 'nor the pack\'s text');
-  console.log(`  receipt: object names ${fx.look}, books ${fx.books}, refused by the gates ${fx.refused}; Look ${dir}: names from the pack ${hits}, missed ${missed}`);
+  // The direction is not named: which one shows a thing is where the user's map puts it.
+  console.log(`  receipt: object names and books kept within the gates, fewer refused than kept: pass; Look one step away: names from the pack ${hits}, missed ${missed}`);
 }, { needs: h.haveHfes });
 
 // --- the Korean pack's strings of the u program (spec 08, slice K4) ---------------------------
