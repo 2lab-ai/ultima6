@@ -620,10 +620,7 @@ fn an_at_names_a_cell_or_the_leader() {
 /// masters of the test's pack (each the ×4 image at ×2, nearest: box-averaged back, the ×4
 /// image where it is not clear), a portrait's master and a file that is not a master.
 fn setup(name: &str, text: &str) -> (PathBuf, Work, PathBuf) {
-    let dir =
-        std::env::temp_dir().join(format!("u6-hdtool-calibrate-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = out_dir::tests::private_dir(&format!("calibrate-{name}")).0;
     let work = Work::open(Some(&dir.join("work"))).unwrap();
     work.write("gates.jsonl", text.as_bytes()).unwrap();
     let slices = dir.join("slices");
@@ -1757,9 +1754,7 @@ fn a_master_is_box_averaged_to_x4() {
     // A master whose 2 × 2 blocks are not uniform: the ×4 image is each block's average,
     // weighted by alpha (`pack`'s reduction), worked out here by hand.
     let g = game();
-    let dir = std::env::temp_dir().join(format!("u6-hdtool-calibrate-{}-box", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = out_dir::tests::private_dir("calibrate-box").0;
     let blocks: [[[u8; 4]; 4]; 3] = [
         // Opaque: the plain mean, rounded.
         [

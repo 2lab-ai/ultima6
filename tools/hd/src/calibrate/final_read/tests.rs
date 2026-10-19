@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::super::out_dir::tests::{in_child, is_child, ran_unprivileged, test_path};
+use super::super::out_dir::tests::{in_child, is_child, private_dir, ran_unprivileged, test_path};
 use super::super::out_dir::{DONE, Hooked, REFUSED, hook};
 use super::*;
 use crate::game::{Level, World, synthetic};
@@ -951,9 +951,7 @@ fn the_atlas_is_laid_out_from_the_plan_of_these_files() {
 /// A temp dir with a work dir: `gates` as its `gates.jsonl`, the records of `images` (×4) listed
 /// in `ingest.json` and each written to `slices/` as its ×8 master ([`master`]).
 fn work_dir(name: &str, gates: &str, g: &Game, images: &BTreeMap<u16, Rgba>) -> (PathBuf, Work) {
-    let dir = std::env::temp_dir().join(format!("u6-hdtool-final-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = private_dir(&format!("final-{name}")).0;
     let work = Work::open(Some(&dir.join("work"))).unwrap();
     work.write("gates.jsonl", gates.as_bytes()).unwrap();
     let plan = group::plan(g);
@@ -3872,8 +3870,7 @@ fn the_read_of_what_ingest_and_its_gate_wrote() {
         }],
         objects: vec![at(3, table + 1), at(4, sword), at(5, chest)],
     };
-    let dir = std::env::temp_dir().join(format!("u6-hdtool-final-{}-e2e", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = private_dir("final-e2e").0;
     let work = Work::open(Some(&dir.join("work"))).unwrap();
     work.mkdirs().unwrap();
     let plan = group::plan(&g);

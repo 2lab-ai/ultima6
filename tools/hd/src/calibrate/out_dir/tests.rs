@@ -6,12 +6,10 @@ use std::collections::BTreeMap;
 
 use super::*;
 
-/// A fresh temp dir of the test's own.
+/// A fresh temp dir of the test's own ([`private_dir`]: a name not known before, made by this
+/// call alone, mode 0700; nothing removed to make it).
 fn temp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("u6-hdtool-outdir-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    private_dir(&format!("outdir-{name}")).0
 }
 
 /// Everything under `d`, by its path from `d` (a dir as `<dir>`), with each file's bytes.
@@ -123,14 +121,14 @@ pub(crate) fn in_child(test: &str, shell: &str, setup: impl FnOnce(&mut std::pro
     );
 }
 
-/// A new dir of this test's own under the temp dir, made with a name no one can know before
-/// (`mkdtemp`, mode 0700), and opened with no link followed (`O_NOFOLLOW`): its path and the
-/// dir.
-fn private_dir() -> (PathBuf, File) {
+/// A new dir of this test's own under the temp dir, `u6-hdtool-<label>-` and a name no one can
+/// know before, made by this call alone (`mkdtemp`: created exclusively, mode 0700; nothing is
+/// removed to make it), and opened with no link followed (`O_NOFOLLOW`): its path and the dir.
+pub(crate) fn private_dir(label: &str) -> (PathBuf, File) {
     use std::os::fd::FromRawFd as _;
     use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
     let mut name = std::env::temp_dir()
-        .join("u6-hdtool-nobody-XXXXXX")
+        .join(format!("u6-hdtool-{label}-XXXXXX"))
         .into_os_string()
         .into_vec();
     name.push(0);
@@ -154,7 +152,7 @@ fn private_dir() -> (PathBuf, File) {
 /// A [`private_dir`] given to uid and gid 65534 through the fd it was opened with (`fchown`):
 /// what is given is that dir, and nothing a link could point at.
 fn temp_for_nobody() -> PathBuf {
-    let (dir, f) = private_dir();
+    let (dir, f) = private_dir("nobody");
     std::os::unix::fs::fchown(&f, Some(65534), Some(65534)).unwrap();
     dir
 }
@@ -2008,7 +2006,7 @@ fn the_dir_given_to_the_unprivileged_child_is_new_and_its_own() {
     // mode 0700 and no link, under any user. Under euid 0 (where the child is used), each is
     // then given to 65534 through its fd.
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    let (a, b) = (private_dir(), private_dir());
+    let (a, b) = (private_dir("nobody"), private_dir("nobody"));
     assert_ne!(a.0, b.0);
     // SAFETY: geteuid(2) reads the process's ids; no memory involved.
     let root = unsafe { libc::geteuid() } == 0;
@@ -2113,4 +2111,25 @@ fn a_kept_file_another_hand_deleted_is_said_while_the_run_dir_is_in_place() {
     assert!(!e.contains("gone: deleted by another hand"), "{e}");
     assert_eq!(e.matches("was moved or removed").count(), 1, "{e}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_test_dir_is_made_new_private_and_empty_each_time() {
+    // The tests' temp dir, asked twice by the same label: two dirs, each new (its own name),
+    // empty, mode 0700, and no link; the first is not removed to make the second.
+    use std::os::unix::fs::PermissionsExt as _;
+    let (a, b) = (temp("same"), temp("same"));
+    assert_ne!(a, b);
+    std::fs::write(a.join("mine.txt"), b"x").unwrap();
+    let c = temp("same");
+    assert_eq!(names(&a), ["mine.txt"]);
+    for d in [&b, &c] {
+        let m = std::fs::symlink_metadata(d).unwrap();
+        assert!(m.is_dir() && !m.file_type().is_symlink(), "{}", d.display());
+        assert_eq!(m.permissions().mode() & 0o777, 0o700, "{}", d.display());
+        assert!(names(d).is_empty(), "{}", d.display());
+    }
+    for d in [a, b, c] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
