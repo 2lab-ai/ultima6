@@ -572,19 +572,24 @@ impl Run {
             said = format!("{said}; {}", self.moved_note());
         }
         let said = then(said);
-        match self.write(REFUSED, format!("{said}\n").as_bytes()) {
-            Ok(()) => {
-                let made = self.made.borrow();
-                match made.iter().rfind(|m| m.name == REFUSED).map(|m| &m.id) {
-                    Some(Err(e)) => format!(
-                        "{said}; {REFUSED} could not be identified when it was made, so it is left \
-                         ({e})"
-                    ),
-                    _ => said,
-                }
-            }
-            Err(e) => format!("{said}; {REFUSED} not written ({e})"),
+        let wrote = self.write(REFUSED, format!("{said}\n").as_bytes());
+        // Its identity, whatever its fill gave: refused.txt made and not identified is left.
+        let unknown = self
+            .made
+            .borrow()
+            .iter()
+            .rfind(|m| m.name == REFUSED)
+            .and_then(|m| m.id.as_ref().err().cloned());
+        let mut said = said;
+        if let Err(e) = wrote {
+            said = format!("{said}; {REFUSED} not written ({e})");
         }
+        if let Some(e) = unknown {
+            said = format!(
+                "{said}; {REFUSED} could not be identified when it was made, so it is left ({e})"
+            );
+        }
+        said
     }
 }
 

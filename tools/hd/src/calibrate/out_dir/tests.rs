@@ -2003,3 +2003,36 @@ fn the_dir_given_to_the_unprivileged_child_is_new_and_its_own() {
         std::fs::remove_dir(d).unwrap();
     }
 }
+
+#[test]
+fn a_refusal_whose_identity_and_fill_both_fail_is_said_to_be_left() {
+    // The run fails; its refused.txt made, its identity not readable and its fill failing too
+    // (each injected): the error says both, that refused.txt was not written and that it could
+    // not be identified, so it is left.
+    let dir = temp("unidentified-unfilled-refused");
+    let out = dir.join("out");
+    let _i = hook(&out, "identify", |name| match name == REFUSED {
+        true => Err(format!("errno:{}", libc::EIO)),
+        false => Ok(()),
+    });
+    let _f = hook(&out, "fill", |name| match name == REFUSED {
+        true => Err(format!("errno:{}", libc::ENOSPC)),
+        false => Ok(()),
+    });
+    let e = run_in(FIRST, &out, fails).unwrap_err();
+    let run = only_run(&out);
+    let os = std::io::Error::from_raw_os_error;
+    assert_eq!(
+        e,
+        format!(
+            "no rows; run dir: {}; {REFUSED} not written ({}: {}); {REFUSED} could not be \
+             identified when it was made, so it is left ({})",
+            run.display(),
+            run.join(REFUSED).display(),
+            os(libc::ENOSPC),
+            os(libc::EIO)
+        )
+    );
+    assert_eq!(names(&run), ["gates.jsonl", REFUSED]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
