@@ -11,18 +11,22 @@
 //   below 0.15 of it. On the GPU from 16, 4 to 16; on the CPU (no WebGPU adapter) from 4, 3 to
 //   16: 16 steps there take twice the audio's length, 3 under half of it, and below 3 words are
 //   lost (spec 09 Measured facts).
-// - The seed of an utterance is a hash of its speaker and its text, so a line repeated sounds the
-//   same.
+// - Each speaker has a voice of its own (site/voice/profile.js, spec 09 Design 4): the profile
+//   made for it goes with each of its lines, and the first one made for a speaker is the one it
+//   keeps for the session, whatever its traits do after.
+// - The seed of an utterance is a hash of its speaker and its text (with its voice's seedSalt),
+//   so a line repeated sounds the same.
 //
 // Rights (spec 01): an utterance's text is the user's game text. It goes to the worker and
-// nowhere else: not to the console, the page's text, its data attributes or an error. What the
-// page learns is states, counts and timings (`stats`), and failures as codes.
+// nowhere else: not to the console, the page's text, its data attributes or an error; so do its
+// speaker, its traits and its profile. What the page learns is states, counts and timings
+// (`stats`; `distinct`: how many voices have spoken this session), and failures as codes.
+import { profileFor } from './profile.js';
 
 const FADE_S = 0.08; // the fade of a cancelled speech
 const LOUD_UP_TO = 4; // above this speed nothing is synthesized (as the music fades out)
 const STEPS = { start: 16, min: 4, max: 16 };
 const CPU_STEPS = { start: 4, min: 3 }; // without WebGPU (the same max)
-const SPEED = 1.05; // the sample code's default pace
 const LEAD_S = 0.02; // a new utterance starts this far after now
 
 // FNV-1a over the speaker and the text: the noise seed.
@@ -42,18 +46,20 @@ function seedOf(speaker, text) {
 export function createVoices({ workerUrl, speed, onState, onStats }) {
   const stats = {
     got: 0, total: 0, stage: '', coldMs: 0, refetched: 0, spoken: 0, firstMs: -1, cancels: 0,
-    fadeMs: 0, playing: 0, steps: STEPS.start, dropped: 0, path: '',
+    fadeMs: 0, playing: 0, steps: STEPS.start, dropped: 0, path: '', distinct: 0,
   };
   let worker = null;
   let ready = false;
   let audio = null; // { ctx, output }
-  let queue = []; // utterances waiting: { id, turn, speaker, text, lang, at }
+  let queue = []; // utterances waiting: { id, turn, text, lang, seed, profile, at }
   // The utterance in the worker: { id, gain, sources, live, done, cancelled, started, at }.
   let current = null;
   let playing = []; // utterances with a gain still on the output (current among them)
   let turn = -1;
   let nextId = 1;
   let endAt = 0; // when the audio scheduled so far ends (context time)
+  const profiles = new Map(); // speaker to its profile, for the session
+  const heard = new Set(); // the voices spoken (their profiles as JSON)
 
   const changed = () => onStats?.();
 
@@ -134,6 +140,16 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
     audio = { ctx, output };
   }
 
+  // The profile of `u`'s speaker: the first one made for it.
+  function profileOf(u) {
+    let p = profiles.get(u.speaker);
+    if (!p) {
+      p = profileFor(u);
+      profiles.set(u.speaker, p);
+    }
+    return p;
+  }
+
   /// What the engine's speech tap queued (Game.take_speech's JSON): each utterance is queued, a
   /// newer turn first cancelling the old speech. Dropped without a ready model, without an
   /// AudioContext, or above 4x.
@@ -156,9 +172,10 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
         if (turn >= 0) cancel();
         turn = u.turn;
       }
+      const profile = profileOf(u);
       queue.push({
         id: nextId, turn: u.turn, text: u.text, lang: u.lang === 'ko' ? 'ko' : 'en',
-        seed: seedOf(u.speaker, u.text), at: performance.now(),
+        seed: (seedOf(u.speaker, u.text) ^ profile.seedSalt) >>> 0, profile, at: performance.now(),
       });
       nextId += 1;
     }
@@ -166,8 +183,8 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
     changed();
   }
 
-  // The next utterance to the worker, when none is there. It plays through a gain of its own
-  // (its fade when cancelled).
+  // The next utterance to the worker, when none is there, at the steps now (at most its
+  // voice's). It plays through a gain of its own (its fade when cancelled).
   function pump() {
     if (current || !worker || !ready || !audio) return;
     const u = queue.shift();
@@ -176,7 +193,9 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
     gain.connect(audio.output);
     current = { ...u, gain, live: 0, done: false, cancelled: false, started: false };
     playing.push(current);
-    worker.postMessage({ type: 'speak', id: u.id, text: u.text, lang: u.lang, seed: u.seed, steps: stats.steps, speed: SPEED });
+    const min = stats.path === 'cpu' ? CPU_STEPS.min : STEPS.min;
+    const steps = Math.max(min, Math.min(stats.steps, u.profile.steps));
+    worker.postMessage({ type: 'speak', id: u.id, text: u.text, lang: u.lang, seed: u.seed, steps, profile: u.profile });
   }
 
   // Off the list of what plays once its last source ended and nothing more comes for it.
@@ -212,6 +231,8 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
     if (!u.started) {
       u.started = true;
       stats.spoken += 1;
+      heard.add(JSON.stringify(u.profile));
+      stats.distinct = heard.size;
       stats.firstMs = Math.round(performance.now() - u.at + (at - ctx.currentTime) * 1000);
     }
     const ratio = m.synthMs / 1000 / Math.max(m.audioSec, 1e-3);

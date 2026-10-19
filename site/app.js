@@ -77,7 +77,9 @@
 // the CPU (slower); the ready line and the chip say which. Once it has the model checked and
 // warmed up, the game's speech tap is on (Game.set_voices) and after each frame what NPCs said
 // (Game.take_speech) goes to the player (site/voice/player.js) and nowhere else: the
-// text is the user's game text, never logged, shown or stored. The speech plays through a voice
+// text is the user's game text, never logged, shown or stored. Each NPC speaks in a voice of its
+// own (site/voice/profile.js: from its actor number and the engine's names for its kind, never
+// shown either; data-voice-distinct counts the voices heard). The speech plays through a voice
 // gain beside the music's (Mute silences both); Enter, Escape and Space on the canvas, and a newer
 // turn, cancel it; above 4x nothing is spoken. While voices are on a chip says the voice is
 // generated on this device. The choice and the acceptance are kept in localStorage: the next
@@ -418,7 +420,7 @@ function reflectVoice() {
   for (const [key, value] of [['voiceColdMs', st.coldMs], ['voiceRefetched', st.refetched],
     ['voiceSpoken', st.spoken], ['voiceFirstMs', st.firstMs], ['voiceCancels', st.cancels],
     ['voiceFadeMs', st.fadeMs], ['voicePlaying', st.playing], ['voiceSteps', st.steps],
-    ['voiceDropped', st.dropped]]) put(data, key, String(value));
+    ['voiceDropped', st.dropped], ['voiceDistinct', st.distinct]]) put(data, key, String(value));
   voicesButton.setAttribute('aria-pressed', String(on));
   put(voiceChip, 'hidden', !on);
   put(voiceOnGpu, 'hidden', !(voiceState === 'ready' && st.path === 'gpu'));

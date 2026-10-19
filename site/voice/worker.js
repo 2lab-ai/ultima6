@@ -10,20 +10,36 @@
 // again. The parts are joined and the whole file checked. The runtime's wasm comes the same way
 // and is handed to it as `wasmBinary`; its two modules are checked, then imported by URL. One
 // thread, the same models on the `webgpu` execution provider or, without an adapter, the `wasm`
-// one (the hosted runtime carries both), then a one-word synthesis as a warm-up.
+// one (the hosted runtime carries both), then a one-word synthesis as a warm-up. The ten voice
+// presets come the same way, after the model.
+//
+// Voices (spec 09 Design 4): each line comes with its speaker's profile (site/voice/profile.js).
+// Its mix is the presets' weighted sum (profile.js mixStyles; one preset alone is that preset),
+// its speed divides the predicted duration, and its pitch is a change of sample rate made up for
+// in length: the line is made r = 2^(pitch/12) times longer through that same speed (divided by
+// r), and its samples go out with a sample rate r times the model's, so the page's AudioContext,
+// converting them to its own rate as it plays them, plays them r times faster: the pitch moves by
+// `pitch` semitones and the length comes back to the profile's. The model has no pitch input.
+// This way the worker does no work per sample (a resampler here would, on the CPU's one thread,
+// and a phase vocoder would smear the speech too): the cost is the line's length, the denoising
+// steps and the vocoder running over a line 12% longer at +2 semitones, 11% shorter at -2. The
+// formants move with the pitch, which over two semitones keeps the voice's kind.
 //
 // Messages in: {type: 'load', cachedOnly} (cachedOnly: a part not cached fails the load instead
-// of being downloaded), {type: 'speak', id, text, lang, seed, steps, speed}, {type: 'cancel', id},
+// of being downloaded), {type: 'speak', id, text, lang, seed, steps, profile} (the profile's mix,
+// speed and pitch, checked into its ranges: none, the default voice), {type: 'cancel', id},
 // {type: 'lose-device'} (tests: destroys the GPU device, as a lost one). Out: {type: 'progress',
 // got, total}, {type: 'stage', stage: 'verifying' | 'starting'}, {type: 'ready', ms, refetched,
 // path: 'gpu' | 'cpu'},
-// {type: 'audio', id, pcm, sampleRate, audioSec, synthMs}, {type: 'done', id} or
+// {type: 'audio', id, pcm, sampleRate (the rate that gives the pitch), audioSec (how long it
+// plays), synthMs}, {type: 'done', id} or
 // {type: 'cancelled', id}, {type: 'error', code, id?}. A message out never holds text: the text is
 // the user's game text, and an error is one of the codes below, never a runtime's message.
 import {
   CACHE_NAME, CACHE_PREFIX, MODEL_BASE, MODEL_FILES, ORT_BASE, ORT_MODULES, ORT_WASM, REVISION,
-  ORT_VERSION,
+  ORT_VERSION, STYLES, styleFile,
 } from './model.js';
+import { checkedProfile, mixStyles, presetOf } from './profile.js';
 
 // Error codes: a part not in the cache (cachedOnly); a download that failed; a part or file whose
 // hash is wrong; storage that refused for lack of room, or otherwise; the runtime or the model
@@ -35,7 +51,7 @@ const SILENCE_S = 0.3; // between the chunks of one text (the sample code's defa
 const MAX_CHUNK = 150; // characters per chunk: a long text starts sounding after its first one
 
 let ort = null;
-let S = null; // the sessions, the config, the indexer and the voice once loaded
+let S = null; // the sessions, the config, the indexer and the presets once loaded
 let cpu = false; // no WebGPU adapter: the models run on the CPU
 let device = null;
 let lost = false;
@@ -219,14 +235,6 @@ async function runtime(m) {
   }
 }
 
-function style(json) {
-  const flat = (x) => Float32Array.from(x.data.flat(Infinity));
-  const ttl = flat(json.style_ttl);
-  const dp = flat(json.style_dp);
-  if (ttl.length !== 50 * 256 || dp.length !== 8 * 16) throw coded('model');
-  return { ttl, dp };
-}
-
 // Whether this browser offers a WebGPU adapter here.
 async function haveAdapter() {
   try {
@@ -262,11 +270,11 @@ async function load(cachedOnly) {
   const json = (name) => JSON.parse(new TextDecoder().decode(bytes[name]));
   let cfg;
   let indexer;
-  let voice;
+  let presets;
   try {
     cfg = json('onnx/tts.json');
     indexer = json('onnx/unicode_indexer.json');
-    voice = style(json(MODEL_FILES[2]));
+    presets = Object.fromEntries(STYLES.map((name) => [name, presetOf(json(styleFile(name)))]));
   } catch {
     throw coded('model');
   }
@@ -287,12 +295,12 @@ async function load(cachedOnly) {
     post({ type: 'error', code: 'gpu' });
   });
   S = {
-    ...sessions, indexer, voice, sampleRate: cfg.ae.sample_rate,
+    ...sessions, indexer, presets, sampleRate: cfg.ae.sample_rate,
     chunk: cfg.ae.base_chunk_size * cfg.ttl.chunk_compress_factor,
     latentDim: cfg.ttl.latent_dim * cfg.ttl.chunk_compress_factor,
   };
   // The warm-up runs every session once; on the CPU one step does that (16 there take seconds).
-  await synthesize('Hello.', 'en', 1, cpu ? 1 : 16, 1.05, null);
+  await synthesize('Hello.', 'en', 1, cpu ? 1 : 16, null, null);
   post({ type: 'ready', ms: performance.now() - t0, refetched: stats.refetched, path: cpu ? 'cpu' : 'gpu' });
 }
 
@@ -332,15 +340,16 @@ const readMessages = () => new Promise((done) => {
   loop.port2.postMessage(0);
 });
 
-// One chunk to samples; null once `id` is cancelled (checked between the denoising steps).
-async function chunk(text, lang, rand, steps, speed, id) {
+// One chunk to samples in `voice` (a mixed style); null once `id` is cancelled (checked between
+// the denoising steps).
+async function chunk(text, lang, rand, steps, speed, voice, id) {
   const p = preprocess(text, lang);
   const ids = BigInt64Array.from(Array.from(p), (c) => BigInt(indexOf(c)));
   const n = ids.length;
   const textIds = tensor('int64', ids, [1, n]);
   const textMask = tensor('float32', new Float32Array(n).fill(1), [1, 1, n]);
-  const styleTtl = tensor('float32', S.voice.ttl, [1, 50, 256]);
-  const dp = await S.dp.run({ text_ids: textIds, style_dp: tensor('float32', S.voice.dp, [1, 8, 16]), text_mask: textMask });
+  const styleTtl = tensor('float32', voice.ttl, [1, 50, 256]);
+  const dp = await S.dp.run({ text_ids: textIds, style_dp: tensor('float32', voice.dp, [1, 8, 16]), text_mask: textMask });
   const seconds = first(dp, S.dp).data[0] / speed;
   const te = await S.te.run({ text_ids: textIds, style_ttl: styleTtl, text_mask: textMask });
   const textEmb = first(te, S.te);
@@ -372,18 +381,23 @@ async function chunk(text, lang, rand, steps, speed, id) {
   return new Float32Array(first(v, S.voc).data.subarray(0, Math.max(1, wavLen)));
 }
 
-// `text` chunk by chunk; each chunk's samples are posted as soon as they are made (`id` null: the
-// warm-up, posted nowhere). Returns false once cancelled.
-async function synthesize(text, lang, seed, steps, speed, id) {
+// `text` chunk by chunk in `profile`'s voice (none: the default); each chunk's samples are posted
+// as soon as they are made (`id` null: the warm-up, posted nowhere), at the rate that gives the
+// pitch. Returns false once cancelled.
+async function synthesize(text, lang, seed, steps, profile, id) {
+  const p = checkedProfile(profile);
+  const voice = mixStyles(S.presets, p.mix);
+  const rate = Math.round(S.sampleRate * 2 ** (p.pitch / 12));
+  const speed = (p.speed * S.sampleRate) / rate; // made rate / sampleRate times longer
   const rand = random(seed);
   const parts = chunks(text);
   for (let i = 0; i < parts.length; i += 1) {
     const t = performance.now();
-    const pcm = await chunk(parts[i], lang, rand, steps, speed, id);
+    const pcm = await chunk(parts[i], lang, rand, steps, speed, voice, id);
     if (pcm === null) return false;
     if (id === null) continue;
     const gap = i < parts.length - 1 ? SILENCE_S : 0;
-    post({ type: 'audio', id, pcm, sampleRate: S.sampleRate, audioSec: pcm.length / S.sampleRate, gap,
+    post({ type: 'audio', id, pcm, sampleRate: rate, audioSec: pcm.length / rate, gap,
       synthMs: performance.now() - t }, [pcm.buffer]);
   }
   return true;
@@ -396,7 +410,7 @@ async function speak(m) {
   }
   try {
     const done = await synthesize(String(m.text), m.lang === 'ko' ? 'ko' : 'en', m.seed >>> 0,
-      m.steps, m.speed, m.id);
+      m.steps, m.profile, m.id);
     post({ type: done ? 'done' : 'cancelled', id: m.id });
   } catch {
     post({ type: 'error', code: lost ? 'gpu' : 'speak', id: m.id });

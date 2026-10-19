@@ -3518,12 +3518,14 @@ const utterance = (turn, text) => ({
   seq: turn, turn, speaker: 9, script: null, text, lang: 'en', traits: { type: 0, worktype: 0, alignment: 0 },
 });
 
-// Before the page's scripts: the Workers made and how each utterance ended in the worker (`done`
-// or `cancelled`, in order), the storage persist calls, and each scheduled audio source's start and
-// stop (seconds after the context's time then) and each linear ramp of a gain [value, at]; the
-// samples of every buffer filled (`__pcm`, for the ASR of the test's own line).
+// Before the page's scripts: the Workers made, each line sent to them (`__speaks`: its seed,
+// steps and profile) and how each utterance ended in the worker (`done` or `cancelled`, in order),
+// the storage persist calls, and each scheduled audio source's start and stop (seconds after the
+// context's time then) and each linear ramp of a gain [value, at]; the samples of every buffer
+// filled (`__pcm`, for the ASR of the test's own line).
 function voiceProbe() {
   window.__workers = 0;
+  window.__speaks = [];
   window.__replies = [];
   window.__persist = 0;
   window.__starts = [];
@@ -3537,6 +3539,11 @@ function voiceProbe() {
     worker.addEventListener('message', (e) => {
       if (e.data?.type === 'done' || e.data?.type === 'cancelled') window.__replies.push(e.data.type);
     });
+    const post = worker.postMessage.bind(worker);
+    worker.postMessage = (m, ...rest) => {
+      if (m?.type === 'speak') window.__speaks.push({ seed: m.seed, steps: m.steps, profile: m.profile });
+      return post(m, ...rest);
+    };
     return worker;
   };
   window.Worker.prototype = RealWorker.prototype;
@@ -3575,7 +3582,7 @@ const voiceShown = (page) => page.evaluate(() => {
     state: d.voice, error: d.voiceError, path: d.voicePath, gain: d.voiceGain, cold: Number(d.voiceColdMs),
     refetched: Number(d.voiceRefetched), spoken: Number(d.voiceSpoken), first: Number(d.voiceFirstMs),
     cancels: Number(d.voiceCancels), fade: Number(d.voiceFadeMs), playing: Number(d.voicePlaying),
-    dropped: Number(d.voiceDropped), chip: !document.getElementById('voice-chip').hidden,
+    dropped: Number(d.voiceDropped), distinct: Number(d.voiceDistinct), chip: !document.getElementById('voice-chip').hidden,
     pressed: document.getElementById('voices').getAttribute('aria-pressed'),
     terms: !document.getElementById('voice-terms').hidden,
     status: document.getElementById('status').textContent,
@@ -3865,16 +3872,18 @@ test('voices with WebGPU: accepted, downloaded, checked and warmed up to ready (
 }, { needs: () => h.haveHfes() && h.haveModels() });
 
 // A page in the default headless Chromium, which offers no WebGPU adapter, the game started from
-// the user's disks, the probe on, and its requests under /models/ recorded; null when it has one.
+// the user's disks, the probe on, and its requests under /models/ and console text recorded; null
+// when it has one.
 async function cpuGame(env) {
   const { context, page } = await h.openPage(env);
   await context.addInitScript(voiceProbe);
   const requests = modelRequests(context);
+  const text = consoleText(page);
   await h.load(page, env);
   if (await page.evaluate(async () => Boolean(await navigator.gpu?.requestAdapter()))) return null;
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
-  return { context, page, requests };
+  return { context, page, requests, text };
 }
 
 // How many of `line`'s words `asr` heard in order (their longest common subsequence).
@@ -4053,6 +4062,290 @@ test('voices fail recoverably: a part that does not download, a part whose bytes
   }));
   assert.ok(!where.includes(SENTINEL), 'not in the page\'s data, text or storage');
   assert.ok(!text.some((m) => m.includes(SENTINEL)), 'not in the console of the page or its worker');
+}, { needs: () => h.haveHfes() && h.haveModels() });
+
+// --- voice profiles (spec 09 Design 4) -----------------------------------------------------
+
+// The engine's own names the type-class table may use (spec 09 Rights), read from its source:
+// the object types converse/start.rs names, and the worktypes actors/npc.rs runs through a
+// combat routine.
+async function engineNames() {
+  const start = await readFile(join(h.REPO, 'crates/u6-core/src/converse/start.rs'), 'utf8');
+  const types = new Set();
+  for (const name of ['SHRINE', 'STATUES', 'HORSES', 'TALKING_OBJECTS']) {
+    const m = start.match(new RegExp(`const ${name}: [^=]+= ([^;]+);`));
+    assert.ok(m, `start.rs names ${name}`);
+    for (const x of m[1].match(/0x[0-9a-f]+/g)) types.add(Number(x));
+  }
+  const npc = await readFile(join(h.REPO, 'crates/u6-core/src/actors/npc.rs'), 'utf8');
+  const m = npc.match(/fn runs_combat_routine\(wt: u8\) -> bool \{\s*matches!\(wt, ([^)]+)\)/);
+  assert.ok(m, 'actors/npc.rs names the combat worktypes');
+  const combat = new Set();
+  for (const arm of m[1].split('|')) {
+    const [a, b = a] = arm.trim().split('..=').map(Number);
+    for (let x = a; x <= b; x += 1) combat.add(x);
+  }
+  return { types, combat };
+}
+
+// Whether `p` is a profile within spec 09 Design 4's ranges.
+function inRange(p, STYLES) {
+  const sum = p.mix.reduce((s, e) => s + e.w, 0);
+  return p.mix.length >= 1 && p.mix.length <= 3 && p.mix.every((e) => STYLES.includes(e.style) && e.w > 0)
+    && new Set(p.mix.map((e) => e.style)).size === p.mix.length && Math.abs(sum - 1) < 1e-12
+    && p.speed >= 0.9 && p.speed <= 1.15 && p.pitch >= -2 && p.pitch <= 2
+    && Number.isInteger(p.steps) && p.steps >= 1 && p.steps <= 16 && p.seedSalt === p.seedSalt >>> 0;
+}
+
+test('voice profiles: deterministic; within the ranges for every object type the table names, every worktype, every alignment and many speakers; neighbouring speakers (n+1: the other sex, n+2: another leading preset) differ; the table keyed only by the engine\'s names; a pack\'s profile wins, checked into the ranges', async () => {
+  const P = await import('../../site/voice/profile.js');
+  const { STYLES } = await import('../../site/voice/model.js');
+  // The table's keys: only what the engine names.
+  const { types, combat } = await engineNames();
+  assert.ok([...P.TYPE_CLASSES.keys()].every((t) => types.has(t)), 'every type key is an object type start.rs names');
+  assert.ok([...P.TYPE_CLASSES.values()].every((c) => Object.hasOwn(P.CLASSES, c)), 'every type maps to a class');
+  assert.deepEqual(P.WORKTYPE_BUCKETS.map((b) => b.name), ['combat'], 'one worktype bucket: the combat routines');
+  assert.deepEqual([...P.WORKTYPE_BUCKETS[0].worktypes].sort((a, b) => a - b), [...combat].sort((a, b) => a - b), 'its worktypes are runs_combat_routine\'s');
+  assert.ok([...P.ALIGNMENT_BUCKETS.keys()].every((a) => [0, 1, 2, 3].includes(a)), 'the alignment buckets are the 2-bit field\'s');
+  // Deterministic, and within the ranges.
+  const kinds = [...P.TYPE_CLASSES.keys(), 0, 1, 0x17f];
+  const speakers = [-32768, -3, -2, -1, 0, 1, 2, 3, 9, 0xdf, 0xe0, 0xff, 0x100, 1000, 32767];
+  let checked = 0;
+  for (const type of kinds) {
+    for (let worktype = 0; worktype < 256; worktype += 1) {
+      for (let alignment = 0; alignment < 4; alignment += 1) {
+        for (const speaker of speakers) {
+          const u = { speaker, traits: { type, worktype, alignment } };
+          const p = P.profileFor(u);
+          assert.ok(inRange(p, STYLES), 'within the ranges');
+          assert.deepEqual(P.profileFor(JSON.parse(JSON.stringify(u))), p, 'deterministic');
+          checked += 1;
+        }
+      }
+    }
+  }
+  for (const speaker of [undefined, null, 1.5, 'x', NaN]) {
+    assert.ok(inRange(P.profileFor({ speaker, traits: undefined }), STYLES), 'any speaker: within the ranges');
+  }
+  assert.ok(inRange(P.profileFor(), STYLES), 'no utterance: within the ranges');
+  // Neighbours differ: n and n+1 share no preset (the other sex), n and n+2 lead with another.
+  const traits = { type: 0, worktype: 0, alignment: 0 };
+  let pairs = 0;
+  for (let n = -64; n < 1024; n += 1) {
+    const [a, b, c] = [n, n + 1, n + 2].map((speaker) => P.profileFor({ speaker, traits }));
+    const styles = new Set(a.mix.map((e) => e.style));
+    assert.ok(b.mix.every((e) => !styles.has(e.style)), 'n and n+1: no preset in common');
+    assert.notEqual(a.mix[0].style, c.mix[0].style, 'n and n+2: another leading preset');
+    assert.ok(a.pitch !== b.pitch && a.pitch !== c.pitch, 'neighbours: another pitch');
+    pairs += 2;
+  }
+  // A pack's profile wins, checked into the ranges; another actor keeps the default.
+  const pack = new Map([[5, { mix: [{ style: 'F2', w: 3 }, { style: 'nope', w: 1 }], speed: 9, pitch: -9, steps: 99, seedSalt: 7 }]]);
+  assert.deepEqual(P.profileFor({ speaker: 5, traits }, pack), { mix: [{ style: 'F2', w: 1 }], speed: 1.15, pitch: -2, steps: 16, seedSalt: 7 }, 'the pack\'s, checked');
+  assert.deepEqual(P.profileFor({ speaker: 6, traits }, pack), P.profileFor({ speaker: 6, traits }), 'not in the pack: the default');
+  console.log(`  receipt: ${checked} profiles within the ranges; ${pairs} neighbouring pairs differ`);
+});
+
+test('voice mixer: one preset at weight 1 is that preset\'s bytes (alone at any weight, or twice); the weights normalise (scaled weights mix the same bytes); at most three presets, the heaviest; every mixed token has length 1; nothing valid: the default voice', async () => {
+  const P = await import('../../site/voice/profile.js');
+  const { STYLES, VOICE } = await import('../../site/voice/model.js');
+  const presets = {};
+  const raw = {};
+  for (const s of STYLES) {
+    const json = JSON.parse(await readFile(join(MODEL_DIR(), 'voice_styles', `${s}.json`), 'utf8'));
+    presets[s] = P.presetOf(json);
+    raw[s] = { ttl: Float32Array.from(json.style_ttl.data.flat(Infinity)), dp: Float32Array.from(json.style_dp.data.flat(Infinity)) };
+  }
+  const bytes = (a) => Buffer.from(a.buffer, a.byteOffset, a.byteLength);
+  const same = (x, y) => bytes(x.ttl).equals(bytes(y.ttl)) && bytes(x.dp).equals(bytes(y.dp));
+  for (const s of STYLES) {
+    assert.ok(same(P.mixStyles(presets, [{ style: s, w: 1 }]), raw[s]), 'weight 1: the preset\'s bytes');
+    assert.ok(same(P.mixStyles(presets, [{ style: s, w: 0.3 }]), raw[s]), 'alone at 0.3: the preset\'s bytes');
+    assert.ok(same(P.mixStyles(presets, [{ style: s, w: 0.5 }, { style: s, w: 0.5 }]), raw[s]), 'twice: joined, the preset\'s bytes');
+  }
+  // The weights normalise.
+  assert.ok(same(P.mixStyles(presets, [{ style: 'F1', w: 2 }, { style: 'M3', w: 6 }]),
+    P.mixStyles(presets, [{ style: 'F1', w: 0.25 }, { style: 'M3', w: 0.75 }])), 'scaled weights: the same bytes');
+  const sum = (m) => m.reduce((s, e) => s + e.w, 0);
+  assert.ok(Math.abs(sum(P.checkedMix([{ style: 'F1', w: 2 }, { style: 'M3', w: 6 }])) - 1) < 1e-12, 'they sum to 1');
+  // At most three: the heaviest.
+  const five = [{ style: 'F1', w: 0.1 }, { style: 'F2', w: 0.3 }, { style: 'F3', w: 0.2 }, { style: 'F4', w: 0.25 }, { style: 'F5', w: 0.15 }];
+  const kept = P.checkedMix(five);
+  assert.deepEqual(kept.map((e) => e.style), ['F2', 'F4', 'F3'], 'the three heaviest');
+  assert.ok(Math.abs(sum(kept) - 1) < 1e-12, 'normalised');
+  assert.ok(same(P.mixStyles(presets, five), P.mixStyles(presets, five.filter((e) => ['F2', 'F4', 'F3'].includes(e.style)))), 'five mix as their three heaviest');
+  // A mix is a new voice: every token of length 1, none of its presets'.
+  const mixed = P.mixStyles(presets, [{ style: 'F1', w: 0.5 }, { style: 'M2', w: 0.3 }, { style: 'M5', w: 0.2 }]);
+  for (const [a, dim] of [[mixed.ttl, 256], [mixed.dp, 16]]) {
+    for (let at = 0; at < a.length; at += dim) {
+      let n = 0;
+      for (let d = 0; d < dim; d += 1) n += a[at + d] ** 2;
+      assert.ok(Math.abs(Math.sqrt(n) - 1) < 1e-5, 'a mixed token has length 1');
+    }
+  }
+  assert.ok(['F1', 'M2', 'M5'].every((s) => !same(mixed, raw[s])), 'the mix is none of its presets');
+  // Nothing valid: the default voice.
+  for (const mix of [[], null, [{ style: 'X9', w: 1 }], [{ style: 'F1', w: 0 }], [{ style: 'F1', w: -1 }], [{ style: 'F1', w: NaN }]]) {
+    assert.deepEqual(P.checkedMix(mix), [{ style: VOICE, w: 1 }], 'nothing valid: the default voice');
+  }
+  assert.ok(same(P.mixStyles(presets, null), raw[VOICE]), 'the default voice\'s bytes');
+}, { needs: h.haveModels });
+
+// The median F0 (Hz) of `samples` at `rate`: the samples averaged by fours, then per 40 ms frame
+// (10 ms on) loud enough (a tenth of the loudest frame's energy), the first lag between 70 and
+// 400 Hz whose normalised autocorrelation is within 0.9 of the frame's highest, if that is above
+// 0.6. Null with no voiced frame.
+function medianF0(samples, rate) {
+  const x = new Float64Array(Math.floor(samples.length / 4));
+  for (let i = 0; i < x.length; i += 1) x[i] = (samples[4 * i] + samples[4 * i + 1] + samples[4 * i + 2] + samples[4 * i + 3]) / 4;
+  const r = rate / 4;
+  const win = Math.round(r * 0.04);
+  const hop = Math.round(r * 0.01);
+  const [lo, hi] = [Math.floor(r / 400), Math.ceil(r / 70)];
+  const frames = [];
+  for (let at = 0; at + win + hi < x.length; at += hop) {
+    let e = 0;
+    for (let i = 0; i < win; i += 1) e += x[at + i] ** 2;
+    frames.push([at, e]);
+  }
+  const loudest = Math.max(0, ...frames.map(([, e]) => e));
+  const f0 = [];
+  for (const [at, e] of frames) {
+    if (e < loudest / 10) continue;
+    const corr = [];
+    for (let lag = lo; lag <= hi; lag += 1) {
+      let ab = 0;
+      let bb = 0;
+      for (let i = 0; i < win; i += 1) {
+        ab += x[at + i] * x[at + i + lag];
+        bb += x[at + i + lag] ** 2;
+      }
+      corr.push(ab / Math.sqrt(e * bb + 1e-12));
+    }
+    const best = Math.max(...corr);
+    if (best < 0.6) continue;
+    const k = corr.findIndex((c, i) => c >= 0.9 * best && (i === 0 || c >= corr[i - 1]) && (i === corr.length - 1 || c >= corr[i + 1]));
+    f0.push(r / (lo + k));
+  }
+  if (f0.length === 0) return null;
+  f0.sort((a, b) => a - b);
+  return f0[f0.length >> 1];
+}
+
+const semitones = (a, b) => 12 * Math.log2(a / b);
+
+// The flat cosine distance of two voices' style_ttl.
+function styleDistance(a, b) {
+  let ab = 0;
+  let aa = 0;
+  let bb = 0;
+  for (let i = 0; i < a.ttl.length; i += 1) {
+    ab += a.ttl[i] * b.ttl[i];
+    aa += a.ttl[i] ** 2;
+    bb += b.ttl[i] ** 2;
+  }
+  return 1 - ab / Math.sqrt(aa * bb);
+}
+
+test('voices per NPC (CPU): two neighbouring speakers say one line in two voices (median F0 at least 2 semitones apart, or their styles a cosine distance of 0.1); the same speaker says it again with the same samples; each line reaches the worker with the profile profileFor gives; the page counts the distinct voices and nothing more; pitch moves the voice but not its pace (the worker alone: at +2 and -2 semitones the rate moves by the pitch and the length stays, +2 being the line made slower, sample for sample; cost reported); no speaker, trait or profile value reaches the console, the page\'s data, its storage or its text', async (env) => {
+  const P = await import('../../site/voice/profile.js');
+  const { STYLES } = await import('../../site/voice/model.js');
+  const g = await cpuGame(env);
+  if (!g) {
+    console.log('  receipt: skipped: this Chromium has a WebGPU adapter');
+    return;
+  }
+  const { page, text } = g;
+  assert.ok((await voicesOn(page)).state === 'ready', 'ready');
+  // Speakers the test made: distinctive numbers (the sentinels), neighbours.
+  const A = { speaker: 29436, traits: { type: 27963, worktype: 0x9a, alignment: 2 } };
+  const B = { speaker: 29437, traits: { type: 0x17e, worktype: 0x85, alignment: 0 } };
+  const W = { speaker: 40, traits: { type: 0, worktype: 0, alignment: 0 } };
+  let turn = 0;
+  // `who` says `line` in a turn of its own; its samples (one rate) once the worker is done.
+  async function say(who, line) {
+    turn += 1;
+    const replies = await page.evaluate(() => window.__replies.length);
+    await page.evaluate(() => window.__pcm.splice(0));
+    await page.evaluate((u) => window.__speech.push(u), { ...utterance(turn, line), ...who });
+    await waitVoice(page, (n) => window.__replies.length > n && document.body.dataset.voicePlaying === '0', replies, 60_000);
+    const chunks = await page.evaluate(() => window.__pcm.splice(0));
+    assert.ok(chunks.length > 0 && chunks.every((c) => c.rate === chunks[0].rate), 'samples at one rate');
+    const speak = await page.evaluate(() => window.__speaks.at(-1));
+    return { rate: chunks[0].rate, samples: chunks.flatMap((c) => c.samples), speak };
+  }
+  await say(W, 'A first line, to settle the steps.');
+  const a1 = await say(A, LINE_60);
+  const b = await say(B, LINE_60);
+  let a2 = await say(A, LINE_60);
+  for (let i = 0; i < 2 && a2.speak.steps !== a1.speak.steps; i += 1) a2 = await say(A, LINE_60);
+  // The profiles the worker got: profileFor's, the seed the speaker's and the text's.
+  const [pA, pB] = [P.profileFor(A), P.profileFor(B)];
+  assert.deepEqual(a1.speak.profile, pA, 'A: its profile');
+  assert.deepEqual(b.speak.profile, pB, 'B: its profile');
+  assert.ok(a1.speak.seed === a2.speak.seed && a1.speak.seed !== b.speak.seed, 'the seed: the speaker\'s and the line\'s');
+  // The same speaker, the same line, the same steps: the same samples.
+  assert.equal(a2.speak.steps, a1.speak.steps, 'A\'s lines at the same steps');
+  assert.ok(a1.rate === a2.rate && a1.samples.length === a2.samples.length && a1.samples.every((s, i) => s === a2.samples[i]), 'A again: the same samples');
+  // Two voices: F0 apart, or the styles apart.
+  const presets = {};
+  for (const s of STYLES) presets[s] = P.presetOf(JSON.parse(await readFile(join(MODEL_DIR(), 'voice_styles', `${s}.json`), 'utf8')));
+  const [fA, fB] = [medianF0(a1.samples, a1.rate), medianF0(b.samples, b.rate)];
+  const apart = Math.abs(semitones(fA, fB));
+  const distance = styleDistance(P.mixStyles(presets, pA.mix), P.mixStyles(presets, pB.mix));
+  console.log(`  receipt: neighbours' median F0 ${apart.toFixed(2)} semitones apart; style cosine distance ${distance.toFixed(3)}`);
+  assert.ok(fA !== null && fB !== null && (apart >= 2 || distance >= 0.1), 'two voices');
+  assert.equal((await voiceShown(page)).distinct, 3, 'three distinct voices spoken');
+  // Nothing of who spoke reaches the page: the speakers, A's type, the profiles' presets, paces,
+  // pitches and weights (worktypes and alignments are too short to tell from a count).
+  const sentinels = [String(A.speaker), String(B.speaker), String(A.traits.type),
+    ...[pA, pB].flatMap((p) => [String(p.speed), String(p.pitch), ...p.mix.flatMap((e) => [e.style, String(e.w)])])];
+  const where = await page.evaluate(() => JSON.stringify({
+    body: { ...document.body.dataset }, canvas: { ...document.getElementById('screen').dataset },
+    text: document.body.innerText, storage: { ...localStorage },
+  }));
+  const found = (s, t) => new RegExp(`(^|[^0-9A-Za-z.])${s.replace(/[.\-]/g, '\\$&')}($|[^0-9A-Za-z])`).test(t);
+  assert.ok(sentinels.every((s) => !found(s, where)), 'not in the page\'s data, text or storage');
+  assert.ok(sentinels.every((s) => !text.some((m) => found(s, m))), 'not in the console of the page or its worker');
+
+  // The worker alone (the model cached in this context), one voice: at 0, +2 and -2 semitones,
+  // then at 0 at the pace +2 synthesizes at (its speed over its rate's ratio).
+  await page.click('#voices');
+  assert.equal((await voiceShown(page)).state, 'off', 'the page\'s voices off');
+  const runs = await page.evaluate(async (line) => {
+    const worker = new Worker(new URL('/voice/worker.js', location.href), { type: 'module' });
+    const next = (want) => new Promise((done, fail) => {
+      const got = [];
+      worker.onmessage = (e) => {
+        if (e.data.type === 'audio') got.push(e.data);
+        else if (e.data.type === 'error') fail(new Error(e.data.code));
+        else if (e.data.type === want) done(got);
+      };
+    });
+    const loaded = next('ready');
+    worker.postMessage({ type: 'load', cachedOnly: true });
+    await loaded;
+    const out = [];
+    for (const [pitch, speed] of [[0, 1.05], [2, 1.05], [-2, 1.05], [0, null]]) {
+      const done = next('done');
+      worker.postMessage({ type: 'speak', id: out.length + 1, text: line, lang: 'en', seed: 7, steps: 4,
+        profile: { mix: [{ style: 'M1', w: 1 }], speed: speed ?? (1.05 * out[0].rate) / out[1].rate, pitch, steps: 16, seedSalt: 0 } });
+      const audio = await done;
+      out.push({ pitch, rate: audio[0].sampleRate, seconds: audio.reduce((s, m) => s + m.pcm.length / m.sampleRate, 0),
+        synthMs: audio.reduce((s, m) => s + m.synthMs, 0), samples: audio.flatMap((m) => Array.from(m.pcm)) });
+    }
+    worker.terminate();
+    return out;
+  }, LINE_60);
+  const [r0, up, down, slow] = runs;
+  for (const r of [up, down]) {
+    assert.ok(Math.abs(r.rate / r0.rate - 2 ** (r.pitch / 12)) < 1e-4, `${r.pitch} st: the rate moved by it`);
+    assert.ok(Math.abs(r.seconds / r0.seconds - 1) < 0.01, `${r.pitch} st: the same length`);
+    console.log(`  receipt: CPU pitch ${r.pitch > 0 ? '+' : ''}${r.pitch} st: length ${(100 * (r.seconds / r0.seconds - 1)).toFixed(2)}%, synthesis ${Math.round(r.synthMs)} ms against ${Math.round(r0.synthMs)} ms at 0 (${r0.seconds.toFixed(2)} s of audio, 4 steps)`);
+  }
+  // +2 is the line made at the slower pace, sample for sample, played 2^(2/12) times faster.
+  assert.ok(slow.rate === r0.rate && slow.samples.length === up.samples.length && slow.samples.every((x, i) => x === up.samples[i]), '+2 st: the slower line\'s samples');
+  console.log(`  receipt: +2 st is the line made ${(100 * (slow.seconds / r0.seconds - 1)).toFixed(1)}% longer, the same samples, at a ${(up.rate / r0.rate).toFixed(4)} times higher rate`);
 }, { needs: () => h.haveHfes() && h.haveModels() });
 
 // --- NPC bundles (spec 09 Design 5) --------------------------------------------------------
