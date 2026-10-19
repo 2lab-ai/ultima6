@@ -172,6 +172,10 @@ pub fn load_script(state: &mut State, files: &Files, npc: i16, dst: ScriptDst<'_
     }
     let n = bytes.len().min(buf.len());
     buf[..n].copy_from_slice(&bytes[..n]);
+    #[cfg(test)]
+    if main {
+        super::disasm::trace::loaded(letter, item);
+    }
     npc
 }
 

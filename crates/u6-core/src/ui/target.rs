@@ -74,6 +74,8 @@ const DIRECTION_KEYS: [(u16, i16); 8] = [
 /// keys are magic's ([`crate::magic::spell_key`], [`crate::magic::book_panel_key`]).
 pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
     if state.borrow().ui.input.accept {
+        #[cfg(test)]
+        crate::converse::disasm::trace::wait_put();
         put_raw(state, io, -1).await;
     }
     let mut key: u16 = 0;

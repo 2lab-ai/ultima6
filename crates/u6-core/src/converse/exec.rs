@@ -225,8 +225,15 @@ async fn print_op(cx: &Cx<'_>, kind: Kind) -> i16 {
     if form == 0xd2 {
         let back = table_element(cx, true).await;
         cx.cv(|c| c.saved_pc = back);
+        #[cfg(test)]
+        super::disasm::trace::print_start(cx);
         loop {
             let b = cx.cv(|c| c.next());
+            #[cfg(test)]
+            {
+                use super::disasm::trace::{Read, table_byte};
+                table_byte(cx.cv(|c| c.pos()) - 1, b, Read::Print);
+            }
             if b == 0 || cx.cv(|c| c.fault) {
                 break;
             }
@@ -273,6 +280,8 @@ async fn assign(cx: &Cx<'_>) -> i16 {
             c.set_byte(at, v as u8);
             c.set_byte(at + 1, (v >> 8) as u8);
         });
+        #[cfg(test)]
+        super::disasm::trace::table_write(at, v);
         return 0;
     }
     if kind == 0xb2 {
@@ -288,6 +297,12 @@ async fn assign(cx: &Cx<'_>) -> i16 {
             let mut text = Vec::new();
             loop {
                 let b = s.converse.next();
+                #[cfg(test)]
+                super::disasm::trace::table_byte(
+                    s.converse.pos() - 1,
+                    b,
+                    super::disasm::trace::Read::Copy,
+                );
                 if b == 0 || s.converse.fault {
                     break;
                 }

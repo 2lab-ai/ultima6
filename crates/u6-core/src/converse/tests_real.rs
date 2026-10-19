@@ -21,7 +21,7 @@ use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
-fn files() -> Option<Files> {
+pub(super) fn files() -> Option<Files> {
     if !Path::new(ZIP).exists() {
         eprintln!("skipped: {ZIP} not present");
         return None;
@@ -34,7 +34,7 @@ fn files() -> Option<Files> {
     Some(Files::new(r.files))
 }
 
-fn with_text(files: &Files) -> State {
+pub(super) fn with_text(files: &Files) -> State {
     let mut s = State::new_game(files).quiet();
     // Load state's tail: the region's objects and the view the on-screen test reads; main's
     // text windows (the message scroll current).
@@ -86,7 +86,12 @@ fn settle(e: &mut Engine) {
 /// types the next of `lines`; at any other wait (a `*` page break, a key wait, a one-key
 /// question) it presses Space, then N, then Y until the game moves on. Returns the scroll and
 /// whether the conversation ended.
-fn converse(state: &State, files: &Files, npc: i16, lines: &[&str]) -> (Vec<String>, bool) {
+pub(super) fn converse(
+    state: &State,
+    files: &Files,
+    npc: i16,
+    lines: &[&str],
+) -> (Vec<String>, bool) {
     let leader = state.actors.party.leader_index;
     let prompt = latin(state.converse.text.as_ref().quiet().get(super::Msg::YouSay));
     let prompt = prompt.trim().to_string();

@@ -36,6 +36,7 @@
 //! - 0x133d3e [converse] load an NPC portrait (portrait.a)
 //! - 0x133e5e [converse] load an NPC's converse.a script block
 
+pub mod disasm;
 mod eval;
 mod exec;
 mod party;

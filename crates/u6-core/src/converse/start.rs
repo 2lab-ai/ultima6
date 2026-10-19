@@ -301,6 +301,8 @@ async fn input_loop(cx: &Cx<'_>, npc: i16) {
             c.saved_pc = c.pos();
             c.next()
         });
+        #[cfg(test)]
+        super::disasm::trace::input_byte(cx, op);
         let waits = matches!(op, 0xf7..=0xfc | 0xcb);
         if waits {
             cx.st(speech::before_input);
