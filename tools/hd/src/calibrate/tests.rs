@@ -1432,8 +1432,7 @@ fn a_first_pass_whose_log_cannot_be_read_says_why_with_its_own_hint() {
     let run = run_dir(&out).canonicalize().unwrap();
     let (emfile, hint) = (
         std::io::Error::from_raw_os_error(libc::EMFILE),
-        "(a run holds each file it makes open until it ends: raise the limit on open files, \
-         ulimit -n)",
+        "(too many files open: raise the limit on open files, ulimit -n)",
     );
     assert_eq!(
         e,

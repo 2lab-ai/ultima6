@@ -46,13 +46,27 @@ pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// What to say of the system's error `e` at `path`, a file a step before this one writes (the
-/// step to run, `if_missing`, e.g. "run ingest first"): that step's hint only when nothing is
-/// at `path`, how to go on only when out of open files (`ulimit -n`), any other error as itself.
-pub fn said(path: &Path, e: &std::io::Error, if_missing: &str) -> String {
-    match (e.kind(), e.raw_os_error()) {
-        (std::io::ErrorKind::NotFound, _) => format!("{}: {e} ({if_missing})", path.display()),
-        (_, Some(libc::EMFILE)) => format!(
+/// The step of the tool that writes the work dir's file `name` (the list above) first, when a
+/// step does: atlas the atlas and the jobs, run the run log, ingest the gate log, the list of
+/// images pack takes and the coverage.
+pub fn step_of(name: &str) -> Option<&'static str> {
+    match name {
+        "atlas.json" | "jobs.jsonl" => Some("atlas"),
+        "runs.jsonl" => Some("run"),
+        "gates.jsonl" | "ingest.json" | "coverage.txt" => Some("ingest"),
+        _ => None,
+    }
+}
+
+/// What to say of the system's error `e` at `path`, the one rule for it: when nothing is at
+/// `path` and a step writes it (`step`, [`step_of`]), to run that step first; out of open
+/// files, how to go on (`ulimit -n`); any other error as itself.
+pub fn said(path: &Path, e: &std::io::Error, step: Option<&str>) -> String {
+    match (e.kind(), e.raw_os_error(), step) {
+        (std::io::ErrorKind::NotFound, _, Some(step)) => {
+            format!("{}: {e} (run {step} first)", path.display())
+        }
+        (_, Some(libc::EMFILE), _) => format!(
             "{}: {e} (too many files open: raise the limit on open files, ulimit -n)",
             path.display()
         ),
@@ -389,9 +403,16 @@ impl Work {
         Ok(())
     }
 
+    /// The work dir's file `name`, at most `max` bytes, read for a step: an error says why, with
+    /// the step to run first when nothing is there ([`said`], [`step_of`]).
+    pub fn read_input(&self, name: &str, max: u64) -> Result<Vec<u8>, String> {
+        let p = self.path(name);
+        crate::img::read_capped_said(&p, max, |e| said(&p, e, step_of(name)))
+    }
+
     pub fn read_jobs(&self) -> Result<Vec<Job>, String> {
         let p = self.path("jobs.jsonl");
-        let text = std::fs::read_to_string(&p).map_err(|e| said(&p, &e, "run atlas first"))?;
+        let text = std::fs::read_to_string(&p).map_err(|e| said(&p, &e, step_of("jobs.jsonl")))?;
         text.lines()
             .filter(|l| !l.trim().is_empty())
             .enumerate()

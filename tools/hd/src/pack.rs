@@ -43,10 +43,7 @@ pub struct PackSummary {
 pub fn pack(work: &Work, out: Option<&Path>) -> Result<PackSummary, String> {
     let dest = out.map_or_else(|| work.path("pack/u6-hdpack.zip"), Path::to_path_buf);
     work::check_target(&dest)?;
-    let list = work.path("ingest.json");
-    let text = img::read_capped_said(&list, 64 << 20, |e| {
-        work::said(&list, e, "run ingest first")
-    })?;
+    let text = work.read_input("ingest.json", 64 << 20)?;
     let accepted: Vec<Accepted> = serde_json::from_slice(&text).map_err(|e| e.to_string())?;
     let mut images = Vec::with_capacity(accepted.len());
     for a in &accepted {

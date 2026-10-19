@@ -882,8 +882,8 @@ fn a_run_out_of_open_files_fails_saying_so_and_still_cleans_up() {
     .unwrap_err();
     let run = only_run(&out);
     let said = format!(
-        "{}: Too many open files (os error {}) (a run holds each file it makes open until it \
-         ends: raise the limit on open files, ulimit -n); run dir: {}",
+        "{}: Too many open files (os error {}) (too many files open: raise the limit on open \
+         files, ulimit -n); run dir: {}",
         run.join("c.txt").display(),
         libc::EMFILE,
         run.display()
@@ -1836,8 +1836,7 @@ fn a_run_dir_beside_the_run_that_cannot_be_opened_is_said_and_out_of_files_fails
     assert_eq!(
         e,
         format!(
-            "{}: {} (a run holds each file it makes open until it ends: raise the limit on open \
-             files, ulimit -n)",
+            "{}: {} (too many files open: raise the limit on open files, ulimit -n)",
             out.canonicalize().unwrap().join(run_name(2, 8)).display(),
             std::io::Error::from_raw_os_error(libc::EMFILE)
         )
@@ -1886,9 +1885,9 @@ fn a_run_dir_out_of_open_files_to_be_opened_says_how_to_go_on() {
     assert_eq!(
         e,
         format!(
-            "{}: {} (a run holds each file it makes open until it ends: raise the limit on open \
-             files, ulimit -n): the run dir is left empty, with no refused.txt (it could not be \
-             opened to write one); the next run lists it as incomplete; run dir: {}; incomplete \
+            "{}: {} (too many files open: raise the limit on open files, ulimit -n): the run dir \
+             is left empty, with no refused.txt (it could not be opened to write one); the next \
+             run lists it as incomplete; run dir: {}; incomplete \
              runs beside it (left as they are): {}",
             run.display(),
             std::io::Error::from_raw_os_error(libc::EMFILE),

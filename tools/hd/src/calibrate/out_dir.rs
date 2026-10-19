@@ -199,16 +199,10 @@ fn io_seam(key: &Path, step: &'static str, what: &str) -> std::io::Result<()> {
     })
 }
 
-/// What to say of the system's error `e` at `path`; out of open files, how to go on too.
+/// What to say of the system's error `e` at `path`, a file no step writes for the run: the
+/// tool's one rule ([`work::said`]), out of open files how to go on, else the error itself.
 pub fn os_error(path: &Path, e: &std::io::Error) -> String {
-    match e.raw_os_error() {
-        Some(libc::EMFILE) => format!(
-            "{}: {e} (a run holds each file it makes open until it ends: raise the limit on open \
-             files, ulimit -n)",
-            path.display()
-        ),
-        _ => format!("{}: {e}", path.display()),
-    }
+    work::said(path, e, None)
 }
 
 /// The open file `f` at `path`, read: at most `max` bytes (never more than `max + 1` are read,
@@ -229,17 +223,6 @@ fn capped(f: File, path: &Path, max: u64) -> Result<Vec<u8>, String> {
 /// how to go on ([`os_error`]).
 pub fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     let f = File::open(path).map_err(|e| os_error(path, &e))?;
-    capped(f, path, max)
-}
-
-/// A file of the work dir that ingest writes, read for a run ([`read_capped`]): when nothing
-/// is at `path`, the error says to run ingest first; any other error is said as itself
-/// ([`os_error`]: out of open files, how to go on).
-pub fn read_from_work(path: &Path, max: u64) -> Result<Vec<u8>, String> {
-    let f = File::open(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => format!("{}: {e} (run ingest first)", path.display()),
-        _ => os_error(path, &e),
-    })?;
     capped(f, path, max)
 }
 

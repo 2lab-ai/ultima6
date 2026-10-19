@@ -3319,6 +3319,40 @@ fn a_run_whose_master_cannot_be_read_again_keeps_its_diagnostics_alone() {
 }
 
 #[test]
+fn a_snapshot_not_there_names_the_step_that_writes_it() {
+    // Each work file the final read takes, not there (each in a work dir of its own): the
+    // error names the step that writes it, ingest for gates.jsonl and ingest.json, atlas for
+    // jobs.jsonl.
+    let g = game();
+    let (text, left) = chain(&g);
+    for (k, (name, step)) in [
+        ("gates.jsonl", "ingest"),
+        ("ingest.json", "ingest"),
+        ("jobs.jsonl", "atlas"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (dir, work) = work_dir(&format!("step-{k}"), &text, &g, &left);
+        let o = options(&dir);
+        let path = work.path(name);
+        std::fs::remove_file(&path).unwrap();
+        let e = calibrate_final(&g, &work, &o).unwrap_err();
+        assert_eq!(
+            e,
+            format!(
+                "{}: {} (run {step} first); run dir: {}",
+                path.display(),
+                std::io::Error::from_raw_os_error(libc::ENOENT),
+                run_dir(&o.out).canonicalize().unwrap().display()
+            ),
+            "{name}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
 fn a_snapshot_that_cannot_be_read_says_why_with_its_own_hint() {
     // The work dir's gates.jsonl not there: the error says to run ingest first. In a child
     // under a limit of 64 open files, with every fd but the run dir's own taken (by the test):
@@ -3355,8 +3389,7 @@ fn a_snapshot_that_cannot_be_read_says_why_with_its_own_hint() {
     let run = run_dir(&o.out).canonicalize().unwrap();
     let (emfile, hint) = (
         std::io::Error::from_raw_os_error(libc::EMFILE),
-        "(a run holds each file it makes open until it ends: raise the limit on open files, \
-         ulimit -n)",
+        "(too many files open: raise the limit on open files, ulimit -n)",
     );
     assert_eq!(
         e,
@@ -3402,8 +3435,7 @@ fn a_snapshot_read_again_out_of_open_files_says_how_to_go_on() {
     assert_eq!(
         e,
         format!(
-            "{}: {} (a run holds each file it makes open until it ends: raise the limit on open \
-             files, ulimit -n); run dir: {}",
+            "{}: {} (too many files open: raise the limit on open files, ulimit -n); run dir: {}",
             work.path("gates.jsonl").display(),
             std::io::Error::from_raw_os_error(libc::EMFILE),
             run_dir(&o.out).canonicalize().unwrap().display()

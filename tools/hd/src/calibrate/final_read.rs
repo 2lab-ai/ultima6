@@ -1544,7 +1544,7 @@ fn run_final(
     };
     // Snapshots first; only they are read.
     let snapshot = |name: &str, cap: u64| -> Result<Vec<u8>, String> {
-        let bytes = out_dir::read_from_work(&work.path(name), cap)?;
+        let bytes = work.read_input(name, cap)?;
         run.write(name, &bytes)?;
         out_dir::seam(&o.out, "snapshot", name)?;
         run.read(name, cap)
