@@ -58,10 +58,13 @@ fn transcript_end(s: &mut State) {
 }
 
 /// The more prompt of a paged window (0x107f2e..0x107fb4): idle-cursor glyphs from 1, wait for
-/// one of [`MORE_KEYS`], blank the window's last row, rearm the row count.
-async fn more(state: &RefCell<State>, io: &Io) {
+/// one of [`MORE_KEYS`], blank the window's last row, rearm the row count. Port (spec 09): the
+/// line it ends is drawn only after the key, so of what the speech tap kept only the drawn part
+/// is flushed; its last `held` codes (that line's) stay for the next flush.
+async fn more(state: &RefCell<State>, io: &Io, held: usize) {
     let last = {
         let mut s = state.borrow_mut();
+        crate::speech::flush_drawn(&mut s, held);
         let w = *s.ui.text.win();
         s.ui.input.cursor_glyph = 1;
         s.ui.input.accept = false;
@@ -103,11 +106,19 @@ pub async fn put_raw(state: &RefCell<State>, io: &Io, c: i32) {
 /// Port (spec 08): every put (text output on) ends [`super::textstate::TextState::after_at`],
 /// so an `@` is followed at once by `{` only with nothing put between them: padding or a
 /// directive put as it is ends it. The escape layer has already ended it for its own puts.
+///
+/// Port (spec 09 Design 1): the code, after the capital step and before the runic bit, goes to
+/// the speech tap ([`crate::speech::capture`]), which keeps it only while its flag is up and the
+/// current window is the message scroll; each cell of the line is marked with whether its code
+/// was kept ([`crate::speech::mark`]), so the more prompt holds back the codes not drawn yet.
 pub(super) async fn put_cell(state: &RefCell<State>, io: &Io, c: i32) {
     let mut c = c;
     let paging;
+    let said;
+    let mut held = 0;
     {
         let mut s = state.borrow_mut();
+        let s = &mut *s;
         let alert = s.ui.tables.colours.alert;
         let t = &mut s.ui.text;
         if !t.on {
@@ -133,6 +144,9 @@ pub(super) async fn put_cell(state: &RefCell<State>, io: &Io, c: i32) {
         if c == 0 {
             c = NL;
         }
+        let (messages, language) = (t.current == WindowId::Messages, t.language);
+        said = crate::speech::capture(s, messages, language, c);
+        let t = &mut s.ui.text;
         if t.win().flags & RUNIC != 0 && c > SPACE && c < 0x80 {
             c |= 0x80;
         }
@@ -144,24 +158,31 @@ pub(super) async fn put_cell(state: &RefCell<State>, io: &Io, c: i32) {
                 t.line[n] = code(c);
                 t.line_len += 1;
                 t.tail.put(c);
+                crate::speech::mark(s, n, said);
             }
-            finish(t, c);
+            finish(&mut s.ui.text, c);
             return;
         }
         if t.more_rows != 0 && c >= 0 && w.flags & PAGED != 0 {
             t.more_rows -= 1;
         }
         paging = w.flags & PAGED != 0 && t.more_rows == 0 && c >= 0;
+        if paging {
+            // Not drawn before the more key: the line's cells and `c`.
+            let (start, len) = (usize::from(t.line_start), usize::from(t.line_len));
+            held = crate::speech::marked(s, start, len) + usize::from(said);
+        }
     }
     if paging {
-        more(state, io).await;
+        more(state, io, held).await;
     }
     let mut s = state.borrow_mut();
-    end_line(&mut s, io, c);
+    end_line(&mut s, io, c, said);
 }
 
-/// 0x107fb8..0x108262: draw the assembled line, keep a wrapped tail, advance or scroll.
-fn end_line(s: &mut State, io: &Io, c: i32) {
+/// 0x107fb8..0x108262: draw the assembled line, keep a wrapped tail, advance or scroll. Port
+/// (spec 09): `said` = the speech tap kept `c`; the line's cell marks move with its cells.
+fn end_line(s: &mut State, io: &Io, c: i32, said: bool) {
     let text_ink = s.ui.tables.colours.text;
     let t = &mut s.ui.text;
     let w = *t.win();
@@ -175,6 +196,8 @@ fn end_line(s: &mut State, io: &Io, c: i32) {
         if c != NL {
             t.tail.put(c);
         }
+        crate::speech::mark(s, len, said);
+        let t = &mut s.ui.text;
         while t.line[end] != SP && !(end >= 1 && t.line[end - 1] == HYPHEN) && end > start {
             end -= 1;
         }
@@ -218,6 +241,7 @@ fn end_line(s: &mut State, io: &Io, c: i32) {
         if c == SPACE {
             t.nonspace = false;
         }
+        crate::speech::shift_marks(s, end);
     } else if c >= 0 {
         t.line_len = 0;
         t.line_start = 0;
@@ -226,6 +250,7 @@ fn end_line(s: &mut State, io: &Io, c: i32) {
             t.line_len = 1;
             t.line[0] = code(c);
             t.tail.put(c);
+            crate::speech::mark(s, 0, said);
         }
     }
     if c >= 0 {

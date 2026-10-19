@@ -44,6 +44,7 @@ Open items are in `.prd/browser-port/loop.md`.
 scripts/cargo.sh test --workspace --profile gate  # release + overflow and debug-assertion checks; the wrapper pins rustup stable
 scripts/cargo.sh run -p u6-native --release -- --zip ultima-vi.zip  # the window: - / = (or numpad -/+) slower / faster, 1x to 8x and Max, shown in the title
 bash scripts/build-web.sh && node tools/web/test-web.mjs
+tools/speech/fetch-models.sh                        # the voice model into site/models/ (gitignored), before a deploy
 scripts/deploy-web.sh main                          # Cloudflare Pages project ultima6
 ```
 
@@ -57,4 +58,5 @@ scripts/deploy-web.sh main                          # Cloudflare Pages project u
 | `crates/u6-hdpack` | the HD pack format `u6-hdpack/1` (spec 07 HD1): writer, strict reader, the drop classifier, the content hash of a classic image; no game data. The page loads a dropped pack (H2), keeps it in IndexedDB and draws its pictures in front of MMPX |
 | `tools/` | PP20, hunk flattener, REA drivers, Amiga emulator oracle, web test harness |
 | `tools/hd` | `u6-hd`, the local imagegen HD tool (spec 07 HD2): run by the owner on the owner's files; its sheets, outputs and packs stay in `~/Games/ultima6/hd/`, outside the repo. It moves each generated image out of `~/.codex/generated_images/`; codex's own session log (`~/.codex/sessions/`) still keeps every sheet that was sent. The example `scaler_pack` writes a full-size pack of MMPX ×4 of the owner's images there, for timing the page |
-| `site/` | the static page |
+| `tools/speech` | `fetch-models.sh` (spec 09 V2): the pinned Supertonic-3 revision and onnxruntime-web 1.30.0, checked against their sha256 pins and hosted in parts of at most 24 MiB under `site/models/` with their licences and notices; `--check` checks them as hosted |
+| `site/` | the static page; `site/voice/` its on-device voices (spec 09 V3: the worker, the player, the model's terms) |

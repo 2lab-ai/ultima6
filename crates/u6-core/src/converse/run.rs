@@ -7,6 +7,7 @@ use super::eval::YIELD_EVERY;
 use super::exec::exec;
 use super::seams;
 use super::{Cx, Msg};
+use crate::speech::Kind;
 
 /// `b0` (jump), `d3`, `d4` carry 4 / 1 / 2 operand bytes the skip loops step over (`d2`'s four
 /// are not skipped by the original, nor here).
@@ -75,7 +76,15 @@ fn strtok(buf: &mut [u8], at: &mut usize, delims: &[u8]) -> Option<usize> {
 /// unit of text, and so is what one op or keyword block puts (a table string put a byte at a
 /// time): where it ends, what the text layer still holds is let out and a brace `@{…}` it opened
 /// and left open is closed ([`seams::end_unit`]), so neither joins or colours the next.
-pub(crate) fn run_text<'a>(cx: &'a Cx<'a>, npc: i16) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+///
+/// Port (spec 09 Design 1): `kind` is what the caller runs (the look text, or the NPC's words);
+/// the text bytes are put with the speech tap's flag up for [`Kind::Speech`], and the keyword
+/// blocks and ops it runs take the same kind.
+pub(crate) fn run_text<'a>(
+    cx: &'a Cx<'a>,
+    npc: i16,
+    kind: Kind,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async move {
         // Every unit here begins after this; each ends before the next begins.
         let opened = seams::braces(cx);
@@ -91,18 +100,18 @@ pub(crate) fn run_text<'a>(cx: &'a Cx<'a>, npc: i16) -> Pin<Box<dyn Future<Outpu
                     seams::print(cx, &m).await;
                     break;
                 }
-                seams::put_char(cx, b).await;
+                seams::put_speech(cx, kind, b).await;
             } else {
                 // The text run before it ends here, and what it puts ends with it.
                 seams::end_unit(cx, opened).await;
                 if b == 0xef {
                     if !cx.cv(|c| c.answered) {
-                        keywords(cx, npc).await;
+                        keywords(cx, npc, kind).await;
                     } else {
                         cx.cv(|c| while c.next() != 0xee && !c.fault {});
                     }
                 } else {
-                    exec(cx, b, npc).await;
+                    exec(cx, b, npc, kind).await;
                 }
                 seams::end_unit(cx, opened).await;
             }
@@ -136,7 +145,7 @@ pub(crate) async fn checkpoint(cx: &Cx<'_>) {
 /// a word of the input (0x1128d0, full keyword length), or that starts with `*`, skips to `f6`,
 /// prints a newline, marks the input answered and runs the answer text. Without a match the
 /// rest of the block is skipped up to `ef` / `ff` (left to be read again) or past `ee`.
-async fn keywords(cx: &Cx<'_>, npc: i16) {
+async fn keywords(cx: &Cx<'_>, npc: i16, kind: Kind) {
     let (delims, newline) = (cx.msg(Msg::Delimiters), cx.msg(Msg::Newline));
     let bye = cx.msg(Msg::Bye);
     cx.cv(|c| {
@@ -167,7 +176,7 @@ async fn keywords(cx: &Cx<'_>, npc: i16) {
             cx.cv(|c| while c.next() != 0xf6 && !c.fault {});
             seams::print(cx, &newline).await;
             cx.cv(|c| c.answered = true);
-            run_text(cx, npc).await;
+            run_text(cx, npc, kind).await;
             return;
         }
         if cx.cv(|c| c.fault) {

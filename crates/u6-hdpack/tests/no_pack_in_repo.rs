@@ -1,7 +1,13 @@
 //! Spec 07 Rights / Acceptance 4: no HD pack, part of one, or output of the HD tool is
-//! committed, and the site serves none. Checked: every blob in the git index (what a commit
-//! takes, read with `git cat-file`, whatever the working tree holds), and every file under
+//! committed, and the site serves none in the open. Checked: every blob in the git index (what a
+//! commit takes, read with `git cat-file`, whatever the working tree holds), and every file under
 //! `site/` on disk (built output included). Any error reading them fails the test.
+//!
+//! The one exception (the owner's rule of 2026-10-19: packs are hosted for the owner to choose at
+//! the first run): a pack zip on disk under `site/packs/`, which is gitignored and served only
+//! through the key gate of `functions/_middleware.js`. While `site/packs/` exists the test also
+//! checks that git ignores it and that the gate still guards `/packs`, so the exception cannot
+//! outlive either. A pack in the index fails wherever it is, `site/packs/` included.
 //!
 //! A file is caught by its shape, not by a string (the format string itself is in source: this
 //! crate, the page's drop classifier):
@@ -34,6 +40,17 @@ fn number(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// The reason [`pack_file`] gives a zip that holds a pack or its parts.
+const PACK_ZIP: &str = "a zip holding a pack or its parts";
+/// Where packs may lie on disk: the gitignored directory the key gate serves.
+const HOSTED: &str = "site/packs/";
+
+/// Whether a file found on disk at `path` (relative to the repository) for `why` is a hosted
+/// pack: a pack zip under [`HOSTED`]. A file of the index never is.
+fn hosted(path: &str, why: &str) -> bool {
+    why == PACK_ZIP && path.starts_with(HOSTED)
+}
+
 /// Why the file `name` with `bytes` is a pack, a part of one, or a tool output; `Ok(None)` if it
 /// is none of these; `Err` if it looks like a zip that does not read (it cannot be checked).
 fn pack_file(name: &str, bytes: &[u8]) -> Result<Option<&'static str>, String> {
@@ -47,7 +64,7 @@ fn pack_file(name: &str, bytes: &[u8]) -> Result<Option<&'static str>, String> {
         zip::read_zip(bytes, |_| true).map_err(|e| format!("{name}: an unreadable zip: {e}"))?;
     for (n, b) in &entries {
         if pack_file(&format!("{name}/{n}"), b)?.is_some() {
-            return Ok(Some("a zip holding a pack or its parts"));
+            return Ok(Some(PACK_ZIP));
         }
     }
     Ok(None)
@@ -328,16 +345,70 @@ fn the_walk_does_not_follow_a_directory_link() {
 }
 
 #[test]
+fn only_a_pack_zip_on_disk_under_site_packs_is_hosted() {
+    assert!(hosted("site/packs/a.zip", PACK_ZIP));
+    assert!(hosted("site/packs/sub/a.zip", PACK_ZIP));
+    assert!(
+        !hosted("site/packs-x/a.zip", PACK_ZIP),
+        "a sibling directory"
+    );
+    assert!(
+        !hosted("site/x/packs/a.zip", PACK_ZIP),
+        "a nested packs directory"
+    );
+    assert!(!hosted("site/a.zip", PACK_ZIP));
+    assert!(
+        !hosted("site/packs/manifest.json", "a pack manifest"),
+        "a loose part"
+    );
+    assert!(
+        !hosted("site/packs/atlas-0.webp", "a pack image"),
+        "a loose part"
+    );
+}
+
+/// While `site/packs/` exists: git ignores it, and the site's Function still gates `/packs` by
+/// the canonical path (its source holds the canonical-path function and the `/packs` test).
+fn hosted_packs_are_ignored_and_gated(root: &Path) {
+    if !root.join("site/packs").is_dir() {
+        return;
+    }
+    let ignored = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "-q", "site/packs/x"])
+        .status()
+        .expect("git runs");
+    assert!(ignored.success(), "site/packs/ is not ignored by git");
+    let gate = std::fs::read_to_string(root.join("functions/_middleware.js"))
+        .unwrap_or_else(|_| panic!("functions/_middleware.js: missing while site/packs/ exists"));
+    assert!(
+        gate.contains("export function canonicalPath(")
+            && gate.contains(
+                "if (path !== '/packs' && !path.startsWith('/packs/')) return context.next();"
+            ),
+        "functions/_middleware.js no longer gates /packs by its canonical path"
+    );
+}
+
+#[test]
 fn no_pack_is_in_the_index_or_under_site() {
     let root = repo_root().canonicalize().unwrap();
-    let mut files = index_blobs();
-    assert!(files.len() > 100, "the index lists the repository");
-    assert!(files.iter().any(|(p, _)| p == "Cargo.toml"));
-    walk(&root.join("site"), &root, &mut files);
+    let index = index_blobs();
+    assert!(index.len() > 100, "the index lists the repository");
+    assert!(index.iter().any(|(p, _)| p == "Cargo.toml"));
+    let mut disk = Vec::new();
+    walk(&root.join("site"), &root, &mut disk);
+    hosted_packs_are_ignored_and_gated(&root);
     let mut found = Vec::new();
     let mut unreadable = Vec::new();
-    for (p, b) in &files {
+    let files = index
+        .iter()
+        .map(|f| (f, false))
+        .chain(disk.iter().map(|f| (f, true)));
+    for ((p, b), on_disk) in files {
         match pack_file(p, b) {
+            Ok(Some(why)) if on_disk && hosted(p, why) => {}
             Ok(Some(why)) => found.push(format!("{p}: {why}")),
             Ok(None) => {}
             Err(e) => unreadable.push(e),

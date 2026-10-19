@@ -52,11 +52,14 @@ mod tests;
 mod tests_ops;
 #[cfg(test)]
 mod tests_real;
+#[cfg(test)]
+mod tests_speech;
 
 use std::cell::RefCell;
 
 pub(crate) use party::member_with_object;
 pub use party::{actor_name, join_party, leave_party, on_screen};
+pub(crate) use script::script_item;
 pub use script::{
     PORTRAIT_LETTERS, SCRIPT_LEN, draw_portrait, load_portrait, load_script, portrait_pixels,
     portrait_ref, portraits,

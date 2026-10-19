@@ -7,6 +7,7 @@ use super::script::{ScriptDst, load_script};
 use super::seams;
 use super::vars::{self, SLOT_GENDER, SLOT_NPC_NAME, SLOT_PLAYER, SLOT_TIME, SLOT_Z, StrRef};
 use super::{ConverseText, Cx, INPUT_MAX, Msg, STRING_BUFFERS};
+use crate::speech::{self, Kind};
 use crate::state::State;
 
 /// Shrine and statue object types: they talk as the NPC named by their object word.
@@ -221,7 +222,7 @@ pub async fn converse(cx: &Cx<'_>, talker: i16, target: i16) {
             while c.next() != 0xf1 && !c.fault {}
             c.look_pc = c.pos();
         });
-        run_text(cx, npc).await;
+        run_text(cx, npc, Kind::Look).await;
     }
     let m = cx.msg(Msg::Newline);
     seams::print(cx, &m).await;
@@ -232,10 +233,11 @@ pub async fn converse(cx: &Cx<'_>, talker: i16, target: i16) {
         !ask
     });
     if greet {
-        run_text(cx, npc).await;
+        run_text(cx, npc, Kind::Speech).await;
     }
     input_loop(cx, npc).await;
     cx.st(|s| {
+        speech::end(s);
         s.converse.active = false;
         s.converse.bye = false;
         let (_, now) = seams::panel(s);
@@ -290,12 +292,19 @@ fn refusal(s: &mut State, talker: i16, target: i16) -> Option<Msg> {
 }
 
 /// 0x114afa's input loop: one input op, then "look" or the text that follows it.
+///
+/// Port (spec 09 Design 1): an op that waits for the player first flushes what was said to the
+/// speech tap (the speaker is the NPC again after it), and the input it gets starts a new turn.
 async fn input_loop(cx: &Cx<'_>, npc: i16) {
     while !cx.cv(|c| c.bye || c.fault) {
         let op = cx.cv(|c| {
             c.saved_pc = c.pos();
             c.next()
         });
+        let waits = matches!(op, 0xf7..=0xfc | 0xcb);
+        if waits {
+            cx.st(speech::before_input);
+        }
         let ok = match op {
             0xf7 => {
                 let m = cx.msg(Msg::YouSay);
@@ -418,6 +427,9 @@ async fn input_loop(cx: &Cx<'_>, npc: i16) {
                 break;
             }
         };
+        if waits {
+            cx.st(speech::after_input);
+        }
         if ok {
             cx.cv(|c| c.answered = false);
         }
@@ -430,10 +442,10 @@ async fn input_loop(cx: &Cx<'_>, npc: i16) {
             let m = cx.msg(Msg::YouSee);
             seams::print(cx, &m).await;
             cx.cv(|c| c.set_pos(c.look_pc));
-            run_text(cx, npc).await;
+            run_text(cx, npc, Kind::Look).await;
             cx.cv(|c| c.set_pos(c.saved_pc));
         } else {
-            run_text(cx, npc).await;
+            run_text(cx, npc, Kind::Speech).await;
         }
     }
 }

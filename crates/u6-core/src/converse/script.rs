@@ -89,7 +89,7 @@ pub enum ScriptDst<'a> {
 }
 
 /// Archive letter and item of `npc`'s script, or `None` for an object that has none.
-fn script_item(state: &State, npc: i16) -> Option<(u8, u16)> {
+pub(crate) fn script_item(state: &State, npc: i16) -> Option<(u8, u16)> {
     let ty = obj_type(state, npc);
     if npc >= 0xe0 {
         return SPECIAL_TALKERS

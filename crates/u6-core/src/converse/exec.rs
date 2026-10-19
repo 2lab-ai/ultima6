@@ -6,6 +6,7 @@ use super::run::operand_len;
 use super::seams;
 use super::vars::{self, SLOT_Y, StrRef};
 use super::{Cx, Msg};
+use crate::speech::Kind;
 
 /// Skips to just after one of `stops`, stepping over jump / literal operands (0x11404c ops
 /// 0xa1, 0xa3).
@@ -33,7 +34,10 @@ async fn actor(cx: &Cx<'_>) -> i16 {
 /// operand or an `a1` whose condition is -1, -1 (and the line 0x1129d2) for an unknown op;
 /// 0x1148f0 ignores it. Operand expressions are read with 0x1130a2, actor operands then go
 /// through 0x112b0a.
-pub(crate) async fn exec(cx: &Cx<'_>, op: u8, npc: i16) -> i16 {
+///
+/// Port (spec 09 Design 1): `kind` is what the text runner runs; op `0xb5` prints as speech of
+/// that kind, and op `0xbf` makes its actor the speaker of what follows.
+pub(crate) async fn exec(cx: &Cx<'_>, op: u8, npc: i16, kind: Kind) -> i16 {
     match op {
         0x9c => {
             let a = actor(cx).await;
@@ -80,7 +84,7 @@ pub(crate) async fn exec(cx: &Cx<'_>, op: u8, npc: i16) -> i16 {
             let target = i32::from(c.word_at(p) as i16);
             c.set_pos(target - SCRIPT_BASE);
         }),
-        0xb5 => return print_op(cx).await,
+        0xb5 => return print_op(cx, kind).await,
         0xb6 => cx.cv(|c| c.bye = true),
         0xb9 | 0xba => {
             let a = actor(cx).await;
@@ -113,6 +117,7 @@ pub(crate) async fn exec(cx: &Cx<'_>, op: u8, npc: i16) -> i16 {
         }
         0xbf => {
             let a = actor(cx).await;
+            cx.st(|s| crate::speech::portrait(s, a));
             seams::portrait_panel(cx, a).await;
         }
         0xc4 => {
@@ -214,10 +219,10 @@ pub(crate) async fn exec(cx: &Cx<'_>, op: u8, npc: i16) -> i16 {
 /// Op 0xb5: print a string. `d2 <table> <index expr>` prints string `index` of a table (bytes
 /// through 0x108376; the read position comes back after the expression), `d5` prints nothing,
 /// any other byte is followed by `slot b3`: string slot `slot` through printf, then one byte
-/// (the expression's `a7`) is skipped.
-async fn print_op(cx: &Cx<'_>) -> i16 {
-    let kind = cx.cv(|c| c.next());
-    if kind == 0xd2 {
+/// (the expression's `a7`) is skipped. Both printing forms are speech of `kind` (spec 09).
+async fn print_op(cx: &Cx<'_>, kind: Kind) -> i16 {
+    let form = cx.cv(|c| c.next());
+    if form == 0xd2 {
         let back = table_element(cx, true).await;
         cx.cv(|c| c.saved_pc = back);
         loop {
@@ -225,12 +230,12 @@ async fn print_op(cx: &Cx<'_>) -> i16 {
             if b == 0 || cx.cv(|c| c.fault) {
                 break;
             }
-            seams::put_char(cx, b).await;
+            seams::put_speech(cx, kind, b).await;
         }
         cx.cv(|c| c.set_pos(c.saved_pc));
         return 0;
     }
-    if kind == 0xd5 {
+    if form == 0xd5 {
         return 0;
     }
     let (slot, tag) = cx.cv(|c| (c.next(), c.next()));
@@ -238,7 +243,7 @@ async fn print_op(cx: &Cx<'_>) -> i16 {
         return 1;
     }
     let text = cx.st(|s| vars::string_var(s, slot));
-    seams::print(cx, &text).await;
+    seams::print_speech(cx, kind, &text).await;
     cx.cv(|c| c.advance(1));
     0
 }

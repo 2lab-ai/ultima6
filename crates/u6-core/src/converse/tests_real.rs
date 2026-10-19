@@ -250,3 +250,159 @@ fn greeting_substitutes_title_time_and_names() {
 fn latin(b: &[u8]) -> String {
     b.iter().map(|&c| char::from(c)).collect()
 }
+
+/// The lines `now` (the scroll's transcript, which keeps only its last lines) adds to `full`
+/// (every finished line so far): those after the longest end of `full` that `now` starts with.
+fn extend_transcript(full: &mut Vec<String>, now: &[String]) {
+    let most = full.len().min(now.len());
+    let kept = (0..=most)
+        .rev()
+        .find(|&k| full[full.len() - k..] == now[..k])
+        .unwrap_or(0);
+    full.extend_from_slice(&now[kept..]);
+}
+
+/// [`converse`] with voices on: every line the scroll showed (not only the transcript's last
+/// ones) and the utterances the speech tap queued.
+fn converse_said(
+    state: &State,
+    files: &Files,
+    npc: i16,
+    lines: &[&str],
+) -> (Vec<String>, Vec<crate::speech::Utterance>) {
+    let leader = state.actors.party.leader_index;
+    let prompt = latin(state.converse.text.as_ref().quiet().get(super::Msg::YouSay));
+    let prompt = prompt.trim().to_string();
+    let mut s = state.clone();
+    crate::speech::set_enabled(&mut s, true);
+    let mut e = Engine::with_game(s, files.clone(), move |st, io| async move {
+        talk(&Cx::new(&st, &io), leader, npc, true).await;
+    });
+    let mut full = Vec::new();
+    let mut said = Vec::new();
+    let mut tick = |e: &mut Engine, keys: &[InputEvent]| {
+        e.tick(keys, 16);
+        extend_transcript(&mut full, &e.state().ui.messages);
+        said.extend(e.take_speech());
+    };
+    let mut lines = lines.iter();
+    let mut tries = 0;
+    let mut seen = Vec::new();
+    for _ in 0..200 {
+        for _ in 0..32 {
+            let before = lines_of(&e.state());
+            tick(&mut e, &[]);
+            if e.finished() || (e.io().pending_events() == 0 && lines_of(&e.state()) == before) {
+                break;
+            }
+        }
+        if e.finished() {
+            break;
+        }
+        let now = lines_of(&e.state());
+        if now != seen {
+            tries = 0;
+            seen = now;
+        }
+        let last = seen.last().cloned().unwrap_or_default();
+        if e.state().ui.input.line_input || last.trim_end().ends_with(&prompt) {
+            let Some(line) = lines.next() else { break };
+            tick(&mut e, &line_keys(line));
+            tries = 0;
+        } else {
+            let k = [' ', 'n', 'y'][tries % 3];
+            tick(&mut e, &[InputEvent::Key(Key::Char(k))]);
+            tries += 1;
+        }
+    }
+    full.extend(lines_of(&e.state()).last().cloned());
+    (full, said)
+}
+
+#[test]
+fn the_transcript_helper_appends_only_the_new_lines() {
+    let mut full = Vec::new();
+    let v = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    extend_transcript(&mut full, &v(&["a", "b"]));
+    extend_transcript(&mut full, &v(&["a", "b", "c"]));
+    extend_transcript(&mut full, &v(&["c", "d"]));
+    extend_transcript(&mut full, &v(&["c", "d"]));
+    assert_eq!(full, v(&["a", "b", "c", "d"]));
+}
+
+/// Spec 09 Acceptance 2's real-data receipt: talking to the NPCs near the start with voices on,
+/// every utterance the tap queued is text the scroll shows (whitespace aside), none holds the
+/// NPC's look text, the turns never go back and the sequence has no gap. Prints counts and
+/// pass/fail only.
+#[test]
+fn speech_tap_on_npcs_near_the_start_says_what_the_scroll_shows() {
+    let Some(files) = files() else { return };
+    let base = with_text(&files);
+    let leader = base.leader_position().quiet();
+    let members: Vec<u16> = base.actors.party.active().map(|id| id.0).collect();
+    let mut near: Vec<(u32, i16)> = (2..0xe0i16)
+        .filter(|a| !members.contains(&(*a as u16)))
+        .filter_map(|a| {
+            let p = base.objects.location(ObjectId(a as u16))?;
+            if p.z != leader.z || base.objects.obj_type(ObjectId(a as u16)) == 0 {
+                return None;
+            }
+            let d = (i32::from(p.x) - i32::from(leader.x)).unsigned_abs()
+                + (i32::from(p.y) - i32::from(leader.y)).unsigned_abs();
+            Some((d, a))
+        })
+        .collect();
+    near.sort();
+    let squeeze = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let (mut talked, mut utterances, mut shown, mut look_said) = (0, 0, 0, 0);
+    for &(_, npc) in near.iter().take(40) {
+        let mut s = base.clone();
+        let mut script = Vec::new();
+        if load_script(&mut s, &files, npc, ScriptDst::Other(&mut script)) == 0 {
+            continue;
+        }
+        let look: Vec<u8> = script
+            .iter()
+            .skip_while(|&&b| b != 0xf1)
+            .skip(1)
+            .take_while(|&&b| b != 0xf2)
+            .copied()
+            .collect();
+        let look = squeeze(&latin(&look));
+        let (scroll, said) = converse_said(&base, &files, npc, &["name", "job", "bye"]);
+        if said.is_empty() {
+            continue;
+        }
+        talked += 1;
+        let screen = squeeze(&scroll.join("\n"));
+        for (i, u) in said.iter().enumerate() {
+            utterances += 1;
+            let text = squeeze(&u.text);
+            if screen.contains(&text) {
+                shown += 1;
+            }
+            if look.len() > 8 && text.contains(&look) {
+                look_said += 1;
+            }
+            assert!(
+                u.seq as usize == i,
+                "actor {npc}: utterance {i} in sequence"
+            );
+            assert!(
+                i == 0 || u.turn >= said[i - 1].turn,
+                "actor {npc}: turn order"
+            );
+            assert!(u.speaker >= 0, "actor {npc}: a speaker");
+        }
+    }
+    let ok = talked >= 3 && shown == utterances && look_said == 0;
+    println!(
+        "speech tap: at least 3 of the 40 nearest NPCs said something, all of it shown on the \
+         scroll and none of it the look text: {}",
+        if ok { "pass" } else { "fail" }
+    );
+    assert!(
+        ok,
+        "every utterance is on the scroll and none is the look text"
+    );
+}

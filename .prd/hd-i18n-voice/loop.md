@@ -18,10 +18,8 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 6 (rev 5: what H0 and H3 measured; rev 6: the neighbour-seam gate), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
 Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening), H1 (the HD compositor, MMPX at 2× or 4×, on by default), H3 (the pack format and the imagegen tool) and H2 (the page loads a pack) are in production (19effa16 at main a769a5a); H4 ran the tool on the owner's files (its pack stays local); H5 (the neighbour-seam gate, tool only, no deploy) is merged at 953e744. 08 L1 (the wide text path) is merged at 16be889 and on preview. In flight:
-- H6, the calibration tool with its final-read mode: review round 8 fixes in progress. Lands squashed (one early commit fails its own test).
-- H7, the pair model's gaps (b) and (c) and the terrain constant: the pair model is now a search over configurations; review round 8 fixes in progress. After H6 lands, it merges main, rebuilds the pack locally and re-gates.
-- L1's production deploy: the build at 16be889 passed its preview check; production waits on the owner's deploy run (this session's classifier refuses production deploys).
-- L3 (08 disassembler): review round 6 in progress. Next it merges main and widens its uses of the text path to `i32`. Lands squashed.
+- Parked 2026-10-19 (see Re-plan below): H6 at 4443e4b, H7 at c74bccd (local only), L3 at a253067. The L1 production deploy line is withdrawn.
+- On preview, not in production: the first-run chooser (`first-run`) and voice V1–V3 (`voice`). Production waits on the owner keeping a preview.
 
 Decision 2026-10-18 (trinity, converged in round 3; record `~/Games/ultima6/work/dispatch/trinity-h5-decision.md`):
 - H5 merged as gate code (953e744); item 1 stays open.
@@ -57,7 +55,7 @@ Decision 2026-10-17: items still close one at a time and in order (07 closes bef
 Nothing the owner could see changed after 2026-10-17 21:15 while H6, H7 and L3 ran review rounds. The plan from here:
 
 1. **First-run chooser (done, on preview `first-run`).** Language English | 한글 for the page chrome, and HD: MMPX or a pack the site lists. Packs are hosted under `/packs/`, gitignored, and served only with the owner's key (a root Pages Function gates every spelling of the path). Owner instruction (verbatim): "hd pack은 드랍하게 하지말고 올려서 내가 고를수 있게 해줘 처음 실행활시에".
-2. **Voice, after the owner has used that preview.** Spec 09 steps 1–3 only: the speech tap (V1), the Supertonic-3 weights with the licence click-through before the first download (V2), one English default voice (V3), so a real NPC line plays. If the tap is not standing within 2 review rounds, ship one fixed Speak sentence instead.
+2. **Voice (done, on preview `voice`).** Spec 09 steps 1–3: the speech tap (V1), the Supertonic-3 weights and ort 1.30.0 self-hosted as ≤ 24 MiB parts with LICENSE and NOTICE, behind a terms click-through before the first download (V2), and one English default voice, preset M1 (V3). A real NPC line plays on device; the tap holds back a row not yet drawn at a more prompt. Started before the owner's answer on 1, since nothing else was in flight. Live receipt on the preview with the owner's files: pass/fail and timings only, kept locally.
 3. The next unit is picked from the owner's answers to 1 and 2.
 
 Parked, no new commits or reviews: H6 at 4443e4b, H7 at c74bccd (local only), L3 at a253067 (unparked when L5 starts). The L1 production deploy line issued 2026-10-19 07:50 is withdrawn: it changes no English pixel.

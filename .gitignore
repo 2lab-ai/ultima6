@@ -13,3 +13,5 @@ dist/
 __pycache__/
 .wrangler/
 /site/packs/
+# The voice model (spec 09), hosted by tools/speech/fetch-models.sh and uploaded with site/.
+/site/models/

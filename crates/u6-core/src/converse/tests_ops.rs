@@ -38,7 +38,13 @@ fn with_at(script: &[u8], at: usize, data: &[u8]) -> Vec<u8> {
 
 /// Runs the text runner from the start of `s`'s script for NPC 9 with `keys`.
 fn text_in(s: State, keys: &str) -> State {
-    run!(s, script_files(), chars(keys), |cx| run_text(cx, 9).await).1
+    run!(s, script_files(), chars(keys), |cx| run_text(
+        cx,
+        9,
+        crate::speech::Kind::Speech
+    )
+    .await)
+    .1
 }
 
 fn text(script: &[u8]) -> State {
@@ -418,7 +424,7 @@ fn braced_then(script: &[u8], language: Language, after: &'static [u8]) -> (Stri
     s.ui.text.set_language(language);
     s.ui.text.keyword_colour = true;
     let (_, s) = run!(s, script_files(), NONE, |cx| {
-        run_text(cx, 9).await;
+        run_text(cx, 9, crate::speech::Kind::Speech).await;
         if !after.is_empty() {
             crate::ui::printf::printf(cx.state, cx.io, after, &[]).await;
         }
@@ -537,7 +543,7 @@ fn waiting_ops() {
         state(&[0xd0, 1, 0xa7, 0]),
         Files::default(),
         |st, io| async move {
-            run_text(&super::Cx::new(&st, &io), 9).await;
+            run_text(&super::Cx::new(&st, &io), 9, crate::speech::Kind::Speech).await;
         },
     );
     let mut ticks = 0;
@@ -563,7 +569,7 @@ fn seam_ops_reach_their_ports() {
         (vec![0x9c, 5, 0xa7, 0], "0x12f6ee"),
     ] {
         let mut e = Engine::with_game(state(&script), Files::default(), |st, io| async move {
-            run_text(&super::Cx::new(&st, &io), 9).await;
+            run_text(&super::Cx::new(&st, &io), 9, crate::speech::Kind::Speech).await;
         });
         // The portrait panel waits for a key before the script goes on.
         for _ in 0..4 {

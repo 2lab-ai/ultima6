@@ -69,6 +69,21 @@
 // chooser shows the pack active (none, a dropped one, or the listed one it came from), and OK
 // makes the entry checked the active one. The choice made is kept in localStorage; while there
 // is none the chooser shows first.
+//
+// Voices (spec 09 V3, site/voice/): off until the visitor presses Voices. The first time, the
+// model's use restrictions show (with this browser's room for the site), and only their
+// acceptance downloads it; nothing is requested from /models/ before. Without WebGPU there is no
+// speech and the status line says why. Once the worker (site/voice/worker.js) has the model
+// checked and warmed up, the game's speech tap is on (Game.set_voices) and after each frame what
+// NPCs said (Game.take_speech) goes to the player (site/voice/player.js) and nowhere else: the
+// text is the user's game text, never logged, shown or stored. The speech plays through a voice
+// gain beside the music's (Mute silences both); Enter, Escape and Space on the canvas, and a newer
+// turn, cancel it; above 4x nothing is spoken. While voices are on a chip says the voice is
+// generated on this device. The choice and the acceptance are kept in localStorage: the next
+// visit starts the voices from this browser's cache only (never downloads unasked). "Forget
+// voices" removes the cached model and the acceptance. A failure (download, a part that does not
+// check out twice, no room, a lost GPU device) turns voices off with a line that names only its
+// kind; the game runs on.
 import init, {
   Game, HdPack, PackProbe, budget_ms, input_too_large, max_input_bytes, max_pack_bytes,
   max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
@@ -78,6 +93,9 @@ import {
   storePack, storeSaves,
 } from './store.js';
 import { TEXT } from './i18n.js';
+import { CACHE_PREFIX, REVISION } from './voice/model.js';
+import { createVoices } from './voice/player.js';
+import { RESTRICTIONS } from './voice/terms.js';
 
 const canvas = document.getElementById('screen');
 const drop = document.getElementById('drop');
@@ -102,6 +120,13 @@ const setupHd = document.getElementById('setup-hd');
 const setupDropped = document.getElementById('setup-dropped');
 const setupOk = document.getElementById('setup-ok');
 const setupStatus = document.getElementById('setup-status');
+const voicesButton = document.getElementById('voices');
+const voiceChip = document.getElementById('voice-chip');
+const voiceTerms = document.getElementById('voice-terms');
+const voiceStorage = document.getElementById('voice-storage');
+const voiceAccept = document.getElementById('voice-accept');
+const voiceDecline = document.getElementById('voice-decline');
+const forgetVoices = document.getElementById('forget-voices');
 
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
 
@@ -119,7 +144,9 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // on the body data-gain = the music's gain now (0 muted or above 4x, 1), data-hd-pack = the
 // images of the HD pack loaded (tiles,portraits,panels) or none, data-hd-pack-bytes = the bytes
 // its pictures take decoded, data-hd-matched = those the game on screen matches (empty without
-// a game).
+// a game); data-voice = the voices' state (off, terms, checking, loading, ready, failed),
+// data-voice-error = the last failure's code, data-voice-gain = the voice gain, and the player's
+// counts and timings (reflectVoice), never what is said.
 function reflect(state) {
   if (state) document.body.dataset.state = state;
   const live = game && !crashed;
@@ -175,6 +202,7 @@ function setLang(next) {
   setupNote.hidden = lang === 'en';
   mute.textContent = t(audio.muted ? 'unmute' : 'mute');
   showSpeed();
+  showStorage();
   if (said) say(said[0], ...said[1]);
 }
 
@@ -220,7 +248,7 @@ const MAX_RENDER_S = 0.25; // at most per frame (a tab back from the background)
 const LOUD_UP_TO = 4; // above this speed (and at Max) the music fades out
 const FADE_S = 0.05 / 3; // the fade's time constant: ~95% of the way in 50 ms
 const audio = {
-  ctx: null, node: null, gain: null, ready: false, muted: false,
+  ctx: null, node: null, gain: null, voiceGain: null, ready: false, muted: false,
   queued: 0, at: 0, posted: 0, received: 0, // the worklet's last report, frames posted since
 };
 
@@ -252,6 +280,14 @@ async function startAudio() {
   const gain = ctx.createGain();
   gain.gain.value = loudness();
   node.connect(gain).connect(ctx.destination);
+  // The voices' gain, beside the music's: 0 muted, else 1 (written directly: it is never
+  // scheduled; each utterance fades on a gain of its own).
+  const voiceGain = ctx.createGain();
+  voiceGain.gain.value = audio.muted ? 0 : 1;
+  voiceGain.connect(ctx.destination);
+  audio.voiceGain = voiceGain;
+  voice.attach(ctx, voiceGain);
+  reflectVoice();
   node.port.onmessage = (e) => {
     audio.queued = e.data.queued;
     audio.received = e.data.received;
@@ -303,11 +339,207 @@ function applyGain() {
   else param.setTargetAtTime(loudness(), now, FADE_S);
 }
 
+// Mute sets both gains: the music's (applyGain) and the voices'.
 function setMuted(muted) {
   audio.muted = muted;
   applyGain();
+  if (audio.voiceGain) audio.voiceGain.gain.value = muted ? 0 : 1;
   mute.textContent = t(muted ? 'unmute' : 'mute');
   mute.setAttribute('aria-pressed', String(muted));
+  reflectVoice();
+}
+
+// --- voices (spec 09 V3) -----------------------------------------------------------------------
+
+const VOICES_KEY = 'u6.voices'; // localStorage: 'on' while the visitor has voices on
+const TERMS_KEY = 'u6.voiceTerms'; // localStorage: the model revision whose terms were accepted
+// The keys that cancel the speech (the more prompt's, and those that answer).
+const VOICE_CANCEL_KEYS = new Set(['Enter', 'Escape', ' ']);
+const VOICE_ERRORS = {
+  nowebgpu: 'voiceErrNoWebgpu', notcached: 'voiceErrNotCached', download: 'voiceErrDownload',
+  hash: 'voiceErrHash', quota: 'voiceErrQuota', storage: 'voiceErrStorage', model: 'voiceErrModel',
+  gpu: 'voiceErrGpu',
+};
+
+let voiceState = 'off';
+let voiceError = '';
+let voiceQuiet = false; // a start from the cache at page load: no progress lines
+let voiceFree = null; // this browser's room for the site, once asked (bytes, -1 unknown)
+
+const stored = (key) => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+const remember = (key, value) => {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    // No storage: the choice lasts until the page is left.
+  }
+};
+const voicesWanted = () => stored(VOICES_KEY) === 'on';
+const termsAccepted = () => stored(TERMS_KEY) === REVISION;
+
+const voice = createVoices({
+  workerUrl: new URL('./voice/worker.js', import.meta.url),
+  speed: () => SPEEDS[speedAt],
+  onState: voiceChanged,
+  onStats: reflectVoice,
+});
+
+// The voices' state, buttons, chip and counts on the page (data-voice*: states, counts and
+// timings only).
+function reflectVoice() {
+  const on = ['checking', 'loading', 'ready'].includes(voiceState);
+  const st = voice.stats;
+  const data = document.body.dataset;
+  put(data, 'voice', voiceState);
+  put(data, 'voiceError', voiceError);
+  put(data, 'voiceGain', audio.voiceGain ? audio.voiceGain.gain.value.toFixed(2) : '');
+  for (const [key, value] of [['voiceColdMs', st.coldMs], ['voiceRefetched', st.refetched],
+    ['voiceSpoken', st.spoken], ['voiceFirstMs', st.firstMs], ['voiceCancels', st.cancels],
+    ['voiceFadeMs', st.fadeMs], ['voicePlaying', st.playing], ['voiceSteps', st.steps],
+    ['voiceDropped', st.dropped]]) put(data, key, String(value));
+  voicesButton.setAttribute('aria-pressed', String(on));
+  put(voiceChip, 'hidden', !on);
+}
+
+// The player's state changed: loading (its progress on the status line, unless quiet), ready (the
+// game's speech tap on), failed (off, with the kind of failure).
+function voiceChanged(state, code = '') {
+  if (state === 'loading') {
+    voiceState = 'loading';
+    const st = voice.stats;
+    if (!voiceQuiet && st.stage === 'download') say('voiceDownload', st.got, st.total);
+    else if (!voiceQuiet && st.stage === 'starting') say('voiceStarting');
+  } else if (state === 'ready') {
+    voiceState = 'ready';
+    voiceError = '';
+    if (game && !crashed) game.set_voices(true);
+    if (!voiceQuiet) say('voiceReady');
+    voiceQuiet = false;
+  } else if (state === 'failed') {
+    voiceOff();
+    voiceState = 'failed';
+    voiceError = Object.hasOwn(VOICE_ERRORS, code) ? code : 'model';
+    say('voiceFailed', t(VOICE_ERRORS[voiceError]));
+  }
+  reflectVoice();
+}
+
+// Voices off: the worker stopped, the speech tap off, the choice kept.
+function voiceOff() {
+  voice.stop();
+  if (game && !crashed) game.set_voices(false);
+  remember(VOICES_KEY, 'off');
+  voiceState = 'off';
+  voiceQuiet = false;
+}
+
+// This browser's room for the site, on the terms (unknown: -1).
+function showStorage() {
+  if (voiceFree !== null) voiceStorage.textContent = t('voiceStorage', voiceFree);
+}
+
+// The Voices button: off when on; else the terms the first time, or the model straight away.
+function toggleVoices() {
+  if (['checking', 'loading', 'ready'].includes(voiceState)) {
+    voiceOff();
+    say('voiceOff');
+    reflectVoice();
+  } else if (!termsAccepted()) {
+    showTerms();
+  } else {
+    startVoices();
+  }
+}
+
+// The model's use restrictions, before its first download, with this browser's room for the
+// site. Nothing is downloaded until they are accepted.
+function showTerms() {
+  voiceTerms.hidden = false;
+  document.getElementById('voice-restrictions').textContent = RESTRICTIONS;
+  voiceState = 'terms';
+  voiceError = '';
+  reflectVoice();
+  voiceFree = -1;
+  showStorage();
+  navigator.storage?.estimate?.().then(({ quota, usage }) => {
+    voiceFree = Number.isFinite(quota) && Number.isFinite(usage) ? Math.max(0, quota - usage) : -1;
+    showStorage();
+  }).catch(() => {});
+  voiceAccept.focus();
+}
+
+function acceptTerms() {
+  remember(TERMS_KEY, REVISION);
+  voiceTerms.hidden = true;
+  startVoices();
+}
+
+function declineTerms() {
+  voiceTerms.hidden = true;
+  voiceState = 'off';
+  reflectVoice();
+}
+
+// Voices on: WebGPU checked here first (none: a note, nothing downloaded), the storage asked to
+// persist (a download, not a start from the cache), then the worker loads the model.
+async function startVoices({ cachedOnly = false } = {}) {
+  voiceQuiet = cachedOnly;
+  voiceState = 'checking';
+  voiceError = '';
+  remember(VOICES_KEY, 'on');
+  reflectVoice();
+  if (!cachedOnly) say('voiceChecking');
+  let adapter = null;
+  try {
+    adapter = await navigator.gpu?.requestAdapter();
+  } catch {
+    adapter = null;
+  }
+  if (voiceState !== 'checking') return;
+  if (!adapter) {
+    voiceChanged('failed', 'nowebgpu');
+    return;
+  }
+  if (!cachedOnly) {
+    try {
+      await navigator.storage?.persist?.();
+    } catch {
+      // Not persisted: the browser may evict the model under pressure; it is fetched again.
+    }
+  }
+  if (voiceState !== 'checking') return;
+  voice.load({ cachedOnly });
+}
+
+// After a frame: what NPCs said goes to the player, and only there.
+function hearSpeech() {
+  const said = game.take_speech();
+  if (!said) return;
+  try {
+    voice.say(said);
+  } catch {
+    // Never shown: the error could carry the text.
+  }
+}
+
+// "Forget voices": the voices off, the cached model and the acceptance removed.
+async function forgetVoiceModel() {
+  voiceOff();
+  remember(VOICES_KEY, null);
+  remember(TERMS_KEY, null);
+  voiceTerms.hidden = true;
+  reflectVoice();
+  for (const name of await caches.keys()) {
+    if (name.startsWith(CACHE_PREFIX)) await caches.delete(name);
+  }
+  say('voiceForgot');
 }
 
 // --- saves ---------------------------------------------------------------------------------
@@ -440,6 +672,7 @@ function changeSpeed(by) {
     showSpeed();
   }, BADGE_MS);
   applyGain();
+  voice.speedChanged();
   showSpeed();
 }
 
@@ -789,6 +1022,7 @@ function frame(now) {
     game.ran(k);
     const log = game.take_log();
     if (log) console.info(log);
+    if (voice.ready) hearSpeech();
     if (k > 0) {
       game.present();
       draw();
@@ -855,6 +1089,8 @@ async function boot(next, origin) {
   const old = game;
   game = next;
   owner = next;
+  next.set_voices(voice.ready);
+  voice.newGame();
   old?.free();
   drawnGame = null; // the freed game's frame is not this one's
   drawnVersion = -1;
@@ -1301,6 +1537,7 @@ function applySetup() {
 canvas.addEventListener('keydown', (e) => {
   gesture();
   if (!game || crashed || e.metaKey || e.altKey) return;
+  if (VOICE_CANCEL_KEYS.has(e.key)) voice.cancel();
   const by = speedKey(e);
   if (by !== 0) {
     e.preventDefault();
@@ -1409,6 +1646,18 @@ forgetHd.addEventListener('click', () => {
   if (queued > 0) say('forgetPackLater');
   enqueue('opForgetPack', forgetHdPack);
 });
+voicesButton.addEventListener('click', () => {
+  gesture();
+  toggleVoices();
+});
+voiceAccept.addEventListener('click', () => {
+  gesture();
+  acceptTerms();
+});
+voiceDecline.addEventListener('click', declineTerms);
+forgetVoices.addEventListener('click', () => {
+  forgetVoiceModel().catch(() => say('voiceForgetFailed'));
+});
 restart.addEventListener('click', () => {
   try {
     sessionStorage.setItem(FOCUS_AFTER_RELOAD, '1');
@@ -1439,6 +1688,9 @@ setLang(lang);
 say('loadingEngine');
 showHd();
 canvas.dataset.behind = '0';
+reflectVoice();
+// Voices turned on in an earlier visit come back from this browser's cache only.
+if (voicesWanted() && termsAccepted()) startVoices({ cachedOnly: true });
 // The chooser first while no choice is kept, or when the address brought a new key.
 if (!storedSetup() || packKey.fresh) openSetup();
 enqueue('opEngine', async () => {

@@ -33,6 +33,10 @@
 //! last commit replaced; after the page removed the stored save ([`Game::save_forgotten`]) the
 //! next one holds the whole save.
 //!
+//! Voices (spec 09): with [`Game::set_voices`] on, the engine's speech tap keeps what NPCs say
+//! in conversations, and the page takes it after each frame with [`Game::take_speech`] for its
+//! on-device synthesis; off (the default), the tap keeps nothing and no frame changes either way.
+//!
 //! A start runs the launcher's sequence (`u`: the opening and the menu, then `game`);
 //! [`Game::start_game_first`] starts `game` at once (development and tests). When the sequence
 //! ends (Quit in the menu, the end of the game) [`Game::finished`] turns true and the page says
@@ -378,6 +382,8 @@ pub struct Game {
     hd: HdView,
     /// The HD pack set ([`Game::set_hd_pack`]).
     hd_pack: Option<Rc<u6_core::hd::HdPack>>,
+    /// Voices on ([`Game::set_voices`]): the engine's speech tap keeps what NPCs say.
+    voices: bool,
 }
 
 impl Default for Game {
@@ -415,6 +421,7 @@ impl Game {
             pacer: Pacer::new(),
             hd: HdView::new(),
             hd_pack: None,
+            voices: false,
         };
         game.redraw();
         game
@@ -959,6 +966,33 @@ impl Game {
         }
     }
 
+    /// Voices on or off (spec 09 Design 1): while on, the engine's speech tap keeps what NPCs
+    /// say for [`Game::take_speech`]; off (the default), it keeps nothing. Applies to the game
+    /// running and to every game started after.
+    pub fn set_voices(&mut self, on: bool) {
+        self.voices = on;
+        if let Some(engine) = &mut self.engine {
+            engine.set_speech(on);
+        }
+    }
+
+    /// Spec 09 Design 1: the utterances NPCs said since the previous call, as a JSON array of
+    /// `{seq, turn, speaker, script: [archive, item] | null, text, lang, traits: {type,
+    /// worktype, alignment}}` (empty when there are none). A channel of its own: the text is
+    /// the user's game text, for the page's speech only (never logged, shown or stored).
+    pub fn take_speech(&mut self) -> String {
+        let said = self
+            .engine
+            .as_mut()
+            .map(Engine::take_speech)
+            .unwrap_or_default();
+        if said.is_empty() {
+            String::new()
+        } else {
+            speech_json(&said)
+        }
+    }
+
     /// Engine log lines (first hit of each stub point) since the previous call.
     pub fn take_log(&mut self) -> String {
         std::mem::take(&mut self.log).join("\n")
@@ -1155,7 +1189,8 @@ impl Game {
     /// `engine`, just started, becomes the game on screen: no Save of it taken yet, no sound
     /// machine, no queued input; its first frame converted and, with HD on, composed whole (its
     /// versions start again at 0).
-    fn put_on_screen(&mut self, engine: Engine) {
+    fn put_on_screen(&mut self, mut engine: Engine) {
+        engine.set_speech(self.voices);
         self.saved_gen = 0;
         self.save_out = Vec::new();
         self.save_whole = false;
@@ -1234,6 +1269,49 @@ fn queue_pointer(pending: &mut Vec<InputEvent>, x: i32, y: i32, buttons: u8) {
         pending.pop();
     }
     pending.push(ev);
+}
+
+/// [`Game::take_speech`]'s JSON for `said`.
+fn speech_json(said: &[u6_core::speech::Utterance]) -> String {
+    let mut out = String::from("[");
+    for (i, u) in said.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let script = u.script.map_or_else(
+            || "null".to_string(),
+            |(letter, item)| format!("[\"{}\",{item}]", char::from(letter)),
+        );
+        let t = u.traits;
+        out.push_str(&format!(
+            "{{\"seq\":{},\"turn\":{},\"speaker\":{},\"script\":{script},\"text\":",
+            u.seq, u.turn, u.speaker
+        ));
+        json_string(&mut out, &u.text);
+        out.push_str(&format!(
+            ",\"lang\":\"{}\",\"traits\":{{\"type\":{},\"worktype\":{},\"alignment\":{}}}}}",
+            u.lang.code(),
+            t.obj_type,
+            t.worktype,
+            t.alignment
+        ));
+    }
+    out.push(']');
+    out
+}
+
+/// `text` as a JSON string literal: `"` and `\` escaped, control characters as `\u00XX`.
+fn json_string(out: &mut String, text: &str) {
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 #[cfg(test)]
@@ -1393,6 +1471,56 @@ mod tests {
                 }
             },
         )
+    }
+
+    /// Spec 09: the speech JSON lists every field; the text's quote, backslash, newline and
+    /// another control character are escaped, a code point past ASCII is kept; no script is
+    /// `null`. Voices set before a start apply to the engine put on screen, and off again to
+    /// the running one; without utterances the channel is empty.
+    #[test]
+    fn take_speech_is_json_and_voices_follow_the_game() {
+        use u6_core::speech::{Lang, Traits, Utterance};
+        let u = |seq, script, text: &str| Utterance {
+            seq,
+            turn: 2,
+            speaker: 5,
+            script,
+            text: text.into(),
+            lang: Lang::En,
+            traits: Traits {
+                obj_type: 0x187,
+                worktype: 7,
+                alignment: 1,
+            },
+        };
+        let json = speech_json(&[
+            u(0, Some((b'a', 3)), "A \"b\"\\c\nd\u{1}é"),
+            u(1, None, "x"),
+        ]);
+        assert_eq!(
+            json,
+            "[{\"seq\":0,\"turn\":2,\"speaker\":5,\"script\":[\"a\",3],\"text\":\"A \\\"b\\\"\\\\c\\u000ad\\u0001é\",\
+             \"lang\":\"en\",\"traits\":{\"type\":391,\"worktype\":7,\"alignment\":1}},\
+             {\"seq\":1,\"turn\":2,\"speaker\":5,\"script\":null,\"text\":\"x\",\"lang\":\"en\",\
+             \"traits\":{\"type\":391,\"worktype\":7,\"alignment\":1}}]"
+        );
+        let mut game = Game::new();
+        assert_eq!(game.take_speech(), "", "no engine: nothing");
+        game.set_voices(true);
+        game.put_on_screen(synthetic_engine());
+        assert!(
+            game.engine
+                .as_ref()
+                .is_some_and(|e| e.state().speech.enabled)
+        );
+        game.set_voices(false);
+        assert!(
+            game.engine
+                .as_ref()
+                .is_some_and(|e| !e.state().speech.enabled)
+        );
+        game.step(20);
+        assert_eq!(game.take_speech(), "", "no utterance: nothing");
     }
 
     /// The keys queued reach the game in the step after them (the queues empty, their characters

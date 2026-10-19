@@ -3503,6 +3503,431 @@ test('HD performance with a full pack (spec 07 Acceptance 5): the owner\'s scale
   assert.ok(matchedAgain[0] >= 0.9 * pack[0] && matchedAgain[1] === pack[1] && matchedAgain[2] === pack[2], 'the second load: matched as the first');
 }, { needs: havePack });
 
+// --- voices (spec 09 V2, V3) -------------------------------------------------------------------
+
+// The test's own lines (no game text): a 60-character one, a long one to cancel, a sentinel.
+const LINE_60 = 'The quick brown fox jumps over the lazy dog near the rivers.';
+const LONG_LINE = 'Here is a long line of the test that goes on for a while, so that its speech is '
+  + 'still playing when a key cancels it. It has a second sentence as well, and a third one after '
+  + 'that, which keeps the voice busy for many seconds more.';
+const SENTINEL = 'Zq9Sentinel';
+const MODEL_DIR = () => join(h.MODELS, 'supertonic3', '724fb5abbf5502583fb520898d45929e62f02c0b');
+
+// One utterance as the engine's speech tap hands it to the page (Game.take_speech), made up.
+const utterance = (turn, text) => ({
+  seq: turn, turn, speaker: 9, script: null, text, lang: 'en', traits: { type: 0, worktype: 0, alignment: 0 },
+});
+
+// Before the page's scripts: the Workers made, the storage persist calls, and each scheduled audio
+// source's start and stop (seconds after the context's time then) and each linear ramp of a gain
+// [value, at]; the samples of every buffer filled (`__pcm`, for the ASR of the test's own line).
+function voiceProbe() {
+  window.__workers = 0;
+  window.__persist = 0;
+  window.__starts = [];
+  window.__stops = [];
+  window.__ramps = [];
+  window.__pcm = [];
+  const RealWorker = window.Worker;
+  window.Worker = function Worker(...args) {
+    window.__workers += 1;
+    return new RealWorker(...args);
+  };
+  window.Worker.prototype = RealWorker.prototype;
+  if (navigator.storage?.persist) {
+    const persist = navigator.storage.persist.bind(navigator.storage);
+    navigator.storage.persist = () => {
+      window.__persist += 1;
+      return persist();
+    };
+  }
+  const start = AudioBufferSourceNode.prototype.start;
+  AudioBufferSourceNode.prototype.start = function (when = 0, ...rest) {
+    window.__starts.push([when - this.context.currentTime, performance.now()]);
+    return start.call(this, when, ...rest);
+  };
+  const stop = AudioScheduledSourceNode.prototype.stop;
+  AudioScheduledSourceNode.prototype.stop = function (when = 0) {
+    window.__stops.push(when - this.context.currentTime);
+    return stop.call(this, when);
+  };
+  const ramp = AudioParam.prototype.linearRampToValueAtTime;
+  AudioParam.prototype.linearRampToValueAtTime = function (value, at) {
+    window.__ramps.push([value, at]);
+    return ramp.call(this, value, at);
+  };
+  const copy = AudioBuffer.prototype.copyToChannel;
+  AudioBuffer.prototype.copyToChannel = function (source, ...rest) {
+    window.__pcm.push({ rate: this.sampleRate, samples: Array.from(source) });
+    return copy.call(this, source, ...rest);
+  };
+}
+
+const voiceShown = (page) => page.evaluate(() => {
+  const d = document.body.dataset;
+  return {
+    state: d.voice, error: d.voiceError, gain: d.voiceGain, cold: Number(d.voiceColdMs),
+    refetched: Number(d.voiceRefetched), spoken: Number(d.voiceSpoken), first: Number(d.voiceFirstMs),
+    cancels: Number(d.voiceCancels), fade: Number(d.voiceFadeMs), playing: Number(d.voicePlaying),
+    dropped: Number(d.voiceDropped), chip: !document.getElementById('voice-chip').hidden,
+    pressed: document.getElementById('voices').getAttribute('aria-pressed'),
+    terms: !document.getElementById('voice-terms').hidden,
+    status: document.getElementById('status').textContent,
+  };
+});
+
+const waitVoice = (page, fn, arg, timeout = 180_000) => page.waitForFunction(fn, arg, { timeout, polling: 100 });
+
+// The page's own line for `key` (its catalog, English), to compare the status line with.
+async function line(key, ...args) {
+  const { TEXT } = await import('../../site/i18n.js');
+  const text = TEXT.en[key];
+  return typeof text === 'function' ? text(...args) : text;
+}
+
+// The requests under /models/ of `context` (its pages and their workers), by path.
+function modelRequests(context) {
+  const seen = [];
+  context.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith('/models/')) seen.push(path);
+  });
+  return seen;
+}
+
+// Every console message of the page and its workers, as text (to look for the sentinel in; never
+// printed).
+function consoleText(page) {
+  const seen = [];
+  page.on('console', (m) => seen.push(m.text()));
+  page.on('worker', (w) => w.on('console', (m) => seen.push(m.text())));
+  page.on('pageerror', (err) => seen.push(String(err?.message ?? err)));
+  return seen;
+}
+
+test('hosting: every file under site/models is at most 24 MiB, each part and each whole file matches its manifest; LICENSE.txt and NOTICE beside the parts; the terms the page shows are the licence\'s Attachment A verbatim; _headers unchanged', async () => {
+  const { RESTRICTIONS } = await import('../../site/voice/terms.js');
+  const { MODEL_BASE, ORT_BASE } = await import('../../site/voice/model.js');
+  let files = 0;
+  for (const base of [MODEL_BASE, ORT_BASE]) {
+    const dir = base.pathname;
+    const manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8'));
+    assert.ok(existsSync(join(dir, 'LICENSE.txt')) && existsSync(join(dir, 'NOTICE')), 'LICENSE.txt and NOTICE beside the parts');
+    assert.ok((await readFile(join(dir, 'NOTICE'))).equals(await readFile(join(dir, 'NOTICE.txt'))), 'NOTICE.txt is the notice');
+    assert.equal(manifest.partBytes, 24 * 2 ** 20);
+    for (const f of manifest.files) {
+      const whole = createHash('sha256');
+      let size = 0;
+      for (const p of f.parts) {
+        const bytes = await readFile(join(dir, p.path));
+        assert.ok(bytes.length === p.size && bytes.length <= manifest.partBytes, `${p.path}: its size, at most 24 MiB`);
+        assert.equal(createHash('sha256').update(bytes).digest('hex'), p.sha256, `${p.path}: its sha256`);
+        whole.update(bytes);
+        size += bytes.length;
+        files += 1;
+      }
+      assert.ok(size === f.size && whole.digest('hex') === f.sha256, `${f.name}: its parts joined are the file`);
+    }
+  }
+  const licence = await readFile(join(MODEL_DIR(), 'LICENSE.txt'), 'utf8');
+  assert.equal(RESTRICTIONS, licence.slice(licence.indexOf('\nAttachment A\n') + 1).trimEnd(), 'the terms are Attachment A verbatim');
+  const notice = await readFile(join(MODEL_DIR(), 'NOTICE'), 'utf8');
+  assert.ok(notice.includes(RESTRICTIONS) && /Served in parts/.test(notice), 'the notice passes the restrictions on and explains the parts');
+  const headers = await readFile(join(h.SITE, '_headers'), 'utf8');
+  assert.equal(createHash('sha256').update(headers).digest('hex'), '2ec9a0edfc178fbaafb9c17233967c812fc1cdd34a4e825819c923d764cecfbb', '_headers unchanged');
+  console.log(`  receipt: ${files} hosted parts checked`);
+}, { needs: h.haveModels });
+
+test('voices off by default: no worker and nothing from /models/; Voices shows the use restrictions first and Cancel downloads nothing; accepted without WebGPU, a note and nothing downloaded; the game runs on; Forget voices removes the acceptance', async (env) => {
+  const { context, page } = await h.openPage(env);
+  await context.addInitScript(voiceProbe);
+  const requests = modelRequests(context);
+  const { RESTRICTIONS } = await import('../../site/voice/terms.js');
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  let v = await voiceShown(page);
+  assert.ok(v.state === 'off' && !v.chip && v.pressed === 'false' && !v.terms, 'off by default');
+  await page.click('#voices');
+  v = await voiceShown(page);
+  assert.ok(v.state === 'terms' && v.terms, 'the terms first');
+  const shown = await page.evaluate(() => ({
+    text: document.getElementById('voice-restrictions').textContent,
+    licence: new URL(document.getElementById('voice-license').href).pathname,
+    notice: new URL(document.getElementById('voice-notice').href).pathname,
+    storage: document.getElementById('voice-storage').textContent.length > 0,
+    link: new URL(document.getElementById('voice-terms-link').href).pathname,
+  }));
+  assert.equal(shown.text, RESTRICTIONS, 'the restrictions shown verbatim');
+  const { LICENSE_URL, NOTICE_URL } = await import('../../site/voice/model.js');
+  const [licence, notice] = [LICENSE_URL, NOTICE_URL].map((u) => u.pathname.slice(h.SITE.length));
+  assert.ok(shown.licence === licence && shown.notice === notice && shown.link === notice, 'the licence and the notice linked');
+  if (h.haveModels()) {
+    // Served as text (a host types a file by its extension; `nosniff` keeps it so).
+    for (const path of [licence, notice]) {
+      const served = await page.request.get(new URL(path.slice(1), env.server.url).href);
+      assert.ok(served.ok() && served.headers()['content-type'].startsWith('text/plain'), `${path.split('/').pop()}: served as text`);
+    }
+  }
+  assert.ok(shown.storage, 'the storage line');
+  await page.click('#voice-decline');
+  v = await voiceShown(page);
+  assert.ok(v.state === 'off' && !v.terms, 'Cancel: off');
+  await page.click('#voices');
+  await page.click('#voice-accept');
+  await waitVoice(page, () => document.body.dataset.voice === 'failed', null, 30_000);
+  v = await voiceShown(page);
+  assert.ok(v.error === 'nowebgpu' && !v.chip && v.pressed === 'false', 'without WebGPU: off, with the reason');
+  assert.equal(v.status, await line('voiceFailed', await line('voiceErrNoWebgpu')), 'the note');
+  const probe = await page.evaluate(() => ({ workers: window.__workers, kept: [localStorage.getItem('u6.voiceTerms'), localStorage.getItem('u6.voices')] }));
+  assert.equal(probe.workers, 0, 'no worker made');
+  assert.deepEqual(probe.kept, ['724fb5abbf5502583fb520898d45929e62f02c0b', 'off'], 'the acceptance kept, voices off');
+  assert.deepEqual(requests, [], 'nothing requested from /models/');
+  await h.waitTicks(page, 20);
+  assert.equal((await h.state(page)).state, 'running', 'the game runs on');
+  await page.click('#forget-voices');
+  await waitVoice(page, (want) => document.getElementById('status').textContent === want, await line('voiceForgot'), 10_000);
+  assert.equal(await page.evaluate(() => localStorage.getItem('u6.voiceTerms')), null, 'the acceptance forgotten');
+  assert.deepEqual(requests, [], 'still nothing from /models/');
+}, { needs: h.haveHfes });
+
+// A page in the Chromium with WebGPU, the game started from the user's disks, the probe on, and
+// its requests under /models/ and console text recorded; null when that Chromium has no adapter.
+async function gpuGame(env) {
+  const { context, page } = await h.openPage(env, { gpu: true });
+  await context.addInitScript(voiceProbe);
+  const requests = modelRequests(context);
+  const text = consoleText(page);
+  await h.load(page, env);
+  if (!(await page.evaluate(async () => Boolean(await navigator.gpu?.requestAdapter())))) return null;
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  return { context, page, requests, text };
+}
+
+// Voices on from the button (the terms accepted first when shown), until ready.
+async function voicesOn(page) {
+  await page.click('#voices');
+  if (await page.evaluate(() => !document.getElementById('voice-terms').hidden)) await page.click('#voice-accept');
+  await waitVoice(page, () => ['ready', 'failed'].includes(document.body.dataset.voice), null);
+  return voiceShown(page);
+}
+
+// The words of `text`, lower case.
+const words = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').split(/\s+/).filter(Boolean);
+
+// The samples the page put into buffers since the last call, as one 16-bit WAV at their rate.
+async function capturedWav(page) {
+  const chunks = await page.evaluate(() => window.__pcm.splice(0));
+  const rate = chunks[0]?.rate ?? 44100;
+  const samples = chunks.flatMap((c) => c.samples);
+  const wav = Buffer.alloc(44 + samples.length * 2);
+  wav.write('RIFF', 0);
+  wav.writeUInt32LE(36 + samples.length * 2, 4);
+  wav.write('WAVEfmt ', 8);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(rate, 24);
+  wav.writeUInt32LE(rate * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36);
+  wav.writeUInt32LE(samples.length * 2, 40);
+  samples.forEach((x, i) => wav.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(x * 32767))), 44 + i * 2));
+  return wav;
+}
+
+// mlx-whisper (the owner's local ASR) on `wav`: the words it heard, or null without it.
+const WHISPER = join(process.env.HOME ?? '', '.local/share/tour-tts/.venv/bin/mlx_whisper');
+async function heard(wav) {
+  if (!existsSync(WHISPER)) return null;
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { execFile } = await import('node:child_process');
+  const dir = await mkdtemp(join(tmpdir(), 'u6-voice-asr-'));
+  try {
+    await writeFile(join(dir, 'line.wav'), wav);
+    await new Promise((done, fail) => execFile(WHISPER, [join(dir, 'line.wav'), '--model', 'mlx-community/whisper-large-v3-turbo',
+      '--language', 'en', '--output-format', 'txt', '--output-dir', dir, '--verbose', 'False'],
+    { timeout: 300_000 }, (err) => (err ? fail(err) : done())));
+    return words(await readFile(join(dir, 'line.txt'), 'utf8'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('voices with WebGPU: accepted, downloaded, checked and warmed up to ready (cold start reported); a 60-character line sounds within 1 s and ASR hears it; a key cancels with an 80 ms fade, and so does a newer turn; Mute silences the voice gain; above 4x nothing is said; a reload starts from the cache with nothing downloaded; a corrupted cached part is fetched again; Forget voices empties the cache (receipt)', async (env) => {
+  const g = await gpuGame(env);
+  if (!g) {
+    console.log('  receipt: skipped: this Chromium has no WebGPU adapter');
+    return;
+  }
+  const { page, requests } = g;
+  const t0 = Date.now();
+  let v = await voicesOn(page);
+  const opt = Date.now() - t0;
+  assert.ok(v.state === 'ready', 'ready after the download, the checks and the warm-up');
+  assert.ok(v.chip && v.pressed === 'true' && v.refetched === 0, 'the chip shows; nothing fetched twice');
+  assert.equal(await page.evaluate(() => window.__persist), 1, 'persistent storage asked once');
+  const parts = requests.filter((p) => /\.part\d+$|\.json$/.test(p) && !p.endsWith('manifest.json'));
+  assert.equal(new Set(parts).size, parts.length, 'each part requested once');
+  console.log(`  receipt: cold start (opt-in to ready) ${opt} ms; the worker's load ${v.cold} ms`);
+  // A 60-character line: first audio within 1 s of the page getting it.
+  assert.equal(LINE_60.length, 60);
+  await page.evaluate(() => window.__pcm.splice(0));
+  await page.evaluate((u) => window.__speech.push(u), utterance(1, LINE_60));
+  await waitVoice(page, () => document.body.dataset.voiceSpoken === '1', null, 30_000);
+  v = await voiceShown(page);
+  console.log(`  receipt: first audio of the 60-character line ${v.first} ms after it reached the page`);
+  assert.ok(v.first >= 0 && v.first <= 1000, 'first audio within 1 s');
+  await waitVoice(page, () => document.body.dataset.voicePlaying === '0', null, 30_000);
+  const asr = await heard(await capturedWav(page));
+  if (asr === null) console.log('  receipt: ASR skipped (no mlx_whisper here)');
+  else {
+    const want = words(LINE_60);
+    // The longest run of the line's words the ASR heard in order (their LCS).
+    const lcs = want.map(() => asr.map(() => 0));
+    want.forEach((w, i) => asr.forEach((a, j) => {
+      const up = i > 0 ? lcs[i - 1][j] : 0;
+      const left = j > 0 ? lcs[i][j - 1] : 0;
+      const diag = i > 0 && j > 0 ? lcs[i - 1][j - 1] : 0;
+      lcs[i][j] = w === a ? diag + 1 : Math.max(up, left);
+    }));
+    const hit = asr.length > 0 ? lcs[want.length - 1][asr.length - 1] : 0;
+    console.log(`  receipt: ASR heard ${hit} of the line's ${want.length} words in order (${asr.length} heard)`);
+    assert.ok(hit >= want.length - 1 && asr.length <= want.length + 1, 'ASR hears the line');
+  }
+  // A key cancels: Escape on the canvas while a long line plays.
+  await page.focus('#screen');
+  await page.evaluate((u) => window.__speech.push(u), utterance(2, LONG_LINE));
+  await waitVoice(page, () => document.body.dataset.voiceSpoken === '2', null, 30_000);
+  await page.evaluate(() => {
+    window.__stops.length = 0;
+    window.__ramps.length = 0;
+  });
+  await page.keyboard.press('Escape');
+  await waitVoice(page, () => document.body.dataset.voiceCancels === '1', null, 5_000);
+  let cut = await page.evaluate(() => ({ stops: [...window.__stops], ramps: [...window.__ramps] }));
+  v = await voiceShown(page);
+  assert.equal(v.fade, 80, 'an 80 ms fade');
+  assert.ok(cut.stops.length >= 1 && cut.stops.every((s) => Math.abs(s - 0.08) < 0.02), 'every source stops 80 ms on');
+  assert.ok(cut.ramps.length >= 1 && cut.ramps.every(([value]) => value === 0), 'its gain ramps to 0');
+  await waitVoice(page, () => document.body.dataset.voicePlaying === '0', null, 5_000);
+  // A newer turn cancels the old speech, and its own line is said.
+  await page.evaluate((u) => window.__speech.push(u), utterance(3, LONG_LINE));
+  await waitVoice(page, () => document.body.dataset.voiceSpoken === '3', null, 30_000);
+  await page.evaluate(() => {
+    window.__stops.length = 0;
+  });
+  await page.evaluate((u) => window.__speech.push(u), utterance(4, 'And now the next turn.'));
+  await waitVoice(page, () => document.body.dataset.voiceCancels === '2' && document.body.dataset.voiceSpoken === '4', null, 30_000);
+  cut = await page.evaluate(() => [...window.__stops]);
+  assert.ok(cut.length >= 1 && cut.every((s) => Math.abs(s - 0.08) < 0.02), 'the newer turn fades the old speech out');
+  // Mute: the voice gain 0 with the music's, and back.
+  await page.click('#mute');
+  assert.equal((await voiceShown(page)).gain, '0.00', 'muted: the voice gain 0');
+  await page.click('#mute');
+  assert.equal((await voiceShown(page)).gain, '1.00', 'unmuted: 1');
+  // Above 4x nothing is synthesized.
+  for (let i = 0; i < 5; i += 1) await page.click('#faster');
+  assert.equal(await page.evaluate(() => document.getElementById('screen').dataset.speed), '6');
+  const before = await voiceShown(page);
+  await page.evaluate((u) => window.__speech.push(u), utterance(5, LINE_60));
+  await waitVoice(page, (n) => Number(document.body.dataset.voiceDropped) > n, before.dropped, 10_000);
+  assert.equal((await voiceShown(page)).spoken, before.spoken, 'at 6x: not said');
+  for (let i = 0; i < 5; i += 1) await page.click('#slower');
+  // A reload: voices come back from the cache, nothing downloaded, no line on the status.
+  requests.length = 0;
+  await page.reload();
+  await h.waitSettled(page);
+  await waitVoice(page, () => ['ready', 'failed'].includes(document.body.dataset.voice), null);
+  v = await voiceShown(page);
+  assert.ok(v.state === 'ready' && v.refetched === 0, 'ready again from the cache');
+  assert.ok(requests.every((p) => !/\.part\d+$/.test(p)), 'no part downloaded');
+  assert.notEqual(v.status, await line('voiceReady'), 'the start from the cache says nothing');
+  // A cached part that no longer checks out is fetched again.
+  await page.evaluate(async () => {
+    const cache = await caches.open((await caches.keys()).find((n) => n.startsWith('u6-voice-')));
+    const key = (await cache.keys()).find((r) => r.url.endsWith('vocoder.onnx.part1'));
+    await cache.put(key, new Response(new Uint8Array([1, 2, 3])));
+  });
+  requests.length = 0;
+  await page.click('#voices');
+  assert.equal((await voiceShown(page)).state, 'off', 'Voices off');
+  v = await voicesOn(page);
+  assert.ok(v.state === 'ready' && v.refetched === 1, 'ready, the corrupted part fetched again');
+  assert.deepEqual(requests.filter((p) => /\.part\d+$/.test(p)).map((p) => p.split('/').pop()), ['vocoder.onnx.part1'], 'only that part');
+  // Forget voices: the cache emptied, the acceptance forgotten, off.
+  await page.click('#forget-voices');
+  await waitVoice(page, (want) => document.getElementById('status').textContent === want, await line('voiceForgot'), 10_000);
+  const left = await page.evaluate(async () => ({
+    caches: (await caches.keys()).filter((n) => n.startsWith('u6-voice-')).length,
+    terms: localStorage.getItem('u6.voiceTerms'),
+  }));
+  assert.ok(left.caches === 0 && left.terms === null && (await voiceShown(page)).state === 'off', 'nothing kept');
+}, { needs: () => h.haveHfes() && h.haveModels() });
+
+// Spec 09 Acceptance 6 and the sentinel: each failure turns voices off with a line that names only
+// its kind, and the game runs on.
+async function failsWith(env, code, arrange) {
+  const g = await gpuGame(env);
+  if (!g) return null;
+  await arrange(g);
+  const v = await voicesOn(g.page);
+  assert.ok(v.state === 'failed' && v.error === code && !v.chip, `${code}: off, with its kind`);
+  assert.equal(v.status, await line('voiceFailed', await line({
+    download: 'voiceErrDownload', hash: 'voiceErrHash', quota: 'voiceErrQuota', gpu: 'voiceErrGpu',
+  }[code])), `${code}: the line names only the kind`);
+  await h.waitTicks(g.page, 20);
+  assert.equal((await h.state(g.page)).state, 'running', `${code}: the game runs on`);
+  return g;
+}
+
+test('voices fail recoverably: a part that does not download, a part whose bytes are wrong, a storage quota denial and a lost GPU device each turn voices off with a content-free line while the game runs on; a sentinel line said never reaches the console, the page\'s data or its text', async (env) => {
+  const ort = /onnxruntime-web\/1\.30\.0\/ort-wasm-simd-threaded\.asyncify\.wasm\.part0$/;
+  const failed = await failsWith(env, 'download', ({ context }) => context.route(ort, (r) => r.fulfill({ status: 404, body: '' })));
+  if (failed === null) {
+    console.log('  receipt: skipped: this Chromium has no WebGPU adapter');
+    return;
+  }
+  await failsWith(env, 'hash', ({ context }) => context.route(ort, (r) => r.fulfill({ status: 200, body: Buffer.alloc(16) })));
+  // A quota denial: the worker's Cache.put refuses, installed before the first part arrives.
+  await failsWith(env, 'quota', ({ context, page }) => {
+    let installed;
+    const ready = new Promise((done) => { installed = done; });
+    page.on('worker', async (w) => {
+      await w.evaluate(() => {
+        Cache.prototype.put = () => Promise.reject(new DOMException('test: no room', 'QuotaExceededError'));
+      });
+      installed();
+    });
+    return context.route(ort, async (r) => {
+      await ready;
+      await r.continue();
+    });
+  });
+  // The lost device, with the sentinel said first.
+  const g = await gpuGame(env);
+  const { page, text } = g;
+  assert.equal((await voicesOn(page)).state, 'ready');
+  await page.evaluate((u) => window.__speech.push(u), utterance(1, `Remember the word ${SENTINEL} for later.`));
+  await waitVoice(page, () => document.body.dataset.voiceSpoken === '1', null, 30_000);
+  const [worker] = page.workers().filter((w) => w.url().endsWith('/voice/worker.js'));
+  await worker.evaluate(() => self.onmessage({ data: { type: 'lose-device' } }));
+  await waitVoice(page, () => document.body.dataset.voice === 'failed', null, 30_000);
+  const v = await voiceShown(page);
+  assert.ok(v.error === 'gpu' && v.status === await line('voiceFailed', await line('voiceErrGpu')), 'the lost device: off, with its kind');
+  await h.waitTicks(page, 20);
+  assert.equal((await h.state(page)).state, 'running', 'the game runs on');
+  const where = await page.evaluate(() => JSON.stringify({
+    body: { ...document.body.dataset }, canvas: { ...document.getElementById('screen').dataset },
+    text: document.body.innerText, storage: { ...localStorage },
+  }));
+  assert.ok(!where.includes(SENTINEL), 'not in the page\'s data, text or storage');
+  assert.ok(!text.some((m) => m.includes(SENTINEL)), 'not in the console of the page or its worker');
+}, { needs: () => h.haveHfes() && h.haveModels() });
+
 const filter = process.argv[2];
 const env = await h.setup();
 let failed = 0;
@@ -3524,7 +3949,7 @@ try {
       // files: no message text (h.failureLines).
       console.log(`not ok - ${t.name}\n  ${h.failureLines(err).join('\n  ')}`);
     } finally {
-      for (const context of env.browser.contexts()) await context.close();
+      for (const b of await env.browsers()) for (const context of b.contexts()) await context.close();
     }
   }
 } finally {

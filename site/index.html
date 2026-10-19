@@ -78,6 +78,17 @@
     #setup label[hidden] { display: none; }
     #setup p { margin: 0 0 8px; }
     #setup button { margin-left: 0; }
+    /* Voices (spec 09): the terms shown before the first download, and the chip while on. */
+    #voice-terms { margin-top: 12px; padding: 12px 16px; border: 2px solid #ffd166; border-radius: 8px;
+                   background: #16161d; }
+    #voice-terms[hidden] { display: none; }
+    #voice-terms p { margin: 0 0 8px; }
+    #voice-terms button { margin-left: 0; margin-right: 8px; }
+    #voice-restrictions { max-height: 16em; overflow: auto; margin: 0 0 8px; padding: 8px;
+                          border: 1px solid #555a66; white-space: pre-wrap; font-size: 0.875rem; }
+    #voice-chip { padding: 0 6px; border: 1px solid #9ab8ff; border-radius: 4px; color: #9ab8ff;
+                  font-size: 0.875rem; }
+    #voice-chip[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -117,12 +128,16 @@
       <button id="forget" type="button" disabled data-i18n="forget">Forget the kept files</button>
       <button id="forget-save" type="button" disabled data-i18n="forgetSave">Forget the saved game</button>
       <button id="forget-hd" type="button" disabled data-i18n="forgetHd">Forget the HD pack</button>
+      <button id="forget-voices" type="button" data-i18n="forgetVoices">Forget voices</button>
       <button id="restart" type="button" hidden data-i18n="restart">Restart</button>
       <div id="playback">
         <button id="mute" type="button" aria-pressed="false">Mute</button>
         <button id="hd" type="button" aria-pressed="true" data-i18n-title="hdTitle"
                 title="HD: the map, the portraits and the panels magnified (MMPX) from your own files, in this browser. Off shows the original 320 x 200 pixels.">HD</button>
         <button id="settings" type="button" data-i18n="settings">Settings</button>
+        <button id="voices" type="button" aria-pressed="false" data-i18n="voices" data-i18n-title="voicesTitle"
+                title="NPCs say their lines aloud, in a voice generated in this browser by the Supertonic-3 model (about 400 MB, downloaded from this site once and kept in this browser). It needs WebGPU.">Voices (~400 MB)</button>
+        <span id="voice-chip" hidden data-i18n="voiceChip">Voice generated on this device</span>
         <span id="speed-group" role="group" aria-label="Game speed" data-i18n-label="speedLabel"
               data-i18n-title="speedTitle"
               title="On the game screen: - slower, = or + faster, unless the game is using that key (a line or a name being typed, the stats and inventory panels, a party list that scrolls, the opening's menu). The keypad - and + and these buttons always change the speed.">
@@ -134,6 +149,21 @@
           <span id="behind" hidden data-i18n="behind">behind</span>
         </span>
       </div>
+      <section id="voice-terms" hidden aria-labelledby="voice-terms-title">
+        <h2 id="voice-terms-title" data-i18n="voiceTermsTitle">Voice model terms</h2>
+        <p data-i18n="voiceTermsIntro">Voices read aloud what the NPCs say, in a voice generated in this
+          browser by the Supertonic-3 model of Supertone Inc. The model (about 400 MB) is
+          downloaded from this site once and kept in this browser; what NPCs say never leaves
+          it. Its licence, the Open RAIL-M, allows its use only under the restrictions below:
+          accept them to download it.</p>
+        <p><span data-i18n="voiceRestrictionsNote">The restrictions, as the licence states them:</span>
+          <a id="voice-license" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/LICENSE.txt" data-i18n="voiceTermsLicense">Licence</a> &middot;
+          <a id="voice-notice" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt" data-i18n="voiceTermsNotice">Notice</a></p>
+        <pre id="voice-restrictions" lang="en"></pre>
+        <p id="voice-storage"></p>
+        <button id="voice-accept" type="button" data-i18n="voiceAccept">Accept and download</button><button
+          id="voice-decline" type="button" data-i18n="voiceDecline">Cancel</button>
+      </section>
       <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
     </section>
     <section id="limits" aria-labelledby="limits-title">
@@ -162,6 +192,13 @@
         dropped here like the game files: its pictures replace MMPX for the images they were made
         from. It is kept in this browser (&ldquo;Forget the HD pack&rdquo; removes it) and never
         sent anywhere; this site hosts none.</p>
+      <p id="voice-credits"><span data-i18n="voiceCreditsBefore">Voices (off until you press
+        Voices): the NPCs say their lines aloud, in one English voice generated in this browser by
+        the Supertonic-3 model (Supertone Inc., Open RAIL-M licence) on WebGPU. The model is
+        downloaded from this site once (about 400 MB), after you accept its use restrictions;
+        what NPCs say never leaves this browser. </span><a id="voice-terms-link" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt"
+        data-i18n="voiceTermsLink">Voice model terms</a><span data-i18n="voiceCreditsAfter">.
+        &ldquo;Forget voices&rdquo; removes the model from this browser.</span></p>
       <p>Not yet: a few rare object actions (moving a carried thing to someone else, a staff's or
         wand's spell in combat). Those say
         &ldquo;Not implemented in this version&rdquo; or do nothing.</p>

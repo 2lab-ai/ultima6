@@ -33,3 +33,34 @@ Galmuri7 (site/fonts, tools/font)
   source URL and the sha256s of the release zip and the table.
 
   Copyright (c) 2019-2025 Lee Minseo (quiple@quiple.dev)
+
+Supertonic sample code (site/voice/worker.js)
+  The voice worker's text processing and inference loop are written from the sample code of
+  Supertonic by Supertone Inc. (the supertonic Python package 1.3.1: core.py, utils.py),
+  https://github.com/supertone-inc/supertonic. The model itself is not in this repository:
+  tools/speech/fetch-models.sh hosts it beside the site under its own licence (OpenRAIL-M), with
+  that licence and a notice beside its files.
+
+  Copyright (c) 2025 Supertone Inc.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+  and associated documentation files (the "Software"), to deal in the Software without
+  restriction, including without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all copies or
+  substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+  BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+  DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+ONNX Runtime Web (served under models/onnxruntime-web/, tools/speech/onnxruntime-LICENSE.txt)
+  The voice worker runs three files of onnxruntime-web 1.30.0 by Microsoft Corporation, hosted
+  unmodified by tools/speech/fetch-models.sh with their licence beside them (MIT:
+  tools/speech/onnxruntime-LICENSE.txt is ONNX Runtime's LICENSE at tag v1.30.0).
+
+  Copyright (c) Microsoft Corporation

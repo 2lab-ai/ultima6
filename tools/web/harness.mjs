@@ -303,6 +303,26 @@ globalThis.__presentMs = 0;
 }
 `;
 
+// Appended to the glue with `gated` (spec 09): `globalThis.__speech`, utterances the test made
+// (its own text), handed to the page by Game.take_speech after what the game's speech tap queued,
+// as the page's player gets them; `__speechCalls` counts the calls that returned any.
+const SPEECH_HOOK = `
+globalThis.__speech = [];
+globalThis.__speechCalls = 0;
+{
+  const take = Game.prototype.take_speech;
+  Game.prototype.take_speech = function () {
+    const real = take.call(this);
+    if (globalThis.__speech.length === 0) {
+      if (real) globalThis.__speechCalls += 1;
+      return real;
+    }
+    globalThis.__speechCalls += 1;
+    return JSON.stringify([...(real ? JSON.parse(real) : []), ...globalThis.__speech.splice(0)]);
+  };
+}
+`;
+
 // Appended to the glue with `gameFirst`: a start runs `game` at once (Game.start_game_first, as
 // `u6-native --game-first`), so the tests of the queue, the storage and the keys need no
 // character from `u`. The page itself is unchanged.
@@ -454,8 +474,22 @@ export async function setup(root = SITE) {
     },
   });
   const browser = await chromium.launch();
-  return { server, browser, packs, packRequests, close: async () => { await browser.close(); await server.close(); } };
+  // Chromium with WebGPU on this machine's GPU (spec 09's voices): launched once, when a test asks.
+  let gpu = null;
+  const gpuBrowser = () => (gpu ??= chromium.launch({ channel: 'chromium' }));
+  const browsers = async () => [browser, ...(gpu ? [await gpu] : [])];
+  return {
+    server, browser, gpuBrowser, browsers, packs, packRequests,
+    close: async () => {
+      for (const b of await browsers()) await b.close();
+      await server.close();
+    },
+  };
 }
+
+/// The voice model as tools/speech/fetch-models.sh hosts it under site/models/ (spec 09 V2).
+export const MODELS = join(SITE, 'models');
+export const haveModels = () => existsSync(join(MODELS, 'supertonic3')) && existsSync(join(MODELS, 'onnxruntime-web'));
 
 /// The choice a page starts with unless a test asks for the chooser (`openPage`'s `setup`).
 export const CHOSEN = { lang: 'en' };
@@ -463,9 +497,10 @@ export const CHOSEN = { lang: 'en' };
 /// A fresh context (empty storage) and page with the hooks; `gated` adds the store and glue
 /// wrappers; `gameFirst` (default) starts `game` without the launcher's `u` (the page itself is
 /// unchanged); `setup` is the chooser's choice the page finds kept (`CHOSEN`: no chooser), null
-/// for a first visit (the chooser shows).
-export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN } = {}) {
-  const context = await env.browser.newContext({ viewport: { width: 1024, height: 900 } });
+/// for a first visit (the chooser shows); `gpu`: in the Chromium with WebGPU.
+export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN, gpu = false } = {}) {
+  const browser = gpu ? await env.gpuBrowser() : env.browser;
+  const context = await browser.newContext({ viewport: { width: 1024, height: 900 } });
   await context.addInitScript(pageHooks);
   if (setup) {
     await context.addInitScript((value) => {
@@ -484,7 +519,7 @@ export async function openPage(env, { gated = true, gameFirst = true, setup = CH
     });
   }
   if (gated || gameFirst) {
-    const extra = (gated ? GLUE_HOOKS : '') + (gameFirst ? GAME_FIRST : '');
+    const extra = (gated ? GLUE_HOOKS + SPEECH_HOOK : '') + (gameFirst ? GAME_FIRST : '');
     await context.route(/\/pkg\/u6_web\.js$/, async (route) => {
       const response = await route.fetch();
       await route.fulfill({ response, body: (await response.text()) + extra });

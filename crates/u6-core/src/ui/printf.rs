@@ -229,7 +229,12 @@ async fn escape(state: &RefCell<State>, io: &Io, c: i32) {
     };
     let Some(prefix) = prefix else {
         put_cell(state, io, -1).await;
-        state.borrow_mut().ui.input.cursor_glyph = 1;
+        {
+            // Port (spec 09): what the speech tap kept before the wait is flushed.
+            let mut s = state.borrow_mut();
+            crate::speech::flush(&mut s);
+            s.ui.input.cursor_glyph = 1;
+        }
         Box::pin(super::wait::read_key(state, io)).await;
         state.borrow_mut().ui.input.cursor_glyph = 5;
         return;

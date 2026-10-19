@@ -15,6 +15,7 @@
 use super::Cx;
 use super::party::ix;
 use crate::engine::Io;
+use crate::speech::Kind;
 use crate::state::State;
 
 /// Objlist-block (A4-0x7b84) offsets the converse code reads: A4-0x7b26 (word, int var 0x15),
@@ -34,6 +35,23 @@ pub(crate) async fn print(cx: &Cx<'_>, text: &[u8]) {
 /// converse variables, `&` text shows only while A4-0x7b26 is set).
 pub(crate) async fn put_char(cx: &Cx<'_>, c: u8) {
     Box::pin(crate::ui::printf::text_out(cx.state, cx.io, i32::from(c))).await;
+}
+
+/// Port-only (spec 09 Design 1): [`put_char`] as the NPC's words when `kind` is speech: the
+/// speech tap's flag is up while it runs ([`crate::speech::raise`]), so the codes the line takes
+/// for it are kept (substituted variables and padding included).
+pub(crate) async fn put_speech(cx: &Cx<'_>, kind: Kind, c: u8) {
+    let was = cx.st(|s| crate::speech::raise(s, kind));
+    put_char(cx, c).await;
+    cx.st(|s| crate::speech::lower(s, was));
+}
+
+/// Port-only (spec 09 Design 1): [`print`] as the NPC's words when `kind` is speech (op `0xb5`'s
+/// string slot), with the speech tap's flag up as [`put_speech`].
+pub(crate) async fn print_speech(cx: &Cx<'_>, kind: Kind, text: &[u8]) {
+    let was = cx.st(|s| crate::speech::raise(s, kind));
+    print(cx, text).await;
+    cx.st(|s| crate::speech::lower(s, was));
 }
 
 /// Port-only (spec 08 Design 1): the `@{` the text layer has taken so far
@@ -59,9 +77,13 @@ pub(crate) async fn read_key(cx: &Cx<'_>) -> u16 {
     Box::pin(crate::ui::wait::read_key(cx.state, cx.io)).await
 }
 
-/// Op 0xcb: A4-0x7a1c = 1 (the waiting cursor), 0x10790a, A4-0x7a1c = 5.
+/// Op 0xcb: A4-0x7a1c = 1 (the waiting cursor), 0x10790a, A4-0x7a1c = 5. Port (spec 09): what
+/// was said before the wait is flushed to the speech tap.
 pub(crate) async fn wait_key(cx: &Cx<'_>) {
-    cx.st(|s| s.ui.input.cursor_glyph = 1);
+    cx.st(|s| {
+        crate::speech::flush(s);
+        s.ui.input.cursor_glyph = 1;
+    });
     Box::pin(crate::ui::wait::read_key(cx.state, cx.io)).await;
     cx.st(|s| s.ui.input.cursor_glyph = 5);
 }

@@ -93,6 +93,8 @@ pub struct State {
     pub objcmds: crate::objects::commands::ObjCommands,
     /// Save / restore bookkeeping (the save generation, the last objlist written).
     pub saveload: crate::saveload::SaveLoad,
+    /// Port-only (spec 09): the speech tap, off unless the platform turns voices on.
+    pub speech: crate::speech::SpeechTap,
 }
 
 /// A game file is missing or malformed.

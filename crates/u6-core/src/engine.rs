@@ -791,6 +791,18 @@ impl Engine {
         self.stubs.take_lines()
     }
 
+    /// Port-only (spec 09 Design 1): voices on or off: the speech tap keeps what NPCs say
+    /// ([`crate::speech`]) only while on. Off by default, and then nothing is kept.
+    pub fn set_speech(&mut self, on: bool) {
+        crate::speech::set_enabled(&mut self.state.borrow_mut(), on);
+    }
+
+    /// Port-only (spec 09 Design 1): the utterances NPCs said since the previous call (a channel
+    /// apart from the log; the text is the user's game text and is never logged).
+    pub fn take_speech(&mut self) -> Vec<crate::speech::Utterance> {
+        crate::speech::take(&mut self.state.borrow_mut())
+    }
+
     /// Port-only (spec 06 §Design 6): which of `-`, `+` and `=` ([`OWN_MINUS`], [`OWN_PLUS`],
     /// [`OWN_EQUALS`]) the game takes now, as of the last tick: those `u` claimed on the `Io`
     /// ([`Io::keys_owned`]) and those `game`'s state reads ([`crate::ui::target::keys_owned`]).
