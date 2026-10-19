@@ -2014,22 +2014,23 @@ fn a_file_another_hand_put_at_a_kept_name_is_said() {
 
 #[test]
 fn the_dir_given_to_the_unprivileged_child_is_new_and_its_own() {
-    // Two dirs for the unprivileged child: each new (a name not known before), each a dir of
-    // mode 0700 and no link, under any user. Under euid 0 (where the child is used), each is
-    // then given to 65534 through its fd.
+    // The dirs for the unprivileged child, made by the helper itself (temp_for_nobody, under
+    // euid 0, where the child is used): each new (a name not known before), a dir of mode 0700
+    // and no link, owned by 65534. Under any other user the helper cannot give a dir away, and
+    // the dirs it is made from (private_dir) are checked alone.
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    let (a, b) = (private_dir("nobody"), private_dir("nobody"));
-    assert_ne!(a.0, b.0);
     // SAFETY: geteuid(2) reads the process's ids; no memory involved.
     let root = unsafe { libc::geteuid() } == 0;
-    for (d, f) in [&a, &b] {
+    let (a, b) = match root {
+        true => (temp_for_nobody(), temp_for_nobody()),
+        false => (private_dir("nobody").0, private_dir("nobody").0),
+    };
+    assert_ne!(a, b);
+    for d in [&a, &b] {
         let m = std::fs::symlink_metadata(d).unwrap();
         assert!(m.is_dir() && !m.file_type().is_symlink(), "{}", d.display());
         assert_eq!(m.permissions().mode() & 0o777, 0o700, "{}", d.display());
-        assert_eq!(at::id(f).unwrap(), (m.dev(), m.ino()), "{}", d.display());
         if root {
-            std::os::unix::fs::fchown(f, Some(65534), Some(65534)).unwrap();
-            let m = std::fs::symlink_metadata(d).unwrap();
             assert_eq!((m.uid(), m.gid()), (65534, 65534), "{}", d.display());
         }
         std::fs::remove_dir(d).unwrap();
