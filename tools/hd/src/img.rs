@@ -295,12 +295,21 @@ pub fn read_png(path: &Path, width: u32, height: u32) -> Result<Rgba, String> {
 /// Reads a file of at most `max` bytes: never more than `max + 1` are read, however large
 /// the file is or grows while it is read.
 pub fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    read_capped_said(path, max, |e| format!("{}: {e}", path.display()))
+}
+
+/// [`read_capped`], each system error to open or read the file said by `say`.
+pub fn read_capped_said(
+    path: &Path,
+    max: u64,
+    say: impl Fn(&std::io::Error) -> String,
+) -> Result<Vec<u8>, String> {
     use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file = std::fs::File::open(path).map_err(|e| say(&e))?;
     let mut bytes = Vec::new();
     file.take(max.saturating_add(1))
         .read_to_end(&mut bytes)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+        .map_err(|e| say(&e))?;
     if bytes.len() as u64 > max {
         return Err(format!("{}: larger than {max} bytes", path.display()));
     }

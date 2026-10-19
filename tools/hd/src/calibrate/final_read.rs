@@ -1529,9 +1529,12 @@ fn run_final(
     // The owner's list first: a bad line stops the run before anything is written.
     let ids = match &o.include {
         Some(p) => {
-            work::check_target(p).map_err(|e| {
-                format!("--include: {e} (the list names records: keep it outside the repository)")
-            })?;
+            // The hint goes with its own cause alone: a list inside the repository.
+            if let Some(e) = work::target_protected(p).map_err(|e| format!("--include: {e}"))? {
+                return Err(format!(
+                    "--include: {e} (the list names records: keep it outside the repository)"
+                ));
+            }
             let bytes = out_dir::read_capped(p, 1 << 20)?;
             let text =
                 String::from_utf8(bytes).map_err(|_| "--include is not UTF-8".to_string())?;

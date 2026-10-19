@@ -46,6 +46,20 @@ pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// What to say of the system's error `e` at `path`, a file a step before this one writes (the
+/// step to run, `if_missing`, e.g. "run ingest first"): that step's hint only when nothing is
+/// at `path`, how to go on only when out of open files (`ulimit -n`), any other error as itself.
+pub fn said(path: &Path, e: &std::io::Error, if_missing: &str) -> String {
+    match (e.kind(), e.raw_os_error()) {
+        (std::io::ErrorKind::NotFound, _) => format!("{}: {e} ({if_missing})", path.display()),
+        (_, Some(libc::EMFILE)) => format!(
+            "{}: {e} (too many files open: raise the limit on open files, ulimit -n)",
+            path.display()
+        ),
+        _ => format!("{}: {e}", path.display()),
+    }
+}
+
 /// `path` made absolute; refused with a `..` component.
 fn absolute(path: &Path) -> Result<PathBuf, String> {
     let abs = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -69,6 +83,15 @@ pub(crate) fn protected(dir: &Path) -> Option<String> {
 
 /// Refuses `path` (made absolute) if its nearest existing ancestor, resolved, is protected.
 pub fn check_target(path: &Path) -> Result<(), String> {
+    match target_protected(path)? {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Whether `path` (made absolute) is protected: its nearest existing ancestor, resolved, in a
+/// protected tree; `Some` with what to say when it is, an error when that cannot be read.
+pub fn target_protected(path: &Path) -> Result<Option<String>, String> {
     let abs = absolute(path)?;
     let existing = abs
         .ancestors()
@@ -77,13 +100,12 @@ pub fn check_target(path: &Path) -> Result<(), String> {
     let resolved = existing
         .canonicalize()
         .map_err(|e| format!("{}: {e}", existing.display()))?;
-    if let Some(why) = protected(&resolved) {
-        return Err(format!(
+    Ok(protected(&resolved).map(|why| {
+        format!(
             "{}: {why}; the tool writes only outside it (spec 07 Rights)",
             path.display()
-        ));
-    }
-    Ok(())
+        )
+    }))
 }
 
 /// Creates `dir` and its parents after checking them; returns it resolved (and checked again).
@@ -369,8 +391,7 @@ impl Work {
 
     pub fn read_jobs(&self) -> Result<Vec<Job>, String> {
         let p = self.path("jobs.jsonl");
-        let text = std::fs::read_to_string(&p)
-            .map_err(|e| format!("{}: {e} (run atlas first)", p.display()))?;
+        let text = std::fs::read_to_string(&p).map_err(|e| said(&p, &e, "run atlas first"))?;
         text.lines()
             .filter(|l| !l.trim().is_empty())
             .enumerate()

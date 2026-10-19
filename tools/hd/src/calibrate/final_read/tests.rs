@@ -3098,6 +3098,49 @@ fn each_run_writes_its_own_run_dir_alone() {
 }
 
 #[test]
+fn an_include_list_is_told_to_stay_outside_the_repository_only_when_it_is_inside() {
+    // --include in the repository: refused, saying why the list stays outside. A path refused
+    // for another reason (a `..` in it): its own error alone, without that hint.
+    let g = game();
+    let (text, left) = chain(&g);
+    let (dir, work) = work_dir("include-hint", &text, &g, &left);
+    let hint = "(the list names records: keep it outside the repository)";
+    let inside = crate::work::repo_root()
+        .canonicalize()
+        .unwrap()
+        .join("no-such-list.txt");
+    let o = FinalOptions {
+        include: Some(inside.clone()),
+        ..options(&dir)
+    };
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(
+        e.starts_with(&format!(
+            "--include: {}: inside the repository; the tool writes only outside it (spec 07 \
+             Rights) {hint}; run dir: ",
+            inside.display()
+        )),
+        "{e}"
+    );
+    let dotted = dir.join("x").join("..").join("list.txt");
+    let o = FinalOptions {
+        include: Some(dotted.clone()),
+        out: dir.join("final-2"),
+        ..options(&dir)
+    };
+    let e = calibrate_final(&g, &work, &o).unwrap_err();
+    assert!(
+        e.starts_with(&format!(
+            "--include: {}: a path with `..` is refused; run dir: ",
+            dotted.display()
+        )),
+        "{e}"
+    );
+    assert!(!e.contains(hint), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_out_dir_holding_other_files_is_written_in_and_they_are_left() {
     // The owner's --out: a file of theirs in it, the --include list too (the reviewer's P15),
     // and a link: the run writes its dir in it, and touches none of them.

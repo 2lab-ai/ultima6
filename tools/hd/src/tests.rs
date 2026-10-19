@@ -2920,3 +2920,60 @@ fn a_turn_of_drain_is_bounded_whatever_the_pipe_holds() {
     assert!(run::drain(&mut pipe, Instant::now(), |_| {}).is_none());
     assert_eq!((reads.get(), pipe.is_some()), (0, true));
 }
+
+#[test]
+fn an_input_a_step_before_writes_says_why_with_its_own_hint() {
+    // pack's ingest.json and the jobs' jobs.jsonl. Not there: the error names the step that
+    // writes them. A dir at the name: the system's error alone. In a child under a limit of 64
+    // open files, with every fd taken (by the test): how to go on alone, no step named.
+    const NAME: &str = "an_input_a_step_before_writes_says_why_with_its_own_hint";
+    use crate::calibrate::out_dir::tests::{in_child, is_child, take_fds, test_path};
+    let test = test_path(module_path!(), NAME);
+    let child = is_child(&test);
+    let dir = temp(&format!("step-input-{child}"));
+    let w = Work::open(Some(&dir.join("w"))).unwrap();
+    let (list, jobs) = (w.path("ingest.json"), w.path("jobs.jsonl"));
+    let os = |n| std::io::Error::from_raw_os_error(n);
+    if !child {
+        assert_eq!(
+            pack::pack(&w, None).unwrap_err(),
+            format!(
+                "{}: {} (run ingest first)",
+                list.display(),
+                os(libc::ENOENT)
+            )
+        );
+        assert_eq!(
+            w.read_jobs().unwrap_err(),
+            format!("{}: {} (run atlas first)", jobs.display(), os(libc::ENOENT))
+        );
+        std::fs::create_dir_all(&list).unwrap();
+        std::fs::create_dir_all(&jobs).unwrap();
+        assert_eq!(
+            pack::pack(&w, None).unwrap_err(),
+            format!("{}: {}", list.display(), os(libc::EISDIR))
+        );
+        assert_eq!(
+            w.read_jobs().unwrap_err(),
+            format!("{}: {}", jobs.display(), os(libc::EISDIR))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        return in_child(&test, "ulimit -n 64", |_| {});
+    }
+    std::fs::create_dir_all(&w.root).unwrap();
+    std::fs::write(&list, b"[]").unwrap();
+    std::fs::write(&jobs, b"").unwrap();
+    let taken = take_fds(&list, 0);
+    let (packed, read) = (pack::pack(&w, None), w.read_jobs());
+    drop(taken);
+    let hint = "(too many files open: raise the limit on open files, ulimit -n)";
+    assert_eq!(
+        packed.unwrap_err(),
+        format!("{}: {} {hint}", list.display(), os(libc::EMFILE))
+    );
+    assert_eq!(
+        read.unwrap_err(),
+        format!("{}: {} {hint}", jobs.display(), os(libc::EMFILE))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
