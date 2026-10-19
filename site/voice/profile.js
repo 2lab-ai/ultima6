@@ -21,8 +21,11 @@
 // player keeps the first profile of each speaker for the session. The voice itself (presets and
 // pitch) comes from the actor number and the object type's class.
 //
-// A later local voice pack (`voices.u6vp`, spec 09 Design 4) gives `profileFor` a map from actor
-// number to profile; a profile of the pack is checked into the same ranges.
+// The local voice pack (`voices.u6vp`, spec 09 Design 4: made by tools/speech/profile.mjs from
+// the owner's NPC bundles, dropped on the page) gives `profileFor` a map from actor number to
+// profile, its personality voice. `readPack` is its one check, the tool's and the page's: a
+// pack whose form, keys or values are not exactly this one's is refused whole, by a code that
+// names only the kind.
 import { STYLES, VOICE } from './model.js';
 
 /// The ranges of a profile.
@@ -123,6 +126,79 @@ export function profileFor({ speaker, traits } = {}, pack = null) {
     steps: STEPS.max,
     seedSalt: 0,
   });
+}
+
+/// The voice pack's format.
+export const PACK_FORMAT = 'u6.voice-pack/1';
+/// The most voices a pack holds (the engine's actor slots are 1 to 255).
+export const PACK_MAX = 1024;
+/// The revision of the ranges and presets a profile is read in: FNV-1a 32 of them, 8 hex digits.
+/// A pack carries the one it was made in, and a page of other ranges refuses it (its numbers
+/// would mean other voices).
+export const RANGES_REVISION = (() => {
+  let h = 0x811c9dc5;
+  for (const c of JSON.stringify([SPEED, PITCH, STEPS, MAX_MIX, STYLES])) {
+    h ^= c.charCodeAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+})();
+
+const PACK_KEYS = ['format', 'model', 'revision', 'profiles'];
+const PROFILE_KEYS = ['mix', 'speed', 'pitch', 'steps', 'seedSalt'];
+const ACTOR = /^(0|[1-9][0-9]{0,4})$/;
+const plain = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+const sameKeys = (x, keys) => Object.keys(x).length === keys.length && keys.every((k) => Object.hasOwn(x, k));
+const within = (x, lo, hi) => typeof x === 'number' && Number.isFinite(x) && x >= lo && x <= hi;
+
+// Why `p` is not a profile of a pack ('keys', 'shape' or 'range'); '' when it is one: exactly
+// the keys of a profile, 1 to MAX_MIX presets, each once, their weights above 0 and summing to 1,
+// and every number within its range.
+function profileFault(p) {
+  if (!plain(p)) return 'shape';
+  if (!Object.keys(p).every((k) => PROFILE_KEYS.includes(k))) return 'keys';
+  if (!sameKeys(p, PROFILE_KEYS) || !Array.isArray(p.mix)) return 'shape';
+  if (p.mix.length < 1 || p.mix.length > MAX_MIX) return 'range';
+  const styles = new Set();
+  let sum = 0;
+  for (const e of p.mix) {
+    if (!plain(e)) return 'shape';
+    if (!Object.keys(e).every((k) => k === 'style' || k === 'w')) return 'keys';
+    if (!sameKeys(e, ['style', 'w'])) return 'shape';
+    if (!STYLES.includes(e.style) || styles.has(e.style) || !within(e.w, Number.MIN_VALUE, 1)) return 'range';
+    styles.add(e.style);
+    sum += e.w;
+  }
+  if (Math.abs(sum - 1) > 1e-6) return 'range';
+  if (!within(p.speed, SPEED.min, SPEED.max) || !within(p.pitch, PITCH.min, PITCH.max)) return 'range';
+  if (!Number.isInteger(p.steps) || !within(p.steps, STEPS.min, STEPS.max)) return 'range';
+  if (!Number.isInteger(p.seedSalt) || !within(p.seedSalt, 0, 0xffffffff)) return 'range';
+  return '';
+}
+
+/// The voice pack `value` (its JSON, parsed) as `{ok: true, pack}`, `pack` a Map from actor
+/// number to its profile (as `checkedProfile` gives it), or `{ok: false, code}`: 'format' (not a
+/// pack of this format), 'keys' (a key this format does not have), 'shape' (a key missing, a value
+/// of the wrong form, an actor that is not a number from 0 to 65535), 'revision' (made in other
+/// ranges), 'range' (a voice out of the ranges, or more than PACK_MAX voices). The codes name the
+/// kind only, never a key or a value.
+export function readPack(value) {
+  if (!plain(value) || value.format !== PACK_FORMAT) return { ok: false, code: 'format' };
+  if (!Object.keys(value).every((k) => PACK_KEYS.includes(k))) return { ok: false, code: 'keys' };
+  if (!sameKeys(value, PACK_KEYS)) return { ok: false, code: 'shape' };
+  if (typeof value.model !== 'string' || value.model.length > 200 || typeof value.revision !== 'string'
+    || !plain(value.profiles)) return { ok: false, code: 'shape' };
+  if (value.revision !== RANGES_REVISION) return { ok: false, code: 'revision' };
+  const actors = Object.keys(value.profiles);
+  if (actors.length > PACK_MAX) return { ok: false, code: 'range' };
+  const pack = new Map();
+  for (const actor of actors) {
+    if (!ACTOR.test(actor) || Number(actor) > 0xffff) return { ok: false, code: 'shape' };
+    const fault = profileFault(value.profiles[actor]);
+    if (fault) return { ok: false, code: fault };
+    pack.set(Number(actor), checkedProfile(value.profiles[actor]));
+  }
+  return { ok: true, pack };
 }
 
 /// A preset as its JSON gives it (`style_ttl` [1, 50, 256], `style_dp` [1, 8, 16]), flat.

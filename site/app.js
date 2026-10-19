@@ -79,7 +79,10 @@
 // (Game.take_speech) goes to the player (site/voice/player.js) and nowhere else: the
 // text is the user's game text, never logged, shown or stored. Each NPC speaks in a voice of its
 // own (site/voice/profile.js: from its actor number and the engine's names for its kind, never
-// shown either; data-voice-distinct counts the voices heard). The speech plays through a voice
+// shown either; data-voice-distinct counts the voices heard), or the personality voice a dropped
+// voice pack gives its actor (`voices.u6vp`, which the owner's local tool tools/speech/profile.mjs
+// makes from the NPC bundles: named so, or a .json dropped alone told by its format; checked
+// whole, kept in IndexedDB, shown as a count, never sent; "Forget voices" removes it too). The speech plays through a voice
 // gain beside the music's (Mute silences both); Enter, Escape and Space on the canvas, and a newer
 // turn, cancel it; above 4x nothing is spoken. While voices are on a chip says the voice is
 // generated on this device. The choice and the acceptance are kept in localStorage: the next
@@ -100,12 +103,14 @@ import init, {
   max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
 } from './pkg/u6_web.js';
 import {
-  collect, forgetBundles, forgetFiles, forgetPack, forgetSaves, loadBundles, loadFiles, loadPack,
-  loadSaves, saveFiles, storeBundles, storePack, storeSaves,
+  collect, forgetBundles, forgetFiles, forgetPack, forgetSaves, forgetVoicePack, loadBundles,
+  loadFiles, loadPack, loadSaves, loadVoicePack, saveFiles, storeBundles, storePack, storeSaves,
+  storeVoicePack,
 } from './store.js';
 import { TEXT } from './i18n.js';
 import { CACHE_PREFIX, REVISION } from './voice/model.js';
 import { createVoices } from './voice/player.js';
+import { PACK_FORMAT, readPack } from './voice/profile.js';
 import { RESTRICTIONS } from './voice/terms.js';
 
 const canvas = document.getElementById('screen');
@@ -161,8 +166,9 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // its pictures take decoded, data-hd-matched = those the game on screen matches (empty without
 // a game); data-voice = the voices' state (off, terms, checking, loading, ready, failed),
 // data-voice-error = the last failure's code, data-voice-gain = the voice gain, data-voice-path =
-// where the model runs once ready (gpu, cpu), and the player's counts and timings (reflectVoice),
-// never what is said.
+// where the model runs once ready (gpu, cpu), data-voice-pack = the voices of the voice pack
+// loaded (0 without one), and the player's counts and timings (reflectVoice), never what is
+// said.
 function reflect(state) {
   if (state) document.body.dataset.state = state;
   const live = game && !crashed;
@@ -417,6 +423,7 @@ function reflectVoice() {
   put(data, 'voiceError', voiceError);
   put(data, 'voiceGain', audio.voiceGain ? audio.voiceGain.gain.value.toFixed(2) : '');
   put(data, 'voicePath', voiceState === 'ready' ? st.path : '');
+  put(data, 'voicePack', String(voice.packVoices));
   for (const [key, value] of [['voiceColdMs', st.coldMs], ['voiceRefetched', st.refetched],
     ['voiceSpoken', st.spoken], ['voiceFirstMs', st.firstMs], ['voiceCancels', st.cancels],
     ['voiceFadeMs', st.fadeMs], ['voicePlaying', st.playing], ['voiceSteps', st.steps],
@@ -537,17 +544,140 @@ function hearSpeech() {
   }
 }
 
-// "Forget voices": the voices off, the cached model and the acceptance removed.
+// "Forget voices": the voices off, the cached model, the acceptance and the voice pack removed
+// (the pack off the player at once, out of storage as an operation of the queue, after any drop
+// queued before). The model's caches and the pack are removed apart: one that cannot be removed
+// leaves the other removed, and the line says that not everything was.
 async function forgetVoiceModel() {
   voiceOff();
   remember(VOICES_KEY, null);
   remember(TERMS_KEY, null);
   voiceTerms.hidden = true;
+  attachVoicePack(null);
   reflectVoice();
-  for (const name of await caches.keys()) {
-    if (name.startsWith(CACHE_PREFIX)) await caches.delete(name);
+  let modelGone = true;
+  try {
+    for (const name of await caches.keys()) {
+      if (!name.startsWith(CACHE_PREFIX)) continue;
+      try {
+        await caches.delete(name);
+      } catch (err) {
+        console.warn(`could not remove a voice model cache: ${errorKind(err)}`);
+        modelGone = false;
+      }
+    }
+  } catch (err) {
+    console.warn(`could not list the voice model caches: ${errorKind(err)}`);
+    modelGone = false;
   }
-  say('voiceForgot');
+  let packGone = true;
+  await enqueue('opForgetVoices', async () => {
+    attachVoicePack(null);
+    try {
+      await forgetVoicePack();
+    } catch (err) {
+      console.warn(`could not remove the voice pack: ${errorKind(err)}`);
+      packGone = false;
+    }
+  });
+  say(modelGone && packGone ? 'voiceForgot' : 'voiceForgetFailed');
+}
+
+// --- the voice pack (spec 09 Design 4) ---------------------------------------------------------
+
+const VOICE_PACK_MAX = 1 << 20; // the most bytes a voice pack file holds
+const VOICE_PACK_NAME = /\.u6vp$/i;
+const JSON_SPACE = new Set([0x20, 0x09, 0x0a, 0x0d]);
+const VOICE_PACK_ERRORS = {
+  large: 'voicePackErrLarge', json: 'voicePackErrJson', format: 'voicePackErrFormat',
+  keys: 'voicePackErrKeys', shape: 'voicePackErrShape', revision: 'voicePackErrRevision',
+  range: 'voicePackErrRange',
+};
+
+// An error's kind only (its name): a message could quote what was read.
+function errorKind(err) {
+  return err?.name ?? 'Error';
+}
+
+// The pack's profiles on the player (null: none): the voices kept for the session forgotten.
+function attachVoicePack(pack) {
+  voice.setPack(pack);
+  reflectVoice();
+}
+
+// Whether the dropped `item` is a voice pack (`alone`: the only file dropped): any file named
+// *.u6vp (its format is checked when it is loaded: one of another is refused), or a *.json file
+// dropped alone, of at most VOICE_PACK_MAX bytes and outside a savegame folder, that starts as
+// JSON (its first byte that is not JSON whitespace is `{`) and parses to an object whose
+// `format` is the pack's. `{pack, value}`: `value` is the object, when it was read. Only such a
+// file is read here, so a drop the import refuses unread (over its limit, a save file over the
+// save limit) is still not read.
+async function probeVoicePack(item, alone) {
+  if (VOICE_PACK_NAME.test(item.path)) return { pack: true };
+  if (!alone || !/\.json$/i.test(item.path) || SAVE_PATH.test(item.path) || item.file.size > VOICE_PACK_MAX) {
+    return { pack: false };
+  }
+  try {
+    const bytes = new Uint8Array(await item.file.arrayBuffer());
+    const first = bytes.findIndex((b) => !JSON_SPACE.has(b));
+    if (first < 0 || bytes[first] !== 0x7b) return { pack: false };
+    const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    return value?.format === PACK_FORMAT ? { pack: true, value } : { pack: false };
+  } catch {
+    return { pack: false }; // not one (or not readable: the import reads it and says what failed)
+  }
+}
+
+// A dropped voice pack (`value`: its object when the probe read it): read (at most
+// VOICE_PACK_MAX bytes), checked whole (profile.js readPack), set on the player and kept in this
+// browser. One that does not check out is refused with a line that names only the kind, and
+// nothing changes. When the browser does not keep it, the pack works for this visit only and the
+// one kept before is removed (else the next visit would bring it back unsaid).
+async function loadVoicePackFile(file, value) {
+  const refuse = (code) => say('voicePackRefused', t(VOICE_PACK_ERRORS[code]));
+  if (value === undefined) {
+    if (file.size > VOICE_PACK_MAX) {
+      refuse('large');
+      return;
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    try {
+      value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    } catch {
+      refuse('json');
+      return;
+    }
+  }
+  const read = readPack(value);
+  if (!read.ok) {
+    refuse(read.code);
+    return;
+  }
+  attachVoicePack(read.pack);
+  try {
+    await storeVoicePack(value);
+    say('voicePack', read.pack.size);
+  } catch (err) {
+    console.warn(`could not keep the voice pack: ${errorKind(err)}`);
+    let old = t('voicePackOldGone');
+    try {
+      await forgetVoicePack();
+    } catch (failed) {
+      console.warn(`could not remove the voice pack kept before: ${errorKind(failed)}`);
+      old = t('voicePackOldStays');
+    }
+    say('voicePackNotKept', read.pack.size, old);
+  }
+}
+
+// The voice pack kept from the last visit, on the player before the first game speaks. One that
+// no longer checks out (another version's ranges) is left where it is and not used.
+async function restoreVoicePack() {
+  const value = await loadVoicePack();
+  if (value === null) return;
+  const read = readPack(value);
+  if (read.ok) attachVoicePack(read.pack);
+  else console.warn(`the kept voice pack is not used: ${read.code}`);
 }
 
 // --- saves ---------------------------------------------------------------------------------
@@ -1394,10 +1524,21 @@ async function pausingSaves(op) {
   }
 }
 
-// A drop: an HD pack alone is loaded as one; anything else is imported as game files. A drop
-// holding a pack and other files (or two packs) is refused as a whole, nothing read further.
+// A drop: a voice pack alone or an HD pack alone is loaded as one; anything else is imported as
+// game files. A drop holding a pack and other files (or two packs) is refused as a whole, nothing
+// read further.
 async function takeDrop(dropped) {
   needEngine();
+  const voicePacks = [];
+  for (const item of dropped) {
+    const told = await probeVoicePack(item, dropped.length === 1);
+    if (told.pack) voicePacks.push({ ...item, value: told.value });
+  }
+  if (voicePacks.length > 0) {
+    if (dropped.length > 1) say('dropVoicePackAndFiles');
+    else await loadVoicePackFile(voicePacks[0].file, voicePacks[0].value);
+    return;
+  }
   const packs = [];
   for (const item of dropped) {
     if (!/\.zip$/i.test(item.path)) continue;
@@ -1792,6 +1933,7 @@ enqueue('opEngine', async () => {
 // meanwhile is queued after it).
 enqueue('opRestore', async () => {
   try {
+    await restoreVoicePack();
     if (wasm) await restorePack();
     if (wasm) await restoreKept(takeFocusFlag());
   } finally {

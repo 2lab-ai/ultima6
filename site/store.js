@@ -6,8 +6,10 @@
 // loaded (spec 07 H2) is one record under `hd:pack`, its file's bytes. The NPC bundles (spec 09
 // Design 5, `u6.npc-bundle/1`: each conversation script's NPC name and dialogue, made in this
 // browser from the kept files) are one record per script under `npc-bundle:` + its archive
-// letter, `/` and its item, the bundle object itself. The page calls these one at a time (its
-// operation queue), so a read never races a write or a delete.
+// letter, `/` and its item, the bundle object itself. The voice pack (spec 09 Design 4,
+// `u6.voice-pack/1`: the owner's personality voices, by actor number; numbers only) is one
+// record under `voice-pack:` + `voices`, the pack object checked. The page calls these one at a
+// time (its operation queue), so a read never races a write or a delete.
 
 const DB = 'ultima6-port';
 const STORE = 'files';
@@ -155,6 +157,31 @@ export async function loadBundles() {
 /// Removes the kept NPC bundles; resolves once the delete is committed, throws when it is not.
 export async function forgetBundles() {
   await run('readwrite', (s) => s.delete(BUNDLES));
+}
+
+const VOICE_PACK = 'voice-pack:';
+const VOICE_PACKS = IDBKeyRange.bound(VOICE_PACK, `${VOICE_PACK}\uffff`);
+
+/// Keeps the voice pack `pack` (the object a dropped voices.u6vp parses to, checked) in place of
+/// the kept one. Resolves once committed, throws when it is not (the one kept before stays).
+export async function storeVoicePack(pack) {
+  await run('readwrite', (s) => s.put(pack, `${VOICE_PACK}voices`));
+}
+
+/// The kept voice pack object, or null (none, or storage unavailable).
+export async function loadVoicePack() {
+  try {
+    const pack = await run('readonly', (s) => s.get(`${VOICE_PACK}voices`));
+    return pack ?? null;
+  } catch (err) {
+    console.warn(`could not read the kept voice pack: ${err}`);
+    return null;
+  }
+}
+
+/// Removes the kept voice pack; resolves once the delete is committed, throws when it is not.
+export async function forgetVoicePack() {
+  await run('readwrite', (s) => s.delete(VOICE_PACKS));
 }
 
 function fileOf(entry) {

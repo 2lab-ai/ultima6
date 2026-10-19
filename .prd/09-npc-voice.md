@@ -93,10 +93,10 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
 4. **Voice profiles (`site/voice/profile.js`).**
    - A profile is `{mix: [{style, w} ≤ 3], speed 0.9–1.15, pitch −2..+2 st, steps, seedSalt}`.
    - The default comes from the type-class table plus the actor number as a tie-breaker, so that neighbours in one place get distinct voices.
-   - A local voice pack, `voices.u6vp`, holds a personality-derived profile for every exported actor. It is built by `tools/speech/profile` from the NPC bundles (5) and dropped like the other packs.
-     - The LLM receives the actor's bundle and returns profile parameters only, plus a short personality note that stays local.
+   - A local voice pack, `voices.u6vp`, holds a personality-derived profile for every exported actor. It is built by `tools/speech/profile.mjs` from the NPC bundles (5) and dropped like the other packs (a `.u6vp`, or a `.json` dropped alone and told by its `format`; checked whole, kept under `voice-pack:`; "Forget voices" removes it).
+     - The LLM receives, per script, its NPC's name, look text, greeting and answers, within a fixed character budget, and returns profile parameters only, plus a short personality note that stays local. Every actor of the script gets that profile.
      - The LLM runs through the owner's llmux, so bundle text leaves the machine. The tool uses 08's upload boundary unchanged: it names the route, writes the exact first payload to a private 0600 file under `~/Games/ultima6/voice/preview/` and prints only its path and size, and sends nothing without a typed `yes` or `--send`. The same zero-request tests apply.
-     - The tool writes a coverage receipt that reconciles exported scripts against generated profiles and lists failures by (archive, item). It holds counts and numbers only.
+     - The tool writes a coverage receipt that reconciles exported scripts against generated profiles and lists failures and skipped scripts by (archive, item). It holds counts, numbers and fixed reason codes only.
    - The seed is `hash(actor, line)`, so a repeated line sounds the same.
 5. **NPC bundles (`u6.npc-bundle/1`).** One JSON per conversation script, keyed by (archive, item), with the actors that use it as a field:
    - the actors and the portrait sources;

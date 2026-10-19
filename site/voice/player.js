@@ -13,7 +13,9 @@
 //   lost (spec 09 Measured facts).
 // - Each speaker has a voice of its own (site/voice/profile.js, spec 09 Design 4): the profile
 //   made for it goes with each of its lines, and the first one made for a speaker is the one it
-//   keeps for the session, whatever its traits do after.
+//   keeps for the session, whatever its traits do after. A voice pack (`setPack`: the owner's
+//   personality voices, by actor number) gives its actors its profiles instead; setting one, or
+//   none, forgets the profiles kept, so the next line of each speaker takes the pack's.
 // - The seed of an utterance is a hash of its speaker and its text (with its voice's seedSalt),
 //   so a line repeated sounds the same.
 //
@@ -59,6 +61,7 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
   let nextId = 1;
   let endAt = 0; // when the audio scheduled so far ends (context time)
   const profiles = new Map(); // speaker to its profile, for the session
+  let pack = null; // the voice pack's profiles (actor number to profile), or null
   const heard = new Set(); // the voices spoken (their profiles as JSON)
 
   const changed = () => onStats?.();
@@ -140,14 +143,22 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
     audio = { ctx, output };
   }
 
-  // The profile of `u`'s speaker: the first one made for it.
+  // The profile of `u`'s speaker: the first one made for it (the pack's, when it has one).
   function profileOf(u) {
     let p = profiles.get(u.speaker);
     if (!p) {
-      p = profileFor(u);
+      p = profileFor(u, pack);
       profiles.set(u.speaker, p);
     }
     return p;
+  }
+
+  /// The voice pack's profiles from now on (`next`: a Map from actor number to profile, as
+  /// profile.js readPack gives it, or null for none): the profiles kept for the session are
+  /// forgotten, so each speaker's next line takes its voice from the pack (or the default).
+  function setPack(next) {
+    pack = next instanceof Map && next.size > 0 ? next : null;
+    profiles.clear();
   }
 
   /// What the engine's speech tap queued (Game.take_speech's JSON): each utterance is queued, a
@@ -291,8 +302,9 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
   }
 
   return {
-    stats, load, stop, attach, say, cancel, speedChanged, newGame,
+    stats, load, stop, attach, say, cancel, speedChanged, newGame, setPack,
     get ready() { return ready; },
     get running() { return worker !== null; },
+    get packVoices() { return pack ? pack.size : 0; },
   };
 }

@@ -240,6 +240,18 @@ export async function forgetBundles() {
   log('bundles:forget:start'); await window.__gate('bundles-forget');
   await real.forgetBundles(); log('bundles:forget:end');
 }
+export async function storeVoicePack(pack) {
+  log('voicepack:store:start'); await window.__gate('voicepack-store');
+  if (window.__fail.has('voicepack-store')) { log('voicepack:store:fail'); throw new DOMException('test: no room', 'QuotaExceededError'); }
+  await real.storeVoicePack(pack); log('voicepack:store:end');
+}
+export async function loadVoicePack() {
+  const pack = await real.loadVoicePack(); log('voicepack:load:' + (pack ? 1 : 0)); return pack;
+}
+export async function forgetVoicePack() {
+  log('voicepack:forget:start'); await window.__gate('voicepack-forget');
+  await real.forgetVoicePack(); log('voicepack:forget:end');
+}
 `;
 
 // Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch, the
@@ -637,6 +649,28 @@ export function keptBundles(page) {
       const db = req.result;
       const store = db.transaction('files').objectStore('files');
       const range = IDBKeyRange.bound('npc-bundle:', 'npc-bundle:\uffff');
+      const keys = store.getAllKeys(range);
+      const values = store.getAll(range);
+      values.onsuccess = () => {
+        db.close();
+        done({ keys: [...keys.result].sort(), byKey: Object.fromEntries(keys.result.map((k, i) => [k, values.result[i]])) });
+      };
+      values.onerror = () => fail(values.error);
+    };
+  }));
+}
+
+/// The voice pack records kept in IndexedDB (spec 09 Design 4): their keys (sorted) and the
+/// objects by key.
+export function keptVoicePacks(page) {
+  return page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const store = db.transaction('files').objectStore('files');
+      const range = IDBKeyRange.bound('voice-pack:', 'voice-pack:￿');
       const keys = store.getAllKeys(range);
       const values = store.getAll(range);
       values.onsuccess = () => {

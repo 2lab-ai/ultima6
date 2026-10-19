@@ -4348,6 +4348,229 @@ test('voices per NPC (CPU): two neighbouring speakers say one line in two voices
   console.log(`  receipt: +2 st is the line made ${(100 * (slow.seconds / r0.seconds - 1)).toFixed(1)}% longer, the same samples, at a ${(up.rate / r0.rate).toFixed(4)} times higher rate`);
 }, { needs: () => h.haveHfes() && h.haveModels() });
 
+// --- the voice pack (spec 09 Design 4) -----------------------------------------------------
+
+const PACK_SENTINEL = 'Zq5VoicePackSentinel';
+// The test's own actors (distinctive numbers) and voices: weights, paces and pitches that are
+// exact binary fractions, so the check leaves them as they are.
+const PACK_A = 29473;
+const PACK_B = 29474;
+const PACK_C = 29475; // in no pack
+const VOICE_A = { mix: [{ style: 'F4', w: 0.625 }, { style: 'M2', w: 0.375 }], speed: 0.9375, pitch: 1.8125, steps: 12, seedSalt: 2718281 };
+const VOICE_B = { mix: [{ style: 'M5', w: 1 }], speed: 1.125, pitch: -1.6875, steps: 16, seedSalt: 0 };
+
+// A u6.voice-pack/1 of `profiles` (actor to profile) as the tool writes it, `extra` laid over it.
+async function voicePack(profiles, extra = {}) {
+  const P = await import('../../site/voice/profile.js');
+  return { format: P.PACK_FORMAT, model: 'test-model', revision: P.RANGES_REVISION, profiles, ...extra };
+}
+
+test('voice pack check (no page): a pack as the tool writes it reads, its actors\' profiles from it; every other form is refused by a code that names only the kind (format, keys, shape, revision, range)', async () => {
+  const P = await import('../../site/voice/profile.js');
+  const good = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
+  const read = P.readPack(structuredClone(good));
+  assert.ok(read.ok && read.pack.size === 2, 'it reads');
+  assert.deepEqual(read.pack.get(PACK_A), VOICE_A, 'A: its profile, as it is');
+  const traits = { type: 0, worktype: 0, alignment: 0 };
+  assert.deepEqual(P.profileFor({ speaker: PACK_B, traits }, read.pack), VOICE_B, 'profileFor: the pack\'s');
+  assert.deepEqual(P.profileFor({ speaker: PACK_C, traits }, read.pack), P.profileFor({ speaker: PACK_C, traits }), 'not in it: the default');
+  assert.ok(P.readPack(await voicePack({})).ok, 'an empty pack reads');
+  assert.match(P.RANGES_REVISION, /^[0-9a-f]{8}$/, 'the revision: 8 hex digits');
+  const a = (change) => {
+    const p = structuredClone(good);
+    change(p, p.profiles[PACK_A]);
+    return p;
+  };
+  const refused = [
+    ['format', null], ['format', []], ['format', 'x'], ['format', a((p) => { p.format = 'u6.voice-pack/2'; })],
+    ['keys', a((p) => { p[PACK_SENTINEL] = 1; })], ['keys', a((p, v) => { v[PACK_SENTINEL] = 1; })],
+    ['keys', a((p, v) => { v.mix[0][PACK_SENTINEL] = 1; })],
+    ['shape', a((p) => { delete p.model; })], ['shape', a((p, v) => { delete v.seedSalt; })],
+    ['shape', a((p) => { p.profiles = [VOICE_A]; })], ['shape', a((p) => { p.profiles.x = VOICE_B; })],
+    ['shape', a((p) => { p.profiles['01'] = VOICE_B; })], ['shape', a((p) => { p.profiles[65536] = VOICE_B; })],
+    ['shape', a((p) => { p.profiles['-1'] = VOICE_B; })], ['shape', a((p, v) => { v.mix = 'F1'; })],
+    ['shape', a((p, v) => { v.mix[0] = 'F4'; })], ['shape', a((p) => { p.model = 7; })],
+    ['revision', a((p) => { p.revision = p.revision === 'ffffffff' ? '00000000' : 'ffffffff'; })],
+    ['range', a((p, v) => { v.speed = 1.5; })], ['range', a((p, v) => { v.pitch = -2.5; })], ['range', a((p, v) => { v.steps = 17; })],
+    ['range', a((p, v) => { v.steps = 1.5; })], ['range', a((p, v) => { v.seedSalt = -1; })], ['range', a((p, v) => { v.speed = '1'; })],
+    ['range', a((p, v) => { v.mix = []; })], ['range', a((p, v) => { v.mix[0].style = 'X9'; })],
+    ['range', a((p, v) => { v.mix[0].w = 0; })], ['range', a((p, v) => { v.mix[0].w = 0.5; })],
+    ['range', a((p, v) => { v.mix = [{ style: 'F1', w: 0.5 }, { style: 'F1', w: 0.5 }]; })],
+    ['range', a((p, v) => { v.mix = ['F1', 'F2', 'F3', 'F5'].map((style) => ({ style, w: 0.25 })); })],
+    ['range', a((p) => { for (let n = 0; n <= P.PACK_MAX; n += 1) p.profiles[n] = VOICE_B; })],
+  ];
+  for (const [code, value] of refused) {
+    const r = P.readPack(value);
+    assert.ok(!r.ok && r.code === code, `refused as ${code}`);
+    assert.ok(!JSON.stringify(r).includes(PACK_SENTINEL), 'the code names no key');
+  }
+  console.log(`  receipt: ${refused.length} malformed packs refused, each by its kind`);
+});
+
+// Before the page's scripts (and before voiceProbe, which wraps it): a voice Worker that runs no
+// model, answering a load with ready (on the CPU) and each line with done, so the player sends
+// each line with its profile (the probe records it) without the 400 MB model.
+function fakeVoiceWorker() {
+  window.Worker = class FakeVoiceWorker extends EventTarget {
+    postMessage(m) {
+      const reply = (data) => setTimeout(() => {
+        const e = new MessageEvent('message', { data });
+        this.dispatchEvent(e);
+        this.onmessage?.(e);
+      }, 0);
+      if (m?.type === 'load') reply({ type: 'ready', ms: 1, refetched: 0, path: 'cpu' });
+      else if (m?.type === 'speak') reply({ type: 'done', id: m.id });
+    }
+
+    terminate() {}
+  };
+}
+
+test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors their profiles (the lines sent to the worker carry the pack\'s), the voices kept for the session forgotten; kept under voice-pack: and back after a reload; told by its format under another name; a malformed one, one too large and one with other files are refused with a content-free line and change nothing; storage that refuses it keeps none; Forget voices removes it; the sentinel and the actors never reach the page\'s data, text, storage or console', async (env) => {
+  const P = await import('../../site/voice/profile.js');
+  const { context, page } = await h.openPage(env);
+  await context.addInitScript(fakeVoiceWorker);
+  await context.addInitScript(voiceProbe);
+  const text = consoleText(page);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  assert.equal((await voicesOn(page)).state, 'ready', 'voices on (no model)');
+  const traits = { type: 0, worktype: 0, alignment: 0 };
+  let turn = 0;
+  // The profile the worker is sent for a line of `speaker`, in a turn of its own.
+  async function profileSent(speaker) {
+    turn += 1;
+    const n = await page.evaluate(() => window.__speaks.length);
+    await page.evaluate((u) => window.__speech.push(u), { ...utterance(turn, 'A line of the test.'), speaker, traits });
+    await waitVoice(page, (k) => window.__speaks.length > k, n, 30_000);
+    return page.evaluate(() => window.__speaks.at(-1).profile);
+  }
+  const drop = async (name, body) => {
+    await h.dropFiles(page, [], [{ name, text: body }]);
+    await h.waitSettled(page);
+    return (await h.state(page)).status;
+  };
+  const shownPack = () => page.evaluate(() => document.body.dataset.voicePack);
+  const defaultOf = (speaker) => P.profileFor({ speaker, traits });
+  assert.deepEqual(await profileSent(PACK_A), defaultOf(PACK_A), 'before the pack: the default voice, kept for the session');
+  assert.equal(await shownPack(), '0');
+
+  // The pack: A and B take its voices, the voice kept for A forgotten; C keeps the default.
+  const pack = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
+  assert.equal(await drop('voices.u6vp', JSON.stringify(pack)), await line('voicePack', 2), 'a count only');
+  assert.equal(await shownPack(), '2');
+  assert.deepEqual(await profileSent(PACK_A), VOICE_A, 'A: the pack\'s voice (the session\'s pin forgotten)');
+  assert.deepEqual(await profileSent(PACK_B), VOICE_B, 'B: the pack\'s voice');
+  assert.deepEqual(await profileSent(PACK_C), defaultOf(PACK_C), 'C, not in it: the default');
+  let kept = await h.keptVoicePacks(page);
+  assert.deepEqual(kept.keys, ['voice-pack:voices'], 'kept under its key');
+  assert.deepEqual(kept.byKey['voice-pack:voices'], pack, 'the pack kept');
+
+  // Refused, nothing changed: the pack in use and the one kept stay.
+  const big = JSON.stringify(pack).replace('{', `{${' '.repeat(1 << 20)}`); // over 1 MiB
+  for (const [name, body, why] of [
+    ['voices.u6vp', JSON.stringify({ ...pack, [PACK_SENTINEL]: 1 }), 'voicePackErrKeys'],
+    ['voices.u6vp', JSON.stringify(await voicePack({ [PACK_A]: { ...VOICE_A, [PACK_SENTINEL]: 1 } })), 'voicePackErrKeys'],
+    ['voices.u6vp', JSON.stringify(await voicePack({ [PACK_A]: { ...VOICE_A, speed: 2 } })), 'voicePackErrRange'],
+    ['voices.u6vp', JSON.stringify(await voicePack({ [PACK_SENTINEL]: VOICE_A })), 'voicePackErrShape'],
+    ['voices.u6vp', JSON.stringify({ ...pack, revision: 'ffffffff' === P.RANGES_REVISION ? '00000000' : 'ffffffff' }), 'voicePackErrRevision'],
+    ['voices.u6vp', JSON.stringify({ ...pack, format: 'u6.voice-pack/2' }), 'voicePackErrFormat'],
+    ['voices.u6vp', `not JSON ${PACK_SENTINEL}`, 'voicePackErrJson'],
+    ['voices.u6vp', big, 'voicePackErrLarge'],
+  ]) {
+    assert.equal(await drop(name, body), await line('voicePackRefused', await line(why)), `${why}: refused, by its kind`);
+    assert.equal(await shownPack(), '2', `${why}: the pack in use stays`);
+  }
+  await h.dropFiles(page, [], [{ name: 'voices.u6vp', text: JSON.stringify(pack) }, MARKER]);
+  await h.waitSettled(page);
+  assert.equal((await h.state(page)).status, await line('dropVoicePackAndFiles'), 'with other files: refused');
+  assert.equal((await h.state(page)).state, 'running', 'the game runs on');
+  kept = await h.keptVoicePacks(page);
+  assert.deepEqual(kept.byKey['voice-pack:voices'], pack, 'the pack kept stays');
+  assert.deepEqual(await profileSent(PACK_A), VOICE_A, 'A: still the pack\'s');
+
+  // Told by its format, under another name: B's voice for A now.
+  const other = await voicePack({ [PACK_A]: VOICE_B });
+  assert.equal(await drop('renamed.json', `\n  ${JSON.stringify(other)}`), await line('voicePack', 1), 'another name: by its format');
+  assert.deepEqual(await profileSent(PACK_A), VOICE_B, 'A: the new pack\'s');
+  assert.deepEqual(await profileSent(PACK_B), defaultOf(PACK_B), 'B, not in the new pack: the default');
+
+  // Storage that refuses it: in use for this visit, none kept.
+  await page.evaluate(() => window.__fail.add('voicepack-store'));
+  assert.equal(await drop('voices.u6vp', JSON.stringify(pack)), await line('voicePackNotKept', 2, await line('voicePackOldGone')));
+  assert.deepEqual((await h.keptVoicePacks(page)).keys, [], 'none kept');
+  assert.deepEqual(await profileSent(PACK_B), VOICE_B, 'in use for this visit');
+  await page.evaluate(() => window.__fail.delete('voicepack-store'));
+  assert.equal(await drop('voices.u6vp', JSON.stringify(pack)), await line('voicePack', 2));
+  const stored = await h.log(page);
+  assert.ok(['voicepack:store:end', 'voicepack:store:fail', 'voicepack:forget:end'].every((e) => stored.includes(e)), 'through the store');
+
+  // A reload: the kept pack is back before anyone speaks.
+  await page.reload();
+  await started(page, FILES);
+  await waitVoice(page, () => document.body.dataset.voice === 'ready', null, 30_000);
+  await page.click('#mute');
+  await page.click('#mute');
+  await waitVoice(page, () => document.body.dataset.voiceGain === '1.00', null, 30_000);
+  assert.equal(await shownPack(), '2', 'back after a reload');
+  turn = 0;
+  assert.deepEqual(await profileSent(PACK_A), VOICE_A, 'A: the kept pack\'s');
+
+  // Forget voices: the pack goes with the model, off the player and out of storage.
+  await page.click('#forget-voices');
+  await waitVoice(page, (want) => document.getElementById('status').textContent === want, await line('voiceForgot'), 10_000);
+  assert.deepEqual((await h.keptVoicePacks(page)).keys, [], 'forgotten');
+  assert.equal(await shownPack(), '0');
+  assert.equal((await voicesOn(page)).state, 'ready', 'voices on again');
+  assert.deepEqual(await profileSent(PACK_A), defaultOf(PACK_A), 'A: the default again');
+  const log = await h.log(page);
+  assert.ok(log.includes('voicepack:load:1') && log.includes('voicepack:forget:end'), 'restored, then forgotten, through the store');
+
+  // Nothing of it reaches the page: the sentinel, the actors, the salt, a pack's weights.
+  const sentinels = [PACK_SENTINEL, String(PACK_A), String(PACK_B), String(VOICE_A.seedSalt), String(VOICE_A.pitch), String(VOICE_B.pitch)];
+  const where = await page.evaluate(() => JSON.stringify({
+    body: { ...document.body.dataset }, canvas: { ...document.getElementById('screen').dataset },
+    text: document.body.innerText, storage: { ...localStorage }, csp: window.__csp,
+  }));
+  assert.ok(sentinels.every((s) => !where.includes(s)), 'not in the page\'s data, text or storage');
+  assert.ok(sentinels.every((s) => !text.some((m) => m.includes(s))), 'not in the console');
+  assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP report');
+}, { needs: h.haveHfes });
+
+test('Forget voices removes the voice pack even when the model\'s caches cannot be removed (their list refused, or a delete): the line says not everything was removed, the pack is off the page and out of storage, and a reload does not bring it back', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  const pack = JSON.stringify(await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B }));
+  const dropPack = async () => {
+    await h.dropFiles(page, [], [{ name: 'voices.u6vp', text: pack }]);
+    await h.waitSettled(page);
+    assert.equal((await h.state(page)).status, await line('voicePack', 2), 'the pack loaded');
+    assert.deepEqual((await h.keptVoicePacks(page)).keys, ['voice-pack:voices'], 'and kept');
+  };
+  const failed = await line('voiceForgetFailed');
+  for (const [what, refuse] of [
+    ['the caches\' list refused', () => { caches.keys = () => Promise.reject(new DOMException('test: refused', 'SecurityError')); }],
+    ['a cache\'s delete refused', async () => {
+      await caches.open('u6-voice-test');
+      caches.delete = () => Promise.reject(new DOMException('test: refused', 'SecurityError'));
+    }],
+  ]) {
+    await dropPack();
+    await page.evaluate(refuse);
+    await page.click('#forget-voices');
+    await waitVoice(page, (want) => document.getElementById('status').textContent === want, failed, 10_000);
+    await h.waitSettled(page);
+    assert.deepEqual((await h.keptVoicePacks(page)).keys, [], `${what}: the pack out of storage`);
+    assert.equal(await page.evaluate(() => document.body.dataset.voicePack), '0', `${what}: and off the page`);
+    await page.evaluate(() => { delete caches.keys; delete caches.delete; });
+  }
+  await page.reload();
+  await h.waitSettled(page);
+  assert.equal(await page.evaluate(() => document.body.dataset.voicePack), '0', 'a reload does not bring it back');
+  assert.ok((await h.log(page)).includes('voicepack:load:0'), 'none kept');
+});
+
 // --- NPC bundles (spec 09 Design 5) --------------------------------------------------------
 
 // FNV-1a 64 of `bytes` as 16 lower-case hex digits (the catalog's and the bundles' hash).
