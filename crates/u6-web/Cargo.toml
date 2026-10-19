@@ -11,6 +11,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 u6-core.workspace = true
+# Spec 08: the Hangul table's type (the table itself is site/fonts/galmuri7-hangul.bin).
+u6-formats.workspace = true
 u6-intake.workspace = true
 u6-render.workspace = true
 # Spec 07 H2: the HD pack the page loads (its strict reader) and the drop classifier.

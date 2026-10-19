@@ -95,6 +95,8 @@ pub struct State {
     pub saveload: crate::saveload::SaveLoad,
     /// Port-only (spec 09): the speech tap, off unless the platform turns voices on.
     pub speech: crate::speech::SpeechTap,
+    /// Port-only (spec 08): the locale layer, none unless the platform installs a pack.
+    pub locale: crate::locale::LocaleState,
 }
 
 /// A game file is missing or malformed.

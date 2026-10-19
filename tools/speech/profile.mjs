@@ -12,7 +12,8 @@
 //                         skipped or failed by (archive, item) with a fixed reason
 //
 // <out> is ~/Games/ultima6/voice/ unless --out names another; it and preview/ are made 0700,
-// every file in them 0600.
+// every file in them 0600. Either one that is a symbolic link (or not a directory) is refused
+// with no request, and its target is left as it is.
 //
 // The upload boundary (spec 08 Rights, used unchanged): the bundles hold the owner's game text,
 // and a request sends one NPC's of it to llmux on this machine, then to the model's provider.
@@ -44,7 +45,7 @@
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -225,7 +226,7 @@ export function providerOf(model) {
 }
 
 /// Whether `url` is an address of this machine.
-function local(url) {
+export function local(url) {
   return ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
 }
 
@@ -252,10 +253,45 @@ export function llmuxTransport(base) {
 
 // --- files -------------------------------------------------------------------------------------
 
-/// `dir` made (with its parents) and set to 0700.
-async function privateDir(dir) {
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  await chmod(dir, 0o700);
+/// One of the directories the tool owns (`what`: the output directory or its preview directory)
+/// is a symbolic link or not a directory: refused. The message names the rule only.
+export class NotOwnDir extends Error {
+  constructor(what) {
+    super(`the ${what} is a symbolic link or not a directory`);
+    this.name = 'NotOwnDir';
+  }
+}
+
+/// `dir` made (with its parents) and set to 0700. When what is at `dir` itself is a symbolic link
+/// or not a directory it is refused with a NotOwnDir (`what` names it) before anything is
+/// changed: the link is not followed, its target's mode and contents stay as they are. The mode is
+/// set through a handle opened on the directory itself (O_DIRECTORY | O_NOFOLLOW), so a link put
+/// there after the check does not take it either. The directories above `dir` are the owner's
+/// choice and are not checked.
+export async function privateDir(dir, what = 'output directory') {
+  const refuse = async () => {
+    const st = await lstat(dir).catch(() => null);
+    return st !== null && (st.isSymbolicLink() || !st.isDirectory());
+  };
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    if (await refuse()) throw new NotOwnDir(what);
+    throw err;
+  }
+  if (await refuse()) throw new NotOwnDir(what);
+  let f;
+  try {
+    f = await open(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch (err) {
+    if (err?.code === 'ELOOP' || err?.code === 'ENOTDIR') throw new NotOwnDir(what);
+    throw err;
+  }
+  try {
+    await f.chmod(0o700);
+  } finally {
+    await f.close();
+  }
 }
 
 // Create a new file only, never through a link: O_CREAT | O_EXCL (a name that exists, a symlink
@@ -333,9 +369,11 @@ export async function holdLock(dir) {
 // --- the run -----------------------------------------------------------------------------------
 
 /// Sends `jobs` (at most `jobs` at a time, each try `timeoutMs` long) through `transport` until
-/// all are answered or `stop` aborts; each is tried twice at most. Returns a result per job
-/// ({ok, profile, note} or {ok: false, reason}) and the counts.
-export async function sendAll(list, { transport, jobs, timeoutMs, stop, progress }) {
+/// all are answered or `stop` aborts; each is tried `tries` times at most (twice by default).
+/// An answer is read by `parse` (this tool's profileOfAnswer by default: what it gives, or null
+/// for none). Returns a result per job ({ok, ...what parse gave} or {ok: false, reason}) and the
+/// counts. tools/i18n/translate.mjs sends through it too.
+export async function sendAll(list, { transport, jobs, timeoutMs, stop, progress, parse = profileOfAnswer, tries = 2 }) {
   const results = new Array(list.length);
   const counts = { requests: 0, retried: 0, input: 0, output: 0, usage: 0 };
   let halted = '';
@@ -343,7 +381,7 @@ export async function sendAll(list, { transport, jobs, timeoutMs, stop, progress
   let done = 0;
   async function one(job) {
     let reason = '';
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < tries; attempt += 1) {
       if (stop.aborted) return { ok: false, reason: 'interrupted' };
       if (halted) return { ok: false, reason: 'not-sent' };
       if (attempt > 0) counts.retried += 1;
@@ -372,7 +410,7 @@ export async function sendAll(list, { transport, jobs, timeoutMs, stop, progress
         counts.output += output;
       }
       const content = contentOf(r.json);
-      const got = profileOfAnswer(content);
+      const got = parse(content, job);
       if (got) return { ok: true, ...got };
       reason = content.trim() ? 'invalid' : 'empty';
     }
@@ -470,7 +508,7 @@ export function parseArgs(argv) {
 
 // Asks for `yes` on the terminal: 'yes', 'no' (any other answer, an empty one, or the input's
 // end) or 'interrupted' (Ctrl-C at the prompt, or SIGINT).
-function ask(question, { stdin, stdout, signals }) {
+export function ask(question, { stdin, stdout, signals }) {
   return new Promise((done) => {
     const rl = createInterface({ input: stdin, output: stdout, terminal: true });
     let settled = false;
@@ -562,7 +600,8 @@ export async function main(argv, {
     await privateDir(o.out);
     release = await holdLock(o.out);
   } catch (err) {
-    say(`profile: ${o.out} cannot be used (${err?.code ?? err?.name ?? 'Error'}): nothing was sent.`);
+    if (err instanceof NotOwnDir) say(`profile: ${err.message}: nothing was sent.`);
+    else say(`profile: ${o.out} cannot be used (${err?.code ?? err?.name ?? 'Error'}): nothing was sent.`);
     return 2;
   }
   if (!release) {
@@ -583,11 +622,12 @@ async function consentAndSend(o, plan, route, { transport, stdin, stdout, isTTY,
   const previewDir = join(o.out, 'preview');
   const preview = join(previewDir, `first-request-${process.pid}-${random()}.json`);
   try {
-    await privateDir(previewDir);
+    await privateDir(previewDir, 'preview directory');
     const bytes = await writePrivate(preview, plan.jobs[0].body);
     say(`The exact first request: ${preview} (${bytes} bytes).`);
   } catch (err) {
-    say(`profile: the preview cannot be written (${err?.code ?? err?.name ?? 'Error'}): nothing was sent.`);
+    if (err instanceof NotOwnDir) say(`profile: ${err.message}: nothing was sent.`);
+    else say(`profile: the preview cannot be written (${err?.code ?? err?.name ?? 'Error'}): nothing was sent.`);
     return 2;
   }
   if (o.dryRun) {

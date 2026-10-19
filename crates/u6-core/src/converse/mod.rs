@@ -50,6 +50,8 @@ mod vars;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_locale;
+#[cfg(test)]
 mod tests_ops;
 #[cfg(test)]
 mod tests_real;
@@ -62,8 +64,8 @@ pub(crate) use party::member_with_object;
 pub use party::{actor_name, join_party, leave_party, on_screen};
 pub(crate) use script::script_item;
 pub use script::{
-    PORTRAIT_LETTERS, SCRIPT_LEN, draw_portrait, load_portrait, load_script, portrait_pixels,
-    portrait_ref, portraits,
+    PORTRAIT_LETTERS, SCRIPT_LEN, archive_name, draw_portrait, load_portrait, load_script,
+    portrait_pixels, portrait_ref, portraits,
 };
 pub use start::{begin, converse, talk};
 pub use text::{ConverseText, Msg};
@@ -127,6 +129,9 @@ pub struct ConverseState {
     pub out: OutFallback,
     /// Port-only: ops run since the last forced yield (bounded-work checkpoint, spec 03 §1).
     pub steps: u32,
+    /// Port-only (spec 08): the archive letter and item of the script last loaded into
+    /// `script` (the locale layer's key), `None` before a load.
+    pub script_key: Option<(u8, u16)>,
 }
 
 impl Default for ConverseState {
@@ -153,6 +158,7 @@ impl Default for ConverseState {
             fault: false,
             out: OutFallback::default(),
             steps: 0,
+            script_key: None,
         }
     }
 }

@@ -252,6 +252,19 @@ export async function forgetVoicePack() {
   log('voicepack:forget:start'); await window.__gate('voicepack-forget');
   await real.forgetVoicePack(); log('voicepack:forget:end');
 }
+export async function storeLocalePack(bytes) {
+  log('locale:store:start'); await window.__gate('locale-store');
+  if (window.__fail.has('locale-store')) { log('locale:store:fail'); return false; }
+  const kept = await real.storeLocalePack(bytes); log('locale:store:end:' + kept); return kept;
+}
+export async function loadLocalePack() {
+  const bytes = await real.loadLocalePack(); log('locale:load:' + (bytes ? 1 : 0)); return bytes;
+}
+export async function forgetLocalePack() {
+  log('locale:forget:start'); await window.__gate('locale-forget');
+  if (window.__fail.has('locale-forget')) { log('locale:forget:fail'); throw new Error('test: storage refused the delete'); }
+  await real.forgetLocalePack(); log('locale:forget:end');
+}
 `;
 
 // Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch, the
@@ -680,6 +693,57 @@ export function keptVoicePacks(page) {
       values.onerror = () => fail(values.error);
     };
   }));
+}
+
+/// The Korean pack kept in the page's IndexedDB (spec 08: the record `locale:ko`), its bytes as a
+/// plain array, or null.
+export function keptLocalePack(page) {
+  return page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const get = db.transaction('files').objectStore('files').get('locale:ko');
+      get.onsuccess = () => {
+        db.close();
+        done(get.result instanceof Uint8Array ? [...get.result] : null);
+      };
+      get.onerror = () => fail(get.error);
+    };
+  }));
+}
+
+/// Replaces, in the page's kept game files (the record `extracted`), the bytes of every file of
+/// bare name `name` (case ignored) by `bytes`, in the page: the user's other files never leave
+/// it. Returns how many were replaced.
+export function replaceKept(page, name, bytes) {
+  return page.evaluate(({ name, bytes }) => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('files', 'readwrite');
+      const store = tx.objectStore('files');
+      const get = store.get('extracted');
+      let n = 0;
+      get.onsuccess = () => {
+        const files = get.result ?? [];
+        for (const f of files) {
+          if (f.path.split('/').pop().toLowerCase() === name) {
+            f.bytes = new Uint8Array(bytes);
+            n += 1;
+          }
+        }
+        store.put(files, 'extracted');
+      };
+      tx.oncomplete = () => {
+        db.close();
+        done(n);
+      };
+      tx.onerror = () => fail(tx.error);
+    };
+  }), { name, bytes });
 }
 
 /// The conversation scripts the kept game files hold, read in the page from their converse.a

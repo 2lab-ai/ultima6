@@ -797,6 +797,17 @@ impl Engine {
         crate::speech::set_enabled(&mut self.state.borrow_mut(), on);
     }
 
+    /// Port-only (spec 08): installs the locale pack `pack` on the game, checked against its
+    /// files first ([`crate::locale::install`]), with the Hangul table `hangul` (from the
+    /// platform). A mismatch changes nothing.
+    pub fn install_locale(
+        &mut self,
+        pack: Rc<crate::locale::Pack>,
+        hangul: Option<Rc<u6_formats::font::HangulFont>>,
+    ) -> Result<(), crate::locale::Mismatch> {
+        crate::locale::install(&mut self.state.borrow_mut(), self.io.files(), pack, hangul)
+    }
+
     /// Port-only (spec 09 Design 1): the utterances NPCs said since the previous call (a channel
     /// apart from the log; the text is the user's game text and is never logged).
     pub fn take_speech(&mut self) -> Vec<crate::speech::Utterance> {

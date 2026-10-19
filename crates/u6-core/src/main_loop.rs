@@ -266,15 +266,18 @@ fn relaunch(state: &RefCell<State>, io: &Io) {
     take_over(&mut state.borrow_mut(), fresh, io);
 }
 
-/// The new process `fresh` takes the place of `s` ([`relaunch`]): the RNG, the save state and
-/// the sound log go on, the character `u` made is read in. Its records' versions start again at
-/// 0 while the screen buffers keep what the old records drew, so every source plane is reset to
-/// classic, the colours untouched ([`Io::reset_src_plane`]): no old pixel can match a new
-/// version (spec 07 HD0).
+/// The new process `fresh` takes the place of `s` ([`relaunch`]): the RNG, the save state, the
+/// sound log and the locale layer go on, the character `u` made is read in. Its records'
+/// versions start again at 0 while the screen buffers keep what the old records drew, so every
+/// source plane is reset to classic, the colours untouched ([`Io::reset_src_plane`]): no old
+/// pixel can match a new version (spec 07 HD0).
 pub(crate) fn take_over(s: &mut State, mut fresh: State, io: &Io) {
     fresh.rng = s.rng;
     fresh.saveload = std::mem::take(&mut s.saveload);
     fresh.sound.continue_calls(&mut s.sound);
+    // Port-only (spec 08): the locale pack the platform installed stays with the game.
+    fresh.locale = std::mem::take(&mut s.locale);
+    crate::locale::apply(&mut fresh);
     if let Some(objlist) = fresh.saveload.objlist.clone() {
         crate::saveload::objlist::decode(&mut fresh, &objlist);
         fresh.place_party();

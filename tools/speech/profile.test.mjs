@@ -284,6 +284,42 @@ test('the writer makes its temporary file exclusively: a symlink planted at its 
   await rm(f.dir, { recursive: true });
 });
 
+// A directory the test made outside the output directory, as a planted link would name it: its
+// mode and what it holds, to compare after a run.
+async function decoy(dir) {
+  await mkdir(dir, { recursive: true });
+  await chmod(dir, 0o755);
+  await writeFile(join(dir, 'kept.txt'), 'the owner\'s own file');
+  return async () => ({ mode: (await stat(dir)).mode & 0o777, names: (await readdir(dir)).sort(), kept: await readFile(join(dir, 'kept.txt'), 'utf8') });
+}
+
+test('a symbolic link (or a file) where the output directory or its preview directory goes is refused before any request, with a line that names the rule only; the link\'s target keeps its mode and contents', async () => {
+  for (const where of ['output', 'preview', 'file']) {
+    const f = await fixture();
+    const target = join(f.dir, 'elsewhere');
+    const seen = await decoy(target);
+    const before = await seen();
+    if (where === 'output') await symlink(target, f.out);
+    else if (where === 'file') await writeFile(f.out, 'not a directory');
+    else {
+      await mkdir(f.out, { recursive: true });
+      await symlink(target, join(f.out, 'preview'));
+    }
+    const t = fakeTransport();
+    const out = output();
+    const code = await main([f.bundles, '--out', f.out, '--send'], { transport: t.send, stdout: out, isTTY: false, signals: new EventEmitter() });
+    assert.equal(code, 2, `${where}: refused`);
+    assert.equal(t.bodies.length, 0, `${where}: no request`);
+    const dir = where === 'preview' ? 'preview directory' : 'output directory';
+    assert.ok(out.text.includes(`profile: the ${dir} is a symbolic link or not a directory: nothing was sent.`), `${where}: the rule's line`);
+    assert.equal(previewPrinted(out.text), null, `${where}: no preview`);
+    assert.deepEqual(await seen(), before, `${where}: the target's mode and contents unchanged`);
+    if (where === 'preview') assert.ok(!existsSync(join(f.out, '.lock')), 'the lock goes with the run');
+    nothingTold(out.text);
+    await rm(f.dir, { recursive: true });
+  }
+});
+
 test('with --send: the pack covers every actor of the scripts profiled, checked as the page checks it; an invalid answer is asked again once, then counted; the coverage reconciles; the files are 0600', async () => {
   const f = await fixture();
   const t = fakeTransport();

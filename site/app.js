@@ -98,14 +98,26 @@
 // Nothing is uploaded, and the bundles are never logged or shown: the status line gives their
 // count. Storage that refuses them still gets the download, with a note. "Forget NPC bundles"
 // removes them from this browser.
+//
+// The Korean pack (spec 08, slice K1: `ko.u6lp`, which the owner's local tool tools/i18n makes
+// from the NPC bundles): a dropped *.u6lp is read whole (at most max_locale_pack_bytes) and
+// checked by the engine's strict reader (LocalePack; refused with a line that names only the
+// rule broken, nothing changed), kept in IndexedDB under locale:ko and shown as counts only.
+// While the page is in 한글 every game it starts takes it (Game.set_locale, before the game's
+// first step): checked against that game's files (a mismatch: the game runs in English, and the
+// line says which part differs), its conversation lines then show in Korean in the Hangul font;
+// every other text stays English. Without a pack, 한글 is the page's own text over the game's
+// English, with one line pointing at tools/i18n. Dropping or forgetting the pack, or switching
+// the language at the chooser's OK, restarts the game from the kept files (the save untouched)
+// when what it shows changes. "Forget the Korean pack" removes it from the page and the browser.
 import init, {
-  Game, HdPack, NpcBundles, PackProbe, budget_ms, input_too_large, max_input_bytes,
-  max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
+  Game, HdPack, LocalePack, NpcBundles, PackProbe, budget_ms, input_too_large, max_input_bytes,
+  max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
 } from './pkg/u6_web.js';
 import {
-  collect, forgetBundles, forgetFiles, forgetPack, forgetSaves, forgetVoicePack, loadBundles,
-  loadFiles, loadPack, loadSaves, loadVoicePack, saveFiles, storeBundles, storePack, storeSaves,
-  storeVoicePack,
+  collect, forgetBundles, forgetFiles, forgetLocalePack, forgetPack, forgetSaves, forgetVoicePack,
+  loadBundles, loadFiles, loadLocalePack, loadPack, loadSaves, loadVoicePack, saveFiles,
+  storeBundles, storeLocalePack, storePack, storeSaves, storeVoicePack,
 } from './store.js';
 import { TEXT } from './i18n.js';
 import { CACHE_PREFIX, REVISION } from './voice/model.js';
@@ -119,6 +131,8 @@ const picker = document.getElementById('picker');
 const forget = document.getElementById('forget');
 const forgetSave = document.getElementById('forget-save');
 const forgetHd = document.getElementById('forget-hd');
+const forgetKo = document.getElementById('forget-ko');
+const localeNote = document.getElementById('locale-note');
 const mute = document.getElementById('mute');
 const hdButton = document.getElementById('hd');
 const restart = document.getElementById('restart');
@@ -168,7 +182,10 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // data-voice-error = the last failure's code, data-voice-gain = the voice gain, data-voice-path =
 // where the model runs once ready (gpu, cpu), data-voice-pack = the voices of the voice pack
 // loaded (0 without one), and the player's counts and timings (reflectVoice), never what is
-// said.
+// said; data-locale-pack = the lines and conversations of the Korean pack loaded (runs,scripts)
+// or none, and on the canvas data-locale = what the game on screen took of it (on, mismatch,
+// off) with data-locale-hits / data-locale-misses = the runs it put from it and those it did
+// not have (counts only).
 function reflect(state) {
   if (state) document.body.dataset.state = state;
   const live = game && !crashed;
@@ -222,6 +239,7 @@ function setLang(next) {
   for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
   for (const el of document.querySelectorAll('[data-i18n-label]')) el.setAttribute('aria-label', t(el.dataset.i18nLabel));
   setupNote.hidden = lang === 'en';
+  reflectLocale();
   mute.textContent = t(audio.muted ? 'unmute' : 'mute');
   showSpeed();
   showStorage();
@@ -678,6 +696,135 @@ async function restoreVoicePack() {
   const read = readPack(value);
   if (read.ok) attachVoicePack(read.pack);
   else console.warn(`the kept voice pack is not used: ${read.code}`);
+}
+
+// --- the Korean pack (spec 08, slice K1) -----------------------------------------------------
+
+const LOCALE_PACK_NAME = /\.u6lp$/i;
+let koPack = null; // the LocalePack loaded (kept under locale:ko), or null
+let localeShown = 'off'; // what the game on screen took of it: off, on, mismatch
+let localeWhy = ''; // the mismatch's sentence (a fixed text of the engine's)
+
+// Whether a game started now takes the pack: the page in 한글 with a pack loaded.
+const wantLocale = () => lang === 'ko' && koPack !== null;
+
+// The pack's counts on the body, the game's on the canvas, the notes on the game's text.
+function reflectLocale() {
+  document.body.dataset.localePack = koPack ? koPack.counts().join(',') : 'none';
+  const live = game && !crashed;
+  canvas.dataset.locale = live ? localeShown : 'off';
+  localeNote.hidden = lang !== 'ko' || koPack !== null;
+  localeNote.textContent = t('gameText');
+  setupNote.textContent = t(koPack ? 'gameTextPack' : 'gameText');
+}
+
+// The game's runs put from the pack and those it did not have (counts only), each frame.
+function reflectLocaleCounts() {
+  if (localeShown === 'off') return;
+  const [, hits, misses] = game.locale_counts();
+  canvas.dataset.localeHits = String(hits);
+  canvas.dataset.localeMisses = String(misses);
+}
+
+// `next`, just started, takes the pack when the page wants it (before its first step).
+function attachLocale(next) {
+  localeShown = 'off';
+  localeWhy = '';
+  canvas.dataset.localeHits = '0';
+  canvas.dataset.localeMisses = '0';
+  if (!wantLocale()) return;
+  localeWhy = next.set_locale(koPack);
+  localeShown = localeWhy ? 'mismatch' : 'on';
+}
+
+// The line a start adds about the pack: its counts, or why the game did not take it.
+function localeLine() {
+  if (localeShown === 'on') {
+    const [runs, scripts] = koPack.counts();
+    return `\n${t('koPackOn', runs, scripts)}`;
+  }
+  return localeShown === 'mismatch' ? `\n${t('koPackMismatch', localeWhy)}` : '';
+}
+
+// The game on screen again from the kept files (the save as stored), when what it should show
+// of the pack is not what it shows, or (`changed`: a new pack) it should show the new one:
+// `note` first in the status; else just `note`.
+async function restartForLocale(note, changed = false) {
+  const differs = (localeShown !== 'off') !== wantLocale();
+  if (game && !crashed && (differs || (changed && wantLocale()))) {
+    await pausingSaves(() => restoreKept(false, note));
+  } else {
+    setStatus(note);
+  }
+}
+
+// A dropped Korean pack: read (at most max_locale_pack_bytes), checked whole by the engine,
+// kept in this browser in place of the one before; the game on screen restarts with it when the
+// page is in 한글. One that does not check out is refused with the rule it breaks and nothing
+// changes. When the browser does not keep it, it works for this visit only and the one kept
+// before is removed (else the next visit would bring it back unsaid).
+async function loadLocalePackFile(file) {
+  needEngine();
+  const limit = max_locale_pack_bytes();
+  if (file.size > limit) {
+    say('koPackTooLarge', Math.floor(limit / 2 ** 20));
+    return;
+  }
+  let bytes = new Uint8Array(await file.arrayBuffer());
+  let next;
+  try {
+    next = LocalePack.load(bytes);
+  } catch (err) {
+    say('koPackRefused', message(err));
+    return;
+  }
+  koPack?.free();
+  koPack = next;
+  reflectLocale();
+  const kept = await storeLocalePack(bytes);
+  bytes = null;
+  let note = t('koPackKept');
+  if (!kept) {
+    let old = t('koPackOldGone');
+    try {
+      await forgetLocalePack();
+    } catch (err) {
+      console.warn(`could not remove the Korean pack kept before: ${errorKind(err)}`);
+      old = t('koPackOldStays');
+    }
+    note = t('koPackNotKept', old);
+  }
+  const [runs, scripts] = koPack.counts();
+  await restartForLocale(`${t('koPackLoaded', runs, scripts)}${note}`, true);
+}
+
+// The pack kept from the last visit, loaded before the first game starts. One that no longer
+// reads is left where it is and not used.
+async function restoreLocalePack() {
+  const bytes = await loadLocalePack();
+  if (!bytes) return;
+  try {
+    koPack = LocalePack.load(bytes);
+  } catch (err) {
+    console.warn(`the kept Korean pack is not used: ${message(err)}`);
+  }
+  reflectLocale();
+}
+
+// "Forget the Korean pack": off the page at once, out of the browser's storage, and the game on
+// screen restarted in English if it had it.
+async function forgetKoPack() {
+  koPack?.free();
+  koPack = null;
+  reflectLocale();
+  let line = t('koPackForgot');
+  try {
+    await forgetLocalePack();
+  } catch (err) {
+    console.warn(`could not remove the Korean pack: ${errorKind(err)}`);
+    line = t('koPackForgetFailed');
+  }
+  await restartForLocale(line);
 }
 
 // --- saves ---------------------------------------------------------------------------------
@@ -1172,6 +1319,7 @@ function frame(now) {
     canvas.dataset.program = game.program();
     canvas.dataset.name = game.leader_name();
     canvas.dataset.keys = String(game.keys_pending());
+    reflectLocaleCounts();
     paced(now, dt, k);
     if (done || game.finished()) {
       ended();
@@ -1241,8 +1389,10 @@ async function boot(next, origin) {
     console.warn(`sound is off: ${message(err)}`);
   }
   if (hdPack) next.set_hd_pack(hdPack);
+  attachLocale(next);
   applyHd();
   reflectPack();
+  reflectLocale();
   restart.hidden = true;
   reflect('running');
   startLoop();
@@ -1375,7 +1525,7 @@ async function importFiles(dropped) {
     const saved = imported ? await adoptSaves(imported) : '';
     const kept = (await keep(next)) ? t('filesKept', next.game_files()) : t('filesNotKept');
     const resumed = next.save_files() > 0 ? t('resumed') : '';
-    setStatus(`${lead}${report}\n${t('started')}${resumed}${saved}${kept}\n${t('howToPlay')}`);
+    setStatus(`${lead}${report}\n${t('started')}${resumed}${saved}${kept}${localeLine()}\n${t('howToPlay')}`);
   } finally {
     if (started) {
       if (!crashed) next.release_kept();
@@ -1423,7 +1573,7 @@ async function restoreKept(focus, note = '', imported = null) {
     if (focus) canvas.focus();
     const saved = imported ? await adoptSaves(imported) : '';
     const what = t(next.save_files() > 0 ? 'keptResumed' : 'keptNew');
-    setStatus(`${lead}${report}\n${t('startedKept', what)}${saved}\n${t('howToPlay')}`);
+    setStatus(`${lead}${report}\n${t('startedKept', what)}${saved}${localeLine()}\n${t('howToPlay')}`);
   } finally {
     if (!started) next.free();
   }
@@ -1524,11 +1674,17 @@ async function pausingSaves(op) {
   }
 }
 
-// A drop: a voice pack alone or an HD pack alone is loaded as one; anything else is imported as
-// game files. A drop holding a pack and other files (or two packs) is refused as a whole, nothing
-// read further.
+// A drop: a Korean pack, a voice pack or an HD pack alone is loaded as one; anything else is
+// imported as game files. A drop holding a pack and other files (or two packs) is refused as a
+// whole, nothing read further. A Korean pack is told by its name (*.u6lp) alone.
 async function takeDrop(dropped) {
   needEngine();
+  const koPacks = dropped.filter((item) => LOCALE_PACK_NAME.test(item.path));
+  if (koPacks.length > 0) {
+    if (dropped.length > 1) say('dropKoPackAndFiles');
+    else await loadLocalePackFile(koPacks[0].file);
+    return;
+  }
   const voicePacks = [];
   for (const item of dropped) {
     const told = await probeVoicePack(item, dropped.length === 1);
@@ -1730,6 +1886,11 @@ function applySetup() {
       } else if (await downloadPack(chosen)) {
         keepSetup();
       }
+      // Spec 08: a switch of the language the game on screen shows the Korean pack in or not
+      // restarts it from the kept files (the save untouched).
+      if (setup.hidden && game && !crashed && (localeShown !== 'off') !== wantLocale()) {
+        await pausingSaves(() => restoreKept(false));
+      }
     } catch (err) {
       console.error(err);
       setStatus(t('failed', t('opPack'), message(err)));
@@ -1859,6 +2020,10 @@ forgetHd.addEventListener('click', () => {
   if (queued > 0) say('forgetPackLater');
   enqueue('opForgetPack', forgetHdPack);
 });
+forgetKo.addEventListener('click', () => {
+  if (queued > 0) say('forgetKoLater');
+  enqueue('opForgetKo', forgetKoPack);
+});
 voicesButton.addEventListener('click', () => {
   gesture();
   toggleVoices();
@@ -1925,6 +2090,7 @@ enqueue('opEngine', async () => {
   forget.disabled = false;
   forgetSave.disabled = false;
   forgetHd.disabled = false;
+  forgetKo.disabled = false;
   npcBundles.disabled = false;
   forgetNpcBundles.disabled = false;
   reflect('idle');
@@ -1935,6 +2101,7 @@ enqueue('opRestore', async () => {
   try {
     await restoreVoicePack();
     if (wasm) await restorePack();
+    if (wasm) await restoreLocalePack();
     if (wasm) await restoreKept(takeFocusFlag());
   } finally {
     if (wasm) picker.disabled = false;

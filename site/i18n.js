@@ -2,7 +2,8 @@
 // buttons of index.html (its data-i18n, data-i18n-title and data-i18n-label attributes name
 // the keys) and the status and error lines of app.js. A value is a string or a function of
 // the values the line shows. The game's own text (the engine's frames, its reports and the
-// reasons it gives) is not here and stays English.
+// reasons it gives) is not here and stays English; a Korean pack (spec 08) the owner makes
+// from his own files puts its conversations in Korean.
 const mib = (n) => (n / 2 ** 20).toFixed(1);
 const files = (n) => `${n} file${n === 1 ? '' : 's'}`;
 
@@ -29,7 +30,8 @@ export const TEXT = {
     behind: 'behind',
     max: 'Max',
     language: 'Language',
-    gameText: 'The game\'s own text is in English for now.',
+    gameText: 'The game\'s own text is in English. To read the conversations in Korean, make a Korean pack (ko.u6lp) from your own files with the project\'s local tool, tools/i18n, and drop it here.',
+    gameTextPack: 'The conversations your Korean pack holds show in Korean; all other text of the game stays English.',
     mmpx: 'MMPX (no pack)',
     droppedPack: 'Dropped pack',
     ok: 'OK',
@@ -155,6 +157,22 @@ export const TEXT = {
     npcExported: (n, file) => `NPC bundles: ${n} conversation scripts, each with its NPC's name and dialogue, are kept in this browser and downloaded as ${file}.`,
     npcNotKept: (n, file) => `NPC bundles: ${n} conversation scripts, each with its NPC's name and dialogue, are downloaded as ${file}; this browser could not keep them (any kept before stay).`,
     npcForgot: 'The NPC bundles were removed from this browser.',
+    forgetKo: 'Forget the Korean pack',
+    opKoPack: 'Loading the Korean pack',
+    opForgetKo: 'Removing the Korean pack',
+    forgetKoLater: 'The Korean pack will be removed after the current step…',
+    koPackLoaded: (runs, scripts) => `Korean pack loaded: ${runs} lines of ${scripts} conversations; they show in Korean while the page is in 한글.`,
+    koPackOn: (runs, scripts) => `Korean pack: ${runs} lines of ${scripts} conversations show in Korean; all other text stays English.`,
+    koPackMismatch: (why) => `The Korean pack is not used with these game files: ${why}.`,
+    koPackKept: ' It is kept in this browser for the next visit.',
+    koPackNotKept: (old) => ` (It could not be kept in this browser: it works until the page is left, and ${old}.)`,
+    koPackOldGone: 'no Korean pack is kept for the next visit',
+    koPackOldStays: 'a Korean pack kept here before, if any, stays and comes back on the next visit',
+    koPackTooLarge: (limit) => `The Korean pack was not loaded: the file is over the ${limit} MiB a pack can be. Nothing was changed.`,
+    koPackRefused: (why) => `The Korean pack was not loaded: ${why}. Nothing was changed.`,
+    koPackForgot: 'The Korean pack was removed from this page and this browser; the conversations show in English.',
+    koPackForgetFailed: 'The Korean pack is off on this page, but this browser did not remove it.',
+    dropKoPackAndFiles: 'The drop holds a Korean pack and other files: drop the Korean pack on its own. Nothing was loaded.',
   },
   ko: {
     canvasLabel: '게임 화면. 클릭하거나 Tab으로 옮겨 오면 화살표 키로 걷고 글자 키는 게임 명령입니다. Tab을 누르면 빠져나갑니다.',
@@ -178,7 +196,8 @@ export const TEXT = {
     behind: '지연',
     max: '최대',
     language: '언어',
-    gameText: '게임 안의 글(대화, 메뉴, 이름)은 아직 영어로 나옵니다.',
+    gameText: '게임 안의 글은 영어로 나옵니다. 대화를 한글로 보려면 이 프로젝트의 로컬 도구 tools/i18n으로 당신의 파일에서 한글 팩(ko.u6lp)을 만들어 여기에 놓으세요.',
+    gameTextPack: '한글 팩에 든 대화는 한글로 나옵니다. 게임의 다른 글은 모두 영어로 나옵니다.',
     mmpx: 'MMPX (팩 없음)',
     droppedPack: '직접 놓은 팩',
     ok: '확인',
@@ -304,5 +323,21 @@ export const TEXT = {
     npcExported: (n, file) => `NPC 대사 묶음: 대화 스크립트 ${n}개(각각 NPC의 이름과 대사)를 이 브라우저에 보관하고 ${file}(으)로 내려받았습니다.`,
     npcNotKept: (n, file) => `NPC 대사 묶음: 대화 스크립트 ${n}개(각각 NPC의 이름과 대사)를 ${file}(으)로 내려받았습니다. 이 브라우저에는 보관하지 못했습니다(전에 보관한 것은 그대로 남습니다).`,
     npcForgot: 'NPC 대사 묶음을 이 브라우저에서 지웠습니다.',
+    forgetKo: '한글 팩 지우기',
+    opKoPack: '한글 팩 불러오기',
+    opForgetKo: '한글 팩 지우기',
+    forgetKoLater: '지금 단계가 끝나면 한글 팩을 지웁니다…',
+    koPackLoaded: (runs, scripts) => `한글 팩을 불러왔습니다: 대화 ${scripts}개의 줄 ${runs}개. 페이지가 한글일 때 한글로 나옵니다.`,
+    koPackOn: (runs, scripts) => `한글 팩: 대화 ${scripts}개의 줄 ${runs}개가 한글로 나옵니다. 다른 글은 모두 영어로 나옵니다.`,
+    koPackMismatch: (why) => `한글 팩을 이 게임 파일과 함께 쓰지 않습니다: ${why}.`,
+    koPackKept: ' 다음 방문을 위해 이 브라우저에 보관합니다.',
+    koPackNotKept: (old) => ` (이 브라우저에 보관하지 못했습니다: 페이지를 떠날 때까지만 쓰이며, ${old}.)`,
+    koPackOldGone: '다음 방문을 위해 보관된 한글 팩은 없습니다',
+    koPackOldStays: '전에 여기 보관한 한글 팩이 있다면 그대로 남아 다음 방문 때 다시 쓰입니다',
+    koPackTooLarge: (limit) => `한글 팩을 불러오지 못했습니다: 파일이 팩의 최대 크기 ${limit} MiB를 넘습니다. 아무것도 바뀌지 않았습니다.`,
+    koPackRefused: (why) => `한글 팩을 불러오지 못했습니다: ${why}. 아무것도 바뀌지 않았습니다.`,
+    koPackForgot: '한글 팩을 이 페이지와 이 브라우저에서 지웠습니다. 대화는 영어로 나옵니다.',
+    koPackForgetFailed: '한글 팩을 이 페이지에서는 껐지만 이 브라우저가 지우지 못했습니다.',
+    dropKoPackAndFiles: '놓은 것에 한글 팩과 다른 파일이 함께 있습니다: 한글 팩은 따로 놓으세요. 아무것도 불러오지 않았습니다.',
   },
 };

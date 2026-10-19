@@ -19,7 +19,8 @@
 //! (aggregate + loading), `rng`, `files`, `stub`, `pacer` (the hosts' fixed step and speed,
 //! spec 06), then `gfx/`, `map/`, `objects/`, `ui/`, `actors/`, `converse/` and `main_loop`;
 //! `hd` gives the HD compositor the images the source plane names (spec 07); `speech` keeps
-//! what NPCs say for the platform's voices (spec 09).
+//! what NPCs say for the platform's voices (spec 09); `locale` puts a pack's translation of the
+//! conversation runs (spec 08).
 
 pub mod actors;
 pub mod combat;
@@ -31,6 +32,7 @@ pub mod hd;
 pub mod image;
 pub mod intro;
 pub mod inventory;
+pub mod locale;
 pub mod magic;
 pub mod main_loop;
 pub mod map;

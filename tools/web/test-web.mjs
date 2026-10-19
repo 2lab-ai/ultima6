@@ -3371,7 +3371,16 @@ test('한글: the page\'s labels, buttons and status lines switch to Korean at o
     status: '아직 불러온 파일이 없습니다: 울티마 VI 파일을 놓거나 고르세요.',
     mmpx: 'MMPX (팩 없음)',
   }, 'Korean at once, the status line too');
-  assert.equal((await chooser(page)).note, '게임 안의 글(대화, 메뉴, 이름)은 아직 영어로 나옵니다.', 'the game\'s text is still English');
+  // Without a Korean pack (spec 08): the game's text is English, and one line points at the
+  // local tool, in the chooser and on the page; no path that names the owner's data.
+  const { TEXT } = await import('../../site/i18n.js');
+  const note = (await chooser(page)).note;
+  assert.equal(note, TEXT.ko.gameText, 'the game\'s text is still English');
+  assert.ok(note.includes('tools/i18n') && !/~|\/Users|Games/.test(note), 'it points at the tool, at no path of data');
+  assert.equal(await page.evaluate(() => {
+    const p = document.getElementById('locale-note');
+    return p.hidden ? null : p.textContent;
+  }), TEXT.ko.gameText, 'and so does the page');
   await page.click('#setup-ok');
   await h.waitSettled(page);
   assert.deepEqual((await chooser(page)).stored, { lang: 'ko' });
@@ -3391,6 +3400,7 @@ test('한글: the page\'s labels, buttons and status lines switch to Korean at o
   await page.check('input[name="setup-lang"][value="en"]');
   assert.deepEqual(await pageText(page), english, 'English again, as it was');
   assert.equal((await chooser(page)).note, null, 'no note in English');
+  assert.ok(await page.evaluate(() => document.getElementById('locale-note').hidden), 'nor on the page');
 });
 
 // The owner's full-size pack for spec 07 Acceptance 5: every classic image of the owner's files
@@ -4715,6 +4725,235 @@ test('NPC bundles from the user\'s files: one press after the import downloads o
   const reports = (await page.evaluate(() => window.__csp)).length;
   assert.ok(reports === 0, `no CSP report (${reports})`);
   console.log(`  receipt: bundles ${bundles.length}, refused ${refused}, with a name ${named}, with a greeting ${greeting}, with a turn ${turns}; text segments ${texts}, keyed to their script ${own}; kept ${kept.keys.length}; press to download ${ms} ms`);
+}, { needs: h.haveHfes });
+
+// --- the Korean pack (spec 08, slice K1) ---------------------------------------------------
+
+const KO_SENTINEL = 'Zq9PageSentinel';
+const KO_LINE = '시험이로구려';
+const KO_LOOK = 'a figure of tests';
+const KO_GREET = `"Hail, ${KO_SENTINEL}! I am made for tests."`;
+const KO_LOOK_KO = '시험 인형';
+const KO_GREET_KO = `"어서 오시오, 그대여! 나는 ${KO_LINE}."`;
+
+// A synthetic converse.a (no game bytes): items 1..0x62, every one the test's script `ff 02
+// "Zed" f1 <look> f2 <greeting> b6`, stored raw, so any conversation archive `a` loads talks it;
+// and the Korean pack over it, made with the translation tool's own writer (tools/i18n), each
+// script's two runs in Korean. `other`: the pack's runs keyed to bytes that are not these.
+async function koFixture() {
+  const { fingerprint, hash64, hex64, latin1, packBytes } = await import('../i18n/translate.mjs');
+  const script = [0xff, 0x02, ...latin1('Zed'), 0xf1, ...latin1(KO_LOOK), 0xf2, ...latin1(KO_GREET), 0xb6];
+  const items = 0x63;
+  const table = [];
+  const body = [];
+  for (let i = 0; i < items; i += 1) {
+    const at = i === 0 ? 0 : items * 4 + body.length;
+    if (i > 0) body.push(0, 0, 0, 0, ...script);
+    table.push(at & 255, (at >> 8) & 255, (at >> 16) & 255, 0);
+  }
+  const look = 6;
+  const greet = look + KO_LOOK.length + 1;
+  const runs = [];
+  const named = [];
+  for (let item = 1; item < items; item += 1) {
+    named.push({ archive: 'a', item, hash: hex64(hash64(script)) });
+    runs.push({ archive: 'a', item, offset: look, len: KO_LOOK.length, hash: hex64(hash64(latin1(KO_LOOK))), text: KO_LOOK_KO });
+    runs.push({ archive: 'a', item, offset: greet, len: KO_GREET.length, hash: hex64(hash64(latin1(KO_GREET))), text: KO_GREET_KO });
+  }
+  const pack = [...packBytes({ base: fingerprint(named), runs })];
+  return { archive: [...table, ...body], pack, runs: runs.length, scripts: items - 1 };
+}
+
+// The Hangul glyphs of `text` (site/fonts/galmuri7-hangul.bin, committed): one 8-row bitmap per
+// distinct syllable.
+async function hangulGlyphs(text) {
+  const table = await readFile(join(h.SITE, 'fonts', 'galmuri7-hangul.bin'));
+  const out = new Map();
+  for (const c of text) {
+    const code = c.codePointAt(0);
+    if (code >= 0xac00 && code <= 0xd7a3) out.set(c, [...table.subarray((code - 0xac00) * 8, (code - 0xac00) * 8 + 8)]);
+  }
+  return out;
+}
+
+// Which of `glyphs` the message window of the game's RGBA frame shows as a cell (8 x 8 at a cell
+// of the window, cols 0x16..0x26, rows 0x0e..0x17): each cell read as ink (a pixel of another
+// colour than the window's most common one, its paper) and paper. Compared in the page's frame,
+// never printed.
+async function cellsShown(page, glyphs) {
+  const rgba = await page.evaluate(() => [...window.__shownGame.frame_rgba()]);
+  const px = (x, y) => rgba.slice((y * 320 + x) * 4, (y * 320 + x) * 4 + 3).join(',');
+  const counts = new Map();
+  for (let y = 0x0e * 8; y < 0x18 * 8; y += 1) for (let x = 0x16 * 8; x < 0x27 * 8; x += 1) counts.set(px(x, y), (counts.get(px(x, y)) ?? 0) + 1);
+  const paper = [...counts].sort((a, b) => b[1] - a[1])[0][0];
+  const found = new Set();
+  let inked = 0;
+  for (let row = 0x0e; row < 0x18; row += 1) {
+    for (let col = 0x16; col < 0x27; col += 1) {
+      const bits = [];
+      for (let dy = 0; dy < 8; dy += 1) {
+        let b = 0;
+        for (let dx = 0; dx < 8; dx += 1) if (px(col * 8 + dx, row * 8 + dy) !== paper) b |= 0x80 >> dx;
+        bits.push(b);
+      }
+      if (bits.some((b) => b !== 0)) inked += 1;
+      for (const [c, g] of glyphs) if (g.every((b, i) => b === bits[i])) found.add(c);
+    }
+  }
+  return { found, inked };
+}
+
+const localeShown = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen').dataset;
+  return { pack: document.body.dataset.localePack, locale: c.locale, hits: Number(c.localeHits ?? 0), misses: Number(c.localeMisses ?? 0) };
+});
+
+// Everything a page shows or keeps outside its frame and its IndexedDB, as one text: its data,
+// its text, its local storage, its CSP reports.
+const pageWords = (page) => page.evaluate(() => JSON.stringify({
+  body: { ...document.body.dataset }, canvas: { ...document.getElementById('screen').dataset },
+  text: document.body.innerText, storage: { ...localStorage }, csp: window.__csp,
+}));
+
+test('Korean pack (synthetic, no game): a dropped ko.u6lp is checked by the engine\'s reader, kept under locale:ko and shown as counts; a reload brings it back; a malformed one, one over the limit and a drop of a pack with another file are refused with a line that names only the rule, nothing changed; storage that refuses it: for this visit only, the one before removed; Forget the Korean pack removes it; no line of it reaches the console, the page\'s data, text or storage', async (env) => {
+  const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  const words = consoleText(page);
+  await h.load(page, env);
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  const { pack, runs, scripts } = await koFixture();
+  assert.equal((await localeShown(page)).pack, 'none');
+  assert.equal(await page.evaluate(() => document.getElementById('locale-note').hidden), false, 'no pack: the line pointing at the tool');
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
+  await h.waitSettled(page);
+  assert.equal((await localeShown(page)).pack, `${runs},${scripts}`, 'its counts');
+  assert.equal((await h.state(page)).status, `${ko.koPackLoaded(runs, scripts)}${ko.koPackKept}`, 'the line, counts only');
+  assert.deepEqual(await h.keptLocalePack(page), pack, 'kept under locale:ko, byte for byte');
+  assert.equal(await page.evaluate(() => document.getElementById('locale-note').hidden), true, 'the tool line goes with a pack');
+  assert.equal((await h.keptPaths(page)), null, 'no game file kept, no game started');
+  await page.reload();
+  await h.waitSettled(page);
+  assert.equal((await localeShown(page)).pack, `${runs},${scripts}`, 'back after a reload');
+  assert.ok((await h.log(page)).includes('locale:load:1'));
+  // Refusals: nothing changes.
+  const broken = pack.slice(0, pack.length - 3);
+  const marked = [...Buffer.from(`U6LP\n{"format":"u6.locale-pack/1","language":"ko","tool":"${KO_SENTINEL}\u0001"}`)];
+  for (const [bytes, line] of [
+    [broken, ko.koPackRefused('its contents are not those of a Korean pack')],
+    [marked, ko.koPackRefused('its contents are not those of a Korean pack')],
+    [[...Buffer.from('PK\u0003\u0004 not a pack')], ko.koPackRefused('the file is not a Korean pack (it does not start with U6LP)')],
+  ]) {
+    await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes }]);
+    await h.waitSettled(page);
+    assert.equal((await h.state(page)).status, line, 'refused with the rule\'s line');
+    assert.deepEqual(await h.keptLocalePack(page), pack, 'the kept pack as it was');
+    assert.equal((await localeShown(page)).pack, `${runs},${scripts}`, 'and the page\'s');
+  }
+  await page.evaluate(() => { window.__bigName = 'big.u6lp'; });
+  await h.dropFiles(page, [], [{ name: 'big.u6lp', bytes: [1] }]);
+  await h.waitSettled(page);
+  assert.equal((await h.state(page)).status, ko.koPackTooLarge(16), 'over the limit, before it is read');
+  assert.ok(!(await h.log(page)).includes('read:start:big.u6lp'), 'not read');
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }, MARKER]);
+  await h.waitSettled(page);
+  assert.equal((await h.state(page)).status, ko.dropKoPackAndFiles, 'a pack with another file: refused');
+  // Storage that refuses the new pack: it works for this visit, and the one before goes.
+  await page.evaluate(() => window.__fail.add('locale-store'));
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
+  await h.waitSettled(page);
+  assert.equal((await h.state(page)).status, `${ko.koPackLoaded(runs, scripts)}${ko.koPackNotKept(ko.koPackOldGone)}`);
+  assert.equal(await h.keptLocalePack(page), null, 'the one kept before removed');
+  assert.equal((await localeShown(page)).pack, `${runs},${scripts}`, 'on the page for this visit');
+  await page.evaluate(() => window.__fail.delete('locale-store'));
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
+  await h.waitSettled(page);
+  await page.click('#forget-ko');
+  await h.waitSettled(page);
+  assert.equal((await h.state(page)).status, ko.koPackForgot);
+  assert.equal(await h.keptLocalePack(page), null, 'out of storage');
+  assert.equal((await localeShown(page)).pack, 'none', 'and off the page');
+  await page.reload();
+  await h.waitSettled(page);
+  assert.equal((await localeShown(page)).pack, 'none', 'not back after a reload');
+  const where = await pageWords(page);
+  for (const w of [KO_SENTINEL, KO_LINE, KO_GREET_KO]) {
+    assert.ok(!where.includes(w), 'no line in the page\'s data, text or storage');
+    assert.ok(!words.some((m) => m.includes(w)), 'nor in the console');
+  }
+  assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP report');
+});
+
+test('Korean pack in a game (the user\'s disks, a synthetic conversation): in 한글 a game started with a pack made for other files runs in English and says the conversation part differs; with the kept converse.a the test\'s own (in the page), the conversation shows the pack\'s Korean in the Hangul cells while every run it starts is the pack\'s; English at the chooser restarts it in English and leaves the save; Forget the Korean pack restarts it in English; no line reaches the console, the page\'s data or text', async (env) => {
+  const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  const words = consoleText(page);
+  await h.load(page, env);
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  const { archive, pack, runs, scripts } = await koFixture();
+  const glyphs = await hangulGlyphs(KO_LOOK_KO + KO_GREET_KO);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  assert.equal((await localeShown(page)).locale, 'off', 'no pack: English');
+  // The pack, over the user's own converse.a: the game restarts and refuses it.
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  assert.equal((await localeShown(page)).locale, 'mismatch', 'made for other files: not used');
+  assert.ok((await h.state(page)).status.includes(ko.koPackMismatch('its conversation part was made from other game files')), 'the line names the part');
+  // The test's converse.a in place of the user's, in the page; a reload starts from it.
+  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  let shown = await localeShown(page);
+  assert.deepEqual([shown.pack, shown.locale], [`${runs},${scripts}`, 'on'], 'the pack on the game');
+  assert.ok((await h.state(page)).status.includes(ko.koPackOn(runs, scripts)), 'its line, counts only');
+  const talkTo2 = async () => {
+    await page.focus('#screen');
+    await page.keyboard.press('t');
+    await h.waitTaken(page);
+    await page.keyboard.press('2');
+    await h.waitTaken(page);
+    await h.waitPrompt(page);
+  };
+  await talkTo2();
+  shown = await localeShown(page);
+  assert.deepEqual([shown.hits, shown.misses], [2, 0], 'the look text and the greeting from the pack, nothing missed');
+  const korean = await cellsShown(page, glyphs);
+  assert.equal(korean.found.size, glyphs.size, 'every syllable of the pack\'s lines in a cell of the message window');
+  const saved = await h.savedFiles(page);
+  // English at the chooser: the game restarts in English, the save as it was.
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  assert.equal((await localeShown(page)).locale, 'off', 'English: the pack not on the game');
+  h.assertSame(await h.savedFiles(page), saved, 'the save untouched');
+  await talkTo2();
+  let english = await cellsShown(page, glyphs);
+  assert.ok(english.found.size === 0 && english.inked > 0, 'the conversation in English: no Korean cell');
+  // 한글 again, then Forget the Korean pack: English again.
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  assert.equal((await localeShown(page)).locale, 'on', '한글: on again');
+  await page.click('#forget-ko');
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  shown = await localeShown(page);
+  assert.deepEqual([shown.pack, shown.locale], ['none', 'off'], 'forgotten: English');
+  assert.ok((await h.state(page)).status.startsWith(ko.koPackForgot), 'its line');
+  await talkTo2();
+  english = await cellsShown(page, glyphs);
+  assert.ok(english.found.size === 0 && english.inked > 0, 'English again after the forget');
+  const where = await pageWords(page);
+  for (const w of [KO_SENTINEL, KO_LINE, KO_GREET_KO, KO_GREET]) {
+    assert.ok(!where.includes(w), 'no line in the page\'s data, text or storage');
+    assert.ok(!words.some((m) => m.includes(w)), 'nor in the console');
+  }
 }, { needs: h.haveHfes });
 
 const filter = process.argv[2];

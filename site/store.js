@@ -8,7 +8,9 @@
 // browser from the kept files) are one record per script under `npc-bundle:` + its archive
 // letter, `/` and its item, the bundle object itself. The voice pack (spec 09 Design 4,
 // `u6.voice-pack/1`: the owner's personality voices, by actor number; numbers only) is one
-// record under `voice-pack:` + `voices`, the pack object checked. The page calls these one at a
+// record under `voice-pack:` + `voices`, the pack object checked. The Korean pack (spec 08,
+// `ko.u6lp`: the owner's translation of the conversation lines, made from his files by
+// tools/i18n) is one record under `locale:ko`, its file's bytes. The page calls these one at a
 // time (its operation queue), so a read never races a write or a delete.
 
 const DB = 'ultima6-port';
@@ -182,6 +184,36 @@ export async function loadVoicePack() {
 /// Removes the kept voice pack; resolves once the delete is committed, throws when it is not.
 export async function forgetVoicePack() {
   await run('readwrite', (s) => s.delete(VOICE_PACKS));
+}
+
+const LOCALE_KO = 'locale:ko';
+
+/// Keeps the Korean pack's bytes in place of the kept one; true once committed, false (with a
+/// console warning that names only the error's kind) when the browser does not keep it.
+export async function storeLocalePack(bytes) {
+  try {
+    await run('readwrite', (s) => s.put(bytes, LOCALE_KO));
+    return true;
+  } catch (err) {
+    console.warn(`could not keep the Korean pack: ${err?.name ?? 'Error'}`);
+    return false;
+  }
+}
+
+/// The kept Korean pack's bytes, or null (none, or storage unavailable).
+export async function loadLocalePack() {
+  try {
+    const bytes = await run('readonly', (s) => s.get(LOCALE_KO));
+    return bytes instanceof Uint8Array ? bytes : null;
+  } catch (err) {
+    console.warn(`could not read the kept Korean pack: ${err?.name ?? 'Error'}`);
+    return null;
+  }
+}
+
+/// Removes the kept Korean pack; resolves once the delete is committed, throws when it is not.
+export async function forgetLocalePack() {
+  await run('readwrite', (s) => s.delete(LOCALE_KO));
 }
 
 function fileOf(entry) {

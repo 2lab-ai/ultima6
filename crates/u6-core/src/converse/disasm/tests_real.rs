@@ -690,3 +690,279 @@ fn every_script_exports_a_bundle_holding_its_catalog_runs_once() {
     assert!(back.is_ok_and(|b| b == out), "the bundles read back");
     println!("the bundles read back from their JSON: pass");
 }
+
+/// What the player sees at each tick of a conversation: the hash of the frame shown and of the
+/// scroll (its lines and the one being written).
+type Seen = Vec<(u64, u64)>;
+
+/// `talk_through`'s conversation with `npc`, recording what the player sees at every tick:
+/// whether it ended, the hashes, and the locale layer's counts (hits, misses) after it.
+fn talk_seen(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool, Seen, (u32, u32)) {
+    use super::catalog::hash64;
+    let you_say = base.converse.text.as_ref().quiet().get(Msg::YouSay);
+    let prompt: Vec<u16> = you_say.trim_ascii().iter().map(|&b| u16::from(b)).collect();
+    let leader = base.actors.party.leader_index;
+    let mut e = Engine::with_game(base.clone(), files.clone(), move |st, io| async move {
+        talk(&Cx::new(&st, &io), leader, npc, true).await;
+    });
+    let mut seen = Vec::new();
+    let mut tick = |e: &mut Engine, keys: &[InputEvent]| {
+        e.tick(keys, 16);
+        let s = e.state();
+        let (n, last) = screen(&s);
+        let text: Vec<u8> =
+            s.ui.messages
+                .iter()
+                .flat_map(|l| l.bytes().chain([b'\n']))
+                .chain(n.to_le_bytes())
+                .chain(last.iter().flat_map(|c| c.to_le_bytes()))
+                .collect();
+        seen.push((hash64(e.frame().pixels()), hash64(&text)));
+    };
+    let counts = |e: &Engine| {
+        let l = &e.state().locale;
+        (l.hits, l.misses)
+    };
+    let (mut sent, mut tries) = (0, 0);
+    for _ in 0..ROUNDS {
+        for _ in 0..32 {
+            let before = screen(&e.state());
+            tick(&mut e, &[]);
+            if e.finished() || (e.io().pending_events() == 0 && screen(&e.state()) == before) {
+                break;
+            }
+        }
+        if e.finished() {
+            let c = counts(&e);
+            return (true, seen, c);
+        }
+        let shown = screen(&e.state()).1;
+        let end = shown
+            .iter()
+            .rposition(|&c| !u8::try_from(c).is_ok_and(|b| b.is_ascii_whitespace()))
+            .map_or(0, |i| i + 1);
+        let asked = e.state().ui.input.line_input || shown[..end].ends_with(&prompt);
+        let keys: Vec<InputEvent> = if asked {
+            let Some(line) = lines.get(sent) else {
+                let c = counts(&e);
+                return (false, seen, c);
+            };
+            (sent, tries) = (sent + 1, 0);
+            line.chars()
+                .map(|c| InputEvent::Key(Key::Char(c)))
+                .chain([InputEvent::Key(Key::Enter)])
+                .collect()
+        } else {
+            tries += 1;
+            const KEYS: &[u8] = b" ny1234567890";
+            let k = char::from(KEYS[(tries - 1) % KEYS.len()]);
+            vec![InputEvent::Key(Key::Char(k))]
+        };
+        tick(&mut e, &keys);
+    }
+    let c = counts(&e);
+    (e.finished(), seen, c)
+}
+
+/// Spec 08 Order 3 / Acceptance 5, for this slice's part (the conversation runs): the identity
+/// pack, built at test time from the owner's files (every run of the catalog, translated as
+/// itself, declaring English grammar), written as a pack file and read back through the pack
+/// reader, checked against the files and installed (`wide` on): the conversations of the
+/// cross-check (name, job and the goodbye with the 40 actors nearest the leader, and the
+/// greeter) show at every tick the frame and the scroll they show without it, and every run
+/// they start is one of the pack's (0 misses). Prints counts and pass/fail only.
+#[test]
+fn the_identity_pack_shows_the_real_conversations_exactly_as_english() {
+    use std::rc::Rc;
+
+    use crate::locale::{self, Pack, RunText, fingerprint};
+    use crate::ui::Language;
+    let Some(files) = files() else { return };
+    let all = scripts(&files);
+    let catalog = Catalog::build(all.iter().map(|(l, i, b)| (*l, *i, b.as_slice())));
+    let (mut runs, mut named) = (Vec::new(), Vec::new());
+    for s in &catalog.scripts {
+        if s.runs.is_empty() {
+            continue;
+        }
+        let letter = s.archive as u8;
+        named.push((letter, s.item, s.hash));
+        for r in &s.runs {
+            let text: Vec<u8> = r.unit.text.chars().map(|c| c as u8).collect();
+            runs.push((
+                (letter, s.item, r.unit.offset),
+                RunText {
+                    len: r.unit.len,
+                    hash: r.unit.hash,
+                    text,
+                },
+            ));
+        }
+    }
+    let made = Pack::new(Language::English, "identity/1", fingerprint(named), runs).quiet();
+    let bytes = made.to_bytes();
+    let pack = Pack::parse(&bytes).quiet();
+    assert!(pack == made, "the pack reads back from its file");
+    let base = with_text(&files);
+    let mut with = base.clone();
+    locale::install(&mut with, &files, Rc::new(pack), None).quiet();
+    assert!(with.ui.text.wide, "wide on");
+    // The actors of the cross-check.
+    let leader = base.leader_position().quiet();
+    let members: Vec<u16> = base.actors.party.active().map(|id| id.0).collect();
+    let mut near: Vec<(u32, i16)> = (2..0xe0i16)
+        .filter(|a| !members.contains(&(*a as u16)))
+        .filter_map(|a| {
+            let p = base.objects.location(ObjectId(a as u16))?;
+            if p.z != leader.z || base.objects.obj_type(ObjectId(a as u16)) == 0 {
+                return None;
+            }
+            let d = (i32::from(p.x) - i32::from(leader.x)).unsigned_abs()
+                + (i32::from(p.y) - i32::from(leader.y)).unsigned_abs();
+            Some((d, a))
+        })
+        .collect();
+    near.sort();
+    let mut npcs: Vec<i16> = near.iter().take(40).map(|&(_, a)| a).collect();
+    let mut s = base.clone();
+    let greeter = (2..0xe0i16).find(|&npc| {
+        let mut buf = Vec::new();
+        load_script(&mut s, &files, npc, ScriptDst::Other(&mut buf)) != 0
+            && buf.windows(2).any(|w| w == b"$G")
+            && buf.windows(2).any(|w| w == b"$T")
+    });
+    npcs.extend(greeter);
+    let (mut talked, mut ticks, mut differ, mut ended) = (0, 0, 0, 0);
+    let (mut hits, mut misses) = (0, 0);
+    for &npc in &npcs {
+        let mut s = base.clone();
+        if name_from_script(&mut s, &files, npc).0.is_empty() {
+            continue;
+        }
+        let lines = ["name", "job", BYE, BYE, BYE];
+        let (done_en, en, _) = talk_seen(&base, &files, npc, &lines);
+        let (done_id, id, (h, m)) = talk_seen(&with, &files, npc, &lines);
+        talked += 1;
+        ticks += en.len();
+        ended += usize::from(done_en && done_id);
+        if id != en || done_id != done_en {
+            differ += 1;
+            println!("a conversation differs with the identity pack");
+        }
+        hits += h;
+        misses += m;
+    }
+    println!(
+        "identity pack: runs {}, scripts {}; conversations {talked} (ended {ended}), ticks compared {ticks}, differing conversations {differ}; runs put from the pack {hits}, misses {misses}",
+        made.runs(),
+        made.scripts(),
+    );
+    assert!(talked > 0 && hits > 0);
+    assert_eq!(differ, 0, "every frame and scroll as in English");
+    assert_eq!(misses, 0, "every run started is in the pack");
+    println!("identity pack frames and scroll identical to English: pass; misses 0: pass");
+}
+
+/// Spec 08 (slice K1): the pack the translation tool makes from the owner's NPC bundles checks
+/// against his files. Keyed as `tools/i18n/translate.mjs` keys it (each text segment's key, its
+/// text one byte per character for the length and the hash, the fingerprint over each script's
+/// bundle `hash`), every run of every bundle that has one goes into one pack of English grammar
+/// (each translated as itself); written as a file, read back and installed on the files the
+/// bundles came from. Prints counts and pass/fail only.
+#[test]
+fn a_pack_keyed_from_the_owners_bundles_checks_against_his_files() {
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    use super::bundle::{self, Segment};
+    use crate::locale::{self, Pack, RunText, fingerprint};
+    use crate::ui::Language;
+    let Some(files) = files() else { return };
+    let bundles = bundle::export(&files).quiet();
+    let mut runs: BTreeMap<(u8, u16, u32), RunText> = BTreeMap::new();
+    let mut named = Vec::new();
+    for b in &bundles {
+        let letter = b.archive as u8;
+        let before = runs.len();
+        for s in b.segments() {
+            let Segment::Text(t) = s else { continue };
+            let bytes: Vec<u8> = t.text.chars().map(|c| c as u8).collect();
+            runs.insert(
+                (letter, b.item, t.key.2),
+                RunText {
+                    len: bytes.len() as u32,
+                    hash: super::catalog::hash64(&bytes),
+                    text: bytes,
+                },
+            );
+        }
+        if runs.len() > before {
+            named.push((letter, b.item, b.hash));
+        }
+    }
+    let pack = Pack::new(Language::English, "bundles/1", fingerprint(named), runs).quiet();
+    let read = Pack::parse(&pack.to_bytes()).quiet();
+    let mut s = with_text(&files);
+    let checked = locale::install(&mut s, &files, Rc::new(read), None);
+    println!(
+        "pack from the bundles: runs {}, scripts {}; checks against the files: {}",
+        pack.runs(),
+        pack.scripts(),
+        if checked.is_ok() { "pass" } else { "fail" }
+    );
+    assert!(pack.runs() > 0);
+    assert!(checked.is_ok(), "the pack keyed from the bundles checks");
+}
+
+/// Spec 08 (slice K1): the translation tool's keyword rule (`tools/i18n/translate.mjs`
+/// `keywordsOf`: an `@` keyword is the ASCII letters and digits right after the `@`) gives, for
+/// every `@` of every run of the owner's scripts, the keyword the escape layer shows: from the
+/// `@` up to a character of the game's keyword-end list (`ui.tables.keyword_end`), the next
+/// escape prefix or the run's end, the characters the escape layer takes before the prefix (`&`,
+/// `<`, `>`, the back-quote, `*`) putting nothing. Prints counts and pass/fail only.
+#[test]
+fn the_tools_keyword_rule_is_the_escape_layers_on_the_owners_runs() {
+    use super::Escape;
+    let Some(files) = files() else { return };
+    let ends = with_text(&files).ui.tables.keyword_end.clone();
+    let all = scripts(&files);
+    let catalog = Catalog::build(all.iter().map(|(l, i, b)| (*l, *i, b.as_slice())));
+    let (mut keywords, mut agree) = (0, 0);
+    for s in &catalog.scripts {
+        for r in &s.runs {
+            let text: Vec<u8> = r.unit.text.chars().map(|c| c as u8).collect();
+            for (at, &b) in text.iter().enumerate() {
+                if b != b'@' {
+                    continue;
+                }
+                keywords += 1;
+                let rest = &text[at + 1..];
+                let mut engine = Vec::new();
+                for &c in rest {
+                    if matches!(c, b'&' | b'<' | b'>' | b'`' | b'*') {
+                        continue;
+                    }
+                    if c == 0 || ends.contains(&c) || Escape::start(c).is_some() {
+                        break;
+                    }
+                    engine.push(c.to_ascii_lowercase());
+                }
+                let tool: Vec<u8> = rest
+                    .iter()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .map(u8::to_ascii_lowercase)
+                    .collect();
+                agree += usize::from(engine == tool);
+            }
+        }
+    }
+    println!(
+        "@ keywords in the owner's runs {keywords}; the tool's rule gives the escape layer's keyword for {agree}"
+    );
+    assert!(keywords > 0);
+    assert_eq!(
+        agree, keywords,
+        "the tool's keyword rule is the escape layer's"
+    );
+    println!("the tool's keyword rule matches the escape layer on every @: pass");
+}

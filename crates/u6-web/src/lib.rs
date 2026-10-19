@@ -37,6 +37,12 @@
 //! in conversations, and the page takes it after each frame with [`Game::take_speech`] for its
 //! on-device synthesis; off (the default), the tap keeps nothing and no frame changes either way.
 //!
+//! Korean (spec 08, slice K1): the page loads a dropped `ko.u6lp` once as a [`LocalePack`]
+//! (the engine's strict reader: at most [`max_locale_pack_bytes`]) and, in Korean mode, sets it
+//! on each game it starts ([`Game::set_locale`]): checked against that game's files, then its
+//! conversation runs show the pack's lines, drawn with the Hangul table built in here
+//! (`site/fonts/galmuri7-hangul.bin`, Galmuri7, OFL-1.1). The counts it gives are counts only.
+//!
 //! NPC bundles (spec 09 Design 5): an [`NpcBundles`] takes the game files the page kept and
 //! exports each conversation script's NPC name and dialogue as `u6.npc-bundle/1` JSON, for the
 //! page's storage and its download; nothing of it runs in a game.
@@ -158,6 +164,61 @@ impl PackProbe {
             .refusal()
             .map_or_else(String::new, |e| refusal(e).into())
     }
+}
+
+/// Spec 08 Design 1: the Hangul table (Galmuri7, OFL-1.1, `site/fonts/OFL.txt`), one 8 × 8
+/// cell per syllable, as `tools/font` wrote it.
+const HANGUL: &[u8] = include_bytes!("../../../site/fonts/galmuri7-hangul.bin");
+
+/// The Hangul table, read from [`HANGUL`]; `None` if it does not read (a syllable is then a
+/// blank cell).
+fn hangul() -> Option<Rc<u6_formats::font::HangulFont>> {
+    u6_formats::font::HangulFont::parse(HANGUL)
+        .ok()
+        .map(Rc::new)
+}
+
+/// Spec 08: the largest Korean pack file the page reads (`u6_core::locale::MAX_PACK_BYTES`).
+#[wasm_bindgen]
+pub fn max_locale_pack_bytes() -> f64 {
+    u6_core::locale::MAX_PACK_BYTES as f64
+}
+
+/// Spec 08 (slice K1): a Korean pack the page loaded ([`LocalePack::load`]), kept by the page
+/// and set on each game it starts in Korean mode ([`Game::set_locale`]).
+#[wasm_bindgen]
+pub struct LocalePack {
+    pack: Rc<u6_core::locale::Pack>,
+}
+
+#[wasm_bindgen]
+impl LocalePack {
+    /// Reads and checks `bytes` as a pack (`u6_core::locale::Pack::parse`). A refusal is the
+    /// fixed sentence of the rule it breaks (no value of the file).
+    pub fn load(bytes: Vec<u8>) -> Result<LocalePack, JsError> {
+        load_locale(&bytes).map_err(|e| JsError::new(&e))
+    }
+
+    /// The lines it holds and the conversations they are in: `[runs, scripts]`.
+    pub fn counts(&self) -> Vec<u32> {
+        vec![self.pack.runs() as u32, self.pack.scripts() as u32]
+    }
+
+    /// The grammar it declares: `en` or `ko`.
+    pub fn language(&self) -> String {
+        match self.pack.language {
+            u6_core::ui::Language::English => "en".into(),
+            u6_core::ui::Language::Korean => "ko".into(),
+        }
+    }
+}
+
+/// [`LocalePack::load`] without the JS error type.
+fn load_locale(bytes: &[u8]) -> Result<LocalePack, String> {
+    let pack = u6_core::locale::Pack::parse(bytes).map_err(|e| e.to_string())?;
+    Ok(LocalePack {
+        pack: Rc::new(pack),
+    })
 }
 
 /// Spec 07 H2: an HD pack the page loaded ([`HdPack::load`]): one for the page, set on each game
@@ -822,6 +883,32 @@ impl Game {
     /// Spec 07 H2: no HD pack any more: MMPX for every image, at once as [`Game::set_hd_pack`].
     pub fn forget_hd_pack(&mut self) {
         self.attach_pack(None);
+    }
+
+    /// Spec 08 (slice K1): installs `pack` on the game just started (the page calls it after
+    /// [`Game::start`], before the first step), checked against its files: `""` once installed,
+    /// else the fixed sentence that says why not (the part that differs, or no game). The pack
+    /// stays with this game; a game started later takes one only from its own call.
+    pub fn set_locale(&mut self, pack: &LocalePack) -> String {
+        let Some(engine) = self.engine.as_mut() else {
+            return "no game is running".into();
+        };
+        match engine.install_locale(pack.pack.clone(), hangul()) {
+            Ok(()) => String::new(),
+            Err(m) => m.to_string(),
+        }
+    }
+
+    /// Spec 08: the running game's locale layer, counts only: `[on, runs put from the pack,
+    /// runs it did not have]` (`on` 1 with a pack installed, else 0 and no counts).
+    pub fn locale_counts(&self) -> Vec<u32> {
+        self.engine.as_ref().map_or_else(
+            || vec![0, 0, 0],
+            |e| {
+                let l = &e.state().locale;
+                vec![u32::from(l.pack.is_some()), l.hits, l.misses]
+            },
+        )
     }
 
     /// Whether an HD pack is set.
@@ -1618,6 +1705,98 @@ mod tests {
         );
         let e = bad.bundles().unwrap_err();
         assert_eq!(e, "NPC bundles: converse.b does not read");
+    }
+
+    /// Spec 08 (slice K1): a pack reads through the engine's strict reader (a refusal names the
+    /// rule only, never what the file holds); set on a game whose files it was made from it is
+    /// installed (`wide` on, the built-in Hangul table set, the counts start at 0), on one with
+    /// other files it is refused with the part's sentence and nothing changes; with no game it is
+    /// refused too.
+    #[test]
+    fn a_locale_pack_loads_strictly_and_installs_only_on_its_own_files() {
+        use u6_core::converse::disasm::catalog::{ScriptUnits, hash64};
+        use u6_core::locale::{Pack, RunText, fingerprint};
+        const SENTINEL: &str = "Zq9LocaleSentinel";
+        let script = [
+            &b"\xff\x05Nm\xf1look\xf2Hi "[..],
+            SENTINEL.as_bytes(),
+            b".\xb6",
+        ]
+        .concat();
+        let lib = |script: &[u8]| {
+            [
+                &0u32.to_le_bytes()[..],
+                &8u32.to_le_bytes(),
+                &[0, 0, 0, 0],
+                script,
+            ]
+            .concat()
+        };
+        let units = ScriptUnits::build(b'a', 1, &script);
+        let runs = units.runs.iter().map(|r| {
+            (
+                (b'a', 1, r.unit.offset),
+                RunText {
+                    len: r.unit.len,
+                    hash: r.unit.hash,
+                    text: "가나".as_bytes().to_vec(),
+                },
+            )
+        });
+        let pack = Pack::new(
+            u6_core::ui::Language::Korean,
+            "test/1",
+            fingerprint([(b'a', 1, hash64(&script))]),
+            runs,
+        )
+        .quiet();
+        let bytes = pack.to_bytes();
+        let loaded = load_locale(&bytes).quiet();
+        assert_eq!(
+            (loaded.counts(), loaded.language()),
+            (vec![2, 1], "ko".into())
+        );
+        // Refusals: fixed sentences, nothing of the file.
+        let mut broken = bytes.clone();
+        broken.truncate(bytes.len() - 2);
+        let e = load_locale(&broken).err().quiet();
+        assert_eq!(e, "its contents are not those of a Korean pack");
+        let marked = [&b"U6LP\n{\""[..], SENTINEL.as_bytes(), b"\":1}"].concat();
+        assert!(!load_locale(&marked).err().quiet().contains(SENTINEL));
+        assert!(load_locale(b"PK\x03\x04").is_err());
+        // No game: refused.
+        let mut game = Game::new();
+        assert_eq!(game.set_locale(&loaded), "no game is running");
+        assert_eq!(game.locale_counts(), [0, 0, 0]);
+        // Its own files: installed.
+        let engine = |archive: Vec<u8>| {
+            let files = Files::new(BTreeMap::from([("U6/converse.a".to_string(), archive)]));
+            Engine::with_game(u6_core::State::empty(), files, |_s, io| async move {
+                loop {
+                    io.vblank().await;
+                }
+            })
+        };
+        game.put_on_screen(engine(lib(&script)));
+        assert_eq!(game.set_locale(&loaded), "");
+        assert_eq!(game.locale_counts(), [1, 0, 0]);
+        let e = game.engine.as_ref().quiet();
+        assert!(e.state().ui.text.wide, "the assembler on");
+        assert!(
+            e.state().ui.hangul.is_some(),
+            "the built-in Hangul table reads"
+        );
+        // Other files: refused, nothing changed.
+        let mut other = script.clone();
+        other[10] = b'o';
+        game.put_on_screen(engine(lib(&other)));
+        assert_eq!(
+            game.set_locale(&loaded),
+            "its conversation part was made from other game files"
+        );
+        assert_eq!(game.locale_counts(), [0, 0, 0]);
+        let e = game.engine.as_ref().quiet();
+        assert!(!e.state().ui.text.wide && e.state().ui.hangul.is_none());
     }
 
     /// The keys queued reach the game in the step after them (the queues empty, their characters

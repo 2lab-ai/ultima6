@@ -118,8 +118,14 @@ fn starts_as_json(p: &Path) -> bool {
 
 /// The paths under `dir` (relative to `root`) whose file is one of the tool's outputs. A file is read
 /// whole only when it starts as JSON ([`starts_as_json`]); a symlink to a directory is not
-/// followed (no loops).
-fn walk(dir: &Path, root: &Path, found: &mut Vec<String>, files: &mut usize) {
+/// followed (no loops) but listed in `links`.
+fn walk(
+    dir: &Path,
+    root: &Path,
+    found: &mut Vec<String>,
+    links: &mut Vec<String>,
+    files: &mut usize,
+) {
     for e in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
         let e = e.unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
         let p = e.path();
@@ -127,10 +133,12 @@ fn walk(dir: &Path, root: &Path, found: &mut Vec<String>, files: &mut usize) {
             .file_type()
             .unwrap_or_else(|e| panic!("{}: {e}", p.display()));
         if t.is_dir() {
-            walk(&p, root, found, files);
+            walk(&p, root, found, links, files);
             continue;
         }
         if t.is_symlink() && std::fs::metadata(&p).is_ok_and(|m| m.is_dir()) {
+            // Not followed (no loops), so nothing under it is checked: the guard fails on it.
+            links.push(p.strip_prefix(root).unwrap().to_string_lossy().into_owned());
             continue;
         }
         *files += 1;
@@ -192,11 +200,59 @@ fn the_walker_finds_a_voice_pack_after_any_amount_of_whitespace() {
     );
     write("blank.txt", pad.clone());
     write("form-feed.u6vp", format!("\u{c}{PACK}"));
-    let (mut found, mut files) = (Vec::new(), 0);
-    walk(&root.join("site"), &root, &mut found, &mut files);
+    let (mut found, mut links, mut files) = (Vec::new(), Vec::new(), 0);
+    walk(
+        &root.join("site"),
+        &root,
+        &mut found,
+        &mut links,
+        &mut files,
+    );
+    assert!(links.is_empty());
     found.sort();
     assert_eq!(files, 5);
     assert_eq!(found, ["site/deep/padded.u6vp", "site/deep/short.json"]);
+    std::fs::remove_dir_all(&root).expect("the test directory goes");
+}
+
+/// The files under `site` (paths relative to `root`), or why the guard fails there: a symlink to
+/// a directory (the walker does not follow it, so what it holds is not checked), named by its
+/// repository path only, or the tool outputs found.
+fn site_check(site: &Path, root: &Path) -> Result<usize, String> {
+    let (mut found, mut links, mut files) = (Vec::new(), Vec::new(), 0);
+    walk(site, root, &mut found, &mut links, &mut files);
+    if !links.is_empty() {
+        return Err(format!(
+            "directory links under site/, not followed so not checked: {links:?}"
+        ));
+    }
+    if !found.is_empty() {
+        return Err(format!("voice tool outputs under site/: {found:?}"));
+    }
+    Ok(files)
+}
+
+/// A symlink to a directory under `site/` fails the guard, named by its repository path only
+/// (not what it points at); without it the same tree passes.
+#[test]
+fn a_directory_link_under_site_fails_the_guard() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-voice-pack-link");
+    if root.exists() {
+        std::fs::remove_dir_all(&root).expect("the old test directory goes");
+    }
+    let (site, outside) = (root.join("site"), root.join("outside"));
+    std::fs::create_dir_all(site.join("deep")).expect("the test directory");
+    std::fs::create_dir_all(&outside).expect("the target directory");
+    std::fs::write(site.join("deep/page.txt"), "a page").expect("written");
+    std::fs::write(outside.join("voices.u6vp"), PACK).expect("written");
+    assert_eq!(site_check(&site, &root), Ok(1), "no link: the tree passes");
+    std::os::unix::fs::symlink(&outside, site.join("deep/out")).expect("the link");
+    let err = site_check(&site, &root).unwrap_err();
+    assert_eq!(
+        err,
+        "directory links under site/, not followed so not checked: [\"site/deep/out\"]"
+    );
+    assert!(!err.contains("outside"), "the target is not named");
     std::fs::remove_dir_all(&root).expect("the test directory goes");
 }
 
@@ -215,13 +271,8 @@ fn no_voice_pack_is_in_git_or_under_site() {
         "voice tool outputs in the index: {tracked:?}"
     );
     let site = root.join("site");
-    let (mut found, mut files) = (Vec::new(), 0);
-    walk(&site, &root, &mut found, &mut files);
+    let files = site_check(&site, &root).unwrap_or_else(|e| panic!("{e}"));
     assert!(files > 0, "site/ holds files");
-    assert!(
-        found.is_empty(),
-        "voice tool outputs under site/: {found:?}"
-    );
     println!(
         "index blobs {}, files under site/ {files}: no voice pack, notes or coverage: pass",
         blobs.len()

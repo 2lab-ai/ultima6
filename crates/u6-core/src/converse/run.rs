@@ -80,6 +80,11 @@ fn strtok(buf: &mut [u8], at: &mut usize, delims: &[u8]) -> Option<usize> {
 /// Port (spec 09 Design 1): `kind` is what the caller runs (the look text, or the NPC's words);
 /// the text bytes are put with the speech tap's flag up for [`Kind::Speech`], and the keyword
 /// blocks and ops it runs take the same kind.
+///
+/// Port (spec 08, slice K1): where a run starts (the first text byte here, or after a byte that
+/// is not text) the installed locale pack may have it: its translation is put instead
+/// ([`translated`]), and the byte after the run starts the next one (the next part of a run a
+/// path enters in the middle). Ops and the bytes that stop the runner are read as before.
 pub(crate) fn run_text<'a>(
     cx: &'a Cx<'a>,
     npc: i16,
@@ -88,6 +93,7 @@ pub(crate) fn run_text<'a>(
     Box::pin(async move {
         // Every unit here begins after this; each ends before the next begins.
         let opened = seams::braces(cx);
+        let mut starts = true;
         let mut b = cx.cv(|c| c.next());
         loop {
             #[cfg(test)]
@@ -102,8 +108,12 @@ pub(crate) fn run_text<'a>(
                     seams::print(cx, &m).await;
                     break;
                 }
-                seams::put_speech(cx, kind, b).await;
+                if !(starts && translated(cx, kind).await) {
+                    starts = false;
+                    seams::put_speech(cx, kind, b).await;
+                }
             } else {
+                starts = true;
                 // The text run before it ends here, and what it puts ends with it.
                 seams::end_unit(cx, opened).await;
                 if b == 0xef {
@@ -126,6 +136,40 @@ pub(crate) fn run_text<'a>(
         seams::end_unit(cx, opened).await;
         cx.cv(|c| c.advance(-1));
     })
+}
+
+/// Port-only (spec 08, slice K1): the run that starts at the byte just read, from the installed
+/// locale pack ([`crate::locale::run_at`]). Its translation is put, with the pack's grammar
+/// ([`crate::locale::Pack::language`]) for those puts only, instead of the run's bytes, which are
+/// read past one by one, each with the checkpoint an English byte takes (the last one is the
+/// caller's): a byte of the translation is put before each source byte's checkpoint while both
+/// last, so the identity pack puts and yields exactly as English does. False, and nothing done,
+/// when the pack does not have the run.
+async fn translated(cx: &Cx<'_>, kind: Kind) -> bool {
+    let at = cx.cv(|c| c.pos()) - 1;
+    let Some((pack, key)) = cx.st(|s| crate::locale::run_at(s, at)) else {
+        return false;
+    };
+    let Some(run) = pack.run(key) else {
+        return false;
+    };
+    let len = run.len as usize;
+    let was = cx.st(|s| std::mem::replace(&mut s.ui.text.language, pack.language));
+    for i in 0..len.max(run.text.len()) {
+        if (1..len).contains(&i) {
+            let _b = cx.cv(|c| c.next());
+            #[cfg(test)]
+            super::disasm::trace::run_byte(cx, _b);
+        }
+        if let Some(&t) = run.text.get(i) {
+            seams::put_speech(cx, kind, t).await;
+        }
+        if i + 1 < len {
+            checkpoint(cx).await;
+        }
+    }
+    cx.st(|s| s.ui.text.language = was);
+    true
 }
 
 /// Bounded-work checkpoint (spec 03 §1): a script that jumps without waiting for input yields

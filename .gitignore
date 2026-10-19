@@ -15,3 +15,5 @@ __pycache__/
 /site/packs/
 # The voice model (spec 09), hosted by tools/speech/fetch-models.sh and uploaded with site/.
 /site/models/
+# The Korean pack (spec 08 Rights): made by tools/i18n in ~/Games/ultima6/i18n/ko/, never here.
+*.u6lp

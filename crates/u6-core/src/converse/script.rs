@@ -117,6 +117,16 @@ fn archive(name: &[u8], letter: u8) -> String {
     n.iter().map(|&b| char::from(b)).collect()
 }
 
+/// Port-only (spec 08): the file name of conversation archive `letter` as [`load_script`] opens
+/// it (the game's message with the letter patched in), `converse.<letter>` before the messages
+/// are read.
+pub fn archive_name(state: &State, letter: u8) -> String {
+    state.converse.text.as_ref().map_or_else(
+        || format!("converse.{}", char::from(letter)),
+        |t| archive(t.get(Msg::ConverseFile), letter),
+    )
+}
+
 /// Little-endian u32 at `at`, or `None` past the end (a short read).
 fn le32(f: &[u8], at: usize) -> Option<usize> {
     let b = f.get(at..at.checked_add(4)?)?;
@@ -164,7 +174,10 @@ pub fn load_script(state: &mut State, files: &Files, npc: i16, dst: ScriptDst<'_
         }
     };
     let buf = match dst {
-        ScriptDst::Main => &mut state.converse.script,
+        ScriptDst::Main => {
+            state.converse.script_key = Some((letter, item));
+            &mut state.converse.script
+        }
         ScriptDst::Other(b) => b,
     };
     if buf.len() < SCRIPT_LEN {
