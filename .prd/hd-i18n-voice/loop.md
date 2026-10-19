@@ -18,8 +18,9 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 6 (rev 5: what H0 and H3 measured; rev 6: the neighbour-seam gate), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
 Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening), H1 (the HD compositor, MMPX at 2× or 4×, on by default), H3 (the pack format and the imagegen tool) and H2 (the page loads a pack) are in production (19effa16 at main a769a5a); H4 ran the tool on the owner's files (its pack stays local); H5 (the neighbour-seam gate, tool only, no deploy) is merged at 953e744. 08 L1 (the wide text path) is merged at 16be889 and on preview. In flight:
-- Parked 2026-10-19 (see Re-plan below): H6 at 4443e4b, H7 at c74bccd (local only), L3 at a253067. The L1 production deploy line is withdrawn.
-- On preview, not in production: the first-run chooser (`first-run`) and voice V1–V3 (`voice`). Production waits on the owner keeping a preview.
+- Parked 2026-10-19 (see Re-plan below): H6 at 4443e4b, H7 at c74bccd (local only). L3 landed on main (03a2071) for V5. The L1 production deploy line is withdrawn.
+- On preview, not in production: the first-run chooser (`first-run`), voice V1–V3 with the CPU path (`voice`, main 882cff2) and the NPC bundles button V5 (`npc`, main aa4018a). Production waits on the owner keeping a preview.
+- In flight: V4, a voice per NPC from the committed type-class table and the actor number (branch feat/v4-voice-profiles).
 
 Decision 2026-10-18 (trinity, converged in round 3; record `~/Games/ultima6/work/dispatch/trinity-h5-decision.md`):
 - H5 merged as gate code (953e744); item 1 stays open.
@@ -56,7 +57,8 @@ Nothing the owner could see changed after 2026-10-17 21:15 while H6, H7 and L3 r
 
 1. **First-run chooser (done, on preview `first-run`).** Language English | 한글 for the page chrome, and HD: MMPX or a pack the site lists. Packs are hosted under `/packs/`, gitignored, and served only with the owner's key (a root Pages Function gates every spelling of the path). Owner instruction (verbatim): "hd pack은 드랍하게 하지말고 올려서 내가 고를수 있게 해줘 처음 실행활시에".
 2. **Voice (done, on preview `voice`).** Spec 09 steps 1–3: the speech tap (V1), the Supertonic-3 weights and ort 1.30.0 self-hosted as ≤ 24 MiB parts with LICENSE and NOTICE, behind a terms click-through before the first download (V2), and one English default voice, preset M1 (V3). A real NPC line plays on device; the tap holds back a row not yet drawn at a more prompt. Started before the owner's answer on 1, since nothing else was in flight. Live receipt on the preview with the owner's files: pass/fail and timings only, kept locally.
-3. The next unit is picked from the owner's answers to 1 and 2.
+3. **NPC bundles (done, on preview `npc`).** V5: one `u6.npc-bundle/1` per conversation script from the kept files, kept under `npc-bundle:` and downloaded as one JSON file, with a per-script item budget against hostile scripts. Without WebGPU the voices run on the CPU (owner, 2026-10-19).
+4. **A voice per NPC (in flight).** V4, then V6 (the personality pack, which needs the owner's typed yes before any upload).
 
 Parked, no new commits or reviews: H6 at 4443e4b, H7 at c74bccd (local only), L3 at a253067 (unparked when L5 starts). The L1 production deploy line issued 2026-10-19 07:50 is withdrawn: it changes no English pixel.
 
