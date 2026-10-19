@@ -379,6 +379,10 @@ pub async fn wait_answer(st: &mut IntroState, io: &Io, pointer: bool) -> u16 {
     }
 }
 
+/// The keys a question waits for (0x1064c0 compares with them); port-only (spec 08, slice K4):
+/// the locale catalogue keys the question passages with them.
+pub const ANSWER_KEYS: [u8; 2] = [b'A', b'B'];
+
 /// Original: u 0x1064c0 (gypsy: ask question `p` until A or B; returns the virtue chosen,
 /// 0..7)
 ///
@@ -395,13 +399,14 @@ pub async fn ask(st: &mut IntroState, io: &Io, p: i16) -> i16 {
         mem::draw_item(&mut st.video.chip, &v, 0x10f, 0x29, file, a);
         mem::draw_item(&mut st.video.chip, &v, 0x120, 0x29, file, b);
     }
+    let [key_a, key_b] = ANSWER_KEYS.map(u16::from);
     let c = loop {
         let c = wait_answer(st, io, true).await;
-        if c == u16::from(b'A') || c == u16::from(b'B') {
+        if c == key_a || c == key_b {
             break c;
         }
     };
-    let table: u32 = if c == u16::from(b'A') { 0x3d4 } else { 0x40c };
+    let table: u32 = if c == key_a { 0x3d4 } else { 0x40c };
     // The original indexes its per-virtue tables with the word as it is, sign-extended
     // (0x106530), so a negative question word reads before the table; the port does the same
     // 32-bit address sum. A `u` whose tables hold one past 7 would read beyond them: the port
@@ -449,6 +454,10 @@ pub async fn pour(st: &mut IntroState, io: &Io, v: i16) {
 
 /// The question passage of the pair (a, b): the word at A4+0x426 + 16 a + 2 b.
 pub fn question(st: &IntroState, a: i16, b: i16) -> i16 {
-    st.exe
-        .a4_i16(0x426 + (16 * i32::from(a) + 2 * i32::from(b)) as u32)
+    question_of(&st.exe, a, b)
+}
+
+/// [`question`] read from `exe` (the locale catalogue reads the passages of every pair).
+pub fn question_of(exe: &super::exe::UExe, a: i16, b: i16) -> i16 {
+    exe.a4_i16(0x426 + (16 * i32::from(a) + 2 * i32::from(b)) as u32)
 }

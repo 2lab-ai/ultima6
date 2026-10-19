@@ -14,6 +14,11 @@
 //! ([`crate::ui::wide::Utf8`]); a syllable is a cell 8 pixels wide and a line high, drawn from
 //! the Hangul table, and the word wrapper sums the widths per glyph. Off, every byte is a glyph
 //! as before.
+//!
+//! Port-only (spec 08, slice K4): a context with [`TextCtx::measure`] set lays text out without
+//! drawing, to learn whether a translation fits its box ([`overflows`]): the cursor moves as it
+//! would, and a glyph put after a line feed that could not advance (the cursor already on the
+//! view's last line, where the next glyphs draw over that line) is recorded instead of drawn.
 
 use std::rc::Rc;
 
@@ -45,6 +50,19 @@ pub struct TextCtx {
     /// Port-only (spec 08 §1b): the table Hangul syllables are drawn from; `None` draws them
     /// blank.
     pub hangul: Option<Rc<HangulFont>>,
+    /// Port-only (spec 08, slice K4): `Some` while text is laid out without drawing
+    /// ([`overflows`]); `None` draws.
+    pub measure: Option<Measure>,
+}
+
+/// Port-only (spec 08, slice K4): what a layout without drawing found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Measure {
+    /// The last line feed could not advance (the cursor stayed on the view's last line) and the
+    /// cursor has not moved down since.
+    pub stuck: bool,
+    /// A glyph was put while stuck: drawn, it would go over the view's last line.
+    pub overflow: bool,
 }
 
 impl Default for TextCtx {
@@ -59,6 +77,7 @@ impl Default for TextCtx {
             align: 3,
             wide: false,
             hangul: None,
+            measure: None,
         }
     }
 }
@@ -116,11 +135,17 @@ pub fn carriage_return(ctx: &mut TextCtx) {
 
 /// Original: u 0x115556 (text: new line; the cursor stays on the last line when the next one
 /// would reach the view's bottom edge)
+///
+/// Port-only (spec 08, slice K4): a measure records whether it could advance.
 pub fn line_feed(ctx: &mut TextCtx, font: &WouFont) {
     carriage_return(ctx);
     let y = ctx.y.wrapping_add(height(font));
-    if y < ctx.view.y1 {
+    let advances = y < ctx.view.y1;
+    if advances {
         ctx.y = y;
+    }
+    if let Some(m) = &mut ctx.measure {
+        m.stuck = !advances;
     }
 }
 
@@ -136,7 +161,8 @@ pub fn put_char(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, c: u8) {
 }
 
 /// [`put_char`] of code `c`: a byte as before, a Hangul syllable as an 8-pixel cell
-/// ([`draw_hangul`]).
+/// ([`draw_hangul`]). Port-only (spec 08, slice K4): a measure draws nothing and records a glyph
+/// put after a line feed that could not advance.
 fn put_code(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, c: i32) {
     match c {
         0x0d => return carriage_return(ctx),
@@ -150,9 +176,13 @@ fn put_code(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, c: i32) {
         }
         line_feed(ctx, font);
     }
-    match u8::try_from(c) {
-        Ok(b) => draw_glyph(chip, ctx, font, b),
-        Err(_) => draw_hangul(chip, ctx, font, c),
+    if let Some(m) = &mut ctx.measure {
+        m.overflow |= m.stuck;
+    } else {
+        match u8::try_from(c) {
+            Ok(b) => draw_glyph(chip, ctx, font, b),
+            Err(_) => draw_hangul(chip, ctx, font, c),
+        }
     }
     ctx.x = ctx.x.wrapping_add(w);
     if ctx.view.x1 <= ctx.x {
@@ -302,6 +332,9 @@ pub fn printf(
             }
             b'Y' => {
                 ctx.y = word(&mut args) as i16;
+                if let Some(m) = &mut ctx.measure {
+                    m.stuck = false;
+                }
                 None
             }
             b'P' => {
@@ -365,6 +398,48 @@ pub fn print_new(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, fmt: &[u8],
 /// Original: u 0x1142f0 (text: `printf` appended to the buffer)
 pub fn print_more(chip: &mut Chip, ctx: &mut TextCtx, font: &WouFont, fmt: &[u8], args: &[Arg]) {
     printf(chip, ctx, font, Out::Buffer, fmt, args);
+}
+
+/// Port-only (spec 08, slice K4): the three print entries of `u` ([`print`], [`print_new`],
+/// [`print_more`]), as the creation and the transfer name the one they call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entry {
+    Screen,
+    New,
+    More,
+}
+
+/// Port-only (spec 08, slice K4): `fmt` printed through `entry`.
+pub fn print_at(
+    chip: &mut Chip,
+    ctx: &mut TextCtx,
+    font: &WouFont,
+    entry: Entry,
+    fmt: &[u8],
+    args: &[Arg],
+) {
+    match entry {
+        Entry::Screen => print(chip, ctx, font, fmt, args),
+        Entry::New => print_new(chip, ctx, font, fmt, args),
+        Entry::More => print_more(chip, ctx, font, fmt, args),
+    }
+}
+
+/// Port-only (spec 08, slice K4): whether `lay`, run on a copy of `ctx` that draws nothing
+/// ([`TextCtx::measure`]; `chip` is passed through and left as it is), would put a glyph after a
+/// line feed that could not advance. `ctx` itself is not changed.
+pub fn overflows(
+    chip: &mut Chip,
+    ctx: &TextCtx,
+    font: &WouFont,
+    lay: impl FnOnce(&mut Chip, &mut TextCtx, &WouFont),
+) -> bool {
+    let mut m = TextCtx {
+        measure: Some(Measure::default()),
+        ..ctx.clone()
+    };
+    lay(chip, &mut m, font);
+    m.measure.is_some_and(|m| m.overflow)
 }
 
 /// The code at `i` of the text (0 past the end, as after the NUL).

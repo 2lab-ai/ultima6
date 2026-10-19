@@ -22,7 +22,7 @@ use crate::state::State;
 /// Bytes of the synthetic image: up to the end of u's last hunk (0x11a010).
 const IMAGE: usize = 0x1_a100;
 
-fn exe() -> UExe {
+pub(super) fn exe() -> UExe {
     UExe::from_flat(vec![0; IMAGE])
 }
 
@@ -95,7 +95,7 @@ fn state() -> IntroState {
 }
 
 /// Runs `f` as the engine's game with `keys` queued at the first tick; the result once done.
-fn drive<T: 'static, F: Future<Output = T> + 'static>(
+pub(super) fn drive<T: 'static, F: Future<Output = T> + 'static>(
     keys: &[Key],
     f: impl FnOnce(Rc<Io>) -> F,
 ) -> Option<T> {
@@ -368,13 +368,13 @@ fn c_rand_and_the_shimmer_generator() {
 }
 
 /// Pokes big-endian words at `addr`.
-fn poke_words(e: &mut UExe, addr: u32, words: &[u16]) {
+pub(super) fn poke_words(e: &mut UExe, addr: u32, words: &[u16]) {
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
     e.poke(addr, &bytes);
 }
 
 /// The displacement word of a PC-relative operand whose extension word is at `ext`.
-fn rel(ext: u32, to: u32) -> u16 {
+pub(super) fn rel(ext: u32, to: u32) -> u16 {
     to.wrapping_sub(ext) as u16
 }
 

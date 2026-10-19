@@ -38,6 +38,8 @@ pub(super) struct Run {
     state: Rc<RefCell<Option<Rc<RefCell<State>>>>>,
     /// The host's audio, when the run has one ([`Run::with_speaker`]).
     pub(super) speaker: Option<Speaker>,
+    /// Each tick's frame (the hash of its pixels and palette), when the run records them.
+    pub(super) frames: Option<Vec<u64>>,
 }
 
 /// Sample rate of the test's audio.
@@ -61,6 +63,7 @@ impl Run {
             outcome: Rc::new(RefCell::new(None)),
             state: Rc::new(RefCell::new(None)),
             speaker: None,
+            frames: None,
         }
     }
 
@@ -85,6 +88,12 @@ impl Run {
     /// One engine tick of 20 ms with `ev`, then the host's audio step.
     fn step(&mut self, ev: &[InputEvent]) {
         self.e.tick(ev, 20);
+        if let Some(frames) = &mut self.frames {
+            let f = self.e.frame();
+            let mut bytes = f.pixels().to_vec();
+            bytes.extend(f.palette.iter().flat_map(|c| [c.r, c.g, c.b]));
+            frames.push(crate::converse::disasm::catalog::hash64(&bytes));
+        }
         if let Some(sp) = &mut self.speaker {
             sp.driver.sync(&self.e.state().sound, self.e.io().files());
             sp.driver.render(&mut sp.buf, RATE);
@@ -93,7 +102,16 @@ impl Run {
     }
 
     fn new(files: Files) -> Self {
-        let state = State::new_game(&files).quiet();
+        Self::with_locale(files, None)
+    }
+
+    /// [`Run::new`] with the locale pack `pack` installed on the game state first, as the page
+    /// installs one before the first step (spec 08, slice K4).
+    pub(super) fn with_locale(files: Files, pack: Option<Rc<crate::locale::Pack>>) -> Self {
+        let mut state = State::new_game(&files).quiet();
+        if let Some(pack) = pack {
+            crate::locale::install(&mut state, &files, pack, None).quiet();
+        }
         let outcome = Rc::new(RefCell::new(None));
         let shared = Rc::new(RefCell::new(None));
         let (out, keep) = (Rc::clone(&outcome), Rc::clone(&shared));
@@ -107,7 +125,14 @@ impl Run {
             outcome,
             state: shared,
             speaker: None,
+            frames: None,
         }
+    }
+
+    /// Records every tick's frame from now on.
+    pub(super) fn recording(mut self) -> Self {
+        self.frames = Some(Vec::new());
+        self
     }
 
     pub(super) fn tick(&mut self, n: u32) {
@@ -144,7 +169,7 @@ impl Run {
 }
 
 /// The scripted creation: answers A, B alternately; name "Zhuge", male, second portrait.
-fn script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
+pub(super) fn script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
     // Opening: the first title card (palette 0 faded in by tick ~18), the second, the TV room.
     r.tick(30);
     shot("origin", r);
@@ -390,7 +415,7 @@ fn receipt_story_frames() {
 
 /// The transfer from the menu: B with no Ultima V save in the files ends in the not-found line
 /// (the string at 0x109aa8); a key returns to the menu.
-fn transfer_script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
+pub(super) fn transfer_script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
     r.tick(30);
     r.keys(&[Key::Escape], 120);
     r.keys(&[Key::Char('t')], 80);
@@ -424,7 +449,7 @@ fn transfer_without_a_save_says_no_character_found_and_returns_to_the_menu() {
 
 /// A synthetic Ultima V `saved.gam` (record at byte 2): name, male, Str 20 Dex 25 Int 18, MP 10,
 /// HP 200 / 200, Exp 3000, level 5.
-fn synthetic_u5_save() -> Vec<u8> {
+pub(super) fn synthetic_u5_save() -> Vec<u8> {
     let mut b = vec![0u8; 0x40];
     b[2..9].copy_from_slice(b"Quintus");
     b[2 + 9] = 0xb;
@@ -439,7 +464,7 @@ fn synthetic_u5_save() -> Vec<u8> {
     b
 }
 
-fn transfer_u5_script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
+pub(super) fn transfer_u5_script(r: &mut Run, mut shot: impl FnMut(&str, &Run)) {
     r.tick(30);
     r.keys(&[Key::Escape], 120);
     r.keys(&[Key::Char('t')], 80);

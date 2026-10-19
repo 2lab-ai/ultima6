@@ -1,16 +1,16 @@
-//! Test-only (spec 08 Order 3 / Acceptance 5, slices K1 to K3): the identity pack of the
+//! Test-only (spec 08 Order 3 / Acceptance 5, slices K1 to K4): the identity pack of the
 //! owner's files, built at test time: every run and every table string of the catalog of his
-//! conversation scripts, every executable string the engine catalogues from his `game`, and
-//! every object name of his `look.lzd` and book of his `book.dat`, each translated as itself,
-//! declaring English grammar. Installed, it turns `wide` on and must show exactly what English
-//! shows, every catalogued unit a hit.
+//! conversation scripts, every executable string the engine catalogues from his `game`, every
+//! object name of his `look.lzd` and book of his `book.dat`, and every string the engine
+//! catalogues from his `u`, each translated as itself, declaring English grammar. Installed, it
+//! turns `wide` on and must show exactly what English shows, every catalogued unit a hit.
 
 use std::rc::Rc;
 
 use u6_formats::converse::ConverseLib;
 
 use super::strings::Catalogue;
-use super::{Pack, RunText, StringText, TableText, fingerprint, texts};
+use super::{Pack, RunText, StringText, TableText, fingerprint, program, texts};
 use crate::converse::disasm::catalog::Catalog;
 use crate::files::Files;
 use crate::ui::Language;
@@ -94,7 +94,17 @@ pub(crate) fn identity(files: &Files) -> Option<Rc<Pack>> {
         .get(texts::BOOK_FILE)
         .map(|f| itself(texts::book_units(f)))
         .unwrap_or_default();
-    let made = Pack::new(Language::English, "identity/3", fingerprint(named), runs)
+    let program = program::Catalogue::from_files(files);
+    let program = program.iter().map(|(hash, e)| {
+        (
+            hash,
+            StringText {
+                len: e.text.len() as u32,
+                text: e.text.clone(),
+            },
+        )
+    });
+    let made = Pack::new(Language::English, "identity/4", fingerprint(named), runs)
         .inspect_err(|e| eprintln!("identity pack: runs refused: {e:?}"))
         .ok()?
         .with_tables(tables)
@@ -108,6 +118,9 @@ pub(crate) fn identity(files: &Files) -> Option<Rc<Pack>> {
         .ok()?
         .with_books(books)
         .inspect_err(|e| eprintln!("identity pack: books refused: {e:?}"))
+        .ok()?
+        .with_program(program)
+        .inspect_err(|e| eprintln!("identity pack: u strings refused: {e:?}"))
         .ok()?;
     let read = Pack::parse(&made.to_bytes()).ok()?;
     (read == made).then(|| Rc::new(read))

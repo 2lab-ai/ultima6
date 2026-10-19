@@ -4,6 +4,7 @@
 
 use crate::engine::Io;
 
+use super::exe::UExe;
 use super::gypsy::{self, ask, pour, question, shuffle, wait_answer};
 use super::input::to_upper;
 use super::mem::{self, Ptr, Region, View};
@@ -23,6 +24,30 @@ pub(super) const FEMALE: u32 = 0x0010_99a8;
 const HERO_CLASS: u32 = 0x0010_586e;
 /// Original: A4+0x9a2 (the keys of the portrait buttons: sex, portrait, accept, abort, Escape)
 const PORTRAIT_KEYS: u32 = super::exe::A4 + 0x9a2;
+/// Port-only (spec 08, slice K4): the formats the name screen and the portrait screen print, for
+/// the locale catalogue ([`crate::locale::program`]).
+pub const PRINTED: [u32; 4] = [ASK_NAME, ECHO_NAME, ASK_SEX, NAME_FMT];
+/// The answers the sex question takes ([`name_and_sex`] compares with them).
+const SEX_KEYS: [u8; 2] = [b'M', b'F'];
+
+/// Port-only (spec 08, slice K4): the keys of the read after the format at `at` (one of
+/// [`PRINTED`]), for the locale catalogue: the sex question's answers; the portrait screen's
+/// buttons, creating and transferring ([`portrait_keys`]); none after the name question (a typed
+/// line) or the name.
+pub fn keys_after(exe: &UExe, at: u32) -> Vec<u8> {
+    match at {
+        ASK_SEX => SEX_KEYS.to_vec(),
+        NAME_FMT => [portrait_keys(exe, false), portrait_keys(exe, true)].concat(),
+        _ => Vec::new(),
+    }
+}
+
+/// The portrait screen's keys (A4+0x9a2), the accept key C, or T when transferring.
+fn portrait_keys(exe: &UExe, transfer: bool) -> Vec<u8> {
+    let mut keys = exe.bytes(PORTRAIT_KEYS, 5);
+    keys[2] = if transfer { b'T' } else { b'C' };
+    keys
+}
 
 fn ctype(st: &IntroState, c: u16) -> u8 {
     st.keys
@@ -38,10 +63,12 @@ fn put(st: &mut IntroState, c: u8) {
     }
 }
 
-fn print_new(st: &mut IntroState, fmt: &[u8], args: &[text::Arg]) {
-    if let Some(font) = st.font.as_ref() {
-        text::print_new(&mut st.video.chip, &mut st.text, font, fmt, args);
-    }
+/// The format at `addr` of `u` printed through 0x1142c6 (restart the buffer, then `printf` into
+/// it). Port (spec 08, slice K4): the format is the print entry's, the locale pack's for a
+/// catalogued one when it fits ([`super::locale::print_formats`]); its arguments (the name typed)
+/// are never looked up.
+fn print_new(st: &mut IntroState, addr: u32, args: &[text::Arg]) {
+    super::locale::print_formats(st, &[(text::Entry::New, addr, args)]);
 }
 
 fn with_font(
@@ -185,8 +212,7 @@ pub async fn name_and_sex(st: &mut IntroState, io: &Io) -> bool {
     st.text.view = box_;
     with_font(st, text::clear_view);
     st.text.align = 2;
-    let ask = st.exe.cstr(ASK_NAME);
-    print_new(st, &ask, &[]);
+    print_new(st, ASK_NAME, &[]);
     loop {
         let y = st.text.y;
         st.text.x = box_.x0;
@@ -202,9 +228,8 @@ pub async fn name_and_sex(st: &mut IntroState, io: &Io) -> bool {
         st.text.x = box_.x0;
         with_font(st, |c, t, f| text::clear_eol(c, t, f));
         st.text.align = 2;
-        let (echo, sex_q) = (st.exe.cstr(ECHO_NAME), st.exe.cstr(ASK_SEX));
-        print_new(st, &echo, &[text::Arg::Str(st.hero.name_str())]);
-        print_new(st, &sex_q, &[]);
+        print_new(st, ECHO_NAME, &[text::Arg::Str(st.hero.name_str())]);
+        print_new(st, ASK_SEX, &[]);
         let answered = loop {
             st.text.x = 0x9d;
             with_font(st, |c, t, f| text::clear_eol(c, t, f));
@@ -216,7 +241,7 @@ pub async fn name_and_sex(st: &mut IntroState, io: &Io) -> bool {
             if let Some(first) = st.hero.sex.first_mut() {
                 *first = c;
             }
-            if c == b'M' || c == b'F' || r.is_none() {
+            if SEX_KEYS.contains(&c) || r.is_none() {
                 break r.is_some();
             }
         };
@@ -249,14 +274,8 @@ pub async fn choose(st: &mut IntroState, io: &Io, keys: &[u8]) -> usize {
 /// Original: u 0x10a15e (creation / transfer: choose the portrait; S switches sex, P the next
 /// of six portraits, C (T when transferring) accepts, A or Escape aborts) — true on accept
 pub async fn choose_portrait(st: &mut IntroState, io: &Io, transfer: bool) -> bool {
-    let mut keys = st.exe.bytes(PORTRAIT_KEYS, 5);
-    let accept_item: u16 = if transfer {
-        keys[2] = b'T';
-        1
-    } else {
-        keys[2] = b'C';
-        0x10
-    };
+    let keys = portrait_keys(&st.exe, transfer);
+    let accept_item: u16 = if transfer { 1 } else { 0x10 };
     let planes = st.views.screen.planes;
     st.views.portrait.planes = planes;
     let mut pic = View {
@@ -294,8 +313,7 @@ pub async fn choose_portrait(st: &mut IntroState, io: &Io, transfer: bool) -> bo
     st.text.x = st.views.buttons[0].x0;
     st.text.y = st.views.buttons[0].y0 + 2;
     st.text.align = 2;
-    let fmt = st.exe.cstr(NAME_FMT);
-    print_new(st, &fmt, &[text::Arg::Str(st.hero.name_str())]);
+    print_new(st, NAME_FMT, &[text::Arg::Str(st.hero.name_str())]);
     let vellum = st.files_ptr;
     let b = st.views.buttons;
     for (k, item) in [(2usize, 3u16), (3, 0x12), (4, accept_item), (5, 4)] {

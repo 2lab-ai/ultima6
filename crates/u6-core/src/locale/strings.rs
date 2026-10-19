@@ -24,8 +24,12 @@
 //! byte, as the NPC bundles write theirs). Slice K3 adds, compatibly (left out when empty, the
 //! format's name unchanged), `texts`: the object names of `look.lzd` and the books and signs of
 //! `book.dat` ([`super::texts`]), each with its kind (`look`, `book`), its index, hash, length and
-//! text. It holds the user's game text: it is made in the user's browser and leaves it only as
-//! his own download (`tests/no_string_bundle_in_repo.rs`).
+//! text. Slice K4 adds, compatibly as well, `u`: the strings the `u` program prints (the opening,
+//! the story, the gypsy, character creation and the transfer; [`super::program`]), each with its
+//! kind (its role there: `opening`, `story`, `gypsy`, `creation`, `transfer`), hash, length,
+//! text and (when a key read follows it) the keys that read takes. It holds the user's game
+//! text: it is made in the user's browser and leaves it only as his own download
+//! (`tests/no_string_bundle_in_repo.rs`).
 
 use std::collections::BTreeMap;
 
@@ -44,8 +48,13 @@ pub const MIN_BYTES: usize = 3;
 /// The longest string the game reads ([`GameImage::cstr`]'s bound).
 pub const MAX_BYTES: usize = 256;
 /// The files the export reads, by bare name (the executable; slice K3: the object names and the
-/// books).
-pub const READS: [&str; 3] = ["game", super::texts::LOOK_FILE, super::texts::BOOK_FILE];
+/// books; slice K4: the `u` program).
+pub const READS: [&str; 4] = [
+    "game",
+    super::texts::LOOK_FILE,
+    super::texts::BOOK_FILE,
+    super::program::FILE,
+];
 
 /// The pointers of the shared messages Use and the object commands read for display (A4 - off:
 /// success, failed, no effect, out of range, blocked, nothing, not possible, done, on whom, not
@@ -189,6 +198,9 @@ pub struct Export {
     /// Slice K3: the object names and books ([`super::texts::export`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub texts: Vec<super::texts::ExportText>,
+    /// Slice K4: the strings of the `u` program ([`super::program::export`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub u: Vec<super::program::ExportString>,
 }
 
 impl Export {
@@ -217,6 +229,9 @@ impl Export {
         if !e.texts.iter().all(super::texts::ExportText::reads_back) {
             return Err("a text's index, text, length and hash disagree");
         }
+        if !e.u.iter().all(super::program::ExportString::reads_back) {
+            return Err("a string of the u program's text, length and hash disagree");
+        }
         Ok(e)
     }
 }
@@ -228,9 +243,10 @@ pub fn reads(path: &str) -> bool {
 }
 
 /// The export of the catalogue of the `game` among `files` (by its bare name), for the page's
-/// download, with (slice K3) the object names and books of `files` ([`super::texts::export`]).
-/// Fails, with a fixed sentence (no value of the file), when there is no `game` or it does not
-/// read as the executable the engine knows, or a `look.lzd` there does not read.
+/// download, with (slice K3) the object names and books of `files` ([`super::texts::export`])
+/// and (slice K4) the strings of its `u` ([`super::program::export`]). Fails, with a fixed
+/// sentence (no value of the file), when there is no `game` or it does not read as the
+/// executable the engine knows, or a `look.lzd` or a `u` there does not read.
 pub fn export(files: &crate::files::Files) -> Result<Export, &'static str> {
     let game = files
         .get("game")
@@ -240,6 +256,7 @@ pub fn export(files: &crate::files::Files) -> Result<Export, &'static str> {
     }
     let mut export = Catalogue::from_game(game).export();
     export.texts = super::texts::export(files)?;
+    export.u = super::program::export(files)?;
     Ok(export)
 }
 
@@ -374,6 +391,7 @@ impl Catalogue {
                 })
                 .collect(),
             texts: Vec::new(),
+            u: Vec::new(),
         }
     }
 

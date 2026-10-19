@@ -167,7 +167,8 @@ fn export() -> String {
 }
 
 /// The shape check catches an export and an array of them, whitespace first or not, and nothing
-/// else of that look; an export with object names and books (slice K3) too.
+/// else of that look; an export with object names and books (slice K3), and one with the `u`
+/// program's strings (slice K4), too.
 #[test]
 fn the_shape_check_catches_exports_only() {
     let one = export();
@@ -183,6 +184,17 @@ fn the_shape_check_catches_exports_only() {
     }];
     let with_texts = with_texts.to_json();
     assert!(with_texts.contains("\"texts\":[") && is_export(with_texts.as_bytes()));
+    let mut with_u = Catalogue::default().export();
+    with_u.u = vec![u6_core::locale::program::ExportString {
+        kind: u6_core::locale::program::Role::Story,
+        hash: 0x5678,
+        len: 3,
+        text: "xyz".into(),
+        keys: "AB".into(),
+    }];
+    let with_u = with_u.to_json();
+    assert!(with_u.contains("\"u\":[{\"kind\":\"story\"") && is_export(with_u.as_bytes()));
+    assert!(is_export(format!("[{with_u}]").as_bytes()));
     assert!(is_export(format!("\n  {array}").as_bytes()));
     let other = one.replace(strings::FORMAT, "u6.npc-bundle/1");
     assert!(!is_export(other.as_bytes()));

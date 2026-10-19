@@ -57,6 +57,7 @@ pub mod gypsy;
 pub mod handoff;
 pub mod input;
 pub mod load;
+pub mod locale;
 pub mod mem;
 pub mod music;
 pub mod opening;
@@ -75,6 +76,7 @@ pub mod video;
 use std::cell::RefCell;
 use std::future::{Future, poll_fn};
 use std::pin::pin;
+use std::rc::Rc;
 
 use u6_formats::font::WouFont;
 
@@ -106,13 +108,21 @@ pub enum IntroOutcome {
 /// `time()`. The calls `u` makes into its MED routine go into the game state's sound log at
 /// the end of each poll, in order with the calls of `game` (the hosts replay that log after
 /// each tick; see [`music`]).
+///
+/// Port-only (spec 08, slice K4): with a locale pack installed on the game state (the platform
+/// installs it before the first step, so before `u` starts), `u` takes it ([`locale`]); the
+/// counts its lookups make go into the state's at the end of each poll too.
 pub async fn run(state: &RefCell<State>, io: &Io) -> IntroOutcome {
     let Some(exe) = io.files().get("u").and_then(|f| UExe::parse(f).ok()) else {
         return IntroOutcome::Unavailable;
     };
-    let (seed, written) = {
+    let (seed, written, intro_locale) = {
         let s = state.borrow();
-        (s.rng.state() as u16, s.saveload.objlist.clone())
+        (
+            s.rng.state() as u16,
+            s.saveload.objlist.clone(),
+            locale::IntroLocale::of(&s),
+        )
     };
     let mut files = io.files().clone();
     if let Some(bytes) = written {
@@ -120,7 +130,9 @@ pub async fn run(state: &RefCell<State>, io: &Io) -> IntroOutcome {
         files.overlay(WRITTEN_LAYER, [(name, bytes)].into());
     }
     let mut st = IntroState::new(exe, files);
+    st.locale = intro_locale;
     let calls = st.music.handle();
+    let counted = st.locale.as_ref().map(|l| Rc::clone(&l.counts));
     let outcome = {
         let mut main = pin!(main(&mut st, io, seed, &LAUNCHER_ARGS));
         poll_fn(|cx| {
@@ -129,6 +141,9 @@ pub async fn run(state: &RefCell<State>, io: &Io) -> IntroOutcome {
             if !made.is_empty() {
                 let sound = &mut state.borrow_mut().sound;
                 made.into_iter().for_each(|c| sound.call(c));
+            }
+            if let Some(counts) = &counted {
+                state.borrow().locale.program.add(counts.take());
             }
             poll
         })
@@ -155,7 +170,8 @@ const JJS: u32 = 0x0010_2c12;
 /// menu's quit exits with (so `u` started by hand, not by the launcher, shows nothing). The
 /// arguments are then copied to A4−0x26 (40 bytes each), which nothing reads. Setup as
 /// 0x113bfe and main leave it: the screen view on buffer 1, the menu panel view, the spare
-/// view, the text context (`u6.set`, ink 15, paper 0, justified), `blocks.new`.
+/// view, the text context (`u6.set`, ink 15, paper 0, justified; port: `wide` with a locale
+/// pack), `blocks.new`.
 pub async fn main(st: &mut IntroState, io: &Io, seed: u16, args: &[&[u8]]) -> IntroOutcome {
     let jjs = st.exe.cstr(JJS);
     if args.len() != 2 || args[1] != jjs.as_slice() {
@@ -181,6 +197,7 @@ pub async fn main(st: &mut IntroState, io: &Io, seed: u16, args: &[&[u8]]) -> In
         view: st.views.text,
         ..text::TextCtx::default()
     };
+    locale::apply(st);
     let blocks = st.blocks;
     load::load_into(&mut st.video.chip, &st.files, b"blocks.new", blocks);
     // 0x113bfe also turns the question buttons on (A4+0x182e = 1).

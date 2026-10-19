@@ -160,6 +160,8 @@ pub struct IntroState {
     pub objlist: Option<Vec<u8>>,
     /// Port-only: the calls into the MED routine not handed to the game state yet.
     pub music: super::music::Calls,
+    /// Port-only (spec 08, slice K4): the locale pack of the game state `u` runs on.
+    pub locale: Option<super::locale::IntroLocale>,
 }
 
 impl IntroState {
@@ -203,6 +205,7 @@ impl IntroState {
             files,
             objlist: None,
             music: super::music::Calls::default(),
+            locale: None,
         }
     }
 

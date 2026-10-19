@@ -13,8 +13,10 @@
 use crate::engine::Io;
 
 use super::exe::{A4, UExe};
+use super::locale::{Pass, format_in};
 use super::state::IntroState;
-use super::text::{self, Arg, TextCtx};
+use super::text::{self, Arg, Measure, TextCtx};
+use crate::locale::program::Role;
 
 /// Where 0x10ac08 starts its compare chain (`move.l d7,d0` then `tst.w d0`).
 const CHAIN: u32 = 0x0010_ac7a;
@@ -109,9 +111,12 @@ impl Machine {
     }
 }
 
+/// Original: A4+0x2bd8 (the player's name buffer, which a case pushes for a `%s`)
+pub const NAME_BUFFER: u32 = A4 + 0x2bd8;
+
 /// The string at a pushed address: the player's name buffer, else a string of `u`.
 fn string_at(st: &IntroState, addr: u32) -> Vec<u8> {
-    if addr == A4 + 0x2bd8 {
+    if addr == NAME_BUFFER {
         st.hero.name_str()
     } else {
         st.exe.cstr(addr)
@@ -146,8 +151,8 @@ fn args_for(st: &IntroState, m: &Machine, fmt: &[u8]) -> Vec<Arg> {
     args
 }
 
-/// A word store of a case into the data hunk.
-fn store(st: &mut IntroState, off: u16, v: u16) {
+/// A word store of a case into the data hunk; false for a global the port does not know.
+fn store(st: &mut IntroState, off: u16, v: u16) -> bool {
     let v16 = v as i16;
     let p = &mut st.views.passage;
     match off {
@@ -160,32 +165,159 @@ fn store(st: &mut IntroState, off: u16, v: u16) {
         0x2d10 => p.y1 = v16,
         0x2d1c => st.views.passage_dst.x0 = v16,
         0x2d1e => st.views.passage_dst.y0 = v16,
-        _ => {
+        _ => return false,
+    }
+    true
+}
+
+/// A word load of a case from the data hunk; `None` for a global the port does not know.
+fn load(st: &IntroState, off: u16) -> Option<u16> {
+    match off {
+        0x08d2 => Some(st.volume),
+        _ => None,
+    }
+}
+
+/// What a case does besides moving the evaluator's machine: the port laying the passage out
+/// ([`Lay`]), or (port-only, spec 08 slice K4) the locale catalogue reading which formats it
+/// prints ([`Walk`]).
+trait Host {
+    fn exe(&self) -> &UExe;
+    /// A word store of the case into the data hunk.
+    fn store(&mut self, off: u16, v: u16);
+    /// A word load of the case from the data hunk.
+    fn load(&mut self, off: u16) -> u16;
+    /// The call of 0x10f898, the machine as the case left it.
+    fn fill(&mut self, m: &Machine);
+    /// The alignment the case stores at -2(a5).
+    fn align(&mut self, a: u8);
+    /// The call of 0x1142f0, the machine as the case left it (the format's pointer on top).
+    fn print_more(&mut self, m: &Machine);
+    /// The case calls a routine or holds an instruction the evaluator does not know; it stops.
+    fn stray(&mut self, what: Stray);
+}
+
+/// What a case reached that the evaluator does not know.
+#[derive(Clone, Copy)]
+enum Stray {
+    Routine,
+    Instruction,
+}
+
+/// The port's passage: the case on the intro's globals and the local text context, its formats
+/// put as `pass` has them (port-only, spec 08 slice K4: [`Pass::Measure`] draws nothing, counts
+/// nothing and hits no stub; the caller puts the globals back).
+struct Lay<'a> {
+    st: &'a mut IntroState,
+    ctx: &'a mut TextCtx,
+    pass: Pass,
+}
+
+impl Host for Lay<'_> {
+    fn exe(&self) -> &UExe {
+        &self.st.exe
+    }
+
+    fn store(&mut self, off: u16, v: u16) {
+        if !store(self.st, off, v) && self.pass != Pass::Measure {
             crate::todo_stub!("u 0x10ac08 passage store to an unexpected global", ());
+        }
+    }
+
+    fn load(&mut self, off: u16) -> u16 {
+        match load(self.st, off) {
+            Some(v) => v,
+            None if self.pass == Pass::Measure => 0,
+            None => crate::todo_stub!("u 0x10ac08 passage load of an unexpected global", 0),
+        }
+    }
+
+    fn fill(&mut self, m: &Machine) {
+        let v = self.st.views.passage;
+        if m.a0 == A4 + 0x2d02 && self.pass != Pass::Measure {
+            super::mem::fill_view(&mut self.st.video.chip, &v, m.d0 as u8);
+        }
+    }
+
+    fn align(&mut self, a: u8) {
+        self.ctx.align = a;
+    }
+
+    /// Port (spec 08, slice K4): the format, read from `u`, is the print entry's: with a locale
+    /// pack, a catalogued one is put as the pack has it ([`format_in`]; in English when the
+    /// pack's do not fit the box, [`passage`]); its arguments are read for the English's codes,
+    /// which the translation keeps, and are never looked up (the player's name, a string of `u`
+    /// pushed for a `%s`).
+    fn print_more(&mut self, m: &Machine) {
+        let at = m.long_at(0);
+        let english = self.st.exe.cstr(at);
+        let args = args_for(self.st, m, &english);
+        let fmt = if at == NAME_BUFFER {
+            english
+        } else {
+            format_in(self.st, english, self.pass)
+        };
+        if let Some(font) = self.st.font.as_ref() {
+            text::print_more(&mut self.st.video.chip, self.ctx, font, &fmt, &args);
+        }
+    }
+
+    fn stray(&mut self, what: Stray) {
+        if self.pass == Pass::Measure {
+            return;
+        }
+        match what {
+            Stray::Routine => {
+                crate::todo_stub!("u 0x10ac08 passage calls an unexpected routine", ());
+            }
+            Stray::Instruction => {
+                crate::todo_stub!("u 0x10ac08 passage instruction not decoded", ());
+            }
         }
     }
 }
 
-/// A word load of a case from the data hunk.
-fn load(st: &IntroState, off: u16) -> u16 {
-    match off {
-        0x08d2 => st.volume,
-        _ => crate::todo_stub!("u 0x10ac08 passage load of an unexpected global", 0),
-    }
+/// Port-only (spec 08, slice K4): a case walked for the formats its 0x1142f0 calls take, with
+/// nothing else done (no global stored or read, nothing drawn, no stub hit).
+struct Walk<'a> {
+    exe: &'a UExe,
+    formats: Vec<u32>,
 }
 
-/// Runs the case at `pc` on the local context; stops at the branch to the tail or at the tail.
-fn run_case(st: &mut IntroState, ctx: &mut TextCtx, mut pc: u32, d6: u32) {
+impl Host for Walk<'_> {
+    fn exe(&self) -> &UExe {
+        self.exe
+    }
+
+    fn store(&mut self, _: u16, _: u16) {}
+
+    fn load(&mut self, _: u16) -> u16 {
+        0
+    }
+
+    fn fill(&mut self, _: &Machine) {}
+
+    fn align(&mut self, _: u8) {}
+
+    fn print_more(&mut self, m: &Machine) {
+        self.formats.push(m.long_at(0));
+    }
+
+    fn stray(&mut self, _: Stray) {}
+}
+
+/// Runs the case at `pc` on `host`; stops at the branch to the tail or at the tail.
+fn run_case(host: &mut impl Host, mut pc: u32, d6: u32) {
     let mut m = Machine {
         d0: 0,
         a0: 0,
         stack: Vec::new(),
     };
     for _ in 0..MAX_STEPS {
-        let exe = &st.exe;
-        let op = exe.word(pc);
-        let w1 = exe.word(pc + 2);
-        let w2 = exe.word(pc + 4);
+        let (op, w1, w2) = {
+            let exe = host.exe();
+            (exe.word(pc), exe.word(pc + 2), exe.word(pc + 4))
+        };
         if [op, w1] == TAIL_OPCODE {
             return;
         }
@@ -202,22 +334,22 @@ fn run_case(st: &mut IntroState, ctx: &mut TextCtx, mut pc: u32, d6: u32) {
             }
             // move.w d0,off(a4)
             0x3940 => {
-                store(st, w1, m.d0 as u16);
+                host.store(w1, m.d0 as u16);
                 pc += 4;
             }
             // move.w #imm,off(a4)
             0x397c => {
-                store(st, w2, w1);
+                host.store(w2, w1);
                 pc += 6;
             }
             // clr.w off(a4)
             0x426c => {
-                store(st, w1, 0);
+                host.store(w1, 0);
                 pc += 4;
             }
             // move.w off(a4),d0
             0x302c => {
-                m.d0 = (m.d0 & 0xffff_0000) | u32::from(load(st, w1));
+                m.d0 = (m.d0 & 0xffff_0000) | u32::from(host.load(w1));
                 pc += 4;
             }
             // ext.l d0
@@ -239,7 +371,7 @@ fn run_case(st: &mut IntroState, ctx: &mut TextCtx, mut pc: u32, d6: u32) {
             0x2eb0 if w1 == 0x0800 => {
                 let p = if m.a0 == A4 + 0x8ac {
                     let i = (m.d0 / 4) as usize;
-                    st.exe.volume_ptrs.get(i).copied().unwrap_or(0)
+                    host.exe().volume_ptrs.get(i).copied().unwrap_or(0)
                 } else {
                     0
                 };
@@ -289,29 +421,21 @@ fn run_case(st: &mut IntroState, ctx: &mut TextCtx, mut pc: u32, d6: u32) {
             }
             // move.b #imm,-2(a5): the alignment
             0x1b7c if w2 == 0xfffe => {
-                ctx.align = w1 as u8;
+                host.align(w1 as u8);
                 pc += 6;
             }
             // jsr d(pc)
             0x4eba => {
-                let target = resolve(exe, (pc + 2).wrapping_add_signed(i32::from(w1 as i16)));
+                let target = resolve(
+                    host.exe(),
+                    (pc + 2).wrapping_add_signed(i32::from(w1 as i16)),
+                );
                 pc += 4;
                 match target {
-                    FILL_VIEW => {
-                        let v = st.views.passage;
-                        if m.a0 == A4 + 0x2d02 {
-                            super::mem::fill_view(&mut st.video.chip, &v, m.d0 as u8);
-                        }
-                    }
-                    PRINT_MORE => {
-                        let fmt = st.exe.cstr(m.long_at(0));
-                        let args = args_for(st, &m, &fmt);
-                        if let Some(font) = st.font.as_ref() {
-                            text::print_more(&mut st.video.chip, ctx, font, &fmt, &args);
-                        }
-                    }
+                    FILL_VIEW => host.fill(&m),
+                    PRINT_MORE => host.print_more(&m),
                     _ => {
-                        crate::todo_stub!("u 0x10ac08 passage calls an unexpected routine", ());
+                        host.stray(Stray::Routine);
                         return;
                     }
                 }
@@ -320,12 +444,41 @@ fn run_case(st: &mut IntroState, ctx: &mut TextCtx, mut pc: u32, d6: u32) {
             0x6000 => return,
             _ if op & 0xff00 == 0x6000 => return,
             _ => {
-                crate::todo_stub!("u 0x10ac08 passage instruction not decoded", ());
+                host.stray(Stray::Instruction);
                 return;
             }
         }
     }
 }
+
+/// Port-only (spec 08, slice K4): the addresses of the formats passage `n`'s case prints (its
+/// 0x1142f0 calls, in order), the player's name buffer left out; empty when the code at 0x10ac7a
+/// is not the expected chain. The locale catalogue reads them ([`crate::locale::program`]).
+pub fn formats(exe: &UExe, n: u16) -> Vec<u32> {
+    let Some(pc) = case_address(exe, n) else {
+        return Vec::new();
+    };
+    let mut walk = Walk {
+        exe,
+        formats: Vec::new(),
+    };
+    run_case(&mut walk, pc, 0x1e);
+    walk.formats.retain(|&a| a != NAME_BUFFER);
+    walk.formats
+}
+
+/// Port-only (spec 08, slice K4): the passages the port shows (inclusive ranges of their
+/// numbers) and what they are: the opening's (`opening.rs`, `storm.rs`, `gate.rs`), the walk to
+/// the gypsy's wagon and her farewell (`create.rs`; her questions are the numbers of the pair
+/// table, [`super::gypsy::question_of`]), the introduction story's (`story.rs`), and the line that
+/// a game is under way (creation and transfer).
+pub const SHOWN: [(u16, u16, Role); 5] = [
+    (0, 0xf, Role::Opening),
+    (0x64, 0x68, Role::Gypsy),
+    (0x85, 0x89, Role::Gypsy),
+    (0xc8, 0xdb, Role::Story),
+    (0x3e6, 0x3e6, Role::Creation),
+];
 
 /// Original: u 0x10ac08 (show passage `n`: its text laid into the passage bitmap A4+0x2d02,
 /// with the scroll frame and the screen position in the globals 0x10f4da uses)
@@ -334,6 +487,10 @@ fn run_case(st: &mut IntroState, ctx: &mut TextCtx, mut pc: u32, d6: u32) {
 /// buffer; waiting keys are dropped; the destination view starts as a copy of A4+0x17e4 and
 /// the box at (0, 0). After the case, the buffer is flushed through the word wrapper into the
 /// box. Nothing reaches the screen until 0x10f4da.
+///
+/// Port (spec 08, slice K4): with a locale pack, the case (one box) is laid out first as it is
+/// then drawn but without drawing ([`too_tall`]); when the pack's formats would put a glyph over
+/// the box's last line, it is drawn with its English formats ([`Pass::English`]).
 pub fn passage(st: &mut IntroState, io: &Io, n: u16) {
     let mut ctx = st.text.clone();
     st.keys.flush(io);
@@ -347,14 +504,60 @@ pub fn passage(st: &mut IntroState, io: &Io, n: u16) {
     ctx.bg = 0x1e;
     ctx.buf.clear();
     let d6 = 0x1e;
-    if let Some(pc) = case_address(&st.exe, n) {
-        run_case(st, &mut ctx, pc, d6);
+    let pc = case_address(&st.exe, n);
+    let pass = match pc {
+        Some(pc) if st.locale.is_some() && too_tall(st, &ctx, pc, d6) => Pass::English,
+        _ => Pass::Draw,
+    };
+    if let Some(pc) = pc {
+        run_case(
+            &mut Lay {
+                st,
+                ctx: &mut ctx,
+                pass,
+            },
+            pc,
+            d6,
+        );
     }
     ctx.view = st.views.passage;
     let buf = ctx.buf.clone();
     if let Some(font) = st.font.as_ref() {
         text::wrap(&mut st.video.chip, &mut ctx, font, &buf);
     }
+}
+
+/// Port-only (spec 08, slice K4): whether the case at `pc`, laid out as [`passage`] then draws
+/// it from `ctx` (the case, then the buffer wrapped into the box it stored) with the pack's
+/// formats, puts a glyph after a line feed that could not advance (a context that measures,
+/// [`TextCtx::measure`]). Nothing is drawn, counted or stubbed, and the globals the case stores
+/// (the frame, the box) are put back as they were.
+fn too_tall(st: &mut IntroState, ctx: &TextCtx, pc: u32, d6: u32) -> bool {
+    let kept = (st.frame, st.views.clone());
+    let mut m = TextCtx {
+        measure: Some(Measure::default()),
+        ..ctx.clone()
+    };
+    run_case(
+        &mut Lay {
+            st,
+            ctx: &mut m,
+            pass: Pass::Measure,
+        },
+        pc,
+        d6,
+    );
+    m.view = st.views.passage;
+    if let Some(x) = &mut m.measure {
+        // Another view: a line feed that could not advance in the one before is not this one's.
+        x.stuck = false;
+    }
+    let buf = m.buf.clone();
+    if let Some(font) = st.font.as_ref() {
+        text::wrap(&mut st.video.chip, &mut m, font, &buf);
+    }
+    (st.frame, st.views) = kept;
+    m.measure.is_some_and(|x| x.overflow)
 }
 
 /// Original: u 0x10f4da (passage: draw the scroll frame into the screen's drawing buffer and

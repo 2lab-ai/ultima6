@@ -119,7 +119,12 @@
 // status line gives their count). Slice K3: the same download also lists, read in wasm from the
 // kept look.lzd and book.dat, the names Look gives things and the books and signs; a pack that
 // holds them shows them in Korean (counts only: data-locale-pack-texts on the body,
-// data-locale-look-hits/misses and data-locale-book-hits/misses on the canvas).
+// data-locale-look-hits/misses and data-locale-book-hits/misses on the canvas). Slice K4: the
+// download also lists, read in wasm from the kept u, the lines of the opening, the introduction
+// story, the gypsy and character creation; a pack that holds them shows them in Korean when a
+// new game starts in 한글 (u runs on the game the pack is set on before its first step, as the
+// game does; counts only: data-locale-pack-program on the body, data-locale-program-hits/misses
+// on the canvas).
 import init, {
   Game, GameStrings, HdPack, LocalePack, NpcBundles, PackProbe, budget_ms, input_too_large, max_input_bytes,
   max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
@@ -728,6 +733,7 @@ function reflectLocale() {
   document.body.dataset.localePack = koPack ? koPack.counts().join(',') : 'none';
   document.body.dataset.localePackStrings = koPack ? koPack.string_counts().join(',') : 'none';
   document.body.dataset.localePackTexts = koPack ? koPack.text_counts().join(',') : 'none';
+  document.body.dataset.localePackProgram = koPack ? String(koPack.program_strings()) : 'none';
   const live = game && !crashed;
   canvas.dataset.locale = live ? localeShown : 'off';
   localeNote.hidden = lang !== 'ko' || koPack !== null;
@@ -738,7 +744,8 @@ function reflectLocale() {
 // The game's runs put from the pack and those it did not have (counts only), each frame.
 function reflectLocaleCounts() {
   if (localeShown === 'off') return;
-  const [, hits, misses, tableHits, tableMisses, textHits, textMisses, lookHits, lookMisses, bookHits, bookMisses] = game.locale_counts();
+  const [, hits, misses, tableHits, tableMisses, textHits, textMisses, lookHits, lookMisses, bookHits, bookMisses,
+    programHits, programMisses] = game.locale_counts();
   canvas.dataset.localeHits = String(hits);
   canvas.dataset.localeMisses = String(misses);
   canvas.dataset.localeTableHits = String(tableHits);
@@ -749,6 +756,8 @@ function reflectLocaleCounts() {
   canvas.dataset.localeLookMisses = String(lookMisses);
   canvas.dataset.localeBookHits = String(bookHits);
   canvas.dataset.localeBookMisses = String(bookMisses);
+  canvas.dataset.localeProgramHits = String(programHits);
+  canvas.dataset.localeProgramMisses = String(programMisses);
 }
 
 // `next`, just started, takes the pack when the page wants it (before its first step).
@@ -756,7 +765,7 @@ function attachLocale(next) {
   localeShown = 'off';
   localeWhy = '';
   for (const k of ['localeHits', 'localeMisses', 'localeTableHits', 'localeTableMisses', 'localeTextHits', 'localeTextMisses',
-    'localeLookHits', 'localeLookMisses', 'localeBookHits', 'localeBookMisses']) {
+    'localeLookHits', 'localeLookMisses', 'localeBookHits', 'localeBookMisses', 'localeProgramHits', 'localeProgramMisses']) {
     canvas.dataset[k] = '0';
   }
   if (!wantLocale()) return;
@@ -768,7 +777,7 @@ function attachLocale(next) {
 function localeLine() {
   if (localeShown === 'on') {
     const [runs, scripts] = koPack.counts();
-    return `\n${t('koPackOn', runs, scripts, ...koPack.string_counts(), ...koPack.text_counts())}`;
+    return `\n${t('koPackOn', runs, scripts, ...koPack.string_counts(), ...koPack.text_counts(), koPack.program_strings())}`;
   }
   return localeShown === 'mismatch' ? `\n${t('koPackMismatch', localeWhy)}` : '';
 }
@@ -822,7 +831,7 @@ async function loadLocalePackFile(file) {
     note = t('koPackNotKept', old);
   }
   const [runs, scripts] = koPack.counts();
-  await restartForLocale(`${t('koPackLoaded', runs, scripts, ...koPack.string_counts(), ...koPack.text_counts())}${note}`, true);
+  await restartForLocale(`${t('koPackLoaded', runs, scripts, ...koPack.string_counts(), ...koPack.text_counts(), koPack.program_strings())}${note}`, true);
 }
 
 // The pack kept from the last visit, loaded before the first game starts. One that no longer
@@ -1669,9 +1678,10 @@ async function exportNpcBundles() {
 
 const STRINGS_FILE = 'ultima6-strings.json';
 
-// "Game strings": the catalogued messages of the kept game file, and (slice K3) the object names
-// and books of the kept look.lzd and book.dat, read in wasm and downloaded as one JSON object
-// (u6.string-bundle/1); nothing is kept, logged or shown but their counts.
+// "Game strings": the catalogued messages of the kept game file, (slice K3) the object names and
+// books of the kept look.lzd and book.dat, and (slice K4) the lines of the kept u, read in wasm
+// and downloaded as one JSON object (u6.string-bundle/1); nothing is kept, logged or shown but
+// their counts.
 async function exportGameStrings() {
   needEngine();
   let kept = await loadFiles();
@@ -1699,9 +1709,10 @@ async function exportGameStrings() {
   const texts = exported.texts ?? [];
   const look = texts.filter((e) => e.kind === 'look').length;
   const books = texts.length - look;
+  const u = (exported.u ?? []).length;
   download(STRINGS_FILE, json);
   json = null;
-  say('stringsExported', n, STRINGS_FILE, look, books);
+  say('stringsExported', n, STRINGS_FILE, look, books, u);
 }
 
 async function forgetNpc() {

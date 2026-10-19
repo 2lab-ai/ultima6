@@ -158,19 +158,19 @@ export const TEXT = {
     npcNotKept: (n, file) => `NPC bundles: ${n} conversation scripts, each with its NPC's name and dialogue, are downloaded as ${file}; this browser could not keep them (any kept before stay).`,
     npcForgot: 'The NPC bundles were removed from this browser.',
     gameStrings: 'Game strings',
-    gameStringsTitle: 'The game\'s own messages (the command prompts and their results), its object names and its books and signs, read in this browser from the game files kept here and downloaded as one JSON file for the Korean pack\'s tool. Nothing is uploaded.',
-    gameStringsNote: 'Game strings: the game strings button reads, in this browser, the game\'s own messages from the game file kept here (the command prompts and their results, the words of a conversation\'s frame), the names Look gives things and the texts of the books and signs, and downloads them as one JSON file, for tools/i18n to make the Korean pack\'s game strings, object names and books. It is never uploaded or kept here.',
+    gameStringsTitle: 'The game\'s own messages (the command prompts and their results), its object names, its books and signs and the lines of its opening and character creation, read in this browser from the game files kept here and downloaded as one JSON file for the Korean pack\'s tool. Nothing is uploaded.',
+    gameStringsNote: 'Game strings: the game strings button reads, in this browser, the game\'s own messages from the game file kept here (the command prompts and their results, the words of a conversation\'s frame), the names Look gives things, the texts of the books and signs and the lines of the opening, the story and character creation, and downloads them as one JSON file, for tools/i18n to make the Korean pack\'s game strings, object names, books and opening. It is never uploaded or kept here.',
     opGameStrings: 'Reading the game strings',
     stringsNoFiles: 'No game files are kept in this browser yet: drop or choose your Ultima VI files, then press Game strings.',
-    stringsExported: (n, file, look = 0, books = 0) => `Game strings: ${n} of the game's own messages${look || books ? `, ${look} object names and ${books} books and signs` : ''} are downloaded as ${file}; nothing is kept in this browser.`,
+    stringsExported: (n, file, look = 0, books = 0, u = 0) => `Game strings: ${n} of the game's own messages${look || books ? `, ${look} object names and ${books} books and signs` : ''}${u ? `, ${u} lines of the opening and character creation` : ''} are downloaded as ${file}; nothing is kept in this browser.`,
     stringsFailed: (why) => `The game strings were not made: ${why}.`,
     forgetKo: 'Forget the Korean pack',
     opKoPack: 'Loading the Korean pack',
     opForgetKo: 'Removing the Korean pack',
     forgetKoLater: 'The Korean pack will be removed after the current step…',
-    koPackLoaded: (runs, scripts, tables = 0, strings = 0, look = 0, books = 0) => `Korean pack loaded: ${runs} lines of ${scripts} conversations${tables || strings ? `, ${tables} table strings and ${strings} game strings` : ''}${look || books ? `, ${look} object names and ${books} books and signs` : ''}; they show in Korean while the page is in 한글.`,
-    koPackOn: (runs, scripts, tables = 0, strings = 0, look = 0, books = 0) => (tables || strings || look || books
-      ? `Korean pack: ${runs} lines of ${scripts} conversations, ${tables} table strings and ${strings} game strings${look || books ? `, ${look} object names and ${books} books and signs` : ''} show in Korean; all other text stays English.`
+    koPackLoaded: (runs, scripts, tables = 0, strings = 0, look = 0, books = 0, u = 0) => `Korean pack loaded: ${runs} lines of ${scripts} conversations${tables || strings ? `, ${tables} table strings and ${strings} game strings` : ''}${look || books ? `, ${look} object names and ${books} books and signs` : ''}${u ? `, ${u} lines of the opening and character creation` : ''}; they show in Korean while the page is in 한글.`,
+    koPackOn: (runs, scripts, tables = 0, strings = 0, look = 0, books = 0, u = 0) => (tables || strings || look || books || u
+      ? `Korean pack: ${runs} lines of ${scripts} conversations, ${tables} table strings and ${strings} game strings${look || books ? `, ${look} object names and ${books} books and signs` : ''}${u ? `, ${u} lines of the opening and character creation` : ''} show in Korean; all other text stays English.`
       : `Korean pack: ${runs} lines of ${scripts} conversations show in Korean; all other text stays English.`),
     koPackMismatch: (why) => `The Korean pack is not used with these game files: ${why}.`,
     koPackKept: ' It is kept in this browser for the next visit.',
@@ -333,19 +333,19 @@ export const TEXT = {
     npcNotKept: (n, file) => `NPC 대사 묶음: 대화 스크립트 ${n}개(각각 NPC의 이름과 대사)를 ${file}(으)로 내려받았습니다. 이 브라우저에는 보관하지 못했습니다(전에 보관한 것은 그대로 남습니다).`,
     npcForgot: 'NPC 대사 묶음을 이 브라우저에서 지웠습니다.',
     gameStrings: '게임 문구',
-    gameStringsTitle: '게임이 직접 내는 문구(명령 프롬프트와 그 결과), 물건 이름, 책과 팻말의 글을 여기 보관한 게임 파일에서 이 브라우저 안에서 읽어 한글 팩 도구용 JSON 파일 하나로 내려받습니다. 아무것도 업로드되지 않습니다.',
-    gameStringsNote: '게임 문구: 게임 문구 버튼은 여기 보관한 게임 파일에서 게임이 직접 내는 문구(명령 프롬프트와 그 결과, 대화 첫머리의 말), 살펴보기가 보여 주는 물건 이름, 책과 팻말의 글을 이 브라우저 안에서 읽어 JSON 파일 하나로 내려받습니다. tools/i18n이 이것으로 한글 팩의 게임 문구, 물건 이름, 책을 만듭니다. 업로드되지도 여기 보관되지도 않습니다.',
+    gameStringsTitle: '게임이 직접 내는 문구(명령 프롬프트와 그 결과), 물건 이름, 책과 팻말의 글, 시작과 인물 만들기의 글을 여기 보관한 게임 파일에서 이 브라우저 안에서 읽어 한글 팩 도구용 JSON 파일 하나로 내려받습니다. 아무것도 업로드되지 않습니다.',
+    gameStringsNote: '게임 문구: 게임 문구 버튼은 여기 보관한 게임 파일에서 게임이 직접 내는 문구(명령 프롬프트와 그 결과, 대화 첫머리의 말), 살펴보기가 보여 주는 물건 이름, 책과 팻말의 글, 시작과 이야기와 인물 만들기의 글을 이 브라우저 안에서 읽어 JSON 파일 하나로 내려받습니다. tools/i18n이 이것으로 한글 팩의 게임 문구, 물건 이름, 책, 시작의 글을 만듭니다. 업로드되지도 여기 보관되지도 않습니다.',
     opGameStrings: '게임 문구 읽기',
     stringsNoFiles: '이 브라우저에 보관한 게임 파일이 아직 없습니다: 울티마 VI 파일을 놓거나 고른 다음 게임 문구를 누르세요.',
-    stringsExported: (n, file, look = 0, books = 0) => `게임 문구: 게임이 직접 내는 문구 ${n}개${look || books ? `, 물건 이름 ${look}개, 책과 팻말 ${books}개` : ''}를 ${file}(으)로 내려받았습니다. 이 브라우저에는 보관하지 않습니다.`,
+    stringsExported: (n, file, look = 0, books = 0, u = 0) => `게임 문구: 게임이 직접 내는 문구 ${n}개${look || books ? `, 물건 이름 ${look}개, 책과 팻말 ${books}개` : ''}${u ? `, 시작과 인물 만들기의 글 ${u}개` : ''}를 ${file}(으)로 내려받았습니다. 이 브라우저에는 보관하지 않습니다.`,
     stringsFailed: (why) => `게임 문구를 만들지 못했습니다: ${why}.`,
     forgetKo: '한글 팩 지우기',
     opKoPack: '한글 팩 불러오기',
     opForgetKo: '한글 팩 지우기',
     forgetKoLater: '지금 단계가 끝나면 한글 팩을 지웁니다…',
-    koPackLoaded: (runs, scripts, tables = 0, strings = 0, look = 0, books = 0) => `한글 팩을 불러왔습니다: 대화 ${scripts}개의 줄 ${runs}개${tables || strings ? `, 표 문구 ${tables}개, 게임 문구 ${strings}개` : ''}${look || books ? `, 물건 이름 ${look}개, 책과 팻말 ${books}개` : ''}. 페이지가 한글일 때 한글로 나옵니다.`,
-    koPackOn: (runs, scripts, tables = 0, strings = 0, look = 0, books = 0) => (tables || strings || look || books
-      ? `한글 팩: 대화 ${scripts}개의 줄 ${runs}개, 표 문구 ${tables}개, 게임 문구 ${strings}개${look || books ? `, 물건 이름 ${look}개, 책과 팻말 ${books}개` : ''}가 한글로 나옵니다. 다른 글은 모두 영어로 나옵니다.`
+    koPackLoaded: (runs, scripts, tables = 0, strings = 0, look = 0, books = 0, u = 0) => `한글 팩을 불러왔습니다: 대화 ${scripts}개의 줄 ${runs}개${tables || strings ? `, 표 문구 ${tables}개, 게임 문구 ${strings}개` : ''}${look || books ? `, 물건 이름 ${look}개, 책과 팻말 ${books}개` : ''}${u ? `, 시작과 인물 만들기의 글 ${u}개` : ''}. 페이지가 한글일 때 한글로 나옵니다.`,
+    koPackOn: (runs, scripts, tables = 0, strings = 0, look = 0, books = 0, u = 0) => (tables || strings || look || books || u
+      ? `한글 팩: 대화 ${scripts}개의 줄 ${runs}개, 표 문구 ${tables}개, 게임 문구 ${strings}개${look || books ? `, 물건 이름 ${look}개, 책과 팻말 ${books}개` : ''}${u ? `, 시작과 인물 만들기의 글 ${u}개` : ''}가 한글로 나옵니다. 다른 글은 모두 영어로 나옵니다.`
       : `한글 팩: 대화 ${scripts}개의 줄 ${runs}개가 한글로 나옵니다. 다른 글은 모두 영어로 나옵니다.`),
     koPackMismatch: (why) => `한글 팩을 이 게임 파일과 함께 쓰지 않습니다: ${why}.`,
     koPackKept: ' 다음 방문을 위해 이 브라우저에 보관합니다.',

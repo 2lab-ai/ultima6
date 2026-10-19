@@ -117,3 +117,41 @@ Incantation syllables, runic text and the credits are not translated.
 | look | `copper teapot` | `구리 찻주전자` |
 | look | `basket\s of plums` | `자두 바구니` |
 | book | `Beware the dark forest, traveller.\n` | `나그네여, 어두운 숲을 조심하시오.\n` |
+
+## The opening, the story, the gypsy and character creation (slice K4)
+
+- A request of these lines holds, in the order the game shows them, the text of the separate
+  program that plays the opening and makes the character, each `{"n", "en", "kind"}`:
+  - `opening` and `story`: the story passages, told by a narrator. Write them in 사극체 as a
+    storyteller of old would (하오체 or a narrating 해라체, ~하였노라, ~이었도다), the same level
+    through every passage;
+  - `gypsy`: the walk to the gypsy's wagon, her questions and her farewell. The gypsy is a seer:
+    she speaks in 하오체 or 하게체 (~하게, ~이네, ~는가), solemn and a little strange, and keeps
+    that level in every question; the narration around her is the narrator's;
+  - `creation` and `transfer`: the prompts of making a character and of bringing one from an
+    earlier game (a name, a sex, a portrait, a disk, the attributes). Write them plain and
+    short, in 하오체 (`그대의 이름은 무엇이오?`), each label one word.
+- This program prints with its own printer, which has no escape layer: `$ # * @ & < >` are
+  plain characters there, and there are no particle markers. Keep every `%` code exactly, in
+  the same order: `%s` (a name or a word the game fills in), `%d` (a number), and the codes the
+  game reads itself, `%B` and `%F` (colours), `%X` and `%Y` (where the text goes), `%P` (the
+  passage is laid out there). Never write `{이/가}` or another marker, nor `@{…}`: they would
+  print as they are.
+- The name the player types is in Latin letters, so its sound is unknown: after `%s` write no
+  particle (`%s, 그대여`), or the paired form itself (`%s이(가)`).
+- Keep every line break where the English has it: as many at the start, at the end and in all
+  (a sheet's labels stand on their own rows, beside the values the game prints). A passage that
+  does not fit its box is shown in English, so keep each one no longer on screen than its
+  English (a syllable is about as wide as two English letters).
+- A line with `"keys"` is shown before the game waits for one of those keys. Keep each key its
+  English shows standing alone (`A)`, `(M)`, `N)ew`) standing alone, in Latin letters and in the
+  same order; for a key the English shows only inside a word (`Male` for `M`), put the letter
+  after that word's Korean as `(M)` (`남자(M)`).
+- Every line needs at least one Hangul syllable.
+
+| Kind | English | Korean |
+|---|---|---|
+| story | `%F%BThe wind howled over the moor.\n%P` | `%F%B황야 위로 바람이 울부짖었노라.\n%P` |
+| gypsy | `Wouldst thou A) speak the truth, or B) spare a friend?` | `그대는 A) 참을 말하겠는가, B) 벗을 감싸겠는가?` |
+| creation | `What name dost thou bear, traveller?` | `나그네여, 그대의 이름은 무엇이오?` |
+| transfer | `Strength\nDexterity\n` | `힘\n민첩\n` |

@@ -23,13 +23,13 @@
 use crate::engine::Io;
 
 use super::create::{FEMALE, MALE, choose, choose_portrait, read_line, toggle_sex};
-use super::exe::A4;
+use super::exe::{A4, UExe};
 use super::mem::{self, Ptr, Region, View};
 use super::music;
 use super::passages::{passage, show_passage};
 use super::screen::{poll_key, swap};
 use super::state::IntroState;
-use super::text::{self, Arg};
+use super::text::{self, Arg, Entry};
 
 /// Strings of `u` the transfer prints or opens.
 const TITLE: u32 = 0x0010_9a1a;
@@ -47,6 +47,23 @@ const LABELS: u32 = 0x0010_99e6;
 const LABELS_2: u32 = 0x0010_99f6;
 const FMT_NAMES: u32 = 0x0010_99b0;
 const FMT_NUMBERS: u32 = 0x0010_99ba;
+/// Port-only (spec 08, slice K4): the formats the transfer prints ([`print`]), for the locale
+/// catalogue ([`crate::locale::program`]); the save names it opens are not printed.
+pub const PRINTED: [u32; 13] = [
+    TITLE,
+    PUT_DISK,
+    CLICK_A,
+    OR_B,
+    NOT_FOUND,
+    ULTIMA,
+    IV,
+    V,
+    ULTIMA_VI,
+    LABELS,
+    LABELS_2,
+    FMT_NAMES,
+    FMT_NUMBERS,
+];
 /// Original: A4+0x94b (the Ultima IV class names, 9 bytes each: the eight classes, then the
 /// hero's)
 const CLASSES: u32 = A4 + 0x94b;
@@ -54,6 +71,25 @@ const CLASSES: u32 = A4 + 0x94b;
 const HERO_CLASS: u32 = A4 + 0x993;
 /// Original: A4+0x99c (the sheet's keys: N, S, C, A, Escape)
 const SHEET_KEYS: u32 = A4 + 0x99c;
+/// The dialog's keys besides Escape: A (Ultima IV), B (Ultima V).
+const SOURCE_KEYS: [u8; 2] = [b'A', b'B'];
+
+/// Port-only (spec 08, slice K4): the keys of the read after the format at `at` (one of
+/// [`PRINTED`]), for the locale catalogue: the dialog's text, then A or B; the sheet's labels,
+/// then its keys ([`sheet_keys`]); none after the title, the headings and the not-found line
+/// (any key).
+pub fn keys_after(exe: &UExe, at: u32) -> Vec<u8> {
+    match at {
+        PUT_DISK | CLICK_A | OR_B => SOURCE_KEYS.to_vec(),
+        LABELS | LABELS_2 => sheet_keys(exe),
+        _ => Vec::new(),
+    }
+}
+
+/// The sheet's keys (A4+0x99c).
+fn sheet_keys(exe: &UExe) -> Vec<u8> {
+    exe.bytes(SHEET_KEYS, 5)
+}
 
 /// Where the save came from (A4+0x2c50).
 pub mod source {
@@ -235,24 +271,12 @@ pub fn convert_ultima_v(st: &mut IntroState) {
 }
 
 /// `printf` through the main text context, restarting the buffer (0x1142c6), appending
-/// (0x1142f0) or straight to the screen (0x1142a6).
-#[derive(Clone, Copy)]
-enum Print {
-    New,
-    More,
-    Screen,
-}
-
-fn print(st: &mut IntroState, how: Print, fmt: u32, args: &[Arg]) {
-    let fmt = st.exe.cstr(fmt);
-    if let Some(font) = st.font.as_ref() {
-        let (chip, ctx) = (&mut st.video.chip, &mut st.text);
-        match how {
-            Print::New => text::print_new(chip, ctx, font, &fmt, args),
-            Print::More => text::print_more(chip, ctx, font, &fmt, args),
-            Print::Screen => text::print(chip, ctx, font, &fmt, args),
-        }
-    }
+/// (0x1142f0) or straight to the screen (0x1142a6). Port (spec 08, slice K4): the format is the
+/// print entry's, the locale pack's for a catalogued one when it fits
+/// ([`super::locale::print_formats`]); its arguments (names, the sex word, the class, the
+/// numbers) are never looked up.
+fn print(st: &mut IntroState, how: Entry, fmt: u32, args: &[Arg]) {
+    super::locale::print_formats(st, &[(how, fmt, args)]);
 }
 
 /// The dialog's three boxes (the locals −0x1a, −0x2a, −0x3a of 0x10a450): title, text,
@@ -288,15 +312,21 @@ pub async fn ask_source(st: &mut IntroState, io: &Io) -> u16 {
     st.text.x = title.x0;
     st.text.y = title.y0;
     st.text.align = 2;
-    print(st, Print::New, TITLE, &[]);
+    print(st, Entry::New, TITLE, &[]);
     body.planes = st.views.screen.planes;
     st.text.view = body;
     st.text.x = body.x0;
     st.text.y = title.y0 + 0x20;
     mem::fill_view(&mut st.video.chip, &body, 0x1e);
-    print(st, Print::New, PUT_DISK, &[]);
-    print(st, Print::More, CLICK_A, &[]);
-    print(st, Print::More, OR_B, &[]);
+    // Port (spec 08, slice K4): one buffer, so one box whose formats fit or not together.
+    super::locale::print_formats(
+        st,
+        &[
+            (Entry::New, PUT_DISK, &[]),
+            (Entry::More, CLICK_A, &[]),
+            (Entry::More, OR_B, &[]),
+        ],
+    );
     // The rule under the title: the text box's top less 2, one row.
     let line = View {
         x0: body.x0,
@@ -308,10 +338,10 @@ pub async fn ask_source(st: &mut IntroState, io: &Io) -> u16 {
     mem::fill_view(&mut st.video.chip, &line, 0);
     let vellum = st.files_ptr;
     let mut keys = Vec::new();
-    for i in 0..2i16 {
+    for (i, key) in (0..2i16).zip(SOURCE_KEYS) {
         let x0 = i * 0x11 + 0x1f;
         mem::draw_item(&mut st.video.chip, &row, x0, row.y0, vellum, (i + 5) as u16);
-        keys.push(b'A' + i as u8);
+        keys.push(key);
     }
     keys.push(0x1b);
     mem::draw_item(&mut st.video.chip, &row, 0xdd, row.y0, vellum, 4);
@@ -350,7 +380,7 @@ pub async fn ask_source(st: &mut IntroState, io: &Io) -> u16 {
         body.y1 = 0xbd;
         st.text.view = body;
         mem::fill_view(&mut st.video.chip, &body, 0x1e);
-        print(st, Print::New, NOT_FOUND, &[]);
+        print(st, Entry::New, NOT_FOUND, &[]);
         while poll_key(st, io) == 0 {
             st.video.wait_frame(io).await;
         }
@@ -384,14 +414,18 @@ pub fn values(st: &mut IntroState) {
         ]
     };
     let nums = |n: [i16; 6]| n.map(|v| Arg::Word(v as u16)).to_vec();
-    print(
-        st,
-        Print::New,
-        FMT_NAMES,
-        &strs(&f.name_str(), &f.sex, &f.class),
-    );
+    // Port (spec 08, slice K4): the names and the numbers fill one buffer, so one box.
+    let column = |st: &mut IntroState, names: Vec<Arg>, numbers: Vec<Arg>| {
+        super::locale::print_formats(
+            st,
+            &[
+                (Entry::New, FMT_NAMES, &names),
+                (Entry::More, FMT_NUMBERS, &numbers),
+            ],
+        );
+    };
     let row = [f.str, f.dex, f.int, f.magic, f.exp, f.level];
-    print(st, Print::More, FMT_NUMBERS, &nums(row));
+    column(st, strs(&f.name_str(), &f.sex, &f.class), nums(row));
     st.views.buttons[1].x0 += 0x20;
     st.views.buttons[1].x0 += 0x31;
     let v = st.views.buttons[1];
@@ -400,14 +434,8 @@ pub fn values(st: &mut IntroState) {
     st.text.x = v.x0;
     st.text.y = v.y0 + 2;
     let h = st.hero.clone();
-    print(
-        st,
-        Print::New,
-        FMT_NAMES,
-        &strs(&h.name_str(), &h.sex, &h.class),
-    );
     let row = [h.str, h.dex, h.int, h.magic, h.exp, h.level];
-    print(st, Print::More, FMT_NUMBERS, &nums(row));
+    column(st, strs(&h.name_str(), &h.sex, &h.class), nums(row));
     st.views.buttons[1].x0 -= 0x86;
     st.text.view = st.views.buttons[1];
     st.views.portrait.planes = st.views.screen.planes;
@@ -472,23 +500,26 @@ pub async fn sheet(st: &mut IntroState, io: &Io) -> bool {
     st.text.view = b[0];
     st.text.x = b[0].x0 + 0x55 - 0x20;
     st.text.y = b[0].y0 + 2;
-    print(st, Print::Screen, ULTIMA, &[]);
+    print(st, Entry::Screen, ULTIMA, &[]);
     let which = if st.transfer.source == source::ULTIMA_IV {
         IV
     } else {
         V
     };
-    print(st, Print::Screen, which, &[]);
+    print(st, Entry::Screen, which, &[]);
     st.text.x = st.views.buttons[0].x0 + 0xa8 - 0x22;
-    print(st, Print::Screen, ULTIMA_VI, &[]);
+    print(st, Entry::Screen, ULTIMA_VI, &[]);
     st.views.buttons[1].x1 -= 0xd6;
     let v = st.views.buttons[1];
     st.text.view = v;
     st.text.x = v.x0;
     st.text.y = v.y0 + 2;
     st.text.align = 1;
-    print(st, Print::New, LABELS, &[]);
-    print(st, Print::More, LABELS_2, &[]);
+    // Port (spec 08, slice K4): one buffer, as the dialog's text.
+    super::locale::print_formats(
+        st,
+        &[(Entry::New, LABELS, &[]), (Entry::More, LABELS_2, &[])],
+    );
     st.views.buttons[1].x1 += 0xd6;
     st.text.view = st.views.buttons[1];
     values(st);
@@ -497,7 +528,7 @@ pub async fn sheet(st: &mut IntroState, io: &Io) -> bool {
     st.views.buttons.iter_mut().for_each(|v| v.planes = planes);
     st.views.draw = st.views.screen;
     st.video.pointer = 1;
-    let keys = st.exe.bytes(SHEET_KEYS, 5);
+    let keys = sheet_keys(&st.exe);
     loop {
         match keys[choose(st, io, &keys).await] {
             0x1b | b'A' => return false,

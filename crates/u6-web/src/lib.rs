@@ -48,7 +48,10 @@
 //! (`u6.string-bundle/1`) for the translation tool, and [`Game::locale_counts`] counts the
 //! table strings and game strings shown from the pack. Slice K3 adds its object names and books:
 //! the same export also lists the object names of the kept `look.lzd` and the books and signs of
-//! `book.dat`, and the counts take them too.
+//! `book.dat`, and the counts take them too. Slice K4 adds the strings of the `u` program (the
+//! opening, the story, the gypsy, character creation, the transfer): the export lists those of the
+//! kept `u`, a pack's show in `u` (which runs on the game state the pack is set on, before its
+//! first step, as the game does), and the counts take them too.
 //!
 //! NPC bundles (spec 09 Design 5): an [`NpcBundles`] takes the game files the page kept and
 //! exports each conversation script's NPC name and dialogue as `u6.npc-bundle/1` JSON, for the
@@ -219,6 +222,11 @@ impl LocalePack {
     /// Slice K3: the object names and the books it holds: `[look, books]`.
     pub fn text_counts(&self) -> Vec<u32> {
         vec![self.pack.look_entries() as u32, self.pack.books() as u32]
+    }
+
+    /// Slice K4: the strings of the `u` program it holds.
+    pub fn program_strings(&self) -> u32 {
+        self.pack.program_strings() as u32
     }
 
     /// The grammar it declares: `en` or `ko`.
@@ -919,15 +927,16 @@ impl Game {
     /// Spec 08: the running game's locale layer, counts only: `[on, runs put from the pack,
     /// runs it did not have, table strings from the pack, table strings it did not have, game
     /// strings from the pack, game strings it did not have, object names from the pack, object
-    /// names it did not have, books from the pack, books it did not have]` (`on` 1 with a pack
-    /// installed, else 0 and no counts).
+    /// names it did not have, books from the pack, books it did not have, strings of `u` from the
+    /// pack, strings of `u` it did not have]` (`on` 1 with a pack installed, else 0 and no counts).
     pub fn locale_counts(&self) -> Vec<u32> {
         self.engine.as_ref().map_or_else(
-            || vec![0; 11],
+            || vec![0; 13],
             |e| {
                 let l = &e.state().locale;
                 let ([th, tm], [xh, xm]) = (l.tables.get(), l.texts.get());
                 let ([lh, lm], [bh, bm]) = (l.look.get(), l.books.get());
+                let [uh, um] = l.program.get();
                 vec![
                     u32::from(l.pack.is_some()),
                     l.hits,
@@ -940,6 +949,8 @@ impl Game {
                     lm,
                     bh,
                     bm,
+                    uh,
+                    um,
                 ]
             },
         )
@@ -1418,10 +1429,12 @@ impl NpcBundles {
 /// the strings of the user's `game` the engine shows and catalogues (`u6_core::locale::strings`),
 /// each with its hash, length, kind and English, for the translation tool; slice K3: and the
 /// object names of `look.lzd` and the books and signs of `book.dat` (`u6_core::locale::texts`),
-/// each with its index, hash, length and English. Made here in the browser like [`NpcBundles`]:
-/// the page adds each kept file ([`GameStrings::add`], which keeps only those three) and takes
-/// them as one JSON object ([`GameStrings::export`]) for its download only (never logged, shown
-/// or stored); an error names only what failed.
+/// each with its index, hash, length and English; slice K4: and the strings of the `u` program
+/// (`u6_core::locale::program`), each with its kind (where `u` prints it), hash, length,
+/// English and the keys of the read after it. Made here in the browser like [`NpcBundles`]: the
+/// page adds each kept file ([`GameStrings::add`], which keeps only those four) and takes them as
+/// one JSON object ([`GameStrings::export`]) for its download only (never logged, shown or
+/// stored); an error names only what failed.
 #[wasm_bindgen]
 #[derive(Default)]
 pub struct GameStrings {
@@ -1435,7 +1448,7 @@ impl GameStrings {
         GameStrings::default()
     }
 
-    /// One kept file; any but the executable, `look.lzd` and `book.dat` is dropped at once.
+    /// One kept file; any but the executable, `look.lzd`, `book.dat` and `u` is dropped at once.
     pub fn add(&mut self, path: &str, bytes: Vec<u8>) {
         if u6_core::locale::strings::reads(path) {
             self.files.insert(path.to_string(), bytes);
@@ -1786,9 +1799,9 @@ mod tests {
         assert_eq!(e, "NPC bundles: converse.b does not read");
     }
 
-    /// Spec 08 (slices K2, K3): the string export keeps only the executable, `look.lzd` and
-    /// `book.dat`, and fails with a line that names only what failed (a sentinel in a path or in
-    /// the file never in it).
+    /// Spec 08 (slices K2 to K4): the string export keeps only the executable, `look.lzd`,
+    /// `book.dat` and `u`, and fails with a line that names only what failed (a sentinel in a
+    /// path or in the file never in it).
     #[test]
     fn game_strings_keep_only_their_files_and_fail_without_content() {
         const SENTINEL: &str = "Zq9StringSentinel";
@@ -1798,9 +1811,11 @@ mod tests {
         ex.add("U6/converse.a", vec![4]);
         ex.add("U6/LOOK.LZD", SENTINEL.as_bytes().to_vec());
         ex.add("U6/book.dat", vec![5]);
+        ex.add("U6/U", SENTINEL.as_bytes().to_vec());
+        ex.add("U6/u.bin", vec![6]);
         assert_eq!(
             ex.files.keys().collect::<Vec<_>>(),
-            ["U6/GAME", "U6/LOOK.LZD", "U6/book.dat"]
+            ["U6/GAME", "U6/LOOK.LZD", "U6/U", "U6/book.dat"]
         );
         let e = ex.strings().unwrap_err();
         assert_eq!(e, "Game strings: the game executable does not read");
@@ -1872,9 +1887,10 @@ mod tests {
         // No game: refused.
         let mut game = Game::new();
         assert_eq!(game.set_locale(&loaded), "no game is running");
-        assert_eq!(game.locale_counts(), [0; 11]);
+        assert_eq!(game.locale_counts(), [0; 13]);
         assert_eq!(loaded.string_counts(), [0, 0]);
         assert_eq!(loaded.text_counts(), [0, 0]);
+        assert_eq!(loaded.program_strings(), 0);
         // Its own files: installed.
         let engine = |archive: Vec<u8>| {
             let files = Files::new(BTreeMap::from([("U6/converse.a".to_string(), archive)]));
@@ -1886,7 +1902,10 @@ mod tests {
         };
         game.put_on_screen(engine(lib(&script)));
         assert_eq!(game.set_locale(&loaded), "");
-        assert_eq!(game.locale_counts(), [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            game.locale_counts(),
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
         let e = game.engine.as_ref().quiet();
         assert!(e.state().ui.text.wide, "the assembler on");
         assert!(
@@ -1901,7 +1920,7 @@ mod tests {
             game.set_locale(&loaded),
             "its conversation part was made from other game files"
         );
-        assert_eq!(game.locale_counts(), [0; 11]);
+        assert_eq!(game.locale_counts(), [0; 13]);
         let e = game.engine.as_ref().quiet();
         assert!(!e.state().ui.text.wide && e.state().ui.hangul.is_none());
     }

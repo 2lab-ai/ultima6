@@ -5051,7 +5051,7 @@ test('Korean pack with game strings in a game (the user\'s disks, a synthetic co
   assert.ok(exported.strings.length > 0, 'strings');
   assert.ok(exported.strings.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len >= 3), 'each keyed by its hash');
   const looks = (exported.texts ?? []).filter((e) => e.kind === 'look').length;
-  const line = ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks, (exported.texts ?? []).length - looks);
+  const line = ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks, (exported.texts ?? []).length - looks, (exported.u ?? []).length);
   assert.equal((await h.state(page)).status, line, 'the line, counts only');
   const fx = await koStringsFixture(exported);
   assert.ok(fx.strings > 0 && fx.refused < fx.strings, `strings kept ${fx.strings}, refused by the gates ${fx.refused}`);
@@ -5225,7 +5225,7 @@ test('Korean pack with object names and books in a game (the user\'s disks): Gam
   const books = texts.filter((e) => e.kind === 'book');
   assert.ok(looks.length > 0 && books.length > 0 && looks.length + books.length === texts.length, 'object names and books');
   assert.ok(texts.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len === Buffer.from(e.text, 'latin1').length), 'each keyed by its hash');
-  assert.equal((await h.state(page)).status, ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks.length, books.length), 'the line, counts only');
+  assert.equal((await h.state(page)).status, ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks.length, books.length, (exported.u ?? []).length), 'the line, counts only');
   const fx = await koTextsFixture(exported);
   assert.ok(fx.look > 0 && fx.books > 0, `names kept ${fx.look}, books kept ${fx.books}, refused by the gates ${fx.refused}`);
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: fx.pack }]);
@@ -5269,6 +5269,165 @@ test('Korean pack with object names and books in a game (the user\'s disks): Gam
   assert.ok(!where.includes(KO_NAME), 'nor the pack\'s text');
   console.log(`  receipt: object names ${fx.look}, books ${fx.books}, refused by the gates ${fx.refused}; Look ${dir}: names from the pack ${hits}, missed ${missed}`);
 }, { needs: h.haveHfes });
+
+// --- the Korean pack's strings of the u program (spec 08, slice K4) ---------------------------
+
+// The made-up syllable every string of u in the pack shows (not K2's or K3's; none of the
+// fixture's lines has it).
+const KO_U = '퀣';
+
+// A string of u of the export as the tool's gate takes it: every printf code and every line break
+// kept where it is, each line's words one made-up `word`.
+function madeUpU(en, word) {
+  let out = '';
+  let worded = false;
+  for (let i = 0; i < en.length; i += 1) {
+    const c = en[i];
+    if (c === '%') {
+      out += en.slice(i, i + 2);
+      i += 1;
+    } else if (c === '\n') {
+      out += c;
+      worded = false;
+    } else if (!worded && /[A-Za-z]/.test(c)) {
+      out += word;
+      worded = true;
+    }
+  }
+  return out;
+}
+
+// The pack of the export's strings of u, every one the made-up syllable within the tool's gate,
+// the keys of its read included (counted when one fails it and is left out: a prompt whose
+// English shows a key standing alone, which the syllable replaces), made with the tool's own
+// writer.
+async function koProgramFixture(exported) {
+  const { fingerprint, packBytes, uGate } = await import('../i18n/translate.mjs');
+  const u = [];
+  let refused = 0;
+  for (const e of exported.u ?? []) {
+    const ko = madeUpU(e.text, KO_U);
+    if (uGate(e.text, ko, e.keys) === null) u.push({ hash: e.hash, len: e.len, text: ko });
+    else refused += 1;
+  }
+  return { pack: [...packBytes({ base: fingerprint([]), runs: [], u })], u: u.length, refused };
+}
+
+const programCounts = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen').dataset;
+  return {
+    pack: document.body.dataset.localePackProgram,
+    hits: Number(c.localeProgramHits ?? 0), misses: Number(c.localeProgramMisses ?? 0),
+  };
+});
+
+// Whether the game's RGBA frame shows one of `glyphs` anywhere, as `u` draws a syllable: 8 pixels
+// wide, its cell's rows 0..6 in a line, ink where the glyph has a bit and paper elsewhere (two
+// colours). Compared in the page, never printed. Right after a restart the game that presented
+// last is the one the restart freed until the new one presents: not yet shown.
+const glyphOnScreen = (page, glyphs) => page.evaluate((rows) => {
+  let f;
+  try {
+    f = window.__shownGame.frame_rgba();
+  } catch {
+    return false;
+  }
+  const at = (x, y) => (y * 320 + x) * 4;
+  const same = (i, j) => f[i] === f[j] && f[i + 1] === f[j + 1] && f[i + 2] === f[j + 2];
+  for (const g of rows) {
+    let ink = null;
+    let paper = null;
+    for (let r = 0; r < 7 && (ink === null || paper === null); r += 1) {
+      for (let c = 0; c < 8; c += 1) {
+        if (g[r] & (0x80 >> c)) ink ??= [r, c];
+        else paper ??= [r, c];
+      }
+    }
+    for (let y = 0; y + 7 <= 200; y += 1) {
+      for (let x = 0; x + 8 <= 320; x += 1) {
+        const i = at(x + ink[1], y + ink[0]);
+        const p = at(x + paper[1], y + paper[0]);
+        if (same(i, p)) continue;
+        let ok = true;
+        for (let r = 0; r < 7 && ok; r += 1) {
+          for (let c = 0; c < 8 && ok; c += 1) ok = same(at(x + c, y + r), g[r] & (0x80 >> c) ? i : p);
+        }
+        if (ok) return true;
+      }
+    }
+  }
+  return false;
+}, [...glyphs.values()]);
+
+// Steps of the opening until the made-up syllable shows (true) or `ticks` have passed (false).
+async function waitGlyph(page, glyphs, ticks) {
+  for (let waited = 0; waited < ticks; waited += 20) {
+    if (await glyphOnScreen(page, glyphs)) return true;
+    await h.waitTicks(page, 20);
+  }
+  return glyphOnScreen(page, glyphs);
+}
+
+test('Korean pack with the strings of u in a new game (the user\'s zip): Game strings also downloads the strings of the kept u, each of its own kind, the status line counts only; a pack made at test time from that export (every string of u the made-up syllable within the tool\'s gate) shows the syllable in the first passage the opening shows, in the Hangul font; Forget the Korean pack: the opening in English; no string of u reaches the console, the page\'s data or text', async (env) => {
+  const { page } = await h.openPage(env, { gameFirst: false, setup: { lang: 'ko' } });
+  const words = consoleText(page);
+  await h.load(page, env);
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  await h.dropFiles(page, [h.ZIP]);
+  await started(page);
+  await h.waitProgram(page, 'u');
+  const before = await pageWords(page);
+  const [download] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.click('#game-strings')]);
+  const exported = JSON.parse(await readFile(await download.path(), 'utf8'));
+  await h.waitSettled(page);
+  const u = exported.u ?? [];
+  const kinds = new Set(['opening', 'story', 'gypsy', 'creation', 'transfer']);
+  assert.ok(u.length > 0 && u.every((e) => kinds.has(e.kind)), 'strings of u, each of a kind of u');
+  assert.ok(!u.some((e) => ['message', 'format', 'label', 'look', 'book'].includes(e.kind)), 'no kind of the game\'s strings or texts');
+  assert.ok(['opening', 'story', 'gypsy', 'creation'].every((k) => u.some((e) => e.kind === k)), 'the opening, the story, the gypsy and creation');
+  assert.ok(u.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len === Buffer.from(e.text, 'latin1').length && e.len >= 3), 'each keyed by its hash');
+  assert.ok(u.every((e) => e.keys === undefined || /^[A-Z]+$/.test(e.keys)), 'keys, when a key read follows, upper-case letters');
+  assert.ok(u.some((e) => e.kind === 'gypsy' && e.keys !== undefined), 'the gypsy\'s questions with the keys she waits for');
+  const looks = (exported.texts ?? []).filter((e) => e.kind === 'look').length;
+  const line = ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks, (exported.texts ?? []).length - looks, u.length);
+  assert.equal((await h.state(page)).status, line, 'the line, counts only');
+  const fx = await koProgramFixture(exported);
+  assert.ok(fx.u > 0 && fx.refused < fx.u, 'strings of u kept within the gate');
+  // The pack: the game restarts with it, from the opening.
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: fx.pack }]);
+  await h.waitSettled(page);
+  await h.waitProgram(page, 'u');
+  const shown = await localeShown(page);
+  assert.deepEqual([shown.pack, shown.locale], ['0,0', 'on'], 'the pack on the game');
+  assert.equal((await programCounts(page)).pack, String(fx.u), 'its strings of u, counted');
+  assert.ok((await h.state(page)).status.includes(ko.koPackOn(0, 0, 0, 0, 0, 0, fx.u)), 'its line, counts only');
+  const glyph = await hangulGlyphs(KO_U);
+  const t0 = await page.evaluate(() => globalThis.__ticks);
+  assert.ok(await waitGlyph(page, glyph, 1500), 'the made-up syllable in the first passage');
+  const took = (await page.evaluate(() => globalThis.__ticks)) - t0;
+  const counts = await programCounts(page);
+  assert.ok(counts.hits >= 1, 'strings of u from the pack');
+  // Forget the Korean pack: the game restarts in English, the same opening without the syllable.
+  await page.click('#forget-ko');
+  await h.waitSettled(page);
+  await h.waitProgram(page, 'u');
+  const off = await localeShown(page);
+  assert.deepEqual([off.pack, off.locale], ['none', 'off'], 'forgotten: English');
+  assert.equal((await programCounts(page)).pack, 'none');
+  assert.ok(!(await waitGlyph(page, glyph, took + 200)), 'the opening in English: no made-up syllable');
+  await h.waitVisible(page);
+  assert.deepEqual([(await programCounts(page)).hits], [0], 'nothing from a pack');
+  const where = await pageWords(page);
+  const long = u.map((e) => e.text.replace(/%[\s\S]/g, '').trim()).filter((t) => t.length >= 12 && !before.includes(t));
+  assert.ok(long.length > 0, 'strings to look for');
+  for (const w of long) {
+    assert.ok(!where.includes(w), 'no string of u in the page\'s data, text or storage');
+    assert.ok(!words.some((m) => m.includes(w)), 'nor in the console');
+  }
+  assert.ok(!where.includes(KO_U), 'nor the pack\'s text');
+  console.log(`  receipt: the syllable shown ${took} steps after the start; strings of u put from the pack by then ${counts.hits}, missed ${counts.misses}`);
+}, { needs: h.haveZip });
 
 const filter = process.argv[2];
 const env = await h.setup();

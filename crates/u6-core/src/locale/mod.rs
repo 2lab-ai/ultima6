@@ -104,15 +104,36 @@
 //! entry or a book shown (a read past the look table's entries, or of no unit of `book.dat`, is
 //! none).
 //!
+//! **Slice K4: the `u` program's strings.** A pack may also hold the formats the `u` program
+//! prints (the opening, the introduction story, the gypsy's passages and questions, character
+//! creation, the transfer), keyed as the executable strings are, by [`hash64`] of their English
+//! with its length (left out of the file when empty):
+//!
+//! ```text
+//!  "u":[{"hash":"<16 hex>","len":40,"text":"..."}]
+//! ```
+//!
+//! Only a string the catalogue of the user's `u` has ([`program::Catalogue`], read when the pack
+//! is installed) is looked up, only at the `u` program's print entry, on the format and never on
+//! its arguments ([`crate::intro::locale`]); at install every pack string the catalogue has must
+//! keep its English's length and the same `printf` codes, in the same order
+//! ([`program::directives`]), and the prompt of a key read the keys its English shows standing
+//! alone ([`program::keys_kept`]), else the pack is refused (the `u` part). `u` runs on the state
+//! the pack is installed on, takes the pack as it starts, and counts its lookups into
+//! [`LocaleState::program`].
+//!
 //! Rights (spec 08): a pack made from the owner's files holds his game text; it lives in
 //! `~/Games/ultima6/i18n/ko/` and his browser storage, never in the repository or under `site/`
 //! (`tests/no_locale_pack_in_repo.rs`).
 
 #[cfg(test)]
 mod identity;
+pub mod program;
 pub mod strings;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_program;
 #[cfg(test)]
 mod tests_strings;
 #[cfg(test)]
@@ -196,23 +217,26 @@ pub struct StringText {
 }
 
 /// A pack's parts, as a mismatch names them: the conversation part (its runs and table strings,
-/// under one fingerprint), the executable strings, and (slice K3) the object names and the books.
+/// under one fingerprint), the executable strings, (slice K3) the object names and the books,
+/// and (slice K4) the `u` program's strings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Converse,
     Strings,
     Look,
     Books,
+    Program,
 }
 
 impl Part {
-    /// The part's name in the pack (`base.converse`; `strings`; `look`; `books`).
+    /// The part's name in the pack (`base.converse`; `strings`; `look`; `books`; `u`).
     pub fn name(self) -> &'static str {
         match self {
             Part::Converse => "converse",
             Part::Strings => "strings",
             Part::Look => "look",
             Part::Books => "books",
+            Part::Program => "u",
         }
     }
 }
@@ -234,6 +258,8 @@ pub struct Pack {
     /// length and hash, as a run's).
     look: BTreeMap<u32, RunText>,
     books: BTreeMap<u32, RunText>,
+    /// Slice K4: the `u` program's strings, by [`hash64`] of their English.
+    program: BTreeMap<u64, StringText>,
 }
 
 /// Why a pack file is refused. Each is a fixed sentence (no value of the file).
@@ -277,6 +303,10 @@ pub enum PackError {
     BookEntry,
     /// A book's translation not under [`texts::BOOK_BYTES`] (the buffer the game reads it into).
     BookCapacity,
+    /// A string of the `u` program whose English is shorter than [`program::MIN_BYTES`] or
+    /// longer than [`program::MAX_BYTES`], or whose translation is over
+    /// [`program::MAX_TEXT_BYTES`].
+    ProgramKey,
 }
 
 impl fmt::Display for PackError {
@@ -300,6 +330,9 @@ impl fmt::Display for PackError {
             PackError::LookEntry => "an object name in it is not one the game's look table holds",
             PackError::BookEntry => "a book in it is not one the game's book file holds",
             PackError::BookCapacity => "a book in it is longer than the game reads a book",
+            PackError::ProgramKey => {
+                "an opening or creation string in it is not one the u program prints"
+            }
         })
     }
 }
@@ -319,6 +352,9 @@ impl fmt::Display for Mismatch {
             }
             Part::Look => f.write_str("its object names part does not match the game's look table"),
             Part::Books => f.write_str("its books part does not match the game's books and signs"),
+            Part::Program => f.write_str(
+                "its opening and creation part does not keep the u program's format codes",
+            ),
         }
     }
 }
@@ -339,6 +375,8 @@ struct PackJson {
     look: Vec<EntryJson>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     books: Vec<EntryJson>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    u: Vec<StringJson>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -462,6 +500,7 @@ impl Pack {
             strings: BTreeMap::new(),
             look: BTreeMap::new(),
             books: BTreeMap::new(),
+            program: BTreeMap::new(),
         })
     }
 
@@ -573,6 +612,35 @@ impl Pack {
         Ok(self)
     }
 
+    /// The pack with the `u` program's strings `program` (slice K4), keyed by [`hash64`] of their
+    /// English, checked as [`Pack::parse`] checks them: an English of [`program::MIN_BYTES`] to
+    /// [`program::MAX_BYTES`] bytes, a text the game can show within [`program::MAX_TEXT_BYTES`],
+    /// each hash once.
+    pub fn with_program(
+        mut self,
+        strings: impl IntoIterator<Item = (u64, StringText)>,
+    ) -> Result<Pack, PackError> {
+        for (hash, t) in strings {
+            let len = t.len as usize;
+            if !(program::MIN_BYTES..=program::MAX_BYTES).contains(&len)
+                || t.text.len() > program::MAX_TEXT_BYTES
+            {
+                return Err(PackError::ProgramKey);
+            }
+            let text = std::str::from_utf8(&t.text).map_err(|_| PackError::Text)?;
+            if !text_ok(text) {
+                return Err(PackError::Text);
+            }
+            if self.program.insert(hash, t).is_some() {
+                return Err(PackError::Duplicate);
+            }
+            if self.program.len() > MAX_STRINGS {
+                return Err(PackError::TooManyRuns);
+            }
+        }
+        Ok(self)
+    }
+
     /// Reads a pack file (see the module doc). Nothing of it is kept unless all of it checks.
     pub fn parse(bytes: &[u8]) -> Result<Pack, PackError> {
         if bytes.len() > MAX_PACK_BYTES {
@@ -602,6 +670,9 @@ impl Pack {
         if json.look.len() > texts::LOOK_ENTRIES || json.books.len() > texts::BOOK_INDICES {
             return Err(PackError::TooManyRuns);
         }
+        if json.u.len() > MAX_STRINGS {
+            return Err(PackError::TooManyRuns);
+        }
         let mut runs = Vec::with_capacity(json.converse.len());
         for r in json.converse {
             let archive = archive_of(&r.archive)?;
@@ -629,17 +700,21 @@ impl Pack {
                 },
             ));
         }
-        let mut strings = Vec::with_capacity(json.strings.len());
-        for t in json.strings {
-            let hash = read_hex(&t.hash)?;
-            strings.push((
-                hash,
-                StringText {
-                    len: t.len,
-                    text: t.text.into_bytes(),
-                },
-            ));
-        }
+        let by_hash = |list: Vec<StringJson>| -> Result<Vec<(u64, StringText)>, PackError> {
+            list.into_iter()
+                .map(|t| {
+                    let hash = read_hex(&t.hash)?;
+                    Ok((
+                        hash,
+                        StringText {
+                            len: t.len,
+                            text: t.text.into_bytes(),
+                        },
+                    ))
+                })
+                .collect()
+        };
+        let strings = by_hash(json.strings)?;
         let entries = |list: Vec<EntryJson>| -> Result<Vec<(u32, RunText)>, PackError> {
             list.into_iter()
                 .map(|e| {
@@ -656,11 +731,13 @@ impl Pack {
                 .collect()
         };
         let (look, books) = (entries(json.look)?, entries(json.books)?);
+        let program = by_hash(json.u)?;
         Pack::new(language, &json.tool, converse_base, runs)?
             .with_tables(tables)?
             .with_strings(strings)?
             .with_look(look)?
-            .with_books(books)
+            .with_books(books)?
+            .with_program(program)
     }
 
     /// The pack file: [`MAGIC`], a line feed and the JSON object, runs in key order.
@@ -697,17 +774,10 @@ impl Pack {
                     text: String::from_utf8(t.text.clone()).expect("checked as UTF-8"),
                 })
                 .collect(),
-            strings: self
-                .strings
-                .iter()
-                .map(|(&hash, t)| StringJson {
-                    hash: hex(hash),
-                    len: t.len,
-                    text: String::from_utf8(t.text.clone()).expect("checked as UTF-8"),
-                })
-                .collect(),
+            strings: strings_json(&self.strings),
             look: entries_json(&self.look),
             books: entries_json(&self.books),
+            u: strings_json(&self.program),
         };
         let mut out = MAGIC.to_vec();
         out.push(b'\n');
@@ -745,6 +815,11 @@ impl Pack {
         self.books.len()
     }
 
+    /// Slice K4: the `u` program's strings it holds.
+    pub fn program_strings(&self) -> usize {
+        self.program.len()
+    }
+
     fn script_keys(&self) -> BTreeSet<(u8, u16)> {
         self.runs
             .keys()
@@ -776,6 +851,12 @@ impl Pack {
     /// Slice K3: the book of `book.dat` index `index`, if the pack has one.
     pub fn book(&self, index: u32) -> Option<&RunText> {
         self.books.get(&index)
+    }
+
+    /// Slice K4: the string of the `u` program whose English hashes to `hash`, if the pack has
+    /// one.
+    pub fn program(&self, hash: u64) -> Option<&StringText> {
+        self.program.get(&hash)
     }
 
     /// The table string of the script (`letter`, `item`) whose bytes hold `offset` after their
@@ -853,6 +934,30 @@ impl Pack {
         Ok(())
     }
 
+    /// Slice K4: checks the `u` program's strings against the catalogue of the user's `u`
+    /// ([`program::Catalogue`]): every string whose hash the catalogue has keeps its English's
+    /// length, the same `printf` codes in the same order ([`program::directives`]; `%B %F %X %Y
+    /// %P` included) and, for the prompt of a key read, its keys ([`program::keys_kept`]). A pack
+    /// string the catalogue lacks is kept, never looked up and not refused (a pack outlives a
+    /// narrower catalogue, as [`Pack::check_strings`] has it). A difference is a mismatch of the
+    /// `u` part.
+    pub fn check_program(&self, catalogue: &program::Catalogue) -> Result<(), Mismatch> {
+        for (&hash, t) in &self.program {
+            let Some(e) = catalogue.get(hash) else {
+                continue;
+            };
+            if e.text.len() != t.len as usize
+                || program::directives(&e.text) != program::directives(&t.text)
+                || !program::keys_kept(&e.text, &t.text, &e.keys)
+            {
+                return Err(Mismatch {
+                    part: Part::Program,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Slice K3: checks the object names and the books against the files the engine reads
     /// (`look.lzd` decoded, `book.dat`; a part the pack does not have needs no file): every entry
     /// is one of the file's units ([`texts::look_units`], [`texts::book_units`]), its English of
@@ -898,6 +1003,17 @@ fn keyed(units: Vec<(usize, Vec<u8>)>) -> BTreeMap<u32, Vec<u8>> {
     units
         .into_iter()
         .filter_map(|(i, en)| Some((u32::try_from(i).ok()?, en)))
+        .collect()
+}
+
+/// The JSON of a map of strings by hash, in hash order.
+fn strings_json(map: &BTreeMap<u64, StringText>) -> Vec<StringJson> {
+    map.iter()
+        .map(|(&hash, t)| StringJson {
+            hash: hex(hash),
+            len: t.len,
+            text: String::from_utf8(t.text.clone()).expect("checked as UTF-8"),
+        })
         .collect()
 }
 
@@ -979,6 +1095,17 @@ impl Counts {
     pub fn get(&self) -> [u32; 2] {
         [self.hits.get(), self.misses.get()]
     }
+
+    /// `[hits, misses]`, both set back to 0 (slice K4: what `u` counted, moved to the state's).
+    pub fn take(&self) -> [u32; 2] {
+        [self.hits.take(), self.misses.take()]
+    }
+
+    /// Adds `[hits, misses]`.
+    pub fn add(&self, [hits, misses]: [u32; 2]) {
+        self.hits.set(self.hits.get().saturating_add(hits));
+        self.misses.set(self.misses.get().saturating_add(misses));
+    }
 }
 
 /// The locale layer's state: the installed pack, the Hangul table the platform gave with it,
@@ -1003,6 +1130,11 @@ pub struct LocaleState {
     pub look: Counts,
     /// Slice K3: books and signs read.
     pub books: Counts,
+    /// Slice K4: the strings the `u` program prints ([`program::Catalogue`]), read from the
+    /// user's `u` when the pack was installed.
+    pub program_catalogue: Option<Rc<program::Catalogue>>,
+    /// Slice K4: catalogued strings of `u` printed (the formats its print entry puts).
+    pub program: Counts,
 }
 
 /// Installs `pack` on `state` once it checks against the conversation archives of `files`, as
@@ -1012,7 +1144,8 @@ pub struct LocaleState {
 /// Slice K2: the catalogue of the executable's strings is read from `files`' `game` (none there:
 /// an empty one), and the pack's strings are checked against it ([`Pack::check_strings`]).
 /// Slice K3: then its object names and books against `files`' `look.lzd` and `book.dat`
-/// ([`Pack::check_texts`]).
+/// ([`Pack::check_texts`]). Slice K4: then its `u` strings against the catalogue of `files`' `u`
+/// ([`program::Catalogue::from_files`], [`Pack::check_program`]).
 pub fn install(
     state: &mut State,
     files: &Files,
@@ -1034,13 +1167,28 @@ pub(crate) fn install_catalogued(
     hangul: Option<Rc<HangulFont>>,
     catalogue: strings::Catalogue,
 ) -> Result<(), Mismatch> {
+    let program = program::Catalogue::from_files(files);
+    install_parts(state, files, pack, hangul, catalogue, program)
+}
+
+/// [`install`] with both catalogues given, the executable's and `u`'s (tests: synthetic ones).
+pub(crate) fn install_parts(
+    state: &mut State,
+    files: &Files,
+    pack: Rc<Pack>,
+    hangul: Option<Rc<HangulFont>>,
+    catalogue: strings::Catalogue,
+    program: program::Catalogue,
+) -> Result<(), Mismatch> {
     pack.check(|letter| files.get(&crate::converse::archive_name(state, letter)))?;
     pack.check_strings(&catalogue)?;
     pack.check_texts(files)?;
+    pack.check_program(&program)?;
     state.locale = LocaleState {
         pack: Some(pack),
         hangul,
         catalogue: Some(Rc::new(catalogue)),
+        program_catalogue: Some(Rc::new(program)),
         ..LocaleState::default()
     };
     apply(state);
