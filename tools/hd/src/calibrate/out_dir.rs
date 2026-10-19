@@ -21,7 +21,7 @@
 //!    the dir it holds open, one by one, never a tree; it keeps its diagnostics ([`Mode::keep`]
 //!    and `refused.txt`), each checked the same way and not deleted. A file another hand put at
 //!    a name of the run's is left, and said; so is a file of the run's moved to another name, a
-//!    kept one too. A file of the run's whose identity could not
+//!    kept one too, and a kept one another hand deleted from the run dir. A file of the run's whose identity could not
 //!    be read when it was made fails the run, and is left (a diagnostic too), said so. A file the
 //!    run reads back is read only while it is the one it made. Nothing a previous process made
 //!    is removed, renamed or rewritten.
@@ -506,10 +506,14 @@ impl Run {
     /// what `mode` keeps, `done` first, each only while the entry at its name is the file the
     /// run holds open ([`Run::still_at`]), through the dir itself, and checks the kept ones the
     /// same way, deleting none; then writes [`REFUSED`] (the error, `then` added: each file it
-    /// could not delete, each kept one not as it made it, each it could not identify, and that
-    /// the dir moved if it did, each unless the error says it already); gives that error.
+    /// could not delete; each kept one not as it made it, moved to another name, another file
+    /// at its name, or, while the run dir is where it made it, deleted by another hand; each it
+    /// could not identify; and that the dir moved if it did, each unless the error says it
+    /// already); gives that error.
     fn fail(&self, mode: Mode, error: &str, then: &dyn Fn(String) -> String) -> String {
         let (mut left, mut kept) = (Vec::new(), Vec::new());
+        // A run dir removed whole takes every name of it: the moved note says that once.
+        let in_place = !self.moved();
         {
             let mut made = self.made.borrow_mut();
             // done first: a run dir whose cleanup stops partway holds no done.
@@ -525,10 +529,16 @@ impl Run {
                 let name = &m.name;
                 let file = m.file.as_ref();
                 // A file the run keeps: checked, not deleted; said when it is not as it was
-                // made (one deleted by another hand has nothing left to point at).
+                // made, and when another hand deleted it from the run dir in place.
                 if mode.keep.contains(&name.as_str()) {
-                    if let Err(e) = self.still_at(name, id, file) {
-                        kept.push(format!("{} ({e})", path.display()));
+                    match self.still_at(name, id, file) {
+                        Ok(true) => {}
+                        Ok(false) if !in_place => {}
+                        Ok(false) => kept.push(format!(
+                            "{} (gone: deleted by another hand)",
+                            path.display()
+                        )),
+                        Err(e) => kept.push(format!("{} ({e})", path.display())),
                     }
                     continue;
                 }

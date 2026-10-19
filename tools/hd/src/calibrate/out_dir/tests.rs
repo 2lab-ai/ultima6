@@ -2036,3 +2036,59 @@ fn a_refusal_whose_identity_and_fill_both_fail_is_said_to_be_left() {
     assert_eq!(names(&run), ["gates.jsonl", REFUSED]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_kept_file_another_hand_deleted_is_said_while_the_run_dir_is_in_place() {
+    // gates.jsonl (a file the run keeps when it fails) made, then deleted by another hand, the
+    // run dir left where it is; the run then fails for its own reason. The error and
+    // refused.txt say the snapshot is gone, deleted by another hand; nothing else is deleted
+    // for it, and no moved note is said.
+    let dir = temp("kept-deleted");
+    let out = dir.join("out");
+    let o = out.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name == "a.png" {
+            std::fs::remove_file(only_run(&o).join("gates.jsonl")).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        run.write("gates.jsonl", b"snapshot")?;
+        writes(run)?;
+        Err("no rows".into())
+    })
+    .unwrap_err();
+    let run = only_run(&out);
+    assert_eq!(
+        e,
+        format!(
+            "no rows; kept, but not as the run made it: {} (gone: deleted by another hand); run \
+             dir: {}",
+            run.join("gates.jsonl").display(),
+            run.display()
+        )
+    );
+    assert_eq!(names(&run), [REFUSED]);
+    assert_eq!(
+        std::fs::read_to_string(run.join(REFUSED)).unwrap(),
+        format!("{e}\n")
+    );
+    // The run dir removed whole instead: every name of it is gone, the snapshot's too, and the
+    // moved note alone says so, once.
+    let out = dir.join("out-removed");
+    let o = out.clone();
+    let _h = hook(&out, "write", move |name| {
+        if name == "a.png" {
+            std::fs::remove_dir_all(only_run(&o)).unwrap();
+        }
+        Ok(())
+    });
+    let e = run_in(FIRST, &out, |run: &Run| -> Result<(), String> {
+        run.write("gates.jsonl", b"snapshot")?;
+        writes(run)
+    })
+    .unwrap_err();
+    assert!(!e.contains("gone: deleted by another hand"), "{e}");
+    assert_eq!(e.matches("was moved or removed").count(), 1, "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
