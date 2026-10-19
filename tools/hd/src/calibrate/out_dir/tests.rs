@@ -1806,17 +1806,29 @@ fn a_run_dir_swapped_for_a_link_while_it_is_listed_is_not_read_through() {
     std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
     std::os::unix::fs::symlink(&empty, out.join(run_name(2, 8))).unwrap();
     let had = (tree(&sentinel), tree(&empty));
-    let (o, aside, to) = (out.clone(), dir.join("aside"), sentinel.clone());
+    let aside = dir.join("aside");
+    let (o, a, to) = (out.clone(), aside.clone(), sentinel.clone());
     let n = run_name(1, 7);
+    let swaps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let k = swaps.clone();
     let _h = hook(&out, "stat", move |name| {
         let at = o.join(&n);
         if name == n && !at.is_symlink() {
-            std::fs::rename(&at, &aside).unwrap();
+            std::fs::rename(&at, &a).unwrap();
             std::os::unix::fs::symlink(&to, &at).unwrap();
+            k.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(())
     });
     let ((), w) = run_in(FIRST, &out, writes).unwrap();
+    // The swap happened, once, while the run read: the link is at the name, the dir aside.
+    assert_eq!(swaps.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        std::fs::read_link(out.join(run_name(1, 7))).unwrap(),
+        sentinel
+    );
+    assert!(std::fs::symlink_metadata(&aside).unwrap().is_dir());
+    assert!(names(&aside).is_empty());
     assert_eq!(w.incomplete, [run_name(1, 7)]);
     assert!(w.unreadable.is_empty(), "{:?}", w.unreadable);
     assert_eq!((tree(&sentinel), tree(&empty)), had);
