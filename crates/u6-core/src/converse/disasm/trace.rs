@@ -14,7 +14,8 @@
 //!   and the words `assign`'s `d2` form writes; and for `b4` / `b7` / `c3`, whether the table
 //!   address came from inside the evaluator's stack (outside it the evaluator reads 0, the
 //!   script's start, which the decoder marks with a stack hazard);
-//! - every character handed to the line assembler (`put_raw`'s argument): what the game prints,
+//! - every character code handed to the line assembler (`put_cell`'s argument, which every
+//!   `put_raw` reaches after the escape layer lets out what it holds): what the game prints,
 //!   before word wrap, spaces and newlines included, with -1 for a flush; and which of them a
 //!   key wait put (its flush, `wait_event`, and the newline its cursor ends a full line with,
 //!   `idle_poll`), not the escape layer;
@@ -50,7 +51,7 @@ pub(crate) enum Event {
     },
     /// The input loop read the op `byte` at `at`.
     Input { at: i32, byte: u8 },
-    /// A character `put_raw` was handed (negative = a flush); `wait` = by a key wait, not by the
+    /// A character `put_cell` was handed (negative = a flush); `wait` = by a key wait, not by the
     /// escape layer.
     Emit { c: i32, wait: bool },
     /// `print_op`'s `d2` form starts printing a table string; `snap` = the state then.
@@ -103,7 +104,7 @@ struct Trace {
     snapshots: bool,
     /// Offset of the last text byte `run_text` read, while a visit lasts.
     last_text: Option<i32>,
-    /// The next `put_raw` call is a key wait's.
+    /// The next `put_cell` call is a key wait's.
     wait: bool,
 }
 
@@ -197,7 +198,7 @@ pub(crate) fn input_byte(cx: &Cx<'_>, b: u8) {
     push(Event::Input { at, byte: b });
 }
 
-/// Hook: `put_raw` was handed `c`.
+/// Hook: `put_cell` was handed `c`.
 pub(crate) fn emit(c: i32) {
     TRACE.with(|t| {
         if let Some(t) = t.borrow_mut().as_mut() {
@@ -207,7 +208,8 @@ pub(crate) fn emit(c: i32) {
     });
 }
 
-/// Hook: a key wait calls `put_raw` next (not for the escape layer).
+/// Hook: a key wait calls `put_raw` next (not for the escape layer), whose `put_cell` call is
+/// the wait's: with `wide` off the escape layer holds nothing to let out first.
 pub(crate) fn wait_put() {
     TRACE.with(|t| {
         if let Some(t) = t.borrow_mut().as_mut() {
