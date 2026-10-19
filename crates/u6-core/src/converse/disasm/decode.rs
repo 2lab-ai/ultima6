@@ -59,8 +59,9 @@ pub(super) struct Plan {
     /// again each round: when its cause is gone, the ban lifts
     /// ([`Decoder::check_table_indices`]).
     banned: BTreeMap<LandingKey, Reason>,
-    /// Landings whose read-past ban was lifted: banned for it again, they stay banned (else
-    /// two landings could take turns).
+    /// Landings whose read-past ban was lifted: banned for it again, they stay banned (a trial
+    /// of one on a round's decode can end otherwise than that round does, and the check would
+    /// lift it again each time).
     lifted: BTreeSet<LandingKey>,
 }
 
