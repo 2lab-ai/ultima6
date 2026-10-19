@@ -7,8 +7,10 @@
 //   Space: the more key and the answer keys) ends the old speech with an 80 ms fade and empties
 //   the queue. Speech never makes the game wait: the engine's queue is only read.
 // - Above 4x (and at Max) nothing is synthesized: the lines go by faster than they can be spoken.
-// - Steps adapt: from 16, halved while synthesis takes more than half the audio's length, doubled
-//   back below 0.15 of it (4 to 16).
+// - Steps adapt: halved while synthesis takes more than half the audio's length, doubled back
+//   below 0.15 of it. On the GPU from 16, 4 to 16; on the CPU (no WebGPU adapter) from 4, 3 to
+//   16: 16 steps there take twice the audio's length, 3 under half of it, and below 3 words are
+//   lost (spec 09 Measured facts).
 // - The seed of an utterance is a hash of its speaker and its text, so a line repeated sounds the
 //   same.
 //
@@ -19,6 +21,7 @@
 const FADE_S = 0.08; // the fade of a cancelled speech
 const LOUD_UP_TO = 4; // above this speed nothing is synthesized (as the music fades out)
 const STEPS = { start: 16, min: 4, max: 16 };
+const CPU_STEPS = { start: 4, min: 3 }; // without WebGPU (the same max)
 const SPEED = 1.05; // the sample code's default pace
 const LEAD_S = 0.02; // a new utterance starts this far after now
 
@@ -33,12 +36,13 @@ function seedOf(speaker, text) {
 }
 
 /// The voices of the page. `speed()`: the game's speed now (0 = Max). `onState(state, code)`:
-/// 'loading' (with the progress in `stats`), 'ready', or 'failed' with an error code; after
-/// `stop` nothing more is reported. `onStats()`: `stats` changed.
+/// 'loading' (with the progress in `stats`), 'ready' (`stats.path`: 'gpu' or 'cpu', where the
+/// model runs), or 'failed' with an error code; after `stop` nothing more is reported.
+/// `onStats()`: `stats` changed.
 export function createVoices({ workerUrl, speed, onState, onStats }) {
   const stats = {
     got: 0, total: 0, stage: '', coldMs: 0, refetched: 0, spoken: 0, firstMs: -1, cancels: 0,
-    fadeMs: 0, playing: 0, steps: STEPS.start, dropped: 0,
+    fadeMs: 0, playing: 0, steps: STEPS.start, dropped: 0, path: '',
   };
   let worker = null;
   let ready = false;
@@ -74,7 +78,9 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
       onState('loading');
     } else if (m.type === 'ready') {
       ready = true;
-      Object.assign(stats, { coldMs: Math.round(m.ms), refetched: m.refetched, stage: 'ready' });
+      const path = m.path === 'cpu' ? 'cpu' : 'gpu';
+      Object.assign(stats, { coldMs: Math.round(m.ms), refetched: m.refetched, stage: 'ready', path });
+      if (path === 'cpu') stats.steps = Math.min(stats.steps, CPU_STEPS.start);
       onState('ready');
     } else if (m.type === 'audio') {
       play(m);
@@ -94,7 +100,7 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
   /// Starts the worker and loads the model (`cachedOnly`: from this browser's cache only).
   function load({ cachedOnly = false } = {}) {
     stop();
-    Object.assign(stats, { got: 0, total: 0, stage: 'start', coldMs: 0, refetched: 0 });
+    Object.assign(stats, { got: 0, total: 0, stage: 'start', coldMs: 0, refetched: 0, path: '' });
     try {
       worker = new Worker(workerUrl, { type: 'module' });
     } catch {
@@ -209,8 +215,9 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
       stats.firstMs = Math.round(performance.now() - u.at + (at - ctx.currentTime) * 1000);
     }
     const ratio = m.synthMs / 1000 / Math.max(m.audioSec, 1e-3);
-    if (ratio > 0.5 && stats.steps > STEPS.min) stats.steps /= 2;
-    else if (ratio < 0.15 && stats.steps < STEPS.max) stats.steps *= 2;
+    const min = stats.path === 'cpu' ? CPU_STEPS.min : STEPS.min;
+    if (ratio > 0.5 && stats.steps > min) stats.steps = Math.max(min, Math.floor(stats.steps / 2));
+    else if (ratio < 0.15 && stats.steps < STEPS.max) stats.steps = Math.min(STEPS.max, stats.steps * 2);
   }
 
   // The worker finished the current utterance (spoken out, or cancelled): the next one goes.

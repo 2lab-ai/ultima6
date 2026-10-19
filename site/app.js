@@ -72,18 +72,19 @@
 //
 // Voices (spec 09 V3, site/voice/): off until the visitor presses Voices. The first time, the
 // model's use restrictions show (with this browser's room for the site), and only their
-// acceptance downloads it; nothing is requested from /models/ before. Without WebGPU there is no
-// speech and the status line says why. Once the worker (site/voice/worker.js) has the model
-// checked and warmed up, the game's speech tap is on (Game.set_voices) and after each frame what
-// NPCs said (Game.take_speech) goes to the player (site/voice/player.js) and nowhere else: the
+// acceptance downloads it; nothing is requested from /models/ before. The worker
+// (site/voice/worker.js) runs the model on WebGPU where the browser offers an adapter, else on
+// the CPU (slower); the ready line and the chip say which. Once it has the model checked and
+// warmed up, the game's speech tap is on (Game.set_voices) and after each frame what NPCs said
+// (Game.take_speech) goes to the player (site/voice/player.js) and nowhere else: the
 // text is the user's game text, never logged, shown or stored. The speech plays through a voice
 // gain beside the music's (Mute silences both); Enter, Escape and Space on the canvas, and a newer
 // turn, cancel it; above 4x nothing is spoken. While voices are on a chip says the voice is
 // generated on this device. The choice and the acceptance are kept in localStorage: the next
 // visit starts the voices from this browser's cache only (never downloads unasked). "Forget
 // voices" removes the cached model and the acceptance. A failure (download, a part that does not
-// check out twice, no room, a lost GPU device) turns voices off with a line that names only its
-// kind; the game runs on.
+// check out twice, no room, a runtime that does not start on the CPU, a lost GPU device) turns
+// voices off with a line that names only its kind; the game runs on.
 import init, {
   Game, HdPack, PackProbe, budget_ms, input_too_large, max_input_bytes, max_pack_bytes,
   max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
@@ -122,6 +123,8 @@ const setupOk = document.getElementById('setup-ok');
 const setupStatus = document.getElementById('setup-status');
 const voicesButton = document.getElementById('voices');
 const voiceChip = document.getElementById('voice-chip');
+const voiceOnGpu = document.getElementById('voice-gpu');
+const voiceOnCpu = document.getElementById('voice-cpu');
 const voiceTerms = document.getElementById('voice-terms');
 const voiceStorage = document.getElementById('voice-storage');
 const voiceAccept = document.getElementById('voice-accept');
@@ -145,8 +148,9 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // images of the HD pack loaded (tiles,portraits,panels) or none, data-hd-pack-bytes = the bytes
 // its pictures take decoded, data-hd-matched = those the game on screen matches (empty without
 // a game); data-voice = the voices' state (off, terms, checking, loading, ready, failed),
-// data-voice-error = the last failure's code, data-voice-gain = the voice gain, and the player's
-// counts and timings (reflectVoice), never what is said.
+// data-voice-error = the last failure's code, data-voice-gain = the voice gain, data-voice-path =
+// where the model runs once ready (gpu, cpu), and the player's counts and timings (reflectVoice),
+// never what is said.
 function reflect(state) {
   if (state) document.body.dataset.state = state;
   const live = game && !crashed;
@@ -356,8 +360,8 @@ const TERMS_KEY = 'u6.voiceTerms'; // localStorage: the model revision whose ter
 // The keys that cancel the speech (the more prompt's, and those that answer).
 const VOICE_CANCEL_KEYS = new Set(['Enter', 'Escape', ' ']);
 const VOICE_ERRORS = {
-  nowebgpu: 'voiceErrNoWebgpu', notcached: 'voiceErrNotCached', download: 'voiceErrDownload',
-  hash: 'voiceErrHash', quota: 'voiceErrQuota', storage: 'voiceErrStorage', model: 'voiceErrModel',
+  notcached: 'voiceErrNotCached', download: 'voiceErrDownload', hash: 'voiceErrHash',
+  quota: 'voiceErrQuota', storage: 'voiceErrStorage', model: 'voiceErrModel', wasm: 'voiceErrWasm',
   gpu: 'voiceErrGpu',
 };
 
@@ -400,12 +404,15 @@ function reflectVoice() {
   put(data, 'voice', voiceState);
   put(data, 'voiceError', voiceError);
   put(data, 'voiceGain', audio.voiceGain ? audio.voiceGain.gain.value.toFixed(2) : '');
+  put(data, 'voicePath', voiceState === 'ready' ? st.path : '');
   for (const [key, value] of [['voiceColdMs', st.coldMs], ['voiceRefetched', st.refetched],
     ['voiceSpoken', st.spoken], ['voiceFirstMs', st.firstMs], ['voiceCancels', st.cancels],
     ['voiceFadeMs', st.fadeMs], ['voicePlaying', st.playing], ['voiceSteps', st.steps],
     ['voiceDropped', st.dropped]]) put(data, key, String(value));
   voicesButton.setAttribute('aria-pressed', String(on));
   put(voiceChip, 'hidden', !on);
+  put(voiceOnGpu, 'hidden', !(voiceState === 'ready' && st.path === 'gpu'));
+  put(voiceOnCpu, 'hidden', !(voiceState === 'ready' && st.path === 'cpu'));
 }
 
 // The player's state changed: loading (its progress on the status line, unless quiet), ready (the
@@ -420,7 +427,7 @@ function voiceChanged(state, code = '') {
     voiceState = 'ready';
     voiceError = '';
     if (game && !crashed) game.set_voices(true);
-    if (!voiceQuiet) say('voiceReady');
+    if (!voiceQuiet) say('voiceReady', voice.stats.path);
     voiceQuiet = false;
   } else if (state === 'failed') {
     voiceOff();
@@ -487,27 +494,16 @@ function declineTerms() {
   reflectVoice();
 }
 
-// Voices on: WebGPU checked here first (none: a note, nothing downloaded), the storage asked to
-// persist (a download, not a start from the cache), then the worker loads the model.
+// Voices on: the storage asked to persist (a download, not a start from the cache), then the
+// worker loads the model, on WebGPU or, without it, on the CPU.
 async function startVoices({ cachedOnly = false } = {}) {
   voiceQuiet = cachedOnly;
   voiceState = 'checking';
   voiceError = '';
   remember(VOICES_KEY, 'on');
   reflectVoice();
-  if (!cachedOnly) say('voiceChecking');
-  let adapter = null;
-  try {
-    adapter = await navigator.gpu?.requestAdapter();
-  } catch {
-    adapter = null;
-  }
-  if (voiceState !== 'checking') return;
-  if (!adapter) {
-    voiceChanged('failed', 'nowebgpu');
-    return;
-  }
   if (!cachedOnly) {
+    say('voiceChecking');
     try {
       await navigator.storage?.persist?.();
     } catch {

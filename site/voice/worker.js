@@ -1,5 +1,6 @@
 // Supertonic-3 on this device (spec 09 Design 3): a module worker that loads the model the site
-// hosts (tools/speech/fetch-models.sh) and turns text into speech with onnxruntime-web on WebGPU.
+// hosts (tools/speech/fetch-models.sh) and turns text into speech with onnxruntime-web, on WebGPU
+// where the browser offers an adapter and on the CPU (its WebAssembly runtime) otherwise.
 // Its text processing and inference are written from Supertone's MIT sample code (supertonic
 // 1.3.1: core.py's UnicodeProcessor and Supertonic.__call__, utils.py's chunk_text; see NOTICE).
 //
@@ -8,12 +9,14 @@
 // runtime version; older ones are pruned); a cached part that no longer checks out is fetched
 // again. The parts are joined and the whole file checked. The runtime's wasm comes the same way
 // and is handed to it as `wasmBinary`; its two modules are checked, then imported by URL. One
-// thread, WebGPU only, then a one-word synthesis as a warm-up.
+// thread, the same models on the `webgpu` execution provider or, without an adapter, the `wasm`
+// one (the hosted runtime carries both), then a one-word synthesis as a warm-up.
 //
 // Messages in: {type: 'load', cachedOnly} (cachedOnly: a part not cached fails the load instead
 // of being downloaded), {type: 'speak', id, text, lang, seed, steps, speed}, {type: 'cancel', id},
 // {type: 'lose-device'} (tests: destroys the GPU device, as a lost one). Out: {type: 'progress',
-// got, total}, {type: 'stage', stage: 'verifying' | 'starting'}, {type: 'ready', ms, refetched},
+// got, total}, {type: 'stage', stage: 'verifying' | 'starting'}, {type: 'ready', ms, refetched,
+// path: 'gpu' | 'cpu'},
 // {type: 'audio', id, pcm, sampleRate, audioSec, synthMs}, {type: 'done', id} or
 // {type: 'cancelled', id}, {type: 'error', code, id?}. A message out never holds text: the text is
 // the user's game text, and an error is one of the codes below, never a runtime's message.
@@ -22,16 +25,18 @@ import {
   ORT_VERSION,
 } from './model.js';
 
-// Error codes: no WebGPU adapter; a part not in the cache (cachedOnly); a download that failed;
-// a part or file whose hash is wrong; storage that refused for lack of room, or otherwise; the
-// runtime or the model that did not start; the GPU device lost; text that could not be spoken.
-const CODES = new Set(['nowebgpu', 'notcached', 'download', 'hash', 'quota', 'storage', 'model',
-  'gpu', 'speak']);
+// Error codes: a part not in the cache (cachedOnly); a download that failed; a part or file whose
+// hash is wrong; storage that refused for lack of room, or otherwise; the runtime or the model
+// that did not start on the GPU (`model`) or on the CPU (`wasm`); the GPU device lost; text that
+// could not be spoken.
+const CODES = new Set(['notcached', 'download', 'hash', 'quota', 'storage', 'model', 'wasm', 'gpu',
+  'speak']);
 const SILENCE_S = 0.3; // between the chunks of one text (the sample code's default)
 const MAX_CHUNK = 150; // characters per chunk: a long text starts sounding after its first one
 
 let ort = null;
 let S = null; // the sessions, the config, the indexer and the voice once loaded
+let cpu = false; // no WebGPU adapter: the models run on the CPU
 let device = null;
 let lost = false;
 const cancelled = new Set();
@@ -45,6 +50,9 @@ function coded(code) {
 
 // The error's code, `fallback` for any error the code did not raise itself.
 const codeOf = (err, fallback) => (CODES.has(err?.code) ? err.code : fallback);
+
+// What did not start: the runtime or the model, on the GPU or on the CPU.
+const unstarted = () => (cpu ? 'wasm' : 'model');
 
 // --- text (core.py UnicodeProcessor) ----------------------------------------------------------
 
@@ -207,7 +215,7 @@ async function runtime(m) {
   try {
     return await import(new URL(entry(m, ORT_MODULES[0]).parts[0].path, ORT_BASE).href);
   } catch {
-    throw coded('model');
+    throw coded(unstarted());
   }
 }
 
@@ -219,16 +227,18 @@ function style(json) {
   return { ttl, dp };
 }
 
+// Whether this browser offers a WebGPU adapter here.
+async function haveAdapter() {
+  try {
+    return Boolean(await self.navigator?.gpu?.requestAdapter());
+  } catch {
+    return false;
+  }
+}
+
 async function load(cachedOnly) {
   const t0 = performance.now();
-  if (!self.navigator?.gpu) throw coded('nowebgpu');
-  let adapter = null;
-  try {
-    adapter = await navigator.gpu.requestAdapter();
-  } catch {
-    adapter = null;
-  }
-  if (!adapter) throw coded('nowebgpu');
+  cpu = !(await haveAdapter());
   const [om, mm] = [await manifest(ORT_BASE), await manifest(MODEL_BASE)];
   if (mm.revision !== REVISION || om.revision !== ORT_VERSION) throw coded('hash');
   const cache = await openCache();
@@ -260,7 +270,7 @@ async function load(cachedOnly) {
   } catch {
     throw coded('model');
   }
-  const options = { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' };
+  const options = { executionProviders: [cpu ? 'wasm' : 'webgpu'], graphOptimizationLevel: 'all' };
   const sessions = {};
   try {
     for (const [key, name] of [['dp', 'onnx/duration_predictor.onnx'], ['te', 'onnx/text_encoder.onnx'],
@@ -269,9 +279,9 @@ async function load(cachedOnly) {
       bytes[name] = null;
     }
   } catch {
-    throw coded(lost ? 'gpu' : 'model');
+    throw coded(lost ? 'gpu' : unstarted());
   }
-  device = ort.env.webgpu?.device ?? null;
+  device = cpu ? null : ort.env.webgpu?.device ?? null;
   device?.lost?.then(() => {
     lost = true;
     post({ type: 'error', code: 'gpu' });
@@ -281,8 +291,9 @@ async function load(cachedOnly) {
     chunk: cfg.ae.base_chunk_size * cfg.ttl.chunk_compress_factor,
     latentDim: cfg.ttl.latent_dim * cfg.ttl.chunk_compress_factor,
   };
-  await synthesize('Hello.', 'en', 1, 16, 1.05, null);
-  post({ type: 'ready', ms: performance.now() - t0, refetched: stats.refetched });
+  // The warm-up runs every session once; on the CPU one step does that (16 there take seconds).
+  await synthesize('Hello.', 'en', 1, cpu ? 1 : 16, 1.05, null);
+  post({ type: 'ready', ms: performance.now() - t0, refetched: stats.refetched, path: cpu ? 'cpu' : 'gpu' });
 }
 
 // --- synthesis (core.py Supertonic.__call__) ----------------------------------------------------
@@ -310,6 +321,17 @@ function gaussian(n, rand) {
 const tensor = (type, data, dims) => new ort.Tensor(type, data, dims);
 const first = (result, session) => result[session.outputNames[0]];
 
+// On the CPU a run computes without returning to the event loop, so a cancel posted meanwhile
+// would be read only once the whole text is made: between two runs the worker reads its messages
+// (a message to itself, queued after them; a timer would be clamped).
+const loop = new MessageChannel();
+const resumes = [];
+loop.port1.onmessage = () => resumes.shift()?.();
+const readMessages = () => new Promise((done) => {
+  resumes.push(done);
+  loop.port2.postMessage(0);
+});
+
 // One chunk to samples; null once `id` is cancelled (checked between the denoising steps).
 async function chunk(text, lang, rand, steps, speed, id) {
   const p = preprocess(text, lang);
@@ -335,6 +357,7 @@ async function chunk(text, lang, rand, steps, speed, id) {
   const latentMask = tensor('float32', mask, [1, 1, latentLen]);
   const total = tensor('float32', new Float32Array([steps]), [1]);
   for (let step = 0; step < steps; step += 1) {
+    if (cpu && id !== null) await readMessages();
     if (id !== null && cancelled.has(id)) return null;
     const r = await S.ve.run({
       noisy_latent: xt, text_emb: textEmb, style_ttl: styleTtl, text_mask: textMask,
@@ -343,6 +366,7 @@ async function chunk(text, lang, rand, steps, speed, id) {
     });
     xt = first(r, S.ve);
   }
+  if (cpu && id !== null) await readMessages();
   if (id !== null && cancelled.has(id)) return null;
   const v = await S.voc.run({ latent: xt });
   return new Float32Array(first(v, S.voc).data.subarray(0, Math.max(1, wavLen)));
@@ -389,7 +413,7 @@ self.onmessage = (e) => {
     device?.destroy();
   } else if (m?.type === 'load') {
     queue = queue.then(() => load(Boolean(m.cachedOnly))).catch((err) => {
-      post({ type: 'error', code: lost ? 'gpu' : codeOf(err, 'model') });
+      post({ type: 'error', code: lost ? 'gpu' : codeOf(err, unstarted()) });
     });
   } else if (m?.type === 'speak') {
     queue = queue.then(() => speak(m));

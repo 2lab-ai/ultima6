@@ -6,7 +6,7 @@ tags: [ultima6, npc, tts, supertonic]
 
 # 09 — Per-NPC dialogue bundles, voice profiles, on-device Supertonic-3 TTS
 
-Status: planned (rev 3, 2026-10-16. rev 2 folded in the gpt-6-astra review: the bundle exporter before profiles, a consent boundary for the profile LLM, exact-text tap tests, defined latency, failure recovery, click-through model terms. rev 3 folds in the opus review, checked against the code: the tap flags only the converse text emitters, a defined speaker after `0xbf`, bundles keyed by script with 08's run catalog, an end-to-end receipt on the preview site). This is user item 3 (`hd-i18n-voice/ssot.md`, verbatim):
+Status: planned (rev 3, 2026-10-16. rev 2 folded in the gpt-6-astra review: the bundle exporter before profiles, a consent boundary for the profile LLM, exact-text tap tests, defined latency, failure recovery, click-through model terms. rev 3 folds in the opus review, checked against the code: the tap flags only the converse text emitters, a defined speaker after `0xbf`, bundles keyed by script with 08's run catalog, an end-to-end receipt on the preview site. rev 4, 2026-10-19: without WebGPU the voices run on the CPU, per the owner, verbatim: "supertonic-3 webgpu없어도 작동하는데 없어도 나오게해줘"). This is user item 3 (`hd-i18n-voice/ssot.md`, verbatim):
 - Bundle each NPC's name and dialogue separately, for a later NpcBrain to imitate the NPC's speech.
 - Give each NPC a voice profile from its personality, for on-device TTS.
 - Attach real-time Supertonic-3 TTS, played when an NPC speaks.
@@ -32,11 +32,21 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
   - Pitch ranges about 85–205 Hz across presets and mixes.
   - `speed` divides the duration.
   - There is no pitch parameter; playback-rate resampling gives ±2 semitones.
-  - Below 16 `steps`, timbre degrades, but the words stay exact.
+  - Below 16 `steps`, timbre degrades, but the words stay exact down to 4 steps, and at 3 every content word is still heard (see the CPU receipts below). At 2 they do not stay exact.
 - **In the browser (onnxruntime-web 1.30.0, WebGPU, one thread).**
   - 32 steps runs at a real-time factor of 0.05–0.09, with first audio after ~0.6 s for a 9 s chunk.
   - Korean and English both decode.
   - It works under our CSP (`connect-src 'self'`, `wasm-unsafe-eval`) with no COOP/COEP.
+- **On the CPU (the same ort files, `wasm` execution provider, one thread: no COOP/COEP; headless Chromium 153, Apple M5 Max, 2026-10-19).**
+  - A 60-character line (4.1 s of audio): synthesis takes 2.0× the audio at 16 steps, 1.04× at 8, 0.54–0.73× at 4, 0.43–0.49× at 3, 0.33–0.36× at 2 and 0.26× at 1. About 0.12× is spent per step, and about 0.14× is fixed (duration, text encoder, vocoder).
+  - ASR on the 60-character line:
+    - at 4 steps it was exact for 4 of 4 seeds;
+    - at 3, for 2 of 3 (one missed its first "The");
+    - at 2, a word was wrong for 4 of 4 seeds;
+    - at 1, it heard noise.
+  - The 228-character test line was exact at 4. At 3 one article changed, and at 2 a clause was lost.
+  - The warm-up `Hello.` takes 4.5 s at 16 steps and 0.5 s at 1.
+  - A run does not return to the event loop, so a cancel is read only between runs.
 - **Hosting.** The models total about 398 MB:
   - `vector_estimator` 256.5 MB, `vocoder` 101.4 MB, `text_encoder` 36.4 MB;
   - the ort wasm is 26.8 MB.
@@ -65,17 +75,21 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
    - It splits every file into parts of ≤ 24 MiB and writes `site/models/supertonic3/<rev>/manifest.json` with the part hashes and the whole-file hash.
    - `LICENSE.txt` and `NOTICE` (the use restrictions, a note that files are served in parts, the hashes) go beside the parts.
    - The parts are gitignored and uploaded by `deploy-web.sh`. They are proven on a preview deploy first.
-   - Only three ort files are needed: `ort.webgpu.min.mjs` and the asyncify `.mjs` and `.wasm`.
+   - Only three ort files are needed: `ort.webgpu.min.mjs` and the asyncify `.mjs` and `.wasm`. The WebGPU bundle registers the CPU (`wasm`) backend as well, so the CPU path needs no other file.
 3. **Worker and player (`site/voice/`).**
    - **Worker origin.** The worker is written from Supertonic's MIT sample code, as the owner's own browser demo is. Code from the iq.io Gucci work is not copied.
    - **Model loading.** The worker fetches the parts, reassembles them, verifies the whole-file hash, and caches the result in Cache Storage with versioned URLs and pruning. The ort wasm is loaded through `wasmBinary`; this path needs its own receipt in the browser.
-   - **Runtime.** WebGPU only, one thread, with a one-word warm-up synthesis.
-   - **Steps.** Adaptive, starting at 16: halved when synthesis takes more than 0.5× the audio, doubled back below 0.15×.
+   - **Runtime.** One thread, with a one-word warm-up synthesis. With a WebGPU adapter the sessions run on the `webgpu` execution provider. Without one, the worker runs the same models from the same files on `wasm`, on the CPU.
+     - On the CPU the warm-up takes one step (it runs every session once).
+     - Between two runs the worker reads its messages, so a cancel or a newer turn ends the line it is making.
+   - **Steps.** Adaptive: halved when synthesis takes more than 0.5× the audio, doubled back below 0.15×.
+     - On the GPU they start at 16 and stay within 4–16.
+     - On the CPU they start at 4 and stay within 3–16. The floor is 3: it is the lowest count at which ASR still heard every content word in the CPU receipts (2 loses words), and it takes under half the audio's length on the reference machine.
    - **Language.** `lang` is passed per utterance.
    - **Player output.** A "voice" gain node runs parallel to the game gain, on the existing `AudioContext`. `setMuted` sets both. Above 4× speed (06), speech is not synthesized, because lines go by faster than they can be spoken.
    - **Queue and cancel.** One synthesis runs at a time. A newer `turn` cancels the old queue with an 80 ms fade, and the player's Enter, Escape, Space or more key also cancels. Speech never makes the game wait.
    - **Opt-in.** A "Voices (~400 MB)" opt-in, with a storage estimate and `navigator.storage.persist()`. A persistent "voice generated on this device" chip, and a "Voice model terms" notice linked from the page. "Forget voices" deletes the cached model, and "Forget NPC bundles" deletes the bundles; both sit next to the other forget buttons.
-   - **Without WebGPU.** No speech, and a note explains why.
+   - **Without WebGPU.** The same speech, on the CPU and slower. The page says which path runs: the ready line reads "Voices on (CPU, slower)" or "(GPU)" in English and Korean, and the chip shows the same. If the CPU runtime does not start, voices turn off with their own content-free code, `wasm`. There is no refusal for lack of WebGPU.
 4. **Voice profiles (`site/voice/profile.js`).**
    - A profile is `{mix: [{style, w} ≤ 3], speed 0.9–1.15, pitch −2..+2 st, steps, seedSalt}`.
    - The default comes from the type-class table plus the actor number as a tie-breaker, so that neighbours in one place get distinct voices.
@@ -125,6 +139,7 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
 4. **Speech.**
    - The page shows a ready state after download, verification and warm-up.
    - Reference: headless Chromium with WebGPU on the owner's Mac, a 60-character synthetic English line.
+   - Without WebGPU, in the default headless Chromium, voices reach ready on the CPU path and the page says so. The 60-character line plays and ASR matches it, and cold start and first audio are reported as timings. A key cancels, and so does a newer turn.
    - Cold start, from opt-in to ready, is reported separately.
    - In the ready state, first audio comes within 1 s of the line appearing, and ASR on the synthetic line matches.
    - A key press cancels the speech.
@@ -136,7 +151,7 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
    - The NPC bundles export and download.
    - None of it is in git or under `site/`.
 6. **Failures are recoverable, and the game keeps running in every case.**
-   - A failed download, a corrupted cached part (hash mismatch, then refetch), a storage quota denial and a lost GPU device each disable voices with a content-free message.
+   - A failed download, a corrupted cached part (hash mismatch, then refetch), a storage quota denial, a CPU runtime that does not start and a lost GPU device each disable voices with a content-free message.
 7. **Upload boundary.** 08's zero-request tests pass for the profile tool.
 8. **Model terms.** Before the first download, the page shows the model's use restrictions, and the visitor accepts them by clicking through. That acceptance is the agreement OpenRAIL-M §4(a) asks for. The licence and the notice are served beside the parts.
 9. **Gates.** All gates pass.

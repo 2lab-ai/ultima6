@@ -3518,11 +3518,13 @@ const utterance = (turn, text) => ({
   seq: turn, turn, speaker: 9, script: null, text, lang: 'en', traits: { type: 0, worktype: 0, alignment: 0 },
 });
 
-// Before the page's scripts: the Workers made, the storage persist calls, and each scheduled audio
-// source's start and stop (seconds after the context's time then) and each linear ramp of a gain
-// [value, at]; the samples of every buffer filled (`__pcm`, for the ASR of the test's own line).
+// Before the page's scripts: the Workers made and how each utterance ended in the worker (`done`
+// or `cancelled`, in order), the storage persist calls, and each scheduled audio source's start and
+// stop (seconds after the context's time then) and each linear ramp of a gain [value, at]; the
+// samples of every buffer filled (`__pcm`, for the ASR of the test's own line).
 function voiceProbe() {
   window.__workers = 0;
+  window.__replies = [];
   window.__persist = 0;
   window.__starts = [];
   window.__stops = [];
@@ -3531,7 +3533,11 @@ function voiceProbe() {
   const RealWorker = window.Worker;
   window.Worker = function Worker(...args) {
     window.__workers += 1;
-    return new RealWorker(...args);
+    const worker = new RealWorker(...args);
+    worker.addEventListener('message', (e) => {
+      if (e.data?.type === 'done' || e.data?.type === 'cancelled') window.__replies.push(e.data.type);
+    });
+    return worker;
   };
   window.Worker.prototype = RealWorker.prototype;
   if (navigator.storage?.persist) {
@@ -3566,7 +3572,7 @@ function voiceProbe() {
 const voiceShown = (page) => page.evaluate(() => {
   const d = document.body.dataset;
   return {
-    state: d.voice, error: d.voiceError, gain: d.voiceGain, cold: Number(d.voiceColdMs),
+    state: d.voice, error: d.voiceError, path: d.voicePath, gain: d.voiceGain, cold: Number(d.voiceColdMs),
     refetched: Number(d.voiceRefetched), spoken: Number(d.voiceSpoken), first: Number(d.voiceFirstMs),
     cancels: Number(d.voiceCancels), fade: Number(d.voiceFadeMs), playing: Number(d.voicePlaying),
     dropped: Number(d.voiceDropped), chip: !document.getElementById('voice-chip').hidden,
@@ -3638,7 +3644,7 @@ test('hosting: every file under site/models is at most 24 MiB, each part and eac
   console.log(`  receipt: ${files} hosted parts checked`);
 }, { needs: h.haveModels });
 
-test('voices off by default: no worker and nothing from /models/; Voices shows the use restrictions first and Cancel downloads nothing; accepted without WebGPU, a note and nothing downloaded; the game runs on; Forget voices removes the acceptance', async (env) => {
+test('voices off by default: no worker and nothing from /models/; Voices shows the use restrictions first and Cancel downloads nothing; the game runs on', async (env) => {
   const { context, page } = await h.openPage(env);
   await context.addInitScript(voiceProbe);
   const requests = modelRequests(context);
@@ -3673,22 +3679,12 @@ test('voices off by default: no worker and nothing from /models/; Voices shows t
   await page.click('#voice-decline');
   v = await voiceShown(page);
   assert.ok(v.state === 'off' && !v.terms, 'Cancel: off');
-  await page.click('#voices');
-  await page.click('#voice-accept');
-  await waitVoice(page, () => document.body.dataset.voice === 'failed', null, 30_000);
-  v = await voiceShown(page);
-  assert.ok(v.error === 'nowebgpu' && !v.chip && v.pressed === 'false', 'without WebGPU: off, with the reason');
-  assert.equal(v.status, await line('voiceFailed', await line('voiceErrNoWebgpu')), 'the note');
   const probe = await page.evaluate(() => ({ workers: window.__workers, kept: [localStorage.getItem('u6.voiceTerms'), localStorage.getItem('u6.voices')] }));
   assert.equal(probe.workers, 0, 'no worker made');
-  assert.deepEqual(probe.kept, ['724fb5abbf5502583fb520898d45929e62f02c0b', 'off'], 'the acceptance kept, voices off');
+  assert.deepEqual(probe.kept, [null, null], 'nothing accepted, voices not on');
   assert.deepEqual(requests, [], 'nothing requested from /models/');
   await h.waitTicks(page, 20);
   assert.equal((await h.state(page)).state, 'running', 'the game runs on');
-  await page.click('#forget-voices');
-  await waitVoice(page, (want) => document.getElementById('status').textContent === want, await line('voiceForgot'), 10_000);
-  assert.equal(await page.evaluate(() => localStorage.getItem('u6.voiceTerms')), null, 'the acceptance forgotten');
-  assert.deepEqual(requests, [], 'still nothing from /models/');
 }, { needs: h.haveHfes });
 
 // A page in the Chromium with WebGPU, the game started from the user's disks, the probe on, and
@@ -3858,6 +3854,137 @@ test('voices with WebGPU: accepted, downloaded, checked and warmed up to ready (
   v = await voicesOn(page);
   assert.ok(v.state === 'ready' && v.refetched === 1, 'ready, the corrupted part fetched again');
   assert.deepEqual(requests.filter((p) => /\.part\d+$/.test(p)).map((p) => p.split('/').pop()), ['vocoder.onnx.part1'], 'only that part');
+  // Forget voices: the cache emptied, the acceptance forgotten, off.
+  await page.click('#forget-voices');
+  await waitVoice(page, (want) => document.getElementById('status').textContent === want, await line('voiceForgot'), 10_000);
+  const left = await page.evaluate(async () => ({
+    caches: (await caches.keys()).filter((n) => n.startsWith('u6-voice-')).length,
+    terms: localStorage.getItem('u6.voiceTerms'),
+  }));
+  assert.ok(left.caches === 0 && left.terms === null && (await voiceShown(page)).state === 'off', 'nothing kept');
+}, { needs: () => h.haveHfes() && h.haveModels() });
+
+// A page in the default headless Chromium, which offers no WebGPU adapter, the game started from
+// the user's disks, the probe on, and its requests under /models/ recorded; null when it has one.
+async function cpuGame(env) {
+  const { context, page } = await h.openPage(env);
+  await context.addInitScript(voiceProbe);
+  const requests = modelRequests(context);
+  await h.load(page, env);
+  if (await page.evaluate(async () => Boolean(await navigator.gpu?.requestAdapter()))) return null;
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  return { context, page, requests };
+}
+
+// How many of `line`'s words `asr` heard in order (their longest common subsequence).
+function heardInOrder(line, asr) {
+  const want = words(line);
+  const lcs = want.map(() => asr.map(() => 0));
+  want.forEach((w, i) => asr.forEach((a, j) => {
+    const up = i > 0 ? lcs[i - 1][j] : 0;
+    const left = j > 0 ? lcs[i][j - 1] : 0;
+    const diag = i > 0 && j > 0 ? lcs[i - 1][j - 1] : 0;
+    lcs[i][j] = w === a ? diag + 1 : Math.max(up, left);
+  }));
+  return { hit: asr.length > 0 ? lcs[want.length - 1][asr.length - 1] : 0, of: want.length };
+}
+
+test('voices without WebGPU: on the CPU, a runtime that does not start turns voices off with its own content-free line while the game runs on; accepted, downloaded, checked and warmed up to ready on the CPU, which the ready line and the chip say (cold start reported); a 60-character line plays and ASR hears it (first audio reported); the game runs on while a long line is made; a key cancels with an 80 ms fade, and so does a newer turn, the worker dropping the line it makes; Forget voices empties the cache and the acceptance (receipt)', async (env) => {
+  const ortPart = /onnxruntime-web\/1\.30\.0\/ort-wasm-simd-threaded\.asyncify\.wasm\.part0$/;
+  // The CPU runtime that does not start: the worker's WebAssembly refuses to instantiate,
+  // installed before the first part arrives.
+  const f = await cpuGame(env);
+  if (!f) {
+    console.log('  receipt: skipped: this Chromium has a WebGPU adapter');
+    return;
+  }
+  let installed;
+  const hooked = new Promise((done) => { installed = done; });
+  f.page.on('worker', async (w) => {
+    await w.evaluate(() => {
+      WebAssembly.instantiate = () => Promise.reject(new Error('test: no wasm'));
+      WebAssembly.instantiateStreaming = WebAssembly.instantiate;
+    });
+    installed();
+  });
+  await f.context.route(ortPart, async (r) => {
+    await hooked;
+    await r.continue();
+  });
+  let v = await voicesOn(f.page);
+  assert.ok(v.state === 'failed' && v.error === 'wasm' && !v.chip && v.path === '', 'the CPU runtime that does not start: off, with its kind');
+  assert.equal(v.status, await line('voiceFailed', await line('voiceErrWasm')), 'the line names only the kind');
+  assert.deepEqual(await f.page.evaluate(() => [localStorage.getItem('u6.voiceTerms'), localStorage.getItem('u6.voices')]),
+    ['724fb5abbf5502583fb520898d45929e62f02c0b', 'off'], 'the acceptance kept, voices off');
+  await h.waitTicks(f.page, 20);
+  assert.equal((await h.state(f.page)).state, 'running', 'the game runs on');
+  await f.context.close();
+
+  // Ready on the CPU.
+  const { page } = await cpuGame(env);
+  const t0 = Date.now();
+  v = await voicesOn(page);
+  const opt = Date.now() - t0;
+  assert.ok(v.state === 'ready' && v.path === 'cpu', 'ready on the CPU after the download, the checks and the warm-up');
+  assert.ok(v.chip && v.pressed === 'true' && v.refetched === 0, 'the chip shows; nothing fetched twice');
+  const chip = await page.evaluate(() => [!document.getElementById('voice-gpu').hidden, !document.getElementById('voice-cpu').hidden]);
+  assert.deepEqual(chip, [false, true], 'the chip says CPU');
+  assert.equal(v.status, await line('voiceReady', 'cpu'), 'the ready line says CPU');
+  console.log(`  receipt: CPU cold start (opt-in to ready) ${opt} ms; the worker's load ${v.cold} ms`);
+  // A 60-character line plays, and ASR hears it.
+  await page.evaluate(() => window.__pcm.splice(0));
+  const steps = await page.evaluate(() => document.body.dataset.voiceSteps);
+  await page.evaluate((u) => window.__speech.push(u), utterance(1, LINE_60));
+  await waitVoice(page, () => document.body.dataset.voiceSpoken === '1', null, 60_000);
+  v = await voiceShown(page);
+  console.log(`  receipt: CPU first audio of the 60-character line ${v.first} ms after it reached the page (${steps} steps)`);
+  assert.ok(v.first >= 0, 'it sounds');
+  await waitVoice(page, () => document.body.dataset.voicePlaying === '0' && window.__replies.length === 1, null, 60_000);
+  const asr = await heard(await capturedWav(page));
+  if (asr === null) console.log('  receipt: ASR skipped (no mlx_whisper here)');
+  else {
+    const { hit, of } = heardInOrder(LINE_60, asr);
+    console.log(`  receipt: ASR heard ${hit} of the line's ${of} words in order (${asr.length} heard)`);
+    assert.ok(hit >= of - 1 && asr.length <= of + 1, 'ASR hears the line');
+  }
+  // A key cancels: Escape on the canvas while a long line plays and its later chunks are made;
+  // the game runs on meanwhile.
+  const longer = `${LONG_LINE} ${LONG_LINE}`;
+  await page.focus('#screen');
+  await page.evaluate((u) => window.__speech.push(u), utterance(2, longer));
+  await waitVoice(page, () => document.body.dataset.voiceSpoken === '2', null, 60_000);
+  await h.waitTicks(page, 20);
+  assert.equal((await h.state(page)).state, 'running', 'the game runs on while the line is made');
+  await page.evaluate(() => {
+    window.__stops.length = 0;
+    window.__ramps.length = 0;
+  });
+  await page.keyboard.press('Escape');
+  await waitVoice(page, () => document.body.dataset.voiceCancels === '1', null, 5_000);
+  let cut = await page.evaluate(() => ({ stops: [...window.__stops], ramps: [...window.__ramps] }));
+  v = await voiceShown(page);
+  assert.equal(v.fade, 80, 'an 80 ms fade');
+  assert.ok(cut.stops.length >= 1 && cut.stops.every((s) => Math.abs(s - 0.08) < 0.02), 'every source stops 80 ms on');
+  assert.ok(cut.ramps.length >= 1 && cut.ramps.every(([value]) => value === 0), 'its gain ramps to 0');
+  await waitVoice(page, () => window.__replies.length === 2, null, 30_000);
+  assert.equal(await page.evaluate(() => window.__replies[1]), 'cancelled', 'the worker drops the line it makes');
+  await waitVoice(page, () => document.body.dataset.voicePlaying === '0', null, 5_000);
+  // A newer turn cancels the old speech, and its own line is said.
+  await page.evaluate((u) => window.__speech.push(u), utterance(3, longer));
+  await waitVoice(page, () => document.body.dataset.voiceSpoken === '3', null, 60_000);
+  await page.evaluate(() => {
+    window.__stops.length = 0;
+  });
+  await page.evaluate((u) => window.__speech.push(u), utterance(4, 'And now the next turn.'));
+  await waitVoice(page, () => document.body.dataset.voiceCancels === '2' && document.body.dataset.voiceSpoken === '4', null, 60_000);
+  cut = await page.evaluate(() => [...window.__stops]);
+  assert.ok(cut.length >= 1 && cut.every((s) => Math.abs(s - 0.08) < 0.02), 'the newer turn fades the old speech out');
+  await waitVoice(page, () => window.__replies.length === 4, null, 60_000);
+  assert.deepEqual(await page.evaluate(() => window.__replies.slice(2)), ['cancelled', 'done'], 'the worker drops the old line and says the new one');
+  const floor = Number(await page.evaluate(() => document.body.dataset.voiceSteps));
+  console.log(`  receipt: CPU steps after four lines ${floor}`);
+  assert.ok(floor >= 3 && floor <= 16, 'the steps stay within the CPU floor and 16');
   // Forget voices: the cache emptied, the acceptance forgotten, off.
   await page.click('#forget-voices');
   await waitVoice(page, (want) => document.getElementById('status').textContent === want, await line('voiceForgot'), 10_000);

@@ -136,8 +136,10 @@
                 title="HD: the map, the portraits and the panels magnified (MMPX) from your own files, in this browser. Off shows the original 320 x 200 pixels.">HD</button>
         <button id="settings" type="button" data-i18n="settings">Settings</button>
         <button id="voices" type="button" aria-pressed="false" data-i18n="voices" data-i18n-title="voicesTitle"
-                title="NPCs say their lines aloud, in a voice generated in this browser by the Supertonic-3 model (about 400 MB, downloaded from this site once and kept in this browser). It needs WebGPU.">Voices (~400 MB)</button>
-        <span id="voice-chip" hidden data-i18n="voiceChip">Voice generated on this device</span>
+                title="NPCs say their lines aloud, in a voice generated in this browser by the Supertonic-3 model (about 400 MB, downloaded from this site once and kept in this browser), on WebGPU where the browser offers it, else on the CPU (slower).">Voices (~400 MB)</button>
+        <span id="voice-chip" hidden><span data-i18n="voiceChip">Voice generated on this device</span><span
+          id="voice-gpu" hidden data-i18n="voiceChipGpu"> (GPU)</span><span id="voice-cpu" hidden
+          data-i18n="voiceChipCpu"> (CPU, slower)</span></span>
         <span id="speed-group" role="group" aria-label="Game speed" data-i18n-label="speedLabel"
               data-i18n-title="speedTitle"
               title="On the game screen: - slower, = or + faster, unless the game is using that key (a line or a name being typed, the stats and inventory panels, a party list that scrolls, the opening's menu). The keypad - and + and these buttons always change the speed.">
@@ -194,7 +196,8 @@
         sent anywhere; this site hosts none.</p>
       <p id="voice-credits"><span data-i18n="voiceCreditsBefore">Voices (off until you press
         Voices): the NPCs say their lines aloud, in one English voice generated in this browser by
-        the Supertonic-3 model (Supertone Inc., Open RAIL-M licence) on WebGPU. The model is
+        the Supertonic-3 model (Supertone Inc., Open RAIL-M licence), on WebGPU where the browser
+        offers it, else on the CPU (slower). The model is
         downloaded from this site once (about 400 MB), after you accept its use restrictions;
         what NPCs say never leaves this browser. </span><a id="voice-terms-link" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt"
         data-i18n="voiceTermsLink">Voice model terms</a><span data-i18n="voiceCreditsAfter">.
