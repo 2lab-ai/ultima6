@@ -1,6 +1,7 @@
 //! Real data: the user's archive.org zip → u6-intake → `Files` → `State::new_game`, then the
-//! object code. Skips when the zip is absent; reads only, prints slots and counts only (names
-//! and strings of the game by length).
+//! object code. Skips when the zip is absent; reads only and prints nothing but the skip line.
+//! A failure names its label, a block index or an object slot, and the index where two
+//! sequences first differ (`assert_same!`), never a name, string, count or length of the game's.
 #![allow(clippy::disallowed_methods)] // the test reads the zip
 
 use std::collections::BTreeMap;

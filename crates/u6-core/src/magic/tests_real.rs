@@ -1,9 +1,10 @@
 //! Real data: spells cast from the start state of the user's archive.org zip, through the
 //! engine with typed keys (the Cast command's own steps, as 0x1041d8 runs them before
 //! 0x11af10). The hero gets a readied spellbook and reagents through the objects API.
-//! Compares the message scroll with strings read from the user's `game` and prints only its
-//! line count; the Light test writes headless frames to /tmp/claude-501/. Skips where the zip
-//! is missing; no game data in the repo.
+//! Compares the message scroll with strings read from the user's `game` and prints only each
+//! cast's label and the stub ids it hit (never the scroll's lines, how many there are or their
+//! lengths); the Light test writes headless frames to /tmp/claude-501/. Skips where the zip is
+//! missing; no game data in the repo.
 #![allow(clippy::disallowed_methods)] // tests read the zip and write the frame receipts
 
 use std::cell::RefCell;

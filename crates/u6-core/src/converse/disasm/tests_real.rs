@@ -2,13 +2,14 @@
 //! `converse.b`, and the execution cross-check on the real-data conversations of
 //! `converse/tests_real.rs`, then with every actor asked the keywords of its script, each at a
 //! prompt of a fresh conversation. An actor whose fresh conversation ends before any prompt is
-//! sent none, and those answers are not checked (how many, only the output says); one whose
-//! fresh conversation waits out the driver's rounds before a prompt, or that gets some of its
-//! keywords sent and not the others, fails the test. Skips where the zip is missing. Its
-//! output, passing or failing, holds only counts of what the test made
-//! (scripts decoded and refused, items and hazards by kind, conversations, keywords sent,
-//! checks and mismatches), labels, actor slots and pass/fail (spec 01): never a value or a length
-//! of the owner's data, a byte, a text, a name, a keyword or a hash of them.
+//! sent none, and those answers are not checked (how many actors, only the output says); one
+//! whose fresh conversation waits out the driver's rounds before a prompt, or that gets some of
+//! its keywords sent and not the others, fails the test. Skips where the zip is missing. Its
+//! output, passing or failing, holds only counts of what the test made (scripts refused by
+//! reason, conversations and their ticks, actors not checked, checks, hits, misses and
+//! mismatches), labels, actor slots and pass/fail (spec 01): never a value or a length of the
+//! owner's data (how many scripts, items, runs, strings, keywords or bundles his files hold, or
+//! what a pack of them holds), a byte, a text, a name, a keyword or a hash of them.
 #![allow(clippy::disallowed_methods)] // tests may read files
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,7 +23,7 @@ use super::super::tests_real::{converse, files, with_text};
 use super::super::{Cx, Msg, talk};
 use super::catalog::Catalog;
 use super::trace::{self, Counts, Decoded, Event};
-use super::{Disasm, HazardKind, Kind, Operands, Reason, disassemble};
+use super::{Disasm, Kind, Reason, disassemble};
 use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
 use crate::objects::ObjectId;
@@ -64,15 +65,6 @@ fn reason_label(r: Reason) -> &'static str {
     }
 }
 
-/// A hazard's kind, its refusal reason without the byte it names.
-fn hazard_label(k: HazardKind) -> String {
-    match k {
-        HazardKind::Dropped(scan, r) => format!("Dropped({scan:?}, {})", reason_label(r)),
-        HazardKind::SearchPastEnd(_) => "SearchPastEnd".into(),
-        k => format!("{k:?}"),
-    }
-}
-
 /// Every byte of the input in exactly one item, in order.
 fn covers_once(d: &Disasm, input: &[u8]) -> bool {
     assert!(
@@ -93,13 +85,10 @@ fn covers_once(d: &Disasm, input: &[u8]) -> bool {
 fn every_script_disassembles_with_every_byte_in_one_item() {
     let Some(files) = files() else { return };
     let all = scripts(&files);
+    // Refusals by reason (the test's outcome: none for a pass); no total of the owner's scripts,
+    // items, runs, strings, splits or hazards is shown.
     let mut refused: BTreeMap<String, usize> = BTreeMap::new();
-    let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut hazards: BTreeMap<String, usize> = BTreeMap::new();
     let (mut decoded, mut bytes, mut once) = (0, 0usize, 0usize);
-    let (mut strings, mut tables, mut splits) = (0, 0, 0);
-    // Splits whose second part is one newline byte / longer (the run is cut in its text).
-    let (mut newline_tails, mut mid_text) = (0, 0);
     for (letter, item, b) in &all {
         let d = match disassemble(*letter, *item, b) {
             Ok(d) => d,
@@ -112,87 +101,25 @@ fn every_script_disassembles_with_every_byte_in_one_item() {
         };
         decoded += 1;
         bytes += b.len();
-        splits += d.run_splits.len();
-        for &at in &d.run_splits {
-            let part = d.items.iter().find(|i| i.offset == at);
-            match part.map(|p| (p.len, b[at as usize])) {
-                Some((1, b'\n')) => newline_tails += 1,
-                Some((l, _)) if l > 1 => mid_text += 1,
-                _ => {}
-            }
-        }
         assert!(
             covers_once(&d, b),
             "script {}{item}: coverage",
             char::from(*letter)
         );
         once += d.items.iter().map(|i| i.len as usize).sum::<usize>();
-        for it in &d.items {
-            let k = match &it.kind {
-                Kind::Header => "header",
-                Kind::Name => "name",
-                Kind::Marker(_) => "marker",
-                Kind::Text(_) => "run",
-                Kind::Op(op) if matches!(op.operands, Operands::Jump { .. }) => "op (jump)",
-                Kind::Op(_) => "op",
-                Kind::Keywords(_) => "keyword block",
-                Kind::BlockEnd => "block end",
-                Kind::Input(_) => "input op",
-                Kind::Stop(_) => "stop",
-                Kind::Table(t) => {
-                    tables += 1;
-                    if !t.words {
-                        strings += t.entries.len();
-                    }
-                    "table"
-                }
-                Kind::Unreached => "unreached range",
-            };
-            *kinds.entry(k).or_default() += 1;
-        }
-        for h in &d.hazards {
-            let k = hazard_label(h.kind);
-            *hazards.entry(k).or_default() += 1;
-        }
     }
     let catalog = Catalog::build(all.iter().map(|(l, i, b)| (*l, *i, b.as_slice())));
-    let runs: usize = catalog.scripts.iter().map(|s| s.runs.len()).sum();
-    let linked = catalog
-        .scripts
-        .iter()
-        .flat_map(|s| &s.runs)
-        .filter(|r| r.part_of.is_some())
-        .count();
-    let slotted = catalog
-        .scripts
-        .iter()
-        .flat_map(|s| &s.strings)
-        .filter(|s| !s.slots.is_empty())
-        .count();
-    let ops = kinds.get("op").copied().unwrap_or(0) + kinds.get("op (jump)").copied().unwrap_or(0);
-    let data = kinds.get("table").copied().unwrap_or(0)
-        + kinds.get("unreached range").copied().unwrap_or(0);
-    println!(
-        "scripts {} decoded {decoded} refused {}",
-        all.len(),
-        all.len() - decoded
-    );
     for (r, n) in &refused {
         println!("refused: {r} x{n}");
     }
-    println!("items by kind: {kinds:?}");
-    println!(
-        "runs {runs} ({linked} of them parts of a split run), table strings {strings} ({slotted} copied into a slot), ops {ops}, data ranges {data} ({tables} tables)"
-    );
-    println!(
-        "run splits {splits} (a one-byte newline tail {newline_tails}, a cut inside the text {mid_text}), hazards: {hazards:?}"
-    );
     assert!(refused.is_empty(), "refused: {refused:?}");
     assert!(decoded > 0 && decoded == all.len(), "every script decodes");
+    println!("every script decodes: pass");
     assert!(once == bytes, "every byte in exactly one item");
     println!("every byte in exactly one item: pass");
     let back = Catalog::from_json(&catalog.to_json());
     assert!(back.is_ok_and(|c| c == catalog), "the catalog reads back");
+    println!("the catalog reads back from its JSON: pass");
 }
 
 /// The (archive, item, offset) of each table string `events` read from a table address.
@@ -462,7 +389,7 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
     assert!(greeter.is_some(), "an actor's script greets with $G and $T");
     npcs.extend(greeter);
     let mut total = Counts::default();
-    let (mut talked, mut nameless) = (0, 0);
+    let mut talked = 0;
     let mut read = BTreeSet::new();
     // Each conversation's script, from its load, for the keyword pass.
     let mut script_of: Vec<(i16, (u8, u16))> = Vec::new();
@@ -506,7 +433,6 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
         let mut s = base.clone();
         let (name, _) = name_from_script(&mut s, &files, npc);
         if name.is_empty() {
-            nameless += 1;
             continue;
         }
         let lines = ["name", "job", BYE, BYE, BYE];
@@ -514,7 +440,7 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
         script_of.push((npc, loaded.expect("the conversation loads its script")));
         talked += 1;
     }
-    println!("conversations {talked} (actors without a script name {nameless})");
+    println!("conversations {talked}");
     print_counts("name, job, bye", &total, read.len());
     let first = total.clone();
     // Every actor with a script name (not in the party) asked every keyword of its script, a
@@ -535,10 +461,10 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
         });
         script_of.extend(loaded.map(|key| (npc, key)));
     }
-    // Keywords: sent (typed at a prompt), and not sent because a fresh conversation came to no
-    // prompt within `talk_through`'s rounds (it ended first, or it did not). Actors whose
-    // keywords were not sent. Conversations: ended and not.
-    let (mut keywords, mut sent, mut unsent, mut unsent_ended) = (0, 0, 0, 0);
+    // Keywords typed at a prompt (only whether any were: their number is the scripts'). Actors
+    // whose keywords were not sent: a fresh conversation came to no prompt within
+    // `talk_through`'s rounds (`sent_ok`: it ended first). Conversations: ended and not.
+    let mut sent = 0;
     let (mut ended, mut stopped, mut mute) = (0, 0, 0);
     for &(npc, key) in &script_of {
         let mut keys: BTreeSet<String> = BTreeSet::new();
@@ -556,7 +482,6 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
                 }
             }
         }
-        keywords += keys.len();
         let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
         let k = send_keywords(&keys, |lines| {
             let (_, done, took) = talk(npc, lines, true, &mut total, &mut read);
@@ -566,30 +491,16 @@ fn the_real_conversations_read_only_what_the_disassembler_found() {
             sent_ok(&k),
             "actor slot {npc:#x}: a keyword not sent while others were, or for a wait"
         );
-        (sent, unsent) = (sent + k.sent, unsent + k.unsent);
-        unsent_ended += k.unsent_ended;
+        sent += k.sent;
         (ended, stopped) = (ended + k.ended, stopped + k.stopped);
         mute += usize::from(k.unsent > 0);
     }
+    assert!(sent > 0, "keywords typed at a prompt");
     println!(
-        "keywords {keywords} of {} actors: sent {sent}; not sent {unsent}, of {mute} actors whose fresh conversation came to no prompt (it ended first {unsent_ended}, it waited out {ROUNDS} driver rounds {}): their answers are not checked; keyword conversations ended {ended}, not ended {stopped}",
-        script_of.len(),
-        unsent - unsent_ended
+        "keyword conversations ended {ended}, not ended {stopped}; actors whose fresh conversation ended before a prompt (their answers are not checked) {mute}; none waited out the {ROUNDS} driver rounds: pass"
     );
-    let catalog_strings: usize = disasms
-        .iter()
-        .flat_map(|(.., d)| &d.items)
-        .map(|it| match &it.kind {
-            Kind::Table(t) if !t.words => t.entries.len(),
-            _ => 0,
-        })
-        .sum();
     print_counts("all", &total, read.len());
     assert!(first.offsets > 0 && first.filled > 0);
-    println!(
-        "distinct table strings read {} of {catalog_strings}",
-        read.len()
-    );
     assert!(talked > 0 && total.offsets > 0 && total.filled > 0);
     assert!(
         total.table_strings > 0,
@@ -623,8 +534,8 @@ fn print_counts(pass: &str, n: &Counts, distinct: usize) {
 /// Spec 09 Acceptance 5 (the bundles' receipt): the owner's files export one bundle per
 /// script of both archives, in the archives' order; each reads back from its JSON; each text
 /// segment's key resolves to a run of 08's catalog of that script (with its text), and every
-/// run and table string of the catalog is in the bundle once (0 gaps). Prints counts and
-/// pass/fail only.
+/// run and table string of the catalog is in the bundle once (0 gaps). Prints pass/fail only:
+/// no count or size of what his scripts hold.
 #[test]
 fn every_script_exports_a_bundle_holding_its_catalog_runs_once() {
     use super::bundle::{self, Segment};
@@ -635,9 +546,8 @@ fn every_script_exports_a_bundle_holding_its_catalog_runs_once() {
     let keys: Vec<(u8, u16)> = all.iter().map(|(l, i, _)| (*l, *i)).collect();
     let got: Vec<(u8, u16)> = out.iter().map(|b| (b.archive as u8, b.item)).collect();
     assert!(got == keys, "one bundle per script, in order");
-    let (mut named, mut greeting, mut turns, mut topics, mut actors, mut traits) =
-        (0, 0, 0, 0, 0, 0);
-    let (mut refused, mut texts, mut runs, mut gaps, mut unresolved) = (0, 0, 0, 0, 0);
+    let (mut named, mut greeting, mut turns, mut actors, mut traits) = (0, 0, 0, 0, 0);
+    let (mut refused, mut gaps, mut unresolved) = (0, 0, 0);
     let (mut most, mut spent) = (0usize, 0usize);
     for (b, (l, i, bytes)) in out.iter().zip(&all) {
         let u = ScriptUnits::build(*l, *i, bytes);
@@ -654,27 +564,17 @@ fn every_script_exports_a_bundle_holding_its_catalog_runs_once() {
                 .any(|s| matches!(s, Segment::Text(_))),
         );
         turns += usize::from(!b.turns.is_empty());
-        topics += b.turns.iter().map(|t| t.topics.len()).sum::<usize>();
         actors += usize::from(!b.actors.is_empty());
         traits += usize::from(!b.traits.is_empty());
-        texts += c.texts;
-        runs += c.runs;
         gaps += c.gaps();
         unresolved += c.unresolved;
     }
-    println!(
-        "bundles {} (scripts {}), refused {refused}, with a name {named}, with a greeting {greeting}, with a turn {turns}, topics {topics}, with actors {actors}, with traits {traits}",
-        out.len(),
-        all.len()
+    // The items spent are a size of the owner's scripts: the budgets are checked, not shown.
+    assert!(
+        most <= bundle::SCRIPT_BUDGET && spent <= bundle::EXPORT_BUDGET,
+        "every script and the export within their budgets"
     );
-    println!(
-        "text segments {texts}, catalog runs {runs}, keys unresolved {unresolved}, gaps {gaps}"
-    );
-    println!(
-        "budget: one script spends at most {most} of {}, the export {spent} of {}",
-        bundle::SCRIPT_BUDGET,
-        bundle::EXPORT_BUDGET
-    );
+    println!("every script and the export within their budgets: pass");
     assert_eq!(refused, 0, "no script refused");
     assert!(named > 0 && greeting > 0 && turns > 0 && actors > 0 && traits > 0);
     assert_eq!(
@@ -773,7 +673,8 @@ fn talk_seen(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool, Se
 /// the cross-check (name, job and the goodbye with the 40 actors nearest the leader, and the
 /// greeter) show at every tick the frame and the scroll they show without it, and every run,
 /// table string and catalogued executable string they show is one of the pack's (0 misses).
-/// Prints counts and pass/fail only.
+/// Prints the counts of its own conversations (ticks, hits, misses) and pass/fail only, no size
+/// of the pack.
 #[test]
 fn the_identity_pack_shows_the_real_conversations_exactly_as_english() {
     use crate::locale;
@@ -838,11 +739,7 @@ fn the_identity_pack_shows_the_real_conversations_exactly_as_english() {
         text_misses,
     ] = counts;
     println!(
-        "identity pack: runs {}, table strings {}, game strings {}, scripts {}; conversations {talked} (ended {ended}), ticks compared {ticks}, differing conversations {differ}; from the pack: runs {hits}, table strings {table_hits}, game strings {text_hits}; misses: runs {misses}, table strings {table_misses}, game strings {text_misses}",
-        made.runs(),
-        made.tables(),
-        made.strings(),
-        made.scripts(),
+        "identity pack: conversations {talked} (ended {ended}), ticks compared {ticks}, differing conversations {differ}; from the pack: runs {hits}, table strings {table_hits}, game strings {text_hits}; misses: runs {misses}, table strings {table_misses}, game strings {text_misses}"
     );
     assert!(talked > 0 && hits > 0 && text_hits > 0);
     assert_eq!(differ, 0, "every frame and scroll as in English");
@@ -862,7 +759,7 @@ fn the_identity_pack_shows_the_real_conversations_exactly_as_english() {
 /// of every bundle that has one goes into one pack of English grammar (each translated as
 /// itself; a capacity its own English passes is not written, as the tool's gate would refuse
 /// it); written as a file, read back and installed on the files the bundles came from. Prints
-/// counts and pass/fail only.
+/// pass/fail only, no size of the pack.
 #[test]
 fn a_pack_keyed_from_the_owners_bundles_checks_against_his_files() {
     use std::collections::BTreeMap;
@@ -919,10 +816,7 @@ fn a_pack_keyed_from_the_owners_bundles_checks_against_his_files() {
     let mut s = with_text(&files);
     let checked = locale::install(&mut s, &files, Rc::new(read), None);
     println!(
-        "pack from the bundles: runs {}, table strings {}, scripts {}; checks against the files: {}",
-        pack.runs(),
-        pack.tables(),
-        pack.scripts(),
+        "pack from the bundles checks against the files: {}",
         if checked.is_ok() { "pass" } else { "fail" }
     );
     assert!(pack.runs() > 0 && pack.tables() > 0);
@@ -934,7 +828,8 @@ fn a_pack_keyed_from_the_owners_bundles_checks_against_his_files() {
 /// every `@` of every run of the owner's scripts, the keyword the escape layer shows: from the
 /// `@` up to a character of the game's keyword-end list (`ui.tables.keyword_end`), the next
 /// escape prefix or the run's end, the characters the escape layer takes before the prefix (`&`,
-/// `<`, `>`, the back-quote, `*`) putting nothing. Prints counts and pass/fail only.
+/// `<`, `>`, the back-quote, `*`) putting nothing. Prints pass/fail only: how many `@` the
+/// runs hold is a count of his text.
 #[test]
 fn the_tools_keyword_rule_is_the_escape_layers_on_the_owners_runs() {
     use super::Escape;
@@ -971,12 +866,9 @@ fn the_tools_keyword_rule_is_the_escape_layers_on_the_owners_runs() {
             }
         }
     }
-    println!(
-        "@ keywords in the owner's runs {keywords}; the tool's rule gives the escape layer's keyword for {agree}"
-    );
     assert!(keywords > 0);
-    assert_eq!(
-        agree, keywords,
+    assert!(
+        agree == keywords,
         "the tool's keyword rule is the escape layer's"
     );
     println!("the tool's keyword rule matches the escape layer on every @: pass");

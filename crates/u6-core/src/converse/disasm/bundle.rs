@@ -73,8 +73,9 @@ pub const READS: [&str; 3] = ["converse.a", "converse.b", "objlist"];
 /// string key a table operand lists. What a script holds once is bounded by its length; these
 /// copies are not (conditions × topics, references × strings), so a script that would pass the
 /// budget is refused with [`OVER_BUDGET`] before the copy that passes it is made. Far above
-/// what the owner's scripts spend (the real-data receipt prints it), and small enough that a
-/// refused script never holds more than a few MiB.
+/// what the owner's scripts spend (the real-data receipt asserts that each script and the
+/// export stay within their budgets; the spend is a size of his scripts, so it is not shown),
+/// and small enough that a refused script never holds more than a few MiB.
 pub const SCRIPT_BUDGET: usize = 1 << 14;
 /// The most items one [`export`] spends over all its scripts, refused ones included (each up to
 /// the budget it was given): a script gets the smaller of [`SCRIPT_BUDGET`] and what is left,
