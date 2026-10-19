@@ -4,16 +4,17 @@
 //! 1. **A run's output is never mixed with another run's.** `--out` is made if it is not there
 //!    and opened once (a link at `--out` itself is followed); where the dir opened is then is
 //!    read from the system and checked again to be outside the repository, and a run that
-//!    cannot read it, or finds it inside, writes nothing. The run's first write in it is a
-//!    `mkdirat` of a dir of its own, `run-<UTC time>-<pid>/`, named from this process's clock
+//!    cannot read it, or finds it inside, makes no run dir (a `--out` it made, with the dirs
+//!    above it that were not there, is left as made, and said). The run's first write in it is
+//!    a `mkdirat` of a dir of its own, `run-<UTC time>-<pid>/`, named from this process's clock
 //!    and pid alone; when that dir is there already the run fails, it is never reused. The run
 //!    opens that dir (`openat`, `O_NOFOLLOW`) and makes every file of it through it ([`at`]:
 //!    `openat` with `O_CREAT | O_EXCL | O_NOFOLLOW`, no temp file, no rename), never by a path:
-//!    nothing outside it is written and no file there is replaced. A run dir removed while the run
-//!    writes is never made again: the next write fails, and so does the run. A run dir renamed
-//!    away (a link put in its place or not) is never followed: the run's writes go on in the dir
-//!    it made, where that dir is now, and the run fails at its end, when it finds its dir is not
-//!    at the path it made it at (checked before `done` and once `done` is written).
+//!    nothing outside it is written and no file there is replaced. A run dir removed while the
+//!    run writes is never made again: the next write fails, and so does the run. A run dir
+//!    renamed away (a link put in its place or not) is never followed: the run's writes go on in
+//!    the dir it made, where that dir is now, and the run fails at its end, when it finds its
+//!    dir is not at the path it made it at (checked before `done` and once `done` is written).
 //! 2. **The tool never deletes what it did not make.** A run that fails deletes only the files
 //!    this process made ([`Run::write`] lists each, and holds it open until the run ends, so its
 //!    inode is not freed and its number cannot be given to another file meanwhile), its `done`
@@ -21,10 +22,10 @@
 //!    the dir it holds open, one by one, never a tree; it keeps its diagnostics ([`Mode::keep`]
 //!    and `refused.txt`), each checked the same way and not deleted. A file another hand put at
 //!    a name of the run's is left, and said; so is a file of the run's moved to another name, a
-//!    kept one too, and a kept one another hand deleted from the run dir. A file of the run's whose identity could not
-//!    be read when it was made fails the run, and is left (a diagnostic too), said so. A file the
-//!    run reads back is read only while it is the one it made. Nothing a previous process made
-//!    is removed, renamed or rewritten.
+//!    kept one too, and a kept one another hand deleted from the run dir. A file of the run's
+//!    whose identity could not be read when it was made fails the run, and is left (a
+//!    diagnostic too), said so. A file the run reads back is read only while it is the one it
+//!    made. Nothing a previous process made is removed, renamed or rewritten.
 //!
 //! What this cannot close: a file swapped in at a name between the check and the delete (POSIX
 //! has no delete-if-this-inode); a dir put in place of the new run dir, by its name in `--out`,
@@ -45,7 +46,7 @@
 //! Cleaning up old runs is the person's job. A run holds each file it makes open until it ends,
 //! so it raises its limit on open files first, as far as the system lets it. Unix only (the
 //! crate is), on a system that says where an open dir is (macOS `F_GETPATH`, Linux
-//! `/proc/self/fd`): elsewhere a run cannot tell where its `--out` is, and writes nothing.
+//! `/proc/self/fd`): elsewhere a run cannot tell where its `--out` is, and makes no run dir.
 
 use std::cell::{Cell, RefCell};
 use std::fs::File;
@@ -615,7 +616,8 @@ impl Written {
 /// Runs a `calibrate` run of `mode` whose `--out` is `out` (module docs): `out` made if it is
 /// not there, and opened (where the dir opened is then read from the system, and checked to be
 /// outside the repository: a run that cannot read it, or finds it inside, fails before it
-/// writes anything); the incomplete runs in it listed through it; the run's own dir made in
+/// makes its run dir, and says the dirs it made for `--out`); the incomplete runs in it listed
+/// through it; the run's own dir made in
 /// it (`mkdirat`, a failure if it is there) and opened (`openat`, not a link); `run` writes in
 /// it ([`Run`]); then [`DONE`], and the dir checked to be where it was made, with each file of
 /// the run identified. A run that fails keeps only its diagnostics ([`Run::fail`]).
@@ -626,29 +628,50 @@ pub fn run_in<T>(
 ) -> Result<(T, Written), String> {
     at::raise_open_files();
     work::check_target(out)?;
+    // The dirs of --out that are not there yet, the top first: ensure_dir makes them.
+    let mut missing: Vec<PathBuf> = std::path::absolute(out)
+        .map(|abs| {
+            abs.ancestors()
+                .take_while(|a| std::fs::symlink_metadata(a).is_err())
+                .map(Path::to_path_buf)
+                .collect()
+        })
+        .unwrap_or_default();
+    missing.reverse();
     let parent = work::ensure_dir(out)?;
     let outfd = at::open_dir(&parent).map_err(|e| os_error(&parent, &e))?;
     seam(out, "opened", "")?;
+    // A refusal from here makes no run dir, and says the dirs it made for --out, if any.
+    let made = |e: String| match missing.as_slice() {
+        [] => e,
+        v => format!(
+            "{e}; the run made {}, which were not there, and wrote nothing else in them",
+            v.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
     // Where the dir opened is now: outside the repository too (it was checked by its path); a
-    // run that cannot tell where it is writes nothing.
+    // run that cannot tell where it is makes no run dir.
     let located = seam(out, "locate", "")
         .ok()
         .and_then(|()| at::id(&outfd).ok())
         .and_then(|id| at::where_now(&outfd, id));
     let Some(located) = located else {
-        return Err(format!(
+        return Err(made(format!(
             "{}: where the dir opened is now could not be read, so the tool cannot tell it is \
-             outside the repository: nothing is written (spec 07 Rights)",
+             outside the repository: no run dir is written (spec 07 Rights)",
             out.display()
-        ));
+        )));
     };
     if let Some(why) = work::protected(&located) {
-        return Err(format!(
+        return Err(made(format!(
             "{}: the dir opened is now at {}, {why}; the tool writes only outside it (spec 07 \
              Rights)",
             out.display(),
             located.display()
-        ));
+        )));
     }
     let (incomplete, unreadable) = incomplete(out, &outfd, &parent)?;
     // Every failure from here says the incomplete runs beside the run, and those it could not

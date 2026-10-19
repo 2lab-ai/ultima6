@@ -1720,7 +1720,9 @@ fn a_read_out_of_open_files_says_how_to_go_on() {
 fn a_run_that_cannot_tell_where_its_out_dir_is_writes_nothing() {
     // --out opened, then where it is now not known (as with no /proc and no F_GETPATH; made
     // so at a seam): the tool cannot tell it is outside the repository, so the run fails before
-    // anything is made in it.
+    // anything is made in it, no run dir. Then a --out not there, two dirs above it missing
+    // too: the run made the three of them before it could tell, says so, and leaves them as
+    // made, nothing else in them.
     let dir = temp("unlocated");
     let out = dir.join("out");
     std::fs::create_dir_all(out.join(run_name(1, 7))).unwrap();
@@ -1732,11 +1734,32 @@ fn a_run_that_cannot_tell_where_its_out_dir_is_writes_nothing() {
         e,
         format!(
             "{}: where the dir opened is now could not be read, so the tool cannot tell it is \
-             outside the repository: nothing is written (spec 07 Rights)",
+             outside the repository: no run dir is written (spec 07 Rights)",
             out.display()
         )
     );
     assert_eq!(tree(&out), had);
+    let (a, b) = (dir.join("a"), dir.join("a").join("b"));
+    let absent = b.join("out");
+    let _h = hook(&absent, "locate", |_| Err("not known".into()));
+    let e = run_in(FIRST, &absent, writes).unwrap_err();
+    assert_eq!(
+        e,
+        format!(
+            "{}: where the dir opened is now could not be read, so the tool cannot tell it is \
+             outside the repository: no run dir is written (spec 07 Rights); the run made {}, \
+             {}, {}, which were not there, and wrote nothing else in them",
+            absent.display(),
+            a.display(),
+            b.display(),
+            absent.display()
+        )
+    );
+    assert_eq!(
+        (names(&a), names(&b)),
+        (vec!["b".to_string()], vec!["out".to_string()])
+    );
+    assert!(names(&absent).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
