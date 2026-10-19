@@ -93,11 +93,13 @@
 //!
 //! Order. Of the landings waiting to be tried, the one at the lowest address where reading
 //! goes on (then by loop, stop byte and context) is taken first, whatever order they were found
-//! in, and a failed trial goes back among them. A landing is found only once a path that leads
-//! to it is decoded: one that only a higher landing's path leads to waits for that one, and
-//! comes after it. Nothing else orders them, so the decode and the catalog are functions of the
-//! script's bytes alone (a test keeps the waiting landings in other orders and gets the same
-//! catalog, byte for byte). Conflicts between landings are resolved by that order:
+//! in. A landing is found only once a path that leads to it is decoded: one that only a higher
+//! landing's path leads to waits for that one, and comes after it. A failed trial is tried
+//! again only after every landing waiting or found meanwhile, higher ones included, has been
+//! tried (the retries then in the same order): it is taken again after them. Nothing else
+//! orders them, so the decode and the catalog are functions of the script's bytes alone (a
+//! test keeps the waiting landings in other orders and gets the same catalog, byte for byte).
+//! Conflicts between landings are resolved by that order:
 //!
 //! - two landings whose code disagrees on a byte (one would decode an item over bytes the
 //!   other decoded otherwise): the one taken first keeps its code, the other is dropped

@@ -1716,6 +1716,49 @@ fn a_lower_landing_only_a_higher_ones_path_finds_comes_after_it() {
 }
 
 #[test]
+fn a_failed_trial_is_tried_again_after_the_landings_found_meanwhile() {
+    // The a1's landing at `x`, the lowest, jumps to `p`, which jumps to `t`: its first trial
+    // fails on `t`'s first byte (no op). The block's loops, higher, print string 0 of `t`, and
+    // their `a1`'s landing at `y`, higher still, is found only through them. The first is
+    // tried again only after both: when the one at `y` jumps into `p`'s operand, its code is in
+    // first and the retry is dropped for the overlap; when it jumps elsewhere, the retry is
+    // kept and stops at the table.
+    let x = BODY + 13;
+    let y = x + 22;
+    let p = y + 5;
+    let t = p + 5;
+    for conflict in [true, false] {
+        let mut rest = jump(p);
+        rest.push(0xee);
+        rest.extend([&[0xb5][..], &lit32(t), &[0xb1]].concat());
+        rest.extend([0xa1, 0x01, 0xa7]);
+        rest.extend(jump(BODY));
+        rest.push(0xa2);
+        rest.extend(jump(if conflict { p + 1 } else { BODY }));
+        rest.extend(jump(t));
+        rest.extend(b"\x80z\0");
+        let d = any_order(&after_an_if(&rest));
+        if conflict {
+            assert_eq!(sorted_hazards(&d), [dropped(x, Scan::If, Reason::Overlap)]);
+            assert!(
+                matches!(item(&d, p + 1).kind, Kind::Text(_)),
+                "{:?}",
+                shape(&d)
+            );
+        } else {
+            assert_eq!(
+                sorted_hazards(&d),
+                [Hazard {
+                    at: t,
+                    kind: HazardKind::IntoData
+                }]
+            );
+            assert!(matches!(op_at(&d, p).info().flow, Flow::Jump));
+        }
+    }
+}
+
+#[test]
 fn of_two_landings_reading_one_address_with_two_kinds_the_lower_keeps_it() {
     // The a1's landing writes word 0 of `t`; the block's loops, at a higher address, print
     // string 0 of `t`: `t` is a word table and the loops are dropped.
