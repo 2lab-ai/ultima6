@@ -2331,8 +2331,8 @@ fn of_two_landings_each_reading_past_the_others_table_the_lower_is_kept() {
     // The a1's landing (at `x`) prints string 1 of `ta` and writes a word inside `tb`'s second
     // string; the block's loops (higher) do the mirror. Each one's word table cuts the other's
     // string table, so each one's read past comes from the other: all are dropped for it. With
-    // them out, the a1's landing's ban lifts first; tried with it in, the loops' cause is still
-    // there, and they stay dropped.
+    // them out, the a1's landing's ban lifts first (the lower); tried with it in, the loops'
+    // cause is still there, and they stay dropped.
     let print1 = |t: u32| [&[0xb5][..], &lit32(t), &[0x01, 0xa7]].concat();
     let x = BODY + 13;
     let loops = x + 24;
@@ -2356,6 +2356,30 @@ fn of_two_landings_each_reading_past_the_others_table_the_lower_is_kept() {
     );
     // The a1's landing's print of string 1 reads its table.
     let Kind::Table(t) = &item(&d, ta).kind else {
+        panic!("{:?}", shape(&d))
+    };
+    assert!(t.entries.len() >= 2);
+    // The mirror: the block's `ee` comes before the `a2`, so the loops' landing is the lower,
+    // while the a1's loop comes first by loop. The bans lift by address: the loops are kept,
+    // and the a1's landing is dropped.
+    let loops = BODY + 13;
+    let x = loops + 24;
+    let ta = x + 23;
+    let tb = ta + 6;
+    let mut b = b"\xf7\xef*\xf6\xa1\x01\xa7".to_vec();
+    b.extend(jump(BODY));
+    b.push(0xee);
+    b.extend(print1(tb));
+    b.extend(write_word(ta + 3, 0));
+    b.extend(jump(BODY));
+    b.push(0xa2);
+    b.extend(print1(ta));
+    b.extend(write_word(tb + 3, 0));
+    b.extend(jump(BODY));
+    b.extend(b"ab\0cd\0ef\0gh\0");
+    let d = any_order(&script(&b));
+    assert_eq!(drops(&d), [dropped(x, Scan::If, Reason::TableIndex)]);
+    let Kind::Table(t) = &item(&d, tb).kind else {
         panic!("{:?}", shape(&d))
     };
     assert!(t.entries.len() >= 2);
