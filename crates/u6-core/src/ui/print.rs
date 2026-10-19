@@ -303,9 +303,24 @@ fn finish(t: &mut super::textstate::TextState, c: i32) {
 ///
 /// Port (spec 08): with `wide` on, the string's bytes are assembled first ([`wide::decode`]):
 /// its Hangul syllables take a cell each, every other byte is put as itself.
+///
+/// Port (spec 08, slice K2): called by game code, so the string is the locale pack's when it
+/// has it ([`crate::locale::exe_string`]); the escape layer's `$n` and `#n` put theirs without
+/// that ([`put_cells`]).
 pub async fn put_raw_str(state: &RefCell<State>, io: &Io, s: &[u8]) {
     super::printf::release(state, io).await;
-    put_cells(state, io, s).await;
+    let found = {
+        let s0 = state.borrow();
+        if s0.ui.text.on {
+            crate::locale::exe_string(&s0, s)
+        } else {
+            None
+        }
+    };
+    match found {
+        Some((_, text)) => put_cells(state, io, &text).await,
+        None => put_cells(state, io, s).await,
+    }
 }
 
 /// [`put_raw_str`] without the release (the escape layer's `$` and `#`).

@@ -46,11 +46,14 @@ pub(crate) async fn put_speech(cx: &Cx<'_>, kind: Kind, c: u8) {
     cx.st(|s| crate::speech::lower(s, was));
 }
 
-/// Port-only (spec 09 Design 1): [`print`] as the NPC's words when `kind` is speech (op `0xb5`'s
-/// string slot), with the speech tap's flag up as [`put_speech`].
-pub(crate) async fn print_speech(cx: &Cx<'_>, kind: Kind, text: &[u8]) {
+/// Port-only (spec 09 Design 1): what a string slot shows (op `0xb5`'s slot form) through printf
+/// as the NPC's words when `kind` is speech, with the speech tap's flag up as [`put_speech`].
+/// Port (spec 08, slice K2): through `printf`'s body without the locale layer's lookup
+/// ([`crate::ui::printf::format`]), since the slot's text was read for display already
+/// ([`super::vars::shown_ref`]).
+pub(crate) async fn print_slot_speech(cx: &Cx<'_>, kind: Kind, text: &[u8]) {
     let was = cx.st(|s| crate::speech::raise(s, kind));
-    print(cx, text).await;
+    Box::pin(crate::ui::printf::format(cx.state, cx.io, text, &[])).await;
     cx.st(|s| crate::speech::lower(s, was));
 }
 

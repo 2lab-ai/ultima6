@@ -17,6 +17,10 @@ const S_ON: u32 = 0x0012_885c;
 const S_BANG: u32 = 0x0012_8860; // "%s!\n"
 const S_KEY_BROKE: u32 = 0x0012_8866;
 const S_NL_LINE_NL: u32 = 0x0012_859a;
+
+/// Port-only (spec 08, slice K2): the strings this module passes to `printf` as its format,
+/// for the locale layer's catalogue ([`crate::locale::strings`]).
+pub(super) const PRINTED: &[u32] = &[S_ON, S_BANG, S_KEY_BROKE, S_NL_LINE_NL];
 const P_NOTHING: i32 = -0x6c58;
 const P_OUT_OF_RANGE: i32 = -0x6c60;
 const P_NO_EFFECT: i32 = super::world::P_NO_EFFECT;

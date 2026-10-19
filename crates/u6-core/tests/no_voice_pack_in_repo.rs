@@ -9,8 +9,15 @@
 //! the page): JSON whose root object, or an element of its root array, has `format` equal to one
 //! of the three, after any JSON whitespace. The walker is the NPC bundles' guard's
 //! (`no_npc_bundle_in_repo.rs`).
+//!
+//! A file that starts as JSON but does not parse (malformed, or nested past the parser's depth)
+//! is caught when a string token of it is a format's name, its escapes decoded (`tests/guard`),
+//! since the parse cannot rule out what it holds; and `site/` itself a symbolic link fails the
+//! guard (the walker would follow it).
 // The test reads the repository and runs git: the crate's platform-free rule is for its code.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+
+mod guard;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -32,7 +39,10 @@ fn is_voice_file(bytes: &[u8]) -> bool {
         return false;
     }
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return false;
+        // JSON that does not parse (malformed, or nested past the parser's depth) may still hold
+        // one: a file with a string token equal to a format, its escapes decoded, fails the guard
+        // too (`guard::holds_string`).
+        return guard::holds_string(bytes, &FORMATS);
     };
     let one = |v: &serde_json::Value| v["format"].as_str().is_some_and(|f| FORMATS.contains(&f));
     one(&v) || v.as_array().is_some_and(|a| a.iter().any(one))
@@ -215,10 +225,23 @@ fn the_walker_finds_a_voice_pack_after_any_amount_of_whitespace() {
     std::fs::remove_dir_all(&root).expect("the test directory goes");
 }
 
-/// The files under `site` (paths relative to `root`), or why the guard fails there: a symlink to
-/// a directory (the walker does not follow it, so what it holds is not checked), named by its
-/// repository path only, or the tool outputs found.
+/// The files under `site` (paths relative to `root`), or why the guard fails there: `site`
+/// itself a symbolic link, or a symlink to a directory under it (the walker does not follow it,
+/// so what it holds is not checked), named by its repository path only, or the tool outputs found.
 fn site_check(site: &Path, root: &Path) -> Result<usize, String> {
+    // `site/` itself a link: the walker would follow it (read_dir does), so nothing is checked.
+    let meta =
+        std::fs::symlink_metadata(site).unwrap_or_else(|e| panic!("{}: {e}", site.display()));
+    if meta.file_type().is_symlink() {
+        let rel = site
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        return Err(format!(
+            "site/ is a symbolic link, not followed so not checked: {rel:?}"
+        ));
+    }
     let (mut found, mut links, mut files) = (Vec::new(), Vec::new(), 0);
     walk(site, root, &mut found, &mut links, &mut files);
     if !links.is_empty() {
@@ -253,6 +276,101 @@ fn a_directory_link_under_site_fails_the_guard() {
         "directory links under site/, not followed so not checked: [\"site/deep/out\"]"
     );
     assert!(!err.contains("outside"), "the target is not named");
+    std::fs::remove_dir_all(&root).expect("the test directory goes");
+}
+
+/// `site/` itself a symbolic link to a directory fails the guard, named by its repository path
+/// only (not what it points at), though what it points at holds a file the guard catches.
+#[test]
+fn a_site_that_is_a_symbolic_link_fails_the_guard() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-voice-pack-site-link");
+    if root.exists() {
+        std::fs::remove_dir_all(&root).expect("the old test directory goes");
+    }
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).expect("the target directory");
+    let sample = PACK.to_string();
+    std::fs::write(outside.join("voices.u6vp"), &sample).expect("written");
+    std::fs::write(outside.join("page.txt"), "a page").expect("written");
+    std::os::unix::fs::symlink(&outside, root.join("site")).expect("the link");
+    let err = site_check(&root.join("site"), &root).unwrap_err();
+    assert_eq!(
+        err,
+        "site/ is a symbolic link, not followed so not checked: \"site\""
+    );
+    assert!(!err.contains("outside"), "the target is not named");
+    std::fs::remove_dir_all(&root).expect("the test directory goes");
+}
+
+/// A file that starts as JSON and names the format but does not parse (here nested past the
+/// parser's depth) is caught by the shape check and under `site/`; one of that depth that names
+/// no format is not.
+#[test]
+fn a_file_too_deep_to_parse_that_names_the_format_is_caught() {
+    let sample = PACK.to_string();
+    let deep = format!("{}{sample}{}", "[".repeat(200), "]".repeat(200));
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&deep).is_err(),
+        "past the parser's depth"
+    );
+    assert!(is_voice_file(deep.as_bytes()));
+    let plain = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+    assert!(!is_voice_file(plain.as_bytes()));
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-voice-pack-deep");
+    if root.exists() {
+        std::fs::remove_dir_all(&root).expect("the old test directory goes");
+    }
+    std::fs::create_dir_all(root.join("site")).expect("the test directory");
+    std::fs::write(root.join("site/deep.json"), &deep).expect("written");
+    std::fs::write(root.join("site/plain.json"), &plain).expect("written");
+    let err = site_check(&root.join("site"), &root).unwrap_err();
+    assert!(
+        err.ends_with("[\"site/deep.json\"]"),
+        "only the file that names it"
+    );
+    std::fs::remove_dir_all(&root).expect("the test directory goes");
+}
+
+/// The reviewer's case: a valid output whose format name is spelled with a JSON escape (`\/`, or
+/// `\u` for its first character), first in a root array whose second element is nested past the
+/// parser's depth. The parse fails and the name is not in the file's bytes, yet the guard
+/// catches it, by its shape check and under `site/`, from the string token decoded; a token that
+/// only holds the name inside a longer one is not it.
+#[test]
+fn an_unparsed_file_that_escapes_the_format_name_is_caught() {
+    let sample = PACK.to_string();
+    let format = FORMATS[0];
+    let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-voice-pack-escaped");
+    let slash = format.replace('/', "\\/");
+    let unicode = format!("\\u{:04x}{}", format.as_bytes()[0], &format[1..]);
+    for spelled in [slash, unicode] {
+        let escaped = sample.replacen(format, &spelled, 1);
+        let v: serde_json::Value = serde_json::from_str(&escaped).expect("the output parses");
+        assert_eq!(v["format"].as_str(), Some(format), "its format, decoded");
+        let file = format!("[{escaped},{deep}]");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&file).is_err(),
+            "past the parser's depth"
+        );
+        assert!(
+            !file.contains(format),
+            "the name is not in the file's bytes"
+        );
+        assert!(is_voice_file(file.as_bytes()), "the shape check catches it");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("the old test directory goes");
+        }
+        std::fs::create_dir_all(root.join("site")).expect("the test directory");
+        std::fs::write(root.join("site/escaped.json"), &file).expect("written");
+        let err = site_check(&root.join("site"), &root).unwrap_err();
+        assert!(err.ends_with("[\"site/escaped.json\"]"), "and under site/");
+    }
+    let longer = format!("[\"{format}x\",\"x{format}\",{deep}]");
+    assert!(
+        !is_voice_file(longer.as_bytes()),
+        "a longer token is not the name"
+    );
     std::fs::remove_dir_all(&root).expect("the test directory goes");
 }
 

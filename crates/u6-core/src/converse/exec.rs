@@ -220,6 +220,13 @@ pub(crate) async fn exec(cx: &Cx<'_>, op: u8, npc: i16, kind: Kind) -> i16 {
 /// through 0x108376; the read position comes back after the expression), `d5` prints nothing,
 /// any other byte is followed by `slot b3`: string slot `slot` through printf, then one byte
 /// (the expression's `a7`) is skipped. Both printing forms are speech of `kind` (spec 09).
+///
+/// Port (spec 08, slice K2): a table string the locale pack has ([`crate::locale::table_at`],
+/// the table reader's hook) is put as its translation, in the pack's grammar, while its source
+/// bytes are read past one by one as English reads them (a byte of the translation put after
+/// each source byte read, while both last, so the identity pack reads and puts as English
+/// does). The slot form prints what the slot shows ([`vars::shown_var`]: a copied table
+/// string's translation, a label's), as a format no executable string is looked up in.
 async fn print_op(cx: &Cx<'_>, kind: Kind) -> i16 {
     let form = cx.cv(|c| c.next());
     if form == 0xd2 {
@@ -227,17 +234,37 @@ async fn print_op(cx: &Cx<'_>, kind: Kind) -> i16 {
         cx.cv(|c| c.saved_pc = back);
         #[cfg(test)]
         super::disasm::trace::print_start(cx);
-        loop {
+        let read = |cx: &Cx<'_>| {
             let b = cx.cv(|c| c.next());
             #[cfg(test)]
             {
                 use super::disasm::trace::{Read, table_byte};
                 table_byte(cx.cv(|c| c.pos()) - 1, b, Read::Print);
             }
-            if b == 0 || cx.cv(|c| c.fault) {
-                break;
+            b
+        };
+        let hit = cx.st(|s| crate::locale::table_at(s, s.converse.pos(), None));
+        if let Some((len, language, text)) = hit {
+            let was = cx.st(|s| std::mem::replace(&mut s.ui.text.language, language));
+            for i in 0..len.max(text.len()) {
+                if i < len {
+                    read(cx);
+                }
+                if let Some(&t) = text.get(i) {
+                    seams::put_speech(cx, kind, t).await;
+                }
             }
-            seams::put_speech(cx, kind, b).await;
+            // The NUL that ends the source.
+            read(cx);
+            cx.st(|s| s.ui.text.language = was);
+        } else {
+            loop {
+                let b = read(cx);
+                if b == 0 || cx.cv(|c| c.fault) {
+                    break;
+                }
+                seams::put_speech(cx, kind, b).await;
+            }
         }
         cx.cv(|c| c.set_pos(c.saved_pc));
         return 0;
@@ -249,8 +276,12 @@ async fn print_op(cx: &Cx<'_>, kind: Kind) -> i16 {
     if tag != 0xb3 {
         return 1;
     }
-    let text = cx.st(|s| vars::string_var(s, slot));
-    seams::print_speech(cx, kind, &text).await;
+    let (language, text) = cx.st(|s| vars::shown_ref(s, vars::slot(s, slot), false));
+    let was = language.map(|l| cx.st(|s| std::mem::replace(&mut s.ui.text.language, l)));
+    seams::print_slot_speech(cx, kind, &text).await;
+    if let Some(was) = was {
+        cx.st(|s| s.ui.text.language = was);
+    }
     cx.cv(|c| c.advance(1));
     0
 }
@@ -258,6 +289,14 @@ async fn print_op(cx: &Cx<'_>, kind: Kind) -> i16 {
 /// Op 0xa6: assignment `a6 <target> a8 <value> a7`. Targets: `d2 <table> <index>` (a word in
 /// the script's table is overwritten), `var b2` (word variable), `var <other>` (string slot;
 /// the value is then `d2 <table> <index>` = a table string, or `src b3` = another slot).
+///
+/// Port (spec 08, slice K2): the slot takes the table string's English bytes as in English (what
+/// logic reads); when the locale pack has the string ([`crate::locale::table_at`], the table
+/// reader's hook) and its translation fits the place the slot points at
+/// ([`vars::capacity`]), the place shows the translation ([`vars::set_shown`]); one that does not
+/// fit stays English (a miss). A copy into a place whose size the port does not know (not one of
+/// the ten buffers) is not looked up. A copy from another slot shows what that slot shows, on
+/// the same terms: where its English is written and the translation fits ([`vars::copy`]).
 async fn assign(cx: &Cx<'_>) -> i16 {
     let first = cx.cv(|c| c.next());
     let (var, kind, at) = if first == 0xd2 {
@@ -294,6 +333,10 @@ async fn assign(cx: &Cx<'_>) -> i16 {
         let back = table_element(cx, true).await;
         cx.st(|s| {
             s.converse.saved_pc = back;
+            // A place the port drops writes to (code text, address 0) shows nothing either.
+            let hit = (!matches!(dst, StrRef::Null | StrRef::Text(_)))
+                .then(|| crate::locale::table_at(s, s.converse.pos(), Some(vars::capacity(dst)?)))
+                .flatten();
             let mut text = Vec::new();
             loop {
                 let b = s.converse.next();
@@ -309,6 +352,9 @@ async fn assign(cx: &Cx<'_>) -> i16 {
                 text.push(b);
             }
             vars::write(s, dst, &text);
+            if let Some((_, language, shown)) = hit {
+                vars::set_shown(s, dst, language, shown);
+            }
             s.converse.set_pos(s.converse.saved_pc);
         });
         return 0;
@@ -321,8 +367,8 @@ async fn assign(cx: &Cx<'_>) -> i16 {
         return 1;
     }
     cx.st(|s| {
-        let text = vars::string_var(s, src);
-        vars::write(s, dst, &text);
+        let from = vars::slot(s, src);
+        vars::copy(s, from, dst);
     });
     0
 }

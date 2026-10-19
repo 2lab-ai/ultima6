@@ -57,6 +57,8 @@ mod tests_ops;
 mod tests_real;
 #[cfg(test)]
 mod tests_speech;
+#[cfg(test)]
+mod tests_strings;
 
 use std::cell::RefCell;
 
@@ -69,7 +71,8 @@ pub use script::{
 };
 pub use start::{begin, converse, talk};
 pub use text::{ConverseText, Msg};
-pub use vars::{StrRef, int_var, string_var, var_letter};
+pub(crate) use vars::shown_var_quiet;
+pub use vars::{StrRef, int_var, shown_var, string_var, var_letter};
 
 use crate::engine::Io;
 use crate::state::State;
@@ -132,6 +135,10 @@ pub struct ConverseState {
     /// Port-only (spec 08): the archive letter and item of the script last loaded into
     /// `script` (the locale layer's key), `None` before a load.
     pub script_key: Option<(u8, u16)>,
+    /// Port-only (spec 08, slice K2): the places that hold a copy of a table string the locale
+    /// pack has, with the pack's language and text, which a read for display shows
+    /// ([`vars::shown_var`]); logic reads the English.
+    pub shown: Vec<(StrRef, crate::ui::Language, Vec<u8>)>,
 }
 
 impl Default for ConverseState {
@@ -159,6 +166,7 @@ impl Default for ConverseState {
             out: OutFallback::default(),
             steps: 0,
             script_key: None,
+            shown: Vec::new(),
         }
     }
 }

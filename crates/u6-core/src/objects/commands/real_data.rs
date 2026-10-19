@@ -551,3 +551,159 @@ fn push_a_chair_and_open_a_door() {
     }
     assert!(frames == [closed ^ 4, closed], "open, then closed");
 }
+
+/// Spec 08 Order 3 / Acceptance 5 (slice K2), for the object commands: the identity pack of the
+/// owner's files (`crate::locale::identity`: every run, table string and catalogued executable
+/// string as itself, English grammar) installed (`wide` on), the commands of the receipts above
+/// (Look at the six things, Get the bread and Drop it on a table, Move the chair, the door used
+/// twice) print exactly the lines they print without it, and every catalogued string they show
+/// is one of the pack's (0 misses). Prints counts and pass/fail only.
+#[test]
+fn the_identity_pack_shows_look_get_drop_and_move_exactly_as_english() {
+    let Some(files) = files() else { return };
+    let pack = crate::locale::identity(&files).quiet();
+    let english = with_text(&files);
+    let mut with = english.clone();
+    crate::locale::install(&mut with, &files, pack, None).quiet();
+    assert!(with.ui.text.wide, "wide on");
+    // Each command run on `s0`: its lines, and the strings' counts after it.
+    let commands = |s0: &State| -> Vec<(Vec<String>, [u32; 2])> {
+        let mut out = Vec::new();
+        let at = |s: &State| s.locale.texts.get();
+        for kind in [0x8f, 0xce, 0x71, 0x9f] {
+            let mut s = s0.clone();
+            let slot = find(&s, kind);
+            if out_of_view(&s, slot) {
+                let (x, y) = beside(&s, slot).quiet();
+                stand_at(&mut s, x, y);
+            }
+            aim(&mut s, slot);
+            let (s, lines) = run(s, &files, &[], look_cmd());
+            out.push((lines, at(&s)));
+        }
+        for slot in [5, FIRST_TEMP_ACTOR] {
+            let mut s = s0.clone();
+            aim(&mut s, slot);
+            let (s, lines) = run(s, &files, &[], look_cmd());
+            out.push((lines, at(&s)));
+        }
+        let mut s = s0.clone();
+        let (bread, (sx, sy)) = nearest(&s, 0x80, |s, o| beside(s, o).is_some())
+            .into_iter()
+            .find_map(|o| Some((o, beside(&s, o)?)))
+            .quiet();
+        stand_at(&mut s, sx, sy);
+        aim(&mut s, bread);
+        let get = Box::new(|st: Rc<RefCell<State>>, io: Rc<Io>| {
+            Box::pin(async move { super::get(&st, &io).await }) as Pin<Box<dyn Future<Output = ()>>>
+        });
+        let (mut s, lines) = run(s, &files, &[], get);
+        out.push((lines, at(&s)));
+        let ((ax, ay), (tx, ty)) = table(&s).quiet();
+        stand_at(&mut s, tx, ty);
+        let loaf = (0x100..crate::objects::OBJECT_SLOTS as Slot)
+            .find(|&o| s.objects.kind(o) == 0x80 && carried_by(&s, 1, o))
+            .quiet();
+        s.ui.panel.mode = 0x92;
+        s.ui.panel.member = 0;
+        s.ui.input.selection = loaf;
+        s.ui.input.target = (ax as i16, ay as i16);
+        s.ui.input.targeting = 0;
+        let drop = Box::new(|st: Rc<RefCell<State>>, io: Rc<Io>| {
+            Box::pin(async move { super::drop_object(&st, &io).await })
+                as Pin<Box<dyn Future<Output = ()>>>
+        });
+        let (s, lines) = run(s, &files, &[InputEvent::Key(Key::Enter)], drop);
+        out.push((lines, at(&s)));
+        let mut s = s0.clone();
+        let free = |s: &State, o: Slot, dx: i32, dy: i32| {
+            walkable(
+                s,
+                i32::from(s.objects.x(o)) + dx,
+                i32::from(s.objects.y(o)) + dy,
+            )
+        };
+        let chair = *nearest(&s, 0xfc, |s, o| free(s, o, 0, 1) && free(s, o, 1, 0))
+            .first()
+            .quiet();
+        let (cx, cy) = (s.objects.x(chair), s.objects.y(chair));
+        stand_at(&mut s, cx + 1, cy);
+        aim(&mut s, chair);
+        let push = Box::new(|st: Rc<RefCell<State>>, io: Rc<Io>| {
+            Box::pin(async move { super::push(&st, &io).await })
+                as Pin<Box<dyn Future<Output = ()>>>
+        });
+        let (s, lines) = run(s, &files, &[InputEvent::Key(Key::Down)], push);
+        out.push((lines, at(&s)));
+        let mut s = s0.clone();
+        let door = *nearest(&s, 0x12c, |s, o| s.objects.tf(o) >> 10 & 4 != 0)
+            .first()
+            .quiet();
+        for _ in 0..2 {
+            super::door(&mut s, door, false, false, false);
+            let open = Box::new(|st: Rc<RefCell<State>>, io: Rc<Io>| {
+                Box::pin(async move { crate::main_loop::flush_prints(&st, &io).await })
+                    as Pin<Box<dyn Future<Output = ()>>>
+            });
+            let (s2, lines) = run(s, &files, &[], open);
+            s = s2;
+            out.push((lines, at(&s)));
+        }
+        out
+    };
+    let en = commands(&english);
+    let id = commands(&with);
+    let differ = en.iter().zip(&id).filter(|((a, _), (b, _))| a != b).count();
+    let hits: u32 = id.iter().map(|(_, c)| c[0]).sum();
+    let misses: u32 = id.iter().map(|(_, c)| c[1]).sum();
+    eprintln!(
+        "identity pack, object commands: {} runs, differing {differ}; game strings from the pack {hits}, misses {misses}",
+        id.len()
+    );
+    assert_eq!(en.len(), id.len());
+    assert_eq!(differ, 0, "every command's lines as in English");
+    assert!(hits > 0, "the commands show the pack's strings");
+    assert_eq!(misses, 0, "every catalogued string shown is in the pack");
+    eprintln!("identity pack object commands identical to English: pass; misses 0: pass");
+}
+
+/// Spec 08 (slice K2): the string export of the owner's `game` (`u6.string-bundle/1`) lists every
+/// catalogued string once, each with its hash and length (it reads back), none under three
+/// bytes, of every kind; Look's lead-in and the command names are among them. Prints counts and
+/// pass/fail only.
+#[test]
+fn the_string_export_of_the_owners_game_lists_its_catalogued_strings() {
+    use crate::locale::strings::{self, Export, Kind};
+    let Some(files) = files() else { return };
+    let export = strings::export(&files).quiet();
+    let back = Export::from_json(&export.to_json()).quiet();
+    assert!(back == export, "it reads back");
+    let s = with_text(&files);
+    let has = |b: &[u8]| {
+        let h = crate::converse::disasm::catalog::hash64(b);
+        export.strings.iter().any(|e| e.hash == h)
+    };
+    let lead = super::text::string(&s, 0x0012_8444);
+    let talk = s
+        .objcmds
+        .data
+        .pointed(crate::image::A4.wrapping_sub(0x7c8e) + 4 * 0x83);
+    let mut hashes: Vec<u64> = export.strings.iter().map(|e| e.hash).collect();
+    hashes.sort_unstable();
+    hashes.dedup();
+    let count = |k: Kind| export.strings.iter().filter(|e| e.kind == k).count();
+    let (messages, formats, labels) = (
+        count(Kind::Message),
+        count(Kind::Format),
+        count(Kind::Label),
+    );
+    eprintln!(
+        "string export: {} strings (messages {messages}, formats {formats}, labels {labels})",
+        export.strings.len()
+    );
+    assert_eq!(hashes.len(), export.strings.len(), "each once");
+    assert!(export.strings.iter().all(|e| e.len >= 3));
+    assert!(messages > 0 && formats > 0 && labels > 0);
+    assert!(has(&lead) && has(&talk), "Look's lead-in and Talk's name");
+    eprintln!("string export reads back, each string once, Look and Talk in it: pass");
+}

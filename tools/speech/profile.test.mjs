@@ -361,6 +361,34 @@ test('with --send: the pack covers every actor of the scripts profiled, checked 
   await rm(f.dir, { recursive: true });
 });
 
+// Spec 08's slice K2 adds optional fields to a bundle's table strings (`slots`, `capacity`,
+// `inner`): bundles that carry them are read as before, request for request, byte for byte.
+test('bundles whose table strings carry the optional slots, capacity and inner fields are read as before: the same requests, the same pack', async () => {
+  const run = async (bundles) => {
+    const dir = await mkdtemp(join(tmpdir(), 'u6-voice-profile-k2-'));
+    const path = join(dir, 'ultima6-npc-bundles.json');
+    await writeFile(path, JSON.stringify(bundles));
+    const t = fakeTransport();
+    const out = output();
+    const code = await main([path, '--out', join(dir, 'voice'), '--send', '--model', 'test-model', '--jobs', '1'], { transport: t.send, stdout: out, isTTY: false, signals: new EventEmitter() });
+    const pack = await readFile(join(dir, 'voice', 'voices.u6vp'), 'utf8');
+    await rm(dir, { recursive: true });
+    return { code, bodies: t.bodies, pack };
+  };
+  const plain = await run(BUNDLES);
+  const marked = BUNDLES.map((b) => ({
+    ...b,
+    strings: [
+      { key: [b.archive, b.item, 300], table: 300, index: 0, text: 'red' },
+      { key: [b.archive, b.item, 304], table: 300, index: 1, text: 'blue', slots: [1], capacity: 99, inner: [306] },
+    ],
+  }));
+  const k2 = await run(marked);
+  assert.equal(k2.code, plain.code);
+  assert.deepEqual(k2.bodies, plain.bodies, 'the same requests');
+  assert.equal(k2.pack, plain.pack, 'the same pack');
+});
+
 test('SIGINT while sending: the request in flight is dropped and none more is sent; what was answered is written', async () => {
   const f = await fixture();
   const signals = new EventEmitter();

@@ -36,6 +36,32 @@ const SPACE: u32 = 0x0012_1bcc;
 const NAMED: u32 = 0x0012_1bc2;
 const NEWLINE: u32 = 0x0012_1bc8;
 const WAND: u32 = 0x0012_1b8e;
+
+/// Port-only (spec 08, slice K2): the strings Attack passes to `printf` as its format (queued
+/// through [`say`]), for the locale layer's catalogue ([`crate::locale::strings`]). The wand's
+/// word, which goes in as an argument, is left out (it stays English).
+pub(crate) const PRINTED: &[u32] = &[
+    ATTACK_WORD,
+    NOT_ABOARD,
+    WHAT,
+    SHIP_CANNONS,
+    BARE_HANDS,
+    WITH,
+    NO_ARROWS,
+    NO_BOLTS,
+    PASS,
+    NOTHING,
+    INTERFERES,
+    OUT_OF_RANGE,
+    NEXT_WEAPON,
+    SHATTERED,
+    WISP,
+    VANISHED,
+    DASH,
+    SPACE,
+    NAMED,
+    NEWLINE,
+];
 /// Cross-hair confirmed (the key read's code 0x8e).
 const CONFIRMED: u16 = crate::ui::wait::REPEAT;
 

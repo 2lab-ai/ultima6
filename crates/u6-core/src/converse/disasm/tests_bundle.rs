@@ -225,12 +225,18 @@ fn conversation() -> (Vec<u8>, Bundle) {
                 table,
                 index: 0,
                 text: "first".into(),
+                slots: Vec::new(),
+                capacity: None,
+                inner: Vec::new(),
             },
             TableString {
                 key: ('a', 9, table + 6),
                 table,
                 index: 1,
                 text: "second".into(),
+                slots: Vec::new(),
+                capacity: None,
+                inner: Vec::new(),
             },
         ],
     };
@@ -546,6 +552,29 @@ fn ops_carry_their_operands_and_assigns_their_slots_and_tables() {
     );
     assert!(bundle.turns.is_empty());
     assert_eq!(coverage(&bundle, &u).gaps(), 0);
+    // Spec 08 (slice K2): the copied string carries its slot and capacity; the other none, and
+    // its JSON has no such field (a bundle without them reads as before).
+    let strings: Vec<_> = bundle
+        .strings
+        .iter()
+        .map(|t| (t.key.2, t.slots.clone(), t.capacity))
+        .collect();
+    assert_eq!(
+        strings,
+        [
+            (table, vec![], None),
+            (
+                table + 4,
+                vec![4],
+                Some(super::catalog::SLOT_BUFFER_CAPACITY)
+            )
+        ]
+    );
+    let json = super::bundle::to_json(std::slice::from_ref(&bundle));
+    assert_eq!(json.matches("\"slots\"").count(), 1);
+    assert_eq!(json.matches("\"capacity\"").count(), 1);
+    assert!(!json.contains("\"inner\""));
+    assert_eq!(super::bundle::from_json(&json).unwrap(), vec![bundle]);
 }
 
 #[test]

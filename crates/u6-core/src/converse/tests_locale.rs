@@ -23,14 +23,14 @@ use crate::ui::Language;
 use crate::ui::wide::cell_char;
 
 /// The script header of NPC 3 ("Ann", whose look text is "a woman"); its body follows.
-const HEADER: &[u8] = b"\xff\x03Ann\xf1a woman\xf2";
+pub(super) const HEADER: &[u8] = b"\xff\x03Ann\xf1a woman\xf2";
 
-fn script(body: &[u8]) -> Vec<u8> {
+pub(super) fn script(body: &[u8]) -> Vec<u8> {
     [HEADER, body].concat()
 }
 
 /// NPC 3's script as item 3 of the conversation archive the synthetic messages name.
-fn talk_files(script: &[u8]) -> Files {
+pub(super) fn talk_files(script: &[u8]) -> Files {
     let mut a: Vec<Option<Vec<u8>>> = vec![None; 4];
     a[3] = Some(packed(script));
     files(&[("talkfile.a", lib(&a))])
@@ -38,7 +38,7 @@ fn talk_files(script: &[u8]) -> Files {
 
 /// A pack of every run of `script`'s catalog (as NPC 3's, item 3 of `a`), each run's
 /// translation `lines` gives for its text; a run it has no line for fails the test.
-fn pack_for(script: &[u8], language: Language, lines: &BTreeMap<&str, &str>) -> Pack {
+pub(super) fn pack_for(script: &[u8], language: Language, lines: &BTreeMap<&str, &str>) -> Pack {
     let units = ScriptUnits::build(b'a', 3, script);
     assert_eq!(units.refused, None, "the script disassembles");
     let runs = units.runs.iter().map(|r| {
@@ -64,7 +64,7 @@ fn pack_for(script: &[u8], language: Language, lines: &BTreeMap<&str, &str>) -> 
 }
 
 /// The reads of a trace that are the interpreter's control flow: every one but the cells put.
-fn flow(events: &[Event]) -> Vec<String> {
+pub(super) fn flow(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .filter(|e| !matches!(e, Event::Emit { .. }))
@@ -74,7 +74,7 @@ fn flow(events: &[Event]) -> Vec<String> {
 
 /// What the message scroll shows: its finished lines, then the one being written, each cell as
 /// its character (Hangul included).
-fn screen(s: &State) -> String {
+pub(super) fn screen(s: &State) -> String {
     let t = &s.ui.text;
     let mut lines = s.ui.messages.clone();
     let mut last: String = t.transcript_line.iter().map(|&c| cell_char(c)).collect();
@@ -198,7 +198,7 @@ fn a_jump_into_the_middle_of_a_run_puts_its_second_part_and_a_whole_read_puts_bo
 #[test]
 fn table_strings_printed_and_copied_stay_english_between_korean_runs() {
     // b5 d2 prints string 1 of the table at 0x80; a6 d2 copies string 0 into slot 1, which `$1`
-    // prints. Table strings are not in this slice: they print as in English.
+    // prints. A pack without table strings (K1's) leaves them English.
     let table = 0x80u32;
     let addr = |a: u32| [&[0xd2][..], &a.to_le_bytes()].concat();
     let mut body = b"Pick \xb5".to_vec();

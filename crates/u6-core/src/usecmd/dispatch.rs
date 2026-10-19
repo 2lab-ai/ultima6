@@ -21,6 +21,21 @@ const STR_NOT_READIED: u32 = 0x0012_cfd4;
 /// The aboard-ship refusal (the data-hunk string at A4 - 0x744d).
 const STR_ABOARD: u32 = 0x744d;
 
+/// Port-only (spec 08, slice K2): the strings Use passes to `printf` as its format, for the
+/// locale layer's catalogue ([`crate::locale::strings`]); the shared messages it prints through
+/// them are the catalogue's labels ([`crate::locale::strings::SHARED_MESSAGES`]).
+pub(super) const PRINTED: &[u32] = &[
+    FMT_LINE,
+    FMT_NL_LINE,
+    FMT_BANG,
+    STR_HORSE,
+    STR_NOT_NOW,
+    STR_IN_HAND,
+    STR_NOT_SOLO,
+    STR_NOT_READIED,
+    crate::image::A4.wrapping_sub(STR_ABOARD),
+];
+
 /// Original: 0x130546 (objects: Use of `obj` is refused while aboard ship)
 ///
 /// Types in the 10-word list at A4-0x65aa are refused, except the vessel the party is in and a

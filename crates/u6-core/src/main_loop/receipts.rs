@@ -371,3 +371,84 @@ fn the_spellbook_by_clicks_through_the_command_loop() {
     assert!(s.actors.timers[0] == 100, "the light timer runs");
     assert!(lit > dark, "more view cells lit after the cast");
 }
+
+/// Spec 08 Order 3 / Acceptance 5 (slice K2), through the command loop: the same keys with and
+/// without the identity pack of the owner's files (`crate::locale::identity`, installed before
+/// the loop starts, `wide` on): Look, Talk and Get at the leader's own cell, Begin and break off
+/// combat, a key the loop does not take, then Rest for an hour at a camp spot with the second
+/// member on guard. Every tick shows the same frame and scroll as English, and every catalogued
+/// string shown is one of the pack's (0 misses). Prints counts and pass/fail only.
+#[test]
+fn the_identity_pack_shows_the_command_loop_exactly_as_english() {
+    use crate::converse::disasm::catalog::hash64;
+    let Some(files) = files() else { return };
+    let pack = crate::locale::identity(&files).quiet();
+    // A tick's frame and scroll, as hashes.
+    let seen = |e: &Engine| {
+        let s = e.state();
+        let t = &s.ui.text;
+        let mut text: Vec<u8> =
+            s.ui.messages
+                .iter()
+                .flat_map(|l| l.bytes().chain([b'\n']))
+                .collect();
+        text.extend(t.line.iter().flat_map(|c| c.to_le_bytes()));
+        (hash64(e.frame().pixels()), hash64(&text))
+    };
+    let play = |with: bool| {
+        let (f, p) = (files.clone(), pack.clone());
+        let setup: Setup = Box::new(move |s| {
+            if with {
+                crate::locale::install(s, &f, p, None).quiet();
+            }
+            let c = s.map.centre;
+            'search: for d in (16..120u16).step_by(4) {
+                for (x, y) in [(c.x + d, c.y), (c.x, c.y + d), (c.x - d, c.y)] {
+                    s.map.flag_7afb = 1;
+                    crate::map::travel::teleport(s, x, y, 0, 0);
+                    s.map.flag_7afb = 0;
+                    if crate::actors::rest::refusal(s).is_none() {
+                        break 'search;
+                    }
+                }
+            }
+            crate::objects::build_draw_lists(s);
+        });
+        let mut e = engine(&files, setup);
+        assert_eq!(e.state().ui.text.wide, with);
+        let mut ticks = vec![seen(&e)];
+        for key in chars("l\nt\ng\nbbqr12") {
+            e.tick(&[InputEvent::Key(key)], 16);
+            ticks.push(seen(&e));
+            for _ in 0..12 {
+                e.tick(&[], 16);
+                ticks.push(seen(&e));
+            }
+        }
+        let hour0 = e.state().actors.calendar.hour;
+        for _ in 0..6000 {
+            e.tick(&[], 16);
+            ticks.push(seen(&e));
+            let s = e.state();
+            if s.actors.calendar.hour != hour0
+                && s.ui.input.target_command == crate::ui::globals::NO_COMMAND
+            {
+                break;
+            }
+        }
+        let counts = e.state().locale.texts.get();
+        (ticks, counts)
+    };
+    let (en, _) = play(false);
+    let (id, [hits, misses]) = play(true);
+    let differ = en.iter().zip(&id).filter(|(a, b)| a != b).count();
+    eprintln!(
+        "identity pack, command loop: ticks {} / {}, differing {differ}; game strings from the pack {hits}, misses {misses}",
+        en.len(),
+        id.len()
+    );
+    assert_eq!(en.len(), id.len(), "as many ticks");
+    assert_eq!(differ, 0, "every frame and scroll as in English");
+    assert!(hits > 0 && misses == 0);
+    eprintln!("identity pack command loop identical to English: pass; misses 0: pass");
+}

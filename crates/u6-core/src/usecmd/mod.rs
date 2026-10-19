@@ -53,6 +53,8 @@ mod tests_real;
 use std::cell::{RefCell, RefMut};
 
 pub use dispatch::{refused_aboard, use_command};
+/// Port-only (spec 08, slice K2): Use's strings for the locale layer's catalogue.
+pub(crate) const PRINTED: &[u32] = dispatch::PRINTED;
 pub(crate) use mech::{drawbridge, lever};
 
 use crate::engine::Io;
@@ -91,9 +93,11 @@ impl<'a> Ux<'a> {
     }
 
     /// printf of the format at `fmt` with the message the pointer at A4 - `ptr` names (the
-    /// shared Use messages: not usable, no effect, ...).
+    /// shared Use messages: not usable, no effect, ...). Port (spec 08, slice K2): the message is
+    /// read for display, so the locale pack's label of it is shown ([`crate::locale::shown`]).
     pub async fn say(&self, fmt: u32, ptr: u32) {
         let msg = pointed_string(self.io, A4.wrapping_sub(ptr));
+        let msg = crate::locale::shown(&self.state.borrow(), msg);
         self.print(fmt, &[Arg::Str(&msg)]).await;
     }
 

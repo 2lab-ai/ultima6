@@ -56,6 +56,54 @@ const MSG_SOUND_OFF: u32 = 0x7271;
 /// Pointer table of the command names, 4 bytes per command code (A4-0x7c8e + 4 code).
 const COMMAND_NAMES: u32 = 0x7c8e;
 
+/// Port-only (spec 08, slice K2): the strings the loop passes to `printf` as its format, for the
+/// locale layer's catalogue ([`crate::locale::strings`]).
+pub(crate) const PRINTED: &[u32] = &[
+    FMT_PROMPT,
+    FMT_KEY_ECHO,
+    FMT_NAME_DASH,
+    MSG_RESTORE,
+    MSG_HELP,
+    MSG_ON,
+    MSG_OFF,
+    MSG_BANG,
+    FMT_COORDS,
+    FMT_REPROMPT,
+    A4.wrapping_sub(MSG_WHAT),
+    A4.wrapping_sub(MSG_PARTY_MODE),
+    A4.wrapping_sub(MSG_PASS),
+    A4.wrapping_sub(MSG_ABOARD),
+    A4.wrapping_sub(MSG_EXIT),
+    A4.wrapping_sub(MSG_SAVE),
+    A4.wrapping_sub(MSG_SOLO),
+    A4.wrapping_sub(MSG_FAILS),
+    A4.wrapping_sub(MSG_NOT_ALL_HERE),
+    A4.wrapping_sub(MSG_NOT_IN_COMBAT),
+    A4.wrapping_sub(MSG_NOT_SOLO),
+    A4.wrapping_sub(MSG_BEGIN_COMBAT),
+    A4.wrapping_sub(MSG_BREAK_COMBAT),
+    A4.wrapping_sub(MSG_VERSION),
+    A4.wrapping_sub(MSG_SOUND_ON),
+    A4.wrapping_sub(MSG_SOUND_OFF),
+];
+
+/// Port-only (spec 08, slice K2): the pointers of the command names [`print_command`] shows
+/// before their dash (Cast, Talk, Look, Get, Drop, Move, Use), labels of the catalogue.
+pub(crate) const LABELS: &[u32] = &[
+    name_pointer(CAST),
+    name_pointer(TALK),
+    name_pointer(0x84),
+    name_pointer(0x85),
+    name_pointer(0x86),
+    name_pointer(0x87),
+    name_pointer(0x88),
+];
+
+/// The image address of the pointer to command `code`'s name.
+const fn name_pointer(code: u16) -> u32 {
+    A4.wrapping_sub(COMMAND_NAMES).wrapping_add(4 * code as u32)
+}
+
 /// Command codes.
 const WALK: u16 = 0x80;
 const ATTACK: u16 = 0x81;
@@ -90,8 +138,12 @@ async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) 
 
 /// The command's name from the table A4-0x7c8e through the format at 0x101f48 (the name, then
 /// a dash).
+///
+/// Port (spec 08, slice K2): the name is read for display, so the locale pack's label of it is
+/// shown in its place ([`crate::locale::shown`]).
 async fn print_command(state: &RefCell<State>, io: &Io, code: u16) {
-    let name = pointed_string(io, A4.wrapping_sub(COMMAND_NAMES) + 4 * u32::from(code));
+    let name = pointed_string(io, name_pointer(code));
+    let name = crate::locale::shown(&state.borrow(), name);
     print_at(state, io, FMT_NAME_DASH, &[Arg::Str(&name)]).await;
 }
 

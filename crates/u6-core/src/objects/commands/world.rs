@@ -36,6 +36,32 @@ const S_MAGIC_LOCKED: u32 = 0x0012_882a;
 const S_OPENED: u32 = 0x0012_883e;
 const S_UNLOCKED: u32 = 0x0012_8848;
 const S_LOCKED_PLAIN: u32 = 0x0012_8854;
+
+/// Port-only (spec 08, slice K2): the strings this module passes to `printf` as its format,
+/// for the locale layer's catalogue ([`crate::locale::strings`]).
+/// The articles (`a `, `an `, `the `) are left out: they make object names, which stay English.
+pub(super) const PRINTED: &[u32] = &[
+    S_LINE,
+    S_COUNT,
+    S_SEARCHING,
+    S_SECRET_DOOR,
+    S_COMMA,
+    S_AND,
+    S_NOTHING_DOT,
+    S_DOT,
+    S_ACID,
+    S_POISON,
+    S_BOMB,
+    S_GAS,
+    S_CLOSED,
+    S_OPEN_DOOR_LOCK,
+    S_LOCKED,
+    S_MAGIC_LOCKED,
+    S_OPENED,
+    S_UNLOCKED,
+    S_LOCKED_PLAIN,
+    S_DOOR_BLOWN,
+];
 /// Original: A4-0x6c64 (pointer to the no-effect message in the message table at A4-0x6c6c)
 pub(super) const P_NO_EFFECT: i32 = -0x6c64;
 
@@ -60,9 +86,10 @@ fn line(s: &mut State, addr: u32) {
     queue_at(s, addr, Vec::new());
 }
 
-/// `printf("%s\n", A4-0x6c64)`: the no-effect message.
+/// `printf("%s\n", A4-0x6c64)`: the no-effect message (shown as the locale pack has it,
+/// [`super::get::message`]).
 fn no_effect(s: &mut State) {
-    let msg = s.objcmds.data.pointed(super::GameData::a4(P_NO_EFFECT));
+    let msg = super::get::message(s, P_NO_EFFECT);
     queue_at(s, S_LINE, vec![PrintArg::Str(msg)]);
 }
 

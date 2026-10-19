@@ -16,7 +16,9 @@
 //!   FNV-1a 64, as the catalog has it), `refused` (the disassembler's reason, or `null`), the
 //!   `actors` that use the script, their `portraits`, the `name` and `locale`,
 //!   `narration.look`, `speech.greeting`, the `turns`, the actors' `traits` (numbers only) and
-//!   the script's table `strings`.
+//!   the script's table `strings` (each with, since spec 08's slice K2 and only when there is one,
+//!   the `slots` an `a6` copies it into, their `capacity` and the `inner` addresses an op reads
+//!   it from: optional fields, so a bundle without them reads as before).
 //! - A [`Turn`] is an input op (`input`, `null` for keyword blocks before any) with the segments
 //!   that follow it outside a keyword block and its `topics`: each keyword block, with its
 //!   `keywords`, what it `requires` and its `answer`.
@@ -351,6 +353,18 @@ pub struct TableString {
     pub table: u32,
     pub index: u32,
     pub text: String,
+    /// Spec 08 (slice K2), optional (absent when empty): the string slots an `a6` copies it
+    /// into, as the catalog has them ([`super::catalog::StringUnit::slots`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<u8>,
+    /// Optional (absent when `None`): the most bytes every one of those slots holds
+    /// ([`super::catalog::StringUnit::capacity`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<u32>,
+    /// Optional (absent when empty): the script addresses inside the string an op reads from
+    /// ([`super::catalog::StringUnit::inner`]; such a read prints the string's rest).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inner: Vec<u32>,
 }
 
 /// An actor that uses a script, with what the bundle says of it.
@@ -521,6 +535,9 @@ impl Bundle {
                     table: s.table,
                     index: s.index,
                     text: s.unit.text.clone(),
+                    slots: s.slots.clone(),
+                    capacity: s.capacity,
+                    inner: s.inner.clone(),
                 })
                 .collect(),
         };

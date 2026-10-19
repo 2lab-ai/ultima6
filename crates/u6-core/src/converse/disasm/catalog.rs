@@ -377,7 +377,7 @@ impl Catalog {
 
 /// `u64` as 16 lower-case hex digits (a JSON number would lose bits in JavaScript); nothing
 /// else reads back. The NPC bundles write the script's hash the same way ([`super::bundle`]).
-pub(super) mod hex64 {
+pub(crate) mod hex64 {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {

@@ -110,8 +110,15 @@
 // English, with one line pointing at tools/i18n. Dropping or forgetting the pack, or switching
 // the language at the chooser's OK, restarts the game from the kept files (the save untouched)
 // when what it shows changes. "Forget the Korean pack" removes it from the page and the browser.
+// Slice K2: the pack may also hold table strings and the game's own messages (the command
+// prompts and their results, a conversation's frame, the forms of address), which then show in
+// Korean too (counts only: data-locale-pack-strings on the body, data-locale-table-hits/misses
+// and data-locale-text-hits/misses on the canvas). The "Game strings" button reads, in wasm
+// (GameStrings), the messages of the kept game file the engine catalogues and downloads them as
+// one u6.string-bundle/1 JSON file for tools/i18n (never uploaded, kept, logged or shown: the
+// status line gives their count).
 import init, {
-  Game, HdPack, LocalePack, NpcBundles, PackProbe, budget_ms, input_too_large, max_input_bytes,
+  Game, GameStrings, HdPack, LocalePack, NpcBundles, PackProbe, budget_ms, input_too_large, max_input_bytes,
   max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
 } from './pkg/u6_web.js';
 import {
@@ -161,6 +168,7 @@ const voiceDecline = document.getElementById('voice-decline');
 const forgetVoices = document.getElementById('forget-voices');
 const npcBundles = document.getElementById('npc-bundles');
 const forgetNpcBundles = document.getElementById('forget-npc-bundles');
+const gameStrings = document.getElementById('game-strings');
 
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
 
@@ -183,9 +191,11 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // where the model runs once ready (gpu, cpu), data-voice-pack = the voices of the voice pack
 // loaded (0 without one), and the player's counts and timings (reflectVoice), never what is
 // said; data-locale-pack = the lines and conversations of the Korean pack loaded (runs,scripts)
-// or none, and on the canvas data-locale = what the game on screen took of it (on, mismatch,
-// off) with data-locale-hits / data-locale-misses = the runs it put from it and those it did
-// not have (counts only).
+// or none (data-locale-pack-strings = its table strings and game strings), and on the canvas
+// data-locale = what the game on screen took of it (on, mismatch, off) with data-locale-hits /
+// data-locale-misses = the runs it put from it and those it did not have, and the same for its
+// table strings (data-locale-table-hits / -misses) and game strings (data-locale-text-hits /
+// -misses) (counts only).
 function reflect(state) {
   if (state) document.body.dataset.state = state;
   const live = game && !crashed;
@@ -711,6 +721,7 @@ const wantLocale = () => lang === 'ko' && koPack !== null;
 // The pack's counts on the body, the game's on the canvas, the notes on the game's text.
 function reflectLocale() {
   document.body.dataset.localePack = koPack ? koPack.counts().join(',') : 'none';
+  document.body.dataset.localePackStrings = koPack ? koPack.string_counts().join(',') : 'none';
   const live = game && !crashed;
   canvas.dataset.locale = live ? localeShown : 'off';
   localeNote.hidden = lang !== 'ko' || koPack !== null;
@@ -721,17 +732,22 @@ function reflectLocale() {
 // The game's runs put from the pack and those it did not have (counts only), each frame.
 function reflectLocaleCounts() {
   if (localeShown === 'off') return;
-  const [, hits, misses] = game.locale_counts();
+  const [, hits, misses, tableHits, tableMisses, textHits, textMisses] = game.locale_counts();
   canvas.dataset.localeHits = String(hits);
   canvas.dataset.localeMisses = String(misses);
+  canvas.dataset.localeTableHits = String(tableHits);
+  canvas.dataset.localeTableMisses = String(tableMisses);
+  canvas.dataset.localeTextHits = String(textHits);
+  canvas.dataset.localeTextMisses = String(textMisses);
 }
 
 // `next`, just started, takes the pack when the page wants it (before its first step).
 function attachLocale(next) {
   localeShown = 'off';
   localeWhy = '';
-  canvas.dataset.localeHits = '0';
-  canvas.dataset.localeMisses = '0';
+  for (const k of ['localeHits', 'localeMisses', 'localeTableHits', 'localeTableMisses', 'localeTextHits', 'localeTextMisses']) {
+    canvas.dataset[k] = '0';
+  }
   if (!wantLocale()) return;
   localeWhy = next.set_locale(koPack);
   localeShown = localeWhy ? 'mismatch' : 'on';
@@ -741,7 +757,7 @@ function attachLocale(next) {
 function localeLine() {
   if (localeShown === 'on') {
     const [runs, scripts] = koPack.counts();
-    return `\n${t('koPackOn', runs, scripts)}`;
+    return `\n${t('koPackOn', runs, scripts, ...koPack.string_counts())}`;
   }
   return localeShown === 'mismatch' ? `\n${t('koPackMismatch', localeWhy)}` : '';
 }
@@ -795,7 +811,7 @@ async function loadLocalePackFile(file) {
     note = t('koPackNotKept', old);
   }
   const [runs, scripts] = koPack.counts();
-  await restartForLocale(`${t('koPackLoaded', runs, scripts)}${note}`, true);
+  await restartForLocale(`${t('koPackLoaded', runs, scripts, ...koPack.string_counts())}${note}`, true);
 }
 
 // The pack kept from the last visit, loaded before the first game starts. One that no longer
@@ -1638,6 +1654,40 @@ async function exportNpcBundles() {
   say(stored ? 'npcExported' : 'npcNotKept', bundles.length, NPC_FILE);
 }
 
+// --- game strings (spec 08, slice K2) ------------------------------------------------------
+
+const STRINGS_FILE = 'ultima6-strings.json';
+
+// "Game strings": the catalogued messages of the kept game file, read in wasm and downloaded
+// as one JSON object (u6.string-bundle/1); nothing is kept, logged or shown but its count.
+async function exportGameStrings() {
+  needEngine();
+  let kept = await loadFiles();
+  if (!kept || kept.length === 0) {
+    say('stringsNoFiles');
+    return;
+  }
+  const exporter = new GameStrings();
+  let json;
+  try {
+    for (let i = 0; i < kept.length; i += 1) {
+      exporter.add(kept[i].path, kept[i].bytes);
+      kept[i] = null;
+    }
+    kept = null;
+    json = exporter.export();
+  } catch (err) {
+    say('stringsFailed', message(err));
+    return;
+  } finally {
+    exporter.free();
+  }
+  const n = JSON.parse(json).strings.length;
+  download(STRINGS_FILE, json);
+  json = null;
+  say('stringsExported', n, STRINGS_FILE);
+}
+
 async function forgetNpc() {
   await forgetBundles();
   say('npcForgot');
@@ -2044,6 +2094,10 @@ forgetNpcBundles.addEventListener('click', () => {
   if (queued > 0) say('forgetNpcLater');
   enqueue('opForgetNpc', forgetNpc);
 });
+gameStrings.addEventListener('click', () => {
+  if (queued > 0) say('waiting');
+  enqueue('opGameStrings', exportGameStrings);
+});
 restart.addEventListener('click', () => {
   try {
     sessionStorage.setItem(FOCUS_AFTER_RELOAD, '1');
@@ -2093,6 +2147,7 @@ enqueue('opEngine', async () => {
   forgetKo.disabled = false;
   npcBundles.disabled = false;
   forgetNpcBundles.disabled = false;
+  gameStrings.disabled = false;
   reflect('idle');
 });
 // The picker opens once the kept files are back, so a choice never races the restore (a drop

@@ -4956,6 +4956,176 @@ test('Korean pack in a game (the user\'s disks, a synthetic conversation): in �
   }
 }, { needs: h.haveHfes });
 
+// --- the Korean pack's table strings and game strings (spec 08, slice K2) ---------------
+
+const KO_TABLE = 'a stone of tests';
+const KO_TABLE_KO = '시험 돌';
+// The made-up syllable every game string of the pack shows (none of the fixture's lines has it).
+const KO_WORD = '뷁';
+
+// `en` with every `%` directive and every other escape kept in order, the line breaks at its ends
+// kept, and the rest one made-up `word`.
+function madeUp(en, word) {
+  const lead = /^\n*/.exec(en)[0];
+  const trail = /\n*$/.exec(en.slice(lead.length))[0];
+  const body = en.slice(lead.length, en.length - trail.length);
+  let kept = '';
+  for (let i = 0; i < body.length; i += 1) {
+    const c = body[i];
+    if (c === '%') {
+      const d = /^%(?:[1-9][0-9]*\$)?[-0]*[0-9]*[\s\S]?/.exec(body.slice(i))[0];
+      kept += d;
+      i += d.length - 1;
+    } else if ('$#^'.includes(c)) {
+      kept += body.slice(i, i + 2);
+      i += 1;
+    } else if ('*&`/\\<>'.includes(c)) kept += c;
+  }
+  return lead + word + kept + trail;
+}
+
+// The K1 fixture with a table string: every item of the synthetic converse.a is `ff 02 "Zed" f1
+// <look> f2 <greeting> b5 d2 <table> b1 b6 <table string> 0` (op b5 prints the table's first
+// string after the greeting); the pack: each script's two runs and its table string in Korean,
+// and every game string of `exported` (the page's own export, read at test time) as the made-up
+// syllable within the tool's gates (counted when one fails them and is left out).
+async function koStringsFixture(exported) {
+  const { fingerprint, hash64, hex64, latin1, packBytes, stringGate } = await import('../i18n/translate.mjs');
+  const head = [0xff, 0x02, ...latin1('Zed'), 0xf1, ...latin1(KO_LOOK), 0xf2, ...latin1(KO_GREET)];
+  const tableAt = head.length + 8;
+  const script = [...head, 0xb5, 0xd2, tableAt & 255, tableAt >> 8, 0, 0, 0xb1, 0xb6, ...latin1(KO_TABLE), 0];
+  const items = 0x63;
+  const table = [];
+  const body = [];
+  for (let i = 0; i < items; i += 1) {
+    const at = i === 0 ? 0 : items * 4 + body.length;
+    if (i > 0) body.push(0, 0, 0, 0, ...script);
+    table.push(at & 255, (at >> 8) & 255, (at >> 16) & 255, 0);
+  }
+  const look = 6;
+  const greet = look + KO_LOOK.length + 1;
+  const runs = [];
+  const tables = [];
+  const named = [];
+  for (let item = 1; item < items; item += 1) {
+    named.push({ archive: 'a', item, hash: hex64(hash64(script)) });
+    runs.push({ archive: 'a', item, offset: look, len: KO_LOOK.length, hash: hex64(hash64(latin1(KO_LOOK))), text: KO_LOOK_KO });
+    runs.push({ archive: 'a', item, offset: greet, len: KO_GREET.length, hash: hex64(hash64(latin1(KO_GREET))), text: KO_GREET_KO });
+    tables.push({ archive: 'a', item, offset: tableAt, len: KO_TABLE.length, hash: hex64(hash64(latin1(KO_TABLE))), capacity: null, text: KO_TABLE_KO });
+  }
+  const strings = [];
+  let refused = 0;
+  for (const e of exported.strings) {
+    const ko = madeUp(e.text, KO_WORD);
+    if (stringGate(e.text, ko) === null) strings.push({ hash: e.hash, len: e.len, text: ko });
+    else refused += 1;
+  }
+  const pack = [...packBytes({ base: fingerprint(named), runs, tables, strings })];
+  return { archive: [...table, ...body], pack, runs: runs.length, scripts: items - 1, tables: tables.length, strings: strings.length, refused };
+}
+
+const stringCounts = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen').dataset;
+  return {
+    pack: document.body.dataset.localePackStrings,
+    tableHits: Number(c.localeTableHits ?? 0), tableMisses: Number(c.localeTableMisses ?? 0),
+    textHits: Number(c.localeTextHits ?? 0), textMisses: Number(c.localeTextMisses ?? 0),
+  };
+});
+
+test('Korean pack with game strings in a game (the user\'s disks, a synthetic conversation with a table string): Game strings downloads the catalogued strings of the kept game file as one u6.string-bundle/1 file, the status line counts only; a pack made at test time from that export (every string the made-up syllable within the tool\'s gates) and the test\'s conversation shows the syllable in the message window at a command key and the table string\'s Korean in the conversation; Forget the Korean pack: English again; no string reaches the console, the page\'s data or text', async (env) => {
+  const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  const words = consoleText(page);
+  await h.load(page, env);
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  const before = await pageWords(page);
+  // The export: one file, counts only on the page.
+  const [download] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.click('#game-strings')]);
+  const exported = JSON.parse(await readFile(await download.path(), 'utf8'));
+  await h.waitSettled(page);
+  assert.equal(download.suggestedFilename(), 'ultima6-strings.json');
+  assert.equal(exported.format, 'u6.string-bundle/1');
+  assert.ok(exported.strings.length > 0, 'strings');
+  assert.ok(exported.strings.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len >= 3), 'each keyed by its hash');
+  assert.equal((await h.state(page)).status, ko.stringsExported(exported.strings.length, 'ultima6-strings.json'), 'the line, counts only');
+  const fx = await koStringsFixture(exported);
+  assert.ok(fx.strings > 0 && fx.refused < fx.strings, `strings kept ${fx.strings}, refused by the gates ${fx.refused}`);
+  // The test's converse.a in place of the user's, then the pack: the game restarts with it.
+  assert.equal(await h.replaceKept(page, 'converse.a', fx.archive), 1, 'one archive replaced');
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: fx.pack }]);
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  let shown = await localeShown(page);
+  assert.deepEqual([shown.pack, shown.locale], [`${fx.runs},${fx.scripts}`, 'on'], 'the pack on the game');
+  assert.equal((await stringCounts(page)).pack, `${fx.tables},${fx.strings}`, 'its strings, counted');
+  assert.ok((await h.state(page)).status.includes(ko.koPackOn(fx.runs, fx.scripts, fx.tables, fx.strings)), 'its line, counts only');
+  const word = await hangulGlyphs(KO_WORD);
+  // A command key: its name and the loop's lines from the pack.
+  await page.focus('#screen');
+  await page.keyboard.press('l');
+  await h.waitTaken(page);
+  let cells = await cellsShown(page, word);
+  assert.equal(cells.found.size, 1, 'the made-up syllable in a cell of the message window');
+  // The cross-hair's own cell (the leader): his portrait, closed by a key; then the prompt.
+  await page.keyboard.press('Enter');
+  await h.waitTicks(page, 90);
+  await page.keyboard.press('Space');
+  await h.waitPrompt(page);
+  // The conversation: its runs and its table string from the pack.
+  await page.keyboard.press('t');
+  await h.waitTaken(page);
+  await page.keyboard.press('2');
+  await h.waitTaken(page);
+  await h.waitPrompt(page);
+  const table = await hangulGlyphs(KO_TABLE_KO);
+  cells = await cellsShown(page, table);
+  assert.equal(cells.found.size, table.size, 'every syllable of the table string in the window');
+  const counts = await stringCounts(page);
+  assert.ok(counts.tableHits >= 1 && counts.tableMisses === 0, 'the table string from the pack, none missed');
+  assert.ok(counts.textHits > 0, 'game strings from the pack');
+  // Forget the Korean pack: the game restarts in English.
+  await page.click('#forget-ko');
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  shown = await localeShown(page);
+  assert.deepEqual([shown.pack, shown.locale], ['none', 'off'], 'forgotten: English');
+  assert.equal((await stringCounts(page)).pack, 'none');
+  await page.focus('#screen');
+  await page.keyboard.press('l');
+  await h.waitTaken(page);
+  cells = await cellsShown(page, word);
+  assert.ok(cells.found.size === 0 && cells.inked > 0, 'the command in English: no made-up syllable');
+  await page.keyboard.press('Enter');
+  await h.waitTicks(page, 90);
+  await page.keyboard.press('Space');
+  await h.waitPrompt(page);
+  await page.keyboard.press('t');
+  await h.waitTaken(page);
+  await page.keyboard.press('2');
+  await h.waitTaken(page);
+  // The English is longer: the window fills and waits at its more prompt, the table string shown.
+  await h.waitTicks(page, 300);
+  cells = await cellsShown(page, table);
+  assert.ok(cells.found.size === 0 && cells.inked > 0, 'the conversation in English: no syllable of the table string');
+  await page.keyboard.press('Space');
+  await h.waitPrompt(page);
+  const where = await pageWords(page);
+  // A game string of a few common words can be the page's own text too: only one the page did not
+  // show before the export counts.
+  const long = exported.strings.map((e) => e.text.trim()).filter((t) => t.length >= 8 && !before.includes(t));
+  for (const w of [KO_SENTINEL, KO_TABLE, KO_TABLE_KO, ...long]) {
+    assert.ok(!where.includes(w), 'no string in the page\'s data, text or storage');
+    assert.ok(!words.some((m) => m.includes(w)), 'nor in the console');
+  }
+  assert.ok(!where.includes(KO_WORD), 'nor the pack\'s text');
+}, { needs: h.haveHfes });
+
 const filter = process.argv[2];
 const env = await h.setup();
 let failed = 0;

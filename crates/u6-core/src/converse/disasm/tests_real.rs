@@ -697,7 +697,7 @@ type Seen = Vec<(u64, u64)>;
 
 /// `talk_through`'s conversation with `npc`, recording what the player sees at every tick:
 /// whether it ended, the hashes, and the locale layer's counts (hits, misses) after it.
-fn talk_seen(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool, Seen, (u32, u32)) {
+fn talk_seen(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool, Seen, [u32; 6]) {
     use super::catalog::hash64;
     let you_say = base.converse.text.as_ref().quiet().get(Msg::YouSay);
     let prompt: Vec<u16> = you_say.trim_ascii().iter().map(|&b| u16::from(b)).collect();
@@ -721,7 +721,8 @@ fn talk_seen(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool, Se
     };
     let counts = |e: &Engine| {
         let l = &e.state().locale;
-        (l.hits, l.misses)
+        let ([th, tm], [xh, xm]) = (l.tables.get(), l.texts.get());
+        [l.hits, l.misses, th, tm, xh, xm]
     };
     let (mut sent, mut tries) = (0, 0);
     for _ in 0..ROUNDS {
@@ -764,48 +765,23 @@ fn talk_seen(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool, Se
     (e.finished(), seen, c)
 }
 
-/// Spec 08 Order 3 / Acceptance 5, for this slice's part (the conversation runs): the identity
-/// pack, built at test time from the owner's files (every run of the catalog, translated as
-/// itself, declaring English grammar), written as a pack file and read back through the pack
-/// reader, checked against the files and installed (`wide` on): the conversations of the
-/// cross-check (name, job and the goodbye with the 40 actors nearest the leader, and the
-/// greeter) show at every tick the frame and the scroll they show without it, and every run
-/// they start is one of the pack's (0 misses). Prints counts and pass/fail only.
+/// Spec 08 Order 3 / Acceptance 5, for the conversation (slices K1 and K2): the identity pack
+/// built at test time from the owner's files (every run and every table string of the catalog,
+/// and every executable string the engine catalogues, each translated as itself, declaring
+/// English grammar; `crate::locale::identity`), written as a pack file and read back through
+/// the pack reader, checked against the files and installed (`wide` on): the conversations of
+/// the cross-check (name, job and the goodbye with the 40 actors nearest the leader, and the
+/// greeter) show at every tick the frame and the scroll they show without it, and every run,
+/// table string and catalogued executable string they show is one of the pack's (0 misses).
+/// Prints counts and pass/fail only.
 #[test]
 fn the_identity_pack_shows_the_real_conversations_exactly_as_english() {
-    use std::rc::Rc;
-
-    use crate::locale::{self, Pack, RunText, fingerprint};
-    use crate::ui::Language;
+    use crate::locale;
     let Some(files) = files() else { return };
-    let all = scripts(&files);
-    let catalog = Catalog::build(all.iter().map(|(l, i, b)| (*l, *i, b.as_slice())));
-    let (mut runs, mut named) = (Vec::new(), Vec::new());
-    for s in &catalog.scripts {
-        if s.runs.is_empty() {
-            continue;
-        }
-        let letter = s.archive as u8;
-        named.push((letter, s.item, s.hash));
-        for r in &s.runs {
-            let text: Vec<u8> = r.unit.text.chars().map(|c| c as u8).collect();
-            runs.push((
-                (letter, s.item, r.unit.offset),
-                RunText {
-                    len: r.unit.len,
-                    hash: r.unit.hash,
-                    text,
-                },
-            ));
-        }
-    }
-    let made = Pack::new(Language::English, "identity/1", fingerprint(named), runs).quiet();
-    let bytes = made.to_bytes();
-    let pack = Pack::parse(&bytes).quiet();
-    assert!(pack == made, "the pack reads back from its file");
+    let made = locale::identity(&files).quiet();
     let base = with_text(&files);
     let mut with = base.clone();
-    locale::install(&mut with, &files, Rc::new(pack), None).quiet();
+    locale::install(&mut with, &files, made.clone(), None).quiet();
     assert!(with.ui.text.wide, "wide on");
     // The actors of the cross-check.
     let leader = base.leader_position().quiet();
@@ -833,7 +809,7 @@ fn the_identity_pack_shows_the_real_conversations_exactly_as_english() {
     });
     npcs.extend(greeter);
     let (mut talked, mut ticks, mut differ, mut ended) = (0, 0, 0, 0);
-    let (mut hits, mut misses) = (0, 0);
+    let mut counts = [0u32; 6];
     for &npc in &npcs {
         let mut s = base.clone();
         if name_from_script(&mut s, &files, npc).0.is_empty() {
@@ -841,7 +817,7 @@ fn the_identity_pack_shows_the_real_conversations_exactly_as_english() {
         }
         let lines = ["name", "job", BYE, BYE, BYE];
         let (done_en, en, _) = talk_seen(&base, &files, npc, &lines);
-        let (done_id, id, (h, m)) = talk_seen(&with, &files, npc, &lines);
+        let (done_id, id, c) = talk_seen(&with, &files, npc, &lines);
         talked += 1;
         ticks += en.len();
         ended += usize::from(done_en && done_id);
@@ -849,41 +825,76 @@ fn the_identity_pack_shows_the_real_conversations_exactly_as_english() {
             differ += 1;
             println!("a conversation differs with the identity pack");
         }
-        hits += h;
-        misses += m;
+        for (sum, n) in counts.iter_mut().zip(c) {
+            *sum += n;
+        }
     }
+    let [
+        hits,
+        misses,
+        table_hits,
+        table_misses,
+        text_hits,
+        text_misses,
+    ] = counts;
     println!(
-        "identity pack: runs {}, scripts {}; conversations {talked} (ended {ended}), ticks compared {ticks}, differing conversations {differ}; runs put from the pack {hits}, misses {misses}",
+        "identity pack: runs {}, table strings {}, game strings {}, scripts {}; conversations {talked} (ended {ended}), ticks compared {ticks}, differing conversations {differ}; from the pack: runs {hits}, table strings {table_hits}, game strings {text_hits}; misses: runs {misses}, table strings {table_misses}, game strings {text_misses}",
         made.runs(),
+        made.tables(),
+        made.strings(),
         made.scripts(),
     );
-    assert!(talked > 0 && hits > 0);
+    assert!(talked > 0 && hits > 0 && text_hits > 0);
     assert_eq!(differ, 0, "every frame and scroll as in English");
-    assert_eq!(misses, 0, "every run started is in the pack");
+    assert_eq!(
+        [misses, table_misses, text_misses],
+        [0, 0, 0],
+        "every unit shown is in the pack"
+    );
     println!("identity pack frames and scroll identical to English: pass; misses 0: pass");
 }
 
-/// Spec 08 (slice K1): the pack the translation tool makes from the owner's NPC bundles checks
-/// against his files. Keyed as `tools/i18n/translate.mjs` keys it (each text segment's key, its
-/// text one byte per character for the length and the hash, the fingerprint over each script's
-/// bundle `hash`), every run of every bundle that has one goes into one pack of English grammar
-/// (each translated as itself); written as a file, read back and installed on the files the
-/// bundles came from. Prints counts and pass/fail only.
+/// Spec 08 (slices K1 and K2): the pack the translation tool makes from the owner's NPC bundles
+/// checks against his files. Keyed as `tools/i18n/translate.mjs` keys it (each text segment's
+/// key, its text one byte per character for the length and the hash, the fingerprint over each
+/// script's bundle `hash`; each table string's key and text the same way, with its `capacity`,
+/// an empty one or one an op reads from inside left out, `tablesOf`), every run and table string
+/// of every bundle that has one goes into one pack of English grammar (each translated as
+/// itself; a capacity its own English passes is not written, as the tool's gate would refuse
+/// it); written as a file, read back and installed on the files the bundles came from. Prints
+/// counts and pass/fail only.
 #[test]
 fn a_pack_keyed_from_the_owners_bundles_checks_against_his_files() {
     use std::collections::BTreeMap;
     use std::rc::Rc;
 
     use super::bundle::{self, Segment};
-    use crate::locale::{self, Pack, RunText, fingerprint};
+    use crate::locale::{self, Pack, RunText, TableText, fingerprint};
     use crate::ui::Language;
     let Some(files) = files() else { return };
     let bundles = bundle::export(&files).quiet();
     let mut runs: BTreeMap<(u8, u16, u32), RunText> = BTreeMap::new();
+    let mut tables: BTreeMap<(u8, u16, u32), TableText> = BTreeMap::new();
     let mut named = Vec::new();
     for b in &bundles {
         let letter = b.archive as u8;
-        let before = runs.len();
+        let before = runs.len() + tables.len();
+        for t in b
+            .strings
+            .iter()
+            .filter(|t| !t.text.is_empty() && t.inner.is_empty())
+        {
+            let bytes: Vec<u8> = t.text.chars().map(|c| c as u8).collect();
+            tables.insert(
+                (letter, b.item, t.key.2),
+                TableText {
+                    len: bytes.len() as u32,
+                    hash: super::catalog::hash64(&bytes),
+                    capacity: t.capacity.filter(|&c| bytes.len() <= c as usize),
+                    text: bytes,
+                },
+            );
+        }
         for s in b.segments() {
             let Segment::Text(t) = s else { continue };
             let bytes: Vec<u8> = t.text.chars().map(|c| c as u8).collect();
@@ -896,21 +907,25 @@ fn a_pack_keyed_from_the_owners_bundles_checks_against_his_files() {
                 },
             );
         }
-        if runs.len() > before {
+        if runs.len() + tables.len() > before {
             named.push((letter, b.item, b.hash));
         }
     }
-    let pack = Pack::new(Language::English, "bundles/1", fingerprint(named), runs).quiet();
+    let pack = Pack::new(Language::English, "bundles/1", fingerprint(named), runs)
+        .quiet()
+        .with_tables(tables)
+        .quiet();
     let read = Pack::parse(&pack.to_bytes()).quiet();
     let mut s = with_text(&files);
     let checked = locale::install(&mut s, &files, Rc::new(read), None);
     println!(
-        "pack from the bundles: runs {}, scripts {}; checks against the files: {}",
+        "pack from the bundles: runs {}, table strings {}, scripts {}; checks against the files: {}",
         pack.runs(),
+        pack.tables(),
         pack.scripts(),
         if checked.is_ok() { "pass" } else { "fail" }
     );
-    assert!(pack.runs() > 0);
+    assert!(pack.runs() > 0 && pack.tables() > 0);
     assert!(checked.is_ok(), "the pack keyed from the bundles checks");
 }
 

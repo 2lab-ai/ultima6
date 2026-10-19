@@ -40,6 +40,38 @@ const S_DOT: u32 = 0x0012_8440;
 const S_BLANK_LINES: u32 = 0x0012_83f0;
 const S_BOOK_DAT: u32 = 0x0012_83f4;
 
+/// Port-only (spec 08, slice K2): the strings this module passes to `printf` as its format,
+/// for the locale layer's catalogue ([`crate::locale::strings`]).
+/// The book file's name (read by logic, not printed) is left out.
+pub(super) const PRINTED: &[u32] = &[
+    S_THOU_DOST_SEE,
+    S_DARKNESS,
+    S_NOTHING,
+    S_SEARCH_NOTHING,
+    S_IT_WEIGHS,
+    S_THEY_WEIGH,
+    S_STONES,
+    S_IT,
+    S_COMMA,
+    S_AND,
+    S_DAMAGE,
+    S_ABSORB,
+    S_COLON,
+    S_NAME_DASH,
+    S_WORD,
+    S_SPACE_WORD,
+    S_INGREDIENTS,
+    S_NONE,
+    S_REAGENT,
+    S_TIME_IS,
+    S_MIDNIGHT,
+    S_AM,
+    S_NOON,
+    S_PM,
+    S_DOT,
+    S_BLANK_LINES,
+];
+
 /// Original: A4-0x6632 (5 words: the book types), A4-0x6628 (5 words: the sign types)
 const BOOK_TYPES: i32 = -0x6632;
 const SIGN_TYPES: i32 = -0x6628;

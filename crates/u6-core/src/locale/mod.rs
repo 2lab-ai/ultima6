@@ -45,13 +45,52 @@
 //! only, its hash); a mismatch refuses the whole pack and names the part kind only
 //! ([`Mismatch`]).
 //!
+//! **Slice K2: table strings and executable strings.** A pack may also hold two more maps (each
+//! left out of the file when empty, so a pack of runs only is K1's file byte for byte):
+//!
+//! ```text
+//!  "tables":[{"archive":"a","item":5,"offset":80,"len":4,"hash":"<16 hex>","capacity":99,"text":"..."}],
+//!  "strings":[{"hash":"<16 hex>","len":12,"text":"..."}]
+//! ```
+//!
+//! - **Table strings** are keyed (archive, item, string offset), with the source string's
+//!   length (up to its NUL) and hash, and for one an `a6` copies into a string slot the most
+//!   bytes that slot holds (`capacity`; the reader refuses a text longer than it). They are
+//!   checked with the runs, against the same fingerprint (`base.converse` is over the scripts
+//!   the runs and the table strings name). One hook in the table reader serves op `b5 d2` and
+//!   op `a6 d2` ([`table_at`]): the string it reads at its start, still the bytes the pack was
+//!   made from, is put (`b5`) or shown (`a6`: the slot keeps the English for logic, its shown
+//!   text is the pack's, [`crate::converse::vars`]) as the translation; a copy whose slot cannot
+//!   hold the translation stays English and is counted missed; a read that starts inside a
+//!   string (its rest) is not looked up.
+//! - **Executable strings** are keyed by [`hash64`] of their English bytes, with its length;
+//!   they need no fingerprint. Only a string the engine catalogues ([`strings::Catalogue`], read
+//!   from the user's `game` when the pack is installed) is ever looked up, only where game code
+//!   prints it ([`exe_string`]: `printf`'s format, `puts`, `put_raw_str`) or reads a label for
+//!   display ([`shown`]), and never on what an escape generates (`$n`, `#n`, `printf`'s `%s`):
+//!   logic keeps the English. A string under [`strings::MIN_BYTES`] is never substituted. At
+//!   install every pack string the catalogue has must hold the same `%` directives, in the same
+//!   order, as its English ([`strings::directives`]), else the pack is refused (the strings part).
+//!
+//! The counters ([`LocaleState`]) count catalogued units only: a table string read at its start
+//! or a catalogued executable string shown, put from the pack (a hit) or not (a miss).
+//!
 //! Rights (spec 08): a pack made from the owner's files holds his game text; it lives in
 //! `~/Games/ultima6/i18n/ko/` and his browser storage, never in the repository or under `site/`
 //! (`tests/no_locale_pack_in_repo.rs`).
 
 #[cfg(test)]
+mod identity;
+pub mod strings;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_strings;
 
+#[cfg(test)]
+pub(crate) use identity::identity;
+
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::rc::Rc;
@@ -81,6 +120,11 @@ pub const MAX_TEXT_BYTES: usize = 3 * SCRIPT_LEN;
 pub const MAX_TOOL_CHARS: usize = 64;
 /// The conversation archives a key may name (`converse.a`, `converse.b`).
 pub const ARCHIVES: [u8; 2] = [b'a', b'b'];
+/// The most table strings, and the most executable strings, a pack may hold.
+pub const MAX_STRINGS: usize = 1 << 16;
+/// The most bytes one executable string's translation may hold (three per byte of the longest
+/// string the game reads).
+pub const MAX_STRING_TEXT_BYTES: usize = 3 * strings::MAX_BYTES;
 
 /// A run's key: (archive letter, item, offset in the script).
 pub type RunKey = (u8, u16, u32);
@@ -96,17 +140,43 @@ pub struct RunText {
     pub text: Vec<u8>,
 }
 
-/// A pack's parts, as a mismatch names them (this slice has the conversation runs only).
+/// One table string's translation and what it was made from (slice K2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableText {
+    /// The source string's length in the script (its bytes up to the NUL).
+    pub len: u32,
+    /// [`hash64`] of those bytes.
+    pub hash: u64,
+    /// For a string an `a6` copies into a string slot: the most bytes that slot holds (the text
+    /// may not be longer).
+    pub capacity: Option<u32>,
+    /// The translation (UTF-8).
+    pub text: Vec<u8>,
+}
+
+/// One executable string's translation (slice K2), keyed by [`hash64`] of its English.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StringText {
+    /// The English's length in bytes.
+    pub len: u32,
+    /// The translation (UTF-8).
+    pub text: Vec<u8>,
+}
+
+/// A pack's parts, as a mismatch names them: the conversation part (its runs and table strings,
+/// under one fingerprint) and the executable strings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Converse,
+    Strings,
 }
 
 impl Part {
-    /// The part's name in the pack (`base.<name>`).
+    /// The part's name in the pack (`base.converse`; `strings`).
     pub fn name(self) -> &'static str {
         match self {
             Part::Converse => "converse",
+            Part::Strings => "strings",
         }
     }
 }
@@ -118,9 +188,12 @@ pub struct Pack {
     pub language: Language,
     /// The tool that made it (its name and version).
     pub tool: String,
-    /// The fingerprint of the scripts its converse map names ([`fingerprint`]).
+    /// The fingerprint of the scripts its converse map and its table strings name
+    /// ([`fingerprint`]).
     pub converse_base: u64,
     runs: BTreeMap<RunKey, RunText>,
+    tables: BTreeMap<RunKey, TableText>,
+    strings: BTreeMap<u64, StringText>,
 }
 
 /// Why a pack file is refused. Each is a fixed sentence (no value of the file).
@@ -150,6 +223,11 @@ pub enum PackError {
     /// A translation over [`MAX_TEXT_BYTES`], or with a character the game cannot show (only
     /// ASCII and Hangul syllables, no control character but the line feed).
     Text,
+    /// An executable string whose English is shorter than [`strings::MIN_BYTES`] or longer than
+    /// [`strings::MAX_BYTES`], or whose translation is over [`MAX_STRING_TEXT_BYTES`].
+    StringKey,
+    /// A table string's translation longer than the slot it is copied into holds.
+    Capacity,
 }
 
 impl fmt::Display for PackError {
@@ -166,6 +244,10 @@ impl fmt::Display for PackError {
             PackError::Key => "a line in it is keyed outside the conversation scripts",
             PackError::Duplicate => "it holds one line twice",
             PackError::Text => "a line in it holds a character the game cannot show",
+            PackError::StringKey => "a game string in it is not one the game prints",
+            PackError::Capacity => {
+                "a table string in it is longer than the place the game copies it to"
+            }
         })
     }
 }
@@ -180,6 +262,9 @@ impl fmt::Display for Mismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.part {
             Part::Converse => f.write_str("its conversation part was made from other game files"),
+            Part::Strings => {
+                f.write_str("its game strings part does not keep the game's format directives")
+            }
         }
     }
 }
@@ -192,6 +277,10 @@ struct PackJson {
     tool: String,
     base: BaseJson,
     converse: Vec<RunJson>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tables: Vec<TableJson>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    strings: Vec<StringJson>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -208,6 +297,27 @@ struct RunJson {
     offset: u32,
     len: u32,
     hash: String,
+    text: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TableJson {
+    archive: String,
+    item: u16,
+    offset: u32,
+    len: u32,
+    hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capacity: Option<u32>,
+    text: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StringJson {
+    hash: String,
+    len: u32,
     text: String,
 }
 
@@ -281,7 +391,63 @@ impl Pack {
             tool: tool.to_string(),
             converse_base,
             runs: map,
+            tables: BTreeMap::new(),
+            strings: BTreeMap::new(),
         })
+    }
+
+    /// The pack with `tables` (slice K2), checked as [`Pack::parse`] checks them: keys as the
+    /// runs', the text the game can show and no longer than its `capacity`, each key once.
+    pub fn with_tables(
+        mut self,
+        tables: impl IntoIterator<Item = (RunKey, TableText)>,
+    ) -> Result<Pack, PackError> {
+        for (key, t) in tables {
+            check_key(key, t.len)?;
+            let text = std::str::from_utf8(&t.text).map_err(|_| PackError::Text)?;
+            if !text_ok(text) {
+                return Err(PackError::Text);
+            }
+            if t.capacity.is_some_and(|c| t.text.len() > c as usize) {
+                return Err(PackError::Capacity);
+            }
+            if self.tables.insert(key, t).is_some() {
+                return Err(PackError::Duplicate);
+            }
+            if self.tables.len() > MAX_STRINGS {
+                return Err(PackError::TooManyRuns);
+            }
+        }
+        Ok(self)
+    }
+
+    /// The pack with the executable strings `strings` (slice K2), keyed by [`hash64`] of their
+    /// English, checked as [`Pack::parse`] checks them: an English the game prints
+    /// ([`strings::MIN_BYTES`]..=[`strings::MAX_BYTES`]), a text the game can show within
+    /// [`MAX_STRING_TEXT_BYTES`], each hash once.
+    pub fn with_strings(
+        mut self,
+        strings: impl IntoIterator<Item = (u64, StringText)>,
+    ) -> Result<Pack, PackError> {
+        for (hash, t) in strings {
+            let len = t.len as usize;
+            if !(strings::MIN_BYTES..=strings::MAX_BYTES).contains(&len)
+                || t.text.len() > MAX_STRING_TEXT_BYTES
+            {
+                return Err(PackError::StringKey);
+            }
+            let text = std::str::from_utf8(&t.text).map_err(|_| PackError::Text)?;
+            if !text_ok(text) {
+                return Err(PackError::Text);
+            }
+            if self.strings.insert(hash, t).is_some() {
+                return Err(PackError::Duplicate);
+            }
+            if self.strings.len() > MAX_STRINGS {
+                return Err(PackError::TooManyRuns);
+            }
+        }
+        Ok(self)
     }
 
     /// Reads a pack file (see the module doc). Nothing of it is kept unless all of it checks.
@@ -307,12 +473,12 @@ impl Pack {
         if json.converse.len() > MAX_RUNS {
             return Err(PackError::TooManyRuns);
         }
+        if json.tables.len() > MAX_STRINGS || json.strings.len() > MAX_STRINGS {
+            return Err(PackError::TooManyRuns);
+        }
         let mut runs = Vec::with_capacity(json.converse.len());
         for r in json.converse {
-            let archive = match r.archive.as_bytes() {
-                [l] if ARCHIVES.contains(l) => *l,
-                _ => return Err(PackError::Key),
-            };
+            let archive = archive_of(&r.archive)?;
             let hash = read_hex(&r.hash)?;
             runs.push((
                 (archive, r.item, r.offset),
@@ -323,7 +489,34 @@ impl Pack {
                 },
             ));
         }
-        Pack::new(language, &json.tool, converse_base, runs)
+        let mut tables = Vec::with_capacity(json.tables.len());
+        for t in json.tables {
+            let archive = archive_of(&t.archive)?;
+            let hash = read_hex(&t.hash)?;
+            tables.push((
+                (archive, t.item, t.offset),
+                TableText {
+                    len: t.len,
+                    hash,
+                    capacity: t.capacity,
+                    text: t.text.into_bytes(),
+                },
+            ));
+        }
+        let mut strings = Vec::with_capacity(json.strings.len());
+        for t in json.strings {
+            let hash = read_hex(&t.hash)?;
+            strings.push((
+                hash,
+                StringText {
+                    len: t.len,
+                    text: t.text.into_bytes(),
+                },
+            ));
+        }
+        Pack::new(language, &json.tool, converse_base, runs)?
+            .with_tables(tables)?
+            .with_strings(strings)
     }
 
     /// The pack file: [`MAGIC`], a line feed and the JSON object, runs in key order.
@@ -347,6 +540,28 @@ impl Pack {
                     text: String::from_utf8(r.text.clone()).expect("checked as UTF-8"),
                 })
                 .collect(),
+            tables: self
+                .tables
+                .iter()
+                .map(|(&(a, item, offset), t)| TableJson {
+                    archive: char::from(a).to_string(),
+                    item,
+                    offset,
+                    len: t.len,
+                    hash: hex(t.hash),
+                    capacity: t.capacity,
+                    text: String::from_utf8(t.text.clone()).expect("checked as UTF-8"),
+                })
+                .collect(),
+            strings: self
+                .strings
+                .iter()
+                .map(|(&hash, t)| StringJson {
+                    hash: hex(hash),
+                    len: t.len,
+                    text: String::from_utf8(t.text.clone()).expect("checked as UTF-8"),
+                })
+                .collect(),
         };
         let mut out = MAGIC.to_vec();
         out.push(b'\n');
@@ -359,13 +574,27 @@ impl Pack {
         self.runs.len()
     }
 
-    /// The scripts its runs are in.
+    /// The scripts its runs and table strings are in.
     pub fn scripts(&self) -> usize {
         self.script_keys().len()
     }
 
+    /// The table strings it holds.
+    pub fn tables(&self) -> usize {
+        self.tables.len()
+    }
+
+    /// The executable strings it holds.
+    pub fn strings(&self) -> usize {
+        self.strings.len()
+    }
+
     fn script_keys(&self) -> BTreeSet<(u8, u16)> {
-        self.runs.keys().map(|&(a, i, _)| (a, i)).collect()
+        self.runs
+            .keys()
+            .chain(self.tables.keys())
+            .map(|&(a, i, _)| (a, i))
+            .collect()
     }
 
     /// The translation keyed `key`, if the pack has one.
@@ -373,10 +602,28 @@ impl Pack {
         self.runs.get(&key)
     }
 
+    /// The table string keyed `key`, if the pack has one.
+    pub fn table(&self, key: RunKey) -> Option<&TableText> {
+        self.tables.get(&key)
+    }
+
+    /// The executable string whose English hashes to `hash`, if the pack has one.
+    pub fn string(&self, hash: u64) -> Option<&StringText> {
+        self.strings.get(&hash)
+    }
+
+    /// The table string of the script (`letter`, `item`) whose bytes hold `offset` after their
+    /// start (a read of its rest), if the pack has one.
+    fn table_around(&self, (letter, item, offset): RunKey) -> Option<&TableText> {
+        let (&(l, i, at), t) = self.tables.range(..(letter, item, offset)).next_back()?;
+        (l == letter && i == item && at < offset && offset < at + t.len).then_some(t)
+    }
+
     /// Checks the pack against the conversation archives `archive` gives by letter (the bytes
-    /// of `converse.<letter>` the engine reads): the fingerprint of the scripts it names, then
-    /// each run inside its script, of text bytes only, with its hash. Any difference is a
-    /// mismatch of the conversation part.
+    /// of `converse.<letter>` the engine reads): the fingerprint of the scripts it names (by its
+    /// runs and its table strings), then each run inside its script, of text bytes only, with its
+    /// hash, and each table string inside its script up to a NUL, with its hash. Any difference is
+    /// a mismatch of the conversation part.
     pub fn check<'f>(&self, archive: impl Fn(u8) -> Option<&'f [u8]>) -> Result<(), Mismatch> {
         let bad = Mismatch {
             part: Part::Converse,
@@ -410,8 +657,53 @@ impl Pack {
                 return Err(bad);
             }
         }
+        for (&(letter, item, offset), t) in &self.tables {
+            let bytes = script(letter, item).ok_or(bad)?;
+            if !table_ok(bytes, offset, t) {
+                return Err(bad);
+            }
+        }
         Ok(())
     }
+
+    /// Checks the executable strings against the catalogue of the game's `game`
+    /// ([`strings::Catalogue`]): every string the catalogue has (by hash and length) holds the
+    /// same `%` directives, in the same order, as its English ([`strings::directives`]). A pack
+    /// string the catalogue lacks is never looked up (another version's, or one no site shows)
+    /// and is not checked. A difference is a mismatch of the strings part.
+    pub fn check_strings(&self, catalogue: &strings::Catalogue) -> Result<(), Mismatch> {
+        for (&hash, t) in &self.strings {
+            let Some(e) = catalogue.get(hash) else {
+                continue;
+            };
+            if e.text.len() == t.len as usize
+                && strings::directives(&e.text) != strings::directives(&t.text)
+            {
+                return Err(Mismatch {
+                    part: Part::Strings,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The archive letter a key names (`a`, `b`).
+fn archive_of(archive: &str) -> Result<u8, PackError> {
+    match archive.as_bytes() {
+        [l] if ARCHIVES.contains(l) => Ok(*l),
+        _ => Err(PackError::Key),
+    }
+}
+
+/// Whether `script` holds, at `offset`, the string `t` was made from: its bytes, none of them a
+/// NUL, then the NUL that ends it, their hash the string's.
+fn table_ok(script: &[u8], offset: u32, t: &TableText) -> bool {
+    let (at, len) = (offset as usize, t.len as usize);
+    let Some(bytes) = at.checked_add(len).and_then(|end| script.get(at..end)) else {
+        return false;
+    };
+    len > 0 && !bytes.contains(&0) && script.get(at + len) == Some(&0) && hash64(bytes) == t.hash
 }
 
 /// Whether `script` holds, at `offset`, the bytes `run` was made from: inside it, text bytes
@@ -439,8 +731,34 @@ fn check_tool(tool: &str) -> Result<(), PackError> {
     if ok { Ok(()) } else { Err(PackError::Tool) }
 }
 
+/// Hits and misses of a part (counts only). Cells, so a read for display that holds the state
+/// shared counts too.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// Units put or shown from the pack.
+    pub hits: Cell<u32>,
+    /// Catalogued units shown with the pack installed that it does not have: in English.
+    pub misses: Cell<u32>,
+}
+
+impl Counts {
+    fn hit(&self) {
+        self.hits.set(self.hits.get().saturating_add(1));
+    }
+
+    fn miss(&self) {
+        self.misses.set(self.misses.get().saturating_add(1));
+    }
+
+    /// `[hits, misses]`.
+    pub fn get(&self) -> [u32; 2] {
+        [self.hits.get(), self.misses.get()]
+    }
+}
+
 /// The locale layer's state: the installed pack, the Hangul table the platform gave with it,
-/// and what the runner counted (counts only: never a key or a text).
+/// the catalogue of the game's strings read when it was installed, and what was counted (counts
+/// only: never a key or a text).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LocaleState {
     pub pack: Option<Rc<Pack>>,
@@ -450,23 +768,48 @@ pub struct LocaleState {
     /// Runs started with the pack installed that it does not have (or whose bytes changed):
     /// printed in English.
     pub misses: u32,
+    /// Slice K2: the executable strings the engine shows ([`strings::Catalogue`]).
+    pub catalogue: Option<Rc<strings::Catalogue>>,
+    /// Slice K2: table strings read at their start.
+    pub tables: Counts,
+    /// Slice K2: catalogued executable strings shown (formats, messages and labels).
+    pub texts: Counts,
 }
 
 /// Installs `pack` on `state` once it checks against the conversation archives of `files`, as
 /// the script loader names them ([`crate::converse::archive_name`]; [`Pack::check`]): the text
 /// layer takes UTF-8 and draws Hangul from `hangul` ([`apply`]). A mismatch changes nothing.
+///
+/// Slice K2: the catalogue of the executable's strings is read from `files`' `game` (none there:
+/// an empty one), and the pack's strings are checked against it ([`Pack::check_strings`]).
 pub fn install(
     state: &mut State,
     files: &Files,
     pack: Rc<Pack>,
     hangul: Option<Rc<HangulFont>>,
 ) -> Result<(), Mismatch> {
+    let catalogue = files
+        .get("game")
+        .map(strings::Catalogue::from_game)
+        .unwrap_or_default();
+    install_catalogued(state, files, pack, hangul, catalogue)
+}
+
+/// [`install`] with the catalogue of the executable's strings given (tests: a synthetic one).
+pub(crate) fn install_catalogued(
+    state: &mut State,
+    files: &Files,
+    pack: Rc<Pack>,
+    hangul: Option<Rc<HangulFont>>,
+    catalogue: strings::Catalogue,
+) -> Result<(), Mismatch> {
     pack.check(|letter| files.get(&crate::converse::archive_name(state, letter)))?;
+    pack.check_strings(&catalogue)?;
     state.locale = LocaleState {
         pack: Some(pack),
         hangul,
-        hits: 0,
-        misses: 0,
+        catalogue: Some(Rc::new(catalogue)),
+        ..LocaleState::default()
     };
     apply(state);
     Ok(())
@@ -498,5 +841,105 @@ pub(crate) fn run_at(state: &mut State, at: i32) -> Option<(Rc<Pack>, RunKey)> {
     } else {
         state.locale.misses = state.locale.misses.saturating_add(1);
         None
+    }
+}
+
+/// Slice K2: what the installed pack has for `english` (bytes up to a NUL) where game code shows
+/// it, counted: `None` without a pack, for a string under [`strings::MIN_BYTES`] or one the
+/// catalogue does not have (not counted), and for a catalogued one the pack lacks (a miss);
+/// else the pack's language and text (a hit).
+fn lookup(state: &State, english: &[u8]) -> Option<(Language, Vec<u8>)> {
+    let l = &state.locale;
+    let pack = l.pack.as_ref()?;
+    let english = &english[..english
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(english.len())];
+    if english.len() < strings::MIN_BYTES {
+        return None;
+    }
+    let catalogue = l.catalogue.as_ref()?;
+    catalogue.of(english)?;
+    match pack
+        .string(hash64(english))
+        .filter(|t| t.len as usize == english.len())
+    {
+        Some(t) => {
+            l.texts.hit();
+            Some((pack.language, t.text.clone()))
+        }
+        None => {
+            l.texts.miss();
+            None
+        }
+    }
+}
+
+/// Slice K2: the translation of the format, string or line `english` game code prints (the
+/// outermost call: `printf`'s format, `puts`, `put_raw_str`), with the pack's language for its
+/// grammar; `None` (English) as [`lookup`] says. Never called on what an escape generates.
+pub(crate) fn exe_string(state: &State, english: &[u8]) -> Option<(Language, Vec<u8>)> {
+    lookup(state, english)
+}
+
+/// Slice K2: a label a loader table holds, read for display (a command's name, a shared
+/// message, `$G`): the pack's text for it, else `english` itself ([`lookup`], counted). Only for
+/// reads whose result is shown; logic reads the table as it is.
+pub fn shown(state: &State, english: Vec<u8>) -> Vec<u8> {
+    match lookup(state, &english) {
+        Some((_, text)) => text,
+        None => english,
+    }
+}
+
+/// [`shown`] without counting, with the language of the pack's text (`None`: English) and only
+/// for a catalogued label: the copy of the escape layer that `printf`'s cell count runs reads a
+/// slot as the escape layer will, and counts nothing.
+pub(crate) fn label_quiet(state: &State, english: &[u8]) -> Option<Vec<u8>> {
+    let l = &state.locale;
+    let pack = l.pack.as_ref()?;
+    l.catalogue.as_ref()?.of(english)?;
+    pack.string(hash64(english))
+        .filter(|t| t.len as usize == english.len())
+        .map(|t| t.text.clone())
+}
+
+/// Slice K2: the table string read at `at` in the loaded script (the table reader's hook, for
+/// op `b5 d2` and op `a6 d2`), as the installed pack has it: its source length, its language and
+/// its text. `capacity` is the most bytes the place it goes to holds (`a6`'s slot), `None` for
+/// a print. `None`, with a miss counted, when the pack has no string there, the script's bytes
+/// are not the ones it was made from, or the text is over `capacity`; `None` without a count
+/// with no pack or no script loaded, for an empty string (no unit: nothing to translate), and
+/// for a read that starts inside a string the pack has (its rest, which is not a unit).
+pub(crate) fn table_at(
+    state: &State,
+    at: i32,
+    capacity: Option<usize>,
+) -> Option<(usize, Language, Vec<u8>)> {
+    let l = &state.locale;
+    let pack = l.pack.as_ref()?;
+    let (letter, item) = state.converse.script_key?;
+    let key = (letter, item, u32::try_from(at).ok()?);
+    if state
+        .converse
+        .script
+        .get(key.2 as usize)
+        .is_none_or(|&b| b == 0)
+    {
+        return None;
+    }
+    let found = pack.table(key).filter(|t| {
+        table_ok(&state.converse.script, key.2, t) && capacity.is_none_or(|c| t.text.len() <= c)
+    });
+    match found {
+        Some(t) => {
+            l.tables.hit();
+            Some((t.len as usize, pack.language, t.text.clone()))
+        }
+        None if pack.table_around(key).is_some() => None,
+        None => {
+            l.tables.miss();
+            None
+        }
     }
 }

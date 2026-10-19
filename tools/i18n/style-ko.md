@@ -71,3 +71,25 @@ Incantation syllables, runic text and the credits are not translated.
 | guard | `Thou seekest $N?` | `$N{을/를} 찾으시오?` |
 | royalty | `I have #1 coin\s for thee.*` | `그대에게 줄 금화가 #1닢\s 있노라.*` |
 | thief | `Keep thy voice down.` | `목소리를 낮추게.` |
+
+## Table strings and the game's own messages (slice K2)
+
+- A line of a conversation marked `"table": true` is a string the script picks at run time (a
+  word, a name of a thing, a short phrase) and prints inside another line. Translate it as that
+  word or phrase, with no ending of its own unless the English has one. One also marked
+  `"copied": true` is stored and printed later as it is: it may hold no particle marker and no
+  `@{…}`, and its UTF-8 must fit the `"capacity"` bytes it names (a syllable is 3 bytes).
+- A request of the game's own messages holds, instead of a conversation, the strings the game
+  prints itself, each `{"n", "en", "kind"}`: `message` (a line as it is), `format` (a line with
+  `%` directives the game fills in: `%s` a word or a name, `%d` a number; keep every `%…`
+  directive exactly, in the same order, and every other escape as above) or `label` (a word the
+  game puts inside another line: a command's name before its dash, a form of address, a time of
+  day). The game speaks to the player as a narrator: use the 하오체 and address the player as
+  **그대**. Keep each string short (the message window is 17 cells wide); a command's name is one
+  word.
+
+| Kind | English | Korean |
+|---|---|---|
+| label | `Seek` | `찾기` |
+| format | `\n%s is too heavy.\n` | `\n%s{은/는} 너무 무겁소.\n` |
+| message | `Thou canst not.` | `그리할 수 없소.` |

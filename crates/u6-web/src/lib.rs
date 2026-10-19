@@ -43,6 +43,11 @@
 //! conversation runs show the pack's lines, drawn with the Hangul table built in here
 //! (`site/fonts/galmuri7-hangul.bin`, Galmuri7, OFL-1.1). The counts it gives are counts only.
 //!
+//! Slice K2 adds the pack's table strings and game strings: the page's second export, a
+//! [`GameStrings`], gives the strings of the user's `game` the engine catalogues
+//! (`u6.string-bundle/1`) for the translation tool, and [`Game::locale_counts`] counts the
+//! table strings and game strings shown from the pack.
+//!
 //! NPC bundles (spec 09 Design 5): an [`NpcBundles`] takes the game files the page kept and
 //! exports each conversation script's NPC name and dialogue as `u6.npc-bundle/1` JSON, for the
 //! page's storage and its download; nothing of it runs in a game.
@@ -202,6 +207,11 @@ impl LocalePack {
     /// The lines it holds and the conversations they are in: `[runs, scripts]`.
     pub fn counts(&self) -> Vec<u32> {
         vec![self.pack.runs() as u32, self.pack.scripts() as u32]
+    }
+
+    /// Slice K2: the table strings and game strings it holds: `[tables, strings]`.
+    pub fn string_counts(&self) -> Vec<u32> {
+        vec![self.pack.tables() as u32, self.pack.strings() as u32]
     }
 
     /// The grammar it declares: `en` or `ko`.
@@ -900,13 +910,24 @@ impl Game {
     }
 
     /// Spec 08: the running game's locale layer, counts only: `[on, runs put from the pack,
-    /// runs it did not have]` (`on` 1 with a pack installed, else 0 and no counts).
+    /// runs it did not have, table strings from the pack, table strings it did not have, game
+    /// strings from the pack, game strings it did not have]` (`on` 1 with a pack installed, else
+    /// 0 and no counts).
     pub fn locale_counts(&self) -> Vec<u32> {
         self.engine.as_ref().map_or_else(
-            || vec![0, 0, 0],
+            || vec![0; 7],
             |e| {
                 let l = &e.state().locale;
-                vec![u32::from(l.pack.is_some()), l.hits, l.misses]
+                let ([th, tm], [xh, xm]) = (l.tables.get(), l.texts.get());
+                vec![
+                    u32::from(l.pack.is_some()),
+                    l.hits,
+                    l.misses,
+                    th,
+                    tm,
+                    xh,
+                    xm,
+                ]
             },
         )
     }
@@ -1380,6 +1401,49 @@ impl NpcBundles {
     }
 }
 
+/// Spec 08 (slice K2): the game strings (`u6.string-bundle/1`) of the game files the page kept:
+/// the strings of the user's `game` the engine shows and catalogues (`u6_core::locale::strings`),
+/// each with its hash, length, kind and English, for the translation tool. Made here in the
+/// browser like [`NpcBundles`]: the page adds each kept file ([`GameStrings::add`], which keeps
+/// only `game`) and takes the strings as one JSON object ([`GameStrings::export`]) for its
+/// download only (never logged, shown or stored); an error names only what failed.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct GameStrings {
+    files: BTreeMap<String, Vec<u8>>,
+}
+
+#[wasm_bindgen]
+impl GameStrings {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> GameStrings {
+        GameStrings::default()
+    }
+
+    /// One kept file; any but the executable is dropped at once.
+    pub fn add(&mut self, path: &str, bytes: Vec<u8>) {
+        if u6_core::locale::strings::reads(path) {
+            self.files.insert(path.to_string(), bytes);
+        }
+    }
+
+    /// The strings as one JSON object. Fails when the files hold no `game`, or one that does not
+    /// read (the message names only that).
+    pub fn export(&self) -> Result<String, JsError> {
+        self.strings().map_err(|msg| JsError::new(&msg))
+    }
+}
+
+impl GameStrings {
+    /// [`GameStrings::export`] without the JS error type.
+    fn strings(&self) -> Result<String, String> {
+        let files = Files::new(self.files.clone());
+        u6_core::locale::strings::export(&files)
+            .map(|e| e.to_json())
+            .map_err(|e| format!("Game strings: {e}"))
+    }
+}
+
 impl NpcBundles {
     /// [`NpcBundles::export`] without the JS error type.
     fn bundles(&self) -> Result<String, String> {
@@ -1707,6 +1771,26 @@ mod tests {
         assert_eq!(e, "NPC bundles: converse.b does not read");
     }
 
+    /// Spec 08 (slice K2): the string export keeps only the executable and fails with a line that
+    /// names only what failed (a sentinel in a path or in the file never in it).
+    #[test]
+    fn game_strings_keep_only_the_executable_and_fail_without_content() {
+        const SENTINEL: &str = "Zq9StringSentinel";
+        let mut ex = GameStrings::new();
+        ex.add("U6/GAME", SENTINEL.as_bytes().to_vec());
+        ex.add(&format!("U6/{SENTINEL}"), vec![1, 2, 3]);
+        ex.add("U6/converse.a", vec![4]);
+        assert_eq!(ex.files.keys().collect::<Vec<_>>(), ["U6/GAME"]);
+        let e = ex.strings().unwrap_err();
+        assert_eq!(e, "Game strings: the game executable does not read");
+        let mut none = GameStrings::new();
+        none.add(&format!("{SENTINEL}/converse.a"), vec![0; 4]);
+        assert_eq!(
+            none.strings(),
+            Err("Game strings: the files hold no game executable".into())
+        );
+    }
+
     /// Spec 08 (slice K1): a pack reads through the engine's strict reader (a refusal names the
     /// rule only, never what the file holds); set on a game whose files it was made from it is
     /// installed (`wide` on, the built-in Hangul table set, the counts start at 0), on one with
@@ -1767,7 +1851,8 @@ mod tests {
         // No game: refused.
         let mut game = Game::new();
         assert_eq!(game.set_locale(&loaded), "no game is running");
-        assert_eq!(game.locale_counts(), [0, 0, 0]);
+        assert_eq!(game.locale_counts(), [0; 7]);
+        assert_eq!(loaded.string_counts(), [0, 0]);
         // Its own files: installed.
         let engine = |archive: Vec<u8>| {
             let files = Files::new(BTreeMap::from([("U6/converse.a".to_string(), archive)]));
@@ -1779,7 +1864,7 @@ mod tests {
         };
         game.put_on_screen(engine(lib(&script)));
         assert_eq!(game.set_locale(&loaded), "");
-        assert_eq!(game.locale_counts(), [1, 0, 0]);
+        assert_eq!(game.locale_counts(), [1, 0, 0, 0, 0, 0, 0]);
         let e = game.engine.as_ref().quiet();
         assert!(e.state().ui.text.wide, "the assembler on");
         assert!(
@@ -1794,7 +1879,7 @@ mod tests {
             game.set_locale(&loaded),
             "its conversation part was made from other game files"
         );
-        assert_eq!(game.locale_counts(), [0, 0, 0]);
+        assert_eq!(game.locale_counts(), [0; 7]);
         let e = game.engine.as_ref().quiet();
         assert!(!e.state().ui.text.wide && e.state().ui.hangul.is_none());
     }

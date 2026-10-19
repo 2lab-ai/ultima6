@@ -55,6 +55,33 @@ const STR_STANDS_GUARD: u32 = 0x0012_73fc;
 const STR_HEAR: u32 = 0x0012_7422;
 const STR_HULL: u32 = 0x0012_72b6;
 
+/// Port-only (spec 08, slice K2): the strings Rest and the hull repair pass to `printf` as its
+/// format, for the locale layer's catalogue ([`crate::locale::strings`]).
+pub(crate) const PRINTED: &[u32] = &[
+    STR_REST,
+    STR_COMBAT,
+    STR_NO_REPAIR,
+    STR_WILDERNESS,
+    STR_FOES,
+    STR_OTHERS,
+    STR_SOLO,
+    STR_ROOM,
+    STR_DISMOUNT,
+    STR_HOURS,
+    STR_ZERO,
+    STR_KEY,
+    STR_GUARD,
+    STR_NONE,
+    STR_NEWLINE,
+    STR_MEAL,
+    STR_TUNE,
+    STR_FOOD,
+    STR_NO_FOOD,
+    STR_STANDS_GUARD,
+    STR_HEAR,
+    STR_HULL,
+];
+
 /// Object types.
 const SHIP: u16 = 0x19c;
 const HORSE_RIDER: u16 = 0x1af;

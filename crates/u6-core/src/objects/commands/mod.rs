@@ -48,6 +48,18 @@ pub use world::{
 
 use crate::files::Files;
 
+/// Port-only (spec 08, slice K2): the strings the object commands pass to `printf` as its
+/// format (Look, Get, Drop, Move, the keys, search, doors and traps), for the locale layer's
+/// catalogue ([`crate::locale::strings`]).
+pub(crate) const PRINTED: [&[u32]; 6] = [
+    look::PRINTED,
+    get::PRINTED,
+    drop::PRINTED,
+    push::PRINTED,
+    keys::PRINTED,
+    world::PRINTED,
+];
+
 /// State of the object commands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ObjCommands {

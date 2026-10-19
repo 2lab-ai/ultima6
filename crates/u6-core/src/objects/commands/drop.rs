@@ -25,6 +25,17 @@ const S_IT_BROKE: u32 = 0x0012_85a0;
 const S_HOW_MANY: u32 = 0x0012_8578;
 const S_COUNT_LINE: u32 = 0x0012_8584; // "%d\n"
 const S_ZERO: u32 = 0x0012_8588; // "0   \n"
+
+/// Port-only (spec 08, slice K2): the strings this module passes to `printf` as its format,
+/// for the locale layer's catalogue ([`crate::locale::strings`]).
+pub(super) const PRINTED: &[u32] = &[
+    S_LOCATION,
+    S_NL_LINE_NL,
+    S_IT_BROKE,
+    S_HOW_MANY,
+    S_COUNT_LINE,
+    S_ZERO,
+];
 const P_NOTHING: i32 = -0x6c58;
 /// Original: A4-0x66fa (15 words: types that break when thrown)
 const FRAGILE: i32 = -0x66fa;

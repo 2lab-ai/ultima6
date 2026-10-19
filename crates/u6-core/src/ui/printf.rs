@@ -251,7 +251,9 @@ async fn escape(state: &RefCell<State>, io: &Io, c: i32) {
             state.borrow_mut().ui.text.prefix = 0;
         }
         b'$' => {
-            let text = crate::converse::string_var(&state.borrow(), var_index(c) as u8);
+            // Port (spec 08, slice K2): what the slot shows (a copied table string's or a
+            // label's translation; logic reads the English).
+            let text = crate::converse::shown_var(&state.borrow(), var_index(c) as u8);
             put_cells(state, io, &text).await;
             state.borrow_mut().ui.text.prefix = 0;
         }
@@ -313,7 +315,28 @@ async fn escape(state: &RefCell<State>, io: &Io, c: i32) {
 }
 
 /// Original: 0x108642 (ui: put each character of a string through the escape layer)
+///
+/// Port (spec 08, slice K2): called by game code, so the string is the locale pack's when it
+/// has it ([`crate::locale::exe_string`]); `printf`'s `%s` puts its field without that
+/// ([`put_field`]).
 pub async fn puts(state: &RefCell<State>, io: &Io, s: &[u8]) {
+    if !state.borrow().ui.text.on {
+        return;
+    }
+    let found = crate::locale::exe_string(&state.borrow(), s);
+    match found {
+        Some((language, text)) => {
+            let was = std::mem::replace(&mut state.borrow_mut().ui.text.language, language);
+            put_field(state, io, &text).await;
+            state.borrow_mut().ui.text.language = was;
+        }
+        None => put_field(state, io, s).await,
+    }
+}
+
+/// [`puts`] without the locale layer's lookup: `printf`'s fields (what `%s` generates is never
+/// looked up).
+async fn put_field(state: &RefCell<State>, io: &Io, s: &[u8]) {
     for &b in s.iter().take_while(|&&b| b != 0) {
         text_out(state, io, i32::from(b)).await;
     }
@@ -859,7 +882,7 @@ impl wide::Escapes for Escaped<'_> {
                 self.prefix = 0;
             }
             b'$' => {
-                let text = crate::converse::string_var(s, var_index(c) as u8);
+                let text = crate::converse::shown_var_quiet(s, var_index(c) as u8);
                 self.put_text(&text, cells);
                 self.prefix = 0;
             }
@@ -908,7 +931,30 @@ impl wide::Escapes for Escaped<'_> {
 /// it takes where it is put ([`field_count`]) instead of its bytes. The format is a unit of text: a brace
 /// `@{…}` it opened (in its fields too) and left open is closed where it ends ([`end_unit`]), so
 /// text after it is not in its colour; a brace open before it stays open through it.
+///
+/// Port (spec 08, slice K2): `printf` is the outermost print call game code makes, so the
+/// format is the locale pack's when it has it ([`crate::locale::exe_string`]: catalogued, 3
+/// bytes or more), put in the pack's grammar, its fields (English names, numbers) included; the
+/// pack's format holds the same `%` directives in the same order (checked at install). What a
+/// field generates is never looked up ([`put_field`]).
 pub async fn printf(state: &RefCell<State>, io: &Io, fmt: &[u8], args: &[Arg<'_>]) {
+    if !state.borrow().ui.text.on {
+        return;
+    }
+    let found = crate::locale::exe_string(&state.borrow(), fmt);
+    match found {
+        Some((language, text)) => {
+            let was = std::mem::replace(&mut state.borrow_mut().ui.text.language, language);
+            format(state, io, &text, args).await;
+            state.borrow_mut().ui.text.language = was;
+        }
+        None => format(state, io, fmt, args).await,
+    }
+}
+
+/// [`printf`] without the locale layer's lookup: the format as it is given (op `b5`'s slot
+/// form, which prints what a slot shows, [`crate::converse::shown_var`]).
+pub async fn format(state: &RefCell<State>, io: &Io, fmt: &[u8], args: &[Arg<'_>]) {
     let (wide, opened) = {
         let t = &state.borrow().ui.text;
         if !t.on {
@@ -974,11 +1020,11 @@ pub async fn printf(state: &RefCell<State>, io: &Io, fmt: &[u8], args: &[Arg<'_>
             width.wrapping_sub(field.len() as i16)
         };
         if left {
-            puts(state, io, &field).await;
+            put_field(state, io, &field).await;
         }
         put_raw_n(state, io, padding, i32::from(pad)).await;
         if !left {
-            puts(state, io, &field).await;
+            put_field(state, io, &field).await;
         }
     }
     end_unit(state, io, opened).await;

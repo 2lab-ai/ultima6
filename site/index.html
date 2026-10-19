@@ -133,6 +133,8 @@
       <button id="npc-bundles" type="button" disabled data-i18n="npcBundles" data-i18n-title="npcBundlesTitle"
               title="Each NPC's name and dialogue, read in this browser from the game files kept here: one bundle per conversation script, kept in this browser and downloaded as one JSON file. Nothing is uploaded.">NPC bundles</button>
       <button id="forget-npc-bundles" type="button" disabled data-i18n="forgetNpcBundles">Forget NPC bundles</button>
+      <button id="game-strings" type="button" disabled data-i18n="gameStrings" data-i18n-title="gameStringsTitle"
+              title="The game's own messages (the command prompts and their results), read in this browser from the game file kept here and downloaded as one JSON file for the Korean pack's tool. Nothing is uploaded.">Game strings</button>
       <button id="restart" type="button" hidden data-i18n="restart">Restart</button>
       <div id="playback">
         <button id="mute" type="button" aria-pressed="false">Mute</button>
@@ -212,6 +214,10 @@
         for a later AI to learn how each NPC speaks), keeps them in this browser and downloads
         them as one JSON file. They are never uploaded; &ldquo;Forget NPC bundles&rdquo; removes
         them from this browser.</p>
+      <p data-i18n="gameStringsNote">Game strings: the game strings button reads, in this browser,
+        the game's own messages from the game file kept here (the command prompts and their
+        results, the words of a conversation's frame) and downloads them as one JSON file, for
+        tools/i18n to make the Korean pack's game strings. It is never uploaded or kept here.</p>
       <p>Not yet: a few rare object actions (moving a carried thing to someone else, a staff's or
         wand's spell in combat). Those say
         &ldquo;Not implemented in this version&rdquo; or do nothing.</p>

@@ -3,9 +3,17 @@
 //! A string slot holds a pointer in the original; the port keeps what it points at
 //! ([`StrRef`]) and reads through it when the slot is used, so a slot that points at a buffer
 //! sees later writes to that buffer as the original does.
+//!
+//! Port (spec 08, slice K2): what a slot points at always holds the English, which every logic
+//! read takes (a comparison, a search, a copy's bytes). A copy of a table string the locale pack
+//! has also keeps the pack's text beside it ([`set_shown`]), and a read for display
+//! ([`shown_var`]: the escape layer's `$n`, op `b5`'s slot form) shows that text instead; the
+//! forms of address, the times of day and `$Y`'s word ([`super::text::Shown::Label`]) show the
+//! pack's label. A write to the place drops its shown text.
 
 use super::{Msg, VAR_COUNT};
 use crate::state::State;
+use crate::ui::Language;
 
 /// What a string slot points at.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,9 +68,11 @@ pub(crate) fn resolve(state: &State, r: StrRef) -> Vec<u8> {
 }
 
 /// Copies `bytes` to where `r` points (`strcpy`). Writes through a pointer at code text or at
-/// address 0 would land in the original's code or low memory; the port drops them.
+/// address 0 would land in the original's code or low memory; the port drops them. Port (spec
+/// 08, slice K2): the place's shown text goes ([`set_shown`]).
 pub(crate) fn write(state: &mut State, r: StrRef, bytes: &[u8]) {
     let c = &mut state.converse;
+    c.shown.retain(|(at, ..)| *at != r);
     match r {
         StrRef::Null | StrRef::Text(_) => {}
         StrRef::Buffer(i) => {
@@ -82,6 +92,82 @@ pub(crate) fn write(state: &mut State, r: StrRef, bytes: &[u8]) {
             names[i] = bytes.iter().map(|&b| char::from(b)).collect();
         }
     }
+}
+
+/// The most bytes the place `r` points at holds, for a copy of a table string's translation
+/// (spec 08, slice K2): a buffer's ([`super::disasm::catalog::SLOT_BUFFER_CAPACITY`]); `None`
+/// for every other place, whose size the port does not know (a translation is not shown there).
+pub(crate) fn capacity(r: StrRef) -> Option<usize> {
+    match r {
+        StrRef::Buffer(_) => Some(super::disasm::catalog::SLOT_BUFFER_CAPACITY as usize),
+        _ => None,
+    }
+}
+
+/// Port-only (spec 08, slice K2): the place `r` points at, which holds a copy of a table string,
+/// shows `text` (in `language`'s grammar) instead, until the next write to it.
+pub(crate) fn set_shown(state: &mut State, r: StrRef, language: Language, text: Vec<u8>) {
+    let c = &mut state.converse;
+    c.shown.retain(|(at, ..)| *at != r);
+    c.shown.push((r, language, text));
+}
+
+/// Op `a6`'s slot form: the English of `from` copied to where `to` points ([`write`]), and,
+/// when `from` shows a table string's translation, `to` shows it too: only where the English was
+/// written and the translation fits, as for the copy of the table string itself (a place
+/// [`capacity`] knows, the translation within it). The shown text is taken before the write, so
+/// a copy onto the same place (a slot onto itself, or onto another slot that points there) keeps
+/// it.
+pub(crate) fn copy(state: &mut State, from: StrRef, to: StrRef) {
+    let text = resolve(state, from);
+    let shown = state
+        .converse
+        .shown
+        .iter()
+        .find(|(at, ..)| *at == from)
+        .cloned();
+    write(state, to, &text);
+    if let Some((_, language, translation)) = shown
+        && capacity(to).is_some_and(|c| translation.len() <= c)
+    {
+        set_shown(state, to, language, translation);
+    }
+}
+
+/// Port-only (spec 08, slice K2): what the place `r` points at shows, for a read for display: its
+/// shown text with the pack's language, a label as the locale pack has it (counted,
+/// [`crate::locale::shown`]), else its bytes (`None`: English). `quiet` counts nothing (the copy
+/// of the escape layer `printf`'s cell count runs).
+pub(crate) fn shown_ref(state: &State, r: StrRef, quiet: bool) -> (Option<Language>, Vec<u8>) {
+    if let Some((_, language, text)) = state.converse.shown.iter().find(|(at, ..)| *at == r) {
+        return (Some(*language), text.clone());
+    }
+    let english = resolve(state, r);
+    if let StrRef::Text(m) = r
+        && super::text::is_label(m)
+    {
+        let found = if quiet {
+            crate::locale::label_quiet(state, &english)
+                .map(|t| (state.locale.pack.as_ref().map(|p| p.language), t))
+        } else {
+            crate::locale::exe_string(state, &english).map(|(l, t)| (Some(l), t))
+        };
+        if let Some((language, text)) = found {
+            return (language, text);
+        }
+    }
+    (None, english)
+}
+
+/// Port-only (spec 08, slice K2): the text string slot `idx` shows ([`shown_ref`], counted): the
+/// escape layer's `$n`.
+pub fn shown_var(state: &State, idx: u8) -> Vec<u8> {
+    shown_ref(state, slot(state, idx), false).1
+}
+
+/// [`shown_var`] counting nothing: the copy of the escape layer `printf`'s cell count runs.
+pub(crate) fn shown_var_quiet(state: &State, idx: u8) -> Vec<u8> {
+    shown_ref(state, slot(state, idx), true).1
 }
 
 /// The text of string slot `idx` (`$0`..`$Z` = 0..35); out of range: empty.

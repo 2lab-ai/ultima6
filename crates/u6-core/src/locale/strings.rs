@@ -1,0 +1,369 @@
+//! Port-only (spec 08 Design 2, slice K2): the catalogue of the executable's strings that game
+//! code shows, read from the user's `game` at run time, and the string export of it.
+//!
+//! **What is catalogued.** The sites the engine knows (each module lists the strings it prints,
+//! next to their addresses): the command loop's prompts and results
+//! ([`crate::main_loop::commands::PRINTED`]), Look, Get, Drop, Move and the keys'
+//! ([`crate::objects::commands::PRINTED`]), Use's ([`crate::usecmd::PRINTED`]), Rest's
+//! ([`crate::actors::rest::PRINTED`]), Attack's ([`crate::combat::attack::PRINTED`]) and the
+//! conversation's own messages ([`crate::converse::text::SHOWN`]): each one game code passes to
+//! `printf` as its format. And the strings a loader table holds that game code shows through an
+//! escape (labels): the command names before their dash
+//! ([`crate::main_loop::commands::LABELS`]), the shared messages Use and the object commands
+//! print through `%s` ([`SHARED_MESSAGES`]), and the conversation's `$G`, `$T` and `$Y` words.
+//! Every other string of the executable is not catalogued, and never substituted: the panels,
+//! magic, the inventory, combat's other lines, object names and articles. A string shorter
+//! than [`MIN_BYTES`], or with no word of its own (`%s\n`), is not catalogued either.
+//!
+//! **Lookup.** By content: [`hash64`] of the English bytes, only where game code prints them
+//! (`printf`'s format, `puts`, `put_raw_str`; [`super::exe_string`]) or reads a label for display
+//! ([`super::shown`]); never on what an escape generates, and never where logic reads a string.
+//!
+//! **The export** ([`Catalogue::to_json`], [`FORMAT`]): every catalogued string once, in the
+//! order the sites list them: its hash, its length, its kind and its text (one character per
+//! byte, as the NPC bundles write theirs). It holds the user's game text: it is made in the
+//! user's browser and leaves it only as his own download (`tests/no_string_bundle_in_repo.rs`).
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::converse::ConverseText;
+use crate::converse::disasm::catalog::{hash64, hex64};
+use crate::image::{A4, GameImage};
+
+/// The string export's format name.
+pub const FORMAT: &str = "u6.string-bundle/1";
+/// The locale of the export (the original's English).
+pub const LOCALE: &str = "en";
+/// Strings shorter than this are never substituted (spec 08 Design 2).
+pub const MIN_BYTES: usize = 3;
+/// The longest string the game reads ([`GameImage::cstr`]'s bound).
+pub const MAX_BYTES: usize = 256;
+/// The files the export reads, by bare name (the executable).
+pub const READS: [&str; 1] = ["game"];
+
+/// The pointers of the shared messages Use and the object commands read for display (A4 - off:
+/// success, failed, no effect, out of range, blocked, nothing, not possible, done, on whom, not
+/// usable; `crate::usecmd::defs` `MSG_*`, `objects::commands` `P_*`, the entries the code names).
+pub const SHARED_MESSAGES: [u32; 10] = [
+    A4.wrapping_sub(0x6c6c),
+    A4.wrapping_sub(0x6c68),
+    A4.wrapping_sub(0x6c64),
+    A4.wrapping_sub(0x6c60),
+    A4.wrapping_sub(0x6c5c),
+    A4.wrapping_sub(0x6c58),
+    A4.wrapping_sub(0x6c54),
+    A4.wrapping_sub(0x6c50),
+    A4.wrapping_sub(0x6c48),
+    A4.wrapping_sub(0x6c40),
+];
+
+/// How game code shows a catalogued string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// `printf`'s format with no conversion: a line as it is.
+    Message,
+    /// `printf`'s format with a conversion (`%d`, `%s`, ...): its `%` directives are kept.
+    Format,
+    /// A word a table holds, shown through an escape inside other text (`%s`, `$n`).
+    Label,
+}
+
+/// Whether `bytes` (a `printf` format) holds a conversion: `%` then flags, digits and one of
+/// `c d o s u x` (either case).
+fn has_conversion(bytes: &[u8]) -> bool {
+    directives(bytes).iter().any(|d| {
+        d.last()
+            .is_some_and(|c| b"cdosux".contains(&c.to_ascii_lowercase()))
+    })
+}
+
+/// The `%` directives of `format` in order, each its bytes from the `%` through the byte that
+/// ends it, as `printf` reads them with `wide` on (`ui::printf::printf`): `%`, then `N$` (N from
+/// 1, its first digit not 0) when it is there, then `-` and `0` flags, then digits, then one more
+/// byte (a conversion, or a byte put as it is: `%%`, `%>`, `%/`); a format that ends after the
+/// `%` ends the directive there. A NUL ends the format.
+pub fn directives(format: &[u8]) -> Vec<Vec<u8>> {
+    let f = &format[..format.iter().position(|&b| b == 0).unwrap_or(format.len())];
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < f.len() {
+        if f[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        // `N$`: digits from 1-9 then `$`, else nothing taken.
+        if f.get(i).is_some_and(|b| (b'1'..=b'9').contains(b)) {
+            let mut j = i;
+            while f.get(j).is_some_and(u8::is_ascii_digit) {
+                j += 1;
+            }
+            if f.get(j) == Some(&b'$') {
+                i = j + 1;
+            }
+        }
+        while f.get(i).is_some_and(|&b| b == b'-' || b == b'0') {
+            i += 1;
+        }
+        while f.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        i = (i + 1).min(f.len());
+        out.push(f[start..i].to_vec());
+    }
+    out
+}
+
+/// Whether `text` holds a letter outside its `%` directives ([`directives`]) and the letters an
+/// escape takes (`$n`, `#n`, `^c`, the plural letters after `/` and `\\`).
+fn has_words(text: &[u8]) -> bool {
+    let mut i = 0;
+    while i < text.len() {
+        let c = text[i];
+        if c == b'%' {
+            i += directives(&text[i..]).first().map_or(1, Vec::len);
+            continue;
+        }
+        if matches!(c, b'$' | b'#' | b'^') {
+            i += 2;
+            continue;
+        }
+        if matches!(c, b'/' | b'\\') {
+            i += 1;
+            while text.get(i).is_some_and(u8::is_ascii_alphabetic) {
+                i += 1;
+            }
+            continue;
+        }
+        if c.is_ascii_alphabetic() {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// One catalogued string: its English bytes and how it is shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub kind: Kind,
+    pub text: Vec<u8>,
+}
+
+/// The catalogued strings of one `game`, by [`hash64`] of their bytes, in site order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Catalogue {
+    by_hash: BTreeMap<u64, usize>,
+    entries: Vec<(u64, Entry)>,
+}
+
+/// One string of the export.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportString {
+    /// [`hash64`] of its bytes, 16 lower-case hex digits: its key in the pack.
+    #[serde(with = "hex64")]
+    pub hash: u64,
+    /// Its length in bytes.
+    pub len: u32,
+    pub kind: Kind,
+    /// Its bytes, one character per byte (U+0000..U+00FF).
+    pub text: String,
+}
+
+/// The export ([`FORMAT`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Export {
+    pub format: String,
+    pub locale: String,
+    pub strings: Vec<ExportString>,
+}
+
+impl Export {
+    /// The export as JSON (one object).
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("the export has only serialisable fields")
+    }
+
+    /// Reads an export back (another format's name is an error, as is a string whose text, length
+    /// and hash disagree): the translation tool's input, read as the tool reads it. Each refusal
+    /// is a fixed sentence: nothing of the input (a field's name, a value) is in it.
+    pub fn from_json(s: &str) -> Result<Export, &'static str> {
+        let e: Export =
+            serde_json::from_str(s).map_err(|_| "it is not JSON of the game strings' form")?;
+        if e.format != FORMAT {
+            return Err("it is not of the game strings' format (u6.string-bundle/1)");
+        }
+        for t in &e.strings {
+            let bytes: Option<Vec<u8>> = t.text.chars().map(|c| u8::try_from(c).ok()).collect();
+            let ok = bytes.is_some_and(|b| b.len() == t.len as usize && hash64(&b) == t.hash);
+            if !ok {
+                return Err("a string's text, length and hash disagree");
+            }
+        }
+        Ok(e)
+    }
+}
+
+/// Whether the export reads the file at `path` (by its bare name, ignoring case).
+pub fn reads(path: &str) -> bool {
+    let bare = path.rsplit(['/', '\\', ':']).next().unwrap_or(path);
+    READS.iter().any(|r| bare.eq_ignore_ascii_case(r))
+}
+
+/// The export of the catalogue of the `game` among `files` (by its bare name), for the page's
+/// download. Fails, with a fixed sentence (no value of the file), when there is no `game` or it
+/// does not read as the executable the engine knows.
+pub fn export(files: &crate::files::Files) -> Result<Export, &'static str> {
+    let game = files
+        .get("game")
+        .ok_or("the files hold no game executable")?;
+    if ConverseText::from_game(game).is_err() {
+        return Err("the game executable does not read");
+    }
+    Ok(Catalogue::from_game(game).export())
+}
+
+impl Catalogue {
+    /// The catalogue of `game` (the decrunched executable): every site's string that reads
+    /// (inside the image, NUL-ended) and is [`MIN_BYTES`] or longer. A file that is no hunk file
+    /// gives an empty catalogue (nothing is substituted then).
+    pub fn from_game(game: &[u8]) -> Catalogue {
+        let mut c = Catalogue::default();
+        let Ok(img) = GameImage::parse(game) else {
+            return c;
+        };
+        let printed = crate::main_loop::commands::PRINTED
+            .iter()
+            .chain(
+                crate::objects::commands::PRINTED
+                    .iter()
+                    .flat_map(|s| s.iter()),
+            )
+            .chain(crate::usecmd::PRINTED)
+            .chain(crate::actors::rest::PRINTED)
+            .chain(crate::combat::attack::PRINTED);
+        for &at in printed {
+            if let Ok(text) = img.cstr(at) {
+                let kind = if has_conversion(&text) {
+                    Kind::Format
+                } else {
+                    Kind::Message
+                };
+                c.add(kind, text);
+            }
+        }
+        let labels = crate::main_loop::commands::LABELS
+            .iter()
+            .chain(&SHARED_MESSAGES);
+        for &ptr in labels {
+            if let Ok(text) = img.pointer(ptr).and_then(|p| img.cstr(p)) {
+                c.add(Kind::Label, text);
+            }
+        }
+        if let Ok(messages) = ConverseText::from_game(game) {
+            for (m, how) in crate::converse::text::SHOWN {
+                let kind = match how {
+                    crate::converse::text::Shown::Printed if has_conversion(messages.get(m)) => {
+                        Kind::Format
+                    }
+                    crate::converse::text::Shown::Printed => Kind::Message,
+                    crate::converse::text::Shown::Label => Kind::Label,
+                };
+                c.add(kind, messages.get(m).to_vec());
+            }
+        }
+        c
+    }
+
+    /// A catalogue of `entries` (tests: a synthetic `game`'s strings), each added as a site's.
+    #[cfg(test)]
+    pub(crate) fn from_entries(entries: impl IntoIterator<Item = (Kind, Vec<u8>)>) -> Catalogue {
+        let mut c = Catalogue::default();
+        for (kind, text) in entries {
+            c.add(kind, text);
+        }
+        c
+    }
+
+    /// Adds `text` (once per content: the first site's kind, a label's over the others). A string
+    /// with no letter but its directives' and escapes' (`%s\n`, `%d `, `\n%s:\n%>`) has nothing
+    /// to translate and is not catalogued: such a format is shared with sites the catalogue does
+    /// not hold (the panels), which keep it as it is.
+    fn add(&mut self, kind: Kind, text: Vec<u8>) {
+        if text.len() < MIN_BYTES
+            || text.len() > MAX_BYTES
+            || text.contains(&0)
+            || !has_words(&text)
+        {
+            return;
+        }
+        let h = hash64(&text);
+        match self.by_hash.get(&h) {
+            Some(&i) => {
+                let e = &mut self.entries[i].1;
+                if e.text == text && kind == Kind::Label {
+                    e.kind = Kind::Label;
+                }
+            }
+            None => {
+                self.by_hash.insert(h, self.entries.len());
+                self.entries.push((h, Entry { kind, text }));
+            }
+        }
+    }
+
+    /// The entry whose bytes hash to `hash`.
+    pub fn get(&self, hash: u64) -> Option<&Entry> {
+        self.by_hash.get(&hash).map(|&i| &self.entries[i].1)
+    }
+
+    /// The entry of exactly `bytes`, if catalogued.
+    pub fn of(&self, bytes: &[u8]) -> Option<&Entry> {
+        if bytes.len() < MIN_BYTES {
+            return None;
+        }
+        self.get(hash64(bytes)).filter(|e| e.text == bytes)
+    }
+
+    /// The strings catalogued.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Each (hash, entry), in site order.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, &Entry)> {
+        self.entries.iter().map(|(h, e)| (*h, e))
+    }
+
+    /// The export of the catalogue.
+    pub fn export(&self) -> Export {
+        Export {
+            format: FORMAT.into(),
+            locale: LOCALE.into(),
+            strings: self
+                .iter()
+                .map(|(hash, e)| ExportString {
+                    hash,
+                    len: e.text.len() as u32,
+                    kind: e.kind,
+                    text: e.text.iter().map(|&b| char::from(b)).collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// [`Catalogue::export`] as JSON.
+    pub fn to_json(&self) -> String {
+        self.export().to_json()
+    }
+}

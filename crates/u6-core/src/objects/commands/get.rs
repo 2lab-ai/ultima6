@@ -21,6 +21,19 @@ const S_TOO_HEAVY: u32 = 0x0012_85b6;
 const S_NO_FREE_HAND: u32 = 0x0012_85d0;
 const S_STOP_THIEF: u32 = 0x0012_85de;
 const S_STEALING: u32 = 0x0012_85f0;
+
+/// Port-only (spec 08, slice K2): the strings this module passes to `printf` as its format,
+/// for the locale layer's catalogue ([`crate::locale::strings`]).
+pub(super) const PRINTED: &[u32] = &[
+    S_LINE,
+    S_BANG_LINE,
+    S_NL_LINE,
+    S_NL_LINE_NL,
+    S_TOO_HEAVY,
+    S_NO_FREE_HAND,
+    S_STOP_THIEF,
+    S_STEALING,
+];
 const P_NOTHING: i32 = -0x6c58;
 const P_OUT_OF_RANGE: i32 = -0x6c60;
 pub(super) const P_NOT_POSSIBLE: i32 = -0x6c54;
@@ -34,9 +47,11 @@ const DRAGON: u16 = 0x19b;
 /// Original: A4-0x7b5a (8 × 3 words: where each moonstone lies; a taken one reads 0, 0, 0)
 const MOONSTONES: usize = 0x2a;
 
-/// The message the pointer at `A4 + off` names.
+/// The message the pointer at `A4 + off` names. Port (spec 08, slice K2): read for display only
+/// (the commands print it through `%s`), so the locale pack's label of it is shown in its place
+/// ([`crate::locale::shown`]).
 pub(super) fn message(s: &State, off: i32) -> Vec<u8> {
-    s.objcmds.data.pointed(super::GameData::a4(off))
+    crate::locale::shown(s, s.objcmds.data.pointed(super::GameData::a4(off)))
 }
 
 /// Original: 0x128aa4 (objects: `obj` and everything inside it may be taken (status bit 0))

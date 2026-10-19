@@ -106,6 +106,60 @@ pub const MESSAGES: [(Msg, u32); 38] = [
     (Msg::WordEnds, 0x0010_4ffe),           // [0x108376] bytes that end an `@` keyword
 ];
 
+/// Port-only (spec 08, slice K2): how the converse code shows a message, for the locale layer's
+/// catalogue ([`crate::locale::strings`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shown {
+    /// Passed to `printf` as its format (`seams::print`).
+    Printed,
+    /// Set as a string slot ([`super::StrRef::Text`]) and shown through `$n`: the forms of
+    /// address (`$G`), the times of day (`$T`) and the word `$Y` names the hero by. The locale
+    /// pack's text is shown where a slot is read for display ([`super::vars::shown`]), never where
+    /// logic reads it (a comparison, a search, a copy).
+    Label,
+}
+
+/// Port-only (spec 08, slice K2): the messages the converse code shows, and how. Left out: the
+/// ones logic reads (the word delimiters, `bye` for an empty input, the `look` word, the
+/// keyword-end bytes), the file names, and the newlines and one-conversion formats (shorter
+/// than the catalogue's least).
+pub const SHOWN: [(Msg, Shown); 27] = [
+    (Msg::Milady, Shown::Label),
+    (Msg::Milord, Shown::Label),
+    (Msg::Morning, Shown::Label),
+    (Msg::Afternoon, Shown::Label),
+    (Msg::Evening, Shown::Label),
+    (Msg::You, Shown::Label),
+    (Msg::Shrine, Shown::Printed),
+    (Msg::Statue, Shown::Printed),
+    (Msg::Nothing, Shown::Printed),
+    (Msg::Undefined, Shown::Printed),
+    (Msg::SelectItem, Shown::Printed),
+    (Msg::DivideError, Shown::Printed),
+    (Msg::ErrorOccured, Shown::Printed),
+    (Msg::UnknownCommand, Shown::Printed),
+    (Msg::ControlChar, Shown::Printed),
+    (Msg::NotOnScreen, Shown::Printed),
+    (Msg::NotInSolo, Shown::Printed),
+    (Msg::DeepMoan, Shown::Printed),
+    (Msg::NoResponseNpc, Shown::Printed),
+    (Msg::NoResponse, Shown::Printed),
+    (Msg::TalkingToYourself, Shown::Printed),
+    (Msg::FunnyNoResponse, Shown::Printed),
+    (Msg::YouSeeFirst, Shown::Printed),
+    (Msg::YouSay, Shown::Printed),
+    (Msg::KeyCommandExpected, Shown::Printed),
+    (Msg::LogicalError, Shown::Printed),
+    (Msg::YouSee, Shown::Printed),
+];
+
+/// Port-only (spec 08, slice K2): whether `msg` is shown through a string slot ([`Shown::Label`]).
+pub fn is_label(msg: Msg) -> bool {
+    SHOWN
+        .iter()
+        .any(|&(m, how)| m == msg && how == Shown::Label)
+}
+
 /// The messages, without their NUL.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConverseText {

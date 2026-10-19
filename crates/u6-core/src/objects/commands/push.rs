@@ -22,6 +22,10 @@ const S_NL_LINE_NL: u32 = 0x0012_859a; // "\n%s\n"
 const S_TO: u32 = 0x0012_85fe;
 const S_NOWHERE: u32 = 0x0012_8602;
 const S_DIR_LINE: u32 = 0x0012_860c; // "%s.\n"
+
+/// Port-only (spec 08, slice K2): the strings this module passes to `printf` as its format,
+/// for the locale layer's catalogue ([`crate::locale::strings`]).
+pub(super) const PRINTED: &[u32] = &[S_BANG_LINE, S_NL_LINE_NL, S_TO, S_NOWHERE, S_DIR_LINE];
 const P_NOTHING: i32 = -0x6c58;
 const P_OUT_OF_RANGE: i32 = -0x6c60;
 const P_BLOCKED: i32 = -0x6c5c;
