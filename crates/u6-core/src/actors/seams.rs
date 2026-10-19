@@ -156,7 +156,8 @@ fn arg_text(s: &State, io: &Io, a: Arg) -> Option<Vec<u8>> {
             .names
             .get(usize::from(i))
             .map_or_else(Vec::new, |n| n.as_bytes().to_vec()),
-        Arg::Name(id) => crate::objects::display_name(s, id.slot()).into_bytes(),
+        // Port (spec 08, slice K3): printed, so the locale pack's object name when it has one.
+        Arg::Name(id) => crate::objects::shown_name(s, id.slot()).into_bytes(),
         Arg::Text(off) => {
             crate::main_loop::game_string(io, crate::image::A4.wrapping_add_signed(off))
         }

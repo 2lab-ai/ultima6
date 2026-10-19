@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 // The Korean pack's translator (spec 08 Design 6; slice K1: conversation runs; slice K2: the
-// conversations' table strings and the game's own messages). It reads the NPC bundles the page
-// downloads (ultima6-npc-bundles.json, one u6.npc-bundle/1 per conversation script, each text
-// segment keyed to its run, each table string to its offset), and the game strings the page's
-// second export writes (ultima6-strings.json, u6.string-bundle/1: the executable's strings the
-// engine shows, each keyed by its hash), translates what is chosen into archaic Korean (사극체,
+// conversations' table strings and the game's own messages; slice K3: the object names and the
+// books and signs). It reads the NPC bundles the page downloads (ultima6-npc-bundles.json, one
+// u6.npc-bundle/1 per conversation script, each text segment keyed to its run, each table string
+// to its offset), and the game strings the page's second export writes (ultima6-strings.json,
+// u6.string-bundle/1: the executable's strings the engine shows, each keyed by its hash, and its
+// `texts`: the object names of look.lzd and the books and signs of book.dat, each keyed by its
+// index with its length and hash), translates what is chosen into archaic Korean (사극체,
 // tools/i18n/style-ko.md) through a model, and writes the pack the page takes in a drop, beside
 // a coverage receipt:
 //
 //   <out>/ko.u6lp        the pack: `U6LP`, a line feed, then {format: u6.locale-pack/1, language:
 //                        ko, tool, base: {converse: <the fingerprint of its scripts>}, converse:
 //                        [{archive, item, offset, len, hash, text}], and when there are any
-//                        tables: [{archive, item, offset, len, hash, capacity?, text}] and
-//                        strings: [{hash, len, text}]} (u6_core::locale)
+//                        tables: [{archive, item, offset, len, hash, capacity?, text}],
+//                        strings: [{hash, len, text}], look: [{index, len, hash, text}] and
+//                        books: [{index, len, hash, text}]} (u6_core::locale)
 //   <out>/coverage.json  u6.locale-coverage/1: the units found, translated and left English by
 //                        reason, by category, scripts and units named by their hashes only
 //
@@ -22,29 +25,40 @@
 //
 // A run MERGES into the pack already in <out>: that pack is read through the tool's strict reader
 // (readPack, the engine's rules) and, when bundles are given, its conversation part is checked
-// against them again (each run and table string still the bundles', the fingerprint theirs); one
-// that does not read or check is refused with no request. What this run translates replaces what
-// the pack had under the same key; the rest stays. A run that translates nothing leaves it as it
-// is. The merged pack is read through the same reader before it replaces anything: one the reader
-// would refuse (past its size or its count of lines) is not written, the pack there and
+// against them again (each run and table string still the bundles', the fingerprint theirs), and
+// when the game strings file lists object names or books, its own are checked against them (each
+// one of the file's, at its index, of its length and hash, as the engine checks them at install);
+// one that does not read or check is refused with no request. What this run translates replaces
+// what the pack had under the same key; the rest stays. A run that translates nothing leaves it as
+// it is. The merged pack is read through the same reader before it replaces anything: one the
+// reader would refuse (past its size or its count of lines) is not written, the pack there and
 // coverage.json left as they were.
 //
 // What is chosen: from the bundles, one script, `--item <archive>:<item>` (the archive letter and
 // item the bundle has) or `--name <text>` (the bundle whose NPC name is that, case folded: one
 // match, else a refusal that counts them; the name is never printed), or the first N scripts with
-// lines in (archive, item) order, `--first N`; and with `--strings <file>`, every game string.
+// lines in (archive, item) order, `--first N`; and with `--strings <file>`, every game string,
+// object name and book it lists, or only the parts `--only` names (strings, look, books).
 // One request per script: the style guide, the speaker's class and register (guessed from its
 // name and description, Pass A of spec 08 §6; `--class` gives it instead), the NPC's name and
 // description, every run of its script in order, escapes kept, and its table strings (a table
 // string an op reads from inside it is left English, `inner`). The game strings go in requests of
-// at most STRINGS_PER_REQUEST strings and STRING_CHARS characters. The answer is JSON only,
-// {"lines": [{"n", "ko"}]}. Each line is checked by the mechanical gates of spec 08 §6 (structure
-// only: the escapes' multiset, Hangul syllables and ASCII only, the josa markers and every `@{`
-// closed as the text layer reads them, the runic text and the line breaks at its ends kept; for a
-// table string the engine copies into a slot, its capacity and no marker; for a game string the
-// same `%` directives in the same order and the reader's length); a line that fails (or that the
-// answer lacks) is asked again once, in a request of the failed lines, then left English and
-// counted. A request that fails or whose answer does not read is asked again once.
+// at most STRINGS_PER_REQUEST strings and STRING_CHARS characters, the object names in requests
+// of at most LOOK_PER_REQUEST names and LOOK_CHARS characters, the books in requests of at most
+// BOOKS_PER_REQUEST books and BOOK_CHARS characters (a longer book alone); a name or a book with
+// no letter to translate (outside its runes, escapes and plural markers) is left English unasked.
+// The answer is JSON only, {"lines": [{"n", "ko"}]}. Each line is checked by the mechanical gates
+// of spec 08 §6 (structure only: the escapes' multiset, Hangul syllables and ASCII only, the josa
+// markers and every `@{` closed as the text layer reads them, the runic text and the line breaks
+// at its ends kept; for a table string the engine copies into a slot, its capacity and no marker;
+// for a game string the same `%` directives in the same order and the reader's length; for an
+// object name no plural marker (the Korean rule drops `/` and `\` with the letters after them,
+// so a Korean name holds none and shows one form), no josa marker or `@{` (it is put inside other
+// text), the directives, the reader's length and a Hangul syllable; for a book the line's gates,
+// the directives, a text under the game's book buffer (0x2800 bytes) and a Hangul syllable); a
+// line that fails (or that the answer lacks) is asked again once, in a request of the failed
+// lines, then left English and counted. A request that fails or whose answer does not read is
+// asked again once.
 //
 // The upload boundary (spec 08 Rights; tools/speech/profile.mjs's, used as it is): the bundles
 // hold the owner's game text, and a request sends one script's of it to llmux on this machine,
@@ -64,8 +78,9 @@
 // kind only.
 //
 //   node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N)]
-//        [--strings <strings.json>] [--class CLASS] [--send | --dry-run] [--model NAME]
-//        [--llmux URL] [--out DIR] [--jobs N] [--timeout SECONDS]
+//        [--strings <strings.json> [--only strings,look,books]] [--class CLASS]
+//        [--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs N]
+//        [--timeout SECONDS]
 import { randomBytes } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -86,7 +101,7 @@ export const DEFAULTS = {
   timeoutS: 900,
 };
 export const JOBS_MAX = 4;
-export const TOOL = 'tools/i18n/translate.mjs/2';
+export const TOOL = 'tools/i18n/translate.mjs/3';
 export const MAX_TOKENS = 32000; // the answer's cap (a reasoning model's thinking counts in it)
 export const PACK_FORMAT = 'u6.locale-pack/1';
 export const COVERAGE_FORMAT = 'u6.locale-coverage/1';
@@ -101,6 +116,16 @@ export const MAX_PACK_BYTES = 16 << 20; // u6_core::locale::MAX_PACK_BYTES
 export const MAX_RUNS = 1 << 16; // u6_core::locale::MAX_RUNS (and MAX_STRINGS)
 export const STRINGS_PER_REQUEST = 60;
 export const STRING_CHARS = 4000; // the English characters of one request of game strings
+export const LOOK_ENTRIES = 2048; // u6_core::locale::texts::LOOK_ENTRIES
+export const MAX_LOOK_BYTES = 256; // u6_core::locale::texts::MAX_LOOK_BYTES
+export const MAX_LOOK_TEXT_BYTES = 3 * MAX_LOOK_BYTES; // u6_core::locale::texts::MAX_LOOK_TEXT_BYTES
+export const BOOK_BYTES = 0x2800; // u6_core::locale::texts::BOOK_BYTES (a book's text is under it)
+export const BOOK_INDICES = 255; // u6_core::locale::texts::BOOK_INDICES
+export const LOOK_PER_REQUEST = 80;
+export const LOOK_CHARS = 3000; // the English characters of one request of object names
+export const BOOKS_PER_REQUEST = 8;
+export const BOOK_CHARS = 6000; // the English characters of one request of books
+export const PARTS = ['strings', 'look', 'books'];
 const BUNDLE_FORMAT = 'u6.npc-bundle/1';
 const BUNDLES_MAX = 256 << 20;
 const LOCK = '.lock';
@@ -181,10 +206,12 @@ const byKey = (x, y) => (x.archive !== y.archive ? (x.archive < y.archive ? -1 :
   : x.item !== y.item ? x.item - y.item : x.offset - y.offset);
 
 /// The pack file (u6_core::locale's form): the magic, a line feed and the JSON object, the runs and
-/// table strings in key order, the game strings in hash order; `tables` and `strings` written only
-/// when there are any (a pack of runs only is K1's file). `runs`: [{archive, item, offset, len,
-/// hash, text}]; `tables`: the same with `capacity` (or null); `strings`: [{hash, len, text}].
-export function packBytes({ language = 'ko', tool = TOOL, base, runs, tables = [], strings = [] }) {
+/// table strings in key order, the game strings in hash order, the object names and books in index
+/// order; `tables`, `strings`, `look` and `books` written only when there are any (a pack of runs
+/// only is K1's file, one without names and books K2's). `runs`: [{archive, item, offset, len,
+/// hash, text}]; `tables`: the same with `capacity` (or null); `strings`: [{hash, len, text}];
+/// `look` and `books`: [{index, len, hash, text}].
+export function packBytes({ language = 'ko', tool = TOOL, base, runs, tables = [], strings = [], look = [], books = [] }) {
   const json = {
     format: PACK_FORMAT,
     language,
@@ -202,6 +229,9 @@ export function packBytes({ language = 'ko', tool = TOOL, base, runs, tables = [
     json.strings = [...strings].sort((x, y) => (x.hash < y.hash ? -1 : x.hash > y.hash ? 1 : 0))
       .map((t) => ({ hash: t.hash, len: t.len, text: t.text }));
   }
+  const entries = (list) => [...list].sort((x, y) => x.index - y.index).map((t) => ({ index: t.index, len: t.len, hash: t.hash, text: t.text }));
+  if (look.length > 0) json.look = entries(look);
+  if (books.length > 0) json.books = entries(books);
   return Buffer.concat([Buffer.from(`${MAGIC}\n`), Buffer.from(JSON.stringify(json), 'utf8')]);
 }
 
@@ -250,8 +280,10 @@ export function duplicateMembers(text) {
 /// Reads a pack file as the engine's reader does (u6_core::locale::Pack::parse): the size, the
 /// magic, JSON of exactly the pack's fields (each once), the format, the language, the tool, every hash 16
 /// hex digits, the limits, each key inside the script buffer and once, each text one the game
-/// can show (a table string's within its capacity, a game string's within the reader's length).
-/// Returns {language, tool, base, converse, tables, strings}; throws PackReadError.
+/// can show (a table string's within its capacity, a game string's within the reader's length),
+/// each object name keyed inside the look table and each book by a quality, a book's text under the
+/// game's book buffer. Returns {language, tool, base, converse, tables, strings, look, books};
+/// throws PackReadError.
 export function readPack(bytes) {
   const fail = (why) => { throw new PackReadError(why); };
   if (bytes.length > MAX_PACK_BYTES) fail('the file is larger than a Korean pack can be');
@@ -269,23 +301,28 @@ export function readPack(bytes) {
     fail(shape);
   }
   if (duplicateMembers(text)) fail(shape);
-  if (!exact(v, ['format', 'language', 'tool', 'base', 'converse'], ['tables', 'strings'])
+  if (!exact(v, ['format', 'language', 'tool', 'base', 'converse'], ['tables', 'strings', 'look', 'books'])
     || typeof v.format !== 'string' || typeof v.language !== 'string' || typeof v.tool !== 'string'
     || !exact(v.base, ['converse']) || typeof v.base.converse !== 'string' || !Array.isArray(v.converse)
-    || (v.tables !== undefined && !Array.isArray(v.tables)) || (v.strings !== undefined && !Array.isArray(v.strings))) fail(shape);
+    || ['tables', 'strings', 'look', 'books'].some((k) => v[k] !== undefined && !Array.isArray(v[k]))) fail(shape);
   const runKeys = ['archive', 'item', 'offset', 'len', 'hash', 'text'];
   const keyed = (r, optional = []) => exact(r, runKeys, optional) && typeof r.archive === 'string' && Number.isInteger(r.item)
     && r.item >= 0 && r.item <= 0xffff && u32(r.offset) && u32(r.len) && typeof r.hash === 'string' && typeof r.text === 'string'
     && (r.capacity === undefined || u32(r.capacity));
   const tables = v.tables ?? [];
   const strings = v.strings ?? [];
+  const look = v.look ?? [];
+  const books = v.books ?? [];
+  const entry = (t) => exact(t, ['index', 'len', 'hash', 'text']) && u32(t.index) && u32(t.len) && typeof t.hash === 'string' && typeof t.text === 'string';
   if (!v.converse.every((r) => keyed(r)) || !tables.every((t) => keyed(t, ['capacity']))
-    || !strings.every((t) => exact(t, ['hash', 'len', 'text']) && typeof t.hash === 'string' && u32(t.len) && typeof t.text === 'string')) fail(shape);
+    || !strings.every((t) => exact(t, ['hash', 'len', 'text']) && typeof t.hash === 'string' && u32(t.len) && typeof t.text === 'string')
+    || !look.every(entry) || !books.every(entry)) fail(shape);
   if (v.format !== PACK_FORMAT) fail(`it is not of this page's pack format (${PACK_FORMAT})`);
   if (!['en', 'ko'].includes(v.language)) fail('it declares a language this page does not have');
   if (v.tool.length === 0 || v.tool.length > 64 || !/^[\x20-\x7e]+$/.test(v.tool)) fail('it does not name the tool that made it');
   if (!hex16(v.base.converse)) fail('a hash in it is not 16 hex digits');
-  if (v.converse.length > MAX_RUNS || tables.length > MAX_RUNS || strings.length > MAX_RUNS) fail('it holds more lines than a pack can');
+  if (v.converse.length > MAX_RUNS || tables.length > MAX_RUNS || strings.length > MAX_RUNS
+    || look.length > LOOK_ENTRIES || books.length > BOOK_INDICES) fail('it holds more lines than a pack can');
   const seen = new Set();
   const place = (r) => {
     if (!['a', 'b'].includes(r.archive)) fail('a line in it is keyed outside the conversation scripts');
@@ -315,7 +352,24 @@ export function readPack(bytes) {
     if (seen.has(t.hash)) fail('it holds one line twice');
     seen.add(t.hash);
   }
-  return { language: v.language, tool: v.tool, base: v.base.converse, converse: v.converse, tables, strings };
+  // The engine reads every hash of the names and the books before it checks any of them.
+  if (![...look, ...books].every((t) => hex16(t.hash))) fail('a hash in it is not 16 hex digits');
+  seen.clear();
+  for (const t of look) {
+    if (t.index >= LOOK_ENTRIES || t.len < 1 || t.len > MAX_LOOK_BYTES || Buffer.byteLength(t.text) > MAX_LOOK_TEXT_BYTES) fail('an object name in it is not one the game\'s look table holds');
+    if (!textOk(t.text, MAX_LOOK_TEXT_BYTES)) fail('a line in it holds a character the game cannot show');
+    if (seen.has(t.index)) fail('it holds one line twice');
+    seen.add(t.index);
+  }
+  seen.clear();
+  for (const t of books) {
+    if (t.index >= BOOK_INDICES || t.len < 1 || t.len > BOOK_BYTES) fail('a book in it is not one the game\'s book file holds');
+    if (Buffer.byteLength(t.text) >= BOOK_BYTES) fail('a book in it is longer than the game reads a book');
+    if (!textOk(t.text, BOOK_BYTES)) fail('a line in it holds a character the game cannot show');
+    if (seen.has(t.index)) fail('it holds one line twice');
+    seen.add(t.index);
+  }
+  return { language: v.language, tool: v.tool, base: v.base.converse, converse: v.converse, tables, strings, look, books };
 }
 
 // --- the escapes and the gates ---------------------------------------------------------------
@@ -484,6 +538,49 @@ export function stringGate(en, ko) {
   return null;
 }
 
+const hangul = (ko) => /[가-힣]/.test(ko);
+
+/// `en` without its plural markers: each `/` or `\` and the ASCII letters after it (the Korean
+/// rule of spec 08 §1: they print nothing).
+export const withoutPlural = (en) => en.replace(/[/\\][A-Za-z]*/g, '');
+
+/// Why `ko` is not a translation of object name `en` the engine can take, or null: no josa marker
+/// or `@{` (a name is put inside other text), no plural marker (in Korean they print nothing, so a
+/// name holds none and shows one form for any count), the line's gates on the English without its
+/// markers, the same `%` directives in order (it is printed as a format), the reader's length,
+/// and a Hangul syllable.
+export function lookGate(en, ko) {
+  if (typeof ko === 'string' && hasMarker(ko)) return 'raw';
+  if (typeof ko === 'string' && /[/\\]/.test(ko)) return 'plural';
+  const why = gate(withoutPlural(en), ko);
+  if (why) return why;
+  const [a, b] = [directivesOf(en), directivesOf(ko)];
+  if (a.length !== b.length || a.some((d, i) => d !== b[i])) return 'directives';
+  if (Buffer.byteLength(ko) > MAX_LOOK_TEXT_BYTES) return 'long';
+  if (!hangul(ko)) return 'no-hangul';
+  return null;
+}
+
+/// Why `ko` is not a translation of book or sign `en` the engine can take, or null: the line's
+/// gates, the same `%` directives in order (it is printed as a format), a text under the game's
+/// book buffer (BOOK_BYTES), and a Hangul syllable.
+export function bookGate(en, ko) {
+  const why = gate(en, ko);
+  if (why) return why;
+  const [a, b] = [directivesOf(en), directivesOf(ko)];
+  if (a.length !== b.length || a.some((d, i) => d !== b[i])) return 'directives';
+  if (Buffer.byteLength(ko) >= BOOK_BYTES) return 'capacity';
+  if (!hangul(ko)) return 'no-hangul';
+  return null;
+}
+
+/// Whether `en` (an object name or a book) has a letter to translate: one outside its runes
+/// (`<…>`), its escapes and its plural markers.
+export function hasLetters(en) {
+  const open = withoutPlural(en).replace(/<[^>]*(>|$)/g, '');
+  return /[A-Za-z]/.test(open.replace(/[$#^][\s\S]?/g, ''));
+}
+
 // --- the bundles -----------------------------------------------------------------------------
 
 /// The runs of `bundle` (u6.npc-bundle/1) in script order, each once: {offset, text, joins}
@@ -595,6 +692,32 @@ export function stringsBodyOf(model, system, units) {
   return JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: [{ role: 'user', content: user }] });
 }
 
+/// The instruction a request of object names and books carries: the task, the answer's form,
+/// then the guide.
+export function textsSystemOf(style) {
+  return [
+    'You translate the object names and the books and signs of a role-playing game, Ultima VI,',
+    'from its faux-archaic English into archaic Korean (사극체), following the guide below. The',
+    'request is JSON: the texts, each {"n": <number>, "en": "<text>", "kind": "look" | "book"}.',
+    'A "look" text is the name the game gives a thing: a plain noun phrase, with no honorific, no',
+    'article, no particle marker and no plural marker (drop / and \\ with the letters after them:',
+    'Korean shows one form for any count). A "book" text is a book or a sign, read in 사극체: keep',
+    'every escape character and every % directive exactly, in the same order, the text between <',
+    'and > (runes) as it is, and the line breaks at its ends. Answer with one JSON object and',
+    'nothing else:',
+    '{"lines": [{"n": <number>, "ko": "<the Korean text>"}]}',
+    'with exactly one entry for every text asked, its own n.',
+    '',
+    style,
+  ].join('\n');
+}
+
+/// The request body for object names and books `units` (the exact bytes sent): a Messages call.
+export function textsBodyOf(model, system, units) {
+  const user = JSON.stringify({ texts: units.map((u) => ({ n: u.n, en: u.text, kind: u.kind })) });
+  return JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: [{ role: 'user', content: user }] });
+}
+
 /// The lines of an answer: a Map of n to its Korean text, or null when it is not JSON of the
 /// answer's form (a code fence around it allowed).
 export function linesOfAnswer(content) {
@@ -648,6 +771,60 @@ export function planOf(value, { item = null, first = null, name = null, cls = nu
   return { read: value.length, usable: usable.length, scripts, bundles: value };
 }
 
+/// The object names and books of `value` (the parsed u6.string-bundle/1, its `texts`) of the parts
+/// `only` names, as the units to translate: the names in requests of at most LOOK_PER_REQUEST and
+/// LOOK_CHARS characters, the books of at most BOOKS_PER_REQUEST and BOOK_CHARS characters (a
+/// longer book alone); one with no letter to translate is left English unasked (`nothing`).
+/// Throws a fixed message (a count at most) when an entry is not of the form, its text, length
+/// and hash disagree, or it is keyed where no pack keys one. `all`: every name and book listed,
+/// for the check of the pack already there.
+export function textsPlanOf(value, only = PARTS) {
+  const list = value.texts ?? [];
+  if (!Array.isArray(list)) throw new InputError(`the file is not ${STRINGS_FORMAT}`);
+  const ok = (t) => plain(t) && ['look', 'book'].includes(t.kind) && Number.isInteger(t.index) && t.index >= 0
+    && t.index < (t.kind === 'look' ? LOOK_ENTRIES : BOOK_INDICES) && hex16(t.hash) && Number.isInteger(t.len)
+    && typeof t.text === 'string' && ![...t.text].some((c) => c.charCodeAt(0) > 0xff) && latin1(t.text).length === t.len
+    && t.len >= 1 && t.len <= (t.kind === 'look' ? MAX_LOOK_BYTES : BOOK_BYTES) && hex64(hash64(latin1(t.text))) === t.hash;
+  const bad = list.filter((t) => !ok(t)).length;
+  if (bad > 0) throw new InputError(`${bad} texts of the file are not object names or books of ${STRINGS_FORMAT}`);
+  const unique = (kind) => [...new Map(list.filter((t) => t.kind === kind).map((t) => [t.index, t])).values()];
+  const all = { look: unique('look'), books: unique('book') };
+  const batches = [];
+  for (const [part, kind, most, chars] of [['look', 'look', LOOK_PER_REQUEST, LOOK_CHARS], ['books', 'book', BOOKS_PER_REQUEST, BOOK_CHARS]]) {
+    if (!only.includes(part)) continue;
+    const left = [];
+    let batch = [];
+    let n = 0;
+    for (const t of all[part]) {
+      const unit = { kind, index: t.index, hash: t.hash, len: t.len, text: t.text };
+      if (!hasLetters(t.text)) {
+        left.push({ ...unit, n: left.length, done: true, why: 'nothing' });
+        continue;
+      }
+      if (batch.length > 0 && (batch.length >= most || n + t.text.length > chars)) {
+        batches.push({ kind: 'texts', units: batch });
+        batch = [];
+        n = 0;
+      }
+      batch.push({ ...unit, n: batch.length });
+      n += t.text.length;
+    }
+    if (batch.length > 0) batches.push({ kind: 'texts', units: batch });
+    // Left English unasked: in a group of their own, which sends nothing.
+    if (left.length > 0) batches.push({ kind: 'texts', units: left });
+  }
+  return { read: list.length, batches, all };
+}
+
+/// Whether the object names and books of the pack read from <out> (`existing`, readPack's) are
+/// those of the files the game strings file was exported from (`all`, textsPlanOf's): each of a
+/// kind the file lists is one of its, at that index, of that length and hash (the engine refuses
+/// the whole pack at install otherwise).
+export function textsRecheckOf(existing, all) {
+  const same = (mine, theirs) => theirs.length === 0 || mine.every((t) => theirs.some((u) => u.index === t.index && u.len === t.len && u.hash === t.hash));
+  return same(existing.look, all.look) && same(existing.books, all.books);
+}
+
 /// The game strings of `value` (the parsed u6.string-bundle/1) as the units to translate, in
 /// requests of at most STRINGS_PER_REQUEST strings and STRING_CHARS characters. Throws a fixed
 /// message (a count at most) when the file is not of that form or a string's text, length and hash
@@ -685,7 +862,8 @@ export function stringsPlanOf(value) {
 function checked(script, answer) {
   const good = new Map();
   const failed = new Map();
-  const gateOf = (u, ko) => (u.kind === 'table' ? tableGate(u, ko) : u.kind === 'string' ? stringGate(u.text, ko) : gate(u.text, ko));
+  const gateOf = (u, ko) => (u.kind === 'table' ? tableGate(u, ko) : u.kind === 'string' ? stringGate(u.text, ko)
+    : u.kind === 'look' ? lookGate(u.text, ko) : u.kind === 'book' ? bookGate(u.text, ko) : gate(u.text, ko));
   for (const u of script.units) {
     if (u.done) continue;
     const ko = answer?.lines?.get(u.n);
@@ -761,6 +939,13 @@ export function outputsOf(plan, model, existing = null) {
     if (u.ko !== undefined) strings.push({ hash: u.hash, len: u.len, text: u.ko });
     else left.push({ category: 'strings', hash: u.hash, reason: u.why ?? 'not-sent' });
   }
+  const textUnits = (plan.texts?.batches ?? []).flatMap((b) => b.units);
+  const look = [];
+  const books = [];
+  for (const u of textUnits) {
+    if (u.ko !== undefined) (u.kind === 'look' ? look : books).push({ index: u.index, len: u.len, hash: u.hash, text: u.ko });
+    else left.push({ category: u.kind === 'look' ? 'look' : 'books', hash: u.hash, reason: u.why ?? 'not-sent' });
+  }
   const runUnits = plan.scripts.flatMap((s) => s.units.filter((u) => u.kind !== 'table'));
   const tableUnits = plan.scripts.flatMap((s) => s.units.filter((u) => u.kind === 'table'));
   const coverage = {
@@ -772,6 +957,8 @@ export function outputsOf(plan, model, existing = null) {
     units: tally(runUnits),
     tables: tally(tableUnits),
     strings: { read: plan.strings?.read ?? 0, ...tally(stringUnits) },
+    look: tally(textUnits.filter((u) => u.kind === 'look')),
+    books: tally(textUnits.filter((u) => u.kind === 'book')),
     perScript,
     left,
   };
@@ -779,10 +966,14 @@ export function outputsOf(plan, model, existing = null) {
   const newRuns = new Set(runs.map(key));
   const newTables = new Set(tables.map(key));
   const newStrings = new Set(strings.map((t) => t.hash));
+  const newLook = new Set(look.map((t) => t.index));
+  const newBooks = new Set(books.map((t) => t.index));
   const merged = {
     runs: [...(existing?.converse ?? []).filter((r) => !newRuns.has(key(r))), ...runs],
     tables: [...(existing?.tables ?? []).filter((t) => !newTables.has(key(t))), ...tables],
     strings: [...(existing?.strings ?? []).filter((t) => !newStrings.has(t.hash)), ...strings],
+    look: [...(existing?.look ?? []).filter((t) => !newLook.has(t.index)), ...look],
+    books: [...(existing?.books ?? []).filter((t) => !newBooks.has(t.index)), ...books],
   };
   let base = existing?.base ?? fingerprint([]);
   if (plan.bundles) {
@@ -791,30 +982,30 @@ export function outputsOf(plan, model, existing = null) {
     for (const r of [...merged.runs, ...merged.tables]) named.set(`${r.archive}:${r.item}`, { archive: r.archive, item: r.item, hash: hashes.get(`${r.archive}:${r.item}`) });
     base = fingerprint([...named.values()]);
   }
-  const changed = runs.length + tables.length + strings.length > 0;
+  const changed = runs.length + tables.length + strings.length + look.length + books.length > 0;
   const pack = changed ? packBytes({ base, ...merged }) : null;
   return {
-    pack, coverage, runs: runs.length, tables: tables.length, strings: strings.length,
-    total: { runs: merged.runs.length, tables: merged.tables.length, strings: merged.strings.length },
+    pack, coverage, runs: runs.length, tables: tables.length, strings: strings.length, look: look.length, books: books.length,
+    total: { runs: merged.runs.length, tables: merged.tables.length, strings: merged.strings.length, look: merged.look.length, books: merged.books.length },
   };
 }
 
 const USAGE = 'usage: node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N)] '
-  + '[--strings <strings.json>] [--class CLASS] '
+  + '[--strings <strings.json> [--only strings,look,books]] [--class CLASS] '
   + `[--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs 1-${JOBS_MAX}] [--timeout SECONDS]`;
 
 /// The options of `argv`, or {error}.
 export function parseArgs(argv) {
   const o = { send: false, dryRun: false, model: DEFAULTS.model, llmux: DEFAULTS.llmux, out: DEFAULTS.out,
     jobs: DEFAULTS.jobs, timeoutS: DEFAULTS.timeoutS, bundles: null, strings: null, item: null, first: null,
-    name: null, cls: null, help: false };
+    name: null, cls: null, only: null, help: false };
   const value = (i) => (i + 1 < argv.length ? argv[i + 1] : null);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--send') o.send = true;
     else if (a === '--dry-run') o.dryRun = true;
     else if (a === '--help' || a === '-h') o.help = true;
-    else if (['--model', '--llmux', '--out', '--jobs', '--timeout', '--item', '--first', '--class', '--name', '--strings'].includes(a)) {
+    else if (['--model', '--llmux', '--out', '--jobs', '--timeout', '--item', '--first', '--class', '--name', '--strings', '--only'].includes(a)) {
       const v = value(i);
       if (v === null) return { error: `${a} needs a value` };
       i += 1;
@@ -827,6 +1018,7 @@ export function parseArgs(argv) {
       else if (a === '--class') o.cls = v;
       else if (a === '--name') o.name = v;
       else if (a === '--strings') o.strings = resolve(v);
+      else if (a === '--only') o.only = v.split(',');
       else {
         const m = /^([ab]):([0-9]{1,5})$/.exec(v);
         if (!m) return { error: '--item is <archive>:<item>, the archive a or b' };
@@ -841,6 +1033,9 @@ export function parseArgs(argv) {
   const choices = [o.item, o.first, o.name].filter((c) => c !== null).length;
   if (o.bundles !== null && choices !== 1) return { error: 'name one script with --item or --name, or --first N' };
   if (o.bundles === null && choices > 0) return { error: '--item, --name and --first choose from a bundles file' };
+  if (o.only !== null && (o.strings === null || o.only.length === 0 || o.only.some((p) => !PARTS.includes(p)))) {
+    return { error: `--only names parts of the --strings file: ${PARTS.join(', ')}` };
+  }
   if (o.first !== null && (!Number.isInteger(o.first) || o.first < 1)) return { error: '--first is a number of scripts above 0' };
   if (o.name !== null && o.name.length === 0) return { error: '--name is an NPC\'s name' };
   if (o.cls !== null && !Object.hasOwn(CLASSES, o.cls)) return { error: `--class is one of ${Object.keys(CLASSES).join(', ')}` };
@@ -908,9 +1103,10 @@ export async function main(argv, {
   }
   const system = systemOf(guide);
   const stringsSystem = stringsSystemOf(guide);
+  const textsSystem = textsSystemOf(guide);
 
   // The bundles and the game strings, and what to send of them.
-  const plan = { read: 0, usable: 0, scripts: [], bundles: null, strings: null };
+  const plan = { read: 0, usable: 0, scripts: [], bundles: null, strings: null, texts: null };
   try {
     if (o.bundles !== null) {
       const { value, size } = await readJson(o.bundles, 'bundles');
@@ -923,10 +1119,19 @@ export async function main(argv, {
     }
     if (o.strings !== null) {
       const { value, size } = await readJson(o.strings, 'game strings');
-      plan.strings = stringsPlanOf(value);
-      const n = plan.strings.batches.reduce((m, b) => m + b.units.length, 0);
-      const chars = plan.strings.batches.reduce((m, b) => m + b.units.reduce((k, u) => k + u.text.length, 0), 0);
-      say(`Game strings: ${plan.strings.read} read from ${o.strings} (${size} bytes); ${n} to translate, ${chars} characters.`);
+      const only = o.only ?? PARTS;
+      const strings = stringsPlanOf(value);
+      plan.texts = textsPlanOf(value, only);
+      if (only.includes('strings')) plan.strings = strings;
+      const count = (batches, kind) => batches.reduce((m, b) => m + b.units.filter((u) => !u.done && (!kind || u.kind === kind)).length, 0);
+      const chars = (batches) => batches.reduce((m, b) => m + b.units.reduce((k, u) => k + (u.done ? 0 : u.text.length), 0), 0);
+      say(`Game strings: ${strings.read} read from ${o.strings} (${size} bytes); `
+        + (plan.strings ? `${count(strings.batches)} to translate, ${chars(strings.batches)} characters.` : 'none chosen.'));
+      const { all, batches } = plan.texts;
+      if (all.look.length + all.books.length > 0) {
+        say(`Object names and books: ${all.look.length} names and ${all.books.length} books read; ${count(batches, 'look')} names and `
+          + `${count(batches, 'book')} books to translate, ${chars(batches)} characters.`);
+      }
     }
   } catch (err) {
     if (err instanceof InputError) say(`translate: ${err.message}`);
@@ -935,9 +1140,10 @@ export async function main(argv, {
   }
   const jobOf = (g, units) => ({
     script: g,
-    body: g.kind === 'strings' ? stringsBodyOf(o.model, stringsSystem, units) : bodyOf(o.model, system, g.bundle, g.cls, units),
+    body: g.kind === 'strings' ? stringsBodyOf(o.model, stringsSystem, units)
+      : g.kind === 'texts' ? textsBodyOf(o.model, textsSystem, units) : bodyOf(o.model, system, g.bundle, g.cls, units),
   });
-  const groups = [...plan.scripts, ...(plan.strings?.batches ?? [])];
+  const groups = [...plan.scripts, ...(plan.strings?.batches ?? []), ...(plan.texts?.batches ?? [])];
   const jobs = groups.map((g) => jobOf(g, g.units.filter((u) => !u.done))).filter((j) => j.script.units.some((u) => !u.done));
   if (jobs.length === 0) {
     say('Nothing to translate: nothing was sent.');
@@ -946,8 +1152,10 @@ export async function main(argv, {
 
   // The boundary: the route named, the first payload written, and the owner's go.
   say(`Route: llmux on this machine (${route.origin}), then ${providerOf(o.model)} (model ${o.model}).`);
+  const parts = new Set(jobs.map((j) => j.script.kind));
   const what = [plan.scripts.length > 0 ? 'one script\'s lines with its NPC\'s name and description' : null,
-    plan.strings ? `up to ${STRINGS_PER_REQUEST} of the game's own strings` : null].filter(Boolean).join(', or ');
+    parts.has('strings') ? `up to ${STRINGS_PER_REQUEST} of the game's own strings` : null,
+    parts.has('texts') ? `up to ${LOOK_PER_REQUEST} object names or ${BOOKS_PER_REQUEST} books` : null].filter(Boolean).join(', or ');
   say(`It sends the owner's game text: ${jobs.length} requests, each ${what}; up to ${o.jobs} at a time, `
     + 'and a request again for lines that fail the checks.');
   let release;
@@ -989,8 +1197,13 @@ export async function main(argv, {
         say(`translate: the pack in ${o.out} was made from other game files (its conversation part): move it away to make a new one; nothing was sent.`);
         return 2;
       }
+      if (plan.texts && !textsRecheckOf(existing, plan.texts.all)) {
+        say(`translate: the pack in ${o.out} was made from other game files (its object names or books): move it away to make a new one; nothing was sent.`);
+        return 2;
+      }
       say(`Pack: ${packPath} holds ${existing.converse.length} lines, ${existing.tables.length} table strings and `
-        + `${existing.strings.length} game strings; what this run translates is merged into it.`);
+        + `${existing.strings.length} game strings${existing.look.length + existing.books.length > 0 ? `, ${existing.look.length} object names and ${existing.books.length} books` : ''}; `
+        + 'what this run translates is merged into it.');
     }
     return await consentAndSend(o, plan, jobs, jobOf, existing, route, { transport, stdin, stdout, isTTY, signals, now, say });
   } finally {
@@ -1109,6 +1322,9 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, route, { transport
     const c = coverage.strings;
     say(`Game strings: ${c.found} found, ${c.translated} translated, ${c.leftEnglish} left English${reasons(c)}.`);
   }
+  for (const [what, c] of [['Object names', coverage.look], ['Books', coverage.books]]) {
+    if (c.found > 0) say(`${what}: ${c.found} found, ${c.translated} translated, ${c.leftEnglish} left English${reasons(c)}.`);
+  }
   // The whole merged pack through the reader before anything is replaced: one past the reader's
   // limits (the size, the lines) would be refused by the page and by the next run.
   if (out.pack) {
@@ -1123,8 +1339,9 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, route, { transport
   const written = [];
   if (out.pack) {
     const path = join(o.out, 'ko.u6lp');
+    const texts = out.total.look + out.total.books > 0 ? `, ${out.total.look} object names, ${out.total.books} books` : '';
     written.push(`${path} (${await writePrivate(path, out.pack)} bytes: ${out.total.runs} lines, ${out.total.tables} table strings, `
-      + `${out.total.strings} game strings; ${out.runs + out.tables + out.strings} from this run)`);
+      + `${out.total.strings} game strings${texts}; ${out.runs + out.tables + out.strings + out.look + out.books} from this run)`);
   }
   const cpath = join(o.out, 'coverage.json');
   written.push(`${cpath} (${await writePrivate(cpath, JSON.stringify(coverage, null, 1))} bytes)`);
@@ -1133,7 +1350,8 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, route, { transport
   else say(existing ? 'No line was translated: the pack there is left as it was.' : 'No line was translated: no pack was written.');
   if (stopper.signal.aborted) return 130;
   if (!out.pack) return 3;
-  const leftEnglish = coverage.units.leftEnglish + coverage.tables.leftEnglish + coverage.strings.leftEnglish;
+  const leftEnglish = coverage.units.leftEnglish + coverage.tables.leftEnglish + coverage.strings.leftEnglish
+    + coverage.look.leftEnglish + coverage.books.leftEnglish;
   return leftEnglish > 0 ? 3 : 0;
 }
 

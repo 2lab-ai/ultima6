@@ -253,7 +253,8 @@ pub fn attack_with_weapon(s: &mut State) {
             let (x, y) = s.ui.input.target;
             let z = u16::from(s.map.centre.z);
             let t = crate::actors::seams::tile_at(s, x as u16, y as u16, z);
-            let look = crate::objects::look_text(s, u16::from(t)).into_bytes();
+            // Port (spec 08, slice K3): shown, so the locale pack's object name when it has one.
+            let look = crate::objects::shown_look(s, u16::from(t)).into_bytes();
             say(s, NAMED, vec![Text::Str(look)]);
         }
         if s.ui.input.selection != attacker {

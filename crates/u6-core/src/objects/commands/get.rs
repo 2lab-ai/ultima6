@@ -8,7 +8,7 @@ use super::world::{self, P_NO_EFFECT};
 use crate::engine::Io;
 use crate::objects::iter::tile_of;
 use crate::objects::moves::{add_to_owner, move_into, remove};
-use crate::objects::{IN_INVENTORY, READIED, Slot, display_name, mark_takeable, stack_kind};
+use crate::objects::{IN_INVENTORY, READIED, Slot, mark_takeable, shown_name, stack_kind};
 use crate::state::State;
 use crate::ui::printf::Arg;
 
@@ -132,7 +132,7 @@ pub async fn get(state: &RefCell<State>, io: &Io) {
         }
         world::name_prefix(&mut s, sel);
     }
-    let name = display_name(&state.borrow(), sel).into_bytes();
+    let name = shown_name(&state.borrow(), sel).into_bytes();
     print(state, io, &name, &[]).await;
     putc(state, io, b'\n').await;
     let (ax, ay, (tx, ty)) = {

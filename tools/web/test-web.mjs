@@ -5050,7 +5050,9 @@ test('Korean pack with game strings in a game (the user\'s disks, a synthetic co
   assert.equal(exported.format, 'u6.string-bundle/1');
   assert.ok(exported.strings.length > 0, 'strings');
   assert.ok(exported.strings.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len >= 3), 'each keyed by its hash');
-  assert.equal((await h.state(page)).status, ko.stringsExported(exported.strings.length, 'ultima6-strings.json'), 'the line, counts only');
+  const looks = (exported.texts ?? []).filter((e) => e.kind === 'look').length;
+  const line = ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks, (exported.texts ?? []).length - looks);
+  assert.equal((await h.state(page)).status, line, 'the line, counts only');
   const fx = await koStringsFixture(exported);
   assert.ok(fx.strings > 0 && fx.refused < fx.strings, `strings kept ${fx.strings}, refused by the gates ${fx.refused}`);
   // The test's converse.a in place of the user's, then the pack: the game restarts with it.
@@ -5124,6 +5126,148 @@ test('Korean pack with game strings in a game (the user\'s disks, a synthetic co
     assert.ok(!words.some((m) => m.includes(w)), 'nor in the console');
   }
   assert.ok(!where.includes(KO_WORD), 'nor the pack\'s text');
+}, { needs: h.haveHfes });
+
+// --- the Korean pack's object names and books (spec 08, slice K3) -----------------------------
+
+// The made-up syllable every object name and book of the pack shows (not K2's, so the Look
+// label of a K2 pack never stands in for it; none of the fixture's lines has it).
+const KO_NAME = '꽑';
+
+// `e` (an object name or a book of the export) as the tool's gates take it: the line breaks at
+// its ends, every `%` directive and every other escape kept in order, the runes as they are, a
+// name's plural markers and their letters dropped (spec 08 §1), the rest one made-up `word`.
+function madeUpText(e, word, withoutPlural) {
+  const en = e.kind === 'look' ? withoutPlural(e.text) : e.text;
+  const lead = /^\n*/.exec(en)[0];
+  const trail = /\n*$/.exec(en.slice(lead.length))[0];
+  const body = en.slice(lead.length, en.length - trail.length);
+  let kept = '';
+  for (let i = 0; i < body.length; i += 1) {
+    const c = body[i];
+    if (c === '<') {
+      const end = body.indexOf('>', i);
+      const to = end < 0 ? body.length : end + 1;
+      kept += body.slice(i, to);
+      i = to - 1;
+    } else if (c === '%') {
+      const d = /^%(?:[1-9][0-9]*\$)?[-0]*[0-9]*[\s\S]?/.exec(body.slice(i))[0];
+      kept += d;
+      i += d.length - 1;
+    } else if ('$#^'.includes(c)) {
+      kept += body.slice(i, i + 2);
+      i += 1;
+    } else if ('*&`/\\@'.includes(c)) kept += c;
+  }
+  return lead + word + kept + trail;
+}
+
+// The pack of the export's object names and books, every one the made-up syllable within the
+// tool's gates (counted when one fails them and is left out), made with the tool's own writer.
+async function koTextsFixture(exported) {
+  const { bookGate, fingerprint, lookGate, packBytes, withoutPlural } = await import('../i18n/translate.mjs');
+  const look = [];
+  const books = [];
+  let refused = 0;
+  for (const e of exported.texts ?? []) {
+    const ko = madeUpText(e, KO_NAME, withoutPlural);
+    const why = e.kind === 'look' ? lookGate(e.text, ko) : bookGate(e.text, ko);
+    if (why === null) (e.kind === 'look' ? look : books).push({ index: e.index, len: e.len, hash: e.hash, text: ko });
+    else refused += 1;
+  }
+  const pack = [...packBytes({ base: fingerprint([]), runs: [], look, books })];
+  return { pack, look: look.length, books: books.length, refused };
+}
+
+const textCounts = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen').dataset;
+  return {
+    pack: document.body.dataset.localePackTexts,
+    lookHits: Number(c.localeLookHits ?? 0), lookMisses: Number(c.localeLookMisses ?? 0),
+    bookHits: Number(c.localeBookHits ?? 0), bookMisses: Number(c.localeBookMisses ?? 0),
+  };
+});
+
+// Look one step away from the leader (the cross-hair moved by `dir`, confirmed with Enter), the
+// window's cells read once it has printed; then the window let go and the prompt back.
+async function lookAt(page, dir) {
+  await page.focus('#screen');
+  await page.keyboard.press('l');
+  await h.waitTaken(page);
+  await page.keyboard.press(dir);
+  await h.waitTaken(page);
+  await page.keyboard.press('Enter');
+  await h.waitTaken(page);
+  await h.waitTicks(page, 120);
+  const cells = await cellsShown(page, await hangulGlyphs(KO_NAME));
+  for (let i = 0; i < 3; i += 1) {
+    await page.keyboard.press('Space');
+    await h.waitTaken(page);
+  }
+  await h.waitPrompt(page);
+  return cells;
+}
+
+test('Korean pack with object names and books in a game (the user\'s disks): Game strings also downloads the object names and the books and signs of the kept files, the status line counts only; a pack made at test time from that export (every name and book the made-up syllable within the tool\'s gates) shows the syllable as the name Look gives the thing next to the leader; Forget the Korean pack: English again; no name or book reaches the console, the page\'s data or text', async (env) => {
+  const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  const words = consoleText(page);
+  await h.load(page, env);
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  const before = await pageWords(page);
+  const [download] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.click('#game-strings')]);
+  const exported = JSON.parse(await readFile(await download.path(), 'utf8'));
+  await h.waitSettled(page);
+  const texts = exported.texts ?? [];
+  const looks = texts.filter((e) => e.kind === 'look');
+  const books = texts.filter((e) => e.kind === 'book');
+  assert.ok(looks.length > 0 && books.length > 0 && looks.length + books.length === texts.length, 'object names and books');
+  assert.ok(texts.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len === Buffer.from(e.text, 'latin1').length), 'each keyed by its hash');
+  assert.equal((await h.state(page)).status, ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks.length, books.length), 'the line, counts only');
+  const fx = await koTextsFixture(exported);
+  assert.ok(fx.look > 0 && fx.books > 0, `names kept ${fx.look}, books kept ${fx.books}, refused by the gates ${fx.refused}`);
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: fx.pack }]);
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  let shown = await localeShown(page);
+  assert.deepEqual([shown.pack, shown.locale], ['0,0', 'on'], 'the pack on the game');
+  assert.equal((await textCounts(page)).pack, `${fx.look},${fx.books}`, 'its names and books, counted');
+  assert.ok((await h.state(page)).status.includes(ko.koPackOn(0, 0, 0, 0, fx.look, fx.books)), 'its line, counts only');
+  // Look one step away, a direction at a time, until a thing's name (not a party member's) shows.
+  let dir = null;
+  for (const d of ['ArrowUp', 'ArrowLeft', 'ArrowRight', 'ArrowDown']) {
+    const cells = await lookAt(page, d);
+    if (cells.found.size === 1) {
+      dir = d;
+      break;
+    }
+  }
+  assert.ok(dir !== null, 'the made-up syllable as a name Look gives');
+  let counts = await textCounts(page);
+  const [hits, missed] = [counts.lookHits, counts.lookMisses];
+  assert.ok(hits >= 1, `object names from the pack (${hits}, missed ${missed})`);
+  // Forget the Korean pack: the game restarts in English.
+  await page.click('#forget-ko');
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  shown = await localeShown(page);
+  assert.deepEqual([shown.pack, shown.locale], ['none', 'off'], 'forgotten: English');
+  assert.equal((await textCounts(page)).pack, 'none');
+  const english = await lookAt(page, dir);
+  assert.ok(english.found.size === 0 && english.inked > 0, 'Look in English: no made-up syllable');
+  counts = await textCounts(page);
+  assert.deepEqual([counts.lookHits, counts.bookHits], [0, 0], 'nothing from a pack');
+  const where = await pageWords(page);
+  const long = texts.map((e) => e.text.trim()).filter((t) => t.length >= 10 && !before.includes(t));
+  assert.ok(long.length > 0, 'texts to look for');
+  for (const w of long) {
+    assert.ok(!where.includes(w), 'no name or book in the page\'s data, text or storage');
+    assert.ok(!words.some((m) => m.includes(w)), 'nor in the console');
+  }
+  assert.ok(!where.includes(KO_NAME), 'nor the pack\'s text');
+  console.log(`  receipt: object names ${fx.look}, books ${fx.books}, refused by the gates ${fx.refused}; Look ${dir}: names from the pack ${hits}, missed ${missed}`);
 }, { needs: h.haveHfes });
 
 const filter = process.argv[2];

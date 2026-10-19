@@ -93,3 +93,27 @@ Incantation syllables, runic text and the credits are not translated.
 | label | `Seek` | `찾기` |
 | format | `\n%s is too heavy.\n` | `\n%s{은/는} 너무 무겁소.\n` |
 | message | `Thou canst not.` | `그리할 수 없소.` |
+
+## Object names, books and signs (slice K3)
+
+- A request of `"kind": "look"` texts holds the names the game gives things when the player
+  looks at them (a sword, a bed, a wall), and the game puts each one inside its own lines
+  ("그대는 … 보오"). Write a **plain noun phrase**: no honorific, no ending, no article (Korean
+  has none), no particle marker (`{이/가}` and the rest belong to the line around it) and no
+  `@{…}`.
+- English names carry plural markers: `/` with the letters for one thing, `\` with the letters
+  for many (`kni/fe\ves`). Korean shows one form for any count, and in Korean the game prints
+  neither marker nor its letters, so drop them: write the name once, with no `/` and no `\`.
+- A request of `"kind": "book"` texts holds what a book or a sign says when it is read. Write it
+  in 사극체 as a narrator or as its writer would (하오체 by default; a royal decree in 해라체),
+  and keep everything the conversation lines keep: every escape and `%` directive in the same
+  order, the text between `<` and `>` (runes) exactly as it is, the line breaks at its start and
+  its end. A book is at most 10239 bytes of UTF-8 (a syllable is 3 bytes).
+- Every name and every book needs at least one Hangul syllable; a text whose only letters are
+  runes is not sent.
+
+| Kind | English | Korean |
+|---|---|---|
+| look | `copper teapot` | `구리 찻주전자` |
+| look | `basket\s of plums` | `자두 바구니` |
+| book | `Beware the dark forest, traveller.\n` | `나그네여, 어두운 숲을 조심하시오.\n` |

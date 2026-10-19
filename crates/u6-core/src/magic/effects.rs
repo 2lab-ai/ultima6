@@ -62,11 +62,12 @@ pub(super) async fn report(state: &RefCell<State>, io: &Io) {
     say(state, io, FMT_NL_S_NL, m).await;
 }
 
-/// The display name of `obj` (0x10eef8), printed as a format.
+/// The display name of `obj` (0x10eef8), printed as a format. Port (spec 08, slice K3): the
+/// locale pack's object name when it has one ([`crate::objects::shown_name`]).
 pub(super) async fn print_name(state: &RefCell<State>, io: &Io, obj: i16) {
     settle(state, io).await;
-    let name = crate::objects::display_name(&state.borrow(), Slot::from(obj));
-    printf(state, io, name.as_bytes(), &[]).await;
+    let name = crate::objects::shown_name(&state.borrow(), Slot::from(obj)).into_bytes();
+    printf(state, io, &name, &[]).await;
 }
 
 /// `Msg::OnWhom` / `Msg::OnWhat` when the caster is a party member (status bit 7), then the

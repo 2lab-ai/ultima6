@@ -1,4 +1,9 @@
 //! Look (0x1298b8) and what it reads: books and signs (0x12909a, 0x1290dc, 0x12911e, 0x1292d0).
+//!
+//! Port (spec 08, slice K3): the names Look prints are read to be shown
+//! ([`crate::objects::shown_name`], [`crate::objects::shown_look`]): the locale pack's object
+//! names when it has them, with no article before a Korean one; a book or sign is the pack's when
+//! it has it ([`read_book`]).
 
 use std::cell::RefCell;
 
@@ -7,7 +12,7 @@ use super::text::{print_at, putc};
 use super::world;
 use crate::engine::Io;
 use crate::objects::iter::{begin_at, first_child, next_at, tile_of};
-use crate::objects::{Slot, display_name};
+use crate::objects::{Slot, shown_name};
 use crate::state::State;
 use crate::ui::printf::Arg;
 
@@ -83,6 +88,9 @@ const SYLLABLES: i32 = -0x70b8;
 const SPELL_REAGENTS: i32 = -0x6d1c;
 const REAGENT_NAMES: i32 = -0x6d4c;
 
+/// Original: 0x1292d0's buffer (the most bytes of a book or sign it reads).
+pub const BOOK_BYTES: usize = 0x2800;
+
 /// Object types Look treats specially.
 const HORSE: u16 = 0x1ae;
 const SPELLBOOK: u16 = 0x39;
@@ -132,9 +140,13 @@ fn leader(s: &State) -> Slot {
 /// Original: 0x1292d0 (objects: print book text `obj`'s quality names from `book.dat`)
 ///
 /// Music off (0x110878), two newlines, then the entry: `book.dat` starts with 16-bit
-/// little-endian offsets, entry q − 1 for quality q; the text there (at most 0x2800 bytes, to
-/// its NUL) is printed as a printf format in a paged window; the next key read unpages. Then
-/// the area music again (0x110912).
+/// little-endian offsets, entry q − 1 for quality q; the text there (at most [`BOOK_BYTES`], to
+/// its NUL; [`crate::locale::texts::book_text`]) is printed as a printf format in a paged window;
+/// the next key read unpages. Then the area music again (0x110912).
+///
+/// Port (spec 08, slice K3): the book the locale pack has for that entry, its bytes still the
+/// ones read ([`crate::locale::book_at`]), is printed instead, in the pack's grammar and not
+/// looked up again ([`crate::ui::printf::format`]); any other prints in English.
 pub async fn read_book(state: &RefCell<State>, io: &Io, obj: Slot) {
     seams::music_off(&mut state.borrow_mut());
     let q = (state.borrow().objects.qq_of(obj) >> 8) as u8;
@@ -144,24 +156,22 @@ pub async fn read_book(state: &RefCell<State>, io: &Io, obj: Slot) {
         .files()
         .get(&String::from_utf8_lossy(&name))
         .unwrap_or(&[]);
-    let at = usize::from(q).wrapping_sub(1).wrapping_mul(2);
-    let text: Vec<u8> = file
-        .get(at..at.wrapping_add(2))
-        .map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])))
-        .map(|off| {
-            file.iter()
-                .skip(off)
-                .take(0x2800)
-                .copied()
-                .take_while(|&b| b != 0)
-                .collect()
-        })
-        .unwrap_or_default();
+    let index = usize::from(q).wrapping_sub(1);
+    let text = crate::locale::texts::book_text(file, index);
     {
         let mut s = state.borrow_mut();
         s.ui.text.win_mut().flags |= crate::ui::text::PAGED;
     }
-    super::text::print(state, io, &text, &[]).await;
+    let found = crate::locale::book_at(&state.borrow(), file, index, &text);
+    match found {
+        Some((language, put)) => {
+            crate::main_loop::flush_prints(state, io).await;
+            let was = std::mem::replace(&mut state.borrow_mut().ui.text.language, language);
+            crate::ui::printf::format(state, io, &put, &[]).await;
+            state.borrow_mut().ui.text.language = was;
+        }
+        None => super::text::print(state, io, &text, &[]).await,
+    }
     state.borrow_mut().ui.input.unpage = true;
     seams::music_on(&mut state.borrow_mut());
 }
@@ -246,7 +256,7 @@ async fn look_at_tile(state: &RefCell<State>, io: &Io, lx: u16, ly: u16) {
                 .tile_at(tx as u16 as usize, ty as u16 as usize, usize::from(c.z))
                 .unwrap_or(0);
             world::article(&mut s, u16::from(tile));
-            crate::objects::look_text(&s, u16::from(tile)).into_bytes()
+            crate::objects::shown_look(&s, u16::from(tile)).into_bytes()
         };
         super::text::print(state, io, &name, &[]).await;
     } else {
@@ -277,7 +287,7 @@ async fn look_at_actor(state: &RefCell<State>, io: &Io, sel: Slot) {
         if !shown || aboard {
             world::name_prefix(&mut s, sel);
         }
-        display_name(&s, sel).into_bytes()
+        shown_name(&s, sel).into_bytes()
     };
     super::text::print(state, io, &name, &[]).await;
     putc(state, io, b'\n').await;
@@ -323,7 +333,7 @@ async fn look_at_object(
         count
     };
     let sel = state.borrow().ui.input.selection;
-    let name = display_name(&state.borrow(), sel).into_bytes();
+    let name = shown_name(&state.borrow(), sel).into_bytes();
     super::text::print(state, io, &name, &[]).await;
     let wt = {
         let s = state.borrow();

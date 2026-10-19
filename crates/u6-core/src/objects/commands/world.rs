@@ -333,7 +333,7 @@ pub fn search(s: &mut State, obj: Slot, x: u16, y: u16) {
                     line(s, S_AND);
                 }
                 name_prefix(s, c);
-                let name = crate::objects::display_name(s, c).into_bytes();
+                let name = crate::objects::shown_name(s, c).into_bytes();
                 queue(s, name, Vec::new());
                 found = true;
                 c = d;
@@ -358,8 +358,17 @@ fn refresh(s: &mut State) {
 /// Original: 0x12904c (objects: print the article of `tile` from flags3 bits 6-7: one of the
 /// three article strings 0x1283e2 / 0x1283e6 / 0x1283ea, or nothing)
 ///
-/// Port (spec 08): in Korean ([`crate::ui::Language`]) it prints nothing.
+/// Port (spec 08): in Korean ([`crate::ui::Language`]) it prints nothing. Slice K3: nor before a
+/// name a Korean pack gives ([`crate::objects::korean_look`]).
 pub fn article(s: &mut State, tile: u16) {
+    if crate::objects::korean_look(s, tile) {
+        return;
+    }
+    article_of(s, tile);
+}
+
+/// [`article`] whatever the name after it.
+fn article_of(s: &mut State, tile: u16) {
     if s.ui.text.language == crate::ui::Language::Korean {
         return;
     }
@@ -378,6 +387,9 @@ pub fn article(s: &mut State, tile: u16) {
 /// Gold-like stacks (0x10cef2 kind 4) print their word, quantity stacks (kind 2) not lit
 /// (status 0x80) their quantity byte, both through "%d "; anything else its tile's article and
 /// counts 1.
+///
+/// Port (spec 08, slice K3): no article before a name a Korean pack gives the slot
+/// ([`crate::objects::korean_name`]).
 pub fn name_prefix(s: &mut State, slot: Slot) -> u16 {
     let o = &s.objects;
     let n = match stack_kind(o, o.kind(slot)) {
@@ -385,7 +397,9 @@ pub fn name_prefix(s: &mut State, slot: Slot) -> u16 {
         2 if o.status(slot) & 0x80 == 0 => o.qq_of(slot) & 0xff,
         _ => {
             let tile = tile_of(&s.tables, o.tf(slot));
-            article(s, tile);
+            if !crate::objects::korean_name(s, slot) {
+                article_of(s, tile);
+            }
             return 1;
         }
     };

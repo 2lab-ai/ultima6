@@ -13,8 +13,7 @@ use crate::objects::moves::{
     add_to_owner, create_from_record, move_into, move_to, remove, take_from_owner,
 };
 use crate::objects::{
-    IN_CONTAINER, READIED, Slot, display_name, in_type_set_670c, mark_takeable, pack_xyz,
-    stack_kind,
+    IN_CONTAINER, READIED, Slot, in_type_set_670c, mark_takeable, pack_xyz, shown_name, stack_kind,
 };
 use crate::state::State;
 use crate::ui::printf::Arg;
@@ -167,7 +166,7 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
         print_at(state, io, S_LINE, &[Arg::Str(&msg)]).await;
         return;
     }
-    let name = display_name(&state.borrow(), sel).into_bytes();
+    let name = shown_name(&state.borrow(), sel).into_bytes();
     print(state, io, &name, &[]).await;
     putc(state, io, b'\n').await;
     let (kind, sk, owner) = {

@@ -21,8 +21,11 @@
 //!
 //! **The export** ([`Catalogue::to_json`], [`FORMAT`]): every catalogued string once, in the
 //! order the sites list them: its hash, its length, its kind and its text (one character per
-//! byte, as the NPC bundles write theirs). It holds the user's game text: it is made in the
-//! user's browser and leaves it only as his own download (`tests/no_string_bundle_in_repo.rs`).
+//! byte, as the NPC bundles write theirs). Slice K3 adds, compatibly (left out when empty, the
+//! format's name unchanged), `texts`: the object names of `look.lzd` and the books and signs of
+//! `book.dat` ([`super::texts`]), each with its kind (`look`, `book`), its index, hash, length and
+//! text. It holds the user's game text: it is made in the user's browser and leaves it only as
+//! his own download (`tests/no_string_bundle_in_repo.rs`).
 
 use std::collections::BTreeMap;
 
@@ -40,8 +43,9 @@ pub const LOCALE: &str = "en";
 pub const MIN_BYTES: usize = 3;
 /// The longest string the game reads ([`GameImage::cstr`]'s bound).
 pub const MAX_BYTES: usize = 256;
-/// The files the export reads, by bare name (the executable).
-pub const READS: [&str; 1] = ["game"];
+/// The files the export reads, by bare name (the executable; slice K3: the object names and the
+/// books).
+pub const READS: [&str; 3] = ["game", super::texts::LOOK_FILE, super::texts::BOOK_FILE];
 
 /// The pointers of the shared messages Use and the object commands read for display (A4 - off:
 /// success, failed, no effect, out of range, blocked, nothing, not possible, done, on whom, not
@@ -182,6 +186,9 @@ pub struct Export {
     pub format: String,
     pub locale: String,
     pub strings: Vec<ExportString>,
+    /// Slice K3: the object names and books ([`super::texts::export`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texts: Vec<super::texts::ExportText>,
 }
 
 impl Export {
@@ -190,9 +197,10 @@ impl Export {
         serde_json::to_string(self).expect("the export has only serialisable fields")
     }
 
-    /// Reads an export back (another format's name is an error, as is a string whose text, length
-    /// and hash disagree): the translation tool's input, read as the tool reads it. Each refusal
-    /// is a fixed sentence: nothing of the input (a field's name, a value) is in it.
+    /// Reads an export back (another format's name is an error, as is a string or a text whose
+    /// text, length and hash disagree, or a text keyed where no pack can key it): the translation
+    /// tool's input, read as the tool reads it. Each refusal is a fixed sentence: nothing of the
+    /// input (a field's name, a value) is in it.
     pub fn from_json(s: &str) -> Result<Export, &'static str> {
         let e: Export =
             serde_json::from_str(s).map_err(|_| "it is not JSON of the game strings' form")?;
@@ -206,6 +214,9 @@ impl Export {
                 return Err("a string's text, length and hash disagree");
             }
         }
+        if !e.texts.iter().all(super::texts::ExportText::reads_back) {
+            return Err("a text's index, text, length and hash disagree");
+        }
         Ok(e)
     }
 }
@@ -217,8 +228,9 @@ pub fn reads(path: &str) -> bool {
 }
 
 /// The export of the catalogue of the `game` among `files` (by its bare name), for the page's
-/// download. Fails, with a fixed sentence (no value of the file), when there is no `game` or it
-/// does not read as the executable the engine knows.
+/// download, with (slice K3) the object names and books of `files` ([`super::texts::export`]).
+/// Fails, with a fixed sentence (no value of the file), when there is no `game` or it does not
+/// read as the executable the engine knows, or a `look.lzd` there does not read.
 pub fn export(files: &crate::files::Files) -> Result<Export, &'static str> {
     let game = files
         .get("game")
@@ -226,7 +238,9 @@ pub fn export(files: &crate::files::Files) -> Result<Export, &'static str> {
     if ConverseText::from_game(game).is_err() {
         return Err("the game executable does not read");
     }
-    Ok(Catalogue::from_game(game).export())
+    let mut export = Catalogue::from_game(game).export();
+    export.texts = super::texts::export(files)?;
+    Ok(export)
 }
 
 impl Catalogue {
@@ -359,6 +373,7 @@ impl Catalogue {
                     text: e.text.iter().map(|&b| char::from(b)).collect(),
                 })
                 .collect(),
+            texts: Vec::new(),
         }
     }
 

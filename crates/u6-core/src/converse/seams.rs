@@ -192,9 +192,10 @@ pub(crate) fn refresh_panels(s: &mut State) {
 
 // ---- objects ----------------------------------------------------------------------------------
 
-/// 0x10eef8(obj): the display name.
+/// 0x10eef8(obj): the display name. Port (spec 08, slice K3): Talk prints it, so the locale
+/// pack's object name when it has one ([`crate::objects::shown_name`]).
 pub(crate) fn object_name(s: &State, obj: i16) -> Vec<u8> {
-    crate::objects::display_name(s, obj).into_bytes()
+    crate::objects::shown_name(s, obj).into_bytes()
 }
 
 /// 0x10ae52(actor): the first object directly inside or carried by the actor, or -1.

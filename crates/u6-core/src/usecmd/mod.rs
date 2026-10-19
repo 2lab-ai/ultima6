@@ -111,10 +111,10 @@ impl<'a> Ux<'a> {
         text_out(self.state, self.io, i32::from(c)).await;
     }
 
-    /// printf of the display name 0x10eef8 of `slot`.
+    /// printf of the display name 0x10eef8 of `slot`. Port (spec 08, slice K3): read to be shown,
+    /// so the locale pack's object name when it has one ([`crate::objects::shown_name`]).
     pub async fn name(&self, slot: Slot) {
-        let name = crate::objects::display_name(&self.s(), slot);
-        let bytes: Vec<u8> = name.chars().map(|c| c as u32 as u8).collect();
+        let bytes = crate::objects::shown_name(&self.s(), slot).into_latin1();
         self.print_bytes(&bytes).await;
     }
 

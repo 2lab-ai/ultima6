@@ -372,12 +372,13 @@ fn the_spellbook_by_clicks_through_the_command_loop() {
     assert!(lit > dark, "more view cells lit after the cast");
 }
 
-/// Spec 08 Order 3 / Acceptance 5 (slice K2), through the command loop: the same keys with and
-/// without the identity pack of the owner's files (`crate::locale::identity`, installed before
-/// the loop starts, `wide` on): Look, Talk and Get at the leader's own cell, Begin and break off
-/// combat, a key the loop does not take, then Rest for an hour at a camp spot with the second
-/// member on guard. Every tick shows the same frame and scroll as English, and every catalogued
-/// string shown is one of the pack's (0 misses). Prints counts and pass/fail only.
+/// Spec 08 Order 3 / Acceptance 5 (slices K2 and K3), through the command loop: the same keys
+/// with and without the identity pack of the owner's files (`crate::locale::identity`, installed
+/// before the loop starts, `wide` on): Look, Talk and Get at the leader's own cell, Begin and
+/// break off combat, a key the loop does not take, then Rest for an hour at a camp spot with the
+/// second member on guard. Every tick shows the same frame and scroll as English, and every
+/// catalogued string shown is one of the pack's (0 misses); Look here is at the leader's own
+/// cell, where no object name is shown. Prints counts and pass/fail only.
 #[test]
 fn the_identity_pack_shows_the_command_loop_exactly_as_english() {
     use crate::converse::disasm::catalog::hash64;
@@ -436,6 +437,7 @@ fn the_identity_pack_shows_the_command_loop_exactly_as_english() {
                 break;
             }
         }
+        // Object-name coverage is the object-commands receipt's (names shown > 0, misses 0).
         let counts = e.state().locale.texts.get();
         (ticks, counts)
     };

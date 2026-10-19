@@ -119,6 +119,7 @@ pub async fn show_actor(state: &RefCell<State>, io: &Io, actor: Slot) {
     if show {
         let who = if actor == 0 { 0x82 } else { actor };
         let met = state.borrow().actors.attrs.talk_flags[who as usize & 0xff] != 0;
+        // Port (spec 08, slice K3): the panel's name stays English (its length places it).
         let name = if portrait != 0 || !met {
             display_name(&state.borrow(), who).into_bytes()
         } else {

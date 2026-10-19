@@ -9,8 +9,8 @@ use crate::engine::Io;
 use crate::image::A4;
 use crate::main_loop::{game_string, leader_name, pointed_string};
 use crate::objects::{
-    IN_INVENTORY, READIED, Slot, WHERE_MASK, add_to_owner, create_in, display_name, find_child,
-    move_into, remove,
+    IN_INVENTORY, READIED, Slot, WHERE_MASK, add_to_owner, create_in, find_child, move_into,
+    remove, shown_name,
 };
 use crate::state::State;
 use crate::ui::printf::{Arg, printf};
@@ -93,8 +93,9 @@ pub async fn ready(state: &RefCell<State>, io: &Io) {
     if ty == TORCH {
         say(state, io, STR_TORCH, &[]).await;
     } else {
-        let name = display_name(&state.borrow(), obj);
-        say(state, io, STR_NAME_LINE, &[Arg::Str(name.as_bytes())]).await;
+        // Port (spec 08, slice K3): shown, so the locale pack's object name when it has one.
+        let name = shown_name(&state.borrow(), obj).into_bytes();
+        say(state, io, STR_NAME_LINE, &[Arg::Str(&name)]).await;
     }
     let refusal = place(&mut state.borrow_mut(), obj, ty, strength);
     if let Some(msg) = refusal {
@@ -243,8 +244,8 @@ pub async fn unready(state: &RefCell<State>, io: &Io) {
         return;
     }
     let outer = crate::combat::present::interrupt(state, io).await;
-    let name = display_name(&state.borrow(), obj);
-    say(state, io, STR_UNREADY, &[Arg::Str(name.as_bytes())]).await;
+    let name = shown_name(&state.borrow(), obj).into_bytes();
+    say(state, io, STR_UNREADY, &[Arg::Str(&name)]).await;
     let (ty, actor) = {
         let s = state.borrow();
         (s.objects.kind(obj), shown_actor(&s))

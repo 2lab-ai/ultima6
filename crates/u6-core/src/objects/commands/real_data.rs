@@ -552,12 +552,14 @@ fn push_a_chair_and_open_a_door() {
     assert!(frames == [closed ^ 4, closed], "open, then closed");
 }
 
-/// Spec 08 Order 3 / Acceptance 5 (slice K2), for the object commands: the identity pack of the
-/// owner's files (`crate::locale::identity`: every run, table string and catalogued executable
-/// string as itself, English grammar) installed (`wide` on), the commands of the receipts above
-/// (Look at the six things, Get the bread and Drop it on a table, Move the chair, the door used
-/// twice) print exactly the lines they print without it, and every catalogued string they show
-/// is one of the pack's (0 misses). Prints counts and pass/fail only.
+/// Spec 08 Order 3 / Acceptance 5 (slices K2 and K3), for the object commands: the identity pack
+/// of the owner's files (`crate::locale::identity`: every run, table string, catalogued
+/// executable string, object name and book as itself, English grammar) installed (`wide` on),
+/// the commands of the receipts above (Look at the six things, the sign's text from book.dat
+/// among them, Get the bread and Drop it on a table, Move the chair, the door used twice) print
+/// exactly the lines they print without it, and every catalogued string, object name and book
+/// they show is one of the pack's (0 misses). Prints the counts of its own commands (runs, hits,
+/// misses) and pass/fail only, no size of the pack.
 #[test]
 fn the_identity_pack_shows_look_get_drop_and_move_exactly_as_english() {
     let Some(files) = files() else { return };
@@ -566,10 +568,15 @@ fn the_identity_pack_shows_look_get_drop_and_move_exactly_as_english() {
     let mut with = english.clone();
     crate::locale::install(&mut with, &files, pack, None).quiet();
     assert!(with.ui.text.wide, "wide on");
-    // Each command run on `s0`: its lines, and the strings' counts after it.
-    let commands = |s0: &State| -> Vec<(Vec<String>, [u32; 2])> {
+    // Each command run on `s0`: its lines, and the counts after it (game strings, object names,
+    // books: hits, misses).
+    let commands = |s0: &State| -> Vec<(Vec<String>, [u32; 6])> {
         let mut out = Vec::new();
-        let at = |s: &State| s.locale.texts.get();
+        let at = |s: &State| {
+            let l = &s.locale;
+            let ([a, b], [c, d], [e, f]) = (l.texts.get(), l.look.get(), l.books.get());
+            [a, b, c, d, e, f]
+        };
         for kind in [0x8f, 0xce, 0x71, 0x9f] {
             let mut s = s0.clone();
             let slot = find(&s, kind);
@@ -654,23 +661,35 @@ fn the_identity_pack_shows_look_get_drop_and_move_exactly_as_english() {
     let en = commands(&english);
     let id = commands(&with);
     let differ = en.iter().zip(&id).filter(|((a, _), (b, _))| a != b).count();
-    let hits: u32 = id.iter().map(|(_, c)| c[0]).sum();
-    let misses: u32 = id.iter().map(|(_, c)| c[1]).sum();
+    let sum = |k: usize| -> u32 { id.iter().map(|(_, c)| c[k]).sum() };
+    let (hits, misses) = (sum(0), sum(1));
+    let (look_hits, look_misses, book_hits, book_misses) = (sum(2), sum(3), sum(4), sum(5));
     eprintln!(
-        "identity pack, object commands: {} runs, differing {differ}; game strings from the pack {hits}, misses {misses}",
-        id.len()
+        "identity pack, object commands: {} runs, differing {differ}; game strings from the pack {hits}, misses {misses}; object names shown {look_hits}, misses {look_misses}; books read {book_hits}, misses {book_misses}",
+        id.len(),
     );
     assert_eq!(en.len(), id.len());
     assert_eq!(differ, 0, "every command's lines as in English");
     assert!(hits > 0, "the commands show the pack's strings");
     assert_eq!(misses, 0, "every catalogued string shown is in the pack");
+    assert!(
+        look_hits > 0 && book_hits > 0,
+        "the pack's object names and the sign's book"
+    );
+    assert_eq!(
+        (look_misses, book_misses),
+        (0, 0),
+        "every name and book shown is in the pack"
+    );
     eprintln!("identity pack object commands identical to English: pass; misses 0: pass");
 }
 
-/// Spec 08 (slice K2): the string export of the owner's `game` (`u6.string-bundle/1`) lists every
-/// catalogued string once, each with its hash and length (it reads back), none under three
-/// bytes, of every kind; Look's lead-in and the command names are among them. Prints counts and
-/// pass/fail only.
+/// Spec 08 (slices K2 and K3): the string export of the owner's files (`u6.string-bundle/1`) lists
+/// every catalogued string of his `game` once, each with its hash and length (it reads back),
+/// none under three bytes, of every kind; Look's lead-in and the command names are among them;
+/// and the object names of his `look.lzd` and the books of his `book.dat`, each once, as many as
+/// the identity pack holds. Prints pass/fail only: no count or size of what his files hold (a
+/// size comparison fails with its label, not the two sizes).
 #[test]
 fn the_string_export_of_the_owners_game_lists_its_catalogued_strings() {
     use crate::locale::strings::{self, Export, Kind};
@@ -697,13 +716,24 @@ fn the_string_export_of_the_owners_game_lists_its_catalogued_strings() {
         count(Kind::Format),
         count(Kind::Label),
     );
-    eprintln!(
-        "string export: {} strings (messages {messages}, formats {formats}, labels {labels})",
-        export.strings.len()
-    );
-    assert_eq!(hashes.len(), export.strings.len(), "each once");
+    assert!(hashes.len() == export.strings.len(), "each once");
     assert!(export.strings.iter().all(|e| e.len >= 3));
     assert!(messages > 0 && formats > 0 && labels > 0);
     assert!(has(&lead) && has(&talk), "Look's lead-in and Talk's name");
     eprintln!("string export reads back, each string once, Look and Talk in it: pass");
+    use crate::locale::texts::TextKind;
+    let of = |k: TextKind| export.texts.iter().filter(|t| t.kind == k).count();
+    let (look, books) = (of(TextKind::Look), of(TextKind::Book));
+    let mut keys: Vec<(TextKind, u32)> = export.texts.iter().map(|t| (t.kind, t.index)).collect();
+    keys.dedup();
+    let pack = crate::locale::identity(&files).quiet();
+    assert!(keys.len() == export.texts.len(), "each text once");
+    assert!(
+        (look, books) == (pack.look_entries(), pack.books()),
+        "as many as the identity pack holds"
+    );
+    assert!(look > 0 && books > 0);
+    eprintln!(
+        "string export: object names and books each once, as many as the identity pack: pass"
+    );
 }

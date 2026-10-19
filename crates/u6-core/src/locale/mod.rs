@@ -72,8 +72,37 @@
 //!   install every pack string the catalogue has must hold the same `%` directives, in the same
 //!   order, as its English ([`strings::directives`]), else the pack is refused (the strings part).
 //!
+//! **Slice K3: object names and books.** A pack may also hold the object names of `look.lzd`
+//! and the books and signs of `book.dat` (each map left out of the file when empty):
+//!
+//! ```text
+//!  "look":[{"index":12,"len":5,"hash":"<16 hex>","text":"..."}],
+//!  "books":[{"index":3,"len":800,"hash":"<16 hex>","text":"..."}]
+//! ```
+//!
+//! Spec 08 §3 has the two files replaced whole in a layer of the pack's own; this slice keys them
+//! per entry instead, as the runs are: a look entry by its index in the table
+//! ([`texts::look_units`]), a book by its index in `book.dat`'s offset table (quality − 1, books
+//! and signs alike; [`texts::book_units`]), each with its English's length and hash. They need no
+//! fingerprint: at install every entry must be one of the files' units, of that length and hash,
+//! with the same `%` directives in the same order as its English (both are printed as `printf`
+//! formats), else the pack is refused, the part named (look, books). A book's text must be under
+//! [`texts::BOOK_BYTES`], the buffer the game reads a book into (the reader and the read refuse a
+//! longer one, as the tool's gate does).
+//!
+//! At run time an entry is put only where it is read for display ([`look_at`]: the names Look,
+//! the object commands, Use, the spells' targets and combat print; [`book_at`]: the book or sign
+//! Look reads), its bytes in the game's table still the ones it was made from; logic keeps the
+//! English (`crate::objects::display_name` and `look_text`: a name compared, measured for a panel's
+//! layout or kept). The plural markers of a look entry follow the pack's language where it is
+//! looked up: in Korean they are dropped ([`crate::objects`]'s Korean rule, `/` or `\\` and the
+//! letters after it), and the name takes no article; with `en` the text is the English's and the
+//! printer resolves it as English. A book is put in the pack's grammar.
+//!
 //! The counters ([`LocaleState`]) count catalogued units only: a table string read at its start
-//! or a catalogued executable string shown, put from the pack (a hit) or not (a miss).
+//! or a catalogued executable string shown, put from the pack (a hit) or not (a miss); a look
+//! entry or a book shown (a read past the look table's entries, or of no unit of `book.dat`, is
+//! none).
 //!
 //! Rights (spec 08): a pack made from the owner's files holds his game text; it lives in
 //! `~/Games/ultima6/i18n/ko/` and his browser storage, never in the repository or under `site/`
@@ -86,6 +115,9 @@ pub mod strings;
 mod tests;
 #[cfg(test)]
 mod tests_strings;
+#[cfg(test)]
+mod tests_texts;
+pub mod texts;
 
 #[cfg(test)]
 pub(crate) use identity::identity;
@@ -164,19 +196,23 @@ pub struct StringText {
 }
 
 /// A pack's parts, as a mismatch names them: the conversation part (its runs and table strings,
-/// under one fingerprint) and the executable strings.
+/// under one fingerprint), the executable strings, and (slice K3) the object names and the books.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Converse,
     Strings,
+    Look,
+    Books,
 }
 
 impl Part {
-    /// The part's name in the pack (`base.converse`; `strings`).
+    /// The part's name in the pack (`base.converse`; `strings`; `look`; `books`).
     pub fn name(self) -> &'static str {
         match self {
             Part::Converse => "converse",
             Part::Strings => "strings",
+            Part::Look => "look",
+            Part::Books => "books",
         }
     }
 }
@@ -194,6 +230,10 @@ pub struct Pack {
     runs: BTreeMap<RunKey, RunText>,
     tables: BTreeMap<RunKey, TableText>,
     strings: BTreeMap<u64, StringText>,
+    /// Slice K3: object names by look entry index, books by `book.dat` index (each its English's
+    /// length and hash, as a run's).
+    look: BTreeMap<u32, RunText>,
+    books: BTreeMap<u32, RunText>,
 }
 
 /// Why a pack file is refused. Each is a fixed sentence (no value of the file).
@@ -228,6 +268,15 @@ pub enum PackError {
     StringKey,
     /// A table string's translation longer than the slot it is copied into holds.
     Capacity,
+    /// An object name keyed past the look table ([`texts::LOOK_ENTRIES`]), its English empty or
+    /// longer than [`texts::MAX_LOOK_BYTES`], or its translation over
+    /// [`texts::MAX_LOOK_TEXT_BYTES`].
+    LookEntry,
+    /// A book keyed past the qualities that name one ([`texts::BOOK_INDICES`]), or its English
+    /// empty or longer than [`texts::BOOK_BYTES`].
+    BookEntry,
+    /// A book's translation not under [`texts::BOOK_BYTES`] (the buffer the game reads it into).
+    BookCapacity,
 }
 
 impl fmt::Display for PackError {
@@ -248,6 +297,9 @@ impl fmt::Display for PackError {
             PackError::Capacity => {
                 "a table string in it is longer than the place the game copies it to"
             }
+            PackError::LookEntry => "an object name in it is not one the game's look table holds",
+            PackError::BookEntry => "a book in it is not one the game's book file holds",
+            PackError::BookCapacity => "a book in it is longer than the game reads a book",
         })
     }
 }
@@ -265,6 +317,8 @@ impl fmt::Display for Mismatch {
             Part::Strings => {
                 f.write_str("its game strings part does not keep the game's format directives")
             }
+            Part::Look => f.write_str("its object names part does not match the game's look table"),
+            Part::Books => f.write_str("its books part does not match the game's books and signs"),
         }
     }
 }
@@ -281,6 +335,10 @@ struct PackJson {
     tables: Vec<TableJson>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     strings: Vec<StringJson>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    look: Vec<EntryJson>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    books: Vec<EntryJson>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -318,6 +376,15 @@ struct TableJson {
 struct StringJson {
     hash: String,
     len: u32,
+    text: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntryJson {
+    index: u32,
+    len: u32,
+    hash: String,
     text: String,
 }
 
@@ -393,6 +460,8 @@ impl Pack {
             runs: map,
             tables: BTreeMap::new(),
             strings: BTreeMap::new(),
+            look: BTreeMap::new(),
+            books: BTreeMap::new(),
         })
     }
 
@@ -450,6 +519,60 @@ impl Pack {
         Ok(self)
     }
 
+    /// The pack with the object names `look` (slice K3), keyed by look entry index, checked as
+    /// [`Pack::parse`] checks them: an index inside the look table, an English of 1 to
+    /// [`texts::MAX_LOOK_BYTES`] bytes, a text the game can show within
+    /// [`texts::MAX_LOOK_TEXT_BYTES`], each index once, at most [`texts::LOOK_ENTRIES`].
+    pub fn with_look(
+        mut self,
+        look: impl IntoIterator<Item = (u32, RunText)>,
+    ) -> Result<Pack, PackError> {
+        for (index, t) in look {
+            let len = t.len as usize;
+            if index as usize >= texts::LOOK_ENTRIES
+                || !(1..=texts::MAX_LOOK_BYTES).contains(&len)
+                || t.text.len() > texts::MAX_LOOK_TEXT_BYTES
+            {
+                return Err(PackError::LookEntry);
+            }
+            let text = std::str::from_utf8(&t.text).map_err(|_| PackError::Text)?;
+            if !text_ok(text) {
+                return Err(PackError::Text);
+            }
+            if self.look.insert(index, t).is_some() {
+                return Err(PackError::Duplicate);
+            }
+        }
+        Ok(self)
+    }
+
+    /// The pack with the books `books` (slice K3), keyed by `book.dat` index, checked as
+    /// [`Pack::parse`] checks them: an index a quality names ([`texts::BOOK_INDICES`]), an English
+    /// of 1 to [`texts::BOOK_BYTES`] bytes, a text the game can show and under
+    /// [`texts::BOOK_BYTES`] (else [`PackError::BookCapacity`]), each index once.
+    pub fn with_books(
+        mut self,
+        books: impl IntoIterator<Item = (u32, RunText)>,
+    ) -> Result<Pack, PackError> {
+        for (index, t) in books {
+            let len = t.len as usize;
+            if index as usize >= texts::BOOK_INDICES || !(1..=texts::BOOK_BYTES).contains(&len) {
+                return Err(PackError::BookEntry);
+            }
+            if t.text.len() >= texts::BOOK_BYTES {
+                return Err(PackError::BookCapacity);
+            }
+            let text = std::str::from_utf8(&t.text).map_err(|_| PackError::Text)?;
+            if !text_ok(text) {
+                return Err(PackError::Text);
+            }
+            if self.books.insert(index, t).is_some() {
+                return Err(PackError::Duplicate);
+            }
+        }
+        Ok(self)
+    }
+
     /// Reads a pack file (see the module doc). Nothing of it is kept unless all of it checks.
     pub fn parse(bytes: &[u8]) -> Result<Pack, PackError> {
         if bytes.len() > MAX_PACK_BYTES {
@@ -474,6 +597,9 @@ impl Pack {
             return Err(PackError::TooManyRuns);
         }
         if json.tables.len() > MAX_STRINGS || json.strings.len() > MAX_STRINGS {
+            return Err(PackError::TooManyRuns);
+        }
+        if json.look.len() > texts::LOOK_ENTRIES || json.books.len() > texts::BOOK_INDICES {
             return Err(PackError::TooManyRuns);
         }
         let mut runs = Vec::with_capacity(json.converse.len());
@@ -514,9 +640,27 @@ impl Pack {
                 },
             ));
         }
+        let entries = |list: Vec<EntryJson>| -> Result<Vec<(u32, RunText)>, PackError> {
+            list.into_iter()
+                .map(|e| {
+                    let hash = read_hex(&e.hash)?;
+                    Ok((
+                        e.index,
+                        RunText {
+                            len: e.len,
+                            hash,
+                            text: e.text.into_bytes(),
+                        },
+                    ))
+                })
+                .collect()
+        };
+        let (look, books) = (entries(json.look)?, entries(json.books)?);
         Pack::new(language, &json.tool, converse_base, runs)?
             .with_tables(tables)?
-            .with_strings(strings)
+            .with_strings(strings)?
+            .with_look(look)?
+            .with_books(books)
     }
 
     /// The pack file: [`MAGIC`], a line feed and the JSON object, runs in key order.
@@ -562,6 +706,8 @@ impl Pack {
                     text: String::from_utf8(t.text.clone()).expect("checked as UTF-8"),
                 })
                 .collect(),
+            look: entries_json(&self.look),
+            books: entries_json(&self.books),
         };
         let mut out = MAGIC.to_vec();
         out.push(b'\n');
@@ -589,6 +735,16 @@ impl Pack {
         self.strings.len()
     }
 
+    /// Slice K3: the object names it holds.
+    pub fn look_entries(&self) -> usize {
+        self.look.len()
+    }
+
+    /// Slice K3: the books (and signs) it holds.
+    pub fn books(&self) -> usize {
+        self.books.len()
+    }
+
     fn script_keys(&self) -> BTreeSet<(u8, u16)> {
         self.runs
             .keys()
@@ -610,6 +766,16 @@ impl Pack {
     /// The executable string whose English hashes to `hash`, if the pack has one.
     pub fn string(&self, hash: u64) -> Option<&StringText> {
         self.strings.get(&hash)
+    }
+
+    /// Slice K3: the object name of look entry `index`, if the pack has one.
+    pub fn look(&self, index: u32) -> Option<&RunText> {
+        self.look.get(&index)
+    }
+
+    /// Slice K3: the book of `book.dat` index `index`, if the pack has one.
+    pub fn book(&self, index: u32) -> Option<&RunText> {
+        self.books.get(&index)
     }
 
     /// The table string of the script (`letter`, `item`) whose bytes hold `offset` after their
@@ -686,6 +852,65 @@ impl Pack {
         }
         Ok(())
     }
+
+    /// Slice K3: checks the object names and the books against the files the engine reads
+    /// (`look.lzd` decoded, `book.dat`; a part the pack does not have needs no file): every entry
+    /// is one of the file's units ([`texts::look_units`], [`texts::book_units`]), its English of
+    /// the entry's length and hash, and its text holds the same `%` directives in the same order as
+    /// that English. A difference is a mismatch of that part.
+    ///
+    /// `book.dat` is read by its bare name here; Look reads the name the game gives
+    /// (`objects::commands::look`'s), and checks each book it reads again
+    /// ([`book_at`]), so a file other than the one checked shows English.
+    pub fn check_texts(&self, files: &Files) -> Result<(), Mismatch> {
+        let same = |units: &BTreeMap<u32, Vec<u8>>, entries: &BTreeMap<u32, RunText>| {
+            entries.iter().all(|(index, t)| {
+                units.get(index).is_some_and(|en| {
+                    en.len() == t.len as usize
+                        && hash64(en) == t.hash
+                        && strings::directives(en) == strings::directives(&t.text)
+                })
+            })
+        };
+        if !self.look.is_empty() {
+            let bad = Mismatch { part: Part::Look };
+            let table = files
+                .get(texts::LOOK_FILE)
+                .and_then(|f| u6_formats::look::LookTable::from_lzd(f).ok())
+                .ok_or(bad)?;
+            if !same(&keyed(texts::look_units(&table)), &self.look) {
+                return Err(bad);
+            }
+        }
+        if !self.books.is_empty() {
+            let bad = Mismatch { part: Part::Books };
+            let file = files.get(texts::BOOK_FILE).ok_or(bad)?;
+            if !same(&keyed(texts::book_units(file)), &self.books) {
+                return Err(bad);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Units by index, for [`Pack::check_texts`].
+fn keyed(units: Vec<(usize, Vec<u8>)>) -> BTreeMap<u32, Vec<u8>> {
+    units
+        .into_iter()
+        .filter_map(|(i, en)| Some((u32::try_from(i).ok()?, en)))
+        .collect()
+}
+
+/// The JSON of a map of object names or books, in index order.
+fn entries_json(map: &BTreeMap<u32, RunText>) -> Vec<EntryJson> {
+    map.iter()
+        .map(|(&index, t)| EntryJson {
+            index,
+            len: t.len,
+            hash: hex(t.hash),
+            text: String::from_utf8(t.text.clone()).expect("checked as UTF-8"),
+        })
+        .collect()
 }
 
 /// The archive letter a key names (`a`, `b`).
@@ -774,6 +999,10 @@ pub struct LocaleState {
     pub tables: Counts,
     /// Slice K2: catalogued executable strings shown (formats, messages and labels).
     pub texts: Counts,
+    /// Slice K3: object names shown (a look entry read for display).
+    pub look: Counts,
+    /// Slice K3: books and signs read.
+    pub books: Counts,
 }
 
 /// Installs `pack` on `state` once it checks against the conversation archives of `files`, as
@@ -782,6 +1011,8 @@ pub struct LocaleState {
 ///
 /// Slice K2: the catalogue of the executable's strings is read from `files`' `game` (none there:
 /// an empty one), and the pack's strings are checked against it ([`Pack::check_strings`]).
+/// Slice K3: then its object names and books against `files`' `look.lzd` and `book.dat`
+/// ([`Pack::check_texts`]).
 pub fn install(
     state: &mut State,
     files: &Files,
@@ -805,6 +1036,7 @@ pub(crate) fn install_catalogued(
 ) -> Result<(), Mismatch> {
     pack.check(|letter| files.get(&crate::converse::archive_name(state, letter)))?;
     pack.check_strings(&catalogue)?;
+    pack.check_texts(files)?;
     state.locale = LocaleState {
         pack: Some(pack),
         hangul,
@@ -939,6 +1171,84 @@ pub(crate) fn table_at(
         None if pack.table_around(key).is_some() => None,
         None => {
             l.tables.miss();
+            None
+        }
+    }
+}
+
+/// Slice K3: the object name of look entry `index` (its English `english`, the entry's bytes) as
+/// the installed pack has it, for a read whose result is shown: `None` without a pack or for an
+/// entry that is no unit ([`texts::is_look_unit`]; not counted), and when the pack has no such entry or the table's bytes there are not the ones it was
+/// made from (a miss, when `count`); else the text (a hit, when `count`), its plural markers as
+/// the pack's language reads them: in Korean dropped (with the letters after them), in English
+/// kept for the printer. `count` off: the article's question, which counts nothing.
+pub(crate) fn look_at(state: &State, index: usize, english: &[u8], count: bool) -> Option<Vec<u8>> {
+    let l = &state.locale;
+    let pack = l.pack.as_ref()?;
+    if !texts::is_look_unit(english) {
+        return None;
+    }
+    let found = u32::try_from(index)
+        .ok()
+        .and_then(|i| pack.look(i))
+        .filter(|t| t.len as usize == english.len() && t.hash == hash64(english));
+    let Some(t) = found else {
+        if count {
+            l.look.miss();
+        }
+        return None;
+    };
+    if count {
+        l.look.hit();
+    }
+    Some(match pack.language {
+        Language::English => t.text.clone(),
+        Language::Korean => crate::objects::drop_plural_bytes(&t.text),
+    })
+}
+
+/// Slice K3: whether the object name of look entry `index` shows from a pack whose language is
+/// Korean (no article goes before it then). Counts nothing.
+pub(crate) fn look_is_korean(state: &State, index: usize, english: &[u8]) -> bool {
+    state
+        .locale
+        .pack
+        .as_ref()
+        .is_some_and(|p| p.language == Language::Korean)
+        && look_at(state, index, english, false).is_some()
+}
+
+/// Slice K3: the book `book.dat` holds at `index` (Look reads it from `file`; `english` is what it
+/// read there, [`texts::book_text`]) as the installed pack has it, with the pack's language for
+/// its grammar. `None` without a pack or for a read that is no unit (not counted), and when the
+/// pack has no such book, the bytes read are not the ones it was made from or its text is not
+/// under [`texts::BOOK_BYTES`] (a miss); else a hit.
+pub(crate) fn book_at(
+    state: &State,
+    file: &[u8],
+    index: usize,
+    english: &[u8],
+) -> Option<(Language, Vec<u8>)> {
+    let l = &state.locale;
+    let pack = l.pack.as_ref()?;
+    if english.is_empty() || !texts::is_book_unit(file, index) {
+        return None;
+    }
+    let found = u32::try_from(index)
+        .ok()
+        .and_then(|i| pack.book(i))
+        .filter(|t| {
+            t.len as usize == english.len()
+                && t.hash == hash64(english)
+                && t.text.len() < texts::BOOK_BYTES
+        });
+    match found {
+        Some(t) => {
+            l.books.hit();
+            Some((pack.language, t.text.clone()))
+        }
+        None => {
+            l.books.miss();
             None
         }
     }

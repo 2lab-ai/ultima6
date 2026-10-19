@@ -9,7 +9,7 @@ use super::text::{print, print_at, putc};
 use super::world::{S_LINE, chest, door};
 use crate::engine::Io;
 use crate::objects::moves::remove;
-use crate::objects::{Slot, display_name};
+use crate::objects::{Slot, shown_name};
 use crate::state::State;
 use crate::ui::printf::Arg;
 
@@ -88,7 +88,7 @@ pub async fn use_key(state: &RefCell<State>, io: &Io, key: Slot) {
         print_at(state, io, S_LINE, &[Arg::Str(&msg)]).await;
         return;
     }
-    let name = display_name(&state.borrow(), sel).into_bytes();
+    let name = shown_name(&state.borrow(), sel).into_bytes();
     print(state, io, &name, &[]).await;
     putc(state, io, b'\n').await;
     let (kind, far) = {

@@ -12,7 +12,7 @@ use super::world::S_LINE;
 use crate::engine::Io;
 use crate::objects::iter::begin_at;
 use crate::objects::moves::{move_into, move_to};
-use crate::objects::{IN_CONTAINER, Slot, display_name};
+use crate::objects::{IN_CONTAINER, Slot, shown_name};
 use crate::state::State;
 use crate::todo_stub;
 use crate::ui::printf::Arg;
@@ -97,7 +97,7 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
         print_at(state, io, S_LINE, &[Arg::Str(&msg)]).await;
         return;
     }
-    let name = display_name(&state.borrow(), sel).into_bytes();
+    let name = shown_name(&state.borrow(), sel).into_bytes();
     print(state, io, &name, &[]).await;
     putc(state, io, b'\n').await;
     if state.borrow().objects.place(sel) != 0 {

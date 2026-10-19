@@ -990,8 +990,9 @@ pub(crate) fn say(s: &mut State, at: u32, args: Vec<Text>) {
 }
 
 /// The display name of an object (0x10eef8), as a message argument, after the time the original
-/// takes to read it out of look.lzd ([`NAME_MS`]).
+/// takes to read it out of look.lzd ([`NAME_MS`]). Port (spec 08, slice K3): the locale pack's
+/// object name when it has one ([`crate::objects::shown_name`]).
 pub(crate) fn name(s: &mut State, o: i16) -> Text {
     capture_pause(s, NAME_MS);
-    Text::Str(crate::objects::display_name(s, o).into_bytes())
+    Text::Str(crate::objects::shown_name(s, o).into_bytes())
 }

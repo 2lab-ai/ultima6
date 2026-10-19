@@ -139,9 +139,10 @@ pub use moves::{
     actor_from_body, add_to_owner, create_actor, create_from_record, create_in, create_on_map,
     move_into, move_to, remove, take_from_owner,
 };
+pub(crate) use names::drop_plural_bytes;
 pub use names::{
-    article_text, count_of_kind, described_name, display_name, look_text, name_prefix_text,
-    quantity, stack_kind,
+    Shown, article_text, count_of_kind, described_name, display_name, korean_look, korean_name,
+    look_text, name_prefix_text, quantity, shown_look, shown_name, stack_kind,
 };
 pub use parts::{
     find_segment_at, move_monster_parts, move_serpent, owner_of_part, update_vine_frames,
