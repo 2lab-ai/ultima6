@@ -104,7 +104,8 @@ struct Trace {
     snapshots: bool,
     /// Offset of the last text byte `run_text` read, while a visit lasts.
     last_text: Option<i32>,
-    /// The next `put_cell` call is a key wait's.
+    /// The next `put_cell` call is a key wait's (`put_raw` keeps it past what its release lets
+    /// out first, [`take_wait`]).
     wait: bool,
 }
 
@@ -208,14 +209,24 @@ pub(crate) fn emit(c: i32) {
     });
 }
 
-/// Hook: a key wait calls `put_raw` next (not for the escape layer), whose `put_cell` call is
-/// the wait's: with `wide` off the escape layer holds nothing to let out first.
+/// Hook: a key wait calls `put_raw` next (not for the escape layer): its own `put_cell` call is
+/// the wait's.
 pub(crate) fn wait_put() {
     TRACE.with(|t| {
         if let Some(t) = t.borrow_mut().as_mut() {
             t.wait = true;
         }
     });
+}
+
+/// Hook: `put_raw` lets out what the escape layer holds before its own put: those puts are the
+/// escape layer's. Takes the key wait's mark, which `put_raw` sets again for its own put.
+pub(crate) fn take_wait() -> bool {
+    TRACE.with(|t| {
+        t.borrow_mut()
+            .as_mut()
+            .is_some_and(|t| std::mem::take(&mut t.wait))
+    })
 }
 
 /// Hook: a string-table byte `b` at `at` was read, by `read`.

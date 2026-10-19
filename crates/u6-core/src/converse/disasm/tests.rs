@@ -4178,6 +4178,34 @@ fn a_glyph_of_code_0_is_checked_and_a_key_waits_own_output_is_not_the_runs() {
 }
 
 #[test]
+fn a_key_waits_mark_is_on_its_own_put_when_the_escape_layer_holds_a_byte() {
+    // With `wide` on, a UTF-8 lead put through the escape layer waits in its assembler; a key
+    // wait lets it out (unchanged, nothing follows it) before its own flush. The byte let out is
+    // the text's output, and the flush is the wait's.
+    let mut s = super::super::tests::state(&[]);
+    s.ui.text.set_wide(true);
+    s.ui.input.accept = true;
+    trace::start(false);
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        crate::ui::printf::text_out(&st, &io, 0xea).await;
+        crate::ui::target::wait_event(&st, &io).await;
+    });
+    for k in chars(" ") {
+        e.tick(&[k], 16);
+    }
+    let events = trace::stop();
+    assert!(e.finished());
+    let emits: Vec<(i32, bool)> = events
+        .iter()
+        .filter_map(|ev| match ev {
+            Event::Emit { c, wait } => Some((*c, *wait)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(emits, [(0xea, false), (-1, true)]);
+}
+
+#[test]
 fn a_table_read_of_one_nul_is_an_empty_string_or_a_failure() {
     // Strings "a" and "" at `t`.
     let t = BODY + 20;

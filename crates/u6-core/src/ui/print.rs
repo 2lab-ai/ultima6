@@ -92,7 +92,14 @@ async fn more(state: &RefCell<State>, io: &Io) {
 /// a UTF-8 sequence, a josa marker not complete yet; [`super::printf::release`]), so a put from
 /// outside it lands after them, as it would with `wide` off.
 pub async fn put_raw(state: &RefCell<State>, io: &Io, c: i32) {
+    // The trace's key-wait mark is for this put, not for what the release lets out first.
+    #[cfg(test)]
+    let wait = crate::converse::disasm::trace::take_wait();
     super::printf::release(state, io).await;
+    #[cfg(test)]
+    if wait {
+        crate::converse::disasm::trace::wait_put();
+    }
     put_cell(state, io, c).await;
 }
 
