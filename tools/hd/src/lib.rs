@@ -23,6 +23,7 @@ pub mod gate;
 pub mod group;
 pub mod img;
 pub mod ingest;
+pub mod neighbour;
 pub mod pack;
 pub mod prompt;
 pub mod run;

@@ -107,6 +107,9 @@ pub struct Codex {
     pub home: PathBuf,
     /// One deadline for the call: the process group, its prompt and its output.
     pub timeout: Duration,
+    /// How long the call's output pipes are given to end once its group is gone: [`CLEANUP`]
+    /// in the tool ([`Codex::from_env`]); a test may set its own.
+    pub grace: Duration,
 }
 
 impl Codex {
@@ -122,14 +125,16 @@ impl Codex {
             bin: bin.unwrap_or_else(|| "codex".into()),
             home,
             timeout: Duration::from_secs(15 * 60),
+            grace: CLEANUP,
         })
     }
 }
 
 /// Most bytes of one codex event line; a longer line is read and dropped whole.
 pub const LINE_MAX: usize = 64 << 10;
-/// How long the event stream is given, once the call's group is gone, to end.
-const CLEANUP: Duration = Duration::from_secs(1);
+/// How long the event stream is given, once the call's group is gone, to end: the tool's
+/// [`Codex::grace`].
+pub const CLEANUP: Duration = Duration::from_secs(1);
 
 /// Kills every process of the group `pgid` (the call and anything it started).
 fn kill_group(pgid: u32) {
@@ -722,7 +727,7 @@ impl Runner for Codex {
     /// events and stderr read as the pipes are ready (non-blocking, one `poll` for the three),
     /// while the call is watched for its exit, until it exits, the prompt fails, the deadline
     /// passes or the tool is stopping ([`STOPPED`]); then the call's group is killed and
-    /// reaped (on every path) and its output pipes given [`CLEANUP`] to end, each tracked on
+    /// reaped (on every path) and its output pipes given [`Codex::grace`] to end, each tracked on
     /// its own (each wait bounded as [`Pipes::step`] says: the files' writes are assumed to
     /// return; no grace when stopping). Then the pipes are closed, whatever still holds their
     /// other ends: nothing of the call outlives it here, no thread, no descriptor. The spawn
@@ -843,7 +848,7 @@ impl Runner for Codex {
         // Whatever the call left running goes with it: killed and reaped.
         drop(group);
         // Each output pipe is drained until its own end, within the grace (none when stopping).
-        let grace = Instant::now() + CLEANUP;
+        let grace = Instant::now() + self.grace;
         while (pipes.stdout.is_some() || pipes.stderr.is_some())
             && Instant::now() < grace
             && stopped_by().is_none()

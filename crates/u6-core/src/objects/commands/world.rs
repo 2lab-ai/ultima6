@@ -330,7 +330,12 @@ fn refresh(s: &mut State) {
 
 /// Original: 0x12904c (objects: print the article of `tile` from flags3 bits 6-7: one of the
 /// three article strings 0x1283e2 / 0x1283e6 / 0x1283ea, or nothing)
+///
+/// Port (spec 08): in Korean ([`crate::ui::Language`]) it prints nothing.
 pub fn article(s: &mut State, tile: u16) {
+    if s.ui.text.language == crate::ui::Language::Korean {
+        return;
+    }
     let at = match flags3(s, tile) & 0xc0 {
         0x40 => S_A,
         0x80 => S_AN,

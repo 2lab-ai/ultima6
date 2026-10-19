@@ -52,7 +52,7 @@ pub(crate) enum Event {
     Input { at: i32, byte: u8 },
     /// A character `put_raw` was handed (negative = a flush); `wait` = by a key wait, not by the
     /// escape layer.
-    Emit { c: i16, wait: bool },
+    Emit { c: i32, wait: bool },
     /// `print_op`'s `d2` form starts printing a table string; `snap` = the state then.
     PrintStart { snap: Option<Box<Snap>> },
     /// A string-table byte read; a 0 ends the string.
@@ -198,7 +198,7 @@ pub(crate) fn input_byte(cx: &Cx<'_>, b: u8) {
 }
 
 /// Hook: `put_raw` was handed `c`.
-pub(crate) fn emit(c: i16) {
+pub(crate) fn emit(c: i32) {
     TRACE.with(|t| {
         if let Some(t) = t.borrow_mut().as_mut() {
             let wait = std::mem::take(&mut t.wait);
@@ -423,7 +423,7 @@ struct Visit {
     start: u32,
     next: u32,
     snap: Option<Box<Snap>>,
-    out: Vec<i16>,
+    out: Vec<i32>,
 }
 
 /// A table string read in progress.
@@ -436,7 +436,7 @@ struct StrRead {
 /// A table print in progress: the state when it started and what it put out so far.
 struct PrintOut {
     snap: Option<Box<Snap>>,
-    out: Vec<i16>,
+    out: Vec<i32>,
 }
 
 /// Checks `events` of a conversation that ended against the disassemblies (`scripts` by
@@ -725,7 +725,7 @@ fn check_events(
 /// Output put out while the bytes up to the last one read went through the escape layer, the
 /// last one maybe not all yet: it holds what the bytes before the last one put out (`done`) and
 /// is a start of what all of them put out (`upto`).
-fn between(out: &[i16], done: &[i16], upto: &[i16]) -> bool {
+fn between(out: &[i32], done: &[i32], upto: &[i32]) -> bool {
     out.starts_with(done) && upto.starts_with(out)
 }
 
@@ -802,11 +802,11 @@ fn close_visit(n: &mut Counts, s: Option<&Loaded<'_, '_>>, visit: &mut Option<Vi
     n.fill_mismatches += usize::from(want != v.out);
 }
 
-fn is_lower(c: i16) -> bool {
+fn is_lower(c: i32) -> bool {
     (0x61..=0x7a).contains(&c)
 }
 
-fn is_alpha(c: i16) -> bool {
+fn is_alpha(c: i32) -> bool {
     is_lower(c) || (0x41..=0x5a).contains(&c)
 }
 
@@ -814,26 +814,26 @@ fn is_alpha(c: i16) -> bool {
 /// at the first byte: `text_out`'s rules over parts, not bytes. Plain text as it is, each escape
 /// filled in or applied, -1 for a flush; spaces and newlines as they are (this is before word
 /// wrap). Capitalising and the runic bit of plain text are the line assembler's, after this.
-pub(crate) fn fill(script: &[u8], runs: &[&super::Run], s: &Snap) -> Vec<i16> {
+pub(crate) fn fill(script: &[u8], runs: &[&super::Run], s: &Snap) -> Vec<i32> {
     let parts: Vec<Part> = runs.iter().flat_map(|r| r.parts.iter().copied()).collect();
     fill_parts(script, &parts, s)
 }
 
 /// [`fill`] over parts (of runs, or of a table string the escape layer prints).
-fn fill_parts(script: &[u8], parts: &[Part], s: &Snap) -> Vec<i16> {
+fn fill_parts(script: &[u8], parts: &[Part], s: &Snap) -> Vec<i32> {
     let mut e = s.esc.clone();
     let mut out = Vec::new();
-    let string = |out: &mut Vec<i16>, v: u8| {
+    let string = |out: &mut Vec<i32>, v: u8| {
         let text = s.strs.get(usize::from(v)).cloned().unwrap_or_default();
-        out.extend(text.into_iter().take_while(|&b| b != 0).map(i16::from));
+        out.extend(text.into_iter().take_while(|&b| b != 0).map(i32::from));
     };
-    let int = |e: &mut EscState, out: &mut Vec<i16>, v: u8| {
+    let int = |e: &mut EscState, out: &mut Vec<i32>, v: u8| {
         let w = s.ints.get(usize::from(v)).copied().unwrap_or(0);
         e.plural = w != 1;
-        out.extend(itoa(w, 6, -10).into_iter().map(i16::from));
+        out.extend(itoa(w, 6, -10).into_iter().map(i32::from));
     };
     let glyph = |e: &EscState, c: u8| {
-        let c = i16::from(c) & 0x1f;
+        let c = i32::from(c) & 0x1f;
         if e.runic { c | 0x80 } else { c }
     };
     for p in parts {
@@ -845,7 +845,7 @@ fn fill_parts(script: &[u8], parts: &[Part], s: &Snap) -> Vec<i16> {
         match p.escape {
             None => {
                 for &b in bytes {
-                    let c = i16::from(b);
+                    let c = i32::from(b);
                     match e.prefix {
                         b'#' => {
                             int(&mut e, &mut out, ops::var_index(b));

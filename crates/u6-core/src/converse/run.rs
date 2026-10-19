@@ -70,8 +70,15 @@ fn strtok(buf: &mut [u8], at: &mut usize, delims: &[u8]) -> Option<usize> {
 /// (0x1149d6) unless an answer was already given, in which case the block is skipped to `ee`;
 /// other bytes 0x80..0xee are ops (0x11404c, `npc` = the NPC talked to). Stops before 0, `ee`
 /// and every byte from `f0` (input ops, `ff`), and after an op that set "bye".
+///
+/// Port (spec 08 Design 1): a text run (the text bytes between two bytes that are not text) is a
+/// unit of text, and so is what one op or keyword block puts (a table string put a byte at a
+/// time): where it ends, what the text layer still holds is let out and a brace `@{…}` it opened
+/// and left open is closed ([`seams::end_unit`]), so neither joins or colours the next.
 pub(crate) fn run_text<'a>(cx: &'a Cx<'a>, npc: i16) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async move {
+        // Every unit here begins after this; each ends before the next begins.
+        let opened = seams::braces(cx);
         let mut b = cx.cv(|c| c.next());
         loop {
             #[cfg(test)]
@@ -81,19 +88,25 @@ pub(crate) fn run_text<'a>(cx: &'a Cx<'a>, npc: i16) -> Pin<Box<dyn Future<Outpu
             }
             if b < 0x80 {
                 if b < 0x20 && b != b'\n' {
+                    seams::end_unit(cx, opened).await;
                     let m = cx.msg(Msg::ControlChar);
                     seams::print(cx, &m).await;
                     break;
                 }
                 seams::put_char(cx, b).await;
-            } else if b == 0xef {
-                if !cx.cv(|c| c.answered) {
-                    keywords(cx, npc).await;
-                } else {
-                    cx.cv(|c| while c.next() != 0xee && !c.fault {});
-                }
             } else {
-                exec(cx, b, npc).await;
+                // The text run before it ends here, and what it puts ends with it.
+                seams::end_unit(cx, opened).await;
+                if b == 0xef {
+                    if !cx.cv(|c| c.answered) {
+                        keywords(cx, npc).await;
+                    } else {
+                        cx.cv(|c| while c.next() != 0xee && !c.fault {});
+                    }
+                } else {
+                    exec(cx, b, npc).await;
+                }
+                seams::end_unit(cx, opened).await;
             }
             if cx.cv(|c| c.bye) {
                 break;
@@ -101,6 +114,7 @@ pub(crate) fn run_text<'a>(cx: &'a Cx<'a>, npc: i16) -> Pin<Box<dyn Future<Outpu
             checkpoint(cx).await;
             b = cx.cv(|c| c.next());
         }
+        seams::end_unit(cx, opened).await;
         cx.cv(|c| c.advance(-1));
     })
 }

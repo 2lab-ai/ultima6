@@ -338,7 +338,7 @@ fn an_actor_whose_keywords_wait_out_the_driver_fails_the_keyword_check() {
 }
 
 /// What the message scroll shows: its lines and the one being written.
-fn screen(s: &State) -> (usize, Vec<u8>) {
+fn screen(s: &State) -> (usize, Vec<u16>) {
     let t = &s.ui.text;
     let mut last = t.transcript_line.clone();
     last.extend(&t.line[usize::from(t.line_start)..usize::from(t.line_len)]);
@@ -352,7 +352,7 @@ fn screen(s: &State) -> (usize, Vec<u8>) {
 /// `lines` it took (typed at a prompt).
 fn talk_through(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool, usize) {
     let you_say = base.converse.text.as_ref().quiet().get(Msg::YouSay);
-    let prompt: Vec<u8> = you_say.trim_ascii().to_vec();
+    let prompt: Vec<u16> = you_say.trim_ascii().iter().map(|&b| u16::from(b)).collect();
     let leader = base.actors.party.leader_index;
     let mut e = Engine::with_game(base.clone(), files.clone(), move |st, io| async move {
         talk(&Cx::new(&st, &io), leader, npc, true).await;
@@ -370,7 +370,12 @@ fn talk_through(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool,
             return (true, sent);
         }
         let shown = screen(&e.state()).1;
-        let asked = e.state().ui.input.line_input || shown.trim_ascii_end().ends_with(&prompt);
+        // Its cells without the ASCII white space at the end (as `trim_ascii_end`).
+        let end = shown
+            .iter()
+            .rposition(|&c| !u8::try_from(c).is_ok_and(|b| b.is_ascii_whitespace()))
+            .map_or(0, |i| i + 1);
+        let asked = e.state().ui.input.line_input || shown[..end].ends_with(&prompt);
         let keys: Vec<InputEvent> = if asked {
             let Some(line) = lines.get(sent) else {
                 return (false, sent);

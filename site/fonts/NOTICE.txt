@@ -1,0 +1,13 @@
+Galmuri7 Hangul table (site/fonts/galmuri7-hangul.bin)
+
+  The 11,172 Hangul syllables U+AC00..U+D7A3 of Galmuri7 by Lee Minseo (quiple), each as an
+  8 x 8 cell of 8 row bytes (bit 7 = leftmost), in code point order, written by
+  tools/font/galmuri.py from the font's BDF. The font is licensed under the SIL Open Font
+  License, Version 1.1 (OFL.txt beside this file, the release's LICENSE.txt as it is).
+
+  Source:  https://github.com/quiple/galmuri/releases/download/v2.40.4/Galmuri-v2.40.4.zip
+  Version: v2.40.4 (member Galmuri7.bdf)
+  sha256 of the release zip: c8b3d9861a62ae73c8b1178091401cd79994812437ef386413f6dd54856e60e7
+  sha256 of galmuri7-hangul.bin: cc35ff5cb931f05acf6990a5f3cb9ed05d56142a8b330955468de1c83754634b
+
+  Copyright (c) 2019-2025 Lee Minseo (quiple@quiple.dev)

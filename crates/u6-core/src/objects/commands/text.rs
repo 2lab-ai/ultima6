@@ -47,5 +47,5 @@ pub(crate) async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &
 /// 0x108376: one character through the escape layer (the commands print their newlines so).
 pub(crate) async fn putc(state: &RefCell<State>, io: &Io, c: u8) {
     crate::main_loop::flush_prints(state, io).await;
-    crate::ui::printf::text_out(state, io, i16::from(c)).await;
+    crate::ui::printf::text_out(state, io, i32::from(c)).await;
 }

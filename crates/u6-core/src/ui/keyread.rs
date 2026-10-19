@@ -71,7 +71,9 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
             ui.input.cursor_frame = frame.wrapping_add(1);
             let glyph = (u16::from(frame) & 3) + ui.input.cursor_glyph;
             let w = *ui.text.win();
-            io.draw(|fb| text::draw_char(fb, ui.font.as_ref(), &w, glyph as u8, col, row));
+            let (font, hangul) = (ui.font.as_ref(), ui.hangul.as_deref());
+            let glyph = u16::from(glyph as u8);
+            io.draw(|fb| text::draw_char(fb, font, hangul, &w, glyph, col, row));
             let refresh = ui.input.idle_refresh;
             s.gfx.actor_anim_due = 1;
             refresh
@@ -100,7 +102,8 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
     let mut s = state.borrow_mut();
     let ui = &mut s.ui;
     let w = *ui.text.win();
-    io.draw(|fb| text::draw_char(fb, ui.font.as_ref(), &w, b' ', col, row));
+    let (font, hangul) = (ui.font.as_ref(), ui.hangul.as_deref());
+    io.draw(|fb| text::draw_char(fb, font, hangul, &w, 0x20, col, row));
     ui.text.drawn = true;
     ui.text.win_mut().fg = saved;
     key
@@ -116,14 +119,14 @@ pub fn echo(s: &mut State, io: &Io, c: u8) {
         if c == 8 {
             t.pop();
         } else {
-            t.push(c);
+            t.push(u16::from(c));
         }
     }
     let w = *ui.text.win();
     let mut col = u16::from(w.col) + u16::from(w.x);
     let mut row = u16::from(w.row) + u16::from(w.y);
     ui.text.drawn = false;
-    let font = ui.font.as_ref();
+    let (font, hangul) = (ui.font.as_ref(), ui.hangul.as_deref());
     if c == 8 {
         let win = ui.text.win_mut();
         if win.col != 0 {
@@ -136,9 +139,9 @@ pub fn echo(s: &mut State, io: &Io, c: u8) {
             col = u16::from(win.col) + u16::from(win.x);
         }
         let w = *win;
-        io.draw(|fb| text::draw_char(fb, font, &w, b' ', col, row));
+        io.draw(|fb| text::draw_char(fb, font, hangul, &w, 0x20, col, row));
     } else {
-        io.draw(|fb| text::draw_char(fb, font, &w, c, col, row));
+        io.draw(|fb| text::draw_char(fb, font, hangul, &w, u16::from(c), col, row));
         let win = ui.text.win_mut();
         win.col = win.col.wrapping_add(1);
         if win.col >= win.width {

@@ -16,32 +16,10 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use u6_hdpack::{Generator, ImageId, Kind, PackImage, Rgba, Role, write_pack};
+use u6_hdpack::{Generator, ImageId, Kind, PackImage, Role, write_pack};
 use u6_hdtool::game::Game;
-use u6_hdtool::img::Classic;
+use u6_hdtool::neighbour::mmpx4 as scaled;
 use u6_hdtool::work;
-use u6_render::hd::{Scale, mmpx};
-
-/// MMPX ×4 of a classic image, transparent pixels transparent.
-fn scaled(c: &Classic) -> Rgba {
-    let input: Vec<u32> =
-        c.px.iter()
-            .map(|p| p.map_or(0, |[r, g, b]| u32::from_le_bytes([r, g, b, 255])))
-            .collect();
-    let mut out = Vec::new();
-    mmpx(
-        &input,
-        c.width as usize,
-        c.height as usize,
-        Scale::X4,
-        &mut out,
-    );
-    Rgba {
-        width: c.width * 4,
-        height: c.height * 4,
-        pixels: out.iter().flat_map(|w| w.to_le_bytes()).collect(),
-    }
-}
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
@@ -73,11 +51,8 @@ fn run() -> Result<(), String> {
     let mut images = Vec::new();
     for id in ids {
         if let (Some(c), Some(hash)) = (g.classic(id), g.hash(id)) {
-            images.push(PackImage {
-                id,
-                hash,
-                image: scaled(&c),
-            });
+            let image = scaled(&c).ok_or("an image the scaler does not take")?;
+            images.push(PackImage { id, hash, image });
         }
     }
     let generator = Generator {

@@ -389,7 +389,7 @@ fn the_escape_set_is_the_escape_layers() {
     // An ordinary character put through the escape layer prints itself; an escape does not.
     for b in 0x21..0x7fu8 {
         let mut e = Engine::with_game(state(&[]), Files::default(), move |st, io| async move {
-            crate::ui::printf::text_out(&st, &io, i16::from(b)).await;
+            crate::ui::printf::text_out(&st, &io, i32::from(b)).await;
         });
         for k in chars("  ") {
             e.tick(&[k], 16);
@@ -4105,12 +4105,12 @@ fn checked(body: &[u8], events: Vec<Event>) -> trace::Counts {
 /// The reads of a visit of `text` at `BODY` and its stop byte `b6`, with `out` put out at the
 /// visit's last byte and `before` before it.
 fn visit(text: &[u8], before: &str, out: &str) -> Vec<Event> {
-    let emit = |s: &str| s.bytes().map(|b| put(i16::from(b))).collect::<Vec<_>>();
+    let emit = |s: &str| s.bytes().map(|b| put(i32::from(b))).collect::<Vec<_>>();
     visit_events(text, emit(before), emit(out))
 }
 
 /// The escape layer put `c`.
-fn put(c: i16) -> Event {
+fn put(c: i32) -> Event {
     Event::Emit { c, wait: false }
 }
 
@@ -4160,7 +4160,7 @@ fn a_glyph_of_code_0_is_checked_and_a_key_waits_own_output_is_not_the_runs() {
     // run's.
     let text = b"a^ b";
     let body = [&text[..], &[0xb6]].concat();
-    let wait = |c: i16| Event::Emit { c, wait: true };
+    let wait = |c: i32| Event::Emit { c, wait: true };
     let (a, b) = (put(0x61), put(0x62));
     let fills = |out: Vec<Event>| {
         let n = checked(&body, visit_events(text, Vec::new(), out));
@@ -4245,7 +4245,7 @@ fn a_table_print_must_put_out_the_string_it_read() {
                 read: Read::Print,
             });
             if let Some(&c) = out.get(i).filter(|_| b != 0) {
-                ev.push(put(i16::from(c)));
+                ev.push(put(i32::from(c)));
             }
         }
         let n = checked(&body, ev);
@@ -4303,7 +4303,7 @@ fn a_string_read_has_one_reader_and_a_print_only_its_own_output() {
     // string after that, with no start of its own, is not compared with that output.
     let mut ev = vec![
         Event::PrintStart { snap: first_snap() },
-        put(i16::from(b'x')),
+        put(i32::from(b'x')),
         Event::Run {
             at: BODY as i32,
             byte: 0xb5,
@@ -4312,7 +4312,7 @@ fn a_string_read_has_one_reader_and_a_print_only_its_own_output() {
     ];
     for i in 0..3 {
         ev.push(table(i, Read::Print));
-        ev.extend(b"ab".get(i).map(|&c| put(i16::from(c))));
+        ev.extend(b"ab".get(i).map(|&c| put(i32::from(c))));
     }
     let n = checked(&body, ev);
     assert_eq!(
@@ -4350,7 +4350,7 @@ fn a_stopped_visit_cut_inside_an_escape_puts_out_nothing_for_it_yet() {
                 snap: if i == 0 { first_snap() } else { None },
             });
         }
-        ev.extend(out.iter().map(|&c| put(i16::from(c))));
+        ev.extend(out.iter().map(|&c| put(i32::from(c))));
         trace::check_interrupted(&ev, &scripts)
     };
     assert_eq!(stopped(b"a").failures(), 0);
@@ -4395,10 +4395,10 @@ fn a_table_print_stopped_while_it_waits_is_checked_as_far_as_it_read() {
                 byte: b,
                 read: Read::Print,
             });
-            ev.extend(out.get(i).map(|&c| put(i16::from(c))));
+            ev.extend(out.get(i).map(|&c| put(i32::from(c))));
         }
         // The rest of the output came after the last read.
-        ev.extend(out.iter().skip(2).map(|&c| put(i16::from(c))));
+        ev.extend(out.iter().skip(2).map(|&c| put(i32::from(c))));
         trace::check_interrupted(&ev, &scripts)
     };
     for out in [&b"ab"[..], b"a"] {
@@ -4430,7 +4430,7 @@ fn a_conversation_stopped_while_it_waits_is_checked_as_far_as_it_went() {
                 snap: if i == 0 { first_snap() } else { None },
             });
         }
-        ev.extend(out.iter().map(|&c| put(i16::from(c))));
+        ev.extend(out.iter().map(|&c| put(i32::from(c))));
         ev
     };
     let interrupted = |ev: Vec<Event>| {

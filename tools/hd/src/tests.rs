@@ -1600,20 +1600,39 @@ fn one_deadline_covers_the_call_and_what_it_started() {
         bin: lingering_stub(&t, wait),
         home: t.join("codex-home"),
         timeout: Duration::from_secs(timeout),
+        grace: run::CLEANUP,
     };
     let dir = crate::work::ensure_dir(&t.join("call")).unwrap();
     std::fs::write(t.join("sheet.png"), b"x").unwrap();
-    // A call that hangs: stopped at the deadline, its whole group killed.
+    // The call's child, killed with it, is gone in a moment: looked for up to 10 s, slack for
+    // a loaded machine (one that outlived the call would sleep on for its 100 s).
+    let child_gone = || {
+        let start = Instant::now();
+        while alive(&t.join("pid")) {
+            if start.elapsed() > Duration::from_secs(10) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    };
+    // A call that hangs: stopped at the deadline, its whole group killed. Its stand-in must
+    // have started its child, and written its pid, before the deadline kills the group: 4 s,
+    // as keeps-both's in the leak test, is slack for a loaded machine, not a bound on its load.
+    let secs = 4;
     let start = Instant::now();
-    let r = codex(100, 2).generate(&t.join("sheet.png"), "prompt", &dir);
+    let r = codex(100, secs).generate(&t.join("sheet.png"), "prompt", &dir);
     assert!(r.unwrap_err().contains("timed out"));
     assert!(
         start.elapsed() < Duration::from_secs(15),
         "{:?}",
         start.elapsed()
     );
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(!alive(&t.join("pid")), "the call's child outlived it");
+    assert!(
+        t.join("pid").exists(),
+        "its stand-in had not written its child's pid by the {secs} s deadline"
+    );
+    assert!(child_gone(), "the call's child outlived it");
     // A call that exits but leaves a child holding its output: the child goes with it and
     // the event stream ends (here with no image, so the call fails, promptly).
     let start = Instant::now();
@@ -1624,8 +1643,7 @@ fn one_deadline_covers_the_call_and_what_it_started() {
         "{:?}",
         start.elapsed()
     );
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(!alive(&t.join("pid")));
+    assert!(child_gone());
     // The events were kept, with the thread line.
     let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
     assert!(events.contains("thread.started"));
@@ -1868,6 +1886,7 @@ fn the_review_codex_shapes_end_in_time() {
             bin,
             home: home.clone(),
             timeout: Duration::from_secs(secs),
+            grace: run::CLEANUP,
         };
         let start = Instant::now();
         (
@@ -1931,6 +1950,7 @@ fn the_generated_image_is_moved_out_of_codex_home() {
         bin: PathBuf::from("/nonexistent"),
         home: home.clone(),
         timeout: std::time::Duration::from_secs(1),
+        grace: run::CLEANUP,
     };
     c.finish(&image);
     assert!(!thread.exists());
@@ -1956,6 +1976,7 @@ fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
             bin,
             home: home.clone(),
             timeout: Duration::from_secs(secs),
+            grace: run::CLEANUP,
         };
         let start = Instant::now();
         (
@@ -1974,26 +1995,41 @@ fn the_deadline_holds_whatever_the_call_does_with_its_pipes() {
         "{took:?} (before: 30 s, the helper's sleep)"
     );
     // A helper that left the call's group (its own session) and holds the output open: the
-    // call ends, and the stream is given a bounded grace, not the rest of the deadline.
+    // call ends, and the stream is given a bounded grace, not the rest of the deadline. The
+    // session is made before the fork, so the helper is out of the group before the call can
+    // exit and the group be killed at that exit. A deadline that falls before the helper has
+    // made its session still kills it with the group: the hang's 4 s, as keeps-both's in the
+    // leak test, is slack for a loaded machine, not a bound on its load.
     let thread = r#"echo '{"type":"thread.started","thread_id":"t1"}'"#;
     for (name, then, secs) in [
         ("escaped-exit.sh", "exit 0", 30),
-        ("escaped-hang.sh", "sleep 30", 2),
+        ("escaped-hang.sh", "sleep 30", 4),
     ] {
         let pid = t.join(format!("{name}.pid"));
         let body = format!(
-            "cat > /dev/null\n{thread}\n/usr/bin/perl -MPOSIX -e 'exit if fork; POSIX::setsid(); \
-             open(my $f, \">\", $ARGV[0]); print $f $$; close $f; sleep 20' \"{}\"\n{then}",
+            "cat > /dev/null\n{thread}\n/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die \
+             \"setsid: $!\"; exit if fork; open(my $f, \">\", $ARGV[0]); print $f $$; close $f; \
+             sleep 20' \"{}\"\n{then}",
             pid.display()
         );
         let (r, took) = call(review_stub(&t, name, &body), secs, "PROMPT");
         let e = r.unwrap_err();
-        // The grace is 1 s; before it, the hang took the deadline + 5 s and the exit 20 s (the
-        // helper's life). Slack for a loaded machine.
-        let limit = Duration::from_secs(if secs == 2 { 6 } else { 8 });
+        // The grace is 1 s: the exit ends a grace after its stand-in's exit, the hang a grace
+        // after its deadline (in both the helper holds the output, so the whole grace is waited
+        // out); 8 s for both, slack for a loaded machine (before the grace, the hang took its
+        // deadline + 5 s, here 9 s, and the exit 20 s, the helper's life).
+        let limit = Duration::from_secs(8);
         assert!(took < limit, "{name}: {took:?} ({e})");
-        if secs == 2 {
+        if name == "escaped-hang.sh" {
             assert!(e.contains("timed out"), "{name}: {e}");
+            // Its helper holds the call's output past the deadline, so the grace is waited out;
+            // a call that ended at its deadline lost its helper with the group (not yet in a
+            // session of its own).
+            assert!(
+                took >= Duration::from_secs(secs) + run::CLEANUP,
+                "{name}: {took:?}: its helper had not left the call's group by the {secs} s \
+                 deadline, or the grace was cut short"
+            );
         } else {
             assert_eq!(e, "the call's output did not end", "{name}");
         }
@@ -2564,6 +2600,7 @@ fn a_call_s_stderr_is_kept_to_its_cap() {
         bin: loud,
         home: t.join("home"),
         timeout: Duration::from_secs(30),
+        grace: run::CLEANUP,
     };
     let start = Instant::now();
     let e = c
@@ -2630,33 +2667,128 @@ fn a_read_error_on_a_call_s_pipe_is_kept_not_taken_for_its_end() {
 
 #[test]
 fn stderr_written_after_the_events_end_is_still_kept() {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     let t = temp("late-stderr");
     let dir = crate::work::ensure_dir(&t.join("dir")).unwrap();
     std::fs::write(t.join("sheet.png"), b"x").unwrap();
     // The call prints its thread and exits; a helper of its own session, holding only its
-    // stderr, writes there 300 ms later: the events have ended long before.
+    // stderr, writes there 300 ms later: the events have ended long before. The session is
+    // made before the fork, so the helper has left the call's group before the call can exit
+    // and the group be killed (made after it, a helper the loaded machine had not yet run
+    // was killed with the group, and never wrote).
     let late = review_stub(
         &t,
         "late.sh",
         "cat > /dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}'\n\
-         /usr/bin/perl -MPOSIX -e 'exit if fork; POSIX::setsid(); select(undef, undef, undef, \
-         0.3); print STDERR \"late\\n\"' > /dev/null\nexit 0",
+         /usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die \"setsid: $!\"; exit if fork; \
+         select(undef, undef, undef, 0.3); print STDERR \"late\\n\"' > /dev/null\nexit 0",
     );
+    // A grace far past the helper's 300 ms, 100 times it, as slack for a loaded machine (a
+    // longer pause would still outlast it): the call still ends before the grace does, when
+    // the helper does (its stderr's end).
     let c = run::Codex {
         bin: late,
         home: t.join("home"),
         timeout: Duration::from_secs(10),
+        grace: Duration::from_secs(30),
     };
+    let start = Instant::now();
     let e = c
         .generate(&t.join("sheet.png"), "PROMPT", &dir)
         .unwrap_err();
+    let took = start.elapsed();
+    assert!(took < c.grace, "{took:?}");
     assert_eq!(e, "no image generated");
     assert_eq!(
         std::fs::read_to_string(dir.join("stderr.txt")).unwrap(),
         "late\n"
     );
     let _ = std::fs::remove_dir_all(&t);
+}
+
+/// The clock `Instant` reads (std's: CLOCK_UPTIME_RAW on Apple, CLOCK_MONOTONIC elsewhere),
+/// by its id, so that a call's stand-in can read it too and the two readings compare.
+#[cfg(target_vendor = "apple")]
+const INSTANT_CLOCK: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
+#[cfg(not(target_vendor = "apple"))]
+const INSTANT_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+
+/// The time on [`INSTANT_CLOCK`].
+fn instant_clock() -> std::time::Duration {
+    // Zeroed, not a literal: on some targets the struct has private padding beside its fields.
+    // SAFETY: a timespec is integers (and padding), for which all zero bytes are a value.
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    // SAFETY: clock_gettime(2) writes the one timespec it is given; no other memory involved.
+    assert_eq!(unsafe { libc::clock_gettime(INSTANT_CLOCK, &mut ts) }, 0);
+    std::time::Duration::new(
+        u64::try_from(ts.tv_sec).unwrap(),
+        u32::try_from(ts.tv_nsec).unwrap(),
+    )
+}
+
+#[test]
+fn stderr_written_after_the_grace_is_not_waited_for() {
+    use std::time::Duration;
+    let t = temp("later-stderr");
+    let dir = crate::work::ensure_dir(&t.join("dir")).unwrap();
+    std::fs::write(t.join("sheet.png"), b"x").unwrap();
+    // As above, but the helper holds the call's stderr while `hold` exists (at most 30 s)
+    // and writes there only then; the test removes it once the call has returned, so the
+    // write comes after the grace whatever the machine's load. Just before it exits, the call
+    // marks the time on the clock its grace is timed on.
+    let (hold, exited) = (t.join("hold"), t.join("exited"));
+    std::fs::write(&hold, b"").unwrap();
+    let later = review_stub(
+        &t,
+        "later.sh",
+        &format!(
+            "cat > /dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"t1\"}}'\n\
+             /usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die \"setsid: $!\"; exit if fork; \
+             for (1 .. 3000) {{ last unless -e $ARGV[0]; select(undef, undef, undef, 0.01) }} \
+             print STDERR \"later\\n\"' \"{}\" > /dev/null\n\
+             /usr/bin/perl -MTime::HiRes -e 'printf \"%.9f\", Time::HiRes::clock_gettime($ARGV[0])' \
+             {INSTANT_CLOCK} > \"{}\"\nexit 0",
+            hold.display(),
+            exited.display()
+        ),
+    );
+    // Twice the tool's own grace, so a call that waited this long was given this one.
+    let grace = run::CLEANUP * 2;
+    let c = run::Codex {
+        bin: later,
+        home: t.join("home"),
+        timeout: Duration::from_secs(10),
+        grace,
+    };
+    let e = c.generate(&t.join("sheet.png"), "PROMPT", &dir);
+    let end = instant_clock();
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(e.unwrap_err(), "no image generated");
+    // Not waited for: nothing of it kept.
+    assert_eq!(std::fs::read_to_string(dir.join("stderr.txt")).unwrap(), "");
+    // From the mark to the call's return, on one clock (an end before the mark fails, it is
+    // not taken for no time): at least the grace, which the call waited out (the stderr still
+    // open), and less than 3 s more, then it ended (slack for a loaded machine). A drain
+    // bounded by the call's deadline instead ends 10 s from the call's start: 10 s after its
+    // exit less the stand-in's run, past these 5 s unless that run took over 5 s.
+    let mark = std::fs::read_to_string(&exited).unwrap();
+    let exit = Duration::from_secs_f64(mark.parse().unwrap_or_else(|e| panic!("{mark:?}: {e}")));
+    let after = end
+        .checked_sub(exit)
+        .unwrap_or_else(|| panic!("the call ended at {end:?}, before its exit at {exit:?}"));
+    assert!(after >= grace, "{after:?} after its exit");
+    assert!(
+        after < grace + Duration::from_secs(3),
+        "{after:?} after its exit"
+    );
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
+fn the_tool_s_calls_are_given_the_cleanup_grace() {
+    // The tool's calls are made by `Codex::from_env` (its only maker outside the tests), with
+    // CLEANUP; the tests above give theirs other graces.
+    assert_eq!(run::Codex::from_env(None).unwrap().grace, run::CLEANUP);
 }
 
 #[test]
@@ -2763,6 +2895,7 @@ fn every_reserved_call_counts_whatever_became_of_it() {
         bin: w.root.join("no-such-codex"),
         home: w.root.join("home"),
         timeout: std::time::Duration::from_secs(5),
+        grace: run::CLEANUP,
     };
     let one = RunOptions {
         send: true,

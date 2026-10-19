@@ -168,3 +168,44 @@ Append-only. Closed units, with their receipts.
   - **Coverage (records):** generated / fallback — portraits 202 / 4, bitmaps 2 / 0, terrain 49 / 222, multi-record objects 26 / 252, objects 234 / 525, actors 0 / 675 (the motion gate, as spec 07 expected); 32 shore records by rule, 33 empty.
   - **Pack:** 309 tiles, 202 portraits, 2 bitmaps; `read_pack` reads it, and on the owner's game every image matches (309, 202, 2). Kept in `~/Games/ultima6/hd/pack/`, never committed or hosted.
   - **Frames (read by the dispatcher on the owner's machine):** portraits and panels show the imagegen art; where a generated terrain record meets a scaled one the frames show a seam (a castle carpet), which the 3×3 self-tiling gate cannot see → spec 07 rev 6 adds the neighbour-seam gate, unit H5.
+
+| hd-stderr-flake | 07 | `tools/hd` test `stderr_written_after_the_events_end_is_still_kept` failed once in a full run under load (stderr empty: the helper's write came after the 1 s grace); reproduce, make the test load-independent without weakening it, sweep `tools/hd` for thin timing margins | H3 |
+
+- **hd-stderr-flake** merged at a578045 (branch to 2b75fc4).
+  - **Cause:** under machine load, a helper that had not yet called setsid when the call's deadline killed its group died with the group, so its output or pid file never came. The tests then failed on a missing file rather than on their own claim.
+  - **Fix:** the helpers call setsid before they fork their child. Every deadline a stand-in or helper must beat is now at least 4 s, the keeps-both one included. Each such test asserts a floor of deadline + grace, so a helper that died with the group fails with a message naming it. The comments call these bounds slack for a loaded machine, not bounds on its load. The sweep of `tools/hd` listed every call and harness deadline; none that a helper must beat is under 4 s.
+  - **Tests:** u6-hdtool lib 57, call_leaks 1, cli 16, events_memory 1, lock 2, terminal 1. RED checks: a helper 4.5 s slow before its setsid fails each new floor with its own message.
+  - **Gates on the merge** (a578045): fmt and clippy clean; 1106 passed, 7 ignored; web 63/63 three times; oracles OK; loop-lint 0 FAIL.
+  - **Reviews:** gpt-6-astra and opus; r2 both APPROVE, r3 (the delta) both APPROVE, and their wording items were applied in 2b75fc4.
+  - **Deploys:** none; the change is to tool tests, and the site is unchanged.
+
+| H5 | 07 | `tools/hd` neighbour-seam gate (spec 07 rev 6): pairs from the owner's map chunks and starting object lists, the cross-edge lattice step against the classic pair's, fallback to a fixed point, the count in the coverage report; then re-ingest locally (no new upload), rebuild the pack, read the frames | H3, H4 |
+
+- **H5** merged at 953e744 (branch abfd815 … d081952).
+  - **Pairs:** map tiles of edge-adjacent cells, and starting objects whose shared edges are both at least half opaque (`neighbour::pairs`). Each pair is labelled by where it comes from (`map`, `objects`).
+  - **Measure:** the step across the join, over the mean interior lattice step, against the classic pair's own ratio. The limit is max(1.5, classic ratio) × 1.001.
+  - **Fallback:** a failing generated record falls back to MMPX as its whole item, repeated to a fixed point.
+  - **Coverage report:** counts the pairs checked, failing and unmeasured before and after the fixed point. An unmeasured pair is one `settle` gets no measure for, and it cannot fail.
+  - **Owner run:** re-ingested from H4's sheets with no new upload, then rebuilt the pack locally. Most first-pass pairs failed and few generated terrain records survived (counts in the owner-local coverage report). That outcome went to trinity (record `~/Games/ultima6/work/dispatch/trinity-h5-decision.md`), and then to H6's read and H7.
+  - **Tests:** synthetic records only. Pair-model controls; the ratio and limit; the fixed point; the after counts, with the mutant "after count set in pass 1 only" killed by a test where an unmeasured pair's generated side falls.
+  - **Gates on the merge:** see the merge-gate line below.
+  - **Reviews:** gpt-6-astra and opus, rounds 1–4. r3: gpt-6-astra APPROVE, opus CHANGES on one test (MF2, closed in r4 with opus's own probe). r4: both APPROVE; opus's wording item was applied in d081952. Findings: `~/Games/ultima6/work/review/h5/`.
+  - **Deploys:** none; the change is to the tool, and the site is unchanged.
+  - **Carried to H7:** the run-time draw variants (type 0x7b's other frame, the doorways' side tiles) were not paired.
+  - **Gates on the merge** (9bbbb22, the merge 953e744 plus this loop text): fmt and clippy clean; 1125 passed, 0 failed, 7 ignored; wasm 1,872,907 bytes (unchanged); web 63/63 three times; oracles OK; port map unchanged; loop-lint 0 FAIL.
+
+| L1 | 08 | text path: `i32` chars, `u16` line and narrowing sites, UTF-8 assembler (invalid bytes pass), Hangul table, runic guard, cell padding, josa, `%1$s`, empty articles; the `u` program's text path by code point (1b) | — |
+
+- **L1** merged at 16be889, squashed as 6665cb8 from `feat/l1-text-path` at 8751380, so main's history holds only the reviewed end state.
+  - **What:** spec 08 §1 and §1b.
+    - The character path is `i32` and the line `u16`.
+    - A UTF-8 assembler sits in front of the escape layer while a locale layer is active; invalid bytes pass unchanged.
+    - The Hangul table is built from Galmuri7 (SIL OFL 1.1, notices in `site/fonts/`) by `tools/font/galmuri.py`.
+    - The runic guard; josa markers; `%1$s`; `@{…}`; empty articles.
+    - `printf` counts cells, with the fixed-point padding.
+    - The `u` program's text runs by code point.
+  - **English:** with `wide` off, output is unchanged; an owner-run comparison with the pre-change engine found no difference (counts stay local).
+  - **Tests:** synthetic text only: `escaped_tests`, `wide_tests`, the intro wide tests, the font tests, and `test_galmuri.py` in both modes; the Python 3.9 refusal holds.
+  - **Gates on the merge** (run on 6665cb8, whose tree the merge 16be889 has): fmt and clippy clean; 1176 passed, 0 failed, 7 ignored; wasm 1,882,766 bytes; web 63/63 three times; oracles OK; port map unchanged; loop-lint 0 FAIL.
+  - **Reviews:** gpt-6-astra and opus over 15 rounds; r15, both APPROVE. Rounds 10–14 each found a counterexample in doc prose that listed, case by case, what a field's first code does after a padding that exactly fills the row. Round 14 deleted the list, keeping only the measured threshold. Lesson: prose that restates a state machine case by case is unbounded review surface; state the measured invariant and defer to the code. Findings: `~/Games/ultima6/work/review/l1-text-path/`.
+  - **Deploys:** preview 409b5dea at 16be889. Live check with the owner's zip and the owner's local pack: HD on, off and on again in the menu, the game and after a look; the pack matched; 0 foreign requests, 0 errors. The dispatcher read the frames (a long wrapped question, the party list and the prompt, a look message); English text lays out as before. Production waits on the owner's deploy run.

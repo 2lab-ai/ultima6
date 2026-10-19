@@ -642,9 +642,13 @@ fn the_originals_save_loads_and_saves_like_the_original() {
 fn transcript(s: &State) -> Vec<String> {
     let t = &s.ui.text;
     let mut lines = s.ui.messages.clone();
-    let mut last: String = t.transcript_line.iter().map(|&b| char::from(b)).collect();
+    let mut last: String = t
+        .transcript_line
+        .iter()
+        .map(|&b| crate::ui::wide::latin_char(b))
+        .collect();
     let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
-    last.extend(pending.iter().map(|&b| char::from(b)));
+    last.extend(pending.iter().map(|&b| crate::ui::wide::latin_char(b)));
     lines.push(last);
     lines
 }
