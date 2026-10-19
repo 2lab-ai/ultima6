@@ -294,7 +294,8 @@ pub(crate) fn end(s: &mut State) {
     s.speech.speaker = None;
 }
 
-fn traits(s: &State, a: i16) -> Traits {
+/// The traits of actor `a` (also the NPC bundles', spec 09 Design 5).
+pub(crate) fn traits(s: &State, a: i16) -> Traits {
     let at = |v: &[u8]| usize::try_from(a).ok().and_then(|i| v.get(i)).copied();
     Traits {
         obj_type: u16::try_from(a).map_or(0, |a| s.objects.obj_type(crate::objects::ObjectId(a))),

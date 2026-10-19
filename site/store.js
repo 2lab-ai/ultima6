@@ -3,8 +3,11 @@
 // game: the `savegame/` files the game's Save writes (the original's names), one record each
 // under `save:` + the lower-cased name in the same store, so a later Save replaces only the
 // blocks it wrote and an imported folder's case does not make a second copy. The HD pack
-// loaded (spec 07 H2) is one record under `hd:pack`, its file's bytes. The page calls these one
-// at a time (its operation queue), so a read never races a write or a delete.
+// loaded (spec 07 H2) is one record under `hd:pack`, its file's bytes. The NPC bundles (spec 09
+// Design 5, `u6.npc-bundle/1`: each conversation script's NPC name and dialogue, made in this
+// browser from the kept files) are one record per script under `npc-bundle:` + its archive
+// letter, `/` and its item, the bundle object itself. The page calls these one at a time (its
+// operation queue), so a read never races a write or a delete.
 
 const DB = 'ultima6-port';
 const STORE = 'files';
@@ -124,6 +127,34 @@ export async function loadPack() {
 /// Removes the kept HD pack; resolves once the delete is committed, throws when it is not.
 export async function forgetPack() {
   await run('readwrite', (s) => s.delete(PACK));
+}
+
+const BUNDLE = 'npc-bundle:';
+const BUNDLES = IDBKeyRange.bound(BUNDLE, `${BUNDLE}\uffff`);
+
+/// Keeps `bundles` (u6.npc-bundle/1 objects) in place of the kept ones, one record each under
+/// `npc-bundle:<archive>/<item>`, all in one transaction. Resolves once committed, throws when
+/// it is not (nothing of it is then kept, and the bundles kept before stay).
+export async function storeBundles(bundles) {
+  await run('readwrite', (s) => {
+    s.delete(BUNDLES);
+    let last = null;
+    for (const b of bundles) last = s.put(b, `${BUNDLE}${b.archive}/${b.item}`);
+    return last ?? s.count();
+  });
+}
+
+/// The kept NPC bundles, in (archive, item) order; [] when there are none. Throws when storage
+/// cannot be read.
+export async function loadBundles() {
+  const bundles = await run('readonly', (s) => s.getAll(BUNDLES));
+  return (Array.isArray(bundles) ? bundles : [])
+    .sort((a, b) => (a.archive === b.archive ? a.item - b.item : Number(a.archive > b.archive) * 2 - 1));
+}
+
+/// Removes the kept NPC bundles; resolves once the delete is committed, throws when it is not.
+export async function forgetBundles() {
+  await run('readwrite', (s) => s.delete(BUNDLES));
 }
 
 function fileOf(entry) {

@@ -4055,6 +4055,152 @@ test('voices fail recoverably: a part that does not download, a part whose bytes
   assert.ok(!text.some((m) => m.includes(SENTINEL)), 'not in the console of the page or its worker');
 }, { needs: () => h.haveHfes() && h.haveModels() });
 
+// --- NPC bundles (spec 09 Design 5) --------------------------------------------------------
+
+// FNV-1a 64 of `bytes` as 16 lower-case hex digits (the catalog's and the bundles' hash).
+function fnv64(bytes) {
+  let h = 0xcbf29ce484222325n;
+  for (const b of bytes) h = ((h ^ BigInt(b)) * 0x100000001b3n) & 0xffffffffffffffffn;
+  return h.toString(16).padStart(16, '0');
+}
+
+const NPC_SENTINEL = 'Zq7NpcSentinel';
+
+// A synthetic converse.a (no game bytes): item 5, stored raw, is `ff 05 "Nm" f1 "look" f2`, a
+// greeting that holds the sentinel, an ask, one keyword block and the end. With its bundle as
+// the exporter must make it (actor 5 by its slot, portrait a 4, no objlist: no traits).
+function npcFixture() {
+  const enc = (t) => [...Buffer.from(t, 'latin1')];
+  const script = [0xff, 0x05, ...enc('Nm'), 0xf1, ...enc('look'), 0xf2, ...enc(`Hi ${NPC_SENTINEL}!`),
+    0xf7, 0xef, ...enc('name'), 0xf6, ...enc('I am Nm.'), 0xee, 0xff];
+  const ask = 10 + 3 + NPC_SENTINEL.length + 1;
+  const offsets = [0, 0, 0, 0, 0, 6 * 4];
+  const lib = [...offsets.flatMap((o) => [o & 255, (o >> 8) & 255, 0, 0]), 0, 0, 0, 0, ...script];
+  const bundle = {
+    format: 'u6.npc-bundle/1', archive: 'a', item: 5, hash: fnv64(script), refused: null,
+    actors: [5], portraits: [{ actor: 5, archive: 'a', item: 4 }], name: 'Nm', locale: 'en',
+    narration: { look: [{ kind: 'text', key: ['a', 5, 5], text: 'look' }] },
+    speech: { greeting: [{ kind: 'text', key: ['a', 5, 10], text: `Hi ${NPC_SENTINEL}!` }] },
+    turns: [{
+      input: { at: ask, kind: 'ask' },
+      segments: [{ kind: 'op', at: ask + 16, op: 'end' }],
+      topics: [{
+        at: ask + 1, keywords: ['name'], requires: [],
+        answer: [{ kind: 'text', key: ['a', 5, ask + 7], text: 'I am Nm.' }],
+      }],
+    }],
+    traits: [], strings: [],
+  };
+  return { files: [{ path: 'U6/converse.a', bytes: lib }, { path: 'U6/other', bytes: [1, 2, 3] }], bundle };
+}
+
+// Presses `button` and returns the download it gives, parsed, with its suggested name.
+async function npcDownload(page, button = '#npc-bundles') {
+  const [download] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.click(button)]);
+  const text = await readFile(await download.path(), 'utf8');
+  await h.waitSettled(page);
+  return { name: download.suggestedFilename(), bundles: JSON.parse(text) };
+}
+
+test('NPC bundles (synthetic kept files): with none kept the button says so and downloads nothing; with the files kept, one press makes the bundle of each conversation script, keeps each under npc-bundle:<archive>/<item> and downloads them as one JSON array, exactly; storage that refuses them still downloads them and keeps the ones before; Forget NPC bundles removes them; the sentinel in the script never reaches the console, the page\'s data or text, an error or a CSP report', async (env) => {
+  const { page } = await h.openPage(env);
+  const text = consoleText(page);
+  let downloads = 0;
+  page.on('download', () => { downloads += 1; });
+  await h.load(page, env);
+  await page.click('#npc-bundles');
+  await h.waitSettled(page);
+  assert.equal((await h.state(page)).status, await line('npcNoFiles'), 'no kept files: says so');
+  assert.equal(downloads, 0, 'and downloads nothing');
+  const { files, bundle } = npcFixture();
+  await h.keepFiles(page, files);
+  const got = await npcDownload(page);
+  assert.equal(got.name, 'ultima6-npc-bundles.json', 'one JSON file');
+  assert.deepEqual(got.bundles, [bundle], 'the bundle, exactly');
+  let kept = await h.keptBundles(page);
+  assert.deepEqual(kept.keys, ['npc-bundle:a/5'], 'kept under its key');
+  assert.deepEqual(kept.byKey['npc-bundle:a/5'], bundle, 'the kept bundle is the one downloaded');
+  assert.equal((await h.state(page)).status, await line('npcExported', 1, 'ultima6-npc-bundles.json'));
+  // A second export over a store that refuses it: the download still comes, the kept one stays.
+  const changed = structuredClone(files);
+  changed[0].bytes[changed[0].bytes.length - 3] = 0x21; // "I am Nm!"
+  await h.keepFiles(page, changed);
+  await page.evaluate(() => window.__fail.add('bundles-store'));
+  const again = await npcDownload(page);
+  assert.equal(again.bundles.length, 1);
+  assert.equal(again.bundles[0].turns[0].topics[0].answer[0].text, 'I am Nm!', 'the download is the new export');
+  assert.equal((await h.state(page)).status, await line('npcNotKept', 1, 'ultima6-npc-bundles.json'));
+  kept = await h.keptBundles(page);
+  assert.deepEqual(kept.byKey['npc-bundle:a/5'], bundle, 'the bundle kept before stays');
+  await page.evaluate(() => window.__fail.delete('bundles-store'));
+  await page.click('#forget-npc-bundles');
+  await h.waitSettled(page);
+  assert.deepEqual((await h.keptBundles(page)).keys, [], 'forgotten');
+  assert.equal((await h.state(page)).status, await line('npcForgot'));
+  assert.ok((await h.keptPaths(page)) !== null, 'the kept game files stay');
+  const log = await h.log(page);
+  assert.ok(log.includes('bundles:store:end') && log.includes('bundles:store:fail') && log.includes('bundles:forget:end'), 'through the store');
+  const where = await page.evaluate(() => JSON.stringify({
+    body: { ...document.body.dataset }, canvas: { ...document.getElementById('screen').dataset },
+    text: document.body.innerText, storage: { ...localStorage }, csp: window.__csp,
+  }));
+  assert.ok(!where.includes(NPC_SENTINEL), 'not in the page\'s data, text or storage');
+  assert.ok(!text.some((m) => m.includes(NPC_SENTINEL)), 'not in the console or an error');
+  assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP report');
+  assert.equal(downloads, 2);
+});
+
+test('NPC bundles from the user\'s files: one press after the import downloads one u6.npc-bundle/1 per conversation script (counts only), each its own (archive, item) once, its text segments keyed to it; the kept ones are the download; Forget NPC bundles removes them; no bundle text in the console (receipt)', async (env) => {
+  const { page } = await h.openPage(env);
+  const text = consoleText(page);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  const t0 = Date.now();
+  const { bundles } = await npcDownload(page);
+  const ms = Date.now() - t0;
+  assert.ok(bundles.length > 0, 'bundles');
+  assert.ok(bundles.every((b) => b.format === 'u6.npc-bundle/1' && b.locale === 'en'), 'every one u6.npc-bundle/1');
+  const keys = bundles.map((b) => `${b.archive}/${b.item}`);
+  assert.equal(new Set(keys).size, keys.length, 'each script once');
+  const order = bundles.every((b, i) => i === 0 || bundles[i - 1].archive < b.archive
+    || (bundles[i - 1].archive === b.archive && bundles[i - 1].item < b.item));
+  assert.ok(order, 'in (archive, item) order');
+  const segments = (b) => [...b.narration.look, ...b.speech.greeting,
+    ...b.turns.flatMap((t) => [...t.segments, ...t.topics.flatMap((p) => p.answer)])];
+  let texts = 0;
+  let own = 0;
+  for (const b of bundles) {
+    for (const s of segments(b).filter((s) => s.kind === 'text')) {
+      texts += 1;
+      if (s.key[0] === b.archive && s.key[1] === b.item && Number.isInteger(s.key[2])) own += 1;
+    }
+  }
+  assert.ok(texts > 0 && own === texts, 'every text segment keyed to its own script');
+  const named = bundles.filter((b) => b.name).length;
+  const greeting = bundles.filter((b) => b.speech.greeting.some((s) => s.kind === 'text')).length;
+  const turns = bundles.filter((b) => b.turns.length > 0).length;
+  const refused = bundles.filter((b) => b.refused !== null).length;
+  const kept = await h.keptBundles(page);
+  // Compared here, never shown: the keys name the user's scripts (a failure gives counts only).
+  // The scripts come from the kept archives themselves, not from the export or the store.
+  const scripts = await h.keptScripts(page);
+  const same = (x, y) => x.length === y.length && x.every((k, i) => k === y[i]);
+  assert.ok(same([...keys].sort(), scripts), `one bundle per script (bundles ${keys.length}, scripts ${scripts.length})`);
+  const want = scripts.map((k) => `npc-bundle:${k}`).sort();
+  assert.ok(same(kept.keys, want), `one kept record per script (kept ${kept.keys.length}, scripts ${want.length})`);
+  assert.ok(bundles.every((b) => JSON.stringify(kept.byKey[`npc-bundle:${b.archive}/${b.item}`]) === JSON.stringify(b)), 'the kept ones are the download');
+  const said = new Set(bundles.flatMap((b) => segments(b)).filter((s) => s.kind === 'text' && s.text.length >= 8).map((s) => s.text));
+  assert.ok(!text.some((m) => [...said].some((t) => m.includes(t))), 'no bundle text in the console');
+  await page.click('#forget-npc-bundles');
+  await h.waitSettled(page);
+  const left = (await h.keptBundles(page)).keys.length;
+  assert.ok(left === 0, `forgotten (${left} left)`);
+  const reports = (await page.evaluate(() => window.__csp)).length;
+  assert.ok(reports === 0, `no CSP report (${reports})`);
+  console.log(`  receipt: bundles ${bundles.length}, refused ${refused}, with a name ${named}, with a greeting ${greeting}, with a turn ${turns}; text segments ${texts}, keyed to their script ${own}; kept ${kept.keys.length}; press to download ${ms} ms`);
+}, { needs: h.haveHfes });
+
 const filter = process.argv[2];
 const env = await h.setup();
 let failed = 0;

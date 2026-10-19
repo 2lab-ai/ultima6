@@ -37,6 +37,10 @@
 //! in conversations, and the page takes it after each frame with [`Game::take_speech`] for its
 //! on-device synthesis; off (the default), the tap keeps nothing and no frame changes either way.
 //!
+//! NPC bundles (spec 09 Design 5): an [`NpcBundles`] takes the game files the page kept and
+//! exports each conversation script's NPC name and dialogue as `u6.npc-bundle/1` JSON, for the
+//! page's storage and its download; nothing of it runs in a game.
+//!
 //! A start runs the launcher's sequence (`u`: the opening and the menu, then `game`);
 //! [`Game::start_game_first`] starts `game` at once (development and tests). When the sequence
 //! ends (Quit in the menu, the end of the game) [`Game::finished`] turns true and the page says
@@ -56,6 +60,7 @@ use std::collections::BTreeMap;
 
 use std::rc::Rc;
 
+use u6_core::converse::disasm::bundle;
 use u6_core::hd::{HdView, PackCounts};
 use u6_core::objects::{BLOCK_COUNT, MAX_RECORDS};
 use u6_core::pacer::{self, Pacer, Speed};
@@ -1254,6 +1259,50 @@ fn whole_save(s: &u6_core::State, since: u32) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
+/// Spec 09 Design 5: the NPC bundles (`u6.npc-bundle/1`) of the game files the page kept, made
+/// here in the browser: the page adds each kept file ([`NpcBundles::add`], which keeps only the
+/// files the exporter reads) and takes the bundles as one JSON array ([`NpcBundles::export`]).
+/// It needs no game running. The JSON holds the user's game text: for the page's storage and
+/// its download only (never logged or shown); an error names only what failed.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct NpcBundles {
+    files: BTreeMap<String, Vec<u8>>,
+}
+
+#[wasm_bindgen]
+impl NpcBundles {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> NpcBundles {
+        NpcBundles::default()
+    }
+
+    /// One kept file; a file the exporter does not read (`u6_core`'s bundle `READS`) is
+    /// dropped at once.
+    pub fn add(&mut self, path: &str, bytes: Vec<u8>) {
+        if bundle::reads(path) {
+            self.files.insert(path.to_string(), bytes);
+        }
+    }
+
+    /// The bundles of the files added, one per conversation script, as a JSON array in
+    /// (archive, item) order. Fails when the files hold no conversation archive or one does not
+    /// read (the message names only that).
+    pub fn export(&self) -> Result<String, JsError> {
+        self.bundles().map_err(|msg| JsError::new(&msg))
+    }
+}
+
+impl NpcBundles {
+    /// [`NpcBundles::export`] without the JS error type.
+    fn bundles(&self) -> Result<String, String> {
+        let files = Files::new(self.files.clone());
+        bundle::export(&files)
+            .map(|b| bundle::to_json(&b))
+            .map_err(|e| format!("NPC bundles: {e}"))
+    }
+}
+
 /// Queues a pointer event; a move right after one with the same buttons replaces it (the game
 /// samples the pointer once per frame and takes a run of moves at once anyway).
 fn queue_pointer(pending: &mut Vec<InputEvent>, x: i32, y: i32, buttons: u8) {
@@ -1521,6 +1570,54 @@ mod tests {
         );
         game.step(20);
         assert_eq!(game.take_speech(), "", "no utterance: nothing");
+    }
+
+    /// Spec 09 Design 5: the export class keeps only the files the exporter reads, gives the
+    /// bundles of a synthetic archive as one JSON array, and fails with a line that names only
+    /// what failed (a sentinel in the script or a path never in it).
+    #[test]
+    fn npc_bundles_keep_only_what_they_read_and_fail_without_content() {
+        const SENTINEL: &str = "Zq7Sentinel";
+        let script = [
+            &b"\xff\x05Nm\xf1look\xf2"[..],
+            SENTINEL.as_bytes(),
+            b"\xf7\xef*\xf6Ok\xee\xff",
+        ]
+        .concat();
+        // A converse library of two items: none, then the script stored raw (at byte 8).
+        let lib = [
+            &0u32.to_le_bytes()[..],
+            &8u32.to_le_bytes(),
+            &[0, 0, 0, 0],
+            &script,
+        ]
+        .concat();
+        let mut ex = NpcBundles::new();
+        ex.add("U6/CONVERSE.A", lib.clone());
+        ex.add(&format!("U6/{SENTINEL}"), vec![1, 2, 3]);
+        ex.add("U6/look.lzd", vec![4]);
+        assert_eq!(ex.files.keys().collect::<Vec<_>>(), ["U6/CONVERSE.A"]);
+        let json = ex.bundles().quiet();
+        let b = bundle::from_json(&json).quiet();
+        assert_eq!(b.len(), 1);
+        assert_eq!(
+            (b[0].archive, b[0].item, b[0].actors.as_slice()),
+            ('a', 1, &[1][..])
+        );
+        assert_eq!(b[0].turns.len(), 1);
+        let mut none = NpcBundles::new();
+        none.add(&format!("{SENTINEL}/objlist"), vec![0; 4]);
+        assert_eq!(
+            none.bundles(),
+            Err("NPC bundles: the files hold no conversation archive".into())
+        );
+        let mut bad = NpcBundles::new();
+        bad.add(
+            &format!("{SENTINEL}/converse.b"),
+            [&4u32.to_le_bytes()[..], SENTINEL.as_bytes()].concat(),
+        );
+        let e = bad.bundles().unwrap_err();
+        assert_eq!(e, "NPC bundles: converse.b does not read");
     }
 
     /// The keys queued reach the game in the step after them (the queues empty, their characters

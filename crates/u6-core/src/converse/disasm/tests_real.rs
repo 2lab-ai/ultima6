@@ -619,3 +619,74 @@ fn print_counts(pass: &str, n: &Counts, distinct: usize) {
         n.unknown_script
     );
 }
+
+/// Spec 09 Acceptance 5 (the bundles' receipt): the owner's files export one bundle per
+/// script of both archives, in the archives' order; each reads back from its JSON; each text
+/// segment's key resolves to a run of 08's catalog of that script (with its text), and every
+/// run and table string of the catalog is in the bundle once (0 gaps). Prints counts and
+/// pass/fail only.
+#[test]
+fn every_script_exports_a_bundle_holding_its_catalog_runs_once() {
+    use super::bundle::{self, Segment};
+    use super::catalog::ScriptUnits;
+    let Some(files) = files() else { return };
+    let all = scripts(&files);
+    let out = bundle::export(&files).quiet();
+    let keys: Vec<(u8, u16)> = all.iter().map(|(l, i, _)| (*l, *i)).collect();
+    let got: Vec<(u8, u16)> = out.iter().map(|b| (b.archive as u8, b.item)).collect();
+    assert!(got == keys, "one bundle per script, in order");
+    let (mut named, mut greeting, mut turns, mut topics, mut actors, mut traits) =
+        (0, 0, 0, 0, 0, 0);
+    let (mut refused, mut texts, mut runs, mut gaps, mut unresolved) = (0, 0, 0, 0, 0);
+    let (mut most, mut spent) = (0usize, 0usize);
+    for (b, (l, i, bytes)) in out.iter().zip(&all) {
+        let u = ScriptUnits::build(*l, *i, bytes);
+        let (_, n) = bundle::Bundle::build_within(*l, *i, bytes, &[], usize::MAX);
+        most = most.max(n);
+        spent += n;
+        let c = bundle::coverage(b, &u);
+        refused += usize::from(b.refused.is_some());
+        named += usize::from(b.name.as_ref().is_some_and(|n| !n.is_empty()));
+        greeting += usize::from(
+            b.speech
+                .greeting
+                .iter()
+                .any(|s| matches!(s, Segment::Text(_))),
+        );
+        turns += usize::from(!b.turns.is_empty());
+        topics += b.turns.iter().map(|t| t.topics.len()).sum::<usize>();
+        actors += usize::from(!b.actors.is_empty());
+        traits += usize::from(!b.traits.is_empty());
+        texts += c.texts;
+        runs += c.runs;
+        gaps += c.gaps();
+        unresolved += c.unresolved;
+    }
+    println!(
+        "bundles {} (scripts {}), refused {refused}, with a name {named}, with a greeting {greeting}, with a turn {turns}, topics {topics}, with actors {actors}, with traits {traits}",
+        out.len(),
+        all.len()
+    );
+    println!(
+        "text segments {texts}, catalog runs {runs}, keys unresolved {unresolved}, gaps {gaps}"
+    );
+    println!(
+        "budget: one script spends at most {most} of {}, the export {spent} of {}",
+        bundle::SCRIPT_BUDGET,
+        bundle::EXPORT_BUDGET
+    );
+    assert_eq!(refused, 0, "no script refused");
+    assert!(named > 0 && greeting > 0 && turns > 0 && actors > 0 && traits > 0);
+    assert_eq!(
+        unresolved, 0,
+        "every text segment's key resolves in the catalog"
+    );
+    assert_eq!(
+        gaps, 0,
+        "every catalog run and string is in its bundle once"
+    );
+    println!("every text key resolves in the catalog: pass; 0 unexplained gaps: pass");
+    let back = bundle::from_json(&bundle::to_json(&out));
+    assert!(back.is_ok_and(|b| b == out), "the bundles read back");
+    println!("the bundles read back from their JSON: pass");
+}

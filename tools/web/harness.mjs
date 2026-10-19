@@ -228,6 +228,18 @@ export async function forgetPack() {
   log('pack:forget:start'); await window.__gate('pack-forget');
   await real.forgetPack(); log('pack:forget:end');
 }
+export async function storeBundles(bundles) {
+  log('bundles:store:start:' + bundles.length); await window.__gate('bundles-store');
+  if (window.__fail.has('bundles-store')) { log('bundles:store:fail'); throw new DOMException('test: no room', 'QuotaExceededError'); }
+  await real.storeBundles(bundles); log('bundles:store:end');
+}
+export async function loadBundles() {
+  const bundles = await real.loadBundles(); log('bundles:load:' + bundles.length); return bundles;
+}
+export async function forgetBundles() {
+  log('bundles:forget:start'); await window.__gate('bundles-forget');
+  await real.forgetBundles(); log('bundles:forget:end');
+}
 `;
 
 // Appended to the wasm-bindgen glue (module scope): the wasm memory size, a trap switch, the
@@ -612,6 +624,79 @@ export function keptPackBytes(page) {
       get.onerror = () => fail(get.error);
     };
   }));
+}
+
+/// The NPC bundles kept in IndexedDB (spec 09 Design 5): their keys (sorted) and the bundle
+/// objects by key. They hold game text: compared in the test, never printed.
+export function keptBundles(page) {
+  return page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const store = db.transaction('files').objectStore('files');
+      const range = IDBKeyRange.bound('npc-bundle:', 'npc-bundle:\uffff');
+      const keys = store.getAllKeys(range);
+      const values = store.getAll(range);
+      values.onsuccess = () => {
+        db.close();
+        done({ keys: [...keys.result].sort(), byKey: Object.fromEntries(keys.result.map((k, i) => [k, values.result[i]])) });
+      };
+      values.onerror = () => fail(values.error);
+    };
+  }));
+}
+
+/// The conversation scripts the kept game files hold, read in the page from their converse.a
+/// and converse.b (each the first by case-folded path among those of that bare name, as the
+/// engine's file lookup takes it) as a U6Lib of 32-bit offsets is read: an item is a script when
+/// its offset is not 0 (u6-formats `U6Lib::parse`, `ConverseLib`). As `<letter>/<item>`, sorted;
+/// they name the user's scripts: compared in the test, never printed.
+export function keptScripts(page) {
+  return page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const get = db.transaction('files').objectStore('files').get('extracted');
+      get.onerror = () => fail(get.error);
+      get.onsuccess = () => {
+        db.close();
+        const files = (get.result ?? []).map((f) => ({ fold: f.path.toLowerCase(), bytes: f.bytes }))
+          .sort((x, y) => (x.fold < y.fold ? -1 : Number(x.fold > y.fold)));
+        const out = [];
+        for (const letter of ['a', 'b']) {
+          const file = files.find((f) => f.fold.split(/[/:\\]/).pop() === `converse.${letter}`);
+          if (!file) continue;
+          const v = new DataView(file.bytes.buffer, file.bytes.byteOffset, file.bytes.byteLength);
+          const at = (i) => v.getUint32(i * 4, true) & 0xffffff;
+          let min = v.byteLength;
+          for (let i = 0; (i + 1) * 4 <= min; i += 1) if (at(i) !== 0 && at(i) < min) min = at(i);
+          for (let i = 0; i < Math.floor(min / 4); i += 1) if (at(i) !== 0) out.push(`${letter}/${i}`);
+        }
+        done(out.sort());
+      };
+    };
+  }));
+}
+
+/// Keeps `files` ({ path, bytes: number[] }) in IndexedDB as the page's kept game files, as
+/// site/store.js keeps them.
+export function keepFiles(page, files) {
+  return page.evaluate((list) => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('files', 'readwrite');
+      tx.objectStore('files').put(list.map(({ path, bytes }) => ({ path, bytes: new Uint8Array(bytes) })), 'extracted');
+      tx.oncomplete = () => { db.close(); done(); };
+      tx.onerror = () => fail(tx.error);
+    };
+  }), files);
 }
 
 /// The paths kept in IndexedDB, or null.

@@ -129,6 +129,9 @@
       <button id="forget-save" type="button" disabled data-i18n="forgetSave">Forget the saved game</button>
       <button id="forget-hd" type="button" disabled data-i18n="forgetHd">Forget the HD pack</button>
       <button id="forget-voices" type="button" data-i18n="forgetVoices">Forget voices</button>
+      <button id="npc-bundles" type="button" disabled data-i18n="npcBundles" data-i18n-title="npcBundlesTitle"
+              title="Each NPC's name and dialogue, read in this browser from the game files kept here: one bundle per conversation script, kept in this browser and downloaded as one JSON file. Nothing is uploaded.">NPC bundles</button>
+      <button id="forget-npc-bundles" type="button" disabled data-i18n="forgetNpcBundles">Forget NPC bundles</button>
       <button id="restart" type="button" hidden data-i18n="restart">Restart</button>
       <div id="playback">
         <button id="mute" type="button" aria-pressed="false">Mute</button>
@@ -202,6 +205,11 @@
         what NPCs say never leaves this browser. </span><a id="voice-terms-link" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt"
         data-i18n="voiceTermsLink">Voice model terms</a><span data-i18n="voiceCreditsAfter">.
         &ldquo;Forget voices&rdquo; removes the model from this browser.</span></p>
+      <p data-i18n="npcNote">NPC bundles: the NPC bundles button makes, in this browser, each
+        NPC's name and dialogue from the game files kept here (one bundle per conversation script,
+        for a later AI to learn how each NPC speaks), keeps them in this browser and downloads
+        them as one JSON file. They are never uploaded; &ldquo;Forget NPC bundles&rdquo; removes
+        them from this browser.</p>
       <p>Not yet: a few rare object actions (moving a carried thing to someone else, a staff's or
         wand's spell in combat). Those say
         &ldquo;Not implemented in this version&rdquo; or do nothing.</p>

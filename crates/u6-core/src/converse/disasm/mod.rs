@@ -116,9 +116,11 @@
 //! as text. A byte the interpreter has no arm for is refused with a named [`Reason`], never
 //! guessed. The op tables are in [`ops`]; the catalog of runs and table strings built on this
 //! is in [`catalog`]. The catalog's JSON form uses serde: no new crate (u6-hdpack already
-//! depends on serde and serde_json) and no measurable weight in the wasm build, and spec 09 V5's
-//! bundle exporter, which runs in wasm, reads the same catalog, so it stays in u6-core.
+//! depends on serde and serde_json). Spec 09 V5's bundle exporter, which runs in wasm, reads the
+//! same catalog, so it stays in u6-core; linking it into u6-web adds about 290 KB (15%) to the
+//! wasm. The NPC bundles built on the catalog are in [`bundle`].
 
+pub mod bundle;
 pub mod catalog;
 mod decode;
 pub mod ops;
@@ -127,6 +129,8 @@ pub(crate) mod trace;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_bundle;
 #[cfg(test)]
 mod tests_real;
 

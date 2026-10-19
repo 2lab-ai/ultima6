@@ -85,13 +85,21 @@
 // voices" removes the cached model and the acceptance. A failure (download, a part that does not
 // check out twice, no room, a runtime that does not start on the CPU, a lost GPU device) turns
 // voices off with a line that names only its kind; the game runs on.
+//
+// NPC bundles (spec 09 Design 5): the "NPC bundles" button reads the game files kept in this
+// browser (no game needs to run) and exports, in wasm (NpcBundles), each conversation script's
+// NPC name and dialogue as one u6.npc-bundle/1 object; they are kept in IndexedDB (one record per
+// script under npc-bundle:) and downloaded as one JSON array, read back from that storage.
+// Nothing is uploaded, and the bundles are never logged or shown: the status line gives their
+// count. Storage that refuses them still gets the download, with a note. "Forget NPC bundles"
+// removes them from this browser.
 import init, {
-  Game, HdPack, PackProbe, budget_ms, input_too_large, max_input_bytes, max_pack_bytes,
-  max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
+  Game, HdPack, NpcBundles, PackProbe, budget_ms, input_too_large, max_input_bytes,
+  max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
 } from './pkg/u6_web.js';
 import {
-  collect, forgetFiles, forgetPack, forgetSaves, loadFiles, loadPack, loadSaves, saveFiles,
-  storePack, storeSaves,
+  collect, forgetBundles, forgetFiles, forgetPack, forgetSaves, loadBundles, loadFiles, loadPack,
+  loadSaves, saveFiles, storeBundles, storePack, storeSaves,
 } from './store.js';
 import { TEXT } from './i18n.js';
 import { CACHE_PREFIX, REVISION } from './voice/model.js';
@@ -130,6 +138,8 @@ const voiceStorage = document.getElementById('voice-storage');
 const voiceAccept = document.getElementById('voice-accept');
 const voiceDecline = document.getElementById('voice-decline');
 const forgetVoices = document.getElementById('forget-voices');
+const npcBundles = document.getElementById('npc-bundles');
+const forgetNpcBundles = document.getElementById('forget-npc-bundles');
 
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
 
@@ -1287,6 +1297,70 @@ async function restoreKept(focus, note = '', imported = null) {
   }
 }
 
+// --- NPC bundles (spec 09 Design 5) ------------------------------------------------------
+
+const NPC_FILE = 'ultima6-npc-bundles.json';
+
+// Offers `text` as the download `name` (a JSON file made in this page; nothing is sent).
+function download(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  const link = Object.assign(document.createElement('a'), { href: url, download: name });
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+// "NPC bundles": the bundles of the kept game files, made in wasm, kept in IndexedDB in place of
+// the ones kept before, and downloaded as one JSON array read back from there (from the export
+// itself when the storage refuses them).
+async function exportNpcBundles() {
+  needEngine();
+  let kept = await loadFiles();
+  if (!kept || kept.length === 0) {
+    say('npcNoFiles');
+    return;
+  }
+  const exporter = new NpcBundles();
+  let json;
+  try {
+    for (let i = 0; i < kept.length; i += 1) {
+      exporter.add(kept[i].path, kept[i].bytes);
+      kept[i] = null;
+    }
+    kept = null;
+    json = exporter.export();
+  } finally {
+    exporter.free();
+  }
+  let bundles = JSON.parse(json);
+  json = null;
+  // A storage error names only its kind, never a bundle.
+  let stored = true;
+  try {
+    await storeBundles(bundles);
+  } catch (err) {
+    console.warn(`could not keep the NPC bundles: ${message(err)}`);
+    stored = false;
+  }
+  if (stored) {
+    try {
+      bundles = await loadBundles();
+    } catch (err) {
+      // Kept, but not read back: the download is the export itself, the same bundles.
+      console.warn(`could not read the kept NPC bundles back: ${message(err)}`);
+    }
+  }
+  download(NPC_FILE, JSON.stringify(bundles));
+  say(stored ? 'npcExported' : 'npcNotKept', bundles.length, NPC_FILE);
+}
+
+async function forgetNpc() {
+  await forgetBundles();
+  say('npcForgot');
+}
+
 async function forgetKept() {
   await forgetFiles();
   say(game ? 'forgotFilesRunning' : 'forgotFiles');
@@ -1654,6 +1728,14 @@ voiceDecline.addEventListener('click', declineTerms);
 forgetVoices.addEventListener('click', () => {
   forgetVoiceModel().catch(() => say('voiceForgetFailed'));
 });
+npcBundles.addEventListener('click', () => {
+  if (queued > 0) say('waiting');
+  enqueue('opNpcBundles', exportNpcBundles);
+});
+forgetNpcBundles.addEventListener('click', () => {
+  if (queued > 0) say('forgetNpcLater');
+  enqueue('opForgetNpc', forgetNpc);
+});
 restart.addEventListener('click', () => {
   try {
     sessionStorage.setItem(FOCUS_AFTER_RELOAD, '1');
@@ -1700,6 +1782,8 @@ enqueue('opEngine', async () => {
   forget.disabled = false;
   forgetSave.disabled = false;
   forgetHd.disabled = false;
+  npcBundles.disabled = false;
+  forgetNpcBundles.disabled = false;
   reflect('idle');
 });
 // The picker opens once the kept files are back, so a choice never races the restore (a drop
