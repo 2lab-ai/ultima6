@@ -31,8 +31,12 @@
       outline: 3px solid transparent;
       outline-offset: 3px;
     }
-    /* The ring says the game has the keyboard (also after a scripted focus, so not :focus-visible). */
-    canvas:focus { outline-color: #ffd166; }
+    /* The ring says the game has the keyboard (also after a scripted focus, so not :focus-visible),
+       and so while a line is typed in the hidden input that takes Korean (spec 08 K5a). */
+    canvas:focus, #screen-box:focus-within canvas { outline-color: #ffd166; }
+    /* That input: on the canvas, unseen and out of the pointer's way, but able to take focus. */
+    #ime { position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0;
+           opacity: 0; pointer-events: none; }
     /* The speed badge lies over the canvas: the canvas keeps its box, and the pointer passes
        through the badge to it. */
     #screen-box { position: relative; }

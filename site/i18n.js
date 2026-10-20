@@ -10,6 +10,7 @@ const files = (n) => `${n} file${n === 1 ? '' : 's'}`;
 export const TEXT = {
   en: {
     canvasLabel: 'Game screen. Click it or Tab to it; then arrow keys walk and letter keys are game commands. Tab leaves it.',
+    imeLabel: 'Words typed to the game (Korean input). Enter says them; Escape cancels.',
     badgeTitle: 'Game speed: - slower, = or + faster, unless the game is using that key: while a line or a name is typed, in the stats and inventory panels (- and + pick the member), in a party list that scrolls, and in the opening\'s menu. The keypad - and + and the Speed buttons always change it.',
     dropBefore: 'Drop your Ultima VI files: the archive.org zip, the three ADFs, or the extracted files — nothing is uploaded. A ',
     dropAfter: ' folder from the original\'s PLAYER disk dropped here becomes the saved game.',
@@ -185,6 +186,7 @@ export const TEXT = {
   },
   ko: {
     canvasLabel: '게임 화면. 클릭하거나 Tab으로 옮겨 오면 화살표 키로 걷고 글자 키는 게임 명령입니다. Tab을 누르면 빠져나갑니다.',
+    imeLabel: '게임에 입력하는 말(한글 입력). Enter로 말하고 Escape로 취소합니다.',
     badgeTitle: '게임 속도: - 느리게, = 또는 + 빠르게. 게임이 그 키를 쓰는 동안은 예외입니다: 한 줄이나 이름을 입력할 때, 능력치와 소지품 패널(- 와 + 로 동료를 고릅니다), 스크롤되는 일행 목록, 오프닝의 메뉴. 키패드의 - 와 + 및 속도 버튼은 언제나 속도를 바꿉니다.',
     dropBefore: '울티마 VI 파일을 여기에 놓으세요: archive.org의 zip, ADF 세 개, 또는 풀어 놓은 파일 — 아무것도 업로드되지 않습니다. 원본 PLAYER 디스크의 ',
     dropAfter: ' 폴더를 여기에 놓으면 저장된 게임이 됩니다.',

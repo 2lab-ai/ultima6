@@ -16,7 +16,9 @@ u6-hdpack.workspace = true
 # The conversation catalog's JSON form (spec 08 Design 6; converse/disasm/catalog.rs), the
 # versions u6-hdpack already uses.
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
-serde_json = "1"
+# `raw_value`: the locale pack's aliases part is read as written (spec 08 slice K5a), so a field
+# twice in an entry is refused as in every other part.
+serde_json = { version = "1", features = ["raw_value"] }
 
 [dev-dependencies]
 # Real-data test only: zip -> files, exactly as the platforms do it.

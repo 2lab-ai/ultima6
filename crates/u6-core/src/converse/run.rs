@@ -44,6 +44,40 @@ pub(crate) fn match_keyword(keyword: &[u8], input: &[u8], len: usize, delims: &[
     false
 }
 
+/// Port-only (spec 08 Design 4, slice K5a): the particles (조사) a word of the input may carry
+/// after a keyword's alias, longest first.
+pub(crate) const PARTICLES: [&str; 21] = [
+    "에게", "에서", "으로", "이여", "은", "는", "이", "가", "을", "를", "와", "과", "의", "에",
+    "로", "도", "만", "께", "아", "야", "여",
+];
+
+/// Port-only (spec 08 Design 4, slice K5a): does any word of the input equal one of a keyword's
+/// alias `words` (from the locale pack), or one of them followed by exactly one particle of
+/// [`PARTICLES`]. The input is split as [`match_keyword`] splits it (`strtok` at `delims`, on a
+/// copy); ASCII letters compare with upper case folded to lower, every other byte as it is.
+pub(crate) fn match_alias(words: &[Vec<u8>], input: &[u8], delims: &[u8]) -> bool {
+    let mut buf = input.to_vec();
+    buf.push(0);
+    let mut at = 0;
+    while let Some(start) = strtok(&mut buf, &mut at, delims) {
+        let end = buf[start..]
+            .iter()
+            .position(|&b| b == 0)
+            .map_or(buf.len(), |i| start + i);
+        let word = &buf[start..end];
+        let hit = words.iter().any(|w| {
+            word.len() >= w.len() && word[..w.len()].eq_ignore_ascii_case(w) && {
+                let rest = &word[w.len()..];
+                rest.is_empty() || PARTICLES.iter().any(|p| p.as_bytes() == rest)
+            }
+        });
+        if hit {
+            return true;
+        }
+    }
+    false
+}
+
 /// `strtok` over a NUL-terminated buffer: the start of the next token, NUL written after it.
 fn strtok(buf: &mut [u8], at: &mut usize, delims: &[u8]) -> Option<usize> {
     let is_delim = |b: u8| b != 0 && delims.contains(&b);
@@ -191,9 +225,17 @@ pub(crate) async fn checkpoint(cx: &Cx<'_>) {
 /// a word of the input (0x1128d0, full keyword length), or that starts with `*`, skips to `f6`,
 /// prints a newline, marks the input answered and runs the answer text. Without a match the
 /// rest of the block is skipped up to `ef` / `ff` (left to be read again) or past `ee`.
+///
+/// Port (spec 08 Design 4, slice K5a): with a locale pack installed, a keyword the English test
+/// does not match matches when a word of the input is one of the aliases the pack gives it for
+/// the script loaded ([`crate::locale::Pack::aliases`], keyed by the keyword up to its NUL,
+/// case-folded), alone or with one particle after it ([`match_alias`]). The input is never
+/// rewritten (`$` and `f9` keep what was typed), and the keywords are tried in their order as
+/// before, so an alias equal to its keyword changes nothing.
 async fn keywords(cx: &Cx<'_>, npc: i16, kind: Kind) {
     let (delims, newline) = (cx.msg(Msg::Delimiters), cx.msg(Msg::Newline));
     let bye = cx.msg(Msg::Bye);
+    let aliased = cx.st(|s| s.locale.pack.clone().zip(s.converse.script_key));
     cx.cv(|c| {
         if c.input.is_empty() {
             c.input = bye;
@@ -215,7 +257,12 @@ async fn keywords(cx: &Cx<'_>, npc: i16, kind: Kind) {
                 c.advance(-1);
             }
             let len = kw.iter().position(|&b| b == 0).unwrap_or(kw.len());
-            let matched = match_keyword(&kw, &c.input, len, &delims);
+            let matched = match_keyword(&kw, &c.input, len, &delims)
+                || aliased.as_ref().is_some_and(|(pack, script)| {
+                    let key = kw[..len].to_ascii_lowercase();
+                    pack.aliases(*script, &key)
+                        .is_some_and(|words| match_alias(words, &c.input, &delims))
+                });
             (kw, matched)
         });
         if matched || kw.first() == Some(&b'*') {

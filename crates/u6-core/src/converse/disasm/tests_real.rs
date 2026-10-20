@@ -665,16 +665,17 @@ fn talk_seen(base: &State, files: &Files, npc: i16, lines: &[&str]) -> (bool, Se
     (e.finished(), seen, c)
 }
 
-/// Spec 08 Order 3 / Acceptance 5, for the conversation (slices K1 and K2): the identity pack
-/// built at test time from the owner's files (every run and every table string of the catalog,
-/// and every executable string the engine catalogues, each translated as itself, declaring
+/// Spec 08 Order 3 / Acceptance 5, for the conversation (slices K1, K2 and K5a): the identity
+/// pack built at test time from the owner's files (every run and every table string of the
+/// catalog, and every executable string the engine catalogues, each translated as itself, and
+/// every keyword of those scripts an alias can stand for given itself as its alias, declaring
 /// English grammar; `crate::locale::identity`), written as a pack file and read back through
 /// the pack reader, checked against the files and installed (`wide` on): the conversations of
 /// the cross-check (name, job and the goodbye with the 40 actors nearest the leader, and the
-/// greeter) show at every tick the frame and the scroll they show without it, and every run,
-/// table string and catalogued executable string they show is one of the pack's (0 misses).
-/// Prints the counts of its own conversations (ticks, hits, misses) and pass/fail only, no size
-/// of the pack.
+/// greeter, each keyword block trying the aliases of the keywords English did not match) show
+/// at every tick the frame and the scroll they show without it, and every run, table string and
+/// catalogued executable string they show is one of the pack's (0 misses). Prints the counts of
+/// its own conversations (ticks, hits, misses) and pass/fail only, no size of the pack.
 #[test]
 fn the_identity_pack_shows_the_real_conversations_exactly_as_english() {
     use crate::locale;
@@ -684,6 +685,12 @@ fn the_identity_pack_shows_the_real_conversations_exactly_as_english() {
     let mut with = base.clone();
     locale::install(&mut with, &files, made.clone(), None).quiet();
     assert!(with.ui.text.wide, "wide on");
+    // Whether it holds aliases only: their number is a count of the owner's keywords.
+    assert!(
+        made.aliased_keywords() > 0,
+        "the identity pack gives keywords aliases"
+    );
+    println!("identity pack with keyword aliases installed: pass");
     // The actors of the cross-check.
     let leader = base.leader_position().quiet();
     let members: Vec<u16> = base.actors.party.active().map(|id| id.0).collect();

@@ -70,8 +70,10 @@ pub(crate) async fn end_unit(cx: &Cx<'_>, opened: u32) {
 }
 
 /// 0x107cba(buf, max): line input with echo; returns the typed bytes (no NUL), empty after Esc.
+/// Port (spec 08 Design 4, slice K5a): the player's words, which take Hangul syllables typed as
+/// text with a locale pack installed ([`crate::ui::keyread::read_words`]; UTF-8, `max` bytes).
 pub(crate) async fn read_line(cx: &Cx<'_>, max: usize) -> Vec<u8> {
-    let (n, line) = Box::pin(crate::ui::keyread::read_line(cx.state, cx.io, max as i16)).await;
+    let (n, line) = Box::pin(crate::ui::keyread::read_words(cx.state, cx.io, max as i16)).await;
     if n < 0 { Vec::new() } else { line }
 }
 

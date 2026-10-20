@@ -1,17 +1,21 @@
-//! Test-only (spec 08 Order 3 / Acceptance 5, slices K1 to K4): the identity pack of the
+//! Test-only (spec 08 Order 3 / Acceptance 5, slices K1 to K5a): the identity pack of the
 //! owner's files, built at test time: every run and every table string of the catalog of his
 //! conversation scripts, every executable string the engine catalogues from his `game`, every
 //! object name of his `look.lzd` and book of his `book.dat`, and every string the engine
-//! catalogues from his `u`, each translated as itself, declaring English grammar. Installed, it
-//! turns `wide` on and must show exactly what English shows, every catalogued unit a hit.
+//! catalogues from his `u`, each translated as itself, and every keyword of those scripts an
+//! alias can stand for given itself as its alias, declaring English grammar. Installed, it turns
+//! `wide` on and must show exactly what English shows, every catalogued unit a hit.
 
 use std::rc::Rc;
 
 use u6_formats::converse::ConverseLib;
 
 use super::strings::Catalogue;
-use super::{Pack, RunText, StringText, TableText, fingerprint, program, texts};
+use super::{
+    MAX_ALIAS_CHARS, Pack, RunText, ScriptKey, StringText, TableText, fingerprint, program, texts,
+};
 use crate::converse::disasm::catalog::Catalog;
+use crate::converse::{ConverseText, Msg};
 use crate::files::Files;
 use crate::ui::Language;
 
@@ -31,10 +35,42 @@ pub(crate) fn identity(files: &Files) -> Option<Rc<Pack>> {
     let catalog = Catalog::build(scripts.iter().map(|(l, i, b)| (*l, *i, b.as_slice())));
     let bytes = |t: &str| -> Vec<u8> { t.chars().map(|c| c as u8).collect() };
     let (mut runs, mut tables, mut named) = (Vec::new(), Vec::new(), Vec::new());
+    // Slice K5a: each keyword as the keyword block keys it (up to its NUL, case-folded), its own
+    // alias where it is an alias word (no `*`, space or game delimiter in it, not too long) of a
+    // script the pack names.
+    let delimiters = ConverseText::from_game(files.get("game")?)
+        .ok()?
+        .get(Msg::Delimiters)
+        .to_vec();
+    let mut aliases: Vec<(ScriptKey, Vec<u8>, Vec<Vec<u8>>)> = Vec::new();
     for s in &catalog.scripts {
         let letter = s.archive as u8;
         if !s.runs.is_empty() || !s.strings.is_empty() {
             named.push((letter, s.item, s.hash));
+            let mut keys: Vec<Vec<u8>> = s
+                .keywords
+                .iter()
+                .map(|k| {
+                    let kw = bytes(&k.text);
+                    let len = kw.iter().position(|&b| b == 0).unwrap_or(kw.len());
+                    kw[..len].to_ascii_lowercase()
+                })
+                .filter(|k| {
+                    (1..=MAX_ALIAS_CHARS).contains(&k.len())
+                        && k.iter().all(|&b| {
+                            b.is_ascii_graphic()
+                                && !b.is_ascii_uppercase()
+                                && !matches!(b, b',' | b'*')
+                                && !delimiters.contains(&b)
+                        })
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            aliases.extend(
+                keys.into_iter()
+                    .map(|k| ((letter, s.item), k.clone(), vec![k])),
+            );
         }
         for r in &s.runs {
             runs.push((
@@ -104,7 +140,7 @@ pub(crate) fn identity(files: &Files) -> Option<Rc<Pack>> {
             },
         )
     });
-    let made = Pack::new(Language::English, "identity/4", fingerprint(named), runs)
+    let made = Pack::new(Language::English, "identity/5", fingerprint(named), runs)
         .inspect_err(|e| eprintln!("identity pack: runs refused: {e:?}"))
         .ok()?
         .with_tables(tables)
@@ -121,6 +157,9 @@ pub(crate) fn identity(files: &Files) -> Option<Rc<Pack>> {
         .ok()?
         .with_program(program)
         .inspect_err(|e| eprintln!("identity pack: u strings refused: {e:?}"))
+        .ok()?
+        .with_aliases(aliases)
+        .inspect_err(|e| eprintln!("identity pack: keyword aliases refused: {e:?}"))
         .ok()?;
     let read = Pack::parse(&made.to_bytes()).ok()?;
     (read == made).then(|| Rc::new(read))

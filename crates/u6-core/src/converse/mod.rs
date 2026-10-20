@@ -59,6 +59,8 @@ mod tests_real;
 mod tests_speech;
 #[cfg(test)]
 mod tests_strings;
+#[cfg(test)]
+mod tests_typing;
 
 use std::cell::RefCell;
 

@@ -122,6 +122,26 @@
 //! the pack is installed on, takes the pack as it starts, and counts its lookups into
 //! [`LocaleState::program`].
 //!
+//! **Slice K5a: keyword aliases.** A pack may also hold, for a conversation script its runs or
+//! table strings name (so under the same fingerprint, `base.converse`), the words a player may
+//! type for a keyword of it (left out of the file when empty):
+//!
+//! ```text
+//!  "aliases":[{"archive":"a","item":5,"keyword":"name","words":["<1 to 8 characters>"]}]
+//! ```
+//!
+//! `keyword` is the keyword as the keyword block reads it (its bytes up to a NUL, upper case
+//! folded to lower, `?` kept; printable ASCII, no `,`), `words` 1 to [`MAX_ALIAS_WORDS`] words
+//! of 1 to [`MAX_ALIAS_CHARS`] characters each, Hangul syllables or printable ASCII but the
+//! space. The reader refuses an entry of another form, one key twice, or a script none of the
+//! pack's runs and table strings name (the aliases part, [`PackError::Aliases`]); at install a
+//! word holding one of the game's word delimiters (a word the keyword test never sees whole)
+//! refuses the pack, the aliases part named ([`Pack::check_aliases`]). A keyword the script
+//! does not hold is kept and never used. At run time the keyword block tries a keyword's
+//! aliases after its English ([`crate::converse`]'s `keywords`): a word of the input equal to
+//! one, or to one followed by one particle (조사) of a fixed list, matches; the input itself is
+//! not changed, so `$` and `f9` keep what was typed.
+//!
 //! Rights (spec 08): a pack made from the owner's files holds his game text; it lives in
 //! `~/Games/ultima6/i18n/ko/` and his browser storage, never in the repository or under `site/`
 //! (`tests/no_locale_pack_in_repo.rs`).
@@ -178,9 +198,24 @@ pub const MAX_STRINGS: usize = 1 << 16;
 /// The most bytes one executable string's translation may hold (three per byte of the longest
 /// string the game reads).
 pub const MAX_STRING_TEXT_BYTES: usize = 3 * strings::MAX_BYTES;
+/// Slice K5a: the most keyword aliases (keywords given words) a pack may hold.
+pub const MAX_ALIASES: usize = 1 << 16;
+/// Slice K5a: the most words one keyword may be given.
+pub const MAX_ALIAS_WORDS: usize = 4;
+/// Slice K5a: the most characters of one alias word.
+pub const MAX_ALIAS_CHARS: usize = 8;
+/// Slice K5a: the most bytes of the keyword an alias is keyed by.
+pub const MAX_KEYWORD_BYTES: usize = 32;
 
 /// A run's key: (archive letter, item, offset in the script).
 pub type RunKey = (u8, u16, u32);
+
+/// Slice K5a: a script's key, (archive letter, item).
+pub type ScriptKey = (u8, u16);
+
+/// Slice K5a: a script's keyword aliases: the words (UTF-8) by keyword (its bytes up to a NUL,
+/// case-folded).
+pub type Aliases = BTreeMap<Vec<u8>, Vec<Vec<u8>>>;
 
 /// One run's translation and what it was made from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -218,7 +253,7 @@ pub struct StringText {
 
 /// A pack's parts, as a mismatch names them: the conversation part (its runs and table strings,
 /// under one fingerprint), the executable strings, (slice K3) the object names and the books,
-/// and (slice K4) the `u` program's strings.
+/// (slice K4) the `u` program's strings and (slice K5a) the keyword aliases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Converse,
@@ -226,10 +261,12 @@ pub enum Part {
     Look,
     Books,
     Program,
+    Aliases,
 }
 
 impl Part {
-    /// The part's name in the pack (`base.converse`; `strings`; `look`; `books`; `u`).
+    /// The part's name in the pack (`base.converse`; `strings`; `look`; `books`; `u`;
+    /// `aliases`).
     pub fn name(self) -> &'static str {
         match self {
             Part::Converse => "converse",
@@ -237,6 +274,7 @@ impl Part {
             Part::Look => "look",
             Part::Books => "books",
             Part::Program => "u",
+            Part::Aliases => "aliases",
         }
     }
 }
@@ -260,6 +298,8 @@ pub struct Pack {
     books: BTreeMap<u32, RunText>,
     /// Slice K4: the `u` program's strings, by [`hash64`] of their English.
     program: BTreeMap<u64, StringText>,
+    /// Slice K5a: the keyword aliases, by script.
+    aliases: BTreeMap<ScriptKey, Aliases>,
 }
 
 /// Why a pack file is refused. Each is a fixed sentence (no value of the file).
@@ -307,6 +347,10 @@ pub enum PackError {
     /// longer than [`program::MAX_BYTES`], or whose translation is over
     /// [`program::MAX_TEXT_BYTES`].
     ProgramKey,
+    /// Slice K5a: a keyword alias of another form than the aliases part's (its keyword or a
+    /// word), one keyword twice, over [`MAX_ALIASES`], or one for a script none of the pack's
+    /// runs and table strings name.
+    Aliases,
 }
 
 impl fmt::Display for PackError {
@@ -333,6 +377,9 @@ impl fmt::Display for PackError {
             PackError::ProgramKey => {
                 "an opening or creation string in it is not one the u program prints"
             }
+            PackError::Aliases => {
+                "its keyword aliases part (aliases) holds an entry of another form or for a script its lines do not name"
+            }
         })
     }
 }
@@ -354,6 +401,9 @@ impl fmt::Display for Mismatch {
             Part::Books => f.write_str("its books part does not match the game's books and signs"),
             Part::Program => f.write_str(
                 "its opening and creation part does not keep the u program's format codes",
+            ),
+            Part::Aliases => f.write_str(
+                "its keyword aliases part (aliases) holds a word the game splits into words",
             ),
         }
     }
@@ -377,6 +427,32 @@ struct PackJson {
     books: Vec<EntryJson>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     u: Vec<StringJson>,
+    /// Slice K5a: kept as written and read on its own as a list of [`AliasJson`], so anything
+    /// of another form is the aliases part's refusal ([`PackError::Aliases`]): a missing, extra
+    /// or repeated field (read as written, not through a map that keeps the last of two), a
+    /// `null` or anything not a list. `None` only when the field is left out.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    aliases: Option<Box<serde_json::value::RawValue>>,
+}
+
+/// A field that is there, whatever its value (`null` included), as `Some`.
+fn present<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Box<serde_json::value::RawValue>>, D::Error> {
+    Box::<serde_json::value::RawValue>::deserialize(d).map(Some)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AliasJson {
+    archive: String,
+    item: u16,
+    keyword: String,
+    words: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -453,6 +529,25 @@ fn text_ok(t: &str) -> bool {
         })
 }
 
+/// Slice K5a: whether `keyword` is a key of the aliases: 1 to [`MAX_KEYWORD_BYTES`] bytes of
+/// printable ASCII as the keyword block reads a keyword (no `,`, which ends one), upper case
+/// folded to lower.
+fn keyword_ok(keyword: &[u8]) -> bool {
+    (1..=MAX_KEYWORD_BYTES).contains(&keyword.len())
+        && keyword
+            .iter()
+            .all(|&b| (0x20..0x7f).contains(&b) && b != b',' && !b.is_ascii_uppercase())
+}
+
+/// Slice K5a: whether `word` is an alias word: 1 to [`MAX_ALIAS_CHARS`] characters, each a
+/// Hangul syllable or printable ASCII but the space (which splits the input into words).
+fn alias_word_ok(word: &str) -> bool {
+    (1..=MAX_ALIAS_CHARS).contains(&word.chars().count())
+        && word
+            .chars()
+            .all(|c| c.is_ascii_graphic() || ('\u{ac00}'..='\u{d7a3}').contains(&c))
+}
+
 /// The fingerprint of the scripts a converse map names: [`hash64`] over, for each distinct
 /// (archive letter, item) in order, the letter, the item (2 bytes, little-endian) and the
 /// script's own [`hash64`] (8 bytes, little-endian; the catalog's and the NPC bundles' `hash`).
@@ -501,6 +596,7 @@ impl Pack {
             look: BTreeMap::new(),
             books: BTreeMap::new(),
             program: BTreeMap::new(),
+            aliases: BTreeMap::new(),
         })
     }
 
@@ -641,6 +737,43 @@ impl Pack {
         Ok(self)
     }
 
+    /// The pack with the keyword aliases `aliases` (slice K5a): per entry a script, a keyword and
+    /// its words (UTF-8), checked as [`Pack::parse`] checks them: a script the pack's runs or
+    /// table strings name, a keyword and words of the aliases' form ([`keyword_ok`],
+    /// 1..=[`MAX_ALIAS_WORDS`] words, each [`alias_word_ok`]), each keyword of a script once, at
+    /// most [`MAX_ALIASES`]. Any other is [`PackError::Aliases`].
+    pub fn with_aliases(
+        mut self,
+        aliases: impl IntoIterator<Item = (ScriptKey, Vec<u8>, Vec<Vec<u8>>)>,
+    ) -> Result<Pack, PackError> {
+        let scripts = self.script_keys();
+        let mut count = 0;
+        for (script, keyword, words) in aliases {
+            let words_ok = (1..=MAX_ALIAS_WORDS).contains(&words.len())
+                && words
+                    .iter()
+                    .all(|w| std::str::from_utf8(w).is_ok_and(alias_word_ok));
+            count += 1;
+            if !scripts.contains(&script)
+                || !keyword_ok(&keyword)
+                || !words_ok
+                || count > MAX_ALIASES
+            {
+                return Err(PackError::Aliases);
+            }
+            if self
+                .aliases
+                .entry(script)
+                .or_default()
+                .insert(keyword, words)
+                .is_some()
+            {
+                return Err(PackError::Aliases);
+            }
+        }
+        Ok(self)
+    }
+
     /// Reads a pack file (see the module doc). Nothing of it is kept unless all of it checks.
     pub fn parse(bytes: &[u8]) -> Result<Pack, PackError> {
         if bytes.len() > MAX_PACK_BYTES {
@@ -672,6 +805,13 @@ impl Pack {
         }
         if json.u.len() > MAX_STRINGS {
             return Err(PackError::TooManyRuns);
+        }
+        let alias_entries: Vec<AliasJson> = match &json.aliases {
+            None => Vec::new(),
+            Some(raw) => serde_json::from_str(raw.get()).map_err(|_| PackError::Aliases)?,
+        };
+        if alias_entries.len() > MAX_ALIASES {
+            return Err(PackError::Aliases);
         }
         let mut runs = Vec::with_capacity(json.converse.len());
         for r in json.converse {
@@ -732,12 +872,19 @@ impl Pack {
         };
         let (look, books) = (entries(json.look)?, entries(json.books)?);
         let program = by_hash(json.u)?;
+        let mut aliases = Vec::with_capacity(alias_entries.len());
+        for a in alias_entries {
+            let archive = archive_of(&a.archive).map_err(|_| PackError::Aliases)?;
+            let words = a.words.into_iter().map(String::into_bytes).collect();
+            aliases.push(((archive, a.item), a.keyword.into_bytes(), words));
+        }
         Pack::new(language, &json.tool, converse_base, runs)?
             .with_tables(tables)?
             .with_strings(strings)?
             .with_look(look)?
             .with_books(books)?
-            .with_program(program)
+            .with_program(program)?
+            .with_aliases(aliases)
     }
 
     /// The pack file: [`MAGIC`], a line feed and the JSON object, runs in key order.
@@ -778,6 +925,7 @@ impl Pack {
             look: entries_json(&self.look),
             books: entries_json(&self.books),
             u: strings_json(&self.program),
+            aliases: aliases_json(&self.aliases),
         };
         let mut out = MAGIC.to_vec();
         out.push(b'\n');
@@ -818,6 +966,20 @@ impl Pack {
     /// Slice K4: the `u` program's strings it holds.
     pub fn program_strings(&self) -> usize {
         self.program.len()
+    }
+
+    /// Slice K5a: the keywords it gives aliases (over every script).
+    pub fn aliased_keywords(&self) -> usize {
+        self.aliases.values().map(BTreeMap::len).sum()
+    }
+
+    /// Slice K5a: the words a player may type for the keyword `keyword` (its bytes up to a NUL,
+    /// case-folded) of the script (`letter`, `item`), if the pack gives it any.
+    pub fn aliases(&self, (letter, item): ScriptKey, keyword: &[u8]) -> Option<&[Vec<u8>]> {
+        self.aliases
+            .get(&(letter, item))?
+            .get(keyword)
+            .map(Vec::as_slice)
     }
 
     fn script_keys(&self) -> BTreeSet<(u8, u16)> {
@@ -958,6 +1120,24 @@ impl Pack {
         Ok(())
     }
 
+    /// Slice K5a: checks the keyword aliases against the game's word delimiters (the bytes the
+    /// keyword test splits the input at, [`crate::converse::Msg::Delimiters`]): a word that holds
+    /// one never comes whole out of the split, so it is a mismatch of the aliases part.
+    pub fn check_aliases(&self, delimiters: &[u8]) -> Result<(), Mismatch> {
+        let split = self
+            .aliases
+            .values()
+            .flat_map(BTreeMap::values)
+            .flatten()
+            .any(|w| w.iter().any(|b| delimiters.contains(b)));
+        if split {
+            return Err(Mismatch {
+                part: Part::Aliases,
+            });
+        }
+        Ok(())
+    }
+
     /// Slice K3: checks the object names and the books against the files the engine reads
     /// (`look.lzd` decoded, `book.dat`; a part the pack does not have needs no file): every entry
     /// is one of the file's units ([`texts::look_units`], [`texts::book_units`]), its English of
@@ -1015,6 +1195,30 @@ fn strings_json(map: &BTreeMap<u64, StringText>) -> Vec<StringJson> {
             text: String::from_utf8(t.text.clone()).expect("checked as UTF-8"),
         })
         .collect()
+}
+
+/// Slice K5a: the JSON of the keyword aliases, by script then keyword (`None`, left out of the
+/// file, when there are none).
+fn aliases_json(
+    aliases: &BTreeMap<ScriptKey, Aliases>,
+) -> Option<Box<serde_json::value::RawValue>> {
+    let entries: Vec<AliasJson> = aliases
+        .iter()
+        .flat_map(|(&(a, item), keywords)| {
+            keywords.iter().map(move |(keyword, words)| AliasJson {
+                archive: char::from(a).to_string(),
+                item,
+                keyword: String::from_utf8(keyword.clone()).expect("checked as ASCII"),
+                words: words
+                    .iter()
+                    .map(|w| String::from_utf8(w.clone()).expect("checked as UTF-8"))
+                    .collect(),
+            })
+        })
+        .collect();
+    (!entries.is_empty()).then(|| {
+        serde_json::value::to_raw_value(&entries).expect("an alias has only serialisable fields")
+    })
 }
 
 /// The JSON of a map of object names or books, in index order.
@@ -1145,7 +1349,9 @@ pub struct LocaleState {
 /// an empty one), and the pack's strings are checked against it ([`Pack::check_strings`]).
 /// Slice K3: then its object names and books against `files`' `look.lzd` and `book.dat`
 /// ([`Pack::check_texts`]). Slice K4: then its `u` strings against the catalogue of `files`' `u`
-/// ([`program::Catalogue::from_files`], [`Pack::check_program`]).
+/// ([`program::Catalogue::from_files`], [`Pack::check_program`]). Slice K5a: then its keyword
+/// aliases against the game's word delimiters, those of the converse messages `state` holds
+/// (none read: no delimiter; [`Pack::check_aliases`]).
 pub fn install(
     state: &mut State,
     files: &Files,
@@ -1184,6 +1390,12 @@ pub(crate) fn install_parts(
     pack.check_strings(&catalogue)?;
     pack.check_texts(files)?;
     pack.check_program(&program)?;
+    let delimiters = state
+        .converse
+        .text
+        .as_ref()
+        .map(|t| t.get(crate::converse::Msg::Delimiters));
+    pack.check_aliases(delimiters.unwrap_or_default())?;
     state.locale = LocaleState {
         pack: Some(pack),
         hangul,

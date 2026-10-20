@@ -20,6 +20,7 @@ mod pointer_real;
 mod pointer_tests;
 mod real_tests;
 mod text_tests;
+mod typing_tests;
 mod wide_tests;
 
 pub(super) const INK: u8 = 1;

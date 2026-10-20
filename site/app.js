@@ -124,7 +124,15 @@
 // story, the gypsy and character creation; a pack that holds them shows them in Korean when a
 // new game starts in 한글 (u runs on the game the pack is set on before its first step, as the
 // game does; counts only: data-locale-pack-program on the body, data-locale-program-hits/misses
-// on the canvas).
+// on the canvas). Slice K5a: with the pack on the game, while the game reads a line (all three
+// bits of Game.keys_owned: what the player says, a name), the canvas's keys go through a hidden
+// text input (#ime, made only then: in English or without a pack there is none) that takes the
+// browser's IME composition: only committed text reaches the game (Game.text_input; the
+// conversation's line editor takes Hangul syllables, and the pack's keyword aliases answer as
+// their English keywords), Enter during a composition commits it first and then goes, Backspace
+// and Escape while composing are the IME's (Escape cancels the composition only), and every
+// other key keeps its canvas meaning (the speed keys included). When the line ends the focus
+// goes back to the canvas. Nothing typed is logged, kept or shown in the page's text or data.
 import init, {
   Game, GameStrings, HdPack, LocalePack, NpcBundles, PackProbe, budget_ms, input_too_large, max_input_bytes,
   max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
@@ -1324,6 +1332,7 @@ function toggleHd() {
 function frame(now) {
   if (!game || crashed) {
     looping = false;
+    followLine();
     return;
   }
   const dt = now - last;
@@ -1355,6 +1364,7 @@ function frame(now) {
     canvas.dataset.program = game.program();
     canvas.dataset.name = game.leader_name();
     canvas.dataset.keys = String(game.keys_pending());
+    followLine();
     reflectLocaleCounts();
     paced(now, dt, k);
     if (done || game.finished()) {
@@ -1978,14 +1988,148 @@ function applySetup() {
   });
 }
 
+// --- typing Korean (spec 08 Design 4, slice K5a) -------------------------------------------
+
+const OWN_LINE = 7; // Game.keys_owned's three bits: a line being typed
+// A plain Enter keydown this soon after the Enter a commit sent is taken for the same press,
+// should a platform deliver it again once the IME let it go (not measured here: the page tests
+// emulate the IME through CDP, which sends no second keydown).
+const ENTER_AGAIN_MS = 100;
+let ime = null; // the hidden input, while the game on screen has the pack
+let lineOpen = false; // the page moved the focus to it for the line being read
+let composing = false; // a composition is open in it
+let enterAfterCommit = false; // Enter came during the composition: it goes after the commit
+let dropCommit = false; // Escape cancelled the composition: a late commit of it is dropped
+let enterSentAt = -Infinity; // the event time of the Enter a commit sent
+// The focus came back to the canvas from the hidden input by the keyboard (Shift+Tab) during the
+// line: it stays there (the canvas takes the keys as in English), so the focus is not trapped.
+let keepCanvas = false;
+
+// Committed text to the game (never logged or kept).
+function sendText(text) {
+  if (lineOpen && text && game && !crashed) game.text_input(text);
+}
+
+// Escape while composing: the composition goes, nothing of it reaches the game (setting the
+// value cancels it in Chrome without a compositionend; an IME that commits on Escape anyway
+// has that commit dropped).
+function cancelComposition() {
+  composing = false;
+  enterAfterCommit = false;
+  dropCommit = true;
+  ime.value = '';
+}
+
+// A key pressed in the hidden input: while composing (or a key the IME takes, keyCode 229)
+// the IME's, Enter marked to follow the commit and Escape cancelling the composition; else as
+// on the canvas (`gameKey`), but for the second Enter of a press a commit already sent.
+function imeKey(e) {
+  if (composing || e.isComposing) {
+    if (e.key === 'Enter') enterAfterCommit = true;
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelComposition();
+    }
+    return;
+  }
+  if (e.keyCode === 229) return;
+  if (e.key === 'Enter' && e.timeStamp - enterSentAt < ENTER_AGAIN_MS) {
+    enterSentAt = -Infinity;
+    e.preventDefault();
+    return;
+  }
+  gameKey(e);
+}
+
+function makeIme() {
+  ime = document.createElement('input');
+  ime.id = 'ime';
+  ime.type = 'text';
+  ime.lang = 'ko';
+  ime.tabIndex = -1; // in the tab order only while a line is open (`followLine`)
+  ime.autocomplete = 'off';
+  ime.spellcheck = false;
+  ime.setAttribute('autocapitalize', 'off');
+  ime.dataset.i18nLabel = 'imeLabel';
+  ime.setAttribute('aria-label', t('imeLabel'));
+  ime.addEventListener('keydown', imeKey);
+  ime.addEventListener('compositionstart', () => {
+    composing = true;
+    dropCommit = false;
+  });
+  ime.addEventListener('compositionend', (e) => {
+    composing = false;
+    if (dropCommit) {
+      dropCommit = false;
+      return;
+    }
+    sendText(e.data);
+    if (enterAfterCommit && lineOpen && game && !crashed) {
+      enterAfterCommit = false;
+      enterSentAt = e.timeStamp;
+      voice.cancel();
+      game.key_down('Enter', 'Enter', false);
+    }
+    ime.value = '';
+  });
+  // Text put in without a composition (an IME's punctuation, an emulated commit).
+  ime.addEventListener('input', (e) => {
+    composing = e.isComposing;
+    if (e.inputType === 'insertText' && !e.isComposing) sendText(e.data);
+    if (!composing) ime.value = '';
+  });
+  canvas.after(ime);
+}
+
+// The line ended (or the input goes): the focus back to the canvas if the input had it, a
+// composition left open dropped with it.
+function closeLine() {
+  const had = document.activeElement === ime;
+  lineOpen = false;
+  ime.tabIndex = -1;
+  composing = false;
+  enterAfterCommit = false;
+  if (had) canvas.focus({ preventScroll: true });
+  keepCanvas = false;
+  ime.value = '';
+}
+
+// Once per frame: the hidden input exists while the game on screen has the pack, and has the
+// focus while the game reads a line and the canvas (or the input) has it, unless the keyboard
+// moved it back to the canvas (`keepCanvas`). The line opens with the focus on the canvas or
+// already on the input (a script gave it, the keys before the line went through it); the input
+// is in the tab order only while the line is open, so Tab from the canvas passes it by outside.
+function followLine() {
+  const wanted = game && !crashed && localeShown === 'on';
+  if (!wanted) {
+    if (ime) {
+      closeLine();
+      ime.remove();
+      ime = null;
+    }
+    return;
+  }
+  if (!ime) makeIme();
+  const line = (game.keys_owned() & OWN_LINE) === OWN_LINE;
+  const at = document.activeElement;
+  if (line && ((at === canvas && !keepCanvas) || at === ime)) {
+    lineOpen = true;
+    ime.tabIndex = 0;
+    if (at !== ime) ime.focus({ preventScroll: true });
+  } else if (!line && lineOpen) {
+    closeLine();
+  }
+}
+
 // --- wiring --------------------------------------------------------------------------------
 
-// Keys go to the engine only from the focused canvas with a game running; everything else
-// (Tab, keys of other elements, modifier shortcuts) keeps its browser meaning. Ctrl + the
-// letters of the game's control commands (Ctrl-S save, Ctrl-R restore, ...) are game keys
-// there, so the browser's own Save page / Reload do not fire. The speed keys (`speedKey`) are
-// the page's and never reach the game.
-canvas.addEventListener('keydown', (e) => {
+// Keys go to the engine only from the focused canvas (or, while a line is typed in 한글 with the
+// pack, the hidden input in its place) with a game running; everything else (Tab, keys of other
+// elements, modifier shortcuts) keeps its browser meaning. Ctrl + the letters of the game's
+// control commands (Ctrl-S save, Ctrl-R restore, ...) are game keys there, so the browser's own
+// Save page / Reload do not fire. The speed keys (`speedKey`) are the page's and never reach the
+// game.
+function gameKey(e) {
   gesture();
   if (!game || crashed || e.metaKey || e.altKey) return;
   if (VOICE_CANCEL_KEYS.has(e.key)) voice.cancel();
@@ -1996,6 +2140,10 @@ canvas.addEventListener('keydown', (e) => {
   } else if (game.key_down(e.code, e.key, e.ctrlKey)) {
     e.preventDefault();
   }
+}
+canvas.addEventListener('keydown', gameKey);
+canvas.addEventListener('focus', (e) => {
+  keepCanvas = ime !== null && e.relatedTarget === ime && lineOpen;
 });
 mute.addEventListener('click', () => {
   setMuted(!audio.muted);
@@ -2045,6 +2193,7 @@ function sendPointer(e) {
 }
 canvas.addEventListener('pointerdown', (e) => {
   canvas.focus();
+  keepCanvas = false; // a press on the canvas gives a line being read the hidden input again
   if (game && !crashed) canvas.setPointerCapture(e.pointerId);
   sendPointer(e);
   gesture();

@@ -4969,6 +4969,170 @@ test('Korean pack in a game (the user\'s disks, a synthetic conversation): in �
   }
 }, { needs: h.haveHfes });
 
+// --- typing Korean in a conversation (spec 08 Design 4, slice K5a) ------------------------
+
+const KO_KEYWORD = 'quiz';
+const KO_ALIAS = '시험';
+const KO_ANSWER = '"Asked, and so answered."';
+const KO_ANSWER_KO = '"묻기에 답하였노라."';
+const KO_NOPE = '"No such thing."';
+
+// koFixture's archive with the player's words after the greeting: `f7`, a keyword block
+// `quiz` whose answer ends the conversation, and after the block a line for no match (left out
+// of the pack: a miss); the pack holds the look text, the greeting and the answer in Korean, and
+// gives `quiz` the alias 시험 in every script (its aliases part spliced in here: the translation
+// tool writes none in K5a).
+async function koTypingFixture() {
+  const { fingerprint, hash64, hex64, latin1, packBytes } = await import('../i18n/translate.mjs');
+  const head = [0xff, 0x02, ...latin1('Zed'), 0xf1, ...latin1(KO_LOOK), 0xf2, ...latin1(KO_GREET)];
+  const answer = head.length + 2 + KO_KEYWORD.length + 1;
+  const script = [...head, 0xf7, 0xef, ...latin1(KO_KEYWORD), 0xf6, ...latin1(KO_ANSWER), 0xb6, 0xee, ...latin1(KO_NOPE), 0xb6];
+  const items = 0x63;
+  const table = [];
+  const body = [];
+  for (let i = 0; i < items; i += 1) {
+    const at = i === 0 ? 0 : items * 4 + body.length;
+    if (i > 0) body.push(0, 0, 0, 0, ...script);
+    table.push(at & 255, (at >> 8) & 255, (at >> 16) & 255, 0);
+  }
+  const look = 6;
+  const greet = look + KO_LOOK.length + 1;
+  const runs = [];
+  const named = [];
+  const aliases = [];
+  for (let item = 1; item < items; item += 1) {
+    named.push({ archive: 'a', item, hash: hex64(hash64(script)) });
+    runs.push({ archive: 'a', item, offset: look, len: KO_LOOK.length, hash: hex64(hash64(latin1(KO_LOOK))), text: KO_LOOK_KO });
+    runs.push({ archive: 'a', item, offset: greet, len: KO_GREET.length, hash: hex64(hash64(latin1(KO_GREET))), text: KO_GREET_KO });
+    runs.push({ archive: 'a', item, offset: answer, len: KO_ANSWER.length, hash: hex64(hash64(latin1(KO_ANSWER))), text: KO_ANSWER_KO });
+    aliases.push({ archive: 'a', item, keyword: KO_KEYWORD, words: [KO_ALIAS] });
+  }
+  const made = Buffer.from(packBytes({ base: fingerprint(named), runs }));
+  const json = JSON.parse(made.subarray(5).toString('utf8'));
+  json.aliases = aliases;
+  const pack = [...made.subarray(0, 5), ...Buffer.from(JSON.stringify(json), 'utf8')];
+  return { archive: [...table, ...body], pack };
+}
+
+test('Korean typed in a conversation (the user\'s disks, a synthetic conversation, slice K5a): in 한글 with the pack, while the game reads the player\'s words the page gives its hidden input the focus (Shift+Tab leaves it for the canvas, Tab comes back); a scripted IME sequence there (a composition Escape cancels, a syllable composed and committed, a second with Backspace inside it, a third composed with Enter during its composition, then its commit) gives the game the committed syllables only, then Enter; they echo in the message window and the keyword\'s alias with a particle answers with the pack\'s line; the focus is back on the canvas when the line ends; outside a line Tab from the canvas passes the input by, and a line read while the input already has the focus (given by script before the conversation, the keys sent to it) takes the committed syllables and Enter once each; in English there is no hidden input and the canvas takes the keys as before; nothing typed reaches the console, the page\'s data or text', async (env) => {
+  const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  const words = consoleText(page);
+  await h.load(page, env);
+  const { archive, pack } = await koTypingFixture();
+  const glyphs = await hangulGlyphs(`${KO_ALIAS}을${KO_ANSWER_KO}혐`);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  assert.equal((await localeShown(page)).locale, 'on', 'the pack on the game');
+  const focus = () => page.evaluate(() => ({ ime: document.getElementById('ime') !== null, at: document.activeElement?.id ?? null }));
+  // Talk to member 2 up to the player's words: the line the game reads.
+  const talkTo2 = async () => {
+    await page.focus('#screen');
+    await page.keyboard.press('t');
+    await h.waitTaken(page);
+    await page.keyboard.press('2');
+    await page.waitForFunction(() => globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
+    await h.waitFrames(page, 2);
+  };
+  await talkTo2();
+  assert.deepEqual(await focus(), { ime: true, at: 'ime' }, 'the hidden input has the focus while the line is read');
+  // Shift+Tab from it: the canvas keeps the focus (no trap); Tab gives the input it again.
+  await page.keyboard.press('Shift+Tab');
+  await h.waitFrames(page, 2);
+  assert.deepEqual(await focus(), { ime: true, at: 'screen' }, 'Shift+Tab leaves the input for the canvas');
+  await page.keyboard.press('Tab');
+  await h.waitFrames(page, 2);
+  assert.deepEqual(await focus(), { ime: true, at: 'ime' }, 'Tab comes back to it');
+  await page.evaluate(() => { globalThis.__sent.length = 0; });
+  const cdp = await page.context().newCDPSession(page);
+  const compose = (text) => cdp.send('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length });
+  const press = async (key, vk) => {
+    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: vk });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: vk });
+  };
+  await compose('ㄱ');
+  await press('Escape', 27); // while composing: the composition goes, the line stays
+  await h.waitFrames(page, 2);
+  assert.ok(await page.evaluate(() => globalThis.__owned === 7 && document.activeElement?.id === 'ime'), 'the line still read');
+  await compose('ㅅ');
+  await compose('시');
+  await cdp.send('Input.insertText', { text: '시' });
+  await compose('ㅎ');
+  await compose('혀');
+  await compose('혐');
+  await press('Backspace', 8); // inside the syllable: the IME's, which takes the ㅁ back
+  await compose('혀');
+  await compose('험');
+  await cdp.send('Input.insertText', { text: '험' });
+  await compose('ㅇ');
+  await compose('으');
+  await compose('을');
+  await press('Enter', 13); // during the composition: after its commit
+  await cdp.send('Input.insertText', { text: '을' });
+  await h.waitPrompt(page);
+  assert.deepEqual(await page.evaluate(() => globalThis.__sent), ['text:시', 'text:험', 'text:을', 'Enter'],
+    'the committed syllables only, then Enter');
+  const shown = await localeShown(page);
+  assert.deepEqual([shown.hits, shown.misses], [3, 0], 'the look text, the greeting and the alias\'s answer from the pack, nothing missed');
+  const korean = await cellsShown(page, glyphs);
+  for (const c of `${KO_ALIAS}을`) assert.ok(korean.found.has(c), 'the typed syllables echoed in Hangul cells');
+  assert.ok(!korean.found.has('혐'), 'nothing of a composition reached the game');
+  assert.ok([...KO_ANSWER_KO].filter((c) => glyphs.has(c)).every((c) => korean.found.has(c)), 'the answer in Korean');
+  assert.deepEqual(await focus(), { ime: true, at: 'screen' }, 'the focus back on the canvas once the line ended');
+  // At the prompt the input is out of the tab order: Tab from the canvas does not reach it.
+  await page.focus('#screen');
+  await page.keyboard.press('Tab');
+  await h.waitFrames(page, 2);
+  assert.notEqual((await focus()).at, 'ime', 'Tab from the canvas at the prompt passes the hidden input by');
+  // The input given the focus before the conversation (by script): the keys reach the game
+  // through it, and the line read then takes what is committed there and the Enter, once each.
+  await page.focus('#ime');
+  await page.keyboard.press('t');
+  await h.waitTaken(page);
+  await page.keyboard.press('2');
+  await page.waitForFunction(() => globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
+  await h.waitFrames(page, 2);
+  assert.deepEqual(await focus(), { ime: true, at: 'ime' }, 'the input keeps the focus into the line');
+  await page.evaluate(() => { globalThis.__sent.length = 0; });
+  await compose('ㅅ');
+  await compose('시');
+  await cdp.send('Input.insertText', { text: '시' });
+  await compose('험');
+  await cdp.send('Input.insertText', { text: '험' });
+  await press('Enter', 13);
+  await h.waitPrompt(page);
+  assert.deepEqual(await page.evaluate(() => globalThis.__sent), ['text:시', 'text:험', 'Enter'],
+    'the committed syllables and the Enter, once each');
+  const again = await localeShown(page);
+  assert.deepEqual([again.hits, again.misses], [6, 0], 'the alias answered from the pack again, nothing missed');
+  assert.deepEqual(await focus(), { ime: true, at: 'screen' }, 'and the focus back on the canvas');
+  // English at the chooser: no hidden input; the canvas takes the keys of the line.
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  assert.equal((await localeShown(page)).locale, 'off', 'English: the pack not on the game');
+  await talkTo2();
+  assert.deepEqual(await focus(), { ime: false, at: 'screen' }, 'no hidden input in English');
+  await page.keyboard.type(KO_KEYWORD);
+  await page.keyboard.press('Enter');
+  await h.waitPrompt(page);
+  const english = await cellsShown(page, glyphs);
+  assert.ok(english.found.size === 0 && english.inked > 0, 'the English answer, no Korean cell');
+  const where = await pageWords(page);
+  for (const w of [`${KO_ALIAS}을`, KO_ALIAS, KO_ANSWER_KO]) {
+    assert.ok(!where.includes(w), 'nothing typed in the page\'s data, text or storage');
+    assert.ok(!words.some((m) => m.includes(w)), 'nor in the console');
+  }
+}, { needs: h.haveHfes });
+
 // --- the Korean pack's table strings and game strings (spec 08, slice K2) ---------------
 
 const KO_TABLE = 'a stone of tests';

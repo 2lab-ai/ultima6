@@ -55,6 +55,20 @@ pub enum InputEvent {
     /// its window; values outside are clamped), with `buttons` held: bit 0 left, bit 1 right
     /// ([`POINTER_LEFT`], [`POINTER_RIGHT`]).
     Pointer { x: i16, y: i16, buttons: u8 },
+    /// Port-only (spec 08 Design 4, slice K5a): one character the platform's input method
+    /// committed (a Hangul syllable composed through an IME), queued in order with the keys. It
+    /// passes by the keymap and never becomes a game code: only the line editor takes it
+    /// ([`Io::next_typed`]); every other read of the keys drops it ([`Io::next_key`],
+    /// [`Io::key_ready`]), so none is left for a later reader.
+    Text(char),
+}
+
+/// What the line editor takes from the queue ([`Io::next_typed`]): a key press, or a character
+/// of text ([`InputEvent::Text`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Typed {
+    Key(Key),
+    Text(char),
 }
 
 /// Left button bit of [`InputEvent::Pointer`] (the original's button word 0x161bd4, bit 0).
@@ -177,7 +191,7 @@ impl Io {
         let events = self.events.borrow();
         let last = events.iter().rev().find_map(|e| match *e {
             InputEvent::Pointer { x, y, buttons } => Some(Pointer::apply(x, y, buttons)),
-            InputEvent::Key(_) => None,
+            InputEvent::Key(_) | InputEvent::Text(_) => None,
         });
         last.unwrap_or(self.pointer.get())
     }
@@ -207,15 +221,36 @@ impl Io {
     ///
     /// Resolves with the next queued key, in arrival order; pending while the queue is empty.
     /// Pointer events before it are applied to the pointer on the way (as the handler would),
-    /// for the waits that read only keys.
+    /// for the waits that read only keys; text before it is dropped (port, spec 08 slice K5a:
+    /// a reader of keys takes no text).
     pub fn next_key(&self) -> NextKey<'_> {
         NextKey { io: self }
     }
 
     /// True when the next queued event is a key (a pointer event before it is taken first, by
-    /// [`Io::take_pointer`]).
+    /// [`Io::take_pointer`]). Text at the front of the queue is dropped first (a reader of keys
+    /// takes none), so it never holds back the events behind it.
     pub fn key_ready(&self) -> bool {
-        matches!(self.events.borrow().front(), Some(InputEvent::Key(_)))
+        let mut events = self.events.borrow_mut();
+        while matches!(events.front(), Some(InputEvent::Text(_))) {
+            events.pop_front();
+        }
+        matches!(events.front(), Some(InputEvent::Key(_)))
+    }
+
+    /// Port-only (spec 08 Design 4, slice K5a): as [`Io::next_key`] for the line editor, which
+    /// takes text too: resolves with the next queued key or character of text, in arrival order.
+    pub fn next_typed(&self) -> NextTyped<'_> {
+        NextTyped { io: self }
+    }
+
+    /// Port-only (spec 08 Design 4, slice K5a): as [`Io::key_ready`] for the line editor: true
+    /// when the next queued event is a key or a character of text (nothing is dropped).
+    pub fn typed_ready(&self) -> bool {
+        matches!(
+            self.events.borrow().front(),
+            Some(InputEvent::Key(_) | InputEvent::Text(_))
+        )
     }
 
     /// The pointer as the handler last left it (no event is taken).
@@ -450,6 +485,29 @@ impl Future for NextKey<'_> {
                 Some(InputEvent::Pointer { x, y, buttons }) => {
                     self.io.pointer.set(Pointer::apply(x, y, buttons));
                 }
+                Some(InputEvent::Text(_)) => {}
+                None => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// Future of [`Io::next_typed`].
+pub struct NextTyped<'a> {
+    io: &'a Io,
+}
+
+impl Future for NextTyped<'_> {
+    type Output = Typed;
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Typed> {
+        let mut events = self.io.events.borrow_mut();
+        loop {
+            match events.pop_front() {
+                Some(InputEvent::Key(key)) => return Poll::Ready(Typed::Key(key)),
+                Some(InputEvent::Text(c)) => return Poll::Ready(Typed::Text(c)),
+                Some(InputEvent::Pointer { x, y, buttons }) => {
+                    self.io.pointer.set(Pointer::apply(x, y, buttons));
+                }
                 None => return Poll::Pending,
             }
         }
@@ -519,6 +577,12 @@ impl From<LoadError> for BootError {
 /// twice the original's type-ahead for keys tapped one by one, whose releases take a slot of
 /// the ring there too.
 const KEY_RING: usize = 49;
+
+/// Port-only (spec 08 Design 4, slice K5a): the characters of text ([`InputEvent::Text`]) the
+/// queue holds at most, counted apart from the keys of [`KEY_RING`] (text takes no slot of the
+/// handler's ring, which has none); one that finds it full is dropped. As many as the ring's
+/// keys: more than a line of the conversation takes ([`crate::converse::INPUT_MAX`] bytes).
+const TEXT_RING: usize = KEY_RING;
 
 /// The game future type the engine retains.
 type Task = Pin<Box<dyn Future<Output = ()>>>;
@@ -619,25 +683,36 @@ impl Engine {
         }
     }
 
-    /// One host tick: queue `input` (keys past the handler's ring, [`KEY_RING`], are dropped),
-    /// advance the clock by `elapsed_ms`, poll the game once (also while it waits; never after it
-    /// finished), bump the display generation, publish the front buffer if the game presented,
-    /// then the vertical-blank work of the display (the pointer sprite, at the handler's
-    /// position, over the published frame, [`crate::ui::pointer::vblank`]).
+    /// One host tick: queue `input` (keys past the handler's ring, [`KEY_RING`], and text past
+    /// [`TEXT_RING`] are dropped), advance the clock by `elapsed_ms`, poll the game once (also
+    /// while it waits; never after it finished), bump the display generation, publish the front
+    /// buffer if the game presented, then the vertical-blank work of the display (the pointer
+    /// sprite, at the handler's position, over the published frame,
+    /// [`crate::ui::pointer::vblank`]).
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
         {
             let mut events = self.io.events.borrow_mut();
-            let mut keys = events
-                .iter()
-                .filter(|e| matches!(e, InputEvent::Key(_)))
-                .count();
+            let count = |text: bool| {
+                events
+                    .iter()
+                    .filter(|e| matches!(e, InputEvent::Text(_)) == text)
+                    .filter(|e| !matches!(e, InputEvent::Pointer { .. }))
+                    .count()
+            };
+            let (mut keys, mut texts) = (count(false), count(true));
             for &e in input {
-                if matches!(e, InputEvent::Key(_)) {
-                    if keys >= KEY_RING {
+                let (held, room) = match e {
+                    InputEvent::Key(_) => (&mut keys, KEY_RING),
+                    InputEvent::Text(_) => (&mut texts, TEXT_RING),
+                    InputEvent::Pointer { .. } => {
+                        events.push_back(e);
                         continue;
                     }
-                    keys += 1;
+                };
+                if *held >= room {
+                    continue;
                 }
+                *held += 1;
                 events.push_back(e);
             }
         }
@@ -990,6 +1065,80 @@ mod tests {
             "the key past a full ring is lost"
         );
         assert_eq!(queued.len(), 50, "the pointer event is kept");
+    }
+
+    #[test]
+    fn text_has_its_own_room_and_takes_none_of_the_keys() {
+        // Port (spec 08 slice K5a): text is no key of the ring; it is bounded apart, in order
+        // with the keys.
+        let mut e = idle_engine();
+        let mut input: Vec<InputEvent> = (0..60).map(|_| InputEvent::Text('\u{ac00}')).collect();
+        input.extend((0..60).map(|_| key('a')));
+        e.tick(&input, 16);
+        let queued: Vec<InputEvent> = e.io.events.borrow().iter().copied().collect();
+        let texts = queued
+            .iter()
+            .filter(|ev| matches!(ev, InputEvent::Text(_)))
+            .count();
+        let keys = queued.len() - texts;
+        println!("60 characters and 60 keys queued: {texts} characters and {keys} keys wait");
+        assert_eq!((texts, keys), (TEXT_RING, KEY_RING));
+        assert!(matches!(queued[0], InputEvent::Text(_)), "in arrival order");
+        assert!(matches!(queued[TEXT_RING], InputEvent::Key(_)));
+    }
+
+    #[test]
+    fn a_reader_of_keys_drops_the_text_before_a_key_and_the_line_editor_takes_it() {
+        // Port (spec 08 slice K5a): a key wait takes the key behind text and leaves no text
+        // queued; `key_ready` drops text in front so the pointer and keys behind it come; the
+        // line editor's read takes both, in order.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let out = Rc::clone(&log);
+        let mut e = engine_with(move |_state, io| async move {
+            let k = io.next_key().await;
+            out.borrow_mut().push(format!("{k:?}"));
+            for _ in 0..3 {
+                let t = io.next_typed().await;
+                out.borrow_mut().push(format!("{t:?}"));
+            }
+        });
+        let text = InputEvent::Text('\u{ac00}');
+        e.tick(&[text, text, key('a')], 16);
+        assert_eq!(*log.borrow(), ["Char('a')"]);
+        assert_eq!(
+            e.io().pending_events(),
+            0,
+            "no text left for a later reader"
+        );
+        e.tick(&[text, key('b'), text], 16);
+        assert_eq!(
+            log.borrow()[1..],
+            ["Text('\u{ac00}')", "Key(Char('b'))", "Text('\u{ac00}')"]
+        );
+        let io = Io::new(Files::default());
+        io.events.borrow_mut().extend([text, text]);
+        assert!(!io.key_ready(), "no key");
+        assert_eq!(io.pending_events(), 0, "the text dropped");
+        io.events.borrow_mut().extend([text, key('c')]);
+        assert!(io.typed_ready(), "the line editor's read sees the text");
+        assert_eq!(io.pending_events(), 2, "and drops nothing");
+        assert!(io.key_ready(), "a key behind the text");
+        assert_eq!(io.pending_events(), 1);
+        let p = InputEvent::Pointer {
+            x: 1,
+            y: 2,
+            buttons: POINTER_LEFT,
+        };
+        io.events.borrow_mut().clear();
+        io.events.borrow_mut().extend([text, p]);
+        assert_eq!(
+            io.take_pointer(),
+            Pointer::default(),
+            "text in front holds the pointer"
+        );
+        assert!(!io.key_ready());
+        assert_eq!(io.take_pointer().buttons, POINTER_LEFT, "then it comes");
+        assert_eq!(io.handler_pointer().buttons, POINTER_LEFT);
     }
 
     #[test]

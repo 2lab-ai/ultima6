@@ -6,8 +6,30 @@ use std::cell::RefCell;
 use super::print::put_raw;
 use super::seams;
 use super::text::{self, PAGED};
-use crate::engine::Io;
+use crate::engine::{Io, Key, Typed};
 use crate::state::State;
+
+/// What a poll took: a game code (never 0), a Hangul syllable typed as text (port, spec 08
+/// slice K5a: only the poll of [`read_words`] with a pack takes one), or nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Polled {
+    None,
+    Code(u16),
+    Text(char),
+}
+
+/// Port-only (spec 08 Design 4, slice K5a): which characters of text
+/// ([`crate::engine::InputEvent::Text`]) a poll takes; it drops the others where it meets them,
+/// as if they had not come.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Text {
+    /// None (every key wait but the line editor's).
+    Dropped,
+    /// Printable ASCII, as the press of its key (the line editor).
+    Ascii,
+    /// That and the Hangul syllables U+AC00..=U+D7A3 (the player's words with a pack).
+    Hangul,
+}
 
 /// Replaces: 0x134e7c (take the next game code, 0 when none is queued; with the drain flag
 /// A4-0x7a46 it empties the ring and keeps the last code)
@@ -17,14 +39,37 @@ use crate::state::State;
 /// [`crate::engine::Io::take_pointer`]). The drain is not applied: the engine contract (spec
 /// 03 §1) consumes input in order, and the platform delivers presses only (no key-up codes
 /// that the drain would otherwise skip past).
-async fn poll(state: &RefCell<State>, io: &Io) -> u16 {
-    if !io.key_ready() {
-        return 0;
-    }
-    let key = io.next_key().await;
+///
+/// Port (spec 08 Design 4, slice K5a): a character of text at the front is taken as `text`
+/// says: printable ASCII as the press of its key (through the map, as typed), a Hangul syllable
+/// as it is ([`Polled::Text`], never a game code); one it does not take is dropped and the poll
+/// goes on to what follows ([`crate::engine::Io::next_typed`]; a reader of keys alone drops
+/// text, [`crate::engine::Io::key_ready`]).
+async fn poll(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
+    let key = loop {
+        if text == Text::Dropped {
+            if !io.key_ready() {
+                return Polled::None;
+            }
+            break io.next_key().await;
+        }
+        if !io.typed_ready() {
+            return Polled::None;
+        }
+        match io.next_typed().await {
+            Typed::Key(key) => break key,
+            Typed::Text(' ') => break Key::Space,
+            Typed::Text(c) if c.is_ascii_graphic() => break Key::Char(c),
+            Typed::Text(c) if text == Text::Hangul && is_syllable(c) => return Polled::Text(c),
+            Typed::Text(_) => {}
+        }
+    };
     let mut s = state.borrow_mut();
     let ui = &mut s.ui;
-    super::input::key_code(&mut ui.input.qualifiers, &ui.tables.keymap, key)
+    match super::input::key_code(&mut ui.input.qualifiers, &ui.tables.keymap, key) {
+        0 => Polled::None,
+        code => Polled::Code(code),
+    }
 }
 
 /// Original: 0x105c8e (ui: poll for a key; while none, show one frame of the spinning cursor at the
@@ -34,6 +79,14 @@ async fn poll(state: &RefCell<State>, io: &Io) -> u16 {
 /// erases it again within one call. The port presents and awaits the next display generation
 /// between drawing and erasing: that is the guaranteed yield of every key wait.
 pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
+    match idle_wait(state, io, Text::Dropped).await {
+        Polled::Code(code) => code,
+        Polled::None | Polled::Text(_) => 0,
+    }
+}
+
+/// [`idle_poll`], taking the text `text` says ([`poll`]; the line editor's).
+async fn idle_wait(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
     let (saved, cell) = {
         let mut s = state.borrow_mut();
         let ink = s.ui.tables.colours.text;
@@ -62,8 +115,8 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
             u16::from(w.row) + u16::from(w.y),
         )
     };
-    let key = poll(state, io).await;
-    if key == 0 {
+    let key = poll(state, io, text).await;
+    if key == Polled::None {
         let refresh = {
             let mut s = state.borrow_mut();
             let ui = &mut s.ui;
@@ -111,7 +164,10 @@ pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
 
 /// Original: 0x105d78 (ui: echo a typed character at the cursor of the line editor: backspace (8)
 /// steps back and blanks, anything else is drawn and advances, wrapping and scrolling)
-pub fn echo(s: &mut State, io: &Io, c: u8) {
+///
+/// Port (spec 08 Design 4, slice K5a): `c` is a cell's code, a byte of the game's font or a
+/// Hangul syllable (U+AC00..=U+D7A3) the wide path draws from the Hangul table, one cell.
+pub fn echo(s: &mut State, io: &Io, c: u16) {
     let ui = &mut s.ui;
     // Port-side: the scroll transcript shows the typed line as the screen does.
     if ui.text.current == super::WindowId::Messages {
@@ -119,7 +175,7 @@ pub fn echo(s: &mut State, io: &Io, c: u8) {
         if c == 8 {
             t.pop();
         } else {
-            t.push(u16::from(c));
+            t.push(c);
         }
     }
     let w = *ui.text.win();
@@ -141,7 +197,7 @@ pub fn echo(s: &mut State, io: &Io, c: u8) {
         let w = *win;
         io.draw(|fb| text::draw_char(fb, font, hangul, &w, 0x20, col, row));
     } else {
-        io.draw(|fb| text::draw_char(fb, font, hangul, &w, u16::from(c), col, row));
+        io.draw(|fb| text::draw_char(fb, font, hangul, &w, c, col, row));
         let win = ui.text.win_mut();
         win.col = win.col.wrapping_add(1);
         if win.col >= win.width {
@@ -160,7 +216,39 @@ pub fn echo(s: &mut State, io: &Io, c: u8) {
 
 /// Original: 0x107cba (ui: line editor: read up to `max` printable characters into a line with
 /// echo, backspace, return; escape erases the echo and gives -1)
+///
+/// Port (spec 08 Design 4, slice K5a): a character of text ([`crate::engine::InputEvent::Text`])
+/// that is printable ASCII is taken as the press of its key would be (through the keymap);
+/// any other is dropped where it is met, as if it had not come ([`poll`]). The player's words
+/// in a conversation take Hangul too ([`read_words`]).
 pub async fn read_line(state: &RefCell<State>, io: &Io, max: i16) -> (i16, Vec<u8>) {
+    edit_line(state, io, max, false).await
+}
+
+/// Port-only (spec 08 Design 4, slice K5a): [`read_line`] for what the player says in a
+/// conversation (ops `f7`, `f9`, `fb`). With a locale pack installed, a Hangul syllable typed as
+/// text (U+AC00..=U+D7A3) is taken too: the line holds it as UTF-8, its 3 bytes counted against
+/// `max`, which stays a byte budget (the most the original's read stores), so a syllable that
+/// would pass it is not taken; it echoes as one cell drawn from the Hangul table, and Backspace
+/// takes the whole syllable back. Without a pack it is [`read_line`].
+pub async fn read_words(state: &RefCell<State>, io: &Io, max: i16) -> (i16, Vec<u8>) {
+    let hangul = state.borrow().locale.pack.is_some();
+    edit_line(state, io, max, hangul).await
+}
+
+/// Whether `c` is a Hangul syllable (U+AC00..=U+D7A3), the one kind of text beyond ASCII the
+/// line editor takes ([`read_words`]).
+fn is_syllable(c: char) -> bool {
+    ('\u{ac00}'..='\u{d7a3}').contains(&c)
+}
+
+/// The cells of the line `line` holds (each a byte of ASCII or a UTF-8 syllable).
+fn cells(line: &[u8]) -> usize {
+    line.iter().filter(|&&b| b & 0xc0 != 0x80).count()
+}
+
+/// [`read_line`] (`hangul`: [`read_words`] with a pack).
+async fn edit_line(state: &RefCell<State>, io: &Io, max: i16, hangul: bool) -> (i16, Vec<u8>) {
     {
         let mut s = state.borrow_mut();
         s.ui.input.line_input = true;
@@ -171,16 +259,32 @@ pub async fn read_line(state: &RefCell<State>, io: &Io, max: i16) -> (i16, Vec<u
     let mut n: i16 = 0;
     state.borrow_mut().ui.input.drain = false;
     loop {
-        let k = loop {
+        let text = if hangul { Text::Hangul } else { Text::Ascii };
+        let typed = loop {
             // Port: nothing here reads the pointer; its queued events are applied (as the
             // handler would) so the keys behind them arrive.
             io.take_pointer();
-            let k = idle_poll(state, io).await;
-            if k != 0 {
-                break k;
+            let typed = idle_wait(state, io, text).await;
+            if typed != Polled::None {
+                break typed;
             }
         };
         let mut s = state.borrow_mut();
+        let k = match typed {
+            Polled::Code(k) => k,
+            Polled::Text(c) => {
+                let mut utf8 = [0; 4];
+                let bytes = c.encode_utf8(&mut utf8).as_bytes();
+                if i32::from(n) + bytes.len() as i32 <= i32::from(max) {
+                    line.truncate(n as usize);
+                    line.extend_from_slice(bytes);
+                    n += bytes.len() as i16;
+                    echo(&mut s, io, c as u16);
+                }
+                continue;
+            }
+            Polled::None => continue,
+        };
         match k {
             0x0d => {
                 line.truncate(n.max(0) as usize);
@@ -188,18 +292,23 @@ pub async fn read_line(state: &RefCell<State>, io: &Io, max: i16) -> (i16, Vec<u
                 break;
             }
             0x1b => {
-                line.clear();
-                while n != 0 {
-                    n -= 1;
+                // One cell erased per character typed (a syllable is one cell of three bytes).
+                for _ in 0..cells(&line[..n as usize]) {
                     echo(&mut s, io, 8);
                 }
+                line.clear();
                 n = -1;
                 s.ui.input.line_cancelled = true;
                 break;
             }
             0x10e => {
                 if n != 0 {
-                    n -= 1;
+                    // The whole last character (a syllable's three bytes), one cell.
+                    let at = line[..n as usize]
+                        .iter()
+                        .rposition(|&b| b & 0xc0 != 0x80)
+                        .unwrap_or(0);
+                    n = at as i16;
                     line.truncate(n as usize);
                     echo(&mut s, io, 8);
                 }
@@ -209,7 +318,7 @@ pub async fn read_line(state: &RefCell<State>, io: &Io, max: i16) -> (i16, Vec<u
                     line.truncate(n as usize);
                     line.push(k as u8);
                     n += 1;
-                    echo(&mut s, io, k as u8);
+                    echo(&mut s, io, k);
                 }
             }
         }

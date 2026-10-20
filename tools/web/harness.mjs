@@ -271,7 +271,8 @@ export async function forgetLocalePack() {
 // steps run (`__ticks`: the helpers' ticks are the page's fixed steps of 20 ms), the save
 // generation of the game stepped last (whether or not the page stores its Saves), the engine
 // clock and the button changes the game took on it, the keys the game takes itself
-// (`__owned`, keys_owned after the step), the keys the page sent it (`__sent`, their DOM `key`)
+// (`__owned`, keys_owned after the step), the keys the page sent it (`__sent`, their DOM `key`,
+// and in order with them `text:` and the text of each Game.text_input: the tests' own words)
 // and, after each frame's report (`ran`), the game's speed (`__speed`, 0 = Max) and its lost
 // time (`__dropped`, `__clamped`). The clock (`__clock`) is the ms of every step of a started
 // game summed: the engine adds a step's ms before the game runs in it, so an event queued
@@ -308,6 +309,11 @@ globalThis.__presentMs = 0;
   Game.prototype.key_down = function (code, key, ctrl) {
     globalThis.__sent.push(key);
     return keyDown.call(this, code, key, ctrl);
+  };
+  const textInput = Game.prototype.text_input;
+  Game.prototype.text_input = function (text) {
+    globalThis.__sent.push('text:' + text);
+    return textInput.call(this, text);
   };
   Game.prototype.step = function (ms) {
     globalThis.__ticks += 1;

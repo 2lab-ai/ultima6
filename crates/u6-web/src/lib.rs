@@ -429,6 +429,10 @@ pub fn key_from_dom(code: &str, key: &str, ctrl: bool) -> Option<Key> {
     })
 }
 
+/// The most characters one [`Game::text_input`] queues: more than a conversation's line holds
+/// (the engine also keeps no more text queued than that, `u6_core::engine`'s text room).
+const TEXT_CHARS: usize = 64;
+
 #[wasm_bindgen]
 pub struct Game {
     inputs: Vec<InputFile>,
@@ -1094,6 +1098,19 @@ impl Game {
         }
     }
 
+    /// Spec 08 Design 4 (slice K5a): queues the text an input method committed (the page's
+    /// hidden input, in 한글 with a Korean pack, while a line is typed): one
+    /// [`InputEvent::Text`] per character, in order with the keys, at most [`TEXT_CHARS`] of one
+    /// call. The engine's line editor takes a Hangul syllable (the player's words, with the pack)
+    /// or printable ASCII (as its key) and drops the rest. Ignored before the game starts.
+    /// Nothing of it is logged or kept.
+    pub fn text_input(&mut self, text: &str) {
+        if self.engine.is_some() {
+            self.pending
+                .extend(text.chars().take(TEXT_CHARS).map(InputEvent::Text));
+        }
+    }
+
     /// Queues the pointer at screen pixel (x, y) (the page maps the canvas's CSS box onto its
     /// 320 × 200 pixels) with `buttons` held: bit 0 left, bit 1 right, as DOM `buttons`. Ignored
     /// before the game starts.
@@ -1313,7 +1330,7 @@ impl Game {
     fn pointer_held(&self) -> bool {
         let queued = self.pending.iter().rev().find_map(|e| match *e {
             InputEvent::Pointer { buttons, .. } => Some(buttons),
-            InputEvent::Key(_) => None,
+            InputEvent::Key(_) | InputEvent::Text(_) => None,
         });
         let buttons = queued.or_else(|| {
             self.engine
@@ -1597,10 +1614,48 @@ mod tests {
         assert!(game.frame_rgba().chunks(4).all(|p| p == [0, 0, 0, 255]));
         assert!(game.key_down("ArrowUp", "ArrowUp", false));
         assert!(!game.key_down("ShiftLeft", "Shift", false));
+        game.text_input("가");
         assert!(game.pending.is_empty());
         game.step(16);
         game.present();
         assert!(!game.started());
+    }
+
+    /// Spec 08 Design 4 (slice K5a): committed text reaches the engine one character per event,
+    /// in order with the keys, at most a line of it per call.
+    #[test]
+    fn text_input_queues_each_character_in_order_with_the_keys() {
+        use std::cell::RefCell;
+        use u6_core::engine::Typed;
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let out = Rc::clone(&seen);
+        let mut game = Game::new();
+        game.engine = Some(Engine::with_game(
+            u6_core::State::empty(),
+            Files::default(),
+            move |_state, io| async move {
+                loop {
+                    let t = io.next_typed().await;
+                    out.borrow_mut().push(t);
+                }
+            },
+        ));
+        game.key_down("KeyA", "a", false);
+        game.text_input("가나");
+        game.key_down("Enter", "Enter", false);
+        assert_eq!(game.keys_pending(), 4);
+        game.step(20);
+        assert_eq!(
+            *seen.borrow(),
+            [
+                Typed::Key(Key::Char('a')),
+                Typed::Text('가'),
+                Typed::Text('나'),
+                Typed::Key(Key::Enter)
+            ]
+        );
+        game.text_input(&"가".repeat(100));
+        assert_eq!(game.keys_pending(), TEXT_CHARS as u32);
     }
 
     #[test]
