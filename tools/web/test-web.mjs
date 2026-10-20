@@ -4038,7 +4038,7 @@ test('voices without WebGPU: on the CPU, a runtime that does not start turns voi
   assert.deepEqual(await page.evaluate(() => window.__replies.slice(2)), ['cancelled', 'done'], 'the worker drops the old line and says the new one');
   const floor = Number(await page.evaluate(() => document.body.dataset.voiceSteps));
   console.log(`  receipt: CPU steps after four lines ${floor}`);
-  assert.ok(floor >= 3 && floor <= 16, 'the steps stay within the CPU floor and 16');
+  assert.ok(floor >= 4 && floor <= 16, 'the steps stay within the CPU floor (4) and 16');
   // A Korean line and an English one reach the worker each in its language (spec 09 Order 6).
   await saysEachLanguage(page, 5, 120_000);
   // Forget voices: the cache emptied, the acceptance forgotten, off.

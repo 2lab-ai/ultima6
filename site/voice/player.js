@@ -8,9 +8,9 @@
 //   the queue. Speech never makes the game wait: the engine's queue is only read.
 // - Above 4x (and at Max) nothing is synthesized: the lines go by faster than they can be spoken.
 // - Steps adapt: halved while synthesis takes more than half the audio's length, doubled back
-//   below 0.15 of it. On the GPU from 16, 4 to 16; on the CPU (no WebGPU adapter) from 4, 3 to
-//   16: 16 steps there take twice the audio's length, 3 under half of it, and below 3 words are
-//   lost (spec 09 Measured facts).
+//   below 0.15 of it. On the GPU from 16, 4 to 16; on the CPU (no WebGPU adapter) from 4, 4 to
+//   16: 16 steps there take twice the audio's length, and at 3 Korean lines lose their words
+//   (spec 09 Measured facts), so a slow CPU says each line late rather than garbled.
 // - Each speaker has a voice of its own (site/voice/profile.js, spec 09 Design 4): the profile
 //   made for it goes with each of its lines, and the first one made for a speaker is the one it
 //   keeps for the session, whatever its traits do after. A voice pack (`setPack`: the owner's
@@ -28,7 +28,7 @@ import { profileFor } from './profile.js';
 const FADE_S = 0.08; // the fade of a cancelled speech
 const LOUD_UP_TO = 4; // above this speed nothing is synthesized (as the music fades out)
 const STEPS = { start: 16, min: 4, max: 16 };
-const CPU_STEPS = { start: 4, min: 3 }; // without WebGPU (the same max)
+const CPU_STEPS = { start: 4, min: 4 }; // without WebGPU (the same max)
 const LEAD_S = 0.02; // a new utterance starts this far after now
 
 // FNV-1a over the speaker and the text: the noise seed.
