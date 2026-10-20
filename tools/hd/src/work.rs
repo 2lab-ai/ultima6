@@ -12,7 +12,8 @@
 //! gates.jsonl         one line per image per attempt: ids and metrics
 //! slices/<image>.png  the images that passed: the ×8 RGBA masters (the pack is ×4)
 //! ingest.json         the images pack takes: id, hash, size, slice
-//! coverage.txt        records by class: generated / fallback / failed / pending (counts)
+//! coverage.txt        records by class: generated / fallback / neighbour / failed / pending /
+//!                     excluded (counts)
 //! diagnostic.txt      details of a failed game load (0600; the terminal gets a category)
 //! pack/u6-hdpack.zip  the pack
 //! ```

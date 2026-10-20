@@ -1238,6 +1238,60 @@ fn a_codex_that_cannot_be_started_spends_nothing() {
 }
 
 #[test]
+fn the_owner_s_list_is_read_by_ingest_only() {
+    // Made-up records of the synthetic set: the table's west part (a 2 x 1 item) and the shore
+    // record (in no item).
+    use u6_hdtool::game::synthetic::{SHORE, TABLE};
+    let e = Env::new("exclude");
+    let work = e.dir.join("work");
+    let w = work.to_str().unwrap();
+    assert!(
+        e.run(&["atlas", "--synthetic", "--work", w])
+            .status
+            .success()
+    );
+    let good = e.dir.join("good.txt");
+    std::fs::write(&good, format!("# made up\nt:{TABLE}\n")).unwrap();
+    let g = good.to_str().unwrap();
+    let o = e.run(&["ingest", "--synthetic", "--work", w, "--exclude", g]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        text(&o).contains(
+            "excluded by the owner's list (the scaler draws them whole): 1 items, 2 records"
+        ),
+        "{}",
+        text(&o)
+    );
+    // A bad list: refused, its line named, nothing written.
+    let bad = e.dir.join("bad.txt");
+    std::fs::write(&bad, format!("t:{TABLE}\nt:{SHORE}\n")).unwrap();
+    let before = std::fs::read(work.join("coverage.txt")).unwrap();
+    let o = e.run(&[
+        "ingest",
+        "--synthetic",
+        "--work",
+        w,
+        "--exclude",
+        bad.to_str().unwrap(),
+    ]);
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("line 2:"), "{err}");
+    for id in [SHORE, TABLE] {
+        assert!(!err.contains(&id.to_string()), "{err}");
+    }
+    assert_eq!(std::fs::read(work.join("coverage.txt")).unwrap(), before);
+    // Any other command refuses it; without its file it is refused too.
+    let o = e.run(&["pack", "--work", w, "--exclude", g]);
+    assert!(!o.status.success());
+    assert!(text(&o).contains("read by ingest only"), "{}", text(&o));
+    let o = e.run(&["ingest", "--synthetic", "--work", w, "--exclude"]);
+    assert!(!o.status.success());
+    assert!(text(&o).contains("--exclude needs a file"), "{}", text(&o));
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
+
+#[test]
 fn run_turns_core_dumps_off_before_anything() {
     // Started with core dumps allowed as far as the inherited hard limit lets a shell raise
     // the soft limit (to min(1000, hard); not at all when hard is 0, as on a hardened runner),

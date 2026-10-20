@@ -34,7 +34,7 @@ const USAGE: &str = "usage:
   u6-hd inventory (--game PATH | --synthetic) [--work DIR]
   u6-hd atlas     (--game PATH | --synthetic) [--work DIR] [--rebuild]
   u6-hd run       [--work DIR] [--send] [--limit N] [--parallel N] [--codex PATH]
-  u6-hd ingest    (--game PATH | --synthetic) [--work DIR] [--gate NAME=VALUE]...
+  u6-hd ingest    (--game PATH | --synthetic) [--work DIR] [--gate NAME=VALUE]... [--exclude FILE]
   u6-hd pack      [--work DIR] [--out FILE]";
 
 #[derive(Default)]
@@ -49,6 +49,7 @@ struct Args {
     out: Option<PathBuf>,
     gates: Thresholds,
     rebuild: bool,
+    exclude: Option<PathBuf>,
 }
 
 fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -78,6 +79,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--codex" => a.codex = Some(value("a path")?.into()),
             "--out" => a.out = Some(value("a path")?.into()),
             "--gate" => a.gates.set(&value("name=value")?)?,
+            "--exclude" => a.exclude = Some(value("a file")?.into()),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -268,7 +270,7 @@ fn ingest_cmd(a: &Args) -> Result<(), String> {
     let g = game(a)?;
     let work = Work::open(a.work.as_deref())?;
     let _lock = work.lock()?;
-    let report = ingest::ingest(&g, &work, &a.gates)?;
+    let report = ingest::ingest_excluding(&g, &work, &a.gates, a.exclude.as_deref())?;
     say_raw!("{}", report.text());
     Ok(())
 }
@@ -301,6 +303,9 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     let result = parse(it).and_then(|a| match cmd.as_str() {
+        _ if a.exclude.is_some() && cmd != "ingest" => {
+            Err("--exclude is read by ingest only (pack packs what ingest listed)".into())
+        }
         "inventory" => inventory(&a),
         "atlas" => atlas_cmd(&a),
         "run" => run_cmd(&a),

@@ -1324,6 +1324,7 @@ fn gates_rows(log: &str) -> BTreeMap<&'static str, usize> {
             "fallback",
             keys(&["item", "class", "fallback", "pass", "gates"]),
         ),
+        ("excluded", keys(&["item", "class", "fallback", "gates"])),
     ];
     let tile = |v: &serde_json::Value| {
         v.as_str()
@@ -1369,6 +1370,11 @@ fn gates_rows(log: &str) -> BTreeMap<&'static str, usize> {
                 assert_eq!(row["fallback"], "neighbour");
                 assert!(row["item"].is_u64() && row["class"].is_string(), "{line}");
                 assert!(row["pass"].as_u64().is_some_and(|p| p >= 1), "{line}");
+                assert!(row["gates"].is_string(), "{line}");
+            }
+            "excluded" => {
+                assert_eq!(row["fallback"], "excluded");
+                assert!(row["item"].is_u64() && row["class"].is_string(), "{line}");
                 assert!(row["gates"].is_string(), "{line}");
             }
             _ => {}
@@ -1606,5 +1612,94 @@ fn ingest_sends_a_multi_record_item_back_whole_and_counts_it_apart() {
             assert_eq!(r0.get(class, st), r.get(class, st), "{class:?} {st:?}");
         }
     }
+    let _ = std::fs::remove_dir_all(&w.root);
+}
+
+#[test]
+fn an_item_the_owner_s_list_names_is_a_scaled_side_to_the_neighbour_gate() {
+    let mut g = synthetic::game();
+    // The world of the test above: the table (2 x 1, opaque) with the sword east of its anchor,
+    // on a grass chunk.
+    let grain = |seed: u32| Record {
+        pixels: (0..256).map(|i| 13 + (hash(i, seed) % 2) as u8).collect(),
+        transparent: vec![false; 256],
+        map: false,
+    };
+    let (table, sword) = (synthetic::TABLE, synthetic::OBJECTS + 2);
+    for (k, t) in [table, table + 1, sword].into_iter().enumerate() {
+        g.records[usize::from(t)] = grain(k as u32 + 1);
+    }
+    let at = |x, tile| Placed {
+        x,
+        y: 3,
+        z: 0,
+        tile,
+    };
+    g.world = World {
+        chunks: vec![chunk(0, &[])],
+        levels: vec![Level {
+            side: 1,
+            refs: vec![0],
+        }],
+        objects: vec![at(3, table + 1), at(4, sword)],
+    };
+    let w = work("exclude");
+    for job in &atlas_into(&g, &w) {
+        let back = img::read_png(&w.sheet(&job.sheet), job.width, job.height).unwrap();
+        run::record(&w, job, &img::encode_png(&back).unwrap()).unwrap();
+    }
+    let t = Thresholds::default();
+    // The pair rows of the first pass: (a, b) -> sides.
+    let pair_sides = |w: &Work| -> BTreeMap<(String, String), String> {
+        std::fs::read_to_string(w.path("gates.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|l| l["neighbour"].is_object() && l["pass"] == 1)
+            .map(|l| {
+                let n = &l["neighbour"];
+                let key = (
+                    n["a"].as_str().unwrap().into(),
+                    n["b"].as_str().unwrap().into(),
+                );
+                (key, l["sides"].as_str().unwrap().into())
+            })
+            .collect()
+    };
+    let name = |r: u16| atlas::image_name(ImageId::Tile(r));
+    let (anchor_sword, parts) = (
+        (name(table + 1), name(sword)),
+        (name(table), name(table + 1)),
+    );
+    // Without the list, both table records are generated sides.
+    let r0 = ingest::ingest(&g, &w, &t).unwrap();
+    let s0 = pair_sides(&w);
+    assert_eq!(s0.get(&anchor_sword).map(String::as_str), Some("gen-gen"));
+    assert_eq!(s0.get(&parts).map(String::as_str), Some("gen-gen"));
+    assert_eq!(r0.neighbour.checked, 4);
+    assert_eq!(r0.get(Class::Multi, Status::Generated), 8);
+    // The list names the table's west part: the whole table is MMPX to the gate, so the sword's
+    // pair with the anchor is checked as generated against scaled, and the table's own pair (two
+    // scaled records) is not checked.
+    let dir = std::env::temp_dir().join(format!(
+        "u6-hdtool-neighbour-{}-exclude-list",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("exclude.txt");
+    std::fs::write(&file, format!("t:{table}\n")).unwrap();
+    let r = ingest::ingest_excluding(&g, &w, &t, Some(&file)).unwrap();
+    let s = pair_sides(&w);
+    assert_eq!(s.get(&anchor_sword).map(String::as_str), Some("gen-mmpx"));
+    assert_eq!(s.get(&parts), None);
+    let grass = (name(0), name(0));
+    assert_eq!(s.get(&grass), s0.get(&grass));
+    assert_eq!(r.neighbour.checked, 3);
+    assert_eq!(r.get(Class::Multi, Status::Excluded), 2);
+    assert_eq!(r.get(Class::Multi, Status::Neighbour), 0);
+    let kinds = gates_rows(&std::fs::read_to_string(w.path("gates.jsonl")).unwrap());
+    assert_eq!((kinds["pair"], kinds["excluded"]), (3, 1));
+    let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&w.root);
 }

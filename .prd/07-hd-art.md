@@ -79,7 +79,7 @@ Status: in-progress (HD0–HD2 and the pack loading shipped 2026-10-17 at main a
    - `inventory`: counts by kind, printed locally only.
    - `atlas`: builds sheets of 12×8 cells at 128 px (×8) per call, plus a cell map and `jobs.jsonl`. All frames of one actor go in one sheet; multi-record objects are composed into one mosaic; terrain uses wrap-border sheets.
    - `run`: one `codex exec -m gpt-6-astra` per sheet through the imagegen skill, 2–4 in parallel.
-   - `ingest`: slices at the fixed pitch, keys out the background, then gates each cell.
+   - `ingest`: slices at the fixed pitch, keys out the background, then gates each cell. With `--exclude FILE`, every item that holds a tile record the file lists goes back to MMPX whole, after the items are judged and before the neighbour gate; the file is the owner's local list, refused inside any git work tree, and never in the repository.
    - `pack`: writes the pack.
 
    Gate per cell: structure correlation ≥ 0.9, shift ≤ 0.5 source px, silhouette IoU ≥ 0.85, key purity ≤ 12 levels. Portraits measure structure at the layout scale: both images box-averaged to 1/4 of the source size, then correlated, still ≥ 0.9. At the source pixel a faithful repaint scores 0.55–0.66, measured by H3 on synthetic portraits: 1-px features become drawn ones. Negative controls on synthetic portraits (mirrored, shifted by 1/8, two portraits swapped) must each fail a gate.

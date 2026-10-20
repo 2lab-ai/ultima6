@@ -13,11 +13,14 @@
 //! measured on it, which on the game's data means no row across the join both sides draw, so
 //! it cannot fail). `gates.jsonl` has a line per pair
 //! checked in the first pass (an unmeasured one with a null ratio) and per failing pair of a
-//! later pass. Ingest reads the sheets that came back and calls
-//! nothing: no `codex`, no upload.
+//! later pass. The owner's list (`ingest --exclude FILE`, [`Exclude`]) sends every item that holds
+//! a record it names back to the scaler whole, after the items are judged and before the
+//! neighbour gate, which sees its records as scaled sides. Ingest reads the sheets that came back
+//! and calls nothing: no `codex`, no upload.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use u6_hdpack::ImageId;
@@ -45,6 +48,97 @@ pub enum Status {
     Failed,
     /// Not run yet, or its re-roll not run yet.
     Pending,
+    /// Named by the owner's list (`ingest --exclude`), whatever it came to: the scaler draws it,
+    /// every record of it, and it is not re-rolled.
+    Excluded,
+}
+
+/// The owner's list (`ingest --exclude FILE`): the tile records it names, each with its line.
+/// Every item that holds one goes back to the scaler whole. The list is the owner's local file,
+/// read only outside every repository; its errors name a line, never a record.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Exclude {
+    /// (line, record), in line order.
+    pub records: Vec<(usize, u16)>,
+}
+
+impl Exclude {
+    /// Reads the list at `path`; refused, unread, when `path` or a directory above it (as given
+    /// or resolved) holds a `.git` entry.
+    pub fn read(path: &Path) -> Result<Exclude, String> {
+        if in_a_work_tree(path) {
+            return Err(
+                "the exclude list is inside a git work tree (a directory above it \
+                        holds .git); keep it outside every repository (spec 07 Rights)"
+                    .into(),
+            );
+        }
+        let text =
+            std::fs::read(path).map_err(|e| format!("the exclude list cannot be read: {e}"))?;
+        Exclude::parse(&text)
+    }
+
+    /// The list's text: one tile record a line, `t:N` or `N` (decimal); `#` to the line's end is
+    /// a comment; blank lines are skipped; a record listed twice is an error.
+    pub fn parse(text: &[u8]) -> Result<Exclude, String> {
+        let text = text.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text);
+        let mut first: BTreeMap<u16, usize> = BTreeMap::new();
+        let mut records = Vec::new();
+        for (k, raw) in text.split(|&b| b == b'\n').enumerate() {
+            let line = k + 1;
+            let bad = |why: &str| format!("the exclude list, line {line}: {why}");
+            let raw = std::str::from_utf8(raw).map_err(|_| bad("not text"))?;
+            let id = raw.split('#').next().unwrap_or_default().trim();
+            if id.is_empty() {
+                continue;
+            }
+            let digits = id.strip_prefix("t:").unwrap_or(id);
+            let r = Some(digits)
+                .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|d| d.parse::<u16>().ok())
+                .ok_or_else(|| bad("not a tile record id (t:N or N)"))?;
+            if let Some(was) = first.insert(r, line) {
+                return Err(bad(&format!("a record listed again (first on line {was})")));
+            }
+            records.push((line, r));
+        }
+        Ok(Exclude { records })
+    }
+
+    /// The numbers of the plan items that hold a listed record; a listed record in no item is an
+    /// error (the first such line).
+    pub fn items(&self, plan: &group::Plan) -> Result<BTreeSet<u32>, String> {
+        let mut owner: BTreeMap<u16, u32> = BTreeMap::new();
+        for (no, item) in plan.items.iter().enumerate() {
+            for id in item.images() {
+                if let ImageId::Tile(r) = id {
+                    owner.insert(r, no as u32);
+                }
+            }
+        }
+        self.records
+            .iter()
+            .map(|&(line, r)| {
+                owner.get(&r).copied().ok_or_else(|| {
+                    format!(
+                        "the exclude list, line {line}: a record in no item of the plan (the \
+                         shore, an empty record or none of the game's)"
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+/// Whether `path` or a directory above it, as given (made absolute) or resolved through its
+/// symlinks, holds a `.git` entry.
+fn in_a_work_tree(path: &Path) -> bool {
+    let given = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let resolved = given.canonicalize().ok();
+    std::iter::once(given).chain(resolved).any(|p| {
+        p.ancestors()
+            .any(|a| std::fs::symlink_metadata(a.join(".git")).is_ok())
+    })
 }
 
 /// What the sheets of one attempt of one item came to.
@@ -96,6 +190,8 @@ pub struct Report {
     pub rerolled_items: usize,
     pub reroll_sheets: usize,
     pub refused_sheets: usize,
+    /// Items the owner's list sent back (their records are counted as [`Status::Excluded`]).
+    pub excluded_items: usize,
     /// Failing gates over every judged image (a name, how many).
     pub failures: BTreeMap<&'static str, usize>,
     /// The neighbour gate's pairs and passes.
@@ -119,21 +215,32 @@ impl Report {
         );
         let _ = writeln!(
             s,
-            "{:<30} {:>9} {:>9} {:>9} {:>7} {:>8}",
-            "", "generated", "fallback", "neighbour", "failed", "pending"
+            "{:<30} {:>9} {:>9} {:>9} {:>7} {:>8} {:>9}",
+            "", "generated", "fallback", "neighbour", "failed", "pending", "excluded"
         );
         for class in Class::ALL {
             let _ = writeln!(
                 s,
-                "{:<30} {:>9} {:>9} {:>9} {:>7} {:>8}",
+                "{:<30} {:>9} {:>9} {:>9} {:>7} {:>8} {:>9}",
                 class.name(),
                 self.get(class, Status::Generated),
                 self.get(class, Status::Fallback),
                 self.get(class, Status::Neighbour),
                 self.get(class, Status::Failed),
                 self.get(class, Status::Pending),
+                self.get(class, Status::Excluded),
             );
         }
+        let excluded: usize = Class::ALL
+            .iter()
+            .map(|&c| self.get(c, Status::Excluded))
+            .sum();
+        let _ = writeln!(
+            s,
+            "excluded by the owner's list (the scaler draws them whole): {} items, {excluded} \
+             records",
+            self.excluded_items
+        );
         let n = &self.neighbour;
         let _ = writeln!(
             s,
@@ -405,10 +512,26 @@ fn neighbour_gate(
 
 /// Runs ingest over the work dir with the thresholds `t`.
 pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String> {
+    ingest_excluding(game, work, t, None)
+}
+
+/// [`ingest`] with the owner's list at `exclude` ([`Exclude`]), read and checked against the
+/// plan before anything is written; `None` is [`ingest`].
+pub fn ingest_excluding(
+    game: &Game,
+    work: &Work,
+    t: &Thresholds,
+    exclude: Option<&Path>,
+) -> Result<Report, String> {
+    let list = exclude.map(Exclude::read).transpose()?;
     let jobs = work.read_jobs()?;
+    let plan = group::plan(game);
+    let excluded = match &list {
+        Some(l) => l.items(&plan)?,
+        None => BTreeSet::new(),
+    };
     // Checked before anything is written there, and again before it is emptied.
     work::own_dir(&work.path("slices"))?;
-    let plan = group::plan(game);
     let fingerprint = plan.fingerprint();
     let generation = jobs
         .first()
@@ -427,6 +550,7 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
     let mut report = Report {
         shore: plan.shore,
         empty: plan.empty,
+        excluded_items: excluded.len(),
         thresholds: t.text(),
         ..Report::default()
     };
@@ -564,6 +688,19 @@ pub fn ingest(game: &Game, work: &Work, t: &Thresholds) -> Result<Report, String
         };
         judged.push((status, n_records, passed));
     }
+
+    // The owner's list, after every item is judged and before the neighbour gate: each item that
+    // holds a listed record goes back to the scaler whole, whatever it came to (the gate sees its
+    // records as MMPX sides), and is not re-rolled.
+    for &no in &excluded {
+        judged[no as usize].0 = Status::Excluded;
+        let line = serde_json::json!({
+            "item": no, "class": plan.items[no as usize].class, "fallback": "excluded",
+            "gates": t.text(),
+        });
+        let _ = writeln!(gates_log, "{line}");
+    }
+    reroll.retain(|no| !excluded.contains(no));
 
     // The neighbour gate, once every item is judged: its fallbacks are final for this ingest
     // (not re-rolled), and only the items it leaves accepted reach the pack.

@@ -3048,3 +3048,341 @@ fn a_turn_of_drain_is_bounded_whatever_the_pipe_holds() {
     assert!(run::drain(&mut pipe, Instant::now(), |_| {}).is_none());
     assert_eq!((reads.get(), pipe.is_some()), (0, true));
 }
+
+// The owner's list (`ingest --exclude`), on the synthetic set: every record named is made up.
+
+/// What ingest leaves in a work dir: `ingest.json`, `gates.jsonl`, `coverage.txt` and every file
+/// in `slices/` (name and bytes).
+type Left = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    std::collections::BTreeMap<String, Vec<u8>>,
+);
+
+/// [`Left`] of `w`.
+fn left_in(w: &Work) -> Left {
+    let read = |rel: &str| std::fs::read(w.path(rel)).unwrap();
+    let slices = std::fs::read_dir(w.path("slices"))
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            (name, std::fs::read(e.path()).unwrap())
+        })
+        .collect();
+    (
+        read("ingest.json"),
+        read("gates.jsonl"),
+        read("coverage.txt"),
+        slices,
+    )
+}
+
+/// A list file holding `text`, in a temp dir of its own outside the repository.
+fn list(name: &str, text: &[u8]) -> PathBuf {
+    let path = temp(&format!("list-{name}")).join("exclude.txt");
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// The number of the item of `plan` that holds record `r`.
+fn item_of(plan: &group::Plan, r: u16) -> u32 {
+    plan.items
+        .iter()
+        .position(|i| i.images().any(|id| id == tile(r)))
+        .unwrap() as u32
+}
+
+/// The rows of `gates.jsonl` that the list wrote.
+fn excluded_rows(w: &Work) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(w.path("gates.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|l| l["fallback"] == "excluded")
+        .collect()
+}
+
+/// `e` with every "line N" taken out names no number (so no record).
+fn names_no_number(e: &str) -> bool {
+    let mut parts = e.split("line ");
+    let mut rest = parts.next().unwrap_or_default().to_string();
+    for p in parts {
+        rest.push_str(p.trim_start_matches(|c: char| c.is_ascii_digit()));
+    }
+    !rest.chars().any(|c| c.is_ascii_digit())
+}
+
+#[test]
+fn the_owner_s_list_sends_its_items_back_to_the_scaler_whole() {
+    use std::collections::BTreeSet;
+    let g = synthetic::game();
+    let plan = group::plan(&g);
+    let w = work("exclude");
+    atlas_into(&g, &w);
+    generate(&w, |_, s| s);
+    let t = Thresholds::default();
+    let r0 = ingest::ingest(&g, &w, &t).unwrap();
+    let all = accepted(&w);
+    let before = left_in(&w);
+    let (table_no, walker_no) = (
+        item_of(&plan, synthetic::TABLE),
+        item_of(&plan, synthetic::ACTOR_A),
+    );
+    let table = members(&g, &plan.items[table_no as usize]);
+    let walker = members(&g, &plan.items[walker_no as usize]);
+    assert_eq!((table.len(), walker.len()), (2, 8));
+    assert!(table.is_subset(&all) && walker.is_subset(&all));
+    // The table's west part (not its anchor) and one frame of the walker, in both forms, among
+    // comments, blank lines and spaces.
+    let text = format!(
+        "\u{feff}# made-up records of the synthetic set\n\n  t:{}  # the west part\n\t{}\r\n# end",
+        synthetic::TABLE,
+        synthetic::ACTOR_A + 5
+    );
+    let file = list("whole", text.as_bytes());
+    let r = ingest::ingest_excluding(&g, &w, &t, Some(&file)).unwrap();
+    // Every record of both items goes (the anchor, all eight frames), and nothing else.
+    let gone: BTreeSet<String> = table.union(&walker).cloned().collect();
+    let now = accepted(&w);
+    assert_eq!(now, all.difference(&gone).cloned().collect());
+    assert_eq!(packed(&w), now);
+    for name in &gone {
+        let id = atlas::parse_image(name).unwrap();
+        assert!(!w.slice(&atlas::slice_name(id)).exists(), "{name}");
+    }
+    // What stays is what it was: its lines of ingest.json and its masters, byte for byte.
+    let kept = |json: &[u8]| -> Vec<ingest::Accepted> {
+        let v: Vec<ingest::Accepted> = serde_json::from_slice(json).unwrap();
+        v.into_iter().filter(|a| !gone.contains(&a.image)).collect()
+    };
+    let after = left_in(&w);
+    assert_eq!(kept(&after.0), kept(&before.0));
+    for (name, bytes) in &after.3 {
+        assert_eq!(before.3.get(name), Some(bytes), "{name}");
+    }
+    assert_eq!(after.3.len(), before.3.len() - gone.len());
+    // Counted apart, as records of their classes; every other count as before.
+    assert_eq!(r.get(Class::Multi, Status::Excluded), 2);
+    assert_eq!(r.get(Class::Actor, Status::Excluded), 8);
+    assert_eq!(
+        r.get(Class::Multi, Status::Generated),
+        r0.get(Class::Multi, Status::Generated) - 2
+    );
+    assert_eq!(
+        r.get(Class::Actor, Status::Generated),
+        r0.get(Class::Actor, Status::Generated) - 8
+    );
+    let statuses = [
+        Status::Generated,
+        Status::Fallback,
+        Status::Neighbour,
+        Status::Failed,
+        Status::Pending,
+        Status::Excluded,
+    ];
+    for class in [
+        Class::Portrait,
+        Class::Bitmap,
+        Class::Terrain,
+        Class::Object,
+    ] {
+        for st in statuses {
+            assert_eq!(r.get(class, st), r0.get(class, st), "{class:?} {st:?}");
+        }
+    }
+    assert_eq!((r0.excluded_items, r.excluded_items), (0, 2));
+    let text = r.text();
+    let header = text.lines().nth(1).unwrap();
+    assert_eq!(header.split_whitespace().last(), Some("excluded"));
+    let row = |name: &str| -> Vec<String> {
+        let line = text.lines().find(|l| l.starts_with(name)).unwrap();
+        line[name.len()..]
+            .split_whitespace()
+            .map(String::from)
+            .collect()
+    };
+    assert_eq!(row("multi-record object records")[5], "2");
+    assert_eq!(row("actor records")[5], "8");
+    assert_eq!(row("object records")[5], "0");
+    assert!(text.contains(
+        "excluded by the owner's list (the scaler draws them whole): 2 items, 10 records"
+    ));
+    assert_eq!(
+        std::fs::read_to_string(w.path("coverage.txt")).unwrap(),
+        text
+    );
+    // gates.jsonl: one line per item the list sent back, like a neighbour fallback's.
+    let rows = excluded_rows(&w);
+    let items: BTreeSet<u64> = rows.iter().map(|l| l["item"].as_u64().unwrap()).collect();
+    assert_eq!(
+        items,
+        [u64::from(table_no), u64::from(walker_no)]
+            .into_iter()
+            .collect()
+    );
+    for l in &rows {
+        let keys: BTreeSet<&str> = l.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["class", "fallback", "gates", "item"].into_iter().collect()
+        );
+        assert_eq!(l["gates"], t.text());
+    }
+    assert!(rows.iter().any(|l| l["class"] == "multi"));
+    assert!(rows.iter().any(|l| l["class"] == "actor"));
+    // Without the list, the next ingest brings both back as they were.
+    assert_eq!(ingest::ingest(&g, &w, &t).unwrap(), r0);
+    assert!(left_in(&w) == before);
+    let _ = std::fs::remove_dir_all(&w.root);
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}
+
+#[test]
+fn an_item_the_list_names_is_not_re_rolled() {
+    let g = synthetic::game();
+    let plan = group::plan(&g);
+    let w = work("exclude-reroll");
+    let jobs = atlas_into(&g, &w);
+    // The tile sheet comes back one pixel narrower: its items are queued for their re-roll, all
+    // but the walker the list names.
+    generate(&w, |job, sent| {
+        if job.kind == SheetKind::Tile {
+            sent.rect(0, 0, SHEET_W - 1, SHEET_H)
+        } else {
+            sent
+        }
+    });
+    let walker = members(&g, &plan.items[item_of(&plan, synthetic::ACTOR_A) as usize]);
+    let file = list("reroll", format!("t:{}\n", synthetic::ACTOR_A).as_bytes());
+    let t = Thresholds::default();
+    let r = ingest::ingest_excluding(&g, &w, &t, Some(&file)).unwrap();
+    assert_eq!(r.get(Class::Actor, Status::Excluded), 8);
+    assert_eq!(r.get(Class::Actor, Status::Pending), 4);
+    assert_eq!(r.reroll_sheets, 1);
+    let all = w.read_jobs().unwrap();
+    assert_eq!(all.len(), jobs.len() + 1);
+    let reroll = all.last().unwrap();
+    assert_eq!(reroll.attempt, 2);
+    assert!(reroll.places.iter().all(|p| !walker.contains(&p.image)));
+    let beast = atlas::image_name(tile(synthetic::ACTOR_B));
+    assert!(reroll.places.iter().any(|p| p.image == beast));
+    // Off the list, it is queued then.
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    assert_eq!(r.reroll_sheets, 1);
+    let last = w.read_jobs().unwrap().pop().unwrap();
+    let on: std::collections::BTreeSet<String> =
+        last.places.iter().map(|p| p.image.clone()).collect();
+    assert_eq!(on, walker);
+    let _ = std::fs::remove_dir_all(&w.root);
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}
+
+#[test]
+fn a_bad_list_is_refused_and_nothing_is_written() {
+    use std::os::unix::fs::symlink;
+    let g = synthetic::game();
+    let w = work("exclude-bad");
+    atlas_into(&g, &w);
+    generate(&w, |_, s| s);
+    let t = Thresholds::default();
+    ingest::ingest(&g, &w, &t).unwrap();
+    let before = left_in(&w);
+    let refused = |name: &str, path: &Path| -> String {
+        let e = ingest::ingest_excluding(&g, &w, &t, Some(path)).unwrap_err();
+        assert!(left_in(&w) == before, "{name}: ingest wrote something");
+        e
+    };
+    // Each list names the tree first: a list taken in part would change what ingest leaves.
+    let tree = synthetic::TREE;
+    let mut cases: Vec<(&str, Vec<u8>, usize)> = [
+        ("no item", format!("t:{tree}\nt:{}\n", synthetic::SHORE), 2),
+        ("past the records", format!("t:{tree}\n# past\n9999\n"), 3),
+        ("twice", format!("# twice\nt:{tree}\n\n{tree}\n"), 4),
+        ("twice, one form each", format!("{tree}\nt:{tree}\n"), 2),
+        ("empty id", format!("t:{tree}\nt:\n"), 2),
+        ("letters", format!("t:{tree}\nt:x7\n"), 2),
+        ("another kind", format!("t:{tree}\np:a:0\n"), 2),
+        ("signed", format!("t:{tree}\n+7\n"), 2),
+        ("negative", format!("t:{tree}\nt:-7\n"), 2),
+        ("past u16", format!("t:{tree}\nt:70000\n"), 2),
+        ("two on a line", format!("t:{tree}\n7 8\n"), 2),
+        ("a space inside", format!("t:{tree}\nt: 7\n"), 2),
+    ]
+    .into_iter()
+    .map(|(n, s, l)| (n, s.into_bytes(), l))
+    .collect();
+    let mut not_text = format!("t:{tree}\n\n").into_bytes();
+    not_text.extend_from_slice(b"t:\xff7\n");
+    cases.push(("not text", not_text, 3));
+    for (name, text, line) in &cases {
+        let file = list("bad", text);
+        let e = refused(name, &file);
+        assert!(e.contains(&format!("line {line}:")), "{name}: {e}");
+        assert!(names_no_number(&e), "{name}: {e}");
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+    // A list in a git work tree, by its path or through a symlink, is refused unread; so is one
+    // that cannot be read.
+    let d = temp("list-git");
+    let good = format!("t:{tree}\n");
+    std::fs::create_dir_all(d.join("repo/.git")).unwrap();
+    std::fs::create_dir_all(d.join("repo/sub/deeper")).unwrap();
+    std::fs::write(d.join("repo/sub/deeper/exclude.txt"), &good).unwrap();
+    std::fs::create_dir_all(d.join("linked")).unwrap();
+    std::fs::write(d.join("linked/.git"), "gitdir: elsewhere\n").unwrap();
+    std::fs::write(d.join("linked/exclude.txt"), &good).unwrap();
+    std::fs::create_dir_all(d.join("free")).unwrap();
+    symlink(
+        d.join("repo/sub/deeper/exclude.txt"),
+        d.join("free/exclude.txt"),
+    )
+    .unwrap();
+    for rel in [
+        "repo/sub/deeper/exclude.txt",
+        "linked/exclude.txt",
+        "free/exclude.txt",
+    ] {
+        let e = refused(rel, &d.join(rel));
+        assert!(e.contains("git work tree"), "{rel}: {e}");
+    }
+    let e = refused("missing", &d.join("free/none.txt"));
+    assert!(e.contains("cannot be read"), "{e}");
+    // The same list outside any work tree is taken.
+    std::fs::write(d.join("free/plain.txt"), &good).unwrap();
+    let r = ingest::ingest_excluding(&g, &w, &t, Some(&d.join("free/plain.txt"))).unwrap();
+    assert_eq!(r.get(Class::Multi, Status::Excluded), 4);
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&w.root);
+}
+
+#[test]
+fn no_list_or_one_of_comments_only_changes_nothing() {
+    let g = synthetic::game();
+    let w = work("exclude-none");
+    atlas_into(&g, &w);
+    generate(&w, |_, s| s);
+    let t = Thresholds::default();
+    let r = ingest::ingest(&g, &w, &t).unwrap();
+    let before = left_in(&w);
+    assert!(excluded_rows(&w).is_empty());
+    assert_eq!(r.excluded_items, 0);
+    assert!(Class::ALL.iter().all(|&c| r.get(c, Status::Excluded) == 0));
+    assert!(r.text().contains(
+        "excluded by the owner's list (the scaler draws them whole): 0 items, 0 records"
+    ));
+    let file = list(
+        "comments",
+        b"# only comments\n\n   \n\t# and blank lines\r\n",
+    );
+    assert_eq!(
+        ingest::ingest_excluding(&g, &w, &t, Some(&file)).unwrap(),
+        r
+    );
+    assert!(left_in(&w) == before);
+    assert_eq!(ingest::ingest_excluding(&g, &w, &t, None).unwrap(), r);
+    assert!(left_in(&w) == before);
+    let _ = std::fs::remove_dir_all(&w.root);
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}
