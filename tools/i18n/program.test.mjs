@@ -410,6 +410,12 @@ test('the keys of a prompt: the letters it shows standing alone (not inside a wo
   assert.equal(keysShown('%sA) after a name', 'A'), 'A');
   assert.equal(keysShown('가A)나', 'A'), 'A', 'next to Hangul');
   assert.equal(keysShown('AB) together', 'AB'), '', 'a word of two keys');
+  assert.equal(keysShown('A lantern hums. A) go, or B) stay?', 'AB'), 'AB');
+  assert.equal(keysShown('A lantern', 'A'), '', 'the article');
+  assert.equal(keysShown('"A tide turns"', 'A'), '', 'the article after a quote');
+  assert.equal(keysShown('press \'Y\' now', 'Y'), 'Y', 'a quoted key');
+  assert.ok(keysKept('Thou art kind. A lantern hums', '그대는 너그럽소. 등불이 우오', 'AB'), 'the article is no key');
+  assert.ok(keysKept('A) go, B) stay', 'A 가시오, B 머무시오', 'AB'), 'a translated key before a space still counts');
   const q = 'Wouldst thou A) give alms, or B) keep thy coin?';
   assert.ok(keysKept(q, '그대는 A) 베풀겠는가, B) 지키겠는가?', 'AB'));
   assert.ok(keysKept('Male or Female?', '남(M) 여(F)?', 'MF'), 'added keys are not counted');

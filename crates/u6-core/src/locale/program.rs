@@ -20,8 +20,8 @@
 //! letters that read accepts, from the code's constants or the key tables of `u` it reads at run
 //! time (Escape and any other byte but an upper-case letter left out). Of those, every letter the
 //! English shows standing alone ([`keys_shown`]: `A)`, `(M)`, `N)ew`) must stand alone in the
-//! translation too, in the same order ([`keys_kept`]); a key the English shows only inside a word
-//! is not checked.
+//! translation too, in the same order ([`keys_kept`]); a key the English shows only inside a word,
+//! or as a word of its own (one followed by whitespace, the article A), is not checked.
 //!
 //! **Lookup** ([`lookup`], [`shown`]): by content, [`hash64`] of the English bytes, at the `u`
 //! program's print entry only (the passages' 0x1142f0 calls, the creation and transfer prints;
@@ -122,10 +122,18 @@ fn letters(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The letters of `keys` that `text` (up to a NUL) shows standing alone, each once, in the order
-/// they first do: an ASCII letter with no ASCII letter right before or after it (`A)`, `(M)`,
-/// `N)ew`). The byte after a `%` is a code ([`directives`]), not a letter.
+/// The letters of `keys` that the English `text` (up to a NUL) shows standing alone, each once, in
+/// the order they first do: an ASCII letter with no ASCII letter right before or after it (`A)`,
+/// `(M)`, `N)ew`) and no ASCII whitespace right after it (space, tab, line feed, carriage return:
+/// such a letter is a word, the article A, not a key shown). The byte after a `%` is a code
+/// ([`directives`]), not a letter.
 pub fn keys_shown(text: &[u8], keys: &[u8]) -> Vec<u8> {
+    standing(text, keys, true)
+}
+
+/// The letters of `keys` that `text` shows standing alone, as [`keys_shown`] reads them; a letter
+/// followed by whitespace counts only when `words` is false (a translation: `A 가시오` shows A).
+fn standing(text: &[u8], keys: &[u8], words: bool) -> Vec<u8> {
     let f = &text[..text.iter().position(|&b| b == 0).unwrap_or(text.len())];
     let mut glyphs: Vec<Option<u8>> = Vec::with_capacity(f.len());
     let mut i = 0;
@@ -142,6 +150,13 @@ pub fn keys_shown(text: &[u8], keys: &[u8]) -> Vec<u8> {
         j.and_then(|j| glyphs.get(j).copied().flatten())
             .is_some_and(|b| b.is_ascii_alphabetic())
     };
+    let space = |j: usize| {
+        glyphs
+            .get(j)
+            .copied()
+            .flatten()
+            .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+    };
     let mut out = Vec::new();
     for (j, g) in glyphs.iter().enumerate() {
         let Some(b) = *g else { continue };
@@ -149,6 +164,7 @@ pub fn keys_shown(text: &[u8], keys: &[u8]) -> Vec<u8> {
             && !out.contains(&b)
             && !letter(j.checked_sub(1))
             && !letter(Some(j + 1))
+            && (!words || !space(j + 1))
         {
             out.push(b);
         }
@@ -158,11 +174,12 @@ pub fn keys_shown(text: &[u8], keys: &[u8]) -> Vec<u8> {
 
 /// Whether `text` keeps the keys of its English `english`: every letter of `keys` the English
 /// shows standing alone ([`keys_shown`]) stands alone in `text` too, in the same order (one it
-/// shows besides, such as a key added as `(M)`, is not counted). A string without keys keeps
+/// shows besides, such as a key added as `(M)`, is not counted). In `text` a key followed by
+/// whitespace still counts (the article rule reads the English only). A string without keys keeps
 /// them.
 pub fn keys_kept(english: &[u8], text: &[u8], keys: &[u8]) -> bool {
     let en = keys_shown(english, keys);
-    let kept: Vec<u8> = keys_shown(text, keys)
+    let kept: Vec<u8> = standing(text, keys, false)
         .into_iter()
         .filter(|k| en.contains(k))
         .collect();

@@ -344,7 +344,26 @@ fn the_keys_a_prompt_shows_standing_alone_are_letters_next_to_no_letter_outside_
         shown(b"AB) together", b"AB").is_empty(),
         "a word of two keys"
     );
+    assert_eq!(shown(b"A lantern hums. A) go, or B) stay?", b"AB"), b"AB");
+    assert!(shown(b"A lantern", b"A").is_empty(), "the article");
+    assert!(
+        shown(b"\"A tide turns\"", b"A").is_empty(),
+        "the article after a quote"
+    );
+    assert_eq!(shown(b"press 'Y' now", b"Y"), b"Y", "a quoted key");
     let kept = |en: &[u8], ko: &str, k: &[u8]| program::keys_kept(en, ko.as_bytes(), k);
+    assert!(
+        kept(
+            b"Thou art kind. A lantern hums",
+            "그대는 너그럽소. 등불이 우오",
+            b"AB"
+        ),
+        "the article is no key"
+    );
+    assert!(
+        kept(b"A) go, B) stay", "A 가시오, B 머무시오", b"AB"),
+        "a translated key before a space still counts"
+    );
     let q = b"Wouldst thou A) give alms, or B) keep thy coin?";
     assert!(kept(q, "그대는 A) 베풀겠는가, B) 지키겠는가?", b"AB"));
     assert!(

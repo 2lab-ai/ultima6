@@ -864,9 +864,17 @@ export const uHasLetters = (en) => /[A-Za-z]/.test(en.replace(/%[\s\S]?/g, ''));
 
 /// The letters of `keys` (the keys of the read after a string of u, the export's `keys`) that
 /// `text` shows standing alone, each once, in the order they first do: an ASCII letter with no
-/// ASCII letter right before or after it (`A)`, `(M)`, `N)ew`); the character after a `%` is a
-/// printf code, not a letter (u6_core::locale::program::keys_shown).
+/// ASCII letter right before or after it (`A)`, `(M)`, `N)ew`) and no ASCII whitespace right after
+/// it (space, tab, line feed, carriage return: such a letter is a word, the article A, not a key
+/// shown); the character after a `%` is a printf code, not a letter
+/// (u6_core::locale::program::keys_shown).
 export function keysShown(text, keys = '') {
+  return standing(text, keys, true);
+}
+
+// The letters of `keys` that `text` shows standing alone, as keysShown reads them; a letter
+// followed by whitespace counts only when `words` is false (a translation: `A 가시오` shows A).
+function standing(text, keys, words) {
   const glyphs = [];
   for (let i = 0; i < text.length; i += 1) {
     if (text[i] === '%') {
@@ -875,19 +883,22 @@ export function keysShown(text, keys = '') {
     } else glyphs.push(text[i]);
   }
   const letter = (j) => typeof glyphs[j] === 'string' && /^[A-Za-z]$/.test(glyphs[j]);
+  const space = (j) => typeof glyphs[j] === 'string' && /^[ \t\n\r]$/.test(glyphs[j]);
   let out = '';
   glyphs.forEach((g, j) => {
-    if (g !== null && /^[A-Z]$/.test(g) && keys.includes(g) && !out.includes(g) && !letter(j - 1) && !letter(j + 1)) out += g;
+    if (g !== null && /^[A-Z]$/.test(g) && keys.includes(g) && !out.includes(g) && !letter(j - 1) && !letter(j + 1)
+      && !(words && space(j + 1))) out += g;
   });
   return out;
 }
 
 /// Whether `ko` keeps the keys of its English `en`: every letter of `keys` the English shows
 /// standing alone stands alone in `ko` too, in the same order (one it shows besides, such as a key
-/// added as `(M)`, is not counted; u6_core::locale::program::keys_kept).
+/// added as `(M)`, is not counted; in `ko` a key followed by whitespace still counts, the article
+/// rule reads the English only; u6_core::locale::program::keys_kept).
 export function keysKept(en, ko, keys = '') {
   const shown = keysShown(en, keys);
-  return [...keysShown(ko, keys)].filter((k) => shown.includes(k)).join('') === shown;
+  return [...standing(ko, keys, false)].filter((k) => shown.includes(k)).join('') === shown;
 }
 
 const lineFeeds = (text) => [...text].filter((c) => c === '\n').length;
