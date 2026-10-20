@@ -50,10 +50,17 @@ Incantation syllables, runic text and the credits are not translated.
     as it is in the English;
   - `/` and `\` with the letters after them (English plural letters): keep them where the
     sentence has them; in Korean they print nothing.
-- `@` marks a keyword the player can type. The player types English keywords, so write the
-  Korean word, then the English keyword highlighted in parentheses: `일(@{job})`. Keep one `@`
-  for each `@` of the English line; every `@` is followed at once by `{`, and its `}` closes it
-  in the same line.
+- `@` marks a keyword the player can type. The request lists the conversation's keywords
+  (`topics`: each key with the English words its lines highlight for it, `shown`, and the Korean
+  word already chosen for it, `known`), and you answer one Korean word for each key: the word the
+  player types for it. Write that Korean word in the braces, `@{일}`, and its particle after the
+  closing brace, `@{일}을`: for each English `@word`, the Korean word you answer for the key whose
+  `shown` lists that word. Use the same word in every line of the character and for the keys of
+  one keyword block; when the request gives `known`, use that word. A word is 1 to 8 Hangul
+  syllables: no particle, no space and no Latin letter in the braces. An `@word` no key lists
+  (and every `@word` of a request that lists no keywords) keeps its English word: `일(@{job})`.
+  Keep one `@` for each `@` of the English line; every `@` is followed at once by `{`, and its `}`
+  closes it in the same line.
 - Particles (조사): after a Korean word write the particle itself (책을, 왕이). After `$x` or `#x`,
   whose sound you cannot know, write one of these markers and nothing else in braces: `{이/가}`,
   `{은/는}`, `{을/를}`, `{과/와}`, `{(으)로}`.
@@ -67,7 +74,7 @@ Incantation syllables, runic text and the credits are not translated.
 
 | Class | English | Korean |
 |---|---|---|
-| merchant | `"Hast thou come to buy @bread, $G?"` | `"빵(@{bread})을 사러 오셨사옵니까, $G?"` |
+| merchant | `"Hast thou come to buy @bread, $G?"` (the key `bread`, its word 빵) | `"@{빵}을 사러 오셨사옵니까, $G?"` |
 | guard | `Thou seekest $N?` | `$N{을/를} 찾으시오?` |
 | royalty | `I have #1 coin\s for thee.*` | `그대에게 줄 금화가 #1닢\s 있노라.*` |
 | thief | `Keep thy voice down.` | `목소리를 낮추게.` |

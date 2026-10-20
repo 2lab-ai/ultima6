@@ -17,7 +17,19 @@
 // - the CLI itself in a child process against a counting HTTP server (the real transport): no
 //   terminal and no --send sends nothing, --dry-run neither, --send does and writes the pack, a
 //   307 or 308 to another server is not followed;
-// - nothing the tool prints holds a name, a line, a script's item or a hash.
+// - nothing the tool prints holds a name, a line, a script's item or a hash;
+// - slice K5b, the keyword aliases (made-up words only): a script's keys from its keyword blocks
+//   and the highlighted words that hit each, the request's `topics` (with `known` from the pack
+//   there and from the shared keywords' request, asked once before the scripts and never before
+//   the owner's yes), a request with no key byte for byte main's for the same style guide, the
+//   alias gate (words that collide as the engine's matcher takes them, with the engine's
+//   particles, kept only by keys whose first block is the same, and checked against the words the
+//   pack keeps) and its refusals counted while the lines land, a key's several words, the run
+//   gate with a script's words (runs and table strings), the pack's `aliases` in the engine's
+//   form (a pack without them byte for byte main's; crates/u6-core/src/locale/tool-pack.json is
+//   this writer's bytes, which the engine reads and writes back), the merge (new words replace
+//   old, an older line that no longer passes dropped and counted, a strings-only run keeping
+//   them).
 //
 //   node --test tools/i18n/*.test.mjs
 import assert from 'node:assert/strict';
@@ -32,8 +44,10 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
-  CLASSES, COVERAGE_FORMAT, MAX_TOKENS, PACK_FORMAT, braceWords, fingerprint, gate, hash64, hex64,
-  keywordsOf, main, packBytes, placeholders, speakerClass, unitsOf,
+  CLASSES, COVERAGE_FORMAT, MAX_TOKENS, PACK_FORMAT, PARTICLES, PackReadError, aliasesOf, bodyOf, braceWords, braceWordsWanted,
+  collide, compatibleOf, duplicateMembers, fingerprint, firstBlocksOf, gate, glossaryOf, hash64, hex64, hits, keyHit, keyOf,
+  keysOf, keywordsOf, knownOf, latin1, main, packBytes, placeholders, planOf, readPack, speakerClass, systemOf, tableGate,
+  topicsOf, unitsOf, wordGate,
 } from './translate.mjs';
 
 const TOOL = join(dirname(fileURLToPath(import.meta.url)), 'translate.mjs');
@@ -45,8 +59,8 @@ const HASHES = ['00000000000a7001', '00000000000a7002', '00000000000b7003', '000
 const seg = (archive, item, offset, text, part) => ({ kind: 'text', key: [archive, item, offset], text, ...(part === undefined ? {} : { part_of: part }) });
 
 // A u6.npc-bundle/1 as the page's exporter writes it, with the test's own name and lines (the
-// keys are made-up offsets in script order).
-function bundle(archive, item, hash, name, { refused = null, look = 'a guard of the gate', lines = [] } = {}) {
+// keys are made-up offsets in script order), each topic's keywords `keywords`.
+function bundle(archive, item, hash, name, { refused = null, look = 'a guard of the gate', lines = [], keywords = ['job'] } = {}) {
   const at = (n) => 100 + n * 40;
   return {
     format: 'u6.npc-bundle/1', archive, item, hash, refused, actors: [5], portraits: [], name, locale: 'en',
@@ -54,27 +68,34 @@ function bundle(archive, item, hash, name, { refused = null, look = 'a guard of 
     speech: { greeting: refused ? [] : [seg(archive, item, at(0), `"Hail, $G! I am $N. ${LINE}"\n`)] },
     turns: refused ? [] : [{
       input: { at: 90, kind: 'ask' }, segments: [],
-      topics: lines.map((l, i) => ({ at: 0, keywords: ['job'], requires: [], answer: [seg(archive, item, at(i + 1), l)] })),
+      topics: lines.map((l, i) => ({ at: 0, keywords, requires: [], answer: [seg(archive, item, at(i + 1), l)] })),
     }],
     traits: [], strings: [],
   };
 }
 
+// Slice K5b: two scripts share `job` (below the GLOSSARY_SCRIPTS that asks a key on its own
+// first), so each run here sends the scripts' requests only; the shared keywords' request has
+// tests of its own below.
 const BUNDLES = [
   bundle('a', ITEMS[0], HASHES[0], `${SENTINEL}Good`, {
     lines: ['My @job is to guard.*', 'I have #0 coin\\s, <runes> here.', 'The first part ', 'and the rest.'],
   }),
   bundle('a', ITEMS[1], HASHES[1], `${SENTINEL}Again`, { look: 'a merchant of bread', lines: ['Buy from me, $P.'] }),
-  bundle('b', ITEMS[2], HASHES[2], `${SENTINEL}Bad`, { lines: ['I never answer well.'] }),
+  bundle('b', ITEMS[2], HASHES[2], `${SENTINEL}Bad`, { lines: ['I never answer well.'], keywords: ['bye'] }),
   bundle('b', ITEMS[3], HASHES[3], `${SENTINEL}Refused`, { refused: 'test refusal' }),
 ];
 // The third and fourth lines of the first script are the two parts of one run.
 BUNDLES[0].turns[0].topics[2].answer[0].part_of = 100 + 3 * 40;
 BUNDLES[0].turns[0].topics[3].answer[0].part_of = 100 + 3 * 40;
 
+// The fake translator's Korean word for key `k` (slice K5b): a made-up syllable per letter.
+const fakeWord = (k) => [...k].slice(0, 8).map((c) => String.fromCharCode(0xac00 + ((c.charCodeAt(0) * 389) % 11172))).join('');
+
 // The fake translator's Korean for `en`: every escape and the runic text kept, the line breaks at
-// its ends kept, each keyword `@word` as `말(@{word})`, every other letter a syllable.
-function fakeKo(en) {
+// its ends kept, each keyword `@word` as `@{<its Korean word>}` where `words` (a Map of the
+// English word, case folded, to it) has one, else `말(@{word})`, every other letter a syllable.
+function fakeKo(en, words = new Map()) {
   let out = '';
   let runic = false;
   for (let i = 0; i < en.length; i += 1) {
@@ -87,7 +108,8 @@ function fakeKo(en) {
       i += 1;
     } else if (c === '@') {
       const word = /^[a-z]+/i.exec(en.slice(i + 1))[0];
-      out += `말(@{${word}})`;
+      const ko = words.get(word.toLowerCase());
+      out += ko ? `@{${ko}}` : `말(@{${word}})`;
       i += word.length;
     } else if ('*&`/\\%'.includes(c)) {
       out += c;
@@ -101,10 +123,29 @@ function fakeKo(en) {
   return out;
 }
 
-const answer = (lines) => ({
+const answer = (lines, keywords) => ({
   status: 200,
-  json: { type: 'message', content: [{ type: 'text', text: JSON.stringify({ lines }) }], usage: { input_tokens: 100, output_tokens: 20 } },
+  json: {
+    type: 'message', content: [{ type: 'text', text: JSON.stringify(keywords ? { lines, keywords } : { lines }) }],
+    usage: { input_tokens: 100, output_tokens: 20 },
+  },
 });
+
+// The fake translator's answer to a script's request `user` (slice K5b): for each key the request
+// lists, the word `pick` gives it (its `known` word, else a made-up one); each line with the words
+// of the keys its `@`s show.
+function fakeAnswer(user, pick = (key) => key.known ?? fakeWord(key.k)) {
+  const keywords = [];
+  const words = new Map();
+  for (const t of user.topics ?? []) {
+    for (const key of t.keys) {
+      const ko = pick(key);
+      if (!keywords.some((x) => x.k === key.k)) keywords.push({ k: key.k, ko });
+      for (const w of key.shown) words.set(w, ko);
+    }
+  }
+  return { lines: user.lines.map((l) => ({ n: l.n, ko: fakeKo(l.en, words) })), keywords: user.topics ? keywords : undefined };
+}
 
 // A counting fake transport: the answer for each request from its NPC's name (the bad one is
 // never JSON; the "again" one drops an escape the first time, so that line fails the gates).
@@ -119,12 +160,12 @@ function fakeTransport() {
     if (who.endsWith('Bad')) {
       return { status: 200, json: { type: 'message', content: [{ type: 'text', text: 'I would rather not.' }] } };
     }
-    const lines = user.lines.map((l) => ({ n: l.n, ko: fakeKo(l.en) }));
+    const { lines, keywords } = fakeAnswer(user);
     if (who.endsWith('Again') && asked.get(who) === 1) {
       const last = lines.at(-1);
       last.ko = last.ko.replace('$P', '그대');
     }
-    return answer(lines);
+    return answer(lines, keywords);
   };
   return { send, bodies, asked };
 }
@@ -348,19 +389,24 @@ test('with --send: one request per script; the pack holds the lines that pass th
   const retry = JSON.parse(JSON.parse(t.bodies.find((b, i) => i > 0 && b.includes(`${SENTINEL}Again`) && b !== t.bodies[1])).messages[0].content);
   assert.equal(retry.lines.length, 1, 'the second request for Again holds only the failed line');
   const pack = await packOf(f.out);
-  assert.deepEqual(Object.keys(pack), ['format', 'language', 'tool', 'base', 'converse']);
+  assert.deepEqual(Object.keys(pack), ['format', 'language', 'tool', 'base', 'converse', 'aliases']);
   assert.equal(pack.format, PACK_FORMAT);
   assert.equal(pack.language, 'ko');
   const units = [0, 1].flatMap((i) => unitsOf(BUNDLES[i]).map((u) => ({ ...u, item: ITEMS[i] })));
   assert.equal(pack.converse.length, units.length, 'every line of the two good scripts');
+  const job = fakeWord('job');
+  const keyed = { keys: ['job'], words: new Map([['job', job]]) };
   for (const r of pack.converse) {
     const u = units.find((x) => r.archive === 'a' && x.item === r.item && x.offset === r.offset);
     assert.ok(u, 'a run of the bundles');
     assert.equal(r.len, Buffer.from(u.text, 'latin1').length);
     assert.equal(r.hash, hex64(hash64(Buffer.from(u.text, 'latin1'))));
-    assert.equal(r.text, fakeKo(u.text));
-    assert.equal(gate(u.text, r.text), null);
+    assert.equal(r.text, fakeKo(u.text, new Map([['job', job]])));
+    assert.equal(gate(u.text, r.text, keyed), null);
   }
+  assert.ok(pack.converse.some((r) => r.text.includes(`@{${job}}`)), 'a line highlights the Korean word');
+  assert.deepEqual(pack.aliases, [0, 1].map((i) => ({ archive: 'a', item: ITEMS[i], keyword: 'job', words: [job] })),
+    'each good script\'s key with its Korean word (the bad one\'s none)');
   assert.equal(pack.base.converse, fingerprint([{ archive: 'a', item: ITEMS[0], hash: HASHES[0] }, { archive: 'a', item: ITEMS[1], hash: HASHES[1] }]), 'the fingerprint of the scripts translated');
   const sorted = [...pack.converse].sort((x, y) => x.item - y.item || x.offset - y.offset);
   assert.deepEqual(pack.converse, sorted, 'in key order');
@@ -522,8 +568,8 @@ function cli(args) {
 
 // The fake translator's answer to a request body, as llmux would give it.
 function translated(body) {
-  const user = JSON.parse(JSON.parse(body).messages[0].content);
-  return answer(user.lines.map((l) => ({ n: l.n, ko: fakeKo(l.en) }))).json;
+  const { lines, keywords } = fakeAnswer(JSON.parse(JSON.parse(body).messages[0].content));
+  return answer(lines, keywords).json;
 }
 
 test('the CLI: no terminal and no --send reaches no server; --dry-run neither; --send does, on POST /v1/messages, and writes the pack', async () => {
@@ -577,4 +623,631 @@ test('the CLI refuses an llmux address off this machine before reading anything'
   assert.match(r.text, /--llmux is the address of llmux on this machine/);
   assert.ok(!existsSync(join(dir, 'ko')), 'nothing made');
   await rm(dir, { recursive: true });
+});
+
+// --- slice K5b: the keyword aliases (made-up words only) ---------------------------------------
+
+const hashOf = (text) => hex64(hash64(latin1(text)));
+const userOf = (body) => JSON.parse(JSON.parse(body).messages[0].content);
+const reply = (obj) => ({ status: 200, json: { type: 'message', content: [{ type: 'text', text: JSON.stringify(obj) }] } });
+const ALIASES_PART = 'its keyword aliases part (aliases) holds an entry of another form or for a script its lines do not name';
+
+// A bundle of the keyword cases, every word of it made up: `topics`, each [its keywords as the
+// script holds them, its answer's line]; `strings`, its table strings.
+function kbundle(archive, item, hash, name, topics, strings = []) {
+  return {
+    format: 'u6.npc-bundle/1', archive, item, hash, refused: null, actors: [5], portraits: [], name, locale: 'en',
+    narration: { look: [seg(archive, item, 20, 'a keeper of words')] },
+    speech: { greeting: [seg(archive, item, 60, 'Hail.')] },
+    turns: [{
+      input: { at: 90, kind: 'ask' }, segments: [],
+      topics: topics.map(([keywords, line], i) => ({ at: 0, keywords, requires: [], answer: [seg(archive, item, 100 + i * 40, line)] })),
+    }],
+    traits: [],
+    strings: strings.map((text, i) => ({ key: [archive, item, 2000 + i * 40], table: 2000, index: i, text })),
+  };
+}
+
+async function kfixture(bundles, strings = null) {
+  const dir = await mkdtemp(join(tmpdir(), 'u6-i18n-keywords-'));
+  const path = join(dir, 'ultima6-npc-bundles.json');
+  await writeFile(path, JSON.stringify(bundles));
+  const spath = strings ? join(dir, 'ultima6-strings.json') : null;
+  if (strings) await writeFile(spath, JSON.stringify(strings));
+  return { dir, bundles: path, strings: spath, out: join(dir, 'ko') };
+}
+
+// The tool run with `args` and `send`, stdin no terminal: its exit code and what it printed.
+async function run(args, send, extra = {}) {
+  const out = output();
+  const code = await main(args, { transport: send, stdout: out, isTTY: false, signals: new EventEmitter(), ...extra });
+  return { code, text: out.text };
+}
+
+// Nothing printed names a script of `bundles`, a hash, a keyword's word or a Korean word.
+function quiet(printed, bundles) {
+  nothingTold(printed);
+  for (const b of bundles) {
+    assert.ok(!printed.includes(b.name) && !printed.includes(b.hash), 'no name or hash printed');
+    assert.ok(!new RegExp(`(^|[^0-9])${b.item}([^0-9]|$)`).test(printed), 'no item printed');
+  }
+  assert.ok(!/[가-힣]{2}/.test(printed.replace(/한글/g, '')), 'no Korean word printed');
+}
+
+// None of `words` (a fixture's keywords, kept and refused alike, and its alias words, given or
+// refused) is in `text` (what the tool printed, or a coverage receipt): an ASCII one as a word of
+// its own, a Korean one anywhere, one syllable too.
+function noneOf(text, words) {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const w of words.filter((x) => typeof x === 'string' && x.length > 0)) {
+    const shown = /^[\x20-\x7e]+$/.test(w) ? new RegExp(`(^|[^A-Za-z0-9])${esc(w)}([^A-Za-z0-9]|$)`, 'i').test(text) : text.includes(w);
+    assert.ok(!shown, `a keyword or an alias word of the fixture is shown: ${JSON.stringify(w)}`);
+  }
+}
+
+// Three scripts that share the key plo (enough for the shared keywords' request), two fl?n, each
+// one of its own.
+const SHARE_ITEMS = [7601, 7602, 7603];
+const sharing = () => SHARE_ITEMS.map((item, i) => kbundle('a', item, `00000000000f${item}`, `${SENTINEL}Share${'xyz'[i]}`, [
+  [['plo'], 'Try my @plod.'],
+  ...(i < 2 ? [[['fl?n'], 'A @flan.']] : []),
+  [[`my${'abc'[i]}`], `Mine is @my${'abc'[i]}.`],
+]));
+const SHARE_KEYS = ['plo', 'plod', 'fl?n', 'flan', 'mya', 'myb', 'myc'];
+// Coverage `keywords.kept` of a run in which no key kept the pack's old word.
+const NONE_KEPT = { count: 0, byReason: {}, keys: [] };
+
+test('slice K5b: a script\'s keys are its keywords as the keyword block keys them (up to the NUL, case folded; a * one and one past the form left out), in the blocks\' order, each with the highlighted words that hit it first (a word longer than its key, a ? in it)', () => {
+  assert.equal(keyOf('Plo\0xyz'), 'plo', 'up to its NUL, case folded');
+  for (const k of ['*', '*plo', 'a,b', '', 'x'.repeat(33), `caf${String.fromCharCode(0xe9)}`]) assert.equal(keyOf(k), null, JSON.stringify(k));
+  assert.equal(keyOf('x'.repeat(32)), 'x'.repeat(32));
+  assert.ok(hits('plod', 'plo') && hits('flan', 'fl?n') && hits('fl', 'fl?'), 'a longer word; ? anywhere, past the word\'s end too');
+  assert.ok(!hits('gr', 'plo') && !hits('grig', 'plo') && !hits('', '?'));
+  const b = kbundle('a', 7501, '00000000000e7501', `${SENTINEL}Keys`, [
+    [['Plo\0xyz', 'plods'], 'Try my @plod, or @Plods.'],
+    [['fl?n'], 'A @flan for thee.'],
+    [['*'], 'Naught.'],
+    [['zub'], 'The @zubbo.'],
+    [['zubbo', 'zub'], 'More @zubbo.'],
+    [['quux'], 'Nothing marked here.'],
+    [['a,b', 'x'.repeat(33)], 'Odd keys.'],
+  ]);
+  assert.deepEqual(keysOf(b), {
+    topics: [['plo', 'plods'], ['fl?n'], ['zub'], ['zubbo', 'zub'], ['quux']],
+    keys: ['plo', 'plods', 'fl?n', 'zub', 'zubbo', 'quux'],
+  });
+  const [s] = planOf([b], { item: { archive: 'a', item: 7501 } }).scripts;
+  assert.deepEqual(Object.fromEntries(s.shown), { plo: ['plod', 'plods'], plods: [], 'fl?n': ['flan'], zub: ['zubbo'], zubbo: [], quux: [] },
+    'plods hits plo first; zubbo hits zub first; quux is highlighted nowhere');
+  assert.equal(keyHit('zubbo', s.keys), 'zub');
+  assert.deepEqual(topicsOf(s, new Map([['zub', '나']])), [
+    { keys: [{ k: 'plo', shown: ['plod', 'plods'] }, { k: 'plods', shown: [] }] },
+    { keys: [{ k: 'fl?n', shown: ['flan'] }] },
+    { keys: [{ k: 'zub', shown: ['zubbo'], known: '나' }] },
+    { keys: [{ k: 'zubbo', shown: [] }, { k: 'zub', shown: ['zubbo'], known: '나' }] },
+    { keys: [{ k: 'quux', shown: [] }] },
+  ], 'one entry per block with keys, a key two blocks list in both, known where settled');
+});
+
+// The request's bytes include the style guide, which this slice changes on purpose: the claim is
+// for the same guide (here the literal 'STYLE' both sides).
+test('slice K5b: a request of a script with no key is byte for byte main\'s (b0df2aa) for the same input and the same style guide (the guide is part of every request; this slice changes it on purpose), its preview too; with keys the request lists them and its instruction asks a word for each', async () => {
+  const NOKEY = {
+    format: 'u6.npc-bundle/1', archive: 'a', item: 7301, hash: '00000000000d7301', refused: null, actors: [], portraits: [], name: 'Zq8Plain', locale: 'en',
+    narration: { look: [seg('a', 7301, 20, 'a plain test')] },
+    speech: { greeting: [seg('a', 7301, 60, 'Hail, $G. Ask of my @wares.')] },
+    turns: [{ input: { at: 90, kind: 'ask' }, segments: [], topics: [{ at: 0, keywords: ['*'], requires: [], answer: [seg('a', 7301, 100, 'Naught more.')] }] }],
+    traits: [], strings: [{ key: ['a', 7301, 200], table: 200, index: 0, text: 'a cup' }],
+  };
+  const [s] = planOf([NOKEY], { item: { archive: 'a', item: 7301 } }).scripts;
+  assert.deepEqual(s.keys, [], 'a * keyword is no key');
+  const body = bodyOf('gpt-6-astra', systemOf('STYLE'), s.bundle, s.cls, s.units.filter((u) => !u.done));
+  assert.equal(body.length, 1091);
+  assert.equal(hex64(hash64(Buffer.from(body))), '8dfd9fc326baf037', 'main\'s body, byte for byte');
+  const f = await kfixture([NOKEY]);
+  const r = await run([f.bundles, '--item', 'a:7301', '--out', f.out, '--dry-run'], null, { style: 'STYLE' });
+  assert.equal(r.code, 0);
+  assert.equal(await readFile(previewPrinted(r.text), 'utf8'), body, 'the preview is that body');
+  quiet(r.text, [NOKEY]);
+  const keyed = systemOf('STYLE', true);
+  assert.notEqual(keyed, systemOf('STYLE'));
+  assert.ok(keyed.includes('"topics"') && keyed.includes('"keywords": [{"k": "<keyword>", "ko":') && keyed.includes('@{<the English word>}') && keyed.endsWith('\nSTYLE'));
+  await rm(f.dir, { recursive: true });
+});
+
+test('slice K5b: the known words: the pack there\'s (the word most of its scripts give a key, a tie to the first in order, a word the alias gate refuses not counted), else the shared keywords\' answer; a key at least 3 scripts hold is asked once before the scripts (the preview), its word reaching every script\'s request; a key the pack settles is not asked; that request failing is counted and the scripts go on', async () => {
+  const al = (item, keyword, words) => ({ archive: 'a', item, keyword, words });
+  assert.deepEqual([...knownOf({ aliases: [al(1, 'plo', ['술']), al(2, 'plo', ['술']), al(3, 'plo', ['탁주']), al(1, 'zub', ['나']), al(2, 'zub', ['가']), al(3, 'quux', ['abc'])] })],
+    [['plo', '술'], ['zub', '가']]);
+  const items = SHARE_ITEMS;
+  const bundles = sharing();
+  const secrets = [...SHARE_KEYS, '술잔', ...['fl?n', 'mya', 'myb', 'myc'].map(fakeWord)];
+  // `glossary(user, n)` answers the shared keywords' request (the n-th time it is asked).
+  const transport = (glossary) => {
+    const bodies = [];
+    let n = 0;
+    const send = async (body) => {
+      bodies.push(body);
+      const user = userOf(body);
+      if (user.keywords) {
+        n += 1;
+        return glossary(user, n);
+      }
+      const { lines, keywords } = fakeAnswer(user);
+      return answer(lines, keywords);
+    };
+    return { send, bodies };
+  };
+  const f = await kfixture(bundles);
+  const t = transport(() => reply({ keywords: [{ k: 'plo', ko: '술잔' }] }));
+  const r = await run([f.bundles, '--first', '3', '--out', f.out, '--send', '--jobs', '2'], t.send);
+  assert.equal(r.code, 0, 'every line and key given Korean');
+  assert.deepEqual(userOf(t.bodies[0]), { keywords: [{ k: 'plo', shown: ['plod'] }] }, 'the key three scripts hold, asked first and alone');
+  assert.ok(JSON.parse(t.bodies[0]).system.includes('사극체'), 'the guide goes with it');
+  assert.equal(await readFile(previewPrinted(r.text), 'utf8'), t.bodies[0], 'the preview is that request');
+  assert.equal(t.bodies.length, 4, 'then one request per script');
+  for (const body of t.bodies.slice(1)) {
+    const keys = userOf(body).topics.flatMap((x) => x.keys);
+    assert.deepEqual(keys.find((x) => x.k === 'plo'), { k: 'plo', shown: ['plod'], known: '술잔' }, 'its word reaches every script');
+    assert.ok(keys.every((x) => x.k === 'plo' || x.known === undefined), 'no other key settled');
+  }
+  assert.match(r.text, /It sends the owner's game text: 4 requests, .*the keywords at least 3 of the scripts share .*the shared keywords first/);
+  assert.match(r.text, /Shared keywords: 1 asked before the scripts, 1 given a word\./);
+  const pack = await packOf(f.out);
+  assert.deepEqual(pack.aliases.filter((a) => a.keyword === 'plo').map((a) => [a.item, a.words]), items.map((i) => [i, ['술잔']]));
+  assert.ok(pack.converse.some((x) => x.text.includes('@{술잔}')), 'a line highlights it');
+  const coverage = JSON.parse(await readFile(join(f.out, 'coverage.json'), 'utf8'));
+  assert.deepEqual(coverage.glossary, { found: 1, translated: 1, leftEnglish: 0, byReason: {}, unexplained: 0 });
+  assert.deepEqual(coverage.keywords, { found: 8, translated: 8, kept: NONE_KEPT, leftEnglish: 0, byReason: {}, unexplained: 0, dropped: 0 });
+  quiet(r.text, bundles);
+  noneOf(r.text + await readFile(join(f.out, 'coverage.json'), 'utf8'), secrets);
+  // Again on the pack it wrote: the pack settles plo (and fl?n), so nothing is asked first.
+  const t2 = transport(() => assert.fail('no shared keywords asked'));
+  const again = await run([f.bundles, '--first', '3', '--out', f.out, '--send', '--jobs', '2'], t2.send);
+  assert.equal(again.code, 0);
+  assert.equal(t2.bodies.length, 3);
+  for (const body of t2.bodies) {
+    const keys = userOf(body).topics.flatMap((x) => x.keys);
+    assert.equal(keys.find((x) => x.k === 'plo').known, '술잔', 'known from the pack there');
+  }
+  quiet(again.text, bundles);
+  noneOf(again.text + await readFile(join(f.out, 'coverage.json'), 'utf8'), secrets);
+  // A fresh run whose shared keywords' answer never reads: counted; the scripts go without it.
+  const g = await kfixture(bundles);
+  const t3 = transport(() => reply({ nothing: true }));
+  const failed = await run([g.bundles, '--first', '3', '--out', g.out, '--send', '--jobs', '2'], t3.send);
+  assert.equal(failed.code, 0, 'the scripts answered their keys themselves');
+  assert.equal(t3.bodies.filter((b) => userOf(b).keywords).length, 2, 'asked, then once more (the transport\'s)');
+  assert.equal(t3.bodies.filter((b) => userOf(b).npc).length, 3, 'every script still asked');
+  assert.ok(t3.bodies.filter((b) => userOf(b).npc).every((b) => userOf(b).topics.flatMap((x) => x.keys).every((x) => x.known === undefined)), 'with no known word');
+  assert.deepEqual(JSON.parse(await readFile(join(g.out, 'coverage.json'), 'utf8')).glossary, { found: 1, translated: 0, leftEnglish: 1, byReason: { invalid: 1 }, unexplained: 0 });
+  assert.match(failed.text, /Shared keywords: 1 asked before the scripts, 0 given a word \(invalid 1\)\./);
+  quiet(failed.text, bundles);
+  noneOf(failed.text + await readFile(join(g.out, 'coverage.json'), 'utf8'), secrets);
+  await rm(f.dir, { recursive: true });
+  await rm(g.dir, { recursive: true });
+});
+
+test('slice K5b: the alias gate: a word is 1 to 8 Hangul syllables (no ASCII, no space, not empty); two keys whose words collide (a word of the input the engine takes for both: the word, or it with one particle) keep them only when their first block is the same, else both are refused; the glossary needs that in every script holding both', () => {
+  assert.equal(wordGate('한말'), null);
+  assert.equal(wordGate('가'.repeat(8)), null);
+  for (const [w, why] of [['', 'empty'], [null, 'empty'], ['abc', 'characters'], ['술 잔', 'characters'], ['한a', 'characters'], ['ㅎ말', 'characters'], ['가'.repeat(9), 'long']]) {
+    assert.equal(wordGate(w), why, JSON.stringify(w));
+  }
+  const compatible = compatibleOf([['kah', 'kai'], ['kaf'], ['kag'], ['p', 'q'], ['r']]);
+  const { words, failed } = aliasesOf(['kah', 'kai', 'kaf', 'kag', 'p', 'q', 'r'], [
+    { k: 'kah', ko: '한말' }, { k: 'kai', ko: '한말' }, { k: 'kaf', ko: '같은말' }, { k: 'kag', ko: '같은말' },
+    { k: 'p', ko: '셋' }, { k: 'q', ko: '셋' }, { k: 'r', ko: '셋' }, { k: 'other', ko: '헛말' },
+  ], compatible);
+  assert.deepEqual(Object.fromEntries(words), { kah: '한말', kai: '한말' }, 'one block\'s keys share a word');
+  assert.deepEqual(Object.fromEntries(failed), { kaf: 'shared', kag: 'shared', p: 'shared', q: 'shared', r: 'shared' },
+    'two blocks sharing a word: every key with it refused');
+  // F1: a collision is what the engine's matcher takes for both, not only the same word.
+  assert.ok(collide('달', '달') && collide('달', '달이') && collide('달이', '달'), 'the word, and it with a particle');
+  assert.ok(collide('가', '가이여') && collide('가', '가으'), 'with a particle of two syllables; both with one (가으로)');
+  assert.ok(!collide('달', '별') && !collide('달', '달빛') && !collide('달이', '달가'));
+  const zp = (topics, given) => {
+    const r = aliasesOf(['zorb', 'plim'], given, compatibleOf(topics));
+    return [Object.fromEntries(r.words), Object.fromEntries(r.failed)];
+  };
+  assert.deepEqual(zp([['zorb'], ['plim']], [{ k: 'zorb', ko: '달' }, { k: 'plim', ko: '달이' }]), [{}, { zorb: 'shared', plim: 'shared' }],
+    'typing 달이 would reach zorb\'s block through 달 and 이');
+  assert.deepEqual(zp([['zorb'], ['plim']], [{ k: 'zorb', ko: '달' }, { k: 'plim', ko: '별' }]), [{ zorb: '달', plim: '별' }, {}]);
+  // F2: colliding words are kept only when the two keys' first block is the same.
+  assert.deepEqual([...firstBlocksOf([['zorb'], ['zorb', 'plim']])], [['zorb', 0], ['plim', 1]]);
+  assert.deepEqual(zp([['zorb'], ['zorb', 'plim']], [{ k: 'zorb', ko: '달' }, { k: 'plim', ko: '달' }]), [{}, { zorb: 'shared', plim: 'shared' }],
+    'block 1 lists zorb alone: 달 reaches it, while English plim reaches block 2');
+  assert.deepEqual(zp([['zorb', 'plim'], ['plim']], [{ k: 'zorb', ko: '달' }, { k: 'plim', ko: '달' }]), [{ zorb: '달', plim: '달' }, {}],
+    'their first block the same');
+  // The glossary: the same first block in every chosen script that holds both keys.
+  const scripts = (lists) => planOf(lists.map((topics, i) => kbundle('a', 7400 + i, `00000000001a740${i}`, `${SENTINEL}G${i}`,
+    topics.map((keys) => [keys, 'Naught.']))), { first: lists.length }).scripts;
+  const same = [[['zorb', 'plim']], [['zorb', 'plim'], ['zorb']], [['plim', 'zorb']]];
+  assert.equal(glossaryOf(scripts(same)).compatible('zorb', 'plim'), true);
+  assert.equal(glossaryOf(scripts([...same, [['zorb'], ['zorb', 'plim']]])).compatible('zorb', 'plim'), false, 'one script differs');
+  assert.equal(glossaryOf(scripts([[['zorb']], [['zorb']], [['zorb']], [['plim']]])).compatible('zorb', 'plim'), true, 'no script holds both');
+});
+
+test('slice K5b: the tool\'s particles are the engine\'s (crates/u6-core/src/converse/run.rs PARTICLES), in their order', async () => {
+  const source = await readFile(join(dirname(TOOL), '..', '..', 'crates', 'u6-core', 'src', 'converse', 'run.rs'), 'utf8');
+  const m = /pub\(crate\) const PARTICLES: \[&str; (\d+)\] = \[([^\]]*)\];/.exec(source);
+  assert.ok(m, 'the engine\'s list is found');
+  const engine = [...m[2].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
+  assert.equal(engine.length, Number(m[1]));
+  assert.deepEqual(PARTICLES, engine);
+});
+
+test('slice K5b: the run gate with a script\'s words: each @{…} the Korean word of the key its English @ word hits first, or that English word where the key has none or it hits no key, the particle after the brace; a table string the same; without words today\'s English rule', () => {
+  const keyed = { keys: ['plo', 'fl?n', 'zub'], words: new Map([['plo', '술'], ['fl?n', '과자']]) };
+  assert.deepEqual(braceWordsWanted('My @Plod, @flan, @zubbo and @other.', keyed), [['술'], ['과자'], ['zubbo'], ['other']]);
+  const ok = [
+    ['My @plod.', '내 @{술}이오.'],
+    ['My @Plod.', '내 @{술}을 드시오.'],
+    ['A @flan or @plod?', '@{술}{이/가} 아니면 @{과자}?'],
+    ['The @zubbo.', '@{zubbo}이오.'],
+    ['Ask @other.', '@{other}에게 묻소.'],
+  ];
+  for (const [en, ko] of ok) assert.equal(gate(en, ko, keyed), null, `${en} -> ${ko}`);
+  const bad = [
+    ['My @plod.', '내 @{plod}이오.', 'the English word where the key has a word'],
+    ['My @plod.', '내 술(@{plod})이오.', 'K1\'s form'],
+    ['My @plod.', '내 @{과자}이오.', 'another key\'s word'],
+    ['My @plod.', '내 @{술이}오.', 'the particle inside the brace'],
+    ['My @plod.', '내 @{술{이/가}} 있소.', 'a marker inside the brace'],
+    ['The @zubbo.', '@{나}이오.', 'a Korean word where the key has none'],
+  ];
+  for (const [en, ko, what] of bad) assert.equal(gate(en, ko, keyed), 'keywords', what);
+  assert.equal(gate('My @plod.', '내 @{plod}이오.'), null, 'no words: the English word');
+  assert.equal(gate('My @plod.', '내 @{술}이오.'), 'keywords', 'no words: not a Korean one');
+  const table = { text: 'a @plod cup', copied: false, capacity: null };
+  assert.equal(tableGate(table, '@{술} 한 잔', keyed), null, 'a table string with the Korean word');
+  assert.equal(tableGate(table, '@{plod} 한 잔', keyed), 'keywords', 'not with the English one');
+  // F4: a key with several words (a pack written by hand): any of them, each brace its own.
+  const many = { keys: ['ambo', 'brix'], words: new Map([['ambo', ['가', '나']], ['brix', ['다']]]) };
+  assert.deepEqual(braceWordsWanted('@ambo @brix', many), [['가', '나'], ['다']]);
+  for (const ko of ['@{가}에게 묻소.', '@{나}에게 묻소.']) assert.equal(gate('Ask of @ambo.', ko, many), null, ko);
+  assert.equal(gate('Ask of @ambo.', '@{다}에게 묻소.', many), 'keywords', 'not another key\'s');
+  assert.equal(gate('The @ambo and @ambo, @brix.', '@{나}와 @{가}, @{다}.', many), null, 'two of one key\'s words');
+  assert.equal(gate('The @ambo and @brix.', '@{다}와 @{가}.', many), null, 'in any order');
+  assert.equal(gate('The @ambo and @ambo.', '@{다}와 @{가}.', many), 'keywords');
+});
+
+test('slice K5b: the alias gate\'s refusals (ASCII, too long, empty, a space, two blocks one word, missing, given twice) are counted by reason, by hashes only, while every line lands (English braces for those keys); a table string with an aliased key lands with its word; a line asked again lists the keys with a word, each known', async () => {
+  const keys = ['kab', 'kac', 'kad', 'kae', 'kaf', 'kag', 'kaj', 'kak'];
+  const b = kbundle('a', 7801, '0000000000107801', `${SENTINEL}Refusals`, [
+    ...keys.map((k) => [[k], `Thy @${k}.`]),
+    [['kah', 'kai'], 'Thy @kah or @kai.'],
+    [['kah'], 'The @kah, once more.*'],
+  ], ['a @kah cup']);
+  const given = [
+    { k: 'kab', ko: 'abc' }, { k: 'kac', ko: '가'.repeat(9) }, { k: 'kad', ko: '' }, { k: 'kae', ko: '술 잔' },
+    { k: 'kaf', ko: '같은말' }, { k: 'kag', ko: '같은말' }, { k: 'kah', ko: '한말' }, { k: 'kai', ko: '한말' },
+    { k: 'kak', ko: '하나' }, { k: 'kak', ko: '둘' }, { k: 'zzz', ko: '헛말' },
+  ];
+  const kept = new Map([['kah', '한말'], ['kai', '한말']]);
+  const bodies = [];
+  const send = async (body) => {
+    bodies.push(body);
+    const user = userOf(body);
+    const lines = user.lines.map((l) => ({ n: l.n, ko: fakeKo(l.en, kept) }));
+    if (bodies.length === 1) lines.find((l, i) => user.lines[i].en.endsWith('*')).ko = lines.find((l, i) => user.lines[i].en.endsWith('*')).ko.replace('*', '');
+    return answer(lines, given);
+  };
+  const f = await kfixture([b]);
+  const r = await run([f.bundles, '--item', 'a:7801', '--out', f.out, '--send'], send);
+  assert.equal(r.code, 3, 'written, keys left English');
+  assert.equal(bodies.length, 2, 'the script, then the failed line again');
+  const retry = userOf(bodies[1]);
+  assert.equal(retry.lines.length, 1);
+  assert.deepEqual(retry.topics, [
+    { keys: [{ k: 'kah', shown: ['kah'], known: '한말' }, { k: 'kai', shown: ['kai'], known: '한말' }] },
+    { keys: [{ k: 'kah', shown: ['kah'], known: '한말' }] },
+  ], 'only the keys with a word, each with it');
+  const pack = await packOf(f.out);
+  assert.equal(pack.converse.length, unitsOf(b).length, 'every line landed');
+  assert.deepEqual(pack.tables.map((x) => x.text), [fakeKo('a @kah cup', kept)]);
+  assert.ok(pack.tables[0].text.includes('@{한말}'));
+  assert.deepEqual(pack.aliases, [
+    { archive: 'a', item: 7801, keyword: 'kah', words: ['한말'] }, { archive: 'a', item: 7801, keyword: 'kai', words: ['한말'] },
+  ]);
+  const coverage = JSON.parse(await readFile(join(f.out, 'coverage.json'), 'utf8'));
+  assert.deepEqual(coverage.keywords, {
+    found: 10, translated: 2, kept: NONE_KEPT, leftEnglish: 8, byReason: { characters: 2, empty: 1, long: 1, missing: 1, repeated: 1, shared: 2 }, unexplained: 0,
+    dropped: 0,
+  });
+  const left = coverage.left.filter((x) => x.category === 'keywords');
+  assert.deepEqual(left.map((x) => [x.hash, x.reason]).sort(), [
+    ['kab', 'characters'], ['kac', 'long'], ['kad', 'empty'], ['kae', 'characters'], ['kaf', 'shared'], ['kag', 'shared'], ['kaj', 'missing'], ['kak', 'repeated'],
+  ].map(([k, why]) => [hashOf(k), why]).sort());
+  assert.ok(left.every((x) => x.script === b.hash));
+  assert.ok(!keys.some((k) => JSON.stringify(coverage).includes(`"${k}"`)), 'no keyword in the receipt');
+  assert.match(r.text, /Keywords: 10 found, 2 given a Korean word, 8 left English \(characters 2, empty 1, long 1, missing 1, repeated 1, shared 2\)\./);
+  quiet(r.text, [b]);
+  noneOf(r.text + await readFile(join(f.out, 'coverage.json'), 'utf8'), [...keys, 'kah', 'kai', 'zzz', ...given.map((x) => x.ko)]);
+  await rm(f.dir, { recursive: true });
+});
+
+// The parts of a pack of every kind but aliases (the same inputs main's packBytes was given).
+const PARTS = {
+  base: '0123456789abcdef',
+  runs: [{ archive: 'b', item: 2, offset: 9, len: 4, hash: '0000000000000001', text: '나무' }, { archive: 'a', item: 5, offset: 3, len: 4, hash: '0000000000000002', text: '일(@{job})' }],
+  tables: [{ archive: 'a', item: 5, offset: 40, len: 3, hash: '0000000000000003', capacity: 9, text: '잔' }, { archive: 'a', item: 5, offset: 30, len: 3, hash: '0000000000000004', capacity: null, text: '컵' }],
+  strings: [{ hash: '00000000000000f5', len: 4, text: '찾기' }],
+  look: [{ index: 7, len: 3, hash: '0000000000000006', text: '돌' }],
+  books: [{ index: 2, len: 5, hash: '0000000000000007', text: '책이오.' }],
+  u: [{ hash: '0000000000000008', len: 5, text: '%s님' }],
+};
+
+// The pack whose JSON is crates/u6-core/src/locale/tool-pack.json (the engine's test reads it and
+// writes it back): two scripts, a table string, keyword aliases given out of order.
+const TOOL_PACK = {
+  tool: 'tools/i18n/translate.mjs/5',
+  base: fingerprint([{ archive: 'a', item: 3, hash: '00000000000000a3' }, { archive: 'b', item: 7, hash: '00000000000000b7' }]),
+  runs: [
+    { archive: 'b', item: 7, offset: 12, len: 9, hash: '00000000000000c1', text: '그대의 @{주브}.' },
+    { archive: 'a', item: 3, offset: 4, len: 13, hash: '00000000000000c2', text: '내 @{술}을 드시오.' },
+  ],
+  tables: [{ archive: 'a', item: 3, offset: 40, len: 8, hash: '00000000000000c3', capacity: 30, text: '@{과자} 하나.' }],
+  aliases: [
+    { archive: 'b', item: 7, keyword: 'zub', words: ['주브'] },
+    { archive: 'a', item: 3, keyword: 'plo', words: ['술'] },
+    { archive: 'a', item: 3, keyword: 'fl?n', words: ['과자'] },
+  ],
+};
+const TOOL_PACK_FILE = join(dirname(TOOL), '..', '..', 'crates', 'u6-core', 'src', 'locale', 'tool-pack.json');
+
+test('slice K5b: the pack\'s aliases in the engine\'s form: by script then keyword, {archive, item, keyword, words}, read back by the reader; a pack without aliases is byte for byte main\'s; crates/u6-core/src/locale/tool-pack.json is this writer\'s bytes', async () => {
+  const k4 = { ...PARTS, tool: 'tools/i18n/translate.mjs/4' };
+  for (const pack of [packBytes(k4), packBytes({ ...k4, aliases: [] })]) {
+    assert.equal(pack.length, 772);
+    assert.equal(hex64(hash64(pack)), '5a35b5cc3dd12650', 'main\'s pack (b0df2aa), byte for byte: no aliases part');
+  }
+  const bytes = packBytes(TOOL_PACK);
+  const json = JSON.parse(bytes.subarray(5).toString('utf8'));
+  assert.deepEqual(Object.keys(json), ['format', 'language', 'tool', 'base', 'converse', 'tables', 'aliases']);
+  assert.deepEqual(json.aliases.map((a) => Object.keys(a)), [0, 1, 2].map(() => ['archive', 'item', 'keyword', 'words']));
+  assert.deepEqual(json.aliases.map((a) => `${a.archive}${a.item}:${a.keyword}`), ['a3:fl?n', 'a3:plo', 'b7:zub'], 'by script, then keyword');
+  const read = readPack(bytes);
+  assert.deepEqual(read.aliases, json.aliases);
+  assert.deepEqual(packBytes({ ...TOOL_PACK, runs: read.converse, tables: read.tables, aliases: read.aliases }), bytes, 'written back the same');
+  assert.deepEqual(bytes.subarray(5), await readFile(TOOL_PACK_FILE), 'the committed file is these bytes (after the magic)');
+});
+
+test('slice K5b: the reader takes the aliases part as the engine does (ASCII words too) and refuses each entry of another form, a script its lines do not name, a key twice, a member twice inside it, with the part\'s sentence; a part given twice at the root is the shape\'s', () => {
+  const runA3 = { archive: 'a', item: 3, offset: 4, len: 2, hash: '0000000000000001', text: '가' };
+  const head = { format: PACK_FORMAT, language: 'ko', tool: 't/1', base: { converse: fingerprint([]) }, converse: [runA3] };
+  const file = (aliases) => Buffer.from(`U6LP\n${JSON.stringify({ ...head, aliases })}`);
+  const raw = (text) => Buffer.from(`U6LP\n${JSON.stringify(head).slice(0, -1)},"aliases":${text}}`);
+  const entry = (archive, item, keyword, words) => ({ archive, item, keyword, words });
+  const good = entry('a', 3, 'name', ['이름', 'na?e1']);
+  assert.deepEqual(readPack(file([good])).aliases, [good]);
+  assert.deepEqual(readPack(raw(JSON.stringify([good]))).aliases, [good]);
+  assert.deepEqual(readPack(packBytes({ base: fingerprint([]), runs: [runA3] })).aliases, [], 'none when left out');
+  const nine = '가'.repeat(9);
+  for (const bad of [
+    [entry('a', 3, 'Name', ['이름'])], [entry('a', 3, 'na,me', ['이름'])], [entry('a', 3, '', ['이름'])],
+    [entry('a', 3, 'name', [])], [entry('a', 3, 'name', ['가', '나', '다', '라', '마'])], [entry('a', 3, 'name', [nine])],
+    [entry('a', 3, 'name', ['이 름'])], [entry('a', 3, 'name', ['ㅇ름'])], [entry('a', 3, 'name', [''])],
+    [entry('c', 3, 'name', ['이름'])], [entry('a', 4, 'name', ['이름'])], [entry('a', 70000, 'name', ['이름'])], [good, good],
+    [{ archive: 'a', item: 3, keyword: 'name' }], [{ ...good, x: 1 }], null, { name: ['이름'] },
+  ]) {
+    assert.throws(() => readPack(file(bad)), (err) => err instanceof PackReadError && err.message === ALIASES_PART, JSON.stringify(bad));
+  }
+  for (const twice of [
+    '[{"archive":"a","item":3,"keyword":"name","words":[],"words":["이름"]}]',
+    '[{"archive":"a","item":3,"keyword":"Name","keyword":"name","words":["이름"]}]',
+  ]) {
+    assert.ok(duplicateMembers(`{"aliases":${twice}}`));
+    assert.throws(() => readPack(raw(twice)), (err) => err instanceof PackReadError && err.message === ALIASES_PART, twice);
+  }
+  const root = Buffer.from(`U6LP\n${JSON.stringify({ ...head, aliases: [good] }).slice(0, -1)},"aliases":[]}`);
+  assert.throws(() => readPack(root), (err) => err instanceof PackReadError && err.message === 'its contents are not those of a Korean pack');
+});
+
+test('slice K5b: the merge: a script answered again has its new words replace the old for the same keys, its other keys\' and the other scripts\' aliases staying; an older line of it that no longer passes is dropped and counted; a script whose lines all fail keeps no aliases (no-base); a strings-only run keeps them all', async () => {
+  const [X, Y, Z] = [7701, 7702, 7703];
+  const bundles = [
+    kbundle('a', X, '0000000000117701', `${SENTINEL}MergeX`, [[['plo'], 'Try my @plod.'], [['plo'], 'Ask of my @plod again.'], [['quux'], 'Naught here.']]),
+    kbundle('a', Y, '0000000000117702', `${SENTINEL}MergeY`, [[['plo'], 'Thy @plod, friend.']]),
+    kbundle('a', Z, '0000000000117703', `${SENTINEL}MergeZ`, [[['zed'], 'Never a @zed.']]),
+  ];
+  const strings = { format: 'u6.string-bundle/1', locale: 'en', strings: [{ hash: hashOf('Naught is there.'), len: 16, kind: 'message', text: 'Naught is there.' }] };
+  const f = await kfixture(bundles, strings);
+  // The first run: X and Y take 술 for plo, X 무엇 for quux; every line of Z fails.
+  const first = async (body) => {
+    const user = userOf(body);
+    if (user.npc.name.endsWith('MergeZ')) return answer(user.lines.map((l) => ({ n: l.n, ko: '' })), [{ k: 'zed', ko: '제드' }]);
+    const { lines, keywords } = fakeAnswer(user, (key) => ({ plo: '술', quux: '무엇' })[key.k]);
+    return answer(lines, keywords);
+  };
+  const one = await run([f.bundles, '--first', '3', '--out', f.out, '--send'], first);
+  assert.equal(one.code, 3);
+  const pack1 = await packOf(f.out);
+  const alias = (item, keyword, word) => ({ archive: 'a', item, keyword, words: [word] });
+  assert.deepEqual(pack1.aliases, [alias(X, 'plo', '술'), alias(X, 'quux', '무엇'), alias(Y, 'plo', '술')], 'none for Z, whose lines are not in the pack');
+  const cov1Text = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  const cov1 = JSON.parse(cov1Text);
+  assert.deepEqual(cov1.keywords.byReason, { 'no-base': 1 });
+  const again = 'Ask of my @plod again.';
+  assert.ok(pack1.converse.find((r) => r.hash === hashOf(again)).text.includes('@{술}'));
+  // The second run, X alone: plo takes 탁주, quux a word the gate refuses, and the second plo line fails.
+  const bodies = [];
+  const second = async (body) => {
+    bodies.push(body);
+    const user = userOf(body);
+    const { lines, keywords } = fakeAnswer(user, (key) => ({ plo: '탁주', quux: 'abc' })[key.k]);
+    lines.forEach((l, i) => { if (user.lines[i].en === again) l.ko = ''; });
+    return answer(lines, keywords);
+  };
+  const two = await run([f.bundles, '--item', `a:${X}`, '--out', f.out, '--send'], second);
+  assert.equal(two.code, 3);
+  assert.deepEqual(userOf(bodies[0]).topics.flatMap((x) => x.keys).map((x) => [x.k, x.known]), [['plo', '술'], ['plo', '술'], ['quux', '무엇']],
+    'known from the pack there (plo in both of its blocks)');
+  const pack2 = await packOf(f.out);
+  assert.deepEqual(pack2.aliases, [alias(X, 'plo', '탁주'), alias(X, 'quux', '무엇'), alias(Y, 'plo', '술')], 'plo replaced; quux and Y stay');
+  assert.ok(!pack2.converse.some((r) => r.item === X && r.hash === hashOf(again)), 'the older line with the old word dropped');
+  assert.ok(pack2.converse.find((r) => r.item === X && r.hash === hashOf('Try my @plod.')).text.includes('@{탁주}'));
+  assert.deepEqual(pack2.converse.filter((r) => r.item === Y), pack1.converse.filter((r) => r.item === Y), 'Y\'s lines as they were');
+  const cov2Text = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  const cov2 = JSON.parse(cov2Text);
+  assert.equal(cov2.keywords.dropped, 1);
+  assert.deepEqual([cov2.keywords.kept, cov2.keywords.leftEnglish], [{ count: 1, byReason: { characters: 1 }, keys: [{ script: bundles[0].hash, hash: hashOf('quux'), reason: 'characters' }] }, 0],
+    'quux\'s new word refused: it keeps 무엇, so it is kept, not left English');
+  assert.deepEqual(cov2.left.filter((x) => x.hash === hashOf(again)).map((x) => x.reason).sort(), ['empty', 'keywords'], 'this run\'s failure, and the old line dropped');
+  assert.match(two.text, /Keywords: 2 found, 1 given a Korean word, 1 kept the pack's word \(characters 1\), 0 left English; 1 lines the pack had left English again/);
+  // A strings-only run: the conversation part and the aliases as they were.
+  const third = async (body) => answer(userOf(body).strings.map((l) => ({ n: l.n, ko: '아무것도 없소.' })));
+  const three = await run(['--strings', f.strings, '--only', 'strings', '--out', f.out, '--send'], third);
+  assert.equal(three.code, 0);
+  const pack3 = await packOf(f.out);
+  assert.deepEqual([pack3.aliases, pack3.converse, pack3.base], [pack2.aliases, pack2.converse, pack2.base]);
+  assert.equal(pack3.strings.length, 1);
+  quiet(one.text + two.text + three.text, bundles);
+  noneOf([one.text, two.text, three.text, cov1Text, cov2Text, await readFile(join(f.out, 'coverage.json'), 'utf8')].join('\n'),
+    ['plo', 'plod', 'quux', 'zed', '술', '무엇', '탁주', 'abc', '제드']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('slice K5b: a new word is checked against the words the pack keeps for the script\'s other keys: one colliding with a kept word of another block is refused (shared), its line with that word is not taken, the kept key keeps its word, and the merged pack holds no two colliding words; a key that keeps its old word is counted kept, not left English, and alone does not make the run exit 3', async () => {
+  const V = 7901;
+  const b = kbundle('a', V, '0000000000127901', `${SENTINEL}KeptV`, [[['zarp'], 'Ask of the @zarp.'], [['vexl'], 'Ask of the @vexl.']]);
+  const [s] = planOf([b], { item: { archive: 'a', item: V } }).scripts;
+  const kept = new Map([['zarp', ['가']]]);
+  const unit = (given) => {
+    const r = aliasesOf(s.keys, given, s.compatible, kept);
+    return [Object.fromEntries(r.words), Object.fromEntries(r.failed)];
+  };
+  assert.deepEqual(unit([{ k: 'vexl', ko: '가' }]), [{}, { zarp: 'missing', vexl: 'shared' }]);
+  assert.deepEqual(unit([{ k: 'vexl', ko: '가이' }]), [{}, { zarp: 'missing', vexl: 'shared' }], 'the kept word with a particle');
+  assert.deepEqual(unit([{ k: 'zarp', ko: '나' }, { k: 'vexl', ko: '가' }]), [{ zarp: '나', vexl: '가' }, {}], 'a kept word this answer replaces does not count');
+  assert.deepEqual(unit([{ k: 'zarp', ko: '나' }, { k: 'zarp', ko: '다' }, { k: 'vexl', ko: '가' }]), [{}, { zarp: 'repeated', vexl: 'shared' }],
+    'a key refused here keeps its old word, which the others are checked against');
+  const f = await kfixture([b]);
+  // The first run: zarp takes 가; vexl's word is refused (empty), its line English.
+  const first = async (body) => {
+    const { lines, keywords } = fakeAnswer(userOf(body), (key) => ({ zarp: '가' })[key.k]);
+    return answer(lines, keywords);
+  };
+  const one = await run([f.bundles, '--item', `a:${V}`, '--out', f.out, '--send'], first);
+  assert.equal(one.code, 3);
+  assert.deepEqual((await packOf(f.out)).aliases, [{ archive: 'a', item: V, keyword: 'zarp', words: ['가'] }]);
+  // The second run: the answer gives only vexl, 가, and writes 가 in both lines.
+  const bodies = [];
+  const second = async (body) => {
+    bodies.push(body);
+    const user = userOf(body);
+    return answer(user.lines.map((l) => ({ n: l.n, ko: fakeKo(l.en, new Map([['zarp', '가'], ['vexl', '가']])) })), [{ k: 'vexl', ko: '가' }]);
+  };
+  const two = await run([f.bundles, '--item', `a:${V}`, '--out', f.out, '--send'], second);
+  assert.equal(two.code, 3);
+  assert.deepEqual(userOf(bodies[0]).topics, [{ keys: [{ k: 'zarp', shown: ['zarp'], known: '가' }] }, { keys: [{ k: 'vexl', shown: ['vexl'] }] }]);
+  assert.deepEqual(userOf(bodies[1]).topics, [{ keys: [{ k: 'zarp', shown: ['zarp'], known: '가' }] }], 'asked again: the key with a word');
+  const pack = await packOf(f.out);
+  assert.deepEqual(pack.aliases, [{ archive: 'a', item: V, keyword: 'zarp', words: ['가'] }], 'vexl refused; zarp keeps its word');
+  const vexl = pack.converse.find((r) => r.hash === hashOf('Ask of the @vexl.'));
+  assert.ok(vexl.text.includes('@{vexl}') && !vexl.text.includes('@{가}'), 'the line with 가 for vexl not taken: the English one stays');
+  assert.ok(pack.converse.find((r) => r.hash === hashOf('Ask of the @zarp.')).text.includes('@{가}'));
+  for (const a of pack.aliases) {
+    for (const o of pack.aliases) {
+      if (a !== o && a.archive === o.archive && a.item === o.item) assert.ok(!a.words.some((w) => o.words.some((v) => collide(w, v))), 'no two colliding words');
+    }
+  }
+  const coverage = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  const kw = JSON.parse(coverage).keywords;
+  assert.deepEqual(kw, {
+    found: 2, translated: 0, kept: { count: 1, byReason: { missing: 1 }, keys: [{ script: b.hash, hash: hashOf('zarp'), reason: 'missing' }] },
+    leftEnglish: 1, byReason: { shared: 1 }, unexplained: 0, dropped: 0,
+  }, 'zarp keeps 가: kept, not left English; vexl ends with no word: left');
+  assert.deepEqual(JSON.parse(coverage).left.filter((x) => x.category === 'keywords').map((x) => [x.hash, x.reason]), [[hashOf('vexl'), 'shared']]);
+  assert.deepEqual(JSON.parse(coverage).units.byReason, { keywords: 1 });
+  assert.match(two.text, /Keywords: 2 found, 0 given a Korean word, 1 kept the pack's word \(missing 1\), 1 left English \(shared 1\)\./);
+  // A third run: vexl takes 나, zarp is left out again but keeps 가; every line lands, so the run
+  // is done (exit 0): a key that keeps its word is no key left English.
+  const third = async (body) => {
+    const user = userOf(body);
+    return answer(user.lines.map((l) => ({ n: l.n, ko: fakeKo(l.en, new Map([['zarp', '가'], ['vexl', '나']])) })), [{ k: 'vexl', ko: '나' }]);
+  };
+  const three = await run([f.bundles, '--item', `a:${V}`, '--out', f.out, '--send'], third);
+  assert.equal(three.code, 0, 'done: nothing left English');
+  const coverage3 = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  assert.deepEqual(JSON.parse(coverage3).keywords, {
+    found: 2, translated: 1, kept: { count: 1, byReason: { missing: 1 }, keys: [{ script: b.hash, hash: hashOf('zarp'), reason: 'missing' }] },
+    leftEnglish: 0, byReason: {}, unexplained: 0, dropped: 0,
+  });
+  assert.deepEqual((await packOf(f.out)).aliases, [
+    { archive: 'a', item: V, keyword: 'vexl', words: ['나'] }, { archive: 'a', item: V, keyword: 'zarp', words: ['가'] },
+  ]);
+  assert.match(three.text, /Keywords: 2 found, 1 given a Korean word, 1 kept the pack's word \(missing 1\), 0 left English\./);
+  quiet(one.text + two.text + three.text, [b]);
+  noneOf([one.text, two.text, three.text, coverage, coverage3].join('\n'), ['zarp', 'vexl', '가', '가이', '나']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('slice K5b: a key the pack gives several words (a pack written by hand) takes any of them: its line showing the second word is kept when another key\'s word changes; the request\'s known is its first word', async () => {
+  const W = 7951;
+  const b = kbundle('a', W, '0000000000137951', `${SENTINEL}ManyW`, [[['ambo'], 'The @ambo here.'], [['ambo'], 'Ask of @ambo again.'], [['brix'], 'And @brix.']]);
+  const at = (en) => unitsOf(b).find((u) => u.text === en);
+  const line = (en, text) => ({ archive: 'a', item: W, offset: at(en).offset, len: latin1(en).length, hash: hashOf(en), text });
+  const f = await kfixture([b]);
+  await mkdir(f.out, { recursive: true, mode: 0o700 });
+  await writeFile(join(f.out, 'ko.u6lp'), packBytes({
+    base: fingerprint([{ archive: 'a', item: W, hash: b.hash }]),
+    runs: [line('The @ambo here.', '@{가} 여기 있소.'), line('Ask of @ambo again.', '@{나}에게 다시 묻소.'), line('And @brix.', '그리고 @{다}.')],
+    aliases: [{ archive: 'a', item: W, keyword: 'ambo', words: ['가', '나'] }, { archive: 'a', item: W, keyword: 'brix', words: ['다'] }],
+  }), { mode: 0o600 });
+  // The answer: brix takes 라, ambo none (it keeps both its words); the second ambo line fails.
+  const bodies = [];
+  const send = async (body) => {
+    bodies.push(body);
+    const user = userOf(body);
+    const lines = user.lines.map((l) => ({ n: l.n, ko: l.en === 'Ask of @ambo again.' ? '' : fakeKo(l.en, new Map([['ambo', '가'], ['brix', '라']])) }));
+    return answer(lines, [{ k: 'brix', ko: '라' }]);
+  };
+  const r = await run([f.bundles, '--item', `a:${W}`, '--out', f.out, '--send'], send);
+  assert.equal(r.code, 3);
+  assert.deepEqual(userOf(bodies[0]).topics.flatMap((x) => x.keys).map((x) => [x.k, x.known]), [['ambo', '가'], ['ambo', '가'], ['brix', '다']], 'known: the first word');
+  const pack = await packOf(f.out);
+  assert.deepEqual(pack.aliases, [{ archive: 'a', item: W, keyword: 'ambo', words: ['가', '나'] }, { archive: 'a', item: W, keyword: 'brix', words: ['라'] }]);
+  assert.equal(pack.converse.find((x) => x.hash === hashOf('Ask of @ambo again.')).text, '@{나}에게 다시 묻소.', 'the line with ambo\'s second word kept');
+  assert.ok(pack.converse.find((x) => x.hash === hashOf('And @brix.')).text.includes('@{라}'));
+  const coverage = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  assert.equal(JSON.parse(coverage).keywords.dropped, 0, 'nothing dropped');
+  quiet(r.text, [b]);
+  noneOf(r.text + coverage, ['ambo', 'brix', '가', '나', '다', '라']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('slice K5b: with the shared keywords\' request first (three scripts share a key), --dry-run, no terminal without --send, and on a terminal a typed no, Ctrl-C and SIGINT send nothing: the counting transport is never called, before the answer either; the preview is that request', async () => {
+  const bundles = sharing();
+  const wants = { 'dry-run': 0, 'no terminal': 1, no: 1, 'ctrl-c': 130, sigint: 130 };
+  for (const how of Object.keys(wants)) {
+    const f = await kfixture(bundles);
+    const calls = [];
+    const send = async (body) => {
+      calls.push(body);
+      return reply({ keywords: [] });
+    };
+    const out = output();
+    const signals = new EventEmitter();
+    const args = [f.bundles, '--first', '3', '--out', f.out, '--jobs', '2'];
+    let code;
+    if (how === 'dry-run' || how === 'no terminal') {
+      code = await main(how === 'dry-run' ? [...args, '--dry-run'] : args, { transport: send, stdout: out, isTTY: false, signals });
+    } else {
+      const stdin = terminal();
+      const running = main(args, { transport: send, stdout: out, isTTY: true, stdin, signals });
+      await prompted(out);
+      assert.equal(calls.length, 0, `${how}: nothing sent before the answer`);
+      if (how === 'sigint') signals.emit('SIGINT');
+      else stdin.write(how === 'no' ? 'no\r' : '\x03');
+      code = await running;
+    }
+    assert.equal(code, wants[how], how);
+    assert.equal(calls.length, 0, `${how}: the transport never called`);
+    assert.deepEqual(userOf(await readFile(previewPrinted(out.text), 'utf8')), { keywords: [{ k: 'plo', shown: ['plod'] }] }, `${how}: the preview`);
+    assert.ok(!existsSync(join(f.out, 'ko.u6lp')) && !existsSync(join(f.out, 'coverage.json')), `${how}: nothing written`);
+    quiet(out.text, bundles);
+    noneOf(out.text, SHARE_KEYS);
+    await rm(f.dir, { recursive: true });
+  }
 });

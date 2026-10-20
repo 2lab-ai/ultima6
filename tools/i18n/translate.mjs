@@ -2,10 +2,11 @@
 // The Korean pack's translator (spec 08 Design 6; slice K1: conversation runs; slice K2: the
 // conversations' table strings and the game's own messages; slice K3: the object names and the
 // books and signs; slice K4: the u program's opening, story, gypsy, character creation and
-// transfer). It reads the NPC bundles the page downloads (ultima6-npc-bundles.json, one
-// u6.npc-bundle/1 per conversation script, each text segment keyed to its run, each table string
-// to its offset), and the game strings the page's second export writes (ultima6-strings.json,
-// u6.string-bundle/1: the executable's strings the engine shows, each keyed by its hash, its
+// transfer; slice K5b: the keyword aliases). It reads the NPC bundles the page downloads
+// (ultima6-npc-bundles.json, one u6.npc-bundle/1 per conversation script, each text segment keyed
+// to its run, each table string to its offset), and the game strings the page's second export
+// writes (ultima6-strings.json, u6.string-bundle/1: the executable's strings the engine shows,
+// each keyed by its hash, its
 // `texts`: the object names of look.lzd and the books and signs of book.dat, each keyed by its
 // index with its length and hash, and its `u`: the strings the u program prints, each keyed by
 // its hash, with its kind, the place u prints it), translates what is chosen into archaic Korean
@@ -17,8 +18,8 @@
 //                        [{archive, item, offset, len, hash, text}], and when there are any
 //                        tables: [{archive, item, offset, len, hash, capacity?, text}],
 //                        strings: [{hash, len, text}], look: [{index, len, hash, text}],
-//                        books: [{index, len, hash, text}] and u: [{hash, len, text}]}
-//                        (u6_core::locale)
+//                        books: [{index, len, hash, text}], u: [{hash, len, text}] and
+//                        aliases: [{archive, item, keyword, words}]} (u6_core::locale)
 //   <out>/coverage.json  u6.locale-coverage/1: the units found, translated and left English by
 //                        reason, by category, scripts and units named by their hashes only
 //
@@ -53,10 +54,24 @@
 // requests of at most U_PER_REQUEST strings and U_CHARS characters, in the order u prints them; a
 // name or a book with no letter to translate (outside its runes, escapes and plural markers), or
 // a string of u with none outside its printf codes, is left English unasked.
-// The answer is JSON only, {"lines": [{"n", "ko"}]}. Each line is checked by the mechanical gates
-// of spec 08 §6 (structure only: the escapes' multiset, Hangul syllables and ASCII only, the josa
-// markers and every `@{` closed as the text layer reads them, the runic text and the line breaks
-// at its ends kept; for a table string the engine copies into a slot, its capacity and no marker;
+// A script's request also lists its keywords (slice K5b, spec 08 §4): `topics`, one entry per
+// keyword block in script order, each key (the keyword as the keyword block keys it, up to its NUL
+// and case-folded; a `*` keyword is none) with the words its lines highlight that hit it
+// (`shown`) and the Korean word already settled for it (`known`: the pack there's, or the shared
+// keywords' request's); the answer gives one Korean word per key (`keywords`), checked by the
+// alias gate (1 to 8 Hangul syllables; one entry per key; two keys whose words collide, a word of
+// the input the engine takes for both, refused unless their first block is the same, and so is a
+// word colliding with one the pack keeps for another key), and the words kept become the pack's
+// `aliases` for that script. Before the scripts, the keys at least GLOSSARY_SCRIPTS of the chosen
+// scripts hold (and the pack there does not settle) are asked once in a request of their own, so a
+// key every NPC has gets one word. A request of a script with no key is the one of K1 to K4, byte
+// for byte, for the same style guide (which goes in every request, and which K5b changes).
+// The answer is JSON only, {"lines": [{"n", "ko"}]} (and "keywords" for a script with keys).
+// Each line is checked by the mechanical gates of spec 08 §6 (structure only: the escapes'
+// multiset, Hangul syllables and ASCII only, the josa markers and every `@{` closed as the text
+// layer reads them, each `@{…}` the Korean word of the key its English `@` word hits, or that
+// English word for a key with no word or for none, the runic text and the line breaks at its
+// ends kept; for a table string the engine copies into a slot, its capacity and no marker;
 // for a game string the same `%` directives in the same order and the reader's length; for an
 // object name no plural marker (the Korean rule drops `/` and `\` with the letters after them,
 // so a Korean name holds none and shows one form), no josa marker or `@{` (it is put inside other
@@ -111,7 +126,7 @@ export const DEFAULTS = {
   timeoutS: 900,
 };
 export const JOBS_MAX = 4;
-export const TOOL = 'tools/i18n/translate.mjs/4';
+export const TOOL = 'tools/i18n/translate.mjs/5';
 export const MAX_TOKENS = 32000; // the answer's cap (a reasoning model's thinking counts in it)
 export const PACK_FORMAT = 'u6.locale-pack/1';
 export const COVERAGE_FORMAT = 'u6.locale-coverage/1';
@@ -142,6 +157,13 @@ export const U_KINDS = ['opening', 'story', 'gypsy', 'creation', 'transfer']; //
 export const U_PER_REQUEST = 40;
 export const U_CHARS = 4000; // the English characters of one request of strings of u
 export const PARTS = ['strings', 'look', 'books', 'u'];
+export const MAX_ALIASES = 1 << 16; // u6_core::locale::MAX_ALIASES
+export const MAX_ALIAS_WORDS = 4; // u6_core::locale::MAX_ALIAS_WORDS
+export const MAX_ALIAS_CHARS = 8; // u6_core::locale::MAX_ALIAS_CHARS
+export const MAX_KEYWORD_BYTES = 32; // u6_core::locale::MAX_KEYWORD_BYTES
+export const GLOSSARY_SCRIPTS = 3; // the chosen scripts a key is in to be asked before them
+export const GLOSSARY_KEYS = 64;
+export const GLOSSARY_SHOWN = 8;
 const BUNDLE_FORMAT = 'u6.npc-bundle/1';
 const BUNDLES_MAX = 256 << 20;
 const LOCK = '.lock';
@@ -223,12 +245,13 @@ const byKey = (x, y) => (x.archive !== y.archive ? (x.archive < y.archive ? -1 :
 
 /// The pack file (u6_core::locale's form): the magic, a line feed and the JSON object, the runs and
 /// table strings in key order, the game strings in hash order, the object names and books in index
-/// order, the strings of u in hash order; `tables`, `strings`, `look`, `books` and `u` written only
-/// when there are any (a pack of runs only is K1's file, one without names and books K2's, one
-/// without strings of u K3's). `runs`: [{archive, item, offset, len, hash, text}]; `tables`: the
-/// same with `capacity` (or null); `strings` and `u`: [{hash, len, text}]; `look` and `books`:
-/// [{index, len, hash, text}].
-export function packBytes({ language = 'ko', tool = TOOL, base, runs, tables = [], strings = [], look = [], books = [], u = [] }) {
+/// order, the strings of u in hash order, the keyword aliases by script then keyword; `tables`,
+/// `strings`, `look`, `books`, `u` and `aliases` written only when there are any (a pack of runs
+/// only is K1's file, one without names and books K2's, one without strings of u K3's, one without
+/// aliases K4's). `runs`: [{archive, item, offset, len, hash, text}]; `tables`: the same with
+/// `capacity` (or null); `strings` and `u`: [{hash, len, text}]; `look` and `books`: [{index, len,
+/// hash, text}]; `aliases`: [{archive, item, keyword, words}].
+export function packBytes({ language = 'ko', tool = TOOL, base, runs, tables = [], strings = [], look = [], books = [], u = [], aliases = [] }) {
   const json = {
     format: PACK_FORMAT,
     language,
@@ -249,6 +272,11 @@ export function packBytes({ language = 'ko', tool = TOOL, base, runs, tables = [
   if (look.length > 0) json.look = entries(look);
   if (books.length > 0) json.books = entries(books);
   if (u.length > 0) json.u = byHash(u);
+  if (aliases.length > 0) {
+    const order = (x, y) => (x.archive !== y.archive ? (x.archive < y.archive ? -1 : 1) : x.item !== y.item ? x.item - y.item
+      : x.keyword < y.keyword ? -1 : x.keyword > y.keyword ? 1 : 0);
+    json.aliases = [...aliases].sort(order).map((a) => ({ archive: a.archive, item: a.item, keyword: a.keyword, words: [...a.words] }));
+  }
   return Buffer.concat([Buffer.from(`${MAGIC}\n`), Buffer.from(JSON.stringify(json), 'utf8')]);
 }
 
@@ -264,11 +292,15 @@ const hex16 = (x) => typeof x === 'string' && /^[0-9a-f]{16}$/.test(x);
 const textOk = (t, max) => typeof t === 'string' && Buffer.byteLength(t) <= max && [...t].every(showableChar);
 const showableChar = (c) => c === '\n' || (c >= ' ' && c <= '\x7f') || (c >= '가' && c <= '힣');
 
-/// Whether the JSON `text` (already parsed) gives one member twice in an object: JSON.parse keeps
-/// the last, the engine's reader (serde) refuses the file. Keys are compared decoded
+/// Where the JSON `text` (already parsed) gives one member twice in an object: JSON.parse keeps
+/// the last, the engine's reader (serde) refuses the file. `aliases`: inside the root's `aliases`
+/// value (the engine reads that part on its own, so it is that part's refusal); `outside`:
+/// anywhere else (the root's own members included). Keys are compared decoded
 /// ("conv\u0065rse" is "converse").
-export function duplicateMembers(text) {
+export function duplicatePlaces(text) {
+  const found = { outside: false, aliases: false };
   const stack = [];
+  let member = null; // the root's member being read
   let i = 0;
   while (i < text.length) {
     const c = text[i];
@@ -278,29 +310,50 @@ export function duplicateMembers(text) {
       const top = stack.at(-1);
       if (top && top.keys && top.expectKey) {
         const key = JSON.parse(text.slice(i, j + 1));
-        if (top.keys.has(key)) return true;
+        if (top.keys.has(key)) found[top.under === 'aliases' ? 'aliases' : 'outside'] = true;
         top.keys.add(key);
         top.expectKey = false;
+        if (stack.length === 1) member = key;
       }
       i = j + 1;
       continue;
     }
-    if (c === '{') stack.push({ keys: new Set(), expectKey: true });
-    else if (c === '[') stack.push({ keys: null });
-    else if (c === '}' || c === ']') stack.pop();
+    if (c === '{' || c === '[') {
+      const under = stack.length === 0 ? null : stack.length === 1 ? member : stack.at(-1).under;
+      stack.push(c === '{' ? { keys: new Set(), expectKey: true, under } : { keys: null, under });
+    } else if (c === '}' || c === ']') stack.pop();
     else if (c === ',' && stack.at(-1)?.keys) stack.at(-1).expectKey = true;
     i += 1;
   }
-  return false;
+  return found;
 }
+
+/// Whether the JSON `text` (already parsed) gives one member twice in an object, anywhere.
+export function duplicateMembers(text) {
+  const { outside, aliases } = duplicatePlaces(text);
+  return outside || aliases;
+}
+
+/// Slice K5a's rules for the aliases part (u6_core::locale): whether `key` is a key of the
+/// aliases (`keyword_ok`: 1 to MAX_KEYWORD_BYTES bytes of printable ASCII, no `,`, no upper case),
+/// and whether `word` is an alias word (`alias_word_ok`: 1 to MAX_ALIAS_CHARS characters, each a
+/// Hangul syllable or printable ASCII but the space).
+export const keywordOk = (key) => typeof key === 'string' && key.length >= 1 && key.length <= MAX_KEYWORD_BYTES
+  && /^[\x20-\x2b\x2d-\x40\x5b-\x7e]+$/.test(key);
+const aliasWordOk = (w) => typeof w === 'string' && [...w].length >= 1 && [...w].length <= MAX_ALIAS_CHARS
+  && [...w].every((c) => (c > ' ' && c < '\x7f') || (c >= '가' && c <= '힣'));
+const ALIASES_PART = 'its keyword aliases part (aliases) holds an entry of another form or for a script its lines do not name';
 
 /// Reads a pack file as the engine's reader does (u6_core::locale::Pack::parse): the size, the
 /// magic, JSON of exactly the pack's fields (each once), the format, the language, the tool, every hash 16
 /// hex digits, the limits, each key inside the script buffer and once, each text one the game
 /// can show (a table string's within its capacity, a game string's within the reader's length),
 /// each object name keyed inside the look table and each book by a quality, a book's text under the
-/// game's book buffer, each string of u within its reader's lengths. Returns {language, tool, base,
-/// converse, tables, strings, look, books, u}; throws PackReadError.
+/// game's book buffer, each string of u within its reader's lengths, each keyword alias of the
+/// aliases part's form, for a script the runs or table strings name, its keyword once per script
+/// (anything else of that part, a member twice inside it included, is that part's refusal).
+/// Returns {language, tool, base, converse, tables, strings, look, books, u, aliases}; throws
+/// PackReadError.
 export function readPack(bytes) {
   const fail = (why) => { throw new PackReadError(why); };
   if (bytes.length > MAX_PACK_BYTES) fail('the file is larger than a Korean pack can be');
@@ -317,8 +370,9 @@ export function readPack(bytes) {
   } catch {
     fail(shape);
   }
-  if (duplicateMembers(text)) fail(shape);
-  if (!exact(v, ['format', 'language', 'tool', 'base', 'converse'], ['tables', 'strings', 'look', 'books', 'u'])
+  const twice = duplicatePlaces(text);
+  if (twice.outside) fail(shape);
+  if (!exact(v, ['format', 'language', 'tool', 'base', 'converse'], ['tables', 'strings', 'look', 'books', 'u', 'aliases'])
     || typeof v.format !== 'string' || typeof v.language !== 'string' || typeof v.tool !== 'string'
     || !exact(v.base, ['converse']) || typeof v.base.converse !== 'string' || !Array.isArray(v.converse)
     || ['tables', 'strings', 'look', 'books', 'u'].some((k) => v[k] !== undefined && !Array.isArray(v[k]))) fail(shape);
@@ -341,6 +395,14 @@ export function readPack(bytes) {
   if (!hex16(v.base.converse)) fail('a hash in it is not 16 hex digits');
   if (v.converse.length > MAX_RUNS || tables.length > MAX_RUNS || strings.length > MAX_RUNS
     || look.length > LOOK_ENTRIES || books.length > BOOK_INDICES || u.length > MAX_RUNS) fail('it holds more lines than a pack can');
+  // The aliases part, read on its own as the engine reads it: its form here, the rest after the
+  // other parts (u6_core::locale::Pack::with_aliases comes last).
+  const aliasForm = (a) => exact(a, ['archive', 'item', 'keyword', 'words']) && typeof a.archive === 'string'
+    && Number.isInteger(a.item) && a.item >= 0 && a.item <= 0xffff && typeof a.keyword === 'string'
+    && Array.isArray(a.words) && a.words.every((w) => typeof w === 'string');
+  if (v.aliases !== undefined && (twice.aliases || !Array.isArray(v.aliases) || !v.aliases.every(aliasForm))) fail(ALIASES_PART);
+  const aliases = v.aliases ?? [];
+  if (aliases.length > MAX_ALIASES) fail(ALIASES_PART);
   const seen = new Set();
   const place = (r) => {
     if (!['a', 'b'].includes(r.archive)) fail('a line in it is keyed outside the conversation scripts');
@@ -395,7 +457,16 @@ export function readPack(bytes) {
     if (seen.has(t.hash)) fail('it holds one line twice');
     seen.add(t.hash);
   }
-  return { language: v.language, tool: v.tool, base: v.base.converse, converse: v.converse, tables, strings, look, books, u };
+  seen.clear();
+  const named = new Set([...v.converse, ...tables].map((r) => `${r.archive}:${r.item}`));
+  for (const a of aliases) {
+    if (!['a', 'b'].includes(a.archive) || !named.has(`${a.archive}:${a.item}`) || !keywordOk(a.keyword)
+      || a.words.length < 1 || a.words.length > MAX_ALIAS_WORDS || !a.words.every(aliasWordOk)) fail(ALIASES_PART);
+    const k = `${a.archive}:${a.item}:${a.keyword}`;
+    if (seen.has(k)) fail(ALIASES_PART);
+    seen.add(k);
+  }
+  return { language: v.language, tool: v.tool, base: v.base.converse, converse: v.converse, tables, strings, look, books, u, aliases };
 }
 
 // --- the escapes and the gates ---------------------------------------------------------------
@@ -467,6 +538,185 @@ export function braceWords(ko) {
   return out;
 }
 
+// --- the keyword aliases (slice K5b, spec 08 §4) ----------------------------------------------
+
+/// The key of a keyword as a bundle holds it (the script's bytes, one character each) as the
+/// keyword block keys it (crates/u6-core/src/converse/run.rs `keywords`): its bytes up to a NUL,
+/// ASCII upper case folded to lower, `?` kept; null when it is no key an alias can have (not
+/// [`keywordOk`]) or it starts with `*` (such a keyword matches any input).
+export function keyOf(keyword) {
+  if (typeof keyword !== 'string') return null;
+  const nul = keyword.indexOf('\0');
+  const key = (nul < 0 ? keyword : keyword.slice(0, nul)).replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return keywordOk(key) && key[0] !== '*' ? key : null;
+}
+
+/// Whether highlighted word `word` (case folded) hits key `key` as the keyword test does
+/// (run.rs `match_keyword`): each of the key's bytes is the word's at that place or `?`, so a word
+/// may be longer than its key; past the word's end only a `?` matches. An empty word hits none.
+export function hits(word, key) {
+  if (word.length === 0) return false;
+  for (let i = 0; i < key.length; i += 1) if (key[i] !== '?' && key[i] !== word[i]) return false;
+  return true;
+}
+
+/// The key of `keys` (in the keyword blocks' order) that `word` hits first, as the game's first
+/// match takes it, or null.
+export const keyHit = (word, keys) => keys.find((k) => hits(word, k)) ?? null;
+
+/// The keys of `bundle`'s keyword blocks: `topics`, the keys of each block that has any, in script
+/// order (its turns, then their topics), each once; `keys`, each key once, in the order it first
+/// comes (so the first of them a word hits is the game's first match).
+export function keysOf(bundle) {
+  const topics = [];
+  const keys = [];
+  for (const turn of Array.isArray(bundle.turns) ? bundle.turns : []) {
+    for (const topic of Array.isArray(turn?.topics) ? turn.topics : []) {
+      const list = [];
+      for (const k of Array.isArray(topic?.keywords) ? topic.keywords : []) {
+        const key = keyOf(k);
+        if (key !== null && !list.includes(key)) list.push(key);
+      }
+      if (list.length === 0) continue;
+      topics.push(list);
+      for (const key of list) if (!keys.includes(key)) keys.push(key);
+    }
+  }
+  return { topics, keys };
+}
+
+/// The highlighted English words of `units` that hit each of `keys`: a Map of key to its words
+/// (case folded), each once, in the lines' order; a word that hits several keys is its first's.
+export function shownOf(units, keys) {
+  const shown = new Map(keys.map((k) => [k, []]));
+  for (const u of units) {
+    for (const w of keywordsOf(u.text)) {
+      const k = keyHit(w, keys);
+      if (k !== null && !shown.get(k).includes(w)) shown.get(k).push(w);
+    }
+  }
+  return shown;
+}
+
+/// The particles (조사) the engine takes after a keyword's alias, longest first
+/// (crates/u6-core/src/converse/run.rs `PARTICLES`; a test reads that file and compares).
+export const PARTICLES = [
+  '에게', '에서', '으로', '이여', '은', '는', '이', '가', '을', '를', '와', '과', '의', '에',
+  '로', '도', '만', '께', '아', '야', '여',
+];
+
+/// The words of the input the engine takes for alias word `word` (run.rs `match_alias`): the word
+/// itself and the word followed by exactly one particle, ASCII case folded.
+export const formsOf = (word) => [word, ...PARTICLES.map((p) => word + p)].map((w) => w.replace(/[A-Z]/g, (c) => c.toLowerCase()));
+
+/// Whether two alias words collide: some word of the input the engine takes for one it takes for
+/// the other too (달 and 달이: 달이 is 달 with the particle 이).
+export function collide(a, b) {
+  const forms = new Set(formsOf(a));
+  return formsOf(b).some((w) => forms.has(w));
+}
+
+/// The first keyword block of `topics` (the script's, in its order) that lists each key: a Map of
+/// key to that block's index.
+export function firstBlocksOf(topics) {
+  const first = new Map();
+  topics.forEach((list, i) => list.forEach((k) => { if (!first.has(k)) first.set(k, i); }));
+  return first;
+}
+
+/// Whether two keys of a script (its `topics`) may keep colliding words, as a function of two
+/// keys: only when their first block is the same (the game's first match then reaches that block
+/// for the word of either and for the English of either).
+export function compatibleOf(topics) {
+  const first = firstBlocksOf(topics);
+  return (a, b) => first.has(a) && first.get(a) === first.get(b);
+}
+
+/// Why `ko` is not a word a player may type for a keyword, or null: 1 to MAX_ALIAS_CHARS Hangul
+/// syllables (U+AC00..=U+D7A3) and nothing else (no ASCII, no space; the engine takes ASCII too,
+/// the tool gives Korean only).
+export function wordGate(ko) {
+  if (typeof ko !== 'string' || ko.length === 0) return 'empty';
+  if (![...ko].every((c) => c >= '가' && c <= '힣')) return 'characters';
+  if ([...ko].length > MAX_ALIAS_CHARS) return 'long';
+  return null;
+}
+
+/// The words an answer's `keywords` ([{k, ko}]) give `keys` that pass the alias gate: a Map of key
+/// to word; and the others' reasons by key: `missing` (none given), `repeated` (given twice), the
+/// word's ([`wordGate`]), `shared` (a word that collides with another key's ([`collide`]) where
+/// `compatible(a, b)` does not let the two keep it: the player could not tell them apart). `kept`
+/// (a Map of key to its words): the words the pack there keeps for the script's other keys; a new
+/// word colliding with one of a key this answer gives none is refused too (`shared`), and a key so
+/// refused keeps its own old words, which the others are then checked against. An entry for a key
+/// not asked is not read.
+export function aliasesOf(keys, given, compatible, kept = new Map()) {
+  const list = (Array.isArray(given) ? given : []).filter((e) => plain(e) && typeof e.k === 'string' && keys.includes(e.k));
+  const count = new Map();
+  for (const e of list) count.set(e.k, (count.get(e.k) ?? 0) + 1);
+  const words = new Map();
+  const failed = new Map();
+  for (const e of list) {
+    if (count.get(e.k) > 1) continue;
+    const why = wordGate(e.ko);
+    if (why) failed.set(e.k, why);
+    else words.set(e.k, e.ko);
+  }
+  for (const k of keys) {
+    if ((count.get(k) ?? 0) > 1) failed.set(k, 'repeated');
+    else if (!count.has(k)) failed.set(k, 'missing');
+  }
+  const clash = (k, j, ws) => j !== k && !compatible(k, j) && ws.some((v) => collide(words.get(k), v));
+  const shared = [...words.keys()].filter((k) => [...words].some(([j, v]) => clash(k, j, [v])));
+  for (const k of shared) {
+    words.delete(k);
+    failed.set(k, 'shared');
+  }
+  // Against the words the pack keeps for keys this answer does not replace, until none collides.
+  for (let again = true; again;) {
+    again = false;
+    for (const k of [...words.keys()]) {
+      if ([...kept].some(([j, ws]) => !words.has(j) && clash(k, j, ws))) {
+        words.delete(k);
+        failed.set(k, 'shared');
+        again = true;
+      }
+    }
+  }
+  return { words, failed };
+}
+
+/// The brace words the `@` keywords of English `en` call for, case folded, in order: for each
+/// highlighted word, the words it may show, those `keyed.words` gives the key of `keyed.keys` it
+/// hits first (a word, or a list: any of a key's words), or the English word itself when that key
+/// has none or it hits no key; with no `keyed` (no script, no aliases), the English words.
+export function braceWordsWanted(en, keyed = null) {
+  const fold = (w) => w.toLowerCase();
+  return keywordsOf(en).map((w) => {
+    const k = keyed ? keyHit(w, keyed.keys) : null;
+    return k !== null && keyed.words.has(k) ? [keyed.words.get(k)].flat().map(fold) : [w];
+  });
+}
+
+/// Why the braces of `ko` do not hold the words the `@` keywords of `en` call for, or null: one
+/// brace word for each highlighted word, one of the words it may show ([`braceWordsWanted`]), in
+/// any order. So the player is shown only words the conversation takes.
+export function keywordsWhy(en, ko, keyed = null) {
+  const wanted = braceWordsWanted(en, keyed);
+  const got = braceWords(ko);
+  if (wanted.length !== got.length) return 'keywords';
+  // A matching of the highlighted words to the brace words (augmenting paths).
+  const owner = new Array(got.length).fill(-1);
+  const take = (i, seen) => got.some((g, j) => {
+    if (seen[j] || !wanted[i].includes(g)) return false;
+    seen[j] = true;
+    if (owner[j] >= 0 && !take(owner[j], seen)) return false;
+    owner[j] = i;
+    return true;
+  });
+  return wanted.every((_, i) => take(i, new Array(got.length).fill(false))) ? null : 'keywords';
+}
+
 // Whether `c` is a character the game can show: ASCII printable, the line feed, a Hangul syllable.
 const showable = (c) => c === '\n' || (c >= ' ' && c <= '\x7f') || (c >= '가' && c <= '힣');
 
@@ -491,10 +741,11 @@ const edges = (text) => [/^\n*/.exec(text)[0].length, /\n*$/.exec(text)[0].lengt
 /// multiset, the characters, the josa markers and the `@{` braces as the text layer reads them
 /// (hidden `&…&` text is dropped before it is read; `@` is followed at once by `{` and opens a
 /// brace, closed by a `}` that is no marker's; every other `{` starts one of the markers), the
-/// keywords (the words the braces hold are, as a multiset and case folded, the keywords the
-/// English `@`s mark, so the player is shown only words the conversation takes), the runic text,
-/// the line breaks at both ends, its length.
-export function gate(en, ko) {
+/// keywords (the words the braces hold are, as a multiset and case folded, the words the English
+/// `@`s call for: with `keyed`, a script's keys and their words, the Korean word of the key each
+/// English word hits, else the English word, [`keywordsWhy`]; so the player is shown only words
+/// the conversation takes), the runic text, the line breaks at both ends, its length.
+export function gate(en, ko, keyed = null) {
   if (typeof ko !== 'string' || (ko.length === 0 && en.length > 0)) return 'empty';
   if (Buffer.byteLength(ko) > MAX_TEXT_BYTES) return 'long';
   if (![...ko].every(showable)) return 'characters';
@@ -523,8 +774,7 @@ export function gate(en, ko) {
     }
   }
   if (brace) return 'braces';
-  const [ka, kb] = [keywordsOf(en).sort(), braceWords(ko).sort()];
-  if (ka.length !== kb.length || ka.some((k, i) => k !== kb[i])) return 'keywords';
+  if (keywordsWhy(en, ko, keyed)) return 'keywords';
   const [ra, rb] = [runic(en), runic(ko)];
   if (ra.length !== rb.length || ra.some((r, i) => r !== rb[i])) return 'runic';
   const [ea, eb] = [edges(en), edges(ko)];
@@ -543,10 +793,10 @@ export function directivesOf(text) {
 const hasMarker = (ko) => MARKERS.some((m) => ko.includes(m)) || ko.includes('@{');
 
 /// Why `ko` is not a translation of table string `u` the engine can take, or null: the line's
-/// gates, then for a string the engine copies into a slot (printed later as it is, by `$n`) no
-/// josa marker or `@{`, and its capacity.
-export function tableGate(u, ko) {
-  const why = gate(u.text, ko);
+/// gates (with its script's keys and words, `keyed`), then for a string the engine copies into a
+/// slot (printed later as it is, by `$n`) no josa marker or `@{`, and its capacity.
+export function tableGate(u, ko, keyed = null) {
+  const why = gate(u.text, ko, keyed);
   if (why) return why;
   if (u.copied && hasMarker(ko)) return 'raw';
   if (Number.isInteger(u.capacity) && Buffer.byteLength(ko) > u.capacity) return 'capacity';
@@ -723,18 +973,63 @@ export function speakerClass(bundle) {
   return CLASS_WORDS.find(([, words]) => words.test(said))?.[0] ?? 'commoner';
 }
 
-/// The instruction every request carries: the task, the answer's form, then the style guide.
-export function systemOf(style) {
-  return [
+/// The instruction every request of a script carries: the task, the answer's form, then the style
+/// guide; `keyed` for a request that lists the script's keywords (`topics`), whose answer gives a
+/// Korean word for each (slice K5b; without it the instruction is K1's to K4's, byte for byte).
+export function systemOf(style, keyed = false) {
+  const head = [
     'You translate the conversation lines of one character of a role-playing game, Ultima VI,',
     'from its faux-archaic English into archaic Korean (사극체), following the guide below.',
     'The request is JSON: the character (name, description, class and register) and its lines,',
     'each {"n": <number>, "en": "<line>"} (and "joins": true for a line that goes on from the one',
     'before it; "table": true for a string the script picks at run time, with "copied": true and',
-    '"capacity" for one it stores and prints later as it is). Answer with one JSON object and',
-    'nothing else:',
-    '{"lines": [{"n": <number>, "ko": "<the Korean line>"}]}',
-    'with exactly one entry for every line asked, its own n.',
+  ];
+  if (!keyed) {
+    return [
+      ...head,
+      '"capacity" for one it stores and prints later as it is). Answer with one JSON object and',
+      'nothing else:',
+      '{"lines": [{"n": <number>, "ko": "<the Korean line>"}]}',
+      'with exactly one entry for every line asked, its own n.',
+      '',
+      style,
+    ].join('\n');
+  }
+  return [
+    ...head,
+    '"capacity" for one it stores and prints later as it is), and the keywords the player types',
+    'to it, "topics": one entry per keyword block of the script, in its order, each {"keys":',
+    '[{"k": "<keyword>", "shown": [<the English words its lines highlight with @ that this keyword',
+    'answers>], "known": "<the Korean word already chosen for it>"}]} (the keys of one block are',
+    'one answer; "known" only where a word is chosen). Answer with one JSON object and nothing',
+    'else:',
+    '{"lines": [{"n": <number>, "ko": "<the Korean line>"}], "keywords": [{"k": "<keyword>", "ko":',
+    '"<the Korean word the player types for it>"}]}',
+    'with exactly one entry for every line asked, its own n, and one for every keyword listed: a',
+    'word of 1 to 8 Hangul syllables and nothing else (no space, no particle, no Latin letter), the',
+    'same word for the keys of one block, its "known" word where one is given. In the lines, write',
+    'each English @word that a key\'s "shown" lists (case aside) as @{<the Korean word you answer',
+    'for that key>}, its particle after the closing brace (@{일}을), and every other @word as',
+    '@{<the English word>}.',
+    '',
+    style,
+  ].join('\n');
+}
+
+/// The instruction the request of shared keywords carries (slice K5b): the task, the answer's
+/// form, then the style guide.
+export function glossarySystemOf(style) {
+  return [
+    'You choose the Korean words a player of a role-playing game, Ultima VI, types to its',
+    'characters for the keywords many of them answer to, in the archaic Korean (사극체) of the',
+    'guide below. The request is JSON: {"keywords": [{"k": "<keyword>", "shown": [<the English',
+    'words the characters\' lines highlight with @ that this keyword answers>]}]}. Answer with one',
+    'JSON object and nothing else:',
+    '{"keywords": [{"k": "<keyword>", "ko": "<the Korean word>"}]}',
+    'with exactly one entry for every keyword asked: the word the lines will highlight and the',
+    'player will type, 1 to 8 Hangul syllables and nothing else (no space, no particle, no Latin',
+    'letter), a plain word of the meaning the English words share, a different word for each',
+    'keyword unless two mean the same.',
     '',
     style,
   ].join('\n');
@@ -748,15 +1043,36 @@ function lineOf(u) {
   return u.joins ? { n: u.n, en: u.text, joins: true } : { n: u.n, en: u.text };
 }
 
-/// The request body for `lines` of `bundle` (the exact bytes sent): a Messages call.
-export function bodyOf(model, system, bundle, cls, lines) {
+/// The request body for `lines` of `bundle` (the exact bytes sent): a Messages call; with
+/// `topics` (slice K5b, [`topicsOf`]) the script's keywords too, and `system` is then
+/// `systemOf(style, true)`'s. With none it is K1's to K4's body, byte for byte, for the same style.
+export function bodyOf(model, system, bundle, cls, lines, topics = []) {
   const npc = {
     name: typeof bundle.name === 'string' ? bundle.name : '',
     description: textOf(bundle.narration?.look),
     class: cls,
     register: CLASSES[cls],
   };
-  const user = JSON.stringify({ npc, lines: lines.map(lineOf) });
+  const user = JSON.stringify(topics.length > 0 ? { npc, lines: lines.map(lineOf), topics } : { npc, lines: lines.map(lineOf) });
+  return JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: [{ role: 'user', content: user }] });
+}
+
+/// The `topics` of a request of `script` (slice K5b): one entry per keyword block with keys, in
+/// script order, each key with the words its lines highlight that hit it (`shown`) and the Korean
+/// word `known` (a Map) settles for it, when there is one; only the keys of `only` (a Set) when
+/// given (a request again lists the keys that have a word, each with that word).
+export function topicsOf(script, known, only = null) {
+  return script.topics
+    .map((list) => ({
+      keys: list.filter((k) => only === null || only.has(k))
+        .map((k) => ({ k, shown: script.shown.get(k) ?? [], ...(known.has(k) ? { known: known.get(k) } : {}) })),
+    }))
+    .filter((t) => t.keys.length > 0);
+}
+
+/// The request body for the shared keywords `units` (the exact bytes sent): a Messages call.
+export function glossaryBodyOf(model, system, units) {
+  const user = JSON.stringify({ keywords: units.map((u) => ({ k: u.k, shown: u.shown })) });
   return JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: [{ role: 'user', content: user }] });
 }
 
@@ -836,32 +1152,46 @@ export function programBodyOf(model, system, units) {
   return JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: [{ role: 'user', content: user }] });
 }
 
-/// The lines of an answer: a Map of n to its Korean text, or null when it is not JSON of the
-/// answer's form (a code fence around it allowed).
-export function linesOfAnswer(content) {
+// The JSON object of an answer (a code fence around it allowed), or null.
+function objectOfAnswer(content) {
   const text = typeof content === 'string' ? content.trim() : '';
   const from = text.indexOf('{');
   const to = text.lastIndexOf('}');
   if (from < 0 || to < from) return null;
-  let v;
   try {
-    v = JSON.parse(text.slice(from, to + 1));
+    const v = JSON.parse(text.slice(from, to + 1));
+    return plain(v) ? v : null;
   } catch {
     return null;
   }
-  if (!plain(v) || !Array.isArray(v.lines)) return null;
+}
+
+/// The lines of an answer: a Map of n to its Korean text, and its `keywords` as given (slice K5b;
+/// [] when it has none, read by the alias gate), or null when it is not JSON of the answer's form
+/// (a code fence around it allowed).
+export function linesOfAnswer(content) {
+  const v = objectOfAnswer(content);
+  if (!v || !Array.isArray(v.lines)) return null;
   const lines = new Map();
   for (const l of v.lines) {
     if (plain(l) && Number.isInteger(l.n) && typeof l.ko === 'string' && !lines.has(l.n)) lines.set(l.n, l.ko);
   }
-  return lines.size > 0 ? { lines } : null;
+  return lines.size > 0 ? { lines, keywords: Array.isArray(v.keywords) ? v.keywords : [] } : null;
+}
+
+/// The keywords of the answer to the shared keywords' request (slice K5b), as given, or null when
+/// it is not JSON of that answer's form.
+export function keywordsOfAnswer(content) {
+  const v = objectOfAnswer(content);
+  return v && Array.isArray(v.keywords) && v.keywords.length > 0 ? { keywords: v.keywords } : null;
 }
 
 /// The bundles of `value` (the parsed file) as the scripts to translate: `item` ({archive, item}),
 /// the one bundle whose `name` is `name` (case folded), or the `first` scripts with lines, in
 /// (archive, item) order. Each script's units: its runs, then its table strings (one an op reads
-/// from inside is left English, `inner`). Throws a fixed message (a count at most) when the file is
-/// not a list of bundles or the script named has no lines.
+/// from inside is left English, `inner`); its keys (slice K5b, [`keysOf`]) with the words the
+/// units asked highlight for each (`shown`, [`shownOf`]). Throws a fixed message (a count at most)
+/// when the file is not a list of bundles or the script named has no lines.
 export function planOf(value, { item = null, first = null, name = null, cls = null } = {}) {
   if (!Array.isArray(value)) throw new InputError('the file is not a list of NPC bundles');
   const bad = value.filter((b) => !plain(b) || b.format !== BUNDLE_FORMAT || !['a', 'b'].includes(b.archive)
@@ -884,9 +1214,52 @@ export function planOf(value, { item = null, first = null, name = null, cls = nu
     const runs = unitsOf(b).map((u) => ({ ...u, kind: 'run', len: latin1(u.text).length, hash: hex64(hash64(latin1(u.text))) }));
     const tables = tablesOf(b).map((t) => ({ ...t, kind: 'table', ...(t.inner ? { done: true, why: 'inner' } : {}) }));
     const units = [...runs, ...tables].map((u, n) => ({ ...u, n }));
-    return { kind: 'script', bundle: b, cls: cls ?? speakerClass(b), units };
+    const { topics, keys } = keysOf(b);
+    const shown = shownOf(units.filter((u) => !u.done), keys);
+    return { kind: 'script', bundle: b, cls: cls ?? speakerClass(b), units, keys, topics, shown, compatible: compatibleOf(topics) };
   });
   return { read: value.length, usable: usable.length, scripts, bundles: value };
+}
+
+/// The words the pack there (`existing`, readPack's) settles for the keys (slice K5b): for each
+/// key, the word most of its scripts give it (each entry's first word that passes [`wordGate`]),
+/// a tie to the word first in order; a Map of key to word.
+export function knownOf(existing) {
+  const counts = new Map();
+  for (const a of existing?.aliases ?? []) {
+    const w = a.words.find((x) => wordGate(x) === null);
+    if (w === undefined) continue;
+    const m = counts.get(a.keyword) ?? new Map();
+    m.set(w, (m.get(w) ?? 0) + 1);
+    counts.set(a.keyword, m);
+  }
+  const known = new Map();
+  for (const [k, m] of counts) known.set(k, [...m].sort(([x, n], [y, o]) => o - n || (x < y ? -1 : x > y ? 1 : 0))[0][0]);
+  return known;
+}
+
+/// The request of shared keywords (slice K5b, spec 08 §4): the keys at least GLOSSARY_SCRIPTS of
+/// `scripts` hold that `settled` (a Set: the keys the pack there gives a word) does not, the most
+/// held first (then in key order), at most GLOSSARY_KEYS, each with the words the scripts' lines
+/// highlight for it (at most GLOSSARY_SHOWN, in script order); `compatible`, whether two keys may
+/// keep colliding words: in every one of them that holds both, the first block of each is the
+/// same ([`compatibleOf`]); null when no key is so shared.
+export function glossaryOf(scripts, settled = new Set()) {
+  const held = new Map();
+  for (const s of scripts) {
+    for (const k of s.keys) {
+      const h = held.get(k) ?? { k, scripts: 0, shown: [] };
+      h.scripts += 1;
+      for (const w of s.shown.get(k) ?? []) if (h.shown.length < GLOSSARY_SHOWN && !h.shown.includes(w)) h.shown.push(w);
+      held.set(k, h);
+    }
+  }
+  const chosen = [...held.values()].filter((h) => h.scripts >= GLOSSARY_SCRIPTS && !settled.has(h.k))
+    .sort((x, y) => y.scripts - x.scripts || (x.k < y.k ? -1 : x.k > y.k ? 1 : 0))
+    .slice(0, GLOSSARY_KEYS);
+  if (chosen.length === 0) return null;
+  const compatible = (a, b) => scripts.every((s) => !(s.keys.includes(a) && s.keys.includes(b)) || s.compatible(a, b));
+  return { kind: 'glossary', units: chosen.map((h, n) => ({ kind: 'keyword', n, k: h.k, shown: h.shown })), compatible };
 }
 
 /// The strings of u of `value` (the parsed u6.string-bundle/1, its `u`) as the units to translate,
@@ -1015,13 +1388,15 @@ export function stringsPlanOf(value) {
 // --- the run ---------------------------------------------------------------------------------
 
 /// The units of `script` an answer gave that pass the gates: a Map of n to text; and the n of the
-/// others, by reason.
+/// others, by reason. A conversation script's runs and table strings are gated with its keys and
+/// their words (`script.keyed`, slice K5b); the other texts have none.
 function checked(script, answer) {
   const good = new Map();
   const failed = new Map();
-  const gateOf = (u, ko) => (u.kind === 'table' ? tableGate(u, ko) : u.kind === 'string' ? stringGate(u.text, ko)
+  const keyed = script.keyed ?? null;
+  const gateOf = (u, ko) => (u.kind === 'table' ? tableGate(u, ko, keyed) : u.kind === 'string' ? stringGate(u.text, ko)
     : u.kind === 'look' ? lookGate(u.text, ko) : u.kind === 'book' ? bookGate(u.text, ko)
-      : u.kind === 'program' ? uGate(u.text, ko, u.keys) : gate(u.text, ko));
+      : u.kind === 'program' ? uGate(u.text, ko, u.keys) : gate(u.text, ko, keyed));
   for (const u of script.units) {
     if (u.done) continue;
     const ko = answer?.lines?.get(u.n);
@@ -1034,7 +1409,8 @@ function checked(script, answer) {
 
 /// Whether the pack read from <out> (`existing`, readPack's) was made from the files `bundles` were
 /// exported from: each of its runs and table strings is one of theirs (its key, length and hash),
-/// and its fingerprint is that of the scripts they name.
+/// each of its keyword aliases is for a script they name, and its fingerprint is that of those
+/// scripts.
 export function recheckOf(existing, bundles) {
   const byScript = new Map(bundles.filter(plain).map((b) => [`${b.archive}:${b.item}`, b]));
   const named = new Map();
@@ -1047,6 +1423,7 @@ export function recheckOf(existing, bundles) {
   };
   if (!existing.converse.every((r) => same(r, unitsOf))) return false;
   if (!existing.tables.every((t) => same(t, tablesOf))) return false;
+  if (!(existing.aliases ?? []).every((a) => named.has(`${a.archive}:${a.item}`))) return false;
   return fingerprint([...named.values()].map((b) => ({ archive: b.archive, item: b.item, hash: b.hash }))) === existing.base;
 }
 
@@ -1064,11 +1441,49 @@ function tally(units) {
   return { found: units.length, translated, leftEnglish: units.length - translated, byReason, unexplained: 0 };
 }
 
+/// The words the aliases `aliases` (a pack's) give script (`archive`, `item`), as the run gate
+/// reads them: a Map of keyword to all its entry's words (a pack written by hand may give a key up
+/// to MAX_ALIAS_WORDS; a line may show any of them).
+export function scriptWordsOf(aliases, archive, item) {
+  const words = new Map();
+  for (const a of aliases ?? []) if (a.archive === archive && a.item === item) words.set(a.keyword, [...a.words]);
+  return words;
+}
+
+/// The word a request names as `known` of a key's `words`: the first the alias gate takes, else
+/// the first.
+export const firstWord = (words) => words.find((w) => wordGate(w) === null) ?? words[0];
+
+/// Slice K5b: settles `script`'s keys from `r`, the result of its first request (sendAll's: `ok`
+/// with the answer's `keywords`, or a failure with its `reason`): `kept`, the words that pass the
+/// alias gate ([`aliasesOf`], checked against each other and against the words the pack there,
+/// `existing`, keeps for the script's keys this answer does not replace); `refused`, the other
+/// keys' reasons; `keyed`, its keys with the words its lines are gated with: the pack there's for
+/// the script (all of a key's words), each key this answer kept a word for with that word instead
+/// (as the merge leaves them).
+export function settleKeys(script, r, existing = null) {
+  const theirs = scriptWordsOf(existing?.aliases, script.bundle.archive, script.bundle.item);
+  const kept = new Map([...theirs].filter(([k]) => script.keys.includes(k)));
+  const { words, failed } = r?.ok ? aliasesOf(script.keys, r.keywords, script.compatible, kept)
+    : { words: new Map(), failed: new Map(script.keys.map((k) => [k, r?.reason ?? 'not-sent'])) };
+  script.kept = words;
+  script.refused = failed;
+  script.keyed = { keys: script.keys, words: new Map([...theirs, ...[...words].map(([k, w]) => [k, [w]])]) };
+}
+
 /// The pack and the coverage receipt of `plan`'s scripts and game strings, translated as their
 /// units say, merged into `existing` (readPack's, or null): what this run translated replaces what
 /// it had under the same key, the rest stays. The fingerprint is over the scripts the merged runs
 /// and table strings name (their hashes from the bundles); with no bundles the conversation part
-/// is the existing pack's, unchanged. No pack (null) when this run translated nothing.
+/// is the existing pack's, unchanged. The keyword aliases (slice K5b): the words a script answered
+/// in this run kept (`kept`, [`settleKeys`]) replace the pack's for the same keys, the others
+/// stay; every merged run and table string of a script whose words changed is checked again
+/// against the merged words, one that no longer passes dropped (left English, `keywords`); the
+/// aliases of a script the merged lines do not name are dropped (`no-base`). Coverage `keywords`:
+/// each key of the scripts answered given a word, or kept (its old word stays in the merged pack:
+/// `kept`, by reason, keys by hash), or left English (no word in the merged pack: `byReason`, and
+/// in `left` by hash); only one left English counts toward exit 3. No pack (null) when this run
+/// changed nothing.
 export function outputsOf(plan, model, existing = null) {
   const runs = [];
   const tables = [];
@@ -1110,23 +1525,6 @@ export function outputsOf(plan, model, existing = null) {
     if (x.ko !== undefined) u.push({ hash: x.hash, len: x.len, text: x.ko });
     else left.push({ category: 'u', hash: x.hash, reason: x.why ?? 'not-sent' });
   }
-  const runUnits = plan.scripts.flatMap((s) => s.units.filter((u) => u.kind !== 'table'));
-  const tableUnits = plan.scripts.flatMap((s) => s.units.filter((u) => u.kind === 'table'));
-  const coverage = {
-    format: COVERAGE_FORMAT,
-    model,
-    tool: TOOL,
-    category: 'conversations',
-    scripts: { read: plan.read, usable: plan.usable, chosen: plan.scripts.length, translated: translatedScripts },
-    units: tally(runUnits),
-    tables: tally(tableUnits),
-    strings: { read: plan.strings?.read ?? 0, ...tally(stringUnits) },
-    look: tally(textUnits.filter((u) => u.kind === 'look')),
-    books: tally(textUnits.filter((u) => u.kind === 'book')),
-    u: { read: plan.program?.read ?? 0, ...tally(programUnits) },
-    perScript,
-    left,
-  };
   const key = (r) => `${r.archive}:${r.item}:${r.offset}`;
   const newRuns = new Set(runs.map(key));
   const newTables = new Set(tables.map(key));
@@ -1142,20 +1540,120 @@ export function outputsOf(plan, model, existing = null) {
     books: [...(existing?.books ?? []).filter((t) => !newBooks.has(t.index)), ...books],
     u: [...(existing?.u ?? []).filter((t) => !newU.has(t.hash)), ...u],
   };
+  // Slice K5b: the keyword aliases. The words a script answered in this run kept replace the
+  // pack's for the same keys; the pack's other aliases stay.
+  const script = (x) => `${x.archive}:${x.item}`;
+  const aliasKey = (a) => `${script(a)}:${a.keyword}`;
+  const keyUnits = [];
+  const fresh = [];
+  for (const s of plan.scripts) {
+    for (const k of s.keys ?? []) {
+      const unit = { archive: s.bundle.archive, item: s.bundle.item, script: s.bundle.hash, k };
+      if (s.kept?.has(k)) {
+        unit.ko = s.kept.get(k);
+        fresh.push({ archive: unit.archive, item: unit.item, keyword: k, words: [unit.ko] });
+      } else unit.why = s.refused?.get(k) ?? 'not-sent';
+      keyUnits.push(unit);
+    }
+  }
+  const before = new Map((existing?.aliases ?? []).map((a) => [aliasKey(a), a]));
+  const differs = (a) => JSON.stringify(before.get(aliasKey(a))?.words) !== JSON.stringify(a.words);
+  const freshKeys = new Set(fresh.map(aliasKey));
+  merged.aliases = [...(existing?.aliases ?? []).filter((a) => !freshKeys.has(aliasKey(a))), ...fresh];
+  // Every merged run and table string of a script whose words changed is checked again against
+  // the merged words (the run gate's keywords); one that no longer passes is dropped, English.
+  const changedScripts = new Set(fresh.filter(differs).map(script));
+  const answered = new Map(plan.scripts.map((s) => [script(s.bundle), s]));
+  const english = new Map();
+  const englishOf = (r, kind) => {
+    const s = answered.get(script(r));
+    const at = `${script(r)}:${kind}`;
+    if (!english.has(at)) english.set(at, new Map((kind === 'table' ? tablesOf : unitsOf)(s.bundle).map((x) => [x.offset, x.text])));
+    return english.get(at).get(r.offset);
+  };
+  let dropped = 0;
+  const recheck = (list, kind) => list.filter((r) => {
+    if (!changedScripts.has(script(r))) return true;
+    const en = englishOf(r, kind);
+    const keyed = { keys: answered.get(script(r)).keys, words: scriptWordsOf(merged.aliases, r.archive, r.item) };
+    if (en === undefined || keywordsWhy(en, r.text, keyed) === null) return true;
+    left.push({ category: kind === 'table' ? 'tables' : 'conversations', hash: r.hash, reason: 'keywords' });
+    dropped += 1;
+    return false;
+  });
+  merged.runs = recheck(merged.runs, 'run');
+  merged.tables = recheck(merged.tables, 'table');
+  // Only a script the merged runs or table strings name keeps aliases (the engine refuses others).
+  const hashes = new Map((plan.bundles ?? []).filter(plain).map((b) => [script(b), b.hash]));
+  const named = new Set([...merged.runs, ...merged.tables].map(script));
+  let unbased = 0;
+  merged.aliases = merged.aliases.filter((a) => {
+    if (named.has(script(a))) return true;
+    const unit = keyUnits.find((x) => script(x) === script(a) && x.k === a.keyword);
+    if (!freshKeys.has(aliasKey(a))) unbased += 1;
+    if (unit) {
+      delete unit.ko;
+      unit.why = 'no-base';
+    } else {
+      left.push({ category: 'keywords', script: hashes.get(script(a)) ?? '', hash: hex64(hash64(latin1(a.keyword))), reason: 'no-base' });
+    }
+    return false;
+  });
+  // A key this run gave no word that keeps one in the merged pack (its old word: the answer left
+  // it out or its new word was refused) is not English: counted as kept, by reason; one that ends
+  // with no word is left English.
+  const finalKeys = new Set(merged.aliases.map(aliasKey));
+  const kept = { count: 0, byReason: {}, keys: [] };
+  let given = 0;
+  const leftKeys = {};
+  for (const x of keyUnits) {
+    const entry = { script: x.script, hash: hex64(hash64(latin1(x.k))), reason: x.why };
+    if (x.ko !== undefined) given += 1;
+    else if (finalKeys.has(aliasKey({ ...x, keyword: x.k }))) {
+      kept.count += 1;
+      kept.byReason[x.why] = (kept.byReason[x.why] ?? 0) + 1;
+      kept.keys.push(entry);
+    } else {
+      leftKeys[x.why] = (leftKeys[x.why] ?? 0) + 1;
+      left.push({ category: 'keywords', ...entry });
+    }
+  }
+  const aliased = fresh.filter((a) => named.has(script(a)) && differs(a)).length;
+  const runUnits = plan.scripts.flatMap((s) => s.units.filter((u) => u.kind !== 'table'));
+  const tableUnits = plan.scripts.flatMap((s) => s.units.filter((u) => u.kind === 'table'));
+  const coverage = {
+    format: COVERAGE_FORMAT,
+    model,
+    tool: TOOL,
+    category: 'conversations',
+    scripts: { read: plan.read, usable: plan.usable, chosen: plan.scripts.length, translated: translatedScripts },
+    units: tally(runUnits),
+    tables: tally(tableUnits),
+    strings: { read: plan.strings?.read ?? 0, ...tally(stringUnits) },
+    look: tally(textUnits.filter((u) => u.kind === 'look')),
+    books: tally(textUnits.filter((u) => u.kind === 'book')),
+    u: { read: plan.program?.read ?? 0, ...tally(programUnits) },
+    keywords: {
+      found: keyUnits.length, translated: given, kept, leftEnglish: keyUnits.length - given - kept.count, byReason: leftKeys, unexplained: 0, dropped,
+    },
+    glossary: tally(plan.glossary?.units ?? []),
+    perScript,
+    left,
+  };
   let base = existing?.base ?? fingerprint([]);
   if (plan.bundles) {
-    const hashes = new Map(plan.bundles.filter(plain).map((b) => [`${b.archive}:${b.item}`, b.hash]));
-    const named = new Map();
-    for (const r of [...merged.runs, ...merged.tables]) named.set(`${r.archive}:${r.item}`, { archive: r.archive, item: r.item, hash: hashes.get(`${r.archive}:${r.item}`) });
-    base = fingerprint([...named.values()]);
+    const scripts = new Map();
+    for (const r of [...merged.runs, ...merged.tables]) scripts.set(script(r), { archive: r.archive, item: r.item, hash: hashes.get(script(r)) });
+    base = fingerprint([...scripts.values()]);
   }
-  const changed = runs.length + tables.length + strings.length + look.length + books.length + u.length > 0;
+  const changed = runs.length + tables.length + strings.length + look.length + books.length + u.length + aliased + dropped + unbased > 0;
   const pack = changed ? packBytes({ base, ...merged }) : null;
   return {
     pack, coverage, runs: runs.length, tables: tables.length, strings: strings.length, look: look.length, books: books.length, u: u.length,
+    aliases: aliased,
     total: {
       runs: merged.runs.length, tables: merged.tables.length, strings: merged.strings.length, look: merged.look.length,
-      books: merged.books.length, u: merged.u.length,
+      books: merged.books.length, u: merged.u.length, aliases: merged.aliases.length,
     },
   };
 }
@@ -1272,6 +1770,8 @@ export async function main(argv, {
     }
   }
   const system = systemOf(guide);
+  const keyedSystem = systemOf(guide, true);
+  const glossarySystem = glossarySystemOf(guide);
   const stringsSystem = stringsSystemOf(guide);
   const textsSystem = textsSystemOf(guide);
   const programSystem = programSystemOf(guide);
@@ -1315,28 +1815,34 @@ export async function main(argv, {
     else say(`translate: the input does not read (${err?.name ?? 'Error'})`);
     return 2;
   }
-  const jobOf = (g, units) => ({
-    script: g,
-    body: g.kind === 'strings' ? stringsBodyOf(o.model, stringsSystem, units)
-      : g.kind === 'texts' ? textsBodyOf(o.model, textsSystem, units)
-        : g.kind === 'program' ? programBodyOf(o.model, programSystem, units) : bodyOf(o.model, system, g.bundle, g.cls, units),
-  });
+  // Slice K5b: the Korean word settled for a key before a script's request: the pack there's,
+  // then the shared keywords' request's. A request again lists the keys with a word, each with it.
+  const known = new Map();
+  const jobOf = (g, units, again = false) => {
+    if (g.kind !== 'script') {
+      return {
+        script: g,
+        body: g.kind === 'strings' ? stringsBodyOf(o.model, stringsSystem, units)
+          : g.kind === 'texts' ? textsBodyOf(o.model, textsSystem, units)
+            : g.kind === 'program' ? programBodyOf(o.model, programSystem, units) : glossaryBodyOf(o.model, glossarySystem, units),
+      };
+    }
+    const topics = again ? topicsOf(g, new Map([...g.keyed.words].map(([k, ws]) => [k, firstWord(ws)])), new Set(g.keyed.words.keys()))
+      : topicsOf(g, known);
+    return { script: g, body: bodyOf(o.model, topics.length > 0 ? keyedSystem : system, g.bundle, g.cls, units, topics) };
+  };
   const groups = [...plan.scripts, ...(plan.strings?.batches ?? []), ...(plan.texts?.batches ?? []), ...(plan.program?.batches ?? [])];
-  const jobs = groups.map((g) => jobOf(g, g.units.filter((u) => !u.done))).filter((j) => j.script.units.some((u) => !u.done));
-  if (jobs.length === 0) {
+  const jobsOf = () => [
+    ...(plan.glossary ? [jobOf(plan.glossary, plan.glossary.units)] : []),
+    ...groups.map((g) => jobOf(g, g.units.filter((u) => !u.done))).filter((j) => j.script.units.some((u) => !u.done)),
+  ];
+  if (jobsOf().length === 0) {
     say('Nothing to translate: nothing was sent.');
     return 1;
   }
 
   // The boundary: the route named, the first payload written, and the owner's go.
   say(`Route: llmux on this machine (${route.origin}), then ${providerOf(o.model)} (model ${o.model}).`);
-  const parts = new Set(jobs.map((j) => j.script.kind));
-  const what = [plan.scripts.length > 0 ? 'one script\'s lines with its NPC\'s name and description' : null,
-    parts.has('strings') ? `up to ${STRINGS_PER_REQUEST} of the game's own strings` : null,
-    parts.has('texts') ? `up to ${LOOK_PER_REQUEST} object names or ${BOOKS_PER_REQUEST} books` : null,
-    parts.has('program') ? `up to ${U_PER_REQUEST} lines of the opening and character creation` : null].filter(Boolean).join(', or ');
-  say(`It sends the owner's game text: ${jobs.length} requests, each ${what}; up to ${o.jobs} at a time, `
-    + 'and a request again for lines that fail the checks.');
   let release;
   try {
     await privateDir(o.out);
@@ -1382,9 +1888,23 @@ export async function main(argv, {
       }
       say(`Pack: ${packPath} holds ${existing.converse.length} lines, ${existing.tables.length} table strings and `
         + `${existing.strings.length} game strings${existing.look.length + existing.books.length > 0 ? `, ${existing.look.length} object names and ${existing.books.length} books` : ''}`
-        + `${existing.u.length > 0 ? `, ${existing.u.length} strings of u` : ''}; what this run translates is merged into it.`);
+        + `${existing.u.length > 0 ? `, ${existing.u.length} strings of u` : ''}`
+        + `${existing.aliases.length > 0 ? `, ${existing.aliases.length} keyword aliases` : ''}; what this run translates is merged into it.`);
     }
-    return await consentAndSend(o, plan, jobs, jobOf, existing, route, { transport, stdin, stdout, isTTY, signals, now, say });
+    // The words the pack settles, and the keys shared by enough of the scripts it does not.
+    for (const [k, w] of knownOf(existing)) known.set(k, w);
+    plan.glossary = glossaryOf(plan.scripts, new Set(known.keys()));
+    const jobs = jobsOf();
+    const parts = new Set(jobs.map((j) => j.script.kind));
+    const what = [plan.scripts.length > 0 ? 'one script\'s lines (and its keywords) with its NPC\'s name and description' : null,
+      parts.has('glossary') ? `the keywords at least ${GLOSSARY_SCRIPTS} of the scripts share (up to ${GLOSSARY_KEYS}, each with up to `
+        + `${GLOSSARY_SHOWN} of the words their lines highlight)` : null,
+      parts.has('strings') ? `up to ${STRINGS_PER_REQUEST} of the game's own strings` : null,
+      parts.has('texts') ? `up to ${LOOK_PER_REQUEST} object names or ${BOOKS_PER_REQUEST} books` : null,
+      parts.has('program') ? `up to ${U_PER_REQUEST} lines of the opening and character creation` : null].filter(Boolean).join(', or ');
+    say(`It sends the owner's game text: ${jobs.length} requests, each ${what}; up to ${o.jobs} at a time, `
+      + `${parts.has('glossary') ? 'the shared keywords first, ' : ''}and a request again for lines that fail the checks.`);
+    return await consentAndSend(o, plan, jobs, jobOf, existing, known, route, { transport, stdin, stdout, isTTY, signals, now, say });
   } finally {
     await release();
   }
@@ -1392,8 +1912,8 @@ export async function main(argv, {
 
 // From the preview to the last file, with `o.out`'s lock held (tools/speech/profile.mjs's order):
 // the preview of this run (a name of its own), the owner's go, the requests, the gates, the
-// files.
-async function consentAndSend(o, plan, jobs, jobOf, existing, route, { transport, stdin, stdout, isTTY, signals, now, say }) {
+// files. `known`: the words settled for the keys, which the shared keywords' answer adds to.
+async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { transport, stdin, stdout, isTTY, signals, now, say }) {
   const previewDir = join(o.out, 'preview');
   const preview = join(previewDir, `first-request-${process.pid}-${randomBytes(6).toString('hex')}.json`);
   try {
@@ -1425,22 +1945,23 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, route, { transport
     }
   }
 
-  // The requests: each script and each batch of game strings once (asked again once when the
-  // request fails or its answer does not read), then once more for its lines that failed the
-  // gates.
+  // The requests: the shared keywords first (slice K5b: their words reach every script's request
+  // as `known`; the scripts go without them when it fails), then each script and each batch of
+  // game strings once (asked again once when the request fails or its answer does not read), then
+  // once more for its lines that failed the gates.
   const stopper = new AbortController();
   const onSignal = () => stopper.abort();
   signals.on('SIGINT', onSignal);
   const t0 = now();
   const counts = { requests: 0, retried: 0, input: 0, output: 0, usage: 0 };
   let halted = '';
-  const send = async (list, tries) => {
+  const send = async (list, tries, parse = linesOfAnswer) => {
     const sent = await sendAll(list, {
       transport: transport ?? llmuxTransport(route),
       jobs: o.jobs,
       timeoutMs: o.timeoutS * 1000,
       stop: stopper.signal,
-      parse: linesOfAnswer,
+      parse,
       tries,
     });
     for (const k of Object.keys(counts)) counts[k] += sent.counts[k];
@@ -1449,9 +1970,23 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, route, { transport
   };
   let again = [];
   try {
-    const first = await send(jobs, 2);
+    let list = jobs;
+    if (plan.glossary) {
+      const gl = plan.glossary;
+      const [r] = await send([jobs[0]], 2, keywordsOfAnswer);
+      const { words, failed } = r.ok ? aliasesOf(gl.units.map((u) => u.k), r.keywords, gl.compatible) : { words: new Map(), failed: new Map() };
+      for (const u of gl.units) {
+        if (words.has(u.k)) u.ko = words.get(u.k);
+        else u.why = r.ok ? failed.get(u.k) : r.reason;
+      }
+      for (const [k, w] of words) known.set(k, w);
+      list = jobs.slice(1).map((j) => (j.script.kind === 'script' ? jobOf(j.script, j.script.units.filter((u) => !u.done)) : j));
+    }
+    // A route that refused the shared keywords' request is sent nothing more.
+    const first = halted ? list.map(() => ({ ok: false, reason: 'not-sent' })) : await send(list, 2);
     first.forEach((r, i) => {
-      const s = jobs[i].script;
+      const s = list[i].script;
+      if (s.kind === 'script') settleKeys(s, r, existing);
       const { good, failed } = checked(s, r.ok ? r : null);
       for (const u of s.units) {
         if (u.done) continue;
@@ -1461,7 +1996,7 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, route, { transport
       // Lines an answer gave that failed the gates (or that it lacked) are asked again once; a
       // request that failed was already asked again.
       const retry = s.units.filter((u) => !u.done);
-      if (r.ok && retry.length > 0 && !halted && !stopper.signal.aborted) again.push(jobOf(s, retry));
+      if (r.ok && retry.length > 0 && !halted && !stopper.signal.aborted) again.push(jobOf(s, retry, true));
     });
     say(`  first round: ${jobs.length} requests answered in ${seconds(now() - t0)}; ${again.reduce((n, j) => n + j.script.units.filter((u) => !u.done).length, 0)} lines to ask again`);
     if (again.length > 0) {
@@ -1496,6 +2031,14 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, route, { transport
       + `scripts translated ${coverage.scripts.translated} of ${coverage.scripts.chosen}.`);
     const t = coverage.tables;
     if (t.found > 0) say(`Table strings: ${t.found} found, ${t.translated} translated, ${t.leftEnglish} left English${reasons(t)}.`);
+    const g = coverage.glossary;
+    if (g.found > 0) say(`Shared keywords: ${g.found} asked before the scripts, ${g.translated} given a word${reasons(g)}.`);
+    const k = coverage.keywords;
+    if (k.found > 0 || k.dropped > 0) {
+      const keptOld = k.kept.count > 0 ? `, ${k.kept.count} kept the pack's word${reasons(k.kept)}` : '';
+      say(`Keywords: ${k.found} found, ${k.translated} given a Korean word${keptOld}, ${k.leftEnglish} left English${reasons(k)}`
+        + `${k.dropped > 0 ? `; ${k.dropped} lines the pack had left English again (their keywords' words changed)` : ''}.`);
+    }
   }
   if (plan.strings) {
     const c = coverage.strings;
@@ -1520,8 +2063,10 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, route, { transport
     const path = join(o.out, 'ko.u6lp');
     const texts = out.total.look + out.total.books > 0 ? `, ${out.total.look} object names, ${out.total.books} books` : '';
     const program = out.total.u > 0 ? `, ${out.total.u} strings of u` : '';
+    const aliases = out.total.aliases > 0 ? `, ${out.total.aliases} keyword aliases` : '';
     written.push(`${path} (${await writePrivate(path, out.pack)} bytes: ${out.total.runs} lines, ${out.total.tables} table strings, `
-      + `${out.total.strings} game strings${texts}${program}; ${out.runs + out.tables + out.strings + out.look + out.books + out.u} from this run)`);
+      + `${out.total.strings} game strings${texts}${program}${aliases}; `
+      + `${out.runs + out.tables + out.strings + out.look + out.books + out.u + out.aliases} from this run)`);
   }
   const cpath = join(o.out, 'coverage.json');
   written.push(`${cpath} (${await writePrivate(cpath, JSON.stringify(coverage, null, 1))} bytes)`);
@@ -1531,7 +2076,8 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, route, { transport
   if (stopper.signal.aborted) return 130;
   if (!out.pack) return 3;
   const leftEnglish = coverage.units.leftEnglish + coverage.tables.leftEnglish + coverage.strings.leftEnglish
-    + coverage.look.leftEnglish + coverage.books.leftEnglish + coverage.u.leftEnglish;
+    + coverage.look.leftEnglish + coverage.books.leftEnglish + coverage.u.leftEnglish + coverage.keywords.leftEnglish
+    + coverage.keywords.dropped;
   return leftEnglish > 0 ? 3 : 0;
 }
 

@@ -344,3 +344,27 @@ fn the_fingerprint_is_of_the_set_of_scripts() {
         "200c9bb3451c6be0"
     );
 }
+
+/// Slice K5b: the translation tool's pack with keyword aliases (`tool-pack.json`: the JSON its
+/// `packBytes` writes after the magic, made-up words; tools/i18n/translate.test.mjs writes the
+/// same pack and compares it with this file byte for byte) reads, and the engine writes it back
+/// byte for byte, so the tool's writer and the engine's cannot drift.
+#[test]
+fn the_tools_pack_with_keyword_aliases_reads_and_is_written_back_byte_for_byte() {
+    let file = [&MAGIC[..], b"\n", include_bytes!("tool-pack.json")].concat();
+    let pack = Pack::parse(&file).expect("the tool's pack reads");
+    assert_eq!(pack.to_bytes(), file, "the engine writes the tool's bytes");
+    assert_eq!((pack.runs(), pack.tables(), pack.scripts()), (2, 1, 2));
+    assert_eq!(pack.aliased_keywords(), 3);
+    let words = |script, keyword: &[u8]| {
+        pack.aliases(script, keyword).map(|w| {
+            w.iter()
+                .map(|w| String::from_utf8(w.clone()).unwrap())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(words((b'a', 3), b"plo"), Some(vec!["술".to_string()]));
+    assert_eq!(words((b'a', 3), b"fl?n"), Some(vec!["과자".to_string()]));
+    assert_eq!(words((b'b', 7), b"zub"), Some(vec!["주브".to_string()]));
+    assert_eq!(words((b'b', 7), b"plo"), None, "a key of the other script");
+}
