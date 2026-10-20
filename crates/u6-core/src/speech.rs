@@ -17,6 +17,9 @@
 //!   more prompt waits before the line it ends is drawn, so there only what is drawn is let out
 //!   ([`flush_drawn`]): the codes of that line stay for the next flush, after the player pages
 //!   on. The tap knows them by a mark per cell of the line being assembled ([`mark`]).
+//! - **Language.** Each code kept carries whether it came with the Korean grammar; an
+//!   utterance is Korean when one of its own codes did ([`Lang::Ko`]), so the two parts the more
+//!   prompt splits take a language each.
 //! - **Queue.** Capped like the message transcript ([`QUEUE`]), the oldest dropped.
 //!
 //! Rights (spec 01): an utterance's text is the user's game text. It leaves the engine only
@@ -49,7 +52,7 @@ pub enum Kind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lang {
     En,
-    /// Some of it came while the text layer had the Korean grammar (the Korean pack, spec 08).
+    /// A code of it came while the text layer had the Korean grammar (the Korean pack, spec 08).
     Ko,
 }
 
@@ -115,8 +118,8 @@ pub struct SpeechTap {
     buf: String,
     /// Code points in `buf`.
     chars: usize,
-    /// Part of `buf` came with the Korean grammar.
-    korean: bool,
+    /// For each code point of `buf`, in order: it came with the Korean grammar.
+    korean: Vec<bool>,
     /// The actor op `0xbf` made the speaker, until the next input op.
     speaker: Option<i16>,
     /// Bit `n`: cell `n` of the line being assembled ([`crate::ui::TextState::line`]) holds a
@@ -146,7 +149,7 @@ pub fn set_enabled(s: &mut State, on: bool) {
         t.capturing = false;
         t.buf.clear();
         t.chars = 0;
-        t.korean = false;
+        t.korean.clear();
         t.speaker = None;
         t.cells = 0;
         t.queue.clear();
@@ -184,7 +187,7 @@ pub(crate) fn capture(s: &mut State, messages: bool, language: Language, c: i32)
     let code = u16::try_from(c).unwrap_or(u16::MAX);
     t.buf.push(crate::ui::wide::cell_char(code));
     t.chars += 1;
-    t.korean |= language == Language::Korean;
+    t.korean.push(language == Language::Korean);
     if t.chars >= TEXT_MAX {
         flush(s);
     }
@@ -212,7 +215,7 @@ pub(crate) fn marked(s: &State, start: usize, end: usize) -> usize {
 
 /// [`flush`] at a wait before the line being assembled is drawn (the more prompt): the last
 /// `held` codes kept, those of that line, stay for the next flush; what comes before them, all
-/// drawn, is let out.
+/// drawn, is let out. Each part keeps the language marks of its own codes.
 pub(crate) fn flush_drawn(s: &mut State, held: usize) {
     if !s.speech.enabled {
         return;
@@ -225,21 +228,22 @@ pub(crate) fn flush_drawn(s: &mut State, held: usize) {
         .nth(t.chars - held)
         .map_or(t.buf.len(), |(i, _)| i);
     let tail = t.buf.split_off(at);
-    let korean = t.korean;
+    let korean = t.korean.split_off(t.chars - held);
     flush(s);
     let t = &mut s.speech;
     t.buf = tail;
     t.chars = held;
-    t.korean = korean && held > 0;
+    t.korean = korean;
 }
 
-/// Ends the current utterance: queued when it holds a character other than whitespace.
+/// Ends the current utterance: queued when it holds a character other than whitespace; Korean
+/// when one of its codes came with the Korean grammar.
 pub(crate) fn flush(s: &mut State) {
     if !s.speech.enabled {
         return;
     }
     let text = std::mem::take(&mut s.speech.buf);
-    let korean = std::mem::take(&mut s.speech.korean);
+    let korean = std::mem::take(&mut s.speech.korean).contains(&true);
     s.speech.chars = 0;
     if text.chars().all(char::is_whitespace) {
         return;

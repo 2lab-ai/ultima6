@@ -3532,15 +3532,34 @@ const SENTINEL = 'Zq9Sentinel';
 const MODEL_DIR = () => join(h.MODELS, 'supertonic3', '724fb5abbf5502583fb520898d45929e62f02c0b');
 
 // One utterance as the engine's speech tap hands it to the page (Game.take_speech), made up.
-const utterance = (turn, text) => ({
-  seq: turn, turn, speaker: 9, script: null, text, lang: 'en', traits: { type: 0, worktype: 0, alignment: 0 },
+const utterance = (turn, text, lang = 'en') => ({
+  seq: turn, turn, speaker: 9, script: null, text, lang, traits: { type: 0, worktype: 0, alignment: 0 },
 });
 
+// Spec 09 Order 6: the test's own line in Hangul (made-up words) and one in English.
+const VOICE_KO = '몰칸 브레딘 숩, 타례 고닌.';
+const VOICE_EN = 'Zorvel quint plosk varrow.';
+
+// Once the worker has ended every line sent to it: the Korean line and the English one, in one
+// turn (`turn`, newer than any before), each reach the worker's `speak` with its own language and
+// its exact text, and are spoken out.
+async function saysEachLanguage(page, turn, timeout) {
+  await waitVoice(page, () => window.__replies.length === window.__speaks.length, null, timeout);
+  const from = await page.evaluate(() => [window.__speaks.length, window.__replies.length,
+    Number(document.body.dataset.voiceDropped)]);
+  await page.evaluate((list) => window.__speech.push(...list), [utterance(turn, VOICE_KO, 'ko'), utterance(turn, VOICE_EN)]);
+  await waitVoice(page, ([, r, d]) => window.__replies.length >= r + 2 || Number(document.body.dataset.voiceDropped) > d,
+    from, timeout);
+  const sent = await page.evaluate(([s]) => window.__speaks.slice(s).map((m) => [m.lang, m.text]), from);
+  assert.deepEqual(sent, [['ko', VOICE_KO], ['en', VOICE_EN]], 'each line to the worker with its language and its exact text');
+  assert.deepEqual(await page.evaluate(([, r]) => window.__replies.slice(r), from), ['done', 'done'], 'both spoken out');
+}
+
 // Before the page's scripts: the Workers made, each line sent to them (`__speaks`: its seed,
-// steps and profile) and how each utterance ended in the worker (`done` or `cancelled`, in order),
-// the storage persist calls, and each scheduled audio source's start and stop (seconds after the
-// context's time then) and each linear ramp of a gain [value, at]; the samples of every buffer
-// filled (`__pcm`, for the ASR of the test's own line).
+// steps, profile, language and text, the test's own) and how each utterance ended in the worker
+// (`done` or `cancelled`, in order), the storage persist calls, and each scheduled audio source's
+// start and stop (seconds after the context's time then) and each linear ramp of a gain [value,
+// at]; the samples of every buffer filled (`__pcm`, for the ASR of the test's own line).
 function voiceProbe() {
   window.__workers = 0;
   window.__speaks = [];
@@ -3559,7 +3578,9 @@ function voiceProbe() {
     });
     const post = worker.postMessage.bind(worker);
     worker.postMessage = (m, ...rest) => {
-      if (m?.type === 'speak') window.__speaks.push({ seed: m.seed, steps: m.steps, profile: m.profile });
+      if (m?.type === 'speak') {
+        window.__speaks.push({ seed: m.seed, steps: m.steps, profile: m.profile, lang: m.lang, text: m.text });
+      }
       return post(m, ...rest);
     };
     return worker;
@@ -3778,7 +3799,7 @@ async function heard(wav) {
   }
 }
 
-test('voices with WebGPU: accepted, downloaded, checked and warmed up to ready (cold start reported); a 60-character line sounds within 1 s and ASR hears it; a key cancels with an 80 ms fade, and so does a newer turn; Mute silences the voice gain; above 4x nothing is said; a reload starts from the cache with nothing downloaded; a corrupted cached part is fetched again; Forget voices empties the cache (receipt)', async (env) => {
+test('voices with WebGPU: accepted, downloaded, checked and warmed up to ready (cold start reported); a 60-character line sounds within 1 s and ASR hears it; a key cancels with an 80 ms fade, and so does a newer turn; a Korean line and an English one reach the worker each in its language and are spoken; Mute silences the voice gain; above 4x nothing is said; a reload starts from the cache with nothing downloaded; a corrupted cached part is fetched again; Forget voices empties the cache (receipt)', async (env) => {
   const g = await gpuGame(env);
   if (!g) {
     console.log('  receipt: skipped: this Chromium has no WebGPU adapter');
@@ -3845,6 +3866,8 @@ test('voices with WebGPU: accepted, downloaded, checked and warmed up to ready (
   await waitVoice(page, () => document.body.dataset.voiceCancels === '2' && document.body.dataset.voiceSpoken === '4', null, 30_000);
   cut = await page.evaluate(() => [...window.__stops]);
   assert.ok(cut.length >= 1 && cut.every((s) => Math.abs(s - 0.08) < 0.02), 'the newer turn fades the old speech out');
+  // A Korean line and an English one reach the worker each in its language (spec 09 Order 6).
+  await saysEachLanguage(page, 5, 30_000);
   // Mute: the voice gain 0 with the music's, and back.
   await page.click('#mute');
   assert.equal((await voiceShown(page)).gain, '0.00', 'muted: the voice gain 0');
@@ -3854,7 +3877,7 @@ test('voices with WebGPU: accepted, downloaded, checked and warmed up to ready (
   for (let i = 0; i < 5; i += 1) await page.click('#faster');
   assert.equal(await page.evaluate(() => document.getElementById('screen').dataset.speed), '6');
   const before = await voiceShown(page);
-  await page.evaluate((u) => window.__speech.push(u), utterance(5, LINE_60));
+  await page.evaluate((u) => window.__speech.push(u), utterance(6, LINE_60));
   await waitVoice(page, (n) => Number(document.body.dataset.voiceDropped) > n, before.dropped, 10_000);
   assert.equal((await voiceShown(page)).spoken, before.spoken, 'at 6x: not said');
   for (let i = 0; i < 5; i += 1) await page.click('#slower');
@@ -3917,7 +3940,7 @@ function heardInOrder(line, asr) {
   return { hit: asr.length > 0 ? lcs[want.length - 1][asr.length - 1] : 0, of: want.length };
 }
 
-test('voices without WebGPU: on the CPU, a runtime that does not start turns voices off with its own content-free line while the game runs on; accepted, downloaded, checked and warmed up to ready on the CPU, which the ready line and the chip say (cold start reported); a 60-character line plays and ASR hears it (first audio reported); the game runs on while a long line is made; a key cancels with an 80 ms fade, and so does a newer turn, the worker dropping the line it makes; Forget voices empties the cache and the acceptance (receipt)', async (env) => {
+test('voices without WebGPU: on the CPU, a runtime that does not start turns voices off with its own content-free line while the game runs on; accepted, downloaded, checked and warmed up to ready on the CPU, which the ready line and the chip say (cold start reported); a 60-character line plays and ASR hears it (first audio reported); the game runs on while a long line is made; a key cancels with an 80 ms fade, and so does a newer turn, the worker dropping the line it makes; a Korean line and an English one reach the worker each in its language and are spoken; Forget voices empties the cache and the acceptance (receipt)', async (env) => {
   const ortPart = /onnxruntime-web\/1\.30\.0\/ort-wasm-simd-threaded\.asyncify\.wasm\.part0$/;
   // The CPU runtime that does not start: the worker's WebAssembly refuses to instantiate,
   // installed before the first part arrives.
@@ -4012,6 +4035,8 @@ test('voices without WebGPU: on the CPU, a runtime that does not start turns voi
   const floor = Number(await page.evaluate(() => document.body.dataset.voiceSteps));
   console.log(`  receipt: CPU steps after four lines ${floor}`);
   assert.ok(floor >= 3 && floor <= 16, 'the steps stay within the CPU floor and 16');
+  // A Korean line and an English one reach the worker each in its language (spec 09 Order 6).
+  await saysEachLanguage(page, 5, 120_000);
   // Forget voices: the cache emptied, the acceptance forgotten, off.
   await page.click('#forget-voices');
   await waitVoice(page, (want) => document.getElementById('status').textContent === want, await line('voiceForgot'), 10_000);
@@ -4081,6 +4106,34 @@ test('voices fail recoverably: a part that does not download, a part whose bytes
   assert.ok(!where.includes(SENTINEL), 'not in the page\'s data, text or storage');
   assert.ok(!text.some((m) => m.includes(SENTINEL)), 'not in the console of the page or its worker');
 }, { needs: () => h.haveHfes() && h.haveModels() });
+
+// Spec 09 Order 6: the worker's text preparation (site/voice/worker.js, its text section, from
+// core.py's UnicodeProcessor) run alone, with a made-up index table in place of the model's: it
+// holds the printable ASCII and every Hangul jamo (U+1100..U+11FF), as the model's does. Nothing
+// is downloaded: the section reads the table only (`S.indexer`).
+test('voice text: a Hangul line prepares to its jamo, in order, in <ko>…</ko> with no character dropped; a character the index table lacks is left out; an English line in <en>', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const source = await readFile(join(h.SITE, 'voice', 'worker.js'), 'utf8');
+  const from = source.indexOf('// --- text (core.py UnicodeProcessor)');
+  const to = source.indexOf('// --- loading');
+  assert.ok(from >= 0 && to > from, 'the worker\'s text section');
+  const indexer = new Array(0x1200).fill(-1);
+  let next = 0;
+  for (const [a, b] of [[0x20, 0x7e], [0x1100, 0x11ff]]) {
+    for (let c = a; c <= b; c += 1) {
+      indexer[c] = next;
+      next += 1;
+    }
+  }
+  const { preprocess } = runInNewContext(`${source.slice(from, to)}\n;({ preprocess })`, { S: { indexer } });
+  const jamo = VOICE_KO.normalize('NFKD');
+  assert.ok(jamo.length > VOICE_KO.length && [...jamo].every((c) => indexer[c.codePointAt(0)] >= 0), 'the line is jamo the table holds');
+  const ko = preprocess(VOICE_KO, 'ko');
+  assert.equal(ko, `<ko>${jamo}</ko>`, 'every jamo kept, in order');
+  assert.equal(ko.slice('<ko>'.length, -'</ko>'.length).normalize('NFC'), VOICE_KO, 'the syllables, composed again');
+  assert.equal(preprocess('몰칸ж 숩.', 'ko'), `<ko>${'몰칸 숩.'.normalize('NFKD')}</ko>`, 'a character the table lacks: left out');
+  assert.equal(preprocess(VOICE_EN, 'en'), `<en>${VOICE_EN}</en>`, 'an English line in <en>');
+});
 
 // --- voice profiles (spec 09 Design 4) -----------------------------------------------------
 

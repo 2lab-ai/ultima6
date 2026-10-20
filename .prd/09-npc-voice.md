@@ -6,7 +6,7 @@ tags: [ultima6, npc, tts, supertonic]
 
 # 09 — Per-NPC dialogue bundles, voice profiles, on-device Supertonic-3 TTS
 
-Status: planned (rev 3, 2026-10-16. rev 2 folded in the gpt-6-astra review: the bundle exporter before profiles, a consent boundary for the profile LLM, exact-text tap tests, defined latency, failure recovery, click-through model terms. rev 3 folds in the opus review, checked against the code: the tap flags only the converse text emitters, a defined speaker after `0xbf`, bundles keyed by script with 08's run catalog, an end-to-end receipt on the preview site. rev 4, 2026-10-19: without WebGPU the voices run on the CPU, per the owner, verbatim: "supertonic-3 webgpu없어도 작동하는데 없어도 나오게해줘"). This is user item 3 (`hd-i18n-voice/ssot.md`, verbatim):
+Status: in-progress (rev 5, 2026-10-20: slice V7, Korean speech (Order 6). A line the Korean pack (08) puts is said in Korean: the tap marks an utterance `ko` when one of its own characters was printed in the pack's grammar (where the more prompt splits what the tap kept, each part on its own), the player passes `lang` to the worker, and the worker reads the text as the model's jamo inside `<ko>`. Tests pin each hop: the tap on a synthetic pack, its split at a more prompt included, the page's `speak` message on the GPU and the CPU paths, and the worker's text preparation on a made-up index table. Korean speech is user item 3 with item 2's Korean, verbatim: "supertonic-3 이용해서 실시간 tts 붙여주고 npc가 대사할때 tts 플레이해줘", "처음 시작시에 영어, 한글 고를수 있게 해주고 i18n 구현해줘". On preview, not in production: V1–V3, the tap, the hosted model, and the worker and player with the CPU path (`voice`); V4, a voice per NPC from the type-class table (`npc-voices`); V5, the NPC bundles (`npc`); V6, the personality voice pack tool and the page's pack loader (`voice-pack`). The owner's own pack run waits on his typed `yes`. Spec history: rev 3, 2026-10-16. rev 2 folded in the gpt-6-astra review: the bundle exporter before profiles, a consent boundary for the profile LLM, exact-text tap tests, defined latency, failure recovery, click-through model terms. rev 3 folds in the opus review, checked against the code: the tap flags only the converse text emitters, a defined speaker after `0xbf`, bundles keyed by script with 08's run catalog, an end-to-end receipt on the preview site. rev 4, 2026-10-19: without WebGPU the voices run on the CPU, per the owner, verbatim: "supertonic-3 webgpu없어도 작동하는데 없어도 나오게해줘"). This is user item 3 (`hd-i18n-voice/ssot.md`, verbatim):
 - Bundle each NPC's name and dialogue separately, for a later NpcBrain to imitate the NPC's speech.
 - Give each NPC a voice profile from its personality, for on-device TTS.
 - Attach real-time Supertonic-3 TTS, played when an NPC speaks.
@@ -67,7 +67,7 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
    - **Capture.** A port-only flag is raised only around the three speech emitters (`run.rs:86`, `exec.rs:228,241`), and only while the kind is Speech and the current window is the Messages window (as `transcript_end` checks, `print.rs:32`). In `put_raw`, text is captured after the capitalise step and before the runic bit, as code points (08 widens the path to `i32`). Look text, engine messages, the `0xbf` name and the player's echo are never captured.
    - **Speaker.** The speaker is `npc`. After `0xbf`, it is that op's actor (after `resolve_npc`) until the next input op, when it reverts to `npc`.
    - **Flush.** The buffer is flushed at each input op, at the `*` wait, the more prompt and `0xcb`'s key wait, at `0xbf`, and at the conversation's end.
-   - **Event.** Each flush emits `{seq, turn, speaker, script, text, lang, traits}`. `turn` increments each time the player gives input, and `script` is (archive, item). `lang` is `ko` when any part of the utterance came from the Korean pack, otherwise `en`.
+   - **Event.** Each flush emits `{seq, turn, speaker, script, text, lang, traits}`. `turn` increments each time the player gives input, and `script` is (archive, item). `lang` is `ko` when one of the utterance's characters came from the Korean pack (printed in its grammar), otherwise `en`. Where the more prompt splits what was kept, the part let out and the part held back each take the language of their own characters.
    - **Queue.** The tap runs only while voices are on (an enable flag set by the page). Its queue is capped like the transcript (`print.rs:35-38`), dropping the oldest.
    - **Export.** `Game::take_speech()` is a separate channel. Speech text never reaches the console, `dataset`, error reports or test output.
 2. **Model hosting (`tools/speech`).**
@@ -85,7 +85,7 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
    - **Steps.** Adaptive: halved when synthesis takes more than 0.5× the audio, doubled back below 0.15×.
      - On the GPU they start at 16 and stay within 4–16.
      - On the CPU they start at 4 and stay within 3–16. The floor is 3: it is the lowest count at which ASR still heard every content word in the CPU receipts (2 loses words), and it takes under half the audio's length on the reference machine.
-   - **Language.** `lang` is passed per utterance.
+   - **Language.** `lang` is passed per utterance. The worker wraps the text in that language's tokens (`<ko>…</ko>`, `<en>…</en>`) after NFKD, so a Hangul syllable is read as its jamo, which the model's index table holds.
    - **Player output.** A "voice" gain node runs parallel to the game gain, on the existing `AudioContext`. `setMuted` sets both. Above 4× speed (06), speech is not synthesized, because lines go by faster than they can be spoken.
    - **Queue and cancel.** One synthesis runs at a time. A newer `turn` cancels the old queue with an 80 ms fade, and the player's Enter, Escape, Space or more key also cancels. Speech never makes the game wait.
    - **Opt-in.** A "Voices (~400 MB)" opt-in, with a storage estimate and `navigator.storage.persist()`. A persistent "voice generated on this device" chip, and a "Voice model terms" notice linked from the page. "Forget voices" deletes the cached model, and "Forget NPC bundles" deletes the bundles; both sit next to the other forget buttons.
@@ -130,7 +130,8 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
    - both printing `0xb5` forms;
    - `0xbf` in the middle of a turn: its name is not captured, the speaker becomes its actor, and the speaker reverts to `npc` at the next input;
    - a `0xcb` wait, which flushes;
-   - with voices off, nothing is queued.
+   - with voices off, nothing is queued;
+   - with a Korean pack: an utterance that holds a run the pack puts is `ko`, with the pack's line as its text, even beside English runs; one that holds none is `en`; with the identity pack in English's grammar, every utterance is `en`; at a more prompt between a Korean run and an English one, the part drawn and the part held back each take their own language.
 
    A sentinel string in a synthetic conversation never appears in the console, in `document.body.dataset` or in an error payload.
 
@@ -145,6 +146,7 @@ Research notes stay outside the repo: `~/Games/ultima6/research/2026-10-15/r3-np
    - A key press cancels the speech.
    - Two NPCs of different classes sound different: their median F0 differs by at least 2 semitones, or their style embeddings by a cosine distance of at least 0.1.
    - **End to end, on the preview site with the owner's files:** talk to one NPC; its greeting plays, and ASR of the played audio matches the greeting text held locally. The receipt prints pass/fail only.
+   - **Korean, on the preview site with the owner's files:** with a synthetic Korean pack installed, an NPC's line from the pack plays, and Korean ASR of the played audio matches it by syllables. The receipt prints pass/fail only.
    - The machine-generated chip and the terms notice are visible.
 5. **Local outputs.**
    - The owner's voice pack gives every exported actor its personality profile; the coverage receipt shows 0 unexplained gaps.

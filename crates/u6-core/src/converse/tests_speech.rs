@@ -1,16 +1,23 @@
 //! The speech tap (spec 09 Design 1, Acceptance 2) on hand-built conversations: the exact text
 //! each flush queues, its speaker, its turn and the order, for the greeting, answers, the look
 //! text, the player's echo, an engine message, both printing forms of `0xb5`, `0xbf`, the waits
-//! that flush, and voices off. All text here is the test's own.
+//! that flush, and voices off; with a Korean pack (spec 09 Order 6), the language of each
+//! utterance. All text here is the test's own.
+
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use super::begin;
+use super::disasm::catalog::ScriptUnits;
 use super::seams;
 use super::tests::{chars, files, lib, packed, run, scroll, state};
+use super::tests_locale;
 use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
+use crate::locale::{self, Pack};
 use crate::speech::{self, Kind, Lang, Utterance};
 use crate::state::State;
-use crate::ui::WindowId;
+use crate::ui::{Language, WindowId};
 
 const NONE: Vec<InputEvent> = Vec::new();
 /// The script header of NPC 3 ("Ann", whose look text is "a woman"); its body follows.
@@ -162,11 +169,17 @@ fn undrawn(s: &State) -> String {
 
 /// A conversation with NPC 3 whose greeting is `greeting`, in `s`, run until it waits at its
 /// first more prompt; the engine (still waiting) and what was said by then.
-fn at_more_prompt(mut s: State, greeting: &[u8]) -> (Engine, Vec<Utterance>) {
-    speech::set_enabled(&mut s, true);
+fn at_more_prompt(s: State, greeting: &[u8]) -> (Engine, Vec<Utterance>) {
     let mut body = greeting.to_vec();
     body.push(0xb6);
-    let mut e = Engine::with_game(s, talk_files(&body), |st, io| async move {
+    wait_at_more(s, talk_files(&body))
+}
+
+/// A conversation with NPC 3 over `files`, in `s` with voices on, run until it waits at its
+/// first more prompt; the engine (still waiting) and what was said by then.
+fn wait_at_more(mut s: State, files: Files) -> (Engine, Vec<Utterance>) {
+    speech::set_enabled(&mut s, true);
+    let mut e = Engine::with_game(s, files, |st, io| async move {
         begin(&super::Cx::new(&st, &io), 0, 3).await;
     });
     for _ in 0..8 {
@@ -336,4 +349,152 @@ fn a_sentinel_said_reaches_only_take_speech() {
     assert!(!log.contains(SENTINEL), "the engine log");
     let stubs = format!("{:?}", e.stub_hits());
     assert!(!stubs.contains(SENTINEL), "the stub report");
+}
+
+// --- Korean speech (spec 09 Order 6) ------------------------------------------------------------
+
+/// The made-up Korean line of the greeting's run, and of the look text.
+const KO_GREETING: &str = "몰칸 브레딘 숩.";
+const KO_LOOK: &str = "누벨 한";
+
+/// The pack of `script` (NPC 3's, the locale tests' archive) in `language` holding only the runs
+/// `lines` gives a line for: every other run prints its English, in the English grammar.
+fn pack_of(script: &[u8], language: Language, lines: &[(&str, &str)]) -> Pack {
+    let units = ScriptUnits::build(b'a', 3, script);
+    let lines: BTreeMap<&str, &str> = lines.iter().copied().collect();
+    let all: BTreeMap<&str, &str> = units
+        .runs
+        .iter()
+        .map(|r| {
+            let t = r.unit.text.as_str();
+            (t, lines.get(t).copied().unwrap_or(t))
+        })
+        .collect();
+    let full = tests_locale::pack_for(script, language, &all);
+    let runs = units
+        .runs
+        .iter()
+        .filter(|r| lines.contains_key(r.unit.text.as_str()))
+        .map(|r| {
+            let key = (b'a', 3, r.unit.offset);
+            (key, full.run(key).cloned().expect("the pack has the run"))
+        });
+    Pack::new(language, "test/1", full.converse_base, runs).unwrap()
+}
+
+/// A conversation with NPC 3 over `script` (the locale tests' archive) typing `keys`, voices on,
+/// with `pack` installed; the utterances queued.
+fn talk_packed(script: &[u8], pack: Pack, keys: &str) -> Vec<Utterance> {
+    let f = tests_locale::talk_files(script);
+    let mut s = state(&[]);
+    locale::install(&mut s, &f, Rc::new(pack), None).expect("the pack checks");
+    speech::set_enabled(&mut s, true);
+    let (_, mut s) = run!(s, f, chars(keys), |cx| begin(cx, 0, 3).await);
+    speech::take(&mut s)
+}
+
+/// (seq, turn, text, lang) of each utterance.
+fn said_in(u: &[Utterance]) -> Vec<(u32, u32, &str, Lang)> {
+    u.iter()
+        .map(|u| (u.seq, u.turn, u.text.as_str(), u.lang))
+        .collect()
+}
+
+#[test]
+fn a_run_the_korean_pack_has_is_said_as_its_korean_and_one_it_lacks_in_english() {
+    // The pack has the greeting's run (and the look text, which is not said), not the answer's:
+    // the greeting is said as the pack's line exactly, marked Korean; the answer as its English,
+    // marked English.
+    let script = tests_locale::script(b"Zorvel quint.\xf7Plosk varrow.\xb6");
+    let ko = pack_of(
+        &script,
+        Language::Korean,
+        &[("a woman", KO_LOOK), ("Zorvel quint.", KO_GREETING)],
+    );
+    let u = talk_packed(&script, ko, "x\n");
+    assert_eq!(
+        said_in(&u),
+        [
+            (0, 0, KO_GREETING, Lang::Ko),
+            (1, 1, "Plosk varrow.", Lang::En)
+        ]
+    );
+    assert!(u.iter().all(|u| !u.text.contains(KO_LOOK)));
+    // The codes the page's voice worker is told.
+    assert_eq!((Lang::Ko.code(), Lang::En.code()), ("ko", "en"));
+    // The identity pack in the English grammar: every run its own text, and both English.
+    let units = ScriptUnits::build(b'a', 3, &script);
+    let identity: Vec<(&str, &str)> = units
+        .runs
+        .iter()
+        .map(|r| (r.unit.text.as_str(), r.unit.text.as_str()))
+        .collect();
+    let en = pack_of(&script, Language::English, &identity);
+    let u = talk_packed(&script, en, "x\n");
+    assert_eq!(
+        said_in(&u),
+        [
+            (0, 0, "Zorvel quint.", Lang::En),
+            (1, 1, "Plosk varrow.", Lang::En)
+        ]
+    );
+}
+
+#[test]
+fn an_utterance_a_korean_run_is_part_of_is_korean() {
+    // Three runs with no wait between them (two assignments part them): English, the pack's
+    // Korean, English. They are one utterance, and it is Korean, as any part of it is.
+    let body =
+        b"Ennor plast.\xa6\x00\xb2\xa8\x07\xa7Zorvel quint.\xa6\x00\xb2\xa8\x07\xa7Dabbet wun.\xb6";
+    let script = tests_locale::script(body);
+    let ko = pack_of(
+        &script,
+        Language::Korean,
+        &[("a woman", KO_LOOK), ("Zorvel quint.", KO_GREETING)],
+    );
+    let u = talk_packed(&script, ko, "");
+    let whole = format!("Ennor plast.{KO_GREETING}Dabbet wun.");
+    assert_eq!(said_in(&u), [(0, 0, whole.as_str(), Lang::Ko)]);
+    // The same pack less that run: the utterance is all English, and so is its language.
+    let ko = pack_of(&script, Language::Korean, &[("a woman", KO_LOOK)]);
+    let u = talk_packed(&script, ko, "");
+    assert_eq!(
+        said_in(&u),
+        [(0, 0, "Ennor plast.Zorvel quint.Dabbet wun.", Lang::En)]
+    );
+}
+
+#[test]
+fn at_a_more_prompt_between_a_korean_run_and_an_english_one_each_part_has_its_own_language() {
+    // Three rows before the prompt, as in the more prompt test above: the look line, the first
+    // run's row, and the second run's first row, whose newline waits at it before that row is
+    // drawn. So the first run is said at the prompt, and the second, its row held back, after the
+    // key: each part with the language of its own characters, not of what the tap held.
+    let split = |body: &[u8]| {
+        let script = tests_locale::script(body);
+        let ko = pack_of(
+            &script,
+            Language::Korean,
+            &[
+                ("a woman", KO_LOOK),
+                ("Zorvel\n", "몰칸\n"),
+                ("Zorvel\nquint.", "몰칸\n브레딘."),
+            ],
+        );
+        let f = tests_locale::talk_files(&script);
+        let mut s = state(&[]);
+        locale::install(&mut s, &f, Rc::new(ko), None).expect("the pack checks");
+        s.ui.text.more_rows = 3;
+        let (mut e, first) = wait_at_more(s, f);
+        let rest = page_on(&mut e);
+        (first, rest)
+    };
+    // The Korean run drawn, the English one held.
+    let (first, rest) = split(b"Zorvel\n\xa6\x00\xb2\xa8\x07\xa7Plosk\nvarrow.\xb6");
+    assert_eq!(said_in(&first), [(0, 0, "몰칸\n", Lang::Ko)]);
+    assert_eq!(said_in(&rest), [(1, 0, "Plosk\nvarrow.", Lang::En)]);
+    // The English run drawn, the Korean one held.
+    let (first, rest) = split(b"Plosk\n\xa6\x00\xb2\xa8\x07\xa7Zorvel\nquint.\xb6");
+    assert_eq!(said_in(&first), [(0, 0, "Plosk\n", Lang::En)]);
+    assert_eq!(said_in(&rest), [(1, 0, "몰칸\n브레딘.", Lang::Ko)]);
 }
