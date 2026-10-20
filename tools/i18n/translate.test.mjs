@@ -724,9 +724,9 @@ test('slice K5b: a script\'s keys are its keywords as the keyword block keys the
     { keys: [{ k: 'plo', shown: ['plod', 'plods'] }, { k: 'plods', shown: [] }] },
     { keys: [{ k: 'fl?n', shown: ['flan'] }] },
     { keys: [{ k: 'zub', shown: ['zubbo'], known: '나' }] },
-    { keys: [{ k: 'zubbo', shown: [] }, { k: 'zub', shown: ['zubbo'], known: '나' }] },
+    { keys: [{ k: 'zubbo', shown: [] }] },
     { keys: [{ k: 'quux', shown: [] }] },
-  ], 'one entry per block with keys, a key two blocks list in both, known where settled');
+  ], 'one entry per block with keys, a key two blocks list only in its first (listed twice, it may be answered twice), known where settled');
 });
 
 // The request's bytes include the style guide, which this slice changes on purpose: the claim is
@@ -941,8 +941,7 @@ test('slice K5b: the alias gate\'s refusals (ASCII, too long, empty, a space, tw
   assert.equal(retry.lines.length, 1);
   assert.deepEqual(retry.topics, [
     { keys: [{ k: 'kah', shown: ['kah'], known: '한말' }, { k: 'kai', shown: ['kai'], known: '한말' }] },
-    { keys: [{ k: 'kah', shown: ['kah'], known: '한말' }] },
-  ], 'only the keys with a word, each with it');
+  ], 'only the keys with a word, each with it, each once');
   const pack = await packOf(f.out);
   assert.equal(pack.converse.length, unitsOf(b).length, 'every line landed');
   assert.deepEqual(pack.tables.map((x) => x.text), [fakeKo('a @kah cup', kept)]);
@@ -1081,8 +1080,8 @@ test('slice K5b: the merge: a script answered again has its new words replace th
   };
   const two = await run([f.bundles, '--item', `a:${X}`, '--out', f.out, '--send'], second);
   assert.equal(two.code, 3);
-  assert.deepEqual(userOf(bodies[0]).topics.flatMap((x) => x.keys).map((x) => [x.k, x.known]), [['plo', '술'], ['plo', '술'], ['quux', '무엇']],
-    'known from the pack there (plo in both of its blocks)');
+  assert.deepEqual(userOf(bodies[0]).topics.flatMap((x) => x.keys).map((x) => [x.k, x.known]), [['plo', '술'], ['quux', '무엇']],
+    'known from the pack there (plo once, in the first of its blocks)');
   const pack2 = await packOf(f.out);
   assert.deepEqual(pack2.aliases, [alias(X, 'plo', '탁주'), alias(X, 'quux', '무엇'), alias(Y, 'plo', '술')], 'plo replaced; quux and Y stay');
   assert.ok(!pack2.converse.some((r) => r.item === X && r.hash === hashOf(again)), 'the older line with the old word dropped');
@@ -1183,6 +1182,69 @@ test('slice K5b: a new word is checked against the words the pack keeps for the 
   await rm(f.dir, { recursive: true });
 });
 
+test('slice K5c: a key answered twice with the same word takes it and is counted translated, not repeated; the request lists a key two blocks hold once, in its first block, and a line asked again too', async () => {
+  const T = 7961;
+  const b = kbundle('a', T, '0000000000147961', `${SENTINEL}Twice`, [
+    [['zorb', 'vexl'], 'Ask of the @zorb.'],
+    [['plim', 'zorb'], 'The @plim, or the @zorb.*'],
+  ]);
+  const words = new Map([['zorb', '달'], ['plim', '별']]);
+  const given = [{ k: 'zorb', ko: '달' }, { k: 'plim', ko: '별' }, { k: 'zorb', ko: '달' }, { k: 'vexl', ko: 'abc' }];
+  const bodies = [];
+  const send = async (body) => {
+    bodies.push(body);
+    const user = userOf(body);
+    const lines = user.lines.map((l) => ({ n: l.n, ko: fakeKo(l.en, words) }));
+    // The first answer drops the line's escape, so that line is asked again.
+    if (bodies.length === 1) for (const l of lines) l.ko = l.ko.replace('*', '');
+    return answer(lines, bodies.length === 1 ? given : []);
+  };
+  const f = await kfixture([b]);
+  const r = await run([f.bundles, '--item', `a:${T}`, '--out', f.out, '--send'], send);
+  assert.equal(r.code, 3, 'written; vexl left English');
+  assert.equal(bodies.length, 2, 'the script, then the failed line again');
+  assert.deepEqual(userOf(bodies[0]).topics, [
+    { keys: [{ k: 'zorb', shown: ['zorb'] }, { k: 'vexl', shown: [] }] },
+    { keys: [{ k: 'plim', shown: ['plim'] }] },
+  ], 'zorb once, in its first block');
+  assert.deepEqual(userOf(bodies[1]).topics, [
+    { keys: [{ k: 'zorb', shown: ['zorb'], known: '달' }] },
+    { keys: [{ k: 'plim', shown: ['plim'], known: '별' }] },
+  ], 'asked again: the keys with a word, zorb alone in its first block');
+  const pack = await packOf(f.out);
+  assert.deepEqual(pack.aliases, [
+    { archive: 'a', item: T, keyword: 'plim', words: ['별'] }, { archive: 'a', item: T, keyword: 'zorb', words: ['달'] },
+  ]);
+  assert.equal(pack.converse.length, unitsOf(b).length, 'every line landed');
+  for (const en of ['Ask of the @zorb.', 'The @plim, or the @zorb.*']) {
+    assert.ok(pack.converse.find((x) => x.hash === hashOf(en)).text.includes('@{달}'), 'each line of zorb highlights its word');
+  }
+  const coverage = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  assert.deepEqual(JSON.parse(coverage).keywords, {
+    found: 3, translated: 2, kept: NONE_KEPT, leftEnglish: 1, byReason: { characters: 1 }, unexplained: 0, dropped: 0,
+  }, 'zorb translated, not repeated');
+  assert.deepEqual(JSON.parse(coverage).left.filter((x) => x.category === 'keywords').map((x) => [x.hash, x.reason]), [[hashOf('vexl'), 'characters']]);
+  assert.match(r.text, /Keywords: 3 found, 2 given a Korean word, 1 left English \(characters 1\)\./);
+  quiet(r.text, [b]);
+  noneOf(r.text + coverage, ['zorb', 'plim', 'vexl', 'abc', '달', '별']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('slice K5c: the alias gate takes entries giving a key one word as one entry; two different words stay repeated; the collision rules run after, so a word given twice that collides with another key\'s, or with one the pack keeps, is refused shared', () => {
+  const compatible = compatibleOf([['zorb'], ['plim']]);
+  const gate2 = (given, kept = new Map()) => {
+    const r = aliasesOf(['zorb', 'plim'], given, compatible, kept);
+    return [Object.fromEntries(r.words), Object.fromEntries(r.failed)];
+  };
+  const z = (ko) => ({ k: 'zorb', ko });
+  assert.deepEqual(gate2([z('달'), { k: 'plim', ko: '별' }, z('달')]), [{ zorb: '달', plim: '별' }, {}], 'the same word twice');
+  assert.deepEqual(gate2([z('달'), z('별'), { k: 'plim', ko: '빛' }]), [{ plim: '빛' }, { zorb: 'repeated' }], 'two words');
+  assert.deepEqual(gate2([z('달'), z('달'), z('별'), { k: 'plim', ko: '빛' }]), [{ plim: '빛' }, { zorb: 'repeated' }], 'all the same, not most');
+  assert.deepEqual(gate2([z('ab'), z('ab'), { k: 'plim', ko: '빛' }]), [{ plim: '빛' }, { zorb: 'characters' }], 'the word gate after');
+  assert.deepEqual(gate2([z('달'), z('달'), { k: 'plim', ko: '달이' }]), [{}, { zorb: 'shared', plim: 'shared' }], 'colliding with another key\'s word');
+  assert.deepEqual(gate2([z('달'), z('달')], new Map([['plim', ['달']]])), [{}, { zorb: 'shared', plim: 'missing' }], 'colliding with a kept word');
+});
+
 test('slice K5b: a key the pack gives several words (a pack written by hand) takes any of them: its line showing the second word is kept when another key\'s word changes; the request\'s known is its first word', async () => {
   const W = 7951;
   const b = kbundle('a', W, '0000000000137951', `${SENTINEL}ManyW`, [[['ambo'], 'The @ambo here.'], [['ambo'], 'Ask of @ambo again.'], [['brix'], 'And @brix.']]);
@@ -1205,7 +1267,7 @@ test('slice K5b: a key the pack gives several words (a pack written by hand) tak
   };
   const r = await run([f.bundles, '--item', `a:${W}`, '--out', f.out, '--send'], send);
   assert.equal(r.code, 3);
-  assert.deepEqual(userOf(bodies[0]).topics.flatMap((x) => x.keys).map((x) => [x.k, x.known]), [['ambo', '가'], ['ambo', '가'], ['brix', '다']], 'known: the first word');
+  assert.deepEqual(userOf(bodies[0]).topics.flatMap((x) => x.keys).map((x) => [x.k, x.known]), [['ambo', '가'], ['brix', '다']], 'known: the first word; ambo once');
   const pack = await packOf(f.out);
   assert.deepEqual(pack.aliases, [{ archive: 'a', item: W, keyword: 'ambo', words: ['가', '나'] }, { archive: 'a', item: W, keyword: 'brix', words: ['라'] }]);
   assert.equal(pack.converse.find((x) => x.hash === hashOf('Ask of @ambo again.')).text, '@{나}에게 다시 묻소.', 'the line with ambo\'s second word kept');

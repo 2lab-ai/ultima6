@@ -56,16 +56,17 @@
 // a string of u with none outside its printf codes, is left English unasked.
 // A script's request also lists its keywords (slice K5b, spec 08 §4): `topics`, one entry per
 // keyword block in script order, each key (the keyword as the keyword block keys it, up to its NUL
-// and case-folded; a `*` keyword is none) with the words its lines highlight that hit it
-// (`shown`) and the Korean word already settled for it (`known`: the pack there's, or the shared
-// keywords' request's); the answer gives one Korean word per key (`keywords`), checked by the
-// alias gate (1 to 8 Hangul syllables; one entry per key; two keys whose words collide, a word of
-// the input the engine takes for both, refused unless their first block is the same, and so is a
-// word colliding with one the pack keeps for another key), and the words kept become the pack's
-// `aliases` for that script. Before the scripts, the keys at least GLOSSARY_SCRIPTS of the chosen
-// scripts hold (and the pack there does not settle) are asked once in a request of their own, so a
-// key every NPC has gets one word. A request of a script with no key is the one of K1 to K4, byte
-// for byte, for the same style guide (which goes in every request, and which K5b changes).
+// and case-folded; a `*` keyword is none) once, in the first block that lists it, with the words
+// its lines highlight that hit it (`shown`) and the Korean word already settled for it (`known`:
+// the pack there's, or the shared keywords' request's); the answer gives one Korean word per key
+// (`keywords`), checked by the alias gate (1 to 8 Hangul syllables; one entry per key, or several
+// that give it the same word; two keys whose words collide, a word of the input the engine takes
+// for both, refused unless their first block is the same, and so is a word colliding with one the
+// pack keeps for another key), and the words kept become the pack's `aliases` for that script.
+// Before the scripts, the keys at least GLOSSARY_SCRIPTS of the chosen scripts hold (and the pack
+// there does not settle) are asked once in a request of their own, so a key every NPC has gets one
+// word. A request of a script with no key is the one of K1 to K4, byte for byte, for the same
+// style guide (which goes in every request, and which K5b changes).
 // The answer is JSON only, {"lines": [{"n", "ko"}]} (and "keywords" for a script with keys).
 // Each line is checked by the mechanical gates of spec 08 §6 (structure only: the escapes'
 // multiset, Hangul syllables and ASCII only, the josa markers and every `@{` closed as the text
@@ -643,15 +644,16 @@ export function wordGate(ko) {
 }
 
 /// The words an answer's `keywords` ([{k, ko}]) give `keys` that pass the alias gate: a Map of key
-/// to word; and the others' reasons by key: `missing` (none given), `repeated` (given twice), the
-/// word's ([`wordGate`]), `shared` (a word that collides with another key's ([`collide`]) where
-/// `compatible(a, b)` does not let the two keep it: the player could not tell them apart). `kept`
-/// (a Map of key to its words): the words the pack there keeps for the script's other keys; a new
-/// word colliding with one of a key this answer gives none is refused too (`shared`), and a key so
-/// refused keeps its own old words, which the others are then checked against. An entry for a key
-/// not asked is not read.
+/// to word; and the others' reasons by key: `missing` (none given), `repeated` (given two different
+/// words; entries that give a key the same word count as one), the word's ([`wordGate`]), `shared`
+/// (a word that collides with another key's ([`collide`]) where `compatible(a, b)` does not let the
+/// two keep it: the player could not tell them apart). `kept` (a Map of key to its words): the
+/// words the pack there keeps for the script's other keys; a new word colliding with one of a key
+/// this answer gives none is refused too (`shared`), and a key so refused keeps its own old words,
+/// which the others are then checked against. An entry for a key not asked is not read.
 export function aliasesOf(keys, given, compatible, kept = new Map()) {
-  const list = (Array.isArray(given) ? given : []).filter((e) => plain(e) && typeof e.k === 'string' && keys.includes(e.k));
+  const list = (Array.isArray(given) ? given : []).filter((e) => plain(e) && typeof e.k === 'string' && keys.includes(e.k))
+    .filter((e, i, all) => all.findIndex((x) => x.k === e.k && x.ko === e.ko) === i);
   const count = new Map();
   for (const e of list) count.set(e.k, (count.get(e.k) ?? 0) + 1);
   const words = new Map();
@@ -1058,13 +1060,16 @@ export function bodyOf(model, system, bundle, cls, lines, topics = []) {
 }
 
 /// The `topics` of a request of `script` (slice K5b): one entry per keyword block with keys, in
-/// script order, each key with the words its lines highlight that hit it (`shown`) and the Korean
-/// word `known` (a Map) settles for it, when there is one; only the keys of `only` (a Set) when
-/// given (a request again lists the keys that have a word, each with that word).
+/// script order, each key once, in the first block that lists it (the block the game's first match
+/// reaches for it, [`compatibleOf`]; a key listed twice may be answered twice), with the words its
+/// lines highlight that hit it (`shown`) and the Korean word `known` (a Map) settles for it, when
+/// there is one; only the keys of `only` (a Set) when given (a request again lists the keys that
+/// have a word, each with that word).
 export function topicsOf(script, known, only = null) {
+  const first = firstBlocksOf(script.topics);
   return script.topics
-    .map((list) => ({
-      keys: list.filter((k) => only === null || only.has(k))
+    .map((list, i) => ({
+      keys: list.filter((k) => first.get(k) === i && (only === null || only.has(k)))
         .map((k) => ({ k, shown: script.shown.get(k) ?? [], ...(known.has(k) ? { known: known.get(k) } : {}) })),
     }))
     .filter((t) => t.keys.length > 0);
