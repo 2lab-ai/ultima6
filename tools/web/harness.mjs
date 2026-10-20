@@ -252,13 +252,13 @@ export async function forgetVoicePack() {
   log('voicepack:forget:start'); await window.__gate('voicepack-forget');
   await real.forgetVoicePack(); log('voicepack:forget:end');
 }
-export async function storeLocalePack(bytes) {
+export async function storeLocalePack(bytes, source) {
   log('locale:store:start'); await window.__gate('locale-store');
   if (window.__fail.has('locale-store')) { log('locale:store:fail'); return false; }
-  const kept = await real.storeLocalePack(bytes); log('locale:store:end:' + kept); return kept;
+  const kept = await real.storeLocalePack(bytes, source); log('locale:store:end:' + kept); return kept;
 }
 export async function loadLocalePack() {
-  const bytes = await real.loadLocalePack(); log('locale:load:' + (bytes ? 1 : 0)); return bytes;
+  const kept = await real.loadLocalePack(); log('locale:load:' + (kept ? 1 : 0)); return kept;
 }
 export async function forgetLocalePack() {
   log('locale:forget:start'); await window.__gate('locale-forget');
@@ -283,6 +283,10 @@ export async function forgetLocalePack() {
 // counts the page's presents, `__converted` those that converted a new frame (frame_version
 // moved: spec 06 O1); `__shownGame` is the game that presented last. `__pointerAt` is the last
 // game pixel the page queued for the pointer, `__presentMs` the wall ms the presents took.
+// `__starts` has one entry per game started in the page (a Game.start that returned, or the
+// start_game_first GAME_FIRST puts in its place), in order: `locale`, what its set_locale gave
+// (null: none, 'on', 'mismatch'), and `stepsBefore`, the steps any game ran between its start
+// and that set_locale (0: before its first step).
 const GLUE_HOOKS = `
 globalThis.__u6mem = () => (wasm ? wasm.memory.buffer.byteLength : 0);
 globalThis.__ticks = 0;
@@ -342,6 +346,26 @@ globalThis.__presentMs = 0;
     globalThis.__speed = this.speed();
     globalThis.__dropped = this.dropped_ms();
     globalThis.__clamped = this.clamped_ms();
+  };
+  globalThis.__starts = [];
+  // Both starts (GAME_FIRST, appended after this, makes start the second).
+  for (const name of ['start', 'start_game_first']) {
+    const start = Game.prototype[name];
+    Game.prototype[name] = function (seed) {
+      const report = start.call(this, seed);
+      this.__start = { locale: null, stepsBefore: null, ticks: globalThis.__ticks };
+      globalThis.__starts.push(this.__start);
+      return report;
+    };
+  }
+  const setLocale = Game.prototype.set_locale;
+  Game.prototype.set_locale = function (pack) {
+    const why = setLocale.call(this, pack);
+    if (this.__start) {
+      this.__start.locale = why ? 'mismatch' : 'on';
+      this.__start.stepsBefore = globalThis.__ticks - this.__start.ticks;
+    }
+    return why;
   };
 }
 `;
@@ -534,16 +558,21 @@ export async function setup(root = SITE) {
 export const MODELS = join(SITE, 'models');
 export const haveModels = () => existsSync(join(MODELS, 'supertonic3')) && existsSync(join(MODELS, 'onnxruntime-web'));
 
+/// The version of the chooser's record (site/app.js SETUP_VERSION).
+export const SETUP_VERSION = 2;
+
 /// The choice a page starts with unless a test asks for the chooser (`openPage`'s `setup`).
 export const CHOSEN = { lang: 'en' };
 
 /// A fresh context (empty storage) and page with the hooks; `gated` adds the store and glue
 /// wrappers; `gameFirst` (default) starts `game` without the launcher's `u` (the page itself is
-/// unchanged); `setup` is the chooser's choice the page finds kept (`CHOSEN`: no chooser), null
-/// for a first visit (the chooser shows); `gpu`: in the Chromium with WebGPU.
-export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN, gpu = false } = {}) {
+/// unchanged); `setup` is the chooser's choice the page finds kept (`CHOSEN`: no chooser), as a
+/// record of this version, or a string kept as it is (a record of an older page), null for a
+/// first visit (the chooser shows); `gpu`: in the Chromium with WebGPU; `locale`: the
+/// browser's language (navigator.language), en-US unless a test asks, whatever the machine's.
+export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN, gpu = false, locale = 'en-US' } = {}) {
   const browser = gpu ? await env.gpuBrowser() : env.browser;
-  const context = await browser.newContext({ viewport: { width: 1024, height: 900 } });
+  const context = await browser.newContext({ viewport: { width: 1024, height: 900 }, locale });
   await context.addInitScript(pageHooks);
   if (setup) {
     await context.addInitScript((value) => {
@@ -552,7 +581,7 @@ export async function openPage(env, { gated = true, gameFirst = true, setup = CH
       } catch {
         // An opaque origin (about:blank) has no storage.
       }
-    }, JSON.stringify(setup));
+    }, typeof setup === 'string' ? setup : JSON.stringify({ ...setup, version: SETUP_VERSION }));
   }
   if (gated) {
     await context.route(/\/store\.js(\?real)?$/, async (route) => {
@@ -697,6 +726,25 @@ export function keptVoicePacks(page) {
         done({ keys: [...keys.result].sort(), byKey: Object.fromEntries(keys.result.map((k, i) => [k, values.result[i]])) });
       };
       values.onerror = () => fail(values.error);
+    };
+  }));
+}
+
+/// The source kept with the Korean pack (spec 08 K6: the record `locale:ko:source`, the listed
+/// file it came from), or null when there is none.
+export function keptLocaleSource(page) {
+  return page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const get = db.transaction('files').objectStore('files').get('locale:ko:source');
+      get.onsuccess = () => {
+        db.close();
+        done(get.result ?? null);
+      };
+      get.onerror = () => fail(get.error);
     };
   }));
 }

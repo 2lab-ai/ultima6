@@ -3151,7 +3151,7 @@ test('first visit: the chooser shows first, above the game screen: English | 한
   await h.waitSettled(page);
   c = await chooser(page);
   assert.ok(!c.shown, 'OK closes it');
-  assert.deepEqual(c.stored, { lang: 'en' }, 'the choice is kept');
+  assert.deepEqual(c.stored, { lang: 'en', version: h.SETUP_VERSION }, 'the choice is kept');
   assert.equal(c.source, null, 'no pack');
   await page.reload();
   await h.waitSettled(page);
@@ -3171,6 +3171,8 @@ test('the pack list: the key from the address is kept and taken off the address 
   const { page } = await h.openPage(env, { setup: null });
   await page.goto(`${env.server.url}?k=wrong-key&x=1#here`);
   await h.waitSettled(page);
+  // A key on the first visit preselects 한글 (spec 08 K6); this test reads the English labels.
+  await page.check('input[name="setup-lang"][value="en"]');
   await listed(page, 0);
   let c = await chooser(page);
   assert.ok(c.shown, 'the chooser shows');
@@ -3208,6 +3210,7 @@ test('a listed pack chosen: downloaded with the key, its progress shown, loaded 
   const { page } = await h.openPage(env, { setup: null });
   await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
   await h.waitSettled(page);
+  await page.check('input[name="setup-lang"][value="en"]'); // the key preselected 한글 (spec 08 K6)
   await listed(page, 2);
   assert.deepEqual((await chooser(page)).hd, ['MMPX (no pack)', 'Test pack', 'Gone']);
   await page.evaluate(() => {
@@ -3233,7 +3236,7 @@ test('a listed pack chosen: downloaded with the key, its progress shown, loaded 
   assert.ok(lines.includes('Checking the HD pack…'), 'then the check');
   assert.ok(!c.shown, 'loaded: the chooser closes');
   assert.match((await h.state(page)).status, /^HD pack loaded: 1 tiles, 0 portraits and 0 panel pictures; it is used once a game runs\. It is kept in this browser for the next visit\.$/);
-  assert.deepEqual(c.stored, { lang: 'en' }, 'the choice is kept');
+  assert.deepEqual(c.stored, { lang: 'en', version: h.SETUP_VERSION }, 'the choice is kept');
   assert.equal(c.source, 'test-pack.zip', 'and where the kept pack came from');
   assert.equal(await h.keptPackBytes(page), bytes.length, 'the pack is kept as a dropped one is');
   assert.equal((await h.state(page)).state, 'idle', 'no game started');
@@ -3307,6 +3310,7 @@ test('a listed pack chosen, then another pack dropped: the chooser shows the dro
   const { page } = await h.openPage(env, { setup: null });
   await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
   await h.waitSettled(page);
+  await page.check('input[name="setup-lang"][value="en"]'); // the key preselected 한글 (spec 08 K6)
   await listed(page, 1);
   await page.check('input[name="setup-hd"][value="test-pack.zip"]');
   await page.click('#setup-ok');
@@ -3388,7 +3392,7 @@ test('한글: the page\'s labels, buttons and status lines switch to Korean at o
   }), TEXT.ko.gameText, 'and so does the page');
   await page.click('#setup-ok');
   await h.waitSettled(page);
-  assert.deepEqual((await chooser(page)).stored, { lang: 'ko' });
+  assert.deepEqual((await chooser(page)).stored, { lang: 'ko', version: h.SETUP_VERSION });
   await page.click('#forget');
   await h.waitSettled(page);
   assert.equal((await h.state(page)).status, '보관한 게임 파일을 이 브라우저에서 지웠습니다.', 'a status line of app.js in Korean');
@@ -4806,10 +4810,10 @@ const KO_GREET_KO = `"어서 오시오, 그대여! 나는 ${KO_LINE}."`;
 // "Zed" f1 <look> f2 <greeting> b6`, stored raw, so any conversation archive `a` loads talks it;
 // and the Korean pack over it, made with the translation tool's own writer (tools/i18n), each
 // script's two runs in Korean. `other`: the pack's runs keyed to bytes that are not these.
-async function koFixture() {
+// `items`: the archive's items (a smaller one makes a pack of other counts).
+async function koFixture(items = 0x63) {
   const { fingerprint, hash64, hex64, latin1, packBytes } = await import('../i18n/translate.mjs');
   const script = [0xff, 0x02, ...latin1('Zed'), 0xf1, ...latin1(KO_LOOK), 0xf2, ...latin1(KO_GREET), 0xb6];
-  const items = 0x63;
   const table = [];
   const body = [];
   for (let i = 0; i < items; i += 1) {
@@ -5020,6 +5024,462 @@ test('Korean pack in a game (the user\'s disks, a synthetic conversation): in �
     assert.ok(!where.includes(w), 'no line in the page\'s data, text or storage');
     assert.ok(!words.some((m) => m.includes(w)), 'nor in the console');
   }
+}, { needs: h.haveHfes });
+
+// --- the site's Korean pack (spec 08, slice K6) -------------------------------------------
+// The site's listing (/packs/index.json) naming a Korean pack for the key, served from memory by
+// the test server through the gate set to the tests' key (sitePacks); the packs are koFixture's
+// (made-up lines, no game data), under made-up file names.
+
+const KO_FILE = 'ko-test-1.u6lp';
+const KO_NEWER = 'ko-test-2.u6lp';
+const koListing = (file) => JSON.stringify({ packs: [], ...(file ? { ko: { file, label: 'Korean (test)' } } : {}) });
+// The requests the page made for a Korean pack of the site (the listing's are not).
+const koRequests = (env) => env.packRequests.filter(([path]) => path.endsWith('.u6lp'));
+// Waits until nothing is queued and the page's Korean pack has `counts` (data-locale-pack).
+const koPackIs = (page, counts) => page.waitForFunction((want) => document.body.dataset.ops === '0'
+  && document.body.dataset.localePack === want, counts, { timeout: 30_000 });
+const koSourceKept = (page) => h.keptLocaleSource(page);
+const localeNoteShown = (page) => page.evaluate(() => {
+  const p = document.getElementById('locale-note');
+  return p.hidden ? null : p.textContent;
+});
+
+// Nothing of the pack's lines in the page's data, text or storage, nor in the console.
+async function noPackWords(page, words) {
+  const where = await pageWords(page);
+  for (const w of [KO_SENTINEL, KO_LINE, KO_GREET_KO]) {
+    assert.ok(!where.includes(w), 'no line in the page\'s data, text or storage');
+    assert.ok(!words.some((m) => m.includes(w)), 'nor in the console');
+  }
+}
+
+test('the site\'s Korean pack (synthetic, no game): with the key and a listing that names one, a page in 한글 downloads it once with the key and loads it as a dropped one (its counts, its line, kept under locale:ko with the file it came from), the chooser\'s note saying it came from the site; OK and a reload with the same listing download nothing; a listing that names another file downloads and loads that one', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  const first = await koFixture();
+  const newer = await koFixture(0x11);
+  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(first.pack) });
+  const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  const words = consoleText(page);
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await koPackIs(page, `${first.runs},${first.scripts}`);
+  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200], [`/packs/${KO_FILE}`, h.PACK_KEY, 200]],
+    'the listing, then the pack, each once and with the key');
+  assert.equal((await h.state(page)).status, `${ko.koPackLoaded(first.runs, first.scripts)}${ko.koPackKept}\n${ko.noFilesYet}`,
+    'the line of a dropped pack, counts only');
+  assert.deepEqual(await h.keptLocalePack(page), first.pack, 'kept under locale:ko, byte for byte');
+  assert.equal(await koSourceKept(page), KO_FILE, 'with the file it came from');
+  assert.equal(await localeNoteShown(page), null, 'the line pointing at the tool goes');
+  let c = await chooser(page);
+  assert.ok(c.shown && c.lang === 'ko', 'the new key opened the chooser, on 한글');
+  assert.equal(c.note, `${ko.gameTextPack}${ko.koPackHosted}`, 'the chooser says the pack came from the site');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.equal(koRequests(env).length, 1, 'OK in 한글: not downloaded again');
+  env.packRequests.length = 0;
+  await page.reload();
+  await koPackIs(page, `${first.runs},${first.scripts}`);
+  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200]], 'a reload: the listing only, the kept pack loaded');
+  c = await chooser(page);
+  assert.ok(!c.shown && c.note === `${ko.gameTextPack}${ko.koPackHosted}`, 'no chooser; its note still says where the pack came from');
+  // A newer pack put on the site under another name: the next visit takes it, unasked.
+  sitePacks(env, { 'index.json': koListing(KO_NEWER), [KO_NEWER]: Uint8Array.from(newer.pack) });
+  await page.reload();
+  await koPackIs(page, `${newer.runs},${newer.scripts}`);
+  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200], [`/packs/${KO_NEWER}`, h.PACK_KEY, 200]],
+    'the other file downloaded, once');
+  assert.deepEqual(await h.keptLocalePack(page), newer.pack, 'kept in place of the one before');
+  assert.equal(await koSourceKept(page), KO_NEWER, 'with its file');
+  await noPackWords(page, words);
+  console.log(`  receipt: pack requests ${koRequests(env).length} after the newer listing, 2 visits with no download: pass`);
+});
+
+test('the site\'s Korean pack and a dropped one (synthetic, no game): a dropped pack is never replaced by the listed one (a visit with the key downloads nothing); after Forget the listed one is not loaded in the visit, not at an OK in 한글, until the page goes to 한글 again; after another Forget the next visit loads it', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  const listedPack = await koFixture();
+  const dropped = await koFixture(0x11);
+  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(listedPack.pack) });
+  const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  const words = consoleText(page);
+  await h.load(page, env);
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: dropped.pack }]);
+  await koPackIs(page, `${dropped.runs},${dropped.scripts}`);
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await koPackIs(page, `${dropped.runs},${dropped.scripts}`);
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.deepEqual(koRequests(env), [], 'the dropped pack stays: nothing downloaded');
+  assert.deepEqual(await h.keptLocalePack(page), dropped.pack, 'and stays kept');
+  assert.equal((await chooser(page)).note, ko.gameTextPack, 'the note does not say it came from the site');
+  await page.click('#forget-ko');
+  await h.waitSettled(page);
+  assert.equal((await localeShown(page)).pack, 'none', 'forgotten');
+  assert.equal(await localeNoteShown(page), ko.gameText, 'the game\'s text is English, the page says so');
+  await page.click('#settings');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.deepEqual(koRequests(env), [], 'after Forget, OK in 한글: still nothing downloaded');
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  await page.click('#setup-ok');
+  await koPackIs(page, `${listedPack.runs},${listedPack.scripts}`);
+  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, h.PACK_KEY, 200]], '한글 again: the listed pack downloaded');
+  assert.equal(await koSourceKept(page), KO_FILE);
+  await page.click('#forget-ko');
+  await h.waitSettled(page);
+  assert.equal(await koSourceKept(page), null, 'Forget removes its source too');
+  env.packRequests.length = 0;
+  await page.reload();
+  await koPackIs(page, `${listedPack.runs},${listedPack.scripts}`);
+  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, h.PACK_KEY, 200]], 'the next visit after a Forget loads it');
+  await noPackWords(page, words);
+  console.log('  receipt: a dropped pack kept over the listed one, 0 downloads; after Forget 0, then 1 at 한글 again, 1 the next visit: pass');
+});
+
+test('the site\'s Korean pack not loaded (synthetic, no game): without a key no /packs/ request at all; in English no Korean pack is asked for; one the site does not have (404) and one that does not read leave the game\'s text English with the page\'s line for that case, asked once only in the visit', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  const { pack } = await koFixture();
+  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack) });
+  let { context, page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  await h.load(page, env);
+  await page.click('#settings');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.deepEqual(env.packRequests, [], 'no key: no request to /packs/ at all');
+  assert.equal((await localeShown(page)).pack, 'none');
+  await context.close();
+  ({ context, page } = await h.openPage(env, { setup: { lang: 'en' } }));
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await h.waitSettled(page);
+  await listed(page, 0);
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.deepEqual(koRequests(env), [], 'English: no Korean pack asked for');
+  assert.equal((await localeShown(page)).pack, 'none');
+  await context.close();
+  // A listing that names a file the site does not have.
+  sitePacks(env, { 'index.json': koListing('ko-gone.u6lp') });
+  ({ context, page } = await h.openPage(env, { setup: { lang: 'ko' } }));
+  const words = consoleText(page);
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await h.waitSettled(page);
+  assert.deepEqual(koRequests(env), [['/packs/ko-gone.u6lp', h.PACK_KEY, 404]], 'asked once, the gate let it through');
+  assert.equal((await localeShown(page)).pack, 'none', 'no pack');
+  assert.equal(await h.keptLocalePack(page), null, 'none kept');
+  assert.equal((await h.state(page)).status, ko.noFilesYet, 'nothing else changes');
+  assert.equal(await localeNoteShown(page), ko.gameText, 'the game\'s text is English, the page says so');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.equal(koRequests(env).length, 1, 'not asked again in the visit, 한글 again included');
+  // A pack that does not read: the reader's line, nothing kept; asked once in the next visit.
+  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack.slice(0, pack.length - 3)) });
+  await page.reload();
+  await h.waitSettled(page);
+  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, h.PACK_KEY, 200]], 'downloaded once');
+  assert.equal((await h.state(page)).status, `${ko.koPackRefused('its contents are not those of a Korean pack')}\n${ko.noFilesYet}`,
+    'refused with the reader\'s line');
+  assert.equal((await localeShown(page)).pack, 'none', 'no pack');
+  assert.equal(await h.keptLocalePack(page), null, 'none kept');
+  assert.equal(await koSourceKept(page), null, 'no source kept');
+  assert.equal(await localeNoteShown(page), ko.gameText, 'the game\'s text is English');
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.equal(koRequests(env).length, 1, 'not asked again in the visit');
+  await noPackWords(page, words);
+  console.log('  receipt: no key 0 requests, English 0 pack requests, 404 1 request, unreadable 1 request: pass');
+});
+
+test('the site\'s Korean pack in a game (the user\'s disks, a synthetic conversation): a game running in English, then 한글 at the chooser: the listed pack is downloaded and the game restarts with it, its line counts only; a reload starts the game with the kept pack and downloads nothing', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  const { archive, pack, runs, scripts } = await koFixture();
+  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack) });
+  const { page } = await h.openPage(env, { setup: { lang: 'en' } });
+  const words = consoleText(page);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  assert.equal((await localeShown(page)).locale, 'off', 'English');
+  assert.deepEqual(koRequests(env), [], 'English: no Korean pack asked for');
+  const saved = await h.savedFiles(page);
+  await page.check('input[name="setup-lang"][value="ko"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  let shown = await localeShown(page);
+  assert.deepEqual([shown.pack, shown.locale], [`${runs},${scripts}`, 'on'], '한글: the game restarted with the pack');
+  const status = (await h.state(page)).status;
+  assert.ok(status.startsWith(`${ko.koPackLoaded(runs, scripts)}${ko.koPackKept}\n`) && status.includes(ko.koPackOn(runs, scripts)),
+    'the lines of a dropped pack, counts only');
+  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, h.PACK_KEY, 200]], 'downloaded once, with the key');
+  h.assertSame(await h.savedFiles(page), saved, 'the save untouched');
+  env.packRequests.length = 0;
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  shown = await localeShown(page);
+  assert.deepEqual([shown.pack, shown.locale], [`${runs},${scripts}`, 'on'], 'a reload: the game starts with the kept pack');
+  assert.ok((await h.state(page)).status.includes(ko.koPackOn(runs, scripts)), 'its line, counts only');
+  assert.deepEqual(koRequests(env), [], 'nothing downloaded');
+  await noPackWords(page, words);
+  console.log('  receipt: 1 download, the game on it after the switch and after a reload, 0 downloads on the reload: pass');
+}, { needs: h.haveHfes });
+
+test('the first-run language (spec 08 K6): with no choice kept the chooser shows on 한글 when the visitor has a key or the browser\'s language is Korean, else on English; a kept choice wins in each case', async (env) => {
+  sitePacks(env, { 'index.json': koListing(null) });
+  // [what, the browser's language, a key in the address, the choice kept, the language wanted]
+  const cases = [
+    ['a key', 'en-US', true, null, 'ko'],
+    ['a ko-KR browser', 'ko-KR', false, null, 'ko'],
+    ['an en-US browser', 'en-US', false, null, 'en'],
+    ['a key, English kept', 'en-US', true, { lang: 'en' }, 'en'],
+    ['a ko-KR browser, English kept', 'ko-KR', false, { lang: 'en' }, 'en'],
+    ['an en-US browser, 한글 kept', 'en-US', false, { lang: 'ko' }, 'ko'],
+  ];
+  for (const [what, locale, key, stored, want] of cases) {
+    const { context, page } = await h.openPage(env, { setup: stored, locale });
+    await page.goto(key ? `${env.server.url}?k=${h.PACK_KEY}` : env.server.url);
+    await h.waitSettled(page);
+    const c = await chooser(page);
+    assert.equal((await pageText(page)).lang, want, `${what}: the page in ${want}`);
+    if (stored === null) {
+      assert.ok(c.shown, `${what}: the chooser shows first`);
+      assert.equal(c.lang, want, `${what}: on ${want}`);
+      await page.click('#setup-ok');
+      await h.waitSettled(page);
+      assert.deepEqual((await chooser(page)).stored, { lang: want, version: h.SETUP_VERSION }, `${what}: OK keeps it`);
+    } else {
+      assert.equal(c.shown, key, `${what}: the chooser shows only for a new key`);
+      if (key) assert.equal(c.lang, want, `${what}: on the choice kept`);
+      assert.deepEqual(c.stored, { ...stored, version: h.SETUP_VERSION }, `${what}: the choice kept as it was`);
+    }
+    await context.close();
+  }
+  console.log(`  receipt: ${cases.length} first-run cases: pass`);
+});
+
+// A context whose pages find the key kept already (no ?k= in the address: the key is not new).
+const keyKept = (context) => context.addInitScript((k) => {
+  try {
+    if (localStorage.getItem('u6.packKey') === null) localStorage.setItem('u6.packKey', k);
+  } catch {
+    // An opaque origin (about:blank) has no storage.
+  }
+}, h.PACK_KEY);
+
+test('a choice kept by an older page (spec 08 K6): with the key kept it counts as none once, so the chooser opens on 한글 and its OK keeps the current record with the listed pack loaded, and the next visit has no chooser; a current record with English stands (no chooser, English, no Korean pack asked for); without a key an old record stands', async (env) => {
+  const { pack, runs, scripts } = await koFixture();
+  const listing = { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack) };
+  sitePacks(env, listing);
+  let { context, page } = await h.openPage(env, { setup: '{"lang":"en"}' });
+  await keyKept(context);
+  await h.load(page, env);
+  let c = await chooser(page);
+  assert.ok(c.shown, 'the key and an old record: the chooser shows');
+  assert.equal(c.lang, 'ko', 'on 한글');
+  assert.equal((await pageText(page)).lang, 'ko', 'the page in 한글');
+  await page.click('#setup-ok');
+  await koPackIs(page, `${runs},${scripts}`);
+  c = await chooser(page);
+  assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, 'OK keeps the current record');
+  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, h.PACK_KEY, 200]], 'the listed pack loaded, once');
+  await page.reload();
+  await koPackIs(page, `${runs},${scripts}`);
+  assert.ok(!(await chooser(page)).shown, 'the next visit: no chooser');
+  assert.equal(koRequests(env).length, 1, 'and no second download');
+  await context.close();
+  sitePacks(env, listing);
+  ({ context, page } = await h.openPage(env, { setup: { lang: 'en' } }));
+  await keyKept(context);
+  await h.load(page, env);
+  c = await chooser(page);
+  assert.ok(!c.shown, 'the key and a current record: no chooser');
+  assert.equal((await pageText(page)).lang, 'en', 'English');
+  assert.deepEqual(koRequests(env), [], 'no Korean pack asked for');
+  await context.close();
+  sitePacks(env, listing);
+  ({ context, page } = await h.openPage(env, { setup: '{"lang":"en"}', locale: 'ko-KR' }));
+  await h.load(page, env);
+  c = await chooser(page);
+  assert.ok(!c.shown, 'no key and an old record: no chooser');
+  assert.equal((await pageText(page)).lang, 'en', 'its language, over a ko-KR browser');
+  assert.deepEqual(c.stored, { lang: 'en' }, 'the record as it was');
+  assert.deepEqual(env.packRequests, [], 'no request to /packs/');
+  await context.close();
+  console.log('  receipt: key + old record 1 chooser and 1 download, key + current record 0 downloads, no key 0 requests: pass');
+});
+
+// Runs in the page: while the test holds `ko-source` (window.__fail), every write of the Korean
+// pack's source record (a put or a delete of locale:ko:source) throws inside its transaction,
+// as a request the storage refuses.
+function sourceWritesThrow() {
+  for (const name of ['put', 'delete']) {
+    const real = IDBObjectStore.prototype[name];
+    IDBObjectStore.prototype[name] = function write(...args) {
+      const key = name === 'put' ? args[1] : args[0];
+      if (window.__fail?.has('ko-source') && key === 'locale:ko:source') {
+        throw new DOMException('test: refused', 'QuotaExceededError');
+      }
+      return real.apply(this, args);
+    };
+  }
+}
+
+// Sets the source record kept with the Korean pack to `value` in the page (undefined: none).
+const setKeptSource = (page, value) => page.evaluate((v) => new Promise((done, fail) => {
+  const req = indexedDB.open('ultima6-port', 1);
+  req.onerror = () => fail(req.error);
+  req.onsuccess = () => {
+    const db = req.result;
+    const tx = db.transaction('files', 'readwrite');
+    if (v === undefined) tx.objectStore('files').delete('locale:ko:source');
+    else tx.objectStore('files').put(v, 'locale:ko:source');
+    tx.oncomplete = () => { db.close(); done(); };
+    tx.onerror = () => fail(tx.error);
+  };
+}), value);
+
+test('the site\'s Korean pack and its source (synthetic, no game): the pack and the file it came from are kept in one transaction, so with every write of the source refused a drop after the site\'s pack is not kept and the site\'s pack stays with its own source, never the dropped bytes under the site\'s name; a kept pack whose source is missing or not a file name counts as dropped: a listing that names another file downloads nothing and the pack stays, byte for byte', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  const hosted = await koFixture();
+  const dropped = await koFixture(0x11);
+  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(hosted.pack) });
+  const { context, page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  await context.addInitScript(sourceWritesThrow);
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await koPackIs(page, `${hosted.runs},${hosted.scripts}`);
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await page.evaluate(() => window.__fail.add('ko-source'));
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: dropped.pack }]);
+  await koPackIs(page, `${dropped.runs},${dropped.scripts}`);
+  assert.equal((await h.state(page)).status, `${ko.koPackLoaded(dropped.runs, dropped.scripts)}${ko.koPackNotKept(ko.koPackOldStays)}`,
+    'the drop works for this visit, the pack kept before stays');
+  assert.deepEqual(await h.keptLocalePack(page), hosted.pack, 'the site\'s pack kept as it was');
+  assert.equal(await koSourceKept(page), KO_FILE, 'with its own source');
+  await page.evaluate(() => window.__fail.delete('ko-source'));
+  // Its source missing, then not a file name: the kept pack counts as dropped.
+  for (const [what, value] of [['missing', undefined], ['not a file name', '../x.u6lp'], ['not text', 7]]) {
+    await setKeptSource(page, value);
+    sitePacks(env, { 'index.json': koListing(KO_NEWER), [KO_NEWER]: Uint8Array.from(dropped.pack) });
+    await page.reload();
+    await h.waitSettled(page);
+    assert.deepEqual(koRequests(env), [], `a source ${what}: nothing downloaded`);
+    assert.equal((await localeShown(page)).pack, `${hosted.runs},${hosted.scripts}`, `a source ${what}: the kept pack loaded`);
+    assert.deepEqual(await h.keptLocalePack(page), hosted.pack, `a source ${what}: and kept, byte for byte`);
+    assert.equal((await chooser(page)).note, ko.gameTextPack, `a source ${what}: not said to come from the site`);
+  }
+  console.log('  receipt: a refused source write kept the pair whole; 3 sources missing or unreadable, 0 downloads: pass');
+});
+
+test('the site\'s Korean pack, then a dropped one (synthetic, no game): the drop keeps no source, so the next visit with a listing that names another file downloads nothing and the dropped pack stays, byte for byte', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  const hosted = await koFixture();
+  const dropped = await koFixture(0x11);
+  const newer = await koFixture(0x21);
+  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(hosted.pack) });
+  const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await koPackIs(page, `${hosted.runs},${hosted.scripts}`);
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: dropped.pack }]);
+  await koPackIs(page, `${dropped.runs},${dropped.scripts}`);
+  assert.deepEqual(await h.keptLocalePack(page), dropped.pack, 'the drop kept in place of the site\'s pack');
+  assert.equal(await koSourceKept(page), null, 'with no source');
+  assert.equal((await chooser(page)).note, ko.gameTextPack, 'not said to come from the site');
+  sitePacks(env, { 'index.json': koListing(KO_NEWER), [KO_NEWER]: Uint8Array.from(newer.pack) });
+  await page.reload();
+  await h.waitSettled(page);
+  assert.deepEqual(koRequests(env), [], 'a listing that names another file: nothing downloaded');
+  assert.equal((await localeShown(page)).pack, `${dropped.runs},${dropped.scripts}`, 'the dropped pack loaded');
+  assert.deepEqual(await h.keptLocalePack(page), dropped.pack, 'and kept, byte for byte');
+  console.log('  receipt: the site\'s pack then a drop, a renamed listing, 0 downloads: pass');
+});
+
+test('the owner\'s first visit after K6 (the user\'s disks, a synthetic conversation): a choice kept by an older page in English, the key kept, the kept game files, an HD pack chosen from the listing and no Korean pack kept; the listing names a Korean pack: before any press, the chooser is open on 한글 with the HD pack still checked, and the game it started behind it already runs with the Korean pack, downloaded once; OK keeps the current record, the HD pack and the Korean pack, nothing downloaded again', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const ko = TEXT.ko;
+  const { archive, pack, runs, scripts } = await koFixture();
+  const hd = await madePack(env);
+  const hdEntry = { file: 'test-pack.zip', label: 'Test pack' };
+  // An older page: the game files kept, an HD pack chosen from the listing (no Korean pack listed
+  // yet), its choice kept as that page kept it (no version).
+  sitePacks(env, { 'index.json': JSON.stringify({ packs: [hdEntry] }), 'test-pack.zip': hd });
+  const { context, page } = await h.openPage(env, { setup: '{"lang":"en"}' });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await h.waitSettled(page);
+  await listed(page, 1);
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.check('input[name="setup-hd"][value="test-pack.zip"]');
+  await page.click('#setup-ok');
+  await packIs(page, '1,0,0');
+  await page.evaluate(() => localStorage.setItem('u6.setup', '{"lang":"en"}'));
+  assert.equal((await chooser(page)).source, 'test-pack.zip', 'the HD pack chosen from the listing');
+  assert.equal(await h.keptLocalePack(page), null, 'no Korean pack kept');
+  // The visit: the key kept, the listing now names a Korean pack; no press at all.
+  await keyKept(context);
+  sitePacks(env, { 'index.json': JSON.stringify({ packs: [hdEntry], ko: { file: KO_FILE, label: 'Korean (test)' } }),
+    'test-pack.zip': hd, [KO_FILE]: Uint8Array.from(pack) });
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  await listed(page, 1);
+  // The games the visit started, in order (h's glue: each Game.start, and what set_locale gave
+  // it): one, with the Korean pack from before its first step; no English start, no restart.
+  const starts = () => page.evaluate(() => globalThis.__starts.map(({ locale, stepsBefore }) => ({ locale, stepsBefore })));
+  assert.deepEqual(await starts(), [{ locale: 'on', stepsBefore: 0 }],
+    'before any press: one game started, with the Korean pack before its first step');
+  let c = await chooser(page);
+  assert.ok(c.shown && c.lang === 'ko', 'the chooser open on 한글');
+  assert.equal(c.checked, 'test-pack.zip', 'the HD pack still checked');
+  const shown = await localeShown(page);
+  assert.deepEqual([shown.pack, shown.locale], [`${runs},${scripts}`, 'on'], 'the game behind it runs with the Korean pack');
+  assert.ok((await h.state(page)).status.includes(ko.koPackOn(runs, scripts)), 'its line, counts only');
+  assert.equal(await page.evaluate(() => document.body.dataset.hdPack), '1,0,0', 'and the HD pack');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200], [`/packs/${KO_FILE}`, h.PACK_KEY, 200]],
+    'the listing and the Korean pack, once each; the HD pack not downloaded again');
+  assert.deepEqual(c.stored, { lang: 'en' }, 'the older record untouched until OK');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  c = await chooser(page);
+  assert.ok(!c.shown && c.source === 'test-pack.zip', 'OK: the HD pack stays the one chosen');
+  assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, 'and keeps the current record');
+  assert.equal((await localeShown(page)).locale, 'on', 'the game still on the Korean pack');
+  assert.equal((await starts()).length, 1, 'OK: no restart');
+  assert.equal(env.packRequests.length, 2, 'nothing downloaded again');
+  console.log('  receipt: 1 game start in the visit, on the Korean pack from its first step, 1 pack download, the HD choice kept: pass');
 }, { needs: h.haveHfes });
 
 // --- typing Korean in a conversation (spec 08 Design 4, slice K5a) ------------------------

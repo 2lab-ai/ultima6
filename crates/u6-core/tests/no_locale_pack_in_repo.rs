@@ -1,7 +1,8 @@
 //! Spec 08 Rights / Acceptance 8: no Korean pack (`ko.u6lp`), and no coverage receipt of the
 //! translation tool, is committed or sits under `site/`. They are made from the owner's game
 //! (tools/i18n/translate.mjs makes them from the NPC bundles): they live in
-//! `~/Games/ultima6/i18n/ko/` and the owner's browser storage only. Checked: every blob in the
+//! `~/Games/ultima6/i18n/ko/` and the owner's browser storage, and the pack also behind his key
+//! (below). Checked: every blob in the
 //! git index (what a commit takes, read with `git cat-file`, whatever the working tree holds),
 //! and every file under `site/` on disk (built output and the gitignored model parts included).
 //! Any error reading them fails the test.
@@ -16,6 +17,12 @@
 //! is caught when a string token of it is a format's name, its escapes decoded (`tests/guard`),
 //! since the parse cannot rule out what it holds; and `site/` itself a symbolic link fails the
 //! guard (the walker would follow it).
+//!
+//! The one exception (spec 08 K6, the owner's rule of 2026-10-20: the pack is hosted behind his
+//! key, as the HD packs are): a pack on disk under `site/packs/`, which is gitignored and served
+//! only through the key gate of `functions/_middleware.js` (u6-hdpack's guard checks, while
+//! `site/packs/` exists, that git ignores it and the gate still guards `/packs`). A pack in the
+//! index fails wherever it is, and a coverage receipt fails under `site/packs/` too.
 // The test reads the repository and runs git: the crate's platform-free rule is for its code.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
@@ -143,9 +150,19 @@ fn starts_with_magic(p: &Path) -> bool {
     head == MAGIC
 }
 
+/// Where a pack may lie on disk: the gitignored directory the key gate serves.
+const HOSTED: &str = "site/packs/";
+
+/// Whether a file found on disk at `rel` (relative to the repository) that starts with the magic
+/// is a hosted pack: one under [`HOSTED`]. A file of the index never is.
+fn hosted(rel: &str) -> bool {
+    rel.starts_with(HOSTED)
+}
+
 /// The paths under `dir` (relative to `root`) whose file is one of the tool's outputs: one that
-/// starts with the magic, or one read whole because it starts as JSON ([`starts_as_json`]) that
-/// is a receipt; a symlink to a directory is not followed (no loops) but listed in `links`.
+/// starts with the magic (but a hosted pack), or one read whole because it starts as JSON
+/// ([`starts_as_json`]) that is a receipt; a symlink to a directory is not followed (no loops)
+/// but listed in `links`.
 fn walk(
     dir: &Path,
     root: &Path,
@@ -171,7 +188,9 @@ fn walk(
         *files += 1;
         if starts_with_magic(&p) {
             let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
-            found.push(rel);
+            if !hosted(&rel) {
+                found.push(rel);
+            }
             continue;
         }
         if !starts_as_json(&p) {
@@ -248,6 +267,47 @@ fn the_walker_finds_a_pack_by_its_magic_and_a_receipt_after_any_whitespace() {
             "site/deep/ko.u6lp",
             "site/deep/padded.json",
             "site/deep/renamed.bin"
+        ]
+    );
+    std::fs::remove_dir_all(&root).expect("the test directory goes");
+}
+
+/// A pack under `site/packs/` on disk is hosted, not found, at any depth; one beside it, in a
+/// sibling or a nested `packs` directory is found, and so is a receipt under `site/packs/`.
+#[test]
+fn only_a_pack_on_disk_under_site_packs_is_hosted() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-locale-pack-hosted");
+    if root.exists() {
+        std::fs::remove_dir_all(&root).expect("the old test directory goes");
+    }
+    let write = |rel: &str, bytes: &[u8]| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).expect("the test directory");
+        std::fs::write(p, bytes).expect("written");
+    };
+    write("site/packs/ko-1.u6lp", PACK);
+    write("site/packs/sub/ko-2.u6lp", PACK);
+    write("site/packs/coverage.json", COVERAGE.as_bytes());
+    write("site/packs-x/ko.u6lp", PACK);
+    write("site/x/packs/ko.u6lp", PACK);
+    write("site/ko.u6lp", PACK);
+    let (mut found, mut links, mut files) = (Vec::new(), Vec::new(), 0);
+    walk(
+        &root.join("site"),
+        &root,
+        &mut found,
+        &mut links,
+        &mut files,
+    );
+    found.sort();
+    assert_eq!(files, 6);
+    assert_eq!(
+        found,
+        [
+            "site/ko.u6lp",
+            "site/packs-x/ko.u6lp",
+            "site/packs/coverage.json",
+            "site/x/packs/ko.u6lp"
         ]
     );
     std::fs::remove_dir_all(&root).expect("the test directory goes");

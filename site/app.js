@@ -68,7 +68,9 @@
 // only. A listed pack is downloaded and then loaded and kept exactly as a dropped one. The
 // chooser shows the pack active (none, a dropped one, or the listed one it came from), and OK
 // makes the entry checked the active one. The choice made is kept in localStorage; while there
-// is none the chooser shows first.
+// is none the chooser shows first, on 한글 when the visitor has a key or the browser's first
+// language is Korean, else on English; for a visitor with a key, a choice kept before that rule
+// (a record without its version) counts as none once.
 //
 // Voices (spec 09 V3, site/voice/): off until the visitor presses Voices. The first time, the
 // model's use restrictions show (with this browser's room for the site), and only their
@@ -133,6 +135,14 @@
 // and Escape while composing are the IME's (Escape cancels the composition only), and every
 // other key keeps its canvas meaning (the speed keys included). When the line ends the focus
 // goes back to the canvas. Nothing typed is logged, kept or shown in the page's text or data.
+// Slice K6: the site's listing (/packs/index.json) may also name a Korean pack for the key
+// (`ko`: {file, label}). While the page is in 한글 (at the restore, before the first game, and at
+// the chooser's OK) the page downloads it with the key and loads it as a dropped one, its file
+// name kept with it in the pack's own transaction (store.js: a drop keeps none, and a kept pack
+// without a listed name counts as dropped); it is downloaded again only when the listing names
+// another file than the kept one came from, never over a dropped one, and not after Forget until
+// the page goes to 한글 again or the next visit. A download or a pack that fails is not tried
+// again in the visit (the game stays English, with the line the page has for that case).
 import init, {
   Game, GameStrings, HdPack, LocalePack, NpcBundles, PackProbe, budget_ms, input_too_large, max_input_bytes,
   max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
@@ -223,7 +233,10 @@ function reflect(state) {
 
 // --- the page's language ---------------------------------------------------------------------
 
-const SETUP_KEY = 'u6.setup'; // localStorage: the chooser's choice made, {"lang":"en"|"ko"}
+const SETUP_KEY = 'u6.setup'; // localStorage: the chooser's choice made, {"lang":"en"|"ko","version":2}
+// The record's version since slice K6: one without it was kept before the first-run default
+// (`setupStale`).
+const SETUP_VERSION = 2;
 
 // The stored choice, or null (none yet, or storage that cannot be read).
 function storedSetup() {
@@ -259,8 +272,10 @@ function say(key, ...args) {
 }
 
 // Puts the page's text in `next` language: the labels and buttons index.html names by key, the
-// buttons whose text is a state, the last line `say` wrote.
+// buttons whose text is a state, the last line `say` wrote. A switch to 한글 lets the site's
+// Korean pack load again after a Forget (spec 08 K6).
 function setLang(next) {
+  if (next === 'ko' && lang !== 'ko') hostedForgot = false;
   lang = Object.hasOwn(TEXT, next) ? next : 'en';
   document.documentElement.lang = lang;
   for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
@@ -732,11 +747,20 @@ const LOCALE_PACK_NAME = /\.u6lp$/i;
 let koPack = null; // the LocalePack loaded (kept under locale:ko), or null
 let localeShown = 'off'; // what the game on screen took of it: off, on, mismatch
 let localeWhy = ''; // the mismatch's sentence (a fixed text of the engine's)
+// Where the pack kept or loaded came from (slice K6), as the HD pack's `packSource`: '' (none),
+// DROPPED (a drop, or a pack kept without a listed name, even one that no longer reads) or the
+// file the site's listing named, kept with the pack in its own transaction (store.js). The
+// listed one is not tried again in the visit once it failed (`hostedFailed`), nor after Forget
+// until the page goes to 한글 again (`hostedForgot`).
+let koSource = '';
+let hostedFailed = false;
+let hostedForgot = false;
 
 // Whether a game started now takes the pack: the page in 한글 with a pack loaded.
 const wantLocale = () => lang === 'ko' && koPack !== null;
 
-// The pack's counts on the body, the game's on the canvas, the notes on the game's text.
+// The pack's counts on the body, the game's on the canvas, the notes on the game's text (the
+// chooser's also says when the pack came from the site).
 function reflectLocale() {
   document.body.dataset.localePack = koPack ? koPack.counts().join(',') : 'none';
   document.body.dataset.localePackStrings = koPack ? koPack.string_counts().join(',') : 'none';
@@ -746,7 +770,8 @@ function reflectLocale() {
   canvas.dataset.locale = live ? localeShown : 'off';
   localeNote.hidden = lang !== 'ko' || koPack !== null;
   localeNote.textContent = t('gameText');
-  setupNote.textContent = t(koPack ? 'gameTextPack' : 'gameText');
+  const hosted = koPack !== null && PACK_NAME.test(koSource) ? t('koPackHosted') : '';
+  setupNote.textContent = koPack ? `${t('gameTextPack')}${hosted}` : t('gameText');
 }
 
 // The game's runs put from the pack and those it did not have (counts only), each frame.
@@ -802,30 +827,32 @@ async function restartForLocale(note, changed = false) {
   }
 }
 
-// A dropped Korean pack: read (at most max_locale_pack_bytes), checked whole by the engine,
-// kept in this browser in place of the one before; the game on screen restarts with it when the
-// page is in 한글. One that does not check out is refused with the rule it breaks and nothing
-// changes. When the browser does not keep it, it works for this visit only and the one kept
-// before is removed (else the next visit would bring it back unsaid).
-async function loadLocalePackFile(file) {
+// A Korean pack from `source` (DROPPED, or the listed file it was downloaded as): read (at most
+// max_locale_pack_bytes), checked whole by the engine, kept in this browser in place of the one
+// before, with its source. One that does not check out is refused with the rule it breaks and
+// nothing changes. When the browser does not keep it, it works for this visit only and the one
+// kept before is removed (else the next visit would bring it back unsaid). Returns whether it
+// was loaded and its status line (or the refusal's, which the status line shows already).
+async function installLocalePack(file, source) {
   needEngine();
+  const refuse = (key, ...args) => {
+    say(key, ...args);
+    return { loaded: false, line: t(key, ...args) };
+  };
   const limit = max_locale_pack_bytes();
-  if (file.size > limit) {
-    say('koPackTooLarge', Math.floor(limit / 2 ** 20));
-    return;
-  }
+  if (file.size > limit) return refuse('koPackTooLarge', Math.floor(limit / 2 ** 20));
   let bytes = new Uint8Array(await file.arrayBuffer());
   let next;
   try {
     next = LocalePack.load(bytes);
   } catch (err) {
-    say('koPackRefused', message(err));
-    return;
+    return refuse('koPackRefused', message(err));
   }
   koPack?.free();
   koPack = next;
+  koSource = source;
   reflectLocale();
-  const kept = await storeLocalePack(bytes);
+  const kept = await storeLocalePack(bytes, PACK_NAME.test(source) ? source : '');
   bytes = null;
   let note = t('koPackKept');
   if (!kept) {
@@ -839,27 +866,90 @@ async function loadLocalePackFile(file) {
     note = t('koPackNotKept', old);
   }
   const [runs, scripts] = koPack.counts();
-  await restartForLocale(`${t('koPackLoaded', runs, scripts, ...koPack.string_counts(), ...koPack.text_counts(), koPack.program_strings())}${note}`, true);
+  const line = `${t('koPackLoaded', runs, scripts, ...koPack.string_counts(), ...koPack.text_counts(), koPack.program_strings())}${note}`;
+  return { loaded: true, line };
 }
 
-// The pack kept from the last visit, loaded before the first game starts. One that no longer
-// reads is left where it is and not used.
+// A dropped Korean pack: installed, and the game on screen restarts with it when the page is in
+// 한글.
+async function loadLocalePackFile(file) {
+  const { loaded, line } = await installLocalePack(file, DROPPED);
+  if (loaded) await restartForLocale(line, true);
+}
+
+// The pack kept from the last visit, loaded before the first game starts, with its source: one
+// kept without a listed name (a drop, or a source missing or not a plain name) is a dropped one.
+// One that no longer reads is left where it is and not used. Storage that cannot be read: the
+// site's pack is not tried in this visit (a pack kept there may be a dropped one).
 async function restoreLocalePack() {
-  const bytes = await loadLocalePack();
-  if (!bytes) return;
+  let kept;
   try {
-    koPack = LocalePack.load(bytes);
+    kept = await loadLocalePack();
+  } catch (err) {
+    hostedFailed = true;
+    console.warn(`could not read the kept Korean pack: ${errorKind(err)}`);
+    return;
+  }
+  if (!kept) return;
+  koSource = PACK_NAME.test(kept.source) ? kept.source : DROPPED;
+  try {
+    koPack = LocalePack.load(kept.bytes);
   } catch (err) {
     console.warn(`the kept Korean pack is not used: ${message(err)}`);
   }
   reflectLocale();
 }
 
+// The Korean pack the site lists for the key (slice K6), while the page is in 한글: downloaded
+// with the key (at most max_locale_pack_bytes read) and installed as a dropped one, when no pack
+// is kept or the one kept came from another listed file; never over a dropped one. Returns
+// the install's result (whether it loaded, its line), or null when none was downloaded (nothing
+// changed). A download that fails, or a pack refused, is not tried again in this visit.
+async function hostedLocalePack() {
+  if (lang !== 'ko' || !packKey.key || hostedFailed || hostedForgot) return null;
+  try {
+    const listed = (await packIndex()).ko;
+    if (listed === null) return null;
+    if (koSource !== '' && (!PACK_NAME.test(koSource) || koSource === listed.file)) return null;
+    const limit = max_locale_pack_bytes();
+    const response = await packFetch(listed.file);
+    if (!response?.ok) {
+      hostedFailed = true;
+      console.warn(`the site's Korean pack was not downloaded: HTTP ${response?.status ?? 404}`);
+      return null;
+    }
+    const reader = response.body.getReader();
+    const parts = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      got += value.length;
+      if (got > limit) {
+        // Enough to tell it is over the limit: the install refuses it before reading it.
+        await reader.cancel();
+        break;
+      }
+    }
+    const installed = await installLocalePack(new File(parts, listed.file), listed.file);
+    if (!installed.loaded) hostedFailed = true;
+    return installed;
+  } catch (err) {
+    hostedFailed = true;
+    console.warn(`the site's Korean pack was not loaded: ${errorKind(err)}`);
+    return null;
+  }
+}
+
 // "Forget the Korean pack": off the page at once, out of the browser's storage, and the game on
-// screen restarted in English if it had it.
+// screen restarted in English if it had it. The site's pack is not loaded again until the page
+// goes to 한글 again or the next visit.
 async function forgetKoPack() {
   koPack?.free();
   koPack = null;
+  koSource = '';
+  hostedForgot = true;
   reflectLocale();
   let line = t('koPackForgot');
   try {
@@ -1841,24 +1931,33 @@ function packFetch(name) {
   });
 }
 
-// The packs the site lists for this visitor (/packs/index.json: {"packs": [{"file", "label"}]}),
-// asked once a visit; [] when it lists none (no key, a 404, anything that does not read). A
-// file is a plain name; a label is text.
+// What the site lists for this visitor (/packs/index.json: {"packs": [{"file", "label"}], "ko":
+// {"file", "label"}}), asked once a visit: `packs`, the HD packs ([] when it lists none: no key,
+// a 404, anything that does not read; a file is a plain name, a label is text), and `ko`, the
+// Korean pack ({file}: a plain name ending .u6lp; its label is not shown), null when none is
+// listed or its entry is not of that form.
 let packList = null;
-function listPacks() {
+function packIndex() {
   packList ??= (async () => {
     try {
       const response = await packFetch('index.json');
-      if (!response?.ok) return [];
-      const { packs } = await response.json();
-      return (Array.isArray(packs) ? packs : [])
-        .filter((p) => typeof p?.file === 'string' && PACK_NAME.test(p.file))
-        .map((p) => ({ file: p.file, label: typeof p.label === 'string' && p.label ? p.label : p.file }));
+      if (!response?.ok) return { packs: [], ko: null };
+      const { packs, ko } = await response.json();
+      return {
+        packs: (Array.isArray(packs) ? packs : [])
+          .filter((p) => typeof p?.file === 'string' && PACK_NAME.test(p.file))
+          .map((p) => ({ file: p.file, label: typeof p.label === 'string' && p.label ? p.label : p.file })),
+        ko: typeof ko?.file === 'string' && PACK_NAME.test(ko.file) && LOCALE_PACK_NAME.test(ko.file) ? { file: ko.file } : null,
+      };
     } catch {
-      return [];
+      return { packs: [], ko: null };
     }
   })();
   return packList;
+}
+
+async function listPacks() {
+  return (await packIndex()).packs;
 }
 
 // The chooser's HD entries checked as the pack active now: MMPX for none, "Dropped pack" (shown
@@ -1900,7 +1999,7 @@ function openSetup() {
 // Keeps the choice made (the language now) and closes the chooser.
 function keepSetup() {
   try {
-    localStorage.setItem(SETUP_KEY, JSON.stringify({ lang }));
+    localStorage.setItem(SETUP_KEY, JSON.stringify({ lang, version: SETUP_VERSION }));
   } catch {
     // No storage: the choice lasts until the page is left.
   }
@@ -1972,6 +2071,12 @@ function applySetup() {
         keepSetup();
       } else if (await downloadPack(chosen)) {
         keepSetup();
+      }
+      // Spec 08 K6: in 한글 the site's Korean pack, when it should be loaded, restarts the game on
+      // screen for it as a drop does.
+      if (setup.hidden && lang === 'ko') {
+        const hosted = await hostedLocalePack();
+        if (hosted?.loaded) await restartForLocale(hosted.line, true);
       }
       // Spec 08: a switch of the language the game on screen shows the Korean pack in or not
       // restarts it from the kept files (the save untouched).
@@ -2297,6 +2402,17 @@ function takeFocusFlag() {
   }
 }
 
+// With no choice kept (spec 08 K6): 한글 when the visitor has a pack key or the browser's first
+// language is Korean, else English (the chooser shows first either way).
+function firstLang() {
+  const browser = navigator.languages?.[0] ?? navigator.language ?? '';
+  return packKey.key || browser.toLowerCase().startsWith('ko') ? 'ko' : 'en';
+}
+
+// A choice kept before this version counts as none, once, for a visitor with a key: the chooser
+// opens as on a first run, and its OK keeps the current record. Without a key it stands.
+const setupStale = packKey.key !== '' && storedSetup() !== null && storedSetup().version !== SETUP_VERSION;
+if (!storedSetup() || setupStale) lang = firstLang();
 reflect('loading');
 reflectPack();
 reflectAudio();
@@ -2308,7 +2424,7 @@ reflectVoice();
 // Voices turned on in an earlier visit come back from this browser's cache only.
 if (voicesWanted() && termsAccepted()) startVoices({ cachedOnly: true });
 // The chooser first while no choice is kept, or when the address brought a new key.
-if (!storedSetup() || packKey.fresh) openSetup();
+if (!storedSetup() || setupStale || packKey.fresh) openSetup();
 enqueue('opEngine', async () => {
   try {
     wasm = await init();
@@ -2333,7 +2449,9 @@ enqueue('opRestore', async () => {
     await restoreVoicePack();
     if (wasm) await restorePack();
     if (wasm) await restoreLocalePack();
-    if (wasm) await restoreKept(takeFocusFlag());
+    // In 한글 the site's Korean pack first (spec 08 K6), so the first game starts with it.
+    const hosted = wasm ? await hostedLocalePack() : null;
+    if (wasm) await restoreKept(takeFocusFlag(), hosted?.line ?? '');
   } finally {
     if (wasm) picker.disabled = false;
     if (!game) reflect(wasm ? 'idle' : 'failed');

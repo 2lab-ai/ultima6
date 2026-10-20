@@ -34,7 +34,7 @@ Status: in-progress (HD0–HD2 and the pack loading shipped 2026-10-17 at main a
 ## Rights (fixed)
 
 - The imagegen tool is a native, local tool that runs on the owner's machine with the owner's own files. Running it sends the game's art to OpenAI. The authority is the user's own request, "hd 이미지 업스케일을 이미지젠 스킬로 해주고" (`hd-i18n-voice/ssot.md`); see Tensions. The page never calls an image API (`connect-src 'self'`).
-- Every output of the tool (sheets, slices, packs, reports that contain art) lives outside the repo under `~/Games/ultima6/hd/`. Packs are never committed, hosted or shared. The manifest carries `derived: true`, and the export path refuses derived packs.
+- Every output of the tool (sheets, slices, packs, reports that contain art) lives outside the repo under `~/Games/ultima6/hd/`. Packs are never committed or shared; since 2026-10-19 they are hosted only under `/packs/` behind the owner key (`functions/_middleware.js`), put there at deploy time. The manifest carries `derived: true`, and the export path refuses derived packs.
 - The scaler baseline runs in the visitor's browser on the visitor's own files, so the public site gains HD with nothing derived on the server.
 - Tests use synthetic art only.
 

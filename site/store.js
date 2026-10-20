@@ -10,8 +10,11 @@
 // `u6.voice-pack/1`: the owner's personality voices, by actor number; numbers only) is one
 // record under `voice-pack:` + `voices`, the pack object checked. The Korean pack (spec 08,
 // `ko.u6lp`: the owner's translation of the conversation lines, made from his files by
-// tools/i18n) is one record under `locale:ko`, its file's bytes. The page calls these one at a
-// time (its operation queue), so a read never races a write or a delete.
+// tools/i18n) is one record under `locale:ko`, its file's bytes, and where it came from (spec 08
+// K6: the file name the site's listing gave it) one under `locale:ko:source`, written, read and
+// removed in the same transaction as the pack: none for a dropped pack, so a kept pack never
+// carries the source of another. The page calls these one at a time (its operation queue), so
+// a read never races a write or a delete.
 
 const DB = 'ultima6-port';
 const STORE = 'files';
@@ -28,13 +31,20 @@ function openDb() {
 }
 
 // Runs `op` on the store in one transaction; resolves with the request's result once the
-// transaction is complete (committed), rejects when it aborts or fails.
+// transaction is complete (committed), rejects when it aborts or fails. An `op` that throws
+// aborts it: none of the requests it made before is committed.
 async function run(mode, op) {
   const db = await openDb();
   try {
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, mode);
-      const req = op(tx.objectStore(STORE));
+      let req;
+      try {
+        req = op(tx.objectStore(STORE));
+      } catch (err) {
+        tx.abort();
+        throw err;
+      }
       tx.oncomplete = () => resolve(req.result);
       tx.onabort = () => reject(tx.error ?? new Error('the storage transaction was aborted'));
       tx.onerror = () => reject(tx.error ?? req.error);
@@ -187,12 +197,18 @@ export async function forgetVoicePack() {
 }
 
 const LOCALE_KO = 'locale:ko';
+const LOCALE_KO_SOURCE = 'locale:ko:source';
 
-/// Keeps the Korean pack's bytes in place of the kept one; true once committed, false (with a
-/// console warning that names only the error's kind) when the browser does not keep it.
-export async function storeLocalePack(bytes) {
+/// Keeps the Korean pack's bytes in place of the kept one, with `source` (the listed file it
+/// came from; '' for a dropped one: the source kept before is removed), in one transaction;
+/// true once committed, false (with a console warning that names only the error's kind, and
+/// nothing changed) when the browser does not keep them.
+export async function storeLocalePack(bytes, source = '') {
   try {
-    await run('readwrite', (s) => s.put(bytes, LOCALE_KO));
+    await run('readwrite', (s) => {
+      s.put(bytes, LOCALE_KO);
+      return source ? s.put(source, LOCALE_KO_SOURCE) : s.delete(LOCALE_KO_SOURCE);
+    });
     return true;
   } catch (err) {
     console.warn(`could not keep the Korean pack: ${err?.name ?? 'Error'}`);
@@ -200,20 +216,26 @@ export async function storeLocalePack(bytes) {
   }
 }
 
-/// The kept Korean pack's bytes, or null (none, or storage unavailable).
+/// The kept Korean pack, read in one transaction: { bytes, source } (`source` '' when none is
+/// kept or it is not text), or null when none is kept. Throws when the storage cannot be read
+/// (the page cannot tell whether a pack is kept).
 export async function loadLocalePack() {
-  try {
-    const bytes = await run('readonly', (s) => s.get(LOCALE_KO));
-    return bytes instanceof Uint8Array ? bytes : null;
-  } catch (err) {
-    console.warn(`could not read the kept Korean pack: ${err?.name ?? 'Error'}`);
-    return null;
-  }
+  let source = null;
+  const bytes = await run('readonly', (s) => {
+    source = s.get(LOCALE_KO_SOURCE);
+    return s.get(LOCALE_KO);
+  });
+  if (!(bytes instanceof Uint8Array)) return null;
+  return { bytes, source: typeof source.result === 'string' ? source.result : '' };
 }
 
-/// Removes the kept Korean pack; resolves once the delete is committed, throws when it is not.
+/// Removes the kept Korean pack and its source in one transaction; resolves once the delete is
+/// committed, throws when it is not.
 export async function forgetLocalePack() {
-  await run('readwrite', (s) => s.delete(LOCALE_KO));
+  await run('readwrite', (s) => {
+    s.delete(LOCALE_KO);
+    return s.delete(LOCALE_KO_SOURCE);
+  });
 }
 
 function fileOf(entry) {
