@@ -209,3 +209,34 @@ Append-only. Closed units, with their receipts.
   - **Gates on the merge** (run on 6665cb8, whose tree the merge 16be889 has): fmt and clippy clean; 1176 passed, 0 failed, 7 ignored; wasm 1,882,766 bytes; web 63/63 three times; oracles OK; port map unchanged; loop-lint 0 FAIL.
   - **Reviews:** gpt-6-astra and opus over 15 rounds; r15, both APPROVE. Rounds 10–14 each found a counterexample in doc prose that listed, case by case, what a field's first code does after a padding that exactly fills the row. Round 14 deleted the list, keeping only the measured threshold. Lesson: prose that restates a state machine case by case is unbounded review surface; state the measured invariant and defer to the code. Findings: `~/Games/ultima6/work/review/l1-text-path/`.
   - **Deploys:** preview 409b5dea at 16be889. Live check with the owner's zip and the owner's local pack: HD on, off and on again in the menu, the game and after a look; the pack matched; 0 foreign requests, 0 errors. The dispatcher read the frames (a long wrapped question, the party list and the prompt, a look message); English text lays out as before. Production waits on the owner's deploy run.
+
+## 2026-10-20 — the item-1 decisions of 2026-10-18, superseded
+
+Superseded by the decision of 2026-10-20 (B: the read decides, H6 and H7 parked). Kept as they stood:
+
+Decision 2026-10-18 (trinity, converged in round 3; record `~/Games/ultima6/work/dispatch/trinity-h5-decision.md`):
+- H5 merged as gate code (953e744); item 1 stays open.
+- Before any limit change, H6 reads the measure against the pixels on H4's pack, at S 4, outdoor pairs. Buckets: ≤1.1, 1.1–1.5, >1.5 × the limit, gen-gen and gen-MMPX separately. Controls: the carpet seam as positive, passing pairs as negative.
+- Reading:
+  - if ≤1.1 looks clean and >1.5 looks seamed, the ruler stands; a calibrated limit or C (edge-harmonise in ingest, no upload) follows;
+  - if ~1.5× pairs look clean, the denominator's sampling (HD interior read only on pitch-k lattice lines) is fixed first, with a null-case fixture.
+- H7 closes the pair model's two gaps before item 1 closes: (b) flags3 0x20 objects that replace the base tile, with the ghost base-tile pairs removed; (c) generated objects at least half opaque toward terrain, counted first.
+- Then re-gate, read the final pack at S 4 and S 2, and write spec 07 rev 7. No arbitrary loosening (option B). D, terrain re-prompted with neighbour context, comes last if at all.
+
+Decision 2026-10-18, after H6's read (trinity, unanimous in round 5; record `~/Games/ultima6/work/dispatch/trinity-h6-decision.md`). H6 read the sheets of H4's pre-gate pack:
+- Terrain: almost all water. The fail side is verified, and the generated tiles are a different style from MMPX.
+- Objects: some passing pairs are visibly defective at or beside the join, and every failing pair read is visibly defective in the window. The defects are restyle, content changes, and multi-cell mis-registration.
+
+Outcome:
+- The v1 pack generates no terrain. This is a policy constant, not a family rule.
+- H7(b)(c) are unconditional. Count first. The first-pass object-terrain pairs are recorded, not gated.
+- Re-gate.
+- The acceptance is a window read of the final pack at S 4 and S 2:
+  - passed pairs included;
+  - each window compared against its classic and MMPX panels;
+  - the fixed-point record matched to the final slices;
+  - explicit inclusion of outdoor, town and castle windows, gen-gen and gen-MMPX, object-terrain, multi-record walls and carpets, and the defective families the object read named;
+  - a type with no survivor recorded as 0.
+- A new defect sends the whole object to MMPX, then re-gate and re-read. Then rev 7.
+- Not done: C, any change to the limit or the denominator, a class rule, a pre-fallback from the pre-gate pack.
+- D (an MMPX-compatible crisp style) comes after items 2 and 3.

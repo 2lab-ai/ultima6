@@ -15,7 +15,7 @@ Status: in-progress. Research is done (2026-10-15, notes kept locally in `~/Game
 | `08-i18n-ko.md` | 2 |
 | `09-npc-voice.md` | 3 |
 
-Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 6 (rev 5: what H0 and H3 measured; rev 6: the neighbour-seam gate), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
+Spec review: every spec had a gpt-6-astra review and an opus review read against the code, all folded in. 06 is at rev 3, 07 at rev 7 (rev 5: what H0 and H3 measured; rev 6: the neighbour-seam gate; rev 7: the v1 pack, the read decides), 08 at rev 3, 09 at rev 3. Closed units are in `loop.done.md`.
 
 Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source plane), H0b (plane hardening), H1 (the HD compositor, MMPX at 2× or 4×, on by default), H3 (the pack format and the imagegen tool) and H2 (the page loads a pack) are in production (19effa16 at main a769a5a); H4 ran the tool on the owner's files (its pack stays local); H5 (the neighbour-seam gate, tool only, no deploy) is merged at 953e744. 08 L1 (the wide text path) is merged at 16be889 and on preview. In flight:
 - Parked 2026-10-19 (see Re-plan below): H6 at 4443e4b, H7 at c74bccd (local only). L3 landed on main (03a2071) for V5. The L1 production deploy line is withdrawn.
@@ -34,34 +34,10 @@ Shipped: 06 is complete in production (9f831837 at main bf93585). 07 H0 (source 
 - The translation run, 2026-10-20, with the owner's consent (verbatim: "처음 인트로부터 캐릭터 생성 스크린부터 모든 대화를 번역하고 배포해줘"): the `u` program's text and every conversation script, with their keywords; the pack is local. Live check on `korean-keywords` with his files and that pack: the opening and the gypsy's questions in Korean, a party member's greeting and two answers in Korean, the Korean words for two of his keywords typed through the IME got their answers. Not sent (not in his words): the executable's messages, object names and books, so the Look and conversation prompt words stay English. Found: a keyword two topics list is refused even when both give the same word (the K5c tool fix, then the conversations run again).
 - K5c merged (main de086b3, tool only): a keyword the model answers twice with the same word is kept, and a script's request lists each key once, in its first block. The conversations ran again with it (same consent): far fewer keywords stay English.
 - On preview `korean-keywords` (main ff95606): K6, the Korean pack hosted under `/packs/` behind the owner key, listed as `ko` in `index.json`, and loaded by default in 한글 (spec 08 rev 11): fetched with the key, kept with its source in one IndexedDB transaction, fetched again only under a new name, never over a drop; the first run picks 한글 for a key or a Korean browser; a setup stored before K6 counts as none once for a key. Live check on the preview: a fresh visit with the key preselects 한글, downloads the pack once and runs the intro and the conversations in Korean with no drop, the Korean keywords answer; a stored older English setup with the key kept opens the chooser on 한글 with the pack loaded, and OK keeps the new setup.
+- On preview `korean-keywords` (main 8747579): the v1 HD pack, listed first in the chooser. H8 (main ab9a2e1) gives `u6-hd ingest --exclude FILE`: every item holding a listed record goes back to MMPX whole, before the neighbour gate; the list is the owner's local file. v1 is H5's sheets re-ingested with the list from the read of every generated tile object at S 4 and S 2 (no new generation, no upload); terrain stays MMPX; portraits stay generated. The u6-hdtool doc gate is green again (8747579). Live check with the owner's key: a fresh first run lists v1, it loads and shows at S 4 and S 2 in the castle rooms and courtyard; the same moment drawn with v1, H5 and no pack, every map-window pixel of v1 equals H5's or MMPX's (a listed bottle and bread equal MMPX, a kept mug and wall pictures equal H5); no listed record is in the pack. The town is out of reach of a new game's party (the gatehouse is locked). Production waits on the owner keeping it.
 - Next: the owner's hand check in 한글 with a real Korean IME.
 
-Decision 2026-10-18 (trinity, converged in round 3; record `~/Games/ultima6/work/dispatch/trinity-h5-decision.md`):
-- H5 merged as gate code (953e744); item 1 stays open.
-- Before any limit change, H6 reads the measure against the pixels on H4's pack, at S 4, outdoor pairs. Buckets: ≤1.1, 1.1–1.5, >1.5 × the limit, gen-gen and gen-MMPX separately. Controls: the carpet seam as positive, passing pairs as negative.
-- Reading:
-  - if ≤1.1 looks clean and >1.5 looks seamed, the ruler stands; a calibrated limit or C (edge-harmonise in ingest, no upload) follows;
-  - if ~1.5× pairs look clean, the denominator's sampling (HD interior read only on pitch-k lattice lines) is fixed first, with a null-case fixture.
-- H7 closes the pair model's two gaps before item 1 closes: (b) flags3 0x20 objects that replace the base tile, with the ghost base-tile pairs removed; (c) generated objects at least half opaque toward terrain, counted first.
-- Then re-gate, read the final pack at S 4 and S 2, and write spec 07 rev 7. No arbitrary loosening (option B). D, terrain re-prompted with neighbour context, comes last if at all.
-
-Decision 2026-10-18, after H6's read (trinity, unanimous in round 5; record `~/Games/ultima6/work/dispatch/trinity-h6-decision.md`). H6 read the sheets of H4's pre-gate pack:
-- Terrain: almost all water. The fail side is verified, and the generated tiles are a different style from MMPX.
-- Objects: some passing pairs are visibly defective at or beside the join, and every failing pair read is visibly defective in the window. The defects are restyle, content changes, and multi-cell mis-registration.
-
-Outcome:
-- The v1 pack generates no terrain. This is a policy constant, not a family rule.
-- H7(b)(c) are unconditional. Count first. The first-pass object-terrain pairs are recorded, not gated.
-- Re-gate.
-- The acceptance is a window read of the final pack at S 4 and S 2:
-  - passed pairs included;
-  - each window compared against its classic and MMPX panels;
-  - the fixed-point record matched to the final slices;
-  - explicit inclusion of outdoor, town and castle windows, gen-gen and gen-MMPX, object-terrain, multi-record walls and carpets, and the defective families the object read named;
-  - a type with no survivor recorded as 0.
-- A new defect sends the whole object to MMPX, then re-gate and re-read. Then rev 7.
-- Not done: C, any change to the limit or the denominator, a class rule, a pre-fallback from the pre-gate pack.
-- D (an MMPX-compatible crisp style) comes after items 2 and 3.
+Decision 2026-10-20 (trinity, unanimous in round 2; record `~/Games/ultima6/work/dispatch/trinity-item1-decision.md`): item 1 closes with B, the read of every window of H5's final-read sheet at S 4 and S 2, each restyled object back to MMPX whole, the rebuilt pack re-read live and hosted behind the key, spec 07 rev 7. H6 and H7 stay parked (not merged); no new generation or upload; the crisp prompt (D) is a named follow-up.
 
 Decision 2026-10-17: items still close one at a time and in order (07 closes before 08 is reported done), but 08's first units (L1, L3) start while 07's last work is tool-only (H5, hd-stderr-flake in `tools/hd`), since their files are disjoint and waiting idles the machine.
 
