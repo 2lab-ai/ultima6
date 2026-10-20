@@ -4,7 +4,7 @@
 //! loads it (`State::new_game`, the public API of `u6-core`), at run time; nothing read here is
 //! written anywhere but the work dir.
 //!
-//! [`Game::synthetic`] is a made-up set of the same shape (drawn by code here), for the tests
+//! [`synthetic::game`] is a made-up set of the same shape (drawn by code here), for the tests
 //! and for tuning the gates with real imagegen calls without sending any game art.
 
 use std::path::Path;

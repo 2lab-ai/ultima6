@@ -180,7 +180,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
 }
 
 /// Starts the thread that, once a stop has been pending [`STOP_GRACE`], puts back the default
-/// action of each stop signal [`on_signal`] was installed for (from normal context), so a
+/// action of each stop signal `on_signal` was installed for (from normal context), so a
 /// stop that stalls (a write that does not return) still yields to a later signal.
 pub fn watch_the_stop() {
     std::thread::spawn(|| {
@@ -198,7 +198,7 @@ pub fn watch_the_stop() {
     });
 }
 
-/// Installs [`on_signal`] for SIGINT, SIGTERM, SIGHUP and SIGQUIT (Ctrl-C, a `kill`, a closed
+/// Installs `on_signal` for SIGINT, SIGTERM, SIGHUP and SIGQUIT (Ctrl-C, a `kill`, a closed
 /// terminal, `Ctrl-\`), each unless the tool was started with it ignored (`nohup`, a script's
 /// background job): then it stays ignored, and the calls (which inherit that) run on through
 /// it. Pair with [`watch_the_stop`]. The calls run in process groups of their own, which those signals do not reach:
@@ -728,10 +728,10 @@ impl Runner for Codex {
     /// while the call is watched for its exit, until it exits, the prompt fails, the deadline
     /// passes or the tool is stopping ([`STOPPED`]); then the call's group is killed and
     /// reaped (on every path) and its output pipes given [`Codex::grace`] to end, each tracked on
-    /// its own (each wait bounded as [`Pipes::step`] says: the files' writes are assumed to
+    /// its own (each wait bounded as `Pipes::step` says: the files' writes are assumed to
     /// return; no grace when stopping). Then the pipes are closed, whatever still holds their
     /// other ends: nothing of the call outlives it here, no thread, no descriptor. The spawn
-    /// is admitted under [`ADMIT`]: its reservation written, the stop looked at once more (the
+    /// is admitted under `ADMIT`: its reservation written, the stop looked at once more (the
     /// admission point: a stop seen there voids the reservation), then the spawn; a spawn that
     /// fails (no process made: nothing sent) voids it too.
     fn dispatch(
