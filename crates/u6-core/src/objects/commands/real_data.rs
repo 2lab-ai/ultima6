@@ -691,10 +691,11 @@ fn the_identity_pack_shows_look_get_drop_and_move_exactly_as_english() {
 
 /// Spec 08 (slices K2 and K3): the string export of the owner's files (`u6.string-bundle/1`) lists
 /// every catalogued string of his `game` once, each with its hash and length (it reads back),
-/// none under three bytes, of every kind; Look's lead-in and the command names are among them;
-/// and the object names of his `look.lzd` and the books of his `book.dat`, each once, as many as
-/// the identity pack holds. Prints pass/fail only: no count or size of what his files hold (a
-/// size comparison fails with its label, not the two sizes).
+/// none under three bytes but a label (one byte or more: a wind's name is two), of every kind;
+/// Look's lead-in and the command names are among them; and the object names of his `look.lzd`
+/// and the books of his `book.dat`, each once, as many as the identity pack holds. Prints
+/// pass/fail only: no count or size of what his files hold (a size comparison fails with its
+/// label, not the two sizes).
 #[test]
 fn the_string_export_of_the_owners_game_lists_its_catalogued_strings() {
     use crate::locale::strings::{self, Export, Kind};
@@ -722,7 +723,13 @@ fn the_string_export_of_the_owners_game_lists_its_catalogued_strings() {
         count(Kind::Label),
     );
     assert!(hashes.len() == export.strings.len(), "each once");
-    assert!(export.strings.iter().all(|e| e.len >= 3));
+    assert!(
+        export
+            .strings
+            .iter()
+            .all(|e| e.len >= if e.kind == Kind::Label { 1 } else { 3 }),
+        "none under three bytes but a label"
+    );
     assert!(messages > 0 && formats > 0 && labels > 0);
     assert!(has(&lead) && has(&talk), "Look's lead-in and Talk's name");
     eprintln!("string export reads back, each string once, Look and Talk in it: pass");

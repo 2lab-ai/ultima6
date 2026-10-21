@@ -5999,7 +5999,8 @@ test('Korean pack with game strings in a game (the user\'s disks, a synthetic co
   assert.equal(download.suggestedFilename(), 'ultima6-strings.json');
   assert.equal(exported.format, 'u6.string-bundle/1');
   assert.ok(exported.strings.length > 0, 'strings');
-  assert.ok(exported.strings.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len >= 3), 'each keyed by its hash');
+  // Each 3 bytes or more, a label (a wind's name) 1 or more (u6_core::locale::strings).
+  assert.ok(exported.strings.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len >= (e.kind === 'label' ? 1 : 3)), 'each keyed by its hash');
   const looks = (exported.texts ?? []).filter((e) => e.kind === 'look').length;
   const line = ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks, (exported.texts ?? []).length - looks, (exported.u ?? []).length);
   assert.equal((await h.state(page)).status, line, 'the line, counts only');
