@@ -5,15 +5,21 @@
 //! next to their addresses): the command loop's prompts and results
 //! ([`crate::main_loop::commands::PRINTED`]), Look, Get, Drop, Move and the keys'
 //! ([`crate::objects::commands::PRINTED`]), Use's ([`crate::usecmd::PRINTED`]), Rest's
-//! ([`crate::actors::rest::PRINTED`]), Attack's ([`crate::combat::attack::PRINTED`]) and the
-//! conversation's own messages ([`crate::converse::text::SHOWN`]): each one game code passes to
-//! `printf` as its format. And the strings a loader table holds that game code shows through an
-//! escape (labels): the command names before their dash
-//! ([`crate::main_loop::commands::LABELS`]), the shared messages Use and the object commands
-//! print through `%s` ([`SHARED_MESSAGES`]), and the conversation's `$G`, `$T` and `$Y` words.
-//! Every other string of the executable is not catalogued, and never substituted: the panels,
-//! magic, the inventory, combat's other lines, object names and articles. A string shorter
-//! than [`MIN_BYTES`], or with no word of its own (`%s\n`), is not catalogued either.
+//! ([`crate::actors::rest::PRINTED`]), Attack's ([`crate::combat::attack::PRINTED`]), the lines
+//! the actors' and objects' own code prints (the clock's with the status area's date line
+//! ([`crate::actors::clock::PRINTED`]), the world turn's ([`crate::actors::turn::PRINTED`]), the
+//! party's ([`crate::actors::party::PRINTED`]), the NPC turn's ([`crate::actors::npc::PRINTED`]),
+//! the step test's ([`crate::actors::walk::PRINTED`]), the passthroughs' and the object blocks'
+//! ([`crate::objects::PRINTED`])) and the conversation's own messages
+//! ([`crate::converse::text::SHOWN`]): each one game code passes to `printf` as its format. And
+//! the strings a loader table holds that game code shows through an escape (labels): the command
+//! names before their dash ([`crate::main_loop::commands::LABELS`]), the shared messages Use and
+//! the object commands print through `%s` ([`SHARED_MESSAGES`]), the wind's names the date line
+//! prints through `%s` ([`crate::actors::clock::LABELS`]), and the conversation's `$G`, `$T` and
+//! `$Y` words. Every other string of the executable is not catalogued, and never substituted:
+//! the panels (but the date line), magic, the inventory, combat's other lines, object names and
+//! articles. A string shorter than [`MIN_BYTES`], or with no word of its own (`%s\n`), is not
+//! catalogued either.
 //!
 //! **Lookup.** By content: [`hash64`] of the English bytes, only where game code prints them
 //! (`printf`'s format, `puts`, `put_raw_str`; [`super::exe_string`]) or reads a label for display
@@ -278,7 +284,13 @@ impl Catalogue {
             )
             .chain(crate::usecmd::PRINTED)
             .chain(crate::actors::rest::PRINTED)
-            .chain(crate::combat::attack::PRINTED);
+            .chain(crate::combat::attack::PRINTED)
+            .chain(crate::actors::clock::PRINTED)
+            .chain(crate::actors::turn::PRINTED)
+            .chain(crate::actors::party::PRINTED)
+            .chain(crate::actors::npc::PRINTED)
+            .chain(crate::actors::walk::PRINTED)
+            .chain(crate::objects::PRINTED.iter().flat_map(|s| s.iter()));
         for &at in printed {
             if let Ok(text) = img.cstr(at) {
                 let kind = if has_conversion(&text) {
@@ -291,7 +303,8 @@ impl Catalogue {
         }
         let labels = crate::main_loop::commands::LABELS
             .iter()
-            .chain(&SHARED_MESSAGES);
+            .chain(&SHARED_MESSAGES)
+            .chain(crate::actors::clock::LABELS);
         for &ptr in labels {
             if let Ok(text) = img.pointer(ptr).and_then(|p| img.cstr(p)) {
                 c.add(Kind::Label, text);

@@ -12,6 +12,7 @@
 use std::cell::RefCell;
 
 use crate::engine::Io;
+use crate::image::A4;
 use crate::objects::ObjectId;
 use crate::state::State;
 use crate::todo_stub;
@@ -20,6 +21,22 @@ use super::clock;
 use super::path::{self, Goal};
 use super::seams::{self, Arg};
 use super::{leaves, tail, walk};
+
+/// A4 string offsets the original prints: a theft noticed ([`steal`]), a guard's arrest
+/// question and the two answers' lines ([`arrest`]).
+const THEFT_NOTICED: i32 = -0x7466;
+const ARREST_ASK: i32 = -0x7503;
+const ARREST_YES: i32 = -0x74cb;
+const ARREST_NO: i32 = -0x7489;
+
+/// Port-only (spec 08, slice K2): the strings the NPC turn passes to `printf` as its format, for
+/// the locale layer's catalogue ([`crate::locale::strings`]).
+pub(crate) const PRINTED: &[u32] = &[
+    A4.wrapping_add_signed(THEFT_NOTICED),
+    A4.wrapping_add_signed(ARREST_ASK),
+    A4.wrapping_add_signed(ARREST_YES),
+    A4.wrapping_add_signed(ARREST_NO),
+];
 
 /// What the synchronous part left for the asynchronous part of an NPC turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -362,7 +379,7 @@ pub fn steal(s: &mut State, actor: u16, target: u16) {
         need += 1;
     }
     if roll >= need >> 1 {
-        seams::print(s, -0x7466, &[Arg::Name(ObjectId(actor))]);
+        seams::print(s, THEFT_NOTICED, &[Arg::Name(ObjectId(actor))]);
     }
 }
 
@@ -545,7 +562,7 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
             s.actors.worktype[a] = 0x81;
             return;
         }
-        seams::print(&mut s, -0x7503, &[]);
+        seams::print(&mut s, ARREST_ASK, &[]);
     }
     let key = loop {
         let k = seams::read_key(state, io).await;
@@ -556,7 +573,7 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
     let mut s = state.borrow_mut();
     s.actors.worktype[a] = 0x81;
     if key == u16::from(b'Y') {
-        seams::print(&mut s, -0x74cb, &[]);
+        seams::print(&mut s, ARREST_YES, &[]);
         seams::full_redraw(&mut s);
         if s.actors.combat_mode() {
             crate::combat::mode::break_off(&mut s);
@@ -575,7 +592,7 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
         seams::area_music(&mut s);
         seams::refresh_view(&mut s);
     } else {
-        seams::print(&mut s, -0x7489, &[]);
+        seams::print(&mut s, ARREST_NO, &[]);
         crate::combat::damage::rouse_neutrals(&mut s);
         s.actors.worktype[a] = 8;
         s.actors.attrs.status[a] = (s.actors.attrs.status[a] & 0x9f) | 0x20;

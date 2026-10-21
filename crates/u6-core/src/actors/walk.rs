@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 
 use crate::engine::Io;
+use crate::image::A4;
 use crate::objects::ObjectId;
 use crate::rng::Rng;
 use crate::state::State;
@@ -51,6 +52,14 @@ pub const PASS_MOVED_MS: u16 = 95;
 /// two a Pass pays, not their values; the values are pinned by trace.py's reduction of the
 /// `q1`..`q6` traces recorded in re/notes/oracle.md §E (14 and 19 passes, the means above).
 pub const PASS_STILL_MS: u16 = 4;
+
+/// The A4 string offset of the line the player's step prints when an object of type 0x1a0 bars
+/// it ([`can_move_to`]).
+const BARRED: i32 = -0x73e0;
+
+/// Port-only (spec 08, slice K2): the string the step test passes to `printf` as its format, for
+/// the locale layer's catalogue ([`crate::locale::strings`]).
+pub(crate) const PRINTED: &[u32] = &[A4.wrapping_add_signed(BARRED)];
 
 /// Port: the walk command's step ([`super::party::player_step`], 0x11d4ee), then the time the
 /// original spends in it, on the engine clock: [`STEP_MS`], and [`FOLLOW_MS`] more when the
@@ -336,7 +345,7 @@ pub fn can_move_to(s: &mut State, actor: u16, x: u16, y: u16) -> bool {
         let other = obj_type(s, id);
         if other == 0x1a0 && s.actors.quest_flag_copy == 0 {
             if s.actors.work.hic != 0 {
-                seams::print(s, -0x73e0, &[]);
+                seams::print(s, BARRED, &[]);
                 s.actors.work.hic = 0;
                 s.actors.work.prompt = 1;
             }

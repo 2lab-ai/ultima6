@@ -143,7 +143,8 @@ pub enum Arg {
     Text(i32),
     /// A string at an absolute image address (PC-relative strings in code hunks).
     Image(u32),
-    /// The string the pointer at A4 + offset points to (a name table entry).
+    /// The string the pointer at A4 + offset points to (a name table entry: the date line's wind
+    /// name), as the locale shows it ([`crate::locale::shown`]).
     Pointer(i32),
 }
 
@@ -162,9 +163,11 @@ fn arg_text(s: &State, io: &Io, a: Arg) -> Option<Vec<u8>> {
             crate::main_loop::game_string(io, crate::image::A4.wrapping_add_signed(off))
         }
         Arg::Image(at) => crate::main_loop::game_string(io, at),
-        Arg::Pointer(off) => {
-            crate::main_loop::pointed_string(io, crate::image::A4.wrapping_add_signed(off))
-        }
+        // Port (spec 08, slice K2): printed, so the locale pack's label when it has one.
+        Arg::Pointer(off) => crate::locale::shown(
+            s,
+            crate::main_loop::pointed_string(io, crate::image::A4.wrapping_add_signed(off)),
+        ),
         Arg::Word(_) => return None,
     })
 }

@@ -441,3 +441,187 @@ fn a_pack_with_a_member_twice_is_refused_as_the_tools_reader_refuses_it() {
         assert_eq!(Pack::parse(&file(json)), Err(PackError::Shape), "case {i}");
     }
 }
+
+/// The date line's format (A4-0x7293) in the synthetic `game`: the test's own.
+const DATE: u32 = crate::image::A4 - 0x7293;
+const DATE_FORMAT: &[u8] = b"Zq8 %d/%d/%d %s";
+/// Where the synthetic `game` keeps the wind's names (past every string of the sites).
+const WIND_TEXT: u32 = 0x0015_4800;
+
+/// The strings the actors' and objects' own lines print as their format, by their sites' lists.
+fn actor_and_object_sites() -> Vec<u32> {
+    let lists: [&[u32]; 5] = [
+        crate::actors::clock::PRINTED,
+        crate::actors::turn::PRINTED,
+        crate::actors::party::PRINTED,
+        crate::actors::npc::PRINTED,
+        crate::actors::walk::PRINTED,
+    ];
+    lists
+        .into_iter()
+        .chain(crate::objects::PRINTED)
+        .flatten()
+        .copied()
+        .collect()
+}
+
+/// Each site's address with its synthetic text.
+type SiteLines = Vec<(u32, Vec<u8>)>;
+
+/// The synthetic text at each site (`Zq` and two digits: the sites lie 6 bytes apart at least),
+/// the date line's format at its own, and a name at each pointer of the wind's name table (the
+/// wind byte -1..=7): `Zw` and the entry's index, but two bytes for wind 7 (under
+/// [`strings::MIN_BYTES`]).
+fn site_texts() -> (SiteLines, Vec<Vec<u8>>) {
+    let lines = actor_and_object_sites()
+        .into_iter()
+        .enumerate()
+        .map(|(i, at)| {
+            let text = if at == DATE {
+                DATE_FORMAT.to_vec()
+            } else {
+                format!("Zq{i:02}").into_bytes()
+            };
+            (at, text)
+        })
+        .collect();
+    let winds = (0..crate::actors::clock::LABELS.len())
+        .map(|k| {
+            if k == 8 {
+                b"Zw".to_vec()
+            } else {
+                format!("Zw{k}").into_bytes()
+            }
+        })
+        .collect();
+    (lines, winds)
+}
+
+/// A synthetic `game` (one CODE hunk from the image base) holding [`site_texts`]: each string
+/// NUL-ended at its site, the name table's pointers (absolute: no RELOC32) to the names.
+fn site_game() -> Vec<u8> {
+    let (lines, winds) = site_texts();
+    let base = crate::image::IMAGE_BASE;
+    let mut hunk = vec![0u8; (WIND_TEXT - base) as usize + 0x100];
+    let mut put = |at: u32, bytes: &[u8]| {
+        let o = (at - base) as usize;
+        hunk[o..o + bytes.len()].copy_from_slice(bytes);
+    };
+    for (at, text) in &lines {
+        put(*at, &[text.as_slice(), &[0]].concat());
+    }
+    for (k, (&ptr, name)) in crate::actors::clock::LABELS.iter().zip(&winds).enumerate() {
+        let at = WIND_TEXT + 8 * k as u32;
+        put(ptr, &at.to_be_bytes());
+        put(at, &[name.as_slice(), &[0]].concat());
+    }
+    crate::image::SyntheticGame::new()
+        .loaded(false, hunk)
+        .build()
+}
+
+#[test]
+fn the_actors_and_objects_lines_and_the_wind_names_are_catalogued() {
+    let cat = Catalogue::from_game(&site_game());
+    let (lines, winds) = site_texts();
+    assert_eq!(
+        lines.len(),
+        22,
+        "the clock 3, the turn 4, the party 6, the NPCs 4, a step 1, the objects 4"
+    );
+    for (at, text) in &lines {
+        let kind = if text == DATE_FORMAT {
+            Kind::Format
+        } else {
+            Kind::Message
+        };
+        assert_eq!(
+            cat.of(text).map(|e| e.kind),
+            Some(kind),
+            "the line at {at:#x}"
+        );
+    }
+    for (k, name) in winds.iter().enumerate() {
+        let want = (name.len() >= strings::MIN_BYTES).then_some(Kind::Label);
+        assert_eq!(cat.of(name).map(|e| e.kind), want, "wind name {k}");
+    }
+    assert!(
+        cat.of(b"Zw").is_none(),
+        "a name under three bytes is not catalogued"
+    );
+}
+
+/// The date line of wind `wind` printed in an engine over [`site_game`], with `pack` installed
+/// over its catalogue (or no pack): the format queued and its arguments.
+fn date_line(pack: Option<Pack>, wind: u8) -> (Vec<u8>, Vec<crate::main_loop::PrintArg>) {
+    let game = site_game();
+    let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    let mut s = State::empty();
+    s.actors.calendar.month = 4;
+    s.actors.calendar.day = 9;
+    s.actors.calendar.year = 161;
+    s.actors.wind = wind;
+    if let Some(p) = pack {
+        install_catalogued(
+            &mut s,
+            &files,
+            Rc::new(p),
+            None,
+            Catalogue::from_game(&game),
+        )
+        .expect("the pack checks");
+    }
+    let mut e = crate::engine::Engine::with_game(s, files, |st, _io| async move {
+        crate::actors::clock::date_line(&mut st.borrow_mut());
+    });
+    for _ in 0..8 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let printed: Vec<_> = e
+        .state()
+        .main
+        .pending_print
+        .iter()
+        .filter_map(|p| match p {
+            crate::main_loop::Pending::Print(f, a) => Some((f.clone(), a.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(printed.len(), 1, "the date line is queued once");
+    printed[0].clone()
+}
+
+#[test]
+fn the_date_line_shows_the_packs_wind_name_and_without_a_pack_the_english() {
+    use crate::main_loop::PrintArg::{Str, Word};
+    let ko = || {
+        Pack::new(Language::Korean, "test/1", fingerprint([]), [])
+            .unwrap()
+            .with_strings([string("Zw0", "잔잔"), string("Zw3", "높새")])
+            .unwrap()
+    };
+    let words = vec![Word(4), Word(9), Word(161)];
+    // Calm (the wind byte 0xff, the table's entry -1): the pack's name with a pack, the English
+    // without one, the format and the date the same.
+    let (format, args) = date_line(None, 0xff);
+    assert_eq!(format, DATE_FORMAT);
+    assert_eq!(args, [words.clone(), vec![Str(b"Zw0".to_vec())]].concat());
+    let (format, args) = date_line(Some(ko()), 0xff);
+    assert_eq!(
+        format, DATE_FORMAT,
+        "the format is the English (the pack has none for it)"
+    );
+    assert_eq!(
+        args,
+        [words.clone(), vec![Str("잔잔".as_bytes().to_vec())]].concat()
+    );
+    // Wind 2 likewise; a name the pack lacks (wind 5's) stays English.
+    let (_, args) = date_line(Some(ko()), 2);
+    assert_eq!(args[3], Str("높새".as_bytes().to_vec()));
+    let (_, args) = date_line(Some(ko()), 5);
+    assert_eq!(args[3], Str(b"Zw6".to_vec()));
+}

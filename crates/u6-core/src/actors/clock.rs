@@ -1,5 +1,6 @@
 //! The clock (0x10368a) and the hourly schedule pick (0x121826).
 
+use crate::image::A4;
 use crate::objects::ObjectId;
 use crate::state::State;
 
@@ -10,6 +11,47 @@ use super::{leaves, tail, timer, walk};
 const HOURS: u8 = 24;
 const DAYS: u8 = 28;
 const MONTHS: u8 = 12;
+
+/// A4 string offsets the original prints (the text is game data in `game`): the torch that
+/// burns out, the carried item that vanishes, the date line's format.
+const TORCH_OUT: i32 = -0x756f;
+const VANISHED: i32 = -0x7354;
+const DATE: i32 = -0x7293;
+/// The wind's name table (pointers, A4 + offset), indexed by the signed wind byte.
+const WIND_NAMES: i32 = -0x7ae4;
+
+/// Port-only (spec 08, slice K2): the strings the clock passes to `printf` as its format, for
+/// the locale layer's catalogue ([`crate::locale::strings`]). The item names the vanishing line
+/// takes as an argument are left out (they stay English).
+pub(crate) const PRINTED: &[u32] = &[
+    A4.wrapping_add_signed(TORCH_OUT),
+    A4.wrapping_add_signed(VANISHED),
+    A4.wrapping_add_signed(DATE),
+];
+
+/// Port-only (spec 08, slice K2): the pointers of the wind's names the date line shows (the
+/// wind byte -1 (calm) to 7, as the wind changes set it), labels of the catalogue.
+pub(crate) const LABELS: &[u32] = &[
+    wind_pointer(-1),
+    wind_pointer(0),
+    wind_pointer(1),
+    wind_pointer(2),
+    wind_pointer(3),
+    wind_pointer(4),
+    wind_pointer(5),
+    wind_pointer(6),
+    wind_pointer(7),
+];
+
+/// The A4 offset of the pointer to the name of wind `wind`.
+const fn wind_offset(wind: i8) -> i32 {
+    WIND_NAMES + 4 * wind as i32
+}
+
+/// The image address of the pointer to the name of wind `wind`.
+const fn wind_pointer(wind: i8) -> u32 {
+    A4.wrapping_add_signed(wind_offset(wind))
+}
 
 /// Original: 0x121826 (schedules: pick each NPC's schedule entry for the hour and weekday)
 ///
@@ -139,9 +181,6 @@ pub fn tick(s: &mut State, minutes: i16) {
 
 /// The torches, rings and cloaks a party member carries (0x10368a, 0x10ae52 iteration).
 fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
-    // A4 string offsets the original prints (the text is game data in `game`).
-    const TORCH_OUT: i32 = -0x756f;
-    const VANISHED: i32 = -0x7354;
     // The two item names the vanishing line uses (PC-relative strings in hunk 1).
     const RING_NAME: u32 = 0x101ef6;
     const CLOAK_NAME: u32 = 0x101efc;
@@ -394,16 +433,14 @@ fn set_light(s: &mut State, f: &TickFlags) {
 
 /// The date line in the status area (the format at A4-0x7293): month, day, year and the wind
 /// name (the name table at A4-0x7ae4 is indexed by the signed wind byte).
-fn date_line(s: &mut State) {
-    const DATE: i32 = -0x7293;
+pub(crate) fn date_line(s: &mut State) {
     let c = s.actors.calendar;
-    const WIND_NAMES: i32 = -0x7ae4;
     seams::date_line_window(s, true);
     let args = [
         Arg::Word(i16::from(c.month)),
         Arg::Word(i16::from(c.day)),
         Arg::Word(c.year as i16),
-        Arg::Pointer(WIND_NAMES + 4 * i32::from(s.actors.wind as i8)),
+        Arg::Pointer(wind_offset(s.actors.wind as i8)),
     ];
     seams::print(s, DATE, &args);
     seams::date_line_window(s, false);

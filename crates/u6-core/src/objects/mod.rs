@@ -151,6 +151,11 @@ pub use parts::{
 use u6_formats::objblk::{ObjBlock, ObjBlockId};
 use u6_formats::position::Position;
 
+/// Port-only (spec 08, slice K2): the strings the object helpers pass to `printf` as its format
+/// (the passthroughs' lines, a block's records running out), for the locale layer's catalogue
+/// ([`crate::locale::strings`]).
+pub(crate) const PRINTED: [&[u32]; 2] = [effects::PRINTED, blocks::PRINTED];
+
 /// Object slots in the location / type tables: 0x137988 − 0x135588 = 0x2400 bytes = 3072 × 3,
 /// and 0x10ed44 links `next` through slot 0xbff.
 pub const OBJECT_SLOTS: usize = 3072;

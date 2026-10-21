@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 
 use crate::engine::Io;
+use crate::image::A4;
 use crate::state::State;
 
 use super::seams::{self, Arg};
@@ -46,6 +47,23 @@ pub const MINUTE_MS: u16 = 186;
 /// 0.033 frames: any turn outside a combat routine waits nothing.
 pub const COMBAT_NPC_MS: u16 = 46;
 
+/// A4 string offsets the original prints: the hero's death's two lines ([`darkness`]), the cry
+/// of a swallowed player character and the line after the name of one freed ([`swallowed`]).
+const DARKNESS_FIRST: i32 = -0x7435;
+const DARKNESS_SECOND: i32 = -0x740e;
+const SWALLOWED_CRY: i32 = -0x75e1;
+const SWALLOWED_FREED: i32 = -0x75d3;
+
+/// Port-only (spec 08, slice K2): the strings the world turn passes to `printf` as its format,
+/// for the locale layer's catalogue ([`crate::locale::strings`]). The freed actor's name, which
+/// is printed as a format of its own, is left out.
+pub(crate) const PRINTED: &[u32] = &[
+    A4.wrapping_add_signed(DARKNESS_FIRST),
+    A4.wrapping_add_signed(DARKNESS_SECOND),
+    A4.wrapping_add_signed(SWALLOWED_CRY),
+    A4.wrapping_add_signed(SWALLOWED_FREED),
+];
+
 fn healthy(s: &State, actor: usize) -> bool {
     s.actors.attrs.status[actor] & 0x16 == 0
         && s.actors.attrs.movement_flags[actor] & 0x10 == 0
@@ -79,10 +97,10 @@ pub fn darkness(s: &mut State) {
         return;
     }
     crate::sound::play_song(s, 0);
-    seams::print(s, -0x7435, &[]);
+    seams::print(s, DARKNESS_FIRST, &[]);
     s.gfx.window_shown = 1;
     seams::full_redraw(s);
-    seams::print(s, -0x740e, &[]);
+    seams::print(s, DARKNESS_SECOND, &[]);
     s.actors.work.resurrect_pending = true;
 }
 
@@ -306,12 +324,12 @@ pub fn swallowed(s: &mut State, actor: u16) -> bool {
     }
     let me = crate::objects::ObjectId(actor);
     if s.actors.worktype[a] == 2 {
-        seams::print(s, -0x75e1, &[Arg::Name(me)]);
+        seams::print(s, SWALLOWED_CRY, &[Arg::Name(me)]);
     }
     let r = s.rng.range(1, 30) as i16;
     if r < leaves::strength(s, actor) as i16 {
         seams::print_name(s, me);
-        seams::print(s, -0x75d3, &[]);
+        seams::print(s, SWALLOWED_FREED, &[]);
         s.actors.attrs.movement_flags[a] &= !0x10;
         s.map.view_dirty = 1;
         return false;

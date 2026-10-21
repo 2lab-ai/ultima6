@@ -21,6 +21,9 @@ const MODE_FROZEN: u16 = 0x52;
 const MODE_GAME: u16 = 0x47;
 /// Image address (0x10a490 + 4) of the line 0x10d376 prints when a block's records run out.
 const STR_REGION_FULL: u32 = 0x0010_a494;
+/// Port-only (spec 08, slice K2): the string a block routine passes to `printf` as its format
+/// ([`flush`]), for the locale layer's catalogue ([`crate::locale::strings`]).
+pub(super) const PRINTED: &[u32] = &[STR_REGION_FULL];
 /// Distance (tiles) from the party beyond which 0x10c49c drops temporary objects.
 const KEEP: i16 = 0x14;
 

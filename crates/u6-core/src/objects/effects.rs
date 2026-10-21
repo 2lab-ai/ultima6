@@ -144,6 +144,10 @@ const STR_OPEN: u32 = 0x0012_cf20;
 const STR_NOT_NOW: u32 = 0x0012_cee2;
 const STR_CLOSE: u32 = 0x0012_cf38;
 
+/// Port-only (spec 08, slice K2): the strings 0x1301e2 passes to `printf` as its format, for the
+/// locale layer's catalogue ([`crate::locale::strings`]).
+pub(super) const PRINTED: &[u32] = &[STR_OPEN, STR_NOT_NOW, STR_CLOSE];
+
 /// 0x128ce8 (an actor's portrait, equipment and name, then a key unless a conversation runs):
 /// ported in [`crate::inventory::show_actor`]; this entry keeps the objects-side signature.
 pub async fn show_actor(state: &RefCell<State>, io: &Io, actor: Slot) {

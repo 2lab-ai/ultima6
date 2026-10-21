@@ -1,11 +1,34 @@
 //! The party on the move: the player's step (0x11d4ee) and the followers (0x11c910).
 
+use crate::image::A4;
 use crate::objects::ObjectId;
 use crate::state::State;
 
 use super::leaves;
 use super::seams;
 use super::walk::{self, DX8, DY8};
+
+/// Strings the party's code prints: PC-relative (image addresses: the hiccup and the mismatch
+/// of a player step, the healed line of a rest) and A4 offsets (a vessel with no wind, an actor
+/// poisoned or caught in a web by its tile).
+const HICCUP: u32 = 0x0011_b912;
+const MISMATCH: u32 = 0x0011_b918;
+const HEALED: u32 = 0x0012_72a8;
+const NO_WIND: i32 = -0x73aa;
+const POISONED: i32 = -0x75af;
+const WEBBED: i32 = -0x72e7;
+
+/// Port-only (spec 08, slice K2): the strings the party's code passes to `printf` as its format,
+/// for the locale layer's catalogue ([`crate::locale::strings`]). The healed member's name,
+/// which is printed as a format of its own, is left out.
+pub(crate) const PRINTED: &[u32] = &[
+    HICCUP,
+    MISMATCH,
+    HEALED,
+    A4.wrapping_add_signed(NO_WIND),
+    A4.wrapping_add_signed(POISONED),
+    A4.wrapping_add_signed(WEBBED),
+];
 
 /// Why a player step did not happen (for receipts and tests; the original only keeps
 /// A4-0x6a90 and the message).
@@ -243,7 +266,7 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
     let mut dir = dir as i16;
     if s.actors.tail(super::tail::ALCOHOL) > 3 && s.rng.range(0, 1) != 0 {
         // The hiccup (PC-relative string at 0x11b912).
-        seams::print_image(s, 0x11b912);
+        seams::print_image(s, HICCUP);
         dir = s.rng.range(0, 7) as i16;
     }
     let t = walk::obj_type(s, ObjectId(l));
@@ -262,7 +285,7 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
             };
         }
         if dir < 0 {
-            seams::print(s, -0x73aa, &[]);
+            seams::print(s, NO_WIND, &[]);
             s.actors.work.prompt = 1;
             s.actors.movement_points[li] = 0;
             return StepResult::NoWind;
@@ -315,7 +338,7 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
         s.map.centre.y = p.y;
         seams::rebuild_window(s);
         // The mismatch message (PC-relative string at 0x11b918).
-        seams::print_image(s, 0x11b918);
+        seams::print_image(s, MISMATCH);
         StepResult::Mismatch
     };
     s.actors.work.hic = 0;
@@ -446,7 +469,7 @@ pub fn tile_effect(s: &mut State, actor: u16, tile: u16) {
         if immune || s.actors.attrs.status[a] & 0x08 != 0 {
             return;
         }
-        seams::print(s, -0x75af, &[seams::Arg::Name(me)]);
+        seams::print(s, POISONED, &[seams::Arg::Name(me)]);
         s.actors.work.prompt = 1;
         seams::after_turn_refresh(s);
         flash(s, actor);
@@ -469,7 +492,7 @@ pub fn tile_effect(s: &mut State, actor: u16, tile: u16) {
                 return;
             }
             s.actors.attrs.status[a] |= 0x02;
-            seams::print(s, -0x72e7, &[seams::Arg::Name(me)]);
+            seams::print(s, WEBBED, &[seams::Arg::Name(me)]);
             s.actors.work.prompt = 1;
         }
         0xdc..=0xdf | 0x37a | 0x464 | 0x465 | 0x46a | 0x46b | 0x48c | 0x4a9 => {
@@ -539,7 +562,7 @@ pub fn heal(s: &mut State, i: usize, announce: bool) {
         if announce {
             seams::print(s, 0, &[seams::Arg::PartyName(i as u8)]);
             // The healed line (PC-relative string at 0x1272a8).
-            seams::print_image(s, 0x1272a8);
+            seams::print_image(s, HEALED);
         }
     }
     s.actors.attrs.magic[mi] = leaves::max_magic(s, id) as u8;
