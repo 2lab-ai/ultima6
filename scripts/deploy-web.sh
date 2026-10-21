@@ -3,15 +3,15 @@
 # Usage: scripts/deploy-web.sh [branch]   (main = production → https://ultima6.2lab.ai)
 #        scripts/deploy-web.sh --packs-only   (fills site/packs/ as below and stops: no build,
 #                                             no deploy)
-# The packs the site serves under /packs/ behind the owner key (functions/_middleware.js) come
-# from the private repository ultima6-deploy: first, site/packs/ (gitignored) is replaced with
+# The packs the site serves publicly under /packs/ (never in git) come from the private repository
+# ultima6-deploy, filled in at deploy time: first, site/packs/ (gitignored) is replaced with
 # exactly that repository's packs/, fetched shallow and sparse (packs/ only) into a temporary
-# directory from U6_DEPLOY_REPO (default below) at U6_DEPLOY_REF (default main: a branch, a tag
-# or a full commit hash), or copied as it is from U6_DEPLOY_DIR, a local checkout, which is
-# refused when packs/ there differs from its commit. packs/ must hold only files and
-# directories, and its index.json must parse with every file it lists (packs[].file, ko.file,
-# voices.file) a plain name present in packs/; otherwise the deploy stops and site/packs/ stays
-# as it was. One line names the commit and the number of files; no file's content is printed.
+# directory from U6_DEPLOY_REPO (default below) at U6_DEPLOY_REF (default main: a branch, a tag or
+# a full commit hash), or copied as it is from U6_DEPLOY_DIR, a local checkout, which is refused
+# when packs/ there differs from its commit. packs/ must hold only files and directories, and its
+# index.json must parse with every file it lists (packs[].file, ko.file, voices.file) a plain name
+# present in packs/; otherwise the deploy stops and site/packs/ stays as it was. One line names
+# the commit and the number of files; no file's content is printed.
 # Runs in one checkout take a lock (below) before site/packs/ is touched and keep it to the end
 # of the upload; a second run while it is held stops with "another deploy is running", and a
 # lock left by a run that died stops it too, naming the lock to remove.

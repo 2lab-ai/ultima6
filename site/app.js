@@ -35,7 +35,7 @@
 // The speed (1x .. 8x, Max) is the viewer's, kept in localStorage; - and = / + on the canvas,
 // the keypad - and +, and the Speed buttons change it.
 //
-// HD (spec 07 HD0): with the HD button on (the default, kept in localStorage) the canvas holds
+// HD (spec 07 HD0): with HD on (Settings' "HD on", the default, kept in localStorage) the canvas holds
 // the game's HD frame, 320·S × 200·S device pixels (S = 4 when its box holds at least three
 // device pixels per game pixel, else 2) in the same CSS box: the pixels the game drew from a
 // tile, a portrait or a panel picture are MMPX-magnified, computed in this browser from the
@@ -43,6 +43,19 @@
 // canvas is the 320 × 200 frame as before. The pointer maps onto the game's 320 × 200 pixels
 // either way. The canvas is scaled into its box pixelated, or smoothly when the HD frame has
 // more device pixels than the box.
+//
+// Fullscreen (the toolbar's Fullscreen): #screen-box (the canvas, its badge, the hidden input
+// that takes Korean) goes fullscreen, the canvas as large as fits with the game's aspect ratio,
+// centred on black, drawn as on the page; the canvas takes the focus, and where the browser has
+// the Keyboard Lock API, Escape is locked to the game while it lasts (holding it leaves). An Exit
+// button shows at the top right while the pointer moves (hidden after EXIT_SHOWN_MS still). The
+// toolbar's button, the Exit button and the browser's own way out (Escape, F11) leave it, and the
+// button says which it does. Where the page cannot ask for fullscreen (requestFullscreen missing
+// or refused: iPhone Safari), the box fills the viewport by a class instead, left the same way.
+//
+// The page shows the game screen, the toolbar under it (Fullscreen, Mute, Voices, Speed,
+// Settings), the drop line while no game files are kept or loaded (dropping anywhere on the page
+// works at any time), the status line, the controls (closed) and the licence notices.
 //
 // An HD pack (spec 07 H2: a zip the owner's local tool made from the owner's own files): a dropped
 // `.zip` is first classified from its zip directory and its manifest.json alone (the engine names
@@ -96,13 +109,9 @@
 // check out twice, no room, a runtime that does not start on the CPU, a lost GPU device) turns
 // voices off with a line that names only its kind; the game runs on.
 //
-// NPC bundles (spec 09 Design 5): the "NPC bundles" button reads the game files kept in this
-// browser (no game needs to run) and exports, in wasm (NpcBundles), each conversation script's
-// NPC name and dialogue as one u6.npc-bundle/1 object; they are kept in IndexedDB (one record per
-// script under npc-bundle:) and downloaded as one JSON array, read back from that storage.
-// Nothing is uploaded, and the bundles are never logged or shown: the status line gives their
-// count. Storage that refuses them still gets the download, with a note. "Forget NPC bundles"
-// removes them from this browser.
+// NPC bundles (spec 09 Design 5) and the game strings are exported natively from the user's
+// files (tools/export, u6-export), no longer on the page: the bundles an older page kept under
+// npc-bundle: are removed once, quietly, at the restore (`dropOldBundles`).
 //
 // The Korean pack (spec 08, slice K1: `ko.u6lp`, which the owner's local tool tools/i18n makes
 // from the NPC bundles): a dropped *.u6lp is read whole (at most max_locale_pack_bytes) and
@@ -111,22 +120,19 @@
 // While the page is in 한글 every game it starts takes it (Game.set_locale, before the game's
 // first step): checked against that game's files (a mismatch: the game runs in English, and the
 // line says which part differs), its conversation lines then show in Korean in the Hangul font;
-// every other text stays English. Without a pack, 한글 is the page's own text over the game's
-// English, with one line pointing at tools/i18n. Dropping or forgetting the pack, or switching
+// every other text stays English. With no pack at all (none kept, none listed), 한글 is the
+// page's own text over the game's English, and the chooser has one line pointing at the README's
+// "Packs from your own copy" (with a pack, none). Dropping or forgetting the pack, or switching
 // the language at the chooser's OK, restarts the game from the kept files (the save untouched)
 // when what it shows changes. "Forget the Korean pack" removes it from the page and the browser.
 // Slice K2: the pack may also hold table strings and the game's own messages (the command
 // prompts and their results, a conversation's frame, the forms of address), which then show in
 // Korean too (counts only: data-locale-pack-strings on the body, data-locale-table-hits/misses
-// and data-locale-text-hits/misses on the canvas). The "Game strings" button reads, in wasm
-// (GameStrings), the messages of the kept game file the engine catalogues and downloads them as
-// one u6.string-bundle/1 JSON file for tools/i18n (never uploaded, kept, logged or shown: the
-// status line gives their count). Slice K3: the same download also lists, read in wasm from the
-// kept look.lzd and book.dat, the names Look gives things and the books and signs; a pack that
-// holds them shows them in Korean (counts only: data-locale-pack-texts on the body,
-// data-locale-look-hits/misses and data-locale-book-hits/misses on the canvas). Slice K4: the
-// download also lists, read in wasm from the kept u, the lines of the opening, the introduction
-// story, the gypsy and character creation; a pack that holds them shows them in Korean when a
+// and data-locale-text-hits/misses on the canvas). Slice K3: a pack that holds the names Look
+// gives things and the books and signs shows them in Korean (counts only: data-locale-pack-texts
+// on the body, data-locale-look-hits/misses and data-locale-book-hits/misses on the canvas).
+// Slice K4: a pack that holds the lines of the opening, the introduction story, the gypsy and
+// character creation shows them in Korean when a
 // new game starts in 한글 (u runs on the game the pack is set on before its first step, as the
 // game does; counts only: data-locale-pack-program on the body, data-locale-program-hits/misses
 // on the canvas). Slice K5a: with the pack on the game, while the game reads a line (all three
@@ -151,13 +157,13 @@
 // kept with it, under the same rules (not after Forget voices in the visit), with no line of its
 // own.
 import init, {
-  Game, GameStrings, HdPack, LocalePack, NpcBundles, PackProbe, budget_ms, input_too_large, max_input_bytes,
+  Game, HdPack, LocalePack, PackProbe, budget_ms, input_too_large, max_input_bytes,
   max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
 } from './pkg/u6_web.js';
 import {
   collect, forgetBundles, forgetFiles, forgetLocalePack, forgetPack, forgetSaves, forgetVoicePack,
-  loadBundles, loadFiles, loadLocalePack, loadPack, loadSaves, loadVoicePack, saveFiles,
-  storeBundles, storeLocalePack, storePack, storeSaves, storeVoicePack,
+  loadFiles, loadLocalePack, loadPack, loadSaves, loadVoicePack, saveFiles,
+  storeLocalePack, storePack, storeSaves, storeVoicePack,
 } from './store.js';
 import { TEXT } from './i18n.js';
 import { CACHE_PREFIX, REVISION } from './voice/model.js';
@@ -172,7 +178,6 @@ const forget = document.getElementById('forget');
 const forgetSave = document.getElementById('forget-save');
 const forgetHd = document.getElementById('forget-hd');
 const forgetKo = document.getElementById('forget-ko');
-const localeNote = document.getElementById('locale-note');
 const mute = document.getElementById('mute');
 const hdButton = document.getElementById('hd');
 const restart = document.getElementById('restart');
@@ -202,9 +207,9 @@ const voiceStorage = document.getElementById('voice-storage');
 const voiceAccept = document.getElementById('voice-accept');
 const voiceDecline = document.getElementById('voice-decline');
 const forgetVoices = document.getElementById('forget-voices');
-const npcBundles = document.getElementById('npc-bundles');
-const forgetNpcBundles = document.getElementById('forget-npc-bundles');
-const gameStrings = document.getElementById('game-strings');
+const screenBox = document.getElementById('screen-box');
+const fullscreenButton = document.getElementById('fullscreen');
+const fullscreenExit = document.getElementById('fullscreen-exit');
 
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
 
@@ -233,12 +238,16 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // table strings (data-locale-table-hits / -misses), game strings (data-locale-text-hits /
 // -misses), object names (data-locale-look-hits / -misses) and books (data-locale-book-hits /
 // -misses), and on the body data-locale-pack-texts = the pack's object names and books (counts
-// only).
+// only), data-fullscreen = off, on (the browser's) or css (the page's own).
+// The drop line shows only while no game files are kept (`filesKept` false once the storage said
+// so) or loaded (a game on screen).
+let filesKept = null; // whether this browser keeps game files; null until the restore asked
 function reflect(state) {
   if (state) document.body.dataset.state = state;
   const live = game && !crashed;
   canvas.dataset.files = String(live ? game.game_files() : 0);
   canvas.dataset.saves = String(live ? game.save_files() : 0);
+  drop.hidden = !(filesKept === false && game === null);
 }
 
 // --- the page's language ---------------------------------------------------------------------
@@ -291,7 +300,6 @@ function setLang(next) {
   for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
   for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
   for (const el of document.querySelectorAll('[data-i18n-label]')) el.setAttribute('aria-label', t(el.dataset.i18nLabel));
-  setupNote.hidden = lang === 'en';
   reflectLocale();
   mute.textContent = t(audio.muted ? 'unmute' : 'mute');
   showSpeed();
@@ -835,12 +843,14 @@ let localeWhy = ''; // the mismatch's sentence (a fixed text of the engine's)
 let koSource = '';
 let hostedFailed = false;
 let hostedForgot = false;
+let koListed = null; // whether the site's listing names a Korean pack; null until it is in
 
 // Whether a game started now takes the pack: the page in 한글 with a pack loaded.
 const wantLocale = () => lang === 'ko' && koPack !== null;
 
-// The pack's counts on the body, the game's on the canvas, the notes on the game's text (the
-// chooser's also says when the pack came from the site).
+// The pack's counts on the body, the game's on the canvas, and the chooser's note on the game's
+// text: shown in 한글 only while no Korean pack is at hand at all (none loaded or kept, and the
+// listing, once in, names none), pointing at the README's way to make one.
 function reflectLocale() {
   document.body.dataset.localePack = koPack ? koPack.counts().join(',') : 'none';
   document.body.dataset.localePackStrings = koPack ? koPack.string_counts().join(',') : 'none';
@@ -848,10 +858,7 @@ function reflectLocale() {
   document.body.dataset.localePackProgram = koPack ? String(koPack.program_strings()) : 'none';
   const live = game && !crashed;
   canvas.dataset.locale = live ? localeShown : 'off';
-  localeNote.hidden = lang !== 'ko' || koPack !== null;
-  localeNote.textContent = t('gameText');
-  const hosted = koPack !== null && PACK_NAME.test(koSource) ? t('koPackHosted') : '';
-  setupNote.textContent = koPack ? `${t('gameTextPack')}${hosted}` : t('gameText');
+  setupNote.hidden = lang !== 'ko' || koPack !== null || koSource !== '' || koListed !== false;
 }
 
 // The game's runs put from the pack and those it did not have (counts only), each frame.
@@ -1310,8 +1317,9 @@ function hdScale() {
   return box.width * dpr >= 3 * 320 && box.height * dpr >= 3 * 200 ? 4 : 2;
 }
 
+// Settings' "HD on" as the choice is.
 function showHd() {
-  hdButton.setAttribute('aria-pressed', String(hdOn));
+  hdButton.checked = hdOn;
 }
 
 // How the browser scales the canvas into its box: pixelated (each canvas pixel a sharp block)
@@ -1483,8 +1491,9 @@ async function forgetHdPack() {
   say('packForgot');
 }
 
+// "HD on" changed: HD as it says, kept, on the game on screen at once.
 function toggleHd() {
-  hdOn = !hdOn;
+  hdOn = hdButton.checked;
   try {
     localStorage.setItem(HD_KEY, hdOn ? 'on' : 'off');
   } catch {
@@ -1739,7 +1748,10 @@ async function importFiles(dropped) {
     started = true;
     canvas.focus();
     const saved = imported ? await adoptSaves(imported) : '';
-    const kept = (await keep(next)) ? t('filesKept', next.game_files()) : t('filesNotKept');
+    const keptNow = await keep(next);
+    if (keptNow) filesKept = true;
+    reflect();
+    const kept = keptNow ? t('filesKept', next.game_files()) : t('filesNotKept');
     const resumed = next.save_files() > 0 ? t('resumed') : '';
     setStatus(`${lead}${report}\n${t('started')}${resumed}${saved}${kept}${localeLine()}\n${t('howToPlay')}`);
   } finally {
@@ -1759,6 +1771,8 @@ async function restoreKept(focus, note = '', imported = null) {
   needEngine();
   const lead = note ? `${note}\n` : '';
   let kept = await loadFiles();
+  filesKept = Boolean(kept && kept.length > 0);
+  reflect();
   if (!kept || kept.length === 0) {
     let after = '';
     if (imported) {
@@ -1797,111 +1811,25 @@ async function restoreKept(focus, note = '', imported = null) {
 
 // --- NPC bundles (spec 09 Design 5) ------------------------------------------------------
 
-const NPC_FILE = 'ultima6-npc-bundles.json';
+const BUNDLES_GONE = 'u6.npcBundlesGone'; // localStorage: '1' once the old bundles were removed
 
-// Offers `text` as the download `name` (a JSON file made in this page; nothing is sent).
-function download(name, text) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
-  const link = Object.assign(document.createElement('a'), { href: url, download: name });
-  link.hidden = true;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
-
-// "NPC bundles": the bundles of the kept game files, made in wasm, kept in IndexedDB in place of
-// the ones kept before, and downloaded as one JSON array read back from there (from the export
-// itself when the storage refuses them).
-async function exportNpcBundles() {
-  needEngine();
-  let kept = await loadFiles();
-  if (!kept || kept.length === 0) {
-    say('npcNoFiles');
-    return;
-  }
-  const exporter = new NpcBundles();
-  let json;
+// The NPC bundles an older page kept (its "NPC bundles" button; u6-export makes them now) removed
+// from this browser once, with no line: a failure only warns with its kind, and it is tried
+// again on the next visit.
+async function dropOldBundles() {
+  if (stored(BUNDLES_GONE) === '1') return;
   try {
-    for (let i = 0; i < kept.length; i += 1) {
-      exporter.add(kept[i].path, kept[i].bytes);
-      kept[i] = null;
-    }
-    kept = null;
-    json = exporter.export();
-  } finally {
-    exporter.free();
-  }
-  let bundles = JSON.parse(json);
-  json = null;
-  // A storage error names only its kind, never a bundle.
-  let stored = true;
-  try {
-    await storeBundles(bundles);
+    await forgetBundles();
+    remember(BUNDLES_GONE, '1');
   } catch (err) {
-    console.warn(`could not keep the NPC bundles: ${message(err)}`);
-    stored = false;
+    console.warn(`could not remove the old NPC bundles: ${errorKind(err)}`);
   }
-  if (stored) {
-    try {
-      bundles = await loadBundles();
-    } catch (err) {
-      // Kept, but not read back: the download is the export itself, the same bundles.
-      console.warn(`could not read the kept NPC bundles back: ${message(err)}`);
-    }
-  }
-  download(NPC_FILE, JSON.stringify(bundles));
-  say(stored ? 'npcExported' : 'npcNotKept', bundles.length, NPC_FILE);
-}
-
-// --- game strings (spec 08, slice K2) ------------------------------------------------------
-
-const STRINGS_FILE = 'ultima6-strings.json';
-
-// "Game strings": the catalogued messages of the kept game file, (slice K3) the object names and
-// books of the kept look.lzd and book.dat, and (slice K4) the lines of the kept u, read in wasm
-// and downloaded as one JSON object (u6.string-bundle/1); nothing is kept, logged or shown but
-// their counts.
-async function exportGameStrings() {
-  needEngine();
-  let kept = await loadFiles();
-  if (!kept || kept.length === 0) {
-    say('stringsNoFiles');
-    return;
-  }
-  const exporter = new GameStrings();
-  let json;
-  try {
-    for (let i = 0; i < kept.length; i += 1) {
-      exporter.add(kept[i].path, kept[i].bytes);
-      kept[i] = null;
-    }
-    kept = null;
-    json = exporter.export();
-  } catch (err) {
-    say('stringsFailed', message(err));
-    return;
-  } finally {
-    exporter.free();
-  }
-  const exported = JSON.parse(json);
-  const n = exported.strings.length;
-  const texts = exported.texts ?? [];
-  const look = texts.filter((e) => e.kind === 'look').length;
-  const books = texts.length - look;
-  const u = (exported.u ?? []).length;
-  download(STRINGS_FILE, json);
-  json = null;
-  say('stringsExported', n, STRINGS_FILE, look, books, u);
-}
-
-async function forgetNpc() {
-  await forgetBundles();
-  say('npcForgot');
 }
 
 async function forgetKept() {
   await forgetFiles();
+  filesKept = false;
+  reflect();
   say(game ? 'forgotFilesRunning' : 'forgotFiles');
 }
 
@@ -2007,7 +1935,7 @@ function packIndex() {
       const response = await packFetch('index.json');
       if (!response.ok) return { packs: [], ko: null, voices: null };
       const { packs, ko, voices } = await response.json();
-      return {
+      const listed = {
         packs: (Array.isArray(packs) ? packs : [])
           .filter((p) => typeof p?.file === 'string' && PACK_NAME.test(p.file))
           .map((p) => ({ file: p.file, label: typeof p.label === 'string' && p.label ? p.label : p.file })),
@@ -2015,10 +1943,15 @@ function packIndex() {
         voices: typeof voices?.file === 'string' && PACK_NAME.test(voices.file) && VOICE_PACK_NAME.test(voices.file)
           ? { file: voices.file } : null,
       };
+      return listed;
     } catch {
       return { packs: [], ko: null, voices: null };
     }
-  })();
+  })().then((listed) => {
+    koListed = listed.ko !== null;
+    reflectLocale();
+    return listed;
+  });
   return packList;
 }
 
@@ -2348,6 +2281,84 @@ function followLine() {
   }
 }
 
+// --- fullscreen ------------------------------------------------------------------------------
+
+const EXIT_SHOWN_MS = 2000; // the Exit button stays this long after the pointer last moved
+let cssFull = false; // the page's own fullscreen (a class), where the browser's is not to be had
+let exitTimer = 0;
+let shownFull = false; // fullscreen as `showFullscreen` last showed it
+
+const fullNow = () => cssFull || document.fullscreenElement === screenBox;
+
+// The toolbar's button as the fullscreen is (its label, pressed), the class, data-fullscreen;
+// out of it, no Exit button. When it has just ended (by any way: the Exit button, the toolbar's,
+// the browser's own), the canvas takes the focus back, since keys reach the game only from it
+// (`followLine` hands it on to the hidden input while a line is read).
+function showFullscreen() {
+  const full = fullNow();
+  const ended = shownFull && !full;
+  shownFull = full;
+  fullscreenButton.dataset.i18n = full ? 'exitFullscreen' : 'fullscreen';
+  fullscreenButton.textContent = t(fullscreenButton.dataset.i18n);
+  fullscreenButton.setAttribute('aria-pressed', String(full));
+  screenBox.classList.toggle('full', cssFull);
+  document.body.dataset.fullscreen = !full ? 'off' : cssFull ? 'css' : 'on';
+  if (!full) {
+    clearTimeout(exitTimer);
+    fullscreenExit.hidden = true;
+  }
+  if (ended) canvas.focus({ preventScroll: true });
+}
+
+// The Exit button shown for EXIT_SHOWN_MS more, while fullscreen.
+function showExit() {
+  if (!fullNow()) return;
+  fullscreenExit.hidden = false;
+  clearTimeout(exitTimer);
+  exitTimer = setTimeout(() => {
+    fullscreenExit.hidden = true;
+  }, EXIT_SHOWN_MS);
+}
+
+// The screen box fullscreen: the browser's (Escape locked to the game where it can be), or the
+// page's own where the browser's cannot be asked for or is refused; the canvas takes the focus.
+async function enterFullscreen() {
+  let browsers = false;
+  if (typeof screenBox.requestFullscreen === 'function') {
+    try {
+      await screenBox.requestFullscreen({ navigationUI: 'hide' });
+      browsers = true;
+    } catch (err) {
+      console.warn(`fullscreen refused: ${errorKind(err)}`);
+    }
+  }
+  cssFull = !browsers;
+  if (browsers) {
+    try {
+      await navigator.keyboard?.lock?.(['Escape']);
+    } catch {
+      // No lock: the browser's Escape leaves fullscreen.
+    }
+  }
+  showFullscreen();
+  showExit();
+  canvas.focus({ preventScroll: true });
+}
+
+// Out of fullscreen, whichever it is (the browser's says so by its fullscreenchange).
+async function leaveFullscreen() {
+  if (cssFull) {
+    cssFull = false;
+    showFullscreen();
+  } else if (document.fullscreenElement) {
+    try {
+      await document.exitFullscreen();
+    } catch (err) {
+      console.warn(`fullscreen not left: ${errorKind(err)}`);
+    }
+  }
+}
+
 // --- wiring --------------------------------------------------------------------------------
 
 // Keys go to the engine only from the focused canvas (or, while a line is typed in 한글 with the
@@ -2376,7 +2387,7 @@ mute.addEventListener('click', () => {
   setMuted(!audio.muted);
   gesture();
 });
-hdButton.addEventListener('click', toggleHd);
+hdButton.addEventListener('change', toggleHd);
 settings.addEventListener('click', () => {
   openSetup();
   setup.querySelector('input[name="setup-lang"]:checked')?.focus();
@@ -2490,18 +2501,17 @@ voiceDecline.addEventListener('click', declineTerms);
 forgetVoices.addEventListener('click', () => {
   forgetVoiceModel().catch(() => say('voiceForgetFailed'));
 });
-npcBundles.addEventListener('click', () => {
-  if (queued > 0) say('waiting');
-  enqueue('opNpcBundles', exportNpcBundles);
+fullscreenButton.addEventListener('click', () => {
+  if (fullNow()) leaveFullscreen();
+  else enterFullscreen();
 });
-forgetNpcBundles.addEventListener('click', () => {
-  if (queued > 0) say('forgetNpcLater');
-  enqueue('opForgetNpc', forgetNpc);
+fullscreenExit.addEventListener('click', leaveFullscreen);
+document.addEventListener('fullscreenchange', () => {
+  if (document.fullscreenElement !== screenBox) navigator.keyboard?.unlock?.();
+  showFullscreen();
 });
-gameStrings.addEventListener('click', () => {
-  if (queued > 0) say('waiting');
-  enqueue('opGameStrings', exportGameStrings);
-});
+// The Exit button while the pointer moves over the fullscreen box (a touch too).
+for (const kind of ['pointermove', 'pointerdown']) screenBox.addEventListener(kind, showExit);
 restart.addEventListener('click', () => {
   try {
     sessionStorage.setItem(FOCUS_AFTER_RELOAD, '1');
@@ -2536,6 +2546,7 @@ reflectAudio();
 setLang(lang);
 say('loadingEngine');
 showHd();
+showFullscreen();
 canvas.dataset.behind = '0';
 reflectVoice();
 // Voices turned on in an earlier visit come back from this browser's cache only.
@@ -2554,15 +2565,13 @@ enqueue('opEngine', async () => {
   forgetSave.disabled = false;
   forgetHd.disabled = false;
   forgetKo.disabled = false;
-  npcBundles.disabled = false;
-  forgetNpcBundles.disabled = false;
-  gameStrings.disabled = false;
   reflect('idle');
 });
 // The picker opens once the kept files are back, so a choice never races the restore (a drop
 // meanwhile is queued after it).
 enqueue('opRestore', async () => {
   try {
+    await dropOldBundles();
     await restoreVoicePack();
     // The site's voice pack (spec 09 Design 4), in either language, before the first game speaks.
     await hostedVoicePack();
@@ -2573,6 +2582,8 @@ enqueue('opRestore', async () => {
     if (wasm) await restoreKept(takeFocusFlag(), hosted?.line ?? '');
   } finally {
     if (wasm) picker.disabled = false;
-    if (!game) reflect(wasm ? 'idle' : 'failed');
+    // Storage that could not say what it keeps: the drop line shows.
+    if (filesKept === null) filesKept = false;
+    reflect(game ? undefined : wasm ? 'idle' : 'failed');
   }
 });

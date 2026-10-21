@@ -1,6 +1,6 @@
-//! `u6-export`: the page's two downloads made natively from the user's own files, for the tools
-//! that read them (`scripts/make-packs.sh` runs it before `tools/i18n/translate.mjs` and
-//! `tools/speech/profile.mjs`):
+//! `u6-export`: the two downloads the page once offered, made natively from the user's own files,
+//! for the tools that read them (`scripts/make-packs.sh` runs it before `tools/i18n/translate.mjs`
+//! and `tools/speech/profile.mjs`):
 //!
 //! ```text
 //! u6-export strings --game PATH --out FILE   the game strings (u6.string-bundle/1), as Game strings
@@ -9,8 +9,8 @@
 //!
 //! `--game` takes what the page takes (the archive.org zip, the ADFs or HFEs, or a folder of any
 //! of them or of extracted files), read through the same intake. Each export keeps the files the
-//! page's exporter keeps (`GameStrings::add`, `NpcBundles::add` in `crates/u6-web`) and calls the
-//! same function of `u6-core`, so its JSON is the page's export byte for byte. It holds the user's
+//! page's exporter kept (its `GameStrings::add`, `NpcBundles::add` in `crates/u6-web`, removed
+//! 2026-10-21) and calls the same function of `u6-core`, so its JSON is that export byte for byte. It holds the user's
 //! game text: the file is written 0600 (the directories it makes, 0700), never inside a git work
 //! tree nor over a game file it read or inside a folder of them, and nothing of it is printed:
 //! one line names the file and counts its entries. An error names only what failed.
@@ -97,8 +97,9 @@ pub fn run(a: &Args) -> Result<String, String> {
     Ok(format!("wrote {} ({counts})", written.display()))
 }
 
-/// The export's JSON of `files` and its count of entries: `crates/u6-web`'s
-/// `GameStrings::strings` and `NpcBundles::bundles`, their errors' words included.
+/// The export's JSON of `files` and its count of entries: what `crates/u6-web`'s
+/// `GameStrings::strings` and `NpcBundles::bundles` gave (removed 2026-10-21), their errors' words
+/// included.
 pub fn json(export: Export, files: &Files) -> Result<(String, String), String> {
     match export {
         Export::Strings => {

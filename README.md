@@ -65,7 +65,7 @@ It needs Rust (built through `scripts/cargo.sh`), Node 22 or later, for `ko` and
 the tools reach through llmux on your machine (`--llmux URL`, `--model NAME`, passed to both; the
 tools' defaults otherwise), and for `hd` Codex signed in, with its built-in image tool (`U6_CODEX`
 names another codex). It first exports the game strings and the NPC bundles with `u6-export`
-(`tools/export`), the page's own exporters run natively, into `DIR/work/`. The game's text and art
+(`tools/export`), the exports the page once offered, run natively, into `DIR/work/`. The game's text and art
 go to that model service only with your yes: before each such step the script prints where; the
 two node tools ask for a typed `yes`, `u6-hd` sends only with `--send` (`--send` answers all
 three), and `--dry-run` sends nothing (the node tools write their first request for you to read,
@@ -75,8 +75,7 @@ script stops at the first failing step, naming it.
 The packs are made from your files and are yours alone: never commit or share them (`DIR` lies
 outside every git work tree, and the repository's guard tests refuse a pack, a string export or a
 bundle in git). Drop each pack on the page, or host `DIR/packs/` (with its `index.json`, the
-site's listing) as the site does, under `/packs/` behind the key `functions/_middleware.js`
-checks.
+site's listing) as the site does, under `/packs/`.
 
 ## Layout
 

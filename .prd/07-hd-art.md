@@ -66,7 +66,7 @@ Status: in-progress (HD0–HD2 and the pack loading shipped 2026-10-17 at main a
    - **HD image per id:**
      - the pack image, if the pack has one whose content hash matches the record's current bytes;
      - otherwise MMPX×S of the record's own current content, with its transparency. Merged shores and substituted frames are covered this way. The result is cached by content hash, because the water and shore records cycle.
-   - **Toggle.** "HD" next to Mute, on by default, kept in `localStorage`. With it off, the page draws the classic frame as today and the compositor does not run; the plane keeps being written, so switching on again is exact at once.
+   - **Toggle.** "HD on" / "HD 켜기" in Settings (since 2026-10-21; a button next to Mute before, taken off the page with the owner's "그리고 쓰잘대기 없는 내용 빼주고 전체화면으로 플레이할수 있게 버튼 추가해줘"), on by default, kept in `localStorage`. With it off, the page draws the classic frame as today and the compositor does not run; the plane keeps being written, so switching on again is exact at once.
 2. **HD1: pack format and loading.** One zip containing:
    - `manifest.json`: `format: "u6-hdpack/1"`, `tile`, `scale`, `derived`, generator, and a base digest over the record hashes;
    - `index.bin`: per record id, content hash, atlas, column, row, flags;

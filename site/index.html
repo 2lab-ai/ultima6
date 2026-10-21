@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ultima VI (Rust port)</title>
+  <title>Ultima VI</title>
   <style>
     :root { color-scheme: dark; }
     *, *::before, *::after { box-sizing: border-box; }
@@ -43,9 +43,20 @@
     #speed-badge { position: absolute; top: 6px; left: 6px; padding: 0 6px; border-radius: 4px;
                    background: rgba(11, 11, 15, 0.8); color: #ffd166; font-size: 0.875rem;
                    pointer-events: none; }
-    /* Mute and the Speed group: a row of their own under the file controls, so a wider label or
-       "behind" never moves them; on a narrow screen the group may go under Mute. "behind"
-       keeps its place while hidden. */
+    /* Fullscreen (the browser's, or .full where the page cannot ask for it): the screen box fills
+       the screen in black, the canvas as large as fits with the game's aspect ratio, centred, its
+       pixels as the page draws them; the Exit button at the top right while the pointer moves. */
+    #screen-box:fullscreen, #screen-box.full { display: flex; align-items: center; justify-content: center;
+                                               background: #000; }
+    #screen-box.full { position: fixed; inset: 0; z-index: 10; }
+    #screen-box:fullscreen canvas, #screen-box.full canvas { width: min(100vw, 160vh); outline: none; }
+    @supports (height: 100dvh) {
+      #screen-box.full canvas { width: min(100vw, 160dvh); }
+    }
+    #fullscreen-exit { position: absolute; top: 8px; right: 8px; margin: 0; }
+    #fullscreen-exit[hidden] { display: none; }
+    /* The toolbar under the game screen: on a narrow screen its controls wrap; "behind" keeps its
+       place while hidden, so a wider label never moves them. */
     #playback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
     #playback button { margin-left: 0; }
     #speed-group { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
@@ -53,25 +64,26 @@
     #behind { color: #ff9a9a; }
     #behind[hidden] { display: inline; visibility: hidden; }
     #drop {
-      margin-top: 16px;
-      padding: 16px;
+      margin-top: 12px;
+      padding: 12px 16px;
       border: 2px dashed #555a66;
       border-radius: 8px;
       overflow-wrap: anywhere;
     }
+    #drop[hidden] { display: none; }
     #drop.over { border-color: #9ab8ff; background: #141a2a; }
-    #drop p { margin: 0 0 12px; }
+    #drop label { display: block; margin: 0 0 8px; }
     input[type="file"] { max-width: 100%; color: inherit; }
     button { margin-left: 8px; color: inherit; background: #1d2230; border: 1px solid #555a66;
              border-radius: 4px; padding: 2px 8px; }
     button:disabled, input:disabled { opacity: 0.5; }
     :is(button, input):focus-visible { outline: 3px solid #ffd166; outline-offset: 2px; }
     #status { margin: 12px 0 0; min-height: 1.5em; color: #b9c3d6; white-space: pre-wrap; }
-    #limits { margin-top: 16px; padding: 12px 16px; border-left: 4px solid #ffd166;
-              background: #16161d; }
-    #limits p { margin: 0 0 8px; }
-    #limits p:last-child { margin-bottom: 0; }
-    .hint { color: #9a9aa6; font-size: 0.875rem; }
+    #restart { margin: 8px 0 0; }
+    #controls { margin-top: 12px; }
+    #controls ul { margin: 4px 0 0; padding-left: 20px; }
+    #notices { margin-top: 16px; color: #9a9aa6; font-size: 0.75rem; }
+    a { color: #9ab8ff; }
     /* The first-run chooser (and Settings): above the game screen until a choice is made. */
     #setup { margin: 0 0 16px; padding: 12px 16px; border: 2px solid #9ab8ff; border-radius: 8px;
              background: #141a2a; }
@@ -81,7 +93,10 @@
     #setup label { display: inline-block; margin-right: 16px; }
     #setup label[hidden] { display: none; }
     #setup p { margin: 0 0 8px; }
+    #setup p[hidden] { display: none; }
     #setup button { margin-left: 0; }
+    #kept { margin: 0 0 8px; }
+    #kept button { margin: 4px 8px 0 0; }
     /* Voices (spec 09): the terms shown before the first download, and the chip while on. */
     #voice-terms { margin-top: 12px; padding: 12px 16px; border: 2px solid #ffd166; border-radius: 8px;
                    background: #16161d; }
@@ -98,7 +113,7 @@
 </head>
 <body>
   <main>
-    <h1>Ultima VI (Rust port)</h1>
+    <h1>Ultima VI</h1>
     <section id="setup" hidden aria-labelledby="setup-title">
       <h2 id="setup-title" data-i18n="settings">Settings</h2>
       <fieldset>
@@ -106,12 +121,18 @@
         <label><input type="radio" name="setup-lang" value="en" checked> English</label>
         <label lang="ko"><input type="radio" name="setup-lang" value="ko"> 한글</label>
       </fieldset>
-      <p id="setup-note" data-i18n="gameText" hidden></p>
-      <fieldset id="setup-hd">
+      <p id="setup-note" hidden><span data-i18n="gameText">The game's own text is in English: this
+        site offers no Korean pack. To make one from your own copy of the game, see the
+        README:</span> <a id="setup-note-link" href="https://github.com/2lab-ai/ultima6#packs-from-your-own-copy"
+        data-i18n="packsReadme">Packs from your own copy</a></p>
+      <fieldset>
         <legend>HD</legend>
-        <label><input type="radio" name="setup-hd" value=""> <span data-i18n="mmpx">MMPX (no pack)</span></label>
-        <label id="setup-dropped" hidden><input type="radio" name="setup-hd" value=":dropped"> <span
-          data-i18n="droppedPack">Dropped pack</span></label>
+        <p><label><input type="checkbox" id="hd" checked> <span data-i18n="hdOn">HD on</span></label></p>
+        <div id="setup-hd">
+          <label><input type="radio" name="setup-hd" value=""> <span data-i18n="mmpx">MMPX (no pack)</span></label>
+          <label id="setup-dropped" hidden><input type="radio" name="setup-hd" value=":dropped"> <span
+            data-i18n="droppedPack">Dropped pack</span></label>
+        </div>
       </fieldset>
       <fieldset id="setup-voice">
         <legend data-i18n="voices">Voices (~400 MB)</legend>
@@ -128,6 +149,14 @@
           <pre id="setup-restrictions" lang="en"></pre>
         </div>
       </fieldset>
+      <details id="kept">
+        <summary data-i18n="kept">Kept in this browser</summary>
+        <button id="forget" type="button" disabled data-i18n="forget">Forget the kept files</button>
+        <button id="forget-save" type="button" disabled data-i18n="forgetSave">Forget the saved game</button>
+        <button id="forget-hd" type="button" disabled data-i18n="forgetHd">Forget the HD pack</button>
+        <button id="forget-ko" type="button" disabled data-i18n="forgetKo">Forget the Korean pack</button>
+        <button id="forget-voices" type="button" data-i18n="forgetVoices">Forget voices</button>
+      </details>
       <button id="setup-ok" type="button" data-i18n="acceptStart">Accept and start</button>
       <p id="setup-status" role="status" aria-live="polite"></p>
     </section>
@@ -137,117 +166,69 @@
               aria-label="Game screen. Click it or Tab to it; then arrow keys walk and letter keys are game commands. Tab leaves it."></canvas>
       <span id="speed-badge" hidden aria-hidden="true" data-i18n-title="badgeTitle"
             title="Game speed: - slower, = or + faster, unless the game is using that key: while a line or a name is typed, in the stats and inventory panels (- and + pick the member), in a party list that scrolls, and in the opening's menu. The keypad - and + and the Speed buttons always change it.">1&times;</span>
+      <button id="fullscreen-exit" type="button" hidden data-i18n="exitFullscreen">Exit fullscreen</button>
     </div>
-    <section id="drop" aria-labelledby="drop-title">
-      <p id="drop-title"><span data-i18n="dropBefore">Drop your Ultima VI files: the archive.org
-        zip, the three ADFs, or the extracted files &mdash; nothing is uploaded. A </span><code
-        >savegame</code><span data-i18n="dropAfter"> folder from the original's PLAYER disk
-        dropped here becomes the saved game.</span></p>
-      <label for="picker" data-i18n="choose">Or choose files:</label>
+    <div id="playback" role="toolbar" aria-label="Game" data-i18n-label="toolbar">
+      <button id="fullscreen" type="button" aria-pressed="false" data-i18n="fullscreen">Fullscreen</button>
+      <button id="mute" type="button" aria-pressed="false">Mute</button>
+      <button id="voices" type="button" aria-pressed="false" data-i18n="voices" data-i18n-title="voicesTitle"
+              title="NPCs say their lines aloud, in a voice generated in this browser by the Supertonic-3 model (about 400 MB, downloaded from this site once and kept in this browser), on WebGPU where the browser offers it, else on the CPU (slower).">Voices (~400 MB)</button>
+      <span id="voice-chip" hidden><span data-i18n="voiceChip">Voice generated on this device</span><span
+        id="voice-gpu" hidden data-i18n="voiceChipGpu"> (GPU)</span><span id="voice-cpu" hidden
+        data-i18n="voiceChipCpu"> (CPU, slower)</span></span>
+      <span id="speed-group" role="group" aria-label="Game speed" data-i18n-label="speedLabel"
+            data-i18n-title="speedTitle"
+            title="On the game screen: - slower, = or + faster, unless the game is using that key (a line or a name being typed, the stats and inventory panels, a party list that scrolls, the opening's menu). The keypad - and + and these buttons always change the speed.">
+        <span data-i18n="speed">Speed</span> <button id="slower" type="button" aria-label="Slower"
+          data-i18n-label="slower">&minus;</button><span
+          id="speed-shown"><span id="speed-label" aria-live="polite">1&times;</span><span
+          id="speed-reached" aria-hidden="true"></span></span><button id="faster" type="button"
+          aria-label="Faster" data-i18n-label="faster">+</button>
+        <span id="behind" hidden data-i18n="behind">behind</span>
+      </span>
+      <button id="settings" type="button" data-i18n="settings">Settings</button>
+    </div>
+    <section id="voice-terms" hidden aria-labelledby="voice-terms-title">
+      <h2 id="voice-terms-title" data-i18n="voiceTermsTitle">Voice model terms</h2>
+      <p data-i18n="voiceTermsIntro">Voices read aloud what the NPCs say, in a voice generated in this
+        browser by the Supertonic-3 model of Supertone Inc. The model (about 400 MB) is
+        downloaded from this site once and kept in this browser; what NPCs say never leaves
+        it. Its licence, the Open RAIL-M, allows its use only under the restrictions below:
+        accept them to download it.</p>
+      <p><span data-i18n="voiceRestrictionsNote">The restrictions, as the licence states them:</span>
+        <a id="voice-license" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/LICENSE.txt" data-i18n="voiceTermsLicense">Licence</a> &middot;
+        <a id="voice-notice" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt" data-i18n="voiceTermsNotice">Notice</a></p>
+      <pre id="voice-restrictions" lang="en"></pre>
+      <p id="voice-storage"></p>
+      <button id="voice-accept" type="button" data-i18n="voiceAccept">Accept and download</button><button
+        id="voice-decline" type="button" data-i18n="voiceDecline">Cancel</button>
+    </section>
+    <section id="drop" hidden>
+      <label for="picker" id="drop-title" data-i18n="dropLine">Drop your Ultima VI files (the archive.org
+        zip) here, or choose them. They never leave this browser.</label>
       <input id="picker" type="file" multiple disabled>
-      <button id="forget" type="button" disabled data-i18n="forget">Forget the kept files</button>
-      <button id="forget-save" type="button" disabled data-i18n="forgetSave">Forget the saved game</button>
-      <button id="forget-hd" type="button" disabled data-i18n="forgetHd">Forget the HD pack</button>
-      <button id="forget-ko" type="button" disabled data-i18n="forgetKo">Forget the Korean pack</button>
-      <button id="forget-voices" type="button" data-i18n="forgetVoices">Forget voices</button>
-      <button id="npc-bundles" type="button" disabled data-i18n="npcBundles" data-i18n-title="npcBundlesTitle"
-              title="Each NPC's name and dialogue, read in this browser from the game files kept here: one bundle per conversation script, kept in this browser and downloaded as one JSON file. Nothing is uploaded.">NPC bundles</button>
-      <button id="forget-npc-bundles" type="button" disabled data-i18n="forgetNpcBundles">Forget NPC bundles</button>
-      <button id="game-strings" type="button" disabled data-i18n="gameStrings" data-i18n-title="gameStringsTitle"
-              title="The game's own messages (the command prompts and their results), read in this browser from the game file kept here and downloaded as one JSON file for the Korean pack's tool. Nothing is uploaded.">Game strings</button>
-      <button id="restart" type="button" hidden data-i18n="restart">Restart</button>
-      <div id="playback">
-        <button id="mute" type="button" aria-pressed="false">Mute</button>
-        <button id="hd" type="button" aria-pressed="true" data-i18n-title="hdTitle"
-                title="HD: the map, the portraits and the panels magnified (MMPX) from your own files, in this browser. Off shows the original 320 x 200 pixels.">HD</button>
-        <button id="settings" type="button" data-i18n="settings">Settings</button>
-        <button id="voices" type="button" aria-pressed="false" data-i18n="voices" data-i18n-title="voicesTitle"
-                title="NPCs say their lines aloud, in a voice generated in this browser by the Supertonic-3 model (about 400 MB, downloaded from this site once and kept in this browser), on WebGPU where the browser offers it, else on the CPU (slower).">Voices (~400 MB)</button>
-        <span id="voice-chip" hidden><span data-i18n="voiceChip">Voice generated on this device</span><span
-          id="voice-gpu" hidden data-i18n="voiceChipGpu"> (GPU)</span><span id="voice-cpu" hidden
-          data-i18n="voiceChipCpu"> (CPU, slower)</span></span>
-        <span id="speed-group" role="group" aria-label="Game speed" data-i18n-label="speedLabel"
-              data-i18n-title="speedTitle"
-              title="On the game screen: - slower, = or + faster, unless the game is using that key (a line or a name being typed, the stats and inventory panels, a party list that scrolls, the opening's menu). The keypad - and + and these buttons always change the speed.">
-          <span data-i18n="speed">Speed</span> <button id="slower" type="button" aria-label="Slower"
-            data-i18n-label="slower">&minus;</button><span
-            id="speed-shown"><span id="speed-label" aria-live="polite">1&times;</span><span
-            id="speed-reached" aria-hidden="true"></span></span><button id="faster" type="button"
-            aria-label="Faster" data-i18n-label="faster">+</button>
-          <span id="behind" hidden data-i18n="behind">behind</span>
-        </span>
-      </div>
-      <section id="voice-terms" hidden aria-labelledby="voice-terms-title">
-        <h2 id="voice-terms-title" data-i18n="voiceTermsTitle">Voice model terms</h2>
-        <p data-i18n="voiceTermsIntro">Voices read aloud what the NPCs say, in a voice generated in this
-          browser by the Supertonic-3 model of Supertone Inc. The model (about 400 MB) is
-          downloaded from this site once and kept in this browser; what NPCs say never leaves
-          it. Its licence, the Open RAIL-M, allows its use only under the restrictions below:
-          accept them to download it.</p>
-        <p><span data-i18n="voiceRestrictionsNote">The restrictions, as the licence states them:</span>
-          <a id="voice-license" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/LICENSE.txt" data-i18n="voiceTermsLicense">Licence</a> &middot;
-          <a id="voice-notice" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt" data-i18n="voiceTermsNotice">Notice</a></p>
-        <pre id="voice-restrictions" lang="en"></pre>
-        <p id="voice-storage"></p>
-        <button id="voice-accept" type="button" data-i18n="voiceAccept">Accept and download</button><button
-          id="voice-decline" type="button" data-i18n="voiceDecline">Cancel</button>
-      </section>
-      <p id="locale-note" data-i18n="gameText" hidden></p>
-      <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
     </section>
-    <section id="limits" aria-labelledby="limits-title">
-      <h2 id="limits-title">What this version does</h2>
-      <p>The game starts as the original does: the opening (Escape skips it), then the menu, where
-        C creates a character (or T transfers one from Ultima IV or V) and J journeys onward.</p>
-      <p>Works: walking (arrow keys), passing a turn (space), talking (T), combat (A attacks, B
-        begins or breaks off combat), casting spells (C), resting (R), looking, getting,
-        dropping, moving and using things (L, G, D, M, U), the inventory panel, the mouse (click
-        the map to walk, the command icons, the party list, the inventory and the spellbook),
-        saving and restoring the game (Ctrl-S, Ctrl-R), music and sound (Ctrl-Z turns the game's
-        sound on and off; the Mute button silences the page). Sound starts once you click or
-        press a key on the game screen.</p>
-      <p>Speed: on the game screen - slows the game and = (or +) speeds it up, through 1&times;,
-        1.5&times;, 2&times;, 3&times;, 4&times;, 6&times;, 8&times; and Max, but only while the
-        game is not using that key: while you type a line or a name, in the stats and inventory
-        panels (where - and + pick the member), in a party list long enough to scroll, and in the
-        opening's menu, the key is the game's. The keypad - and + and the Speed buttons always
-        change the speed. 1&times; is the original's pace; above 4&times; the music fades out.
-        &ldquo;behind&rdquo; means this computer cannot keep up with the chosen speed.</p>
-      <p id="hd-credits">HD (on by default; the HD button switches it): the map, the portraits
-        and the panels are shown magnified two or four times with MMPX (Morgan McGuire and Mara
-        Gagiu, MIT licence: <a href="NOTICE.txt">copyright and permission notice</a>), computed in
-        your browser from your own files; text and the pointer stay the original pixels,
-        scaled. An HD pack made from your own files with the project's local HD tool can be
-        dropped here like the game files: its pictures replace MMPX for the images they were made
-        from. It is kept in this browser (&ldquo;Forget the HD pack&rdquo; removes it) and never
-        sent anywhere. The packs this site offers (Settings) are chosen and kept the same way.</p>
-      <p id="voice-credits"><span data-i18n="voiceCreditsBefore">Voices (off until you accept
-        them, with NPC voices at the first run or in Settings, or with the Voices button): the NPCs say their lines aloud, each in an English voice of its own, generated in this browser by
-        the Supertonic-3 model (Supertone Inc., Open RAIL-M licence), on WebGPU where the browser
-        offers it, else on the CPU (slower). The model is
-        downloaded from this site once (about 400 MB), after you accept its use restrictions;
-        what NPCs say never leaves this browser. </span><a id="voice-terms-link" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt"
-        data-i18n="voiceTermsLink">Voice model terms</a><span data-i18n="voiceCreditsAfter">.
-        &ldquo;Forget voices&rdquo; removes the model and any voice pack from this browser.</span></p>
-      <p data-i18n="npcNote">NPC bundles: the NPC bundles button makes, in this browser, each
-        NPC's name and dialogue from the game files kept here (one bundle per conversation script,
-        for a later AI to learn how each NPC speaks), keeps them in this browser and downloads
-        them as one JSON file. They are never uploaded; &ldquo;Forget NPC bundles&rdquo; removes
-        them from this browser.</p>
-      <p data-i18n="gameStringsNote">Game strings: the game strings button reads, in this browser,
-        the game's own messages from the game file kept here (the command prompts and their
-        results, the words of a conversation's frame) and downloads them as one JSON file, for
-        tools/i18n to make the Korean pack's game strings. It is never uploaded or kept here.</p>
-      <p>Not yet: a few rare object actions (moving a carried thing to someone else, a staff's or
-        wand's spell in combat). Those say
-        &ldquo;Not implemented in this version&rdquo; or do nothing.</p>
-      <p>A character you create and a save (Ctrl-S) are kept in this browser and the next visit resumes it; &ldquo;Forget the
-        saved game&rdquo; starts over. &ldquo;Forget the kept files&rdquo; removes the game files
-        themselves.</p>
-    </section>
-    <p class="hint">Click the game screen or Tab to it before playing; Tab leaves it again. Your
-      game files stay in your browser (kept in its storage for the next visit) and are never
-      uploaded.</p>
+    <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
+    <button id="restart" type="button" hidden data-i18n="restart">Restart</button>
+    <details id="controls">
+      <summary data-i18n="controls">Controls</summary>
+      <ul>
+        <li data-i18n="keyWalk">Walk: the arrow keys, or click the map</li>
+        <li data-i18n="keyCommands">T talk, L look, G get, D drop, M move, U use</li>
+        <li data-i18n="keyCombat">A attack, B combat, C cast, R rest</li>
+        <li data-i18n="keyPass">Space: pass a turn</li>
+        <li data-i18n="keySave">Ctrl-S save, Ctrl-R restore</li>
+        <li data-i18n="keySpeed">- and +: slower and faster</li>
+        <li data-i18n="keyOpening">Escape skips the opening</li>
+      </ul>
+    </details>
+    <footer id="notices">
+      <span data-i18n="noticeMmpx">HD: MMPX (MIT licence)</span> <a id="mmpx-notice" href="NOTICE.txt"
+        data-i18n="voiceTermsNotice">Notice</a> &middot; <span data-i18n="noticeVoice">Voices: the
+        Supertonic-3 model (Open RAIL-M)</span> <a id="voice-license-link" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/LICENSE.txt"
+        data-i18n="voiceTermsLicense">Licence</a> <a id="voice-terms-link" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt"
+        data-i18n="voiceTermsNotice">Notice</a>
+    </footer>
     <noscript><p>This page needs JavaScript and WebAssembly.</p></noscript>
   </main>
   <script type="module" src="./app.js"></script>

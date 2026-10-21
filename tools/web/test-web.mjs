@@ -14,8 +14,10 @@
 // drawn only when it changed), and HD (spec 07: the switch and its storage, the S× canvas and
 // its scaling, the pointer, the MMPX notice the site ships, the performance baseline; an HD
 // pack dropped, shown, kept, forgotten and refused, its performance with a full pack), and the
-// first-run chooser (the page's language, a pack the site lists, NPC voices). Most
-// tests start `game` at once (harness `gameFirst`); the launcher tests run the page as it is.
+// first-run chooser (the page's language, a pack the site lists, NPC voices), the page itself
+// (one toolbar, the drop line, Settings' "HD on" and forget buttons, the controls, the notices)
+// and fullscreen. Most tests start `game` at once (harness `gameFirst`); the launcher tests run
+// the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. The game is read once it reached what a check asserts, by its own signals (the
 // prompt, the key queue, the program, its ticks: the page's fixed steps of 20 ms), never after a
@@ -27,8 +29,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import * as h from './harness.mjs';
 
 const MARKER = { name: 'port-test-marker.txt', text: 'not a game file' };
@@ -91,6 +94,22 @@ async function atPrompt(page) {
 }
 
 const promptNow = (page) => page.evaluate(() => document.getElementById('screen').dataset.prompt);
+
+// Presses one of the forget buttons: they sit in Settings, in its "Kept in this browser" group
+// (closed by default): Settings opened first when it is not, the group opened.
+async function forgetVia(page, id) {
+  if (await page.evaluate(() => document.getElementById('setup').hidden)) await page.click('#settings');
+  await page.evaluate(() => { document.getElementById('kept').open = true; });
+  await page.click(id);
+}
+
+// Switches Settings' "HD on" and closes Settings again (its OK, nothing else chosen).
+async function switchHd(page) {
+  await page.click('#settings');
+  await page.click('#hd');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+}
 
 // No page: the harness's content-free comparison (synthetic values) names paths, whether the
 // lengths differ and the index only; a prefix without an index (it would be the shorter
@@ -379,8 +398,13 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   assert.equal((await h.state(page)).focused, 'screen', 'the canvas is in the tab order');
   await page.keyboard.press('ArrowDown');
   assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['ArrowDown', false], 'no game: arrows stay the page\'s');
-  await page.keyboard.press('Tab');
-  assert.equal((await h.state(page)).focused, 'picker');
+  // From the canvas: the toolbar under it, then the drop line's picker.
+  const order = [];
+  for (let i = 0; i < 8 && order.at(-1) !== 'picker'; i += 1) {
+    await page.keyboard.press('Tab');
+    order.push((await h.state(page)).focused);
+  }
+  assert.deepEqual(order, ['fullscreen', 'mute', 'voices', 'slower', 'faster', 'settings', 'picker'], 'the toolbar, then the picker');
   await page.keyboard.press('Enter');
   const chooser = await chosen;
   await chooser.setFiles(h.HFES);
@@ -455,7 +479,7 @@ test('forget during a pending save runs after the save and reports only once com
   await page.evaluate(() => { window.__hold('save'); window.__hold('forget'); });
   await h.dropFiles(page, h.HFES);
   await h.waitLog(page, 'save:start');
-  await page.click('#forget');
+  await forgetVia(page, '#forget');
   let s = await h.state(page);
   assert.equal(s.ops, 2);
   assert.match(s.status, /will be removed after the current step/);
@@ -484,7 +508,7 @@ test('read and forget failures are shown and the page stays usable', async (env)
   assert.match(s.status, /Loading the files failed: test: unreadable/);
   assert.equal(s.state, 'idle');
   await page.evaluate(() => { window.__fail.delete('read'); window.__fail.add('forget'); });
-  await page.click('#forget');
+  await forgetVia(page, '#forget');
   await h.waitSettled(page);
   s = await h.state(page);
   assert.match(s.status, /Removing the kept files failed: test: storage refused the delete/);
@@ -604,7 +628,7 @@ test('a save (Ctrl-S, Y) is kept; a reload resumes it there; forgetting it start
   assert.equal(s.saves, saved.length, 'the stored save is laid over the game files');
   assert.equal((await atPrompt(page)).leader, moved, 'resumed where it was saved');
   assert.match(s.status, /the game saved in this browser, resumed/);
-  await page.click('#forget-save');
+  await forgetVia(page, '#forget-save');
   await h.waitSettled(page);
   assert.deepEqual(await h.savedPaths(page), [], 'the save is gone');
   await kept(page, FILES, 'the game files stay');
@@ -629,7 +653,7 @@ test('an original savegame folder dropped becomes the saved game', async (env) =
   await started(page, FILES);
   const { moved } = await walkAndSave(page);
   const folder = asFolder(await h.savedFiles(page));
-  await page.click('#forget-save');
+  await forgetVia(page, '#forget-save');
   await h.waitSettled(page);
   assert.deepEqual(await h.savedPaths(page), []);
   await h.dropFiles(page, [], folder);
@@ -714,7 +738,7 @@ test('a Save after the saved game was forgotten stores the whole game; a reload 
   assert.equal(s.saves, folder.length);
   // A Save taken while the forget runs is not stored after the delete.
   await page.evaluate(() => window.__hold('saves-forget'));
-  await page.click('#forget-save');
+  await forgetVia(page, '#forget-save');
   await h.waitLog(page, 'saves:forget:start');
   await page.focus('#screen');
   await h.waitPrompt(page); // the started game's boot and the start fight ran
@@ -748,7 +772,7 @@ test('a Save of a game that did not own the stored save, then the forget: it is 
   await started(page, FILES);
   // No kept files: a drop of only a savegame folder starts nothing, it becomes the stored save
   // and the game on screen no longer owns it (synthetic: one empty block file).
-  await page.click('#forget');
+  await forgetVia(page, '#forget');
   await h.waitSettled(page);
   assert.equal(await h.keptPaths(page), null);
   await h.dropFiles(page, [], [{ name: 'PLAYER/SAVEGAME/OBJBLKHH', bytes: [0, 0] }]);
@@ -769,7 +793,7 @@ test('a Save of a game that did not own the stored save, then the forget: it is 
   assert.equal((await h.state(page)).saved, 0);
   // The forget: that earlier Save stays out of the store on the ticks after it.
   const from = (await h.log(page)).length;
-  await page.click('#forget-save');
+  await forgetVia(page, '#forget-save');
   await h.waitSettled(page);
   await h.waitTicks(page, 10);
   await h.waitSettled(page);
@@ -2036,7 +2060,7 @@ test('the opening\'s frame at a step is the same on a 60 Hz and a 144 Hz display
 }, { needs: h.haveHfes });
 
 // No game: the controls only. The widest speed text and "behind" shown.
-test('layout: the Speed group sits on Mute\'s line at 1280 and 1024 px; at 375 px the page does not scroll sideways', async (env) => {
+test('layout: the Speed group sits on Mute\'s line at 1280 and 1024 px, inside the toolbar; at 375 px the page does not scroll sideways', async (env) => {
   const { page } = await h.openPage(env, { gated: false });
   await h.load(page, env);
   for (const width of [1280, 1024, 375]) {
@@ -2051,12 +2075,12 @@ test('layout: the Speed group sits on Mute\'s line at 1280 and 1024 px; at 375 p
       const [mute, group, behind] = [box('mute'), box('speed-group'), box('behind')];
       return {
         sameLine: Math.abs((mute.top + mute.bottom) / 2 - (group.top + group.bottom) / 2) < 2 && group.left > mute.right,
-        inside: behind.right <= document.getElementById('drop').getBoundingClientRect().right,
+        inside: behind.right <= document.getElementById('playback').getBoundingClientRect().right,
         sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       };
     });
     if (width >= 1024) assert.ok(m.sameLine, `${width} px: Speed on Mute's line`);
-    assert.ok(m.inside, `${width} px: the group inside the drop zone`);
+    assert.ok(m.inside, `${width} px: the group inside the toolbar`);
     assert.ok(!m.sideways, `${width} px: no sideways scroll`);
   }
 });
@@ -2154,7 +2178,8 @@ test('the Speed buttons change the speed by click; the music fades out above 4x 
 // in the same CSS box, off it is the RGBA frame at 320 × 200 as before; the pointer maps onto
 // the game's 320 × 200 either way. The frames are compared in the page, by equality only.
 
-// What the page shows of HD: the button, the canvas size and box, the stored choice.
+// What the page shows of HD: Settings' "HD on" (as 'true' or 'false'), the canvas size and box,
+// the stored choice.
 const hdShown = (page) => page.evaluate(() => {
   const c = document.getElementById('screen');
   const box = c.getBoundingClientRect();
@@ -2165,7 +2190,7 @@ const hdShown = (page) => page.evaluate(() => {
     stored = 'unreadable';
   }
   return {
-    pressed: document.getElementById('hd').getAttribute('aria-pressed'),
+    pressed: String(document.getElementById('hd').checked),
     width: c.width,
     height: c.height,
     box: [Math.round(box.width), Math.round(box.height)],
@@ -2297,7 +2322,7 @@ test('HD: on by default and kept across a reload; the button switches it at once
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
 
-test('the MMPX notice ships with the site: NOTICE.txt is the repository\'s NOTICE, as text, linked from the HD paragraph', async (env) => {
+test('the MMPX notice ships with the site: NOTICE.txt is the repository\'s NOTICE, as text, linked from the footer\'s notices', async (env) => {
   const { page } = await h.openPage(env, { gated: false });
   await h.load(page, env);
   const served = await page.request.get(`${env.server.url}NOTICE.txt`);
@@ -2310,10 +2335,10 @@ test('the MMPX notice ships with the site: NOTICE.txt is the repository\'s NOTIC
     assert.ok(text.includes(part), `the notice holds: ${part}`);
   }
   const link = await page.evaluate(() => {
-    const a = document.querySelector('#hd-credits a[href="NOTICE.txt"]');
+    const a = document.querySelector('#notices a[href="NOTICE.txt"]');
     return a ? new URL(a.href).pathname : null;
   });
-  assert.equal(link, '/NOTICE.txt', 'linked from the HD paragraph');
+  assert.equal(link, '/NOTICE.txt', 'linked from the footer');
 });
 
 // Page init script: every read and write of the page's storage throws (a browser that refuses
@@ -2326,7 +2351,7 @@ function storageThrows() {
   }
 }
 
-test('HD: the button works from the keyboard (Space, Enter); with storage that throws HD is on, switches, and nothing is kept across a reload; no page error', async (env) => {
+test('HD: Settings\' "HD on" works from the keyboard (Space); with storage that throws HD is on, switches, and nothing is kept across a reload; no page error', async (env) => {
   const foreign = [];
   const page = await bootHd(env, foreign, storageThrows);
   const errors = [];
@@ -2335,14 +2360,15 @@ test('HD: the button works from the keyboard (Space, Enter); with storage that t
   let shown = await hdShown(page);
   assert.ok(shown.stored === 'unreadable', 'the storage throws');
   assert.ok(shown.pressed === 'true' && shown.width === 1280, 'on by default');
+  await page.click('#settings');
   await page.focus('#hd');
   await page.keyboard.press('Space');
   shown = await hdShown(page);
   assert.ok(shown.pressed === 'false' && shown.width === 320, 'Space: off');
   assert.ok(await canvasShowsGame(page), 'off: the RGBA frame');
-  await page.keyboard.press('Enter');
+  await page.keyboard.press('Space');
   shown = await hdShown(page);
-  assert.ok(shown.pressed === 'true' && shown.width === 1280, 'Enter: on');
+  assert.ok(shown.pressed === 'true' && shown.width === 1280, 'Space again: on');
   assert.ok(await canvasShowsGame(page), 'on: the HD frame');
   await page.keyboard.press('Space');
   assert.equal((await hdShown(page)).pressed, 'false', 'off again');
@@ -2364,7 +2390,7 @@ test('HD: a pointer on a game pixel reaches the game at that pixel with HD off, 
   const modes = [['4x', 1024, 1280], ['2x', 700, 640], ['off', 1024, 320]];
   for (const [mode, width, canvasWidth] of modes) {
     await page.setViewportSize({ width, height: 900 });
-    if (mode === 'off') await page.click('#hd');
+    if (mode === 'off') await switchHd(page);
     await page.waitForFunction((w) => document.getElementById('screen').width === w, canvasWidth, { timeout: 10_000 });
     await h.waitFrames(page, 2);
     for (const [x, y] of POINTS) {
@@ -2696,7 +2722,7 @@ test('HD pack: a dropped pack starts no game and touches no kept file; its count
   assert.ok(await canvasShowsGame(page), 'the canvas is the game\'s HD frame');
   // Forget: MMPX again at once, storage empty, and after a reload too.
   await h.virtualDisplay(page, 60);
-  await page.click('#forget-hd');
+  await forgetVia(page, '#forget-hd');
   await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === 'none', null, { timeout: 30_000, polling: 50 });
   assert.equal(await page.evaluate(() => window.__cellHash()), mmpx[4], 'S 4: MMPX again, at once');
   assert.match((await h.state(page)).status, /^The HD pack was removed from this page and this browser; HD shows MMPX\.$/);
@@ -2817,7 +2843,7 @@ test('HD pack with storage that throws: the pack is loaded and shown for this vi
   assert.deepEqual(await cellHashes(page), mmpx, 'MMPX after the reload');
   await page.evaluate(() => window.__dropPack(['good']));
   await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
-  await page.click('#forget-hd');
+  await forgetVia(page, '#forget-hd');
   await h.waitSettled(page);
   assert.match((await h.state(page)).status, /^The HD pack is off on this page, but this browser did not remove it: /);
   assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true });
@@ -3034,6 +3060,251 @@ test('the page\'s text: English and Korean hold the same keys, of the same shape
   for (const key of named) assert.ok(typeof TEXT.en[key] === 'string', `index.html's ${key} is in the catalog`);
 });
 
+// --- the page (the owner's "쓰잘대기 없는 내용 빼주고", 2026-10-21) and fullscreen ---------------
+
+// The page as a visitor sees it: the toolbar's controls, every button shown outside Settings and
+// the Voices terms, the drop line, the footer's links, the controls' list.
+const pageShown = (page) => page.evaluate(() => {
+  const shownNow = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
+  const drop = document.getElementById('drop');
+  const controls = document.getElementById('controls');
+  return {
+    title: document.title,
+    h1: document.querySelector('h1').textContent.trim(),
+    toolbars: document.querySelectorAll('[role="toolbar"]').length,
+    toolbar: [...document.getElementById('playback').children].map((e) => e.id),
+    afterScreen: document.getElementById('screen-box').nextElementSibling?.id ?? null,
+    buttons: [...document.querySelectorAll('button')].filter((b) => shownNow(b) && !b.closest('#setup, #voice-terms')).map((b) => b.id),
+    gone: ['limits', 'npc-bundles', 'forget-npc-bundles', 'game-strings', 'hd-credits', 'voice-credits', 'locale-note']
+      .filter((id) => document.getElementById(id) !== null),
+    hint: document.querySelectorAll('.hint').length,
+    hdInSettings: document.getElementById('hd').type === 'checkbox' && document.getElementById('setup').contains(document.getElementById('hd')),
+    kept: [...document.querySelectorAll('#kept button')].map((b) => b.id),
+    keptOpen: document.getElementById('kept').open,
+    drop: drop.hidden ? null : drop.querySelector('label[for="picker"]').textContent.replace(/\s+/g, ' ').trim(),
+    notices: [...document.querySelectorAll('#notices a')].map((a) => new URL(a.href).pathname),
+    controlsOpen: controls.open,
+    controls: [...controls.querySelectorAll('li')].map((li) => li.textContent.trim()),
+    controlsTitle: controls.querySelector('summary').textContent.trim(),
+  };
+});
+
+const CONTROL_KEYS = ['keyWalk', 'keyCommands', 'keyCombat', 'keyPass', 'keySave', 'keySpeed', 'keyOpening'];
+
+test('the page: titled "Ultima VI"; under the game screen one toolbar of exactly Fullscreen, Mute, Voices (and its chip), the Speed group and Settings, the only buttons shown outside Settings; no "What this version does", hint, NPC bundles, Game strings, HD button or page note; Settings holds "HD on" and a closed "Kept in this browser" group of the five forget buttons; the footer links the MMPX notice and the voice model\'s licence and notice; the controls are closed and list the keys in the page\'s language', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const { LICENSE_URL, NOTICE_URL } = await import('../../site/voice/model.js');
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  const p = await pageShown(page);
+  assert.deepEqual([p.title, p.h1], ['Ultima VI', 'Ultima VI'], 'the title');
+  assert.equal(p.toolbars, 1, 'one toolbar');
+  assert.equal(p.afterScreen, 'playback', 'right under the game screen');
+  assert.deepEqual(p.toolbar, ['fullscreen', 'mute', 'voices', 'voice-chip', 'speed-group', 'settings'], 'its controls, in order');
+  assert.deepEqual(p.buttons, ['fullscreen', 'mute', 'voices', 'slower', 'faster', 'settings'], 'the only buttons shown');
+  assert.deepEqual(p.gone, [], 'the removed parts are gone');
+  assert.equal(p.hint, 0, 'no hint paragraph');
+  assert.ok(p.hdInSettings, '"HD on" is a checkbox in Settings');
+  assert.deepEqual(p.kept, ['forget', 'forget-save', 'forget-hd', 'forget-ko', 'forget-voices'], 'the forget buttons, in Settings\' group');
+  assert.equal(p.keptOpen, false, 'the group closed');
+  const [licence, notice] = [LICENSE_URL, NOTICE_URL].map((u) => u.pathname.slice(h.SITE.length));
+  assert.deepEqual(p.notices, ['/NOTICE.txt', licence, notice], 'the footer: MMPX\'s notice, the voice model\'s licence and notice');
+  assert.equal(p.controlsOpen, false, 'the controls closed');
+  assert.equal(p.controlsTitle, TEXT.en.controls);
+  assert.deepEqual(p.controls, CONTROL_KEYS.map((k) => TEXT.en[k]), 'the keys, in English');
+  await page.click('#settings');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  const ko = await pageShown(page);
+  assert.equal(ko.controlsTitle, TEXT.ko.controls);
+  assert.deepEqual(ko.controls, CONTROL_KEYS.map((k) => TEXT.ko[k]), 'and in Korean');
+  console.log(`  receipt: toolbar ${p.toolbar.length} controls, ${p.buttons.length} buttons shown, ${p.kept.length} forget buttons in Settings, ${p.notices.length} notice links: pass`);
+});
+
+test('the drop line: shown with no game files kept, one sentence in the page\'s language with the picker; hidden once files are kept (made-up kept files: no game starts from them), while a drop on the page still loads a voice pack; Forget the kept files shows it again; Settings\' "HD on" switches HD and is kept across a reload', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  assert.equal((await pageShown(page)).drop, TEXT.en.dropLine, 'no files: the drop line');
+  await h.keepFiles(page, [{ path: 'U6/other', bytes: [1, 2, 3] }]);
+  await page.reload();
+  await h.waitSettled(page);
+  assert.equal((await pageShown(page)).drop, null, 'files kept: no drop line');
+  const pack = await voicePack({ [PACK_A]: VOICE_A });
+  await h.dropFiles(page, [], [{ name: 'voices.u6vp', text: JSON.stringify(pack) }]);
+  await voicePackIs(page, 1);
+  await forgetVia(page, '#forget');
+  await h.waitSettled(page);
+  assert.equal((await pageShown(page)).drop, TEXT.en.dropLine, 'forgotten: the drop line again');
+  assert.equal(await page.evaluate(() => document.getElementById('hd').checked), true, 'HD on by default');
+  await page.click('#hd');
+  assert.equal(await page.evaluate(() => localStorage.getItem('u6.hd')), 'off', 'off, kept');
+  await page.reload();
+  await h.waitSettled(page);
+  assert.equal(await page.evaluate(() => document.getElementById('hd').checked), false, 'off after the reload');
+});
+
+// The fullscreen as the page shows it: the fullscreen element, data-fullscreen, the toolbar
+// button's label and state, the canvas's box and the viewport, the focus, the Exit button, the
+// screen box's class.
+const fullShown = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen').getBoundingClientRect();
+  const button = document.getElementById('fullscreen');
+  return {
+    element: document.fullscreenElement?.id ?? null,
+    mode: document.body.dataset.fullscreen,
+    label: button.textContent,
+    pressed: button.getAttribute('aria-pressed'),
+    rect: [c.left, c.top, c.width, c.height].map((v) => Math.round(v * 10) / 10),
+    viewport: [innerWidth, innerHeight],
+    focus: document.activeElement?.id ?? null,
+    exit: !document.getElementById('fullscreen-exit').hidden,
+    full: document.getElementById('screen-box').classList.contains('full'),
+  };
+});
+
+// The canvas as large as fits the viewport with the game's aspect ratio, centred.
+function fitsScreen({ rect: [left, top, width, height], viewport: [vw, vh] }) {
+  return Math.abs(width / height - 1.6) < 0.01 && width <= vw + 0.5 && height <= vh + 0.5
+    && (Math.abs(width - vw) < 1 || Math.abs(height - vh) < 1)
+    && Math.abs(left - (vw - width) / 2) < 1 && Math.abs(top - (vh - height) / 2) < 1;
+}
+
+const waitFull = (page, mode) => page.waitForFunction((m) => document.body.dataset.fullscreen === m, mode, { timeout: 10_000 });
+
+test('fullscreen: the toolbar\'s Fullscreen puts the screen box in the browser\'s fullscreen, the canvas as large as fits with the game\'s aspect ratio, centred, with the focus; the button reads Exit fullscreen; the Exit button shows on entering and on a pointer move and hides 2 s after; the Exit button, the toolbar\'s button and the browser\'s own way out each leave, the page says so and the canvas has the focus again; without requestFullscreen the box fills the viewport by its class instead, left the same way', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  let { context, page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.click('#fullscreen');
+  await waitFull(page, 'on');
+  let f = await fullShown(page);
+  assert.equal(f.element, 'screen-box', 'the screen box is fullscreen');
+  assert.ok(f.label === TEXT.en.exitFullscreen && f.pressed === 'true', 'the button reads Exit fullscreen');
+  assert.ok(fitsScreen(f), 'the canvas fits the screen with the game\'s aspect ratio, centred');
+  assert.equal(f.focus, 'screen', 'the canvas has the focus');
+  assert.ok(f.exit, 'the Exit button on entering');
+  const seen = f;
+  await page.waitForFunction(() => document.getElementById('fullscreen-exit').hidden, null, { timeout: 5000 });
+  await page.mouse.move(200, 200);
+  await page.mouse.move(220, 210);
+  assert.ok((await fullShown(page)).exit, 'a pointer move shows it again');
+  await page.click('#fullscreen-exit');
+  await waitFull(page, 'off');
+  f = await fullShown(page);
+  assert.ok(f.element === null && f.label === TEXT.en.fullscreen && f.pressed === 'false' && !f.exit, 'the Exit button leaves');
+  assert.ok(!fitsScreen(f), 'the canvas back in the page');
+  assert.equal(f.focus, 'screen', 'left by the Exit button: the canvas has the focus back');
+  await page.click('#fullscreen');
+  await waitFull(page, 'on');
+  await page.evaluate(() => document.getElementById('fullscreen').click());
+  await waitFull(page, 'off');
+  assert.equal((await fullShown(page)).element, null, 'the toolbar\'s button leaves');
+  assert.equal((await fullShown(page)).focus, 'screen', 'left by the toolbar\'s button: the canvas has the focus back');
+  await page.click('#fullscreen');
+  await waitFull(page, 'on');
+  await page.evaluate(() => document.exitFullscreen()); // as the browser's Escape or F11 does
+  await waitFull(page, 'off');
+  assert.equal((await fullShown(page)).label, TEXT.en.fullscreen, 'the browser\'s own way out is shown');
+  const lock = await page.evaluate(() => typeof navigator.keyboard?.lock === 'function');
+  await context.close();
+  // No requestFullscreen (iPhone Safari): the page's own, by a class.
+  ({ context, page } = await h.openPage(env));
+  await context.addInitScript(() => { delete Element.prototype.requestFullscreen; });
+  await h.load(page, env);
+  await page.click('#fullscreen');
+  await waitFull(page, 'css');
+  f = await fullShown(page);
+  assert.ok(f.element === null && f.full, 'the box by its class, not the browser\'s fullscreen');
+  assert.ok(fitsScreen(f), 'the canvas fits the viewport the same way');
+  assert.ok(f.focus === 'screen' && f.exit && f.label === TEXT.en.exitFullscreen, 'the focus, the Exit button, the label');
+  await page.click('#fullscreen-exit');
+  await waitFull(page, 'off');
+  assert.ok(!(await fullShown(page)).full, 'the Exit button leaves it');
+  assert.equal((await fullShown(page)).focus, 'screen', 'the class left by the Exit button: the canvas has the focus back');
+  await page.click('#fullscreen');
+  await waitFull(page, 'css');
+  await page.evaluate(() => document.getElementById('fullscreen').click());
+  await waitFull(page, 'off');
+  console.log(`  receipt: fullscreen canvas ${seen.rect.join(',')} in a viewport ${seen.viewport.join('x')}; css fallback ${f.rect.join(',')} in ${f.viewport.join('x')}; keyboard lock ${lock ? 'offered' : 'not offered'} by this Chromium: pass`);
+});
+
+test('the chooser\'s note on the game\'s text, in 한글: with no Korean pack at all (none listed, none kept) it points at the README\'s "Packs from your own copy"; with one listed it shows nothing, also while that pack is still downloading and once it is loaded; in English it shows nothing', async (env) => {
+  sitePacks(env, { 'index.json': koListing(null) });
+  let { context, page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  await h.load(page, env);
+  await page.click('#settings');
+  await listed(page, 0);
+  let c = await chooser(page);
+  assert.equal(c.note, await noteFor('ko'), 'none listed or kept: the note');
+  assert.equal(c.noteLink, README_PACKS, 'pointing at the README');
+  await page.check('input[name="setup-lang"][value="en"]');
+  assert.equal((await chooser(page)).note, null, 'in English: none');
+  await context.close();
+  const { pack, runs, scripts } = await koFixture();
+  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack) });
+  const held = h.holdPack(env, KO_FILE);
+  ({ context, page } = await h.openPage(env, { setup: null }));
+  await page.goto(env.server.url);
+  await held.asked;
+  c = await chooser(page);
+  assert.ok(c.shown && c.lang === 'ko', 'the first run\'s chooser, on 한글');
+  assert.equal(c.note, null, 'a pack listed, still downloading: no note');
+  held.release();
+  await koPackIs(page, `${runs},${scripts}`);
+  assert.equal((await chooser(page)).note, null, 'loaded: no note');
+  await context.close();
+});
+
+test('fullscreen in a game in 한글 with the Korean pack (the user\'s disks, a synthetic conversation): the hidden input that takes Korean is inside the fullscreen element, the canvas has the focus, and while the game reads the player\'s words the input has it; composed syllables and Enter reach the game as on the page; left by the Exit button, the canvas has the focus again and a key reaches the game', async (env) => {
+  const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  await h.load(page, env);
+  const { archive, pack } = await koTypingFixture();
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  await page.click('#fullscreen');
+  await waitFull(page, 'on');
+  const inside = () => page.evaluate(() => ({
+    ime: document.fullscreenElement?.contains(document.getElementById('ime')) ?? false,
+    at: document.activeElement?.id ?? null,
+  }));
+  assert.deepEqual(await inside(), { ime: true, at: 'screen' }, 'the hidden input inside the fullscreen element, the canvas focused');
+  await page.keyboard.press('t');
+  await h.waitTaken(page);
+  await page.keyboard.press('2');
+  await page.waitForFunction(() => globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
+  await h.waitFrames(page, 2);
+  assert.deepEqual(await inside(), { ime: true, at: 'ime' }, 'the line read: the input has the focus, in fullscreen');
+  await page.evaluate(() => { globalThis.__sent.length = 0; });
+  const cdp = await page.context().newCDPSession(page);
+  for (const [steps, syllable] of [[['ㅅ', '시'], '시'], [['ㅎ', '혀', '험'], '험']]) {
+    for (const text of steps) await cdp.send('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length });
+    await cdp.send('Input.insertText', { text: syllable });
+  }
+  await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await h.waitPrompt(page);
+  assert.deepEqual(await page.evaluate(() => globalThis.__sent), ['text:시', 'text:험', 'Enter'], 'the committed syllables, then Enter');
+  assert.equal((await fullShown(page)).element, 'screen-box', 'still fullscreen');
+  // Left by a click on the Exit button (shown by a pointer move): the canvas has the focus back
+  // and a key pressed then reaches the game.
+  await page.mouse.move(300, 300);
+  await page.mouse.move(320, 310);
+  await page.click('#fullscreen-exit');
+  await waitFull(page, 'off');
+  assert.equal((await fullShown(page)).focus, 'screen', 'left: the canvas has the focus back');
+  await page.evaluate(() => { globalThis.__sent.length = 0; });
+  await page.keyboard.press('ArrowRight');
+  await page.waitForFunction(() => globalThis.__sent.length > 0, null, { timeout: 10_000 });
+  assert.deepEqual(await page.evaluate(() => globalThis.__sent), ['ArrowRight'], 'left: a key pressed then reaches the game');
+}, { needs: h.haveHfes });
+
 // What the chooser shows: whether it is on screen and above the game screen, its entries
 // (each label's text; the HD entries shown), the HD entry checked, NPC voices checked and the
 // voice model's terms shown, OK's label, its status line, the note on the game's text, the
@@ -3056,12 +3327,21 @@ const chooser = (page) => page.evaluate(() => {
     terms: !document.getElementById('setup-terms').hidden,
     ok: document.getElementById('setup-ok').textContent,
     status: document.getElementById('setup-status').textContent,
-    note: note.hidden ? null : note.textContent,
+    note: note.hidden ? null : note.textContent.replace(/\s+/g, ' ').trim(),
+    noteLink: document.getElementById('setup-note-link').href,
     stored: JSON.parse(localStorage.getItem('u6.setup')),
     source: localStorage.getItem('u6.hdSource'),
     key: localStorage.getItem('u6.packKey'),
   };
 });
+
+// The README section the chooser's note points at, and the note in `lang` (shown only with no
+// Korean pack at all: none kept, none listed).
+const README_PACKS = 'https://github.com/2lab-ai/ultima6#packs-from-your-own-copy';
+async function noteFor(lang) {
+  const { TEXT } = await import('../../site/i18n.js');
+  return `${TEXT[lang].gameText} ${TEXT[lang].packsReadme}`;
+}
 
 // Waits until the chooser's HD entries hold the list the site gave (`n` packs).
 const listed = (page, n) => page.waitForFunction((want) => document.getElementById('setup-hd').dataset.packs === want,
@@ -3459,8 +3739,8 @@ const pageText = (page) => page.evaluate(() => {
     forgetHd: text('forget-hd'),
     settings: text('settings'),
     mute: text('mute'),
-    choose: document.querySelector('label[for="picker"]').textContent.trim(),
-    drop: text('drop-title').replace(/\s+/g, ' '),
+    fullscreen: text('fullscreen'),
+    drop: document.querySelector('label[for="picker"]').textContent.replace(/\s+/g, ' ').trim(),
     canvas: document.getElementById('screen').getAttribute('aria-label'),
     status: text('status'),
     mmpx: document.querySelector('#setup-hd input[value=""]').parentElement.textContent.trim(),
@@ -3486,26 +3766,22 @@ test('한글: a first visit opens on 한글 and English is one click away; the p
     forgetHd: 'HD 팩 지우기',
     settings: '설정',
     mute: '소리 끄기',
-    choose: '또는 파일 고르기:',
-    drop: '울티마 VI 파일을 여기에 놓으세요: archive.org의 zip, ADF 세 개, 또는 풀어 놓은 파일 — 아무것도 업로드되지 않습니다. 원본 PLAYER 디스크의 savegame 폴더를 여기에 놓으면 저장된 게임이 됩니다.',
+    fullscreen: '전체화면',
+    drop: '울티마 VI 파일(archive.org의 zip)을 여기에 놓거나 고르세요. 파일은 이 브라우저 밖으로 나가지 않습니다.',
     canvas: '게임 화면. 클릭하거나 Tab으로 옮겨 오면 화살표 키로 걷고 글자 키는 게임 명령입니다. Tab을 누르면 빠져나갑니다.',
     status: '아직 불러온 파일이 없습니다: 울티마 VI 파일을 놓거나 고르세요.',
     mmpx: 'MMPX (팩 없음)',
   }, 'Korean at once, the status line too');
-  // Without a Korean pack (spec 08): the game's text is English, and one line points at the
-  // local tool, in the chooser and on the page; no path that names the owner's data.
-  const { TEXT } = await import('../../site/i18n.js');
-  const note = (await chooser(page)).note;
-  assert.equal(note, TEXT.ko.gameText, 'the game\'s text is still English');
-  assert.ok(note.includes('tools/i18n') && !/~|\/Users|Games/.test(note), 'it points at the tool, at no path of data');
-  assert.equal(await page.evaluate(() => {
-    const p = document.getElementById('locale-note');
-    return p.hidden ? null : p.textContent;
-  }), TEXT.ko.gameText, 'and so does the page');
+  // With no Korean pack at all (none kept, none listed: spec 08): the game's text is English, and
+  // one line in the chooser points at the README's way to make one; no path of the owner's data.
+  const c = await chooser(page);
+  assert.equal(c.note, await noteFor('ko'), 'the game\'s text is still English');
+  assert.equal(c.noteLink, README_PACKS, 'it points at the README\'s "Packs from your own copy"');
+  assert.ok(!/~|\/Users|Games|tools\/i18n/.test(c.note), 'at no path of data or tool');
   await page.click('#setup-ok');
   await h.waitSettled(page);
   assert.deepEqual((await chooser(page)).stored, { lang: 'ko', version: h.SETUP_VERSION });
-  await page.click('#forget');
+  await forgetVia(page, '#forget');
   await h.waitSettled(page);
   assert.equal((await h.state(page)).status, '보관한 게임 파일을 이 브라우저에서 지웠습니다.', 'a status line of app.js in Korean');
   await page.click('#mute');
@@ -3521,7 +3797,6 @@ test('한글: a first visit opens on 한글 and English is one click away; the p
   await page.check('input[name="setup-lang"][value="en"]');
   assert.deepEqual(await pageText(page), english, 'English again, as it was');
   assert.equal((await chooser(page)).note, null, 'no note in English');
-  assert.ok(await page.evaluate(() => document.getElementById('locale-note').hidden), 'nor on the page');
 });
 
 // The owner's full-size pack for spec 07 Acceptance 5: every classic image of the owner's files
@@ -4019,7 +4294,7 @@ test('voices with WebGPU: accepted, downloaded, checked and warmed up to ready (
   assert.ok(v.state === 'ready' && v.refetched === 1, 'ready, the corrupted part fetched again');
   assert.deepEqual(requests.filter((p) => /\.part\d+$/.test(p)).map((p) => p.split('/').pop()), ['vocoder.onnx.part1'], 'only that part');
   // Forget voices: the cache emptied, the acceptance forgotten, off.
-  await page.click('#forget-voices');
+  await forgetVia(page, '#forget-voices');
   await waitVoice(page, (want) => document.getElementById('status').textContent === want, await line('voiceForgot'), 10_000);
   const left = await page.evaluate(async () => ({
     caches: (await caches.keys()).filter((n) => n.startsWith('u6-voice-')).length,
@@ -4154,7 +4429,7 @@ test('voices without WebGPU: on the CPU, a runtime that does not start turns voi
   // A Korean line and an English one reach the worker each in its language (spec 09 Order 6).
   await saysEachLanguage(page, 5, 120_000);
   // Forget voices: the cache emptied, the acceptance forgotten, off.
-  await page.click('#forget-voices');
+  await forgetVia(page, '#forget-voices');
   await waitVoice(page, (want) => document.getElementById('status').textContent === want, await line('voiceForgot'), 10_000);
   const left = await page.evaluate(async () => ({
     caches: (await caches.keys()).filter((n) => n.startsWith('u6-voice-')).length,
@@ -4705,7 +4980,7 @@ test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors
   assert.deepEqual(await profileSent(PACK_A), VOICE_A, 'A: the kept pack\'s');
 
   // Forget voices: the pack goes with the model, off the player and out of storage.
-  await page.click('#forget-voices');
+  await forgetVia(page, '#forget-voices');
   await waitVoice(page, (want) => document.getElementById('status').textContent === want, await line('voiceForgot'), 10_000);
   assert.deepEqual((await h.keptVoicePacks(page)).keys, [], 'forgotten');
   assert.equal(await shownPack(), '0');
@@ -4745,7 +5020,7 @@ test('Forget voices removes the voice pack even when the model\'s caches cannot 
   ]) {
     await dropPack();
     await page.evaluate(refuse);
-    await page.click('#forget-voices');
+    await forgetVia(page, '#forget-voices');
     await waitVoice(page, (want) => document.getElementById('status').textContent === want, failed, 10_000);
     await h.waitSettled(page);
     assert.deepEqual((await h.keptVoicePacks(page)).keys, [], `${what}: the pack out of storage`);
@@ -4834,7 +5109,7 @@ test('the site\'s voice pack and a dropped one (synthetic, no game, in 한글): 
   let kept = await h.keptVoicePacks(page);
   assert.deepEqual(kept.keys, ['voice-pack:voices'], 'kept with no source');
   assert.deepEqual(kept.byKey['voice-pack:voices'], dropped, 'the dropped pack stays kept');
-  await page.click('#forget-voices');
+  await forgetVia(page, '#forget-voices');
   await waitVoice(page, (want) => document.getElementById('status').textContent === want, TEXT.ko.voiceForgot, 10_000);
   await h.waitSettled(page);
   assert.equal(await page.evaluate(() => document.body.dataset.voicePack), '0', 'forgotten');
@@ -4917,7 +5192,7 @@ test('the site\'s voice pack not loaded (synthetic, no game): a listing that nam
   console.log(`  receipt: no voice pack listed 0 pack requests, 2 entries of another form 0 pack requests, ${cases.length} refusals 1 request each, nothing changed: pass`);
 });
 
-// --- NPC bundles (spec 09 Design 5) --------------------------------------------------------
+// --- NPC bundles an older page kept (spec 09 Design 5) --------------------------------------
 
 // FNV-1a 64 of `bytes` as 16 lower-case hex digits (the catalog's and the bundles' hash).
 function fnv64(bytes) {
@@ -4926,147 +5201,38 @@ function fnv64(bytes) {
   return h.toString(16).padStart(16, '0');
 }
 
-const NPC_SENTINEL = 'Zq7NpcSentinel';
-
-// A synthetic converse.a (no game bytes): item 5, stored raw, is `ff 05 "Nm" f1 "look" f2`, a
-// greeting that holds the sentinel, an ask, one keyword block and the end. With its bundle as
-// the exporter must make it (actor 5 by its slot, portrait a 4, no objlist: no traits).
-function npcFixture() {
-  const enc = (t) => [...Buffer.from(t, 'latin1')];
-  const script = [0xff, 0x05, ...enc('Nm'), 0xf1, ...enc('look'), 0xf2, ...enc(`Hi ${NPC_SENTINEL}!`),
-    0xf7, 0xef, ...enc('name'), 0xf6, ...enc('I am Nm.'), 0xee, 0xff];
-  const ask = 10 + 3 + NPC_SENTINEL.length + 1;
-  const offsets = [0, 0, 0, 0, 0, 6 * 4];
-  const lib = [...offsets.flatMap((o) => [o & 255, (o >> 8) & 255, 0, 0]), 0, 0, 0, 0, ...script];
-  const bundle = {
-    format: 'u6.npc-bundle/1', archive: 'a', item: 5, hash: fnv64(script), refused: null,
-    actors: [5], portraits: [{ actor: 5, archive: 'a', item: 4 }], name: 'Nm', locale: 'en',
-    narration: { look: [{ kind: 'text', key: ['a', 5, 5], text: 'look' }] },
-    speech: { greeting: [{ kind: 'text', key: ['a', 5, 10], text: `Hi ${NPC_SENTINEL}!` }] },
-    turns: [{
-      input: { at: ask, kind: 'ask' },
-      segments: [{ kind: 'op', at: ask + 16, op: 'end' }],
-      topics: [{
-        at: ask + 1, keywords: ['name'], requires: [],
-        answer: [{ kind: 'text', key: ['a', 5, ask + 7], text: 'I am Nm.' }],
-      }],
-    }],
-    traits: [], strings: [],
+// Puts made-up records where an older page kept its NPC bundles (npc-bundle:<archive>/<item>).
+const seedBundles = (page, n) => page.evaluate((count) => new Promise((done, fail) => {
+  const req = indexedDB.open('ultima6-port', 1);
+  req.onerror = () => fail(req.error);
+  req.onsuccess = () => {
+    const db = req.result;
+    const tx = db.transaction('files', 'readwrite');
+    for (let i = 1; i <= count; i += 1) tx.objectStore('files').put({ format: 'u6.npc-bundle/1', archive: 'a', item: i }, `npc-bundle:a/${i}`);
+    tx.oncomplete = () => { db.close(); done(); };
+    tx.onerror = () => fail(tx.error);
   };
-  return { files: [{ path: 'U6/converse.a', bytes: lib }, { path: 'U6/other', bytes: [1, 2, 3] }], bundle };
-}
+}), n);
 
-// Presses `button` and returns the download it gives, parsed, with its suggested name.
-async function npcDownload(page, button = '#npc-bundles') {
-  const [download] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.click(button)]);
-  const text = await readFile(await download.path(), 'utf8');
-  await h.waitSettled(page);
-  return { name: download.suggestedFilename(), bundles: JSON.parse(text) };
-}
-
-test('NPC bundles (synthetic kept files): with none kept the button says so and downloads nothing; with the files kept, one press makes the bundle of each conversation script, keeps each under npc-bundle:<archive>/<item> and downloads them as one JSON array, exactly; storage that refuses them still downloads them and keeps the ones before; Forget NPC bundles removes them; the sentinel in the script never reaches the console, the page\'s data or text, an error or a CSP report', async (env) => {
+test('NPC bundles an older page kept (made-up records under npc-bundle:) are removed at the restore, once and with no line; a later visit removes nothing again; the page has no NPC bundles or Game strings button', async (env) => {
   const { page } = await h.openPage(env);
-  const text = consoleText(page);
-  let downloads = 0;
-  page.on('download', () => { downloads += 1; });
   await h.load(page, env);
-  await page.click('#npc-bundles');
+  assert.ok(await page.evaluate(() => ['npc-bundles', 'forget-npc-bundles', 'game-strings'].every((id) => !document.getElementById(id))),
+    'no NPC bundles, Forget NPC bundles or Game strings button');
+  await page.evaluate(() => localStorage.removeItem('u6.npcBundlesGone')); // as an older page left it
+  await seedBundles(page, 3);
+  assert.equal((await h.keptBundles(page)).keys.length, 3, 'the older page\'s records');
+  await page.reload();
   await h.waitSettled(page);
-  assert.equal((await h.state(page)).status, await line('npcNoFiles'), 'no kept files: says so');
-  assert.equal(downloads, 0, 'and downloads nothing');
-  const { files, bundle } = npcFixture();
-  await h.keepFiles(page, files);
-  const got = await npcDownload(page);
-  assert.equal(got.name, 'ultima6-npc-bundles.json', 'one JSON file');
-  assert.deepEqual(got.bundles, [bundle], 'the bundle, exactly');
-  let kept = await h.keptBundles(page);
-  assert.deepEqual(kept.keys, ['npc-bundle:a/5'], 'kept under its key');
-  assert.deepEqual(kept.byKey['npc-bundle:a/5'], bundle, 'the kept bundle is the one downloaded');
-  assert.equal((await h.state(page)).status, await line('npcExported', 1, 'ultima6-npc-bundles.json'));
-  // A second export over a store that refuses it: the download still comes, the kept one stays.
-  const changed = structuredClone(files);
-  changed[0].bytes[changed[0].bytes.length - 3] = 0x21; // "I am Nm!"
-  await h.keepFiles(page, changed);
-  await page.evaluate(() => window.__fail.add('bundles-store'));
-  const again = await npcDownload(page);
-  assert.equal(again.bundles.length, 1);
-  assert.equal(again.bundles[0].turns[0].topics[0].answer[0].text, 'I am Nm!', 'the download is the new export');
-  assert.equal((await h.state(page)).status, await line('npcNotKept', 1, 'ultima6-npc-bundles.json'));
-  kept = await h.keptBundles(page);
-  assert.deepEqual(kept.byKey['npc-bundle:a/5'], bundle, 'the bundle kept before stays');
-  await page.evaluate(() => window.__fail.delete('bundles-store'));
-  await page.click('#forget-npc-bundles');
+  assert.equal((await h.keptBundles(page)).keys.length, 0, 'removed at the restore');
+  assert.equal((await h.log(page)).filter((e) => e === 'bundles:forget:end').length, 1, 'once');
+  assert.equal((await h.state(page)).status, await line('noFilesYet'), 'with no line');
+  await seedBundles(page, 2);
+  await page.reload();
   await h.waitSettled(page);
-  assert.deepEqual((await h.keptBundles(page)).keys, [], 'forgotten');
-  assert.equal((await h.state(page)).status, await line('npcForgot'));
-  assert.ok((await h.keptPaths(page)) !== null, 'the kept game files stay');
-  const log = await h.log(page);
-  assert.ok(log.includes('bundles:store:end') && log.includes('bundles:store:fail') && log.includes('bundles:forget:end'), 'through the store');
-  const where = await page.evaluate(() => JSON.stringify({
-    body: { ...document.body.dataset }, canvas: { ...document.getElementById('screen').dataset },
-    text: document.body.innerText, storage: { ...localStorage }, csp: window.__csp,
-  }));
-  assert.ok(!where.includes(NPC_SENTINEL), 'not in the page\'s data, text or storage');
-  assert.ok(!text.some((m) => m.includes(NPC_SENTINEL)), 'not in the console or an error');
-  assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP report');
-  assert.equal(downloads, 2);
+  assert.ok(!(await h.log(page)).some((e) => e.startsWith('bundles:')), 'a later visit: no removal');
+  assert.equal((await h.keptBundles(page)).keys.length, 2, 'nothing touched');
 });
-
-test('NPC bundles from the user\'s files: one press after the import downloads one u6.npc-bundle/1 per conversation script (counts only), each its own (archive, item) once, its text segments keyed to it; the kept ones are the download; Forget NPC bundles removes them; no bundle text in the console (receipt)', async (env) => {
-  const { page } = await h.openPage(env);
-  const text = consoleText(page);
-  await h.load(page, env);
-  await page.setInputFiles('#picker', h.HFES);
-  await started(page, FILES);
-  const t0 = Date.now();
-  const { bundles } = await npcDownload(page);
-  const ms = Date.now() - t0;
-  assert.ok(bundles.length > 0, 'bundles');
-  assert.ok(bundles.every((b) => b.format === 'u6.npc-bundle/1' && b.locale === 'en'), 'every one u6.npc-bundle/1');
-  const keys = bundles.map((b) => `${b.archive}/${b.item}`);
-  assert.equal(new Set(keys).size, keys.length, 'each script once');
-  const order = bundles.every((b, i) => i === 0 || bundles[i - 1].archive < b.archive
-    || (bundles[i - 1].archive === b.archive && bundles[i - 1].item < b.item));
-  assert.ok(order, 'in (archive, item) order');
-  const segments = (b) => [...b.narration.look, ...b.speech.greeting,
-    ...b.turns.flatMap((t) => [...t.segments, ...t.topics.flatMap((p) => p.answer)])];
-  let texts = 0;
-  let own = 0;
-  for (const b of bundles) {
-    for (const s of segments(b).filter((s) => s.kind === 'text')) {
-      texts += 1;
-      if (s.key[0] === b.archive && s.key[1] === b.item && Number.isInteger(s.key[2])) own += 1;
-    }
-  }
-  assert.ok(texts > 0 && own === texts, 'every text segment keyed to its own script');
-  const named = bundles.filter((b) => b.name).length;
-  const greeting = bundles.filter((b) => b.speech.greeting.some((s) => s.kind === 'text')).length;
-  const turns = bundles.filter((b) => b.turns.length > 0).length;
-  const refused = bundles.filter((b) => b.refused !== null).length;
-  // How many bundles there are, and of which kind, are sizes of the user's scripts: checked, never
-  // shown (the Rust real-data bundle test holds the same rules on these files).
-  assert.ok(refused === 0, 'no script refused');
-  assert.ok(named > 0 && greeting > 0 && turns > 0, 'bundles with a name, with a greeting and with a turn');
-  const kept = await h.keptBundles(page);
-  // Compared here, never shown: the keys name the user's scripts and their number is a size of
-  // his files (a failure gives the rule only). The scripts come from the kept archives
-  // themselves, not from the export or the store.
-  const scripts = await h.keptScripts(page);
-  const same = (x, y) => x.length === y.length && x.every((k, i) => k === y[i]);
-  assert.ok(same([...keys].sort(), scripts), 'one bundle per script');
-  const want = scripts.map((k) => `npc-bundle:${k}`).sort();
-  assert.ok(same(kept.keys, want), 'one kept record per script');
-  assert.ok(bundles.every((b) => JSON.stringify(kept.byKey[`npc-bundle:${b.archive}/${b.item}`]) === JSON.stringify(b)), 'the kept ones are the download');
-  const said = new Set(bundles.flatMap((b) => segments(b)).filter((s) => s.kind === 'text' && s.text.length >= 8).map((s) => s.text));
-  assert.ok(!text.some((m) => [...said].some((t) => m.includes(t))), 'no bundle text in the console');
-  await page.click('#forget-npc-bundles');
-  await h.waitSettled(page);
-  const left = (await h.keptBundles(page)).keys.length;
-  assert.ok(left === 0, 'forgotten: none left');
-  const reports = (await page.evaluate(() => window.__csp)).length;
-  assert.ok(reports === 0, `no CSP report (${reports})`);
-  console.log(`  receipt: one bundle per script, each once, in order, every text segment keyed to its own script, none refused, the kept ones the download, forgotten: pass; press to download ${ms} ms`);
-}, { needs: h.haveHfes });
 
 // --- the Korean pack (spec 08, slice K1) ---------------------------------------------------
 
@@ -5164,13 +5330,13 @@ test('Korean pack (synthetic, no game): a dropped ko.u6lp is checked by the engi
   const ko = TEXT.ko;
   const { pack, runs, scripts } = await koFixture();
   assert.equal((await localeShown(page)).pack, 'none');
-  assert.equal(await page.evaluate(() => document.getElementById('locale-note').hidden), false, 'no pack: the line pointing at the tool');
+  assert.equal(await localeNoteShown(page), await noteFor('ko'), 'no pack at all: the chooser\'s line pointing at the README');
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
   await h.waitSettled(page);
   assert.equal((await localeShown(page)).pack, `${runs},${scripts}`, 'its counts');
   assert.equal((await h.state(page)).status, `${ko.koPackLoaded(runs, scripts)}${ko.koPackKept}`, 'the line, counts only');
   assert.deepEqual(await h.keptLocalePack(page), pack, 'kept under locale:ko, byte for byte');
-  assert.equal(await page.evaluate(() => document.getElementById('locale-note').hidden), true, 'the tool line goes with a pack');
+  assert.equal(await localeNoteShown(page), null, 'the line goes with a pack');
   assert.equal((await h.keptPaths(page)), null, 'no game file kept, no game started');
   await page.reload();
   await h.waitSettled(page);
@@ -5208,7 +5374,7 @@ test('Korean pack (synthetic, no game): a dropped ko.u6lp is checked by the engi
   await page.evaluate(() => window.__fail.delete('locale-store'));
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
   await h.waitSettled(page);
-  await page.click('#forget-ko');
+  await forgetVia(page, '#forget-ko');
   await h.waitSettled(page);
   assert.equal((await h.state(page)).status, ko.koPackForgot);
   assert.equal(await h.keptLocalePack(page), null, 'out of storage');
@@ -5281,7 +5447,7 @@ test('Korean pack in a game (the user\'s disks, a synthetic conversation): in �
   await h.waitSettled(page);
   await h.waitPrompt(page);
   assert.equal((await localeShown(page)).locale, 'on', '한글: on again');
-  await page.click('#forget-ko');
+  await forgetVia(page, '#forget-ko');
   await h.waitSettled(page);
   await h.waitPrompt(page);
   shown = await localeShown(page);
@@ -5311,9 +5477,10 @@ const koRequests = (env) => env.packRequests.filter(([path]) => path.endsWith('.
 const koPackIs = (page, counts) => page.waitForFunction((want) => document.body.dataset.ops === '0'
   && document.body.dataset.localePack === want, counts, { timeout: 30_000 });
 const koSourceKept = (page) => h.keptLocaleSource(page);
+// The chooser's note on the game's text (shown or not with the chooser), as `chooser` reads it.
 const localeNoteShown = (page) => page.evaluate(() => {
-  const p = document.getElementById('locale-note');
-  return p.hidden ? null : p.textContent;
+  const p = document.getElementById('setup-note');
+  return p.hidden ? null : p.textContent.replace(/\s+/g, ' ').trim();
 });
 
 // Nothing of the pack's lines in the page's data, text or storage, nor in the console.
@@ -5345,7 +5512,7 @@ test('the site\'s Korean pack (synthetic, no game): with a listing that names on
   await page.click('#settings');
   let c = await chooser(page);
   assert.ok(c.shown && c.lang === 'ko', 'Settings opens the chooser, on 한글');
-  assert.equal(c.note, `${ko.gameTextPack}${ko.koPackHosted}`, 'the chooser says the pack came from the site');
+  assert.equal(c.note, null, 'with the site\'s pack the chooser has no note');
   await page.click('#setup-ok');
   await h.waitSettled(page);
   assert.equal(koRequests(env).length, 1, 'OK in 한글: not downloaded again');
@@ -5354,7 +5521,7 @@ test('the site\'s Korean pack (synthetic, no game): with a listing that names on
   await koPackIs(page, `${first.runs},${first.scripts}`);
   assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'a reload: the listing only, the kept pack loaded');
   c = await chooser(page);
-  assert.ok(!c.shown && c.note === `${ko.gameTextPack}${ko.koPackHosted}`, 'no chooser; its note still says where the pack came from');
+  assert.ok(!c.shown && c.note === null, 'no chooser, and no note');
   // A newer pack put on the site under another name: the next visit takes it, unasked.
   sitePacks(env, { 'index.json': koListing(KO_NEWER), [KO_NEWER]: Uint8Array.from(newer.pack) });
   await page.reload();
@@ -5385,11 +5552,11 @@ test('the site\'s Korean pack and a dropped one (synthetic, no game): a dropped 
   await koPackIs(page, `${dropped.runs},${dropped.scripts}`);
   assert.deepEqual(koRequests(env), [], 'the dropped pack stays: nothing downloaded');
   assert.deepEqual(await h.keptLocalePack(page), dropped.pack, 'and stays kept');
-  assert.equal((await chooser(page)).note, ko.gameTextPack, 'the note does not say it came from the site');
-  await page.click('#forget-ko');
+  assert.equal((await chooser(page)).note, null, 'a dropped pack: no note');
+  await forgetVia(page, '#forget-ko');
   await h.waitSettled(page);
   assert.equal((await localeShown(page)).pack, 'none', 'forgotten');
-  assert.equal(await localeNoteShown(page), ko.gameText, 'the game\'s text is English, the page says so');
+  assert.equal(await localeNoteShown(page), null, 'the site still lists one: no note');
   await page.click('#settings');
   await page.click('#setup-ok');
   await h.waitSettled(page);
@@ -5404,7 +5571,7 @@ test('the site\'s Korean pack and a dropped one (synthetic, no game): a dropped 
   await koPackIs(page, `${listedPack.runs},${listedPack.scripts}`);
   assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, 200]], '한글 again: the listed pack downloaded');
   assert.equal(await koSourceKept(page), KO_FILE);
-  await page.click('#forget-ko');
+  await forgetVia(page, '#forget-ko');
   await h.waitSettled(page);
   assert.equal(await koSourceKept(page), null, 'Forget removes its source too');
   env.packRequests.length = 0;
@@ -5427,6 +5594,7 @@ test('the site\'s Korean pack not loaded (synthetic, no game): a listing that na
   await h.waitSettled(page);
   assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'a listing with no Korean pack: the listing only');
   assert.equal((await localeShown(page)).pack, 'none');
+  assert.equal(await localeNoteShown(page), await noteFor('ko'), 'no Korean pack at all: the chooser\'s note points at the README');
   await context.close();
   sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack) });
   ({ context, page } = await h.openPage(env, { setup: { lang: 'en' } }));
@@ -5449,7 +5617,7 @@ test('the site\'s Korean pack not loaded (synthetic, no game): a listing that na
   assert.equal((await localeShown(page)).pack, 'none', 'no pack');
   assert.equal(await h.keptLocalePack(page), null, 'none kept');
   assert.equal((await h.state(page)).status, ko.noFilesYet, 'nothing else changes');
-  assert.equal(await localeNoteShown(page), ko.gameText, 'the game\'s text is English, the page says so');
+  assert.equal(await localeNoteShown(page), null, 'one is listed: no note');
   await page.click('#settings');
   await page.click('#setup-ok');
   await h.waitSettled(page);
@@ -5472,7 +5640,7 @@ test('the site\'s Korean pack not loaded (synthetic, no game): a listing that na
   assert.equal((await localeShown(page)).pack, 'none', 'no pack');
   assert.equal(await h.keptLocalePack(page), null, 'none kept');
   assert.equal(await koSourceKept(page), null, 'no source kept');
-  assert.equal(await localeNoteShown(page), ko.gameText, 'the game\'s text is English');
+  assert.equal(await localeNoteShown(page), null, 'one is listed: no note');
   await page.click('#settings');
   await page.check('input[name="setup-lang"][value="en"]');
   await page.click('#setup-ok');
@@ -5652,7 +5820,7 @@ test('the site\'s Korean pack and its source (synthetic, no game): the pack and 
     assert.deepEqual(koRequests(env), [], `a source ${what}: nothing downloaded`);
     assert.equal((await localeShown(page)).pack, `${hosted.runs},${hosted.scripts}`, `a source ${what}: the kept pack loaded`);
     assert.deepEqual(await h.keptLocalePack(page), hosted.pack, `a source ${what}: and kept, byte for byte`);
-    assert.equal((await chooser(page)).note, ko.gameTextPack, `a source ${what}: not said to come from the site`);
+    assert.equal((await chooser(page)).note, null, `a source ${what}: a pack kept, no note`);
   }
   console.log('  receipt: a refused source write kept the pair whole; 3 sources missing or unreadable, 0 downloads: pass');
 });
@@ -5671,7 +5839,7 @@ test('the site\'s Korean pack, then a dropped one (synthetic, no game): the drop
   await koPackIs(page, `${dropped.runs},${dropped.scripts}`);
   assert.deepEqual(await h.keptLocalePack(page), dropped.pack, 'the drop kept in place of the site\'s pack');
   assert.equal(await koSourceKept(page), null, 'with no source');
-  assert.equal((await chooser(page)).note, ko.gameTextPack, 'not said to come from the site');
+  assert.equal((await chooser(page)).note, null, 'a dropped pack: no note');
   sitePacks(env, { 'index.json': koListing(KO_NEWER), [KO_NEWER]: Uint8Array.from(newer.pack) });
   await page.reload();
   await h.waitSettled(page);
@@ -5934,10 +6102,38 @@ function madeUp(en, word) {
   return lead + word + kept + trail;
 }
 
+// The game strings of the user's `game` (the archive's path, or the disk images' paths, copied into
+// a folder of the test's own) as u6-export makes them (tools/export: the export the page's Game
+// strings button made, byte for byte), parsed. Built once a run; its file is written into a
+// temporary folder outside the repository, removed after. An error names only the step.
+let exporter = null;
+async function nativeStrings(game) {
+  const { execFile } = await import('node:child_process');
+  const run = (file, args, cwd) => new Promise((done, fail) => execFile(file, args, { cwd, maxBuffer: 1 << 24 },
+    (err) => (err ? fail(new Error(`${basename(file)} ${args[0]}: exit ${err.code}`)) : done())));
+  exporter ??= run('bash', ['scripts/cargo.sh', 'build', '--release', '-p', 'u6-export'], h.REPO)
+    .then(() => join(process.env.CARGO_TARGET_DIR ?? join(h.REPO, 'target'), 'release', 'u6-export'));
+  const bin = await exporter;
+  const dir = await mkdtemp(join(tmpdir(), 'u6-strings-'));
+  try {
+    let input = game;
+    if (Array.isArray(game)) {
+      input = join(dir, 'disks');
+      await mkdir(input);
+      for (const p of game) await copyFile(p, join(input, basename(p)));
+    }
+    const out = join(dir, 'out', 'strings.json');
+    await run(bin, ['strings', '--game', input, '--out', out], dir);
+    return JSON.parse(await readFile(out, 'utf8'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 // The K1 fixture with a table string: every item of the synthetic converse.a is `ff 02 "Zed" f1
 // <look> f2 <greeting> b5 d2 <table> b1 b6 <table string> 0` (op b5 prints the table's first
 // string after the greeting); the pack: each script's two runs and its table string in Korean,
-// and every game string of `exported` (the page's own export, read at test time) as the made-up
+// and every game string of `exported` (the native export, made at test time) as the made-up
 // syllable within the tool's gates (counted when one fails them and is left out).
 async function koStringsFixture(exported) {
   const { fingerprint, hash64, hex64, latin1, packBytes, stringGate } = await import('../i18n/translate.mjs');
@@ -5983,7 +6179,7 @@ const stringCounts = (page) => page.evaluate(() => {
   };
 });
 
-test('Korean pack with game strings in a game (the user\'s disks, a synthetic conversation with a table string): Game strings downloads the catalogued strings of the kept game file as one u6.string-bundle/1 file, the status line counts only; a pack made at test time from that export (every string the made-up syllable within the tool\'s gates) and the test\'s conversation shows the syllable in the message window at a command key and the table string\'s Korean in the conversation; Forget the Korean pack: English again; no string reaches the console, the page\'s data or text', async (env) => {
+test('Korean pack with game strings in a game (the user\'s disks, a synthetic conversation with a table string): the native string export (u6-export, the page\'s former Game strings) gives the catalogued strings of the game file as one u6.string-bundle/1 file; a pack made at test time from that export (every string the made-up syllable within the tool\'s gates) and the test\'s conversation shows the syllable in the message window at a command key and the table string\'s Korean in the conversation; Forget the Korean pack: English again; no string reaches the console, the page\'s data or text', async (env) => {
   const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
   const words = consoleText(page);
   await h.load(page, env);
@@ -5992,18 +6188,12 @@ test('Korean pack with game strings in a game (the user\'s disks, a synthetic co
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
   const before = await pageWords(page);
-  // The export: one file, counts only on the page.
-  const [download] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.click('#game-strings')]);
-  const exported = JSON.parse(await readFile(await download.path(), 'utf8'));
-  await h.waitSettled(page);
-  assert.equal(download.suggestedFilename(), 'ultima6-strings.json');
+  // The export, from the same disks.
+  const exported = await nativeStrings(h.HFES);
   assert.equal(exported.format, 'u6.string-bundle/1');
   assert.ok(exported.strings.length > 0, 'strings');
   // Each 3 bytes or more, a label (a wind's name) 1 or more (u6_core::locale::strings).
   assert.ok(exported.strings.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len >= (e.kind === 'label' ? 1 : 3)), 'each keyed by its hash');
-  const looks = (exported.texts ?? []).filter((e) => e.kind === 'look').length;
-  const line = ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks, (exported.texts ?? []).length - looks, (exported.u ?? []).length);
-  assert.equal((await h.state(page)).status, line, 'the line, counts only');
   const fx = await koStringsFixture(exported);
   assert.ok(fx.strings > 0 && fx.refused < fx.strings, 'strings kept within the gates, fewer refused than kept');
   // The test's converse.a in place of the user's, then the pack: the game restarts with it.
@@ -6043,7 +6233,7 @@ test('Korean pack with game strings in a game (the user\'s disks, a synthetic co
   assert.ok(counts.tableHits >= 1 && counts.tableMisses === 0, 'the table string from the pack, none missed');
   assert.ok(counts.textHits > 0, 'game strings from the pack');
   // Forget the Korean pack: the game restarts in English.
-  await page.click('#forget-ko');
+  await forgetVia(page, '#forget-ko');
   await h.waitSettled(page);
   await h.waitPrompt(page);
   shown = await localeShown(page);
@@ -6159,7 +6349,7 @@ async function lookAt(page, dir) {
   return cells;
 }
 
-test('Korean pack with object names and books in a game (the user\'s disks): Game strings also downloads the object names and the books and signs of the kept files, the status line counts only; a pack made at test time from that export (every name and book the made-up syllable within the tool\'s gates) shows the syllable as the name Look gives the thing next to the leader; Forget the Korean pack: English again; no name or book reaches the console, the page\'s data or text', async (env) => {
+test('Korean pack with object names and books in a game (the user\'s disks): the native string export also gives the object names and the books and signs of the files; a pack made at test time from that export (every name and book the made-up syllable within the tool\'s gates) shows the syllable as the name Look gives the thing next to the leader; Forget the Korean pack: English again; no name or book reaches the console, the page\'s data or text', async (env) => {
   const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
   const words = consoleText(page);
   await h.load(page, env);
@@ -6168,15 +6358,12 @@ test('Korean pack with object names and books in a game (the user\'s disks): Gam
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
   const before = await pageWords(page);
-  const [download] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.click('#game-strings')]);
-  const exported = JSON.parse(await readFile(await download.path(), 'utf8'));
-  await h.waitSettled(page);
+  const exported = await nativeStrings(h.HFES);
   const texts = exported.texts ?? [];
   const looks = texts.filter((e) => e.kind === 'look');
   const books = texts.filter((e) => e.kind === 'book');
   assert.ok(looks.length > 0 && books.length > 0 && looks.length + books.length === texts.length, 'object names and books');
   assert.ok(texts.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len === Buffer.from(e.text, 'latin1').length), 'each keyed by its hash');
-  assert.equal((await h.state(page)).status, ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks.length, books.length, (exported.u ?? []).length), 'the line, counts only');
   const fx = await koTextsFixture(exported);
   assert.ok(fx.look > 0 && fx.books > 0, 'object names and books kept within the gates');
   // How many the gates refused is a count of the user's texts: checked, not shown.
@@ -6202,7 +6389,7 @@ test('Korean pack with object names and books in a game (the user\'s disks): Gam
   const [hits, missed] = [counts.lookHits, counts.lookMisses];
   assert.ok(hits >= 1, `object names from the pack (${hits}, missed ${missed})`);
   // Forget the Korean pack: the game restarts in English.
-  await page.click('#forget-ko');
+  await forgetVia(page, '#forget-ko');
   await h.waitSettled(page);
   await h.waitPrompt(page);
   shown = await localeShown(page);
@@ -6322,7 +6509,7 @@ async function waitGlyph(page, glyphs, ticks) {
   return glyphOnScreen(page, glyphs);
 }
 
-test('Korean pack with the strings of u in a new game (the user\'s zip): Game strings also downloads the strings of the kept u, each of its own kind, the status line counts only; a pack made at test time from that export (every string of u the made-up syllable within the tool\'s gate) shows the syllable in the first passage the opening shows, in the Hangul font; Forget the Korean pack: the opening in English; no string of u reaches the console, the page\'s data or text', async (env) => {
+test('Korean pack with the strings of u in a new game (the user\'s zip): the native string export also gives the strings of u, each of its own kind; a pack made at test time from that export (every string of u the made-up syllable within the tool\'s gate) shows the syllable in the first passage the opening shows, in the Hangul font; Forget the Korean pack: the opening in English; no string of u reaches the console, the page\'s data or text', async (env) => {
   const { page } = await h.openPage(env, { gameFirst: false, setup: { lang: 'ko' } });
   const words = consoleText(page);
   await h.load(page, env);
@@ -6332,9 +6519,7 @@ test('Korean pack with the strings of u in a new game (the user\'s zip): Game st
   await started(page);
   await h.waitProgram(page, 'u');
   const before = await pageWords(page);
-  const [download] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.click('#game-strings')]);
-  const exported = JSON.parse(await readFile(await download.path(), 'utf8'));
-  await h.waitSettled(page);
+  const exported = await nativeStrings(h.ZIP);
   const u = exported.u ?? [];
   const kinds = new Set(['opening', 'story', 'gypsy', 'creation', 'transfer']);
   assert.ok(u.length > 0 && u.every((e) => kinds.has(e.kind)), 'strings of u, each of a kind of u');
@@ -6343,9 +6528,6 @@ test('Korean pack with the strings of u in a new game (the user\'s zip): Game st
   assert.ok(u.every((e) => fnv64([...Buffer.from(e.text, 'latin1')]) === e.hash && e.len === Buffer.from(e.text, 'latin1').length && e.len >= 3), 'each keyed by its hash');
   assert.ok(u.every((e) => e.keys === undefined || /^[A-Z]+$/.test(e.keys)), 'keys, when a key read follows, upper-case letters');
   assert.ok(u.some((e) => e.kind === 'gypsy' && e.keys !== undefined), 'the gypsy\'s questions with the keys she waits for');
-  const looks = (exported.texts ?? []).filter((e) => e.kind === 'look').length;
-  const line = ko.stringsExported(exported.strings.length, 'ultima6-strings.json', looks, (exported.texts ?? []).length - looks, u.length);
-  assert.equal((await h.state(page)).status, line, 'the line, counts only');
   const fx = await koProgramFixture(exported);
   assert.ok(fx.u > 0 && fx.refused < fx.u, 'strings of u kept within the gate');
   // The pack: the game restarts with it, from the opening.
@@ -6363,7 +6545,7 @@ test('Korean pack with the strings of u in a new game (the user\'s zip): Game st
   const counts = await programCounts(page);
   assert.ok(counts.hits >= 1, 'strings of u from the pack');
   // Forget the Korean pack: the game restarts in English, the same opening without the syllable.
-  await page.click('#forget-ko');
+  await forgetVia(page, '#forget-ko');
   await h.waitSettled(page);
   await h.waitProgram(page, 'u');
   const off = await localeShown(page);

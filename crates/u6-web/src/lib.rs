@@ -43,19 +43,13 @@
 //! conversation runs show the pack's lines, drawn with the Hangul table built in here
 //! (`site/fonts/galmuri7-hangul.bin`, Galmuri7, OFL-1.1). The counts it gives are counts only.
 //!
-//! Slice K2 adds the pack's table strings and game strings: the page's second export, a
-//! [`GameStrings`], gives the strings of the user's `game` the engine catalogues
-//! (`u6.string-bundle/1`) for the translation tool, and [`Game::locale_counts`] counts the
-//! table strings and game strings shown from the pack. Slice K3 adds its object names and books:
-//! the same export also lists the object names of the kept `look.lzd` and the books and signs of
-//! `book.dat`, and the counts take them too. Slice K4 adds the strings of the `u` program (the
-//! opening, the story, the gypsy, character creation, the transfer): the export lists those of the
-//! kept `u`, a pack's show in `u` (which runs on the game state the pack is set on, before its
-//! first step, as the game does), and the counts take them too.
-//!
-//! NPC bundles (spec 09 Design 5): an [`NpcBundles`] takes the game files the page kept and
-//! exports each conversation script's NPC name and dialogue as `u6.npc-bundle/1` JSON, for the
-//! page's storage and its download; nothing of it runs in a game.
+//! Slice K2 adds the pack's table strings and game strings, and [`Game::locale_counts`] counts
+//! the table strings and game strings shown from the pack. Slice K3 adds its object names and
+//! books, and the counts take them too. Slice K4 adds the strings of the `u` program (the
+//! opening, the story, the gypsy, character creation, the transfer): a pack's show in `u` (which
+//! runs on the game state the pack is set on, before its first step, as the game does), and the
+//! counts take them too. The strings a pack is made from, and the NPC bundles (spec 09 Design 5),
+//! are exported natively from the user's files (`tools/export`, `u6-export`), not here.
 //!
 //! A start runs the launcher's sequence (`u`: the opening and the menu, then `game`);
 //! [`Game::start_game_first`] starts `game` at once (development and tests). When the sequence
@@ -76,7 +70,6 @@ use std::collections::BTreeMap;
 
 use std::rc::Rc;
 
-use u6_core::converse::disasm::bundle;
 use u6_core::hd::{HdView, PackCounts};
 use u6_core::objects::{BLOCK_COUNT, MAX_RECORDS};
 use u6_core::pacer::{self, Pacer, Speed};
@@ -1408,97 +1401,6 @@ fn whole_save(s: &u6_core::State, since: u32) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
-/// Spec 09 Design 5: the NPC bundles (`u6.npc-bundle/1`) of the game files the page kept, made
-/// here in the browser: the page adds each kept file ([`NpcBundles::add`], which keeps only the
-/// files the exporter reads) and takes the bundles as one JSON array ([`NpcBundles::export`]).
-/// It needs no game running. The JSON holds the user's game text: for the page's storage and
-/// its download only (never logged or shown); an error names only what failed.
-#[wasm_bindgen]
-#[derive(Default)]
-pub struct NpcBundles {
-    files: BTreeMap<String, Vec<u8>>,
-}
-
-#[wasm_bindgen]
-impl NpcBundles {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> NpcBundles {
-        NpcBundles::default()
-    }
-
-    /// One kept file; a file the exporter does not read (`u6_core`'s bundle `READS`) is
-    /// dropped at once.
-    pub fn add(&mut self, path: &str, bytes: Vec<u8>) {
-        if bundle::reads(path) {
-            self.files.insert(path.to_string(), bytes);
-        }
-    }
-
-    /// The bundles of the files added, one per conversation script, as a JSON array in
-    /// (archive, item) order. Fails when the files hold no conversation archive or one does not
-    /// read (the message names only that).
-    pub fn export(&self) -> Result<String, JsError> {
-        self.bundles().map_err(|msg| JsError::new(&msg))
-    }
-}
-
-/// Spec 08 (slice K2): the game strings (`u6.string-bundle/1`) of the game files the page kept:
-/// the strings of the user's `game` the engine shows and catalogues (`u6_core::locale::strings`),
-/// each with its hash, length, kind and English, for the translation tool; slice K3: and the
-/// object names of `look.lzd` and the books and signs of `book.dat` (`u6_core::locale::texts`),
-/// each with its index, hash, length and English; slice K4: and the strings of the `u` program
-/// (`u6_core::locale::program`), each with its kind (where `u` prints it), hash, length,
-/// English and the keys of the read after it. Made here in the browser like [`NpcBundles`]: the
-/// page adds each kept file ([`GameStrings::add`], which keeps only those four) and takes them as
-/// one JSON object ([`GameStrings::export`]) for its download only (never logged, shown or
-/// stored); an error names only what failed.
-#[wasm_bindgen]
-#[derive(Default)]
-pub struct GameStrings {
-    files: BTreeMap<String, Vec<u8>>,
-}
-
-#[wasm_bindgen]
-impl GameStrings {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> GameStrings {
-        GameStrings::default()
-    }
-
-    /// One kept file; any but the executable, `look.lzd`, `book.dat` and `u` is dropped at once.
-    pub fn add(&mut self, path: &str, bytes: Vec<u8>) {
-        if u6_core::locale::strings::reads(path) {
-            self.files.insert(path.to_string(), bytes);
-        }
-    }
-
-    /// The strings as one JSON object. Fails when the files hold no `game`, or one that does not
-    /// read (the message names only that).
-    pub fn export(&self) -> Result<String, JsError> {
-        self.strings().map_err(|msg| JsError::new(&msg))
-    }
-}
-
-impl GameStrings {
-    /// [`GameStrings::export`] without the JS error type.
-    fn strings(&self) -> Result<String, String> {
-        let files = Files::new(self.files.clone());
-        u6_core::locale::strings::export(&files)
-            .map(|e| e.to_json())
-            .map_err(|e| format!("Game strings: {e}"))
-    }
-}
-
-impl NpcBundles {
-    /// [`NpcBundles::export`] without the JS error type.
-    fn bundles(&self) -> Result<String, String> {
-        let files = Files::new(self.files.clone());
-        bundle::export(&files)
-            .map(|b| bundle::to_json(&b))
-            .map_err(|e| format!("NPC bundles: {e}"))
-    }
-}
-
 /// Queues a pointer event; a move right after one with the same buttons replaces it (the game
 /// samples the pointer once per frame and takes a run of moves at once anyway).
 fn queue_pointer(pending: &mut Vec<InputEvent>, x: i32, y: i32, buttons: u8) {
@@ -1804,82 +1706,6 @@ mod tests {
         );
         game.step(20);
         assert_eq!(game.take_speech(), "", "no utterance: nothing");
-    }
-
-    /// Spec 09 Design 5: the export class keeps only the files the exporter reads, gives the
-    /// bundles of a synthetic archive as one JSON array, and fails with a line that names only
-    /// what failed (a sentinel in the script or a path never in it).
-    #[test]
-    fn npc_bundles_keep_only_what_they_read_and_fail_without_content() {
-        const SENTINEL: &str = "Zq7Sentinel";
-        let script = [
-            &b"\xff\x05Nm\xf1look\xf2"[..],
-            SENTINEL.as_bytes(),
-            b"\xf7\xef*\xf6Ok\xee\xff",
-        ]
-        .concat();
-        // A converse library of two items: none, then the script stored raw (at byte 8).
-        let lib = [
-            &0u32.to_le_bytes()[..],
-            &8u32.to_le_bytes(),
-            &[0, 0, 0, 0],
-            &script,
-        ]
-        .concat();
-        let mut ex = NpcBundles::new();
-        ex.add("U6/CONVERSE.A", lib.clone());
-        ex.add(&format!("U6/{SENTINEL}"), vec![1, 2, 3]);
-        ex.add("U6/look.lzd", vec![4]);
-        assert_eq!(ex.files.keys().collect::<Vec<_>>(), ["U6/CONVERSE.A"]);
-        let json = ex.bundles().quiet();
-        let b = bundle::from_json(&json).quiet();
-        assert_eq!(b.len(), 1);
-        assert_eq!(
-            (b[0].archive, b[0].item, b[0].actors.as_slice()),
-            ('a', 1, &[1][..])
-        );
-        assert_eq!(b[0].turns.len(), 1);
-        let mut none = NpcBundles::new();
-        none.add(&format!("{SENTINEL}/objlist"), vec![0; 4]);
-        assert_eq!(
-            none.bundles(),
-            Err("NPC bundles: the files hold no conversation archive".into())
-        );
-        let mut bad = NpcBundles::new();
-        bad.add(
-            &format!("{SENTINEL}/converse.b"),
-            [&4u32.to_le_bytes()[..], SENTINEL.as_bytes()].concat(),
-        );
-        let e = bad.bundles().unwrap_err();
-        assert_eq!(e, "NPC bundles: converse.b does not read");
-    }
-
-    /// Spec 08 (slices K2 to K4): the string export keeps only the executable, `look.lzd`,
-    /// `book.dat` and `u`, and fails with a line that names only what failed (a sentinel in a
-    /// path or in the file never in it).
-    #[test]
-    fn game_strings_keep_only_their_files_and_fail_without_content() {
-        const SENTINEL: &str = "Zq9StringSentinel";
-        let mut ex = GameStrings::new();
-        ex.add("U6/GAME", SENTINEL.as_bytes().to_vec());
-        ex.add(&format!("U6/{SENTINEL}"), vec![1, 2, 3]);
-        ex.add("U6/converse.a", vec![4]);
-        ex.add("U6/LOOK.LZD", SENTINEL.as_bytes().to_vec());
-        ex.add("U6/book.dat", vec![5]);
-        ex.add("U6/U", SENTINEL.as_bytes().to_vec());
-        ex.add("U6/u.bin", vec![6]);
-        assert_eq!(
-            ex.files.keys().collect::<Vec<_>>(),
-            ["U6/GAME", "U6/LOOK.LZD", "U6/U", "U6/book.dat"]
-        );
-        let e = ex.strings().unwrap_err();
-        assert_eq!(e, "Game strings: the game executable does not read");
-        let mut none = GameStrings::new();
-        none.add(&format!("{SENTINEL}/converse.a"), vec![0; 4]);
-        assert_eq!(
-            none.strings(),
-            Err("Game strings: the files hold no game executable".into())
-        );
     }
 
     /// Spec 08 (slice K1): a pack reads through the engine's strict reader (a refusal names the

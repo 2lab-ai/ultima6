@@ -226,14 +226,6 @@ export async function forgetPack() {
   log('pack:forget:start'); await window.__gate('pack-forget');
   await real.forgetPack(); log('pack:forget:end');
 }
-export async function storeBundles(bundles) {
-  log('bundles:store:start:' + bundles.length); await window.__gate('bundles-store');
-  if (window.__fail.has('bundles-store')) { log('bundles:store:fail'); throw new DOMException('test: no room', 'QuotaExceededError'); }
-  await real.storeBundles(bundles); log('bundles:store:end');
-}
-export async function loadBundles() {
-  const bundles = await real.loadBundles(); log('bundles:load:' + bundles.length); return bundles;
-}
 export async function forgetBundles() {
   log('bundles:forget:start'); await window.__gate('bundles-forget');
   await real.forgetBundles(); log('bundles:forget:end');
