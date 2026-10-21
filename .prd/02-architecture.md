@@ -19,6 +19,8 @@ Status: in-progress (rev 2, 2026-10-14)
 | Web shell (static HTML + wasm-bindgen glue) | `crates/u6-web` → `site/` build output | MIT |
 | Deploy | Cloudflare Pages project `ultima6` (account icedac@gmail.com) + Vercel DNS CNAME `ultima6` in the `2lab.ai` zone | — |
 
+Before each build `scripts/deploy-web.sh` replaces the gitignored `site/packs/` (served under `/packs/` behind the owner key) with exactly the `packs/` of the private repository `2lab-ai/ultima6-deploy` (`U6_DEPLOY_REF`, default `main`), and stops the deploy, leaving `site/packs/` as it was, unless its `index.json` parses and every file it lists is a plain name present there (the owner, 2026-10-21; `hd-i18n-voice/ssot.md`).
+
 ## Rust workspace
 
 ```text

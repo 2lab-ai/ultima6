@@ -20,6 +20,10 @@ Added the same day (verbatim):
 
 > 4. 게임 루프(틱)을 고정해서 속도 유지해줘. 이거 키보드 -+로 조절할 수 있도록해줘. (지금 너무 느린데 최적화도 해야할 것 같음)
 
+Added 2026-10-21 (verbatim):
+
+> 2. ultima6-deploy 비공개 저장소 만들고 네가 가공한 2차 리소스들 올리고 배포할때 쓰도록해줘
+
 Order: research each item, then fix the specs (using-dotprd), then build the items one after another.
 
 Fixed constraints these items inherit (not reopened here):
