@@ -19,11 +19,15 @@
 //! `$Y` words. Every other string of the executable is not catalogued, and never substituted:
 //! the panels (but the date line), magic, the inventory, combat's other lines, object names and
 //! articles. A string shorter than [`MIN_BYTES`], or with no word of its own (`%s\n`), is not
-//! catalogued either.
+//! catalogued either; but (2026-10-21) a label of a pointer table, read through
+//! [`super::shown`], is catalogued from 1 byte (a wind's name is 2). The conversation's words
+//! keep the minimum: its display reads them as the print hooks do.
 //!
 //! **Lookup.** By content: [`hash64`] of the English bytes, only where game code prints them
-//! (`printf`'s format, `puts`, `put_raw_str`; [`super::exe_string`]) or reads a label for display
-//! ([`super::shown`]); never on what an escape generates, and never where logic reads a string.
+//! (`printf`'s format, `puts`, `put_raw_str`; [`super::exe_string`], [`Catalogue::of`]) or reads
+//! a label of a pointer table for display ([`super::shown`], [`Catalogue::label_of`]); never on
+//! what an escape generates, and never where logic reads a string. A string under [`MIN_BYTES`]
+//! is found only at such a label read: the same bytes printed as a format stay English.
 //!
 //! **The export** ([`Catalogue::to_json`], [`FORMAT`]): every catalogued string once, in the
 //! order the sites list them: its hash, its length, its kind and its text (one character per
@@ -49,7 +53,8 @@ use crate::image::{A4, GameImage};
 pub const FORMAT: &str = "u6.string-bundle/1";
 /// The locale of the export (the original's English).
 pub const LOCALE: &str = "en";
-/// Strings shorter than this are never substituted (spec 08 Design 2).
+/// Strings shorter than this are never substituted (spec 08 Design 2), but a label read for
+/// display ([`Catalogue::label_of`]).
 pub const MIN_BYTES: usize = 3;
 /// The longest string the game reads ([`GameImage::cstr`]'s bound).
 pub const MAX_BYTES: usize = 256;
@@ -268,8 +273,9 @@ pub fn export(files: &crate::files::Files) -> Result<Export, &'static str> {
 
 impl Catalogue {
     /// The catalogue of `game` (the decrunched executable): every site's string that reads
-    /// (inside the image, NUL-ended) and is [`MIN_BYTES`] or longer. A file that is no hunk file
-    /// gives an empty catalogue (nothing is substituted then).
+    /// (inside the image, NUL-ended) and is [`MIN_BYTES`] or longer, a label of a pointer table
+    /// 1 byte or longer ([`Catalogue::add_label`]). A file that is no hunk file gives an empty
+    /// catalogue (nothing is substituted then).
     pub fn from_game(game: &[u8]) -> Catalogue {
         let mut c = Catalogue::default();
         let Ok(img) = GameImage::parse(game) else {
@@ -307,7 +313,7 @@ impl Catalogue {
             .chain(crate::actors::clock::LABELS);
         for &ptr in labels {
             if let Ok(text) = img.pointer(ptr).and_then(|p| img.cstr(p)) {
-                c.add(Kind::Label, text);
+                c.add_label(text);
             }
         }
         if let Ok(messages) = ConverseText::from_game(game) {
@@ -325,12 +331,17 @@ impl Catalogue {
         c
     }
 
-    /// A catalogue of `entries` (tests: a synthetic `game`'s strings), each added as a site's.
+    /// A catalogue of `entries` (tests: a synthetic `game`'s strings), each added as a site's (a
+    /// label as a pointer table's, [`Catalogue::add_label`]).
     #[cfg(test)]
     pub(crate) fn from_entries(entries: impl IntoIterator<Item = (Kind, Vec<u8>)>) -> Catalogue {
         let mut c = Catalogue::default();
         for (kind, text) in entries {
-            c.add(kind, text);
+            if kind == Kind::Label {
+                c.add_label(text);
+            } else {
+                c.add(kind, text);
+            }
         }
         c
     }
@@ -338,13 +349,22 @@ impl Catalogue {
     /// Adds `text` (once per content: the first site's kind, a label's over the others). A string
     /// with no letter but its directives' and escapes' (`%s\n`, `%d `, `\n%s:\n%>`) has nothing
     /// to translate and is not catalogued: such a format is shared with sites the catalogue does
-    /// not hold (the panels), which keep it as it is.
+    /// not hold (the panels), which keep it as it is. A string under [`MIN_BYTES`] is not
+    /// catalogued.
     fn add(&mut self, kind: Kind, text: Vec<u8>) {
-        if text.len() < MIN_BYTES
-            || text.len() > MAX_BYTES
-            || text.contains(&0)
-            || !has_words(&text)
-        {
+        self.add_over(kind, text, MIN_BYTES);
+    }
+
+    /// [`Catalogue::add`] of a label of a pointer table, which game code reads for display
+    /// through [`super::shown`] only (2026-10-21): 1 byte or longer. One under [`MIN_BYTES`] is
+    /// found only by [`Catalogue::label_of`], never by the print hooks.
+    fn add_label(&mut self, text: Vec<u8>) {
+        self.add_over(Kind::Label, text, 1);
+    }
+
+    /// [`Catalogue::add`] of a string of `min` bytes or longer.
+    fn add_over(&mut self, kind: Kind, text: Vec<u8>, min: usize) {
+        if text.len() < min || text.len() > MAX_BYTES || text.contains(&0) || !has_words(&text) {
             return;
         }
         let h = hash64(&text);
@@ -367,12 +387,24 @@ impl Catalogue {
         self.by_hash.get(&hash).map(|&i| &self.entries[i].1)
     }
 
-    /// The entry of exactly `bytes`, if catalogued.
+    /// The entry of exactly `bytes`, if catalogued and [`MIN_BYTES`] or longer: the lookup of
+    /// the print hooks (`printf`'s format, `puts`, `put_raw_str`; [`super::exe_string`]).
     pub fn of(&self, bytes: &[u8]) -> Option<&Entry> {
         if bytes.len() < MIN_BYTES {
             return None;
         }
         self.get(hash64(bytes)).filter(|e| e.text == bytes)
+    }
+
+    /// The entry of exactly `bytes`, if catalogued, for a label of a pointer table read for
+    /// display ([`super::shown`]): as [`Catalogue::of`], and a label under [`MIN_BYTES`] too
+    /// (2026-10-21).
+    pub fn label_of(&self, bytes: &[u8]) -> Option<&Entry> {
+        if bytes.is_empty() {
+            return None;
+        }
+        self.get(hash64(bytes))
+            .filter(|e| e.text == bytes && (bytes.len() >= MIN_BYTES || e.kind == Kind::Label))
     }
 
     /// The strings catalogued.

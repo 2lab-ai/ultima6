@@ -178,7 +178,7 @@ fn each_broken_rule_of_the_new_maps_refuses_the_pack() {
             PackError::Duplicate,
         ),
         (
-            ",\"strings\":[{\"hash\":\"0123456789abcdef\",\"len\":2,\"text\":\"가\"}]".into(),
+            ",\"strings\":[{\"hash\":\"0123456789abcdef\",\"len\":0,\"text\":\"가\"}]".into(),
             PackError::StringKey,
         ),
         (
@@ -216,7 +216,7 @@ fn each_broken_rule_of_the_new_maps_refuses_the_pack() {
         assert!(!text.is_empty() && !text.contains(SENTINEL));
     }
     let marked = file(&json_with(&format!(
-        ",\"strings\":[{{\"hash\":\"0123456789abcdef\",\"len\":1,\"text\":\"{SENTINEL}\"}}]"
+        ",\"strings\":[{{\"hash\":\"0123456789abcdef\",\"len\":0,\"text\":\"{SENTINEL}\"}}]"
     )));
     assert!(
         !Pack::parse(&marked)
@@ -357,6 +357,7 @@ fn a_game_string_whose_directives_differ_from_its_english_refuses_the_pack() {
 fn the_catalogue_keeps_each_string_once_with_its_kind_and_none_under_three_bytes() {
     let cat = Catalogue::from_entries([
         (Kind::Message, b"ab".to_vec()),
+        (Kind::Format, b"zq".to_vec()),
         (Kind::Message, b"abc".to_vec()),
         (Kind::Format, b"%d of %s".to_vec()),
         (Kind::Label, b"abc".to_vec()),
@@ -375,6 +376,15 @@ fn the_catalogue_keeps_each_string_once_with_its_kind_and_none_under_three_bytes
     );
     assert!(cat.of(b"%d stone/s $1 #2").is_some());
     assert!(cat.of(b"ab").is_none());
+    assert!(
+        cat.label_of(b"ab").is_none() && cat.label_of(b"zq").is_none(),
+        "a short message or format is not catalogued"
+    );
+    assert_eq!(
+        cat.label_of(b"abc").map(|e| e.kind),
+        cat.of(b"abc").map(|e| e.kind),
+        "from three bytes, a label read finds what a print finds"
+    );
     assert_eq!(
         cat.of(b"abc").map(|e| e.kind),
         Some(Kind::Label),
@@ -388,6 +398,29 @@ fn the_catalogue_keeps_each_string_once_with_its_kind_and_none_under_three_bytes
     assert_eq!(back.strings[1].kind, Kind::Format);
     assert_eq!(back.strings[1].hash, hash64(b"%d of %s"));
     assert!(json.contains("\"kind\":\"label\"") && json.contains("\"len\":8"));
+    // A label of a pointer table is catalogued from 1 byte (2026-10-21), found only by a label
+    // read, and exported with the others; a string of no word of its own still is not.
+    let short = Catalogue::from_entries([
+        (Kind::Label, b"Zq".to_vec()),
+        (Kind::Label, b"Z".to_vec()),
+        (Kind::Label, b"%s".to_vec()),
+        (Kind::Label, Vec::new()),
+        (Kind::Format, b"Zq".to_vec()),
+    ]);
+    assert_eq!(short.len(), 2);
+    for zq in [&b"Zq"[..], b"Z"] {
+        assert_eq!(short.label_of(zq).map(|e| e.kind), Some(Kind::Label));
+        assert!(short.of(zq).is_none(), "a print never finds a short label");
+    }
+    assert!(short.label_of(b"").is_none());
+    let json = short.to_json();
+    assert!(json.contains("\"len\":2,\"kind\":\"label\",\"text\":\"Zq\""));
+    let back = strings::Export::from_json(&json).unwrap();
+    assert_eq!(back.strings.len(), 2);
+    assert_eq!(
+        (back.strings[0].len, back.strings[0].kind),
+        (2, Kind::Label)
+    );
     // A file that is no hunk file catalogues nothing.
     assert!(Catalogue::from_game(b"not a game").is_empty());
     assert!(strings::reads("U6/GAME") && !strings::reads("U6/game.bak"));
@@ -471,7 +504,7 @@ type SiteLines = Vec<(u32, Vec<u8>)>;
 /// The synthetic text at each site (`Zq` and two digits: the sites lie 6 bytes apart at least),
 /// the date line's format at its own, and a name at each pointer of the wind's name table (the
 /// wind byte -1..=7): `Zw` and the entry's index, but two bytes for wind 7 (under
-/// [`strings::MIN_BYTES`]).
+/// [`strings::MIN_BYTES`], as every wind's name in the original is).
 fn site_texts() -> (SiteLines, Vec<Vec<u8>>) {
     let lines = actor_and_object_sites()
         .into_iter()
@@ -542,12 +575,21 @@ fn the_actors_and_objects_lines_and_the_wind_names_are_catalogued() {
         );
     }
     for (k, name) in winds.iter().enumerate() {
-        let want = (name.len() >= strings::MIN_BYTES).then_some(Kind::Label);
-        assert_eq!(cat.of(name).map(|e| e.kind), want, "wind name {k}");
+        assert_eq!(
+            cat.label_of(name).map(|e| e.kind),
+            Some(Kind::Label),
+            "wind name {k}"
+        );
     }
+    // A name under three bytes is catalogued as a label (2026-10-21), and a print never finds it.
+    assert_eq!(cat.label_of(b"Zw").map(|e| e.text.len()), Some(2));
+    assert!(cat.of(b"Zw").is_none());
     assert!(
-        cat.of(b"Zw").is_none(),
-        "a name under three bytes is not catalogued"
+        cat.export()
+            .strings
+            .iter()
+            .any(|e| e.text == "Zw" && e.kind == Kind::Label),
+        "the export lists it"
     );
 }
 
@@ -624,4 +666,94 @@ fn the_date_line_shows_the_packs_wind_name_and_without_a_pack_the_english() {
     assert_eq!(args[3], Str("높새".as_bytes().to_vec()));
     let (_, args) = date_line(Some(ko()), 5);
     assert_eq!(args[3], Str(b"Zw6".to_vec()));
+}
+
+/// A pack of the two-byte wind name (wind 7's, [`site_texts`]) and a three-byte one.
+fn short_ko() -> Pack {
+    Pack::new(Language::Korean, "test/1", fingerprint([]), [])
+        .unwrap()
+        .with_strings([string("Zw", "샛바람"), string("Zw0", "잔잔")])
+        .unwrap()
+}
+
+#[test]
+fn a_two_byte_wind_name_shows_the_packs_and_without_a_pack_the_english() {
+    use crate::main_loop::PrintArg::{Str, Word};
+    // The pack reads a two-byte English (it holds no kind) and keeps it.
+    let p = short_ko();
+    assert_eq!(Pack::parse(&p.to_bytes()), Ok(p.clone()));
+    // Wind 7: the pack's name; the format the English (the pack has none for it).
+    let (format, args) = date_line(Some(short_ko()), 7);
+    assert_eq!(format, DATE_FORMAT);
+    assert_eq!(
+        args,
+        [
+            Word(4),
+            Word(9),
+            Word(161),
+            Str("샛바람".as_bytes().to_vec())
+        ]
+    );
+    // Without a pack the line is the English, as before.
+    let (format, args) = date_line(None, 7);
+    assert_eq!(format, DATE_FORMAT);
+    assert_eq!(args, [Word(4), Word(9), Word(161), Str(b"Zw".to_vec())]);
+}
+
+/// What game code's prints put for `Zw` (`printf`'s format, `puts`, `put_raw_str`, a `|` between
+/// them) in an engine over [`site_game`] with `pack` installed over its catalogue: the scroll's
+/// text, the counts after them, and what [`shown`] reads for the same bytes after them.
+fn printed_zw(pack: Pack) -> (String, [u32; 2], Vec<u8>) {
+    let game = site_game();
+    let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    install_catalogued(
+        &mut s,
+        &files,
+        Rc::new(pack),
+        None,
+        Catalogue::from_game(&game),
+    )
+    .expect("the pack checks");
+    let mut e = crate::engine::Engine::with_game(s, files, |st, io| async move {
+        crate::ui::printf::printf(&st, &io, b"Zw", &[]).await;
+        crate::ui::printf::puts(&st, &io, b"|").await;
+        crate::ui::printf::puts(&st, &io, b"Zw").await;
+        crate::ui::print::put_raw_str(&st, &io, b"|").await;
+        crate::ui::print::put_raw_str(&st, &io, b"Zw").await;
+        crate::ui::print::put_raw(&st, &io, -1).await;
+    });
+    for _ in 0..400 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let s = e.state();
+    let t = &s.ui.text;
+    let mut lines = s.ui.messages.clone();
+    let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
+    let cells = t.transcript_line.iter().chain(pending);
+    lines.push(cells.map(|&c| crate::ui::wide::cell_char(c)).collect());
+    let counts = s.locale.texts.get();
+    let label = shown(&s, b"Zw".to_vec());
+    (lines.join("\n"), counts, label)
+}
+
+#[test]
+fn a_print_of_the_two_bytes_of_a_short_label_stays_english() {
+    let (screen, counts, label) = printed_zw(short_ko());
+    assert_eq!(
+        screen.trim_end(),
+        "Zw|Zw|Zw",
+        "printf's format, puts and put_raw_str of the same bytes: English"
+    );
+    assert_eq!(counts, [0, 0], "no print looked it up");
+    assert_eq!(
+        label,
+        "샛바람".as_bytes(),
+        "the label read of the same state finds it"
+    );
 }

@@ -68,9 +68,11 @@
 //!   from the user's `game` when the pack is installed) is ever looked up, only where game code
 //!   prints it ([`exe_string`]: `printf`'s format, `puts`, `put_raw_str`) or reads a label for
 //!   display ([`shown`]), and never on what an escape generates (`$n`, `#n`, `printf`'s `%s`):
-//!   logic keeps the English. A string under [`strings::MIN_BYTES`] is never substituted. At
-//!   install every pack string the catalogue has must hold the same `%` directives, in the same
-//!   order, as its English ([`strings::directives`]), else the pack is refused (the strings part).
+//!   logic keeps the English. A string under [`strings::MIN_BYTES`] is never substituted, but a
+//!   label of a pointer table [`shown`] reads (2026-10-21: the catalogue holds it from 1 byte,
+//!   [`strings::Catalogue::label_of`]; the print hooks never find it). At install every pack
+//!   string the catalogue has must hold the same `%` directives, in the same order, as its
+//!   English ([`strings::directives`]), else the pack is refused (the strings part).
 //!
 //! **Slice K3: object names and books.** A pack may also hold the object names of `look.lzd`
 //! and the books and signs of `book.dat` (each map left out of the file when empty):
@@ -329,8 +331,9 @@ pub enum PackError {
     /// A translation over [`MAX_TEXT_BYTES`], or with a character the game cannot show (only
     /// ASCII and Hangul syllables, no control character but the line feed).
     Text,
-    /// An executable string whose English is shorter than [`strings::MIN_BYTES`] or longer than
-    /// [`strings::MAX_BYTES`], or whose translation is over [`MAX_STRING_TEXT_BYTES`].
+    /// An executable string whose English is empty or longer than [`strings::MAX_BYTES`] (one
+    /// under [`strings::MIN_BYTES`] is read, and found only as a label), or whose translation is
+    /// over [`MAX_STRING_TEXT_BYTES`].
     StringKey,
     /// A table string's translation longer than the slot it is copied into holds.
     Capacity,
@@ -626,18 +629,17 @@ impl Pack {
     }
 
     /// The pack with the executable strings `strings` (slice K2), keyed by [`hash64`] of their
-    /// English, checked as [`Pack::parse`] checks them: an English the game prints
-    /// ([`strings::MIN_BYTES`]..=[`strings::MAX_BYTES`]), a text the game can show within
-    /// [`MAX_STRING_TEXT_BYTES`], each hash once.
+    /// English, checked as [`Pack::parse`] checks them: an English the game shows (1 to
+    /// [`strings::MAX_BYTES`] bytes; the pack holds no kind, so one under [`strings::MIN_BYTES`]
+    /// is kept for the catalogue to find as a label only, 2026-10-21), a text the game can show
+    /// within [`MAX_STRING_TEXT_BYTES`], each hash once.
     pub fn with_strings(
         mut self,
         strings: impl IntoIterator<Item = (u64, StringText)>,
     ) -> Result<Pack, PackError> {
         for (hash, t) in strings {
             let len = t.len as usize;
-            if !(strings::MIN_BYTES..=strings::MAX_BYTES).contains(&len)
-                || t.text.len() > MAX_STRING_TEXT_BYTES
-            {
+            if !(1..=strings::MAX_BYTES).contains(&len) || t.text.len() > MAX_STRING_TEXT_BYTES {
                 return Err(PackError::StringKey);
             }
             let text = std::str::from_utf8(&t.text).map_err(|_| PackError::Text)?;
@@ -1437,21 +1439,23 @@ pub(crate) fn run_at(state: &mut State, at: i32) -> Option<(Rc<Pack>, RunKey)> {
 }
 
 /// Slice K2: what the installed pack has for `english` (bytes up to a NUL) where game code shows
-/// it, counted: `None` without a pack, for a string under [`strings::MIN_BYTES`] or one the
-/// catalogue does not have (not counted), and for a catalogued one the pack lacks (a miss);
-/// else the pack's language and text (a hit).
-fn lookup(state: &State, english: &[u8]) -> Option<(Language, Vec<u8>)> {
+/// it, counted: `None` without a pack, for a string the catalogue does not have (not counted;
+/// a print hook never has one under [`strings::MIN_BYTES`], [`strings::Catalogue::of`], while a
+/// `label` read has the catalogue's short labels, [`strings::Catalogue::label_of`]), and for a
+/// catalogued one the pack lacks (a miss); else the pack's language and text (a hit).
+fn lookup(state: &State, english: &[u8], label: bool) -> Option<(Language, Vec<u8>)> {
     let l = &state.locale;
     let pack = l.pack.as_ref()?;
     let english = &english[..english
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(english.len())];
-    if english.len() < strings::MIN_BYTES {
-        return None;
-    }
     let catalogue = l.catalogue.as_ref()?;
-    catalogue.of(english)?;
+    if label {
+        catalogue.label_of(english)?;
+    } else {
+        catalogue.of(english)?;
+    }
     match pack
         .string(hash64(english))
         .filter(|t| t.len as usize == english.len())
@@ -1471,14 +1475,15 @@ fn lookup(state: &State, english: &[u8]) -> Option<(Language, Vec<u8>)> {
 /// outermost call: `printf`'s format, `puts`, `put_raw_str`), with the pack's language for its
 /// grammar; `None` (English) as [`lookup`] says. Never called on what an escape generates.
 pub(crate) fn exe_string(state: &State, english: &[u8]) -> Option<(Language, Vec<u8>)> {
-    lookup(state, english)
+    lookup(state, english, false)
 }
 
 /// Slice K2: a label a loader table holds, read for display (a command's name, a shared
-/// message, `$G`): the pack's text for it, else `english` itself ([`lookup`], counted). Only for
-/// reads whose result is shown; logic reads the table as it is.
+/// message, a wind's name): the pack's text for it, else `english` itself ([`lookup`], counted),
+/// a label under [`strings::MIN_BYTES`] included (2026-10-21). Only for reads whose result is
+/// shown; logic reads the table as it is.
 pub fn shown(state: &State, english: Vec<u8>) -> Vec<u8> {
-    match lookup(state, &english) {
+    match lookup(state, &english, true) {
         Some((_, text)) => text,
         None => english,
     }
@@ -1486,7 +1491,9 @@ pub fn shown(state: &State, english: Vec<u8>) -> Vec<u8> {
 
 /// [`shown`] without counting, with the language of the pack's text (`None`: English) and only
 /// for a catalogued label: the copy of the escape layer that `printf`'s cell count runs reads a
-/// slot as the escape layer will, and counts nothing.
+/// slot as the escape layer will, and counts nothing. It finds what [`exe_string`] finds, not a
+/// label under [`strings::MIN_BYTES`]: the escape layer reads the slot it copies
+/// (`converse::vars::shown_ref`) through [`exe_string`].
 pub(crate) fn label_quiet(state: &State, english: &[u8]) -> Option<Vec<u8>> {
     let l = &state.locale;
     let pack = l.pack.as_ref()?;

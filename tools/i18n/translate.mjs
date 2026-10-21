@@ -135,7 +135,7 @@ export const MAGIC = 'U6LP';
 export const SCRIPT_LEN = 0x2800; // u6_core::converse::SCRIPT_LEN
 export const MAX_TEXT_BYTES = 3 * SCRIPT_LEN; // u6_core::locale::MAX_TEXT_BYTES
 export const STRINGS_FORMAT = 'u6.string-bundle/1'; // u6_core::locale::strings::FORMAT
-export const MIN_STRING_BYTES = 3; // u6_core::locale::strings::MIN_BYTES
+export const MIN_STRING_BYTES = 3; // u6_core::locale::strings::MIN_BYTES (a label's is 1)
 export const MAX_STRING_BYTES = 256; // u6_core::locale::strings::MAX_BYTES
 export const MAX_STRING_TEXT_BYTES = 3 * MAX_STRING_BYTES; // u6_core::locale::MAX_STRING_TEXT_BYTES
 export const MAX_PACK_BYTES = 16 << 20; // u6_core::locale::MAX_PACK_BYTES
@@ -428,7 +428,8 @@ export function readPack(bytes) {
   seen.clear();
   for (const t of strings) {
     if (!hex16(t.hash)) fail('a hash in it is not 16 hex digits');
-    if (t.len < MIN_STRING_BYTES || t.len > MAX_STRING_BYTES || Buffer.byteLength(t.text) > MAX_STRING_TEXT_BYTES) fail('a game string in it is not one the game prints');
+    // A pack string holds no kind: one of 1 or 2 bytes is a label's (the engine's reader keeps it).
+    if (t.len < 1 || t.len > MAX_STRING_BYTES || Buffer.byteLength(t.text) > MAX_STRING_TEXT_BYTES) fail('a game string in it is not one the game prints');
     if (!textOk(t.text, MAX_STRING_TEXT_BYTES)) fail('a line in it holds a character the game cannot show');
     if (seen.has(t.hash)) fail('it holds one line twice');
     seen.add(t.hash);
@@ -1374,14 +1375,16 @@ export function textsRecheckOf(existing, all) {
 /// The game strings of `value` (the parsed u6.string-bundle/1) as the units to translate, in
 /// requests of at most STRINGS_PER_REQUEST strings and STRING_CHARS characters. Throws a fixed
 /// message (a count at most) when the file is not of that form or a string's text, length and hash
-/// disagree.
+/// disagree, or one is under MIN_STRING_BYTES but a label (the engine catalogues a label from 1
+/// byte: a wind's name is 2).
 export function stringsPlanOf(value) {
   if (!plain(value) || value.format !== STRINGS_FORMAT || !Array.isArray(value.strings)) {
     throw new InputError(`the file is not ${STRINGS_FORMAT}`);
   }
   const ok = (s) => plain(s) && hex16(s.hash) && Number.isInteger(s.len) && KINDS.includes(s.kind) && typeof s.text === 'string'
     && ![...s.text].some((c) => c.charCodeAt(0) > 0xff) && latin1(s.text).length === s.len
-    && hex64(hash64(latin1(s.text))) === s.hash && s.len >= MIN_STRING_BYTES && s.len <= MAX_STRING_BYTES;
+    && hex64(hash64(latin1(s.text))) === s.hash && s.len >= (s.kind === 'label' ? 1 : MIN_STRING_BYTES)
+    && s.len <= MAX_STRING_BYTES;
   const bad = value.strings.filter((s) => !ok(s)).length;
   if (bad > 0) throw new InputError(`${bad} entries of the file are not strings of ${STRINGS_FORMAT}`);
   const unique = [...new Map(value.strings.map((s) => [s.hash, s])).values()];

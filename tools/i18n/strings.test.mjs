@@ -31,8 +31,8 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   MAX_PACK_BYTES, MAX_RUNS, MAX_STRING_TEXT_BYTES, PackReadError, STRINGS_PER_REQUEST, directivesOf,
-  duplicateMembers, fingerprint, hash64, hex64, latin1, main, packBytes, readPack, stringGate, tableGate,
-  tablesOf, unitsOf,
+  duplicateMembers, fingerprint, hash64, hex64, latin1, main, packBytes, readPack, stringGate, stringsPlanOf,
+  tableGate, tablesOf, unitsOf,
 } from './translate.mjs';
 
 const TOOL = join(dirname(fileURLToPath(import.meta.url)), 'translate.mjs');
@@ -311,6 +311,35 @@ test('with --send, game strings alone: bounded requests; each string through the
   await rm(f.dir, { recursive: true });
 });
 
+test('a label of 1 or 2 bytes (a wind\'s name) is planned, translated and merged, and the pack reads back; a format or a message that short is refused unasked', async () => {
+  const short = [str('Zw', 'label'), str('Z', 'label'), str('Naught is there.', 'message')];
+  assert.deepEqual(stringsPlanOf({ ...EXPORT, strings: short }).batches[0].units.map((u) => [u.text, u.len, u.skind]),
+    [['Zw', 2, 'label'], ['Z', 1, 'label'], ['Naught is there.', 16, 'message']]);
+  assert.equal(stringGate('Zw', '샛바람'), null);
+  const f = await fixture({ strings: { ...EXPORT, strings: short } });
+  await k1Pack(f.out);
+  const t = fakeTransport((l) => (l.en === 'Zw' ? '샛바람' : null));
+  const out = output();
+  assert.equal(await main(['--strings', f.strings, '--out', f.out, '--send'], { transport: t.send, stdout: out, isTTY: false, signals: new EventEmitter() }), 0);
+  const pack = await packOf(f.out);
+  assert.deepEqual(pack.strings.find((s) => s.hash === hashOf('Zw')), { hash: hashOf('Zw'), len: 2, text: '샛바람' });
+  assert.equal(pack.strings.find((s) => s.hash === hashOf('Z')).len, 1);
+  nothingTold(out.text);
+  // Run again over the pack it wrote: the reader takes the short strings back.
+  assert.equal(await main(['--strings', f.strings, '--out', f.out, '--send'], { transport: fakeTransport().send, stdout: output(), isTTY: false, signals: new EventEmitter() }), 0);
+  assert.equal((await packOf(f.out)).strings.length, 3);
+  for (const kind of ['format', 'message']) {
+    const g = await fixture({ strings: { ...EXPORT, strings: [str('Zq', kind), STRINGS[1]] } });
+    const t2 = fakeTransport();
+    const o = output();
+    assert.equal(await main(['--strings', g.strings, '--out', g.out, '--send'], { transport: t2.send, stdout: o, isTTY: false, signals: new EventEmitter() }), 2, kind);
+    assert.match(o.text, /translate: 1 entries of the file are not strings of u6\.string-bundle\/1/);
+    assert.equal(t2.bodies.length, 0, 'nothing asked');
+    await rm(g.dir, { recursive: true });
+  }
+  await rm(f.dir, { recursive: true });
+});
+
 test('with --send, a script with table strings: its runs and its table strings in one request; a copied one held to its capacity and to no marker (asked again once, then left English and counted); one read from inside left English unasked; the pack checks against the bundles again on the next run', async () => {
   const f = await fixture();
   const t = fakeTransport((l, first) => {
@@ -414,7 +443,7 @@ test('the reader is the engine\'s: a K1 pack and a K2 pack read; each broken rul
     [file({ tables: [{ ...table, capacity: 5 }] }), 'a table string in it is longer than the place the game copies it to'],
     [file({ tables: [{ ...table, len: 0 }] }), 'a line in it is keyed outside the conversation scripts'],
     [file({ tables: [table, table] }), 'it holds one line twice'],
-    [file({ strings: [{ hash: '0000000000000004', len: 2, text: '가' }] }), 'a game string in it is not one the game prints'],
+    [file({ strings: [{ hash: '0000000000000004', len: 0, text: '가' }] }), 'a game string in it is not one the game prints'],
     [file({ strings: [{ hash: '0000000000000004', len: 3, text: '가'.repeat(MAX_STRING_TEXT_BYTES / 3 + 1) }] }), 'a game string in it is not one the game prints'],
     [file({ strings: [{ hash: '000000000000000G', len: 3, text: '가' }] }), 'a hash in it is not 16 hex digits'],
     [file({ strings: [{ hash: '0000000000000004', len: 3, text: '中' }] }), 'a line in it holds a character the game cannot show'],
