@@ -22,6 +22,12 @@ Added the same day (verbatim):
 
 Added 2026-10-21 (verbatim):
 
+> 1. 저장소에서는 2차 가공 파일을 자신이 만들수 있도록 스크립트 형태로 올려주고
+
+The packs are made by `scripts/make-packs.sh` from the user's own files (README "Packs from your own copy").
+
+Added 2026-10-21 (verbatim):
+
 > 2. ultima6-deploy 비공개 저장소 만들고 네가 가공한 2차 리소스들 올리고 배포할때 쓰도록해줘
 
 Order: research each item, then fix the specs (using-dotprd), then build the items one after another.

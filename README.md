@@ -48,6 +48,36 @@ tools/speech/fetch-models.sh                        # the voice model into site/
 scripts/deploy-web.sh main                          # Cloudflare Pages project ultima6
 ```
 
+## Packs from your own copy
+
+`scripts/make-packs.sh --game PATH --out DIR [--only hd,ko,voices] [--send | --dry-run] [--rebuild]`
+makes the three packs the page loads from your own game files (`--game` takes what the page
+takes):
+
+- `ko.u6lp`, the Korean pack (spec 08): `tools/i18n/translate.mjs` over every conversation script
+  and the game strings.
+- `voices.u6vp`, the NPC personality voices (spec 09): `tools/speech/profile.mjs` over the NPC
+  bundles.
+- `hd.zip`, the HD pack (spec 07): `u6-hd` (`tools/hd`) inventory, atlas, run, ingest and pack
+  (`--exclude FILE` goes to ingest).
+
+It needs Rust (built through `scripts/cargo.sh`), Node 22 or later, for `ko` and `voices` a model
+the tools reach through llmux on your machine (`--llmux URL`, `--model NAME`, passed to both; the
+tools' defaults otherwise), and for `hd` Codex signed in, with its built-in image tool (`U6_CODEX`
+names another codex). It first exports the game strings and the NPC bundles with `u6-export`
+(`tools/export`), the page's own exporters run natively, into `DIR/work/`. The game's text and art
+go to that model service only with your yes: before each such step the script prints where; the
+two node tools ask for a typed `yes`, `u6-hd` sends only with `--send` (`--send` answers all
+three), and `--dry-run` sends nothing (the node tools write their first request for you to read,
+`u6-hd` counts its sheets). A pack already in `DIR/packs/` is skipped unless `--rebuild`; the
+script stops at the first failing step, naming it.
+
+The packs are made from your files and are yours alone: never commit or share them (`DIR` lies
+outside every git work tree, and the repository's guard tests refuse a pack, a string export or a
+bundle in git). Drop each pack on the page, or host `DIR/packs/` (with its `index.json`, the
+site's listing) as the site does, under `/packs/` behind the key `functions/_middleware.js`
+checks.
+
 ## Layout
 
 | Path | What |
@@ -58,6 +88,7 @@ scripts/deploy-web.sh main                          # Cloudflare Pages project u
 | `crates/u6-hdpack` | the HD pack format `u6-hdpack/1` (spec 07 HD1): writer, strict reader, the drop classifier, the content hash of a classic image; no game data. The page loads a dropped pack (H2), keeps it in IndexedDB and draws its pictures in front of MMPX |
 | `tools/` | PP20, hunk flattener, REA drivers, Amiga emulator oracle, web test harness |
 | `tools/hd` | `u6-hd`, the local imagegen HD tool (spec 07 HD2): run by the owner on the owner's files; its sheets, outputs and packs stay in `~/Games/ultima6/hd/`, outside the repo. It moves each generated image out of `~/.codex/generated_images/`; codex's own session log (`~/.codex/sessions/`) still keeps every sheet that was sent. The example `scaler_pack` writes a full-size pack of MMPX ×4 of the owner's images there, for timing the page |
+| `tools/export` | `u6-export strings` and `u6-export bundles`: the page's Game strings and NPC bundles downloads made from the user's files (`--game`, through the page's intake) by the same u6-core functions, byte for byte, into a 0600 file outside any git work tree and apart from the game files it reads; `scripts/make-packs.sh` runs it |
 | `tools/i18n` | `translate.mjs` (spec 08, slices K1 to K4): run by the owner on the NPC bundles the page downloads, for one script (`--item a:N`, or `--name <NPC name>`) or the first N (its lines and its table strings), and on the page's Game strings download (`--strings ultima6-strings.json`: the game's own messages, the names Look gives things, the books and signs, and the opening, story, gypsy, character creation and transfer lines of `u`; `--only strings,look,books,u` picks the parts); it sends them through his llmux (gpt-6-astra by default) after a preview and a typed `yes`, checks each answer with the mechanical gates and merges them into `~/Games/ultima6/i18n/ko/ko.u6lp` (what an earlier run put stays; dropped on the page, used in 한글) beside a count-only coverage receipt; `style-ko.md` is the 사극체 register guide it sends |
 | `tools/speech` | `fetch-models.sh` (spec 09 V2): the pinned Supertonic-3 revision and onnxruntime-web 1.30.0, checked against their sha256 pins and hosted in parts of at most 24 MiB under `site/models/` with their licences and notices; `--check` checks them as hosted |
 | `site/` | the static page; `site/voice/` its on-device voices (spec 09 V3: the worker, the player, the model's terms) |

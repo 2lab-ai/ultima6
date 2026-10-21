@@ -1,0 +1,16 @@
+[package]
+name = "u6-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The page's two exports run natively: the game strings and the NPC bundles of the user's own files"
+
+[[bin]]
+name = "u6-export"
+path = "src/main.rs"
+
+[dependencies]
+u6-core.workspace = true
+u6-intake.workspace = true
