@@ -45,7 +45,7 @@ mod travel;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-mod tests_real;
+pub(crate) mod tests_real;
 
 use std::cell::{RefCell, RefMut};
 

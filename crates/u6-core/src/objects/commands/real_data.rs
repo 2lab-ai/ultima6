@@ -239,6 +239,12 @@ type Command = Box<dyn FnOnce(Rc<RefCell<State>>, Rc<Io>) -> Pin<Box<dyn Future<
 /// Runs one command handler on `s`: `keys` first, then Space whenever the game idles on a key
 /// (more prompts). Returns the state after it, the new scroll lines and the stub hits.
 fn run(s: State, files: &Files, keys: &[InputEvent], cmd: Command) -> (State, Vec<String>) {
+    let (e, new) = run_engine(s, files, keys, cmd);
+    (e.state().clone(), new)
+}
+
+/// [`run`], returning the engine (its frame) with the new scroll lines.
+fn run_engine(s: State, files: &Files, keys: &[InputEvent], cmd: Command) -> (Engine, Vec<String>) {
     let before = lines_of(&s).len();
     let mut e = Engine::with_game(s, files.clone(), cmd);
     let mut keys = keys.iter().copied();
@@ -260,10 +266,9 @@ fn run(s: State, files: &Files, keys: &[InputEvent], cmd: Command) -> (State, Ve
     for id in e.stub_hits().keys() {
         eprintln!("   stub {id}");
     }
-    let s = e.state().clone();
-    let lines = lines_of(&s);
+    let lines = lines_of(&e.state());
     let new = lines[before.saturating_sub(1).min(lines.len())..].to_vec();
-    (s, new)
+    (e, new)
 }
 
 /// Points the cross-hair at `slot` as a confirmed target does: selection, map target and the
@@ -736,4 +741,146 @@ fn the_string_export_of_the_owners_game_lists_its_catalogued_strings() {
     eprintln!(
         "string export: object names and books each once, as many as the identity pack: pass"
     );
+}
+
+/// The keys (type 0x40) of quality `q` the port holds, anywhere (the slot list).
+fn keys_of(s: &State, q: u8) -> Vec<Slot> {
+    let o = &s.objects;
+    let mut v = Vec::new();
+    let mut c = o.next_of(crate::objects::HEAD);
+    let mut n = 0;
+    while c >= 0 && n < crate::objects::OBJECT_SLOTS {
+        if o.kind(c) == 0x40 && o.qq_of(c) >> 8 == u16::from(q) {
+            v.push(c);
+        }
+        c = o.next_of(c);
+        n += 1;
+    }
+    v
+}
+
+/// Points the cross-hair at the map tile (x, y) with no object selected.
+fn aim_tile(s: &mut State, x: u16, y: u16) {
+    let c = s.map.centre;
+    let col = x as i16 - c.x as i16 + 5;
+    let row = y as i16 - c.y as i16 + 5;
+    let input = &mut s.ui.input;
+    input.selection = -1;
+    input.target = (x as i16, y as i16);
+    input.pointer = (col * 16 + 8, row * 16 + 8);
+    input.target_void = false;
+}
+
+/// Look with the screen drawn before and after it (the paper, the view, the panel), as the
+/// command loop leaves it, so the frame after it shows the map.
+fn look_drawn() -> Command {
+    Box::new(|st, io| {
+        Box::pin(async move {
+            crate::main_loop::draw_paper(&st.borrow(), &io);
+            crate::gfx::refresh_view(&mut st.borrow_mut(), &io);
+            crate::ui::panels::redraw_panel(&st, &io).await;
+            super::look(&st, &io).await;
+            crate::main_loop::flush_prints(&st, &io).await;
+            crate::gfx::refresh_view(&mut st.borrow_mut(), &io);
+            io.present();
+        })
+    })
+}
+
+/// Port-only (owner, 2026-10-21; `super::gatehouse`): in a new game every gatehouse plant the
+/// rule finds, looked at from a tile beside it, gives one key of its door's lock (the port holds
+/// none before) on its tile; the hero takes it, and Use of it on that door unlocks the door
+/// (0x12bbc0's locked branch). Prints each door's index with the number of plants whose key is
+/// its, each plant's index and pass/fail only: where the plants and doors are, their tiles and
+/// the lock are the user's world. With `U6_GK_FRAMES=<dir>` it writes the frame after each
+/// plant's Look there (`gk-<plant index>.png`).
+#[test]
+fn every_gatehouse_plant_gives_the_key_that_unlocks_its_door() {
+    let Some(files) = files() else { return };
+    let mut s0 = with_text(&files);
+    s0.gfx.window_shown = 1;
+    s0.ui.panel.dirty = true;
+    let z = usize::from(s0.map.centre.z);
+    let doors = super::gatehouse::doors(&s0);
+    assert!(!doors.is_empty(), "the new game has gatehouse doors");
+    let reach = super::gatehouse::PLANT_REACH;
+    let mut plants: Vec<(u16, u16, Slot)> = Vec::new();
+    for &d in &doors {
+        let (dx, dy) = (i32::from(s0.objects.x(d)), i32::from(s0.objects.y(d)));
+        for y in dy - reach..=dy + reach {
+            for x in dx - reach..=dx + reach {
+                let (x, y) = (x as u16, y as u16);
+                let Some(tile) = s0.map.tile_at(usize::from(x), usize::from(y), z) else {
+                    continue;
+                };
+                if let Some(door) = super::gatehouse::plant_door(&s0, x, y, tile) {
+                    plants.push((x, y, door));
+                }
+            }
+        }
+    }
+    plants.sort_unstable();
+    plants.dedup();
+    for (k, &d) in doors.iter().enumerate() {
+        let n = plants.iter().filter(|p| p.2 == d).count();
+        eprintln!("door {k}: plants that give its key {n}");
+    }
+    assert!(!plants.is_empty(), "the rule finds gatehouse plants");
+    for (i, &(px, py, door)) in plants.iter().enumerate() {
+        let mut s = s0.clone();
+        let q = (s.objects.qq_of(door) >> 8) as u8;
+        assert!(
+            keys_of(&s, q).is_empty(),
+            "plant {i}: no key of the lock before"
+        );
+        let (sx, sy) =
+            beside_tile(&s, px, py).unwrap_or_else(|| panic!("plant {i}: no tile beside it"));
+        stand_at(&mut s, sx, sy);
+        aim_tile(&mut s, px, py);
+        let (e, lines) = run_engine(s, &files, &[], look_drawn());
+        print_lines(&format!("plant {i}: Look"), &lines);
+        crate::usecmd::tests_real::save_frame(&e, "U6_GK_FRAMES", &format!("gk-{i}"));
+        let mut s = e.state().clone();
+        let made = keys_of(&s, q);
+        assert!(made.len() == 1, "plant {i}: one key of the lock");
+        let key = made[0];
+        let o = &s.objects;
+        assert!(
+            o.place(key) == 0 && (o.x(key), o.y(key)) == (px, py),
+            "plant {i}: the key lies on the plant's tile"
+        );
+
+        // The hero takes it.
+        aim(&mut s, key);
+        let get = Box::new(|st: Rc<RefCell<State>>, io: Rc<Io>| {
+            Box::pin(async move { super::get(&st, &io).await }) as Pin<Box<dyn Future<Output = ()>>>
+        });
+        let (mut s, lines) = run(s, &files, &[], get);
+        print_lines(&format!("plant {i}: Get the key"), &lines);
+        assert!(
+            carried_by(&s, 1, key),
+            "plant {i}: the hero carries the key"
+        );
+
+        // Use on its door from a tile beside it; the target is confirmed as the repeat key gives
+        // it (0x10790a returns 0x8e).
+        let (bx, by) = beside(&s, door).unwrap_or_else(|| panic!("plant {i}: no tile by the door"));
+        stand_at(&mut s, bx, by);
+        let locked = s.objects.tf(door) >> 10;
+        assert!((8..=11).contains(&locked), "plant {i}: the door is locked");
+        aim(&mut s, door);
+        s.ui.input.targeting = 0;
+        s.ui.input.repeat = true;
+        let use_key = Box::new(move |st: Rc<RefCell<State>>, io: Rc<Io>| {
+            Box::pin(async move { super::use_key(&st, &io, key).await })
+                as Pin<Box<dyn Future<Output = ()>>>
+        });
+        let (s, lines) = run(s, &files, &[], use_key);
+        print_lines(&format!("plant {i}: Use the key on the door"), &lines);
+        assert!(
+            s.objects.tf(door) >> 10 == locked ^ 0xc,
+            "plant {i}: the door unlocked"
+        );
+        eprintln!("plant {i}: key given, taken, door unlocked: pass");
+    }
 }

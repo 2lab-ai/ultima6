@@ -118,15 +118,17 @@ fn use_on(s: State, files: &Files, target: Slot, cell: (i16, i16), keys: &[Input
     e
 }
 
-fn save_frame(e: &Engine, name: &str) {
-    let Ok(dir) = std::env::var("U6_USE_FRAMES") else {
+/// With the environment variable `var` naming a directory, the engine's frame as
+/// `<dir>/<name>.png`; prints the file's name only.
+pub(crate) fn save_frame(e: &Engine, var: &str, name: &str) {
+    let Ok(dir) = std::env::var(var) else {
         return;
     };
     let mut rgba = Vec::new();
     e.frame().write_rgba(&mut rgba);
-    let path = Path::new(&dir).join(format!("{name}.png"));
-    std::fs::write(&path, png(320, 200, &rgba)).quiet();
-    eprintln!("frame: {}", path.display());
+    let file = format!("{name}.png");
+    std::fs::write(Path::new(&dir).join(&file), png(320, 200, &rgba)).quiet();
+    eprintln!("frame: {file}");
 }
 
 /// A minimal PNG (stored deflate blocks) of an RGBA image.
@@ -194,7 +196,7 @@ fn report(e: &Engine, name: &str, before: usize) -> Vec<String> {
         "[{name}] stubs: {:?}",
         e.stub_hits().keys().collect::<Vec<_>>()
     );
-    save_frame(e, name);
+    save_frame(e, "U6_USE_FRAMES", name);
     new
 }
 

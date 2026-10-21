@@ -38,6 +38,8 @@ Added 2026-10-21 (verbatim):
 
 Order: research each item, then fix the specs (using-dotprd), then build the items one after another.
 
+Added 2026-10-21 (verbatim, with a screenshot of the castle gate seen from inside; port-only, `crates/u6-core/src/objects/commands/gatehouse.rs`): "그리고 여기 풀을 look 하면 로드브리티시가 주는 열쇠 나오도록 해줘. [screenshot] 도개교 왼족 방왼쪽 나무"
+
 Fixed constraints these items inherit (not reopened here):
 
 - `.prd/01-spec.md` §Rights. The public site serves only our engine. Game bytes, text, names, art and values never go into the repo, tests, logs or the hosted site.

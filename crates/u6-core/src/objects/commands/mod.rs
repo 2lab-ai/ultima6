@@ -11,12 +11,13 @@
 //!
 //! Submodules: `data` (the image), `text` (output), `eggs`, `world` (doors, chests, search,
 //! traps, kegs), `light` (torches, fixtures), `horse` (horses, the answer parser), `look`,
-//! `get`, `drop`, `push` (the four commands), `seams` (calls into modules not ported
-//! yet).
+//! `get`, `drop`, `push` (the four commands), `gatehouse` (port-only: the plants by the
+//! gatehouse give its key on Look), `seams` (calls into modules not ported yet).
 
 mod data;
 mod drop;
 mod eggs;
+mod gatehouse;
 mod get;
 mod horse;
 mod keys;
@@ -31,6 +32,8 @@ mod world;
 mod real_data;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_gatehouse;
 
 pub use data::GameData;
 pub use drop::{drop_object, fits_in, fragile, how_many, surface_at};

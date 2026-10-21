@@ -27,7 +27,7 @@ const P_NO_EFFECT: i32 = super::world::P_NO_EFFECT;
 /// Original: A4-0x66dc (85 words: the types 0x128b6a accepts)
 const TYPE_LIST: i32 = -0x66dc;
 const LOCK_PICK: u16 = 0x3f;
-const KEY: u16 = 0x40;
+pub(super) const KEY: u16 = 0x40;
 const CHEST: u16 = 0x62;
 const TARGET_DONE: u16 = crate::ui::wait::REPEAT;
 

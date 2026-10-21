@@ -19,12 +19,12 @@ const S_A: u32 = 0x0012_83e2;
 const S_AN: u32 = 0x0012_83e6;
 const S_THE: u32 = 0x0012_83ea;
 const S_COUNT: u32 = 0x0012_83fe; // "%d "
-const S_SEARCHING: u32 = 0x0012_8402;
+pub(super) const S_SEARCHING: u32 = 0x0012_8402;
 const S_SECRET_DOOR: u32 = 0x0012_841e;
 const S_COMMA: u32 = 0x0012_842c;
 const S_AND: u32 = 0x0012_8430;
 const S_NOTHING_DOT: u32 = 0x0012_8436;
-const S_DOT: u32 = 0x0012_8440;
+pub(super) const S_DOT: u32 = 0x0012_8440;
 const S_ACID: u32 = 0x0012_87d6;
 const S_POISON: u32 = 0x0012_87de;
 const S_BOMB: u32 = 0x0012_87e8;
@@ -350,7 +350,7 @@ fn spills(s: &State, c: Slot) -> bool {
 }
 
 /// 0x109e74 then 0x102ef0, the redraw the search does after each change.
-fn refresh(s: &mut State) {
+pub(super) fn refresh(s: &mut State) {
     crate::map::view::update_view(s);
     crate::engine::with_current_io(|io| crate::gfx::refresh_view(s, io));
 }

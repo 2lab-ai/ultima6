@@ -191,6 +191,9 @@ pub async fn read_book(state: &RefCell<State>, io: &Io, obj: Slot) {
 /// spell picked with its words and ingredients, a clock or a sundial by day tells the time,
 /// else ".". Unless a text was read, the spot is searched (0x129544). The window unpages at
 /// the next key.
+///
+/// Port-only (owner, 2026-10-21): a plant by a gatehouse door, looked at within one tile of the
+/// leader, may give the gatehouse key ([`super::gatehouse`]).
 pub async fn look(state: &RefCell<State>, io: &Io) {
     let mut read = false;
     state.borrow_mut().ui.text.win_mut().flags |= crate::ui::text::PAGED;
@@ -242,8 +245,12 @@ pub async fn look(state: &RefCell<State>, io: &Io) {
 }
 
 /// Look with no object: the map tile under the pointer.
+///
+/// Port-only (owner, 2026-10-21): within one tile of the leader, a plant by a gatehouse door
+/// may give the gatehouse key instead of the found-nothing line ([`super::gatehouse`]).
 async fn look_at_tile(state: &RefCell<State>, io: &Io, lx: u16, ly: u16) {
     let (px, py) = state.borrow().ui.input.pointer;
+    let mut looked = None;
     if px < 0xa8 && py < 0xa8 {
         let name = {
             let mut s = state.borrow_mut();
@@ -255,6 +262,7 @@ async fn look_at_tile(state: &RefCell<State>, io: &Io, lx: u16, ly: u16) {
                 .map
                 .tile_at(tx as u16 as usize, ty as u16 as usize, usize::from(c.z))
                 .unwrap_or(0);
+            looked = Some(tile);
             world::article(&mut s, u16::from(tile));
             crate::objects::shown_look(&s, u16::from(tile)).into_bytes()
         };
@@ -266,7 +274,14 @@ async fn look_at_tile(state: &RefCell<State>, io: &Io, lx: u16, ly: u16) {
     let (tx, ty) = state.borrow().ui.input.target;
     let near = |a: i16, b: u16| a.wrapping_sub(b as i16).wrapping_abs() <= 1;
     if near(tx, lx) && near(ty, ly) {
-        print_at(state, io, S_SEARCH_NOTHING, &[]).await;
+        let gave = looked.is_some_and(|tile| {
+            super::gatehouse::give_key(&mut state.borrow_mut(), tx as u16, ty as u16, tile)
+        });
+        if gave {
+            crate::main_loop::flush_prints(state, io).await;
+        } else {
+            print_at(state, io, S_SEARCH_NOTHING, &[]).await;
+        }
     }
 }
 
