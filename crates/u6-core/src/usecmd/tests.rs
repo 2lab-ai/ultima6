@@ -411,10 +411,23 @@ const LAND_REFUSAL: (u32, &[u8]) = (0x0012_cd7a, b"MARKER-LAND-REFUSAL");
 /// Files with a synthetic `game` whose image (one CODE hunk from the image base) holds `text`,
 /// NUL-terminated, at image address `addr`: what `game_string` reads for the string a handler
 /// prints. The text is the test's own, no game text.
-fn game_with_string((addr, text): (u32, &[u8])) -> Files {
-    let at = (addr - crate::image::IMAGE_BASE) as usize;
-    let mut hunk = vec![0u8; (at + text.len() + 4) & !3];
-    hunk[at..at + text.len()].copy_from_slice(text);
+fn game_with_string(part: (u32, &[u8])) -> Files {
+    game_with(&[part])
+}
+
+/// [`game_with_string`] for several `(addr, bytes)` parts: strings and the small A4 tables a
+/// handler reads, the zeros after each ending it. The bytes are the test's own, no game data.
+fn game_with(parts: &[(u32, &[u8])]) -> Files {
+    let at = |addr: u32| (addr - crate::image::IMAGE_BASE) as usize;
+    let end = parts
+        .iter()
+        .map(|&(a, b)| at(a) + b.len())
+        .max()
+        .unwrap_or(0);
+    let mut hunk = vec![0u8; (end + 4) & !3];
+    for &(addr, bytes) in parts {
+        hunk[at(addr)..at(addr) + bytes.len()].copy_from_slice(bytes);
+    }
     let game = crate::image::SyntheticGame::new()
         .loaded(false, hunk)
         .build();
@@ -750,4 +763,345 @@ fn the_telescope_pointed_nowhere_leaves_the_view_on_it() {
     // 0x12fe80 branches to the exit 0x12ff46 without restoring A4-0x7b78 / -0x7b76; the next
     // player step re-centres on the leader (0x11d536, 0x11d55c).
     assert_eq!((c.x, c.y), (100, 99), "the centre stays on the telescope");
+}
+
+/// The made-up map tiles of the drawbridge site: water everywhere, one row of a bank tile the
+/// made-up end list holds (A4-0x6614 in [`bridge_game`]).
+const MOAT: u8 = 2;
+const BANK: u8 = 0x43;
+const BANK_ROW: u16 = 104;
+/// Markers at the crank's line addresses: no bridge (0x12ca2a), then results 0..4 (nothing
+/// moved, raised, lowered, something on it, something in the way).
+const NO_BRIDGE: &str = "MARK-NO-BRIDGE";
+const BRIDGE_LINES: [&str; 5] = [
+    "MARK-NOTHING",
+    "MARK-RAISED",
+    "MARK-LOWERED",
+    "MARK-ON-IT",
+    "MARK-IN-THE-WAY",
+];
+/// The crank's quality and the first slot of the bridge's pieces.
+const CRANK_Q: u16 = 7;
+const PIECES: Slot = 0x210;
+
+/// A synthetic `game` with the markers at the crank's lines and an end list holding [`BANK`].
+fn bridge_game() -> Files {
+    let (off, _) = super::defs::BRIDGE_ENDS;
+    let ends = [0x41, 0x42, BANK, 0x44, 0x45];
+    let mut parts: Vec<(u32, &[u8])> = vec![(mech::STR_NO_BRIDGE, NO_BRIDGE.as_bytes())];
+    parts.extend(
+        mech::STR_BRIDGE
+            .iter()
+            .zip(BRIDGE_LINES)
+            .map(|(&a, m)| (a, m.as_bytes())),
+    );
+    parts.push((crate::image::A4.wrapping_add_signed(off), &ends));
+    game_with(&parts)
+}
+
+/// A crank (0x120, quality [`CRANK_Q`]) at A next to the party and its bridge raised as
+/// 0x12de3a leaves it: frame 6 of the quality at (103, 101), frames 7, 7, 7 and 8 east of it.
+/// Water below down to [`BANK_ROW`]; the two crank tiles have animation slots.
+fn drawbridge_site() -> State {
+    let mut s = world();
+    s.ui = crate::main_loop::test_support::test_ui();
+    put(&mut s, A, 0x120, 100, 99);
+    s.objects.qq[A as usize] = CRANK_Q << 8;
+    for (i, frame) in [6u16, 7, 7, 7, 8].into_iter().enumerate() {
+        put(
+            &mut s,
+            PIECES + i as Slot,
+            0x10d | frame << 10,
+            103 + i as u16,
+            101,
+        );
+    }
+    s.objects.qq[PIECES as usize] = CRANK_Q << 8;
+    link(&mut s);
+    tiles(&mut s, MOAT, 0);
+    let oy = s.map.window_origin[1];
+    for x in 0..crate::map::WINDOW {
+        s.map.window_tiles[crate::map::cell(x, usize::from(BANK_ROW - oy))] = BANK;
+    }
+    s.tables.anim.count = 2;
+    s.tables.anim.slots = [0x3f1, 0x3fc]
+        .map(|tile| u6_formats::animdata::AnimEntry {
+            tile_to_animate: tile,
+            first_anim_frame: tile,
+            and_mask: 0,
+            shift: 0,
+        })
+        .to_vec();
+    s.map.anim_enabled = vec![0; 2];
+    s
+}
+
+/// The drawbridge pieces on the map: (x, y, frame, quality), sorted.
+fn bridge_pieces(s: &State) -> Vec<(u16, u16, u16, u16)> {
+    let mut v: Vec<_> = (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .filter(|&i| s.objects.kind(i) == 0x10d && s.objects.place(i) == 0)
+        .map(|i| {
+            let o = &s.objects;
+            (o.x(i), o.y(i), o.tf(i) >> 10, o.qq_of(i) >> 8)
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// The bridge of [`drawbridge_site`] up: one row, the quality on its first piece.
+fn raised() -> Vec<(u16, u16, u16, u16)> {
+    let mut v = vec![(103, 101, 6, CRANK_Q)];
+    v.extend((104..107).map(|x| (x, 101, 7, 0)));
+    v.push((107, 101, 8, 0));
+    v.sort();
+    v
+}
+
+/// The bridge of [`drawbridge_site`] down: rows of frames 3 (with the quality), 4, 4, 5 from
+/// (104, 102) above the bank row, which gets 0, 1, 1, 2.
+fn lowered() -> Vec<(u16, u16, u16, u16)> {
+    let mut v = Vec::new();
+    for y in 102..BANK_ROW {
+        v.extend([
+            (104, y, 3, CRANK_Q),
+            (105, y, 4, 0),
+            (106, y, 4, 0),
+            (107, y, 5, 0),
+        ]);
+    }
+    v.extend([
+        (104, BANK_ROW, 0, 0),
+        (105, BANK_ROW, 1, 0),
+        (106, BANK_ROW, 1, 0),
+        (107, BANK_ROW, 2, 0),
+    ]);
+    v.sort();
+    v
+}
+
+/// Works the crank A to its end under [`bridge_game`]: Use, or the Telekinesis spell (0x15)
+/// with the crank chosen. Returns the state and the crank tiles' animation flags the first
+/// time any was on (empty: never).
+fn work_crank(mut s: State, telekinesis: bool) -> (State, Vec<u8>) {
+    if telekinesis {
+        s.ui.input.selection = A;
+        s.ui.input.target = (s.objects.x(A) as i16, s.objects.y(A) as i16);
+    }
+    let mut e = Engine::with_game(s, bridge_game(), move |st, io| async move {
+        if telekinesis {
+            crate::magic::dispatch(&st, &io, 0x15, true).await;
+        } else {
+            mech::drawbridge(Ux::new(&st, &io), A).await;
+        }
+    });
+    let mut turning = Vec::new();
+    for _ in 0..2000 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+        let a = &e.state().map.anim_enabled;
+        if turning.is_empty() && a.iter().any(|&f| f != 0) {
+            turning = a.clone();
+        }
+    }
+    assert!(e.finished());
+    (e.state().clone(), turning)
+}
+
+/// The view refreshes paced so far ([`crate::combat::present::REFRESH_MS`] waits).
+fn refreshes(s: &State) -> u32 {
+    let ms = crate::combat::present::REFRESH_MS;
+    s.combat.paced.get(&ms).copied().unwrap_or(0)
+}
+
+#[test]
+fn the_drawbridge_crank_lowers_its_raised_bridge_and_raises_it_again() {
+    let s = drawbridge_site();
+    assert_eq!(
+        bridge_pieces(&s),
+        raised(),
+        "fixture: up as 0x12de3a leaves it"
+    );
+    let (s, turning) = work_crank(s, false);
+    assert_eq!(
+        bridge_pieces(&s),
+        lowered(),
+        "frame 6: the row goes, the rows come down to the bank"
+    );
+    assert_eq!(turning, [1, 1], "0x101ff6: the crank tiles turn forward");
+    assert_eq!(s.map.anim_enabled, [0, 0], "and stop after the line");
+    assert_eq!(
+        refreshes(&s),
+        20,
+        "20 view refreshes (0x102ef0), each paced"
+    );
+    let (s, turning) = work_crank(s, false);
+    assert_eq!(bridge_pieces(&s), raised(), "frame 3: back up into one row");
+    assert_eq!(turning, [2, 2], "backward while it rises");
+    assert_eq!(s.map.anim_enabled, [0, 0]);
+    assert_eq!(refreshes(&s), 40);
+    let t = scroll_text(&s);
+    let (down, up) = (t.find(BRIDGE_LINES[2]), t.find(BRIDGE_LINES[1]));
+    assert!(
+        down.is_some() && up.is_some() && down < up,
+        "result 2's line, then result 1's: {t:?}"
+    );
+    for other in [BRIDGE_LINES[0], BRIDGE_LINES[3], BRIDGE_LINES[4], NO_BRIDGE] {
+        assert!(!t.contains(other), "no {other}");
+    }
+}
+
+#[test]
+fn a_drawbridge_with_something_in_its_way_or_on_it_stays() {
+    // Up, with an object on the first n − 4 = 2 tiles of a row it would come down on: 4.
+    let mut s = drawbridge_site();
+    crate::objects::create_on_map(&mut s.objects, 0x77, 0, 1, 105, 103, 0);
+    let (s, _) = work_crank(s, false);
+    assert_eq!(bridge_pieces(&s), raised(), "result 4: it stays up");
+    assert!(scroll_text(&s).contains(BRIDGE_LINES[4]));
+    // Down, with an object on it: 3.
+    let (mut s, _) = work_crank(drawbridge_site(), false);
+    crate::objects::create_on_map(&mut s.objects, 0x77, 0, 1, 107, BANK_ROW, 0);
+    let (s, _) = work_crank(s, false);
+    assert_eq!(bridge_pieces(&s), lowered(), "result 3: it stays down");
+    assert!(scroll_text(&s).contains(BRIDGE_LINES[3]));
+    assert!(!scroll_text(&s).contains(BRIDGE_LINES[1]));
+}
+
+#[test]
+fn a_lowered_drawbridge_covers_what_its_check_leaves_out_and_lies_under_the_bank_row() {
+    // 0x12de3a checks the first n − 4 tiles of each row above the bank row only: an object on
+    // a row's third tile and one on the bank row do not stop it. The bank row's pieces move
+    // what lies on their tiles there again (0x10c9d2), ahead of the piece; above, the new
+    // piece comes first.
+    let mut s = drawbridge_site();
+    let third = crate::objects::create_on_map(&mut s.objects, 0x77, 0, 1, 106, 102, 0);
+    let bank = crate::objects::create_on_map(&mut s.objects, 0x77, 0, 1, 105, BANK_ROW, 0);
+    let (mut s, _) = work_crank(s, false);
+    assert_eq!(bridge_pieces(&s), lowered());
+    assert!(scroll_text(&s).contains(BRIDGE_LINES[2]));
+    assert_eq!(super::first_at(&mut s, 105, BANK_ROW, 0), bank);
+    let first = super::first_at(&mut s, 106, 102, 0);
+    assert_eq!(s.objects.kind(first), 0x10d, "the piece ahead of it");
+    assert_eq!(super::next_here(&mut s), third);
+}
+
+#[test]
+fn a_crank_without_its_bridge_or_with_a_piece_of_another_frame_says_so() {
+    // No piece of the crank's quality: the no-bridge line, nothing turns.
+    let mut s = drawbridge_site();
+    s.objects.qq[A as usize] = 9 << 8;
+    let (s, turning) = work_crank(s, false);
+    assert_eq!(bridge_pieces(&s), raised());
+    assert!(scroll_text(&s).contains(NO_BRIDGE));
+    assert!(turning.is_empty(), "the crank tiles do not turn");
+    assert_eq!(refreshes(&s), 0);
+    // The first piece of the quality has frame 7: the crank turns, result 0.
+    let mut s = drawbridge_site();
+    s.objects.qq[PIECES as usize] = 0;
+    s.objects.qq[PIECES as usize + 1] = CRANK_Q << 8;
+    let before = bridge_pieces(&s);
+    let (s, turning) = work_crank(s, false);
+    assert_eq!(bridge_pieces(&s), before, "result 0: nothing moved");
+    assert!(scroll_text(&s).contains(BRIDGE_LINES[0]));
+    assert_eq!(turning, [1, 1]);
+    assert_eq!(refreshes(&s), 20);
+}
+
+#[test]
+fn telekinesis_on_the_crank_works_the_bridge_as_use_does() {
+    let (by_use, _) = work_crank(drawbridge_site(), false);
+    let (by_spell, turning) = work_crank(drawbridge_site(), true);
+    assert_eq!(bridge_pieces(&by_spell), lowered(), "0x118e98 → 0x12e3f6");
+    assert_eq!(bridge_pieces(&by_spell), bridge_pieces(&by_use));
+    assert_eq!(turning, [1, 1]);
+    assert!(scroll_text(&by_spell).contains(BRIDGE_LINES[2]));
+}
+
+/// Every object slot as it is (type and frame, place, quantity and quality, status, list link)
+/// and the free slots: what a drawbridge that does not move leaves as it was.
+type Objects = (
+    Vec<u16>,
+    Vec<Position>,
+    Vec<u16>,
+    Vec<u8>,
+    Vec<Slot>,
+    (Slot, i16),
+);
+
+fn all_objects(s: &State) -> Objects {
+    let o = &s.objects;
+    (
+        o.type_frame.clone(),
+        o.location.clone(),
+        o.qq.clone(),
+        o.obj_status.clone(),
+        o.next.clone(),
+        o.free,
+    )
+}
+
+/// Made-up objects away from the bridge until `left` object slots are free.
+fn fill_pool(s: &mut State, left: i16) {
+    while s.objects.free.1 > left {
+        let o = crate::objects::create_on_map(&mut s.objects, 0x77, 0, 1, 90, 110, 0);
+        assert!(o >= 0);
+    }
+}
+
+#[test]
+fn a_drawbridge_the_object_pool_cannot_hold_stays_as_it_is() {
+    // Lowering frees the raised row's 5 pieces, then makes 3 rows of 4: 7 free slots needed.
+    // With 6 nothing is made or removed (result 0); with 7 it comes down.
+    let mut s = drawbridge_site();
+    fill_pool(&mut s, 6);
+    let before = all_objects(&s);
+    let (s, turning) = work_crank(s, false);
+    assert_eq!(all_objects(&s), before, "every object as it was");
+    assert_eq!(bridge_pieces(&s), raised());
+    let t = scroll_text(&s);
+    assert!(
+        t.contains(BRIDGE_LINES[0]) && !t.contains(BRIDGE_LINES[2]),
+        "result 0's line: {t:?}"
+    );
+    assert_eq!(turning, [1, 1], "the crank still turns");
+    let mut s = drawbridge_site();
+    fill_pool(&mut s, 7);
+    let (s, _) = work_crank(s, false);
+    assert_eq!(bridge_pieces(&s), lowered(), "7 free slots are enough");
+    // Raising makes its frame 6 piece before any piece goes, each later one after one went:
+    // 1 free slot needed.
+    let (mut s, _) = work_crank(drawbridge_site(), false);
+    fill_pool(&mut s, 0);
+    let before = all_objects(&s);
+    let (s, _) = work_crank(s, false);
+    assert_eq!(all_objects(&s), before, "every object as it was");
+    assert_eq!(bridge_pieces(&s), lowered());
+    let t = scroll_text(&s);
+    assert!(
+        t.contains(BRIDGE_LINES[0]) && !t.contains(BRIDGE_LINES[1]),
+        "result 0's line: {t:?}"
+    );
+    let (mut s, _) = work_crank(drawbridge_site(), false);
+    fill_pool(&mut s, 1);
+    let (s, _) = work_crank(s, false);
+    assert_eq!(bridge_pieces(&s), raised(), "1 free slot is enough");
+}
+
+#[test]
+fn a_raised_drawbridge_over_a_column_with_no_end_tile_stays_up() {
+    // No bank row: the original would walk down the column for ever; the port stops and
+    // leaves everything as it was, result 0.
+    let mut s = drawbridge_site();
+    s.map.window_tiles.iter_mut().for_each(|t| *t = MOAT);
+    let before = all_objects(&s);
+    let (s, _) = work_crank(s, false);
+    assert_eq!(all_objects(&s), before, "every object as it was");
+    let t = scroll_text(&s);
+    assert!(
+        t.contains(BRIDGE_LINES[0]) && !t.contains(BRIDGE_LINES[2]),
+        "result 0's line: {t:?}"
+    );
 }

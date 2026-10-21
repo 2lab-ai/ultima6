@@ -102,7 +102,8 @@ fn use_on(s: State, files: &Files, target: Slot, cell: (i16, i16), keys: &[Input
         io.present();
     });
     let mut queued = keys.iter();
-    for _ in 0..400 {
+    // Room for the crank's 20 paced view refreshes (some 280 ticks).
+    for _ in 0..1000 {
         if e.finished() {
             break;
         }
@@ -431,34 +432,135 @@ fn anywhere(files: &Files, kind: u16) -> Option<(u16, u16, u8)> {
     (0..=5u8).find_map(|z| records(&s, kind, 0, 0, z).first().map(|r| (r.0, r.1, z)))
 }
 
-/// The drawbridge crank (0x120) and the serpent figure (0x139) reach unported routines
-/// (0x12de3a, 0x12ff50); their fallbacks print the game's own line that nothing happened
-/// (0x12ca48, 0x12ceee) instead of ending silently.
+/// The serpent figure (0x139) reaches the unported 0x12ff50; its fallback prints the game's own
+/// line that nothing happened (0x12ceee) instead of ending silently.
 #[test]
-fn unported_drawbridge_and_serpent_figure_print_a_line() {
+fn unported_serpent_figure_prints_a_line() {
     let Some(files) = files() else { return };
-    for (kind, stub, name) in [
-        (0x120, "0x12de3a", "9-drawbridge"),
-        (0x139, "0x12ff50", "10-serpent-figure"),
-    ] {
-        let Some((x, y, z)) = anywhere(&files, kind) else {
-            eprintln!("[{name}] no {kind:#x} in the world");
-            continue;
-        };
+    let (kind, stub, name) = (0x139, "0x12ff50", "10-serpent-figure");
+    let Some((x, y, z)) = anywhere(&files, kind) else {
+        eprintln!("[{name}] no {kind:#x} in the world");
+        return;
+    };
+    let mut s = start(&files);
+    goto(&mut s, x, y + 1, z);
+    let obj = slot_at(&mut s, x, y, z, kind);
+    assert!(obj >= 0, "no {kind:#x} where the records put it");
+    let n = lines_of(&s).len();
+    let e = use_on(s, &files, obj, (x as i16, y as i16), &[]);
+    let out = report(&e, name, n);
+    assert!(
+        e.stub_hits().keys().any(|k| k.starts_with(stub)),
+        "[{name}] reaches the stub {stub}"
+    );
+    assert!(
+        out.len() >= 2,
+        "[{name}] the name, then the fallback's line"
+    );
+}
+
+/// The drawbridge pieces (0x10d) on the surface in the object slots: (x, y, frame), sorted;
+/// with `quality`, only the pieces of that quality.
+fn bridge_pieces(s: &State, quality: Option<u16>) -> Vec<(u16, u16, u16)> {
+    let o = &s.objects;
+    let mut v: Vec<_> = (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .filter(|&i| o.kind(i) == 0x10d && o.place(i) == 0 && o.z(i) == 0)
+        .filter(|&i| quality.is_none_or(|q| o.qq_of(i) >> 8 == q))
+        .map(|i| (o.x(i), o.y(i), o.tf(i) >> 10))
+        .collect();
+    v.sort();
+    v
+}
+
+/// Which of 0x12e3f6's lines ([`super::mech::STR_BRIDGE`], read from the user's `game` at run
+/// time) is among `lines`: its result 0..4, -1 for none. Compared with the white space taken
+/// out (the scroll wraps a long line); the longest that matches, should one line hold another.
+fn bridge_line(e: &Engine, lines: &[String]) -> i32 {
+    let bare = |t: &str| t.split_whitespace().collect::<String>();
+    let shown = bare(&lines.join(" "));
+    super::mech::STR_BRIDGE
+        .iter()
+        .map(|&a| {
+            let text = crate::main_loop::game_string(e.io(), a);
+            bare(
+                &text
+                    .iter()
+                    .map(|&b| crate::ui::wide::latin_char(u16::from(b)))
+                    .collect::<String>(),
+            )
+        })
+        .enumerate()
+        .filter(|(_, t)| !t.is_empty() && shown.contains(t.as_str()))
+        .max_by_key(|(_, t)| t.len())
+        .map_or(-1, |(i, _)| i as i32)
+}
+
+/// Every drawbridge crank (0x120) on the surface, each from a new game: Use lowers the bridge of
+/// its quality (its pieces of that quality change; the line of result 2), Use again raises it
+/// (every piece where and as it was before; the line of result 1). The leader's followers are
+/// parked out of the world first (level 15, as the region leave 0x108fba parks members), so no
+/// member but the leader stands where the bridge comes down or lies. A crank with no piece of
+/// its quality is counted apart. Prints the crank indices, the result index of each Use's line,
+/// pass / fail and counts only. Real data, two Uses of 20 paced view refreshes per crank: run
+/// with `--ignored` (the merge gate).
+#[test]
+#[ignore = "real data: the user's files, run with --ignored"]
+fn each_surface_crank_turns_its_bridge_and_back() {
+    let Some(files) = files() else { return };
+    let pass = |ok: bool| if ok { "pass" } else { "fail" };
+    let cranks = records(&start(&files), 0x120, 0, 0, 0);
+    let (mut passed, mut failed, mut no_bridge) = (0, 0, 0);
+    for (i, &(x, y, _, _)) in cranks.iter().enumerate() {
         let mut s = start(&files);
-        goto(&mut s, x, y + 1, z);
-        let obj = slot_at(&mut s, x, y, z, kind);
-        assert!(obj >= 0, "no {kind:#x} where the records put it");
+        goto(&mut s, x, y + 1, 0);
+        let me = lead(&s);
+        let (lx, ly) = (s.objects.x(me), s.objects.y(me));
+        let others: Vec<Slot> = s
+            .actors
+            .party
+            .active()
+            .map(|m| m.slot())
+            .filter(|&m| m != me)
+            .collect();
+        for m in others {
+            crate::objects::move_to(&mut s, m, lx, ly, 0xf);
+        }
+        let crank = slot_at(&mut s, x, y, 0, 0x120);
+        assert!(crank >= 0, "[crank {i}] no crank where the records put it");
+        let q = s.objects.qq_of(crank) >> 8;
+        let (all, own) = (bridge_pieces(&s, None), bridge_pieces(&s, Some(q)));
+        if own.is_empty() {
+            no_bridge += 1;
+            eprintln!("[crank {i}] no piece of its quality");
+            continue;
+        }
+        let cell = (x as i16, y as i16);
         let n = lines_of(&s).len();
-        let e = use_on(s, &files, obj, (x as i16, y as i16), &[]);
-        let out = report(&e, name, n);
-        assert!(
-            e.stub_hits().keys().any(|k| k.starts_with(stub)),
-            "[{name}] reaches the stub {stub}"
+        let e = use_on(s, &files, crank, cell, &[]);
+        let down = bridge_line(&e, &report(&e, &format!("11-crank-{i}-turn"), n));
+        let s = e.state().clone();
+        let turned = bridge_pieces(&s, Some(q));
+        let n = lines_of(&s).len();
+        let e = use_on(s, &files, crank, cell, &[]);
+        let up = bridge_line(&e, &report(&e, &format!("11-crank-{i}-back"), n));
+        let back = bridge_pieces(&e.state(), None);
+        let changed = !turned.is_empty() && turned != own && down == 2;
+        let restored = back == all && up == 1;
+        eprintln!(
+            "[crank {i}] turn line {down}: {}, back line {up}: {}",
+            pass(changed),
+            pass(restored)
         );
-        assert!(
-            out.len() >= 2,
-            "[{name}] the name, then the fallback's line"
-        );
+        if changed && restored {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
     }
+    eprintln!(
+        "[cranks] {}: {passed} pass, {failed} fail, {no_bridge} without a bridge",
+        cranks.len()
+    );
+    assert!(passed > 0, "a crank turns its bridge");
+    assert!(failed == 0, "every crank with a bridge turns it and back");
 }

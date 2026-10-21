@@ -4,18 +4,25 @@
 use super::defs::{self, MSG_FAILED, MSG_NO_EFFECT};
 use super::dispatch::FMT_NL_LINE;
 use super::{Ux, leader, seams, set_frame};
+use crate::engine::Io;
 use crate::objects::{Slot, object_of_kind_at};
 use crate::state::State;
-use crate::todo_stub;
 
 const STR_BURIED: u32 = 0x0012_c91c;
 const STR_CANT_BURY: u32 = 0x0012_c926;
 const STR_FIRE: u32 = 0x0012_c9f2;
 const STR_NOT_NOW: u32 = 0x0012_c9fa;
 const STR_POWDER_LIT: u32 = 0x0012_ca04;
-const STR_NO_BRIDGE: u32 = 0x0012_ca2a;
-/// 0x12e3f6's line for result 0 of 0x12de3a (the bridge did not move).
-const STR_BRIDGE_NOTHING: u32 = 0x0012_ca48;
+pub(super) const STR_NO_BRIDGE: u32 = 0x0012_ca2a;
+/// 0x12e3f6's lines for the results 0..4 of 0x12de3a (the jump table at 0x12e4d6): nothing
+/// moved, raised, lowered, something on it, something in the way.
+pub(super) const STR_BRIDGE: [u32; 5] = [
+    0x0012_ca48,
+    0x0012_ca66,
+    0x0012_ca7e,
+    0x0012_ca96,
+    0x0012_cab4,
+];
 const STR_LEVER: u32 = 0x0012_cad2;
 const STR_STRANGE: u32 = 0x0012_cae6;
 const STR_NOISE: u32 = 0x0012_cb02;
@@ -241,18 +248,28 @@ pub async fn switch(ux: Ux<'_>, obj: Slot) {
         .await;
 }
 
-/// Original: 0x12e3f6 (objects: the drawbridge crank: find the bridge of the crank's quality)
-/// [partial]
+/// The drawbridge piece type.
+const BRIDGE: u16 = 0x10d;
+/// The tiles 0x12e3f6 animates while the crank turns (0x101ff6 on each, in this order).
+const CRANK_TILES: [u16; 2] = [0x3f1, 0x3fc];
+/// Port: the most rows [`bridge`] walks down looking for the end of a bridge it lowers.
+const BRIDGE_ROWS: u16 = 0x400;
+
+/// Original: 0x12e3f6 (objects: the drawbridge crank: raise or lower the bridge of its quality)
 ///
-/// Ported: the search for a drawbridge piece (0x10d) of the crank's quality on the level (the
-/// line 0x12ca2a when there is none). The raising / lowering 0x12de3a (with its helpers
-/// 0x12dd1a, 0x12ddae, 0x12ddda) is a stub point.
+/// The first drawbridge piece (0x10d) of the crank's quality on the level is the bridge's (none:
+/// the line 0x12ca2a). The tiles 0x3f1 and 0x3fc animate (0x101ff6: backward when that piece
+/// has frame 3, else forward) for 20 view refreshes (0x102ef0); then 0x12de3a moves the bridge,
+/// its result picks the line ([`STR_BRIDGE`]) and the animation stops (0x101ff6 with 0).
+///
+/// Port: each refresh waits its time on the engine clock before it is drawn, as X-ray's do
+/// ([`crate::magic::xray`]); without a wait the port would publish none of them.
 pub async fn drawbridge(ux: Ux<'_>, obj: Slot) {
     let found = {
         let mut s = ux.s();
         let q = super::quality(&s, obj);
         let mut c = crate::objects::begin_area(&mut s, 0, 0, 0x3ff, 0x3ff);
-        while c >= 0 && (s.objects.kind(c) != 0x10d || super::quality(&s, c) != q) {
+        while c >= 0 && (s.objects.kind(c) != BRIDGE || super::quality(&s, c) != q) {
             c = crate::objects::next_in_area(&mut s.objects);
         }
         c
@@ -261,12 +278,211 @@ pub async fn drawbridge(ux: Ux<'_>, obj: Slot) {
         ux.print(STR_NO_BRIDGE, &[]).await;
         return;
     }
-    // Contract: 0x101ff6 ×2, 0x102ef0 ×20, then 0x12de3a raises or lowers the bridge pieces and
-    // returns 0..4, the line printed by it (jump table at 0x12e4d6: 0x12ca48, 0x12ca66,
-    // 0x12ca7e, 0x12ca96, 0x12cab4). Fallback: the bridge stays as it is and the line of
-    // result 0 (nothing happened, 0x12ca48) is printed.
-    todo_stub!("0x12de3a raise or lower the drawbridge", ());
-    ux.print(STR_BRIDGE_NOTHING, &[]).await;
+    {
+        let mut s = ux.s();
+        let way = if s.objects.tf(found) >> 10 == 3 { 2 } else { 1 };
+        for tile in CRANK_TILES {
+            crate::main_loop::set_tile_animation(&mut s, tile, way);
+        }
+    }
+    for _ in 0..20 {
+        crate::combat::present::pace(ux.state, ux.io, crate::combat::present::REFRESH_MS).await;
+        crate::gfx::refresh_view(&mut ux.s(), ux.io);
+    }
+    let result = bridge(&mut ux.s(), ux.io, found);
+    ux.print(STR_BRIDGE[usize::from(result)], &[]).await;
+    let mut s = ux.s();
+    for tile in CRANK_TILES {
+        crate::main_loop::set_tile_animation(&mut s, tile, 0);
+    }
+}
+
+/// Original: 0x12de3a (objects: raise or lower the drawbridge whose first piece is `piece`; 0..4)
+///
+/// `piece`, at (x0, y0), carries the bridge's quality. Frame 3 (lowered): the rows from y0
+/// down that have a piece at x0, each walked east while there is one; anything else on one
+/// (0x12dd1a) gives 3. Else a frame 6 piece of that quality at (x0 − 1, y0 − 1), the first
+/// row's pieces become frame 7 one row up, the last of them frame 8, the other rows go: 1.
+/// Frame 6 (raised): n = 1 + the pieces of its row from x0. From (x0 + 1, y0 + 1) down to the
+/// row whose map tile at x0 + 1 is an end (0x12ddae), anything on the first n − 4 tiles of a
+/// row gives 4. Else the row goes; every row above the end row gets frame 3 (of the quality),
+/// n − 4 × frame 4 and frame 5 from x0 + 1, the end row frame 0, n − 4 × frame 1 and frame 2,
+/// each with what lies on its tile moved there again (0x10c9d2, ahead of the piece): 2. Both
+/// end with the view flags (0x109e74). Any other frame: 0.
+///
+/// Port: down a column with no end tile the original walks on for ever (the rows wrap round
+/// the world); the port stops after [`BRIDGE_ROWS`] rows and leaves the bridge as it is (0).
+/// And the original goes on when the object pool cannot make a piece (0x10bc4c: -1), leaving
+/// the bridge part built or with no piece of its quality for the crank to find; before it
+/// changes anything the port counts the free slots the pieces need, in the order the original
+/// makes and removes them, and when they fall short leaves the bridge as it is (0).
+fn bridge(s: &mut State, io: &Io, piece: Slot) -> u8 {
+    let q = super::quality(s, piece);
+    let (x0, y0) = (s.objects.x(piece), s.objects.y(piece));
+    match s.objects.tf(piece) >> 10 {
+        3 => raise(s, piece, q, x0, y0),
+        6 => lower(s, io, piece, q, x0, y0),
+        _ => 0,
+    }
+}
+
+/// The piece at (x, y) on the view's level (0x12dcbe of 0x10d), -1.
+fn piece_at(s: &mut State, x: u16, y: u16) -> Slot {
+    let z = z(s);
+    object_of_kind_at(s, x, y, z, BRIDGE)
+}
+
+/// Frame 3 of 0x12de3a: the lowered bridge goes up into one row.
+fn raise(s: &mut State, piece: Slot, q: u8, x0: u16, y0: u16) -> u8 {
+    let z = z(s);
+    let (mut c, mut x, mut y) = (piece, x0, y0);
+    while c >= 0 {
+        while c >= 0 {
+            if on_bridge(s, x, y, z) != 0 {
+                return 3;
+            }
+            x = x.wrapping_add(1);
+            c = piece_at(s, x, y);
+        }
+        (x, y) = (x0, y.wrapping_add(1));
+        c = piece_at(s, x, y);
+    }
+    // Port: the frame 6 piece is made before any piece goes; every piece after it right
+    // after one went (a frame 7 after its row's piece, the frame 8 after the last frame 7).
+    if s.objects.free.1 < 1 {
+        return 0;
+    }
+    let first = place(s, x0.wrapping_sub(1), y0.wrapping_sub(1), 6);
+    super::set_quality(s, first, q);
+    let (mut c, mut x, mut last) = (piece, x0, crate::objects::NONE);
+    while c >= 0 {
+        crate::objects::remove(s, c);
+        last = place(s, x, y0.wrapping_sub(1), 7);
+        x = x.wrapping_add(1);
+        c = piece_at(s, x, y0);
+    }
+    crate::objects::remove(s, last);
+    place(s, x.wrapping_sub(1), y0.wrapping_sub(1), 8);
+    let (mut x, mut y) = (x0, y0.wrapping_add(1));
+    let mut c = piece_at(s, x, y);
+    while c >= 0 {
+        while c >= 0 {
+            crate::objects::remove(s, c);
+            x = x.wrapping_add(1);
+            c = piece_at(s, x, y);
+        }
+        (x, y) = (x0, y.wrapping_add(1));
+        c = piece_at(s, x, y);
+    }
+    crate::map::view::update_view(s);
+    1
+}
+
+/// Frame 6 of 0x12de3a: the raised bridge comes down to its end row.
+fn lower(s: &mut State, io: &Io, piece: Slot, q: u8, x0: u16, y0: u16) -> u8 {
+    let z = z(s);
+    let (mut n, mut c, mut x) = (1i16, piece, x0);
+    while c >= 0 {
+        n += 1;
+        x = x.wrapping_add(1);
+        c = piece_at(s, x, y0);
+    }
+    let x1 = x0.wrapping_add(1);
+    let tile = |s: &State, y: u16| {
+        let t = s
+            .map
+            .tile_at(usize::from(x1), usize::from(y), usize::from(z));
+        u16::from(t.unwrap_or(0))
+    };
+    let (mut y, mut rows) = (y0.wrapping_add(1), 0);
+    while !bridge_end(io, tile(s, y)) {
+        rows += 1;
+        if rows > BRIDGE_ROWS {
+            return 0;
+        }
+        let mut x = x1;
+        for _ in 0..n - 4 {
+            if on_bridge(s, x, y, z) != 0 {
+                return 4;
+            }
+            x = x.wrapping_add(1);
+        }
+        y = y.wrapping_add(1);
+    }
+    // Port: the raised row's n − 1 pieces go first, then each of the rows above the end row
+    // and the end row gets 2 + (n − 4 when positive) pieces.
+    let made = (i32::from(rows) + 1) * (2 + i32::from(n - 4).max(0));
+    if i32::from(s.objects.free.1) + i32::from(n - 1) < made {
+        return 0;
+    }
+    let (mut c, mut x) = (piece, x0);
+    while c >= 0 {
+        crate::objects::remove(s, c);
+        x = x.wrapping_add(1);
+        c = piece_at(s, x, y0);
+    }
+    let mut y = y0.wrapping_add(1);
+    while !bridge_end(io, tile(s, y)) {
+        let first = place(s, x1, y, 3);
+        super::set_quality(s, first, q);
+        let mut x = x1.wrapping_add(1);
+        for _ in 0..n - 4 {
+            place(s, x, y, 4);
+            x = x.wrapping_add(1);
+        }
+        place(s, x, y, 5);
+        y = y.wrapping_add(1);
+    }
+    let mut x = x1;
+    for frame in std::iter::once(0)
+        .chain(std::iter::repeat_n(1, usize::try_from(n - 4).unwrap_or(0)))
+        .chain(std::iter::once(2))
+    {
+        place(s, x, y, frame);
+        let o = on_bridge(s, x, y, z);
+        if o != 0 {
+            let (ox, oy) = (s.objects.x(o), s.objects.y(o));
+            crate::objects::move_to(s, o, ox, oy, z);
+        }
+        x = x.wrapping_add(1);
+    }
+    crate::map::view::update_view(s);
+    2
+}
+
+/// Original: 0x12dd1a (objects: the first object at (x, y, z) that is not a drawbridge piece, 0
+/// when none)
+fn on_bridge(s: &mut State, x: u16, y: u16, z: u16) -> Slot {
+    let mut c = super::first_at(s, x, y, z);
+    while c >= 0 && s.objects.kind(c) == BRIDGE {
+        c = super::next_here(s);
+    }
+    if c == -1 { 0 } else { c }
+}
+
+/// Original: 0x12ddae (objects: `tile` is one of the 5 bytes at A4-0x6614, the map tiles a
+/// lowered drawbridge ends on)
+fn bridge_end(io: &Io, tile: u16) -> bool {
+    let (off, n) = defs::BRIDGE_ENDS;
+    (0..n).any(|i| u16::from(defs::a4_byte(io, off, i)) == tile)
+}
+
+/// Original: 0x12ddda (objects: a new drawbridge piece of `frame` at (x, y) on the view's level)
+///
+/// The type is 0x10d at every call. Made from a record (0x134e1c packs the place, 0x10bc4c
+/// makes the object: status, quantity and quality 0), then not temporary (status bit 5
+/// cleared). Returns the slot, -1 when the pool is full.
+fn place(s: &mut State, x: u16, y: u16, frame: u16) -> Slot {
+    let [b0, b1, b2] = crate::objects::pack_xyz(x, y, z(s)).to_packed();
+    let [hi, lo] = (BRIDGE | frame << 10).to_be_bytes();
+    let p = crate::objects::create_from_record(s, [0, b0, b1, b2, hi, lo, 0, 0]);
+    if let Some(st) = usize::try_from(p)
+        .ok()
+        .and_then(|i| s.objects.obj_status.get_mut(i))
+    {
+        *st &= !0x20;
+    }
+    p
 }
 
 /// Original: 0x12f1e6 (objects: dig with a shovel or pick in a direction)

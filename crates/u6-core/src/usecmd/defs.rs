@@ -16,6 +16,8 @@ pub const DIR_DY: i32 = -0x61c6;
 /// Original: A4-0x661c / A4-0x6618 (4 signed bytes each: cannon shot dx / dy by its frame)
 pub const CANNON_DX: i32 = -0x661c;
 pub const CANNON_DY: i32 = -0x6618;
+/// Original: A4-0x6614 (5 bytes: the map tiles a lowered drawbridge ends on, 0x12ddae)
+pub const BRIDGE_ENDS: (i32, usize) = (-0x6614, 5);
 /// Original: A4-0x71b4 (pointers by a wand's quality: 0-terminated spell-number lists)
 pub const WAND_SPELLS: i32 = -0x71b4;
 /// Original: A4-0x70b8 (pointers by spell number: spell names)
