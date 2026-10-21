@@ -84,7 +84,8 @@
 // shown either; data-voice-distinct counts the voices heard), or the personality voice a dropped
 // voice pack gives its actor (`voices.u6vp`, which the owner's local tool tools/speech/profile.mjs
 // makes from the NPC bundles: named so, or a .json dropped alone told by its format; checked
-// whole, kept in IndexedDB, shown as a count, never sent; "Forget voices" removes it too). The speech plays through a voice
+// whole, kept in IndexedDB, shown as a count, never sent; "Forget voices" removes it too; the
+// site may also list one for the key, slice K6 below). The speech plays through a voice
 // gain beside the music's (Mute silences both); Enter, Escape and Space on the canvas, and a newer
 // turn, cancel it; above 4x nothing is spoken. While voices are on a chip says the voice is
 // generated on this device. The choice and the acceptance are kept in localStorage: the next
@@ -142,7 +143,11 @@
 // without a listed name counts as dropped); it is downloaded again only when the listing names
 // another file than the kept one came from, never over a dropped one, and not after Forget until
 // the page goes to 한글 again or the next visit. A download or a pack that fails is not tried
-// again in the visit (the game stays English, with the line the page has for that case).
+// again in the visit (the game stays English, with the line the page has for that case). The
+// listing may also name a voice pack (`voices`: {file, label}; spec 09 Design 4), which the
+// restore downloads with the key in either language and loads as a dropped one, its file name
+// kept with it, under the same rules (not after Forget voices in the visit), with no line of its
+// own.
 import init, {
   Game, GameStrings, HdPack, LocalePack, NpcBundles, PackProbe, budget_ms, input_too_large, max_input_bytes,
   max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
@@ -607,9 +612,11 @@ function hearSpeech() {
 
 // "Forget voices": the voices off, the cached model, the acceptance and the voice pack removed
 // (the pack off the player at once, out of storage as an operation of the queue, after any drop
-// queued before). The model's caches and the pack are removed apart: one that cannot be removed
-// leaves the other removed, and the line says that not everything was.
+// queued before; the site's pack is not downloaded again in the visit). The model's caches and
+// the pack are removed apart: one that cannot be removed leaves the other removed, and the line
+// says that not everything was.
 async function forgetVoiceModel() {
+  voiceHostedForgot = true;
   voiceOff();
   remember(VOICES_KEY, null);
   remember(TERMS_KEY, null);
@@ -634,6 +641,7 @@ async function forgetVoiceModel() {
   let packGone = true;
   await enqueue('opForgetVoices', async () => {
     attachVoicePack(null);
+    voiceSource = '';
     try {
       await forgetVoicePack();
     } catch (err) {
@@ -654,6 +662,15 @@ const VOICE_PACK_ERRORS = {
   keys: 'voicePackErrKeys', shape: 'voicePackErrShape', revision: 'voicePackErrRevision',
   range: 'voicePackErrRange',
 };
+
+// Where the voice pack kept or loaded came from, as the Korean pack's `koSource`: '' (none),
+// DROPPED (a drop, or a pack kept without a listed name, even one that no longer checks out) or
+// the file the site's listing named, kept with the pack in its own transaction (store.js). The
+// listed one is not tried again in the visit once it failed (`voiceHostedFailed`), nor after
+// Forget voices (`voiceHostedForgot`).
+let voiceSource = '';
+let voiceHostedFailed = false;
+let voiceHostedForgot = false;
 
 // An error's kind only (its name): a message could quote what was read.
 function errorKind(err) {
@@ -689,56 +706,113 @@ async function probeVoicePack(item, alone) {
   }
 }
 
-// A dropped voice pack (`value`: its object when the probe read it): read (at most
-// VOICE_PACK_MAX bytes), checked whole (profile.js readPack), set on the player and kept in this
-// browser. One that does not check out is refused with a line that names only the kind, and
-// nothing changes. When the browser does not keep it, the pack works for this visit only and the
-// one kept before is removed (else the next visit would bring it back unsaid).
-async function loadVoicePackFile(file, value) {
-  const refuse = (code) => say('voicePackRefused', t(VOICE_PACK_ERRORS[code]));
+// A voice pack from `source` (DROPPED, or the listed file it was downloaded as; `value`: its
+// object when the probe read it): read (at most VOICE_PACK_MAX bytes), checked whole (profile.js
+// readPack), set on the player and kept in this browser in place of the one before, with its
+// source. One that does not check out is refused (`refused`: its kind) and nothing changes.
+// When the browser does not keep it, the pack works for this visit only and the one kept before
+// is removed (else the next visit would bring it back unsaid; `oldStays` when it could not be).
+async function installVoicePack(file, value, source) {
   if (value === undefined) {
-    if (file.size > VOICE_PACK_MAX) {
-      refuse('large');
-      return;
-    }
+    if (file.size > VOICE_PACK_MAX) return { refused: 'large' };
     const bytes = new Uint8Array(await file.arrayBuffer());
     try {
       value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     } catch {
-      refuse('json');
-      return;
+      return { refused: 'json' };
     }
   }
   const read = readPack(value);
-  if (!read.ok) {
-    refuse(read.code);
-    return;
-  }
+  if (!read.ok) return { refused: read.code };
   attachVoicePack(read.pack);
+  voiceSource = source;
   try {
-    await storeVoicePack(value);
-    say('voicePack', read.pack.size);
+    await storeVoicePack(value, PACK_NAME.test(source) ? source : '');
+    return { voices: read.pack.size, kept: true };
   } catch (err) {
     console.warn(`could not keep the voice pack: ${errorKind(err)}`);
-    let old = t('voicePackOldGone');
+    let oldStays = false;
     try {
       await forgetVoicePack();
     } catch (failed) {
       console.warn(`could not remove the voice pack kept before: ${errorKind(failed)}`);
-      old = t('voicePackOldStays');
+      oldStays = true;
     }
-    say('voicePackNotKept', read.pack.size, old);
+    return { voices: read.pack.size, kept: false, oldStays };
   }
 }
 
-// The voice pack kept from the last visit, on the player before the first game speaks. One that
-// no longer checks out (another version's ranges) is left where it is and not used.
+// A dropped voice pack: installed, with a line that gives its count, or the refusal's that names
+// only the kind.
+async function loadVoicePackFile(file, value) {
+  const got = await installVoicePack(file, value, DROPPED);
+  if (got.refused) say('voicePackRefused', t(VOICE_PACK_ERRORS[got.refused]));
+  else if (got.kept) say('voicePack', got.voices);
+  else say('voicePackNotKept', got.voices, t(got.oldStays ? 'voicePackOldStays' : 'voicePackOldGone'));
+}
+
+// The voice pack kept from the last visit, on the player before the first game speaks, with its
+// source: one kept without a listed name (a drop, or a source missing or not a plain name) is a
+// dropped one. One that no longer checks out (another version's ranges) is left where it is and
+// not used. Storage that cannot be read: the site's pack is not tried in this visit (a pack kept
+// there may be a dropped one).
 async function restoreVoicePack() {
-  const value = await loadVoicePack();
-  if (value === null) return;
-  const read = readPack(value);
+  let kept;
+  try {
+    kept = await loadVoicePack();
+  } catch (err) {
+    voiceHostedFailed = true;
+    console.warn(`could not read the kept voice pack: ${errorKind(err)}`);
+    return;
+  }
+  if (kept === null) return;
+  voiceSource = PACK_NAME.test(kept.source) ? kept.source : DROPPED;
+  const read = readPack(kept.pack);
   if (read.ok) attachVoicePack(read.pack);
   else console.warn(`the kept voice pack is not used: ${read.code}`);
+}
+
+// The voice pack the site lists for the key (spec 09 Design 4, as slice K6's Korean pack, in
+// either language: the voices speak both): downloaded with the key (at most VOICE_PACK_MAX bytes
+// read) and installed as a dropped one, when no pack is kept or the one kept came from another
+// listed file; never over a dropped one. It has no line of its own (data-voice-pack gives its
+// count). A download that fails, or a pack refused, changes nothing, warns with its kind only and
+// is not tried again in this visit.
+async function hostedVoicePack() {
+  if (!packKey.key || voiceHostedFailed || voiceHostedForgot) return;
+  try {
+    const listed = (await packIndex()).voices;
+    if (listed === null) return;
+    if (voiceSource !== '' && (!PACK_NAME.test(voiceSource) || voiceSource === listed.file)) return;
+    const response = await packFetch(listed.file);
+    if (!response?.ok) {
+      voiceHostedFailed = true;
+      console.warn(`the site's voice pack was not downloaded: HTTP ${response?.status ?? 404}`);
+      return;
+    }
+    const reader = response.body.getReader();
+    const parts = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      got += value.length;
+      if (got > VOICE_PACK_MAX) {
+        // Enough to tell it is over the limit: the install refuses it before reading it.
+        await reader.cancel();
+        break;
+      }
+    }
+    const installed = await installVoicePack(new File(parts, listed.file), undefined, listed.file);
+    if (installed.refused) {
+      voiceHostedFailed = true;
+      console.warn(`the site's voice pack is not used: ${installed.refused}`);
+    }
+  } catch (err) {
+    voiceHostedFailed = true;
+    console.warn(`the site's voice pack was not loaded: ${errorKind(err)}`);
+  }
 }
 
 // --- the Korean pack (spec 08, slice K1) -----------------------------------------------------
@@ -1932,25 +2006,28 @@ function packFetch(name) {
 }
 
 // What the site lists for this visitor (/packs/index.json: {"packs": [{"file", "label"}], "ko":
-// {"file", "label"}}), asked once a visit: `packs`, the HD packs ([] when it lists none: no key,
-// a 404, anything that does not read; a file is a plain name, a label is text), and `ko`, the
-// Korean pack ({file}: a plain name ending .u6lp; its label is not shown), null when none is
-// listed or its entry is not of that form.
+// {"file", "label"}, "voices": {"file", "label"}}), asked once a visit: `packs`, the HD packs ([]
+// when it lists none: no key, a 404, anything that does not read; a file is a plain name, a label
+// is text), `ko`, the Korean pack ({file}: a plain name ending .u6lp; its label is not shown), and
+// `voices`, the voice pack ({file}: a plain name ending .u6vp; its label is not shown), each null
+// when none is listed or its entry is not of that form.
 let packList = null;
 function packIndex() {
   packList ??= (async () => {
     try {
       const response = await packFetch('index.json');
-      if (!response?.ok) return { packs: [], ko: null };
-      const { packs, ko } = await response.json();
+      if (!response?.ok) return { packs: [], ko: null, voices: null };
+      const { packs, ko, voices } = await response.json();
       return {
         packs: (Array.isArray(packs) ? packs : [])
           .filter((p) => typeof p?.file === 'string' && PACK_NAME.test(p.file))
           .map((p) => ({ file: p.file, label: typeof p.label === 'string' && p.label ? p.label : p.file })),
         ko: typeof ko?.file === 'string' && PACK_NAME.test(ko.file) && LOCALE_PACK_NAME.test(ko.file) ? { file: ko.file } : null,
+        voices: typeof voices?.file === 'string' && PACK_NAME.test(voices.file) && VOICE_PACK_NAME.test(voices.file)
+          ? { file: voices.file } : null,
       };
     } catch {
-      return { packs: [], ko: null };
+      return { packs: [], ko: null, voices: null };
     }
   })();
   return packList;
@@ -2447,6 +2524,8 @@ enqueue('opEngine', async () => {
 enqueue('opRestore', async () => {
   try {
     await restoreVoicePack();
+    // The site's voice pack (spec 09 Design 4), in either language, before the first game speaks.
+    await hostedVoicePack();
     if (wasm) await restorePack();
     if (wasm) await restoreLocalePack();
     // In 한글 the site's Korean pack first (spec 08 K6), so the first game starts with it.

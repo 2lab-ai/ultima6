@@ -8,7 +8,9 @@
 // browser from the kept files) are one record per script under `npc-bundle:` + its archive
 // letter, `/` and its item, the bundle object itself. The voice pack (spec 09 Design 4,
 // `u6.voice-pack/1`: the owner's personality voices, by actor number; numbers only) is one
-// record under `voice-pack:` + `voices`, the pack object checked. The Korean pack (spec 08,
+// record under `voice-pack:` + `voices`, the pack object checked, and the listed file it came from
+// one under `voice-pack:source`, in the pack's own transaction as the Korean pack's source
+// below. The Korean pack (spec 08,
 // `ko.u6lp`: the owner's translation of the conversation lines, made from his files by
 // tools/i18n) is one record under `locale:ko`, its file's bytes, and where it came from (spec 08
 // K6: the file name the site's listing gave it) one under `locale:ko:source`, written, read and
@@ -173,22 +175,31 @@ export async function forgetBundles() {
 
 const VOICE_PACK = 'voice-pack:';
 const VOICE_PACKS = IDBKeyRange.bound(VOICE_PACK, `${VOICE_PACK}\uffff`);
+const VOICE_PACK_VOICES = `${VOICE_PACK}voices`;
+const VOICE_PACK_SOURCE = `${VOICE_PACK}source`;
 
-/// Keeps the voice pack `pack` (the object a dropped voices.u6vp parses to, checked) in place of
-/// the kept one. Resolves once committed, throws when it is not (the one kept before stays).
-export async function storeVoicePack(pack) {
-  await run('readwrite', (s) => s.put(pack, `${VOICE_PACK}voices`));
+/// Keeps the voice pack `pack` (the object a voices.u6vp parses to, checked) in place of the kept
+/// one, with `source` (the listed file it came from; '' for a dropped one: the source kept before
+/// is removed), in one transaction. Resolves once committed, throws when it is not (the one kept
+/// before stays).
+export async function storeVoicePack(pack, source = '') {
+  await run('readwrite', (s) => {
+    s.put(pack, VOICE_PACK_VOICES);
+    return source ? s.put(source, VOICE_PACK_SOURCE) : s.delete(VOICE_PACK_SOURCE);
+  });
 }
 
-/// The kept voice pack object, or null (none, or storage unavailable).
+/// The kept voice pack, read in one transaction: { pack, source } (`source` '' when none is kept
+/// or it is not text), or null when none is kept. Throws when the storage cannot be read (the
+/// page cannot tell whether a pack is kept).
 export async function loadVoicePack() {
-  try {
-    const pack = await run('readonly', (s) => s.get(`${VOICE_PACK}voices`));
-    return pack ?? null;
-  } catch (err) {
-    console.warn(`could not read the kept voice pack: ${err}`);
-    return null;
-  }
+  let source = null;
+  const pack = await run('readonly', (s) => {
+    source = s.get(VOICE_PACK_SOURCE);
+    return s.get(VOICE_PACK_VOICES);
+  });
+  if (pack === undefined || pack === null) return null;
+  return { pack, source: typeof source.result === 'string' ? source.result : '' };
 }
 
 /// Removes the kept voice pack; resolves once the delete is committed, throws when it is not.

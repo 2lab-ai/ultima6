@@ -3246,7 +3246,8 @@ test('a listed pack chosen: downloaded with the key, its progress shown, loaded 
   await page.reload();
   await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
   assert.ok(!(await chooser(page)).shown, 'a reload: no chooser');
-  assert.deepEqual(env.packRequests, [], 'and no download: the kept pack');
+  // The listing is asked with the key at every restore (the voice pack it may name, spec 09).
+  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200]], 'the listing only, no download: the kept pack');
   await page.click('#settings');
   await listed(page, 2);
   assert.equal((await chooser(page)).checked, 'test-pack.zip', 'Settings: the pack chosen is checked');
@@ -4644,6 +4645,168 @@ test('Forget voices removes the voice pack even when the model\'s caches cannot 
   await h.waitSettled(page);
   assert.equal(await page.evaluate(() => document.body.dataset.voicePack), '0', 'a reload does not bring it back');
   assert.ok((await h.log(page)).includes('voicepack:load:0'), 'none kept');
+});
+
+// --- the site's voice pack (spec 09 Design 4, as spec 08 K6's Korean pack) -------------------
+// The site's listing naming a voice pack for the key, served from memory by the test server
+// through the gate set to the tests' key (sitePacks); the packs are the tests' own (made-up
+// actors and profiles), under made-up file names.
+
+const VOICES_FILE = 'voices-test-1.u6vp';
+const VOICES_NEWER = 'voices-test-2.u6vp';
+const voicesListing = (file) => JSON.stringify({ packs: [], ...(file ? { voices: { file, label: 'Voices (test)' } } : {}) });
+// The requests the page made for a voice pack of the site (the listing's are not).
+const voiceRequests = (env) => env.packRequests.filter(([path]) => path.endsWith('.u6vp'));
+// Waits until nothing is queued and the page's voice pack has `n` voices (data-voice-pack).
+const voicePackIs = (page, n) => page.waitForFunction((want) => document.body.dataset.ops === '0'
+  && document.body.dataset.voicePack === want, String(n), { timeout: 30_000 });
+
+// Nothing of the tests' packs (the sentinel, the actors, the salt, the pitches) in the page's
+// data, text or storage, nor in the console.
+async function noVoicePackValues(page, words) {
+  const where = await pageWords(page);
+  for (const s of [PACK_SENTINEL, String(PACK_A), String(PACK_B), String(VOICE_A.seedSalt), String(VOICE_A.pitch), String(VOICE_B.pitch)]) {
+    assert.ok(!where.includes(s), 'nothing of the pack in the page\'s data, text or storage');
+    assert.ok(!words.some((m) => m.includes(s)), 'nor in the console');
+  }
+}
+
+test('the site\'s voice pack (synthetic, no game): with the key and a listing that names one, the page downloads it once with the key and loads it as a dropped one (data-voice-pack its count, kept under voice-pack: with the file it came from), with no line of its own; a reload with the same listing downloads nothing; a listing that names another file downloads and loads that one', async (env) => {
+  const pack = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
+  const newer = await voicePack({ [PACK_A]: VOICE_B });
+  sitePacks(env, { 'index.json': voicesListing(VOICES_FILE), [VOICES_FILE]: JSON.stringify(pack) });
+  const { page } = await h.openPage(env);
+  const words = consoleText(page);
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await voicePackIs(page, 2);
+  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200], [`/packs/${VOICES_FILE}`, h.PACK_KEY, 200]],
+    'the listing, then the pack, each once and with the key');
+  assert.equal((await h.state(page)).status, await line('noFilesYet'), 'no line of its own');
+  let kept = await h.keptVoicePacks(page);
+  assert.deepEqual(kept.keys, ['voice-pack:source', 'voice-pack:voices'], 'kept under voice-pack:');
+  assert.deepEqual(kept.byKey['voice-pack:voices'], pack, 'the pack kept');
+  assert.equal(kept.byKey['voice-pack:source'], VOICES_FILE, 'with the file it came from');
+  env.packRequests.length = 0;
+  await page.reload();
+  await voicePackIs(page, 2);
+  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200]], 'a reload: the listing only, the kept pack loaded');
+  // A newer pack put on the site under another name: the next visit takes it, unasked.
+  sitePacks(env, { 'index.json': voicesListing(VOICES_NEWER), [VOICES_NEWER]: JSON.stringify(newer) });
+  await page.reload();
+  await voicePackIs(page, 1);
+  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200], [`/packs/${VOICES_NEWER}`, h.PACK_KEY, 200]],
+    'the other file downloaded, once');
+  kept = await h.keptVoicePacks(page);
+  assert.deepEqual(kept.byKey['voice-pack:voices'], newer, 'kept in place of the one before');
+  assert.equal(kept.byKey['voice-pack:source'], VOICES_NEWER, 'with its file');
+  await noVoicePackValues(page, words);
+  console.log(`  receipt: voice pack requests ${voiceRequests(env).length} after the newer listing, 1 visit with no download: pass`);
+});
+
+test('the site\'s voice pack and a dropped one (synthetic, no game, in 한글): a dropped voice pack is never replaced by the listed one (visits with the key download nothing); after Forget voices the listed one is not downloaded again in the visit; the next visit downloads it', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const listedPack = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
+  const dropped = await voicePack({ [PACK_A]: VOICE_B });
+  sitePacks(env, { 'index.json': voicesListing(VOICES_FILE), [VOICES_FILE]: JSON.stringify(listedPack) });
+  const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
+  const words = consoleText(page);
+  await h.load(page, env);
+  await h.dropFiles(page, [], [{ name: 'voices.u6vp', text: JSON.stringify(dropped) }]);
+  await voicePackIs(page, 1);
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await voicePackIs(page, 1);
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await page.reload();
+  await voicePackIs(page, 1);
+  assert.deepEqual(voiceRequests(env), [], 'the dropped pack stays: nothing downloaded');
+  let kept = await h.keptVoicePacks(page);
+  assert.deepEqual(kept.keys, ['voice-pack:voices'], 'kept with no source');
+  assert.deepEqual(kept.byKey['voice-pack:voices'], dropped, 'the dropped pack stays kept');
+  await page.click('#forget-voices');
+  await waitVoice(page, (want) => document.getElementById('status').textContent === want, TEXT.ko.voiceForgot, 10_000);
+  await h.waitSettled(page);
+  assert.equal(await page.evaluate(() => document.body.dataset.voicePack), '0', 'forgotten');
+  assert.deepEqual((await h.keptVoicePacks(page)).keys, [], 'and out of storage');
+  await page.click('#settings');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.deepEqual(voiceRequests(env), [], 'after Forget voices: not downloaded in the visit');
+  await page.reload();
+  await voicePackIs(page, 2);
+  assert.deepEqual(voiceRequests(env), [[`/packs/${VOICES_FILE}`, h.PACK_KEY, 200]], 'the next visit after a Forget loads it');
+  kept = await h.keptVoicePacks(page);
+  assert.deepEqual([kept.byKey['voice-pack:voices'], kept.byKey['voice-pack:source']], [listedPack, VOICES_FILE], 'kept with its file');
+  await noVoicePackValues(page, words);
+  console.log('  receipt: a dropped voice pack kept over the listed one, 0 downloads; after Forget voices 0 in the visit, 1 the next visit: pass');
+});
+
+test('the site\'s voice pack, then a dropped one (synthetic, no game): the drop keeps no source, so the next visit with a listing that names another file downloads nothing and the dropped pack stays', async (env) => {
+  const listedPack = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
+  const dropped = await voicePack({ [PACK_A]: VOICE_B });
+  sitePacks(env, { 'index.json': voicesListing(VOICES_FILE), [VOICES_FILE]: JSON.stringify(listedPack) });
+  const { page } = await h.openPage(env);
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await voicePackIs(page, 2);
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await h.dropFiles(page, [], [{ name: 'voices.u6vp', text: JSON.stringify(dropped) }]);
+  await voicePackIs(page, 1);
+  let kept = await h.keptVoicePacks(page);
+  assert.deepEqual(kept.keys, ['voice-pack:voices'], 'the drop kept in place of the site\'s pack, with no source');
+  assert.deepEqual(kept.byKey['voice-pack:voices'], dropped, 'the dropped pack kept');
+  sitePacks(env, { 'index.json': voicesListing(VOICES_NEWER), [VOICES_NEWER]: JSON.stringify(listedPack) });
+  await page.reload();
+  await voicePackIs(page, 1);
+  assert.deepEqual(voiceRequests(env), [], 'a listing that names another file: nothing downloaded');
+  kept = await h.keptVoicePacks(page);
+  assert.deepEqual([kept.keys, kept.byKey['voice-pack:voices']], [['voice-pack:voices'], dropped], 'the dropped pack stays kept');
+  console.log('  receipt: the site\'s voice pack then a drop, a renamed listing, 0 downloads: pass');
+});
+
+test('the site\'s voice pack not loaded (synthetic, no game): without a key no /packs/ request at all; an entry that is not a plain *.u6vp name is not asked for; one the site does not have (404), one that is not JSON, one the check refuses and one over the limit change nothing (the pack from before stays in use and kept, with its source), each warns with its kind only and is asked once only in the visit', async (env) => {
+  const pack = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
+  sitePacks(env, { 'index.json': voicesListing(VOICES_FILE), [VOICES_FILE]: JSON.stringify(pack) });
+  let { context, page } = await h.openPage(env);
+  await h.load(page, env);
+  assert.deepEqual(env.packRequests, [], 'no key: no request to /packs/ at all');
+  assert.equal(await page.evaluate(() => document.body.dataset.voicePack), '0', 'no pack');
+  await context.close();
+  ({ context, page } = await h.openPage(env));
+  const words = consoleText(page);
+  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await voicePackIs(page, 2);
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  for (const file of ['../voices-up.u6vp', 'voices-test.json']) {
+    sitePacks(env, { 'index.json': voicesListing(file), [file]: JSON.stringify(pack) });
+    await page.reload();
+    await voicePackIs(page, 2);
+    assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200]], 'not a plain *.u6vp name: the listing only');
+  }
+  const big = JSON.stringify(pack).replace('{', `{${' '.repeat(1 << 20)}`); // over 1 MiB
+  const cases = [
+    ['a 404', 'voices-gone.u6vp', undefined, 'the site\'s voice pack was not downloaded: HTTP 404'],
+    ['not JSON', 'voices-bad-1.u6vp', `not JSON ${PACK_SENTINEL}`, 'the site\'s voice pack is not used: json'],
+    ['a key the check refuses', 'voices-bad-2.u6vp', JSON.stringify({ ...pack, [PACK_SENTINEL]: 1 }), 'the site\'s voice pack is not used: keys'],
+    ['over the limit', 'voices-bad-3.u6vp', big, 'the site\'s voice pack is not used: large'],
+  ];
+  for (const [what, file, body, warned] of cases) {
+    sitePacks(env, { 'index.json': voicesListing(file), ...(body === undefined ? {} : { [file]: body }) });
+    await page.reload();
+    await voicePackIs(page, 2);
+    assert.deepEqual(voiceRequests(env), [[`/packs/${file}`, h.PACK_KEY, body === undefined ? 404 : 200]], `${what}: asked once, with the key`);
+    assert.equal((await h.state(page)).status, await line('noFilesYet'), `${what}: no line`);
+    const kept = await h.keptVoicePacks(page);
+    assert.deepEqual([kept.byKey['voice-pack:voices'], kept.byKey['voice-pack:source']], [pack, VOICES_FILE], `${what}: the pack from before stays kept, with its source`);
+    assert.ok(words.includes(warned), `${what}: a warning that names its kind only`);
+    await page.click('#settings');
+    await page.click('#setup-ok');
+    await h.waitSettled(page);
+    assert.equal(voiceRequests(env).length, 1, `${what}: not asked again in the visit`);
+  }
+  await noVoicePackValues(page, words);
+  console.log(`  receipt: no key 0 requests, 2 entries of another form 0 pack requests, ${cases.length} refusals 1 request each, nothing changed: pass`);
 });
 
 // --- NPC bundles (spec 09 Design 5) --------------------------------------------------------

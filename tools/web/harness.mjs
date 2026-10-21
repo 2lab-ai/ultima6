@@ -240,10 +240,10 @@ export async function forgetBundles() {
   log('bundles:forget:start'); await window.__gate('bundles-forget');
   await real.forgetBundles(); log('bundles:forget:end');
 }
-export async function storeVoicePack(pack) {
+export async function storeVoicePack(pack, source) {
   log('voicepack:store:start'); await window.__gate('voicepack-store');
   if (window.__fail.has('voicepack-store')) { log('voicepack:store:fail'); throw new DOMException('test: no room', 'QuotaExceededError'); }
-  await real.storeVoicePack(pack); log('voicepack:store:end');
+  await real.storeVoicePack(pack, source); log('voicepack:store:end');
 }
 export async function loadVoicePack() {
   const pack = await real.loadVoicePack(); log('voicepack:load:' + (pack ? 1 : 0)); return pack;

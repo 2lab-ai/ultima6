@@ -1,7 +1,8 @@
 //! Spec 09 Rights / Acceptance 5: no voice pack, and none of the tool's other outputs (the
 //! personality notes, the coverage receipt), is committed or sits under `site/`. They are read
 //! from the owner's game (tools/speech/profile.mjs makes them from the NPC bundles): they live in
-//! `~/Games/ultima6/voice/` and the owner's browser storage only. Checked: every blob in the git index (what a commit takes, read with `git cat-file`,
+//! `~/Games/ultima6/voice/` and the owner's browser storage, and the pack also behind his key
+//! (below). Checked: every blob in the git index (what a commit takes, read with `git cat-file`,
 //! whatever the working tree holds), and every file under `site/` on disk (built output and the
 //! gitignored model parts included). Any error reading them fails the test.
 //!
@@ -14,6 +15,14 @@
 //! is caught when a string token of it is a format's name, its escapes decoded (`tests/guard`),
 //! since the parse cannot rule out what it holds; and `site/` itself a symbolic link fails the
 //! guard (the walker would follow it).
+//!
+//! The one exception (spec 09 Design 4, the owner's answer of 2026-10-21, "올려서 자동 적용", to
+//! putting his voice pack behind his key like the Korean pack, used with no drop): a voice pack
+//! (a root object of the pack's format; not the notes, the receipt or an array) on disk under
+//! `site/packs/`, which is gitignored and served only through the key gate of
+//! `functions/_middleware.js`, as the Korean pack's guard allows (`no_locale_pack_in_repo.rs`).
+//! A pack in the index fails wherever it is, and the notes and a coverage receipt fail under
+//! `site/packs/` too.
 // The test reads the repository and runs git: the crate's platform-free rule is for its code.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
@@ -46,6 +55,13 @@ fn is_voice_file(bytes: &[u8]) -> bool {
     };
     let one = |v: &serde_json::Value| v["format"].as_str().is_some_and(|f| FORMATS.contains(&f));
     one(&v) || v.as_array().is_some_and(|a| a.iter().any(one))
+}
+
+/// Whether `bytes` is a voice pack itself: JSON whose root object has the pack's format
+/// (`FORMATS[0]`), not the notes, the receipt, an array or a file that does not parse.
+fn is_pack(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .is_ok_and(|v| v.is_object() && v["format"].as_str() == Some(FORMATS[0]))
 }
 
 fn repo_root() -> PathBuf {
@@ -126,9 +142,18 @@ fn starts_as_json(p: &Path) -> bool {
     }
 }
 
-/// The paths under `dir` (relative to `root`) whose file is one of the tool's outputs. A file is read
-/// whole only when it starts as JSON ([`starts_as_json`]); a symlink to a directory is not
-/// followed (no loops) but listed in `links`.
+/// Where a pack may lie on disk: the gitignored directory the key gate serves.
+const HOSTED: &str = "site/packs/";
+
+/// Whether a voice pack ([`is_pack`]) found on disk at `rel` (relative to the repository) is a
+/// hosted pack: one under [`HOSTED`]. A file of the index never is.
+fn hosted(rel: &str) -> bool {
+    rel.starts_with(HOSTED)
+}
+
+/// The paths under `dir` (relative to `root`) whose file is one of the tool's outputs (but a
+/// hosted pack). A file is read whole only when it starts as JSON ([`starts_as_json`]); a
+/// symlink to a directory is not followed (no loops) but listed in `links`.
 fn walk(
     dir: &Path,
     root: &Path,
@@ -158,7 +183,9 @@ fn walk(
         let data = std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
         if is_voice_file(&data) {
             let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
-            found.push(rel);
+            if !(is_pack(&data) && hosted(&rel)) {
+                found.push(rel);
+            }
         }
     }
 }
@@ -222,6 +249,54 @@ fn the_walker_finds_a_voice_pack_after_any_amount_of_whitespace() {
     found.sort();
     assert_eq!(files, 5);
     assert_eq!(found, ["site/deep/padded.u6vp", "site/deep/short.json"]);
+    std::fs::remove_dir_all(&root).expect("the test directory goes");
+}
+
+/// A pack under `site/packs/` on disk is hosted, not found, at any depth (whitespace first or
+/// not); one in a sibling or a nested `packs` directory, or in `site/` itself, is found, and so
+/// are the notes, a coverage receipt and an array holding a pack under `site/packs/`.
+#[test]
+fn only_a_pack_on_disk_under_site_packs_is_hosted() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-voice-pack-hosted");
+    if root.exists() {
+        std::fs::remove_dir_all(&root).expect("the old test directory goes");
+    }
+    let notes = r#"{"format":"u6.voice-notes/1","model":"m","notes":[]}"#;
+    let coverage = r#"{"format":"u6.voice-coverage/1","model":"m","failures":[]}"#;
+    let write = |rel: &str, text: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).expect("the test directory");
+        std::fs::write(p, text).expect("written");
+    };
+    write("site/packs/voices-1.u6vp", PACK);
+    write("site/packs/sub/voices-2.u6vp", &format!("\n {PACK}"));
+    write("site/packs/notes.json", notes);
+    write("site/packs/coverage.json", coverage);
+    write("site/packs/array.json", &format!("[{PACK}]"));
+    write("site/packs-x/voices.u6vp", PACK);
+    write("site/x/packs/voices.u6vp", PACK);
+    write("site/voices.u6vp", PACK);
+    let (mut found, mut links, mut files) = (Vec::new(), Vec::new(), 0);
+    walk(
+        &root.join("site"),
+        &root,
+        &mut found,
+        &mut links,
+        &mut files,
+    );
+    found.sort();
+    assert_eq!(files, 8);
+    assert_eq!(
+        found,
+        [
+            "site/packs-x/voices.u6vp",
+            "site/packs/array.json",
+            "site/packs/coverage.json",
+            "site/packs/notes.json",
+            "site/voices.u6vp",
+            "site/x/packs/voices.u6vp"
+        ]
+    );
     std::fs::remove_dir_all(&root).expect("the test directory goes");
 }
 
