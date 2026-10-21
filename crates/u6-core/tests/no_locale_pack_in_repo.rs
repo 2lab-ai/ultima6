@@ -1,7 +1,7 @@
 //! Spec 08 Rights / Acceptance 8: no Korean pack (`ko.u6lp`), and no coverage receipt of the
 //! translation tool, is committed or sits under `site/`. They are made from the owner's game
 //! (tools/i18n/translate.mjs makes them from the NPC bundles): they live in
-//! `~/Games/ultima6/i18n/ko/` and the owner's browser storage, and the pack also behind his key
+//! `~/Games/ultima6/i18n/ko/` and the owner's browser storage, and the pack also on the site
 //! (below). Checked: every blob in the
 //! git index (what a commit takes, read with `git cat-file`, whatever the working tree holds),
 //! and every file under `site/` on disk (built output and the gitignored model parts included).
@@ -18,11 +18,11 @@
 //! since the parse cannot rule out what it holds; and `site/` itself a symbolic link fails the
 //! guard (the walker would follow it).
 //!
-//! The one exception (spec 08 K6, the owner's rule of 2026-10-20: the pack is hosted behind his
-//! key, as the HD packs are): a pack on disk under `site/packs/`, which is gitignored and served
-//! only through the key gate of `functions/_middleware.js` (u6-hdpack's guard checks, while
-//! `site/packs/` exists, that git ignores it and the gate still guards `/packs`). A pack in the
-//! index fails wherever it is, and a coverage receipt fails under `site/packs/` too.
+//! The one exception (spec 08 K6, the owner's rule of 2026-10-20: the pack is hosted as the HD
+//! packs are, public since 2026-10-21, his derivative work, with his permission): a pack on disk
+//! under `site/packs/`, which is gitignored and filled at deploy time (u6-hdpack's guard checks,
+//! while `site/packs/` exists, that git ignores it). A pack in the index fails wherever it is, and
+//! a coverage receipt fails under `site/packs/` too.
 // The test reads the repository and runs git: the crate's platform-free rule is for its code.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
@@ -150,7 +150,7 @@ fn starts_with_magic(p: &Path) -> bool {
     head == MAGIC
 }
 
-/// Where a pack may lie on disk: the gitignored directory the key gate serves.
+/// Where a pack may lie on disk: the gitignored directory the deploy fills and the site serves.
 const HOSTED: &str = "site/packs/";
 
 /// Whether a file found on disk at `rel` (relative to the repository) that starts with the magic

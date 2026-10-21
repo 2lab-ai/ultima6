@@ -4,10 +4,10 @@
 //! `site/` on disk (built output included). Any error reading them fails the test.
 //!
 //! The one exception (the owner's rule of 2026-10-19: packs are hosted for the owner to choose at
-//! the first run): a pack zip on disk under `site/packs/`, which is gitignored and served only
-//! through the key gate of `functions/_middleware.js`. While `site/packs/` exists the test also
-//! checks that git ignores it and that the gate still guards `/packs`, so the exception cannot
-//! outlive either. A pack in the index fails wherever it is, `site/packs/` included.
+//! the first run; public since 2026-10-21, his derivative works, with his permission): a pack zip
+//! on disk under `site/packs/`, which is gitignored and filled at deploy time. While `site/packs/`
+//! exists the test also checks that git ignores it, so the exception cannot outlive that. A pack
+//! in the index fails wherever it is, `site/packs/` included.
 //!
 //! A file is caught by its shape, not by a string (the format string itself is in source: this
 //! crate, the page's drop classifier):
@@ -42,7 +42,7 @@ fn number(s: &str) -> bool {
 
 /// The reason [`pack_file`] gives a zip that holds a pack or its parts.
 const PACK_ZIP: &str = "a zip holding a pack or its parts";
-/// Where packs may lie on disk: the gitignored directory the key gate serves.
+/// Where packs may lie on disk: the gitignored directory the deploy fills and the site serves.
 const HOSTED: &str = "site/packs/";
 
 /// Whether a file found on disk at `path` (relative to the repository) for `why` is a hosted
@@ -367,9 +367,8 @@ fn only_a_pack_zip_on_disk_under_site_packs_is_hosted() {
     );
 }
 
-/// While `site/packs/` exists: git ignores it, and the site's Function still gates `/packs` by
-/// the canonical path (its source holds the canonical-path function and the `/packs` test).
-fn hosted_packs_are_ignored_and_gated(root: &Path) {
+/// While `site/packs/` exists: git ignores it.
+fn hosted_packs_are_ignored(root: &Path) {
     if !root.join("site/packs").is_dir() {
         return;
     }
@@ -380,15 +379,6 @@ fn hosted_packs_are_ignored_and_gated(root: &Path) {
         .status()
         .expect("git runs");
     assert!(ignored.success(), "site/packs/ is not ignored by git");
-    let gate = std::fs::read_to_string(root.join("functions/_middleware.js"))
-        .unwrap_or_else(|_| panic!("functions/_middleware.js: missing while site/packs/ exists"));
-    assert!(
-        gate.contains("export function canonicalPath(")
-            && gate.contains(
-                "if (path !== '/packs' && !path.startsWith('/packs/')) return context.next();"
-            ),
-        "functions/_middleware.js no longer gates /packs by its canonical path"
-    );
 }
 
 #[test]
@@ -399,7 +389,7 @@ fn no_pack_is_in_the_index_or_under_site() {
     assert!(index.iter().any(|(p, _)| p == "Cargo.toml"));
     let mut disk = Vec::new();
     walk(&root.join("site"), &root, &mut disk);
-    hosted_packs_are_ignored_and_gated(&root);
+    hosted_packs_are_ignored(&root);
     let mut found = Vec::new();
     let mut unreadable = Vec::new();
     let files = index

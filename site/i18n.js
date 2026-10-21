@@ -3,7 +3,7 @@
 // the keys) and the status and error lines of app.js. A value is a string or a function of
 // the values the line shows. The game's own text (the engine's frames, its reports and the
 // reasons it gives) is not here and stays English; a Korean pack (spec 08) the owner makes
-// from his own files (dropped, or listed by the site for his key) puts its conversations in
+// from his own files (dropped, or listed by the site) puts its conversations in
 // Korean.
 const mib = (n) => (n / 2 ** 20).toFixed(1);
 const files = (n) => `${n} file${n === 1 ? '' : 's'}`;
@@ -37,6 +37,8 @@ export const TEXT = {
     mmpx: 'MMPX (no pack)',
     droppedPack: 'Dropped pack',
     ok: 'OK',
+    npcVoices: 'NPC voices',
+    acceptStart: 'Accept and start',
     loadingEngine: 'Loading engine…',
     howToPlay: 'Click the game screen or Tab to it, then: Escape skips the opening; in the menu C creates a character, J journeys onward; in the game arrow keys walk, T talks, space passes. The mouse works as in the original: click the map to walk, the command icons, the party and the inventory.',
     failed: (what, why) => `${what} failed: ${why}`,
@@ -115,7 +117,7 @@ export const TEXT = {
     voiceStorage: (free) => (free < 0
       ? 'This browser does not say how much room it has left for this site.'
       : `This browser has room for about ${mib(free)} MiB more for this site.`),
-    voiceCreditsBefore: 'Voices (off until you press Voices): the NPCs say their lines aloud, each in an English voice of its own, generated in this browser by the Supertonic-3 model (Supertone Inc., Open RAIL-M licence), on WebGPU where the browser offers it, else on the CPU (slower). The model is downloaded from this site once (about 400 MB), after you accept its use restrictions; what NPCs say never leaves this browser. ',
+    voiceCreditsBefore: 'Voices (off until you accept them, with NPC voices at the first run or in Settings, or with the Voices button): the NPCs say their lines aloud, each in an English voice of its own, generated in this browser by the Supertonic-3 model (Supertone Inc., Open RAIL-M licence), on WebGPU where the browser offers it, else on the CPU (slower). The model is downloaded from this site once (about 400 MB), after you accept its use restrictions; what NPCs say never leaves this browser. ',
     voiceTermsLink: 'Voice model terms',
     voiceCreditsAfter: '. "Forget voices" removes the model and any voice pack from this browser.',
     voiceChecking: 'Voices: checking this browser…',
@@ -176,7 +178,7 @@ export const TEXT = {
       : `Korean pack: ${runs} lines of ${scripts} conversations show in Korean; all other text stays English.`),
     koPackMismatch: (why) => `The Korean pack is not used with these game files: ${why}.`,
     koPackKept: ' It is kept in this browser for the next visit.',
-    koPackHosted: ' This Korean pack came from the site, for your key.',
+    koPackHosted: ' This Korean pack came from the site.',
     koPackNotKept: (old) => ` (It could not be kept in this browser: it works until the page is left, and ${old}.)`,
     koPackOldGone: 'no Korean pack is kept for the next visit',
     koPackOldStays: 'a Korean pack kept here before, if any, stays and comes back on the next visit',
@@ -214,6 +216,8 @@ export const TEXT = {
     mmpx: 'MMPX (팩 없음)',
     droppedPack: '직접 놓은 팩',
     ok: '확인',
+    npcVoices: 'NPC 음성',
+    acceptStart: '동의하고 시작',
     loadingEngine: '엔진을 불러오는 중…',
     howToPlay: '게임 화면을 클릭하거나 Tab으로 옮긴 다음: Escape는 오프닝을 건너뜁니다. 메뉴에서 C는 캐릭터를 만들고 J는 여정을 이어 갑니다. 게임에서는 화살표 키로 걷고, T는 대화, 스페이스는 차례 넘기기입니다. 마우스는 원작처럼 씁니다: 지도를 클릭해 걷고, 명령 아이콘, 일행, 소지품을 클릭합니다.',
     failed: (what, why) => `${what} 실패: ${why}`,
@@ -292,7 +296,7 @@ export const TEXT = {
     voiceStorage: (free) => (free < 0
       ? '이 브라우저는 이 사이트에 남은 저장 공간을 알려 주지 않습니다.'
       : `이 브라우저에는 이 사이트를 위한 공간이 약 ${mib(free)} MiB 남아 있습니다.`),
-    voiceCreditsBefore: '음성(음성 버튼을 누르기 전에는 꺼져 있음): NPC가 저마다 다른 영어 음성으로 대사를 소리 내어 말합니다. 그 음성은 이 브라우저에서 Supertonic-3 모델(Supertone Inc., Open RAIL-M 라이선스)이 생성합니다. 브라우저가 WebGPU를 제공하면 GPU에서, 아니면 CPU에서(더 느리게) 생성합니다. 모델은 사용 제한에 동의한 뒤 이 사이트에서 한 번 내려받으며(약 400 MB), NPC의 말은 이 브라우저 밖으로 나가지 않습니다. ',
+    voiceCreditsBefore: '음성(처음 실행할 때나 설정의 NPC 음성, 또는 음성 버튼으로 동의하기 전에는 꺼져 있음): NPC가 저마다 다른 영어 음성으로 대사를 소리 내어 말합니다. 그 음성은 이 브라우저에서 Supertonic-3 모델(Supertone Inc., Open RAIL-M 라이선스)이 생성합니다. 브라우저가 WebGPU를 제공하면 GPU에서, 아니면 CPU에서(더 느리게) 생성합니다. 모델은 사용 제한에 동의한 뒤 이 사이트에서 한 번 내려받으며(약 400 MB), NPC의 말은 이 브라우저 밖으로 나가지 않습니다. ',
     voiceTermsLink: '음성 모델 약관',
     voiceCreditsAfter: '. "음성 지우기"는 이 브라우저에서 모델과 음성 팩을 지웁니다.',
     voiceChecking: '음성: 이 브라우저를 확인하는 중…',
@@ -353,7 +357,7 @@ export const TEXT = {
       : `한글 팩: 대화 ${scripts}개의 줄 ${runs}개가 한글로 나옵니다. 다른 글은 모두 영어로 나옵니다.`),
     koPackMismatch: (why) => `한글 팩을 이 게임 파일과 함께 쓰지 않습니다: ${why}.`,
     koPackKept: ' 다음 방문을 위해 이 브라우저에 보관합니다.',
-    koPackHosted: ' 이 한글 팩은 이 사이트에서 당신의 키로 받은 것입니다.',
+    koPackHosted: ' 이 한글 팩은 이 사이트에서 받은 것입니다.',
     koPackNotKept: (old) => ` (이 브라우저에 보관하지 못했습니다: 페이지를 떠날 때까지만 쓰이며, ${old}.)`,
     koPackOldGone: '다음 방문을 위해 보관된 한글 팩은 없습니다',
     koPackOldStays: '전에 여기 보관한 한글 팩이 있다면 그대로 남아 다음 방문 때 다시 쓰입니다',

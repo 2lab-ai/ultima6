@@ -88,8 +88,9 @@
     #voice-terms[hidden] { display: none; }
     #voice-terms p { margin: 0 0 8px; }
     #voice-terms button { margin-left: 0; margin-right: 8px; }
-    #voice-restrictions { max-height: 16em; overflow: auto; margin: 0 0 8px; padding: 8px;
-                          border: 1px solid #555a66; white-space: pre-wrap; font-size: 0.875rem; }
+    #voice-restrictions, #setup-restrictions { max-height: 16em; overflow: auto; margin: 0 0 8px;
+                          padding: 8px; border: 1px solid #555a66; white-space: pre-wrap; font-size: 0.875rem; }
+    #setup-terms[hidden] { display: none; }
     #voice-chip { padding: 0 6px; border: 1px solid #9ab8ff; border-radius: 4px; color: #9ab8ff;
                   font-size: 0.875rem; }
     #voice-chip[hidden] { display: none; }
@@ -112,7 +113,22 @@
         <label id="setup-dropped" hidden><input type="radio" name="setup-hd" value=":dropped"> <span
           data-i18n="droppedPack">Dropped pack</span></label>
       </fieldset>
-      <button id="setup-ok" type="button" data-i18n="ok">OK</button>
+      <fieldset id="setup-voice">
+        <legend data-i18n="voices">Voices (~400 MB)</legend>
+        <label><input type="checkbox" id="setup-voices" checked> <span data-i18n="npcVoices">NPC voices</span></label>
+        <div id="setup-terms">
+          <p data-i18n="voiceTermsIntro">Voices read aloud what the NPCs say, in a voice generated in this
+            browser by the Supertonic-3 model of Supertone Inc. The model (about 400 MB) is
+            downloaded from this site once and kept in this browser; what NPCs say never leaves
+            it. Its licence, the Open RAIL-M, allows its use only under the restrictions below:
+            accept them to download it.</p>
+          <p><span data-i18n="voiceRestrictionsNote">The restrictions, as the licence states them:</span>
+            <a id="setup-license" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/LICENSE.txt" data-i18n="voiceTermsLicense">Licence</a> &middot;
+            <a id="setup-notice" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt" data-i18n="voiceTermsNotice">Notice</a></p>
+          <pre id="setup-restrictions" lang="en"></pre>
+        </div>
+      </fieldset>
+      <button id="setup-ok" type="button" data-i18n="acceptStart">Accept and start</button>
       <p id="setup-status" role="status" aria-live="polite"></p>
     </section>
     <div id="screen-box">
@@ -204,9 +220,9 @@
         scaled. An HD pack made from your own files with the project's local HD tool can be
         dropped here like the game files: its pictures replace MMPX for the images they were made
         from. It is kept in this browser (&ldquo;Forget the HD pack&rdquo; removes it) and never
-        sent anywhere; this site hosts none.</p>
-      <p id="voice-credits"><span data-i18n="voiceCreditsBefore">Voices (off until you press
-        Voices): the NPCs say their lines aloud, each in an English voice of its own, generated in this browser by
+        sent anywhere. The packs this site offers (Settings) are chosen and kept the same way.</p>
+      <p id="voice-credits"><span data-i18n="voiceCreditsBefore">Voices (off until you accept
+        them, with NPC voices at the first run or in Settings, or with the Voices button): the NPCs say their lines aloud, each in an English voice of its own, generated in this browser by
         the Supertonic-3 model (Supertone Inc., Open RAIL-M licence), on WebGPU where the browser
         offers it, else on the CPU (slower). The model is
         downloaded from this site once (about 400 MB), after you accept its use restrictions;

@@ -1,8 +1,8 @@
 // Static server for site/ that applies site/_headers the way Cloudflare Pages does (every rule
 // whose path pattern matches adds its headers; `*` matches anything, `:name` one segment), so
-// the page can be checked under its real CSP before a deploy. Local only; no game data. It runs
-// no Pages Functions: with `packs` (a module caller's) it answers /packs/* itself, as the site's
-// Function in front of them does.
+// the page can be checked under its real CSP before a deploy. Local only; no game data. With
+// `packs` (a module caller's) it answers /packs/* itself, in place of the packs the deploy puts
+// there.
 //
 //   node tools/web/serve.mjs [--root site] [--port 8787] [--headers <root>/_headers]
 //
@@ -84,7 +84,7 @@ export async function serve({ root = 'site', port = 0, headersFile, packs } = {}
       const path = decodeURIComponent(new URL(req.url, 'http://local').pathname);
       let file = normalize(join(base, path));
       if (file !== base && !file.startsWith(base + sep)) throw Object.assign(new Error(), { code: 'ENOENT' });
-      if (path === '/_headers' || path === '/_routes.json') throw Object.assign(new Error(), { code: 'ENOENT' });
+      if (path === '/_headers') throw Object.assign(new Error(), { code: 'ENOENT' });
       if (packs && path.startsWith('/packs/')) {
         const headers = Object.entries(req.headers).filter(([, value]) => typeof value === 'string');
         const response = await packs(new Request(new URL(req.url, url), { method: req.method, headers }));

@@ -29,7 +29,9 @@ carries no license field. Therefore:
 - decompiler output of `game` stays in `re/dumps/` (gitignored); committed Rust code
   never contains pasted decompiler output — it cites the original function address and
   describes behavior in prose;
-- no game data or derived files are committed.
+- no game data or derived files are committed. Since 2026-10-21 the owner's packs made from his
+  files (HD 07, Korean 08, voices 09) are hosted publicly under `/packs/` (put there at deploy
+  time, never in git): his derivative works, with his permission, verbatim: "해당 사이트에서 그냥 울티마-iv.zip 파일 하나면 올리면 전체 한글화부터 음성까지 모두 적용되도록 배포해줘. 그 원본만 라이센스문제고 나머지는 2차 창작인데 다 허락 맡음."
 
 These restrictions are distribution controls, not a legal determination or a claim of clean-room
 development. The archive item's availability and the user's possession of files do not

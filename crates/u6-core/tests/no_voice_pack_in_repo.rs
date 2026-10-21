@@ -1,7 +1,7 @@
 //! Spec 09 Rights / Acceptance 5: no voice pack, and none of the tool's other outputs (the
 //! personality notes, the coverage receipt), is committed or sits under `site/`. They are read
 //! from the owner's game (tools/speech/profile.mjs makes them from the NPC bundles): they live in
-//! `~/Games/ultima6/voice/` and the owner's browser storage, and the pack also behind his key
+//! `~/Games/ultima6/voice/` and the owner's browser storage, and the pack also on the site
 //! (below). Checked: every blob in the git index (what a commit takes, read with `git cat-file`,
 //! whatever the working tree holds), and every file under `site/` on disk (built output and the
 //! gitignored model parts included). Any error reading them fails the test.
@@ -17,10 +17,10 @@
 //! guard (the walker would follow it).
 //!
 //! The one exception (spec 09 Design 4, the owner's answer of 2026-10-21, "올려서 자동 적용", to
-//! putting his voice pack behind his key like the Korean pack, used with no drop): a voice pack
-//! (a root object of the pack's format; not the notes, the receipt or an array) on disk under
-//! `site/packs/`, which is gitignored and served only through the key gate of
-//! `functions/_middleware.js`, as the Korean pack's guard allows (`no_locale_pack_in_repo.rs`).
+//! hosting his voice pack like the Korean pack, used with no drop; public since the same day): a
+//! voice pack (a root object of the pack's format; not the notes, the receipt or an array) on disk
+//! under `site/packs/`, which is gitignored and filled at deploy time, as the Korean pack's guard
+//! allows (`no_locale_pack_in_repo.rs`).
 //! A pack in the index fails wherever it is, and the notes and a coverage receipt fail under
 //! `site/packs/` too.
 // The test reads the repository and runs git: the crate's platform-free rule is for its code.
@@ -142,7 +142,7 @@ fn starts_as_json(p: &Path) -> bool {
     }
 }
 
-/// Where a pack may lie on disk: the gitignored directory the key gate serves.
+/// Where a pack may lie on disk: the gitignored directory the deploy fills and the site serves.
 const HOSTED: &str = "site/packs/";
 
 /// Whether a voice pack ([`is_pack`]) found on disk at `rel` (relative to the repository) is a

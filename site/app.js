@@ -60,21 +60,23 @@
 // set holds both decoded until the new one is checked (so a refusal changes nothing).
 //
 // The chooser (first run, and Settings): the page's language (English or 한글: the page's own
-// labels, buttons and status lines, from site/i18n.js; the game's text stays English) and HD:
-// MMPX, or one of the packs the site lists for the owner. Those are fetched only with the key
-// the owner's link carries once (`?k=`, kept in localStorage and taken off the address bar),
-// sent as X-Pack-Key on every /packs/ request; the site's Pages Function
-// (functions/_middleware.js) answers 404 to any other, so a visitor without the key gets MMPX
-// only. A listed pack is downloaded and then loaded and kept exactly as a dropped one. The
+// labels, buttons and status lines, from site/i18n.js; the game's text stays English), HD: MMPX,
+// or one of the packs the site lists under /packs/ (static files, for every visitor), and NPC
+// voices. A listed pack is downloaded and then loaded and kept exactly as a dropped one. The
 // chooser shows the pack active (none, a dropped one, or the listed one it came from), and OK
 // makes the entry checked the active one. The choice made is kept in localStorage; while there
-// is none the chooser shows first, on 한글 when the visitor has a key or the browser's first
-// language is Korean, else on English; for a visitor with a key, a choice kept before that rule
-// (a record without its version) counts as none once.
+// is none (or one an older page kept, SETUP_VERSION) the chooser shows first, on 한글, with the
+// active pack checked or else the first the site lists (MMPX when it lists none), and NPC voices
+// checked. While NPC voices is checked the chooser shows the voice model's use restrictions and
+// its OK reads as their acceptance: OK records it as the Voices terms' Accept does and starts the
+// voices the same way; unchecked, OK turns them off and asks nothing of /models/. Opened from
+// Settings it shows the voices as they are (checked while on). An old link's `?k=` (the key the
+// packs once needed) is taken off the address bar, and the key an older page kept is removed.
 //
-// Voices (spec 09 V3, site/voice/): off until the visitor presses Voices. The first time, the
-// model's use restrictions show (with this browser's room for the site), and only their
-// acceptance downloads it; nothing is requested from /models/ before. The worker
+// Voices (spec 09 V3, site/voice/): off until the visitor accepts them at the chooser (NPC
+// voices) or presses Voices. Before the first download the model's use restrictions show (at
+// the chooser, or with this browser's room for the site at Voices), and only their acceptance
+// downloads it; nothing is requested from /models/ before. The worker
 // (site/voice/worker.js) runs the model on WebGPU where the browser offers an adapter, else on
 // the CPU (slower); the ready line and the chip say which. Once it has the model checked and
 // warmed up, the game's speech tap is on (Game.set_voices) and after each frame what NPCs said
@@ -85,7 +87,7 @@
 // voice pack gives its actor (`voices.u6vp`, which the owner's local tool tools/speech/profile.mjs
 // makes from the NPC bundles: named so, or a .json dropped alone told by its format; checked
 // whole, kept in IndexedDB, shown as a count, never sent; "Forget voices" removes it too; the
-// site may also list one for the key, slice K6 below). The speech plays through a voice
+// site may also list one, slice K6 below). The speech plays through a voice
 // gain beside the music's (Mute silences both); Enter, Escape and Space on the canvas, and a newer
 // turn, cancel it; above 4x nothing is spoken. While voices are on a chip says the voice is
 // generated on this device. The choice and the acceptance are kept in localStorage: the next
@@ -136,16 +138,16 @@
 // and Escape while composing are the IME's (Escape cancels the composition only), and every
 // other key keeps its canvas meaning (the speed keys included). When the line ends the focus
 // goes back to the canvas. Nothing typed is logged, kept or shown in the page's text or data.
-// Slice K6: the site's listing (/packs/index.json) may also name a Korean pack for the key
-// (`ko`: {file, label}). While the page is in 한글 (at the restore, before the first game, and at
-// the chooser's OK) the page downloads it with the key and loads it as a dropped one, its file
+// Slice K6: the site's listing (/packs/index.json) may also name a Korean pack (`ko`: {file,
+// label}). While the page is in 한글 (at the restore, before the first game, and at the
+// chooser's OK) the page downloads it and loads it as a dropped one, its file
 // name kept with it in the pack's own transaction (store.js: a drop keeps none, and a kept pack
 // without a listed name counts as dropped); it is downloaded again only when the listing names
 // another file than the kept one came from, never over a dropped one, and not after Forget until
 // the page goes to 한글 again or the next visit. A download or a pack that fails is not tried
 // again in the visit (the game stays English, with the line the page has for that case). The
 // listing may also name a voice pack (`voices`: {file, label}; spec 09 Design 4), which the
-// restore downloads with the key in either language and loads as a dropped one, its file name
+// restore downloads in either language and loads as a dropped one, its file name
 // kept with it, under the same rules (not after Forget voices in the visit), with no line of its
 // own.
 import init, {
@@ -188,6 +190,9 @@ const setupHd = document.getElementById('setup-hd');
 const setupDropped = document.getElementById('setup-dropped');
 const setupOk = document.getElementById('setup-ok');
 const setupStatus = document.getElementById('setup-status');
+const setupVoices = document.getElementById('setup-voices');
+const setupTerms = document.getElementById('setup-terms');
+const setupRestrictions = document.getElementById('setup-restrictions');
 const voicesButton = document.getElementById('voices');
 const voiceChip = document.getElementById('voice-chip');
 const voiceOnGpu = document.getElementById('voice-gpu');
@@ -238,10 +243,10 @@ function reflect(state) {
 
 // --- the page's language ---------------------------------------------------------------------
 
-const SETUP_KEY = 'u6.setup'; // localStorage: the chooser's choice made, {"lang":"en"|"ko","version":2}
-// The record's version since slice K6: one without it was kept before the first-run default
-// (`setupStale`).
-const SETUP_VERSION = 2;
+const SETUP_KEY = 'u6.setup'; // localStorage: the chooser's choice made, {"lang":"en"|"ko","version":3}
+// The record's version: 3 since the packs are public and the first run turns everything on (one
+// of 2, from slice K6, or none, was kept before those defaults: `setupStale`).
+const SETUP_VERSION = 3;
 
 // The stored choice, or null (none yet, or storage that cannot be read).
 function storedSetup() {
@@ -471,6 +476,7 @@ const remember = (key, value) => {
 };
 const voicesWanted = () => stored(VOICES_KEY) === 'on';
 const termsAccepted = () => stored(TERMS_KEY) === REVISION;
+const voiceIsOn = () => ['checking', 'loading', 'ready'].includes(voiceState);
 
 const voice = createVoices({
   workerUrl: new URL('./voice/worker.js', import.meta.url),
@@ -482,7 +488,7 @@ const voice = createVoices({
 // The voices' state, buttons, chip and counts on the page (data-voice*: states, counts and
 // timings only).
 function reflectVoice() {
-  const on = ['checking', 'loading', 'ready'].includes(voiceState);
+  const on = voiceIsOn();
   const st = voice.stats;
   const data = document.body.dataset;
   put(data, 'voice', voiceState);
@@ -539,7 +545,7 @@ function showStorage() {
 
 // The Voices button: off when on; else the terms the first time, or the model straight away.
 function toggleVoices() {
-  if (['checking', 'loading', 'ready'].includes(voiceState)) {
+  if (voiceIsOn()) {
     voiceOff();
     say('voiceOff');
     reflectVoice();
@@ -772,22 +778,22 @@ async function restoreVoicePack() {
   else console.warn(`the kept voice pack is not used: ${read.code}`);
 }
 
-// The voice pack the site lists for the key (spec 09 Design 4, as slice K6's Korean pack, in
-// either language: the voices speak both): downloaded with the key (at most VOICE_PACK_MAX bytes
-// read) and installed as a dropped one, when no pack is kept or the one kept came from another
-// listed file; never over a dropped one. It has no line of its own (data-voice-pack gives its
-// count). A download that fails, or a pack refused, changes nothing, warns with its kind only and
-// is not tried again in this visit.
+// The voice pack the site lists (spec 09 Design 4, as slice K6's Korean pack, in either
+// language: the voices speak both): downloaded (at most VOICE_PACK_MAX bytes read) and installed
+// as a dropped one, when no pack is kept or the one kept came from another listed file; never
+// over a dropped one. It has no line of its own (data-voice-pack gives its count). A download
+// that fails, or a pack refused, changes nothing, warns with its kind only and is not tried
+// again in this visit.
 async function hostedVoicePack() {
-  if (!packKey.key || voiceHostedFailed || voiceHostedForgot) return;
+  if (voiceHostedFailed || voiceHostedForgot) return;
   try {
     const listed = (await packIndex()).voices;
     if (listed === null) return;
     if (voiceSource !== '' && (!PACK_NAME.test(voiceSource) || voiceSource === listed.file)) return;
     const response = await packFetch(listed.file);
-    if (!response?.ok) {
+    if (!response.ok) {
       voiceHostedFailed = true;
-      console.warn(`the site's voice pack was not downloaded: HTTP ${response?.status ?? 404}`);
+      console.warn(`the site's voice pack was not downloaded: HTTP ${response.status}`);
       return;
     }
     const reader = response.body.getReader();
@@ -974,22 +980,22 @@ async function restoreLocalePack() {
   reflectLocale();
 }
 
-// The Korean pack the site lists for the key (slice K6), while the page is in 한글: downloaded
-// with the key (at most max_locale_pack_bytes read) and installed as a dropped one, when no pack
-// is kept or the one kept came from another listed file; never over a dropped one. Returns
-// the install's result (whether it loaded, its line), or null when none was downloaded (nothing
-// changed). A download that fails, or a pack refused, is not tried again in this visit.
+// The Korean pack the site lists (slice K6), while the page is in 한글: downloaded (at most
+// max_locale_pack_bytes read) and installed as a dropped one, when no pack is kept or the one
+// kept came from another listed file; never over a dropped one. Returns the install's result
+// (whether it loaded, its line), or null when none was downloaded (nothing changed). A download
+// that fails, or a pack refused, is not tried again in this visit.
 async function hostedLocalePack() {
-  if (lang !== 'ko' || !packKey.key || hostedFailed || hostedForgot) return null;
+  if (lang !== 'ko' || hostedFailed || hostedForgot) return null;
   try {
     const listed = (await packIndex()).ko;
     if (listed === null) return null;
     if (koSource !== '' && (!PACK_NAME.test(koSource) || koSource === listed.file)) return null;
     const limit = max_locale_pack_bytes();
     const response = await packFetch(listed.file);
-    if (!response?.ok) {
+    if (!response.ok) {
       hostedFailed = true;
-      console.warn(`the site's Korean pack was not downloaded: HTTP ${response?.status ?? 404}`);
+      console.warn(`the site's Korean pack was not downloaded: HTTP ${response.status}`);
       return null;
     }
     const reader = response.body.getReader();
@@ -1968,47 +1974,30 @@ function queueImport(gather) {
 
 // --- the chooser -----------------------------------------------------------------------------
 
-const PACK_KEY = 'u6.packKey'; // localStorage: the key the owner's link brought (`?k=`)
+const OLD_KEY = 'u6.packKey'; // localStorage: the key an older page kept for the packs (none needed now)
 
-// The key: taken once from the address (`?k=`; empty forgets it), kept, and taken off the
-// address bar (and so off the history and a copied link); else the one kept, '' without one.
-// `fresh`: the address brought a key other than the one kept.
-function takePackKey() {
-  let kept = '';
-  try {
-    kept = localStorage.getItem(PACK_KEY) ?? '';
-  } catch {
-    // No storage: a key lasts until the page is left.
-  }
+// An old link's key (`?k=`) taken off the address bar (and so off the history and a copied
+// link), and the key an older page kept removed: the packs are asked with none.
+function dropOldKey() {
   const url = new URL(location.href);
-  const given = url.searchParams.get('k');
-  if (given === null) return { key: kept, fresh: false };
-  url.searchParams.delete('k');
-  history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
-  try {
-    if (given) localStorage.setItem(PACK_KEY, given);
-    else localStorage.removeItem(PACK_KEY);
-  } catch {
-    // No storage: the key lasts until the page is left.
+  if (url.searchParams.has('k')) {
+    url.searchParams.delete('k');
+    history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
   }
-  return { key: given, fresh: given !== '' && given !== kept };
+  remember(OLD_KEY, null);
 }
 
-const packKey = takePackKey();
+dropOldKey();
 
-// /packs/`name` with the key, never cached by the browser (it is kept in IndexedDB once
-// loaded); null without a key: no request is made.
+// /packs/`name`, never cached by the browser (it is kept in IndexedDB once loaded).
 function packFetch(name) {
-  if (!packKey.key) return null;
-  return fetch(`/packs/${encodeURIComponent(name)}`, {
-    headers: { 'X-Pack-Key': packKey.key }, cache: 'no-store',
-  });
+  return fetch(`/packs/${encodeURIComponent(name)}`, { cache: 'no-store' });
 }
 
-// What the site lists for this visitor (/packs/index.json: {"packs": [{"file", "label"}], "ko":
-// {"file", "label"}, "voices": {"file", "label"}}), asked once a visit: `packs`, the HD packs ([]
-// when it lists none: no key, a 404, anything that does not read; a file is a plain name, a label
-// is text), `ko`, the Korean pack ({file}: a plain name ending .u6lp; its label is not shown), and
+// What the site lists (/packs/index.json: {"packs": [{"file", "label"}], "ko": {"file",
+// "label"}, "voices": {"file", "label"}}), asked once a visit: `packs`, the HD packs ([] when it
+// lists none: a 404, anything that does not read; a file is a plain name, a label is text),
+// `ko`, the Korean pack ({file}: a plain name ending .u6lp; its label is not shown), and
 // `voices`, the voice pack ({file}: a plain name ending .u6vp; its label is not shown), each null
 // when none is listed or its entry is not of that form.
 let packList = null;
@@ -2016,7 +2005,7 @@ function packIndex() {
   packList ??= (async () => {
     try {
       const response = await packFetch('index.json');
-      if (!response?.ok) return { packs: [], ko: null, voices: null };
+      if (!response.ok) return { packs: [], ko: null, voices: null };
       const { packs, ko, voices } = await response.json();
       return {
         packs: (Array.isArray(packs) ? packs : [])
@@ -2037,39 +2026,77 @@ async function listPacks() {
   return (await packIndex()).packs;
 }
 
-// The chooser's HD entries checked as the pack active now: MMPX for none, "Dropped pack" (shown
-// only then) for a dropped one, the listed one it was downloaded as (none checked when that one
-// is not listed: OK leaves the HD as it is).
+// Whether the chooser shows the first run's defaults (no choice kept, or one an older page kept:
+// `setupStale`), until its OK keeps a choice.
+let setupFirst = false;
+
+// OK waits for the chooser's list (`setupListing`: the `showPacks` in flight) and for the OK
+// before it, on the queue (`setupApplying`): a press before the list is in would take no HD entry.
+let setupListing = 0;
+let setupApplying = false;
+function reflectSetupOk() {
+  setupOk.disabled = setupListing > 0 || setupApplying;
+}
+
+// The chooser's HD entries checked as the pack active now: MMPX for none (on the first run none
+// yet: `showPacks` checks the first pack listed, once the list is in), "Dropped pack" (shown only
+// then) for a dropped one, the listed one it was downloaded as (none checked when that one is
+// not listed: OK leaves the HD as it is).
 function showHdChoice() {
   setupDropped.hidden = packSource !== DROPPED;
-  for (const input of setupHd.querySelectorAll('input')) input.checked = input.value === packSource;
+  const active = setupFirst && packSource === '' ? null : packSource;
+  for (const input of setupHd.querySelectorAll('input')) input.checked = input.value === active;
 }
 
 // The chooser's listed HD entries, after MMPX (and "Dropped pack"): each pack listed, by its label
-// (as text); the active one checked unless another entry was checked meanwhile. Its data-packs
-// is the count listed, once the list is in (for scripts and tests).
+// (as text); the active one checked unless another entry was checked meanwhile, and on the first
+// run with no pack active the first one listed (MMPX when none is). Its data-packs is the count
+// listed, once the list is in (for scripts and tests). OK is disabled until then, whatever the
+// listing gave (none, when it failed).
 async function showPacks() {
-  const packs = await listPacks();
-  for (const row of setupHd.querySelectorAll('label[data-pack]')) row.remove();
-  for (const { file, label } of packs) {
-    const input = Object.assign(document.createElement('input'), { type: 'radio', name: 'setup-hd', value: file });
-    const text = document.createElement('span');
-    text.textContent = label;
-    const row = document.createElement('label');
-    row.dataset.pack = file;
-    row.append(input, ' ', text);
-    setupHd.append(row);
-    if (file === packSource && !setupHd.querySelector('input:checked')) input.checked = true;
+  setupListing += 1;
+  reflectSetupOk();
+  try {
+    const packs = await listPacks();
+    for (const row of setupHd.querySelectorAll('label[data-pack]')) row.remove();
+    for (const { file, label } of packs) {
+      const input = Object.assign(document.createElement('input'), { type: 'radio', name: 'setup-hd', value: file });
+      const text = document.createElement('span');
+      text.textContent = label;
+      const row = document.createElement('label');
+      row.dataset.pack = file;
+      row.append(input, ' ', text);
+      setupHd.append(row);
+      if (file === packSource && !setupHd.querySelector('input:checked')) input.checked = true;
+    }
+    if (setupFirst && packSource === '' && !setupHd.querySelector('input:checked')) {
+      (setupHd.querySelector('label[data-pack] input') ?? setupHd.querySelector('input[value=""]')).checked = true;
+    }
+    setupHd.dataset.packs = String(packs.length);
+  } finally {
+    setupListing -= 1;
+    reflectSetupOk();
   }
-  setupHd.dataset.packs = String(packs.length);
 }
 
-// Opens the chooser on the language and the HD choice now.
+// The chooser's NPC voices as checked: the model's use restrictions shown, and OK read as their
+// acceptance, only while it is.
+function showVoiceTerms() {
+  setupTerms.hidden = !setupVoices.checked;
+  setupOk.dataset.i18n = setupVoices.checked ? 'acceptStart' : 'ok';
+  setupOk.textContent = t(setupOk.dataset.i18n);
+}
+
+// Opens the chooser on the language, the HD choice and the voices now (NPC voices checked on the
+// first run, else while the voices are on).
 function openSetup() {
   for (const input of setup.querySelectorAll('input[name="setup-lang"]')) input.checked = input.value === lang;
   setupStatus.textContent = '';
   setup.hidden = false;
   showHdChoice();
+  setupVoices.checked = setupFirst || voiceIsOn();
+  setupRestrictions.textContent = RESTRICTIONS;
+  showVoiceTerms();
   showPacks();
 }
 
@@ -2080,11 +2107,12 @@ function keepSetup() {
   } catch {
     // No storage: the choice lasts until the page is left.
   }
+  setupFirst = false;
   setup.hidden = true;
 }
 
-// A listed pack: downloaded with the key (its progress on the status line), then loaded and kept
-// as a dropped one (`loadPackFile`). Returns whether it was loaded.
+// A listed pack: downloaded (its progress on the status line), then loaded and kept as a dropped
+// one (`loadPackFile`). Returns whether it was loaded.
 async function downloadPack(name) {
   needEngine();
   const limit = max_pack_bytes();
@@ -2093,8 +2121,8 @@ async function downloadPack(name) {
   const parts = [];
   try {
     const response = await packFetch(name);
-    if (!response?.ok) {
-      say('packNotDownloaded', `HTTP ${response?.status ?? 404}`);
+    if (!response.ok) {
+      say('packNotDownloaded', `HTTP ${response.status}`);
       return false;
     }
     const total = Number(response.headers.get('Content-Length')) || 0;
@@ -2130,14 +2158,16 @@ async function downloadPack(name) {
   return loadPackFile(file, told.refusal, name);
 }
 
-// OK: the language is kept, and the HD entry checked becomes the active pack, on the queue (so
-// after a restore or a load queued before): the active pack's own entry (or none checked)
-// changes nothing; MMPX removes the active pack, whatever its source; another listed pack is
-// downloaded and loaded, the chooser open and saying what the status line says until it is (it
-// stays open with the reason when it is not).
+// OK: the voices as NPC voices says, at once (`applyVoices`); the language is kept, and the HD
+// entry checked becomes the active pack, on the queue (so after a restore or a load queued
+// before): the active pack's own entry (or none checked) changes nothing; MMPX removes the active
+// pack, whatever its source; another listed pack is downloaded and loaded, the chooser open and
+// saying what the status line says until it is (it stays open with the reason when it is not).
 function applySetup() {
   const chosen = setupHd.querySelector('input:checked')?.value;
-  setupOk.disabled = true;
+  applyVoices();
+  setupApplying = true;
+  reflectSetupOk();
   enqueue('opPack', async () => {
     mirror = true;
     try {
@@ -2165,9 +2195,24 @@ function applySetup() {
       setStatus(t('failed', t('opPack'), message(err)));
     } finally {
       mirror = false;
-      setupOk.disabled = false;
+      setupApplying = false;
+      reflectSetupOk();
     }
   });
+}
+
+// NPC voices at OK: checked, the model's use restrictions the chooser shows are accepted and the
+// voices start, exactly as at Accept on the Voices terms (the acceptance kept, the model
+// downloaded, warmed up, ready; on the CPU without WebGPU), unless they are on already;
+// unchecked, voices that are on go off, and nothing is asked of /models/.
+function applyVoices() {
+  if (setupVoices.checked && !voiceIsOn()) {
+    gesture();
+    acceptTerms();
+  } else if (!setupVoices.checked && voiceIsOn()) {
+    voiceOff();
+    reflectVoice();
+  }
 }
 
 // --- typing Korean (spec 08 Design 4, slice K5a) -------------------------------------------
@@ -2339,6 +2384,7 @@ settings.addEventListener('click', () => {
 for (const input of setup.querySelectorAll('input[name="setup-lang"]')) {
   input.addEventListener('change', () => setLang(input.value));
 }
+setupVoices.addEventListener('change', showVoiceTerms);
 setupOk.addEventListener('click', applySetup);
 // A box that grows or shrinks (the window, the zoom) may want the other scale.
 new ResizeObserver(() => {
@@ -2479,17 +2525,11 @@ function takeFocusFlag() {
   }
 }
 
-// With no choice kept (spec 08 K6): 한글 when the visitor has a pack key or the browser's first
-// language is Korean, else English (the chooser shows first either way).
-function firstLang() {
-  const browser = navigator.languages?.[0] ?? navigator.language ?? '';
-  return packKey.key || browser.toLowerCase().startsWith('ko') ? 'ko' : 'en';
-}
-
-// A choice kept before this version counts as none, once, for a visitor with a key: the chooser
-// opens as on a first run, and its OK keeps the current record. Without a key it stands.
-const setupStale = packKey.key !== '' && storedSetup() !== null && storedSetup().version !== SETUP_VERSION;
-if (!storedSetup() || setupStale) lang = firstLang();
+// A choice kept before this version counts as none, once: the chooser opens as on a first run
+// (on 한글, whatever the browser's language), and its OK keeps the current record.
+const setupStale = storedSetup() !== null && storedSetup().version !== SETUP_VERSION;
+setupFirst = !storedSetup() || setupStale;
+if (setupFirst) lang = 'ko';
 reflect('loading');
 reflectPack();
 reflectAudio();
@@ -2500,8 +2540,8 @@ canvas.dataset.behind = '0';
 reflectVoice();
 // Voices turned on in an earlier visit come back from this browser's cache only.
 if (voicesWanted() && termsAccepted()) startVoices({ cachedOnly: true });
-// The chooser first while no choice is kept, or when the address brought a new key.
-if (!storedSetup() || setupStale || packKey.fresh) openSetup();
+// The chooser first while no choice of this version is kept.
+if (setupFirst) openSetup();
 enqueue('opEngine', async () => {
   try {
     wasm = await init();

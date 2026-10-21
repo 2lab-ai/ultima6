@@ -14,7 +14,7 @@
 // drawn only when it changed), and HD (spec 07: the switch and its storage, the S× canvas and
 // its scaling, the pointer, the MMPX notice the site ships, the performance baseline; an HD
 // pack dropped, shown, kept, forgotten and refused, its performance with a full pack), and the
-// first-run chooser (the page's language, a pack the site lists behind its key gate). Most
+// first-run chooser (the page's language, a pack the site lists, NPC voices). Most
 // tests start `game` at once (harness `gameFirst`); the launcher tests run the page as it is.
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. The game is read once it reached what a check asserts, by its own signals (the
@@ -3004,62 +3004,16 @@ test('HD pack on a page with no game: the drop loads it and starts nothing (no i
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
 
-// --- the first-run chooser and the pack gate ------------------------------------------------
-// The chooser (the page's language and HD: MMPX or a pack the site lists for the owner's key),
-// the gate in front of /packs/ (functions/_middleware.js) and the catalog of the page's
-// own text (site/i18n.js). The packs are the test's: one made-up record (h.packKit), served by
-// the test server from memory through the gate set to the tests' key (h.setup). No game data.
+// --- the first-run chooser and the site's packs -----------------------------------------------
+// The chooser (the page's language, HD: MMPX or a pack the site lists, and NPC voices), the
+// site's packs under /packs/ (static files, asked with no key) and the catalog of the page's own
+// text (site/i18n.js). The packs are the test's: made-up records (h.packKit), served by the test
+// server from memory (h.setup). No game data.
 
-const sha256 = (text) => createHash('sha256').update(text).digest('hex');
-
-// No page: the gate runs on every path and canonicalises it (decoded until stable, \ as /,
-// empty, . and .. segments resolved, lowercased) before it tells a pack path: every spelling of
-// /packs without the key is a 404 with an empty body, the files not reached; with the key each
-// reaches them; other paths go on with no key; a path that does not decode, or is not stable
-// within five decodes, is a 404 whatever it names.
-test('the pack gate: every spelling of /packs (encoded, doubly encoded, any case, \\, //, . and ..) without the key is a 404 with an empty body; with the key it reaches the files; other paths need none; a path that does not decode is a 404; the site\'s gate holds the hash of the owner\'s key and runs on every path', async () => {
-  const middleware = await import('../../functions/_middleware.js');
-  assert.equal(middleware.KEY_SHA256, '637302b222111324a562643c3e206768a1e5bd8b3ee897d9f0695b3528c56922');
-  const call = async (onRequest, path, key) => {
-    let reached = 0;
-    const headers = key === null ? {} : { 'X-Pack-Key': key };
-    const response = await onRequest({
-      request: new Request(`https://ultima6.test${path}`, { headers }),
-      next: async () => {
-        reached += 1;
-        return new Response('the files');
-      },
-    });
-    return { status: response.status, body: await response.text(), reached };
-  };
-  const KEY = 'a key of the test';
-  const front = middleware.gate(sha256(KEY));
-  const PASSED = { status: 200, body: 'the files', reached: 1 };
-  const REFUSED = { status: 404, body: '', reached: 0 };
-  // %70 is p, %25 is %, %2f is /, %5c is a backslash. /%252525%370acks is /packs after four decodes
-  // (the fifth finds it stable); with one more %25 it would need a sixth, past the cap.
-  const packs = ['/packs/x', '/PACKS/x', '/Packs/x', '/%70acks/x', '/%2570acks/x', '/%252525%370acks/x', '/packs%2fx',
-    '/packs%5cx', '/%5cpacks/x', '//packs/x', '/./packs/x', '/x/../packs/x', '/%2e%2e/packs/x', '/packs/%2e%2e/packs/x',
-    '/x/%2e%2e%2fpacks/x', '/packs', '/packs/', '/packs/index.json'];
-  for (const path of packs) {
-    for (const [key, what] of [[null, 'no key'], ['another key', 'a wrong key'], ['', 'an empty key'], [sha256(KEY), 'the hash as the key']]) {
-      assert.deepEqual(await call(front, path, key), REFUSED, `${path}, ${what}`);
-      assert.deepEqual(await call(middleware.onRequest, path, key), REFUSED, `the site's gate: ${path}, ${what}`);
-    }
-    assert.deepEqual(await call(front, path, KEY), PASSED, `${path}, the key`);
-    assert.deepEqual(await call(middleware.onRequest, path, KEY), REFUSED, `the site's gate: ${path}, the test's key`);
-  }
-  for (const path of ['/', '/app.js', '/pkg/u6_web_bg.wasm', '/i18n.js', '/index.html', '/packsx', '/x/packs/y', '/NOTICE.txt']) {
-    assert.deepEqual(await call(front, path, null), PASSED, `${path}: no key needed`);
-    assert.deepEqual(await call(middleware.onRequest, path, null), PASSED, `the site's gate: ${path}: no key needed`);
-  }
-  for (const path of ['/%E0%A4%A', '/packs/%E0%A4%A', '/%', '/%25252525%370acks/x']) {
-    for (const key of [null, KEY]) assert.deepEqual(await call(front, path, key), REFUSED, `${path}: does not decode`);
-  }
-  assert.equal(middleware.canonicalPath('/A/./b//c/../%2E%2e/%44'), '/a/d', 'the canonical path');
-  const routes = JSON.parse(await readFile(join(h.SITE, '_routes.json'), 'utf8'));
-  assert.deepEqual(routes, { version: 1, include: ['/*'], exclude: [] }, 'every path invokes the gate');
-  assert.ok(!existsSync(join(h.REPO, 'functions', 'packs')), 'no Function of its own under /packs');
+// No page: nothing stands in front of /packs/: no Pages Function and no routing for one.
+test('the site\'s packs are static files: no Pages Function (functions/) and no routing for one (site/_routes.json)', async () => {
+  assert.ok(!existsSync(join(h.REPO, 'functions')), 'no Function');
+  assert.ok(!existsSync(join(h.SITE, '_routes.json')), 'no routing for one');
 });
 
 // No page: both languages hold the same keys, each a string in both or a function of as many
@@ -3081,8 +3035,9 @@ test('the page\'s text: English and Korean hold the same keys, of the same shape
 });
 
 // What the chooser shows: whether it is on screen and above the game screen, its entries
-// (each label's text; the HD entries shown), the HD entry checked, its status line, the note on
-// the game's text, the choice, the kept pack's source and the key kept.
+// (each label's text; the HD entries shown), the HD entry checked, NPC voices checked and the
+// voice model's terms shown, OK's label, its status line, the note on the game's text, the
+// choice, the kept pack's source and the key an older page kept.
 const chooser = (page) => page.evaluate(() => {
   const setup = document.getElementById('setup');
   const box = setup.getBoundingClientRect();
@@ -3097,6 +3052,9 @@ const chooser = (page) => page.evaluate(() => {
       .map((i) => i.parentElement.textContent.trim()),
     checked: setup.querySelector('input[name="setup-hd"]:checked')?.value ?? null,
     markup: setup.querySelectorAll('#setup-hd b').length,
+    voices: document.getElementById('setup-voices').checked,
+    terms: !document.getElementById('setup-terms').hidden,
+    ok: document.getElementById('setup-ok').textContent,
     status: document.getElementById('setup-status').textContent,
     note: note.hidden ? null : note.textContent,
     stored: JSON.parse(localStorage.getItem('u6.setup')),
@@ -3132,85 +3090,236 @@ function sitePacks(env, files) {
   env.packRequests.length = 0;
 }
 
-test('first visit: the chooser shows first, above the game screen: English | 한글, and HD with MMPX only when the site lists no pack for the visitor (no key: no request to /packs/ at all); OK keeps the choice and a reload skips the chooser; Settings opens it again', async (env) => {
-  sitePacks(env, { 'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }] }) });
-  const { page } = await h.openPage(env, { setup: null });
+// The site's listing for the first-run tests: two HD packs (the first is the default), a Korean
+// pack and a voice pack, each the tests' own.
+async function fullSite(env, { hd = true } = {}) {
+  const ko = await koFixture();
+  const voices = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
+  const hdPack = hd ? await madePack(env) : null;
+  sitePacks(env, {
+    'index.json': JSON.stringify({
+      packs: hd ? [{ file: 'test-pack.zip', label: 'Test pack' }, { file: 'other.zip', label: 'Other' }] : [],
+      ko: { file: KO_FILE, label: 'Korean (test)' },
+      voices: { file: VOICES_FILE, label: 'Voices (test)' },
+    }),
+    ...(hd ? { 'test-pack.zip': hdPack } : {}),
+    [KO_FILE]: Uint8Array.from(ko.pack),
+    [VOICES_FILE]: JSON.stringify(voices),
+  });
+  return { ko, voices, hdPack };
+}
+
+// The voice model's terms as the chooser shows them: the restrictions' text and the paths the
+// licence and the notice link to.
+const setupTermsShown = (page) => page.evaluate(() => ({
+  text: document.getElementById('setup-restrictions').textContent,
+  licence: new URL(document.getElementById('setup-license').href).pathname,
+  notice: new URL(document.getElementById('setup-notice').href).pathname,
+}));
+
+test('first visit: the chooser shows first, above the game screen, on 한글 (an en-US browser), with the first HD pack the site lists and NPC voices checked, the voice model\'s use restrictions shown verbatim with the licence and the notice linked and OK reading as their acceptance (in English too); unchecking NPC voices hides them and OK reads as OK; the listing is asked once a visit with no key, the listed Korean and voice packs downloaded once before any press; OK loads the HD pack, keeps the choice, asks nothing of /models/ and accepts nothing; a reload downloads nothing and skips the chooser; Settings shows the choice kept, NPC voices unchecked while the voices are off', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const { RESTRICTIONS } = await import('../../site/voice/terms.js');
+  const { LICENSE_URL, NOTICE_URL } = await import('../../site/voice/model.js');
+  const { ko, hdPack } = await fullSite(env);
+  const { context, page } = await h.openPage(env, { setup: null });
+  await context.addInitScript(voiceProbe);
+  const requests = modelRequests(context);
   await h.load(page, env);
-  await listed(page, 0);
+  await listed(page, 2);
+  await koPackIs(page, `${ko.runs},${ko.scripts}`);
+  await voicePackIs(page, 2);
   let c = await chooser(page);
   assert.ok(c.shown && c.first, 'the chooser shows, above the game screen');
   assert.deepEqual(c.langs, ['English', '한글']);
-  assert.equal(c.lang, 'en', 'English to start with');
-  assert.deepEqual(c.hd, ['MMPX (no pack)'], 'MMPX only');
-  assert.equal(c.checked, '', 'MMPX checked');
-  assert.equal(c.note, null, 'no note in English');
+  assert.equal(c.lang, 'ko', 'on 한글');
+  assert.equal((await pageText(page)).lang, 'ko', 'the page in 한글');
+  assert.deepEqual(c.hd, [TEXT.ko.mmpx, 'Test pack', 'Other'], 'MMPX and the packs listed');
+  assert.equal(c.checked, 'test-pack.zip', 'the first pack listed checked');
+  assert.ok(c.voices && c.terms, 'NPC voices checked, the terms shown');
+  assert.equal(c.ok, TEXT.ko.acceptStart, 'OK reads as acceptance');
+  const shown = await setupTermsShown(page);
+  const [licence, notice] = [LICENSE_URL, NOTICE_URL].map((u) => u.pathname.slice(h.SITE.length));
+  assert.equal(shown.text, RESTRICTIONS, 'the restrictions shown verbatim');
+  assert.ok(shown.licence === licence && shown.notice === notice, 'the licence and the notice linked');
   assert.equal(c.stored, null, 'nothing kept yet');
-  assert.deepEqual(env.packRequests, [], 'no key: no request to /packs/');
-  assert.equal((await h.state(page)).state, 'idle', 'the page runs behind it');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200], [`/packs/${VOICES_FILE}`, 200], [`/packs/${KO_FILE}`, 200]],
+    'the listing once, the voice pack and the Korean pack once each, before any press');
+  await page.check('input[name="setup-lang"][value="en"]');
+  assert.equal((await chooser(page)).ok, TEXT.en.acceptStart, 'in English too');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  await page.uncheck('#setup-voices');
+  c = await chooser(page);
+  assert.ok(!c.voices && !c.terms, 'unchecked: the terms hidden');
+  assert.equal(c.ok, TEXT.ko.ok, 'and OK reads as OK');
   await page.click('#setup-ok');
-  await h.waitSettled(page);
+  await packIs(page, '1,0,0');
   c = await chooser(page);
   assert.ok(!c.shown, 'OK closes it');
-  assert.deepEqual(c.stored, { lang: 'en', version: h.SETUP_VERSION }, 'the choice is kept');
-  assert.equal(c.source, null, 'no pack');
+  assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, 'the choice kept');
+  assert.equal(c.source, 'test-pack.zip', 'the listed HD pack loaded');
+  assert.equal(await h.keptPackBytes(page), hdPack.length, 'and kept');
+  assert.deepEqual(env.packRequests.slice(3), [['/packs/test-pack.zip', 200]], 'downloaded once');
+  let v = await voiceShown(page);
+  assert.ok(v.state === 'off' && !v.chip, 'voices off');
+  assert.deepEqual(await page.evaluate(() => [window.__workers, localStorage.getItem('u6.voiceTerms'), localStorage.getItem('u6.voices')]),
+    [0, null, null], 'no worker, nothing accepted');
+  assert.deepEqual(requests, [], 'nothing asked of /models/');
+  env.packRequests.length = 0;
   await page.reload();
-  await h.waitSettled(page);
-  assert.ok(!(await chooser(page)).shown, 'a kept choice skips it');
+  await packIs(page, '1,0,0');
+  await koPackIs(page, `${ko.runs},${ko.scripts}`);
+  assert.ok(!(await chooser(page)).shown, 'a kept choice skips the chooser');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'a reload: the listing only, every pack kept');
   await page.click('#settings');
+  await listed(page, 2);
   c = await chooser(page);
-  assert.ok(c.shown && c.lang === 'en' && c.checked === '', 'Settings opens it on the choice kept');
-  assert.equal(await page.evaluate(() => document.activeElement?.value), 'en', 'on the language chosen');
-  assert.deepEqual(env.packRequests, [], 'still no request to /packs/');
+  assert.ok(c.shown && c.lang === 'ko' && c.checked === 'test-pack.zip', 'Settings: on the choice kept');
+  assert.ok(!c.voices && !c.terms && c.ok === TEXT.ko.ok, 'NPC voices unchecked while the voices are off');
+  assert.deepEqual(requests, [], 'still nothing asked of /models/');
+  console.log('  receipt: 1 listing a visit, 3 packs downloaded once each, 0 model requests: pass');
 });
 
-test('the pack list: the key from the address is kept and taken off the address bar; a wrong key gets the gate\'s 404 and MMPX only; the owner\'s key gets the packs listed, by their labels as text (a file that is not a plain name left out), and a new key opens the chooser again', async (env) => {
+test('first visit with the voice model: OK as the chooser opens (NPC voices checked; a listing that names no HD pack: MMPX checked) accepts the model\'s use restrictions as the Voices terms\' Accept does (the revision accepted kept, the voices on) and starts the voices to ready, the model asked of /models/ only after OK; Settings then shows NPC voices checked with the terms; unchecked there, OK turns the voices off', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const { REVISION } = await import('../../site/voice/model.js');
+  await fullSite(env, { hd: false });
+  const { context, page } = await h.openPage(env, { setup: null });
+  await context.addInitScript(voiceProbe);
+  const requests = modelRequests(context);
+  await h.load(page, env);
+  await listed(page, 0);
+  await voicePackIs(page, 2);
+  let c = await chooser(page);
+  assert.ok(c.shown && c.lang === 'ko', 'the chooser on 한글');
+  assert.equal(c.checked, '', 'MMPX checked: the listing names no HD pack');
+  assert.ok(c.voices && c.terms && c.ok === TEXT.ko.acceptStart, 'NPC voices checked, the terms shown, OK as acceptance');
+  assert.deepEqual(requests, [], 'nothing asked of /models/ before OK');
+  const gpu = await page.evaluate(async () => Boolean(await navigator.gpu?.requestAdapter()));
+  await page.click('#setup-ok');
+  await waitVoice(page, () => ['ready', 'failed'].includes(document.body.dataset.voice), null);
+  const v = await voiceShown(page);
+  assert.ok(v.state === 'ready' && v.chip, 'the voices ready');
+  assert.equal(v.path, gpu ? 'gpu' : 'cpu', 'where this browser runs them');
+  assert.deepEqual(await page.evaluate(() => [localStorage.getItem('u6.voiceTerms'), localStorage.getItem('u6.voices')]),
+    [REVISION, 'on'], 'the acceptance kept, voices on');
+  assert.ok(requests.length > 0, 'the model asked of /models/ after OK');
+  c = await chooser(page);
+  assert.ok(!c.shown, 'OK closes the chooser');
+  assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, 'and keeps the choice');
+  assert.deepEqual([koRequests(env).length, voiceRequests(env).length], [1, 1], 'the Korean and the voice pack downloaded once each');
+  await page.click('#settings');
+  c = await chooser(page);
+  assert.ok(c.voices && c.terms && c.ok === TEXT.ko.acceptStart, 'Settings: NPC voices checked while on, the terms shown');
+  await page.uncheck('#setup-voices');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  assert.equal((await voiceShown(page)).state, 'off', 'unchecked: OK turns the voices off');
+  assert.equal(await page.evaluate(() => localStorage.getItem('u6.voices')), 'off', 'and keeps them off');
+  console.log(`  receipt: voices ready on the ${v.path} from the chooser's OK, ${requests.length} model requests after it, 0 before: pass`);
+}, { needs: h.haveModels });
+
+// The chooser's OK, the HD entry checked and what is kept, read in the page.
+const setupOkState = (page) => page.evaluate(() => ({
+  shown: !document.getElementById('setup').hidden,
+  disabled: document.getElementById('setup-ok').disabled,
+  checked: document.querySelector('#setup-hd input:checked')?.value ?? null,
+  stored: localStorage.getItem('u6.setup'),
+}));
+
+test('the chooser waits for the site\'s listing: on a first visit while the listing is held, OK is disabled with no HD entry checked and a press does nothing (nothing kept, the chooser open once the queue is done); once the listing is in, the first pack listed is checked, OK is enabled and loads it; a listing that fails (a 404, a body that does not read) enables OK with MMPX checked', async (env) => {
+  const hdPack = await madePack(env);
+  sitePacks(env, {
+    'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }, { file: 'other.zip', label: 'Other' }] }),
+    'test-pack.zip': hdPack,
+  });
+  let hold = h.holdPack(env, 'index.json');
+  let { context, page } = await h.openPage(env, { setup: null });
+  await page.goto(env.server.url);
+  await hold.asked;
+  await page.waitForFunction(() => !document.getElementById('setup').hidden);
+  let s = await setupOkState(page);
+  assert.ok(s.shown && s.disabled, 'the listing held: the chooser shows, OK disabled');
+  assert.equal(s.checked, null, 'no HD entry checked yet');
+  await page.uncheck('#setup-voices'); // no voices turned on here
+  await page.evaluate(() => document.getElementById('setup-ok').click());
+  hold.release();
+  await listed(page, 2);
+  await h.waitSettled(page);
+  s = await setupOkState(page);
+  assert.ok(s.shown && s.stored === null, 'the press while disabled did nothing: nothing kept, the chooser open');
+  assert.ok(!s.disabled && s.checked === 'test-pack.zip', 'the listing in: the first pack listed checked, OK enabled');
+  await page.click('#setup-ok');
+  await packIs(page, '1,0,0');
+  const c = await chooser(page);
+  assert.ok(!c.shown && c.source === 'test-pack.zip', 'OK loads it');
+  assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, 'and keeps the choice');
+  await context.close();
+  for (const [what, files] of [['a 404', {}], ['a body that does not read', { 'index.json': 'not JSON' }]]) {
+    sitePacks(env, files);
+    hold = h.holdPack(env, 'index.json');
+    ({ context, page } = await h.openPage(env, { setup: null }));
+    await page.goto(env.server.url);
+    await hold.asked;
+    await page.waitForFunction(() => !document.getElementById('setup').hidden);
+    s = await setupOkState(page);
+    assert.ok(s.disabled && s.checked === null, `${what}: OK disabled while the listing is held`);
+    hold.release();
+    await listed(page, 0);
+    s = await setupOkState(page);
+    assert.ok(!s.disabled && s.checked === '', `${what}: then OK enabled, MMPX checked`);
+    await context.close();
+  }
+  console.log('  receipt: OK disabled while the listing was held (3 visits), a press then kept nothing; the listed pack loaded after; 2 failed listings: MMPX: pass');
+});
+
+test('the pack list: asked once a visit with no key, the packs listed by their labels as text (a file that is not a plain name left out), MMPX checked in Settings with no pack active; an old link\'s ?k= is taken off the address bar and opens no chooser, and the key an older page kept is removed', async (env) => {
   sitePacks(env, {
     'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: '<b>Test</b> pack' }, { file: '../up.zip', label: 'Up' },
       { file: 'plain.zip' }] }),
   });
-  const { page } = await h.openPage(env, { setup: null });
-  await page.goto(`${env.server.url}?k=wrong-key&x=1#here`);
-  await h.waitSettled(page);
-  // A key on the first visit preselects 한글 (spec 08 K6); this test reads the English labels.
-  await page.check('input[name="setup-lang"][value="en"]');
-  await listed(page, 0);
+  const { context, page } = await h.openPage(env);
+  await context.addInitScript(() => {
+    try {
+      if (sessionStorage.getItem('test:seeded') === null) {
+        sessionStorage.setItem('test:seeded', '1');
+        localStorage.setItem('u6.packKey', 'an-old-key');
+      }
+    } catch {
+      // An opaque origin (about:blank) has no storage.
+    }
+  });
+  await h.load(page, env);
   let c = await chooser(page);
-  assert.ok(c.shown, 'the chooser shows');
-  assert.deepEqual(c.hd, ['MMPX (no pack)'], 'a wrong key: MMPX only');
-  assert.deepEqual(env.packRequests, [['/packs/index.json', 'wrong-key', 404]], 'the gate refused the index');
-  assert.equal(c.key, 'wrong-key', 'the key is kept');
-  assert.equal(page.url(), `${env.server.url}?x=1#here`, 'and taken off the address bar');
-  await page.click('#setup-ok');
+  assert.ok(!c.shown, 'a current choice: no chooser');
+  assert.equal(c.key, null, 'the key an older page kept is removed');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'the listing asked once, with no key');
+  await page.goto(`${env.server.url}?k=an-old-key&x=1#here`);
   await h.waitSettled(page);
-  env.packRequests.length = 0;
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
-  await h.waitSettled(page);
+  c = await chooser(page);
+  assert.equal(page.url(), `${env.server.url}?x=1#here`, 'an old link\'s ?k= taken off the address bar');
+  assert.ok(!c.shown && c.key === null, 'it opens no chooser and is not kept');
+  await page.click('#settings');
   await listed(page, 2);
   c = await chooser(page);
-  assert.ok(c.shown, 'a new key opens the chooser over the kept choice');
   assert.deepEqual(c.hd, ['MMPX (no pack)', '<b>Test</b> pack', 'plain.zip'], 'the packs by their labels (a file without one by its name)');
   assert.equal(c.markup, 0, 'a label is text, not markup');
   assert.equal(c.checked, '', 'MMPX, the HD now, checked');
-  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200]], 'the index asked once, with the key');
-  assert.equal(c.key, h.PACK_KEY, 'the new key is kept');
-  assert.equal(page.url(), env.server.url, 'and taken off the address bar');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  await page.reload();
-  await h.waitSettled(page);
-  assert.ok(!(await chooser(page)).shown, 'the same key again: no chooser');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200], ['/packs/index.json', 200]], 'once a visit');
 });
 
-test('a listed pack chosen: downloaded with the key, its progress shown, loaded and kept as a dropped pack (no game needed); the chooser closes; a reload brings it back with no chooser and no download; one the site does not have leaves the chooser open with the reason and nothing loaded; MMPX then forgets it', async (env) => {
+test('a listed pack chosen: downloaded, its progress shown, loaded and kept as a dropped pack (no game needed); the chooser closes; a reload brings it back with no chooser and no download; one the site does not have leaves the chooser open with the reason and nothing loaded; MMPX then forgets it', async (env) => {
   const bytes = await madePack(env);
   sitePacks(env, {
     'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }, { file: 'gone.zip', label: 'Gone' }] }),
     'test-pack.zip': bytes,
   });
   const { page } = await h.openPage(env, { setup: null });
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
-  await h.waitSettled(page);
-  await page.check('input[name="setup-lang"][value="en"]'); // the key preselected 한글 (spec 08 K6)
+  await h.load(page, env);
+  // A first visit opens on 한글 with NPC voices checked; this test reads the English labels and
+  // turns no voices on.
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.uncheck('#setup-voices');
   await listed(page, 2);
   assert.deepEqual((await chooser(page)).hd, ['MMPX (no pack)', 'Test pack', 'Gone']);
   await page.evaluate(() => {
@@ -3240,14 +3349,13 @@ test('a listed pack chosen: downloaded with the key, its progress shown, loaded 
   assert.equal(c.source, 'test-pack.zip', 'and where the kept pack came from');
   assert.equal(await h.keptPackBytes(page), bytes.length, 'the pack is kept as a dropped one is');
   assert.equal((await h.state(page)).state, 'idle', 'no game started');
-  assert.deepEqual(env.packRequests.slice(1), [['/packs/gone.zip', h.PACK_KEY, 404], ['/packs/test-pack.zip', h.PACK_KEY, 200]],
-    'each download with the key');
+  assert.deepEqual(env.packRequests.slice(1), [['/packs/gone.zip', 404], ['/packs/test-pack.zip', 200]], 'each download');
   env.packRequests.length = 0;
   await page.reload();
   await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
   assert.ok(!(await chooser(page)).shown, 'a reload: no chooser');
-  // The listing is asked with the key at every restore (the voice pack it may name, spec 09).
-  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200]], 'the listing only, no download: the kept pack');
+  // The listing is asked at every restore (the voice pack it may name, spec 09).
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'the listing only, no download: the kept pack');
   await page.click('#settings');
   await listed(page, 2);
   assert.equal((await chooser(page)).checked, 'test-pack.zip', 'Settings: the pack chosen is checked');
@@ -3299,7 +3407,7 @@ test('a dropped pack still loads; the chooser then shows it as the active pack (
   await listed(page, 0);
   c = await chooser(page);
   assert.ok(c.hd.length === 1 && c.checked === '', 'no pack: MMPX only, checked');
-  assert.deepEqual(env.packRequests, [], 'no key: no request to /packs/');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 404], ['/packs/index.json', 404]], 'the listing only, once a visit');
 });
 
 test('a listed pack chosen, then another pack dropped: the chooser shows the dropped one as active, and the listed pack chosen again is downloaded and replaces it', async (env) => {
@@ -3309,9 +3417,9 @@ test('a listed pack chosen, then another pack dropped: the chooser shows the dro
     'test-pack.zip': listedPack,
   });
   const { page } = await h.openPage(env, { setup: null });
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
-  await h.waitSettled(page);
-  await page.check('input[name="setup-lang"][value="en"]'); // the key preselected 한글 (spec 08 K6)
+  await h.load(page, env);
+  await page.check('input[name="setup-lang"][value="en"]'); // a first visit opens on 한글
+  await page.uncheck('#setup-voices'); // and with NPC voices checked: none turned on here
   await listed(page, 1);
   await page.check('input[name="setup-hd"][value="test-pack.zip"]');
   await page.click('#setup-ok');
@@ -3330,7 +3438,7 @@ test('a listed pack chosen, then another pack dropped: the chooser shows the dro
   await packIs(page, '1,0,0');
   c = await chooser(page);
   assert.ok(!c.shown && c.source === 'test-pack.zip', 'the listed pack is active again');
-  assert.deepEqual(env.packRequests, [['/packs/test-pack.zip', h.PACK_KEY, 200]], 'downloaded again');
+  assert.deepEqual(env.packRequests, [['/packs/test-pack.zip', 200]], 'downloaded again');
   assert.equal(await h.keptPackBytes(page), listedPack.length, 'and kept in place of the dropped one');
   await page.click('#settings');
   await listed(page, 1);
@@ -3359,10 +3467,13 @@ const pageText = (page) => page.evaluate(() => {
   };
 });
 
-test('한글: the page\'s labels, buttons and status lines switch to Korean at once and the chooser says the game\'s text is still English; the choice survives a reload; English switches back', async (env) => {
+test('한글: a first visit opens on 한글 and English is one click away; the page\'s labels, buttons and status lines switch to Korean at once and the chooser says the game\'s text is still English; the choice survives a reload; English switches back', async (env) => {
   sitePacks(env, {});
   const { page } = await h.openPage(env, { setup: null });
   await h.load(page, env);
+  assert.equal((await pageText(page)).lang, 'ko', 'a first visit: 한글');
+  await page.uncheck('#setup-voices'); // no voices turned on here
+  await page.check('input[name="setup-lang"][value="en"]');
   let shown = await pageText(page);
   assert.deepEqual({ lang: shown.lang, forget: shown.forget, mute: shown.mute, status: shown.status },
     { lang: 'en', forget: 'Forget the kept files', mute: 'Mute', status: 'No files loaded yet: drop or choose your Ultima VI files.' });
@@ -4648,9 +4759,8 @@ test('Forget voices removes the voice pack even when the model\'s caches cannot 
 });
 
 // --- the site's voice pack (spec 09 Design 4, as spec 08 K6's Korean pack) -------------------
-// The site's listing naming a voice pack for the key, served from memory by the test server
-// through the gate set to the tests' key (sitePacks); the packs are the tests' own (made-up
-// actors and profiles), under made-up file names.
+// The site's listing naming a voice pack, served from memory by the test server (sitePacks); the
+// packs are the tests' own (made-up actors and profiles), under made-up file names.
 
 const VOICES_FILE = 'voices-test-1.u6vp';
 const VOICES_NEWER = 'voices-test-2.u6vp';
@@ -4671,16 +4781,16 @@ async function noVoicePackValues(page, words) {
   }
 }
 
-test('the site\'s voice pack (synthetic, no game): with the key and a listing that names one, the page downloads it once with the key and loads it as a dropped one (data-voice-pack its count, kept under voice-pack: with the file it came from), with no line of its own; a reload with the same listing downloads nothing; a listing that names another file downloads and loads that one', async (env) => {
+test('the site\'s voice pack (synthetic, no game): with a listing that names one, the page downloads it once (no key) and loads it as a dropped one (data-voice-pack its count, kept under voice-pack: with the file it came from), with no line of its own; a reload with the same listing downloads nothing; a listing that names another file downloads and loads that one', async (env) => {
   const pack = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
   const newer = await voicePack({ [PACK_A]: VOICE_B });
   sitePacks(env, { 'index.json': voicesListing(VOICES_FILE), [VOICES_FILE]: JSON.stringify(pack) });
   const { page } = await h.openPage(env);
   const words = consoleText(page);
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await page.goto(env.server.url);
   await voicePackIs(page, 2);
-  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200], [`/packs/${VOICES_FILE}`, h.PACK_KEY, 200]],
-    'the listing, then the pack, each once and with the key');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200], [`/packs/${VOICES_FILE}`, 200]],
+    'the listing, then the pack, each once');
   assert.equal((await h.state(page)).status, await line('noFilesYet'), 'no line of its own');
   let kept = await h.keptVoicePacks(page);
   assert.deepEqual(kept.keys, ['voice-pack:source', 'voice-pack:voices'], 'kept under voice-pack:');
@@ -4689,12 +4799,12 @@ test('the site\'s voice pack (synthetic, no game): with the key and a listing th
   env.packRequests.length = 0;
   await page.reload();
   await voicePackIs(page, 2);
-  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200]], 'a reload: the listing only, the kept pack loaded');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'a reload: the listing only, the kept pack loaded');
   // A newer pack put on the site under another name: the next visit takes it, unasked.
   sitePacks(env, { 'index.json': voicesListing(VOICES_NEWER), [VOICES_NEWER]: JSON.stringify(newer) });
   await page.reload();
   await voicePackIs(page, 1);
-  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200], [`/packs/${VOICES_NEWER}`, h.PACK_KEY, 200]],
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200], [`/packs/${VOICES_NEWER}`, 200]],
     'the other file downloaded, once');
   kept = await h.keptVoicePacks(page);
   assert.deepEqual(kept.byKey['voice-pack:voices'], newer, 'kept in place of the one before');
@@ -4703,7 +4813,7 @@ test('the site\'s voice pack (synthetic, no game): with the key and a listing th
   console.log(`  receipt: voice pack requests ${voiceRequests(env).length} after the newer listing, 1 visit with no download: pass`);
 });
 
-test('the site\'s voice pack and a dropped one (synthetic, no game, in 한글): a dropped voice pack is never replaced by the listed one (visits with the key download nothing); after Forget voices the listed one is not downloaded again in the visit; the next visit downloads it', async (env) => {
+test('the site\'s voice pack and a dropped one (synthetic, no game, in 한글): a dropped voice pack is never replaced by the listed one (later visits download nothing); after Forget voices the listed one is not downloaded again in the visit; the next visit downloads it', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   const listedPack = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
   const dropped = await voicePack({ [PACK_A]: VOICE_B });
@@ -4713,10 +4823,11 @@ test('the site\'s voice pack and a dropped one (synthetic, no game, in 한글): 
   await h.load(page, env);
   await h.dropFiles(page, [], [{ name: 'voices.u6vp', text: JSON.stringify(dropped) }]);
   await voicePackIs(page, 1);
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  // The drop came after the first visit's restore had downloaded the listed pack.
+  assert.deepEqual(voiceRequests(env), [[`/packs/${VOICES_FILE}`, 200]], 'the first visit downloaded the listed pack');
+  env.packRequests.length = 0;
+  await page.reload();
   await voicePackIs(page, 1);
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
   await page.reload();
   await voicePackIs(page, 1);
   assert.deepEqual(voiceRequests(env), [], 'the dropped pack stays: nothing downloaded');
@@ -4734,7 +4845,7 @@ test('the site\'s voice pack and a dropped one (synthetic, no game, in 한글): 
   assert.deepEqual(voiceRequests(env), [], 'after Forget voices: not downloaded in the visit');
   await page.reload();
   await voicePackIs(page, 2);
-  assert.deepEqual(voiceRequests(env), [[`/packs/${VOICES_FILE}`, h.PACK_KEY, 200]], 'the next visit after a Forget loads it');
+  assert.deepEqual(voiceRequests(env), [[`/packs/${VOICES_FILE}`, 200]], 'the next visit after a Forget loads it');
   kept = await h.keptVoicePacks(page);
   assert.deepEqual([kept.byKey['voice-pack:voices'], kept.byKey['voice-pack:source']], [listedPack, VOICES_FILE], 'kept with its file');
   await noVoicePackValues(page, words);
@@ -4746,10 +4857,8 @@ test('the site\'s voice pack, then a dropped one (synthetic, no game): the drop 
   const dropped = await voicePack({ [PACK_A]: VOICE_B });
   sitePacks(env, { 'index.json': voicesListing(VOICES_FILE), [VOICES_FILE]: JSON.stringify(listedPack) });
   const { page } = await h.openPage(env);
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await page.goto(env.server.url);
   await voicePackIs(page, 2);
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
   await h.dropFiles(page, [], [{ name: 'voices.u6vp', text: JSON.stringify(dropped) }]);
   await voicePackIs(page, 1);
   let kept = await h.keptVoicePacks(page);
@@ -4764,25 +4873,24 @@ test('the site\'s voice pack, then a dropped one (synthetic, no game): the drop 
   console.log('  receipt: the site\'s voice pack then a drop, a renamed listing, 0 downloads: pass');
 });
 
-test('the site\'s voice pack not loaded (synthetic, no game): without a key no /packs/ request at all; an entry that is not a plain *.u6vp name is not asked for; one the site does not have (404), one that is not JSON, one the check refuses and one over the limit change nothing (the pack from before stays in use and kept, with its source), each warns with its kind only and is asked once only in the visit', async (env) => {
+test('the site\'s voice pack not loaded (synthetic, no game): a listing that names none asks for no pack; an entry that is not a plain *.u6vp name is not asked for; one the site does not have (404), one that is not JSON, one the check refuses and one over the limit change nothing (the pack from before stays in use and kept, with its source), each warns with its kind only and is asked once only in the visit', async (env) => {
   const pack = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
-  sitePacks(env, { 'index.json': voicesListing(VOICES_FILE), [VOICES_FILE]: JSON.stringify(pack) });
+  sitePacks(env, { 'index.json': voicesListing(null) });
   let { context, page } = await h.openPage(env);
   await h.load(page, env);
-  assert.deepEqual(env.packRequests, [], 'no key: no request to /packs/ at all');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'a listing with no voice pack: the listing only');
   assert.equal(await page.evaluate(() => document.body.dataset.voicePack), '0', 'no pack');
   await context.close();
+  sitePacks(env, { 'index.json': voicesListing(VOICES_FILE), [VOICES_FILE]: JSON.stringify(pack) });
   ({ context, page } = await h.openPage(env));
   const words = consoleText(page);
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await page.goto(env.server.url);
   await voicePackIs(page, 2);
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
   for (const file of ['../voices-up.u6vp', 'voices-test.json']) {
     sitePacks(env, { 'index.json': voicesListing(file), [file]: JSON.stringify(pack) });
     await page.reload();
     await voicePackIs(page, 2);
-    assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200]], 'not a plain *.u6vp name: the listing only');
+    assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'not a plain *.u6vp name: the listing only');
   }
   const big = JSON.stringify(pack).replace('{', `{${' '.repeat(1 << 20)}`); // over 1 MiB
   const cases = [
@@ -4795,7 +4903,7 @@ test('the site\'s voice pack not loaded (synthetic, no game): without a key no /
     sitePacks(env, { 'index.json': voicesListing(file), ...(body === undefined ? {} : { [file]: body }) });
     await page.reload();
     await voicePackIs(page, 2);
-    assert.deepEqual(voiceRequests(env), [[`/packs/${file}`, h.PACK_KEY, body === undefined ? 404 : 200]], `${what}: asked once, with the key`);
+    assert.deepEqual(voiceRequests(env), [[`/packs/${file}`, body === undefined ? 404 : 200]], `${what}: asked once`);
     assert.equal((await h.state(page)).status, await line('noFilesYet'), `${what}: no line`);
     const kept = await h.keptVoicePacks(page);
     assert.deepEqual([kept.byKey['voice-pack:voices'], kept.byKey['voice-pack:source']], [pack, VOICES_FILE], `${what}: the pack from before stays kept, with its source`);
@@ -4806,7 +4914,7 @@ test('the site\'s voice pack not loaded (synthetic, no game): without a key no /
     assert.equal(voiceRequests(env).length, 1, `${what}: not asked again in the visit`);
   }
   await noVoicePackValues(page, words);
-  console.log(`  receipt: no key 0 requests, 2 entries of another form 0 pack requests, ${cases.length} refusals 1 request each, nothing changed: pass`);
+  console.log(`  receipt: no voice pack listed 0 pack requests, 2 entries of another form 0 pack requests, ${cases.length} refusals 1 request each, nothing changed: pass`);
 });
 
 // --- NPC bundles (spec 09 Design 5) --------------------------------------------------------
@@ -5190,9 +5298,9 @@ test('Korean pack in a game (the user\'s disks, a synthetic conversation): in �
 }, { needs: h.haveHfes });
 
 // --- the site's Korean pack (spec 08, slice K6) -------------------------------------------
-// The site's listing (/packs/index.json) naming a Korean pack for the key, served from memory by
-// the test server through the gate set to the tests' key (sitePacks); the packs are koFixture's
-// (made-up lines, no game data), under made-up file names.
+// The site's listing (/packs/index.json) naming a Korean pack, served from memory by the test
+// server (sitePacks); the packs are koFixture's (made-up lines, no game data), under made-up file
+// names.
 
 const KO_FILE = 'ko-test-1.u6lp';
 const KO_NEWER = 'ko-test-2.u6lp';
@@ -5217,7 +5325,7 @@ async function noPackWords(page, words) {
   }
 }
 
-test('the site\'s Korean pack (synthetic, no game): with the key and a listing that names one, a page in 한글 downloads it once with the key and loads it as a dropped one (its counts, its line, kept under locale:ko with the file it came from), the chooser\'s note saying it came from the site; OK and a reload with the same listing download nothing; a listing that names another file downloads and loads that one', async (env) => {
+test('the site\'s Korean pack (synthetic, no game): with a listing that names one, a page in 한글 downloads it once (no key) and loads it as a dropped one (its counts, its line, kept under locale:ko with the file it came from), the chooser\'s note saying it came from the site; OK and a reload with the same listing download nothing; a listing that names another file downloads and loads that one', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   const ko = TEXT.ko;
   const first = await koFixture();
@@ -5225,17 +5333,18 @@ test('the site\'s Korean pack (synthetic, no game): with the key and a listing t
   sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(first.pack) });
   const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
   const words = consoleText(page);
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await page.goto(env.server.url);
   await koPackIs(page, `${first.runs},${first.scripts}`);
-  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200], [`/packs/${KO_FILE}`, h.PACK_KEY, 200]],
-    'the listing, then the pack, each once and with the key');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200], [`/packs/${KO_FILE}`, 200]],
+    'the listing, then the pack, each once');
   assert.equal((await h.state(page)).status, `${ko.koPackLoaded(first.runs, first.scripts)}${ko.koPackKept}\n${ko.noFilesYet}`,
     'the line of a dropped pack, counts only');
   assert.deepEqual(await h.keptLocalePack(page), first.pack, 'kept under locale:ko, byte for byte');
   assert.equal(await koSourceKept(page), KO_FILE, 'with the file it came from');
   assert.equal(await localeNoteShown(page), null, 'the line pointing at the tool goes');
+  await page.click('#settings');
   let c = await chooser(page);
-  assert.ok(c.shown && c.lang === 'ko', 'the new key opened the chooser, on 한글');
+  assert.ok(c.shown && c.lang === 'ko', 'Settings opens the chooser, on 한글');
   assert.equal(c.note, `${ko.gameTextPack}${ko.koPackHosted}`, 'the chooser says the pack came from the site');
   await page.click('#setup-ok');
   await h.waitSettled(page);
@@ -5243,14 +5352,14 @@ test('the site\'s Korean pack (synthetic, no game): with the key and a listing t
   env.packRequests.length = 0;
   await page.reload();
   await koPackIs(page, `${first.runs},${first.scripts}`);
-  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200]], 'a reload: the listing only, the kept pack loaded');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'a reload: the listing only, the kept pack loaded');
   c = await chooser(page);
   assert.ok(!c.shown && c.note === `${ko.gameTextPack}${ko.koPackHosted}`, 'no chooser; its note still says where the pack came from');
   // A newer pack put on the site under another name: the next visit takes it, unasked.
   sitePacks(env, { 'index.json': koListing(KO_NEWER), [KO_NEWER]: Uint8Array.from(newer.pack) });
   await page.reload();
   await koPackIs(page, `${newer.runs},${newer.scripts}`);
-  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200], [`/packs/${KO_NEWER}`, h.PACK_KEY, 200]],
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200], [`/packs/${KO_NEWER}`, 200]],
     'the other file downloaded, once');
   assert.deepEqual(await h.keptLocalePack(page), newer.pack, 'kept in place of the one before');
   assert.equal(await koSourceKept(page), KO_NEWER, 'with its file');
@@ -5258,7 +5367,7 @@ test('the site\'s Korean pack (synthetic, no game): with the key and a listing t
   console.log(`  receipt: pack requests ${koRequests(env).length} after the newer listing, 2 visits with no download: pass`);
 });
 
-test('the site\'s Korean pack and a dropped one (synthetic, no game): a dropped pack is never replaced by the listed one (a visit with the key downloads nothing); after Forget the listed one is not loaded in the visit, not at an OK in 한글, until the page goes to 한글 again; after another Forget the next visit loads it', async (env) => {
+test('the site\'s Korean pack and a dropped one (synthetic, no game): a dropped pack is never replaced by the listed one (a later visit downloads nothing); after Forget the listed one is not loaded in the visit, not at an OK in 한글, until the page goes to 한글 again; after another Forget the next visit loads it', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   const ko = TEXT.ko;
   const listedPack = await koFixture();
@@ -5269,10 +5378,11 @@ test('the site\'s Korean pack and a dropped one (synthetic, no game): a dropped 
   await h.load(page, env);
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: dropped.pack }]);
   await koPackIs(page, `${dropped.runs},${dropped.scripts}`);
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  // The drop came after the first visit's restore had loaded the listed pack.
+  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, 200]], 'the first visit downloaded the listed pack');
+  env.packRequests.length = 0;
+  await page.reload();
   await koPackIs(page, `${dropped.runs},${dropped.scripts}`);
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
   assert.deepEqual(koRequests(env), [], 'the dropped pack stays: nothing downloaded');
   assert.deepEqual(await h.keptLocalePack(page), dropped.pack, 'and stays kept');
   assert.equal((await chooser(page)).note, ko.gameTextPack, 'the note does not say it came from the site');
@@ -5292,7 +5402,7 @@ test('the site\'s Korean pack and a dropped one (synthetic, no game): a dropped 
   await page.check('input[name="setup-lang"][value="ko"]');
   await page.click('#setup-ok');
   await koPackIs(page, `${listedPack.runs},${listedPack.scripts}`);
-  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, h.PACK_KEY, 200]], '한글 again: the listed pack downloaded');
+  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, 200]], '한글 again: the listed pack downloaded');
   assert.equal(await koSourceKept(page), KO_FILE);
   await page.click('#forget-ko');
   await h.waitSettled(page);
@@ -5300,27 +5410,29 @@ test('the site\'s Korean pack and a dropped one (synthetic, no game): a dropped 
   env.packRequests.length = 0;
   await page.reload();
   await koPackIs(page, `${listedPack.runs},${listedPack.scripts}`);
-  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, h.PACK_KEY, 200]], 'the next visit after a Forget loads it');
+  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, 200]], 'the next visit after a Forget loads it');
   await noPackWords(page, words);
   console.log('  receipt: a dropped pack kept over the listed one, 0 downloads; after Forget 0, then 1 at 한글 again, 1 the next visit: pass');
 });
 
-test('the site\'s Korean pack not loaded (synthetic, no game): without a key no /packs/ request at all; in English no Korean pack is asked for; one the site does not have (404) and one that does not read leave the game\'s text English with the page\'s line for that case, asked once only in the visit', async (env) => {
+test('the site\'s Korean pack not loaded (synthetic, no game): a listing that names none asks for no pack; in English no Korean pack is asked for; one the site does not have (404) and one that does not read leave the game\'s text English with the page\'s line for that case, asked once only in the visit', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   const ko = TEXT.ko;
   const { pack } = await koFixture();
-  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack) });
+  sitePacks(env, { 'index.json': koListing(null) });
   let { context, page } = await h.openPage(env, { setup: { lang: 'ko' } });
   await h.load(page, env);
   await page.click('#settings');
   await page.click('#setup-ok');
   await h.waitSettled(page);
-  assert.deepEqual(env.packRequests, [], 'no key: no request to /packs/ at all');
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'a listing with no Korean pack: the listing only');
   assert.equal((await localeShown(page)).pack, 'none');
   await context.close();
+  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack) });
   ({ context, page } = await h.openPage(env, { setup: { lang: 'en' } }));
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await page.goto(env.server.url);
   await h.waitSettled(page);
+  await page.click('#settings');
   await listed(page, 0);
   await page.click('#setup-ok');
   await h.waitSettled(page);
@@ -5331,13 +5443,14 @@ test('the site\'s Korean pack not loaded (synthetic, no game): without a key no 
   sitePacks(env, { 'index.json': koListing('ko-gone.u6lp') });
   ({ context, page } = await h.openPage(env, { setup: { lang: 'ko' } }));
   const words = consoleText(page);
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await page.goto(env.server.url);
   await h.waitSettled(page);
-  assert.deepEqual(koRequests(env), [['/packs/ko-gone.u6lp', h.PACK_KEY, 404]], 'asked once, the gate let it through');
+  assert.deepEqual(koRequests(env), [['/packs/ko-gone.u6lp', 404]], 'asked once');
   assert.equal((await localeShown(page)).pack, 'none', 'no pack');
   assert.equal(await h.keptLocalePack(page), null, 'none kept');
   assert.equal((await h.state(page)).status, ko.noFilesYet, 'nothing else changes');
   assert.equal(await localeNoteShown(page), ko.gameText, 'the game\'s text is English, the page says so');
+  await page.click('#settings');
   await page.click('#setup-ok');
   await h.waitSettled(page);
   await page.click('#settings');
@@ -5353,7 +5466,7 @@ test('the site\'s Korean pack not loaded (synthetic, no game): without a key no 
   sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack.slice(0, pack.length - 3)) });
   await page.reload();
   await h.waitSettled(page);
-  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, h.PACK_KEY, 200]], 'downloaded once');
+  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, 200]], 'downloaded once');
   assert.equal((await h.state(page)).status, `${ko.koPackRefused('its contents are not those of a Korean pack')}\n${ko.noFilesYet}`,
     'refused with the reader\'s line');
   assert.equal((await localeShown(page)).pack, 'none', 'no pack');
@@ -5370,7 +5483,7 @@ test('the site\'s Korean pack not loaded (synthetic, no game): without a key no 
   await h.waitSettled(page);
   assert.equal(koRequests(env).length, 1, 'not asked again in the visit');
   await noPackWords(page, words);
-  console.log('  receipt: no key 0 requests, English 0 pack requests, 404 1 request, unreadable 1 request: pass');
+  console.log('  receipt: no Korean pack listed 0 pack requests, English 0 pack requests, 404 1 request, unreadable 1 request: pass');
 });
 
 test('the site\'s Korean pack in a game (the user\'s disks, a synthetic conversation): a game running in English, then 한글 at the chooser: the listed pack is downloaded and the game restarts with it, its line counts only; a reload starts the game with the kept pack and downloads nothing', async (env) => {
@@ -5384,12 +5497,13 @@ test('the site\'s Korean pack in a game (the user\'s disks, a synthetic conversa
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
   assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await page.goto(env.server.url);
   await h.waitSettled(page);
   await h.waitPrompt(page);
   assert.equal((await localeShown(page)).locale, 'off', 'English');
   assert.deepEqual(koRequests(env), [], 'English: no Korean pack asked for');
   const saved = await h.savedFiles(page);
+  await page.click('#settings');
   await page.check('input[name="setup-lang"][value="ko"]');
   await page.click('#setup-ok');
   await h.waitSettled(page);
@@ -5399,7 +5513,7 @@ test('the site\'s Korean pack in a game (the user\'s disks, a synthetic conversa
   const status = (await h.state(page)).status;
   assert.ok(status.startsWith(`${ko.koPackLoaded(runs, scripts)}${ko.koPackKept}\n`) && status.includes(ko.koPackOn(runs, scripts)),
     'the lines of a dropped pack, counts only');
-  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, h.PACK_KEY, 200]], 'downloaded once, with the key');
+  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, 200]], 'downloaded once');
   h.assertSame(await h.savedFiles(page), saved, 'the save untouched');
   env.packRequests.length = 0;
   await page.reload();
@@ -5413,32 +5527,30 @@ test('the site\'s Korean pack in a game (the user\'s disks, a synthetic conversa
   console.log('  receipt: 1 download, the game on it after the switch and after a reload, 0 downloads on the reload: pass');
 }, { needs: h.haveHfes });
 
-test('the first-run language (spec 08 K6): with no choice kept the chooser shows on 한글 when the visitor has a key or the browser\'s language is Korean, else on English; a kept choice wins in each case', async (env) => {
+test('the first-run language: with no choice kept the chooser shows on 한글, whatever the browser\'s language, and English is one click away; a kept choice wins in each case', async (env) => {
   sitePacks(env, { 'index.json': koListing(null) });
-  // [what, the browser's language, a key in the address, the choice kept, the language wanted]
+  // [what, the browser's language, the choice kept, the language wanted]
   const cases = [
-    ['a key', 'en-US', true, null, 'ko'],
-    ['a ko-KR browser', 'ko-KR', false, null, 'ko'],
-    ['an en-US browser', 'en-US', false, null, 'en'],
-    ['a key, English kept', 'en-US', true, { lang: 'en' }, 'en'],
-    ['a ko-KR browser, English kept', 'ko-KR', false, { lang: 'en' }, 'en'],
-    ['an en-US browser, 한글 kept', 'en-US', false, { lang: 'ko' }, 'ko'],
+    ['an en-US browser', 'en-US', null, 'ko'],
+    ['a ko-KR browser', 'ko-KR', null, 'ko'],
+    ['an en-US browser, English kept', 'en-US', { lang: 'en' }, 'en'],
+    ['a ko-KR browser, English kept', 'ko-KR', { lang: 'en' }, 'en'],
+    ['an en-US browser, 한글 kept', 'en-US', { lang: 'ko' }, 'ko'],
   ];
-  for (const [what, locale, key, stored, want] of cases) {
+  for (const [what, locale, stored, want] of cases) {
     const { context, page } = await h.openPage(env, { setup: stored, locale });
-    await page.goto(key ? `${env.server.url}?k=${h.PACK_KEY}` : env.server.url);
-    await h.waitSettled(page);
+    await h.load(page, env);
     const c = await chooser(page);
     assert.equal((await pageText(page)).lang, want, `${what}: the page in ${want}`);
     if (stored === null) {
       assert.ok(c.shown, `${what}: the chooser shows first`);
       assert.equal(c.lang, want, `${what}: on ${want}`);
+      await page.uncheck('#setup-voices'); // no voices turned on here
       await page.click('#setup-ok');
       await h.waitSettled(page);
       assert.deepEqual((await chooser(page)).stored, { lang: want, version: h.SETUP_VERSION }, `${what}: OK keeps it`);
     } else {
-      assert.equal(c.shown, key, `${what}: the chooser shows only for a new key`);
-      if (key) assert.equal(c.lang, want, `${what}: on the choice kept`);
+      assert.ok(!c.shown, `${what}: no chooser`);
       assert.deepEqual(c.stored, { ...stored, version: h.SETUP_VERSION }, `${what}: the choice kept as it was`);
     }
     await context.close();
@@ -5446,55 +5558,41 @@ test('the first-run language (spec 08 K6): with no choice kept the chooser shows
   console.log(`  receipt: ${cases.length} first-run cases: pass`);
 });
 
-// A context whose pages find the key kept already (no ?k= in the address: the key is not new).
-const keyKept = (context) => context.addInitScript((k) => {
-  try {
-    if (localStorage.getItem('u6.packKey') === null) localStorage.setItem('u6.packKey', k);
-  } catch {
-    // An opaque origin (about:blank) has no storage.
-  }
-}, h.PACK_KEY);
-
-test('a choice kept by an older page (spec 08 K6): with the key kept it counts as none once, so the chooser opens on 한글 and its OK keeps the current record with the listed pack loaded, and the next visit has no chooser; a current record with English stands (no chooser, English, no Korean pack asked for); without a key an old record stands', async (env) => {
+test('a choice kept by an older page (SETUP_VERSION 2, or none) counts as none once, for every visitor: the chooser opens on 한글 (over English kept) with NPC voices checked and the listed packs loaded, its OK keeps the current record and the next visit has no chooser; a current record with English stands (no chooser, English, no Korean pack asked for)', async (env) => {
   const { pack, runs, scripts } = await koFixture();
   const listing = { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack) };
+  for (const [what, record] of [['version 2', '{"lang":"en","version":2}'], ['no version', '{"lang":"en"}']]) {
+    sitePacks(env, listing);
+    const { context, page } = await h.openPage(env, { setup: record, locale: 'en-US' });
+    await h.load(page, env);
+    await koPackIs(page, `${runs},${scripts}`);
+    let c = await chooser(page);
+    assert.ok(c.shown, `${what}: the chooser shows`);
+    assert.equal(c.lang, 'ko', `${what}: on 한글`);
+    assert.equal((await pageText(page)).lang, 'ko', `${what}: the page in 한글`);
+    assert.ok(c.voices && c.terms, `${what}: NPC voices checked, the terms shown`);
+    assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, 200]], `${what}: the listed Korean pack loaded before any press, once`);
+    assert.deepEqual(c.stored, JSON.parse(record), `${what}: the older record untouched until OK`);
+    await page.uncheck('#setup-voices'); // no voices turned on here
+    await page.click('#setup-ok');
+    await h.waitSettled(page);
+    c = await chooser(page);
+    assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, `${what}: OK keeps the current record`);
+    await page.reload();
+    await koPackIs(page, `${runs},${scripts}`);
+    assert.ok(!(await chooser(page)).shown, `${what}: the next visit: no chooser`);
+    assert.equal(koRequests(env).length, 1, `${what}: and no second download`);
+    await context.close();
+  }
   sitePacks(env, listing);
-  let { context, page } = await h.openPage(env, { setup: '{"lang":"en"}' });
-  await keyKept(context);
+  const { context, page } = await h.openPage(env, { setup: { lang: 'en' } });
   await h.load(page, env);
-  let c = await chooser(page);
-  assert.ok(c.shown, 'the key and an old record: the chooser shows');
-  assert.equal(c.lang, 'ko', 'on 한글');
-  assert.equal((await pageText(page)).lang, 'ko', 'the page in 한글');
-  await page.click('#setup-ok');
-  await koPackIs(page, `${runs},${scripts}`);
-  c = await chooser(page);
-  assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, 'OK keeps the current record');
-  assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, h.PACK_KEY, 200]], 'the listed pack loaded, once');
-  await page.reload();
-  await koPackIs(page, `${runs},${scripts}`);
-  assert.ok(!(await chooser(page)).shown, 'the next visit: no chooser');
-  assert.equal(koRequests(env).length, 1, 'and no second download');
-  await context.close();
-  sitePacks(env, listing);
-  ({ context, page } = await h.openPage(env, { setup: { lang: 'en' } }));
-  await keyKept(context);
-  await h.load(page, env);
-  c = await chooser(page);
-  assert.ok(!c.shown, 'the key and a current record: no chooser');
+  const c = await chooser(page);
+  assert.ok(!c.shown, 'a current record: no chooser');
   assert.equal((await pageText(page)).lang, 'en', 'English');
   assert.deepEqual(koRequests(env), [], 'no Korean pack asked for');
   await context.close();
-  sitePacks(env, listing);
-  ({ context, page } = await h.openPage(env, { setup: '{"lang":"en"}', locale: 'ko-KR' }));
-  await h.load(page, env);
-  c = await chooser(page);
-  assert.ok(!c.shown, 'no key and an old record: no chooser');
-  assert.equal((await pageText(page)).lang, 'en', 'its language, over a ko-KR browser');
-  assert.deepEqual(c.stored, { lang: 'en' }, 'the record as it was');
-  assert.deepEqual(env.packRequests, [], 'no request to /packs/');
-  await context.close();
-  console.log('  receipt: key + old record 1 chooser and 1 download, key + current record 0 downloads, no key 0 requests: pass');
+  console.log('  receipt: 2 older records 1 chooser and 1 download each, a current record 0 downloads: pass');
 });
 
 // Runs in the page: while the test holds `ko-source` (window.__fail), every write of the Korean
@@ -5535,10 +5633,8 @@ test('the site\'s Korean pack and its source (synthetic, no game): the pack and 
   sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(hosted.pack) });
   const { context, page } = await h.openPage(env, { setup: { lang: 'ko' } });
   await context.addInitScript(sourceWritesThrow);
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await page.goto(env.server.url);
   await koPackIs(page, `${hosted.runs},${hosted.scripts}`);
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
   await page.evaluate(() => window.__fail.add('ko-source'));
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: dropped.pack }]);
   await koPackIs(page, `${dropped.runs},${dropped.scripts}`);
@@ -5569,10 +5665,8 @@ test('the site\'s Korean pack, then a dropped one (synthetic, no game): the drop
   const newer = await koFixture(0x21);
   sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(hosted.pack) });
   const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await page.goto(env.server.url);
   await koPackIs(page, `${hosted.runs},${hosted.scripts}`);
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: dropped.pack }]);
   await koPackIs(page, `${dropped.runs},${dropped.scripts}`);
   assert.deepEqual(await h.keptLocalePack(page), dropped.pack, 'the drop kept in place of the site\'s pack');
@@ -5587,7 +5681,7 @@ test('the site\'s Korean pack, then a dropped one (synthetic, no game): the drop
   console.log('  receipt: the site\'s pack then a drop, a renamed listing, 0 downloads: pass');
 });
 
-test('the owner\'s first visit after K6 (the user\'s disks, a synthetic conversation): a choice kept by an older page in English, the key kept, the kept game files, an HD pack chosen from the listing and no Korean pack kept; the listing names a Korean pack: before any press, the chooser is open on 한글 with the HD pack still checked, and the game it started behind it already runs with the Korean pack, downloaded once; OK keeps the current record, the HD pack and the Korean pack, nothing downloaded again', async (env) => {
+test('a returning visit after an older page (the user\'s disks, a synthetic conversation): a choice kept by an older page in English, the kept game files, an HD pack chosen from the listing and no Korean pack kept; the listing names a Korean pack and another HD pack first: before any press, the chooser is open on 한글 with the HD pack chosen still checked, and the game it started behind it already runs with the Korean pack, downloaded once; OK keeps the current record, the HD pack and the Korean pack, nothing downloaded again', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   const ko = TEXT.ko;
   const { archive, pack, runs, scripts } = await koFixture();
@@ -5601,24 +5695,26 @@ test('the owner\'s first visit after K6 (the user\'s disks, a synthetic conversa
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
   assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
-  await page.goto(`${env.server.url}?k=${h.PACK_KEY}`);
+  await page.goto(env.server.url);
   await h.waitSettled(page);
   await listed(page, 1);
+  // The older record opened the chooser as a first run: English, the HD pack, no voices.
   await page.check('input[name="setup-lang"][value="en"]');
   await page.check('input[name="setup-hd"][value="test-pack.zip"]');
+  await page.uncheck('#setup-voices');
   await page.click('#setup-ok');
   await packIs(page, '1,0,0');
   await page.evaluate(() => localStorage.setItem('u6.setup', '{"lang":"en"}'));
   assert.equal((await chooser(page)).source, 'test-pack.zip', 'the HD pack chosen from the listing');
   assert.equal(await h.keptLocalePack(page), null, 'no Korean pack kept');
-  // The visit: the key kept, the listing now names a Korean pack; no press at all.
-  await keyKept(context);
-  sitePacks(env, { 'index.json': JSON.stringify({ packs: [hdEntry], ko: { file: KO_FILE, label: 'Korean (test)' } }),
-    'test-pack.zip': hd, [KO_FILE]: Uint8Array.from(pack) });
+  // The visit: the listing now names a Korean pack, and another HD pack before the one chosen
+  // (the first run's default for a visitor with none); no press at all.
+  sitePacks(env, { 'index.json': JSON.stringify({ packs: [{ file: 'first.zip', label: 'First' }, hdEntry],
+    ko: { file: KO_FILE, label: 'Korean (test)' } }), 'test-pack.zip': hd, [KO_FILE]: Uint8Array.from(pack) });
   await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
-  await listed(page, 1);
+  await listed(page, 2);
   // The games the visit started, in order (h's glue: each Game.start, and what set_locale gave
   // it): one, with the Korean pack from before its first step; no English start, no restart.
   const starts = () => page.evaluate(() => globalThis.__starts.map(({ locale, stepsBefore }) => ({ locale, stepsBefore })));
@@ -5626,14 +5722,15 @@ test('the owner\'s first visit after K6 (the user\'s disks, a synthetic conversa
     'before any press: one game started, with the Korean pack before its first step');
   let c = await chooser(page);
   assert.ok(c.shown && c.lang === 'ko', 'the chooser open on 한글');
-  assert.equal(c.checked, 'test-pack.zip', 'the HD pack still checked');
+  assert.equal(c.checked, 'test-pack.zip', 'the HD pack still checked, not the first listed');
   const shown = await localeShown(page);
   assert.deepEqual([shown.pack, shown.locale], [`${runs},${scripts}`, 'on'], 'the game behind it runs with the Korean pack');
   assert.ok((await h.state(page)).status.includes(ko.koPackOn(runs, scripts)), 'its line, counts only');
   assert.equal(await page.evaluate(() => document.body.dataset.hdPack), '1,0,0', 'and the HD pack');
-  assert.deepEqual(env.packRequests, [['/packs/index.json', h.PACK_KEY, 200], [`/packs/${KO_FILE}`, h.PACK_KEY, 200]],
+  assert.deepEqual(env.packRequests, [['/packs/index.json', 200], [`/packs/${KO_FILE}`, 200]],
     'the listing and the Korean pack, once each; the HD pack not downloaded again');
   assert.deepEqual(c.stored, { lang: 'en' }, 'the older record untouched until OK');
+  await page.uncheck('#setup-voices'); // no voices turned on here
   await page.click('#setup-ok');
   await h.waitSettled(page);
   c = await chooser(page);
@@ -6297,6 +6394,12 @@ try {
       continue;
     }
     ran += 1;
+    // Each test starts with a site that lists nothing (every visit asks /packs/index.json), and
+    // answers nothing held.
+    env.packs.clear();
+    env.packRequests.length = 0;
+    for (const hold of env.packHolds.values()) hold.release();
+    env.packHolds.clear();
     try {
       await t.fn(env);
       console.log(`ok - ${t.name}`);

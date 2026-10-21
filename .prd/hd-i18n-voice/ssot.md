@@ -20,6 +20,12 @@ Added the same day (verbatim):
 
 > 4. 게임 루프(틱)을 고정해서 속도 유지해줘. 이거 키보드 -+로 조절할 수 있도록해줘. (지금 너무 느린데 최적화도 해야할 것 같음)
 
+Added 2026-10-21 (verbatim; "울티마-iv.zip" is the game archive the page takes, `ultima-vi.zip`):
+
+> 해당 사이트에서 그냥 울티마-iv.zip 파일 하나면 올리면 전체 한글화부터 음성까지 모두 적용되도록 배포해줘. 그 원본만 라이센스문제고 나머지는 2차 창작인데 다 허락 맡음.
+
+So the HD, Korean and voice packs (his derivative works, with his permission) are hosted publicly under `/packs/` with no key, and the first run turns them and the voices on by default; the game's own files are never hosted (07, 08, 09).
+
 Added 2026-10-21 (verbatim):
 
 > 1. 저장소에서는 2차 가공 파일을 자신이 만들수 있도록 스크립트 형태로 올려주고

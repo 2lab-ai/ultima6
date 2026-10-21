@@ -2,13 +2,11 @@
 // IndexedDB view, frame comparisons. Game files are read from the user's local copy at run
 // time and never written anywhere.
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { chromium } from 'playwright';
-import { gate } from '../../functions/_middleware.js';
 import { serve } from './serve.mjs';
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -516,27 +514,27 @@ export function packKit() {
   };
 }
 
-/// The tests' own pack key (the site's is in no file: its Function holds only its SHA-256).
-export const PACK_KEY = 'test-pack-key';
-
 /// Starts the server and a headless Chromium; `close()` stops both. The server answers /packs/*
-/// through the site's gate (functions/_middleware.js) set to `PACK_KEY`, from `packs`
-/// (name -> body, a string or bytes the test made; nothing on disk), and logs each of those
-/// requests in `packRequests` as [path, its X-Pack-Key or null, the status answered].
+/// as the site's static files there, from `packs` (name -> body, a string or bytes the test made;
+/// nothing on disk; a name it does not hold is a 404), each answer held while `holdPack` holds
+/// its name, and logs each of those requests in `packRequests` as [path, the status answered].
 export async function setup(root = SITE) {
   const packs = new Map();
   const packRequests = [];
-  const sha256 = createHash('sha256').update(PACK_KEY).digest('hex');
-  const files = (request) => {
-    const body = packs.get(decodeURIComponent(new URL(request.url).pathname.slice('/packs/'.length)));
-    return body === undefined ? new Response('not found', { status: 404 }) : new Response(body);
-  };
-  const front = gate(sha256);
+  const packHolds = new Map();
   const server = await serve({
     root,
     packs: async (request) => {
-      const response = await front({ request, next: async () => files(request) });
-      packRequests.push([new URL(request.url).pathname, request.headers.get('X-Pack-Key'), response.status]);
+      const path = new URL(request.url).pathname;
+      const name = decodeURIComponent(path.slice('/packs/'.length));
+      const hold = packHolds.get(name);
+      if (hold) {
+        hold.arrived();
+        await hold.gate;
+      }
+      const body = packs.get(name);
+      const response = body === undefined ? new Response('not found', { status: 404 }) : new Response(body);
+      packRequests.push([path, response.status]);
       return response;
     },
   });
@@ -546,10 +544,27 @@ export async function setup(root = SITE) {
   const gpuBrowser = () => (gpu ??= chromium.launch({ channel: 'chromium' }));
   const browsers = async () => [browser, ...(gpu ? [await gpu] : [])];
   return {
-    server, browser, gpuBrowser, browsers, packs, packRequests,
+    server, browser, gpuBrowser, browsers, packs, packRequests, packHolds,
     close: async () => {
       for (const b of await browsers()) await b.close();
       await server.close();
+    },
+  };
+}
+
+/// Holds the answer to every request for /packs/`name` until `release()` (the body is read from
+/// `env.packs` then); `asked` resolves once such a request came.
+export function holdPack(env, name) {
+  let arrived;
+  let release;
+  const asked = new Promise((done) => { arrived = done; });
+  const gate = new Promise((done) => { release = done; });
+  env.packHolds.set(name, { arrived, gate, release });
+  return {
+    asked,
+    release: () => {
+      env.packHolds.delete(name);
+      release();
     },
   };
 }
@@ -559,7 +574,7 @@ export const MODELS = join(SITE, 'models');
 export const haveModels = () => existsSync(join(MODELS, 'supertonic3')) && existsSync(join(MODELS, 'onnxruntime-web'));
 
 /// The version of the chooser's record (site/app.js SETUP_VERSION).
-export const SETUP_VERSION = 2;
+export const SETUP_VERSION = 3;
 
 /// The choice a page starts with unless a test asks for the chooser (`openPage`'s `setup`).
 export const CHOSEN = { lang: 'en' };
