@@ -22,6 +22,7 @@
 //   and the highlighted words that hit each, the request's `topics` (with `known` from the pack
 //   there and from the shared keywords' request, asked once before the scripts and never before
 //   the owner's yes), a request with no key byte for byte main's for the same style guide, the
+//   words of one block's keys (shared only where their English means the same), the
 //   alias gate (words that collide as the engine's matcher takes them, with the engine's
 //   particles, kept only by keys whose first block is the same, and checked against the words the
 //   pack keeps) and its refusals counted while the lines land, a key's several words, the run
@@ -890,6 +891,35 @@ test('slice K5b: the alias gate: a word is 1 to 8 Hangul syllables (no ASCII, no
   assert.equal(glossaryOf(scripts(same)).compatible('zorb', 'plim'), true);
   assert.equal(glossaryOf(scripts([...same, [['zorb'], ['zorb', 'plim']]])).compatible('zorb', 'plim'), false, 'one script differs');
   assert.equal(glossaryOf(scripts([[['zorb']], [['zorb']], [['zorb']], [['plim']]])).compatible('zorb', 'plim'), true, 'no script holds both');
+});
+
+test('slice K5b: the words of one block\'s keys: the instruction and the guide ask a key\'s word in all its lines, the keys of one block (leading to one reply) sharing a word only when the English words their lines show mean the same thing, else each the word for its own English (a key no line shows, its own keyword\'s), the sharing rule never replacing a key\'s known word; neither asks one word for every key of a block nor lets known override every rule, and the alias gate keeps one block\'s keys with different words', async () => {
+  // Whitespace collapsed: how either text is wrapped is no part of the rule.
+  const flat = (s) => s.replace(/\s+/g, ' ');
+  const keyed = flat(systemOf('STYLE', true));
+  assert.ok(keyed.includes('(the keys of one block lead to one reply;') && !keyed.includes('are one answer'), 'a block leads to one reply, not "one answer"');
+  assert.ok(keyed.includes('the same word for a key in all its lines, its "known" word where one is given'), 'a key\'s word in all its lines');
+  assert.ok(keyed.includes('the keys of one block may share a word only when the English words their lines show mean the same thing'),
+    'a block\'s keys share a word only when their English means the same');
+  assert.ok(keyed.includes('else each takes the word for its own English (a key no line shows: the word for its own keyword) (each line shows its own key\'s word);'),
+    'else each its own, a key no line shows its keyword\'s');
+  assert.ok(keyed.includes('(each line shows its own key\'s word); the sharing rule never replaces a key\'s "known" word.'), 'known over the sharing rule');
+  assert.ok(!keyed.includes('the same word for the keys of one block'), 'the instruction no longer asks one word for a block');
+  assert.ok(!keyed.includes('this is for the words you choose') && !keyed.includes('a key given "known" keeps it'), 'nor lets known override every rule');
+  const guide = flat(await readFile(join(dirname(TOOL), 'style-ko.md'), 'utf8'));
+  assert.ok(guide.includes('Use a key\'s word in every line of the character; when the request gives `known`, use that word.'), 'the guide: a key\'s word');
+  assert.ok(guide.includes('The keys of one keyword block lead to one reply, so they may share a word, but only when the English words their lines show mean the same thing'),
+    'the guide: a block\'s keys share a word only when their English means the same');
+  assert.ok(guide.includes('otherwise each key takes the word for its own English (a key no line shows, the word for its own keyword)'),
+    'the guide: else each its own, a key no line shows its keyword\'s');
+  assert.ok(guide.includes('since each line shows its own key\'s word. The sharing rule never replaces a key\'s `known` word, even where another key of its block keeps the same word.'),
+    'the guide: known over the sharing rule');
+  assert.ok(guide.includes('This holds over `known`: a name key\'s `known` is used only when it is already the name transliterated'), 'the name rule over known still stands');
+  assert.ok(!guide.includes('for the keys of one keyword block') && !guide.includes('Use the same word in every line of the character'),
+    'the guide no longer asks one word for a block');
+  assert.ok(!guide.includes('This is for the words you choose') && !guide.includes('a key given `known` keeps it'), 'nor lets known override every rule');
+  const { words, failed } = aliasesOf(['zorb', 'plim'], [{ k: 'zorb', ko: '달' }, { k: 'plim', ko: '별' }], compatibleOf([['zorb', 'plim']]));
+  assert.deepEqual([Object.fromEntries(words), Object.fromEntries(failed)], [{ zorb: '달', plim: '별' }, {}], 'one block, two words: both kept');
 });
 
 test('slice K5b: the tool\'s particles are the engine\'s (crates/u6-core/src/converse/run.rs PARTICLES), in their order', async () => {
