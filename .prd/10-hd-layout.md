@@ -6,7 +6,7 @@ tags: [ultima6, hd, ui, layout]
 
 # 10 — HD layout: the game's screen recomposed for 1280 × 720
 
-Status: in progress (2026-10-22). User item 1 of `hd-layout-font-register/ssot.md`, verbatim: "hd 해상도에 맞게 화면 ui 재구성해주고 hd pack을 최대한 사용할 수 있도록 개선 (전체 화면 모드 지원; 최대 해상도는 hd고 그거보다 화면이 크면 알아서 스트레칭)". It builds on 07's compositor and pack and does not change the engine or the parity frame.
+Status: shipped (2026-10-23, in production at https://ultima6.2lab.ai from main 904ffd2; deploy 2 of `hd-layout-font-register/loop.md`). As built: the column's scale is 3.5, the only scale of 3.5..3.75 that puts every rect on whole pixels, with gaps of 30 and 31 px; a move with a button held in a gap is sent like a press (the rest of the screen). Follow-up L2 (the paper border 9-sliced around the regions) is open. User item 1 of `hd-layout-font-register/ssot.md`, verbatim: "hd 해상도에 맞게 화면 ui 재구성해주고 hd pack을 최대한 사용할 수 있도록 개선 (전체 화면 모드 지원; 최대 해상도는 hd고 그거보다 화면이 크면 알아서 스트레칭)". It builds on 07's compositor and pack and does not change the engine or the parity frame.
 
 ## Measured facts (main 6e4e337)
 
@@ -40,6 +40,6 @@ Status: in progress (2026-10-22). User item 1 of `hd-layout-font-register/ssot.m
 1. In game at 1280 × 720 (a 1400 × 900 window) the map rect of the visible canvas equals the map rect of the ×4 frame pixel for pixel, and so does the command bar.
 2. Clicks through the layout: a map cell walks or targets that cell; each command icon selects its command; a party member in the side panel opens its inventory; a press in a gap is the original's click on the rest of the screen (no walk, no command), and a move there keeps the pointer sprite in the nearest region.
 3. The opening and the menu show the whole frame letterboxed, and their clicks still land.
-4. Fullscreen at 1920 × 1080 (smooth stretch), 2560 × 1440 (pixelated ×2) and 1728 × 1117 (16:9 with bars): the box size, the rendering mode and a key reaching the game are printed (`live-fullscreen.mjs`'s checks).
+4. Fullscreen at 1920 × 1080 (smooth stretch), 2560 × 1440 (pixelated ×2) and 1728 × 1117 (16:9 with bars): the box size, the rendering mode and a key reaching the game are printed (the web test "HD layout (spec 10 Acceptance 4)", in the browser's and the page's own fullscreen).
 5. Original layout and HD off are as before: the existing web tests pass unchanged.
 6. Gates (`merge-gate.sh`) pass; the live site, a fresh visitor with the zip only, shows 1 to 4.
