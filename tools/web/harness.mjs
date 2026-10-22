@@ -576,8 +576,11 @@ export const CHOSEN = { lang: 'en' };
 /// unchanged); `setup` is the chooser's choice the page finds kept (`CHOSEN`: no chooser), as a
 /// record of this version, or a string kept as it is (a record of an older page), null for a
 /// first visit (the chooser shows); `gpu`: in the Chromium with WebGPU; `locale`: the
-/// browser's language (navigator.language), en-US unless a test asks, whatever the machine's.
-export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN, gpu = false, locale = 'en-US' } = {}) {
+/// browser's language (navigator.language), en-US unless a test asks, whatever the machine's;
+/// `layout`: the screen layout the page finds kept (spec 10 Design 7: `original` unless a test
+/// asks for `hd`, so every click test keeps its 320 x 200 box; null keeps none, the page's
+/// default), kept only while the page keeps none (a choice the page made survives a reload).
+export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN, gpu = false, locale = 'en-US', layout = 'original' } = {}) {
   const browser = gpu ? await env.gpuBrowser() : env.browser;
   const context = await browser.newContext({ viewport: { width: 1024, height: 900 }, locale });
   await context.addInitScript(pageHooks);
@@ -589,6 +592,15 @@ export async function openPage(env, { gated = true, gameFirst = true, setup = CH
         // An opaque origin (about:blank) has no storage.
       }
     }, typeof setup === 'string' ? setup : JSON.stringify({ ...setup, version: SETUP_VERSION }));
+  }
+  if (layout) {
+    await context.addInitScript((value) => {
+      try {
+        if (localStorage.getItem('u6.layout') === null) localStorage.setItem('u6.layout', value);
+      } catch {
+        // An opaque origin (about:blank) has no storage.
+      }
+    }, layout);
   }
   if (gated) {
     await context.route(/\/store\.js(\?real)?$/, async (route) => {
@@ -1156,10 +1168,33 @@ export async function press(page, key, settle) {
   await waitTicks(page, settle);
 }
 
-/// A pixel of the canvas (320 x 200 game pixels) as a page position through its CSS box.
+/// A pixel of the canvas (320 x 200 game pixels) as a page position through its CSS box; with
+/// the HD layout in effect (spec 10) through the page's own map of it (`__u6Layout.toCanvas`:
+/// the centre of what shows that pixel; a pixel the layout does not show fails).
 export async function screenPoint(page, x, y) {
   const box = await page.locator('#screen').boundingBox();
+  const at = await page.evaluate(([gx, gy]) => {
+    if (document.body.dataset.layout !== 'hd') return null;
+    const c = document.getElementById('screen');
+    const p = globalThis.__u6Layout.toCanvas(gx, gy);
+    return p ? [p[0] / c.width, p[1] / c.height] : [NaN, NaN];
+  }, [x, y]);
+  if (at) {
+    if (!Number.isFinite(at[0])) throw new Error('the HD layout does not show that pixel');
+    return [box.x + at[0] * box.width, box.y + at[1] * box.height];
+  }
   return [box.x + ((x + 0.5) * box.width) / 320, box.y + ((y + 0.5) * box.height) / 200];
+}
+
+/// Canvas pixel (cx, cy) of the canvas's own size (the HD layout's 1280 x 720) as a page
+/// position through its CSS box.
+export async function canvasPoint(page, cx, cy) {
+  const box = await page.locator('#screen').boundingBox();
+  const [w, h] = await page.evaluate(() => {
+    const c = document.getElementById('screen');
+    return [c.width, c.height];
+  });
+  return [box.x + (cx * box.width) / w, box.y + (cy * box.height) / h];
 }
 
 /// Clicks game pixel (x, y), waits until the game took the press and the release, then
