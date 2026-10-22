@@ -60,11 +60,13 @@
 // unless the pixel font was chosen): while the HD layout is in effect the page loads the font
 // from this origin (site/fonts/gowun-batang.woff2, document.fonts.load) and, once it has it,
 // sets the compositor's HD font mode (Game.set_hd_font): each letter or syllable cell of the
-// game's text is its paper in the ×4 frame and listed (Game.hd_glyphs), and after the regions
-// are copied the page draws each listed character in the font over its cell's place on the
-// canvas, centred, at 0.85 of the cell's height there, in its ink colour (ASCII 1.45 times as
-// wide as the font has it). Until the font is loaded, with the pixel font chosen, with Original
-// or with HD off, the game's own pixel font shows, as before.
+// game's text is its paper in the ×4 frame and listed (Game.hd_glyphs, whole spaces too), and
+// after the regions are copied the page draws the listed characters in the font over their
+// cells' places on the canvas in runs (a row's neighbouring cells, one space joining words, two
+// or more ending the run): each run one line from its first cell's left edge, at 0.85 of the
+// cell's height there, at the font's natural width (narrowed to its cells should it be wider),
+// each character in its own ink. Until the font is loaded, with the pixel font chosen, with
+// Original or with HD off, the game's own pixel font shows, as before.
 //
 // Fullscreen (the toolbar's Fullscreen): #screen-box (the canvas, its badge, the hidden input
 // that takes Korean) goes fullscreen, the canvas as large as fits with the game's aspect ratio,
@@ -265,8 +267,8 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // only), data-fullscreen = off, on (the browser's) or css (the page's own), data-layout = the
 // screen layout in effect (hd: HD on with the HD layout chosen; else original), data-font = the
 // font the game's text is drawn in on the canvas (hd: the HD font, chosen with the HD layout in
-// effect and loaded; else pixel), data-font-file = the HD font file's state (none: not asked for,
-// loading, loaded, failed).
+// effect and loaded, as the page last set it; after a trap as it was; else pixel),
+// data-font-file = the HD font file's state (none: not asked for, loading, loaded, failed).
 // The drop line shows only while no game files are kept (`filesKept` false once the storage said
 // so) or loaded (a game on screen).
 let filesKept = null; // whether this browser keeps game files; null until the restore asked
@@ -1394,15 +1396,20 @@ function fitRendering(hd) {
 // `draw`). The layout in effect goes on the body first, since it sets the box. The text in the
 // HD font while it is chosen and loaded with the HD layout in effect (asked for here when it is
 // wanted and not yet), else in the pixel font. After a trap nothing changes (the canvas keeps
-// what it showed in the box it had, as for HD on or off) until the reload.
+// what it showed in the box it had, as for HD on or off) until the reload; the font file's state
+// still shows.
 function applyHd() {
-  if (crashed) return;
+  if (crashed) {
+    reflectFont();
+    return;
+  }
   showLayout();
   if (fontWanted()) loadFont();
+  fontDrawn = fontOn();
   reflectFont();
   if (!game) return;
   game.set_hd(hdOn, layoutOn() ? LAYOUT_S : hdScale());
-  game.set_hd_font(fontOn());
+  game.set_hd_font(fontDrawn);
   draw();
   fitRendering(game.hd_on());
 }
@@ -1531,10 +1538,9 @@ function overlap([ax, ay, aw, ah], [bx, by, bw, bh]) {
 // The canvas from the ×4 frame for `view`: everything (`dirty` null: the fill, the frames and
 // every region), or the regions that rect of the ×4 frame touches (a one-to-one region only that
 // part of it, a scaled one whole: a part scaled on its own would not meet its neighbours'); then
-// the HD font's characters over what it copied (`paintGlyphs`). With characters listed, a
-// one-to-one region's part reaches a cell further left and right (the x4 frame's own pixels
-// again): a character drawn wider than its cell (ASCII) is then drawn again wherever a cell it
-// reaches was copied again, and never left over from a cell that changed.
+// the HD font's characters over what it copied (`paintGlyphs`). A one-to-one region with cells
+// listed in it, now or at the paint before, is copied whole too: a run's characters move when
+// one of its cells changes, so a part copied alone could keep pixels of the run before.
 function paint(view, dirty) {
   const ctx = canvas.getContext('2d');
   if (!dirty) {
@@ -1547,8 +1553,11 @@ function paint(view, dirty) {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(x4, 0, 0, x4.width, x4.height, ...LAYOUT_WHOLE);
     // `u` lists no cell (its text is in the chip planes), but the letterbox also shows `game`'s
-    // last frame once the game itself ended (Ctrl-Q, Y: the launcher ends in `game`).
+    // last frame once the game itself ended (Ctrl-Q, Y: the launcher ends in `game`). The whole
+    // screen is one region here: runs of two windows side by side do not join, since the
+    // windows' borders are not listed cells and so end a run.
     if (glyphs.length > 0) paintGlyphs(ctx, glyphs, [0, 0, SCREEN_W, SCREEN_H], LAYOUT_WHOLE, LAYOUT_WHOLE);
+    paintedGlyphs = glyphs;
     return;
   }
   if (!dirty) {
@@ -1556,17 +1565,15 @@ function paint(view, dirty) {
     ctx.lineWidth = 1;
     for (const { to: [x, y, w, h] } of LAYOUT_REGIONS) ctx.strokeRect(x - 0.5, y - 0.5, w + 1, h + 1);
   }
-  const cell = GLYPH_CELL * LAYOUT_S;
-  const reach = dirty && glyphs.length > 0 ? [dirty[0] - cell, dirty[1], dirty[2] + 2 * cell, dirty[3]] : dirty;
   for (const { from, to } of LAYOUT_REGIONS) {
     const source = from.map((v) => v * LAYOUT_S);
     const one = to[2] === source[2] && to[3] === source[3];
-    const part = dirty ? overlap(source, one ? reach : dirty) : source;
+    const part = dirty ? overlap(source, dirty) : source;
     if (!part) continue;
     ctx.imageSmoothingEnabled = !one;
     ctx.imageSmoothingQuality = 'high';
     let copied = to;
-    if (one) {
+    if (one && !listedIn(glyphs, from) && !listedIn(paintedGlyphs, from)) {
       const [x, y, w, h] = part;
       copied = [to[0] + x - source[0], to[1] + y - source[1], w, h];
       ctx.drawImage(x4, x, y, w, h, ...copied);
@@ -1575,6 +1582,7 @@ function paint(view, dirty) {
     }
     if (glyphs.length > 0) paintGlyphs(ctx, glyphs, from, to, copied);
   }
+  paintedGlyphs = glyphs;
 }
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -1658,8 +1666,13 @@ function chooseLayout(value) {
 const FONT_KEY = 'u6.font'; // localStorage: 'pixel' when the viewer chose the pixel font
 const FONT_FAMILY = 'U6 Gowun Batang'; // index.html's @font-face: site/fonts/gowun-batang.woff2
 const GLYPH_CELL = 8; // a character's cell, in game pixels
+const GLYPH_SPACE = 0x20; // a listed space: no ink, it joins the words beside it (Design 3)
 const FONT_EM = 0.85; // the font's size: of the height the cell has on the canvas
-const ASCII_WIDE = 1.45; // ASCII drawn this many times as wide as the font has it (Design 3)
+// A run's ink keeps this far inside its cells at either end, in canvas pixels (it starts this far
+// in, and a run is narrowed to its cells less this either side): the rasteriser's anti-aliased
+// fringe reaches about a pixel past the ink box the font measures (measured on Chromium, the
+// shipped woff2 at 0.85 em: 'A' at the pen, the fringe one pixel left of it).
+const GLYPH_INSET = 1;
 
 // The stored choice: 'pixel', else (any other value, none, storage that cannot be read) 'hd'.
 function storedFont() {
@@ -1672,6 +1685,8 @@ function storedFont() {
 
 let fontChoice = storedFont();
 let fontFile = 'none'; // the font file: none (not asked for yet), loading, loaded, failed
+let fontDrawn = false; // the game's text is drawn in the HD font (as `applyHd` set it last)
+let paintedGlyphs = []; // the cells the last `paint` drew (Game.hd_glyphs then)
 // How far below its cell's centre a character's baseline lies, in ems of the font (once loaded:
 // half a syllable's ink height less its depth, so the syllables are centred in their cells and
 // ASCII stands on the same baseline, where the font puts it beside them).
@@ -1683,7 +1698,7 @@ const fontOn = () => fontWanted() && fontFile === 'loaded';
 
 // The font in effect and the file's state on the body (data-font, data-font-file).
 function reflectFont() {
-  put(document.body.dataset, 'font', fontOn() ? 'hd' : 'pixel');
+  put(document.body.dataset, 'font', fontDrawn ? 'hd' : 'pixel');
   put(document.body.dataset, 'fontFile', fontFile);
 }
 
@@ -1712,37 +1727,103 @@ function loadFont() {
     .finally(applyHd);
 }
 
-// The characters of `glyphs` (Game.hd_glyphs: x, y, code, ink and paper per cell, the whole
-// list of the last composition) whose cells lie in the classic rect `from` that the canvas rect
-// `to` shows, drawn there over the canvas rect `copied` alone (the part just copied from the ×4
-// frame, where those cells are their paper): each character centred on its cell's place, at
-// FONT_EM of its height, in its ink colour, ASCII ASCII_WIDE times as wide. A character is drawn
-// only over pixels copied again just before, so never twice over itself (its anti-aliased edges
-// would thicken); one that reaches that part from a cell beside it is drawn too.
+// Whether `glyphs` (Game.hd_glyphs) lists a cell in the classic rect `from`.
+function listedIn(glyphs, from) {
+  for (let i = 0; i < glyphs.length; i += 5) {
+    if (overlap([glyphs[i], glyphs[i + 1], GLYPH_CELL, GLYPH_CELL], from)) return true;
+  }
+  return false;
+}
+
+// The runs of `glyphs` (Game.hd_glyphs: x, y, code, ink and paper per cell, in raster order)
+// whose cells lie in the classic rect `from` (Design 3): listed cells of one row, each the next
+// one's left neighbour, of one paper; one listed space joins the cells either side of it, two or
+// more end the run, and so does a cell not listed; a run's spaces at either end are left out.
+// Each run: its row `y` and its cells [x, code, ink] left to right (a space's ink null: it goes
+// with the text it stands in).
+function glyphRuns(glyphs, from) {
+  const runs = [];
+  // The run being read: its row and paper, its cells, the spaces after its last cell, where its
+  // next cell would be.
+  let run = null;
+  const end = () => {
+    if (run && run.cells.length > 0) runs.push({ y: run.y, cells: run.cells });
+    run = null;
+  };
+  for (let i = 0; i < glyphs.length; i += 5) {
+    const [x, y, code, ink, paper] = [glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3], glyphs[i + 4]];
+    if (!overlap([x, y, GLYPH_CELL, GLYPH_CELL], from)) continue;
+    if (run && (y !== run.y || x !== run.next || paper !== run.paper)) end();
+    if (code === GLYPH_SPACE) {
+      if (run) {
+        run.spaces += 1;
+        run.next = x + GLYPH_CELL;
+        if (run.spaces > 1) end();
+      }
+      continue;
+    }
+    run ??= { y, paper, cells: [], spaces: 0, next: x };
+    if (run.spaces === 1) run.cells.push([x - GLYPH_CELL, GLYPH_SPACE, null]);
+    run.spaces = 0;
+    run.cells.push([x, code, ink]);
+    run.next = x + GLYPH_CELL;
+  }
+  end();
+  return runs;
+}
+
+// The runs of `glyphs` (`glyphRuns`) in the classic rect `from` that the canvas rect `to` shows,
+// drawn there over the canvas rect `copied` alone (the part just copied from the ×4 frame, where
+// their cells are their paper): each run one line of text from the left edge of its first cell's
+// place (its ink from GLYPH_INSET inside that edge), at FONT_EM of the cell's height there, on
+// the baseline `glyphDrop` puts, at the font's natural width without kerning, or narrowed to its
+// cells' width less the inset at each end when wider (horizontally only: the ink stays within its
+// cells); each character in its own ink, the parts of one ink drawn one after another, each where
+// the text before it ends. A run is drawn only over pixels copied again just before (a region
+// copied whole while it has characters: `paint`), so never twice over itself (its anti-aliased
+// edges would thicken).
 function paintGlyphs(ctx, glyphs, from, to, copied) {
   const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
-  const [w, h] = [GLYPH_CELL * sx, GLYPH_CELL * sy];
+  const h = GLYPH_CELL * sy;
   const size = FONT_EM * h;
   let ready = false;
-  for (let i = 0; i < glyphs.length; i += 5) {
-    const [x, y, code, ink] = [glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3]];
-    if (!overlap([x, y, GLYPH_CELL, GLYPH_CELL], from)) continue;
-    const [cx, cy] = [to[0] + (x - from[0]) * sx, to[1] + (y - from[1]) * sy];
-    // Where the character can reach: its cell and half a cell either side (ASCII at its width).
-    if (!overlap([cx - w / 2, cy, 2 * w, h], copied)) continue;
+  for (const { y, cells } of glyphRuns(glyphs, from)) {
+    const left = to[0] + (cells[0][0] - from[0]) * sx;
+    const top = to[1] + (y - from[1]) * sy;
+    const span = (cells.at(-1)[0] + GLYPH_CELL - cells[0][0]) * sx;
+    if (!overlap([left, top, span, h], copied)) continue;
     if (!ready) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(...copied);
       ctx.clip();
       ctx.font = `${size}px "${FONT_FAMILY}"`;
-      ctx.textAlign = 'center';
+      ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
+      // No kerning (Design 3): a run's width is its characters' advances, so a part drawn on its
+      // own stands where the whole text would put it.
+      ctx.fontKerning = 'none';
       ready = true;
     }
-    ctx.fillStyle = `#${ink.toString(16).padStart(6, '0')}`;
-    ctx.setTransform(code < 0x80 ? ASCII_WIDE : 1, 0, 0, 1, cx + w / 2, cy + h / 2 + glyphDrop * size);
-    ctx.fillText(String.fromCodePoint(code), 0, 0);
+    // Every code is under 0x10000: one character of the string per cell. The pen starts
+    // GLYPH_INSET inside the span, and further right as far as the first character's ink reaches
+    // left of the pen, and the run is narrowed when its width (or its ink's) is wider than the
+    // span less an inset either side: the ink, and its anti-aliased fringe, stay in the span.
+    const text = cells.map(([, code]) => String.fromCharCode(code)).join('');
+    const m = ctx.measureText(text);
+    const lead = Math.max(0, m.actualBoundingBoxLeft);
+    const natural = Math.max(m.width, lead + m.actualBoundingBoxRight);
+    const room = span - 2 * GLYPH_INSET;
+    const k = natural > room ? room / natural : 1;
+    ctx.setTransform(k, 0, 0, 1, left + GLYPH_INSET + lead * k, top + h / 2 + glyphDrop * size);
+    for (let a = 0; a < cells.length;) {
+      const ink = cells[a][2];
+      let b = a + 1;
+      while (b < cells.length && (cells[b][2] === null || cells[b][2] === ink)) b += 1;
+      ctx.fillStyle = `#${ink.toString(16).padStart(6, '0')}`;
+      ctx.fillText(text.slice(a, b), a === 0 ? 0 : ctx.measureText(text.slice(0, a)).width, 0);
+      a = b;
+    }
   }
   if (ready) ctx.restore();
 }

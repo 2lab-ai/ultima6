@@ -18,7 +18,7 @@
 // (one toolbar, the drop line, Settings' "HD on" and forget buttons, the controls, the notices)
 // and fullscreen, and the HD layout (spec 10: the 1280 x 720 canvas composed from the x4 frame,
 // clicks through it, the letterbox, fullscreen at any size, the setting) and the HD font on it
-// (spec 11: the font file, the characters drawn over the listed cells, the pixel font as before,
+// (spec 11: the font file, the text drawn in runs over the listed cells, the pixel font as before,
 // the choice). Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
 // page as it is. Every test but the HD layout's and the HD font's runs on the Original layout
 // (harness `openPage`), and the HD layout's keep the pixel font (`bootLayout`).
@@ -5256,10 +5256,11 @@ const KO_GREET_KO = `"어서 오시오, 그대여! 나는 ${KO_LINE}."`;
 // "Zed" f1 <look> f2 <greeting> b6`, stored raw, so any conversation archive `a` loads talks it;
 // and the Korean pack over it, made with the translation tool's own writer (tools/i18n), each
 // script's two runs in Korean. `other`: the pack's runs keyed to bytes that are not these.
-// `items`: the archive's items (a smaller one makes a pack of other counts).
-async function koFixture(items = 0x63) {
+// `items`: the archive's items (a smaller one makes a pack of other counts); `greeting` and
+// `greetingKo`: the greeting and its Korean, KO_GREET's and KO_GREET_KO unless a test makes its own.
+async function koFixture(items = 0x63, { greeting = KO_GREET, greetingKo = KO_GREET_KO } = {}) {
   const { fingerprint, hash64, hex64, latin1, packBytes } = await import('../i18n/translate.mjs');
-  const script = [0xff, 0x02, ...latin1('Zed'), 0xf1, ...latin1(KO_LOOK), 0xf2, ...latin1(KO_GREET), 0xb6];
+  const script = [0xff, 0x02, ...latin1('Zed'), 0xf1, ...latin1(KO_LOOK), 0xf2, ...latin1(greeting), 0xb6];
   const table = [];
   const body = [];
   for (let i = 0; i < items; i += 1) {
@@ -5274,7 +5275,7 @@ async function koFixture(items = 0x63) {
   for (let item = 1; item < items; item += 1) {
     named.push({ archive: 'a', item, hash: hex64(hash64(script)) });
     runs.push({ archive: 'a', item, offset: look, len: KO_LOOK.length, hash: hex64(hash64(latin1(KO_LOOK))), text: KO_LOOK_KO });
-    runs.push({ archive: 'a', item, offset: greet, len: KO_GREET.length, hash: hex64(hash64(latin1(KO_GREET))), text: KO_GREET_KO });
+    runs.push({ archive: 'a', item, offset: greet, len: greeting.length, hash: hex64(hash64(latin1(greeting))), text: greetingKo });
   }
   const pack = [...packBytes({ base: fingerprint(named), runs })];
   return { archive: [...table, ...body], pack, runs: runs.length, scripts: items - 1 };
@@ -7245,20 +7246,28 @@ test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (HD
 }, { needs: h.haveHfes });
 
 // --- the HD font (spec 11) ----------------------------------------------------------------------
-// With the HD layout and the HD font the compositor leaves each letter or syllable cell its paper
-// in the x4 frame and lists it (Game.hd_glyphs), and the page draws the character over the cell's
-// place on the canvas. The listed codes are the user's text (but those of the test's own Korean
-// lines): the checks tell them apart by kind (ASCII, a Hangul syllable) and compare in the page;
-// the receipts print no code and no count of them.
+// With the HD layout and the HD font the compositor leaves each letter, syllable or whole space
+// cell its paper in the x4 frame and lists it (Game.hd_glyphs), and the page draws the text over
+// the cells' places on the canvas in runs (Design 3). The listed codes are the user's text (but
+// those of the test's own conversation): the checks tell them apart by kind (ASCII, a Hangul
+// syllable, a space) and compare in the page; the receipts print no code and no count of them.
 
 const FONT_PATH = '/fonts/gowun-batang.woff2';
 
-// Every answer to a request for the font file in `context`, as [its origin, its status].
+// The test's own conversation for the font (koFixture's script with this greeting): two spaces
+// between two words (a run after them keeps its column), a word the font kerns (AVAW: drawn
+// without kerning, Design 3), a keyword (`@`: the game's highlight colour when its help mode is
+// on), and its Korean with the same (`@{…}`: the pack's keyword).
+const FONT_GREET = '"Hail,  friend! AVAW? Ask of @tests."';
+const FONT_GREET_KO = '"어서 오시오,  나그네여! @{시험}을 물으시오."';
+
+// Every answer to a request for the font file in `context`, as [its origin, its status, its
+// content type].
 function fontAnswers(context) {
   const seen = [];
   context.on('response', (r) => {
     const url = new URL(r.url());
-    if (url.pathname === FONT_PATH) seen.push([url.origin, r.status()]);
+    if (url.pathname === FONT_PATH) seen.push([url.origin, r.status(), r.headers()['content-type']]);
   });
   return seen;
 }
@@ -7286,125 +7295,86 @@ const fontShown = (page) => page.evaluate(() => {
 const fontIs = (page, font) => page.waitForFunction((f) => document.body.dataset.font === f
   && document.body.dataset.fontFile !== 'loading', font, { timeout: 30_000 });
 
-// Page script: the listed cells as the canvas shows them now, per region of the game screen (a
-// cell whole inside the region's classic rect): its place on the canvas (the cell's rect through
-// the region's map) and, there, whether some pixel is the ink's colour (within 48 a channel),
-// whether the ink (the pixels off the paper's colour) is centred across the place (within a
-// quarter of its width), and for a syllable whether it stands at least 0.6 of the place's
-// height and is centred down it (within a sixth); `unlike`: the places whose pixels differ from
-// the canvas `fontPixelShot` kept (the pixel font's). The canvas and the places are kept in the
-// page (`window.__fontSeen`) for `fontAgain`. Counts only.
-const fontCells = (page) => page.evaluate(() => {
-  const c = document.getElementById('screen');
-  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  const list = globalThis.__shownGame.hd_glyphs();
-  const out = {};
-  const places = [];
-  for (const { name, from, to } of globalThis.__u6Layout.regions) {
-    const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
-    const r = { cells: 0, ascii: 0, hangul: 0, inked: 0, centred: 0, tall: 0, upright: 0, whole: 0, unlike: 0 };
-    const shot = window.__pixelShot;
+// Page init script: the test's own reading of Design 3 (`window.__fontRunsOf(list, from)`, the
+// page's is not used): the listed cells of `list` (Game.hd_glyphs) in the classic rect `from`,
+// in runs: one row, each cell the next one's left neighbour, one paper; one space joins the
+// cells either side, two or more end the run, so does a cell not listed; the spaces at a run's
+// ends left out. Each run: its row, its cells ({ x, code, ink }, a space's ink null), whether it
+// follows two or more spaces (`after`), its inks; and `parts`, the texts the page is to draw it
+// in (one per stretch of one ink, a space going with the stretch it stands in). Also every
+// `fillText` on the game's canvas is kept in `window.__fills` while that is an array.
+function fontRunsHook() {
+  window.__fontRunsOf = (list, [fx, fy, fw, fh]) => {
+    const runs = [];
+    let chain = null;
+    const close = () => {
+      if (chain?.run) runs.push(chain.run);
+      if (chain) chain.run = null;
+    };
     for (let i = 0; i < list.length; i += 5) {
       const [x, y, code, ink, paper] = [list[i], list[i + 1], list[i + 2], list[i + 3], list[i + 4]];
-      if (x < from[0] || y < from[1] || x + 8 > from[0] + from[2] || y + 8 > from[1] + from[3]) continue;
-      const [px, py, w, hh] = [to[0] + (x - from[0]) * sx, to[1] + (y - from[1]) * sy, 8 * sx, 8 * sy];
-      if ([px, py, w, hh].every(Number.isInteger)) r.whole += 1;
-      const rgb = (v) => [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-      const [ki, pa] = [rgb(ink), rgb(paper)];
-      const far = (j, k) => Math.max(...[0, 1, 2].map((n) => Math.abs(d[j + n] - k[n])));
-      let inked = false;
-      let unlike = false;
-      let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
-      for (let yy = py; yy < py + hh; yy += 1) {
-        for (let xx = px; xx < px + w; xx += 1) {
-          const j = (yy * c.width + xx) * 4;
-          if (far(j, ki) <= 48) inked = true;
-          if (shot && (shot[j] !== d[j] || shot[j + 1] !== d[j + 1] || shot[j + 2] !== d[j + 2])) unlike = true;
-          if (far(j, pa) > 8) [x0, y0, x1, y1] = [Math.min(x0, xx), Math.min(y0, yy), Math.max(x1, xx), Math.max(y1, yy)];
+      if (x + 8 <= fx || y + 8 <= fy || x >= fx + fw || y >= fy + fh) continue;
+      if (!chain || chain.y !== y || chain.next !== x || chain.paper !== paper) {
+        close();
+        chain = { y, paper, spaces: 0, run: null };
+      }
+      chain.next = x + 8;
+      if (code === 0x20) {
+        chain.spaces += 1;
+        if (chain.spaces === 2) close();
+        continue;
+      }
+      if (!chain.run) chain.run = { y, cells: [], after: chain.spaces >= 2 };
+      else if (chain.spaces === 1) chain.run.cells.push({ x: x - 8, code: 0x20, ink: null });
+      chain.spaces = 0;
+      chain.run.cells.push({ x, code, ink });
+    }
+    close();
+    for (const run of runs) {
+      run.inks = new Set(run.cells.filter((c) => c.ink !== null).map((c) => c.ink));
+      run.parts = [];
+      let ink = null;
+      for (const c of run.cells) {
+        const ch = String.fromCharCode(c.code);
+        if (c.ink === null || c.ink === ink) run.parts[run.parts.length - 1] += ch;
+        else {
+          run.parts.push(ch);
+          ink = c.ink;
         }
       }
-      const hangul = code >= 0xac00 && code <= 0xd7a3;
-      r.cells += 1;
-      r.ascii += code >= 0x21 && code <= 0x7e ? 1 : 0;
-      r.hangul += hangul ? 1 : 0;
-      r.inked += inked ? 1 : 0;
-      r.unlike += unlike ? 1 : 0;
-      r.centred += x1 >= x0 && Math.abs((x0 + x1 + 1) / 2 - (px + w / 2)) <= w / 4 ? 1 : 0;
-      if (hangul) {
-        r.tall += y1 - y0 + 1 >= 0.6 * hh ? 1 : 0;
-        r.upright += Math.abs((y0 + y1 + 1) / 2 - (py + hh / 2)) <= hh / 6 ? 1 : 0;
-      }
-      places.push({ region: name, rect: [px, py, w, hh], code, ink });
     }
-    out[name] = r;
-  }
-  window.__fontSeen = { pixels: new Uint8ClampedArray(d), places };
-  return out;
-});
+    return runs;
+  };
+  const real = CanvasRenderingContext2D.prototype.fillText;
+  CanvasRenderingContext2D.prototype.fillText = function fillText(text, ...rest) {
+    if (Array.isArray(window.__fills) && this.canvas.id === 'screen') window.__fills.push(String(text));
+    return real.call(this, text, ...rest);
+  };
+}
 
-// Page script: the places `fontCells` kept, against the canvas now: how many show other pixels
-// than then (`differ`), of those still listed with the same character and ink (`same`; `all`:
-// every place kept, whatever is listed now), and per region whether any pixel of it off those
-// places changed (`moved`).
-const fontAgain = (page, { all = false } = {}) => page.evaluate((every) => {
-  const c = document.getElementById('screen');
-  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  const { pixels, places } = window.__fontSeen;
-  const list = globalThis.__shownGame.hd_glyphs();
-  const now = new Set();
-  for (let i = 0; i < list.length; i += 5) now.add(`${list[i]},${list[i + 1]},${list[i + 2]},${list[i + 3]}`);
-  const seen = new Set();
-  for (const { name, from, to } of globalThis.__u6Layout.regions) {
-    const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
-    for (const key of now) {
-      const [x, y, code, ink] = key.split(',').map(Number);
-      seen.add(`${name},${to[0] + (x - from[0]) * sx},${to[1] + (y - from[1]) * sy},${code},${ink}`);
-    }
-  }
-  let same = 0;
-  let differ = 0;
-  for (const { region, rect: [px, py, w, hh], code, ink } of places) {
-    if (!every && !seen.has(`${region},${px},${py},${code},${ink}`)) continue;
-    same += 1;
-    let off = false;
-    for (let yy = py; yy < py + hh && !off; yy += 1) {
-      for (let xx = px; xx < px + w; xx += 1) {
-        const j = (yy * c.width + xx) * 4;
-        if (d[j] !== pixels[j] || d[j + 1] !== pixels[j + 1] || d[j + 2] !== pixels[j + 2]) {
-          off = true;
-          break;
-        }
-      }
-    }
-    differ += off ? 1 : 0;
-  }
-  const on = new Uint8Array(c.width * c.height);
-  for (const { rect: [px, py, w, hh] } of places) {
-    for (let yy = py; yy < py + hh; yy += 1) for (let xx = px; xx < px + w; xx += 1) on[yy * c.width + xx] = 1;
-  }
-  const moved = {};
-  for (const { name, to: [x, y, w, hh] } of globalThis.__u6Layout.regions) {
-    moved[name] = false;
-    for (let yy = y; yy < y + hh && !moved[name]; yy += 1) {
-      for (let xx = x; xx < x + w; xx += 1) {
-        const j = (yy * c.width + xx) * 4;
-        if (!on[yy * c.width + xx] && (d[j] !== pixels[j] || d[j + 1] !== pixels[j + 1] || d[j + 2] !== pixels[j + 2])) {
-          moved[name] = true;
-          break;
-        }
-      }
-    }
-  }
-  return { same, differ, moved };
-}, all);
-
-// Page script: the game screen's regions composed again from the x4 frame as it is now (the
-// page's own copies, rect for rect: one to one, or scaled smooth), against the canvas, region
-// by region: the pixels that differ off the places where a listed character can reach (its
-// cell's place and half a place to either side, inside the region: `off`, of `offCompared`),
-// and the listed cells whose place differs (`cells`, of `listed`). Right after a whole
-// composition (a change of the font) every region was copied from that frame.
-const fontComposed = (page) => page.evaluate(() => {
+// Page script: the runs as the canvas shows them now, region by region of the game screen,
+// against the regions composed again from the x4 frame as it is (the page's own copies, rect for
+// rect: one to one, or scaled smooth; right after a whole composition, a change of the font,
+// every region was copied from that frame). A run's span: its first cell's left edge to its last
+// cell's right edge, over its cell rows, through the region's map; its ink: the pixels in its
+// span that differ from the composition. Where a run's ink belongs, by the test's own measure of
+// Design 3: its text (the joined spaces in it) measured in the HD font at 0.85 of the cell's
+// height, no kerning; the pen 1 pixel inside the span's left edge and on by the ink the first
+// character puts left of it; the run at that width, or narrowed to the span less 1 pixel at
+// each end; so its ink box from the pen less the measured left reach to the pen plus the right
+// reach (each scaled as the run is). Per region: `off`, the pixels that differ outside every
+// span (of `offCompared`); the runs, their cells, syllables and ASCII; how many runs show ink,
+// stand on whole pixels, have their ink where it belongs within FONT_TOL pixels at each end
+// (`fits`: natural spacing, the inset, the narrowing); the runs of four or more ASCII and no
+// syllable (`latin`); of the runs with a syllable, those whose ink stands at least 0.6 of the
+// cell's height and is centred down it (within a sixth); of the runs after two or more spaces,
+// those that fit (so start at their own first cell); of the runs of two inks, those showing both
+// (a pixel within 48 a channel of each) and whose second ink starts where the text before it
+// ends (within FONT_TOL + 1: its first pixel of that colour); `unlike`: the runs whose span
+// differs from the canvas `fontPixelShot` kept (the pixel font's). The canvas and the spans are
+// kept in the page (`window.__fontSeen`) for `fontAgain`. Counts only.
+const FONT_TOL = 2;
+const fontRuns = (page) => page.evaluate((tol) => {
   const c = document.getElementById('screen');
   const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
   const g = globalThis.__shownGame;
@@ -7415,60 +7385,150 @@ const fontComposed = (page) => page.evaluate(() => {
   const e = document.createElement('canvas');
   [e.width, e.height] = [c.width, c.height];
   const ctx = e.getContext('2d');
-  const list = g.hd_glyphs();
-  const reach = new Uint8Array(c.width * c.height);
-  const out = {};
-  for (const { name, from, to } of globalThis.__u6Layout.regions) {
+  for (const { from, to } of globalThis.__u6Layout.regions) {
     const source = from.map((v) => v * 4);
-    const one = to[2] === source[2] && to[3] === source[3];
-    ctx.imageSmoothingEnabled = !one;
+    ctx.imageSmoothingEnabled = !(to[2] === source[2] && to[3] === source[3]);
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(x4, ...source, ...to);
-    const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
-    const cells = [];
-    for (let i = 0; i < list.length; i += 5) {
-      const [x, y] = [list[i], list[i + 1]];
-      if (x + 8 <= from[0] || y + 8 <= from[1] || x >= from[0] + from[2] || y >= from[1] + from[3]) continue;
-      const [px, py, w, hh] = [to[0] + (x - from[0]) * sx, to[1] + (y - from[1]) * sy, 8 * sx, 8 * sy];
-      cells.push([px, py, w, hh]);
-      for (let yy = Math.max(py, to[1]); yy < Math.min(py + hh, to[1] + to[3]); yy += 1) {
-        for (let xx = Math.max(Math.floor(px - w / 2), to[0]); xx < Math.min(Math.ceil(px + w + w / 2), to[0] + to[2]); xx += 1) reach[yy * c.width + xx] = 1;
-      }
-    }
-    out[name] = { cells, to };
   }
   const f = ctx.getImageData(0, 0, c.width, c.height).data;
-  const differs = (j) => d[j] !== f[j] || d[j + 1] !== f[j + 1] || d[j + 2] !== f[j + 2] || d[j + 3] !== f[j + 3];
-  const result = {};
-  for (const [name, { cells, to: [x, y, w, hh] }] of Object.entries(out)) {
-    let off = 0;
-    let offCompared = 0;
-    for (let yy = y; yy < y + hh; yy += 1) {
-      for (let xx = x; xx < x + w; xx += 1) {
-        if (reach[yy * c.width + xx]) continue;
-        offCompared += 1;
-        if (differs((yy * c.width + xx) * 4)) off += 1;
-      }
-    }
-    let changed = 0;
-    for (const [px, py, cw, ch] of cells) {
-      let any = false;
-      for (let yy = Math.max(py, y); yy < Math.min(py + ch, y + hh) && !any; yy += 1) {
-        for (let xx = Math.max(px, x); xx < Math.min(px + cw, x + w); xx += 1) {
-          if (differs((yy * c.width + xx) * 4)) {
-            any = true;
-            break;
-          }
+  const shot = window.__pixelShot;
+  const list = g.hd_glyphs();
+  const inked = (j) => d[j] !== f[j] || d[j + 1] !== f[j + 1] || d[j + 2] !== f[j + 2] || d[j + 3] !== f[j + 3];
+  const near = (j, v) => Math.max(Math.abs(d[j] - ((v >> 16) & 255)), Math.abs(d[j + 1] - ((v >> 8) & 255)), Math.abs(d[j + 2] - (v & 255))) <= 48;
+  const out = {};
+  const spans = [];
+  const mc = document.createElement('canvas').getContext('2d');
+  for (const { name, from, to } of globalThis.__u6Layout.regions) {
+    const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
+    const ch = 8 * sy;
+    mc.font = `${0.85 * ch}px "U6 Gowun Batang"`;
+    mc.fontKerning = 'none';
+    const r = {
+      off: 0, offCompared: 0, runs: 0, cells: 0, hangul: 0, ascii: 0, inked: 0, fits: 0, whole: 0,
+      latin: 0, syllabic: 0, tall: 0, upright: 0, after: 0, afterFits: 0, twoInk: 0, bothInks: 0, placed: 0, unlike: 0,
+    };
+    const mask = new Uint8Array(c.width * c.height);
+    for (const run of window.__fontRunsOf(list, from)) {
+      const [x0, x1] = [run.cells[0].x, run.cells.at(-1).x + 8];
+      const span = [to[0] + (x0 - from[0]) * sx, to[1] + (run.y - from[1]) * sy, (x1 - x0) * sx, ch];
+      const [left, top] = span;
+      const [ya, yb] = [Math.max(span[1], to[1]), Math.min(span[1] + ch, to[1] + to[3])];
+      const [xa, xb] = [Math.max(span[0], to[0]), Math.min(span[0] + span[2], to[0] + to[2])];
+      let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
+      const found = new Map(); // ink -> the first x showing it
+      let unlike = false;
+      for (let y = ya; y < yb; y += 1) {
+        for (let x = xa; x < xb; x += 1) {
+          mask[y * c.width + x] = 1;
+          const j = (y * c.width + x) * 4;
+          if (shot && (shot[j] !== d[j] || shot[j + 1] !== d[j + 1] || shot[j + 2] !== d[j + 2])) unlike = true;
+          if (!inked(j)) continue;
+          [minX, minY, maxX, maxY] = [Math.min(minX, x), Math.min(minY, y), Math.max(maxX, x), Math.max(maxY, y)];
+          for (const v of run.inks) if (near(j, v) && !(found.get(v) <= x)) found.set(v, x);
         }
       }
-      changed += any ? 1 : 0;
+      const letters = run.cells.filter((k) => k.code !== 0x20);
+      const syllables = letters.filter((k) => k.code >= 0xac00 && k.code <= 0xd7a3).length;
+      const ink = maxX >= minX;
+      const text = run.cells.map((k) => String.fromCharCode(k.code)).join('');
+      const m = mc.measureText(text);
+      const lead = Math.max(0, m.actualBoundingBoxLeft);
+      const natural = Math.max(m.width, lead + m.actualBoundingBoxRight);
+      const room = span[2] - 2;
+      const k = natural > room ? room / natural : 1;
+      const pen = left + 1 + lead * k;
+      const fits = ink && Math.abs(minX - (pen - m.actualBoundingBoxLeft * k)) <= tol
+        && Math.abs(maxX + 1 - (pen + m.actualBoundingBoxRight * k)) <= tol;
+      r.runs += 1;
+      r.cells += letters.length;
+      r.hangul += syllables;
+      r.ascii += letters.length - syllables;
+      r.inked += ink ? 1 : 0;
+      r.fits += fits ? 1 : 0;
+      r.whole += span.every(Number.isInteger) ? 1 : 0;
+      r.unlike += unlike ? 1 : 0;
+      if (syllables === 0 && letters.length >= 4) r.latin += 1;
+      if (syllables > 0) {
+        r.syllabic += 1;
+        r.tall += ink && maxY - minY + 1 >= 0.6 * ch ? 1 : 0;
+        r.upright += ink && Math.abs((minY + maxY + 1) / 2 - (top + ch / 2)) <= ch / 6 ? 1 : 0;
+      }
+      if (run.after) {
+        r.after += 1;
+        r.afterFits += fits ? 1 : 0;
+      }
+      if (run.inks.size > 1) {
+        r.twoInk += 1;
+        r.bothInks += found.size === run.inks.size ? 1 : 0;
+        // The second ink's part: from its first cell to the next cell of another ink.
+        const a = run.cells.findIndex((q) => q.ink !== null && q.ink !== run.cells[0].ink);
+        const second = run.cells[a].ink;
+        let b = a + 1;
+        while (b < run.cells.length && (run.cells[b].ink === null || run.cells[b].ink === second)) b += 1;
+        const at = pen + (mc.measureText(text.slice(0, a)).width - mc.measureText(text.slice(a, b)).actualBoundingBoxLeft) * k;
+        r.placed += found.has(second) && Math.abs(found.get(second) - at) <= tol + 1 ? 1 : 0;
+      }
+      spans.push({ key: `${name},${run.y},${run.cells.map((k) => `${k.x}:${k.code}:${k.ink}`).join(' ')}`, rect: [xa, ya, xb - xa, yb - ya] });
     }
-    result[name] = { off, offCompared, cells: changed, listed: cells.length };
+    const [x, y, w, hh] = to;
+    for (let yy = y; yy < y + hh; yy += 1) {
+      for (let xx = x; xx < x + w; xx += 1) {
+        if (mask[yy * c.width + xx]) continue;
+        r.offCompared += 1;
+        if (inked((yy * c.width + xx) * 4)) r.off += 1;
+      }
+    }
+    out[name] = r;
   }
-  return result;
+  window.__fontSeen = { pixels: new Uint8ClampedArray(d), spans };
+  return out;
+}, FONT_TOL);
+
+// Page script: the spans `fontRuns` kept, against the canvas now: how many of those whose run is
+// still listed the same (its cells, codes and inks: `same`) show other pixels than then
+// (`differ`), and per region whether any pixel of it outside those spans changed (`moved`).
+const fontAgain = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen');
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const { pixels, spans } = window.__fontSeen;
+  const list = globalThis.__shownGame.hd_glyphs();
+  const now = new Set();
+  for (const { name, from } of globalThis.__u6Layout.regions) {
+    for (const run of window.__fontRunsOf(list, from)) now.add(`${name},${run.y},${run.cells.map((k) => `${k.x}:${k.code}:${k.ink}`).join(' ')}`);
+  }
+  const changed = (j) => d[j] !== pixels[j] || d[j + 1] !== pixels[j + 1] || d[j + 2] !== pixels[j + 2];
+  const on = new Uint8Array(c.width * c.height);
+  let same = 0;
+  let differ = 0;
+  for (const { key, rect: [x, y, w, hh] } of spans) {
+    let off = false;
+    for (let yy = y; yy < y + hh; yy += 1) {
+      for (let xx = x; xx < x + w; xx += 1) {
+        on[yy * c.width + xx] = 1;
+        if (changed((yy * c.width + xx) * 4)) off = true;
+      }
+    }
+    if (!now.has(key)) continue;
+    same += 1;
+    differ += off ? 1 : 0;
+  }
+  const moved = {};
+  for (const { name, to: [x, y, w, hh] } of globalThis.__u6Layout.regions) {
+    moved[name] = false;
+    for (let yy = y; yy < y + hh && !moved[name]; yy += 1) {
+      for (let xx = x; xx < x + w; xx += 1) {
+        if (!on[yy * c.width + xx] && changed((yy * c.width + xx) * 4)) {
+          moved[name] = true;
+          break;
+        }
+      }
+    }
+  }
+  return { same, differ, moved };
 });
 
-// Page script: the canvas as it is now kept in the page (`window.__pixelShot`, for `fontCells`).
+// Page script: the canvas as it is now kept in the page (`window.__pixelShot`, for `fontRuns`).
 const fontPixelShot = (page) => page.evaluate(() => {
   const c = document.getElementById('screen');
   window.__pixelShot = new Uint8ClampedArray(c.getContext('2d').getImageData(0, 0, c.width, c.height).data);
@@ -7481,45 +7541,84 @@ async function chooseFont(page, value) {
   await page.check(`input[name="font"][value="${value}"]`);
 }
 
+// Talks to the party's second member (the test's conversation in place of the user's) and waits
+// for the prompt. The greeting's keyword shows in the game's highlight colour only in its help
+// mode, which the user's files start on or off: when no run of the scroll has two inks the help
+// mode is switched (Ctrl-H) and the member talked to again.
+async function fontTalk(page) {
+  const talk = async () => {
+    await page.focus('#screen');
+    for (const key of ['t', '2']) {
+      await page.keyboard.press(key);
+      await h.waitTaken(page);
+    }
+    await h.waitPrompt(page);
+  };
+  const twoInks = () => page.evaluate(() => {
+    const L = globalThis.__u6Layout;
+    const from = L.regions.find((r) => r.name === 'messages').from;
+    return window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from).some((run) => run.inks.size > 1);
+  });
+  await talk();
+  if (await twoInks()) return;
+  await page.keyboard.press('Control+KeyH');
+  await h.waitTaken(page);
+  await h.waitPrompt(page);
+  await talk();
+}
+
 // The pixel font in effect (no cell listed) and the canvas exactly the x4 frame's regions; then
-// the HD font: every listed cell drawn at its place, the rest the x4 frame's regions exactly,
-// each place showing other pixels than the pixel font did; `regions` the regions whose cells are
-// checked, each with its kinds wanted. Returns what `fontCells` read with the HD font.
+// the HD font in one paint that draws each run once, part by part (the page's fillText calls
+// against the test's reading of the runs, in order); every run inked within its span and its
+// cell rows, the rest of the canvas exactly the x4 frame's regions, every run unlike the pixel
+// font's; `regions`: the regions checked closer, each with the kinds of run it must show
+// (`latin`, `syllabic`, `after`, `twoInk`). Returns what `fontRuns` read with the HD font.
 async function fontOnOff(page, regions) {
   await chooseFont(page, 'pixel');
   let s = await fontShown(page);
   assert.ok(s.font === 'pixel' && s.mode === false && !s.listed && s.stored === 'pixel', 'the pixel font at once, kept: no cell listed');
-  for (const [name, r] of Object.entries(await fontComposed(page))) {
-    assert.equal(r.listed, 0, `${name}: no character drawn`);
-    assert.equal(r.off, 0, `${name}: the pixel font: the canvas is the x4 frame's region exactly`);
+  for (const [name, r] of Object.entries(await fontRuns(page))) {
+    assert.equal(r.runs, 0, `${name}: no run drawn`);
+    assert.ok(r.offCompared > 0 && r.off === 0, `${name}: the pixel font: the canvas is the x4 frame's region exactly`);
   }
   await fontPixelShot(page);
+  await page.evaluate(() => { window.__fills = []; });
   await chooseFont(page, 'hd');
+  const fills = await page.evaluate(() => {
+    const L = globalThis.__u6Layout;
+    const list = globalThis.__shownGame.hd_glyphs();
+    const want = L.regions.flatMap(({ from }) => window.__fontRunsOf(list, from).flatMap((run) => run.parts));
+    const got = window.__fills;
+    window.__fills = null;
+    return { calls: got.length, want: want.length, same: got.length === want.length && got.every((t, i) => t === want[i]) };
+  });
   s = await fontShown(page);
   assert.ok(s.font === 'hd' && s.mode === true && s.listed && s.stored === 'hd', 'the HD font at once, kept: cells listed');
-  const composed = await fontComposed(page);
-  const cells = await fontCells(page);
+  assert.ok(fills.want > 0 && fills.same, 'one paint draws each run once, part by part, as the runs read');
+  const runs = await fontRuns(page);
   for (const [name, kinds] of Object.entries(regions)) {
-    const r = cells[name];
-    assert.ok(r.cells > 0, `${name}: cells listed`);
-    for (const kind of kinds) assert.ok(r[kind] > 0, `${name}: ${kind} cells listed`);
-    assert.equal(r.whole, r.cells, `${name}: every place on whole canvas pixels`);
-    assert.equal(r.inked, r.cells, `${name}: every place shows its ink`);
-    assert.equal(r.unlike, r.cells, `${name}: every place unlike the pixel font's`);
-    assert.equal(r.centred, r.cells, `${name}: every character centred across its place`);
-    assert.ok(r.tall === r.hangul && r.upright === r.hangul, `${name}: every syllable at the region's scale, centred down its place`);
-    assert.equal(composed[name].cells, composed[name].listed, `${name}: every listed place drawn over its paper`);
+    const r = runs[name];
+    assert.ok(r.runs > 0 && r.cells > 0, `${name}: runs listed`);
+    for (const kind of kinds) assert.ok(r[kind] > 0, `${name}: a run of kind ${kind}`);
+    assert.equal(r.inked, r.runs, `${name}: every run shows its ink`);
+    assert.equal(r.whole, r.runs, `${name}: every span on whole canvas pixels`);
+    assert.equal(r.fits, r.runs, `${name}: every run's ink where the font puts it: from 1 px inside its first cell, at the font's natural width without kerning (or narrowed to its cells)`);
+    assert.ok(r.tall === r.syllabic && r.upright === r.syllabic, `${name}: every run of syllables at the region's scale, centred down its cells`);
+    assert.equal(r.afterFits, r.after, `${name}: every run after two or more spaces at its own first cell`);
+    assert.ok(r.bothInks === r.twoInk && r.placed === r.twoInk, `${name}: every run of two inks shows both, the second where the text before it ends`);
+    assert.equal(r.unlike, r.runs, `${name}: every run unlike the pixel font's`);
   }
-  for (const [name, r] of Object.entries(composed)) {
-    assert.ok(r.offCompared > 0, `${name}: pixels off the characters to compare`);
-    assert.equal(r.off, 0, `${name}: off the characters the canvas is the x4 frame's region exactly`);
+  for (const [name, r] of Object.entries(runs)) {
+    assert.ok(r.offCompared > 0, `${name}: pixels off the runs to compare`);
+    assert.equal(r.off, 0, `${name}: the runs' ink within their spans and cell rows, the rest the x4 frame's region exactly`);
   }
-  return cells;
+  return { runs, fills };
 }
 
-test('HD font (spec 11 Acceptance 2, English): in game on the HD layout (a 1400 x 900 window, the user\'s disks) the text is in the pixel font until the font file is in, which comes from this origin (200, no CSP report); with the pixel font chosen in Settings no cell is listed and the canvas is the x4 frame\'s regions exactly, as before; with the HD font every letter of the side panel and the message scroll is drawn at its place, in its ink, centred, on whole pixels, the rest of the canvas exactly the x4 frame\'s, every place unlike the pixel font\'s; frames that redraw the regions draw each character once (its pixels as before); at the game\'s own end (Ctrl-Q, Y) its last frame letterboxed still shows the listed letters; no page error', async (env) => {
+test('HD font (spec 11 Acceptance 2, English): in game on the HD layout (a 1400 x 900 window, the user\'s disks, a synthetic conversation) the text is in the pixel font until the font file is in, which comes from this origin (200, font/woff2, no CSP report); with the pixel font chosen in Settings no cell is listed and the canvas is the x4 frame\'s regions exactly, as before; with the HD font one paint draws each run of the side panel and the message scroll once, in its inks: its ink within its cells where the font puts it (from 1 px inside its first cell, at the font\'s natural width without kerning, the second ink where the text before it ends), a run after two spaces at its own cell, a keyword in its own colour, the rest of the canvas exactly the x4 frame\'s; frames that redraw the regions draw each run once (its pixels as before); at the game\'s own end (Ctrl-Q, Y) its last frame letterboxed still shows the runs; no page error', async (env) => {
   const errors = [];
   const { context, page } = await h.openPage(env, { layout: 'hd' });
+  await context.addInitScript(fontRunsHook);
   const answers = fontAnswers(context);
   page.on('pageerror', () => errors.push(1));
   // The font file's answer held until the game runs: the pixel font until it is in.
@@ -7535,7 +7634,6 @@ test('HD font (spec 11 Acceptance 2, English): in game on the HD layout (a 1400 
   await h.waitSettled(page);
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
-  await page.focus('#screen');
   await h.waitPrompt(page);
   let s = await fontShown(page);
   assert.ok(s.font === 'pixel' && s.file === 'loading' && s.mode === false && !s.listed, 'the font file not in yet: the pixel font, no cell listed');
@@ -7543,28 +7641,35 @@ test('HD font (spec 11 Acceptance 2, English): in game on the HD layout (a 1400 
   await fontIs(page, 'hd');
   s = await fontShown(page);
   assert.ok(s.file === 'loaded' && s.mode === true && s.listed && s.stored === null, 'the HD font by default, loaded, cells listed');
-  assert.ok(answers.length >= 1 && answers.every(([origin, status]) => origin === new URL(env.server.url).origin && status === 200), 'the font file from this origin, 200');
+  assert.ok(answers.length >= 1 && answers.every(([origin, status, type]) => origin === new URL(env.server.url).origin && status === 200 && type === 'font/woff2'), 'the font file from this origin, 200, font/woff2');
   assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP report');
+  // The test's conversation in place of the user's (in English no pack is taken).
+  const { archive } = await koFixture(0x63, { greeting: FONT_GREET, greetingKo: FONT_GREET_KO });
+  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  await fontIs(page, 'hd');
+  await fontTalk(page);
   await h.virtualDisplay(page, 60);
-  await fontOnOff(page, { panel: ['ascii'], messages: ['ascii'] });
+  await fontOnOff(page, { messages: ['latin', 'after', 'twoInk'], panel: ['latin'] });
   // Frames at the prompt: the message scroll's cursor turns (its cell is not listed), so the
-  // regions are copied again and their characters drawn again: each place as it was.
-  const before = await fontAgain(page);
-  assert.equal(before.differ, 0, 'the places as read');
+  // regions are copied again and their runs drawn again: each span as it was.
+  await fontRuns(page);
   let turned = 0;
   for (let k = 0; k < 12; k += 1) {
     await h.runFrames(page, 10);
     const again = await fontAgain(page);
     if (again.moved.messages) turned += 1;
-    assert.ok(again.same > 0, 'the characters still listed');
-    assert.equal(again.differ, 0, 'each character drawn once over its copied place: its pixels as before');
+    assert.ok(again.same > 0, 'the runs still listed');
+    assert.equal(again.differ, 0, 'each run drawn once over its copied region: its pixels as before');
   }
   assert.ok(turned > 0, 'the message scroll drawn again (its cursor turned)');
   s = await fontShown(page);
   assert.equal(s.font, 'hd', 'still the HD font');
   // The game's own end (Ctrl-Q, Y: the command loop ends, and so does the launcher, in `game`):
-  // the page shows its last frame letterboxed, the cells listed still drawn there, each place
-  // (the cell's rect through the letterbox) showing its ink.
+  // the page shows its last frame letterboxed, the runs listed still drawn there, each span
+  // (its cells' rect through the letterbox) showing the run's first ink.
   await page.focus('#screen');
   for (const key of ['Control+KeyQ', 'KeyY']) {
     await page.keyboard.press(key);
@@ -7576,16 +7681,18 @@ test('HD font (spec 11 Acceptance 2, English): in game on the HD layout (a 1400 
     const c = document.getElementById('screen');
     const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
     const L = globalThis.__u6Layout;
-    const list = globalThis.__shownGame.hd_glyphs();
     const [x, y, w, hh] = L.whole;
     const [sx, sy] = [w / 320, hh / 200];
+    const runs = window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), [0, 0, 320, 200]);
     let inked = 0;
-    for (let i = 0; i < list.length; i += 5) {
-      const ink = [(list[i + 3] >> 16) & 255, (list[i + 3] >> 8) & 255, list[i + 3] & 255];
-      const [px, py] = [x + list[i] * sx, y + list[i + 1] * sy];
+    for (const run of runs) {
+      const v = run.cells[0].ink;
+      const ink = [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+      const [px, py] = [x + run.cells[0].x * sx, y + run.y * sy];
+      const pw = (run.cells.at(-1).x + 8 - run.cells[0].x) * sx;
       let found = false;
       for (let yy = Math.floor(py); yy < Math.ceil(py + 8 * sy) && !found; yy += 1) {
-        for (let xx = Math.floor(px); xx < Math.ceil(px + 8 * sx); xx += 1) {
+        for (let xx = Math.floor(px); xx < Math.ceil(px + pw); xx += 1) {
           const j = (yy * c.width + xx) * 4;
           if (Math.max(...[0, 1, 2].map((n) => Math.abs(d[j + n] - ink[n]))) <= 48) {
             found = true;
@@ -7595,21 +7702,113 @@ test('HD font (spec 11 Acceptance 2, English): in game on the HD layout (a 1400 
       }
       inked += found ? 1 : 0;
     }
-    return { state: document.body.dataset.state, view: L.view, listed: list.length / 5, inked };
+    return { state: document.body.dataset.state, view: L.view, runs: runs.length, inked };
   });
   assert.ok(ended.state === 'ended' && ended.view === 'whole', 'the game ended: its last frame letterboxed');
-  assert.ok(ended.listed > 0 && ended.inked === ended.listed, 'every cell listed still drawn, in its ink');
+  assert.ok(ended.runs > 0 && ended.inked === ended.runs, 'every run listed still drawn, in its ink');
   assert.equal(errors.length, 0, 'no page error');
-  console.log('  receipt: the font file from this origin (200), no CSP report; the pixel font: the canvas the x4 frame\'s regions exactly; the HD font: the panel\'s and the scroll\'s letters drawn at their places, the rest exactly the x4 frame\'s; 120 frames, the scroll drawn again: each character drawn once; the game\'s own end: its letters drawn in the letterbox: pass');
+  console.log('  receipt: the font file from this origin (200, font/woff2), no CSP report; the pixel font: the canvas the x4 frame\'s regions exactly; the HD font: one paint, each run of the panel and the scroll drawn once in its parts, inked within its cells from its first cell, letters at the font\'s width, a run after two spaces at its column, the keyword in its colour, the rest exactly the x4 frame\'s; 120 frames, the scroll drawn again: each run drawn once; the game\'s own end: its runs drawn in the letterbox: pass');
 }, { needs: h.haveHfes });
 
-test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pack (the user\'s disks, a synthetic conversation) the message scroll lists the pack\'s syllables and the game\'s letters; with the HD font each is drawn at its place, a syllable centred and standing at the scroll\'s scale; with the pixel font the canvas is the x4 frame\'s regions exactly; no line reaches the console, the page\'s data or text', async (env) => {
+test('HD font (spec 11, after a trap): a font file that comes in after the engine trapped is shown as loaded on the page (data-font-file), while the canvas, not drawn again, keeps the pixel font (data-font)', async (env) => {
+  const { context, page } = await h.openPage(env, { layout: 'hd' });
+  let release;
+  const held = new Promise((done) => { release = done; });
+  await context.route((url) => url.pathname === FONT_PATH, async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.goto(env.server.url, { waitUntil: 'domcontentloaded' });
+  await h.waitSettled(page);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  assert.deepEqual([(await fontShown(page)).font, (await fontShown(page)).file], ['pixel', 'loading'], 'the font file not in yet');
+  await page.evaluate(() => { globalThis.__trap = true; });
+  await page.waitForFunction(() => document.body.dataset.state === 'crashed');
+  const trapped = await canvasHash(page);
+  release();
+  await page.waitForFunction(() => document.body.dataset.fontFile !== 'loading', null, { timeout: 30_000 });
+  const s = await page.evaluate(() => [document.body.dataset.font, document.body.dataset.fontFile]);
+  assert.deepEqual(s, ['pixel', 'loaded'], 'the file loaded; the canvas keeps the pixel font');
+  assert.equal(await canvasHash(page), trapped, 'the canvas not drawn again');
+}, { needs: h.haveHfes });
+
+// Page script: the canvas's pixels in rect [x, y, w, h] that differ from the x4 frame's at the
+// same place of a one-to-one region `name` (its canvas rect `to` shows the x4 rect of `from`).
+const oneToOneOff = (page, name, rect) => page.evaluate(([n, [x, y, w, hh]]) => {
+  const c = document.getElementById('screen');
+  const d = c.getContext('2d').getImageData(x, y, w, hh).data;
+  const g = globalThis.__shownGame;
+  const f = g.hd_frame_rgba();
+  const w4 = g.width() * 4;
+  const { from, to } = globalThis.__u6Layout.regions.find((r) => r.name === n);
+  let off = 0;
+  for (let yy = 0; yy < hh; yy += 1) {
+    for (let xx = 0; xx < w; xx += 1) {
+      const a = (yy * w + xx) * 4;
+      const b = ((4 * from[1] + y - to[1] + yy) * w4 + 4 * from[0] + x - to[0] + xx) * 4;
+      if (d[a] !== f[b] || d[a + 1] !== f[b + 1] || d[a + 2] !== f[b + 2]) off += 1;
+    }
+  }
+  return off;
+}, [name, rect]);
+
+test('HD font (spec 11, a one-to-one region): a run listed in the map window (made up by the test: its own four letters and colours added to the list the page reads) is drawn there once and kept through a repaint the pointer causes elsewhere in the window; once it is no longer listed, the next such repaint copies the window again whole, and nothing of the run stays', async (env) => {
+  const { page } = await bootLayout(env, { font: null });
+  await fontIs(page, 'hd');
+  await page.mouse.move(...(await h.screenPoint(page, 150, 150)));
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 10);
+  // The made-up run: 'TEST' in the map window's row 40 from x 40, ink and paper of the test's own.
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const real = Object.getPrototypeOf(g).hd_glyphs;
+    g.hd_glyphs = function hdGlyphs() {
+      const list = real.call(this);
+      return window.__fake ? Uint32Array.from([...list, ...window.__fake]) : list;
+    };
+    window.__fake = [0x54, 0x45, 0x53, 0x54].flatMap((code, i) => [40 + 8 * i, 40, code, 0xff00ff, 0x00ff00]);
+  });
+  const { from, to } = (await layoutTable(page)).regions.find((r) => r.name === 'map');
+  const span = [to[0] + (40 - from[0]) * 4, to[1] + (40 - from[1]) * 4, 32 * 4, 32];
+  // A whole paint (the font off and on again) draws it.
+  await chooseFont(page, 'pixel');
+  await chooseFont(page, 'hd');
+  assert.ok(await oneToOneOff(page, 'map', span) > 0, 'the made-up run drawn in the map window');
+  await page.evaluate(([x, y, w, hh]) => {
+    window.__spanShot = [...document.getElementById('screen').getContext('2d').getImageData(x, y, w, hh).data];
+  }, span);
+  const sameAsShot = () => page.evaluate(([x, y, w, hh]) => {
+    const d = document.getElementById('screen').getContext('2d').getImageData(x, y, w, hh).data;
+    return d.every((v, i) => v === window.__spanShot[i]);
+  }, span);
+  const version = () => page.evaluate(() => globalThis.__shownGame.frame_version());
+  // A repaint the pointer causes far from the run, the run still listed: drawn once again.
+  let v = await version();
+  await page.mouse.move(...(await h.screenPoint(page, 150, 100)));
+  await h.runFrames(page, 10);
+  assert.notEqual(await version(), v, 'the pointer moved: a new frame');
+  assert.ok(await sameAsShot(), 'the run still listed: its pixels as before (drawn once)');
+  // No longer listed: the next repaint copies the window whole, the run gone.
+  await page.evaluate(() => { window.__fake = null; });
+  v = await version();
+  await page.mouse.move(...(await h.screenPoint(page, 150, 150)));
+  await h.runFrames(page, 10);
+  assert.notEqual(await version(), v, 'the pointer moved again: a new frame');
+  assert.equal(await oneToOneOff(page, 'map', span), 0, 'no longer listed: the run\'s place the x4 frame\'s again');
+  console.log('  receipt: a made-up run in the map window drawn, kept once through a pointer repaint, and gone after the next once no longer listed: pass');
+}, { needs: h.haveHfes });
+
+test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pack (the user\'s disks, a synthetic conversation) the message scroll lists the pack\'s syllables and the game\'s letters; with the HD font one paint draws each run once, in its inks, where the font puts it (from 1 px inside its first cell, at the font\'s natural width without kerning, the second ink where the text before it ends): syllables at the scroll\'s scale centred down their cells, a run after two spaces at its own cell, the keyword in its own colour, the rest of the canvas exactly the x4 frame\'s; a change of the scroll\'s text alone (Look at the prompt) drawn over the scroll copied again, nothing of the runs before left; with the pixel font the canvas is the x4 frame\'s regions exactly; no line reaches the console, the page\'s data or text', async (env) => {
   const { context, page } = await h.openPage(env, { setup: { lang: 'ko' }, layout: 'hd' });
+  await context.addInitScript(fontRunsHook);
   const words = consoleText(page);
   const answers = fontAnswers(context);
   await page.setViewportSize({ width: 1400, height: 900 });
   await h.load(page, env);
-  const { archive, pack } = await koFixture();
+  const { archive, pack } = await koFixture(0x63, { greeting: FONT_GREET, greetingKo: FONT_GREET_KO });
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
@@ -7620,31 +7819,49 @@ test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pa
   await h.waitSettled(page);
   await h.waitPrompt(page);
   assert.equal((await localeShown(page)).locale, 'on', 'the pack on the game');
-  await page.focus('#screen');
-  await page.keyboard.press('t');
-  await h.waitTaken(page);
-  await page.keyboard.press('2');
-  await h.waitTaken(page);
-  await h.waitPrompt(page);
-  assert.deepEqual([(await localeShown(page)).hits, (await localeShown(page)).misses], [2, 0], 'the conversation from the pack');
   await fontIs(page, 'hd');
+  await fontTalk(page);
+  const shown = await localeShown(page);
+  assert.ok(shown.hits >= 2 && shown.misses === 0, 'the conversation from the pack');
   assert.ok(answers.length >= 1 && answers.every(([, status]) => status === 200), 'the font file, 200');
   await h.virtualDisplay(page, 60);
   // The pack's syllables (the test's own lines) are among the scroll's listed cells.
-  const wanted = [...new Set([...(KO_LOOK_KO + KO_GREET_KO)].filter((ch) => /[가-힣]/.test(ch)).map((ch) => ch.codePointAt(0)))];
+  const wanted = [...new Set([...(KO_LOOK_KO + FONT_GREET_KO)].filter((ch) => /[가-힣]/.test(ch)).map((ch) => ch.codePointAt(0)))];
   const listed = await page.evaluate((codes) => {
     const g = globalThis.__shownGame.hd_glyphs();
-    const shown = new Set();
-    for (let i = 0; i < g.length; i += 5) if (g[i] >= 176 && g[i + 1] >= 112) shown.add(g[i + 2]);
-    return codes.filter((c) => shown.has(c)).length;
+    const seen = new Set();
+    for (let i = 0; i < g.length; i += 5) if (g[i] >= 176 && g[i + 1] >= 112) seen.add(g[i + 2]);
+    return codes.filter((c) => seen.has(c)).length;
   }, wanted);
   assert.equal(listed, wanted.length, 'every syllable of the pack\'s lines listed in the message scroll');
-  await fontOnOff(page, { messages: ['hangul', 'ascii'], panel: ['ascii'] });
+  await fontOnOff(page, { messages: ['syllabic', 'latin', 'after', 'twoInk'], panel: ['latin'] });
+  // A change of the scroll's text on its own (L at the prompt: Look, its name printed, waiting
+  // for a target, no turn): a repaint of the regions the change touched, the scroll's runs not as
+  // before; the scroll copied again shows its new runs where the font puts them and nothing of
+  // the old ones.
+  await page.evaluate(() => {
+    const from = globalThis.__u6Layout.regions.find((r) => r.name === 'messages').from;
+    window.__keysBefore = window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from).map((run) => `${run.y}:${run.cells.map((k) => `${k.x}:${k.code}`).join(' ')}`).join('|');
+  });
+  await page.focus('#screen');
+  await page.keyboard.press('KeyL');
+  const scrollChanged = () => page.evaluate(() => {
+    const from = globalThis.__u6Layout.regions.find((r) => r.name === 'messages').from;
+    return window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from).map((run) => `${run.y}:${run.cells.map((k) => `${k.x}:${k.code}`).join(' ')}`).join('|') !== window.__keysBefore;
+  });
+  for (let k = 0; k < 40 && !(await scrollChanged()); k += 1) await h.runFrames(page, 5);
+  await h.runFrames(page, 10);
+  assert.ok(await scrollChanged(), 'the scroll\'s runs changed');
+  const partial = (await fontRuns(page)).messages;
+  assert.ok(partial.runs > 0 && partial.inked === partial.runs && partial.fits === partial.runs, 'after the partial repaint every run of the scroll where the font puts it');
+  assert.ok(partial.offCompared > 0 && partial.off === 0, 'and nothing of the runs before: the rest of the scroll the x4 frame\'s exactly');
   await noPackWords(page, words);
-  console.log(`  receipt: in 한글 the ${wanted.length} syllables of the test's lines listed in the message scroll and drawn in the HD font, centred at the scroll's scale, with the game's letters; the pixel font: the canvas the x4 frame's regions exactly: pass`);
+  const where = await pageWords(page);
+  assert.ok(!where.includes('나그네여') && !words.some((m) => m.includes('나그네여')), 'no line of the test\'s conversation in the page\'s data, text or console');
+  console.log(`  receipt: in 한글 the ${wanted.length} syllables of the test's lines listed in the message scroll; one paint, each run drawn once in its parts, syllables at the scroll's scale from their first cell, a run after two spaces at its column, the keyword in its colour; a change of the scroll alone drawn over it copied again, nothing of the runs before left; the pixel font: the canvas the x4 frame's regions exactly: pass`);
 }, { needs: h.haveHfes });
 
-test('HD font (spec 11 Acceptance 3, Design 4-5): the first-run chooser and Settings offer "Font: HD font / Pixel font" in the page\'s language, the HD font checked; the font file is asked for once it is wanted (the HD layout, the HD font: from this origin, 200, no CSP report), not with the pixel font or the Original layout; a choice is kept at once and across a reload, any other kept value is the HD font; with storage that throws the HD font, switched for the visit, nothing kept; a font file that does not load leaves the pixel font (synthetic, no game)', async (env) => {
+test('HD font (spec 11 Acceptance 3, Design 4-5): the first-run chooser and Settings offer "Font: HD font / Pixel font" in the page\'s language, the HD font checked; the font file is asked for once it is wanted (the HD layout, the HD font: from this origin, 200, font/woff2, no CSP report), not with the pixel font or the Original layout; a choice is kept at once and across a reload, any other kept value is the HD font; with storage that throws the HD font, switched for the visit, nothing kept; a font file that does not load leaves the pixel font (synthetic, no game)', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   const origin = new URL(env.server.url).origin;
   let { context, page } = await h.openPage(env, { setup: null, layout: null });
@@ -7663,7 +7880,7 @@ test('HD font (spec 11 Acceptance 3, Design 4-5): the first-run chooser and Sett
   let s = await fontShown(page);
   assert.deepEqual(s.radios, [['hd', true], ['pixel', false]], 'the HD font checked');
   assert.ok(s.file === 'loaded' && s.stored === null, 'the HD font loaded before any game, nothing kept yet');
-  assert.ok(answers.length === 1 && answers[0][0] === origin && answers[0][1] === 200, 'the font file asked for once, from this origin, 200');
+  assert.ok(answers.length === 1 && answers[0][0] === origin && answers[0][1] === 200 && answers[0][2] === 'font/woff2', 'the font file asked for once, from this origin, 200, font/woff2');
   assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP report');
   await page.check('input[name="setup-lang"][value="en"]');
   c = await choice();
