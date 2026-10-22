@@ -107,9 +107,13 @@ Incantation syllables, runic text and the credits are not translated.
   player types for it. Write that Korean word in the braces, `@{일}`, and its particle after the
   closing brace, `@{일}을`: for each English `@word`, the Korean word you answer for the key whose
   `shown` lists that word. Use the same word in every line of the character and for the keys of
-  one keyword block; when the request gives `known`, use that word. A word is 1 to 8 Hangul
-  syllables: no particle, no space and no Latin letter in the braces. An `@word` no key lists
-  (and every `@word` of a request that lists no keywords) keeps its English word: `일(@{job})`.
+  one keyword block; when the request gives `known`, use that word. A key marked `"answer"` (a
+  one-letter `y` or `n` alone in its keyword block) is the player's yes or no to the question
+  before it: answer the Korean word a player types for yes or no, 예 for `y` and 아니 for `n`,
+  whatever else is given, not a word of the lines. A key of another block that means yes or no
+  (`yes`, `no`) takes another word (그렇소, 아니오), not the reply's. A word is 1 to 8 Hangul
+  syllables: no particle, no space and no Latin letter in the braces. An `@word` no key lists (and
+  every `@word` of a request that lists no keywords) keeps its English word: `일(@{job})`.
   Keep one `@` for each `@` of the English line; every `@` is followed at once by `{`, and its `}`
   closes it in the same line.
 - Particles (조사): after a Korean word write the particle itself (책을, 왕이). After `$x` or `#x`,
