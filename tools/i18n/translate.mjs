@@ -66,16 +66,30 @@
 // A script's request also lists its keywords (slice K5b, spec 08 §4): `topics`, one entry per
 // keyword block in script order, each key (the keyword as the keyword block keys it, up to its NUL
 // and case-folded; a `*` keyword is none) once, in the first block that lists it, with the words
-// its lines highlight that hit it (`shown`) and the Korean word already settled for it (`known`:
-// the pack there's, or the shared keywords' request's); the answer gives one Korean word per key
-// (`keywords`), checked by the alias gate (1 to 8 Hangul syllables; one entry per key, or several
-// that give it the same word; two keys whose words collide, a word of the input the engine takes
-// for both, refused unless their first block is the same, and so is a word colliding with one the
-// pack keeps for another key), and the words kept become the pack's `aliases` for that script.
-// Before the scripts, the keys at least GLOSSARY_SCRIPTS of the chosen scripts hold (and the pack
-// there does not settle) are asked once in a request of their own, so a key every NPC has gets one
-// word. A request of a script with no key is the one of K1 to K4, byte for byte, for the same
-// style guide (which goes in every request, and which K5b changes).
+// its lines highlight that hit it (`shown`), the Korean word already settled for it (`known`: the
+// script's own in the pack there, its alias's first word the alias gate takes, never a word another
+// script gives the key, as the engine looks a word up by script and key; else the shared keywords'
+// request's) and, for a key `y` or `n` its first block lists alone, the reply's yes or no it is
+// (`answer`: such a key is sent its known word only when that is 예 or 아니, so the mark decides;
+// a line of it asked again names the word its key keeps, without the mark when that word is
+// another); the answer gives one Korean word per key (`keywords`), checked by the alias gate (1
+// to 8 Hangul syllables; one entry per key, or several that give it the same word; two keys whose
+// words collide, a word of the input the engine takes for both, refused unless their first block
+// is the same, and so is a word colliding with one the pack keeps for another key), and the words
+// kept become the pack's `aliases` for that script.
+// Before the scripts, the keys at least GLOSSARY_SCRIPTS of the chosen scripts hold (and one of
+// them has no word of its own for) are asked once in a request of their own, so a key many NPCs
+// have gets one word where they have none; never a key of one letter (a word longer than a key
+// hits it: over the scripts it would gather every highlighted word that starts so). With
+// `--fresh-keywords` no word of the pack there is sent as `known` in a script's first request
+// (only the shared keywords' request's, which then asks every key that many scripts hold), so
+// each script answers its keys from its own lines; a line asked again names the word its key
+// keeps (the pack's where this run kept none), as in any run; the words a script's answer keeps
+// (past the alias gate) replace the pack's for its keys, as any run's do (a key whose word is
+// refused or missing, and every key of a script whose request fails, keeps its own); the consent
+// text and the coverage (`freshKeywords`) say so. A request of a script with no key is the one of
+// K1 to K4, byte for byte, for the same style guide (which goes in every request, and which K5b
+// changes).
 // The answer is JSON only, {"lines": [{"n", "ko"}]} (and "keywords" for a script with keys).
 // Each line is checked by the mechanical gates of spec 08 §6 (structure only: the escapes'
 // multiset, Hangul syllables and ASCII only, the josa markers and every `@{` closed as the text
@@ -113,7 +127,7 @@
 // kind only.
 //
 //   node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N
-//        | --ages AGES [--first N]) [--speakers <speakers.json>]]
+//        | --ages AGES [--first N]) [--speakers <speakers.json>] [--fresh-keywords]]
 //        [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS]
 //        [--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs N]
 //        [--timeout SECONDS]
@@ -1050,17 +1064,20 @@ export function systemOf(style, keyed = false) {
     '"capacity" for one it stores and prints later as it is), and the keywords the player types',
     'to it, "topics": one entry per keyword block of the script, in its order, each {"keys":',
     '[{"k": "<keyword>", "shown": [<the English words its lines highlight with @ that this keyword',
-    'answers>], "known": "<the Korean word already chosen for it>"}]} (the keys of one block are',
-    'one answer; "known" only where a word is chosen). Answer with one JSON object and nothing',
-    'else:',
+    'answers>], "known": "<the Korean word already chosen for it>", "answer": "yes" | "no"}]} (the',
+    'keys of one block are one answer; "known" only where a word is chosen; "answer" only on a',
+    'one-letter key y or n alone in its block). Answer with one JSON object and nothing else:',
     '{"lines": [{"n": <number>, "ko": "<the Korean line>"}], "keywords": [{"k": "<keyword>", "ko":',
     '"<the Korean word the player types for it>"}]}',
     'with exactly one entry for every line asked, its own n, and one for every keyword listed: a',
     'word of 1 to 8 Hangul syllables and nothing else (no space, no particle, no Latin letter), the',
-    'same word for the keys of one block, its "known" word where one is given. In the lines, write',
-    'each English @word that a key\'s "shown" lists (case aside) as @{<the Korean word you answer',
-    'for that key>}, its particle after the closing brace (@{일}을), and every other @word as',
-    '@{<the English word>}.',
+    'same word for the keys of one block, its "known" word where one is given. A key marked',
+    '"answer" is the player\'s yes or no to the question before its block: answer the Korean word a',
+    'player types for yes or no, 예 for y and 아니 for n, whatever else is given, not a word of its',
+    'lines; a key of another block that means yes or no (yes, no) takes another word (그렇소,',
+    '아니오). In the lines, write each English @word that a key\'s "shown" lists (case aside) as',
+    '@{<the Korean word you answer for that key>}, its particle after the closing brace (@{일}을),',
+    'and every other @word as @{<the English word>}.',
     '',
     style,
   ].join('\n');
@@ -1111,18 +1128,35 @@ export function bodyOf(model, system, bundle, cls, lines, topics = [], speaker =
   return JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: [{ role: 'user', content: user }] });
 }
 
+/// The one-letter keys a block that lists one of them alone takes as the player's answer to the
+/// question before it: `y` for yes, `n` for no (the game's own test takes any word starting so);
+/// and the Korean word such a key takes, the one a player types for yes or no (YES_NO_WORDS).
+export const YES_NO = { y: 'yes', n: 'no' };
+export const YES_NO_WORDS = { y: '예', n: '아니' };
+
 /// The `topics` of a request of `script` (slice K5b): one entry per keyword block with keys, in
 /// script order, each key once, in the first block that lists it (the block the game's first match
 /// reaches for it, [`compatibleOf`]; a key listed twice may be answered twice), with the words its
 /// lines highlight that hit it (`shown`) and the Korean word `known` (a Map) settles for it, when
-/// there is one; only the keys of `only` (a Set) when given (a request again lists the keys that
-/// have a word, each with that word).
+/// there is one, and for a key of [`YES_NO`] its first block lists alone, the answer it is
+/// (`answer`: yes or no); only the keys of `only` (a Set) when given (a request again lists the
+/// keys that have a word, each with that word). The two never disagree: a marked key's known word
+/// other than its [`YES_NO_WORDS`] word is left out of a first request (the mark decides), and the
+/// mark out of a request again (the word the run gate takes decides: its lines must show it).
 export function topicsOf(script, known, only = null) {
   const first = firstBlocksOf(script.topics);
   return script.topics
     .map((list, i) => ({
       keys: list.filter((k) => first.get(k) === i && (only === null || only.has(k)))
-        .map((k) => ({ k, shown: script.shown.get(k) ?? [], ...(known.has(k) ? { known: known.get(k) } : {}) })),
+        .map((k) => {
+          const answer = Object.hasOwn(YES_NO, k) && list.length === 1 ? YES_NO[k] : null;
+          const word = known.get(k);
+          const agree = answer === null || word === undefined || word === YES_NO_WORDS[k];
+          return {
+            k, shown: script.shown.get(k) ?? [], ...(word !== undefined && (agree || only !== null) ? { known: word } : {}),
+            ...(answer !== null && (agree || only === null) ? { answer } : {}),
+          };
+        }),
     }))
     .filter((t) => t.keys.length > 0);
 }
@@ -1320,33 +1354,41 @@ export function planOf(value, { item = null, first = null, name = null, cls = nu
   return { read: value.length, usable: usable.length, scripts, bundles: value, speakers: speakers !== null };
 }
 
-/// The words the pack there (`existing`, readPack's) settles for the keys (slice K5b): for each
-/// key, the word most of its scripts give it (each entry's first word that passes [`wordGate`]),
-/// a tie to the word first in order; a Map of key to word.
-export function knownOf(existing) {
-  const counts = new Map();
-  for (const a of existing?.aliases ?? []) {
-    const w = a.words.find((x) => wordGate(x) === null);
-    if (w === undefined) continue;
-    const m = counts.get(a.keyword) ?? new Map();
-    m.set(w, (m.get(w) ?? 0) + 1);
-    counts.set(a.keyword, m);
-  }
+/// The words the pack there (`existing`, readPack's, or null) settles for `script`'s keys (slice
+/// K5b): each key's own word in the script's alias for it (its entry's first word that passes
+/// [`wordGate`]; a key with none has none), never a word another script gives the key (the engine
+/// looks a word up by script and key, so a key need not have one word over the scripts); a Map of
+/// key to word.
+export function knownOf(existing, script) {
   const known = new Map();
-  for (const [k, m] of counts) known.set(k, [...m].sort(([x, n], [y, o]) => o - n || (x < y ? -1 : x > y ? 1 : 0))[0][0]);
+  for (const [k, words] of scriptWordsOf(existing?.aliases, script.bundle.archive, script.bundle.item)) {
+    const w = words.find((x) => wordGate(x) === null);
+    if (w !== undefined && script.keys.includes(k)) known.set(k, w);
+  }
   return known;
 }
 
+/// The keys of `scripts` the shared keywords' request need not ask: those every one of them that
+/// holds the key has its own word for (`own`, [`knownOf`]'s; none with --fresh-keywords).
+export function settledOf(scripts) {
+  const settled = new Set(scripts.flatMap((s) => [...(s.own ?? new Map()).keys()]));
+  for (const s of scripts) for (const k of s.keys) if (!s.own?.has(k)) settled.delete(k);
+  return settled;
+}
+
 /// The request of shared keywords (slice K5b, spec 08 §4): the keys at least GLOSSARY_SCRIPTS of
-/// `scripts` hold that `settled` (a Set: the keys the pack there gives a word) does not, the most
-/// held first (then in key order), at most GLOSSARY_KEYS, each with the words the scripts' lines
-/// highlight for it (at most GLOSSARY_SHOWN, in script order); `compatible`, whether two keys may
-/// keep colliding words: in every one of them that holds both, the first block of each is the
-/// same ([`compatibleOf`]); null when no key is so shared.
+/// `scripts` hold that `settled` (a Set: [`settledOf`]'s) does not, the most held first (then in
+/// key order), at most GLOSSARY_KEYS, each with the words the scripts' lines highlight for it (at
+/// most GLOSSARY_SHOWN, in script order); never a key of one letter (a word longer than its key
+/// hits it, so over the scripts it would gather every highlighted word that starts so: `y` and `n`
+/// are a reply's yes and no, which each script's request marks, [`topicsOf`]); `compatible`,
+/// whether two keys may keep colliding words: in every one of them that holds both, the first
+/// block of each is the same ([`compatibleOf`]); null when no key is so shared.
 export function glossaryOf(scripts, settled = new Set()) {
   const held = new Map();
   for (const s of scripts) {
     for (const k of s.keys) {
+      if (k.length === 1) continue;
       const h = held.get(k) ?? { k, scripts: 0, shown: [] };
       h.scripts += 1;
       for (const w of s.shown.get(k) ?? []) if (h.shown.length < GLOSSARY_SHOWN && !h.shown.includes(w)) h.shown.push(w);
@@ -1748,6 +1790,9 @@ export function outputsOf(plan, model, existing = null) {
     look: tally(textUnits.filter((u) => u.kind === 'look')),
     books: tally(textUnits.filter((u) => u.kind === 'book')),
     u: { read: plan.program?.read ?? 0, ...tally(programUnits) },
+    // A run with --fresh-keywords sent no word of the pack there as known in a script's first
+    // request (a line asked again names the word its key keeps, the pack's where it kept none).
+    ...(plan.freshKeywords ? { freshKeywords: true } : {}),
     keywords: {
       found: keyUnits.length, translated: given, kept, leftEnglish: keyUnits.length - given - kept.count, byReason: leftKeys, unexplained: 0, dropped,
     },
@@ -1774,19 +1819,20 @@ export function outputsOf(plan, model, existing = null) {
 }
 
 const USAGE = 'usage: node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N | --ages AGES [--first N]) '
-  + '[--speakers <speakers.json>]] [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS] '
+  + '[--speakers <speakers.json>] [--fresh-keywords]] [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS] '
   + `[--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs 1-${JOBS_MAX}] [--timeout SECONDS]`;
 
 /// The options of `argv`, or {error}.
 export function parseArgs(argv) {
   const o = { send: false, dryRun: false, model: DEFAULTS.model, llmux: DEFAULTS.llmux, out: DEFAULTS.out,
     jobs: DEFAULTS.jobs, timeoutS: DEFAULTS.timeoutS, bundles: null, strings: null, item: null, first: null,
-    name: null, cls: null, only: null, speakers: null, ages: null, help: false };
+    name: null, cls: null, only: null, speakers: null, ages: null, freshKeywords: false, help: false };
   const value = (i) => (i + 1 < argv.length ? argv[i + 1] : null);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--send') o.send = true;
     else if (a === '--dry-run') o.dryRun = true;
+    else if (a === '--fresh-keywords') o.freshKeywords = true;
     else if (a === '--help' || a === '-h') o.help = true;
     else if (['--model', '--llmux', '--out', '--jobs', '--timeout', '--item', '--first', '--class', '--name', '--strings', '--only',
       '--speakers', '--ages'].includes(a)) {
@@ -1819,6 +1865,7 @@ export function parseArgs(argv) {
   // Spec 12: --ages chooses by the speaker file's ages, alone or with --first N.
   if (o.ages !== null && o.speakers === null) return { error: '--ages chooses by the ages of a --speakers file: name one' };
   if (o.speakers !== null && o.bundles === null) return { error: '--speakers and --ages go with a bundles file' };
+  if (o.freshKeywords && o.bundles === null) return { error: '--fresh-keywords goes with a bundles file' };
   if (o.ages !== null && o.ages.some((a) => !AGES.includes(a))) return { error: `--ages names ages of the speaker file: ${AGES.join(', ')}` };
   if (o.ages !== null && (o.item !== null || o.name !== null)) return { error: '--ages goes alone or with --first N, not with --item or --name' };
   const choices = [o.item, o.first, o.name].filter((c) => c !== null).length;
@@ -1902,7 +1949,9 @@ export async function main(argv, {
   const programSystem = programSystemOf(guide);
 
   // The bundles and the game strings, and what to send of them.
-  const plan = { read: 0, usable: 0, scripts: [], bundles: null, speakers: false, strings: null, texts: null, program: null };
+  const plan = {
+    read: 0, usable: 0, scripts: [], bundles: null, speakers: false, freshKeywords: o.freshKeywords, strings: null, texts: null, program: null,
+  };
   try {
     if (o.bundles !== null) {
       // Spec 12: the speaker file, read strictly before the bundles (one that does not read is
@@ -1950,8 +1999,9 @@ export async function main(argv, {
     else say(`translate: the input does not read (${err?.name ?? 'Error'})`);
     return 2;
   }
-  // Slice K5b: the Korean word settled for a key before a script's request: the pack there's,
-  // then the shared keywords' request's. A request again lists the keys with a word, each with it.
+  // Slice K5b: the Korean word settled for a key before a script's request: the script's own in
+  // the pack there (`own`, none with --fresh-keywords), else the shared keywords' answer's
+  // (`known`). A request again lists the keys with a word, each with it.
   const known = new Map();
   const jobOf = (g, units, again = false) => {
     if (g.kind !== 'script') {
@@ -1963,7 +2013,7 @@ export async function main(argv, {
       };
     }
     const topics = again ? topicsOf(g, new Map([...g.keyed.words].map(([k, ws]) => [k, firstWord(ws)])), new Set(g.keyed.words.keys()))
-      : topicsOf(g, known);
+      : topicsOf(g, new Map([...known, ...(g.own ?? [])]));
     return { script: g, body: bodyOf(o.model, topics.length > 0 ? keyedSystem : system, g.bundle, g.cls, units, topics, g.speaker) };
   };
   const groups = [...plan.scripts, ...(plan.strings?.batches ?? []), ...(plan.texts?.batches ?? []), ...(plan.program?.batches ?? [])];
@@ -2026,9 +2076,10 @@ export async function main(argv, {
         + `${existing.u.length > 0 ? `, ${existing.u.length} strings of u` : ''}`
         + `${existing.aliases.length > 0 ? `, ${existing.aliases.length} keyword aliases` : ''}; what this run translates is merged into it.`);
     }
-    // The words the pack settles, and the keys shared by enough of the scripts it does not.
-    for (const [k, w] of knownOf(existing)) known.set(k, w);
-    plan.glossary = glossaryOf(plan.scripts, new Set(known.keys()));
+    // Each script's own words in the pack (none with --fresh-keywords), and the keys shared by
+    // enough of the scripts that one of them has no word for.
+    for (const s of plan.scripts) s.own = o.freshKeywords ? new Map() : knownOf(existing, s);
+    plan.glossary = glossaryOf(plan.scripts, settledOf(plan.scripts));
     const jobs = jobsOf();
     const parts = new Set(jobs.map((j) => j.script.kind));
     const npcSaid = plan.speakers ? 'its NPC\'s name, description, age and personality note' : 'its NPC\'s name and description';
@@ -2040,6 +2091,12 @@ export async function main(argv, {
       parts.has('program') ? `up to ${U_PER_REQUEST} lines of the opening and character creation` : null].filter(Boolean).join(', or ');
     say(`It sends the owner's game text: ${jobs.length} requests, each ${what}; up to ${o.jobs} at a time, `
       + `${parts.has('glossary') ? 'the shared keywords first, ' : ''}and a request again for lines that fail the checks.`);
+    if (o.freshKeywords) {
+      say('Keywords afresh (--fresh-keywords): no word of the pack there is sent as known in a script\'s first request (a line '
+        + 'asked again names the word its key keeps, the pack\'s where this run kept none); each script answers its keys from its '
+        + `own lines, the keys at least ${GLOSSARY_SCRIPTS} of them share asked first; the words a script's answer keeps (past the `
+        + 'alias gate) replace the pack\'s for its keys, and a script whose request fails keeps its own.');
+    }
     return await consentAndSend(o, plan, jobs, jobOf, existing, known, route, { transport, stdin, stdout, isTTY, signals, now, say });
   } finally {
     await release();
@@ -2048,7 +2105,8 @@ export async function main(argv, {
 
 // From the preview to the last file, with `o.out`'s lock held (tools/speech/profile.mjs's order):
 // the preview of this run (a name of its own), the owner's go, the requests, the gates, the
-// files. `known`: the words settled for the keys, which the shared keywords' answer adds to.
+// files. `known`: the words the shared keywords' answer settles for the keys (it adds to it), each
+// script's own words (`own`) going before them in its request.
 async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { transport, stdin, stdout, isTTY, signals, now, say }) {
   const previewDir = join(o.out, 'preview');
   const preview = join(previewDir, `first-request-${process.pid}-${randomBytes(6).toString('hex')}.json`);
@@ -2081,10 +2139,10 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { tr
     }
   }
 
-  // The requests: the shared keywords first (slice K5b: their words reach every script's request
-  // as `known`; the scripts go without them when it fails), then each script and each batch of
-  // game strings once (asked again once when the request fails or its answer does not read), then
-  // once more for its lines that failed the gates.
+  // The requests: the shared keywords first (slice K5b: their words reach as `known` the request of
+  // each script with no word of its own for the key; the scripts go without them when it fails),
+  // then each script and each batch of game strings once (asked again once when the request fails
+  // or its answer does not read), then once more for its lines that failed the gates.
   const stopper = new AbortController();
   const onSignal = () => stopper.abort();
   signals.on('SIGINT', onSignal);
