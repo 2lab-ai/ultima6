@@ -106,8 +106,13 @@ Incantation syllables, runic text and the credits are not translated.
   word already chosen for it, `known`), and you answer one Korean word for each key: the word the
   player types for it. Write that Korean word in the braces, `@{일}`, and its particle after the
   closing brace, `@{일}을`: for each English `@word`, the Korean word you answer for the key whose
-  `shown` lists that word. Use the same word in every line of the character and for the keys of
-  one keyword block; when the request gives `known`, use that word. A key marked `"answer"` (a
+  `shown` lists that word. Use a key's word in every line of the character; when the request gives
+  `known`, use that word. The keys of one keyword block lead to one reply, so they may share a
+  word, but only when the English words their lines show mean the same thing (`harbour`, `dock`
+  and `pier` all 부두); otherwise each key takes the word for its own English (a key no line shows,
+  the word for its own keyword) (`bread` 빵 beside `ale` 맥주 in one block), since each line shows
+  its own key's word. The sharing rule never replaces a key's `known` word, even where another key
+  of its block keeps the same word. A key marked `"answer"` (a
   one-letter `y` or `n` alone in its keyword block) is the player's yes or no to the question
   before it: answer the Korean word a player types for yes or no, 예 for `y` and 아니 for `n`,
   whatever else is given, not a word of the lines. A key of another block that means yes or no
