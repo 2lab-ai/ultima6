@@ -36,10 +36,12 @@
 //   request, every shared key asked, a line asked again naming the word its key keeps, the pack's
 //   where the run kept none, the words an answer keeps replacing the pack's, a failed script
 //   keeping its own, said in the consent text and the coverage), a one-letter key never shared and
-//   a `y` or `n` alone in its first block marked as the reply's yes or no (its known word sent
-//   only when it is 예 or 아니; a request again naming the word the gate takes, unmarked where they
-//   differ), and which yes and no words the alias gate keeps beside keys yes and no of another
-//   block;
+//   a `y` or `n` alone in its first block marked as the reply's yes or no (always sent 예 or 아니
+//   as known, a request again too), which yes and no words the alias gate keeps beside keys yes
+//   and no of another block, and the guide's yes and no words set by the tool (a marked key and a
+//   key `yes` or `no` settle to theirs whatever the answer gives, the word winning a collision
+//   with another key's, new or kept by the pack, in any order; a word that would lose not sent as
+//   known, so one run cleans a pack; `yes` and `no` never asked in the shared request);
 // - spec 12, the register by profile (made-up speakers only): the speaker file's strict reader and
 //   its refusals (fixed messages, no request), the register for a class at an age, `--speakers`
 //   putting the age, the profile and that register in the request (a script the file does not list
@@ -63,7 +65,7 @@ import {
   AGES, CLASSES, COVERAGE_FORMAT, InputError, MAX_TOKENS, PACK_FORMAT, PARTICLES, PackReadError, SPEAKERS_FORMAT, SPEAKER_NOTE_MAX,
   aliasesOf, bodyOf, braceWords, braceWordsWanted, collide, compatibleOf, duplicateMembers, fingerprint, firstBlocksOf, gate,
   glossaryOf, hash64, hex64, hits, keyHit, keyOf, keysOf, keywordsOf, knownOf, latin1, main, packBytes, placeholders, planOf,
-  readPack, readSpeakers, registerOf, settledOf, speakerClass, systemOf, tableGate, topicsOf, unitsOf, wordGate, YES_NO_WORDS,
+  readPack, readSpeakers, registerOf, settledOf, settleKeys, speakerClass, systemOf, tableGate, topicsOf, unitsOf, wordGate,
 } from './translate.mjs';
 
 const TOOL = join(dirname(fileURLToPath(import.meta.url)), 'translate.mjs');
@@ -1488,7 +1490,7 @@ test('keywords per script: --fresh-keywords sends no word of the pack there as k
   await rm(g.dir, { recursive: true });
 });
 
-test('keywords per script: a one-letter key is never asked across scripts (nor its highlighted words gathered from them) and never takes another script\'s word; a y or an n its first block lists alone is marked in the request as that block\'s yes or no, a y beside another key and another letter alone are not; a marked key is sent its own word only when that is 예 or 아니 (the mark decides); a line asked again keeps the mark; the instruction and the guide say what to answer', async () => {
+test('keywords per script: a one-letter key is never asked across scripts (nor its highlighted words gathered from them) and never takes another script\'s word; a y or an n its first block lists alone is marked in the request as that block\'s yes or no, a y beside another key and another letter alone are not; a marked key is always sent 예 or 아니 as known, whatever word the pack there has for it; a line asked again keeps the mark and the word; the instruction and the guide say what to answer', async () => {
   const items = [8401, 8402, 8403];
   const [P, Q, R] = items;
   const bundles = [
@@ -1510,8 +1512,9 @@ test('keywords per script: a one-letter key is never asked across scripts (nor i
     bodies.push(body);
     const user = userOf(body);
     if (user.keywords) return reply({ keywords: [{ k: 'plo', ko: '술' }] });
-    // The fake translator follows the guide: a known word, else for a marked key 예 or 아니.
-    const { lines, keywords } = fakeAnswer(user, (key) => key.known ?? (key.answer ? YES_NO_WORDS[key.k] : fakeWord(key.k)));
+    // The fake translator answers each key its known word (a marked key is always sent 예 or 아니),
+    // else a made-up one.
+    const { lines, keywords } = fakeAnswer(user);
     // Q's first answer drops its line's escape, so that line is asked again.
     if (user.npc.name.endsWith('Letterq') && user.lines.length > 1) for (const l of lines) l.ko = l.ko.replace('*', '');
     return answer(lines, keywords);
@@ -1522,19 +1525,19 @@ test('keywords per script: a one-letter key is never asked across scripts (nor i
   const first = new Map(bodies.slice(1, 4).map(userOf).map((u) => [u.npc.name.replace(SENTINEL, ''), u.topics]));
   assert.deepEqual(first.get('Letterp'), [
     { keys: [{ k: 'plo', shown: ['plo'], known: '술' }] },
-    { keys: [{ k: 'y', shown: [], answer: 'yes' }] },
+    { keys: [{ k: 'y', shown: [], known: '예', answer: 'yes' }] },
     { keys: [{ k: 'n', shown: ['nix'], known: '아니', answer: 'no' }] },
     { keys: [{ k: 'x', shown: ['xo'] }] },
-  ], 'P: its own n word, y and n marked, x not');
+  ], 'P: y and n marked, each with its word (y with none in the pack too), x not');
   assert.deepEqual(first.get('Letterq'), [
     { keys: [{ k: 'plo', shown: ['plo'], known: '술' }] },
     { keys: [{ k: 'y', shown: ['yarn'], known: '예', answer: 'yes' }] },
-    { keys: [{ k: 'n', shown: ['nob'], answer: 'no' }] },
-  ], 'Q: its own y word 예 kept; its own n word (not 아니) left out, so the mark decides; no word of P\'s; its own highlighted words only');
+    { keys: [{ k: 'n', shown: ['nob'], known: '아니', answer: 'no' }] },
+  ], 'Q: its own y word 예 kept; its own n word (not 아니) replaced by 아니; no word of P\'s; its own highlighted words only');
   assert.deepEqual(first.get('Letterr'), [
     { keys: [{ k: 'plo', shown: ['plo'], known: '술' }] },
     { keys: [{ k: 'y', shown: ['yon'] }, { k: 'yon', shown: [] }] },
-    { keys: [{ k: 'n', shown: [], answer: 'no' }] },
+    { keys: [{ k: 'n', shown: [], known: '아니', answer: 'no' }] },
   ], 'R: y beside yon is not marked');
   const retry = userOf(bodies.at(-1));
   assert.equal(retry.lines.length, 1, 'Q\'s failed line asked again');
@@ -1555,16 +1558,16 @@ test('keywords per script: a one-letter key is never asked across scripts (nor i
   await rm(f.dir, { recursive: true });
 });
 
-test('keywords per script: a key marked yes or no and its known word never disagree: in a first request a known word other than 예 or 아니 is left out (the mark decides) and 예 or 아니 kept; in a request again the word the run gate takes is named and the mark left out where they differ; a lone y block that is not y\'s first block leaves y unmarked', () => {
+test('keywords per script: a key marked yes or no and its known word never disagree: in a first request and in a request again it is named 예 or 아니 as known whatever other word known gives it, or with none; a lone y block that is not y\'s first block leaves y unmarked', () => {
   const [s] = planOf([kbundle('a', 8501, '0000000000198501', `${SENTINEL}Marks`, [[['y'], 'So be it.'], [['n'], 'Begone.']])], { first: 1 }).scripts;
   const listed = (known, only = null) => topicsOf(s, new Map(Object.entries(known)), only).flatMap((t) => t.keys);
-  assert.deepEqual(listed({ y: '예', n: '나무' }), [{ k: 'y', shown: [], known: '예', answer: 'yes' }, { k: 'n', shown: [], answer: 'no' }]);
-  assert.deepEqual(listed({ y: '너', n: '아니' }), [{ k: 'y', shown: [], answer: 'yes' }, { k: 'n', shown: [], known: '아니', answer: 'no' }]);
-  assert.deepEqual(listed({}), [{ k: 'y', shown: [], answer: 'yes' }, { k: 'n', shown: [], answer: 'no' }]);
-  assert.deepEqual(listed({ y: '너', n: '아니' }, new Set(['y', 'n'])), [{ k: 'y', shown: [], known: '너' }, { k: 'n', shown: [], known: '아니', answer: 'no' }],
-    'asked again: the word the gate takes, unmarked where it is not 예');
+  const both = [{ k: 'y', shown: [], known: '예', answer: 'yes' }, { k: 'n', shown: [], known: '아니', answer: 'no' }];
+  assert.deepEqual(listed({ y: '예', n: '나무' }), both);
+  assert.deepEqual(listed({ y: '너', n: '아니' }), both);
+  assert.deepEqual(listed({}), both, 'no word known: the fixed one');
+  assert.deepEqual(listed({ y: '너', n: '아니' }, new Set(['y', 'n'])), both, 'asked again: the fixed word (the settle gives the key the same), still marked');
   const [lone] = planOf([kbundle('a', 8502, '0000000000198502', `${SENTINEL}Lone`, [[['yea', 'y'], 'Ask of @yea.'], [['y'], 'Aye.'], [['n'], 'Nay.']])], { first: 1 }).scripts;
-  assert.deepEqual(topicsOf(lone, new Map()), [{ keys: [{ k: 'yea', shown: ['yea'] }, { k: 'y', shown: [] }] }, { keys: [{ k: 'n', shown: [], answer: 'no' }] }],
+  assert.deepEqual(topicsOf(lone, new Map()), [{ keys: [{ k: 'yea', shown: ['yea'] }, { k: 'y', shown: [] }] }, { keys: [{ k: 'n', shown: [], known: '아니', answer: 'no' }] }],
     'y first beside yea: unmarked, though a later block lists it alone');
 });
 
@@ -1621,6 +1624,179 @@ test('keywords per script: the yes and no words beside a key yes or no of anothe
   assert.deepEqual(yYes, { 그렇소: { 예: 'kept', 네: 'kept' }, 예: { 예: 'shared,shared', 네: 'kept' }, 네: { 예: 'kept', 네: 'shared,shared' } });
   // In one block (y beside yes) the two may share the word: the rule of a block is its own.
   assert.equal(aliasesOf(['y', 'yes'], [{ k: 'y', ko: '예' }, { k: 'yes', ko: '예' }], compatibleOf([['y', 'yes']])).words.size, 2);
+});
+
+// The guide's yes and no words, set by the tool (style-ko.md): a script of the made-up `topics`
+// planned on its own, and what settling its keys from an answer giving `keywords` keeps and
+// refuses.
+const planned = (item, topics) => planOf([kbundle('a', item, `000000000021${item}`, `${SENTINEL}Fixed${item}`, topics)], { first: 1 }).scripts[0];
+const settled = (s, keywords, existing = null) => {
+  settleKeys(s, { ok: true, keywords }, existing);
+  return [Object.fromEntries(s.kept), Object.fromEntries(s.refused)];
+};
+
+test('the yes and no words set by the tool: an n its first block lists alone, answered 예, settles to 아니, not refused, and its lines are gated with 아니', () => {
+  const s = planned(8701, [[['n'], 'A @nix to thee.'], [['zorb'], 'The @zorb.']]);
+  assert.deepEqual(settled(s, [{ k: 'n', ko: '예' }, { k: 'zorb', ko: '돌' }]), [{ n: '아니', zorb: '돌' }, {}]);
+  assert.deepEqual(s.keyed.words.get('n'), ['아니']);
+  assert.equal(gate('A @nix to thee.', fakeKo('A @nix to thee.', new Map([['nix', '예']])), s.keyed), 'keywords', 'a line showing 예 for it fails');
+  assert.equal(gate('A @nix to thee.', fakeKo('A @nix to thee.', new Map([['nix', '아니']])), s.keyed), null);
+});
+
+test('the yes and no words set by the tool: a y its first block lists alone settles to 예 when the answer gives it none, two words or a word the alias gate refuses, never refused; a y beside another key is no reply and stays missing; a request that failed settles no word', () => {
+  const s = planned(8702, [[['y'], 'So be it.'], [['zorb'], 'The @zorb.']]);
+  assert.deepEqual(settled(s, [{ k: 'zorb', ko: '돌' }]), [{ y: '예', zorb: '돌' }, {}], 'none given');
+  assert.deepEqual(settled(s, [{ k: 'y', ko: '네' }, { k: 'y', ko: '응' }, { k: 'zorb', ko: '돌' }]), [{ y: '예', zorb: '돌' }, {}], 'two words given');
+  assert.deepEqual(settled(s, [{ k: 'y', ko: 'abc' }, { k: 'zorb', ko: '돌' }]), [{ y: '예', zorb: '돌' }, {}], 'a word the gate refuses');
+  assert.deepEqual(settled(planned(8703, [[['y', 'zorb'], 'The @zorb.']]), [{ k: 'zorb', ko: '돌' }]), [{ zorb: '돌' }, { y: 'missing' }], 'y beside zorb');
+  settleKeys(s, { ok: false, reason: 'invalid' });
+  assert.deepEqual([Object.fromEntries(s.kept), Object.fromEntries(s.refused)], [{}, { y: 'invalid', zorb: 'invalid' }], 'its keys keep the pack\'s');
+});
+
+test('the yes and no words set by the tool: a key yes in a block with three other keys, all answered with one word, settles to 그렇소; the other keys keep that word', () => {
+  const s = planned(8704, [[['zorb', 'yes', 'plim', 'vexl'], 'Ask of the @zorb.'], [['grak'], 'A @grak.']]);
+  const one = ['zorb', 'yes', 'plim', 'vexl'].map((k) => ({ k, ko: '좋소' }));
+  assert.deepEqual(settled(s, [...one, { k: 'grak', ko: '풀' }]), [{ zorb: '좋소', yes: '그렇소', plim: '좋소', vexl: '좋소', grak: '풀' }, {}]);
+});
+
+test('the yes and no words set by the tool: another key answered 그렇소 or 아니오 beside a key yes or no of another block is refused (shared), the fixed word kept; a key of the same block may keep it', () => {
+  const s = planned(8705, [[['yes', 'plim'], 'Ask of the @plim.'], [['zorb'], 'The @zorb.'], [['no'], 'Begone.'], [['vexl'], 'A @vexl.']]);
+  const given = (plim, zorb) => [{ k: 'yes', ko: '좋소' }, { k: 'plim', ko: plim }, { k: 'zorb', ko: zorb }, { k: 'no', ko: '싫소' }, { k: 'vexl', ko: '아니오' }];
+  assert.deepEqual(settled(s, given('좋소', '그렇소')), [{ yes: '그렇소', plim: '좋소', no: '아니오' }, { zorb: 'shared', vexl: 'shared' }]);
+  assert.deepEqual(settled(s, given('그렇소', '돌')), [{ yes: '그렇소', plim: '그렇소', zorb: '돌', no: '아니오' }, { vexl: 'shared' }], 'plim beside yes');
+});
+
+test('the yes and no words set by the tool: a script\'s request names a key no or yes its fixed word as known (아니오, 그렇소), unmarked, whatever word the pack there has for it, a request again too; the pack keeps those words', async () => {
+  const V = 8706;
+  const b = kbundle('a', V, '0000000000228706', `${SENTINEL}FixKnown`, [[['no', 'zorb'], 'The @zorb.'], [['yes'], 'So be it.']]);
+  const f = await kfixture([b]);
+  await packFor(f.out, [b], [['a', V, 'no', '싫소'], ['a', V, 'zorb', '돌']]);
+  const t = wordsTransport();
+  const r = await run([f.bundles, '--item', `a:${V}`, '--out', f.out, '--send'], t.send);
+  assert.equal(r.code, 0);
+  assert.deepEqual(userOf(t.bodies[0]).topics, [
+    { keys: [{ k: 'no', shown: [], known: '아니오' }, { k: 'zorb', shown: ['zorb'], known: '돌' }] },
+    { keys: [{ k: 'yes', shown: [], known: '그렇소' }] },
+  ], 'no: 아니오, not the pack\'s word; yes: 그렇소 with none in the pack');
+  const [s] = planOf([b], { first: 1 }).scripts;
+  assert.deepEqual(topicsOf(s, new Map([['no', '싫소'], ['zorb', '돌']]), new Set(['no', 'zorb'])), [
+    { keys: [{ k: 'no', shown: [], known: '아니오' }, { k: 'zorb', shown: ['zorb'], known: '돌' }] },
+  ], 'asked again: the same');
+  const alias = (keyword, word) => ({ archive: 'a', item: V, keyword, words: [word] });
+  assert.deepEqual((await packOf(f.out)).aliases, [alias('no', '아니오'), alias('yes', '그렇소'), alias('zorb', '돌')]);
+  const coverage = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  quiet(r.text, [b]);
+  noneOf(r.text + coverage, ['zorb', '싫소', '돌', '아니오', '그렇소']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('the yes and no words set by the tool: a key yes or no, its word set, is not asked in the shared keywords\' request (an entry the answer gives it is not read); a shared word colliding with its word (another block) reaches no script as known; every script\'s request names yes 그렇소', async () => {
+  const items = [8711, 8712, 8713];
+  const bundles = items.map((item, i) => kbundle('a', item, `000000000023${item}`, `${SENTINEL}FixShare${'pqr'[i]}`, [
+    [['plo'], 'Try my @plo.'], [['yes'], 'So be it.'], [[`my${'abc'[i]}`], `Mine is @my${'abc'[i]}.`],
+  ]));
+  assert.deepEqual(glossaryOf(planOf(bundles, { first: 3 }).scripts).units, [{ kind: 'keyword', n: 0, k: 'plo', shown: ['plo'] }], 'yes, held by all three, not asked');
+  const f = await kfixture(bundles);
+  const t = wordsTransport([{ k: 'yes', ko: '좋소' }, { k: 'plo', ko: '그렇소' }]);
+  const r = await run([f.bundles, '--first', '3', '--out', f.out, '--send', '--jobs', '1'], t.send);
+  assert.equal(r.code, 0);
+  assert.deepEqual(userOf(t.bodies[0]), { keywords: [{ k: 'plo', shown: ['plo'] }] }, 'plo alone asked first');
+  const coverageText = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  assert.deepEqual(JSON.parse(coverageText).glossary, { found: 1, translated: 1, leftEnglish: 0, byReason: {}, unexplained: 0 }, 'plo takes 그렇소 there');
+  for (const [who, topics] of topicsBy(t.bodies.slice(1))) {
+    assert.deepEqual(topics.slice(0, 2), [{ keys: [{ k: 'plo', shown: ['plo'] }] }, { keys: [{ k: 'yes', shown: [], known: '그렇소' }] }],
+      `${who}: plo not named 그렇소 (yes's, another block)`);
+  }
+  const pack = await packOf(f.out);
+  assert.deepEqual(pack.aliases.filter((a) => a.keyword === 'yes').map((a) => [a.item, a.words]), items.map((item) => [item, ['그렇소']]));
+  assert.deepEqual(pack.aliases.filter((a) => a.keyword === 'plo').map((a) => [a.item, a.words]), items.map((item) => [item, [fakeWord('plo')]]));
+  quiet(r.text, bundles);
+  noneOf(r.text + coverageText, ['plo', 'mya', 'myb', 'myc', '좋소', '그렇소', fakeWord('plo')]);
+  await rm(f.dir, { recursive: true });
+});
+
+test('the yes and no words set by the tool: the word the pack keeps for another key, colliding with a fixed word (another block), is dropped: that key, named no known word and answered none, ends with no word (shared, left English), its line with the English word, the fixed key with its word; the merged pack holds no two colliding words', async () => {
+  const V = 8721;
+  const b = kbundle('a', V, '0000000000248721', `${SENTINEL}FixKept`, [[['n'], 'A @nix to thee.'], [['zorb'], 'The @zorb.']]);
+  const [s] = planOf([b], { first: 1 }).scripts;
+  const there = { aliases: [{ archive: 'a', item: V, keyword: 'n', words: ['예'] }, { archive: 'a', item: V, keyword: 'zorb', words: ['아니'] }] };
+  assert.deepEqual(settled(s, [], there), [{ n: '아니' }, { zorb: 'shared' }], 'zorb, given none, loses its kept word');
+  assert.deepEqual([[...s.lost], [...s.keyed.words]], [['zorb'], [['n', ['아니']]]]);
+  const f = await kfixture([b]);
+  // The pack of an earlier run: n 예 (the defect's kind), zorb 아니.
+  await packFor(f.out, [b], [['a', V, 'n', '예'], ['a', V, 'zorb', '아니']]);
+  const bodies = [];
+  const send = async (body) => {
+    bodies.push(body);
+    // The answer gives zorb no word; its line keeps the English one.
+    const { lines, keywords } = fakeAnswer(userOf(body), (key) => (key.k === 'zorb' ? undefined : key.known ?? fakeWord(key.k)));
+    return answer(lines, keywords.filter((x) => x.ko !== undefined));
+  };
+  const r = await run([f.bundles, '--item', `a:${V}`, '--out', f.out, '--send'], send);
+  assert.equal(r.code, 3, 'a key left English');
+  assert.deepEqual(userOf(bodies[0]).topics, [
+    { keys: [{ k: 'n', shown: ['nix'], known: '아니', answer: 'no' }] }, { keys: [{ k: 'zorb', shown: ['zorb'] }] },
+  ], 'zorb named no known word: its old one collides with n\'s');
+  assert.equal(bodies.length, 1, 'every line lands');
+  const pack = await packOf(f.out);
+  assert.deepEqual(pack.aliases, [{ archive: 'a', item: V, keyword: 'n', words: ['아니'] }]);
+  assert.ok(pack.converse.find((x) => x.hash === hashOf('The @zorb.')).text.includes('@{zorb}'), 'its line with the English word');
+  assert.ok(pack.converse.find((x) => x.hash === hashOf('A @nix to thee.')).text.includes('@{아니}'));
+  for (const a of pack.aliases) {
+    for (const o of pack.aliases) if (a !== o) assert.ok(!a.words.some((w) => o.words.some((v) => collide(w, v))), 'no two colliding words');
+  }
+  const coverageText = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  assert.deepEqual(JSON.parse(coverageText).keywords, {
+    found: 2, translated: 1, kept: NONE_KEPT, leftEnglish: 1, byReason: { shared: 1 }, unexplained: 0, dropped: 0,
+  });
+  quiet(r.text, [b]);
+  noneOf(r.text + coverageText, ['nix', 'zorb', '예', '아니']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('the yes and no words set by the tool: one run cleans a pack whose word for another key collides with a fixed word (another block): the request names that key no known word (one certain to be refused), so the answer gives it a new one, kept; a key of the fixed key\'s own block keeps its known word', async () => {
+  const V = 8722;
+  const b = kbundle('a', V, '0000000000248722', `${SENTINEL}FixClean`, [[['n'], 'A @nix to thee.'], [['zorb'], 'The @zorb.']]);
+  const f = await kfixture([b]);
+  // The pack of an earlier run: n 예 (the defect's kind), zorb 아니.
+  await packFor(f.out, [b], [['a', V, 'n', '예'], ['a', V, 'zorb', '아니']]);
+  const t = wordsTransport();
+  const r = await run([f.bundles, '--item', `a:${V}`, '--out', f.out, '--send'], t.send);
+  assert.equal(r.code, 0, 'done in one run');
+  assert.equal(t.bodies.length, 1, 'nothing asked again');
+  assert.deepEqual(userOf(t.bodies[0]).topics, [
+    { keys: [{ k: 'n', shown: ['nix'], known: '아니', answer: 'no' }] }, { keys: [{ k: 'zorb', shown: ['zorb'] }] },
+  ]);
+  const pack = await packOf(f.out);
+  assert.deepEqual(pack.aliases, [{ archive: 'a', item: V, keyword: 'n', words: ['아니'] }, { archive: 'a', item: V, keyword: 'zorb', words: [fakeWord('zorb')] }]);
+  assert.ok(pack.converse.find((x) => x.hash === hashOf('The @zorb.')).text.includes(`@{${fakeWord('zorb')}}`));
+  const coverageText = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  assert.deepEqual(JSON.parse(coverageText).keywords, {
+    found: 2, translated: 2, kept: NONE_KEPT, leftEnglish: 0, byReason: {}, unexplained: 0, dropped: 0,
+  });
+  // Beside yes in its block a key keeps 그렇소 as known; a key of another block is named none for
+  // 그렇소 with a particle.
+  const s = planned(8723, [[['yes', 'plim'], 'Ask of the @plim.'], [['vexl'], 'A @vexl.']]);
+  assert.deepEqual(topicsOf(s, new Map([['plim', '그렇소'], ['vexl', '그렇소이']])), [
+    { keys: [{ k: 'yes', shown: [], known: '그렇소' }, { k: 'plim', shown: ['plim'], known: '그렇소' }] }, { keys: [{ k: 'vexl', shown: ['vexl'] }] },
+  ]);
+  quiet(r.text, [b]);
+  noneOf(r.text + coverageText, ['nix', 'zorb', '예', '아니', fakeWord('zorb')]);
+  await rm(f.dir, { recursive: true });
+});
+
+test('the yes and no words set by the tool: a kept word colliding with a fixed word is lost first and is no constraint on any key, in whatever order the answer gives the keys', () => {
+  const kept = new Map([['a', ['아니야']], ['b', ['돌']]]);
+  const of = (given) => {
+    const r = aliasesOf(['n', 'a', 'b', 'c'], given, compatibleOf([['n'], ['a'], ['b'], ['c']]), kept, new Map([['n', '아니']]));
+    return [Object.fromEntries(r.words), Object.fromEntries(r.failed), [...r.lost]];
+  };
+  const given = [{ k: 'a', ko: '돌' }, { k: 'c', ko: '아니야도' }];
+  // a's new word collides with b's kept one (refused); a's kept 아니야 (아니 with a particle) is
+  // lost to n's 아니, so c's 아니야도 (아니야 with a particle) is kept.
+  const want = [{ n: '아니', c: '아니야도' }, { a: 'shared', b: 'missing' }, ['a']];
+  assert.deepEqual(of(given), want, 'a first');
+  assert.deepEqual(of([...given].reverse()), want, 'c first');
 });
 
 // --- spec 12: the register by profile (made-up speakers only) ----------------------------------
