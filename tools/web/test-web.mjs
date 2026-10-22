@@ -7302,7 +7302,9 @@ const fontIs = (page, font) => page.waitForFunction((f) => document.body.dataset
 // ends left out. Each run: its row, its cells ({ x, code, ink }, a space's ink null), whether it
 // follows two or more spaces (`after`), its inks; and `parts`, the texts the page is to draw it
 // in (one per stretch of one ink, a space going with the stretch it stands in). Also every
-// `fillText` on the game's canvas is kept in `window.__fills` while that is an array.
+// `fillText` on the game's canvas is kept in `window.__fills` while that is an array, and every
+// `fillRect` on it (a whole repaint's background: `paint` with no dirty rect) is counted in
+// `window.__wholePaints`.
 function fontRunsHook() {
   window.__fontRunsOf = (list, [fx, fy, fw, fh]) => {
     const runs = [];
@@ -7349,6 +7351,12 @@ function fontRunsHook() {
   CanvasRenderingContext2D.prototype.fillText = function fillText(text, ...rest) {
     if (Array.isArray(window.__fills) && this.canvas.id === 'screen') window.__fills.push(String(text));
     return real.call(this, text, ...rest);
+  };
+  window.__wholePaints = 0;
+  const rect = CanvasRenderingContext2D.prototype.fillRect;
+  CanvasRenderingContext2D.prototype.fillRect = function fillRect(...args) {
+    if (this.canvas.id === 'screen') window.__wholePaints += 1;
+    return rect.apply(this, args);
   };
 }
 
@@ -7755,24 +7763,98 @@ const oneToOneOff = (page, name, rect) => page.evaluate(([n, [x, y, w, hh]]) => 
   return off;
 }, [name, rect]);
 
-test('HD font (spec 11, a one-to-one region): a run listed in the map window (made up by the test: its own four letters and colours added to the list the page reads) is drawn there once and kept through a repaint the pointer causes elsewhere in the window; once it is no longer listed, the next such repaint copies the window again whole, and nothing of the run stays', async (env) => {
+// Page script: from now on, every non-empty rect the page takes of the game on screen's x4 frame
+// (Game.hd_take_dirty, the rect `paint` copies from) is kept in `window.__dirty`, and that game
+// in `window.__dirtyGame`.
+const recordDirty = (page) => page.evaluate(() => {
+  const g = globalThis.__shownGame;
+  const real = Object.getPrototypeOf(g).hd_take_dirty;
+  window.__dirty = [];
+  window.__dirtyGame = g;
+  g.hd_take_dirty = function hdTakeDirty() {
+    const rect = real.call(this);
+    if (rect.length > 0) window.__dirty.push([...rect]);
+    return rect;
+  };
+});
+
+// Page script: the rects `recordDirty` kept: how many, whether any is the whole x4 frame, whether
+// any meets the x4 rect `rect`; whether the game on screen and the view are still the ones then
+// (so each of those rects reached `paint` as its dirty rect: a partial repaint).
+const dirtySeen = (page, rect) => page.evaluate(([x, y, w, hh]) => {
+  const g = globalThis.__shownGame;
+  const [w4, h4] = [g.width() * 4, g.height() * 4];
+  const meets = ([a, b, c, d]) => a < x + w && x < a + c && b < y + hh && y < b + d;
+  return {
+    rects: window.__dirty.length,
+    full: window.__dirty.some(([a, b, c, d]) => a === 0 && b === 0 && c === w4 && d === h4),
+    meets: window.__dirty.some(meets),
+    sameGame: g === window.__dirtyGame,
+    view: globalThis.__u6Layout.view,
+  };
+}, rect);
+
+// Page script: from now on, every `fillRect` on the game's canvas (a whole repaint's background:
+// `paint` with no dirty rect) is counted in `window.__wholePaints`, from 0 (the wrapper put in once,
+// as `fontRunsHook` puts it; then only the count reset).
+const countWholePaints = (page) => page.evaluate(() => {
+  if (window.__wholePaints === undefined) {
+    const rect = CanvasRenderingContext2D.prototype.fillRect;
+    CanvasRenderingContext2D.prototype.fillRect = function fillRect(...args) {
+      if (this.canvas.id === 'screen') window.__wholePaints += 1;
+      return rect.apply(this, args);
+    };
+  }
+  window.__wholePaints = 0;
+});
+
+// Page script: a hash of the game on screen's x4 frame in its rect [x, y, w, h].
+const x4Hash = (page, rect) => page.evaluate(([x, y, w, hh]) => {
+  const g = globalThis.__shownGame;
+  const f = g.hd_frame_rgba();
+  const w4 = g.width() * 4;
+  let v = 0x811c9dc5;
+  for (let yy = y; yy < y + hh; yy += 1) {
+    for (let xx = x; xx < x + w; xx += 1) {
+      for (let k = 0; k < 4; k += 1) v = Math.imul(v ^ f[(yy * w4 + xx) * 4 + k], 0x01000193) >>> 0;
+    }
+  }
+  return v;
+}, rect);
+
+test('HD font (spec 11, a one-to-one region): a run listed in the map window (made up by the test: its own four letters and colours added to the list the page reads) is drawn there once and kept through a repaint the pointer causes elsewhere in the window; once it is no longer listed, the next such repaint copies the window again whole, and nothing of the run stays; preconditions asserted: the game lists no cell in the window, and through those frames nothing else repaints the run\'s place (its x4 pixels unchanged, no dirty rect meets it, each a partial repaint, no whole repaint of the canvas)', async (env) => {
   const { page } = await bootLayout(env, { font: null });
   await fontIs(page, 'hd');
   await page.mouse.move(...(await h.screenPoint(page, 150, 150)));
   await h.virtualDisplay(page, 60);
   await h.runFrames(page, 10);
-  // The made-up run: 'TEST' in the map window's row 40 from x 40, ink and paper of the test's own.
-  await page.evaluate(() => {
+  // The test's precondition: the game lists no cell in the map window (else the window is copied
+  // whole for those, and the made-up run below would not be what decides it).
+  const mapCells = () => page.evaluate(() => {
+    const [fx, fy, fw, fh] = globalThis.__u6Layout.regions.find((r) => r.name === 'map').from;
+    const g = globalThis.__shownGame;
+    const list = Object.getPrototypeOf(g).hd_glyphs.call(g);
+    let n = 0;
+    for (let i = 0; i < list.length; i += 5) {
+      if (list[i] + 8 > fx && list[i + 1] + 8 > fy && list[i] < fx + fw && list[i + 1] < fy + fh) n += 1;
+    }
+    return n;
+  });
+  assert.equal(await mapCells(), 0, 'precondition: the game lists no cell in the map window');
+  // The made-up run: 'TEST' in the map window's row 136 from x 16 (its lower left, away from the
+  // pointer and from the tiles that move at the start), ink and paper of the test's own.
+  const [RUN_X, RUN_Y] = [16, 136];
+  await page.evaluate(([rx, ry]) => {
     const g = globalThis.__shownGame;
     const real = Object.getPrototypeOf(g).hd_glyphs;
     g.hd_glyphs = function hdGlyphs() {
       const list = real.call(this);
       return window.__fake ? Uint32Array.from([...list, ...window.__fake]) : list;
     };
-    window.__fake = [0x54, 0x45, 0x53, 0x54].flatMap((code, i) => [40 + 8 * i, 40, code, 0xff00ff, 0x00ff00]);
-  });
+    window.__fake = [0x54, 0x45, 0x53, 0x54].flatMap((code, i) => [rx + 8 * i, ry, code, 0xff00ff, 0x00ff00]);
+  }, [RUN_X, RUN_Y]);
   const { from, to } = (await layoutTable(page)).regions.find((r) => r.name === 'map');
-  const span = [to[0] + (40 - from[0]) * 4, to[1] + (40 - from[1]) * 4, 32 * 4, 32];
+  const span = [to[0] + (RUN_X - from[0]) * 4, to[1] + (RUN_Y - from[1]) * 4, 32 * 4, 32];
   // A whole paint (the font off and on again) draws it.
   await chooseFont(page, 'pixel');
   await chooseFont(page, 'hd');
@@ -7791,17 +7873,32 @@ test('HD font (spec 11, a one-to-one region): a run listed in the map window (ma
   await h.runFrames(page, 10);
   assert.notEqual(await version(), v, 'the pointer moved: a new frame');
   assert.ok(await sameAsShot(), 'the run still listed: its pixels as before (drawn once)');
-  // No longer listed: the next repaint copies the window whole, the run gone.
+  // No longer listed: the next repaint copies the window whole, the run gone. Preconditions for
+  // that to rest on the whole copy alone: through those frames the x4 frame under the run's place
+  // stays as it was (no animated tile there), no rect the page copies meets it, every one reaches
+  // `paint` as a partial repaint (the same game and view, none the whole frame), no paint draws
+  // the whole canvas (whatever the rects, `compose` repaints whole for another game or view, a
+  // fresh x4 frame), and the game still lists no cell in the window.
+  const under = [4 * RUN_X, 4 * RUN_Y, 4 * 32, 4 * 8];
+  const before = await x4Hash(page, under);
+  await recordDirty(page);
+  await countWholePaints(page);
   await page.evaluate(() => { window.__fake = null; });
   v = await version();
   await page.mouse.move(...(await h.screenPoint(page, 150, 150)));
   await h.runFrames(page, 10);
   assert.notEqual(await version(), v, 'the pointer moved again: a new frame');
+  const dirty = await dirtySeen(page, under);
+  assert.ok(dirty.rects > 0 && !dirty.full && dirty.sameGame && dirty.view === 'game', 'precondition: the frames after it repainted part of the frame');
+  assert.equal(await page.evaluate(() => window.__wholePaints), 0, 'precondition: no whole repaint of the canvas through those frames');
+  assert.ok(!dirty.meets, 'precondition: no rect the page copied meets the run\'s place');
+  assert.equal(await x4Hash(page, under), before, 'precondition: the x4 frame under the run\'s place unchanged');
+  assert.equal(await mapCells(), 0, 'precondition: still no cell of the game in the map window');
   assert.equal(await oneToOneOff(page, 'map', span), 0, 'no longer listed: the run\'s place the x4 frame\'s again');
-  console.log('  receipt: a made-up run in the map window drawn, kept once through a pointer repaint, and gone after the next once no longer listed: pass');
+  console.log('  receipt: a made-up run in the map window drawn, kept once through a pointer repaint, and gone after the next once no longer listed, its place repainted by nothing else (no game cell in the window, its x4 pixels unchanged, no dirty rect meeting it, no whole repaint): pass');
 }, { needs: h.haveHfes });
 
-test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pack (the user\'s disks, a synthetic conversation) the message scroll lists the pack\'s syllables and the game\'s letters; with the HD font one paint draws each run once, in its inks, where the font puts it (from 1 px inside its first cell, at the font\'s natural width without kerning, the second ink where the text before it ends): syllables at the scroll\'s scale centred down their cells, a run after two spaces at its own cell, the keyword in its own colour, the rest of the canvas exactly the x4 frame\'s; a change of the scroll\'s text alone (Look at the prompt) drawn over the scroll copied again, nothing of the runs before left; with the pixel font the canvas is the x4 frame\'s regions exactly; no line reaches the console, the page\'s data or text', async (env) => {
+test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pack (the user\'s disks, a synthetic conversation) the message scroll lists the pack\'s syllables and the game\'s letters; with the HD font one paint draws each run once, in its inks, where the font puts it (from 1 px inside its first cell, at the font\'s natural width without kerning, the second ink where the text before it ends): syllables at the scroll\'s scale centred down their cells, a run after two spaces at its own cell, the keyword in its own colour, the rest of the canvas exactly the x4 frame\'s; a change of the scroll\'s text alone (Look at the prompt), a partial repaint (its dirty rects meet the scroll, none the whole frame), drawn over the scroll copied again, nothing of the runs before left; with the pixel font the canvas is the x4 frame\'s regions exactly; no line reaches the console, the page\'s data or text', async (env) => {
   const { context, page } = await h.openPage(env, { setup: { lang: 'ko' }, layout: 'hd' });
   await context.addInitScript(fontRunsHook);
   const words = consoleText(page);
@@ -7843,6 +7940,8 @@ test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pa
     const from = globalThis.__u6Layout.regions.find((r) => r.name === 'messages').from;
     window.__keysBefore = window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from).map((run) => `${run.y}:${run.cells.map((k) => `${k.x}:${k.code}`).join(' ')}`).join('|');
   });
+  await recordDirty(page);
+  await page.evaluate(() => { window.__wholePaints = 0; });
   await page.focus('#screen');
   await page.keyboard.press('KeyL');
   const scrollChanged = () => page.evaluate(() => {
@@ -7852,6 +7951,13 @@ test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pa
   for (let k = 0; k < 40 && !(await scrollChanged()); k += 1) await h.runFrames(page, 5);
   await h.runFrames(page, 10);
   assert.ok(await scrollChanged(), 'the scroll\'s runs changed');
+  // The repaint was partial: each rect the page copied since reached `paint` as its dirty rect
+  // (the same game and view), none the whole frame, some met the scroll, and no paint drew the
+  // whole canvas (its background, `fillRect`).
+  const scroll = (await layoutTable(page)).regions.find((r) => r.name === 'messages').from.map((n) => 4 * n);
+  const dirty = await dirtySeen(page, scroll);
+  assert.ok(dirty.rects > 0 && dirty.meets && !dirty.full && dirty.sameGame && dirty.view === 'game', 'the repaint partial: the dirty rects met the scroll, none the whole frame');
+  assert.equal(await page.evaluate(() => window.__wholePaints), 0, 'the repaint partial: no whole repaint of the canvas');
   const partial = (await fontRuns(page)).messages;
   assert.ok(partial.runs > 0 && partial.inked === partial.runs && partial.fits === partial.runs, 'after the partial repaint every run of the scroll where the font puts it');
   assert.ok(partial.offCompared > 0 && partial.off === 0, 'and nothing of the runs before: the rest of the scroll the x4 frame\'s exactly');
