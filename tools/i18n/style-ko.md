@@ -111,7 +111,11 @@ Incantation syllables, runic text and the credits are not translated.
   one-letter `y` or `n` alone in its keyword block) is the player's yes or no to the question
   before it: answer the Korean word a player types for yes or no, 예 for `y` and 아니 for `n`,
   whatever else is given, not a word of the lines. A key of another block that means yes or no
-  (`yes`, `no`) takes another word (그렇소, 아니오), not the reply's. A word is 1 to 8 Hangul
+  (`yes`, `no`) takes another word (그렇소, 아니오), not the reply's. A key that is a name (of a person, a
+  town, a land, a ship: its `shown` words are capitalised in the lines as names) takes the name
+  transliterated by 외래어 표기법, as the lines write it, never a word for what its English parts
+  mean: a made-up Lord `@Grimwald` is 그림왈드, a made-up town `@Stonebrook` 스톤브룩, not 냉혹 or
+  돌개울. A word is 1 to 8 Hangul
   syllables: no particle, no space and no Latin letter in the braces. An `@word` no key lists (and
   every `@word` of a request that lists no keywords) keeps its English word: `일(@{job})`.
   Keep one `@` for each `@` of the English line; every `@` is followed at once by `{`, and its `}`
