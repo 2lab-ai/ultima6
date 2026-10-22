@@ -29,7 +29,13 @@
 //   form (a pack without them byte for byte main's; crates/u6-core/src/locale/tool-pack.json is
 //   this writer's bytes, which the engine reads and writes back), the merge (new words replace
 //   old, an older line that no longer passes dropped and counted, a strings-only run keeping
-//   them).
+//   them);
+// - spec 12, the register by profile (made-up speakers only): the speaker file's strict reader and
+//   its refusals (fixed messages, no request), the register for a class at an age, `--speakers`
+//   putting the age, the profile and that register in the request (a script the file does not list
+//   by Pass A as an adult, `--class` still winning), a request without it byte for byte main's,
+//   `--ages` choosing the scripts of those ages (alone or with `--first`) and its refusals, the
+//   guide's age section.
 //
 //   node --test tools/i18n/*.test.mjs
 import assert from 'node:assert/strict';
@@ -44,10 +50,10 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
-  CLASSES, COVERAGE_FORMAT, MAX_TOKENS, PACK_FORMAT, PARTICLES, PackReadError, aliasesOf, bodyOf, braceWords, braceWordsWanted,
-  collide, compatibleOf, duplicateMembers, fingerprint, firstBlocksOf, gate, glossaryOf, hash64, hex64, hits, keyHit, keyOf,
-  keysOf, keywordsOf, knownOf, latin1, main, packBytes, placeholders, planOf, readPack, speakerClass, systemOf, tableGate,
-  topicsOf, unitsOf, wordGate,
+  AGES, CLASSES, COVERAGE_FORMAT, InputError, MAX_TOKENS, PACK_FORMAT, PARTICLES, PackReadError, SPEAKERS_FORMAT, SPEAKER_NOTE_MAX,
+  aliasesOf, bodyOf, braceWords, braceWordsWanted, collide, compatibleOf, duplicateMembers, fingerprint, firstBlocksOf, gate,
+  glossaryOf, hash64, hex64, hits, keyHit, keyOf, keysOf, keywordsOf, knownOf, latin1, main, packBytes, placeholders, planOf,
+  readPack, readSpeakers, registerOf, speakerClass, systemOf, tableGate, topicsOf, unitsOf, wordGate,
 } from './translate.mjs';
 
 const TOOL = join(dirname(fileURLToPath(import.meta.url)), 'translate.mjs');
@@ -1312,4 +1318,237 @@ test('slice K5b: with the shared keywords\' request first (three scripts share a
     noneOf(out.text, SHARE_KEYS);
     await rm(f.dir, { recursive: true });
   }
+});
+
+// --- spec 12: the register by profile (made-up speakers only) ----------------------------------
+
+const NOTE = 'Zq8NoteSentinel';
+// A u6.speakers/1 listing `entries`, each [archive, item, age, class, note].
+const speakersOf = (entries) => ({
+  format: SPEAKERS_FORMAT, model: 'test-model', speakers: entries.map(([archive, item, age, cls, note]) => ({ archive, item, age, class: cls, note })),
+});
+
+async function sfixture(bundles, speakers) {
+  const f = await kfixture(bundles);
+  const path = join(f.dir, 'speakers.json');
+  await writeFile(path, typeof speakers === 'string' ? speakers : JSON.stringify(speakers));
+  return { ...f, speakers: path };
+}
+
+const npcsOf = (bodies) => new Map(bodies.map((b) => userOf(b)).filter((u) => u.npc).map((u) => [u.npc.name.replace(SENTINEL, ''), u.npc]));
+
+test('spec 12: the speaker file\'s reader takes u6.speakers/1 exactly (each age and class one of its enums, a note of at most SPEAKER_NOTE_MAX characters, a script once; its coverage receipt, an object, passed over) and refuses anything else with a fixed message, a count at most', () => {
+  const read = readSpeakers(speakersOf([['a', 1, 'child', 'commoner', `${NOTE}a`], ['b', 65535, 'elder', 'mage', '']]));
+  assert.deepEqual([...read], [['a:1', { age: 'child', class: 'commoner', note: `${NOTE}a` }], ['b:65535', { age: 'elder', class: 'mage', note: '' }]]);
+  assert.equal(readSpeakers(speakersOf([])).size, 0, 'an empty list reads');
+  assert.equal(readSpeakers(speakersOf([['a', 1, 'youth', 'noble', 'x'.repeat(SPEAKER_NOTE_MAX)]])).size, 1, 'a note of the most characters');
+  const shape = /^the speakers file is not u6\.speakers\/1$/;
+  const entries = /^the speakers file is not u6\.speakers\/1: 1 entries are not \{archive, item, age, class, note\} of its forms$/;
+  const good = { archive: 'a', item: 1, age: 'child', class: 'commoner', note: NOTE };
+  const file = (speakers, extra = {}) => ({ format: SPEAKERS_FORMAT, model: 'm', speakers, ...extra });
+  for (const coverage of [{}, { scripts: { read: 1 }, fallback: [{ archive: 'b', item: 9, age: 'missing', class: null }], extra: NOTE }]) {
+    assert.deepEqual([...readSpeakers(file([good], { coverage }))], [...readSpeakers(file([good]))], 'the coverage member changes nothing read');
+  }
+  for (const [what, value, rule] of [
+    ['null', null, shape], ['a list', [], shape], ['a string', 'u6.speakers/1', shape],
+    ['another format', { ...file([]), format: 'u6.speakers/2' }, shape],
+    ['no model', { format: SPEAKERS_FORMAT, speakers: [] }, shape],
+    ['a model not text', file([], { model: 1 }), shape],
+    ['a member more', file([], { extra: 1 }), shape],
+    ['a coverage not an object', file([], { coverage: [] }), shape],
+    ['a coverage of null', file([], { coverage: null }), shape],
+    ['a coverage of text', file([], { coverage: NOTE }), shape],
+    ['speakers not a list', file({}), shape],
+    ['an age not of the enum', file([{ ...good, age: 'teen' }]), entries],
+    ['an age of another case', file([{ ...good, age: 'Child' }]), entries],
+    ['a class not of the enum', file([{ ...good, class: 'emperor' }]), entries],
+    ['a class of the prototype', file([{ ...good, class: '__proto__' }]), entries],
+    ['an archive not a or b', file([{ ...good, archive: 'c' }]), entries],
+    ['an item below 0', file([{ ...good, item: -1 }]), entries],
+    ['an item past 65535', file([{ ...good, item: 65536 }]), entries],
+    ['an item not whole', file([{ ...good, item: 1.5 }]), entries],
+    ['a note not text', file([{ ...good, note: 5 }]), entries],
+    ['a note too long', file([{ ...good, note: 'x'.repeat(SPEAKER_NOTE_MAX + 1) }]), entries],
+    ['no note', file([{ archive: 'a', item: 1, age: 'child', class: 'commoner' }]), entries],
+    ['an entry member more', file([{ ...good, name: NOTE }]), entries],
+    ['an entry not an object', file([null]), entries],
+    ['a script twice', file([good, { ...good, age: 'elder' }]), /^the speakers file is not u6\.speakers\/1: 1 entries list a script listed before$/],
+  ]) {
+    assert.throws(() => readSpeakers(value), (err) => err instanceof InputError && rule.test(err.message) && !err.message.includes(NOTE), what);
+  }
+});
+
+test('spec 12: the register for a class at an age: an adult\'s is the class\'s; a child\'s the same whatever its class, a child\'s speech; a young person\'s 해요체 for the plain stations, a soft 하오체 for the others; an elder\'s the class\'s with an old person\'s turns', () => {
+  const classes = Object.keys(CLASSES);
+  assert.deepEqual(AGES, ['child', 'youth', 'adult', 'elder']);
+  for (const c of classes) {
+    assert.equal(registerOf(c, 'adult'), CLASSES[c], `${c}: an adult's is today's`);
+    assert.equal(registerOf(c), CLASSES[c], `${c}: no age is an adult's`);
+    assert.equal(registerOf(c, 'child'), registerOf('commoner', 'child'), `${c}: a child speaks as a child`);
+    assert.ok(registerOf(c, 'elder').startsWith(CLASSES[c]) && registerOf(c, 'elder').includes('~구먼'), `${c}: an elder's`);
+    assert.equal(new Set(AGES.map((a) => registerOf(c, a))).size, 4, `${c}: each age its own`);
+  }
+  assert.ok(registerOf('commoner', 'child').includes('해요체') && registerOf('commoner', 'child').includes('반말'));
+  for (const c of ['merchant', 'commoner', 'thief']) assert.ok(registerOf(c, 'youth').startsWith('해요체'), `${c}: a young one's 해요체`);
+  for (const c of classes.filter((x) => !['merchant', 'commoner', 'thief'].includes(x))) {
+    assert.ok(registerOf(c, 'youth').startsWith('a soft 하오체'), `${c}: a young one's soft 하오체`);
+  }
+});
+
+test('spec 12: --speakers: a script the file lists takes its class and age, the request\'s NPC naming its age, its profile (the note) and the register for that class at that age; one it does not list Pass A as an adult with no profile; --class still wins for the run; the coverage counts the ages; nothing printed names a note', async () => {
+  const f = await sfixture(BUNDLES, speakersOf([
+    ['a', ITEMS[0], 'child', 'commoner', `${NOTE}Small`], ['b', ITEMS[2], 'elder', 'spirit', `${NOTE}Old`], ['b', 9999, 'youth', 'noble', ''],
+  ]));
+  const t = fakeTransport();
+  const r = await run([f.bundles, '--first', '9', '--speakers', f.speakers, '--out', f.out, '--send', '--jobs', '1'], t.send);
+  assert.equal(r.code, 3, 'written, the bad script left English');
+  const npcs = npcsOf(t.bodies);
+  const look = (i) => BUNDLES[i].narration.look[0].text;
+  assert.deepEqual(npcs.get('Good'), {
+    name: `${SENTINEL}Good`, description: look(0), class: 'commoner', age: 'child', profile: `${NOTE}Small`, register: registerOf('commoner', 'child'),
+  }, 'the file\'s class (not Pass A\'s guard), age and note');
+  assert.deepEqual(Object.keys(npcs.get('Good')), ['name', 'description', 'class', 'age', 'profile', 'register']);
+  assert.deepEqual(npcs.get('Again'), { name: `${SENTINEL}Again`, description: look(1), class: 'merchant', age: 'adult', profile: '', register: CLASSES.merchant },
+    'not listed: Pass A, an adult');
+  assert.deepEqual(npcs.get('Bad'), { name: `${SENTINEL}Bad`, description: look(2), class: 'spirit', age: 'elder', profile: `${NOTE}Old`, register: registerOf('spirit', 'elder') });
+  const again = t.bodies.filter((b) => b.includes(`${SENTINEL}Again`)).map((b) => userOf(b).npc);
+  assert.equal(again.length, 2, 'a line asked again');
+  assert.deepEqual(again[1], again[0], 'a request again names the same speaker');
+  const coverage = JSON.parse(await readFile(join(f.out, 'coverage.json'), 'utf8'));
+  assert.deepEqual(coverage.ages, {
+    child: { chosen: 1, listed: 1, translated: 1 }, youth: { chosen: 0, listed: 0, translated: 0 },
+    adult: { chosen: 1, listed: 0, translated: 1 }, elder: { chosen: 1, listed: 1, translated: 0 },
+  });
+  assert.deepEqual(coverage.perScript.map((p) => [p.class, p.age]), [['commoner', 'child'], ['merchant', 'adult'], ['spirit', 'elder']]);
+  assert.match(r.text, /Speakers: 3 scripts listed in .*speakers\.json; of the 3 chosen, 2 listed \(the others by Pass A, as adults\); child 1, youth 0, adult 1, elder 1\./);
+  assert.match(r.text, /Scripts by age \(translated of chosen\): child 1 of 1, youth 0 of 0, adult 1 of 1, elder 0 of 1\./);
+  assert.ok(!r.text.includes(NOTE) && !JSON.stringify(coverage).includes(NOTE), 'no note printed or in the receipt');
+  nothingTold(r.text);
+  // --class gives the class for the run; the file's age and note stay.
+  const c = await run([f.bundles, '--item', `a:${ITEMS[0]}`, '--speakers', f.speakers, '--class', 'royalty', '--out', join(f.dir, 'c'), '--dry-run'], null);
+  assert.equal(c.code, 0);
+  const npc = userOf(await readFile(previewPrinted(c.text), 'utf8')).npc;
+  assert.deepEqual([npc.class, npc.age, npc.profile, npc.register], ['royalty', 'child', `${NOTE}Small`, registerOf('royalty', 'child')]);
+  nothingTold(c.text);
+  await rm(f.dir, { recursive: true });
+});
+
+test('spec 12: without --speakers the request is byte for byte main\'s (the NPC\'s name, description, class and register only), its plan has no speaker and its coverage no ages; with an empty speaker file every script is an adult and its request names that', async () => {
+  const NOKEY = {
+    format: 'u6.npc-bundle/1', archive: 'a', item: 7301, hash: '00000000000d7301', refused: null, actors: [], portraits: [], name: 'Zq8Plain', locale: 'en',
+    narration: { look: [seg('a', 7301, 20, 'a plain test')] },
+    speech: { greeting: [seg('a', 7301, 60, 'Hail, $G. Ask of my @wares.')] },
+    turns: [{ input: { at: 90, kind: 'ask' }, segments: [], topics: [{ at: 0, keywords: ['*'], requires: [], answer: [seg('a', 7301, 100, 'Naught more.')] }] }],
+    traits: [], strings: [{ key: ['a', 7301, 200], table: 200, index: 0, text: 'a cup' }],
+  };
+  const [s] = planOf([NOKEY], { item: { archive: 'a', item: 7301 } }).scripts;
+  assert.equal(s.speaker, null, 'no speaker without a file');
+  const units = s.units.filter((u) => !u.done);
+  for (const body of [bodyOf('gpt-6-astra', systemOf('STYLE'), s.bundle, s.cls, units), bodyOf('gpt-6-astra', systemOf('STYLE'), s.bundle, s.cls, units, [], null)]) {
+    assert.equal(hex64(hash64(Buffer.from(body))), '8dfd9fc326baf037', 'main\'s body (the K5b test\'s), byte for byte');
+  }
+  const f = await sfixture([NOKEY], speakersOf([]));
+  const plainRun = await run([f.bundles, '--item', 'a:7301', '--out', f.out, '--dry-run'], null, { style: 'STYLE' });
+  assert.equal(hex64(hash64(await readFile(previewPrinted(plainRun.text)))), '8dfd9fc326baf037', 'the preview without --speakers');
+  assert.ok(!plainRun.text.includes('Speakers:'), 'no speaker line');
+  const [e] = planOf([NOKEY], { item: { archive: 'a', item: 7301 }, speakers: new Map() }).scripts;
+  assert.deepEqual(e.speaker, { age: 'adult', profile: '', listed: false });
+  const listed = await run([f.bundles, '--item', 'a:7301', '--speakers', f.speakers, '--out', join(f.dir, 'b'), '--dry-run'], null, { style: 'STYLE' });
+  assert.equal(listed.code, 0);
+  assert.deepEqual(userOf(await readFile(previewPrinted(listed.text), 'utf8')).npc,
+    { name: 'Zq8Plain', description: 'a plain test', class: 'commoner', age: 'adult', profile: '', register: CLASSES.commoner });
+  // A run with --send and no --speakers: the coverage as before.
+  const g = await kfixture(BUNDLES.slice(0, 2));
+  const t = fakeTransport();
+  assert.equal((await run([g.bundles, '--first', '2', '--out', g.out, '--send'], t.send)).code, 0);
+  assert.ok(t.bodies.every((b) => JSON.stringify(Object.keys(userOf(b).npc)) === '["name","description","class","register"]'), 'the NPC as before');
+  const coverage = JSON.parse(await readFile(join(g.out, 'coverage.json'), 'utf8'));
+  assert.ok(!Object.hasOwn(coverage, 'ages'), 'no ages');
+  assert.ok(coverage.perScript.every((p) => JSON.stringify(Object.keys(p)) === '["hash","class","units","tables","translated","left"]'), 'each script as before');
+  await rm(f.dir, { recursive: true });
+  await rm(g.dir, { recursive: true });
+});
+
+// Five scripts with a line each and a keyword of their own (so no shared keywords' request): the
+// speaker file gives the first four ages, the fifth none (an adult).
+const AGE_ITEMS = [7701, 7702, 7703, 7704, 7705];
+const aged = () => AGE_ITEMS.map((item, i) => bundle('a', item, `00000000001b${item}`, `${SENTINEL}Age${i}`, { lines: [`Line ${i}.`], keywords: [`own${i}`] }));
+const AGED = speakersOf([['a', 7701, 'child', 'commoner', ''], ['a', 7702, 'elder', 'mage', ''], ['a', 7703, 'child', 'thief', ''], ['a', 7704, 'youth', 'noble', '']]);
+
+test('spec 12: --ages chooses the scripts the speaker file gives those ages (a script it does not list an adult), in order: all of them, or the first N with --first; each sent once, nothing else', async () => {
+  const speakers = readSpeakers(AGED);
+  const items = (o) => planOf(aged(), { speakers, ...o }).scripts.map((s) => s.bundle.item);
+  assert.deepEqual(items({ ages: ['child'] }), [7701, 7703]);
+  assert.deepEqual(items({ ages: ['child'], first: 1 }), [7701]);
+  assert.deepEqual(items({ ages: ['adult'] }), [7705], 'the one not listed');
+  assert.deepEqual(items({ ages: ['child', 'youth', 'elder'] }), [7701, 7702, 7703, 7704]);
+  assert.deepEqual(items({ ages: ['child', 'youth', 'elder'], first: 2 }), [7701, 7702], 'the first 2 of those ages');
+  assert.deepEqual(items({ first: 2 }), [7701, 7702], 'without --ages, --first as before');
+  const f = await sfixture(aged(), AGED);
+  for (const [args, want] of [[['--ages', 'child'], ['Age0', 'Age2']], [['--ages', 'child,youth,elder', '--first', '3'], ['Age0', 'Age1', 'Age2']],
+    [['--first', '3', '--ages', 'adult'], ['Age4']]]) {
+    const t = fakeTransport();
+    const out = join(f.dir, `out-${args.join('')}`);
+    const r = await run([f.bundles, ...args, '--speakers', f.speakers, '--out', out, '--send'], t.send);
+    assert.equal(r.code, 0, `${args}: every line translated`);
+    assert.deepEqual([...t.asked.keys()].map((k) => k.replace(SENTINEL, '')).sort(), want, `${args}: those scripts, once each`);
+    assert.equal(t.bodies.length, want.length);
+    nothingTold(r.text);
+  }
+  const none = await sfixture(aged(), speakersOf([['a', 7701, 'child', 'commoner', '']]));
+  const r = await run([none.bundles, '--ages', 'youth', '--speakers', none.speakers, '--out', none.out, '--send'], async () => assert.fail('no request'));
+  assert.equal(r.code, 1);
+  assert.match(r.text, /0 chosen.*\n.*Nothing to translate: nothing was sent\./s);
+  await rm(f.dir, { recursive: true });
+  await rm(none.dir, { recursive: true });
+});
+
+test('spec 12: --ages and --speakers refused with a fixed message before any request: --ages with no speaker file, an age not of the enum, with --item or --name, a speaker file with no bundles, a speaker file that does not read or check', async () => {
+  const f = await sfixture(aged(), AGED);
+  const never = async () => assert.fail('no request');
+  for (const [args, rule] of [
+    [[f.bundles, '--ages', 'child'], /--ages chooses by the ages of a --speakers file: name one/],
+    [[f.bundles, '--ages', 'kid', '--speakers', f.speakers], /--ages names ages of the speaker file: child, youth, adult, elder/],
+    [[f.bundles, '--ages', '', '--speakers', f.speakers], /--ages names ages of the speaker file/],
+    [[f.bundles, '--ages', 'child,', '--speakers', f.speakers], /--ages names ages of the speaker file/],
+    [[f.bundles, '--ages', 'child', '--item', 'a:7701', '--speakers', f.speakers], /--ages goes alone or with --first N, not with --item or --name/],
+    [[f.bundles, '--ages', 'child', '--name', 'x', '--speakers', f.speakers], /--ages goes alone or with --first N, not with --item or --name/],
+    [['--strings', f.bundles, '--speakers', f.speakers], /--speakers and --ages go with a bundles file/],
+    [[f.bundles, '--speakers', f.speakers], /name one script with --item or --name, or --first N, or choose by --ages/],
+  ]) {
+    const r = await run([...args, '--out', f.out, '--send'], never);
+    assert.equal(r.code, 2, `${args}: refused`);
+    assert.match(r.text, rule, `${args}: says why`);
+    assert.ok(!r.text.includes('kid'), 'the refused value is not echoed');
+  }
+  const bad = [
+    ['not JSON', '{', /the speakers file does not read as JSON/],
+    ['another format', JSON.stringify({ ...AGED, format: 'u6.voice-notes/1' }), /the speakers file is not u6\.speakers\/1$/m],
+    ['an age not of the enum', JSON.stringify(speakersOf([['a', 7701, 'teen', 'commoner', NOTE]])), /the speakers file is not u6\.speakers\/1: 1 entries are not/],
+  ];
+  for (const [what, text, rule] of bad) {
+    const g = await sfixture(aged(), text);
+    const r = await run([g.bundles, '--first', '1', '--speakers', g.speakers, '--out', g.out, '--send'], never);
+    assert.equal(r.code, 2, `${what}: refused`);
+    assert.match(r.text, rule, `${what}: its fixed message`);
+    assert.ok(!r.text.includes('Route:') && !existsSync(g.out), `${what}: before the route, the output directory or a preview`);
+    assert.ok(!r.text.includes(NOTE) && !r.text.includes('teen'), `${what}: nothing of the file printed`);
+    nothingTold(r.text);
+    await rm(g.dir, { recursive: true });
+  }
+  const missing = await run([f.bundles, '--first', '1', '--speakers', join(f.dir, 'none.json'), '--out', f.out, '--send'], never);
+  assert.equal(missing.code, 2);
+  assert.match(missing.text, /the speakers file cannot be read \(ENOENT\)/);
+  await rm(f.dir, { recursive: true });
+});
+
+test('spec 12: the guide by age: the ages section (child, youth, adult, elder, made-up examples), the modern endings banned for adult and elder speakers only, a child never saying 그대; the class table and the rest as before', async () => {
+  const guide = await readFile(join(dirname(TOOL), 'style-ko.md'), 'utf8');
+  const ages = guide.slice(guide.indexOf('## Speaker ages'), guide.indexOf('## Speaker classes'));
+  assert.ok(ages.length > 0 && guide.indexOf('## Speaker ages') < guide.indexOf('## Speaker classes'), 'the ages before the classes');
+  for (const a of AGES) assert.ok(ages.includes(`- \`${a}\`:`), `${a}'s rule`);
+  assert.ok(ages.includes('never 그대') && ages.includes('아저씨, 우리 고양이 못 봤어요?'), 'the child\'s address and example');
+  assert.ok(guide.includes('An `adult` or an `elder` speaker never uses modern endings') && !guide.includes('Never use modern endings'), 'the ban scoped');
+  assert.ok(guide.includes('No speaker uses modern loanwords or slang.'));
+  for (const c of Object.keys(CLASSES)) assert.ok(guide.includes(`| ${c} |`), `${c} still in the table`);
 });
