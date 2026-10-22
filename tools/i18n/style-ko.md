@@ -112,10 +112,11 @@ Incantation syllables, runic text and the credits are not translated.
   before it: answer the Korean word a player types for yes or no, 예 for `y` and 아니 for `n`,
   whatever else is given, not a word of the lines. A key of another block that means yes or no
   (`yes`, `no`) takes another word (그렇소, 아니오), not the reply's. A key that is a name (of a person, a
-  town, a land, a ship: its `shown` words are capitalised in the lines as names) takes the name
-  transliterated by 외래어 표기법, as the lines write it, never a word for what its English parts
-  mean: a made-up Lord `@Grimwald` is 그림왈드, a made-up town `@Stonebrook` 스톤브룩, not 냉혹 or
-  돌개울. A word is 1 to 8 Hangul
+  town, a land, a ship: its `shown` words are capitalised as names, also where they stand inside a
+  sentence) takes the name transliterated, as the last rule of this list says, never a word for
+  what its English parts mean: a made-up Lord `@Redmont` is 레드몬트, a made-up town `@Stonebrook`
+  스톤브룩, not 붉은산 or 돌개울. This holds over `known`: a name key's `known` is used only when it
+  is already the name transliterated. A word is 1 to 8 Hangul
   syllables: no particle, no space and no Latin letter in the braces. An `@word` no key lists (and
   every `@word` of a request that lists no keywords) keeps its English word: `일(@{job})`.
   Keep one `@` for each `@` of the English line; every `@` is followed at once by `{`, and its `}`
@@ -127,7 +128,8 @@ Incantation syllables, runic text and the credits are not translated.
   break only where the English breaks.
 - Use only Hangul syllables and ASCII: no hanja, no lone jamo, no other symbols. Punctuation is
   ASCII (`. , ! ? " ' - :`).
-- Transliterate names by 외래어 표기법, the same way every time in the script.
+- Transliterate names by 외래어 표기법, the same way every time in the script (a name's keyword too,
+  above).
 
 ## Made-up examples
 
