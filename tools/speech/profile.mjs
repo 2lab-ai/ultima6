@@ -100,16 +100,17 @@ const finite = (x) => typeof x === 'number' && Number.isFinite(x);
 
 // --- the bundles -------------------------------------------------------------------------------
 
-// A line of the script as the model reads it: the printing escapes the engine fills in at run
-// time stand as an ellipsis, the keyword marks and waits go, whitespace is one space.
-function clean(text) {
+/// A line of the script as the model reads it: the printing escapes the engine fills in at run
+/// time stand as an ellipsis, the keyword marks and waits go, whitespace is one space
+/// (tools/i18n/speakers.mjs reads the names and descriptions through it too).
+export function clean(text) {
   return text.replace(/@/g, '').replace(/\*/g, ' ').replace(/\$[A-Za-z0-9]|#[0-9]/g, '…')
     .replace(/\s+/g, ' ').trim();
 }
 
-// The text of `segments` (u6.npc-bundle/1): its text runs joined, a value printed at run time
-// (`var`) as an ellipsis; ops and conditions print nothing.
-function textOf(segments) {
+/// The text of `segments` (u6.npc-bundle/1): its text runs joined, a value printed at run time
+/// (`var`) as an ellipsis; ops and conditions print nothing.
+export function textOf(segments) {
   let out = '';
   for (const s of Array.isArray(segments) ? segments : []) {
     if (s?.kind === 'text' && typeof s.text === 'string') out += s.text;

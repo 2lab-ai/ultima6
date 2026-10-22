@@ -1,22 +1,70 @@
 # Korean register guide (사극체) for Ultima VI's conversations
 
-This guide is spec 08 §7, written for the translator. `tools/i18n/translate.mjs` sends it, as it
-is, with every request. Every example below is made up for this guide; none is the game's text.
+This guide is spec 08 §7 (its speaker ages, spec 12 Design 3), written for the translator.
+`tools/i18n/translate.mjs` sends it, as it is, with every request. Every example below is made up
+for this guide; none is the game's text.
 
 ## The register
 
 - The English is a faux-archaic English: *thou*, *thee*, *art*, *hast*. Those words choose a
   speech level and a form of address; they have no word-for-word Korean. Carry the same feel
   with the archaic Korean speech levels of historical drama (사극체).
-- Address the hero as **그대** unless the line says otherwise (a title the game fills in, such as
-  `$G`, stays as it is).
-- Never use modern endings: no ~요 (해요체), no ~해 / ~야 / ~거든 / ~잖아 (modern 반말), no
-  modern loanwords or slang.
+- Address the hero as **그대** unless the line says otherwise or the speaker is a child (see the
+  ages below; a title the game fills in, such as `$G`, stays as it is).
+- An `adult` or an `elder` speaker never uses modern endings: no ~요 (해요체), no ~해 / ~야 /
+  ~거든 / ~잖아 (modern 반말). A `child` or a `youth` speaker uses the endings its age gives below.
+- No speaker uses modern loanwords or slang.
 - One speaker keeps one level through the whole conversation.
+
+## Speaker ages: the age decides first, then the class
+
+The request may name the speaker's `age` (`child`, `youth`, `adult` or `elder`) and a short note
+on its personality and manner of speech (`profile`); its `register` is then the one for its class
+at that age. A request with no `age` is an adult's. Let the note shape the voice (shy, boastful,
+gruff, kind) inside the level its age and class give.
+
+- `child`: a child's speech. Short sentences and easy native words, no Sino-Korean diction and
+  none of the archaic adult endings (~노라, ~도다, ~하오, ~이오, ~하게, ~사옵니다). To a grown-up,
+  a polite child's 해요체 (~요, ~어요, ~예요); to another child or an animal, 반말. The hero is
+  아저씨, 언니, 오빠, 기사님 or 그쪽 as the line suits, never 그대. Whatever its class, a child
+  speaks as a child.
+- `youth`: a young person's lighter level, by station: an apprentice or a young servant (a young
+  merchant, commoner or thief) 해요체; a young noble, a squire or another young person of high
+  station a soft 하오체. Fewer archaic endings than an adult of the class.
+- `adult`: the class table below, as it is.
+- `elder`: the class's level with an old person's turns (~구먼, ~하네, ~일세), and 하게체 to a
+  younger hero where the station allows.
+
+| Age | Class | Made-up example |
+|---|---|---|
+| child | commoner | 아저씨, 우리 고양이 못 봤어요? |
+| child | commoner, to another child | 야, 이리 와 봐. 여기 개구리 있어! |
+| youth | commoner (an apprentice) | 스승님은 지금 안 계세요. 조금만 기다려 주세요. |
+| youth | noble | 그대도 이 성은 처음이오? 내가 길을 알려 드리겠소. |
+| elder | commoner | 허허, 젊은이가 용케도 여기까지 왔구먼. |
+| elder | mage | 자네, 이 늙은이 말을 잘 들어 두게. |
+
+## The narrator and the other voices in a script
+
+The speaker's level (its age and class) is for the speaker's own words only.
+
+- Text outside double quotes is the game's narrator, whatever the speaker's age or class: the
+  look description, what someone does, the `he says` around a quote. The narrator writes in the
+  하오체 (~하오, ~이오) or ends a description on a noun, and calls the hero 그대.
+- A quoted line that the line or its narration gives to someone else (a companion who cuts in,
+  `"…," says <name>.`) is in that person's own level (a grown companion: 하오체), not the
+  speaker's.
+
+| Line | Made-up example |
+|---|---|
+| a look description | 바구니를 든 어린 소년. |
+| a narrated action in a child's script | 아이가 수줍게 고개를 숙이오. |
+| a companion cutting in on a child | "아이가 겁을 먹은 모양이오," 동료가 말하오. |
 
 ## Speaker classes and their endings
 
-The request names the speaker's class (guessed from the description, or given by the owner).
+The request names the speaker's class (guessed from the description, or given by the owner or by
+the owner's speaker file). The table is an adult's level; the ages above change it.
 
 | Class | Speech level | Made-up example |
 |---|---|---|

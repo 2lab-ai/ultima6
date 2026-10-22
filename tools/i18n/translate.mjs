@@ -47,13 +47,22 @@
 // One request per script: the style guide, the speaker's class and register (guessed from its
 // name and description, Pass A of spec 08 §6; `--class` gives it instead), the NPC's name and
 // description, every run of its script in order, escapes kept, and its table strings (a table
-// string an op reads from inside it is left English, `inner`). The game strings go in requests of
-// at most STRINGS_PER_REQUEST strings and STRING_CHARS characters, the object names in requests
-// of at most LOOK_PER_REQUEST names and LOOK_CHARS characters, the books in requests of at most
-// BOOKS_PER_REQUEST books and BOOK_CHARS characters (a longer book alone), the strings of u in
-// requests of at most U_PER_REQUEST strings and U_CHARS characters, in the order u prints them; a
-// name or a book with no letter to translate (outside its runes, escapes and plural markers), or
-// a string of u with none outside its printf codes, is left English unasked.
+// string an op reads from inside it is left English, `inner`).
+// Spec 12, the register by profile: `--speakers <file>` (u6.speakers/1, tools/i18n/speakers.mjs's,
+// read strictly, its `coverage` receipt passed over: one that does not read is refused with no
+// request) gives a script it lists its class (`--class`, given, still wins for the run), its age
+// (child, youth, adult or elder) and its personality note; the request's NPC then also names its
+// `age` and its `profile` (the note), and its register is the one for that class at that age
+// (registerOf). A script the file does not list takes Pass A, `adult` and an empty profile. `--ages a,b` (with `--speakers` only) chooses the
+// scripts of those ages, a script not listed counting as adult: all of them, or with `--first N`
+// the first N of them. Without `--speakers` every request is byte for byte as before.
+// The game strings go in requests of at most STRINGS_PER_REQUEST strings and STRING_CHARS
+// characters, the object names in requests of at most LOOK_PER_REQUEST names and LOOK_CHARS
+// characters, the books in requests of at most BOOKS_PER_REQUEST books and BOOK_CHARS characters
+// (a longer book alone), the strings of u in requests of at most U_PER_REQUEST strings and U_CHARS
+// characters, in the order u prints them; a name or a book with no letter to translate (outside
+// its runes, escapes and plural markers), or a string of u with none outside its printf codes, is
+// left English unasked.
 // A script's request also lists its keywords (slice K5b, spec 08 §4): `topics`, one entry per
 // keyword block in script order, each key (the keyword as the keyword block keys it, up to its NUL
 // and case-folded; a `*` keyword is none) once, in the first block that lists it, with the words
@@ -103,7 +112,8 @@
 // model's name): never a name, a line, a script's (archive, item) or a hash. An error prints its
 // kind only.
 //
-//   node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N)]
+//   node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N
+//        | --ages AGES [--first N]) [--speakers <speakers.json>]]
 //        [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS]
 //        [--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs N]
 //        [--timeout SECONDS]
@@ -184,6 +194,32 @@ export const CLASSES = {
   spirit: '해라체 with archaic forms (~로다, ~도다, ~니라)',
   gargoyle: 'the provisional gargoyle register of the guide',
 };
+
+/// The speakers' ages (spec 12): the age decides the speech level first, then the class.
+export const AGES = ['child', 'youth', 'adult', 'elder'];
+export const SPEAKERS_FORMAT = 'u6.speakers/1';
+export const SPEAKER_NOTE_MAX = 400; // the characters of a speaker's note the reader takes
+const SPEAKERS_MAX = 1 << 16; // the entries of a speaker file
+
+// The stations whose young speak 해요체 (an apprentice, a young servant); the young of the others
+// speak a soft 하오체 (a young noble, a squire). Spec 12 Design 3.
+const PLAIN_STATIONS = new Set(['merchant', 'commoner', 'thief']);
+
+/// The register a request names for a speaker of class `cls` at age `age` (spec 12 Design 3, the
+/// guide's ages): a child's speech whatever its class; a young person's lighter level by station;
+/// the class's level with an old person's turns; an adult's is the class's (CLASSES).
+export function registerOf(cls, age = 'adult') {
+  if (age === 'child') {
+    return 'a child\'s speech: short sentences in easy native words, none of the archaic adult endings; '
+      + '해요체 (~요, ~어요) to a grown-up, 반말 to another child; the hero never 그대';
+  }
+  if (age === 'youth') {
+    return PLAIN_STATIONS.has(cls) ? '해요체 (~요, ~어요), a young person\'s lighter level'
+      : 'a soft 하오체 (~하오, ~이오), a young person\'s lighter level with fewer archaic endings';
+  }
+  if (age === 'elder') return `${CLASSES[cls]}, with an old person's turns (~구먼, ~하네, ~일세)`;
+  return CLASSES[cls];
+}
 
 // Pass A: words of a name or description that tell a class, the most telling first.
 const CLASS_WORDS = [
@@ -1060,12 +1096,16 @@ function lineOf(u) {
 /// The request body for `lines` of `bundle` (the exact bytes sent): a Messages call; with
 /// `topics` (slice K5b, [`topicsOf`]) the script's keywords too, and `system` is then
 /// `systemOf(style, true)`'s. With none it is K1's to K4's body, byte for byte, for the same style.
-export function bodyOf(model, system, bundle, cls, lines, topics = []) {
+/// With `speaker` (spec 12: a script's {age, profile} from the speaker file, [`planOf`]) the `npc`
+/// also names its `age` and its `profile` (the personality note), and its `register` is the one
+/// for that class at that age ([`registerOf`]); without it (null) the body is as before.
+export function bodyOf(model, system, bundle, cls, lines, topics = [], speaker = null) {
   const npc = {
     name: typeof bundle.name === 'string' ? bundle.name : '',
     description: textOf(bundle.narration?.look),
     class: cls,
-    register: CLASSES[cls],
+    ...(speaker ? { age: speaker.age, profile: speaker.profile } : {}),
+    register: speaker ? registerOf(cls, speaker.age) : CLASSES[cls],
   };
   const user = JSON.stringify(topics.length > 0 ? { npc, lines: lines.map(lineOf), topics } : { npc, lines: lines.map(lineOf) });
   return JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: [{ role: 'user', content: user }] });
@@ -1169,8 +1209,8 @@ export function programBodyOf(model, system, units) {
   return JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: [{ role: 'user', content: user }] });
 }
 
-// The JSON object of an answer (a code fence around it allowed), or null.
-function objectOfAnswer(content) {
+/// The JSON object of an answer (a code fence around it allowed), or null.
+export function objectOfAnswer(content) {
   const text = typeof content === 'string' ? content.trim() : '';
   const from = text.indexOf('{');
   const to = text.lastIndexOf('}');
@@ -1203,19 +1243,54 @@ export function keywordsOfAnswer(content) {
   return v && Array.isArray(v.keywords) && v.keywords.length > 0 ? { keywords: v.keywords } : null;
 }
 
+/// The speaker file (spec 12 Design 1: `value`, the parsed u6.speakers/1 tools/i18n/speakers.mjs
+/// writes) as a Map of `<archive>:<item>` to {age, class, note}. Strict: an object of exactly
+/// {format, model, speakers} and, optionally, `coverage` (speakers.mjs's receipt: an object, not
+/// read for the plan), each entry exactly {archive, item, age, class, note}, its archive a or b,
+/// its item 0 to 65535, its age one of AGES, its class one of CLASSES and its note at most
+/// SPEAKER_NOTE_MAX characters, each script once. Anything else throws an InputError with a fixed
+/// message (a count at most).
+export function readSpeakers(value) {
+  const refused = (why) => new InputError(`the speakers file is not ${SPEAKERS_FORMAT}${why ? `: ${why}` : ''}`);
+  if (!exact(value, ['format', 'model', 'speakers'], ['coverage']) || value.format !== SPEAKERS_FORMAT || typeof value.model !== 'string'
+    || !Array.isArray(value.speakers) || (Object.hasOwn(value, 'coverage') && !plain(value.coverage))) throw refused('');
+  if (value.speakers.length > SPEAKERS_MAX) throw refused(`it lists more than ${SPEAKERS_MAX} scripts`);
+  const entry = (s) => exact(s, ['archive', 'item', 'age', 'class', 'note']) && ['a', 'b'].includes(s.archive)
+    && Number.isInteger(s.item) && s.item >= 0 && s.item <= 0xffff && AGES.includes(s.age) && Object.hasOwn(CLASSES, s.class)
+    && typeof s.note === 'string' && [...s.note].length <= SPEAKER_NOTE_MAX;
+  const bad = value.speakers.filter((s) => !entry(s)).length;
+  if (bad > 0) throw refused(`${bad} entries are not {archive, item, age, class, note} of its forms`);
+  const speakers = new Map();
+  let twice = 0;
+  for (const s of value.speakers) {
+    const key = `${s.archive}:${s.item}`;
+    if (speakers.has(key)) twice += 1;
+    else speakers.set(key, { age: s.age, class: s.class, note: s.note });
+  }
+  if (twice > 0) throw refused(`${twice} entries list a script listed before`);
+  return speakers;
+}
+
 /// The bundles of `value` (the parsed file) as the scripts to translate: `item` ({archive, item}),
 /// the one bundle whose `name` is `name` (case folded), or the `first` scripts with lines, in
 /// (archive, item) order. Each script's units: its runs, then its table strings (one an op reads
 /// from inside is left English, `inner`); its keys (slice K5b, [`keysOf`]) with the words the
 /// units asked highlight for each (`shown`, [`shownOf`]). Throws a fixed message (a count at most)
 /// when the file is not a list of bundles or the script named has no lines.
-export function planOf(value, { item = null, first = null, name = null, cls = null } = {}) {
+/// With `speakers` (spec 12: [`readSpeakers`]'s Map) each script's `speaker` is {age, profile,
+/// listed}: a script the file lists takes its age, its note as the profile and its class (unless
+/// `cls`, the owner's --class, gives one for the run); one it does not list Pass A, `adult` and
+/// no note. `ages` (a list of AGES, with `speakers`) keeps only the scripts of those ages, in
+/// order, all of them, or the `first` of them; without `speakers` every script is as before
+/// (`speaker` null).
+export function planOf(value, { item = null, first = null, name = null, cls = null, speakers = null, ages = null } = {}) {
   if (!Array.isArray(value)) throw new InputError('the file is not a list of NPC bundles');
   const bad = value.filter((b) => !plain(b) || b.format !== BUNDLE_FORMAT || !['a', 'b'].includes(b.archive)
     || !Number.isInteger(b.item) || typeof b.hash !== 'string' || !/^[0-9a-f]{16}$/.test(b.hash)).length;
   if (bad > 0) throw new InputError(`${bad} entries of the file are not ${BUNDLE_FORMAT} bundles`);
   const sorted = [...value].sort((x, y) => (x.archive === y.archive ? x.item - y.item : x.archive < y.archive ? -1 : 1));
   const usable = sorted.filter((b) => (b.refused === null || b.refused === undefined) && unitsOf(b).length > 0);
+  const listedOf = (b) => speakers?.get(`${b.archive}:${b.item}`) ?? null;
   let chosen;
   if (item) {
     chosen = usable.filter((b) => b.archive === item.archive && b.item === item.item);
@@ -1224,6 +1299,9 @@ export function planOf(value, { item = null, first = null, name = null, cls = nu
     const want = name.toLowerCase();
     chosen = usable.filter((b) => typeof b.name === 'string' && b.name.toLowerCase() === want);
     if (chosen.length !== 1) throw new InputError(`${chosen.length} scripts with lines have that name: name one with --item`);
+  } else if (speakers !== null && ages !== null) {
+    const pool = usable.filter((b) => ages.includes(listedOf(b)?.age ?? 'adult'));
+    chosen = pool.slice(0, first ?? pool.length);
   } else {
     chosen = usable.slice(0, first ?? 0);
   }
@@ -1233,9 +1311,13 @@ export function planOf(value, { item = null, first = null, name = null, cls = nu
     const units = [...runs, ...tables].map((u, n) => ({ ...u, n }));
     const { topics, keys } = keysOf(b);
     const shown = shownOf(units.filter((u) => !u.done), keys);
-    return { kind: 'script', bundle: b, cls: cls ?? speakerClass(b), units, keys, topics, shown, compatible: compatibleOf(topics) };
+    const listed = listedOf(b);
+    const speaker = speakers === null ? null : { age: listed?.age ?? 'adult', profile: listed?.note ?? '', listed: listed !== null };
+    return {
+      kind: 'script', bundle: b, cls: cls ?? listed?.class ?? speakerClass(b), units, keys, topics, shown, compatible: compatibleOf(topics), speaker,
+    };
   });
-  return { read: value.length, usable: usable.length, scripts, bundles: value };
+  return { read: value.length, usable: usable.length, scripts, bundles: value, speakers: speakers !== null };
 }
 
 /// The words the pack there (`existing`, readPack's) settles for the keys (slice K5b): for each
@@ -1446,6 +1528,15 @@ export function recheckOf(existing, bundles) {
   return fingerprint([...named.values()].map((b) => ({ archive: b.archive, item: b.item, hash: b.hash }))) === existing.base;
 }
 
+// Spec 12: `scripts` by their speaker's age: for each age the scripts chosen, those of them the
+// speaker file lists and those `translated` (a predicate) says.
+function agesOf(scripts, translated = () => false) {
+  return Object.fromEntries(AGES.map((age) => {
+    const of = scripts.filter((s) => s.speaker?.age === age);
+    return [age, { chosen: of.length, listed: of.filter((s) => s.speaker.listed).length, translated: of.filter(translated).length }];
+  }));
+}
+
 // A category's counts: units found, translated, left English by reason.
 function tally(units) {
   const byReason = {};
@@ -1524,7 +1615,10 @@ export function outputsOf(plan, model, existing = null) {
     }
     if (done > 0) translatedScripts += 1;
     const tablesHere = s.units.filter((u) => u.kind === 'table').length;
-    perScript.push({ hash: s.bundle.hash, class: s.cls, units: s.units.length - tablesHere, tables: tablesHere, translated: done, left: s.units.length - done });
+    perScript.push({
+      hash: s.bundle.hash, class: s.cls, ...(s.speaker ? { age: s.speaker.age } : {}), units: s.units.length - tablesHere, tables: tablesHere,
+      translated: done, left: s.units.length - done,
+    });
   }
   const stringUnits = (plan.strings?.batches ?? []).flatMap((b) => b.units);
   for (const u of stringUnits) {
@@ -1646,6 +1740,8 @@ export function outputsOf(plan, model, existing = null) {
     tool: TOOL,
     category: 'conversations',
     scripts: { read: plan.read, usable: plan.usable, chosen: plan.scripts.length, translated: translatedScripts },
+    // Spec 12: with a speaker file, the chosen scripts by age, and of them the translated.
+    ...(plan.speakers ? { ages: agesOf(plan.scripts, (s) => s.units.some((u) => u.ko !== undefined)) } : {}),
     units: tally(runUnits),
     tables: tally(tableUnits),
     strings: { read: plan.strings?.read ?? 0, ...tally(stringUnits) },
@@ -1677,22 +1773,23 @@ export function outputsOf(plan, model, existing = null) {
   };
 }
 
-const USAGE = 'usage: node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N)] '
-  + '[--strings <strings.json> [--only strings,look,books,u]] [--class CLASS] '
+const USAGE = 'usage: node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N | --ages AGES [--first N]) '
+  + '[--speakers <speakers.json>]] [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS] '
   + `[--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs 1-${JOBS_MAX}] [--timeout SECONDS]`;
 
 /// The options of `argv`, or {error}.
 export function parseArgs(argv) {
   const o = { send: false, dryRun: false, model: DEFAULTS.model, llmux: DEFAULTS.llmux, out: DEFAULTS.out,
     jobs: DEFAULTS.jobs, timeoutS: DEFAULTS.timeoutS, bundles: null, strings: null, item: null, first: null,
-    name: null, cls: null, only: null, help: false };
+    name: null, cls: null, only: null, speakers: null, ages: null, help: false };
   const value = (i) => (i + 1 < argv.length ? argv[i + 1] : null);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--send') o.send = true;
     else if (a === '--dry-run') o.dryRun = true;
     else if (a === '--help' || a === '-h') o.help = true;
-    else if (['--model', '--llmux', '--out', '--jobs', '--timeout', '--item', '--first', '--class', '--name', '--strings', '--only'].includes(a)) {
+    else if (['--model', '--llmux', '--out', '--jobs', '--timeout', '--item', '--first', '--class', '--name', '--strings', '--only',
+      '--speakers', '--ages'].includes(a)) {
       const v = value(i);
       if (v === null) return { error: `${a} needs a value` };
       i += 1;
@@ -1706,6 +1803,8 @@ export function parseArgs(argv) {
       else if (a === '--name') o.name = v;
       else if (a === '--strings') o.strings = resolve(v);
       else if (a === '--only') o.only = v.split(',');
+      else if (a === '--speakers') o.speakers = resolve(v);
+      else if (a === '--ages') o.ages = v.split(',');
       else {
         const m = /^([ab]):([0-9]{1,5})$/.exec(v);
         if (!m) return { error: '--item is <archive>:<item>, the archive a or b' };
@@ -1717,8 +1816,15 @@ export function parseArgs(argv) {
   }
   if (o.help) return o;
   if (o.bundles === null && o.strings === null) return { error: 'no bundles file named, and no --strings' };
+  // Spec 12: --ages chooses by the speaker file's ages, alone or with --first N.
+  if (o.ages !== null && o.speakers === null) return { error: '--ages chooses by the ages of a --speakers file: name one' };
+  if (o.speakers !== null && o.bundles === null) return { error: '--speakers and --ages go with a bundles file' };
+  if (o.ages !== null && o.ages.some((a) => !AGES.includes(a))) return { error: `--ages names ages of the speaker file: ${AGES.join(', ')}` };
+  if (o.ages !== null && (o.item !== null || o.name !== null)) return { error: '--ages goes alone or with --first N, not with --item or --name' };
   const choices = [o.item, o.first, o.name].filter((c) => c !== null).length;
-  if (o.bundles !== null && choices !== 1) return { error: 'name one script with --item or --name, or --first N' };
+  if (o.bundles !== null && choices !== 1 && !(o.ages !== null && choices === 0)) {
+    return { error: 'name one script with --item or --name, or --first N, or choose by --ages' };
+  }
   if (o.bundles === null && choices > 0) return { error: '--item, --name and --first choose from a bundles file' };
   if (o.only !== null && (o.strings === null || o.only.length === 0 || o.only.some((p) => !PARTS.includes(p)))) {
     return { error: `--only names parts of the --strings file: ${PARTS.join(', ')}` };
@@ -1734,9 +1840,9 @@ export function parseArgs(argv) {
 
 const seconds = (ms) => `${(ms / 1000).toFixed(1)} s`;
 
-// The JSON of the file at `path` (at most BUNDLES_MAX bytes) and its size; throws InputError with
-// a fixed message (its kind, the file's role).
-async function readJson(path, what) {
+/// The JSON of the file at `path` (at most BUNDLES_MAX bytes) and its size; throws InputError with
+/// a fixed message (its kind, the file's role).
+export async function readJson(path, what) {
   let size;
   try {
     size = (await stat(path)).size;
@@ -1796,16 +1902,26 @@ export async function main(argv, {
   const programSystem = programSystemOf(guide);
 
   // The bundles and the game strings, and what to send of them.
-  const plan = { read: 0, usable: 0, scripts: [], bundles: null, strings: null, texts: null, program: null };
+  const plan = { read: 0, usable: 0, scripts: [], bundles: null, speakers: false, strings: null, texts: null, program: null };
   try {
     if (o.bundles !== null) {
+      // Spec 12: the speaker file, read strictly before the bundles (one that does not read is
+      // refused here, before any request).
+      const speakers = o.speakers === null ? null : readSpeakers((await readJson(o.speakers, 'speakers')).value);
       const { value, size } = await readJson(o.bundles, 'bundles');
-      Object.assign(plan, planOf(value, { item: o.item, first: o.first, name: o.name, cls: o.cls }));
+      Object.assign(plan, planOf(value, { item: o.item, first: o.first, name: o.name, cls: o.cls, speakers, ages: o.ages }));
       const units = plan.scripts.reduce((n, s) => n + s.units.filter((u) => u.kind === 'run').length, 0);
       const tables = plan.scripts.reduce((n, s) => n + s.units.filter((u) => u.kind === 'table').length, 0);
       const chars = plan.scripts.reduce((n, s) => n + s.units.reduce((m, u) => m + u.text.length, 0), 0);
       say(`Bundles: ${plan.read} scripts read from ${o.bundles} (${size} bytes), ${plan.usable} with lines; `
         + `${plan.scripts.length} chosen, ${units} lines, ${tables} table strings, ${chars} characters.`);
+      if (speakers !== null) {
+        const ages = agesOf(plan.scripts);
+        const listed = AGES.reduce((n, a) => n + ages[a].listed, 0);
+        say(`Speakers: ${speakers.size} scripts listed in ${o.speakers}${o.ages ? `; chosen by age (${o.ages.join(', ')})` : ''}; `
+          + `of the ${plan.scripts.length} chosen, ${listed} listed (the others by Pass A, as adults); `
+          + `${AGES.map((a) => `${a} ${ages[a].chosen}`).join(', ')}.`);
+      }
     }
     if (o.strings !== null) {
       const { value, size } = await readJson(o.strings, 'game strings');
@@ -1848,7 +1964,7 @@ export async function main(argv, {
     }
     const topics = again ? topicsOf(g, new Map([...g.keyed.words].map(([k, ws]) => [k, firstWord(ws)])), new Set(g.keyed.words.keys()))
       : topicsOf(g, known);
-    return { script: g, body: bodyOf(o.model, topics.length > 0 ? keyedSystem : system, g.bundle, g.cls, units, topics) };
+    return { script: g, body: bodyOf(o.model, topics.length > 0 ? keyedSystem : system, g.bundle, g.cls, units, topics, g.speaker) };
   };
   const groups = [...plan.scripts, ...(plan.strings?.batches ?? []), ...(plan.texts?.batches ?? []), ...(plan.program?.batches ?? [])];
   const jobsOf = () => [
@@ -1915,7 +2031,8 @@ export async function main(argv, {
     plan.glossary = glossaryOf(plan.scripts, new Set(known.keys()));
     const jobs = jobsOf();
     const parts = new Set(jobs.map((j) => j.script.kind));
-    const what = [plan.scripts.length > 0 ? 'one script\'s lines (and its keywords) with its NPC\'s name and description' : null,
+    const npcSaid = plan.speakers ? 'its NPC\'s name, description, age and personality note' : 'its NPC\'s name and description';
+    const what = [plan.scripts.length > 0 ? `one script's lines (and its keywords) with ${npcSaid}` : null,
       parts.has('glossary') ? `the keywords at least ${GLOSSARY_SCRIPTS} of the scripts share (up to ${GLOSSARY_KEYS}, each with up to `
         + `${GLOSSARY_SHOWN} of the words their lines highlight)` : null,
       parts.has('strings') ? `up to ${STRINGS_PER_REQUEST} of the game's own strings` : null,
@@ -2048,6 +2165,9 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { tr
     const c = coverage.units;
     say(`Lines: ${c.found} found, ${c.translated} translated, ${c.leftEnglish} left English${reasons(c)}; `
       + `scripts translated ${coverage.scripts.translated} of ${coverage.scripts.chosen}.`);
+    if (coverage.ages) {
+      say(`Scripts by age (translated of chosen): ${AGES.map((a) => `${a} ${coverage.ages[a].translated} of ${coverage.ages[a].chosen}`).join(', ')}.`);
+    }
     const t = coverage.tables;
     if (t.found > 0) say(`Table strings: ${t.found} found, ${t.translated} translated, ${t.leftEnglish} left English${reasons(t)}.`);
     const g = coverage.glossary;
