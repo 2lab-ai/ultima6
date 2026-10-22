@@ -1,7 +1,7 @@
 //! Spec 07 HD0: the source plane on synthetic art. What names each pixel (records, overlays,
-//! outlines, portraits, panel bitmaps), how the copies, the dissolve, the quake, a text scroll, a
-//! flight's put-back block, a combat playback and the presents carry it, what stays classic
-//! (text, clock hands, the sparkle, a missile, the pointer sprite), a pixel left from a record
+//! outlines, portraits, panel bitmaps, glyphs), how the copies, the dissolve, the quake, a text
+//! scroll, a flight's put-back block, a combat playback and the presents carry it, what stays
+//! classic (clock hands, the sparkle, a missile, the pointer sprite), a pixel left from a record
 //! rewritten since (stale, also in a clone), and a scene whose every pixel is checked against its
 //! image. The parity runs are in `plane_parity`. No game data.
 
@@ -9,8 +9,8 @@ use u6_formats::bitmap::Bitmap;
 use u6_formats::font::BitFont;
 use u6_formats::gfx::{AnimOverlay, Span};
 use u6_render::{
-    BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, HEIGHT, Kind, Src,
-    WIDTH,
+    BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, HEIGHT,
+    Kind, Src, WIDTH,
 };
 
 use super::view::{HERO_BASE, world};
@@ -53,6 +53,16 @@ fn picture(kind: Kind, id: u16, (u, v): (usize, usize)) -> Src {
         v: v as u16,
         kind,
         flags: 0,
+    }
+}
+
+/// The source of pixel (u, v) of the glyph of `code` whose row bytes are all `row` (spec 11).
+fn glyph(code: u8, row: u8, (u, v): (usize, usize)) -> Src {
+    Src {
+        id: u16::from(code),
+        kind: Kind::Glyph,
+        flags: if row & (0x80 >> u) != 0 { FLAG_INK } else { 0 },
+        ..picture(Kind::Glyph, 0, (u, v))
     }
 }
 
@@ -402,10 +412,11 @@ fn a_present_after_an_idle_tick_leaves_the_published_plane_the_screens() {
     );
 }
 
-/// Text drawn over a portrait is classic in the glyph's cell; the rest of the portrait keeps
-/// its (letter, item) and (u, v).
+/// Text drawn over a portrait names its glyph in the glyph's cell (spec 11: the code, (u, v) in
+/// the cell, the ink flag on set pixels); the rest of the portrait keeps its (letter, item) and
+/// (u, v).
 #[test]
-fn text_over_a_portrait_is_classic() {
+fn text_over_a_portrait_names_its_glyph() {
     // b'a' << 8 | 3: portrait.a, item 3.
     let id = 0x6103;
     let mut fb = plane();
@@ -419,9 +430,10 @@ fn text_over_a_portrait_is_classic() {
     for v in 0..64 {
         for u in 0..56 {
             let (x, y) = (0xd8 + u, 0x18 + v);
-            let glyph = (0xe0..0xe8).contains(&x) && (0x20..0x28).contains(&y);
-            if glyph {
-                assert_eq!(kind(&fb, x, y), Kind::Classic);
+            let cell = (0xe0..0xe8).contains(&x) && (0x20..0x28).contains(&y);
+            if cell {
+                let at = (x - 0xe0, y - 0x20);
+                assert_eq!(fb.src_at(x, y), Some(glyph(b'A', 0xAA, at)));
             } else {
                 assert_eq!(fb.src_at(x, y), Some(picture(Kind::Portrait, id, (u, v))));
             }
@@ -430,7 +442,7 @@ fn text_over_a_portrait_is_classic() {
 }
 
 /// A text window scrolled over the paper: each pixel moved up keeps its source (the paper's
-/// pixel it was, with its (u, v)), a glyph moved up stays classic, and the row the scroll clears
+/// pixel it was, with its (u, v)), a glyph moved up stays that glyph, and the row the scroll clears
 /// is classic; nothing outside the window changes. Checked on a copy synced from the screen
 /// before and after the scroll (as the published frame is), against sources and colours
 /// computed from the layout: a write that forgot its mark would leave the copy as it was.
@@ -467,7 +479,8 @@ fn a_text_scroll_moves_the_sources_under_it() {
     // What the screen showed at (x, y) before the scroll.
     let was = |x: usize, y: usize| {
         if (192..200).contains(&x) && (112..120).contains(&y) {
-            (if x == 192 || x == 199 { 1 } else { 2 }, Src::CLASSIC)
+            let ink = if x == 192 || x == 199 { 1 } else { 2 };
+            (ink, glyph(b'A', 0x81, (x - 192, y - 112)))
         } else {
             (paper.pixels[y * 320 + x], picture(Kind::Bitmap, 0, (x, y)))
         }
@@ -493,7 +506,11 @@ fn a_text_scroll_moves_the_sources_under_it() {
         Some(picture(Kind::Bitmap, 0, (180, 112))),
         "the paper moved up"
     );
-    assert_eq!(kind(&copy, 192, 104), Kind::Classic, "the glyph moved up");
+    assert_eq!(
+        copy.src_at(199, 111),
+        Some(glyph(b'A', 0x81, (7, 7))),
+        "the glyph moved up"
+    );
 }
 
 /// The world of the view tests in `s.gfx`, with the clock's hands on the hero's tile and its

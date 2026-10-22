@@ -1,10 +1,12 @@
 //! The MMPX port against the reference's vectors, and the compositor on synthetic frames and
 //! images: the blocks it writes for each kind of pixel, a composition kept across changes equal to
 //! a new one, the rect it reports, the bound of its cache, and a synthetic pack in front of MMPX
-//! (spec 07 H2). No game data.
+//! (spec 07 H2); the HD font mode (spec 11) in `font`. No game data.
 
 use super::*;
 use crate::{FLAG_OUTLINE, FLAG_OVERLAY};
+
+mod font;
 
 /// One case of `mmpx-vectors.txt`: name, width, height, scale, input and expected output words.
 type Vector = (String, usize, usize, Scale, Vec<u32>, Vec<u32>);

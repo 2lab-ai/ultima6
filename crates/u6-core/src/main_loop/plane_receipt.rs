@@ -56,7 +56,8 @@ impl Receipt {
                 self.window.1 += 1;
                 self.window.0 += u64::from(src.kind == Kind::Tile);
             }
-            if src.kind == Kind::Classic {
+            // A glyph names no image (spec 11): its colours are the text's, as a classic pixel's.
+            if matches!(src.kind, Kind::Classic | Kind::Glyph) {
                 continue;
             }
             if src.flags != 0 {
@@ -99,7 +100,7 @@ impl Receipt {
                     })
                     .map(|&b| through(b))
                 }
-                Kind::Classic => None,
+                Kind::Classic | Kind::Glyph => None,
             };
             if want != Some(fb.pixels()[i]) {
                 self.wrong += 1;

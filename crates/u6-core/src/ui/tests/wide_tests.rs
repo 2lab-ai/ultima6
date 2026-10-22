@@ -5,8 +5,8 @@
 use std::rc::Rc;
 
 use u6_formats::font::{HANGUL_GLYPHS, HangulFont};
-use u6_render::hd::{Compositor, Image, Images, Scale, word};
-use u6_render::{Kind, Src};
+use u6_render::hd::{Compositor, HdGlyph, Image, Images, NoImages, Scale, word};
+use u6_render::{FLAG_INK, Kind, Src};
 
 use super::text::{TextWindow, draw_char};
 use super::*;
@@ -1045,10 +1045,20 @@ fn a_hangul_cell_composes_as_a_latin_cell_does_at_2x_and_4x() {
     draw_char(&mut fb, Some(&font), Some(&t), &w, 0xac00, 3, 2);
     draw_char(&mut fb, Some(&font), Some(&t), &w, u16::from(b'A'), 4, 2);
     let cells = [(3usize, "Hangul"), (4, "Latin")];
-    for (col, what) in cells {
+    // Spec 11: each pixel names its glyph (the cell's code, its place, the ink flag where set).
+    for ((col, what), code) in cells.into_iter().zip([0xac00, u16::from(b'A')]) {
         for y in 16..24 {
             for x in col * 8..col * 8 + 8 {
-                assert_eq!(fb.src_at(x, y), Some(Src::CLASSIC), "{what} ({x}, {y})");
+                let ink = fb.get(x, y) == Some(INK);
+                let want = Src {
+                    id: code,
+                    u: (x - col * 8) as u16,
+                    v: (y - 16) as u16,
+                    kind: Kind::Glyph,
+                    flags: if ink { FLAG_INK } else { 0 },
+                    ..Src::CLASSIC
+                };
+                assert_eq!(fb.src_at(x, y), Some(want), "{what} ({x}, {y})");
             }
         }
     }
@@ -1072,5 +1082,125 @@ fn a_hangul_cell_composes_as_a_latin_cell_does_at_2x_and_4x() {
         // The tile beside them is still the tile's.
         let tile = c.rgba()[(24 * n) * 320 * n + 16 * n];
         assert_eq!(tile, word(fb.palette[5]));
+        // Spec 11, the HD font mode: both cells listed with their ink and paper, each block the
+        // paper; the tile is as before.
+        let mut c = Compositor::new();
+        c.set_font_mode(true);
+        c.compose(&fb, &mut Tile(vec![5; 256]), scale);
+        let (ink, paper) = (fb.palette[usize::from(INK)], fb.palette[usize::from(PAPER)]);
+        let listed = |x: u16, code: u16| HdGlyph {
+            x,
+            y: 16,
+            code,
+            ink,
+            paper,
+        };
+        assert_eq!(
+            c.glyphs(),
+            [listed(24, 0xac00), listed(32, u16::from(b'A'))]
+        );
+        for y in 16 * n..24 * n {
+            let row = &c.rgba()[y * 320 * n..][24 * n..40 * n];
+            assert!(row.iter().all(|&g| g == word(paper)), "the paper at {n}x");
+        }
+        assert_eq!(c.rgba()[(24 * n) * 320 * n + 16 * n], tile);
     }
+}
+
+/// Spec 11 Acceptance 1 on the text path: twelve lines in the ten rows of the message scroll
+/// (so its rows have scrolled up three times), the plane on and off. With it, every pixel has
+/// the colour it has without it; every glyph pixel names its cell's code and its place, with the
+/// ink flag exactly on its rows' set bits, also on the rows moved up; the HD font lists the
+/// letter and the syllable of every line at their cells, in the ink and paper the frame shows,
+/// not the space; and the key wait's cursor, below the last line, is classic.
+#[test]
+fn the_scroll_names_its_glyphs_and_the_hd_font_lists_its_letters() {
+    let game = |st: Rc<RefCell<State>>, io: Rc<Io>| async move {
+        io.draw(|fb| {
+            for (i, c) in fb.palette.iter_mut().enumerate() {
+                let v = i as u8;
+                *c = u6_render::Rgb::new(v.wrapping_mul(9), 255 - v, 7);
+            }
+        });
+        for _ in 0..12 {
+            printf::puts(&st, &io, "가A B\n".as_bytes()).await;
+        }
+        let _ = wait::read_key(&st, &io).await;
+    };
+    let run = |plane: bool| {
+        let mut e = Engine::with_game(wide(Language::English), Files::default(), game);
+        if plane {
+            e.enable_src_plane();
+        }
+        for _ in 0..6 {
+            e.tick(&[], 16);
+        }
+        e
+    };
+    let (on, off) = (run(true), run(false));
+    let fb = on.frame();
+    assert!(off.frame().src().is_none(), "off: no plane");
+    assert!(
+        fb.pixels() == off.frame().pixels(),
+        "the colours of the plane off"
+    );
+    let (font, table) = (font(), table());
+    let mut glyphs = 0;
+    for (i, src) in fb.src().unwrap().iter().enumerate() {
+        if src.kind != Kind::Glyph {
+            continue;
+        }
+        glyphs += 1;
+        let (x, y) = (i % 320, i / 320);
+        let rows = match u8::try_from(src.id) {
+            Ok(b) => font.glyphs[usize::from(b)],
+            Err(_) => *table.glyph(u32::from(src.id)).unwrap(),
+        };
+        let (u, v) = (usize::from(src.u), usize::from(src.v));
+        assert_eq!((u, v), (x % 8, y % 8), "({x}, {y}): its place in the cell");
+        let set = rows[v] & (0x80 >> u) != 0;
+        assert_eq!(src.flags, if set { FLAG_INK } else { 0 }, "({x}, {y})");
+    }
+    assert!(glyphs >= 9 * 4 * 64, "every cell of the nine lines left");
+    // The scroll's columns 22.. and rows 14..=22 hold the last nine lines; row 23 the cursor.
+    let at = |col: usize, row: usize| (row * 8 * 320 + col * 8 + 1, row * 8 * 320 + col * 8);
+    let (ink, paper) = at(23, 14);
+    let (ink, paper) = (fb.pixels()[ink], fb.pixels()[paper]);
+    assert_ne!(ink, paper, "the letter's ink and paper differ");
+    let want: Vec<HdGlyph> = (14..=22u16)
+        .flat_map(|row| {
+            [
+                (22u16, 0xac00),
+                (23, u16::from(b'A')),
+                (25, u16::from(b'B')),
+            ]
+            .map(move |(col, code)| (col, row, code))
+        })
+        .map(|(col, row, code)| HdGlyph {
+            x: col * 8,
+            y: row * 8,
+            code,
+            ink: fb.palette[usize::from(ink)],
+            paper: fb.palette[usize::from(paper)],
+        })
+        .collect();
+    let mut c = Compositor::new();
+    c.set_font_mode(true);
+    c.compose(fb, &mut NoImages, Scale::X2);
+    assert_eq!(
+        c.glyphs(),
+        want.as_slice(),
+        "the letters and syllables of nine lines"
+    );
+    let w = *on.state().ui.text.win();
+    let cursor = (usize::from(w.x + w.col), usize::from(w.y + w.row));
+    assert_eq!(cursor, (22, 23), "the cursor below the last line");
+    for k in 0..64 {
+        let (x, y) = (cursor.0 * 8 + k % 8, cursor.1 * 8 + k / 8);
+        assert_eq!(fb.src_at(x, y), Some(Src::CLASSIC), "the cursor ({x}, {y})");
+    }
+    assert!(
+        (0..64).any(|k| fb.get(cursor.0 * 8 + k % 8, cursor.1 * 8 + k / 8) == Some(ink)),
+        "the cursor is drawn"
+    );
 }

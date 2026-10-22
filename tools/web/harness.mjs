@@ -579,8 +579,10 @@ export const CHOSEN = { lang: 'en' };
 /// browser's language (navigator.language), en-US unless a test asks, whatever the machine's;
 /// `layout`: the screen layout the page finds kept (spec 10 Design 7: `original` unless a test
 /// asks for `hd`, so every click test keeps its 320 x 200 box; null keeps none, the page's
-/// default), kept only while the page keeps none (a choice the page made survives a reload).
-export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN, gpu = false, locale = 'en-US', layout = 'original' } = {}) {
+/// default), kept only while the page keeps none (a choice the page made survives a reload);
+/// `font`: the font the page finds kept (spec 11 Design 5: `pixel` or `hd`; null, the default,
+/// keeps none: the page's default, the HD font), kept likewise only while the page keeps none.
+export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN, gpu = false, locale = 'en-US', layout = 'original', font = null } = {}) {
   const browser = gpu ? await env.gpuBrowser() : env.browser;
   const context = await browser.newContext({ viewport: { width: 1024, height: 900 }, locale });
   await context.addInitScript(pageHooks);
@@ -601,6 +603,15 @@ export async function openPage(env, { gated = true, gameFirst = true, setup = CH
         // An opaque origin (about:blank) has no storage.
       }
     }, layout);
+  }
+  if (font) {
+    await context.addInitScript((value) => {
+      try {
+        if (localStorage.getItem('u6.font') === null) localStorage.setItem('u6.font', value);
+      } catch {
+        // An opaque origin (about:blank) has no storage.
+      }
+    }, font);
   }
   if (gated) {
     await context.route(/\/store\.js(\?real)?$/, async (route) => {
