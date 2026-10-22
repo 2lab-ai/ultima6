@@ -17,7 +17,8 @@
 // first-run chooser (the page's language, a pack the site lists, NPC voices), the page itself
 // (one toolbar, the drop line, Settings' "HD on" and forget buttons, the controls, the notices)
 // and fullscreen, and the HD layout (spec 10: the 1280 x 720 canvas composed from the x4 frame,
-// clicks through it, the letterbox, fullscreen at any size, the setting) and the HD font on it
+// the game's paper round its regions, clicks through it, the letterbox, fullscreen at any size,
+// the setting) and the HD font on it
 // (spec 11: the font file, the text drawn in runs over the listed cells, the pixel font as before,
 // the choice). Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
 // page as it is. Every test but the HD layout's and the HD font's runs on the Original layout
@@ -6579,9 +6580,9 @@ test('Korean pack with the strings of u in a new game (the user\'s zip): the nat
 // With HD on and the screen layout HD 16:9 (the page's default; h.openPage keeps Original unless
 // a test asks for HD), the canvas is 1280 x 720, composed from the x4 frame: in game the map
 // window and the command bar one to one, the date line, the side panel and the message scroll
-// beside them at one scale; every other screen the whole frame letterboxed. Clicks go through
-// the page's map of it (`__u6Layout`, h.screenPoint). Frames are compared in the page, by
-// equality only; the receipts print sizes, scales, places and counts the tests made.
+// beside them at one scale, on the game's paper; every other screen the whole frame letterboxed.
+// Clicks go through the page's map of it (`__u6Layout`, h.screenPoint). Frames are compared in
+// the page, by equality only; the receipts print sizes, scales, places and counts the tests made.
 
 // The parts of the game's screen the layout shows, as classic rects [x, y, width, height] (spec 10
 // Measured facts, from the engine's code): the test's own reading, checked against the page's.
@@ -7243,6 +7244,191 @@ test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (HD
   s = await layoutShown(page);
   assert.ok(s.layout === 'hd' && s.size[1] === 720, 'nothing kept: HD 16:9 after a reload');
   assert.equal(errors.length, 0, 'no page error');
+}, { needs: h.haveHfes });
+
+// The paper round the regions (spec 10 Design 2, follow-up L2), the test's own reading, checked
+// against the page's: the game's paper, its outer band (6 game rows at the top and the bottom, 8
+// columns at either side: in game the source plane shows the paper bitmap alone there, the
+// pointer's sprite apart) 9-sliced to the canvas's edges from the x4 frame: `from` a rect of the
+// band in game pixels, `to` canvas pixels, `flip` mirrored across x or y (the right edge, the
+// bottom edge and the bottom-right corner are the left edge, the top edge and the bottom-left
+// corner mirrored); inside the band, the parchment in one colour, each channel's median of the
+// x4 frame's top-left pixel of the three game pixels `samples`.
+const LAYOUT_PAPER = {
+  pieces: [
+    { name: 'top-left', from: [0, 0, 8, 6], to: [0, 0, 32, 24], flip: null },
+    { name: 'top', from: [8, 0, 304, 6], to: [32, 0, 1216, 24], flip: null },
+    { name: 'top-right', from: [312, 0, 8, 6], to: [1248, 0, 32, 24], flip: null },
+    { name: 'left', from: [0, 6, 8, 188], to: [0, 24, 32, 672], flip: null },
+    { name: 'right', from: [0, 6, 8, 188], to: [1248, 24, 32, 672], flip: 'x' },
+    { name: 'bottom-left', from: [0, 194, 8, 6], to: [0, 696, 32, 24], flip: null },
+    { name: 'bottom', from: [8, 0, 304, 6], to: [32, 696, 1216, 24], flip: 'y' },
+    { name: 'bottom-right', from: [0, 194, 8, 6], to: [1248, 696, 32, 24], flip: 'x' },
+  ],
+  parchment: [32, 24, 1216, 672],
+  samples: [[204, 104], [240, 104], [276, 104]],
+};
+// The page's paint round the regions before the paper (spec 10 v1): a dark fill and a 1 px frame
+// round each region, as RGB.
+const LAYOUT_V1 = [[0x0b, 0x0b, 0x0f], [0x3a, 0x3f, 0x4c]];
+
+// Page script: the canvas outside the game's regions (the gaps and the margins) against the paper
+// composed by the test from the x4 frame as it is now, by LAYOUT_PAPER's rects (the same draws:
+// the unscaled pieces sharp, the stretched edges smooth, mirrored by a transform; then the
+// parchment's colour from the frame's samples). Per pixel compared: `differ`, not that paper;
+// `v1`, the old dark fill's or frame's colour; the unscaled pieces also read straight against the
+// frame's pixels, mirrored by index (`direct` of `directCompared`), and the parchment against its
+// colour (`parchmentDiffer` of `parchment`). `touched`: the game pixels of the pieces' sources
+// whose source is not the paper bitmap alone (the engine's kind 3, id 0: u6-render BITMAP_PAPER),
+// `covered` the samples not the paper alone; `fill` the parchment's colour, `uncovered` the
+// colours of the samples that are the paper alone, and `hash` the pixels compared, for checks
+// that compare them (never printed: they are the user's picture).
+const paperShown = (page) => page.evaluate((own) => {
+  const c = document.getElementById('screen');
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const g = globalThis.__shownGame;
+  const L = globalThis.__u6Layout;
+  const [w4, h4] = [g.width() * 4, g.height() * 4];
+  const f = g.hd_frame_rgba();
+  const x4 = document.createElement('canvas');
+  [x4.width, x4.height] = [w4, h4];
+  x4.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(f), w4, h4), 0, 0);
+  const e = document.createElement('canvas');
+  [e.width, e.height] = [c.width, c.height];
+  const ctx = e.getContext('2d');
+  for (const { from, to: [x, y, w, hh], flip } of own.pieces) {
+    const source = from.map((v) => v * 4);
+    ctx.save();
+    ctx.imageSmoothingEnabled = source[2] !== w || source[3] !== hh;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.translate(flip === 'x' ? x + w : x, flip === 'y' ? y + hh : y);
+    ctx.scale(flip === 'x' ? -1 : 1, flip === 'y' ? -1 : 1);
+    ctx.drawImage(x4, ...source, 0, 0, w, hh);
+    ctx.restore();
+  }
+  const at = ([gx, gy], k) => f[(4 * gy * w4 + 4 * gx) * 4 + k];
+  const colour = (p) => (at(p, 0) << 16) | (at(p, 1) << 8) | at(p, 2);
+  const fill = [0, 1, 2].map((k) => own.samples.map((p) => at(p, k)).sort((a, b) => a - b)[1]);
+  ctx.fillStyle = `rgb(${fill.join(', ')})`;
+  ctx.fillRect(...own.parchment);
+  const ex = ctx.getImageData(0, 0, c.width, c.height).data;
+  const inRect = (px, py, [x, y, w, hh]) => px >= x && px < x + w && py >= y && py < y + hh;
+  const r = { compared: 0, differ: 0, v1: 0, direct: 0, directCompared: 0, parchment: 0, parchmentDiffer: 0, hash: 0x811c9dc5 };
+  for (let py = 0; py < c.height; py += 1) {
+    for (let px = 0; px < c.width; px += 1) {
+      if (L.regions.some(({ to }) => inRect(px, py, to))) continue;
+      const i = (py * c.width + px) * 4;
+      r.compared += 1;
+      if (d[i] !== ex[i] || d[i + 1] !== ex[i + 1] || d[i + 2] !== ex[i + 2] || d[i + 3] !== ex[i + 3]) r.differ += 1;
+      if (own.v1.some(([a, b, q]) => d[i] === a && d[i + 1] === b && d[i + 2] === q)) r.v1 += 1;
+      for (let k = 0; k < 4; k += 1) r.hash = Math.imul(r.hash ^ d[i + k], 0x01000193) >>> 0;
+      if (inRect(px, py, own.parchment)) {
+        r.parchment += 1;
+        if (d[i] !== fill[0] || d[i + 1] !== fill[1] || d[i + 2] !== fill[2]) r.parchmentDiffer += 1;
+        continue;
+      }
+      const piece = own.pieces.find(({ to }) => inRect(px, py, to));
+      if (!piece || piece.to[2] !== 4 * piece.from[2] || piece.to[3] !== 4 * piece.from[3]) continue;
+      const [dx, dy] = [px - piece.to[0], py - piece.to[1]];
+      const sx = 4 * piece.from[0] + (piece.flip === 'x' ? piece.to[2] - 1 - dx : dx);
+      const sy = 4 * piece.from[1] + (piece.flip === 'y' ? piece.to[3] - 1 - dy : dy);
+      const j = (sy * w4 + sx) * 4;
+      r.directCompared += 1;
+      if (d[i] !== f[j] || d[i + 1] !== f[j + 1] || d[i + 2] !== f[j + 2]) r.direct += 1;
+    }
+  }
+  const paper = (gx, gy) => {
+    const s = g.hd_source_at(gx, gy);
+    return s[0] === 3 && s[1] === 0;
+  };
+  const sources = new Set(own.pieces.map(({ from }) => from.join(',')));
+  r.touched = 0;
+  for (const key of sources) {
+    const [x, y, w, hh] = key.split(',').map(Number);
+    for (let gy = y; gy < y + hh; gy += 1) for (let gx = x; gx < x + w; gx += 1) r.touched += paper(gx, gy) ? 0 : 1;
+  }
+  r.covered = own.samples.filter(([gx, gy]) => !paper(gx, gy)).length;
+  r.fill = (fill[0] << 16) | (fill[1] << 8) | fill[2];
+  r.uncovered = [...new Set(own.samples.filter(([gx, gy]) => paper(gx, gy)).map(colour))];
+  return r;
+}, { ...LAYOUT_PAPER, v1: LAYOUT_V1 });
+
+// The canvas round the regions is the paper as the x4 frame shows it now (`paperShown`).
+function paperAsFrame(s, label) {
+  assert.ok(s.compared > 0 && s.differ === 0, `${label}: the gaps and margins the 9-slice of the x4 frame and the parchment, pixel for pixel`);
+  assert.ok(s.directCompared > 0 && s.direct === 0, `${label}: the unscaled pieces the x4 frame's pixels, mirrored where they are`);
+  assert.ok(s.parchment > 0 && s.parchmentDiffer === 0, `${label}: the parchment one colour, each channel the samples' median`);
+  assert.equal(s.v1, 0, `${label}: no pixel of the old dark fill or frame`);
+}
+
+test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the regions is the game\'s paper from the x4 frame: its outer band (in game only the paper there, the source plane says, the pointer apart) 9-sliced to the canvas\'s edges, the corners and the top and bottom edges unscaled, the side edges stretched, the right and bottom ones mirrored from the left and top; inside it the parchment in one colour, the median of three pixels of the frame; no pixel of the old dark fill or frames; the pieces tile the canvas; a change of a source of the paper paints it again (the pointer\'s sprite where the game starts it, then moved into the map; the cross-hair at the map\'s left edge); the sprite over one sample leaves the parchment\'s colour; the regions still the x4 frame\'s; no page error', async (env) => {
+  const errors = [];
+  const { page } = await bootLayout(env);
+  page.on('pageerror', () => errors.push(1));
+  assert.deepEqual(await page.evaluate(() => globalThis.__u6Layout.paper), LAYOUT_PAPER, 'the paper\'s pieces, the parchment and its samples: the test\'s reading');
+  // The pieces and the parchment tile the canvas: every canvas pixel in exactly one of them.
+  const cover = new Uint8Array(1280 * 720);
+  for (const [x, y, w, hh] of [...LAYOUT_PAPER.pieces.map((p) => p.to), LAYOUT_PAPER.parchment]) {
+    for (let py = y; py < y + hh; py += 1) for (let px = x; px < x + w; px += 1) cover[py * 1280 + px] += 1;
+  }
+  assert.ok(cover.every((n) => n === 1), 'the band\'s pieces and the parchment tile the canvas');
+  // The samples are the paper's own: outside every region, inside the band's inner edge.
+  for (const [gx, gy] of LAYOUT_PAPER.samples) {
+    assert.ok(!Object.values(LAYOUT_PARTS).some(([x, y, w, hh]) => gx >= x && gx < x + w && gy >= y && gy < y + hh), 'a sample outside the regions');
+  }
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  // At the boot, no pointer event yet: the game's sprite where it starts it, over the band's top
+  // left (the sources then not the paper alone), and the canvas the paper as the frame shows it.
+  let s = await paperShown(page);
+  assert.ok(s.touched > 0, 'the boot: the pointer\'s sprite over the band where the game starts it');
+  paperAsFrame(s, 'the boot');
+  const boot = s.hash;
+  // The pointer into the map: its sprite leaves the band, which is the paper alone, and the
+  // paper is painted again from the frame.
+  await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
+  await h.runFrames(page, 10);
+  s = await paperShown(page);
+  assert.ok(s.touched === 0 && s.covered === 0, 'in game, the pointer in the map: the band and the samples the paper alone');
+  paperAsFrame(s, 'the pointer in the map');
+  assert.notEqual(s.hash, boot, 'a change of the paper\'s sources: the paper painted again');
+  const clean = s;
+  // The sprite over one sample (the arrow from the side panel's foot): the parchment as before.
+  let over = null;
+  for (const [gx, gy] of [[240, 103], [240, 101], [239, 102], [238, 100], [236, 99]]) {
+    await page.mouse.move(...(await h.screenPoint(page, gx, gy)));
+    await h.runFrames(page, 10);
+    over = await paperShown(page);
+    if (over.covered > 0) break;
+  }
+  assert.equal(over.covered, 1, 'the pointer\'s sprite over one sample');
+  paperAsFrame(over, 'the sprite over a sample');
+  assert.ok(over.uncovered.length === 1 && over.fill === over.uncovered[0] && over.fill === clean.fill, 'the parchment the colour of the samples that are the paper alone, as before');
+  // Look waits for its target (the cross-hair): at the map's left edge it reaches into the band's
+  // left strip, which the right edge mirrors: the paper painted again.
+  await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
+  await h.runFrames(page, 10);
+  await page.focus('#screen');
+  await page.keyboard.press('KeyL');
+  for (let k = 0; k < 40 && await page.evaluate(() => document.getElementById('screen').dataset.keys !== '0'); k += 1) await h.runFrames(page, 5);
+  await page.mouse.move(...(await h.screenPoint(page, 8, 88)));
+  await h.runFrames(page, 10);
+  s = await paperShown(page);
+  assert.ok(s.touched > 0, 'Look: the cross-hair at the map\'s left edge over the band');
+  paperAsFrame(s, 'the cross-hair over the band');
+  assert.notEqual(s.hash, clean.hash, 'the cross-hair over a source: the paper painted again');
+  await page.keyboard.press('Escape');
+  for (let k = 0; k < 40 && await page.evaluate(() => document.getElementById('screen').dataset.keys !== '0'); k += 1) await h.runFrames(page, 5);
+  await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
+  await h.runFrames(page, 10);
+  s = await paperShown(page);
+  assert.equal(s.touched, 0, 'the cross-hair gone: the band the paper alone');
+  paperAsFrame(s, 'the target taken back');
+  assert.equal(s.hash, clean.hash, 'the paper as with the pointer in the map before');
+  // The regions over the paper: the one-to-one ones still the x4 frame's pixels.
+  for (const [name, { differ }] of Object.entries(await oneToOne(page))) assert.equal(differ, 0, `${name}: the x4 frame's pixels`);
+  assert.equal(errors.length, 0, 'no page error');
+  console.log(`  receipt: ${LAYOUT_PAPER.pieces.length} pieces of the band and the parchment tile the canvas; ${s.compared} canvas pixels round the regions the paper from the x4 frame (${s.directCompared} of them read straight from the frame), none the old fill or frame; painted again at each change of its sources (the sprite at the boot moved into the map, the cross-hair at the map's edge); the sprite over a sample: the parchment's colour kept: pass`);
 }, { needs: h.haveHfes });
 
 // --- the HD font (spec 11) ----------------------------------------------------------------------
