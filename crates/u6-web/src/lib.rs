@@ -891,11 +891,13 @@ impl Game {
         self.hd.font()
     }
 
-    /// Spec 11: every cell the HD frame shows in the HD font, of its last composition (the whole
-    /// list, not what changed: the page that copies a rect of the HD frame draws every listed
-    /// glyph over it again), 5 words per cell in raster order: the cell's x and y in screen
-    /// pixels (multiples of 8, of the 320 × 200 screen), its code (printable ASCII but the space,
-    /// or a Hangul syllable's code point), its ink and its paper as 0xRRGGBB. Empty while HD or
+    /// Spec 11: every cell the HD frame shows in the HD font, and every whole space, of its last
+    /// composition (the whole list, not what changed: the page that copies a rect of the HD frame
+    /// draws every listed glyph over it again), 5 words per cell in raster order: the cell's x
+    /// and y in screen pixels (multiples of 8, of the 320 × 200 screen), its code (printable
+    /// ASCII but the space, or a Hangul syllable's code point, drawn in the HD font; or 0x20, a
+    /// space the text writer drew whole, for which nothing is drawn but which a run of text may
+    /// cross, its ink equal to its paper), its ink and its paper as 0xRRGGBB. Empty while HD or
     /// the HD font is off. The list changes only with every block of the cells it adds, drops or
     /// changes written, so with [`Game::frame_version`] moved and those cells in the rect of
     /// [`Game::hd_take_dirty`].
@@ -3328,10 +3330,11 @@ mod tests {
 
     /// Spec 11 in the platform: the HD font is off until switched on, and lists nothing while HD
     /// or it is off; switched on with HD on it composes at once (the whole frame, the version
-    /// moved, no step) and lists every letter cell, not the space, as x, y, code, ink, paper; a
-    /// recoloured letter and a letter under the pointer change the list with their cells in the
-    /// rect; off again, the HD frame is the definition's (the pixel font); with HD off a switch
-    /// moves nothing until HD is on again.
+    /// moved, no step) and lists every letter cell, not the space (the synthetic font's space
+    /// has ink, so it is not a whole space), as x, y, code, ink, paper; a recoloured letter and
+    /// a letter under the pointer change the list with their cells in the rect; off again, the
+    /// HD frame is the definition's (the pixel font); with HD off a switch moves nothing until
+    /// HD is on again.
     #[test]
     fn the_hd_font_lists_the_letters_shown_and_follows_its_switch() {
         let mut game = Game::new();

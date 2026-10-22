@@ -12,7 +12,12 @@
 //! in the cell, one ink and one paper colour, both present) and whose code is printable ASCII
 //! but the space or a Hangul syllable ([`hd_font_code`]) is filled with its paper colour and
 //! listed ([`Compositor::glyphs`]): the platform draws the character over it in its HD font.
-//! Every other cell is composed as with the mode off.
+//! A whole space is listed too (code 0x20, its ink its paper, [`HdGlyph::code`]): the glyph of
+//! the space drawn whole, no pixel of it ink, all 64 of one colour. It is filled with its paper
+//! like a listed letter, which leaves its pixels as they were, and nothing is drawn for it: it
+//! tells the platform that the text writer drew a space there, which no other blank cell is, so
+//! a run of text drawn at the font's own width may cross it. Every other cell is composed as
+//! with the mode off.
 //!
 //! An image's HD version (spec 07 "HD image per id"):
 //!
@@ -553,25 +558,31 @@ const HANGUL: std::ops::RangeInclusive<u16> = 0xac00..=0xd7a3;
 /// Spec 11: whether a glyph cell of code `code` is drawn in the HD font ([`Compositor::glyphs`]):
 /// printable ASCII but the space (0x21..=0x7e) and the Hangul syllables. Not the space, the
 /// control codes the game draws as symbols (its key-wait cursor), and the codes past 0x7e of its
-/// font (the runes).
+/// font (the runes). A whole space is listed apart from these and not drawn ([`HdGlyph::code`]).
 pub fn hd_font_code(code: u16) -> bool {
     (0x21..=0x7e).contains(&code) || HANGUL.contains(&code)
 }
 
-/// Spec 11: one cell the HD font mode shows in the HD font ([`Compositor::glyphs`]).
+/// The space's code: listed when whole, not drawn in the HD font ([`glyph_cell`]).
+const SPACE: u16 = 0x20;
+
+/// Spec 11: one cell the HD font mode lists ([`Compositor::glyphs`]): a cell it shows in the HD
+/// font, or a whole space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HdGlyph {
     /// The cell's top-left screen pixel (multiples of [`CELL`]).
     pub x: u16,
     pub y: u16,
-    /// Its code ([`hd_font_code`]).
+    /// Its code: a code drawn in the HD font ([`hd_font_code`]), or 0x20, a space the text
+    /// writer drew whole (no pixel of it ink, all of one colour), for which nothing is drawn: a
+    /// run of text may cross it.
     pub code: u16,
-    /// The colour of its set pixels and of its clear ones.
+    /// The colour of its set pixels and of its clear ones; a space's ink is its paper.
     pub ink: Rgb,
     pub paper: Rgb,
 }
 
-/// A cell shown in the HD font: its code and its ink and paper indices.
+/// A cell listed: its code and its ink and paper indices (a space's ink is its paper).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CellGlyph {
     code: u16,
@@ -579,14 +590,16 @@ struct CellGlyph {
     paper: u8,
 }
 
-/// Whether cell (col, row) is the glyph of one code drawn whole: each of its 64 pixels a
-/// [`Kind::Glyph`] source of that code at version 0, (u, v) its place in the cell, flags
-/// [`FLAG_INK`] or none; its set pixels of one colour and its clear ones of one colour, with at
-/// least one of each; and the code drawn in the HD font ([`hd_font_code`]).
+/// Whether cell (col, row) is listed, and as what. Each of its 64 pixels is a [`Kind::Glyph`]
+/// source of one code at version 0, (u, v) its place in the cell, flags [`FLAG_INK`] or none,
+/// its set pixels of one colour and its clear ones of one colour; and either the code is drawn
+/// in the HD font ([`hd_font_code`]) with at least one set pixel and one clear one, or it is the
+/// space ([`SPACE`], not drawn in the HD font, listed on its own) with no set pixel, listed with
+/// its one colour as its ink and its paper.
 fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<CellGlyph> {
     let (x0, y0) = (col * CELL, row * CELL);
     let code = plane[y0 * WIDTH + x0].id;
-    if plane[y0 * WIDTH + x0].kind != Kind::Glyph || !hd_font_code(code) {
+    if plane[y0 * WIDTH + x0].kind != Kind::Glyph || !(hd_font_code(code) || code == SPACE) {
         return None;
     }
     let (mut ink, mut paper) = (None, None);
@@ -614,6 +627,16 @@ fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<Ce
                 return None;
             }
         }
+    }
+    if code == SPACE {
+        return match (ink, paper) {
+            (None, Some(paper)) => Some(CellGlyph {
+                code,
+                ink: paper,
+                paper,
+            }),
+            _ => None,
+        };
     }
     Some(CellGlyph {
         code,
@@ -788,11 +811,11 @@ impl Compositor {
     }
 
     /// Spec 11: the HD font mode on (`hd`) or off (the pixel font). On, each cell of the glyph of
-    /// one code drawn whole whose code is drawn in the HD font ([`hd_font_code`]) is filled with
-    /// its paper colour and listed ([`Compositor::glyphs`]); off, glyph pixels are shown classic,
-    /// as every composition before the mode did. A change empties the list at once and makes the
-    /// next composition write every block, as a change of scale does, also when the mode is
-    /// changed back before it; setting the mode it is in changes nothing.
+    /// one code drawn whole whose code is drawn in the HD font ([`hd_font_code`]), and each whole
+    /// space, is filled with its paper colour and listed ([`Compositor::glyphs`]); off, glyph
+    /// pixels are shown classic, as every composition before the mode did. A change empties the
+    /// list at once and makes the next composition write every block, as a change of scale does,
+    /// also when the mode is changed back before it; setting the mode it is in changes nothing.
     pub fn set_font_mode(&mut self, hd: bool) {
         if self.font != hd {
             self.font = hd;
@@ -806,11 +829,13 @@ impl Compositor {
         self.font
     }
 
-    /// The cells the last composition showed in the HD font, in raster order: all of them, the
-    /// cells it left as they were included (a platform that copies a rect of the frame draws
-    /// every listed glyph over it again). Empty with the mode off, and after a change of the mode
-    /// until the next composition. A cell enters, leaves or changes in this list only with every
-    /// block of it written, or leaves it at a change of the mode, whose next composition writes
+    /// The cells the last composition listed, in raster order: those it showed in the HD font and
+    /// the whole spaces, for which nothing is drawn but which a run of text may cross
+    /// ([`HdGlyph::code`]). All of them, the cells it left as they were included (a platform that
+    /// copies a rect of the frame draws every listed glyph over it again). Empty with the mode
+    /// off, and after a change of the mode until the next composition. A cell enters, leaves or
+    /// changes in this list only with every block of it written (a space's too, whose blocks
+    /// keep their colours), or leaves it at a change of the mode, whose next composition writes
     /// every block: so the rect the compositions wrote ([`Compositor::take_dirty`]) holds the
     /// whole cell.
     pub fn glyphs(&self) -> &[HdGlyph] {
@@ -850,7 +875,7 @@ impl Compositor {
         self.scale = scale;
         let plane = frame.src();
         let pixels = frame.pixels();
-        // Spec 11: the cells shown in the HD font now.
+        // Spec 11: the cells listed now (shown in the HD font, or whole spaces).
         self.cells.clear();
         match plane.filter(|_| font) {
             Some(p) => self

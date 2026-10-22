@@ -113,7 +113,8 @@ impl HdView {
         self.compositor.font_mode()
     }
 
-    /// Spec 11: the cells the HD frame shows in the HD font ([`Compositor::glyphs`]): those of
+    /// Spec 11: the cells the HD frame lists for the HD font, its letters and syllables and the
+    /// whole spaces between them ([`Compositor::glyphs`]): those of
     /// its last composition while HD and the HD font mode are on, else none (the frame shown then
     /// is not one this view composed with the mode).
     pub fn glyphs(&self) -> &[HdGlyph] {

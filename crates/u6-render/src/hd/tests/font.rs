@@ -45,6 +45,14 @@ fn glyph(fb: &mut Framebuffer, code: u16, (col, row): (usize, usize)) {
     glyph_px(fb, code, SHAPE, (col * CELL, row * CELL), (INK, PAPER));
 }
 
+/// No row byte set: the rows of a blank glyph (the space's here).
+const BLANK: [u8; 8] = [0; 8];
+
+/// A whole space (code 0x20, [`BLANK`]) in cell (col, row): all 64 pixels [`PAPER`].
+fn space(fb: &mut Framebuffer, (col, row): (usize, usize)) {
+    glyph_px(fb, 0x20, BLANK, (col * CELL, row * CELL), (INK, PAPER));
+}
+
 /// The composition of a new compositor in the font mode `font`: its frame and its list.
 fn fresh_font(fb: &Framebuffer, pics: &Pics, scale: Scale, font: bool) -> (Vec<u32>, Vec<HdGlyph>) {
     let mut c = Compositor::new();
@@ -75,15 +83,18 @@ fn cell_pixels((col, row): (usize, usize)) -> impl Iterator<Item = (usize, usize
 }
 
 /// Spec 11 Acceptance 1: a letter and a syllable (and the ends of both ranges) are listed with
-/// their ink and paper and composed as their paper; the space, a code under it, codes past 0x7e
-/// (a rune) and past the syllables are not; nor is a cell of a listed code that is not one whole
-/// glyph: all ink, no ink, half under a tile, under one classic write (the pointer), a pixel of
-/// another paper colour, a pixel flagged otherwise, drawn one pixel off the grid, a pixel of
-/// another code, a pixel at another version, an ink pixel of another colour, its lower half
-/// written again classic in the colours it had (only the sources tell). Every cell not listed is
-/// the mode off's.
+/// their ink and paper and composed as their paper; a whole space (no ink pixel, all of one
+/// colour) is listed as 0x20 with that colour as its ink and its paper, and composed as it was;
+/// a code under the space, codes past 0x7e (a rune) and past the syllables are not; nor is a cell
+/// of a listed code that is not one whole glyph: all ink, no ink, half under a tile, under one
+/// classic write (the pointer), a pixel of another paper colour, a pixel flagged otherwise, drawn
+/// one pixel off the grid, a pixel of another code, a pixel at another version, an ink pixel of
+/// another colour, its lower half written again classic in the colours it had (only the sources
+/// tell); nor a space with an ink pixel (in the ink's colour, or in the paper's: only the flag
+/// tells), with a pixel of another colour, half under a tile, or its lower half written again
+/// classic in the colour it had. Every cell not listed is the mode off's.
 #[test]
-fn the_hd_font_lists_whole_glyphs_of_letters_and_syllables_only() {
+fn the_hd_font_lists_whole_letters_syllables_and_spaces_only() {
     let mut pics = Pics::default();
     pics.put(Kind::Tile, 9, (16, 16), art(9, 16, 16, 4), None);
     let letters = [
@@ -93,9 +104,10 @@ fn the_hd_font_lists_whole_glyphs_of_letters_and_syllables_only() {
         (0x7e, (7, 1)),
         (0xd7a3, (9, 1)),
     ];
+    // Whole spaces after the letters in raster order: each cell and its one colour.
+    let spaces = [((11, 1), PAPER), ((13, 1), 3)];
     let others = [
-        (0x20u16, (1, 3)),
-        (0x05, (3, 3)),
+        (0x05u16, (3, 3)),
         (0x7f, (5, 3)),
         (0xc1, (7, 3)),
         (0xabff, (9, 3)),
@@ -107,6 +119,31 @@ fn the_hd_font_lists_whole_glyphs_of_letters_and_syllables_only() {
         fb.clear(30);
         for &(code, at) in letters.iter().chain(&others) {
             glyph(&mut fb, code, at);
+        }
+        for &((col, row), colour) in &spaces {
+            glyph_px(
+                &mut fb,
+                0x20,
+                BLANK,
+                (col * CELL, row * CELL),
+                (INK, colour),
+            );
+        }
+        // The broken spaces, row 9: one ink pixel, in the ink's colour and in the paper's.
+        let dot = [0, 0, 0x10, 0, 0, 0, 0, 0];
+        glyph_px(&mut fb, 0x20, dot, (8, 72), (INK, PAPER));
+        glyph_px(&mut fb, 0x20, dot, (24, 72), (PAPER, PAPER));
+        // A pixel of another colour, its source kept.
+        space(&mut fb, (5, 9));
+        let s = fb.src_at(43, 75).unwrap();
+        fb.set_src(43, 75, 3, s);
+        // Its lower half under a tile.
+        space(&mut fb, (7, 9));
+        draw(&mut fb, &pics, Kind::Tile, 9, (56, 76));
+        // Its lower half written again classic in the colour it had.
+        space(&mut fb, (10, 9));
+        for (x, y) in cell_pixels((10, 9)).filter(|&(_, y)| y >= 76) {
+            fb.set(x, y, fb.get(x, y).unwrap());
         }
         // The broken cells, all of a listed code, row 5.
         glyph_px(&mut fb, 0x42, [0xff; 8], (8, 40), (INK, PAPER));
@@ -151,11 +188,16 @@ fn the_hd_font_lists_whole_glyphs_of_letters_and_syllables_only() {
         let want: Vec<HdGlyph> = letters
             .iter()
             .map(|&(code, at)| listed(&fb, code, at, (INK, PAPER)))
+            .chain(
+                spaces
+                    .iter()
+                    .map(|&(at, colour)| listed(&fb, 0x20, at, (colour, colour))),
+            )
             .collect();
         assert_eq!(
             c.glyphs(),
             want.as_slice(),
-            "{scale:?}: the letters and syllables"
+            "{scale:?}: the letters, the syllables and the whole spaces"
         );
         let (off, none) = fresh_font(&fb, &pics, scale, false);
         assert!(none.is_empty(), "off: nothing listed");
@@ -170,6 +212,18 @@ fn the_hd_font_lists_whole_glyphs_of_letters_and_syllables_only() {
                 );
             }
         }
+        // A listed space is its paper, which is every pixel it had: the mode off's blocks (and
+        // left out of `cells`, so the check below holds it to them too).
+        for &(at, colour) in &spaces {
+            let paper = word(fb.palette[usize::from(colour)]);
+            for p in cell_pixels(at) {
+                let b = block(c.rgba(), scale, p);
+                assert!(
+                    b.iter().all(|&g| g == paper) && b == block(&off, scale, p),
+                    "{scale:?}: a listed space is its paper, the pixels it had"
+                );
+            }
+        }
         let s = scale.factor();
         let same = (0..c.rgba().len()).all(|i| {
             let (x, y) = (i % (WIDTH * s) / s, i / (WIDTH * s) / s);
@@ -180,9 +234,10 @@ fn the_hd_font_lists_whole_glyphs_of_letters_and_syllables_only() {
 }
 
 /// The mode off (the default) composes each glyph pixel as the classic pixel it was before
-/// spec 11: the frame is that of the same colours drawn classic, byte for byte, with the same
-/// images asked for (a glyph is never asked as one) and nothing listed; and a compositor switched
-/// on and off again writes every block and is a new one's.
+/// spec 11 (whole spaces, which the mode on lists, included): the frame is that of the same
+/// colours drawn classic, byte for byte, with the same images asked for (a glyph is never asked
+/// as one) and nothing listed; and a compositor switched on and off again writes every block and
+/// is a new one's.
 #[test]
 fn with_the_font_mode_off_glyphs_are_the_classic_pixels_they_were() {
     let mut pics = Pics::default();
@@ -195,6 +250,8 @@ fn with_the_font_mode_off_glyphs_are_the_classic_pixels_they_were() {
     for (col, code) in (0..40).zip([0x41u16, 0xac00, 0x20, 0x7f, 0xc1].into_iter().cycle()) {
         glyph(&mut fb, code, (col, 8 + col % 3));
     }
+    space(&mut fb, (0, 12));
+    space(&mut fb, (1, 12));
     let mut classic = fb.clone();
     for (i, src) in fb.src().unwrap().iter().enumerate() {
         if src.kind == Kind::Glyph {
@@ -282,8 +339,9 @@ fn a_change_of_the_font_mode_empties_the_list_at_once() {
 }
 
 /// A scroll moves the glyphs with their cells (`copy_px_within`, as the text scroll does): the
-/// cells moved up are listed at their new place with their codes and colours, the row the
-/// scroll clears is not; a composition of the same frame writes nothing and keeps the list.
+/// cells moved up are listed at their new place with their codes and colours, a whole space
+/// among them (a space with ink is not, before or after), the row the scroll clears is not; a
+/// composition of the same frame writes nothing and keeps the list.
 #[test]
 fn a_scroll_keeps_the_listing() {
     let pics = Pics::default();
@@ -296,11 +354,12 @@ fn a_scroll_keeps_the_listing() {
             glyph(&mut fb, code, (col, row));
         }
     }
-    glyph(&mut fb, 0x20, (4, 12));
+    space(&mut fb, (4, 12));
+    glyph(&mut fb, 0x20, (5, 12));
     let mut c = Compositor::new();
     c.set_font_mode(true);
     c.compose(&fb, &mut pics.clone(), Scale::X2);
-    assert_eq!(c.glyphs().len(), 4);
+    assert_eq!(c.glyphs().len(), 5, "four letters and the whole space");
     let (xs, ys) = (2 * CELL..6 * CELL, 10 * CELL..13 * CELL);
     for y in ys.start..ys.end - CELL {
         for x in xs.clone() {
@@ -319,6 +378,7 @@ fn a_scroll_keeps_the_listing() {
         listed(&fb, 0xac00, (3, 10), (INK, PAPER)),
         listed(&fb, 0x62, (2, 11), (INK, PAPER)),
         listed(&fb, 0xd7a3, (3, 11), (INK, PAPER)),
+        listed(&fb, 0x20, (4, 11), (PAPER, PAPER)),
     ];
     assert_eq!(
         c.glyphs(),
@@ -374,11 +434,12 @@ fn a_cell_under_the_pointer_is_not_listed() {
     }
 }
 
-/// Random glyph cells (listed codes and others, in changing colours), classic writes over them,
-/// tiles, scrolls, cells copied elsewhere, palette changes, mode and scale switches: after each,
-/// a kept compositor's frame and list are a new one's in the same mode, every block that changed
-/// is in the rect it reported, and so is every cell that entered, left or changed in the list
-/// (with a composition that says it wrote).
+/// Random glyph cells (listed codes and others, blank ones among them so that some spaces are
+/// whole, in changing colours), classic writes over them, tiles, scrolls, cells copied
+/// elsewhere, palette changes, mode and scale switches: after each, a kept compositor's frame
+/// and list are a new one's in the same mode, every block that changed is in the rect it
+/// reported, and so is every cell that entered, left or changed in the list (with a composition
+/// that says it wrote), a whole space's too, whose blocks keep their colours.
 #[test]
 fn a_kept_compositor_in_the_font_mode_equals_a_new_one_after_every_change() {
     let mut pics = Pics::default();
@@ -392,20 +453,25 @@ fn a_kept_compositor_in_the_font_mode_equals_a_new_one_after_every_change() {
         );
     }
     let codes = [0x41u16, 0x7a, 0xac00, 0xd7a3, 0x20, 0x05, 0xc1];
-    let rows = [SHAPE, [0x81; 8], [0x3c, 0, 0x3c, 0, 0x3c, 0, 0x3c, 0]];
+    let rows = [
+        SHAPE,
+        [0x81; 8],
+        [0x3c, 0, 0x3c, 0, 0x3c, 0, 0x3c, 0],
+        BLANK,
+    ];
     let mut fb = plane();
     fb.palette = palette(4);
     let mut x = X(0x0bad_cafe_f00d_1234);
     let mut c = Compositor::new();
     let (mut scale, mut font, mut last_font) = (Scale::X2, true, true);
-    let mut listed_steps = 0;
+    let (mut listed_steps, mut space_steps, mut space_moves) = (0, 0, 0);
     for step in 0..300 {
         for _ in 0..1 + x.below(5) {
             let (col, row) = (x.below(COLS as u64) as usize, x.below(ROWS as u64) as usize);
             match x.below(12) {
                 0..=4 => {
                     let code = codes[x.below(codes.len() as u64) as usize];
-                    let r = rows[x.below(3) as usize];
+                    let r = rows[x.below(rows.len() as u64) as usize];
                     let colours = (1 + x.below(3) as u8, 1 + x.below(3) as u8);
                     glyph_px(&mut fb, code, r, (col * CELL, row * CELL), colours);
                 }
@@ -474,6 +540,7 @@ fn a_kept_compositor_in_the_font_mode_equals_a_new_one_after_every_change() {
         assert!(c.rgba() == want.as_slice(), "step {step}: the kept frame");
         assert_eq!(c.glyphs(), list.as_slice(), "step {step}: the kept list");
         listed_steps += usize::from(!list.is_empty());
+        space_steps += usize::from(list.iter().any(|g| g.code == 0x20));
         let rect = c.take_dirty();
         let inside = |bx: usize, by: usize| {
             rect.is_some_and(|[x0, y0, w, h]| {
@@ -495,6 +562,7 @@ fn a_kept_compositor_in_the_font_mode_equals_a_new_one_after_every_change() {
             .chain(before.1.iter().filter(|g| at(&list, g) != Some(**g)))
             .copied()
             .collect();
+        space_moves += moved.iter().filter(|g| g.code == 0x20).count();
         for g in &moved {
             let cell = (usize::from(g.x) / CELL, usize::from(g.y) / CELL);
             assert!(
@@ -508,4 +576,6 @@ fn a_kept_compositor_in_the_font_mode_equals_a_new_one_after_every_change() {
         );
     }
     assert!(listed_steps > 50, "the list was exercised: {listed_steps}");
+    assert!(space_steps > 50, "whole spaces were listed: {space_steps}");
+    assert!(space_moves > 20, "spaces entered and left: {space_moves}");
 }
