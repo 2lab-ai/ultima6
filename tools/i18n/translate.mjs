@@ -70,17 +70,22 @@
 // script's own in the pack there, its alias's first word the alias gate takes, never a word another
 // script gives the key, as the engine looks a word up by script and key; else the shared keywords'
 // request's) and, for a key `y` or `n` its first block lists alone, the reply's yes or no it is
-// (`answer`: such a key is sent its known word only when that is 예 or 아니, so the mark decides;
-// a line of it asked again names the word its key keeps, without the mark when that word is
-// another); the answer gives one Korean word per key (`keywords`), checked by the alias gate (1
+// (`answer`); the answer gives one Korean word per key (`keywords`), checked by the alias gate (1
 // to 8 Hangul syllables; one entry per key, or several that give it the same word; two keys whose
 // words collide, a word of the input the engine takes for both, refused unless their first block
 // is the same, and so is a word colliding with one the pack keeps for another key), and the words
-// kept become the pack's `aliases` for that script.
+// kept become the pack's `aliases` for that script. The guide's yes and no words are the tool's
+// too (fixedOf): a key so marked takes 예 for `y` and 아니 for `n`, a key `yes` or `no` of any
+// other block 그렇소 or 아니오; such a key is always sent that word as known (a line of it asked
+// again too), and settles to it whatever the answer gives it, or if it gives none, never refused;
+// another key's word colliding with it (where their first blocks differ) is refused, and so is
+// the word the pack keeps for another key (that key then keeps none, and that word is no
+// constraint on any other); a request names no key such a word as known, so it is asked afresh.
 // Before the scripts, the keys at least GLOSSARY_SCRIPTS of the chosen scripts hold (and one of
 // them has no word of its own for) are asked once in a request of their own, so a key many NPCs
 // have gets one word where they have none; never a key of one letter (a word longer than a key
-// hits it: over the scripts it would gather every highlighted word that starts so). With
+// hits it: over the scripts it would gather every highlighted word that starts so), nor `yes` or
+// `no` (their words are set). With
 // `--fresh-keywords` no word of the pack there is sent as `known` in a script's first request
 // (only the shared keywords' request's, which then asks every key that many scripts hold), so
 // each script answers its keys from its own lines; a line asked again names the word its key
@@ -701,8 +706,15 @@ export function wordGate(ko) {
 /// two keep it: the player could not tell them apart). `kept` (a Map of key to its words): the
 /// words the pack there keeps for the script's other keys; a new word colliding with one of a key
 /// this answer gives none is refused too (`shared`), and a key so refused keeps its own old words,
-/// which the others are then checked against. An entry for a key not asked is not read.
-export function aliasesOf(keys, given, compatible, kept = new Map()) {
+/// which the others are then checked against. An entry for a key not asked is not read. `fixed`
+/// (a Map of key to word, the guide's words: [`fixedOf`]): a key of `keys` it gives a word takes
+/// that word whatever the answer gives it or if it gives none, never refused, and the word wins
+/// every collision: another key's colliding with it where `compatible` does not let the two keep
+/// it is refused (`shared`), and so is a kept word colliding with it, before anything else: it is
+/// no constraint on any key, and its key, unless this answer gives it a word, is in `lost` (a
+/// Set), the words the pack keeps for it dropped, so it ends with none. The result does not
+/// depend on the order of `given`.
+export function aliasesOf(keys, given, compatible, kept = new Map(), fixed = new Map()) {
   const list = (Array.isArray(given) ? given : []).filter((e) => plain(e) && typeof e.k === 'string' && keys.includes(e.k))
     .filter((e, i, all) => all.findIndex((x) => x.k === e.k && x.ko === e.ko) === i);
   const count = new Map();
@@ -719,24 +731,40 @@ export function aliasesOf(keys, given, compatible, kept = new Map()) {
     if ((count.get(k) ?? 0) > 1) failed.set(k, 'repeated');
     else if (!count.has(k)) failed.set(k, 'missing');
   }
+  // A key with a fixed word takes it, whatever the answer gave it.
+  const isFixed = (k) => fixed.has(k) && keys.includes(k);
+  for (const k of keys.filter(isFixed)) {
+    words.set(k, fixed.get(k));
+    failed.delete(k);
+  }
   const clash = (k, j, ws) => j !== k && !compatible(k, j) && ws.some((v) => collide(words.get(k), v));
-  const shared = [...words.keys()].filter((k) => [...words].some(([j, v]) => clash(k, j, [v])));
+  // Of two colliding words, a fixed one is never refused; the other is.
+  const shared = [...words.keys()].filter((k) => !isFixed(k) && [...words].some(([j, v]) => clash(k, j, [v])));
   for (const k of shared) {
     words.delete(k);
     failed.set(k, 'shared');
   }
-  // Against the words the pack keeps for keys this answer does not replace, until none collides.
+  // The kept words that collide with a fixed one lose, first: none of them is a constraint on
+  // any key (so the result does not depend on the answer's order), and a key of them this answer
+  // gives no word ends with none (`lost`).
+  const losing = new Set([...kept].filter(([j, ws]) => !isFixed(j) && keys.filter(isFixed).some((f) => clash(f, j, ws))).map(([j]) => j));
+  // Against the other words the pack keeps for keys this answer does not replace, until none
+  // collides: a new word colliding with one is refused.
+  const keeps = (j) => !words.has(j) && !losing.has(j);
   for (let again = true; again;) {
     again = false;
     for (const k of [...words.keys()]) {
-      if ([...kept].some(([j, ws]) => !words.has(j) && clash(k, j, ws))) {
+      if (isFixed(k)) continue;
+      if ([...kept].some(([j, ws]) => keeps(j) && clash(k, j, ws))) {
         words.delete(k);
         failed.set(k, 'shared');
         again = true;
       }
     }
   }
-  return { words, failed };
+  const lost = new Set([...losing].filter((j) => !words.has(j)));
+  for (const j of lost) failed.set(j, 'shared');
+  return { words, failed, lost };
 }
 
 /// The brace words the `@` keywords of English `en` call for, case folded, in order: for each
@@ -1133,6 +1161,27 @@ export function bodyOf(model, system, bundle, cls, lines, topics = [], speaker =
 /// and the Korean word such a key takes, the one a player types for yes or no (YES_NO_WORDS).
 export const YES_NO = { y: 'yes', n: 'no' };
 export const YES_NO_WORDS = { y: '예', n: '아니' };
+/// The keys yes and no (a yes or no of a block other than the reply's) and the Korean word each
+/// takes, another than the reply's (style-ko.md).
+export const YES_NO_KEYS = { yes: '그렇소', no: '아니오' };
+
+/// The word the guide fixes for key `k` (style-ko.md), whatever an answer gives it, with `block`
+/// the keys of its first keyword block (none for the shared keywords): for a key of [`YES_NO`]
+/// the block lists alone, the reply's yes or no, {word: its [`YES_NO_WORDS`] word, answer: yes or
+/// no}; else for the key yes or no, {word: its [`YES_NO_KEYS`] word, answer: null}; else null.
+/// The request ([`topicsOf`]) and the settle ([`aliasesOf`]'s `fixed`) both go by it.
+export function fixedOf(k, block = []) {
+  if (Object.hasOwn(YES_NO, k) && block.length === 1 && block[0] === k) return { word: YES_NO_WORDS[k], answer: YES_NO[k] };
+  if (Object.hasOwn(YES_NO_KEYS, k)) return { word: YES_NO_KEYS[k], answer: null };
+  return null;
+}
+
+// The fixed words ([`fixedOf`]) of `keys`, each with its first block of `topics` (a script's
+// keyword blocks; none for the shared keywords): a Map of key to word.
+function fixedWordsOf(keys, topics = []) {
+  const first = firstBlocksOf(topics);
+  return new Map(keys.map((k) => [k, fixedOf(k, first.has(k) ? topics[first.get(k)] : [])?.word ?? null]).filter(([, w]) => w !== null));
+}
 
 /// The `topics` of a request of `script` (slice K5b): one entry per keyword block with keys, in
 /// script order, each key once, in the first block that lists it (the block the game's first match
@@ -1140,21 +1189,26 @@ export const YES_NO_WORDS = { y: '예', n: '아니' };
 /// lines highlight that hit it (`shown`) and the Korean word `known` (a Map) settles for it, when
 /// there is one, and for a key of [`YES_NO`] its first block lists alone, the answer it is
 /// (`answer`: yes or no); only the keys of `only` (a Set) when given (a request again lists the
-/// keys that have a word, each with that word). The two never disagree: a marked key's known word
-/// other than its [`YES_NO_WORDS`] word is left out of a first request (the mark decides), and the
-/// mark out of a request again (the word the run gate takes decides: its lines must show it).
+/// keys that have a word, each with that word). A key with a fixed word ([`fixedOf`]) is named
+/// that word as known whatever `known` gives it, in a first request and in a request again alike
+/// (the settle gives it the same, so the word the run gate takes is that word too): a marked key's
+/// word and its mark never disagree. Another key is named no `known` word that collides with the
+/// fixed word of a key of another first block (the settle would refuse it, or drop it from the
+/// pack): it is asked afresh, so one run cleans such a pack.
 export function topicsOf(script, known, only = null) {
   const first = firstBlocksOf(script.topics);
+  const fixedWords = fixedWordsOf([...first.keys()], script.topics);
+  const refused = (k, w) => [...fixedWords].some(([f, v]) => f !== k && first.get(f) !== first.get(k) && collide(w, v));
   return script.topics
     .map((list, i) => ({
       keys: list.filter((k) => first.get(k) === i && (only === null || only.has(k)))
         .map((k) => {
-          const answer = Object.hasOwn(YES_NO, k) && list.length === 1 ? YES_NO[k] : null;
-          const word = known.get(k);
-          const agree = answer === null || word === undefined || word === YES_NO_WORDS[k];
+          const fixed = fixedOf(k, list);
+          const word = fixed?.word ?? known.get(k);
+          const named = word !== undefined && (fixed !== null || !refused(k, word));
           return {
-            k, shown: script.shown.get(k) ?? [], ...(word !== undefined && (agree || only !== null) ? { known: word } : {}),
-            ...(answer !== null && (agree || only === null) ? { answer } : {}),
+            k, shown: script.shown.get(k) ?? [], ...(named ? { known: word } : {}),
+            ...(fixed?.answer ? { answer: fixed.answer } : {}),
           };
         }),
     }))
@@ -1381,14 +1435,15 @@ export function settledOf(scripts) {
 /// key order), at most GLOSSARY_KEYS, each with the words the scripts' lines highlight for it (at
 /// most GLOSSARY_SHOWN, in script order); never a key of one letter (a word longer than its key
 /// hits it, so over the scripts it would gather every highlighted word that starts so: `y` and `n`
-/// are a reply's yes and no, which each script's request marks, [`topicsOf`]); `compatible`,
-/// whether two keys may keep colliding words: in every one of them that holds both, the first
-/// block of each is the same ([`compatibleOf`]); null when no key is so shared.
+/// are a reply's yes and no, which each script's request marks, [`topicsOf`]), nor a key whose
+/// word is set (`yes`, `no`: [`fixedOf`]); `compatible`, whether two keys may keep colliding
+/// words: in every one of them that holds both, the first block of each is the same
+/// ([`compatibleOf`]); null when no key is so shared.
 export function glossaryOf(scripts, settled = new Set()) {
   const held = new Map();
   for (const s of scripts) {
     for (const k of s.keys) {
-      if (k.length === 1) continue;
+      if (k.length === 1 || fixedOf(k) !== null) continue;
       const h = held.get(k) ?? { k, scripts: 0, shown: [] };
       h.scripts += 1;
       for (const w of s.shown.get(k) ?? []) if (h.shown.length < GLOSSARY_SHOWN && !h.shown.includes(w)) h.shown.push(w);
@@ -1609,18 +1664,22 @@ export const firstWord = (words) => words.find((w) => wordGate(w) === null) ?? w
 /// Slice K5b: settles `script`'s keys from `r`, the result of its first request (sendAll's: `ok`
 /// with the answer's `keywords`, or a failure with its `reason`): `kept`, the words that pass the
 /// alias gate ([`aliasesOf`], checked against each other and against the words the pack there,
-/// `existing`, keeps for the script's keys this answer does not replace); `refused`, the other
-/// keys' reasons; `keyed`, its keys with the words its lines are gated with: the pack there's for
-/// the script (all of a key's words), each key this answer kept a word for with that word instead
-/// (as the merge leaves them).
+/// `existing`, keeps for the script's keys this answer does not replace), each key with a fixed
+/// word ([`fixedOf`], by its first block) with that word whatever the answer gave it; `refused`,
+/// the other keys' reasons; `lost`, the keys whose words the pack keeps collide with a fixed word
+/// (the merge drops them); `keyed`, its keys with the words its lines are gated with: the pack
+/// there's for the script (all of a key's words) but a lost key's, each key this answer kept a
+/// word for with that word instead (as the merge leaves them). A request that failed settles no
+/// word, fixed or not: its keys keep the pack's.
 export function settleKeys(script, r, existing = null) {
   const theirs = scriptWordsOf(existing?.aliases, script.bundle.archive, script.bundle.item);
   const kept = new Map([...theirs].filter(([k]) => script.keys.includes(k)));
-  const { words, failed } = r?.ok ? aliasesOf(script.keys, r.keywords, script.compatible, kept)
-    : { words: new Map(), failed: new Map(script.keys.map((k) => [k, r?.reason ?? 'not-sent'])) };
+  const { words, failed, lost } = r?.ok ? aliasesOf(script.keys, r.keywords, script.compatible, kept, fixedWordsOf(script.keys, script.topics))
+    : { words: new Map(), failed: new Map(script.keys.map((k) => [k, r?.reason ?? 'not-sent'])), lost: new Set() };
   script.kept = words;
   script.refused = failed;
-  script.keyed = { keys: script.keys, words: new Map([...theirs, ...[...words].map(([k, w]) => [k, [w]])]) };
+  script.lost = lost;
+  script.keyed = { keys: script.keys, words: new Map([...[...theirs].filter(([k]) => !lost.has(k)), ...[...words].map(([k, w]) => [k, [w]])]) };
 }
 
 /// The pack and the coverage receipt of `plan`'s scripts and game strings, translated as their
@@ -1628,10 +1687,11 @@ export function settleKeys(script, r, existing = null) {
 /// it had under the same key, the rest stays. The fingerprint is over the scripts the merged runs
 /// and table strings name (their hashes from the bundles); with no bundles the conversation part
 /// is the existing pack's, unchanged. The keyword aliases (slice K5b): the words a script answered
-/// in this run kept (`kept`, [`settleKeys`]) replace the pack's for the same keys, the others
-/// stay; every merged run and table string of a script whose words changed is checked again
-/// against the merged words, one that no longer passes dropped (left English, `keywords`); the
-/// aliases of a script the merged lines do not name are dropped (`no-base`). Coverage `keywords`:
+/// in this run kept (`kept`, [`settleKeys`]) replace the pack's for the same keys, the pack's
+/// words of a key that lost to a fixed word (`lost`) are dropped, the others stay; every merged
+/// run and table string of a script whose words changed is checked again against the merged
+/// words, one that no longer passes dropped (left English, `keywords`); the aliases of a script
+/// the merged lines do not name are dropped (`no-base`). Coverage `keywords`:
 /// each key of the scripts answered given a word, or kept (its old word stays in the merged pack:
 /// `kept`, by reason, keys by hash), or left English (no word in the merged pack: `byReason`, and
 /// in `left` by hash); only one left English counts toward exit 3. No pack (null) when this run
@@ -1696,11 +1756,13 @@ export function outputsOf(plan, model, existing = null) {
     u: [...(existing?.u ?? []).filter((t) => !newU.has(t.hash)), ...u],
   };
   // Slice K5b: the keyword aliases. The words a script answered in this run kept replace the
-  // pack's for the same keys; the pack's other aliases stay.
+  // pack's for the same keys, the pack's for a key that lost to a fixed word are dropped; the
+  // pack's other aliases stay.
   const script = (x) => `${x.archive}:${x.item}`;
   const aliasKey = (a) => `${script(a)}:${a.keyword}`;
   const keyUnits = [];
   const fresh = [];
+  const lostKeys = new Set();
   for (const s of plan.scripts) {
     for (const k of s.keys ?? []) {
       const unit = { archive: s.bundle.archive, item: s.bundle.item, script: s.bundle.hash, k };
@@ -1708,16 +1770,18 @@ export function outputsOf(plan, model, existing = null) {
         unit.ko = s.kept.get(k);
         fresh.push({ archive: unit.archive, item: unit.item, keyword: k, words: [unit.ko] });
       } else unit.why = s.refused?.get(k) ?? 'not-sent';
+      if (s.lost?.has(k)) lostKeys.add(aliasKey({ ...unit, keyword: k }));
       keyUnits.push(unit);
     }
   }
   const before = new Map((existing?.aliases ?? []).map((a) => [aliasKey(a), a]));
   const differs = (a) => JSON.stringify(before.get(aliasKey(a))?.words) !== JSON.stringify(a.words);
   const freshKeys = new Set(fresh.map(aliasKey));
-  merged.aliases = [...(existing?.aliases ?? []).filter((a) => !freshKeys.has(aliasKey(a))), ...fresh];
+  const droppedAliases = (existing?.aliases ?? []).filter((a) => lostKeys.has(aliasKey(a)));
+  merged.aliases = [...(existing?.aliases ?? []).filter((a) => !freshKeys.has(aliasKey(a)) && !lostKeys.has(aliasKey(a))), ...fresh];
   // Every merged run and table string of a script whose words changed is checked again against
   // the merged words (the run gate's keywords); one that no longer passes is dropped, English.
-  const changedScripts = new Set(fresh.filter(differs).map(script));
+  const changedScripts = new Set([...fresh.filter(differs), ...droppedAliases].map(script));
   const answered = new Map(plan.scripts.map((s) => [script(s.bundle), s]));
   const english = new Map();
   const englishOf = (r, kind) => {
@@ -1806,7 +1870,7 @@ export function outputsOf(plan, model, existing = null) {
     for (const r of [...merged.runs, ...merged.tables]) scripts.set(script(r), { archive: r.archive, item: r.item, hash: hashes.get(script(r)) });
     base = fingerprint([...scripts.values()]);
   }
-  const changed = runs.length + tables.length + strings.length + look.length + books.length + u.length + aliased + dropped + unbased > 0;
+  const changed = runs.length + tables.length + strings.length + look.length + books.length + u.length + aliased + droppedAliases.length + dropped + unbased > 0;
   const pack = changed ? packBytes({ base, ...merged }) : null;
   return {
     pack, coverage, runs: runs.length, tables: tables.length, strings: strings.length, look: look.length, books: books.length, u: u.length,
@@ -2168,6 +2232,8 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { tr
     if (plan.glossary) {
       const gl = plan.glossary;
       const [r] = await send([jobs[0]], 2, keywordsOfAnswer);
+      // No key with a fixed word is asked here (glossaryOf): its word is set, its script's request
+      // names it; a word given here that collides with it reaches no script as known (topicsOf).
       const { words, failed } = r.ok ? aliasesOf(gl.units.map((u) => u.k), r.keywords, gl.compatible) : { words: new Map(), failed: new Map() };
       for (const u of gl.units) {
         if (words.has(u.k)) u.ko = words.get(u.k);
