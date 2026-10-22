@@ -44,6 +44,23 @@ gruff, kind) inside the level its age and class give.
 | elder | commoner | 허허, 젊은이가 용케도 여기까지 왔구먼. |
 | elder | mage | 자네, 이 늙은이 말을 잘 들어 두게. |
 
+## The narrator and the other voices in a script
+
+The speaker's level (its age and class) is for the speaker's own words only.
+
+- Text outside double quotes is the game's narrator, whatever the speaker's age or class: the
+  look description, what someone does, the `he says` around a quote. The narrator writes in the
+  하오체 (~하오, ~이오) or ends a description on a noun, and calls the hero 그대.
+- A quoted line that the line or its narration gives to someone else (a companion who cuts in,
+  `"…," says <name>.`) is in that person's own level (a grown companion: 하오체), not the
+  speaker's.
+
+| Line | Made-up example |
+|---|---|
+| a look description | 바구니를 든 어린 소년. |
+| a narrated action in a child's script | 아이가 수줍게 고개를 숙이오. |
+| a companion cutting in on a child | "아이가 겁을 먹은 모양이오," 동료가 말하오. |
+
 ## Speaker classes and their endings
 
 The request names the speaker's class (guessed from the description, or given by the owner or by
