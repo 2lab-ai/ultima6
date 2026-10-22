@@ -56,6 +56,16 @@
 // cancel. globalThis.__u6Layout maps canvas pixels and game pixels both ways for tests, in any
 // layout. With Original, or HD off, the page is as without the HD layout.
 //
+// The HD font (spec 11; the chooser's and Settings' "Font", kept in localStorage, the HD font
+// unless the pixel font was chosen): while the HD layout is in effect the page loads the font
+// from this origin (site/fonts/gowun-batang.woff2, document.fonts.load) and, once it has it,
+// sets the compositor's HD font mode (Game.set_hd_font): each letter or syllable cell of the
+// game's text is its paper in the ×4 frame and listed (Game.hd_glyphs), and after the regions
+// are copied the page draws each listed character in the font over its cell's place on the
+// canvas, centred, at 0.85 of the cell's height there, in its ink colour (ASCII 1.45 times as
+// wide as the font has it). Until the font is loaded, with the pixel font chosen, with Original
+// or with HD off, the game's own pixel font shows, as before.
+//
 // Fullscreen (the toolbar's Fullscreen): #screen-box (the canvas, its badge, the hidden input
 // that takes Korean) goes fullscreen, the canvas as large as fits with the game's aspect ratio,
 // centred on black, drawn as on the page; the canvas takes the focus, and where the browser has
@@ -193,6 +203,7 @@ const forgetKo = document.getElementById('forget-ko');
 const mute = document.getElementById('mute');
 const hdButton = document.getElementById('hd');
 const layoutChoices = document.querySelectorAll('input[name="layout"]');
+const fontChoices = document.querySelectorAll('input[name="font"]');
 const restart = document.getElementById('restart');
 const statusLine = document.getElementById('status');
 const badge = document.getElementById('speed-badge');
@@ -252,7 +263,10 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // -misses), object names (data-locale-look-hits / -misses) and books (data-locale-book-hits /
 // -misses), and on the body data-locale-pack-texts = the pack's object names and books (counts
 // only), data-fullscreen = off, on (the browser's) or css (the page's own), data-layout = the
-// screen layout in effect (hd: HD on with the HD layout chosen; else original).
+// screen layout in effect (hd: HD on with the HD layout chosen; else original), data-font = the
+// font the game's text is drawn in on the canvas (hd: the HD font, chosen with the HD layout in
+// effect and loaded; else pixel), data-font-file = the HD font file's state (none: not asked for,
+// loading, loaded, failed).
 // The drop line shows only while no game files are kept (`filesKept` false once the storage said
 // so) or loaded (a game on screen).
 let filesKept = null; // whether this browser keeps game files; null until the restore asked
@@ -1347,10 +1361,11 @@ function hdScale() {
   return box.width * dpr >= 3 * 320 && box.height * dpr >= 3 * 200 ? 4 : 2;
 }
 
-// Settings' "HD on" and "Screen layout" as the choices are.
+// Settings' "HD on", "Screen layout" and "Font" as the choices are.
 function showHd() {
   hdButton.checked = hdOn;
   for (const input of layoutChoices) input.checked = input.value === layoutChoice;
+  for (const input of fontChoices) input.checked = input.value === fontChoice;
 }
 
 // How the browser scales the canvas into its box: pixelated (each canvas pixel a sharp block)
@@ -1376,14 +1391,18 @@ function fitRendering(hd) {
 
 // The game on screen shows HD as chosen, at the scale for the box now (S 4 with the HD layout),
 // drawn at once with no new game frame (the canvas takes the size of the frame it shows:
-// `draw`). The layout in effect goes on the body first, since it sets the box. After a trap
-// nothing changes (the canvas keeps what it showed in the box it had, as for HD on or off) until
-// the reload.
+// `draw`). The layout in effect goes on the body first, since it sets the box. The text in the
+// HD font while it is chosen and loaded with the HD layout in effect (asked for here when it is
+// wanted and not yet), else in the pixel font. After a trap nothing changes (the canvas keeps
+// what it showed in the box it had, as for HD on or off) until the reload.
 function applyHd() {
   if (crashed) return;
   showLayout();
+  if (fontWanted()) loadFont();
+  reflectFont();
   if (!game) return;
   game.set_hd(hdOn, layoutOn() ? LAYOUT_S : hdScale());
+  game.set_hd_font(fontOn());
   draw();
   fitRendering(game.hd_on());
 }
@@ -1511,17 +1530,25 @@ function overlap([ax, ay, aw, ah], [bx, by, bw, bh]) {
 
 // The canvas from the ×4 frame for `view`: everything (`dirty` null: the fill, the frames and
 // every region), or the regions that rect of the ×4 frame touches (a one-to-one region only that
-// part of it, a scaled one whole: a part scaled on its own would not meet its neighbours').
+// part of it, a scaled one whole: a part scaled on its own would not meet its neighbours'); then
+// the HD font's characters over what it copied (`paintGlyphs`). With characters listed, a
+// one-to-one region's part reaches a cell further left and right (the x4 frame's own pixels
+// again): a character drawn wider than its cell (ASCII) is then drawn again wherever a cell it
+// reaches was copied again, and never left over from a cell that changed.
 function paint(view, dirty) {
   const ctx = canvas.getContext('2d');
   if (!dirty) {
     ctx.fillStyle = LAYOUT_FILL;
     ctx.fillRect(0, 0, LAYOUT_W, LAYOUT_H);
   }
+  const glyphs = game.hd_font() ? game.hd_glyphs() : [];
   if (view === WHOLE_VIEW) {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(x4, 0, 0, x4.width, x4.height, ...LAYOUT_WHOLE);
+    // `u` lists no cell (its text is in the chip planes), but the letterbox also shows `game`'s
+    // last frame once the game itself ended (Ctrl-Q, Y: the launcher ends in `game`).
+    if (glyphs.length > 0) paintGlyphs(ctx, glyphs, [0, 0, SCREEN_W, SCREEN_H], LAYOUT_WHOLE, LAYOUT_WHOLE);
     return;
   }
   if (!dirty) {
@@ -1529,19 +1556,24 @@ function paint(view, dirty) {
     ctx.lineWidth = 1;
     for (const { to: [x, y, w, h] } of LAYOUT_REGIONS) ctx.strokeRect(x - 0.5, y - 0.5, w + 1, h + 1);
   }
+  const cell = GLYPH_CELL * LAYOUT_S;
+  const reach = dirty && glyphs.length > 0 ? [dirty[0] - cell, dirty[1], dirty[2] + 2 * cell, dirty[3]] : dirty;
   for (const { from, to } of LAYOUT_REGIONS) {
     const source = from.map((v) => v * LAYOUT_S);
     const one = to[2] === source[2] && to[3] === source[3];
-    const part = dirty ? overlap(source, dirty) : source;
+    const part = dirty ? overlap(source, one ? reach : dirty) : source;
     if (!part) continue;
     ctx.imageSmoothingEnabled = !one;
     ctx.imageSmoothingQuality = 'high';
+    let copied = to;
     if (one) {
       const [x, y, w, h] = part;
-      ctx.drawImage(x4, x, y, w, h, to[0] + x - source[0], to[1] + y - source[1], w, h);
+      copied = [to[0] + x - source[0], to[1] + y - source[1], w, h];
+      ctx.drawImage(x4, x, y, w, h, ...copied);
     } else {
       ctx.drawImage(x4, ...source, ...to);
     }
+    if (glyphs.length > 0) paintGlyphs(ctx, glyphs, from, to, copied);
   }
 }
 
@@ -1614,6 +1646,112 @@ function chooseLayout(value) {
   layoutChoice = value === 'original' ? 'original' : 'hd';
   try {
     localStorage.setItem(LAYOUT_KEY, layoutChoice);
+  } catch {
+    // No storage: the choice lasts until the page is left.
+  }
+  showHd();
+  applyHd();
+}
+
+// --- the HD font (spec 11) ---------------------------------------------------------------------
+
+const FONT_KEY = 'u6.font'; // localStorage: 'pixel' when the viewer chose the pixel font
+const FONT_FAMILY = 'U6 Gowun Batang'; // index.html's @font-face: site/fonts/gowun-batang.woff2
+const GLYPH_CELL = 8; // a character's cell, in game pixels
+const FONT_EM = 0.85; // the font's size: of the height the cell has on the canvas
+const ASCII_WIDE = 1.45; // ASCII drawn this many times as wide as the font has it (Design 3)
+
+// The stored choice: 'pixel', else (any other value, none, storage that cannot be read) 'hd'.
+function storedFont() {
+  try {
+    return localStorage.getItem(FONT_KEY) === 'pixel' ? 'pixel' : 'hd';
+  } catch {
+    return 'hd';
+  }
+}
+
+let fontChoice = storedFont();
+let fontFile = 'none'; // the font file: none (not asked for yet), loading, loaded, failed
+// How far below its cell's centre a character's baseline lies, in ems of the font (once loaded:
+// half a syllable's ink height less its depth, so the syllables are centred in their cells and
+// ASCII stands on the same baseline, where the font puts it beside them).
+let glyphDrop = 0;
+
+// The HD font is wanted (chosen, with the HD layout in effect), and drawn (wanted and loaded).
+const fontWanted = () => layoutOn() && fontChoice === 'hd';
+const fontOn = () => fontWanted() && fontFile === 'loaded';
+
+// The font in effect and the file's state on the body (data-font, data-font-file).
+function reflectFont() {
+  put(document.body.dataset, 'font', fontOn() ? 'hd' : 'pixel');
+  put(document.body.dataset, 'fontFile', fontFile);
+}
+
+// Asks for the font file once (this origin's, index.html's @font-face) and measures it; then the
+// game on screen shows its text in it at once (`applyHd`). A file that does not load leaves the
+// pixel font for the visit, with a line that names nothing of the game (so does a browser with
+// no document.fonts: the call is in the promise's chain, never thrown at the caller).
+function loadFont() {
+  if (fontFile !== 'none') return;
+  fontFile = 'loading';
+  const face = `100px "${FONT_FAMILY}"`;
+  Promise.resolve()
+    .then(() => document.fonts.load(face, '한'))
+    .then((faces) => {
+      if (faces.length === 0) throw new Error('no face');
+      const ctx = document.createElement('canvas').getContext('2d');
+      ctx.font = face;
+      const m = ctx.measureText('한');
+      glyphDrop = (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 200;
+      fontFile = 'loaded';
+    })
+    .catch(() => {
+      fontFile = 'failed';
+      console.warn('the HD font did not load: the text stays in the pixel font');
+    })
+    .finally(applyHd);
+}
+
+// The characters of `glyphs` (Game.hd_glyphs: x, y, code, ink and paper per cell, the whole
+// list of the last composition) whose cells lie in the classic rect `from` that the canvas rect
+// `to` shows, drawn there over the canvas rect `copied` alone (the part just copied from the ×4
+// frame, where those cells are their paper): each character centred on its cell's place, at
+// FONT_EM of its height, in its ink colour, ASCII ASCII_WIDE times as wide. A character is drawn
+// only over pixels copied again just before, so never twice over itself (its anti-aliased edges
+// would thicken); one that reaches that part from a cell beside it is drawn too.
+function paintGlyphs(ctx, glyphs, from, to, copied) {
+  const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
+  const [w, h] = [GLYPH_CELL * sx, GLYPH_CELL * sy];
+  const size = FONT_EM * h;
+  let ready = false;
+  for (let i = 0; i < glyphs.length; i += 5) {
+    const [x, y, code, ink] = [glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3]];
+    if (!overlap([x, y, GLYPH_CELL, GLYPH_CELL], from)) continue;
+    const [cx, cy] = [to[0] + (x - from[0]) * sx, to[1] + (y - from[1]) * sy];
+    // Where the character can reach: its cell and half a cell either side (ASCII at its width).
+    if (!overlap([cx - w / 2, cy, 2 * w, h], copied)) continue;
+    if (!ready) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(...copied);
+      ctx.clip();
+      ctx.font = `${size}px "${FONT_FAMILY}"`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      ready = true;
+    }
+    ctx.fillStyle = `#${ink.toString(16).padStart(6, '0')}`;
+    ctx.setTransform(code < 0x80 ? ASCII_WIDE : 1, 0, 0, 1, cx + w / 2, cy + h / 2 + glyphDrop * size);
+    ctx.fillText(String.fromCodePoint(code), 0, 0);
+  }
+  if (ready) ctx.restore();
+}
+
+// The chooser's and Settings' "Font" changed: kept, on the game on screen at once.
+function chooseFont(value) {
+  fontChoice = value === 'pixel' ? 'pixel' : 'hd';
+  try {
+    localStorage.setItem(FONT_KEY, fontChoice);
   } catch {
     // No storage: the choice lasts until the page is left.
   }
@@ -2667,6 +2805,7 @@ mute.addEventListener('click', () => {
 });
 hdButton.addEventListener('change', toggleHd);
 for (const input of layoutChoices) input.addEventListener('change', () => chooseLayout(input.value));
+for (const input of fontChoices) input.addEventListener('change', () => chooseFont(input.value));
 settings.addEventListener('click', () => {
   openSetup();
   setup.querySelector('input[name="setup-lang"]:checked')?.focus();
@@ -2839,6 +2978,9 @@ setLang(lang);
 say('loadingEngine');
 showHd();
 showLayout();
+// The HD font asked for at once when it is wanted, so it is in before the first game's frame.
+if (fontWanted()) loadFont();
+reflectFont();
 showFullscreen();
 canvas.dataset.behind = '0';
 reflectVoice();

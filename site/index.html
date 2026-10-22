@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ultima VI</title>
   <style>
+    /* The HD font (spec 11; site/fonts/NOTICE.txt), from this origin, for the game's text the page
+       draws on the HD layout's canvas: loaded (document.fonts.load) only while it is wanted. */
+    @font-face {
+      font-family: "U6 Gowun Batang";
+      src: url("fonts/gowun-batang.woff2") format("woff2");
+      font-display: block;
+    }
     :root { color-scheme: dark; }
     *, *::before, *::after { box-sizing: border-box; }
     body {
@@ -142,6 +149,10 @@
           data-i18n="layout">Screen layout</span>: <label><input type="radio" name="layout" value="hd" checked>
           HD 16:9</label> <label><input type="radio" name="layout" value="original"> <span
           data-i18n="layoutOriginal">Original 16:10</span></label></p>
+        <p id="font-choice" role="radiogroup" aria-labelledby="font-title"><span id="font-title"
+          data-i18n="font">Font</span>: <label><input type="radio" name="font" value="hd" checked> <span
+          data-i18n="fontHd">HD font</span></label> <label><input type="radio" name="font" value="pixel"> <span
+          data-i18n="fontPixel">Pixel font</span></label></p>
         <div id="setup-hd">
           <label><input type="radio" name="setup-hd" value=""> <span data-i18n="mmpx">MMPX (no pack)</span></label>
           <label id="setup-dropped" hidden><input type="radio" name="setup-hd" value=":dropped"> <span
