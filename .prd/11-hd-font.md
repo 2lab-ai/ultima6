@@ -6,7 +6,7 @@ tags: [ultima6, hd, font, korean, text]
 
 # 11 — HD font: text drawn at the HD layout's own size
 
-Status: in progress (2026-10-22). User item 2 of `hd-layout-font-register/ssot.md`, verbatim: "hd 해상도에 맞게 한글 폰트 개선해줘. 처음 설정에 니가 만든 기본 폰트랑 hd 화면에 맞는 적절한 폰트 사용해줘." It builds on 10 (the layout) and 08 (the Hangul cells).
+Status: shipped (2026-10-23, in production at https://ultima6.2lab.ai from main ba3a639; deploys 3 and 4 of `hd-layout-font-register/loop.md`; Design 3 revised after deploy 3's captures). Not in this unit: F2 (Design 6). User item 2 of `hd-layout-font-register/ssot.md`, verbatim: "hd 해상도에 맞게 한글 폰트 개선해줘. 처음 설정에 니가 만든 기본 폰트랑 hd 화면에 맞는 적절한 폰트 사용해줘." It builds on 10 (the layout) and 08 (the Hangul cells).
 
 ## Measured facts (main 6e4e337)
 
