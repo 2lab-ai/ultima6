@@ -23,6 +23,7 @@ const TYPES = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
   '.txt': 'text/plain; charset=utf-8',
+  '.woff2': 'font/woff2',
 };
 
 /// Parses a Pages `_headers` file into [{ pattern: RegExp, headers: [[name, value]] }].
