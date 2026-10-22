@@ -44,6 +44,18 @@
 // either way. The canvas is scaled into its box pixelated, or smoothly when the HD frame has
 // more device pixels than the box.
 //
+// The HD layout (spec 10; Settings' "Screen layout", kept in localStorage, HD 16:9 unless
+// Original 16:10 was chosen): with HD on and that layout, the canvas is 1280 × 720 in a 16:9 box
+// (at most 1280 CSS px wide on the page) and the compositor runs at S 4. The ×4 frame is kept on
+// an offscreen canvas (updated by its dirty rect) and the canvas is drawn from it: in `game`, the
+// map window and the command bar one to one, beside them the date line, the side panel and the
+// message scroll at one smaller scale (LAYOUT_REGIONS), over a dark fill with a thin frame round
+// each; on every other screen the whole frame letterboxed. The pointer goes through the layout
+// backwards (`layoutToGame`): a move in a gap reaches the nearest pixel of the nearest region, a
+// press or a release there (or a move with a button held) the rest of the screen, the original's
+// cancel. globalThis.__u6Layout maps canvas pixels and game pixels both ways for tests, in any
+// layout. With Original, or HD off, the page is as without the HD layout.
+//
 // Fullscreen (the toolbar's Fullscreen): #screen-box (the canvas, its badge, the hidden input
 // that takes Korean) goes fullscreen, the canvas as large as fits with the game's aspect ratio,
 // centred on black, drawn as on the page; the canvas takes the focus, and where the browser has
@@ -180,6 +192,7 @@ const forgetHd = document.getElementById('forget-hd');
 const forgetKo = document.getElementById('forget-ko');
 const mute = document.getElementById('mute');
 const hdButton = document.getElementById('hd');
+const layoutChoices = document.querySelectorAll('input[name="layout"]');
 const restart = document.getElementById('restart');
 const statusLine = document.getElementById('status');
 const badge = document.getElementById('speed-badge');
@@ -238,7 +251,8 @@ let crashed = false; // the engine trapped: nothing calls into it again until a 
 // table strings (data-locale-table-hits / -misses), game strings (data-locale-text-hits /
 // -misses), object names (data-locale-look-hits / -misses) and books (data-locale-book-hits /
 // -misses), and on the body data-locale-pack-texts = the pack's object names and books (counts
-// only), data-fullscreen = off, on (the browser's) or css (the page's own).
+// only), data-fullscreen = off, on (the browser's) or css (the page's own), data-layout = the
+// screen layout in effect (hd: HD on with the HD layout chosen; else original).
 // The drop line shows only while no game files are kept (`filesKept` false once the storage said
 // so) or loaded (a game on screen).
 let filesKept = null; // whether this browser keeps game files; null until the restore asked
@@ -1262,11 +1276,27 @@ let drawnHd = false; // that frame was its HD frame
 // the canvas already shows that frame of that game (spec 06 O1: `present` converts only a
 // changed frame, and so the page draws only a changed one; a start or an HD switch resizes,
 // and so clears, the canvas, and its first frame is drawn whole). Over the HD frame it drew
-// last, only the rect the compositions since then wrote is drawn.
+// last, only the rect the compositions since then wrote is drawn. With the HD layout the frame
+// goes to the offscreen ×4 frame and the canvas is composed from it (`compose`), also when only
+// the screen changed (the opening's end: the game's regions in place of the whole frame).
 function draw() {
   const version = game.frame_version();
-  if (game === drawnGame && version === drawnVersion) return;
   const hd = game.hd_on();
+  const view = viewFor(hd);
+  if (game === drawnGame && version === drawnVersion && view === shownView) return;
+  if (view !== FRAME) {
+    compose(view, version);
+    return;
+  }
+  if (x4) {
+    // The dirty rects go to the canvas now: the ×4 frame kept would be stale; its memory goes.
+    x4.width = 0;
+    x4.height = 0;
+    x4 = null;
+    x4Game = null;
+  }
+  if (shownView !== FRAME) drawnGame = null; // the canvas held the layout
+  shownView = FRAME;
   const s = hd ? game.hd_scale() : 1;
   const [w, h] = [game.width() * s, game.height() * s];
   if (canvas.width !== w || canvas.height !== h) {
@@ -1317,30 +1347,278 @@ function hdScale() {
   return box.width * dpr >= 3 * 320 && box.height * dpr >= 3 * 200 ? 4 : 2;
 }
 
-// Settings' "HD on" as the choice is.
+// Settings' "HD on" and "Screen layout" as the choices are.
 function showHd() {
   hdButton.checked = hdOn;
+  for (const input of layoutChoices) input.checked = input.value === layoutChoice;
 }
 
 // How the browser scales the canvas into its box: pixelated (each canvas pixel a sharp block)
 // by the stylesheet, but smooth when the HD frame has more device pixels than the box (S 4 in
 // a box of 3 to 4 device pixels per game pixel): pixelated would drop one HD row and column in
-// four there.
+// four there. The HD layout's canvas is pixelated only in a box of a whole number of times its
+// 1280 × 720 in device pixels (one to one, ×2, ...), smooth in any other (spec 10 Design 5).
 function fitRendering(hd) {
   const box = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  const down = canvas.width > box.width * dpr || canvas.height > box.height * dpr;
-  const want = hd && down ? 'auto' : '';
+  let want;
+  if (shownView === FRAME) {
+    const down = canvas.width > box.width * dpr || canvas.height > box.height * dpr;
+    want = hd && down ? 'auto' : '';
+  } else {
+    const k = Math.round((box.width * dpr) / LAYOUT_W);
+    const whole = k >= 1 && Math.abs(box.width * dpr - k * LAYOUT_W) < 0.5
+      && Math.abs(box.height * dpr - k * LAYOUT_H) < 0.5;
+    want = whole ? '' : 'auto';
+  }
   if (canvas.style.imageRendering !== want) canvas.style.imageRendering = want;
 }
 
-// The game on screen shows HD as chosen, at the scale for the box now, drawn at once with no
-// new game frame (the canvas takes the size of the frame it shows: `draw`).
+// The game on screen shows HD as chosen, at the scale for the box now (S 4 with the HD layout),
+// drawn at once with no new game frame (the canvas takes the size of the frame it shows:
+// `draw`). The layout in effect goes on the body first, since it sets the box. After a trap
+// nothing changes (the canvas keeps what it showed in the box it had, as for HD on or off) until
+// the reload.
 function applyHd() {
-  if (!game || crashed) return;
-  game.set_hd(hdOn, hdScale());
+  if (crashed) return;
+  showLayout();
+  if (!game) return;
+  game.set_hd(hdOn, layoutOn() ? LAYOUT_S : hdScale());
   draw();
   fitRendering(game.hd_on());
+}
+
+// --- the HD layout (spec 10) -------------------------------------------------------------------
+
+const LAYOUT_KEY = 'u6.layout'; // localStorage: 'original' when the viewer chose Original 16:10
+
+// The stored choice: 'original', else (any other value, none, storage that cannot be read) 'hd'.
+function storedLayout() {
+  try {
+    return localStorage.getItem(LAYOUT_KEY) === 'original' ? 'original' : 'hd';
+  } catch {
+    return 'hd';
+  }
+}
+
+let layoutChoice = storedLayout();
+
+// The HD layout is in effect: HD on and the HD layout chosen.
+const layoutOn = () => hdOn && layoutChoice === 'hd';
+
+// The game's screen in game pixels (Game.width / height).
+const SCREEN_W = 320;
+const SCREEN_H = 200;
+// The HD layout's canvas, and the compositor's scale while it shows.
+const LAYOUT_W = 1280;
+const LAYOUT_H = 720;
+const LAYOUT_S = 4;
+// What the canvas shows: the frame as it is (07's canvas, any layout off), the game's regions
+// (`game` with the HD layout) or the whole ×4 frame letterboxed (any other screen with it).
+const FRAME = 'frame';
+const REGIONS_VIEW = 'game';
+const WHOLE_VIEW = 'whole';
+// The game screen's regions (spec 10 Design 2): `from`, the classic rect in game pixels (x, y,
+// width, height; the screen's parts the engine draws: the map window gfx/view.rs, the command
+// bar main_loop.rs and ui/cursor.rs with its underline row, the date line actors/seams.rs, the
+// side panel magic/book.rs and ui/panels.rs, the message scroll ui/textstate.rs); `to`, where
+// it goes on the 1280 × 720 canvas (canvas pixels, integers). Left, 4 px from the edges with 4
+// px between them: the map window and under it the command bar at ×4, one to one with the ×4
+// frame. Right, in the column x 648..1276 (4 px from the map and the edge): the date line, the
+// side panel and the message scroll at 3.5, each centred in the column, 4 px from the top and
+// the bottom with 30 and 31 px between them. 3.5 is the only scale of 3.5..3.75 that puts every
+// rect on whole pixels (8 rows and 98 rows both whole need a multiple of 1/2; at 3.75 the panel
+// would be 367.5 px tall); the 69 px it leaves in the column's height are odd, hence 30 and 31.
+const LAYOUT_REGIONS = [
+  { name: 'map', from: [8, 8, 160, 160], to: [4, 4, 640, 640] },
+  { name: 'commands', from: [8, 176, 160, 17], to: [4, 648, 640, 68] },
+  { name: 'date', from: [16, 168, 152, 8], to: [696, 4, 532, 28] },
+  { name: 'panel', from: [168, 6, 144, 98], to: [710, 62, 504, 343] },
+  { name: 'messages', from: [176, 112, 136, 80], to: [724, 436, 476, 280] },
+];
+// The whole ×4 frame (1280 × 800) on every other screen: 1152 × 720 with its 16:10 shape,
+// centred (spec 10 Design 3).
+const LAYOUT_WHOLE = [64, 0, 1152, 720];
+// Where a press, a release or a held move in a gap reaches the game: a pixel of the screen in
+// none of the map window, the command bar and the side panel (nor the message scroll), so the
+// click map takes it for the rest of the screen, a cancel (ui/click.rs: region 3, 0x8f, the
+// target cleared), never a walk or a command; the arrow the game draws from there is off screen.
+const LAYOUT_REST = [319, 199];
+// The page's paint round the regions (v1): a dark fill, a 1 px frame round each region.
+const LAYOUT_FILL = '#0b0b0f';
+const LAYOUT_FRAME = '#3a3f4c';
+
+let shownView = FRAME; // what the canvas shows now
+let x4 = null; // the offscreen canvas that holds the ×4 frame while the HD layout shows
+let x4Game = null; // the game whose ×4 frame x4 holds as drawn last (null: none, or stale)
+let sentButtons = 0; // the pointer's buttons as last sent to the game
+
+// The layout in effect on the body (data-layout: the stylesheet's box).
+function showLayout() {
+  put(document.body.dataset, 'layout', layoutOn() ? 'hd' : 'original');
+}
+
+// What the canvas is to show of the game on screen now (`hd`: its HD frame shows).
+function viewFor(hd) {
+  if (!hd || layoutChoice !== 'hd' || game.hd_scale() !== LAYOUT_S) return FRAME;
+  return game.program() === 'game' ? REGIONS_VIEW : WHOLE_VIEW;
+}
+
+// Draws the HD frame (version `version`) for `view`: on the offscreen ×4 frame (only the dirty
+// rect over the one it holds of this game), then on the canvas, whole when it showed another
+// game, another view or nothing yet, else only the regions the dirty rect touches.
+function compose(view, version) {
+  if (canvas.width !== LAYOUT_W || canvas.height !== LAYOUT_H) {
+    canvas.width = LAYOUT_W;
+    canvas.height = LAYOUT_H;
+    drawnGame = null; // the resize cleared it
+  }
+  const [w, h] = [game.width() * LAYOUT_S, game.height() * LAYOUT_S];
+  x4 ??= document.createElement('canvas');
+  if (x4.width !== w || x4.height !== h) {
+    x4.width = w;
+    x4.height = h;
+    x4Game = null;
+  }
+  const whole = game !== drawnGame || view !== shownView;
+  const over = x4Game === game;
+  const rect = game.hd_take_dirty();
+  const fresh = shownView !== view;
+  drawnGame = game;
+  drawnVersion = version;
+  drawnHd = true;
+  shownView = view;
+  if (fresh) fitRendering(true);
+  if (over && rect.length === 0 && !whole) return;
+  if (!over || rect.length > 0) {
+    // Re-create the view every frame: wasm memory growth detaches old buffers.
+    const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len());
+    const image = new ImageData(pixels, w, h);
+    const ctx = x4.getContext('2d');
+    if (over) ctx.putImageData(image, 0, 0, rect[0], rect[1], rect[2], rect[3]);
+    else ctx.putImageData(image, 0, 0);
+    x4Game = game;
+  }
+  paint(view, whole || !over ? null : rect);
+}
+
+// The part of rect `a` inside rect `b` (x, y, width, height), or null when they do not meet.
+function overlap([ax, ay, aw, ah], [bx, by, bw, bh]) {
+  const [x0, y0] = [Math.max(ax, bx), Math.max(ay, by)];
+  const [x1, y1] = [Math.min(ax + aw, bx + bw), Math.min(ay + ah, by + bh)];
+  return x0 < x1 && y0 < y1 ? [x0, y0, x1 - x0, y1 - y0] : null;
+}
+
+// The canvas from the ×4 frame for `view`: everything (`dirty` null: the fill, the frames and
+// every region), or the regions that rect of the ×4 frame touches (a one-to-one region only that
+// part of it, a scaled one whole: a part scaled on its own would not meet its neighbours').
+function paint(view, dirty) {
+  const ctx = canvas.getContext('2d');
+  if (!dirty) {
+    ctx.fillStyle = LAYOUT_FILL;
+    ctx.fillRect(0, 0, LAYOUT_W, LAYOUT_H);
+  }
+  if (view === WHOLE_VIEW) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(x4, 0, 0, x4.width, x4.height, ...LAYOUT_WHOLE);
+    return;
+  }
+  if (!dirty) {
+    ctx.strokeStyle = LAYOUT_FRAME;
+    ctx.lineWidth = 1;
+    for (const { to: [x, y, w, h] } of LAYOUT_REGIONS) ctx.strokeRect(x - 0.5, y - 0.5, w + 1, h + 1);
+  }
+  for (const { from, to } of LAYOUT_REGIONS) {
+    const source = from.map((v) => v * LAYOUT_S);
+    const one = to[2] === source[2] && to[3] === source[3];
+    const part = dirty ? overlap(source, dirty) : source;
+    if (!part) continue;
+    ctx.imageSmoothingEnabled = !one;
+    ctx.imageSmoothingQuality = 'high';
+    if (one) {
+      const [x, y, w, h] = part;
+      ctx.drawImage(x4, x, y, w, h, to[0] + x - source[0], to[1] + y - source[1], w, h);
+    } else {
+      ctx.drawImage(x4, ...source, ...to);
+    }
+  }
+}
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+// The game pixel canvas pixel (px, py) reaches (fractions inside the pixel), as the canvas shows
+// now; `held`: the event presses or releases a button, or moves with one held. The frame as it
+// is maps its box onto the game's screen (as `sendPointer` always did); the letterboxed frame
+// likewise, a point on its dark sides at the nearest edge. In the game's regions a point in one
+// is that pixel of its classic rect; in a gap or a margin, a move with no button the nearest
+// pixel of the nearest region (the game's pointer stays where the player sees it), anything
+// else the rest of the screen (LAYOUT_REST).
+function layoutToGame(px, py, held = false) {
+  if (shownView === FRAME) {
+    return [Math.floor((px * SCREEN_W) / canvas.width), Math.floor((py * SCREEN_H) / canvas.height)];
+  }
+  if (shownView === WHOLE_VIEW) {
+    const [x, y, w, h] = LAYOUT_WHOLE;
+    return [clamp(Math.floor(((px - x) * SCREEN_W) / w), 0, SCREEN_W - 1),
+      clamp(Math.floor(((py - y) * SCREEN_H) / h), 0, SCREEN_H - 1)];
+  }
+  let near = null;
+  let far = Infinity;
+  for (const region of LAYOUT_REGIONS) {
+    const [x, y, w, h] = region.to;
+    const inside = px >= x && px < x + w && py >= y && py < y + h;
+    const d = inside ? -1 : Math.hypot(Math.max(x - px, 0, px - x - w), Math.max(y - py, 0, py - y - h));
+    if (d < far) [near, far] = [region, d];
+  }
+  if (far >= 0 && held) return [...LAYOUT_REST];
+  const [fx, fy, fw, fh] = near.from;
+  const [x, y, w, h] = near.to;
+  return [clamp(fx + Math.floor(((px - x) * fw) / w), fx, fx + fw - 1),
+    clamp(fy + Math.floor(((py - y) * fh) / h), fy, fy + fh - 1)];
+}
+
+// The canvas pixel (the centre of what shows game pixel (gx, gy)) as the canvas shows now; null
+// for a pixel that does not show (outside the game's regions).
+function layoutToCanvas(gx, gy) {
+  if (shownView === FRAME) {
+    return [((gx + 0.5) * canvas.width) / SCREEN_W, ((gy + 0.5) * canvas.height) / SCREEN_H];
+  }
+  if (shownView === WHOLE_VIEW) {
+    const [x, y, w, h] = LAYOUT_WHOLE;
+    return [x + ((gx + 0.5) * w) / SCREEN_W, y + ((gy + 0.5) * h) / SCREEN_H];
+  }
+  const region = LAYOUT_REGIONS.find(({ from: [x, y, w, h] }) => gx >= x && gx < x + w && gy >= y && gy < y + h);
+  if (!region) return null;
+  const [fx, fy, fw, fh] = region.from;
+  const [x, y, w, h] = region.to;
+  return [x + ((gx - fx + 0.5) * w) / fw, y + ((gy - fy + 0.5) * h) / fh];
+}
+
+// For tests, in any layout: canvas pixels to game pixels (`held` as layoutToGame) and back,
+// what the canvas shows, the regions, the letterbox and the rest of the screen.
+globalThis.__u6Layout = {
+  toGame: (px, py, held = false) => layoutToGame(px, py, held),
+  toCanvas: (gx, gy) => layoutToCanvas(gx, gy),
+  get view() {
+    return shownView;
+  },
+  regions: LAYOUT_REGIONS.map(({ name, from, to }) => ({ name, from: [...from], to: [...to] })),
+  whole: [...LAYOUT_WHOLE],
+  rest: [...LAYOUT_REST],
+  size: [LAYOUT_W, LAYOUT_H],
+};
+
+// Settings' "Screen layout" changed: kept, on the game on screen at once.
+function chooseLayout(value) {
+  layoutChoice = value === 'original' ? 'original' : 'hd';
+  try {
+    localStorage.setItem(LAYOUT_KEY, layoutChoice);
+  } catch {
+    // No storage: the choice lasts until the page is left.
+  }
+  showHd();
+  applyHd();
 }
 
 // --- the HD pack -------------------------------------------------------------------------------
@@ -2388,6 +2666,7 @@ mute.addEventListener('click', () => {
   gesture();
 });
 hdButton.addEventListener('change', toggleHd);
+for (const input of layoutChoices) input.addEventListener('change', () => chooseLayout(input.value));
 settings.addEventListener('click', () => {
   openSetup();
   setup.querySelector('input[name="setup-lang"]:checked')?.focus();
@@ -2417,7 +2696,10 @@ slower.addEventListener('click', () => changeSpeed(-1));
 faster.addEventListener('click', () => changeSpeed(1));
 // The pointer: the position through the canvas's CSS box onto the game's 320 x 200 pixels
 // (whatever the canvas's own size: HD makes it S times that), the buttons
-// as DOM `buttons` (bit 0 left, bit 1 right). The canvas captures a press so the release reaches
+// as DOM `buttons` (bit 0 left, bit 1 right). With the HD layout the position goes through the
+// canvas's pixels and the layout backwards (`layoutToGame`, held when a button is down or was
+// down in the event sent last: a press, a release, a move with a button held). The canvas
+// captures a press so the release reaches
 // the game even off the canvas; the context menu stays off it while a game runs. A press is, in
 // this order, the focus, the game's pointer event (queued for the next step, exactly once) and
 // the gesture that starts the sound (the AudioContext is created before its first await, inside
@@ -2426,9 +2708,19 @@ function sendPointer(e) {
   if (!game || crashed) return;
   const box = canvas.getBoundingClientRect();
   if (box.width === 0 || box.height === 0) return;
-  const x = Math.floor(((e.clientX - box.left) * game.width()) / box.width);
-  const y = Math.floor(((e.clientY - box.top) * game.height()) / box.height);
-  game.pointer(x, y, e.buttons & 3);
+  const buttons = e.buttons & 3;
+  let x;
+  let y;
+  if (shownView === FRAME) {
+    x = Math.floor(((e.clientX - box.left) * game.width()) / box.width);
+    y = Math.floor(((e.clientY - box.top) * game.height()) / box.height);
+  } else {
+    const px = ((e.clientX - box.left) * canvas.width) / box.width;
+    const py = ((e.clientY - box.top) * canvas.height) / box.height;
+    [x, y] = layoutToGame(px, py, buttons !== 0 || sentButtons !== 0);
+  }
+  sentButtons = buttons;
+  game.pointer(x, y, buttons);
 }
 canvas.addEventListener('pointerdown', (e) => {
   canvas.focus();
@@ -2546,6 +2838,7 @@ reflectAudio();
 setLang(lang);
 say('loadingEngine');
 showHd();
+showLayout();
 showFullscreen();
 canvas.dataset.behind = '0';
 reflectVoice();

@@ -16,8 +16,10 @@
 // pack dropped, shown, kept, forgotten and refused, its performance with a full pack), and the
 // first-run chooser (the page's language, a pack the site lists, NPC voices), the page itself
 // (one toolbar, the drop line, Settings' "HD on" and forget buttons, the controls, the notices)
-// and fullscreen. Most tests start `game` at once (harness `gameFirst`); the launcher tests run
-// the page as it is.
+// and fullscreen, and the HD layout (spec 10: the 1280 x 720 canvas composed from the x4 frame,
+// clicks through it, the letterbox, fullscreen at any size, the setting). Most tests start
+// `game` at once (harness `gameFirst`); the launcher tests run the page as it is. Every test
+// but the HD layout's runs on the Original layout (harness `openPage`).
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. The game is read once it reached what a check asserts, by its own signals (the
 // prompt, the key queue, the program, its ticks: the page's fixed steps of 20 ms), never after a
@@ -2342,10 +2344,15 @@ test('the MMPX notice ships with the site: NOTICE.txt is the repository\'s NOTIC
 });
 
 // Page init script: every read and write of the page's storage throws (a browser that refuses
-// it), and the page's media queries are kept (`watchMedia`).
+// it), and the page's media queries are kept (`watchMedia`). The one read let through is the
+// screen layout the harness keeps (h.openPage: Original, spec 10 Design 7), so the page stays
+// on the layout these checks of 07's canvas are about; the HD layout with storage that throws
+// is checked on its own (`layoutStorageThrows`).
 function storageThrows() {
+  const read = Storage.prototype.getItem;
   for (const name of ['getItem', 'setItem', 'removeItem']) {
-    Storage.prototype[name] = () => {
+    Storage.prototype[name] = function (key) {
+      if (name === 'getItem' && key === 'u6.layout') return read.call(this, key);
       throw new DOMException('test: storage refused', 'SecurityError');
     };
   }
@@ -6564,6 +6571,674 @@ test('Korean pack with the strings of u in a new game (the user\'s zip): the nat
   assert.ok(!where.includes(KO_U), 'nor the pack\'s text');
   console.log(`  receipt: the syllable shown ${took} steps after the start; strings of u put from the pack by then ${counts.hits}, missed ${counts.misses}`);
 }, { needs: h.haveZip });
+
+// --- the HD layout (spec 10) -------------------------------------------------------------------
+// With HD on and the screen layout HD 16:9 (the page's default; h.openPage keeps Original unless
+// a test asks for HD), the canvas is 1280 x 720, composed from the x4 frame: in game the map
+// window and the command bar one to one, the date line, the side panel and the message scroll
+// beside them at one scale; every other screen the whole frame letterboxed. Clicks go through
+// the page's map of it (`__u6Layout`, h.screenPoint). Frames are compared in the page, by
+// equality only; the receipts print sizes, scales, places and counts the tests made.
+
+// The parts of the game's screen the layout shows, as classic rects [x, y, width, height] (spec 10
+// Measured facts, from the engine's code): the test's own reading, checked against the page's.
+const LAYOUT_PARTS = {
+  map: [8, 8, 160, 160],
+  commands: [8, 176, 160, 17],
+  date: [16, 168, 152, 8],
+  panel: [168, 6, 144, 98],
+  messages: [176, 112, 136, 80],
+};
+
+// A gated page (gameFirst) with the HD layout kept, in a `width` x `height` window, on the
+// user's disks, started at its prompt with the canvas focused.
+async function bootLayout(env, { width = 1400, height = 900 } = {}) {
+  const { context, page } = await h.openPage(env, { layout: 'hd' });
+  await page.setViewportSize({ width, height });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await page.focus('#screen');
+  await h.waitPrompt(page);
+  return { context, page };
+}
+
+// What the page shows of the layout: the body's layout, what the canvas shows, its size, its box
+// (CSS px, its place, and device px) and scaling, the compositor's scale (0 with HD off), the
+// stored choice.
+const layoutShown = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen');
+  const box = c.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const round = (v) => Math.round(v * 100) / 100;
+  const g = globalThis.__shownGame;
+  let stored = null;
+  try {
+    stored = localStorage.getItem('u6.layout');
+  } catch {
+    stored = 'unreadable';
+  }
+  return {
+    layout: document.body.dataset.layout,
+    view: globalThis.__u6Layout.view,
+    size: [c.width, c.height],
+    box: [box.width, box.height].map(round),
+    at: [box.left, box.top].map(round),
+    device: [box.width * dpr, box.height * dpr].map(round),
+    viewport: [innerWidth, innerHeight],
+    rendering: getComputedStyle(c).imageRendering,
+    scale: g && g.hd_on() ? g.hd_scale() : 0,
+    stored,
+  };
+});
+
+// The page's layout table.
+const layoutTable = (page) => page.evaluate(() => {
+  const L = globalThis.__u6Layout;
+  return { regions: L.regions, whole: L.whole, rest: L.rest, size: L.size };
+});
+
+// The canvas pixel `p` shows in region `r` (its classic rect `from`, its canvas rect `to`), the
+// point clamped into the canvas rect: the nearest pixel of that region.
+function regionPixel({ from, to }, [px, py]) {
+  const at = (v, o, n, m) => Math.min(n - 1, Math.max(0, Math.floor(((v - o) * n) / m)));
+  return [from[0] + at(px, to[0], from[2], to[2]), from[1] + at(py, to[1], from[3], to[3])];
+}
+
+// Per one-to-one region of the canvas (a canvas rect the size of its x4 rect), the pixels that
+// differ from the x4 frame's and the pixels compared, read in the page; equality only.
+const oneToOne = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen');
+  const g = globalThis.__shownGame;
+  const w4 = g.width() * 4;
+  const frame = g.hd_frame_rgba();
+  const shown = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const out = {};
+  for (const { name, from, to } of globalThis.__u6Layout.regions) {
+    if (to[2] !== 4 * from[2] || to[3] !== 4 * from[3]) continue;
+    let differ = 0;
+    for (let y = 0; y < to[3]; y += 1) {
+      for (let x = 0; x < to[2]; x += 1) {
+        const a = ((to[1] + y) * c.width + to[0] + x) * 4;
+        const b = ((4 * from[1] + y) * w4 + 4 * from[0] + x) * 4;
+        if (shown[a] !== frame[b] || shown[a + 1] !== frame[b + 1] || shown[a + 2] !== frame[b + 2]
+          || shown[a + 3] !== frame[b + 3]) differ += 1;
+      }
+    }
+    out[name] = { differ, compared: to[2] * to[3] };
+  }
+  return out;
+});
+
+// Per region named (a region of the game screen, or `whole`: the letterboxed frame), what the
+// canvas shows of the x4 frame where a scaled copy is that colour whatever its filter: the game
+// pixels of the region whose 3 x 3 neighbourhood in the x4 frame is one flat colour (`compared`;
+// `lit` those not black, `colours` how many colours), and how many of them the canvas, at the
+// centre of what shows each, does not show within 2 of each channel (`differ`). Read in the
+// page, the display frozen by the caller; counts the receipts never print (they are the user's
+// picture).
+const flatShown = (page, names) => page.evaluate((wanted) => {
+  const c = document.getElementById('screen');
+  const L = globalThis.__u6Layout;
+  const g = globalThis.__shownGame;
+  const f = g.hd_frame_rgba();
+  const [w, hh] = [g.width(), g.height()];
+  const w4 = w * 4;
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const rects = Object.fromEntries(L.regions.map((r) => [r.name, r.from]));
+  rects.whole = [0, 0, w, hh];
+  const out = {};
+  for (const name of wanted) {
+    const [fx, fy, fw, fh] = rects[name];
+    let compared = 0;
+    let lit = 0;
+    let differ = 0;
+    const colours = new Set();
+    for (let gy = Math.max(fy, 1); gy < Math.min(fy + fh, hh - 1); gy += 1) {
+      for (let gx = Math.max(fx, 1); gx < Math.min(fx + fw, w - 1); gx += 1) {
+        const ref = (4 * gy * w4 + 4 * gx) * 4;
+        let one = true;
+        for (let y = 4 * (gy - 1); y < 4 * (gy + 2) && one; y += 1) {
+          for (let x = 4 * (gx - 1); x < 4 * (gx + 2); x += 1) {
+            const i = (y * w4 + x) * 4;
+            if (f[i] !== f[ref] || f[i + 1] !== f[ref + 1] || f[i + 2] !== f[ref + 2]) {
+              one = false;
+              break;
+            }
+          }
+        }
+        if (!one) continue;
+        const [cx, cy] = L.toCanvas(gx, gy).map(Math.floor);
+        const i = (cy * c.width + cx) * 4;
+        compared += 1;
+        colours.add((f[ref] << 16) | (f[ref + 1] << 8) | f[ref + 2]);
+        if (f[ref] + f[ref + 1] + f[ref + 2] > 0) lit += 1;
+        if ([0, 1, 2].some((k) => Math.abs(d[i + k] - f[ref + k]) > 2)) differ += 1;
+      }
+    }
+    out[name] = { compared, lit, differ, colours: colours.size };
+  }
+  return out;
+}, names);
+
+// The least flat pixels a scaled region of the game screen must offer the check (its paper
+// round the text and the pictures gives many more at the boot).
+const FLAT_MIN = { date: 8, panel: 100, messages: 100 };
+
+// A hash of the canvas's pixels in canvas rect [x, y, w, h], read in the page.
+const rectHash = (page, rect) => page.evaluate(([x, y, w, hh]) => {
+  const d = document.getElementById('screen').getContext('2d').getImageData(x, y, w, hh).data;
+  let v = 0x811c9dc5;
+  for (let i = 0; i < d.length; i += 1) v = Math.imul(v ^ d[i], 0x01000193) >>> 0;
+  return v;
+}, rect);
+
+// Page script, once the game presented: every pointer event the page gives the game on screen
+// from now, as [x, y, buttons], in `window.__pointer` (the game's own method underneath).
+const recordPointer = (page) => page.evaluate(() => {
+  const g = globalThis.__shownGame;
+  const real = Object.getPrototypeOf(g).pointer;
+  window.__pointer = [];
+  g.pointer = function (x, y, buttons) {
+    window.__pointer.push([x, y, buttons]);
+    return real.call(this, x, y, buttons);
+  };
+});
+const pointerSince = (page, n) => page.evaluate((from) => window.__pointer.slice(from), n);
+const pointerCount = (page) => page.evaluate(() => window.__pointer.length);
+
+// Presses and releases the left button at canvas pixel `p` (the mouse moved there first), then
+// until the game took both: the pointer events the page gave it for that.
+async function canvasClick(page, p, settle = 0) {
+  const n = await pointerCount(page);
+  await page.mouse.click(...(await h.canvasPoint(page, p[0] + 0.5, p[1] + 0.5)));
+  await h.waitTaken(page);
+  await h.waitTicks(page, settle);
+  return pointerSince(page, n);
+}
+
+test('HD layout (spec 10 Acceptance 1): in game in a 1400 x 900 window the canvas is 1280 x 720 in a box of as many CSS px, scaled sharp, the compositor at S 4; the map window and the command bar on it equal their rects of the x4 frame pixel for pixel; the date line, the side panel and the message scroll at one scale of 3.5..3.75 in the column beside them, centred, showing the x4 frame\'s colours, the largest that puts every rect on whole pixels; every rect inside the canvas, margins at least 4 px and the same all round; every canvas pixel of a region maps to a game pixel of its rect and back; no page error', async (env) => {
+  const errors = [];
+  const { page } = await bootLayout(env);
+  page.on('pageerror', () => errors.push(1));
+  const shown = await layoutShown(page);
+  assert.ok(shown.layout === 'hd' && shown.view === 'game', 'the HD layout in game');
+  assert.deepEqual(shown.size, [1280, 720], 'the canvas 1280 x 720');
+  assert.deepEqual(shown.box, [1280, 720], 'in a box of as many CSS px');
+  assert.equal(shown.scale, 4, 'the compositor at S 4');
+  assert.ok(SHARP.includes(shown.rendering), 'one to one: scaled sharp');
+  const { regions } = await layoutTable(page);
+  assert.deepEqual(regions.map((r) => r.name), Object.keys(LAYOUT_PARTS), 'five regions, in order');
+  for (const r of regions) {
+    assert.deepEqual(r.from, LAYOUT_PARTS[r.name], `${r.name}: its classic rect`);
+    const [x, y, w, hh] = r.to;
+    assert.ok(r.to.every(Number.isInteger), `${r.name}: on whole pixels`);
+    assert.ok(x >= 0 && y >= 0 && x + w <= 1280 && y + hh <= 720, `${r.name}: inside the canvas`);
+  }
+  for (const [i, a] of regions.entries()) {
+    for (const b of regions.slice(i + 1)) {
+      const apart = a.to[0] + a.to[2] <= b.to[0] || b.to[0] + b.to[2] <= a.to[0]
+        || a.to[1] + a.to[3] <= b.to[1] || b.to[1] + b.to[3] <= a.to[1];
+      assert.ok(apart, `${a.name} and ${b.name} do not overlap`);
+    }
+  }
+  const [map, commands, ...column] = regions;
+  for (const r of [map, commands]) assert.ok(r.to[2] === 4 * r.from[2] && r.to[3] === 4 * r.from[3], `${r.name}: x4, one to one`);
+  assert.ok(commands.to[1] > map.to[1] && commands.to[0] === map.to[0], 'the command bar under the map window');
+  const s = column[0].to[2] / column[0].from[2];
+  assert.ok(s >= 3.5 && s <= 3.75, 'the column\'s scale in 3.5..3.75');
+  for (const r of column) assert.ok(r.to[2] === s * r.from[2] && r.to[3] === s * r.from[3], `${r.name}: at the column's scale`);
+  const m = map.to[0];
+  assert.ok(m >= 4, 'margins at least 4 px');
+  assert.ok(map.to[1] === m && commands.to[1] - (map.to[1] + map.to[3]) === m && 720 - (commands.to[1] + commands.to[3]) === m,
+    'the left column: the same margin at the top, between and at the bottom');
+  const [x0, x1] = [map.to[0] + map.to[2] + m, 1280 - m];
+  for (const r of column) {
+    assert.ok(r.to[0] >= x0 && r.to[0] + r.to[2] <= x1, `${r.name}: in the column`);
+    assert.equal(r.to[0] - x0, x1 - (r.to[0] + r.to[2]), `${r.name}: centred in the column`);
+  }
+  assert.ok(column[0].to[1] === m && 720 - (column[2].to[1] + column[2].to[3]) === m, 'the column: the same margin at the top and the bottom');
+  const gaps = [0, 1].map((i) => column[i + 1].to[1] - (column[i].to[1] + column[i].to[3]));
+  assert.ok(gaps.every((g) => g >= 4) && Math.abs(gaps[0] - gaps[1]) <= 1, 'the date line, the panel, the scroll in order, at least 4 px apart, the gaps within a pixel of each other');
+  // The largest scale: none above it in 3.5..3.75 (on a 1/400 grid) puts every column rect on
+  // whole pixels and fits the column's height with margins and gaps of at least 4 px.
+  const height = column.reduce((n, r) => n + r.from[3], 0);
+  for (let k = Math.round(s * 400) + 1; k <= 3.75 * 400; k += 1) {
+    const t = k / 400;
+    const whole = column.every((r) => Number.isInteger(t * r.from[2]) && Number.isInteger(t * r.from[3]));
+    assert.ok(!whole || t * height + 4 * 4 > 720, 'no larger scale of the range fits on whole pixels');
+  }
+  // The canvas as drawn, the display frozen: the one-to-one regions against the x4 frame.
+  await h.virtualDisplay(page, 60);
+  const same = await oneToOne(page);
+  assert.deepEqual(Object.keys(same), ['map', 'commands'], 'the map window and the command bar one to one');
+  for (const [name, { differ }] of Object.entries(same)) assert.equal(differ, 0, `${name}: the x4 frame's pixels`);
+  // The scaled regions (the column): the x4 frame's colours where a scaled copy shows them.
+  const flat = await flatShown(page, column.map((r) => r.name));
+  for (const r of column) {
+    assert.ok(flat[r.name].compared >= FLAT_MIN[r.name], `${r.name}: flat pixels to compare`);
+    assert.equal(flat[r.name].differ, 0, `${r.name}: the x4 frame's colours at the column's scale`);
+  }
+  assert.ok(flat.panel.colours >= 2, 'the panel: more than one colour compared');
+  // Every canvas pixel of a region: the game pixel it reaches is in that region's rect, and that
+  // pixel's centre is shown within half a game pixel of it; the corners and centre of each rect
+  // go there and back; a game pixel outside the regions is not shown.
+  const trips = await page.evaluate(() => {
+    const L = globalThis.__u6Layout;
+    let bad = 0;
+    let swept = 0;
+    let round = 0;
+    for (const { from: [fx, fy, fw, fh], to: [x, y, w, hh] } of L.regions) {
+      const [sx, sy] = [w / fw, hh / fh];
+      for (let py = y; py < y + hh; py += 1) {
+        for (let px = x; px < x + w; px += 1) {
+          swept += 1;
+          const [gx, gy] = L.toGame(px + 0.5, py + 0.5);
+          const inside = gx >= fx && gx < fx + fw && gy >= fy && gy < fy + fh;
+          const back = inside ? L.toCanvas(gx, gy) : null;
+          if (!back || Math.abs(back[0] - px - 0.5) > sx / 2 || Math.abs(back[1] - py - 0.5) > sy / 2) bad += 1;
+        }
+      }
+      for (const [gx, gy] of [[fx, fy], [fx + fw - 1, fy], [fx, fy + fh - 1], [fx + fw - 1, fy + fh - 1], [fx + (fw >> 1), fy + (fh >> 1)]]) {
+        round += 1;
+        const p = L.toCanvas(gx, gy);
+        const g = L.toGame(p[0], p[1]);
+        if (g[0] !== gx || g[1] !== gy) bad += 1;
+      }
+    }
+    const hidden = [[0, 0], [319, 199], [4, 100], [170, 106]].filter(([gx, gy]) => L.toCanvas(gx, gy) !== null).length;
+    return { bad, swept, round, hidden };
+  });
+  assert.equal(trips.bad, 0, 'canvas pixels and game pixels map both ways');
+  assert.equal(trips.hidden, 0, 'a game pixel outside the regions is not shown');
+  assert.equal(errors.length, 0, 'no page error');
+  const compared = Object.values(same).map((r) => r.compared).join(' and ');
+  console.log(`  receipt: canvas 1280x720 in a ${shown.box.join('x')} box (${shown.rendering}); map window and command bar ${compared} pixels compared with the x4 frame, ${Object.values(same).reduce((n, r) => n + r.differ, 0)} differ; the date line, the panel and the scroll show the x4 frame's colours; the column at ${s}, margins ${m} px, the column's gaps ${gaps.join(' and ')} px; ${trips.swept} canvas pixels and ${trips.round} round trips mapped: pass`);
+}, { needs: h.haveHfes });
+
+test('HD layout (spec 10 Acceptance 2): clicks through the layout reach the game at the pixel they show: a map cell walks toward it or is Look\'s target, each of the ten command icons selects its command (a right press underlines that icon alone), Look waits for its target and Escape takes it back, the party roster\'s figure opens that member\'s panel and the canvas shows the new panel; in a gap or a margin a move with no button reaches the nearest pixel of the nearest region, a press, its release and a move with a button held the rest of the screen, the original\'s click there: at the prompt a pass (no walk, no command), while Look waits for its target a cancel', async (env) => {
+  const { page } = await bootLayout(env);
+  await recordPointer(page);
+  const { regions, rest } = await layoutTable(page);
+  const [map, commands, date] = regions;
+  const at = (name) => regions.find((r) => r.name === name);
+  // The rest of the screen: in none of the regions' classic rects.
+  assert.ok(Object.values(LAYOUT_PARTS).every(([x, y, w, hh]) => rest[0] < x || rest[0] >= x + w || rest[1] < y || rest[1] >= y + hh),
+    'the rest of the screen lies outside every region');
+  // Moves with no button in gaps and margins: the nearest pixel of the nearest region.
+  const gapMoves = [
+    [map, [map.to[0] + map.to[2] + 2, 300], 'between the map window and the column'],
+    [map, [300, map.to[1] + map.to[3] + 1], 'between the map window and the command bar'],
+    [commands, [300, commands.to[1] - 1], 'between the command bar and the map window'],
+    [map, [1, 1], 'in the top left margin'],
+    [date, [960, date.to[1] + date.to[3] + 6], 'under the date line'],
+    [at('messages'), [1279, 719], 'in the bottom right margin'],
+  ];
+  for (const [region, p, label] of gapMoves) {
+    const n = await pointerCount(page);
+    await page.mouse.move(...(await h.canvasPoint(page, p[0] + 0.5, p[1] + 0.5)));
+    await page.waitForFunction((k) => window.__pointer.length > k, n, { timeout: 5000 });
+    const sent = await pointerSince(page, n);
+    assert.deepEqual(sent.at(-1), [...regionPixel(region, [p[0] + 0.5, p[1] + 0.5]), 0], `a move ${label}: the nearest pixel of the ${region.name}`);
+  }
+  // A press and its release in gaps and a margin, at the prompt: the rest of the screen; the
+  // original takes it as a pass (ui/click.rs region 3, the command loop's 0x8f), so the world
+  // turn runs and the prompt comes back with the hero walked nowhere (a foe of the start fight
+  // that kills him in that turn wakes him on the start cell: h.WAKE_CELL).
+  const gapPresses = [
+    [[map.to[0] + map.to[2] + 2, 300], 'between the map window and the column'],
+    [[300, map.to[1] + map.to[3] + 1], 'between the map window and the command bar'],
+    [[1, 1], 'in the top left margin'],
+  ];
+  for (const [p, label] of gapPresses) {
+    await h.waitPrompt(page);
+    const from = (await h.state(page)).leader;
+    const sent = await canvasClick(page, p);
+    const press = sent.find(([, , b]) => b === 1);
+    const release = sent.findLast(([, , b]) => b === 0);
+    assert.ok(press && release, `a press ${label}: the press and the release reached the game`);
+    assert.deepEqual([press.slice(0, 2), release.slice(0, 2)], [rest, rest], `a press ${label}: the rest of the screen`);
+    await h.waitPrompt(page);
+    const to = (await h.state(page)).leader;
+    assert.ok(to === from || to === h.WAKE_CELL, `a press ${label}: no walk`);
+    assert.equal(await promptNow(page), '1', `a press ${label}: no command waits`);
+  }
+  // A press on the map (the hero's own cell: a pass), then a move into a gap with the button
+  // still held: the rest of the screen (no walk target there), and the release there too.
+  await h.waitPrompt(page);
+  let mark = await pointerCount(page);
+  await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
+  await page.mouse.down();
+  const gap = [map.to[0] + map.to[2] + 2, 500];
+  await page.mouse.move(...(await h.canvasPoint(page, gap[0] + 0.5, gap[1] + 0.5)));
+  await page.waitForFunction((k) => window.__pointer.slice(k).some(([, , b]) => b === 1), mark, { timeout: 5000 });
+  let held = await pointerSince(page, mark);
+  const down = held.findIndex(([, , b]) => b === 1);
+  assert.deepEqual(held[down], [88, 88, 1], 'the press on the map at its pixel');
+  await page.waitForFunction((k) => window.__pointer.length > k, mark + down + 1, { timeout: 5000 });
+  held = await pointerSince(page, mark);
+  assert.deepEqual(held[down + 1], [...rest, 1], 'the held move into the gap: the rest of the screen, the button held');
+  await page.mouse.up();
+  await h.waitTaken(page);
+  held = await pointerSince(page, mark);
+  assert.deepEqual(held.at(-1), [...rest, 0], 'its release there: the rest of the screen');
+  await h.waitPrompt(page);
+  // The command icons (x = 8 + 16 i, y 176..191): a right press on each underlines it and no
+  // other (ui/cursor.rs: row 192 under it in the command colour, one flat colour, the same for
+  // every icon; the old underline painted over in paper), and runs nothing. Read with the
+  // pointer moved off the bar (its arrow would lie over the row), in the page.
+  const underlined = (sel) => page.evaluate((i) => {
+    const c = document.getElementById('screen');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const L = globalThis.__u6Layout;
+    const rows = Array.from({ length: 10 }, (_, n) => Array.from({ length: 16 }, (_, k) => {
+      const [x, y] = L.toCanvas(8 + 16 * n + k, 192).map(Math.floor);
+      const j = (y * c.width + x) * 4;
+      return `${d[j]},${d[j + 1]},${d[j + 2]}`;
+    }));
+    const inked = (row) => row.every((p) => p === window.__ink);
+    window.__ink ??= rows[i][0];
+    return { inked: inked(rows[i]), others: rows.filter((row, n) => n !== i && inked(row)).length };
+  }, sel);
+  for (let i = 0; i < 10; i += 1) {
+    const n = await pointerCount(page);
+    await page.mouse.click(...(await h.screenPoint(page, 8 + 16 * i + 8, 184)), { button: 'right' });
+    await h.waitTaken(page);
+    await page.mouse.move(...(await h.screenPoint(page, 88, 40)));
+    await h.waitTaken(page);
+    await h.waitTicks(page, 3);
+    const press = (await pointerSince(page, n)).find(([, , b]) => b === 2);
+    assert.deepEqual(press, [8 + 16 * i + 8, 184, 2], `icon ${i}: the right press at its pixel`);
+    const u = await underlined(i);
+    assert.ok(u.inked && u.others === 0, `icon ${i}: underlined, alone`);
+    assert.equal(await promptNow(page), '1', `icon ${i}: the right press runs nothing`);
+  }
+  // Look (the fourth icon) by a left click waits for its target; Escape takes it back.
+  await h.click(page, 64, 184, 30);
+  assert.equal(await promptNow(page), '0', 'Look waits for its target');
+  await page.keyboard.press('Escape');
+  await h.waitPrompt(page);
+  // Look's target on a map cell, the hero's own (window cell (5, 5), centred on game pixel
+  // (88, 88)): the description's portrait waits for a key or a click; a click on that cell
+  // answers it and walks nowhere (as `lookAtHero`).
+  await h.click(page, 64, 184, 30);
+  const here = (await h.state(page)).leader;
+  mark = await pointerCount(page);
+  await h.click(page, 88, 88, 90);
+  assert.deepEqual((await pointerSince(page, mark)).find(([, , b]) => b === 1), [88, 88, 1], 'Look\'s target pressed at the hero\'s pixel');
+  assert.equal(await promptNow(page), '0', 'Look on the hero: the portrait waits');
+  await h.click(page, 88, 88, 0);
+  await h.waitPrompt(page);
+  assert.equal((await h.state(page)).leader, here, 'the click that closes the portrait does not walk');
+  // Look again; a press in a gap cancels it (region 3: the target cleared) and walks nowhere.
+  await h.click(page, 64, 184, 30);
+  assert.equal(await promptNow(page), '0', 'Look waits for its target again');
+  const looking = (await h.state(page)).leader;
+  const cancel = await canvasClick(page, [map.to[0] + map.to[2] + 2, 300]);
+  assert.deepEqual(cancel.find(([, , b]) => b === 1).slice(0, 2), rest, 'the press in the gap: the rest of the screen');
+  await h.waitPrompt(page);
+  const after = (await h.state(page)).leader;
+  assert.ok(after === looking || after === h.WAKE_CELL, 'the cancel walks nowhere');
+  // A map cell: clicks walk (one step toward a cell beside the hero, `clickStep`).
+  const walked = await clickStep(page);
+  assert.notEqual(walked.to, walked.from, 'a click on the map walks');
+  // The roster's first member, on the figures (x 0xb1..0xc0): their inventory panel, whose - and
+  // + the game then takes (ui/click.rs roster_click).
+  // The pointer over the figure first, so the panel's canvas before and after the click differs
+  // by what the game drew in the panel only (its arrow is there both times).
+  const panel = at('panel');
+  await page.mouse.move(...(await h.screenPoint(page, 184, 32)));
+  await h.waitTaken(page);
+  await h.waitTicks(page, 5);
+  const roster = await rectHash(page, panel.to);
+  mark = await pointerCount(page);
+  await h.click(page, 184, 32, 0);
+  assert.deepEqual((await pointerSince(page, mark)).find(([, , b]) => b === 1), [184, 32, 1], 'the press on the figure at its pixel');
+  await page.waitForFunction(() => globalThis.__owned === 3, null, { timeout: 10_000 });
+  // The panel's new picture reached the canvas over the frame shown before (the dirty rect's
+  // path: a scaled region drawn again whole): it changed, and it is the x4 frame's, the display
+  // frozen.
+  await h.waitTicks(page, 10);
+  await h.virtualDisplay(page, 60);
+  assert.notEqual(await rectHash(page, panel.to), roster, 'the panel\'s canvas changed');
+  const now = (await flatShown(page, ['panel'])).panel;
+  assert.ok(now.compared >= FLAT_MIN.panel, 'the new panel: flat pixels to compare');
+  assert.equal(now.differ, 0, 'the new panel: the x4 frame\'s colours');
+  console.log(`  receipt: ${gapMoves.length} gap moves at the nearest region pixel; ${gapPresses.length} gap presses at the rest of the screen, no walk; a held move into a gap and its release at the rest of the screen; 10 icons underlined by a right press; Look on the hero's cell; Look cancelled by a gap press; a map click walked; the roster figure opened the member's panel, drawn again on the canvas from the x4 frame: pass`);
+}, { needs: h.haveHfes });
+
+test('HD layout (spec 10 Acceptance 3): the opening and the menu show the whole x4 frame letterboxed, 1152 x 720 centred with the sides dark, the frame\'s colours where it shows them; their clicks still land, in the opening and in the menu: a press reaches the game at the pixel it shows (on a dark side at the nearest edge) and the game takes it; the keys still work', async (env) => {
+  const { page } = await h.openPage(env, { gameFirst: false, layout: 'hd' });
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await h.load(page, env);
+  await h.dropFiles(page, [h.ZIP]);
+  await started(page);
+  await h.waitProgram(page, 'u');
+  await h.waitTicks(page, 60);
+  let shown = await layoutShown(page);
+  assert.ok(shown.layout === 'hd' && shown.view === 'whole', 'the opening: the whole frame');
+  assert.deepEqual(shown.size, [1280, 720], 'on the 1280 x 720 canvas');
+  const { whole } = await layoutTable(page);
+  assert.deepEqual(whole, [64, 0, 1152, 720], 'letterboxed: 1152 x 720 (16:10), centred');
+  // The sides: one dark colour, the same on both.
+  const sides = () => page.evaluate(([x, w]) => {
+    const c = document.getElementById('screen');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const first = `${d[0]},${d[1]},${d[2]}`;
+    let off = 0;
+    let n = 0;
+    for (let y = 0; y < c.height; y += 1) {
+      for (const [a, b] of [[0, x], [x + w, c.width]]) {
+        for (let px = a; px < b; px += 1) {
+          n += 1;
+          const i = (y * c.width + px) * 4;
+          if (`${d[i]},${d[i + 1]},${d[i + 2]}` !== first) off += 1;
+        }
+      }
+    }
+    return { off, n, dark: d[0] + d[1] + d[2] < 3 * 48 };
+  }, [whole[0], whole[2]]);
+  let side = await sides();
+  assert.ok(side.off === 0 && side.dark, 'the opening: the sides dark');
+  // A click while the opening runs: it lands at the pixel it shows and the game takes it.
+  await recordPointer(page);
+  let mark = await pointerCount(page);
+  await page.mouse.click(...(await h.screenPoint(page, 120, 80)));
+  await h.waitTaken(page);
+  assert.deepEqual((await pointerSince(page, mark)).find(([, , b]) => b === 1), [120, 80, 1], 'a press in the opening lands there');
+  assert.ok((await h.state(page)).program === 'u' && (await layoutShown(page)).view === 'whole', 'still the opening, letterboxed');
+  await page.focus('#screen');
+  await h.press(page, 'Escape', 120);
+  assert.equal((await h.state(page)).program, 'u', 'Escape: the menu');
+  shown = await layoutShown(page);
+  assert.equal(shown.view, 'whole', 'the menu: the whole frame');
+  side = await sides();
+  assert.ok(side.off === 0 && side.dark, 'the menu: the sides dark');
+  // Clicks: at game pixels through the page's map, and on the dark sides.
+  const points = [[160, 100], [0, 0], [319, 199], [40, 150], [300, 20]];
+  for (const [gx, gy] of points) {
+    mark = await pointerCount(page);
+    await page.mouse.click(...(await h.screenPoint(page, gx, gy)));
+    await h.waitTaken(page);
+    const press = (await pointerSince(page, mark)).find(([, , b]) => b === 1);
+    assert.deepEqual(press, [gx, gy, 1], `a press at (${gx}, ${gy}) lands there`);
+  }
+  // On a side: the nearest edge pixel of the frame (the point clamped into the letterbox).
+  const edge = ([px, py]) => [
+    Math.min(319, Math.max(0, Math.floor(((px - whole[0]) * 320) / whole[2]))),
+    Math.min(199, Math.max(0, Math.floor(((py - whole[1]) * 200) / whole[3]))),
+  ];
+  for (const [p, label] of [[[20, 360], 'the left side'], [[1260, 700], 'the right side']]) {
+    const want = edge([p[0] + 0.5, p[1] + 0.5]);
+    assert.ok(want[0] === (p[0] < 640 ? 0 : 319), `${label}: an edge pixel`);
+    const sent = await canvasClick(page, p);
+    assert.deepEqual(sent.find(([, , b]) => b === 1), [...want, 1], `a press on ${label}: the nearest edge pixel`);
+  }
+  assert.equal((await h.state(page)).program, 'u', 'still the menu');
+  // The frame where it shows: game pixels whose x4 block and its neighbours' are one colour show
+  // that colour (the scaled frame there is that colour whatever the filter), the display frozen.
+  await h.virtualDisplay(page, 60);
+  const content = (await flatShown(page, ['whole'])).whole;
+  assert.ok(content.lit >= 20, 'the menu shows colours to compare');
+  assert.equal(content.differ, 0, 'the frame\'s colours where the letterbox shows them');
+  // How many of the frame's pixels were one colour is the user's picture: compared, not printed.
+  console.log(`  receipt: the opening and the menu letterboxed at ${whole.join(',')}, sides of one dark colour (${side.n} pixels); ${points.length + 3} presses landed (one in the opening); the frame's colours where the letterbox shows them: pass`);
+}, { needs: h.haveZip });
+
+test('HD layout (spec 10 Acceptance 4): fullscreen keeps 16:9 at any size, centred on black, the canvas still 1280 x 720: at 1920 x 1080 the whole screen, smooth; at 2560 x 1440 the whole screen, sharp (x2); at 1728 x 1117 1728 x 972 with bars, smooth; a key reaches the game in each; the page\'s own fullscreen (no requestFullscreen) the same', async (env) => {
+  const sizes = [[1920, 1080, 'smooth'], [2560, 1440, 'sharp'], [1728, 1117, 'smooth']];
+  const lines = [];
+  const check = async (page, mode, label) => {
+    for (const [w, hh, want] of sizes) {
+      await page.setViewportSize({ width: w, height: hh });
+      await page.click('#fullscreen');
+      await waitFull(page, mode);
+      await page.waitForFunction(([vw]) => Math.abs(document.getElementById('screen').getBoundingClientRect().width - Math.min(vw, (innerHeight * 16) / 9)) < 1, [w], { timeout: 10_000 });
+      await h.waitFrames(page, 2);
+      const s = await layoutShown(page);
+      const [bw, bh] = s.box;
+      assert.ok(Math.abs(bw / bh - 16 / 9) < 0.01, `${label} ${w}x${hh}: 16:9`);
+      assert.ok(bw <= w + 0.5 && bh <= hh + 0.5 && (Math.abs(bw - w) < 1 || Math.abs(bh - hh) < 1), `${label} ${w}x${hh}: as large as fits`);
+      assert.ok(Math.abs(s.at[0] - (w - bw) / 2) < 1 && Math.abs(s.at[1] - (hh - bh) / 2) < 1, `${label} ${w}x${hh}: centred`);
+      assert.deepEqual(s.size, [1280, 720], `${label} ${w}x${hh}: the canvas stays 1280 x 720`);
+      const mode2 = SHARP.includes(s.rendering) ? 'sharp' : s.rendering === 'auto' ? 'smooth' : s.rendering;
+      assert.equal(mode2, want, `${label} ${w}x${hh}: ${want}`);
+      const before = (await glue(page)).sent;
+      await h.press(page, 'Space', 2);
+      const g = await glue(page);
+      const key = g.sent === before + 1 && g.lastSent === ' ';
+      assert.ok(key, `${label} ${w}x${hh}: a key reaches the game`);
+      lines.push(`${label} ${w}x${hh}: box ${bw}x${bh} at ${s.at.join(',')}, ${mode2}, a key reached the game`);
+      // The Exit button shows while the pointer moves (it hides 2 s after).
+      await page.mouse.move(200, 200);
+      await page.mouse.move(220, 210);
+      await page.click('#fullscreen-exit');
+      await waitFull(page, 'off');
+      await h.waitPrompt(page);
+    }
+  };
+  let { context, page } = await bootLayout(env);
+  await check(page, 'on', 'fullscreen');
+  await context.close();
+  ({ context, page } = await h.openPage(env, { layout: 'hd' }));
+  await context.addInitScript(() => { delete Element.prototype.requestFullscreen; });
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await page.focus('#screen');
+  await h.waitPrompt(page);
+  await check(page, 'css', 'the page\'s own');
+  for (const line of lines) console.log(`  receipt: ${line}`);
+}, { needs: h.haveHfes });
+
+// Page init script: every read and write of the page's storage throws, the layout's too.
+function layoutStorageThrows() {
+  for (const name of ['getItem', 'setItem', 'removeItem']) {
+    Storage.prototype[name] = () => {
+      throw new DOMException('test: storage refused', 'SecurityError');
+    };
+  }
+}
+
+test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (HD 16:9, Original 16:10, in the page\'s language) switches the game on screen at once and is kept; any other kept value is HD; Original with HD on is 07\'s canvas (1280 x 800 at S 4 in a 16:10 box); HD off with the HD layout chosen is the page as before (the 320 x 200 frame, a 16:10 box, the pointer through the box); after an engine trap a switch changes neither the canvas nor its box; with storage that throws the layout is HD, switches for the visit and nothing is kept; no page error', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const errors = [];
+  let { context, page } = await bootLayout(env, { width: 1024 });
+  page.on('pageerror', () => errors.push(1));
+  let s = await layoutShown(page);
+  assert.ok(s.layout === 'hd' && s.view === 'game' && s.size[0] === 1280 && s.size[1] === 720, 'HD 16:9');
+  const column = await page.evaluate(() => {
+    const main = document.querySelector('main');
+    const pad = getComputedStyle(main);
+    return main.clientWidth - parseFloat(pad.paddingLeft) - parseFloat(pad.paddingRight);
+  });
+  assert.ok(column < 1280 && Math.abs(s.box[0] - column) < 0.5 && Math.abs(s.box[1] - (column * 9) / 16) < 0.5, 'a 16:9 box as wide as the column');
+  assert.equal(s.rendering, 'auto', 'more canvas pixels than box pixels: smooth');
+  await page.click('#settings');
+  const choice = () => page.evaluate(() => ({
+    title: document.getElementById('layout-title').textContent,
+    labels: [...document.querySelectorAll('#layout-choice label')].map((l) => l.textContent.replace(/\s+/g, ' ').trim()),
+    values: [...document.querySelectorAll('input[name="layout"]')].map((i) => [i.value, i.checked]),
+    inSettings: document.getElementById('setup').contains(document.getElementById('layout-choice')),
+  }));
+  let c = await choice();
+  assert.ok(c.inSettings, 'in Settings');
+  assert.deepEqual([c.title, c.labels], [TEXT.en.layout, ['HD 16:9', TEXT.en.layoutOriginal]], 'its words in English');
+  assert.deepEqual(c.values, [['hd', true], ['original', false]], 'HD 16:9 checked');
+  await page.check('input[name="layout"][value="original"]');
+  s = await layoutShown(page);
+  assert.ok(s.layout === 'original' && s.view === 'frame' && s.stored === 'original', 'Original at once, kept');
+  assert.ok(s.size[0] === 1280 && s.size[1] === 800 && s.scale === 4, '07\'s canvas: the x4 frame');
+  assert.deepEqual(s.box, [960, 600], 'in a 16:10 box');
+  assert.ok(await canvasShowsGame(page), 'the HD frame as it is');
+  await page.check('input[name="layout"][value="hd"]');
+  s = await layoutShown(page);
+  assert.ok(s.layout === 'hd' && s.view === 'game' && s.size[1] === 720 && s.stored === 'hd', 'HD 16:9 again at once, kept');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  c = await choice();
+  assert.deepEqual([c.title, c.labels], [TEXT.ko.layout, ['HD 16:9', TEXT.ko.layoutOriginal]], 'its words in Korean');
+  await page.check('input[name="setup-lang"][value="en"]');
+  // HD off: the page as before, whatever the layout chosen.
+  await page.click('#hd');
+  s = await layoutShown(page);
+  assert.ok(s.layout === 'original' && s.view === 'frame' && s.size[0] === 320 && s.size[1] === 200, 'HD off: the 320 x 200 frame');
+  assert.deepEqual(s.box, [960, 600], 'in a 16:10 box');
+  assert.ok(await canvasShowsGame(page), 'the RGBA frame');
+  const identity = await page.evaluate(() => [globalThis.__u6Layout.toGame(88.5, 88.5), globalThis.__u6Layout.toCanvas(88, 88)]);
+  assert.deepEqual(identity, [[88, 88], [88.5, 88.5]], 'the page\'s map: the canvas is the frame');
+  await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
+  await page.waitForFunction(() => globalThis.__pointerAt?.[0] === 88 && globalThis.__pointerAt[1] === 88, null, { timeout: 5000 });
+  await page.click('#hd');
+  s = await layoutShown(page);
+  assert.ok(s.layout === 'hd' && s.view === 'game' && s.size[1] === 720, 'HD on: the HD layout again');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  // Kept across a reload, as chosen; another value is HD.
+  for (const [kept, want] of [['original', 'original'], ['hd', 'hd'], ['wide', 'hd']]) {
+    await page.evaluate((v) => localStorage.setItem('u6.layout', v), kept);
+    await page.reload();
+    await started(page, FILES);
+    await h.waitPrompt(page);
+    s = await layoutShown(page);
+    assert.equal(s.layout, want, `kept ${kept}: ${want}`);
+    assert.ok(want === 'hd' ? s.size[1] === 720 && s.view === 'game' : s.size[1] === 800 && s.view === 'frame', `kept ${kept}: its canvas`);
+  }
+  // After an engine trap nothing calls into the engine again: a switch of the layout or of HD
+  // leaves the canvas as it was, in the box it had, until the reload (the choice still kept).
+  await page.evaluate(() => { globalThis.__trap = true; });
+  await page.waitForFunction(() => document.body.dataset.state === 'crashed');
+  const trapped = await canvasHash(page);
+  await page.click('#settings');
+  await page.check('input[name="layout"][value="original"]');
+  s = await layoutShown(page);
+  assert.ok(s.layout === 'hd' && s.size[0] === 1280 && s.size[1] === 720 && s.stored === 'original', 'trapped: Original kept, the canvas and its box as they were');
+  await page.click('#hd');
+  s = await layoutShown(page);
+  assert.ok(s.layout === 'hd' && s.size[0] === 1280 && s.size[1] === 720, 'trapped: HD off leaves them too');
+  assert.equal(await canvasHash(page), trapped, 'trapped: the canvas not drawn again');
+  await context.close();
+  // Storage that throws: HD 16:9, Original for the visit, nothing kept.
+  ({ context, page } = await h.openPage(env, { layout: null }));
+  await context.addInitScript(layoutStorageThrows);
+  page.on('pageerror', () => errors.push(1));
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  s = await layoutShown(page);
+  assert.ok(s.stored === 'unreadable' && s.layout === 'hd' && s.size[1] === 720, 'storage that throws: HD 16:9');
+  await page.click('#settings');
+  await page.check('input[name="layout"][value="original"]');
+  s = await layoutShown(page);
+  assert.ok(s.layout === 'original' && s.size[1] === 800, 'Original for the visit');
+  await page.reload();
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  s = await layoutShown(page);
+  assert.ok(s.layout === 'hd' && s.size[1] === 720, 'nothing kept: HD 16:9 after a reload');
+  assert.equal(errors.length, 0, 'no page error');
+}, { needs: h.haveHfes });
 
 const filter = process.argv[2];
 const env = await h.setup();
