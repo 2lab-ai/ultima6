@@ -94,7 +94,7 @@ impl Receipt {
                 let pixels = b.pixels.get(..w * h)?;
                 Some((w, h, pixels.iter().map(|&p| through(p)).collect()))
             }
-            Kind::Classic => None,
+            Kind::Classic | Kind::Glyph => None,
         }
     }
 

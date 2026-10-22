@@ -5,7 +5,14 @@
 //! - for a pixel of a tile record, a portrait or a panel bitmap without flags, drawn at the
 //!   image's current version, the block `(u·S.., v·S..)` of that image's HD version, where an HD
 //!   sub-pixel that is transparent takes the pixel's classic colour;
-//! - for every other pixel (classic, flagged, stale), its classic colour.
+//! - for every other pixel (classic, glyph, flagged, stale), its classic colour.
+//!
+//! Spec 11, the HD font mode ([`Compositor::set_font_mode`]): on, each 8 × 8 cell of the screen
+//! grid whose 64 pixels are the glyph of one code drawn whole ([`Kind::Glyph`], (u, v) its place
+//! in the cell, one ink and one paper colour, both present) and whose code is printable ASCII
+//! but the space or a Hangul syllable ([`hd_font_code`]) is filled with its paper colour and
+//! listed ([`Compositor::glyphs`]): the platform draws the character over it in its HD font.
+//! Every other cell is composed as with the mode off.
 //!
 //! An image's HD version (spec 07 "HD image per id"):
 //!
@@ -27,10 +34,11 @@
 //! [`HdImages::bytes`] counts; [`HdImages::peak`] is the retained cache payload peak, the most it
 //! held, also during a composition whose images alone exceed the bound); outside it, the 2×
 //! intermediate of a 4× magnification while it is made, the frame (`WIDTH·S × HEIGHT·S`
-//! words), the last composition's inputs (a [`Src`], an index and a token per screen pixel) and
-//! a few words per image named so far: per tile record up to the largest record id named (the
-//! game's records are 2048), per portrait (letter, item) and per panel bitmap (two) named. The
-//! pack's own images are the platform's ([`Pack`]); the compositor holds a reference to it.
+//! words), the last composition's inputs (a [`Src`], an index and a token per screen pixel, the
+//! glyph per cell) and its list of glyphs, and a few words per image named so far: per tile
+//! record up to the largest record id named (the game's records are 2048), per portrait (letter,
+//! item) and per panel bitmap (two) named. The pack's own images are the platform's ([`Pack`]);
+//! the compositor holds a reference to it.
 //!
 //! The output is packed RGBA words, `u32::from_le_bytes([r, g, b, a])`: in wasm memory (little
 //! endian) the bytes the page's `ImageData` takes.
@@ -42,7 +50,7 @@ mod tests;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::{Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH};
+use crate::{FLAG_INK, Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH};
 
 pub use mmpx::{mmpx, mmpx2x};
 
@@ -530,6 +538,90 @@ impl HdImages {
     }
 }
 
+/// The side of a character cell in screen pixels: the screen is [`COLS`] × [`ROWS`] cells.
+pub const CELL: usize = 8;
+/// Cells per row of the screen.
+pub const COLS: usize = WIDTH / CELL;
+/// Rows of cells of the screen.
+pub const ROWS: usize = HEIGHT / CELL;
+/// Cells of the screen.
+const CELLS: usize = COLS * ROWS;
+
+/// The Hangul syllables U+AC00..=U+D7A3 (`u6_formats::font::HANGUL_FIRST`..=`HANGUL_LAST`).
+const HANGUL: std::ops::RangeInclusive<u16> = 0xac00..=0xd7a3;
+
+/// Spec 11: whether a glyph cell of code `code` is drawn in the HD font ([`Compositor::glyphs`]):
+/// printable ASCII but the space (0x21..=0x7e) and the Hangul syllables. Not the space, the
+/// control codes the game draws as symbols (its key-wait cursor), and the codes past 0x7e of its
+/// font (the runes).
+pub fn hd_font_code(code: u16) -> bool {
+    (0x21..=0x7e).contains(&code) || HANGUL.contains(&code)
+}
+
+/// Spec 11: one cell the HD font mode shows in the HD font ([`Compositor::glyphs`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HdGlyph {
+    /// The cell's top-left screen pixel (multiples of [`CELL`]).
+    pub x: u16,
+    pub y: u16,
+    /// Its code ([`hd_font_code`]).
+    pub code: u16,
+    /// The colour of its set pixels and of its clear ones.
+    pub ink: Rgb,
+    pub paper: Rgb,
+}
+
+/// A cell shown in the HD font: its code and its ink and paper indices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CellGlyph {
+    code: u16,
+    ink: u8,
+    paper: u8,
+}
+
+/// Whether cell (col, row) is the glyph of one code drawn whole: each of its 64 pixels a
+/// [`Kind::Glyph`] source of that code at version 0, (u, v) its place in the cell, flags
+/// [`FLAG_INK`] or none; its set pixels of one colour and its clear ones of one colour, with at
+/// least one of each; and the code drawn in the HD font ([`hd_font_code`]).
+fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<CellGlyph> {
+    let (x0, y0) = (col * CELL, row * CELL);
+    let code = plane[y0 * WIDTH + x0].id;
+    if plane[y0 * WIDTH + x0].kind != Kind::Glyph || !hd_font_code(code) {
+        return None;
+    }
+    let (mut ink, mut paper) = (None, None);
+    for v in 0..CELL {
+        for u in 0..CELL {
+            let i = (y0 + v) * WIDTH + x0 + u;
+            let s = plane[i];
+            let at = Src {
+                ver: 0,
+                id: code,
+                u: u as u16,
+                v: v as u16,
+                kind: Kind::Glyph,
+                flags: s.flags & FLAG_INK,
+            };
+            if s != at {
+                return None;
+            }
+            let colour = if s.flags == FLAG_INK {
+                &mut ink
+            } else {
+                &mut paper
+            };
+            if *colour.get_or_insert(pixels[i]) != pixels[i] {
+                return None;
+            }
+        }
+    }
+    Some(CellGlyph {
+        code,
+        ink: ink?,
+        paper: paper?,
+    })
+}
+
 /// No HD image: the pixel is shown classic.
 const NONE: u32 = 0;
 
@@ -567,13 +659,15 @@ struct Slot {
     memo: Option<(usize, u32, u64)>,
 }
 
-/// The inputs of the last composition, per screen pixel.
+/// The inputs of the last composition, per screen pixel, and per cell the glyph it showed in the
+/// HD font.
 struct Last {
     palette: [Rgb; 256],
     scale: Scale,
     src: Vec<Src>,
     pixels: Vec<u8>,
     tokens: Vec<u32>,
+    cells: Vec<Option<CellGlyph>>,
 }
 
 /// The HD compositor (the module docs).
@@ -597,6 +691,14 @@ pub struct Compositor {
     input: Vec<u32>,
     /// The screen rect written since [`Compositor::take_dirty`]: x0, y0, x1, y1 (exclusive).
     dirty: Option<[usize; 4]>,
+    /// Spec 11: the HD font mode ([`Compositor::set_font_mode`]).
+    font: bool,
+    /// The mode changed since the last composition: the next writes every block.
+    font_changed: bool,
+    /// Scratch: per cell, the glyph the running composition shows in the HD font.
+    cells: Vec<Option<CellGlyph>>,
+    /// The cells the last composition showed in the HD font ([`Compositor::glyphs`]).
+    glyphs: Vec<HdGlyph>,
 }
 
 impl Default for Compositor {
@@ -629,6 +731,10 @@ impl Compositor {
             pack_gen: 0,
             input: Vec::new(),
             dirty: None,
+            font: false,
+            font_changed: false,
+            cells: Vec::new(),
+            glyphs: Vec::new(),
         }
     }
 
@@ -681,6 +787,36 @@ impl Compositor {
         self.pack.is_some()
     }
 
+    /// Spec 11: the HD font mode on (`hd`) or off (the pixel font). On, each cell of the glyph of
+    /// one code drawn whole whose code is drawn in the HD font ([`hd_font_code`]) is filled with
+    /// its paper colour and listed ([`Compositor::glyphs`]); off, glyph pixels are shown classic,
+    /// as every composition before the mode did. A change empties the list at once and makes the
+    /// next composition write every block, as a change of scale does, also when the mode is
+    /// changed back before it; setting the mode it is in changes nothing.
+    pub fn set_font_mode(&mut self, hd: bool) {
+        if self.font != hd {
+            self.font = hd;
+            self.font_changed = true;
+            self.glyphs.clear();
+        }
+    }
+
+    /// Whether the HD font mode is on ([`Compositor::set_font_mode`]).
+    pub fn font_mode(&self) -> bool {
+        self.font
+    }
+
+    /// The cells the last composition showed in the HD font, in raster order: all of them, the
+    /// cells it left as they were included (a platform that copies a rect of the frame draws
+    /// every listed glyph over it again). Empty with the mode off, and after a change of the mode
+    /// until the next composition. A cell enters, leaves or changes in this list only with every
+    /// block of it written, or leaves it at a change of the mode, whose next composition writes
+    /// every block: so the rect the compositions wrote ([`Compositor::take_dirty`]) holds the
+    /// whole cell.
+    pub fn glyphs(&self) -> &[HdGlyph] {
+        &self.glyphs
+    }
+
     /// Composes `frame` at `scale` from the images `images` names ([`Compositor::rgba`]).
     /// Returns whether it wrote any block.
     pub fn compose(&mut self, frame: &Framebuffer, images: &mut dyn Images, scale: Scale) -> bool {
@@ -698,6 +834,8 @@ impl Compositor {
         if !same_palette {
             self.palette += 1;
         }
+        let font = self.font;
+        full |= std::mem::take(&mut self.font_changed);
         full |= !same_palette || self.last.as_ref().is_none_or(|l| l.scale != scale);
         let last = self.last.get_or_insert_with(|| Last {
             palette: frame.palette,
@@ -705,14 +843,24 @@ impl Compositor {
             src: vec![Src::CLASSIC; n],
             pixels: vec![0; n],
             tokens: vec![NONE; n],
+            cells: vec![None; CELLS],
         });
         last.palette = frame.palette;
         last.scale = scale;
         self.scale = scale;
-        self.hd.stamp += 1;
-        let pal: [u32; 256] = std::array::from_fn(|i| word(frame.palette[i]));
         let plane = frame.src();
         let pixels = frame.pixels();
+        // Spec 11: the cells shown in the HD font now.
+        self.cells.clear();
+        match plane.filter(|_| font) {
+            Some(p) => self
+                .cells
+                .extend((0..CELLS).map(|c| glyph_cell(p, pixels, c % COLS, c / COLS))),
+            None => self.cells.resize(CELLS, None),
+        }
+        let cells = &self.cells;
+        self.hd.stamp += 1;
+        let pal: [u32; 256] = std::array::from_fn(|i| word(frame.palette[i]));
         let mut res = Resolver {
             hd: &mut self.hd,
             tiles: &mut self.tiles,
@@ -734,8 +882,11 @@ impl Compositor {
                 let i = y * WIDTH + x;
                 let src = plane.map_or(Src::CLASSIC, |p| p[i]);
                 let index = pixels[i];
+                let c = y / CELL * COLS + x / CELL;
+                let glyph = cells[c];
                 let mut shown = None;
-                if src.kind != Kind::Classic && src.flags == 0 {
+                // A glyph names no image: shown classic, or as its cell's paper in the HD font.
+                if !matches!(src.kind, Kind::Classic | Kind::Glyph) && src.flags == 0 {
                     if key != Some((src.kind, src.id)) {
                         key = Some((src.kind, src.id));
                         cur = res.resolve(src.kind, src.id);
@@ -746,7 +897,11 @@ impl Compositor {
                     }
                 }
                 let token = shown.map_or(NONE, |r| r.token);
-                if !full && last.src[i] == src && last.pixels[i] == index && last.tokens[i] == token
+                if !full
+                    && last.cells[c] == glyph
+                    && last.src[i] == src
+                    && last.pixels[i] == index
+                    && last.tokens[i] == token
                 {
                     continue;
                 }
@@ -763,8 +918,9 @@ impl Compositor {
                 let o = y * s * ow + x * s;
                 match shown {
                     None => {
+                        let fill = glyph.map_or(classic, |g| pal[usize::from(g.paper)]);
                         for r in 0..s {
-                            out[o + r * ow..o + r * ow + s].fill(classic);
+                            out[o + r * ow..o + r * ow + s].fill(fill);
                         }
                     }
                     Some(r) => {
@@ -782,6 +938,18 @@ impl Compositor {
                 }
             }
         }
+        last.cells.copy_from_slice(cells);
+        self.glyphs.clear();
+        self.glyphs
+            .extend(cells.iter().enumerate().filter_map(|(c, g)| {
+                g.map(|g| HdGlyph {
+                    x: (c % COLS * CELL) as u16,
+                    y: (c / COLS * CELL) as u16,
+                    code: g.code,
+                    ink: frame.palette[usize::from(g.ink)],
+                    paper: frame.palette[usize::from(g.paper)],
+                })
+            }));
         self.hd.shrink();
         if dirty[2] == 0 {
             return false;

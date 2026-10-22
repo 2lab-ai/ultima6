@@ -16,15 +16,17 @@
 //!   bitmap's as the file holds them ([`u6_hdpack::bitmap_hash`]), both before the colour table.
 //!
 //! [`HdView`] is the HD frame a platform shows of its engine: the switch, the scale, the pack
-//! ([`HdPack`], spec 07 H2) and when to compose (the web page's `Game::set_hd`,
-//! `Game::set_hd_pack` and `Game::present` are it).
+//! ([`HdPack`], spec 07 H2), the HD font mode (spec 11) and when to compose (the web page's
+//! `Game::set_hd`, `Game::set_hd_pack`, `Game::set_hd_font` and `Game::present` are it).
 
 use std::rc::Rc;
 
 use u6_formats::gfx::{TILE_H, TILE_W};
 use u6_formats::portrait::{PORTRAIT_HEIGHT, PORTRAIT_WIDTH};
 use u6_hdpack::{ImageId, Role, bitmap_hash, portrait_hash, tile_hash};
-use u6_render::hd::{Compositor, Image, Images, NoImages, PACK_SCALE, Pack, PackHd, Scale};
+use u6_render::hd::{
+    Compositor, HdGlyph, Image, Images, NoImages, PACK_SCALE, Pack, PackHd, Scale,
+};
 use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, Framebuffer, Kind, portrait_id, portrait_of};
 
 use crate::converse::Msg;
@@ -38,7 +40,7 @@ use crate::state::State;
 pub struct HdView {
     on: bool,
     scale: Scale,
-    /// Moves at every change of `on`, `scale` or the pack.
+    /// Moves at every change of `on`, `scale`, the pack or the font mode.
     version: u64,
     compositor: Compositor,
     images: ImageCache,
@@ -93,6 +95,33 @@ impl HdView {
     /// Whether a pack is set.
     pub fn has_pack(&self) -> bool {
         self.compositor.has_pack()
+    }
+
+    /// Spec 11: the HD font mode on (`hd`) or off ([`Compositor::set_font_mode`]); true when it
+    /// changed (the setting moves, so the next [`HdView::present`] composes, when on).
+    pub fn set_font(&mut self, hd: bool) -> bool {
+        if self.compositor.font_mode() == hd {
+            return false;
+        }
+        self.compositor.set_font_mode(hd);
+        self.version += 1;
+        true
+    }
+
+    /// Whether the HD font mode is on ([`HdView::set_font`]).
+    pub fn font(&self) -> bool {
+        self.compositor.font_mode()
+    }
+
+    /// Spec 11: the cells the HD frame shows in the HD font ([`Compositor::glyphs`]): those of
+    /// its last composition while HD and the HD font mode are on, else none (the frame shown then
+    /// is not one this view composed with the mode).
+    pub fn glyphs(&self) -> &[HdGlyph] {
+        if self.on && self.compositor.font_mode() {
+            self.compositor.glyphs()
+        } else {
+            &[]
+        }
     }
 
     pub fn scale(&self) -> Scale {
@@ -242,7 +271,7 @@ impl EngineImages<'_> {
                 let key = bitmap_hash(bmp.width, bmp.height, &bmp.pixels)?;
                 Some((w, h, through(colours, &bmp.pixels[..w * h]), key))
             }
-            Kind::Classic | Kind::Tile => None,
+            Kind::Classic | Kind::Tile | Kind::Glyph => None,
         }
     }
 }

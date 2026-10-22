@@ -28,13 +28,13 @@ fn decisions(s: &State) -> (u64, u64, u64) {
 }
 
 /// The receipt's rule on synthetic data: each attributed pixel of `fb` without flags whose
-/// version is its record's current one has its record's colour at (u, v). Only records are
-/// drawn in these runs. Returns the pixels checked.
+/// version is its record's current one has its record's colour at (u, v). Only records and
+/// glyphs are drawn in these runs; a glyph names no image (spec 11). Returns the pixels checked.
 fn check_images(fb: &Framebuffer, s: &State, what: &str) -> usize {
     let mut checked = 0;
     for (i, src) in fb.src().expect("a plane").iter().enumerate() {
         match src.kind {
-            Kind::Classic => continue,
+            Kind::Classic | Kind::Glyph => continue,
             Kind::Tile => {}
             other => panic!("{what}: pixel {i} names a {other:?}; none is drawn"),
         }

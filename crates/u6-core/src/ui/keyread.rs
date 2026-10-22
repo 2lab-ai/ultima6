@@ -78,6 +78,8 @@ async fn poll(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
 /// The original draws the cursor glyph, refreshes the view (0x102ef0, which presents) and
 /// erases it again within one call. The port presents and awaits the next display generation
 /// between drawing and erasing: that is the guaranteed yield of every key wait.
+///
+/// Port (spec 11): the cursor is drawn as a symbol ([`text::draw_symbol`]).
 pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
     match idle_wait(state, io, Text::Dropped).await {
         Polled::Code(code) => code,
@@ -126,7 +128,8 @@ async fn idle_wait(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
             let w = *ui.text.win();
             let (font, hangul) = (ui.font.as_ref(), ui.hangul.as_deref());
             let glyph = u16::from(glyph as u8);
-            io.draw(|fb| text::draw_char(fb, font, hangul, &w, glyph, col, row));
+            // Port (spec 11): a symbol, never a character of the HD font.
+            io.draw(|fb| text::draw_symbol(fb, font, hangul, &w, glyph, col, row));
             let refresh = ui.input.idle_refresh;
             s.gfx.actor_anim_due = 1;
             refresh

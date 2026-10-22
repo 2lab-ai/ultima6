@@ -42,8 +42,8 @@ impl Rgb {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Kind {
-    /// Drawn directly (text, fills, plots, sprites, pixel replays) or by a write that names no
-    /// image: shown as the classic pixel.
+    /// Drawn directly (fills, plots, sprites, pixel replays) or by a write that names no image:
+    /// shown as the classic pixel.
     #[default]
     Classic = 0,
     /// A pixel of a 16 × 16 tile record; [`Src::id`] is the record number.
@@ -52,6 +52,11 @@ pub enum Kind {
     Portrait = 2,
     /// A pixel of a panel bitmap; [`Src::id`] is its role ([`BITMAP_PAPER`], [`BITMAP_SPELLBOOK`]).
     Bitmap = 3,
+    /// Spec 11: a pixel of an 8 × 8 character cell; [`Src::id`] is the cell's code (a code of the
+    /// game's font, or a Hangul syllable's code point), (u, v) the pixel's place in the cell,
+    /// [`FLAG_INK`] on its set pixels. No image: shown classic, or by the HD font mode
+    /// ([`hd::Compositor::set_font_mode`]) as a listed glyph.
+    Glyph = 4,
 }
 
 /// [`Src::id`] of the paper bitmap drawn over the whole screen at the boot.
@@ -65,6 +70,9 @@ pub const FLAG_OVERLAY: u8 = 1;
 /// [`Src::flags`]: the pixel is an outline pixel, painted in the outline colour over an opaque
 /// colour-0 pixel of the record.
 pub const FLAG_OUTLINE: u8 = 2;
+/// [`Src::flags`] of a [`Kind::Glyph`] pixel: a set pixel of the glyph, in the ink colour (the
+/// clear ones are in the paper colour, no flag).
+pub const FLAG_INK: u8 = 4;
 
 /// [`Src::id`] of portrait `item` of the archive `portrait.<letter>` (the pair the portrait
 /// loader computes): the letter's byte in the high byte, the item in the low one. `None` for
@@ -97,7 +105,8 @@ pub struct Src {
     /// The pixel's row inside the image.
     pub v: u16,
     pub kind: Kind,
-    /// [`FLAG_OVERLAY`], [`FLAG_OUTLINE`]: the blit changed the image's colour here.
+    /// [`FLAG_OVERLAY`], [`FLAG_OUTLINE`]: the blit changed the image's colour here;
+    /// [`FLAG_INK`]: a glyph's set pixel.
     pub flags: u8,
 }
 
