@@ -6,7 +6,11 @@ tags: [ultima6, hd, ui, layout, wide]
 
 # 14 — Actor windows: the side panel's views open at once, U7-style
 
-Status: rev 2, 2026-10-24. Trinity review (grok-4.7, gpt-6-astra, fable) reached a unanimous verdict in round 2: C, rev 2. The briefs and positions are kept outside the repo, under `work/dispatch/r1023-wide/trinity-spec14-*`.
+Status: rev 3, 2026-10-24. Trinity review (grok-4.7, gpt-6-astra, fable) reached a unanimous verdict in round 2: C, rev 2. The briefs and positions are kept outside the repo, under `work/dispatch/r1023-wide/trinity-spec14-*`.
+
+Rev 3 (during G1 and G2, from G2's report) changes two things:
+- **Slot rows.** The slots move onto the HD font's 8-pixel grid, so the frame is 912 × 408. `hd.rs:613-616` `glyph_cell` draws a cell in the HD font only at `(col*8, row*8)`, and the Status window's text is on that grid (`ui/text.rs:99`, text rows 1..12). Rev 2's rows 202 and 338 moved panel text 196 and 332 rows, which is off the grid, so the actor windows would have shown the pixel font.
+- **Conversations show 패널.** A conversation draws its portrait in the panel area with the mode at 0x9e only while drawing, then puts the mode back, usually to 0x91 (`inventory/portrait.rs:40-158`). Under rev 2's mode rule the portrait was invisible in Wide.
 
 This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's words are in `hd-layout-font-register/ssot.md` §Round 2. The reference image is nuvie.png; its right half shows one member's paper-doll window, portrait-and-attributes window and backpack window open at once over the map.
 
@@ -54,17 +58,19 @@ This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's
 
 ## Design
 
-1. **The frame grows to 912 × 436 in Wide.** Three fixed slots, each 144 × 98, hold three live views:
+1. **The frame grows to 912 × 408 in Wide.** Three fixed slots, each 144 × 98, hold three live views:
 
    | Slot | Frame origin |
    |---|---|
-   | roster | (8, 202) |
-   | stats | (160, 202) |
-   | inventory | (8, 338) |
+   | roster | (8, 206) |
+   | stats | (160, 206) |
+   | inventory | (8, 310) |
+
+   - Each slot's offset from `PANEL` is a multiple of 8 in x and y, so text copied into a slot stays on the HD font's grid (rev 3).
 
    - Nothing else draws in these rows or rects.
    - Original keeps 320 × 200. `HEIGHT` is the only frame constant; the page and native read the frame's size from the engine.
-   - The frame area grows by 30%. The compositor receipt (`test-web.mjs` "Wide layout (spec 13 Design 6)") is measured again; above 8 ms the page asks S 2 by its own rule.
+   - The frame area grows by 21%. The compositor receipt (`test-web.mjs` "Wide layout (spec 13 Design 6)") is measured again; above 8 ms the page asks S 2 by its own rule.
 2. **A Wide redraw draws all three views.** On each `redraw_panel`, Wide draws each of roster, stats and inventory into the panel area, the current mode last. Each view is drawn with that view's `panel.mode` set, and the mode is restored after. After each draw, the panel rect (pixels and source plane, through `copy_px_within`) is copied into that view's slot. The copy of the current view is made after `panel_cursor`.
    - The extra draws leave every other state as a current-mode-only draw would leave it. The exception is the inventory context in Design 3.
    - A mode other than the three (spellbook, conversation, 0x9e) is drawn as today. The slots then keep their last views (see Design 6).
@@ -85,21 +91,22 @@ This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's
    The codes switch the panel as today.
 6. **The active view, and other modes.**
    - The current mode is the active view; the page marks its window (title strip and border).
-   - While the mode is none of the three, a 패널 window shows the real panel area. The slots show their last views, dimmed, and a press in one is ignored until the mode is one of the three again.
+   - While the mode is none of the three, **or a conversation is active**, a 패널 window shows the real panel area and is the active window. The slots show their last views, dimmed, and a press in one is ignored until the mode is one of the three again.
+   - While a conversation is active, no Wide slot redraw draws over the portrait in the panel area. The redraw after the Talk command restores the panel as today (rev 3).
 7. **The page's windows** (spec 13's frames, drag and memory):
 
    | Window | Shows | Frame rect |
    |---|---|---|
-   | 파티 | the roster slot | (8, 202, 144, 98) |
-   | 능력치 | the stats slot | (160, 202, 144, 98) |
-   | 인형 | the inventory slot's doll part: equipment, figure, Wielded, member icons | slot (0..71, 10..97) = frame (8, 348, 72, 88) |
-   | 배낭 | the inventory slot's list part: container picture, 4 × 3 list, arrows, Carried, combat-mode icon | slot (72..143, 10..97) = frame (80, 348, 72, 88) |
+   | 파티 | the roster slot | (8, 206, 144, 98) |
+   | 능력치 | the stats slot | (160, 206, 144, 98) |
+   | 인형 | the inventory slot's doll part: equipment, figure, Wielded, member icons | slot (0..71, 10..97) = frame (8, 320, 72, 88) |
+   | 배낭 | the inventory slot's list part: container picture, 4 × 3 list, arrows, Carried, combat-mode icon | slot (72..143, 10..97) = frame (80, 320, 72, 88) |
    | 패널 | the panel area | only while Design 6 says |
 
    - The name row (rows 0..9) is left out; the 능력치, 인형 and 배낭 titles carry the shown member's name.
    - 날짜, 메시지 and 명령 stay as in spec 13.
    - Default places do not overlap on 1920 × 1080: 파티 under 날짜 at the top right, 능력치 to its left, 인형 and 배낭 side by side under 능력치.
-   - The engine adds one read for the page, `panel_view()`: [mode, member, actor], plus the shown member's name.
+   - The engine adds two reads for the page: `panel_view()`, which returns [mode, member, actor, conversation active], and `panel_name()`, the shown member's name.
 8. **The combat-mode icon** sits at the bottom of the 배낭 window this round. Moving it to the doll window (an L-shaped window) and showing several members' bags at once are later work.
 
 ## Tests
@@ -113,10 +120,12 @@ This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's
   - a press in each slot selects the same object, and gives the same ready/unready/use/drop result, as the same press in the panel in that mode;
   - the pointer is back after a slot press;
   - in another mode, a slot press is ignored.
+  - each slot's offset from `PANEL` is a multiple of 8 (a const assert), and panel text in a slot passes `glyph_cell`;
+  - during Talk, the panel area keeps the portrait.
 - **Engine, Original:** no slot, no region, no frame change. Every existing test passes unchanged.
 - **Web:**
-  - the Wide layout lists 파티, 능력치, 인형, 배낭, 메시지, 명령 and 날짜, none overlapping at their default places, with the frame at 912 × 436 (the spec 13 literals updated);
-  - 패널 shows only in another mode;
+  - the Wide layout lists 파티, 능력치, 인형, 배낭, 메시지, 명령 and 날짜, none overlapping at their default places, with the frame at 912 × 408 (the spec 13 literals updated);
+  - 패널 shows only in another mode or during a conversation;
   - the active window is marked;
   - a click in each window reaches the engine at its frame rect's pixel;
   - the compositor receipt is re-measured.

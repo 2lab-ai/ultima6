@@ -60,9 +60,6 @@ pub use tables::MapTables;
 pub const WINDOW: usize = crate::geom::WINDOW;
 /// Cells in the window grids.
 pub const WINDOW_CELLS: usize = WINDOW * WINDOW;
-/// Side of the original's drawn view window (0x109e74 writes 11 × 11 view tiles). `map/` reads
-/// [`crate::geom::VIEW_W`] × [`crate::geom::VIEW_H`] instead; kept for the other units' sites.
-pub const VIEW: usize = 11;
 /// Coordinate mask on the surface (1024 tiles); 0x108d10.
 pub const SURFACE_MASK: u16 = 0x3ff;
 /// Coordinate mask on a dungeon level (256 tiles); 0x108d10.

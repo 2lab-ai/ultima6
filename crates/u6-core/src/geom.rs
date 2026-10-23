@@ -49,8 +49,9 @@ mod mode {
 /// Pixels per map cell side.
 const CELL: u16 = 16;
 
-/// View columns. Original 11: `map::VIEW` (`map/mod.rs:61`), `gfx::WINDOW_TILES`
-/// (`gfx/view.rs:21`), and the 11 × 11 of `objects::DRAW_CELLS` (`objects/draw.rs:11`).
+/// View columns. Original 11: the `moveq #0xb` loops of 0x102c90, the 11 × 11 words of the tile
+/// cache A4-0x1476 that 0x109e74 writes (`gfx/view.rs:35-36`), and the draw-list pool's 121
+/// cells, the 256 bytes of A4-0x1577 (`objects/draw.rs:23-24`).
 pub const VIEW_W: usize = mode::VIEW.0;
 /// View rows. Original 11, as [`VIEW_W`] (the view is square there, not in Wide).
 pub const VIEW_H: usize = mode::VIEW.1;
@@ -78,7 +79,7 @@ pub const BLOCK_X: Range<usize> = block(HALF_W);
 /// The inner sight block's window rows, as [`BLOCK_X`]. Original `8..32`, the same sites.
 pub const BLOCK_Y: Range<usize> = block(HALF_H);
 /// Frame column of map cell (0, 0)'s left edge. Original 0: view cell (col, row) is drawn at
-/// pixel `(col * 16, row * 16)` (`gfx/view.rs:214`).
+/// pixel `(col * 16, row * 16)` (`cell_pixel`, `gfx/view.rs:68-70`).
 pub const MAP_X: u16 = mode::MAP.0;
 /// Frame row of map cell (0, 0)'s top edge. Original 0, as [`MAP_X`].
 pub const MAP_Y: u16 = mode::MAP.1;
@@ -138,8 +139,7 @@ mod tests {
     #[cfg(not(feature = "wide"))]
     #[test]
     fn original_constants_are_todays_literals() {
-        assert_eq!((VIEW_W, VIEW_H), (crate::map::VIEW, crate::map::VIEW));
-        assert_eq!(VIEW_W, crate::gfx::WINDOW_TILES);
+        assert_eq!((VIEW_W, VIEW_H), (11, 11));
         assert_eq!(VIEW_W * VIEW_H, crate::objects::DRAW_CELLS);
         assert_eq!((HALF_W, HALF_H, RULE_HALF), (5, 5, 5));
         assert_eq!(WINDOW, crate::map::WINDOW);
