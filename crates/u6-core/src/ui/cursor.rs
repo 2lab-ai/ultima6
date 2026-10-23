@@ -154,6 +154,11 @@ pub fn panel_cursor_in(s: &mut State, io: &Io, mode: i16) {
         2 => s.ui.input.pointer = (x, y),
         _ => {}
     }
+    // Spec 14 Design 4: the cursor drawn or taken away shows in the view's slot.
+    #[cfg(feature = "wide")]
+    if mode == 0 || mode == 1 {
+        super::panels::mirror_view(s, io);
+    }
 }
 
 /// 0x106ab0..0x106ba4: redraw what the panel cursor covered.

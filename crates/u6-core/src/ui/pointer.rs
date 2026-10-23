@@ -22,6 +22,10 @@ use crate::state::State;
 const REGIONS: i32 = -0x79c2;
 /// Regions 0x10658e has a case for (the last one covers the screen, so the scan ends there).
 const REGION_COUNT: usize = 4;
+/// Spec 14 Design 5: the click regions of the side panel's view slots, one per slot of
+/// [`geom::SLOTS`] in its order, numbered after the image's (none in Original). The click map
+/// scans them after the side panel's ([`super::click::region_at`]).
+pub const SLOT_REGIONS: std::ops::Range<usize> = REGION_COUNT..REGION_COUNT + geom::SLOTS.len();
 /// Original: A4-0x79c6 / -0x79c4 (words: window cell of the last walk click)
 const WALK_CELL: i32 = -0x79c6;
 /// Original: 0x1624b2 (long per shape: its sprite data, two control words then two per row)
@@ -82,8 +86,14 @@ pub fn in_shown_map(x: i16, y: i16) -> bool {
 
 /// Click region `i` of `tables` (x0, y0, x1, y1 inclusive), as the click map scans them. In Wide
 /// region 0, the image's map window, is the shown map [`geom::SHOWN`] beside the UI; the command bar,
-/// the side panel and the screen keep the image's rects (the UI keeps its coordinates).
+/// the side panel and the screen keep the image's rects (the UI keeps its coordinates); the
+/// regions of [`SLOT_REGIONS`] are the slots' rects.
 pub fn region(tables: &PointerTables, i: usize) -> Option<[i16; 4]> {
+    if SLOT_REGIONS.contains(&i) {
+        let (x, y) = geom::SLOTS[i - SLOT_REGIONS.start];
+        let (w, h) = (geom::SLOT_W, geom::SLOT_H);
+        return Some([x, y, x + w - 1, y + h - 1].map(|v| v as i16));
+    }
     let r = tables.regions.get(i).copied()?;
     if cfg!(feature = "wide") && i == 0 {
         let (x0, y0, x1, y1) = geom::SHOWN;

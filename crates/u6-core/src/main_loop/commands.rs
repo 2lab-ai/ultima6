@@ -178,6 +178,13 @@ pub async fn command_loop(state: &RefCell<State>, io: &Io) {
             NO_TURN => reprompt(state, io).await,
             _ => end_of_turn(state, io, code).await,
         }
+        // Spec 14 Design 4 (Wide): what the command changed reaches the side panel's view slots
+        // at the next redraw, the inventory refreshes that only run in the inventory mode
+        // included.
+        #[cfg(feature = "wide")]
+        {
+            state.borrow_mut().ui.panel.dirty = true;
+        }
     }
 }
 

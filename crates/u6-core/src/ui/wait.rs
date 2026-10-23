@@ -122,6 +122,10 @@ async fn open_container(state: &RefCell<State>, io: &Io, code: u16) -> Panel {
 }
 
 /// Original: 0x10790a (ui: read a command key; the panel codes 0x90..0xa9 are handled here)
+///
+/// Wide (spec 14): a code a press in a view's slot gave is handled with that view's mode, and
+/// then the press is put back ([`super::panels::end_slot_press`]); every panel code handled
+/// here marks the panel dirty, so the slots show what it changed (Design 4).
 pub async fn read_key(state: &RefCell<State>, io: &Io) -> u16 {
     {
         let mut s = state.borrow_mut();
@@ -132,6 +136,8 @@ pub async fn read_key(state: &RefCell<State>, io: &Io) -> u16 {
     }
     loop {
         let code = wait_event(state, io).await;
+        #[cfg(feature = "wide")]
+        let slot = super::panels::claim_slot_press(&mut state.borrow_mut());
         let outcome = if (0x90..0xaa).contains(&code) {
             match code {
                 0x95 => {
@@ -165,6 +171,16 @@ pub async fn read_key(state: &RefCell<State>, io: &Io) -> u16 {
         } else {
             Panel::Deliver(code)
         };
+        #[cfg(feature = "wide")]
+        {
+            let mut s = state.borrow_mut();
+            if slot {
+                super::panels::end_slot_press(&mut s);
+            }
+            if matches!(outcome, Panel::Again) {
+                s.ui.panel.dirty = true;
+            }
+        }
         match outcome {
             Panel::Deliver(code) => return code,
             Panel::Again => redraw_panel(state, io).await,
