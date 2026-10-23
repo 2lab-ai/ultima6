@@ -938,17 +938,43 @@ impl wide::Escapes for Escaped<'_> {
 /// pack's format holds the same `%` directives in the same order (checked at install). What a
 /// field generates is never looked up ([`put_field`]).
 pub async fn printf(state: &RefCell<State>, io: &Io, fmt: &[u8], args: &[Arg<'_>]) {
+    printf_dropping(state, io, fmt, args, false).await;
+}
+
+/// Port (spec 08, 2026-10-24): [`printf`] of a combat line queued while Attack's newline is held
+/// (A4-0x7a48, [`crate::main_loop::Pending::PrintSwallowed`]): the format is looked up whole, as
+/// [`printf`] looks it up, and the leading newlines of the text then put (the pack's or the
+/// English) are dropped, as the queue dropped the English's before.
+pub async fn printf_swallowed(state: &RefCell<State>, io: &Io, fmt: &[u8], args: &[Arg<'_>]) {
+    printf_dropping(state, io, fmt, args, true).await;
+}
+
+/// [`printf`], the leading newlines of the text it puts dropped when `drop_newlines`.
+async fn printf_dropping(
+    state: &RefCell<State>,
+    io: &Io,
+    fmt: &[u8],
+    args: &[Arg<'_>],
+    drop_newlines: bool,
+) {
     if !state.borrow().ui.text.on {
         return;
     }
+    let dropped = |text: &[u8]| -> usize {
+        if drop_newlines {
+            text.iter().take_while(|&&b| b == b'\n').count()
+        } else {
+            0
+        }
+    };
     let found = crate::locale::exe_string(&state.borrow(), fmt);
     match found {
         Some((language, text)) => {
             let was = std::mem::replace(&mut state.borrow_mut().ui.text.language, language);
-            format(state, io, &text, args).await;
+            format(state, io, &text[dropped(&text)..], args).await;
             state.borrow_mut().ui.text.language = was;
         }
-        None => format(state, io, fmt, args).await,
+        None => format(state, io, &fmt[dropped(fmt)..], args).await,
     }
 }
 

@@ -74,6 +74,13 @@ pub(crate) fn remains(s: &mut State, actor: i16) -> Slot {
 /// The magic hunk's refusal line (PC-relative 0x1159f8), shown for a cast the port cannot run.
 const CAST_REFUSED: u32 = 0x0011_59f8;
 
+/// Port-only (spec 08, slice K2; 2026-10-24): the strings these calls pass to `printf` as its
+/// format (queued through [`super::present::say`]), for the locale layer's catalogue
+/// ([`crate::locale::strings`]): the refusal line. Its address is magic's not-possible line as
+/// well (`crate::magic::items`' `MSG_NOT_POSSIBLE`, printed through `printf`): the catalogue is
+/// keyed by content, so that line shows the pack's form too.
+pub(crate) const PRINTED: &[u32] = &[CAST_REFUSED];
+
 /// [magic] 0x11a586(spell, 1) from a staff or wand: the spell its quality names, cast by the
 /// attacker as party slot 16 (A4+0x47fc, leader index 16) at the selection with the text off;
 /// the hit then reads the result byte A4+0x181e (asm 0x12467a..0x12476e).

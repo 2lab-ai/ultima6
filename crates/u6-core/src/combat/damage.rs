@@ -32,6 +32,16 @@ const YELLS: u32 = A4 - 0x7318;
 const NAME_SPACE: u32 = 0x0012_1b9a;
 const HP_NUMBER: u32 = 0x0012_1b94;
 
+/// Port-only (spec 08, slice K2; 2026-10-24): the strings a hit landing passes to `printf` as its
+/// format (queued through [`say`]), for the locale layer's catalogue ([`crate::locale::strings`]):
+/// the graze, the death line, the specials', the wound report, the slime's and the vine's, the
+/// broken object's and the bystander's yell. The name-and-space format and the number line hold
+/// no word of their own: the catalogue leaves them out (they stay as they are).
+pub(crate) const PRINTED: &[u32] = &[
+    GRAZED, KILLED, DRAGGED, DISSOLVES, ROBBED, POISONED, CRITICAL, HEAVILY, LIGHTLY, BARELY,
+    WOUNDED, SLIME, VINE, BROKEN, YELLS, NAME_SPACE, HP_NUMBER,
+];
+
 fn status(s: &State, a: i16) -> u8 {
     s.actors.attrs.status[a as usize]
 }
