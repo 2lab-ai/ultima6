@@ -124,6 +124,12 @@ pub struct UiState {
     /// `None` until the locale layer sets one (a syllable is then a blank cell). Shared, so a
     /// copy of the state does not copy its 89 KB.
     pub hangul: Option<Rc<HangulFont>>,
+    /// Port-only (spec 07 HD0): the paper's colours as the boot drew it
+    /// ([`crate::main_loop::draw_paper`]), `None` before or without `paper.bmp`. The message
+    /// window's scroll and its cleared row, the UI's fills (the side panel, the combat-mode line,
+    /// the command underline, the inventory list, the portrait panel, the spellbook's clear) and
+    /// the key wait's symbol name the paper with them ([`text::Paper`]).
+    pub paper: Option<text::Paper>,
     /// Strings, tables and initial values read from `game`.
     pub tables: UiTables,
     pub text: TextState,
@@ -160,6 +166,7 @@ impl UiState {
             messages: Vec::new(),
             font,
             hangul: None,
+            paper: None,
             text: TextState::from_tables(&tables),
             input: InputState::from_tables(&tables),
             panel: PanelState::from_tables(&tables),

@@ -224,7 +224,8 @@ pub async fn draw_list(state: &RefCell<State>, io: &Io) {
     let (count, first) = {
         let mut s = state.borrow_mut();
         let paper = s.ui.tables.colours.paper;
-        io.draw(|fb| fill_rect(fb, 0xf8, 0x10, 0x137, 0x4f, paper));
+        let map = s.ui.paper.as_ref();
+        io.draw(|fb| fill_rect(fb, 0xf8, 0x10, 0x137, 0x4f, paper, map));
         draw_equipment(&s, io, 0, 0);
         let container = s.ui.panel.container as Slot;
         let mut c = first_child(&mut s.objects, container);

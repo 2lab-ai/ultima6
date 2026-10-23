@@ -9,8 +9,8 @@ use u6_formats::bitmap::Bitmap;
 use u6_formats::font::BitFont;
 use u6_formats::gfx::{AnimOverlay, Span};
 use u6_render::{
-    BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, HEIGHT,
-    Kind, Src, WIDTH,
+    BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, FLAG_OUTLINE, FLAG_OVERLAY, FLAG_PAPER,
+    FLAG_PAPER_OFF, Framebuffer, HEIGHT, Kind, Src, WIDTH,
 };
 
 use super::view::{HERO_BASE, world};
@@ -53,6 +53,15 @@ fn picture(kind: Kind, id: u16, (u, v): (usize, usize)) -> Src {
         v: v as u16,
         kind,
         flags: 0,
+    }
+}
+
+/// [`glyph`] drawn over the paper ([`FLAG_PAPER`]).
+fn glyph_on_paper(code: u8, row: u8, at: (usize, usize)) -> Src {
+    let g = glyph(code, row, at);
+    Src {
+        flags: g.flags | FLAG_PAPER,
+        ..g
     }
 }
 
@@ -441,27 +450,26 @@ fn text_over_a_portrait_names_its_glyph() {
     }
 }
 
-/// A text window scrolled over the paper: each pixel moved up keeps its source (the paper's
-/// pixel it was, with its (u, v)), a glyph moved up stays that glyph, and the row the scroll clears
-/// is classic; nothing outside the window changes. Checked on a copy synced from the screen
-/// before and after the scroll (as the published frame is), against sources and colours
-/// computed from the layout: a write that forgot its mark would leave the copy as it was.
-#[test]
-fn a_text_scroll_moves_the_sources_under_it() {
-    let mut fb = plane();
-    let paper = Bitmap {
-        width: 320,
-        height: 200,
-        pixels: image(5, 320, 200),
-    };
-    blit_bmp(&colours(), &mut fb, &paper, 0, 0, BITMAP_PAPER);
-    let font = BitFont {
-        glyphs: vec![[0x81; 8]; 256],
-    };
-    // A glyph in the window's second row: ink in its first and last columns, paper colour 2
-    // between.
-    crate::ui::text::draw_glyph(&mut fb, &font, 192, 112, b'A', 1, 2);
-    let w = crate::ui::text::TextWindow {
+/// A crafted paper (identity colour table): all of colour 2, the test windows' paper colour,
+/// but two pixels of colour 7 under the window [`text_window`]: (300, 183) in its last pixel
+/// row, which its scroll moves up to (300, 175), and (290, 175), where the pixel of colour 2 from
+/// (290, 183) arrives. A pixel written onto the paper of its own colour names the paper there;
+/// these two branches are the others.
+fn crafted_paper() -> Bitmap {
+    let mut pixels = vec![2u8; WIDTH * HEIGHT];
+    pixels[183 * WIDTH + 300] = 7;
+    pixels[175 * WIDTH + 290] = 7;
+    Bitmap {
+        width: WIDTH as u16,
+        height: HEIGHT as u16,
+        pixels,
+    }
+}
+
+/// The text window of the scroll tests: columns 22..=37, rows 13..=22 (x 176..304, y 104..184),
+/// ink 1, paper 2.
+fn text_window() -> crate::ui::text::TextWindow {
+    crate::ui::text::TextWindow {
         x: 22,
         y: 13,
         width: 16,
@@ -471,27 +479,74 @@ fn a_text_scroll_moves_the_sources_under_it() {
         fg: 1,
         bg: 2,
         flags: 0,
+    }
+}
+
+/// The source of a pixel of `colour` that the scroll or the clear writes at (x, y) over `paper`
+/// (drawn over the whole screen): the paper's there when that is its colour, else the paper's
+/// flagged [`FLAG_PAPER_OFF`].
+fn over_paper(paper: &Bitmap, colour: u8, (x, y): (usize, usize)) -> Src {
+    let named = picture(Kind::Bitmap, BITMAP_PAPER, (x, y));
+    if paper.pixels[y * WIDTH + x] == colour {
+        named
+    } else {
+        Src {
+            flags: FLAG_PAPER_OFF,
+            ..named
+        }
+    }
+}
+
+/// A text window scrolled over the paper: a glyph moved up stays that glyph (drawn over the
+/// paper); a paper pixel moved up names the paper at the place it moves to, flagged
+/// [`FLAG_PAPER_OFF`] where its colour is not the paper's there; every colour moves up; the row
+/// the scroll clears names the paper, flagged where the paper is not of the window's paper
+/// colour; nothing outside the window changes. Checked on a copy synced from the screen before
+/// and after the scroll (as the published frame is), against sources and colours computed from
+/// the layout: a write that forgot its mark would leave the copy as it was.
+#[test]
+fn a_text_scroll_moves_the_glyphs_over_the_paper() {
+    let mut fb = plane();
+    let paper = crafted_paper();
+    blit_bmp(&colours(), &mut fb, &paper, 0, 0, BITMAP_PAPER);
+    let kept = crate::ui::text::Paper::drawn(&colours(), &paper);
+    let font = BitFont {
+        glyphs: vec![[0x81; 8]; 256],
     };
+    // A glyph in the window's second row: ink in its first and last columns, paper colour 2
+    // between.
+    crate::ui::text::draw_glyph(&mut fb, &font, 192, 112, b'A', 1, 2);
+    let w = text_window();
     let mut copy = plane();
     copy.sync_from(&mut fb);
-    crate::ui::text::scroll_window(&mut fb, &w);
+    crate::ui::text::scroll_window(&mut fb, &w, Some(&kept));
     copy.sync_from(&mut fb);
     // What the screen showed at (x, y) before the scroll.
     let was = |x: usize, y: usize| {
         if (192..200).contains(&x) && (112..120).contains(&y) {
             let ink = if x == 192 || x == 199 { 1 } else { 2 };
-            (ink, glyph(b'A', 0x81, (x - 192, y - 112)))
+            (ink, glyph_on_paper(b'A', 0x81, (x - 192, y - 112)))
         } else {
             (paper.pixels[y * 320 + x], picture(Kind::Bitmap, 0, (x, y)))
         }
+    };
+    // A pixel the scroll moved to (x, y): the paper's named in place (flagged on another colour),
+    // any other as it was.
+    let in_place = |(colour, src): (u8, Src), x, y| match src {
+        Src {
+            kind: Kind::Bitmap,
+            id: BITMAP_PAPER,
+            ..
+        } => (colour, over_paper(&paper, colour, (x, y))),
+        _ => (colour, src),
     };
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let inside = (176..304).contains(&x) && (104..184).contains(&y);
             let want = match (inside, y < 176) {
                 (false, _) => was(x, y),
-                (true, true) => was(x, y + 8),
-                (true, false) => (2, Src::CLASSIC),
+                (true, true) => in_place(was(x, y + 8), x, y),
+                (true, false) => (2, over_paper(&paper, 2, (x, y))),
             };
             assert_eq!(
                 (copy.get(x, y), copy.src_at(x, y)),
@@ -501,16 +556,330 @@ fn a_text_scroll_moves_the_sources_under_it() {
         }
     }
     assert!(copy.src() == fb.src() && copy.pixels() == fb.pixels());
+    let at = |x, y| (copy.get(x, y), copy.src_at(x, y));
     assert_eq!(
-        copy.src_at(180, 104),
-        Some(picture(Kind::Bitmap, 0, (180, 112))),
-        "the paper moved up"
+        at(180, 104),
+        (Some(2), Some(picture(Kind::Bitmap, 0, (180, 104)))),
+        "the paper's colour moved up, its source stayed"
+    );
+    let off = |x, y| Src {
+        flags: FLAG_PAPER_OFF,
+        ..picture(Kind::Bitmap, 0, (x, y))
+    };
+    assert_eq!(
+        at(300, 175),
+        (Some(7), Some(off(300, 175))),
+        "a pixel of the paper's other colour moved onto its plain part is flagged"
     );
     assert_eq!(
-        copy.src_at(199, 111),
-        Some(glyph(b'A', 0x81, (7, 7))),
+        at(290, 175),
+        (Some(2), Some(off(290, 175))),
+        "a pixel of the plain part moved onto the other colour is flagged"
+    );
+    assert_eq!(
+        at(301, 183),
+        (Some(2), Some(picture(Kind::Bitmap, 0, (301, 183)))),
+        "the cleared row names the paper of its colour"
+    );
+    assert_eq!(
+        at(300, 183),
+        (Some(2), Some(off(300, 183))),
+        "the cleared row is flagged over the paper's other colour"
+    );
+    assert_eq!(
+        at(199, 111),
+        (Some(1), Some(glyph_on_paper(b'A', 0x81, (7, 7)))),
         "the glyph moved up"
     );
+}
+
+/// The paper is the background and stays where it is drawn when the text scrolls over it: a paper
+/// pixel the scroll moves up takes the paper's source of the place it moves to ((u, v) = its new
+/// (x, y), as the paper is drawn at (0, 0)), so the HD compositor shows the paper's own place
+/// there, not the place the pixel came from; a pixel of another colour than the paper's there
+/// names it flagged [`FLAG_PAPER_OFF`] (shown classic). Every other source moves with its pixel as
+/// before: a panel bitmap, a portrait, a tile and a glyph under the text. The colours move as they
+/// did, equal to the same scroll on a buffer without a plane. Without the paper's colours (no
+/// `paper.bmp`) every pixel keeps its source and the cleared row is classic, as before.
+#[test]
+fn a_text_scroll_leaves_the_paper_in_place() {
+    let paper = crafted_paper();
+    let kept = crate::ui::text::Paper::drawn(&colours(), &paper);
+    let book = image(7, 8, 8);
+    let face = image(11, 8, 8);
+    let face_id = u6_render::portrait_id(b'a', 3).expect("an item below 256");
+    let font = BitFont {
+        glyphs: vec![[0x81; 8]; 256],
+    };
+    let draw = |fb: &mut Framebuffer| {
+        blit_bmp(&colours(), fb, &paper, 0, 0, BITMAP_PAPER);
+        // In the window's third row: a spellbook block at (200, 120), a portrait block at
+        // (216, 120), a row of tile pixels at (232..248, 124) and a glyph at (256, 120).
+        let book_src = BitmapSource::Bitmap(BITMAP_SPELLBOOK);
+        blit_bitmap(&colours(), fb, (8, 8), &book, 200, 120, book_src);
+        let face_src = BitmapSource::Portrait(face_id);
+        blit_bitmap(&colours(), fb, (8, 8), &face, 216, 120, face_src);
+        for u in 0..16 {
+            fb.set_src(232 + u, 124, 9, tile(0x123, 2, (u as u16, 5), 0));
+        }
+        crate::ui::text::draw_glyph(fb, &font, 256, 120, b'B', 1, 2);
+    };
+    let w = text_window();
+    let mut fb = plane();
+    draw(&mut fb);
+    let before = fb.clone();
+    let mut without = fb.clone();
+    crate::ui::text::scroll_window(&mut fb, &w, Some(&kept));
+    crate::ui::text::scroll_window(&mut without, &w, None);
+    let mut bare = Framebuffer::new();
+    draw(&mut bare);
+    crate::ui::text::scroll_window(&mut bare, &w, Some(&kept));
+    assert!(
+        fb.pixels() == bare.pixels() && without.pixels() == bare.pixels(),
+        "the colours are the plane-less scroll's"
+    );
+    let src_before = |x: usize, y: usize| before.src_at(x, y).expect("on the screen");
+    for y in 104..184 {
+        for x in 176..304 {
+            let colour = before.get(x, y + 8).filter(|_| y < 176).unwrap_or(2);
+            let from = (y < 176).then(|| src_before(x, y + 8));
+            let want = match from {
+                Some(s) if s.kind == Kind::Bitmap && s.id == BITMAP_PAPER => {
+                    over_paper(&paper, colour, (x, y))
+                }
+                Some(s) => s,
+                None => over_paper(&paper, 2, (x, y)),
+            };
+            assert_eq!(
+                (fb.get(x, y), fb.src_at(x, y)),
+                (Some(colour), Some(want)),
+                "({x}, {y})"
+            );
+            let old = from.unwrap_or(Src::CLASSIC);
+            assert_eq!(without.src_at(x, y), Some(old), "({x}, {y}) without");
+        }
+    }
+    // The paper pixel moved from (180, 112) to (180, 104) names the paper at (180, 104); the
+    // others name what they named one text row lower.
+    let at = |x, y| fb.src_at(x, y).expect("on the screen");
+    assert_eq!(
+        at(180, 104),
+        picture(Kind::Bitmap, BITMAP_PAPER, (180, 104))
+    );
+    let off = |x, y| Src {
+        flags: FLAG_PAPER_OFF,
+        ..picture(Kind::Bitmap, BITMAP_PAPER, (x, y))
+    };
+    assert_eq!((fb.get(300, 175), at(300, 175)), (Some(7), off(300, 175)));
+    assert_eq!((fb.get(290, 175), at(290, 175)), (Some(2), off(290, 175)));
+    assert_eq!(
+        at(203, 114),
+        picture(Kind::Bitmap, BITMAP_SPELLBOOK, (3, 2))
+    );
+    assert_eq!(at(221, 119), picture(Kind::Portrait, face_id, (5, 7)));
+    assert_eq!(at(240, 116), tile(0x123, 2, (8, 5), 0));
+    assert_eq!(at(263, 113), glyph_on_paper(b'B', 0x81, (7, 1)));
+}
+
+/// A fill of the UI over the paper ([`crate::ui::text::fill_rect`], the panels' clears and the
+/// command underline): each pixel filled names the paper, flagged [`FLAG_PAPER_OFF`] where the
+/// paper's colour there is not the colour filled; with the paper's colour 7 filled over its pixel
+/// of colour 7 only that pixel names it unflagged; without the paper's colours, or without a
+/// plane, the fill is classic as before. The colours are the fill's either way. A colour past 15
+/// writes nothing (`plot_in`), so it names nothing either: pixels of the paper's colour drawn
+/// there classic before stay classic.
+#[test]
+fn a_fill_over_the_paper_names_it_where_it_is_its_colour() {
+    let paper = crafted_paper();
+    let kept = crate::ui::text::Paper::drawn(&colours(), &paper);
+    let rect = (280, 170, 303, 183);
+    let inside = |x: usize, y: usize| (280..=303).contains(&x) && (170..=183).contains(&y);
+    for (colour, given) in [(2, true), (7, true), (2, false)] {
+        let mut fb = plane();
+        blit_bmp(&colours(), &mut fb, &paper, 0, 0, BITMAP_PAPER);
+        let mut bare = Framebuffer::new();
+        blit_bmp(&colours(), &mut bare, &paper, 0, 0, BITMAP_PAPER);
+        let (x0, y0, x1, y1) = rect;
+        let map = given.then_some(&kept);
+        crate::ui::text::fill_rect(&mut fb, x1, y1, x0, y0, colour, map);
+        crate::ui::text::fill_rect(&mut bare, x0, y0, x1, y1, colour, map);
+        assert!(fb.pixels() == bare.pixels(), "the fill's colours");
+        for y in 160..190 {
+            for x in 270..310 {
+                let want = match (inside(x, y), given) {
+                    (false, _) => picture(Kind::Bitmap, BITMAP_PAPER, (x, y)),
+                    (true, true) => over_paper(&paper, colour, (x, y)),
+                    (true, false) => Src::CLASSIC,
+                };
+                assert_eq!(
+                    fb.src_at(x, y),
+                    Some(want),
+                    "colour {colour}, {given}: ({x}, {y})"
+                );
+            }
+        }
+    }
+    let mut fb = plane();
+    blit_bmp(&colours(), &mut fb, &paper, 0, 0, BITMAP_PAPER);
+    for (x, y) in (170..=183).flat_map(|y| (280..=303).map(move |x| (x, y))) {
+        fb.set(x, y, 2);
+    }
+    let before = fb.clone();
+    crate::ui::text::fill_rect(&mut fb, 280, 170, 303, 183, 0x12, Some(&kept));
+    assert!(
+        fb.pixels() == before.pixels(),
+        "a colour past 15: nothing filled"
+    );
+    assert!(fb.src() == before.src(), "a colour past 15: nothing named");
+}
+
+/// A paper pixel the scroll moves keeps its place's name as it goes, flagged
+/// [`FLAG_PAPER_OFF`] over the paper of another colour and unflagged again where it meets the
+/// paper of its own: on a paper of colour 2 with colour 7 at (300, 183), (290, 175) and
+/// (290, 167), the cleared row's pixel at (300, 183) (colour 2) is flagged, and names the paper
+/// one text row up at the next scroll; the pixel of colour 2 that leaves (290, 183) crosses two
+/// places of colour 7, flagged at each, and names the paper at the third scroll.
+#[test]
+fn a_moved_paper_pixel_is_named_again_where_it_meets_its_colour() {
+    let mut pixels = vec![2u8; WIDTH * HEIGHT];
+    for (x, y) in [(300, 183), (290, 175), (290, 167)] {
+        pixels[y * WIDTH + x] = 7;
+    }
+    let paper = Bitmap {
+        width: WIDTH as u16,
+        height: HEIGHT as u16,
+        pixels,
+    };
+    let kept = crate::ui::text::Paper::drawn(&colours(), &paper);
+    let mut fb = plane();
+    blit_bmp(&colours(), &mut fb, &paper, 0, 0, BITMAP_PAPER);
+    let w = text_window();
+    let named = |x, y| picture(Kind::Bitmap, BITMAP_PAPER, (x, y));
+    let off = |x, y| Src {
+        flags: FLAG_PAPER_OFF,
+        ..named(x, y)
+    };
+    let at = |fb: &Framebuffer, x, y| (fb.get(x, y).unwrap(), fb.src_at(x, y).unwrap());
+    crate::ui::text::scroll_window(&mut fb, &w, Some(&kept));
+    assert_eq!(
+        at(&fb, 300, 183),
+        (2, off(300, 183)),
+        "cleared over colour 7"
+    );
+    assert_eq!(at(&fb, 290, 175), (2, off(290, 175)), "moved onto colour 7");
+    crate::ui::text::scroll_window(&mut fb, &w, Some(&kept));
+    assert_eq!(at(&fb, 300, 175), (2, named(300, 175)), "one row up: named");
+    assert_eq!(at(&fb, 290, 167), (2, off(290, 167)), "onto colour 7 again");
+    crate::ui::text::scroll_window(&mut fb, &w, Some(&kept));
+    assert_eq!(
+        at(&fb, 290, 159),
+        (2, named(290, 159)),
+        "back on colour 2: named"
+    );
+    assert_eq!(at(&fb, 300, 167), (2, named(300, 167)), "named as it goes");
+}
+
+/// A glyph names the paper under it ([`FLAG_PAPER`]) where the pixel it replaces is on the paper
+/// ([`Src::on_paper`]): over the paper, over the paper flagged [`FLAG_PAPER_OFF`] and over a
+/// glyph drawn over the paper; not over the spellbook, a portrait or a classic pixel. The flag
+/// moves with the glyph in a scroll.
+#[test]
+fn a_glyph_carries_the_paper_only_where_it_is_drawn_over_it() {
+    let paper = crafted_paper();
+    let kept = crate::ui::text::Paper::drawn(&colours(), &paper);
+    let mut fb = plane();
+    blit_bmp(&colours(), &mut fb, &paper, 0, 0, BITMAP_PAPER);
+    let book = BitmapSource::Bitmap(BITMAP_SPELLBOOK);
+    blit_bitmap(&colours(), &mut fb, (8, 8), &[2; 64], 200, 120, book);
+    let face_id = u6_render::portrait_id(b'a', 3).expect("an item below 256");
+    let face = BitmapSource::Portrait(face_id);
+    blit_bitmap(&colours(), &mut fb, (8, 8), &[2; 64], 216, 120, face);
+    for (x, y) in (120..128).flat_map(|y| (232..240).map(move |x| (x, y))) {
+        fb.set(x, y, 2);
+    }
+    // A fill of colour 3 over the paper at (248..256, 120..128): the paper flagged.
+    crate::ui::text::fill_rect(&mut fb, 248, 120, 255, 127, 3, Some(&kept));
+    let font = BitFont {
+        glyphs: vec![[0x81; 8]; 256],
+    };
+    for x in [184, 200, 216, 232, 248] {
+        crate::ui::text::draw_glyph(&mut fb, &font, x, 120, b'A', 1, 2);
+    }
+    // Again over the first, a glyph drawn over the paper.
+    crate::ui::text::draw_glyph(&mut fb, &font, 184, 120, b'B', 1, 2);
+    let cell = |fb: &Framebuffer, x0: usize, y0: usize| -> Vec<Src> {
+        (0..64)
+            .map(|k| fb.src_at(x0 + k % 8, y0 + k / 8).unwrap())
+            .collect()
+    };
+    let over =
+        |fb: &Framebuffer, x0, y0| cell(fb, x0, y0).iter().all(|s| s.flags & FLAG_PAPER != 0);
+    let not = |fb: &Framebuffer, x0, y0| cell(fb, x0, y0).iter().all(|s| s.flags & FLAG_PAPER == 0);
+    assert!(over(&fb, 184, 120), "over a glyph over the paper");
+    assert!(not(&fb, 200, 120), "over the spellbook");
+    assert!(not(&fb, 216, 120), "over a portrait");
+    assert!(not(&fb, 232, 120), "over classic pixels");
+    assert!(over(&fb, 248, 120), "over the paper flagged");
+    crate::ui::text::scroll_window(&mut fb, &text_window(), Some(&kept));
+    assert!(over(&fb, 184, 112), "moved up with the scroll");
+    assert!(
+        not(&fb, 200, 112),
+        "moved up with the scroll, not over the paper"
+    );
+    let s = fb.src_at(191, 119).unwrap();
+    assert_eq!(s, glyph_on_paper(b'B', 0x81, (7, 7)), "the glyph whole");
+}
+
+/// The key wait's symbol ([`crate::ui::text::draw_symbol`]) over the paper names it by the rule
+/// of the fills: its clear pixels of the paper's colour name the paper, its ink pixels the paper
+/// flagged [`FLAG_PAPER_OFF`]; over the spellbook, or without the paper's colours, its pixels
+/// are classic as before. Never a glyph: the HD font mode cannot show it as a character.
+#[test]
+fn the_key_wait_symbol_names_the_paper_under_it() {
+    let paper = crafted_paper();
+    let kept = crate::ui::text::Paper::drawn(&colours(), &paper);
+    let font = BitFont {
+        glyphs: vec![[0x81; 8]; 256],
+    };
+    let w = text_window();
+    let mut fb = plane();
+    blit_bmp(&colours(), &mut fb, &paper, 0, 0, BITMAP_PAPER);
+    let book = BitmapSource::Bitmap(BITMAP_SPELLBOOK);
+    blit_bitmap(&colours(), &mut fb, (8, 8), &[2; 64], 200, 120, book);
+    let fonts = (Some(&font), None);
+    let mut bare = fb.clone();
+    crate::ui::text::draw_symbol(&mut fb, fonts, &w, 5, (23, 15), Some(&kept));
+    crate::ui::text::draw_symbol(&mut fb, fonts, &w, 5, (25, 15), Some(&kept));
+    crate::ui::text::draw_symbol(&mut bare, fonts, &w, 5, (23, 15), None);
+    for k in 0..64 {
+        let (u, v) = (k % 8, k / 8);
+        let ink = u == 0 || u == 7;
+        let (x, y) = (184 + u, 120 + v);
+        let want = if ink {
+            Src {
+                flags: FLAG_PAPER_OFF,
+                ..picture(Kind::Bitmap, BITMAP_PAPER, (x, y))
+            }
+        } else {
+            picture(Kind::Bitmap, BITMAP_PAPER, (x, y))
+        };
+        let colour = if ink { 1 } else { 2 };
+        assert_eq!(
+            (fb.get(x, y), fb.src_at(x, y)),
+            (Some(colour), Some(want)),
+            "({x}, {y})"
+        );
+        assert_eq!(
+            fb.src_at(200 + u, y),
+            Some(Src::CLASSIC),
+            "over the spellbook"
+        );
+        assert_eq!(
+            bare.src_at(x, y),
+            Some(Src::CLASSIC),
+            "without the paper's colours"
+        );
+    }
 }
 
 /// The world of the view tests in `s.gfx`, with the clock's hands on the hero's tile and its

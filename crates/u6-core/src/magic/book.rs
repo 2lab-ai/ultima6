@@ -168,10 +168,24 @@ fn a4_pointed(io: &Io, off: u32) -> String {
 /// The picture is the LZW file named at A4-0x61de (A4-0x61e8 = 1 around the read selects the
 /// compressed path of 0x134776), drawn at (0xa8, 6) by 0x153384. A missing or bad file draws
 /// nothing. The source plane names it the spellbook.
+///
+/// Port (spec 07 HD0): the clear names the paper as the UI's fills do
+/// ([`crate::ui::text::fill_rect`]), in the buffer it fills; a colour past 15 writes nothing.
 pub fn draw_book(s: &mut State, io: &Io) {
     let paper = u16::from(s.ui.tables.colours.paper);
     crate::gfx::blit::set_plot_colour(&mut s.gfx, paper);
     seams::fill_rect(s, io, 0xa8, 6, 0x137, 0x67);
+    if paper <= 15 {
+        let map = s.ui.paper.as_ref();
+        let name = |fb: &mut u6_render::Framebuffer| {
+            crate::ui::text::name_paper(fb, (0xa8, 6, 0x137, 0x67), map);
+        };
+        if s.gfx.plot_back {
+            io.draw_back(name);
+        } else {
+            io.draw(name);
+        }
+    }
     let Some(bmp) = book_bitmap(io) else {
         return;
     };

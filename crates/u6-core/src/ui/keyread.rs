@@ -129,7 +129,8 @@ async fn idle_wait(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
             let (font, hangul) = (ui.font.as_ref(), ui.hangul.as_deref());
             let glyph = u16::from(glyph as u8);
             // Port (spec 11): a symbol, never a character of the HD font.
-            io.draw(|fb| text::draw_symbol(fb, font, hangul, &w, glyph, col, row));
+            let paper = ui.paper.as_ref();
+            io.draw(|fb| text::draw_symbol(fb, (font, hangul), &w, glyph, (col, row), paper));
             let refresh = ui.input.idle_refresh;
             s.gfx.actor_anim_due = 1;
             refresh
@@ -210,7 +211,7 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
             } else if win.flags & text::SCROLL != 0 {
                 ui.text.drawn = true;
                 let w = *ui.text.win();
-                io.draw(|fb| text::scroll_window(fb, &w));
+                io.draw(|fb| text::scroll_window(fb, &w, ui.paper.as_ref()));
             }
         }
     }

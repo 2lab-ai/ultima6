@@ -5,6 +5,10 @@
 //! - for a pixel of a tile record, a portrait or a panel bitmap without flags, drawn at the
 //!   image's current version, the block `(u·S.., v·S..)` of that image's HD version, where an HD
 //!   sub-pixel that is transparent takes the pixel's classic colour;
+//! - for a glyph pixel drawn over the paper ([`FLAG_PAPER`]), without ink ([`FLAG_INK`]), whose
+//!   colour is the paper's at its own place (the paper bitmap, [`BITMAP_PAPER`], is drawn at
+//!   (0, 0)), the block `(x·S.., y·S..)` of the paper's HD version, so the text windows show the
+//!   HD paper in place behind the text (and text over a portrait or the spellbook does not);
 //! - for every other pixel (classic, glyph, flagged, stale), its classic colour.
 //!
 //! Spec 11, the HD font mode ([`Compositor::set_font_mode`]): on, each 8 × 8 cell of the screen
@@ -12,6 +16,8 @@
 //! in the cell, one ink and one paper colour, both present) and whose code is printable ASCII
 //! but the space or a Hangul syllable ([`hd_font_code`]) is filled with its paper colour and
 //! listed ([`Compositor::glyphs`]): the platform draws the character over it in its HD font.
+//! The fill is the paper's HD block at each of its pixels drawn over the paper ([`FLAG_PAPER`])
+//! where the paper's colour there is the cell's paper colour, as a clear glyph pixel's is.
 //! A whole space is listed too (code 0x20, its ink its paper, [`HdGlyph::code`]): the glyph of
 //! the space drawn whole, no pixel of it ink, all 64 of one colour. It is filled with its paper
 //! like a listed letter, which leaves its pixels as they were, and nothing is drawn for it: it
@@ -55,7 +61,7 @@ mod tests;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::{FLAG_INK, Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH};
+use crate::{BITMAP_PAPER, FLAG_INK, FLAG_PAPER, Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH};
 
 pub use mmpx::{mmpx, mmpx2x};
 
@@ -613,12 +619,12 @@ fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<Ce
                 u: u as u16,
                 v: v as u16,
                 kind: Kind::Glyph,
-                flags: s.flags & FLAG_INK,
+                flags: s.flags & (FLAG_INK | FLAG_PAPER),
             };
             if s != at {
                 return None;
             }
-            let colour = if s.flags == FLAG_INK {
+            let colour = if s.flags & FLAG_INK != 0 {
                 &mut ink
             } else {
                 &mut paper
@@ -812,10 +818,13 @@ impl Compositor {
 
     /// Spec 11: the HD font mode on (`hd`) or off (the pixel font). On, each cell of the glyph of
     /// one code drawn whole whose code is drawn in the HD font ([`hd_font_code`]), and each whole
-    /// space, is filled with its paper colour and listed ([`Compositor::glyphs`]); off, glyph
-    /// pixels are shown classic, as every composition before the mode did. A change empties the
-    /// list at once and makes the next composition write every block, as a change of scale does,
-    /// also when the mode is changed back before it; setting the mode it is in changes nothing.
+    /// space, is filled with its paper colour (the paper's HD block where that is the paper's
+    /// colour) and listed ([`Compositor::glyphs`]); off, glyph pixels are composed as the module
+    /// docs say for every glyph pixel (classic, or the paper's HD block behind a clear pixel
+    /// drawn over the paper in its colour), as every composition before the mode did. A change
+    /// empties the list at once and makes the next composition write every block, as a change of
+    /// scale does, also when the mode is changed back before it; setting the mode it is in
+    /// changes nothing.
     pub fn set_font_mode(&mut self, hd: bool) {
         if self.font != hd {
             self.font = hd;
@@ -902,6 +911,8 @@ impl Compositor {
         let mut dirty = [usize::MAX, usize::MAX, 0, 0];
         let mut key: Option<(Kind, u16)> = None;
         let mut cur = Resolved::CLASSIC;
+        // The paper, resolved at the first glyph pixel that may show it.
+        let mut paper: Option<Resolved> = None;
         for y in 0..HEIGHT {
             for x in 0..WIDTH {
                 let i = y * WIDTH + x;
@@ -909,16 +920,35 @@ impl Compositor {
                 let index = pixels[i];
                 let c = y / CELL * COLS + x / CELL;
                 let glyph = cells[c];
+                let classic = pal[usize::from(index)];
+                // The colour of a pixel shown flat: a listed cell's paper colour, else its own.
+                let flat = glyph.map_or(classic, |g| pal[usize::from(g.paper)]);
                 let mut shown = None;
-                // A glyph names no image: shown classic, or as its cell's paper in the HD font.
+                // The place in the image shown whose HD block the pixel takes.
+                let mut at = (usize::from(src.u), usize::from(src.v));
                 if !matches!(src.kind, Kind::Classic | Kind::Glyph) && src.flags == 0 {
                     if key != Some((src.kind, src.id)) {
                         key = Some((src.kind, src.id));
                         cur = res.resolve(src.kind, src.id);
                     }
-                    let (u, v) = (usize::from(src.u), usize::from(src.v));
+                    let (u, v) = at;
                     if cur.token != NONE && src.ver == cur.ver && u < cur.width && v < cur.height {
                         shown = Some(cur);
+                    }
+                } else if src.kind == Kind::Glyph
+                    && src.flags & FLAG_PAPER != 0
+                    && (glyph.is_some() || src.flags & FLAG_INK == 0)
+                {
+                    // A glyph names no image: a pixel drawn over the paper ([`FLAG_PAPER`]) of a
+                    // listed cell (filled with its paper colour) or a clear one shows the paper's
+                    // HD block of its own place where that colour is the paper's there (the paper
+                    // is drawn at (0, 0)), else it is flat.
+                    let p = *paper.get_or_insert_with(|| res.resolve(Kind::Bitmap, BITMAP_PAPER));
+                    let under = (p.token != NONE && x < p.width && y < p.height)
+                        .then(|| res.hd.entry(p.slot).input[y * p.width + x]);
+                    if under == Some(flat) {
+                        shown = Some(p);
+                        at = (x, y);
                     }
                 }
                 let token = shown.map_or(NONE, |r| r.token);
@@ -939,24 +969,22 @@ impl Compositor {
                     dirty[2].max(x + 1),
                     dirty[3].max(y + 1),
                 ];
-                let classic = pal[usize::from(index)];
                 let o = y * s * ow + x * s;
                 match shown {
                     None => {
-                        let fill = glyph.map_or(classic, |g| pal[usize::from(g.paper)]);
                         for r in 0..s {
-                            out[o + r * ow..o + r * ow + s].fill(fill);
+                            out[o + r * ow..o + r * ow + s].fill(flat);
                         }
                     }
                     Some(r) => {
                         let hd = &res.hd.entry(r.slot).hd;
                         let hw = r.width * s;
-                        let b = usize::from(src.v) * s * hw + usize::from(src.u) * s;
+                        let b = at.1 * s * hw + at.0 * s;
                         for k in 0..s {
                             let from = &hd[b + k * hw..b + k * hw + s];
                             let to = &mut out[o + k * ow..o + k * ow + s];
                             for (d, &c) in to.iter_mut().zip(from) {
-                                *d = over(c, classic);
+                                *d = over(c, flat);
                             }
                         }
                     }

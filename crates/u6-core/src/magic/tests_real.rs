@@ -52,7 +52,7 @@ pub(super) async fn boot(state: &RefCell<State>, io: &Io) {
                 *dst = u6_render::Rgb::new(c.r, c.g, c.b);
             }
         });
-        crate::main_loop::draw_paper(&s, io);
+        crate::main_loop::draw_paper(&mut s, io);
         s.ui.text.main_windows(&tables);
         crate::objects::init_slots(&mut s.objects);
         // As game's main, the start window's egg unhatched: its monsters would be foes in every

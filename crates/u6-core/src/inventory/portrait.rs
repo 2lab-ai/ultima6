@@ -95,7 +95,8 @@ pub async fn show_actor(state: &RefCell<State>, io: &Io, actor: Slot) {
         {
             let s = state.borrow();
             let paper = s.ui.tables.colours.paper;
-            io.draw(|fb| fill_rect(fb, 0xa8, 6, 0x137, 0x67, paper));
+            let map = s.ui.paper.as_ref();
+            io.draw(|fb| fill_rect(fb, 0xa8, 6, 0x137, 0x67, paper, map));
         }
         select_window(state, io, WindowId::Status).await;
         let mut s = state.borrow_mut();
