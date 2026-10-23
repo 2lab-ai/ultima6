@@ -219,7 +219,7 @@ fn eggs_far_or_active_or_on_arrival_are_offered() {
     let egg = |s: &mut State, slot: u16, x: u16, y: u16| {
         s.objects.type_frame[usize::from(slot)] = 0x14f;
         s.objects.location[usize::from(slot)] = at(x, y);
-        link(s);
+        crate::main_loop::test_support::link_placed_objects(s);
     };
     // An egg is near up to 3 past the half view of its axis (spec 13 Decision 5): Original 8
     // each way, Wide 21 east-west and 13 north-south. Taken from geom, not from the pass.
@@ -285,17 +285,7 @@ fn object(s: &mut State, slot: u16, (x, y): (u16, u16), tile: u16, [f1, f2, f3]:
     s.tables.tileflags.flags3[usize::from(tile)] = f3;
     s.objects.type_frame[usize::from(slot)] = ty;
     s.objects.location[usize::from(slot)] = at(x, y);
-    link(s);
-}
-
-/// Links the placed objects (`test_support::link_placed_objects`), then puts back the window the
-/// rebuild made: that helper sets the window origin with the original's lead of 16, which is not
-/// the Wide window's. Delete once the helper reads `geom::window_origin`.
-fn link(s: &mut State) {
-    let [ox, oy] = s.map.window_origin;
     crate::main_loop::test_support::link_placed_objects(s);
-    s.map.window_origin = [ox, oy];
-    s.objects.set_window(ox, oy, s.map.centre.z);
 }
 
 fn set_ambient(s: &mut State, light: i8) {
