@@ -1553,10 +1553,15 @@ mod tests {
         assert_eq!(key_from_dom("ArrowUp", "ArrowUp", true), None);
     }
 
+    /// Bytes of the whole frame at `s`× (1: the classic frame), RGBA8.
+    fn frame_bytes(s: usize) -> usize {
+        u6_render::WIDTH * s * u6_render::HEIGHT * s * 4
+    }
+
     #[test]
     fn before_start_the_frame_is_black_and_keys_are_not_queued() {
         let mut game = Game::new();
-        assert_eq!(game.frame_len(), 320 * 200 * 4);
+        assert_eq!(game.frame_len(), frame_bytes(1));
         assert!(game.frame_rgba().chunks(4).all(|p| p == [0, 0, 0, 255]));
         assert!(game.key_down("ArrowUp", "ArrowUp", false));
         assert!(!game.key_down("ShiftLeft", "Shift", false));
@@ -2186,7 +2191,7 @@ mod tests {
         again.boot(1, false).quiet();
         assert!(again.game_files() == n);
         assert!(again.frame_version() > v, "the start moves the version");
-        assert_eq!(again.hd_frame_len(), 1280 * 800 * 4);
+        assert_eq!(again.hd_frame_len(), frame_bytes(4));
         assert_eq!(
             again.hd_take_dirty(),
             vec![0, 0, 1280, 800],
@@ -3166,7 +3171,7 @@ mod tests {
         game.set_hd(true, 4);
         assert!(game.frame_version() > v, "the switch moves the version");
         assert_eq!((game.hd_on(), game.hd_scale()), (true, 4));
-        assert_eq!(game.hd_frame_len(), 1280 * 800 * 4);
+        assert_eq!(game.hd_frame_len(), frame_bytes(4));
         assert!(
             game.hd_frame_rgba() == expected_hd(&game, Scale::X4),
             "a new compositor's frame"
@@ -3243,7 +3248,7 @@ mod tests {
         let v = game.frame_version();
         game.set_hd(true, 2);
         assert!(game.frame_version() > v);
-        assert_eq!((game.hd_scale(), game.hd_frame_len()), (2, 640 * 400 * 4));
+        assert_eq!((game.hd_scale(), game.hd_frame_len()), (2, frame_bytes(2)));
         assert!(game.hd_frame_rgba() == expected_hd(&game, Scale::X2));
         game.set_hd(true, 3);
         assert_eq!(game.hd_scale(), 2, "any other scale is 2");
@@ -3269,7 +3274,7 @@ mod tests {
         game.hd_take_dirty();
         game.put_on_screen(tile_engine());
         assert!(game.frame_version() > v, "the start moves the version");
-        assert_eq!(game.hd_frame_len(), 640 * 400 * 4);
+        assert_eq!(game.hd_frame_len(), frame_bytes(2));
         assert_eq!(game.hd_take_dirty(), vec![0, 0, 640, 400], "composed whole");
         assert!(
             game.hd_frame_rgba() == expected_hd(&game, Scale::X2),
@@ -3719,7 +3724,7 @@ mod tests {
     fn before_a_start_the_hd_frame_is_black() {
         let mut game = Game::new();
         game.set_hd(true, 4);
-        assert_eq!(game.hd_frame_len(), 1280 * 800 * 4);
+        assert_eq!(game.hd_frame_len(), frame_bytes(4));
         assert!(game.hd_frame_rgba().chunks(4).all(|p| p == [0, 0, 0, 255]));
     }
 }

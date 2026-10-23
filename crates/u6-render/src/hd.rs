@@ -555,6 +555,10 @@ pub const CELL: usize = 8;
 pub const COLS: usize = WIDTH / CELL;
 /// Rows of cells of the screen.
 pub const ROWS: usize = HEIGHT / CELL;
+const _: () = assert!(
+    WIDTH.is_multiple_of(CELL) && HEIGHT.is_multiple_of(CELL),
+    "the screen is whole cells"
+);
 /// Cells of the screen.
 const CELLS: usize = COLS * ROWS;
 

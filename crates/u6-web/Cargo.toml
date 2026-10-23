@@ -9,6 +9,10 @@ publish.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Spec 13 Wide mode (`site/pkg-wide`); off, the Original build (`site/pkg`).
+wide = ["u6-core/wide", "u6-render/wide"]
+
 [dependencies]
 u6-core.workspace = true
 # Spec 08: the Hangul table's type (the table itself is site/fonts/galmuri7-hangul.bin).

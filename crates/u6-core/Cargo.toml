@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Spec 13 Wide mode: a 37 × 21 view in a 60 × 60 window (`geom`), and the wide frame.
+wide = ["u6-render/wide"]
+
 [dependencies]
 u6-formats.workspace = true
 u6-render.workspace = true
