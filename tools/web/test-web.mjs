@@ -6597,9 +6597,11 @@ const LAYOUT_PARTS = {
 // A gated page (gameFirst) with the HD layout kept, in a `width` x `height` window, on the
 // user's disks, started at its prompt with the canvas focused. The layout's tests compare the
 // canvas with the x4 frame, so they keep the pixel font (`font`; spec 11: with the HD font the
-// page draws characters over cells that are paper in that frame), unless a test asks.
-async function bootLayout(env, { width = 1400, height = 900, font = 'pixel' } = {}) {
+// page draws characters over cells that are paper in that frame), unless a test asks. `init`, a
+// page init script the test adds before the page loads.
+async function bootLayout(env, { width = 1400, height = 900, font = 'pixel', init = null } = {}) {
   const { context, page } = await h.openPage(env, { layout: 'hd', font });
+  if (init) await context.addInitScript(init);
   await page.setViewportSize({ width, height });
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
@@ -7361,9 +7363,44 @@ function paperAsFrame(s, label) {
   assert.equal(s.v1, 0, `${label}: no pixel of the old dark fill or frame`);
 }
 
-test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the regions is the game\'s paper from the x4 frame: its outer band (in game only the paper there, the source plane says, the pointer apart) 9-sliced to the canvas\'s edges, the corners and the top and bottom edges unscaled, the side edges stretched, the right and bottom ones mirrored from the left and top; inside it the parchment in one colour, the median of three pixels of the frame; no pixel of the old dark fill or frames; the pieces tile the canvas; a change of a source of the paper paints it again (the pointer\'s sprite where the game starts it, then moved into the map; the cross-hair at the map\'s left edge); the sprite over one sample leaves the parchment\'s colour; the regions still the x4 frame\'s; no page error', async (env) => {
+// Page init script: the engine's wasm memory (the instance whose exports hold the HD frame) kept
+// in `window.__wasmMemory`, so a test can write pixels of the x4 frame where the page reads them.
+function wasmMemoryHook() {
+  const keep = (result) => {
+    const instance = result instanceof WebAssembly.Instance ? result : result.instance;
+    if (instance && 'game_hd_frame_ptr' in instance.exports) window.__wasmMemory = instance.exports.memory;
+    return result;
+  };
+  const streaming = WebAssembly.instantiateStreaming;
+  if (streaming) WebAssembly.instantiateStreaming = (...args) => streaming.apply(WebAssembly, args).then(keep);
+  const instantiate = WebAssembly.instantiate;
+  WebAssembly.instantiate = (...args) => instantiate.apply(WebAssembly, args).then(keep);
+}
+
+// Page script: the x4 frame in the engine's memory at the game pixels `at` (the top-left x4 pixel
+// of each, the one the page reads for the parchment): with `colour` (RGB, the test's own) those
+// pixels kept in the page and that colour written there; with null, the kept pixels put back.
+// The engine writes a block of its frame again only where the screen changes, so the paper's
+// pixels keep what is written until then.
+const writeFramePixels = (page, at, colour) => page.evaluate(([points, rgb]) => {
+  const g = globalThis.__shownGame;
+  const view = new Uint8Array(window.__wasmMemory.buffer, g.hd_frame_ptr(), g.hd_frame_len());
+  const w4 = g.width() * 4;
+  if (rgb !== null) window.__framePixelsHeld = [];
+  points.forEach(([gx, gy], n) => {
+    const i = (4 * gy * w4 + 4 * gx) * 4;
+    if (rgb === null) {
+      view.set(window.__framePixelsHeld[n], i);
+      return;
+    }
+    window.__framePixelsHeld.push(view.slice(i, i + 3));
+    view.set([(rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255], i);
+  });
+}, [at, colour]);
+
+test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the regions is the game\'s paper from the x4 frame: its outer band (in game only the paper there, the source plane says, the pointer apart) 9-sliced to the canvas\'s edges, the corners and the top and bottom edges unscaled, the side edges stretched, the right and bottom ones mirrored from the left and top; inside it the parchment in one colour, the median of three pixels of the frame; no pixel of the old dark fill or frames; the pieces tile the canvas; the rects that paint it whole outside every region; a change of a source of the paper paints it again (the pointer\'s sprite where the game starts it, then moved into the map; the cross-hair at the map\'s left edge); two samples changed in the frame (by the test) paint it whole, the parchment their new median, and put back whole again; the sprite over one sample leaves the parchment\'s colour with no whole repaint; the regions still the x4 frame\'s; no page error', async (env) => {
   const errors = [];
-  const { page } = await bootLayout(env);
+  const { page } = await bootLayout(env, { init: wasmMemoryHook });
   page.on('pageerror', () => errors.push(1));
   assert.deepEqual(await page.evaluate(() => globalThis.__u6Layout.paper), LAYOUT_PAPER, 'the paper\'s pieces, the parchment and its samples: the test\'s reading');
   // The pieces and the parchment tile the canvas: every canvas pixel in exactly one of them.
@@ -7376,6 +7413,11 @@ test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the r
   for (const [gx, gy] of LAYOUT_PAPER.samples) {
     assert.ok(!Object.values(LAYOUT_PARTS).some(([x, y, w, hh]) => gx >= x && gx < x + w && gy >= y && gy < y + hh), 'a sample outside the regions');
   }
+  // What paints the canvas whole (the page's PAPER_SOURCES, x4 frame pixels): every rect outside
+  // every region's classic rect, so a change in the regions alone never does.
+  const { paperSources, regions } = await page.evaluate(() => ({ paperSources: globalThis.__u6Layout.paperSources, regions: globalThis.__u6Layout.regions }));
+  const meets = ([ax, ay, aw, ah], [bx, by, bw, bh]) => ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+  assert.ok(paperSources.length > 0 && paperSources.every((r) => regions.every(({ from }) => !meets(r, from.map((v) => 4 * v)))), 'every rect that paints the paper whole outside every region');
   await h.virtualDisplay(page, 60);
   await h.runFrames(page, 2);
   // At the boot, no pointer event yet: the game's sprite where it starts it, over the band's top
@@ -7393,7 +7435,52 @@ test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the r
   paperAsFrame(s, 'the pointer in the map');
   assert.notEqual(s.hash, boot, 'a change of the paper\'s sources: the paper painted again');
   const clean = s;
-  // The sprite over one sample (the arrow from the side panel's foot): the parchment as before.
+  // From here, the rects the page copies and its whole repaints, through frames after a move of
+  // the pointer (`moveSeen`): whether the frame moved on, the rects as `dirtySeen` tells them,
+  // whether any met a source of the band, and the whole repaints since.
+  const bandRects = LAYOUT_PAPER.pieces.map(({ from }) => from.map((v) => 4 * v));
+  const startSeeing = async () => {
+    await recordDirty(page);
+    await countWholePaints(page);
+  };
+  const moveSeen = async () => {
+    const seen = await dirtySeen(page, bandRects[0]);
+    for (const r of bandRects) seen.meets ||= (await dirtySeen(page, r)).meets;
+    return { ...seen, whole: await page.evaluate(() => window.__wholePaints) };
+  };
+  const partial = (m) => m.rects > 0 && !m.full && !m.meets && m.sameGame && m.view === 'game';
+  // Two samples changed in the frame alone: the test writes its own colour into the engine's x4
+  // frame at two of them (no image of the paper changing, so nothing else of the frame does),
+  // then the pointer moves in the map, a partial repaint that meets no source of the band. The
+  // page finds the samples' median not the parchment it shows and paints whole, the parchment
+  // the new median; the pixels put back, the next such repaint whole again, the paper as before.
+  const OWN = 0xff00ff;
+  assert.notEqual(clean.fill, OWN, 'precondition: the test\'s colour not the parchment\'s');
+  const two = LAYOUT_PAPER.samples.slice(0, 2);
+  await writeFramePixels(page, two, OWN);
+  await startSeeing();
+  await page.mouse.move(...(await h.screenPoint(page, 100, 100)));
+  await h.runFrames(page, 10);
+  let m = await moveSeen();
+  assert.ok(partial(m), 'precondition: the pointer moved in the map, a partial repaint meeting no source of the band');
+  assert.ok(m.whole > 0, 'two samples changed: the canvas painted whole');
+  s = await paperShown(page);
+  paperAsFrame(s, 'two samples changed');
+  assert.equal(s.fill, OWN, 'two samples changed: the parchment their new median');
+  await writeFramePixels(page, two, null);
+  await startSeeing();
+  await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
+  await h.runFrames(page, 10);
+  m = await moveSeen();
+  assert.ok(partial(m), 'precondition: the pointer moved back, a partial repaint meeting no source of the band');
+  assert.ok(m.whole > 0, 'the samples put back: the canvas painted whole again');
+  s = await paperShown(page);
+  paperAsFrame(s, 'the samples put back');
+  assert.equal(s.hash, clean.hash, 'the samples put back: the paper as with the pointer in the map before');
+  // The sprite over one sample (the arrow from the side panel's foot): the parchment as before,
+  // the median absorbing it, with no whole repaint (a sample is not among the rects that paint
+  // the canvas whole, and the median the parchment the canvas shows).
+  await startSeeing();
   let over = null;
   for (const [gx, gy] of [[240, 103], [240, 101], [239, 102], [238, 100], [236, 99]]) {
     await page.mouse.move(...(await h.screenPoint(page, gx, gy)));
@@ -7404,6 +7491,9 @@ test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the r
   assert.equal(over.covered, 1, 'the pointer\'s sprite over one sample');
   paperAsFrame(over, 'the sprite over a sample');
   assert.ok(over.uncovered.length === 1 && over.fill === over.uncovered[0] && over.fill === clean.fill, 'the parchment the colour of the samples that are the paper alone, as before');
+  m = await moveSeen();
+  assert.ok(partial(m), 'precondition: the pointer moved to the sample, partial repaints meeting no source of the band');
+  assert.equal(m.whole, 0, 'the sprite over one sample: no whole repaint');
   // Look waits for its target (the cross-hair): at the map's left edge it reaches into the band's
   // left strip, which the right edge mirrors: the paper painted again.
   await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
@@ -7428,7 +7518,7 @@ test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the r
   // The regions over the paper: the one-to-one ones still the x4 frame's pixels.
   for (const [name, { differ }] of Object.entries(await oneToOne(page))) assert.equal(differ, 0, `${name}: the x4 frame's pixels`);
   assert.equal(errors.length, 0, 'no page error');
-  console.log(`  receipt: ${LAYOUT_PAPER.pieces.length} pieces of the band and the parchment tile the canvas; ${s.compared} canvas pixels round the regions the paper from the x4 frame (${s.directCompared} of them read straight from the frame), none the old fill or frame; painted again at each change of its sources (the sprite at the boot moved into the map, the cross-hair at the map's edge); the sprite over a sample: the parchment's colour kept: pass`);
+  console.log(`  receipt: ${LAYOUT_PAPER.pieces.length} pieces of the band and the parchment tile the canvas; ${s.compared} canvas pixels round the regions the paper from the x4 frame (${s.directCompared} of them read straight from the frame), none the old fill or frame; painted again at each change of its sources (the sprite at the boot moved into the map, the cross-hair at the map's edge); two samples changed in the frame: painted whole with their median, and again once put back; the sprite over a sample: the parchment's colour kept, no whole repaint: pass`);
 }, { needs: h.haveHfes });
 
 // --- the HD font (spec 11) ----------------------------------------------------------------------
@@ -8084,7 +8174,7 @@ test('HD font (spec 11, a one-to-one region): a run listed in the map window (ma
   console.log('  receipt: a made-up run in the map window drawn, kept once through a pointer repaint, and gone after the next once no longer listed, its place repainted by nothing else (no game cell in the window, its x4 pixels unchanged, no dirty rect meeting it, no whole repaint): pass');
 }, { needs: h.haveHfes });
 
-test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pack (the user\'s disks, a synthetic conversation) the message scroll lists the pack\'s syllables and the game\'s letters; with the HD font one paint draws each run once, in its inks, where the font puts it (from 1 px inside its first cell, at the font\'s natural width without kerning, the second ink where the text before it ends): syllables at the scroll\'s scale centred down their cells, a run after two spaces at its own cell, the keyword in its own colour, the rest of the canvas exactly the x4 frame\'s; a change of the scroll\'s text alone (Look at the prompt), a partial repaint (its dirty rects meet the scroll, none the whole frame), drawn over the scroll copied again, nothing of the runs before left; with the pixel font the canvas is the x4 frame\'s regions exactly; no line reaches the console, the page\'s data or text', async (env) => {
+test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pack (the user\'s disks, a synthetic conversation) the message scroll lists the pack\'s syllables and the game\'s letters; with the HD font one paint draws each run once, in its inks, where the font puts it (from 1 px inside its first cell, at the font\'s natural width without kerning, the second ink where the text before it ends): syllables at the scroll\'s scale centred down their cells, a run after two spaces at its own cell, the keyword in its own colour, the rest of the canvas exactly the x4 frame\'s; a change of the scroll\'s text alone (Look at the prompt, the pointer in the map; precondition asserted: no rect the page copied met a source of the paper\'s band, nor did the x4 frame there change), a partial repaint (its dirty rects meet the scroll, none the whole frame), drawn over the scroll copied again, nothing of the runs before left; with the pixel font the canvas is the x4 frame\'s regions exactly; no line reaches the console, the page\'s data or text', async (env) => {
   const { context, page } = await h.openPage(env, { setup: { lang: 'ko' }, layout: 'hd' });
   await context.addInitScript(fontRunsHook);
   const words = consoleText(page);
@@ -8121,11 +8211,25 @@ test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pa
   // A change of the scroll's text on its own (L at the prompt: Look, its name printed, waiting
   // for a target, no turn): a repaint of the regions the change touched, the scroll's runs not as
   // before; the scroll copied again shows its new runs where the font puts them and nothing of
-  // the old ones.
+  // the old ones. The pointer first into the map, settled: until the first move the game keeps its
+  // sprite over the paper's band where it starts it, and Look changes it there, a change of the
+  // band's source that rightly paints the canvas whole (spec 10 Design 2). Precondition: through
+  // the Look no rect the page copied meets a source of the band (its pieces' `from`, the x4
+  // frame's rects that paint the paper whole) and the x4 frame under them stays as it was, so a
+  // whole repaint could only be the page's own.
+  await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
+  await h.runFrames(page, 10);
   await page.evaluate(() => {
     const from = globalThis.__u6Layout.regions.find((r) => r.name === 'messages').from;
     window.__keysBefore = window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from).map((run) => `${run.y}:${run.cells.map((k) => `${k.x}:${k.code}`).join(' ')}`).join('|');
   });
+  const bandSources = await page.evaluate(() => globalThis.__u6Layout.paper.pieces.map(({ from }) => from.map((v) => 4 * v)));
+  const bandHashes = async () => {
+    const v = [];
+    for (const r of bandSources) v.push(await x4Hash(page, r));
+    return v;
+  };
+  const bandBefore = await bandHashes();
   await recordDirty(page);
   await page.evaluate(() => { window.__wholePaints = 0; });
   await page.focus('#screen');
@@ -8142,6 +8246,10 @@ test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pa
   // whole canvas (its background, `fillRect`).
   const scroll = (await layoutTable(page)).regions.find((r) => r.name === 'messages').from.map((n) => 4 * n);
   const dirty = await dirtySeen(page, scroll);
+  const bandMet = [];
+  for (const r of bandSources) bandMet.push((await dirtySeen(page, r)).meets);
+  assert.ok(bandSources.length > 0 && !bandMet.some(Boolean), 'precondition: through the Look no rect the page copied met a source of the paper\'s band');
+  assert.deepEqual(await bandHashes(), bandBefore, 'precondition: through the Look the x4 frame under the band\'s sources unchanged');
   assert.ok(dirty.rects > 0 && dirty.meets && !dirty.full && dirty.sameGame && dirty.view === 'game', 'the repaint partial: the dirty rects met the scroll, none the whole frame');
   assert.equal(await page.evaluate(() => window.__wholePaints), 0, 'the repaint partial: no whole repaint of the canvas');
   const partial = (await fontRuns(page)).messages;
