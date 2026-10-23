@@ -60,6 +60,10 @@ fn oracle_save(dir: &str) -> Option<MemStore> {
 enum Cmd {
     Save,
     Restore,
+    /// The egg on this tile made unhatched (status bit 0x40 cleared) and full (quantity 100), so
+    /// its next offer hatches for sure: 0x1319b2 draws 1..=100 against the quantity
+    /// (`objects/commands/eggs.rs` `hatch_egg`).
+    Rearm(Position),
 }
 
 /// The real game future (`main_loop::game_first`) with commands run at the start of a poll, inside
@@ -82,6 +86,15 @@ impl Future for Inject {
             match cmd {
                 Cmd::Save => save(&mut s),
                 Cmd::Restore => restore(&mut s, &self.io).quiet(),
+                Cmd::Rearm(at) => {
+                    let o = &mut s.objects;
+                    for e in 0x100..crate::objects::OBJECT_SLOTS {
+                        if o.type_frame[e] & 0x3ff == EGG && o.location[e] == at {
+                            o.obj_status[e] &= !0x40;
+                            o.qq[e] = (o.qq[e] & 0xff00) | 100;
+                        }
+                    }
+                }
             }
         }
         self.game.as_mut().poll(cx)
@@ -318,8 +331,9 @@ fn boot_change(table: &str, i: usize, x: u8, y: u8, party: &[usize]) -> Option<&
 
 /// The port's Save of the start state against the shipped files, in both builds: the objlist
 /// bytes the boot changes are the ones [`boot_change`] explains, the Save commits the region's
-/// 2 × 2 surface blocks, and the blocks hold the shipped records beside the opening fight's (in
-/// Wide beside every hatch's, [`written_back_beside_hatches`]).
+/// 2 × 2 surface blocks, and every block that differs holds the shipped records beside the
+/// hatches' only ([`written_back_beside_hatches`]; in Original also the opening fight's
+/// comparison, [`strip_fight`]). Prints what the oracle saw, as counts.
 #[test]
 fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
     let Some(files) = zip_files() else { return };
@@ -362,18 +376,24 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
         "the committed blocks are not a 2 x 2 square of the surface"
     );
     assert!(committed.contains(&fight), "the leader's block committed");
+    let region = |blocks: &[Vec<u8>]| -> Vec<Vec<[u8; 8]>> {
+        committed.iter().map(|&i| records(&blocks[i])).collect()
+    };
+    let hatches = Hatches::of(&s, &region(&old_blocks), &region(&new_blocks));
     for (name, _, _) in block_diffs(&old_blocks, &new_blocks) {
         let i = (0..BLOCK_COUNT).find(|&i| block_file(i) == name).quiet();
         let (mut ra, mut rb) = (records(&old_blocks[i]), records(&new_blocks[i]));
+        assert!(committed.contains(&i), "{name}: a block of the region");
+        let seen = written_back_beside_hatches(&name, &ra, &rb, &hatches);
+        let seen = seen.unwrap_or_else(|e| panic!("{e}"));
+        eprintln!("{name}: {seen}");
         if cfg!(feature = "wide") {
             // Wide: the window offers the eggs past the wide view too (spec 13 Decision 6), so
             // any block of the region may hold hatchlings' records, of more kinds than the start
-            // egg's gear.
+            // egg's gear; the oracle above is the comparison.
             if i == fight {
                 assert!(gear_records(&rb) > 0, "the hatched creatures' gear");
             }
-            written_back_beside_hatches(&name, ra, rb);
-            assert!(committed.contains(&i), "{name}: a block of the region");
             continue;
         }
         if i == fight {
@@ -390,7 +410,6 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
         ra.sort();
         rb.sort();
         assert_same!(ra, rb, "{name}: the same records");
-        assert!(committed.contains(&i), "{name}: a block of the region");
     }
 }
 
@@ -508,53 +527,291 @@ fn egg_record(r: &[u8; 8]) -> bool {
     r[4..6] == [1, 0x4f]
 }
 
-/// A block record a hatch (0x1319b2) made: an object a temporary actor carries or readies (its
-/// gear and treasure, 0x13121a), one inside a container with the temporary bit 0x20 (a
-/// hatchling's bag; 0x10be02 sets the bit), or one it put on the map: an object created there
-/// (0x10bcee sets the bit) or a body part of a monster of more than one tile (0x131646 clears the
-/// bit; its type is an actor type, 0x156 and up, the bound 0x1319b2 compares a template with).
-fn hatch_record(r: &[u8; 8]) -> bool {
-    /// The first actor type (0x1319b2 creates the templates below it as objects).
-    const ACTOR_TYPES: u16 = 0x156;
-    let temp = r[0] & crate::objects::TEMPORARY != 0;
-    match r[0] & 0x18 {
-        0x10 | 0x18 => temp && temporary(usize::from(r[1])),
-        0x08 => temp,
-        _ => temp || u16::from_be_bytes([r[4], r[5]]) & 0x3ff >= ACTOR_TYPES,
+/// What the saved state says about the hatches, for [`hatch_rule`]. The temporary actors come
+/// from the state (a Save packs only map objects and what they hold; actors stay linked,
+/// `objects/blocks.rs:94-` `collect`), the egg tiles from the block records (packing a map
+/// object clears its slot's type, `objects/blocks.rs:85`).
+struct Hatches {
+    /// Temporary actors in use (slots 0xe0..0x100): slot, type, tile.
+    actors: Vec<(u16, u16, Position)>,
+    /// The tiles of the eggs that may have hatched ([`offered_eggs`]), in all four blocks of the
+    /// region, not only the record's: the scatter (0x121e88) moves a hatchling up to 3 tiles,
+    /// across a block's edge when the egg is near one (a block is 128 tiles a side,
+    /// [`leader_block`]).
+    eggs: Vec<Position>,
+    /// A silver serpent's segment offsets from its head (dx at A4-0x6582, dy at A4-0x657e, the
+    /// segment number & 3) and the frames a segment or the tail gets (A4-0x658a, A4-0x6586):
+    /// `objects/commands/eggs.rs:53-58` `SEG_DX` .. `TAIL_FRAME`, read from the user's game.
+    segment_at: Vec<(i16, i16)>,
+    segment_frames: Vec<u8>,
+}
+
+impl Hatches {
+    /// The hatches of saved state `s`, whose region's blocks are `shipped` and `saved`.
+    fn of(s: &State, shipped: &[Vec<[u8; 8]>], saved: &[Vec<[u8; 8]>]) -> Hatches {
+        let o = &s.objects;
+        let actors = (FIRST_TEMP_ACTOR..ACTOR_SLOTS as Slot)
+            .filter(|&m| o.type_frame[m as usize] != 0)
+            .map(|m| (m as u16, o.kind(m), o.location[m as usize]))
+            .collect();
+        let eggs = offered_eggs(shipped, saved);
+        let data = &s.objcmds.data;
+        let sb = |off: i32, j: i32| i16::from(data.a4_byte(off + j) as i8);
+        let segment_at = (0..4).map(|j| (sb(-0x6582, j), sb(-0x657e, j))).collect();
+        let segment_frames = (0..4)
+            .flat_map(|j| [data.a4_byte(-0x658a + j), data.a4_byte(-0x6586 + j)])
+            .map(|f| f & 0x3f)
+            .collect();
+        Hatches {
+            actors,
+            eggs,
+            segment_at,
+            segment_frames,
+        }
+    }
+
+    /// Whether a temporary actor of type `kind` stands within 1 tile of `at` on each axis, on its
+    /// level.
+    fn beside(&self, kind: u16, at: Position) -> bool {
+        self.actors
+            .iter()
+            .any(|&(_, k, p)| k == kind && p.z == at.z && within(p, at, 1))
     }
 }
 
-/// Wide: block `name`'s records saved against the shipped ones, container indices cleared (they
-/// shift after new records) and the eggs left out (a hatch changes their status): every shipped
-/// record is written back, and every other saved one is a hatch's ([`hatch_record`]).
-fn written_back_beside_hatches(name: &str, shipped: Vec<[u8; 8]>, saved: Vec<[u8; 8]>) {
-    let plain = |v: Vec<[u8; 8]>| -> Vec<[u8; 8]> {
-        v.into_iter()
-            .filter(|r| !egg_record(r))
-            .map(|mut r| {
-                if r[0] & 0x18 == 0x08 {
-                    r[1] = 0;
-                    r[2] = 0;
-                }
-                r
-            })
-            .collect()
-    };
-    let mut left = plain(shipped);
-    let mut new = Vec::new();
-    for r in plain(saved) {
-        match left.iter().position(|x| *x == r) {
-            Some(k) => {
-                left.swap_remove(k);
-            }
-            None => new.push(r),
+/// The tiles of the region's eggs that may have hatched: saved map egg records with the bit 0x40
+/// that 0x1319b2 sets on every egg it is offered (`objects/commands/eggs.rs:392`), each matching
+/// a shipped egg record of the region with the bits 0x40 and 0x02 masked (one shipped egg each).
+/// A saved egg no shipped one matches gives no tile, so a record cannot vouch for itself.
+fn offered_eggs(shipped: &[Vec<[u8; 8]>], saved: &[Vec<[u8; 8]>]) -> Vec<Position> {
+    let masked = |r: &[u8; 8]| [r[0] & !0x42, r[1], r[2], r[3], r[4], r[5], r[6], r[7]];
+    let on_map = |r: &&[u8; 8]| egg_record(r) && r[0] & 0x18 == 0;
+    let mut left: Vec<[u8; 8]> = shipped
+        .iter()
+        .flatten()
+        .filter(on_map)
+        .map(masked)
+        .collect();
+    let mut out = Vec::new();
+    for r in saved.iter().flatten().filter(on_map) {
+        if r[0] & 0x40 == 0 {
+            continue;
+        }
+        if let Some(i) = left.iter().position(|x| *x == masked(r)) {
+            left.swap_remove(i);
+            out.push(Position::from_packed([r[1], r[2], r[3]]));
         }
     }
-    assert!(left.is_empty(), "{name}: every shipped record written back");
-    assert!(
-        new.iter().all(hatch_record),
-        "{name}: every other record a hatch's"
-    );
+    out
+}
+
+/// Whether `a` and `b` are at most `d` tiles apart on each axis.
+fn within(a: Position, b: Position, d: i32) -> bool {
+    (i32::from(a.x) - i32::from(b.x)).abs() <= d && (i32::from(a.y) - i32::from(b.y)).abs() <= d
+}
+
+/// The rule [`hatch_rule`] passed a record by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rule {
+    /// Carried or readied by a temporary actor.
+    Carried,
+    /// Inside a hatchling's container.
+    Contained,
+    /// A temporary object on the map near an egg.
+    Placed,
+    /// A body part of a monster of more than one tile.
+    Part,
+    /// A silver serpent's body segment.
+    Segment,
+}
+
+/// The rule by which saved record `k` of `saved` is a hatch's (0x1319b2), or `None`. The fields
+/// as 0x10d376 packs them (`objects/blocks.rs:58-89` `pack_record`): bytes 1-2 little-endian are
+/// the owner of an inventory record and the record index of a container content's container
+/// (`:75-82`), bytes 1-3 a map record's tile, bytes 4-5 big-endian the type (low 10 bits) and
+/// frame, byte 7 the quantity (`:71-74`).
+///
+/// - Carried (0x10) or readied (0x18): the temporary bit 0x20, and the owner is a temporary actor
+///   in use. 0x13121a gives a hatchling its gear and treasure inside it
+///   (`objects/commands/eggs.rs:198-` `equip_monster`, `:270-` `treasure`) with 0x10be02, which
+///   sets the bit (`objects/moves.rs:283-` `create_in`), and the packer turns a content of an
+///   actor into inventory (`objects/blocks.rs:60-69`).
+/// - Contained (0x08): the temporary bit, and the container is an earlier record of the block (the
+///   packer searches back from the content, `objects/blocks.rs:77-80`) that is a hatch's: the
+///   chest 0x13121a gives and fills (`objects/commands/eggs.rs:273-301`), carried, or on the map
+///   (Placed) when its hatchling found no tile: 0x1319b2 removes a hatchling after the first that
+///   the scatter could not place, on the egg's tile (`objects/commands/eggs.rs:457-462`), the
+///   removal moves its contents onto that tile (`objects/moves.rs:140-151`), and a move takes an
+///   object's own contents along (`objects/moves.rs:86-87`), so the chest is a temporary map
+///   record and its contents stay contained.
+/// - On the map with the temporary bit: within 3 tiles of an egg on each axis, on its level.
+///   0x1319b2 creates a template below 0x156 on the egg's tile (`objects/commands/eggs.rs:436-438`;
+///   0x10bcee sets the bit, `objects/moves.rs:268`), 0x121e88 scatters every hatchling after the
+///   first (`objects/commands/eggs.rs:455-457`) by `a + b - 5`, a and b in 1..=4
+///   (`combat/mode.rs:110-118`), and a hatchling that finds no tile is removed on the egg's tile
+///   (`objects/commands/eggs.rs:462`), its contents left there (`objects/moves.rs:118`).
+/// - On the map without the bit: a body part 0x131646 makes and clears the bit of
+///   (`objects/commands/eggs.rs:120-189` `spawn_monster`), within 1 tile on each axis of a
+///   temporary actor it belongs to (0x10b9ca moves a part one tile from the monster's new tile,
+///   `objects/parts.rs:188-192`): a type from 0x1aa with the tail frame 2 or 14, of a monster of
+///   its own type (`objects/commands/eggs.rs:156-168`); a dragon part (0x19b) of frame 8, 16, 24
+///   or 32, of a dragon (`:169-177`); a part 0x1a9 of frame 4 × d (d 0..8), of a monster 0x176
+///   (`:178-184`).
+/// - On the map without the bit, type 0x19d: a silver serpent's body segment, whose quantity byte
+///   names its head (`objects/commands/eggs.rs:551`), a temporary serpent, at one of the segment
+///   offsets from the head (`:552-555`) with a segment or tail frame (`:548`, `:561-562`, `:568`;
+///   [`Hatches`]). Exact offsets assume the start save comes before any turn moves a serpent;
+///   no real data exercises this rule (no segment in either build's start save), only the
+///   synthetic test.
+///
+/// A hydra's heads are actors (`objects/commands/eggs.rs:578-` `hydra_heads` through 0x131646,
+/// `:585`), so no block record.
+fn hatch_rule(saved: &[[u8; 8]], k: usize, h: &Hatches) -> Option<Rule> {
+    /// Monster types with parts (0x131646).
+    const TAILED: u16 = 0x1aa;
+    const DRAGON: u16 = 0x19b;
+    const EIGHT: u16 = 0x176;
+    const EIGHT_PART: u16 = 0x1a9;
+    const SERPENT: u16 = 0x19d;
+    let r = saved.get(k)?;
+    let temp = r[0] & crate::objects::TEMPORARY != 0;
+    let word = u16::from_le_bytes([r[1], r[2]]);
+    let kind = u16::from_be_bytes([r[4], r[5]]) & 0x3ff;
+    let frame = r[4] >> 2;
+    let at = Position::from_packed([r[1], r[2], r[3]]);
+    match r[0] & 0x18 {
+        0x10 | 0x18 => (temp && h.actors.iter().any(|a| a.0 == word)).then_some(Rule::Carried),
+        0x08 => {
+            let parent = usize::from(word);
+            let held = parent < k
+                && matches!(
+                    hatch_rule(saved, parent, h),
+                    Some(Rule::Carried | Rule::Contained | Rule::Placed)
+                );
+            (temp && held).then_some(Rule::Contained)
+        }
+        _ if temp => h
+            .eggs
+            .iter()
+            .any(|&e| e.z == at.z && within(e, at, 3))
+            .then_some(Rule::Placed),
+        _ => {
+            let part = (kind >= TAILED && matches!(frame, 2 | 14) && h.beside(kind, at))
+                || (kind == DRAGON && matches!(frame, 8 | 16 | 24 | 32) && h.beside(DRAGON, at))
+                || (kind == EIGHT_PART && frame % 4 == 0 && frame < 32 && h.beside(EIGHT, at));
+            if part {
+                return Some(Rule::Part);
+            }
+            let head = h
+                .actors
+                .iter()
+                .find(|a| a.0 == u16::from(r[7]) && a.1 == SERPENT);
+            let segment = kind == SERPENT
+                && h.segment_frames.contains(&frame)
+                && head.is_some_and(|&(_, _, p)| {
+                    p.z == at.z
+                        && h.segment_at.iter().any(|&(dx, dy)| {
+                            i32::from(p.x) + i32::from(dx) == i32::from(at.x)
+                                && i32::from(p.y) + i32::from(dy) == i32::from(at.y)
+                        })
+                });
+            segment.then_some(Rule::Segment)
+        }
+    }
+}
+
+/// What [`written_back_beside_hatches`] saw in a block: the saved records no shipped one matches
+/// and the rule each passed by, the eggs compared, and whether the records were the shipped ones
+/// exactly (no other record).
+#[derive(Debug, Default)]
+struct Seen {
+    new: usize,
+    by_rule: [usize; 5],
+    eggs: usize,
+    exact: bool,
+}
+
+impl std::fmt::Display for Seen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let [c, n, p, b, s] = self.by_rule;
+        write!(
+            f,
+            "records not shipped {} (carried {c}, contained {n}, placed {p}, parts {b}, \
+             segments {s}), eggs compared {}, exactly the shipped records {}",
+            self.new, self.eggs, self.exact
+        )
+    }
+}
+
+/// Block `name`'s saved records against the shipped ones. An egg's status bits 0x40 and 0x02
+/// are masked on both sides (0x1319b2 sets them on every offer, `objects/commands/eggs.rs:392`);
+/// nothing else of an egg may change. Matched with container indices cleared (they
+/// shift after new records): every shipped record is written back, and every other saved record
+/// is a hatch's ([`hatch_rule`]); an egg record no shipped egg matches is refused outright. With
+/// no other record the saved records are the shipped ones exactly, sorted, container indices
+/// included. Errors name the block and a record index only.
+fn written_back_beside_hatches(
+    name: &str,
+    shipped: &[[u8; 8]],
+    saved: &[[u8; 8]],
+    h: &Hatches,
+) -> Result<Seen, String> {
+    let egg_masked = |r: &[u8; 8]| {
+        let mut r = *r;
+        if egg_record(&r) {
+            r[0] &= !0x42;
+        }
+        r
+    };
+    let plain = |r: &[u8; 8]| {
+        let mut r = egg_masked(r);
+        if r[0] & 0x18 == 0x08 {
+            r[1] = 0;
+            r[2] = 0;
+        }
+        r
+    };
+    let mut left: Vec<[u8; 8]> = shipped.iter().map(plain).collect();
+    let mut new = Vec::new();
+    for (k, r) in saved.iter().enumerate() {
+        let r = plain(r);
+        match left.iter().position(|x| *x == r) {
+            Some(i) => {
+                left.swap_remove(i);
+            }
+            None => new.push(k),
+        }
+    }
+    if !left.is_empty() {
+        return Err(format!("{name}: a shipped record not written back"));
+    }
+    let mut seen = Seen {
+        new: new.len(),
+        eggs: saved.iter().filter(|r| egg_record(r)).count(),
+        ..Seen::default()
+    };
+    for &k in &new {
+        if egg_record(&saved[k]) {
+            return Err(format!(
+                "{name}: saved record #{k} is an egg no shipped one matches"
+            ));
+        }
+        let rule =
+            hatch_rule(saved, k, h).ok_or(format!("{name}: saved record #{k} is no hatch's"))?;
+        seen.by_rule[rule as usize] += 1;
+    }
+    if new.is_empty() {
+        let sorted = |v: &[[u8; 8]]| {
+            let mut v: Vec<[u8; 8]> = v.iter().map(egg_masked).collect();
+            v.sort();
+            v
+        };
+        if sorted(shipped) != sorted(saved) {
+            return Err(format!("{name}: not the shipped records exactly"));
+        }
+        seen.exact = true;
+    }
+    Ok(seen)
 }
 
 /// The records of a block without the opening fight's, container indices (which shift after
@@ -1072,53 +1329,456 @@ fn hatched(o: &crate::objects::Objects, e: Slot) -> bool {
     o.status(e) & 0x40 != 0
 }
 
-/// The game's own boot hatches the start egg once: walking on (in combat, as the boot starts)
-/// until the window origin moves, which rebuilds the window and offers the start egg again
-/// (0x1321dc: its status has bit 0x20), adds none of its monsters (no second wave) and the egg
-/// keeps its hatched bit, in both builds (the origin moves at other cells in Wide,
-/// `geom::LEAD`). Prints counts the test made only.
+/// What [`walk_until_the_window_moves`] found.
+struct Walked {
+    /// Steps walked.
+    steps: usize,
+    /// Whether the window origin moved (the walk stops then, or after 40 steps).
+    moved: bool,
+    /// Ticks watched.
+    ticks: usize,
+    /// (step, slot) of every newcomer [`newcomers`] found.
+    newcomers: Vec<(usize, Slot)>,
+    /// The steps after which the start egg lacked its hatched bit.
+    unmarked: Vec<usize>,
+}
+
+impl Run {
+    /// [`Run::press`] with `watch` run on the state after every tick.
+    fn press_watched(&mut self, k: Key, watch: &mut dyn FnMut(&State)) {
+        self.e.tick(&[InputEvent::Key(k)], 16);
+        watch(&self.e.state());
+        for t in 0..4000 {
+            if t >= 40 && self.at_prompt() {
+                break;
+            }
+            self.e.tick(&[], 16);
+            watch(&self.e.state());
+        }
+    }
+}
+
+/// The kind (type, the low 10 bits of the type + frame word) of every temporary-actor slot
+/// (0xe0..0x100) of `s`, 0 for an empty slot.
+fn slot_kinds(s: &State) -> Vec<u16> {
+    (FIRST_TEMP_ACTOR as usize..ACTOR_SLOTS)
+        .map(|m| s.objects.type_frame[m] & 0x3ff)
+        .collect()
+}
+
+/// The newcomers between two looks at the temporary-actor slots: the indices whose kind is now
+/// one of `kinds` (the start egg's) and differs from the kind `prior` held there (0: empty).
+/// Kinds, not type + frame words: idle animation turns an actor's frame as display time passes
+/// (0x10202e) and makes no newcomer. Residual: a slot freed and filled again with the same kind
+/// between two looks shows the same kind, so that newcomer is not seen by type.
+fn newcomers(prior: &[u16], now: &[u16], kinds: &[u16]) -> Vec<usize> {
+    prior
+        .iter()
+        .zip(now)
+        .enumerate()
+        .filter(|&(_, (p, n))| n != p && kinds.contains(n))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Walks one step at a time (as [`Run::walk`]: south, else east, west, north) until the window
+/// origin moves, at most 40 steps, looking at the temporary-actor slots after every tick for
+/// [`newcomers`] of the start egg's `kinds`, from the kinds after the boot on. After each step it
+/// looks at the start egg on tile `at`.
+fn walk_until_the_window_moves(run: &mut Run, at: Position, kinds: &[u16]) -> Walked {
+    let s = run.state();
+    let mut prior = slot_kinds(&s);
+    let origin = s.map.window_origin;
+    drop(s);
+    let mut walked = Walked {
+        steps: 0,
+        moved: false,
+        ticks: 0,
+        newcomers: Vec::new(),
+        unmarked: Vec::new(),
+    };
+    let dirs = [Key::Down, Key::Right, Key::Left, Key::Up];
+    while !walked.moved && walked.steps < 40 {
+        walked.steps += 1;
+        let step = walked.steps;
+        let mut watch = |s: &State| {
+            walked.ticks += 1;
+            let now = slot_kinds(s);
+            for i in newcomers(&prior, &now, kinds) {
+                walked.newcomers.push((step, FIRST_TEMP_ACTOR + i as Slot));
+            }
+            prior = now;
+        };
+        let start = run.leader_at();
+        let mut d = 0;
+        for _ in 0..12 {
+            run.press_watched(dirs[d], &mut watch);
+            assert!(run.at_prompt(), "a step ends at the prompt");
+            if run.leader_at() != start {
+                break;
+            }
+            d = (d + 1) % dirs.len();
+        }
+        assert!(run.leader_at() != start, "the party cannot walk");
+        let s = run.e.state();
+        let o = &s.objects;
+        let egg = (0x100..crate::objects::OBJECT_SLOTS as Slot)
+            .find(|&e| o.kind(e) == EGG && o.place(e) == 0 && o.location[e as usize] == at)
+            .expect("the start egg on its tile");
+        if !hatched(o, egg) {
+            walked.unmarked.push(step);
+        }
+        walked.moved = s.map.window_origin != origin;
+    }
+    walked
+}
+
+/// The newcomer detector on synthetic kinds: a slot that turns from start-egg kind A to start-egg
+/// kind B, an empty slot that takes a start-egg kind, and a slot of another kind that turns into
+/// one are newcomers; a start-egg kind kept, one that leaves, and another kind arriving are not.
+#[test]
+fn a_slot_that_changes_into_a_start_egg_kind_is_a_newcomer() {
+    let (a, b, other) = (0x170, 0x171, 0x180);
+    let kinds = [a, b];
+    let prior = [a, 0, other, a, a, 0, other];
+    let now = [b, a, a, a, 0, other, other];
+    assert_eq!(newcomers(&prior, &now, &kinds), [0, 1, 2]);
+    // The kinds come from the type + frame words: another frame of the same type is the same kind.
+    let mut s = State::empty();
+    s.objects.type_frame[FIRST_TEMP_ACTOR as usize] = a | 3 << 10;
+    let before = slot_kinds(&s);
+    s.objects.type_frame[FIRST_TEMP_ACTOR as usize] = a | 5 << 10;
+    assert!(
+        newcomers(&before, &slot_kinds(&s), &kinds).is_empty(),
+        "an idle frame"
+    );
+    s.objects.type_frame[FIRST_TEMP_ACTOR as usize] = b | 5 << 10;
+    assert_eq!(newcomers(&before, &slot_kinds(&s), &kinds), [0], "A to B");
+}
+
+/// The game's own boot hatches the start egg once: after the boot the egg has the bit 0x20 that
+/// makes 0x1321dc offer it at every window rebuild, near the leader or not; walking on (in
+/// combat, as the boot starts) until the window origin moves, which rebuilds the window and
+/// offers it again, no temporary-actor slot newly holds one of its types on any tick (no second
+/// wave) and the egg keeps its hatched bit, in both builds (the origin moves at other cells in
+/// Wide, `geom::LEAD`). Prints counts the test made only.
 #[test]
 fn the_start_egg_hatches_once_when_the_window_moves() {
     let Some(files) = zip_files() else { return };
     let mut run = Run::boot(files);
     let s = run.state();
     let (at, kinds) = start_egg(&s);
-    let egg = |s: &State| {
-        (0x100..crate::objects::OBJECT_SLOTS as Slot).find(|&e| {
-            s.objects.kind(e) == EGG
-                && s.objects.place(e) == 0
-                && s.objects.location[e as usize] == at
-        })
+    let o = &s.objects;
+    let egg = (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .find(|&e| o.kind(e) == EGG && o.place(e) == 0 && o.location[e as usize] == at)
+        .quiet();
+    assert!(
+        o.status(egg) & 0x20 != 0,
+        "the start egg is offered at every rebuild (bit 0x20)"
+    );
+    let hatchlings = (FIRST_TEMP_ACTOR..ACTOR_SLOTS as Slot)
+        .any(|m| o.type_frame[m as usize] != 0 && kinds.contains(&o.kind(m)));
+    assert!(hatchlings, "the boot hatched the start egg");
+    drop(s);
+    let w = walk_until_the_window_moves(&mut run, at, &kinds);
+    eprintln!(
+        "the window origin moved after {} steps ({} ticks watched): {} newcomers, {} steps \
+         without the hatched bit",
+        w.steps,
+        w.ticks,
+        w.newcomers.len(),
+        w.unmarked.len()
+    );
+    assert!(w.moved, "the window origin moved within 40 steps");
+    assert!(w.newcomers.is_empty(), "no second wave of the start egg");
+    assert!(w.unmarked.is_empty(), "the start egg keeps its hatched bit");
+}
+
+/// The newcomer watch sees a second wave: the start egg made unhatched and full after the boot
+/// ([`Cmd::Rearm`]) hatches again when the walk moves the window, and its new hatchlings are
+/// newcomers. Prints counts the test made only.
+#[test]
+fn a_forced_second_hatch_of_the_start_egg_is_seen() {
+    let Some(files) = zip_files() else { return };
+    let mut run = Run::boot(files);
+    let s = run.state();
+    let (at, kinds) = start_egg(&s);
+    let free =
+        (FIRST_TEMP_ACTOR..ACTOR_SLOTS as Slot).any(|m| s.objects.type_frame[m as usize] == 0);
+    assert!(free, "a free temporary-actor slot for a second wave");
+    drop(s);
+    run.command(Cmd::Rearm(at));
+    let w = walk_until_the_window_moves(&mut run, at, &kinds);
+    eprintln!(
+        "forced: the window origin moved after {} steps; newcomers seen {}, the first at step \
+         {:?}",
+        w.steps,
+        !w.newcomers.is_empty(),
+        w.newcomers.first().map(|n| n.0)
+    );
+    assert!(w.moved, "the window origin moved within 40 steps");
+    assert!(!w.newcomers.is_empty(), "the second wave is seen");
+    assert!(
+        w.newcomers.iter().all(|&(step, _)| step == w.steps),
+        "the second wave comes at the step the window moved"
+    );
+}
+
+/// A synthetic map record: `status`, tile (x, y, z), type `kind` with `frame`, quantity `qty`.
+fn map_record(status: u8, (x, y, z): (u16, u16, u8), kind: u16, frame: u16, qty: u8) -> [u8; 8] {
+    let [b1, b2, b3] = Position { x, y, z }.to_packed();
+    let [t0, t1] = (kind | frame << 10).to_be_bytes();
+    [status, b1, b2, b3, t0, t1, 0, qty]
+}
+
+/// A synthetic held record: `status` (its location bits 0x08, 0x10 or 0x18), the owner or the
+/// container's record index `word`, type `kind`.
+fn held_record(status: u8, word: u16, kind: u16) -> [u8; 8] {
+    let [lo, hi] = word.to_le_bytes();
+    let [t0, t1] = kind.to_be_bytes();
+    [status, lo, hi, 0, t0, t1, 0, 1]
+}
+
+/// The errors of [`written_back_beside_hatches`], by the words each carries.
+const NOT_BACK: &str = "not written back";
+const NO_HATCH: &str = "is no hatch's";
+const NEW_EGG: &str = "is an egg no shipped one matches";
+const NOT_EXACT: &str = "not the shipped records exactly";
+
+/// The save oracle on synthetic records (no game data): every rule of [`hatch_rule`] takes its
+/// own kind of record, and each record or change no hatch makes is refused with its own error,
+/// among them a map record of an actor type far from any temporary actor, which the round-1 rule
+/// (temporary, or a type from 0x156) took.
+#[test]
+fn the_save_oracle_takes_only_what_a_hatch_makes() {
+    let p = |x, y| Position { x, y, z: 0 };
+    let h = Hatches {
+        actors: vec![
+            (0xe0, 0x1b0, p(100, 100)),
+            (0xe1, 0x19b, p(200, 200)),
+            (0xe2, 0x176, p(300, 300)),
+            (0xe3, 0x19d, p(400, 400)),
+        ],
+        eggs: vec![p(50, 50)],
+        segment_at: vec![(0, 1), (1, 0), (0, -1), (-1, 0)],
+        segment_frames: vec![1, 2],
     };
-    // Temporary actors of the start egg's types (other eggs' hatchlings of other types aside).
-    let theirs = |s: &State| {
-        (FIRST_TEMP_ACTOR..ACTOR_SLOTS as Slot)
-            .filter(|&m| {
-                s.objects.type_frame[m as usize] != 0 && kinds.contains(&s.objects.kind(m))
-            })
-            .count()
+    let egg = map_record(0x20, (50, 50, 0), EGG, 0, 1);
+    let shipped = vec![egg, map_record(0x01, (10, 10, 0), 0x30, 0, 1)];
+    let check = |saved: &[[u8; 8]]| written_back_beside_hatches("block", &shipped, saved, &h);
+    let with = |extra: &[[u8; 8]]| {
+        let mut v = shipped.clone();
+        v.extend_from_slice(extra);
+        v
     };
-    let first = theirs(&s);
-    assert!(first > 0, "the boot hatched the start egg");
-    let origin = s.map.window_origin;
-    let mut steps = 0;
-    loop {
-        run.walk(1);
-        steps += 1;
-        let s = run.state();
-        let e = egg(&s).expect("the start egg on its tile");
-        assert!(
-            hatched(&s.objects, e),
-            "step {steps}: the start egg keeps its hatched bit"
-        );
-        assert!(
-            theirs(&s) <= first,
-            "step {steps}: no second wave of the start egg"
-        );
-        if s.map.window_origin != origin {
-            break;
-        }
-        assert!(steps < 40, "the window origin moved within 40 steps");
+    // The egg's status bits 0x40 and 0x02 alone changed: the shipped records exactly.
+    let mut marked = shipped.clone();
+    marked[0][0] |= 0x42;
+    let seen = check(&marked).quiet();
+    assert!(
+        seen.exact && seen.new == 0 && seen.eggs == 1,
+        "a marked egg is the shipped one"
+    );
+    // One record of every rule (the chest, record 3, holds the content, record 4).
+    let all = with(&[
+        held_record(0x31, 0xe0, 0x58),
+        held_record(0x31, 0xe0, 0x62),
+        held_record(0x29, 3, 0x58),
+        map_record(0x21, (52, 47, 0), 0x40, 0, 1),
+        map_record(0x01, (101, 100, 0), 0x1b0, 2, 1),
+        map_record(0x01, (200, 199, 0), 0x19b, 8, 1),
+        map_record(0x01, (301, 299, 0), 0x1a9, 12, 1),
+        map_record(0x01, (400, 401, 0), 0x19d, 1, 0xe3),
+    ]);
+    let seen = check(&all).quiet();
+    assert_eq!(
+        seen.by_rule,
+        [2, 1, 1, 3, 1],
+        "carried, contained, placed, parts, segments"
+    );
+    assert!(!seen.exact && seen.new == 8);
+    // A hatchling the scatter could not place, removed on the egg's tile: its chest is a
+    // temporary map record there (record 2), the chest's content still contained (record 3).
+    let dropped = with(&[
+        map_record(0x21, (50, 50, 0), 0x62, 1, 1),
+        held_record(0x29, 2, 0x58),
+    ]);
+    let seen = check(&dropped).quiet();
+    assert_eq!(
+        seen.by_rule,
+        [0, 1, 1, 0, 0],
+        "a dropped chest and its content"
+    );
+    // The round-1 rule took any map record that is temporary or of an actor type.
+    let old = |r: &[u8; 8]| r[0] & 0x20 != 0 || u16::from_be_bytes([r[4], r[5]]) & 0x3ff >= 0x156;
+    let far_part = map_record(0x01, (600, 600, 0), 0x1b0, 2, 1);
+    assert!(old(&far_part));
+    let up = |(x, y): (u16, u16)| (x, y, 1u8);
+    let refused: Vec<(&str, &str, Vec<[u8; 8]>)> = vec![
+        (
+            "an actor-type map record far from any temporary actor",
+            NO_HATCH,
+            with(&[far_part]),
+        ),
+        (
+            "a tail beside a monster of another type",
+            NO_HATCH,
+            with(&[map_record(0x01, (201, 200, 0), 0x1b0, 2, 1)]),
+        ),
+        (
+            "a tail of another frame",
+            NO_HATCH,
+            with(&[map_record(0x01, (101, 100, 0), 0x1b0, 5, 1)]),
+        ),
+        (
+            "a dragon part of another frame",
+            NO_HATCH,
+            with(&[map_record(0x01, (200, 199, 0), 0x19b, 12, 1)]),
+        ),
+        (
+            "a part 0x1a9 of a frame not a multiple of 4",
+            NO_HATCH,
+            with(&[map_record(0x01, (301, 299, 0), 0x1a9, 13, 1)]),
+        ),
+        (
+            "a part 0x1a9 of frame 32",
+            NO_HATCH,
+            with(&[map_record(0x01, (301, 299, 0), 0x1a9, 32, 1)]),
+        ),
+        (
+            "a part on another level",
+            NO_HATCH,
+            with(&[map_record(0x01, up((101, 100)), 0x1b0, 2, 1)]),
+        ),
+        (
+            "a temporary map record far from the eggs",
+            NO_HATCH,
+            with(&[map_record(0x21, (54, 50, 0), 0x40, 0, 1)]),
+        ),
+        (
+            "a temporary map record near an egg on another level",
+            NO_HATCH,
+            with(&[map_record(0x21, up((51, 50)), 0x40, 0, 1)]),
+        ),
+        (
+            "one carried by an actor not in use",
+            NO_HATCH,
+            with(&[held_record(0x31, 0xe9, 0x58)]),
+        ),
+        (
+            "one carried without the temporary bit",
+            NO_HATCH,
+            with(&[held_record(0x11, 0xe0, 0x58)]),
+        ),
+        (
+            "a content of a record no hatch made",
+            NO_HATCH,
+            with(&[held_record(0x29, 1, 0x58)]),
+        ),
+        (
+            "a content whose container index is its own",
+            NO_HATCH,
+            with(&[held_record(0x29, 2, 0x58)]),
+        ),
+        (
+            "a content whose container comes after it",
+            NO_HATCH,
+            with(&[held_record(0x29, 3, 0x58), held_record(0x31, 0xe0, 0x62)]),
+        ),
+        (
+            "a segment whose head is no serpent",
+            NO_HATCH,
+            with(&[map_record(0x01, (101, 101, 0), 0x19d, 1, 0xe0)]),
+        ),
+        (
+            "a segment off the offsets",
+            NO_HATCH,
+            with(&[map_record(0x01, (402, 400, 0), 0x19d, 1, 0xe3)]),
+        ),
+        (
+            "an added egg",
+            NEW_EGG,
+            with(&[map_record(0x60, (51, 50, 0), EGG, 0, 1)]),
+        ),
+        (
+            "a moved egg",
+            NOT_BACK,
+            vec![map_record(0x20, (51, 50, 0), EGG, 0, 1), shipped[1]],
+        ),
+        ("an egg changed past bits 0x40 and 0x02", NOT_BACK, {
+            let mut v = shipped.clone();
+            v[0][0] |= 0x01;
+            v
+        }),
+        ("a shipped record left out", NOT_BACK, vec![egg]),
+        ("an egg left out", NOT_BACK, vec![shipped[1]]),
+    ];
+    for (what, error, saved) in &refused {
+        let got = check(saved).err().unwrap_or_default();
+        assert!(got.contains(error), "refused: {what}: {error}");
     }
-    eprintln!("the window origin moved after {steps} steps: no second wave, the egg still hatched");
+    // Nothing new, but a container index changed: not the shipped records exactly.
+    let held = vec![
+        egg,
+        map_record(0x01, (10, 10, 0), 0x62, 0, 1),
+        held_record(0x09, 1, 0x58),
+    ];
+    let moved = vec![held[0], held[1], held_record(0x09, 0, 0x58)];
+    let check_held = |saved: &[[u8; 8]]| written_back_beside_hatches("block", &held, saved, &h);
+    assert!(check_held(&held).is_ok_and(|s| s.exact));
+    let got = check_held(&moved).err().unwrap_or_default();
+    assert!(
+        got.contains(NOT_EXACT),
+        "refused: a container index changed, nothing new: {NOT_EXACT}"
+    );
+}
+
+/// The eggs [`Hatches::of`] takes its tiles from (no game data): only a saved egg with the hatch's
+/// bit 0x40 that matches a shipped egg. A temporary egg appended where no shipped egg is gives no
+/// tile, so neither it nor an object beside it passes as a hatch's; a shipped egg without the
+/// bit gives none either.
+#[test]
+fn an_egg_the_shipped_blocks_lack_vouches_for_nothing() {
+    let p = |x, y| Position { x, y, z: 0 };
+    let egg = map_record(0x20, (50, 50, 0), EGG, 0, 1);
+    let plain = map_record(0x01, (10, 10, 0), 0x30, 0, 1);
+    let mut marked = egg;
+    marked[0] |= 0x42;
+    let added = map_record(0x60, (500, 500, 0), EGG, 0, 1);
+    let near_added = map_record(0x21, (500, 501, 0), 0x40, 0, 1);
+    let near_shipped = map_record(0x21, (50, 51, 0), 0x40, 0, 1);
+    let shipped = vec![vec![egg, plain]];
+    let run = |saved: Vec<[u8; 8]>| {
+        let blocks = vec![saved.clone()];
+        let h = Hatches::of(&State::empty(), &shipped, &blocks);
+        (
+            h.eggs.clone(),
+            written_back_beside_hatches("block", &shipped[0], &saved, &h),
+        )
+    };
+    let (eggs, got) = run(vec![marked, plain, added, near_added]);
+    assert_eq!(eggs, [p(50, 50)], "only the shipped egg gives a tile");
+    assert!(
+        got.err().unwrap_or_default().contains(NEW_EGG),
+        "the added egg"
+    );
+    let (_, got) = run(vec![marked, plain, near_added]);
+    assert!(
+        got.err().unwrap_or_default().contains(NO_HATCH),
+        "beside no offered egg"
+    );
+    let (_, got) = run(vec![marked, plain, near_shipped]);
+    assert!(
+        got.is_ok_and(|s| s.by_rule[2] == 1),
+        "beside the offered egg"
+    );
+    let (eggs, got) = run(vec![egg, plain, near_shipped]);
+    assert!(
+        eggs.is_empty(),
+        "an egg without the bit 0x40 was not offered"
+    );
+    assert!(
+        got.err().unwrap_or_default().contains(NO_HATCH),
+        "beside an egg never offered"
+    );
 }
