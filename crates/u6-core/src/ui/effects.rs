@@ -38,9 +38,7 @@ pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
 pub fn reset_window(s: &mut State) {
     let d = &mut s.objects.draw;
     d.base.iter_mut().for_each(|t| *t = 0xff);
-    for (n, next) in d.node_next.iter_mut().enumerate() {
-        *next = (n as u8).wrapping_add(1);
-    }
+    d.reset_nodes();
     d.cell.iter_mut().for_each(|c| *c = 0);
 }
 
@@ -72,10 +70,17 @@ mod tests {
         let d = &s.objects.draw;
         assert!(d.base.iter().all(|&t| t == 0xff));
         assert!(d.cell.iter().all(|&c| c == 0));
+        // Node 255 links to 256, past the byte pool of Original: 0; the last node ends it.
+        let n = crate::objects::DRAW_NODES;
         assert_eq!(
-            (d.node_next[0], d.node_next[3], d.node_next[255]),
-            (1, 4, 0)
+            (
+                d.node_next[0],
+                d.node_next[3],
+                usize::from(d.node_next[255])
+            ),
+            (1, 4, 256 % n)
         );
+        assert_eq!(d.node_next[n - 1], 0);
     }
 
     #[test]

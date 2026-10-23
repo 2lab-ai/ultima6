@@ -82,16 +82,34 @@ fn camp_checks_refuse_in_their_order() {
     let mut t = s.clone();
     t.tables.tileflags.flags1[0] = 0x14;
     assert_eq!(refusal(&mut t), Some(STR_WILDERNESS));
+    // The window less its last column (Original 39 tiles from x 0: 38 is in, 39 past it).
+    let x0 = geom::window_origin(20);
+    let (inside, past) = (
+        x0.wrapping_add(geom::WINDOW as u16 - 2) & 0x3ff,
+        x0.wrapping_add(geom::WINDOW as u16 - 1) & 0x3ff,
+    );
     let mut t = s.clone();
     t.objects.type_frame[50] = 0x17a;
-    t.objects.location[50] = Position { x: 38, y: 30, z: 0 };
+    t.objects.location[50] = Position {
+        x: inside,
+        y: 30,
+        z: 0,
+    };
     t.actors.attrs.status[50] = 0x20;
     assert_eq!(refusal(&mut t), Some(STR_FOES));
     t.actors.attrs.status[50] = 0x40;
-    assert_eq!(refusal(&mut t), None, "a friendly actor 18 tiles off");
-    t.objects.location[50] = Position { x: 39, y: 30, z: 0 };
+    assert_eq!(refusal(&mut t), None, "a friendly actor far off");
+    t.objects.location[50] = Position {
+        x: past,
+        y: 30,
+        z: 0,
+    };
     t.actors.attrs.status[50] = 0x20;
-    assert_eq!(refusal(&mut t), None, "a foe past the 39-tile square");
+    assert_eq!(
+        refusal(&mut t),
+        None,
+        "a foe past the window less its last column"
+    );
     t.actors.attrs.status[50] = 0x40;
     t.objects.location[50] = Position { x: 24, y: 17, z: 0 };
     assert_eq!(refusal(&mut t), Some(STR_OTHERS));
@@ -210,11 +228,14 @@ fn an_ambush_places_hostile_attackers_around_the_camp() {
         .filter(|&a| s.objects.type_frame[a] & 0x3ff == 0x17a)
         .collect();
     assert!(!placed.is_empty() && placed.len() <= 8, "{}", placed.len());
+    // The sides just outside the view: west / east HALF_W + 1 / + 2, north / south HALF_H + 2
+    // / + 1 (Original 6, 7, 7, 6).
+    let (hw, hh) = (HALF_W as i16, HALF_H as i16);
     for &m in &placed {
         let p = s.objects.location[m];
         let (dx, dy) = (p.x as i16 - 20, p.y as i16 - 20);
         assert!(
-            matches!(dx, -6 | 7) || matches!(dy, -7 | 6),
+            dx == -(hw + 1) || dx == hw + 2 || dy == -(hh + 2) || dy == hh + 1,
             "slot {m} at {dx}, {dy}"
         );
         assert_eq!(s.actors.attrs.status[m] & 0x60, 0x20, "slot {m} hostile");
@@ -234,4 +255,77 @@ fn an_ambush_takes_its_kinds_from_the_game() {
         .filter(|&a| s.objects.type_frame[a] != 0)
         .count();
     assert_eq!(after, before);
+}
+
+/// Spec 13 Decision 5: an ambush comes from just outside the view (wide in Wide) and inside the
+/// window, for the leader on any cell of its window chunk; each try draws twice (a side, a place
+/// along it) and reaches all four sides and the eleven places along them.
+#[test]
+fn the_ambush_spot_is_outside_the_view_and_inside_the_window() {
+    let mut s = camp_world();
+    s.rng = crate::rng::Rng::seeded(7);
+    let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+    let side = geom::WINDOW as i16;
+    let mut sides = std::collections::BTreeSet::new();
+    let mut along = std::collections::BTreeSet::new();
+    for c in 200..208u16 {
+        let (ox, oy) = (geom::window_origin(c), geom::window_origin(c + 3));
+        for _ in 0..200 {
+            let mut r = s.rng;
+            r.next_word();
+            r.next_word();
+            let (cx, cy) = (c as i16, (c + 3) as i16);
+            let (x, y) = ambush_spot(&mut s, cx, cy);
+            assert_eq!(s.rng, r, "two draws a try");
+            let (dx, dy) = (x - cx, y - cy);
+            assert!(
+                dx.abs() > hw || dy.abs() > hh,
+                "({dx}, {dy}) outside the view"
+            );
+            let (wx, wy) = (x - ox as i16, y - oy as i16);
+            assert!(
+                (0..side).contains(&wx) && (0..side).contains(&wy),
+                "({dx}, {dy}) in the window"
+            );
+            // North and south lie outside the rows along a west or east side.
+            if dy == -(hh + 2) || dy == hh + 1 {
+                sides.insert(('y', dy));
+                along.insert(dx);
+            } else {
+                assert!(dx == -(hw + 1) || dx == hw + 2, "({dx}, {dy}) on a side");
+                sides.insert(('x', dx));
+                along.insert(dy);
+            }
+        }
+    }
+    assert_eq!(sides.len(), 4, "every side");
+    assert_eq!(
+        along.into_iter().collect::<Vec<_>>(),
+        (-6..=4).collect::<Vec<_>>()
+    );
+}
+
+/// Original only: [`ambush_spot`] is the original's formula, draw for draw: a side 0..=3, then
+/// 0..=10 along it; west (cx − 6, cy + off − 6), north (cx + off − 6, cy − 7), east (cx + 7,
+/// cy + off − 6), south (cx + off − 6, cy + 6).
+#[cfg(not(feature = "wide"))]
+#[test]
+fn the_ambush_spot_is_the_original_formula() {
+    let mut s = camp_world();
+    for seed in (1..=0xffffu16).step_by(97) {
+        s.rng = crate::rng::Rng::seeded(seed);
+        for (cx, cy) in [(20i16, 20i16), (500, 300)] {
+            let mut r = s.rng;
+            let side = r.range(0, 3);
+            let off = r.range(0, 10) as i16;
+            let old = match side {
+                0 => (cx - 6, cy + off - 6),
+                1 => (cx + off - 6, cy - 7),
+                2 => (cx + 7, cy + off - 6),
+                _ => (cx + off - 6, cy + 6),
+            };
+            assert_eq!(ambush_spot(&mut s, cx, cy), old, "seed {seed:#x}");
+            assert_eq!(s.rng, r, "seed {seed:#x}: the same draws");
+        }
+    }
 }

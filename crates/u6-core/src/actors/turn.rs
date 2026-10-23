@@ -417,15 +417,17 @@ struct Pick {
     dex: i16,
 }
 
-/// One pass over the 256 actors (0x1213de): actors outside the 40 × 40 window around the party
+/// One pass over the 256 actors (0x1213de): actors outside the window around the party
+/// ([`crate::geom::WINDOW`] tiles a side from [`crate::geom::window_origin`], 40 in Original)
 /// lose their points (walkers there jump home or search again); party followers (worktype 1)
 /// never act here; dormant ones (0x80) in the window wake up ([`path::arrive`]). The pick is
 /// the actor with the highest points-to-dexterity ratio (ties: higher dexterity); one with
 /// points ≥ dexterity is taken at once.
 fn pick_actor(s: &mut State, mask: u16, pick: &mut Pick) {
     let c = s.map.centre;
-    let wx = c.x.wrapping_sub(16) & 0x3f8;
-    let wy = c.y.wrapping_sub(16) & 0x3f8;
+    let wx = crate::geom::window_origin(c.x);
+    let wy = crate::geom::window_origin(c.y);
+    let last = crate::geom::WINDOW as u16 - 1;
     for i in 1..s.actors.party.count() {
         let m = member(s, i);
         if s.actors.worktype[m] == 1 && s.actors.mp(m) <= 0 {
@@ -438,7 +440,7 @@ fn pick_actor(s: &mut State, mask: u16, pick: &mut Pick) {
             continue;
         }
         let p = s.objects.location[a];
-        let near = (p.x.wrapping_sub(wx) & mask) <= 0x27 && (p.y.wrapping_sub(wy) & mask) <= 0x27;
+        let near = (p.x.wrapping_sub(wx) & mask) <= last && (p.y.wrapping_sub(wy) & mask) <= last;
         if !near {
             let wt = s.actors.worktype[a];
             if (0x83..=0x86).contains(&wt) {
@@ -790,6 +792,71 @@ mod tests {
             "outside the window: points gone"
         );
         assert_eq!(s.actors.movement_points[11], 5, "paralysed: just skipped");
+    }
+
+    /// Spec 13 A2: a walker (worktype 0x83, three steps from home on its path) 25 cells east and
+    /// south of the leader, and one 25 west and north. Wide's window (60 a side) holds them:
+    /// picked with their points, each steps toward home on its turn. Original's (40) does not:
+    /// the pick sends each home (0x11e60c) and takes its points.
+    #[test]
+    fn a_walker_25_cells_off_steps_in_wide_and_is_sent_home_in_original() {
+        for (name, d) in [("east and south", 25i16), ("west and north", -25)] {
+            let lead = Position {
+                x: 100,
+                y: 100,
+                z: 0,
+            };
+            let at = (lead.x.wrapping_add_signed(d), lead.y.wrapping_add_signed(d));
+            let back = -d.signum();
+            let home = (at.0.wrapping_add_signed(3 * back), at.1);
+            let mut s = world(&[(10, 10)]);
+            crate::actors::walk::tests::creature_tiles(&mut s);
+            s.map.centre = lead;
+            s.objects.location[1] = lead;
+            s.actors.movement_points[1] = 0;
+            s.objects.location[10] = Position {
+                x: at.0,
+                y: at.1,
+                z: 0,
+            };
+            s.actors.worktype[10] = 0x83;
+            s.actors.schedules.first = vec![1; 257];
+            s.actors.schedules.first[10] = 0;
+            s.actors.schedules.entries = vec![u6_formats::schedule::ScheduleEntry {
+                hour: 8,
+                day_of_week: 0,
+                worktype: 0x90,
+                pos: Position {
+                    x: home.0,
+                    y: home.1,
+                    z: 0,
+                },
+            }];
+            // Path slot 0: one run of three steps, west (3) or east (1).
+            s.actors.attrs.unknown_18f1[10] = 0;
+            s.actors.set_tail(tail::SLOT_ACTOR, 10);
+            s.actors.attrs.unknown_1af1[0] = 3 << 2 | if back < 0 { 3 } else { 1 };
+            crate::actors::walk::tests::link_objects(&mut s);
+            let (ox, oy) = (
+                crate::geom::window_origin(lead.x),
+                crate::geom::window_origin(lead.y),
+            );
+            s.map.window_origin = [ox, oy];
+            s.objects.set_window(ox, oy, 0);
+            let picked = pick(&mut s);
+            let p = s.objects.location[10];
+            if cfg!(feature = "wide") {
+                assert_eq!((picked, (p.x, p.y)), (10, at), "{name}: picked where it is");
+                npc::npc_turn_sync(&mut s, 10);
+                let p = s.objects.location[10];
+                let step = (at.0.wrapping_add_signed(back), at.1);
+                assert_eq!((p.x, p.y), step, "{name}: a step toward home");
+                assert_eq!(s.actors.worktype[10], 0x83, "{name}: still walking");
+            } else {
+                assert_eq!((picked, (p.x, p.y)), (-1, home), "{name}: sent home");
+                assert_eq!(s.actors.mp(10), 0, "{name}: its points gone");
+            }
+        }
     }
 
     #[test]
@@ -1195,8 +1262,8 @@ mod tests {
             s.map.centre = at;
             s.objects.location[1] = at;
             s.actors.movement_points[1] = 0;
-            // In the 40 × 40 window around the player (else they lose their points), more than 8
-            // tiles from the guard (else it might take one of them for its target).
+            // In the window around the player (else they lose their points), more than 8 tiles
+            // from the guard (else it might take one of them for its target).
             for (i, a) in (10..15).enumerate() {
                 s.actors.worktype[a] = 0x11;
                 s.objects.location[a] = Position {

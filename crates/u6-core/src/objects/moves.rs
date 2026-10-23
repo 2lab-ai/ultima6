@@ -5,6 +5,7 @@ use super::parts::{move_monster_parts, move_serpent, update_vine_frames};
 use super::{
     ACTOR_SLOTS, IN_INVENTORY, NONE, Objects, READIED, Slot, TEMPORARY, WHERE_MASK, seams,
 };
+use crate::geom::{HALF_H, HALF_W};
 use crate::state::State;
 
 /// Type the move routines refuse (0x10c9d2 always, 0x10cda8 unless allowed).
@@ -72,9 +73,11 @@ pub fn move_to(s: &mut State, slot: Slot, x: u16, y: u16, z: u16) -> Slot {
         return NONE;
     }
     let c = s.map.centre;
+    // In view (spec 13 Decision 5: the wide view in Wide).
     let near = |px: u16, py: u16| {
         let (px, py, lx, ly) = (px as i16, py as i16, c.x as i16, c.y as i16);
-        (lx - 5..=lx + 5).contains(&px) && (ly - 5..=ly + 5).contains(&py)
+        let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+        (lx - hw..=lx + hw).contains(&px) && (ly - hh..=ly + hh).contains(&py)
     };
     if near(ox, oy) || near(x, y) {
         s.map.view_dirty = 1;

@@ -26,6 +26,7 @@ use std::cell::RefCell;
 use super::walk::{can_move_to, face, flags1};
 use super::{seams as actor_seams, tail};
 use crate::engine::Io;
+use crate::geom::{self, HALF_H, HALF_W, RULE_HALF};
 use crate::main_loop::{flush_prints, game_string};
 use crate::objects::{Slot, pack_xyz};
 use crate::state::State;
@@ -171,15 +172,16 @@ pub fn member_eats(s: &mut State, i: usize) -> bool {
     })
 }
 
-/// Original: 0x1274fe (party: not a place to camp: a tile within 5 of the centre has flags1
-/// bit 2 and one of bits 4..7 (low byte of the tile number), or the centre tile has flags1
-/// bit 0 while the party is not aboard)
+/// Original: 0x1274fe (party: not a place to camp: a tile within 5 ([`RULE_HALF`]) of the
+/// centre has flags1 bit 2 and one of bits 4..7 (low byte of the tile number), or the centre
+/// tile has flags1 bit 0 while the party is not aboard)
 pub fn not_wilderness(s: &State) -> bool {
     let c = s.map.centre;
     let (cx, cy) = (c.x as i16, c.y as i16);
     let z = u16::from(c.z);
-    for x in cx - 5..=cx + 5 {
-        for y in cy - 5..=cy + 5 {
+    // An effect area: the original box round the leader in both builds (spec 13 Decision 3).
+    for x in cx - RULE_HALF..=cx + RULE_HALF {
+        for y in cy - RULE_HALF..=cy + RULE_HALF {
             let f = flags1(s, u16::from(actor_seams::tile_at(s, x as u16, y as u16, z)));
             if f & 0x04 != 0 && f & 0xf0 != 0 {
                 return true;
@@ -191,34 +193,37 @@ pub fn not_wilderness(s: &State) -> bool {
 }
 
 /// Original: 0x12759e (party: a hostile actor (alignment 0x20 or 0x60) on the party's level in
-/// the 39 × 39 tiles from the 8-aligned corner 16 tiles up-left of the centre)
+/// the window less its last column and row, from its origin [`geom::window_origin`]: 39 × 39
+/// tiles from the 8-aligned corner 16 tiles up-left of the centre in Original)
 pub fn foes_near(s: &State) -> bool {
     let c = s.map.centre;
     let mask: u16 = if c.z != 0 { 0xff } else { 0x3ff };
-    let x0 = c.x.wrapping_sub(16) & 0x3f8;
-    let y0 = c.y.wrapping_sub(16) & 0x3f8;
+    let x0 = geom::window_origin(c.x);
+    let y0 = geom::window_origin(c.y);
+    let last = geom::WINDOW as u16 - 1;
     (0..crate::objects::ACTOR_SLOTS).any(|a| {
         let align = s.actors.attrs.status[a] & 0x60;
         let p = s.objects.location[a];
         s.objects.type_frame[a] != 0
             && (align == 0x20 || align == 0x60)
-            && (p.x.wrapping_sub(x0) & mask) < 0x27
-            && (p.y.wrapping_sub(y0) & mask) < 0x27
+            && (p.x.wrapping_sub(x0) & mask) < last
+            && (p.y.wrapping_sub(y0) & mask) < last
             && p.z == c.z
     })
 }
 
 /// Original: 0x127688 (party: an actor not in the party (and not of type 0x1ae) within 5 tiles
-/// of the centre on its level)
+/// ([`RULE_HALF`]) of the centre on its level)
 pub fn others_near(s: &State) -> bool {
     let c = s.map.centre;
+    // An effect area: the original box round the leader in both builds (spec 13 Decision 3).
     (0..crate::objects::ACTOR_SLOTS).any(|a| {
         let p = s.objects.location[a];
         let tf = s.objects.type_frame[a];
         tf != 0
             && s.actors.attrs.status[a] & 0x80 == 0
-            && (p.x as i16 - c.x as i16).abs() <= 5
-            && (p.y as i16 - c.y as i16).abs() <= 5
+            && (p.x as i16 - c.x as i16).abs() <= RULE_HALF
+            && (p.y as i16 - c.y as i16).abs() <= RULE_HALF
             && p.z == c.z
             && tf & 0x3ff != NOT_OTHERS
     })
@@ -241,8 +246,13 @@ pub fn no_room(s: &mut State) -> bool {
 }
 
 /// Original: 0x12783c (party: an ambush: 1..=8 monsters of one of four kinds, each placed on
-/// a free tile at one of the four sides 6 / 7 tiles from the centre (8 tries), hostile and
+/// a free tile at one of the four sides just outside the view (8 tries), hostile and
 /// attacking; true when one was placed)
+///
+/// The sides (spec 13 Decision 5: the wide view in Wide): west [`HALF_W`] + 1 and east
+/// [`HALF_W`] + 2 columns from the centre, north [`HALF_H`] + 2 and south [`HALF_H`] + 1 rows
+/// (Original 6 / 7 / 7 / 6); along a side one draw of 0..=10 puts it at −6..=4 from the
+/// centre in both builds.
 ///
 /// The four kinds are read from the user's `game` ([`super::GameTables::ambush_kind`]); without
 /// them nothing comes. Each monster is made by objects' 0x131646
@@ -264,14 +274,7 @@ pub fn ambush(s: &mut State) -> bool {
         }
         let mut spot = None;
         for _ in 0..8 {
-            let side = s.rng.range(0, 3);
-            let off = s.rng.range(0, 10) as i16;
-            let (x, y) = match side {
-                0 => (cx - 6, cy + off - 6),
-                1 => (cx + off - 6, cy - 7),
-                2 => (cx + 7, cy + off - 6),
-                _ => (cx + off - 6, cy + 6),
-            };
+            let (x, y) = ambush_spot(s, cx, cy);
             if can_move_to(s, m as u16, x as u16, y as u16) {
                 spot = Some((x as u16, y as u16));
                 break;
@@ -289,6 +292,20 @@ pub fn ambush(s: &mut State) -> bool {
         }
     }
     placed
+}
+
+/// One try of [`ambush`] round the centre (cx, cy): a side (one draw of 0..=3), then a place
+/// along it (one draw of 0..=10, −6..=4 from the centre).
+fn ambush_spot(s: &mut State, cx: i16, cy: i16) -> (i16, i16) {
+    let side = s.rng.range(0, 3);
+    let along = s.rng.range(0, 10) as i16 - 6;
+    let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+    match side {
+        0 => (cx - (hw + 1), cy + along),
+        1 => (cx + along, cy - (hh + 2)),
+        2 => (cx + hw + 2, cy + along),
+        _ => (cx + along, cy + hh + 1),
+    }
 }
 
 /// Original: 0x127ac0 (party: repair the ship: its hit points + 5 up to 100, five minutes,

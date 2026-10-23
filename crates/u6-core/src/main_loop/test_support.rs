@@ -54,7 +54,10 @@ pub(crate) fn link_placed_objects(s: &mut State) {
         o.set_next(p, slot);
     }
     let c = s.map.centre;
-    let (ox, oy) = (c.x.wrapping_sub(16) & 0x3f8, c.y.wrapping_sub(16) & 0x3f8);
+    let (ox, oy) = (
+        crate::geom::window_origin(c.x),
+        crate::geom::window_origin(c.y),
+    );
     s.map.window_origin = [ox, oy];
     s.objects.set_window(ox, oy, c.z);
 }

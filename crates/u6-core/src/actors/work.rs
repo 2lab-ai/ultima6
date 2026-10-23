@@ -144,23 +144,33 @@ impl Default for ActorWork {
     }
 }
 
-/// Side of a 40 × 40 path grid (the map-window cache size).
-pub const GRID: usize = 40;
-/// Nodes in the path-finder's bucket queue.
-pub const NODES: usize = 256;
+/// Side of the path grid: the window's, [`crate::geom::WINDOW`] (Original 40, the map-window
+/// cache size).
+pub const GRID: usize = crate::geom::WINDOW;
+/// Nodes in the path-finder's bucket queue (0x13d180..0x13d580: a word of link and a byte each
+/// of column and row): Original 256 for its 40 × 40 grid, 4 for every 25 cells. Wide keeps that
+/// share (576 for 60 × 60), rounded up to a power of two: 1024. A cell reached with the pool
+/// empty is not queued, as on the original.
+pub const NODES: usize = (GRID * GRID * 4).div_ceil(25).next_power_of_two();
+#[cfg(not(feature = "wide"))]
+const _: () = assert!(NODES == 256, "Original keeps the game's pool");
+/// Cost buckets of the bucket queue (0x13cf80..0x13d180, a word each); a cost is at most 0x7f.
+pub const BUCKETS: usize = 256;
 
 /// The path-finder's scratch (0x11ea54 and helpers). Rebuilt by every search.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PathScratch {
     /// Original: 0x13c940 (40 × 40 bytes: cost so far, bit 7 = reached from the goal side;
-    /// 0xff = not visited)
+    /// 0xff = not visited); [`GRID`]² entries
     pub grid: Vec<u8>,
     /// Original: 0x13d580 (40 × 40 bytes: cost of entering each cell, 0xff = blocked; built by
-    /// 0x1206e2)
+    /// 0x1206e2); [`GRID`]² entries
     pub cost: Vec<u8>,
-    /// Original: 0x13cf80 (word per cost bucket: first queued node, -1 = empty)
+    /// Original: 0x13cf80 (word per cost bucket: first queued node, -1 = empty); [`BUCKETS`]
+    /// entries
     pub heads: Vec<i16>,
-    /// Original: 0x13d180 (word per node: next node in its bucket or the free list)
+    /// Original: 0x13d180 (word per node: next node in its bucket or the free list); [`NODES`]
+    /// entries, as `col` and `row`
     pub next: Vec<i16>,
     /// Original: 0x13d380 (byte per node: column)
     pub col: Vec<u8>,
@@ -187,7 +197,7 @@ impl Default for PathScratch {
         Self {
             grid: vec![0xff; GRID * GRID],
             cost: vec![0; GRID * GRID],
-            heads: vec![-1; NODES],
+            heads: vec![-1; BUCKETS],
             next: vec![-1; NODES],
             col: vec![0; NODES],
             row: vec![0; NODES],

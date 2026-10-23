@@ -233,7 +233,8 @@ pub fn spend_tile_cost(s: &mut State, actor: u16) {
 
 /// Original: 0x11b92a (actors: is the actor outside the map-window cache)
 ///
-/// True when the actor is on another level than the party or outside the 40 × 40 cache.
+/// True when the actor is on another level than the party or outside the window's cache
+/// ([`crate::geom::WINDOW`] tiles a side, 40 in Original).
 pub fn outside_window(s: &State, actor: u16) -> bool {
     let p = s.objects.location[usize::from(actor)];
     if u16::from(p.z) != party_z(s) {
@@ -242,7 +243,8 @@ pub fn outside_window(s: &State, actor: u16) -> bool {
     let (x0, y0, mask) = seams::window_origin(s);
     let dx = (p.x.wrapping_sub(x0) & mask) as i16;
     let dy = (p.y.wrapping_sub(y0) & mask) as i16;
-    dx > 0x27 || dy > 0x27
+    let last = crate::geom::WINDOW as i16 - 1;
+    dx > last || dy > last
 }
 
 /// Original: 0x11b9ae (actors: is (x, y) on the party's level impassable)
@@ -1220,7 +1222,12 @@ pub(crate) mod tests {
     fn outside_window_by_level_and_distance() {
         let mut s = two_actors();
         assert!(!outside_window(&s, 10));
-        s.objects.location[10].x = 60;
+        // The window's last column, then the one past it.
+        let [ox, _] = s.map.window_origin;
+        let last = ox.wrapping_add(crate::geom::WINDOW as u16 - 1) & 0x3ff;
+        s.objects.location[10].x = last;
+        assert!(!outside_window(&s, 10), "the last column");
+        s.objects.location[10].x = (last + 1) & 0x3ff;
         assert!(outside_window(&s, 10));
         s.objects.location[10] = Position { x: 20, y: 20, z: 1 };
         assert!(outside_window(&s, 10));
