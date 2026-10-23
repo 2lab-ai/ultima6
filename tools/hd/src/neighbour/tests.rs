@@ -350,13 +350,18 @@ fn the_image_helpers_refuse_images_that_do_not_fit() {
     few.px.pop();
     assert_eq!(gate::shown(&few, &ok), None);
     assert_eq!(mmpx4(&few), None);
-    // Larger than the screen: the compositor does not scale it.
-    let wide = Classic {
-        width: 321,
-        height: 1,
-        px: vec![Some([1, 2, 3]); 321],
+    // Larger than the screen (`u6_render::hd::IMAGE_MAX`, in both builds): the compositor does
+    // not scale it; one of the screen's size it does.
+    let (w, h) = u6_render::hd::IMAGE_MAX;
+    let past = |width: usize, height: usize| Classic {
+        width: width as u32,
+        height: height as u32,
+        px: vec![Some([1, 2, 3]); width * height],
     };
-    assert_eq!(mmpx4(&wide), None);
+    assert_eq!(mmpx4(&past(w + 1, 1)), None);
+    assert_eq!(mmpx4(&past(1, h + 1)), None);
+    let whole = mmpx4(&past(w, h)).unwrap();
+    assert_eq!((whole.width, whole.height), (4 * w as u32, 4 * h as u32));
     let m = mmpx4(&c).unwrap();
     assert_eq!((m.width, m.height, m.pixels.len()), (64, 64, 64 * 64 * 4));
     // The measure: k = 0, classic images of other sizes or short (as A and as B), shown images

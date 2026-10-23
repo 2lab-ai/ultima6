@@ -56,6 +56,21 @@
 // cancel. globalThis.__u6Layout maps canvas pixels and game pixels both ways for tests, in any
 // layout. With Original, or HD off, the page is as without the HD layout.
 //
+// Wide mode (spec 13): the engine comes in two builds, site/pkg (Original: the 320 × 200 frame)
+// and site/pkg-wide (Wide: a 912 × 336 frame, the UI's 320 × 200 at its top left and a 37 × 21
+// map beside it), and the page imports one at its engine's operation: Wide when the kept screen
+// (`u6.layout`) is `wide` or none (a new visitor), else Original. The chooser's and Settings'
+// "Screen layout" is Wide / HD 16:9 / Original 16:10; a choice across the builds keeps it and
+// loads the page again (the game starts from the kept files and its own stored save, as at any
+// load). In Wide, HD on or off, the canvas is 1920 × 1080 in the HD layout's 16:9 box: the
+// engine's shown map scaled to cover it, and over it four framed windows with a title each (the
+// date line top right, the side panel under it, the message scroll bottom right, the command bar
+// bottom left), each the size of its spec 10 region; the HD frame scaled smoothly (the
+// compositor at WIDE_S), with HD off the classic frame pixelated. A window is dragged by its
+// title strip, its place kept (`u6.layout.windows`). The pointer reaches a window's content
+// before the map, its frame and title strip are gaps as in the HD layout; every other screen
+// shows the UI's 320 × 200 letterboxed.
+//
 // The HD font (spec 11; the chooser's and Settings' "Font", kept in localStorage, the HD font
 // unless the pixel font was chosen): while the HD layout is in effect the page loads the font
 // from this origin (site/fonts/gowun-batang.woff2, document.fonts.load) and, once it has it,
@@ -180,10 +195,6 @@
 // restore downloads in either language and loads as a dropped one, its file name
 // kept with it, under the same rules (not after Forget voices in the visit), with no line of its
 // own.
-import init, {
-  Game, HdPack, LocalePack, PackProbe, budget_ms, input_too_large, max_input_bytes,
-  max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
-} from './pkg/u6_web.js';
 import {
   collect, forgetBundles, forgetFiles, forgetLocalePack, forgetPack, forgetSaves, forgetVoicePack,
   loadFiles, loadLocalePack, loadPack, loadSaves, loadVoicePack, saveFiles,
@@ -238,6 +249,24 @@ const fullscreenButton = document.getElementById('fullscreen');
 const fullscreenExit = document.getElementById('fullscreen-exit');
 
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
+
+// The engine (wasm-bindgen's glue of one of the two builds, spec 13 Decision 2: `pkg` Original,
+// `pkg-wide` Wide), imported at the engine's operation (`ENGINE_URL`); until then none of these.
+let init = null;
+let Game = null;
+let HdPack = null;
+let LocalePack = null;
+let PackProbe = null;
+let budget_ms = null;
+let input_too_large = null;
+let max_input_bytes = null;
+let max_locale_pack_bytes = null;
+let max_pack_bytes = null;
+let max_save_bytes = null;
+let max_save_file_bytes = null;
+let step_ms = null;
+let zip_sliced = null;
+let shown_map = null;
 
 let wasm = null; // the wasm exports, once loaded
 let game = null; // the running game, or null
@@ -331,6 +360,7 @@ function setLang(next) {
   for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
   for (const el of document.querySelectorAll('[data-i18n-label]')) el.setAttribute('aria-label', t(el.dataset.i18nLabel));
   reflectLocale();
+  repaintWide();
   mute.textContent = t(audio.muted ? 'unmute' : 'mute');
   showSpeed();
   showStorage();
@@ -1300,6 +1330,10 @@ function draw() {
   const hd = game.hd_on();
   const view = viewFor(hd);
   if (game === drawnGame && version === drawnVersion && view === shownView) return;
+  if (WIDE) {
+    composeWide(view, hd, version);
+    return;
+  }
   if (view !== FRAME) {
     compose(view, version);
     return;
@@ -1374,7 +1408,8 @@ function showHd() {
 // by the stylesheet, but smooth when the HD frame has more device pixels than the box (S 4 in
 // a box of 3 to 4 device pixels per game pixel): pixelated would drop one HD row and column in
 // four there. The HD layout's canvas is pixelated only in a box of a whole number of times its
-// 1280 × 720 in device pixels (one to one, ×2, ...), smooth in any other (spec 10 Design 5).
+// 1280 × 720 in device pixels (one to one, ×2, ...), smooth in any other (spec 10 Design 5); the
+// Wide layout's likewise of its 1920 × 1080 (spec 13 A5).
 function fitRendering(hd) {
   const box = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
@@ -1383,21 +1418,21 @@ function fitRendering(hd) {
     const down = canvas.width > box.width * dpr || canvas.height > box.height * dpr;
     want = hd && down ? 'auto' : '';
   } else {
-    const k = Math.round((box.width * dpr) / LAYOUT_W);
-    const whole = k >= 1 && Math.abs(box.width * dpr - k * LAYOUT_W) < 0.5
-      && Math.abs(box.height * dpr - k * LAYOUT_H) < 0.5;
+    const k = Math.round((box.width * dpr) / canvas.width);
+    const whole = k >= 1 && Math.abs(box.width * dpr - k * canvas.width) < 0.5
+      && Math.abs(box.height * dpr - k * canvas.height) < 0.5;
     want = whole ? '' : 'auto';
   }
   if (canvas.style.imageRendering !== want) canvas.style.imageRendering = want;
 }
 
-// The game on screen shows HD as chosen, at the scale for the box now (S 4 with the HD layout),
-// drawn at once with no new game frame (the canvas takes the size of the frame it shows:
-// `draw`). The layout in effect goes on the body first, since it sets the box. The text in the
-// HD font while it is chosen and loaded with the HD layout in effect (asked for here when it is
-// wanted and not yet), else in the pixel font. After a trap nothing changes (the canvas keeps
-// what it showed in the box it had, as for HD on or off) until the reload; the font file's state
-// still shows.
+// The game on screen shows HD as chosen, at the scale for the box now (S 4 with the HD layout,
+// WIDE_S in Wide), drawn at once with no new game frame (the canvas takes the size of the frame
+// it shows: `draw`). The layout in effect goes on the body first, since it sets the box. The text
+// in the HD font while it is chosen and loaded with the HD layout in effect, or HD on in Wide
+// (asked for here when it is wanted and not yet), else in the pixel font. After a trap nothing
+// changes (the canvas keeps what it showed in the box it had, as for HD on or off) until the
+// reload; the font file's state still shows.
 function applyHd() {
   if (crashed) {
     reflectFont();
@@ -1408,7 +1443,7 @@ function applyHd() {
   fontDrawn = fontOn();
   reflectFont();
   if (!game) return;
-  game.set_hd(hdOn, layoutOn() ? LAYOUT_S : hdScale());
+  game.set_hd(hdOn, WIDE ? WIDE_S : layoutOn() ? LAYOUT_S : hdScale());
   game.set_hd_font(fontDrawn);
   draw();
   fitRendering(game.hd_on());
@@ -1416,20 +1451,31 @@ function applyHd() {
 
 // --- the HD layout (spec 10) -------------------------------------------------------------------
 
-const LAYOUT_KEY = 'u6.layout'; // localStorage: 'original' when the viewer chose Original 16:10
+// localStorage: the screen chosen (spec 13 Decision 2): 'wide', 'hd' (HD 16:9) or 'original'
+// (Original 16:10).
+const LAYOUT_KEY = 'u6.layout';
 
-// The stored choice: 'original', else (any other value, none, storage that cannot be read) 'hd'.
+// The stored choice: 'wide' when none is kept (a new visitor), 'wide' or 'original' as kept,
+// else (any other value, storage that cannot be read) 'hd'. Storage that cannot be read keeps
+// spec 10's HD: it could not keep a choice of the other build across the reload that loads it.
 function storedLayout() {
   try {
-    return localStorage.getItem(LAYOUT_KEY) === 'original' ? 'original' : 'hd';
+    const kept = localStorage.getItem(LAYOUT_KEY);
+    if (kept === null) return 'wide';
+    return kept === 'wide' || kept === 'original' ? kept : 'hd';
   } catch {
     return 'hd';
   }
 }
 
 let layoutChoice = storedLayout();
+// The build this page loads, for its life (spec 13 Decision 2): Wide with the Wide screen
+// chosen, else Original (HD 16:9 and Original 16:10 are its two layouts, spec 10). Another
+// choice across the two reloads the page (`chooseLayout`).
+const WIDE = layoutChoice === 'wide';
+const ENGINE_URL = WIDE ? './pkg-wide/u6_web.js' : './pkg/u6_web.js';
 
-// The HD layout is in effect: HD on and the HD layout chosen.
+// The HD layout is in effect: HD on and the HD layout chosen (Original build).
 const layoutOn = () => hdOn && layoutChoice === 'hd';
 
 // The game's screen in game pixels (Game.width / height).
@@ -1524,13 +1570,17 @@ let x4Game = null; // the game whose ×4 frame x4 holds as drawn last (null: non
 let parchmentShown = null; // the parchment's colour the last whole paint drew (`parchmentNow`)
 let sentButtons = 0; // the pointer's buttons as last sent to the game
 
-// The layout in effect on the body (data-layout: the stylesheet's box).
+// The layout in effect on the body (data-layout: the stylesheet's box): 'wide' in the Wide build
+// (HD on or off), else 'hd' or 'original'.
 function showLayout() {
-  put(document.body.dataset, 'layout', layoutOn() ? 'hd' : 'original');
+  put(document.body.dataset, 'layout', WIDE ? 'wide' : layoutOn() ? 'hd' : 'original');
 }
 
-// What the canvas is to show of the game on screen now (`hd`: its HD frame shows).
+// What the canvas is to show of the game on screen now (`hd`: its HD frame shows). The Wide
+// layout shows the game's windows over its map in `game`, the UI's screen letterboxed on every
+// other, HD on or off.
 function viewFor(hd) {
+  if (WIDE) return game.program() === 'game' ? REGIONS_VIEW : WHOLE_VIEW;
   if (!hd || layoutChoice !== 'hd' || game.hd_scale() !== LAYOUT_S) return FRAME;
   return game.program() === 'game' ? REGIONS_VIEW : WHOLE_VIEW;
 }
@@ -1673,6 +1723,7 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 // pixel of the nearest region (the game's pointer stays where the player sees it), anything
 // else the rest of the screen (LAYOUT_REST).
 function layoutToGame(px, py, held = false) {
+  if (WIDE && shownView !== FRAME) return wideToGame(px, py, held);
   if (shownView === FRAME) {
     return [Math.floor((px * SCREEN_W) / canvas.width), Math.floor((py * SCREEN_H) / canvas.height)];
   }
@@ -1699,6 +1750,7 @@ function layoutToGame(px, py, held = false) {
 // The canvas pixel (the centre of what shows game pixel (gx, gy)) as the canvas shows now; null
 // for a pixel that does not show (outside the game's regions).
 function layoutToCanvas(gx, gy) {
+  if (WIDE && shownView !== FRAME) return wideToCanvas(gx, gy);
   if (shownView === FRAME) {
     return [((gx + 0.5) * canvas.width) / SCREEN_W, ((gy + 0.5) * canvas.height) / SCREEN_H];
   }
@@ -1714,36 +1766,399 @@ function layoutToCanvas(gx, gy) {
 }
 
 // For tests, in any layout: canvas pixels to game pixels (`held` as layoutToGame) and back,
-// what the canvas shows, the regions, the paper round them and the rects of the ×4 frame that
-// paint it whole (`paperSources`), the letterbox and the rest of the screen.
+// what the canvas shows, the regions (in Wide the map, then the windows), the paper round them
+// and the rects of the ×4 frame that paint it whole (`paperSources`, spec 10's), the letterbox
+// and the rest of the screen, the canvas's size and the compositor's scale of the layout; in
+// Wide (`wide`) the windows too, each with its frame (`outer`) and its title strip (`bar`).
 globalThis.__u6Layout = {
   toGame: (px, py, held = false) => layoutToGame(px, py, held),
   toCanvas: (gx, gy) => layoutToCanvas(gx, gy),
   get view() {
     return shownView;
   },
-  regions: LAYOUT_REGIONS.map(({ name, from, to }) => ({ name, from: [...from], to: [...to] })),
+  wide: WIDE,
+  get regions() {
+    const regions = WIDE ? [...(wideMap ? [wideMap] : []), ...wideWindows] : LAYOUT_REGIONS;
+    return regions.map(({ name, from, to }) => ({ name, from: [...from], to: [...to] }));
+  },
+  get windows() {
+    return wideWindows.map(({ name, from, to, outer, bar }) => ({ name, from: [...from], to: [...to], outer: [...outer], bar: [...bar] }));
+  },
   paper: {
     pieces: LAYOUT_PAPER.map(({ name, from, to, flip }) => ({ name, from: [...from], to: [...to], flip: flip ?? null })),
     parchment: [...LAYOUT_PARCHMENT],
     samples: LAYOUT_SAMPLES.map((p) => [...p]),
   },
   paperSources: PAPER_SOURCES.map((r) => [...r]),
-  whole: [...LAYOUT_WHOLE],
+  get whole() {
+    return [...(WIDE ? WIDE_WHOLE : LAYOUT_WHOLE)];
+  },
   rest: [...LAYOUT_REST],
-  size: [LAYOUT_W, LAYOUT_H],
+  get size() {
+    return WIDE ? [WIDE_W, WIDE_H] : [LAYOUT_W, LAYOUT_H];
+  },
+  get scale() {
+    return WIDE ? WIDE_S : LAYOUT_S;
+  },
 };
 
-// Settings' "Screen layout" changed: kept, on the game on screen at once.
+// The chooser's and Settings' "Screen layout" changed: kept. Within the build this page loaded,
+// on the game on screen at once. Across the builds (spec 13 Decision 2) the page loads again,
+// once the operations queued before are done, with nothing new saved: the game starts again
+// from the kept files and the game's own stored save, which carry over (no state of the window
+// or the view is saved). With storage that does not keep it, the reload would bring back the
+// build it left, so the choice is put back and a line says why.
 function chooseLayout(value) {
-  layoutChoice = value === 'original' ? 'original' : 'hd';
+  const next = value === 'wide' || value === 'original' ? value : 'hd';
+  let kept = true;
   try {
-    localStorage.setItem(LAYOUT_KEY, layoutChoice);
+    localStorage.setItem(LAYOUT_KEY, next);
   } catch {
     // No storage: the choice lasts until the page is left.
+    kept = false;
   }
+  if ((next === 'wide') !== WIDE) {
+    if (kept) {
+      tail.then(() => location.reload());
+    } else {
+      say('layoutNotKept');
+      showHd();
+    }
+    return;
+  }
+  layoutChoice = next;
   showHd();
   applyHd();
+}
+
+// --- the Wide layout (spec 13) -----------------------------------------------------------------
+
+// The Wide layout's canvas (spec 13 Design 5), 16:9, and the compositor's scale while it shows
+// (Design 6: 4 unless its time per frame on a game frame passes 8 ms, measured by the web test
+// "Wide layout (spec 13 Design 6)", then 2).
+const WIDE_W = 1920;
+const WIDE_H = 1080;
+const WIDE_S = 4;
+// The windows' frames, U7-style in colours of our own (no art of another program's): a dark
+// border WINDOW_BORDER wide (a lighter line along its inside), then a title strip WINDOW_TITLE
+// tall with the window's name in the page's font, over the window's content, WINDOW_EDGE from
+// the canvas's edges, the side panel WINDOW_GAP under the date line.
+const WINDOW_BORDER = 4;
+const WINDOW_TITLE = 20;
+const WINDOW_EDGE = 8;
+const WINDOW_GAP = 8;
+const WINDOW_INK = { border: '#16130f', line: '#6b5a3e', bar: '#2e271d', title: '#ecdfbf' };
+// The page's font for the titles (index.html's body's, read once), at this size in canvas pixels.
+const WINDOW_FONT_PX = 13;
+let windowFont = '';
+// A part of the map drawn again alone takes this many canvas pixels more on every side: a
+// smoothed scale reads the source pixels round each it shows, so a changed source pixel changes
+// the canvas a little past the rect it maps to.
+const WIDE_PAD = 8;
+
+// The windows (Design 5): the engine's date line, side panel, message scroll and command bar,
+// each its spec 10 region's `from` and the size of its `to` there (the panel's column at 3.5, the
+// command bar at 4, one to one with the ×4 frame), framed (`outer`, the title strip `bar`, the
+// content `to`): the date line at the top right, the side panel under it, the message scroll at
+// the bottom right, the command bar at the bottom left. `title`: the key of its name.
+const WIDE_WINDOWS = [
+  { name: 'date', title: 'windowDate', corner: 'top-right' },
+  { name: 'panel', title: 'windowPanel', corner: 'top-right', under: 'date' },
+  { name: 'messages', title: 'windowMessages', corner: 'bottom-right' },
+  { name: 'commands', title: 'windowCommands', corner: 'bottom-left' },
+];
+const wideWindows = WIDE ? WIDE_WINDOWS.map(({ name, title, corner, under }) => {
+  const { from, to } = LAYOUT_REGIONS.find((r) => r.name === name);
+  const [w, h] = [to[2], to[3]];
+  return { name, title, corner, under, from: [...from], to: [0, 0, w, h], outer: [0, 0, w + 2 * WINDOW_BORDER, h + WINDOW_TITLE + 2 * WINDOW_BORDER], bar: [0, 0, w, WINDOW_TITLE] };
+}) : [];
+// The map (Design 5): the engine's shown rect (`shown_map`) scaled to cover the canvas, centred
+// (`placeWide`, once the engine loaded).
+let wideMap = null;
+// Every other screen (a program other than `game`): the UI's 320 × 200 scaled to the canvas's
+// height, centred, the sides dark (as LAYOUT_WHOLE).
+const WIDE_WHOLE = [Math.round((WIDE_W - (SCREEN_W * WIDE_H) / SCREEN_H) / 2), 0,
+  Math.round((SCREEN_W * WIDE_H) / SCREEN_H), WIDE_H];
+
+// localStorage: where the viewer dragged the windows, {name: [x, y]} (each frame's top-left
+// corner on the canvas); a window not named, or named with anything but two numbers, stays at
+// its corner. A window is dragged by its title strip and stays whole on the canvas.
+const WINDOWS_KEY = 'u6.layout.windows';
+let dragged = null; // the window being dragged: { win, dx, dy } (the press's place in its frame)
+
+let wideSrc = null; // the offscreen canvas of the frame the Wide layout is drawn from
+let wideSrcGame = null; // the game whose frame it holds (null: none, or stale)
+let wideSrcScale = 0; // that frame's scale: 1 the classic frame (HD off), else the HD frame's
+let wideStale = false; // the next paint is whole (the titles' language changed, a window moved)
+
+// Window `win` with its frame's top-left corner at canvas pixel (x, y).
+function placeWindow(win, x, y) {
+  win.outer[0] = x;
+  win.outer[1] = y;
+  win.bar[0] = x + WINDOW_BORDER;
+  win.bar[1] = y + WINDOW_BORDER;
+  win.to[0] = x + WINDOW_BORDER;
+  win.to[1] = y + WINDOW_BORDER + WINDOW_TITLE;
+}
+
+// Window `win` moved to canvas pixel (x, y) (its frame's top-left corner), kept whole on the
+// canvas.
+function moveWindow(win, x, y) {
+  placeWindow(win, clamp(Math.round(x), 0, WIDE_W - win.outer[2]), clamp(Math.round(y), 0, WIDE_H - win.outer[3]));
+}
+
+// The places the viewer dragged the windows to, as kept ({} for none or storage that cannot be
+// read).
+function keptWindows() {
+  try {
+    const kept = JSON.parse(localStorage.getItem(WINDOWS_KEY));
+    return kept && typeof kept === 'object' && !Array.isArray(kept) ? kept : {};
+  } catch {
+    return {};
+  }
+}
+
+// The windows' places kept (WINDOWS_KEY).
+function keepWindows() {
+  try {
+    localStorage.setItem(WINDOWS_KEY, JSON.stringify(Object.fromEntries(wideWindows.map((w) => [w.name, w.outer.slice(0, 2)]))));
+  } catch {
+    // No storage: the places last until the page is left.
+  }
+}
+
+// The map's region from the engine's shown rect `[x, y, width, height]` (frame pixels), and the
+// windows at their corners, or where the viewer dragged them (`keptWindows`).
+function placeWide([x, y, w, h]) {
+  const k = Math.max(WIDE_W / w, WIDE_H / h);
+  const [cw, ch] = [Math.round(w * k), Math.round(h * k)];
+  wideMap = { name: 'map', from: [x, y, w, h], to: [Math.round((WIDE_W - cw) / 2), Math.round((WIDE_H - ch) / 2), cw, ch] };
+  for (const win of wideWindows) {
+    const [, , ow, oh] = win.outer;
+    const right = win.corner.endsWith('right');
+    const bottom = win.corner.startsWith('bottom');
+    const above = win.under ? wideWindows.find((o) => o.name === win.under) : null;
+    const top = above ? above.outer[1] + above.outer[3] + WINDOW_GAP : WINDOW_EDGE;
+    placeWindow(win, right ? WIDE_W - WINDOW_EDGE - ow : WINDOW_EDGE, bottom ? WIDE_H - WINDOW_EDGE - oh : top);
+  }
+  const kept = keptWindows();
+  for (const win of wideWindows) {
+    const at = kept[win.name];
+    if (Array.isArray(at) && at.length === 2 && at.every(Number.isFinite)) moveWindow(win, at[0], at[1]);
+  }
+}
+
+// A drag of a window by its title strip: a press of the left button on a title strip in `game`
+// takes that window, in front of the others; the moves with it held move the window (the canvas
+// painted whole); the release (or a cancel) keeps the places. Whether the event (at canvas pixel
+// (px, py)) is the drag's: its press, a move or its end, which the game takes as the rest of the
+// screen, a gap's, wherever the pointer is (also past a window held at the canvas's edge, so
+// never a held walk on the map).
+function dragWindow(e, px, py) {
+  if (e.type === 'pointerdown') {
+    dragged = null;
+    if (e.button !== 0 || shownView !== REGIONS_VIEW) return false;
+    const win = wideWindows.findLast(({ outer }) => inRect(px, py, outer));
+    if (!win || !inRect(px, py, win.bar)) return false;
+    wideWindows.splice(wideWindows.indexOf(win), 1);
+    wideWindows.push(win);
+    dragged = { win, dx: px - win.outer[0], dy: py - win.outer[1] };
+    repaintWide();
+    return true;
+  }
+  if (!dragged) return false;
+  if (e.type === 'pointermove' && (e.buttons & 1) !== 0) {
+    moveWindow(dragged.win, px - dragged.dx, py - dragged.dy);
+    repaintWide();
+    return true;
+  }
+  dragged = null;
+  keepWindows();
+  return true;
+}
+
+const inRect = (px, py, [x, y, w, h]) => px >= x && px < x + w && py >= y && py < y + h;
+
+// Draws the frame (version `version`; its HD frame with `hd`, else the classic one) for `view`
+// on the 1920 × 1080 canvas: first on the offscreen frame (the HD frame's dirty rect only over
+// the one it holds of this game at this scale; the classic frame, which has none, whole), then
+// on the canvas, whole when it showed another game, another view, the other frame or nothing
+// yet, else the part the dirty rect touches (`paintWide`).
+function composeWide(view, hd, version) {
+  if (canvas.width !== WIDE_W || canvas.height !== WIDE_H) {
+    canvas.width = WIDE_W;
+    canvas.height = WIDE_H;
+    drawnGame = null; // the resize cleared it
+  }
+  const s = hd ? game.hd_scale() : 1;
+  const [w, h] = [game.width() * s, game.height() * s];
+  wideSrc ??= document.createElement('canvas');
+  if (wideSrc.width !== w || wideSrc.height !== h) {
+    wideSrc.width = w;
+    wideSrc.height = h;
+    wideSrcGame = null;
+  }
+  const over = wideSrcGame === game && wideSrcScale === s;
+  const whole = !over || !hd || game !== drawnGame || view !== shownView || hd !== drawnHd || wideStale;
+  const fresh = view !== shownView;
+  const rect = hd ? game.hd_take_dirty() : [];
+  drawnGame = game;
+  drawnVersion = version;
+  drawnHd = hd;
+  shownView = view;
+  wideStale = false;
+  if (fresh) fitRendering(hd);
+  if (!over || !hd || rect.length > 0) {
+    // Re-create the view every frame: wasm memory growth detaches old buffers.
+    const pixels = hd
+      ? new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len())
+      : new Uint8ClampedArray(wasm.memory.buffer, game.frame_ptr(), game.frame_len());
+    const image = new ImageData(pixels, w, h);
+    const ctx = wideSrc.getContext('2d');
+    if (over && hd) ctx.putImageData(image, 0, 0, rect[0], rect[1], rect[2], rect[3]);
+    else ctx.putImageData(image, 0, 0);
+    wideSrcGame = game;
+    wideSrcScale = s;
+  }
+  if (whole) paintWide(view, null);
+  else if (rect.length > 0) paintWide(view, rect);
+}
+
+// The canvas from the offscreen frame for `view`. Every other screen: the dark sides and the UI's
+// screen (WIDE_WHOLE). The game's: within one clip rect of the canvas (all of it with `dirty`
+// null; else the box round the canvas rects that show the part of the frame `dirty` touches: of
+// the map that part, WIDE_PAD wider, all of it with cells listed in it now or at the paint
+// before; of a window its whole content) the map, then each window over it: its frame, its title
+// and its content; then the HD font's characters over each region copied (`paintGlyphs`, within
+// the clip: copied again just before). The HD frame is scaled smoothly (a one-to-one window
+// copied as it is), the classic frame pixelated.
+function paintWide(view, dirty) {
+  const ctx = canvas.getContext('2d');
+  const s = wideSrcScale;
+  const smooth = s > 1;
+  const glyphs = drawnHd && game.hd_font() ? game.hd_glyphs() : [];
+  if (view === WHOLE_VIEW) {
+    ctx.fillStyle = LAYOUT_FILL;
+    ctx.fillRect(0, 0, WIDE_W, WIDE_H);
+    ctx.imageSmoothingEnabled = smooth;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(wideSrc, 0, 0, SCREEN_W * s, SCREEN_H * s, ...WIDE_WHOLE);
+    if (glyphs.length > 0) paintGlyphs(ctx, glyphs, [0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE, WIDE_WHOLE);
+    paintedGlyphs = glyphs;
+    return;
+  }
+  let clip = [0, 0, WIDE_W, WIDE_H];
+  if (dirty) {
+    const rects = [];
+    const map = wideMap;
+    const part = overlap(map.from.map((v) => v * s), dirty);
+    if (part && (listedIn(glyphs, map.from) || listedIn(paintedGlyphs, map.from))) {
+      rects.push(map.to);
+    } else if (part) {
+      const [kx, ky] = [map.to[2] / (map.from[2] * s), map.to[3] / (map.from[3] * s)];
+      const x0 = Math.floor(map.to[0] + (part[0] - map.from[0] * s) * kx) - WIDE_PAD;
+      const y0 = Math.floor(map.to[1] + (part[1] - map.from[1] * s) * ky) - WIDE_PAD;
+      const x1 = Math.ceil(map.to[0] + (part[0] + part[2] - map.from[0] * s) * kx) + WIDE_PAD;
+      const y1 = Math.ceil(map.to[1] + (part[1] + part[3] - map.from[1] * s) * ky) + WIDE_PAD;
+      rects.push([x0, y0, x1 - x0, y1 - y0]);
+    }
+    for (const win of wideWindows) {
+      if (overlap(win.from.map((v) => v * s), dirty)) rects.push(win.to);
+    }
+    if (rects.length === 0) return;
+    const x0 = Math.min(...rects.map((r) => r[0]));
+    const y0 = Math.min(...rects.map((r) => r[1]));
+    const x1 = Math.max(...rects.map((r) => r[0] + r[2]));
+    const y1 = Math.max(...rects.map((r) => r[1] + r[3]));
+    clip = overlap([x0, y0, x1 - x0, y1 - y0], clip);
+    if (!clip) return;
+  }
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(...clip);
+  ctx.clip();
+  ctx.imageSmoothingEnabled = smooth;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(wideSrc, ...wideMap.from.map((v) => v * s), ...wideMap.to);
+  if (glyphs.length > 0) paintGlyphs(ctx, glyphs, wideMap.from, wideMap.to, overlap(wideMap.to, clip));
+  for (const win of wideWindows) {
+    if (overlap(win.outer, clip)) paintWindow(ctx, win, s, smooth, glyphs, clip);
+  }
+  ctx.restore();
+  paintedGlyphs = glyphs;
+}
+
+// Window `win` on the canvas (within the clip `clip` the caller set): its frame, its title, its
+// content from the offscreen frame at scale `s` (`smooth`: the HD frame, scaled smoothly unless
+// one to one), the HD font's characters over the content (`glyphs`).
+function paintWindow(ctx, win, s, smooth, glyphs, clip) {
+  const [x, y, w, h] = win.outer;
+  ctx.fillStyle = WINDOW_INK.border;
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = WINDOW_INK.line;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 1.5, y + 1.5, w - 3, h - 3);
+  ctx.fillStyle = WINDOW_INK.bar;
+  ctx.fillRect(...win.bar);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(...win.bar);
+  ctx.clip();
+  ctx.fillStyle = WINDOW_INK.title;
+  windowFont ||= `600 ${WINDOW_FONT_PX}px ${getComputedStyle(document.body).fontFamily}`;
+  ctx.font = windowFont;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(t(win.title), win.bar[0] + 6, win.bar[1] + WINDOW_TITLE / 2 + 1);
+  ctx.restore();
+  const source = win.from.map((v) => v * s);
+  ctx.imageSmoothingEnabled = smooth && (win.to[2] !== source[2] || win.to[3] !== source[3]);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(wideSrc, ...source, ...win.to);
+  const copied = overlap(win.to, clip);
+  if (glyphs.length > 0 && copied) paintGlyphs(ctx, glyphs, win.from, win.to, copied);
+}
+
+// The Wide layout painted whole (the titles' language changed, a window moved), at once with a
+// game shown.
+function repaintWide() {
+  if (!WIDE) return;
+  wideStale = true;
+  if (game && !crashed && drawnGame === game) {
+    drawnVersion = -1;
+    draw();
+  }
+}
+
+// The game pixel canvas pixel (px, py) reaches in the Wide layout (as `layoutToGame`). Every
+// other screen: the UI's screen letterboxed, a point on a dark side at the nearest edge. The
+// game's: a window first (each in front of the map, the one painted last in front): in its
+// content that pixel of its classic rect; on its frame or its title strip (a gap), a move with no
+// button the nearest pixel of its content, anything else the rest of the screen (LAYOUT_REST);
+// elsewhere the map, at its pixel.
+function wideToGame(px, py, held) {
+  const through = ([fx, fy, fw, fh], [x, y, w, h]) => [
+    clamp(fx + Math.floor(((px - x) * fw) / w), fx, fx + fw - 1),
+    clamp(fy + Math.floor(((py - y) * fh) / h), fy, fy + fh - 1)];
+  if (shownView === WHOLE_VIEW) return through([0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE);
+  const win = wideWindows.findLast(({ outer }) => inRect(px, py, outer));
+  if (win && !inRect(px, py, win.to) && held) return [...LAYOUT_REST];
+  if (win) return through(win.from, win.to);
+  return through(wideMap.from, wideMap.to);
+}
+
+// The canvas pixel (the centre of what shows game pixel (gx, gy)) in the Wide layout (as
+// `layoutToCanvas`); null for a pixel that does not show: outside the windows and the map, under
+// a window in front of it, or of the map past the canvas's edges.
+function wideToCanvas(gx, gy) {
+  const at = ([fx, fy, fw, fh], [x, y, w, h]) => [x + ((gx - fx + 0.5) * w) / fw, y + ((gy - fy + 0.5) * h) / fh];
+  if (shownView === WHOLE_VIEW) return at([0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE);
+  const i = wideWindows.findIndex(({ from }) => inRect(gx, gy, from));
+  const [region, before] = i >= 0 ? [wideWindows[i], wideWindows.slice(i + 1)] : [wideMap, wideWindows];
+  if (!inRect(gx, gy, region.from)) return null;
+  const [cx, cy] = at(region.from, region.to);
+  if (!inRect(cx, cy, [0, 0, WIDE_W, WIDE_H])) return null;
+  return before.some(({ outer }) => inRect(cx, cy, outer)) ? null : [cx, cy];
 }
 
 // --- the HD font (spec 11) ---------------------------------------------------------------------
@@ -1777,8 +2192,9 @@ let paintedGlyphs = []; // the cells the last `paint` drew (Game.hd_glyphs then)
 // ASCII stands on the same baseline, where the font puts it beside them).
 let glyphDrop = 0;
 
-// The HD font is wanted (chosen, with the HD layout in effect), and drawn (wanted and loaded).
-const fontWanted = () => layoutOn() && fontChoice === 'hd';
+// The HD font is wanted (chosen, with the HD layout in effect, or HD on in the Wide build: its
+// windows show the text as the HD layout's regions do), and drawn (wanted and loaded).
+const fontWanted = () => (WIDE ? hdOn : layoutOn()) && fontChoice === 'hd';
 const fontOn = () => fontWanted() && fontFile === 'loaded';
 
 // The font in effect and the file's state on the body (data-font, data-font-file).
@@ -2981,18 +3397,19 @@ for (const input of setup.querySelectorAll('input[name="setup-lang"]')) {
 }
 setupVoices.addEventListener('change', showVoiceTerms);
 setupOk.addEventListener('click', applySetup);
-// A box that grows or shrinks (the window, the zoom) may want the other scale.
+// A box that grows or shrinks (the window, the zoom) may want the other scale, and the Wide
+// layout's canvas (HD on or off) the other rendering.
 new ResizeObserver(() => {
-  if (hdOn) applyHd();
+  if (hdOn || WIDE) applyHd();
 }).observe(canvas);
 window.addEventListener('resize', () => {
-  if (hdOn) applyHd();
+  if (hdOn || WIDE) applyHd();
 });
 // A move to a display of another pixel ratio changes the device pixels of the same CSS box
 // (no resize): one query per ratio, armed again for the new one.
 function watchRatio() {
   matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`).addEventListener('change', () => {
-    if (hdOn) applyHd();
+    if (hdOn || WIDE) applyHd();
     watchRatio();
   }, { once: true });
 }
@@ -3003,8 +3420,9 @@ faster.addEventListener('click', () => changeSpeed(1));
 // (whatever the canvas's own size: HD makes it S times that), the buttons
 // as DOM `buttons` (bit 0 left, bit 1 right). With the HD layout the position goes through the
 // canvas's pixels and the layout backwards (`layoutToGame`, held when a button is down or was
-// down in the event sent last: a press, a release, a move with a button held). The canvas
-// captures a press so the release reaches
+// down in the event sent last: a press, a release, a move with a button held); in Wide a press
+// on a title strip also drags its window (`dragWindow`). The canvas captures a press so the
+// release reaches
 // the game even off the canvas; the context menu stays off it while a game runs. A press is, in
 // this order, the focus, the game's pointer event (queued for the next step, exactly once) and
 // the gesture that starts the sound (the AudioContext is created before its first await, inside
@@ -3022,7 +3440,8 @@ function sendPointer(e) {
   } else {
     const px = ((e.clientX - box.left) * canvas.width) / box.width;
     const py = ((e.clientY - box.top) * canvas.height) / box.height;
-    [x, y] = layoutToGame(px, py, buttons !== 0 || sentButtons !== 0);
+    if (WIDE && dragWindow(e, px, py)) [x, y] = LAYOUT_REST;
+    else [x, y] = layoutToGame(px, py, buttons !== 0 || sentButtons !== 0);
   }
   sentButtons = buttons;
   game.pointer(x, y, buttons);
@@ -3037,7 +3456,7 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', sendPointer);
 canvas.addEventListener('pointerup', sendPointer);
 canvas.addEventListener('pointercancel', (e) =>
-  sendPointer({ clientX: e.clientX, clientY: e.clientY, buttons: 0 }));
+  sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 }));
 canvas.addEventListener('contextmenu', (e) => {
   if (game && !crashed) e.preventDefault();
 });
@@ -3156,7 +3575,13 @@ if (voicesWanted() && termsAccepted()) startVoices({ cachedOnly: true });
 if (setupFirst) openSetup();
 enqueue('opEngine', async () => {
   try {
+    ({
+      default: init, Game, HdPack, LocalePack, PackProbe, budget_ms, input_too_large, max_input_bytes,
+      max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
+      shown_map,
+    } = await import(ENGINE_URL));
     wasm = await init();
+    if (WIDE) placeWide(shown_map());
   } catch (err) {
     reflect('failed');
     throw new Error(t('engineFailed', message(err)));

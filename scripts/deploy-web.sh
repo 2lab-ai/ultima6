@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds the wasm engine and publishes site/ to Cloudflare Pages project `ultima6`.
+# Builds the wasm engine (both builds, spec 13: site/pkg Original, site/pkg-wide Wide;
+# scripts/build-web.sh) and publishes site/ with both to Cloudflare Pages project `ultima6`.
 # Usage: scripts/deploy-web.sh [branch]   (main = production → https://ultima6.2lab.ai)
 #        scripts/deploy-web.sh --packs-only   (fills site/packs/ as below and stops: no build,
 #                                             no deploy)
@@ -145,6 +146,11 @@ main() {
   fill_packs
   if [ -d site/models ]; then bash tools/speech/fetch-models.sh --check; fi
   bash scripts/build-web.sh
+  # The page loads either build (site/app.js): both go up, or none.
+  local pkg
+  for pkg in site/pkg site/pkg-wide; do
+    [ -s "$pkg/u6_web_bg.wasm" ] && [ -s "$pkg/u6_web.js" ] || fail "$pkg was not built"
+  done
   npx --yes wrangler@4 pages deploy site --project-name ultima6 --branch "$branch" \
     --commit-hash "$(git rev-parse HEAD)" --commit-message "$(git log -1 --format=%s)" \
     --commit-dirty=false

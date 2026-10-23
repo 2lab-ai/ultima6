@@ -578,8 +578,9 @@ export const CHOSEN = { lang: 'en' };
 /// first visit (the chooser shows); `gpu`: in the Chromium with WebGPU; `locale`: the
 /// browser's language (navigator.language), en-US unless a test asks, whatever the machine's;
 /// `layout`: the screen layout the page finds kept (spec 10 Design 7: `original` unless a test
-/// asks for `hd`, so every click test keeps its 320 x 200 box; null keeps none, the page's
-/// default), kept only while the page keeps none (a choice the page made survives a reload);
+/// asks for `hd` or `wide`, so every click test keeps its 320 x 200 box and the Original build;
+/// null keeps none, the page's default: the Wide build, spec 13), kept only while the page keeps
+/// none (a choice the page made survives a reload);
 /// `font`: the font the page finds kept (spec 11 Design 5: `pixel` or `hd`; null, the default,
 /// keeps none: the page's default, the HD font), kept likewise only while the page keeps none.
 export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN, gpu = false, locale = 'en-US', layout = 'original', font = null } = {}) {
@@ -622,7 +623,8 @@ export async function openPage(env, { gated = true, gameFirst = true, setup = CH
   }
   if (gated || gameFirst) {
     const extra = (gated ? GLUE_HOOKS + SPEECH_HOOK : '') + (gameFirst ? GAME_FIRST : '');
-    await context.route(/\/pkg\/u6_web\.js$/, async (route) => {
+    // Either build's glue (spec 13 Decision 2: site/pkg, site/pkg-wide).
+    await context.route(/\/pkg(-wide)?\/u6_web\.js$/, async (route) => {
       const response = await route.fetch();
       await route.fulfill({ response, body: (await response.text()) + extra });
     });
@@ -632,6 +634,14 @@ export async function openPage(env, { gated = true, gameFirst = true, setup = CH
   // only.
   page.on('pageerror', (err) => console.error(`  page error: ${errorName(err)}`));
   return { context, page };
+}
+
+/// `openPage` with the Wide screen kept (spec 13: the Wide build, site/pkg-wide), in a viewport
+/// of `width` x `height`.
+export async function openWide(env, { width = 1400, height = 900, ...rest } = {}) {
+  const opened = await openPage(env, { ...rest, layout: 'wide' });
+  await opened.page.setViewportSize({ width, height });
+  return opened;
 }
 
 export async function load(page, env) {
@@ -1180,12 +1190,13 @@ export async function press(page, key, settle) {
 }
 
 /// A pixel of the canvas (320 x 200 game pixels) as a page position through its CSS box; with
-/// the HD layout in effect (spec 10) through the page's own map of it (`__u6Layout.toCanvas`:
-/// the centre of what shows that pixel; a pixel the layout does not show fails).
+/// the HD layout (spec 10) or the Wide layout (spec 13) in effect through the page's own map of
+/// it (`__u6Layout.toCanvas`: the centre of what shows that pixel; a pixel the layout does not
+/// show fails).
 export async function screenPoint(page, x, y) {
   const box = await page.locator('#screen').boundingBox();
   const at = await page.evaluate(([gx, gy]) => {
-    if (document.body.dataset.layout !== 'hd') return null;
+    if (!['hd', 'wide'].includes(document.body.dataset.layout)) return null;
     const c = document.getElementById('screen');
     const p = globalThis.__u6Layout.toCanvas(gx, gy);
     return p ? [p[0] / c.width, p[1] / c.height] : [NaN, NaN];
@@ -1197,8 +1208,8 @@ export async function screenPoint(page, x, y) {
   return [box.x + ((x + 0.5) * box.width) / 320, box.y + ((y + 0.5) * box.height) / 200];
 }
 
-/// Canvas pixel (cx, cy) of the canvas's own size (the HD layout's 1280 x 720) as a page
-/// position through its CSS box.
+/// Canvas pixel (cx, cy) of the canvas's own size (the HD layout's 1280 x 720, the Wide
+/// layout's 1920 x 1080) as a page position through its CSS box.
 export async function canvasPoint(page, cx, cy) {
   const box = await page.locator('#screen').boundingBox();
   const [w, h] = await page.evaluate(() => {

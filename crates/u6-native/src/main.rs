@@ -30,7 +30,8 @@
 //! Headless mode never opens a window or reads a clock: it runs N ticks of `HEADLESS_TICK_MS`
 //! (the same fixed step), delivering the `--keys` one per tick while the game has no input
 //! queued, and writes the last
-//! published 320x200 frame. A `ctrl+<letter>` token is that control character (`ctrl+s` Save,
+//! published frame (320 × 200; built with `--features wide`, spec 13's Wide frame, 912 × 336,
+//! shown and written as it is). A `ctrl+<letter>` token is that control character (`ctrl+s` Save,
 //! `ctrl+r` Restore; the window sends them for Ctrl + a letter); `tab` is the Tab key (with a
 //! cursor up it moves to the inventory panel). A `say:words` token types
 //! `words` and Return into the next line

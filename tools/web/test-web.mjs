@@ -20,9 +20,13 @@
 // the game's paper round its regions, clicks through it, the letterbox, fullscreen at any size,
 // the setting) and the HD font on it
 // (spec 11: the font file, the text drawn in runs over the listed cells, the pixel font as before,
-// the choice). Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
-// page as it is. Every test but the HD layout's and the HD font's runs on the Original layout
-// (harness `openPage`), and the HD layout's keep the pixel font (`bootLayout`).
+// the choice), and the Wide layout (spec 13: the Wide build site/pkg-wide on a fresh page, the
+// map covering the 1920 x 1080 canvas, the four framed windows over it, the pointer through them,
+// the letterbox, fullscreen, the compositor's time and scale, the setting across the builds).
+// Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
+// page as it is. Every test but the HD layout's, the HD font's and the Wide layout's runs on the
+// Original layout of the Original build (harness `openPage`); the HD layout's and the Wide
+// layout's keep the pixel font (`bootLayout`, `bootWide`, on harness `openWide`).
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
 // not timed. The game is read once it reached what a check asserts, by its own signals (the
 // prompt, the key queue, the program, its ticks: the page's fixed steps of 20 ms), never after a
@@ -7149,7 +7153,7 @@ function layoutStorageThrows() {
   }
 }
 
-test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (HD 16:9, Original 16:10, in the page\'s language) switches the game on screen at once and is kept; any other kept value is HD; Original with HD on is 07\'s canvas (1280 x 800 at S 4 in a 16:10 box); HD off with the HD layout chosen is the page as before (the 320 x 200 frame, a 16:10 box, the pointer through the box); after an engine trap a switch changes neither the canvas nor its box; with storage that throws the layout is HD, switches for the visit and nothing is kept; no page error', async (env) => {
+test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (Wide, HD 16:9, Original 16:10, in the page\'s language) switches the game on screen at once and is kept; any other kept value is HD; Original with HD on is 07\'s canvas (1280 x 800 at S 4 in a 16:10 box); HD off with the HD layout chosen is the page as before (the 320 x 200 frame, a 16:10 box, the pointer through the box); after an engine trap a switch changes neither the canvas nor its box; with storage that throws the layout is HD, switches for the visit and nothing is kept; no page error', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   const errors = [];
   let { context, page } = await bootLayout(env, { width: 1024 });
@@ -7172,8 +7176,8 @@ test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (HD
   }));
   let c = await choice();
   assert.ok(c.inSettings, 'in Settings');
-  assert.deepEqual([c.title, c.labels], [TEXT.en.layout, ['HD 16:9', TEXT.en.layoutOriginal]], 'its words in English');
-  assert.deepEqual(c.values, [['hd', true], ['original', false]], 'HD 16:9 checked');
+  assert.deepEqual([c.title, c.labels], [TEXT.en.layout, [TEXT.en.layoutWide, 'HD 16:9', TEXT.en.layoutOriginal]], 'its words in English');
+  assert.deepEqual(c.values, [['wide', false], ['hd', true], ['original', false]], 'HD 16:9 checked');
   await page.check('input[name="layout"][value="original"]');
   s = await layoutShown(page);
   assert.ok(s.layout === 'original' && s.view === 'frame' && s.stored === 'original', 'Original at once, kept');
@@ -7185,7 +7189,7 @@ test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (HD
   assert.ok(s.layout === 'hd' && s.view === 'game' && s.size[1] === 720 && s.stored === 'hd', 'HD 16:9 again at once, kept');
   await page.check('input[name="setup-lang"][value="ko"]');
   c = await choice();
-  assert.deepEqual([c.title, c.labels], [TEXT.ko.layout, ['HD 16:9', TEXT.ko.layoutOriginal]], 'its words in Korean');
+  assert.deepEqual([c.title, c.labels], [TEXT.ko.layout, [TEXT.ko.layoutWide, 'HD 16:9', TEXT.ko.layoutOriginal]], 'its words in Korean');
   await page.check('input[name="setup-lang"][value="en"]');
   // HD off: the page as before, whatever the layout chosen.
   await page.click('#hd');
@@ -7202,8 +7206,8 @@ test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (HD
   assert.ok(s.layout === 'hd' && s.view === 'game' && s.size[1] === 720, 'HD on: the HD layout again');
   await page.click('#setup-ok');
   await h.waitSettled(page);
-  // Kept across a reload, as chosen; another value is HD.
-  for (const [kept, want] of [['original', 'original'], ['hd', 'hd'], ['wide', 'hd']]) {
+  // Kept across a reload, as chosen; another value is HD (spec 13: `wide` is the Wide build's).
+  for (const [kept, want] of [['original', 'original'], ['hd', 'hd'], ['other', 'hd']]) {
     await page.evaluate((v) => localStorage.setItem('u6.layout', v), kept);
     await page.reload();
     await started(page, FILES);
@@ -8349,6 +8353,618 @@ test('HD font (spec 11 Acceptance 3, Design 4-5): the first-run chooser and Sett
   assert.ok(words.some((m) => m.startsWith('the HD font did not load')), 'the line says so');
   console.log('  receipt: the chooser\'s and Settings\' Font in Korean and English; the font file from this origin (200) only while the HD font and the HD layout are in effect; the choice kept at once and across reloads; storage that throws: for the visit; a file not there: the pixel font: pass');
 });
+
+// --- the Wide layout (spec 13) -----------------------------------------------------------------
+// The Wide build (site/pkg-wide, a 912 x 336 frame: the UI's 320 x 200 at its top left, the map
+// beside it) on a 1920 x 1080 canvas: the map covering it, four framed windows over it. The
+// test's own copy of spec 13's Geometry (Wide column) and of spec 10's region rects; the window
+// rects are checked against where Design 5 puts them, read from the page's table. At W0 the
+// engine still draws its map in the UI's 11 x 11 window, so the shown map is black in the frame:
+// what these tests check of it is that the canvas shows the frame's pixels there, whatever they
+// are, and where the pointer goes.
+const WIDE_GEOM = { mapX: 320, mapY: 0, halfW: 18, halfH: 10, shown: [328, 8, 576, 320], frame: [912, 336] };
+const WIDE_CANVAS = [1920, 1080];
+// Spec 10's regions, `from` (game pixels) and the size of their `to` (canvas pixels).
+const WIDE_PARTS = {
+  date: { from: [16, 168, 152, 8], size: [532, 28], corner: 'top-right' },
+  panel: { from: [168, 6, 144, 98], size: [504, 343], corner: 'top-right' },
+  messages: { from: [176, 112, 136, 80], size: [476, 280], corner: 'bottom-right' },
+  commands: { from: [8, 176, 160, 17], size: [640, 68], corner: 'bottom-left' },
+};
+const WIDE_EDGE = 8; // the windows' frames this far from the canvas's edges (Design 5, brief W5)
+
+// A gated page of the Wide build (`openWide`; with `fresh`, a page that keeps no screen choice:
+// the page's default), the pixel font kept (as `bootLayout`: a listed cell is flat paper in the
+// HD frame), the user's disks started in `game`, the canvas focused. `init` runs in the page
+// before its scripts. Also: the paths of the engine glue the page asked for.
+async function bootWide(env, { fresh = false, init = null, width = 1400, height = 900 } = {}) {
+  const { context, page } = fresh
+    ? await h.openPage(env, { layout: null, font: 'pixel' })
+    : await h.openWide(env, { width, height, font: 'pixel' });
+  if (fresh) await page.setViewportSize({ width, height });
+  if (init) await context.addInitScript(init);
+  const glues = [];
+  page.on('request', (r) => {
+    const path = new URL(r.url()).pathname;
+    if (path.endsWith('/u6_web.js')) glues.push(path);
+  });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await page.focus('#screen');
+  await h.waitPrompt(page);
+  return { context, page, glues };
+}
+
+// The page's Wide table and what it shows: the layout, the view, the canvas, its box's
+// rendering, the frame's and the compositor's sizes, the regions and the windows.
+const wideShown = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen');
+  const L = globalThis.__u6Layout;
+  const g = globalThis.__shownGame;
+  return {
+    layout: document.body.dataset.layout,
+    wide: L.wide,
+    view: L.view,
+    size: [c.width, c.height],
+    frame: [g.width(), g.height()],
+    hd: g.hd_on(),
+    scale: g.hd_on() ? g.hd_scale() : 0,
+    layoutScale: L.scale,
+    regions: L.regions,
+    windows: L.windows,
+    whole: L.whole,
+    rest: L.rest,
+  };
+});
+
+// Whether rects (x, y, w, h) `a` and `b` share a pixel.
+const meets = ([ax, ay, aw, ah], [bx, by, bw, bh]) => ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+const holds = ([ax, ay, aw, ah], [bx, by, bw, bh]) => bx >= ax && by >= ay && bx + bw <= ax + aw && by + bh <= ay + ah;
+
+// Page script, the display frozen by the caller: the canvas against the frame it is drawn from
+// (`hd`: the HD frame at the layout's scale, else the classic frame). Per window, its content's
+// pixels where the frame is one colour round the game pixel shown (3 x 3 game pixels; at the
+// centre of what shows it): `compared`, `differ` (more than 2 off in a channel); a one-to-one
+// window (the command bar at x4) every pixel (`exact`, `exactDiffer`). The map likewise at a grid
+// of canvas pixels not under a window (`map`). The frames: per window, the colours of its border
+// (the outer ring), of its title strip's last 40 columns (no title there) and the title strip's
+// colours besides them (the name's ink). Counts only.
+const wideCheck = (page, hd) => page.evaluate((onHd) => {
+  const c = document.getElementById('screen');
+  const L = globalThis.__u6Layout;
+  const g = globalThis.__shownGame;
+  const s = onHd ? g.hd_scale() : 1;
+  const f = onHd ? g.hd_frame_rgba() : g.frame_rgba();
+  const fw = g.width() * s;
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const px = (x, y) => [0, 1, 2].map((k) => d[(y * c.width + x) * 4 + k]);
+  const fr = (x, y) => [0, 1, 2].map((k) => f[(y * fw + x) * 4 + k]);
+  // The frame's colour of game pixel (gx, gy) when its 3 x 3 game pixels are one colour there.
+  const flat = (gx, gy) => {
+    const ref = fr(gx * s, gy * s);
+    for (let y = (gy - 1) * s; y < (gy + 2) * s; y += 1) {
+      for (let x = (gx - 1) * s; x < (gx + 2) * s; x += 1) {
+        const p = fr(x, y);
+        if (p[0] !== ref[0] || p[1] !== ref[1] || p[2] !== ref[2]) return null;
+      }
+    }
+    return ref;
+  };
+  const off = (a, b) => [0, 1, 2].some((k) => Math.abs(a[k] - b[k]) > 2);
+  const out = { windows: {}, map: { compared: 0, differ: 0 } };
+  for (const w of L.windows) {
+    const r = { compared: 0, differ: 0, exact: 0, exactDiffer: 0 };
+    const [x0, y0, ww, wh] = w.from;
+    for (let gy = y0 + 1; gy < y0 + wh - 1; gy += 1) {
+      for (let gx = x0 + 1; gx < x0 + ww - 1; gx += 1) {
+        const want = flat(gx, gy);
+        if (!want) continue;
+        const [cx, cy] = L.toCanvas(gx, gy).map(Math.floor);
+        r.compared += 1;
+        if (off(px(cx, cy), want)) r.differ += 1;
+      }
+    }
+    if (w.to[2] === s * ww && w.to[3] === s * wh) {
+      for (let y = 0; y < w.to[3]; y += 1) {
+        for (let x = 0; x < w.to[2]; x += 1) {
+          r.exact += 1;
+          const a = px(w.to[0] + x, w.to[1] + y);
+          const b = fr(s * x0 + x, s * y0 + y);
+          if (a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2]) r.exactDiffer += 1;
+        }
+      }
+    }
+    const key = (p) => p.join(',');
+    const [ox, oy, ow, oh] = w.outer;
+    const ring = new Set();
+    for (let x = ox; x < ox + ow; x += 1) ring.add(key(px(x, oy))).add(key(px(x, oy + oh - 1)));
+    for (let y = oy; y < oy + oh; y += 1) ring.add(key(px(ox, y))).add(key(px(ox + ow - 1, y)));
+    const [bx, by, bw, bh] = w.bar;
+    const plain = new Set();
+    for (let y = by; y < by + bh; y += 1) for (let x = bx + bw - 40; x < bx + bw; x += 1) plain.add(key(px(x, y)));
+    const ink = new Set();
+    for (let y = by; y < by + bh; y += 1) for (let x = bx; x < bx + 120; x += 1) if (!plain.has(key(px(x, y)))) ink.add(key(px(x, y)));
+    r.ring = ring.size;
+    r.plain = plain.size;
+    r.ink = ink.size;
+    r.inkVsBar = [...ink].some((p) => p !== [...plain][0]);
+    out.windows[w.name] = r;
+  }
+  const map = L.regions.find((r) => r.name === 'map');
+  for (let cy = 4; cy < c.height; cy += 24) {
+    for (let cx = 4; cx < c.width; cx += 24) {
+      if (L.windows.some(({ outer: [x, y, w, h] }) => cx >= x - 2 && cx < x + w + 2 && cy >= y - 2 && cy < y + h + 2)) continue;
+      const gx = map.from[0] + Math.floor(((cx + 0.5 - map.to[0]) * map.from[2]) / map.to[2]);
+      const gy = map.from[1] + Math.floor(((cy + 0.5 - map.to[1]) * map.from[3]) / map.to[3]);
+      const want = flat(gx, gy);
+      if (!want) continue;
+      out.map.compared += 1;
+      if (off(px(cx, cy), want)) out.map.differ += 1;
+    }
+  }
+  return out;
+}, hd);
+
+// The windows of `shown` are where Design 5 puts them: content the size of spec 10's region, in
+// a frame whose title strip is above it, the frame WIDE_EDGE from the canvas's edges at its
+// corner (the side panel under the date line), none meeting another; with `label`.
+function windowsPlaced(shown, label) {
+  const names = shown.windows.map((w) => w.name);
+  assert.deepEqual(names, ['date', 'panel', 'messages', 'commands'], `${label}: the four windows`);
+  const [cw, ch] = WIDE_CANVAS;
+  for (const w of shown.windows) {
+    const part = WIDE_PARTS[w.name];
+    assert.deepEqual(w.from, part.from, `${label}: ${w.name} shows its spec 10 rect`);
+    assert.deepEqual(w.to.slice(2), part.size, `${label}: ${w.name} at its spec 10 size`);
+    assert.ok(holds(w.outer, w.to) && holds(w.outer, w.bar), `${label}: ${w.name}'s frame holds its title strip and its content`);
+    assert.ok(w.bar[1] + w.bar[3] <= w.to[1] && w.bar[0] === w.to[0] && w.bar[2] === w.to[2] && w.bar[3] >= 12, `${label}: ${w.name}'s title strip above its content, as wide`);
+    const [ox, oy, ow, oh] = w.outer;
+    assert.ok(ox >= 0 && oy >= 0 && ox + ow <= cw && oy + oh <= ch, `${label}: ${w.name} inside the canvas`);
+    const right = part.corner.endsWith('right');
+    const bottom = part.corner.startsWith('bottom');
+    assert.equal(right ? cw - (ox + ow) : ox, WIDE_EDGE, `${label}: ${w.name} ${WIDE_EDGE} px from the ${right ? 'right' : 'left'} edge`);
+    if (bottom) assert.equal(ch - (oy + oh), WIDE_EDGE, `${label}: ${w.name} ${WIDE_EDGE} px from the bottom`);
+  }
+  const at = Object.fromEntries(shown.windows.map((w) => [w.name, w]));
+  assert.equal(at.date.outer[1], WIDE_EDGE, `${label}: the date line ${WIDE_EDGE} px from the top`);
+  assert.ok(at.panel.outer[1] >= at.date.outer[1] + at.date.outer[3], `${label}: the side panel under the date line`);
+  for (let i = 0; i < shown.windows.length; i += 1) {
+    for (let j = i + 1; j < shown.windows.length; j += 1) {
+      assert.ok(!meets(shown.windows[i].outer, shown.windows[j].outer), `${label}: ${shown.windows[i].name} and ${shown.windows[j].name} do not overlap`);
+    }
+  }
+}
+
+// The map region of `shown` covers the canvas: spec 13's shown rect scaled by the larger of the
+// canvas's ratios to it (1080 / 320), centred: 12 px of it past either side.
+function mapCovers(shown, label) {
+  const map = shown.regions.find((r) => r.name === 'map');
+  assert.deepEqual(map.from, WIDE_GEOM.shown, `${label}: the map is spec 13's shown rect`);
+  const [cw, ch] = WIDE_CANVAS;
+  const k = Math.max(cw / map.from[2], ch / map.from[3]);
+  assert.equal(k, 3.375, `${label}: the cover scale`);
+  assert.deepEqual(map.to, [(cw - map.from[2] * k) / 2, (ch - map.from[3] * k) / 2, map.from[2] * k, map.from[3] * k], `${label}: scaled to cover, centred`);
+  assert.ok(map.to[0] === -12 && map.to[0] + map.to[2] === cw + 12 && map.to[1] === 0 && map.to[3] === ch, `${label}: 12 px cropped at either side, the whole height`);
+}
+
+test('Wide layout (spec 13 A1, A3, A4, Design 2 and 5): a fresh page (no screen kept) loads the Wide build (site/pkg-wide only: the frame 912 x 336) and shows the Wide layout: the canvas 1920 x 1080 in a 16:9 box, the compositor at the layout\'s scale; the map (spec 13\'s shown rect) scaled to cover the canvas, the canvas the frame\'s colours there; the date line, the side panel, the message scroll and the command bar in framed windows over it, each titled, at its corner 8 px from the edges, the side panel under the date line, at spec 10\'s sizes, none overlapping, showing the frame\'s colours (the command bar one to one with the x4 frame); HD off: the same layout from the classic frame, pixelated (each pixel the frame\'s); every window\'s centre and every pixel of a window maps to a game pixel of its rect and back; no page error', async (env) => {
+  const errors = [];
+  const { page, glues } = await bootWide(env, { fresh: true });
+  page.on('pageerror', () => errors.push(1));
+  assert.ok(glues.length > 0 && glues.every((p) => p === '/pkg-wide/u6_web.js'), 'the Wide build\'s glue, and no other');
+  let s = await wideShown(page);
+  assert.ok(s.layout === 'wide' && s.wide && s.view === 'game', 'the Wide layout in game');
+  assert.deepEqual(s.frame, WIDE_GEOM.frame, 'the Wide frame');
+  assert.deepEqual(s.size, WIDE_CANVAS, 'the canvas 1920 x 1080');
+  assert.ok(s.hd && s.scale === s.layoutScale && [2, 4].includes(s.scale), 'HD at the layout\'s scale');
+  const box = await page.evaluate(() => {
+    const r = document.getElementById('screen').getBoundingClientRect();
+    return [r.width, r.height];
+  });
+  assert.ok(Math.abs(box[0] / box[1] - 16 / 9) < 0.01, 'a 16:9 box');
+  mapCovers(s, 'HD on');
+  windowsPlaced(s, 'HD on');
+  // Every pixel of a window's content maps to a game pixel of its rect and back to that pixel's
+  // place; a window's centre to its rect's centre.
+  const mapped = await page.evaluate(() => {
+    const L = globalThis.__u6Layout;
+    let bad = 0;
+    let n = 0;
+    const centres = {};
+    for (const { name, from: [fx, fy, fw, fh], to: [x, y, w, hh] } of L.windows) {
+      for (let py = y; py < y + hh; py += 1) {
+        for (let px = x; px < x + w; px += 1) {
+          const [gx, gy] = L.toGame(px + 0.5, py + 0.5);
+          n += 1;
+          if (gx < fx || gx >= fx + fw || gy < fy || gy >= fy + fh) bad += 1;
+          const [bx, by] = L.toCanvas(gx, gy);
+          if (Math.abs(bx - px - 0.5) > w / fw / 2 + 1e-9 || Math.abs(by - py - 0.5) > hh / fh / 2 + 1e-9) bad += 1;
+        }
+      }
+      centres[name] = L.toGame(x + w / 2, y + hh / 2);
+    }
+    return { bad, n, centres };
+  });
+  assert.ok(mapped.n > 0 && mapped.bad === 0, 'every window pixel maps to a pixel of its rect and back');
+  for (const [name, { from }] of Object.entries(WIDE_PARTS)) {
+    assert.deepEqual(mapped.centres[name], [from[0] + Math.floor(from[2] / 2), from[1] + Math.floor(from[3] / 2)], `${name}: its centre is its rect's centre`);
+  }
+  // What the canvas shows, the display frozen.
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  let shown = await wideCheck(page, true);
+  for (const [name, r] of Object.entries(shown.windows)) {
+    assert.ok(r.compared > 0 && r.differ === 0, `HD on: ${name} shows the frame's colours`);
+    assert.ok(r.ring === 1 && r.plain === 1 && r.ink > 0 && r.inkVsBar, `HD on: ${name} framed in one colour, titled on a strip of one colour`);
+  }
+  // One to one at S 4 only (the command bar's 640 x 68 is its rect at x4).
+  if (s.layoutScale === 4) assert.ok(shown.windows.commands.exact === 640 * 68 && shown.windows.commands.exactDiffer === 0, 'HD on: the command bar one to one with the x4 frame');
+  // At least 50 flat places on the map's grid (the map as the engine draws it now: textured
+  // tiles leave fewer than a black map does).
+  assert.ok(shown.map.compared > 50 && shown.map.differ === 0, 'HD on: the map, scaled to cover, the frame\'s colours');
+  // HD off: the same layout, from the classic frame, pixelated.
+  await page.click('#settings');
+  await page.click('#hd');
+  await h.runFrames(page, 2);
+  s = await wideShown(page);
+  assert.ok(s.layout === 'wide' && s.view === 'game' && !s.hd && s.size[0] === 1920 && s.size[1] === 1080, 'HD off: the Wide layout still');
+  mapCovers(s, 'HD off');
+  windowsPlaced(s, 'HD off');
+  shown = await wideCheck(page, false);
+  for (const [name, r] of Object.entries(shown.windows)) {
+    assert.ok(r.compared > 0 && r.differ === 0, `HD off: ${name} shows the classic frame's colours`);
+  }
+  assert.ok(shown.map.compared > 50 && shown.map.differ === 0, 'HD off: the map, the classic frame\'s colours');
+  // Pixelated: every canvas pixel of a window is the classic pixel it shows (those whose centre
+  // falls within 0.15 of a game pixel's edge left out: the nearest sample there is the scaler's
+  // rounding).
+  const exact = await page.evaluate(() => {
+    const c = document.getElementById('screen');
+    const L = globalThis.__u6Layout;
+    const g = globalThis.__shownGame;
+    const f = g.frame_rgba();
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let differ = 0;
+    let n = 0;
+    for (const { from, to: [x, y, w, hh] } of L.windows) {
+      for (let py = y; py < y + hh; py += 2) {
+        for (let px = x; px < x + w; px += 2) {
+          const [u, v] = [((px + 0.5 - x) * from[2]) / w, ((py + 0.5 - y) * from[3]) / hh];
+          if ([u, v].some((q) => q - Math.floor(q) < 0.15 || q - Math.floor(q) > 0.85)) continue;
+          const [gx, gy] = L.toGame(px + 0.5, py + 0.5);
+          const a = (py * c.width + px) * 4;
+          const b = (gy * g.width() + gx) * 4;
+          n += 1;
+          if (d[a] !== f[b] || d[a + 1] !== f[b + 1] || d[a + 2] !== f[b + 2]) differ += 1;
+        }
+      }
+    }
+    return { differ, n };
+  });
+  assert.ok(exact.n > 0 && exact.differ === 0, 'HD off: every window pixel the classic pixel it shows (pixelated)');
+  await page.click('#hd');
+  await h.runFrames(page, 2);
+  assert.ok((await wideShown(page)).hd, 'HD on again');
+  assert.equal(errors.length, 0, 'no page error');
+  console.log(`  receipt: the Wide build from a fresh page; canvas 1920 x 1080, map cover ${s.regions[0].to.join(',')}; windows (frame / content) ${s.windows.map((w) => `${w.name} ${w.outer.join(',')} / ${w.to.join(',')}`).join('; ')}; the frame's colours in every window and on the map with HD on and off${s.layoutScale === 4 ? ', the command bar one to one at x4' : ''}: pass`);
+}, { needs: h.haveHfes });
+
+test('Wide layout (spec 13 Design 5): the pointer through the windows and the map: a move on a window\'s frame or title strip with no button reaches the nearest pixel of its content; a click on a title strip is a gap (its press and release the rest of the screen); a click on the map 15 cells east of the leader reaches the game at its cell\'s centre (MAP_X + (HALF_W + 15) 16 + 8, the leader\'s row); a click at each window\'s centre reaches the game pixel at its rect\'s centre', async (env) => {
+  const { page } = await bootWide(env);
+  await recordPointer(page);
+  const s = await wideShown(page);
+  const at = Object.fromEntries(s.windows.map((w) => [w.name, w]));
+  const nearest = (w, [px, py]) => regionPixel(w, [px, py]);
+  // Moves with no button on a frame and on a title strip: the nearest pixel of that content.
+  const moves = [
+    [at.date, [at.date.outer[0] + 1, at.date.outer[1] + 1], 'the date line\'s frame, top left'],
+    [at.panel, [at.panel.bar[0] + 40, at.panel.bar[1] + 5], 'the side panel\'s title strip'],
+    [at.messages, [at.messages.outer[0] + at.messages.outer[2] - 2, at.messages.to[1] + 29], 'the message scroll\'s right border'],
+    [at.commands, [at.commands.to[0] + 102, at.commands.outer[1] + at.commands.outer[3] - 2], 'the command bar\'s bottom border'],
+  ];
+  for (const [w, p, label] of moves) {
+    const n = await pointerCount(page);
+    await page.mouse.move(...(await h.canvasPoint(page, p[0] + 0.5, p[1] + 0.5)));
+    await page.waitForFunction((k) => window.__pointer.length > k, n, { timeout: 5000 });
+    const sent = await pointerSince(page, n);
+    assert.deepEqual(sent.at(-1), [...nearest(w, [p[0] + 0.5, p[1] + 0.5]), 0], `a move on ${label}: the nearest pixel of its content`);
+  }
+  // A click on each title strip: a gap, the rest of the screen (the original's click there).
+  for (const w of s.windows) {
+    await h.waitPrompt(page);
+    const p = [w.bar[0] + Math.floor(w.bar[2] / 2), w.bar[1] + Math.floor(w.bar[3] / 2)];
+    const sent = await canvasClick(page, p);
+    const press = sent.find(([, , b]) => b === 1);
+    const release = sent.findLast(([, , b]) => b === 0);
+    assert.ok(press && release, `${w.name}'s title strip: the press and the release reached the game`);
+    assert.deepEqual([press.slice(0, 2), release.slice(0, 2)], [s.rest, s.rest], `${w.name}'s title strip: a gap, the rest of the screen`);
+  }
+  // The map: the cell 15 east of the leader, at its centre, through the test's own geometry
+  // (spec 13: the leader at view cell (HALF_W, HALF_H), view cell (0, 0) at frame (MAP_X,
+  // MAP_Y); the shown rect scaled by 1080 / 320 from canvas x -12).
+  await h.waitPrompt(page);
+  const g = WIDE_GEOM;
+  const want = [g.mapX + (g.halfW + 15) * 16 + 8, g.mapY + g.halfH * 16 + 8];
+  const k = 1080 / g.shown[3];
+  const cell = [-12 + (want[0] - g.shown[0] + 0.5) * k, (want[1] - g.shown[1] + 0.5) * k];
+  const viaPage = await page.evaluate(([x, y]) => globalThis.__u6Layout.toCanvas(x, y), want);
+  assert.ok(viaPage && Math.abs(viaPage[0] - cell[0]) < 1e-6 && Math.abs(viaPage[1] - cell[1]) < 1e-6, 'the page shows that cell where the geometry puts it, not under a window');
+  let n = await pointerCount(page);
+  await page.mouse.click(...(await h.canvasPoint(page, cell[0], cell[1])));
+  await h.waitTaken(page);
+  let press = (await pointerSince(page, n)).find(([, , b]) => b === 1);
+  assert.deepEqual(press, [...want, 1], 'the map click 15 cells east of the leader reaches its cell\'s centre');
+  // Each window's centre: the game pixel at its rect's centre, clicked at the middle of what
+  // shows it (the date line and the scroll first; the panel and the command bar may start
+  // something in the game, which this test does not wait for).
+  for (const name of ['date', 'messages', 'panel', 'commands']) {
+    const { from } = WIDE_PARTS[name];
+    const centre = [from[0] + Math.floor(from[2] / 2), from[1] + Math.floor(from[3] / 2)];
+    const w = at[name];
+    const [cx, cy] = await page.evaluate(([x, y]) => globalThis.__u6Layout.toCanvas(x, y), centre);
+    assert.ok(Math.abs(cx - (w.to[0] + w.to[2] / 2)) <= w.to[2] / from[2] && Math.abs(cy - (w.to[1] + w.to[3] / 2)) <= w.to[3] / from[3], `${name}: that pixel shows at the window's centre`);
+    n = await pointerCount(page);
+    await page.mouse.click(...(await h.screenPoint(page, ...centre)));
+    await h.waitTaken(page);
+    press = (await pointerSince(page, n)).find(([, , b]) => b === 1);
+    assert.deepEqual(press, [...centre, 1], `a click at the centre of ${name} reaches its rect's centre`);
+  }
+  console.log(`  receipt: ${moves.length} frame and title moves at the nearest content pixel; ${s.windows.length} title-strip clicks at the rest of the screen; the map click 15 cells east at (${want.join(', ')}); 4 window centres at their rects' centres: pass`);
+}, { needs: h.haveHfes });
+
+test('Wide layout (spec 13 Design 5): every other screen (the opening, the menu) shows the UI\'s 320 x 200 scaled to the canvas\'s height, 1728 x 1080 centred, the sides dark; a press lands at the pixel it shows, on a side at the nearest edge', async (env) => {
+  const { page } = await h.openWide(env, { gameFirst: false });
+  await h.load(page, env);
+  await h.dropFiles(page, [h.ZIP]);
+  await started(page);
+  await h.waitProgram(page, 'u');
+  await h.waitTicks(page, 60);
+  const s = await wideShown(page);
+  assert.ok(s.layout === 'wide' && s.view === 'whole', 'the opening: the UI\'s screen');
+  assert.deepEqual(s.size, WIDE_CANVAS, 'on the 1920 x 1080 canvas');
+  assert.deepEqual(s.whole, [96, 0, 1728, 1080], 'scaled to the canvas\'s height, centred');
+  const sides = await page.evaluate(([x, w]) => {
+    const c = document.getElementById('screen');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const first = `${d[0]},${d[1]},${d[2]}`;
+    let off = 0;
+    for (let y = 0; y < c.height; y += 3) {
+      for (const [a, b] of [[0, x], [x + w, c.width]]) {
+        for (let px = a; px < b; px += 3) {
+          const i = (y * c.width + px) * 4;
+          if (`${d[i]},${d[i + 1]},${d[i + 2]}` !== first) off += 1;
+        }
+      }
+    }
+    return { off, dark: d[0] + d[1] + d[2] < 3 * 48 };
+  }, [s.whole[0], s.whole[2]]);
+  assert.ok(sides.off === 0 && sides.dark, 'the sides dark');
+  await recordPointer(page);
+  for (const [gx, gy] of [[160, 100], [0, 0], [319, 199]]) {
+    const mark = await pointerCount(page);
+    await page.mouse.click(...(await h.screenPoint(page, gx, gy)));
+    await h.waitTaken(page);
+    assert.deepEqual((await pointerSince(page, mark)).find(([, , b]) => b === 1), [gx, gy, 1], `a press at (${gx}, ${gy}) lands there`);
+  }
+  const sent = await canvasClick(page, [20, 500]);
+  assert.deepEqual(sent.find(([, , b]) => b === 1).slice(0, 2), [0, Math.floor(((500.5 - 0) * 200) / 1080)], 'a press on the left side: the nearest edge pixel');
+  assert.equal((await h.state(page)).program, 'u', 'still in u');
+  console.log('  receipt: the opening shows the UI\'s screen at 96,0,1728,1080 with dark sides; 4 presses landed: pass');
+}, { needs: h.haveZip });
+
+test('Wide layout (spec 13 A5): fullscreen keeps 16:9 at any size, centred on black, the canvas still 1920 x 1080: at 1920 x 1080 the whole screen, sharp (one to one); at 2560 x 1440 the whole screen, smooth; at 1728 x 1117 1728 x 972 with bars, smooth; a key reaches the game in each', async (env) => {
+  const { page } = await bootWide(env);
+  const sizes = [[1920, 1080, 'sharp'], [2560, 1440, 'smooth'], [1728, 1117, 'smooth']];
+  const lines = [];
+  for (const [w, hh, want] of sizes) {
+    await page.setViewportSize({ width: w, height: hh });
+    await page.click('#fullscreen');
+    await waitFull(page, 'on');
+    await page.waitForFunction(([vw]) => Math.abs(document.getElementById('screen').getBoundingClientRect().width - Math.min(vw, (innerHeight * 16) / 9)) < 1, [w], { timeout: 10_000 });
+    await h.waitFrames(page, 2);
+    const s = await layoutShown(page);
+    const [bw, bh] = s.box;
+    assert.ok(Math.abs(bw / bh - 16 / 9) < 0.01, `${w}x${hh}: 16:9`);
+    assert.ok(bw <= w + 0.5 && bh <= hh + 0.5 && (Math.abs(bw - w) < 1 || Math.abs(bh - hh) < 1), `${w}x${hh}: as large as fits`);
+    assert.ok(Math.abs(s.at[0] - (w - bw) / 2) < 1 && Math.abs(s.at[1] - (hh - bh) / 2) < 1, `${w}x${hh}: centred`);
+    assert.deepEqual(s.size, WIDE_CANVAS, `${w}x${hh}: the canvas stays 1920 x 1080`);
+    const mode = SHARP.includes(s.rendering) ? 'sharp' : s.rendering === 'auto' ? 'smooth' : s.rendering;
+    assert.equal(mode, want, `${w}x${hh}: ${want}`);
+    const before = (await glue(page)).sent;
+    await h.press(page, 'Space', 2);
+    const g = await glue(page);
+    assert.ok(g.sent === before + 1 && g.lastSent === ' ', `${w}x${hh}: a key reaches the game`);
+    lines.push(`${w}x${hh}: box ${bw}x${bh}, ${mode}`);
+    await page.mouse.move(200, 200);
+    await page.mouse.move(220, 210);
+    await page.click('#fullscreen-exit');
+    await waitFull(page, 'off');
+    await h.waitPrompt(page);
+  }
+  console.log(`  receipt: ${lines.join('; ')}; a key reached the game in each: pass`);
+}, { needs: h.haveHfes });
+
+test('Wide layout (spec 13 Design 6): the compositor\'s time per frame at S 4 on a game frame (a whole composition of the 912 x 336 frame, the median of 60, the least of up to three runs of 60: the machine\'s load only adds) and the scale the Wide layout asks: while it asks 4 that median is within 8 ms (above, it is to ask 2); asking 2, the median is printed (receipt)', async (env) => {
+  // The page's own frames run between the runs (the display stays real: a virtual one would
+  // stop the clock the runs read).
+  const { page } = await bootWide(env);
+  const scale = (await wideShown(page)).layoutScale;
+  const medians = [];
+  for (let run = 0; run < 3; run += 1) {
+    medians.push(await page.evaluate(() => {
+      const g = globalThis.__shownGame;
+      const times = [];
+      for (let i = 0; i < 60; i += 1) {
+        g.set_hd(true, 2);
+        const t0 = performance.now();
+        g.set_hd(true, 4);
+        times.push(performance.now() - t0);
+      }
+      times.sort((a, b) => a - b);
+      return (times[29] + times[30]) / 2;
+    }));
+    if (Math.min(...medians) <= 8) break;
+  }
+  await page.evaluate((s) => globalThis.__shownGame.set_hd(true, s), scale);
+  await h.waitFrames(page, 2);
+  const median = Math.min(...medians);
+  assert.ok(median > 0, 'a time measured');
+  const shown = await wideShown(page);
+  assert.equal(shown.scale, scale, 'the game composes at the layout\'s scale');
+  assert.ok([2, 4].includes(scale), 'the Wide layout asks 2 or 4');
+  // One-sided (brief W5 item 5): S 4 holds while the median is within 8 ms; S 2, once chosen,
+  // needs no time (the receipt says the median at S 4).
+  if (scale === 4) assert.ok(median <= 8, 'S 4: the median within 8 ms (above it, the Wide layout is to ask 2: site/app.js WIDE_S)');
+  console.log(`  receipt: the compositor at S 4, a whole composition of the Wide frame on a game frame: median ${median.toFixed(2)} ms (runs: ${medians.map((m) => m.toFixed(2)).join(', ')}); the Wide layout asks S ${scale}`);
+}, { needs: h.haveHfes });
+
+test('Wide layout (spec 13 Decision 2): the chooser\'s and Settings\' "Screen layout" offers Wide (first), HD 16:9 and Original 16:10, in the page\'s language, Wide checked in the Wide build; after a Save in the Wide build, HD 16:9 keeps hd and loads the page again with the Original build (site/pkg) and spec 10\'s layout, the kept files and the stored save as they were (nothing new saved) and the save resumed; Wide again loads the Wide build, the save resumed there too; with storage that throws, Wide from the Original build keeps the page as it is (the radio back on HD 16:9) and says why', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const { page, glues } = await bootWide(env);
+  const choice = () => page.evaluate(() => ({
+    labels: [...document.querySelectorAll('#layout-choice label')].map((l) => l.textContent.replace(/\s+/g, ' ').trim()),
+    values: [...document.querySelectorAll('input[name="layout"]')].map((i) => [i.value, i.checked]),
+  }));
+  await page.click('#settings');
+  let c = await choice();
+  assert.deepEqual(c.labels, [TEXT.en.layoutWide, 'HD 16:9', TEXT.en.layoutOriginal], 'its words in English, Wide first');
+  assert.deepEqual(c.values, [['wide', true], ['hd', false], ['original', false]], 'Wide checked');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  c = await choice();
+  assert.deepEqual(c.labels, [TEXT.ko.layoutWide, 'HD 16:9', TEXT.ko.layoutOriginal], 'its words in Korean');
+  assert.equal(TEXT.ko.layoutWide, '와이드 (넓은 지도)', 'the Korean name of Wide');
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await page.focus('#screen');
+  const { moved } = await walkAndSave(page);
+  await page.click('#settings');
+  const keptBefore = await h.keptPaths(page);
+  const savedBefore = await h.savedFiles(page);
+  const n = glues.length;
+  // The choice loads the page again at once: a click that does not wait on the old document.
+  await Promise.all([page.waitForEvent('load'), page.click('input[name="layout"][value="hd"]', { noWaitAfter: true })]);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  let s = await layoutShown(page);
+  assert.ok(glues.length > n && glues.slice(n).every((p) => p === '/pkg/u6_web.js'), 'the page loaded again with the Original build\'s glue');
+  assert.ok(s.layout === 'hd' && s.view === 'game' && s.stored === 'hd' && s.size[0] === 1280 && s.size[1] === 720 && s.scale === 4, 'HD 16:9: spec 10\'s layout, kept');
+  assert.equal(await page.evaluate(() => globalThis.__u6Layout.wide), false, 'not the Wide layout');
+  assert.deepEqual(await h.keptPaths(page), keptBefore, 'the kept files as they were');
+  h.assertSame(await h.savedFiles(page), savedBefore, 'the stored save as it was: nothing new saved');
+  assert.ok(savedBefore.length > 1, 'a save was stored');
+  assert.equal((await atPrompt(page)).leader, moved, 'the save resumes in the Original build');
+  // Original 16:10 within the Original build: at once, no new load.
+  const m = glues.length;
+  await page.click('#settings');
+  await page.check('input[name="layout"][value="original"]');
+  s = await layoutShown(page);
+  assert.ok(s.layout === 'original' && s.view === 'frame' && s.stored === 'original' && glues.length === m, 'Original 16:10 at once, in the same build');
+  // Wide again: the Wide build.
+  await Promise.all([page.waitForEvent('load'), page.click('input[name="layout"][value="wide"]', { noWaitAfter: true })]);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  const w = await wideShown(page);
+  assert.ok(w.layout === 'wide' && w.wide && w.size[0] === 1920 && glues.slice(m).every((p) => p === '/pkg-wide/u6_web.js'), 'Wide: the Wide build again');
+  assert.equal((await atPrompt(page)).leader, moved, 'the save resumes in the Wide build');
+  h.assertSame(await h.savedFiles(page), savedBefore, 'the stored save still as it was');
+  await page.context().close();
+  // Storage that throws: the Original build (HD 16:9); Wide cannot be kept across the load it
+  // needs, so nothing happens but a line.
+  const { context, page: p2 } = await h.openPage(env, { layout: null });
+  await context.addInitScript(layoutStorageThrows);
+  await h.load(p2, env);
+  await p2.setInputFiles('#picker', h.HFES);
+  await started(p2, FILES);
+  await h.waitPrompt(p2);
+  let reloads = 0;
+  p2.on('load', () => { reloads += 1; });
+  await p2.click('#settings');
+  await p2.click('input[name="layout"][value="wide"]');
+  await h.waitFrames(p2, 10);
+  const after = await p2.evaluate(() => ({
+    layout: document.body.dataset.layout,
+    checked: document.querySelector('input[name="layout"]:checked')?.value,
+    status: document.getElementById('status').textContent,
+    lang: document.documentElement.lang,
+  }));
+  assert.ok(reloads === 0 && after.layout === 'hd' && after.checked === 'hd', 'storage that throws: no load, HD 16:9 still, the radio back');
+  // The page's language: 한글 here (storage that throws keeps no chooser's choice: a first run).
+  assert.equal(after.status, TEXT[after.lang].layoutNotKept, 'the line says why, in the page\'s language');
+  console.log('  receipt: Wide, HD 16:9, Original 16:10 in English and Korean; a Save in Wide, then Wide -> HD 16:9 loaded the Original build with spec 10\'s layout, kept files and save unchanged, the save resumed; Original 16:10 at once; HD -> Wide loaded the Wide build, the save resumed; storage that throws: no load, a line: pass');
+}, { needs: h.haveHfes });
+
+test('Wide layout (spec 13 Design 5, drag): the date line dragged by its title strip follows the pointer (in front of the others) and stays whole on the canvas; its press and release reach the game as a gap\'s; the pointer then reaches its content where it is; its place is kept (u6.layout.windows) and comes back after a reload; the windows not dragged stay at their corners', async (env) => {
+  const { page } = await bootWide(env);
+  await recordPointer(page);
+  let s = await wideShown(page);
+  const date = s.windows.find((w) => w.name === 'date');
+  // From the middle of its title strip, 600 canvas px left and 300 down, in steps (the box is
+  // 1280 CSS px for 1920 canvas px: 400 and 200 CSS px).
+  const box = await page.locator('#screen').boundingBox();
+  const k = box.width / WIDE_CANVAS[0];
+  const start = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5, date.bar[1] + date.bar[3] / 2 + 0.5);
+  const n = await pointerCount(page);
+  await page.mouse.move(...start);
+  await page.mouse.down();
+  for (let i = 1; i <= 4; i += 1) await page.mouse.move(start[0] - 150 * k * i, start[1] + 75 * k * i);
+  await page.mouse.up();
+  await h.waitTaken(page);
+  const sent = await pointerSince(page, n);
+  const press = sent.find(([, , b]) => b === 1);
+  const release = sent.findLast(([, , b]) => b === 0);
+  assert.deepEqual([press?.slice(0, 2), release?.slice(0, 2)], [s.rest, s.rest], 'the press and the release: a gap\'s');
+  s = await wideShown(page);
+  const moved = s.windows.at(-1);
+  assert.equal(moved.name, 'date', 'the dragged window in front');
+  assert.deepEqual(moved.outer.slice(0, 2), [date.outer[0] - 600, date.outer[1] + 300], 'moved with the pointer');
+  assert.deepEqual([moved.to[0] - moved.outer[0], moved.to[1] - moved.outer[1]], [date.to[0] - date.outer[0], date.to[1] - date.outer[1]], 'its content with it');
+  const kept = await page.evaluate(() => JSON.parse(localStorage.getItem('u6.layout.windows')));
+  assert.deepEqual(kept.date, moved.outer.slice(0, 2), 'its place kept');
+  // The canvas shows the frame's colours there, the map where it was.
+  await h.waitFrames(page, 2);
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const shown = await wideCheck(page, true);
+  assert.ok(shown.windows.date.compared > 0 && shown.windows.date.differ === 0, 'the moved date line shows the frame\'s colours');
+  assert.ok(shown.map.compared > 50 && shown.map.differ === 0, 'the map where it was');
+  // A press in its content where it is now: the pixel it shows.
+  const centre = [92, 172];
+  const m = await pointerCount(page);
+  await page.mouse.click(...(await h.screenPoint(page, ...centre)));
+  await h.runFrames(page, 4);
+  await page.waitForFunction((c) => window.__pointer.length > c, m, { timeout: 5000 });
+  assert.deepEqual((await pointerSince(page, m)).find(([, , b]) => b === 1), [...centre, 1], 'a press in the moved date line reaches its pixel');
+  // Past the canvas's edge: it stays whole on it; the pointer leaves its title strip there (over
+  // the map, then off the canvas), and every event of the drag is still the rest of the screen,
+  // never a held map pixel.
+  const right = await h.canvasPoint(page, moved.bar[0] + 10.5, moved.bar[1] + 10.5);
+  const e0 = await pointerCount(page);
+  await page.mouse.move(...right);
+  await page.mouse.down();
+  await page.mouse.move(right[0] + 300 * k, right[1] - 300 * k);
+  await page.mouse.move(right[0] + 3000, right[1] - 3000);
+  await page.mouse.up();
+  await h.runFrames(page, 4);
+  await page.waitForFunction((c) => window.__pointer.some(([, , b], i) => i > c && b === 0), e0, { timeout: 5000 });
+  const drag = (await pointerSince(page, e0)).slice(1);
+  assert.ok(drag.length >= 3 && drag.every(([x, y]) => x === s.rest[0] && y === s.rest[1]), 'past the edge: every event of the drag the rest of the screen');
+  assert.ok(drag.some(([, , b]) => b === 1) && drag.at(-1)[2] === 0, 'past the edge: held, then released');
+  s = await wideShown(page);
+  const edge = s.windows.find((w) => w.name === 'date');
+  assert.deepEqual(edge.outer.slice(0, 2), [WIDE_CANVAS[0] - edge.outer[2], 0], 'dragged past the corner: whole on the canvas, at its edge');
+  // After a reload: where it was left; the others at their corners.
+  await page.reload();
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  s = await wideShown(page);
+  assert.deepEqual(s.windows.find((w) => w.name === 'date').outer.slice(0, 2), edge.outer.slice(0, 2), 'its place after a reload');
+  // The others at their corners (checked with the date line where it was first).
+  const corners = s.windows.filter((w) => w.name !== 'date');
+  windowsPlaced({ ...s, windows: [date, ...corners] }, 'the others');
+  console.log(`  receipt: the date line dragged by its title strip to ${moved.outer.slice(0, 2).join(',')}, then past the corner to ${edge.outer.slice(0, 2).join(',')}, kept across a reload; its press and release a gap's; a press in it there at its pixel: pass`);
+}, { needs: h.haveHfes });
 
 const filter = process.argv[2];
 const env = await h.setup();
