@@ -6,6 +6,8 @@ tags: [ultima6, hd, ui, layout]
 
 # 10 — HD layout: the game's screen recomposed for 1280 × 720
 
+Scope since 2026-10-23: this is the layout of Original mode. Wide mode (a 37 × 21 map filling the screen, floating windows) is spec 13, after the owner rejected the 11 × 11 view kept here (`hd-layout-font-register/ssot.md` §Round 2).
+
 Status: shipped (2026-10-23, in production at https://ultima6.2lab.ai from main 904ffd2; deploy 2 of `hd-layout-font-register/loop.md`). As built: the column's scale is 3.5, the only scale of 3.5..3.75 that puts every rect on whole pixels, with gaps of 30 and 31 px; a move with a button held in a gap is sent like a press (the rest of the screen). Follow-ups shipped as deploys 6 (L2, the game's paper round the regions, Design 2, main 4936c59) and 8 (P1, the HD paper kept in place under the message scroll and the UI clears, spec 07, main 87c4814) of the same loop. User item 1 of `hd-layout-font-register/ssot.md`, verbatim: "hd 해상도에 맞게 화면 ui 재구성해주고 hd pack을 최대한 사용할 수 있도록 개선 (전체 화면 모드 지원; 최대 해상도는 hd고 그거보다 화면이 크면 알아서 스트레칭)". It builds on 07's compositor and pack and does not change the engine or the parity frame.
 
 ## Measured facts (main 6e4e337)

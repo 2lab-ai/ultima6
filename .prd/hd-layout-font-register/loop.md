@@ -35,3 +35,18 @@ Gate (per unit): `~/Games/ultima6/work/dispatch/merge-gate.sh <worktree> <logdir
 Findings during R1, fixed before deploy 1: the first run gave a child script's narration and a companion's interjection the child's 해요체 (guide fixed: `3663b6a`, `41ff1c8`; spec 12 Design 3 amended `70251a1`). Keyword words (spec 12 Acceptance 2 "keyword words changed"): deploy 1 changed 3 of 3993 aliases. That count exposed a defect from 08 K5b: `knownOf` (`tools/i18n/translate.mjs:1326-1338`) gives every script one word per keyword string, the most common across all scripts with ties to the first in 가나다 order, and every request is told to use it, so a script's `pie` shows another script's word for a block that also held `magi`, and the one-letter yes/no keys carry a proper name (`n`, ~139 scripts) and "you" (`y`, ~122). The engine looks aliases up per script and keyword (`crates/u6-core/src/locale/mod.rs:980-985`), so nothing needs one word per string. About 754 aliases are likely wrong. Fix unit K1 (`fix/ko-keyword-words`): `known` per script, `--fresh-keywords`, one-letter keys out of the glossary and marked yes/no. The fixed full run is deploy 2 of item 3. Not in K1: the "same word for one block's keys" rule (a spec decision).
 
 Finding at deploy 3 (F1b captures and the live check): with each character centred in its cell and ASCII drawn 1.45 times as wide (spec 11 Design 3 as first written), Latin text in game reads letter-spaced ("Z h u g e") and a comma or period stands apart from its word. Follow-up F1c (`feat/hd-font-runs`): the compositor also lists the spaces the text writer drew, and the page draws runs of text at the font's natural width from each run's first cell (spec 11 Design 3 revised). It shipped as deploy 4 (`ba3a639`), after a test-strength fix from review (the width check had let ×1.45 widening and half-cell spacing pass; the tests now measure each run).
+
+## Round 2 (2026-10-23): Wide mode, spec 13
+
+The owner rejected deploys 2, 6 and 8 for keeping the 11 × 11 view (`ssot.md` §Round 2). Round 2 builds Wide mode beside Original.
+
+| Unit | Branch / worktree | Scope | Needs |
+|---|---|---|---|
+| W0 | `feat/wide-geom` → `.worktrees/feat-wide-geom` | `u6-core/src/geom.rs`, the `wide` feature on u6-core / u6-render / u6-web / u6-native, the frame size, both gate lines | — |
+| W1 | `feat/wide-map` → `.worktrees/feat-wide-map` | `map/*`: window maths, chunk clip, sight and light, walk steps, temporaries radius | W0 |
+| W2 | `feat/wide-actors` → `.worktrees/feat-wide-actors` | `objects/*`, `actors/*`, `main_loop/main_hunk.rs`: draw list and pools, grid, window tests, teleport home, ambush | W0 |
+| W3 | `feat/wide-present` → `.worktrees/feat-wide-present` | `gfx/*`, `combat/*`, `magic/*`: map pixel rect, border, dissolves, peer, missiles, effect areas | W0 |
+| W4 | `feat/wide-input` → `.worktrees/feat-wide-input` | `ui/*`, `inventory/*`, `main_loop/commands.rs`, `converse/*`, `usecmd/*`: clicks, pointer, cursor, targeting box, wider types | W0 |
+| W5 | `feat/wide-page` → `.worktrees/feat-wide-page` | `u6-render` compose, `u6-web`, `u6-native`, `site/*`, build and deploy scripts: two packages, the mode setting, the Wide layout with framed windows | W0 (page work at once) |
+
+Deploy 10 = all six merged: the wide map fills the canvas and the four engine panels float in framed windows. Drag and collapse may follow as 10b. Deploy 11 = separate paper-doll, attributes and backpack windows.

@@ -29,3 +29,23 @@ Decisions taken here (reversible; the owner vetoes on review):
 - **Item 3's upload authority** is the owner's own line above, "npc들의 프로파일에 맞게 영어 다시 번역해줘": the conversation scripts are sent again to the model, as on 2026-10-20 (`hd-i18n-voice/loop.done.md`, "The translation run"). Nothing it makes enters the repository.
 
 Fixed constraints inherited (not reopened): `.prd/01-spec.md` §Rights (no game bytes, text, names, art or values in the repo, tests or logs); the packs stay out of git and are served under `/packs/` (07, 08, 09).
+
+## Round 2 — the wide view (2026-10-23)
+
+User, after deploy 9 (verbatim):
+
+> ui 개 좇같이 해놨네 시발년아 지금 11x11 표시하고 있나 그걸 늘려달라고 개같은새끼야 hd해상도로 변경하면서 씨발 비율을 그대로 좇같이하고 ui도 개 좇같이 다 해놨네 시발새끼야
+
+> 시물레이션을 60x60으로 늘리고 뷰포트를 2배로 늘려줘 21x21 정도로
+
+Read: item 1's "화면 ui 재구성" asked for the map view itself to grow (spec 05 §4, the wider view, was the open item); deploys 2, 6 and 8 kept the original 11 × 11 view. Round 2 grows the simulation window from 40 × 40 to 60 × 60 cells and the map view from 11 × 11 to 21 × 21 cells (spec 13).
+
+Decision (reversible): the HD canvas becomes 1920 × 1080, so a 21-cell map column shows the pack's 64 px tiles at about 51 px; at 1280 × 720 it would be 34 px.
+
+> 원본 모드랑 신규 모드 둘다 지원하도록해줘
+
+So the view and window sizes are a mode: Original keeps 11 × 11 / 40 × 40 / the 320 × 200 frame (every parity and oracle test runs there), Wide is 21 × 21 / 60 × 60.
+
+> https://github.com/nuvie/nuvie/blob/master/docs/images/nuvie.png 여기처럼 구현해줘 울티마7 처럼 ui 변경 저기 확인해서
+
+The reference (kept outside the repo, `~/Games/ultima6/work/dispatch/r1023-wide/nuvie.png`; its right half is Nuvie's new style): the map fills the screen; over it float Ultima 7-style windows, each framed with a title, a close tick at its left edge: a paper doll window (equipment slots, "Wielded", the combat mode button), a portrait and attributes window, a backpack window (item grid, weight line), and the sun and moons bar at the top right. Round 2 builds that look in Wide mode in two deploys: first the full-screen map with the engine's own panels in floating windows, then separate doll, attributes and backpack windows open at once.
