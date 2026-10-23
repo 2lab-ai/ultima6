@@ -6,11 +6,17 @@ tags: [ultima6, hd, ui, layout, wide]
 
 # 14 — Actor windows: the side panel's views open at once, U7-style
 
-Status: rev 3, 2026-10-24. Trinity review (grok-4.7, gpt-6-astra, fable) reached a unanimous verdict in round 2: C, rev 2. The briefs and positions are kept outside the repo, under `work/dispatch/r1023-wide/trinity-spec14-*`.
+Status: rev 4, 2026-10-24. Trinity review (grok-4.7, gpt-6-astra, fable) reached a unanimous verdict in round 2: C, rev 2. The briefs and positions are kept outside the repo, under `work/dispatch/r1023-wide/trinity-spec14-*`.
 
 Rev 3 (during G1 and G2, from G2's report) changes two things:
 - **Slot rows.** The slots move onto the HD font's 8-pixel grid, so the frame is 912 × 408. `hd.rs:613-616` `glyph_cell` draws a cell in the HD font only at `(col*8, row*8)`, and the Status window's text is on that grid (`ui/text.rs:99`, text rows 1..12). Rev 2's rows 202 and 338 moved panel text 196 and 332 rows, which is off the grid, so the actor windows would have shown the pixel font.
 - **Conversations show 패널.** A conversation draws its portrait in the panel area with the mode at 0x9e only while drawing, then puts the mode back, usually to 0x91 (`inventory/portrait.rs:40-158`). Under rev 2's mode rule the portrait was invisible in Wide.
+
+Rev 4 (from the G1 and G2 reviews, built that way) records four points:
+- **Design 3's member check.** It compares the shown member's base with the last draw's base, not flags at five codes. It keeps the bag only while the bag's chain reaches that base. Restore clears the record.
+- **Design 5 step 3.** The inventory slot uses the inventory view's saved cells instead of `recount`.
+- **Design 4.** It also mirrors in-place cursor draws.
+- **Design 7's titles.** They carry the member the slots were last drawn for.
 
 This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's words are in `hd-layout-font-register/ssot.md` §Round 2. The reference image is nuvie.png; its right half shows one member's paper-doll window, portrait-and-attributes window and backpack window open at once over the map.
 
@@ -75,18 +81,19 @@ This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's
    - The extra draws leave every other state as a current-mode-only draw would leave it. The exception is the inventory context in Design 3.
    - A mode other than the three (spellbook, conversation, 0x9e) is drawn as today. The slots then keep their last views (see Design 6).
 3. **The inventory context is kept.** In Wide, `inventory()` keeps `inventory_first` and `container`.
-   - It resets the page and re-derives the container only when the shown member changes: 0x90, 0x92 with a selection, 0x99, 0x9a, 0x91.
+   - It resets the page and re-derives the container only when the shown member's base (the member, or `open_container`) differs from the last draw's. This covers 0x90, 0x92 with a selection, 0x99, 0x9a and 0x91, and also the solo override, Drop's or Tab's leader, a conversation and a restore. A code that names the member already shown keeps the page (rev 4).
+   - The container is kept only while its chain of parents reaches that base, as `inventory::weight::holder` walks it. A chain that ends on the map, at another actor or at the walk's limit starts the page and container again. So does a missing last draw. Restore clears the record (rev 4).
    - It also resets on 0x9f and 0xa0, as today.
    - So the slot's pixels and the cells a click reads are always the same page and container.
-4. **Every change reaches the slots.** In Wide, one place sets `panel.dirty = true`: after each panel code is handled (`ui/wait.rs` `read_key`) and after each command completes. This covers the in-place draws and the mode-gated refreshes listed above. Under Design 3, the redraw keeps the page and the open bag.
+4. **Every change reaches the slots.** In Wide, one place sets `panel.dirty = true`: after each panel code is handled (`ui/wait.rs` `read_key`) and after each command completes. The draws that need no code, the keyboard panel cursor and the combat-mode line, copy the current view into its slot where they draw (rev 4). This covers the in-place draws and the mode-gated refreshes listed above. Under Design 3, the redraw keeps the page and the open bag.
 5. **A click in a slot goes through `panel_click`.** Wide adds three click regions, one per slot, after the side panel's region. A press in a slot:
    1. moves the pointer to the same place in the panel area;
    2. sets `panel.mode` to the slot's view and the inventory context of Design 3;
-   3. calls `recount` for the inventory slot;
+   3. for the inventory slot, puts in the inventory view's cells as its last draw left them (rev 4: `recount` alone zeroes the list cells, `inventory/panel.rs:74`);
    4. calls `panel_click`, so the press check, the right-click repeat and the target-pending confirmation all run;
    5. keeps that mode until `read_key` has handled the code it returns;
    6. puts the pointer back where the press was;
-   7. sets `dirty`.
+   7. sets `dirty`. A press that returns no code redraws at once (the combat-mode line draws in place).
 
    The codes switch the panel as today.
 6. **The active view, and other modes.**
@@ -103,7 +110,7 @@ This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's
    | 배낭 | the inventory slot's list part: container picture, 4 × 3 list, arrows, Carried, combat-mode icon | slot (72..143, 10..97) = frame (80, 320, 72, 88) |
    | 패널 | the panel area | only while Design 6 says |
 
-   - The name row (rows 0..9) is left out; the 능력치, 인형 and 배낭 titles carry the shown member's name.
+   - The name row (rows 0..9) is left out. The 능력치, 인형 and 배낭 titles carry the name of the member the slots were last drawn for. In another mode or a conversation the engine's panel member is the other actor, so the page keeps the name of its last actor-view paint (rev 4).
    - 날짜, 메시지 and 명령 stay as in spec 13.
    - Default places do not overlap on 1920 × 1080: 파티 under 날짜 at the top right, 능력치 to its left, 인형 and 배낭 side by side under 능력치.
    - The engine adds two reads for the page: `panel_view()`, which returns [mode, member, actor, conversation active], and `panel_name()`, the shown member's name.
@@ -116,6 +123,8 @@ This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's
   - a redraw's state equals a current-mode-only redraw's, field by field, except Design 3's context;
   - scroll past 12 items, then any dirty redraw: the slot shows page N, and `inventory_first == N`;
   - open a bag in the 배낭 slot, Use an item in it: the bag stays open;
+  - Use and Drop through the command loop give the same result from the slot as from the panel;
+  - a bag taken by another actor, a bag left on the map, and a Restore each start the page and container again;
   - ready or unready by key while the roster is current: the inventory slot shows it in the same turn;
   - a press in each slot selects the same object, and gives the same ready/unready/use/drop result, as the same press in the panel in that mode;
   - the pointer is back after a slot press;
