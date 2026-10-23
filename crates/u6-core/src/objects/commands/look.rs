@@ -552,23 +552,27 @@ mod tests {
     use crate::ui::pointer::cell_pixel;
     use u6_formats::look::{LookEntry, LookTable};
 
-    /// Tiles of the test map: the floor everywhere, one marked tile.
+    /// Tiles of the test map: the floor everywhere, the marked tiles.
     const FLOOR: u8 = 1;
     const MARKED: u8 = 2;
+    /// A target no Look sets: whether the look took a map location.
+    const UNSET: (i16, i16) = (-7, -7);
 
-    /// The objects' test world with the test text layer, the map window all floor but the
-    /// marked tile `east` cells east of the view centre, and look names for both tiles.
-    fn marked_world(east: u16) -> State {
+    /// The objects' test world with the test text layer, the map window from the view's first
+    /// cell all floor but the tiles `marks` cells (east, south) of the view centre, and look
+    /// names for both tiles.
+    fn marked_world(marks: &[(i16, i16)]) -> State {
         let mut s = crate::objects::tests::world();
         s.ui = crate::main_loop::test_support::test_ui();
         let c = s.map.centre;
-        // The window from four cells before the centre on each axis: the marked cell lies in it
-        // for any `east` up to the window's side less five.
-        let lead = 4;
-        s.map.window_origin = [c.x - lead, c.y - lead];
+        let (hw, hh) = (HALF_W as u16, HALF_H as u16);
+        s.map.window_origin = [c.x - hw, c.y - hh];
         s.map.window_tiles = vec![FLOOR; crate::map::WINDOW_CELLS];
-        let at = crate::map::cell(usize::from(lead + east), usize::from(lead));
-        s.map.window_tiles[at] = MARKED;
+        for &(dx, dy) in marks {
+            let (x, y) = (HALF_W as i16 + dx, HALF_H as i16 + dy);
+            let at = crate::map::cell(x as usize, y as usize);
+            s.map.window_tiles[at] = MARKED;
+        }
         let entry = |tile: u8, text: &str| LookEntry {
             tile: u16::from(tile),
             text: text.into(),
@@ -577,22 +581,17 @@ mod tests {
             entries: vec![entry(FLOOR, "floorname"), entry(MARKED, "markedname")],
             trailer: Vec::new(),
         };
+        s.ui.input.target = UNSET;
         s
     }
 
-    /// Look at the map tile under the pointer at view cell `cell` (4 pixels into it: inside the
-    /// shown half of an edge cell), the leader on the view centre; the line it printed and the
-    /// map location it targeted.
-    fn look_at(s: State, cell: (i16, i16)) -> (String, (i16, i16)) {
-        let mut s = s;
-        let (x, y) = cell_pixel(cell.0, cell.1);
-        s.ui.input.pointer = (x + 4, y + 4);
-        let c = s.map.centre;
-        let mut e =
-            crate::Engine::with_game(s, crate::Files::default(), move |st, io| async move {
-                look_at_tile(&st, &io, c.x, c.y).await;
-                crate::ui::printf(&st, &io, b"\n", &[]).await;
-            });
+    /// Runs `game` on `s` until it ends; the last line of the scroll and the state after it.
+    fn run<G, F>(s: State, game: G) -> (String, State)
+    where
+        G: FnOnce(std::rc::Rc<RefCell<State>>, std::rc::Rc<Io>) -> F,
+        F: std::future::Future<Output = ()> + 'static,
+    {
+        let mut e = crate::Engine::with_game(s, crate::Files::default(), game);
         for _ in 0..8 {
             if e.finished() {
                 break;
@@ -600,9 +599,59 @@ mod tests {
             e.tick(&[], 16);
         }
         assert!(e.finished(), "the look ended");
-        let s = e.state();
+        let s = e.state().clone();
         let line = s.ui.messages.last().cloned().unwrap_or_default();
+        (line, s)
+    }
+
+    /// Look at the map tile under frame pixel (x, y), the leader on the view centre: the line
+    /// it printed and the map location it targeted ([`UNSET`] when none).
+    fn look_at_pixel(s: State, (x, y): (i16, i16)) -> (String, (i16, i16)) {
+        let mut s = s;
+        s.ui.input.pointer = (x, y);
+        let c = s.map.centre;
+        let (line, s) = run(s, move |st, io| async move {
+            look_at_tile(&st, &io, c.x, c.y).await;
+            crate::ui::printf(&st, &io, b"\n", &[]).await;
+        });
         (line, s.ui.input.target)
+    }
+
+    /// [`look_at_pixel`] 4 pixels into view cell `cell` (inside the shown half of an edge cell).
+    fn look_at(s: State, cell: (i16, i16)) -> (String, (i16, i16)) {
+        let (x, y) = cell_pixel(cell.0, cell.1);
+        look_at_pixel(s, (x + 4, y + 4))
+    }
+
+    /// The line names the marked tile (`Some(true)`), the floor (`Some(false)`) or no tile.
+    fn named(line: &str) -> Option<bool> {
+        match (line.contains("markedname"), line.contains("floorname")) {
+            (true, false) => Some(true),
+            (false, true) => Some(false),
+            _ => None,
+        }
+    }
+
+    /// A frame pixel and the cell (east, south of the leader's) Look names there, `None` for no
+    /// cell: off the map.
+    type Pixel = ((i16, i16), Option<(i16, i16)>);
+
+    /// Looks at each pixel of `rows` with its cell marked: the marked tile and its map location
+    /// named, or (off the map) no tile and no location.
+    fn check_pixels(rows: &[Pixel]) {
+        for &((x, y), cell) in rows {
+            let s = marked_world(&[cell.unwrap_or((0, 0))]);
+            let c = s.map.centre;
+            let (line, target) = look_at_pixel(s, (x, y));
+            let label = format!("({x}, {y})");
+            match cell {
+                Some((dx, dy)) => {
+                    let at = (c.x as i16 + dx, c.y as i16 + dy);
+                    assert_eq!((named(&line), target), (Some(true), at), "{label}");
+                }
+                None => assert_eq!((named(&line), target), (None, UNSET), "{label}"),
+            }
+        }
     }
 
     /// Spec 13 Decision 5: Look reaches the whole view. In Wide the cell 15 columns east of the
@@ -616,7 +665,7 @@ mod tests {
             far.push(15);
         }
         for dx in far {
-            let s = marked_world(dx as u16);
+            let s = marked_world(&[(dx, 0)]);
             let c = s.map.centre;
             let (line, target) = look_at(s, (hw + dx, hh));
             assert_eq!(
@@ -624,17 +673,111 @@ mod tests {
                 (c.x as i16 + dx, c.y as i16),
                 "{dx} east: the map location"
             );
-            assert!(
-                line.contains("markedname"),
-                "{dx} east: the marked tile named"
-            );
+            assert_eq!(named(&line), Some(true), "{dx} east: the marked tile");
             // One cell short of it: the floor.
-            let s = marked_world(dx as u16);
+            let s = marked_world(&[(dx, 0)]);
             let (line, _) = look_at(s, (hw + dx - 1, hh));
-            assert!(
-                line.contains("floorname"),
-                "{dx} east, one short: the floor"
-            );
+            assert_eq!(named(&line), Some(false), "{dx} east, one short: the floor");
+        }
+    }
+
+    /// Original: the map is pixels 0..0xa8 on each axis, as the original tests `px < 0xa8 &&
+    /// py < 0xa8`: 0xa7 names the cell 5 east (or south) of the leader's, 0xa8 names none.
+    #[cfg(not(feature = "wide"))]
+    #[test]
+    fn original_look_takes_0xa7_and_not_0xa8() {
+        let rows: [Pixel; 4] = [
+            ((0xa7, 0x58), Some((5, 0))),
+            ((0xa8, 0x58), None),
+            ((0x58, 0xa7), Some((0, 5))),
+            ((0x58, 0xa8), None),
+        ];
+        check_pixels(&rows);
+    }
+
+    /// Wide: the shown map's corners (`MAP_X` + 8, `MAP_Y` + 8) and (`SHOWN.x1`, `SHOWN.y1`)
+    /// name the view's first and last cells; one pixel past its right or bottom edge names none.
+    #[cfg(feature = "wide")]
+    #[test]
+    fn wide_look_takes_the_shown_maps_corners_and_not_past_them() {
+        use crate::geom::{MAP_X, MAP_Y, SHOWN};
+        let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+        let (mx, my) = (MAP_X as i16, MAP_Y as i16);
+        let (x1, y1) = (SHOWN.2 as i16, SHOWN.3 as i16);
+        let rows: [Pixel; 4] = [
+            ((mx + 8, my + 8), Some((-hw, -hh))),
+            ((x1, y1), Some((hw, hh))),
+            ((x1 + 1, my + 8 * 16), None),
+            ((mx + 8 * 16, y1 + 1), None),
+        ];
+        check_pixels(&rows);
+    }
+
+    /// Three rows north of the leader's pixel and three rows south are different cells: the
+    /// marked tile 3 north is named from the north, the floor 3 south from the south (rows
+    /// counted from `MAP_Y` and `HALF_H`, not the columns' `HALF_W`). The leader's pixel is
+    /// written out: (0x58, 0x58) in Original, (616, 168) in Wide (spec 13 Geometry: the map
+    /// at (320, 0), the leader's cell (18, 10)).
+    #[test]
+    fn look_tells_three_rows_north_from_three_rows_south() {
+        let (lx, ly): (i16, i16) = if cfg!(feature = "wide") {
+            (616, 168)
+        } else {
+            (0x58, 0x58)
+        };
+        for (dy, marked) in [(-3, true), (3, false)] {
+            let s = marked_world(&[(0, -3)]);
+            let c = s.map.centre;
+            let (line, target) = look_at_pixel(s, (lx, ly + dy * 16));
+            let at = (c.x as i16, c.y as i16 + dy);
+            assert_eq!((named(&line), target), (Some(marked), at), "{dy} rows");
+        }
+    }
+
+    /// Spec 13 Decisions 4 and 5 for the mouse: with Look waiting for its target, a press on the
+    /// cell 8 columns east of the leader's (in the Wide view, outside the original's window) is
+    /// taken and Look names that cell; with Talk waiting, the same press is not taken.
+    #[cfg(feature = "wide")]
+    #[test]
+    fn wide_a_look_click_8_east_names_the_cell_and_a_talk_click_waits() {
+        use crate::geom::SHOWN;
+        use crate::ui::pointer::{PointerState, PointerTables};
+        let (x0, y0, x1, y1) = SHOWN;
+        let map = [x0, y0, x1, y1].map(|v| v as i16);
+        let (lx, ly) = (616i16, 168i16);
+        for (cmd, taken) in [(0x84u16, true), (0x83, false)] {
+            let mut s = marked_world(&[(8, 0)]);
+            s.ui.pointer = PointerState::from_tables(PointerTables {
+                regions: vec![map],
+                ..PointerTables::default()
+            });
+            s.ui.input.target_pending = 1;
+            s.ui.input.target_command = cmd;
+            s.ui.input.pointer = (lx + 8 * 16, ly);
+            s.ui.pointer.pressed = true;
+            s.ui.pointer.buttons = 1;
+            let c = s.map.centre;
+            let (line, s) = run(s, move |st, io| async move {
+                let code = crate::ui::click::click(&st, &io).await;
+                st.borrow_mut().converse.ints[0] = code;
+                if code == 0x8e {
+                    look_at_tile(&st, &io, c.x, c.y).await;
+                    crate::ui::printf(&st, &io, b"\n", &[]).await;
+                }
+            });
+            let label = format!("command {cmd:#x}");
+            if taken {
+                assert_eq!(s.converse.ints[0], 0x8e, "{label}: taken");
+                let at = (c.x as i16 + 8, c.y as i16);
+                assert_eq!(
+                    (named(&line), s.ui.input.target),
+                    (Some(true), at),
+                    "{label}"
+                );
+            } else {
+                assert_eq!(s.converse.ints[0], 0, "{label}: not taken");
+                assert_eq!(s.ui.input.target, UNSET, "{label}: no target");
+            }
         }
     }
 }

@@ -225,8 +225,8 @@ fn a_click_at_each_corner_of_the_shown_map_walks_toward_it() {
     assert_ne!(click_code(s).0, 0x80, "past the east edge");
 }
 
-/// The pointer origin rests on the leader's pixel, the centre of view cell (`HALF_W`, `HALF_H`)
-/// in the shown map: (0x58, 0x58) in Original (`inventory/mod.rs`, the Move command's reset).
+/// The pointer origin A4-0x7a26 rests on the leader's pixel, the centre of view cell (`HALF_W`,
+/// `HALF_H`) in the shown map, where Move (0x12ae04) puts it back: (0x58, 0x58) in Original.
 #[test]
 fn the_pointer_origin_rests_on_the_leaders_pixel() {
     let (x, y) = (LEADER_PIXEL.0 as i16, LEADER_PIXEL.1 as i16);
@@ -297,10 +297,10 @@ fn wide_the_last_shown_pixel_is_the_cell_at_the_frames_corner() {
     );
 }
 
-/// C2 (spec 13): the view's draw lists hold `VIEW_W` × `VIEW_H` cells, row by row of `VIEW_W`.
-/// A target over an occupied view cell east and south of the leader's reads that cell, and the
-/// empty cell above it reads empty (the original's stride of 11 would read another cell in
-/// Wide).
+/// The view's caches A4-0x15f0 / A4-0x1476 hold one entry per view cell (`VIEW_W` × `VIEW_H`,
+/// spec 13 Decision 1), row by row of `VIEW_W`. A target over an occupied view cell east and
+/// south of the leader's reads that cell, and the empty cell above it reads empty (the
+/// original's stride of 11 would read another cell in Wide).
 #[test]
 fn a_target_over_an_occupied_view_cell_reads_its_draw_list_cell() {
     let mut s = st();
@@ -318,6 +318,106 @@ fn a_target_over_an_occupied_view_cell_reads_its_draw_list_cell() {
     assert_eq!(s.ui.input.target, (103, 102), "its map location");
     assert_eq!(at_cell(&mut s, col, row - 1), 0, "the cell above it");
     assert_eq!(s.ui.input.target, (103, 101));
+}
+
+/// Talk (0x83) and Look (0x84), the commands the target tests use.
+const TALK: u16 = 0x83;
+const LOOK: u16 = 0x84;
+
+/// A press at map pixel (x, y) while command `cmd` waits for its target (`pending`), or with it
+/// underlined and the right button (`!pending`, the repeat): the click's code and the target.
+fn target_click(cmd: u16, pending: bool, (x, y): (i16, i16)) -> (u16, (i16, i16)) {
+    let mut s = st();
+    if pending {
+        s.ui.input.target_pending = 1;
+        s.ui.input.target_command = cmd;
+        at(&mut s, x, y, 1, true);
+    } else {
+        globals::set_last_command(&mut s.actors, cmd as u8);
+        at(&mut s, x, y, 2, true);
+    }
+    s.ui.input.target = (-7, -7);
+    let (code, after) = click_code(s);
+    (code, after.ui.input.target)
+}
+
+/// Spec 13 Decision 4 for the mouse: a press that confirms a pending target, and the right
+/// button's repeat of the underlined command, take a cell only within `RULE_HALF` of the
+/// leader's on both axes, as the cross-hair does; Look takes any cell of the view (Decision 5).
+/// Over every view cell (its shown part): in Original the window is the whole view, so every
+/// click is taken as before; in Wide only the 11 × 11 cells round the leader.
+#[test]
+fn a_target_click_is_taken_within_the_rule_window_and_in_original_everywhere() {
+    use crate::geom::RULE_HALF;
+    let (x0, y0, x1, y1) = SHOWN;
+    let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+    let mut taken = [0usize; 4];
+    for row in 0..VIEW_H as i16 {
+        for col in 0..VIEW_W as i16 {
+            let x = (MAP_X as i16 + col * 16 + 8).clamp(x0 as i16, x1 as i16);
+            let y = (MAP_Y as i16 + row * 16 + 8).clamp(y0 as i16, y1 as i16);
+            let reach = (col - hw).abs() <= RULE_HALF && (row - hh).abs() <= RULE_HALF;
+            let location = (100 + col - hw, 100 + row - hh);
+            let cases = [(TALK, true, 0x8e), (LOOK, true, 0x8e), (TALK, false, 0xa9)];
+            for (k, (cmd, pending, code)) in cases.into_iter().enumerate() {
+                let label = format!("command {cmd:#x}, pending {pending}, cell ({col}, {row})");
+                let got = target_click(cmd, pending, (x, y));
+                if reach || cmd == LOOK {
+                    assert_eq!(got, (code, location), "{label}: taken");
+                    taken[k] += 1;
+                } else {
+                    assert_eq!(got, (0, (-7, -7)), "{label}: not taken");
+                }
+            }
+            // Look underlined: its repeat names any cell.
+            let got = target_click(LOOK, false, (x, y));
+            assert_eq!(got, (0xa9, location), "Look's repeat at ({col}, {row})");
+            taken[3] += 1;
+        }
+    }
+    let cells = VIEW_W * VIEW_H;
+    let side = 2 * RULE_HALF as usize + 1;
+    let window = side.min(VIEW_W) * side.min(VIEW_H);
+    println!("cells taken (Talk, Look, Talk's repeat, Look's repeat): {taken:?} of {cells}");
+    assert_eq!(taken, [window, cells, window, cells]);
+    #[cfg(not(feature = "wide"))]
+    assert_eq!(window, cells, "Original: the whole view");
+}
+
+/// Wide: with Talk waiting for its target, a press 8 columns east of the leader (in view,
+/// outside the original's window) gives nothing and the key read goes on waiting; a press 5
+/// east and 5 north, or 5 west and 5 south, then confirms its cell.
+#[cfg(feature = "wide")]
+#[test]
+fn wide_talk_waits_on_a_click_past_the_rule_window_and_takes_one_inside_it() {
+    use crate::geom::RULE_HALF;
+    let r = RULE_HALF * 16;
+    for (inside, dx, dy) in [(near(r, -r), 5, -5), (near(-r, r), -5, 5)] {
+        let mut s = st();
+        s.ui.input.target_pending = 1;
+        s.ui.input.target_command = TALK;
+        s.main.reading = 0;
+        let got = Rc::new(RefCell::new(None));
+        let out = Rc::clone(&got);
+        let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+            let k = wait::read_key(&st, &io).await;
+            *out.borrow_mut() = Some((k, st.borrow().ui.input.target));
+        });
+        let ev = |(x, y): (i16, i16), b| InputEvent::Pointer { x, y, buttons: b };
+        let far = near(8 * 16, 0);
+        e.tick(&[ev(far, 1), ev(far, 0)], 16);
+        for _ in 0..8 {
+            e.tick(&[], 16);
+        }
+        assert!(!e.finished(), "8 east: still waiting");
+        assert_eq!(*got.borrow(), None);
+        e.tick(&[ev(inside, 1), ev(inside, 0)], 16);
+        for _ in 0..8 {
+            e.tick(&[], 16);
+        }
+        assert!(e.finished(), "({dx}, {dy}): confirmed");
+        assert_eq!(*got.borrow(), Some((0x8e, (100 + dx, 100 + dy))));
+    }
 }
 
 #[test]
