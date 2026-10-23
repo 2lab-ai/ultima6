@@ -1,16 +1,35 @@
-//! Draw lists of the 11 × 11 map window: per cell, the object tiles to draw over its base tile.
+//! Draw lists of the map window (the view, [`VIEW_W`] × [`VIEW_H`] cells: 11 × 11 in Original):
+//! per cell, the object tiles to draw over its base tile.
 //!
 //! Built by 0x10e81e before the window is drawn; gfx (0x10202e) walks them. A list is a chain
-//! of node numbers 1..255 through `node_next` (0 ends it, node 0 heads the free chain).
+//! of node numbers 1..[`DRAW_NODES`] through `node_next` (0 ends it, node 0 heads the free
+//! chain). Cell (cx, cy) is entry `cy * VIEW_W + cx` of `base` and `cell`.
 
 use super::iter::{begin_area, flags2, next_in_area, tile_of};
 use super::{ACTOR_SLOTS, Slot, seams};
+use crate::geom::{self, HALF_H, HALF_W, VIEW_H, VIEW_W};
 use crate::state::State;
 
-/// Cells in the map window (11 × 11).
-pub const DRAW_CELLS: usize = 11 * 11;
-/// Draw-list nodes (node 0 = free-chain head).
-pub const DRAW_NODES: usize = 256;
+/// Cells in the map window: the view, [`VIEW_W`] × [`VIEW_H`] (Original 11 × 11).
+pub const DRAW_CELLS: usize = VIEW_W * VIEW_H;
+/// A draw-list node number: a byte in Original (A4-0x15f0, A4-0x1577), a word in Wide, whose
+/// pool outgrows a byte (spec 13 Design 2).
+#[cfg(not(feature = "wide"))]
+pub type DrawNode = u8;
+/// A draw-list node number: a byte in Original (A4-0x15f0, A4-0x1577), a word in Wide, whose
+/// pool outgrows a byte (spec 13 Design 2).
+#[cfg(feature = "wide")]
+pub type DrawNode = u16;
+/// Draw-list nodes (node 0 = free-chain head): two a view cell, rounded up to a power of two.
+/// Original 256 (121 cells; the 256 bytes of A4-0x1577), Wide 2048 (777 cells: 2.6 a cell
+/// against Original's 2.1). An object past the pool is not drawn, as on the original.
+pub const DRAW_NODES: usize = (2 * DRAW_CELLS).next_power_of_two();
+const _: () = assert!(
+    DRAW_NODES - 1 <= DrawNode::MAX as usize,
+    "node numbers fit a link"
+);
+#[cfg(not(feature = "wide"))]
+const _: () = assert!(DRAW_NODES == 256, "Original keeps the game's pool");
 /// Base tile that hides a cell (0x10e596 draws nothing on it).
 const HIDDEN: u16 = 0xff;
 /// Base tile drawn only with the "see through" flag and for tiles with flags3 bit 0.
@@ -20,14 +39,17 @@ const DARK: u16 = 0x1bc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DrawLists {
     /// Original: A4-0x1476 (11 × 11 words: base tile of each window cell; map's tile-cache
-    /// rebuild 0x108f90 fills it, 0x10e596 overwrites a cell with a flat object tile)
+    /// rebuild 0x108f90 fills it, 0x10e596 overwrites a cell with a flat object tile).
+    /// [`DRAW_CELLS`] entries, `row * VIEW_W + col`.
     pub base: Vec<u16>,
-    /// Original: A4-0x15f0 (11 × 11 bytes: first node of each cell's list, 0 = empty)
-    pub cell: Vec<u8>,
-    /// Original: A4-0x1577 (256 bytes: next node; node 0 = first free node)
-    pub node_next: Vec<u8>,
+    /// Original: A4-0x15f0 (11 × 11 bytes: first node of each cell's list, 0 = empty).
+    /// [`DRAW_CELLS`] entries, `row * VIEW_W + col`.
+    pub cell: Vec<DrawNode>,
+    /// Original: A4-0x1577 (256 bytes: next node; node 0 = first free node). [`DRAW_NODES`]
+    /// entries.
+    pub node_next: Vec<DrawNode>,
     /// Original: A4-0x1384 (256 words: tile of each node; bits 11-12 = effect: 0x800 invisible
-    /// outline, 0x1000 / 0x1800 actor effects)
+    /// outline, 0x1000 / 0x1800 actor effects). [`DRAW_NODES`] entries.
     pub node_tile: Vec<u16>,
     /// Original: A4-0x7af6 (word: set to 1 to ask for the slot of a volcano / fumarole in view;
     /// 0x10e81e stores the slot or resets it)
@@ -54,15 +76,27 @@ impl Default for DrawLists {
 }
 
 impl DrawLists {
-    /// The tiles of cell (cx, cy) in list order.
+    /// The tiles of view cell (cx, cy) in list order.
     pub fn tiles(&self, cx: usize, cy: usize) -> Vec<u16> {
         let mut out = Vec::new();
-        let mut n = self.cell.get(cy * 11 + cx).copied().unwrap_or(0);
+        let mut n = self.cell.get(cy * VIEW_W + cx).copied().unwrap_or(0);
         while n != 0 && out.len() < DRAW_NODES {
             out.push(self.node_tile[usize::from(n)]);
             n = self.node_next[usize::from(n)];
         }
         out
+    }
+
+    /// Every node free again: node n links to n + 1, the last node ends the chain (in Original
+    /// the byte link of node 255 wraps to 0).
+    pub fn reset_nodes(&mut self) {
+        for (i, n) in self.node_next.iter_mut().enumerate() {
+            *n = if i + 1 < DRAW_NODES {
+                (i + 1) as DrawNode
+            } else {
+                0
+            };
+        }
     }
 }
 
@@ -79,10 +113,10 @@ fn flags3(s: &State, tile: u16) -> u8 {
 #[derive(Clone, Copy)]
 enum Link {
     Cell(usize),
-    Node(u8),
+    Node(DrawNode),
 }
 
-fn read(d: &DrawLists, l: Link) -> u8 {
+fn read(d: &DrawLists, l: Link) -> DrawNode {
     match l {
         Link::Cell(c) => d.cell[c],
         Link::Node(n) => d.node_next[usize::from(n)],
@@ -103,7 +137,7 @@ pub fn add_tile(s: &mut State, word: u16, cx: i16, cy: i16, mode: u16) {
     if egg == Some(t) {
         return;
     }
-    let idx = cy * 11 + cx;
+    let idx = cy * VIEW_W as i16 + cx;
     let Some(c) = usize::try_from(idx).ok().filter(|&c| c < DRAW_CELLS) else {
         // The original reads the word before the table here; the port draws nothing.
         return;
@@ -123,7 +157,7 @@ pub fn add_tile(s: &mut State, word: u16, cx: i16, cy: i16, mode: u16) {
     if node == 0 {
         return;
     }
-    let tile_of_node = |n: u8| d.node_tile[usize::from(n)] & 0x7ff;
+    let tile_of_node = |n: DrawNode| d.node_tile[usize::from(n)] & 0x7ff;
     let mut at = Link::Cell(c);
     if top || mode == 2 {
         if mode & 1 != 0 {
@@ -174,31 +208,34 @@ pub fn add_tile(s: &mut State, word: u16, cx: i16, cy: i16, mode: u16) {
 /// width tile adds tile − 1 to the cell west, a double height one tile − 1 (or − 2 when also
 /// wide) to the cell north, and a double one tile − 3 to the cell north-west.
 pub fn add_object_tiles(s: &mut State, tile: u16, effect: u16, cx: i16, cy: i16) {
+    let (w_end, h_end) = (VIEW_W as i16, VIEW_H as i16);
     let w = tile.wrapping_add(effect);
-    if cx < 11 && cy < 11 {
+    if cx < w_end && cy < h_end {
         add_tile(s, w, cx, cy, 0);
     }
     let f2 = flags2(&s.tables, tile);
     if f2 & 0x80 != 0 {
-        if cx != 0 && cy < 11 {
+        if cx != 0 && cy < h_end {
             add_tile(s, w.wrapping_sub(1), cx - 1, cy, 1);
         }
         if f2 & 0x40 != 0 {
-            if cx < 11 && cy != 0 {
+            if cx < w_end && cy != 0 {
                 add_tile(s, w.wrapping_sub(2), cx, cy - 1, 1);
             }
             if cx != 0 && cy != 0 {
                 add_tile(s, w.wrapping_sub(3), cx - 1, cy - 1, 1);
             }
         }
-    } else if cx < 11 && cy != 0 && f2 & 0x40 != 0 {
+    } else if cx < w_end && cy != 0 && f2 & 0x40 != 0 {
         add_tile(s, w.wrapping_sub(1), cx, cy - 1, 1);
     }
 }
 
 /// Original: 0x10e81e (objects: build the draw lists of the map window around the leader)
 ///
-/// Every map object in leader − 5 ..= leader + 6 is visited in list order. Invisible objects
+/// Every map object in leader − [`HALF_W`] ..= leader + [`HALF_W`] + 1 (rows: [`HALF_H`];
+/// Original − 5 ..= + 6: the extra column and row reach the west and north parts of a
+/// multi-tile object just past the view) is visited in list order. Invisible objects
 /// (status 0x02) are drawn only for party members (actor status 0x80) and then as an outline
 /// (+0x800, types below 0x1aa); actors with movement flag 0x10 are skipped; a type-0x7b actor
 /// with frame < 2 shows frame 1 when an actor stands below it. Actor effects: actor status
@@ -209,13 +246,12 @@ pub fn add_object_tiles(s: &mut State, tile: u16, effect: u16, cx: i16, cy: i16)
 /// animation with one RNG draw.
 pub fn build_draw_lists(s: &mut State) {
     let d = &mut s.objects.draw;
-    for (i, n) in d.node_next.iter_mut().enumerate() {
-        *n = (i + 1) as u8;
-    }
+    d.reset_nodes();
     d.cell.fill(0);
     let mut saw_188 = 0;
     let (lx, ly) = (s.map.centre.x as i16, s.map.centre.y as i16);
-    let mut c = begin_area(s, lx - 5, ly - 5, lx + 6, ly + 6);
+    let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+    let mut c = begin_area(s, lx - hw, ly - hh, lx + hw + 1, ly + hh + 1);
     while c >= 0 {
         draw_object(s, c, lx, ly, &mut saw_188);
         c = next_in_area(&mut s.objects);
@@ -282,8 +318,8 @@ fn draw_object(s: &mut State, c: Slot, lx: i16, ly: i16, saw_188: &mut u16) {
             effect = 0x1800;
         }
     }
-    let cx = (o.x(c) as i16).wrapping_sub(lx) + 5;
-    let cy = (o.y(c) as i16).wrapping_sub(ly) + 5;
+    let cx = (o.x(c) as i16).wrapping_sub(lx) + HALF_W as i16;
+    let cy = (o.y(c) as i16).wrapping_sub(ly) + HALF_H as i16;
     let z = o.z(c);
     if effect != 0 {
         add_object_tiles(s, tile, effect, cx, cy);
@@ -300,23 +336,23 @@ fn draw_object(s: &mut State, c: Slot, lx: i16, ly: i16, saw_188: &mut u16) {
         && cx + lx == x
         && cy + ly == 0x358
         && z == 0
-        && cy < 11
+        && cy < VIEW_H as i16
     {
         if cx != 0 {
             add_tile(s, right, cx + 1, cy, 1);
         }
-        if cx < 10 {
+        if cx < VIEW_W as i16 - 1 {
             add_tile(s, left, cx - 1, cy, 1);
         }
     }
 }
 
-/// The second pass of 0x10e81e over the 11 × 11 cells (view flags and light overlays).
+/// The second pass of 0x10e81e over the view's cells (view flags and light overlays).
 fn overlay_view(s: &mut State) {
     let (vx, vy) = view_offset(s);
-    for x in 0..11i16 {
-        for y in 0..11i16 {
-            let c = (y * 11 + x) as usize;
+    for x in 0..VIEW_W as i16 {
+        for y in 0..VIEW_H as i16 {
+            let c = (y * VIEW_W as i16 + x) as usize;
             let base = s.objects.draw.base[c];
             let f1 = s.tables.tileflags.flags1.get(usize::from(base)).copied();
             if f1.unwrap_or(0) & 0x04 != 0
@@ -343,11 +379,14 @@ fn overlay_view(s: &mut State) {
     }
 }
 
-/// Original: A4-0x7950 / A4-0x794e (words: column and row of the 11 × 11 view inside the
-/// 40 × 40 window), as map 0x108d10 computes them from the leader and the window origin.
+/// Original: A4-0x7950 / A4-0x794e (words: column and row of the view's cell (0, 0) inside the
+/// window), as map 0x108d10 computes them from the leader and the window origin
+/// ([`geom::view_offset`]).
 pub fn view_offset(s: &State) -> (i16, i16) {
     let c = s.map.centre;
     let [wx, wy] = s.objects.window;
-    let off = |l: u16, w: u16| (l.wrapping_sub(w).wrapping_sub(5) & 0x1f) as i16;
-    (off(c.x, wx), off(c.y, wy))
+    (
+        geom::view_offset(c.x, wx, HALF_W as u16),
+        geom::view_offset(c.y, wy, HALF_H as u16),
+    )
 }

@@ -345,7 +345,7 @@ pub(crate) fn bump_7afe(s: &mut State) {
 /// The map window caches 0x112bf2 reads at (col, row) of the 11×11 window: the byte table at
 /// A4-0x15f0 (first draw-list node) and the word table at A4-0x1476 (tile shown), built by
 /// 0x109e74 / 0x10e81e (`objects.draw`).
-pub(crate) fn view_cell(s: &State, col: i16, row: i16) -> (u8, i16) {
+pub(crate) fn view_cell(s: &State, col: i16, row: i16) -> (crate::objects::DrawNode, i16) {
     let d = &s.objects.draw;
     usize::try_from(row * 11 + col)
         .ok()

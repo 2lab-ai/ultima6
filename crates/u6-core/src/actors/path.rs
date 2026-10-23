@@ -1,11 +1,13 @@
-//! Going to the scheduled place: the path finder over the 40 × 40 window, the path slots, the
-//! off-screen teleport and the arrival that starts the scheduled work.
+//! Going to the scheduled place: the path finder over the window ([`GRID`] × [`GRID`], 40 × 40
+//! in Original), the path slots, the off-screen teleport and the arrival that starts the
+//! scheduled work.
 //!
 //! The search (0x11ea54) is a bucket-queue Dijkstra over the cost map 0x1206e2 builds, run from
 //! both ends at once when the goal is a location (grid bit 7 tells the sides apart); the path
 //! (0x11e2a6) is stored as at most 31 bytes in one of 8 slots: direction (0 N, 1 E, 2 S, 3 W)
 //! in bits 0-1, run length × 4 above. Walkers (worktypes 0x83..0x85) follow it in 0x11f804.
 
+use crate::geom::{self, HALF_H, HALF_W};
 use crate::objects::ObjectId;
 use crate::state::State;
 
@@ -32,10 +34,11 @@ fn inside(col: i16, row: i16) -> bool {
     (0..=LAST).contains(&col) && (0..=LAST).contains(&row)
 }
 
-/// The search window origin: ((leader x − 16) & 0x3f8, (leader y − 16) & 0x3f8).
+/// The search window origin: [`geom::window_origin`] of the leader (Original
+/// ((leader x − 16) & 0x3f8, (leader y − 16) & 0x3f8)).
 fn window(s: &State) -> (u16, u16) {
     let c = s.map.centre;
-    (c.x.wrapping_sub(16) & 0x3f8, c.y.wrapping_sub(16) & 0x3f8)
+    (geom::window_origin(c.x), geom::window_origin(c.y))
 }
 
 /// The schedule entry the actor is on (first entry + 0x139388).
@@ -83,7 +86,7 @@ pub fn add_tile_cost(s: &mut State, tile: u16, col: i16, row: i16) {
     }
 }
 
-/// Original: 0x1206e2 (actors: build the 40 × 40 cost map of the search window)
+/// Original: 0x1206e2 (actors: build the cost map of the search window, [`GRID`] × [`GRID`])
 ///
 /// Map tiles: impassable = 0xff, else cost nibble + 1. Doors add 1 when open (frame < 8), else
 /// block, and block the cell before them (above for a double-height door, left otherwise);
@@ -284,16 +287,19 @@ pub fn arrive(s: &mut State, actor: u16) {
 
 /// Original: 0x11e60c (actors: teleport to the schedule location when neither end is in view)
 ///
-/// Unless forced (A4-0x6a9e), an actor within 5 tiles of the leader on its level, or whose
-/// scheduled place is, stays. Otherwise it frees its path slot (walkers 0x83..0x85), is placed
-/// at the scheduled location, [`arrive`]s, pays 10 points; counts toward the 3 per turn.
+/// Unless forced (A4-0x6a9e), an actor in view of the leader on its level (within [`HALF_W`]
+/// columns and [`HALF_H`] rows; Original 5, 5), or whose scheduled place is, stays. Otherwise
+/// it frees its path slot (walkers 0x83..0x85), is placed at the scheduled location,
+/// [`arrive`]s, pays 10 points; counts toward the 3 per turn.
 pub fn teleport_home(s: &mut State, actor: u16) {
     let a = usize::from(actor);
     let p = s.objects.location[a];
     let c = s.map.centre;
+    // In view (spec 13 Decision 5: the wide view in Wide).
     let near = |x: u16, y: u16| {
         let (x, y, cx, cy) = (x as i16, y as i16, c.x as i16, c.y as i16);
-        (cx - 5..=cx + 5).contains(&x) && (cy - 5..=cy + 5).contains(&y)
+        let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+        (cx - hw..=cx + hw).contains(&x) && (cy - hh..=cy + hh).contains(&y)
     };
     let forced = s.actors.work.force_teleport != 0;
     let same_level = p.z == c.z;
@@ -499,7 +505,7 @@ pub enum Goal {
 
 /// Original: 0x11ea54 (actors: find a path for `actor` and start walking it)
 ///
-/// Standing on the target: [`arrive`]. If the actor or the target is outside the 40 × 40
+/// Standing on the target: [`arrive`]. If the actor or the target is outside the
 /// window (or on another level): at most 3 per turn [`teleport_home`]; if still 0x81 and the
 /// actor itself is outside, the search runs from the target toward the window edge facing the
 /// actor, which then jumps to where the path meets the edge and walks it reversed. Each search
@@ -539,10 +545,12 @@ pub fn seek(s: &mut State, actor: u16, goal: Goal) {
                     std::mem::swap(&mut ar, &mut gr);
                     swapped = true;
                 }
-                let (ex, ey) = ((gc - 20).abs(), (gr - 20).abs());
+                // The grid's centre (Original 20).
+                let mid = (GRID / 2) as i16;
+                let (ex, ey) = ((gc - mid).abs(), (gr - mid).abs());
                 s.actors.path.seek_edge = if ex > ey {
-                    if gc < 20 { 3 } else { 1 }
-                } else if gr < 20 {
+                    if gc < mid { 3 } else { 1 }
+                } else if gr < mid {
                     0
                 } else {
                     2
@@ -642,11 +650,18 @@ mod tests {
 
     use super::*;
 
-    /// An empty map (every tile passable, cost 1) with the view at (20, 20) (window origin 0),
-    /// NPC 10 at `from` with one schedule entry at `to`.
+    /// The view centre of [`walker`]: window origin 0 (Original (20, 20)).
+    const CENTRE: u16 = geom::LEAD + 4;
+
+    /// An empty map (every tile passable, cost 1) with the view at ([`CENTRE`], [`CENTRE`])
+    /// (window origin 0), NPC 10 at `from` with one schedule entry at `to`.
     fn walker(from: (u16, u16), to: (u16, u16), worktype: u8) -> State {
         let mut s = State::empty();
-        s.map.centre = Position { x: 20, y: 20, z: 0 };
+        s.map.centre = Position {
+            x: CENTRE,
+            y: CENTRE,
+            z: 0,
+        };
         s.objects.type_frame[10] = 0x17a;
         s.actors.attrs.base_type_frame[10] = 0x17a;
         s.objects.location[10] = Position {
@@ -671,6 +686,9 @@ mod tests {
             },
         }];
         crate::actors::walk::tests::link_objects(&mut s);
+        assert_eq!(window(&s), (0, 0));
+        s.map.window_origin = [0, 0];
+        s.objects.set_window(0, 0, 0);
         s
     }
 
@@ -759,10 +777,33 @@ mod tests {
         assert_eq!(s.actors.worktype[10], 0x90);
         assert_eq!(s.actors.work.teleports, 1);
         assert_eq!(s.actors.mp(10), -10);
-        // Near the leader: stays.
-        let mut s = walker((22, 21), (300, 300), 0x90);
+        // In view of the leader (2 east, 1 south): stays.
+        let mut s = walker((CENTRE + 2, CENTRE + 1), (300, 300), 0x90);
         teleport_home(&mut s, 10);
-        assert_eq!(s.objects.location[10].x, 22);
+        assert_eq!(s.objects.location[10].x, CENTRE + 2);
+    }
+
+    /// Spec 13 Decision 5: an actor stays while it, or its scheduled place, is in view: within
+    /// [`HALF_W`] columns and [`HALF_H`] rows of the leader (Original 5, 5).
+    #[test]
+    fn teleport_home_keeps_an_actor_at_the_edge_of_the_view() {
+        let c = CENTRE;
+        let (hw, hh) = (HALF_W as u16, HALF_H as u16);
+        for (from, stays) in [
+            ((c + hw, c + hh), true),
+            ((c - hw, c - hh), true),
+            ((c + hw + 1, c), false),
+            ((c, c + hh + 1), false),
+        ] {
+            let mut s = walker(from, (300, 300), 0x90);
+            teleport_home(&mut s, 10);
+            let p = s.objects.location[10];
+            assert_eq!((p.x, p.y) == from, stays, "from {from:?}");
+        }
+        // Its scheduled place at the view's edge keeps it too.
+        let mut s = walker((300, 300), (c + hw, c - hh), 0x90);
+        teleport_home(&mut s, 10);
+        assert_eq!(s.objects.location[10].x, 300);
     }
 
     #[test]

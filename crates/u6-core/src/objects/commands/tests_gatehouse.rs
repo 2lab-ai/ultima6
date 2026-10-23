@@ -106,9 +106,12 @@ fn look_at(mut s: State, (x, y): (u16, u16)) -> (State, String) {
     s.ui = crate::main_loop::test_support::test_ui();
     s.ui.input = input;
     let c = s.map.centre;
-    let (col, row) = (x as i16 - c.x as i16 + 5, y as i16 - c.y as i16 + 5);
+    let (hw, hh) = (crate::geom::HALF_W as i16, crate::geom::HALF_H as i16);
+    let (col, row) = (x as i16 - c.x as i16 + hw, y as i16 - c.y as i16 + hh);
+    // The middle of its view cell on the frame (C4: the map from (MAP_X, MAP_Y)).
+    let (mx, my) = (crate::geom::MAP_X as i16, crate::geom::MAP_Y as i16);
     s.ui.input.selection = -1;
-    s.ui.input.pointer = (col * 16 + 8, row * 16 + 8);
+    s.ui.input.pointer = (mx + col * 16 + 8, my + row * 16 + 8);
     s.ui.input.target_void = false;
     let mut e = crate::Engine::with_game(s, crate::Files::default(), |st, io| async move {
         look(&st, &io).await;

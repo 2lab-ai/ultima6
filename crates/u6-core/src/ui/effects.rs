@@ -38,9 +38,7 @@ pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
 pub fn reset_window(s: &mut State) {
     let d = &mut s.objects.draw;
     d.base.iter_mut().for_each(|t| *t = 0xff);
-    for (n, next) in d.node_next.iter_mut().enumerate() {
-        *next = (n as u8).wrapping_add(1);
-    }
+    d.reset_nodes();
     d.cell.iter_mut().for_each(|c| *c = 0);
 }
 

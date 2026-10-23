@@ -1,6 +1,7 @@
 //! Unit tests on synthetic object sets.
 
 use super::*;
+use crate::geom::{HALF_H, HALF_W, VIEW_H, VIEW_W};
 use crate::state::State;
 use u6_formats::basetile::BaseTiles;
 use u6_formats::look::{LookEntry, LookTable};
@@ -339,10 +340,12 @@ fn region_load_keeps_the_four_nearest_superchunks() {
     have.sort();
     assert_eq!(have, [0, 1, 8, 9]);
     assert_eq!(list(&s.objects).len(), 4);
-    // It moves one column east at 251 tiles into it, back west below 5 into the next one.
-    load_region(&mut s, 250, 100, 0);
+    // It moves one column east at HALF_W tiles from the block's east edge (Original 251 tiles
+    // into it), back west below HALF_W into the next one (Original 5).
+    let (east, west) = (256 - HALF_W as u16, 128 + HALF_W as u16);
+    load_region(&mut s, east - 1, 100, 0);
     assert_eq!(s.objects.surface_base, 0);
-    load_region(&mut s, 251, 100, 0);
+    load_region(&mut s, east, 100, 0);
     assert_eq!(s.objects.surface_base, 1);
     let mut have = s.objects.loaded_surface;
     have.sort();
@@ -352,11 +355,11 @@ fn region_load_keeps_the_four_nearest_superchunks() {
         (1, 1),
         "written back"
     );
-    load_region(&mut s, 133, 100, 0);
+    load_region(&mut s, west, 100, 0);
     assert_eq!(s.objects.surface_base, 1);
-    load_region(&mut s, 132, 100, 0);
+    load_region(&mut s, west - 1, 100, 0);
     assert_eq!(s.objects.surface_base, 0);
-    load_region(&mut s, 251, 100, 0);
+    load_region(&mut s, east, 100, 0);
     let kinds: Vec<u16> = list(&s.objects)
         .iter()
         .map(|&c| s.objects.kind(c))
@@ -436,14 +439,177 @@ fn draw_lists_put_wide_objects_in_two_cells_and_top_tiles_last() {
     put(&mut s, 10, lx, ly);
     build_draw_lists(&mut s);
     let d = &s.objects.draw;
-    // Cell (5, 5): the plain object, the top tile (0x10) behind it; the wide object's west
-    // half (mode 1, not a top tile) goes in front.
-    assert_eq!(d.tiles(5, 5), [tile(20, 0) - 1, tile(10, 0), tile(21, 0)]);
-    assert_eq!(d.tiles(6, 5), [tile(20, 0)]);
+    // The leader's cell (HALF_W, HALF_H): the plain object, the top tile (0x10) behind it; the
+    // wide object's west half (mode 1, not a top tile) goes in front.
+    let (hx, hy) = (HALF_W, HALF_H);
+    assert_eq!(d.tiles(hx, hy), [tile(20, 0) - 1, tile(10, 0), tile(21, 0)]);
+    assert_eq!(d.tiles(hx + 1, hy), [tile(20, 0)]);
     // Hidden cells draw nothing.
-    s.objects.draw.base[5 * 11 + 5] = 0xff;
+    s.objects.draw.base[hy * VIEW_W + hx] = 0xff;
     build_draw_lists(&mut s);
-    assert!(s.objects.draw.tiles(5, 5).is_empty());
+    assert!(s.objects.draw.tiles(hx, hy).is_empty());
+}
+
+/// The objects drawn, over every view cell.
+fn drawn(s: &State) -> usize {
+    (0..VIEW_H)
+        .flat_map(|row| (0..VIEW_W).map(move |col| (col, row)))
+        .map(|(col, row)| s.objects.draw.tiles(col, row).len())
+        .sum()
+}
+
+/// A view with an object on every cell, more than a byte of node numbers: each object in its
+/// own cell. Wide draws all of them; Original's pool of 256 nodes draws the first 255, as the
+/// original does (one object a cell is 121 there, so it takes three a cell).
+#[test]
+fn an_all_object_view_draws_every_object_the_pool_holds() {
+    let mut s = world();
+    let (lx, ly) = (s.map.centre.x, s.map.centre.y);
+    let per_cell = (usize::from(u8::MAX) + 1).div_ceil(DRAW_CELLS);
+    let mut placed = 0;
+    for row in 0..VIEW_H {
+        for col in 0..VIEW_W {
+            let (x, y) = (
+                lx + col as u16 - HALF_W as u16,
+                ly + row as u16 - HALF_H as u16,
+            );
+            for k in 0..per_cell {
+                // Type 0x80 + i / 4, frame i % 4: tile 0x200 + i, one of its own for each object
+                // (types without a rule of their own in the builder).
+                let i = (row * VIEW_W + col) * per_cell + k;
+                let tf = (0x80 + i / 4) as u16 | ((i % 4) as u16) << 10;
+                create_on_map(&mut s.objects, tf, 0, 0, x, y, 0);
+                placed += 1;
+            }
+        }
+    }
+    assert!(placed > usize::from(u8::MAX), "{placed} objects");
+    build_draw_lists(&mut s);
+    let n = drawn(&s);
+    if cfg!(feature = "wide") {
+        assert_eq!(n, placed, "every object drawn");
+        for row in 0..VIEW_H {
+            for col in 0..VIEW_W {
+                let i = row * VIEW_W + col;
+                assert_eq!(
+                    s.objects.draw.tiles(col, row),
+                    [0x200 + i as u16],
+                    "cell ({col}, {row})"
+                );
+            }
+        }
+    } else {
+        assert_eq!((n, DRAW_NODES), (255, 256), "the original's pool");
+    }
+}
+
+/// The view reaches [`HALF_W`] columns and [`HALF_H`] rows either side of the leader: the
+/// corners are drawn in the corner cells, one tile past each side is not. Wide's view is wider
+/// than tall (37 × 21, spec 13 Decision 1): an object [`HALF_H`] + 1 columns east is drawn
+/// there and not in Original. Fails with [`VIEW_W`] and [`VIEW_H`] swapped.
+#[test]
+fn the_view_reaches_half_w_columns_and_half_h_rows_from_the_leader() {
+    let mut s = world();
+    let (lx, ly) = (s.map.centre.x as i16, s.map.centre.y as i16);
+    let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+    let corners = [(-hw, -hh), (hw, -hh), (-hw, hh), (hw, hh)];
+    for (k, &(dx, dy)) in corners.iter().enumerate() {
+        put(&mut s, 30 + k as u16, (lx + dx) as u16, (ly + dy) as u16);
+    }
+    for (dx, dy) in [(-hw - 1, 0), (hw + 1, 0), (0, -hh - 1), (0, hh + 1)] {
+        put(&mut s, 40, (lx + dx) as u16, (ly + dy) as u16);
+    }
+    build_draw_lists(&mut s);
+    let d = &s.objects.draw;
+    let (w, h) = (VIEW_W - 1, VIEW_H - 1);
+    for (k, (col, row)) in [(0, 0), (w, 0), (0, h), (w, h)].into_iter().enumerate() {
+        assert_eq!(d.tiles(col, row), [tile(30 + k as u16, 0)], "corner {k}");
+    }
+    assert_eq!(drawn(&s), 4, "nothing past the sides");
+    let mut s = world();
+    put(&mut s, 50, (lx + hh + 1) as u16, ly as u16);
+    put(&mut s, 51, lx as u16, (ly + hh + 1) as u16);
+    build_draw_lists(&mut s);
+    if cfg!(feature = "wide") {
+        let east = s.objects.draw.tiles(HALF_W + HALF_H + 1, HALF_H);
+        assert_eq!(
+            east,
+            [tile(50, 0)],
+            "east of the leader past the rows' half"
+        );
+        assert_eq!(drawn(&s), 1, "south of it past the rows' half: not drawn");
+    } else {
+        assert_eq!(drawn(&s), 0, "both past the half view");
+    }
+}
+
+/// The superchunks of the loaded 2 × 2 block, which hold view cell (x, y) (every surface
+/// coordinate wraps at 1024).
+fn loaded_holds(s: &State, x: i32, y: i32) -> bool {
+    let (x, y) = (x.rem_euclid(1024), y.rem_euclid(1024));
+    let b = ((y >> 7) & 7) * 8 + ((x >> 7) & 7);
+    s.objects.loaded_surface.contains(&(b as i16))
+}
+
+/// Every view cell round the leader at (x, y) lies in the loaded blocks.
+fn view_loaded(s: &State, x: u16, y: u16) -> bool {
+    let (hw, hh) = (HALF_W as i32, HALF_H as i32);
+    (-hh..=hh).all(|dy| (-hw..=hw).all(|dx| loaded_holds(s, i32::from(x) + dx, i32::from(y) + dy)))
+}
+
+/// The region objects follow the party with the half view as margin on each axis: every view
+/// cell lies inside the loaded superchunks for a leader one tile either side of each
+/// superchunk edge, on a fresh load and walking across the whole world each way (twice round,
+/// past the wrap at 1024).
+#[test]
+fn the_loaded_blocks_hold_the_whole_view_at_every_superchunk_edge() {
+    let mut s = world();
+    with_blocks(&mut s);
+    for edge in (0..8u16).map(|k| k * 128) {
+        for d in [-1i16, 0, 1] {
+            for (x, y) in [(edge as i16 + d, 300), (300, edge as i16 + d)] {
+                let (x, y) = ((x & 0x3ff) as u16, (y & 0x3ff) as u16);
+                unload_region_objects(&mut s);
+                load_region(&mut s, x, y, 0);
+                assert!(view_loaded(&s, x, y), "fresh load at ({x}, {y})");
+            }
+        }
+    }
+    for axis in [0, 1] {
+        for step in [1i32, -1] {
+            unload_region_objects(&mut s);
+            for i in 0..2048 {
+                let a = (300 + step * i).rem_euclid(1024) as u16;
+                let (x, y) = if axis == 0 { (a, 300) } else { (300, a) };
+                load_region(&mut s, x, y, 0);
+                assert!(view_loaded(&s, x, y), "walking to ({x}, {y})");
+            }
+        }
+    }
+    // The hysteresis stays the half view: the base moves only past it.
+    unload_region_objects(&mut s);
+    load_region(&mut s, 100, 100, 0);
+    assert_eq!(s.objects.surface_base, 0);
+    let east = 256 - HALF_W as u16;
+    load_region(&mut s, east - 1, 100, 0);
+    assert_eq!(
+        s.objects.surface_base,
+        0,
+        "{} from the east edge",
+        HALF_W + 1
+    );
+    load_region(&mut s, east, 100, 0);
+    assert_eq!(s.objects.surface_base, 1, "{HALF_W} from the east edge");
+    let south = 256 - HALF_H as u16;
+    load_region(&mut s, east, south - 1, 0);
+    assert_eq!(
+        s.objects.surface_base,
+        1,
+        "{} from the south edge",
+        HALF_H + 1
+    );
+    load_region(&mut s, east, south, 0);
+    assert_eq!(s.objects.surface_base, 9, "{HALF_H} from the south edge");
 }
 
 #[test]

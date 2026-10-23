@@ -206,8 +206,8 @@ fn write_lists(s: &mut State, base: &[u16], lists: &[Vec<u16>]) {
             }
             d.node_tile[n] = w;
             match prev {
-                None => d.cell[b] = n as u8,
-                Some(p) => d.node_next[p] = n as u8,
+                None => d.cell[b] = n as crate::objects::DrawNode,
+                Some(p) => d.node_next[p] = n as crate::objects::DrawNode,
             }
             prev = Some(n);
             n += 1;

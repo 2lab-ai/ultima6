@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
+use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, VIEW_H, VIEW_W};
 use crate::objects::{ACTOR_SLOTS, FIRST_TEMP_ACTOR, Slot};
 use crate::state::State;
 use u6_testkit::Quiet;
@@ -88,12 +89,14 @@ fn hatched_egg(s: &mut State) -> Egg {
     }
 }
 
-/// View cells (column, row of the 11 x 11 view around the centre) of the monsters, sorted.
+/// View cells (column, row of the view around the centre, [`VIEW_W`] × [`VIEW_H`]) of the
+/// monsters, sorted.
 fn cells(s: &State) -> Vec<(i16, i16)> {
     let c = s.map.centre;
+    let (hw, hh) = (HALF_W as i16, HALF_H as i16);
     let mut v: Vec<(i16, i16)> = monsters(s)
         .iter()
-        .map(|m| (m.2 as i16 - c.x as i16 + 5, m.3 as i16 - c.y as i16 + 5))
+        .map(|m| (m.2 as i16 - c.x as i16 + hw, m.3 as i16 - c.y as i16 + hh))
         .collect();
     v.sort_unstable();
     v
@@ -101,12 +104,16 @@ fn cells(s: &State) -> Vec<(i16, i16)> {
 
 /// The oracle's view cells of the start egg's monsters, read off an oracle frame of the
 /// original's start and kept outside the repository (the user's world): this file under the
-/// oracle directory, the way the saveload tests find the original's saves.
+/// oracle directory, the way the saveload tests find the original's saves. The oracle is the
+/// original's view: its comparisons run in Original only.
+#[cfg(not(feature = "wide"))]
 const ORACLE_CELLS: &str = "/Users/zhugehyuk/Games/ultima6/oracle/hatch/start-gargoyle-cells.txt";
 /// Where the seed search writes the seeds it found, next to [`ORACLE_CELLS`].
+#[cfg(not(feature = "wide"))]
 const ORACLE_SEEDS: &str = "/Users/zhugehyuk/Games/ultima6/oracle/hatch/start-gargoyle-seeds.txt";
 
 /// `col,row` pairs separated by white space (`#` lines are comments), sorted.
+#[cfg(not(feature = "wide"))]
 fn parse_cells(text: &str) -> Vec<(i16, i16)> {
     let mut v: Vec<(i16, i16)> = text
         .lines()
@@ -123,6 +130,7 @@ fn parse_cells(text: &str) -> Vec<(i16, i16)> {
 
 /// The oracle's cells: `U6_ORACLE_GARGOYLE_CELLS="c,r c,r ..."` when set (an override), else
 /// [`ORACLE_CELLS`] when present, else `None`.
+#[cfg(not(feature = "wide"))]
 fn oracle_cells() -> Option<Vec<(i16, i16)>> {
     if let Ok(text) = std::env::var("U6_ORACLE_GARGOYLE_CELLS") {
         return Some(parse_cells(&text));
@@ -170,10 +178,13 @@ fn the_start_egg_hatches_its_gargoyles() {
     let mut distinct = got.clone();
     distinct.dedup();
     assert!(distinct.len() == got.len(), "one monster a cell");
+    let (w, h) = (VIEW_W as i16, VIEW_H as i16);
     assert!(
         got.iter()
-            .all(|&(x, y)| (0..11).contains(&x) && (0..11).contains(&y))
+            .all(|&(x, y)| (0..w).contains(&x) && (0..h).contains(&y))
     );
+    // The oracle frame is the original's view (Original only).
+    #[cfg(not(feature = "wide"))]
     match oracle_cells() {
         Some(want) => assert!(got == want, "the oracle frame's cells"),
         None => eprintln!("the oracle's cells not at hand: placement checked by invariants only"),
@@ -185,6 +196,7 @@ fn the_start_egg_hatches_its_gargoyles() {
 /// cells are the user's world, so they stay out of the repo). The seeds follow from the user's
 /// files too: they go to [`ORACLE_SEEDS`] (or `U6_ORACLE_SEEDS_OUT`), and the output says only
 /// whether there are any and where they went.
+#[cfg(not(feature = "wide"))]
 #[test]
 #[ignore]
 fn search_seeds_for_the_oracle_gargoyles() {
@@ -271,17 +283,24 @@ fn run_engine(s: State, files: &Files, keys: &[InputEvent], cmd: Command) -> (En
     (e, new)
 }
 
+/// The frame pixel at the middle of the view cell holding map tile (x, y) (C4: the map from
+/// ([`MAP_X`], [`MAP_Y`]), 16 pixels a cell).
+fn cell_pixel(s: &State, x: u16, y: u16) -> (i16, i16) {
+    let c = s.map.centre;
+    let col = x as i16 - c.x as i16 + HALF_W as i16;
+    let row = y as i16 - c.y as i16 + HALF_H as i16;
+    (MAP_X as i16 + col * 16 + 8, MAP_Y as i16 + row * 16 + 8)
+}
+
 /// Points the cross-hair at `slot` as a confirmed target does: selection, map target and the
 /// pointer on its view cell.
 fn aim(s: &mut State, slot: Slot) {
-    let c = s.map.centre;
     let (x, y) = (s.objects.x(slot), s.objects.y(slot));
-    let col = x as i16 - c.x as i16 + 5;
-    let row = y as i16 - c.y as i16 + 5;
+    let pointer = cell_pixel(s, x, y);
     let input = &mut s.ui.input;
     input.selection = slot;
     input.target = (x as i16, y as i16);
-    input.pointer = (col * 16 + 8, row * 16 + 8);
+    input.pointer = pointer;
     input.target_void = false;
 }
 
@@ -359,12 +378,13 @@ fn beside_tile(s: &State, x: u16, y: u16) -> Option<(u16, u16)> {
     .map(|(x, y)| (x as u16, y as u16))
 }
 
-/// True when `slot` lies outside the 11 x 11 view around the centre.
+/// True when `slot` lies outside the view around the centre ([`HALF_W`] columns and [`HALF_H`]
+/// rows either side).
 fn out_of_view(s: &State, slot: Slot) -> bool {
     let c = s.map.centre;
     let dx = i32::from(s.objects.x(slot)) - i32::from(c.x);
     let dy = i32::from(s.objects.y(slot)) - i32::from(c.y);
-    dx.abs() > 5 || dy.abs() > 5
+    dx.unsigned_abs() > HALF_W as u32 || dy.unsigned_abs() > HALF_H as u32
 }
 
 fn look_cmd() -> Command {
@@ -768,13 +788,11 @@ fn keys_of(s: &State, q: u8) -> Vec<Slot> {
 
 /// Points the cross-hair at the map tile (x, y) with no object selected.
 fn aim_tile(s: &mut State, x: u16, y: u16) {
-    let c = s.map.centre;
-    let col = x as i16 - c.x as i16 + 5;
-    let row = y as i16 - c.y as i16 + 5;
+    let pointer = cell_pixel(s, x, y);
     let input = &mut s.ui.input;
     input.selection = -1;
     input.target = (x as i16, y as i16);
-    input.pointer = (col * 16 + 8, row * 16 + 8);
+    input.pointer = pointer;
     input.target_void = false;
 }
 
