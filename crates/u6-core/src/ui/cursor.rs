@@ -28,12 +28,14 @@ pub fn select_command(s: &mut State, io: &Io, cmd: u8) {
     let old = last_command(&s.actors);
     if old != NO_ICON {
         let x = icon_x(old);
-        io.draw(|fb| fill_rect(fb, x, 0xc0, x + 0xf, 0xc0, paper));
+        let map = s.ui.paper.as_ref();
+        io.draw(|fb| fill_rect(fb, x, 0xc0, x + 0xf, 0xc0, paper, map));
     }
     set_last_command(&mut s.actors, cmd);
     if cmd != NO_ICON {
         let x = icon_x(cmd);
-        io.draw(|fb| fill_rect(fb, x, 0xc0, x + 0xf, 0xc0, ink));
+        let map = s.ui.paper.as_ref();
+        io.draw(|fb| fill_rect(fb, x, 0xc0, x + 0xf, 0xc0, ink, map));
     }
 }
 

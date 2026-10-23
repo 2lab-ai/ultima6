@@ -783,7 +783,7 @@ fn aim_tile(s: &mut State, x: u16, y: u16) {
 fn look_drawn() -> Command {
     Box::new(|st, io| {
         Box::pin(async move {
-            crate::main_loop::draw_paper(&st.borrow(), &io);
+            crate::main_loop::draw_paper(&mut st.borrow_mut(), &io);
             crate::gfx::refresh_view(&mut st.borrow_mut(), &io);
             crate::ui::panels::redraw_panel(&st, &io).await;
             super::look(&st, &io).await;

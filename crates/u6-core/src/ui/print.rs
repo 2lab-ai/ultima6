@@ -272,7 +272,8 @@ fn end_line(s: &mut State, io: &Io, c: i32, said: bool) {
         } else if w.flags & SCROLL != 0 {
             let w = *w;
             t.drawn = true;
-            io.draw(|fb| text::scroll_window(fb, &w));
+            let paper = s.ui.paper.as_ref();
+            io.draw(|fb| text::scroll_window(fb, &w, paper));
         }
     } else {
         let t = &mut s.ui.text;

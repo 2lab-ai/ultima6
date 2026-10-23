@@ -94,3 +94,86 @@ fn roster_arrows_when_the_list_scrolls() {
     assert_eq!(cell(e.frame(), 0x15, 3, INK), 0x18);
     assert_eq!(cell(e.frame(), 0x15, 12, INK), 0x19);
 }
+
+/// Spec 07 HD0: the side panel's clear (the stats panel here), the combat-mode line's and the
+/// command underline's, over a paper of the panel's paper colour but for two pixels of another
+/// (in the panel's top rows and under the first icon's underline): each pixel filled names the
+/// paper where the paper's colour there is the colour filled, and is classic elsewhere (the other
+/// colour's pixels, the underline in the command colour).
+#[test]
+fn the_panel_and_underline_fills_name_the_paper_where_it_is_their_colour() {
+    use u6_formats::bitmap::Bitmap;
+    use u6_render::{BITMAP_PAPER, Kind, Src};
+    let mut s = party_state();
+    s.ui.panel.mode = 0x90;
+    s.actors.attrs.combat_mode[1] = 2;
+    let mut pixels = vec![PAPER; 320 * 200];
+    pixels[7 * 320 + 0xa9] = ALERT;
+    pixels[0xc0 * 320 + 10] = ALERT;
+    let bmp = Bitmap {
+        width: 320,
+        height: 200,
+        pixels,
+    };
+    let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
+    s.ui.paper = Some(text::Paper::drawn(&identity, &bmp));
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        panels::redraw_panel(&st, &io).await;
+        panels::combat_mode_line(&st, &io).await;
+        let mut s = st.borrow_mut();
+        cursor::select_command(&mut s, &io, 0x81);
+        cursor::select_command(&mut s, &io, 0x82);
+        drop(s);
+        io.present();
+    });
+    e.enable_src_plane();
+    for _ in 0..4 {
+        e.tick(&[], 16);
+    }
+    let fb = e.frame();
+    let at = |x: usize, y: usize| (fb.get(x, y).unwrap(), fb.src_at(x, y).unwrap());
+    let paper = |x: usize, y: usize| Src {
+        ver: 0,
+        id: BITMAP_PAPER,
+        u: x as u16,
+        v: y as u16,
+        kind: Kind::Bitmap,
+        flags: 0,
+    };
+    // The panel's clear, above its text rows.
+    assert_eq!(at(0xa8, 6), (PAPER, paper(0xa8, 6)), "the panel's clear");
+    assert_eq!(at(0x137, 7), (PAPER, paper(0x137, 7)));
+    assert_eq!(
+        at(0xa9, 7),
+        (PAPER, Src::CLASSIC),
+        "over the paper's other colour"
+    );
+    // The combat-mode line's clear, right of its name.
+    assert_eq!(
+        at(0x137, 0x67),
+        (PAPER, paper(0x137, 0x67)),
+        "the mode line's clear"
+    );
+    // The first icon's underline painted over in the paper colour; the second's in the command
+    // colour.
+    for x in 8..24 {
+        let want = if x == 10 {
+            Src::CLASSIC
+        } else {
+            paper(x, 0xc0)
+        };
+        assert_eq!(at(x, 0xc0), (PAPER, want), "the underline cleared at {x}");
+    }
+    for x in 24..40 {
+        assert_eq!(at(x, 0xc0), (5, Src::CLASSIC), "the underline at {x}");
+    }
+    assert_eq!(
+        kind_at(fb, 0, 0xc0),
+        Kind::Classic,
+        "no fill there: the plane's own"
+    );
+}
+
+fn kind_at(fb: &Framebuffer, x: usize, y: usize) -> u6_render::Kind {
+    fb.src_at(x, y).unwrap().kind
+}

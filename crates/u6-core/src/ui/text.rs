@@ -6,8 +6,12 @@
 //! port draws into the engine's chunky back buffer ([`crate::Io::draw`]) where the original
 //! writes the bitplanes of the screen at 0x161bde.
 
+use std::fmt;
+use std::rc::Rc;
+
+use u6_formats::bitmap::Bitmap;
 use u6_formats::font::{BitFont, HangulFont};
-use u6_render::{FLAG_INK, Framebuffer, HEIGHT, Kind, Src, WIDTH};
+use u6_render::{BITMAP_PAPER, FLAG_INK, Framebuffer, HEIGHT, Kind, Src, WIDTH};
 
 /// Window flag (byte 8) bit: wrap at word boundaries.
 pub const WRAP: u8 = 0x01;
@@ -217,9 +221,82 @@ fn draw_cell(
 
 /// Fills the inclusive pixel rectangle with `colour`: 0x152176 selects the colour, 0x1521f4
 /// fills (on the screen, set mode; [`crate::gfx::blit::fill_rect`]).
-pub fn fill_rect(fb: &mut Framebuffer, x0: i32, y0: i32, x1: i32, y1: i32, colour: u8) {
+///
+/// Port (spec 07 HD0): with `paper` ([`Paper`]) each pixel filled names the paper where the
+/// paper's colour there is `colour`, so the HD paper shows wherever the classic frame shows the
+/// paper's own colour; the others are classic. Without it, or without a source plane, every pixel
+/// filled is classic. The text windows' clears and the UI's (the panels, the command underline)
+/// fill through here; the colours are those of the fill either way.
+pub fn fill_rect(
+    fb: &mut Framebuffer,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    colour: u8,
+    paper: Option<&Paper>,
+) {
     let w = |v: i32| v as u16;
     crate::gfx::blit::fill_colour(fb, w(x0), w(y0), w(x1), w(y1), colour);
+    name_paper(fb, (w(x0), w(y0), w(x1), w(y1)), paper);
+}
+
+/// Port-only (spec 07 HD0): the paper's colour at each screen pixel, as
+/// [`crate::main_loop::draw_paper`] drew it at the boot (the bitmap at (0, 0) through the bitmap
+/// colour table), none where it drew nothing. With it the scroll of a text window and the fills of
+/// the UI name the paper wherever a pixel they write has the paper's own colour there
+/// ([`scroll_window`], [`fill_rect`]), so the HD paper shows in place behind the text and the
+/// panels; every other pixel they write is classic. Shared, so a copy of the state does not copy it; shown by its size only (it
+/// is the user's art).
+#[derive(Clone, PartialEq, Eq)]
+pub struct Paper(Rc<[u8]>);
+
+impl Paper {
+    /// A pixel the paper did not draw (the paper's colours are below 32).
+    const NONE: u8 = 0xff;
+
+    /// The colours `bmp` puts on the screen drawn at (0, 0) through `colours`, as
+    /// [`crate::gfx::blit::blit_bmp`] draws them.
+    pub fn drawn(colours: &[u8; 256], bmp: &Bitmap) -> Paper {
+        let mut fb = Framebuffer::new();
+        fb.clear(Self::NONE);
+        crate::gfx::blit::blit_bmp(colours, &mut fb, bmp, 0, 0, BITMAP_PAPER);
+        Paper(Rc::from(fb.pixels()))
+    }
+
+    /// The paper's colour at (x, y); `None` off the screen and where it drew nothing.
+    pub fn at(&self, x: usize, y: usize) -> Option<u8> {
+        let c = (x < WIDTH && y < HEIGHT).then(|| self.0[y * WIDTH + x]);
+        c.filter(|&c| c != Self::NONE)
+    }
+
+    /// The source of the paper's pixel at screen (x, y) (it is drawn at (0, 0)).
+    pub fn src(x: usize, y: usize) -> Src {
+        Src {
+            ver: 0,
+            id: BITMAP_PAPER,
+            u: x as u16,
+            v: y as u16,
+            kind: Kind::Bitmap,
+            flags: 0,
+        }
+    }
+
+    /// The source of a pixel of colour `colour` written at (x, y) over the paper: the paper's
+    /// there when that is its colour, else classic.
+    fn over(&self, x: usize, y: usize, colour: u8) -> Src {
+        if self.at(x, y) == Some(colour) {
+            Self::src(x, y)
+        } else {
+            Src::CLASSIC
+        }
+    }
+}
+
+impl fmt::Debug for Paper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Paper({} pixels)", self.0.len())
+    }
 }
 
 /// Original: 0x1522d6 (graphics: move a byte-aligned screen rectangle up by `-dy` pixel rows)
@@ -227,8 +304,21 @@ pub fn fill_rect(fb: &mut Framebuffer, x0: i32, y0: i32, x1: i32, y1: i32, colou
 /// Columns are whole bytes (`x >> 3`); the corners are swapped into order. Only a negative
 /// `dy` moves anything: the positive branch adjusts its pointers and returns without copying,
 /// and so does this port. The pixels moved keep their sources (spec 07 HD0: a panel bitmap under
-/// the text stays named; spec 11: a glyph stays the glyph it was).
-pub fn scroll_rect(fb: &mut Framebuffer, x0: u16, y0: u16, x1: u16, y1: u16, dy: i16) {
+/// the text stays named; spec 11: a glyph stays the glyph it was), but the paper's when `paper`
+/// is given: the paper is the background, drawn at (0, 0) under the whole screen, and does not
+/// move with the text. A paper pixel moved names the paper at the place it moves to when its
+/// colour is the paper's there, so the HD paper shows that place, not the one the pixel came
+/// from; one of another colour (a pixel of the paper's edge moved into its plain middle) is
+/// classic. The colours move as they did, so the classic frame is unchanged.
+pub fn scroll_rect(
+    fb: &mut Framebuffer,
+    x0: u16,
+    y0: u16,
+    x1: u16,
+    y1: u16,
+    dy: i16,
+    paper: Option<&Paper>,
+) {
     let (mut c0, mut c1) = (x0 >> 3, x1 >> 3);
     let (mut r0, mut r1) = (y0, y1);
     if c0 > c1 {
@@ -243,26 +333,39 @@ pub fn scroll_rect(fb: &mut Framebuffer, x0: u16, y0: u16, x1: u16, y1: u16, dy:
     let shift = dy.unsigned_abs();
     let rows = (r1 - r0 + 1).saturating_sub(shift);
     let (px0, px1) = (usize::from(c0) * 8, (usize::from(c1) + 1) * 8);
+    let is_paper = |s: &Src| s.kind == Kind::Bitmap && s.id == BITMAP_PAPER;
     for r in 0..rows {
         let (dst, src) = (usize::from(r0 + r), usize::from(r0 + r + shift));
         if dst >= HEIGHT || src >= HEIGHT {
             continue;
         }
         for x in px0..px1.min(WIDTH) {
-            fb.copy_px_within(src * WIDTH + x, dst * WIDTH + x);
+            let (from, to) = (src * WIDTH + x, dst * WIDTH + x);
+            match paper.filter(|_| fb.src_at(x, src).is_some_and(|s| is_paper(&s))) {
+                Some(p) => {
+                    let colour = fb.pixels()[from];
+                    fb.set_src(x, dst, colour, p.over(x, dst, colour));
+                }
+                None => fb.copy_px_within(from, to),
+            }
         }
     }
 }
 
 /// Original: 0x10525c (ui: scroll a window's cells up one row and clear the last row to its paper
 /// colour; the target of the pointer A4-0x7a20)
-pub fn scroll_window(fb: &mut Framebuffer, w: &TextWindow) {
+///
+/// Port (spec 07 HD0): with `paper` ([`Paper`]) the scroll leaves the paper in place
+/// ([`scroll_rect`]) and each pixel of the cleared row names the paper where the paper's colour
+/// there is the window's paper colour; without it, or without a source plane, the pixels move
+/// with their sources and the row is classic.
+pub fn scroll_window(fb: &mut Framebuffer, w: &TextWindow, paper: Option<&Paper>) {
     let x = u16::from(w.x) * 8;
     let y = u16::from(w.y) * 8;
     let wp = u16::from(w.width) * 8;
     let hp = u16::from(w.height) * 8;
     let (x1, y1) = (x + wp - 1, y + hp - 1);
-    scroll_rect(fb, x, y, x1, y1, -8);
+    scroll_rect(fb, x, y, x1, y1, -8, paper);
     fill_rect(
         fb,
         i32::from(x),
@@ -270,7 +373,34 @@ pub fn scroll_window(fb: &mut Framebuffer, w: &TextWindow) {
         i32::from(x1),
         i32::from(y1),
         w.bg,
+        paper,
     );
+}
+
+/// Port-only (spec 07 HD0): after a fill of the inclusive rectangle ([`fill_rect`]; its corners
+/// put in order and held to the screen as [`crate::gfx::blit::fill_colour`] does), each pixel of
+/// it names the paper where its colour is the paper's there ([`Paper`]); the others stay classic.
+/// Nothing without `paper` or without a source plane.
+fn name_paper(fb: &mut Framebuffer, (x0, y0, x1, y1): (u16, u16, u16, u16), paper: Option<&Paper>) {
+    let Some(p) = paper.filter(|_| fb.src().is_some()) else {
+        return;
+    };
+    let (xa, xb) = (
+        usize::from(x0.min(x1)),
+        usize::from(x0.max(x1)).min(WIDTH - 1),
+    );
+    let (ya, yb) = (
+        usize::from(y0.min(y1)),
+        usize::from(y0.max(y1)).min(HEIGHT - 1),
+    );
+    for y in ya..=yb {
+        for x in xa..=xb {
+            let colour = fb.pixels()[y * WIDTH + x];
+            if p.at(x, y) == Some(colour) {
+                fb.set_src(x, y, colour, Paper::src(x, y));
+            }
+        }
+    }
 }
 
 /// Original: 0x1082b0 (ui: number to text: up to `max` digits in `base`, signed when `base` < 0)

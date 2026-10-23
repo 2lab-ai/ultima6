@@ -91,8 +91,8 @@ fn use_on(s: State, files: &Files, target: Slot, cell: (i16, i16), keys: &[Input
     s.ui.panel.dirty = true;
     let mut e = Engine::with_game(s, files.clone(), |st, io| async move {
         {
-            let s = st.borrow();
-            crate::main_loop::draw_paper(&s, &io);
+            let mut s = st.borrow_mut();
+            crate::main_loop::draw_paper(&mut s, &io);
         }
         crate::gfx::refresh_view(&mut st.borrow_mut(), &io);
         crate::ui::panels::redraw_panel(&st, &io).await;

@@ -52,7 +52,7 @@ pub async fn set_cursor(state: &RefCell<State>, io: &Io, col: i16, row: i16) {
 fn clear_panel(s: &State, io: &Io) {
     let paper = s.ui.tables.colours.paper;
     let (x0, y0, x1, y1) = PANEL;
-    io.draw(|fb| fill_rect(fb, x0, y0, x1, y1, paper));
+    io.draw(|fb| fill_rect(fb, x0, y0, x1, y1, paper, s.ui.paper.as_ref()));
 }
 
 /// Original: 0x105c6a (ui: draw `tile` over `bg` at pixel (x, y); a forwarding wrapper of 0x10598a)
@@ -221,7 +221,8 @@ pub async fn combat_mode_line(state: &RefCell<State>, io: &Io) {
     let (name, fmt) = {
         let s = state.borrow();
         let paper = s.ui.tables.colours.paper;
-        io.draw(|fb| fill_rect(fb, 0x100, 0x60, 0x137, 0x67, paper));
+        let map = s.ui.paper.as_ref();
+        io.draw(|fb| fill_rect(fb, 0x100, 0x60, 0x137, 0x67, paper, map));
         let actor = member_actor(&s, s.ui.panel.member);
         let mode = s.actors.attrs.combat_mode[usize::from(actor)];
         let name = s.ui.tables.combat_mode_name(mode).to_vec();

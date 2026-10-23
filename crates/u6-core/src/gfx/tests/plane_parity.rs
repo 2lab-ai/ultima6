@@ -313,7 +313,7 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>, Rc<Cell<bool>>) {
                 if step % 23 == 11 {
                     io.draw(|f| {
                         crate::ui::text::draw_glyph(f, &font, 40, 64, b'x', 1, 2);
-                        crate::ui::text::scroll_window(f, &text);
+                        crate::ui::text::scroll_window(f, &text, None);
                     });
                 }
             }

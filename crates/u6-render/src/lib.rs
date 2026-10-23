@@ -54,7 +54,8 @@ pub enum Kind {
     Bitmap = 3,
     /// Spec 11: a pixel of an 8 × 8 character cell; [`Src::id`] is the cell's code (a code of the
     /// game's font, or a Hangul syllable's code point), (u, v) the pixel's place in the cell,
-    /// [`FLAG_INK`] on its set pixels. No image: shown classic, or by the HD font mode
+    /// [`FLAG_INK`] on its set pixels. No image: shown classic (a clear pixel of the paper's
+    /// colour at its place shows the HD paper there, [`hd`]), or by the HD font mode
     /// ([`hd::Compositor::set_font_mode`]) as a listed glyph.
     Glyph = 4,
 }

@@ -3,8 +3,9 @@
 //! every frame the engine shows, each block of the 4× frame must be what the definition gives:
 //! for a current unflagged tile, portrait or panel bitmap pixel, its block of MMPX ×4 of its
 //! image decoded here independently (the record now, the portrait and the panel bitmaps through
-//! the bitmap colour table), its transparent sub-pixels the classic colour; for every other
-//! pixel the classic colour. Every 50th frame a new compositor must make the same frame. Skips
+//! the bitmap colour table), its transparent sub-pixels the classic colour; for a glyph pixel
+//! without ink whose colour is the paper's at its own place, the paper's block of that place; for
+//! every other pixel the classic colour. Every 50th frame a new compositor must make the same frame. Skips
 //! where the zip is missing; prints pass/fail and counts only.
 #![allow(clippy::disallowed_methods)] // tests may read files
 
@@ -13,7 +14,7 @@ use std::rc::Rc;
 
 use u6_formats::bitmap::Bitmap;
 use u6_render::hd::{Compositor, Scale, mmpx, word};
-use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, HEIGHT, Kind, WIDTH, portrait_of};
+use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, HEIGHT, Kind, Src, WIDTH, portrait_of};
 
 use super::receipts::{Setup, boot_then, chars, files, give_book};
 use crate::engine::{Engine, InputEvent, Key};
@@ -31,6 +32,8 @@ struct Receipt {
     frames: u64,
     /// HD blocks checked by kind: tile, portrait, paper, spellbook; and classic blocks.
     hd: [u64; 4],
+    /// Glyph pixels shown as the paper's block of their place (counted in `hd`'s paper too).
+    behind: u64,
     classic: u64,
     /// Blocks that differ from the definition's.
     wrong: u64,
@@ -113,17 +116,43 @@ impl Receipt {
         let pal: [u32; 256] = std::array::from_fn(|i| word(fb.palette[i]));
         let sf = SCALE.factor();
         let src = fb.src().quiet();
+        // The paper's own pixels, for the glyph pixels it shows behind.
+        let paper = Src {
+            ver: 0,
+            id: BITMAP_PAPER,
+            u: 0,
+            v: 0,
+            kind: Kind::Bitmap,
+            flags: 0,
+        };
+        let bitmaps = (self.paper.as_ref(), self.book.as_ref());
+        let paper_words = Self::image(bitmaps, e, &s, paper, &pal);
         // This frame's images by (kind, id, version): their size and MMPX ×4.
         type Hd = Option<(usize, usize, Rc<Vec<u32>>)>;
         let mut frame: HashMap<(Kind, u16, u32), Hd> = HashMap::new();
         for (i, &sp) in src.iter().enumerate() {
             let (x, y) = (i % WIDTH, i / WIDTH);
             let classic = pal[usize::from(fb.pixels()[i])];
-            let image = if sp.kind == Kind::Classic || sp.flags != 0 {
+            // A glyph pixel without ink of the paper's colour at its place shows the paper there.
+            let behind = sp.kind == Kind::Glyph
+                && sp.flags & FLAG_INK == 0
+                && paper_words
+                    .as_ref()
+                    .is_some_and(|(w, h, p)| x < *w && y < *h && p[y * w + x] == classic);
+            self.behind += u64::from(behind);
+            let sp = if behind {
+                Src {
+                    u: x as u16,
+                    v: y as u16,
+                    ..paper
+                }
+            } else {
+                sp
+            };
+            let image = if matches!(sp.kind, Kind::Classic | Kind::Glyph) || sp.flags != 0 {
                 None
             } else {
                 let made = &mut self.made;
-                let bitmaps = (self.paper.as_ref(), self.book.as_ref());
                 let image = |sp| Self::image(bitmaps, e, &s, sp, &pal);
                 frame
                     .entry((sp.kind, sp.id, sp.ver))
@@ -224,23 +253,30 @@ fn the_hd_frame_of_the_users_game_is_the_definitions() {
     ] {
         press(&mut e, &mut r, &[k], 80);
     }
+    // As the source receipt: twelve more steps and two passes, so the message window scrolls
+    // while its last row is still the paper's.
+    for k in [Key::Left, Key::Right].repeat(6) {
+        press(&mut e, &mut r, &[k], 80);
+    }
+    press(&mut e, &mut r, &[Key::Space, Key::Space], 80);
     press(&mut e, &mut r, &chars("c"), 60);
     press(&mut e, &mut r, &[Key::Escape], 60);
     press(&mut e, &mut r, &chars("l"), 30);
     press(&mut e, &mut r, &[Key::Enter], 120);
     press(&mut e, &mut r, &[Key::Space], 60);
     idle(&mut e, &mut r, 600);
-    let covered = r.hd.iter().all(|&n| n > 0);
+    let covered = r.hd.iter().all(|&n| n > 0) && r.behind > 0;
     let pass = r.wrong == 0 && r.fresh.1 == 0 && covered;
     println!(
-        "hd receipt: {}; {} frames at 4x; HD blocks {} tile, {} portrait, {} paper, {} spellbook; \
-         {} classic; {} blocks off the definition; a new compositor on {} frames, {} differ; \
-         retained cache payload peak {} KiB of {} KiB",
+        "hd receipt: {}; {} frames at 4x; HD blocks {} tile, {} portrait, {} paper ({} of them \
+         behind glyphs), {} spellbook; {} classic; {} blocks off the definition; a new compositor \
+         on {} frames, {} differ; retained cache payload peak {} KiB of {} KiB",
         if pass { "pass" } else { "FAIL" },
         r.frames,
         r.hd[0],
         r.hd[1],
         r.hd[2],
+        r.behind,
         r.hd[3],
         r.classic,
         r.wrong,
@@ -251,7 +287,10 @@ fn the_hd_frame_of_the_users_game_is_the_definitions() {
     );
     assert_eq!(r.wrong, 0, "blocks off the definition");
     assert_eq!(r.fresh.1, 0, "a new compositor's frame");
-    assert!(covered, "every kind was shown HD");
+    assert!(
+        covered,
+        "every kind was shown HD, and the paper behind glyphs"
+    );
 }
 
 /// The receipt's own reference on synthetic images: a portrait (a one-item archive) and a panel

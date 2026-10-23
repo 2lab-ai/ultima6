@@ -8,16 +8,16 @@ use crate::FLAG_INK;
 
 /// Row bytes with ink and paper on every row (bit 7 = leftmost): four 4 × 4 squares, ink at the
 /// top left and the bottom right. A pattern, not a letter.
-const SHAPE: [u8; 8] = [0xf0, 0xf0, 0xf0, 0xf0, 0x0f, 0x0f, 0x0f, 0x0f];
+pub(super) const SHAPE: [u8; 8] = [0xf0, 0xf0, 0xf0, 0xf0, 0x0f, 0x0f, 0x0f, 0x0f];
 
 /// The ink and paper indices of most test cells.
-const INK: u8 = 1;
-const PAPER: u8 = 2;
+pub(super) const INK: u8 = 1;
+pub(super) const PAPER: u8 = 2;
 
 /// Draws the glyph of `code` with row bytes `rows` at screen pixel (x, y) as the text path does:
 /// set pixels in `ink` with [`FLAG_INK`], clear ones in `paper`, each naming the glyph at its
 /// place in the glyph.
-fn glyph_px(
+pub(super) fn glyph_px(
     fb: &mut Framebuffer,
     code: u16,
     rows: [u8; 8],
@@ -54,7 +54,12 @@ fn space(fb: &mut Framebuffer, (col, row): (usize, usize)) {
 }
 
 /// The composition of a new compositor in the font mode `font`: its frame and its list.
-fn fresh_font(fb: &Framebuffer, pics: &Pics, scale: Scale, font: bool) -> (Vec<u32>, Vec<HdGlyph>) {
+pub(super) fn fresh_font(
+    fb: &Framebuffer,
+    pics: &Pics,
+    scale: Scale,
+    font: bool,
+) -> (Vec<u32>, Vec<HdGlyph>) {
     let mut c = Compositor::new();
     c.set_font_mode(font);
     c.compose(fb, &mut pics.clone(), scale);
@@ -62,7 +67,7 @@ fn fresh_font(fb: &Framebuffer, pics: &Pics, scale: Scale, font: bool) -> (Vec<u
 }
 
 /// The listing of cell (col, row) as the compositor gives it, in `fb`'s palette.
-fn listed(
+pub(super) fn listed(
     fb: &Framebuffer,
     code: u16,
     (col, row): (usize, usize),
@@ -78,7 +83,7 @@ fn listed(
 }
 
 /// The screen pixels of cell (col, row).
-fn cell_pixels((col, row): (usize, usize)) -> impl Iterator<Item = (usize, usize)> {
+pub(super) fn cell_pixels((col, row): (usize, usize)) -> impl Iterator<Item = (usize, usize)> {
     (0..CELL * CELL).map(move |k| (col * CELL + k % CELL, row * CELL + k / CELL))
 }
 
@@ -235,9 +240,10 @@ fn the_hd_font_lists_whole_letters_syllables_and_spaces_only() {
 
 /// The mode off (the default) composes each glyph pixel as the classic pixel it was before
 /// spec 11 (whole spaces, which the mode on lists, included): the frame is that of the same
-/// colours drawn classic, byte for byte, with the same images asked for (a glyph is never asked
-/// as one) and nothing listed; and a compositor switched on and off again writes every block and
-/// is a new one's.
+/// colours drawn classic, byte for byte, with the same images asked for and the paper (a glyph is
+/// never asked as an image; the paper, which a glyph shows where it is of the paper's colour, is
+/// asked once, and there is none here) and nothing listed; and a compositor switched on and off
+/// again writes every block and is a new one's.
 #[test]
 fn with_the_font_mode_off_glyphs_are_the_classic_pixels_they_were() {
     let mut pics = Pics::default();
@@ -267,7 +273,13 @@ fn with_the_font_mode_off_glyphs_are_the_classic_pixels_they_were() {
         let mut d = Compositor::new();
         d.compose(&classic, &mut b, scale);
         assert!(c.rgba() == d.rgba(), "{scale:?}: byte for byte");
-        assert_eq!(a.asked, b.asked, "{scale:?}: no glyph asked as an image");
+        // The glyphs ask for the paper once (they show it where they are of its colour; there is
+        // none here), and no glyph is asked as an image.
+        assert_eq!(
+            a.asked,
+            b.asked + 1,
+            "{scale:?}: no glyph asked as an image"
+        );
         assert!(c.glyphs().is_empty());
         c.take_dirty();
         for font in [true, false] {
