@@ -89,17 +89,35 @@ fn hatched_egg(s: &mut State) -> Egg {
     }
 }
 
-/// View cells (column, row of the view around the centre, [`VIEW_W`] × [`VIEW_H`]) of the
-/// monsters, sorted.
+/// [`cells_of`] every monster.
+#[cfg(not(feature = "wide"))]
 fn cells(s: &State) -> Vec<(i16, i16)> {
+    cells_of(s, &monsters(s))
+}
+
+/// View cells (column, row of the view around the centre, [`VIEW_W`] × [`VIEW_H`]) of the
+/// monsters `ms`, sorted.
+fn cells_of(s: &State, ms: &[(Slot, u16, u16, u16, u8)]) -> Vec<(i16, i16)> {
     let c = s.map.centre;
     let (hw, hh) = (HALF_W as i16, HALF_H as i16);
-    let mut v: Vec<(i16, i16)> = monsters(s)
+    let mut v: Vec<(i16, i16)> = ms
         .iter()
         .map(|m| (m.2 as i16 - c.x as i16 + hw, m.3 as i16 - c.y as i16 + hh))
         .collect();
     v.sort_unstable();
     v
+}
+
+/// The monsters of `ms` the egg on tile `at` hatched, in Wide: there the window offers the eggs
+/// past the wide view too (spec 13 Decision 6), and every egg's hatchlings stand on its tile or
+/// where the scatter put them, within 3 cells of it on each axis (0x121e88: two draws of 1..=4,
+/// less 5).
+#[cfg(feature = "wide")]
+fn own(ms: Vec<(Slot, u16, u16, u16, u8)>, at: (u16, u16)) -> Vec<(Slot, u16, u16, u16, u8)> {
+    let near = |a: u16, b: u16| (i32::from(a) - i32::from(b)).abs() <= 3;
+    ms.into_iter()
+        .filter(|m| near(m.2, at.0) && near(m.3, at.1))
+        .collect()
 }
 
 /// The oracle's view cells of the start egg's monsters, read off an oracle frame of the
@@ -151,6 +169,9 @@ fn the_start_egg_hatches_its_gargoyles() {
         full,
         ..
     } = hatched_egg(&mut s);
+    // In Wide the check takes the start egg's own monsters (`own`); Original takes them all.
+    #[cfg(feature = "wide")]
+    let ms = own(ms, at);
     // Output: the template's index only (types, counts and places are the user's data).
     // Each template makes 1..=its quantity of its type (all of it from an egg of quantity 100),
     // gargoyles among them (0x16a / 0x16b, the types 0x1319b2 compares with).
@@ -174,7 +195,14 @@ fn the_start_egg_hatches_its_gargoyles() {
     // the oracle directory, or the environment override). Without them the placement check is
     // invariant-only: in view, one monster a cell.
     let s = started(&files, 0x1d3);
+    #[cfg(not(feature = "wide"))]
     let got = cells(&s);
+    #[cfg(feature = "wide")]
+    let got = {
+        let mut s = s;
+        let at = hatched_egg(&mut s).at;
+        cells_of(&s, &own(monsters(&s), at))
+    };
     let mut distinct = got.clone();
     distinct.dedup();
     assert!(distinct.len() == got.len(), "one monster a cell");

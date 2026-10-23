@@ -3,7 +3,7 @@
 //! where keys from the boot cannot reach (no spellbook at the start; the castle is not
 //! wilderness), then [`super::commands::command_loop`] fed one key per tick. Cast reaches magic
 //! 0x11af10 and Rest 0x127b1a through the loop's dispatch; the spellbook also by clicks (0x106474). With `U6_RECEIPTS=<dir>` the frames
-//! go there as raw RGBA (320 × 200). Skips where the zip is missing; reads it, copies nothing.
+//! go there as raw RGBA (the frame, `u6_render::WIDTH` × `HEIGHT`). Skips where the zip is missing; reads it, copies nothing.
 #![allow(clippy::disallowed_methods)] // tests may read files
 
 use std::cell::RefCell;
@@ -11,6 +11,7 @@ use std::path::Path;
 
 use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
+use crate::geom::{VIEW_H, VIEW_W};
 use crate::image::A4;
 use crate::objects::{IN_CONTAINER, READIED};
 use crate::state::State;
@@ -148,9 +149,26 @@ pub(super) fn give_book(s: &mut State, spells: &[u8]) {
     }
 }
 
+/// Every egg on the map marked hatched (status 0x40), so the egg pass of a window rebuild
+/// (0x1321dc) only marks it again (0x1319b2) and a receipt's walk meets no hatchlings. The start
+/// egg, which [`boot_then`] leaves unhatched, has status 0x20 and is offered at every rebuild;
+/// the window rebuilds when the leader leaves window cells `LEAD..=LEAD + 7` (`geom::LEAD`: 16 in
+/// Original, 26 in Wide), which in Wide the receipts' first steps from the start do.
+pub(super) fn hatch_no_eggs(s: &mut State) {
+    /// The egg type 0x1321dc compares with.
+    const EGG: u16 = 0x14f;
+    for o in 0x100..crate::objects::OBJECT_SLOTS as crate::objects::Slot {
+        if s.objects.kind(o) == EGG && s.objects.place(o) == 0 {
+            s.objects.obj_status[o as usize] |= 0x40;
+        }
+    }
+}
+
+/// View cells drawn lit (neither unseen nor dark), over the whole view: [`VIEW_H`] rows of
+/// [`VIEW_W`].
 fn lit_cells(s: &State) -> usize {
-    (0..11)
-        .flat_map(|r| (0..11).map(move |c| (c, r)))
+    (0..VIEW_H)
+        .flat_map(|r| (0..VIEW_W).map(move |c| (c, r)))
         .filter(|&(c, r)| {
             let t = s.map.view_tile(c, r);
             t != crate::map::view::NOT_VISIBLE && t != crate::map::view::DARK

@@ -1232,11 +1232,17 @@ mod tests {
         }
     }
 
-    /// The published map window (176 × 176 from the top left) of `e`.
+    /// The frame pixels of the shown map ([`crate::geom::SHOWN`], C3), row by row.
+    fn shown_map() -> impl Iterator<Item = (usize, usize)> {
+        let (x0, y0, x1, y1) = crate::geom::SHOWN;
+        let (x0, x1) = (usize::from(x0), usize::from(x1));
+        (usize::from(y0)..=usize::from(y1)).flat_map(move |y| (x0..=x1).map(move |x| (x, y)))
+    }
+
+    /// The published map window of `e`: the shown map ([`shown_map`]).
     fn published_window(e: &Engine) -> Vec<u8> {
         e.io().published(|fb| {
-            (0..176)
-                .flat_map(|y| (0..176).map(move |x| (x, y)))
+            shown_map()
                 .map(|(x, y)| fb.get(x, y).unwrap_or(0))
                 .collect()
         })
@@ -1284,7 +1290,7 @@ mod tests {
             }
             s
         };
-        let marker = vec![5u8; 176 * 176];
+        let marker = vec![5u8; shown_map().count()];
         // When (ms after the turn began) the published window first differs from the marker,
         // and how many recorded frames were shown.
         let run = |s: State, tick: u32, zero: bool| {
@@ -1293,10 +1299,8 @@ mod tests {
             let (st0, dn) = (Rc::clone(&start), Rc::clone(&done));
             let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
                 io.draw(|fb| {
-                    for y in 0..176 {
-                        for x in 0..176 {
-                            fb.set(x, y, 5);
-                        }
+                    for (x, y) in shown_map() {
+                        fb.set(x, y, 5);
                     }
                 });
                 io.present();

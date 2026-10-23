@@ -19,7 +19,7 @@ use u6_render::{
     BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, FLAG_PAPER, HEIGHT, Kind, Src, WIDTH, portrait_of,
 };
 
-use super::receipts::{Setup, boot_then, chars, files, give_book};
+use super::receipts::{Setup, boot_then, chars, files, give_book, hatch_no_eggs};
 use crate::engine::{Engine, InputEvent, Key};
 use crate::hd::ImageCache;
 use crate::state::State;
@@ -236,6 +236,8 @@ fn the_hd_frame_of_the_users_game_is_the_definitions() {
         // The game-first patch of the hero's portrait byte (re/notes/oracle.md §D), so Look at
         // the hero shows a portrait.
         s.actors.objlist_tail[0x81] = 1;
+        // The walks below meet no hatchlings in either build (in Wide they move the window).
+        hatch_no_eggs(s);
     });
     let state = State::new_game(&files).quiet();
     let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {

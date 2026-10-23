@@ -18,11 +18,14 @@ use super::objlist::{OBJLIST_LEN, TABLES, decode, encode};
 use super::*;
 use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
-use crate::objects::{ACTOR_SLOTS, BLOCK_COUNT, FIRST_TEMP_ACTOR};
+use crate::objects::BLOCK_COUNT;
+#[cfg(not(feature = "wide"))]
+use crate::objects::{ACTOR_SLOTS, FIRST_TEMP_ACTOR};
 use crate::state::State;
 use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
+#[cfg(not(feature = "wide"))]
 const ORACLE: &str = "/Users/zhugehyuk/Games/ultima6/oracle/saveload";
 
 fn zip_files() -> Option<Files> {
@@ -39,6 +42,7 @@ fn zip_files() -> Option<Files> {
 }
 
 /// `ORACLE/<dir>/*` as `savegame/<name>` (a `savegame/` directory taken off the PLAYER disk).
+#[cfg(not(feature = "wide"))]
 fn oracle_save(dir: &str) -> Option<MemStore> {
     let path = Path::new(ORACLE).join(dir);
     let Ok(entries) = std::fs::read_dir(&path) else {
@@ -266,6 +270,7 @@ fn decode_agrees_with_the_formats_parser() {
 
 /// The surface block holding the leader's superchunk (128 × 128 tiles a block, x then y): in a
 /// start save the block of the opening fight (the egg the party stands by).
+#[cfg(not(feature = "wide"))]
 fn leader_block(s: &State) -> usize {
     let at = s.leader_position().expect("a leader");
     usize::from(at.y / 128) * 8 + usize::from(at.x / 128)
@@ -273,6 +278,7 @@ fn leader_block(s: &State) -> usize {
 
 /// The shipped party roster: the actor numbers at objlist 0x0FE0, as many as the size at 0x0FF0
 /// (formats.md §6), read from the raw file.
+#[cfg(not(feature = "wide"))]
 fn roster(files: &Files) -> Vec<usize> {
     let raw = files.get(OBJLIST_FILE).quiet();
     let n = usize::from(raw[0x0FF0]).min(16);
@@ -283,6 +289,7 @@ fn roster(files: &Files) -> Vec<usize> {
 }
 
 /// The new-game files the port boots from: objlist and the 69 blocks.
+#[cfg(not(feature = "wide"))]
 fn shipped(files: &Files) -> (Vec<u8>, Vec<Vec<u8>>) {
     let objlist = files.get(OBJLIST_FILE).quiet()[..OBJLIST_LEN].to_vec();
     let blocks = (0..BLOCK_COUNT)
@@ -298,6 +305,7 @@ fn shipped(files: &Files) -> (Vec<u8>, Vec<Vec<u8>>) {
 /// fight (the egg 0x1319b2 hatches its creatures into temporary actor slots, combat starts
 /// 0x121c64; [`opening_fight`]). The portrait byte (block 0x81) is the port's character-creation
 /// stub.
+#[cfg(not(feature = "wide"))]
 fn boot_change(table: &str, i: usize, x: u8, y: u8, party: &[usize]) -> Option<&'static str> {
     if opening_fight(table, i, party) {
         return Some("0x1319b2 / 0x121c64 opening fight");
@@ -313,6 +321,8 @@ fn boot_change(table: &str, i: usize, x: u8, y: u8, party: &[usize]) -> Option<&
     })
 }
 
+// Original only: Wide's 60-cell window hatches more eggs at the start (spec 13 Decision 6).
+#[cfg(not(feature = "wide"))]
 #[test]
 fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
     let Some(files) = zip_files() else { return };
@@ -380,6 +390,7 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
 /// the number of differing block files.
 ///
 /// Content-free: table names, byte and record indices only (no counts of the user's records).
+#[cfg(not(feature = "wide"))]
 fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8>>)) -> usize {
     for (table, _, first) in table_diffs(&want.0, &got.0) {
         eprintln!("{what}: objlist {table} differs, first at {first:x?}");
@@ -417,6 +428,7 @@ fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8
 }
 
 /// The `savegame/` files of a store, objlist and the 69 blocks.
+#[cfg(not(feature = "wide"))]
 fn store_files(store: &MemStore) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut f = Files::default();
     f.overlay("s", store.files.clone());
@@ -430,6 +442,7 @@ fn store_files(store: &MemStore) -> (Vec<u8>, Vec<Vec<u8>>) {
 /// A record with its container-content byte 3 cleared: 0x10d376 packs a container content's
 /// record index through a 3-byte stack buffer whose third byte it never writes (A5-1), so the
 /// original leaves stack contents there; nothing reads it back.
+#[cfg(not(feature = "wide"))]
 fn defined(r: &[u8; 8]) -> [u8; 8] {
     let mut r = *r;
     if r[0] & 0x18 == 0x08 {
@@ -438,6 +451,7 @@ fn defined(r: &[u8; 8]) -> [u8; 8] {
     r
 }
 
+#[cfg(not(feature = "wide"))]
 fn defined_block(bytes: &[u8]) -> Vec<[u8; 8]> {
     records(bytes).iter().map(defined).collect()
 }
@@ -445,6 +459,7 @@ fn defined_block(bytes: &[u8]) -> Vec<[u8; 8]> {
 /// An actor's frame bits: the high 6 bits of its type + frame word (objlist 0x0400, even
 /// bytes). Idle animation turns actors as display time passes (0x10202e, A4-0x7afa); the
 /// oracle saved after ~1000 frames, the port after 40 ticks.
+#[cfg(not(feature = "wide"))]
 fn frame_only(table: &str, index: usize, x: u8, y: u8) -> bool {
     table == "0x137988 type + frame" && index.is_multiple_of(2) && x & 3 == y & 3
 }
@@ -455,6 +470,7 @@ fn frame_only(table: &str, index: usize, x: u8, y: u8) -> bool {
 /// worktype operand = its party index, the solo worktype kept at A4-0x7b0a). The port runs both
 /// since milestone 2 but from its own RNG state (seed 0; the oracle's differs), so the
 /// creatures' stats, places and gear differ from the original's. `party` = the roster.
+#[cfg(not(feature = "wide"))]
 fn opening_fight(table: &str, index: usize, party: &[usize]) -> bool {
     let actor = match table {
         "0x135588 location" => index / 3,
@@ -471,18 +487,21 @@ fn opening_fight(table: &str, index: usize, party: &[usize]) -> bool {
 }
 
 /// A temporary actor slot (0xe0..0x100, the monsters' slots).
+#[cfg(not(feature = "wide"))]
 fn temporary(actor: usize) -> bool {
     (FIRST_TEMP_ACTOR as usize..ACTOR_SLOTS).contains(&actor)
 }
 
 /// A block record of the opening fight: a readied object (the gear 0x13121a gives) of a
 /// temporary actor, or an egg (type 0x14f), whose status the hatch changes.
+#[cfg(not(feature = "wide"))]
 fn fight_record(r: &[u8; 8]) -> bool {
     (r[0] & 0x38 == 0x38 && temporary(usize::from(r[1]))) || r[4..6] == [1, 0x4f]
 }
 
 /// The records of a block without the opening fight's, container indices (which shift after
 /// them) cleared, sorted.
+#[cfg(not(feature = "wide"))]
 fn strip_fight(v: Vec<[u8; 8]>) -> Vec<[u8; 8]> {
     let mut v: Vec<[u8; 8]> = v
         .into_iter()
@@ -500,12 +519,15 @@ fn strip_fight(v: Vec<[u8; 8]>) -> Vec<[u8; 8]> {
 }
 
 /// The hatched creatures' gear records (readied, owned by a temporary actor) of a block.
+#[cfg(not(feature = "wide"))]
 fn gear_records(v: &[[u8; 8]]) -> usize {
     v.iter()
         .filter(|r| r[0] & 0x38 == 0x38 && temporary(usize::from(r[1])))
         .count()
 }
 
+// Original only: the original's run; Wide's window hatches more eggs (spec 13 Decision 6).
+#[cfg(not(feature = "wide"))]
 #[test]
 fn the_ports_start_save_against_the_originals() {
     let Some(mut files) = zip_files() else { return };
@@ -582,6 +604,8 @@ fn a_saved_party_size_past_the_roster_boots_clamped() {
 
 /// The original's own save boots in the port, and the port's save of it is the original's
 /// save of the same state (the original booted from that save and saved again at once).
+// Original only: the original's run; Wide's window hatches more eggs (spec 13 Decision 6).
+#[cfg(not(feature = "wide"))]
 #[test]
 fn the_originals_save_loads_and_saves_like_the_original() {
     let Some(mut files) = zip_files() else { return };
@@ -682,35 +706,29 @@ impl Run {
         pressed
     }
 
-    /// `T`, the cross-hair onto the nearest actor not in the party within 5 tiles (else the
-    /// nearest member), Return; then answers the conversation: "bye" at a line input, else
-    /// space / N / Y until the prompt is back. Returns the actor talked to.
+    /// `T`, the cross-hair onto the party's first member after the leader, Return; then answers
+    /// the conversation: "bye" at a line input, else space / N / Y until the prompt is back.
+    /// Returns the actor talked to. The member follows the leader, so the target does not hang
+    /// on where the actors round the party walked (the nearest actor did: any change to a path
+    /// picked another, one that may not ask for a line).
     fn talk(&mut self) -> u16 {
         let (target, dx, dy) = {
             let s = self.e.state();
             let c = s.leader_position().quiet();
             let leader = s.actors.party.leader().quiet().0;
-            let party: Vec<u16> = s.actors.party.active().map(|a| a.0).collect();
-            let mut best: Option<(bool, i32, u16, i32, i32)> = None;
-            for a in 1..0xe0u16 {
-                let p = s.objects.location[usize::from(a)];
-                if a == leader || s.objects.type_frame[usize::from(a)] == 0 || p.z != c.z {
-                    continue;
-                }
-                let (dx, dy) = (
-                    i32::from(p.x) - i32::from(c.x),
-                    i32::from(p.y) - i32::from(c.y),
-                );
-                if dx.abs() > 5 || dy.abs() > 5 {
-                    continue;
-                }
-                let key = (party.contains(&a), dx.abs().max(dy.abs()), a, dx, dy);
-                if best.is_none_or(|b| (key.0, key.1) < (b.0, b.1)) {
-                    best = Some(key);
-                }
-            }
-            let b = best.expect("an actor near the party");
-            (b.2, b.3, b.4)
+            let target = s.actors.party.active().map(|a| a.0).find(|&a| a != leader);
+            let target = target.expect("a member besides the leader");
+            let p = s.objects.location[usize::from(target)];
+            let (dx, dy) = (
+                i32::from(p.x) - i32::from(c.x),
+                i32::from(p.y) - i32::from(c.y),
+            );
+            let reach = i32::from(crate::geom::RULE_HALF);
+            assert!(
+                p.z == c.z && dx.abs() <= reach && dy.abs() <= reach,
+                "the member is in the cross-hair's reach"
+            );
+            (target, dx, dy)
         };
         self.press(Key::Char('t'));
         let (h, v) = (
