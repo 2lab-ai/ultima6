@@ -273,11 +273,31 @@ fn flap(s: &mut State, o: Slot) {
 ///
 /// Spec 13: the foes are those of the original's 11 × 11 box round the leader (Decision 3,
 /// [`RULE_HALF`]); the dragon enters at the view's edge, [`HALF_W`] columns from the centre,
-/// and crosses the view in `VIEW_W - 1` steps (Decision 5; ten in Original).
+/// and crosses the view in `VIEW_W - 1` one-cell steps (Decision 5; ten in Original), showing
+/// the original's ten frames ([`CROSSING_FRAMES`], [`shows_frame`]; Decision 7).
 pub async fn wing_strike(state: &RefCell<State>, io: &Io) {
     let caster = super::cast::caster(&state.borrow());
     super::spells::flash_actor(state, io, caster, 0).await;
     let rows = seams::a4_bytes(io, -0x6b2c, 6);
+    sweep(state, io, caster, &rows).await;
+}
+
+/// The display frames a dragon's crossing shows after its first: the original's, one per step
+/// of its ten.
+const CROSSING_FRAMES: i16 = 10;
+
+/// Spec 13 Decision 7 (durations stay, rates scale): step `k` (1..=`steps`) of a crossing of
+/// `steps` one-cell steps ends on a display frame when `k * 10 / steps` advances, so a crossing
+/// shows [`CROSSING_FRAMES`] frames whatever its steps: every step in Original (ten steps), about
+/// every fourth of Wide's 36.
+fn shows_frame(k: i16, steps: i16) -> bool {
+    k * CROSSING_FRAMES / steps != (k - 1) * CROSSING_FRAMES / steps
+}
+
+/// [`wing_strike`] after the caster's flash, with the A4-0x6b2c pairs `rows` (step sign of row 0
+/// and 1, then the two frame pairs).
+pub(super) async fn sweep(state: &RefCell<State>, io: &Io, caster: u16, rows: &[u8]) {
+    let steps = VIEW_W as i16 - 1;
     let mut any = false;
     for a in 0..0x100u16 {
         let (x, y, cx, step, parts) = {
@@ -312,7 +332,7 @@ pub async fn wing_strike(state: &RefCell<State>, io: &Io) {
             (x, y, cx, step, (head, tail))
         };
         io.vblank().await;
-        for k in 1..VIEW_W as i16 {
+        for k in 1..=steps {
             let hit = {
                 let mut s = state.borrow_mut();
                 flap(&mut s, parts.0);
@@ -335,7 +355,9 @@ pub async fn wing_strike(state: &RefCell<State>, io: &Io) {
             if hit {
                 seams::wound_line(state, io, a).await;
             }
-            io.vblank().await;
+            if shows_frame(k, steps) {
+                io.vblank().await;
+            }
         }
         any = true;
         let mut s = state.borrow_mut();

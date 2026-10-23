@@ -324,6 +324,40 @@ fn wing_strike_hits_on_the_foe_s_column() {
     );
 }
 
+/// Spec 13 Decision 7: a dragon's crossing awaits the original's display frames in both builds,
+/// 11 (its first and one per step of its ten), however many one-cell steps it takes, and a foe
+/// on its row is struck once, on its column. The step sign of row 0 (east of the centre) is +1;
+/// the hit flash is off, so the only waits are the crossing's.
+#[test]
+fn a_dragon_s_crossing_shows_the_original_frames_and_strikes_once() {
+    let mut s = world_with(&[(5, 0x178, 103, 100)]);
+    s.actors.attrs.status[5] = 0x20;
+    s.actors.attrs.hp[5] = 0xff;
+    s.combat.flash = 0;
+    s.rng = Rng::seeded(5);
+    let mut dice = s.rng;
+    let strike = dice.range(1, 0x14) as u8;
+    let frames = Rc::new(std::cell::Cell::new(None));
+    let out = Rc::clone(&frames);
+    let rows = [1u8, 0xff, 0, 0, 0, 0];
+    let s = run(s, &[], move |st, io| async move {
+        let before = io.generation();
+        super::creatures::sweep(&st, &io, 1, &rows).await;
+        out.set(Some(io.generation() - before));
+    });
+    println!(
+        "crossing of {} steps: {:?} frames",
+        VIEW_W - 1,
+        frames.get()
+    );
+    assert_eq!(frames.get(), Some(11), "the original's frames");
+    assert_eq!(s.actors.attrs.hp[5], 0xff - strike, "one strike");
+    assert!(
+        (0x100..crate::objects::OBJECT_SLOTS).all(|o| s.objects.type_frame[o] & 0x3ff != 0x19b),
+        "the dragon goes"
+    );
+}
+
 /// 0x133562's sprite calls: a stone (sprite 7) over its saved background reaches the screen
 /// through the changed rectangle (whole bytes) as one frame, and the back buffer gets the
 /// background back; the hit mark (tile 0x101) copies its 16 x 16 cell to the screen and leaves
