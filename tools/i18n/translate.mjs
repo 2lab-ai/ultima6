@@ -59,7 +59,8 @@
 // scripts of those ages, a script not listed counting as adult: all of them, or with `--first N`
 // the first N of them. Without `--speakers` every request is byte for byte as before.
 // One Korean form per name over the scripts: `--names <file>` (u6.names/1, the owner's names
-// table, local: {format, names: [{en, ko}]}, read strictly (readNames): one that does not read is
+// table, local: {format, names: [{en, ko}]}, read strictly (readNames): one that does not read,
+// or whose two entries give one form or a form and that form with a particle after it, is
 // refused with no request). A listed name occurs in an English line or table string at a word
 // boundary, case-sensitive, the longest names first and without overlap (a two-word name takes
 // its words before a one-word name could); hidden `&…&` text, runic `<…>` text, a keyword its `@`
@@ -75,8 +76,10 @@
 // script, settled to it whatever the answer gives, never refused, and another key's word colliding
 // with it refused. With --regate it is the one keyword word the run changes: a named key whose
 // pack words are not its form alone is set to it, and the script's lines are checked with it (one
-// showing the old word fails `keywords` and is sent); the summary counts the keys so set. Without
-// `--names` every request and output is byte for byte as before.
+// showing the old word fails `keywords` and is sent); it is written only when every line of the
+// script sent that shows it landed (settleSets), else the pack's word and lines stay (a line that
+// landed showing it too: it was checked with the form); the summary counts the keys so set and
+// those so left. Without `--names` every request and output is byte for byte as before.
 // The game strings go in requests of at most STRINGS_PER_REQUEST strings and STRING_CHARS
 // characters, the object names in requests of at most LOOK_PER_REQUEST names and LOOK_CHARS
 // characters, the books in requests of at most BOOKS_PER_REQUEST books and BOOK_CHARS characters
@@ -129,9 +132,14 @@
 // words of the keys the names file names, above): the shared keywords are
 // not asked, an answer's `keywords` are not read, the pack's aliases are written as they were and
 // the keys are not counted; so it does not go with --fresh-keywords (nor with --name, --ages or
-// --strings). A line still failing keeps the pack's line, as any merge does. The consent text says
-// what is kept and sent, and the summary names the lines kept, the lines sent and the lines still
-// failing, by reason. Without --regate every request and file is as before.
+// --strings). A line still failing keeps the pack's line, as any merge does; with --names a key
+// set to its name's form is written only when every line that shows it landed, otherwise the
+// pack's word and lines stay (settleSets), and the merge checks again only the pack lines that
+// show a key so set, never one that already failed with the pack's words nor one that shows a key
+// left as the pack has it (outputsOf), so it drops no line that shows no key set, as a run
+// without --names drops none. The consent text says what is kept and sent, and the summary names
+// the lines kept, the lines sent and the lines still failing, by reason. Without --regate every
+// request and file is as before.
 // The answer is JSON only, {"lines": [{"n", "ko"}]} (and "keywords" for a script with keys).
 // Each line is checked by the mechanical gates of spec 08 §6 (structure only: the escapes'
 // multiset, Hangul syllables and ASCII only, as many double quote marks outside hidden `&…&` text
@@ -1544,7 +1552,9 @@ export function readSpeakers(value) {
 /// ko}, in its order. Strict: an object of exactly {format, names}, at most NAMES_MAX entries, each
 /// exactly {en, ko}: `en` words of ASCII letters and `'` (a letter among them), one space between
 /// two, `ko` words of Hangul syllables, one space between two, 1 to NAME_SYLLABLES syllables in
-/// all; no `en` twice. Anything else throws an InputError with a fixed message (a count at most).
+/// all; no `en` twice; no two entries whose forms are one or one the other with a particle of
+/// [`PARTICLES`] after it (the names gate would take the one for the other). Anything else throws
+/// an InputError with a fixed message (a count or two entries' indexes at most, never a text).
 export function readNames(value) {
   const refused = (why) => new InputError(`the names file is not ${NAMES_FORMAT}${why ? `: ${why}` : ''}`);
   if (!exact(value, ['format', 'names']) || value.format !== NAMES_FORMAT || !Array.isArray(value.names)) throw refused('');
@@ -1561,6 +1571,11 @@ export function readNames(value) {
     else seen.add(x.en);
   }
   if (twice > 0) throw refused(`${twice} entries list an English name listed before`);
+  const alike = (a, b) => a === b || PARTICLES.some((p) => a === b + p || b === a + p);
+  for (let j = 1; j < value.names.length; j += 1) {
+    const i = value.names.findIndex((x, at) => at < j && alike(x.ko, value.names[j].ko));
+    if (i >= 0) throw refused(`names[${i}] and names[${j}] give one Korean form, or one the other with a particle after it`);
+  }
   return value.names.map(({ en, ko }) => ({ en, ko }));
 }
 
@@ -1641,14 +1656,15 @@ export function settledOf(scripts) {
 /// most GLOSSARY_SHOWN, in script order); never a key of one letter (a word longer than its key
 /// hits it, so over the scripts it would gather every highlighted word that starts so: `y` and `n`
 /// are a reply's yes and no, which each script's request marks, [`topicsOf`]), nor a key whose
-/// word is set (`yes`, `no`: [`fixedOf`]); `compatible`, whether two keys may keep colliding
-/// words: in every one of them that holds both, the first block of each is the same
-/// ([`compatibleOf`]); null when no key is so shared.
+/// word is set (`yes`, `no`: [`fixedOf`]), and with --names a script does not hold here a key its
+/// `named` ([`namedOf`]) gives a form (that form is the key's fixed word there); `compatible`,
+/// whether two keys may keep colliding words: in every one of them that holds both, the first
+/// block of each is the same ([`compatibleOf`]); null when no key is so shared.
 export function glossaryOf(scripts, settled = new Set()) {
   const held = new Map();
   for (const s of scripts) {
     for (const k of s.keys) {
-      if (k.length === 1 || fixedOf(k) !== null) continue;
+      if (k.length === 1 || fixedOf(k, [], s.named ?? null) !== null) continue;
       const h = held.get(k) ?? { k, scripts: 0, shown: [] };
       h.scripts += 1;
       for (const w of s.shown.get(k) ?? []) if (h.shown.length < GLOSSARY_SHOWN && !h.shown.includes(w)) h.shown.push(w);
@@ -1910,16 +1926,20 @@ export function settleKeys(script, r, existing = null) {
 /// none of it is sent, its lines left English (`not-in-pack`), and it is counted (`unpacked`).
 /// With --names (the scripts' `named`, [`namedOf`]) it is the one place a --regate run changes a
 /// keyword word: a key the names table names (and no yes or no word fixes) whose words in the pack
-/// are not its name's Korean form alone is set to that form (`set`, a Map of key to form, which the
-/// merge writes), and the script's lines are gated with the words so changed, so a line that
-/// shows the old word fails (`keywords`) and is sent; a named key whose form collides with a word
-/// the pack keeps for a key of another first block (or one set before it) stays as the pack has
-/// it and is no named key of the script (`clashing`): every other alias stays as the pack has it.
-/// Returns the counts: `kept`, `failing` (by reason), `lacking`, `sent` (the units left to send),
-/// `unpacked` and, with --names, `named` ({set, clashing}: keys).
+/// are not its name's Korean form alone is set to that form (`set`, a Map of key to form), and the
+/// script's lines are gated with the words so changed, so a line that shows the old word fails
+/// (`keywords`) and is sent; the merge writes a key set only when every line sent that shows it
+/// landed, otherwise the pack's word and lines stay ([`settleSets`], after the rounds); a named
+/// key whose form collides with a word the pack keeps for a key of another first block (or one
+/// set before it) stays as the pack has it and is no named key of the script (`clashing`): every
+/// other alias stays as the pack has it. Returns the counts: `kept`, `failing` (by reason),
+/// `lacking`, `sent` (the units left to send), `unpacked` and, with --names, `named` ({set,
+/// clashing, unlanded}: keys; `unlanded`, settleSets's).
 export function regateOf(scripts, existing) {
   const withNames = scripts.some((s) => s.named !== undefined);
-  const counts = { kept: 0, failing: {}, lacking: 0, sent: [], unpacked: 0, ...(withNames ? { named: { set: 0, clashing: 0 } } : {}) };
+  const counts = {
+    kept: 0, failing: {}, lacking: 0, sent: [], unpacked: 0, ...(withNames ? { named: { set: 0, clashing: 0, unlanded: 0 } } : {}),
+  };
   for (const s of scripts) {
     const { archive, item } = s.bundle;
     s.keyed = { keys: s.keys, words: scriptWordsOf(existing?.aliases, archive, item) };
@@ -1961,6 +1981,47 @@ export function regateOf(scripts, existing) {
   return counts;
 }
 
+/// After the rounds of a `--regate --names` run (whatever stopped them: a failed request, a route
+/// that refused one, an answer still failing, SIGINT): a key [`regateOf`] set to its name's form
+/// (`s.set`) is written only when every line and table string of its script this run sent that
+/// shows it (an English `@` word that hits it first, as the keyword gate reads them,
+/// [`braceWordsWanted`]) landed (an answer that passed the gates). Else it is no longer set: the
+/// pack's word stays (its lines are gated with it again, `keyed`), and every one of those lines
+/// that landed is left as the pack has it (`keywords`: it was gated with the form, which the pack
+/// then does not give the key); a line so left that shows another key set does the same to that
+/// one, until none does. The keys so left are the script's `unlanded` (a Set; the merge checks no
+/// line that shows one again, [`outputsOf`]); `counts` (regateOf's) then count the keys set and,
+/// apart, those so left (`named.unlanded`).
+export function settleSets(scripts, counts, existing = null) {
+  const sent = new Set(counts.sent);
+  for (const s of scripts) {
+    if (!(s.set?.size > 0)) continue;
+    const mine = s.units.filter((u) => sent.has(u));
+    const shows = (u, k) => keywordsOf(u.text).some((w) => keyHit(w, s.keys) === k);
+    const theirs = scriptWordsOf(existing?.aliases, s.bundle.archive, s.bundle.item);
+    s.unlanded = new Set();
+    for (let again = true; again;) {
+      again = false;
+      for (const k of [...s.set.keys()]) {
+        if (mine.every((u) => u.ko !== undefined || !shows(u, k))) continue;
+        s.set.delete(k);
+        s.unlanded.add(k);
+        if (theirs.has(k)) s.keyed.words.set(k, theirs.get(k));
+        else s.keyed.words.delete(k);
+        counts.named.set -= 1;
+        counts.named.unlanded += 1;
+        for (const u of mine) {
+          if (u.ko === undefined || !shows(u, k)) continue;
+          delete u.ko;
+          delete u.done;
+          u.why = 'keywords';
+        }
+        again = true;
+      }
+    }
+  }
+}
+
 // ` (<reason> <count>, …)`, in reason order, for the counts by reason `byReason`; '' for none.
 const reasonsOf = (byReason) => {
   const why = Object.entries(byReason).sort().map(([r, n]) => `${r} ${n}`).join(', ');
@@ -1982,9 +2043,15 @@ export function regateSummary(counts) {
     + `${sum(still)} still failing${reasonsOf(still)}${namedKeysOf(counts)}${unpackedOf(counts)}.`;
 }
 
-// `N set to their name's Korean form (M left …)` of [`regateOf`]'s counts with --names.
-const namedSetOf = (counts) => `${counts.named.set} set to their name's Korean form`
-  + `${counts.named.clashing > 0 ? ` (${counts.named.clashing} left as the pack has them: the form collides with another key's word)` : ''}`;
+// `N set to their name's Korean form (M left …)` of [`regateOf`]'s counts with --names (and
+// [`settleSets`]'s, after the rounds).
+const namedSetOf = (counts) => {
+  const left = [
+    counts.named.clashing > 0 ? `${counts.named.clashing} left as the pack has them: the form collides with another key's word` : null,
+    counts.named.unlanded > 0 ? `${counts.named.unlanded} left as the pack has them: a line showing it did not land` : null,
+  ].filter(Boolean);
+  return `${counts.named.set} set to their name's Korean form${left.length > 0 ? ` (${left.join('; ')})` : ''}`;
+};
 
 // `; keys the names file names: …` of [`regateOf`]'s counts, with --names only; '' without.
 const namedKeysOf = (counts) => (counts.named ? `; keys the names file names: ${namedSetOf(counts)}` : '');
@@ -2001,7 +2068,9 @@ const unpackedOf = (counts) => (counts.unpacked > 0
 /// in this run kept (`kept`, [`settleKeys`]) replace the pack's for the same keys, the pack's
 /// words of a key that lost to a fixed word (`lost`) are dropped, the others stay; every merged
 /// run and table string of a script whose words changed is checked again against the merged
-/// words, one that no longer passes dropped (left English, `keywords`); the aliases of a script
+/// words, one that no longer passes dropped (left English, `keywords`), but for a --regate run
+/// only a pack line that shows a key it set (`set`, [`settleSets`]'s), passed with the pack's
+/// words and shows no key settleSets left as the pack has it (`unlanded`); the aliases of a script
 /// the merged lines do not name are dropped (`no-base`). Coverage `keywords`:
 /// each key of the scripts answered given a word, or kept (its old word stays in the merged pack:
 /// `kept`, by reason, keys by hash), or left English (no word in the merged pack: `byReason`, and
@@ -2082,7 +2151,8 @@ export function outputsOf(plan, model, existing = null) {
   const fresh = [];
   const lostKeys = new Set();
   // A --regate run asks no key: its words stay the pack's but those of the keys the names file
-  // names that it set to their name's form (regateOf's `set`), and no key of it is counted.
+  // names that it set to their name's form and whose lines landed (regateOf's `set`, as
+  // settleSets leaves it), and no key of it is counted.
   if (plan.regate) {
     for (const s of plan.scripts) for (const [k, w] of s.set ?? []) fresh.push({ archive: s.bundle.archive, item: s.bundle.item, keyword: k, words: [w] });
   }
@@ -2103,7 +2173,12 @@ export function outputsOf(plan, model, existing = null) {
   const droppedAliases = (existing?.aliases ?? []).filter((a) => lostKeys.has(aliasKey(a)));
   merged.aliases = [...(existing?.aliases ?? []).filter((a) => !freshKeys.has(aliasKey(a)) && !lostKeys.has(aliasKey(a))), ...fresh];
   // Every merged run and table string of a script whose words changed is checked again against
-  // the merged words (the run gate's keywords); one that no longer passes is dropped, English.
+  // the merged words (the run gate's keywords); one that no longer passes is dropped, English. A
+  // --regate run changes a script's words only through the keys it set (regateOf's `set`, as
+  // settleSets leaves it) and its own lines were gated with the words the merge writes: only a
+  // pack line that shows a key it set is checked again, never one that already failed with the
+  // pack's words nor one that shows a key settleSets left as the pack has it (`unlanded`), so it
+  // drops no line that shows no key set, as a run without --names drops none.
   const changedScripts = new Set([...fresh.filter(differs), ...droppedAliases].map(script));
   const answered = new Map(plan.scripts.map((s) => [script(s.bundle), s]));
   const english = new Map();
@@ -2113,12 +2188,22 @@ export function outputsOf(plan, model, existing = null) {
     if (!english.has(at)) english.set(at, new Map((kind === 'table' ? tablesOf : unitsOf)(s.bundle).map((x) => [x.offset, x.text])));
     return english.get(at).get(r.offset);
   };
+  const rechecked = (r, kind, en) => {
+    if (!plan.regate) return true;
+    if ((kind === 'table' ? newTables : newRuns).has(key(r))) return false;
+    const s = answered.get(script(r));
+    const shown = new Set(keywordsOf(en).map((w) => keyHit(w, s.keys)));
+    if (![...(s.set ?? new Map()).keys()].some((k) => shown.has(k))) return false;
+    if ([...(s.unlanded ?? [])].some((k) => shown.has(k))) return false;
+    return keywordsWhy(en, r.text, { keys: s.keys, words: scriptWordsOf(existing?.aliases, r.archive, r.item) }) === null;
+  };
   let dropped = 0;
   const recheck = (list, kind) => list.filter((r) => {
     if (!changedScripts.has(script(r))) return true;
     const en = englishOf(r, kind);
+    if (en === undefined || !rechecked(r, kind, en)) return true;
     const keyed = { keys: answered.get(script(r)).keys, words: scriptWordsOf(merged.aliases, r.archive, r.item) };
-    if (en === undefined || keywordsWhy(en, r.text, keyed) === null) return true;
+    if (keywordsWhy(en, r.text, keyed) === null) return true;
     left.push({ category: kind === 'table' ? 'tables' : 'conversations', hash: r.hash, reason: 'keywords' });
     dropped += 1;
     return false;
@@ -2662,6 +2747,9 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { tr
     signals.off('SIGINT', onSignal);
     again = null;
   }
+  // A key a --regate --names run set is written only when its lines sent landed, whatever ended
+  // the rounds; else the pack's word and lines stay.
+  if (plan.regate) settleSets(plan.scripts, plan.regate, existing);
   const ms = now() - t0;
   const tokens = counts.usage > 0 ? `tokens: input ${counts.input}, output ${counts.output} (${counts.usage} answers counted)` : 'no token counts returned';
   say(`Sent: ${counts.requests} requests (${counts.retried} asked again) in ${seconds(ms)}; ${tokens}.`);

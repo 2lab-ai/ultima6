@@ -55,15 +55,22 @@
 //   request again too, none for lines that hold none), the gate `names` (a missing form refused,
 //   the form with a particle taken, after the other gates, runs and table strings), `--regate
 //   --names` sending only the lines that fail it, the names file's strict reader and its
-//   refusals, a request without `--names` (or whose lines hold no listed name) byte for byte
-//   main's, the guide's rule; a key every word of whose lines is one listed name (a one-word form)
-//   fixed to that form as the guide's yes and no words are (named as known, settled to it whatever
-//   the answer gives, a colliding word of another key refused, a yes or no word winning), a key
-//   under two names, a listed and an unlisted word, no line or a two-word form not named, and
-//   `--regate --names` setting a named key's other pack word to the form (the one alias it
-//   changes, its lines checked with it, written without a request when none needs sending), no
-//   alias changing without `--names`; and the check of what the tool printed reading past the
-//   preview's path, whose pid and random part may hold an item number by chance.
+//   refusals (two entries of one form, or of a form and it with a particle, by their indexes), a
+//   request without `--names` (or whose lines hold no listed name) byte for byte main's, the
+//   guide's rule; a key every word of whose lines is one listed name (a one-word form) fixed to
+//   that form as the guide's yes and no words are (named as known, settled to it whatever the
+//   answer gives, a colliding word of another key refused, a yes or no word winning, no shared
+//   keyword of a script that names it), a key under two names, a listed and an unlisted word, no
+//   line or a two-word form not named, and `--regate --names` setting a named key's other pack
+//   word to the form (the one alias it changes, its lines checked with it, written without a
+//   request when none needs sending, and only when every line sent that shows it landed: a failed
+//   or refused request, SIGINT, an answer keeping the old word, one of two scripts failing; a form
+//   colliding with another block's pack word and a reply's yes or no key not set, the first sent
+//   as the pack's word; the merge checking again only the pack lines that show a key set, never one
+//   that failed with the pack's words or shows a key left as the pack has it, none showing no key
+//   set dropped, as without `--names`), no alias changing without `--names`; and the check of
+//   what the tool printed reading past the preview's path, whose pid and random part may hold an
+//   item number by chance.
 //
 //   node --test tools/i18n/*.test.mjs
 import assert from 'node:assert/strict';
@@ -80,7 +87,7 @@ import { fileURLToPath } from 'node:url';
 import {
   AGES, CLASSES, COVERAGE_FORMAT, InputError, MAX_TOKENS, PACK_FORMAT, PARTICLES, PackReadError, SPEAKERS_FORMAT, SPEAKER_NOTE_MAX,
   aliasesOf, bodyOf, braceWords, braceWordsWanted, collide, compatibleOf, duplicateMembers, fingerprint, firstBlocksOf, gate,
-  glossaryOf, hash64, hex64, hits, keyHit, keyOf, keysOf, keywordsOf, knownOf, latin1, main, packBytes, placeholders, planOf,
+  glossaryOf, hash64, hex64, hits, keyHit, keyOf, keysOf, keywordsOf, knownOf, latin1, main, namedOf, packBytes, placeholders, planOf,
   readPack, readSpeakers, registerOf, scriptWordsOf, settledOf, settleKeys, speakerClass, systemOf, tableGate, topicsOf, unitsOf, wordGate,
 } from './translate.mjs';
 
@@ -2860,5 +2867,309 @@ test('--regate --names: a named key set when no line needs sending (its lines al
   assert.ok(r.text.includes('0 sent (0 that failed the checks, 0 the pack lacked), 0 still failing; keys the names file names: 1 set to their name\'s Korean form.'));
   assert.deepEqual(aliasesIn(await packOf(f.out)), [[9804, 'plo', ['술']], [9804, 'redmont', ['레드몬트']]]);
   quiet(plain.text + d.text + r.text, bundles);
+  await rm(f.dir, { recursive: true });
+});
+
+// The P/Q pack of namedBundles with Q's redmont also another word than the form (its line shows
+// that word), so both scripts' redmont are set and both scripts are sent.
+const NAMED_KO_BOTH = new Map([...NAMED_KO, ['Hail @Redmont.', '@{붉은산}여, 반갑소.']]);
+const NAMED_ALIASES_BOTH = NAMED_ALIASES.map((a) => (a[1] === NAMED_ITEMS[1] && a[2] === 'redmont' ? [a[0], a[1], a[2], '붉은산'] : a));
+
+test('--regate --names: a key set to its form is written only when every line sent showing it landed: a request that fails, a route that refuses it or SIGINT leaves the pack\'s word and every pack line, exit as for any failed request', async () => {
+  const bundles = namedBundles();
+  const units = bundles.reduce((n, b) => n + unitsOf(b).length, 0);
+  for (const [what, how, code, still] of [
+    ['a request that fails', () => ({ status: 500 }), 3, 'http-500 3'],
+    ['a route that refuses it', () => ({ status: 401 }), 3, 'http-401 3'],
+    ['SIGINT', (signals) => { signals.emit('SIGINT'); throw new Error('aborted'); }, 130, 'interrupted 3'],
+  ]) {
+    const f = await nfixture(bundles);
+    await namesPack(f.out, bundles, NAMED_KO, NAMED_ALIASES);
+    const beforeBytes = await readFile(join(f.out, 'ko.u6lp'));
+    const signals = new EventEmitter();
+    const asked = [];
+    const send = async (body) => {
+      asked.push(body);
+      return how(signals);
+    };
+    const r = await run([f.bundles, '--first', '2', '--names', f.names, '--out', f.out, '--send', '--regate'], send, { signals });
+    assert.equal(r.code, code, `${what}: its exit`);
+    assert.ok(asked.length > 0, `${what}: P was sent`);
+    assert.ok((await readFile(join(f.out, 'ko.u6lp'))).equals(beforeBytes), `${what}: no alias changed, every pack line kept`);
+    assert.ok(r.text.includes(`Regate: ${units - 3} lines and table strings kept as the pack had them, 3 sent (3 that failed the checks (keywords 2, names 1), `
+      + `0 the pack lacked), 3 still failing (${still}); keys the names file names: 0 set to their name's Korean form `
+      + '(1 left as the pack has them: a line showing it did not land).'), `${what}: the summary`);
+    assert.ok(r.text.includes('No line was translated: the pack there is left as it was.'), what);
+    assert.ok(!r.text.includes('left English again'), `${what}: no pack line dropped`);
+    quiet(r.text, bundles);
+    noneOf(r.text, [...NAME_WORDS, 'redmont', 'plo', '붉은산', '술', '네']);
+    await rm(f.dir, { recursive: true });
+  }
+});
+
+test('--regate --names: an answer that keeps a set key\'s old word in both rounds leaves the key the pack\'s word; that line keeps the pack\'s line, and so does a line of that key that landed with the form; a line of no set key that landed is written', async () => {
+  const bundles = namedBundles();
+  const [P] = NAMED_ITEMS;
+  const f = await nfixture(bundles);
+  await namesPack(f.out, bundles, NAMED_KO, NAMED_ALIASES);
+  const before = await packOf(f.out);
+  const units = bundles.reduce((n, b) => n + unitsOf(b).length, 0);
+  const t = keyedTransport(new Map(), new Map([['Seek @Redmont.', '@{붉은산}을 찾으시오.'], ['Redmont sleeps.', '레드몬트는 자오.']]));
+  const r = await run([f.bundles, '--first', '2', '--names', f.names, '--out', f.out, '--send', '--regate'], t.send);
+  assert.equal(r.code, 3, 'two lines left as the pack has them');
+  assert.deepEqual(t.bodies.map((b) => userOf(b).lines.map((l) => l.en)), [['Seek @Redmont.', 'Ask @Redmont again.', 'Redmont sleeps.'], ['Seek @Redmont.']],
+    'the old word kept: asked again once');
+  const pack = await packOf(f.out);
+  assert.deepEqual(aliasesIn(pack), aliasesIn(before), 'redmont keeps the pack\'s word');
+  const line = (en) => pack.converse.find((x) => x.item === P && x.hash === hashOf(en))?.text;
+  assert.equal(line('Seek @Redmont.'), NAMED_KO.get('Seek @Redmont.'), 'the line that kept the old word: the pack\'s');
+  assert.equal(line('Ask @Redmont again.'), NAMED_KO.get('Ask @Redmont again.'), 'landed with the form: the pack\'s, as the form is not written');
+  assert.equal(line('Redmont sleeps.'), '레드몬트는 자오.', 'the names failure mended');
+  assert.equal(pack.converse.length, before.converse.length, 'no pack line dropped');
+  assert.ok(r.text.includes(`Regate: ${units - 3} lines and table strings kept as the pack had them, 3 sent (3 that failed the checks (keywords 2, names 1), `
+    + '0 the pack lacked), 2 still failing (keywords 2); keys the names file names: 0 set to their name\'s Korean form '
+    + '(1 left as the pack has them: a line showing it did not land).'));
+  assert.ok(!r.text.includes('left English again'));
+  const coverage = JSON.parse(await readFile(join(f.out, 'coverage.json'), 'utf8'));
+  assert.deepEqual(coverage.units.byReason, { keywords: 2 });
+  quiet(r.text, bundles);
+  noneOf(r.text, [...NAME_WORDS, 'redmont', 'plo', '붉은산', '술', '네']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate --names: of two scripts whose named key is set, the one whose lines land has its key written, the one whose request fails keeps the pack\'s word and lines', async () => {
+  const bundles = namedBundles();
+  const [P, Q] = NAMED_ITEMS;
+  const f = await nfixture(bundles);
+  await namesPack(f.out, bundles, NAMED_KO_BOTH, NAMED_ALIASES_BOTH);
+  const before = await packOf(f.out);
+  const units = bundles.reduce((n, b) => n + unitsOf(b).length, 0);
+  const t = keyedTransport(new Map(), new Map([['Redmont sleeps.', '레드몬트는 자오.']]));
+  const send = async (body) => (userOf(body).npc.name === `${SENTINEL}Namedq` ? { status: 500 } : t.send(body));
+  const r = await run([f.bundles, '--first', '2', '--names', f.names, '--out', f.out, '--send', '--regate'], send);
+  assert.equal(r.code, 3, 'Q\'s line still failing');
+  const pack = await packOf(f.out);
+  const changed = aliasesIn(pack).filter((a) => !aliasesIn(before).some((b) => JSON.stringify(b) === JSON.stringify(a)));
+  assert.deepEqual(changed, [[P, 'redmont', ['레드몬트']]], 'P\'s key only');
+  assert.deepEqual(aliasesIn(pack).filter(([item]) => item === Q), aliasesIn(before).filter(([item]) => item === Q), 'Q\'s words as they were');
+  assert.deepEqual(pack.converse.filter((x) => x.item === Q), before.converse.filter((x) => x.item === Q), 'Q\'s lines as they were');
+  assert.ok(pack.converse.find((x) => x.item === P && x.hash === hashOf('Seek @Redmont.')).text.includes('@{레드몬트}'));
+  assert.ok(pack.converse.find((x) => x.item === P && x.hash === hashOf('Ask @Redmont again.')).text.includes('@{레드몬트}'));
+  assert.ok(r.text.includes(`Regate: ${units - 4} lines and table strings kept as the pack had them, 4 sent (4 that failed the checks (keywords 3, names 1), `
+    + '0 the pack lacked), 1 still failing (http-500 1); keys the names file names: 1 set to their name\'s Korean form '
+    + '(1 left as the pack has them: a line showing it did not land).'));
+  assert.ok(!r.text.includes('left English again'));
+  quiet(r.text, bundles);
+  noneOf(r.text, [...NAME_WORDS, 'redmont', 'plo', '붉은산', '술', '네']);
+  await rm(f.dir, { recursive: true });
+});
+
+// A script whose named key redmont's form collides with the word the pack keeps for zed, a key of
+// another block; with `quoted`, also a line whose pack line drops a double quote mark.
+const clashBundles = (quoted = false) => [kbundle('a', 9805, '0000000000199805', `${SENTINEL}Clash`, [
+  [['redmont'], 'Seek @Redmont.'], [['zed'], 'A @zed here.'], ...(quoted ? [[['wex'], '"The road is long']] : []),
+])];
+const CLASH_KO = new Map([['Seek @Redmont.', '@{붉은산}을 찾으시오.'], ['A @zed here.', '@{레드몬트가} 여기 있소.'], ['"The road is long', '그 길은 멀고']]);
+const CLASH_ALIASES = [['a', 9805, 'redmont', '붉은산'], ['a', 9805, 'zed', '레드몬트가']];
+
+test('--regate --names: a named key whose form collides with the word the pack keeps for a key of another block is not set: its lines pass with the pack\'s word, nothing is sent or written, and the summary counts it left as the pack has it', async () => {
+  const bundles = clashBundles();
+  const f = await nfixture(bundles);
+  await namesPack(f.out, bundles, CLASH_KO, CLASH_ALIASES);
+  const beforeBytes = await readFile(join(f.out, 'ko.u6lp'));
+  const asked = [];
+  const never = async (body) => {
+    asked.push(body);
+    return { status: 500 };
+  };
+  const r = await run([f.bundles, '--item', 'a:9805', '--names', f.names, '--out', f.out, '--send', '--regate'], never);
+  assert.equal(r.code, 1, 'nothing to send');
+  assert.equal(asked.length, 0, 'no request');
+  assert.ok(r.text.includes('0 sent (0 that failed the checks, 0 the pack lacked), 0 still failing; keys the names file names: 0 set to their name\'s Korean form '
+    + '(1 left as the pack has them: the form collides with another key\'s word).'));
+  assert.ok((await readFile(join(f.out, 'ko.u6lp'))).equals(beforeBytes), 'nothing written');
+  quiet(r.text, bundles);
+  noneOf(r.text, [...NAME_WORDS, 'redmont', 'zed', '붉은산']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate --names: a named key left as the pack has it for a clash is no named key of its script: a request of its script names it the pack\'s word as known, and the colliding key its own', async () => {
+  const bundles = clashBundles(true);
+  const f = await nfixture(bundles);
+  await namesPack(f.out, bundles, CLASH_KO, CLASH_ALIASES);
+  const before = await packOf(f.out);
+  const t = keyedTransport(new Map(), new Map([['"The road is long', '"그 길은 멀고']]));
+  const r = await run([f.bundles, '--item', 'a:9805', '--names', f.names, '--out', f.out, '--send', '--regate'], t.send);
+  assert.equal(r.code, 0);
+  assert.deepEqual(t.bodies.map((b) => userOf(b).lines.map((l) => l.en)), [['"The road is long']], 'the quotes failure only');
+  assert.deepEqual(knownSent(t.bodies[0]), [['redmont', '붉은산'], ['zed', '레드몬트가']], 'the pack\'s words, not the form');
+  assert.ok(r.text.includes('keys the names file names: 0 set to their name\'s Korean form (1 left as the pack has them: the form collides with another key\'s word).'));
+  assert.deepEqual(aliasesIn(await packOf(f.out)), aliasesIn(before));
+  quiet(r.text, bundles);
+  noneOf(r.text, [...NAME_WORDS, 'redmont', 'zed', 'wex', '붉은산']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate --names: a reply\'s n alone in its block that its lines show only as a listed name keeps the yes or no word: not set to the name\'s form, nothing sent or written', async () => {
+  const names = namesFile([...NAMES, { en: 'Nolm', ko: '놀름' }]);
+  const bundles = [kbundle('a', 9807, '0000000000199807', `${SENTINEL}Replyn`, [[['n'], 'Art thou @Nolm?']])];
+  const f = await nfixture(bundles, names);
+  await namesPack(f.out, bundles, new Map([['Art thou @Nolm?', '그대가 @{아니}인가?']]), [['a', 9807, 'n', '아니']]);
+  const beforeBytes = await readFile(join(f.out, 'ko.u6lp'));
+  const asked = [];
+  const never = async (body) => {
+    asked.push(body);
+    return { status: 500 };
+  };
+  const r = await run([f.bundles, '--item', 'a:9807', '--names', f.names, '--out', f.out, '--send', '--regate'], never);
+  assert.match(r.text, /; 1 of their keys are named, /, 'n is named');
+  assert.equal(r.code, 1, 'nothing to send');
+  assert.equal(asked.length, 0, 'no request');
+  assert.ok(r.text.includes('0 still failing; keys the names file names: 0 set to their name\'s Korean form.'));
+  assert.ok((await readFile(join(f.out, 'ko.u6lp'))).equals(beforeBytes), 'nothing written');
+  quiet(r.text, bundles);
+  noneOf(r.text, [...NAME_WORDS, 'Nolm', '놀름', '아니']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--names: a table two of whose entries give one Korean form, or a form and that form with a particle after it, is refused with the two entries\' indexes, never their text; a form inside another of two words is read', async () => {
+  const bundles = holding();
+  const never = async () => assert.fail('no request');
+  const R = 'Zqxrefused';
+  const ok = await nfixture(bundles);
+  assert.equal((await run([ok.bundles, '--first', '2', '--names', ok.names, '--out', ok.out, '--dry-run'], never)).code, 0, 'one form inside a two-word one: read');
+  for (const [what, list, [i, j]] of [
+    ['one form twice', [{ en: 'Brenn', ko: '브렌' }, { en: R, ko: '브렌' }], [0, 1]],
+    ['a form and it with a particle', [{ en: 'Brenn', ko: '브렌' }, { en: 'Quill', ko: '퀼' }, { en: R, ko: '브렌의' }], [0, 2]],
+    ['the longer first', [{ en: 'Quill', ko: '퀼' }, { en: R, ko: '브렌에게' }, { en: 'Brenn', ko: '브렌' }], [1, 2]],
+    ['a form of two words and it with a particle', [{ en: R, ko: '가나 다라' }, { en: 'Brenn', ko: '가나 다라가' }], [0, 1]],
+  ]) {
+    const g = await nfixture(bundles, namesFile(list));
+    const r = await run([g.bundles, '--first', '2', '--names', g.names, '--out', g.out, '--send'], never);
+    assert.equal(r.code, 2, `${what}: refused`);
+    assert.ok(r.text.includes(`translate: the names file is not u6.names/1: names[${i}] and names[${j}] give one Korean form, or one the other with a particle after it\n`),
+      `${what}: its message`);
+    assert.ok(!r.text.includes('Route:') && !existsSync(g.out), `${what}: before the route or the output directory`);
+    assert.ok(!r.text.includes(R) && !r.text.includes('Bundles:'), `${what}: nothing of the file printed`);
+    noneOf(r.text, list.flatMap((x) => [x.en, x.ko, ...x.ko.split(' ')]));
+    quiet(r.text, bundles);
+    await rm(g.dir, { recursive: true });
+  }
+  await rm(ok.dir, { recursive: true });
+});
+
+test('--names: a key a script\'s names table names is not held by that script for the shared keywords (its form is set there), as a yes or no key is not; without names it is', () => {
+  const bundles = [9811, 9812, 9813].map((item) => kbundle('a', item, `00000000001${item}0`, `${SENTINEL}Share${item}`, [
+    [['redmont'], 'Seek @Redmont.'], [['plo'], 'Try my @plo.'],
+  ]));
+  const scripts = planOf(bundles, { first: 3 }).scripts;
+  assert.deepEqual(glossaryOf(scripts).units.map((u) => u.k), ['plo', 'redmont'], 'without names both shared');
+  for (const s of scripts) s.named = namedOf(s.shown, NAMES);
+  assert.deepEqual(scripts.map((s) => [...s.named.keys()]), [['redmont'], ['redmont'], ['redmont']]);
+  assert.deepEqual(glossaryOf(scripts).units.map((u) => u.k), ['plo'], 'named in every script: not asked');
+  scripts[0].named = new Map();
+  assert.deepEqual(glossaryOf(scripts).units.map((u) => u.k), ['plo'], 'held unnamed by one script only: under the scripts a shared key needs');
+  for (const s of scripts) s.named = new Map();
+  assert.deepEqual(glossaryOf(scripts).units.map((u) => u.k), ['plo', 'redmont'], 'an empty table: as without names');
+});
+
+test('--regate --names: the merge checks again only the pack lines that show a key the run set: a line of its script still failing for another key\'s word keeps the pack\'s line, as a run without --names leaves it', async () => {
+  const item = 9821;
+  const bundles = [kbundle('a', item, '0000000000199821', `${SENTINEL}Rechecka`, [[['redmont'], 'Seek @Redmont.'], [['plo'], 'Try my @plo.']])];
+  const ko = new Map([['Seek @Redmont.', '@{붉은산}을 찾으시오.'], ['Try my @plo.', '내 @{돌}을 드시오.']]);
+  const aliases = [['a', item, 'plo', '술'], ['a', item, 'redmont', '붉은산']];
+  const f = await nfixture(bundles);
+  const g = await nfixture(bundles);
+  await namesPack(f.out, bundles, ko, aliases);
+  await namesPack(g.out, bundles, ko, aliases);
+  const before = await packOf(f.out);
+  // The plo line keeps its wrong word in both rounds; the redmont line lands with the form.
+  const answers = new Map([['Try my @plo.', '내 @{돌}을 드시오.']]);
+  const t = keyedTransport(new Map(), answers);
+  const r = await run([f.bundles, '--item', `a:${item}`, '--names', f.names, '--out', f.out, '--send', '--regate'], t.send);
+  const plain = keyedTransport(new Map(), answers);
+  const p = await run([g.bundles, '--item', `a:${item}`, '--out', g.out, '--send', '--regate'], plain.send);
+  assert.equal(r.code, 3, 'the plo line still failing');
+  assert.equal(p.code, 3);
+  const sent = (tr) => tr.bodies.map((b) => userOf(b).lines.map((l) => l.en));
+  assert.deepEqual(sent(t), [['Seek @Redmont.', 'Try my @plo.'], ['Try my @plo.']]);
+  assert.deepEqual(sent(plain), [['Try my @plo.'], ['Try my @plo.']], 'without --names: the plo line only');
+  const pack = await packOf(f.out);
+  const noSetKey = (x) => x.hash !== hashOf('Seek @Redmont.');
+  assert.deepEqual(pack.converse.filter(noSetKey), (await packOf(g.out)).converse.filter(noSetKey), 'every line that shows no set key as without --names');
+  assert.deepEqual(pack.converse.filter(noSetKey), before.converse.filter(noSetKey), 'the pack\'s lines, the failing one too');
+  assert.ok(pack.converse.find((x) => x.hash === hashOf('Seek @Redmont.')).text.includes('@{레드몬트}'), 'the set key\'s line landed');
+  const changed = aliasesIn(pack).filter((a) => !aliasesIn(before).some((b) => JSON.stringify(b) === JSON.stringify(a)));
+  assert.deepEqual(changed, [[item, 'redmont', ['레드몬트']]], 'its lines landed: set');
+  assert.ok(!r.text.includes('left English again'), 'no pack line dropped');
+  assert.ok(r.text.includes('1 still failing (keywords 1); keys the names file names: 1 set to their name\'s Korean form.'));
+  quiet(r.text + p.text, bundles);
+  noneOf(r.text + p.text, [...NAME_WORDS, 'redmont', 'plo', '붉은산', '술', '돌']);
+  await rm(f.dir, { recursive: true });
+  await rm(g.dir, { recursive: true });
+});
+
+test('--regate --names: a pack line that shows a key left as the pack has it (a line of it did not land) is not dropped, though it shows that key\'s form, alone or beside another key of its script that stays set', async () => {
+  const item = 9822;
+  const bundles = [kbundle('a', item, '0000000000199822', `${SENTINEL}Recheckb`, [
+    [['redmont'], 'Seek @Redmont.'], [['brenn'], 'Ask @Brenn.'], [['redmont'], 'Hail @Redmont.'], [['redmont'], 'Tell @Brenn of @Redmont.'],
+  ])];
+  const f = await nfixture(bundles);
+  // Both keys' pack words are not their forms; two lines already show the forms (kept, not sent).
+  await namesPack(f.out, bundles, new Map([
+    ['Seek @Redmont.', '@{붉은산}을 찾으시오.'], ['Ask @Brenn.', '@{바위}에게 묻소.'], ['Hail @Redmont.', '@{레드몬트}여, 반갑소.'],
+    ['Tell @Brenn of @Redmont.', '@{브렌}에게 @{레드몬트}를 전하시오.'],
+  ]), [['a', item, 'brenn', '바위'], ['a', item, 'redmont', '붉은산']]);
+  const before = await packOf(f.out);
+  const t = keyedTransport(new Map(), new Map([['Seek @Redmont.', '@{붉은산}을 찾으시오.']]));
+  const r = await run([f.bundles, '--item', `a:${item}`, '--names', f.names, '--out', f.out, '--send', '--regate'], t.send);
+  assert.equal(r.code, 3, 'the redmont line still failing');
+  assert.deepEqual(t.bodies.map((b) => userOf(b).lines.map((l) => l.en)), [['Seek @Redmont.', 'Ask @Brenn.'], ['Seek @Redmont.']]);
+  const pack = await packOf(f.out);
+  const line = (en) => pack.converse.find((x) => x.hash === hashOf(en))?.text;
+  const was = (en) => before.converse.find((x) => x.hash === hashOf(en)).text;
+  assert.equal(line('Hail @Redmont.'), was('Hail @Redmont.'), 'the form of the key left as the pack has it, alone: kept');
+  assert.equal(line('Tell @Brenn of @Redmont.'), was('Tell @Brenn of @Redmont.'), 'beside the key set: kept');
+  assert.equal(line('Seek @Redmont.'), was('Seek @Redmont.'), 'the line that did not land: the pack\'s');
+  assert.ok(line('Ask @Brenn.').includes('@{브렌}'), 'the set key\'s line landed');
+  assert.equal(pack.converse.length, before.converse.length, 'no pack line dropped');
+  const changed = aliasesIn(pack).filter((a) => !aliasesIn(before).some((b) => JSON.stringify(b) === JSON.stringify(a)));
+  assert.deepEqual(changed, [[item, 'brenn', ['브렌']]], 'brenn set; redmont as the pack has it');
+  assert.ok(!r.text.includes('left English again'));
+  assert.ok(r.text.includes('1 still failing (keywords 1); keys the names file names: 1 set to their name\'s Korean form '
+    + '(1 left as the pack has them: a line showing it did not land).'));
+  quiet(r.text, bundles);
+  noneOf(r.text, [...NAME_WORDS, 'redmont', 'brenn', '붉은산', '바위']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate --names: a pack line no gate of the run reads (a table string an op reads from inside) is not dropped by the merge when it already failed with the pack\'s words, or when it shows a key left as the pack has it, though it shows a key set', async () => {
+  const item = 9823;
+  const bundles = [kbundle('a', item, '0000000000199823', `${SENTINEL}Recheckc`, [[['redmont'], 'Seek @Redmont.'], [['brenn'], 'Ask @Brenn.']],
+    ['Tell @Brenn of @Redmont.', 'Ask @Brenn twice.'])];
+  for (const s of bundles[0].strings) s.inner = [0];
+  const f = await nfixture(bundles);
+  await namesPack(f.out, bundles, new Map([
+    ['Seek @Redmont.', '@{붉은산}을 찾으시오.'], ['Ask @Brenn.', '@{바위}에게 묻소.'],
+    // Passes with the pack's words, shows the key left as the pack has it and the key set.
+    ['Tell @Brenn of @Redmont.', '@{바위}에게 @{붉은산}를 전하시오.'],
+    // Fails with the pack's words already, shows the key set only.
+    ['Ask @Brenn twice.', '@{돌}에게 두 번 묻소.'],
+  ]), [['a', item, 'brenn', '바위'], ['a', item, 'redmont', '붉은산']]);
+  const before = await packOf(f.out);
+  const t = keyedTransport(new Map(), new Map([['Seek @Redmont.', '@{붉은산}을 찾으시오.']]));
+  const r = await run([f.bundles, '--item', `a:${item}`, '--names', f.names, '--out', f.out, '--send', '--regate'], t.send);
+  assert.equal(r.code, 3);
+  assert.deepEqual(t.bodies.map((b) => userOf(b).lines.map((l) => l.en)), [['Seek @Redmont.', 'Ask @Brenn.'], ['Seek @Redmont.']], 'the table strings not sent');
+  const pack = await packOf(f.out);
+  const changed = aliasesIn(pack).filter((a) => !aliasesIn(before).some((b) => JSON.stringify(b) === JSON.stringify(a)));
+  assert.deepEqual(changed, [[item, 'brenn', ['브렌']]], 'brenn set; redmont as the pack has it');
+  // A pack with no table string left has no `tables`.
+  const table = (p, en) => (p.tables ?? []).find((x) => x.hash === hashOf(en));
+  assert.deepEqual(table(pack, 'Tell @Brenn of @Redmont.'), table(before, 'Tell @Brenn of @Redmont.'), 'it shows the key left as the pack has it: kept');
+  assert.deepEqual(table(pack, 'Ask @Brenn twice.'), table(before, 'Ask @Brenn twice.'), 'it failed with the pack\'s words: kept');
+  assert.ok(!r.text.includes('left English again'));
+  quiet(r.text, bundles);
+  noneOf(r.text, [...NAME_WORDS, 'redmont', 'brenn', '붉은산', '바위', '돌']);
   await rm(f.dir, { recursive: true });
 });
