@@ -1470,13 +1470,58 @@ const LAYOUT_WHOLE = [64, 0, 1152, 720];
 // click map takes it for the rest of the screen, a cancel (ui/click.rs: region 3, 0x8f, the
 // target cleared), never a walk or a command; the arrow the game draws from there is off screen.
 const LAYOUT_REST = [319, 199];
-// The page's paint round the regions (v1): a dark fill, a 1 px frame round each region.
+// The letterbox's sides (every screen but the game's).
 const LAYOUT_FILL = '#0b0b0f';
-const LAYOUT_FRAME = '#3a3f4c';
+// Round the game's regions, the game's own paper (spec 10 Design 2, follow-up L2): `paper.bmp`,
+// drawn over the whole screen at the boot (main_loop.rs draw_paper), the windows drawn over it.
+// Taken from the ×4 frame at every whole paint, never kept. Its outer band, in game pixels 6 rows
+// at the top and the bottom and 8 columns at either side, is only the paper in game: the source
+// plane (Game.hd_source_at, read at the prompt and in a conversation) shows the paper bitmap and
+// nothing else there, and everywhere outside the regions but the column right of the side panel
+// beside its rows; only the pointer's sprite is drawn over it, where it reaches. The band goes
+// to the canvas's edges 9-sliced: `from`, a rect of the band (game pixels); `to`, where it goes
+// (canvas pixels); `flip`, mirrored across x or y. The corners at ×4, unscaled; the top edge
+// along the canvas at ×4 (the canvas is as wide as the ×4 frame), the left edge stretched down
+// it. The right edge, the bottom edge and the bottom-right corner are the left edge, the top edge
+// and the bottom-left corner mirrored: the band's own right and bottom strips hold the frame the
+// paper draws round the message scroll (they are the paper too, so the source plane cannot tell
+// them apart), and they are where the pointer's arrow reaches from the side panel, the message
+// scroll and the command bar; the top and left strips and those three corners are out of the
+// arrow's reach from every region (the sprite is over them only where the game starts it, until
+// the first move, and as the cross-hair at a region's very edge), and every rect here is outside
+// the regions' bounding box, so a change in the regions alone leaves the band as drawn.
+const LAYOUT_PAPER = [
+  { name: 'top-left', from: [0, 0, 8, 6], to: [0, 0, 32, 24] },
+  { name: 'top', from: [8, 0, 304, 6], to: [32, 0, 1216, 24] },
+  { name: 'top-right', from: [312, 0, 8, 6], to: [1248, 0, 32, 24] },
+  { name: 'left', from: [0, 6, 8, 188], to: [0, 24, 32, 672] },
+  { name: 'right', from: [0, 6, 8, 188], to: [1248, 24, 32, 672], flip: 'x' },
+  { name: 'bottom-left', from: [0, 194, 8, 6], to: [0, 696, 32, 24] },
+  { name: 'bottom', from: [8, 0, 304, 6], to: [32, 696, 1216, 24], flip: 'y' },
+  { name: 'bottom-right', from: [0, 194, 8, 6], to: [1248, 696, 32, 24], flip: 'x' },
+];
+// Inside the band (canvas pixels) the parchment, one colour: each channel's median of three
+// pixels of the ×4 frame, the top-left pixel of game pixels on the row between the side panel and
+// the message scroll, a quarter of the panel's width apart (the parchment there is one colour at
+// ×4, with and without the owner's HD pack). One colour, not a patch stretched: no patch of the
+// parchment is larger than a row of it, which stretched would streak the whole inside; three,
+// since the pointer's sprite (16 px wide) covers at most one of them.
+const LAYOUT_PARCHMENT = [32, 24, 1216, 672];
+const LAYOUT_SAMPLES = [[204, 104], [240, 104], [276, 104]];
+// What the band is taken from, in ×4 frame pixels: a dirty rect that meets one of these is
+// painted whole (`paint`), so the band never shows a frame before. The samples are not among
+// them: a dirty rect is one box round all a take changed, so the map's animation and a change of
+// the message scroll in one take span the samples' row, and would paint everything. The
+// parchment is checked instead: at every partial paint `paint` takes the samples' median from the
+// ×4 frame again and paints whole when it is not the colour the canvas shows (`parchmentShown`).
+// The pointer's sprite over one sample leaves the median as it was; two changed samples, or the
+// paper's whole image, change it.
+const PAPER_SOURCES = LAYOUT_PAPER.map(({ from }) => from.map((v) => v * LAYOUT_S));
 
 let shownView = FRAME; // what the canvas shows now
 let x4 = null; // the offscreen canvas that holds the ×4 frame while the HD layout shows
 let x4Game = null; // the game whose ×4 frame x4 holds as drawn last (null: none, or stale)
+let parchmentShown = null; // the parchment's colour the last whole paint drew (`parchmentNow`)
 let sentButtons = 0; // the pointer's buttons as last sent to the game
 
 // The layout in effect on the body (data-layout: the stylesheet's box).
@@ -1535,20 +1580,24 @@ function overlap([ax, ay, aw, ah], [bx, by, bw, bh]) {
   return x0 < x1 && y0 < y1 ? [x0, y0, x1 - x0, y1 - y0] : null;
 }
 
-// The canvas from the ×4 frame for `view`: everything (`dirty` null: the fill, the frames and
-// every region), or the regions that rect of the ×4 frame touches (a one-to-one region only that
-// part of it, a scaled one whole: a part scaled on its own would not meet its neighbours'); then
-// the HD font's characters over what it copied (`paintGlyphs`). A one-to-one region with cells
-// listed in it, now or at the paint before, is copied whole too: a run's characters move when
-// one of its cells changes, so a part copied alone could keep pixels of the run before.
+// The canvas from the ×4 frame for `view`: everything (`dirty` null: the letterbox's sides or the
+// paper round the regions, and every region), or the regions that rect of the ×4 frame touches (a
+// one-to-one region only that part of it, a scaled one whole: a part scaled on its own would not
+// meet its neighbours'); then the HD font's characters over what it copied (`paintGlyphs`). A
+// rect that meets what the band is taken from (PAPER_SOURCES) paints everything, and so does any
+// rect when the samples' median in the ×4 frame now is not the parchment the canvas shows (a
+// rect that meets a sample alone does not: one covered sample leaves the median as it was). A
+// one-to-one region with cells listed in it, now or at the paint before, is copied whole too: a
+// run's characters move when one of its cells changes, so a part copied alone could keep pixels
+// of the run before.
 function paint(view, dirty) {
   const ctx = canvas.getContext('2d');
-  if (!dirty) {
-    ctx.fillStyle = LAYOUT_FILL;
-    ctx.fillRect(0, 0, LAYOUT_W, LAYOUT_H);
-  }
   const glyphs = game.hd_font() ? game.hd_glyphs() : [];
   if (view === WHOLE_VIEW) {
+    if (!dirty) {
+      ctx.fillStyle = LAYOUT_FILL;
+      ctx.fillRect(0, 0, LAYOUT_W, LAYOUT_H);
+    }
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(x4, 0, 0, x4.width, x4.height, ...LAYOUT_WHOLE);
@@ -1560,11 +1609,9 @@ function paint(view, dirty) {
     paintedGlyphs = glyphs;
     return;
   }
-  if (!dirty) {
-    ctx.strokeStyle = LAYOUT_FRAME;
-    ctx.lineWidth = 1;
-    for (const { to: [x, y, w, h] } of LAYOUT_REGIONS) ctx.strokeRect(x - 0.5, y - 0.5, w + 1, h + 1);
-  }
+  if (dirty && PAPER_SOURCES.some((source) => overlap(source, dirty))) dirty = null;
+  if (dirty && parchmentNow() !== parchmentShown) dirty = null;
+  if (!dirty) paintPaper(ctx);
   for (const { from, to } of LAYOUT_REGIONS) {
     const source = from.map((v) => v * LAYOUT_S);
     const one = to[2] === source[2] && to[3] === source[3];
@@ -1583,6 +1630,37 @@ function paint(view, dirty) {
     if (glyphs.length > 0) paintGlyphs(ctx, glyphs, from, to, copied);
   }
   paintedGlyphs = glyphs;
+}
+
+// The paper under and round the game's regions, from the ×4 frame now (LAYOUT_PAPER): the band's
+// pieces (one to one sharp, the stretched edges smooth), then the parchment inside it (its
+// colour kept in `parchmentShown`).
+function paintPaper(ctx) {
+  for (const { from, to: [x, y, w, h], flip } of LAYOUT_PAPER) {
+    const source = from.map((v) => v * LAYOUT_S);
+    ctx.save();
+    ctx.imageSmoothingEnabled = source[2] !== w || source[3] !== h;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.translate(flip === 'x' ? x + w : x, flip === 'y' ? y + h : y);
+    ctx.scale(flip === 'x' ? -1 : 1, flip === 'y' ? -1 : 1);
+    ctx.drawImage(x4, ...source, 0, 0, w, h);
+    ctx.restore();
+  }
+  parchmentShown = parchmentNow();
+  ctx.fillStyle = parchmentShown;
+  ctx.fillRect(...LAYOUT_PARCHMENT);
+}
+
+// The parchment's colour in the ×4 frame now, as a fill style: each channel's median of the
+// samples' pixels (LAYOUT_SAMPLES, the top-left ×4 pixel of each), read from the engine's memory.
+function parchmentNow() {
+  // Re-create the view every call: wasm memory growth detaches old buffers.
+  const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len());
+  const width = game.width() * LAYOUT_S;
+  const median = (k) => LAYOUT_SAMPLES
+    .map(([gx, gy]) => pixels[(gy * LAYOUT_S * width + gx * LAYOUT_S) * 4 + k])
+    .sort((a, b) => a - b)[1];
+  return `rgb(${median(0)}, ${median(1)}, ${median(2)})`;
 }
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -1636,7 +1714,8 @@ function layoutToCanvas(gx, gy) {
 }
 
 // For tests, in any layout: canvas pixels to game pixels (`held` as layoutToGame) and back,
-// what the canvas shows, the regions, the letterbox and the rest of the screen.
+// what the canvas shows, the regions, the paper round them and the rects of the ×4 frame that
+// paint it whole (`paperSources`), the letterbox and the rest of the screen.
 globalThis.__u6Layout = {
   toGame: (px, py, held = false) => layoutToGame(px, py, held),
   toCanvas: (gx, gy) => layoutToCanvas(gx, gy),
@@ -1644,6 +1723,12 @@ globalThis.__u6Layout = {
     return shownView;
   },
   regions: LAYOUT_REGIONS.map(({ name, from, to }) => ({ name, from: [...from], to: [...to] })),
+  paper: {
+    pieces: LAYOUT_PAPER.map(({ name, from, to, flip }) => ({ name, from: [...from], to: [...to], flip: flip ?? null })),
+    parchment: [...LAYOUT_PARCHMENT],
+    samples: LAYOUT_SAMPLES.map((p) => [...p]),
+  },
+  paperSources: PAPER_SOURCES.map((r) => [...r]),
   whole: [...LAYOUT_WHOLE],
   rest: [...LAYOUT_REST],
   size: [LAYOUT_W, LAYOUT_H],
