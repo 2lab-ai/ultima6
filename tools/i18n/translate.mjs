@@ -21,7 +21,9 @@
 //                        books: [{index, len, hash, text}], u: [{hash, len, text}] and
 //                        aliases: [{archive, item, keyword, words}]} (u6_core::locale)
 //   <out>/coverage.json  u6.locale-coverage/1: the units found, translated and left English by
-//                        reason, by category, scripts and units named by their hashes only
+//                        reason, by category, scripts and units named by their hashes only; a
+//                        --regate run's lines and table strings (and each script) also `kept`,
+//                        those kept as the pack had them, which are not counted translated
 //
 // <out> is ~/Games/ultima6/i18n/ko/ unless --out names another; it and preview/ are made 0700,
 // every file in them 0600; either one that is a symbolic link (or not a directory) is refused with
@@ -95,9 +97,26 @@
 // text and the coverage (`freshKeywords`) say so. A request of a script with no key is the one of
 // K1 to K4, byte for byte, for the same style guide (which goes in every request, and which K5b
 // changes).
+// The repair mode, `--regate` (with --item or --first, and a pack in <out>): each chosen script's
+// lines and table strings the pack already has are checked by the gates below, its keys with the
+// words the pack keeps for them (regateOf); one that passes is kept as it is and not sent (the
+// pack's line stays; the counts and the coverage name it kept, not translated by this run). The
+// ones that fail and the ones the pack lacks are sent, a script's in one request of those lines,
+// a request again's (the keys the pack gives a word listed, each with that word as known); one
+// its answer fails is asked again once, as in any run; a script with none to send is sent
+// nothing. A script the pack has no line of is not repaired (no keyword word would be asked for
+// it): nothing of it is sent, its lines are left English (`not-in-pack`), and the consent text and
+// the summary count it, to run without --regate. No keyword word changes: the shared keywords are
+// not asked, an answer's `keywords` are not read, the pack's aliases are written as they were and
+// the keys are not counted; so it does not go with --fresh-keywords (nor with --name, --ages or
+// --strings). A line still failing keeps the pack's line, as any merge does. The consent text says
+// what is kept and sent, and the summary names the lines kept, the lines sent and the lines still
+// failing, by reason. Without --regate every request and file is as before.
 // The answer is JSON only, {"lines": [{"n", "ko"}]} (and "keywords" for a script with keys).
 // Each line is checked by the mechanical gates of spec 08 §6 (structure only: the escapes'
-// multiset, Hangul syllables and ASCII only, the josa markers and every `@{` closed as the text
+// multiset, Hangul syllables and ASCII only, as many double quote marks outside hidden `&…&` text
+// as its English line (a speech split over lines keeps each line's own), the josa markers and
+// every `@{` closed as the text
 // layer reads them, each `@{…}` the Korean word of the key its English `@` word hits, or that
 // English word for a key with no word or for none, the runic text and the line breaks at its
 // ends kept; for a table string the engine copies into a slot, its capacity and no marker;
@@ -132,7 +151,7 @@
 // kind only.
 //
 //   node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N
-//        | --ages AGES [--first N]) [--speakers <speakers.json>] [--fresh-keywords]]
+//        | --ages AGES [--first N]) [--speakers <speakers.json>] [--fresh-keywords] [--regate]]
 //        [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS]
 //        [--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs N]
 //        [--timeout SECONDS]
@@ -818,8 +837,23 @@ function runic(text) {
 
 const edges = (text) => [/^\n*/.exec(text)[0].length, /\n*$/.exec(text)[0].length];
 
+// The double quote marks of `text` the text layer reads: those outside hidden `&…&` text (each
+// `&` starts or ends it; what it hides is dropped before it is read).
+function quotes(text) {
+  let hidden = false;
+  let n = 0;
+  for (const c of text) {
+    if (c === '&') hidden = !hidden;
+    else if (c === '"' && !hidden) n += 1;
+  }
+  return n;
+}
+
 /// Why `ko` is not a translation of the run `en` the text layer can take, or null: the escapes'
-/// multiset, the characters, the josa markers and the `@{` braces as the text layer reads them
+/// multiset, the characters, the double quote marks outside hidden `&…&` text (as many as the
+/// English line shows: a speech the script opens in one line and closes in another keeps each
+/// line's own, so no line drops one or shows a stray one), the josa markers and the `@{` braces as
+/// the text layer reads them
 /// (hidden `&…&` text is dropped before it is read; `@` is followed at once by `{` and opens a
 /// brace, closed by a `}` that is no marker's; every other `{` starts one of the markers), the
 /// keywords (the words the braces hold are, as a multiset and case folded, the words the English
@@ -833,6 +867,7 @@ export function gate(en, ko, keyed = null) {
   const a = placeholders(en).sort();
   const b = placeholders(ko).sort();
   if (a.length !== b.length || a.some((p, i) => p !== b[i])) return 'escapes';
+  if (quotes(en) !== quotes(ko)) return 'quotes';
   let hidden = false;
   let brace = false;
   for (let i = 0; i < ko.length; i += 1) {
@@ -1589,6 +1624,14 @@ export function stringsPlanOf(value) {
 
 // --- the run ---------------------------------------------------------------------------------
 
+// Why `ko` is not a translation of unit `u` the engine can take, or null: the gate of its kind, a
+// conversation's runs and table strings with their script's keys and words (`keyed`).
+function unitGate(u, ko, keyed = null) {
+  return u.kind === 'table' ? tableGate(u, ko, keyed) : u.kind === 'string' ? stringGate(u.text, ko)
+    : u.kind === 'look' ? lookGate(u.text, ko) : u.kind === 'book' ? bookGate(u.text, ko)
+      : u.kind === 'program' ? uGate(u.text, ko, u.keys) : gate(u.text, ko, keyed);
+}
+
 /// The units of `script` an answer gave that pass the gates: a Map of n to text; and the n of the
 /// others, by reason. A conversation script's runs and table strings are gated with its keys and
 /// their words (`script.keyed`, slice K5b); the other texts have none.
@@ -1596,13 +1639,10 @@ function checked(script, answer) {
   const good = new Map();
   const failed = new Map();
   const keyed = script.keyed ?? null;
-  const gateOf = (u, ko) => (u.kind === 'table' ? tableGate(u, ko, keyed) : u.kind === 'string' ? stringGate(u.text, ko)
-    : u.kind === 'look' ? lookGate(u.text, ko) : u.kind === 'book' ? bookGate(u.text, ko)
-      : u.kind === 'program' ? uGate(u.text, ko, u.keys) : gate(u.text, ko, keyed));
   for (const u of script.units) {
     if (u.done) continue;
     const ko = answer?.lines?.get(u.n);
-    const why = ko === undefined ? 'missing' : gateOf(u, ko);
+    const why = ko === undefined ? 'missing' : unitGate(u, ko, keyed);
     if (why === null) good.set(u.n, ko);
     else failed.set(u.n, why);
   }
@@ -1638,18 +1678,21 @@ function agesOf(scripts, translated = () => false) {
   }));
 }
 
-// A category's counts: units found, translated, left English by reason.
-function tally(units) {
+// A category's counts: units found, translated, left English by reason; with `withKept` (a
+// --regate run's lines and table strings) also those kept as the pack had them, not translated.
+function tally(units, withKept = false) {
   const byReason = {};
   let translated = 0;
+  let kept = 0;
   for (const u of units) {
-    if (u.ko !== undefined) translated += 1;
+    if (u.had) kept += 1;
+    else if (u.ko !== undefined) translated += 1;
     else {
       const why = u.why ?? 'not-sent';
       byReason[why] = (byReason[why] ?? 0) + 1;
     }
   }
-  return { found: units.length, translated, leftEnglish: units.length - translated, byReason, unexplained: 0 };
+  return { found: units.length, translated, ...(withKept ? { kept } : {}), leftEnglish: units.length - translated - kept, byReason, unexplained: 0 };
 }
 
 /// The words the aliases `aliases` (a pack's) give script (`archive`, `item`), as the run gate
@@ -1686,6 +1729,71 @@ export function settleKeys(script, r, existing = null) {
   script.keyed = { keys: script.keys, words: new Map([...[...theirs].filter(([k]) => !lost.has(k)), ...[...words].map(([k, w]) => [k, [w]])]) };
 }
 
+/// The repair mode (`--regate`): each line and table string of `scripts` (planOf's) that the pack
+/// read from <out> (`existing`, readPack's) already has, checked by the gate a new answer meets,
+/// its script's keys with the words the pack keeps for them (`keyed`, all of a key's words, as
+/// [`settleKeys`] leaves them where no key is settled; a request again names each key's word as
+/// known). One that passes is kept as the pack has it (`had`, done: the pack's line stays, and
+/// it is not this run's) and is not sent; the others and the ones the pack lacks are left to send;
+/// one an op reads from inside (`inner`) stays English, unasked. A script the pack has no line of
+/// is not repaired (its request would ask no keyword word, so its keyword lines could not land):
+/// none of it is sent, its lines left English (`not-in-pack`), and it is counted (`unpacked`).
+/// Returns the counts: `kept`, `failing` (by reason), `lacking`, `sent` (the units left to send)
+/// and `unpacked`.
+export function regateOf(scripts, existing) {
+  const counts = { kept: 0, failing: {}, lacking: 0, sent: [], unpacked: 0 };
+  for (const s of scripts) {
+    const { archive, item } = s.bundle;
+    s.keyed = { keys: s.keys, words: scriptWordsOf(existing?.aliases, archive, item) };
+    const textsOf = (list) => new Map((list ?? []).filter((r) => r.archive === archive && r.item === item).map((r) => [r.offset, r.text]));
+    const had = { run: textsOf(existing?.converse), table: textsOf(existing?.tables) };
+    if (had.run.size + had.table.size === 0) {
+      counts.unpacked += 1;
+      for (const u of s.units) if (!u.done) Object.assign(u, { done: true, why: 'not-in-pack' });
+      continue;
+    }
+    for (const u of s.units) {
+      if (u.done) continue;
+      const ko = had[u.kind].get(u.offset);
+      const why = ko === undefined ? null : unitGate(u, ko, s.keyed);
+      if (ko !== undefined && why === null) {
+        Object.assign(u, { done: true, had: true });
+        counts.kept += 1;
+        continue;
+      }
+      if (ko === undefined) counts.lacking += 1;
+      else counts.failing[why] = (counts.failing[why] ?? 0) + 1;
+      counts.sent.push(u);
+    }
+  }
+  return counts;
+}
+
+// ` (<reason> <count>, …)`, in reason order, for the counts by reason `byReason`; '' for none.
+const reasonsOf = (byReason) => {
+  const why = Object.entries(byReason).sort().map(([r, n]) => `${r} ${n}`).join(', ');
+  return why ? ` (${why})` : '';
+};
+
+/// The summary line of a `--regate` run ([`regateOf`]'s counts, its units as the run left them):
+/// the lines kept as the pack had them, the lines sent (those that failed the checks, by reason,
+/// and those the pack lacked), the lines sent that still fail, by reason, and the scripts the pack
+/// has no line of, not repaired. Counts only.
+export function regateSummary(counts) {
+  const still = {};
+  for (const u of counts.sent) {
+    if (u.ko === undefined) still[u.why ?? 'not-sent'] = (still[u.why ?? 'not-sent'] ?? 0) + 1;
+  }
+  const sum = (byReason) => Object.values(byReason).reduce((n, x) => n + x, 0);
+  return `Regate: ${counts.kept} lines and table strings kept as the pack had them, ${counts.sent.length} sent `
+    + `(${sum(counts.failing)} that failed the checks${reasonsOf(counts.failing)}, ${counts.lacking} the pack lacked), `
+    + `${sum(still)} still failing${reasonsOf(still)}${unpackedOf(counts)}.`;
+}
+
+// `; N scripts the pack has no line of: …` of [`regateOf`]'s counts, or '' for none.
+const unpackedOf = (counts) => (counts.unpacked > 0
+  ? `; ${counts.unpacked} scripts the pack has no line of: not repaired, run them without --regate` : '');
+
 /// The pack and the coverage receipt of `plan`'s scripts and game strings, translated as their
 /// units say, merged into `existing` (readPack's, or null): what this run translated replaces what
 /// it had under the same key, the rest stays. The fingerprint is over the scripts the merged runs
@@ -1698,8 +1806,10 @@ export function settleKeys(script, r, existing = null) {
 /// the merged lines do not name are dropped (`no-base`). Coverage `keywords`:
 /// each key of the scripts answered given a word, or kept (its old word stays in the merged pack:
 /// `kept`, by reason, keys by hash), or left English (no word in the merged pack: `byReason`, and
-/// in `left` by hash); only one left English counts toward exit 3. No pack (null) when this run
-/// changed nothing.
+/// in `left` by hash); only one left English counts toward exit 3. A --regate run's line kept as
+/// the pack had it (`had`) is not this run's: the pack's stays, and the coverage counts it `kept`
+/// (lines, table strings and each script), not translated. No pack (null) when this run changed
+/// nothing.
 export function outputsOf(plan, model, existing = null) {
   const runs = [];
   const tables = [];
@@ -1709,7 +1819,12 @@ export function outputsOf(plan, model, existing = null) {
   let translatedScripts = 0;
   for (const s of plan.scripts) {
     let done = 0;
+    let kept = 0;
     for (const u of s.units) {
+      if (u.had) {
+        kept += 1;
+        continue;
+      }
       const at = { archive: s.bundle.archive, item: s.bundle.item, offset: u.offset, len: u.len, hash: u.hash };
       if (u.ko !== undefined) {
         done += 1;
@@ -1723,7 +1838,7 @@ export function outputsOf(plan, model, existing = null) {
     const tablesHere = s.units.filter((u) => u.kind === 'table').length;
     perScript.push({
       hash: s.bundle.hash, class: s.cls, ...(s.speaker ? { age: s.speaker.age } : {}), units: s.units.length - tablesHere, tables: tablesHere,
-      translated: done, left: s.units.length - done,
+      translated: done, ...(plan.regate ? { kept } : {}), left: s.units.length - done - kept,
     });
   }
   const stringUnits = (plan.strings?.batches ?? []).flatMap((b) => b.units);
@@ -1767,7 +1882,8 @@ export function outputsOf(plan, model, existing = null) {
   const keyUnits = [];
   const fresh = [];
   const lostKeys = new Set();
-  for (const s of plan.scripts) {
+  // A --regate run asks no key: its words stay the pack's, and no key of it is counted.
+  for (const s of plan.regate ? [] : plan.scripts) {
     for (const k of s.keys ?? []) {
       const unit = { archive: s.bundle.archive, item: s.bundle.item, script: s.bundle.hash, k };
       if (s.kept?.has(k)) {
@@ -1852,8 +1968,8 @@ export function outputsOf(plan, model, existing = null) {
     scripts: { read: plan.read, usable: plan.usable, chosen: plan.scripts.length, translated: translatedScripts },
     // Spec 12: with a speaker file, the chosen scripts by age, and of them the translated.
     ...(plan.speakers ? { ages: agesOf(plan.scripts, (s) => s.units.some((u) => u.ko !== undefined)) } : {}),
-    units: tally(runUnits),
-    tables: tally(tableUnits),
+    units: tally(runUnits, Boolean(plan.regate)),
+    tables: tally(tableUnits, Boolean(plan.regate)),
     strings: { read: plan.strings?.read ?? 0, ...tally(stringUnits) },
     look: tally(textUnits.filter((u) => u.kind === 'look')),
     books: tally(textUnits.filter((u) => u.kind === 'book')),
@@ -1887,20 +2003,21 @@ export function outputsOf(plan, model, existing = null) {
 }
 
 const USAGE = 'usage: node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N | --ages AGES [--first N]) '
-  + '[--speakers <speakers.json>] [--fresh-keywords]] [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS] '
+  + '[--speakers <speakers.json>] [--fresh-keywords] [--regate]] [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS] '
   + `[--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs 1-${JOBS_MAX}] [--timeout SECONDS]`;
 
 /// The options of `argv`, or {error}.
 export function parseArgs(argv) {
   const o = { send: false, dryRun: false, model: DEFAULTS.model, llmux: DEFAULTS.llmux, out: DEFAULTS.out,
     jobs: DEFAULTS.jobs, timeoutS: DEFAULTS.timeoutS, bundles: null, strings: null, item: null, first: null,
-    name: null, cls: null, only: null, speakers: null, ages: null, freshKeywords: false, help: false };
+    name: null, cls: null, only: null, speakers: null, ages: null, freshKeywords: false, regate: false, help: false };
   const value = (i) => (i + 1 < argv.length ? argv[i + 1] : null);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--send') o.send = true;
     else if (a === '--dry-run') o.dryRun = true;
     else if (a === '--fresh-keywords') o.freshKeywords = true;
+    else if (a === '--regate') o.regate = true;
     else if (a === '--help' || a === '-h') o.help = true;
     else if (['--model', '--llmux', '--out', '--jobs', '--timeout', '--item', '--first', '--class', '--name', '--strings', '--only',
       '--speakers', '--ages'].includes(a)) {
@@ -1934,6 +2051,11 @@ export function parseArgs(argv) {
   if (o.ages !== null && o.speakers === null) return { error: '--ages chooses by the ages of a --speakers file: name one' };
   if (o.speakers !== null && o.bundles === null) return { error: '--speakers and --ages go with a bundles file' };
   if (o.freshKeywords && o.bundles === null) return { error: '--fresh-keywords goes with a bundles file' };
+  // The repair mode checks again the lines a pack has of the scripts chosen, and keeps its words.
+  if (o.regate && o.freshKeywords) return { error: '--regate keeps the keyword words of the pack there: it does not go with --fresh-keywords' };
+  if (o.regate && (o.bundles === null || o.strings !== null || o.name !== null || o.ages !== null)) {
+    return { error: '--regate checks again the lines of the scripts --item or --first chooses from a bundles file: not with --name, --ages or --strings' };
+  }
   if (o.ages !== null && o.ages.some((a) => !AGES.includes(a))) return { error: `--ages names ages of the speaker file: ${AGES.join(', ')}` };
   if (o.ages !== null && (o.item !== null || o.name !== null)) return { error: '--ages goes alone or with --first N, not with --item or --name' };
   const choices = [o.item, o.first, o.name].filter((c) => c !== null).length;
@@ -2019,6 +2141,7 @@ export async function main(argv, {
   // The bundles and the game strings, and what to send of them.
   const plan = {
     read: 0, usable: 0, scripts: [], bundles: null, speakers: false, freshKeywords: o.freshKeywords, strings: null, texts: null, program: null,
+    regate: null,
   };
   try {
     if (o.bundles !== null) {
@@ -2069,7 +2192,8 @@ export async function main(argv, {
   }
   // Slice K5b: the Korean word settled for a key before a script's request: the script's own in
   // the pack there (`own`, none with --fresh-keywords), else the shared keywords' answer's
-  // (`known`). A request again lists the keys with a word, each with it.
+  // (`known`). A request again lists the keys with a word, each with it; so does every script's
+  // request of a --regate run (once regateOf has checked the pack's lines).
   const known = new Map();
   const jobOf = (g, units, again = false) => {
     if (g.kind !== 'script') {
@@ -2087,7 +2211,7 @@ export async function main(argv, {
   const groups = [...plan.scripts, ...(plan.strings?.batches ?? []), ...(plan.texts?.batches ?? []), ...(plan.program?.batches ?? [])];
   const jobsOf = () => [
     ...(plan.glossary ? [jobOf(plan.glossary, plan.glossary.units)] : []),
-    ...groups.map((g) => jobOf(g, g.units.filter((u) => !u.done))).filter((j) => j.script.units.some((u) => !u.done)),
+    ...groups.map((g) => jobOf(g, g.units.filter((u) => !u.done), plan.regate !== null)).filter((j) => j.script.units.some((u) => !u.done)),
   ];
   if (jobsOf().length === 0) {
     say('Nothing to translate: nothing was sent.');
@@ -2144,14 +2268,33 @@ export async function main(argv, {
         + `${existing.u.length > 0 ? `, ${existing.u.length} strings of u` : ''}`
         + `${existing.aliases.length > 0 ? `, ${existing.aliases.length} keyword aliases` : ''}; what this run translates is merged into it.`);
     }
-    // Each script's own words in the pack (none with --fresh-keywords), and the keys shared by
-    // enough of the scripts that one of them has no word for.
-    for (const s of plan.scripts) s.own = o.freshKeywords ? new Map() : knownOf(existing, s);
-    plan.glossary = glossaryOf(plan.scripts, settledOf(plan.scripts));
+    if (o.regate) {
+      // The repair mode: the pack's lines of the chosen scripts checked again, those that pass
+      // kept and not sent; no shared keywords asked, as no keyword word changes.
+      if (!existing) {
+        say(`translate: --regate checks again the lines of the pack in ${o.out}, and there is none there: nothing was sent.`);
+        return 2;
+      }
+      plan.regate = regateOf(plan.scripts, existing);
+      plan.glossary = null;
+    } else {
+      // Each script's own words in the pack (none with --fresh-keywords), and the keys shared by
+      // enough of the scripts that one of them has no word for.
+      for (const s of plan.scripts) s.own = o.freshKeywords ? new Map() : knownOf(existing, s);
+      plan.glossary = glossaryOf(plan.scripts, settledOf(plan.scripts));
+    }
     const jobs = jobsOf();
+    if (plan.regate && jobs.length === 0) {
+      say(regateSummary(plan.regate));
+      say('Nothing to send: every line the pack has of the chosen scripts passes the checks, and it lacks none of a script it has '
+        + 'lines of; nothing was sent.');
+      return 1;
+    }
     const parts = new Set(jobs.map((j) => j.script.kind));
     const npcSaid = plan.speakers ? 'its NPC\'s name, description, age and personality note' : 'its NPC\'s name and description';
-    const what = [plan.scripts.length > 0 ? `one script's lines (and its keywords) with ${npcSaid}` : null,
+    const scriptSaid = plan.regate ? `the lines of one script that fail the checks or that the pack lacks, with ${npcSaid} and the words `
+      + 'the pack keeps for its keys' : `one script's lines (and its keywords) with ${npcSaid}`;
+    const what = [plan.scripts.length > 0 ? scriptSaid : null,
       parts.has('glossary') ? `the keywords at least ${GLOSSARY_SCRIPTS} of the scripts share (up to ${GLOSSARY_KEYS}, each with up to `
         + `${GLOSSARY_SHOWN} of the words their lines highlight)` : null,
       parts.has('strings') ? `up to ${STRINGS_PER_REQUEST} of the game's own strings` : null,
@@ -2159,6 +2302,14 @@ export async function main(argv, {
       parts.has('program') ? `up to ${U_PER_REQUEST} lines of the opening and character creation` : null].filter(Boolean).join(', or ');
     say(`It sends the owner's game text: ${jobs.length} requests, each ${what}; up to ${o.jobs} at a time, `
       + `${parts.has('glossary') ? 'the shared keywords first, ' : ''}and a request again for lines that fail the checks.`);
+    if (plan.regate) {
+      const r = plan.regate;
+      const failing = Object.values(r.failing).reduce((n, x) => n + x, 0);
+      say(`Regate (--regate): of the chosen scripts' lines and table strings the pack has, ${r.kept} pass the checks and are kept `
+        + `as they are, not sent, and ${failing} fail them${reasonsOf(r.failing)}; those and the ${r.lacking} the pack lacks are sent, a `
+        + `script's in one request of those lines, naming the words the pack keeps for its keys as known; no keyword word changes`
+        + `${unpackedOf(r)}.`);
+    }
     if (o.freshKeywords) {
       say('Keywords afresh (--fresh-keywords): no word of the pack there is sent as known in a script\'s first request (a line '
         + 'asked again names the word its key keeps, the pack\'s where this run kept none); each script answers its keys from its '
@@ -2250,7 +2401,8 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { tr
     const first = halted ? list.map(() => ({ ok: false, reason: 'not-sent' })) : await send(list, 2);
     first.forEach((r, i) => {
       const s = list[i].script;
-      if (s.kind === 'script') settleKeys(s, r, existing);
+      // A --regate run settles no key: its words stay the pack's (regateOf's `keyed`).
+      if (s.kind === 'script' && !plan.regate) settleKeys(s, r, existing);
       const { good, failed } = checked(s, r.ok ? r : null);
       for (const u of s.units) {
         if (u.done) continue;
@@ -2283,6 +2435,7 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { tr
   const tokens = counts.usage > 0 ? `tokens: input ${counts.input}, output ${counts.output} (${counts.usage} answers counted)` : 'no token counts returned';
   say(`Sent: ${counts.requests} requests (${counts.retried} asked again) in ${seconds(ms)}; ${tokens}.`);
   if (halted) say(`The route refused a request (${halted}): no request was sent after it.`);
+  if (plan.regate) say(regateSummary(plan.regate));
   const out = outputsOf(plan, o.model, existing);
   const { coverage } = out;
   const reasons = (c) => {
@@ -2291,13 +2444,15 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { tr
   };
   if (plan.scripts.length > 0) {
     const c = coverage.units;
-    say(`Lines: ${c.found} found, ${c.translated} translated, ${c.leftEnglish} left English${reasons(c)}; `
+    // A --regate run's lines kept as the pack had them are named apart from this run's.
+    const keptOf = (x) => (x.kept === undefined ? '' : `, ${x.kept} kept as the pack had them`);
+    say(`Lines: ${c.found} found, ${c.translated} translated${keptOf(c)}, ${c.leftEnglish} left English${reasons(c)}; `
       + `scripts translated ${coverage.scripts.translated} of ${coverage.scripts.chosen}.`);
     if (coverage.ages) {
       say(`Scripts by age (translated of chosen): ${AGES.map((a) => `${a} ${coverage.ages[a].translated} of ${coverage.ages[a].chosen}`).join(', ')}.`);
     }
     const t = coverage.tables;
-    if (t.found > 0) say(`Table strings: ${t.found} found, ${t.translated} translated, ${t.leftEnglish} left English${reasons(t)}.`);
+    if (t.found > 0) say(`Table strings: ${t.found} found, ${t.translated} translated${keptOf(t)}, ${t.leftEnglish} left English${reasons(t)}.`);
     const g = coverage.glossary;
     if (g.found > 0) say(`Shared keywords: ${g.found} asked before the scripts, ${g.translated} given a word${reasons(g)}.`);
     const k = coverage.keywords;
