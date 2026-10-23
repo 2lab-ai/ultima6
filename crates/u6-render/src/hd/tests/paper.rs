@@ -9,7 +9,7 @@
 
 use super::font::{INK, PAPER, SHAPE, glyph_px, listed};
 use super::*;
-use crate::{BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, FLAG_PAPER};
+use crate::{BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, FLAG_PAPER, FLAG_PAPER_OFF};
 
 /// The test paper's size: smaller than the screen, so a cell past it has no paper under it.
 const PW: usize = 96;
@@ -354,5 +354,45 @@ fn a_glyph_not_drawn_over_the_paper_shows_no_paper_in_its_colour() {
             shown > 0,
             "{scale:?}: the same cells over the paper show it"
         );
+    }
+}
+
+/// A pixel naming the paper flagged [`FLAG_PAPER_OFF`] (written on the paper in another colour)
+/// is composed as its classic block, never the paper's HD image, even where its classic colour is
+/// the paper's at its place; the same pixel unflagged shows the paper's block.
+#[test]
+fn a_paper_pixel_flagged_off_colour_is_its_classic_block() {
+    let (pics, pack, mut fb) = scene();
+    let (x, y) = (40, 40);
+    assert_eq!(
+        paper_pixels()[y * PW + x],
+        PAPER,
+        "the paper's colour at the pixel"
+    );
+    let named = fb.src_at(x, y).unwrap();
+    assert_eq!(
+        (named.kind, named.id, named.flags),
+        (Kind::Bitmap, BITMAP_PAPER, 0)
+    );
+    for scale in [Scale::X2, Scale::X4] {
+        let classic = vec![word(fb.palette[usize::from(PAPER)]); scale.factor().pow(2)];
+        let frame = fresh_in(&fb, &pics, Some(&pack), scale, false);
+        assert!(
+            block(&frame, scale, (x, y)) != classic,
+            "{scale:?}: unflagged, the paper's block"
+        );
+        let off = Src {
+            flags: FLAG_PAPER_OFF,
+            ..named
+        };
+        fb.set_src(x, y, PAPER, off);
+        for font in [false, true] {
+            let frame = fresh_in(&fb, &pics, Some(&pack), scale, font);
+            assert!(
+                block(&frame, scale, (x, y)) == classic,
+                "{scale:?}, font {font}: flagged off-colour, the classic block"
+            );
+        }
+        fb.set_src(x, y, PAPER, named);
     }
 }
