@@ -68,16 +68,19 @@ pub async fn click(state: &RefCell<State>, io: &Io) -> u16 {
     }
 }
 
+/// The side panel's click region (A4-0x79c2 entry 2).
+const SIDE_PANEL: usize = 2;
+
 /// The first click region (A4-0x79c2, [`super::pointer::region`]) that holds pixel (x, y), as
 /// 0x10658e scans them; `None` when none does. The slots' regions (Wide) come after the side
 /// panel's (region 2).
 pub(crate) fn region_at(s: &State, x: i16, y: i16) -> Option<usize> {
     let tables = &s.ui.pointer.tables;
     let n = tables.regions.len();
-    let side = n.min(3);
-    (0..side)
+    let after_panel = n.min(SIDE_PANEL + 1);
+    (0..after_panel)
         .chain(super::pointer::SLOT_REGIONS)
-        .chain(side..n)
+        .chain(after_panel..n)
         .find(|&i| {
             super::pointer::region(tables, i)
                 .is_some_and(|r| (r[0]..=r[2]).contains(&x) && (r[1]..=r[3]).contains(&y))

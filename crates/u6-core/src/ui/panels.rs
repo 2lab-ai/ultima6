@@ -332,10 +332,11 @@ pub(crate) fn mirror_view(s: &State, io: &Io) {
 
 /// Spec 14 Design 5 (Wide): the start of a press in slot `slot`, the pointer in it. Ignored
 /// (false) unless it is a press, the panel mode is one of [`VIEWS`], no conversation runs
-/// (Design 6) and no other slot press is still being handled. Else: the pointer moved to the same place in the panel
-/// area, the panel mode the slot's view, for the inventory slot while another view is the
-/// panel's the inventory state its last draw left (the cells its click reads, as the panel's
-/// own would after that draw), and the press recorded to be put back ([`end_slot_press`]).
+/// (Design 6) and no other slot press is still being handled. Else: the pointer moved to the
+/// same place in the panel area, the panel mode the slot's view, for the inventory slot while
+/// another view is the panel's the inventory state its last draw left (the cells its click
+/// reads, as the panel's own would after that draw), and the press recorded to be put back
+/// ([`end_slot_press`]).
 #[cfg(feature = "wide")]
 pub(crate) fn begin_slot_press(s: &mut State, slot: usize) -> bool {
     let mode = s.ui.panel.mode;
@@ -688,33 +689,39 @@ fn first_row(s: &mut State) {
 
 /// Spec 14 Design 3 (Wide): the container the inventory view shows for `base`, the member's actor
 /// or the open container: the panel's container as the last draw left it, the page kept, while
-/// `base` is the last draw's; else `base`, from the first page. Also from the first page when
-/// the kept container is held by another actor (its chain of containers, as
-/// `inventory::weight::holder` walks it, ends at an actor other than `base`: it was taken, or
-/// is the panel's start value 0).
+/// `base` is the last draw's and that container is still `base` or held in it ([`held_in`]).
+/// Else `base`, from the first page: the member shown changed, there was no last draw (the
+/// first, or after a Restore), or the container left `base` (taken by another actor, left on
+/// the map).
 #[cfg(feature = "wide")]
 fn kept_container(s: &mut State, base: u16) -> u16 {
     let kept = s.ui.panel.container;
-    let same = s.ui.panel.slots.base.is_none_or(|b| b == base);
+    let same = s.ui.panel.slots.base == Some(base);
     s.ui.panel.slots.base = Some(base);
-    let o = &s.objects;
-    let mut c = kept as i16;
-    let mut elsewhere = false;
-    for _ in 0..crate::objects::OBJECT_SLOTS {
-        if c == base as i16 || (c >= crate::objects::ACTOR_SLOTS as i16 && o.place(c) == 0) {
-            break;
-        }
-        if c < crate::objects::ACTOR_SLOTS as i16 {
-            elsewhere = true;
-            break;
-        }
-        c = o.parent(c);
-    }
-    if same && !elsewhere {
+    if same && held_in(&s.objects, kept, base) {
         return kept;
     }
     s.ui.panel.inventory_first = 0;
     base
+}
+
+/// `obj` is `base`, or its chain of containers reaches `base` as `inventory::weight::holder`
+/// walks it (`inventory/weight.rs`). False when the chain ends elsewhere: at another actor, on
+/// the map, or at the walk's bound (a chain that comes back on itself).
+#[cfg(feature = "wide")]
+fn held_in(o: &crate::objects::Objects, obj: u16, base: u16) -> bool {
+    use crate::objects::{ACTOR_SLOTS, OBJECT_SLOTS, Slot};
+    let mut c = obj as Slot;
+    for _ in 0..OBJECT_SLOTS {
+        if c == base as Slot {
+            return true;
+        }
+        if c < ACTOR_SLOTS as Slot || o.place(c) == 0 {
+            return false;
+        }
+        c = o.parent(c);
+    }
+    false
 }
 
 /// Bytes of the objlist block at A4-0x7b84 the sky bar reads.
