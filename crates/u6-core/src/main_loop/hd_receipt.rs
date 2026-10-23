@@ -4,9 +4,10 @@
 //! for a current unflagged tile, portrait or panel bitmap pixel, its block of MMPX ×4 of its
 //! image decoded here independently (the record now, the portrait and the panel bitmaps through
 //! the bitmap colour table), its transparent sub-pixels the classic colour; for a glyph pixel
-//! without ink whose colour is the paper's at its own place, the paper's block of that place; for
-//! every other pixel the classic colour. Every 50th frame a new compositor must make the same frame. Skips
-//! where the zip is missing; prints pass/fail and counts only.
+//! drawn over the paper, without ink, whose colour is the paper's at its own place, the paper's
+//! block of that place; for every other pixel the classic colour. Every 50th frame a new
+//! compositor must make the same frame. Skips where the zip is missing; prints pass/fail and
+//! counts only.
 #![allow(clippy::disallowed_methods)] // tests may read files
 
 use std::collections::HashMap;
@@ -14,7 +15,9 @@ use std::rc::Rc;
 
 use u6_formats::bitmap::Bitmap;
 use u6_render::hd::{Compositor, Scale, mmpx, word};
-use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, HEIGHT, Kind, Src, WIDTH, portrait_of};
+use u6_render::{
+    BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, FLAG_PAPER, HEIGHT, Kind, Src, WIDTH, portrait_of,
+};
 
 use super::receipts::{Setup, boot_then, chars, files, give_book};
 use crate::engine::{Engine, InputEvent, Key};
@@ -133,9 +136,11 @@ impl Receipt {
         for (i, &sp) in src.iter().enumerate() {
             let (x, y) = (i % WIDTH, i / WIDTH);
             let classic = pal[usize::from(fb.pixels()[i])];
-            // A glyph pixel without ink of the paper's colour at its place shows the paper there.
+            // A glyph pixel drawn over the paper, without ink, of the paper's colour at its place
+            // shows the paper there.
             let behind = sp.kind == Kind::Glyph
                 && sp.flags & FLAG_INK == 0
+                && sp.flags & FLAG_PAPER != 0
                 && paper_words
                     .as_ref()
                     .is_some_and(|(w, h, p)| x < *w && y < *h && p[y * w + x] == classic);

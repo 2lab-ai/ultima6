@@ -240,10 +240,9 @@ fn the_hd_font_lists_whole_letters_syllables_and_spaces_only() {
 
 /// The mode off (the default) composes each glyph pixel as the classic pixel it was before
 /// spec 11 (whole spaces, which the mode on lists, included): the frame is that of the same
-/// colours drawn classic, byte for byte, with the same images asked for and the paper (a glyph is
-/// never asked as an image; the paper, which a glyph shows where it is of the paper's colour, is
-/// asked once, and there is none here) and nothing listed; and a compositor switched on and off
-/// again writes every block and is a new one's.
+/// colours drawn classic, byte for byte, with the same images asked for (a glyph is never asked
+/// as one, and none here is drawn over the paper, so the paper is not asked for) and nothing
+/// listed; and a compositor switched on and off again writes every block and is a new one's.
 #[test]
 fn with_the_font_mode_off_glyphs_are_the_classic_pixels_they_were() {
     let mut pics = Pics::default();
@@ -273,13 +272,7 @@ fn with_the_font_mode_off_glyphs_are_the_classic_pixels_they_were() {
         let mut d = Compositor::new();
         d.compose(&classic, &mut b, scale);
         assert!(c.rgba() == d.rgba(), "{scale:?}: byte for byte");
-        // The glyphs ask for the paper once (they show it where they are of its colour; there is
-        // none here), and no glyph is asked as an image.
-        assert_eq!(
-            a.asked,
-            b.asked + 1,
-            "{scale:?}: no glyph asked as an image"
-        );
+        assert_eq!(a.asked, b.asked, "{scale:?}: no glyph asked as an image");
         assert!(c.glyphs().is_empty());
         c.take_dirty();
         for font in [true, false] {

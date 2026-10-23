@@ -54,9 +54,10 @@ pub enum Kind {
     Bitmap = 3,
     /// Spec 11: a pixel of an 8 × 8 character cell; [`Src::id`] is the cell's code (a code of the
     /// game's font, or a Hangul syllable's code point), (u, v) the pixel's place in the cell,
-    /// [`FLAG_INK`] on its set pixels. No image: shown classic (a clear pixel of the paper's
-    /// colour at its place shows the HD paper there, [`hd`]), or by the HD font mode
-    /// ([`hd::Compositor::set_font_mode`]) as a listed glyph.
+    /// [`FLAG_INK`] on its set pixels, [`FLAG_PAPER`] on those drawn over the paper. No image:
+    /// shown classic (a clear pixel drawn over the paper in the paper's colour at its place shows
+    /// the HD paper there, [`hd`]), or by the HD font mode ([`hd::Compositor::set_font_mode`]) as
+    /// a listed glyph.
     Glyph = 4,
 }
 
@@ -74,6 +75,15 @@ pub const FLAG_OUTLINE: u8 = 2;
 /// [`Src::flags`] of a [`Kind::Glyph`] pixel: a set pixel of the glyph, in the ink colour (the
 /// clear ones are in the paper colour, no flag).
 pub const FLAG_INK: u8 = 4;
+/// [`Src::flags`] of a [`Kind::Glyph`] pixel: drawn over the paper, the pixel it replaced naming
+/// the paper ([`Src::on_paper`]). Only such a pixel may show the HD paper behind the text
+/// ([`hd`]); text over a portrait or the spellbook does not.
+pub const FLAG_PAPER: u8 = 8;
+/// [`Src::flags`] of a pixel naming the paper ([`BITMAP_PAPER`]): written on the paper in
+/// another colour than the paper's there (a fill's, a scroll's or a symbol's). Shown classic,
+/// as every flagged pixel; named the paper so that a scroll that moves it onto the paper of its
+/// colour names the paper there again.
+pub const FLAG_PAPER_OFF: u8 = 16;
 
 /// [`Src::id`] of portrait `item` of the archive `portrait.<letter>` (the pair the portrait
 /// loader computes): the letter's byte in the high byte, the item in the low one. `None` for
@@ -107,7 +117,8 @@ pub struct Src {
     pub v: u16,
     pub kind: Kind,
     /// [`FLAG_OVERLAY`], [`FLAG_OUTLINE`]: the blit changed the image's colour here;
-    /// [`FLAG_INK`]: a glyph's set pixel.
+    /// [`FLAG_INK`]: a glyph's set pixel; [`FLAG_PAPER`]: a glyph's pixel over the paper;
+    /// [`FLAG_PAPER_OFF`]: the paper's pixel of another colour than the paper's.
     pub flags: u8,
 }
 
@@ -123,6 +134,16 @@ impl Src {
         kind: Kind::Classic,
         flags: 0,
     };
+
+    /// Whether a pixel of this source is on the paper: it names the paper ([`BITMAP_PAPER`],
+    /// with or without [`FLAG_PAPER_OFF`]), or it is a glyph's drawn over it ([`FLAG_PAPER`]).
+    pub fn on_paper(&self) -> bool {
+        match self.kind {
+            Kind::Bitmap => self.id == BITMAP_PAPER,
+            Kind::Glyph => self.flags & FLAG_PAPER != 0,
+            _ => false,
+        }
+    }
 }
 
 /// Pixels per chunk of the change marks: a row is [`ROW_CHUNKS`] chunks.

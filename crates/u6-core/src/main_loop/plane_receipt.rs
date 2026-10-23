@@ -5,15 +5,17 @@
 //! now, the portrait and the panel bitmaps decoded as the engine decodes them, through the
 //! bitmap colour table. The walks scroll the message window while its last row is still the
 //! paper's, so a pixel of the paper of another colour than the paper above it is moved up (the
-//! receipt checks that it was, where the paper has one). The panels the run shows (the party,
-//! a portrait, an inventory) are cleared over the paper, and their clears name it where it is of
-//! their colour. Skips where the zip is missing; prints pass/fail and counts only.
+//! receipt checks that it was, where the paper has one). The panels the run shows (the
+//! spellbook, the party, a portrait, an inventory) are cleared over the paper, and their clears
+//! name it where it is of their colour; no pixel of the message window shows the paper's own
+//! colour flat (classic, or a glyph's not drawn over the paper) on any frame. Skips where the zip
+//! is missing; prints pass/fail and counts only.
 #![allow(clippy::disallowed_methods)] // tests may read files
 
 use std::collections::BTreeMap;
 
 use u6_formats::bitmap::Bitmap;
-use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, Kind, WIDTH, portrait_of};
+use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, FLAG_PAPER, Kind, WIDTH, portrait_of};
 
 use super::receipts::{Setup, boot_then, chars, files, give_book};
 use crate::engine::{Engine, InputEvent, Key};
@@ -47,6 +49,9 @@ struct Receipt {
     /// rows above such a pixel, that hold its colour where the paper's own colour is another (the
     /// scroll moved it up), summed over the frames; glyph pixels are not counted.
     corner: (bool, u64),
+    /// Pixels of the message window shown flat in the paper's own colour at their place, summed
+    /// over the frames: classic ones, and glyph pixels without ink not drawn over the paper.
+    window_flat: u64,
 }
 
 impl Receipt {
@@ -118,6 +123,23 @@ impl Receipt {
             }
         }
         let w = s.ui.text.windows[WindowId::Messages.index()];
+        if let Some(p) = s.ui.paper.as_ref().filter(|_| w.width > 0) {
+            let (x0, y0) = (usize::from(w.x) * 8, usize::from(w.y) * 8);
+            let x1 = (x0 + usize::from(w.width) * 8).min(WIDTH);
+            let y1 = (y0 + usize::from(w.height) * 8).min(u6_render::HEIGHT);
+            let src = fb.src().quiet();
+            for (x, y) in (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))) {
+                let (i, sp) = (y * WIDTH + x, src[y * WIDTH + x]);
+                let flat = match sp.kind {
+                    Kind::Classic => true,
+                    Kind::Glyph => sp.flags & (FLAG_INK | FLAG_PAPER) == 0,
+                    _ => false,
+                };
+                if flat && p.at(x, y) == Some(fb.pixels()[i]) {
+                    self.window_flat += 1;
+                }
+            }
+        }
         if let Some(b) = self.paper.as_ref().filter(|_| w.width > 0 && w.height > 1) {
             let bw = usize::from(b.width);
             let paper = |x: usize, y: usize| {
@@ -146,13 +168,19 @@ impl Receipt {
     }
 }
 
-/// The side panel's area its clears fill (`ui::panels` `PANEL`, the portrait panel's too) and the
-/// inventory list's (`inventory::panel::draw_list`), inclusive.
+/// The areas the panels' clears fill, inclusive: the side panel's (`ui::panels` `PANEL`), the
+/// portrait panel's (`inventory::portrait`), the inventory list's (`inventory::panel::draw_list`),
+/// and of the spellbook's clear (`magic::book::draw_book`, the portrait panel's area) the rows
+/// below the book's picture, where the clear stays in sight (the book's page clear over the
+/// picture is the book's, not the paper's).
 const PANEL: (usize, usize, usize, usize) = (0xa8, 6, 0x138, 0x67);
+const PORTRAIT: (usize, usize, usize, usize) = (0xa8, 6, 0x137, 0x67);
 const LIST: (usize, usize, usize, usize) = (0xf8, 0x10, 0x137, 0x4f);
+const BOOK_FOOT: (usize, usize, usize, usize) = (0xa8, 0x58, 0x137, 0x67);
 
-/// In the frame `e` shows, the pixels of the inclusive rect that name the paper, and the classic
-/// ones of the paper's own colour there (shown flat where the HD paper could show).
+/// In the frame `e` shows, the pixels of the inclusive rect that name the paper unflagged (the
+/// HD paper shows there), and the classic ones of the paper's own colour there (shown flat where
+/// the HD paper could show).
 fn paper_in(e: &Engine, (x0, y0, x1, y1): (usize, usize, usize, usize)) -> (usize, usize) {
     let s = e.state();
     let Some(paper) = s.ui.paper.as_ref() else {
@@ -162,7 +190,7 @@ fn paper_in(e: &Engine, (x0, y0, x1, y1): (usize, usize, usize, usize)) -> (usiz
     let (mut named, mut flat) = (0, 0);
     for (x, y) in (y0..=y1).flat_map(|y| (x0..=x1).map(move |x| (x, y))) {
         let src = fb.src_at(x, y).quiet();
-        if src.kind == Kind::Bitmap && src.id == BITMAP_PAPER {
+        if src.kind == Kind::Bitmap && src.id == BITMAP_PAPER && src.flags == 0 {
             named += 1;
         } else if src.kind == Kind::Classic && fb.get(x, y) == paper.at(x, y) {
             flat += 1;
@@ -231,10 +259,11 @@ fn the_source_plane_names_the_classic_pixels_of_the_users_game() {
     // portrait panel until a key; the party panel again; a click on the leader's figure in it:
     // the leader's inventory panel.
     press(&mut e, &mut r, &chars("c"), 60);
+    let book = paper_in(&e, BOOK_FOOT);
     press(&mut e, &mut r, &[Key::Escape], 60);
     press(&mut e, &mut r, &chars("l"), 30);
     press(&mut e, &mut r, &[Key::Enter], 120);
-    let portrait = paper_in(&e, PANEL);
+    let portrait = paper_in(&e, PORTRAIT);
     press(&mut e, &mut r, &[Key::Space], 60);
     idle(&mut e, &mut r, 200);
     let party = paper_in(&e, PANEL);
@@ -263,7 +292,7 @@ fn the_source_plane_names_the_classic_pixels_of_the_users_game() {
         .flat_map(|y| (x0..x0 + usize::from(w.width) * 8).map(move |x| (x, y)))
         .filter(|&(x, y)| {
             let src = e.frame().src_at(x, y);
-            src.is_some_and(|p| p.kind == Kind::Bitmap && p.id == BITMAP_PAPER)
+            src.is_some_and(|p| p.kind == Kind::Bitmap && p.id == BITMAP_PAPER && p.flags == 0)
         })
         .count();
     drop(s);
@@ -273,16 +302,21 @@ fn the_source_plane_names_the_classic_pixels_of_the_users_game() {
     let covered = r.checked.iter().all(|&n| n > 0);
     let moved = !r.corner.0 || r.corner.1 > 0;
     let cleared = drawn.is_none() || named > 0;
-    // The panels' clears name the paper: the portrait's, the party panel's and the inventory
-    // list's (no part of the party panel or the list is flat paper colour).
+    // The panels' clears name the paper, each over its own area, none of it flat paper colour:
+    // the spellbook's, the portrait's, the party panel's and the inventory list's.
+    let named_all = |(named, flat): (usize, usize)| named > 0 && flat == 0;
     let panels = drawn.is_none()
-        || (portrait.0 > 0 && party.0 > 0 && party.1 == 0 && inventory.0 > 0 && inventory.1 == 0);
-    let pass = r.wrong == 0 && covered && moved && cleared && panels;
+        || [book, portrait, party, inventory]
+            .into_iter()
+            .all(named_all);
+    let flat = drawn.is_some() && r.window_flat > 0;
+    let pass = r.wrong == 0 && covered && moved && cleared && panels && !flat;
     println!(
         "source receipt: {}; {} frames; checked {} tile, {} portrait, {} paper, {} spellbook \
          pixels; {} stale, {} flagged; {} wrong; the paper's off-colour pixel moved up {} \
-         (pixel-frames: {}); {named} pixels of the scroll's last row name the paper; the panels \
-         name the paper / show it flat: portrait {portrait:?}, party {party:?}, inventory list \
+         (pixel-frames: {}); {named} pixels of the scroll's last row name the paper; the message \
+         window flat in the paper's colour {} (pixel-frames); the panels name the paper / show \
+         it flat: spellbook {book:?}, portrait {portrait:?}, party {party:?}, inventory list \
          {inventory:?}; map window {:.1}% tile ({tiles} of {window})",
         if pass { "pass" } else { "FAIL" },
         r.frames,
@@ -299,6 +333,7 @@ fn the_source_plane_names_the_classic_pixels_of_the_users_game() {
             (true, _) => "yes",
         },
         r.corner.1,
+        r.window_flat,
         tiles as f64 * 100.0 / window.max(1) as f64,
     );
     assert!(
@@ -310,4 +345,8 @@ fn the_source_plane_names_the_classic_pixels_of_the_users_game() {
     assert!(moved, "the scroll moved the paper's off-colour pixel up");
     assert!(cleared, "the scroll's cleared row names the paper");
     assert!(panels, "the panels' clears name the paper");
+    assert!(
+        !flat,
+        "no pixel of the message window shows the paper's colour flat"
+    );
 }

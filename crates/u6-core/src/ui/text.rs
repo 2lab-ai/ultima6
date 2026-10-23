@@ -11,7 +11,9 @@ use std::rc::Rc;
 
 use u6_formats::bitmap::Bitmap;
 use u6_formats::font::{BitFont, HangulFont};
-use u6_render::{BITMAP_PAPER, FLAG_INK, Framebuffer, HEIGHT, Kind, Src, WIDTH};
+use u6_render::{
+    BITMAP_PAPER, FLAG_INK, FLAG_PAPER, FLAG_PAPER_OFF, Framebuffer, HEIGHT, Kind, Src, WIDTH,
+};
 
 /// Window flag (byte 8) bit: wrap at word boundaries.
 pub const WRAP: u8 = 0x01;
@@ -132,7 +134,9 @@ pub fn draw_glyph(fb: &mut Framebuffer, font: &BitFont, x: usize, y: usize, c: u
 /// Port (spec 11): with a `code`, each pixel's source is the glyph of that code ([`Kind::Glyph`],
 /// (u, v) its place in the cell, [`FLAG_INK`] on the set pixels), so the HD font mode can show
 /// the cell's character in an HD font; without one the pixels are classic. The colours are those
-/// of either.
+/// of either. Port (spec 07 HD0): a glyph's pixel drawn over the paper ([`Src::on_paper`]: the
+/// pixel it replaces names the paper or is a glyph's over it) carries [`FLAG_PAPER`], so the HD
+/// paper can show behind the text there and nowhere else.
 fn draw_rows(
     fb: &mut Framebuffer,
     x: usize,
@@ -148,13 +152,16 @@ fn draw_rows(
             let colour = if set { fg & 0x0f } else { bg & 0x0f };
             match code {
                 Some(id) => {
+                    let under = fb.src_at(x + dx, y + dy);
+                    let on_paper = under.is_some_and(|s| s.on_paper());
                     let src = Src {
                         ver: 0,
                         id,
                         u: dx as u16,
                         v: dy as u16,
                         kind: Kind::Glyph,
-                        flags: if set { FLAG_INK } else { 0 },
+                        flags: if set { FLAG_INK } else { 0 }
+                            | if on_paper { FLAG_PAPER } else { 0 },
                     };
                     fb.set_src(x + dx, y + dy, colour, src);
                 }
@@ -186,18 +193,37 @@ pub fn draw_char(
 }
 
 /// Port-only (spec 11): [`draw_char`] for a glyph the game draws as a symbol, not a letter (the
-/// key wait's cursor): the same pixels, all classic, so the HD font mode never shows it as a
-/// character of the HD font, whatever its code.
+/// key wait's cursor): the same pixels, none of them named the glyph, so the HD font mode never
+/// shows it as a character of the HD font, whatever its code.
+///
+/// Port (spec 07 HD0): with `paper` ([`Paper`]), each pixel drawn over the paper
+/// ([`Src::on_paper`]) names the paper by the rule of the fills ([`Paper::over`]): the paper
+/// where the pixel's colour is the paper's there, else the paper flagged [`FLAG_PAPER_OFF`]; the
+/// others, and all of them without `paper` or without a source plane, are classic.
 pub fn draw_symbol(
     fb: &mut Framebuffer,
-    font: Option<&BitFont>,
-    hangul: Option<&HangulFont>,
+    fonts: (Option<&BitFont>, Option<&HangulFont>),
     w: &TextWindow,
     c: u16,
-    col: u16,
-    row: u16,
+    (col, row): (u16, u16),
+    paper: Option<&Paper>,
 ) {
-    draw_cell(fb, (font, hangul), w, c, (col, row), false);
+    let (x0, y0) = (usize::from(col) * CELL, usize::from(row) * CELL);
+    let at = |k: usize| (x0 + k % CELL, y0 + k / CELL);
+    let under: [bool; CELL * CELL] = std::array::from_fn(|k| {
+        let (x, y) = at(k);
+        fb.src_at(x, y).is_some_and(|s| s.on_paper())
+    });
+    draw_cell(fb, fonts, w, c, (col, row), false);
+    let Some(p) = paper.filter(|_| fonts.0.is_some()) else {
+        return;
+    };
+    for (k, _) in under.iter().enumerate().filter(|(_, on)| **on) {
+        let (x, y) = at(k);
+        if let Some(colour) = fb.get(x, y) {
+            fb.set_src(x, y, colour, p.over(x, y, colour));
+        }
+    }
 }
 
 /// [`draw_char`] (`named`: its glyph's pixels name it) and [`draw_symbol`].
@@ -222,11 +248,13 @@ fn draw_cell(
 /// Fills the inclusive pixel rectangle with `colour`: 0x152176 selects the colour, 0x1521f4
 /// fills (on the screen, set mode; [`crate::gfx::blit::fill_rect`]).
 ///
-/// Port (spec 07 HD0): with `paper` ([`Paper`]) each pixel filled names the paper where the
-/// paper's colour there is `colour`, so the HD paper shows wherever the classic frame shows the
-/// paper's own colour; the others are classic. Without it, or without a source plane, every pixel
-/// filled is classic. The text windows' clears and the UI's (the panels, the command underline)
-/// fill through here; the colours are those of the fill either way.
+/// Port (spec 07 HD0): with `paper` ([`Paper`]) each pixel the fill writes names the paper by
+/// [`Paper::over`]: the paper where the colour now in the frame is the paper's there, so the HD
+/// paper shows wherever the classic frame shows the paper's own colour, else the paper flagged
+/// [`FLAG_PAPER_OFF`] (shown classic). Without it, or without a source plane, every pixel filled
+/// is classic; a colour past 15 writes nothing and names nothing. The text windows' clears and
+/// the UI's (the panels, the command underline) fill through here; the colours are those of the
+/// fill either way.
 pub fn fill_rect(
     fb: &mut Framebuffer,
     x0: i32,
@@ -238,16 +266,20 @@ pub fn fill_rect(
 ) {
     let w = |v: i32| v as u16;
     crate::gfx::blit::fill_colour(fb, w(x0), w(y0), w(x1), w(y1), colour);
-    name_paper(fb, (w(x0), w(y0), w(x1), w(y1)), paper);
+    // The fill writes no colour past 15 (`plot_in`): then no pixel is the fill's to name.
+    if colour <= 15 {
+        name_paper(fb, (w(x0), w(y0), w(x1), w(y1)), paper);
+    }
 }
 
 /// Port-only (spec 07 HD0): the paper's colour at each screen pixel, as
 /// [`crate::main_loop::draw_paper`] drew it at the boot (the bitmap at (0, 0) through the bitmap
-/// colour table), none where it drew nothing. With it the scroll of a text window and the fills of
-/// the UI name the paper wherever a pixel they write has the paper's own colour there
-/// ([`scroll_window`], [`fill_rect`]), so the HD paper shows in place behind the text and the
-/// panels; every other pixel they write is classic. Shared, so a copy of the state does not copy it; shown by its size only (it
-/// is the user's art).
+/// colour table), none where it drew nothing. With it the scroll of a text window, the fills of the
+/// UI and the key wait's symbol name the paper wherever a pixel they write has the paper's own
+/// colour there ([`scroll_window`], [`fill_rect`], [`draw_symbol`]), so the HD paper shows in
+/// place behind the text and the panels; a pixel they write on the paper in another colour names
+/// it flagged [`FLAG_PAPER_OFF`] (shown classic), so a later scroll can name it again. Shared, so
+/// a copy of the state does not copy it; shown by its size only (it is the user's art).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Paper(Rc<[u8]>);
 
@@ -283,12 +315,16 @@ impl Paper {
     }
 
     /// The source of a pixel of colour `colour` written at (x, y) over the paper: the paper's
-    /// there when that is its colour, else classic.
-    fn over(&self, x: usize, y: usize, colour: u8) -> Src {
-        if self.at(x, y) == Some(colour) {
-            Self::src(x, y)
-        } else {
-            Src::CLASSIC
+    /// there when that is its colour, the paper's flagged [`FLAG_PAPER_OFF`] when it is another,
+    /// classic where the paper drew nothing.
+    pub fn over(&self, x: usize, y: usize, colour: u8) -> Src {
+        match self.at(x, y) {
+            Some(c) if c == colour => Self::src(x, y),
+            Some(_) => Src {
+                flags: FLAG_PAPER_OFF,
+                ..Self::src(x, y)
+            },
+            None => Src::CLASSIC,
         }
     }
 }
@@ -306,10 +342,12 @@ impl fmt::Debug for Paper {
 /// and so does this port. The pixels moved keep their sources (spec 07 HD0: a panel bitmap under
 /// the text stays named; spec 11: a glyph stays the glyph it was), but the paper's when `paper`
 /// is given: the paper is the background, drawn at (0, 0) under the whole screen, and does not
-/// move with the text. A paper pixel moved names the paper at the place it moves to when its
-/// colour is the paper's there, so the HD paper shows that place, not the one the pixel came
-/// from; one of another colour (a pixel of the paper's edge moved into its plain middle) is
-/// classic. The colours move as they did, so the classic frame is unchanged.
+/// move with the text. A paper pixel moved (flagged [`FLAG_PAPER_OFF`] or not) names the paper
+/// at the place it moves to by [`Paper::over`]: unflagged when its colour is the paper's there,
+/// so the HD paper shows that place, not the one the pixel came from; flagged when it is another
+/// (a pixel of the paper's edge moved into its plain middle, shown classic), so that it is named
+/// again where it later meets the paper of its colour. The colours move as they did, so the
+/// classic frame is unchanged.
 pub fn scroll_rect(
     fb: &mut Framebuffer,
     x0: u16,
@@ -356,9 +394,8 @@ pub fn scroll_rect(
 /// colour; the target of the pointer A4-0x7a20)
 ///
 /// Port (spec 07 HD0): with `paper` ([`Paper`]) the scroll leaves the paper in place
-/// ([`scroll_rect`]) and each pixel of the cleared row names the paper where the paper's colour
-/// there is the window's paper colour; without it, or without a source plane, the pixels move
-/// with their sources and the row is classic.
+/// ([`scroll_rect`]) and each pixel of the cleared row names the paper ([`fill_rect`]); without
+/// it, or without a source plane, the pixels move with their sources and the row is classic.
 pub fn scroll_window(fb: &mut Framebuffer, w: &TextWindow, paper: Option<&Paper>) {
     let x = u16::from(w.x) * 8;
     let y = u16::from(w.y) * 8;
@@ -377,11 +414,15 @@ pub fn scroll_window(fb: &mut Framebuffer, w: &TextWindow, paper: Option<&Paper>
     );
 }
 
-/// Port-only (spec 07 HD0): after a fill of the inclusive rectangle ([`fill_rect`]; its corners
-/// put in order and held to the screen as [`crate::gfx::blit::fill_colour`] does), each pixel of
-/// it names the paper where its colour is the paper's there ([`Paper`]); the others stay classic.
-/// Nothing without `paper` or without a source plane.
-fn name_paper(fb: &mut Framebuffer, (x0, y0, x1, y1): (u16, u16, u16, u16), paper: Option<&Paper>) {
+/// Port-only (spec 07 HD0): after a fill that wrote every pixel of the inclusive rectangle (its
+/// corners put in order and held to the screen as [`crate::gfx::blit::fill_colour`] does), each
+/// of them names the paper by [`Paper::over`] with the colour now in the frame. Nothing without
+/// `paper` or without a source plane.
+pub(crate) fn name_paper(
+    fb: &mut Framebuffer,
+    (x0, y0, x1, y1): (u16, u16, u16, u16),
+    paper: Option<&Paper>,
+) {
     let Some(p) = paper.filter(|_| fb.src().is_some()) else {
         return;
     };
@@ -396,9 +437,7 @@ fn name_paper(fb: &mut Framebuffer, (x0, y0, x1, y1): (u16, u16, u16, u16), pape
     for y in ya..=yb {
         for x in xa..=xb {
             let colour = fb.pixels()[y * WIDTH + x];
-            if p.at(x, y) == Some(colour) {
-                fb.set_src(x, y, colour, Paper::src(x, y));
-            }
+            fb.set_src(x, y, colour, p.over(x, y, colour));
         }
     }
 }
