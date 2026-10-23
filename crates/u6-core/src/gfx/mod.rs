@@ -76,4 +76,4 @@ pub mod view;
 mod tests;
 
 pub use load::GfxState;
-pub use view::{ViewWindow, WINDOW_TILES, flash_actor, refresh_view, render_window};
+pub use view::{ViewWindow, flash_actor, refresh_view, render_window};

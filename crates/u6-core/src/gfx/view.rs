@@ -21,9 +21,6 @@ use crate::engine::Io;
 use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, SHOWN, VIEW_H, VIEW_W};
 use crate::state::State;
 
-/// Cells per side of the Original map window (`moveq #0xb` loops in 0x102c90). The view's size
-/// is [`VIEW_W`] × [`VIEW_H`] (spec 13); this module no longer reads it.
-pub const WINDOW_TILES: usize = 11;
 /// Cell side in pixels (`asl.w #4`).
 const CELL: u16 = 16;
 // The cells' boxes are at multiples of 16 from the frame's corner ([`super::cache`]), and the
