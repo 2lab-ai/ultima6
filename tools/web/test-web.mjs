@@ -8656,6 +8656,12 @@ test('Wide layout (spec 13 Design 5): the pointer through the windows and the ma
   const s = await wideShown(page);
   const at = Object.fromEntries(s.windows.map((w) => [w.name, w]));
   const nearest = (w, [px, py]) => regionPixel(w, [px, py]);
+  // The rest of the screen in Wide: in none of the click map's map (Original's window and the
+  // shown map), command bar and side panel; a window's rect is not near it (its arrow, 16 px
+  // wide at most, shows in none; the drag test reads its pixels).
+  const near = [s.rest[0] - 16, s.rest[1] - 16, 48, 48];
+  assert.ok([LAYOUT_PARTS.map, LAYOUT_PARTS.commands, LAYOUT_PARTS.panel, WIDE_GEOM.shown].every((r) => !meets(r, [...s.rest, 1, 1])), 'the rest pixel: the rest of the screen');
+  assert.ok(s.windows.every((w) => !meets(w.from, near)) && !meets(WIDE_GEOM.shown, near), 'no window and not the map near the rest pixel');
   // Moves with no button on a frame and on a title strip: the nearest pixel of that content.
   const moves = [
     [at.date, [at.date.outer[0] + 1, at.date.outer[1] + 1], 'the date line\'s frame, top left'],
@@ -8713,7 +8719,55 @@ test('Wide layout (spec 13 Design 5): the pointer through the windows and the ma
   console.log(`  receipt: ${moves.length} frame and title moves at the nearest content pixel; ${s.windows.length} title-strip clicks at the rest of the screen; the map click 15 cells east at (${want.join(', ')}); 4 window centres at their rects' centres: pass`);
 }, { needs: h.haveHfes });
 
-test('Wide layout (spec 13 Design 5): every other screen (the opening, the menu) shows the UI\'s 320 x 200 scaled to the canvas\'s height, 1728 x 1080 centred, the sides dark; a press lands at the pixel it shows, on a side at the nearest edge', async (env) => {
+// Page script, the display frozen by the caller: the canvas of the letterboxed screen against the
+// frame's rect `crop` (frame pixels) scaled into the canvas rect `rect`, by the test's own
+// arithmetic: at a grid of canvas points over `rect` (every 9th pixel, and the rect's first and
+// last two columns and rows), the frame pixel the point's centre falls in. `hd`: the HD frame
+// (scaled smoothly: only points whose 3 x 3 frame pixels round it are one colour, within 2 a
+// channel); else the classic frame (pixelated: every point not within 0.15 of a frame pixel's
+// edge, exactly). Counts only: `compared`, `lit` (not black), `differ`.
+const wholeCheck = (page, crop, rect, hd) => page.evaluate(([[fx, fy, fw, fh], [x, y, w, hh], onHd]) => {
+  const c = document.getElementById('screen');
+  const g = globalThis.__shownGame;
+  const s = onHd ? g.hd_scale() : 1;
+  const f = onHd ? g.hd_frame_rgba() : g.frame_rgba();
+  const [W, H] = [g.width(), g.height()];
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const fr = (gx, gy) => [0, 1, 2].map((k) => f[((gy * s) * W * s + gx * s) * 4 + k]);
+  const flat = (gx, gy) => {
+    const ref = fr(gx, gy);
+    for (let v = (gy - 1) * s; v < (gy + 2) * s; v += 1) {
+      for (let u = (gx - 1) * s; u < (gx + 2) * s; u += 1) {
+        if (u < 0 || v < 0 || u >= W * s || v >= H * s) return null;
+        const i = (v * W * s + u) * 4;
+        if (f[i] !== ref[0] || f[i + 1] !== ref[1] || f[i + 2] !== ref[2]) return null;
+      }
+    }
+    return ref;
+  };
+  const cols = new Set([x, x + 1, x + w - 2, x + w - 1]);
+  const rows = new Set([y, y + 1, y + hh - 2, y + hh - 1]);
+  for (let v = x + 4; v < x + w; v += 9) cols.add(v);
+  for (let v = y + 4; v < y + hh; v += 9) rows.add(v);
+  const r = { compared: 0, lit: 0, differ: 0 };
+  for (const cy of rows) {
+    for (const cx of cols) {
+      const [u, v] = [((cx + 0.5 - x) * fw) / w, ((cy + 0.5 - y) * fh) / hh];
+      if (!onHd && [u, v].some((q) => q - Math.floor(q) < 0.15 || q - Math.floor(q) > 0.85)) continue;
+      const [gx, gy] = [fx + Math.floor(u), fy + Math.floor(v)];
+      if (gx < 0 || gy < 0 || gx >= W || gy >= H) continue;
+      const want = onHd ? flat(gx, gy) : fr(gx, gy);
+      if (!want) continue;
+      const i = (cy * c.width + cx) * 4;
+      r.compared += 1;
+      if (want[0] + want[1] + want[2] > 0) r.lit += 1;
+      if ([0, 1, 2].some((k) => Math.abs(d[i + k] - want[k]) > (onHd ? 2 : 0))) r.differ += 1;
+    }
+  }
+  return r;
+}, [crop, rect, hd]);
+
+test('Wide layout (spec 13 Design 5): every other screen (the opening, the menu) shows the UI\'s 320 x 200 scaled to the canvas\'s height, 1728 x 1080 centred, the sides dark; a press lands at the pixel it shows, on a side at the nearest edge; the page\'s map shows no frame pixel outside the UI\'s 320 x 200 there; in the menu, the display frozen, the canvas inside the letterbox is the frame\'s 320 x 200 crop scaled by 1080 / 200 (the test\'s own arithmetic), with HD off pixel for pixel (edges included) and with HD on where the frame is flat; the same check with the whole frame as the source or another scale finds pixels that differ', async (env) => {
   const { page } = await h.openWide(env, { gameFirst: false });
   await h.load(page, env);
   await h.dropFiles(page, [h.ZIP]);
@@ -8750,7 +8804,42 @@ test('Wide layout (spec 13 Design 5): every other screen (the opening, the menu)
   const sent = await canvasClick(page, [20, 500]);
   assert.deepEqual(sent.find(([, , b]) => b === 1).slice(0, 2), [0, Math.floor(((500.5 - 0) * 200) / 1080)], 'a press on the left side: the nearest edge pixel');
   assert.equal((await h.state(page)).program, 'u', 'still in u');
-  console.log('  receipt: the opening shows the UI\'s screen at 96,0,1728,1080 with dark sides; 4 presses landed: pass');
+  // The page's map shows only the UI's 320 x 200 here: no canvas place for a frame pixel past it.
+  const places = await page.evaluate(() => [[0, 0], [319, 199], [320, 0], [0, 200], [319, 200], [911, 335], [-1, 5], [5, -1]]
+    .map(([x, y]) => globalThis.__u6Layout.toCanvas(x, y)));
+  assert.ok(places[0] && places[1], 'the UI\'s corner pixels show');
+  assert.ok(places.slice(2).every((p) => p === null), 'no place for a frame pixel outside the UI\'s 320 x 200');
+  // The menu, frozen: the letterbox is the UI's crop scaled, by the test's own arithmetic.
+  await page.focus('#screen');
+  await h.press(page, 'Escape', 120);
+  assert.equal((await h.state(page)).program, 'u', 'Escape: the menu');
+  const k = 1080 / 200;
+  const rect = [(1920 - 320 * k) / 2, 0, 320 * k, 1080];
+  assert.deepEqual(rect, s.whole, 'the letterbox where the test puts it');
+  await page.click('#settings');
+  await page.click('#hd');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 3);
+  const results = {};
+  for (const [hd, label] of [[false, 'HD off'], [true, 'HD on']]) {
+    if (hd) {
+      await page.click('#settings');
+      await page.click('#hd');
+      await page.click('#setup-ok');
+      await h.runFrames(page, 3);
+    }
+    assert.equal(await page.evaluate(() => globalThis.__shownGame.hd_on()), hd, `${label}: as switched`);
+    const right = await wholeCheck(page, [0, 0, 320, 200], rect, hd);
+    assert.ok(right.compared >= (hd ? 200 : 2000) && right.lit >= (hd ? 50 : 500), `${label}: the menu offers lit pixels to compare`);
+    assert.equal(right.differ, 0, `${label}: the letterbox is the frame's 320 x 200 crop scaled by 1080 / 200`);
+    const wrongCrop = await wholeCheck(page, [0, 0, 912, 336], rect, hd);
+    const wrongScale = await wholeCheck(page, [0, 0, 320, 200], [96, 0, 1600, 1000], hd);
+    assert.ok(wrongCrop.differ > 0 && wrongScale.differ > 0, `${label}: the check tells the whole frame or another scale from it`);
+    results[label] = [right, wrongCrop, wrongScale];
+  }
+  console.log(`  receipt: the opening shows the UI's screen at 96,0,1728,1080 with dark sides; 4 presses landed; frame pixels outside the UI have no canvas place; the menu's letterbox the UI crop scaled (the grid with the rect's first and last two columns and rows): ${Object.entries(results).map(([l, [r, a, b]]) => `${l} ${r.compared} compared, 0 differ (whole frame as source: ${a.differ} differ; scale 5: ${b.differ} differ)`).join('; ')}: pass`);
 }, { needs: h.haveZip });
 
 test('Wide layout (spec 13 A5): fullscreen keeps 16:9 at any size, centred on black, the canvas still 1920 x 1080: at 1920 x 1080 the whole screen, sharp (one to one); at 2560 x 1440 the whole screen, smooth; at 1728 x 1117 1728 x 972 with bars, smooth; a key reaches the game in each', async (env) => {
@@ -8785,7 +8874,10 @@ test('Wide layout (spec 13 A5): fullscreen keeps 16:9 at any size, centred on bl
   console.log(`  receipt: ${lines.join('; ')}; a key reached the game in each: pass`);
 }, { needs: h.haveHfes });
 
-test('Wide layout (spec 13 Design 6): the compositor\'s time per frame at S 4 on a game frame (a whole composition of the 912 x 336 frame, the median of 60, the least of up to three runs of 60: the machine\'s load only adds) and the scale the Wide layout asks: while it asks 4 that median is within 8 ms (above, it is to ask 2); asking 2, the median is printed (receipt)', async (env) => {
+// A timing: it needs a lightly loaded runner. On a machine busy with other work the median grows
+// with the load (three runs of 60 are taken and the least kept, which only the load raises), and
+// a failure prints the medians measured: read them against the machine's load before choosing 2.
+test('Wide layout (spec 13 Design 6): the compositor\'s time per frame at S 4 on a game frame (a whole composition of the 912 x 336 frame, the median of 60, the least of up to three runs of 60: the machine\'s load only adds; a lightly loaded runner) and the scale the Wide layout asks: while it asks 4 that median is within 8 ms (above, it is to ask 2); asking 2, the median is printed (receipt)', async (env) => {
   // The page's own frames run between the runs (the display stays real: a virtual one would
   // stop the clock the runs read).
   const { page } = await bootWide(env);
@@ -8815,11 +8907,16 @@ test('Wide layout (spec 13 Design 6): the compositor\'s time per frame at S 4 on
   assert.ok([2, 4].includes(scale), 'the Wide layout asks 2 or 4');
   // One-sided (brief W5 item 5): S 4 holds while the median is within 8 ms; S 2, once chosen,
   // needs no time (the receipt says the median at S 4).
-  if (scale === 4) assert.ok(median <= 8, 'S 4: the median within 8 ms (above it, the Wide layout is to ask 2: site/app.js WIDE_S)');
+  const runs = medians.map((v) => v.toFixed(2)).join(', ');
+  if (scale === 4) assert.ok(median <= 8, `S 4: the median ${median.toFixed(2)} ms (runs: ${runs}) within 8 ms (above it on a lightly loaded runner, the Wide layout is to ask 2: site/app.js WIDE_S)`);
   console.log(`  receipt: the compositor at S 4, a whole composition of the Wide frame on a game frame: median ${median.toFixed(2)} ms (runs: ${medians.map((m) => m.toFixed(2)).join(', ')}); the Wide layout asks S ${scale}`);
 }, { needs: h.haveHfes });
 
-test('Wide layout (spec 13 Decision 2): the chooser\'s and Settings\' "Screen layout" offers Wide (first), HD 16:9 and Original 16:10, in the page\'s language, Wide checked in the Wide build; after a Save in the Wide build, HD 16:9 keeps hd and loads the page again with the Original build (site/pkg) and spec 10\'s layout, the kept files and the stored save as they were (nothing new saved) and the save resumed; Wide again loads the Wide build, the save resumed there too; with storage that throws, Wide from the Original build keeps the page as it is (the radio back on HD 16:9) and says why', async (env) => {
+// Waits for the page's next load after `act` (a choice that loads the page again), without
+// waiting on the old document.
+const loadAfter = (page, act) => Promise.all([page.waitForEvent('load', { timeout: 60_000 }), act()]);
+
+test('Wide layout (spec 13 Decision 2): the chooser\'s and Settings\' "Screen layout" offers Wide (first), HD 16:9 and Original 16:10, in the page\'s language, Wide checked in the Wide build; after a Save in the Wide build, HD 16:9 is only noted (no load, the radio on it) until OK, which keeps hd and loads the page again with the Original build (site/pkg) and spec 10\'s layout, the kept files and the stored save as they were (nothing new saved) and the save resumed; Wide again (at OK) loads the Wide build, the save resumed there too; with storage that throws, Wide from the Original build at OK keeps the page as it is (the radio back on HD 16:9) and says why', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   const { page, glues } = await bootWide(env);
   const choice = () => page.evaluate(() => ({
@@ -8843,8 +8940,14 @@ test('Wide layout (spec 13 Decision 2): the chooser\'s and Settings\' "Screen la
   const keptBefore = await h.keptPaths(page);
   const savedBefore = await h.savedFiles(page);
   const n = glues.length;
-  // The choice loads the page again at once: a click that does not wait on the old document.
-  await Promise.all([page.waitForEvent('load'), page.click('input[name="layout"][value="hd"]', { noWaitAfter: true })]);
+  // The choice is noted; OK loads the page again.
+  let loads = 0;
+  page.on('load', () => { loads += 1; });
+  await page.check('input[name="layout"][value="hd"]');
+  await h.waitFrames(page, 10);
+  assert.equal(loads, 0, 'HD 16:9 chosen: no load before OK');
+  assert.equal((await choice()).values.find(([v]) => v === 'hd')[1], true, 'the radio on HD 16:9 until OK');
+  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
   await started(page, FILES);
   await h.waitPrompt(page);
   let s = await layoutShown(page);
@@ -8861,8 +8964,9 @@ test('Wide layout (spec 13 Decision 2): the chooser\'s and Settings\' "Screen la
   await page.check('input[name="layout"][value="original"]');
   s = await layoutShown(page);
   assert.ok(s.layout === 'original' && s.view === 'frame' && s.stored === 'original' && glues.length === m, 'Original 16:10 at once, in the same build');
-  // Wide again: the Wide build.
-  await Promise.all([page.waitForEvent('load'), page.click('input[name="layout"][value="wide"]', { noWaitAfter: true })]);
+  // Wide again (at OK): the Wide build.
+  await page.check('input[name="layout"][value="wide"]');
+  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
   await started(page, FILES);
   await h.waitPrompt(page);
   const w = await wideShown(page);
@@ -8882,6 +8986,11 @@ test('Wide layout (spec 13 Decision 2): the chooser\'s and Settings\' "Screen la
   p2.on('load', () => { reloads += 1; });
   await p2.click('#settings');
   await p2.click('input[name="layout"][value="wide"]');
+  // No voices: storage that throws keeps no choice, so the chooser is a first run's (NPC voices
+  // ticked), and their download's line would follow.
+  await p2.uncheck('#setup-voices');
+  await p2.click('#setup-ok');
+  await h.waitSettled(p2);
   await h.waitFrames(p2, 10);
   const after = await p2.evaluate(() => ({
     layout: document.body.dataset.layout,
@@ -8892,7 +9001,231 @@ test('Wide layout (spec 13 Decision 2): the chooser\'s and Settings\' "Screen la
   assert.ok(reloads === 0 && after.layout === 'hd' && after.checked === 'hd', 'storage that throws: no load, HD 16:9 still, the radio back');
   // The page's language: 한글 here (storage that throws keeps no chooser's choice: a first run).
   assert.equal(after.status, TEXT[after.lang].layoutNotKept, 'the line says why, in the page\'s language');
-  console.log('  receipt: Wide, HD 16:9, Original 16:10 in English and Korean; a Save in Wide, then Wide -> HD 16:9 loaded the Original build with spec 10\'s layout, kept files and save unchanged, the save resumed; Original 16:10 at once; HD -> Wide loaded the Wide build, the save resumed; storage that throws: no load, a line: pass');
+  console.log('  receipt: Wide, HD 16:9, Original 16:10 in English and Korean; a Save in Wide, then Wide -> HD 16:9 noted, loaded at OK into the Original build with spec 10\'s layout, kept files and save unchanged, the save resumed; Original 16:10 at once; HD -> Wide at OK loaded the Wide build, the save resumed; storage that throws: no load, a line: pass');
+}, { needs: h.haveHfes });
+
+test('Wide layout (spec 13 Decision 2, the first-run chooser): on a first visit (the chooser open on the Wide build) English, NPC voices unticked and HD 16:9 load nothing until OK; OK keeps the chooser\'s choices first and then loads the page once into the Original build: in English, the chooser not shown again, the voices off and nothing asked of /models/, HD 16:9 kept', async (env) => {
+  const { context, page } = await h.openPage(env, { setup: null, layout: null });
+  const glues = [];
+  const models = [];
+  page.on('request', (r) => {
+    const path = new URL(r.url()).pathname;
+    if (path.endsWith('/u6_web.js')) glues.push(path);
+    if (path.startsWith('/models/')) models.push(path);
+  });
+  let loads = 0;
+  page.on('load', () => { loads += 1; });
+  await h.load(page, env);
+  await page.waitForFunction(() => !document.getElementById('setup').hidden);
+  assert.ok(glues.length === 1 && glues[0] === '/pkg-wide/u6_web.js', 'a first visit: the Wide build');
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.uncheck('#setup-voices');
+  await page.check('input[name="layout"][value="hd"]');
+  await h.waitFrames(page, 10);
+  assert.equal(loads, 1, 'no load before OK');
+  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
+  await h.waitSettled(page);
+  await h.waitFrames(page, 20);
+  const after = await page.evaluate(() => ({
+    lang: document.documentElement.lang,
+    open: !document.getElementById('setup').hidden,
+    layout: document.body.dataset.layout,
+    wide: globalThis.__u6Layout.wide,
+    stored: localStorage.getItem('u6.layout'),
+    setup: JSON.parse(localStorage.getItem('u6.setup')),
+    voices: localStorage.getItem('u6.voices'),
+    voice: document.body.dataset.voice ?? null,
+  }));
+  assert.equal(loads, 2, 'one load at OK');
+  assert.deepEqual(glues, ['/pkg-wide/u6_web.js', '/pkg/u6_web.js'], 'then the Original build');
+  assert.ok(after.layout === 'hd' && !after.wide && after.stored === 'hd', 'HD 16:9, kept');
+  assert.ok(after.lang === 'en' && after.setup?.lang === 'en', 'in English, kept');
+  assert.equal(after.open, false, 'the chooser not shown again');
+  assert.ok(after.voices !== 'on' && models.length === 0, 'the voices off, nothing asked of /models/');
+  await context.close();
+  console.log(`  receipt: a first visit chose English, no voices and HD 16:9; one load at OK into the Original build, the chooser's choices kept, voices off (voice state ${after.voice}): pass`);
+});
+
+// Before the page's scripts: a voice Worker that runs no model (as fakeVoiceWorker) and keeps,
+// in the tab's session storage across its documents, each load it was asked for
+// (`__voiceLoads`: [the document's number from 1, whether from the cache only]) and each voice
+// state the page showed (`__voiceStates`). From the cache only it answers as the real worker does
+// when the model is not there (notcached); with downloads allowed, in the tab's first document a
+// download that goes on (progress, never ready), as the 400 MB model's would; in a later one,
+// ready.
+function voiceLoadsLog() {
+  const list = (key) => JSON.parse(sessionStorage.getItem(key) ?? '[]');
+  const doc = Number(sessionStorage.getItem('__voiceDocs') ?? 0) + 1;
+  sessionStorage.setItem('__voiceDocs', String(doc));
+  window.Worker = class FakeVoiceWorker extends EventTarget {
+    postMessage(m) {
+      const reply = (data) => setTimeout(() => {
+        const e = new MessageEvent('message', { data });
+        this.dispatchEvent(e);
+        this.onmessage?.(e);
+      }, 0);
+      if (m?.type === 'load') {
+        sessionStorage.setItem('__voiceLoads', JSON.stringify([...list('__voiceLoads'), [doc, Boolean(m.cachedOnly)]]));
+        if (m.cachedOnly) reply({ type: 'error', code: 'notcached' });
+        else if (doc === 1) reply({ type: 'progress', got: 1 << 20, total: 400 << 20 });
+        else reply({ type: 'ready', ms: 1, refetched: 0, path: 'cpu' });
+      } else if (m?.type === 'speak') reply({ type: 'done', id: m.id });
+    }
+
+    terminate() {}
+  };
+  document.addEventListener('DOMContentLoaded', () => {
+    const note = () => {
+      const states = list('__voiceStates');
+      const v = document.body.dataset.voice;
+      if (v !== undefined && states.at(-1) !== v) sessionStorage.setItem('__voiceStates', JSON.stringify([...states, v]));
+    };
+    note();
+    new MutationObserver(note).observe(document.body, { attributes: true, attributeFilter: ['data-voice'] });
+  });
+}
+
+test('Wide layout (spec 13 Decision 2, the first-run chooser with voices): NPC voices ticked and HD 16:9 at the first run (the model stubbed: a download that goes on), OK starts the download and loads the page once into the Original build; there the voices go on with downloads allowed (not from the cache only) and are ready, the voices kept on; no state failed, no load from the cache only; the mark the switch left is taken', async (env) => {
+  const { context, page } = await h.openPage(env, { setup: null, layout: null });
+  await context.addInitScript(voiceLoadsLog);
+  let loads = 0;
+  page.on('load', () => { loads += 1; });
+  await h.load(page, env);
+  await page.waitForFunction(() => !document.getElementById('setup').hidden);
+  await page.check('input[name="setup-lang"][value="en"]');
+  assert.equal(await page.isChecked('#setup-voices'), true, 'NPC voices ticked (a first run)');
+  await page.check('input[name="layout"][value="hd"]');
+  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
+  await h.waitSettled(page);
+  await page.waitForFunction(() => document.body.dataset.voice === 'ready', null, { timeout: 30_000 });
+  await h.waitFrames(page, 10);
+  const after = await page.evaluate(() => ({
+    loads: JSON.parse(sessionStorage.getItem('__voiceLoads') ?? '[]'),
+    states: JSON.parse(sessionStorage.getItem('__voiceStates') ?? '[]'),
+    mark: sessionStorage.getItem('u6-voice-download-after-reload'),
+    voices: localStorage.getItem('u6.voices'),
+    layout: document.body.dataset.layout,
+    wide: globalThis.__u6Layout.wide,
+    error: document.body.dataset.voiceError,
+  }));
+  assert.equal(loads, 2, 'one load at OK');
+  assert.ok(after.layout === 'hd' && !after.wide, 'the Original build, HD 16:9');
+  // The first document's load may not be asked yet when the page loads again (the storage's
+  // persist is asked first): the second's goes on with downloads allowed either way.
+  assert.ok(after.loads.every(([, cached]) => !cached), 'no load from the cache only');
+  assert.ok(after.loads.some(([d]) => d === 2), 'the page loaded again asked for the model, downloads allowed');
+  assert.ok(!after.states.includes('failed') && after.error === '', 'never failed');
+  assert.equal(after.states.at(-1), 'ready', 'the voices ready');
+  assert.equal(after.voices, 'on', 'the voices kept on');
+  assert.equal(after.mark, null, 'the mark taken');
+  await context.close();
+  console.log(`  receipt: voices ticked at the first run with HD 16:9: the voices started, one load at OK, then the model asked for with downloads allowed (loads ${after.loads.map(([d, c]) => `${d}:${c ? 'cache' : 'download'}`).join(', ')}), ready, kept on (states ${after.states.join(' > ')}): pass`);
+});
+
+test('Wide layout (spec 13 Decision 2, one switch): two choices across the builds before OK load the page once, into the last; a choice across the builds shows a line (on the status line and the chooser\'s, in the page\'s language) that OK loads the page again with that screen and what the game has not saved is lost, gone when the choice is called off; a choice across and back (or to the other layout of the build that runs) before OK loads nothing, the latter at once; after OK the switch waits for every operation admitted before the page loads again, with a line that it waits: a Save held in its store when the switch starts, then a second Save admitted while it waits, held too: no load when the first is done, one load only once the second is, and the second resumes after it', async (env) => {
+  const hdPack = await madePack(env);
+  const listing = { 'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }] }), 'test-pack.zip': hdPack };
+  sitePacks(env, listing);
+  const { page, glues } = await bootWide(env);
+  let loads = 0;
+  page.on('load', () => { loads += 1; });
+  const stored = () => page.evaluate(() => localStorage.getItem('u6.layout'));
+  const { TEXT } = await import('../../site/i18n.js');
+  const lines = () => page.evaluate(() => [document.getElementById('status').textContent, document.getElementById('setup-status').textContent]);
+  // Two choices across the builds: HD 16:9, then Original 16:10; one load, into Original. Each
+  // says so; back to Wide (the build that runs), the line goes.
+  await page.click('#settings');
+  await listed(page, 1);
+  await page.check('input[name="layout"][value="hd"]');
+  assert.deepEqual(await lines(), [TEXT.en.layoutSwitchAtOk('hd'), TEXT.en.layoutSwitchAtOk('hd')], 'HD 16:9 across the builds: the line, twice');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  assert.deepEqual(await lines(), [TEXT.ko.layoutSwitchAtOk('hd'), TEXT.ko.layoutSwitchAtOk('hd')], 'in Korean');
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.check('input[name="layout"][value="wide"]');
+  assert.deepEqual(await lines(), ['', ''], 'called off: the line gone');
+  await page.check('input[name="layout"][value="hd"]');
+  await page.check('input[name="layout"][value="original"]');
+  assert.deepEqual(await lines(), [TEXT.en.layoutSwitchAtOk('original'), TEXT.en.layoutSwitchAtOk('original')], 'Original 16:10: its line');
+  assert.equal(await stored(), 'wide', 'noted only: nothing kept before OK');
+  let n = glues.length;
+  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  await h.waitFrames(page, 30);
+  let s = await layoutShown(page);
+  assert.equal(loads, 1, 'one load');
+  assert.ok(s.layout === 'original' && s.stored === 'original' && glues.slice(n).every((p) => p === '/pkg/u6_web.js'), 'into the last choice: Original 16:10, the Original build');
+  // Across and back: Wide, then Original 16:10 (the build and layout that run): no load.
+  await page.click('#settings');
+  await page.check('input[name="layout"][value="wide"]');
+  await page.check('input[name="layout"][value="original"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await h.waitFrames(page, 30);
+  assert.equal(loads, 1, 'across and back: no load');
+  // Wide, then HD 16:9 (the other layout of this build): no load, HD 16:9 at once.
+  await page.click('#settings');
+  await page.check('input[name="layout"][value="wide"]');
+  await page.check('input[name="layout"][value="hd"]');
+  s = await layoutShown(page);
+  assert.ok(s.layout === 'hd' && s.stored === 'hd', 'HD 16:9 at once, the switch called off');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  await h.waitFrames(page, 30);
+  assert.equal(loads, 1, 'no load');
+  // The switch's wait: Wide and the site's pack chosen, the pack's answer held, OK (the
+  // chooser's operation waits on the pack); a first Save (after a step) admitted behind it, its
+  // store held; the pack let go: the chooser closes and the switch starts, waiting on the first
+  // Save. THEN a second Save (after another step), admitted while the switch waits, its store
+  // held as well. The first let go (and the hold kept for the second): no load; the second let
+  // go: one load. A wait on the queue's tail as it was when the switch started would load the
+  // page between the two.
+  const stores = async (kind) => (await h.log(page)).filter((e) => e.startsWith(`saves:store:${kind}`)).length;
+  const save = async () => {
+    await page.focus('#screen');
+    const { to } = await h.stepOnce(page);
+    await h.press(page, 'Control+s', 30);
+    await h.press(page, 'y', 60);
+    return to;
+  };
+  await page.click('#settings');
+  await listed(page, 1);
+  await page.check('input[name="layout"][value="wide"]');
+  await page.check('#setup-hd input[value="test-pack.zip"]');
+  const pack = h.holdPack(env, 'test-pack.zip');
+  await page.click('#setup-ok');
+  await pack.asked;
+  await page.evaluate(() => window.__hold('saves'));
+  const [ends0, starts0] = [await stores('end'), await stores('start')];
+  const first = await save();
+  pack.release();
+  await page.waitForFunction((k) => window.__log.filter((e) => e.startsWith('saves:store:start')).length > k, starts0, { timeout: 30_000 });
+  await page.waitForFunction(() => document.getElementById('setup').hidden, null, { timeout: 30_000 });
+  assert.equal((await lines())[0], TEXT.en.layoutSwitchWaiting, 'the switch waits on the first Save: its line');
+  const second = await save();
+  assert.notEqual(second, first, 'the second Save after another step');
+  await page.waitForFunction(() => document.body.dataset.ops === '2', null, { timeout: 30_000 });
+  assert.equal(loads, 1, 'both Saves admitted, no load yet');
+  await page.evaluate(() => {
+    window.__release('saves');
+    window.__hold('saves');
+  });
+  await page.waitForFunction(([e, k]) => window.__log.filter((x) => x.startsWith('saves:store:end')).length > e
+    && window.__log.filter((x) => x.startsWith('saves:store:start')).length > k + 1, [ends0, starts0], { timeout: 30_000 });
+  await h.waitFrames(page, 30);
+  assert.equal(loads, 1, 'the first Save done: no load (the second is admitted)');
+  assert.equal(await stores('end'), ends0 + 1, 'the second Save still held');
+  assert.equal((await lines())[0], TEXT.en.layoutSwitchWaiting, 'the switch waits again (on the second): its line');
+  n = glues.length;
+  await loadAfter(page, () => page.evaluate(() => window.__release('saves')));
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  assert.equal(loads, 2, 'one load, after the second Save');
+  const w = await wideShown(page);
+  assert.ok(w.layout === 'wide' && w.wide && glues.slice(n).every((p) => p === '/pkg-wide/u6_web.js'), 'the Wide build');
+  assert.equal((await atPrompt(page)).leader, second, 'the second Save resumes');
+  assert.ok((await h.savedPaths(page)).includes('savegame/objlist'), 'it is in storage');
+  console.log('  receipt: the switch line in English and Korean, gone when called off; HD then Original before OK: one load into Original; Wide and back, Wide then HD: no load; the switch waited (its line) on a held Save, then on a second Save admitted during the wait: no load after the first, one load after the second, which resumed: pass');
 }, { needs: h.haveHfes });
 
 test('Wide layout (spec 13 Design 5, drag): the date line dragged by its title strip follows the pointer (in front of the others) and stays whole on the canvas; its press and release reach the game as a gap\'s; the pointer then reaches its content where it is; its place is kept (u6.layout.windows) and comes back after a reload; the windows not dragged stay at their corners', async (env) => {
@@ -8909,6 +9242,10 @@ test('Wide layout (spec 13 Design 5, drag): the date line dragged by its title s
   await page.mouse.move(...start);
   await page.mouse.down();
   for (let i = 1; i <= 4; i += 1) await page.mouse.move(start[0] - 150 * k * i, start[1] + 75 * k * i);
+  // Mid-drag, the game's pointer at the rest pixel with the button held: its frame kept, to read
+  // the arrow there against a frame with the pointer elsewhere (below).
+  await h.waitTaken(page);
+  await page.evaluate(() => { window.__restFrame = globalThis.__shownGame.frame_rgba(); });
   await page.mouse.up();
   await h.waitTaken(page);
   const sent = await pointerSince(page, n);
@@ -8936,6 +9273,35 @@ test('Wide layout (spec 13 Design 5, drag): the date line dragged by its title s
   await h.runFrames(page, 4);
   await page.waitForFunction((c) => window.__pointer.length > c, m, { timeout: 5000 });
   assert.deepEqual((await pointerSince(page, m)).find(([, , b]) => b === 1), [...centre, 1], 'a press in the moved date line reaches its pixel');
+  // The arrow the game drew at the rest pixel during the drag: the frame pixels round the rest
+  // pixel that differ from this frame (the pointer in the date line now). Some, and none of them
+  // has a place on the canvas (no window shows it, nor the map); the arrow at the date line's
+  // pixel, read the same way, has.
+  const arrows = await page.evaluate(([rest, here]) => {
+    const g = globalThis.__shownGame;
+    const [a, b, w] = [window.__restFrame, g.frame_rgba(), g.width()];
+    const L = globalThis.__u6Layout;
+    const drawn = ([px, py]) => {
+      const out = [];
+      for (let y = Math.max(0, py - 16); y < py + 24; y += 1) {
+        for (let x = Math.max(0, px - 16); x < px + 24; x += 1) {
+          const i = (y * w + x) * 4;
+          if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) out.push([x, y]);
+        }
+      }
+      return out;
+    };
+    const atRest = drawn(rest);
+    const atHere = drawn(here);
+    return {
+      rest: atRest.length,
+      restShown: atRest.filter(([x, y]) => L.toCanvas(x, y) !== null).length,
+      here: atHere.length,
+      hereShown: atHere.filter(([x, y]) => L.toCanvas(x, y) !== null).length,
+    };
+  }, [s.rest, centre]);
+  assert.ok(arrows.rest > 0 && arrows.restShown === 0, 'the arrow at the rest pixel during the drag: drawn, and nowhere on the canvas');
+  assert.ok(arrows.here > 0 && arrows.hereShown > 0, 'the arrow in the date line: on the canvas (the check sees an arrow that shows)');
   // Past the canvas's edge: it stays whole on it; the pointer leaves its title strip there (over
   // the map, then off the canvas), and every event of the drag is still the rest of the screen,
   // never a held map pixel.
@@ -8963,7 +9329,7 @@ test('Wide layout (spec 13 Design 5, drag): the date line dragged by its title s
   // The others at their corners (checked with the date line where it was first).
   const corners = s.windows.filter((w) => w.name !== 'date');
   windowsPlaced({ ...s, windows: [date, ...corners] }, 'the others');
-  console.log(`  receipt: the date line dragged by its title strip to ${moved.outer.slice(0, 2).join(',')}, then past the corner to ${edge.outer.slice(0, 2).join(',')}, kept across a reload; its press and release a gap's; a press in it there at its pixel: pass`);
+  console.log(`  receipt: the date line dragged by its title strip to ${moved.outer.slice(0, 2).join(',')}, then past the corner to ${edge.outer.slice(0, 2).join(',')}, kept across a reload; its press and release a gap's (the rest pixel ${s.rest.join(',')}: the arrow there ${arrows.rest} frame pixels, none on the canvas; in the date line ${arrows.hereShown} on it); a press in it there at its pixel: pass`);
 }, { needs: h.haveHfes });
 
 const filter = process.argv[2];

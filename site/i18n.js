@@ -6,6 +6,11 @@
 // from his own files (dropped, or listed by the site) puts its conversations in
 // Korean.
 const mib = (n) => (n / 2 ** 20).toFixed(1);
+// The names of the screens (index.html's Screen layout), for the lines that name one.
+const SCREENS = {
+  en: { wide: 'Wide (larger map)', hd: 'HD 16:9', original: 'Original 16:10' },
+  ko: { wide: '와이드 (넓은 지도)', hd: 'HD 16:9', original: '원본 16:10' },
+};
 const files = (n) => `${n} file${n === 1 ? '' : 's'}`;
 
 export const TEXT = {
@@ -40,9 +45,11 @@ export const TEXT = {
     toolbar: 'Game',
     hdOn: 'HD on',
     layout: 'Screen layout',
-    layoutWide: 'Wide (larger map)',
-    layoutOriginal: 'Original 16:10',
+    layoutWide: SCREENS.en.wide,
+    layoutOriginal: SCREENS.en.original,
     layoutNotKept: 'The screen stays as it is: this browser keeps no settings, and the other screen loads with the page.',
+    layoutSwitchAtOk: (screen) => `OK loads the page again with the screen ${SCREENS.en[screen] ?? screen}: what the game has not saved is lost.`,
+    layoutSwitchWaiting: 'The page loads again with the other screen once the work under way is done.',
     windowDate: 'Date',
     windowPanel: 'Party',
     windowMessages: 'Messages',
@@ -219,9 +226,11 @@ export const TEXT = {
     toolbar: '게임',
     hdOn: 'HD 켜기',
     layout: '화면 배치',
-    layoutWide: '와이드 (넓은 지도)',
-    layoutOriginal: '원본 16:10',
+    layoutWide: SCREENS.ko.wide,
+    layoutOriginal: SCREENS.ko.original,
     layoutNotKept: '화면은 그대로입니다: 이 브라우저는 설정을 저장하지 않고, 다른 화면은 페이지를 다시 불러와야 열립니다.',
+    layoutSwitchAtOk: (screen) => `확인을 누르면 ${SCREENS.ko[screen] ?? screen} 화면으로 페이지를 다시 엽니다: 게임에서 저장하지 않은 진행은 사라집니다.`,
+    layoutSwitchWaiting: '진행 중인 작업이 끝나면 다른 화면으로 페이지를 다시 엽니다.',
     windowDate: '날짜',
     windowPanel: '파티',
     windowMessages: '메시지',
