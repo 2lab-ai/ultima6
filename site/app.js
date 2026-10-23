@@ -250,6 +250,9 @@ const fullscreenButton = document.getElementById('fullscreen');
 const fullscreenExit = document.getElementById('fullscreen-exit');
 
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
+// sessionStorage, one-shot: the switch to the other build (`switchBuild`) cut a download of the
+// voice model the visitor started; the page it loads goes on with downloads allowed.
+const VOICE_DOWNLOAD_AFTER_RELOAD = 'u6-voice-download-after-reload';
 
 // The engine (wasm-bindgen's glue of one of the two builds, spec 13 Decision 2: `pkg` Original,
 // `pkg-wide` Wide), imported at the engine's operation (`ENGINE_URL`); until then none of these.
@@ -367,6 +370,7 @@ function setLang(next) {
   showSpeed();
   showStorage();
   if (said) say(said[0], ...said[1]);
+  if (said?.[0] === 'layoutSwitchAtOk') setupStatus.textContent = statusLine.textContent;
 }
 
 function message(err) {
@@ -1822,17 +1826,20 @@ let switching = false;
 // The chooser's and Settings' "Screen layout" changed. Within the build this page loaded: kept,
 // on the game on screen at once, and a switch to the other build chosen before is called off.
 // Across the builds: only noted (`switchTo`, the latest choice), for the chooser's OK, which
-// switches after it kept the chooser's other choices (`applySetup`). While the page is loading
-// again into the other build, nothing (the choices are disabled).
+// switches after it kept the chooser's other choices (`applySetup`); a line says so
+// (`showSwitchLine`). While the page is loading again into the other build, nothing (the
+// choices are disabled).
 function chooseLayout(value) {
   if (switching) return;
   const next = value === 'wide' || value === 'original' ? value : 'hd';
   if ((next === 'wide') !== WIDE) {
     switchTo = next;
     showHd();
+    showSwitchLine();
     return;
   }
   switchTo = null;
+  showSwitchLine();
   layoutChoice = next;
   try {
     localStorage.setItem(LAYOUT_KEY, layoutChoice);
@@ -1855,7 +1862,10 @@ async function switchBuild() {
   if (switching || switchTo === null) return;
   switching = true;
   showHd();
+  // Waiting on an operation other than the chooser's own (the one that calls this): a line says
+  // the page loads again once it is done, again after each that came meanwhile.
   for (let seen = null; seen !== tail;) {
+    if (seen !== null || queued > 1) say('layoutSwitchWaiting');
     seen = tail;
     await seen;
   }
@@ -1869,8 +1879,29 @@ async function switchBuild() {
     say('layoutNotKept');
     return;
   }
+  // A download of the voice model the visitor started (not a start from the cache) goes on in
+  // the page loaded next, which would otherwise start the voices from the cache only.
+  if (!voiceQuiet && (voiceState === 'checking' || voiceState === 'loading')) {
+    try {
+      sessionStorage.setItem(VOICE_DOWNLOAD_AFTER_RELOAD, '1');
+    } catch {
+      // No session storage: the next page starts the voices from the cache only.
+    }
+  }
   leaving = true;
   location.reload();
+}
+
+// The line of a switch to the other build noted for OK (`switchTo`): on the status line and the
+// chooser's, in the page's language; gone with the switch called off.
+function showSwitchLine() {
+  if (switchTo !== null) {
+    say('layoutSwitchAtOk', switchTo);
+    setupStatus.textContent = statusLine.textContent;
+  } else if (said?.[0] === 'layoutSwitchAtOk') {
+    setStatus('');
+    setupStatus.textContent = '';
+  }
 }
 
 // --- the Wide layout (spec 13) -----------------------------------------------------------------
@@ -3605,6 +3636,17 @@ window.addEventListener('unhandledrejection', (e) => {
   say('unexpected', message(e.reason));
 });
 
+// The mark the switch to the other build left for a voice download it cut, taken once.
+function takeVoiceDownload() {
+  try {
+    const set = sessionStorage.getItem(VOICE_DOWNLOAD_AFTER_RELOAD) === '1';
+    sessionStorage.removeItem(VOICE_DOWNLOAD_AFTER_RELOAD);
+    return set;
+  } catch {
+    return false;
+  }
+}
+
 function takeFocusFlag() {
   try {
     const set = sessionStorage.getItem(FOCUS_AFTER_RELOAD) === '1';
@@ -3633,8 +3675,10 @@ reflectFont();
 showFullscreen();
 canvas.dataset.behind = '0';
 reflectVoice();
-// Voices turned on in an earlier visit come back from this browser's cache only.
-if (voicesWanted() && termsAccepted()) startVoices({ cachedOnly: true });
+// Voices turned on in an earlier visit come back from this browser's cache only; a download the
+// switch to the other build cut (`switchBuild`) goes on, downloads allowed.
+const voiceDownload = takeVoiceDownload();
+if (voicesWanted() && termsAccepted()) startVoices({ cachedOnly: !voiceDownload });
 // The chooser first while no choice of this version is kept.
 if (setupFirst) openSetup();
 enqueue('opEngine', async () => {

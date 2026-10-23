@@ -8839,8 +8839,7 @@ test('Wide layout (spec 13 Design 5): every other screen (the opening, the menu)
     assert.ok(wrongCrop.differ > 0 && wrongScale.differ > 0, `${label}: the check tells the whole frame or another scale from it`);
     results[label] = [right, wrongCrop, wrongScale];
   }
-  const edges = await wholeCheck(page, [0, 0, 320, 200], [rect[0], rect[1], 12, rect[3]], false);
-  console.log(`  receipt: the opening shows the UI's screen at 96,0,1728,1080 with dark sides; 4 presses landed; frame pixels outside the UI have no canvas place; the menu's letterbox the UI crop scaled: ${Object.entries(results).map(([l, [r, a, b]]) => `${l} ${r.compared} compared, 0 differ (whole frame as source: ${a.differ} differ; scale 5: ${b.differ} differ)`).join('; ')}; edge columns ${edges.compared} compared: pass`);
+  console.log(`  receipt: the opening shows the UI's screen at 96,0,1728,1080 with dark sides; 4 presses landed; frame pixels outside the UI have no canvas place; the menu's letterbox the UI crop scaled (the grid with the rect's first and last two columns and rows): ${Object.entries(results).map(([l, [r, a, b]]) => `${l} ${r.compared} compared, 0 differ (whole frame as source: ${a.differ} differ; scale 5: ${b.differ} differ)`).join('; ')}: pass`);
 }, { needs: h.haveZip });
 
 test('Wide layout (spec 13 A5): fullscreen keeps 16:9 at any size, centred on black, the canvas still 1920 x 1080: at 1920 x 1080 the whole screen, sharp (one to one); at 2560 x 1440 the whole screen, smooth; at 1728 x 1117 1728 x 972 with bars, smooth; a key reaches the game in each', async (env) => {
@@ -9047,7 +9046,83 @@ test('Wide layout (spec 13 Decision 2, the first-run chooser): on a first visit 
   console.log(`  receipt: a first visit chose English, no voices and HD 16:9; one load at OK into the Original build, the chooser's choices kept, voices off (voice state ${after.voice}): pass`);
 });
 
-test('Wide layout (spec 13 Decision 2, one switch): two choices across the builds before OK load the page once, into the last; a choice across and back (or to the other layout of the build that runs) before OK loads nothing, the latter at once; a Save the game makes after OK while the switch waits (the chooser\'s HD pack still downloading) is stored before the page loads again, and resumes after it', async (env) => {
+// Before the page's scripts: a voice Worker that runs no model (as fakeVoiceWorker) and keeps,
+// in the tab's session storage across its documents, each load it was asked for
+// (`__voiceLoads`: [the document's number from 1, whether from the cache only]) and each voice
+// state the page showed (`__voiceStates`). From the cache only it answers as the real worker does
+// when the model is not there (notcached); with downloads allowed, in the tab's first document a
+// download that goes on (progress, never ready), as the 400 MB model's would; in a later one,
+// ready.
+function voiceLoadsLog() {
+  const list = (key) => JSON.parse(sessionStorage.getItem(key) ?? '[]');
+  const doc = Number(sessionStorage.getItem('__voiceDocs') ?? 0) + 1;
+  sessionStorage.setItem('__voiceDocs', String(doc));
+  window.Worker = class FakeVoiceWorker extends EventTarget {
+    postMessage(m) {
+      const reply = (data) => setTimeout(() => {
+        const e = new MessageEvent('message', { data });
+        this.dispatchEvent(e);
+        this.onmessage?.(e);
+      }, 0);
+      if (m?.type === 'load') {
+        sessionStorage.setItem('__voiceLoads', JSON.stringify([...list('__voiceLoads'), [doc, Boolean(m.cachedOnly)]]));
+        if (m.cachedOnly) reply({ type: 'error', code: 'notcached' });
+        else if (doc === 1) reply({ type: 'progress', got: 1 << 20, total: 400 << 20 });
+        else reply({ type: 'ready', ms: 1, refetched: 0, path: 'cpu' });
+      } else if (m?.type === 'speak') reply({ type: 'done', id: m.id });
+    }
+
+    terminate() {}
+  };
+  document.addEventListener('DOMContentLoaded', () => {
+    const note = () => {
+      const states = list('__voiceStates');
+      const v = document.body.dataset.voice;
+      if (v !== undefined && states.at(-1) !== v) sessionStorage.setItem('__voiceStates', JSON.stringify([...states, v]));
+    };
+    note();
+    new MutationObserver(note).observe(document.body, { attributes: true, attributeFilter: ['data-voice'] });
+  });
+}
+
+test('Wide layout (spec 13 Decision 2, the first-run chooser with voices): NPC voices ticked and HD 16:9 at the first run (the model stubbed: a download that goes on), OK starts the download and loads the page once into the Original build; there the voices go on with downloads allowed (not from the cache only) and are ready, the voices kept on; no state failed, no load from the cache only; the mark the switch left is taken', async (env) => {
+  const { context, page } = await h.openPage(env, { setup: null, layout: null });
+  await context.addInitScript(voiceLoadsLog);
+  let loads = 0;
+  page.on('load', () => { loads += 1; });
+  await h.load(page, env);
+  await page.waitForFunction(() => !document.getElementById('setup').hidden);
+  await page.check('input[name="setup-lang"][value="en"]');
+  assert.equal(await page.isChecked('#setup-voices'), true, 'NPC voices ticked (a first run)');
+  await page.check('input[name="layout"][value="hd"]');
+  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
+  await h.waitSettled(page);
+  await page.waitForFunction(() => document.body.dataset.voice === 'ready', null, { timeout: 30_000 });
+  await h.waitFrames(page, 10);
+  const after = await page.evaluate(() => ({
+    loads: JSON.parse(sessionStorage.getItem('__voiceLoads') ?? '[]'),
+    states: JSON.parse(sessionStorage.getItem('__voiceStates') ?? '[]'),
+    mark: sessionStorage.getItem('u6-voice-download-after-reload'),
+    voices: localStorage.getItem('u6.voices'),
+    layout: document.body.dataset.layout,
+    wide: globalThis.__u6Layout.wide,
+    error: document.body.dataset.voiceError,
+  }));
+  assert.equal(loads, 2, 'one load at OK');
+  assert.ok(after.layout === 'hd' && !after.wide, 'the Original build, HD 16:9');
+  // The first document's load may not be asked yet when the page loads again (the storage's
+  // persist is asked first): the second's goes on with downloads allowed either way.
+  assert.ok(after.loads.every(([, cached]) => !cached), 'no load from the cache only');
+  assert.ok(after.loads.some(([d]) => d === 2), 'the page loaded again asked for the model, downloads allowed');
+  assert.ok(!after.states.includes('failed') && after.error === '', 'never failed');
+  assert.equal(after.states.at(-1), 'ready', 'the voices ready');
+  assert.equal(after.voices, 'on', 'the voices kept on');
+  assert.equal(after.mark, null, 'the mark taken');
+  await context.close();
+  console.log(`  receipt: voices ticked at the first run with HD 16:9: the voices started, one load at OK, then the model asked for with downloads allowed (loads ${after.loads.map(([d, c]) => `${d}:${c ? 'cache' : 'download'}`).join(', ')}), ready, kept on (states ${after.states.join(' > ')}): pass`);
+});
+
+test('Wide layout (spec 13 Decision 2, one switch): two choices across the builds before OK load the page once, into the last; a choice across the builds shows a line (on the status line and the chooser\'s, in the page\'s language) that OK loads the page again with that screen and what the game has not saved is lost, gone when the choice is called off; a choice across and back (or to the other layout of the build that runs) before OK loads nothing, the latter at once; after OK the switch waits for every operation admitted before the page loads again, with a line that it waits: a Save held in its store when the switch starts, then a second Save admitted while it waits, held too: no load when the first is done, one load only once the second is, and the second resumes after it', async (env) => {
   const hdPack = await madePack(env);
   const listing = { 'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }] }), 'test-pack.zip': hdPack };
   sitePacks(env, listing);
@@ -9055,11 +9130,22 @@ test('Wide layout (spec 13 Decision 2, one switch): two choices across the build
   let loads = 0;
   page.on('load', () => { loads += 1; });
   const stored = () => page.evaluate(() => localStorage.getItem('u6.layout'));
-  // Two choices across the builds: HD 16:9, then Original 16:10; one load, into Original.
+  const { TEXT } = await import('../../site/i18n.js');
+  const lines = () => page.evaluate(() => [document.getElementById('status').textContent, document.getElementById('setup-status').textContent]);
+  // Two choices across the builds: HD 16:9, then Original 16:10; one load, into Original. Each
+  // says so; back to Wide (the build that runs), the line goes.
   await page.click('#settings');
   await listed(page, 1);
   await page.check('input[name="layout"][value="hd"]');
+  assert.deepEqual(await lines(), [TEXT.en.layoutSwitchAtOk('hd'), TEXT.en.layoutSwitchAtOk('hd')], 'HD 16:9 across the builds: the line, twice');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  assert.deepEqual(await lines(), [TEXT.ko.layoutSwitchAtOk('hd'), TEXT.ko.layoutSwitchAtOk('hd')], 'in Korean');
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.check('input[name="layout"][value="wide"]');
+  assert.deepEqual(await lines(), ['', ''], 'called off: the line gone');
+  await page.check('input[name="layout"][value="hd"]');
   await page.check('input[name="layout"][value="original"]');
+  assert.deepEqual(await lines(), [TEXT.en.layoutSwitchAtOk('original'), TEXT.en.layoutSwitchAtOk('original')], 'Original 16:10: its line');
   assert.equal(await stored(), 'wide', 'noted only: nothing kept before OK');
   let n = glues.length;
   await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
@@ -9087,13 +9173,21 @@ test('Wide layout (spec 13 Decision 2, one switch): two choices across the build
   await h.waitSettled(page);
   await h.waitFrames(page, 30);
   assert.equal(loads, 1, 'no load');
-  // A Save while the switch waits: Wide and the site's pack chosen, the pack's answer held; OK
-  // (the chooser's operation waits on the pack); then a Save, its store held too; the pack let
-  // go: the chooser closes, the switch waits for the Save; the Save let go: the page loads.
-  await page.focus('#screen');
-  const from = (await h.state(page)).leader;
-  const { to: moved } = await h.stepOnce(page);
-  assert.notEqual(moved, from, 'a step before the Save');
+  // The switch's wait: Wide and the site's pack chosen, the pack's answer held, OK (the
+  // chooser's operation waits on the pack); a first Save (after a step) admitted behind it, its
+  // store held; the pack let go: the chooser closes and the switch starts, waiting on the first
+  // Save. THEN a second Save (after another step), admitted while the switch waits, its store
+  // held as well. The first let go (and the hold kept for the second): no load; the second let
+  // go: one load. A wait on the queue's tail as it was when the switch started would load the
+  // page between the two.
+  const stores = async (kind) => (await h.log(page)).filter((e) => e.startsWith(`saves:store:${kind}`)).length;
+  const save = async () => {
+    await page.focus('#screen');
+    const { to } = await h.stepOnce(page);
+    await h.press(page, 'Control+s', 30);
+    await h.press(page, 'y', 60);
+    return to;
+  };
   await page.click('#settings');
   await listed(page, 1);
   await page.check('input[name="layout"][value="wide"]');
@@ -9102,26 +9196,36 @@ test('Wide layout (spec 13 Decision 2, one switch): two choices across the build
   await page.click('#setup-ok');
   await pack.asked;
   await page.evaluate(() => window.__hold('saves'));
-  await page.focus('#screen');
-  await h.press(page, 'Control+s', 30);
-  await h.press(page, 'y', 60);
-  const savedAt = (await h.log(page)).length;
+  const [ends0, starts0] = [await stores('end'), await stores('start')];
+  const first = await save();
   pack.release();
-  await h.waitLog(page, 'saves:store:start');
+  await page.waitForFunction((k) => window.__log.filter((e) => e.startsWith('saves:store:start')).length > k, starts0, { timeout: 30_000 });
+  await page.waitForFunction(() => document.getElementById('setup').hidden, null, { timeout: 30_000 });
+  assert.equal((await lines())[0], TEXT.en.layoutSwitchWaiting, 'the switch waits on the first Save: its line');
+  const second = await save();
+  assert.notEqual(second, first, 'the second Save after another step');
+  await page.waitForFunction(() => document.body.dataset.ops === '2', null, { timeout: 30_000 });
+  assert.equal(loads, 1, 'both Saves admitted, no load yet');
+  await page.evaluate(() => {
+    window.__release('saves');
+    window.__hold('saves');
+  });
+  await page.waitForFunction(([e, k]) => window.__log.filter((x) => x.startsWith('saves:store:end')).length > e
+    && window.__log.filter((x) => x.startsWith('saves:store:start')).length > k + 1, [ends0, starts0], { timeout: 30_000 });
   await h.waitFrames(page, 30);
-  assert.equal(loads, 1, 'the switch waits for the Save');
-  assert.ok(!(await h.log(page)).slice(savedAt).includes('saves:store:end'), 'the Save still held');
-  assert.equal(await page.evaluate(() => document.getElementById('setup').hidden), true, 'the chooser closed (its pack loaded)');
+  assert.equal(loads, 1, 'the first Save done: no load (the second is admitted)');
+  assert.equal(await stores('end'), ends0 + 1, 'the second Save still held');
+  assert.equal((await lines())[0], TEXT.en.layoutSwitchWaiting, 'the switch waits again (on the second): its line');
   n = glues.length;
   await loadAfter(page, () => page.evaluate(() => window.__release('saves')));
   await started(page, FILES);
   await h.waitPrompt(page);
-  assert.equal(loads, 2, 'one load after the Save');
+  assert.equal(loads, 2, 'one load, after the second Save');
   const w = await wideShown(page);
   assert.ok(w.layout === 'wide' && w.wide && glues.slice(n).every((p) => p === '/pkg-wide/u6_web.js'), 'the Wide build');
-  assert.equal((await atPrompt(page)).leader, moved, 'the Save made while the switch waited resumes');
+  assert.equal((await atPrompt(page)).leader, second, 'the second Save resumes');
   assert.ok((await h.savedPaths(page)).includes('savegame/objlist'), 'it is in storage');
-  console.log('  receipt: HD then Original before OK: one load into Original; Wide and back, Wide then HD: no load; a Save while the switch waited for the chooser\'s pack: stored first (the load waited for it), then one load into Wide, the Save resumed: pass');
+  console.log('  receipt: the switch line in English and Korean, gone when called off; HD then Original before OK: one load into Original; Wide and back, Wide then HD: no load; the switch waited (its line) on a held Save, then on a second Save admitted during the wait: no load after the first, one load after the second, which resumed: pass');
 }, { needs: h.haveHfes });
 
 test('Wide layout (spec 13 Design 5, drag): the date line dragged by its title strip follows the pointer (in front of the others) and stays whole on the canvas; its press and release reach the game as a gap\'s; the pointer then reaches its content where it is; its place is kept (u6.layout.windows) and comes back after a reload; the windows not dragged stay at their corners', async (env) => {
