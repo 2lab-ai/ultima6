@@ -49,7 +49,7 @@ Status: rev 1, 2026-10-23. Supersedes spec 10's layout for the new mode; spec 10
 - The UI keeps its 320 × 200 coordinates in both modes; in Wide it is the frame's left 320 columns and the map is beside it. Only map writers learn `MAP_X`/`MAP_Y`. Nothing else draws where Original's map was.
 - `WINDOW` = 60 is not a multiple of the 8-cell chunk: `fill_window` (`map/region.rs:138-150`) copies the last column and row of chunks clipped to 60.
 - Dungeon levels (z ≥ 1, 256 wide): keep today's edge behaviour (`chunk_ref`, `world_mask`) and test it at a level's edge in Wide.
-- The origin formula appears six times (`map/region.rs:91-92`, `actors/path.rs:36-38`, `actors/turn.rs:427-428`, `actors/rest/mod.rs:198-199`, `main_loop/main_hunk.rs:77-78`, `map/view.rs:316`); all six call one `geom` function.
+- The origin formula `(c − 16) & 0x3f8` appears five times (`map/region.rs:91-92`, `actors/path.rs:36-38`, `actors/turn.rs:427-428`, `actors/rest/mod.rs:198-199`, `main_loop/main_hunk.rs:77-78`); all five call `geom::window_origin`. `map/view.rs:316-317` (`mark_objects`) masks with `0xfff8` instead, which differs below c = 16 (`objects/iter.rs:258` clamps the rect at 0): it keeps its mask and takes only `LEAD`.
 
 ## Design
 
