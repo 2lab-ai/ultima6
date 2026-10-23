@@ -86,7 +86,7 @@ Totals: functions 599: ported 496, partial 6, stubbed 3, replaced 84, planned 2,
 | 0x103f64 | ui | M | `ui/panels.rs::redraw_panel` | ported |
 | 0x103fd4 | main | M | `main_loop/main_hunk.rs::switch_leader` | ported |
 | 0x104094 | main | M | `main_loop/main_hunk.rs::end_solo` | ported |
-| 0x104140 | main | M | `main_loop/commands.rs:416 in dispatch` | stubbed |
+| 0x104140 | main | M | `main_loop/commands.rs:429 in dispatch` | stubbed |
 | 0x1041d8 | main | M | `main_loop/commands.rs::command_loop` | ported |
 | 0x105016 | ui | M | `inventory/portrait.rs::direction_to` | ported |
 | 0x1051a6 | ui | M | `ui/pointer.rs::update_shape` | ported |
@@ -493,7 +493,7 @@ Totals: functions 599: ported 496, partial 6, stubbed 3, replaced 84, planned 2,
 | 0x12fb0a | objects |  | `usecmd/travel.rs::orb` | ported |
 | 0x12fca2 | objects |  | `usecmd/travel.rs::sextant_travel` | ported |
 | 0x12fdf6 | objects |  | `usecmd/travel.rs::telescope` | ported |
-| 0x12ff50 | objects |  | `usecmd/misc.rs:402 in serpents` | stubbed |
+| 0x12ff50 | objects |  | `usecmd/misc.rs:405 in serpents` | stubbed |
 | 0x1301e2 | objects | M | `objects/effects.rs::toggle_passthrough` | ported |
 | 0x130380 | objects |  | `usecmd/food.rs::eat` | ported |
 | 0x1303f4 | objects |  | `usecmd/misc.rs::vortex_cube` | ported |
@@ -525,7 +525,7 @@ Totals: functions 599: ported 496, partial 6, stubbed 3, replaced 84, planned 2,
 | 0x133e5e | converse | M | `converse/script.rs::load_script` | ported |
 | 0x133fe0 | ui | M | `ui/panels.rs::figure_frame` | ported |
 | 0x134044 | ui | M | `combat/peer.rs::overview_cell` | ported |
-| 0x13410a | ui | M | `combat/peer.rs::overview` | ported |
+| 0x13410a | ui | M | `combat/peer.rs::overview`; `combat/peer.rs::surface_cells` | ported |
 | 0x1346a0 | fileio | M | Files (rule: spec 03 §4) | replaced |
 | 0x1346f4 | fileio | M | Files (rule: spec 03 §4) | replaced |
 | 0x1346fc | fileio | M | Files (rule: spec 03 §4) | replaced |
@@ -577,7 +577,7 @@ Totals: functions 599: ported 496, partial 6, stubbed 3, replaced 84, planned 2,
 | 0x151f5a | graphics | M | `gfx/blit.rs::copy_window` | ported |
 | 0x151fe6 | graphics | M | `gfx/blit.rs::copy_rect` | ported |
 | 0x15206c | graphics | M | `gfx/blit.rs::copy_pixel` | ported |
-| 0x1520e2 | graphics | M | `gfx/blit.rs::dissolve` | ported |
+| 0x1520e2 | graphics | M | `gfx/blit.rs::dissolve`; `gfx/blit.rs::dissolve_map` | ported |
 | 0x152176 | graphics | M | `gfx/blit.rs::set_plot_colour` | ported |
 | 0x152188 | graphics | M | `gfx/blit.rs::plot` | ported |
 | 0x1521f4 | graphics | M | `gfx/blit.rs::fill_rect` | ported |
