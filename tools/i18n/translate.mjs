@@ -1552,9 +1552,11 @@ export function readSpeakers(value) {
 /// ko}, in its order. Strict: an object of exactly {format, names}, at most NAMES_MAX entries, each
 /// exactly {en, ko}: `en` words of ASCII letters and `'` (a letter among them), one space between
 /// two, `ko` words of Hangul syllables, one space between two, 1 to NAME_SYLLABLES syllables in
-/// all; no `en` twice; no two entries whose forms are one or one the other with a particle of
-/// [`PARTICLES`] after it (the names gate would take the one for the other). Anything else throws
-/// an InputError with a fixed message (a count or two entries' indexes at most, never a text).
+/// all; no `en` twice; no two entries whose forms are equal, or one the other followed by one
+/// particle of [`PARTICLES`] (only these: a form inside a longer one otherwise, as a word of a
+/// two-word form, is read, and the names gate, which looks for a form anywhere in the Korean, takes
+/// the longer for it). Anything else throws an InputError with a fixed message (a count or two
+/// entries' indexes at most, never a text).
 export function readNames(value) {
   const refused = (why) => new InputError(`the names file is not ${NAMES_FORMAT}${why ? `: ${why}` : ''}`);
   if (!exact(value, ['format', 'names']) || value.format !== NAMES_FORMAT || !Array.isArray(value.names)) throw refused('');
@@ -1571,6 +1573,7 @@ export function readNames(value) {
     else seen.add(x.en);
   }
   if (twice > 0) throw refused(`${twice} entries list an English name listed before`);
+  // Two forms refused together: equal, or one the other followed by one particle.
   const alike = (a, b) => a === b || PARTICLES.some((p) => a === b + p || b === a + p);
   for (let j = 1; j < value.names.length; j += 1) {
     const i = value.names.findIndex((x, at) => at < j && alike(x.ko, value.names[j].ko));
@@ -1986,19 +1989,17 @@ export function regateOf(scripts, existing) {
 /// (`s.set`) is written only when every line and table string of its script this run sent that
 /// shows it (an English `@` word that hits it first, as the keyword gate reads them,
 /// [`braceWordsWanted`]) landed (an answer that passed the gates). Else it is no longer set: the
-/// pack's word stays (its lines are gated with it again, `keyed`), and every one of those lines
-/// that landed is left as the pack has it (`keywords`: it was gated with the form, which the pack
-/// then does not give the key); a line so left that shows another key set does the same to that
-/// one, until none does. The keys so left are the script's `unlanded` (a Set; the merge checks no
+/// pack's word stays, and every one of those lines that landed is left as the pack has it
+/// (`keywords`: it was gated with the form, which the pack then does not give the key); a line so
+/// left that shows another key set does the same to that one, until none does. The keys so left are the script's `unlanded` (a Set; the merge checks no
 /// line that shows one again, [`outputsOf`]); `counts` (regateOf's) then count the keys set and,
 /// apart, those so left (`named.unlanded`).
-export function settleSets(scripts, counts, existing = null) {
+export function settleSets(scripts, counts) {
   const sent = new Set(counts.sent);
   for (const s of scripts) {
     if (!(s.set?.size > 0)) continue;
     const mine = s.units.filter((u) => sent.has(u));
     const shows = (u, k) => keywordsOf(u.text).some((w) => keyHit(w, s.keys) === k);
-    const theirs = scriptWordsOf(existing?.aliases, s.bundle.archive, s.bundle.item);
     s.unlanded = new Set();
     for (let again = true; again;) {
       again = false;
@@ -2006,8 +2007,6 @@ export function settleSets(scripts, counts, existing = null) {
         if (mine.every((u) => u.ko !== undefined || !shows(u, k))) continue;
         s.set.delete(k);
         s.unlanded.add(k);
-        if (theirs.has(k)) s.keyed.words.set(k, theirs.get(k));
-        else s.keyed.words.delete(k);
         counts.named.set -= 1;
         counts.named.unlanded += 1;
         for (const u of mine) {
@@ -2749,7 +2748,7 @@ async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { tr
   }
   // A key a --regate --names run set is written only when its lines sent landed, whatever ended
   // the rounds; else the pack's word and lines stay.
-  if (plan.regate) settleSets(plan.scripts, plan.regate, existing);
+  if (plan.regate) settleSets(plan.scripts, plan.regate);
   const ms = now() - t0;
   const tokens = counts.usage > 0 ? `tokens: input ${counts.input}, output ${counts.output} (${counts.usage} answers counted)` : 'no token counts returned';
   say(`Sent: ${counts.requests} requests (${counts.retried} asked again) in ${seconds(ms)}; ${tokens}.`);

@@ -66,7 +66,8 @@
 //   request when none needs sending, and only when every line sent that shows it landed: a failed
 //   or refused request, SIGINT, an answer keeping the old word, one of two scripts failing; a form
 //   colliding with another block's pack word and a reply's yes or no key not set, the first sent
-//   as the pack's word; the merge checking again only the pack lines that show a key set, never one
+//   as the pack's word; the keys set settled until none changes, a line unsetting only the key its
+//   word hits first; the merge checking again only the pack lines that show a key set, never one
 //   that failed with the pack's words or shows a key left as the pack has it, none showing no key
 //   set dropped, as without `--names`), no alias changing without `--names`; and the check of
 //   what the tool printed reading past the preview's path, whose pid and random part may hold an
@@ -3171,5 +3172,45 @@ test('--regate --names: a pack line no gate of the run reads (a table string an 
   assert.ok(!r.text.includes('left English again'));
   quiet(r.text, bundles);
   noneOf(r.text, [...NAME_WORDS, 'redmont', 'brenn', '붉은산', '바위', '돌']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate --names: the keys set are settled until none changes: a line of a key set, left as the pack has it for a key unset after it, unsets that key too', async () => {
+  const item = 9831;
+  const bundles = [kbundle('a', item, '0000000000199831', `${SENTINEL}Fixpoint`, [
+    [['brenn'], 'Ask @Brenn.'], [['redmont'], 'Seek @Redmont.'], [['brenn'], 'Tell @Brenn of @Redmont.'],
+  ])];
+  const f = await nfixture(bundles);
+  await namesPack(f.out, bundles, new Map([
+    ['Ask @Brenn.', '@{바위}에게 묻소.'], ['Seek @Redmont.', '@{붉은산}을 찾으시오.'], ['Tell @Brenn of @Redmont.', '@{바위}에게 @{붉은산}를 전하시오.'],
+  ]), [['a', item, 'brenn', '바위'], ['a', item, 'redmont', '붉은산']]);
+  const before = await packOf(f.out);
+  const t = keyedTransport(new Map(), new Map([['Seek @Redmont.', '@{붉은산}을 찾으시오.']]));
+  const r = await run([f.bundles, '--item', `a:${item}`, '--names', f.names, '--out', f.out, '--send', '--regate'], t.send);
+  const pack = await packOf(f.out);
+  const line = (p, en) => p.converse.find((x) => x.hash === hashOf(en))?.text;
+  assert.deepEqual(aliasesIn(pack), aliasesIn(before), 'no key set: brenn\'s line B did not stay landed');
+  for (const en of ['Ask @Brenn.', 'Seek @Redmont.', 'Tell @Brenn of @Redmont.']) assert.equal(line(pack, en), line(before, en), en.length);
+  assert.equal(r.code, 3, 'the redmont line still failing');
+  quiet(r.text, bundles);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate --names: a line that did not land unsets only the key its word hits first: a key set whose lines landed stays set, though the failing line\'s word would hit it too', async () => {
+  const item = 9832;
+  const bundles = [kbundle('a', item, '0000000000199832', `${SENTINEL}Firsthit`, [
+    [['brx'], 'A @Brxnn here.'], [['br?nn'], 'Ask @Brenn.'],
+  ])];
+  const f = await nfixture(bundles);
+  await namesPack(f.out, bundles, new Map([['A @Brxnn here.', '@{자갈} 여기.'], ['Ask @Brenn.', '@{바위}에게 묻소.']]),
+    [['a', item, 'br?nn', '바위'], ['a', item, 'brx', '돌']]);
+  const before = await packOf(f.out);
+  const t = keyedTransport(new Map(), new Map([['A @Brxnn here.', '@{자갈} 여기.']]));
+  const r = await run([f.bundles, '--item', `a:${item}`, '--names', f.names, '--out', f.out, '--send', '--regate'], t.send);
+  const pack = await packOf(f.out);
+  const changed = aliasesIn(pack).filter((a) => !aliasesIn(before).some((b) => JSON.stringify(b) === JSON.stringify(a)));
+  assert.deepEqual(changed, [[item, 'br?nn', ['브렌']]], 'br?nn set: its one line landed');
+  assert.equal(r.code, 3, 'the brx line still failing');
+  quiet(r.text, bundles);
   await rm(f.dir, { recursive: true });
 });
