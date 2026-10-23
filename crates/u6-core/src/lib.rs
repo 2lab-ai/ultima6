@@ -27,6 +27,7 @@ pub mod combat;
 pub mod converse;
 pub mod engine;
 pub mod files;
+pub mod geom;
 pub mod gfx;
 pub mod hd;
 pub mod image;

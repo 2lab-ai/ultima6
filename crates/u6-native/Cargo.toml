@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Spec 13 Wide mode. u6-core's feature turns on u6-render's; this crate does not depend on it.
+wide = ["u6-core/wide"]
+
 [dependencies]
 u6-core.workspace = true
 u6-intake.workspace = true

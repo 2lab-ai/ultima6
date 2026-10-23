@@ -6,4 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Spec 13 Wide mode: the frame is 912 × 336 (the UI's 320 × 200 with the 37 × 21 map beside it).
+wide = []
+
 [dependencies]

@@ -19,10 +19,18 @@ pub mod hd;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Screen width in pixels (Amiga low-res).
+/// Screen width in pixels: the Amiga low-res screen.
+#[cfg(not(feature = "wide"))]
 pub const WIDTH: usize = 320;
-/// Screen height in pixels.
+/// Screen height in pixels: the Amiga low-res screen.
+#[cfg(not(feature = "wide"))]
 pub const HEIGHT: usize = 200;
+/// Frame width in pixels, spec 13 Wide mode: the UI's 320 columns, then the 37-cell map.
+#[cfg(feature = "wide")]
+pub const WIDTH: usize = 912;
+/// Frame height in pixels, spec 13 Wide mode: the 21-cell map (the UI's 200 rows at the top).
+#[cfg(feature = "wide")]
+pub const HEIGHT: usize = 336;
 
 /// One palette entry.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -102,7 +110,8 @@ pub const fn portrait_of(id: u16) -> (u8, u8) {
 /// The source of one screen pixel: the image it was drawn from and where in it.
 ///
 /// Layout (`repr(C)`, 12 bytes, alignment 4): `ver` at byte 0 (u32), `id` at 4, `u` at 6, `v`
-/// at 8 (u16 each), `kind` at 10 and `flags` at 11 (u8 each). A plane of 320 × 200 is 750 KiB.
+/// at 8 (u16 each), `kind` at 10 and `flags` at 11 (u8 each). A plane of 320 × 200 is 750 KiB
+/// (912 × 336 in Wide mode, 3.5 MiB).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Src {
@@ -150,6 +159,7 @@ impl Src {
 const CHUNK: usize = 16;
 /// Chunks per row.
 const ROW_CHUNKS: usize = WIDTH / CHUNK;
+const _: () = assert!(WIDTH.is_multiple_of(CHUNK), "a row is whole chunks");
 /// Chunks of the screen.
 const CHUNKS: usize = ROW_CHUNKS * HEIGHT;
 /// Words of a [`Marks`].
@@ -254,8 +264,8 @@ fn chunk_start(k: usize) -> usize {
     k / ROW_CHUNKS * WIDTH + k % ROW_CHUNKS * CHUNK
 }
 
-/// A 320x200 grid of palette indices plus the 256-entry palette they refer to, and an optional
-/// source plane ([`Framebuffer::enable_src`]).
+/// A [`WIDTH`] × [`HEIGHT`] grid of palette indices plus the 256-entry palette they refer to,
+/// and an optional source plane ([`Framebuffer::enable_src`]).
 pub struct Framebuffer {
     pixels: Vec<u8>,
     pub palette: [Rgb; 256],
@@ -1041,29 +1051,36 @@ mod tests {
         );
         assert_eq!(kind(&c, 40, 20), Some(Kind::Tile), "outside the rect");
         // Empty rects at the screen's end and rects past it or upside down copy nothing.
+        let (last_x, last_y) = (WIDTH - 1, HEIGHT - 1);
         let mut d = Framebuffer::new();
         d.enable_src();
-        d.set_src(319, 199, 6, tile(2, 0, 0));
+        d.set_src(last_x, last_y, 6, tile(2, 0, 0));
         let mut e = Framebuffer::new();
         e.enable_src();
         assert_eq!(e.sync_rect_from(&mut d, WIDTH..WIDTH, 0..HEIGHT), 0);
         assert_eq!(e.sync_rect_from(&mut d, 0..WIDTH, HEIGHT..HEIGHT), 0);
-        assert_eq!(e.sync_rect_from(&mut d, 300..WIDTH + 1, 190..HEIGHT), 0);
-        assert_eq!(e.sync_rect_from(&mut d, 300..WIDTH, 190..HEIGHT + 1), 0);
+        assert_eq!(
+            e.sync_rect_from(&mut d, WIDTH - 20..WIDTH + 1, HEIGHT - 10..HEIGHT),
+            0
+        );
+        assert_eq!(
+            e.sync_rect_from(&mut d, WIDTH - 20..WIDTH, HEIGHT - 10..HEIGHT + 1),
+            0
+        );
         #[allow(clippy::reversed_empty_ranges)]
-        let upside = e.sync_rect_from(&mut d, 310..300, 190..HEIGHT);
+        let upside = e.sync_rect_from(&mut d, WIDTH - 10..WIDTH - 20, HEIGHT - 10..HEIGHT);
         assert_eq!(upside, 0);
         assert_eq!(
-            (e.get(319, 199), kind(&e, 319, 199)),
+            (e.get(last_x, last_y), kind(&e, last_x, last_y)),
             (Some(0), Some(Kind::Classic))
         );
         assert_eq!(
-            e.sync_rect_from(&mut d, 304..WIDTH, 199..HEIGHT),
+            e.sync_rect_from(&mut d, WIDTH - CHUNK..WIDTH, last_y..HEIGHT),
             1,
             "the last chunk"
         );
         assert_eq!(
-            (e.get(319, 199), e.src_at(319, 199)),
+            (e.get(last_x, last_y), e.src_at(last_x, last_y)),
             (Some(6), Some(tile(2, 0, 0)))
         );
     }
