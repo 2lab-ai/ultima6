@@ -8,6 +8,7 @@ use super::effects::{FMT_NL_S_NL, FMT_S, FMT_S_NL, NEWLINE, print_at, print_name
 use super::seams;
 use super::tables::Msg;
 use crate::engine::Io;
+use crate::geom::SHOWN;
 use crate::objects::Slot;
 use crate::state::State;
 use crate::ui::printf::Arg;
@@ -35,8 +36,10 @@ pub async fn flash_actor(state: &RefCell<State>, io: &Io, actor: u16, mode: u16)
 ///
 /// Plot colour 15, XOR into the back buffer: the window is rendered (0x102c90 without the
 /// frame, which sets its own plot colour A4-0x6570 first, so that colour is the one XORed), the
-/// rectangle (8, 8)..(0xa8, 0xa8) XORed, the border redrawn over it (0x1324ae) and the window
-/// copied to the screen (0x151f5a); then the same XOR again, which restores it.
+/// rectangle (8, 8)..(0xa8, 0xa8) XORed (the shown map and one pixel past its far edges: from
+/// [`SHOWN`]'s top left to one past its bottom right, spec 13), the border redrawn over it
+/// (0x1324ae) and the window copied to the screen (0x151f5a); then the same XOR again, which
+/// restores it.
 ///
 /// The XORed window is on the screen while the second pass draws; the engine publishes only
 /// the last present of a poll, so the port waits on the engine clock before each pass is shown,
@@ -57,8 +60,9 @@ pub async fn flash_window(state: &RefCell<State>, io: &Io, circle: u16) {
     for pass in 0..2 {
         {
             let mut s = state.borrow_mut();
-            seams::fill_rect(&mut s, io, 8, 8, 0xa8, 0xa8);
-            seams::redraw_border(&mut s, 8, 8, 0xa7, 0xa7);
+            let (x0, y0, x1, y1) = SHOWN;
+            seams::fill_rect(&mut s, io, x0, y0, x1 + 1, y1 + 1);
+            seams::redraw_border(&mut s, x0, y0, x1, y1);
             io.with_buffers(|back, front| crate::gfx::blit::copy_window(back, front));
             io.present();
         }

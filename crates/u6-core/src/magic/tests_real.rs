@@ -80,7 +80,8 @@ pub(super) fn give_book(s: &mut State, spells: &[u8]) -> i16 {
 }
 
 /// The command loop's part of Cast (0x104216 and 0x10498e..0x104a96): the spell cursor (mode
-/// 3, range 7, cell (5, 5)), the target pending, the Cast line, the command, the cleanup.
+/// 3, range 7, the leader's view cell: (5, 5) in Original), the target pending, the Cast line,
+/// the command, the cleanup.
 pub(super) async fn cast_command(state: &RefCell<State>, io: &Io) {
     {
         let mut s = state.borrow_mut();
@@ -88,7 +89,7 @@ pub(super) async fn cast_command(state: &RefCell<State>, io: &Io) {
         let input = &mut s.ui.input;
         input.cursor_by_tab = false;
         input.targeting = 3;
-        input.cursor = (5, 5);
+        input.cursor = (crate::geom::HALF_W as i8, crate::geom::HALF_H as i8);
         input.range = 7;
         input.target_pending = 1;
         input.target_command = 0x82;
@@ -355,8 +356,9 @@ pub(super) fn png(fb: &Framebuffer) -> Vec<u8> {
 
 /// View cells drawn lit (neither unseen 0xff nor dark 0x1bc).
 pub(super) fn lit_cells(s: &State) -> usize {
-    (0..11)
-        .flat_map(|r| (0..11).map(move |c| (c, r)))
+    use crate::geom::{VIEW_H, VIEW_W};
+    (0..VIEW_H)
+        .flat_map(|r| (0..VIEW_W).map(move |c| (c, r)))
         .filter(|&(c, r)| {
             let t = s.map.view_tile(c, r);
             t != crate::map::view::NOT_VISIBLE && t != crate::map::view::DARK

@@ -1,11 +1,14 @@
 //! The map window: render 0x102c90 and the refresh 0x102ef0.
 //!
-//! Geometry (0x102c90 and 0x10e81e): an 11×11 grid of 16-pixel cells drawn from screen (0, 0),
-//! cell (col, row) at pixel (16·col, 16·row); the view centre (A4-0x7b78 / -0x7b76 / -0x7b74,
-//! [`crate::map::MapState::centre`]) sits in cell (5, 5), i.e. pixels 80..96 on both axes
-//! (0x10e81e places an object at `x - centre_x + 5`). Only pixels 8..168 reach the front buffer
-//! (0x151f5a, 0x1520e2 with (8, 8)..(0xa7, 0xa7)): ten full cells and a half cell on each side.
-//! The frame is 8-wide border tiles 0x1b0..0x1b7 at x / y = 0 and 0xa0.
+//! Geometry (0x102c90 and 0x10e81e; spec 13 C3): a [`VIEW_W`] × [`VIEW_H`] grid of 16-pixel
+//! cells (11 × 11 in Original) drawn from frame pixel ([`MAP_X`], [`MAP_Y`]) ((0, 0) in Original),
+//! cell (col, row) at pixel (`MAP_X` + 16·col, `MAP_Y` + 16·row); the view centre (A4-0x7b78 /
+//! -0x7b76 / -0x7b74, [`crate::map::MapState::centre`]) sits in cell ([`HALF_W`], [`HALF_H`]),
+//! (5, 5) in Original, pixels 80..96 on both axes (0x10e81e places an object at
+//! `x - centre_x + 5`). Only the pixels of [`SHOWN`] reach the front buffer (0x151f5a, 0x1520e2
+//! with (8, 8)..(0xa7, 0xa7) in Original): the full cells and a half cell on each side. The frame
+//! is 8-wide border tiles 0x1b0..0x1b7 on the first and last column and row of cells (x / y = 0
+//! and 0xa0 in Original).
 
 use u6_render::{Framebuffer, Rgb};
 
@@ -15,34 +18,58 @@ use super::tables::GameTables;
 use super::{GfxState, anim, cache, seams};
 use crate::actors::Calendar;
 use crate::engine::Io;
+use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, SHOWN, VIEW_H, VIEW_W};
 use crate::state::State;
 
-/// Cells per side of the map window (`moveq #0xb` loops in 0x102c90).
+/// Cells per side of the Original map window (`moveq #0xb` loops in 0x102c90). The view's size
+/// is [`VIEW_W`] × [`VIEW_H`] (spec 13); this module no longer reads it.
 pub const WINDOW_TILES: usize = 11;
 /// Cell side in pixels (`asl.w #4`).
 const CELL: u16 = 16;
+// The cells' boxes are at multiples of 16 from the frame's corner ([`super::cache`]), and the
+// blitter takes x down to a multiple of 8.
+const _: () = assert!(
+    MAP_X.is_multiple_of(CELL) && MAP_Y.is_multiple_of(CELL),
+    "the map's corner on a cell boundary"
+);
 /// Object type whose tile gets clock hands (0x13aa7e = basetile 0x13a940 + 2·0x9f).
 const CLOCK_TYPE: usize = 0x9f;
 
-/// What 0x102c90 draws: the window tile cache A4-0x1476 (11×11 words, built by 0x109e74) and per
-/// cell the object tile words in draw order (the lists at A4-0x15f0 heads, A4-0x1384 words,
-/// A4-0x1577 links, built by 0x10e81e). Words carry the outline bits 11..12.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// What 0x102c90 draws: the window tile cache A4-0x1476 (11×11 words in Original, built by
+/// 0x109e74) and per cell the object tile words in draw order (the lists at A4-0x15f0 heads,
+/// A4-0x1384 words, A4-0x1577 links, built by 0x10e81e). Words carry the outline bits 11..12.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewWindow {
-    /// `tiles[row][col]`.
-    pub tiles: [[u16; WINDOW_TILES]; WINDOW_TILES],
-    /// `objects[row * 11 + col]`, first drawn first.
+    /// `tiles[row][col]`: [`VIEW_H`] rows of [`VIEW_W`].
+    pub tiles: [[u16; VIEW_W]; VIEW_H],
+    /// `objects[row * VIEW_W + col]`, first drawn first.
     pub objects: Vec<Vec<u16>>,
+}
+
+impl Default for ViewWindow {
+    /// Tile 0 in every cell and no object lists (written out: arrays of Wide's 37 columns have no
+    /// derived default).
+    fn default() -> Self {
+        Self {
+            tiles: [[0; VIEW_W]; VIEW_H],
+            objects: Vec::new(),
+        }
+    }
 }
 
 impl ViewWindow {
     /// Every cell empty (tile 0, no objects).
     pub fn empty() -> Self {
         Self {
-            tiles: [[0; WINDOW_TILES]; WINDOW_TILES],
-            objects: vec![Vec::new(); WINDOW_TILES * WINDOW_TILES],
+            tiles: [[0; VIEW_W]; VIEW_H],
+            objects: vec![Vec::new(); VIEW_W * VIEW_H],
         }
     }
+}
+
+/// The frame pixel of view cell (col, row)'s top left: (`MAP_X` + 16·col, `MAP_Y` + 16·row).
+pub(crate) fn cell_pixel(col: usize, row: usize) -> (u16, u16) {
+    (MAP_X + col as u16 * CELL, MAP_Y + row as u16 * CELL)
 }
 
 /// Replaces: 0x162358 (copies the 32 OCS colours into the copper list)
@@ -88,8 +115,8 @@ pub(super) fn clock_points(cal: &Calendar, t: &GameTables, x: u16, y: u16) -> [(
 
 /// The border of 0x102c90 (`0x00102E16..0x00102EC2`): corners 0x1b0 (0, 0), 0x1b2 (0xa0, 0),
 /// 0x1b3 (0, 0xa0), 0x1b5 (0xa0, 0xa0), then for i = 1..10 the edges 0x1b1 (16i, 0),
-/// 0x1b4 (16i, 0xa0), 0x1b6 (0, 16i), 0x1b7 (0xa0, 16i). Each tile lies on an edge cell;
-/// `only` keeps those of the boxes it marks.
+/// 0x1b4 (16i, 0xa0), 0x1b6 (0, 16i), 0x1b7 (0xa0, 16i) (Original's pixels; [`border_tiles`]).
+/// Each tile lies on an edge cell; `only` keeps those of the boxes it marks.
 fn draw_border(gfx: &GfxState, fb: &mut Framebuffer, only: Option<&[bool; BOXES]>) {
     for (t, x, y) in border_tiles() {
         if only.is_none_or(|d| cell_box(x, y).is_some_and(|b| d[b])) {
@@ -98,21 +125,31 @@ fn draw_border(gfx: &GfxState, fb: &mut Framebuffer, only: Option<&[bool; BOXES]
     }
 }
 
-/// The border's (tile, x, y) in the order [`draw_border`] draws them.
-fn border_tiles() -> impl Iterator<Item = (u16, u16, u16)> {
+/// The border's (tile, x, y) in the order [`draw_border`] draws them: the corners on the view's
+/// first and last cells, then for i = 1.. the edge cells i of the top, bottom, left and right
+/// edges (the top and bottom ones up to `VIEW_W - 2`, the left and right ones up to `VIEW_H - 2`;
+/// 1..10 for all four in Original).
+pub(crate) fn border_tiles() -> impl Iterator<Item = (u16, u16, u16)> {
+    let (left, top) = cell_pixel(0, 0);
+    let (right, bottom) = cell_pixel(VIEW_W - 1, VIEW_H - 1);
     let corners = [
-        (0x1b0, 0, 0),
-        (0x1b2, 0xa0, 0),
-        (0x1b3, 0, 0xa0),
-        (0x1b5, 0xa0, 0xa0),
+        (0x1b0, left, top),
+        (0x1b2, right, top),
+        (0x1b3, left, bottom),
+        (0x1b5, right, bottom),
     ];
-    let edges = (1..10).flat_map(|i| {
+    let edges = (1..VIEW_W.max(VIEW_H) - 1).flat_map(move |i| {
+        let (x, y) = cell_pixel(i, i);
+        let across = i < VIEW_W - 1;
+        let down = i < VIEW_H - 1;
         [
-            (0x1b1, i * CELL, 0),
-            (0x1b4, i * CELL, 0xa0),
-            (0x1b6, 0, i * CELL),
-            (0x1b7, 0xa0, i * CELL),
+            (across, (0x1b1, x, top)),
+            (across, (0x1b4, x, bottom)),
+            (down, (0x1b6, left, y)),
+            (down, (0x1b7, right, y)),
         ]
+        .into_iter()
+        .filter_map(|(on, t)| on.then_some(t))
     });
     corners.into_iter().chain(edges)
 }
@@ -136,7 +173,8 @@ fn border_of_boxes() -> [Option<u16>; BOXES] {
 /// never reads, so it is not called); an object whose tile is the clock's gets hands
 /// ([`clock_hands`]).
 /// With A4-0x7b65 set: 100 XOR pixels of colour 8 into the back buffer at
-/// (random 8..=0xa7, random 8..=0xa7). With `framed` (D0): the ui's target cursor, the border,
+/// (random 8..=0xa7, random 8..=0xa7) (Original; random within [`SHOWN`] per axis, one draw per
+/// axis either way). With `framed` (D0): the ui's target cursor, the border,
 /// then the window goes to the front, dissolved when A4-0x6578 is set (cleared after), copied
 /// otherwise.
 pub fn render_window(state: &mut State, io: &Io, framed: bool) {
@@ -208,12 +246,12 @@ fn draw_boxes(
     io.draw_back(|fb| {
         for (row, tiles) in window.tiles.iter().enumerate() {
             for (col, &tile) in tiles.iter().enumerate() {
-                if only.is_some_and(|d| !d[row * WINDOW_TILES + col]) {
+                if only.is_some_and(|d| !d[row * VIEW_W + col]) {
                     continue;
                 }
-                let (x, y) = (col as u16 * CELL, row as u16 * CELL);
+                let (x, y) = cell_pixel(col, row);
                 blit_back(gfx, fb, tile, x, y);
-                for &word in &window.objects[row * WINDOW_TILES + col] {
+                for &word in &window.objects[row * VIEW_W + col] {
                     blit_back(gfx, fb, word, x, y);
                     if Some(word & 0x7ff) == clock {
                         clock_hands(&actors.calendar, gfx, fb, x, y);
@@ -225,9 +263,10 @@ fn draw_boxes(
             gfx.plot_xor = true;
             gfx.plot_back = true;
             set_plot_colour(gfx, 8);
+            let (x0, y0, x1, y1) = SHOWN;
             for _ in 0..100 {
-                let x = rng.range(8, 0xa7);
-                let y = rng.range(8, 0xa7);
+                let x = rng.range(x0, x1);
+                let y = rng.range(y0, y1);
                 plot(gfx, fb, x, y);
             }
             gfx.plot_xor = false;
@@ -321,8 +360,10 @@ fn render_window_cached(state: &mut State, io: &Io) {
 /// Original: 0x132338 (ui: flash an actor in the map window: its tile in outline mode over its
 /// cell, the window presented dissolving, then the window again without it)
 ///
-/// Nothing for an actor off the map (status A4+0x190c & 0x18) or more than five cells from the
-/// view centre on either axis (`(x - centre + 5) & 0x3ff < 11`). The tile word is the type's base
+/// Nothing for an actor off the map (status A4+0x190c & 0x18) or outside the view (more than five
+/// cells from the view centre on either axis in Original, `(x - centre + 5) & 0x3ff < 11`; spec 13
+/// Decision 5: [`HALF_W`] and [`HALF_H`] cells, the view cell inside [`VIEW_W`] × [`VIEW_H`]).
+/// The tile word is the type's base
 /// tile (0x13a940) plus the frame, plus 0x1800 (`bright`, D1 non-zero) or 0x1000; it goes into
 /// the cell's current draw list on top (0x10e596 mode 2), then A4-0x6578 = 1 and 0x102c90 with
 /// D0 = 1; the draw lists rebuilt (0x10e81e), A4-0x6578 = 1 and 0x102c90 again. The original
@@ -345,8 +386,8 @@ pub fn flash_actor(state: &mut State, io: &Io, actor: u16, bright: bool) {
         return;
     }
     let c = state.map.centre;
-    let col = (at.x & 0x3ff).wrapping_sub(c.x).wrapping_add(5) & 0x3ff;
-    let row = (at.y & 0x3ff).wrapping_sub(c.y).wrapping_add(5) & 0x3ff;
+    let col = (at.x & 0x3ff).wrapping_sub(c.x).wrapping_add(HALF_W as u16) & 0x3ff;
+    let row = (at.y & 0x3ff).wrapping_sub(c.y).wrapping_add(HALF_H as u16) & 0x3ff;
     let base = state
         .tables
         .basetile
@@ -357,7 +398,7 @@ pub fn flash_actor(state: &mut State, io: &Io, actor: u16, bright: bool) {
         .unwrap_or(0)
         .wrapping_add(tf >> 10)
         .wrapping_add(if bright { 0x1800 } else { 0x1000 });
-    if col >= 11 || row >= 11 {
+    if usize::from(col) >= VIEW_W || usize::from(row) >= VIEW_H {
         return;
     }
     crate::objects::add_tile(state, word, col as i16, row as i16, 2);

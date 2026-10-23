@@ -7,6 +7,7 @@ use u6_formats::gfx::TileKind;
 
 use crate::engine::Engine;
 use crate::files::Files;
+use crate::geom::{HALF_H, HALF_W, VIEW_W};
 use crate::gfx::GfxState;
 use crate::gfx::anim::shore_mask;
 use crate::gfx::seams::view_window;
@@ -125,7 +126,8 @@ fn real_shore_masks_fit_and_the_window_draws_the_party() {
         }
     }
     let window = view_window(&state);
-    let centre = &window.objects[5 * 11 + 5];
+    // The leader's cell ((5, 5) in Original), by view cell.
+    let centre = &window.objects[HALF_H * VIEW_W + HALF_W];
     let leader = crate::objects::ObjectId(1);
     let hero = state.tables.basetile.base[usize::from(state.objects.obj_type(leader))]
         + u16::from(state.objects.frame(leader));
@@ -136,7 +138,10 @@ fn real_shore_masks_fit_and_the_window_draws_the_party() {
     let (rec, _, _) = gfx.record(hero);
     let expect: Vec<(usize, usize, u8)> = (0..256)
         .filter(|&i| !rec.transparent[i])
-        .map(|i| (80 + i % 16, 80 + i / 16, rec.pixels[i]))
+        .map(|i| {
+            let (x, y) = super::at_map(HALF_W * 16 + i % 16, HALF_H * 16 + i / 16);
+            (x, y, rec.pixels[i])
+        })
         .collect();
     let e = {
         let mut e = Engine::with_game(State::empty(), files.clone(), move |_s, io| async move {
