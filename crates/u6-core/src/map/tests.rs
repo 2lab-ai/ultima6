@@ -221,30 +221,33 @@ fn eggs_far_or_active_or_on_arrival_are_offered() {
         s.objects.location[usize::from(slot)] = at(x, y);
         link(s);
     };
-    // Original: 8 each way; Wide: 3 past the half view of each axis.
-    let [near_x, near_y] = region::EGG_NEAR.map(|n| n as u16);
-    egg(&mut s, 5, 300 + near_x, 300 - near_y); // near on both axes
-    egg(&mut s, 6, 300 + near_x + 1, 300); // one more east: far
-    egg(&mut s, 7, 300, 300 - near_y - 1); // one more north: far
+    // An egg is near up to 3 past the half view of its axis (spec 13 Decision 5): Original 8
+    // each way, Wide 21 east-west and 13 north-south. Taken from geom, not from the pass.
+    let (near_x, near_y) = (HALF_W as u16 + 3, HALF_H as u16 + 3);
+    assert_eq!(region::EGG_NEAR, [near_x as i16, near_y as i16]);
+    egg(&mut s, 5, 300 + near_x, 300); // at the threshold east: near
+    egg(&mut s, 6, 300 + near_x + 1, 300); // one past it east: far
+    egg(&mut s, 7, 300, 300 - near_y); // at the threshold north: near
+    egg(&mut s, 8, 300, 300 - near_y - 1); // one past it north: far
     // The window's south-east corner cell: far, and in the rectangle the pass walks.
     let last = WINDOW as u16 - 1;
-    egg(&mut s, 8, ox + last, oy + last);
+    egg(&mut s, 9, ox + last, oy + last);
     let offered = |s: &mut State, status5: u8| {
-        for e in 5..9 {
+        for e in 5..10 {
             s.objects.obj_status[e] = 0;
         }
         s.objects.obj_status[5] = status5;
         region::check_eggs(s);
-        (5..9)
+        (5..10)
             .map(|e| s.objects.obj_status[e] & 0x40 != 0)
             .collect::<Vec<_>>()
     };
-    assert_eq!(offered(&mut s, 0), [false, true, true, true]);
-    assert_eq!(offered(&mut s, 0x20), [true, true, true, true]);
+    assert_eq!(offered(&mut s, 0), [false, true, false, true, true]);
+    assert_eq!(offered(&mut s, 0x20), [true, true, false, true, true]);
     s.map.arriving = 1;
-    assert_eq!(offered(&mut s, 0), [true, true, true, true]);
+    assert_eq!(offered(&mut s, 0), [true; 5]);
     s.map.flag_7afb = 1;
-    assert_eq!(offered(&mut s, 0), [false, false, false, false]);
+    assert_eq!(offered(&mut s, 0), [false; 5]);
 }
 
 #[test]
@@ -327,8 +330,8 @@ fn sight_dist(col: usize, row: usize) -> usize {
 
 /// For every cell the leader can stand in within its chunk (the window keeps its origin over
 /// eight cells), the view and its one-cell ring lie in the inner block, the sight flood of an
-/// open field queues exactly the view and its ring (fewer cells than the queue holds, so none
-/// is dropped), and every view cell is seen.
+/// open field queues exactly the view and its ring, the queue never fills (no cell dropped, the
+/// most it held below its size), and every view cell is seen.
 #[test]
 fn every_leader_cell_sees_its_whole_view_and_its_ring_lies_in_the_block() {
     let area = (VIEW_W + 2) * (VIEW_H + 2);
@@ -339,8 +342,11 @@ fn every_leader_cell_sees_its_whole_view_and_its_ring_lies_in_the_block() {
             let mut s = open_state(at(296 + dx, 296 + dy));
             set_ambient(&mut s, 7);
             view::update_view(&mut s);
+            let queue = view::last_queue();
             let [ox, oy] = s.map.window_origin;
             let lead = [296 + dx - ox, 296 + dy - oy].map(usize::from);
+            assert_eq!(queue.dropped, 0, "no cell dropped at {lead:?}");
+            assert!(queue.peak > 0 && queue.peak < QUEUE_LEN, "{lead:?}");
             cells[0][lead[0] - usize::from(LEAD)] = true;
             cells[1][lead[1] - usize::from(LEAD)] = true;
             let [vx, vy] = s.map.view_offset.map(|v| v as usize);
@@ -606,6 +612,23 @@ fn a_lit_wall_above_a_hidden_cell_stalls_the_rest_of_its_row() {
         l(after),
         0,
         "a light after the wall on the same row never floods"
+    );
+    // Past the stall the pointer lags: the next row starts `WINDOW - BLOCK_X.len()` cells after
+    // the wall on the wall's own row (Original 16, Wide 4). `after` is 4 cells past the wall, so
+    // in Wide the next row's first pass reads it and floods its light with that pass's
+    // coordinates, (BLOCK_X.start, bottom + 1) = (0, bottom + 1), its own 4 - 0 - 1 = 3 there;
+    // in Original the lag passes it by and nothing floods on that row.
+    let lag = WINDOW - BLOCK_X.len();
+    assert_eq!(after - wall == lag, cfg!(feature = "wide"));
+    let below = s.map.light[cell(BLOCK_X.start, bottom + 1)];
+    assert_eq!(
+        below,
+        if after - wall == lag { 3 } else { 0 },
+        "the lagging pointer"
+    );
+    assert_eq!(
+        s.map.light[cell(0, bottom + 1)],
+        if cfg!(feature = "wide") { 3 } else { 0 }
     );
 }
 

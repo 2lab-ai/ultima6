@@ -99,6 +99,31 @@ struct Queue {
     y: [u8; QUEUE_LEN],
     head: QueueIndex,
     tail: QueueIndex,
+    /// Test-only: what the queue went through in one [`update_view`].
+    #[cfg(test)]
+    seen: QueueSeen,
+}
+
+/// Test-only: the most cells the queue held at once, and the cells it dropped because it was
+/// full, over one [`update_view`] (all its floods).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct QueueSeen {
+    pub peak: usize,
+    pub dropped: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The [`QueueSeen`] of this thread's last [`update_view`] that flooded.
+    static LAST_SEEN: std::cell::Cell<QueueSeen> =
+        const { std::cell::Cell::new(QueueSeen { peak: 0, dropped: 0 }) };
+}
+
+/// Test-only: the queue of this thread's last [`update_view`] that flooded.
+#[cfg(test)]
+pub(super) fn last_queue() -> QueueSeen {
+    LAST_SEEN.with(std::cell::Cell::get)
 }
 
 /// A queue index: the original's byte.
@@ -121,6 +146,11 @@ impl Queue {
             y: [0; QUEUE_LEN],
             head: 0,
             tail: 0,
+            #[cfg(test)]
+            seen: QueueSeen {
+                peak: 0,
+                dropped: 0,
+            },
         }
     }
 }
@@ -234,7 +264,16 @@ impl Flood<'_> {
         q.tail = next(q.tail);
         if q.head == q.tail {
             q.tail = prev(q.tail);
+            #[cfg(test)]
+            {
+                q.seen.dropped += 1;
+            }
         } else {
+            #[cfg(test)]
+            {
+                let held = usize::from(q.tail.wrapping_sub(q.head) & QUEUE_LAST);
+                q.seen.peak = q.seen.peak.max(held);
+            }
             self.flags[cell(x as usize, y as usize)] |= CELL_QUEUED;
         }
     }
@@ -351,6 +390,8 @@ pub fn update_view(state: &mut State) {
     if ambient < FULL_DAYLIGHT {
         flood_lights(&mut f);
     }
+    #[cfg(test)]
+    LAST_SEEN.with(|c| c.set(f.queue.seen));
     let tiles = view_tiles(&f);
     state.map.view_tiles = tiles;
     seams::build_view_objects(state);
@@ -648,9 +689,17 @@ mod tests {
             f.enqueue(i % w, i / w);
         }
         assert_eq!((f.queue.head, f.queue.tail), (0, last));
+        assert_eq!(
+            f.queue.seen,
+            QueueSeen {
+                peak: last as usize,
+                dropped: 0
+            }
+        );
         let (dropped, kept) = (last as i16, last as i16 - 1);
         f.enqueue(dropped % w, dropped / w);
         assert_eq!(f.queue.tail, last);
+        assert_eq!(f.queue.seen.dropped, 1, "the full queue's drop is counted");
         assert_eq!(
             f.flags[cell((dropped % w) as usize, (dropped / w) as usize)],
             0
@@ -662,6 +711,7 @@ mod tests {
         f.enqueue(-1, 3);
         f.enqueue(3, w);
         assert_eq!(f.queue.tail, last);
+        assert_eq!(f.queue.seen.dropped, 1, "off-grid cells are no drops");
         // Round the ring: one dequeued, one more fits, and the tail wraps to 0.
         f.queue.head = next(f.queue.head);
         f.enqueue(dropped % w, dropped / w);
