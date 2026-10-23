@@ -53,6 +53,12 @@ The speaker's level (its age and class) is for the speaker's own words only.
   하오체 (~하오, ~이오) or ends a description on a noun, and calls the hero 그대. This holds inside
   one line too: when a line has the speaker's quote and then narration (`"…," she adds.`), the
   quote is in the speaker's level and the narration after it in the narrator's.
+- Keep every double quote mark of the English line, no more and no fewer, even where a speech
+  opens in one line and closes in another, and keep a quoted word inside narration in quotes. A
+  line that opens a speech the next line closes keeps its one `"` and adds none at its end (a
+  made-up `"The road is long` is `"그 길은 멀고`), the line that closes it keeps its own
+  (`and steep."` is `험하오."`), a line that only ends a speech keeps it too (`."` is `."`), and
+  a quoted word in narration stays quoted (`The sign says "shut".` is `팻말에 "닫힘"이라 적혀 있소.`).
 - A quoted line that the line or its narration gives to someone else (a companion who cuts in,
   `"…," says <name>.`) is in that person's own level (a grown companion: 하오체), not the
   speaker's.

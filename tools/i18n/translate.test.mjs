@@ -66,7 +66,7 @@ import {
   AGES, CLASSES, COVERAGE_FORMAT, InputError, MAX_TOKENS, PACK_FORMAT, PARTICLES, PackReadError, SPEAKERS_FORMAT, SPEAKER_NOTE_MAX,
   aliasesOf, bodyOf, braceWords, braceWordsWanted, collide, compatibleOf, duplicateMembers, fingerprint, firstBlocksOf, gate,
   glossaryOf, hash64, hex64, hits, keyHit, keyOf, keysOf, keywordsOf, knownOf, latin1, main, packBytes, placeholders, planOf,
-  readPack, readSpeakers, registerOf, settledOf, settleKeys, speakerClass, systemOf, tableGate, topicsOf, unitsOf, wordGate,
+  readPack, readSpeakers, registerOf, scriptWordsOf, settledOf, settleKeys, speakerClass, systemOf, tableGate, topicsOf, unitsOf, wordGate,
 } from './translate.mjs';
 
 const TOOL = join(dirname(fileURLToPath(import.meta.url)), 'translate.mjs');
@@ -490,7 +490,7 @@ test('the speaker class: guessed from the name and description (commoner when no
   await rm(f.dir, { recursive: true });
 });
 
-test('the gates: the escapes\' multiset, Hangul and ASCII only, the josa markers and every @{ closed as the text layer reads them, the runic text and the line breaks at the ends', () => {
+test('the gates: the escapes\' multiset, Hangul and ASCII only, as many double quote marks as the English line (a speech split over lines keeps each line\'s own), the josa markers and every @{ closed as the text layer reads them, the runic text and the line breaks at the ends', () => {
   assert.deepEqual(placeholders('Hi $G, #0 coin\\s @job* <ab> `x &h& %y ^c $'), ['$G', '#0', '\\', '@', '*', '<', '>', '`', '&', '&', '%', '^c', '$']);
   assert.deepEqual(placeholders('$$x'), ['$', '$x'], 'an escape after a prefix is no argument');
   assert.deepEqual(placeholders('$N{이/가} {(으)로}'), ['$N'], 'a josa marker\'s / is no plural marker');
@@ -507,11 +507,24 @@ test('the gates: the escapes\' multiset, Hangul and ASCII only, the josa markers
     ['@a', '@{a}{이/가}'],
     ['Buy @bread', '빵(@{Bread})을 사시오'],
     ['@job or @name?', '이름(@{name})이오, 일(@{job})이오?'],
+    ['"The road is long', '"그 길은 멀고'],
+    ['and steep."', '험하오."'],
+    ['The sign says "shut".', '팻말에 "닫힘"이라 적혀 있소.'],
+    ['No word is quoted here.', '여기 따옴표는 없소.'],
+    ['&"aside"& Hail.', '&곁말& 안녕하오.'],
+    ['&aside& Hail.', '&"곁말"& 안녕하오.'],
   ];
   for (const [en, ko] of ok) assert.equal(gate(en, ko), null, `${en} -> ${ko}`);
   const bad = [
     ['Hi $N.', '그대 왔소.', 'escapes'],
     ['Hi.', '안녕*', 'escapes'],
+    ['"Well met, friend.', '반갑소, 벗이여.', 'quotes'],
+    ['"The road is long', '"그 길은 멀다오."', 'quotes'],
+    ['."', '.', 'quotes'],
+    ['The sign says "shut".', '팻말에 닫힘이라 적혀 있소.', 'quotes'],
+    ['"Hi, $N."', '안녕, 그대."', 'escapes'],
+    ['"My @job."', '"내 @일이오.', 'quotes'],
+    ['&"aside"& "Hail."', '&"곁말"& 안녕하오.', 'quotes'],
     ['Hi.', '안녕 中', 'characters'],
     ['Hi.', '안녕ㄱ', 'characters'],
     ['Hi.', '안녕\t', 'characters'],
@@ -2060,4 +2073,250 @@ test('spec 12: the guide by age: the ages section (child, youth, adult, elder, m
   assert.ok(guide.includes('An `adult` or an `elder` speaker never uses modern endings') && !guide.includes('Never use modern endings'), 'the ban scoped');
   assert.ok(guide.includes('No speaker uses modern loanwords or slang.'));
   for (const c of Object.keys(CLASSES)) assert.ok(guide.includes(`| ${c} |`), `${c} still in the table`);
+});
+
+// --- the quotes gate and the repair mode, --regate (made-up lines only) -------------------------
+
+test('the guide asks every double quote mark of the English line kept, a speech split over lines and a quoted word in narration included, with made-up examples', async () => {
+  const guide = (await readFile(join(dirname(TOOL), 'style-ko.md'), 'utf8')).replace(/\s+/g, ' ');
+  assert.ok(guide.includes('Keep every double quote mark of the English line, no more and no fewer, even where a speech opens in one line '
+    + 'and closes in another, and keep a quoted word inside narration in quotes.'), 'the rule');
+  for (const [en, ko] of [['"The road is long', '"그 길은 멀고'], ['and steep."', '험하오."'], ['The sign says "shut".', '팻말에 "닫힘"이라 적혀 있소.']]) {
+    assert.ok(guide.includes(`\`${en}\` is \`${ko}\``), `its example ${en}`);
+    assert.equal(gate(en, ko), null, `the example passes the gate: ${en}`);
+  }
+});
+
+// Three scripts for the repair mode: P's pack line for the opening of a split speech (a keyword
+// in it, which the pack gives a word) dropped its `"`, Q's lines all pass, R's pack lacks one
+// line; every script holds mox, which the pack gives no word (so a run without --regate would ask
+// it in the shared keywords' request).
+const MEND_ITEMS = [8901, 8902, 8903];
+const OPENING = '"The @vexl road is long';
+const mending = () => [
+  kbundle('a', MEND_ITEMS[0], '0000000000198901', `${SENTINEL}Mendp`, [
+    [['plo'], 'Try my @plo.'], [['vexl'], OPENING], [['quux'], 'and steep."'], [['mox'], 'A @mox.'],
+  ], ['a "cup"']),
+  kbundle('a', MEND_ITEMS[1], '0000000000198902', `${SENTINEL}Mendq`, [[['plo'], 'Thy @plo, friend.'], [['mox'], 'A @mox.']]),
+  kbundle('a', MEND_ITEMS[2], '0000000000198903', `${SENTINEL}Mendr`, [[['plo'], 'A @plo for thee.'], [['zed'], 'Naught more.'], [['mox'], 'A @mox.']]),
+];
+const MEND_ALIASES = [['a', MEND_ITEMS[0], 'plo', '술'], ['a', MEND_ITEMS[0], 'vexl', '길'], ['a', MEND_ITEMS[1], 'plo', '술'], ['a', MEND_ITEMS[2], 'plo', '탁주']];
+
+// The pack the repair mode starts from: every line and table string of `bundles` as the fake
+// translator writes it with the script's words, but P's opening line without its `"`, none of
+// R's `Naught more.` and no table string an op reads from inside (the tool never translates one).
+async function mendPack(out, bundles) {
+  const runs = [];
+  const tables = [];
+  for (const b of bundles) {
+    const words = new Map(MEND_ALIASES.filter(([, i]) => i === b.item).map(([, , k, w]) => [k, w]));
+    for (const u of unitsOf(b)) {
+      if (u.text === 'Naught more.') continue;
+      const text = u.text === OPENING ? fakeKo(u.text, words).replace('"', '') : fakeKo(u.text, words);
+      runs.push({ archive: b.archive, item: b.item, offset: u.offset, len: latin1(u.text).length, hash: hashOf(u.text), text });
+    }
+    for (const s of b.strings) {
+      if (s.inner) continue;
+      tables.push({ archive: b.archive, item: b.item, offset: s.key[2], len: latin1(s.text).length, hash: hashOf(s.text), text: fakeKo(s.text, words) });
+    }
+  }
+  await mkdir(out, { recursive: true, mode: 0o700 });
+  await writeFile(join(out, 'ko.u6lp'), packBytes({
+    base: fingerprint(bundles.map((b) => ({ archive: b.archive, item: b.item, hash: b.hash }))),
+    runs, tables,
+    aliases: MEND_ALIASES.map(([archive, item, keyword, word]) => ({ archive, item, keyword, words: [word] })),
+  }), { mode: 0o600 });
+}
+
+// A transport that writes each line as the fake translator does with the words the request names
+// as known, and answers every key it lists a made-up word of its own (which a --regate run never
+// takes); `drop` (an English line) is answered without its `"`, the first `times` times it is asked.
+function mendTransport(drop = null, times = Infinity) {
+  const bodies = [];
+  let dropped = 0;
+  const send = async (body) => {
+    bodies.push(body);
+    const user = userOf(body);
+    const { lines } = fakeAnswer(user);
+    for (const l of lines) {
+      if (user.lines.find((x) => x.n === l.n).en === drop && dropped < times) {
+        l.ko = l.ko.replace('"', '');
+        dropped += 1;
+      }
+    }
+    return answer(lines, (user.topics ?? []).flatMap((t) => t.keys).map((k) => ({ k: k.k, ko: fakeWord(`${k.k}x`) })));
+  };
+  return { send, bodies };
+}
+
+test('--regate: each line the pack has is checked again; one that passes is kept as it is and not sent: the transport sees only the failing line of a script whose other lines pass and the line the pack lacks of another, a script whose lines all pass is sent nothing, the shared keywords are not asked; no alias changes and the mended line shows the pack\'s word; the consent text, the counts and the coverage name the kept lines apart from this run\'s; the summary names the lines kept, sent and still failing', async () => {
+  const bundles = mending();
+  const [P, Q, R] = MEND_ITEMS;
+  const f = await kfixture(bundles);
+  await mendPack(f.out, bundles);
+  const beforeBytes = await readFile(join(f.out, 'ko.u6lp'));
+  const before = await packOf(f.out);
+  // The boundary as in any run: a dry run sends nothing, its preview the first regate request.
+  const dry = mendTransport();
+  const d = await run([f.bundles, '--first', '3', '--out', f.out, '--dry-run', '--regate'], dry.send);
+  assert.equal(d.code, 0);
+  assert.equal(dry.bodies.length, 0, 'no request');
+  assert.deepEqual(userOf(await readFile(previewPrinted(d.text), 'utf8')).lines.map((l) => l.en), [OPENING], 'the preview: P\'s failing line only');
+  assert.ok((await readFile(join(f.out, 'ko.u6lp'))).equals(beforeBytes), 'the pack untouched by the dry run');
+  // P's line comes back without its quote the first time, so it is asked again once.
+  const t = mendTransport(OPENING, 1);
+  const r = await run([f.bundles, '--first', '3', '--out', f.out, '--send', '--regate'], t.send);
+  assert.equal(r.code, 0, 'every line lands; no key is counted');
+  // The pack: no alias changes, and the mended line shows the word the pack keeps for its key.
+  const pack = await packOf(f.out);
+  assert.deepEqual(pack.aliases, before.aliases, 'no alias changes (the answers\' own words not taken)');
+  const mended = pack.converse.find((x) => x.item === P && x.hash === hashOf(OPENING));
+  assert.equal(gate(OPENING, mended.text, { keys: keysOf(bundles[0]).keys, words: scriptWordsOf(pack.aliases, 'a', P) }), null,
+    'the mended line passes the gate with the pack\'s words');
+  assert.ok(mended.text.startsWith('"') && mended.text.includes('@{길}'), 'its quote back, the pack\'s word for vexl');
+  assert.deepEqual(pack.tables, before.tables, 'the table strings as they were');
+  const changed = new Set([hashOf(OPENING), hashOf('Naught more.')]);
+  assert.deepEqual(pack.converse.filter((x) => !changed.has(x.hash)), before.converse.filter((x) => !changed.has(x.hash)), 'every passing line unchanged');
+  assert.ok(pack.converse.some((x) => x.item === R && x.hash === hashOf('Naught more.')), 'the line the pack lacked added');
+  // The requests.
+  const users = t.bodies.map(userOf);
+  assert.ok(users.every((u) => u.npc), 'no request of shared keywords (mox, three scripts, no word)');
+  const by = new Map(users.map((u) => [u.npc.name.replace(SENTINEL, ''), u]));
+  assert.deepEqual([...by.keys()].sort(), ['Mendp', 'Mendr'], 'requests for P and R, none for Q');
+  const asked = users.filter((u) => u.npc.name.endsWith('Mendp'));
+  assert.deepEqual([asked.length, users.length], [2, 3], 'P\'s line asked again once, R\'s once');
+  for (const u of asked) {
+    assert.deepEqual(u.lines.map((l) => l.en), [OPENING], 'P: only its failing line');
+    assert.deepEqual(u.topics, [{ keys: [{ k: 'plo', shown: ['plo'], known: '술' }] }, { keys: [{ k: 'vexl', shown: ['vexl'], known: '길' }] }],
+      'the keys the pack gives a word, each with it as known, the request again too');
+  }
+  assert.deepEqual(by.get('Mendr').lines.map((l) => l.en), ['Naught more.'], 'R: only the line the pack lacks');
+  assert.deepEqual(by.get('Mendr').topics, [{ keys: [{ k: 'plo', shown: ['plo'], known: '탁주' }] }]);
+  // What it says: the consent text, the counts (the kept lines apart from this run's), the summary.
+  const runs = bundles.reduce((n, b) => n + unitsOf(b).length, 0);
+  const units = runs + bundles.reduce((n, b) => n + b.strings.length, 0);
+  const consent = r.text.slice(0, r.text.indexOf('The exact first request'));
+  assert.ok(!consent.includes('(and its keywords)'), 'no keyword is asked');
+  assert.ok(consent.includes('each the lines of one script that fail the checks or that the pack lacks, with its NPC\'s name and description and '
+    + 'the words the pack keeps for its keys;'));
+  assert.match(consent, new RegExp(`Regate \\(--regate\\): of the chosen scripts' lines and table strings the pack has, ${units - 2} pass the checks `
+    + 'and are kept as they are, not sent, and 1 fail them \\(quotes 1\\); those and the 1 the pack lacks are sent'), 'said before the owner\'s go');
+  assert.ok(r.text.includes(`Lines: ${runs} found, 2 translated, ${runs - 2} kept as the pack had them, 0 left English; scripts translated 2 of 3.`),
+    'the lines kept named apart from this run\'s');
+  assert.ok(r.text.includes('Table strings: 1 found, 0 translated, 1 kept as the pack had them, 0 left English.'), 'the table string kept, not translated');
+  assert.match(r.text, /; 2 from this run\)/, 'only the lines this run sent');
+  assert.ok(r.text.includes(`Regate: ${units - 2} lines and table strings kept as the pack had them, 2 sent (1 that failed the checks (quotes 1), `
+    + '1 the pack lacked), 0 still failing.'), 'the summary');
+  assert.ok(!r.text.includes('Keywords:'), 'no key counted');
+  const coverageText = await readFile(join(f.out, 'coverage.json'), 'utf8');
+  const coverage = JSON.parse(coverageText);
+  assert.deepEqual(coverage.units, { found: runs, translated: 2, kept: runs - 2, leftEnglish: 0, byReason: {}, unexplained: 0 });
+  assert.deepEqual(coverage.tables, { found: 1, translated: 0, kept: 1, leftEnglish: 0, byReason: {}, unexplained: 0 });
+  assert.deepEqual(coverage.perScript.map((x) => [x.translated, x.kept, x.left]), [[1, unitsOf(bundles[0]).length, 0], [0, unitsOf(bundles[1]).length, 0],
+    [1, unitsOf(bundles[2]).length - 1, 0]], 'each script: this run\'s, kept, left');
+  // Again over the mended pack: nothing fails and nothing lacks, so nothing is sent.
+  const mendedBytes = await readFile(join(f.out, 'ko.u6lp'));
+  assert.ok(!mendedBytes.equals(beforeBytes));
+  const t2 = mendTransport();
+  const r2 = await run([f.bundles, '--first', '3', '--out', f.out, '--send', '--regate'], t2.send);
+  assert.equal(r2.code, 1, 'nothing sent');
+  assert.equal(t2.bodies.length, 0);
+  assert.ok(r2.text.includes(`Regate: ${units} lines and table strings kept as the pack had them, 0 sent (0 that failed the checks, 0 the pack lacked), 0 still failing.`));
+  assert.match(r2.text, /Nothing to send: every line the pack has of the chosen scripts passes the checks, and it lacks none of a script it has lines of; nothing was sent\./);
+  assert.ok((await readFile(join(f.out, 'ko.u6lp'))).equals(mendedBytes), 'the pack as it was');
+  quiet(d.text + r.text + r2.text, bundles);
+  noneOf(d.text + r.text + r2.text + coverageText, ['plo', 'vexl', 'quux', 'mox', 'zed', '술', '길', '탁주']);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate: a line its request fails, and the request again too, is counted still failing by reason, and the pack keeps its line as a merge does (nothing new lands, so the pack is not written again); the run exits 3', async () => {
+  const bundles = mending();
+  const f = await kfixture(bundles);
+  await mendPack(f.out, bundles);
+  const beforeBytes = await readFile(join(f.out, 'ko.u6lp'));
+  const t = mendTransport(OPENING);
+  const r = await run([f.bundles, '--item', `a:${MEND_ITEMS[0]}`, '--out', f.out, '--send', '--regate'], t.send);
+  assert.equal(r.code, 3, 'a line left failing');
+  assert.deepEqual(t.bodies.map((b) => userOf(b).lines.map((l) => l.en)), [[OPENING], [OPENING]], 'the line, then once again');
+  assert.ok(r.text.includes('Regate: 6 lines and table strings kept as the pack had them, 1 sent (1 that failed the checks (quotes 1), 0 the pack lacked), '
+    + '1 still failing (quotes 1).'));
+  assert.match(r.text, /No line was translated: the pack there is left as it was\./);
+  assert.ok((await readFile(join(f.out, 'ko.u6lp'))).equals(beforeBytes), 'the pack\'s line kept as it was');
+  quiet(r.text, bundles);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate: a chosen script the pack has no line of is not repaired: nothing of it is sent, its lines are left English (not-in-pack), and the consent text and the summary count it, to run without --regate; the other scripts are repaired', async () => {
+  const S = 8904;
+  const bundles = [...mending(), kbundle('a', S, '0000000000198904', `${SENTINEL}Mends`, [[['plo'], 'Ask of my @plo.'], [['wex'], 'A @wex here.']])];
+  const f = await kfixture(bundles);
+  await mendPack(f.out, bundles.slice(0, 3));
+  const before = await packOf(f.out);
+  const t = mendTransport();
+  const r = await run([f.bundles, '--first', '4', '--out', f.out, '--send', '--regate'], t.send);
+  assert.equal(r.code, 3, 'its lines left English');
+  assert.deepEqual(t.bodies.map((b) => userOf(b).npc.name.replace(SENTINEL, '')).sort(), ['Mendp', 'Mendr'], 'nothing of S sent');
+  const said = '; 1 scripts the pack has no line of: not repaired, run them without --regate.';
+  assert.ok(r.text.includes(`no keyword word changes${said}`), 'the consent text counts it');
+  assert.ok(r.text.includes(`0 still failing${said}`), 'the summary counts it');
+  const pack = await packOf(f.out);
+  assert.ok(!pack.converse.some((x) => x.item === S) && !pack.aliases.some((a) => a.item === S), 'no line or alias of S');
+  assert.deepEqual(pack.aliases, before.aliases);
+  const coverage = JSON.parse(await readFile(join(f.out, 'coverage.json'), 'utf8'));
+  assert.deepEqual(coverage.units.byReason, { 'not-in-pack': unitsOf(bundles[3]).length }, 'its lines left English, by that reason');
+  quiet(r.text, bundles);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate: a table string an op reads from inside (inner) is neither kept, nor sent, nor counted lacking: a script whose other lines all pass sends nothing', async () => {
+  const bundles = mending();
+  const Q = MEND_ITEMS[1];
+  // Made up: the script reads its table string from inside it, so the tool leaves it English, unasked.
+  bundles[1].strings.push({ key: ['a', Q, 2000], table: 2000, index: 0, text: 'a bowl of plums', inner: [2002] });
+  const f = await kfixture(bundles);
+  await mendPack(f.out, bundles);
+  const t = mendTransport();
+  const r = await run([f.bundles, '--item', `a:${Q}`, '--out', f.out, '--send', '--regate'], t.send);
+  assert.equal(r.code, 1, 'nothing sent');
+  assert.equal(t.bodies.length, 0);
+  assert.ok(r.text.includes(`Regate: ${unitsOf(bundles[1]).length} lines and table strings kept as the pack had them, 0 sent (0 that failed the checks, `
+    + '0 the pack lacked), 0 still failing.'), 'the inner string counted nowhere');
+  quiet(r.text, bundles);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate with --fresh-keywords is refused before any request or preview, with a fixed message', async () => {
+  const bundles = mending();
+  const f = await kfixture(bundles);
+  await mendPack(f.out, bundles);
+  const t = mendTransport();
+  const r = await run([f.bundles, '--first', '3', '--out', f.out, '--send', '--regate', '--fresh-keywords'], t.send);
+  assert.equal(r.code, 2);
+  assert.match(r.text, /translate: --regate keeps the keyword words of the pack there: it does not go with --fresh-keywords/);
+  assert.equal(t.bodies.length, 0, 'no request');
+  assert.equal(previewPrinted(r.text), null, 'no preview');
+  quiet(r.text, bundles);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--regate needs a pack in --out and goes with --item or --first only: no pack, --name, --strings and --ages are refused with a fixed message, no request sent; the usage names it', async () => {
+  const bundles = mending();
+  const f = await kfixture(bundles);
+  const t = mendTransport();
+  const none = await run([f.bundles, '--item', `a:${MEND_ITEMS[0]}`, '--out', f.out, '--send', '--regate'], t.send);
+  assert.equal(none.code, 2);
+  assert.match(none.text, /translate: --regate checks again the lines of the pack in .+, and there is none there: nothing was sent\./);
+  assert.equal(previewPrinted(none.text), null, 'no preview');
+  await mendPack(f.out, bundles);
+  const refusal = /--regate checks again the lines of the scripts --item or --first chooses from a bundles file: not with --name, --ages or --strings/;
+  for (const args of [['--name', `${SENTINEL}Mendp`], ['--first', '1', '--strings', join(f.dir, 'strings.json')],
+    ['--speakers', join(f.dir, 'speakers.json'), '--ages', 'adult']]) {
+    const r = await run([f.bundles, ...args, '--out', f.out, '--send', '--regate'], t.send);
+    assert.equal(r.code, 2, `${args[0]}: refused`);
+    assert.match(r.text, refusal, `${args[0]}: the rule`);
+  }
+  assert.equal(t.bodies.length, 0, 'no request');
+  const help = await run(['--help'], null);
+  assert.match(help.text, /\[--regate\]/);
+  await rm(f.dir, { recursive: true });
 });
