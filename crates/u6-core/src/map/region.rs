@@ -14,13 +14,19 @@ use u6_formats::map::{DUNGEON_CHUNKS, SURFACE_CHUNKS};
 
 use super::seams;
 use super::{DUNGEON_MASK, MapState, SURFACE_MASK, WINDOW, WINDOW_CELLS, cell};
+use crate::geom::{self, HALF_H, HALF_W};
 use crate::objects::{ACTOR_SLOTS, ObjectId};
 use crate::state::State;
 
 /// Object type of an egg (0x1321dc).
 const OBJ_EGG: u16 = 0x14f;
-/// Eggs farther than this from the leader on either axis are offered to 0x1319b2 (0x1321dc).
-const EGG_NEAR: i16 = 8;
+/// Eggs farther than this from the leader on the x / y axis are offered to 0x1319b2 (0x1321dc):
+/// the original's 8 is 3 past its half view of 5; the port keeps the 3 past the half view of
+/// each axis, so no egg hatches in sight (spec 13 Decision 5).
+pub(super) const EGG_NEAR: [i16; 2] = [HALF_W as i16 + 3, HALF_H as i16 + 3];
+/// Window cells from the origin to the window's centre on each axis: 0x108d10 drops the
+/// temporaries round it (spec 13 Decision 6, `WINDOW / 2`; the original's 20).
+const WINDOW_CENTRE: u16 = (WINDOW / 2) as u16;
 
 impl MapState {
     /// Original: 0x10983a (map: chunk ref at x, y, z; loads the region first)
@@ -43,11 +49,11 @@ impl MapState {
 
     /// Original: 0x10996c (map: tile at x, y, z; window cache, else from chunk)
     ///
-    /// x and y are words masked with [`MapState::world_mask`]. Inside the 40 × 40 window cache
-    /// the tile comes from [`MapState::window_tiles`]; elsewhere from the chunk 0x10983a names
-    /// (the chunk LRU 0x1089d8 it reads through is replaced). The window cache is a copy of the
-    /// map, so both paths agree; before the first 0x108d10 the port has no window and reads the
-    /// chunks. `None` when the map or the chunks are not loaded.
+    /// x and y are words masked with [`MapState::world_mask`]. Inside the window cache
+    /// ([`WINDOW`] × [`WINDOW`]) the tile comes from [`MapState::window_tiles`]; elsewhere from
+    /// the chunk 0x10983a names (the chunk LRU 0x1089d8 it reads through is replaced). The window
+    /// cache is a copy of the map, so both paths agree; before the first 0x108d10 the port has no
+    /// window and reads the chunks. `None` when the map or the chunks are not loaded.
     pub fn tile_at(&self, x: usize, y: usize, z: usize) -> Option<u8> {
         let mask = self.world_mask;
         let (x, y, z) = (x as u16 & mask, y as u16 & mask, z as u16);
@@ -78,22 +84,23 @@ impl MapState {
 /// Original: 0x108d10 (map: rebuild the 40×40 window tile cache around the view centre)
 ///
 /// Origin = `(centre - 16) & 0x3f8` per axis (chunk-aligned, the centre in cells 16..24); view
-/// offset = `(centre - origin - 5) & 0x1f`; mask 0xff on a dungeon level, else 0x3ff. When origin
-/// and level equal the last rebuild's key the cache is kept; otherwise: object grid rebuild
-/// (0x10dea4), every actor on the level inside the window that the grid does not hold at its own
-/// cell is re-placed there (0x10c9d2, with A4-0x784e cleared around the loop), temporaries away
-/// from the window centre go (0x10c49c), the key is stored, the 5 × 5 chunks are copied in and
-/// the egg pass 0x1321dc runs. Always: moongates (0x10355c), then "view changed".
+/// offset = `(centre - origin - 5) & 0x1f`; the port's are [`geom::window_origin`] and
+/// [`geom::view_offset`] (x with [`HALF_W`], y with [`HALF_H`]). Mask 0xff on a dungeon level,
+/// else 0x3ff. When origin and level equal the last rebuild's key the cache is kept; otherwise:
+/// object grid rebuild (0x10dea4), every actor on the level inside the window that the grid does
+/// not hold at its own cell is re-placed there (0x10c9d2, with A4-0x784e cleared around the
+/// loop), temporaries away from the window centre go (0x10c49c), the key is stored, the chunks
+/// are copied in and the egg pass 0x1321dc runs. Always: moongates (0x10355c), then "view
+/// changed".
 pub fn rebuild_window(state: &mut State) {
     let centre = state.map.centre;
     let (lx, ly, lz) = (centre.x, centre.y, u16::from(centre.z));
     let m = &mut state.map;
-    let ox = lx.wrapping_sub(16) & 0x3f8;
-    let oy = ly.wrapping_sub(16) & 0x3f8;
+    let (ox, oy) = (geom::window_origin(lx), geom::window_origin(ly));
     m.window_origin = [ox, oy];
     m.view_offset = [
-        (lx.wrapping_sub(ox).wrapping_sub(5) & 0x1f) as i16,
-        (ly.wrapping_sub(oy).wrapping_sub(5) & 0x1f) as i16,
+        geom::view_offset(lx, ox, HALF_W as u16),
+        geom::view_offset(ly, oy, HALF_H as u16),
     ];
     m.world_mask = if lz != 0 { DUNGEON_MASK } else { SURFACE_MASK };
     let key = [ox as i16, oy as i16, lz as i16];
@@ -102,7 +109,8 @@ pub fn rebuild_window(state: &mut State) {
         state.map.flag_784e = 0;
         place_window_actors(state, ox, oy, lz);
         state.map.flag_784e = 1;
-        seams::drop_far_temporaries(state, ox.wrapping_add(20), oy.wrapping_add(20), lz);
+        let c = WINDOW_CENTRE;
+        seams::drop_far_temporaries(state, ox.wrapping_add(c), oy.wrapping_add(c), lz);
         state.map.window_key = key;
         fill_window(&mut state.map, ox, oy, lz);
         check_eggs(state);
@@ -133,7 +141,9 @@ fn place_window_actors(state: &mut State, ox: u16, oy: u16, lz: u16) {
     }
 }
 
-/// 0x108d10's copy loop: 5 × 5 chunks, x outer, from (origin + offset) & 0x3ff.
+/// 0x108d10's copy loop: 5 × 5 chunks, x outer, from (origin + offset) & 0x3ff. A window side
+/// that is no multiple of the chunk (Wide's 60) takes the last column and row of chunks clipped
+/// to it (spec 13 Geometry).
 fn fill_window(m: &mut MapState, ox: u16, oy: u16, lz: u16) {
     let mut tiles = vec![0u8; WINDOW_CELLS];
     for cx in (0..WINDOW).step_by(CHUNK_SIZE) {
@@ -144,9 +154,10 @@ fn fill_window(m: &mut MapState, ox: u16, oy: u16, lz: u16) {
                 .chunk_ref(x, y, lz)
                 .and_then(|c| m.chunks.chunks.get(usize::from(c)));
             let Some(chunk) = chunk else { continue };
-            for (r, row) in chunk.iter().enumerate() {
+            let w = CHUNK_SIZE.min(WINDOW - cx);
+            for (r, row) in chunk.iter().take(WINDOW - cy).enumerate() {
                 let at = cell(cx, cy + r);
-                tiles[at..at + CHUNK_SIZE].copy_from_slice(row);
+                tiles[at..at + w].copy_from_slice(&row[..w]);
             }
         }
     }
@@ -170,7 +181,8 @@ pub fn refresh_region(state: &mut State) {
 /// Skipped while A4-0x7afb is set. Clears A4-0x6592, then walks the objects in the whole window
 /// rectangle on the centre's level (0x10b05a / 0x10af74): an egg (type 0x14f) on that level is
 /// offered when the party is arriving (A4-0x6594), when it is more than 8 tiles from the centre
-/// on either axis (`abs`, 0x101ea8), or when its status has bit 0x20.
+/// on either axis (`abs`, 0x101ea8; the port's [`EGG_NEAR`] per axis), or when its status has
+/// bit 0x20.
 pub fn check_eggs(state: &mut State) {
     if state.map.flag_7afb != 0 {
         return;
@@ -179,7 +191,8 @@ pub fn check_eggs(state: &mut State) {
     let [ox, oy] = state.map.window_origin;
     let c = state.map.centre;
     let (x0, y0) = (ox as i16, oy as i16);
-    let found = seams::objects_in_rect(state, x0, y0, x0 + 39, y0 + 39, u16::from(c.z));
+    let last = WINDOW as i16 - 1;
+    let found = seams::objects_in_rect(state, x0, y0, x0 + last, y0 + last, u16::from(c.z));
     for id in found {
         let Some(p) = state.objects.location(id) else {
             continue;
@@ -187,10 +200,10 @@ pub fn check_eggs(state: &mut State) {
         if state.objects.obj_type(id) != OBJ_EGG || p.z != c.z {
             continue;
         }
-        let far = |a: u16, b: u16| (a.wrapping_sub(b) as i16).wrapping_abs() > EGG_NEAR;
+        let far = |a: u16, b: u16, near: i16| (a.wrapping_sub(b) as i16).wrapping_abs() > near;
         let offer = state.map.arriving != 0
-            || far(p.x, c.x)
-            || far(p.y, c.y)
+            || far(p.x, c.x, EGG_NEAR[0])
+            || far(p.y, c.y, EGG_NEAR[1])
             || seams::object_status(state, id) & 0x20 != 0;
         if offer {
             seams::hatch_egg(state, id);

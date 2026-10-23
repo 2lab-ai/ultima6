@@ -547,7 +547,9 @@ mod tests {
         let mut s = party();
         teleport(&mut s, 500, 600, 0, 0);
         assert_eq!(s.map.centre, at(500, 600, 0));
-        assert_eq!(s.map.window_origin, [480, 584]);
+        // Original (480, 584).
+        let origin = [500, 600].map(crate::geom::window_origin);
+        assert_eq!(s.map.window_origin, origin);
         for a in [1, 2] {
             assert_eq!(s.objects.location[a], at(500, 600, 0));
             assert_eq!(s.actors.movement_points[a], 20 + a as u8);
