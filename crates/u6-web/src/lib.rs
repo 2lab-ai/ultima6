@@ -637,37 +637,25 @@ impl Game {
     /// of the member it shows, that member's actor slot (0 for none), and 1 while a conversation
     /// runs (its portrait in the panel area, whatever the mode), else 0; empty before a start.
     /// The page reads it at each paint in Wide: the window of the mode is the active one, the
-    /// side panel's own in another mode or a conversation.
+    /// side panel's own in another mode or a conversation ([`u6_core::ui::panels::panel_view`]).
     pub fn panel_view(&self) -> Vec<i32> {
         self.engine.as_ref().map_or_else(Vec::new, |e| {
-            let s = e.state();
-            let p = &s.ui.panel;
-            // G1: call ui::panels::{member_actor,name}
-            let actor = usize::try_from(p.member)
-                .ok()
-                .and_then(|i| s.actors.party.members.get(i))
-                .copied()
-                .unwrap_or(0);
+            let (mode, member, actor, talking) = u6_core::ui::panels::panel_view(&e.state());
             vec![
-                i32::from(p.mode),
-                i32::from(p.member),
+                i32::from(mode),
+                i32::from(member),
                 i32::from(actor),
-                i32::from(s.converse.active),
+                i32::from(talking),
             ]
         })
     }
 
     /// Spec 14 Design 7: the roster name of the member the side panel shows (the member of
-    /// [`Game::panel_view`]), for the page's window titles; empty for none and before a start.
+    /// [`Game::panel_view`]; [`u6_core::ui::panels::panel_name`]), for the page's window titles;
+    /// empty for none and before a start.
     pub fn panel_name(&self) -> String {
         self.engine.as_ref().map_or_else(String::new, |e| {
-            let s = e.state();
-            // G1: call ui::panels::{member_actor,name}
-            usize::try_from(s.ui.panel.member)
-                .ok()
-                .and_then(|i| s.actors.party.names.get(i))
-                .cloned()
-                .unwrap_or_default()
+            String::from_utf8_lossy(&u6_core::ui::panels::panel_name(&e.state())).into_owned()
         })
     }
 
@@ -1621,8 +1609,8 @@ mod tests {
 
     /// Spec 13: the shown map as the page gets it ([`shown_map`]). Original: the game's map
     /// window. Wide: the view less half a cell, beside the UI's 320 columns and half a cell
-    /// inside the frame's right and bottom edges, 36 cells across and 20 down (fails with
-    /// `VIEW_W` and `VIEW_H` swapped: the frame is 912 × 336 either way).
+    /// inside the frame's right edge and the view's last row (the frame goes on under the UI,
+    /// spec 14), 36 cells across and 20 down (fails with `VIEW_W` and `VIEW_H` swapped).
     #[test]
     fn the_shown_map_is_the_view_less_half_a_cell_in_the_frame() {
         let [x, y, w, h] = shown_map()[..] else {
@@ -1630,8 +1618,16 @@ mod tests {
         };
         let (fw, fh) = (u6_render::WIDTH as u32, u6_render::HEIGHT as u32);
         if fw > 320 {
+            // The view's rows end above the frame's last (spec 14: the actor views' slots lie
+            // under the UI, beside the map's rows).
+            let rows = u32::from(u6_core::geom::MAP_Y) + u6_core::geom::VIEW_H as u32 * 16;
             assert_eq!((x, y), (320 + 8, 8), "beside the UI");
-            assert_eq!((x + w + 8, y + h + 8), (fw, fh), "to the frame's edges");
+            assert_eq!(
+                (x + w + 8, y + h + 8),
+                (fw, rows),
+                "to the frame's right edge and the view's last row"
+            );
+            assert!(rows <= fh, "the view's rows in the frame");
             assert_eq!((w / 16, h / 16), (36, 20), "cells across and down");
         } else {
             assert_eq!([x, y, w, h], [8, 8, 160, 160], "the map window");

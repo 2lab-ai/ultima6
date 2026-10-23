@@ -57,25 +57,24 @@
 // layout. With Original, or HD off, the page is as without the HD layout.
 //
 // Wide mode (spec 13): the engine comes in two builds, site/pkg (Original: the 320 × 200 frame)
-// and site/pkg-wide (Wide: a 912 × 408 frame, the UI's 320 × 200 at its top left, a 37 × 21
-// map beside it and under the UI the side panel's three views, spec 14), and the page imports
-// one at its engine's operation (the frame's size read from the engine): Wide when the kept screen
+// and site/pkg-wide (Wide: a 912 × 408 frame, the UI's 320 × 200 at its top left, a 37 × 21 map
+// beside it and under the UI the side panel's three views, spec 14), and the page imports one at
+// its engine's operation (the frame's size read from the engine): Wide when the kept screen
 // (`u6.layout`) is `wide` or none (a new visitor), else Original. The chooser's and Settings'
 // "Screen layout" is Wide / HD 16:9 / Original 16:10; a choice across the builds is noted, and
 // the chooser's OK, once it kept the chooser's other choices, keeps it and loads the page again,
 // once, after the operations admitted before (the game starts from the kept files and its own
-// stored save, as at any load). In Wide, HD on or off, the canvas is 1920 × 1080 in the HD layout's 16:9 box: the
-// engine's shown map scaled to cover it, and over it framed windows with a title each (the date
-// line top right, the message scroll bottom right, the command bar bottom left, each the size of
-// its spec 10 region; spec 14's actor windows: the party under the date line, the attributes
-// left of it, the paper doll and the backpack under the attributes, the one the side panel's
-// mode shows marked, and the side panel itself in a window of its own while its mode is another
-// or a conversation runs);
-// the HD frame scaled smoothly (the
-// compositor at WIDE_S), with HD off the classic frame pixelated. A window is dragged by its
-// title strip, its place kept (`u6.layout.windows`). The pointer reaches a window's content
-// before the map, its frame and title strip are gaps as in the HD layout; every other screen
-// shows the UI's 320 × 200 letterboxed.
+// stored save, as at any load). In Wide, HD on or off, the canvas is 1920 × 1080 in the HD
+// layout's 16:9 box: the engine's shown map scaled to cover it, and over it framed windows with
+// a title each (the date line top right, the message scroll bottom right, the command bar bottom
+// left, each the size of its spec 10 region; spec 14's actor windows: the party under the date
+// line, the attributes left of it, the paper doll and the backpack under the attributes, the one
+// the side panel's mode shows marked, and the side panel itself in a window of its own while its
+// mode is another or a conversation runs); the HD frame scaled smoothly (the compositor at
+// WIDE_S), with HD off the classic frame pixelated. A window is dragged by its title strip, its
+// place kept (`u6.layout.windows`). The pointer reaches a window's content before the map, its
+// frame and title strip are gaps as in the HD layout; every other screen shows the UI's 320 ×
+// 200 letterboxed.
 //
 // The HD font (spec 11; the chooser's and Settings' "Font", kept in localStorage, the HD font
 // unless the pixel font was chosen): while the HD layout is in effect the page loads the font
@@ -1994,9 +1993,12 @@ const wideWindows = WIDE ? WIDE_WINDOWS.map((spec) => {
 const ACTOR_VIEWS = new Set(WIDE_WINDOWS.filter((w) => w.view !== undefined).map((w) => w.view));
 // What the side panel shows as the engine said at the last paint in `game` (`pollPanel`):
 // `panelView` its [mode, member, actor, talking] (Game.panel_view; null before the first),
-// `panelName` the shown member's name (Game.panel_name).
+// `panelName` the shown member's name (Game.panel_name); `slotsName` the name of the member the
+// actor windows show: `panelName` at the last paint that read one of their views (in another mode
+// or a conversation they keep their last views, Design 6, and their titles with them).
 let panelView = null;
 let panelName = '';
+let slotsName = '';
 // The side panel shows what no actor window does (spec 14 Design 6): its mode is none of theirs,
 // or a conversation runs (its portrait in the panel area, whatever the mode).
 const otherMode = () => panelView !== null && panelView.length > 0
@@ -2011,9 +2013,9 @@ const windowActive = (win) => (win.other
   : !otherMode() && win.view !== undefined && panelView !== null && win.view === panelView[0]);
 // Window `win` is dimmed: an actor window while the side panel's own window shows.
 const windowDimmed = (win) => win.view !== undefined && otherMode();
-// Window `win`'s title in the page's language: its name, the shown member's name after it
-// where it shows that member (`named`).
-const windowTitle = (win) => (win.named && panelName ? `${t(win.title)} — ${panelName}` : t(win.title));
+// Window `win`'s title in the page's language: its name, the name of the member it shows after
+// it where it shows one (`named`).
+const windowTitle = (win) => (win.named && slotsName ? `${t(win.title)} — ${slotsName}` : t(win.title));
 // The map (Design 5): the engine's shown rect (`shown_map`) scaled to cover the canvas, centred
 // (`placeWide`, once the engine loaded).
 let wideMap = null;
@@ -2297,9 +2299,10 @@ function fitText(ctx, text, room) {
 }
 
 // What the side panel shows now (spec 14 Design 7), read at each paint in `game`: the engine's
-// Game.panel_view ([mode, member, actor, talking]) and Game.panel_name (the shown member's name) into
-// `panelView` and `panelName`; true when either changed (the windows' titles and marks, and
-// whether the side panel's own window shows, go with them: the paint is whole).
+// Game.panel_view ([mode, member, actor, talking]) and Game.panel_name (the shown member's name)
+// into `panelView` and `panelName`, and in one of the actor windows' views the name into
+// `slotsName`; true when either changed (the windows' titles and marks, and whether the side
+// panel's own window shows, go with them: the paint is whole).
 function pollPanel() {
   const view = [...game.panel_view()];
   const name = game.panel_name();
@@ -2307,6 +2310,7 @@ function pollPanel() {
   if (same && name === panelName) return false;
   panelView = view;
   panelName = name;
+  if (!otherMode()) slotsName = name;
   return true;
 }
 
