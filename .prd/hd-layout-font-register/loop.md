@@ -50,3 +50,11 @@ The owner rejected deploys 2, 6 and 8 for keeping the 11 × 11 view (`ssot.md` �
 | W5 | `feat/wide-page` → `.worktrees/feat-wide-page` | `u6-render` compose, `u6-web`, `u6-native`, `site/*`, build and deploy scripts: two packages, the mode setting, the Wide layout with framed windows | W0 (page work at once) |
 
 Deploy 10 = all six merged: the wide map fills the canvas and the four engine panels float in framed windows. Drag and collapse may follow as 10b. Deploy 11 = separate paper-doll, attributes and backpack windows.
+
+### Round 2 deploys
+
+| # | Date | Item | What went live | Main | Receipt |
+|---|---|---|---|---|---|
+| 10 | 2026-10-24 KST | Wide (spec 13, W0–W5 + I1) | Wide mode beside Original. Wide is the default for a new visitor and is its own wasm build (`site/pkg-wide`), chosen by `u6.layout`. A world window of 60×60. A 37×21 view, about 36×20 cells shown, cover-scaled onto the 1920×1080 canvas. Four framed, draggable windows: date, party panel, messages, commands. Targeting stays within 5 cells of the leader; Look reaches the whole view. A switch to HD 16:9 or Original reloads once into `site/pkg`, keeping saves. | `c502116` | Cloudflare `1fb4f009.ultima6.pages.dev`, prod wasm `pkg-wide` 2219466 B, `pkg` 2212822 B. Fresh visitor, en-US, 1920×1080, zip only (`live-wide.mjs`, run 2): Wide checked and only `pkg-wide/` requested. In game, layout wide, 4 windows, map region −12,0,1944,1080 from frame rect 328,8,576,320 (36×20 cells). Four steps east and back. A click 14 cells east maps to frame x 840 and the party walks. Settings → HD 16:9 reloads to stored `hd`, layout hd 1280×720, only `pkg/` requested. Console errors 0. `LIVE OK`. Gate: Original 1528 passed, Wide 1521 passed, web 121/121. |
+
+Finding at deploy 10: in 한글, combat's wound report prints the creature's Korean name and then English words. The catalogue of shown strings (`crates/u6-core/src/locale/strings.rs:19-21`) leaves out combat's other lines, magic, the inventory and the panels. The words come from 0x12395a `report_wounds` (`crates/u6-core/src/combat/damage.rs:84-111`, A4-0x7750/-0x7745/-0x773d/-0x7735/-0x772e), and are not looked up. This is a deploy-11 item: catalogue them and translate.
