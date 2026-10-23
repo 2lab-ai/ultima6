@@ -15,6 +15,7 @@
 use super::Cx;
 use super::party::ix;
 use crate::engine::Io;
+use crate::geom::{VIEW_H, VIEW_W};
 use crate::speech::Kind;
 use crate::state::State;
 
@@ -342,15 +343,17 @@ pub(crate) fn bump_7afe(s: &mut State) {
     s.ui.panel.dirty = true;
 }
 
-/// The map window caches 0x112bf2 reads at (col, row) of the 11×11 window: the byte table at
-/// A4-0x15f0 (first draw-list node) and the word table at A4-0x1476 (tile shown), built by
-/// 0x109e74 / 0x10e81e (`objects.draw`).
+/// The map window caches 0x112bf2 reads at view cell (col, row) of the [`VIEW_W`] × [`VIEW_H`]
+/// view (Original 11 × 11): the byte table at A4-0x15f0 (first draw-list node) and the word
+/// table at A4-0x1476 (tile shown), built by 0x109e74 / 0x10e81e (`objects.draw`, row by row
+/// of [`VIEW_W`]).
 pub(crate) fn view_cell(s: &State, col: i16, row: i16) -> (crate::objects::DrawNode, i16) {
     let d = &s.objects.draw;
-    usize::try_from(row * 11 + col)
+    usize::try_from(row * VIEW_W as i16 + col)
         .ok()
-        .filter(|&i| i < d.cell.len())
-        .map_or((0, 0xff), |i| (d.cell[i], d.base[i] as i16))
+        .filter(|&i| i < VIEW_W * VIEW_H)
+        .and_then(|i| Some((*d.cell.get(i)?, *d.base.get(i)? as i16)))
+        .unwrap_or((0, 0xff))
 }
 
 // ---- magic and music (milestone-1 stubs) ---------------------------------------------------

@@ -5,6 +5,7 @@
 use super::defs::{self, MSG_DONE, MSG_FAILED, MSG_NO_EFFECT};
 use super::dispatch::FMT_NL_LINE;
 use super::{Ux, seams};
+use crate::geom::RULE_HALF;
 use crate::objects::{Slot, object_of_kind_at};
 use crate::state::State;
 use crate::todo_stub;
@@ -38,7 +39,8 @@ const WISHES: i32 = -0x65ce;
 ///
 /// The cube must hold the eight moonstones (one of each frame); on the surface the lens 0x18a
 /// at (0x399, 0x353), the lens 0x18c at (0x39d, 0x353) and the Codex 0x3b at (0x39b, 0x353)
-/// must be in place and the party within 5 tiles of the Codex: the Codex goes (0x10c1d6),
+/// must be in place and the party within 5 tiles of the Codex ([`RULE_HALF`], the original's
+/// window in both builds, spec 13 Decision 3): the Codex goes (0x10c1d6),
 /// 0x133d1e, the vanishing line (0x12cf66), a key, the end sequence 0x13513a. False otherwise
 /// (the caller prints the cube's refusal).
 ///
@@ -67,7 +69,8 @@ pub async fn vortex_cube(ux: Ux<'_>, cube: Slot) -> bool {
         let codex = object_of_kind_at(&mut s, 0x39b, 0x353, 0, 0x3b);
         let c = s.map.centre;
         let (cx, cy) = (c.x as i16, c.y as i16);
-        let near = cx - 5 < 0x39c && 0x39a < cx + 5 && cy - 5 < 0x354 && 0x352 < cy + 5;
+        let r = RULE_HALF;
+        let near = cx - r < 0x39c && 0x39a < cx + r && cy - r < 0x354 && 0x352 < cy + r;
         if codex == -1 || !near {
             return false;
         }

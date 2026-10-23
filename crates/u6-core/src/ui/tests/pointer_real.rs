@@ -58,6 +58,7 @@ impl Play {
     /// As [`Play::boot_with_state`], then the oracle's quiet start (tools/oracle/pace.mjs): every
     /// actor outside the party gets status bit 0x10, so the world turn passes it over (0x1213de),
     /// and `b` breaks off the start fight: a step is the party's move alone.
+    #[cfg(not(feature = "wide"))]
     fn boot_quiet(files: &Files) -> Play {
         let (mut p, st) = Play::boot_with_state(files);
         {
@@ -74,9 +75,10 @@ impl Play {
 
     /// Holds the left button three cells south of the hero for `ms` ([`ticks`]), then idles
     /// until the prompt is back; the cells walked.
+    #[cfg(not(feature = "wide"))]
     fn held_steps(&mut self, ms: u32) -> u16 {
         let from = self.leader_at();
-        let path = self.hold((88, 88 + 48), ticks(ms));
+        let path = self.hold(near(0, 48), ticks(ms));
         self.settle(ticks(64_000));
         let at = self.leader_at();
         steps(from, &path).iter().sum::<u16>() + steps(*path.last().quiet(), &[at])[0]
@@ -179,15 +181,16 @@ impl Play {
         m[m.len().saturating_sub(n)..].to_vec()
     }
 
-    /// The pixel centre of the window cell where party member `i` stands.
+    /// The pixel centre of the view cell where party member `i` stands.
     fn member_cell(&self, i: usize) -> (i16, i16) {
         let s = self.e.state();
         let actor = s.actors.party.members[i];
         let p = s.objects.location(ObjectId(u16::from(actor))).quiet();
         let c = s.map.centre;
-        let col = p.x as i16 - c.x as i16 + 5;
-        let row = p.y as i16 - c.y as i16 + 5;
-        (col * 16 + 8, row * 16 + 8)
+        near(
+            (p.x as i16 - c.x as i16) * 16,
+            (p.y as i16 - c.y as i16) * 16,
+        )
     }
 
     fn weights(&self) -> (i16, i16) {
@@ -213,7 +216,8 @@ fn sprite_shown(p: &Play) -> (u16, usize) {
     for (r, row) in sp.rows.iter().enumerate() {
         for (c, &v) in row.iter().enumerate() {
             let (x, y) = (i32::from(sp.x) + c as i32, i32::from(sp.y) + r as i32);
-            if v != 0 && (0..320).contains(&x) && (0..200).contains(&y) {
+            let (w, h) = (u6_render::WIDTH as i32, u6_render::HEIGHT as i32);
+            if v != 0 && (0..w).contains(&x) && (0..h).contains(&y) {
                 assert!(
                     fb.get(x as usize, y as usize) == Some(16 + v),
                     "a sprite pixel"
@@ -235,11 +239,8 @@ fn the_game_played_with_the_pointer() {
     p.receipt("boot");
 
     // The pointer over the map: the walk arrow toward it.
-    p.send(InputEvent::Pointer {
-        x: 130,
-        y: 50,
-        buttons: 0,
-    });
+    let (x, y) = near(42, -38);
+    p.send(InputEvent::Pointer { x, y, buttons: 0 });
     let (shape, _) = sprite_shown(&p);
     assert!(shape == 3, "north-east of the hero: the north-east arrow");
     p.receipt("arrow-ne");
@@ -322,7 +323,8 @@ fn the_game_played_with_the_pointer() {
 
     // A map cell south of the hero: one step south.
     let before = p.e.state().map.centre;
-    p.click(88, 104);
+    let (x, y) = near(0, 16);
+    p.click(x, y);
     let after = p.e.state().map.centre;
     assert!(
         (after.x, after.y) == (before.x, before.y + 1),
@@ -416,7 +418,7 @@ fn a_held_press_walks_a_cell_a_step_and_stops_at_the_release() {
         (3, -3),
     ] {
         let from = p.leader_at();
-        let path = p.hold((88 + 16 * dx, 88 + 16 * dy), held);
+        let path = p.hold(near(16 * dx, 16 * dy), held);
         p.settle(ticks(64_000));
         let st = steps(from, &path);
         let moved: u16 = st.iter().sum();
@@ -440,10 +442,13 @@ fn a_held_press_walks_a_cell_a_step_and_stops_at_the_release() {
 /// steps by frame 200 of the 300-frame holds. Quiet = every actor outside the party passed over
 /// and the fight broken off; the start = the throne-room fight as booted, whose first world
 /// turn takes 420..470 frames.
+#[cfg(not(feature = "wide"))]
 const ORACLE_QUIET: [(u32, u16); 5] = [(5, 1), (10, 1), (25, 1), (50, 2), (200, 6)];
+#[cfg(not(feature = "wide"))]
 const ORACLE_START: [(u32, u16); 4] = [(5, 1), (10, 1), (25, 1), (50, 1)];
 
 /// The port's cells for the oracle's holds (a PAL frame = 20 ms), each from a fresh boot.
+#[cfg(not(feature = "wide"))]
 fn port_counts(boot: impl Fn() -> Play, oracle: &[(u32, u16)]) -> Vec<(u32, u16, u16)> {
     oracle
         .iter()
@@ -451,6 +456,8 @@ fn port_counts(boot: impl Fn() -> Play, oracle: &[(u32, u16)]) -> Vec<(u32, u16,
         .collect()
 }
 
+/// Against the oracle's runs: Original only (spec 13 Tests).
+#[cfg(not(feature = "wide"))]
 #[test]
 fn a_held_press_walks_at_the_originals_pace() {
     let Some(files) = files() else { return };
@@ -500,7 +507,7 @@ fn a_held_press_in_a_calm_balloon_does_not_hang() {
     let from = p.leader_at();
     let lines = |p: &Play| p.e.state().ui.messages.len();
     let mut grown = Vec::new();
-    let (x, y) = (88 + 48, 88);
+    let (x, y) = near(48, 0);
     for t in 0..13 {
         // Calm (-1) before every tick: the clock's wind changes (0x10368a) do not end the try.
         st.borrow_mut().actors.wind = 0xff;
@@ -531,7 +538,7 @@ fn a_held_map_press_during_the_exit_question_does_not_hang() {
     // Ctrl-Q (0x11): the exit question, read with 0x10790a until Y or N.
     p.send(InputEvent::Key(Key::Char('\u{11}')));
     assert!(!p.at_prompt(), "the exit question waits");
-    let path = p.hold((88 + 48, 88), ticks(192));
+    let path = p.hold(near(48, 0), ticks(192));
     p.idle(ticks(320));
     assert!(
         path.iter().all(|&a| a == from),

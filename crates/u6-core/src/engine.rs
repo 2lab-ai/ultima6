@@ -51,9 +51,10 @@ pub enum Key {
 pub enum InputEvent {
     /// A key press (auto-repeat arrives as further presses).
     Key(Key),
-    /// The pointer (mouse) at screen pixel (x, y), 0..=319 × 0..=199 (the platform scales from
-    /// its window; values outside are clamped), with `buttons` held: bit 0 left, bit 1 right
-    /// ([`POINTER_LEFT`], [`POINTER_RIGHT`]).
+    /// The pointer (mouse) at frame pixel (x, y), 0..[`u6_render::WIDTH`] ×
+    /// 0..[`u6_render::HEIGHT`] (320 × 200 in Original; in Wide the map beside the UI too; the
+    /// platform scales from its window; values outside are clamped), with `buttons` held: bit 0
+    /// left, bit 1 right ([`POINTER_LEFT`], [`POINTER_RIGHT`]).
     Pointer { x: i16, y: i16, buttons: u8 },
     /// Port-only (spec 08 Design 4, slice K5a): one character the platform's input method
     /// committed (a Hangul syllable composed through an IME), queued in order with the keys. It
@@ -88,7 +89,7 @@ pub const OWN_ALL: u8 = OWN_MINUS | OWN_PLUS | OWN_EQUALS;
 const OWN_KEYS: usize = 3;
 
 /// The pointer as the input handler keeps it: position 0x1623b8 / 0x1623ba (pixels, clamped to
-/// the screen) and the button word 0x161bd4.
+/// the frame, [`Pointer::apply`]) and the button word 0x161bd4.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pointer {
     pub x: i16,
@@ -99,11 +100,14 @@ pub struct Pointer {
 impl Pointer {
     /// Replaces: 0x151b08 (input.device handler, mouse class: the move is added to the position
     /// and clamped to 0..=319 / 0..=199; codes 0x68 / 0xe8 and 0x69 / 0xe9 set and clear
-    /// button bits 0 and 1). Platforms report absolute positions, so the position is taken.
+    /// button bits 0 and 1). Platforms report absolute positions, so the position is taken. The
+    /// clamp is the frame's size, [`u6_render::WIDTH`] × [`u6_render::HEIGHT`]: the original's
+    /// 320 × 200 in Original, the whole Wide frame in Wide (spec 13), where the map lies beside
+    /// the UI.
     fn apply(x: i16, y: i16, buttons: u8) -> Pointer {
         Pointer {
-            x: x.clamp(0, 0x13f),
-            y: y.clamp(0, 199),
+            x: x.clamp(0, u6_render::WIDTH as i16 - 1),
+            y: y.clamp(0, u6_render::HEIGHT as i16 - 1),
             buttons: buttons & (POINTER_LEFT | POINTER_RIGHT),
         }
     }

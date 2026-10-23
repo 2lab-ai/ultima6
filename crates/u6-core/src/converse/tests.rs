@@ -67,6 +67,11 @@ pub(super) fn state(script: &[u8]) -> State {
         y: 100,
         z: 0,
     };
+    // The view's draw lists as `objects` sizes them (spec 13 C2: `VIEW_W` × `VIEW_H` cells, row
+    // by row of `VIEW_W`), which 0x112bf2 reads.
+    let cells = crate::geom::VIEW_W * crate::geom::VIEW_H;
+    s.objects.draw.base.resize(cells, 0);
+    s.objects.draw.cell.resize(cells, 0);
     s
 }
 

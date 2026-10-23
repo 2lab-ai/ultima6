@@ -501,8 +501,8 @@ fn hatch_templates(
         let (rx, ry) = s.inventory.pointer_origin;
         let dir = seams::direction_of(
             s,
-            (dx << 4).wrapping_add(i16::from(rx)),
-            (dy << 4).wrapping_add(i16::from(ry)),
+            (dx << 4).wrapping_add(rx as i16),
+            (dy << 4).wrapping_add(ry as i16),
         );
         let st = s.actors.attrs.status[usize::from(SCOUT)];
         if s.rng.range(0, 3) != 0

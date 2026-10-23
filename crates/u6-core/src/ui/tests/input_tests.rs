@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ui::input::{Qualifiers, key_code, map_raw, raw_events};
+use crate::ui::target::LEADER_CELL;
 
 #[test]
 fn raw_map_takes_the_column_of_the_held_qualifier() {
@@ -124,19 +125,22 @@ fn cross_hair_moves_within_range_and_the_command_letter_confirms() {
         z: 0,
     };
     let input = &mut s.ui.input;
-    // As the command loop sets it up for Talk (0x104330): cursor mode 1 at (5, 5), range 7.
+    // As the command loop sets it up for Talk (0x104330): cursor mode 1 on the leader's cell
+    // (Original (5, 5)), range 7.
     input.target_pending = 1;
     input.target_command = 0x83;
     input.targeting = 1;
-    input.cursor = (5, 5);
+    input.cursor = LEADER_CELL;
     input.range = 7;
     s.ui.tables.keymap[0x14] = [0x74, 0x54, 0x14, 0];
     let e = read_one(s.clone(), &[Key::Right, Key::Up, Key::Char('t')]);
     let st = e.state();
     assert_eq!(st.converse.ints[0], wait::REPEAT, "T confirms like Return");
     assert_eq!(st.ui.input.targeting, 0);
-    assert_eq!(st.ui.input.pointer, (6 * 16, 4 * 16));
-    // Window cell (6, 4) around the centre (100, 200) is map (101, 199).
+    let (lx, ly) = (i16::from(LEADER_CELL.0), i16::from(LEADER_CELL.1));
+    assert_eq!(st.ui.input.pointer, pointer::cell_pixel(lx + 1, ly - 1));
+    // The view cell east and north of the leader's (Original (6, 4)) around the centre (100,
+    // 200) is map (101, 199).
     assert_eq!(st.ui.input.target, (101, 199));
     assert_eq!(st.ui.input.selection, -1);
     drop(st);
@@ -148,13 +152,57 @@ fn cross_hair_moves_within_range_and_the_command_letter_confirms() {
     assert_eq!(st.ui.input.target, (100, 199));
 }
 
+/// Spec 13 Decision 4: the cross-hair stays in the original's 11 × 11 window round the leader.
+/// Moved nine cells east (the Wide view goes on past it) it stops [`RULE_HALF`] east of the
+/// leader's cell, and confirmed it targets the map location there.
+///
+/// [`RULE_HALF`]: crate::geom::RULE_HALF
+#[test]
+fn the_cross_hair_moved_nine_cells_east_stops_at_the_rule_half() {
+    use crate::geom::RULE_HALF;
+    let mut s = state();
+    s.map.centre = u6_formats::position::Position {
+        x: 100,
+        y: 200,
+        z: 0,
+    };
+    let input = &mut s.ui.input;
+    input.target_pending = 1;
+    input.target_command = 0x83;
+    input.targeting = 1;
+    input.cursor = LEADER_CELL;
+    input.range = 7;
+    s.ui.tables.keymap[0x14] = [0x74, 0x54, 0x14, 0];
+    let mut keys = vec![Key::Right; 9];
+    keys.push(Key::Char('t'));
+    let e = run(s, &keys, 40, |st, io| async move {
+        let k = wait::read_key(&st, &io).await;
+        st.borrow_mut().converse.ints[0] = k;
+    });
+    assert!(e.finished(), "the confirm ends the read");
+    let st = e.state();
+    let (lx, ly) = (i16::from(LEADER_CELL.0), i16::from(LEADER_CELL.1));
+    assert_eq!(st.converse.ints[0], wait::REPEAT, "T confirms");
+    assert_eq!(
+        st.ui.input.cursor,
+        ((lx + RULE_HALF) as i8, ly as i8),
+        "stopped at the rule's edge"
+    );
+    assert_eq!(st.ui.input.pointer, pointer::cell_pixel(lx + RULE_HALF, ly));
+    assert_eq!(
+        st.ui.input.target,
+        (100 + RULE_HALF, 200),
+        "its map location"
+    );
+}
+
 #[test]
 fn escape_drops_the_cross_hair_and_keeps_waiting() {
     let mut s = state();
     let input = &mut s.ui.input;
     input.target_pending = 1;
     input.targeting = 1;
-    input.cursor = (5, 5);
+    input.cursor = LEADER_CELL;
     input.range = 7;
     let e = read_one(s, &[Key::Escape]);
     assert!(!e.finished());
