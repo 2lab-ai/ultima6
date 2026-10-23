@@ -11,9 +11,11 @@ use super::seams;
 use super::text::{print_at, putc};
 use super::world;
 use crate::engine::Io;
+use crate::geom::{HALF_H, HALF_W};
 use crate::objects::iter::{begin_at, first_child, next_at, tile_of};
 use crate::objects::{Slot, shown_name};
 use crate::state::State;
+use crate::ui::pointer::{map_column, map_row, view_cell};
 use crate::ui::printf::Arg;
 
 /// Strings of hunk 15 (image addresses).
@@ -244,19 +246,21 @@ pub async fn look(state: &RefCell<State>, io: &Io) {
     state.borrow_mut().ui.input.unpage = true;
 }
 
-/// Look with no object: the map tile under the pointer.
+/// Look with no object: the map tile under the pointer, anywhere in the view (spec 13
+/// Decision 5; Original `px < 0xa8 && py < 0xa8`, cell `(px >> 4) + c - 5`).
 ///
 /// Port-only (owner, 2026-10-21): within one tile of the leader, a plant by a gatehouse door
 /// may give the gatehouse key instead of the found-nothing line ([`super::gatehouse`]).
 async fn look_at_tile(state: &RefCell<State>, io: &Io, lx: u16, ly: u16) {
     let (px, py) = state.borrow().ui.input.pointer;
     let mut looked = None;
-    if px < 0xa8 && py < 0xa8 {
+    if map_column(px) && map_row(py) {
         let name = {
             let mut s = state.borrow_mut();
             let c = s.map.centre;
-            let tx = (px >> 4).wrapping_add(c.x as i16).wrapping_sub(5);
-            let ty = (py >> 4).wrapping_add(c.y as i16).wrapping_sub(5);
+            let (col, row) = view_cell(px, py);
+            let tx = col.wrapping_add(c.x as i16).wrapping_sub(HALF_W as i16);
+            let ty = row.wrapping_add(c.y as i16).wrapping_sub(HALF_H as i16);
             s.ui.input.target = (tx, ty);
             let tile = s
                 .map
@@ -538,5 +542,99 @@ async fn tell_time(state: &RefCell<State>, io: &Io) {
         1..=11 => print_at(state, io, S_AM, &[Arg::Word(h), Arg::Word(m)]).await,
         12 => print_at(state, io, S_NOON, &[Arg::Word(m)]).await,
         _ => print_at(state, io, S_PM, &[Arg::Word(h - 12), Arg::Word(m)]).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::{HALF_H, HALF_W};
+    use crate::ui::pointer::cell_pixel;
+    use u6_formats::look::{LookEntry, LookTable};
+
+    /// Tiles of the test map: the floor everywhere, one marked tile.
+    const FLOOR: u8 = 1;
+    const MARKED: u8 = 2;
+
+    /// The objects' test world with the test text layer, the map window all floor but the
+    /// marked tile `east` cells east of the view centre, and look names for both tiles.
+    fn marked_world(east: u16) -> State {
+        let mut s = crate::objects::tests::world();
+        s.ui = crate::main_loop::test_support::test_ui();
+        let c = s.map.centre;
+        // The window from four cells before the centre on each axis: the marked cell lies in it
+        // for any `east` up to the window's side less five.
+        let lead = 4;
+        s.map.window_origin = [c.x - lead, c.y - lead];
+        s.map.window_tiles = vec![FLOOR; crate::map::WINDOW_CELLS];
+        let at = crate::map::cell(usize::from(lead + east), usize::from(lead));
+        s.map.window_tiles[at] = MARKED;
+        let entry = |tile: u8, text: &str| LookEntry {
+            tile: u16::from(tile),
+            text: text.into(),
+        };
+        s.tables.look = LookTable {
+            entries: vec![entry(FLOOR, "floorname"), entry(MARKED, "markedname")],
+            trailer: Vec::new(),
+        };
+        s
+    }
+
+    /// Look at the map tile under the pointer at view cell `cell` (4 pixels into it: inside the
+    /// shown half of an edge cell), the leader on the view centre; the line it printed and the
+    /// map location it targeted.
+    fn look_at(s: State, cell: (i16, i16)) -> (String, (i16, i16)) {
+        let mut s = s;
+        let (x, y) = cell_pixel(cell.0, cell.1);
+        s.ui.input.pointer = (x + 4, y + 4);
+        let c = s.map.centre;
+        let mut e =
+            crate::Engine::with_game(s, crate::Files::default(), move |st, io| async move {
+                look_at_tile(&st, &io, c.x, c.y).await;
+                crate::ui::printf(&st, &io, b"\n", &[]).await;
+            });
+        for _ in 0..8 {
+            if e.finished() {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        assert!(e.finished(), "the look ended");
+        let s = e.state();
+        let line = s.ui.messages.last().cloned().unwrap_or_default();
+        (line, s.ui.input.target)
+    }
+
+    /// Spec 13 Decision 5: Look reaches the whole view. In Wide the cell 15 columns east of the
+    /// leader's is in view and Look names its tile; the view's east-most column is named in both
+    /// builds.
+    #[test]
+    fn look_names_the_tile_of_a_far_view_cell() {
+        let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+        let mut far = vec![hw];
+        if cfg!(feature = "wide") {
+            far.push(15);
+        }
+        for dx in far {
+            let s = marked_world(dx as u16);
+            let c = s.map.centre;
+            let (line, target) = look_at(s, (hw + dx, hh));
+            assert_eq!(
+                target,
+                (c.x as i16 + dx, c.y as i16),
+                "{dx} east: the map location"
+            );
+            assert!(
+                line.contains("markedname"),
+                "{dx} east: the marked tile named"
+            );
+            // One cell short of it: the floor.
+            let s = marked_world(dx as u16);
+            let (line, _) = look_at(s, (hw + dx - 1, hh));
+            assert!(
+                line.contains("floorname"),
+                "{dx} east, one short: the floor"
+            );
+        }
     }
 }

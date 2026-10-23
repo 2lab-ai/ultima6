@@ -5,6 +5,7 @@
 use u6_render::Framebuffer;
 
 use crate::engine::Io;
+use crate::geom::{VIEW_H, VIEW_W};
 use crate::state::State;
 
 /// 0x122144 (actors: maximum hit points of actor slot `actor`).
@@ -70,7 +71,7 @@ pub(crate) fn present_map(s: &mut State, io: &Io, flag: i16) {
 }
 
 /// 0x124e0e (combat: distance between two window cells from the A4-0x69a0 table; the
-/// cross-hair passes (5, 5) and the cell).
+/// cross-hair passes the leader's view cell, Original (5, 5), and the cell).
 pub(crate) fn distance(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) -> i16 {
     crate::combat::leaves::cell_distance(s, x0, y0, x1, y1)
 }
@@ -80,13 +81,16 @@ pub(crate) fn actor_at(s: &mut State, actor: u8, x: i16, y: i16) -> i16 {
     crate::combat::leaves::actor_at(s, i16::from(actor), x, y)
 }
 
-/// Map-window caches A4-0x15f0 (byte per window cell, 11 × 11: first draw-list node, non-zero =
-/// something stands there) and A4-0x1476 (word per cell: tile shown), both built by 0x109e74 →
-/// 0x10e81e (`objects.draw`).
+/// Map-window caches A4-0x15f0 (byte per view cell, [`VIEW_W`] × [`VIEW_H`], Original 11 × 11:
+/// first draw-list node, non-zero = something stands there) and A4-0x1476 (word per cell: tile
+/// shown), both built by 0x109e74 → 0x10e81e (`objects.draw`, row by row of [`VIEW_W`]).
 pub(crate) fn window_cell(s: &State, col: i16, row: i16) -> (bool, u16) {
     let d = &s.objects.draw;
-    let i = usize::try_from(row * 11 + col).ok().filter(|&i| i < 121);
-    i.map_or((false, 0xff), |i| (d.cell[i] != 0, d.base[i]))
+    let i = usize::try_from(row * VIEW_W as i16 + col)
+        .ok()
+        .filter(|&i| i < VIEW_W * VIEW_H);
+    i.and_then(|i| Some((*d.cell.get(i)? != 0, *d.base.get(i)?)))
+        .unwrap_or((false, 0xff))
 }
 
 /// 0x135120 (boot: step the overlay frame unless A4-0x7b64 is set).

@@ -4,6 +4,7 @@ use super::script::{ScriptDst, load_script};
 use super::seams;
 use super::{Cx, Msg};
 use crate::files::Files;
+use crate::geom::{HALF_H, HALF_W, RULE_HALF};
 use crate::objects::ObjectId;
 use crate::state::State;
 
@@ -125,8 +126,9 @@ pub async fn actor_name(cx: &Cx<'_>, npc: i16) -> super::StrRef {
 /// Original: 0x112bf2 (actor in the 11×11 window around the view centre and on a visible cell)
 ///
 /// In a vehicle every party member counts as present. Otherwise the actor must be strictly
-/// within 5 tiles of the centre on both axes; its window cell then counts unless the cell's
-/// flag byte is 0, its word is below 0x200 and equals 0xff or 0x1bc.
+/// within 5 tiles of the centre on both axes ([`RULE_HALF`]: the original's window in both
+/// builds, spec 13 Decision 3); its view cell then counts unless the cell's flag byte is 0, its
+/// word is below 0x200 and equals 0xff or 0x1bc.
 pub fn on_screen(s: &State, a: i16) -> bool {
     if in_vehicle(s) && status(s, a) & 0x80 != 0 {
         return true;
@@ -136,10 +138,11 @@ pub fn on_screen(s: &State, a: i16) -> bool {
     };
     let (x, y) = (pos.x as i16, pos.y as i16);
     let (cx, cy) = (s.map.centre.x as i16, s.map.centre.y as i16);
-    if !(cx - 5 < x && x < cx + 5 && cy - 5 < y && y < cy + 5) {
+    let r = RULE_HALF;
+    if !(cx - r < x && x < cx + r && cy - r < y && y < cy + r) {
         return false;
     }
-    let (flag, word) = seams::view_cell(s, x - cx + 5, y - cy + 5);
+    let (flag, word) = seams::view_cell(s, x - cx + HALF_W as i16, y - cy + HALF_H as i16);
     if flag != 0 || word >= 0x200 {
         return true;
     }

@@ -3,8 +3,16 @@
 
 use super::*;
 use crate::engine::Pointer;
+use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, SHOWN, VIEW_H, VIEW_W};
 use crate::ui::click;
-use crate::ui::pointer::{PointerState, PointerTables, Shape};
+use crate::ui::pointer::{LEADER_PIXEL, PointerState, PointerTables, Shape};
+
+/// A press south of the hero: the cell below the leader's (Original (88, 104)).
+const SOUTH: (i16, i16) = near(0, 16);
+/// The cell two east of the leader's (Original (120, 88)).
+const EAST: (i16, i16) = near(32, 0);
+/// On the leader's own cell, off its centre (Original (90, 90)).
+const OWN: (i16, i16) = near(2, 2);
 
 /// The regions of the shipped `game` (map window, command bar, side panel, the screen).
 fn regions() -> Vec<[i16; 4]> {
@@ -27,8 +35,8 @@ fn shapes() -> Vec<Shape> {
         .collect()
 }
 
-/// The synthetic ui state with the pointer tables, the pointer origin (88, 88), view centre
-/// (100, 100).
+/// The synthetic ui state with the pointer tables, the pointer origin on the leader's pixel
+/// (Original (88, 88)), view centre (100, 100).
 fn st() -> State {
     let mut s = state();
     s.ui.pointer = PointerState::from_tables(PointerTables {
@@ -37,7 +45,7 @@ fn st() -> State {
         walk_cell: (-1, -1),
         shown: false,
     });
-    s.inventory.pointer_origin = (88, 88);
+    s.inventory.pointer_origin = LEADER_PIXEL;
     s.map.centre.x = 100;
     s.map.centre.y = 100;
     s.actors.party.size = 4;
@@ -78,11 +86,13 @@ fn the_queue_hands_one_button_change_per_sample() {
             out.borrow_mut().push((io.pointer(), k == Key::Char('k')));
         },
     );
-    // Moves, a press, a drag, a release, then a key.
+    // Moves, a press, a drag, a release, then a key. The frame's width plus 80 (Original 400):
+    // past the frame's right edge in either build.
+    let w = u6_render::WIDTH as i16;
     e.tick(
         &[
             ev(5, 5, 0),
-            ev(400, -3, 0),
+            ev(w + 80, -3, 0),
             ev(10, 20, 1),
             ev(12, 22, 1),
             ev(12, 22, 0),
@@ -94,8 +104,9 @@ fn the_queue_hands_one_button_change_per_sample() {
     assert_eq!(
         *seen.borrow(),
         [
-            // The two moves together, clamped to the screen.
-            (p(319, 0, 0), false),
+            // The two moves together, clamped to the frame (Original 319: the screen; Wide:
+            // the map beside the UI too, spec 13).
+            (p(w - 1, 0, 0), false),
             // The press, with the drag after it.
             (p(12, 22, 1), false),
             // The release; now the key is next.
@@ -142,33 +153,36 @@ fn map_clicks_walk_target_and_repeat() {
     let mut s = st();
     s.main.reading = 1;
     // South of the origin: walk south; the walk target is the clicked location.
-    at(&mut s, 88, 104, 1, true);
+    at(&mut s, SOUTH.0, SOUTH.1, 1, true);
     let (code, a) = click_code(s.clone());
     assert_eq!((code, a.ui.input.direction), (0x80, 4));
     assert_eq!(a.actors.work.mouse_target, (100, 101));
-    assert_eq!(a.ui.pointer.walk_cell, (5, 6));
+    let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+    assert_eq!(a.ui.pointer.walk_cell, (hw, hh + 1));
     // Held, last step blocked the same way: nothing; another direction walks.
     let mut b = a.clone();
-    at(&mut b, 88, 104, 1, false);
+    at(&mut b, SOUTH.0, SOUTH.1, 1, false);
     b.actors.work.step_blocked = 1;
     assert_eq!(click_code(b.clone()).0, 0);
-    at(&mut b, 120, 88, 1, false);
+    at(&mut b, EAST.0, EAST.1, 1, false);
     let (code, c) = click_code(b);
     assert_eq!((code, c.ui.input.direction), (0x80, 2));
     // The origin's own cell: the press passes, a hold does nothing.
-    at(&mut s, 90, 90, 1, true);
+    at(&mut s, OWN.0, OWN.1, 1, true);
     assert_eq!(click_code(s.clone()).0, 0x8f);
-    at(&mut s, 90, 90, 1, false);
+    at(&mut s, OWN.0, OWN.1, 1, false);
     assert_eq!(click_code(s.clone()).0, 0);
     // A target pending: the press confirms the cell.
     let mut t = s.clone();
     t.ui.input.target_pending = 1;
-    at(&mut t, 24, 40, 1, true);
+    let (x, y) = near(-64, -48);
+    at(&mut t, x, y, 1, true);
     let (code, t) = click_code(t);
     assert_eq!((code, t.ui.input.target), (0x8e, (96, 97)));
     // The right button with a command underlined repeats it at the pointer.
     globals::set_last_command(&mut s.actors, 0x84);
-    at(&mut s, 40, 40, 2, true);
+    let (x, y) = near(-48, -48);
+    at(&mut s, x, y, 2, true);
     assert_eq!(click_code(s.clone()).0, 0xa9);
     // Outside every window region: cancel.
     at(&mut s, 2, 195, 1, true);
@@ -176,13 +190,144 @@ fn map_clicks_walk_target_and_repeat() {
     assert_eq!((code, u.ui.input.target), (0x8f, (-1, -1)));
 }
 
+/// Spec 13 Decision 5: a press at each corner of the shown map (Wide: (MAP_X + 8, MAP_Y + 8) to
+/// (SHOWN.x1, SHOWN.y1)) walks toward that corner, its walk target the corner cell of the view.
+#[test]
+fn a_click_at_each_corner_of_the_shown_map_walks_toward_it() {
+    let (x0, y0, x1, y1) = SHOWN;
+    assert_eq!((x0, y0), (MAP_X + 8, MAP_Y + 8));
+    let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+    let (last_col, last_row) = (VIEW_W as i16 - 1, VIEW_H as i16 - 1);
+    // (pixel, direction, view cell): north-west, north-east, south-east, south-west.
+    let corners = [
+        ((x0, y0), 7, (0, 0)),
+        ((x1, y0), 1, (last_col, 0)),
+        ((x1, y1), 3, (last_col, last_row)),
+        ((x0, y1), 5, (0, last_row)),
+    ];
+    for ((x, y), dir, (col, row)) in corners {
+        let mut s = st();
+        s.main.reading = 1;
+        at(&mut s, x as i16, y as i16, 1, true);
+        let (code, a) = click_code(s);
+        let label = format!("corner ({x}, {y})");
+        assert_eq!((code, a.ui.input.direction), (0x80, dir), "{label}");
+        assert_eq!(a.ui.pointer.walk_cell, (col, row), "{label}");
+        assert_eq!(
+            a.actors.work.mouse_target,
+            (100 + col - hw, 100 + row - hh),
+            "{label}"
+        );
+    }
+    // A pixel past the shown map's east edge is no map click.
+    let mut s = st();
+    at(&mut s, x1 as i16 + 1, y0 as i16, 1, true);
+    assert_ne!(click_code(s).0, 0x80, "past the east edge");
+}
+
+/// The pointer origin rests on the leader's pixel, the centre of view cell (`HALF_W`, `HALF_H`)
+/// in the shown map: (0x58, 0x58) in Original (`inventory/mod.rs`, the Move command's reset).
+#[test]
+fn the_pointer_origin_rests_on_the_leaders_pixel() {
+    let (x, y) = (LEADER_PIXEL.0 as i16, LEADER_PIXEL.1 as i16);
+    assert_eq!(pointer::view_cell(x, y), (HALF_W as i16, HALF_H as i16));
+    assert_eq!(
+        pointer::cell_pixel(HALF_W as i16, HALF_H as i16),
+        (x - 8, y - 8)
+    );
+    assert!(pointer::in_shown_map(x, y));
+    assert_eq!(
+        crate::inventory::InventoryState::default().pointer_origin,
+        LEADER_PIXEL
+    );
+    #[cfg(not(feature = "wide"))]
+    assert_eq!(LEADER_PIXEL, (0x58, 0x58));
+}
+
+/// The click regions: the map window is the shown map ([`SHOWN`]; in Wide beside the UI, not
+/// the image's rect), the command bar, the side panel and the screen keep the image's rects.
+#[test]
+fn the_side_panel_and_the_bar_keep_their_regions_beside_the_shown_map() {
+    let s = st();
+    let (x0, y0, x1, y1) = SHOWN;
+    let centre = |r: [i16; 4]| ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2);
+    let mid = ((x0 + x1) / 2, (y0 + y1) / 2);
+    let rows = [
+        ("the shown map", (mid.0 as i16, mid.1 as i16), Some(0)),
+        ("the command bar", centre(regions()[1]), Some(1)),
+        ("the side panel", centre(regions()[2]), Some(2)),
+        ("the side panel's corner", (311, 103), Some(2)),
+        ("the screen", (2, 195), Some(3)),
+    ];
+    for (label, (x, y), want) in rows {
+        assert_eq!(click::region_at(&s, x, y), want, "{label} ({x}, {y})");
+    }
+    // In Wide the image's map window, left of the panel, is no longer the map.
+    let image_map = centre(regions()[0]);
+    let want = if cfg!(feature = "wide") { 3 } else { 0 };
+    assert_eq!(
+        click::region_at(&s, image_map.0, image_map.1),
+        Some(want),
+        "the image's map rect"
+    );
+}
+
+/// Wide: the view's last column and row lie at the frame's right and bottom edges, so a press on
+/// the frame's last shown pixel walks to the view cell `(VIEW_W - 1, VIEW_H - 1)`: columns
+/// counted across the frame beside the UI, rows down it. Fails with `VIEW_W` and `VIEW_H`
+/// swapped.
+#[cfg(feature = "wide")]
+#[test]
+fn wide_the_last_shown_pixel_is_the_cell_at_the_frames_corner() {
+    let (w, h) = (u6_render::WIDTH as i16, u6_render::HEIGHT as i16);
+    let (cols, rows) = ((w - MAP_X as i16) / 16, (h - MAP_Y as i16) / 16);
+    let mut s = st();
+    s.main.reading = 1;
+    at(&mut s, SHOWN.2 as i16, SHOWN.3 as i16, 1, true);
+    let (code, a) = click_code(s);
+    assert_eq!(code, 0x80);
+    assert_eq!(a.ui.pointer.walk_cell, (cols - 1, rows - 1), "the cell");
+    assert_eq!(
+        a.actors.work.mouse_target,
+        (
+            100 + cols - 1 - HALF_W as i16,
+            100 + rows - 1 - HALF_H as i16
+        ),
+        "the walk target"
+    );
+}
+
+/// C2 (spec 13): the view's draw lists hold `VIEW_W` × `VIEW_H` cells, row by row of `VIEW_W`.
+/// A target over an occupied view cell east and south of the leader's reads that cell, and the
+/// empty cell above it reads empty (the original's stride of 11 would read another cell in
+/// Wide).
+#[test]
+fn a_target_over_an_occupied_view_cell_reads_its_draw_list_cell() {
+    let mut s = st();
+    let cells = VIEW_W * VIEW_H;
+    s.objects.draw.cell.resize(cells, 0);
+    s.objects.draw.base.resize(cells, 0);
+    let (col, row) = (HALF_W + 3, HALF_H + 2);
+    s.objects.draw.cell[row * VIEW_W + col] = 1;
+    let at_cell = |s: &mut State, col: usize, row: usize| {
+        let (x, y) = pointer::cell_pixel(col as i16, row as i16);
+        s.ui.input.pointer = (x + 8, y + 8);
+        crate::ui::cursor::target_from_pointer(s)
+    };
+    assert_eq!(at_cell(&mut s, col, row), 0x9d, "the occupied cell");
+    assert_eq!(s.ui.input.target, (103, 102), "its map location");
+    assert_eq!(at_cell(&mut s, col, row - 1), 0, "the cell above it");
+    assert_eq!(s.ui.input.target, (103, 101));
+}
+
 #[test]
 fn a_held_walk_keeps_its_target_while_far() {
     let mut s = st();
     s.main.reading = 1;
     s.actors.work.mouse_target = (104, 96);
-    s.ui.pointer.walk_cell = (9, 1);
-    at(&mut s, 9 * 16 + 4, 16 + 4, 1, false);
+    s.ui.pointer.walk_cell = (HALF_W as i16 + 4, HALF_H as i16 - 4);
+    let (x, y) = near(68, -68);
+    at(&mut s, x, y, 1, false);
     assert_eq!(click::walk_direction(&mut s), 1);
     assert_eq!(
         s.actors.work.mouse_target,
@@ -336,19 +481,22 @@ fn the_shape_follows_the_sample_and_the_sprite_its_offsets() {
     };
     assert_eq!(shape(&mut s, 200, 50), 0, "outside the map: the arrow");
     assert_eq!(
-        shape(&mut s, 90, 90),
+        shape(&mut s, OWN.0, OWN.1),
         1,
         "the origin's cell: the cross-hair"
     );
-    assert_eq!(shape(&mut s, 88, 20), 2, "north");
-    assert_eq!(shape(&mut s, 20, 20), 9, "north-west");
+    let (x, y) = near(0, -68);
+    assert_eq!(shape(&mut s, x, y), 2, "north");
+    let (x, y) = near(-68, -68);
+    assert_eq!(shape(&mut s, x, y), 9, "north-west");
     s.ui.input.target_pending = 1;
     assert_eq!(
         shape(&mut s, 200, 50),
         1,
         "a target pending: the cross-hair"
     );
-    // Hidden: the sprite sits on line 0xc9 (below the screen); shown: at the pointer.
+    // Hidden: the sprite sits on the line below the frame (0xc9 in Original); shown: at the
+    // pointer.
     s.ui.pointer.shape = 3;
     let p = Pointer {
         x: 100,
@@ -356,7 +504,8 @@ fn the_shape_follows_the_sample_and_the_sprite_its_offsets() {
         buttons: 0,
     };
     let hidden = pointer::sprite(&s.ui.pointer, p).unwrap();
-    assert_eq!((hidden.x, hidden.y, hidden.rows.len()), (97, 0xc8, 4));
+    let below = u6_render::HEIGHT as i16 + 1;
+    assert_eq!((hidden.x, hidden.y, hidden.rows.len()), (97, below - 1, 4));
     pointer::show(&mut s);
     let sp = pointer::vblank(&mut s, p).unwrap();
     assert_eq!((sp.x, sp.y), (100 - 1, 59), "shape 1 at the target pending");
@@ -399,7 +548,10 @@ fn the_event_wait_takes_a_click_then_its_release() {
     });
     let ev = |x, y, b| InputEvent::Pointer { x, y, buttons: b };
     // The Talk icon, then a press held south of the hero (the walk repeats a pace later).
-    e.tick(&[ev(44, 184, 1), ev(44, 184, 0), ev(88, 104, 1)], 16);
+    e.tick(
+        &[ev(44, 184, 1), ev(44, 184, 0), ev(SOUTH.0, SOUTH.1, 1)],
+        16,
+    );
     for _ in 0..HELD_WALK_MS_TEST.div_ceil(16) + 1 {
         e.tick(&[], 16);
     }
@@ -409,7 +561,7 @@ fn the_event_wait_takes_a_click_then_its_release() {
 }
 
 /// The codes `reads` command-key reads give, each with the engine clock (ms) it came at, while
-/// the press south of the hero (88, 104) is held `held_ms` and then released, at host ticks of
+/// the press south of the hero ([`SOUTH`]) is held `held_ms` and then released, at host ticks of
 /// `tick_ms`; `after_ms` follow. The press goes in at the first tick. Whether the game finished
 /// (all reads done).
 fn held_walk(tick_ms: u32, reads: usize, held_ms: u32, after_ms: u32) -> (Vec<(u64, u16)>, bool) {
@@ -429,14 +581,14 @@ fn held_walk_at(
     step: fn(usize) -> Option<u32>,
 ) -> (Vec<(u64, u16)>, bool) {
     let up = InputEvent::Pointer {
-        x: 88,
-        y: 104,
+        x: SOUTH.0,
+        y: SOUTH.1,
         buttons: 0,
     };
     press_and_events(ticks, reads, &[(held_ms, up)], after_ms, step)
 }
 
-/// The press south of the hero (88, 104) at the first tick of `ticks` (cycled, ms each), then
+/// The press south of the hero ([`SOUTH`]) at the first tick of `ticks` (cycled, ms each), then
 /// each of `events` at the tick that ends exactly its ms after the press (that tick shortened
 /// when the cycle would pass it; in order), then `after_ms`. The codes the command-key reads
 /// gave, each with the engine clock (ms) it came at, and whether all `reads` were done; after
@@ -478,8 +630,8 @@ fn press_and_walk(
     let mut cycle = ticks.iter().copied().cycle();
     let mut tick = || cycle.next().unwrap_or(16);
     let press = InputEvent::Pointer {
-        x: 88,
-        y: 104,
+        x: SOUTH.0,
+        y: SOUTH.1,
         buttons: 1,
     };
     e.tick(&[press], tick());
@@ -594,7 +746,7 @@ fn a_move_before_the_release_does_not_hide_it_from_the_due_sample() {
     // came in the tick that woke the first repeat or is still queued behind it at the due
     // sample, that sample sees the release behind it: two steps before the due time, three after.
     let ev = |y, b| InputEvent::Pointer {
-        x: 88,
+        x: SOUTH.0,
         y,
         buttons: b,
     };
@@ -602,7 +754,7 @@ fn a_move_before_the_release_does_not_hide_it_from_the_due_sample() {
         let steps: Vec<usize> = TICKS
             .iter()
             .map(|ticks| {
-                let events = [(668, ev(105, 1)), (release, ev(105, 0))];
+                let events = [(668, ev(SOUTH.1 + 1, 1)), (release, ev(SOUTH.1 + 1, 0))];
                 press_and_events(ticks, 64, &events, 2 * HELD_WALK_MS_TEST, |_| None)
                     .0
                     .len()
@@ -624,7 +776,7 @@ fn a_move_before_the_release_does_not_hide_it_from_the_due_sample() {
                 continue;
             }
             for ticks in TICKS {
-                let events = [(at, ev(105, 1)), (hold, ev(105, 0))];
+                let events = [(at, ev(SOUTH.1 + 1, 1)), (hold, ev(SOUTH.1 + 1, 0))];
                 let got = press_and_events(ticks, 16, &events, pace, |_| None).0.len();
                 if got != expect {
                     wrong.push((hold, at, ticks, got, expect));
@@ -647,9 +799,9 @@ fn a_due_sample_walks_where_the_pointer_was_at_its_due_time() {
     // pointer was at 660, and the next one east.
     let ev = |x, y, b| InputEvent::Pointer { x, y, buttons: b };
     let events = [
-        (650, ev(88, 105, 1)),
-        (662, ev(120, 88, 1)),
-        (1500, ev(120, 88, 0)),
+        (650, ev(SOUTH.0, SOUTH.1 + 1, 1)),
+        (662, ev(EAST.0, EAST.1, 1)),
+        (1500, ev(EAST.0, EAST.1, 0)),
     ];
     let walks: Vec<Vec<(u16, i16)>> = TICKS
         .iter()
@@ -668,9 +820,9 @@ fn a_due_sample_walks_where_the_pointer_was_at_its_due_time() {
     for first in [600, 656] {
         for east in (655..=670).filter(|&m| m > first) {
             let events = [
-                (first, ev(88, 105, 1)),
-                (east, ev(120, 88, 1)),
-                (1500, ev(120, 88, 0)),
+                (first, ev(SOUTH.0, SOUTH.1 + 1, 1)),
+                (east, ev(EAST.0, EAST.1, 1)),
+                (1500, ev(EAST.0, EAST.1, 0)),
             ];
             let expect = if east <= HELD_WALK_MS_TEST { 2 } else { 4 };
             for ticks in TICKS {
@@ -739,8 +891,8 @@ fn a_key_in_the_tick_that_passes_a_due_time_comes_after_its_step() {
     // arrives in the tick that passes the first repeat's due time (660 ms), at 8 ms ticks a tick
     // after it. Either way the repeat samples at 660 ms, before the key: the step, then the key.
     let ev = |b| InputEvent::Pointer {
-        x: 88,
-        y: 104,
+        x: SOUTH.0,
+        y: SOUTH.1,
         buttons: b,
     };
     let seqs: Vec<Vec<u16>> = [16u32, 8]
@@ -898,10 +1050,10 @@ fn a_hold_that_gives_no_walk_keeps_the_frame_pace() {
     // the pace from the last step is over, every pass of the event wait is a frame again: the
     // key poll spins its cursor, a key typed is read at once, the release ends the hold.
     let ev = |x, y, b| InputEvent::Pointer { x, y, buttons: b };
-    let (press, drag) = ([ev(88, 104, 1)], [ev(90, 90, 1)]);
+    let (press, drag) = ([ev(SOUTH.0, SOUTH.1, 1)], [ev(OWN.0, OWN.1, 1)]);
     let pace_ticks = HELD_WALK_MS_TEST.div_ceil(16) as usize + 2;
     let key = [InputEvent::Key(Key::Char('a'))];
-    let release = [ev(90, 90, 0)];
+    let release = [ev(OWN.0, OWN.1, 0)];
     let mut events: Vec<&[InputEvent]> = vec![&press, &drag];
     events.resize(pace_ticks, &[]);
     let spin_from = events.len();
@@ -944,8 +1096,8 @@ fn a_walk_after_a_prompt_keeps_its_pace_without_a_burst() {
     // its walk codes. Answered within the pace, the next step comes when it was due, a pace after
     // the second; answered later, on the next frame after the answer. Then a pace apart.
     let ev = |b| InputEvent::Pointer {
-        x: 88,
-        y: 104,
+        x: SOUTH.0,
+        y: SOUTH.1,
         buttons: b,
     };
     let key = [InputEvent::Key(Key::Char('a'))];
@@ -1030,8 +1182,8 @@ fn prompt_under_held_press(
 #[test]
 fn a_prompt_survives_a_held_map_press() {
     let ev = |b| InputEvent::Pointer {
-        x: 88,
-        y: 104,
+        x: SOUTH.0,
+        y: SOUTH.1,
         buttons: b,
     };
     let key = InputEvent::Key(Key::Char('a'));

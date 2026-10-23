@@ -7,6 +7,7 @@ use super::globals::{last_command, set_last_command};
 use super::seams;
 use super::text::fill_rect;
 use crate::engine::Io;
+use crate::geom::{HALF_H, HALF_W};
 use crate::objects::ObjectId;
 use crate::state::State;
 
@@ -45,16 +46,21 @@ pub fn select_command(s: &mut State, io: &Io, cmd: u8) {
 ///
 /// Returns 0x9d for an actor (A4-0x2f04 = its slot), 0x9b / 0x9c for an inventory or equipment
 /// slot (0x111e3c / 0x111eec, [`crate::inventory`]), else 0. Map cells are 16 pixels, the
-/// window 11 × 11 cells centred on the view centre.
+/// view [`VIEW_W`] × [`VIEW_H`] cells centred on the view centre (Original 11 × 11). Only the
+/// pointer's column says it is over the map, as in the original (`x < 0xa8`,
+/// [`super::pointer::map_column`]).
+///
+/// [`VIEW_W`]: crate::geom::VIEW_W
+/// [`VIEW_H`]: crate::geom::VIEW_H
 pub fn target_from_pointer(s: &mut State) -> u16 {
     let ui = &mut s.ui;
     ui.input.target_void = false;
     let (px, py) = ui.input.pointer;
-    if px < 0xa8 {
+    if super::pointer::map_column(px) {
         let c = s.map.centre;
-        let (col, row) = (px >> 4, py >> 4);
-        let tx = (col + c.x as i16) - 5;
-        let ty = (row + c.y as i16) - 5;
+        let (col, row) = super::pointer::view_cell(px, py);
+        let tx = (col + c.x as i16) - HALF_W as i16;
+        let ty = (row + c.y as i16) - HALF_H as i16;
         s.ui.input.target = (tx, ty);
         let (occupied, tile) = seams::window_cell(s, col, row);
         if occupied || tile >= 0x200 {

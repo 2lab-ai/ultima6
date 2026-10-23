@@ -23,6 +23,13 @@ mod text_tests;
 mod typing_tests;
 mod wide_tests;
 
+/// The frame pixel (dx, dy) from the leader's pixel ([`pointer::LEADER_PIXEL`], Original (88,
+/// 88)): a map pixel in either build (spec 13: the map at `MAP_X`, `MAP_Y`).
+pub(super) const fn near(dx: i16, dy: i16) -> (i16, i16) {
+    let (x, y) = pointer::LEADER_PIXEL;
+    (x as i16 + dx, y as i16 + dy)
+}
+
 pub(super) const INK: u8 = 1;
 pub(super) const PAPER: u8 = 2;
 pub(super) const ALERT: u8 = 3;

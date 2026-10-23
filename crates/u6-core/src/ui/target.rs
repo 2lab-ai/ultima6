@@ -10,7 +10,11 @@ use super::pointer;
 use super::print::put_raw;
 use super::seams;
 use crate::engine::Io;
+use crate::geom::{HALF_H, HALF_W, RULE_HALF};
 use crate::state::State;
+
+/// The leader's view cell, where a cross-hair starts (Original (5, 5), the window centre).
+pub(crate) const LEADER_CELL: (i8, i8) = (HALF_W as i8, HALF_H as i8);
 
 const TAB: u16 = 0x09;
 const RETURN: u16 = 0x0d;
@@ -315,10 +319,11 @@ fn tab_key(state: &RefCell<State>, io: &Io, key: u16) -> u16 {
     0
 }
 
-/// 0x107640..0x10765c: cross-hair at the window centre (5, 5), range 7, started by Tab.
+/// 0x107640..0x10765c: cross-hair at the window centre (5, 5), range 7, started by Tab. The
+/// centre is the leader's view cell ([`HALF_W`], [`HALF_H`]; spec 13 Decision 4).
 fn start_cross_hair(s: &mut State, io: &Io) {
     let input = &mut s.ui.input;
-    input.cursor = (5, 5);
+    input.cursor = LEADER_CELL;
     input.range = 7;
     input.cursor_by_tab = true;
     seams::present_map(s, io, 1);
@@ -521,7 +526,7 @@ async fn confirm(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
         }
         input.targeting = 0;
         let (cx, cy) = input.cursor;
-        input.pointer = (i16::from(cx) << 4, i16::from(cy) << 4);
+        input.pointer = super::pointer::cell_pixel(i16::from(cx), i16::from(cy));
         target_from_pointer(&mut s);
         return key;
     }
@@ -545,6 +550,10 @@ async fn confirm(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
 
 /// A direction with a cursor up (0x1072cc..0x10755c): the cross-hair moves within its range
 /// (range -1: the step selects at once); the panel cursor moves over the panel's slots.
+///
+/// The cross-hair stays in the original's 11 × 11 window round the leader's view cell
+/// ([`RULE_HALF`] each way on each axis, spec 13 Decision 4: Original `0..11`), its range
+/// measured from that cell.
 fn step(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
     let mut s = state.borrow_mut();
     let dir = s.ui.input.direction.rem_euclid(8) as usize;
@@ -553,10 +562,12 @@ fn step(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
     if targeting == 1 {
         let (cx, cy) = s.ui.input.cursor;
         let (nx, ny) = (i16::from(cx) + i16::from(dx), i16::from(cy) + i16::from(dy));
+        let (lx, ly) = (i16::from(LEADER_CELL.0), i16::from(LEADER_CELL.1));
         let range = s.ui.input.range;
-        if (0..11).contains(&nx)
-            && (0..11).contains(&ny)
-            && seams::distance(&s, nx, ny, 5, 5) <= i16::from(range)
+        let rule = -RULE_HALF..=RULE_HALF;
+        if rule.contains(&(nx - lx))
+            && rule.contains(&(ny - ly))
+            && seams::distance(&s, nx, ny, lx, ly) <= i16::from(range)
         {
             s.ui.input.cursor = (nx as i8, ny as i8);
             seams::present_map(&mut s, io, 1);
@@ -565,7 +576,7 @@ fn step(state: &RefCell<State>, io: &Io, targeting: u8) -> u16 {
         if range != -1 {
             return 0;
         }
-        s.ui.input.pointer = (nx << 4, ny << 4);
+        s.ui.input.pointer = super::pointer::cell_pixel(nx, ny);
         target_from_pointer(&mut s);
         return super::wait::REPEAT;
     }
